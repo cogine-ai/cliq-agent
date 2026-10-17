@@ -1763,19 +1763,26 @@ export class StateStore {
   async startInstalledRuns(): Promise<void> {
     if (this.schedulerStarted) throw new TypeError('installed scheduler is already started');
     if (!this.installedRuntime || !this.installedAnchor || !this.runtimeAuthority?.sourceInspection) return;
+    const isClosing = () => this.closeRequested || this.closed || this.released;
+    if (isClosing()) return;
     const recipe = await withHeldInstalledRuntime(this.installedRuntime, async installed => {
       await installed.revalidate();
       return { hasDiscovery: installed.modelAuthority !== undefined,
         hasBroker: installed.bundle.entries.some(entry => entry.entryId === MODEL_BROKER_ENTRY_ID &&
           entry.role === 'provider_adapter' && entry.executable) };
     });
-    if (!recipe.hasBroker) return;
+    if (isClosing() || !recipe.hasBroker) return;
     await loadInstalledModelBroker(this.installedRuntime);
+    if (isClosing()) return;
     this.installedAnchor.assertHeld(); assertActiveStateOwner(this.driver, this.owner);
     const rows = this.driver.prepare("SELECT id FROM runs WHERE status IN ('queued','running','waiting') ORDER BY created_at,id LIMIT ?")
       .all<{ id: string }>(INSTALLED_RUN_INVENTORY_LIMIT + 1);
     if (rows.length > INSTALLED_RUN_INVENTORY_LIMIT) throw new KernelStorageError('RECOVERY_REQUIRED', 'installed scheduler retained inventory exceeds its bounded cut');
-    for (const row of rows) await this.retainInstalledAgent(row.id);
+    for (const row of rows) {
+      if (isClosing()) return;
+      await this.retainInstalledAgent(row.id);
+    }
+    if (isClosing()) return;
     this.installedModelAdmissionReady = recipe.hasDiscovery;
     this.schedulerStarted = true;
     for (const row of rows) this.scheduleInstalledRun(row.id);

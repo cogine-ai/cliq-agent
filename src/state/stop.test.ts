@@ -5,6 +5,7 @@ import { KERNEL_DATABASE_FILENAME } from '../config.js';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting } from '../kernel/identity.js';
 import type { ContinuationItem, LocalControlChannelIdentityV1, LocalPrincipalIdentityV1, RunCancel, SessionContextProjection, StateRootIdentityV1, StopIntent, TerminalDetail, ToolResultModelContentV1, ToolResultPayloadV1, WorkerLaunch } from '../kernel/types.js';
+import { RunTerminalError } from './errors.js';
 import { openSqliteDriver } from './sqlite-driver.js';
 import { readWorkerLaunchesForRun } from './repositories/worker-launches.js';
 import { openStateStore, publishInProcessChannel } from './store.js';
@@ -74,6 +75,29 @@ test('cancel fences a prepared model, replays authenticated requests, and atomic
     await assert.rejects(fixture.agent.readModelAttempt(), { code: 'STATE_TRANSITION_INVALID' });
     await assert.rejects(activateFixtureWorker(fixture, 'forbidden-stop-worker'));
     await assert.rejects(fixture.agent.cancelRun({ ...command, expectedRunRevision: command.expectedRunRevision + 1 }), { code: 'REQUEST_ID_CONFLICT' });
+  } finally { await disposeFixture(fixture); }
+});
+
+test('terminal cancellation preserves committed replay and request/revision conflict precedence across reopen', async () => {
+  const fixture = await createAgentFixture('stop-terminal-cancel-precedence', undefined, { mode: 'plan' });
+  try {
+    const command = await cancelCommand(fixture), stopped = await fixture.agent.cancelRun(command);
+    const terminal = await finish(fixture, stopped.checkpointId);
+    const closure = await fixture.store.readRecoveryClosure(fixture.runId);
+    const session = fixture.store.getSession(terminal.run.sessionId);
+    for (const afterReopen of [false, true]) {
+      if (afterReopen) await reopen(fixture);
+      const channel = await publishInProcessChannel(fixture.store);
+      assert.deepEqual((await fixture.agent.cancelRun({ ...command, ...channel })).response, stopped.response);
+      await assert.rejects(fixture.agent.cancelRun({ ...command, ...channel, expectedRunRevision: terminal.run.revision }),
+        { code: 'REQUEST_ID_CONFLICT' });
+      await assert.rejects(fixture.agent.cancelRun({ ...channel, requestId: uuidv7(), expectedRunRevision: terminal.run.revision - 1 }),
+        { code: 'REVISION_CONFLICT' });
+      await assert.rejects(fixture.agent.cancelRun({ ...channel, requestId: uuidv7(), expectedRunRevision: terminal.run.revision }),
+        error => error instanceof RunTerminalError && error.code === 'STATE_TRANSITION_INVALID');
+      assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), closure);
+      assert.deepEqual(fixture.store.getSession(session.id), session);
+    }
   } finally { await disposeFixture(fixture); }
 });
 

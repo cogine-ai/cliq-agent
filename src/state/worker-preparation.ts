@@ -321,8 +321,8 @@ export async function retireWorkerPreparation(driver: SqliteDriver, artifacts: A
     diagnosticPoint = 'preparation_controller_birth';
     const birth = launch.preparation.controller
       ? controllerBirth(await readCanonicalArtifact(artifacts, launch.preparation.controller.birthIdentityRef)) : undefined;
-    const readResources = () => {
-      assertActiveStateOwner(driver, owner);
+    const readResources = (connection: SqliteConnection | SqliteDriver = driver) => {
+      assertActiveStateOwner(connection, owner);
       assertInstalledBrokerQuiescence(input.brokerQuiescence, driver, owner, run.id);
       const workspace = readRunWorkspaceBirthRetirement(owner.filesystem, workspaceBirth);
       if (workspace.generationId !== generation.generationId || workspace.runId !== run.id ||
@@ -389,7 +389,7 @@ export async function retireWorkerPreparation(driver: SqliteDriver, artifacts: A
       requireEqual(preparing(connection, owner, launch.launchId), launch, 'preparation retirement original lifecycle');
       requireEqual(bindableRun(connection, launch), run, 'preparation retirement current Run');
       requireEqual(readRequiredWorkspaceGeneration(connection, generation.generationId), generation, 'preparation retirement original generation');
-      const fresh = readResources(), now = sampleCanonicalNow();
+      const fresh = readResources(connection), now = sampleCanonicalNow();
       const moved = owner.filesystem.quarantineGeneration(identity, generation.rowVersion);
       requireEqual(moved, move, 'preparation retirement exact native quarantine');
       if (advanceTimeFence(connection, owner.ownerEpoch, now) !== 'healthy') return;
@@ -425,15 +425,15 @@ export async function retireWorkerPreparation(driver: SqliteDriver, artifacts: A
 async function retireUnallocatedPreparation(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
   launch: PreparingWorkerLaunch, run: Run, workspace: RunWorkspaceMaterialization,
   broker: InstalledBrokerQuiescence): Promise<RetiredWorkerPreparation> {
-  const readResources = () => {
-    assertActiveStateOwner(driver, owner); assertInstalledBrokerQuiescence(broker, driver, owner, run.id);
+  const readResources = (connection: SqliteConnection | SqliteDriver = driver) => {
+    assertActiveStateOwner(connection, owner); assertInstalledBrokerQuiescence(broker, driver, owner, run.id);
     const observed = readUnallocatedRunWorkspaceRetirement(owner.filesystem, workspace);
     const { observedAt: _observedAt, ...body } = observed;
     requireEqual(body, { runId: run.id, generationId: launch.preparation.generationId,
       sourceCheckpointId: launch.preparation.sourceCheckpointId, sourceWorkspaceStateRef: launch.preparation.sourceWorkspaceStateRef,
       creationNonceDigest: launch.preparation.generationCreationNonceDigest, allocationRequested: false,
       operationsJoined: true }, 'preparation exact original unallocated producer');
-    if (readWorkspaceGenerationsForRun(driver, run.id).some(value => value.generationId === launch.preparation.generationId))
+    if (readWorkspaceGenerationsForRun(connection, run.id).some(value => value.generationId === launch.preparation.generationId))
       fail('unallocated preparation has an actual generation row');
     return observed;
   };
@@ -451,7 +451,7 @@ async function retireUnallocatedPreparation(driver: SqliteDriver, artifacts: Art
   driver.transaction(connection => {
     requireEqual(preparing(connection, owner, launch.launchId), launch, 'unallocated preparation original lifecycle');
     requireEqual(bindableRun(connection, launch), run, 'unallocated preparation current Run');
-    const fresh = readResources(), now = sampleCanonicalNow();
+    const fresh = readResources(connection), now = sampleCanonicalNow();
     if (advanceTimeFence(connection, owner.ownerEpoch, now) !== 'healthy') return;
     if (now < observedAt || parseCanonicalTime(now) - parseCanonicalTime(observedAt) > 5000 || fresh.observedAt > now)
       fail('unallocated preparation closure is no longer fresh');

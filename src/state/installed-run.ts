@@ -82,6 +82,8 @@ export function assertInstalledRunRecipe(request: NormalizedRunSubmitRequest,
       request.registeredMcpServerIds.length || request.skillIds.length || request.sourceIncludes.length ||
       request.sandboxResources.maxProcesses < 8 || request.sandboxResources.maxSingleFileBytes > 268_435_456)
     invalid('installed Run selects an unsupported model, execution resource, verifier, dependency, MCP, skill or source inclusion');
+  if (request.model.modelCredentialGrantIds.length !== 1)
+    invalid('installed Run requires exactly one model bearer credential');
   if (request.policyMode === 'default')
     invalid('installed Run default policy requires unavailable interactive approval');
   if (endpoint) {

@@ -14,7 +14,7 @@ import { advanceTimeFence, readTimeFence, sampleCanonicalNow, type TimeFenceAdva
 import { validateControlChannelClosure } from '../control-channel.js';
 import { prepareContinuationCommit } from '../continuation-commit.js';
 import { decodeAdmittedContext, decodeContextManifest, decodeSessionProjection } from '../decoders.js';
-import { KernelStorageError, stateOperation } from '../errors.js';
+import { KernelStorageError, RunTerminalError, stateOperation } from '../errors.js';
 import { isZeroBudget, subtractBudget } from '../invariants.js';
 import { readRecoveryClosure } from '../recovery-closure.js';
 import { appendInvocationJournalEntry, nextJournalSequence } from '../repositories/journal.js';
@@ -54,6 +54,7 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
     if (run.specRef !== admitted.specRef || run.createdAt !== admitted.createdAt || run.deadlineAt !== admitted.deadlineAt) throw new TypeError('stop authority no longer belongs to this Run');
     if (spec.operation !== 'agent' || run.parentRunId || selected.childAllocations.length ||
         driver.prepare('SELECT 1 FROM runs WHERE parent_run_id = ? LIMIT 1').get(runId)) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'child stop requires the parent/child settlement reducer');
+    if (['succeeded', 'completed_unverified', 'failed', 'cancelled'].includes(run.status)) throw new RunTerminalError();
     // Cancellation/deadline may fence a validated worker-death wait, but cannot clear it or drain it.
     if (!['queued', 'running', 'waiting'].includes(run.status) || !['agent', 'tool'].includes(run.nextStep ?? '') ||
         (run.status === 'waiting' && !['approval', 'input'].includes(run.waitingReason ?? '') &&

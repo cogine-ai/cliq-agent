@@ -231,6 +231,26 @@ all signed images. The executable mapping is bounded read-only observation of
 the actual dlopen, not a loader instruction hook or fake inventory. Lost cuts
 and the not-yet-repaired startup producer remain explicitly unqualified.
 
+At `7892b1f`, both actual one-retained-Run startup controls pass: the original
+second owner and signed broker mapping are present before control readiness,
+the unchanged two-second ordinary stop exits successfully, and the third owner
+validates the exact clean predecessor. This is not a startup failure reproduction
+or a qualification of a large retained inventory or the earlier unpublished
+StateStore window. The minimal startup repair synchronously latches Supervisor
+stop and revokes a published Store before waiting for startup; each later
+resource/Run load boundary returns without publishing further control or work.
+Final close still joins the original startup before releasing authority. Real
+loading and retirement errors remain failures, not deliberate-stop successes.
+
+Both `7892b1f` preparation campaigns reach the original physical writer and
+fail in `preparation_transaction`. A deterministic defect is present there:
+the resource recheck calls `assertActiveStateOwner` through the outer driver
+inside a scoped write transaction. The driver correctly refuses that access.
+Both born and unallocated retirement rechecks must use the actual transaction
+connection for SQL; the original driver remains the physical broker registry's
+identity. No driver guard, native join, freshness, quarantine or CAS predicate
+is removed. Its installed GREEN remains pending until the same campaign passes.
+
 ## Tool result and settlement rules
 
 | Actual cut | Required behavior |

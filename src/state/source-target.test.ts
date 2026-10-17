@@ -93,6 +93,23 @@ test('installed recipe refuses unavailable default approvals without changing ge
   }
 });
 
+for (const count of [0, 1, 2, 32]) {
+  test(`installed recipe requires one bearer credential while generic normalization retains its bounds (${count} grants)`, () => {
+    const normalize = () => normalizeRunSubmitRequest(inlineRequest({
+      model: { provider: 'openai-compatible', model: 'owned-fixture-model',
+        endpoint: { kind: 'registered', endpointRegistrationId: 'owned-fixture-endpoint' },
+        modelCredentialGrantIds: Array.from({ length: count }, (_, index) => `owned-fixture-grant-${index}`) },
+      policyMode: 'accept-edits'
+    })).request;
+    if (count === 0) { assert.throws(normalize, { code: 'INVALID_REQUEST' }); return; }
+    const request = normalize();
+    assert(request.model.provider === 'openai-compatible');
+    assert.equal(request.model.modelCredentialGrantIds.length, count);
+    if (count === 1) assert.doesNotThrow(() => assertInstalledRunRecipe(request));
+    else assert.throws(() => assertInstalledRunRecipe(request), { code: 'INVALID_REQUEST' });
+  });
+}
+
 test('installed recipe refuses insufficient process capacity before capture without changing generic resource normalization', () => {
   const installedRequest = (maxProcesses: number) => normalizeRunSubmitRequest(inlineRequest({
     model: { provider: 'openai-compatible', model: 'owned-fixture-model',

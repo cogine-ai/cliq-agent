@@ -63,12 +63,20 @@ registered path is decoded, rewritten or silently normalized to make it fit.
 The same preflight rejects more than 64 SPKI pins, matching the native broker's
 array capacity without truncating the registered TLS policy. Generic endpoint
 registration retains its wider nonempty, unique, sorted pin-array contract.
+The fixed bearer recipe requires exactly one model credential grant before
+source capture; generic request normalization retains its 1..32 grant range.
 The fixed installed recipe also refuses new `default`-policy admissions until
 its interactive approval control path is implemented. Generic policy semantics
 remain unchanged: `default` asks before writes, `plan` denies them, and no
 request is silently upgraded to `accept-edits`. Already committed admission and
 source-refusal replays retain their original early replay behavior. This
 preflight does not make historical approval waits actionable.
+Cancellation preserves exact committed replay before evaluating a new cut.
+Reusing that request ID with changed intent remains `REQUEST_ID_CONFLICT`;
+a fresh stale revision remains `REVISION_CONFLICT`. Only a fresh request at
+the validated current terminal revision returns nonretryable `RUN_TERMINAL`,
+without changing Run, Journal, Session or events. Other invalid transitions
+are not reclassified by this narrow terminal error.
 New installed Session creation holds the actual platform user's persisted
 Workspace Trust before reading workspace Git configuration, then reasserts
 that same held Trust after capture and before the final write transaction.

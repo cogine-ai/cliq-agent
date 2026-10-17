@@ -29,6 +29,13 @@ let keeper: HeldInstalledKeeper | undefined;
 let anchor: HeldInstalledAnchor | undefined;
 let containmentHealth: ReturnType<typeof setInterval> | undefined;
 let closing: Promise<void> | undefined;
+let supervisorStopRequested = false;
+
+function stopSupervisorStartup(): boolean {
+  if (!supervisorStopRequested) return false;
+  store?.beginClose();
+  return true;
+}
 
 function close(): Promise<void> {
   return closing ??= (async () => {
@@ -149,9 +156,16 @@ async function start(): Promise<void> {
     throw new Error('expected canonical installed StateRoot locators');
   assertArtifactRef(bundleDigest);
   process.once('SIGTERM', () => {
+    if (mode === '--installed-supervisor') {
+      supervisorStopRequested = true;
+      store?.beginClose();
+    }
+    // Final retirement still joins the original startup producer before
+    // releasing Store, containment or installation descriptors.
     void starting.then(close, close).catch(error => { report(error); process.exitCode = 1; });
   });
   selected = await runtime.openSelected(stateRoot);
+  if (stopSupervisorStartup()) return;
   const supervisor = selected.bundle.entries.find(entry => entry.role === 'supervisor')!;
   if (selected.bundleDigest !== bundleDigest || executable !== path.join(stateRoot, 'runtime/bundles', bundleDigest, supervisor.relativePath))
     throw new Error('installed Supervisor differs from the fixed selected image');
@@ -159,6 +173,7 @@ async function start(): Promise<void> {
     if (`${installed.stateRoot.deviceId}:${installed.stateRoot.fileId}:${installed.stateRoot.ownerUid}` !== rootLocator)
       throw new Error('installed StateRoot differs from the pre-exec root');
   });
+  if (stopSupervisorStartup()) return;
   if (mode === '--installed-credential') {
     const request = readCredentialRequest(process.argv[6]);
     const response = request.kind === 'install_services' ? { schemaVersion: 1, ...await installServices(selected) }
@@ -192,6 +207,7 @@ async function start(): Promise<void> {
   // A stale/missing locator or keeper refuses before the first StateOwner
   // transaction. Never reopen a named cgroup root as an acquisition fallback.
   anchor = await acquireInstalledAnchor(selected);
+  if (stopSupervisorStartup()) return;
   anchor.assertHeld();
   // Only this selected mode acquires authority. Genesis borrows these newly
   // held, verified descriptors, never the retired bootstrap's historical FDs.
@@ -200,10 +216,14 @@ async function start(): Promise<void> {
     await installed.revalidate();
     return installedSandboxProfile();
   });
+  if (stopSupervisorStartup()) return;
   const actualUser = runProfile ? (await loadInstalledCredentialPlatform(selected)).currentUser() : undefined;
+  if (stopSupervisorStartup()) return;
   store = await openStateStore(stateRoot, { bundle: selected.bundle, releaseKeys,
     ...(runProfile ? { sourceInspection: { controlledHome: path.join(actualUser!.home, '.cliq'), sandboxProfile: runProfile } } : {}) }, selected, anchor);
+  if (stopSupervisorStartup()) return;
   await store.startInstalledRuns();
+  if (stopSupervisorStartup()) return;
   anchor.assertHeld();
   service = openInstalledControl(store, { serverBuild: 'cliq-installed-v1' }, report);
   containmentHealth = setInterval(() => {

@@ -25,6 +25,15 @@ export class KernelStorageError extends Error {
   }
 }
 
+/** Only a validated current terminal Run cut carries this wire classification;
+ * arbitrary invalid transitions remain distinct internal refusals. */
+export class RunTerminalError extends KernelStorageError {
+  constructor() {
+    super('STATE_TRANSITION_INVALID', 'the selected Run is already terminal');
+    this.name = 'RunTerminalError';
+  }
+}
+
 /** Internal diagnosis of an existing finalizer refusal, never time or
  * authorization evidence. Only the finalizer's actual time guards throw it. */
 export class CredentialFinalizationTimeError extends KernelStorageError {

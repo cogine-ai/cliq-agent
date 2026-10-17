@@ -446,10 +446,10 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
   }
   // Temporary source-only diagnosis for the actual installed SIGTERM campaign.
   // Remove [DEBUG-shutdown-retirement] after its real failure is resolved.
-  function reportShutdownRetirement(stage: 'preparation' | 'retirement' | 'worker_join', failure: unknown,
+  function reportShutdownRetirement(stage: 'preparation' | 'retirement' | 'worker_join' | 'tool_before_result', failure: unknown,
     point = 'unclassified'): void {
     try {
-      if (!closed && !isClosing()) return;
+      if (stage !== 'tool_before_result' && !closed && !isClosing()) return;
       const message = failure instanceof Error ? Object.getOwnPropertyDescriptor(failure, 'message')?.value : undefined;
       let reason = point;
       switch (message) {
@@ -479,8 +479,11 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         case 'generation retains an original native model transport owner': reason = 'preparation_broker_owner'; break;
       }
       if (typeof message === 'string' && message.startsWith('worker preparation history is invalid: ')) reason = 'preparation_history';
+      const code = failure instanceof KernelStorageError &&
+        ['ARTIFACT_MISMATCH', 'LEASE_FENCED', 'RECOVERY_REQUIRED', 'REVISION_CONFLICT', 'INVALID_REQUEST'].includes(failure.code)
+        ? failure.code : 'other';
       console.error(JSON.stringify({ debugTag: '[DEBUG-shutdown-retirement]', diagnosticOnly: true,
-        scope: 'installed-shutdown-retirement', stage, reason }));
+        scope: 'installed-shutdown-retirement', stage, reason, code }));
     } catch { /* Diagnosis cannot replace the original retirement failure. */ }
   }
   function ownOperation(work: Promise<Run>, abort: AbortController, retainWorker = false): Promise<Run> {
@@ -694,6 +697,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       const signal = abort.signal;
       toolPhase = 'preparing';
       let claimedTool: Awaited<ReturnType<typeof agent.claimTool>> | undefined;
+      let resultPoint = 'tool_input';
       const work = (async () => {
         signal.throwIfAborted();
         const selected = await readToolCut(driver, artifacts, runId, agent.resolveToolInput);
@@ -754,14 +758,21 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         claimedTool = claimed;
         toolPhase = 'claimed';
         const call = await artifacts.readCanonical<import('../protocol/agent-ir.js').ToolCallInputV1>(claimed.request.inputRef);
+        resultPoint = 'tool_grant';
         const grant = await artifacts.readCanonical<import('../kernel/tool-authorization.js').ToolOperationGrantV1>(claimed.entry.grantRef!);
+        resultPoint = 'tool_live_cut';
         const live = assertLiveDispatchState(driver, owner, runId, prepared.run.revision, activated.run.leaseEpoch, sampleCanonicalNow());
+        resultPoint = 'tool_launch_closure';
         const edit = await readBuiltinEditLaunchClosure(artifacts, assertActiveStateOwner(driver, owner), { ...live, prepared: prepared.entry,
           request: claimed.request, target: claimed.target, call, grant, dispatchId, sandboxLaunchSpecRef });
+        resultPoint = 'tool_invocation_create';
         const invocation = await currentWorker.createInvocation(edit);
+        resultPoint = 'tool_process_observation';
         await invocation.observeProcess();
         signal.throwIfAborted();
+        resultPoint = 'tool_release';
         await claimed.release(invocation);
+        resultPoint = 'tool_result';
         const result = await invocation.result();
         toolPhase = 'received';
         const observedAt = sampleCanonicalNow();
@@ -799,6 +810,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         return readRun(driver, runId);
       })().catch(async error => {
         if (claimedTool && toolPhase !== 'received') {
+          reportShutdownRetirement('tool_before_result', error, resultPoint);
           // A permanent claim is possibly dispatched even when cancellation
           // wins before the blocked child/RELEASE handshake. Join the actual
           // producer, preserve uncertainty and charge once; only the separate

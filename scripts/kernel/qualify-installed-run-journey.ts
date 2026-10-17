@@ -360,7 +360,7 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
           const value = parseJsonStrict(line) as Record<string, unknown>;
           if (value?.diagnosticOnly !== true) continue;
           if (value.scope === 'installed-shutdown-retirement' && value.debugTag === '[DEBUG-shutdown-retirement]' &&
-              ['preparation', 'retirement', 'worker_join'].includes(value.stage as string) &&
+              ['preparation', 'retirement', 'worker_join', 'tool_before_result'].includes(value.stage as string) &&
               ['unregistered_controller_birth', 'unregistered_reservation_birth', 'materialization_join_pending',
                 'joined_generation_birth_mismatch', 'native_generation_retirement', 'quarantine_identity',
                 'worker_stop_channel_fenced', 'preparation_materialization_join', 'preparation_controller_join',
@@ -368,8 +368,12 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
                 'preparation_run_changed', 'preparation_broker_owner', 'preparation_history', 'preparation_logical_cut',
                 'preparation_generation_identity', 'preparation_recovery_closure', 'preparation_controller_birth',
                 'preparation_resource_assertion', 'preparation_quarantine_move', 'preparation_resource_refresh',
-                'preparation_evidence_publication', 'preparation_transaction', 'unclassified'].includes(value.reason as string)) {
-            refusals.push({ code: 'diagnostic_only', origin: `${value.stage}.${value.reason}` }); continue;
+                'preparation_evidence_publication', 'preparation_transaction', 'tool_input', 'tool_grant', 'tool_live_cut',
+                'tool_launch_closure', 'tool_invocation_create', 'tool_process_observation', 'tool_release', 'tool_result',
+                'unclassified'].includes(value.reason as string)) {
+            const code = ['ARTIFACT_MISMATCH', 'LEASE_FENCED', 'RECOVERY_REQUIRED', 'REVISION_CONFLICT', 'INVALID_REQUEST'].includes(value.code as string)
+              ? value.code as string : 'diagnostic_only';
+            refusals.push({ code, origin: `${value.stage}.${value.reason}` }); continue;
           }
           if (value.scope !== 'installed-read-startup') continue;
           const code = ['RECOVERY_REQUIRED', 'LEASE_FENCED', 'ARTIFACT_MISMATCH', 'STATE_TRANSITION_INVALID'].includes(value.code as string)
@@ -958,6 +962,35 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
     const sessionReply = exchange([sessionRequest])[0]!, session = accepted(sessionReply, 'session.create').snapshot.session;
     assert.deepEqual(exchange([sessionRequest])[0], sessionReply, 'new authenticated connection must replay the original Session response');
     const currentSession = () => accepted(exchange([{ protocolVersion: 1, method: 'session.get', sessionId: session.id }])[0]!, 'session.get').snapshot.session;
+    const qualifyTerminalCancelPrecedence = (terminal: Record<string, any>, originalCancel: Record<string, any>, originalReply: Response,
+      afterSessionItemSeq: number, expectedSession: Record<string, any>) => {
+      const run = terminal.snapshot.run;
+      assert(['succeeded', 'completed_unverified', 'failed', 'cancelled'].includes(run.status));
+      assert(Number.isSafeInteger(run.revision) && run.revision > originalCancel.expectedRevision);
+      const attach = { protocolVersion: 1, method: 'run.attach', runId: run.id, afterEventSeq: 0 };
+      const events = accepted(exchange([attach])[0]!, 'run.attach');
+      const counts = [requestsReceived, acceptedTcpConnections, acceptedTlsConnections];
+      const { requestDigest: _originalDigest, ...core } = originalCancel;
+      const replies = exchange([originalCancel, request({ ...core, expectedRevision: run.revision }),
+        request({ ...core, requestId: '019a0012-0000-7000-8000-000000000140', expectedRevision: run.revision - 1 }),
+        request({ ...core, requestId: '019a0012-0000-7000-8000-000000000141', expectedRevision: run.revision })]);
+      assert.deepEqual(replies[0], originalReply);
+      assert.deepEqual(replies[1], { protocolVersion: 1, ok: false, method: 'run.cancel', error: {
+        schemaVersion: 1, code: 'REQUEST_ID_CONFLICT', retryable: false, messageCode: 'control.mutation_refused' } });
+      assert.deepEqual(replies[2], { protocolVersion: 1, ok: false, method: 'run.cancel', error: {
+        schemaVersion: 1, code: 'REVISION_CONFLICT', retryable: true, messageCode: 'control.revision_conflict', currentRevision: run.revision,
+        conflict: { resourceKind: 'run', currentSnapshot: terminal.snapshot } } });
+      assert.deepEqual(replies[3], { protocolVersion: 1, ok: false, method: 'run.cancel', error: {
+        schemaVersion: 1, code: 'RUN_TERMINAL', retryable: false, messageCode: 'control.run_terminal' } });
+      assert.deepEqual(accepted(exchange([{ protocolVersion: 1, method: 'run.get', runId: run.id }])[0]!, 'run.get'), terminal);
+      assert.deepEqual(accepted(exchange([{ protocolVersion: 1, method: 'session.get', sessionId: session.id,
+        afterItemSeq: afterSessionItemSeq }])[0]!, 'session.get'), expectedSession);
+      assert.deepEqual(accepted(exchange([attach])[0]!, 'run.attach'), events);
+      assert.deepEqual([requestsReceived, acceptedTcpConnections, acceptedTlsConnections], counts); assert(!providerFailure);
+      return { qualified: true, committedReplayPreserved: true, requestConflictBeforeRevision: true,
+        revisionConflictBeforeTerminal: true, terminalCode: 'RUN_TERMINAL', fixedNonretryableRefusal: true,
+        runJournalSessionEventsUnchanged: true, noProductiveRedispatch: true, freshConnectionQualified: true };
+    };
     if (shutdownEffectsOnly) {
       const effect: Record<string, any> = { diagnosticOnly: true, qualified: false, standardStopTimeoutMs: 2000,
         exactPrivateCloseGateQualified: false, exactNativeMutexOrderQualified: false, completeI1Qualified: false };
@@ -1079,6 +1112,8 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
           return undefined;
         };
         const toolCut = (cut: Record<string, any>) => {
+          if (cut.journal.some((entry: any) => entry.opKind === 'tool' && entry.phase === 'unknown'))
+            effect.originalToolRefusal = observeShutdownRefusal(services.supervisorUnit, String(originalPid));
           const completed = cut.journal.some((entry: any) => entry.opKind === 'tool' && entry.phase === 'completed');
           if (completed) { effect.observedCutLost = true; assert.fail('the original received-tool cut completed before positive shutdown observation'); }
           assert.equal(cut.snapshot.run.status, 'running'); assert(cut.snapshot.run.activeWorkerLaunchId);
@@ -1499,6 +1534,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       assert.equal(sessionCut.snapshot.session.latestItemSeq, session.latestItemSeq + 1);
       assert.deepEqual(await shutdownClient.send(cancel), cancelReply); assert.deepEqual(exchange([submit])[0], submitReply);
       assert.deepEqual(exchange([sessionRequest])[0], sessionReply); assert.deepEqual(await publicRead(), terminal);
+      effect.terminalCancellationPrecedence = qualifyTerminalCancelPrecedence(terminal, cancel, cancelReply, session.latestItemSeq, sessionCut);
       if (payloadBefore) await verifyPayload(payloadPath, originalBlob!, payloadBefore);
       for (const field of imageFields) assert.equal((await lstat(source, { bigint: true }))[field], sourceBefore[field]);
       assert.equal(await readFile(source, 'utf8'), hostBefore); assert(!providerFailure);
@@ -2106,6 +2142,33 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       assert.equal(unauthorized.error!.messageCode, 'run.model_authority_refused');
       assert.equal(requestsReceived, 0); assert.deepEqual(currentSession(), session);
     }
+    const recipeClient = await persistentClient();
+    try {
+      // Authentication has already published its genuine channel artifacts.
+      // On this same connection, invalid fixed-recipe cardinality must not
+      // begin source capture or publish any additional CAS object.
+      const before = (await readdir(path.join(recipe.stateRoot, 'cas'))).sort(); assert(before.length <= 4096);
+      for (const [count, requestId] of [[2, '019a0012-0000-7000-8000-000000000142'],
+        [32, '019a0012-0000-7000-8000-000000000143']] as const) {
+        const credentialIds = [enrollment.credentialGrantId, ...Array.from({ length: count - 1 },
+          (_, index) => `installed-run-unselected-credential-${index}`)];
+        assert.equal(new Set(credentialIds).size, count);
+        const refused = await recipeClient.send(request({ ...resourceCore, requestId,
+          model: { ...resourceCore.model, modelCredentialGrantIds: credentialIds } }));
+        assert.deepEqual(refused, { protocolVersion: 1, ok: false, method: 'run.submit', error: {
+          schemaVersion: 1, code: 'INVALID_REQUEST', retryable: false, messageCode: 'control.invalid_request',
+          issues: [{ path: 'request', issueCode: 'invalid_request' }] } });
+      }
+      assert.deepEqual((await readdir(path.join(recipe.stateRoot, 'cas'))).sort(), before);
+      const absent = await recipeClient.send({ protocolVersion: 1, method: 'run.get',
+        runId: identityHash('cliq-run-id-v1', principal, 'run.submit', submit.admissionKey) });
+      assert.deepEqual(absent, { protocolVersion: 1, ok: false, method: 'run.get', error: {
+        schemaVersion: 1, code: 'NOT_FOUND', retryable: false, messageCode: 'control.read_rejected' } });
+      assert.deepEqual(accepted(await recipeClient.send({ protocolVersion: 1, method: 'session.get', sessionId: session.id }), 'session.get').snapshot.session, session);
+      assert.equal(requestsReceived, 0); assert.equal(acceptedTcpConnections, 0); assert.equal(acceptedTlsConnections, 0); assert(!providerFailure);
+      report.credentialCardinalityRefused = { qualified: true, rejectedCounts: [2, 32], refusalCode: 'INVALID_REQUEST',
+        sameAuthenticatedConnection: true, noNewCasObjects: true, noRun: true, sessionUnchanged: true, noProductiveRequest: true };
+    } finally { await recipeClient.close(); }
     const defaultPolicy = exchange([request({ ...resourceCore, requestId: '019a0012-0000-7000-8000-000000000124',
       policyMode: 'default' })])[0]!;
     assert.equal(canonicalSha256(defaultPolicy), canonicalSha256({ protocolVersion: 1, ok: false, method: 'run.submit',
@@ -3531,6 +3594,8 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
     const unchangedDomainSupervisor = show(services.supervisorUnit);
     assert.equal(unchangedDomainSupervisor.MainPID, currentDomainSupervisor.MainPID);
     assert.equal(unchangedDomainSupervisor.InvocationID, currentDomainSupervisor.InvocationID);
+    const terminalCancellationPrecedence = qualifyTerminalCancelPrecedence(domainTerminal, domainCancel, domainCancelReply,
+      beforeDomainSession.latestItemSeq, afterDomainSession);
     mark('closed_broker_terminal_history_after_actual_supervisor_restart');
     const terminalRestart = command('/usr/bin/systemctl', ['--user', 'restart', services.supervisorUnit], undefined, 30000);
     assert.equal(terminalRestart.status, 0);
@@ -3554,6 +3619,8 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       afterItemSeq: beforeDomainSession.latestItemSeq }])[0]!, 'session.get'), afterDomainSession);
     assert.deepEqual(accepted(exchange([{ protocolVersion: 1, method: 'run.attach', runId: reflectionAdmitted.id,
       afterEventSeq: domainEvents.nextEventSeq }])[0]!, 'run.attach'), domainEmptyEvents);
+    const restartedTerminalCancellationPrecedence = qualifyTerminalCancelPrecedence(domainTerminal, domainCancel, domainCancelReply,
+      beforeDomainSession.latestItemSeq, afterDomainSession);
     assert.equal(requestsReceived, 4); assert(!providerFailure);
     assert.equal(await fixtureProcess(Number(terminalHistorySupervisor.MainPID), ledger.uid), terminalHistoryStart);
     assert.equal(await readlink(`/proc/${terminalHistorySupervisor.MainPID}/exe`), successorImagePath);
@@ -3562,6 +3629,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       originalClaimProcessMatched: true, strictlyNewerSameSignedRuntimeInspectorMatched: true, providerRedispatches: 0,
       dispatchClosureRef: abandoned.dispatchFenceOrDeathEvidenceRef, processDeathEvidenceRef: dispatchClosure.closure.brokerProcessDeathEvidenceRef,
       processDeathEvidenceDigest: domainDeath.evidenceDigest, terminalCheckpointPublishedOnce: true, sessionPublishedOnce: true,
+      terminalCancellationPrecedence, restartedTerminalCancellationPrecedence,
       cancelReplayPreserved: true, contiguousAttachPreserved: true, noResultPublished: true,
       terminalHistoryReopenedAfterActualSupervisorRestart: true };
     }
