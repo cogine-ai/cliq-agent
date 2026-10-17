@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync, type ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomBytes, X509Certificate } from 'node:crypto';
 import { constants } from 'node:fs';
-import { chown, lstat, mkdir, open, readFile, readdir, readlink, stat, statfs, writeFile } from 'node:fs/promises';
+import { chown, link, lstat, mkdir, open, readFile, readdir, readlink, stat, statfs, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:https';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -22,6 +22,8 @@ import { buildInstalledSupervisorPackage } from './testing/installed-supervisor-
 import { createCredentialSecretScanner } from './testing/credential-secret-scan.js';
 import { scanCredentialSecretCorpus } from './testing/credential-secret-corpus.js';
 import { assertInstalledWorkerLeaseRenewed, inspectInstalledWorkerLease } from './testing/installed-worker-lease.js';
+import { inspectInstalledOwnerHistory } from './testing/installed-read-control.js';
+import { qualifyInstalledOwnerLinks } from './testing/installed-owner-history.js';
 import { projectInstalledRunProgress, projectInstalledServiceExit, projectInstalledSupervisorStatus } from '../../src/sandbox/testing/installed-run-progress.js';
 
 type Recipe = { buildFixture: string; packageRoot: string; installerEntry: string; stateRoot: string; releaseKeysFile: string;
@@ -35,7 +37,8 @@ const privateAfter = 'after the private edit\n';
 const excludedVendorInstruction = 'Ordinary vendor instructions remain independent of source exclusion.\n';
 const model = 'installed-run-transport-fixture';
 const rejectedResponse = '{"error":{"message":"Owned fixture rejected this request."}}';
-type CampaignMode = '--campaign' | '--failure-campaign' | '--retry-campaign' | '--authority-failure-campaign' | '--storage-failure-campaign';
+type CampaignMode = '--campaign' | '--failure-campaign' | '--retry-campaign' | '--authority-failure-campaign' |
+  '--storage-failure-campaign' | '--shutdown-admission-campaign';
 const requestTokenCeiling = { inputTokens: 32768, outputTokens: 4096, cacheReadTokens: 0, cacheWriteTokens: 0 };
 const imageFields = ['dev', 'ino', 'size', 'uid', 'gid', 'mode', 'nlink', 'mtimeNs', 'ctimeNs'] as const;
 
@@ -158,8 +161,11 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
   const retryOnly = mode === '--retry-campaign';
   const authorityOnly = mode === '--authority-failure-campaign';
   const storageOnly = mode === '--storage-failure-campaign';
+  const shutdownAdmissionOnly = mode === '--shutdown-admission-campaign';
   const report: Record<string, any> = { diagnosticOnly: true, qualified: false, phase: 'installation',
-    scope: storageOnly
+    scope: shutdownAdmissionOnly
+      ? 'independent signed installed Linux Supervisor SIGTERM during positively observed ordinary instruction capture for an in-flight public Run admission, unchanged two-second service timeout, graceful owner join and successor preservation of absence or a legitimately committed admission; not an exact precommit-abort, source-payload, worker-preparation, received-tool, provider or complete I1 qualification'
+      : storageOnly
       ? 'independent signed installed Linux Run, real read-preserving CAS write refusal after one actual POST, same-owner typed UNKNOWN settlement after exact restoration, no extra accepted TCP/TLS/POST, then actual successor-owner cancellation and terminal replay; not never-CONNECT guard storage-failure qualification, a provider qualification or complete I1'
       : authorityOnly
       ? 'independent signed installed Linux Runs, real credential revocation after queued admission, exact pre-I/O refusal and terminal retirement, one Session publication per Run and actual Supervisor restart; not a provider qualification, exact finalizer cut or complete I1'
@@ -277,6 +283,16 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
       assert.equal(exit.code, 0); assert.equal(exit.signal, null); assert.equal(failure, undefined); assert.equal(output, '');
       assert.equal(errorBytes, 0); report.originalPublicClientJoined = true;
     })();
+    const joinAfterPeerShutdown = () => closing ??= (async () => {
+      // Only the isolated SIGTERM case calls this after observing the actual
+      // service stop and the original pending request's disconnection. The
+      // ordinary client still refuses closure rather than reconnecting.
+      child.stdin.end();
+      const exit = await bounded(closed, 10000, 'disconnected original public client did not join');
+      assert.equal(exit.signal, null); assert.equal(exit.code, 1);
+      assert(failure instanceof Error); assert.equal(output, '');
+      assert(errorBytes > 0 && errorBytes <= 65536); report.originalPublicClientJoined = true;
+    })();
     const send = async (value: Record<string, unknown>, timeout = 5000): Promise<Response> => {
       assert(!pending && !failure && !closing); const bytes = canonicalJsonBytes(value); assert(bytes.length <= 1048576);
       const reply = new Promise<string>((resolve, reject) => { pending = { resolve, reject }; });
@@ -288,7 +304,7 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
     try {
       await bounded(Promise.race([ready, closed.then(() => { throw new Error('original public client closed before readiness'); })]),
         5000, 'original public client did not connect');
-      accepted(await send(hello), 'control.hello'); return { send, close };
+      accepted(await send(hello), 'control.hello'); return { send, close, joinAfterPeerShutdown };
     } catch (error) { try { await close(); } catch {} throw error; }
   };
   const show = (unit: string) => {
@@ -381,6 +397,7 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
   let busyFinalize: CredentialFinalizeRequest | undefined;
   let storageClient: Awaited<ReturnType<typeof persistentClient>> | undefined;
   let queuedObserverClient: Awaited<ReturnType<typeof persistentClient>> | undefined;
+  let shutdownClient: Awaited<ReturnType<typeof persistentClient>> | undefined;
   let restoreCasWrite: (() => Promise<void>) | undefined;
   let storagePost: { destroy(): void; closed: Promise<void> } | undefined;
   let storagePostResolve!: () => void;
@@ -595,7 +612,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
           }
           return;
         }
-        if (retryOnly || authorityOnly) {
+        if (retryOnly || authorityOnly || shutdownAdmissionOnly) {
           assert.equal(ordinal, 1, 'this independent candidate campaign must release exactly one actual model request');
           const bytes = Buffer.from(JSON.stringify({ id: 'owned-retry-fixture-turn', object: 'chat.completion', model,
             choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: 'The restored preparation is complete.' } }],
@@ -777,6 +794,217 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
     const sessionReply = exchange([sessionRequest])[0]!, session = accepted(sessionReply, 'session.create').snapshot.session;
     assert.deepEqual(exchange([sessionRequest])[0], sessionReply, 'new authenticated connection must replay the original Session response');
     const currentSession = () => accepted(exchange([{ protocolVersion: 1, method: 'session.get', sessionId: session.id }])[0]!, 'session.get').snapshot.session;
+    if (shutdownAdmissionOnly) {
+      mark('owned_instruction_inventory_before_shutdown_admission');
+      const inventory = path.join(recipe.workspace, 'shutdown-instructions'), instruction = path.join(inventory, 'AGENTS.md');
+      await mkdir(inventory, { mode: 0o700 }); await chown(inventory, ledger.uid, ledger.gid);
+      const instructionBytes = Buffer.from('Ordinary shutdown qualification guidance.\n');
+      await writeFile(instruction, instructionBytes, { flag: 'wx', mode: 0o644 }); await chown(instruction, ledger.uid, ledger.gid);
+      const seeds = [path.join(inventory, 'ordinary-a.txt'), path.join(inventory, 'ordinary-b.txt')];
+      for (const seed of seeds) {
+        await writeFile(seed, 'ordinary excluded metadata\n', { flag: 'wx', mode: 0o644 }); await chown(seed, ledger.uid, ledger.gid);
+      }
+      // Ordinary metadata only: never a blocked special file, linked AGENTS,
+      // invalid scan bound or a production pause. The source prunes this one
+      // subtree; independent instruction capture must still enumerate it.
+      const metadataEntries = 80_000;
+      for (let offset = 0; offset < metadataEntries; offset += 64) {
+        await Promise.all(Array.from({ length: Math.min(64, metadataEntries - offset) }, (_, index) => {
+          const ordinal = offset + index;
+          return link(seeds[ordinal % seeds.length]!, path.join(inventory, `entry-${String(ordinal).padStart(5, '0')}.txt`));
+        }));
+      }
+      const instructionBefore = await lstat(instruction, { bigint: true });
+      assert(instructionBefore.isFile() && instructionBefore.nlink === 1n && instructionBefore.uid === BigInt(ledger.uid));
+      assert.equal(instructionBefore.size, BigInt(instructionBytes.length));
+      const originalPid = Number(supervisorBefore.MainPID), originalStart = await fixtureProcess(originalPid, ledger.uid);
+      const selectedImage = path.join(recipe.stateRoot, 'runtime/bundles', bundleDigest, 'supervisor');
+      const signedImage = await lstat(selectedImage, { bigint: true });
+      const assertOriginalSupervisor = async () => {
+        assert.equal(await fixtureProcess(originalPid, ledger.uid), originalStart);
+        assert.equal(await readlink(`/proc/${originalPid}/exe`), selectedImage);
+        const actual = await stat(`/proc/${originalPid}/exe`, { bigint: true });
+        for (const key of imageFields) assert.equal(actual[key], signedImage[key]);
+      };
+      const heldInstruction = async (only?: string) => {
+        await assertOriginalSupervisor();
+        const descriptors = only ? [only] : await readdir(`/proc/${originalPid}/fd`);
+        assert(descriptors.length <= 4096, 'actual Supervisor descriptor inventory exceeded its fixed observation bound');
+        for (const descriptor of descriptors) {
+          assert.match(descriptor, /^(?:0|[1-9][0-9]*)$/u);
+          try {
+            const fd = `/proc/${originalPid}/fd/${descriptor}`;
+            if (await readlink(fd) !== instruction) continue;
+            const actual = await stat(fd, { bigint: true });
+            for (const key of imageFields) assert.equal(actual[key], instructionBefore[key]);
+            await assertOriginalSupervisor(); return descriptor;
+          } catch (error) {
+            if (!['ENOENT', 'ESRCH'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
+          }
+        }
+        await assertOriginalSupervisor(); return undefined;
+      };
+      const admission = request({ protocolVersion: 1, method: 'run.submit', requestId: '019a0012-0000-7000-8000-000000000130',
+        admissionKey: randomBytes(32).toString('base64url'), sessionId: session.id, expectedContextRevision: session.contextRevision,
+        workspacePath: recipe.workspace, objective: 'Qualify ordinary instruction capture shutdown without executing a model or tool.',
+        model: { provider: 'openai-compatible', model, endpoint: { kind: 'registered', endpointRegistrationId: registration.endpointRegistrationId },
+          modelCredentialGrantIds: [enrollment.credentialGrantId] }, policyMode: 'accept-edits',
+        budgets: { wallTimeMs: 300000, modelTokens: 2000000, costMicros: 10000000, toolCalls: 1000,
+          repairAttempts: 0, childDepth: 0, childConcurrency: 1 },
+        verifiers: [], dependency: { mode: 'none' }, sourceIncludes: [],
+        sourceExcludes: [{ path: 'shutdown-instructions', scope: 'subtree' }],
+        registeredMcpServerIds: [], skillIds: [], allowUnverified: true });
+      const runId = identityHash('cliq-run-id-v1', principal, 'run.submit', admission.admissionKey);
+      const absent = { protocolVersion: 1, ok: false, method: 'run.get', error: { schemaVersion: 1,
+        code: 'NOT_FOUND', retryable: false, messageCode: 'control.read_rejected' } };
+      assert.equal(canonicalSha256(exchange([{ protocolVersion: 1, method: 'run.get', runId }])[0]), canonicalSha256(absent));
+      const originalStatus = accepted(exchange([{ protocolVersion: 1, method: 'supervisor.status' }])[0]!, 'supervisor.status');
+      assert.equal(originalStatus.health, 'ready');
+      const originalOwners = inspectInstalledOwnerHistory(recipe.stateRoot).owners;
+      assert.equal(originalOwners.length, 1);
+      const originalOwner = originalOwners[0]!;
+      assert.equal(originalOwner.state, 'active'); assert.equal(originalOwner.supervisorInstanceId, originalStatus.supervisorInstanceId);
+      shutdownClient = await persistentClient();
+      let requestFinished = false;
+      const pendingAdmission = shutdownClient.send(admission, 120000).then(response => {
+        requestFinished = true; return { kind: 'response' as const, response };
+      }, () => { requestFinished = true; return { kind: 'disconnected' as const }; });
+      mark('actual_instruction_descriptor_owned_by_original_pending_admission');
+      const observeBy = Date.now() + 30000;
+      let descriptor: string | undefined;
+      while (!descriptor) {
+        assert(!requestFinished, 'instruction phase was not positively observed before the admission completed');
+        assert(Date.now() < observeBy, 'actual original instruction descriptor was not observed');
+        descriptor = await heldInstruction();
+        if (!descriptor) await delay(1);
+      }
+      assert.equal(canonicalSha256(exchange([{ protocolVersion: 1, method: 'run.get', runId }])[0]), canonicalSha256(absent));
+      assert.equal(await heldInstruction(descriptor), descriptor, 'the exact original instruction owner must remain in flight at the signal cut');
+      assert.equal(requestFinished, false); assert.equal(requestsReceived, 0); assert(!providerFailure);
+      report.shutdownAdmission = { qualified: false, diagnosticOnly: true,
+        originalPendingPublicRequest: true, originalInstructionDescriptorMatched: true,
+        originalSupervisorProcessMatched: true, metadataEntries, instructionDocuments: 1, instructionBytes: instructionBytes.length,
+        sourceSubtreeExcluded: true, inFlightSourcePayloadQualified: false, workerPreparationQualified: false,
+        receivedToolQualified: false, immutableResultOrClaimQualified: false };
+      const contract = command('/usr/bin/systemctl', ['--user', 'show', services.supervisorUnit,
+        '--property=TimeoutStopUSec,KillSignal,FinalKillSignal,SendSIGKILL', '--no-pager']);
+      assert.equal(contract.status, 0);
+      const stopPolicy = Object.fromEntries(contract.stdout.trim().split('\n').map(line => line.split('=')));
+      assert.equal(stopPolicy.TimeoutStopUSec, '2s'); assert.equal(stopPolicy.KillSignal, '15');
+      assert.equal(stopPolicy.FinalKillSignal, '9'); assert.equal(stopPolicy.SendSIGKILL, 'yes');
+      report.shutdownAdmission.standardStopTimeoutMs = 2000;
+      mark('ordinary_systemd_sigterm_during_instruction_capture');
+      let originalAdmissionResponse: Response | undefined;
+      await withRetainedUnitHistory([services.supervisorUnit, services.keeperUnit], async () => {
+        assert.equal(await heldInstruction(descriptor), descriptor);
+        assert.equal(requestFinished, false);
+        const stopped = command('/usr/bin/systemctl', ['--user', 'stop', services.supervisorUnit]);
+        const exit = show(services.supervisorUnit);
+        report.shutdownAdmission.serviceExit = projectInstalledServiceExit(exit);
+        const pending = await bounded(pendingAdmission, 10000, 'original stopped admission client did not finish');
+        if (pending.kind === 'disconnected') await shutdownClient!.joinAfterPeerShutdown();
+        else { originalAdmissionResponse = pending.response; await shutdownClient!.close(); }
+        report.shutdownAdmission.originalClientJoined = true;
+        report.shutdownAdmission.originalClientDisconnected = pending.kind === 'disconnected';
+        assert.equal(stopped.status, 0, 'ordinary two-second Supervisor stop must not require forced retirement');
+        assert.equal(exit.ActiveState, 'inactive'); assert.equal(exit.MainPID, '0');
+        assert.equal(exit.Result, 'success'); assert.equal(exit.ExecMainCode, '1'); assert.equal(exit.ExecMainStatus, '0');
+        await assert.rejects(lstat(`/proc/${originalPid}`), { code: 'ENOENT' });
+      });
+      const releasedOwners = inspectInstalledOwnerHistory(recipe.stateRoot).owners;
+      assert.equal(releasedOwners.length, 1);
+      const releasedOwner = releasedOwners[0]!;
+      assert.equal(releasedOwner.state, 'terminal');
+      if (releasedOwner.state !== 'terminal') throw new Error('ordinary SIGTERM did not publish a terminal StateOwner');
+      assert.equal(releasedOwner.terminalReason, 'graceful_release');
+      for (const key of ['ownerEpoch', 'supervisorInstanceId', 'processIdentityRef', 'processIdentityDigest',
+        'stateLockIdentityRef', 'stateLockIdentityDigest', 'instanceNonceDigest', 'acquiredAt'] as const)
+        assert.equal(releasedOwner[key], originalOwner[key]);
+      assert.equal(show(services.keeperUnit).MainPID, keeperBefore.MainPID);
+      assert.deepEqual(await readFile(path.join(recipe.stateRoot, 'runtime/keeper.ready')), keeperReady);
+      mark('shutdown_admission_actual_successor_and_public_outcome');
+      assert.equal(command('/usr/bin/systemctl', ['--user', 'start', services.supervisorUnit]).status, 0);
+      const successor = show(services.supervisorUnit), successorBy = Date.now() + 30000;
+      assert.notEqual(successor.MainPID, supervisorBefore.MainPID); assert.notEqual(successor.InvocationID, supervisorBefore.InvocationID);
+      await selectedSupervisor(services.supervisorUnit, successor, selectedImage, successorBy);
+      const successorStatus = accepted(exchange([{ protocolVersion: 1, method: 'supervisor.status' }])[0]!, 'supervisor.status');
+      assert.equal(successorStatus.health, 'ready'); assert.notEqual(successorStatus.supervisorInstanceId, originalStatus.supervisorInstanceId);
+      const links: Record<string, unknown> = {};
+      const history = await qualifyInstalledOwnerLinks({ stateRoot: recipe.stateRoot, uid: ledger.uid, bundle: signed.bundle,
+        imageDigest: report.bundle.supervisorDigest, report: links });
+      assert.equal(links.qualified, true); assert.equal(history.owners.length, 2);
+      assert.deepEqual(history.owners[0], releasedOwner);
+      const successorOwner = history.owners[1]!;
+      assert.equal(successorOwner.state, 'active');
+      assert.equal(successorOwner.supervisorInstanceId, successorStatus.supervisorInstanceId);
+      assert.equal(successorOwner.ownerEpoch, originalOwner.ownerEpoch + 1);
+      report.shutdownAdmission.ownerLineage = { qualified: true,
+        originalOwnerEpoch: originalOwner.ownerEpoch, originalSupervisorInstanceId: originalOwner.supervisorInstanceId,
+        originalProcessIdentityRef: originalOwner.processIdentityRef, originalProcessIdentityDigest: originalOwner.processIdentityDigest,
+        terminalReason: 'graceful_release', terminalRowDigest: releasedOwner.rowDigest,
+        transitionEvidenceRef: releasedOwner.transitionEvidenceRef, transitionEvidenceDigest: releasedOwner.transitionEvidenceDigest,
+        successorOwnerEpoch: successorOwner.ownerEpoch, successorSupervisorInstanceId: successorOwner.supervisorInstanceId,
+        acquisitionKind: 'acquire_after_graceful_release', acquisitionEvidenceRef: successorOwner.acquisitionEvidenceRef,
+        acquisitionEvidenceDigest: successorOwner.acquisitionEvidenceDigest,
+        sameStateLock: true, sameSignedRuntime: true };
+      assert.deepEqual(exchange([sessionRequest])[0], sessionReply);
+      // The descriptor observation precedes systemctl and the Store's private
+      // gate. An admission may legitimately commit in that unobserved gap;
+      // SIGTERM is not run.cancel and must not erase that durable response.
+      const outcome = exchange([{ protocolVersion: 1, method: 'run.get', runId }])[0]!;
+      if (!outcome.ok) {
+        assert.equal(canonicalSha256(outcome), canonicalSha256(absent));
+        assert.notEqual(originalAdmissionResponse?.ok, true, 'an acknowledged admission cannot disappear during graceful stop');
+        assert.deepEqual(currentSession(), session); assert.equal(requestsReceived, 0);
+        report.shutdownAdmission.acceptedBeforeGateRace = false;
+        report.shutdownAdmission.noAcceptedRunObservedAfterRestart = true;
+        report.shutdownAdmission.sessionUnchanged = true;
+      } else {
+        const cut = accepted(outcome, 'run.get'), run = cut.snapshot.run;
+        assert.equal(run.id, runId); assert.equal(run.sessionId, session.id);
+        const spec = parseJsonStrict((await readCas(run.specRef)).toString('utf8')) as Record<string, any>;
+        assert.equal(spec.schemaVersion, 1); assert.equal(spec.operation, 'agent');
+        assert.equal(canonicalSha256(spec.budgets), canonicalSha256(admission.budgets));
+        const objective = parseJsonStrict((await readCas(spec.objectiveRef)).toString('utf8')) as Record<string, any>;
+        assert.equal(objective.format, 'cliq-run-objective-v1'); assert.equal(objective.utf8, admission.objective);
+        assert.equal(objective.objectiveDigest, digestOmitting(objective, 'objectiveDigest'));
+        const replay = exchange([admission, admission]); assert.deepEqual(replay[1], replay[0]);
+        if (originalAdmissionResponse) assert.deepEqual(replay[0], originalAdmissionResponse);
+        const original = accepted(replay[0]!, 'run.submit').snapshot.run;
+        assert.equal(original.id, runId); assert.equal(original.sessionId, session.id); assert.equal(original.specRef, run.specRef);
+        assert.deepEqual(exchange([admission])[0], replay[0], 'the exact original admission response must survive a fresh connection');
+        const latest = accepted(exchange([{ protocolVersion: 1, method: 'run.get', runId }])[0]!, 'run.get');
+        assert.equal(latest.snapshot.run.specRef, run.specRef);
+        const claims = latest.journal.filter((entry: any) => entry.phase === 'dispatch_claimed');
+        assert(claims.length <= 1, 'the one admitted model response cannot acquire a duplicate productive claim');
+        for (const claim of claims) { assert.equal(claim.opKind, 'model'); assert.equal(claim.attempt, 0); }
+        const sessionCut = accepted(exchange([{ protocolVersion: 1, method: 'session.get', sessionId: session.id,
+          afterItemSeq: session.latestItemSeq }])[0]!, 'session.get');
+        assert(sessionCut.items.length <= 1, 'the admitted Run cannot publish a duplicate Session terminal item');
+        for (const item of sessionCut.items) {
+          assert.equal(item.kind, 'run_terminal');
+          const payload = parseJsonStrict((await readCas(item.payloadRef)).toString('utf8')) as Record<string, any>;
+          assert.equal(payload.runId, runId);
+        }
+        assert.equal(sessionCut.snapshot.session.contextRevision, session.contextRevision + sessionCut.items.length);
+        assert.equal(sessionCut.snapshot.session.latestItemSeq, session.latestItemSeq + sessionCut.items.length);
+        assert(requestsReceived <= 1 && acceptedTcpConnections <= 1 && acceptedTlsConnections <= 1);
+        report.shutdownAdmission.acceptedBeforeGateRace = true;
+        report.shutdownAdmission.acceptedAdmissionReplayPreserved = true;
+        report.shutdownAdmission.noDuplicateProductiveClaimOrSessionPublication = true;
+        report.shutdownAdmission.sessionPublications = sessionCut.items.length;
+      }
+      assert(!providerFailure);
+      for (const key of imageFields) {
+        assert.equal((await lstat(source, { bigint: true }))[key], sourceBefore[key]);
+        assert.equal((await lstat(instruction, { bigint: true }))[key], instructionBefore[key]);
+      }
+      assert.equal(await readFile(source, 'utf8'), hostBefore); assert.deepEqual(await readFile(instruction), instructionBytes);
+      report.shutdownAdmission = { ...report.shutdownAdmission, qualified: true, gracefulExitZero: true,
+        genuineSuccessorPublicOwner: true, sameKeeper: true, originalSessionCreateResponsePreserved: true,
+        sourceAndInstructionUnchanged: true, precommitAbortCutQualified: false,
+        fullI1Qualified: false };
+    } else {
     mark('public_run_submit');
     const runBudgets = { wallTimeMs: failureOnly || retryOnly || authorityOnly ? 45000 : 300000, modelTokens: 2000000, costMicros: 10000000, toolCalls: 1000,
       repairAttempts: 0, childDepth: 0, childConcurrency: 1 };
@@ -2268,6 +2496,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       cancelReplayPreserved: true, contiguousAttachPreserved: true, noResultPublished: true,
       terminalHistoryReopenedAfterActualSupervisorRestart: true };
     }
+    }
     report.qualified = true; mark('run_assertions_complete');
   } catch (error) {
     primary = error;
@@ -2294,6 +2523,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
     } catch (error) { cleanupFailures.push(error); }
     try { await storageClient?.close(); } catch (error) { cleanupFailures.push(error); }
     try { await queuedObserverClient?.close(); } catch (error) { cleanupFailures.push(error); }
+    try { await shutdownClient?.close(); } catch (error) { cleanupFailures.push(error); }
     try {
       if (installedServices) {
         // A stable retained-byte scan must follow real writer retirement.
@@ -2365,5 +2595,6 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
 
 assert.equal(process.platform, 'linux'); assert.equal(process.arch, 'x64');
 const [mode, filename, ...extra] = process.argv.slice(2);
-assert(mode === '--campaign' || mode === '--failure-campaign' || mode === '--retry-campaign' || mode === '--authority-failure-campaign' || mode === '--storage-failure-campaign'); assert(filename && extra.length === 0);
+assert(mode === '--campaign' || mode === '--failure-campaign' || mode === '--retry-campaign' || mode === '--authority-failure-campaign' ||
+  mode === '--storage-failure-campaign' || mode === '--shutdown-admission-campaign'); assert(filename && extra.length === 0);
 await campaign(filename, mode);
