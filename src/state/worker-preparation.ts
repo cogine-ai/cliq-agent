@@ -291,117 +291,135 @@ export async function retireWorkerPreparation(driver: SqliteDriver, artifacts: A
   brokerQuiescence: InstalledBrokerQuiescence;
 } & ({ workspaceBirth: RunWorkspaceBirth; unallocatedWorkspace?: never } |
   { workspaceBirth?: never; unallocatedWorkspace: RunWorkspaceMaterialization })): Promise<RetiredWorkerPreparation> {
-  const original = preparationOwners.get(input.preparation);
-  if (!original || original.driver !== driver || original.owner !== owner)
-    throw new KernelStorageError('ARTIFACT_MISMATCH', 'preparation retirement requires its original live producer');
-  const launch = preparing(driver, owner, input.preparation.launchId), run = bindableRun(driver, launch);
-  const { generation: _generationBirth, controller: _controllerBirth, reservation: _reservationBirth, ...logical } = launch.preparation;
-  requireEqual({ ...launch, preparation: logical }, input.preparation, 'preparation retirement original live logical producer');
-  if (run.revision !== input.expectedRunRevision) fail('preparation retirement lacks its exact stopping cut');
-  if (!launch.preparation.generation) {
-    if (!input.unallocatedWorkspace || input.workspaceBirth || input.controllerRetirement || input.reservation ||
-        launch.preparation.controller || launch.preparation.reservation)
-      fail('preparation retirement has no original unallocated producer or complete physical birth');
-    return retireUnallocatedPreparation(driver, artifacts, owner, launch, run, input.unallocatedWorkspace, input.brokerQuiescence);
+  // Temporary fixed-point diagnosis for the genuine installed retirement RED.
+  // Remove [DEBUG-shutdown-retirement] together with its caller diagnostics.
+  let diagnosticPoint = 'preparation_logical_cut';
+  try {
+    const original = preparationOwners.get(input.preparation);
+    if (!original || original.driver !== driver || original.owner !== owner)
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'preparation retirement requires its original live producer');
+    const launch = preparing(driver, owner, input.preparation.launchId), run = bindableRun(driver, launch);
+    const { generation: _generationBirth, controller: _controllerBirth, reservation: _reservationBirth, ...logical } = launch.preparation;
+    requireEqual({ ...launch, preparation: logical }, input.preparation, 'preparation retirement original live logical producer');
+    if (run.revision !== input.expectedRunRevision) fail('preparation retirement lacks its exact stopping cut');
+    if (!launch.preparation.generation) {
+      if (!input.unallocatedWorkspace || input.workspaceBirth || input.controllerRetirement || input.reservation ||
+          launch.preparation.controller || launch.preparation.reservation)
+        fail('preparation retirement has no original unallocated producer or complete physical birth');
+      return retireUnallocatedPreparation(driver, artifacts, owner, launch, run, input.unallocatedWorkspace, input.brokerQuiescence);
+    }
+    const workspaceBirth = input.workspaceBirth;
+    if (!workspaceBirth || input.unallocatedWorkspace) fail('born preparation retirement requires its original joined workspace birth');
+    const generation = readRequiredWorkspaceGeneration(driver, launch.preparation.generationId);
+    if (generation.phase !== 'materializing' && generation.phase !== 'preactivated_readonly')
+      fail('preparation retirement cannot substitute an activated or already retired generation');
+    diagnosticPoint = 'preparation_generation_identity';
+    const identity = decodeWorkspaceGenerationIdentity(await readCanonicalArtifact(artifacts, generation.generationRef));
+    diagnosticPoint = 'preparation_recovery_closure';
+    const cut = await readRecoveryClosure(driver, artifacts, run.id);
+    requireEqual(cut.run, run, 'preparation retirement selected Run');
+    diagnosticPoint = 'preparation_controller_birth';
+    const birth = launch.preparation.controller
+      ? controllerBirth(await readCanonicalArtifact(artifacts, launch.preparation.controller.birthIdentityRef)) : undefined;
+    const readResources = () => {
+      assertActiveStateOwner(driver, owner);
+      assertInstalledBrokerQuiescence(input.brokerQuiescence, driver, owner, run.id);
+      const workspace = readRunWorkspaceBirthRetirement(owner.filesystem, workspaceBirth);
+      if (workspace.generationId !== generation.generationId || workspace.runId !== run.id ||
+          workspace.sourceCheckpointId !== launch.preparation.sourceCheckpointId ||
+          workspace.creationNonceDigest !== launch.preparation.generationCreationNonceDigest ||
+          workspace.directoryIdentity.deviceId !== (identity.locator.kind === 'linux_directory' ? identity.locator.deviceId : undefined) ||
+          workspace.directoryIdentity.fileId !== (identity.locator.kind === 'linux_directory' ? identity.locator.directoryFileId : undefined))
+        fail('preparation retirement substitutes its exact original joined directory birth');
+      let controller: ReturnType<typeof readNativeControllerPreparationRetirement> | undefined;
+      if (birth) {
+        if (!input.controllerRetirement) fail('preparation retirement has no original controller join');
+        controller = readNativeControllerPreparationRetirement(input.controllerRetirement);
+        if (controller.controllerBirthDigest !== birth.birthDigest || controller.pid !== birth.identity.pid ||
+            controller.processStartToken !== birth.identity.processStartToken)
+          fail('preparation retirement substitutes its original native controller lifetime');
+      } else if (input.controllerRetirement) fail('preparation retirement controller has no registered actual birth');
+      let reservation: HeldWorkerReservation['identity'] | undefined;
+      if (launch.preparation.reservation) {
+        if (!input.reservation || !controller) fail('preparation retirement has no original reservation/controller closure');
+        reservation = readWorkerReservationRetirement(owner.filesystem, input.reservation, launch.launchId, launch.spawnNonceDigest);
+        requireEqual(reservation, launch.preparation.reservation, 'preparation retirement exact reservation birth');
+      } else if (input.reservation) fail('preparation retirement reservation has no registered actual birth');
+      return { workspace, controller, reservation };
+    };
+    diagnosticPoint = 'preparation_resource_assertion';
+    readResources();
+    diagnosticPoint = 'preparation_quarantine_move';
+    const move = owner.filesystem.quarantineGeneration(identity, generation.rowVersion);
+    diagnosticPoint = 'preparation_resource_refresh';
+    const resources = readResources(), observedAt = sampleCanonicalNow();
+    for (const timestamp of [resources.workspace.observedAt, ...(resources.controller ? [resources.controller.observedAt] : [])]) {
+      if (timestamp > observedAt || parseCanonicalTime(observedAt) - parseCanonicalTime(timestamp) > 5000)
+        fail('preparation retirement native joins are not fresh');
+    }
+    diagnosticPoint = 'preparation_evidence_publication';
+    const inspector = supervisorInspectorIdentity(assertActiveStateOwner(driver, owner));
+    const inspectorArtifact = await artifacts.publishCanonical(inspector, inspector.format);
+    const evidence: BornPreparationRetirement = { schemaVersion: 1, format: 'cliq-worker-preparation-retirement-evidence-v1', kind: 'born',
+      launch, sourceGeneration: generation, workspaceRetirementObservedAt: resources.workspace.observedAt,
+      ...(resources.controller ? { controllerRetirement: resources.controller } : {}),
+      ...(resources.reservation ? { reservationRetirement: resources.reservation } : {}), quarantineMove: move,
+      inspectorIdentityRef: inspectorArtifact.ref, inspectorIdentityDigest: inspector.identityDigest, observedAt, evidenceDigest: '' };
+    const closedEvidence = { ...evidence, evidenceDigest: digestOmitting(evidence, 'evidenceDigest') };
+    const proof = await artifacts.publishCanonical(closedEvidence, evidence.format);
+    const quarantine: PreparationQuarantine = { schemaVersion: 1, format: 'cliq-workspace-generation-quarantine-evidence-v1',
+      runId: run.id, generationRef: generation.generationRef, generationIdentityDigest: generation.generationIdentityDigest,
+      sourceRowVersion: generation.rowVersion, observedState: { kind: 'unverified_preparation' },
+      inspectorIdentityRef: inspectorArtifact.ref, inspectorIdentityDigest: inspector.identityDigest, ...move,
+      observedAt, evidenceDigest: '', reason: 'preparation_retired', fromPhase: generation.phase, workerLaunchId: launch.launchId,
+      preparationRetirementEvidenceRef: proof.ref, preparationRetirementEvidenceDigest: closedEvidence.evidenceDigest };
+    quarantine.evidenceDigest = digestOmitting(quarantine, 'evidenceDigest');
+    const quarantineArtifact = await artifacts.publishCanonical(quarantine, quarantine.format);
+    const retirement: WorkspaceGenerationRetirementEvidenceV1 = { schemaVersion: 1, format: 'cliq-workspace-generation-retirement-evidence-v1',
+      runId: run.id, generationRef: generation.generationRef, generationIdentityDigest: generation.generationIdentityDigest,
+      inspectorIdentityRef: inspectorArtifact.ref, inspectorIdentityDigest: inspector.identityDigest, observedAt, evidenceDigest: '',
+      fromPhase: 'quarantined', quarantineEvidenceRef: quarantineArtifact.ref, quarantineEvidenceDigest: quarantine.evidenceDigest,
+      sourceQuarantinedRowVersion: generation.rowVersion + 1, activeRunPointerCount: 0, nonretiredWorkerLaunchCount: 0,
+      liveContainmentCount: 0, activeMountCount: 0, releasableBrokerClaimCount: 0 };
+    retirement.evidenceDigest = digestOmitting(retirement, 'evidenceDigest');
+    const retirementArtifact = await artifacts.publishCanonical(retirement, retirement.format);
+    let result: RetiredWorkerPreparation | undefined;
+    diagnosticPoint = 'preparation_transaction';
+    driver.transaction(connection => {
+      requireEqual(preparing(connection, owner, launch.launchId), launch, 'preparation retirement original lifecycle');
+      requireEqual(bindableRun(connection, launch), run, 'preparation retirement current Run');
+      requireEqual(readRequiredWorkspaceGeneration(connection, generation.generationId), generation, 'preparation retirement original generation');
+      const fresh = readResources(), now = sampleCanonicalNow();
+      const moved = owner.filesystem.quarantineGeneration(identity, generation.rowVersion);
+      requireEqual(moved, move, 'preparation retirement exact native quarantine');
+      if (advanceTimeFence(connection, owner.ownerEpoch, now) !== 'healthy') return;
+      if (now < observedAt || parseCanonicalTime(now) - parseCanonicalTime(observedAt) > 5000 ||
+          fresh.workspace.observedAt > now || fresh.controller && fresh.controller.observedAt > now)
+        fail('preparation retirement lost its fresh native commit cut');
+      const otherLaunches = readWorkerLaunchesForRun(connection, run.id, true).filter(value => value.launchId !== launch.launchId);
+      if (otherLaunches.length || connection.prepare('SELECT 1 FROM runs WHERE active_worker_launch_id = ? LIMIT 1').get(launch.launchId))
+        fail('preparation retirement still has another original active launch pointer');
+      for (const artifact of [inspectorArtifact, proof, quarantineArtifact, retirementArtifact]) insertArtifactMetadata(connection, artifact, now);
+      result = { ...launch, phase: 'retired', retirementKind: 'preparation', retiredAt: now, retirementEvidenceRef: proof.ref };
+      updateWorkerLaunch(connection, launch, result);
+      const { snapshotEvidenceRef: _snapshot, snapshotEvidenceDigest: _snapshotDigest, ...base } = generation;
+      const quarantined: Extract<WorkspaceGenerationStateV1, { phase: 'quarantined' }> = {
+        ...base, rowVersion: generation.rowVersion + 1, updatedAt: now, phase: 'quarantined',
+        quarantineEvidenceRef: quarantineArtifact.ref, quarantineEvidenceDigest: quarantine.evidenceDigest,
+        observedState: quarantine.observedState };
+      updateWorkspaceGeneration(connection, generation, quarantined);
+      const retired: RetiredGeneration = { ...base, phase: 'retired', rowVersion: generation.rowVersion + 2, updatedAt: now,
+        retirementEvidenceRef: retirementArtifact.ref, retirementEvidenceDigest: retirement.evidenceDigest };
+      updateWorkspaceGeneration(connection, quarantined, retired);
+    });
+    if (!result) fail('preparation retirement canonical time fence refused publication');
+    return immutableSnapshot(result);
+  } catch (error) {
+    try { console.error(JSON.stringify({ debugTag: '[DEBUG-shutdown-retirement]', diagnosticOnly: true,
+      scope: 'installed-shutdown-retirement', stage: 'preparation', reason: diagnosticPoint })); }
+    catch { /* A fixed diagnostic never changes the original refusal. */ }
+    throw error;
   }
-  const workspaceBirth = input.workspaceBirth;
-  if (!workspaceBirth || input.unallocatedWorkspace) fail('born preparation retirement requires its original joined workspace birth');
-  const generation = readRequiredWorkspaceGeneration(driver, launch.preparation.generationId);
-  if (generation.phase !== 'materializing' && generation.phase !== 'preactivated_readonly')
-    fail('preparation retirement cannot substitute an activated or already retired generation');
-  const identity = decodeWorkspaceGenerationIdentity(await readCanonicalArtifact(artifacts, generation.generationRef));
-  const cut = await readRecoveryClosure(driver, artifacts, run.id);
-  requireEqual(cut.run, run, 'preparation retirement selected Run');
-  const birth = launch.preparation.controller
-    ? controllerBirth(await readCanonicalArtifact(artifacts, launch.preparation.controller.birthIdentityRef)) : undefined;
-  const readResources = () => {
-    assertActiveStateOwner(driver, owner);
-    assertInstalledBrokerQuiescence(input.brokerQuiescence, driver, owner, run.id);
-    const workspace = readRunWorkspaceBirthRetirement(owner.filesystem, workspaceBirth);
-    if (workspace.generationId !== generation.generationId || workspace.runId !== run.id ||
-        workspace.sourceCheckpointId !== launch.preparation.sourceCheckpointId ||
-        workspace.creationNonceDigest !== launch.preparation.generationCreationNonceDigest ||
-        workspace.directoryIdentity.deviceId !== (identity.locator.kind === 'linux_directory' ? identity.locator.deviceId : undefined) ||
-        workspace.directoryIdentity.fileId !== (identity.locator.kind === 'linux_directory' ? identity.locator.directoryFileId : undefined))
-      fail('preparation retirement substitutes its exact original joined directory birth');
-    let controller: ReturnType<typeof readNativeControllerPreparationRetirement> | undefined;
-    if (birth) {
-      if (!input.controllerRetirement) fail('preparation retirement has no original controller join');
-      controller = readNativeControllerPreparationRetirement(input.controllerRetirement);
-      if (controller.controllerBirthDigest !== birth.birthDigest || controller.pid !== birth.identity.pid ||
-          controller.processStartToken !== birth.identity.processStartToken)
-        fail('preparation retirement substitutes its original native controller lifetime');
-    } else if (input.controllerRetirement) fail('preparation retirement controller has no registered actual birth');
-    let reservation: HeldWorkerReservation['identity'] | undefined;
-    if (launch.preparation.reservation) {
-      if (!input.reservation || !controller) fail('preparation retirement has no original reservation/controller closure');
-      reservation = readWorkerReservationRetirement(owner.filesystem, input.reservation, launch.launchId, launch.spawnNonceDigest);
-      requireEqual(reservation, launch.preparation.reservation, 'preparation retirement exact reservation birth');
-    } else if (input.reservation) fail('preparation retirement reservation has no registered actual birth');
-    return { workspace, controller, reservation };
-  };
-  readResources();
-  const move = owner.filesystem.quarantineGeneration(identity, generation.rowVersion);
-  const resources = readResources(), observedAt = sampleCanonicalNow();
-  for (const timestamp of [resources.workspace.observedAt, ...(resources.controller ? [resources.controller.observedAt] : [])]) {
-    if (timestamp > observedAt || parseCanonicalTime(observedAt) - parseCanonicalTime(timestamp) > 5000)
-      fail('preparation retirement native joins are not fresh');
-  }
-  const inspector = supervisorInspectorIdentity(assertActiveStateOwner(driver, owner));
-  const inspectorArtifact = await artifacts.publishCanonical(inspector, inspector.format);
-  const evidence: BornPreparationRetirement = { schemaVersion: 1, format: 'cliq-worker-preparation-retirement-evidence-v1', kind: 'born',
-    launch, sourceGeneration: generation, workspaceRetirementObservedAt: resources.workspace.observedAt,
-    ...(resources.controller ? { controllerRetirement: resources.controller } : {}),
-    ...(resources.reservation ? { reservationRetirement: resources.reservation } : {}), quarantineMove: move,
-    inspectorIdentityRef: inspectorArtifact.ref, inspectorIdentityDigest: inspector.identityDigest, observedAt, evidenceDigest: '' };
-  const closedEvidence = { ...evidence, evidenceDigest: digestOmitting(evidence, 'evidenceDigest') };
-  const proof = await artifacts.publishCanonical(closedEvidence, evidence.format);
-  const quarantine: PreparationQuarantine = { schemaVersion: 1, format: 'cliq-workspace-generation-quarantine-evidence-v1',
-    runId: run.id, generationRef: generation.generationRef, generationIdentityDigest: generation.generationIdentityDigest,
-    sourceRowVersion: generation.rowVersion, observedState: { kind: 'unverified_preparation' },
-    inspectorIdentityRef: inspectorArtifact.ref, inspectorIdentityDigest: inspector.identityDigest, ...move,
-    observedAt, evidenceDigest: '', reason: 'preparation_retired', fromPhase: generation.phase, workerLaunchId: launch.launchId,
-    preparationRetirementEvidenceRef: proof.ref, preparationRetirementEvidenceDigest: closedEvidence.evidenceDigest };
-  quarantine.evidenceDigest = digestOmitting(quarantine, 'evidenceDigest');
-  const quarantineArtifact = await artifacts.publishCanonical(quarantine, quarantine.format);
-  const retirement: WorkspaceGenerationRetirementEvidenceV1 = { schemaVersion: 1, format: 'cliq-workspace-generation-retirement-evidence-v1',
-    runId: run.id, generationRef: generation.generationRef, generationIdentityDigest: generation.generationIdentityDigest,
-    inspectorIdentityRef: inspectorArtifact.ref, inspectorIdentityDigest: inspector.identityDigest, observedAt, evidenceDigest: '',
-    fromPhase: 'quarantined', quarantineEvidenceRef: quarantineArtifact.ref, quarantineEvidenceDigest: quarantine.evidenceDigest,
-    sourceQuarantinedRowVersion: generation.rowVersion + 1, activeRunPointerCount: 0, nonretiredWorkerLaunchCount: 0,
-    liveContainmentCount: 0, activeMountCount: 0, releasableBrokerClaimCount: 0 };
-  retirement.evidenceDigest = digestOmitting(retirement, 'evidenceDigest');
-  const retirementArtifact = await artifacts.publishCanonical(retirement, retirement.format);
-  let result: RetiredWorkerPreparation | undefined;
-  driver.transaction(connection => {
-    requireEqual(preparing(connection, owner, launch.launchId), launch, 'preparation retirement original lifecycle');
-    requireEqual(bindableRun(connection, launch), run, 'preparation retirement current Run');
-    requireEqual(readRequiredWorkspaceGeneration(connection, generation.generationId), generation, 'preparation retirement original generation');
-    const fresh = readResources(), now = sampleCanonicalNow();
-    const moved = owner.filesystem.quarantineGeneration(identity, generation.rowVersion);
-    requireEqual(moved, move, 'preparation retirement exact native quarantine');
-    if (advanceTimeFence(connection, owner.ownerEpoch, now) !== 'healthy') return;
-    if (now < observedAt || parseCanonicalTime(now) - parseCanonicalTime(observedAt) > 5000 ||
-        fresh.workspace.observedAt > now || fresh.controller && fresh.controller.observedAt > now)
-      fail('preparation retirement lost its fresh native commit cut');
-    const otherLaunches = readWorkerLaunchesForRun(connection, run.id, true).filter(value => value.launchId !== launch.launchId);
-    if (otherLaunches.length || connection.prepare('SELECT 1 FROM runs WHERE active_worker_launch_id = ? LIMIT 1').get(launch.launchId))
-      fail('preparation retirement still has another original active launch pointer');
-    for (const artifact of [inspectorArtifact, proof, quarantineArtifact, retirementArtifact]) insertArtifactMetadata(connection, artifact, now);
-    result = { ...launch, phase: 'retired', retirementKind: 'preparation', retiredAt: now, retirementEvidenceRef: proof.ref };
-    updateWorkerLaunch(connection, launch, result);
-    const { snapshotEvidenceRef: _snapshot, snapshotEvidenceDigest: _snapshotDigest, ...base } = generation;
-    const quarantined: Extract<WorkspaceGenerationStateV1, { phase: 'quarantined' }> = {
-      ...base, rowVersion: generation.rowVersion + 1, updatedAt: now, phase: 'quarantined',
-      quarantineEvidenceRef: quarantineArtifact.ref, quarantineEvidenceDigest: quarantine.evidenceDigest,
-      observedState: quarantine.observedState };
-    updateWorkspaceGeneration(connection, generation, quarantined);
-    const retired: RetiredGeneration = { ...base, phase: 'retired', rowVersion: generation.rowVersion + 2, updatedAt: now,
-      retirementEvidenceRef: retirementArtifact.ref, retirementEvidenceDigest: retirement.evidenceDigest };
-    updateWorkspaceGeneration(connection, quarantined, retired);
-  });
-  if (!result) fail('preparation retirement canonical time fence refused publication');
-  return immutableSnapshot(result);
 }
 
 async function retireUnallocatedPreparation(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,

@@ -361,7 +361,10 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
                 'joined_generation_birth_mismatch', 'native_generation_retirement', 'quarantine_identity',
                 'worker_stop_channel_fenced', 'preparation_materialization_join', 'preparation_controller_join',
                 'preparation_reservation_join', 'preparation_commit', 'preparation_logical_identity',
-                'preparation_run_changed', 'preparation_broker_owner', 'preparation_history', 'unclassified'].includes(value.reason as string)) {
+                'preparation_run_changed', 'preparation_broker_owner', 'preparation_history', 'preparation_logical_cut',
+                'preparation_generation_identity', 'preparation_recovery_closure', 'preparation_controller_birth',
+                'preparation_resource_assertion', 'preparation_quarantine_move', 'preparation_resource_refresh',
+                'preparation_evidence_publication', 'preparation_transaction', 'unclassified'].includes(value.reason as string)) {
             refusals.push({ code: 'diagnostic_only', origin: `${value.stage}.${value.reason}` }); continue;
           }
           if (value.scope !== 'installed-read-startup') continue;

@@ -92,9 +92,9 @@ async function campaign(filename: string): Promise<void> {
     try { child = spawn('/usr/sbin/runuser', [...prefix, executable, ...args],
       { cwd: ledger.home, env: environment, detached: true, stdio: ['pipe', 'pipe', 'pipe'] }); }
     catch (error) { for (const held of outputScans) held.close(); throw error; }
-    const stdout: Buffer[] = [], stderr: Buffer[] = []; let total = 0, failure: unknown, done = false;
+    const stdout: Buffer[] = [], stderr: Buffer[] = []; let total = 0, failure: unknown, done = false, joinedAt: number | undefined;
     const joined = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolve => child.once('close', (code, signal) => {
-      done = true; resolve({ code, signal });
+      done = true; joinedAt = performance.now(); resolve({ code, signal });
     }));
     const closed = Promise.all([child.stdin!, child.stdout!, child.stderr!].map(stream => new Promise<void>(resolve => stream.once('close', resolve))));
     child.on('error', () => { failure = new Error('owned finalizer command did not spawn'); }); child.stdin!.on('error', () => {});
@@ -116,21 +116,31 @@ async function campaign(filename: string): Promise<void> {
     const check = () => { if (failure) throw failure; };
     const text = () => { check(); return Buffer.concat(stdout).toString('utf8'); };
     let waitFailure: 'deadline_reached' | 'service_exited' | undefined;
-    const waitEvent = async (event: string) => {
-      const deadline = Date.now() + 10000;
+    const waitEvent = async (event: string, entryDeadline?: number) => {
+      // Genuine signed bootstrap/profile validation belongs to the existing
+      // whole-entry budget. Only the observed CreateItem setup milestone may
+      // use its remainder; the inspection observation window stays ten seconds.
+      assert(event !== 'helper-create-started' || entryDeadline !== undefined);
+      const deadline = event === 'helper-create-started' ? entryDeadline!
+        : Math.min(performance.now() + 10000, entryDeadline ?? Infinity);
       const frames = role === 'unit-history' ? ['systemd_units_retained', 'systemd_units_released']
-        : ['ready', 'armed', 'inspection-started', 'inspection-retired', 'closed'];
+        : ['ready', 'armed', 'producer-armed', 'helper-create-started', 'inspection-started', 'inspection-held', 'inspection-retired', 'closed'];
       assert(frames.includes(event));
       const complete = `${frames.join('\n')}\n`;
       for (;;) {
         check(); const output = text(); assert(complete.startsWith(output), 'owned fixture emitted an invalid fixed frame');
         if (output.split('\n').slice(0, -1).includes(event)) return;
         if (done) { waitFailure = 'service_exited'; throw new Error('actual external service exited before its event'); }
-        if (Date.now() >= deadline) { waitFailure = 'deadline_reached'; throw new Error('actual external service event deadline was reached'); }
+        if (performance.now() >= deadline) { waitFailure = 'deadline_reached'; throw new Error('actual external service event deadline was reached'); }
         await delay(10);
       }
     };
-    const join = async () => { const exit = await bounded(joined, 10000); await bounded(closed, 5000); check(); return exit; };
+    const join = async (entryDeadline?: number) => {
+      if (!done) await bounded(joined, Math.max(0, Math.min(10000, (entryDeadline ?? Infinity) - performance.now())));
+      const exit = await joined;
+      if (entryDeadline !== undefined) assert(joinedAt !== undefined && joinedAt <= entryDeadline, 'actual enrollment exceeded its existing whole-entry budget');
+      await bounded(closed, 5000); check(); return exit;
+    };
     const diagnostic = () => {
       check();
       const output = Buffer.concat(stdout).toString('utf8'), errors = Buffer.concat(stderr).toString('utf8');
@@ -294,29 +304,66 @@ async function campaign(filename: string): Promise<void> {
     const metadata = { schemaVersion: 1, kind: 'enroll', requestId: '019a0012-0000-7000-8000-000000000082',
       credentialGrantId: 'credential-finalizer-grant', purpose: 'model_endpoint', endpointRegistrationId: registration.endpointRegistrationId,
       secretSubmissionId: 'credential-finalizer-submission', expiresAt: '2099-01-01T00:00:00.000Z' };
-    await retainUnitHistory();
     service.child.stdin!.write(`arm ${originalPid} ${identity.processStartToken.slice('linux-proc-start-ticks:'.length)}\n`);
     await service.waitEvent('armed');
+    const entryStarted = performance.now(), entryDeadline = entryStarted + 60000;
+    report.entryBudget = { milliseconds: 60000 };
     const enrollment = spawnOwned(path.join(recipe.stateRoot, 'runtime/bootstrap'), ['--bootstrap-credential', canonicalJsonBytes(metadata).toString('base64url')], secret);
     await enrollment.observe();
-    try { await service.waitEvent('inspection-started'); }
+    const launcher = await enrollment.observe();
+    let producer: NonNullable<Awaited<ReturnType<typeof processFact>>> | undefined;
+    try {
+      // Observe the real auth child after its signed selected-image exec.
+      // No PID, image, continuation or database phase is supplied to production.
+      for (;;) {
+        assert(performance.now() < entryDeadline, 'actual signed credential setup exceeded its existing whole-entry budget');
+        assert.equal(enrollment.child.exitCode, null, 'actual signed enrollment exited before its create milestone');
+        const children = await readFile(`/proc/${launcher.pid}/task/${launcher.pid}/children`, 'utf8');
+        const childPids = children.trim() ? children.trim().split(/\s+/u).map(Number) : [];
+        assert(childPids.length <= 1);
+        if (childPids.length) {
+          const observed = await processFact(childPids[0]!);
+          if (observed && observed.parent === launcher.pid && observed.uids.every(uid => uid === ledger.uid) &&
+              await readlink(`/proc/${observed.pid}/exe`).catch((error: NodeJS.ErrnoException) => {
+                if (error.code === 'ENOENT') return ''; throw error;
+              }) === selectedImage) {
+            const actual = await stat(`/proc/${observed.pid}/exe`, { bigint: true }), expected = await lstat(selectedImage, { bigint: true });
+            for (const key of imageFields) assert.equal(actual[key], expected[key]);
+            const confirmed = await processFact(observed.pid); assert(confirmed && confirmed.start === observed.start);
+            producer = observed; break;
+          }
+        }
+        await delay(10);
+      }
+      report.entryBudget.selectedImageObservedAfterMs = Math.floor(performance.now() - entryStarted);
+      service.child.stdin!.write(`producer ${producer.pid} ${producer.start}\n`);
+      await service.waitEvent('producer-armed', entryDeadline);
+      await service.waitEvent('helper-create-started', entryDeadline);
+      report.entryBudget.actualCreateObservedAfterMs = Math.floor(performance.now() - entryStarted);
+      await service.waitEvent('inspection-started', entryDeadline);
+      report.entryBudget.actualInspectionObservedAfterMs = Math.floor(performance.now() - entryStarted);
+    }
     catch (error) {
       // This is a refused/unreached cut, never a SIGTERM result. Preserve only
       // fixed stage classes and independently observed child exit facts.
       report.unreachedInspection = { enrollment: enrollment.diagnostic(), externalService: service.diagnostic() };
       throw error;
     }
-    const launcher = await enrollment.observe();
-    const children = await readFile(`/proc/${launcher.pid}/task/${launcher.pid}/children`, 'utf8');
-    const childPids = children.trim().split(/\s+/u).map(Number); assert.equal(childPids.length, 1);
-    const producer = await processFact(childPids[0]!); assert(producer && producer.parent === launcher.pid && producer.uids.every(uid => uid === ledger.uid));
+    assert(producer);
+    // Retain real inactive-unit history only after the actual finalizer cut,
+    // not during potentially lengthy signed bootstrap/profile validation.
+    await retainUnitHistory();
+    const currentProducer = await processFact(producer.pid);
+    assert(currentProducer && currentProducer.start === producer.start && currentProducer.parent === launcher.pid && currentProducer.uids.every(uid => uid === ledger.uid));
     assert.equal(await readlink(`/proc/${producer.pid}/exe`), selectedImage);
     const beforeStop = observe(); assert.equal(beforeStop.items.length, 1);
     for (const key of ['nameOwner', 'servicePid', 'serviceUid', 'collection']) assert.equal(beforeStop[key], initialStore[key]);
     assert.equal(show(services.supervisorUnit).InvocationID, original.InvocationID);
+    service.child.stdin!.write('confirm\n'); await service.waitEvent('inspection-held', entryDeadline);
     report.cut = { actualOriginalSupervisorInspectionEntered: true, originalProducerStillPresent: true, originalProducerPid: producer.pid,
       originalProducerStartTicks: producer.start, originalSupervisorPid: originalPid, originalSupervisorStartToken: identity.processStartToken,
-      actualPlatformItemCreated: true, noFixtureReplyOrServiceReplacement: true };
+      actualPlatformItemCreated: true, exactOriginalHelperCreateObserved: true,
+      originalInspectionStillUnansweredAfterUnitRetention: true, noFixtureReplyOrServiceReplacement: true };
     mark('ordinary_two_second_sigterm');
     const stop = command('/usr/bin/systemctl', ['--user', 'stop', services.supervisorUnit]);
     const exit = show(services.supervisorUnit); report.serviceExit = exit;
@@ -324,7 +371,7 @@ async function campaign(filename: string): Promise<void> {
     assert.equal(exit.Result, 'success'); assert.equal(exit.ExecMainCode, '1'); assert.equal(exit.ExecMainStatus, '0');
     await releaseUnitHistory(); report.targetUnitExitHistoryObserverJoined = true;
     await service.waitEvent('inspection-retired');
-    const enrollmentExit = await enrollment.join(); report.enrollmentExit = enrollmentExit;
+    const enrollmentExit = await enrollment.join(entryDeadline); report.enrollmentExit = enrollmentExit;
     assert.equal(enrollmentExit.signal, null); assert.equal(enrollmentExit.code, 1);
     const refusal = enrollment.result(); assert.equal(refusal.stdout, '');
     const diagnostic = parseJsonStrict(refusal.stderr.trim()) as Record<string, unknown>;

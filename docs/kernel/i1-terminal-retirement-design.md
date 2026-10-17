@@ -190,6 +190,36 @@ An opaque directory cookie is an enumeration observation, not a byte or entry
 count and not an exact private precommit cut. A legitimate raced commit must
 retain its original response; absence alone does not prove an exact abort cut.
 
+The unchanged Session path at `2072c4d` reached that real Trust-enumeration
+cut in both push `38997514864` and PR `38997520147`, then hit the ordinary
+two-second `timeout`, exit code 2/status 9. Run admission in the same jobs
+passed independently. The repair therefore reuses one complete Session/Run
+admission producer registry, propagates its original AbortSignal to the Trust
+walker, and checks cancellation before the first transaction time-fence/write.
+New replay aliases are writes too; already committed exact responses are not
+discarded by a post-commit abort check. A focused real-cursor test does not
+replace the installed Session RED-to-GREEN requirement.
+
+At `2072c4d`, both push effect controls and the PR pending-model control pass
+their actual strict stop, original graceful owner release and successor
+continuations. The PR received-tool control instead encountered the original
+attempt's tool UNKNOWN before its target snapshot; that negative cut remains
+unqualified. Preparation diagnostics now narrow failure to the retirement
+call expression after the resource joins, not yet a particular reducer check.
+Temporary inner fixed-point diagnostics must identify the failing boundary
+before any lifecycle or proof predicate is changed.
+
+The installed finalizer's setup is separate from its inspection cut. The normal
+signed enrollment at `e8500dd` took 26.308 seconds; the early fixture's ten-second
+wait from helper spawn expired with a live helper before any creation call.
+Keep the original sixty-second complete-entry budget, authenticate that same
+signed helper's actual CreateItem caller, and only then begin the unchanged
+ten-second inspection observation. Retain unit history after the original
+Supervisor inspection actually enters, recheck the same unanswered connection
+and original processes, then apply the unchanged two-second stop. Neither
+setup readiness nor these diagnostics substitute for the actual cancellation
+join, original owner release, orphan cleanup and successor replay evidence.
+
 ## Tool result and settlement rules
 
 | Actual cut | Required behavior |

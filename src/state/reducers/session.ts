@@ -71,6 +71,7 @@ type InstalledSessionRequest = {
   requestDigest: string;
   identity: AuthenticatedControlIdentity;
   controlledHome: string;
+  signal: AbortSignal;
 };
 
 function readSessionCreatePublicRequest(request: unknown,
@@ -219,7 +220,12 @@ async function replayCreateSession(
           canonicalSha256(currentOriginal) !== canonicalSha256(original)) {
         throw new KernelStorageError('RECOVERY_REQUIRED', 'session admission original response link changed');
       }
-      if (installed) assertCurrentControlFrame(owner, installed.identity);
+      if (installed) {
+        assertCurrentControlFrame(owner, installed.identity);
+        // Existing exact bindings above remain replayable; a new alias is
+        // still a write and cannot cross this handler's shutdown gate.
+        installed.signal.throwIfAborted();
+      }
       assertActiveStateOwner(connection, owner);
       const now = sampleCanonicalNow();
       fenceOutcome = advanceTimeFence(connection, owner.ownerEpoch, now);
@@ -256,13 +262,15 @@ export async function createInstalledSession(
   request: unknown,
   identity: AuthenticatedControlIdentity,
   selected: HeldInstalledRuntime,
-  controlledHome: string
+  controlledHome: string,
+  signal: AbortSignal
 ): Promise<CreateSessionResult> {
   assertCurrentControlFrame(owner, identity);
+  signal.throwIfAborted();
   const wire = readSessionCreatePublicRequest(request);
   const result = await createSessionWithin(driver, artifacts, owner, { ...identity, requestId: wire.core.requestId,
     admissionKey: wire.core.admissionKey, workspacePath: wire.core.workspacePath,
-    ...(wire.core.name === undefined ? {} : { name: wire.core.name }) }, selected, { ...wire, identity, controlledHome });
+    ...(wire.core.name === undefined ? {} : { name: wire.core.name }) }, selected, { ...wire, identity, controlledHome, signal });
   assertCurrentControlFrame(owner, identity);
   return result;
 }
@@ -295,8 +303,10 @@ async function createSessionWithin(
 
   const replayed = await replayCreateSession(driver, artifacts, owner, input, admissionIntentDigest, requestDigest, installed);
   if (replayed !== undefined) return replayed;
+  installed?.signal.throwIfAborted();
 
   const channelClosure = await validateControlChannelClosure(artifacts, owner, input);
+  installed?.signal.throwIfAborted();
   const channel = channelClosure.channel;
 
   const resources: Array<{ close(): void }> = [];
@@ -307,15 +317,19 @@ async function createSessionWithin(
       const native = await withHeldInstalledRuntime(selected, async runtime => {
         await runtime.revalidate(); const native = await runtime.loadStateOwner(); await runtime.revalidate(); return native;
       });
+      installed.signal.throwIfAborted();
       const platform = await loadInstalledCredentialPlatform(selected);
+      installed.signal.throwIfAborted();
       if (path.join(platform.currentUser().home, '.cliq') !== installed.controlledHome)
         throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed Session home is not the actual platform controlled home');
       const home = native.openWorkspaceRoot(installed.controlledHome); resources.push(home);
-      trust = await holdWorkspaceSourceTrust(home, workspacePath); resources.push(trust);
+      trust = await holdWorkspaceSourceTrust(home, workspacePath, installed.signal); resources.push(trust);
+      installed.signal.throwIfAborted();
       assertWorkspaceSourceTrust(trust, workspacePath);
     }
     const capture = { workspacePath, ownerPrincipalId: input.principalId };
     const captured = selected ? await captureInstalledWorkspaceIdentity(selected, capture) : await captureLiveWorkspaceIdentity(capture);
+    installed?.signal.throwIfAborted();
     if (trust) assertWorkspaceSourceTrust(trust, workspacePath);
     const published: PublishedArtifact[] = [...channelClosure.metadata];
     if (installed) published.push(await publishSessionCreatePublicCore(artifacts, installed));
@@ -402,7 +416,10 @@ async function createSessionWithin(
         return;
       }
 
-      if (installed) assertCurrentControlFrame(owner, installed.identity);
+      if (installed) {
+        assertCurrentControlFrame(owner, installed.identity);
+        installed.signal.throwIfAborted();
+      }
       if (trust) assertWorkspaceSourceTrust(trust, workspacePath);
       assertActiveStateOwner(connection, owner);
       fenceOutcome = advanceTimeFence(connection, owner.ownerEpoch);

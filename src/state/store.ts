@@ -1582,7 +1582,7 @@ export class StateStore {
   private readonly loadedExecutionScopes = new Map<string, Awaited<ReturnType<typeof loadRunExecution>>>();
   private readonly sourceInspectionTasks = new Set<SourceInspectionTask>();
   private readonly sourceInspections = new Map<string, { intent: string; task: SourceInspectionTask }>();
-  private readonly installedSubmissionTasks = new Set<{ abort: AbortController; promise: Promise<unknown> }>();
+  private readonly installedAdmissionTasks = new Set<{ abort: AbortController; promise: Promise<unknown> }>();
   private readonly modelTransports = new Map<string, NativeModelTransport>();
   private readonly modelOperations = new Map<string, Promise<unknown>>();
   // A positively received result keeps its original settlement owner through
@@ -1633,24 +1633,30 @@ export class StateStore {
   async createInstalledSession(request: unknown, identity: AuthenticatedControlIdentity) {
     if (!this.supportsInstalledRuns() || !this.installedRuntime || !this.runtimeAuthority?.sourceInspection)
       throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'installed Run composition is not ready');
-    return createInstalledSession(this.driver, this.artifacts, this.owner, request, identity, this.installedRuntime,
-      this.runtimeAuthority.sourceInspection.controlledHome);
+    request = immutableSnapshot(request);
+    const selected = this.installedRuntime, controlledHome = this.runtimeAuthority.sourceInspection.controlledHome;
+    return this.ownInstalledAdmission(signal => createInstalledSession(this.driver, this.artifacts, this.owner,
+      request, identity, selected, controlledHome, signal));
   }
 
   async submitInstalledRun(request: unknown, identity: AuthenticatedControlIdentity) {
     if (!this.supportsInstalledRuns() || !this.installedRuntime || !this.runtimeAuthority?.sourceInspection)
       throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'installed Run composition is not ready');
     request = immutableSnapshot(request);
-    // The native frame already freezes this identity and authenticates its
-    // exact object. Snapshot caller data, never clone that current authority.
+    return this.ownInstalledAdmission(signal => this.submitInstalledRunOwned(request, identity, signal));
+  }
+
+  private ownInstalledAdmission<T>(operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    // Each caller snapshots request data and retains the exact identity
+    // object already frozen and authenticated by the native current frame.
     const abort = new AbortController();
     // Own the complete handler before its first asynchronous action, not only
-    // its source leaf. Instruction assembly and final admission also use SQL
-    // and the held installation and must join before StateOwner is released.
-    const promise = Promise.resolve().then(() => this.submitInstalledRunOwned(request, identity, abort.signal));
-    const task = { abort, promise }; this.installedSubmissionTasks.add(task);
+    // its Trust/source leaf. Session capture, Run assembly, admission/replay
+    // and any accepted Run agent load must join before StateOwner is released.
+    const promise = Promise.resolve().then(() => operation(abort.signal));
+    const task = { abort, promise }; this.installedAdmissionTasks.add(task);
     const release = (error?: unknown) => {
-      if (!(error instanceof ResourceRetirementError)) this.installedSubmissionTasks.delete(task);
+      if (!(error instanceof ResourceRetirementError)) this.installedAdmissionTasks.delete(task);
     };
     void promise.then(() => release(), release);
     return promise;
@@ -2903,7 +2909,7 @@ export class StateStore {
     // while listeners/opening resources are being joined.
     this.closeRequested = true;
     clearTimeout(this.installedMaintenanceTimer); this.installedMaintenanceTimer = undefined;
-    for (const task of this.installedSubmissionTasks) task.abort.abort();
+    for (const task of this.installedAdmissionTasks) task.abort.abort();
     for (const task of this.sourceInspectionTasks) task.abort.abort();
     const credential = installedCredentialFinalizers.get(this);
     if (credential?.inspection && !credential.inspectionJoin) {
@@ -2947,7 +2953,7 @@ export class StateStore {
     if (this.closing !== undefined) return this.closing;
     this.beginClose();
     const attempt = (async () => {
-      const submissionJoins = await Promise.allSettled([...this.installedSubmissionTasks].map(task => task.promise));
+      const admissionJoins = await Promise.allSettled([...this.installedAdmissionTasks].map(task => task.promise));
       // Retire transports and join driver tasks before fencing workers or
       // closing their sole SQL owner; no key/request owner outlives StateOwner.
       const brokerJoins = await Promise.allSettled([...this.modelTransports.values()].map(transport => transport.close()));
@@ -2991,7 +2997,7 @@ export class StateStore {
       // revocation. Every owner is joined, but StateOwner stays held on any
       // retirement uncertainty; neither failure becomes a positive receipt.
       const failure = [...brokerJoins, ...closureJoins, ...completionJoins,
-        ...submissionJoins.filter(result => result.status === 'rejected' && result.reason instanceof ResourceRetirementError),
+        ...admissionJoins.filter(result => result.status === 'rejected' && result.reason instanceof ResourceRetirementError),
         ...producerJoins.filter(result => result.status === 'rejected' && result.reason instanceof ResourceRetirementError),
         ...driverJoins.filter(result => result.status === 'rejected' && result.reason instanceof ResourceRetirementError),
         ...maintenanceJoins.filter(result => result.status === 'rejected' && result.reason instanceof ResourceRetirementError), ...results]

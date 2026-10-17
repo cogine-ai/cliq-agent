@@ -23,11 +23,11 @@ struct installed_fixture {
   GDBusMethodInvocation *unanswered;
   struct fixture_secret_data secret;
   guint registrations[3], subscription;
-  pid_t supervisor;
-  unsigned long long start;
+  pid_t supervisor, producer;
+  unsigned long long start, producer_start;
   struct stat image;
   const char *image_path;
-  bool armed, inspected, retired, finished, failed;
+  bool armed, producer_armed, create_observed, inspected, inspection_held, retired, finished, failed;
   char sender[256], command[128];
   size_t used;
   guint input, interrupted, deadline;
@@ -56,15 +56,16 @@ static bool announce(const char *event) {
 static void installed_fail(struct installed_fixture *fixture) {
   diagnose(fixture, FIXTURE_REFUSED); fixture->failed = true; if (fixture->loop) g_main_loop_quit(fixture->loop);
 }
-static bool original_supervisor(struct installed_fixture *fixture, const char *sender) {
+static bool original_process(struct installed_fixture *fixture, const char *sender, pid_t expected_pid,
+  unsigned long long expected_start) {
   GError *error = NULL;
   GVariant *pid = g_dbus_connection_call_sync(fixture->bus, "org.freedesktop.DBus", "/org/freedesktop/DBus",
     "org.freedesktop.DBus", "GetConnectionUnixProcessID", g_variant_new("(s)", sender), G_VARIANT_TYPE("(u)"),
     G_DBUS_CALL_FLAGS_NO_AUTO_START, 1000, NULL, &error);
   if (!pid) { g_clear_error(&error); return false; }
   guint32 actual_pid; g_variant_get(pid, "(u)", &actual_pid); g_variant_unref(pid);
-  if (actual_pid != (guint32)fixture->supervisor) { diagnose(fixture, CALLER_OTHER); return false; }
-  diagnose(fixture, CALLER_ORIGINAL);
+  if (actual_pid != (guint32)expected_pid) { diagnose(fixture, CALLER_OTHER); return false; }
+  if (expected_pid == fixture->supervisor) diagnose(fixture, CALLER_ORIGINAL);
   GVariant *uid = g_dbus_connection_call_sync(fixture->bus, "org.freedesktop.DBus", "/org/freedesktop/DBus",
     "org.freedesktop.DBus", "GetConnectionUnixUser", g_variant_new("(s)", sender), G_VARIANT_TYPE("(u)"),
     G_DBUS_CALL_FLAGS_NO_AUTO_START, 1000, NULL, &error);
@@ -72,7 +73,7 @@ static bool original_supervisor(struct installed_fixture *fixture, const char *s
   guint32 actual_uid; g_variant_get(uid, "(u)", &actual_uid); g_variant_unref(uid);
   if (actual_uid != getuid()) { installed_fail(fixture); return false; }
   char proc[80], bytes[8192]; struct stat current, selected;
-  int count = snprintf(proc, sizeof(proc), "/proc/%ld/stat", (long)fixture->supervisor);
+  int count = snprintf(proc, sizeof(proc), "/proc/%ld/stat", (long)expected_pid);
   if (count <= 0 || (size_t)count >= sizeof(proc)) goto failed;
   int fd = open(proc, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
   if (fd < 0) goto failed;
@@ -87,8 +88,8 @@ static bool original_supervisor(struct installed_fixture *fixture, const char *s
     if (index == 19) { char *end; errno = 0; start = strtoull(field, &end, 10); if (errno || *end) goto failed; break; }
     index++; field = strtok_r(NULL, " \n", &save);
   }
-  if (!start || start != fixture->start) goto failed;
-  count = snprintf(proc, sizeof(proc), "/proc/%ld/exe", (long)fixture->supervisor);
+  if (!start || start != expected_start) goto failed;
+  count = snprintf(proc, sizeof(proc), "/proc/%ld/exe", (long)expected_pid);
   if (count <= 0 || (size_t)count >= sizeof(proc) || stat(proc, &current) || lstat(fixture->image_path, &selected) ||
       !S_ISREG(selected.st_mode) || selected.st_uid != getuid() || current.st_dev != fixture->image.st_dev ||
       current.st_ino != fixture->image.st_ino || current.st_size != fixture->image.st_size ||
@@ -106,7 +107,8 @@ static void installed_method(GDBusConnection *bus, const gchar *sender, const gc
     const char *alias; g_variant_get(parameters, "(&s)", &alias);
     if (strcmp(alias, "default") && strcmp(alias, "session")) goto failed;
     diagnose(fixture, !strcmp(alias, "default") ? ALIAS_DEFAULT : ALIAS_SESSION);
-    if (!strcmp(alias, "default") && fixture->armed && !fixture->inspected && original_supervisor(fixture, sender)) {
+    if (!strcmp(alias, "default") && fixture->armed && !fixture->inspected &&
+        original_process(fixture, sender, fixture->supervisor, fixture->start)) {
       if (!fixture->secret.created || fixture->unanswered) goto failed;
       fixture->inspected = true; strcpy(fixture->sender, sender);
       fixture->unanswered = invocation; /* Actual remote request remains unanswered until its connection retires. */
@@ -122,6 +124,12 @@ static void installed_method(GDBusConnection *bus, const gchar *sender, const gc
   else if (!strcmp(interface, "org.freedesktop.Secret.Service") && !strcmp(method, "OpenSession")) diagnose(fixture, OPEN_SESSION);
   else if (!strcmp(interface, "org.freedesktop.Secret.Collection") && !strcmp(method, "CreateItem")) diagnose(fixture, CREATE_ITEM);
   else if (!strcmp(interface, "org.freedesktop.Secret.Item") && !strcmp(method, "GetSecret")) diagnose(fixture, GET_SECRET);
+  if (!strcmp(interface, "org.freedesktop.Secret.Collection") && !strcmp(method, "CreateItem") && !fixture->create_observed) {
+    if (!fixture->producer_armed || fixture->producer == fixture->supervisor ||
+        !original_process(fixture, sender, fixture->producer, fixture->producer_start)) goto failed;
+    fixture->create_observed = true;
+    if (!announce("helper-create-started\n")) { installed_fail(fixture); return; }
+  }
   if (!strcmp(interface, "org.freedesktop.Secret.Item") && !strcmp(method, "Delete") && fixture->secret.created) {
     fixture_secret_clear(&fixture->secret);
     g_dbus_method_invocation_return_value(invocation, g_variant_new("(o)", "/")); return;
@@ -172,15 +180,27 @@ static gboolean installed_control(gint descriptor, GIOCondition condition, gpoin
   if (count <= 0) { installed_fail(fixture); return G_SOURCE_CONTINUE; }
   fixture->used += (size_t)count; fixture->command[fixture->used] = '\0';
   if (!strchr(fixture->command, '\n')) return G_SOURCE_CONTINUE;
-  if (!strcmp(fixture->command, "finish\n") && fixture->inspected && fixture->retired && !fixture->secret.created) {
+  if (!strcmp(fixture->command, "confirm\n") && fixture->inspected && !fixture->inspection_held && !fixture->retired && fixture->unanswered) {
+    if (!original_process(fixture, fixture->sender, fixture->supervisor, fixture->start)) {
+      installed_fail(fixture); return G_SOURCE_CONTINUE;
+    }
+    fixture->inspection_held = true; fixture->used = 0;
+    if (!announce("inspection-held\n")) installed_fail(fixture);
+    return G_SOURCE_CONTINUE;
+  }
+  if (!strcmp(fixture->command, "finish\n") && fixture->inspection_held && fixture->retired && !fixture->secret.created) {
     fixture->finished = true; g_main_loop_quit(fixture->loop); fixture->input = 0; return G_SOURCE_REMOVE;
   }
   long pid; unsigned long long start; char extra; int parsed = 0;
-  if (fixture->armed || sscanf(fixture->command, "arm %ld %llu%c%n", &pid, &start, &extra, &parsed) != 3 || extra != '\n' ||
+  bool producer = !strncmp(fixture->command, "producer ", 9);
+  if ((producer ? (!fixture->armed || fixture->producer_armed || fixture->inspected) : fixture->armed) ||
+      sscanf(fixture->command, producer ? "producer %ld %llu%c%n" : "arm %ld %llu%c%n", &pid, &start, &extra, &parsed) != 3 || extra != '\n' ||
       parsed < 0 || (size_t)parsed != fixture->used ||
       pid <= 0 || pid > INT_MAX || !start) { installed_fail(fixture); return G_SOURCE_CONTINUE; }
-  fixture->supervisor = (pid_t)pid; fixture->start = start; fixture->armed = true; fixture->used = 0;
-  if (!announce("armed\n")) installed_fail(fixture);
+  if (producer) { fixture->producer = (pid_t)pid; fixture->producer_start = start; fixture->producer_armed = true; }
+  else { fixture->supervisor = (pid_t)pid; fixture->start = start; fixture->armed = true; }
+  fixture->used = 0;
+  if (!announce(producer ? "producer-armed\n" : "armed\n")) installed_fail(fixture);
   return G_SOURCE_CONTINUE;
 }
 static gboolean installed_interrupted(gpointer data) { installed_fail(data); return G_SOURCE_CONTINUE; }
