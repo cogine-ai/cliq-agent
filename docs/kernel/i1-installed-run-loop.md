@@ -453,8 +453,17 @@ byte-only exhaustion below the token threshold, queued successor dispatch,
 terminal history, reconnect and Supervisor restart without redispatch. It uses
 its own disposable UID so the original full campaign and its 4096-stream/512 MiB
 scan limits remain unchanged. It is not qualified before its complete matching
-Linux report passes. Independent observation of the original retired worker is
-explicitly unqualified; clearing the public worker pointer is not that evidence.
+Linux report passes. Clearing the public worker pointer is not independent
+retirement evidence. The approved read-only diagnostic additionally fixes the
+actual original WorkerLaunch, generation and CAS worker identity before sending
+the fifth genuine owned HTTPS response, then observes that same worker's
+retirement and PID/start lifetime after terminalization, reconnect and restart.
+It reads closed, bounded SQLite/CAS data without creating StateOwner or native
+authority, and preserves the original active-lease reader's stricter contract.
+The normal stop branch retains a sealed generation; this is not a claim that
+the generation directory was deleted. Independent qualification is limited to
+the original worker process lifetime, not every descendant, cgroup or mount,
+and remains unqualified until its complete matching Linux report passes.
 Its restart observation retains both original unit histories, while stopping
 only Supervisor. The original two-unit runtime assertion remains in force.
 The read-only property query explicitly includes `TimeoutStopUSec`; an omitted

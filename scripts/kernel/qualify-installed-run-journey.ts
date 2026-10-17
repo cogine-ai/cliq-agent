@@ -23,7 +23,8 @@ import { MODEL_BROKER_ENTRY_ID, MODEL_BROKER_RELATIVE_PATH } from '../../src/sta
 import { buildInstalledSupervisorPackage } from './testing/installed-supervisor-package.js';
 import { createCredentialSecretScanner } from './testing/credential-secret-scan.js';
 import { scanCredentialSecretCorpus } from './testing/credential-secret-corpus.js';
-import { assertInstalledWorkerLeaseRenewed, inspectInstalledWorkerLease } from './testing/installed-worker-lease.js';
+import { assertInstalledWorkerLeaseRenewed, inspectInstalledWorkerIdentity, inspectInstalledWorkerLease,
+  inspectInstalledWorkerRetirement, type InstalledWorkerIdentityInspection } from './testing/installed-worker-lease.js';
 import { inspectInstalledOwnerHistory } from './testing/installed-read-control.js';
 import { qualifyInstalledOwnerLinks } from './testing/installed-owner-history.js';
 import { projectInstalledRunProgress, projectInstalledServiceExit, projectInstalledSupervisorStatus } from '../../src/sandbox/testing/installed-run-progress.js';
@@ -206,6 +207,7 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
   })() : undefined;
   const resourceRequests: Array<{ ordinal: number; kind: 'normal' | 'context_compaction'; bodyBytes: number; bodyDigest: string;
     predictedNext?: { requestBodyBytes: number; nextPromptTokens: number; modelVisiblePromptDigest: string } }> = [];
+  let observeResourceWorkerBeforeReply: (() => Promise<void>) | undefined;
   const predictNextResourceRequest = (body: Record<string, any>, response: Record<string, any>) => {
     const next: Record<string, any> = { ...body, messages: [...body.messages, response.choices[0].message,
       { role: 'tool', tool_call_id: response.choices[0].message.tool_calls[0].id, content: '{"code":"TOOL_NOT_FOUND"}' }] };
@@ -791,6 +793,12 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
           }
           report.requestResourceResponderStage = 'response_shape';
           const bytes = requestResource.bytes[ordinal - 1]!; assert(bytes.length < 1048576); scanBytes(bytes);
+          if (ordinal === 5) {
+            // Observe the actual original worker before its genuine response
+            // can cause byte exhaustion. No pause, fabricated row or authority.
+            report.requestResourceResponderStage = 'original_worker_observation';
+            assert(observeResourceWorkerBeforeReply); await observeResourceWorkerBeforeReply();
+          }
           outgoing.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': String(bytes.length), Connection: 'close' }); outgoing.end(bytes);
           report.requestResourceResponderStage = 'response_sent';
           report.providerRequests = { received: ordinal, method: 'POST', requestPath: '/v1/chat/completions', tls13: true,
@@ -1210,6 +1218,22 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       const queue = await send({ protocolVersion: 1, method: 'supervisor.status' }, 'supervisor.status');
       assert.equal(queue.health, 'ready'); assert.equal(queue.queue.capacity, 1); assert.equal(queue.queue.runningRuns, 1); assert.equal(queue.queue.queuedRuns, 2);
       assert.equal(requestsReceived, 4);
+      let originalWorker: InstalledWorkerIdentityInspection | undefined;
+      observeResourceWorkerBeforeReply = async () => {
+        assert.equal(originalWorker, undefined);
+        // A separate ordinary authenticated read cannot conflict with the
+        // campaign client's pending request, nor does it take credential scope.
+        const active = accepted(exchange([{ protocolVersion: 1, method: 'run.get', runId: exhaustedRun.id }])[0]!, 'run.get');
+        const run = active.snapshot.run;
+        assert.equal(run.status, 'running'); assert(run.activeWorkerLaunchId);
+        assert.deepEqual(active.journal.map((entry: any) => entry.phase), ['prepared', 'dispatch_claimed']);
+        const original = inspectInstalledWorkerIdentity(recipe.stateRoot, { uid: ledger.uid, runId: run.id,
+          launchId: run.activeWorkerLaunchId, leaseEpoch: run.leaseEpoch, runRevision: run.revision,
+          supervisorInstanceId: queue.supervisorInstanceId, deadlineAt: run.deadlineAt });
+        assert.equal(`linux-proc-start-ticks:${await fixtureProcess(original.pid, ledger.uid)}`, original.processStartToken);
+        originalWorker = original;
+        resource.originalWorker = { ...original, sameOriginalProcessObservedAlive: true };
+      };
       const cancelCandidate = request({ protocolVersion: 1, method: 'run.cancel', requestId: '019a0012-0000-7000-8000-000000000206',
         runId: compactRun.id, expectedRevision: compactCut.snapshot.run.revision });
       const candidateCancelReply = await client.send(cancelCandidate); accepted(candidateCancelReply, 'run.cancel');
@@ -1246,6 +1270,29 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
         contextManifestRef: intent.contextManifestRef,
         trigger: 'request_body_bytes', completeValidResponseRetained: true, noExtraModelPreparationOrClaim: true,
         publicTerminalWorkerPointerCleared: true, independentlyObservedWorkerRetirementQualified: false, ownedPosts: 1 };
+      assert(originalWorker, 'the original worker must have been independently observed before its response');
+      const retirement = inspectInstalledWorkerRetirement(recipe.stateRoot, ledger.uid, originalWorker);
+      const observeRetirement = async () => {
+        const retained = inspectInstalledWorkerRetirement(recipe.stateRoot, ledger.uid, originalWorker!);
+        const { observedAt: _observedAt, ...stable } = retained;
+        const { observedAt: _originalObservedAt, ...original } = retirement;
+        assert.deepEqual(stable, original, 'reconnect and restart must retain the same original worker retirement');
+        let currentStart: string | undefined;
+        try { currentStart = `linux-proc-start-ticks:${await processStart(originalWorker!.pid)}`; }
+        catch (error) {
+          // Permission, damaged observation and an unreaped zombie are not
+          // evidence that the original joined process lifetime disappeared.
+          assert(['ENOENT', 'ESRCH'].includes((error as NodeJS.ErrnoException).code ?? ''));
+        }
+        assert.notEqual(currentStart, originalWorker!.processStartToken, 'the original worker process lifetime must be gone');
+        return { diagnosticOnly: true, observedAt: new Date().toISOString(),
+          processObservation: currentStart === undefined ? 'pid_absent' : 'pid_reused_with_different_start' };
+      };
+      resource.originalWorkerRetirement = { ...retirement, observations: [await observeRetirement()],
+        originalProcessLifetimeQualified: true, independentlyObservedAllDescendantsQualified: false,
+        independentlyObservedMountReleaseQualified: false };
+      resource.exhaustion.independentlyObservedWorkerRetirementQualified = true;
+      resource.independentlyObservedWorkerRetirementQualified = true;
       mark('request_resource_original_queued_successor_progress');
       const follower = await wait(followerRun.id, cut => completeModels(cut).length === 1 && cut.snapshot.run.status === 'running',
         'the genuinely queued follower did not progress after resource retirement');
@@ -1290,7 +1337,8 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
         }
         assert.equal(requestsReceived, 6); assert.equal(acceptedTcpConnections, 6); assert.equal(acceptedTlsConnections, 6); assert(!providerFailure);
       };
-      reconnect(); mark('request_resource_actual_restart_without_redispatch');
+      reconnect(); resource.originalWorkerRetirement.observations.push(await observeRetirement());
+      mark('request_resource_actual_restart_without_redispatch');
       const previous = show(services.supervisorUnit), image = path.join(recipe.stateRoot, 'runtime/bundles', bundleDigest, 'supervisor');
       const keeper = show(services.keeperUnit);
       await withRetainedUnitHistory([services.supervisorUnit, services.keeperUnit], async () => {
@@ -1312,6 +1360,8 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
         processIdentityRef: owner.processIdentityRef, acquisitionEvidenceRef: owner.acquisitionEvidenceRef,
         ...(owner.state === 'terminal' ? { terminalReason: owner.terminalReason, transitionEvidenceRef: owner.transitionEvidenceRef } : {}) })) };
       reconnect();
+      resource.originalWorkerRetirement.observations.push(await observeRetirement());
+      assert.equal(resource.originalWorkerRetirement.observations.length, 3);
       for (const key of imageFields) assert.equal((await lstat(source, { bigint: true }))[key], sourceBefore[key]);
       assert.equal(await readFile(source, 'utf8'), hostBefore);
       resource.successor = { qualified: true, runId: followerRun.id, previouslyObservedQueuedWithoutWorkerOrJournal: true, actualOwnedPostObserved: true,

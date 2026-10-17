@@ -1,14 +1,17 @@
 // Serialized test-owned SQLite data only; no StateOwner, native owner or worker
 // authority is created. Real installed renewal is a separate Linux qualification.
 import assert from 'node:assert/strict';
-import { chmod, copyFile, link, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, link, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test, type TestContext } from 'node:test';
-import { KERNEL_DATABASE_FILENAME, KERNEL_STATE_SCHEMA_VERSION } from '../../../src/config.js';
-import type { WorkerLaunch } from '../../../src/kernel/types.js';
-import { assertInstalledWorkerLeaseRenewed, inspectInstalledWorkerLease } from './installed-worker-lease.js';
+import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME, KERNEL_STATE_SCHEMA_VERSION } from '../../../src/config.js';
+import { canonicalJsonBytes, canonicalSha256 } from '../../../src/kernel/canonical.js';
+import { digestOmitting, sha256Bytes } from '../../../src/kernel/identity.js';
+import type { WorkerIdentity, WorkerLaunch, WorkspaceGenerationStateV1 } from '../../../src/kernel/types.js';
+import { assertInstalledWorkerLeaseRenewed, inspectInstalledWorkerIdentity, inspectInstalledWorkerLease,
+  inspectInstalledWorkerRetirement } from './installed-worker-lease.js';
 
 async function fixture(t: TestContext) {
   const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-installed-worker-lease-'));
@@ -59,6 +62,245 @@ function update(filename: string, operation: (database: DatabaseSync) => void) {
   const database = new DatabaseSync(filename);
   try { operation(database); } finally { database.close(); }
 }
+
+// Pure serialized data for the diagnostic seam, never a native birth/death proof.
+async function workerFixture(t: TestContext) {
+  const value = await fixture(t), hash = 'a'.repeat(64);
+  const cas = path.join(value.stateRoot, KERNEL_CAS_DIRECTORY);
+  await mkdir(cas, { mode: 0o700 });
+  const worker: WorkerIdentity = { schemaVersion: 1, executableRealpath: '/fixture/worker', executableDigest: hash,
+    pid: 12345, processStartToken: 'linux-proc-start-ticks:67890', spawnNonceDigest: value.launch.spawnNonceDigest,
+    activationNonceDigest: value.launch.activationNonceDigest, intendedLeaseEpoch: 1, launchId: value.launch.launchId,
+    supervisorInstanceId: value.launch.supervisorInstanceId, processContainmentRef: value.launch.processContainmentRef! };
+  const workerRef = canonicalSha256(worker), workerFilename = path.join(cas, workerRef);
+  await writeFile(workerFilename, canonicalJsonBytes(worker), { mode: 0o400 });
+  value.launch.workerIdentityDigest = workerRef;
+  const generation: WorkspaceGenerationStateV1 = { schemaVersion: 1, generationId: 'fixture-generation', runId: value.expected.runId,
+    generationRef: value.launch.workspaceGenerationRef!, generationIdentityDigest: 'b'.repeat(64), rowVersion: 3,
+    sourceCheckpointId: 'fixture-checkpoint', sourceWorkspaceStateRef: hash, sourceWorkspaceStateDigest: hash,
+    lastVerifiedTreeDigest: hash, updatedAt: value.launch.activatedAt!, phase: 'active',
+    snapshotEvidenceRef: hash, snapshotEvidenceDigest: hash, activeWorkerLaunchId: value.launch.launchId, leaseEpoch: 1 };
+  update(value.filename, database => {
+    database.exec(`CREATE TABLE workspace_generations(generation_id TEXT, run_id TEXT, phase TEXT, row_version INTEGER, row_json TEXT)`);
+    database.prepare('UPDATE worker_launches SET row_json=?').run(JSON.stringify(value.launch));
+    database.prepare('INSERT INTO workspace_generations VALUES(?, ?, ?, ?, ?)')
+      .run(generation.generationId, generation.runId, generation.phase, generation.rowVersion, JSON.stringify(generation));
+  });
+  return { ...value, cas, worker, workerFilename, generation };
+}
+
+test('active identity diagnostic fixes the original worker PID/start and generation without creating authority', async t => {
+  const value = await workerFixture(t);
+  const observed = inspectInstalledWorkerIdentity(value.stateRoot, value.expected);
+  assert.equal(observed.diagnosticOnly, true);
+  assert.equal(observed.runId, value.expected.runId); assert.equal(observed.launchId, value.expected.launchId);
+  assert.equal(observed.pid, 12345); assert.equal(observed.processStartToken, 'linux-proc-start-ticks:67890');
+  assert.equal(observed.workerIdentityDigest, value.launch.workerIdentityDigest);
+  assert.equal(observed.workspaceGenerationRef, value.launch.workspaceGenerationRef);
+  assert.equal(observed.generationId, 'fixture-generation'); assert.equal(observed.generationIdentityDigest, 'b'.repeat(64));
+  assert(Object.isFrozen(observed));
+  assert.equal(Object.hasOwn(observed, 'qualified'), false); assert.equal(Object.hasOwn(observed, 'executableRealpath'), false);
+});
+
+async function publishFixture(value: Awaited<ReturnType<typeof workerFixture>>, data: unknown) {
+  const ref = canonicalSha256(data);
+  await writeFile(path.join(value.cas, ref), canonicalJsonBytes(data), { mode: 0o400 });
+  return ref;
+}
+
+async function retireFixture(value: Awaited<ReturnType<typeof workerFixture>>) {
+  const hash = 'a'.repeat(64), retiredTime = new Date().toISOString(), time = (_offset: number) => retiredTime;
+  const death = { schemaVersion: 1, kind: 'containment_all_descendants_dead', containmentRef: value.launch.processContainmentRef!,
+    planRef: value.launch.containmentPlanRef, sandboxLaunchSpecRef: value.launch.sandboxLaunchSpecRef, sandboxLaunchSpecDigest: hash,
+    owner: { kind: 'worker_activation', runId: value.expected.runId, intendedLeaseEpoch: 1, workerLaunchId: value.expected.launchId },
+    launchNonceDigest: value.launch.spawnNonceDigest, inspectorSupervisorInstanceId: value.expected.supervisorInstanceId,
+    inspectorIdentityRef: hash, inspectorIdentityDigest: hash,
+    backend: { kind: 'linux', pidNamespaceReservationId: 'fixture-reservation', pidNamespaceId: 'fixture-namespace',
+      cgroupPath: '/fixture/cgroup', cgroupId: 'fixture-cgroup', namespaceInitStartToken: 'fixture-init',
+      subreaperStartToken: 'fixture-subreaper', cgroupPopulated: 0, namespaceInitDeadAndReaped: true, remainingTrackedDescendants: 0 },
+    observedAt: time(500), evidenceDigest: '' };
+  death.evidenceDigest = digestOmitting(death, 'evidenceDigest');
+  const retirementEvidenceRef = await publishFixture(value, death);
+  const snapshot = { schemaVersion: 1, format: 'cliq-workspace-generation-snapshot-evidence-v1', purpose: 'sealed_to_checkpoint',
+    runId: value.expected.runId, generationRef: value.generation.generationRef, generationIdentityDigest: value.generation.generationIdentityDigest,
+    checkpointId: 'fixture-stop-checkpoint', workspaceStateRef: hash, workspaceStateDigest: hash, entriesRef: hash,
+    treeDigest: 'c'.repeat(64), descriptorRewalkComplete: true, fileFsyncComplete: true, directoryFsyncComplete: true,
+    observedAt: time(250), quiescenceEvidenceRef: hash, evidenceDigest: '' };
+  snapshot.evidenceDigest = digestOmitting(snapshot, 'evidenceDigest');
+  const snapshotEvidenceRef = await publishFixture(value, snapshot), retiredAt = time(750);
+  const retiredLaunch = { ...value.launch, phase: 'retired', generationWriteState: 'sealed', quiesceId: 'fixture-quiesce',
+    leaseVersion: 4, retiredAt, retirementEvidenceRef };
+  const { activeWorkerLaunchId: _active, leaseEpoch: _epoch, ...base } = value.generation;
+  const sealedGeneration = { ...base, phase: 'sealed', rowVersion: 6, updatedAt: retiredAt,
+    lastVerifiedTreeDigest: snapshot.treeDigest, snapshotEvidenceRef, snapshotEvidenceDigest: snapshot.evidenceDigest };
+  update(value.filename, database => {
+    database.prepare('UPDATE worker_launches SET phase=?, row_json=?, retired_at=?')
+      .run(retiredLaunch.phase, JSON.stringify(retiredLaunch), retiredAt);
+    database.prepare('UPDATE workspace_generations SET phase=?, row_version=?, row_json=?')
+      .run(sealedGeneration.phase, sealedGeneration.rowVersion, JSON.stringify(sealedGeneration));
+    database.exec("UPDATE runs SET active_worker_launch_id='successor-launch', lease_epoch=2, revision=9");
+  });
+  return { retiredLaunch, sealedGeneration, death, snapshot };
+}
+
+test('retirement diagnostic follows the captured original worker after the Run points to a successor', async t => {
+  const value = await workerFixture(t), original = inspectInstalledWorkerIdentity(value.stateRoot, value.expected);
+  const retired = await retireFixture(value), before = await readFile(value.filename), names = await readdir(value.cas);
+  const bytes = await Promise.all(names.map(name => readFile(path.join(value.cas, name))));
+  const observed = inspectInstalledWorkerRetirement(value.stateRoot, value.expected.uid, original);
+  assert.equal(observed.diagnosticOnly, true); assert.equal(observed.databaseIdentity, original.databaseIdentity);
+  assert.equal(observed.launchId, 'fixture-launch'); assert.equal(observed.leaseEpoch, 1);
+  assert.equal(observed.pid, 12345); assert.equal(observed.processStartToken, 'linux-proc-start-ticks:67890');
+  assert.equal(observed.phase, 'retired'); assert.equal(observed.generationWriteState, 'sealed'); assert.equal(observed.generationPhase, 'sealed');
+  assert.equal(observed.retiredAt, retired.retiredLaunch.retiredAt);
+  assert.equal(observed.retirementEvidenceRef, retired.retiredLaunch.retirementEvidenceRef);
+  assert.equal(observed.snapshotEvidenceRef, retired.sealedGeneration.snapshotEvidenceRef);
+  assert.equal(observed.deathObservedAt, retired.death.observedAt); assert(Object.isFrozen(observed));
+  assert.equal(Object.hasOwn(observed, 'qualified'), false); assert.equal(Object.hasOwn(observed, 'nativeObservation'), false);
+  assert.deepEqual(await readFile(value.filename), before); assert.deepEqual(await readdir(value.cas), names);
+  assert.deepEqual(await Promise.all(names.map(name => readFile(path.join(value.cas, name)))), bytes);
+  update(value.filename, database => {
+    database.exec("BEGIN EXCLUSIVE; UPDATE runs SET active_worker_launch_id=NULL, status='failed', revision=10; COMMIT");
+  });
+  const { observedAt: _firstTime, ...first } = observed;
+  const { observedAt: _secondTime, ...second } = inspectInstalledWorkerRetirement(value.stateRoot, value.expected.uid, original);
+  assert.deepEqual(second, first, 'the original seal is independent of the later Run pointer and status');
+});
+
+const workerCasChanges: Array<[string, (value: Awaited<ReturnType<typeof workerFixture>>) => Promise<void>]> = [
+  ['writable CAS object', async value => { await chmod(value.workerFilename, 0o600); }],
+  ['CAS object hardlink', async value => { await link(value.workerFilename, path.join(value.stateRoot, 'worker-alias')); }],
+  ['CAS object symlink', async value => {
+    const retained = path.join(value.stateRoot, 'worker-retained'); await rename(value.workerFilename, retained);
+    await symlink(retained, value.workerFilename);
+  }],
+  ['CAS directory symlink', async value => {
+    const retained = path.join(value.stateRoot, 'cas-retained'); await rename(value.cas, retained); await symlink(retained, value.cas);
+  }],
+  ['writable CAS directory', async value => { await chmod(value.cas, 0o755); }],
+  ['wrong object hash', async value => {
+    await chmod(value.workerFilename, 0o600); await writeFile(value.workerFilename, canonicalJsonBytes({ ...value.worker, pid: 99999 }));
+    await chmod(value.workerFilename, 0o400);
+  }],
+  ['oversized object', async value => {
+    await chmod(value.workerFilename, 0o600); await writeFile(value.workerFilename, 'x'.repeat(65537)); await chmod(value.workerFilename, 0o400);
+  }],
+  ['noncanonical content-addressed JSON', async value => {
+    const bytes = Buffer.from(JSON.stringify(value.worker) + '\n'), ref = sha256Bytes(bytes);
+    await writeFile(path.join(value.cas, ref), bytes, { mode: 0o400 });
+    value.launch.workerIdentityDigest = ref;
+    update(value.filename, db => db.prepare('UPDATE worker_launches SET row_json=?').run(JSON.stringify(value.launch)));
+  }],
+  ['malformed UTF-8 content-addressed object', async value => {
+    const bytes = Buffer.from([0xff]), ref = sha256Bytes(bytes);
+    await writeFile(path.join(value.cas, ref), bytes, { mode: 0o400 });
+    value.launch.workerIdentityDigest = ref;
+    update(value.filename, db => db.prepare('UPDATE worker_launches SET row_json=?').run(JSON.stringify(value.launch)));
+  }],
+  ['foreign worker identity', async value => {
+    const foreign = { ...value.worker, launchId: 'successor-launch' }, ref = await publishFixture(value, foreign);
+    value.launch.workerIdentityDigest = ref;
+    update(value.filename, db => db.prepare('UPDATE worker_launches SET row_json=?').run(JSON.stringify(value.launch)));
+  }],
+];
+for (const [label, change] of workerCasChanges) {
+  test(`active identity inspection refuses ${label} without leaking object content`, async t => {
+    const value = await workerFixture(t); await change(value);
+    assert.throws(() => inspectInstalledWorkerIdentity(value.stateRoot, value.expected), error => {
+      assert(error instanceof Error); assert.equal(error.message, 'installed worker identity inspection refused');
+      assert.equal(error.cause, undefined); return true;
+    });
+  });
+}
+
+for (const table of ['worker_launches', 'workspace_generations']) {
+  for (const [label, content] of [['oversized', JSON.stringify({ workspaceGenerationRef: 'a'.repeat(64),
+    generationRef: 'a'.repeat(64), private: 'private-data'.repeat(6000) })], ['malformed', '{"private":"private-data"']] as const) {
+    test(`identity inspection refuses ${label} ${table} JOIN input with a fixed error`, async t => {
+      const value = await workerFixture(t);
+      update(value.filename, database => database.prepare(`UPDATE ${table} SET row_json=?`).run(content));
+      assert.throws(() => inspectInstalledWorkerIdentity(value.stateRoot, value.expected), error => {
+        assert(error instanceof Error); assert.equal(error.message, 'installed worker identity inspection refused');
+        assert.equal(error.cause, undefined); return true;
+      });
+    });
+  }
+}
+
+const retirementChanges: Array<[string, (value: Awaited<ReturnType<typeof workerFixture>>,
+  retired: Awaited<ReturnType<typeof retireFixture>>) => Promise<void> | void]> = [
+  ['replacement launch instead of the original', (value, retired) => {
+    const changed = { ...retired.retiredLaunch, launchId: 'successor-launch' };
+    update(value.filename, db => db.prepare('UPDATE worker_launches SET launch_id=?, row_json=?').run(changed.launchId, JSON.stringify(changed)));
+  }],
+  ['changed original activation nonce', (value, retired) => {
+    const changed = { ...retired.retiredLaunch, activationNonceDigest: 'd'.repeat(64) };
+    update(value.filename, db => db.prepare('UPDATE worker_launches SET row_json=?').run(JSON.stringify(changed)));
+  }],
+  ['changed original generation source', (value, retired) => {
+    const changed = { ...retired.sealedGeneration, sourceCheckpointId: 'successor-source' };
+    update(value.filename, db => db.prepare('UPDATE workspace_generations SET row_json=?').run(JSON.stringify(changed)));
+  }],
+  ['mismatched retired SQL column', value => {
+    update(value.filename, db => db.exec("UPDATE worker_launches SET retired_at='2026-01-01T00:00:00.000Z'"));
+  }],
+  ['duplicate original generation', value => {
+    update(value.filename, db => db.exec('INSERT INTO workspace_generations SELECT * FROM workspace_generations'));
+  }],
+  ['unsealed original generation', (value, retired) => {
+    const changed = { ...retired.sealedGeneration, phase: 'preactivated_readonly' };
+    update(value.filename, db => db.prepare('UPDATE workspace_generations SET phase=?, row_json=?').run(changed.phase, JSON.stringify(changed)));
+  }],
+  ['recovery wrapper instead of normal seal death', async (value, retired) => {
+    const ref = await publishFixture(value, { schemaVersion: 1, kind: 'recovery', private: 'private-data' });
+    update(value.filename, db => db.prepare('UPDATE worker_launches SET row_json=?').run(JSON.stringify({ ...retired.retiredLaunch, retirementEvidenceRef: ref })));
+  }],
+  ['death of a different launch', async (value, retired) => {
+    const death = { ...retired.death, owner: { ...retired.death.owner, workerLaunchId: 'successor-launch' } };
+    death.evidenceDigest = digestOmitting(death, 'evidenceDigest'); const ref = await publishFixture(value, death);
+    update(value.filename, db => db.prepare('UPDATE worker_launches SET row_json=?').run(JSON.stringify({ ...retired.retiredLaunch, retirementEvidenceRef: ref })));
+  }],
+  ['nonzero descendant declaration', async (value, retired) => {
+    const death = { ...retired.death, backend: { ...retired.death.backend, remainingTrackedDescendants: 1 } };
+    death.evidenceDigest = digestOmitting(death, 'evidenceDigest'); const ref = await publishFixture(value, death);
+    update(value.filename, db => db.prepare('UPDATE worker_launches SET row_json=?').run(JSON.stringify({ ...retired.retiredLaunch, retirementEvidenceRef: ref })));
+  }],
+  ['snapshot of a different generation', async (value, retired) => {
+    const snapshot = { ...retired.snapshot, generationRef: 'd'.repeat(64) };
+    snapshot.evidenceDigest = digestOmitting(snapshot, 'evidenceDigest'); const ref = await publishFixture(value, snapshot);
+    const changed = { ...retired.sealedGeneration, snapshotEvidenceRef: ref, snapshotEvidenceDigest: snapshot.evidenceDigest };
+    update(value.filename, db => db.prepare('UPDATE workspace_generations SET row_json=?').run(JSON.stringify(changed)));
+  }],
+  ['snapshot with an invalid semantic digest', async (value, retired) => {
+    const snapshot = { ...retired.snapshot, evidenceDigest: 'd'.repeat(64) }, ref = await publishFixture(value, snapshot);
+    const changed = { ...retired.sealedGeneration, snapshotEvidenceRef: ref, snapshotEvidenceDigest: snapshot.evidenceDigest };
+    update(value.filename, db => db.prepare('UPDATE workspace_generations SET row_json=?').run(JSON.stringify(changed)));
+  }],
+  ['replaced database inode', async value => {
+    const replacement = path.join(value.stateRoot, 'replacement.sqlite3'); await copyFile(value.filename, replacement); await rename(replacement, value.filename);
+  }],
+];
+for (const [label, change] of retirementChanges) {
+  test(`original retirement inspection refuses ${label}`, async t => {
+    const value = await workerFixture(t), original = inspectInstalledWorkerIdentity(value.stateRoot, value.expected);
+    const retired = await retireFixture(value); await change(value, retired);
+    assert.throws(() => inspectInstalledWorkerRetirement(value.stateRoot, value.expected.uid, original), error => {
+      assert(error instanceof Error); assert.equal(error.message, 'installed worker retirement inspection refused');
+      assert.equal(error.cause, undefined); return true;
+    });
+  });
+}
+
+test('retirement inspection refuses another UID and any caller-invented or changed identity field', async t => {
+  const value = await workerFixture(t), original = inspectInstalledWorkerIdentity(value.stateRoot, value.expected); await retireFixture(value);
+  assert.throws(() => inspectInstalledWorkerRetirement(value.stateRoot, value.expected.uid + 1, original),
+    { message: 'installed worker retirement inspection refused' });
+  for (const changed of [{ ...original, pid: original.pid + 1 }, { ...original, processStartToken: 'linux-proc-start-ticks:67891' },
+    { ...original, nativeObservation: 'private-data' }]) {
+    assert.throws(() => inspectInstalledWorkerRetirement(value.stateRoot, value.expected.uid, changed),
+      { message: 'installed worker retirement inspection refused' });
+  }
+});
 
 test('two short connections see a later committed renewal without retaining a writer lock', async t => {
   const value = await fixture(t), before = inspectInstalledWorkerLease(value.stateRoot, value.expected);
