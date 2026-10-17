@@ -85,7 +85,7 @@ import {
   decodeStateRootIdentity
 } from './decoders.js';
 import { admitRun, type AdmitRunInput, type AdmitRunResult } from './reducers/admission.js';
-import { loadAgentRun, type LoadAgentRunInput } from './reducers/agent.js';
+import { AgentContextExhaustedError, loadAgentRun, type LoadAgentRunInput } from './reducers/agent.js';
 import {
   abandonUnknownInvocation,
   claimInvocationDispatch,
@@ -2068,7 +2068,16 @@ export class StateStore {
       if (current.status === 'queued') {
         current = await execution.activateCurrentWorker({ expectedRunRevision: current.revision });
       }
-      const prepared = await agent.prepareModel({ expectedRunRevision: current.revision, leaseEpoch: current.leaseEpoch });
+      let prepared: Awaited<ReturnType<AgentRunState['prepareModel']>>;
+      try { prepared = await agent.prepareModel({ expectedRunRevision: current.revision, leaseEpoch: current.leaseEpoch }); }
+      catch (error) {
+        if (!(error instanceof AgentContextExhaustedError)) throw error;
+        // A typed planning refusal is not itself stop authority. Reproduce the
+        // exact current retained cause before entering the ordinary proof-backed drain.
+        await agent.stopForResourceFailure({ expectedRunRevision: current.revision });
+        this.requestInstalledRunStop(runId);
+        continue;
+      }
       try { await this.dispatchInstalledModel(execution, agent, prepared); }
       catch (error) {
         if (error instanceof ResourceRetirementError) throw error;

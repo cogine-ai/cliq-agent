@@ -2,9 +2,9 @@ import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting, identityHash } from '../kernel/identity.js';
 import type { BudgetUsage, ContextManifest, ContinuationItem, RecoveryClosureV1, RunAssemblyV1, RunContextCompactionPlan, ToolContractManifestV1 } from '../kernel/types.js';
 import type { RunPolicySnapshotV1 } from '../kernel/tool-authorization.js';
-import type { ToolCallInputV1, ModelUnusableResponseV1 } from '../protocol/agent-ir.js';
+import type { ToolCallInputV1, ModelUnusableResponseV1, ModelTextV1 } from '../protocol/agent-ir.js';
 import { createModelRequestReservation, priceTableDigest, type ModelPriceTableV1, type LocalZeroCostProvenanceV1 } from '../model/pricing.js';
-import { estimatePromptTokens, projectModelVisiblePrompt, type ModelRequestV1 } from '../model/request.js';
+import { estimatePromptTokens, projectModelVisiblePrompt, type CompactionPromptEnvelopeV1, type ModelRequestV1 } from '../model/request.js';
 import { loadToolPolicy, planToolRequest, toolOperationId } from '../policy/tool-policy.js';
 import { requireEqual } from '../policy/runtime-authority.js';
 import { planContextCompaction, replaceCompactedPrefix, type ContextItem } from '../runtime/context-compaction.js';
@@ -94,6 +94,14 @@ export const readResourceStopCause = stateOperation('RECOVERY_REQUIRED', async f
     inputSchemaDigest: entry.inputSchemaDigest, inputSchema: entry.inputSchema, replayClass: entry.replayClass }));
   const project = (value: ContextManifest) => readModelContext({ artifacts, run, spec, assembly, context: value, systemInstruction, tools });
   const projection = await project(context);
+  const envelopeRef = assembly.context.compactionPromptEnvelopeRef;
+  const envelope = await readCanonicalArtifact<CompactionPromptEnvelopeV1>(artifacts, envelopeRef);
+  const [system, prefix, suffix] = await joinResourceOperations([
+    envelope.systemInstructionRef, envelope.userPrefixRef, envelope.userSuffixRef
+  ].map(ref => readCanonicalArtifact<ModelTextV1>(artifacts, ref)));
+  const compactionEnvelope = { ref: envelopeRef, value: envelope,
+    systemInstruction: { ref: envelope.systemInstructionRef, value: system! },
+    userPrefix: { ref: envelope.userPrefixRef, value: prefix! }, userSuffix: { ref: envelope.userSuffixRef, value: suffix! } };
   // Map insertion order is preparation order; late audit rows cannot select an older attempt.
   const latest = history.filter(({ entry }) => entry.opKind === 'model').at(-1)?.entry;
   if (latest) {
@@ -103,7 +111,7 @@ export const readResourceStopCause = stateOperation('RECOVERY_REQUIRED', async f
         const plan = await readCanonicalArtifact<RunContextCompactionPlan>(artifacts, request.compactionPlanRef!);
         if (checkpoint.contextManifestRef === plan.sourceContextManifestRef) {
           const selection = planContextCompaction({ context, contextRef: checkpoint.contextManifestRef, items, projection,
-            policy: assembly.context, createdAt: plan.createdAt });
+            policy: assembly.context, provider: assembly.provider, compactionEnvelope, createdAt: plan.createdAt });
           if (selection.kind !== 'compact' || canonicalSha256(selection.plan) !== request.compactionPlanRef) throw new TypeError('failed compaction plan cannot be reproduced');
           const root = await readCanonicalArtifact<{ format: string }>(artifacts, latest.resultRef!);
           if (root.format === 'cliq-model-unusable-response-v1') {
@@ -127,11 +135,15 @@ export const readResourceStopCause = stateOperation('RECOVERY_REQUIRED', async f
     }
   }
   const selection = planContextCompaction({ context, contextRef: checkpoint.contextManifestRef, items, projection,
-    policy: assembly.context, createdAt: observedAt });
+    policy: assembly.context, provider: assembly.provider, compactionEnvelope, createdAt: observedAt });
   if (selection.kind === 'exhausted') {
     const { contextManifestRef, nextPromptTokens, triggerThresholdTokens, hardPromptTokens, protectedTokens, sourceInputTokenCap } = selection.evidence;
-    return { origin: 'runtime', targetStatus: 'failed', reason: 'runtime_failed', runtimeSubtype: 'context_window_exhausted',
+    const cause = { origin: 'runtime' as const, targetStatus: 'failed' as const, reason: 'runtime_failed' as const,
+      runtimeSubtype: 'context_window_exhausted' as const,
       contextManifestRef, nextPromptTokens, triggerThresholdTokens, hardPromptTokens, protectedTokens, sourceInputTokenCap };
+    return 'trigger' in selection.evidence && selection.evidence.trigger === 'request_body_bytes' ? { ...cause, trigger: selection.evidence.trigger,
+        modelVisiblePromptDigest: selection.evidence.modelVisiblePromptDigest, requestBodyBytes: selection.evidence.requestBodyBytes,
+        requestBodyLimitBytes: selection.evidence.requestBodyLimitBytes } : cause;
   }
   const bound = assembly.provider.pricing;
   const output = selection.kind === 'compact' ? assembly.context.summaryTokenCap : assembly.context.reservedOutputTokens;

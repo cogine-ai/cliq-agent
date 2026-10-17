@@ -8,7 +8,7 @@ import type { ObservedToolArguments } from '../protocol/agent-ir.js';
 import { type ResolveToolInput, type CompiledModelObservation } from './attempt.js';
 import { validateRunAssembly } from './run-assembly.js';
 import { priceTableDigest } from './pricing.js';
-import { MISSING_TOOL_NAME, type NormalPromptProjectionV1 } from './request.js';
+import { MODEL_REQUEST_BODY_LIMIT_BYTES, MISSING_TOOL_NAME, type NormalPromptProjectionV1 } from './request.js';
 import { normalInput, ref, reseal, testFixture } from './testing/fixtures.js';
 
 const AT = '2026-09-05T00:00:02.000Z';
@@ -376,6 +376,40 @@ test('small normal output caps do not impose an unrelated smaller compaction out
     { role: 'system', content: 'Summarize faithfully.' },
     { role: 'user', content: 'Summarize this context:\n\nPrevious work.\n\nReturn Markdown only.' }
   ]);
+});
+
+test('normal and compaction preparation keep the exact 1 MiB wire bound including JSON escaping', () => {
+  const input = testFixture('openai', false, 1_048_576);
+  const model = load(input);
+  const expectedNormal = { model: 'model-1', input: [
+    { role: 'system', content: 'Use tools carefully.' }, { role: 'user', content: '' }
+  ], stream: true, store: false, max_output_tokens: 4096, truncation: 'disabled', include: ['reasoning.encrypted_content'] };
+  const expectedCompaction = { model: 'model-1', input: [
+    { role: 'system', content: 'Summarize faithfully.' },
+    { role: 'user', content: 'Summarize this context:\n\n\n\nReturn Markdown only.' }
+  ], stream: true, store: false, max_output_tokens: 8192, truncation: 'disabled', include: ['reasoning.encrypted_content'] };
+  for (const compact of [false, true]) {
+    const emptyBytes = canonicalJsonBytes(compact ? expectedCompaction : expectedNormal).byteLength;
+    const availableBytes = MODEL_REQUEST_BODY_LIMIT_BYTES - emptyBytes;
+    // A quote is one source byte but exactly two wire bytes in these literals.
+    const exactText = '"'.repeat(Math.floor(availableBytes / 2)) + 'a'.repeat(availableBytes % 2);
+    const prepare = (text: string) => {
+      if (compact) return model.prepare({ kind: 'context_compaction', invocation: { runId: 'run-1', opId: 'compact-1', attempt: 0 },
+        compactionPlanRef: ref(500), sourceContextUtf8: text });
+      const prompt = normalInput(input);
+      prompt.projection.messages[1]!.contentUtf8 = text;
+      resealProjection(prompt);
+      return model.prepare(prompt);
+    };
+    const prepared = prepare(exactText);
+    assert.equal(prepared.outbound.bodyBytes.byteLength, 1_048_576);
+    assert.equal(prepared.request.bodyByteCount, 1_048_576);
+    assert.equal(prepared.request.reservation.inputTokens, 1_048_576);
+    assert.equal(prepared.request.reservation.outputTokens, 8192);
+    assert.equal(prepared.request.maximumOutputTokens, compact ? 8192 : 4096);
+    assert.ok(prepared.request.estimatedInputTokens < input.assembly.context.triggerThresholdTokens);
+    assert.throws(() => prepare(exactText + 'a'), { name: 'RangeError', message: 'native request body exceeds 1 MiB' });
+  }
 });
 
 test('Responses retains all calls including a missing name and malformed input, and closes a second request', () => {

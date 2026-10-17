@@ -533,6 +533,8 @@ export function prepareValidatedInvocationSettlement(
   const retained: RetainedSettlement = { validateSnapshot };
   return { settle(expectedRunRevision: number) {
     return settleInitialInvocation(driver, artifacts, owner, { ...input, expectedRunRevision }, terminal, continuation, retained);
+  }, hasRevisionConflict(error: unknown, expectedRunRevision: number) {
+    return retained.rebind?.error === error && retained.rebind?.revision === expectedRunRevision;
   }, acceptRevisionConflict(error: unknown, expectedRunRevision: number) {
     const permit = retained.rebind;
     if (!permit || permit.error !== error || permit.revision !== expectedRunRevision) return false;
@@ -578,7 +580,8 @@ async function settleInitialInvocation(
     if (snapshotRun.revision !== input.expectedRunRevision) {
       const error = new KernelStorageError('REVISION_CONFLICT', 'Run revision changed before invocation settlement');
       if (retained && snapshotRun.revision > input.expectedRunRevision && snapshotRun.stopIntentRef) {
-        retained.validateSnapshot(driver, snapshotRun);
+        // Pending cause only. The owning reducer must asynchronously verify
+        // the exact new StopIntent before acceptRevisionConflict can grant it.
         retained.rebind = { error, revision: snapshotRun.revision };
       }
       throw error;
@@ -685,7 +688,6 @@ async function settleInitialInvocation(
         const changed = new KernelStorageError('REVISION_CONFLICT', 'prepared continuation cut changed before settlement');
         if (retained) {
           const current = readRun(driver, input.runId);
-          retained.validateSnapshot(driver, current);
           // This private exception escaped transaction() only after its
           // successful rollback. The changed StopIntent is not SQL failure
           // permission and never rebuilds the original completion plan.

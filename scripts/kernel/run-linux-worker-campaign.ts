@@ -633,17 +633,107 @@ async function expiredFinalDeathPublication() {
   }
 }
 
+async function nativeEditSearchSemantics() {
+  const cases: ReadonlyArray<{ label: string; contents: string; oldText: string; newText: string;
+    expected: string; outcome: 'executed' | 'error' }> = [
+    { label: 'no-match', contents: 'before\n', oldText: 'missing', newText: 'after', expected: 'before\n', outcome: 'error' },
+    { label: 'one-match', contents: 'before\n', oldText: 'before', newText: 'after', expected: 'after\n', outcome: 'executed' },
+    { label: 'two-matches', contents: 'before before', oldText: 'before', newText: 'after', expected: 'before before', outcome: 'error' },
+    { label: 'overlap-one', contents: 'aaa', oldText: 'aa', newText: 'X', expected: 'Xa', outcome: 'executed' },
+    { label: 'nonoverlap-two', contents: 'aaaa', oldText: 'aa', newText: 'X', expected: 'aaaa', outcome: 'error' },
+    { label: 'end-match', contents: 'prefix:before', oldText: 'before', newText: 'after', expected: 'prefix:after', outcome: 'executed' },
+    { label: 'longer-needle', contents: 'a', oldText: 'a'.repeat(300), newText: 'X', expected: 'a', outcome: 'error' },
+    { label: 'embedded-nul', contents: 'A\0B\0C', oldText: '\0B', newText: '!\0', expected: 'A!\0\0C', outcome: 'executed' },
+    { label: 'unicode', contents: 'Aé😀Z', oldText: 'é😀', newText: '漢', expected: 'A漢Z', outcome: 'executed' },
+    { label: 'empty-two-ascii', contents: 'ab', oldText: '', newText: 'X', expected: 'Xab', outcome: 'executed' },
+    { label: 'empty-one-astral', contents: '😀', oldText: '', newText: 'X', expected: 'X😀', outcome: 'executed' },
+    { label: 'empty-one-nonascii', contents: 'é', oldText: '', newText: 'X', expected: 'é', outcome: 'error' },
+    { label: 'empty-three-ascii', contents: 'abc', oldText: '', newText: 'X', expected: 'abc', outcome: 'error' }
+  ];
+  for (const value of cases) {
+    const fixture = await createLinuxWorkerCampaignFixture({ ...options, label: 'edit-' + value.label,
+      edit: { contents: Buffer.from(value.contents), oldText: value.oldText, newText: value.newText } });
+    let reopened: StateStore | undefined, reopeningFailed = false, operationFailure: { error: unknown } | undefined;
+    try {
+      const before = await checkpointBytes(fixture.store, fixture.runId);
+      assert.deepEqual(before.bytes, Buffer.from(value.contents));
+      const hostBefore = await stat(path.join(fixture.workspace, 'a'), { bigint: true }), startingChildren = directChildren();
+      const execution = await fixture.store.loadRunExecution({ runId: fixture.runId, material: fixture.authority.material });
+      const run = await bounded(execution.executeCurrentTool({ expectedRunRevision: before.closure.run.revision }));
+      assert.equal(run.status, 'queued'); assert.equal(run.activeWorkerLaunchId, undefined);
+      const after = await checkpointBytes(fixture.store, fixture.runId);
+      assert.deepEqual(after.bytes, Buffer.from(value.expected), 'actual native edit bytes: ' + value.label);
+      const journal = after.closure.journal.filter(entry => entry.opKind === 'tool');
+      assert.deepEqual(journal.map(entry => entry.phase), ['prepared', 'dispatch_claimed', 'completed']);
+      const observation = await fixture.store.artifacts.readCanonical<{ outcome: string; code?: string; dispatchId: string }>(journal[2]!.resultRef!);
+      assert.equal(observation.outcome, value.outcome); assert.equal(observation.dispatchId, journal[1]!.dispatchId);
+      if (value.outcome === 'error') assert.equal(observation.code, 'TOOL_EXECUTION_FAILED');
+      assert.equal(after.closure.run.budgetConsumed.toolCalls, 1); assert.equal(after.closure.run.budgetReserved.toolCalls, 0);
+      const launches = after.closure.workerLaunches.filter(row => !before.closure.workerLaunches.some(old => old.launchId === row.launchId));
+      assert.equal(launches.length, 1); const launch = launches[0]!;
+      assert.equal(launch.phase, 'retired'); assert.equal(launch.generationWriteState, 'sealed'); assert(launch.workerIdentityDigest && launch.retirementEvidenceRef);
+      assert.equal(after.closure.workspaceGenerations.filter(row =>
+        !before.closure.workspaceGenerations.some(old => old.generationRef === row.generationRef)).length, 1);
+      const death = await fixture.store.artifacts.readCanonical<ProcessContainmentDeathEvidenceV1>(launch.retirementEvidenceRef);
+      assert.equal(death.kind, 'containment_all_descendants_dead'); assert.equal(death.containmentRef, launch.processContainmentRef);
+      assert.equal(death.owner.kind, 'worker_activation');
+      if (death.owner.kind !== 'worker_activation' || death.backend.kind !== 'linux') throw new Error('edit semantics requires actual Linux worker retirement');
+      assert.equal(death.owner.workerLaunchId, launch.launchId);
+      assert.equal(death.backend.cgroupPopulated, 0); assert.equal(death.backend.namespaceInitDeadAndReaped, true);
+      assert.equal(death.backend.remainingTrackedDescendants, 0);
+      const workerIdentity = decodeWorkerIdentity(await fixture.store.artifacts.readCanonical(launch.workerIdentityDigest));
+      await assert.rejects(access('/proc/' + workerIdentity.pid), { code: 'ENOENT' });
+      assert.deepEqual(directChildren(), startingChildren);
+      assert.deepEqual(await readFile(path.join(fixture.workspace, 'a')), fixture.original);
+      const hostAfter = await stat(path.join(fixture.workspace, 'a'), { bigint: true });
+      for (const field of ['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs'] as const) assert.equal(hostAfter[field], hostBefore[field]);
+      await fixture.store.close();
+      try { reopened = await openStateStore(fixture.stateRoot, fixture.runtimeAuthority); }
+      catch (error) { reopeningFailed = true; throw error; }
+      assert.deepEqual(await checkpointBytes(reopened, fixture.runId), after);
+      await reopened.close(); reopened = undefined;
+      console.log(JSON.stringify({ scenario: 'actual-native-edit-search-semantics', case: value.label,
+        outcome: value.outcome, permanentToolClaims: 1, completedToolEntries: 1, consumedToolCalls: 1,
+        originalHostUnchanged: true, actualWorkerRetired: true, retainedCheckpointReopened: true }));
+    } catch (error) { operationFailure = { error }; throw error; }
+    finally {
+      const failures: unknown[] = [];
+      for (const resource of [reopened, fixture.store]) {
+        try { await resource?.close(); } catch (error) { failures.push(error); }
+      }
+      if (failures.length === 0 && !reopeningFailed) {
+        try { await fixture.dispose(); } catch (error) { failures.push(error); }
+      } else console.error('preserving uncertain native edit semantics fixture: ' + fixture.stateRoot);
+      if (failures.length) throw new AggregateError([...(operationFailure ? [operationFailure.error] : []), ...failures], 'native edit semantics and cleanup failures');
+    }
+  }
+}
+
 async function receivedToolSurvivesDeathPublicationFailure() {
-  const fixture = await createLinuxWorkerCampaignFixture({ ...options, label: 'received-tool-storage' });
+  for (const boundary of ['death', 'snapshot', 'observation', 'settlement', 'continuation'] as const) {
+    for (const recovery of ['retry', 'stop', 'close'] as const) {
+      console.log(JSON.stringify({ scenario: 'actual-received-tool-death-publication-failure', phase: 'publication-case-start',
+        publicationBoundary: boundary, recovery }));
+      await receivedToolPublicationFailure(boundary, recovery);
+    }
+  }
+}
+
+async function receivedToolPublicationFailure(boundary: 'death' | 'snapshot' | 'observation' | 'settlement' | 'continuation',
+  recovery: 'retry' | 'stop' | 'close') {
+  const fixture = await createLinuxWorkerCampaignFixture({ ...options, label: `received-tool-${boundary}-${recovery}` });
   let reopened: StateStore | undefined, sample: FileHandle | undefined, root: FileHandle | undefined, file: FileHandle | undefined;
   let prototype: { writeFile: FileHandle['writeFile'] } | undefined, originalWrite: FileHandle['writeFile'] | undefined;
   let held: { cut: Awaited<ReturnType<typeof checkpointBytes>>; death: ProcessContainmentDeathEvidenceV1;
-    workerIdentityDigest: string; generationRef: string; launchId: string } | undefined;
+    workerIdentityDigest: string; generationRef: string; launchId: string; failedArtifact: { ref: string; value: unknown } } | undefined;
+  let originalDeath: ProcessContainmentDeathEvidenceV1 | undefined;
+  let verifyStopReplay: ((store: StateStore) => Promise<void>) | undefined;
   let injected = 0, reopeningFailed = false;
   let operationFailure: { error: unknown } | undefined;
-  const storageFailure = Object.assign(new Error('campaign injected death-publication storage failure'), { code: 'ENOSPC' });
+  const storageFailure = Object.assign(new Error(`campaign injected received-tool ${boundary} publication storage failure`), { code: 'ENOSPC' });
   try {
     const before = await checkpointBytes(fixture.store, fixture.runId);
+    const sessionBefore = fixture.store.getSession(fixture.sessionId);
     const hostBefore = await stat(path.join(fixture.workspace, 'a'), { bigint: true });
     const startingChildren = directChildren();
     const execution = await fixture.store.loadRunExecution({ runId: fixture.runId, material: fixture.authority.material });
@@ -656,9 +746,24 @@ async function receivedToolSurvivesDeathPublicationFailure() {
     // does not alter CAS permissions or prevent its original temporary cleanup.
     prototype.writeFile = (async function(this: FileHandle, ...args: Parameters<FileHandle['writeFile']>) {
       await Reflect.apply(writeFile, this, args);
-      if (injected || !Buffer.isBuffer(args[0]) || !args[0].toString('utf8').includes('"kind":"containment_all_descendants_dead"')) return;
-      const death = JSON.parse(args[0].toString('utf8')) as ProcessContainmentDeathEvidenceV1;
-      if (death.kind !== 'containment_all_descendants_dead' || death.owner.kind !== 'worker_activation' || death.owner.runId !== fixture.runId) return;
+      if (injected || !Buffer.isBuffer(args[0])) return;
+      const text = args[0].toString('utf8');
+      if (!['"kind":"containment_all_descendants_dead"', '"format":"cliq-workspace-generation-snapshot-evidence-v1"',
+        '"format":"cliq-tool-observation-v1"', '"format":"cliq-budget-settlement-v1"', '"kind":"tool_result"'].some(kind => text.includes(kind))) return;
+      const value = JSON.parse(text);
+      const isDeath = value.kind === 'containment_all_descendants_dead' && value.owner?.kind === 'worker_activation' && value.owner.runId === fixture.runId;
+      if (isDeath) originalDeath ??= value as ProcessContainmentDeathEvidenceV1;
+      const selected = boundary === 'death' ? isDeath
+        : value.runId === fixture.runId && (boundary === 'snapshot'
+          ? value.format === 'cliq-workspace-generation-snapshot-evidence-v1' && value.purpose === 'sealed_to_checkpoint'
+          : boundary === 'observation' ? value.format === 'cliq-tool-observation-v1' && value.outcome === 'executed'
+            : boundary === 'settlement' ? value.format === 'cliq-budget-settlement-v1' && value.terminalPhase === 'completed'
+              : value.kind === 'tool_result' && value.outcome === 'executed');
+      if (!selected) return;
+      assert(originalDeath, 'every selected publication follows the original actual native death observation');
+      assert.deepEqual(args[0], canonicalJsonBytes(value));
+      const death = originalDeath;
+      if (death.owner.kind !== 'worker_activation') throw new Error('received result lost its original worker owner');
       const workerOwner = death.owner;
       assert.equal(death.evidenceDigest, digestOmitting(death, 'evidenceDigest'));
       assert.equal(death.backend.kind, 'linux');
@@ -687,6 +792,22 @@ async function receivedToolSurvivesDeathPublicationFailure() {
       assert.equal(cut.closure.latestCheckpoint.journalSeq, prepared[0]!.seq);
       assert.equal(cut.closure.latestCheckpoint.workspaceStateRef, before.closure.latestCheckpoint.workspaceStateRef);
       assert.deepEqual(cut.bytes, fixture.original);
+      if (boundary === 'snapshot') {
+        assert.equal(value.generationRef, launch.workspaceGenerationRef);
+        assert.equal(value.quiescenceEvidenceRef, canonicalSha256(death));
+      } else if (boundary !== 'death') {
+        assert.equal(value.opId, claims[0]!.opId);
+        if (boundary !== 'continuation') assert.equal(value.attempt, claims[0]!.attempt);
+        if (boundary === 'observation') {
+          assert.equal(value.dispatchId, claims[0]!.dispatchId);
+          assert.equal(value.postEffect.retirementEvidenceRef, canonicalSha256(death));
+          assert.equal(value.observationDigest, digestOmitting(value, 'observationDigest'));
+        } else if (boundary === 'settlement') {
+          assert.equal(value.preparedJournalSeq, prepared[0]!.seq);
+          assert.equal(value.consumed.toolCalls, 1); assert.equal(value.released.toolCalls, 1);
+          assert.equal(value.settlementDigest, digestOmitting(value, 'settlementDigest'));
+        }
+      }
       const identity = await fixture.store.artifacts.readCanonical<WorkspaceGenerationIdentityV1>(launch.workspaceGenerationRef);
       if (identity.locator.kind !== 'linux_directory') throw new Error('received tool has no original Linux generation');
       root = await open(path.join(fixture.stateRoot, identity.locator.canonicalRootRelativePath),
@@ -699,7 +820,8 @@ async function receivedToolSurvivesDeathPublicationFailure() {
       assert.deepEqual(await readFile(path.join(fixture.workspace, 'a')), fixture.original);
       const host = await stat(path.join(fixture.workspace, 'a'), { bigint: true });
       assert.equal(host.dev, hostBefore.dev); assert.equal(host.ino, hostBefore.ino);
-      held = { cut, death, workerIdentityDigest: launch.workerIdentityDigest, generationRef: launch.workspaceGenerationRef, launchId: launch.launchId };
+      held = { cut, death, workerIdentityDigest: launch.workerIdentityDigest, generationRef: launch.workspaceGenerationRef, launchId: launch.launchId,
+        failedArtifact: { ref: canonicalSha256(value), value } };
       injected++;
       throw storageFailure;
     }) as FileHandle['writeFile'];
@@ -710,16 +832,62 @@ async function receivedToolSurvivesDeathPublicationFailure() {
     const retained = held;
     const failed = await checkpointBytes(fixture.store, fixture.runId);
     console.log(JSON.stringify({ scenario: 'actual-received-tool-death-publication-failure', phase: 'fault-observed',
+      publicationBoundary: boundary, recovery,
       actualPrivateEditObserved: true, originalHostUnchanged: true, injectedWriteFailures: injected,
       permanentToolClaims: failed.closure.journal.filter(entry => entry.opKind === 'tool' && entry.phase === 'dispatch_claimed').length,
-      observedRunStatus: failed.closure.run.status, actualFullDiskQualified: false }));
+      observedRunStatus: failed.closure.run.status, actualFullDiskQualified: false, providerQualified: false }));
     assert.equal(failed.closure.run.status, 'running', 'a received result must remain with its original owner after a joined storage failure');
     assert.equal(failed.closure.run.activeWorkerLaunchId, retained.launchId);
     assert.deepEqual(failed, retained.cut, 'storage refusal cannot replace the original claim, worker, checkpointing generation, budget or ready Checkpoint');
     assert.deepEqual(await witnessBytes(file, Buffer.byteLength('after\n')), Buffer.from('after\n'));
-    const completed = await bounded(execution.executeCurrentTool({ expectedRunRevision: failed.closure.run.revision }));
-    assert.equal(completed.status, 'queued'); assert.equal(completed.activeWorkerLaunchId, undefined);
-    const after = await checkpointBytes(fixture.store, fixture.runId);
+    let observingStore = fixture.store;
+    if (recovery === 'close') {
+      // This is actual Store.close, not installed SIGTERM qualification. It
+      // must finish the same received result before releasing its StateOwner.
+      await bounded(fixture.store.close());
+      try { reopened = await openStateStore(fixture.stateRoot, fixture.runtimeAuthority); }
+      catch (error) { reopeningFailed = true; throw error; }
+      observingStore = reopened;
+    } else {
+      let originalStopIntentRef: string | undefined;
+      if (recovery === 'stop') {
+        const agent = await fixture.store.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material,
+          releaseKeys: fixture.signed.releaseKeys });
+        const request = { ...await publishInProcessChannel(fixture.store), requestId: uuidv7(), expectedRunRevision: failed.closure.run.revision };
+        const cancelled = await bounded(agent.cancelRun(request));
+        assert.equal(cancelled.run.cancelRequested, true); assert(cancelled.run.stopIntentRef);
+        originalStopIntentRef = cancelled.run.stopIntentRef;
+        await bounded(execution.requestStop());
+        const stopped = await checkpointBytes(fixture.store, fixture.runId);
+        assert.equal(stopped.closure.run.stopIntentRef, originalStopIntentRef);
+        const stableRun = ({ revision: _revision, updatedAt: _updated, cancelRequested: _cancel, stopIntentRef: _intent, ...run }: Run) => run;
+        assert.deepEqual(stableRun(stopped.closure.run), stableRun(failed.closure.run));
+        assert.deepEqual({ ...stopped, closure: { ...stopped.closure, run: failed.closure.run } }, failed,
+          'the original StopIntent cannot replace the retained received result, claim, generation or budget');
+        verifyStopReplay = async store => {
+          const reloaded = await store.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material,
+            releaseKeys: fixture.signed.releaseKeys });
+          assert.deepEqual((await bounded(reloaded.cancelRun({ ...request, ...await publishInProcessChannel(store) }))).response, cancelled.response);
+          const session = store.getSession(fixture.sessionId);
+          assert.equal(session.contextRevision, sessionBefore.contextRevision + 1);
+          assert.equal(session.latestItemSeq, sessionBefore.latestItemSeq + 1);
+        };
+      }
+      const completed = await bounded(execution.executeCurrentTool({ expectedRunRevision: fixture.store.getRun(fixture.runId).revision }));
+      assert.equal(completed.status, 'queued'); assert.equal(completed.activeWorkerLaunchId, undefined);
+      if (recovery === 'stop') {
+        assert.equal(completed.stopIntentRef, originalStopIntentRef);
+        const terminal = await bounded(execution.finishCurrentStop({ expectedRunRevision: completed.revision }));
+        assert.equal(terminal.status, 'cancelled'); assert.equal(terminal.terminalReason, 'cancelled_by_user');
+        assert.equal(terminal.stopIntentRef, originalStopIntentRef);
+        assert.deepEqual(await bounded(execution.finishCurrentStop({ expectedRunRevision: terminal.revision })), terminal);
+        await verifyStopReplay!(fixture.store);
+      }
+    }
+    const after = await checkpointBytes(observingStore, fixture.runId);
+    assert.equal(after.closure.run.status, recovery === 'stop' ? 'cancelled' : 'queued');
+    assert.equal(after.closure.run.activeWorkerLaunchId, undefined);
+    if (recovery !== 'stop') assert.deepEqual(observingStore.getSession(fixture.sessionId), sessionBefore);
     assert.deepEqual(after.bytes, Buffer.from('after\n'));
     const journal = after.closure.journal.filter(entry => entry.opKind === 'tool');
     assert.deepEqual(journal.map(entry => entry.phase), ['prepared', 'dispatch_claimed', 'completed']);
@@ -730,26 +898,45 @@ async function receivedToolSurvivesDeathPublicationFailure() {
     const retired = after.closure.workerLaunches.find(row => row.launchId === retained.launchId)!;
     assert.equal(retired.phase, 'retired'); assert.equal(retired.workerIdentityDigest, retained.workerIdentityDigest);
     assert.equal(retired.workspaceGenerationRef, retained.generationRef); assert(retired.retirementEvidenceRef);
-    const finalDeath = await fixture.store.artifacts.readCanonical<ProcessContainmentDeathEvidenceV1>(retired.retirementEvidenceRef);
+    const finalDeath = await observingStore.artifacts.readCanonical<ProcessContainmentDeathEvidenceV1>(retired.retirementEvidenceRef);
     assert.equal(finalDeath.containmentRef, retained.death.containmentRef); assert.deepEqual(finalDeath.owner, retained.death.owner);
-    const observation = await fixture.store.artifacts.readCanonical<{ outcome: string; dispatchId: string }>(journal[2]!.resultRef!);
+    const observation = await observingStore.artifacts.readCanonical<{ outcome: string; dispatchId: string }>(journal[2]!.resultRef!);
     assert.equal(observation.outcome, 'executed'); assert.equal(observation.dispatchId, journal[1]!.dispatchId);
-    const originalWorker = decodeWorkerIdentity(await fixture.store.artifacts.readCanonical(retained.workerIdentityDigest));
+    assert(journal[2]!.budgetSettlementRef);
+    const settlement = await observingStore.artifacts.readCanonical<BudgetSettlementV1>(journal[2]!.budgetSettlementRef);
+    assert.equal(settlement.format, 'cliq-budget-settlement-v1'); assert.equal(settlement.runId, fixture.runId);
+    assert.equal(settlement.opId, journal[1]!.opId); assert.equal(settlement.attempt, journal[1]!.attempt);
+    assert.equal(settlement.terminalPhase, 'completed'); assert.equal(settlement.terminalJournalSeq, journal[2]!.seq);
+    assert.equal(settlement.preparedJournalSeq, journal[0]!.seq); assert.equal(settlement.consumed.toolCalls, 1);
+    assert.equal(settlement.released.toolCalls, 1); assert.equal(settlement.settlementDigest, digestOmitting(settlement, 'settlementDigest'));
+    const items = await Promise.all(after.closure.items.map(entry => observingStore.artifacts.readCanonical<{
+      kind: string; opId?: string; outcome?: string }>(entry.payloadRef)));
+    const results = items.filter(item => item.kind === 'tool_result' && item.opId === journal[1]!.opId);
+    assert.equal(results.length, 1); assert.equal(results[0]!.outcome, 'executed');
+    assert.deepEqual(await observingStore.artifacts.readBytes(retained.failedArtifact.ref), canonicalJsonBytes(retained.failedArtifact.value),
+      'retry publishes the original failed artifact bytes, not a resampled result or settlement');
+    const originalWorker = decodeWorkerIdentity(await observingStore.artifacts.readCanonical(retained.workerIdentityDigest));
     await assert.rejects(access(`/proc/${originalWorker.pid}`), { code: 'ENOENT' });
     assert.deepEqual(directChildren(), startingChildren);
     assert.deepEqual(await readFile(path.join(fixture.workspace, 'a')), fixture.original);
     const hostAfter = await stat(path.join(fixture.workspace, 'a'), { bigint: true });
     assert.equal(hostAfter.dev, hostBefore.dev); assert.equal(hostAfter.ino, hostBefore.ino);
+    for (const field of ['size', 'mtimeNs', 'ctimeNs'] as const) assert.equal(hostAfter[field], hostBefore[field]);
     await file.close(); file = undefined; await root!.close(); root = undefined;
-    await fixture.store.close();
+    await observingStore.close();
     try { reopened = await openStateStore(fixture.stateRoot, fixture.runtimeAuthority); }
     catch (error) { reopeningFailed = true; throw error; }
-    assert.deepEqual(await reopened.readRecoveryClosure(fixture.runId), after.closure);
+    assert.deepEqual(await checkpointBytes(reopened, fixture.runId), after);
+    await verifyStopReplay?.(reopened);
+    if (recovery !== 'stop') assert.deepEqual(reopened.getSession(fixture.sessionId), sessionBefore);
     await reopened.close(); reopened = undefined;
     console.log(JSON.stringify({ scenario: 'actual-received-tool-death-publication-failure', phase: 'settlement-retained',
+      publicationBoundary: boundary, recovery,
       injectedWriteFailures: 1, permanentToolClaims: 1, completedToolEntries: 1, consumedToolCalls: 1,
       sameOriginalWorkerAndGeneration: true, actualPrivateEditObserved: true, originalHostUnchanged: true,
-      actualFullDiskQualified: false, note: 'original execution resumes persistence only; no repeated native tool effect' }));
+      originalFailedArtifactRetained: true, terminalSessionPublications: recovery === 'stop' ? 1 : 0,
+      actualFullDiskQualified: false, providerQualified: false, installedSigtermQualified: false,
+      note: 'original execution resumes persistence only; no repeated native tool effect; continuation fault covers its tool_result item, not every graph format' }));
   } catch (error) { operationFailure = { error }; throw error; }
   finally {
     if (prototype && originalWrite) prototype.writeFile = originalWrite;
@@ -3302,6 +3489,7 @@ for (const [scenario, run] of [
   ['pre-probe-retirement-failure', () => retirementFailureKeepsOwner('pre_probe')],
   ['timeout-retirement-failure', () => retirementFailureKeepsOwner('timeout_closure')],
   ['worker-recovery-first-inflight-cancel', () => parentLossBeforeRelease(true, true, true)],
+  ['edit-search-semantics', nativeEditSearchSemantics],
   ['received-tool-death-publication-failure', receivedToolSurvivesDeathPublicationFailure]
 ] as const) {
   console.log(JSON.stringify({ scenario, phase: 'start' }));

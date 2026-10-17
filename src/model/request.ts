@@ -522,9 +522,10 @@ function responsesInput(messages: readonly ModelVisibleMessage[]): unknown[] {
   });
 }
 
-/** Internal wire adapter. The caller already validated the typed projection. */
-function serializeRequest(
-  authority: ModelAttemptAuthority,
+/** One pure wire adapter for eligibility and preparation. Callers retain their
+ * independent hard bounds; measuring an oversized body grants no dispatch. */
+export function buildModelRequestWire(
+  authority: Pick<ModelAttemptAuthority, 'provider' | 'model' | 'streaming' | 'contextLimitTokens'>,
   prompt: ModelVisiblePromptV1,
   output: number,
   mode: AgentNegotiatedMode
@@ -594,7 +595,6 @@ function serializeRequest(
     };
   }
   const bodyBytes = canonicalJsonBytes(body);
-  if (bodyBytes.byteLength > MODEL_REQUEST_BODY_LIMIT_BYTES) throw new RangeError('native request body exceeds 1 MiB');
   return { requestPath, bodyBytes };
 }
 
@@ -825,7 +825,8 @@ function prepare(
   if (estimatedInputTokens > authority.contextLimitTokens - maximumOutputTokens) {
     throw new RangeError('estimated prompt exceeds the admitted context window');
   }
-  const serialized = serializeRequest(authority, prompt, maximumOutputTokens, mode);
+  const serialized = buildModelRequestWire(authority, prompt, maximumOutputTokens, mode);
+  if (serialized.bodyBytes.byteLength > MODEL_REQUEST_BODY_LIMIT_BYTES) throw new RangeError('native request body exceeds 1 MiB');
   const body = planArtifactBytes(serialized.bodyBytes, 'application/json', 'cliq-provider-native-request-wire-v1');
   const value = {
     schemaVersion: 1 as const,
@@ -943,24 +944,27 @@ function validateCompactionEnvelope(material: CompactionPromptEnvelopeMaterial):
   }
 }
 
-export function prepareCompactionModelAttempt(input: PrepareCompactionModelAttemptInput): PreparedModelAttemptData {
-  assertArtifactRef(input.compactionPlanRef);
-  if (!exactUnicodeText(input.sourceContextUtf8) || !input.sourceContextUtf8.length) {
+export function projectCompactionPrompt(envelope: CompactionPromptEnvelopeMaterial, sourceContextUtf8: string): ModelVisiblePromptV1 {
+  if (!exactUnicodeText(sourceContextUtf8) || !sourceContextUtf8.length) {
     throw new TypeError('compaction source must be nonempty UTF-8 without NUL');
   }
-  const envelope = input.authority.compactionEnvelope;
-  const prompt: ModelVisiblePromptV1 = {
+  return {
     format: MODEL_VISIBLE_COMPACTION_FORMAT,
     messages: [
       { role: 'system', contentUtf8: envelope.systemInstruction.value.utf8 },
       {
         role: 'user',
-        contentUtf8: envelope.userPrefix.value.utf8 + input.sourceContextUtf8 + envelope.userSuffix.value.utf8
+        contentUtf8: envelope.userPrefix.value.utf8 + sourceContextUtf8 + envelope.userSuffix.value.utf8
       }
     ],
     tools: [],
     responseContract: envelope.value.resultContract
   };
+}
+
+export function prepareCompactionModelAttempt(input: PrepareCompactionModelAttemptInput): PreparedModelAttemptData {
+  assertArtifactRef(input.compactionPlanRef);
+  const prompt = projectCompactionPrompt(input.authority.compactionEnvelope, input.sourceContextUtf8);
   const projection = planCanonicalArtifact(prompt, prompt.format);
   const prepared = prepare(input.authority, input.invocation, prompt, {
     ref: projection.ref,

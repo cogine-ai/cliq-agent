@@ -427,6 +427,9 @@ async function campaign(filename: string): Promise<void> {
     assert.equal(record.createdAt, committed.finishedAt);
     const revoked = decodeCredentialAuthorityRevokeOperation(success(credential({ schemaVersion: 1, kind: 'revoke',
       requestId: '019a0012-0000-7000-8000-000000000083', credentialGrantId: metadata.credentialGrantId, expectedAuthorityRevision: 1 }), 'operation'));
+    report.recovery.successorRevokeCleanup = { cleanupPhase: revoked.cleanupPhase,
+      ...(revoked.cleanupPhase === 'cleanup_failed' ? { cleanupErrorCode: revoked.cleanupErrorCode } : {}) };
+    report.recovery.successorRevokeCleanup.externalService = service.diagnostic();
     assert.equal(revoked.cleanupPhase, 'cleanup_complete');
     const finalStore = observe(); assert.deepEqual(finalStore.items, []);
     for (const key of ['nameOwner', 'servicePid', 'serviceUid', 'collection']) assert.equal(finalStore[key], initialStore[key]);

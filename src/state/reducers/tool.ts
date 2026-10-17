@@ -36,6 +36,7 @@ import { loadAgentStop } from './stop.js';
 import { appendRunStateEvent, assertLiveDispatchState, claimValidatedInvocation, prepareValidatedInvocation,
   prepareValidatedInvocationSettlement, requireHealthyFence, settleValidatedInvocation, type ClaimInvocationDispatchInput } from './invocation.js';
 import { loadInputContinuation } from './input.js';
+import { decodeAgentStop, selectAgentStop, type AgentStopIntent } from '../../runtime/stop.js';
 import type { HeldInstalledRuntime } from '../installed-runtime.js';
 
 const TOOL_BUDGET = Object.freeze({ modelTokens: 0, costMicros: 0, toolCalls: 1, repairAttempts: 0 });
@@ -244,15 +245,16 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
     let settlement: ReturnType<typeof prepareValidatedInvocationSettlement> | undefined;
     let graph: ReturnType<typeof planContinuationCommit> | undefined;
     let observationMetadata: Awaited<ReturnType<ArtifactCatalog['describe']>> | undefined;
+    let checkedRun: Run | undefined, checkedStop: AgentStopIntent | undefined;
+    let stopConflict: { error: KernelStorageError; revision: number } | undefined;
 
-    function validateSnapshot(connection: SqliteConnection, current: Run) {
+    function validateOriginalCut(connection: SqliteConnection, current: Run) {
       if (!selection) throw new KernelStorageError('RECOVERY_REQUIRED', 'tool completion has no original selected cut');
       const { selected, items } = selection;
       const stable = ({ revision: _revision, updatedAt: _time, stopIntentRef: _intent, cancelRequested: _cancel, ...data }: Run) => data;
       const unchanged = canonicalSha256(current) === canonicalSha256(selected.run);
       if ((!unchanged && (current.revision <= selected.run.revision || current.updatedAt < selected.run.updatedAt ||
           !current.stopIntentRef || selected.run.cancelRequested && !current.cancelRequested ||
-          selected.run.stopIntentRef !== undefined && current.stopIntentRef !== selected.run.stopIntentRef ||
           canonicalSha256(stable(current)) !== canonicalSha256(stable(selected.run)))) ||
           canonicalSha256(readInvocationJournal(connection, runId)) !== canonicalSha256(selected.journal) ||
           canonicalSha256(readItems(connection)) !== canonicalSha256(items) ||
@@ -263,10 +265,49 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
       }
       assertCut(connection, current, selected);
     }
+    function validateSnapshot(connection: SqliteConnection, current: Run) {
+      validateOriginalCut(connection, current);
+      if (!checkedRun || canonicalSha256(current) !== canonicalSha256(checkedRun)) {
+        throw new KernelStorageError('REVISION_CONFLICT', 'tool completion has not verified this exact StopIntent cut');
+      }
+    }
+    function changedStopCut(current: Run, expectedRunRevision: number): never {
+      validateOriginalCut(driver, current);
+      const error = new KernelStorageError('REVISION_CONFLICT', 'tool completion StopIntent revision changed during validation');
+      if (current.revision > expectedRunRevision && current.stopIntentRef) stopConflict = { error, revision: current.revision };
+      throw error;
+    }
+    async function checkStopCut(expectedRunRevision: number) {
+      if (!selection || !checkedRun) throw new KernelStorageError('RECOVERY_REQUIRED', 'tool completion has no original StopIntent cut');
+      const current = readRun(driver, runId);
+      if (current.revision !== expectedRunRevision) changedStopCut(current, expectedRunRevision);
+      if (canonicalSha256(current) === canonicalSha256(checkedRun)) { validateSnapshot(driver, current); return; }
+      // cut() authenticates the retained StopIntent, including its original
+      // control row/channel or reproducible resource cause. Decoding a ref
+      // alone would not establish that ownership.
+      const next = await cut();
+      const { run: _originalRun, ...originalData } = selection.selected;
+      const { run: _nextRun, ...nextData } = next;
+      validateOriginalCut(driver, next.run);
+      if (canonicalSha256(nextData) !== canonicalSha256(originalData) || next.run.revision <= checkedRun.revision ||
+          next.run.updatedAt < checkedRun.updatedAt || checkedRun.cancelRequested && !next.run.cancelRequested || !next.run.stopIntentRef) {
+        throw new KernelStorageError('REVISION_CONFLICT', 'tool completion StopIntent replaced its original continuation');
+      }
+      const intent = decodeAgentStop(await readCanonicalArtifact(artifacts, next.run.stopIntentRef), next.run);
+      if (next.run.stopIntentRef !== checkedRun.stopIntentRef &&
+          (selectAgentStop(checkedStop, intent) !== intent || checkedStop !== undefined && intent.createdAt < checkedStop.createdAt)) {
+        throw new KernelStorageError('REVISION_CONFLICT', 'tool completion StopIntent is not a monotonic upgrade');
+      }
+      const observed = readRun(driver, runId);
+      if (next.run.revision !== expectedRunRevision || canonicalSha256(observed) !== canonicalSha256(next.run)) changedStopCut(observed, expectedRunRevision);
+      checkedRun = next.run; checkedStop = intent;
+      validateSnapshot(driver, observed);
+    }
 
     return { input: original, get established() { return established; }, async complete(expectedRunRevision: number) {
       if (failure && !isJoinedCasPublicationFailure(failure.error) && !isRolledBackSqliteTransactionFailure(driver, failure.error) &&
-          !settlement?.acceptRevisionConflict(failure.error, expectedRunRevision)) throw failure.error;
+          !settlement?.hasRevisionConflict(failure.error, expectedRunRevision) &&
+          !(stopConflict !== undefined && stopConflict.error === failure.error && stopConflict.revision === expectedRunRevision)) throw failure.error;
       const retryCommit = failure !== undefined && isRolledBackSqliteTransactionFailure(driver, failure.error);
       try {
         if (!selection) {
@@ -274,9 +315,22 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
           requireEqual(items.map(row => [row.item_id, Number(row.item_seq), row.kind, row.payload_ref]),
             selected.items.map(row => [row.item.itemId, row.itemSeq, row.item.kind, row.itemRef]), 'original completion items');
           selection = { selected, expected, items };
+          // The original ToolCut already validated the complete historical
+          // stop closure; retain only its exact typed intent for precedence.
+          checkedRun = selected.run;
+          checkedStop = selected.run.stopIntentRef ? decodeAgentStop(await readCanonicalArtifact(artifacts, selected.run.stopIntentRef), selected.run) : undefined;
         }
         const { selected, expected } = selection;
-        validateSnapshot(driver, readRun(driver, runId));
+        await checkStopCut(expectedRunRevision);
+        // Awaiting even an already checked cut yields. A cancellation which
+        // commits in that gap is another pending conflict, not a sticky
+        // rejection or permission to skip its asynchronous ownership check.
+        const current = readRun(driver, runId);
+        if (current.revision !== expectedRunRevision) changedStopCut(current, expectedRunRevision);
+        if (failure && settlement?.hasRevisionConflict(failure.error, expectedRunRevision) &&
+            !settlement.acceptRevisionConflict(failure.error, expectedRunRevision)) throw failure.error;
+        stopConflict = undefined;
+        validateSnapshot(driver, current);
         const entries = readInvocationAttempt(driver, runId, original.opId, original.attempt);
         const prepared = entries.find(entry => entry.phase === 'prepared'), claim = entries.find(entry => entry.phase === 'dispatch_claimed');
         if (!prepared?.grantRef || !claim || original.opId !== expected.request.opId ||

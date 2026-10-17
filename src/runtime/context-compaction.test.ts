@@ -50,9 +50,18 @@ function history(texts: string[], inputAnswer?: string) {
     contextManifestDigest: context.projectionDigest, messages, tools: [], projectionDigest: '' };
   projection.projectionDigest = digestOmitting(projection, 'projectionDigest');
   return { context, contextRef: canonicalSha256(context), projection, items, policy: authority.assembly.context,
+    provider: authority.assembly.provider, compactionEnvelope: authority.material.compactionEnvelope,
     createdAt: baseTime };
 }
 const baseTime = '2026-09-05T00:00:00.000Z';
+
+function largeWindow(input: ReturnType<typeof history>) {
+  Object.assign(input.policy, { contextLimitTokens: 1_048_576, hardPromptTokens: 1_044_480,
+    triggerThresholdTokens: 734_003, protectedRecentTokens: 32_768, summaryTokenCap: 8192,
+    sourceInputTokenCap: 524_288 });
+  input.provider.negotiation.contextLimitTokens = input.policy.contextLimitTokens;
+  return input;
+}
 
 test('compaction selects the greatest closed prefix and excludes fixed instructions and audit refs from its source', () => {
   const input = history(['a'.repeat(20_000), 'b'.repeat(20_000), 'c'.repeat(28_000)]);
@@ -73,6 +82,60 @@ test('small prompts do not compact; an oversized indivisible prefix or protected
   assert.equal(planContextCompaction(history(['small'])).kind, 'normal');
   assert.equal(planContextCompaction(history(['a'.repeat(60_000), 'b'.repeat(28_000)])).kind, 'exhausted');
   assert.equal(planContextCompaction(history(['x'.repeat(70_000)])).kind, 'exhausted');
+  const tokenExhausted = planContextCompaction(history(['x'.repeat(70_000)]));
+  assert.ok(tokenExhausted.kind === 'exhausted');
+  assert.equal(Object.hasOwn(tokenExhausted.evidence, 'trigger'), false);
+  assert.equal(Object.hasOwn(tokenExhausted.evidence, 'requestBodyBytes'), false);
+});
+
+test('a normal request exceeding the wire bound compacts a safe whole prefix even below the token trigger', () => {
+  const input = largeWindow(history(['a'.repeat(40_000), '"'.repeat(540_000)]));
+  const selected = planContextCompaction(input);
+  assert.equal(selected.kind, 'compact');
+  if (selected.kind !== 'compact') return;
+  assert.equal(selected.plan.compactThroughItemSeq, 3);
+  assert.ok(selected.sourceContextUtf8.includes('a'.repeat(40_000)));
+  assert.deepEqual((JSON.parse(selected.sourceContextUtf8) as { contentUtf8: string }[]).map(message => message.contentUtf8),
+    ['a'.repeat(40_000), '{"code":"TOOL_INPUT_INVALID"}']);
+});
+
+test('the greatest safe prefix must fit the actual compaction envelope after source JSON is escaped again', () => {
+  const selected = planContextCompaction(largeWindow(history([
+    'a'.repeat(100_000), '"'.repeat(400_000), 'z'.repeat(200_000)
+  ])));
+  assert.equal(selected.kind, 'compact');
+  if (selected.kind !== 'compact') return;
+  assert.equal(selected.plan.compactThroughItemSeq, 3);
+  assert.ok(selected.sourceContextUtf8.includes('a'.repeat(100_000)));
+  assert.deepEqual((JSON.parse(selected.sourceContextUtf8) as { contentUtf8: string }[]).map(message => message.contentUtf8),
+    ['a'.repeat(100_000), '{"code":"TOOL_INPUT_INVALID"}']);
+});
+
+test('no byte-safe complete prefix yields exact wire exhaustion rather than a truncated or over-limit request', () => {
+  const input = largeWindow(history(['"'.repeat(300_000), 'z'.repeat(500_000)]));
+  const selected = planContextCompaction(input);
+  assert.equal(selected.kind, 'exhausted');
+  if (selected.kind !== 'exhausted') return;
+  assert.ok('trigger' in selected.evidence);
+  assert.equal(selected.evidence.trigger, 'request_body_bytes');
+  assert.ok(selected.evidence.nextPromptTokens <= selected.evidence.triggerThresholdTokens);
+  assert.ok(selected.evidence.requestBodyBytes > 1_048_576);
+  assert.equal(selected.evidence.requestBodyLimitBytes, 1_048_576);
+  assert.match(selected.evidence.modelVisiblePromptDigest, /^[a-f0-9]{64}$/u);
+  assert.equal(selected.evidence.contextManifestRef, input.contextRef);
+  assert.deepEqual(planContextCompaction(input), selected);
+});
+
+test('two ordinary 700 KiB results select the largest complete byte-safe prefix without changing frozen token caps', () => {
+  const input = largeWindow(history(['a'.repeat(700 * 1024), 'b'.repeat(700 * 1024)]));
+  const before = structuredClone(input.policy);
+  const selected = planContextCompaction(input);
+  assert.equal(selected.kind, 'compact');
+  if (selected.kind !== 'compact') return;
+  assert.equal(selected.plan.compactThroughItemSeq, 3);
+  assert.ok(selected.sourceContextUtf8.includes('a'.repeat(700 * 1024)));
+  assert.equal(selected.sourceContextUtf8.includes('b'.repeat(700 * 1024)), false);
+  assert.deepEqual(input.policy, before);
 });
 
 test('normal dispatch cannot overtake an incomplete or out-of-order batch, even below the compaction threshold', () => {

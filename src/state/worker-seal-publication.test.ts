@@ -5,6 +5,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { KERNEL_CAS_DIRECTORY } from '../config.js';
 import type { BudgetSettlementV1, RecoveryClosureV1, Session, ToolResultItem } from '../kernel/types.js';
+import { decodeAgentStop, selectAgentStop } from '../runtime/stop.js';
 import { openStateStore, publishInProcessChannel } from './store.js';
 import { createAgentFixture } from './testing/agent-fixtures.js';
 import { admissionKey, disposeFixture, uuidv7 } from './testing/fixtures.js';
@@ -150,19 +151,23 @@ test('a cancellation during settlement publication preserves the winning cut wit
   } finally { await disposeFixture(fixture); t.mock.restoreAll(); }
 });
 
-test('a joined result-graph publication refusal resumes the same completion without restaging its settlement', async t => {
+for (const priorDeadline of [false, true]) test(`a joined result-graph publication refusal resumes the same completion ${priorDeadline ? 'after a deadline upgrades to user cancellation' : 'without restaging its settlement'}`, async t => {
   let clock = Date.now();
   t.mock.method(Date, 'now', () => clock);
-  const fixture = await createAgentFixture('seal-publication-resume', undefined, { mode: 'accept-edits', tools: ['edit'] });
+  const fixture = await createAgentFixture('seal-publication-resume', { wallTimeMs: 60_000 }, { mode: 'accept-edits', tools: ['edit'] });
   try {
     // The existing real SQLite/CAS and FileHandle seam is used here. Its
     // offline containment graph is neither native death nor full-disk proof.
     await batch(fixture, [{ name: 'edit', input: { path: 'a', old_text: 'old', new_text: 'new' } }]);
     const prepared = await prepareTool(fixture), claimed = await claimTool(fixture, prepared);
     const raw = await observation(fixture, claimed, { changed: true });
+    if (priorDeadline) {
+      clock += 60_000;
+      await fixture.agent.expireRun({ expectedRunRevision: fixture.store.getRun(fixture.runId).revision });
+    }
     const proof = await postEffectObservation(fixture, raw, prepared.checkpointId);
     const input = { opId: prepared.entry.opId, attempt: prepared.entry.attempt,
-      expectedRunRevision: prepared.run.revision, observationRef: proof.observationRef };
+      expectedRunRevision: fixture.store.getRun(fixture.runId).revision, observationRef: proof.observationRef };
     const before = await fixture.store.readRecoveryClosure(fixture.runId);
     const sample = await fs.open(path.join(fixture.stateRoot, KERNEL_CAS_DIRECTORY, proof.observationRef), 'r');
     const prototype = Object.getPrototypeOf(sample) as { writeFile: FileHandle['writeFile'] };
@@ -187,6 +192,25 @@ test('a joined result-graph publication refusal resumes the same completion with
     assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
     await assert.rejects(fixture.agent.completeTool({ ...input, observationRef: raw }), { code: 'REVISION_CONFLICT' });
     clock += 1_000;
+    let cancellationRef: string | undefined;
+    if (priorDeadline) {
+      assert(before.run.stopIntentRef);
+      const cancelled = await fixture.agent.cancelRun({ ...await publishInProcessChannel(fixture.store), requestId: uuidv7(),
+        expectedRunRevision: before.run.revision });
+      cancellationRef = cancelled.run.stopIntentRef;
+      assert(cancellationRef); assert.notEqual(cancellationRef, before.run.stopIntentRef);
+      const prior = decodeAgentStop(await fixture.store.artifacts.readCanonical(before.run.stopIntentRef), before.run);
+      const winning = decodeAgentStop(await fixture.store.artifacts.readCanonical(cancellationRef), cancelled.run);
+      assert.equal(prior.origin, 'deadline'); assert.equal(winning.origin, 'user_cancel');
+      assert.strictEqual(selectAgentStop(winning, prior), winning, 'a lower-priority retained intent cannot replace the winner');
+      const again = await fixture.agent.cancelRun({ ...await publishInProcessChannel(fixture.store), requestId: uuidv7(),
+        expectedRunRevision: cancelled.run.revision });
+      assert.equal(again.run.stopIntentRef, cancellationRef);
+      assert.strictEqual(selectAgentStop(winning, decodeAgentStop(await fixture.store.artifacts.readCanonical(cancellationRef), again.run)), winning,
+        'equal priority preserves the original intent rather than replacing it');
+      assert.deepEqual((await fixture.agent.expireRun({ expectedRunRevision: again.run.revision })).run, again.run);
+      input.expectedRunRevision = again.run.revision;
+    }
     const completed = await fixture.agent.completeTool(input);
     writer.mock.restore();
     assert.equal(settlements.length, 1, 'the successful settlement publication is not repeated');
@@ -198,5 +222,14 @@ test('a joined result-graph publication refusal resumes the same completion with
     assert.deepEqual(after.journal.filter(entry => entry.opId === prepared.entry.opId).map(entry => entry.phase),
       ['prepared', 'dispatch_claimed', 'completed']);
     assert.deepEqual(after.journal.slice(0, -1), before.journal);
+    if (priorDeadline) {
+      assert.equal(after.run.stopIntentRef, cancellationRef); assert.equal(after.run.cancelRequested, true);
+      const terminal = await fixture.agent.commitTerminalStop({ expectedRunRevision: after.run.revision });
+      assert.equal(terminal.run.status, 'cancelled'); assert.equal(terminal.run.terminalReason, 'cancelled_by_user');
+      assert.equal(terminal.run.stopIntentRef, cancellationRef); assert.equal(terminal.run.budgetConsumed.toolCalls, 1);
+      const retained = await fixture.store.readRecoveryClosure(fixture.runId);
+      await fixture.store.close(); fixture.store = await openStateStore(fixture.stateRoot, fixture.signed);
+      assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), retained);
+    }
   } finally { t.mock.restoreAll(); await disposeFixture(fixture); }
 });

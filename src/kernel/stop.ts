@@ -2,6 +2,17 @@ import type { ArtifactRef, BudgetUsage, RunStatus, RunTerminalReason } from './t
 
 type StopIdentity = { schemaVersion: 1; runId: string; createdAt: string };
 
+/** The token trigger retains its original closed shape. Byte exhaustion is a
+ * separate, reproducible pre-dispatch fact, never an arbitrary caught error. */
+export type ContextWindowExhaustionCause = {
+  contextManifestRef: ArtifactRef; nextPromptTokens: number; triggerThresholdTokens: number;
+  hardPromptTokens: number; protectedTokens: number; sourceInputTokenCap: number;
+} & (
+  | { trigger?: never; modelVisiblePromptDigest?: never; requestBodyBytes?: never; requestBodyLimitBytes?: never }
+  | { trigger: 'request_body_bytes'; modelVisiblePromptDigest: ArtifactRef;
+      requestBodyBytes: number; requestBodyLimitBytes: 1048576 }
+);
+
 /** Implemented model-response branch of the RFC's closed RuntimeFailureEvidenceV1 union. */
 export type ModelResponseFailureEvidenceV1 = {
   schemaVersion: 1; format: 'cliq-runtime-failure-evidence-v1'; runId: string;
@@ -45,8 +56,7 @@ export type StopIntent = StopIdentity & (
       | { subjectKind: 'delivery' | 'dependency_install_scripts'; reason: 'runtime_failed' }))
   | ({ origin: 'runtime'; targetStatus: 'failed'; reason: 'runtime_failed' } & (
       | { runtimeSubtype: 'context_compaction_failed'; compactionPlanRef: ArtifactRef; modelOpId: string; attempt: number }
-      | { runtimeSubtype: 'context_window_exhausted'; contextManifestRef: ArtifactRef; nextPromptTokens: number;
-          triggerThresholdTokens: number; hardPromptTokens: number; protectedTokens: number; sourceInputTokenCap: number }
+      | ({ runtimeSubtype: 'context_window_exhausted' } & ContextWindowExhaustionCause)
       | { runtimeSubtype: 'delivery_merge_conflict'; deliveryMergeConflictItemRef: ArtifactRef; conflictRef: ArtifactRef }
       | { runtimeSubtype: 'delivery_publication_failed'; deliveryPlanRef: ArtifactRef; sequence: 'forward' | 'abort'; operationId: string }
       | { runtimeSubtype: 'local_inference_unavailable'; activationCycleId: string; serviceId: string; frontierRef: ArtifactRef; failureDetailRef: ArtifactRef }
@@ -60,8 +70,7 @@ export type TerminalReasonDetail =
   | { kind: 'verifier_source_mutation'; verifierOpId: string; violationOrDigestEvidenceRef: ArtifactRef; violationOrDigestEvidenceDigest: string }
   | { kind: 'budget_exhausted' | 'cancelled'; stopIntentRef: ArtifactRef }
   | { kind: 'context_compaction_failed'; compactionPlanRef: ArtifactRef; modelOpId: string; attempt: number; evidenceRef: ArtifactRef }
-  | { kind: 'context_window_exhausted'; contextManifestRef: ArtifactRef; nextPromptTokens: number; triggerThresholdTokens: number;
-      hardPromptTokens: number; protectedTokens: number; sourceInputTokenCap: number; evidenceRef: ArtifactRef }
+  | ({ kind: 'context_window_exhausted'; evidenceRef: ArtifactRef } & ContextWindowExhaustionCause)
   | { kind: 'dependency_source_integrity'; dependencyPlanRef: ArtifactRef; failingOpId: string; integrityEvidenceRef: ArtifactRef; integrityEvidenceDigest: string }
   | { kind: 'delivery_merge_conflict'; deliveryMergeConflictItemRef: ArtifactRef; conflictRef: ArtifactRef }
   | { kind: 'delivery_publication_failed'; deliveryPlanRef: ArtifactRef; sequence: 'forward' | 'abort'; operationId: string; evidenceRef: ArtifactRef }

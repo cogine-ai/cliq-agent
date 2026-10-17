@@ -2797,7 +2797,7 @@ Normal prompt construction is a total stored projection, not adapter assembly. `
 3. Emit one user message for the exact `RunObjectiveV1.utf8` named by `RunSpec.objectiveRef`, with `sourceKind='run_objective'` and that ref as `sourceId`.
 4. Walk the current `ContextManifest.segments` in order. A summary emits its exact `ModelTextV1` as one user message. An `excluded_control` segment emits none. Every raw item must be one of the following model-visible forms; every other item belongs in `excluded_control`: a `ModelTurnItem` emits one assistant message whose text equals its `ModelTextV1` and whose ordered calls equal the decoded `AgentModelTurn`; each call's `arguments` retains `{encoding:'jcs_json',value}` or `{encoding:'utf8_json_fragment',utf8}` directly from its observation, with no internal stringify/parse round trip, and its ref/digest/id/index/name equal `ToolCallInputV1`; a `ToolResultItem` emits one tool message whose content is `UTF8(JCS(decoded ToolResultModelContentV1.content))`; a `UserInputItem` emits one user message containing exact text or `UTF8(JCS(value))` from its ref-free `UserInputModelContentV1`; a `RepairDiagnosticItem` emits one user message per ordered diagnostic using only `VerifierRepairModelContentV1.message`; and a `ChildResultItem` emits one user message containing `UTF8(JCS(ChildResultModelContentV1.content))`. The source item id and source kind match each message. No authority/audit payload, raw verifier output, principal, grant, StopIntent, containment fact, or legacy payload is serialized.
 
-The `tools` array is empty for text-only mode. Otherwise it is the contiguous projection of `provider.negotiation.exposedToolNames` in that order: every name selects exactly one `ToolContractManifestV1` entry, description is byte-identical, and `inputSchemaRef/inputSchemaDigest/inputSchema` rehash and decode the exact finite JSON-domain schema. There are no hidden or adapter-added tools. The entire projection's JCS is bounded to the admitted context/model limit before dispatch; an indivisible oversized message follows the context-window failure rule rather than truncation.
+The `tools` array is empty for text-only mode. Otherwise it is the contiguous projection of `provider.negotiation.exposedToolNames` in that order: every name selects exactly one `ToolContractManifestV1` entry, description is byte-identical, and `inputSchemaRef/inputSchemaDigest/inputSchema` rehash and decode the exact finite JSON-domain schema. There are no hidden or adapter-added tools. Before dispatch the full model-visible projection passes both the admitted context estimate and the actual provider-native JCS body limit of 1,048,576 bytes, including adapter framing and JSON escaping. The same wire constructor determines eligibility and the retained outgoing bytes; an indivisible oversized message follows the context-window failure rule rather than truncation. This byte limit never reduces the signed request-token ceiling or the frozen context/output caps.
 
 Every normal or context-compaction model Journal `requestRef` decodes the single `ModelRequestV1`; `requestDigest` omits itself under JCS. Run/op/attempt, assembly ref/digest, provider/model/mode, projection pair, body ref/count/path, streaming flag, output cap, estimate and reservation equal the prepared attempt. Normal mode is the frozen assembly mode, output cap is `O`, and `compactionPlanRef` is absent. Compaction mode is `text-only`, cap is `S`, and the plan is the current frontier's exact plan. Its stored projection is the retained envelope's system message plus user prefix/source/suffix, with no tools or fabricated framing. `AgentModelTurn` repeats the applicable projection pair and request digest. Recovery reloads the same immutable closure and re-prepares the retained projection, reproducing the same request and wire bytes before accepting a response.
 
@@ -3600,7 +3600,7 @@ type StopIntent =
             modelOpId: string
             attempt: number
           }
-        | {
+        | ({
             runtimeSubtype: 'context_window_exhausted'
             contextManifestRef: ArtifactRef
             nextPromptTokens: number
@@ -3608,7 +3608,10 @@ type StopIntent =
             hardPromptTokens: number
             protectedTokens: number
             sourceInputTokenCap: number
-          }
+          } & (
+            | { trigger?: never; modelVisiblePromptDigest?: never; requestBodyBytes?: never; requestBodyLimitBytes?: never }
+            | { trigger: 'request_body_bytes'; modelVisiblePromptDigest: ArtifactRef; requestBodyBytes: number; requestBodyLimitBytes: 1048576 }
+          ))
         | {
             runtimeSubtype: 'delivery_merge_conflict'
             deliveryMergeConflictItemRef: ArtifactRef
@@ -6615,7 +6618,9 @@ Cancellation, deadline, or failure atomically appends `cancelled` results for un
 
 Long horizon cannot depend on an ever-growing prompt or implicit provider truncation. The assembly freezes `C/O/H/T/R/S/K/P` under the estimate policy above and the exact `CompactionPromptEnvelopeV1`. Each of its three `ModelTextV1` members is valid NFC/no-NUL UTF-8, rehashes, and the combined fixed text is at most 256 KiB. The logical source placeholder cannot occur in fixed text and is not emitted. `K` estimates exactly system content and user prefix + empty source + suffix, plus two-message overhead; plan/source data do not participate in the envelope digest. A compaction response requests actual provider output cap `S` and accepts only complete nonempty Markdown of at most `min(262144,3*S)` UTF-8 bytes, whose text estimate is therefore at most `S`. Context estimates are not signed billing bounds or proof of provider context acceptance.
 
-Before normal dispatch, trusted code estimates the next prompt. If `N<=T`, dispatch normally. Otherwise protect fixed admitted Session/parent context, instructions/skills/tools and every live frontier/wait/StopIntent/invocation/child/candidate/verifier reference. Protect newest whole segments until their model-visible content estimates total at least `R`, extending backward for other live references. Candidates are contiguous sequence-one prefixes ending at closed segment boundaries before the protected suffix. Their source is the current model-visible projection, including existing summaries but excluding control payloads. A legal source has estimated content `<=P` and `>=S+512`; choose the greatest `throughItemSeq`. Summary replacement reduces estimated source content by at least 512 units; admission of the replacement must also verify that the complete next-prompt estimate decreases (including message overhead). If `N>T` and no legal range exists, make no call and propose `runtime_failed(context_window_exhausted)` with exact manifest/estimate evidence. Never truncate, split an item, loosen protection or loop on the same summary.
+Before normal dispatch, trusted code estimates the next prompt and constructs its exact provider-native JCS body with frozen provider/model/mode/streaming, context and output caps. Dispatch normally only if `N<=T` and this body is at most 1,048,576 bytes. Otherwise protect fixed admitted Session/parent context, instructions/skills/tools and every live frontier/wait/StopIntent/invocation/child/candidate/verifier reference. Protect newest whole segments until their model-visible content estimates total at least `R`, extending backward for other live references. Candidates are contiguous sequence-one prefixes ending at closed segment boundaries before the protected suffix. Their source is the current model-visible projection, including existing summaries but excluding control payloads. A legal source has estimated content `<=P` and `>=S+512`, and its actual tools-disabled request, including the retained envelope and all JSON escaping, is at most 1,048,576 bytes; choose the greatest `throughItemSeq`. The same constructor is used for eligibility and preparation, and preparation independently enforces the hard byte limit. Summary replacement reduces estimated source content by at least 512 units; admission of the replacement must also verify that the complete next-prompt estimate decreases (including message overhead).
+
+If no legal range exists, make no call and propose `runtime_failed(context_window_exhausted)`. For `N>T`, retain the existing exact manifest/estimate evidence shape. For `N<=T` with an oversized native body, require the closed `trigger='request_body_bytes'` branch with the exact `requestBodyBytes>requestBodyLimitBytes`, literal `requestBodyLimitBytes=1048576`, and `modelVisiblePromptDigest=SHA-256(JCS(ModelVisiblePromptV1))`. This digest binds the complete messages/tools/response contract without a revision-dependent audit projection. The StopIntent owner and recovery independently reproduce these facts and the absence of a legal candidate from retained context, assembly and envelope; a caught `RangeError`, caller-selected reason, or larger estimated source is not proof. The installed scheduler enters the same proof-backed StopIntent/retirement/terminal transaction without preparing or claiming another attempt. Never truncate, split an item, loosen protection or loop on the same summary; signed billing ceilings and frozen `C/O/T/R/S/P/K` are unchanged.
 
 For the chosen range, publish immutable `RunContextCompactionPlan`, set `phase='context_compaction'`, and use an ordinary tools-disabled Journaled model attempt with frozen retry/budget policy. Plan envelope pair, `C/O/T/R/S/K/P` and byte limit equal assembly; `promptOverheadTokens=K`; source range/digest/estimate equal the chosen projection. `RunContextCompactionItem.summaryRef` must be that highest/current completed turn's `AgentModelTurn.textRef`, decoding bounded NFC/no-NUL `ModelTextV1`; both item and replacement segment repeat its `textDigest`. A text-only provider may compact because the response is content, not a control envelope. Tool-bearing, non-end, malformed or oversized responses cannot become a summary. Raw items remain durable.
 
@@ -8334,7 +8339,7 @@ type TerminalReasonDetail =
       attempt: number
       evidenceRef: ArtifactRef
     }
-  | {
+  | ({
       kind: 'context_window_exhausted'
       contextManifestRef: ArtifactRef
       nextPromptTokens: number
@@ -8343,7 +8348,10 @@ type TerminalReasonDetail =
       protectedTokens: number
       sourceInputTokenCap: number
       evidenceRef: ArtifactRef
-    }
+    } & (
+      | { trigger?: never; modelVisiblePromptDigest?: never; requestBodyBytes?: never; requestBodyLimitBytes?: never }
+      | { trigger: 'request_body_bytes'; modelVisiblePromptDigest: ArtifactRef; requestBodyBytes: number; requestBodyLimitBytes: 1048576 }
+    ))
   | {
       kind: 'dependency_source_integrity'
       dependencyPlanRef: ArtifactRef

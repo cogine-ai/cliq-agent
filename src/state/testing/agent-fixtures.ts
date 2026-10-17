@@ -16,9 +16,9 @@ import { publishOfflineModelEndpoint } from './model-endpoint.js';
 /** Real CAS + SQLite/lease, with offline signed-authority verification fixtures; no provider or tool I/O. */
 export async function createAgentFixture(label: string, budgets?: Partial<RunSpec['budgets']>, options: {
   tools?: Array<keyof typeof builtinInputContracts>; mode?: RunPolicySnapshotV1['mode'];
-  rules?: RunPolicySnapshotV1['decisionRules']; outputSchema?: unknown;
+  rules?: RunPolicySnapshotV1['decisionRules']; outputSchema?: unknown; contextLimitTokens?: number;
 } = {}) {
-  const authority = testFixture();
+  const authority = testFixture('openai', true, options.contextLimitTokens);
   const builtins = (options.tools ?? ['read']).map((name) => builtinInputContracts[name])
     .sort((left, right) => Buffer.compare(Buffer.from(left.name), Buffer.from(right.name)));
   const selected = builtins.map((builtin) => ({ name: builtin.name, description: `Use ${builtin.name}`, inputSchema: builtin.inputSchema,

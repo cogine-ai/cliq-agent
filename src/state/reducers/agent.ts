@@ -184,7 +184,7 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
     const items = await readContextItems(driver, artifacts, runId, context.throughItemSeq);
     const projection = await readModelContext({ artifacts, run, spec, assembly, context, systemInstruction, tools });
     const reproduced = planContextCompaction({ context, contextRef: plan.sourceContextManifestRef, items, projection,
-      policy: assembly.context, createdAt: plan.createdAt });
+      policy: assembly.context, provider: assembly.provider, compactionEnvelope: material.compactionEnvelope, createdAt: plan.createdAt });
     if (reproduced.kind !== 'compact' || canonicalSha256(reproduced.plan) !== planRef) {
       throw new TypeError('compaction plan cannot be reproduced from retained context and frozen policy');
     }
@@ -297,7 +297,8 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
       const projection = await project(cut.run, cut.context, cut.checkpoint.contextManifestRef);
       const selection = cut.frontier.phase === 'context_compaction' ? await compactionSource(cut.run, cut.frontier.compactionPlanRef!)
         : planContextCompaction({ context: cut.context, contextRef: cut.checkpoint.contextManifestRef, items: cut.items,
-          projection, policy: assembly.context, createdAt: sampleCanonicalNow() });
+          projection, policy: assembly.context, provider: assembly.provider, compactionEnvelope: material.compactionEnvelope,
+          createdAt: sampleCanonicalNow() });
       if (selection.kind === 'exhausted') {
         const evidence = planCanonicalArtifact(selection.evidence, selection.evidence.format);
         await publishPlans(artifacts, [evidence]);
