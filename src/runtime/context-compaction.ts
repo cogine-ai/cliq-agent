@@ -1,8 +1,9 @@
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting, parseCanonicalTime } from '../kernel/identity.js';
 import type { ContextManifest, ContextSegment, ContinuationItem, RunAssemblyV1, RunContextCompactionPlan } from '../kernel/types.js';
-import { estimatePromptTokens, estimateTextTokens, projectModelVisiblePrompt,
-  type NormalPromptMessageV1, type NormalPromptProjectionV1 } from '../model/request.js';
+import { buildModelRequestWire, compactionEnvelopeEstimate, estimatePromptTokens, estimateTextTokens,
+  MODEL_REQUEST_BODY_LIMIT_BYTES, projectCompactionPrompt, projectModelVisiblePrompt,
+  type CompactionPromptEnvelopeMaterial, type NormalPromptMessageV1, type NormalPromptProjectionV1 } from '../model/request.js';
 
 export type ContextItem = { itemSeq: number; itemRef: string; item: ContinuationItem };
 type ContextProjection = Pick<NormalPromptProjectionV1, 'messages' | 'tools'> & Partial<Pick<NormalPromptProjectionV1, 'projectionDigest'>>;
@@ -112,14 +113,28 @@ function closedBoundaries(items: readonly ContextItem[]): Set<number> {
 export function planContextCompaction(input: {
   context: ContextManifest; contextRef: string; items: readonly ContextItem[];
   projection: ContextProjection; policy: RunAssemblyV1['context']; createdAt: string;
+  provider: Pick<RunAssemblyV1['provider'], 'name' | 'model' | 'negotiation'>;
+  compactionEnvelope: CompactionPromptEnvelopeMaterial;
 }) {
-  const { context, contextRef, items, projection, policy } = input;
+  const { context, contextRef, items, projection, policy, provider, compactionEnvelope } = input;
   parseCanonicalTime(input.createdAt);
   if (canonicalSha256(context) !== contextRef) throw new TypeError('compaction context reference mismatch');
   validateContextItems(context, items);
   const closed = closedBoundaries(items);
-  const nextPromptTokens = estimatePromptTokens(projectModelVisiblePrompt(projection, 'native-tools'));
-  if (nextPromptTokens <= policy.triggerThresholdTokens) return { kind: 'normal' as const };
+  if (compactionEnvelope.ref !== policy.compactionPromptEnvelopeRef ||
+      compactionEnvelope.value.envelopeDigest !== policy.compactionPromptEnvelopeDigest ||
+      compactionEnvelopeEstimate(compactionEnvelope) !== policy.compactionEnvelopeTokens ||
+      provider.negotiation.contextLimitTokens !== policy.contextLimitTokens) throw new TypeError('compaction wire policy differs from its frozen assembly');
+  const wireAuthority = { provider: provider.name, model: provider.model, streaming: provider.negotiation.streaming,
+    contextLimitTokens: policy.contextLimitTokens };
+  const normalPrompt = projectModelVisiblePrompt(projection, provider.negotiation.mode);
+  const nextPromptTokens = estimatePromptTokens(normalPrompt);
+  // Above T the token policy already requires compaction; avoid constructing
+  // an unbounded normal body that cannot be dispatched in that branch.
+  const requestBodyBytes = nextPromptTokens <= policy.triggerThresholdTokens
+    ? buildModelRequestWire(wireAuthority, normalPrompt, policy.reservedOutputTokens, provider.negotiation.mode).bodyBytes.byteLength
+    : undefined;
+  if (requestBodyBytes !== undefined && requestBodyBytes <= MODEL_REQUEST_BODY_LIMIT_BYTES) return { kind: 'normal' as const };
   const groups = context.segments.map((segment) => segmentMessages(segment, items, projection));
   const contentTokens = groups.map((messages) => {
     const prompt = projectModelVisiblePrompt({ ...projection, messages, tools: [] }, 'text-only');
@@ -141,18 +156,27 @@ export function planContextCompaction(input: {
     const sourceContextUtf8 = canonicalJsonBytes(visibleMessages(prefix, projection)).toString('utf8');
     const sourceProjectedTokens = estimateTextTokens(sourceContextUtf8);
     if (sourceProjectedTokens <= policy.sourceInputTokenCap && sourceProjectedTokens >= policy.summaryTokenCap + 512) {
-      selected = { through: segment.throughItemSeq, sourceContextUtf8, sourceProjectedTokens };
+      const prompt = projectCompactionPrompt(compactionEnvelope, sourceContextUtf8);
+      if (estimatePromptTokens(prompt) <= policy.contextLimitTokens - policy.summaryTokenCap &&
+          buildModelRequestWire(wireAuthority, prompt, policy.summaryTokenCap, 'text-only').bodyBytes.byteLength <= MODEL_REQUEST_BODY_LIMIT_BYTES) {
+        selected = { through: segment.throughItemSeq, sourceContextUtf8, sourceProjectedTokens };
+      }
     }
   }
   if (!selected) {
     const fixedTokens = nextPromptTokens - contentTokens.reduce((sum, value) => sum + value, 0);
-    return { kind: 'exhausted' as const, evidence: {
-      schemaVersion: 1, format: 'cliq-context-window-exhausted-evidence-v1', runId: context.runId,
+    const evidence = {
+      schemaVersion: 1 as const, format: 'cliq-context-window-exhausted-evidence-v1' as const, runId: context.runId,
       contextManifestRef: contextRef, ...(projection.projectionDigest ? { promptProjectionDigest: projection.projectionDigest } : {}),
       nextPromptTokens, triggerThresholdTokens: policy.triggerThresholdTokens, hardPromptTokens: policy.hardPromptTokens,
       protectedFromItemSeq: protectedFrom, protectedTokens: fixedTokens + recentTokens,
       sourceInputTokenCap: policy.sourceInputTokenCap, summaryTokenCap: policy.summaryTokenCap
-    } };
+    };
+    if (requestBodyBytes !== undefined) return { kind: 'exhausted' as const, evidence: { ...evidence,
+        trigger: 'request_body_bytes' as const,
+        modelVisiblePromptDigest: canonicalSha256(normalPrompt), requestBodyBytes,
+        requestBodyLimitBytes: MODEL_REQUEST_BODY_LIMIT_BYTES } as const };
+    return { kind: 'exhausted' as const, evidence };
   }
   const plan: RunContextCompactionPlan = { schemaVersion: 1, runId: context.runId, sourceContextManifestRef: contextRef,
     compactFromItemSeq: 1, compactThroughItemSeq: selected.through, preservedItemIds: [],

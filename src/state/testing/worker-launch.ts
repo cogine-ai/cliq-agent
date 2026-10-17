@@ -17,7 +17,7 @@ export function fixtureSandboxProfile(): SandboxProfileV1 {
     networkAtSpawn: 'none', networkAfterRelease: 'typed_broker_only', credentialReachability: 'typed_broker_only',
     stateRootReachability: 'none', inheritedHostEnvironment: false,
     resources: { maxProcesses: 256, memoryBytes: 4 * 1024 ** 3, cpuQuotaMicrosPerSecond: 400000, maxOpenFiles: 1024,
-      maxSingleFileBytes: 2 * 1024 ** 3, maxGenerationBytes: 20 * 1024 ** 3, maxInvocationOutputBytes: 16 * 1024 ** 2,
+      maxSingleFileBytes: 256 * 1024 ** 2, maxGenerationBytes: 20 * 1024 ** 3, maxInvocationOutputBytes: 16 * 1024 ** 2,
       maxIpcFrameBytes: 16 * 1024 ** 2, maxQueuedIpcBytes: 64 * 1024 ** 2 }, profileDigest: '' };
   profile.profileDigest = digestOmitting(profile, 'profileDigest');
   return profile;
@@ -28,7 +28,8 @@ export async function publishFixtureEditLaunch(fixture: Awaited<ReturnType<typeo
   prepared: Awaited<ReturnType<typeof prepareTool>>, dispatchId: string) {
   const { store } = fixture;
   const closure = await store.readRecoveryClosure(fixture.runId);
-  const parent = closure.workerLaunches.find((launch) => launch.launchId === closure.run.activeWorkerLaunchId)!;
+  const parent = closure.workerLaunches.find((launch) => launch.launchId === closure.run.activeWorkerLaunchId);
+  if (!parent || parent.phase !== 'activated') throw new Error('retained edit fixture requires its activated worker launch');
   const worker = await store.artifacts.readCanonical<Extract<SandboxLaunchSpecV1, { purpose: 'worker_activation' }>>(parent.sandboxLaunchSpecRef);
   const owner = { kind: 'run_invocation' as const, runId: fixture.runId, intendedLeaseEpoch: closure.run.leaseEpoch,
     workerLaunchId: parent.launchId, opId: prepared.entry.opId, attempt: prepared.entry.attempt, dispatchId };

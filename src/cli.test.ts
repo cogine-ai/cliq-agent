@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
+import { Console } from 'node:console';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { Readable } from 'node:stream';
+import { Readable, Writable } from 'node:stream';
 import test from 'node:test';
 import { mock } from 'node:test';
 import { promisify } from 'node:util';
@@ -54,6 +55,36 @@ import {
 } from './workspace/transactions/store.js';
 
 const execFileAsync = promisify(execFile);
+
+function captureCliOutput(stdout: (chunk: string) => void, stderr: (chunk: string) => void): () => void {
+  const descriptors = {
+    stdout: Object.getOwnPropertyDescriptor(process, 'stdout')!,
+    stderr: Object.getOwnPropertyDescriptor(process, 'stderr')!
+  };
+  const previousConsole = globalThis.console;
+  const sink = (original: typeof process.stdout | typeof process.stderr, capture: (chunk: string) => void) =>
+    Object.assign(new Writable({
+      write(chunk, _encoding, callback) {
+        capture(String(chunk));
+        callback();
+      }
+    }), { isTTY: original.isTTY, columns: original.columns, rows: original.rows });
+  const output = sink(process.stdout, stdout);
+  const errors = sink(process.stderr, stderr);
+
+  // The test runner owns the original streams, including binary result frames.
+  // Replace only the application's properties; never intercept the originals.
+  Object.defineProperty(process, 'stdout', { configurable: true, value: output });
+  Object.defineProperty(process, 'stderr', { configurable: true, value: errors });
+  globalThis.console = new Console(output, errors);
+  return () => {
+    globalThis.console = previousConsole;
+    Object.defineProperty(process, 'stdout', descriptors.stdout);
+    Object.defineProperty(process, 'stderr', descriptors.stderr);
+    output.end();
+    errors.end();
+  };
+}
 
 test('parseArgs accepts --policy=plan', () => {
   assert.deepEqual(parseArgs(['node', 'src/index.ts', '--policy=plan', 'chat']), {
@@ -1303,21 +1334,12 @@ test('runCli marks already-rendered runtime errors as reported', async () => {
   const previousTrust = process.env.CLIQ_TRUST_WORKSPACE;
   let stdout = '';
   let stderr = '';
-  const stdoutWrite = process.stdout.write;
-  const stderrWrite = process.stderr.write;
   const fetchMock = mock.method(globalThis, 'fetch', async () => {
     throw new Error('fetch failed');
   });
 
   process.chdir(cwd);
-  process.stdout.write = ((chunk: string | Uint8Array) => {
-    stdout += String(chunk);
-    return true;
-  }) as typeof process.stdout.write;
-  process.stderr.write = ((chunk: string | Uint8Array) => {
-    stderr += String(chunk);
-    return true;
-  }) as typeof process.stderr.write;
+  const restoreOutput = captureCliOutput((chunk) => { stdout += chunk; }, (chunk) => { stderr += chunk; });
 
   try {
     process.env.CLIQ_HOME = home;
@@ -1340,8 +1362,7 @@ test('runCli marks already-rendered runtime errors as reported', async () => {
       isReportedCliError
     );
   } finally {
-    process.stdout.write = stdoutWrite;
-    process.stderr.write = stderrWrite;
+    restoreOutput();
     if (previousTrust === undefined) {
       delete process.env.CLIQ_TRUST_WORKSPACE;
     } else {
@@ -1368,8 +1389,6 @@ test('runCli run --jsonl writes only JSONL events to stdout for model errors', a
   const previousCwd = process.cwd();
   const previousHome = process.env.CLIQ_HOME;
   const previousTrust = process.env.CLIQ_TRUST_WORKSPACE;
-  const previousStdoutWrite = process.stdout.write;
-  const previousStderrWrite = process.stderr.write;
   const fetchMock = mock.method(globalThis, 'fetch', async () => {
     throw new Error('fetch failed');
   });
@@ -1379,14 +1398,7 @@ test('runCli run --jsonl writes only JSONL events to stdout for model errors', a
   process.chdir(cwd);
   process.env.CLIQ_HOME = home;
   process.env.CLIQ_TRUST_WORKSPACE = 'trust';
-  process.stdout.write = ((chunk: string | Uint8Array) => {
-    chunks.push(String(chunk));
-    return true;
-  }) as typeof process.stdout.write;
-  process.stderr.write = ((chunk: string | Uint8Array) => {
-    stderrChunks.push(String(chunk));
-    return true;
-  }) as typeof process.stderr.write;
+  const restoreOutput = captureCliOutput((chunk) => { chunks.push(chunk); }, (chunk) => { stderrChunks.push(chunk); });
 
   try {
     await assert.rejects(
@@ -1409,8 +1421,7 @@ test('runCli run --jsonl writes only JSONL events to stdout for model errors', a
       isReportedCliError
     );
   } finally {
-    process.stdout.write = previousStdoutWrite;
-    process.stderr.write = previousStderrWrite;
+    restoreOutput();
     fetchMock.mock.restore();
     if (previousTrust === undefined) {
       delete process.env.CLIQ_TRUST_WORKSPACE;
@@ -1448,8 +1459,6 @@ test('runCli --classic prints provider-first setup guidance for missing model co
   const previousModel = process.env.CLIQ_MODEL;
   const previousBaseUrl = process.env.CLIQ_MODEL_BASE_URL;
   const previousStreaming = process.env.CLIQ_MODEL_STREAMING;
-  const previousStdoutWrite = process.stdout.write;
-  const previousStderrWrite = process.stderr.write;
   const fetchMock = mock.method(globalThis, 'fetch', async () => Response.json({ models: [] }));
   let stdout = '';
   let stderr = '';
@@ -1461,20 +1470,12 @@ test('runCli --classic prints provider-first setup guidance for missing model co
   delete process.env.CLIQ_MODEL;
   delete process.env.CLIQ_MODEL_BASE_URL;
   delete process.env.CLIQ_MODEL_STREAMING;
-  process.stdout.write = ((chunk: string | Uint8Array) => {
-    stdout += String(chunk);
-    return true;
-  }) as typeof process.stdout.write;
-  process.stderr.write = ((chunk: string | Uint8Array) => {
-    stderr += String(chunk);
-    return true;
-  }) as typeof process.stderr.write;
+  const restoreOutput = captureCliOutput((chunk) => { stdout += chunk; }, (chunk) => { stderr += chunk; });
 
   try {
     await assert.rejects(() => runCli(['node', 'src/index.ts', '--classic']), isReportedCliError);
   } finally {
-    process.stdout.write = previousStdoutWrite;
-    process.stderr.write = previousStderrWrite;
+    restoreOutput();
     if (previousTrust === undefined) delete process.env.CLIQ_TRUST_WORKSPACE;
     else process.env.CLIQ_TRUST_WORKSPACE = previousTrust;
     if (previousHome === undefined) delete process.env.CLIQ_HOME;
@@ -1523,6 +1524,42 @@ test('ReportedCliError preserves headless exit details for the CLI entrypoint', 
   assert.equal(cliExitCode(new Error('plain failure')), 1);
 });
 
+test('CLI output capture preserves runner streams and captures application strings and bytes', async () => {
+  const stdout = process.stdout;
+  const stderr = process.stderr;
+  const stdoutWrite = stdout.write;
+  const stderrWrite = stderr.write;
+  const stdoutDescriptor = Object.getOwnPropertyDescriptor(process, 'stdout');
+  const stderrDescriptor = Object.getOwnPropertyDescriptor(process, 'stderr');
+  let output = '';
+  let errors = '';
+  const restore = captureCliOutput((chunk) => { output += chunk; }, (chunk) => { errors += chunk; });
+  try {
+    assert.notEqual(process.stdout, stdout);
+    assert.notEqual(process.stderr, stderr);
+    assert.equal(stdout.write, stdoutWrite);
+    assert.equal(stderr.write, stderrWrite);
+    assert.equal(process.stdout.isTTY, stdout.isTTY);
+    assert.equal(process.stderr.isTTY, stderr.isTTY);
+    process.stdout.write('text\n');
+    process.stdout.write(Buffer.from('buffer\n'));
+    process.stderr.write(new Uint8Array(Buffer.from('bytes\n')));
+    console.log('console output');
+    console.error('console error');
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(output, 'text\nbuffer\nconsole output\n');
+    assert.equal(errors, 'bytes\nconsole error\n');
+  } finally {
+    restore();
+  }
+  assert.equal(process.stdout, stdout);
+  assert.equal(process.stderr, stderr);
+  assert.equal(stdout.write, stdoutWrite);
+  assert.equal(stderr.write, stderrWrite);
+  assert.deepEqual(Object.getOwnPropertyDescriptor(process, 'stdout'), stdoutDescriptor);
+  assert.deepEqual(Object.getOwnPropertyDescriptor(process, 'stderr'), stderrDescriptor);
+});
+
 type CliTestEnv = {
   cwd: string;
   home: string;
@@ -1537,25 +1574,14 @@ async function withCliTestEnv(prefix: string, callback: (env: CliTestEnv) => Pro
   const home = await mkdtemp(path.join(tmpdir(), 'cliq-home-'));
   const previousCwd = process.cwd();
   const previousHome = process.env.CLIQ_HOME;
-  const previousLog = console.log;
-  const previousStdoutWrite = process.stdout.write;
-  const previousStderrWrite = process.stderr.write;
   const output: string[] = [];
   const stderr: string[] = [];
 
   process.chdir(cwd);
+  const restoreOutput = captureCliOutput((chunk) => { output.push(chunk); }, (chunk) => { stderr.push(chunk); });
   console.log = (value?: unknown) => {
     output.push(String(value));
   };
-  process.stdout.write = ((chunk: string | Uint8Array) => {
-    output.push(String(chunk));
-    return true;
-  }) as typeof process.stdout.write;
-  process.stderr.write = ((chunk: string | Uint8Array) => {
-    stderr.push(String(chunk));
-    return true;
-  }) as typeof process.stderr.write;
-
   try {
     process.env.CLIQ_HOME = home;
     await callback({
@@ -1567,9 +1593,7 @@ async function withCliTestEnv(prefix: string, callback: (env: CliTestEnv) => Pro
       stderrText: () => stderr.join('')
     });
   } finally {
-    console.log = previousLog;
-    process.stdout.write = previousStdoutWrite;
-    process.stderr.write = previousStderrWrite;
+    restoreOutput();
     if (previousHome === undefined) {
       delete process.env.CLIQ_HOME;
     } else {

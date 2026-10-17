@@ -52,3 +52,28 @@ test('source Trust rejects denial, path substitution, symlink records and missin
   await assert.rejects(holdWorkspaceSourceTrust(heldHome, workspace), /persisted Workspace Trust/);
   heldHome.assertHeld();
 });
+
+test('source Trust cancellation joins its real cursor without poisoning the original home owner', async t => {
+  const container = await mkdtemp(path.join(process.cwd(), '.cliq-source-trust-'));
+  t.after(() => rm(container, { recursive: true, force: true }));
+  const home = path.join(container, 'home'), workspace = path.join(container, 'workspace');
+  await mkdir(home, { mode: 0o700 }); await mkdir(workspace);
+  const context = await createWorkspaceTrustContext(workspace, home);
+  await writePersistedWorkspaceTrust(context, 'trusted');
+  const heldHome = (await loadNativeStateOwner()).openWorkspaceRoot(home);
+  t.after(() => heldHome.close());
+  for (const beforeStart of [true, false]) {
+    const abort = new AbortController(), reason = new Error('original Trust producer cancelled');
+    if (beforeStart) abort.abort(reason);
+    // The real leaf opens its native cursor before the first yielded entry.
+    // This does not manufacture a Session, authority or scan-progress receipt.
+    const pending = holdWorkspaceSourceTrust(heldHome, workspace, abort.signal);
+    if (!beforeStart) abort.abort(reason);
+    await assert.rejects(pending, error => error === reason);
+    heldHome.assertHeld();
+  }
+  const trust = await holdWorkspaceSourceTrust(heldHome, workspace);
+  try { assertWorkspaceSourceTrust(trust, workspace); }
+  finally { trust.close(); }
+  heldHome.assertHeld();
+});

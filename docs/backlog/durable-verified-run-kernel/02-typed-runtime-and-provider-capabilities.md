@@ -273,6 +273,16 @@ source content by at least 512 units without custom tokenizer code. Also verify
 that the complete prompt estimate decreases including message overhead. Provider output
 is requested with cap `S`; reported over-cap output is invalid.
 
+Normal eligibility additionally requires the actual provider-native JCS body
+to fit the fixed 1 MiB request bound, even when `N<=T`. Each candidate's complete
+tools-disabled envelope/source must independently fit that same byte bound
+after JSON escaping. Use the one production wire constructor for eligibility
+and preparation; do not truncate or lower any signed/frozen cap. If no complete
+safe prefix exists below the token trigger, retain the exact visible-prompt
+digest and native byte count in the closed `request_body_bytes` exhaustion
+branch. Reproduce it from retained artifacts before the ordinary proof-backed
+resource StopIntent/retirement/terminal path, with no new model attempt.
+
 Compaction is a journaled model operation, never an invisible heuristic edit.
 Plan/item/manifest/ready Checkpoint publish atomically with unchanged workspace;
 raw items remain durable. No legal prefix produces exact

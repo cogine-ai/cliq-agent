@@ -1,5 +1,6 @@
 import {
   assertArtifactRef,
+  identityHash,
   parseCanonicalTime,
   requiredSafeInteger
 } from '../kernel/identity.js';
@@ -7,7 +8,10 @@ import type {
   BudgetUsage,
   ChildAllocationV1,
   InvocationJournalEntry,
+  PreparingWorkerLaunch,
+  RetiredWorkerPreparation,
   WorkerLaunch,
+  WorkerPreparation,
   WorkspaceGenerationStateV1
 } from '../kernel/types.js';
 import { KernelStorageError } from './errors.js';
@@ -303,10 +307,49 @@ const WORKER_BASE_KEYS = [
   'leaseVersion',
   'generationWriteState',
   'createdAt',
-  'activationDeadlineAt'
+  'activationDeadlineAt',
+  'preparation'
 ] as const;
 const WORKER_IDENTITY_KEYS = ['workerIdentityDigest', 'processContainmentRef'] as const;
 const WORKER_LEASE_KEYS = ['leaseEpoch', 'leaseExpiresAt', 'activatedAt'] as const;
+
+function decodeWorkerPreparation(record: Record<string, unknown>): WorkerPreparation {
+  const preparation = requireRecord(record.preparation, 'WorkerLaunch.preparation');
+  rejectUnknownKeys(preparation, ['stateOwnerEpoch', 'sourceCheckpointId', 'sourceWorkspaceStateRef',
+    'generationCreationNonceDigest', 'generationId', 'generation', 'controller', 'reservation'], 'WorkerLaunch.preparation');
+  requireSafeInteger(preparation.stateOwnerEpoch, 'WorkerLaunch.preparation.stateOwnerEpoch', 1);
+  const checkpoint = requireString(preparation.sourceCheckpointId, 'WorkerLaunch.preparation.sourceCheckpointId');
+  const workspace = requireArtifactRef(preparation.sourceWorkspaceStateRef, 'WorkerLaunch.preparation.sourceWorkspaceStateRef');
+  const nonce = requireDigest(preparation.generationCreationNonceDigest, 'WorkerLaunch.preparation.generationCreationNonceDigest');
+  if (preparation.generationId !== identityHash(record.runId as string, checkpoint, workspace, nonce))
+    invalid('WorkerLaunch.preparation.generationId differs from its immutable source and nonce');
+  if (has(preparation, 'generation')) {
+    const generation = requireRecord(preparation.generation, 'WorkerLaunch.preparation.generation');
+    rejectUnknownKeys(generation, ['generationRef', 'generationIdentityDigest'], 'WorkerLaunch.preparation.generation');
+    requireArtifactRef(generation.generationRef, 'WorkerLaunch.preparation.generation.generationRef');
+    requireDigest(generation.generationIdentityDigest, 'WorkerLaunch.preparation.generation.generationIdentityDigest');
+  }
+  if (has(preparation, 'controller')) {
+    const controller = requireRecord(preparation.controller, 'WorkerLaunch.preparation.controller');
+    rejectUnknownKeys(controller, ['birthIdentityRef', 'birthIdentityDigest'], 'WorkerLaunch.preparation.controller');
+    requireArtifactRef(controller.birthIdentityRef, 'WorkerLaunch.preparation.controller.birthIdentityRef');
+    requireDigest(controller.birthIdentityDigest, 'WorkerLaunch.preparation.controller.birthIdentityDigest');
+  }
+  if (has(preparation, 'reservation')) {
+    const reservation = requireRecord(preparation.reservation, 'WorkerLaunch.preparation.reservation');
+    rejectUnknownKeys(reservation, ['deviceId', 'fileId', 'ownerUid'], 'WorkerLaunch.preparation.reservation');
+    for (const key of ['deviceId', 'fileId'] as const) {
+      if (!/^(0|[1-9][0-9]*)$/u.test(requireString(reservation[key], `WorkerLaunch.preparation.reservation.${key}`)))
+        invalid(`WorkerLaunch.preparation.reservation.${key} must be a canonical unsigned decimal`);
+    }
+    requireSafeInteger(reservation.ownerUid, 'WorkerLaunch.preparation.reservation.ownerUid');
+  }
+  const createdAt = requireCanonicalTime(record.createdAt, 'WorkerLaunch.createdAt');
+  const deadlineAt = requireCanonicalTime(record.activationDeadlineAt, 'WorkerLaunch.activationDeadlineAt');
+  if (parseCanonicalTime(deadlineAt) - parseCanonicalTime(createdAt) !== 120_000)
+    invalid('WorkerLaunch preparation requires its original fixed 120-second deadline');
+  return preparation as WorkerPreparation;
+}
 
 export function decodeWorkerLaunch(value: unknown): WorkerLaunch {
   const record = requireRecord(value, 'WorkerLaunch');
@@ -317,6 +360,20 @@ export function decodeWorkerLaunch(value: unknown): WorkerLaunch {
   requireString(record.supervisorInstanceId, 'WorkerLaunch.supervisorInstanceId');
   requireDigest(record.spawnNonceDigest, 'WorkerLaunch.spawnNonceDigest');
   requireDigest(record.activationNonceDigest, 'WorkerLaunch.activationNonceDigest');
+  const retiredPreparation = record.phase === 'retired' && record.retirementKind === 'preparation';
+  if (record.phase === 'preparing' || retiredPreparation) {
+    rejectUnknownKeys(record, ['schemaVersion', 'launchId', 'runId', 'plannedRunRevision', 'supervisorInstanceId',
+      'spawnNonceDigest', 'activationNonceDigest', 'phase', 'preparation', 'createdAt', 'activationDeadlineAt',
+      ...(retiredPreparation ? ['retirementKind', 'retiredAt', 'retirementEvidenceRef'] : [])], 'WorkerLaunch(preparation)');
+    decodeWorkerPreparation(record);
+    if (retiredPreparation) {
+      const retiredAt = requireCanonicalTime(record.retiredAt, 'WorkerLaunch.retiredAt');
+      if (parseCanonicalTime(retiredAt) < parseCanonicalTime(record.createdAt as string))
+        invalid('WorkerLaunch preparation retirement precedes its creation');
+      requireArtifactRef(record.retirementEvidenceRef, 'WorkerLaunch.retirementEvidenceRef');
+    }
+    return record as PreparingWorkerLaunch | RetiredWorkerPreparation;
+  }
   requireArtifactRef(record.workspaceGenerationRef, 'WorkerLaunch.workspaceGenerationRef');
   requireArtifactRef(record.containmentPlanRef, 'WorkerLaunch.containmentPlanRef');
   requireArtifactRef(record.sandboxLaunchSpecRef, 'WorkerLaunch.sandboxLaunchSpecRef');
@@ -329,6 +386,13 @@ export function decodeWorkerLaunch(value: unknown): WorkerLaunch {
   }
   if (!['preactivated_readonly', 'active', 'revoking', 'checkpointing', 'fenced_reconciling', 'sealed'].includes(String(record.generationWriteState))) {
     invalid('WorkerLaunch.generationWriteState is not closed');
+  }
+  if (has(record, 'preparation')) {
+    const preparation = decodeWorkerPreparation(record);
+    if (!preparation.generation || !preparation.controller || !preparation.reservation)
+      invalid('bound WorkerLaunch requires complete actual preparation birth bindings');
+    if (record.workspaceGenerationRef !== preparation.generation.generationRef)
+      invalid('bound WorkerLaunch differs from its original preparation generation');
   }
 
   if (phase === 'reserved') {

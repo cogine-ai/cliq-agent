@@ -222,12 +222,13 @@ test('copied diagnostics reject non-copy paths and symlink leaves before opening
 });
 
 const linux = { skip: process.platform !== 'linux' || process.geteuid?.() === 0 ? 'full corpus fixtures require an ordinary Linux UID' : false };
-async function actualFixture(work: (stateRoot: string, cas: string) => Promise<void>) {
+const stateLayouts = ['home/probe/credential-state', 'home/.cliq/kernel-v1'] as const;
+async function actualFixture(layout: typeof stateLayouts[number], work: (stateRoot: string, cas: string) => Promise<void>) {
   const fixture = await mkdtemp('/var/tmp/cliq-systemd-probe.');
   try {
-    const stateRoot = path.join(fixture, 'home/probe/credential-state'), cas = path.join(stateRoot, 'cas');
+    const stateRoot = path.join(fixture, layout), cas = path.join(stateRoot, 'cas');
     await mkdir(path.join(stateRoot, 'credentials'), { recursive: true, mode: 0o700 });
-    for (const directory of [path.join(fixture, 'home'), path.join(fixture, 'home/probe'), stateRoot]) await chmod(directory, 0o700);
+    for (const directory of [path.join(fixture, 'home'), path.dirname(stateRoot), stateRoot]) await chmod(directory, 0o700);
     await mkdir(cas, { mode: 0o700 });
     for (const filename of [path.join(stateRoot, 'kernel.sqlite3'), path.join(stateRoot, 'credentials/authority.sqlite')]) {
       await createDatabase(filename, database => {
@@ -239,8 +240,8 @@ async function actualFixture(work: (stateRoot: string, cas: string) => Promise<v
   } finally { await rm(fixture, { recursive: true, force: true }); }
 }
 
-test('actual Linux fixed-file corpus covers both databases and a flat pinned CAS object', linux, async () => {
-  await actualFixture(async (stateRoot, cas) => {
+for (const layout of stateLayouts) test(`actual Linux ${layout} fixed-file corpus covers both databases and a flat pinned CAS object`, linux, async () => {
+  await actualFixture(layout, async (stateRoot, cas) => {
     await writeFile(path.join(cas, 'a'.repeat(64)), Buffer.from('ordinary immutable object'), { flag: 'wx', mode: 0o400 });
     const scanner = createCredentialSecretScanner([secret()], limits);
     try {
@@ -253,8 +254,8 @@ test('actual Linux fixed-file corpus covers both databases and a flat pinned CAS
   });
 });
 
-test('actual Linux CAS scan detects secret bytes across read chunk boundaries', linux, async () => {
-  await actualFixture(async (stateRoot, cas) => {
+for (const layout of stateLayouts) test(`actual Linux ${layout} CAS scan detects secret bytes across read chunk boundaries`, linux, async () => {
+  await actualFixture(layout, async (stateRoot, cas) => {
     const input = secret(), payload = Buffer.concat([Buffer.alloc(65530, 3), input, Buffer.alloc(17, 4)]);
     await writeFile(path.join(cas, 'b'.repeat(64)), payload, { flag: 'wx', mode: 0o400 });
     const scanner = createCredentialSecretScanner([input], limits);
@@ -265,8 +266,8 @@ test('actual Linux CAS scan detects secret bytes across read chunk boundaries', 
   });
 });
 
-for (const temporary of [false, true]) test(`actual Linux CAS ${temporary ? 'temporary' : 'published'} leaf names cannot contain encoded secret bytes`, linux, async () => {
-  await actualFixture(async (stateRoot, cas) => {
+for (const layout of stateLayouts) for (const temporary of [false, true]) test(`actual Linux ${layout} CAS ${temporary ? 'temporary' : 'published'} leaf names cannot contain encoded secret bytes`, linux, async () => {
+  await actualFixture(layout, async (stateRoot, cas) => {
     const input = randomBytes(32), encoded = input.toString('hex');
     const leaf = temporary ? `.tmp-${encoded}-${'a'.repeat(32)}` : encoded;
     await writeFile(path.join(cas, leaf), Buffer.from('ordinary diagnostic content'), { flag: 'wx', mode: temporary ? 0o600 : 0o400 });
@@ -283,8 +284,8 @@ for (const temporary of [false, true]) test(`actual Linux CAS ${temporary ? 'tem
   });
 });
 
-test('actual Linux corpus refuses CAS aliases, extra directory breadth and weak file modes', linux, async () => {
-  await actualFixture(async (stateRoot, cas) => {
+for (const layout of stateLayouts) test(`actual Linux ${layout} corpus refuses CAS aliases, extra directory breadth and weak file modes`, linux, async () => {
+  await actualFixture(layout, async (stateRoot, cas) => {
     const scanner = createCredentialSecretScanner([secret()], limits);
     try {
       const leaf = path.join(cas, 'c'.repeat(64)); await symlink(path.join(stateRoot, 'kernel.sqlite3'), leaf);
@@ -296,6 +297,22 @@ test('actual Linux corpus refuses CAS aliases, extra directory breadth and weak 
       await rm(path.join(cas, 'unrelated'), { recursive: true }); await chmod(path.join(stateRoot, 'kernel.sqlite3'), 0o644);
       await assert.rejects(scanCredentialSecretCorpus({ stateRoot, uid: process.geteuid!(), evidenceDirs: [], scanner }),
         { message: 'credential secret corpus did not qualify' });
+    } finally { scanner.close(); }
+  });
+});
+
+for (const layout of stateLayouts) test(`actual Linux ${layout} corpus refuses roots outside either exact fixture layout`, linux, async () => {
+  await actualFixture(layout, async stateRoot => {
+    const fixture = path.resolve(stateRoot, '../../..');
+    const scanner = createCredentialSecretScanner([secret()], limits);
+    try {
+      for (const invalidRoot of [path.dirname(stateRoot), `${stateRoot}/extra`,
+        path.join(fixture, 'home/probe/other'), path.join(fixture, 'home/.cliq/other'),
+        `${stateRoot}/../${path.basename(stateRoot)}`, `${stateRoot}/`]) {
+        await assert.rejects(scanCredentialSecretCorpus({ stateRoot: invalidRoot, uid: process.geteuid!(), evidenceDirs: [], scanner }),
+          { message: 'credential secret corpus did not qualify' });
+      }
+      assert.equal(scanner.stats().streamsOpened, 0);
     } finally { scanner.close(); }
   });
 });

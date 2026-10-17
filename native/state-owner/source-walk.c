@@ -9,7 +9,7 @@ struct source_cursor {
     source_entry *parent;
     napi_ref root_ref, parent_ref;
     DIR *directory;
-    int fd, closed, complete, finalized;
+    int fd, closed, complete, finalized, instruction_only;
     struct stat before;
     char *path;
     source_entry *entries;
@@ -230,6 +230,8 @@ static napi_value source_entry_close(napi_env env, napi_callback_info info) {
 static napi_value source_entry_file(napi_env env, napi_callback_info info) {
     source_entry *entry = source_unwrap(env, info, &source_entry_tag); napi_value self;
     if (!entry) return NULL;
+    if (entry->cursor->instruction_only && strcmp(entry->name, "AGENTS.md"))
+        return native_error(env, "instruction cursor may read only AGENTS.md");
     if (!source_entry_held(entry) || !source_entry_same_device(entry) || !S_ISREG(entry->before.st_mode) || entry->opened || entry->before.st_size < 0 ||
         entry->before.st_size > (off_t)9007199254740991LL || napi_get_cb_info(env, info, NULL, NULL, &self, NULL) != napi_ok)
         return native_error(env, "source reader requires an unopened selected regular entry");
@@ -254,6 +256,8 @@ failed:
 static napi_value source_entry_link(napi_env env, napi_callback_info info) {
     source_entry *entry = source_unwrap(env, info, &source_entry_tag);
     if (!entry) return NULL;
+    if (entry->cursor->instruction_only)
+        return native_error(env, "instruction cursor cannot read symlink targets");
     if (!source_entry_held(entry) || !source_entry_same_device(entry) || !S_ISLNK(entry->before.st_mode))
         return native_error(env, "source link requires a selected held same-device symlink entry");
     char bytes[4097]; ssize_t length = readlinkat(entry->cursor->fd, entry->name, bytes, sizeof(bytes));
@@ -290,6 +294,7 @@ static napi_value source_cursor_next(napi_env env, napi_callback_info info) {
         }
         if (!strcmp(item->d_name, ".") || !strcmp(item->d_name, "..")) continue;
         if (!strcasecmp(item->d_name, ".git")) {
+            if (cursor->instruction_only) continue;
             /* Only the held root repository has a separate Git capture path.
              * A selected subtree must not silently erase a nested repository. */
             if (*cursor->path) return native_error(env, "selected source subtree contains nested Git metadata");
@@ -332,10 +337,11 @@ static napi_value source_cursor_next(napi_env env, napi_callback_info info) {
     }
 }
 static napi_value source_mint_cursor(napi_env env, source_root *root, napi_value root_object,
-                                    source_entry *parent, napi_value parent_object, int fd, const char *path) {
+                                    source_entry *parent, napi_value parent_object, int fd, const char *path, int instruction_only) {
     source_cursor *cursor = calloc(1, sizeof(*cursor));
     if (!cursor) { if (close(fd) < 0) root->retirement_error = errno; return native_error(env, "source cursor allocation failed"); }
     cursor->root = root; cursor->parent = parent; cursor->fd = fd; cursor->path = strdup(path);
+    cursor->instruction_only = instruction_only;
     cursor->directory = fdopendir(fd);
     if (!cursor->directory) { cursor->fd = -1; if (close(fd) < 0) root->retirement_error = errno; }
     napi_value result;
@@ -369,9 +375,9 @@ static napi_value source_entry_directory(napi_env env, napi_callback_info info) 
         return native_error(env, "source directory requires an unopened selected held entry");
     int fd = openat(entry->cursor->fd, entry->name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (fd < 0) return native_error(env, "selected source directory is unreadable");
-    return source_mint_cursor(env, entry->cursor->root, root_object, entry, self, fd, entry->path);
+    return source_mint_cursor(env, entry->cursor->root, root_object, entry, self, fd, entry->path, entry->cursor->instruction_only);
 }
-static napi_value source_open_snapshot(napi_env env, napi_callback_info info) {
+static napi_value source_open_cursor(napi_env env, napi_callback_info info, int instruction_only) {
     source_root *root = unwrap_source_root(env, info); napi_value self;
     if (!root) return NULL;
     if (!source_held(root) || napi_get_cb_info(env, info, NULL, NULL, &self, NULL) != napi_ok)
@@ -380,5 +386,11 @@ static napi_value source_open_snapshot(napi_env env, napi_callback_info info) {
      * give each inventory its own open file description, not a caller path. */
     int fd = openat(root->fds[root->count - 1], ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (fd < 0) return native_error(env, "source metadata root is unreadable");
-    return source_mint_cursor(env, root, self, NULL, NULL, fd, "");
+    return source_mint_cursor(env, root, self, NULL, NULL, fd, "", instruction_only);
+}
+static napi_value source_open_snapshot(napi_env env, napi_callback_info info) {
+    return source_open_cursor(env, info, 0);
+}
+static napi_value source_open_instruction_snapshot(napi_env env, napi_callback_info info) {
+    return source_open_cursor(env, info, 1);
 }

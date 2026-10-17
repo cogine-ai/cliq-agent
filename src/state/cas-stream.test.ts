@@ -5,9 +5,128 @@ import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { sha256Bytes } from '../kernel/identity.js';
-import { ARTIFACT_CHUNK_BYTES, ContentAddressedStore } from './cas.js';
+import { ARTIFACT_CHUNK_BYTES, ContentAddressedStore, isJoinedCasPublicationFailure } from './cas.js';
 import { ArtifactCatalog } from './artifacts.js';
 import { ResourceRetirementError } from './errors.js';
+
+for (const code of ['ENOSPC', 'EIO']) {
+  test('only joined direct CAS write ENOSPC is classified, not source reuse: ' + code, async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'cliq-cas-joined-write-'));
+    await chmod(root, 0o700);
+    const store = new ContentAddressedStore(root);
+    const failure = Object.assign(new Error('injected direct CAS write failure'), { code });
+    const originalOpen = fs.open, identities: Array<{ dev: number; ino: number }> = [];
+    let writes = 0;
+    fs.open = (async (...args: Parameters<typeof fs.open>) => {
+      const handle = await originalOpen(...args);
+      identities.push(await handle.stat());
+      if (typeof args[0] === 'string' && args[0].startsWith(path.join(root, '.tmp-stream-'))) {
+        const actualWrite = handle.writeFile.bind(handle);
+        handle.writeFile = async (...writeArgs: Parameters<typeof handle.writeFile>) => {
+          await actualWrite(...writeArgs); writes++; throw failure;
+        };
+      }
+      return handle;
+    }) as typeof fs.open;
+    try {
+      assert.equal(isJoinedCasPublicationFailure(failure), false);
+      await assert.rejects(store.publish(Buffer.from('actual CAS temporary bytes')), error => error === failure);
+      assert.equal(writes, 1); assert.equal(isJoinedCasPublicationFailure(failure), code === 'ENOSPC');
+      assert.deepEqual(await readdir(root), []);
+      for (const name of readdirSync(process.platform === 'linux' ? '/proc/self/fd' : '/dev/fd')) {
+        if (!/^\d+$/.test(name)) continue;
+        let info; try { info = fstatSync(Number(name)); } catch { continue; }
+        assert(!identities.some(identity => identity.dev === info.dev && identity.ino === info.ino),
+          'a classified write failure must first close its real temporary and root descriptors');
+      }
+      fs.open = originalOpen;
+      // Even the same previously classified Error cannot lend provenance to
+      // a producer failure. Its errno alone is never a CAS cleanup receipt.
+      await assert.rejects(store.publishChunks((async function* () {
+        yield Buffer.from('source bytes'); throw failure;
+      })(), 64), error => error === failure);
+      assert.equal(isJoinedCasPublicationFailure(failure), false);
+      assert.deepEqual(await readdir(root), []);
+      if (code === 'ENOSPC') {
+        const originalUnlink = fs.unlink;
+        try {
+          // A later cleanup wrapper must revoke an earlier classification on
+          // the reused cause too, not only leave the wrapper unclassified.
+          fs.open = (async (...args: Parameters<typeof fs.open>) => {
+            const handle = await originalOpen(...args);
+            if (typeof args[0] === 'string' && args[0].startsWith(path.join(root, '.tmp-stream-'))) {
+              const actualWrite = handle.writeFile.bind(handle);
+              handle.writeFile = async (...writeArgs: Parameters<typeof handle.writeFile>) => { await actualWrite(...writeArgs); throw failure; };
+            }
+            return handle;
+          }) as typeof fs.open;
+          await assert.rejects(store.publish(Buffer.from('another joined failure')), error => error === failure);
+          assert.equal(isJoinedCasPublicationFailure(failure), true);
+          fs.unlink = async target => { await originalUnlink(target); throw new Error('cleanup receipt failed'); };
+          await assert.rejects(store.publish(Buffer.from('same cause with failed cleanup')), error => error instanceof ResourceRetirementError);
+          assert.equal(isJoinedCasPublicationFailure(failure), false);
+        } finally { fs.open = originalOpen; fs.unlink = originalUnlink; }
+      }
+      const ref = await store.publish(Buffer.from('recovered storage'));
+      assert.deepEqual(await store.read(ref), Buffer.from('recovered storage'));
+    } finally {
+      fs.open = originalOpen;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const stage of ['temporary_metadata', 'temporary_close', 'temporary_unlink', 'root_close', 'root_identity'] as const) {
+  test('CAS write ENOSPC cannot borrow a failed publication join: ' + stage, async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-cas-unjoined-write-'));
+    const root = path.join(home, 'objects');
+    await fs.mkdir(root, { mode: 0o700 });
+    const store = new ContentAddressedStore(root);
+    const failure = Object.assign(new Error('injected actual CAS write failure'), { code: 'ENOSPC' });
+    const retirementFailure = Object.assign(new Error('injected CAS resource retirement failure'), { code: 'EIO' });
+    const originalOpen = fs.open, originalUnlink = fs.unlink;
+    let writes = 0, failedJoins = 0;
+    fs.open = (async (...args: Parameters<typeof fs.open>) => {
+      const handle = await originalOpen(...args);
+      const temporary = typeof args[0] === 'string' && args[0].startsWith(path.join(root, '.tmp-stream-'));
+      if (temporary) {
+        const actualWrite = handle.writeFile.bind(handle);
+        handle.writeFile = async (...writeArgs: Parameters<typeof handle.writeFile>) => {
+          await actualWrite(...writeArgs); writes++; throw failure;
+        };
+        if (stage === 'temporary_metadata') {
+          const actualChmod = handle.chmod.bind(handle);
+          handle.chmod = async mode => { await actualChmod(mode); failedJoins++; throw retirementFailure; };
+        }
+      }
+      if ((temporary && stage === 'temporary_close') || (args[0] === root && stage === 'root_close')) {
+        const actualClose = handle.close.bind(handle);
+        handle.close = async () => { await actualClose(); failedJoins++; throw retirementFailure; };
+      }
+      return handle;
+    }) as typeof fs.open;
+    fs.unlink = async target => {
+      await originalUnlink(target);
+      if (typeof target !== 'string' || !target.startsWith(path.join(root, '.tmp-stream-'))) return;
+      if (stage === 'temporary_unlink') { failedJoins++; throw retirementFailure; }
+      if (stage === 'root_identity') {
+        await fs.rename(root, path.join(home, 'original'));
+        await fs.mkdir(root, { mode: 0o700 }); failedJoins++;
+      }
+    };
+    try {
+      await assert.rejects(store.publish(Buffer.from('real temporary before failed retirement')), error => {
+        assert(error instanceof ResourceRetirementError);
+        assert.equal(isJoinedCasPublicationFailure(error), false); return true;
+      });
+      assert.equal(writes, 1); assert.equal(failedJoins, 1);
+      assert.equal(isJoinedCasPublicationFailure(failure), false);
+    } finally {
+      fs.open = originalOpen; fs.unlink = originalUnlink;
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+}
 
 test('a real CAS read close failure is resource retirement failure, not a joined inspection error', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'cliq-cas-close-failure-'));

@@ -35,6 +35,7 @@ jobs:
       - run: npm ci
       - run: node --test scripts/kernel/check-design-contracts.test.mjs
       - run: node scripts/kernel/check-design-contracts.mjs
+      - run: node scripts/kernel/test-linux-worker-text.mjs
       - run: npm run build
       - run: npm test
 
@@ -72,6 +73,353 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+  linux-installed-finalizer-shutdown:
+    name: Linux installed original credential finalizer ordinary SIGTERM
+    # The owned external service stays on the actual disposable-user bus for
+    # the whole scenario. This is not GNOME Keyring or full installed I1.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+        id: build
+      - name: Install actual signed image and D-Bus fixture prerequisites
+        run: sudo apt-get update && sudo apt-get install -y libglib2.0-dev musl-tools bubblewrap
+      - name: Join the original installed finalizer before ordinary two-second stop
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          probe_node=$(realpath "$(command -v node)")
+          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --credential-finalizer-shutdown "$probe_node" "$RUNNER_TEMP/cliq-finalizer-shutdown"
+      - name: Retain only the bounded closed finalizer and unchanged-runner feedback
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installed-finalizer-shutdown-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cliq-finalizer-shutdown/*.json
+          if-no-files-found: warn
+          retention-days: 7
+
+  linux-installed-authority-stop:
+    name: Linux installed post-admission credential refusal and retirement
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+        id: build
+      - name: Install actual signed transport and worker build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap e2fsprogs
+      - name: Revoke the real admitted credential and require truthful retirement and restart
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          probe_node=$(realpath "$(command -v node)")
+          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --run-authority-failure-journey "$probe_node" "$RUNNER_TEMP/cliq-installed-authority-stop"
+      - name: Retain exact-source refusal and unchanged-runner cleanup evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installed-authority-stop-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cliq-installed-authority-stop/*.json
+          if-no-files-found: warn
+          retention-days: 7
+
+  linux-installed-settlement-storage:
+    name: Linux installed original-claim settlement after actual CAS refusal
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+      - run: npm ci
+      - run: node --test scripts/kernel/testing/installed-run-client.test.mjs
+      - run: npm run build
+        id: build
+      - name: Install actual signed transport and bounded ext4 prerequisites
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap e2fsprogs
+      - name: Refuse real CAS publication and settle the same original claim after exact restoration
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          probe_node=$(realpath "$(command -v node)")
+          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --run-storage-failure-journey "$probe_node" "$RUNNER_TEMP/cliq-installed-settlement-storage"
+      - name: Retain exact-source storage refusal and unchanged-runner cleanup evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installed-settlement-storage-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cliq-installed-settlement-storage/*.json
+          if-no-files-found: warn
+          retention-days: 7
+
+  linux-installed-shutdown:
+    name: Linux installed SIGTERM during admission
+    # Independent ordinary Run-instruction and Session-Trust cuts. Keep the production
+    # two-second service policy and the original full-journey scan bounds.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+      - run: npm ci
+      - run: node --test scripts/kernel/testing/installed-run-client.test.mjs
+      - run: npm run build
+        id: build
+      - name: Install actual signed transport and worker build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap e2fsprogs
+      - name: Stop the real Supervisor during positively observed instruction capture
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          probe_node=$(realpath "$(command -v node)")
+          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --run-shutdown-admission-journey "$probe_node" "$RUNNER_TEMP/cliq-installed-shutdown-admission"
+      - name: Stop the real Supervisor during positively observed Session Trust enumeration
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          probe_node=$(realpath "$(command -v node)")
+          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --run-shutdown-session-journey "$probe_node" "$RUNNER_TEMP/cliq-installed-shutdown-session"
+      - name: Retain bounded shutdown and unchanged-runner cleanup evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installed-shutdown-admission-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cliq-installed-shutdown-admission/*.json
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Retain bounded Session shutdown and unchanged-runner cleanup evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installed-shutdown-session-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cliq-installed-shutdown-session/*.json
+          if-no-files-found: warn
+          retention-days: 7
+
+  linux-installed-preparation-shutdown:
+    name: Linux installed SIGTERM during preparation
+    # Separate real scheduler/copy corpus; do not inflate the original full
+    # campaign's fixed scan bounds or change the two-second service policy.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+      - run: npm ci
+      - run: node --test scripts/kernel/testing/installed-run-client.test.mjs
+      - run: npm run build
+        id: build
+      - name: Install actual signed transport and worker build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap e2fsprogs
+      - name: Stop the real scheduler during positively observed generation writes
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          probe_node=$(realpath "$(command -v node)")
+          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --run-shutdown-preparation-journey "$probe_node" "$RUNNER_TEMP/cliq-installed-shutdown-preparation"
+      - name: Retain bounded shutdown and unchanged-runner cleanup evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installed-shutdown-preparation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cliq-installed-shutdown-preparation/*.json
+          if-no-files-found: warn
+          retention-days: 7
+
+  linux-installed-effects-shutdown:
+    name: Linux installed SIGTERM preserves actual received tool and model effects
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+      - run: npm ci
+      - run: node --test scripts/kernel/testing/installed-run-client.test.mjs
+      - run: npm run build
+        id: build
+      - name: Install actual signed transport and worker build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap e2fsprogs
+      - name: Preserve the actual received private-tool result through ordinary stop
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          probe_node=$(realpath "$(command -v node)")
+          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --run-shutdown-received-tool-journey "$probe_node" "$RUNNER_TEMP/cliq-installed-shutdown-received-tool"
+      - name: Preserve the original unknown model claim and charge before worker fencing
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          probe_node=$(realpath "$(command -v node)")
+          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --run-shutdown-pending-model-journey "$probe_node" "$RUNNER_TEMP/cliq-installed-shutdown-pending-model"
+      - name: Stop a genuine retained-Run successor after native broker load and before public control
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          probe_node=$(realpath "$(command -v node)")
+          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --run-shutdown-startup-journey "$probe_node" "$RUNNER_TEMP/cliq-installed-shutdown-startup"
+      - name: Retain bounded received-tool shutdown and unchanged-runner feedback
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installed-shutdown-received-tool-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cliq-installed-shutdown-received-tool/*.json
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Retain bounded pending-model shutdown and unchanged-runner feedback
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installed-shutdown-pending-model-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cliq-installed-shutdown-pending-model/*.json
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Retain bounded startup shutdown and unchanged-runner feedback
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installed-shutdown-startup-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cliq-installed-shutdown-startup/*.json
+          if-no-files-found: warn
+          retention-days: 7
+
+  linux-installed-request-resources:
+    name: Linux installed request-byte compaction and terminal retirement
+    # A separate fresh disposable UID keeps the original full journey and its
+    # unchanged 4096-stream/512-MiB secret scan independent of this workload.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+      - run: npm ci
+      - run: node --test scripts/kernel/testing/installed-run-client.test.mjs
+      - run: node --test --import tsx scripts/kernel/testing/installed-worker-lease.test.ts
+      - run: npm run build
+        id: build
+      - name: Install actual signed transport and worker build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap e2fsprogs
+      - name: Exercise byte-triggered whole-prefix compaction and genuine queued successor progress
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          probe_node=$(realpath "$(command -v node)")
+          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --run-request-resource-journey "$probe_node" "$RUNNER_TEMP/cliq-installed-request-resources"
+      - name: Retain only bounded closed resource and unchanged-runner feedback
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installed-request-resources-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cliq-installed-request-resources/*.json
+          if-no-files-found: warn
+          retention-days: 7
+
+  linux-installed-run:
+    name: Linux signed installed Run closed-loop diagnostics
+    # Real installed/manager/native transport mechanics, not complete I1 or a
+    # qualified provider. Reuse the unmodified qualified 22.04 sandbox policy.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+      - run: npm ci
+      - run: node --test scripts/kernel/testing/installed-volume-guard.test.mjs scripts/kernel/testing/installed-run-client.test.mjs
+      - run: node --test --import tsx scripts/kernel/testing/installed-worker-lease.test.ts
+      - run: npm run build
+        id: build
+      - name: Install actual signed transport and worker build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap e2fsprogs
+      - name: Compile the native transport with visible compiler diagnostics
+        run: node scripts/kernel/build-linux-model-broker.mjs "$RUNNER_TEMP/cliq-model-broker-compile"
+      - name: Exercise actual installed Run, ready Checkpoint, reconnect and restart
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          probe_node=$(realpath "$(command -v node)")
+          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --run-journey "$probe_node" "$RUNNER_TEMP/cliq-installed-run-journey"
+      - name: Retain bounded installed Run and unchanged-runner cleanup evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installed-run-journey-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cliq-installed-run-journey/*.json
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Exercise one received rejection through the actual installed terminal drain
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          probe_node=$(realpath "$(command -v node)")
+          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --run-failure-journey "$probe_node" "$RUNNER_TEMP/cliq-installed-run-failure-journey"
+      - name: Retain independent received-rejection and unchanged-runner cleanup evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installed-run-failure-journey-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cliq-installed-run-failure-journey/*.json
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Exercise real preparation refusal and exact-alias restoration on the same installed Run
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          probe_node=$(realpath "$(command -v node)")
+          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --run-retry-journey "$probe_node" "$RUNNER_TEMP/cliq-installed-run-retry-journey"
+      - name: Retain independent pre-dispatch retry and unchanged-runner cleanup evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installed-run-retry-journey-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cliq-installed-run-retry-journey/*.json
+          if-no-files-found: warn
+          retention-days: 7
+
   linux-supervisor-preflight:
     name: Linux Supervisor image and actual user-manager diagnostics
     # Component/OS facts only, not an installed I1 qualification. Standard
@@ -100,6 +448,7 @@ jobs:
           node --test --test-concurrency=1 --import tsx
           scripts/kernel/testing/credential-platform-queue.test.ts
           scripts/kernel/testing/credential-platform-timeout.test.ts
+          scripts/kernel/testing/model-broker-preparation-lifecycle.test.ts
       - name: Verify the bounded secret scan before collecting credential artifacts
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: >-

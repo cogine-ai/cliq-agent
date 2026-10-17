@@ -147,6 +147,68 @@ test('protected context exhaustion retains exact estimates, survives restart and
   } finally { await disposeFixture(fixture); }
 });
 
+test('byte-only context exhaustion reproduces exact wire facts and closes once without a new model attempt', async () => {
+  const fixture = await createAgentFixture('resource-wire', { modelTokens: 10_000_000, costMicros: 100_000_000 },
+    { mode: 'plan', contextLimitTokens: 1_048_576 });
+  try {
+    await batch(fixture, [{ name: 'read', input: { path: 'first' } }]);
+    const claimed = await claimTool(fixture, await prepareTool(fixture));
+    await fixture.agent.completeTool({ expectedRunRevision: revision(fixture), opId: claimed.entry.opId, attempt: claimed.entry.attempt,
+      observationRef: await observation(fixture, claimed, '"'.repeat(300_000)) });
+    const before = await fixture.store.readRecoveryClosure(fixture.runId);
+    let evidence: AgentContextExhaustedError['evidence'] | undefined;
+    await assert.rejects(fixture.agent.prepareModel({ expectedRunRevision: revision(fixture), leaseEpoch: fixture.leaseEpoch }), error => {
+      if (!(error instanceof AgentContextExhaustedError)) return false;
+      evidence = error.evidence;
+      return true;
+    });
+    assert.ok(evidence && 'trigger' in evidence && evidence.trigger === 'request_body_bytes');
+    assert.ok(evidence.nextPromptTokens <= evidence.triggerThresholdTokens);
+    assert.ok(evidence.requestBodyBytes > 1_048_576);
+    assert.equal(evidence.requestBodyLimitBytes, 1_048_576);
+    assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
+    const stopped = await stop(fixture);
+    const intent = await fixture.store.artifacts.readCanonical<StopIntent>(stopped.run.stopIntentRef!);
+    assert.ok(intent.origin === 'runtime' && intent.runtimeSubtype === 'context_window_exhausted' && intent.trigger === 'request_body_bytes');
+    for (const field of ['modelVisiblePromptDigest', 'requestBodyBytes', 'requestBodyLimitBytes'] as const) {
+      assert.equal(intent[field], evidence[field]);
+    }
+    const writer = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+    try {
+      for (const altered of [
+        { ...intent, requestBodyBytes: intent.requestBodyBytes + 1 },
+        { ...intent, requestBodyBytes: 1_048_576 },
+        { ...intent, requestBodyLimitBytes: 2_097_152 },
+        { ...intent, modelVisiblePromptDigest: canonicalSha256('different visible prompt') },
+        { ...intent, trigger: 'other' },
+        { ...intent, nextPromptTokens: intent.triggerThresholdTokens + 1 }
+      ]) {
+        const forged = await fixture.store.artifacts.publishCanonical(altered, 'cliq-stop-intent-v1');
+        writer.prepare('UPDATE runs SET stop_intent_ref = ? WHERE id = ?').run(forged.ref, fixture.runId);
+        await assert.rejects(fixture.store.readRecoveryClosure(fixture.runId), { code: 'RECOVERY_REQUIRED' });
+      }
+    } finally {
+      writer.prepare('UPDATE runs SET stop_intent_ref = ? WHERE id = ?').run(stopped.run.stopIntentRef!, fixture.runId);
+      writer.close();
+    }
+    await reopen(fixture);
+    const terminal = await finish(fixture, stopped.checkpointId);
+    assert.equal(terminal.run.status, 'failed');
+    const detail = await fixture.store.artifacts.readCanonical<TerminalDetail>(terminal.run.terminalDetailRef!);
+    assert.ok(detail.reasonDetail.kind === 'context_window_exhausted' && detail.reasonDetail.trigger === 'request_body_bytes');
+    assert.equal(detail.reasonDetail.requestBodyBytes, intent.requestBodyBytes);
+    assert.equal(detail.reasonDetail.modelVisiblePromptDigest, intent.modelVisiblePromptDigest);
+    await reopen(fixture);
+    const after = await fixture.store.readRecoveryClosure(fixture.runId);
+    assert.deepEqual(after.journal, before.journal);
+    assert.deepEqual(after.items, before.items);
+    assert.deepEqual(after.run.budgetConsumed, before.run.budgetConsumed);
+    const session = fixture.store.getSession(after.run.sessionId);
+    await fixture.agent.commitTerminalStop({ expectedRunRevision: after.run.revision });
+    assert.deepEqual(fixture.store.getSession(session.id), session);
+  } finally { await disposeFixture(fixture); }
+});
+
 for (const expired of [false, true]) test(`tool budget stopping respects ${expired ? 'expired' : 'live'} approval and never grants permission`, async (t) => {
   let now = Date.now();
   t.mock.method(Date, 'now', () => now);

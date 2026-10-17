@@ -14,12 +14,13 @@ import { sha256Bytes } from '../../../src/kernel/identity.js';
 import { policyProfile, verifyRuntimeBundle, type RuntimeBundleManifest } from '../../../src/policy/runtime-authority.js';
 import { STATE_OWNER_NATIVE_ENTRY_ID, STATE_OWNER_NATIVE_RELATIVE_PATH } from '../../../src/state/native-owner.js';
 import { buildSupervisorSeaImage, prepareSupervisorSeaCarrier } from './supervisor-sea-builder.js';
+import { installedModelPackageEntries, writeInstalledModelAuthority, type InstalledModelPackageFixture } from './installed-model-package.js';
 
 /** Construct the same actual SEA/helper package for independent Linux startup
  * and user-manager qualifiers. Real worker images are installed, not launched:
  * they do not qualify admission, execution, release signing or complete I1. */
 export async function buildInstalledSupervisorPackage(fixture: string,
-  variant: 'complete' | 'retirement-native-missing' = 'complete') {
+  variant: 'complete' | 'retirement-native-missing' = 'complete', modelFixture?: InstalledModelPackageFixture) {
   const repository = fileURLToPath(new URL('../../..', import.meta.url));
   const { nodeRoot, carrier } = await prepareSupervisorSeaCarrier(fixture);
   const keys = generateKeyPairSync('ed25519');
@@ -57,6 +58,16 @@ export async function buildInstalledSupervisorPackage(fixture: string,
   { encoding: 'utf8', timeout: 60_000, cwd: fixture, maxBuffer: 2 * 1024 * 1024 });
   assert.equal(credentials.error, undefined, 'production credential platform construction did not join');
   assert.equal(credentials.status, 0, `production credential platform construction: ${credentials.stderr}`);
+  let modelBrokerBytes: Buffer | undefined;
+  if (modelFixture) {
+    const brokerRoot = path.join(fixture, 'model-broker-image');
+    const broker = spawnSync(process.execPath, [path.join(repository, 'scripts/kernel/build-linux-model-broker.mjs'),
+      brokerRoot, path.join(nodeRoot, 'include/node')],
+    { encoding: 'utf8', timeout: 60_000, cwd: fixture, maxBuffer: 2 * 1024 * 1024 });
+    assert.equal(broker.error, undefined, 'production model broker construction did not join');
+    assert.equal(broker.status, 0, `production model broker construction: ${broker.stderr}`);
+    modelBrokerBytes = await readFile(path.join(brokerRoot, 'linux-model-broker.node'));
+  }
   const workerEntries = await Promise.all(([
     ['linux_worker_native', 'platform_helper', 'linux-worker.node'],
     ['linux_worker_controller', 'platform_helper', 'cliq-linux-worker-controller'],
@@ -66,6 +77,8 @@ export async function buildInstalledSupervisorPackage(fixture: string,
   ] as const).filter(([entryId]) => variant !== 'retirement-native-missing' || entryId !== 'linux_worker_native')
     .map(async ([entryId, role, filename]) => ({ entryId, role,
     relativePath: `workers/${filename}`, executable: true, bytes: await readFile(path.join(workerRoot, filename)) })));
+  const modelMaterial = modelFixture ? installedModelPackageEntries(modelFixture, modelBrokerBytes!,
+    workerEntries.find(entry => entry.entryId === 'edit')!.bytes) : undefined;
   const profile = policyProfile();
   const rootCore = { schemaVersion: 1, format: 'cliq-sandbox-root-profile-v1', protocol: 'cliq-fresh-empty-root-v1',
     filesystemKind: 'fresh_ephemeral_tmpfs', fixedDirectories: ['/home/cliq', '/tmp', '/work'], persistent: false, networkConfiguration: 'none' };
@@ -78,9 +91,10 @@ export async function buildInstalledSupervisorPackage(fixture: string,
       executable: true, bytes: await readFile(path.join(credentialRoot, 'linux-credential-platform.node')) },
     { entryId: 'installed-policy', role: 'policy_engine', relativePath: 'profiles/policy.json', executable: false, bytes: canonicalJsonBytes(profile) },
     { entryId: 'default_https_trust_store', role: 'trust_store', relativePath: 'profiles/https-trust.pem', executable: false,
-      bytes: Buffer.from(rootCertificates.join('\n')) },
+      bytes: modelFixture ? Buffer.from(modelFixture.tls.caPem) : Buffer.from(rootCertificates.join('\n')) },
     { entryId: 'installed-empty-root', role: 'sandbox_root_profile', relativePath: 'profiles/empty-root.json', executable: false,
       bytes: canonicalJsonBytes({ ...rootCore, profileDigest: canonicalSha256(rootCore) }) },
+    ...(modelMaterial?.entries ?? []),
   ];
   for (const entry of contents.slice(2)) {
     const filename = path.join(packageRoot, entry.relativePath);
@@ -88,12 +102,16 @@ export async function buildInstalledSupervisorPackage(fixture: string,
     await writeFile(filename, entry.bytes, { flag: 'wx', mode: entry.executable ? 0o500 : 0o400 });
   }
   const bundle: RuntimeBundleManifest = {
-    schemaVersion: 1, bundleVersion: 'installed-sea-read-qualification-v1',
+    schemaVersion: 1, bundleVersion: modelFixture ? 'installed-sea-run-fixture-v1' : 'installed-sea-read-qualification-v1',
     controlProtocolRange: { min: 1, max: 1 }, headlessSchemaRange: { min: 1, max: 1 },
     stateSchemaRange: { min: 1, max: KERNEL_STATE_SCHEMA_VERSION }, workerProtocolRange: { min: 1, max: 1 },
     entries: contents.map(({ bytes, ...entry }) => ({ ...entry, version: '1', digest: sha256Bytes(bytes), byteCount: bytes.byteLength })),
-    structuredArtifacts: [{ kind: 'policy_engine_profile', artifactId: 'installed-policy', rootEntryId: 'installed-policy',
-      artifactRef: canonicalSha256(profile), semanticDigest: profile.profileDigest, memberRefs: [] }],
+    structuredArtifacts: [
+      ...(modelMaterial?.structuredArtifacts.filter(root => root.kind === 'compaction_prompt') ?? []),
+      { kind: 'policy_engine_profile', artifactId: 'installed-policy', rootEntryId: 'installed-policy',
+        artifactRef: canonicalSha256(profile), semanticDigest: profile.profileDigest, memberRefs: [] },
+      ...(modelMaterial?.structuredArtifacts.filter(root => root.kind === 'system_prompt') ?? []),
+    ],
     guestToolchainManifestRefs: [], publisherKeyId: releaseKeys[0]!.keyId, manifestDigest: '', signature: '',
   };
   const { signature: _signature, manifestDigest: _digest, ...core } = bundle;
@@ -101,5 +119,7 @@ export async function buildInstalledSupervisorPackage(fixture: string,
   bundle.signature = sign(null, Buffer.from(`cliq-runtime-bundle-v1\0${bundle.manifestDigest}`), keys.privateKey).toString('base64');
   verifyRuntimeBundle(bundle, releaseKeys);
   await writeFile(path.join(packageRoot, 'manifest.json'), canonicalJsonBytes(bundle), { flag: 'wx', mode: 0o400 });
-  return { packageRoot, releaseKeys, bundle, contents, carrier };
+  const modelAuthority = modelFixture ? await writeInstalledModelAuthority({ packageRoot, bundle,
+    privateKey: keys.privateKey, fixture: modelFixture, material: modelMaterial! }) : undefined;
+  return { packageRoot, releaseKeys, bundle, contents, carrier, ...(modelAuthority ? { modelAuthority } : {}) };
 }

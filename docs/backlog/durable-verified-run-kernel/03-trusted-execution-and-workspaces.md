@@ -1799,3 +1799,30 @@ Deliver mandatory signed macOS `Virtualization.framework` microVM and Linux bubb
 Every source operation must require the Session's exact live no-follow descriptor-derived `WorkspaceIdentityV1` plus exact `RepositoryIdentityV1` iff Git; keep root/`.git` device/file ids as unsigned decimal strings, require every workspace/repository ref/digest match, make `run.submit` path equal that identity, derive pathless `run.apply` from the live source Session, reject `legacy_unavailable`, and fail same-path root/`.git` replacement as `ARTIFACT_MISMATCH`.
 
 Done means every acceptance criterion and automated/manual validation item in the local spec passes. Do not admit any Run when its strong backend/worker/executable probes fail, do not expose provider secrets to workers, and do not add a result copy-back path.
+
+## I1 coherent retirement and review corrections
+
+The approved preparation lifecycle registers its actual directory birth before
+copying and binds the genuine controller/reservation before productive
+promotion. Preparation-only retirement uses `unverified_preparation`, never a
+complete-tree claim or worker no-spawn. The original joined owner can prove
+allocation never requested; missing birth after any allocation attempt or
+owner loss remains recovery-required.
+
+In-flight edit stop retains the original producer join and any authentic result.
+When the fixed signed private-only edit's result is indeterminate, exact
+`PrivateToolRollbackV1` may close its already fully charged UNKNOWN only in the
+sole terminal-stop transaction after the original whole-domain death,
+quarantine and retirement. Its replay class stays `manual`; external manual
+effects receive no analogous shortcut or retry. Stopped worker recovery keeps
+the original wait/probe nonce/quarantine anchor valid until the atomic terminal
+commit, without a transient queued state or eagerly created replacement.
+
+The model broker retains its original native token/mutex before permanent
+claim. I/O close remains a genuine join but does not dispose that original
+fence until exact no-release settlement or conservative released-outcome
+settlement completes. No reported boolean substitutes for the live native guard.
+
+These are implementation contracts, not qualification evidence. The exact-SHA
+Linux reports must independently pass; unexecuted cuts and full I1 remain
+explicitly unqualified.

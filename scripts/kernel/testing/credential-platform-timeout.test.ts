@@ -60,3 +60,45 @@ if (process.platform === 'linux' && process.arch === 'x64')
         finally { await rm(fixture, { recursive: true, force: true }); }
       }
     });
+
+if (process.platform === 'linux' && process.arch === 'x64')
+  test('caller cancellation joins an executing credential inspection and cannot revoke its next native job',
+    { timeout: 180000 }, async () => {
+      assert(process.getuid!() > 0, 'invoke from the real runner user; only the mount coordinator uses sudo');
+      const fixture = await mkdtemp(path.join(os.tmpdir(), 'cliq-platform-inspect-cancel-'));
+      const hostRuntime = ['/run', '/run/user', `/run/user/${process.getuid!()}`, `/run/user/${process.getuid!()}/bus`];
+      const originalRuntime = await Promise.all(hostRuntime.map(runtimeIdentity));
+      try {
+        const carrier = await prepareSupervisorSeaCarrier(fixture, process.env.CLIQ_QUALIFICATION_CARRIER_ARCHIVE);
+        const output = path.join(fixture, 'native');
+        const recipe = fileURLToPath(new URL('../build-linux-credential-platform.mjs', import.meta.url));
+        const compiled = spawnSync(process.execPath, [recipe, output, path.join(carrier.nodeRoot, 'include/node')],
+          { encoding: 'utf8', timeout: 65000, maxBuffer: 65536 });
+        assert.equal(compiled.error, undefined); assert.equal(compiled.signal, null); assert.equal(compiled.status, 0, compiled.stderr);
+        const flags = spawnSync('pkg-config', ['--cflags', '--libs', 'gio-2.0'], { encoding: 'utf8', timeout: 5000 });
+        assert.equal(flags.error, undefined); assert.equal(flags.signal, null); assert.equal(flags.status, 0, flags.stderr);
+        const coordinator = path.join(fixture, 'credential-platform-inspection');
+        const fixtureSource = fileURLToPath(new URL('./credential-platform-timeout-fixture.c', import.meta.url));
+        const built = spawnSync('cc', ['-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', fixtureSource, '-o', coordinator,
+          ...flags.stdout.trim().split(/\s+/u)], { encoding: 'utf8', timeout: 30000, maxBuffer: 65536 });
+        assert.equal(built.error, undefined); assert.equal(built.signal, null); assert.equal(built.status, 0, built.stderr);
+        const childSource = fileURLToPath(new URL('./credential-platform-timeout-child.mjs', import.meta.url));
+        const child = spawnSync('/usr/bin/sudo', ['--non-interactive', '--', coordinator, carrier.carrier,
+          childSource, path.join(output, 'linux-credential-platform.node'), '--inspect-cancel'],
+        { encoding: 'utf8', timeout: 60000, killSignal: 'SIGKILL', maxBuffer: 65536, cwd: fixture,
+          env: { PATH: process.env.PATH, UV_THREADPOOL_SIZE: '4' } });
+        assert.equal(child.error, undefined); assert.equal(child.signal, null);
+        const report = JSON.parse(child.stdout);
+        console.log(JSON.stringify(report)); // Retain the real entered/retired cut even on expected RED.
+        assert.equal(report.actualInspectionEntered, true, 'the real inspect must reach the deliberately unanswered external call');
+        assert.equal(report.actualInspectionConnectionRetired, true, 'expected RED must still join the original bus connection');
+        assert.equal(report.childrenJoined, true, 'expected RED must still join both actual fixture children');
+        assert.equal(child.status, 0, child.stderr);
+        assert.deepEqual(report, { diagnosticOnly: true, actualInspectionEntered: true, cancelJoinedWithin1500ms: true,
+          actualInspectionConnectionRetired: true, childrenJoined: true, installedI1Qualified: false });
+      } finally {
+        try { assert.deepEqual(await Promise.all(hostRuntime.map(runtimeIdentity)), originalRuntime,
+          'the isolated fixture must not replace or modify the host runtime namespace'); }
+        finally { await rm(fixture, { recursive: true, force: true }); }
+      }
+    });

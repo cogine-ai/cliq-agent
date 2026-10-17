@@ -184,7 +184,7 @@ export async function scanCredentialSecretCorpus(input: CredentialSecretCorpusIn
   let snapshot: string | undefined;
   try {
     check(process.platform === 'linux' && Number.isSafeInteger(input.uid) && input.uid > 0);
-    check(/^\/var\/tmp\/cliq-systemd-probe\.[A-Za-z0-9]+\/home\/probe\/credential-state$/u.test(input.stateRoot));
+    check(/^\/var\/tmp\/cliq-systemd-probe\.[A-Za-z0-9]+\/home\/(?:probe\/credential-state|\.cliq\/kernel-v1)$/u.test(input.stateRoot));
     check(Array.isArray(input.evidenceDirs) && input.evidenceDirs.length <= 16 && new Set(input.evidenceDirs).size === input.evidenceDirs.length);
     const fixture = path.resolve(input.stateRoot, '../../..');
     for (const filename of input.evidenceDirs) check(path.dirname(filename) === fixture && /^credential-prepared-crash-[A-Za-z0-9]+$/u.test(path.basename(filename)));

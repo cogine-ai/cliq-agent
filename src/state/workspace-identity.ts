@@ -2,7 +2,8 @@ import { setImmediate } from 'node:timers/promises';
 import { digestOmitting, normalizeAbsolutePath } from '../kernel/identity.js';
 import type { RepositoryIdentityV1, WorkspaceIdentityV1 } from '../kernel/types.js';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
-import { loadNativeStateOwner, type HeldWorkspaceRoot } from './native-owner.js';
+import { loadNativeStateOwner, type HeldWorkspaceRoot, type NativeStateOwner } from './native-owner.js';
+import { withHeldInstalledRuntime, type HeldInstalledRuntime } from './installed-runtime.js';
 
 export type HostPlatform = 'macos' | 'linux';
 
@@ -64,8 +65,26 @@ export async function captureLiveWorkspaceIdentity(options: {
   repository?: RepositoryIdentityV1;
 }> {
   const workspacePath = normalizeAbsolutePath(options.workspacePath);
-  const platform = hostPlatform();
   const native = await loadNativeStateOwner();
+  return captureWorkspaceIdentity({ ...options, workspacePath }, native);
+}
+
+/** Installed physical observation uses only its genuine held signed image;
+ * no development addon pathname or caller-supplied native factory is used. */
+export async function captureInstalledWorkspaceIdentity(selected: HeldInstalledRuntime,
+  options: { workspacePath: string; ownerPrincipalId: string }) {
+  const native = await withHeldInstalledRuntime(selected, async installed => {
+    await installed.revalidate(); return installed.loadStateOwner();
+  });
+  const captured = await captureWorkspaceIdentity(options, native);
+  await selected.assertHeld(); return captured;
+}
+
+async function captureWorkspaceIdentity(options: { workspacePath: string; ownerPrincipalId: string }, native: NativeStateOwner): Promise<{
+  identity: Extract<WorkspaceIdentityV1, { kind: 'live' }>; repository?: RepositoryIdentityV1;
+}> {
+  const workspacePath = normalizeAbsolutePath(options.workspacePath);
+  const platform = hostPlatform();
   let opened: HeldWorkspaceRoot;
   try { opened = native.openWorkspaceRoot(workspacePath); }
   catch (error) { return sourceError(error, true); }
@@ -104,9 +123,10 @@ export async function captureLiveWorkspaceIdentity(options: {
 }
 
 export async function recaptureLiveWorkspaceIdentity(
-  expected: Extract<WorkspaceIdentityV1, { kind: 'live' }>, workspacePath: string
+  expected: Extract<WorkspaceIdentityV1, { kind: 'live' }>, workspacePath: string, selected?: HeldInstalledRuntime
 ): Promise<Extract<WorkspaceIdentityV1, { kind: 'live' }>> {
-  const captured = await captureLiveWorkspaceIdentity({ workspacePath, ownerPrincipalId: expected.ownerPrincipalId });
+  const input = { workspacePath, ownerPrincipalId: expected.ownerPrincipalId };
+  const captured = selected ? await captureInstalledWorkspaceIdentity(selected, input) : await captureLiveWorkspaceIdentity(input);
   if (captured.identity.canonicalRootPath !== expected.canonicalRootPath) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace path does not match the live Session identity');
   }

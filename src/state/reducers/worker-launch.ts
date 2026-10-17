@@ -1,5 +1,5 @@
 import { assertArtifactRef, addCanonicalDuration, parseCanonicalTime } from '../../kernel/identity.js';
-import type { Checkpoint, Run, RunEvent, WorkerIdentity, WorkerLaunch, WorkspaceGenerationStateV1 } from '../../kernel/types.js';
+import type { BoundWorkerLaunch, Checkpoint, Run, RunEvent, WorkerIdentity, WorkspaceGenerationStateV1 } from '../../kernel/types.js';
 import { immutableSnapshot } from '../../model/immutable.js';
 import { decodeRetainedRunAssembly } from '../../model/run-assembly.js';
 import { canonicalSha256 } from '../../kernel/canonical.js';
@@ -31,6 +31,8 @@ import {
 import type { SqliteConnection, SqliteDriver } from '../sqlite-driver.js';
 import { assertActiveStateOwner, type StateOwnerContext } from '../state-owner.js';
 import { readWorkerCheckpointProof, prepareWorkerRetirement, type NativeWorkerRetirement } from '../tool-checkpoint.js';
+import { assertWorkerPreparationPromotion } from '../worker-preparation.js';
+import type { NativeWorkerReservationBinding } from '../../sandbox/linux-worker.js';
 
 const ACTIVATION_DEADLINE_MS = 120_000;
 const MAX_LEASE_EXTENSION_MS = 60_000;
@@ -110,8 +112,9 @@ export async function reserveWorkerLaunch(
   driver: SqliteDriver,
   artifacts: ArtifactCatalog,
   owner: StateOwnerContext,
-  input: ReserveWorkerLaunchInput
-): Promise<WorkerLaunch> {
+  input: ReserveWorkerLaunchInput,
+  preparationBinding?: NativeWorkerReservationBinding
+): Promise<BoundWorkerLaunch> {
   input = immutableSnapshot(input);
   for (const ref of [
     input.spawnNonceDigest,
@@ -130,7 +133,7 @@ export async function reserveWorkerLaunch(
     artifacts.describe(input.sandboxLaunchSpecRef, 'application/json', 'cliq-sandbox-launch-spec-v1')
   ]);
 
-  let reserved!: WorkerLaunch;
+  let reserved!: BoundWorkerLaunch;
   let fenceOutcome: TimeFenceAdvance | undefined;
   driver.transaction((connection) => {
     assertActiveStateOwner(connection, owner);
@@ -139,8 +142,16 @@ export async function reserveWorkerLaunch(
     if (fenceOutcome !== 'healthy') return;
     const run = readRun(connection, input.runId);
     assertRunCanActivate(run, now, input.expectedRunRevision);
-    if (readWorkerLaunchesForRun(connection, input.runId, true).length !== 0) {
+    const retained = readWorkerLaunchesForRun(connection, input.runId, true);
+    const preparation = retained.length === 1 && retained[0]!.phase === 'preparing' ? retained[0] : undefined;
+    if (retained.length !== 0 && !preparation) {
       throw new KernelStorageError('STATE_TRANSITION_INVALID', 'Run already has an unretired worker launch');
+    }
+    if (preparation) {
+      assertWorkerPreparationPromotion(connection, owner, preparation, input, preparationBinding);
+      if (now > preparation.activationDeadlineAt) throw new KernelStorageError('LEASE_FENCED', 'original worker preparation deadline elapsed');
+    } else if (preparationBinding) {
+      throw new KernelStorageError('STATE_TRANSITION_INVALID', 'native BIND acknowledgement has no original preparation intent');
     }
     const generation = readRequiredWorkspaceGeneration(connection, identity.generationId);
     if (
@@ -165,11 +176,13 @@ export async function reserveWorkerLaunch(
       sandboxLaunchSpecRef: input.sandboxLaunchSpecRef,
       leaseVersion: 0,
       generationWriteState: 'preactivated_readonly',
-      createdAt: now,
-      activationDeadlineAt: addCanonicalDuration(now, ACTIVATION_DEADLINE_MS)
+      createdAt: preparation?.createdAt ?? now,
+      activationDeadlineAt: preparation?.activationDeadlineAt ?? addCanonicalDuration(now, ACTIVATION_DEADLINE_MS),
+      ...(preparation ? { preparation: preparation.preparation as import('../../kernel/types.js').BoundWorkerPreparation } : {})
     };
     for (const artifact of authorityMetadata) insertArtifactMetadata(connection, artifact, now);
-    insertWorkerLaunch(connection, reserved);
+    if (preparation) updateWorkerLaunch(connection, preparation, reserved);
+    else insertWorkerLaunch(connection, reserved);
   });
   requireHealthyFence(fenceOutcome);
   return reserved;
@@ -186,7 +199,7 @@ export async function recordWorkerPreactivated(
   artifacts: ArtifactCatalog,
   owner: StateOwnerContext,
   input: RecordWorkerPreactivatedInput
-): Promise<WorkerLaunch> {
+): Promise<BoundWorkerLaunch> {
   input = immutableSnapshot(input);
   assertArtifactRef(input.workerIdentityDigest);
   assertArtifactRef(input.processContainmentRef);
@@ -206,7 +219,7 @@ export async function recordWorkerPreactivated(
     'cliq-process-containment-v1'
   );
 
-  let updated!: WorkerLaunch;
+  let updated!: BoundWorkerLaunch;
   let fenceOutcome: TimeFenceAdvance | undefined;
   driver.transaction((connection) => {
     assertActiveStateOwner(connection, owner);
@@ -239,7 +252,7 @@ export async function recordWorkerPreactivated(
 
 function assertWorkerIdentityMatches(
   identity: WorkerIdentity,
-  launch: WorkerLaunch,
+  launch: BoundWorkerLaunch,
   intendedLeaseEpoch: number,
   processContainmentRef: string,
   owner: StateOwnerContext
@@ -267,11 +280,25 @@ export function activateWorkerLease(
   driver: SqliteDriver,
   owner: StateOwnerContext,
   input: ActivateWorkerLeaseInput
-): { run: Run; launch: WorkerLaunch; generation: WorkspaceGenerationStateV1 } {
+): { run: Run; launch: BoundWorkerLaunch; generation: WorkspaceGenerationStateV1 } {
   if (!Number.isSafeInteger(input.leaseDurationMs) || input.leaseDurationMs < 1 || input.leaseDurationMs > MAX_LEASE_EXTENSION_MS) {
     throw new KernelStorageError('INVALID_REQUEST', 'worker lease duration is outside 1..60000ms');
   }
-  let result!: { run: Run; launch: WorkerLaunch; generation: WorkspaceGenerationStateV1 };
+  return activateWorkerLeaseAtCurrentCut(driver, owner, input);
+}
+
+/** Installed composition chooses no duration or clock. Its initial lease is
+ * bounded by the actual Run deadline inside the same activation transaction. */
+export function activateWorkerLeaseWithinDeadline(driver: SqliteDriver, owner: StateOwnerContext,
+  input: Omit<ActivateWorkerLeaseInput, 'leaseDurationMs'>) {
+  return activateWorkerLeaseAtCurrentCut(driver, owner, { launchId: input.launchId,
+    expectedRunRevision: input.expectedRunRevision, expectedGenerationRowVersion: input.expectedGenerationRowVersion });
+}
+
+function activateWorkerLeaseAtCurrentCut(driver: SqliteDriver, owner: StateOwnerContext,
+  input: Omit<ActivateWorkerLeaseInput, 'leaseDurationMs'> & { leaseDurationMs?: number }
+): { run: Run; launch: BoundWorkerLaunch; generation: WorkspaceGenerationStateV1 } {
+  let result!: { run: Run; launch: BoundWorkerLaunch; generation: WorkspaceGenerationStateV1 };
   let fenceOutcome: TimeFenceAdvance | undefined;
   driver.transaction((connection) => {
     assertActiveStateOwner(connection, owner);
@@ -289,7 +316,9 @@ export function activateWorkerLease(
     }
     const run = readRun(connection, currentLaunch.runId);
     assertRunCanActivate(run, now, input.expectedRunRevision);
-    const leaseExpiresAt = addCanonicalDuration(now, input.leaseDurationMs);
+    const leaseExpiresAt = input.leaseDurationMs === undefined
+      ? new Date(Math.min(parseCanonicalTime(now) + MAX_LEASE_EXTENSION_MS, parseCanonicalTime(run.deadlineAt))).toISOString()
+      : addCanonicalDuration(now, input.leaseDurationMs);
     if (parseCanonicalTime(leaseExpiresAt) > parseCanonicalTime(run.deadlineAt)) {
       throw new KernelStorageError('INVALID_REQUEST', 'initial worker lease exceeds the Run deadline');
     }
@@ -306,7 +335,7 @@ export function activateWorkerLease(
     }
     const leaseEpoch = run.leaseEpoch + 1;
     if (!Number.isSafeInteger(leaseEpoch)) throw new KernelStorageError('RECOVERY_REQUIRED', 'Run lease epoch overflowed');
-    const launch: WorkerLaunch = {
+    const launch: BoundWorkerLaunch = {
       ...currentLaunch,
       phase: 'activated',
       leaseEpoch,
@@ -362,8 +391,8 @@ export function renewWorkerLease(
   driver: SqliteDriver,
   owner: StateOwnerContext,
   input: RenewWorkerLeaseInput
-): WorkerLaunch {
-  let renewed!: WorkerLaunch;
+): BoundWorkerLaunch {
+  let renewed!: BoundWorkerLaunch;
   let fenceOutcome: TimeFenceAdvance | undefined;
   driver.transaction((connection) => {
     assertActiveStateOwner(connection, owner);
@@ -442,8 +471,8 @@ export function beginGenerationRevocation(
   driver: SqliteDriver,
   owner: StateOwnerContext,
   input: BeginGenerationRevocationInput
-): { launch: WorkerLaunch; generation: WorkspaceGenerationStateV1 } {
-  let result!: { launch: WorkerLaunch; generation: WorkspaceGenerationStateV1 };
+): { launch: BoundWorkerLaunch; generation: WorkspaceGenerationStateV1 } {
+  let result!: { launch: BoundWorkerLaunch; generation: WorkspaceGenerationStateV1 };
   let fenceOutcome: TimeFenceAdvance | undefined;
   driver.transaction((connection) => {
     assertActiveStateOwner(connection, owner);
@@ -467,7 +496,7 @@ export function beginGenerationRevocation(
       currentGeneration.activeWorkerLaunchId !== currentLaunch.launchId ||
       currentGeneration.leaseEpoch !== currentLaunch.leaseEpoch
     ) throw new KernelStorageError('LEASE_FENCED', 'workspace generation cannot begin revocation');
-    const launch: WorkerLaunch = {
+    const launch: BoundWorkerLaunch = {
       ...currentLaunch,
       generationWriteState: 'revoking',
       quiesceId: input.quiesceId
@@ -498,8 +527,8 @@ export function beginGenerationCheckpoint(
   driver: SqliteDriver,
   owner: StateOwnerContext,
   input: BeginGenerationCheckpointInput
-): { launch: WorkerLaunch; generation: WorkspaceGenerationStateV1 } {
-  let result!: { launch: WorkerLaunch; generation: WorkspaceGenerationStateV1 };
+): { launch: BoundWorkerLaunch; generation: WorkspaceGenerationStateV1 } {
+  let result!: { launch: BoundWorkerLaunch; generation: WorkspaceGenerationStateV1 };
   let fenceOutcome: TimeFenceAdvance | undefined;
   driver.transaction((connection) => {
     assertActiveStateOwner(connection, owner);
@@ -521,7 +550,7 @@ export function beginGenerationCheckpoint(
       currentGeneration.activeWorkerLaunchId !== currentLaunch.launchId ||
       currentGeneration.leaseEpoch !== currentLaunch.leaseEpoch
     ) throw new KernelStorageError('LEASE_FENCED', 'workspace generation is not revoking under this quiesce id');
-    const launch: WorkerLaunch = {
+    const launch: BoundWorkerLaunch = {
       ...currentLaunch,
       generationWriteState: 'checkpointing'
     };
@@ -559,9 +588,12 @@ export async function sealWorkerGeneration(
   owner: StateOwnerContext,
   input: SealWorkerGenerationInput,
   reobserve?: NativeWorkerRetirement
-): Promise<{ run: Run; checkpoint: Checkpoint; launch: WorkerLaunch; generation: WorkspaceGenerationStateV1 }> {
+): Promise<{ run: Run; checkpoint: Checkpoint; launch: BoundWorkerLaunch; generation: WorkspaceGenerationStateV1 }> {
   input = immutableSnapshot(input);
   const initialLaunch = readRequiredWorkerLaunch(driver, input.launchId);
+  if (initialLaunch.phase !== 'activated') {
+    throw new KernelStorageError('LEASE_FENCED', 'Run and WorkerLaunch are not checkpointing together');
+  }
   const initialRun = readRun(driver, initialLaunch.runId);
   const spec = await artifacts.readCanonical<{ assemblyRef: string }>(initialRun.specRef);
   const assembly = await artifacts.readCanonical<{ format?: string }>(spec.assemblyRef);
@@ -610,7 +642,7 @@ export async function sealWorkerGeneration(
   await retirement?.refresh();
   checkpointMetadata.push(...(retirement?.metadata ?? []));
 
-  let result!: { run: Run; checkpoint: Checkpoint; launch: WorkerLaunch; generation: WorkspaceGenerationStateV1 };
+  let result!: { run: Run; checkpoint: Checkpoint; launch: BoundWorkerLaunch; generation: WorkspaceGenerationStateV1 };
   let fenceOutcome: TimeFenceAdvance | undefined;
   driver.transaction((connection) => {
     assertActiveStateOwner(connection, owner);
@@ -706,7 +738,7 @@ export async function sealWorkerGeneration(
       snapshotEvidenceRef: input.snapshotEvidenceRef,
       snapshotEvidenceDigest: snapshot.evidenceDigest
     };
-    const launch: WorkerLaunch = {
+    const launch: BoundWorkerLaunch = {
       ...currentLaunch,
       phase: 'retired',
       generationWriteState: 'sealed',

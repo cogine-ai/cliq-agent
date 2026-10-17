@@ -5,13 +5,15 @@ import type { FileHandle } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { canonicalJsonBytes } from '../kernel/canonical.js';
+import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
+import { decodeEndpointRegistration, type EndpointRegistrationV1 } from '../kernel/credential-authority.js';
 import { digestOmitting, identityHash } from '../kernel/identity.js';
 import type { SourceInspectionRetirementEvidenceV1, SourceInspectionTargetV1 } from '../kernel/execution.js';
 import type { SourceManifest, WorkspaceEntryManifest } from '../kernel/types.js';
 import { testFixture } from '../model/testing/fixtures.js';
 import { createWorkspaceTrustContext, writePersistedWorkspaceTrust } from '../session/trust.js';
 import { normalizeRunSubmitRequest, runSubmitIntentDigest } from './source-target.js';
+import { assertInstalledRunRecipe } from './installed-run.js';
 import { insertArtifactMetadata } from './artifacts.js';
 import { admissionKey, uuidv7 } from './testing/fixtures.js';
 import { signedToolBundle } from './testing/tool-authority.js';
@@ -24,6 +26,7 @@ import { createSourceInspectionFixture, sourceInspectionRequest as inlineRequest
 test('inline submit normalization closes its schema and freezes defaults into intent, not request identity', () => {
   const first = normalizeRunSubmitRequest(inlineRequest());
   assert.equal(first.request.budgets.wallTimeMs, 86_400_000);
+  assert.equal(first.request.sandboxResources.maxSingleFileBytes, 268_435_456);
   assert.equal(first.request.sandboxResources.maxGenerationBytes, 20 * 1024 ** 3);
   assert.equal(first.request.maxChangedPaths, 10_000);
   assert.equal(first.request.maxChangedBytes, 512 * 1024 ** 2);
@@ -37,6 +40,142 @@ test('inline submit normalization closes its schema and freezes defaults into in
   assert.throws(() => normalizeRunSubmitRequest(inlineRequest({ sourceExcludes: [{ path: 'secret', scope: 'entry', readGrantId: 'grant' }] })), { code: 'INVALID_REQUEST' });
   assert.throws(() => normalizeRunSubmitRequest(inlineRequest({ verifiers: [{ id: 'gate', version: '1', required: true,
     executable: { kind: 'toolchain', toolId: 'node' }, argv: [], cwd: '.', env: {}, writableEphemeralPaths: [], identityReadGrantId: 'identity' }] })), { code: 'INVALID_REQUEST' });
+});
+
+test('inline submit retains original Unicode request identity separately from normalized admission intent', () => {
+  const original = inlineRequest({ objective: 'inspect cafe\u0301' });
+  const normalized = normalizeRunSubmitRequest(original);
+  assert.deepEqual(normalized.originalRequest, original);
+  assert.equal(normalized.originalRequestDigest, original.requestDigest);
+  assert.equal(normalized.request.objective, 'inspect caf\u00e9');
+  const canonical = inlineRequest({ ...original, objective: 'inspect caf\u00e9' });
+  const equivalent = normalizeRunSubmitRequest(canonical);
+  assert.notEqual(normalized.originalRequestDigest, equivalent.originalRequestDigest);
+  assert.equal(runSubmitIntentDigest('principal', normalized.request), runSubmitIntentDigest('principal', equivalent.request));
+  assert.throws(() => normalizeRunSubmitRequest({ ...original, requestDigest: canonical.requestDigest }), { code: 'INVALID_REQUEST' });
+  original.objective = 'changed after validation';
+  assert.equal((normalized.originalRequest as { objective: string }).objective, 'inspect cafe\u0301');
+});
+
+test('inline submit preserves original nested model values without weakening normalized uniqueness or scalar bounds', () => {
+  const original = inlineRequest({ model: { provider: 'openai-compatible', model: 'modele\u0301',
+    endpoint: { kind: 'registered', endpointRegistrationId: 'cafe\u0301' }, modelCredentialGrantIds: ['cle\u0301'] } });
+  const normalized = normalizeRunSubmitRequest(original);
+  assert.deepEqual(normalized.originalRequest, original);
+  assert.deepEqual(normalized.request.model, { provider: 'openai-compatible', model: 'model\u00e9',
+    endpoint: { kind: 'registered', endpointRegistrationId: 'caf\u00e9' }, modelCredentialGrantIds: ['cl\u00e9'] });
+  assert.throws(() => normalizeRunSubmitRequest(inlineRequest({ model: { ...original.model,
+    modelCredentialGrantIds: ['cle\u0301', 'cl\u00e9'] } })), { code: 'INVALID_REQUEST' });
+  for (const objective of ['', '\0', 'a'.repeat(262_145)]) {
+    assert.throws(() => normalizeRunSubmitRequest(inlineRequest({ objective })), { code: 'INVALID_REQUEST' });
+  }
+  // No valid JCS digest exists for these strings. Pass them to the production
+  // parser directly rather than letting the client-side hashing helper reject.
+  const valid = inlineRequest();
+  for (const objective of ['\ud800', '\udc00']) {
+    assert.throws(() => normalizeRunSubmitRequest({ ...valid, objective }), { code: 'INVALID_REQUEST' });
+  }
+});
+
+test('installed recipe refuses unavailable default approvals without changing generic policy modes', () => {
+  const installedRequest = (policyMode: 'default' | 'plan' | 'accept-edits' | 'yolo') => normalizeRunSubmitRequest(inlineRequest({
+    model: { provider: 'openai-compatible', model: 'owned-fixture-model',
+      endpoint: { kind: 'registered', endpointRegistrationId: 'owned-fixture-endpoint' }, modelCredentialGrantIds: ['owned-fixture-grant'] },
+    policyMode
+  })).request;
+  const request = installedRequest('default');
+  assert.equal(request.policyMode, 'default', 'generic normalization must retain the requested approval policy');
+  assert.throws(() => assertInstalledRunRecipe(request), { code: 'INVALID_REQUEST' });
+  for (const mode of ['plan', 'accept-edits', 'yolo'] as const) {
+    const supported = installedRequest(mode);
+    assert.equal(supported.policyMode, mode);
+    assert.doesNotThrow(() => assertInstalledRunRecipe(supported));
+  }
+});
+
+for (const count of [0, 1, 2, 32]) {
+  test(`installed recipe requires one bearer credential while generic normalization retains its bounds (${count} grants)`, () => {
+    const normalize = () => normalizeRunSubmitRequest(inlineRequest({
+      model: { provider: 'openai-compatible', model: 'owned-fixture-model',
+        endpoint: { kind: 'registered', endpointRegistrationId: 'owned-fixture-endpoint' },
+        modelCredentialGrantIds: Array.from({ length: count }, (_, index) => `owned-fixture-grant-${index}`) },
+      policyMode: 'accept-edits'
+    })).request;
+    if (count === 0) { assert.throws(normalize, { code: 'INVALID_REQUEST' }); return; }
+    const request = normalize();
+    assert(request.model.provider === 'openai-compatible');
+    assert.equal(request.model.modelCredentialGrantIds.length, count);
+    if (count === 1) assert.doesNotThrow(() => assertInstalledRunRecipe(request));
+    else assert.throws(() => assertInstalledRunRecipe(request), { code: 'INVALID_REQUEST' });
+  });
+}
+
+test('installed recipe refuses insufficient process capacity before capture without changing generic resource normalization', () => {
+  const installedRequest = (maxProcesses: number) => normalizeRunSubmitRequest(inlineRequest({
+    model: { provider: 'openai-compatible', model: 'owned-fixture-model',
+      endpoint: { kind: 'registered', endpointRegistrationId: 'owned-fixture-endpoint' }, modelCredentialGrantIds: ['owned-fixture-grant'] },
+    policyMode: 'accept-edits', sandboxResources: { maxProcesses }
+  })).request;
+  for (const maxProcesses of [1, 7]) {
+    const request = installedRequest(maxProcesses);
+    assert.equal(request.sandboxResources.maxProcesses, maxProcesses);
+    assert.throws(() => assertInstalledRunRecipe(request), { code: 'INVALID_REQUEST' });
+  }
+  for (const maxProcesses of [8, 1024]) assert.doesNotThrow(() => assertInstalledRunRecipe(installedRequest(maxProcesses)));
+});
+
+test('installed recipe refuses oversized files before capture without clamping explicit resource intent', () => {
+  const installedRequest = (maxSingleFileBytes: number) => normalizeRunSubmitRequest(inlineRequest({
+    model: { provider: 'openai-compatible', model: 'owned-fixture-model',
+      endpoint: { kind: 'registered', endpointRegistrationId: 'owned-fixture-endpoint' }, modelCredentialGrantIds: ['owned-fixture-grant'] },
+    policyMode: 'accept-edits', sandboxResources: { maxSingleFileBytes }
+  })).request;
+  for (const maxSingleFileBytes of [1_048_576, 268_435_456]) {
+    const request = installedRequest(maxSingleFileBytes);
+    assert.equal(request.sandboxResources.maxSingleFileBytes, maxSingleFileBytes);
+    assert.doesNotThrow(() => assertInstalledRunRecipe(request));
+  }
+  for (const maxSingleFileBytes of [268_435_457, 2_147_483_648, 17_179_869_184]) {
+    const request = installedRequest(maxSingleFileBytes);
+    assert.equal(request.sandboxResources.maxSingleFileBytes, maxSingleFileBytes);
+    assert.throws(() => assertInstalledRunRecipe(request), { code: 'INVALID_REQUEST' });
+  }
+});
+
+test('installed recipe rejects unsupported registered paths and pin counts without narrowing general endpoint registration', () => {
+  const request = normalizeRunSubmitRequest(inlineRequest({ model: { provider: 'openai-compatible', model: 'owned-fixture-model',
+    endpoint: { kind: 'registered', endpointRegistrationId: 'owned-fixture-endpoint' }, modelCredentialGrantIds: ['owned-fixture-grant'] },
+    policyMode: 'accept-edits' })).request;
+  const registered = (basePath: string, spkiSha256Pins = ['a'.repeat(64)]) => {
+    // Complete canonical data only, not registration or installed authority.
+    const hash = 'a'.repeat(64), endpoint: EndpointRegistrationV1 = { schemaVersion: 1, format: 'cliq-endpoint-registration-v1',
+      endpointRegistrationId: 'owned-fixture-endpoint', registrationKind: 'user', ownerPrincipalId: 'principal', purposes: ['model_endpoint'],
+      target: { scheme: 'https', hostAscii: 'endpoint.invalid', port: 443, basePath, redirectPolicy: 'reject_all' },
+      tls: { serverNameAscii: 'endpoint.invalid', minimumVersion: 'TLSv1.3', trustStoreRuntimeBundleRef: hash,
+        trustStoreRuntimeBundleManifestDigest: hash, trustStoreEntryId: 'default_https_trust_store', trustStoreRef: hash,
+        trustStoreDigest: hash, spkiSha256Pins }, endpointIdentityDigest: '', tlsPolicyDigest: '',
+      createdAt: '2026-10-15T00:00:00.000Z', registrationDigest: '' };
+    endpoint.tlsPolicyDigest = canonicalSha256(endpoint.tls);
+    endpoint.endpointIdentityDigest = canonicalSha256({ target: endpoint.target, tlsPolicyDigest: endpoint.tlsPolicyDigest });
+    endpoint.registrationDigest = digestOmitting(endpoint, 'registrationDigest');
+    return decodeEndpointRegistration(endpoint);
+  };
+  for (const basePath of ['/api%20v1', '/api:v1', '/api;v1', '/a//b', `/${'a'.repeat(4096)}`]) {
+    const endpoint = registered(basePath);
+    assert.equal(endpoint.target.basePath, basePath);
+    assert.throws(() => assertInstalledRunRecipe(request, endpoint), { code: 'UNSUPPORTED_PLATFORM' }, basePath);
+  }
+  for (const basePath of ['/', '/v1', '/v1/', '/.well-known/api-v1_~+', `/${'a'.repeat(4095)}`]) {
+    assert.doesNotThrow(() => assertInstalledRunRecipe(request, registered(basePath)), basePath);
+  }
+  const pins = Array.from({ length: 65 }, (_, index) => index.toString(16).padStart(64, '0'));
+  const atLimit = registered('/v1', pins.slice(0, 64));
+  assert.equal(atLimit.tls.spkiSha256Pins.length, 64);
+  assert.doesNotThrow(() => assertInstalledRunRecipe(request, atLimit));
+  const wider = registered('/v1', pins);
+  assert.equal(wider.tls.spkiSha256Pins.length, 65, 'generic registration retains its wider unique sorted pin contract');
+  assert.throws(() => assertInstalledRunRecipe(request, wider), { code: 'UNSUPPORTED_PLATFORM' });
+  assert.throws(() => registered('/v1', [pins[0], pins[0]]), /sorted|unique/);
 });
 
 for (const outcome of ['captured', 'failed'] as const) for (const missing of ['retirement', 'inspector'] as const) {

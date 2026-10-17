@@ -16,21 +16,34 @@ import type { ArtifactCatalog } from './artifacts.js';
 import { validateToolRecovery } from './tool-recovery.js';
 import { validateUserInputRecovery } from './input-recovery.js';
 import type { Checkpoint } from '../kernel/types.js';
+import { decodeModelOperationGrant } from '../kernel/model-grant.js';
+import { decodeRetainedRunAssembly } from '../model/run-assembly.js';
+import { readModelGrantData } from './model-grant.js';
+import { decodeAdmittedContext, decodeContextManifest, decodeSourceManifest, decodeWorkspaceIdentity } from './decoders.js';
 
 /** Recovery checks retained reachability/identity; loading the agent additionally reproduces native requests and validates schemas. */
 export async function validateAgentRecovery(input: {
   artifacts: ArtifactCatalog; run: Run; spec: RunSpec; items: RunItemReferenceV1[];
   journal: InvocationJournalEntry[]; context: ContextManifest;
   checkpoints: Checkpoint[]; workspaceGenerations: WorkspaceGenerationStateV1[];
+  principalId: string; workspaceIdentityRef: string;
 }): Promise<void> {
   const { artifacts, run, spec, journal } = input;
+  const workspace = decodeWorkspaceIdentity(await readCanonicalArtifact(artifacts, input.workspaceIdentityRef));
+  const source = decodeSourceManifest(await readCanonicalArtifact(artifacts, spec.baseWorkspaceManifestRef));
+  const admitted = decodeAdmittedContext(await readCanonicalArtifact(artifacts, spec.admittedContextRef));
+  if (workspace.kind !== 'live' || workspace.ownerPrincipalId !== input.principalId ||
+      source.workspaceIdentityDigest !== workspace.identityDigest || admitted.sessionId !== run.sessionId) {
+    throw new TypeError('model history has no exact original Session/workspace principal closure');
+  }
+  const assembly = decodeRetainedRunAssembly(await readCanonicalArtifact(artifacts, spec.assemblyRef));
   const requests = new Map<string, ModelRequestV1>();
   const operationRequests = new Map<string, ModelRequestV1>();
   for (const prepared of journal.filter((entry) => entry.opKind === 'model' && entry.phase === 'prepared')) {
     const request = await readCanonicalArtifact<ModelRequestV1>(artifacts, prepared.requestRef);
     if (request.schemaVersion !== 1 || request.format !== 'cliq-model-request-v1' ||
         request.runId !== run.id || request.assemblyRef !== spec.assemblyRef || request.opId !== prepared.opId ||
-        request.attempt !== prepared.attempt || request.model !== prepared.target || request.requestDigest !== digestOmitting(request, 'requestDigest')) {
+        request.attempt !== prepared.attempt || request.model !== assembly.provider.model || request.requestDigest !== digestOmitting(request, 'requestDigest')) {
       throw new TypeError('model Journal request identity does not rehash');
     }
     const bytes = await artifacts.readBytes(request.bodyBytesRef);
@@ -55,10 +68,24 @@ export async function validateAgentRecovery(input: {
     const first = operationRequests.get(prepared.opId);
     if (first) assertSameModelOperation(first, request);
     else operationRequests.set(prepared.opId, request);
+    if (!prepared.grantRef) throw new TypeError('model Journal preparation has no operation grant');
+    const grant = decodeModelOperationGrant(await readCanonicalArtifact(artifacts, prepared.grantRef));
+    const frontier = await readCanonicalArtifact<import('../kernel/types.js').RunFrontier>(artifacts, grant.frontierRef);
+    if (frontier.kind !== 'agent') throw new TypeError('model Journal grant has no original model frontier');
+    const authority = await readModelGrantData(artifacts, { principalId: input.principalId, run, spec, assembly, frontier,
+      frontierRef: grant.frontierRef, request, requestRef: prepared.requestRef, grantRef: prepared.grantRef });
+    const contextRef = 'contextManifestRef' in projection ? projection.contextManifestRef :
+      (await readCanonicalArtifact<RunContextCompactionPlan>(artifacts, request.compactionPlanRef!)).sourceContextManifestRef;
+    const context = decodeContextManifest(await readCanonicalArtifact(artifacts, contextRef));
+    if (prepared.target !== authority.targetRef || prepared.timestamp < grant.issuedAt || context.runId !== run.id ||
+        context.assemblyRef !== spec.assemblyRef || context.admittedContextRef !== spec.admittedContextRef ||
+        frontier.contextItemSeq !== context.throughItemSeq ||
+        ('frontierDigest' in projection && projection.frontierDigest !== grant.frontierRef)) {
+      throw new TypeError('model Journal target/grant differs from its original ready context and frontier');
+    }
     requests.set(prepared.requestRef, request);
   }
   if (operationRequests.size) {
-    const assembly = await readCanonicalArtifact<RunAssemblyV1>(artifacts, spec.assemblyRef);
     for (const opId of operationRequests.keys()) modelRetryState(assembly.retry.model, journal.filter((entry) => entry.opId === opId), run.updatedAt);
   }
   const turns = new Map<string, Awaited<ReturnType<typeof readModelTurnMaterial>>>();

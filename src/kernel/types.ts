@@ -1,5 +1,7 @@
 export type ArtifactRef = string;
 
+export type { BrokerProcessDomainDeathEvidenceV1 } from './broker-process-domain-death.js';
+
 export type {
   ProcessContainmentOwner, ProcessContainmentPlanV1, ProcessContainment,
   ProcessContainmentRef, ProcessContainmentNoSpawnEvidenceV1, ProcessContainmentDeathEvidenceV1,
@@ -785,6 +787,7 @@ export type WorkspaceGenerationQuarantineEvidenceBaseV1 = {
   sourceRowVersion: number;
   observedState:
     | { kind: 'complete_tree'; treeDigest: string }
+    | { kind: 'unverified_preparation' }
     | {
         kind: 'unreadable_partial';
         failureCode:
@@ -808,6 +811,13 @@ export type WorkspaceGenerationQuarantineEvidenceBaseV1 = {
 export type WorkspaceGenerationQuarantineEvidenceV1 =
   WorkspaceGenerationQuarantineEvidenceBaseV1 &
     (
+      | {
+          reason: 'preparation_retired';
+          fromPhase: 'materializing' | 'preactivated_readonly';
+          workerLaunchId: string;
+          preparationRetirementEvidenceRef: ArtifactRef;
+          preparationRetirementEvidenceDigest: string;
+        }
       | {
           reason: 'materialization_failed';
           fromPhase: 'materializing';
@@ -893,6 +903,27 @@ export type WorkspaceGenerationQuarantineEvidenceV1 =
           containmentNoSpawnEvidenceDigest?: never;
         }
     );
+
+export type WorkspaceGenerationRetirementEvidenceV1 = {
+  schemaVersion: 1;
+  format: 'cliq-workspace-generation-retirement-evidence-v1';
+  runId: string;
+  generationRef: ArtifactRef;
+  generationIdentityDigest: string;
+  inspectorIdentityRef: ArtifactRef;
+  inspectorIdentityDigest: string;
+  observedAt: string;
+  evidenceDigest: string;
+} & (
+  | { fromPhase: 'sealed'; snapshotEvidenceRef: ArtifactRef; snapshotEvidenceDigest: string; workerLaunchId: string;
+      containmentDeathEvidenceRef: ArtifactRef; containmentDeathEvidenceDigest: string;
+      quarantineEvidenceRef?: never; quarantineEvidenceDigest?: never }
+  | { fromPhase: 'quarantined'; quarantineEvidenceRef: ArtifactRef; quarantineEvidenceDigest: string;
+      sourceQuarantinedRowVersion: number; activeRunPointerCount: 0; nonretiredWorkerLaunchCount: 0;
+      liveContainmentCount: 0; activeMountCount: 0; releasableBrokerClaimCount: 0;
+      snapshotEvidenceRef?: never; snapshotEvidenceDigest?: never; workerLaunchId?: never;
+      containmentDeathEvidenceRef?: never; containmentDeathEvidenceDigest?: never }
+);
 
 export type WorkspaceGenerationStateBaseV1 = {
   schemaVersion: 1;
@@ -1357,7 +1388,21 @@ export type WorkerDeathWait = {
   probeState: import('./reconciliation.js').ReconciliationProbeStateV1;
 };
 
-export type WorkerLaunch = {
+/** Logical intent only. A schema-valid value is not a resource birth witness. */
+export type WorkerPreparation = {
+  stateOwnerEpoch: number;
+  sourceCheckpointId: string;
+  sourceWorkspaceStateRef: ArtifactRef;
+  generationCreationNonceDigest: string;
+  generationId: string;
+  generation?: { generationRef: ArtifactRef; generationIdentityDigest: string };
+  controller?: { birthIdentityRef: ArtifactRef; birthIdentityDigest: string };
+  reservation?: { deviceId: string; fileId: string; ownerUid: number };
+};
+
+export type BoundWorkerPreparation = WorkerPreparation & Required<Pick<WorkerPreparation, 'generation' | 'controller' | 'reservation'>>;
+
+type WorkerLaunchIdentity = {
   schemaVersion: 1;
   launchId: string;
   runId: string;
@@ -1365,7 +1410,44 @@ export type WorkerLaunch = {
   supervisorInstanceId: string;
   spawnNonceDigest: string;
   activationNonceDigest: string;
+  createdAt: string;
+  activationDeadlineAt: string;
+};
+
+type WorkerLaunchWithoutExecution = {
+  workspaceGenerationRef?: never;
+  containmentPlanRef?: never;
+  sandboxLaunchSpecRef?: never;
+  workerIdentityDigest?: never;
+  processContainmentRef?: never;
+  leaseEpoch?: never;
+  leaseVersion?: never;
+  leaseExpiresAt?: never;
+  generationWriteState?: never;
+  quiesceId?: never;
+  activatedAt?: never;
+};
+
+export type PreparingWorkerLaunch = WorkerLaunchIdentity & WorkerLaunchWithoutExecution & {
+  phase: 'preparing';
+  preparation: WorkerPreparation;
+  retirementKind?: never;
+  retiredAt?: never;
+  retirementEvidenceRef?: never;
+};
+
+export type RetiredWorkerPreparation = WorkerLaunchIdentity & WorkerLaunchWithoutExecution & {
+  phase: 'retired';
+  retirementKind: 'preparation';
+  preparation: WorkerPreparation;
+  retiredAt: string;
+  retirementEvidenceRef: ArtifactRef;
+};
+
+export type BoundWorkerLaunch = WorkerLaunchIdentity & {
   phase: 'reserved' | 'preactivated' | 'activated' | 'reconciling' | 'retired';
+  retirementKind?: never;
+  preparation?: BoundWorkerPreparation;
   workspaceGenerationRef: ArtifactRef;
   containmentPlanRef: ArtifactRef;
   sandboxLaunchSpecRef: ArtifactRef;
@@ -1382,12 +1464,12 @@ export type WorkerLaunch = {
     | 'fenced_reconciling'
     | 'sealed';
   quiesceId?: string;
-  createdAt: string;
-  activationDeadlineAt: string;
   activatedAt?: string;
   retiredAt?: string;
   retirementEvidenceRef?: ArtifactRef;
 };
+
+export type WorkerLaunch = PreparingWorkerLaunch | RetiredWorkerPreparation | BoundWorkerLaunch;
 
 export type ChildAllocationTerminal =
   | {
@@ -1493,6 +1575,7 @@ export type KernelGenerationIdentityV1 = {
       pristineSchemaDigest: string;
       runtimeBundleRef?: never;
       runtimeBundleManifestDigest?: never;
+      modelAuthoritySource?: never;
       candidateRef?: never;
       candidateDigest?: never;
       migrationId?: never;
@@ -1504,6 +1587,9 @@ export type KernelGenerationIdentityV1 = {
       pristineSchemaDigest: string;
       runtimeBundleRef: ArtifactRef;
       runtimeBundleManifestDigest: string;
+      modelAuthoritySource:
+        | { kind: 'none' }
+        | { kind: 'present'; closureRef: ArtifactRef; closureDigest: string };
       candidateRef?: never;
       candidateDigest?: never;
       migrationId?: never;
@@ -1518,6 +1604,7 @@ export type KernelGenerationIdentityV1 = {
       pristineSchemaDigest?: never;
       runtimeBundleRef?: never;
       runtimeBundleManifestDigest?: never;
+      modelAuthoritySource?: never;
     }
 );
 

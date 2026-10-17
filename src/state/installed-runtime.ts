@@ -16,10 +16,15 @@ import { ContentAddressedStore } from './cas.js';
 import { joinResourceOperations, KernelStorageError, ResourceRetirementError } from './errors.js';
 import { decodeSandboxRootProfile } from './execution-closure.js';
 import { decodeControlChannel, decodeLocalPrincipalIdentity, decodePlatformProcessIdentity, decodeStateRootIdentity } from './decoders.js';
-import { checkCanonicalBytes, validateBundle, validateTrustStore } from './installed-artifacts.js';
+import { checkCanonicalBytes, validateBundle, validateTrustStore, validateInstalledStructuredArtifacts,
+  type InstalledStructuredArtifacts } from './installed-artifacts.js';
+import { decodeInstalledModelAuthorityClosure, verifyInstalledModelAuthority,
+  type VerifiedInstalledModelAuthority } from '../model/installed-authority.js';
+import { MODEL_BROKER_ENTRY_ID, MODEL_BROKER_RELATIVE_PATH, InstalledModelBrokerRefusalError,
+  type ModelBrokerBinding, type NativeModelBrokerBinding, type NativeModelTransport, type NativeModelNoReleaseFence } from './model-broker-native.js';
 import { runInstalledCredentialAuthority, type HeldCredentialAuthorityLock } from './store.js';
 import type { NativeWorkerBinding, NativeWorkerImage } from '../sandbox/linux-worker.js';
-import type { NativeCredentialPlatformBinding } from './credential-platform.js';
+import type { NativeCredentialInspection, NativeCredentialPlatformBinding, NativeSecretServiceInput } from './credential-platform.js';
 import { acquireHeldInstalledAnchor, executeHeldInstalledImage, initializeHeldInstalledKeeper, loadHeldStateOwnerImage,
   stateRootIdentityFromDescriptor, withHeldCredentialNativeScope, STATE_OWNER_NATIVE_ENTRY_ID, STATE_OWNER_NATIVE_RELATIVE_PATH,
   type NativeStateOwner } from './native-owner.js';
@@ -53,6 +58,30 @@ type CredentialPhysicalBinding = { native: NativeStateOwner;
   pid: number; processStartToken: string; generation: string; active: boolean;
   provenance: InstalledCredentialProvenance };
 const credentialPhysicalScopes = new WeakMap<InstalledCredentialScope, CredentialPhysicalBinding>();
+const installedModelNoReleaseFences = new WeakMap<NativeModelNoReleaseFence, {
+  native: NativeModelNoReleaseFence; bindingDigest: string; active: boolean; processId: number;
+  selected: HeldInstalledRuntime; bundleDigest: string; manifestDigest: string; assertSelection(): void;
+}>();
+
+/** Friend validation only. A structural object, closed report or token digest
+ * is not the original signed native owner's continuously held release mutex. */
+export function assertInstalledModelNoReleaseFence(fence: NativeModelNoReleaseFence, binding: ModelBrokerBinding,
+  expected?: { selected: HeldInstalledRuntime; runtimeBundleRef: string; runtimeBundleManifestDigest: string }): void {
+  const held = installedModelNoReleaseFences.get(fence);
+  if (!held || !held.active || held.processId !== process.pid || held.bindingDigest !== canonicalSha256(binding))
+    mismatch('installed model no-release fence is not the original held claim owner');
+  if (expected && (held.selected !== expected.selected || held.bundleDigest !== expected.runtimeBundleRef ||
+      held.manifestDigest !== expected.runtimeBundleManifestDigest)) mismatch('installed model no-release fence belongs to another signed selection');
+  held.assertSelection();
+  try { held.native.assertHeld(); }
+  catch (error) {
+    if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT') {
+      const failure = new ResourceRetirementError('model no-release mutex owner has uncertain retirement', error);
+      rememberRetirement(failure); throw failure;
+    }
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'installed model no-release mutex is no longer held');
+  }
+}
 
 function checkedCredentialPhysicalScope(physical: InstalledCredentialScope): CredentialPhysicalBinding {
   const held = credentialPhysicalScopes.get(physical);
@@ -100,8 +129,12 @@ type InstalledDirectoryIdentity = Readonly<{ deviceId: string; fileId: string; o
 export type InstalledRuntimeBorrow = Readonly<{
   bundle: RuntimeBundleManifest;
   bundleDigest: string;
+  releaseKeys: readonly ReleaseTrustKey[];
   stateRoot: InstalledDirectoryIdentity & Readonly<{ canonicalPath: string }>;
   casRoot: InstalledDirectoryIdentity;
+  modelAuthority?: VerifiedInstalledModelAuthority;
+  structured: InstalledStructuredArtifacts;
+  objects: ReadonlyMap<string, Buffer>;
   seed: readonly Readonly<{ artifactRef: string; byteCount: number; mediaType: string; schemaKind: string }>[];
   revalidate(): Promise<void>;
   loadStateOwner(): Promise<NativeStateOwner>;
@@ -114,6 +147,7 @@ type InstalledRuntimeBinding = {
   acquireAnchor(): Promise<HeldInstalledAnchor>;
   loadWorkerNative(): Promise<NativeWorkerBinding>;
   loadCredentialPlatform(): Promise<NativeCredentialPlatformBinding>;
+  loadModelBroker(): Promise<NativeModelBrokerBinding>;
   openControlClient(): Promise<HeldInstalledControlClient>;
   sealWorkerImage(entryId: string): Promise<NativeWorkerImage>;
   credentialScope<T>(operation: (token: HeldCredentialAuthorityLock) => Promise<T>): Promise<T>;
@@ -145,7 +179,24 @@ export function loadInstalledWorkerNative(selected: HeldInstalledRuntime): Promi
 export function loadInstalledCredentialPlatform(selected: HeldInstalledRuntime): Promise<NativeCredentialPlatformBinding> {
   const binding = heldInstalledRuntimes.get(selected);
   if (!binding) mismatch('installed runtime is not a verified held selection');
+  healthy();
+  // Ordinary callers load before acquiring the credential scope. Enqueueing
+  // here during a scope would wait behind its own pending native operation,
+  // preventing the public caller from ever reaching the existing Busy gate.
+  if (credentialScopeReserved) throw new CredentialScopeBusyError();
   return binding.loadCredentialPlatform();
+}
+export function loadInstalledModelBroker(selected: HeldInstalledRuntime): Promise<NativeModelBrokerBinding> {
+  const binding = heldInstalledRuntimes.get(selected);
+  if (!binding) mismatch('installed runtime is not a verified held selection');
+  return binding.loadModelBroker();
+}
+
+/** Supported fixed creator-process recipe only, not installation or release
+ * authority. Both live dispatch and domain-death production retain this gate. */
+export function assertInstalledModelBrokerProcess(): void {
+  if (!isMainThread || !isSea() || process.platform !== 'linux' || process.arch !== 'x64' || process.versions.node !== '24.21.0')
+    throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'model broker requires the fixed signed Linux backend');
 }
 export function openInstalledControlClient(selected: HeldInstalledRuntime): Promise<HeldInstalledControlClient> {
   const binding = heldInstalledRuntimes.get(selected);
@@ -179,6 +230,15 @@ export function withHeldInstalledRuntime<T>(held: HeldInstalledRuntime,
   return binding.borrow(operation);
 }
 
+export class CredentialScopeBusyError extends TypeError {
+  readonly controlError = Object.freeze({ schemaVersion: 1, code: 'RATE_LIMITED', retryable: true,
+    retryAfterMs: 1000, messageCode: 'run.credential_scope_busy' } as const);
+  constructor() {
+    super('ordinary credential entry cannot be called while a scope is acquiring, active or draining');
+    this.name = 'CredentialScopeBusyError';
+  }
+}
+
 /** Ordinary same-user credential-store scope. Preoccupy the whole process
  * before enqueue: recursion or a second factory cannot wait on its own tail.
  * This token carries physical ownership, not an authentication decision. */
@@ -187,7 +247,7 @@ export function withCredentialAuthorityLock<T>(held: HeldInstalledRuntime,
   const binding = heldInstalledRuntimes.get(held);
   if (!binding) mismatch('installed runtime is not a verified held selection');
   healthy();
-  if (credentialScopeReserved) throw new TypeError('ordinary credential entry cannot be called while a scope is acquiring, active or draining');
+  if (credentialScopeReserved) throw new CredentialScopeBusyError();
   if (typeof operation !== 'function') throw new TypeError('credential scope requires a callback');
   credentialScopeReserved = true;
   const release = () => { if (!retirementFailure) credentialScopeReserved = false; };
@@ -206,7 +266,9 @@ type InstalledRuntime = Readonly<{
 type Directory = { handle: FileHandle; info: BigIntStats; parent?: Directory; name: string; private: boolean };
 type InstalledFile = { handle: FileHandle; info: BigIntStats; parent: Directory; name: string; digest?: string };
 type VerifiedPackage = { root: Directory; manifest: InstalledFile; bundle: RuntimeBundleManifest;
-  bundleDigest: string; manifestBytes: Buffer; entries: Map<string, InstalledFile>; roots: Map<string, Buffer> };
+  bundleDigest: string; manifestBytes: Buffer; entries: Map<string, InstalledFile>; roots: Map<string, Buffer>;
+  structured: InstalledStructuredArtifacts; modelAuthority?: VerifiedInstalledModelAuthority;
+  companionFiles: InstalledFile[] };
 
 const SMALL_BYTES = 1_048_576;
 const TRUST_BYTES = 16 * SMALL_BYTES;
@@ -399,9 +461,12 @@ async function readSmall(file: InstalledFile, limit = SMALL_BYTES): Promise<Buff
   return Buffer.concat(bytes);
 }
 async function verifyBytes(file: InstalledFile): Promise<void> { for await (const _chunk of chunks(file)) { /* streamed integrity check */ } }
-async function checkPackageGraph(scope: Scope, root: Directory, bundle: RuntimeBundleManifest): Promise<void> {
+async function checkPackageGraph(scope: Scope, root: Directory, bundle: RuntimeBundleManifest,
+  companion?: VerifiedInstalledModelAuthority): Promise<void> {
   const expected = new Map<string, Set<string>>();
-  for (const filename of ['manifest.json', ...bundle.entries.map(entry => entry.relativePath)]) {
+  const companionPaths = companion ? ['model-authority.json', ...companion.closure.objects.map(object =>
+    `model-objects/sha256/${object.artifactRef.slice(0, 2)}/${object.artifactRef}`)] : [];
+  for (const filename of ['manifest.json', ...bundle.entries.map(entry => entry.relativePath), ...companionPaths]) {
     const components = filename.split('/');
     for (let index = 0; index < components.length; index++) {
       const parent = components.slice(0, index).join('/');
@@ -422,7 +487,8 @@ async function checkSelectedVersion(scope: Scope, bundles: Directory, bundleDige
   if (names.length !== 1 || names[0] !== bundleDigest) mismatch('initial installed runtime contains an unselected version or object');
   await scope.assertDirectory(bundles);
 }
-async function verifyPackage(scope: Scope, root: Directory, releaseKeys: readonly ReleaseTrustKey[], expectedDigest?: string): Promise<VerifiedPackage> {
+async function verifyPackage(scope: Scope, root: Directory, releaseKeys: readonly ReleaseTrustKey[], expectedDigest?: string,
+  sourceCompanion = false): Promise<VerifiedPackage> {
   const manifest = await scope.file(root, 'manifest.json', 0o400, undefined, expectedDigest);
   const manifestBytes = await readSmall(manifest);
   const bundleDigest = sha256Bytes(manifestBytes);
@@ -430,34 +496,54 @@ async function verifyPackage(scope: Scope, root: Directory, releaseKeys: readonl
   manifest.digest = bundleDigest;
   const entries = new Map<string, InstalledFile>();
   const roots = new Map<string, Buffer>([[bundleDigest, manifestBytes]]);
-  const inodes = new Set<string>();
+  const inodes = new Set<string>([`${manifest.info.dev}:${manifest.info.ino}`]);
   for (const entry of bundle.entries) {
     const file = await scope.file(root, entry.relativePath, entry.executable ? 0o500 : 0o400, entry.byteCount, entry.digest);
     const identity = `${file.info.dev}:${file.info.ino}`;
     if (inodes.has(identity)) mismatch('distinct signed entries alias one installed inode');
     inodes.add(identity); entries.set(entry.entryId, file);
-    if (entry.role === 'policy_engine' || entry.role === 'sandbox_root_profile') {
+    if (['policy_engine', 'sandbox_root_profile', 'system_prompt', 'compaction_prompt', 'bundle_object', 'schema'].includes(entry.role)) {
       if (entry.executable) mismatch('signed structured roots must be data');
       const bytes = await readSmall(file); const value = checkCanonicalBytes(bytes);
       if (entry.role === 'policy_engine') {
         if (canonicalSha256(value) !== canonicalSha256(policyProfile())) mismatch('signed policy root is not the fixed supported evaluator profile');
-      } else decodeSandboxRootProfile(value);
+      } else if (entry.role === 'sandbox_root_profile') decodeSandboxRootProfile(value);
       roots.set(entry.digest, bytes);
     } else if (entry.role === 'trust_store') {
       const bytes = await readSmall(file, TRUST_BYTES); validateTrustStore(bytes); roots.set(entry.digest, bytes);
     } else await verifyBytes(file);
   }
-  const profileEntry = bundle.entries.find(entry => entry.role === 'policy_engine')!;
-  const profile = policyProfile();
-  const structured = bundle.structuredArtifacts[0]!;
-  if (!structured || !exactKeys(structured, ['artifactId', 'rootEntryId', 'artifactRef', 'semanticDigest', 'memberRefs', 'kind']) ||
-      structured.kind !== 'policy_engine_profile' || typeof structured.artifactId !== 'string' || !structured.artifactId ||
-      structured.rootEntryId !== profileEntry.entryId || structured.artifactRef !== profileEntry.digest ||
-      structured.semanticDigest !== profile.profileDigest || !Array.isArray(structured.memberRefs) || structured.memberRefs.length !== 0) {
-    mismatch('signed structured policy root is not its exact self-contained entry');
+  const structured = validateInstalledStructuredArtifacts(bundle, roots);
+  const companionFiles: InstalledFile[] = [];
+  let modelAuthority: VerifiedInstalledModelAuthority | undefined;
+  if (sourceCompanion) {
+    await scope.assertDirectory(root);
+    const names = await readdir(childPath(root, '.'));
+    await scope.assertDirectory(root);
+    if (names.includes('model-authority.json')) {
+      const file = await scope.file(root, 'model-authority.json', 0o400);
+      const bytes = await readSmall(file);
+      try {
+        const closure = decodeInstalledModelAuthorityClosure(checkCanonicalBytes(bytes), { bundle, releaseKeys });
+        file.digest = sha256Bytes(bytes); companionFiles.push(file); roots.set(file.digest, bytes);
+        const objects = new Map<string, Buffer>();
+        for (const object of closure.objects) {
+          const member = await scope.file(root, `model-objects/sha256/${object.artifactRef.slice(0, 2)}/${object.artifactRef}`,
+            0o400, object.byteCount, object.artifactRef);
+          const identity = `${member.info.dev}:${member.info.ino}`;
+          if (inodes.has(identity)) mismatch('installed model members alias another signed inode');
+          inodes.add(identity); companionFiles.push(member);
+          const bytes = await readSmall(member, 65536);
+          objects.set(object.artifactRef, bytes); roots.set(object.artifactRef, bytes);
+        }
+        modelAuthority = verifyInstalledModelAuthority({ closure, bundle, releaseKeys, objects });
+        if (modelAuthority.closureRef !== file.digest) mismatch('installed model closure complete identity differs');
+      } catch (cause) { mismatch('installed model companion verification failed', cause); }
+    }
   }
-  await checkPackageGraph(scope, root, bundle); await scope.assertDirectories();
-  return { root, manifest, bundle, bundleDigest, manifestBytes, entries, roots };
+  await checkPackageGraph(scope, root, bundle, modelAuthority); await scope.assertDirectories();
+  return { root, manifest, bundle, bundleDigest, manifestBytes, entries, roots, structured, companionFiles,
+    ...(modelAuthority ? { modelAuthority } : {}) };
 }
 
 async function writeChunks(scope: Scope, root: Directory, relative: string, source: AsyncIterable<Buffer>, mode: number): Promise<void> {
@@ -533,7 +619,7 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
         let signed: VerifiedPackage;
         try {
           const sourceRoot = await sourceScope.root(packageRoot);
-          signed = await verifyPackage(sourceScope, sourceRoot, releaseKeys);
+          signed = await verifyPackage(sourceScope, sourceRoot, releaseKeys, undefined, true);
           const state = await destination.root(stateRoot, true);
           const root = await destination.directory(state, 'runtime', true);
           const casRoot = await destination.directory(state, KERNEL_CAS_DIRECTORY, true);
@@ -555,9 +641,9 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
           }
           await verifyPackage(destination, stage, releaseKeys, signed.bundleDigest);
           await verifyBytes(await destination.file(root, 'bootstrap', 0o500, supervisor.byteCount, supervisor.digest));
-          await checkPackageGraph(sourceScope, sourceRoot, signed.bundle);
+          await checkPackageGraph(sourceScope, sourceRoot, signed.bundle, signed.modelAuthority);
           await sourceScope.assertDirectories();
-          for (const file of [signed.manifest, ...signed.entries.values()]) await verifyBytes(file);
+          for (const file of [signed.manifest, ...signed.entries.values(), ...signed.companionFiles]) await verifyBytes(file);
           for (const file of casFiles) await verifyBytes(file);
           await syncDirectories(destination);
           // Retire source authority before publishing a selection. Source
@@ -569,7 +655,8 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
           await bundles.handle.sync(); await destination.assertDirectories();
           await absent(root, 'active.json');
           const temporary = `.tmp-active-${randomBytes(16).toString('hex')}`;
-          await writeChunks(destination, root, temporary, bytesSource(canonicalJsonBytes({ schemaVersion: 1, bundleDigest: signed.bundleDigest })), 0o600);
+          await writeChunks(destination, root, temporary, bytesSource(canonicalJsonBytes({ schemaVersion: 1,
+            bundleDigest: signed.bundleDigest, ...(signed.modelAuthority ? { modelAuthorityRef: signed.modelAuthority.closureRef } : {}) })), 0o600);
           healthy(); await rename(childPath(root, temporary), childPath(root, 'active.json'));
           await root.handle.sync(); await destination.assertDirectories();
           return { bundleDigest: signed.bundleDigest, manifestDigest: signed.bundle.manifestDigest };
@@ -591,9 +678,12 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
         const casRoot = await scope.directory(state, KERNEL_CAS_DIRECTORY);
         const active = await scope.file(root, 'active.json', 0o600);
         const activeBytes = await readSmall(active);
-        const selection = checkCanonicalBytes(activeBytes) as { schemaVersion: number; bundleDigest: string };
-        if (!selection || typeof selection !== 'object' || Array.isArray(selection) || !exactKeys(selection, ['schemaVersion', 'bundleDigest']) || selection.schemaVersion !== 1) mismatch('installed runtime selection has an invalid closed shape');
-        try { assertArtifactRef(selection.bundleDigest); } catch (cause) { mismatch('installed runtime selection has an invalid complete bundle reference', cause); }
+        const selection = checkCanonicalBytes(activeBytes) as { schemaVersion: number; bundleDigest: string; modelAuthorityRef?: string };
+        if (!selection || typeof selection !== 'object' || Array.isArray(selection) ||
+            !exactKeys(selection, ['schemaVersion', 'bundleDigest', ...(Object.hasOwn(selection, 'modelAuthorityRef') ? ['modelAuthorityRef'] : [])]) ||
+            selection.schemaVersion !== 1) mismatch('installed runtime selection has an invalid closed shape');
+        try { assertArtifactRef(selection.bundleDigest); if (selection.modelAuthorityRef !== undefined) assertArtifactRef(selection.modelAuthorityRef); }
+        catch (cause) { mismatch('installed runtime selection has an invalid complete reference', cause); }
         active.digest = sha256Bytes(activeBytes);
         await checkSelectedVersion(scope, bundles, selection.bundleDigest);
         const version = await scope.directory(bundles, selection.bundleDigest);
@@ -602,13 +692,30 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
         const bootstrap = await scope.file(root, 'bootstrap', 0o500, supervisor.byteCount, supervisor.digest);
         const casFiles: InstalledFile[] = [];
         for (const [ref, bytes] of signed.roots) casFiles.push(await scope.file(casRoot, ref, 0o400, bytes.length, ref));
+        if (selection.modelAuthorityRef !== undefined) {
+          try {
+            const file = await scope.file(casRoot, selection.modelAuthorityRef, 0o400, undefined, selection.modelAuthorityRef);
+            const bytes = await readSmall(file); casFiles.push(file); signed.roots.set(selection.modelAuthorityRef, bytes);
+            const closure = decodeInstalledModelAuthorityClosure(checkCanonicalBytes(bytes), { bundle: signed.bundle, releaseKeys });
+            const objects = new Map<string, Buffer>();
+            for (const object of closure.objects) {
+              const member = await scope.file(casRoot, object.artifactRef, 0o400, object.byteCount, object.artifactRef);
+              const bytes = await readSmall(member, 65536); casFiles.push(member);
+              objects.set(object.artifactRef, bytes); signed.roots.set(object.artifactRef, bytes);
+            }
+            signed.modelAuthority = verifyInstalledModelAuthority({ closure, bundle: signed.bundle, releaseKeys, objects });
+            if (signed.modelAuthority.closureRef !== selection.modelAuthorityRef) mismatch('selected model closure complete identity differs');
+          } catch (cause) { mismatch('selected installed model companion verification failed', cause); }
+        }
         let closed = false;
         let poisoned: unknown;
         let tail = Promise.resolve();
         let closePromise: Promise<void> | undefined;
         let workerNative: NativeWorkerBinding | undefined;
         let credentialPlatform: NativeCredentialPlatformBinding | undefined;
+        let modelBroker: NativeModelBrokerBinding | undefined;
         const platformJobs = new Set<Promise<unknown>>();
+        const brokerTransports = new Set<NativeModelTransport>();
         const assertSelection = () => {
           if (poisoned !== undefined) throw poisoned;
           try { scope.assertMetadata([active, signed.manifest, bootstrap, ...signed.entries.values(), ...casFiles]); }
@@ -648,16 +755,27 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
         });
         const observation = Object.freeze({
           bundle: signed.bundle, bundleDigest: signed.bundleDigest,
+          releaseKeys,
           stateRoot: Object.freeze({ ...identity(state), canonicalPath: stateRoot }),
           casRoot: identity(casRoot),
+          structured: signed.structured,
+          get objects(): ReadonlyMap<string, Buffer> { return new Map([...signed.roots].map(([ref, bytes]) => [ref, Buffer.from(bytes)])); },
+          ...(signed.modelAuthority ? { modelAuthority: signed.modelAuthority } : {}),
           seed: Object.freeze([...signed.roots].map(([artifactRef, bytes]) => {
             const role = signed.bundle.entries.find(entry => entry.digest === artifactRef)?.role;
+            const companionKind = signed.modelAuthority?.closure.objects.find(object => object.artifactRef === artifactRef)?.kind;
             const schemaKind = artifactRef === signed.bundleDigest ? 'cliq-runtime-bundle-v1' :
+              artifactRef === signed.modelAuthority?.closureRef ? 'cliq-installed-model-authority-v1' :
+              companionKind === 'ed25519_signature' ? 'cliq-ed25519-signature-v1' :
+              companionKind === 'model_catalog_entry' ? 'cliq-signed-model-catalog-entry-v1' :
+              companionKind === 'model_price_table' ? 'cliq-model-price-table-v1' :
+              signed.structured.objects.find(object => object.artifactRef === artifactRef)?.schemaKind ?? (
+              role === 'schema' ? 'cliq-installed-schema-v1' :
               role === 'policy_engine' ? 'cliq-policy-engine-profile-v1' :
               role === 'sandbox_root_profile' ? 'cliq-sandbox-root-profile-v1' :
-              role === 'trust_store' ? 'cliq-https-trust-store-v1' : mismatch('installed seed contains an unsupported object');
+              role === 'trust_store' ? 'cliq-https-trust-store-v1' : mismatch('installed seed contains an unsupported object'));
             return Object.freeze({ artifactRef, byteCount: bytes.length,
-              mediaType: role === 'trust_store' ? 'application/octet-stream' : 'application/json', schemaKind });
+              mediaType: role === 'trust_store' || companionKind === 'ed25519_signature' ? 'application/octet-stream' : 'application/json', schemaKind });
           })
             .sort((left, right) => left.artifactRef < right.artifactRef ? -1 : left.artifactRef > right.artifactRef ? 1 : 0)),
         });
@@ -670,10 +788,23 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
           close(this: HeldInstalledRuntime): Promise<void> {
             if (this !== selected) return Promise.reject(new KernelStorageError('ARTIFACT_MISMATCH', 'installed runtime handle receiver is not its held instance'));
             closed = true;
-            return closePromise ??= tail.then(async () => {
-              await joinResourceOperations([...platformJobs]);
+            return closePromise ??= (async () => {
+              // Every preparation already has its actual closeable owner.
+              // Cancel before joining producers, without acquiring the
+              // credential lock those pending producers may still hold.
+              const transports = await Promise.allSettled([...brokerTransports].map(transport => transport.close()));
+              await tail;
+              const producers = await Promise.allSettled([...platformJobs]);
+              const remaining = await Promise.allSettled([...platformJobs]);
+              const failed = [...producers, ...transports, ...remaining].find(result => result.status === 'rejected' &&
+                result.reason instanceof ResourceRetirementError);
+              if (failed?.status === 'rejected') throw failed.reason;
+              if (brokerTransports.size !== 0) {
+                const failure = new ResourceRetirementError('installed model transports did not all retire', undefined);
+                rememberRetirement(failure); throw failure;
+              }
               await scope.close();
-            });
+            })();
           },
         });
         heldInstalledRuntimes.set(selected, {
@@ -782,32 +913,73 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
                 const loaded = new Module('cliq-installed-linux-credential-platform');
                 process.dlopen(loaded, `/proc/self/fd/${file.handle.fd}`);
                 const native = loaded.exports as NativeCredentialPlatformBinding;
-                if (native.interfaceVersion !== 1 || typeof native.secretService !== 'function' || typeof native.userManager !== 'function' ||
+                if (native.interfaceVersion !== 2 || typeof native.secretService !== 'function' || typeof native.userManager !== 'function' ||
                     typeof native.currentUser !== 'function')
                   mismatch('unsupported installed credential platform interface');
-                const invoke = <T>(operation: () => Promise<T>): Promise<T> => {
-                  if (closed) mismatch('installed runtime handle is closed');
-                  assertSelection();
-                  const job = Promise.resolve().then(operation).then(result => { assertSelection(); return result; }, error => {
-                    if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT') {
-                      const failure = new ResourceRetirementError('credential platform resources did not retire', error);
-                      rememberRetirement(failure); throw failure;
-                    }
-                    // Only fixed native status codes survive. Remote/native
-                    // messages, payloads and stacks never become receipt data.
-                    const value = error as { code?: unknown; platformCode?: unknown } | null;
-                    const platformCode = value?.code === 'ERR_CLIQ_CREDENTIAL_PLATFORM' &&
-                      (value.platformCode === 'delete_denied' || value.platformCode === 'delete_failed')
-                      ? value.platformCode : 'platform_store_unavailable';
-                    throw new KernelStorageError('RECOVERY_REQUIRED', 'installed credential platform rejected an operation',
-                      { cause: Object.freeze({ platformCode }) });
-                  });
+                const refused = (error: unknown): never => {
+                  if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT') {
+                    const failure = new ResourceRetirementError('credential platform resources did not retire', error);
+                    rememberRetirement(failure); throw failure;
+                  }
+                  // Only fixed native status codes survive. Remote/native
+                  // messages, payloads and stacks never become receipt data.
+                  const value = error as { code?: unknown; platformCode?: unknown } | null;
+                  const platformCode = value?.code === 'ERR_CLIQ_CREDENTIAL_PLATFORM' &&
+                    (value.platformCode === 'delete_denied' || value.platformCode === 'delete_failed')
+                    ? value.platformCode : 'platform_store_unavailable';
+                  throw new KernelStorageError('RECOVERY_REQUIRED', 'installed credential platform rejected an operation',
+                    { cause: Object.freeze({ platformCode }) });
+                };
+                const track = <T>(pending: Promise<T>): Promise<T> => {
+                  const job = pending.then(result => { assertSelection(); return result; }, refused);
                   platformJobs.add(job);
                   void job.finally(() => platformJobs.delete(job)).catch(() => {});
                   return job;
                 };
-                credentialPlatform = Object.freeze({ interfaceVersion: 1 as const,
-                  secretService: input => invoke(() => native.secretService(input)),
+                const invoke = <T>(operation: () => Promise<T>): Promise<T> => {
+                  if (closed) mismatch('installed runtime handle is closed');
+                  assertSelection();
+                  return track(Promise.resolve().then(operation));
+                };
+                const secretService = ((input: NativeSecretServiceInput): Promise<unknown> => {
+                  if (input.kind !== 'inspect') return invoke(() => native.secretService(input));
+                  if (closed) mismatch('installed runtime handle is closed');
+                  assertSelection();
+                  let original: NativeCredentialInspection;
+                  try { original = native.secretService(input); }
+                  catch (error) { return refused(error); }
+                  // Publish the actual owner synchronously, before a caller can
+                  // request shutdown. A .then alone would discard cancellation.
+                  const result = track(original) as NativeCredentialInspection;
+                  if (typeof original.cancelAndJoin !== 'function') {
+                    const failure = new ResourceRetirementError('credential inspection lacks its original native cancellation owner', undefined);
+                    rememberRetirement(failure); throw failure;
+                  }
+                  let joining: Promise<void> | undefined;
+                  Object.defineProperty(result, 'cancelAndJoin', { value: function (this: NativeCredentialInspection, ...args: unknown[]) {
+                    if (this !== result || args.length) throw new TypeError('credential inspection cancellation requires its original owner and no fields');
+                    if (joining) return joining;
+                    const failedJoin = (error: unknown): never => {
+                      const failure = error instanceof ResourceRetirementError ? error
+                        : new ResourceRetirementError('credential inspection cancellation did not retire', error);
+                      rememberRetirement(failure); throw failure;
+                    };
+                    let nativeJoin: Promise<void>;
+                    try { nativeJoin = original.cancelAndJoin(); }
+                    catch (error) { nativeJoin = Promise.reject(error); }
+                    joining = nativeJoin.then(() => result.then(() => undefined, error => {
+                      // Ordinary observation refusal is not a failed physical
+                      // join. Retirement uncertainty always remains sticky.
+                      if (error instanceof ResourceRetirementError) throw error;
+                    }), failedJoin);
+                    platformJobs.add(joining);
+                    void joining.finally(() => platformJobs.delete(joining!)).catch(() => {});
+                    return joining;
+                  } });
+                  return result;
+                }) as NativeCredentialPlatformBinding['secretService'];
+                credentialPlatform = Object.freeze({ interfaceVersion: 2 as const,
+                  secretService,
                   userManager: input => invoke(() => native.userManager(input)),
                   currentUser: () => {
                     assertSelection();
@@ -823,6 +995,136 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
               }
               await checkedRevalidate();
               return credentialPlatform;
+            });
+          },
+          loadModelBroker() {
+            return enqueue(async () => {
+              assertInstalledModelBrokerProcess();
+              await checkedRevalidate();
+              if (!modelBroker) {
+                const entry = signed.bundle.entries.find(value => value.entryId === MODEL_BROKER_ENTRY_ID);
+                const file = signed.entries.get(MODEL_BROKER_ENTRY_ID);
+                if (!entry || !file || entry.role !== 'provider_adapter' || !entry.executable || entry.version !== '1' ||
+                    entry.relativePath !== MODEL_BROKER_RELATIVE_PATH)
+                  mismatch('fixed signed model broker adapter is missing');
+                const loaded = new Module('cliq-installed-linux-model-broker');
+                process.dlopen(loaded, `/proc/self/fd/${file.handle.fd}`);
+                const native = loaded.exports as NativeModelBrokerBinding;
+                if (native.interfaceVersion !== 3 || typeof native.prepareModelTransport !== 'function')
+                  mismatch('unsupported installed model broker interface');
+                const refused = (error: unknown): never => {
+                  if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT') {
+                    const failure = new ResourceRetirementError('model broker resources did not retire', undefined);
+                    rememberRetirement(failure); throw failure;
+                  }
+                  if ((error as { code?: unknown; brokerCode?: unknown } | null)?.code === 'ERR_CLIQ_MODEL_BROKER' &&
+                      (error as { brokerCode?: unknown }).brokerCode === 'broker_response_refused') throw new InstalledModelBrokerRefusalError();
+                  throw new KernelStorageError('RECOVERY_REQUIRED', 'installed model broker refused an operation');
+                };
+                const invoke = <T>(operation: () => Promise<T>, retiring = false): Promise<T> => {
+                  if (closed && !retiring) mismatch('installed runtime handle is closed');
+                  if (!retiring) assertSelection();
+                  // Enter the native queue synchronously after the caller's
+                  // final SQL cut; do not insert a microtask before release.
+                  let pending: Promise<T>;
+                  try { pending = operation(); }
+                  catch (error) { pending = Promise.reject(error); }
+                  const job = pending.then(result => {
+                    if (!retiring) assertSelection(); return result;
+                  }, refused);
+                  platformJobs.add(job);
+                  void job.finally(() => platformJobs.delete(job)).catch(() => {});
+                  return job;
+                };
+                modelBroker = Object.freeze({ interfaceVersion: 3 as const,
+                  prepareModelTransport(input) {
+                    if (closed) mismatch('installed runtime handle is closed');
+                    assertSelection();
+                    let original: NativeModelTransport;
+                    try { original = native.prepareModelTransport(input); }
+                    catch (error) { return refused(error); }
+                    let transport!: NativeModelTransport;
+                    let retirement: Promise<Awaited<ReturnType<typeof original.close>>> | undefined;
+                    let fenceRetained = false, resourcesJoined = false;
+                    const fences = new Set<NativeModelNoReleaseFence>();
+                    // Promise handlers run only after this synchronous call
+                    // has registered the owner below. In particular, no
+                    // selection check can strand a newly minted native owner.
+                    const prepared = original.ready.then(undefined, refused).then(() => {
+                      if (closed) mismatch('installed runtime handle is closed');
+                      assertSelection();
+                      assertArtifactRef(original.brokerFenceTokenDigest);
+                    });
+                    const owned = prepared.catch(async error => {
+                      // A validation or preparation refusal cannot expose a
+                      // free failure before its actual native owner joins.
+                      await transport.close();
+                      throw error;
+                    });
+                    transport = Object.freeze({
+                      brokerFenceTokenDigest: original.brokerFenceTokenDigest, ready: owned,
+                      retainDispatchFence() {
+                        if (closed) mismatch('installed runtime handle is closed'); assertSelection();
+                        try { original.retainDispatchFence(); fenceRetained = true; }
+                        catch (error) { return refused(error); }
+                      },
+                      acquireNoReleaseFence(binding) {
+                        if (!fenceRetained || !resourcesJoined) mismatch('installed model no-release fence lacks its original joined resource owner');
+                        binding = immutableSnapshot(binding);
+                        let nativeFence: NativeModelNoReleaseFence;
+                        try { nativeFence = original.acquireNoReleaseFence(binding); }
+                        catch (error) { return refused(error); }
+                        let fence!: NativeModelNoReleaseFence;
+                        const held = { native: nativeFence, bindingDigest: canonicalSha256(binding), active: true, processId: process.pid,
+                          selected, bundleDigest: signed.bundleDigest, manifestDigest: signed.bundle.manifestDigest, assertSelection };
+                        fence = Object.freeze({
+                          assertHeld() { assertInstalledModelNoReleaseFence(fence, binding); },
+                          close() {
+                            if (!held.active) return;
+                            try { nativeFence.close(); }
+                            catch (error) {
+                              const failure = new ResourceRetirementError('model no-release mutex owner did not retire', error);
+                              rememberRetirement(failure); throw failure;
+                            }
+                            held.active = false; fences.delete(fence);
+                          },
+                        });
+                        installedModelNoReleaseFences.set(fence, held); fences.add(fence); return fence;
+                      },
+                      releaseDispatchFence() {
+                        if (fences.size) {
+                          const failure = new ResourceRetirementError('model no-release mutex still has an owning guard', undefined);
+                          rememberRetirement(failure); throw failure;
+                        }
+                        try { original.releaseDispatchFence(); }
+                        catch (error) { return refused(error); }
+                        fenceRetained = false;
+                        if (resourcesJoined) brokerTransports.delete(transport);
+                      },
+                      connect: binding => invoke(() => original.connect(binding)),
+                      releaseBody: binding => invoke(() => original.releaseBody(binding)),
+                      close: () => retirement ??= invoke(async () => {
+                        const result = await original.close();
+                        if (!exactKeys(result, ['kind', 'brokerFenceTokenDigest', 'bodyBytesDigest', 'networkStarted', 'requestStarted',
+                          'tokenRevoked', 'matchingActiveReleaseCount']) || result.kind !== 'broker_transport_closed' ||
+                            result.brokerFenceTokenDigest !== original.brokerFenceTokenDigest || result.bodyBytesDigest !== input.bodyBytesDigest ||
+                            typeof result.networkStarted !== 'boolean' || typeof result.requestStarted !== 'boolean' ||
+                            result.tokenRevoked !== true || result.matchingActiveReleaseCount !== 0) {
+                          const failure = new ResourceRetirementError('model broker closure is incomplete', undefined);
+                          rememberRetirement(failure); throw failure;
+                        }
+                        resourcesJoined = true;
+                        if (!fenceRetained) brokerTransports.delete(transport); return result;
+                      }, true),
+                    });
+                    brokerTransports.add(transport);
+                    platformJobs.add(owned);
+                    void owned.finally(() => platformJobs.delete(owned)).catch(() => {});
+                    return transport;
+                  },
+                });
+              }
+              await checkedRevalidate(); return modelBroker;
             });
           },
           openControlClient() {

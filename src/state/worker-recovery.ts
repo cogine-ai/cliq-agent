@@ -2,13 +2,13 @@ import { canonicalSha256 } from '../kernel/canonical.js';
 import { addCanonicalDuration, assertArtifactRef, digestOmitting, identityHash, parseCanonicalTime } from '../kernel/identity.js';
 import type { InvocationJournalEntry, ProcessContainmentDeathEvidenceV1, ReconciliationProbeDispatchV1, ReconciliationProbeEvidenceV1,
   ReconciliationProbeTimeoutClosureV1, ReconciliationInspectorTaskClosureV1,
-  RecoveryClosureV1, SupervisorInspectorIdentityV1, WorkerDeathWait, WorkerRecoveryEvidenceV1,
+  RecoveryClosureV1, RunAssemblyV1, SupervisorInspectorIdentityV1, WorkerDeathWait, WorkerRecoveryEvidenceV1,
   WorkspaceGenerationQuarantineEvidenceV1, WorkspaceGenerationStateV1 } from '../kernel/types.js';
 import { decodeRetainedRunAssembly } from '../model/run-assembly.js';
 import { exactKeys, requireEqual } from '../policy/runtime-authority.js';
 import type { ArtifactCatalog } from './artifacts.js';
 import { readCanonicalArtifact } from './agent-context.js';
-import { joinResourceOperations } from './errors.js';
+import { joinResourceOperations, KernelStorageError } from './errors.js';
 import type { SqliteDriver } from './sqlite-driver.js';
 import { readStateOwner } from './state-owner.js';
 import { readStateOwnerDeath } from './state-owner-death.js';
@@ -20,6 +20,7 @@ import { readCheckpoint } from './rows.js';
 import { decodeRunSpec, decodeStateOwnerAcquisitionEvidence, decodeWorkerIdentity, decodeWorkspaceGenerationIdentity } from './decoders.js';
 import { decodeWorkspaceGenerationState } from './invariants.js';
 import { decodeWorkerContainmentPlan, decodeWorkerProcessContainment, decodeWorkerSandboxLaunchSpec } from './execution-closure.js';
+import { MODEL_BROKER_ENTRY_ID } from './model-broker-native.js';
 
 /** Immutable witnesses of existing Journal facts, not a second invocation state machine. */
 export function openWorkerInvocations(journal: readonly InvocationJournalEntry[]): InvocationJournalEntry[] {
@@ -27,6 +28,28 @@ export function openWorkerInvocations(journal: readonly InvocationJournalEntry[]
   for (const entry of journal) latest.set(`${entry.opId}\0${entry.attempt}`, entry);
   return journal.filter(entry => entry.phase === 'prepared' &&
     ['prepared', 'dispatch_claimed', 'unknown'].includes(latest.get(`${entry.opId}\0${entry.attempt}`)!.phase));
+}
+
+/** Data eligibility only, after readRecoveryClosure has validated the complete
+ * retained assembly, installed broker ambiguity history and budget settlements.
+ * This neither closes unknown effects nor proves physical quiescence: a caller
+ * must separately hold and reassert genuine InstalledBrokerQuiescence. */
+export function hasOnlySettledInstalledModelUnknowns(assembly: RunAssemblyV1,
+  journal: readonly InvocationJournalEntry[]): boolean {
+  const provider = assembly.provider;
+  if (provider.name !== 'openai-compatible' || provider.endpoint.kind !== 'registered' ||
+      provider.adapter.adapterId !== MODEL_BROKER_ENTRY_ID || provider.adapter.version !== '1' ||
+      provider.negotiation.streaming !== false) return false;
+  const open = openWorkerInvocations(journal);
+  if (open.length === 0) return false;
+  const latest = new Map<string, InvocationJournalEntry>();
+  for (const entry of journal) latest.set(`${entry.opId}\0${entry.attempt}`, entry);
+  return open.every(prepared => {
+    const current = latest.get(`${prepared.opId}\0${prepared.attempt}`)!;
+    return prepared.opKind === 'model' && prepared.replayClass === 'retry' && current.opKind === 'model' &&
+      current.phase === 'unknown' && current.replayClass === 'retry' && !!current.budgetSettlementRef &&
+      canonicalSha256(current.budgetDelta) === canonicalSha256(prepared.budgetDelta);
+  });
 }
 
 type WorkerCut = Pick<RecoveryClosureV1, 'run' | 'journal' | 'workerLaunches' | 'workspaceGenerations'>;
@@ -183,7 +206,7 @@ async function validateWorkerInFlightDispatch(artifacts: ArtifactCatalog, wait: 
 }
 
 /** Retained closed artifacts can be replay-validated, but cannot mint a live native observation. */
-async function validateWorkerQuarantines(artifacts: ArtifactCatalog, cut: WorkerCut, driver: SqliteDriver): Promise<void> {
+export async function validateRetainedWorkerQuarantines(artifacts: ArtifactCatalog, cut: WorkerCut, driver: SqliteDriver): Promise<void> {
   for (const generation of cut.workspaceGenerations) {
     if (generation.phase !== 'quarantined') continue;
     const quarantine = await readCanonicalArtifact<WorkspaceGenerationQuarantineEvidenceV1>(artifacts, generation.quarantineEvidenceRef);
@@ -195,6 +218,10 @@ async function validateWorkerQuarantines(artifacts: ArtifactCatalog, cut: Worker
     const recovery = await readCanonicalArtifact<WorkerRecoveryEvidenceV1>(artifacts, quarantine.workerRecoveryEvidenceRef);
     const wait = await readCanonicalArtifact<WorkerDeathWait>(artifacts, recovery.waitingSubjectRef);
     const launch = readRequiredWorkerLaunch(driver, recovery.oldWorkerLaunchId);
+    if (launch.retirementKind === 'preparation') {
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'preparation retirement requires its exact owning resource closure');
+    }
+    if (launch.phase !== 'retired') throw new TypeError('worker recovery history has no retired original launch');
     const containment = decodeWorkerProcessContainment(await readCanonicalArtifact(artifacts, recovery.processContainmentRef));
     const plan = decodeWorkerContainmentPlan(await readCanonicalArtifact(artifacts, launch.containmentPlanRef));
     const spec = decodeWorkerSandboxLaunchSpec(await readCanonicalArtifact(artifacts, launch.sandboxLaunchSpecRef));
@@ -326,7 +353,7 @@ async function validateWorkerQuarantines(artifacts: ArtifactCatalog, cut: Worker
     if (generation.observedState.kind === 'complete_tree') {
       if (!exactKeys(generation.observedState, ['kind', 'treeDigest'])) throw new TypeError('quarantine tree is not closed');
       assertArtifactRef(generation.observedState.treeDigest);
-    } else if (!exactKeys(generation.observedState, ['kind', 'failureCode']) ||
+    } else if (generation.observedState.kind !== 'unreadable_partial' || !exactKeys(generation.observedState, ['kind', 'failureCode']) ||
         !['descriptor_io_failed', 'artifact_missing_or_corrupt', 'path_or_entry_invalid', 'git_closure_invalid'].includes(generation.observedState.failureCode)) {
       throw new TypeError('quarantine failure is not closed');
     }
@@ -335,7 +362,7 @@ async function validateWorkerQuarantines(artifacts: ArtifactCatalog, cut: Worker
 
 /** Validate the installed wait from the same SQLite cut as the Run, launch, generation and Journal. */
 export async function validateWorkerRecoveryWait(artifacts: ArtifactCatalog, cut: WorkerCut, driver: SqliteDriver): Promise<void> {
-  await validateWorkerQuarantines(artifacts, cut, driver);
+  await validateRetainedWorkerQuarantines(artifacts, cut, driver);
   const { run, workerLaunches: launches, workspaceGenerations: generations } = cut;
   const reconciling = launches.filter(launch => launch.phase === 'reconciling');
   const fenced = generations.filter(generation => generation.phase === 'fenced_reconciling');

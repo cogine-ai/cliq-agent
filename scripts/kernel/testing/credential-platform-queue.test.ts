@@ -36,7 +36,7 @@ if (process.platform === 'linux' && process.arch === 'x64')
             const loaded = { exports: {} };
             process.dlopen(loaded, ${JSON.stringify(path.join(output, 'linux-credential-platform.node'))});
             const native = loaded.exports;
-            assert.equal(native.interfaceVersion, 1);
+            assert.equal(native.interfaceVersion, 2);
             assert.equal(native.currentUser().uid, process.getuid());
             const fifos = ${JSON.stringify(fifos)};
             let opened = 0, sentinelDone = false, ticks = 0, pending;

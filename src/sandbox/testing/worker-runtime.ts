@@ -1,7 +1,6 @@
 import { generateKeyPairSync, sign } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { rootCertificates } from 'node:tls';
 import { KERNEL_STATE_SCHEMA_VERSION } from '../../config.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../../kernel/canonical.js';
 import { sha256Bytes } from '../../kernel/identity.js';
@@ -10,6 +9,7 @@ import type { RunAssemblyV1, ToolContractManifestV1 } from '../../kernel/types.j
 import { policyProfile, verifyRuntimeBundle, type RuntimeBundleManifest } from '../../policy/runtime-authority.js';
 import { STATE_OWNER_NATIVE_ENTRY_ID, STATE_OWNER_NATIVE_PATH, STATE_OWNER_NATIVE_RELATIVE_PATH } from '../../state/native-owner.js';
 import { LINUX_WORKER_RECIPE } from '../linux-worker.js';
+import { OFFLINE_MODEL_TRUST_STORE_PEM } from '../../state/testing/tool-authority.js';
 
 /** Actual built worker/controller/edit/bwrap/addon bytes under an explicitly
  * injected CI Ed25519 test root. This is not a Cliq release signature, an
@@ -37,7 +37,7 @@ export async function signedLinuxWorkerTestRuntime(input: {
   fromBytes(STATE_OWNER_NATIVE_ENTRY_ID, 'platform_helper', STATE_OWNER_NATIVE_RELATIVE_PATH, await readFile(STATE_OWNER_NATIVE_PATH), true);
   const profile = policyProfile(), profileRef = canonicalSha256(profile);
   fromBytes('policy-v1', 'policy_engine', 'test/policy-v1', canonicalJsonBytes(profile), false);
-  fromBytes('default_https_trust_store', 'trust_store', 'test/https-trust', Buffer.from(rootCertificates.join('\n')), false);
+  fromBytes('default_https_trust_store', 'trust_store', 'test/https-trust', Buffer.from(OFFLINE_MODEL_TRUST_STORE_PEM), false);
   fromBytes('linux-root-recipe-test', 'sandbox_root_profile', 'test/root-recipe', canonicalJsonBytes(input.sandboxProfile), false);
   // The campaign uses retained offline model facts, not productive provider I/O.
   const provider = input.assembly.provider.adapter;
@@ -66,6 +66,7 @@ export async function signedLinuxWorkerTestRuntime(input: {
   const bundleRef = canonicalSha256(bundle);
   input.assembly.runtime.runtimeBundleRef = bundleRef;
   input.assembly.runtime.runtimeBundleManifestDigest = bundle.manifestDigest;
-  return { bundle, releaseKeys, profile, engine: { id: 'cliq-policy-v1' as const, version: '1', runtimeBundleRef: bundleRef,
+  return { bundle, releaseKeys, profile, trustStorePem: OFFLINE_MODEL_TRUST_STORE_PEM,
+    engine: { id: 'cliq-policy-v1' as const, version: '1', runtimeBundleRef: bundleRef,
     profileEntryId: 'policy-v1', profileRef, profileDigest: profile.profileDigest } };
 }

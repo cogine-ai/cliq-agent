@@ -138,7 +138,7 @@ export type ActiveFixtureOptions = {
   runtimeAuthority?: StateStoreRuntimeAuthority;
   runWallTimeMs?: number;
   leaseDurationMs?: number;
-  assembly?: (store: StateStore) => Promise<string>;
+  assembly?: (store: StateStore, identity: WorkspaceIdentityV1) => Promise<string>;
   policy?: (store: StateStore, identity: WorkspaceIdentityV1) => Promise<string>;
   sandboxProfile?: (store: StateStore) => Promise<string>;
   budgets?: Partial<RunSpec['budgets']>;
@@ -187,7 +187,7 @@ export async function createQueuedFixture(
   const workspaceIdentity = (await store.artifacts.readCanonical(
     session.session.workspaceIdentityRef
   )) as WorkspaceIdentityV1;
-  const assemblyRef = options.assembly ? await options.assembly(store)
+  const assemblyRef = options.assembly ? await options.assembly(store, workspaceIdentity)
     : (await store.artifacts.publishCanonical(defaultAssembly.assembly, defaultAssembly.assembly.format)).ref;
   const source = await publishEmptySourceGraph(store, workspaceIdentity.identityDigest, assemblyRef);
   if (options.policy) source.policyRef = await options.policy(store, workspaceIdentity);

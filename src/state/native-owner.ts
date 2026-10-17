@@ -26,7 +26,7 @@ type DescriptorIdentity = Readonly<{ deviceId: string; fileId: string; ownerUid:
 export type HeldWorkerReservation = Readonly<{ identity: DescriptorIdentity; assertHeld(): void; close(): void }>;
 type NativeWorkerReservation = HeldWorkerReservation & { borrow(): Readonly<{ fd: number; identity: DescriptorIdentity; assertHeld(): void; close(): void }> };
 const workerReservations = new WeakMap<HeldWorkerReservation,
-  { lock: HeldStateOwnerLock; native: NativeWorkerReservation; launchId: string; spawnNonceDigest: string }>();
+  { lock: HeldStateOwnerLock; native: NativeWorkerReservation; launchId: string; spawnNonceDigest: string; closed: boolean }>();
 function checkedWorkerReservation(launchId: string, spawnNonceDigest: string): string {
   if (!/^[A-Za-z0-9_-]{43}$/u.test(launchId) || !/^[0-9a-f]{64}$/u.test(spawnNonceDigest)) {
     throw new KernelStorageError('INVALID_REQUEST', 'worker reservation requires the exact launch and spawn nonce');
@@ -49,10 +49,10 @@ function wrapWorkerReservation(lock: HeldStateOwnerLock, native: NativeWorkerRes
     },
     close() {
       if (this !== handle) throw new TypeError('invalid worker reservation');
-      try { native.close(); } catch (error) { workerReservationError(error); }
+      try { native.close(); workerReservations.get(handle)!.closed = true; } catch (error) { workerReservationError(error); }
     }
   });
-  workerReservations.set(handle, { lock, native, launchId, spawnNonceDigest });
+  workerReservations.set(handle, { lock, native, launchId, spawnNonceDigest, closed: false });
   return handle;
 }
 /** Internal descriptor bridge between the two installed native modules. */
@@ -64,6 +64,17 @@ export function borrowWorkerReservationForExecution(reservation: HeldWorkerReser
   }
   reservation.assertHeld();
   try { return held.native.borrow(); } catch (error) { workerReservationError(error); }
+}
+/** Only the exact original native close can set this joined state. It closes
+ * every duplicate before returning, and any error keeps the StateOwner held. */
+export function readWorkerReservationRetirement(lock: HeldStateOwnerLock, reservation: HeldWorkerReservation,
+  launchId: string, spawnNonceDigest: string): DescriptorIdentity {
+  const held = workerReservations.get(reservation);
+  if (!held || held.lock !== lock || held.launchId !== launchId || held.spawnNonceDigest !== spawnNonceDigest)
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'reservation retirement substitutes its exact original physical owner');
+  lock.assertHeld();
+  if (!held.closed) throw new KernelStorageError('RECOVERY_REQUIRED', 'original worker reservation descriptors are not joined');
+  return reservation.identity;
 }
 export type SourceInspectionStagingIdentity = DescriptorIdentity & Readonly<{ mode: 448 }>;
 /** Physical source-inspection reservation only, never a Run or execution FD. */
@@ -212,6 +223,7 @@ type NativeGenerationTree = HeldGenerationTree & {
   openSnapshot(): HeldGenerationSnapshot;
   openFileWriter(path: string, mode: number, byteCount: number): HeldGenerationFileWriter;
   borrow(): BorrowedGenerationForExecution;
+  assertRetired(): number;
 };
 const nativeTrees = new WeakMap<HeldGenerationTree, NativeGenerationTree>();
 const roots = new WeakMap<HeldStateOwnerLock, StateRootIdentityV1>();
@@ -258,6 +270,17 @@ export function openGenerationFileWriter(tree: HeldGenerationTree, path: string,
 export function borrowGenerationForExecution(tree: HeldGenerationTree): BorrowedGenerationForExecution {
   return heldTree(tree).borrow();
 }
+/** Closed native owner, not a rescan, boolean or caller-supplied descriptor. */
+export function assertRetiredGenerationTree(tree: HeldGenerationTree): number {
+  const native = nativeTrees.get(tree);
+  if (!native) throw new TypeError('invalid retired generation tree owner');
+  try { return native.assertRetired(); }
+  catch (error) {
+    if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT')
+      throw new ResourceRetirementError('generation resources did not retire under their original StateOwner', error);
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'generation native resource owners are not retired', { cause: error });
+  }
+}
 /** Native-minted process/image observation, never a caller attestation. */
 export type NativePeerObservation = Readonly<{
   pid: number;
@@ -301,6 +324,9 @@ export type HeldStateOwnerLock = Readonly<{
   lock: DescriptorIdentity;
   assertHeld(): void;
   assertPriorProcessDead(pid: number, processStartToken: string): void;
+  /** Native time after observing the exact prior lifetime absent or replaced.
+   * This grants no broker, descendant, claim or token-revocation proof. */
+  observePriorProcessDeath(pid: number, processStartToken: string): number;
   openControlListener(onAccept: (peer: HeldControlPeer) => void, onError: (error: Error) => void): HeldControlListener;
   createGenerationTree(runId: string, generationId: string): HeldGenerationTree;
   /** A fixed recovery intent additionally permits its exact archived locator;
@@ -354,6 +380,8 @@ export type HeldWorkspaceRoot = Readonly<{
   readGitConfigChunk(): Buffer | null;
   /** Metadata only. Entries must be explicitly selected before content is opened. */
   openSnapshot(): HeldWorkspaceCursor;
+  /** Fixed instruction recipe: skip Git metadata, read only AGENTS.md bytes. */
+  openInstructionSnapshot(): HeldWorkspaceCursor;
   close(): void;
 }>;
 
@@ -668,6 +696,15 @@ function wrapLock(held: NativeLock, stateRoot: string): HeldStateOwnerLock {
     root: held.root, runtime: held.runtime, lock: held.lock,
     assertHeld() { receiver(this); held.assertHeld(); },
     assertPriorProcessDead(pid, token) { receiver(this); held.assertPriorProcessDead(pid, token); },
+    observePriorProcessDeath(pid, token) {
+      receiver(this);
+      try { return held.observePriorProcessDeath(pid, token); }
+      catch (error) {
+        if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT')
+          throw new ResourceRetirementError('prior process observation descriptors did not retire', error);
+        throw error;
+      }
+    },
     openControlListener(onAccept, onError) {
       receiver(this);
       held.assertHeld();
@@ -746,7 +783,7 @@ function wrapLock(held: NativeLock, stateRoot: string): HeldStateOwnerLock {
       try { held.close(); }
       catch (error) {
         if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT')
-          throw new ResourceRetirementError('source staging retirement prevents StateOwner release', error);
+          throw new ResourceRetirementError('native resource retirement prevents StateOwner release', error);
         throw error;
       }
     },
@@ -895,7 +932,10 @@ export async function loadHeldStateOwnerImage(file: FileHandle, bundle?: Runtime
 export function assertStateOwnerLock(lock: HeldStateOwnerLock): void {
   try {
     lock.assertHeld();
-  } catch {
+  } catch (error) {
+    if (error instanceof ResourceRetirementError) throw error;
+    if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT')
+      throw new ResourceRetirementError('StateOwner retains unresolved resource retirement', error);
     throw new KernelStorageError('RECOVERY_REQUIRED', 'StateOwner root/runtime/lock descriptor identity changed or closed');
   }
 }

@@ -25,12 +25,30 @@ export class KernelStorageError extends Error {
   }
 }
 
+/** Only a validated current terminal Run cut carries this wire classification;
+ * arbitrary invalid transitions remain distinct internal refusals. */
+export class RunTerminalError extends KernelStorageError {
+  constructor() {
+    super('STATE_TRANSITION_INVALID', 'the selected Run is already terminal');
+    this.name = 'RunTerminalError';
+  }
+}
+
 /** Internal diagnosis of an existing finalizer refusal, never time or
  * authorization evidence. Only the finalizer's actual time guards throw it. */
 export class CredentialFinalizationTimeError extends KernelStorageError {
   constructor(readonly reason: 'noncausal_time' | 'expired') {
     super('STATE_TRANSITION_INVALID', 'credential expansion time or expiry is not causal');
     this.name = 'CredentialFinalizationTimeError';
+  }
+}
+
+/** Fixed classification of the model authority guards, not authorization
+ * evidence or a generic interpretation of every invalid state transition. */
+export class InstalledModelAuthorizationError extends KernelStorageError {
+  constructor() {
+    super('STATE_TRANSITION_INVALID', 'installed model endpoint or credential does not authorize this Run');
+    this.name = 'InstalledModelAuthorizationError';
   }
 }
 

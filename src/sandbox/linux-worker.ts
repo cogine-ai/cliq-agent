@@ -74,21 +74,27 @@ export function assertNativePreactivationObservation(observation: NativePreactiv
 
 export type LinuxBlockedWorker = Readonly<{
   containment: ProcessContainment;
+  assertHeld(): void;
   observeProcess(): Promise<LinuxObservedProcess>;
   activateCommitted(launch: WorkerLaunch): Promise<void>;
   createInvocation(closure: BuiltinEditLaunchClosure): Promise<LinuxBlockedInvocation>;
   stop(): Promise<NativeContainmentDeathObservation>;
+  closeAfterControllerJoin(): Promise<void>;
 }>;
 export type LinuxWorkerController = Readonly<{
   pid: number;
   processStartToken: string;
   subreaperStartToken: string;
-  bindWorkerReservation(input: { closure: WorkerLaunchClosure; reservation: HeldWorkerReservation; activationNonceDigest: string }): Promise<void>;
+  preparationBirth: NativeControllerPreparationBirth;
+  bindWorkerReservation(input: { closure: WorkerLaunchClosure; reservation: HeldWorkerReservation; activationNonceDigest: string }): Promise<NativeWorkerReservationBinding>;
   inspectPreactivation(input: { closure: WorkerLaunchClosure; reservation: HeldWorkerReservation; activationNonceDigest: string;
     containment?: ProcessContainment; workerIdentity?: WorkerIdentity }): Promise<NativePreactivationObservation>;
   launchWorker(input: { closure: WorkerLaunchClosure; generation: RunWorkspaceGeneration; activationNonceDigest: string }): Promise<LinuxBlockedWorker>;
   terminateRetained(input: { closure: WorkerLaunchClosure; containment: ProcessContainment; workerIdentity: WorkerIdentity;
     signal?: AbortSignal }): Promise<NativeContainmentDeathObservation>;
+  closeRetained(): Promise<NativeRetainedWorkerRetirement>;
+  closePreactivation(): Promise<NativePreactivationRetirement>;
+  closePreparation(): Promise<NativeControllerPreparationRetirement>;
   close(): Promise<void>;
 }>;
 export type LinuxWorkerLauncher = Readonly<{ startController(options?: { signal?: AbortSignal }): Promise<LinuxWorkerController>; close(): Promise<void> }>;
@@ -107,6 +113,14 @@ export type NativeWorkerImage = { descriptor(): number; close(): void };
 type NativeImage = NativeWorkerImage;
 type NativeScope = { pollReady(): boolean; observe(): NativeObservation; activate(nonce: string): void; pollActivated(): boolean;
   release(): void; result(): number | undefined; stop(): void; pollStopped(): NativeObservation | undefined };
+type ControllerPreparationDirectoryIdentity = Readonly<{
+  deviceId: string; fileId: string; ownerUid: number; ownerGid: number; mode: number;
+}>;
+type NativeControllerPreparationBirthObservation = Readonly<{
+  rootPath: string; root: ControllerPreparationDirectoryIdentity; parent: ControllerPreparationDirectoryIdentity;
+  leafName: string; leaf: ControllerPreparationDirectoryIdentity; pid: number; processStartToken: string;
+  readyObservedAtMs: number; observedAtMs: number;
+}>;
 type NativeController = { pid: number; processStartToken: string;
   pollReady(): boolean;
   bindReservation(reservation: number, config: object): void;
@@ -118,11 +132,146 @@ type NativeController = { pid: number; processStartToken: string;
   createInvocation(generation: number, parent: NativeScope, helper: NativeImage, adapter: NativeImage, bwrap: NativeImage, input: NativeImage, config: object): NativeScope;
   terminateRetained(cgroup: number, config: object): void;
   pollRetained(): NativeObservation | undefined;
+  assertRetainedRetired(cgroupRootFd: number): number;
+  assertPreactivationRetired(cgroupRootFd: number, reservationFd: number): number;
+  assertPreparationRetired(cgroupRootFd: number): number;
+  observePreparationBirth(cgroupRootFd: number): NativeControllerPreparationBirthObservation;
   close(): Promise<void>;
 };
 export type NativeWorkerBinding = { interfaceVersion: 3; sealImage(fd: number): NativeImage; sealImageBuffer(input: Buffer): NativeImage;
   openController(helper: NativeImage, cgroupRootFd: number): NativeController };
 type NativeBinding = NativeWorkerBinding;
+
+function controllerPreparationBirthIdentity(observed: NativeControllerPreparationBirthObservation) {
+  if (!Number.isSafeInteger(observed.readyObservedAtMs) || observed.readyObservedAtMs < 1 ||
+      !Number.isSafeInteger(observed.observedAtMs) || observed.observedAtMs < observed.readyObservedAtMs)
+    mismatch('native controller preparation birth time is invalid');
+  return immutableSnapshot({ rootPath: observed.rootPath, root: observed.root, parent: observed.parent,
+    leafName: observed.leafName, leaf: observed.leaf, pid: observed.pid, processStartToken: observed.processStartToken,
+    readyObservedAt: new Date(observed.readyObservedAtMs).toISOString() });
+}
+
+declare const controllerPreparationBirthBrand: unique symbol;
+export type NativeControllerPreparationBirth = Readonly<{ [controllerPreparationBirthBrand]: true }>;
+const controllerPreparationBirths = new WeakMap<NativeControllerPreparationBirth, {
+  identity: ReturnType<typeof controllerPreparationBirthIdentity>; controllerBirthDigest: string;
+  lastObservedAtMs: number; assertCurrent(): NativeControllerPreparationBirthObservation;
+}>();
+/** An authenticated HELLO birth, freshly reasserted by its original live owner.
+ * The immutable identity is data; only this opaque token retains its producer. */
+export function readNativeControllerPreparationBirth(birth: NativeControllerPreparationBirth) {
+  const held = controllerPreparationBirths.get(birth);
+  if (!held) throw new TypeError('invalid native controller preparation birth');
+  let observed: NativeControllerPreparationBirthObservation;
+  try { observed = held.assertCurrent(); }
+  catch (error) {
+    if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT')
+      throw retirementError('controller preparation birth observation resources did not retire', error);
+    throw error;
+  }
+  if (canonicalSha256(controllerPreparationBirthIdentity(observed)) !== held.controllerBirthDigest)
+    mismatch('native controller preparation birth identity changed');
+  if (observed.observedAtMs < held.lastObservedAtMs)
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'native controller preparation birth clock regressed');
+  held.lastObservedAtMs = observed.observedAtMs;
+  return immutableSnapshot({ identity: held.identity, controllerBirthDigest: held.controllerBirthDigest,
+    observedAt: new Date(observed.observedAtMs).toISOString() });
+}
+
+declare const workerReservationBindingBrand: unique symbol;
+export type NativeWorkerReservationBinding = Readonly<{ [workerReservationBindingBrand]: true }>;
+type WorkerReservationBindingData = Readonly<{ runId: string; launchId: string; generationRef: string;
+  containmentPlanRef: string; sandboxLaunchSpecRef: string; spawnNonceDigest: string; activationNonceDigest: string;
+  controllerBirthDigest: string; reservation: HeldWorkerReservation['identity'] }>;
+const workerReservationBindings = new WeakMap<NativeWorkerReservationBinding,
+  { data: WorkerReservationBindingData; assertCurrent(): void }>();
+
+/** The original controller's durable BIND acknowledgement, not a phase string
+ * or a caller's assertion that its reservation file was written. */
+export function readNativeWorkerReservationBinding(receipt: NativeWorkerReservationBinding): WorkerReservationBindingData {
+  const held = workerReservationBindings.get(receipt);
+  if (!held) throw new TypeError('invalid native worker reservation binding');
+  held.assertCurrent();
+  return held.data;
+}
+
+declare const retiredControllerPreparationBrand: unique symbol;
+export type NativeControllerPreparationRetirement = Readonly<{ [retiredControllerPreparationBrand]: true }>;
+const retiredControllerPreparations = new WeakMap<NativeControllerPreparationRetirement,
+  { pid: number; processStartToken: string; controllerBirthDigest: string; readyObservedAt: string; assertCurrent(): number }>();
+/** Fresh closure of the original ordinary controller only. This supplies no
+ * worker no-spawn, workspace or broker retirement authority. */
+export function readNativeControllerPreparationRetirement(receipt: NativeControllerPreparationRetirement) {
+  const held = retiredControllerPreparations.get(receipt);
+  if (!held) throw new TypeError('invalid native controller preparation retirement');
+  let observed: number;
+  try { observed = held.assertCurrent(); }
+  catch (error) {
+    if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT')
+      throw retirementError('controller preparation observation resources did not retire', error);
+    throw error;
+  }
+  if (!Number.isSafeInteger(observed) || observed < 1) mismatch('native controller preparation retirement time is invalid');
+  const observedAt = new Date(observed).toISOString();
+  if (observedAt < held.readyObservedAt)
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'native retirement clock precedes original controller birth');
+  return immutableSnapshot({ pid: held.pid, processStartToken: held.processStartToken, controllerBirthDigest: held.controllerBirthDigest, observedAt,
+    controllerJoined: true as const, controllerLeafAbsent: true as const, workerCreationRequested: false as const,
+    liveContainmentCount: 0 as const, activeMountCount: 0 as const });
+}
+
+declare const retiredWorkerBrand: unique symbol;
+export type NativeRetainedWorkerRetirement = Readonly<{ [retiredWorkerBrand]: true }>;
+const retiredWorkers = new WeakMap<NativeRetainedWorkerRetirement,
+  { containment: ProcessContainment; deathObservedAt: string; assertCurrent(): number }>();
+/** Fresh physical check of a genuine joined native owner. No data decoder or
+ * caller callback can mint this receipt or its zero resource observations. */
+export function readNativeRetainedWorkerRetirement(receipt: NativeRetainedWorkerRetirement): Readonly<{
+  containment: ProcessContainment; observedAt: string; liveContainmentCount: 0; activeMountCount: 0;
+}> {
+  const held = retiredWorkers.get(receipt);
+  if (!held) throw new TypeError('invalid native retained worker retirement');
+  let observed: number;
+  try { observed = held.assertCurrent(); }
+  catch (error) {
+    if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT')
+      throw retirementError('retained native inspection resource did not retire', error);
+    throw error;
+  }
+  if (!Number.isSafeInteger(observed) || observed < 1) mismatch('native retirement observation time is invalid');
+  const observedAt = new Date(observed).toISOString();
+  if (observedAt < held.deathObservedAt) throw new KernelStorageError('RECOVERY_REQUIRED', 'native retirement clock precedes original actual death');
+  return immutableSnapshot({ containment: held.containment, observedAt, liveContainmentCount: 0, activeMountCount: 0 });
+}
+
+declare const retiredPreactivationBrand: unique symbol;
+export type NativePreactivationRetirement = Readonly<{ [retiredPreactivationBrand]: true }>;
+const retiredPreactivations = new WeakMap<NativePreactivationRetirement, {
+  closure: WorkerLaunchClosure; activationNonceDigest: string; observation: NativePreactivationObservation; assertCurrent(): number;
+}>();
+/** The original birth witness plus a genuinely joined inspector, refreshed
+ * synchronously at the consumer's cut. Historical proof data cannot mint it. */
+export function readNativePreactivationRetirement(receipt: NativePreactivationRetirement) {
+  const held = retiredPreactivations.get(receipt);
+  if (!held) throw new TypeError('invalid native preactivation retirement');
+  let observed: number;
+  try { observed = held.assertCurrent(); }
+  catch (error) {
+    if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT')
+      throw retirementError('preactivation native inspection resource did not retire', error);
+    throw error;
+  }
+  if (!Number.isSafeInteger(observed) || observed < 1) mismatch('native preactivation retirement observation time is invalid');
+  const observedAt = new Date(observed).toISOString(), original = held.observation;
+  if (observedAt < (original.kind === 'no_spawn' ? original.observedAt : original.death.observedAt))
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'native retirement clock precedes original preactivation closure');
+  return immutableSnapshot({ kind: original.kind, planRef: held.closure.containmentPlanRef,
+    sandboxLaunchSpecRef: held.closure.sandboxLaunchSpecRef, workspaceGenerationRef: held.closure.workspaceGenerationRef,
+    workerLaunchId: held.closure.plan.owner.workerLaunchId, launchNonceDigest: held.closure.plan.launchNonceDigest,
+    activationNonceDigest: held.activationNonceDigest,
+    ...(original.kind === 'created' ? { containment: original.containment } : {}),
+    observedAt, liveContainmentCount: 0 as const, activeMountCount: 0 as const });
+}
 
 export async function openInstalledLinuxWorkerLauncher(selected: HeldInstalledRuntime,
   anchor: HeldInstalledAnchor): Promise<LinuxWorkerLauncher> {
@@ -503,6 +652,12 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
         signal?.throwIfAborted();
         let native!: NativeController;
         let controllerClosed = false, controllerClosing: Promise<void> | undefined;
+        let retainedDeath: NativeContainmentDeathObservation | undefined;
+        let retired: NativeRetainedWorkerRetirement | undefined;
+        let preactivation: { closure: WorkerLaunchClosure; reservation: HeldWorkerReservation;
+          activationNonceDigest: string; observation: NativePreactivationObservation } | undefined;
+        let retiredPreactivation: NativePreactivationRetirement | undefined;
+        let retiredPreparation: NativeControllerPreparationRetirement | undefined;
         const closeController = () => {
           controllerClosed = true;
           if (!controllerClosing) {
@@ -525,9 +680,19 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
           });
           await awaitNative(() => native.pollReady() ? true : undefined, closeController, signal);
           controllerReceiver(); signal?.throwIfAborted();
+          const observeBirth = () => {
+            controllerReceiver(); let observed!: NativeControllerPreparationBirthObservation;
+            source.withRoot(fd => { observed = native.observePreparationBirth(fd); });
+            return observed;
+          };
+          const observedBirth = observeBirth(), birthIdentity = controllerPreparationBirthIdentity(observedBirth);
+          const controllerBirthDigest = canonicalSha256(birthIdentity);
+          const preparationBirth = Object.freeze({}) as NativeControllerPreparationBirth;
+          controllerPreparationBirths.set(preparationBirth, { identity: birthIdentity, controllerBirthDigest,
+            lastObservedAtMs: observedBirth.observedAtMs, assertCurrent: observeBirth });
           const subreaperStartToken = `linux-subreaper:${native.pid}:${native.processStartToken}`;
           const controller: LinuxWorkerController = Object.freeze({
-            pid: native.pid, processStartToken: native.processStartToken, subreaperStartToken,
+            pid: native.pid, processStartToken: native.processStartToken, subreaperStartToken, preparationBirth,
             async bindWorkerReservation({ closure, reservation, activationNonceDigest }) {
               if (this !== controller) throw new TypeError('invalid worker controller'); controllerReceiver();
               same(closure.bundle, bundle, 'reservation bundle');
@@ -540,6 +705,16 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
                 borrowed.assertHeld(); native.bindReservation(borrowed.fd, config);
                 await awaitNative(() => native.pollBound() ? true : undefined, closeController);
                 controllerReceiver(); borrowed.assertHeld(); reservation.assertHeld();
+                const receipt = Object.freeze({}) as NativeWorkerReservationBinding;
+                workerReservationBindings.set(receipt, { data: immutableSnapshot({ runId: closure.spec.owner.runId,
+                  launchId: closure.spec.owner.workerLaunchId, generationRef: closure.workspaceGenerationRef,
+                  containmentPlanRef: closure.containmentPlanRef, sandboxLaunchSpecRef: closure.sandboxLaunchSpecRef,
+                  spawnNonceDigest: closure.plan.launchNonceDigest, activationNonceDigest, controllerBirthDigest,
+                  reservation: reservation.identity }), assertCurrent() {
+                  controllerReceiver(); reservation.assertHeld(); readNativeControllerPreparationBirth(preparationBirth);
+                  if (!native.pollBound()) mismatch('original native reservation BIND acknowledgement is unavailable');
+                } });
+                return receipt;
               } catch (error) { primary = { error }; throw error; }
               finally { retireBorrow(borrowed, primary); }
             },
@@ -553,6 +728,7 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
               const borrowed = borrowWorkerReservationForExecution(reservation, closure.spec.owner.workerLaunchId, closure.plan.launchNonceDigest);
               let primary: { error: unknown } | undefined;
               try {
+                preactivation = undefined;
                 borrowed.assertHeld(); source.withRoot(fd => { native.inspectReservation(fd, borrowed.fd, config); });
                 const observed = await awaitNative(() => native.pollReservation(), closeController);
                 controllerReceiver(); borrowed.assertHeld(); reservation.assertHeld();
@@ -576,6 +752,7 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
                   result = Object.freeze({ kind: 'created', containment: retained, death: checkedDeath(observed, retained) });
                 } else mismatch('unsupported native reservation observation');
                 preactivationObservations.set(result, canonicalSha256([closure.containmentPlanRef, closure.sandboxLaunchSpecRef]));
+                preactivation = { closure, reservation, activationNonceDigest, observation: result };
                 return result;
               } catch (error) { primary = { error }; await closeController(); throw error; }
               finally { retireBorrow(borrowed, primary); }
@@ -611,6 +788,13 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
                 const containment = actualContainment(closure, created.observe()); let active = false, borrowRetired = false;
                 const worker: LinuxBlockedWorker = Object.freeze({
                   containment,
+                  assertHeld() {
+                    if (this !== worker || !active) throw new KernelStorageError('LEASE_FENCED', 'model release requires the original active native worker');
+                    controllerReceiver(); borrowed.assertHeld();
+                    const current = created.observe();
+                    same(actualContainment(closure, current, containment.createdAt), containment, 'current native worker containment');
+                    controllerReceiver(); borrowed.assertHeld();
+                  },
                   async observeProcess() { if (this !== worker) throw new TypeError('invalid blocked worker'); receiver(); borrowed.assertHeld(); return observedProcess(created, workerDigest); },
                   async activateCommitted(launch) {
                     if (this !== worker) throw new TypeError('invalid blocked worker'); borrowed.assertHeld();
@@ -675,6 +859,12 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
                       // retired generation duplicate is never reopened/reused.
                       if (!borrowRetired) { retireBorrow(borrowed); borrowRetired = true; }
                     }
+                  },
+                  async closeAfterControllerJoin() {
+                    if (this !== worker) throw new TypeError('invalid blocked worker');
+                    active = false;
+                    await closeController();
+                    if (!borrowRetired) { retireBorrow(borrowed); borrowRetired = true; }
                   }
                 });
                 return worker;
@@ -686,6 +876,7 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
             },
             async terminateRetained({ closure, containment, workerIdentity, signal }) {
               if (this !== controller) throw new TypeError('invalid controller receiver'); controllerReceiver();
+              retainedDeath = undefined;
               if (signal?.aborted) { await closeController(); signal.throwIfAborted(); }
               assertWorkerLaunchClosure(closure);
               same(closure.bundle, bundle, 'retained worker bundle');
@@ -703,8 +894,69 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
                   workerPid: workerIdentity.pid, processStartToken: workerIdentity.processStartToken }); });
                 const observed = await awaitNative(() => native.pollRetained(), closeController, signal);
                 controllerReceiver(); signal?.throwIfAborted();
-                return checkedDeath(observed, containment);
+                const death = checkedDeath(observed, containment);
+                retainedDeath = death;
+                return death;
               } catch (error) { await closeController(); throw error; }
+            },
+            async closeRetained() {
+              if (this !== controller) throw new TypeError('invalid controller receiver');
+              const death = retainedDeath;
+              if (!death) throw new KernelStorageError('RECOVERY_REQUIRED', 'retirement requires this inspector\'s actual full-containment death');
+              await closeController();
+              if (!retired) {
+                const receipt = Object.freeze({}) as NativeRetainedWorkerRetirement;
+                retiredWorkers.set(receipt, { containment: death.containment, deathObservedAt: death.observedAt, assertCurrent() {
+                  receiver();
+                  let observed!: number;
+                  source.withRoot(fd => { observed = native.assertRetainedRetired(fd); });
+                  return observed;
+                } });
+                retired = receipt;
+              }
+              readNativeRetainedWorkerRetirement(retired);
+              return retired;
+            },
+            async closePreactivation() {
+              if (this !== controller) throw new TypeError('invalid controller receiver');
+              const inspected = preactivation;
+              if (!inspected) throw new KernelStorageError('RECOVERY_REQUIRED', 'retirement requires this inspector\'s actual preactivation closure');
+              await closeController();
+              if (!retiredPreactivation) {
+                const receipt = Object.freeze({}) as NativePreactivationRetirement;
+                retiredPreactivations.set(receipt, { ...inspected, assertCurrent() {
+                  receiver(); inspected.reservation.assertHeld();
+                  const borrowed = borrowWorkerReservationForExecution(inspected.reservation,
+                    inspected.closure.spec.owner.workerLaunchId, inspected.closure.plan.launchNonceDigest);
+                  let primary: { error: unknown } | undefined;
+                  try {
+                    borrowed.assertHeld(); let observed!: number;
+                    source.withRoot(fd => { observed = native.assertPreactivationRetired(fd, borrowed.fd); });
+                    borrowed.assertHeld(); inspected.reservation.assertHeld(); return observed;
+                  } catch (error) { primary = { error }; throw error; }
+                  finally { retireBorrow(borrowed, primary); }
+                } });
+                retiredPreactivation = receipt;
+              }
+              readNativePreactivationRetirement(retiredPreactivation);
+              return retiredPreactivation;
+            },
+            async closePreparation() {
+              if (this !== controller) throw new TypeError('invalid controller receiver');
+              await closeController();
+              if (!retiredPreparation) {
+                const receipt = Object.freeze({}) as NativeControllerPreparationRetirement;
+                retiredControllerPreparations.set(receipt, { pid: birthIdentity.pid, processStartToken: birthIdentity.processStartToken,
+                  controllerBirthDigest, readyObservedAt: birthIdentity.readyObservedAt,
+                  assertCurrent() {
+                    receiver(); let observed!: number;
+                    source.withRoot(fd => { observed = native.assertPreparationRetired(fd); });
+                    return observed;
+                  } });
+                retiredPreparation = receipt;
+              }
+              readNativeControllerPreparationRetirement(retiredPreparation);
+              return retiredPreparation;
             },
             async close() { if (this !== controller) throw new TypeError('invalid worker controller'); await closeController(); controllers.delete(native); }
           });

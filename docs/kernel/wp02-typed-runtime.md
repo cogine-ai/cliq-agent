@@ -402,7 +402,16 @@ transaction and Session outcome as cancellation/deadline:
   including the authenticated control row, historical channel and response.
 - Context exhaustion reproduces the whole-prefix planner from retained
   context and the frozen context policy. No legal prefix means no model call;
-  the intent contains the exact manifest and token estimates.
+  the intent contains the exact manifest and token estimates. Normal eligibility
+  requires both `N<=T` and an actual provider-native JCS body of at most 1 MiB.
+  A prefix is legal only when its complete compaction envelope and escaped
+  source also fit that byte bound. Planning and preparation share the one wire
+  constructor, and preparation retains its independent hard limit. Below the
+  token trigger, byte exhaustion uses a closed `request_body_bytes` branch
+  containing exact body bytes, literal 1,048,576 and the digest of the complete
+  model-visible prompt. Recovery reproduces all of those facts from retained
+  artifacts; an arbitrary error is not evidence. The original token-trigger
+  intent shape remains unchanged, as do signed billing ceilings and frozen caps.
 - Executed unusable or ineffective compaction retains its completed result
   and full charge. The reducer reproduces the original plan and validates the
   response, or recomputes the before/after model-visible prompt to prove that

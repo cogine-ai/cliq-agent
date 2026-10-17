@@ -35,7 +35,7 @@ const properties = ['LoadState', 'ActiveState', 'SubState', 'MainPID', 'ExecMain
   'InvocationID', 'FragmentPath', 'Type', 'WorkingDirectory', 'Delegate', 'KillMode', 'Restart', 'NRestarts',
   'Slice', 'Requires', 'After', 'Before', 'Conflicts'] as const;
 
-async function readLedger(filename: string): Promise<Ledger> {
+export async function readLedger(filename: string): Promise<Ledger> {
   const held = await open(filename, constants.O_RDONLY | constants.O_NOFOLLOW);
   let ledger: Ledger;
   try {
@@ -74,7 +74,7 @@ async function readLedger(filename: string): Promise<Ledger> {
 
 // Same post-order, no-follow transfer as the qualified installed fixture. Only
 // the newly built package changes owner; never its stage/carrier or StateRoot.
-async function transferPackage(filename: string, uid: number, gid: number): Promise<void> {
+export async function transferPackage(filename: string, uid: number, gid: number): Promise<void> {
   const before = await lstat(filename);
   assert(!before.isSymbolicLink() && (before.isDirectory() || before.isFile()));
   assert.equal(before.uid, 0); assert.equal(before.gid, 0);
@@ -91,7 +91,7 @@ async function transferPackage(filename: string, uid: number, gid: number): Prom
   } finally { await held.close(); }
 }
 
-async function stageInstaller(recipe: Recipe): Promise<void> {
+export async function stageInstaller(recipe: Recipe): Promise<void> {
   const result = await build({ entryPoints: [fileURLToPath(new URL('./installed-runtime-installer.ts', import.meta.url))],
     outfile: recipe.installerEntry, bundle: true, platform: 'node', format: 'esm', target: 'node22.13',
     metafile: true, write: false });
@@ -120,10 +120,18 @@ async function campaign(filename: string): Promise<void> {
     catch { /* Diagnostic only. */ }
   };
   markPhase('installation');
-  const secret = randomBytes(32), rotatedSecret = randomBytes(32), abandonedSecret = randomBytes(32), resubmittedSecret = randomBytes(32),
-    negativeSecret = randomBytes(32), password = Buffer.from(randomBytes(32).toString('hex'));
-  const capSecrets = [randomBytes(32), randomBytes(32), randomBytes(32)];
-  const scanner = createCredentialSecretScanner([secret, rotatedSecret, abandonedSecret, resubmittedSecret, ...capSecrets, negativeSecret, password],
+  // Preserve the observer and duplicate fixture's exact 32-byte contract.
+  // Model samples use printable bytes; the first actual roundtrip also
+  // covers both accepted edge bytes. These are test-only random secrets.
+  const secret = Buffer.from(`!${randomBytes(22).toString('base64url')}~`), rotatedSecret = Buffer.from(randomBytes(24).toString('base64url')),
+    abandonedSecret = Buffer.from(randomBytes(24).toString('base64url')), resubmittedSecret = Buffer.from(randomBytes(24).toString('base64url')),
+    negativeSecret = Buffer.from(randomBytes(24).toString('base64url')), password = Buffer.from(randomBytes(32).toString('hex'));
+  const capSecrets = [0, 1, 2].map(() => Buffer.from(randomBytes(24).toString('base64url')));
+  const invalidModelSecrets = [0x00, 0x20, 0x7f, 0x80, 0x0a, 0x0d].map(byte => {
+    const bytes = Buffer.from(randomBytes(24).toString('base64url')); bytes[16] = byte; return bytes;
+  });
+  const scanner = createCredentialSecretScanner([secret, rotatedSecret, abandonedSecret, resubmittedSecret, ...capSecrets,
+    negativeSecret, password, ...invalidModelSecrets],
     { maxBytes: 512 * 1024 * 1024, maxStreams: 4096 });
   const evidenceDirs: string[] = [];
   const scanBytes = (bytes: Uint8Array) => {
@@ -491,7 +499,8 @@ async function campaign(filename: string): Promise<void> {
     const ownerPrincipalId = identityHash('cliq-local-principal-v1', rootDigest, 'linux', ledger.uid);
     const trust = signed.bundle.entries.find(entry => entry.entryId === 'default_https_trust_store')!;
     const registration: EndpointRegistrationV1 = { schemaVersion: 1, format: 'cliq-endpoint-registration-v1',
-      endpointRegistrationId: 'credential-journey-endpoint', registrationKind: 'user', ownerPrincipalId, purposes: ['model_endpoint'],
+      endpointRegistrationId: 'credential-journey-endpoint', registrationKind: 'user', ownerPrincipalId,
+      purposes: ['dependency_registry', 'model_endpoint'],
       target: { scheme: 'https', hostAscii: 'endpoint.invalid', port: 443, basePath: '/v1', redirectPolicy: 'reject_all' },
       tls: { serverNameAscii: 'endpoint.invalid', minimumVersion: 'TLSv1.3', trustStoreRuntimeBundleRef: bundleDigest,
         trustStoreRuntimeBundleManifestDigest: signed.bundle.manifestDigest, trustStoreEntryId: 'default_https_trust_store',
@@ -641,6 +650,105 @@ async function campaign(filename: string): Promise<void> {
     assert.deepEqual(await readFile(readyPath), readyBytes);
     report.expiredPreparationRefusal = { noReturnedAuthority: true, noRetainedOperation: true, originalRecordUnchanged: true,
       originalItemUnchanged: true, actualServicesUnchanged: true, finalizerExpiryQualified: false, clockRegressionQualified: false };
+
+    const originalItemId = record.platformItem.itemId;
+    const originalCredentialUnchanged = async () => {
+      assert.deepEqual(decodeCredentialAuthorityRecord(success(credential({ schemaVersion: 1, kind: 'read',
+        credentialGrantId: metadata.credentialGrantId }), 'record')), record);
+      const inventory = observe('list'); assert.deepEqual(inventory.items, after.items);
+      for (const key of ['nameOwner', 'servicePid', 'serviceUid', 'collection'] as const) assert.equal(inventory[key], after[key]);
+      const readback = observe('compare', after.items[0]!, originalItemId, secret);
+      assert.equal(readback.readback, true); assert.equal(readback.logicalItemIdMatched, true);
+      assert.deepEqual(await processCut(setup.keeperUnit, 'keeper'), keeper);
+      assert.deepEqual(await processCut(setup.supervisorUnit, 'supervisor'), supervisor);
+      assert.deepEqual(await readFile(readyPath), readyBytes);
+    };
+    markPhase('opaque_dependency_secret_roundtrip');
+    // The same approved FD0 seam must still accept opaque bytes for a
+    // different purpose. This is platform roundtrip, not dependency dispatch.
+    const opaqueMetadata = { ...metadata, requestId: '019a0012-0000-7000-8000-000000000067',
+      credentialGrantId: 'credential-journey-opaque-grant', purpose: 'dependency_registry',
+      secretSubmissionId: 'credential-journey-opaque-submission' };
+    const opaqueOperation = decodeCredentialAuthorityOperation(success(credential(opaqueMetadata, invalidModelSecrets[0]!), 'operation'));
+    assert.equal(opaqueOperation.phase, 'committed'); assert.equal(opaqueOperation.intendedAuthorityRevision, 1);
+    assert.equal(opaqueOperation.intendedSecretGeneration, 1); assert.equal(opaqueOperation.commandCore.purpose, 'dependency_registry');
+    const opaqueRecord = decodeCredentialAuthorityRecord(success(credential({ schemaVersion: 1, kind: 'read',
+      credentialGrantId: opaqueMetadata.credentialGrantId }), 'record'));
+    assert.equal(opaqueRecord.state, 'active'); assert.equal(opaqueRecord.purpose, 'dependency_registry');
+    assert.equal(opaqueRecord.authorityRevision, 1); assert.equal(opaqueRecord.secretGeneration, 1);
+    assert.deepEqual(opaqueRecord.platformItem, opaqueOperation.platformItem);
+    assert.equal(opaqueRecord.platformItem.kind, 'linux_secret_service');
+    if (opaqueRecord.platformItem.kind !== 'linux_secret_service') throw new Error('Linux opaque enrollment must use Secret Service');
+    const opaqueInventory = observe('list'); assert.equal(opaqueInventory.items.length, 2);
+    assert(opaqueInventory.items.includes(after.items[0]!));
+    const opaqueItems = opaqueInventory.items.filter(item => item !== after.items[0]); assert.equal(opaqueItems.length, 1);
+    const opaqueReadback = observe('compare', opaqueItems[0]!, opaqueRecord.platformItem.itemId, invalidModelSecrets[0]!);
+    assert.equal(opaqueReadback.readback, true); assert.equal(opaqueReadback.logicalItemIdMatched, true);
+    const opaqueRevocation = decodeCredentialAuthorityRevokeOperation(success(credential({ schemaVersion: 1, kind: 'revoke',
+      requestId: '019a0012-0000-7000-8000-000000000068', credentialGrantId: opaqueMetadata.credentialGrantId,
+      expectedAuthorityRevision: 1 }), 'operation'));
+    assert.equal(opaqueRevocation.disposition, 'revoked'); assert.equal(opaqueRevocation.cleanupPhase, 'cleanup_complete');
+    assert.equal(opaqueRevocation.committedAuthorityRevision, 2); assert.deepEqual(opaqueRevocation.platformItem, opaqueRecord.platformItem);
+    assert.deepEqual(decodeCredentialAuthorityRevokeOperation(success(credential({ schemaVersion: 1, kind: 'cleanup',
+      requestId: opaqueRevocation.requestId }), 'operation')), opaqueRevocation);
+    await originalCredentialUnchanged();
+    report.opaqueDependencySecret = { actualBinaryRoundtrip: true, exactItemRevokedAndCleaned: true,
+      originalModelRecordAndItemUnchanged: true, dependencyDispatchQualified: false };
+
+    markPhase('model_bearer_input_refusal');
+    for (const [index, invalidSecret] of invalidModelSecrets.entries()) {
+      const invalidMetadata = { ...metadata, requestId: `019a0012-0000-7000-8000-${String(60 + index).padStart(12, '0')}`,
+        credentialGrantId: `credential-journey-invalid-model-${index}`, secretSubmissionId: `credential-journey-invalid-model-submission-${index}` };
+      const response = credential(invalidMetadata, invalidSecret);
+      let returnedCommittedOperation = false;
+      if (response.status === 0) try {
+        const observed = decodeCredentialAuthorityOperation(success(response, 'operation'));
+        returnedCommittedOperation = observed.phase === 'committed' && observed.kind === 'enroll' &&
+          observed.requestId === invalidMetadata.requestId && observed.credentialGrantId === invalidMetadata.credentialGrantId &&
+          observed.commandCore.purpose === 'model_endpoint';
+      } catch { /* Diagnostic only: never retain arbitrary returned bytes or errors. */ }
+      report.modelBearerInputAttempt = { caseIndex: index, commandExitStatus: response.status, returnedCommittedOperation };
+      exactRefusal(response, 'INVALID_REQUEST',
+        'model credential secret is outside the installed bearer byte range');
+      assert.equal(success(credential({ schemaVersion: 1, kind: 'read', credentialGrantId: invalidMetadata.credentialGrantId }), 'record'), null);
+      exactRefusal(credential({ schemaVersion: 1, kind: 'cleanup', requestId: invalidMetadata.requestId }),
+        'NOT_FOUND', 'credential cleanup request has no retained operation');
+      await originalCredentialUnchanged();
+    }
+    report.modelBearerInputRefusal = { invalidEnrollCases: 6, noActiveRecordOrPreparedOperation: true,
+      originalRecordItemAndServicesUnchanged: true, acceptedBoundaryBytesRoundtripped: true };
+
+    // These are public, fixed invalid protocol literals, not newly generated
+    // credential material. Keep the existing private-key scanner/corpus intact:
+    // registering '{' as a private needle would necessarily reject all JSON.
+    const protocolConflicts = ['{', 'application/json', '[', ']'] as const;
+    const protocolConflictRefusal = async (input: Record<string, unknown>, caseIndex: number) => {
+      const bytes = Buffer.from(protocolConflicts[caseIndex]!, 'ascii');
+      try {
+        const response = credential(input, bytes);
+        let returnedCommittedOperation = false;
+        if (response.status === 0) try {
+          const observed = decodeCredentialAuthorityOperation(success(response, 'operation'));
+          returnedCommittedOperation = observed.phase === 'committed' && observed.requestId === input.requestId &&
+            observed.credentialGrantId === input.credentialGrantId && observed.kind === input.kind;
+        } catch { /* Retain only fixed diagnostic facts, never arbitrary returned bytes. */ }
+        report.modelProtocolConflictAttempt = { caseIndex, kind: input.kind,
+          commandExitStatus: response.status, returnedCommittedOperation };
+        exactRefusal(response, 'INVALID_REQUEST', 'model credential secret conflicts with the installed protocol');
+        if (input.kind === 'enroll')
+          assert.equal(success(credential({ schemaVersion: 1, kind: 'read', credentialGrantId: input.credentialGrantId }), 'record'), null);
+        exactRefusal(credential({ schemaVersion: 1, kind: 'cleanup', requestId: input.requestId }),
+          'NOT_FOUND', 'credential cleanup request has no retained operation');
+        await originalCredentialUnchanged();
+      } finally { bytes.fill(0); }
+    };
+    markPhase('model_protocol_conflict_enroll_refusal');
+    for (const index of protocolConflicts.keys()) await protocolConflictRefusal({ ...metadata,
+      requestId: `019a0012-0000-7000-8000-${String(71 + index).padStart(12, '0')}`,
+      credentialGrantId: `credential-journey-protocol-conflict-${index}`,
+      secretSubmissionId: `credential-journey-protocol-conflict-submission-${index}` }, index);
+    report.modelProtocolConflictEnrollRefusal = { cases: protocolConflicts.length, noActiveRecordOrPreparedOperation: true,
+      originalRecordItemAndServicesUnchanged: true, nativeBrokerRedemptionQualified: false };
 
     markPhase('orphan_first_prepared_sigkill');
     const orphanMetadata = { schemaVersion: 1, kind: 'enroll', requestId: '019a0012-0000-7000-8000-000000000027',
@@ -794,6 +902,22 @@ async function campaign(filename: string): Promise<void> {
     markPhase('rotate');
     const rotateMetadata = { schemaVersion: 1, kind: 'rotate', requestId: '019a0012-0000-7000-8000-000000000023',
       credentialGrantId: metadata.credentialGrantId, expectedAuthorityRevision: 1, secretSubmissionId: 'credential-journey-rotation-submission' };
+    const invalidRotate = { ...rotateMetadata, requestId: '019a0012-0000-7000-8000-000000000066',
+      secretSubmissionId: 'credential-journey-invalid-model-rotation-submission' };
+    exactRefusal(credential(invalidRotate, invalidModelSecrets[4]!), 'INVALID_REQUEST',
+      'model credential secret is outside the installed bearer byte range');
+    exactRefusal(credential({ schemaVersion: 1, kind: 'cleanup', requestId: invalidRotate.requestId }),
+      'NOT_FOUND', 'credential cleanup request has no retained operation');
+    await originalCredentialUnchanged();
+    report.modelBearerRotateRefusal = { purposeDerivedFromActiveRecord: true, noPreparedOperation: true,
+      originalRevisionGenerationSubjectItemAndServicesUnchanged: true };
+    markPhase('model_protocol_conflict_rotate_refusal');
+    for (const index of protocolConflicts.keys()) await protocolConflictRefusal({ ...rotateMetadata,
+      requestId: `019a0012-0000-7000-8000-${String(75 + index).padStart(12, '0')}`,
+      secretSubmissionId: `credential-journey-protocol-conflict-rotation-${index}` }, index);
+    report.modelProtocolConflictRotateRefusal = { cases: protocolConflicts.length, purposeDerivedFromActiveRecord: true,
+      noPreparedOperation: true, originalRevisionGenerationSubjectItemAndServicesUnchanged: true,
+      nativeBrokerRedemptionQualified: false };
     const rotatedOperation = decodeCredentialAuthorityOperation(success(credential(rotateMetadata, rotatedSecret), 'operation'));
     assert.equal(rotatedOperation.phase, 'committed'); assert.equal(rotatedOperation.kind, 'rotate'); assert.equal(rotatedOperation.attempt, 1);
     assert.equal(rotatedOperation.requestId, rotateMetadata.requestId); assert.equal(rotatedOperation.credentialGrantId, metadata.credentialGrantId);
@@ -1505,7 +1629,7 @@ async function campaign(filename: string): Promise<void> {
   } catch (error) { primary = error; }
   finally {
     secret.fill(0); rotatedSecret.fill(0); abandonedSecret.fill(0); resubmittedSecret.fill(0); negativeSecret.fill(0); password.fill(0);
-    for (const bytes of capSecrets) bytes.fill(0);
+    for (const bytes of [...capSecrets, ...invalidModelSecrets]) bytes.fill(0);
     try { await stopDaemon(); }
     catch (error) { primary = new AggregateError([primary, error].filter(Boolean), 'fixture platform daemon retirement failed'); }
     if (!primary) {
@@ -1561,8 +1685,14 @@ async function campaign(filename: string): Promise<void> {
   if (primary) throw new Error('actual installed credential journey failed; see the closed diagnostic report');
 }
 
-assert.equal(process.platform, 'linux', 'installed credential journey requires Linux');
-assert.equal(process.arch, 'x64', 'no installed credential carrier qualified for this architecture');
-const [mode, filename, ...extra] = process.argv.slice(2);
-assert.equal(mode, '--campaign'); assert(filename && extra.length === 0);
-await campaign(filename);
+// The fixed systemd recipe invokes this source through tsx. The basename
+// guard also keeps these preparation helpers inert if another driver bundles
+// them, where esbuild would otherwise rewrite both import.meta.url values.
+if (process.argv[1] && path.basename(process.argv[1]) === 'credential-installed-journey.ts' &&
+    path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  assert.equal(process.platform, 'linux', 'installed credential journey requires Linux');
+  assert.equal(process.arch, 'x64', 'no installed credential carrier qualified for this architecture');
+  const [mode, filename, ...extra] = process.argv.slice(2);
+  assert.equal(mode, '--campaign'); assert(filename && extra.length === 0);
+  await campaign(filename);
+}
