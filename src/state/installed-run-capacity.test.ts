@@ -81,3 +81,32 @@ test('a retained inventory already beyond the bound cannot admit more work', con
   assert.throws(check, error => error instanceof InstalledRunCapacityError);
   assert.deepEqual(driver.prepare('SELECT * FROM runs ORDER BY id').all(), before);
 });
+
+test('a read-only preflight reserves no capacity and the final transaction rejects a concurrently filled inventory', context => {
+  const { driver, database, add, check } = fixture(context);
+  add(999, 'queued');
+  assert.doesNotThrow(() => assertInstalledRunAdmissionCapacity(driver));
+  const otherWriter = openSqliteDriver(database);
+  try {
+    // This is a second real SQLite connection, not a second StateOwner or an
+    // installed admission. A completed read-only preflight holds no slot.
+    otherWriter.prepare("INSERT INTO runs(status) VALUES ('waiting')").run();
+    const full = driver.prepare('SELECT * FROM runs ORDER BY id').all();
+    assert.equal(full.length, 1000);
+    assert.throws(() => driver.transaction(connection => {
+      // A terminal data row does not change active capacity; it witnesses
+      // that the refusing transaction rolls back, rather than partly commits.
+      connection.prepare("INSERT INTO runs(status) VALUES ('succeeded')").run();
+      assertInstalledRunAdmissionCapacity(connection);
+      connection.prepare("INSERT INTO runs(status) VALUES ('queued')").run();
+    }), error => error instanceof InstalledRunCapacityError);
+    assert.deepEqual(driver.prepare('SELECT * FROM runs ORDER BY id').all(), full);
+    otherWriter.prepare("UPDATE runs SET status='cancelled' WHERE id=1").run();
+    assert.doesNotThrow(() => driver.transaction(connection => {
+      assertInstalledRunAdmissionCapacity(connection);
+      connection.prepare("INSERT INTO runs(status) VALUES ('queued')").run();
+    }));
+    assert.equal(driver.prepare('SELECT COUNT(*) AS count FROM runs').get<{ count: bigint }>()!.count, 1001n);
+    assert.throws(check, error => error instanceof InstalledRunCapacityError);
+  } finally { otherWriter.close(); }
+});

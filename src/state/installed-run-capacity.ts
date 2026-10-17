@@ -13,8 +13,9 @@ export class InstalledRunCapacityError extends KernelStorageError {
   }
 }
 
-/** Read-only capacity check, not admission authority. The installed caller
- * must hold its original write transaction through the subsequent insert. */
+/** Read-only capacity check, never a reservation or admission authority. An
+ * advisory preflight must still be repeated in the installed caller's original
+ * write transaction, held through the subsequent insert. */
 export function assertInstalledRunAdmissionCapacity(connection: Pick<SqliteConnection, 'prepare'>): void {
   const full = connection.prepare(`SELECT 1 FROM runs
     WHERE status IN ('queued','running','waiting') LIMIT 1 OFFSET ?`).get(INSTALLED_RUN_INVENTORY_LIMIT - 1);

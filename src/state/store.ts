@@ -74,7 +74,7 @@ import { MODEL_BROKER_ENTRY_ID, InstalledModelBrokerRefusalError, type NativeMod
 import { decodeBrokerInvocationAmbiguity, type BrokerInvocationAmbiguityEvidenceV1 } from '../kernel/broker-ambiguity.js';
 import { supervisorInspectorIdentity } from './supervisor-inspector.js';
 import { selectInstalledModelProgress } from './installed-model-progress.js';
-import { INSTALLED_RUN_INVENTORY_LIMIT } from './installed-run-capacity.js';
+import { assertInstalledRunAdmissionCapacity, INSTALLED_RUN_INVENTORY_LIMIT } from './installed-run-capacity.js';
 import type { SupervisorHelloV1, SupervisorStatusV1 } from './installed-control.js';
 import { assertStateOwnerLock, loadNativeStateOwner, stateRootIdentityFromDescriptor, type HeldStateOwnerLock, type NativeStateOwner } from './native-owner.js';
 import {
@@ -2777,10 +2777,13 @@ export class StateStore {
    * its first asynchronous action; shutdown cancels and joins every operation. */
   async captureSubmittedSource(input: CaptureSubmittedSourceInput): Promise<SourceInspectionAttemptV1> {
     if (this.closed || this.closeRequested || this.released) throw new KernelStorageError('LEASE_FENCED', 'StateStore is closing or closed');
-    input = immutableSnapshot(input);
-    if (!input || Object.keys(input).length !== 2 || !Object.hasOwn(input, 'request') || !Object.hasOwn(input, 'identity')) {
+    if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length !== 2 ||
+        !Object.hasOwn(input, 'request') || !Object.hasOwn(input, 'identity')) {
       throw new KernelStorageError('INVALID_REQUEST', 'source capture requires one inline request and authenticated identity');
     }
+    // Keep the actual native frame owner separately from snapshotted data.
+    const frameIdentity = input.identity;
+    input = immutableSnapshot(input);
     const normalized = normalizeRunSubmitRequest(input.request);
     const key = identityHash('cliq-source-inspection-task-v1', input.identity.principalId, normalized.request.admissionKey);
     const intent = runSubmitIntentDigest(input.identity.principalId, normalized.request);
@@ -2804,6 +2807,13 @@ export class StateStore {
       const bootstrap = this.runtimeAuthority;
       if (!bootstrap?.sourceInspection) throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'trusted source inspection installation is not configured');
       abort.signal.throwIfAborted();
+      if (this.installedRuntime) {
+        assertCurrentControlFrame(this.owner, frameIdentity); assertActiveStateOwner(this.driver, this.owner);
+        // A joined capture may have just committed its original request index.
+        // Preserve that conflict before this read-only, non-reserving refusal.
+        assertSourceInspectionRequestId(this.driver, input.identity.principalId, normalized.request);
+        assertInstalledRunAdmissionCapacity(this.driver);
+      }
       return captureSubmittedSource(this.driver, this.artifacts, this.owner,
         { bundle: bootstrap.bundle, releaseKeys: bootstrap.releaseKeys, ...bootstrap.sourceInspection,
           ...(this.installedRuntime ? { sandboxProfile: installedSandboxProfile(normalized.request.sandboxResources) } : {}) },

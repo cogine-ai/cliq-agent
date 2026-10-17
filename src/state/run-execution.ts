@@ -447,7 +447,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
   // Temporary source-only diagnosis for the actual installed SIGTERM campaign.
   // Remove [DEBUG-shutdown-retirement] after its real failure is resolved.
   function reportShutdownRetirement(stage: 'preparation' | 'retirement' | 'worker_join' | 'tool_before_result', failure: unknown,
-    point = 'unclassified'): void {
+    point = 'unclassified', observedWaitMs?: number): void {
     try {
       if (stage !== 'tool_before_result' && !closed && !isClosing()) return;
       const message = failure instanceof Error ? Object.getOwnPropertyDescriptor(failure, 'message')?.value : undefined;
@@ -479,11 +479,23 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         case 'generation retains an original native model transport owner': reason = 'preparation_broker_owner'; break;
       }
       if (typeof message === 'string' && message.startsWith('worker preparation history is invalid: ')) reason = 'preparation_history';
-      const code = failure instanceof KernelStorageError &&
-        ['ARTIFACT_MISMATCH', 'LEASE_FENCED', 'RECOVERY_REQUIRED', 'REVISION_CONFLICT', 'INVALID_REQUEST'].includes(failure.code)
-        ? failure.code : 'other';
+      const ownCode = failure instanceof Error ? Object.getOwnPropertyDescriptor(failure, 'code')?.value : undefined;
+      const code = typeof ownCode === 'string' &&
+        ['ARTIFACT_MISMATCH', 'LEASE_FENCED', 'RECOVERY_REQUIRED', 'REVISION_CONFLICT', 'INVALID_REQUEST'].includes(ownCode)
+        ? ownCode : 'other';
+      // Existing native poll_failure metadata only: request/requestScope,
+      // expected/expectedScope, received/receivedScope, status/fds/errno/boundary.
+      // No message, path, token, payload, stderr or arbitrary nested cause.
+      const match = stage === 'tool_before_result' && point === 'tool_result' && typeof message === 'string'
+        ? /^native controller reply failed: request=(\d{1,2}) requestScope=(\d{1,2}) expected=(\d{1,2}) expectedScope=(\d{1,2}) received=(\d{1,2}) receivedScope=(\d{1,2}) status=(\d{1,10}) fds=(\d) receiveErrno=(\d{1,4}) boundary=([1-3])$/u.exec(message) : null;
+      const numbers = match?.slice(1).map(Number);
+      const nativeReply = numbers && numbers.every(Number.isSafeInteger) &&
+        [0, 2, 4].every(index => numbers[index]! <= 13) && [1, 3, 5].every(index => numbers[index]! < 16) &&
+        numbers[6]! <= 4_294_967_295 && numbers[7]! <= 5 && numbers[8]! <= 4095 ? numbers : undefined;
+      const wait = Number.isSafeInteger(observedWaitMs) && observedWaitMs! >= 0 && observedWaitMs! <= 3_600_000
+        ? observedWaitMs : undefined;
       console.error(JSON.stringify({ debugTag: '[DEBUG-shutdown-retirement]', diagnosticOnly: true,
-        scope: 'installed-shutdown-retirement', stage, reason, code }));
+        scope: 'installed-shutdown-retirement', stage, reason, code, nativeReply, observedWaitMs: wait }));
     } catch { /* Diagnosis cannot replace the original retirement failure. */ }
   }
   function ownOperation(work: Promise<Run>, abort: AbortController, retainWorker = false): Promise<Run> {
@@ -698,6 +710,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       toolPhase = 'preparing';
       let claimedTool: Awaited<ReturnType<typeof agent.claimTool>> | undefined;
       let resultPoint = 'tool_input';
+      let resultStartedAt: number | undefined;
       const work = (async () => {
         signal.throwIfAborted();
         const selected = await readToolCut(driver, artifacts, runId, agent.resolveToolInput);
@@ -773,6 +786,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         resultPoint = 'tool_release';
         await claimed.release(invocation);
         resultPoint = 'tool_result';
+        resultStartedAt = performance.now();
         const result = await invocation.result();
         toolPhase = 'received';
         const observedAt = sampleCanonicalNow();
@@ -810,7 +824,8 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         return readRun(driver, runId);
       })().catch(async error => {
         if (claimedTool && toolPhase !== 'received') {
-          reportShutdownRetirement('tool_before_result', error, resultPoint);
+          reportShutdownRetirement('tool_before_result', error, resultPoint,
+            resultStartedAt === undefined ? undefined : Math.round(performance.now() - resultStartedAt));
           // A permanent claim is possibly dispatched even when cancellation
           // wins before the blocked child/RELEASE handshake. Join the actual
           // producer, preserve uncertainty and charge once; only the separate

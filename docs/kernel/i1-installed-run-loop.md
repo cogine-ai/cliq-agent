@@ -83,6 +83,9 @@ that same held Trust after capture and before the final write transaction.
 Exact committed replays still precede all home/workspace opening; generic
 non-installed Session creation is unchanged.
 The installed scheduler retains at most 1000 nonterminal Runs across Sessions.
+An installed-only, read-only preflight refuses a full queue before the physical
+source capture factory. It follows the existing source request/key conflicts
+and original in-flight capture join. Passing reserves no capacity or authority.
 New installed admission checks that same bound in its original write transaction,
 after replay/conflict and all authority/time guards, before inserting any Run.
 Queued, running and waiting Runs occupy capacity; terminal history does not.

@@ -251,6 +251,19 @@ connection for SQL; the original driver remains the physical broker registry's
 identity. No driver guard, native join, freshness, quarantine or CAS predicate
 is removed. Its installed GREEN remains pending until the same campaign passes.
 
+At `be6a34a`, the PR preparation campaign completes the genuine original writer,
+unchanged two-second normal exit, same-directory quarantine/retirement, original
+graceful owner release, validated successor and one terminal publication. Its
+push counterpart passes physical retirement and normal stop, then fails inside
+the successor owner-history helper; that report remains negative. Bounded
+source frames for that existing helper may diagnose the difference but cannot
+substitute for its assertions.
+New cardinality wire checks fail earlier because strict JSON objects have null
+prototypes while their expected literals do not. Correcting those comparisons
+to complete canonical bytes preserves every field/value assertion. That harness
+failure supplies no evidence of an actual wrong refusal code, and the later
+normal/authority/storage targets did not execute in those negative campaigns.
+
 ## Tool result and settlement rules
 
 | Actual cut | Required behavior |

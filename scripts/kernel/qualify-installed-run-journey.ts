@@ -348,7 +348,7 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
     const result = spawnSync('/usr/bin/journalctl', ['--no-pager', '--output=cat', '--lines=16',
       `_UID=${ledger.uid}`, `_SYSTEMD_USER_UNIT=${unit}`, `_PID=${pid}`],
     { env: environment, timeout: 5000, killSignal: 'SIGKILL', maxBuffer: 65536 });
-    const refusals: Array<{ code: string; origin: string }> = [];
+    const refusals: Array<{ code: string; origin: string; nativeReply?: number[]; observedWaitMs?: number }> = [];
     try {
       if (Buffer.isBuffer(result.stdout)) scanBytes(result.stdout);
       if (Buffer.isBuffer(result.stderr)) scanBytes(result.stderr);
@@ -373,7 +373,17 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
                 'unclassified'].includes(value.reason as string)) {
             const code = ['ARTIFACT_MISMATCH', 'LEASE_FENCED', 'RECOVERY_REQUIRED', 'REVISION_CONFLICT', 'INVALID_REQUEST'].includes(value.code as string)
               ? value.code as string : 'diagnostic_only';
-            refusals.push({ code, origin: `${value.stage}.${value.reason}` }); continue;
+            const numbers = value.nativeReply;
+            const nativeReply = Array.isArray(numbers) && numbers.length === 10 &&
+              numbers.every(number => Number.isSafeInteger(number) && number >= 0) &&
+              [0, 2, 4].every(index => numbers[index] <= 13) && [1, 3, 5].every(index => numbers[index] < 16) &&
+              numbers[6] <= 4_294_967_295 && numbers[7] <= 5 && numbers[8] <= 4095 && [1, 2, 3].includes(numbers[9])
+              ? numbers as number[] : undefined;
+            const wait = value.observedWaitMs;
+            const observedWaitMs = Number.isSafeInteger(wait) && (wait as number) >= 0 && (wait as number) <= 3_600_000
+              ? wait as number : undefined;
+            refusals.push({ code, origin: `${value.stage}.${value.reason}`,
+              ...(nativeReply ? { nativeReply } : {}), ...(observedWaitMs === undefined ? {} : { observedWaitMs }) }); continue;
           }
           if (value.scope !== 'installed-read-startup') continue;
           const code = ['RECOVERY_REQUIRED', 'LEASE_FENCED', 'ARTIFACT_MISMATCH', 'STATE_TRANSITION_INVALID'].includes(value.code as string)
@@ -975,13 +985,13 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
         request({ ...core, requestId: '019a0012-0000-7000-8000-000000000140', expectedRevision: run.revision - 1 }),
         request({ ...core, requestId: '019a0012-0000-7000-8000-000000000141', expectedRevision: run.revision })]);
       assert.deepEqual(replies[0], originalReply);
-      assert.deepEqual(replies[1], { protocolVersion: 1, ok: false, method: 'run.cancel', error: {
-        schemaVersion: 1, code: 'REQUEST_ID_CONFLICT', retryable: false, messageCode: 'control.mutation_refused' } });
-      assert.deepEqual(replies[2], { protocolVersion: 1, ok: false, method: 'run.cancel', error: {
+      assert(canonicalJsonBytes(replies[1]).equals(canonicalJsonBytes({ protocolVersion: 1, ok: false, method: 'run.cancel', error: {
+        schemaVersion: 1, code: 'REQUEST_ID_CONFLICT', retryable: false, messageCode: 'control.mutation_refused' } })));
+      assert(canonicalJsonBytes(replies[2]).equals(canonicalJsonBytes({ protocolVersion: 1, ok: false, method: 'run.cancel', error: {
         schemaVersion: 1, code: 'REVISION_CONFLICT', retryable: true, messageCode: 'control.revision_conflict', currentRevision: run.revision,
-        conflict: { resourceKind: 'run', currentSnapshot: terminal.snapshot } } });
-      assert.deepEqual(replies[3], { protocolVersion: 1, ok: false, method: 'run.cancel', error: {
-        schemaVersion: 1, code: 'RUN_TERMINAL', retryable: false, messageCode: 'control.run_terminal' } });
+        conflict: { resourceKind: 'run', currentSnapshot: terminal.snapshot } } })));
+      assert(canonicalJsonBytes(replies[3]).equals(canonicalJsonBytes({ protocolVersion: 1, ok: false, method: 'run.cancel', error: {
+        schemaVersion: 1, code: 'RUN_TERMINAL', retryable: false, messageCode: 'control.run_terminal' } })));
       assert.deepEqual(accepted(exchange([{ protocolVersion: 1, method: 'run.get', runId: run.id }])[0]!, 'run.get'), terminal);
       assert.deepEqual(accepted(exchange([{ protocolVersion: 1, method: 'session.get', sessionId: session.id,
         afterItemSeq: afterSessionItemSeq }])[0]!, 'session.get'), expectedSession);
@@ -2155,15 +2165,15 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
         assert.equal(new Set(credentialIds).size, count);
         const refused = await recipeClient.send(request({ ...resourceCore, requestId,
           model: { ...resourceCore.model, modelCredentialGrantIds: credentialIds } }));
-        assert.deepEqual(refused, { protocolVersion: 1, ok: false, method: 'run.submit', error: {
+        assert(canonicalJsonBytes(refused).equals(canonicalJsonBytes({ protocolVersion: 1, ok: false, method: 'run.submit', error: {
           schemaVersion: 1, code: 'INVALID_REQUEST', retryable: false, messageCode: 'control.invalid_request',
-          issues: [{ path: 'request', issueCode: 'invalid_request' }] } });
+          issues: [{ path: 'request', issueCode: 'invalid_request' }] } })));
       }
       assert.deepEqual((await readdir(path.join(recipe.stateRoot, 'cas'))).sort(), before);
       const absent = await recipeClient.send({ protocolVersion: 1, method: 'run.get',
         runId: identityHash('cliq-run-id-v1', principal, 'run.submit', submit.admissionKey) });
-      assert.deepEqual(absent, { protocolVersion: 1, ok: false, method: 'run.get', error: {
-        schemaVersion: 1, code: 'NOT_FOUND', retryable: false, messageCode: 'control.read_rejected' } });
+      assert(canonicalJsonBytes(absent).equals(canonicalJsonBytes({ protocolVersion: 1, ok: false, method: 'run.get', error: {
+        schemaVersion: 1, code: 'NOT_FOUND', retryable: false, messageCode: 'control.read_rejected' } })));
       assert.deepEqual(accepted(await recipeClient.send({ protocolVersion: 1, method: 'session.get', sessionId: session.id }), 'session.get').snapshot.session, session);
       assert.equal(requestsReceived, 0); assert.equal(acceptedTcpConnections, 0); assert.equal(acceptedTlsConnections, 0); assert(!providerFailure);
       report.credentialCardinalityRefused = { qualified: true, rejectedCounts: [2, 32], refusalCode: 'INVALID_REQUEST',
@@ -3713,7 +3723,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       const pending = [primary];
       for (let visited = 0; pending.length && visited < 8 && sourceFrames.length < 8; visited++) {
         const error = pending.shift(); if (!(error instanceof Error)) continue;
-        for (const match of (error.stack ?? '').matchAll(/\b(qualify-installed-run-journey|installed-supervisor-package|installed-model-package)\.ts:([1-9][0-9]{0,6}):([1-9][0-9]{0,6})/gu)) {
+        for (const match of (error.stack ?? '').matchAll(/\b(qualify-installed-run-journey|installed-supervisor-package|installed-model-package|installed-owner-history)\.ts:([1-9][0-9]{0,6}):([1-9][0-9]{0,6})/gu)) {
           sourceFrames.push({ file: `${match[1]}.ts`, line: Number(match[2]), column: Number(match[3]) }); if (sourceFrames.length === 8) break;
         }
         if (error instanceof AggregateError) pending.unshift(...error.errors.slice(0, 4));
