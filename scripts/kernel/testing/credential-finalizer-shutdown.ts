@@ -87,6 +87,7 @@ async function campaign(filename: string): Promise<void> {
   };
   const owned: { retire(): Promise<void> }[] = [];
   function spawnOwned(executable: string, args: string[], input?: Buffer, role: 'service' | 'unit-history' = 'service') {
+    const spawnedAt = performance.now();
     const outputScans = [scanner.openStream(), scanner.openStream()];
     let child: ReturnType<typeof spawn>;
     try { child = spawn('/usr/sbin/runuser', [...prefix, executable, ...args],
@@ -146,7 +147,7 @@ async function campaign(filename: string): Promise<void> {
       const output = Buffer.concat(stdout).toString('utf8'), errors = Buffer.concat(stderr).toString('utf8');
       const sourceStages = ['alias-default', 'alias-session', 'caller-other', 'caller-original', 'search-absent', 'search-present',
         'open-session', 'create-item', 'item-created', 'get-secret', 'secret-returned', 'collections', 'collection-locked', 'collection-items',
-        'item-attributes', 'item-locked', 'original-identity-refused', 'method-refused', 'property-refused', 'fixture-refused'];
+        'item-attributes', 'item-locked', 'original-identity-refused', 'method-refused', 'property-refused', 'deadline-expired', 'fixture-refused'];
       const externalStages: string[] = [];
       let externalOtherOutput = false;
       for (const line of errors.trim().split('\n').filter(Boolean)) {
@@ -181,11 +182,14 @@ async function campaign(filename: string): Promise<void> {
         if (value.schemaVersion === 1 && Object.keys(value).sort().join(',') === 'operation,schemaVersion')
           returnedOperationPhase = decodeCredentialAuthorityOperation(value.operation).phase;
       } catch { /* No arbitrary returned payload becomes evidence. */ }
-      return { exited: done, exitCode: child.exitCode, signal: child.signalCode === null ? 'none'
+      const age = Math.floor(performance.now() - spawnedAt), processAgeBoundMs = 3600000;
+      const processAgeWithinBound = Number.isSafeInteger(age) && age >= 0 && age <= processAgeBoundMs;
+      return { processAgeMs: processAgeWithinBound ? age : null, processAgeBoundMs, processAgeWithinBound,
+        exited: done, exitCode: child.exitCode, signal: child.signalCode === null ? 'none'
         : ['SIGTERM', 'SIGKILL'].includes(child.signalCode) ? child.signalCode : 'other',
         stdoutBytes: Buffer.byteLength(output), stderrBytes: Buffer.byteLength(errors), returnedOperationPhase,
         entryCodeClass, entryMessageClass, externalStages, externalFixtureRefused: externalStages.includes('fixture-refused'),
-        externalOtherOutput, waitFailure: waitFailure ?? 'none' };
+        externalDeadlineExpired: externalStages.includes('deadline-expired'), externalOtherOutput, waitFailure: waitFailure ?? 'none' };
     };
     const retire = async () => {
       let retirementFailure: unknown;
@@ -240,25 +244,6 @@ async function campaign(filename: string): Promise<void> {
     assert.equal(bundleDigest, canonicalSha256(signed.bundle)); report.bundleDigest = bundleDigest;
     const selectedImage = path.join(recipe.stateRoot, 'runtime/bundles', bundleDigest, 'supervisor');
     const selected = signed.bundle.entries.find(entry => entry.role === 'supervisor' && entry.relativePath === 'supervisor'); assert(selected);
-    const servicePath = path.join(ledger.fixture, 'cliq-credential-finalizer-service');
-    const helper = await lstat(servicePath); assert(helper.isFile() && !helper.isSymbolicLink() && helper.uid === 0 && helper.nlink === 1 && (helper.mode & 0o7777) === 0o555);
-    const absent = command('/usr/bin/busctl', ['--user', 'call', 'org.freedesktop.DBus', '/org/freedesktop/DBus',
-      'org.freedesktop.DBus', 'NameHasOwner', 's', 'org.freedesktop.secrets']);
-    assert.equal(absent.status, 0); assert.equal(absent.stdout.trim(), 'b false');
-    mark('original_external_service');
-    const service = spawnOwned(servicePath, [selectedImage]); await service.observe(); await service.waitEvent('ready');
-    const observe = () => {
-      const result = command(recipe.observer, ['list']); assert.equal(result.status, 0);
-      const value = parseJsonStrict(result.stdout.trim()) as Record<string, any>;
-      assert.equal(value.serviceUid, ledger.uid); assert.equal(value.connectionClosed, true);
-      assert.match(value.nameOwner, /^:\d+\.\d+$/u); assert(Array.isArray(value.items)); return value;
-    };
-    const initialStore = observe(); assert.deepEqual(initialStore.items, []);
-    assert.equal(await readlink(`/proc/${initialStore.servicePid}/exe`), servicePath);
-    const actualService = await stat(`/proc/${initialStore.servicePid}/exe`, { bigint: true }), helperImage = await lstat(servicePath, { bigint: true });
-    for (const key of imageFields) assert.equal(actualService[key], helperImage[key]);
-    report.platform = { actualUserManagerBus: true, sameUid: true, nameOwner: initialStore.nameOwner, servicePid: initialStore.servicePid,
-      collection: initialStore.collection, unchangedThroughoutEnrollmentAndCleanup: false };
     const setup = credential({ schemaVersion: 1, kind: 'install_services' }); assert.equal(setup.status, 0);
     const parsedSetup = parseJsonStrict(setup.stdout.trim()) as { schemaVersion: number; keeperUnit: string; supervisorUnit: string };
     assert.equal(parsedSetup.schemaVersion, 1); services = parsedSetup;
@@ -300,6 +285,27 @@ async function campaign(filename: string): Promise<void> {
     const endpoint = command(path.join(recipe.stateRoot, 'runtime/bootstrap'), ['--bootstrap-endpoint'], canonicalJsonBytes({ schemaVersion: 1, kind: 'commit',
       requestId: '019a0012-0000-7000-8000-000000000081', commandCore: { ...core, commandDigest: digestOmitting(core, 'commandDigest') } }));
     assert.equal(decodeEndpointAuthorityOperation(success(endpoint, 'operation')).disposition, 'registered');
+    // Manager setup, owner qualification and endpoint metadata need no Secret
+    // Service. Spend this one service's unchanged lifetime on the real work.
+    const servicePath = path.join(ledger.fixture, 'cliq-credential-finalizer-service');
+    const helper = await lstat(servicePath); assert(helper.isFile() && !helper.isSymbolicLink() && helper.uid === 0 && helper.nlink === 1 && (helper.mode & 0o7777) === 0o555);
+    const absent = command('/usr/bin/busctl', ['--user', 'call', 'org.freedesktop.DBus', '/org/freedesktop/DBus',
+      'org.freedesktop.DBus', 'NameHasOwner', 's', 'org.freedesktop.secrets']);
+    assert.equal(absent.status, 0); assert.equal(absent.stdout.trim(), 'b false');
+    mark('original_external_service');
+    const service = spawnOwned(servicePath, [selectedImage]); await service.observe(); await service.waitEvent('ready');
+    const observe = () => {
+      const result = command(recipe.observer, ['list']); assert.equal(result.status, 0);
+      const value = parseJsonStrict(result.stdout.trim()) as Record<string, any>;
+      assert.equal(value.serviceUid, ledger.uid); assert.equal(value.connectionClosed, true);
+      assert.match(value.nameOwner, /^:\d+\.\d+$/u); assert(Array.isArray(value.items)); return value;
+    };
+    const initialStore = observe(); assert.deepEqual(initialStore.items, []);
+    assert.equal(await readlink(`/proc/${initialStore.servicePid}/exe`), servicePath);
+    const actualService = await stat(`/proc/${initialStore.servicePid}/exe`, { bigint: true }), helperImage = await lstat(servicePath, { bigint: true });
+    for (const key of imageFields) assert.equal(actualService[key], helperImage[key]);
+    report.platform = { actualUserManagerBus: true, sameUid: true, nameOwner: initialStore.nameOwner, servicePid: initialStore.servicePid,
+      collection: initialStore.collection, serviceDeadlineMs: 90000, unchangedThroughoutEnrollmentAndCleanup: false };
     mark('genuine_enrollment_original_finalizer');
     const metadata = { schemaVersion: 1, kind: 'enroll', requestId: '019a0012-0000-7000-8000-000000000082',
       credentialGrantId: 'credential-finalizer-grant', purpose: 'model_endpoint', endpointRegistrationId: registration.endpointRegistrationId,
@@ -346,6 +352,7 @@ async function campaign(filename: string): Promise<void> {
     catch (error) {
       // This is a refused/unreached cut, never a SIGTERM result. Preserve only
       // fixed stage classes and independently observed child exit facts.
+      await delay(0);
       report.unreachedInspection = { enrollment: enrollment.diagnostic(), externalService: service.diagnostic() };
       throw error;
     }
@@ -429,6 +436,9 @@ async function campaign(filename: string): Promise<void> {
       requestId: '019a0012-0000-7000-8000-000000000083', credentialGrantId: metadata.credentialGrantId, expectedAuthorityRevision: 1 }), 'operation'));
     report.recovery.successorRevokeCleanup = { cleanupPhase: revoked.cleanupPhase,
       ...(revoked.cleanupPhase === 'cleanup_failed' ? { cleanupErrorCode: revoked.cleanupErrorCode } : {}) };
+    // Synchronous installed commands can defer the original pipe/close events.
+    // Yield for those callbacks only; never retry the completed revoke.
+    await delay(0);
     report.recovery.successorRevokeCleanup.externalService = service.diagnostic();
     assert.equal(revoked.cleanupPhase, 'cleanup_complete');
     const finalStore = observe(); assert.deepEqual(finalStore.items, []);

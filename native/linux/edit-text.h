@@ -3,8 +3,24 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* Binary-safe ASCII runs, including NUL. memcpy avoids alignment and aliasing
+ * assumptions; the high-bit mask has the same meaning on either byte order. */
+static inline size_t cliq_ascii_span(const unsigned char *input, size_t size) {
+    if (!size || input[0] >= 0x80) return 0;
+    size_t offset = 0;
+    while (size - offset >= sizeof(uint64_t)) {
+        uint64_t word;
+        memcpy(&word, input + offset, sizeof(word));
+        if (word & UINT64_C(0x8080808080808080)) break;
+        offset += sizeof(word);
+    }
+    while (offset < size && input[offset] < 0x80) offset++;
+    return offset;
+}
 
 /* Node readFile(..., 'utf8') uses replacement decoding of ill-formed input.
  * A nonempty valid old_text has the same exact-span matches in these UTF-8
@@ -31,6 +47,12 @@ static inline bool cliq_decode_utf8(const unsigned char *input, size_t size, siz
                                    unsigned char **output, size_t *length, size_t *utf16_units) {
     size_t count = 0, units = 0;
     for (size_t offset = 0; offset < size;) {
+        size_t ascii = cliq_ascii_span(input + offset, size - offset);
+        if (ascii) {
+            if (ascii > maximum || count > maximum - ascii) return false;
+            count += ascii; units += ascii; offset += ascii;
+            continue;
+        }
         bool valid; size_t consumed = cliq_utf8_part(input + offset, size - offset, &valid);
         size_t bytes = valid ? consumed : 3;
         if (bytes > maximum || count > maximum - bytes) return false;
@@ -40,6 +62,12 @@ static inline bool cliq_decode_utf8(const unsigned char *input, size_t size, siz
     if (!result) return false;
     size_t written = 0;
     for (size_t offset = 0; offset < size;) {
+        size_t ascii = cliq_ascii_span(input + offset, size - offset);
+        if (ascii) {
+            memcpy(result + written, input + offset, ascii);
+            written += ascii; offset += ascii;
+            continue;
+        }
         bool valid; size_t consumed = cliq_utf8_part(input + offset, size - offset, &valid);
         if (valid) { memcpy(result + written, input + offset, consumed); written += consumed; }
         else { memcpy(result + written, "\xef\xbf\xbd", 3); written += 3; }

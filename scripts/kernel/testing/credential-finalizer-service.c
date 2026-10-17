@@ -36,11 +36,11 @@ struct installed_fixture {
 
 enum diagnostic_stage { ALIAS_DEFAULT, ALIAS_SESSION, CALLER_OTHER, CALLER_ORIGINAL, SEARCH_ABSENT, SEARCH_PRESENT,
   OPEN_SESSION, CREATE_ITEM, ITEM_CREATED, GET_SECRET, SECRET_RETURNED, COLLECTIONS, COLLECTION_LOCKED, COLLECTION_ITEMS,
-  ITEM_ATTRIBUTES, ITEM_LOCKED, ORIGINAL_IDENTITY_REFUSED, METHOD_REFUSED, PROPERTY_REFUSED, FIXTURE_REFUSED };
+  ITEM_ATTRIBUTES, ITEM_LOCKED, ORIGINAL_IDENTITY_REFUSED, METHOD_REFUSED, PROPERTY_REFUSED, DEADLINE_EXPIRED, FIXTURE_REFUSED };
 static void diagnose(struct installed_fixture *fixture, enum diagnostic_stage stage) {
   static const char *const stages[] = {"alias-default", "alias-session", "caller-other", "caller-original", "search-absent", "search-present",
     "open-session", "create-item", "item-created", "get-secret", "secret-returned", "collections", "collection-locked", "collection-items",
-    "item-attributes", "item-locked", "original-identity-refused", "method-refused", "property-refused", "fixture-refused"};
+    "item-attributes", "item-locked", "original-identity-refused", "method-refused", "property-refused", "deadline-expired", "fixture-refused"};
   uint64_t bit = UINT64_C(1) << stage;
   if (!(fixture->diagnosed & bit)) {
     fixture->diagnosed |= bit;
@@ -204,6 +204,9 @@ static gboolean installed_control(gint descriptor, GIOCondition condition, gpoin
   return G_SOURCE_CONTINUE;
 }
 static gboolean installed_interrupted(gpointer data) { installed_fail(data); return G_SOURCE_CONTINUE; }
+static gboolean installed_deadline(gpointer data) {
+  diagnose(data, DEADLINE_EXPIRED); return installed_interrupted(data);
+}
 
 int main(int argc, char **argv) {
   struct installed_fixture fixture = {0}; GError *error = NULL; GDBusNodeInfo *shape = NULL;
@@ -246,7 +249,7 @@ int main(int argc, char **argv) {
   fixture.loop = g_main_loop_new(NULL, FALSE);
   fixture.input = g_unix_fd_add(STDIN_FILENO, G_IO_IN | G_IO_HUP | G_IO_ERR, installed_control, &fixture);
   fixture.interrupted = g_unix_signal_add(SIGTERM, installed_interrupted, &fixture);
-  fixture.deadline = g_timeout_add_seconds(90, installed_interrupted, &fixture);
+  fixture.deadline = g_timeout_add_seconds(90, installed_deadline, &fixture);
   if (!announce("ready\n")) goto failed;
   g_main_loop_run(fixture.loop);
   if (!fixture.finished || fixture.failed) goto failed;

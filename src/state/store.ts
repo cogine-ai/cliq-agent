@@ -704,7 +704,7 @@ function prepareCredentialWrite(held: CredentialBinding, request: CredentialWrit
   if (purpose === 'model_endpoint' && secret.some(byte => byte < 0x21 || byte > 0x7e))
     throw new KernelStorageError('INVALID_REQUEST', 'model credential secret is outside the installed bearer byte range');
   if (purpose === 'model_endpoint' && secret.length > 0 &&
-      ['{', '}', '"', ':', 'application/json'].some(literal => Buffer.from(literal, 'ascii').includes(secret)))
+      ['{', '}', '[', ']', '"', ':', 'application/json'].some(literal => Buffer.from(literal, 'ascii').includes(secret)))
     throw new KernelStorageError('INVALID_REQUEST', 'model credential secret conflicts with the installed protocol');
   const now = sampleCanonicalNow();
   if ([endpoint.createdAt, held.channelIdentity.openedAt, ...(previous ? [previous.createdAt] : []),

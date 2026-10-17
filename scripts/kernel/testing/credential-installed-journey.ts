@@ -721,8 +721,9 @@ async function campaign(filename: string): Promise<void> {
     // These are public, fixed invalid protocol literals, not newly generated
     // credential material. Keep the existing private-key scanner/corpus intact:
     // registering '{' as a private needle would necessarily reject all JSON.
+    const protocolConflicts = ['{', 'application/json', '[', ']'] as const;
     const protocolConflictRefusal = async (input: Record<string, unknown>, caseIndex: number) => {
-      const bytes = Buffer.from(caseIndex === 0 ? '{' : 'application/json', 'ascii');
+      const bytes = Buffer.from(protocolConflicts[caseIndex]!, 'ascii');
       try {
         const response = credential(input, bytes);
         let returnedCommittedOperation = false;
@@ -742,11 +743,11 @@ async function campaign(filename: string): Promise<void> {
       } finally { bytes.fill(0); }
     };
     markPhase('model_protocol_conflict_enroll_refusal');
-    for (const index of [0, 1]) await protocolConflictRefusal({ ...metadata,
+    for (const index of protocolConflicts.keys()) await protocolConflictRefusal({ ...metadata,
       requestId: `019a0012-0000-7000-8000-${String(71 + index).padStart(12, '0')}`,
       credentialGrantId: `credential-journey-protocol-conflict-${index}`,
       secretSubmissionId: `credential-journey-protocol-conflict-submission-${index}` }, index);
-    report.modelProtocolConflictEnrollRefusal = { cases: 2, noActiveRecordOrPreparedOperation: true,
+    report.modelProtocolConflictEnrollRefusal = { cases: protocolConflicts.length, noActiveRecordOrPreparedOperation: true,
       originalRecordItemAndServicesUnchanged: true, nativeBrokerRedemptionQualified: false };
 
     markPhase('orphan_first_prepared_sigkill');
@@ -911,10 +912,10 @@ async function campaign(filename: string): Promise<void> {
     report.modelBearerRotateRefusal = { purposeDerivedFromActiveRecord: true, noPreparedOperation: true,
       originalRevisionGenerationSubjectItemAndServicesUnchanged: true };
     markPhase('model_protocol_conflict_rotate_refusal');
-    for (const index of [0, 1]) await protocolConflictRefusal({ ...rotateMetadata,
-      requestId: `019a0012-0000-7000-8000-${String(73 + index).padStart(12, '0')}`,
+    for (const index of protocolConflicts.keys()) await protocolConflictRefusal({ ...rotateMetadata,
+      requestId: `019a0012-0000-7000-8000-${String(75 + index).padStart(12, '0')}`,
       secretSubmissionId: `credential-journey-protocol-conflict-rotation-${index}` }, index);
-    report.modelProtocolConflictRotateRefusal = { cases: 2, purposeDerivedFromActiveRecord: true,
+    report.modelProtocolConflictRotateRefusal = { cases: protocolConflicts.length, purposeDerivedFromActiveRecord: true,
       noPreparedOperation: true, originalRevisionGenerationSubjectItemAndServicesUnchanged: true,
       nativeBrokerRedemptionQualified: false };
     const rotatedOperation = decodeCredentialAuthorityOperation(success(credential(rotateMetadata, rotatedSecret), 'operation'));

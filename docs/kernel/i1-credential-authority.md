@@ -93,7 +93,8 @@ subject generation, `prepared` or platform creation; do not trim, encode, hash
 or persist the secret. Other purposes still accept opaque bounded bytes.
 The same fixed recipe additionally rejects an original secret that is a
 nonempty byte substring of any one of these separate required protocol
-literals: `{`, `}`, `"`, `:`, or `application/json`. This is a closed,
+literals: `{`, `}`, `[`, `]`, `"`, `:`, or `application/json`. The brackets are
+required by the fixed response's `choices` array. This is a closed,
 deterministic-conflict input contract, not an arbitrary minimum length or a
 general credential-usability heuristic. Do not concatenate those literals,
 normalize or transform the key, or reject a longer key merely because it

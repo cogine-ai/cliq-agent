@@ -2569,7 +2569,7 @@ Enrollment/rotation is request-idempotent and crash ordered. `CredentialAuthorit
 For the fixed installed Linux nonstreaming JSON model recipe, fresh
 `model_endpoint` enroll/rotate accepts only 1..65536 original bytes in
 `0x21..0x7e`, and refuses a secret that is a nonempty byte substring of any one
-of the separate fixed protocol literals `{`, `}`, `"`, `:`, `application/json`.
+of the separate fixed protocol literals `{`, `}`, `[`, `]`, `"`, `:`, `application/json`.
 Check after frozen-intent validation but before subject generation, `prepared`
 or platform creation. This closed deterministic-conflict contract checks the
 original bytes without trimming, normalization, encoding, hashing or secret

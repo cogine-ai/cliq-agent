@@ -471,7 +471,7 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
   // systemd may unload an inactive unreferenced unit and discard its exit
   // history. Hold both actual unit objects on one real user-bus connection
   // until the original stop/show assertions finish; never change the units.
-  const withRetainedUnitHistory = async (units: string[], body: (assertRetained: () => void) => Promise<void>): Promise<void> => {
+  const withRetainedUnitHistory = async (units: readonly [string, string], body: (assertRetained: () => void) => Promise<void>): Promise<void> => {
     assert.equal(units.length, 2);
     const observers: Record<string, unknown>[] = report.unitExitHistoryObservers ??= [];
     assert(observers.length < 8, 'unit-history observations exceed their fixed diagnostic bound');
@@ -1319,7 +1319,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       reconnect(); mark('request_resource_actual_restart_without_redispatch');
       const previous = show(services.supervisorUnit), image = path.join(recipe.stateRoot, 'runtime/bundles', bundleDigest, 'supervisor');
       const keeper = show(services.keeperUnit);
-      await withRetainedUnitHistory([services.supervisorUnit], async () => {
+      await withRetainedUnitHistory([services.supervisorUnit, services.keeperUnit], async () => {
         assert.equal(command('/usr/bin/systemctl', ['--user', 'stop', services.supervisorUnit]).status, 0);
         const stopped = show(services.supervisorUnit); assert.equal(stopped.TimeoutStopUSec, '2s');
         assert.equal(stopped.Result, 'success'); assert.equal(stopped.ExecMainCode, '1'); assert.equal(stopped.ExecMainStatus, '0');
@@ -4029,7 +4029,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       if (installedServices) {
         // A stable retained-byte scan must follow real writer retirement.
         // The outer root cleanup still independently checks all UID resources.
-        const units = [installedServices.supervisorUnit, installedServices.keeperUnit];
+        const units = [installedServices.supervisorUnit, installedServices.keeperUnit] as const;
         const before = units.map(unit => show(unit));
         await withRetainedUnitHistory(units, async () => {
           assert.equal(command('/usr/bin/systemctl', ['--user', 'stop', ...units]).status, 0);

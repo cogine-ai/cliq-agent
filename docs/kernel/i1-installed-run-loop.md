@@ -386,6 +386,12 @@ may observe progress after the five-second poll; it does not prove where time
 was spent, grant more time, change an outcome or supply retirement evidence.
 Absent or unreadable stage data retains the original 4002 refusal. These tagged
 diagnostics must be removed after genuine root-cause GREEN, not on a hypothesis.
+The decoder now counts and copies binary-safe ASCII spans in bulk while keeping
+the original replacement decoding, UTF-16 counts and exact output bound for
+mixed or invalid UTF-8. The portable text contract includes word boundaries,
+embedded NUL and the unchanged 64 MiB received-tool size. This optimization is
+not evidence that the original five-second Linux timeout is resolved; that
+still requires the matching complete installed report.
 Stopped worker recovery retains the exact wait/nonce/anchor until its unique
 atomic terminal transaction; it never exposes a transient queued replacement.
 The real worker campaign exercises these branches separately from
@@ -450,9 +456,21 @@ its own disposable UID so the original full campaign and its 4096-stream/512 MiB
 scan limits remain unchanged. It is not qualified before its complete matching
 Linux report passes. Independent observation of the original retired worker is
 explicitly unqualified; clearing the public worker pointer is not that evidence.
+Its restart observation retains both original unit histories, while stopping
+only Supervisor. The original two-unit runtime assertion remains in force.
 The 30-second native deadline bounds operation eligibility and cancellation,
 not hard real-time disappearance under arbitrary OS scheduling. Completion
 and retirement receipts still require the actual worker and callback joins.
+
+The finalizer fixture starts its one original external Secret Service after
+manager/owner/endpoint metadata setup, before real enrollment. The same service
+identity must survive enrollment, ordinary stop, successor cleanup, retry and
+revoke; it is never replaced to finish the campaign. Its 90-second deadline,
+60-second enrollment budget and two-second unit stop are unchanged. Bounded
+parent-spawn age and a fixed deadline-expired marker distinguish observations
+from a guessed service lifetime; yielding pending pipe callbacks does not retry
+the failed operation. Only the full matching Linux report can qualify this
+changed fixture lifetime, not the diagnostic or prior successful heads.
 
 ## Evidence
 
