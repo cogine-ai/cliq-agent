@@ -718,6 +718,37 @@ async function campaign(filename: string): Promise<void> {
     report.modelBearerInputRefusal = { invalidEnrollCases: 6, noActiveRecordOrPreparedOperation: true,
       originalRecordItemAndServicesUnchanged: true, acceptedBoundaryBytesRoundtripped: true };
 
+    // These are public, fixed invalid protocol literals, not newly generated
+    // credential material. Keep the existing private-key scanner/corpus intact:
+    // registering '{' as a private needle would necessarily reject all JSON.
+    const protocolConflictRefusal = async (input: Record<string, unknown>, caseIndex: number) => {
+      const bytes = Buffer.from(caseIndex === 0 ? '{' : 'application/json', 'ascii');
+      try {
+        const response = credential(input, bytes);
+        let returnedCommittedOperation = false;
+        if (response.status === 0) try {
+          const observed = decodeCredentialAuthorityOperation(success(response, 'operation'));
+          returnedCommittedOperation = observed.phase === 'committed' && observed.requestId === input.requestId &&
+            observed.credentialGrantId === input.credentialGrantId && observed.kind === input.kind;
+        } catch { /* Retain only fixed diagnostic facts, never arbitrary returned bytes. */ }
+        report.modelProtocolConflictAttempt = { caseIndex, kind: input.kind,
+          commandExitStatus: response.status, returnedCommittedOperation };
+        exactRefusal(response, 'INVALID_REQUEST', 'model credential secret conflicts with the installed protocol');
+        if (input.kind === 'enroll')
+          assert.equal(success(credential({ schemaVersion: 1, kind: 'read', credentialGrantId: input.credentialGrantId }), 'record'), null);
+        exactRefusal(credential({ schemaVersion: 1, kind: 'cleanup', requestId: input.requestId }),
+          'NOT_FOUND', 'credential cleanup request has no retained operation');
+        await originalCredentialUnchanged();
+      } finally { bytes.fill(0); }
+    };
+    markPhase('model_protocol_conflict_enroll_refusal');
+    for (const index of [0, 1]) await protocolConflictRefusal({ ...metadata,
+      requestId: `019a0012-0000-7000-8000-${String(71 + index).padStart(12, '0')}`,
+      credentialGrantId: `credential-journey-protocol-conflict-${index}`,
+      secretSubmissionId: `credential-journey-protocol-conflict-submission-${index}` }, index);
+    report.modelProtocolConflictEnrollRefusal = { cases: 2, noActiveRecordOrPreparedOperation: true,
+      originalRecordItemAndServicesUnchanged: true, nativeBrokerRedemptionQualified: false };
+
     markPhase('orphan_first_prepared_sigkill');
     const orphanMetadata = { schemaVersion: 1, kind: 'enroll', requestId: '019a0012-0000-7000-8000-000000000027',
       credentialGrantId: 'credential-journey-orphan-grant', purpose: 'model_endpoint',
@@ -879,6 +910,13 @@ async function campaign(filename: string): Promise<void> {
     await originalCredentialUnchanged();
     report.modelBearerRotateRefusal = { purposeDerivedFromActiveRecord: true, noPreparedOperation: true,
       originalRevisionGenerationSubjectItemAndServicesUnchanged: true };
+    markPhase('model_protocol_conflict_rotate_refusal');
+    for (const index of [0, 1]) await protocolConflictRefusal({ ...rotateMetadata,
+      requestId: `019a0012-0000-7000-8000-${String(73 + index).padStart(12, '0')}`,
+      secretSubmissionId: `credential-journey-protocol-conflict-rotation-${index}` }, index);
+    report.modelProtocolConflictRotateRefusal = { cases: 2, purposeDerivedFromActiveRecord: true,
+      noPreparedOperation: true, originalRevisionGenerationSubjectItemAndServicesUnchanged: true,
+      nativeBrokerRedemptionQualified: false };
     const rotatedOperation = decodeCredentialAuthorityOperation(success(credential(rotateMetadata, rotatedSecret), 'operation'));
     assert.equal(rotatedOperation.phase, 'committed'); assert.equal(rotatedOperation.kind, 'rotate'); assert.equal(rotatedOperation.attempt, 1);
     assert.equal(rotatedOperation.requestId, rotateMetadata.requestId); assert.equal(rotatedOperation.credentialGrantId, metadata.credentialGrantId);

@@ -357,6 +357,16 @@ old unpaired generations are not retroactively granted fictional birth history.
 Installed cancellation now revokes the original tool controller and retains its
 join. An authentic already-received result is retained; otherwise the original
 unknown/full charge precedes genuine private rollback, with no refund or retry.
+This result preservation currently covers the uninterrupted completion path,
+not a failed post-result publication or settlement. That remaining defect must
+retain the original result and physical owner across recoverable durability
+failure, including already committed revocation/checkpointing stages. Retrying
+the effect, converting its known result to unknown, rebuilding a prepared
+completion to reset its three final-death observations, or treating failed CAS
+temporary cleanup as recoverable publication are not acceptable substitutes.
+The existing exhausted-freshness recovery assertions remain unchanged. A real
+native/CAS-boundary regression is being prepared; neither a proposed owner nor
+the normal received-tool SIGTERM campaign qualifies this failure-recovery cut.
 Stopped worker recovery retains the exact wait/nonce/anchor until its unique
 atomic terminal transaction; it never exposes a transient queued replacement.
 The new 28-scenario worker campaign exercises these branches separately from

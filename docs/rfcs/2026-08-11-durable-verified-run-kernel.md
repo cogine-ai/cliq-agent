@@ -2566,6 +2566,23 @@ The internal authority API has one lock-aware form, `withCredentialAuthorityLock
 
 Enrollment/rotation is request-idempotent and crash ordered. `CredentialAuthorityCommandCoreV1` is the complete persisted secret-free command: its inline external subject rehashes to `externalSubjectDigest`; `credentialTargetDigest = SHA-256(JCS({credentialGrantId,ownerPrincipalId,purpose,endpointRegistrationRef,endpointIdentityDigest,tlsPolicyDigest,expiresAt,externalSubjectDigest}))`; `commandDigest = SHA-256(JCS(commandCore with commandDigest omitted))`; and `requestDigest = commandDigest`. Operation owner/kind/grant/target/subject fields must repeat the core, and `intendedAuthorityRevision`/`intendedSecretGeneration` are exactly one greater than the latest row for rotation or both one for enrollment. Every enroll/rotate/revoke operation also retains the first-commit authenticated `channelIdentityRef/channelIdentityDigest`, closed-decodes it for the same owner, and keeps it outside the command/request digest so later-channel replay cannot rewrite provenance or create a false request conflict. Raw secret bytes are deliberately excluded and never hashed/persisted. `operationId = H(ownerPrincipalId,requestId,requestDigest,attempt)`, attempts are contiguous `1..3`, and at most one nonterminal attempt exists. Under the lock, append `prepared` with the already-frozen command/subject; write a fresh logical-identity-bound platform item; read it back through the same-user store and compare in memory; run the fixed read-only provider subject/scopes validator or bind the successful opaque roundtrip to that frozen subject; require equality with the command; append `secret_stored`; then the narrow Supervisor finalizer atomically appends the active authority revision and `committed` operation after the sole canonical-time prefix. Only after commit may rotation delete the superseded item. `operationDigest` omits itself, request-id+different-digest conflict is permanent, and a committed replay returns the same grant/revision **without reading, comparing, or storing newly submitted secret bytes**. Changing a committed secret requires a new request/secret-submission id and `rotate`.
 
+For the fixed installed Linux nonstreaming JSON model recipe, fresh
+`model_endpoint` enroll/rotate accepts only 1..65536 original bytes in
+`0x21..0x7e`, and refuses a secret that is a nonempty byte substring of any one
+of the separate fixed protocol literals `{`, `}`, `"`, `:`, `application/json`.
+Check after frozen-intent validation but before subject generation, `prepared`
+or platform creation. This closed deterministic-conflict contract checks the
+original bytes without trimming, normalization, encoding, hashing or secret
+commitment; it adds no arbitrary minimum length and does not reject a longer
+key merely for containing a literal. The native broker repeats the same check
+on its actual redeemed bytes before preparation readiness and permanent claim.
+Other credential purposes retain their opaque-byte contract. Committed replay
+still precedes reading new input. No-echo filtering, including its encoded and
+decoded projections, remains unchanged. Passing these finite checks is neither
+provider credential/capability/billing validation nor a guarantee against every
+future response collision. A later ambiguous released request retains the
+existing full charge and no-retry rules.
+
 Credential revocation has no enrollment/rotation attempt: its `operationId = H(ownerPrincipalId,requestId,requestDigest)`. Cleanup transitions retain that same operation identity; retrying an indeterminate deletion never creates a new attempt or restores authority.
 
 Opaque subject production freezes the complete 256-bit candidate and its

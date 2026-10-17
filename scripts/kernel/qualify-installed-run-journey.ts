@@ -501,6 +501,7 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
   let busySubmit: (Record<string, unknown> & { admissionKey: string }) | undefined;
   let busyFinalize: CredentialFinalizeRequest | undefined;
   let storageClient: Awaited<ReturnType<typeof persistentClient>> | undefined;
+  let maintenanceObserverClient: Awaited<ReturnType<typeof persistentClient>> | undefined;
   let queuedObserverClient: Awaited<ReturnType<typeof persistentClient>> | undefined;
   let shutdownClient: Awaited<ReturnType<typeof persistentClient>> | undefined;
   let restoreCasWrite: (() => Promise<void>) | undefined;
@@ -2978,14 +2979,23 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
     report.candidateLeaseMaintenance = { diagnosticOnly: true, leaseRenewalQualified: false, before: leaseBefore };
     const idleStarted = performance.now(), originalCandidateCut = cut;
     let idleObservations = 0;
+    maintenanceObserverClient = await persistentClient();
     do {
       await delay(1000); assert(!providerFailure, 'candidate maintenance cannot redispatch an owned provider effect');
-      // Both read-only frames share this round's fresh authenticated client;
-      // their per-connection identity is published once, not once per query.
-      const [maintenanceRun, maintenanceSupervisor] = exchange([
-        { protocolVersion: 1, method: 'run.get', runId: admitted.id },
-        { protocolVersion: 1, method: 'supervisor.status' },
-      ]);
+      // This observation window tests the same live worker, not a new client
+      // identity each second. Keep every read/assertion while reusing one real
+      // authenticated connection; explicit reconnect/replay cuts stay below.
+      const roundDeadline = performance.now() + 30000;
+      const remainingRound = () => {
+        const remaining = Math.ceil(roundDeadline - performance.now());
+        assert(remaining > 0, 'candidate maintenance read round exceeded its original request budget');
+        return remaining;
+      };
+      const maintenanceRun = await maintenanceObserverClient.send(
+        { protocolVersion: 1, method: 'run.get', runId: admitted.id }, remainingRound());
+      const maintenanceSupervisor = await maintenanceObserverClient.send(
+        { protocolVersion: 1, method: 'supervisor.status' }, remainingRound());
+      remainingRound();
       cut = accepted(maintenanceRun!, 'run.get');
       report.lastPublicCut = projectInstalledRunProgress(cut, { requestsReceived, providerFailure });
       idleObservations++;
@@ -3004,6 +3014,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       assert.equal(maintenanceStatus.health, 'ready'); assert.equal(maintenanceStatus.queue.capacity, 1);
       assert.equal(maintenanceStatus.queue.runningRuns, 1); assert.equal(maintenanceStatus.incompatiblePinnedRunCount, 0);
     } while (performance.now() - idleStarted < 65000);
+    await maintenanceObserverClient.close(); maintenanceObserverClient = undefined;
     const leaseAfter = inspectInstalledWorkerLease(recipe.stateRoot, leaseExpected);
     report.candidateLeaseMaintenance.after = leaseAfter;
     assertInstalledWorkerLeaseRenewed(leaseBefore, leaseAfter, leaseExpected.deadlineAt);
@@ -3669,6 +3680,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       }
     } catch (error) { cleanupFailures.push(error); }
     try { await storageClient?.close(); } catch (error) { cleanupFailures.push(error); }
+    try { await maintenanceObserverClient?.close(); } catch (error) { cleanupFailures.push(error); }
     try { await queuedObserverClient?.close(); } catch (error) { cleanupFailures.push(error); }
     try { await shutdownClient?.close(); } catch (error) { cleanupFailures.push(error); }
     try {
