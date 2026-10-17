@@ -10,6 +10,7 @@ import type { InvocationJournalEntry, WorkerDeathWait, WorkerIdentity } from '..
 import { readTimeFence, sampleCanonicalNow } from './canonical-time.js';
 import { openSqliteDriver, type SqliteDriver } from './sqlite-driver.js';
 import { openStateStore, publishInProcessChannel } from './store.js';
+import { openWorkerInvocations } from './worker-recovery.js';
 import { createAgentFixture } from './testing/agent-fixtures.js';
 import { activateFixtureWorker, digest, disposeFixture, makePrivateDir, uuidv7, type ActiveFixture } from './testing/fixtures.js';
 import { childFor } from './testing/state-owner-process.js';
@@ -467,6 +468,55 @@ test('missing wait or invocation witnesses block recovery without changing retai
   }
   await fixture.store.readRecoveryClosure(fixture.runId);
 });
+
+test('openWorkerInvocations retains only prepared rows whose latest phase is still productive', () => {
+  const entry = (opId: string, attempt: number, phase: InvocationJournalEntry['phase'], seq: number): InvocationJournalEntry => ({
+    runId: 'run-1', seq, opId, attempt, opKind: 'tool', phase, leaseEpoch: 1, timestamp: '2026-01-01T00:00:00.000Z',
+    target: 'test.read', requestRef: digest(opId), replayClass: 'manual', budgetDelta: ZERO,
+    idempotencyKey: `${opId}:${attempt}`, supervisorInstanceId: 'supervisor', stateOwnerEpoch: 1
+  });
+  const open = entry('open', 0, 'prepared', 1);
+  const claimed = { ...entry('claimed', 0, 'dispatch_claimed', 2), dispatchId: 'dispatch', brokerFenceTokenDigest: digest('fence') };
+  const unknownPrepared = entry('unknown', 0, 'prepared', 3);
+  const unknown = { ...claimed, opId: 'unknown', seq: 4, attempt: 0, phase: 'unknown' as const,
+    evidenceRef: digest('evidence'), evidenceDigest: digest('evidence'), budgetSettlementRef: digest('settlement') };
+  const completedPrepared = entry('done', 0, 'prepared', 5);
+  const completed = { ...claimed, opId: 'done', seq: 6, attempt: 0, phase: 'completed' as const,
+    resultRef: digest('result'), budgetSettlementRef: digest('settlement') };
+  const journal = [open, claimed, unknownPrepared, unknown, completedPrepared, completed];
+  assert.deepEqual(openWorkerInvocations(journal), [open, unknownPrepared]);
+  assert.deepEqual(openWorkerInvocations(journal.slice(0, 4)), [open, unknownPrepared]);
+});
+
+for (const phase of ['prepared', 'dispatch_claimed'] as const) {
+  test(`recovery rejects a productive ${phase} Journal suffix after the fence cut`, async t => {
+    const fixture = await fixtureFor(t, `productive-suffix-${phase}`);
+    const prepared = await prepare(fixture, 'fenced');
+    await prepare(fixture, 'claimed', true);
+    await begin(fixture);
+    const cut = await fixture.store.readRecoveryClosure(fixture.runId);
+    assert.equal(cut.workspaceGenerations[0]!.fencedJournalSeq, cut.journal.length);
+    const seq = cut.journal.length + 1;
+    const suffixEntries = phase === 'prepared'
+      ? [{ ...structuredClone(prepared), seq, opId: 'suffix-prepared', attempt: 0 }]
+      : (() => {
+        const opId = 'suffix-claimed';
+        const template = cut.journal.find(entry => entry.phase === 'dispatch_claimed')!;
+        return [{ ...structuredClone(prepared), seq, opId, attempt: 0 },
+          { ...structuredClone(template), runId: fixture.runId, seq: seq + 1, opId, attempt: 0,
+            phase: 'dispatch_claimed' as const, dispatchId: `${opId}-dispatch` }];
+      })();
+    withDb(fixture.stateRoot, driver => {
+      for (const entry of suffixEntries) {
+        driver.prepare(`INSERT INTO run_journal (run_id, seq, op_id, op_kind, attempt, phase, entry_json)
+          VALUES (?, ?, ?, ?, ?, ?, ?)`).run(fixture.runId, entry.seq, entry.opId, entry.opKind, BigInt(entry.attempt), entry.phase, JSON.stringify(entry));
+      }
+    });
+    const afterInsert = snapshot(fixture.stateRoot);
+    await assert.rejects(fixture.store.readRecoveryClosure(fixture.runId), { code: 'RECOVERY_REQUIRED' });
+    assert.deepEqual(snapshot(fixture.stateRoot), afterInsert);
+  });
+}
 
 test('the fence Journal cutoff is immutable, required and rejects invalid or productive suffix cuts', async t => {
   const fixture = await fixtureFor(t, 'journal-cut');
