@@ -380,7 +380,7 @@ implementation changes nor the normal received-tool SIGTERM campaign qualifies
 the post-result failure-recovery cut.
 Stopped worker recovery retains the exact wait/nonce/anchor until its unique
 atomic terminal transaction; it never exposes a transient queued replacement.
-The new 28-scenario worker campaign exercises these branches separately from
+The real worker campaign exercises these branches separately from
 the installed journey. They are implementation candidates, not qualified merely
 by adding tests; accepted StopIntent is not physical retirement evidence.
 The queued launcher-image allocation guard is implemented. The approved read-only
@@ -428,6 +428,20 @@ restart and public cancellation close the historical ambiguity. This tests the
 common retained failed-producer owner, not storage failure while a never-CONNECT
 mutex guard is held; that distinct cut remains unverified. Neither the fixture
 nor this document is qualification without its complete exact-source report.
+The fixed model recipe now admits a normal request only when both its frozen
+token threshold and its actual provider-native serialized body fit. Compaction
+keeps complete, protected-prefix selection and additionally checks the complete
+escaped compaction envelope against the same 1 MiB bound. No safe candidate
+means a reproducible resource StopIntent and the original proof-backed terminal
+drain, never truncation, a larger cap, another claim or reduced signed billing.
+The separate installed request-resource campaign uses one actual signed package,
+three public Runs and six owned HTTPS POSTs to check whole-prefix compaction,
+byte-only exhaustion below the token threshold, queued successor dispatch,
+terminal history, reconnect and Supervisor restart without redispatch. It uses
+its own disposable UID so the original full campaign and its 4096-stream/512 MiB
+scan limits remain unchanged. It is not qualified before its complete matching
+Linux report passes. Independent observation of the original retired worker is
+explicitly unqualified; clearing the public worker pointer is not that evidence.
 The 30-second native deadline bounds operation eligibility and cancellation,
 not hard real-time disappearance under arbitrary OS scheduling. Completion
 and retirement receipts still require the actual worker and callback joins.
