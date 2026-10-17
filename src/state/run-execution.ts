@@ -859,12 +859,18 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
     recoverWorker: async value => {
       const expectedRunRevision = revision(value);
       let registered: WorkerRecoveryTask | undefined;
+      const sameInspectionStopCut = (previous: Run, current: Run): boolean => {
+        if (canonicalSha256(previous) === canonicalSha256(current)) return true;
+        const stable = ({ revision: _revision, updatedAt: _time, stopIntentRef: _intent, cancelRequested: _cancel, ...data }: Run) => data;
+        return current.revision > previous.revision && current.updatedAt >= previous.updatedAt &&
+          !!current.stopIntentRef && (!previous.cancelRequested || current.cancelRequested) &&
+          canonicalSha256(stable(current)) === canonicalSha256(stable(previous));
+      };
       const inspect = async (run: Run, wait: WorkerDeathWait, signal: AbortSignal): Promise<Run> => {
         signal.throwIfAborted();
         const cut = await readRecoveryClosure(driver, artifacts, runId);
         signal.throwIfAborted();
-        if (cut.run.waitingOnRef !== run.waitingOnRef ||
-            cut.run.revision !== run.revision && (!cut.run.stopIntentRef || cut.run.revision < run.revision)) {
+        if (!sameInspectionStopCut(run, cut.run)) {
           throw new KernelStorageError('REVISION_CONFLICT', 'worker inspection dispatch cut changed');
         }
         const launch = cut.workerLaunches.find(row => row.launchId === wait.subject.oldWorkerLaunchId)!;
@@ -880,7 +886,9 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         assertNativeContainmentDeath(death);
         signal.throwIfAborted();
         const handoff = cut.run.nextStep === 'agent' ? await agent.readModelAttempt() : undefined;
-        if (handoff) requireEqual(handoff.run, cut.run, 'worker recovery model handoff cut');
+        if (handoff && !sameInspectionStopCut(cut.run, handoff.run)) {
+          throw new KernelStorageError('REVISION_CONFLICT', 'worker recovery model handoff cut changed');
+        }
         const unknownHandoff = handoff?.state.phase === 'unknown' && hasOnlySettledInstalledModelUnknowns(
           decodeRetainedRunAssembly(await artifacts.readCanonical(cut.runSpec.assemblyRef)), cut.journal);
         const replacement = cut.workspaceGenerations.filter(row => row.phase === 'preactivated_readonly' || row.phase === 'materializing');
@@ -897,16 +905,25 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         // Historical replacements remain explicit retained resources, not a
         // reason to invent a second birth or silently discard the first one.
         const current = await readRecoveryClosure(driver, artifacts, runId);
-        if (current.run.waitingOnRef !== cut.run.waitingOnRef ||
+        if (!sameInspectionStopCut(cut.run, current.run) ||
             canonicalSha256(current.journal) !== canonicalSha256(cut.journal) ||
-            current.run.revision !== cut.run.revision && (!current.run.stopIntentRef || current.run.revision < cut.run.revision)) {
+            canonicalSha256(current.workerLaunches) !== canonicalSha256(cut.workerLaunches) ||
+            canonicalSha256(current.workspaceGenerations) !== canonicalSha256(cut.workspaceGenerations)) {
           throw new KernelStorageError('REVISION_CONFLICT', 'worker recovery original subject changed during physical inspection');
         }
         // Retain the original zero-release owner even when stop wins later
         // during the descriptor walk; it grants no productive authority.
         const brokerQuiescence = observeInstalledBrokerQuiescence(executionStore!, runId);
+        // Artifact validation awaited after the closure's SQL snapshot. A stop
+        // may have advanced only its authority-reducing fields meanwhile.
+        // Enter completion synchronously at that exact current revision; its
+        // fresh SQL snapshot and all original probe/native checks remain strict.
+        const completionRun = readRun(driver, runId);
+        if (!sameInspectionStopCut(current.run, completionRun)) {
+          throw new KernelStorageError('REVISION_CONFLICT', 'worker recovery completion subject changed before entry');
+        }
         const recovered = await completeWorkerRecoveryProbe(driver, artifacts, owner,
-          { runId, expectedRunRevision: current.run.revision }, death, signal, brokerQuiescence,
+          { runId, expectedRunRevision: completionRun.revision }, death, signal, brokerQuiescence,
           { retire: () => controller!.closeRetained(), finish: async plan =>
             (await agent.commitTerminalStop({ expectedRunRevision: readRun(driver, runId).revision }, plan)).run });
         signal.throwIfAborted();

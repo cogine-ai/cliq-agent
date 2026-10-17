@@ -2358,7 +2358,7 @@ function frozenArtifact<T>(stateRoot: string, ref: string): T {
   } finally { fs.closeSync(fd); }
 }
 
-async function parentLossBeforeRelease(retireAfterStop = false, cancelDuringProbe = false) {
+async function parentLossBeforeRelease(retireAfterStop = false, cancelDuringProbe = false, firstCancelDuringProbe = false) {
   const fixture = await createLinuxWorkerCampaignFixture({ ...options, label: retireAfterStop ? 'parent-loss-stop' : 'parent-loss',
     ...(cancelDuringProbe ? { paddingBytes: 8 * 1024 ** 2 } : {}) });
   const before = await fixture.store.readRecoveryClosure(fixture.runId);
@@ -2487,11 +2487,18 @@ async function parentLossBeforeRelease(retireAfterStop = false, cancelDuringProb
       const agent = await fixture.store.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material,
         releaseKeys: fixture.runtimeAuthority.releaseKeys });
       const sessionBefore = fixture.store.getSession(fixture.sessionId);
-      const cancelled = await agent.cancelRun({ ...await publishInProcessChannel(fixture.store), requestId: uuidv7(),
-        expectedRunRevision: replay.run.revision });
-      assert.equal(cancelled.run.waitingOnRef, failed.run.waitingOnRef, 'cancel must retain the exact original worker subject');
-      await execution.requestStop();
-      const recovery = execution.recoverWorker({ expectedRunRevision: cancelled.run.revision });
+      let recoveryRevision = replay.run.revision;
+      if (firstCancelDuringProbe) {
+        assert.equal(replay.run.cancelRequested, false);
+        assert.equal(replay.run.stopIntentRef, undefined, 'the first-cancel case must start recovery without an earlier stop');
+      } else {
+        const cancelled = await agent.cancelRun({ ...await publishInProcessChannel(fixture.store), requestId: uuidv7(),
+          expectedRunRevision: replay.run.revision });
+        assert.equal(cancelled.run.waitingOnRef, failed.run.waitingOnRef, 'cancel must retain the exact original worker subject');
+        await execution.requestStop();
+        recoveryRevision = cancelled.run.revision;
+      }
+      const recovery = execution.recoverWorker({ expectedRunRevision: recoveryRevision });
       let recoveryFinished = false, observedProbeNonce: string | undefined;
       void recovery.then(() => { recoveryFinished = true; }, () => { recoveryFinished = true; });
       if (cancelDuringProbe) {
@@ -2508,11 +2515,20 @@ async function parentLossBeforeRelease(retireAfterStop = false, cancelDuringProb
         assert(dispatched && dispatched.wait.probeState.phase === 'automatic_in_flight',
           'the real inspector must own its durable nonce before this cancellation');
         observedProbeNonce = dispatched.wait.probeState.dispatch.probeNonceDigest;
+        if (firstCancelDuringProbe) {
+          assert.equal(dispatched.run.cancelRequested, false);
+          assert.equal(dispatched.run.stopIntentRef, undefined,
+            'the first public cancellation must follow the original unstopped inspection dispatch');
+        }
         const during = await agent.cancelRun({ ...await publishInProcessChannel(fixture.store), requestId: uuidv7(),
           expectedRunRevision: dispatched.run.revision });
         assert.equal(recoveryFinished, false, 'cancellation must commit while the original actual inspector is still running');
         assert.equal(during.run.waitingOnRef, dispatched.run.waitingOnRef, 'stop must preserve the exact in-flight wait and nonce');
         assert.deepEqual(frozenArtifact<WorkerDeathWait>(fixture.stateRoot, during.run.waitingOnRef!).subject, dispatched.wait.subject);
+        if (firstCancelDuringProbe) {
+          assert.equal(during.run.cancelRequested, true); assert.ok(during.run.stopIntentRef);
+          await execution.requestStop();
+        }
       }
       const terminal = await bounded(recovery);
       assert.equal(terminal.status, 'cancelled'); assert.equal(terminal.terminalReason, 'cancelled_by_user');
@@ -2539,9 +2555,11 @@ async function parentLossBeforeRelease(retireAfterStop = false, cancelDuringProb
         assert.deepEqual(await successor.readRecoveryClosure(fixture.runId), closed);
         assert.deepEqual(successor.getSession(fixture.sessionId), session);
       } finally { await successor.close(); }
-      console.log(JSON.stringify({ scenario: cancelDuringProbe ? 'actual-worker-recovery-inflight-stop' : 'actual-private-tool-stop-recovery-retirement', waitingSubjectRef: failed.run.waitingOnRef,
+      console.log(JSON.stringify({ scenario: firstCancelDuringProbe ? 'actual-worker-recovery-first-inflight-cancel'
+        : cancelDuringProbe ? 'actual-worker-recovery-inflight-stop' : 'actual-private-tool-stop-recovery-retirement', waitingSubjectRef: failed.run.waitingOnRef,
         generationRef, originalDispatchId: claim.dispatchId, originalUnknownSettlementRef: unknown.budgetSettlementRef,
         ...(observedProbeNonce ? { observedProbeNonce, cancellationCommittedDuringOriginalProbe: true } : {}),
+        ...(firstCancelDuringProbe ? { firstCancellationAfterOriginalProbeDispatch: true, noEarlierStopIntent: true } : {}),
         permanentToolClaims: 1, nativeEffectCount: 0, toolCharges: 1, terminalSessionPublications: 1,
         note: 'real parent loss before release; actual joined death/quarantine/rollback and terminal restart; not an in-flight write cut' }));
       return;
@@ -3148,7 +3166,8 @@ for (const [scenario, run] of [
   ['close-during-factory-open', closeDuringFactoryOpen],
   ['interrupted-controller-close', interruptedControllerClose],
   ['pre-probe-retirement-failure', () => retirementFailureKeepsOwner('pre_probe')],
-  ['timeout-retirement-failure', () => retirementFailureKeepsOwner('timeout_closure')]
+  ['timeout-retirement-failure', () => retirementFailureKeepsOwner('timeout_closure')],
+  ['worker-recovery-first-inflight-cancel', () => parentLossBeforeRelease(true, true, true)]
 ] as const) {
   console.log(JSON.stringify({ scenario, phase: 'start' }));
   try { await run(); }
