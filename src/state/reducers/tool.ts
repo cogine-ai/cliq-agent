@@ -307,7 +307,7 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
     return { input: original, get established() { return established; }, async complete(expectedRunRevision: number) {
       if (failure && !isJoinedCasPublicationFailure(failure.error) && !isRolledBackSqliteTransactionFailure(driver, failure.error) &&
           !settlement?.hasRevisionConflict(failure.error, expectedRunRevision) &&
-          !(stopConflict !== undefined && stopConflict.error === failure.error && stopConflict.revision === expectedRunRevision)) throw failure.error;
+          !(stopConflict !== undefined && stopConflict.error === failure.error && expectedRunRevision >= stopConflict.revision)) throw failure.error;
       const retryCommit = failure !== undefined && isRolledBackSqliteTransactionFailure(driver, failure.error);
       try {
         if (!selection) {

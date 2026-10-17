@@ -534,10 +534,13 @@ export function prepareValidatedInvocationSettlement(
   return { settle(expectedRunRevision: number) {
     return settleInitialInvocation(driver, artifacts, owner, { ...input, expectedRunRevision }, terminal, continuation, retained);
   }, hasRevisionConflict(error: unknown, expectedRunRevision: number) {
-    return retained.rebind?.error === error && retained.rebind?.revision === expectedRunRevision;
+    const permit = retained.rebind;
+    return permit !== undefined && permit.error === error && expectedRunRevision >= permit.revision;
   }, acceptRevisionConflict(error: unknown, expectedRunRevision: number) {
     const permit = retained.rebind;
-    if (!permit || permit.error !== error || permit.revision !== expectedRunRevision) return false;
+    if (!permit || permit.error !== error || expectedRunRevision < permit.revision) return false;
+    // A later public stop may advance revision again. Only the owning
+    // reducer's exact asynchronously checked current cut can accept it.
     const current = readRun(driver, input.runId);
     if (current.revision !== expectedRunRevision) return false;
     retained.validateSnapshot(driver, current);

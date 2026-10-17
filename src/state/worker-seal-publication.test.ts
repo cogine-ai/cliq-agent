@@ -138,12 +138,18 @@ test('a cancellation during settlement publication preserves the winning cut wit
     assert.deepEqual(after.items, before.items);
     assert.deepEqual(after.workerLaunches, before.workerLaunches);
     assert.deepEqual(after.workspaceGenerations, before.workspaceGenerations);
+    clock += 1_000;
+    const repeated = await fixture.agent.cancelRun({ ...identity, requestId: uuidv7(), expectedRunRevision: after.run.revision });
+    assert.deepEqual(repeated.run, { ...after.run, revision: after.run.revision + 1, updatedAt: new Date(clock).toISOString() });
+    assert.equal(repeated.run.stopIntentRef, winning.run.stopIntentRef, 'a fresh cancellation retains the original winning intent');
+    const repeatedCut = await fixture.store.readRecoveryClosure(fixture.runId);
+    assert.deepEqual(repeatedCut, { ...after, run: repeated.run });
     const resumed = await fixture.agent.completeTool({ opId: prepared.entry.opId, attempt: prepared.entry.attempt,
-      expectedRunRevision: after.run.revision, observationRef: proof.observationRef });
+      expectedRunRevision: repeated.run.revision, observationRef: proof.observationRef });
     assert.deepEqual(resumed.settlement, settlements[0], 'explicit StopIntent-only rebinding retains the original settlement bytes and timestamp');
     const settled = await fixture.store.readRecoveryClosure(fixture.runId);
     assert.equal(settled.run.stopIntentRef, winning.run.stopIntentRef); assert.equal(settled.run.cancelRequested, true);
-    assert.equal(settled.run.revision, winning.run.revision + 1);
+    assert.equal(settled.run.revision, repeated.run.revision + 1);
     assert.equal(settled.run.budgetConsumed.toolCalls, 1); assert.equal(settled.run.budgetReserved.toolCalls, 0);
     assert.deepEqual(settled.journal.filter(entry => entry.opId === prepared.entry.opId).map(entry => entry.phase),
       ['prepared', 'dispatch_claimed', 'completed']);
