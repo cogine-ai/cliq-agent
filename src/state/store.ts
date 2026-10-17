@@ -1639,7 +1639,9 @@ export class StateStore {
   async submitInstalledRun(request: unknown, identity: AuthenticatedControlIdentity) {
     if (!this.supportsInstalledRuns() || !this.installedRuntime || !this.runtimeAuthority?.sourceInspection)
       throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'installed Run composition is not ready');
-    request = immutableSnapshot(request); identity = immutableSnapshot(identity);
+    request = immutableSnapshot(request);
+    // The native frame already freezes this identity and authenticates its
+    // exact object. Snapshot caller data, never clone that current authority.
     const abort = new AbortController();
     // Own the complete handler before its first asynchronous action, not only
     // its source leaf. Instruction assembly and final admission also use SQL
