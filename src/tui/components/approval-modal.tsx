@@ -2,6 +2,11 @@ import { Box, Text, useInput, type Key } from 'ink';
 import { useEffect, useRef, useState } from 'react';
 
 import type { ApprovalSubject, PolicyMode } from '../../policy/types.js';
+import {
+  semanticStyle,
+  semanticTextProps,
+  type SemanticTone
+} from '../semantic-styles.js';
 import type { UiApprovalDecision } from '../store.js';
 
 export type ApprovalModalProps = {
@@ -13,6 +18,8 @@ export type ApprovalModalProps = {
 
 export function ApprovalModal({ subject, policy, activationKey, onDecide }: ApprovalModalProps) {
   const isTool = subject.kind === 'tool';
+  const tone = approvalTone(subject);
+  const style = semanticStyle(tone);
   const isActiveRef = useRef(false);
   const [isActive, setIsActive] = useState(false);
 
@@ -71,10 +78,11 @@ export function ApprovalModal({ subject, policy, activationKey, onDecide }: Appr
   );
 
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor="yellow" paddingX={1}>
-      <Text color="yellow" bold>
-        Approval required
+    <Box flexDirection="column" borderStyle="round" borderColor={style.color} paddingX={1}>
+      <Text {...semanticTextProps(tone)} bold>
+        {`${style.marker} Approval required`}
       </Text>
+      <RiskNotice subject={subject} tone={tone} />
       {subject.kind === 'tool' ? (
         <ToolBody subject={subject} policy={policy} />
       ) : subject.kind === 'tx-apply' ? (
@@ -83,7 +91,9 @@ export function ApprovalModal({ subject, policy, activationKey, onDecide }: Appr
         <PermissionBody subject={subject} policy={policy} />
       )}
       <Hotkeys allowTurn={isTool} allowScopes={isTool} />
-      {!isActive ? <Text dimColor>Waiting for fresh input…</Text> : null}
+      {!isActive ? (
+        <Text {...semanticTextProps('warning')}>… Waiting for approval input</Text>
+      ) : null}
     </Box>
   );
 }
@@ -173,30 +183,57 @@ function PermissionBody({
 function Field({ label, value, warn = false }: { label: string; value: string; warn?: boolean }) {
   return (
     <Box>
-      <Text dimColor>{`  ${label}: `}</Text>
-      <Text {...(warn ? { color: 'red' } : {})}>{value}</Text>
+      <Text {...semanticTextProps('muted')}>{`  ${label}: `}</Text>
+      <Text {...(warn ? semanticTextProps('error') : {})}>
+        {warn ? `${semanticStyle('error').marker} ${value}` : value}
+      </Text>
     </Box>
   );
 }
 
+function approvalTone(subject: ApprovalSubject): SemanticTone {
+  if (subject.kind === 'tool' && (subject.access === 'exec' || subject.channel.kind === 'bash')) {
+    return 'danger';
+  }
+  if (subject.kind === 'tx-apply' && subject.blockingFailures.length > 0) return 'danger';
+  return 'warning';
+}
+
+function RiskNotice({ subject, tone }: { subject: ApprovalSubject; tone: SemanticTone }) {
+  const message =
+    subject.kind === 'tool'
+      ? subject.access === 'exec'
+        ? 'Risk: command execution'
+        : subject.access === 'write'
+          ? 'Risk: workspace modification'
+          : `Review: ${subject.access} access`
+      : subject.kind === 'tx-apply'
+        ? subject.blockingFailures.length > 0
+          ? `Risk: ${subject.blockingFailures.length} blocking validator failure${subject.blockingFailures.length === 1 ? '' : 's'}`
+          : `Review: apply ${subject.diffSummary.filesChanged} changed file${subject.diffSummary.filesChanged === 1 ? '' : 's'}`
+        : 'Risk: additional capabilities requested';
+  return (
+    <Text {...semanticTextProps(tone)}>
+      {`${semanticStyle(tone).marker} ${message}`}
+    </Text>
+  );
+}
+
 function Hotkeys({ allowTurn, allowScopes }: { allowTurn: boolean; allowScopes: boolean }) {
-  // Layout intentionally walks "once → turn → session → workspace" so
-  // visually the most sticky choice (workspace, persisted to disk) is the
-  // rightmost option. `[W]` is rendered in dimColor to flag it as the
-  // weightiest commit; lowercase `[s]ession` keeps the in-process scope
-  // visually lighter than its persisted neighbor.
+  // Layout intentionally walks "once → turn → session → workspace". The
+  // persistent workspace choice is explicitly dangerous rather than muted.
   return (
     <Box marginTop={1}>
-      <Text color="green">[y]es allow </Text>
-      <Text color="red"> [n]o deny </Text>
-      {allowTurn ? <Text color="cyan"> [a]llow this turn </Text> : null}
+      <Text {...semanticTextProps('success')}>✓ [y]es allow </Text>
+      <Text {...semanticTextProps('error')}> ✗ [n]o deny </Text>
+      {allowTurn ? <Text {...semanticTextProps('info')}> i [a]llow this turn </Text> : null}
       {allowScopes ? (
         <>
-          <Text color="cyan"> [s]ession </Text>
-          <Text dimColor> [W]orkspace </Text>
+          <Text {...semanticTextProps('info')}> i [s]ession </Text>
+          <Text {...semanticTextProps('danger')}> ! [W]orkspace (persistent) </Text>
         </>
       ) : null}
-      <Text dimColor> Esc=deny</Text>
+      <Text {...semanticTextProps('error')}> ✗ Esc=deny</Text>
     </Box>
   );
 }

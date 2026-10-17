@@ -30,7 +30,7 @@ test('renders a two-row composer with a mode rail and model context', () => {
   );
   const frame = lastFrame() ?? '';
   assert.match(frame, /^│  /m);
-  assert.match(frame, /^│  Plan Mode > ollama\/qwen3:4b/m);
+  assert.match(frame, /^│  ◆ Plan Mode > ollama\/qwen3:4b/m);
   assert.doesNotMatch(frame, /─/);
 });
 
@@ -70,7 +70,7 @@ test('composer metadata is not submitted with the prompt', async () => {
   assert.deepEqual(submitted, ['hello']);
 });
 
-test('renders a dimmed waiting glyph when disabled', () => {
+test('renders a labeled waiting glyph when disabled', () => {
   const { lastFrame } = render(
     <InputBar value="" onChange={() => {}} onSubmit={() => {}} disabled />
   );

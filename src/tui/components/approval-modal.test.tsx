@@ -56,12 +56,15 @@ test('renders the tool subject with command, access, and policy', () => {
     <ApprovalModal subject={toolSubject} policy="accept-edits" onDecide={() => {}} />
   );
   const frame = lastFrame() ?? '';
-  assert.match(frame, /Approval required/);
+  assert.match(frame, /! Approval required/);
+  assert.match(frame, /! Risk: command execution/);
   assert.match(frame, /Allow bash command\?/);
   assert.match(frame, /tool: bash/);
   assert.match(frame, /command: rm -rf \//);
   assert.match(frame, /policy: accept-edits/);
   assert.match(frame, /\[a\]llow this turn/);
+  assert.match(frame, /✓ \[y\]es allow/);
+  assert.match(frame, /✗ \[n\]o deny/);
 });
 
 test('renders an MCP tool subject with server and tool target before approval', () => {
@@ -84,7 +87,7 @@ test('renders the tx-apply subject with diff, validators, and blocking failures'
   assert.match(frame, /Apply transaction tx_123\?/);
   assert.match(frame, /2 changed \(\+7\/-3\)/);
   assert.match(frame, /blocking 0\/1, advisory 1\/1/);
-  assert.match(frame, /blocking failures: tsc/);
+  assert.match(frame, /blocking failures: ✗ tsc/);
   // tx-apply does not get the allow-turn shortcut.
   assert.doesNotMatch(frame, /\[a\]llow this turn/);
 });
@@ -158,15 +161,13 @@ test('"a" on a tx-apply subject is a no-op (no allow-turn for tx)', async () => 
   assert.equal(calls.length, 0);
 });
 
-test('tool modal renders the [s]ession and dim [W]orkspace hotkeys', () => {
+test('tool modal renders scoped grants and marks persistent workspace access as risky', () => {
   const { lastFrame } = render(
     <ApprovalModal subject={toolSubject} policy="accept-edits" onDecide={() => {}} />
   );
   const frame = lastFrame() ?? '';
-  // The hotkey row carries both scopes; the workspace label is the only one
-  // rendered in dim color, signaling it's the most sticky decision.
   assert.match(frame, /\[s\]ession/);
-  assert.match(frame, /\[W\]orkspace/);
+  assert.match(frame, /! \[W\]orkspace \(persistent\)/);
 });
 
 test('s -> allow-session and W -> allow-workspace on a tool subject', async () => {

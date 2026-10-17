@@ -25,6 +25,7 @@ import { useUiStore } from './hooks/use-ui-store.js';
 import { buildInputHint } from './hints.js';
 import { describePolicyMode } from './mode-language.js';
 import { nextPolicyMode } from './policy-rotation.js';
+import type { SemanticTone } from './semantic-styles.js';
 import { buildHelpText, completeSlash, parseSlash } from './slash.js';
 import type {
   PendingPlanReview,
@@ -241,6 +242,11 @@ export function App({
               hasExpandableTool: expandableTool !== null,
               width: terminalWidth
             });
+  const inputHintTone: SemanticTone = state.activeTurn
+    ? 'active'
+    : input.startsWith('/')
+      ? 'info'
+      : 'muted';
 
   async function rotatePolicy() {
     // Read the current policy from the store rather than the rendered state
@@ -413,7 +419,7 @@ export function App({
 
   return (
     <Box flexDirection="column">
-      <TuiHeader />
+      <TuiHeader policy={state.policy} />
       <Transcript entries={state.transcript} activeTurn={state.activeTurn} />
       {state.planProgress && !state.pendingPlanReview ? <PlanProgressView progress={state.planProgress} /> : null}
       {state.pendingApproval ? (
@@ -458,7 +464,7 @@ export function App({
       ) : (
         <>
           {input.startsWith('/') ? <SlashPalette query={input} /> : null}
-          <TopStatusBar hint={inputHint} />
+          <TopStatusBar hint={inputHint} tone={inputHintTone} />
           <InputBar
             value={input}
             onChange={handleInputChange}
