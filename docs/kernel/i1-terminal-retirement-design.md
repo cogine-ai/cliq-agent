@@ -7,7 +7,11 @@ repairing two shutdown-order defects and a further credential-finalizer shutdown
 gap in the same PR on 2026-10-17. Admission shutdown now passes both exact-source
 Linux events at `db6f658`; preparation shutdown has genuine forced-stop RED.
 Execution producer and credential-finalizer shutdown repairs still require
-qualification. This document itself
+qualification. At `d9770e2`, both preparation probes lost their final writer
+observation before the target stop; their later cleanup exit 1 remains an
+unresolved production-retirement signal, not a passing cut. The native
+inspection cancellation component reached genuine RED; ABI2 implementation and
+the independent installed/effect controls are under qualification. This document itself
 qualifies nothing. The owner accepted one WorkerLaunch preparation
 spine plus genuine preparation-retirement/private rollback evidence, including
 fail-closed incomplete birth. Model unknown retains the existing strictly newer
@@ -137,6 +141,24 @@ the ordinary service's two-second `timeout`, code 2, status 9. That is the
 execution shutdown RED. The push preparation failure occurred at the final
 pre-stop observation; its later cleanup timeout is not evidence for that cut.
 Both failures remain preserved, rather than being conflated or rerun away.
+
+At `d9770e2`, push `38994258934` / PR `38994262929` preserve two further
+pre-stop observation failures and cleanup `exit-code`, status 1. No target
+preparation stop or graceful release is inferred. Sampling may retry a whole
+three-observation attempt within the same thirty-second deadline; it must still
+positively observe the original writer, strict public queued cut, same-generation
+writer and final same-generation writer immediately before ordinary SIGTERM.
+Missing observations are never successful stops. Fixed source-enum diagnostics
+may help distinguish genuine preparation registration, activation and native
+retirement failures, but cannot release resources or stand in for evidence.
+
+The native component RED on completed push job `117283158935` positively records
+an actual pending inspection, then `cancelJoinedWithin1500ms: false`, with the
+original inspection connection retired and both children joined. Its specific
+cancel-and-join assertion fails; the other three component cases and subsequent
+92-test Supervisor suite pass. This is not a compilation/setup failure and does
+not qualify the installed finalizer. The new ABI2 owner must pass that same real
+component test and the independent signed installed finalizer stop scenario.
 
 ## Tool result and settlement rules
 

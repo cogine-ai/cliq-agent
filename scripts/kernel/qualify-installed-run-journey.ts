@@ -3,7 +3,7 @@
 // model capability/billing bound, I2 result, macOS or the full I1 fault matrix.
 import assert from 'node:assert/strict';
 import { spawn, spawnSync, type ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { randomBytes, X509Certificate } from 'node:crypto';
+import { createHash, randomBytes, X509Certificate } from 'node:crypto';
 import { constants, type BigIntStats } from 'node:fs';
 import { chown, link, lstat, mkdir, open, readFile, readdir, readlink, stat, statfs, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:https';
@@ -38,9 +38,12 @@ const excludedVendorInstruction = 'Ordinary vendor instructions remain independe
 const model = 'installed-run-transport-fixture';
 const rejectedResponse = '{"error":{"message":"Owned fixture rejected this request."}}';
 type CampaignMode = '--campaign' | '--failure-campaign' | '--retry-campaign' | '--authority-failure-campaign' |
-  '--storage-failure-campaign' | '--shutdown-admission-campaign' | '--shutdown-preparation-campaign';
+  '--storage-failure-campaign' | '--shutdown-admission-campaign' | '--shutdown-preparation-campaign' |
+  '--shutdown-received-tool-campaign' | '--shutdown-pending-model-campaign';
 const requestTokenCeiling = { inputTokens: 32768, outputTokens: 4096, cacheReadTokens: 0, cacheWriteTokens: 0 };
 const imageFields = ['dev', 'ino', 'size', 'uid', 'gid', 'mode', 'nlink', 'mtimeNs', 'ctimeNs'] as const;
+const receivedToolBefore = 'owned received-tool OLD token';
+const receivedToolAfter = 'owned received-tool NEW token';
 
 async function bounded<T>(pending: Promise<T>, milliseconds: number, label: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -163,8 +166,15 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
   const storageOnly = mode === '--storage-failure-campaign';
   const shutdownAdmissionOnly = mode === '--shutdown-admission-campaign';
   const shutdownPreparationOnly = mode === '--shutdown-preparation-campaign';
+  const shutdownReceivedToolOnly = mode === '--shutdown-received-tool-campaign';
+  const shutdownPendingModelOnly = mode === '--shutdown-pending-model-campaign';
+  const shutdownEffectsOnly = shutdownReceivedToolOnly || shutdownPendingModelOnly;
   const report: Record<string, any> = { diagnosticOnly: true, qualified: false, phase: 'installation',
-    scope: shutdownPreparationOnly
+    scope: shutdownReceivedToolOnly
+      ? 'independent signed installed Linux SIGTERM after positively observed original received-tool snapshot progress, unchanged two-second service timeout, original executed result and ready Checkpoint, then successor continuation and terminal cancellation; not an exact private close gate, provider or complete I1 qualification'
+      : shutdownPendingModelOnly
+      ? 'independent signed installed Linux SIGTERM with one complete owned model POST awaiting a response, unchanged two-second service timeout, original socket join and fully charged UNKNOWN before durable worker fencing, then strict successor terminal cancellation; not an exact native mutex, provider or complete I1 qualification'
+      : shutdownPreparationOnly
       ? 'independent signed installed Linux scheduler SIGTERM after actual original Supervisor writes to a queued Run generation, unchanged two-second service timeout, graceful owner join and exact successor cancellation/history; the ordinary observation-to-gate race is retained, not an exact preparing-only, controller, received-tool, provider or complete I1 qualification'
       : shutdownAdmissionOnly
       ? 'independent signed installed Linux Supervisor SIGTERM during positively observed ordinary instruction capture for an in-flight public Run admission, unchanged two-second service timeout, graceful owner join and successor preservation of absence or a legitimately committed admission; not an exact precommit-abort, source-payload, worker-preparation, received-tool, provider or complete I1 qualification'
@@ -315,6 +325,49 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
     assert.equal(result.status, 0); return Object.fromEntries(result.stdout.trim().split('\n').map(line => {
       const at = line.indexOf('='); assert(at > 0); return [line.slice(0, at), line.slice(at + 1)]; }));
   };
+  const observeShutdownRefusal = (unit: string, pid: string | undefined) => {
+    // Read only this disposable unit/process's bounded journal. Never retain
+    // arbitrary journal text, error messages, paths, stacks or nested causes.
+    const origins = new Map([
+      ['worker preparation physical retirement did not complete', 'preparation_retirement'],
+      ['Run execution failed and its resources did not retire', 'execution_retirement'],
+      ['private workspace descriptor retirement failed', 'workspace_descriptor_retirement'],
+      ['StateStore producer revocation did not start cleanly', 'producer_revocation'],
+      ['StateStore execution revocation did not start cleanly', 'execution_revocation'],
+      ['workspace materialization has not completely joined', 'materialization_join'],
+      ['native retirement clock precedes workspace birth', 'workspace_retirement_clock']
+    ]);
+    if (!pid || !/^[1-9][0-9]*$/u.test(pid)) return { diagnosticOnly: true, available: false };
+    const result = spawnSync('/usr/bin/journalctl', ['--no-pager', '--output=cat', '--lines=16',
+      `_UID=${ledger.uid}`, `_SYSTEMD_USER_UNIT=${unit}`, `_PID=${pid}`],
+    { env: environment, timeout: 5000, killSignal: 'SIGKILL', maxBuffer: 65536 });
+    const refusals: Array<{ code: string; origin: string }> = [];
+    try {
+      if (Buffer.isBuffer(result.stdout)) scanBytes(result.stdout);
+      if (Buffer.isBuffer(result.stderr)) scanBytes(result.stderr);
+      if (result.error || result.signal || result.status !== 0 || !Buffer.isBuffer(result.stdout))
+        return { diagnosticOnly: true, available: false };
+      for (const line of result.stdout.toString('utf8').split('\n')) {
+        if (!line.startsWith('{') || Buffer.byteLength(line) > 4096 || refusals.length >= 4) continue;
+        try {
+          const value = parseJsonStrict(line) as Record<string, unknown>;
+          if (value?.diagnosticOnly !== true) continue;
+          if (value.scope === 'installed-shutdown-retirement' && value.debugTag === '[DEBUG-shutdown-retirement]' &&
+              ['preparation', 'retirement', 'worker_join'].includes(value.stage as string) &&
+              ['unregistered_controller_birth', 'unregistered_reservation_birth', 'materialization_join_pending',
+                'joined_generation_birth_mismatch', 'native_generation_retirement', 'quarantine_identity',
+                'worker_stop_channel_fenced', 'unclassified'].includes(value.reason as string)) {
+            refusals.push({ code: 'diagnostic_only', origin: `${value.stage}.${value.reason}` }); continue;
+          }
+          if (value.scope !== 'installed-read-startup') continue;
+          const code = ['RECOVERY_REQUIRED', 'LEASE_FENCED', 'ARTIFACT_MISMATCH', 'STATE_TRANSITION_INVALID'].includes(value.code as string)
+            ? value.code as string : 'unclassified';
+          refusals.push({ code, origin: typeof value.message === 'string' ? origins.get(value.message) ?? 'unclassified' : 'unclassified' });
+        } catch { /* Non-source journal data supplies no diagnostic fact. */ }
+      }
+      return { diagnosticOnly: true, available: refusals.length > 0, refusals };
+    } finally { result.stdout?.fill(0); result.stderr?.fill(0); }
+  };
   const observe = () => {
     const result = command(recipe.observer, ['list']); assert.equal(result.status, 0);
     const value = parseJsonStrict(result.stdout.trim()) as { clientPid: number; busUniqueName: string; serviceUid: number; servicePid: number; nameOwner: string;
@@ -402,7 +455,7 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
   let queuedObserverClient: Awaited<ReturnType<typeof persistentClient>> | undefined;
   let shutdownClient: Awaited<ReturnType<typeof persistentClient>> | undefined;
   let restoreCasWrite: (() => Promise<void>) | undefined;
-  let storagePost: { destroy(): void; closed: Promise<void> } | undefined;
+  let storagePost: { destroy(): void; closed: Promise<void>; assertPending(): void } | undefined;
   let storagePostResolve!: () => void;
   const storagePostEntered = new Promise<void>(resolve => { storagePostResolve = resolve; });
   let acceptedTcpConnections = 0, acceptedTlsConnections = 0;
@@ -631,11 +684,12 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
         assert(Array.isArray(body.messages) && Array.isArray(body.tools));
         assert.deepEqual(body.tools.map((tool: any) => tool.function.name), ['edit']);
         const ordinal = ++requestsReceived;
-        if (storageOnly) {
+        if (storageOnly || shutdownPendingModelOnly) {
           assert.equal(ordinal, 1, 'the retained original failure must never redispatch provider I/O');
           assert.equal(storagePost, undefined);
           const socket = incoming.socket;
           storagePost = { destroy() { incoming.destroy(); outgoing.destroy(); },
+            assertPending() { assert(incoming.complete && !socket.destroyed && !outgoing.headersSent && !outgoing.writableEnded); },
             closed: new Promise<void>(resolve => socket.once('close', () => resolve())) };
           report.providerRequests = { received: ordinal, method: 'POST', requestPath: '/v1/chat/completions', tls13: true,
             exactCredentialMatched: true, responseWithheld: true, latestBodyDigest: sha256Bytes(bodyBytes), latestBodyBytes: bodyBytes.length };
@@ -713,7 +767,9 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
         const payload = { id: `owned-fixture-turn-${ordinal}`, object: 'chat.completion', model,
           choices: [{ index: 0, finish_reason: ordinal === 1 || ordinal === 3 ? 'tool_calls' : 'stop', message: ordinal === 1 || ordinal === 3
             ? { role: 'assistant', content: '', tool_calls: [{ id: 'owned-private-edit-call', type: 'function',
-              function: { name: 'edit', arguments: reflectedArguments ?? JSON.stringify({ path: 'example.txt', old_text: hostBefore, new_text: privateAfter }) } }] }
+              function: { name: 'edit', arguments: reflectedArguments ?? JSON.stringify(shutdownReceivedToolOnly
+                ? { path: 'payload.txt', old_text: receivedToolBefore, new_text: receivedToolAfter }
+                : { path: 'example.txt', old_text: hostBefore, new_text: privateAfter }) } }] }
             : { role: 'assistant', content: 'The private edit is complete.' } }],
           usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 } };
         const bytes = Buffer.from(JSON.stringify(payload)); scanBytes(bytes);
@@ -867,7 +923,418 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
     const sessionReply = exchange([sessionRequest])[0]!, session = accepted(sessionReply, 'session.create').snapshot.session;
     assert.deepEqual(exchange([sessionRequest])[0], sessionReply, 'new authenticated connection must replay the original Session response');
     const currentSession = () => accepted(exchange([{ protocolVersion: 1, method: 'session.get', sessionId: session.id }])[0]!, 'session.get').snapshot.session;
-    if (shutdownPreparationOnly) {
+    if (shutdownEffectsOnly) {
+      const effect: Record<string, any> = { diagnosticOnly: true, qualified: false, standardStopTimeoutMs: 2000,
+        exactPrivateCloseGateQualified: false, exactNativeMutexOrderQualified: false, completeI1Qualified: false };
+      report[shutdownReceivedToolOnly ? 'shutdownReceivedTool' : 'shutdownPendingModel'] = effect;
+      const fileBytes = 64 * 1024 * 1024, payloadPath = path.join(recipe.workspace, 'payload.txt');
+      let payloadBefore: BigIntStats | undefined, originalBlob: string | undefined, editedBlob: string | undefined;
+      if (shutdownReceivedToolOnly) {
+        mark('ordinary_received_tool_payload');
+        assert.equal(Buffer.byteLength(receivedToolBefore), Buffer.byteLength(receivedToolAfter));
+        const bytes = Buffer.alloc(fileBytes, 0x5a), offset = fileBytes / 2;
+        bytes.write(receivedToolBefore, offset, 'utf8');
+        assert.equal(bytes.indexOf(receivedToolBefore), offset); assert.equal(bytes.lastIndexOf(receivedToolBefore), offset);
+        originalBlob = sha256Bytes(bytes);
+        await writeFile(payloadPath, bytes, { flag: 'wx', mode: 0o644 }); await chown(payloadPath, ledger.uid, ledger.gid);
+        payloadBefore = await lstat(payloadPath, { bigint: true });
+        bytes.write(receivedToolAfter, offset, 'utf8'); editedBlob = sha256Bytes(bytes); bytes.fill(0);
+      }
+      // Only the fixed ordinary payload and its exact CAS objects use this
+      // streaming diagnostic. Small JSON readCas remains capped at 1 MiB.
+      const verifyPayload = async (filename: string, digest: string, original?: BigIntStats) => {
+        assert(shutdownReceivedToolOnly && [originalBlob, editedBlob].includes(digest));
+        assert.equal(filename, original ? payloadPath : path.join(recipe.stateRoot, 'cas', digest));
+        const chunk = Buffer.alloc(65536), hash = createHash('sha256');
+        const held = await open(filename, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+        let stream: ReturnType<typeof scanner.openStream> | undefined;
+        try {
+          stream = scanner.openStream();
+          const before = await held.stat({ bigint: true });
+          assert(before.isFile() && before.uid === BigInt(ledger.uid) && before.nlink === 1n && before.size === BigInt(fileBytes));
+          assert.equal(before.mode & 0o7777n, original ? 0o644n : 0o400n);
+          if (original) for (const field of imageFields) assert.equal(before[field], original[field]);
+          for (let offset = 0; offset < fileBytes;) {
+            const { bytesRead } = await held.read(chunk, 0, Math.min(chunk.length, fileBytes - offset), offset);
+            assert(bytesRead > 0); const bytes = chunk.subarray(0, bytesRead); hash.update(bytes); stream.scan(bytes); offset += bytesRead;
+          }
+          assert.equal((await held.read(chunk, 0, 1, fileBytes)).bytesRead, 0); assert.equal(hash.digest('hex'), digest);
+          const after = await held.stat({ bigint: true }), named = await lstat(filename, { bigint: true });
+          for (const field of imageFields) { assert.equal(after[field], before[field]); assert.equal(named[field], before[field]); }
+        } finally { chunk.fill(0); try { stream?.close(); } finally { await held.close(); } }
+      };
+      const originalPid = Number(supervisorBefore.MainPID), originalStart = await fixtureProcess(originalPid, ledger.uid);
+      const selectedImage = path.join(recipe.stateRoot, 'runtime/bundles', bundleDigest, 'supervisor');
+      const signedImage = await lstat(selectedImage, { bigint: true });
+      const assertOriginalSupervisor = async () => {
+        assert.equal(await fixtureProcess(originalPid, ledger.uid), originalStart);
+        assert.equal(await readlink(`/proc/${originalPid}/exe`), selectedImage);
+        const actual = await stat(`/proc/${originalPid}/exe`, { bigint: true });
+        for (const field of imageFields) assert.equal(actual[field], signedImage[field]);
+      };
+      const originalOwners = inspectInstalledOwnerHistory(recipe.stateRoot).owners;
+      assert.equal(originalOwners.length, 1); const originalOwner = originalOwners[0]!; assert.equal(originalOwner.state, 'active');
+      const ownerProcess = parseJsonStrict((await readCas(originalOwner.processIdentityRef)).toString('utf8')) as Record<string, any>;
+      assert.equal(ownerProcess.identityDigest, originalOwner.processIdentityDigest);
+      assert.equal(ownerProcess.pid, originalPid); assert.equal(ownerProcess.processStartToken, `linux-proc-start-ticks:${originalStart}`);
+      assert.equal(ownerProcess.ownerUid, ledger.uid); assert.equal(ownerProcess.executableImageDigest, report.bundle.supervisorDigest);
+      const contract = command('/usr/bin/systemctl', ['--user', 'show', services.supervisorUnit,
+        '--property=TimeoutStopUSec,KillSignal,FinalKillSignal,SendSIGKILL', '--no-pager']);
+      assert.equal(contract.status, 0);
+      const policy = Object.fromEntries(contract.stdout.trim().split('\n').map(line => line.split('=')));
+      assert.equal(policy.TimeoutStopUSec, '2s'); assert.equal(policy.KillSignal, '15');
+      assert.equal(policy.FinalKillSignal, '9'); assert.equal(policy.SendSIGKILL, 'yes');
+      shutdownClient = await persistentClient();
+      const submit = request({ protocolVersion: 1, method: 'run.submit', requestId: '019a0012-0000-7000-8000-000000000134',
+        admissionKey: randomBytes(32).toString('base64url'), sessionId: session.id, expectedContextRevision: session.contextRevision,
+        workspacePath: recipe.workspace, objective: shutdownReceivedToolOnly ? 'Change the one OLD token in payload.txt to NEW using one edit.'
+          : 'Observe one interrupted model request without using a tool.',
+        model: { provider: 'openai-compatible', model, endpoint: { kind: 'registered', endpointRegistrationId: registration.endpointRegistrationId },
+          modelCredentialGrantIds: [enrollment.credentialGrantId] }, policyMode: 'accept-edits',
+        budgets: { wallTimeMs: 300000, modelTokens: 2000000, costMicros: 10000000, toolCalls: 1000,
+          repairAttempts: 0, childDepth: 0, childConcurrency: 1 }, verifiers: [], dependency: { mode: 'none' },
+        sourceIncludes: [], sourceExcludes: [], registeredMcpServerIds: [], skillIds: [], allowUnverified: true });
+      let submitReply!: Response, admitted!: Record<string, any>, beforeStop!: Record<string, any>, originalGenerationRef: string | undefined;
+      const publicRead = async () => {
+        const cut = accepted(await shutdownClient!.send({ protocolVersion: 1, method: 'run.get', runId: admitted.id }), 'run.get');
+        assert.equal(cut.nextJournalSeq, cut.highWaterJournalSeq); assert.equal(cut.journal.length, cut.highWaterJournalSeq);
+        for (let index = 0; index < cut.journal.length; index++) {
+          assert.equal(cut.journal[index].seq, index + 1); assert.equal(cut.journal[index].runId, admitted.id);
+        }
+        report.lastPublicCut = projectInstalledRunProgress(cut, { requestsReceived, providerFailure }); return cut;
+      };
+      await withRetainedUnitHistory([services.supervisorUnit, services.keeperUnit], async () => {
+        mark('public_effect_run_submit'); submitReply = await shutdownClient!.send(submit, 30000);
+        admitted = accepted(submitReply, 'run.submit').snapshot.run;
+        assert.equal(admitted.status, 'queued'); assert.equal(admitted.revision, 1);
+        report.acceptedRun = { id: admitted.id, sessionId: admitted.sessionId, specRef: admitted.specRef, initialCheckpointId: admitted.latestCheckpointId };
+        if (shutdownReceivedToolOnly) {
+          mark('original_received_tool_snapshot_progress');
+          let target: Record<string, any> | undefined, selectedClaim: Record<string, any> | undefined, selectedLaunchId: string | undefined;
+          type SnapshotRead = { descriptor: string; device: bigint; inode: bigint; position: bigint };
+          const snapshotRead = async (same?: SnapshotRead): Promise<SnapshotRead | undefined> => {
+            assert(target); await assertOriginalSupervisor();
+            const directory = path.join(recipe.stateRoot, 'runs', admitted.id, 'generations', target.generationId);
+            const names = await readdir(`/proc/${originalPid}/fd`); assert(names.length <= 4096);
+            for (const descriptor of names) {
+              assert.match(descriptor, /^(?:0|[1-9][0-9]*)$/u); if (same && descriptor !== same.descriptor) continue;
+              try {
+                const fd = `/proc/${originalPid}/fd/${descriptor}`, filename = path.join(directory, 'payload.txt');
+                if (await readlink(fd) !== filename) continue;
+                const info = await readFile(`/proc/${originalPid}/fdinfo/${descriptor}`, 'utf8'); assert(info.length <= 65536);
+                const flags = info.match(/^flags:\s+([0-7]+)$/mu), position = info.match(/^pos:\s+([0-9]+)$/mu); assert(flags && position);
+                const access = Number.parseInt(flags[1]!, 8), progress = BigInt(position[1]!);
+                if ((access & 3) !== constants.O_RDONLY || !(access & constants.O_NONBLOCK) || progress <= 0n || progress >= BigInt(fileBytes)) continue;
+                for (const parent of [path.join(recipe.stateRoot, 'runs'), path.join(recipe.stateRoot, 'runs', admitted.id),
+                  path.dirname(directory), directory]) {
+                  const actual = await lstat(parent, { bigint: true });
+                  assert(actual.isDirectory() && !actual.isSymbolicLink() && actual.uid === BigInt(ledger.uid) && (actual.mode & 0o7777n) === 0o700n);
+                }
+                const parent = await lstat(directory, { bigint: true }), named = await lstat(filename, { bigint: true }), actual = await stat(fd, { bigint: true });
+                assert.equal(parent.dev.toString(), target.locator.deviceId); assert.equal(parent.ino.toString(), target.locator.directoryFileId);
+                assert(actual.isFile() && named.isFile() && !named.isSymbolicLink() && actual.uid === BigInt(ledger.uid) &&
+                  actual.nlink === 1n && actual.size === BigInt(fileBytes) && (actual.mode & 0o7777n) === 0o644n);
+                for (const field of imageFields) assert.equal(actual[field], named[field]);
+                assert.equal(actual.dev, parent.dev);
+                if (same) { assert.equal(actual.dev, same.device); assert.equal(actual.ino, same.inode); assert(progress >= same.position); }
+                if (await readlink(fd) !== filename) continue;
+                await assertOriginalSupervisor(); return { descriptor, device: actual.dev, inode: actual.ino, position: progress };
+              } catch (error) { if (!['ENOENT', 'ESRCH'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error; }
+            }
+            return undefined;
+          };
+          const toolCut = (cut: Record<string, any>) => {
+            const completed = cut.journal.some((entry: any) => entry.opKind === 'tool' && entry.phase === 'completed');
+            if (completed) { effect.observedCutLost = true; assert.fail('the original received-tool cut completed before positive shutdown observation'); }
+            assert.equal(cut.snapshot.run.status, 'running'); assert(cut.snapshot.run.activeWorkerLaunchId);
+            assert.equal(cut.snapshot.run.activeWorkerLaunchId, selectedLaunchId); assert.equal(cut.snapshot.run.leaseEpoch, selectedClaim!.leaseEpoch);
+            assert.equal(cut.snapshot.run.specRef, admitted.specRef);
+            assert.equal(cut.snapshot.run.cancelRequested, false); assert.equal(cut.snapshot.run.stopIntentRef, undefined);
+            assert.deepEqual(cut.journal.map((entry: any) => [entry.opKind, entry.phase, entry.attempt]),
+              [['model', 'prepared', 0], ['model', 'dispatch_claimed', 0], ['model', 'completed', 0], ['tool', 'prepared', 0], ['tool', 'dispatch_claimed', 0]]);
+            assert.equal(canonicalSha256(cut.journal[4]), canonicalSha256(selectedClaim));
+          };
+          const observeBy = Date.now() + 30000;
+          let observed: SnapshotRead | undefined;
+          while (!observed) {
+            assert(Date.now() < observeBy, 'the real original received-tool snapshot was not positively observed');
+            const cut = await publicRead();
+            if (cut.journal.some((entry: any) => entry.opKind === 'tool' && entry.phase === 'completed')) {
+              effect.observedCutLost = true; assert.fail('the received-tool snapshot finished before its shutdown cut was observed');
+            }
+            const claims = cut.journal.filter((entry: any) => entry.opKind === 'tool' && entry.phase === 'dispatch_claimed');
+            if (!claims.length) { assert(!providerFailure); await delay(1); continue; }
+            assert.equal(claims.length, 1);
+            if (!selectedClaim) {
+              selectedClaim = claims[0];
+              const launch = parseJsonStrict((await readCas(selectedClaim!.sandboxLaunchSpecRef)).toString('utf8')) as Record<string, any>;
+              assert.equal(launch.owner.runId, admitted.id); assert.equal(launch.owner.workerLaunchId, cut.snapshot.run.activeWorkerLaunchId);
+              selectedLaunchId = launch.owner.workerLaunchId; originalGenerationRef = launch.filesystem.generationRef;
+              assert.equal(launch.owner.opId, selectedClaim!.opId); assert.equal(launch.owner.dispatchId, selectedClaim!.dispatchId);
+              target = parseJsonStrict((await readCas(launch.filesystem.generationRef)).toString('utf8')) as Record<string, any>;
+              assert.equal(target.format, 'cliq-workspace-generation-identity-v1'); assert.equal(target.identityDigest, digestOmitting(target, 'identityDigest'));
+              assert.equal(target.runId, admitted.id); assert.equal(target.locator.kind, 'linux_directory');
+              assert.match(target.generationId, /^[A-Za-z0-9_-]{43}$/u);
+              assert.equal(target.locator.canonicalRootRelativePath, `runs/${admitted.id}/generations/${target.generationId}`);
+            }
+            toolCut(cut); const before = await snapshotRead(); if (!before) continue;
+            toolCut(await publicRead()); const bracketed = await snapshotRead(before); if (!bracketed) continue;
+            assert.equal(requestsReceived, 1); assert.equal(acceptedTcpConnections, 1); assert.equal(acceptedTlsConnections, 1); assert(!providerFailure);
+            observed = await snapshotRead(bracketed); beforeStop = cut;
+          }
+          effect.originalSnapshotProgress = { qualified: true, sameOriginalSupervisor: true, publicToolClaimBracketed: true,
+            workerLaunchId: selectedLaunchId, generationId: target!.generationId, generationRef: originalGenerationRef,
+            generationIdentityDigest: target!.identityDigest,
+            generationDeviceId: target!.locator.deviceId,
+            generationDirectoryFileId: target!.locator.directoryFileId, position: observed.position.toString(), byteCount: fileBytes };
+        } else {
+          mark('original_whole_post_awaiting_response');
+          await bounded(storagePostEntered, 15000, 'the actual complete pending POST was not received');
+          assert(storagePost); storagePost.assertPending(); beforeStop = await publicRead();
+          assert.deepEqual(beforeStop.journal.map((entry: any) => [entry.opKind, entry.phase, entry.attempt]),
+            [['model', 'prepared', 0], ['model', 'dispatch_claimed', 0]]);
+          assert.equal(beforeStop.snapshot.run.status, 'running'); assert(beforeStop.snapshot.run.activeWorkerLaunchId);
+          assert.equal(beforeStop.snapshot.run.cancelRequested, false); assert.equal(beforeStop.snapshot.run.stopIntentRef, undefined);
+          assert.equal(beforeStop.snapshot.run.specRef, admitted.specRef);
+          assert.equal(beforeStop.journal[1].supervisorInstanceId, originalOwner.supervisorInstanceId);
+          assert.equal(beforeStop.journal[1].stateOwnerEpoch, originalOwner.ownerEpoch);
+          assert.equal(requestsReceived, 1); assert.equal(acceptedTcpConnections, 1); assert.equal(acceptedTlsConnections, 1); assert(!providerFailure);
+          await assertOriginalSupervisor(); storagePost.assertPending(); effect.completeOriginalPostPending = true;
+        }
+        mark('ordinary_sigterm_with_original_effect_producer');
+        const stopped = command('/usr/bin/systemctl', ['--user', 'stop', services.supervisorUnit]), exit = show(services.supervisorUnit);
+        effect.serviceExit = projectInstalledServiceExit(exit);
+        if (exit.Result !== 'success' || exit.ExecMainStatus !== '0') effect.shutdownRefusal = observeShutdownRefusal(services.supervisorUnit, exit.ExecMainPID);
+        assert.equal(stopped.status, 0); assert.equal(exit.ActiveState, 'inactive'); assert.equal(exit.MainPID, '0');
+        assert.equal(exit.Result, 'success'); assert.equal(exit.ExecMainCode, '1'); assert.equal(exit.ExecMainStatus, '0');
+        if (shutdownPendingModelOnly) {
+          await bounded(storagePost!.closed, 5000, 'the original native model socket did not join before harness cleanup');
+          effect.originalSocketJoinedWithoutTestDestroy = true;
+        }
+        await shutdownClient!.close(); shutdownClient = undefined;
+        await assert.rejects(lstat(`/proc/${originalPid}`), { code: 'ENOENT' });
+      });
+      const releasedOwners = inspectInstalledOwnerHistory(recipe.stateRoot).owners;
+      assert.equal(releasedOwners.length, 1); const releasedOwner = releasedOwners[0]!; assert.equal(releasedOwner.state, 'terminal');
+      if (releasedOwner.state !== 'terminal') throw new Error('effect shutdown did not release its original StateOwner');
+      assert.equal(releasedOwner.terminalReason, 'graceful_release');
+      for (const key of ['ownerEpoch', 'supervisorInstanceId', 'processIdentityRef', 'processIdentityDigest',
+        'stateLockIdentityRef', 'stateLockIdentityDigest', 'instanceNonceDigest', 'acquiredAt'] as const) assert.equal(releasedOwner[key], originalOwner[key]);
+      const sameKeeper = show(services.keeperUnit);
+      assert.equal(sameKeeper.MainPID, keeperBefore.MainPID); assert.equal(sameKeeper.InvocationID, keeperBefore.InvocationID);
+      assert.deepEqual(await readFile(path.join(recipe.stateRoot, 'runtime/keeper.ready')), keeperReady);
+      mark('effect_original_owner_successor');
+      assert.equal(command('/usr/bin/systemctl', ['--user', 'start', services.supervisorUnit]).status, 0);
+      const successor = show(services.supervisorUnit), recoverBy = Date.now() + 30000;
+      assert.notEqual(successor.MainPID, supervisorBefore.MainPID); assert.notEqual(successor.InvocationID, supervisorBefore.InvocationID);
+      const successorStart = await selectedSupervisor(services.supervisorUnit, successor, selectedImage, recoverBy);
+      const links: Record<string, unknown> = {};
+      const history = await qualifyInstalledOwnerLinks({ stateRoot: recipe.stateRoot, uid: ledger.uid, bundle: signed.bundle,
+        imageDigest: report.bundle.supervisorDigest, report: links });
+      assert.equal(links.qualified, true); assert.equal(history.owners.length, 2); assert.deepEqual(history.owners[0], releasedOwner);
+      const successorOwner = history.owners[1]!; assert.equal(successorOwner.state, 'active');
+      assert.equal(successorOwner.ownerEpoch, originalOwner.ownerEpoch + 1);
+      const successorProcess = parseJsonStrict((await readCas(successorOwner.processIdentityRef)).toString('utf8')) as Record<string, any>;
+      assert.equal(successorProcess.identityDigest, successorOwner.processIdentityDigest);
+      assert.equal(successorProcess.pid, Number(successor.MainPID));
+      assert.equal(successorProcess.processStartToken, `linux-proc-start-ticks:${successorStart}`);
+      effect.ownerLineage = { qualified: true, originalOwnerEpoch: originalOwner.ownerEpoch,
+        originalProcessIdentityRef: originalOwner.processIdentityRef, terminalReason: 'graceful_release',
+        transitionEvidenceRef: releasedOwner.transitionEvidenceRef, successorOwnerEpoch: successorOwner.ownerEpoch,
+        acquisitionEvidenceRef: successorOwner.acquisitionEvidenceRef, acquisitionKind: 'acquire_after_graceful_release' };
+      shutdownClient = await persistentClient();
+      let ready: Record<string, any>;
+      for (;;) {
+        ready = await publicRead(); assert(!providerFailure);
+        assert(Date.now() < recoverBy, 'the actual effect successor did not reach its independently cancellable cut');
+        if (shutdownReceivedToolOnly ? requestsReceived === 2 && ready.journal.length === 9 && ready.journal[8].phase === 'completed'
+          : ready.snapshot.run.status === 'queued' && !ready.snapshot.run.activeWorkerLaunchId && !ready.snapshot.run.waitingReason) break;
+        await delay(50);
+      }
+      const successorStatus = accepted(await shutdownClient.send({ protocolVersion: 1, method: 'supervisor.status' }), 'supervisor.status');
+      assert.equal(successorStatus.health, 'ready'); assert.equal(successorStatus.supervisorInstanceId, successorOwner.supervisorInstanceId);
+      const zero = { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 }, modelCharge = { ...zero, modelTokens: 36864 };
+      const assertBudget = (actual: unknown, expected: unknown) => assert.equal(canonicalSha256(actual), canonicalSha256(expected));
+      const settlement = async (prepared: Record<string, any>, terminal: Record<string, any>, consumed: Record<string, number>, before: Record<string, number>) => {
+        const claim = ready.journal[prepared.seq]; assert.equal(claim.phase, 'dispatch_claimed');
+        for (const field of ['runId', 'opId', 'opKind', 'attempt', 'leaseEpoch', 'requestRef', 'target']) {
+          assert.equal(claim[field], prepared[field]); assert.equal(terminal[field], prepared[field]);
+        }
+        for (const field of ['dispatchId', 'supervisorInstanceId', 'stateOwnerEpoch', 'brokerFenceTokenDigest'])
+          assert.equal(terminal[field], claim[field]);
+        assertBudget(claim.budgetDelta, zero);
+        const value = parseJsonStrict((await readCas(terminal.budgetSettlementRef)).toString('utf8')) as Record<string, any>;
+        assert.equal(value.format, 'cliq-budget-settlement-v1'); assert.equal(value.settlementDigest, digestOmitting(value, 'settlementDigest'));
+        assert.equal(value.runId, admitted.id); assert.equal(value.opId, prepared.opId); assert.equal(value.attempt, prepared.attempt);
+        assert.equal(value.preparedJournalSeq, prepared.seq); assert.equal(value.terminalJournalSeq, terminal.seq);
+        assert.equal(value.terminalPhase, terminal.phase); assert.equal(value.settledAt, terminal.timestamp);
+        assertBudget(value.reserved, prepared.budgetDelta); assertBudget(value.released, prepared.budgetDelta);
+        assertBudget(value.budgetReservedBefore, prepared.budgetDelta); assertBudget(value.budgetReservedAfter, zero);
+        assertBudget(value.consumed, consumed); assertBudget(terminal.budgetDelta, consumed); assertBudget(value.budgetConsumedBefore, before);
+        assertBudget(value.budgetConsumedAfter, Object.fromEntries(Object.keys(zero).map(key => [key, before[key]! + consumed[key]!])));
+      };
+      if (shutdownReceivedToolOnly) {
+        assert.deepEqual(ready.journal.map((entry: any) => [entry.opKind, entry.phase, entry.attempt]),
+          [['model', 'prepared', 0], ['model', 'dispatch_claimed', 0], ['model', 'completed', 0],
+            ['tool', 'prepared', 0], ['tool', 'dispatch_claimed', 0], ['tool', 'completed', 0],
+            ['model', 'prepared', 0], ['model', 'dispatch_claimed', 0], ['model', 'completed', 0]]);
+        assert.deepEqual(ready.journal.slice(0, 5), beforeStop.journal);
+        const [firstPrepared, firstClaim, firstCompleted, toolPrepared, toolClaim, toolCompleted, nextPrepared, nextClaim, nextCompleted] = ready.journal;
+        assert.equal(firstClaim.supervisorInstanceId, originalOwner.supervisorInstanceId);
+        assert.equal(toolClaim.supervisorInstanceId, originalOwner.supervisorInstanceId);
+        assert.equal(firstClaim.stateOwnerEpoch, originalOwner.ownerEpoch); assert.equal(toolClaim.stateOwnerEpoch, originalOwner.ownerEpoch);
+        if (nextClaim.supervisorInstanceId !== successorOwner.supervisorInstanceId) effect.observationToGateAdvanceObserved = true;
+        assert.equal(nextClaim.supervisorInstanceId, successorOwner.supervisorInstanceId,
+          'the second distinct model turn must belong to the actual successor, not an observation-to-gate advance');
+        assert.equal(nextClaim.stateOwnerEpoch, successorOwner.ownerEpoch); assert.notEqual(nextClaim.opId, firstClaim.opId);
+        assert.equal(nextClaim.leaseEpoch, ready.snapshot.run.leaseEpoch); assert.equal(ready.snapshot.run.status, 'running');
+        assert(ready.snapshot.run.activeWorkerLaunchId); assert.notEqual(ready.snapshot.run.activeWorkerLaunchId, effect.originalSnapshotProgress.workerLaunchId);
+        effect.successorWorker = inspectInstalledWorkerLease(recipe.stateRoot, { uid: ledger.uid, runId: admitted.id,
+          launchId: ready.snapshot.run.activeWorkerLaunchId, leaseEpoch: nextClaim.leaseEpoch, runRevision: ready.snapshot.run.revision,
+          supervisorInstanceId: successorOwner.supervisorInstanceId, deadlineAt: admitted.deadlineAt });
+        assert.equal(toolCompleted.dispatchId, toolClaim.dispatchId); assert(toolCompleted.timestamp <= releasedOwner.releasedAt);
+        const observation = parseJsonStrict((await readCas(toolCompleted.resultRef)).toString('utf8')) as Record<string, any>;
+        assert.equal(observation.format, 'cliq-tool-observation-v1'); assert.equal(observation.outcome, 'executed');
+        assert.equal(observation.observationDigest, digestOmitting(observation, 'observationDigest'));
+        assert.equal(observation.runId, admitted.id); assert.equal(observation.opId, toolClaim.opId); assert.equal(observation.attempt, toolClaim.attempt);
+        assert.equal(observation.dispatchId, toolClaim.dispatchId); assert.equal(observation.requestRef, toolClaim.requestRef);
+        assert.equal(observation.grantRef, toolClaim.grantRef); assert.equal(observation.targetRef, toolClaim.target);
+        assert(observation.observedAt <= releasedOwner.releasedAt);
+        const checkpoints = ready.checkpoints.filter((value: any) => value.reason === 'auto' && value.journalSeq === toolCompleted.seq);
+        assert.equal(checkpoints.length, 1); const checkpoint = checkpoints[0]; assert(checkpoint.createdAt <= releasedOwner.releasedAt);
+        assert.equal(checkpoint.workspaceStateRef, observation.postEffect.workspaceStateRef);
+        const snapshot = parseJsonStrict((await readCas(observation.postEffect.snapshotEvidenceRef)).toString('utf8')) as Record<string, any>;
+        assert.equal(snapshot.purpose, 'sealed_to_checkpoint'); assert.equal(snapshot.evidenceDigest, digestOmitting(snapshot, 'evidenceDigest'));
+        assert.equal(snapshot.generationRef, originalGenerationRef); assert.equal(snapshot.generationIdentityDigest, effect.originalSnapshotProgress.generationIdentityDigest);
+        assert.equal(snapshot.checkpointId, checkpoint.id); assert.equal(snapshot.workspaceStateRef, checkpoint.workspaceStateRef);
+        assert.equal(snapshot.descriptorRewalkComplete, true); assert.equal(snapshot.fileFsyncComplete, true); assert.equal(snapshot.directoryFsyncComplete, true);
+        const state = parseJsonStrict((await readCas(checkpoint.workspaceStateRef)).toString('utf8')) as Record<string, any>;
+        assert.equal(state.stateDigest, digestOmitting(state, 'stateDigest'));
+        const entries = parseJsonStrict((await readCas(state.entriesRef)).toString('utf8')) as Record<string, any>;
+        assert.equal(entries.treeDigest, canonicalSha256({ schemaVersion: 1, format: 'cliq-workspace-entries-v1', entries: entries.entries }));
+        assert.deepEqual(entries.entries.map((value: any) => value.path), ['example.txt', 'payload.txt']);
+        const unchanged = entries.entries[0]; assert.equal(unchanged.kind, 'file');
+        assert.equal(unchanged.blobRef, sha256Bytes(Buffer.from(hostBefore))); assert.equal(unchanged.size, Buffer.byteLength(hostBefore));
+        const file = entries.entries.find((value: any) => value.path === 'payload.txt');
+        assert(file && file.kind === 'file'); assert.equal(file.size, fileBytes); assert.equal(file.blobRef, editedBlob);
+        await verifyPayload(path.join(recipe.stateRoot, 'cas', editedBlob!), editedBlob!);
+        const death = parseJsonStrict((await readCas(observation.postEffect.retirementEvidenceRef)).toString('utf8')) as Record<string, any>;
+        const inspector = parseJsonStrict((await readCas(death.inspectorIdentityRef)).toString('utf8')) as Record<string, any>;
+        assert.equal(inspector.stateOwnerEpoch, originalOwner.ownerEpoch); assert.equal(inspector.processIdentityRef, originalOwner.processIdentityRef);
+        const toolCharge = { ...zero, toolCalls: 1 }, afterTool = { ...modelCharge, toolCalls: 1 };
+        assertBudget(firstPrepared.budgetDelta, modelCharge); assertBudget(toolPrepared.budgetDelta, toolCharge); assertBudget(nextPrepared.budgetDelta, modelCharge);
+        await settlement(firstPrepared, firstCompleted, modelCharge, zero); await settlement(toolPrepared, toolCompleted, toolCharge, modelCharge);
+        await settlement(nextPrepared, nextCompleted, modelCharge, afterTool);
+        assertBudget(ready.snapshot.run.budgetConsumed, { ...afterTool, modelTokens: 73728 });
+        assert.equal(requestsReceived, 2); assert.equal(acceptedTcpConnections, 2); assert.equal(acceptedTlsConnections, 2);
+        effect.originalExecutedTool = { qualified: true, originalClaimPreserved: true, resultRef: toolCompleted.resultRef,
+          checkpointId: checkpoint.id, workspaceStateRef: checkpoint.workspaceStateRef, blobRef: editedBlob,
+          originalInspectorMatched: true, originalOwnerCompletedBeforeGracefulRelease: true, toolClaims: 1, toolCallsCharged: 1,
+          actualSuccessorContinuedNextModel: true };
+      } else {
+        assert.deepEqual(ready.journal.slice(0, 2), beforeStop.journal); assert.equal(ready.journal.length, 3);
+        const [prepared, claim, unknown] = ready.journal; assert.equal(unknown.phase, 'unknown');
+        for (const key of ['opId', 'attempt', 'dispatchId', 'requestRef', 'target', 'supervisorInstanceId', 'stateOwnerEpoch', 'brokerFenceTokenDigest'])
+          assert.equal(unknown[key], claim[key]);
+        assert.equal(unknown.resultRef, undefined); assert.equal(unknown.errorRef, undefined); assert(unknown.timestamp <= releasedOwner.releasedAt);
+        const ambiguity = parseJsonStrict((await readCas(unknown.evidenceRef)).toString('utf8')) as Record<string, any>;
+        assert.equal(ambiguity.format, 'cliq-invocation-ambiguity-evidence-v1'); assert.equal(ambiguity.ambiguityKind, 'broker_channel_lost_after_claim');
+        assert.equal(ambiguity.failureCode, 'response_stream_interrupted'); assert.equal(ambiguity.dispatchId, claim.dispatchId);
+        assert.equal(ambiguity.claimingStateOwnerEpoch, originalOwner.ownerEpoch); assert.equal(ambiguity.claimingSupervisorInstanceId, originalOwner.supervisorInstanceId);
+        assert.equal(ambiguity.dispatchJournalSeq, claim.seq); assert.equal(ambiguity.brokerFenceTokenDigest, claim.brokerFenceTokenDigest);
+        assert.equal(ambiguity.evidenceDigest, unknown.evidenceDigest); assert.equal(ambiguity.evidenceDigest, digestOmitting(ambiguity, 'evidenceDigest'));
+        assert.equal(ambiguity.runId, admitted.id); assert.equal(ambiguity.opId, claim.opId); assert.equal(ambiguity.attempt, claim.attempt);
+        assert.equal(ambiguity.operationRequestRef, prepared.requestRef); assert.equal(ambiguity.operationTargetRef, prepared.target);
+        assert.equal(ambiguity.operationTargetDigest, registration.registrationDigest); assert.equal(ambiguity.observedAt, unknown.timestamp);
+        assert.equal(ambiguity.durableTerminalResultAbsent, true);
+        const inspector = parseJsonStrict((await readCas(ambiguity.inspectorIdentityRef)).toString('utf8')) as Record<string, any>;
+        assert.equal(inspector.stateOwnerEpoch, originalOwner.ownerEpoch); assert.equal(inspector.processIdentityRef, originalOwner.processIdentityRef);
+        assertBudget(prepared.budgetDelta, modelCharge); await settlement(prepared, unknown, modelCharge, zero);
+        assertBudget(ready.snapshot.run.budgetConsumed, modelCharge);
+        const events = accepted(await shutdownClient.send({ protocolVersion: 1, method: 'run.attach', runId: admitted.id, afterEventSeq: 0 }), 'run.attach');
+        assert.equal(events.earliestRetainedEventSeq, 1); assert.equal(events.nextEventSeq, events.highWaterEventSeq);
+        assert.equal(events.events.length, events.highWaterEventSeq);
+        let anchor: Record<string, any> | undefined;
+        for (let index = 0; index < events.events.length; index++) {
+          const event = events.events[index]; assert.equal(event.eventSeq, index + 1);
+          if (event.kind !== 'state_changed' || event.waitingReason !== 'reconciliation' || !event.waitingOnRef) continue;
+          const wait = parseJsonStrict((await readCas(event.waitingOnRef)).toString('utf8')) as Record<string, any>;
+          if (wait.subject.kind !== 'worker_death' || wait.probeState.phase !== 'automatic_in_flight') continue;
+          assert.equal(wait.subject.oldWorkerLaunchId, beforeStop.snapshot.run.activeWorkerLaunchId);
+          assert.equal(wait.probeState.dispatch.owningSupervisorInstanceId, successorOwner.supervisorInstanceId);
+          anchor = parseJsonStrict((await readCas(wait.probeState.dispatch.inspectionTargetDigest)).toString('utf8')) as Record<string, any>;
+          assert.equal(anchor.phase, 'fenced_reconciling'); assert.equal(anchor.runId, admitted.id);
+          assert.equal(anchor.activeWorkerLaunchId, beforeStop.snapshot.run.activeWorkerLaunchId);
+          assert.equal(anchor.leaseEpoch, beforeStop.snapshot.run.leaseEpoch);
+          assert(Number.isSafeInteger(anchor.fencedJournalSeq) && anchor.fencedJournalSeq >= unknown.seq);
+          assert(anchor.updatedAt <= releasedOwner.releasedAt);
+          const initialWait = parseJsonStrict((await readCas(anchor.waitingSubjectRef)).toString('utf8')) as Record<string, any>;
+          assert.equal(initialWait.subject.oldWorkerLaunchId, beforeStop.snapshot.run.activeWorkerLaunchId);
+          assert.equal(initialWait.probeState.phase, 'automatic_pending'); assert.equal(initialWait.probeState.automaticProbeCount, 0);
+          assert(initialWait.createdAt <= releasedOwner.releasedAt); break;
+        }
+        assert(anchor, 'the actual successor inspection must retain the original post-settlement worker fence');
+        effect.originalUnknown = { qualified: true, evidenceRef: unknown.evidenceRef, settlementRef: unknown.budgetSettlementRef,
+          originalClaimPreserved: true, fullyCharged: true, settledBeforeOriginalOwnerRelease: true,
+          originalFencedJournalSeq: anchor.fencedJournalSeq, unknownJournalSeq: unknown.seq, settledBeforeDurableWorkerFence: true };
+      }
+      assertBudget(ready.snapshot.run.budgetReserved, zero);
+      mark('effect_successor_public_cancel_once');
+      const terminalBy = Date.now() + 30000;
+      let cancel = request({ protocolVersion: 1, method: 'run.cancel', requestId: '019a0012-0000-7000-8000-000000000135',
+        runId: admitted.id, expectedRevision: ready.snapshot.run.revision });
+      let cancelReply = await shutdownClient.send(cancel), conflicts = 0;
+      while (!cancelReply.ok) {
+        assert.equal(cancelReply.error?.code, 'REVISION_CONFLICT'); assert.equal(cancelReply.error?.retryable, true);
+        assert.equal(cancelReply.error?.messageCode, 'control.revision_conflict'); assert(++conflicts <= 8 && Date.now() < terminalBy);
+        const current = await publicRead(); cancel = request({ protocolVersion: 1, method: 'run.cancel', requestId: cancel.requestId,
+          runId: admitted.id, expectedRevision: current.snapshot.run.revision }); cancelReply = await shutdownClient.send(cancel);
+      }
+      accepted(cancelReply, 'run.cancel'); let terminal = await publicRead();
+      while (terminal.snapshot.run.status !== 'cancelled') {
+        assert(Date.now() < terminalBy, 'the effect successor did not complete genuine terminal cancellation');
+        await delay(50); terminal = await publicRead();
+      }
+      assert.equal(terminal.snapshot.run.terminalReason, 'cancelled_by_user'); assert.equal(terminal.snapshot.run.activeWorkerLaunchId, undefined);
+      assert.equal(terminal.snapshot.run.resultRef, undefined); assert.deepEqual(terminal.journal, ready.journal);
+      assertBudget(terminal.snapshot.run.budgetConsumed, ready.snapshot.run.budgetConsumed); assertBudget(terminal.snapshot.run.budgetReserved, zero);
+      if (shutdownPendingModelOnly) {
+        const [prepared, claim, unknown] = ready.journal;
+        const detail = parseJsonStrict((await readCas(terminal.snapshot.run.terminalDetailRef)).toString('utf8')) as Record<string, any>;
+        assert.equal(detail.abandonedRetryInvocations.length, 1); const abandoned = detail.abandonedRetryInvocations[0];
+        assert.equal(abandoned.opId, claim.opId); assert.equal(abandoned.unknownJournalSeq, unknown.seq);
+        assert.equal(abandoned.budgetSettlementRef, unknown.budgetSettlementRef);
+        const closure = decodeBrokerProcessDomainDeathDispatchClosure(parseJsonStrict((await readCas(abandoned.dispatchFenceOrDeathEvidenceRef)).toString('utf8')));
+        assert.equal(closure.runId, admitted.id); assert.equal(closure.opId, claim.opId); assert.equal(closure.dispatchId, claim.dispatchId);
+        assert.equal(closure.unknownJournalSeq, unknown.seq);
+        const death = decodeBrokerProcessDomainDeath(parseJsonStrict((await readCas(closure.closure.brokerProcessDeathEvidenceRef)).toString('utf8')));
+        assert.equal(death.evidenceDigest, closure.closure.brokerProcessDeathEvidenceDigest);
+        assert.equal(death.claimingStateOwnerEpoch, originalOwner.ownerEpoch); assert.equal(death.claimingSupervisorInstanceId, originalOwner.supervisorInstanceId);
+        assert.equal(death.claimingProcessIdentityRef, originalOwner.processIdentityRef); assert.equal(death.operationRequestRef, prepared.requestRef);
+        assert.equal(death.brokerFenceTokenDigest, claim.brokerFenceTokenDigest); assert.equal(death.inspectorStateOwnerEpoch, successorOwner.ownerEpoch);
+        assert(death.inspectorStateOwnerEpoch > death.claimingStateOwnerEpoch);
+        assert.equal(requestsReceived, 1); assert.equal(acceptedTcpConnections, 1); assert.equal(acceptedTlsConnections, 1);
+        effect.successorBrokerProcessDomainDeath = { qualified: true, originalClaimAndProcessMatched: true,
+          dispatchClosureRef: abandoned.dispatchFenceOrDeathEvidenceRef, strictlyNewerInspector: true, noRedispatch: true };
+      }
+      const sessionCut = accepted(await shutdownClient.send({ protocolVersion: 1, method: 'session.get', sessionId: session.id,
+        afterItemSeq: session.latestItemSeq }), 'session.get');
+      assert.equal(sessionCut.items.length, 1); assert.equal(sessionCut.items[0].kind, 'run_terminal');
+      const publication = parseJsonStrict((await readCas(sessionCut.items[0].payloadRef)).toString('utf8')) as Record<string, any>;
+      assert.equal(publication.runId, admitted.id); assert.equal(publication.status, 'cancelled');
+      assert.equal(sessionCut.snapshot.session.contextRevision, session.contextRevision + 1);
+      assert.equal(sessionCut.snapshot.session.latestItemSeq, session.latestItemSeq + 1);
+      assert.deepEqual(await shutdownClient.send(cancel), cancelReply); assert.deepEqual(exchange([submit])[0], submitReply);
+      assert.deepEqual(exchange([sessionRequest])[0], sessionReply); assert.deepEqual(await publicRead(), terminal);
+      if (payloadBefore) await verifyPayload(payloadPath, originalBlob!, payloadBefore);
+      for (const field of imageFields) assert.equal((await lstat(source, { bigint: true }))[field], sourceBefore[field]);
+      assert.equal(await readFile(source, 'utf8'), hostBefore); assert(!providerFailure);
+      const expectedPosts = shutdownReceivedToolOnly ? 2 : 1;
+      assert.equal(requestsReceived, expectedPosts); assert.equal(acceptedTcpConnections, expectedPosts); assert.equal(acceptedTlsConnections, expectedPosts);
+      await shutdownClient.close(); shutdownClient = undefined;
+      effect.qualified = true; effect.gracefulExitZero = true; effect.originalSourceUnchanged = true;
+      effect.sessionPublishedOnce = true; effect.publicAdmissionAndCancelReplayPreserved = true;
+    } else if (shutdownPreparationOnly) {
       mark('owned_source_before_scheduler_preparation_shutdown');
       const payload = path.join(recipe.workspace, 'payload'), fileCount = 1000;
       const bytes = Buffer.alloc(65536, 0x5a), blobRef = sha256Bytes(bytes);
@@ -987,19 +1454,25 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
           const before = await heldGenerationWrite();
           if (!before) { await delay(1); continue; }
           preparingCut(await publicRead());
-          observed = await heldGenerationWrite(before);
+          const bracketed = await heldGenerationWrite(before);
+          if (!bracketed) continue;
+          assert.equal(requestsReceived, 0); assert(!providerFailure);
+          report.shutdownPreparation = { qualified: false, diagnosticOnly: true, sourceFiles: fileCount, bytesPerFile: bytes.length,
+            distinctSourceInodes: new Set([...sourceFiles.values()].map(info => `${info.dev}:${info.ino}`)).size,
+            deduplicatedSourceBlobRef: blobRef, originalSupervisorProcessMatched: true, originalWritableGenerationMatched: true,
+            publicQueuedCutBracketed: true, noActiveWorkerAtObservedPublicCut: true, noJournalAtObservedPublicCut: true,
+            generationId: bracketed.generationId, generationDeviceId: bracketed.deviceId, generationDirectoryFileId: bracketed.directoryFileId,
+            controllerRetirementQualified: false, receivedToolQualified: false, exactPreparingGateCutQualified: false,
+            standardStopTimeoutMs: 2000 };
+          assert.equal(report.shutdownPreparation.distinctSourceInodes, fileCount);
+          mark('ordinary_systemd_sigterm_during_scheduler_generation_copy');
+          // File writers rotate between ordinary entries. Keep all three
+          // positive observations in the same bounded sampling attempt;
+          // absence between writers is not a positive stop cut. The final
+          // real recheck still immediately precedes the unchanged stop.
+          observed = await heldGenerationWrite(bracketed);
         }
-        assert.equal(requestsReceived, 0); assert(!providerFailure);
-        report.shutdownPreparation = { qualified: false, diagnosticOnly: true, sourceFiles: fileCount, bytesPerFile: bytes.length,
-          distinctSourceInodes: new Set([...sourceFiles.values()].map(info => `${info.dev}:${info.ino}`)).size,
-          deduplicatedSourceBlobRef: blobRef, originalSupervisorProcessMatched: true, originalWritableGenerationMatched: true,
-          publicQueuedCutBracketed: true, noActiveWorkerAtObservedPublicCut: true, noJournalAtObservedPublicCut: true,
-          generationId: observed.generationId, generationDeviceId: observed.deviceId, generationDirectoryFileId: observed.directoryFileId,
-          controllerRetirementQualified: false, receivedToolQualified: false, exactPreparingGateCutQualified: false,
-          standardStopTimeoutMs: 2000 };
-        assert.equal(report.shutdownPreparation.distinctSourceInodes, fileCount);
-        mark('ordinary_systemd_sigterm_during_scheduler_generation_copy');
-        assert(await heldGenerationWrite(observed), 'a genuine same-generation writer must still be observed immediately before ordinary SIGTERM');
+        assert(observed, 'a genuine same-generation writer must still be observed immediately before ordinary SIGTERM');
         const stopped = command('/usr/bin/systemctl', ['--user', 'stop', services.supervisorUnit]), exit = show(services.supervisorUnit);
         report.shutdownPreparation.serviceExit = projectInstalledServiceExit(exit);
         await shutdownClient!.close();
@@ -2897,6 +3370,8 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
           const stoppedUnits = units.map(unit => show(unit));
           report.installedServiceExit = { supervisor: projectInstalledServiceExit(stoppedUnits[0]),
             keeper: projectInstalledServiceExit(stoppedUnits[1]) };
+          if (stoppedUnits[0]!.Result !== 'success' || stoppedUnits[0]!.ExecMainStatus !== '0')
+            report.shutdownRefusal = observeShutdownRefusal(installedServices!.supervisorUnit, stoppedUnits[0]!.ExecMainPID);
           for (let index = 0; index < units.length; index++) {
             const stopped = stoppedUnits[index]!;
             assert.equal(stopped.ActiveState, 'inactive'); assert.equal(stopped.MainPID, '0');
@@ -2958,5 +3433,6 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
 assert.equal(process.platform, 'linux'); assert.equal(process.arch, 'x64');
 const [mode, filename, ...extra] = process.argv.slice(2);
 assert(mode === '--campaign' || mode === '--failure-campaign' || mode === '--retry-campaign' || mode === '--authority-failure-campaign' ||
-  mode === '--storage-failure-campaign' || mode === '--shutdown-admission-campaign' || mode === '--shutdown-preparation-campaign'); assert(filename && extra.length === 0);
+  mode === '--storage-failure-campaign' || mode === '--shutdown-admission-campaign' || mode === '--shutdown-preparation-campaign' ||
+  mode === '--shutdown-received-tool-campaign' || mode === '--shutdown-pending-model-campaign'); assert(filename && extra.length === 0);
 await campaign(filename, mode);

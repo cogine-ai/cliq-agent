@@ -26,6 +26,7 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#include "credential-secret-service-fixture.h"
 
 struct fixture {
   GMainLoop *loop;
@@ -38,10 +39,10 @@ struct fixture {
   char first_sender[256];
   /* Fixed independent broker scenario; none of these values is production
    * authority. The actual native create_compare supplies its observation. */
-  bool broker_mode, inspection_mode, created, preparation_entered, preparation_gone, released, timely;
+  bool broker_mode, inspection_mode, preparation_entered, preparation_gone, released, timely;
   char preparation_sender[256], control[32]; size_t control_used;
   int notify; guint control_watch, secret_registrations[3];
-  GVariant *item_attributes, *item_secret;
+  struct fixture_secret_data secret;
 };
 static void refuse(struct fixture *fixture) { fixture->failed = true; if (fixture->loop) g_main_loop_quit(fixture->loop); }
 static gboolean stop_fixture(gpointer data) { refuse(data); return G_SOURCE_CONTINUE; }
@@ -94,10 +95,6 @@ static void reload(GDBusConnection *bus, const gchar *sender, const gchar *path,
   } else if (fixture->first_gone) g_dbus_method_invocation_return_value(invocation, g_variant_new("()"));
   else fixture->healthy = invocation; /* Signal delivery need not precede this method callback. */
 }
-#define SECRET_ROOT "/org/freedesktop/secrets"
-#define SECRET_COLLECTION SECRET_ROOT "/collection/component"
-#define SECRET_ITEM SECRET_COLLECTION "/item"
-#define SECRET_SESSION SECRET_ROOT "/session/component"
 static void secret_call(GDBusConnection *bus, const gchar *sender, const gchar *path, const gchar *interface,
   const gchar *method, GVariant *parameters, GDBusMethodInvocation *invocation, gpointer data) {
   (void)bus; (void)path; struct fixture *fixture = data;
@@ -107,7 +104,7 @@ static void secret_call(GDBusConnection *bus, const gchar *sender, const gchar *
     if (strcmp(alias, "default") && strcmp(alias, "session")) goto refused;
     if (!fixture->first_sender[0]) strcpy(fixture->first_sender, sender);
     if (!strcmp(alias, "default") && strcmp(sender, fixture->first_sender) && !fixture->preparation_entered) {
-      if (!fixture->created || fixture->unanswered) goto refused;
+      if (!fixture->secret.created || fixture->unanswered) goto refused;
       strcpy(fixture->preparation_sender, sender); fixture->preparation_entered = true;
       fixture->unanswered = invocation; /* Real remote call stays unanswered. */
       const char started[] = "prepare-started\n";
@@ -117,52 +114,14 @@ static void secret_call(GDBusConnection *bus, const gchar *sender, const gchar *
     g_dbus_method_invocation_return_value(invocation, g_variant_new("(o)", !strcmp(alias, "default")
       ? SECRET_COLLECTION : SECRET_ROOT "/collection/session")); return;
   }
-  if (!strcmp(interface, "org.freedesktop.Secret.Service") && !strcmp(method, "SearchItems")) {
-    GVariant *attributes = g_variant_get_child_value(parameters, 0);
-    bool valid = g_variant_n_children(attributes) == 9 && (!fixture->created || g_variant_equal(attributes, fixture->item_attributes));
-    g_variant_unref(attributes); if (!valid) goto refused;
-    const char *items[] = { SECRET_ITEM, NULL }, *empty[] = { NULL };
-    g_dbus_method_invocation_return_value(invocation, g_variant_new("(@ao@ao)",
-      g_variant_new_objv(fixture->created ? items : empty, -1), g_variant_new_objv(empty, -1))); return;
-  }
-  if (!strcmp(interface, "org.freedesktop.Secret.Service") && !strcmp(method, "OpenSession")) {
-    const char *algorithm; GVariant *box; g_variant_get(parameters, "(&s@v)", &algorithm, &box);
-    GVariant *value = g_variant_get_variant(box); bool valid = !strcmp(algorithm, "plain") &&
-      g_variant_is_of_type(value, G_VARIANT_TYPE_STRING) && !g_variant_get_string(value, NULL)[0];
-    g_variant_unref(value); g_variant_unref(box); if (!valid) goto refused;
-    g_dbus_method_invocation_return_value(invocation, g_variant_new("(vo)", g_variant_new_string(""), SECRET_SESSION)); return;
-  }
-  if (!strcmp(interface, "org.freedesktop.Secret.Collection") && !strcmp(method, "CreateItem") && !fixture->created) {
-    GVariant *properties = g_variant_get_child_value(parameters, 0), *secret = g_variant_get_child_value(parameters, 1);
-    fixture->item_attributes = g_variant_lookup_value(properties, "org.freedesktop.Secret.Item.Attributes", G_VARIANT_TYPE("a{ss}"));
-    fixture->item_secret = g_variant_get_child_value(secret, 2);
-    bool valid = fixture->item_attributes && g_variant_n_children(fixture->item_attributes) == 9 &&
-      g_variant_n_children(fixture->item_secret) > 0 && g_variant_n_children(fixture->item_secret) <= 256;
-    g_variant_unref(properties); g_variant_unref(secret); if (!valid) goto refused;
-    fixture->created = true;
-    g_dbus_method_invocation_return_value(invocation, g_variant_new("(oo)", SECRET_ITEM, "/")); return;
-  }
-  if (!strcmp(interface, "org.freedesktop.Secret.Item") && !strcmp(method, "GetSecret") && fixture->created) {
-    const char *session; g_variant_get(parameters, "(&o)", &session); if (strcmp(session, SECRET_SESSION)) goto refused;
-    g_dbus_method_invocation_return_value(invocation, g_variant_new("((o@ay@ays))", SECRET_SESSION,
-      g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, NULL, 0, 1), g_variant_ref(fixture->item_secret), "application/octet-stream")); return;
-  }
+  if (fixture_secret_method(&fixture->secret, interface, method, parameters, invocation)) return;
 refused:
   g_dbus_method_invocation_return_dbus_error(invocation, "org.cliq.Test.Refused", "fixture request refused"); refuse(fixture);
 }
 static GVariant *secret_property(GDBusConnection *bus, const gchar *sender, const gchar *path,
   const gchar *interface, const gchar *property, GError **error, gpointer data) {
   (void)bus; (void)sender; (void)path; struct fixture *fixture = data;
-  if (!strcmp(interface, "org.freedesktop.Secret.Service") && !strcmp(property, "Collections")) {
-    const char *collections[] = { SECRET_COLLECTION, NULL }; return g_variant_new_objv(collections, -1);
-  }
-  if (!strcmp(interface, "org.freedesktop.Secret.Collection") && !strcmp(property, "Items")) {
-    const char *items[] = { SECRET_ITEM, NULL }, *empty[] = { NULL }; return g_variant_new_objv(fixture->created ? items : empty, -1);
-  }
-  if ((!strcmp(interface, "org.freedesktop.Secret.Collection") || !strcmp(interface, "org.freedesktop.Secret.Item")) &&
-      !strcmp(property, "Locked")) return g_variant_new_boolean(FALSE);
-  if (!strcmp(interface, "org.freedesktop.Secret.Item") && !strcmp(property, "Attributes") && fixture->item_attributes)
-    return g_variant_ref(fixture->item_attributes);
+  GVariant *value = fixture_secret_property(&fixture->secret, interface, property); if (value) return value;
   g_set_error_literal(error, G_DBUS_ERROR, G_DBUS_ERROR_UNKNOWN_PROPERTY, "fixture property refused"); refuse(fixture); return NULL;
 }
 static gboolean control_reply(gint descriptor, GIOCondition condition, gpointer data) {
@@ -448,8 +407,7 @@ cleanup:
     owned = notify[index]; notify[index] = -1; if (owned >= 0 && close(owned)) fixture.failed = true;
     owned = control[index]; control[index] = -1; if (owned >= 0 && close(owned)) fixture.failed = true;
   }
-  if (fixture.item_attributes) g_variant_unref(fixture.item_attributes);
-  if (fixture.item_secret) g_variant_unref(fixture.item_secret);
+  fixture_secret_clear(&fixture.secret);
   g_clear_error(&error); if (shape) g_dbus_node_info_unref(shape); if (fixture.loop) g_main_loop_unref(fixture.loop);
   if (fixture.inspection_mode) {
     printf("{\"diagnosticOnly\":true,\"actualInspectionEntered\":%s,\"cancelJoinedWithin1500ms\":%s,"

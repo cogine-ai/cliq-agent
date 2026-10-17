@@ -444,6 +444,40 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
     return { postEffect: { workspaceStateRef: observed.workspaceStateRef, snapshotEvidenceRef, retirementEvidenceRef: retirement.ref },
       snapshot, checkpointing, quiesceId };
   }
+  // Temporary source-only diagnosis for the actual installed SIGTERM campaign.
+  // Remove [DEBUG-shutdown-retirement] after its real failure is resolved.
+  function reportShutdownRetirement(stage: 'preparation' | 'retirement' | 'worker_join', failure: unknown): void {
+    try {
+      if (!closed && !isClosing()) return;
+      const message = failure instanceof Error ? Object.getOwnPropertyDescriptor(failure, 'message')?.value : undefined;
+      let reason = 'unclassified';
+      switch (message) {
+        case 'preparation retirement controller has no registered actual birth': reason = 'unregistered_controller_birth'; break;
+        case 'preparation retirement reservation has no registered actual birth': reason = 'unregistered_reservation_birth'; break;
+        case 'workspace materialization has not completely joined': reason = 'materialization_join_pending'; break;
+        case 'preparation retirement substitutes its exact original joined directory birth': reason = 'joined_generation_birth_mismatch'; break;
+        case 'generation native resource owners are not retired':
+        case 'generation resources did not retire under their original StateOwner':
+        case 'private workspace descriptor retirement failed': reason = 'native_generation_retirement'; break;
+        case 'generation quarantine requires the exact host, StateRoot, generation locator and source version':
+        case 'invalid generation quarantine identity':
+        case 'generation quarantine requires private same-device no-follow parent descriptors':
+        case 'generation quarantine source identity differs or is unreadable':
+        case 'generation quarantine target requires private same-device no-follow parent descriptors':
+        case 'generation quarantine requires exactly one original or exact target; refusing conflict or identity drift':
+        case 'generation quarantine parent or source descriptor identity changed':
+        case 'generation quarantine parent fsync failed; retry the exact locator pair':
+        case 'generation quarantine no-replace rename failed; no overwrite or copy fallback is allowed':
+        case 'generation quarantine post-move descriptor identity or original absence changed': reason = 'quarantine_identity'; break;
+        case 'worker controller scope is closed':
+        case 'controller preparation birth is no longer live':
+        case 'invalid native stop scope':
+        case 'invalid native death observation': reason = 'worker_stop_channel_fenced'; break;
+      }
+      console.error(JSON.stringify({ debugTag: '[DEBUG-shutdown-retirement]', diagnosticOnly: true,
+        scope: 'installed-shutdown-retirement', stage, reason }));
+    } catch { /* Diagnosis cannot replace the original retirement failure. */ }
+  }
   function ownOperation(work: Promise<Run>, abort: AbortController, retainWorker = false): Promise<Run> {
     let operationFailure: { error: unknown } | undefined;
     const operation = work.catch(async error => {
@@ -478,6 +512,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           worker = undefined;
         }
       } catch (failure) {
+        reportShutdownRetirement(retiringPreparation ? 'preparation' : 'retirement', failure);
         // Losing the state fence cannot bypass actual resource retirement or
         // be mistaken for a graceful owner release.
         cleanupFailure ??= retiringPreparation
@@ -485,7 +520,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       } finally {
         if (worker) {
           try { const death = activeWorker ? await observeOriginalWorkerDeath(activeWorker) : await worker.stop(); assertNativeContainmentDeath(death); }
-          catch (failure) { cleanupFailure ??= failure; }
+          catch (failure) { reportShutdownRetirement('worker_join', failure); cleanupFailure ??= failure; }
         }
       }
       throw error;

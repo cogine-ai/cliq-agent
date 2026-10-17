@@ -58,6 +58,14 @@ struct platform_observation {
   uid_t uid; pid_t pid; uint64_t ticks;
   struct service service;
 };
+struct task;
+struct inspection_owner {
+  napi_env env;
+  struct task *task;
+  napi_ref handle, join_promise;
+  napi_deferred join_deferred;
+  bool retained, finalized, joined, unsafe;
+};
 struct task {
   napi_env env; napi_async_work work; napi_deferred deferred; napi_async_cleanup_hook_handle cleanup_hook;
   enum operation operation; uid_t uid; gid_t gid; char home[PATH_MAX], unit[256], job[TEXT_CAP];
@@ -68,16 +76,18 @@ struct task {
   /* Only the main loop reads/writes these timer/completion flags. In
    * particular, expiry never races a worker write to error, unsafe or secret. */
   uv_timer_t deadline_timer;
-  bool timer_initialized, timer_closing, timer_closed, work_complete, expired, cancel_requested, main_retirement_failed;
+  bool timer_initialized, timer_closing, timer_closed, work_complete, expired, cancel_requested, caller_cancelled, main_retirement_failed;
   GCancellable *cancel; GDBusConnection *bus; int runtime_fd;
   char session[TEXT_CAP]; struct stat runtime_identity, socket_identity;
   GVariant *unit_properties, *service_properties;
   const char *error; const char *result_kind;
+  struct inspection_owner *inspection;
   struct task *unretired_next;
 };
 static atomic_bool retirement_failed;
 static atomic_bool job_in_flight;
 static struct task *unretired_tasks;
+static const napi_type_tag inspection_tag = { UINT64_C(0x6dbc324eb14e4978), UINT64_C(0x84eb6af70c82d539) };
 static bool manager_shape(struct task *task);
 
 static void wipe(void *memory, size_t count) { volatile unsigned char *bytes = memory; while (count--) *bytes++ = 0; }
@@ -728,32 +738,73 @@ static void release_task(struct task *task) {
   if (task->cancel) g_object_unref(task->cancel);
   free(task);
 }
+static void release_inspection_owner(struct inspection_owner *owner) {
+  if (owner->join_promise && napi_delete_reference(owner->env, owner->join_promise) != napi_ok)
+    atomic_store(&retirement_failed, true);
+  if (owner->handle && napi_delete_reference(owner->env, owner->handle) != napi_ok)
+    atomic_store(&retirement_failed, true);
+  free(owner);
+}
 static void finish_task(struct task *task) {
   if (!task->work_complete || (task->timer_initialized && !task->timer_closed)) return;
   /* Neither the async worker nor the timer can still access the task. The
    * queued-cancel path never ran execute, so retire its copied input here. */
   if (task->secret) { wipe(task->secret, task->secret_size); free(task->secret); task->secret = NULL; }
+  if (task->caller_cancelled) task->error = "platform_cancelled";
   if (task->expired || !remaining(task)) task->error = "platform_timeout";
   if (task->main_retirement_failed) {
     task->unsafe = true; task->error = "resource_retirement"; atomic_store(&retirement_failed, true);
   }
   retire_main_handles(task);
-  if (!task->env_closing && task->deferred) {
+  const bool env_closing = task->env_closing;
+  struct inspection_owner *owner = task->inspection;
+  napi_env env = task->env;
+  napi_handle_scope scope = NULL;
+  if (!env_closing) {
     /* A uv_close callback has no implicit Node-API handle scope. A broken
      * environment cannot safely publish a reply or continue this producer. */
-    napi_handle_scope scope;
-    if (napi_open_handle_scope(task->env, &scope) != napi_ok)
+    if (napi_open_handle_scope(env, &scope) != napi_ok)
       napi_fatal_error("cliq-credential-platform", NAPI_AUTO_LENGTH, "platform completion scope unavailable", NAPI_AUTO_LENGTH);
+  }
+  if (owner && owner->retained && !owner->finalized) {
+    // Keep a local handle while dropping the task's strong reference. A live
+    // JS owner may then outlive this task, but can never retain its freed pointer.
+    napi_value held; uint32_t references;
+    if ((!env_closing && napi_get_reference_value(env, owner->handle, &held) != napi_ok) ||
+        napi_reference_unref(env, owner->handle, &references) != napi_ok) {
+      task->unsafe = true; task->error = "resource_retirement"; atomic_store(&retirement_failed, true);
+    } else owner->retained = false;
+  }
+  if (!env_closing && task->deferred) {
     napi_value result = NULL;
     if (!task->error) result = result_value(task->env, task);
     napi_status settled = task->error || task->unsafe
       ? napi_reject_deferred(task->env, task->deferred, error_value(task->env, task->unsafe, task->error))
       : napi_resolve_deferred(task->env, task->deferred, result);
-    if (settled != napi_ok || napi_close_handle_scope(task->env, scope) != napi_ok)
+    if (settled != napi_ok)
       napi_fatal_error("cliq-credential-platform", NAPI_AUTO_LENGTH, "platform completion unavailable", NAPI_AUTO_LENGTH);
     task->deferred = NULL;
   }
+  if (owner) {
+    owner->task = NULL; owner->joined = true; owner->unsafe = task->unsafe;
+    task->inspection = NULL;
+  }
   atomic_store(&job_in_flight, false); release_task(task);
+  // release_task also retires variant/input storage. A positive cancellation
+  // join is published only after every worker, watchdog, bus, FD and timer gate.
+  if (owner && !env_closing && owner->join_deferred) {
+    napi_value value;
+    napi_status settled = owner->unsafe
+      ? napi_reject_deferred(env, owner->join_deferred, error_value(env, true, "resource_retirement"))
+      : napi_get_undefined(env, &value);
+    if (!owner->unsafe && settled == napi_ok) settled = napi_resolve_deferred(env, owner->join_deferred, value);
+    if (settled != napi_ok)
+      napi_fatal_error("cliq-credential-platform", NAPI_AUTO_LENGTH, "inspection join unavailable", NAPI_AUTO_LENGTH);
+    owner->join_deferred = NULL;
+  }
+  if (owner && owner->finalized) release_inspection_owner(owner);
+  if (scope && napi_close_handle_scope(env, scope) != napi_ok)
+    napi_fatal_error("cliq-credential-platform", NAPI_AUTO_LENGTH, "platform completion scope did not retire", NAPI_AUTO_LENGTH);
 }
 static void timer_closed(uv_handle_t *handle) {
   struct task *task = handle->data; task->timer_closed = true; finish_task(task);
@@ -790,6 +841,57 @@ static void complete(napi_env env, napi_status status, void *data) {
 static void cleanup_task(napi_async_cleanup_hook_handle handle, void *data) {
   (void)handle; struct task *task = data; task->env_closing = true;
   cancel_task(task); close_timer(task);
+}
+static void finalize_inspection(napi_env env, void *data, void *hint) {
+  (void)env; (void)hint; struct inspection_owner *owner = data; owner->finalized = true;
+  if (owner->task) {
+    // Strong task ownership normally prevents GC here. Environment teardown
+    // can finalize first; retain this owner until the same task's complete gate.
+    owner->task->env_closing = true;
+    cancel_task(owner->task); close_timer(owner->task);
+  } else release_inspection_owner(owner);
+}
+static napi_value cancel_inspection(napi_env env, napi_callback_info info) {
+  size_t argc = 1; napi_value args[1], receiver; bool tagged = false; struct inspection_owner *owner = NULL;
+  if (napi_get_cb_info(env, info, &argc, args, &receiver, NULL) != napi_ok || argc ||
+      napi_check_object_type_tag(env, receiver, &inspection_tag, &tagged) != napi_ok || !tagged ||
+      napi_unwrap(env, receiver, (void **)&owner) != napi_ok || !owner || owner->env != env || owner->finalized) {
+    napi_throw_type_error(env, NULL, "Credential inspection cancellation requires its original owner and no fields"); return NULL;
+  }
+  napi_value promise;
+  if (owner->join_promise) {
+    if (napi_get_reference_value(env, owner->join_promise, &promise) != napi_ok) return NULL;
+    return promise;
+  }
+  if (napi_create_promise(env, &owner->join_deferred, &promise) != napi_ok ||
+      napi_create_reference(env, promise, 1, &owner->join_promise) != napi_ok) return NULL;
+  if (owner->task) {
+    owner->task->caller_cancelled = true;
+    cancel_task(owner->task); close_timer(owner->task);
+  } else if (owner->joined) {
+    napi_value value; napi_status settled = owner->unsafe
+      ? napi_reject_deferred(env, owner->join_deferred, error_value(env, true, "resource_retirement"))
+      : napi_get_undefined(env, &value);
+    if (!owner->unsafe && settled == napi_ok) settled = napi_resolve_deferred(env, owner->join_deferred, value);
+    if (settled != napi_ok) return NULL;
+    owner->join_deferred = NULL;
+  }
+  return promise;
+}
+static bool own_inspection(struct task *task, napi_value promise) {
+  struct inspection_owner *owner = calloc(1, sizeof(*owner));
+  if (!owner) return false;
+  owner->env = task->env; owner->task = task;
+  if (napi_type_tag_object(task->env, promise, &inspection_tag) != napi_ok ||
+      napi_wrap(task->env, promise, owner, finalize_inspection, NULL, &owner->handle) != napi_ok) {
+    free(owner); return false;
+  }
+  task->inspection = owner;
+  uint32_t references;
+  if (napi_reference_ref(task->env, owner->handle, &references) != napi_ok) return false;
+  owner->retained = true;
+  const napi_property_descriptor method = {"cancelAndJoin", NULL, cancel_inspection, NULL, NULL, NULL, napi_default, NULL};
+  return napi_define_properties(task->env, promise, 1, &method) == napi_ok;
 }
 static napi_value submit(napi_env env, napi_callback_info info, bool manager) {
   if (atomic_load(&retirement_failed)) { napi_throw(env, error_value(env, true, "resource_retirement")); return NULL; }
@@ -846,6 +948,7 @@ static napi_value submit(napi_env env, napi_callback_info info, bool manager) {
   if (condition) goto failed;
   task->condition_ready = true;
   if (napi_create_promise(env, &task->deferred, &promise) != napi_ok ||
+      (task->operation == INSPECT_SECRET && !own_inspection(task, promise)) ||
       napi_create_string_utf8(env, "cliq-linux-credential-platform", NAPI_AUTO_LENGTH, &resource) != napi_ok ||
       napi_create_async_work(env, NULL, resource, execute, complete, task, &task->work) != napi_ok ||
       napi_add_async_cleanup_hook(env, cleanup_task, task, &task->cleanup_hook) != napi_ok) goto failed;
@@ -885,7 +988,7 @@ static napi_value initialize(napi_env env, napi_value exports) {
     {"userManager", NULL, user_manager, NULL, NULL, NULL, napi_default, NULL},
   };
   if (napi_define_properties(env, exports, sizeof(methods) / sizeof(*methods), methods) != napi_ok) return NULL;
-  set_number(env, exports, "interfaceVersion", 1); return exports;
+  set_number(env, exports, "interfaceVersion", 2); return exports;
 }
 NAPI_MODULE(cliq_linux_credential_platform, initialize)
 #else

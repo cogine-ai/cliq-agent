@@ -13,11 +13,13 @@ export LC_ALL=C
 
 probe_campaign_kind=diagnostic
 probe_run_driver_mode=--campaign
+probe_finalizer_shutdown=0
 case ${1:-} in
   --installed) probe_campaign_kind=installed; shift ;;
   --installed-retirement-refusal) probe_campaign_kind=retirement; shift ;;
   --secrets) probe_campaign_kind=secrets; shift ;;
   --credentials) probe_campaign_kind=credentials; shift ;;
+  --credential-finalizer-shutdown) probe_campaign_kind=credentials; probe_finalizer_shutdown=1; shift ;;
   --run-journey) probe_campaign_kind=run-journey; shift ;;
   --run-failure-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--failure-campaign; shift ;;
   --run-retry-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--retry-campaign; shift ;;
@@ -25,10 +27,12 @@ case ${1:-} in
   --run-storage-failure-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--storage-failure-campaign; shift ;;
   --run-shutdown-admission-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--shutdown-admission-campaign; shift ;;
   --run-shutdown-preparation-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--shutdown-preparation-campaign; shift ;;
+  --run-shutdown-received-tool-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--shutdown-received-tool-campaign; shift ;;
+  --run-shutdown-pending-model-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--shutdown-pending-model-campaign; shift ;;
 esac
-readonly probe_campaign_kind probe_run_driver_mode
+readonly probe_campaign_kind probe_run_driver_mode probe_finalizer_shutdown
 if [[ $(id -u) != 0 || $# -lt 1 || $# -gt 2 ]]; then
-  printf 'usage: sudo bash %s [--installed|--installed-retirement-refusal|--secrets|--credentials|--run-journey|--run-failure-journey|--run-retry-journey|--run-authority-failure-journey|--run-storage-failure-journey|--run-shutdown-admission-journey|--run-shutdown-preparation-journey] ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' "$0" >&2
+  printf 'usage: sudo bash %s [--installed|--installed-retirement-refusal|--secrets|--credentials|--credential-finalizer-shutdown|--run-journey|--run-failure-journey|--run-retry-journey|--run-authority-failure-journey|--run-storage-failure-journey|--run-shutdown-admission-journey|--run-shutdown-preparation-journey|--run-shutdown-received-tool-journey|--run-shutdown-pending-model-journey] ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' "$0" >&2
   exit 2
 fi
 readonly probe_node=$1
@@ -52,9 +56,14 @@ readonly probe_installed_driver="$probe_source_dir/qualify-installed-keeper.ts"
 readonly probe_secret_driver="$probe_source_dir/qualify-secret-service.ts"
 readonly probe_secret_source="$probe_source_dir/cliq-secret-service-probe.c"
 readonly probe_sqlite_driver="$probe_source_dir/qualify-sqlite-paths.ts"
-readonly probe_credential_driver="$probe_source_dir/testing/credential-installed-journey.ts"
+if [[ "$probe_finalizer_shutdown" = 1 ]]; then
+  readonly probe_credential_driver="$probe_source_dir/testing/credential-finalizer-shutdown.ts"
+else
+  readonly probe_credential_driver="$probe_source_dir/testing/credential-installed-journey.ts"
+fi
 readonly probe_credential_source="$probe_source_dir/testing/credential-journey-observer.c"
 readonly probe_credential_store_source="$probe_source_dir/testing/credential-store-fixture.c"
+readonly probe_finalizer_source="$probe_source_dir/testing/credential-finalizer-service.c"
 readonly probe_run_driver="$probe_source_dir/qualify-installed-run-journey.ts"
 if [[ "$probe_campaign_kind" = installed || "$probe_campaign_kind" = retirement || "$probe_campaign_kind" = secrets || "$probe_campaign_kind" = credentials || "$probe_campaign_kind" = run-journey ]]; then
   probe_typescript_driver=$probe_installed_driver
@@ -67,6 +76,7 @@ if [[ "$probe_campaign_kind" = installed || "$probe_campaign_kind" = retirement 
     probe_typescript_driver=$probe_credential_driver
     [[ -f "$probe_credential_driver" && ! -L "$probe_credential_driver" && -f "$probe_credential_source" && ! -L "$probe_credential_source" ]] || exit 2
     [[ -f "$probe_credential_store_source" && ! -L "$probe_credential_store_source" ]] || exit 2
+    [[ "$probe_finalizer_shutdown" != 1 || ( -f "$probe_finalizer_source" && ! -L "$probe_finalizer_source" ) ]] || exit 2
   fi
   if [[ "$probe_campaign_kind" = run-journey ]]; then
     probe_typescript_driver=$probe_run_driver
@@ -597,8 +607,8 @@ if [[ "$probe_campaign_kind" = secrets ]]; then
   chmod 0555 "$probe_secret_helper"
 fi
 if [[ "$probe_campaign_kind" = credentials ]]; then
-  [[ -x /usr/bin/gnome-keyring-daemon && -x /usr/bin/busctl ]] || {
-    printf 'actual GNOME Keyring daemon and user-bus inspection are required\n' >&2; exit 1;
+  [[ -x /usr/bin/busctl && ( "$probe_finalizer_shutdown" = 1 || -x /usr/bin/gnome-keyring-daemon ) ]] || {
+    printf 'actual Secret Service fixture and user-bus inspection are required\n' >&2; exit 1;
   }
   unset PKG_CONFIG_PATH PKG_CONFIG_LIBDIR
   read -r -a probe_gio_flags <<< "$(pkg-config --cflags --libs gio-2.0)"
@@ -606,6 +616,10 @@ if [[ "$probe_campaign_kind" = credentials ]]; then
   chmod 0555 "$probe_fixture/cliq-credential-journey-observer"
   cc -std=c11 -O2 -Wall -Wextra -Werror "$probe_credential_store_source" -o "$probe_fixture/cliq-credential-store-fixture" "${probe_gio_flags[@]}"
   chmod 0555 "$probe_fixture/cliq-credential-store-fixture"
+  if [[ "$probe_finalizer_shutdown" = 1 ]]; then
+    cc -std=c11 -O2 -Wall -Wextra -Werror "$probe_finalizer_source" -o "$probe_fixture/cliq-credential-finalizer-service" "${probe_gio_flags[@]}"
+    chmod 0555 "$probe_fixture/cliq-credential-finalizer-service"
+  fi
 fi
 if [[ "$probe_campaign_kind" = run-journey ]]; then
   [[ -x /usr/bin/gnome-keyring-daemon && -x /usr/bin/busctl && -x /usr/bin/openssl ]] || {

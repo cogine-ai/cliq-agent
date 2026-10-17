@@ -59,7 +59,7 @@ import {
 import { advanceTimeFence } from './canonical-time.js';
 import { decodeSecretServiceObservation, decodeRetainedSecretServiceObservation,
   decodeSecretServiceSelector, type SecretServiceObservation, type SecretServiceSelector,
-  type NativeCredentialPlatformBinding } from './credential-platform.js';
+  type NativeCredentialInspection, type NativeCredentialPlatformBinding } from './credential-platform.js';
 import { ensureInstalledCredentialSupervisor, type CredentialFinalizeRequest } from './installed-credential-client.js';
 import { ContentAddressedStore } from './cas.js';
 import { openLocalControlListener, type AuthenticatedControlIdentity, type LocalControlConnection, type LocalControlListener } from './control-channel.js';
@@ -1531,7 +1531,8 @@ function failStateStoreOpening(lock: HeldStateOwnerLock, driver: SqliteDriver | 
 const unretiredStateStoreClosings = new Set<StateStore>();
 
 type InstalledCredentialFinalizer = { driver: SqliteDriver; owner: StateOwnerContext; selected: HeldInstalledRuntime;
-  active: boolean; task?: Promise<CredentialAuthorityOperationV1>; retirementFailure?: ResourceRetirementError };
+  active: boolean; task?: Promise<CredentialAuthorityOperationV1>; inspection?: NativeCredentialInspection;
+  inspectionJoin?: Promise<void>; retirementFailure?: ResourceRetirementError };
 const installedCredentialFinalizers = new WeakMap<StateStore, InstalledCredentialFinalizer>();
 
 /** Private physical producer registry. Entries outlive ordinary caller errors
@@ -2126,8 +2127,29 @@ export class StateStore {
         if (operation.phase !== 'secret_stored' || !expected)
           throw new KernelStorageError('STATE_TRANSITION_INVALID', 'credential continuation is not secret_stored');
         const original = retainedCredentialChannel(held, operation);
-        const fresh = decodeSecretServiceObservation(await platform.secretService({ kind: 'inspect',
-          selector: credentialSelector(held, operation), expectedObservation: expected }));
+        // Closing may have won while the genuine selection/scope opened.
+        // A committed replay above does not need a new inspection or grant.
+        if (this.closeRequested || this.closed || this.released)
+          throw new KernelStorageError('RECOVERY_REQUIRED', 'credential StateOwner is closing');
+        const inspection = platform.secretService({ kind: 'inspect',
+          selector: credentialSelector(held, operation), expectedObservation: expected });
+        heldOwner.inspection = inspection;
+        let fresh: SecretServiceObservation;
+        try { fresh = decodeSecretServiceObservation(await inspection); }
+        catch (error) {
+          if (error instanceof ResourceRetirementError) heldOwner.retirementFailure ??= error;
+          throw error;
+        }
+        finally {
+          // The original credential scope must outlive native cancellation,
+          // even when its observation refused. Never detach the native job or
+          // release the database/guard while its timer/bus/worker may remain.
+          try { if (heldOwner.inspectionJoin) await heldOwner.inspectionJoin; }
+          catch (error) { heldOwner.retirementFailure ??= error instanceof ResourceRetirementError ? error :
+            new ResourceRetirementError('credential inspection cancellation did not retire', error); }
+          if (heldOwner.retirementFailure) throw heldOwner.retirementFailure;
+          heldOwner.inspection = undefined; heldOwner.inspectionJoin = undefined;
+        }
         const observationBody = (value: SecretServiceObservation) => {
           const { kind: _kind, observationDigest: _digest, ...body } = value; return body;
         };
@@ -2883,6 +2905,21 @@ export class StateStore {
     clearTimeout(this.installedMaintenanceTimer); this.installedMaintenanceTimer = undefined;
     for (const task of this.installedSubmissionTasks) task.abort.abort();
     for (const task of this.sourceInspectionTasks) task.abort.abort();
+    const credential = installedCredentialFinalizers.get(this);
+    if (credential?.inspection && !credential.inspectionJoin) {
+      try {
+        // Enter the exact native inspection owner's cancellation before the
+        // service joins its handler. The handler retains and reawaits this
+        // memoized join inside its still-held credential authority scope.
+        credential.inspectionJoin = credential.inspection.cancelAndJoin();
+        void credential.inspectionJoin.catch(error => {
+          credential.retirementFailure ??= error instanceof ResourceRetirementError ? error :
+            new ResourceRetirementError('credential inspection cancellation did not retire', error);
+        });
+      } catch (error) {
+        credential.retirementFailure ??= new ResourceRetirementError('credential inspection cancellation did not start', error);
+      }
+    }
     for (const transport of this.modelTransports.values()) {
       try {
         // Native close starts revocation synchronously and memoizes its join.

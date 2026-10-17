@@ -72,6 +72,40 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+  linux-installed-finalizer-shutdown:
+    name: Linux installed original credential finalizer ordinary SIGTERM
+    # The owned external service stays on the actual disposable-user bus for
+    # the whole scenario. This is not GNOME Keyring or full installed I1.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+        id: build
+      - name: Install actual signed image and D-Bus fixture prerequisites
+        run: sudo apt-get update && sudo apt-get install -y libglib2.0-dev musl-tools bubblewrap
+      - name: Join the original installed finalizer before ordinary two-second stop
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          probe_node=$(realpath "$(command -v node)")
+          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --credential-finalizer-shutdown "$probe_node" "$RUNNER_TEMP/cliq-finalizer-shutdown"
+      - name: Retain only the bounded closed finalizer and unchanged-runner feedback
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installed-finalizer-shutdown-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cliq-finalizer-shutdown/*.json
+          if-no-files-found: warn
+          retention-days: 7
+
   linux-installed-authority-stop:
     name: Linux installed post-admission credential refusal and retirement
     runs-on: ubuntu-22.04
@@ -204,6 +238,53 @@ jobs:
         with:
           name: installed-shutdown-preparation-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/cliq-installed-shutdown-preparation/*.json
+          if-no-files-found: warn
+          retention-days: 7
+
+  linux-installed-effects-shutdown:
+    name: Linux installed SIGTERM preserves actual received tool and model effects
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+      - run: npm ci
+      - run: node --test scripts/kernel/testing/installed-run-client.test.mjs
+      - run: npm run build
+        id: build
+      - name: Install actual signed transport and worker build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap e2fsprogs
+      - name: Preserve the actual received private-tool result through ordinary stop
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          probe_node=$(realpath "$(command -v node)")
+          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --run-shutdown-received-tool-journey "$probe_node" "$RUNNER_TEMP/cliq-installed-shutdown-received-tool"
+      - name: Preserve the original unknown model claim and charge before worker fencing
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          probe_node=$(realpath "$(command -v node)")
+          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --run-shutdown-pending-model-journey "$probe_node" "$RUNNER_TEMP/cliq-installed-shutdown-pending-model"
+      - name: Retain bounded received-tool shutdown and unchanged-runner feedback
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installed-shutdown-received-tool-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cliq-installed-shutdown-received-tool/*.json
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Retain bounded pending-model shutdown and unchanged-runner feedback
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installed-shutdown-pending-model-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cliq-installed-shutdown-pending-model/*.json
           if-no-files-found: warn
           retention-days: 7
 

@@ -44,7 +44,7 @@ try {
   const platformModule = { exports: {} }, brokerModule = { exports: {} };
   process.dlopen(platformModule, process.argv[2]); process.dlopen(brokerModule, process.argv[3]);
   const platform = platformModule.exports, broker = brokerModule.exports;
-  assert.equal(platform.interfaceVersion, 1);
+  assert.equal(platform.interfaceVersion, 2);
   assert([1, 2, 3].includes(broker.interfaceVersion)); // Original lifecycle RED remains executable on the original ABI.
   const selector = { itemId: 'preparation-lifecycle-item', ownerPrincipalId: 'component-principal',
     stateRootIdentityDigest: '1'.repeat(64), creatingOperationId: 'component-create',

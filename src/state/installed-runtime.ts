@@ -24,7 +24,7 @@ import { MODEL_BROKER_ENTRY_ID, MODEL_BROKER_RELATIVE_PATH, InstalledModelBroker
   type ModelBrokerBinding, type NativeModelBrokerBinding, type NativeModelTransport, type NativeModelNoReleaseFence } from './model-broker-native.js';
 import { runInstalledCredentialAuthority, type HeldCredentialAuthorityLock } from './store.js';
 import type { NativeWorkerBinding, NativeWorkerImage } from '../sandbox/linux-worker.js';
-import type { NativeCredentialPlatformBinding } from './credential-platform.js';
+import type { NativeCredentialInspection, NativeCredentialPlatformBinding, NativeSecretServiceInput } from './credential-platform.js';
 import { acquireHeldInstalledAnchor, executeHeldInstalledImage, initializeHeldInstalledKeeper, loadHeldStateOwnerImage,
   stateRootIdentityFromDescriptor, withHeldCredentialNativeScope, STATE_OWNER_NATIVE_ENTRY_ID, STATE_OWNER_NATIVE_RELATIVE_PATH,
   type NativeStateOwner } from './native-owner.js';
@@ -913,32 +913,73 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
                 const loaded = new Module('cliq-installed-linux-credential-platform');
                 process.dlopen(loaded, `/proc/self/fd/${file.handle.fd}`);
                 const native = loaded.exports as NativeCredentialPlatformBinding;
-                if (native.interfaceVersion !== 1 || typeof native.secretService !== 'function' || typeof native.userManager !== 'function' ||
+                if (native.interfaceVersion !== 2 || typeof native.secretService !== 'function' || typeof native.userManager !== 'function' ||
                     typeof native.currentUser !== 'function')
                   mismatch('unsupported installed credential platform interface');
-                const invoke = <T>(operation: () => Promise<T>): Promise<T> => {
-                  if (closed) mismatch('installed runtime handle is closed');
-                  assertSelection();
-                  const job = Promise.resolve().then(operation).then(result => { assertSelection(); return result; }, error => {
-                    if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT') {
-                      const failure = new ResourceRetirementError('credential platform resources did not retire', error);
-                      rememberRetirement(failure); throw failure;
-                    }
-                    // Only fixed native status codes survive. Remote/native
-                    // messages, payloads and stacks never become receipt data.
-                    const value = error as { code?: unknown; platformCode?: unknown } | null;
-                    const platformCode = value?.code === 'ERR_CLIQ_CREDENTIAL_PLATFORM' &&
-                      (value.platformCode === 'delete_denied' || value.platformCode === 'delete_failed')
-                      ? value.platformCode : 'platform_store_unavailable';
-                    throw new KernelStorageError('RECOVERY_REQUIRED', 'installed credential platform rejected an operation',
-                      { cause: Object.freeze({ platformCode }) });
-                  });
+                const refused = (error: unknown): never => {
+                  if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT') {
+                    const failure = new ResourceRetirementError('credential platform resources did not retire', error);
+                    rememberRetirement(failure); throw failure;
+                  }
+                  // Only fixed native status codes survive. Remote/native
+                  // messages, payloads and stacks never become receipt data.
+                  const value = error as { code?: unknown; platformCode?: unknown } | null;
+                  const platformCode = value?.code === 'ERR_CLIQ_CREDENTIAL_PLATFORM' &&
+                    (value.platformCode === 'delete_denied' || value.platformCode === 'delete_failed')
+                    ? value.platformCode : 'platform_store_unavailable';
+                  throw new KernelStorageError('RECOVERY_REQUIRED', 'installed credential platform rejected an operation',
+                    { cause: Object.freeze({ platformCode }) });
+                };
+                const track = <T>(pending: Promise<T>): Promise<T> => {
+                  const job = pending.then(result => { assertSelection(); return result; }, refused);
                   platformJobs.add(job);
                   void job.finally(() => platformJobs.delete(job)).catch(() => {});
                   return job;
                 };
-                credentialPlatform = Object.freeze({ interfaceVersion: 1 as const,
-                  secretService: input => invoke(() => native.secretService(input)),
+                const invoke = <T>(operation: () => Promise<T>): Promise<T> => {
+                  if (closed) mismatch('installed runtime handle is closed');
+                  assertSelection();
+                  return track(Promise.resolve().then(operation));
+                };
+                const secretService = ((input: NativeSecretServiceInput): Promise<unknown> => {
+                  if (input.kind !== 'inspect') return invoke(() => native.secretService(input));
+                  if (closed) mismatch('installed runtime handle is closed');
+                  assertSelection();
+                  let original: NativeCredentialInspection;
+                  try { original = native.secretService(input); }
+                  catch (error) { return refused(error); }
+                  // Publish the actual owner synchronously, before a caller can
+                  // request shutdown. A .then alone would discard cancellation.
+                  const result = track(original) as NativeCredentialInspection;
+                  if (typeof original.cancelAndJoin !== 'function') {
+                    const failure = new ResourceRetirementError('credential inspection lacks its original native cancellation owner', undefined);
+                    rememberRetirement(failure); throw failure;
+                  }
+                  let joining: Promise<void> | undefined;
+                  Object.defineProperty(result, 'cancelAndJoin', { value: function (this: NativeCredentialInspection, ...args: unknown[]) {
+                    if (this !== result || args.length) throw new TypeError('credential inspection cancellation requires its original owner and no fields');
+                    if (joining) return joining;
+                    const failedJoin = (error: unknown): never => {
+                      const failure = error instanceof ResourceRetirementError ? error
+                        : new ResourceRetirementError('credential inspection cancellation did not retire', error);
+                      rememberRetirement(failure); throw failure;
+                    };
+                    let nativeJoin: Promise<void>;
+                    try { nativeJoin = original.cancelAndJoin(); }
+                    catch (error) { nativeJoin = Promise.reject(error); }
+                    joining = nativeJoin.then(() => result.then(() => undefined, error => {
+                      // Ordinary observation refusal is not a failed physical
+                      // join. Retirement uncertainty always remains sticky.
+                      if (error instanceof ResourceRetirementError) throw error;
+                    }), failedJoin);
+                    platformJobs.add(joining);
+                    void joining.finally(() => platformJobs.delete(joining!)).catch(() => {});
+                    return joining;
+                  } });
+                  return result;
+                }) as NativeCredentialPlatformBinding['secretService'];
+                credentialPlatform = Object.freeze({ interfaceVersion: 2 as const,
+                  secretService,
                   userManager: input => invoke(() => native.userManager(input)),
                   currentUser: () => {
                     assertSelection();

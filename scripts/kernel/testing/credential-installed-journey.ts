@@ -35,7 +35,7 @@ const properties = ['LoadState', 'ActiveState', 'SubState', 'MainPID', 'ExecMain
   'InvocationID', 'FragmentPath', 'Type', 'WorkingDirectory', 'Delegate', 'KillMode', 'Restart', 'NRestarts',
   'Slice', 'Requires', 'After', 'Before', 'Conflicts'] as const;
 
-async function readLedger(filename: string): Promise<Ledger> {
+export async function readLedger(filename: string): Promise<Ledger> {
   const held = await open(filename, constants.O_RDONLY | constants.O_NOFOLLOW);
   let ledger: Ledger;
   try {
@@ -74,7 +74,7 @@ async function readLedger(filename: string): Promise<Ledger> {
 
 // Same post-order, no-follow transfer as the qualified installed fixture. Only
 // the newly built package changes owner; never its stage/carrier or StateRoot.
-async function transferPackage(filename: string, uid: number, gid: number): Promise<void> {
+export async function transferPackage(filename: string, uid: number, gid: number): Promise<void> {
   const before = await lstat(filename);
   assert(!before.isSymbolicLink() && (before.isDirectory() || before.isFile()));
   assert.equal(before.uid, 0); assert.equal(before.gid, 0);
@@ -91,7 +91,7 @@ async function transferPackage(filename: string, uid: number, gid: number): Prom
   } finally { await held.close(); }
 }
 
-async function stageInstaller(recipe: Recipe): Promise<void> {
+export async function stageInstaller(recipe: Recipe): Promise<void> {
   const result = await build({ entryPoints: [fileURLToPath(new URL('./installed-runtime-installer.ts', import.meta.url))],
     outfile: recipe.installerEntry, bundle: true, platform: 'node', format: 'esm', target: 'node22.13',
     metafile: true, write: false });
@@ -1646,8 +1646,14 @@ async function campaign(filename: string): Promise<void> {
   if (primary) throw new Error('actual installed credential journey failed; see the closed diagnostic report');
 }
 
-assert.equal(process.platform, 'linux', 'installed credential journey requires Linux');
-assert.equal(process.arch, 'x64', 'no installed credential carrier qualified for this architecture');
-const [mode, filename, ...extra] = process.argv.slice(2);
-assert.equal(mode, '--campaign'); assert(filename && extra.length === 0);
-await campaign(filename);
+// The fixed systemd recipe invokes this source through tsx. The basename
+// guard also keeps these preparation helpers inert if another driver bundles
+// them, where esbuild would otherwise rewrite both import.meta.url values.
+if (process.argv[1] && path.basename(process.argv[1]) === 'credential-installed-journey.ts' &&
+    path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  assert.equal(process.platform, 'linux', 'installed credential journey requires Linux');
+  assert.equal(process.arch, 'x64', 'no installed credential carrier qualified for this architecture');
+  const [mode, filename, ...extra] = process.argv.slice(2);
+  assert.equal(mode, '--campaign'); assert(filename && extra.length === 0);
+  await campaign(filename);
+}
