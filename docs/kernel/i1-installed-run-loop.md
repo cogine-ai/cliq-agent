@@ -378,6 +378,14 @@ release another effect. The existing exhausted-freshness recovery assertions
 remain unchanged. Current-source Linux GREEN is still required; neither these
 implementation changes nor the normal received-tool SIGTERM campaign qualifies
 the post-result failure-recovery cut.
+The original-release timeout remains under temporary fixed-stage diagnosis.
+Statuses 4101..4109 are still timeout refusals: they indicate only the last
+observed edit boundary (validation/read/decode/search/compose/write/fsync/cleanup/
+return) in the original private stderr memfd. A single-byte non-consuming read
+may observe progress after the five-second poll; it does not prove where time
+was spent, grant more time, change an outcome or supply retirement evidence.
+Absent or unreadable stage data retains the original 4002 refusal. These tagged
+diagnostics must be removed after genuine root-cause GREEN, not on a hypothesis.
 Stopped worker recovery retains the exact wait/nonce/anchor until its unique
 atomic terminal transaction; it never exposes a transient queued replacement.
 The real worker campaign exercises these branches separately from

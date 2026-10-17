@@ -771,7 +771,19 @@ static int controller(void) {
                     int ready;
                     do { ready = poll(&observed, 1, OBSERVATION_TIMEOUT_MS); }
                     while (ready < 0 && errno == EINTR && !shutdown_requested);
-                    if (ready == 0) response.status = 4002;
+                    if (ready == 0) {
+                        response.status = 4002;
+                        /* Temporary [DEBUG-shutdown-retirement]: non-consuming,
+                         * bounded observation of the signed edit's last fixed
+                         * boundary. It may advance after poll returns; this is
+                         * not proof of where time was spent or any success. */
+                        int saved = errno;
+                        unsigned char boundary;
+                        ssize_t observed_bytes = pread(scope->stderr_fd, &boundary, 1, 0);
+                        errno = saved;
+                        if (observed_bytes == 1 && boundary >= '1' && boundary <= '9')
+                            response.status = 4100 + (uint32_t)(boundary - '0');
+                    }
                     else if (ready < 0) response.status = 4003;
                     else if ((observed.revents & POLLIN) == 0) response.status = 4004;
                     else if (!cliq_receive(scope->channel, &response, extra, &extras)) response.status = 4005;

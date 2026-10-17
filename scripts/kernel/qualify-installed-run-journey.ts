@@ -215,7 +215,7 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
       responseContract: { mode: 'native-tools', toolCallsAllowed: true },
       messages: next.messages.map((entry: Record<string, any>) => entry.role === 'assistant'
         ? { role: 'assistant', contentUtf8: entry.content ?? '', toolCalls: (entry.tool_calls ?? []).map((call: Record<string, any>, index: number) => ({
-          callId: call.id, index, toolName: call.function.name, arguments: { encoding: 'utf8_json_fragment', utf8: call.function.arguments } })) }
+          callId: call.id, index, toolName: call.function.name, arguments: { encoding: 'jcs_json', value: parseJsonStrict(call.function.arguments) } })) }
         : entry.role === 'tool' ? { role: 'tool', toolCallId: entry.tool_call_id, contentUtf8: entry.content }
           : { role: entry.role, contentUtf8: entry.content }),
       tools: next.tools.map((tool: Record<string, any>, index: number) => ({ index, name: tool.function.name, description: tool.function.description,
@@ -1250,6 +1250,14 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       assert.equal(intent.origin, 'runtime'); assert.equal(intent.runtimeSubtype, 'context_window_exhausted');
       assert.equal(intent.reason, 'runtime_failed'); assert.equal(intent.targetStatus, 'failed'); assert.equal(intent.runId, exhaustedRun.id);
       const predictedExhausted = resourceRequests[4]!.predictedNext!;
+      const comparisonFields = (value: Record<string, any>) => {
+        for (const field of ['requestBodyBytes', 'nextPromptTokens']) assert(Number.isSafeInteger(value[field]) && value[field] >= 0);
+        assert.match(value.modelVisiblePromptDigest, /^[a-f0-9]{64}$/u);
+        return { requestBodyBytes: value.requestBodyBytes, nextPromptTokens: value.nextPromptTokens,
+          modelVisiblePromptDigest: value.modelVisiblePromptDigest };
+      };
+      const comparison = { actual: comparisonFields(intent), predicted: comparisonFields(predictedExhausted) };
+      resource.exhaustion = { qualified: false, comparison };
       for (const field of ['requestBodyBytes', 'nextPromptTokens', 'modelVisiblePromptDigest']) assert.equal(intent[field], predictedExhausted[field as keyof typeof predictedExhausted]);
       assert.equal(intent.trigger, 'request_body_bytes'); assert.equal(intent.requestBodyLimitBytes, 1048576);
       assert(intent.nextPromptTokens < intent.triggerThresholdTokens); assert(intent.requestBodyBytes > 1048576);
@@ -1259,7 +1267,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       for (const field of ['trigger', 'modelVisiblePromptDigest', 'requestBodyBytes', 'requestBodyLimitBytes', 'contextManifestRef',
         'nextPromptTokens', 'triggerThresholdTokens', 'hardPromptTokens', 'protectedTokens', 'sourceInputTokenCap'])
         assert.equal(detail.reasonDetail[field], intent[field]);
-      resource.exhaustion = { qualified: true, runId: exhaustedRun.id, predictedNormal: predictedExhausted,
+      resource.exhaustion = { qualified: true, runId: exhaustedRun.id, predictedNormal: predictedExhausted, comparison,
         stopIntentRef: exhausted.snapshot.run.stopIntentRef, terminalDetailRef: exhausted.snapshot.run.terminalDetailRef,
         contextManifestRef: intent.contextManifestRef,
         trigger: 'request_body_bytes', completeValidResponseRetained: true, noExtraModelPreparationOrClaim: true,

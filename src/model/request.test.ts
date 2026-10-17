@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
+import { parseJsonStrict } from '../kernel/json.js';
 import { planCanonicalArtifact } from '../kernel/artifact-plan.js';
 import type { ProviderName } from '../kernel/types.js';
 import type { ModelTextV1, ToolCallInputV1 } from '../protocol/agent-ir.js';
@@ -8,7 +9,9 @@ import type { ObservedToolArguments } from '../protocol/agent-ir.js';
 import { type ResolveToolInput, type CompiledModelObservation } from './attempt.js';
 import { validateRunAssembly } from './run-assembly.js';
 import { priceTableDigest } from './pricing.js';
-import { MODEL_REQUEST_BODY_LIMIT_BYTES, MISSING_TOOL_NAME, type NormalPromptProjectionV1 } from './request.js';
+import { observeProviderResponse } from './provider-observation.js';
+import { buildModelRequestWire, estimatePromptTokens, MODEL_REQUEST_BODY_LIMIT_BYTES, MISSING_TOOL_NAME,
+  type ModelVisiblePromptV1, type NormalPromptProjectionV1 } from './request.js';
 import { normalInput, ref, reseal, testFixture } from './testing/fixtures.js';
 
 const AT = '2026-09-05T00:00:02.000Z';
@@ -270,6 +273,34 @@ test('request handles cannot be forged, substituted, or used with a different lo
   const extended = normalInput(input);
   Object.assign(extended.invocation, { kind: 'context_compaction' });
   assert.throws(() => model.prepare(extended), /invocation.*shape/);
+});
+
+test('valid observed arguments retain canonical prompt identity even when fragment wire bytes match', () => {
+  const response = { model: 'model-1', choices: [{ index: 0, finish_reason: 'tool_calls', message: {
+    role: 'assistant', content: 'Owned reply.', tool_calls: [{ id: 'owned-call', type: 'function',
+      function: { name: 'owned_unavailable_tool', arguments: '{}' } }]
+  } }] };
+  const observed = observeProviderResponse({ provider: 'openai-compatible', model: 'model-1', negotiatedMode: 'native-tools',
+    status: 200, mediaType: 'application/json', bytes: encode(response), observedAt: AT }).observation;
+  assert.equal(observed.kind, 'decoded');
+  if (observed.kind !== 'decoded') return;
+  const argumentsValue = observed.toolCalls[0]!.input;
+  assert.deepEqual(canonicalJsonBytes(argumentsValue), canonicalJsonBytes({ encoding: 'jcs_json', value: {} }));
+  const prompt = (args: ObservedToolArguments): ModelVisiblePromptV1 => ({ format: 'cliq-model-visible-prompt-v1',
+    responseContract: { mode: 'native-tools', toolCallsAllowed: true }, tools: [], messages: [
+      { role: 'assistant', contentUtf8: 'Owned reply.', toolCalls: [{ callId: 'owned-call', index: 0,
+        toolName: 'owned_unavailable_tool', arguments: args }] },
+      { role: 'tool', toolCallId: 'owned-call', contentUtf8: '{"code":"TOOL_NOT_FOUND"}' }
+    ] });
+  const canonical = prompt(argumentsValue);
+  const strictForecast = prompt({ encoding: 'jcs_json', value: parseJsonStrict(response.choices[0]!.message.tool_calls[0]!.function.arguments) });
+  const fragment = prompt({ encoding: 'utf8_json_fragment', utf8: '{}' });
+  assert.equal(canonicalSha256(strictForecast), canonicalSha256(canonical));
+  assert.notEqual(canonicalSha256(fragment), canonicalSha256(canonical));
+  const authority = { provider: 'openai-compatible' as const, model: 'model-1', streaming: false, contextLimitTokens: 32768 };
+  assert.deepEqual(buildModelRequestWire(authority, fragment, 4096, 'native-tools').bodyBytes,
+    buildModelRequestWire(authority, canonical, 4096, 'native-tools').bodyBytes);
+  assert.equal(estimatePromptTokens(fragment), estimatePromptTokens(canonical));
 });
 
 test('object-native histories preserve typed arguments and malformed fragments without decoding them again', () => {

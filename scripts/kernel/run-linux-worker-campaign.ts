@@ -282,6 +282,12 @@ async function checkpointBytes(store: StateStore, runId: string) {
   return { closure, bytes: Buffer.concat(chunks) };
 }
 
+function workerLaunchHistory(stateRoot: string, runId: string): WorkerLaunch[] {
+  const metadata = openSqliteDriver(path.join(stateRoot, KERNEL_DATABASE_FILENAME));
+  try { return metadata.readSnapshot(connection => readWorkerLaunchesForRun(connection, runId)); }
+  finally { metadata.close(); }
+}
+
 function assertQueuedReadyCut(actual: Awaited<ReturnType<typeof checkpointBytes>>, before: Awaited<ReturnType<typeof checkpointBytes>>) {
   assert.equal(actual.closure.run.status, 'queued'); assert.equal(actual.closure.run.activeWorkerLaunchId, undefined);
   for (const field of ['leaseEpoch', 'frontierRef', 'nextStep'] as const) assert.equal(actual.closure.run[field], before.closure.run[field]);
@@ -656,6 +662,7 @@ async function nativeEditSearchSemantics() {
     let reopened: StateStore | undefined, reopeningFailed = false, operationFailure: { error: unknown } | undefined;
     try {
       const before = await checkpointBytes(fixture.store, fixture.runId);
+      const beforeLaunches = workerLaunchHistory(fixture.stateRoot, fixture.runId);
       assert.deepEqual(before.bytes, Buffer.from(value.contents));
       const hostBefore = await stat(path.join(fixture.workspace, 'a'), { bigint: true }), startingChildren = directChildren();
       const execution = await fixture.store.loadRunExecution({ runId: fixture.runId, material: fixture.authority.material });
@@ -669,8 +676,11 @@ async function nativeEditSearchSemantics() {
       assert.equal(observation.outcome, value.outcome); assert.equal(observation.dispatchId, journal[1]!.dispatchId);
       if (value.outcome === 'error') assert.equal(observation.code, 'TOOL_EXECUTION_FAILED');
       assert.equal(after.closure.run.budgetConsumed.toolCalls, 1); assert.equal(after.closure.run.budgetReserved.toolCalls, 0);
-      const launches = after.closure.workerLaunches.filter(row => !before.closure.workerLaunches.some(old => old.launchId === row.launchId));
+      const history = workerLaunchHistory(fixture.stateRoot, fixture.runId);
+      const launches = history.filter(row => !beforeLaunches.some(old => old.launchId === row.launchId));
       assert.equal(launches.length, 1); const launch = launches[0]!;
+      assert.deepEqual(history.filter(row => row.launchId !== launch.launchId), beforeLaunches);
+      assert.deepEqual(after.closure.workerLaunches, [], 'the completed worker is absent only from the unretired projection');
       assert.equal(launch.phase, 'retired'); assert.equal(launch.generationWriteState, 'sealed'); assert(launch.workerIdentityDigest && launch.retirementEvidenceRef);
       assert.equal(after.closure.workspaceGenerations.filter(row =>
         !before.closure.workspaceGenerations.some(old => old.generationRef === row.generationRef)).length, 1);
@@ -733,6 +743,7 @@ async function receivedToolPublicationFailure(boundary: 'death' | 'snapshot' | '
   const storageFailure = Object.assign(new Error(`campaign injected received-tool ${boundary} publication storage failure`), { code: 'ENOSPC' });
   try {
     const before = await checkpointBytes(fixture.store, fixture.runId);
+    const beforeLaunches = workerLaunchHistory(fixture.stateRoot, fixture.runId);
     const sessionBefore = fixture.store.getSession(fixture.sessionId);
     const hostBefore = await stat(path.join(fixture.workspace, 'a'), { bigint: true });
     const startingChildren = directChildren();
@@ -893,9 +904,13 @@ async function receivedToolPublicationFailure(boundary: 'death' | 'snapshot' | '
     assert.deepEqual(journal.map(entry => entry.phase), ['prepared', 'dispatch_claimed', 'completed']);
     assert.deepEqual(journal.slice(0, 2), retained.cut.closure.journal.filter(entry => entry.opKind === 'tool'));
     assert.equal(after.closure.run.budgetConsumed.toolCalls, 1); assert.equal(after.closure.run.budgetReserved.toolCalls, 0);
-    assert.deepEqual(after.closure.workerLaunches.map(row => row.launchId), retained.cut.closure.workerLaunches.map(row => row.launchId));
+    const history = workerLaunchHistory(fixture.stateRoot, fixture.runId);
+    const launches = history.filter(row => !beforeLaunches.some(old => old.launchId === row.launchId));
+    assert.equal(launches.length, 1); assert.equal(launches[0]!.launchId, retained.launchId);
+    assert.deepEqual(history.filter(row => row.launchId !== retained.launchId), beforeLaunches);
+    assert.deepEqual(after.closure.workerLaunches, [], 'the original completed worker must no longer be unretired');
     assert.deepEqual(after.closure.workspaceGenerations.map(row => row.generationRef), retained.cut.closure.workspaceGenerations.map(row => row.generationRef));
-    const retired = after.closure.workerLaunches.find(row => row.launchId === retained.launchId)!;
+    const retired = launches[0]!;
     assert.equal(retired.phase, 'retired'); assert.equal(retired.workerIdentityDigest, retained.workerIdentityDigest);
     assert.equal(retired.workspaceGenerationRef, retained.generationRef); assert(retired.retirementEvidenceRef);
     const finalDeath = await observingStore.artifacts.readCanonical<ProcessContainmentDeathEvidenceV1>(retired.retirementEvidenceRef);
@@ -2819,10 +2834,16 @@ async function parentLossBeforeRelease(retireAfterStop = false, cancelDuringProb
         await execution.requestStop();
         recoveryRevision = cancelled.run.revision;
       }
+      // Publish the actual authenticated channel before the real probe starts.
+      // Its three CAS writes must not consume the observed in-flight window;
+      // the cancellation still uses only the subsequently observed nonce/cut.
+      const duringCancellation = cancelDuringProbe
+        ? { ...await publishInProcessChannel(fixture.store), requestId: uuidv7() } : undefined;
       const recovery = execution.recoverWorker({ expectedRunRevision: recoveryRevision });
       let recoveryFinished = false, observedProbeNonce: string | undefined;
       void recovery.then(() => { recoveryFinished = true; }, () => { recoveryFinished = true; });
       if (cancelDuringProbe) {
+        assert(duringCancellation);
         const until = performance.now() + 30_000;
         let dispatched: { run: Run; wait: WorkerDeathWait } | undefined;
         while (!recoveryFinished && !dispatched && performance.now() < until) {
@@ -2841,7 +2862,7 @@ async function parentLossBeforeRelease(retireAfterStop = false, cancelDuringProb
           assert.equal(dispatched.run.stopIntentRef, undefined,
             'the first public cancellation must follow the original unstopped inspection dispatch');
         }
-        const during = await agent.cancelRun({ ...await publishInProcessChannel(fixture.store), requestId: uuidv7(),
+        const during = await agent.cancelRun({ ...duringCancellation,
           expectedRunRevision: dispatched.run.revision });
         assert.equal(recoveryFinished, false, 'cancellation must commit while the original actual inspector is still running');
         assert.equal(during.run.waitingOnRef, dispatched.run.waitingOnRef, 'stop must preserve the exact in-flight wait and nonce');
