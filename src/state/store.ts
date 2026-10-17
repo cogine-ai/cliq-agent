@@ -1573,6 +1573,7 @@ export class StateStore {
   private released = false;
   private closeRequested = false;
   private closing: Promise<void> | undefined;
+  private closeRevocationFailure: ResourceRetirementError | undefined;
   private readonly controlListeners = new Set<LocalControlListener>();
   // Reserve the Run through validation and join that opening during shutdown.
   // This protects resources; SQLite remains the sole lifecycle authority.
@@ -1580,6 +1581,7 @@ export class StateStore {
   private readonly loadedExecutions = new Map<string, RunExecution>();
   private readonly sourceInspectionTasks = new Set<SourceInspectionTask>();
   private readonly sourceInspections = new Map<string, { intent: string; task: SourceInspectionTask }>();
+  private readonly installedSubmissionTasks = new Set<{ abort: AbortController; promise: Promise<unknown> }>();
   private readonly modelTransports = new Map<string, NativeModelTransport>();
   private readonly modelOperations = new Map<string, Promise<unknown>>();
   // A positively received result keeps its original settlement owner through
@@ -1637,8 +1639,27 @@ export class StateStore {
   async submitInstalledRun(request: unknown, identity: AuthenticatedControlIdentity) {
     if (!this.supportsInstalledRuns() || !this.installedRuntime || !this.runtimeAuthority?.sourceInspection)
       throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'installed Run composition is not ready');
+    request = immutableSnapshot(request); identity = immutableSnapshot(identity);
+    const abort = new AbortController();
+    // Own the complete handler before its first asynchronous action, not only
+    // its source leaf. Instruction assembly and final admission also use SQL
+    // and the held installation and must join before StateOwner is released.
+    const promise = Promise.resolve().then(() => this.submitInstalledRunOwned(request, identity, abort.signal));
+    const task = { abort, promise }; this.installedSubmissionTasks.add(task);
+    const release = (error?: unknown) => {
+      if (!(error instanceof ResourceRetirementError)) this.installedSubmissionTasks.delete(task);
+    };
+    void promise.then(() => release(), release);
+    return promise;
+  }
+
+  private async submitInstalledRunOwned(request: unknown, identity: AuthenticatedControlIdentity, signal: AbortSignal) {
+    signal.throwIfAborted();
+    if (!this.installedRuntime || !this.runtimeAuthority?.sourceInspection)
+      throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'installed Run composition is not ready');
     const normalized = normalizeRunSubmitRequest(request);
     await validateControlChannelClosure(this.artifacts, this.owner, identity);
+    signal.throwIfAborted();
     const { replayInstalledRunAdmission, admitInstalledRun } = await import('./reducers/admission.js');
     const replay = await replayInstalledRunAdmission(this.driver, this.artifacts, this.owner, normalized, identity);
     if (replay) {
@@ -1682,11 +1703,13 @@ export class StateStore {
     // Refuse invalid credential intent before publishing source or assembly
     // CAS objects. This read is not the final admission or release authority.
     const authority = await withCredentialAuthorityLock(selected, async token => {
+      signal.throwIfAborted();
       const held = checkedCredentialToken(token);
       const authority = currentModelAuthority(held, identity.principalId, model.endpoint.endpointRegistrationId,
         model.modelCredentialGrantIds, sampleCanonicalNow());
       return immutableSnapshot({ endpoint: authority.endpoint, bindings: authority.bindings });
     });
+    signal.throwIfAborted();
     assertRecipe(normalized.request, authority.endpoint);
     const source = await this.captureSubmittedSource({ request, identity });
     if (source.phase !== 'retired') throw new KernelStorageError('RECOVERY_REQUIRED', 'Run source inspection has not completely retired');
@@ -1702,8 +1725,9 @@ export class StateStore {
     // reacquire and check the exact current revisions for the final admission.
     const assembled = await assembleInstalledRun({ selected, driver: this.driver, owner: this.owner,
       artifacts: this.artifacts, identity, request: normalized.request, originalRequest: normalized.originalRequest, source,
-      endpoint: authority.endpoint, credentialBindings: authority.bindings, controlledHome });
+      endpoint: authority.endpoint, credentialBindings: authority.bindings, controlledHome }, signal);
     const admission = withCredentialAuthorityLock(selected, async token => {
+      signal.throwIfAborted();
       const held = checkedCredentialToken(token);
       currentModelAuthority(held, identity.principalId, model.endpoint.endpointRegistrationId,
         model.modelCredentialGrantIds, sampleCanonicalNow(), authority);
@@ -2847,15 +2871,34 @@ export class StateStore {
     return outcome;
   }
 
-  close(): Promise<void> {
-    if (this.closed) return Promise.resolve();
-    if (this.closing !== undefined) return this.closing;
+  /** Revoke producers before a control service waits for its active handlers.
+   * This is not a join, worker fence or permission to release StateOwner. */
+  beginClose(): void {
+    if (this.closed) return;
     // The gate is synchronous: existing execution references cannot dispatch
     // while listeners/opening resources are being joined.
     this.closeRequested = true;
     clearTimeout(this.installedMaintenanceTimer); this.installedMaintenanceTimer = undefined;
+    for (const task of this.installedSubmissionTasks) task.abort.abort();
     for (const task of this.sourceInspectionTasks) task.abort.abort();
+    for (const transport of this.modelTransports.values()) {
+      try {
+        // Native close starts revocation synchronously and memoizes its join.
+        // Keep the map and original dispatch fence through typed settlement;
+        // final close reawaits that same join, including a failed retirement.
+        void transport.close().catch(() => {});
+      } catch (error) {
+        this.closeRevocationFailure ??= new ResourceRetirementError('StateStore producer revocation did not start cleanly', error);
+      }
+    }
+  }
+
+  close(): Promise<void> {
+    if (this.closed) return Promise.resolve();
+    if (this.closing !== undefined) return this.closing;
+    this.beginClose();
     const attempt = (async () => {
+      const submissionJoins = await Promise.allSettled([...this.installedSubmissionTasks].map(task => task.promise));
       // Retire transports and join driver tasks before fencing workers or
       // closing their sole SQL owner; no key/request owner outlives StateOwner.
       const brokerJoins = await Promise.allSettled([...this.modelTransports.values()].map(transport => transport.close()));
@@ -2898,10 +2941,13 @@ export class StateStore {
       // A failed broker join cannot skip independent listener/source/worker
       // revocation. Every owner is joined, but StateOwner stays held on any
       // retirement uncertainty; neither failure becomes a positive receipt.
-      const failure = [...brokerJoins, ...closureJoins, ...completionJoins, ...producerJoins.filter(result => result.status === 'rejected' && result.reason instanceof ResourceRetirementError),
+      const failure = [...brokerJoins, ...closureJoins, ...completionJoins,
+        ...submissionJoins.filter(result => result.status === 'rejected' && result.reason instanceof ResourceRetirementError),
+        ...producerJoins.filter(result => result.status === 'rejected' && result.reason instanceof ResourceRetirementError),
         ...driverJoins.filter(result => result.status === 'rejected' && result.reason instanceof ResourceRetirementError),
         ...maintenanceJoins.filter(result => result.status === 'rejected' && result.reason instanceof ResourceRetirementError), ...results]
         .find(result => result.status === 'rejected');
+      if (this.closeRevocationFailure) throw this.closeRevocationFailure;
       if (failure?.status === 'rejected') throw failure.reason;
       this.executions.clear();
       this.loadedExecutions.clear();

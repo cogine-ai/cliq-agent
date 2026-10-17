@@ -40,6 +40,10 @@ function close(): Promise<void> {
       await joinResourceOperations([Promise.resolve().then(() => keeper!.close()), selected?.close()] as const);
       return;
     }
+    // Pending handlers own complete submissions and may be waiting behind an
+    // active broker. Revoke those producers before draining the service, but
+    // keep final Store/StateOwner retirement after every handler has joined.
+    store?.beginClose();
     await service?.close();
     await store?.close();
     // Store retirement must join before releasing containment. Afterwards both

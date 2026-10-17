@@ -1,9 +1,12 @@
 # I1 coherent terminal retirement — implementation contract
 
-Status: implementation direction approved on 2026-10-16; the owning preparation,
-private rollback and atomic stopped-recovery implementation is now present, but
-requires new exact-source Linux qualification. This document itself qualifies
-nothing. The owner accepted one WorkerLaunch preparation
+Status: implementation direction approved on 2026-10-16. The original nine-fix
+candidate `2630f23` passed both exact-source Linux campaigns, including 29 native
+cases per event; that does not complete I1. The owner additionally approved
+repairing two shutdown-order defects in the same PR on 2026-10-17. The admission
+defect now has genuine installed Linux RED evidence; its repair and the execution
+producer's shutdown controls still require qualification. This document itself
+qualifies nothing. The owner accepted one WorkerLaunch preparation
 spine plus genuine preparation-retirement/private rollback evidence, including
 fail-closed incomplete birth. Model unknown retains the existing strictly newer
 StateOwner rule. Normative RFC/WP amendments and implementation must ship
@@ -59,6 +62,58 @@ StopIntent commit → revoke productive release → join original producer
                  → prove original physical retirement
                  → typed closure + terminal Checkpoint + Session item
 ```
+
+## Supervisor shutdown — revoke before joining, fence after settlement
+
+Supervisor shutdown is not `run.cancel`: it creates no StopIntent and must not
+erase an accepted admission or replace a genuinely received result with unknown.
+Use two phases in the same resource owners, not concurrent full service/Store
+closure, a second lifecycle or a transferable shutdown receipt.
+
+The first phase synchronously closes productive gates and starts revocation
+before waiting for control handlers or installed scheduling tasks. A submission
+owns its complete asynchronous handler, including source capture, independent
+instruction capture, assembly, admission and the accepted Run's agent load.
+Its existing AbortSignal remains bound to its original private admission token;
+the existing transaction-scoped workspace recheck checks abortion before the
+first admission write. No post-acceptance abortion check discards the original
+committed response. Historical replay does not borrow that transient token.
+
+Start original model transport closure in this phase too: a control handler may
+be queued behind its installed credential/runtime borrow. Keep the original
+transport, memoized join and dispatch fence through typed settlement. Closing
+the transport is neither a refund nor a replacement no-release/death proof.
+
+An execution's first phase must abort preparation and revoke its original
+pending native controller before joining that task; aborting only a file walker
+cannot interrupt a native BIND/launch wait. Already claimed/received tool work
+must retain its original join and genuinely received result. An idle worker
+supporting an in-flight model operation is not fenced in this phase. Any narrow
+received-tool drain after the closed gate must retain the exact original worker
+and physical owner; it does not reopen dispatch, lease or grant authority.
+
+Final close joins complete handlers and producers while StateOwner and the
+installation remain held, settles original model outcomes, then performs the
+existing worker fencing/death/retirement and descriptor joins. Only successful
+retirement permits the existing graceful owner transition and SQL/lock release.
+Initiation and join failures remain retained, and one failure must not prevent
+independent owners from starting revocation. No best-effort close is a positive
+retirement receipt.
+
+Keep the installed service's two-second stop policy unchanged. Its regression
+requires actual zero exit, the original owner's committed `graceful_release`
+and a validated successor acquisition, not merely a missing process. The
+existing worker inspection's original persisted deadline is also unchanged;
+these controls do not assert universal two-second completion for an in-flight
+thirty-second inspection or qualify an unobserved precise cut.
+
+The harness-only `3dd1536` kept production identical to `2630f23`. Its PR event
+`38990393818` positively observed the original pending admission and AGENTS.md
+descriptor, then recorded `Result=timeout`, `ExecMainCode=2`, `ExecMainStatus=9`
+under the ordinary two-second policy. The push event `38990389971` legitimately
+finished gracefully. Both original reports and the unchanged-runner cleanup
+evidence are retained; the positive event does not erase the genuine RED.
+Neither observation proves the exact private precommit-abort cut.
 
 ## Tool result and settlement rules
 

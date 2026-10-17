@@ -59,7 +59,7 @@ export type AssembledInstalledRun = Readonly<{
 type AdmissionBinding = { driver: SqliteDriver; owner: StateOwnerContext; selected: HeldInstalledRuntime;
   identity: AuthenticatedControlIdentity; normalized: ReturnType<typeof normalizeRunSubmitRequest>; source: RetiredSource;
   native: NativeStateOwner; workspace: Extract<WorkspaceIdentityV1, { kind: 'live' }>;
-  input: AdmitRunInput; admittedAt: string; deadlineAt: string };
+  input: AdmitRunInput; admittedAt: string; deadlineAt: string; signal?: AbortSignal };
 const admissions = new WeakMap<AssembledInstalledRun, AdmissionBinding>();
 /** Fixed refusal projection, not authority or a caller-selectable error code. */
 export class InstalledRunAuthorityError extends KernelStorageError {
@@ -470,7 +470,7 @@ export async function assembleInstalledRun(input: {
     const result: AssembledInstalledRun = Object.freeze({ assemblyRef, assembly: immutableSnapshot(assembly), policyRef, sandboxProfileRef, verifierSpecRef,
       credentialGrantRefs: Object.freeze(credentialGrantRefs), sourceProjectionRef: sourceManifest.sourceProjectionRef,
       frozenIgnoreRulesRef: sourceManifest.frozenIgnoreRulesRef, baseWorkspaceManifestRef: capturedSourceRef, material, admittedAt, deadlineAt });
-    admissions.set(result, { driver, owner, selected, identity, normalized: currentOriginal, source, native: held, workspace,
+    admissions.set(result, { driver, owner, selected, identity, normalized: currentOriginal, source, native: held, workspace, signal,
       input: immutableSnapshot({ ...identity, requestId: request.requestId, admissionKey: request.admissionKey, sessionId: request.sessionId,
         expectedContextRevision: request.expectedContextRevision, workspacePath: request.workspacePath, objective: request.objective,
         assemblyRef, policyRef, sandboxProfileRef, verifierSpecRef, credentialGrantRefs, budgets: request.budgets,
@@ -488,6 +488,10 @@ export function readInstalledRunAdmission(prepared: AssembledInstalledRun, drive
   const binding = admissions.get(prepared);
   if (!binding || binding.driver !== driver || binding.owner !== owner || !same(binding.identity, identity))
     mismatch('installed admission token has no matching authenticated producer');
+  // The existing transaction-scoped workspace recheck calls this again after
+  // all async CAS work, before the first admission write. Already committed
+  // responses never consult this transient preparation token on replay.
+  binding.signal?.throwIfAborted();
   assertActiveStateOwner(connection, owner);
   const key = { principalId: identity.principalId, admissionKey: binding.normalized.request.admissionKey,
     admissionIntentDigest: runSubmitIntentDigest(identity.principalId, binding.normalized.request) };

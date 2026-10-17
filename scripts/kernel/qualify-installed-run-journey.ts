@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync, type ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomBytes, X509Certificate } from 'node:crypto';
-import { constants } from 'node:fs';
+import { constants, type BigIntStats } from 'node:fs';
 import { chown, link, lstat, mkdir, open, readFile, readdir, readlink, stat, statfs, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:https';
 import path from 'node:path';
@@ -38,7 +38,7 @@ const excludedVendorInstruction = 'Ordinary vendor instructions remain independe
 const model = 'installed-run-transport-fixture';
 const rejectedResponse = '{"error":{"message":"Owned fixture rejected this request."}}';
 type CampaignMode = '--campaign' | '--failure-campaign' | '--retry-campaign' | '--authority-failure-campaign' |
-  '--storage-failure-campaign' | '--shutdown-admission-campaign';
+  '--storage-failure-campaign' | '--shutdown-admission-campaign' | '--shutdown-preparation-campaign';
 const requestTokenCeiling = { inputTokens: 32768, outputTokens: 4096, cacheReadTokens: 0, cacheWriteTokens: 0 };
 const imageFields = ['dev', 'ino', 'size', 'uid', 'gid', 'mode', 'nlink', 'mtimeNs', 'ctimeNs'] as const;
 
@@ -162,8 +162,11 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
   const authorityOnly = mode === '--authority-failure-campaign';
   const storageOnly = mode === '--storage-failure-campaign';
   const shutdownAdmissionOnly = mode === '--shutdown-admission-campaign';
+  const shutdownPreparationOnly = mode === '--shutdown-preparation-campaign';
   const report: Record<string, any> = { diagnosticOnly: true, qualified: false, phase: 'installation',
-    scope: shutdownAdmissionOnly
+    scope: shutdownPreparationOnly
+      ? 'independent signed installed Linux scheduler SIGTERM after actual original Supervisor writes to a queued Run generation, unchanged two-second service timeout, graceful owner join and exact successor cancellation/history; the ordinary observation-to-gate race is retained, not an exact preparing-only, controller, received-tool, provider or complete I1 qualification'
+      : shutdownAdmissionOnly
       ? 'independent signed installed Linux Supervisor SIGTERM during positively observed ordinary instruction capture for an in-flight public Run admission, unchanged two-second service timeout, graceful owner join and successor preservation of absence or a legitimately committed admission; not an exact precommit-abort, source-payload, worker-preparation, received-tool, provider or complete I1 qualification'
       : storageOnly
       ? 'independent signed installed Linux Run, real read-preserving CAS write refusal after one actual POST, same-owner typed UNKNOWN settlement after exact restoration, no extra accepted TCP/TLS/POST, then actual successor-owner cancellation and terminal replay; not never-CONNECT guard storage-failure qualification, a provider qualification or complete I1'
@@ -466,6 +469,76 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
       assert.equal(sha256Bytes(bytes), ref); scanBytes(bytes); return bytes;
     } finally { await held.close(); }
   };
+  // Only the two isolated shutdown campaigns use this real public Journal/CAS
+  // inspection. A free failed preparation may precede the first permanent
+  // claim; it must not be mistaken for either productive I/O or a refund after
+  // a claim. No phase or settlement is invented to fill a missing prefix.
+  const inspectShutdownModelClaims = async (cut: Record<string, any>) => {
+    assert(shutdownAdmissionOnly || shutdownPreparationOnly);
+    assert.equal(cut.nextJournalSeq, cut.highWaterJournalSeq);
+    assert.equal(cut.journal.length, cut.highWaterJournalSeq);
+    const run = cut.snapshot.run, entries: Array<Record<string, any>> = cut.journal;
+    const spec = parseJsonStrict((await readCas(run.specRef)).toString('utf8')) as Record<string, any>;
+    const assembly = parseJsonStrict((await readCas(spec.assemblyRef)).toString('utf8')) as Record<string, any>;
+    assert.equal(canonicalSha256(assembly.retry.model), canonicalSha256({ maxDispatchedAttempts: 3,
+      maxZeroByteTransportRetriesPerAttempt: 0, postAttemptDelaysMs: [500, 2000] }));
+    const claims = entries.filter(entry => entry.phase === 'dispatch_claimed'); assert(claims.length <= 1);
+    const first = entries[0], fullCharge = { modelTokens: 36864, costMicros: 0, toolCalls: 0, repairAttempts: 0 };
+    const zeroCharge = { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 };
+    for (let index = 0; index < entries.length; index++) {
+      const entry = entries[index]!;
+      assert.equal(entry.seq, index + 1); assert.equal(entry.runId, run.id); assert.equal(entry.opKind, 'model');
+      assert.equal(entry.opId, first!.opId); assert.equal(entry.target, first!.target); assert.equal(entry.replayClass, 'retry');
+    }
+    const stableRequest = ({ attempt: _attempt, promptProjectionRef: _projection,
+      promptProjectionDigest: _projectionDigest, requestDigest: _digest, ...stable }: Record<string, any>) => stable;
+    let originalRequest: Record<string, any> | undefined, index = 0, freeFailures = 0;
+    while (index < entries.length) {
+      const prepared = entries[index]!;
+      assert.equal(prepared.phase, 'prepared'); assert.equal(prepared.attempt, freeFailures);
+      assert.equal(canonicalSha256(prepared.budgetDelta), canonicalSha256(fullCharge));
+      const modelRequest = parseJsonStrict((await readCas(prepared.requestRef)).toString('utf8')) as Record<string, any>;
+      assert.equal(modelRequest.schemaVersion, 1); assert.equal(modelRequest.format, 'cliq-model-request-v1');
+      assert.equal(modelRequest.kind, 'normal'); assert.equal(modelRequest.runId, run.id);
+      assert.equal(modelRequest.opId, prepared.opId); assert.equal(modelRequest.attempt, prepared.attempt);
+      assert.equal(modelRequest.assemblyRef, spec.assemblyRef);
+      assert.equal(modelRequest.requestDigest, digestOmitting(modelRequest, 'requestDigest'));
+      if (originalRequest) assert.equal(canonicalSha256(stableRequest(modelRequest)), canonicalSha256(stableRequest(originalRequest)));
+      else originalRequest = modelRequest;
+      const next = entries[index + 1];
+      if (!next) { assert.equal(claims.length, 0); break; } // genuinely still prepared at the captured public cut
+      if (next.phase === 'dispatch_claimed') {
+        assert.equal(claims.length, 1); assert.equal(next.attempt, freeFailures);
+        for (const entry of entries.slice(index + 1)) {
+          assert.equal(entry.attempt, prepared.attempt); assert.equal(entry.requestRef, prepared.requestRef);
+          assert.notEqual(entry.phase, 'prepared');
+        }
+        break;
+      }
+      assert.equal(next.phase, 'failed'); assert.equal(next.attempt, prepared.attempt);
+      assert.equal(next.requestRef, prepared.requestRef); assert.equal(next.seq, prepared.seq + 1);
+      for (const entry of [prepared, next]) for (const key of ['dispatchId', 'supervisorInstanceId', 'stateOwnerEpoch', 'brokerFenceTokenDigest'])
+        assert.equal(entry[key], undefined, 'free prefix cannot carry permanent-claim authority');
+      assert.equal(next.resultRef, undefined); assert.equal(canonicalSha256(next.budgetDelta), canonicalSha256(zeroCharge));
+      const settlement = parseJsonStrict((await readCas(next.budgetSettlementRef)).toString('utf8')) as Record<string, any>;
+      assert.equal(settlement.schemaVersion, 1); assert.equal(settlement.format, 'cliq-budget-settlement-v1');
+      assert.equal(settlement.runId, run.id); assert.equal(settlement.opId, prepared.opId); assert.equal(settlement.attempt, prepared.attempt);
+      assert.equal(settlement.preparedJournalSeq, prepared.seq); assert.equal(settlement.terminalJournalSeq, next.seq);
+      assert.equal(settlement.terminalPhase, 'failed'); assert.equal(settlement.settledAt, next.timestamp);
+      assert.equal(settlement.settlementDigest, digestOmitting(settlement, 'settlementDigest'));
+      for (const actual of [settlement.reserved, settlement.released, settlement.budgetReservedBefore])
+        assert.equal(canonicalSha256(actual), canonicalSha256(fullCharge));
+      for (const actual of [settlement.consumed, settlement.budgetConsumedBefore, settlement.budgetConsumedAfter, settlement.budgetReservedAfter])
+        assert.equal(canonicalSha256(actual), canonicalSha256(zeroCharge));
+      const failure = parseJsonStrict((await readCas(next.errorRef)).toString('utf8')) as Record<string, any>;
+      assert.equal(failure.format, 'cliq-invocation-error-v1'); assert.equal(failure.reason, 'installed_model_preparation_refused');
+      assert.equal(failure.runId, run.id); assert.equal(failure.opId, prepared.opId);
+      assert.equal(failure.attempt, prepared.attempt); assert.equal(failure.requestRef, prepared.requestRef);
+      freeFailures++; index += 2;
+    }
+    return { freeFailures, permanentClaims: claims.length, claimedAttempt: claims[0]?.attempt ?? null,
+      contiguousFreePrefixQualified: true, frozenAttemptPolicyUnchanged: true };
+  };
   const refuseCasWrites = async () => {
     assert(storageOnly && process.geteuid!() === 0 && !restoreCasWrite);
     const name = path.join(recipe.stateRoot, 'cas');
@@ -612,7 +685,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
           }
           return;
         }
-        if (retryOnly || authorityOnly || shutdownAdmissionOnly) {
+        if (retryOnly || authorityOnly || shutdownAdmissionOnly || shutdownPreparationOnly) {
           assert.equal(ordinal, 1, 'this independent candidate campaign must release exactly one actual model request');
           const bytes = Buffer.from(JSON.stringify({ id: 'owned-retry-fixture-turn', object: 'chat.completion', model,
             choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: 'The restored preparation is complete.' } }],
@@ -794,7 +867,294 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
     const sessionReply = exchange([sessionRequest])[0]!, session = accepted(sessionReply, 'session.create').snapshot.session;
     assert.deepEqual(exchange([sessionRequest])[0], sessionReply, 'new authenticated connection must replay the original Session response');
     const currentSession = () => accepted(exchange([{ protocolVersion: 1, method: 'session.get', sessionId: session.id }])[0]!, 'session.get').snapshot.session;
-    if (shutdownAdmissionOnly) {
+    if (shutdownPreparationOnly) {
+      mark('owned_source_before_scheduler_preparation_shutdown');
+      const payload = path.join(recipe.workspace, 'payload'), fileCount = 1000;
+      const bytes = Buffer.alloc(65536, 0x5a), blobRef = sha256Bytes(bytes);
+      await mkdir(payload, { mode: 0o755 }); await chown(payload, ledger.uid, ledger.gid);
+      const sourceFiles = new Map<string, BigIntStats>();
+      for (let offset = 0; offset < fileCount; offset += 32) {
+        await Promise.all(Array.from({ length: Math.min(32, fileCount - offset) }, async (_, index) => {
+          const relative = `payload/entry-${String(offset + index).padStart(4, '0')}.txt`, filename = path.join(recipe.workspace, relative);
+          await writeFile(filename, bytes, { flag: 'wx', mode: 0o644 }); await chown(filename, ledger.uid, ledger.gid);
+          const info = await lstat(filename, { bigint: true });
+          assert(info.isFile() && info.nlink === 1n && info.uid === BigInt(ledger.uid) && info.size === BigInt(bytes.length));
+          sourceFiles.set(relative, info);
+        }));
+      }
+      const originalPid = Number(supervisorBefore.MainPID), originalStart = await fixtureProcess(originalPid, ledger.uid);
+      const selectedImage = path.join(recipe.stateRoot, 'runtime/bundles', bundleDigest, 'supervisor');
+      const signedImage = await lstat(selectedImage, { bigint: true });
+      const assertOriginalSupervisor = async () => {
+        assert.equal(await fixtureProcess(originalPid, ledger.uid), originalStart);
+        assert.equal(await readlink(`/proc/${originalPid}/exe`), selectedImage);
+        const actual = await stat(`/proc/${originalPid}/exe`, { bigint: true });
+        for (const key of imageFields) assert.equal(actual[key], signedImage[key]);
+      };
+      const originalOwners = inspectInstalledOwnerHistory(recipe.stateRoot).owners;
+      assert.equal(originalOwners.length, 1);
+      const originalOwner = originalOwners[0]!; assert.equal(originalOwner.state, 'active');
+      const originalStatus = accepted(exchange([{ protocolVersion: 1, method: 'supervisor.status' }])[0]!, 'supervisor.status');
+      assert.equal(originalStatus.health, 'ready'); assert.equal(originalStatus.supervisorInstanceId, originalOwner.supervisorInstanceId);
+      shutdownClient = await persistentClient();
+      const submit = request({ protocolVersion: 1, method: 'run.submit', requestId: '019a0012-0000-7000-8000-000000000132',
+        admissionKey: randomBytes(32).toString('base64url'), sessionId: session.id, expectedContextRevision: session.contextRevision,
+        workspacePath: recipe.workspace, objective: 'Retain one candidate without using a tool after ordinary preparation.',
+        model: { provider: 'openai-compatible', model, endpoint: { kind: 'registered', endpointRegistrationId: registration.endpointRegistrationId },
+          modelCredentialGrantIds: [enrollment.credentialGrantId] }, policyMode: 'accept-edits',
+        budgets: { wallTimeMs: 300000, modelTokens: 2000000, costMicros: 10000000, toolCalls: 1000,
+          repairAttempts: 0, childDepth: 0, childConcurrency: 1 },
+        verifiers: [], dependency: { mode: 'none' }, sourceIncludes: [], sourceExcludes: [],
+        registeredMcpServerIds: [], skillIds: [], allowUnverified: true });
+      const submitReply = exchange([submit])[0]!, admitted = accepted(submitReply, 'run.submit').snapshot.run;
+      assert.equal(admitted.status, 'queued'); assert.equal(admitted.revision, 1);
+      report.acceptedRun = { id: admitted.id, sessionId: admitted.sessionId, specRef: admitted.specRef,
+        initialCheckpointId: admitted.latestCheckpointId };
+      const spec = parseJsonStrict((await readCas(admitted.specRef)).toString('utf8')) as Record<string, any>;
+      const manifest = parseJsonStrict((await readCas(spec.baseWorkspaceManifestRef)).toString('utf8')) as Record<string, any>;
+      const frozen = parseJsonStrict((await readCas(manifest.entriesRef)).toString('utf8')) as Record<string, any>;
+      assert.equal(frozen.entries.length, fileCount + 2);
+      assert.deepEqual(frozen.entries.map((entry: any) => entry.path).sort(), ['example.txt', 'payload', ...sourceFiles.keys()].sort());
+      for (const entry of frozen.entries) if (sourceFiles.has(entry.path)) {
+        assert.equal(entry.kind, 'file'); assert.equal(entry.blobRef, blobRef); assert.equal(entry.size, bytes.length); assert.equal(entry.mode, 0o644);
+      }
+      const prefix = path.join(recipe.stateRoot, 'runs', admitted.id, 'generations') + '/';
+      type WriteObservation = { generationId: string; generationPath: string; deviceId: string; directoryFileId: string; relative: string };
+      const heldGenerationWrite = async (same?: WriteObservation): Promise<WriteObservation | undefined> => {
+        await assertOriginalSupervisor();
+        const descriptors = await readdir(`/proc/${originalPid}/fd`);
+        assert(descriptors.length <= 4096, 'actual Supervisor descriptor inventory exceeded its fixed observation bound');
+        for (const descriptor of descriptors) {
+          assert.match(descriptor, /^(?:0|[1-9][0-9]*)$/u);
+          try {
+            const fd = `/proc/${originalPid}/fd/${descriptor}`, target = await readlink(fd);
+            if (!target.startsWith(prefix)) continue;
+            const [generationId, ...parts] = target.slice(prefix.length).split('/'), relative = parts.join('/');
+            if (!generationId || !/^[A-Za-z0-9_-]{43}$/u.test(generationId) || !sourceFiles.has(relative)) continue;
+            if (same && generationId !== same.generationId) continue;
+            const info = await readFile(`/proc/${originalPid}/fdinfo/${descriptor}`, 'utf8'); assert(info.length <= 65536);
+            const flags = info.match(/^flags:\s+([0-7]+)$/mu); assert(flags);
+            if ((Number.parseInt(flags[1]!, 8) & 3) !== constants.O_WRONLY) continue;
+            const generationPath = path.join(prefix, generationId);
+            for (const directory of [path.join(recipe.stateRoot, 'runs'), path.join(recipe.stateRoot, 'runs', admitted.id),
+              prefix.slice(0, -1), generationPath, path.join(generationPath, 'payload')]) {
+              const actual = await lstat(directory, { bigint: true });
+              assert(actual.isDirectory() && !actual.isSymbolicLink() && actual.uid === BigInt(ledger.uid));
+              assert.equal(actual.mode & 0o7777n, directory.endsWith('/payload') ? 0o755n : 0o700n);
+            }
+            const directory = await lstat(generationPath, { bigint: true }), named = await lstat(target, { bigint: true });
+            const actual = await stat(fd, { bigint: true });
+            assert(named.isFile() && !named.isSymbolicLink() && named.nlink === 1n && named.uid === BigInt(ledger.uid));
+            if ((['dev', 'ino', 'uid', 'gid', 'nlink'] as const).some(key => actual[key] !== named[key])) continue;
+            assert(actual.isFile() && actual.size >= 0n && actual.size <= BigInt(bytes.length));
+            assert.equal(actual.mode & 0o7777n, 0o644n);
+            assert.equal(actual.dev, directory.dev);
+            if (same) { assert.equal(directory.dev.toString(), same.deviceId); assert.equal(directory.ino.toString(), same.directoryFileId); }
+            if (await readlink(fd) !== target) continue;
+            const confirmed = await lstat(generationPath, { bigint: true });
+            assert.equal(confirmed.dev, directory.dev); assert.equal(confirmed.ino, directory.ino);
+            await assertOriginalSupervisor();
+            return { generationId, generationPath, deviceId: directory.dev.toString(), directoryFileId: directory.ino.toString(), relative };
+          } catch (error) {
+            if (!['ENOENT', 'ESRCH'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
+          }
+        }
+        await assertOriginalSupervisor(); return undefined;
+      };
+      const publicRead = async () => accepted(await shutdownClient!.send({ protocolVersion: 1, method: 'run.get', runId: admitted.id }), 'run.get');
+      const preparingCut = (cut: Record<string, any>) => {
+        const run = cut.snapshot.run;
+        assert.equal(run.id, admitted.id); assert.equal(run.status, 'queued'); assert.equal(run.activeWorkerLaunchId, undefined);
+        assert.equal(run.leaseEpoch, 0); assert.equal(run.cancelRequested, false); assert.equal(run.stopIntentRef, undefined);
+        assert.equal(run.specRef, admitted.specRef); assert.equal(run.latestCheckpointId, admitted.latestCheckpointId);
+        assert.equal(cut.highWaterJournalSeq, 0); assert.deepEqual(cut.journal, []);
+      };
+      mark('actual_scheduler_generation_write_bracketed_by_public_queued_cut');
+      const observeBy = Date.now() + 30000;
+      let observed: WriteObservation | undefined;
+      while (!observed) {
+        assert(Date.now() < observeBy, 'the actual installed scheduler preparation write was not positively observed');
+        const before = await heldGenerationWrite();
+        if (!before) { await delay(1); continue; }
+        preparingCut(await publicRead());
+        observed = await heldGenerationWrite(before);
+      }
+      assert.equal(requestsReceived, 0); assert(!providerFailure);
+      report.shutdownPreparation = { qualified: false, diagnosticOnly: true, sourceFiles: fileCount, bytesPerFile: bytes.length,
+        distinctSourceInodes: new Set([...sourceFiles.values()].map(info => `${info.dev}:${info.ino}`)).size,
+        deduplicatedSourceBlobRef: blobRef, originalSupervisorProcessMatched: true, originalWritableGenerationMatched: true,
+        publicQueuedCutBracketed: true, noActiveWorkerAtObservedPublicCut: true, noJournalAtObservedPublicCut: true,
+        generationId: observed.generationId, generationDeviceId: observed.deviceId, generationDirectoryFileId: observed.directoryFileId,
+        controllerRetirementQualified: false, receivedToolQualified: false, exactPreparingGateCutQualified: false };
+      assert.equal(report.shutdownPreparation.distinctSourceInodes, fileCount);
+      const contract = command('/usr/bin/systemctl', ['--user', 'show', services.supervisorUnit,
+        '--property=TimeoutStopUSec,KillSignal,FinalKillSignal,SendSIGKILL', '--no-pager']);
+      assert.equal(contract.status, 0);
+      const stopPolicy = Object.fromEntries(contract.stdout.trim().split('\n').map(line => line.split('=')));
+      assert.equal(stopPolicy.TimeoutStopUSec, '2s'); assert.equal(stopPolicy.KillSignal, '15');
+      assert.equal(stopPolicy.FinalKillSignal, '9'); assert.equal(stopPolicy.SendSIGKILL, 'yes');
+      report.shutdownPreparation.standardStopTimeoutMs = 2000;
+      mark('ordinary_systemd_sigterm_during_scheduler_generation_copy');
+      await withRetainedUnitHistory([services.supervisorUnit, services.keeperUnit], async () => {
+        assert(await heldGenerationWrite(observed), 'a genuine same-generation writer must still be observed immediately before ordinary SIGTERM');
+        const stopped = command('/usr/bin/systemctl', ['--user', 'stop', services.supervisorUnit]), exit = show(services.supervisorUnit);
+        report.shutdownPreparation.serviceExit = projectInstalledServiceExit(exit);
+        await shutdownClient!.close();
+        assert.equal(stopped.status, 0, 'ordinary two-second scheduler stop must not require forced retirement');
+        assert.equal(exit.ActiveState, 'inactive'); assert.equal(exit.MainPID, '0');
+        assert.equal(exit.Result, 'success'); assert.equal(exit.ExecMainCode, '1'); assert.equal(exit.ExecMainStatus, '0');
+        await assert.rejects(lstat(`/proc/${originalPid}`), { code: 'ENOENT' });
+      });
+      const releasedOwners = inspectInstalledOwnerHistory(recipe.stateRoot).owners;
+      assert.equal(releasedOwners.length, 1);
+      const releasedOwner = releasedOwners[0]!; assert.equal(releasedOwner.state, 'terminal');
+      if (releasedOwner.state !== 'terminal') throw new Error('scheduler shutdown did not publish its terminal StateOwner');
+      assert.equal(releasedOwner.terminalReason, 'graceful_release');
+      for (const key of ['ownerEpoch', 'supervisorInstanceId', 'processIdentityRef', 'processIdentityDigest',
+        'stateLockIdentityRef', 'stateLockIdentityDigest', 'instanceNonceDigest', 'acquiredAt'] as const)
+        assert.equal(releasedOwner[key], originalOwner[key]);
+      assert.equal(show(services.keeperUnit).MainPID, keeperBefore.MainPID);
+      assert.deepEqual(await readFile(path.join(recipe.stateRoot, 'runtime/keeper.ready')), keeperReady);
+      // Read only immutable genuine publications, never create a private SQL
+      // owner or infer retirement from a path/closed boolean. This inspection
+      // itself is data; the successor's real lifecycle must still validate it.
+      const publications = new Map<string, Record<string, any>>();
+      const casNames = await readdir(path.join(recipe.stateRoot, 'cas')); assert(casNames.length <= 4096);
+      for (const ref of casNames) {
+        if (!/^[0-9a-f]{64}$/u.test(ref)) continue;
+        const content = await readCas(ref);
+        if (content[0] !== 0x7b) continue;
+        const value = parseJsonStrict(content.toString('utf8')) as Record<string, any>;
+        assert.deepEqual(canonicalJsonBytes(value), content); publications.set(ref, value);
+      }
+      const identities = [...publications].filter(([, value]) => value.format === 'cliq-workspace-generation-identity-v1' &&
+        value.runId === admitted.id && value.generationId === observed!.generationId);
+      assert.equal(identities.length, 1);
+      const [generationRef, generationIdentity] = identities[0]!;
+      assert.equal(generationIdentity.identityDigest, digestOmitting(generationIdentity, 'identityDigest'));
+      assert.equal(generationIdentity.sourceCheckpointId, admitted.latestCheckpointId);
+      assert.equal(generationIdentity.locator.canonicalRootRelativePath, path.relative(recipe.stateRoot, observed.generationPath));
+      assert.equal(generationIdentity.locator.deviceId, observed.deviceId);
+      assert.equal(generationIdentity.locator.directoryFileId, observed.directoryFileId);
+      const retired = [...publications].filter(([, value]) => value.format === 'cliq-worker-preparation-retirement-evidence-v1' &&
+        value.kind === 'born' && value.sourceGeneration?.generationRef === generationRef);
+      assert(retired.length <= 1);
+      if (retired.length) {
+        const [retirementRef, proof] = retired[0]!;
+        assert.equal(proof.evidenceDigest, digestOmitting(proof, 'evidenceDigest'));
+        assert.equal(proof.launch.phase, 'preparing'); assert.equal(proof.launch.runId, admitted.id);
+        assert.equal(proof.launch.supervisorInstanceId, originalOwner.supervisorInstanceId);
+        assert.equal(proof.launch.preparation.stateOwnerEpoch, originalOwner.ownerEpoch);
+        assert.equal(proof.launch.preparation.generationId, observed.generationId);
+        assert.equal(proof.launch.preparation.generation.generationRef, generationRef);
+        assert.equal(proof.launch.preparation.generation.generationIdentityDigest, generationIdentity.identityDigest);
+        const inspector = publications.get(proof.inspectorIdentityRef); assert(inspector);
+        assert.equal(inspector.identityDigest, digestOmitting(inspector, 'identityDigest'));
+        assert.equal(inspector.identityDigest, proof.inspectorIdentityDigest);
+        assert.equal(inspector.stateOwnerEpoch, originalOwner.ownerEpoch);
+        assert.equal(inspector.processIdentityRef, originalOwner.processIdentityRef);
+        assert.equal(inspector.processIdentityDigest, originalOwner.processIdentityDigest);
+        const quarantine = [...publications].filter(([, value]) => value.format === 'cliq-workspace-generation-quarantine-evidence-v1' &&
+          value.generationRef === generationRef && value.preparationRetirementEvidenceRef === retirementRef);
+        assert.equal(quarantine.length, 1);
+        const receipt = quarantine[0]![1]; assert.equal(receipt.evidenceDigest, digestOmitting(receipt, 'evidenceDigest'));
+        assert.equal(receipt.reason, 'preparation_retired'); assert.equal(receipt.observedState.kind, 'unverified_preparation');
+        assert.equal(receipt.preparationRetirementEvidenceDigest, proof.evidenceDigest);
+        assert.equal(receipt.quarantineDeviceId, observed.deviceId); assert.equal(receipt.quarantineFileId, observed.directoryFileId);
+        const archive = path.join(recipe.stateRoot, receipt.quarantineCanonicalRootRelativePath);
+        assert.equal(path.dirname(archive), path.join(recipe.stateRoot, 'quarantine/workspace-generations'));
+        const physical = await lstat(archive, { bigint: true });
+        assert(physical.isDirectory() && !physical.isSymbolicLink());
+        assert.equal(physical.dev.toString(), observed.deviceId); assert.equal(physical.ino.toString(), observed.directoryFileId);
+        await assert.rejects(lstat(observed.generationPath), { code: 'ENOENT' });
+        report.shutdownPreparation.originalPreparationRetirement = { qualified: true, retirementRef,
+          retirementDigest: proof.evidenceDigest, generationRef, quarantineRef: quarantine[0]![0],
+          sourcePhase: proof.sourceGeneration.phase, originalInspectorMatched: true, samePhysicalDirectoryQuarantined: true };
+      } else {
+        // SIGTERM follows asynchronous observations. Promotion can legitimately
+        // win before the private gate; do not manufacture a preparation-only
+        // failure if the complete ordinary drain and successor graph are valid.
+        report.shutdownPreparation.originalPreparationRetirement = { qualified: false,
+          observationToGatePromotionNotExcluded: true };
+      }
+      mark('scheduler_shutdown_actual_successor_cancel_and_history');
+      assert.equal(command('/usr/bin/systemctl', ['--user', 'start', services.supervisorUnit]).status, 0);
+      const successor = show(services.supervisorUnit), successorBy = Date.now() + 30000;
+      assert.notEqual(successor.MainPID, supervisorBefore.MainPID); assert.notEqual(successor.InvocationID, supervisorBefore.InvocationID);
+      await selectedSupervisor(services.supervisorUnit, successor, selectedImage, successorBy);
+      const successorStatus = accepted(exchange([{ protocolVersion: 1, method: 'supervisor.status' }])[0]!, 'supervisor.status');
+      assert.equal(successorStatus.health, 'ready'); assert.notEqual(successorStatus.supervisorInstanceId, originalStatus.supervisorInstanceId);
+      const links: Record<string, unknown> = {};
+      const history = await qualifyInstalledOwnerLinks({ stateRoot: recipe.stateRoot, uid: ledger.uid, bundle: signed.bundle,
+        imageDigest: report.bundle.supervisorDigest, report: links });
+      assert.equal(links.qualified, true); assert.equal(history.owners.length, 2); assert.deepEqual(history.owners[0], releasedOwner);
+      const successorOwner = history.owners[1]!; assert.equal(successorOwner.state, 'active');
+      assert.equal(successorOwner.supervisorInstanceId, successorStatus.supervisorInstanceId);
+      assert.equal(successorOwner.ownerEpoch, originalOwner.ownerEpoch + 1);
+      report.shutdownPreparation.ownerLineage = { qualified: true, terminalReason: 'graceful_release',
+        originalOwnerEpoch: originalOwner.ownerEpoch, originalProcessIdentityRef: originalOwner.processIdentityRef,
+        terminalRowDigest: releasedOwner.rowDigest, transitionEvidenceRef: releasedOwner.transitionEvidenceRef,
+        transitionEvidenceDigest: releasedOwner.transitionEvidenceDigest, successorOwnerEpoch: successorOwner.ownerEpoch,
+        acquisitionKind: 'acquire_after_graceful_release', acquisitionEvidenceRef: successorOwner.acquisitionEvidenceRef,
+        acquisitionEvidenceDigest: successorOwner.acquisitionEvidenceDigest, sameStateLock: true, sameSignedRuntime: true };
+      assert.deepEqual(exchange([submit])[0], submitReply); assert.deepEqual(exchange([sessionRequest])[0], sessionReply);
+      shutdownClient = await persistentClient();
+      let beforeCancel = await publicRead();
+      assert.equal(beforeCancel.snapshot.run.specRef, admitted.specRef);
+      let cancel = request({ protocolVersion: 1, method: 'run.cancel', requestId: '019a0012-0000-7000-8000-000000000133',
+        runId: admitted.id, expectedRevision: beforeCancel.snapshot.run.revision });
+      const terminalBy = Date.now() + 30000;
+      let cancelReply = await shutdownClient.send(cancel), revisionConflicts = 0;
+      while (!cancelReply.ok) {
+        // Only a positively received closed revision refusal permits a new
+        // cancellation cut. Transport failures are never retried, and neither
+        // this loop nor its counter grants a productive dispatch retry.
+        assert.equal(cancelReply.error?.code, 'REVISION_CONFLICT'); assert.equal(cancelReply.error?.retryable, true);
+        assert.equal(cancelReply.error?.messageCode, 'control.revision_conflict');
+        assert(++revisionConflicts <= 8 && Date.now() < terminalBy);
+        beforeCancel = await publicRead(); assert.equal(beforeCancel.snapshot.run.specRef, admitted.specRef);
+        cancel = request({ protocolVersion: 1, method: 'run.cancel', requestId: '019a0012-0000-7000-8000-000000000133',
+          runId: admitted.id, expectedRevision: beforeCancel.snapshot.run.revision });
+        cancelReply = await shutdownClient.send(cancel);
+      }
+      accepted(cancelReply, 'run.cancel');
+      let terminal = await publicRead();
+      while (terminal.snapshot.run.status !== 'cancelled') {
+        assert(Date.now() < terminalBy, 'the actual successor could not complete the original Run cancellation/retirement graph');
+        await delay(50); terminal = await publicRead();
+      }
+      const run = terminal.snapshot.run;
+      assert.equal(run.terminalReason, 'cancelled_by_user'); assert.equal(run.activeWorkerLaunchId, undefined);
+      assert.equal(run.resultRef, undefined); assert.equal(run.specRef, admitted.specRef);
+      report.shutdownPreparation.modelClaimHistory = await inspectShutdownModelClaims(terminal);
+      assert(requestsReceived <= 1 && acceptedTcpConnections <= 1 && acceptedTlsConnections <= 1); assert(!providerFailure);
+      const sessionCut = accepted(await shutdownClient.send({ protocolVersion: 1, method: 'session.get', sessionId: session.id,
+        afterItemSeq: session.latestItemSeq }), 'session.get');
+      assert.equal(sessionCut.items.length, 1); assert.equal(sessionCut.items[0].kind, 'run_terminal');
+      const publication = parseJsonStrict((await readCas(sessionCut.items[0].payloadRef)).toString('utf8')) as Record<string, any>;
+      assert.equal(publication.runId, admitted.id); assert.equal(publication.status, 'cancelled');
+      assert.equal(sessionCut.snapshot.session.contextRevision, session.contextRevision + 1);
+      assert.equal(sessionCut.snapshot.session.latestItemSeq, session.latestItemSeq + 1);
+      assert.deepEqual(await shutdownClient.send(cancel), cancelReply); assert.deepEqual(exchange([submit])[0], submitReply);
+      assert.deepEqual(await publicRead(), terminal);
+      for (const [relative, before] of sourceFiles) {
+        const held = await open(path.join(recipe.workspace, relative), constants.O_RDONLY | constants.O_NOFOLLOW);
+        try {
+          const after = await held.stat({ bigint: true });
+          for (const key of imageFields) assert.equal(after[key], before[key]);
+          assert.equal(sha256Bytes(await held.readFile()), blobRef);
+          for (const key of imageFields) assert.equal((await held.stat({ bigint: true }))[key], before[key]);
+        } finally { await held.close(); }
+      }
+      for (const key of imageFields) assert.equal((await lstat(source, { bigint: true }))[key], sourceBefore[key]);
+      assert.equal(await readFile(source, 'utf8'), hostBefore);
+      await shutdownClient.close();
+      report.shutdownPreparation = { ...report.shutdownPreparation, qualified: true, gracefulExitZero: true,
+        acceptedAdmissionReplayPreserved: true, genuineSuccessorPublicOwner: true, sameKeeper: true,
+        originalSessionCreateResponsePreserved: true, successorCancellationTerminal: true, sessionPublishedOnce: true,
+        noDuplicateProductiveClaim: true, cancelRevisionConflicts: revisionConflicts,
+        immutableTerminalPublicCutPreserved: true, sourceUnchanged: true, fullI1Qualified: false };
+    } else if (shutdownAdmissionOnly) {
       mark('owned_instruction_inventory_before_shutdown_admission');
       const inventory = path.join(recipe.workspace, 'shutdown-instructions'), instruction = path.join(inventory, 'AGENTS.md');
       await mkdir(inventory, { mode: 0o700 }); await chown(inventory, ledger.uid, ledger.gid);
@@ -975,9 +1335,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
         assert.deepEqual(exchange([admission])[0], replay[0], 'the exact original admission response must survive a fresh connection');
         const latest = accepted(exchange([{ protocolVersion: 1, method: 'run.get', runId }])[0]!, 'run.get');
         assert.equal(latest.snapshot.run.specRef, run.specRef);
-        const claims = latest.journal.filter((entry: any) => entry.phase === 'dispatch_claimed');
-        assert(claims.length <= 1, 'the one admitted model response cannot acquire a duplicate productive claim');
-        for (const claim of claims) { assert.equal(claim.opKind, 'model'); assert.equal(claim.attempt, 0); }
+        report.shutdownAdmission.modelClaimHistory = await inspectShutdownModelClaims(latest);
         const sessionCut = accepted(exchange([{ protocolVersion: 1, method: 'session.get', sessionId: session.id,
           afterItemSeq: session.latestItemSeq }])[0]!, 'session.get');
         assert(sessionCut.items.length <= 1, 'the admitted Run cannot publish a duplicate Session terminal item');
@@ -2596,5 +2954,5 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
 assert.equal(process.platform, 'linux'); assert.equal(process.arch, 'x64');
 const [mode, filename, ...extra] = process.argv.slice(2);
 assert(mode === '--campaign' || mode === '--failure-campaign' || mode === '--retry-campaign' || mode === '--authority-failure-campaign' ||
-  mode === '--storage-failure-campaign' || mode === '--shutdown-admission-campaign'); assert(filename && extra.length === 0);
+  mode === '--storage-failure-campaign' || mode === '--shutdown-admission-campaign' || mode === '--shutdown-preparation-campaign'); assert(filename && extra.length === 0);
 await campaign(filename, mode);
