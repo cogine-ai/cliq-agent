@@ -18,19 +18,22 @@ import { quiescedToolCheckpoint } from '../../state/testing/tool-effects.js';
 import { fixtureSandboxProfile } from '../../state/testing/worker-launch.js';
 import { builtinInputContracts } from '../../tools/builtin-inputs.js';
 import { signedLinuxWorkerTestRuntime } from './worker-runtime.js';
+import { publishOfflineModelEndpoint } from '../../state/testing/model-endpoint.js';
 
 /** Campaign setup only. Its model prefix and first worker retirement are
  * explicitly offline retained fixtures, never native execution evidence.
  * The later StateStore.loadRunExecution path must create and inspect the real
  * signed processes, generation, edit effect and complete containment death. */
 export async function createLinuxWorkerCampaignFixture(input: {
-  installationRoot: string; cgroupParent: string; stateVolume: string; label: string;
+  installationRoot: string; cgroupParent: string; stateVolume: string; label: string; paddingBytes?: number;
+  edit?: { contents: Uint8Array; oldText: string; newText: string };
 }) {
   if (process.platform !== 'linux') throw new Error('Linux worker campaign requires Linux; no skipped qualification');
   const stateRoot = await mkdtemp(path.join(input.stateVolume, 's-'));
   const workspace = await mkdtemp(path.join(input.stateVolume, 'w-'));
   await chmod(stateRoot, 0o700); await chmod(workspace, 0o700);
-  const original = Buffer.from('before\n');
+  const original = Buffer.concat([input.edit ? Buffer.from(input.edit.contents) : Buffer.from('before\n'),
+    Buffer.alloc(input.paddingBytes ?? 0, 0x78)]);
   await writeFile(path.join(workspace, 'a'), original, { mode: 0o644 });
   const authority = testFixture();
   const builtin = builtinInputContracts.edit;
@@ -59,8 +62,15 @@ export async function createLinuxWorkerCampaignFixture(input: {
     const session = await store.createSession({ principalId, ...channel, requestId: uuidv7(),
       admissionKey: admissionKey(`${input.label}-session`), workspacePath: workspace });
     const workspaceIdentity = await store.artifacts.readCanonical<WorkspaceIdentityV1>(session.session.workspaceIdentityRef);
-    const credentials = [(await store.artifacts.publishCanonical({ format: 'cliq-offline-credential-fixture-v1' },
-      'cliq-offline-credential-fixture-v1')).ref];
+    const endpoint = await publishOfflineModelEndpoint({ artifacts: store.artifacts, principalId,
+      bundle: signed.bundle, trustStorePem: signed.trustStorePem, createdAt: sampleCanonicalNow() });
+    const credentials = endpoint.credentialRefs;
+    authority.assembly.provider.endpoint = endpoint.endpoint;
+    authority.material.capabilityEvidence.value.endpointIdentityDigest = endpoint.endpoint.endpointIdentityDigest;
+    authority.material.priceTable!.value.endpointIdentityDigest = endpoint.endpoint.endpointIdentityDigest;
+    authority.material.verifyProviderEndpoint = input => input.provider === authority.assembly.provider.name &&
+      input.model === authority.assembly.provider.model && canonicalSha256(input.endpoint) === canonicalSha256(endpoint.endpoint) &&
+      canonicalSha256(input.credentialGrantRefs) === canonicalSha256(credentials);
     authority.assembly.provider.credentialGrantRefs = credentials;
     authority.material.additionalCredentialGrantRefs = [];
     authority.runSpecCredentialGrantRefs = credentials;
@@ -143,7 +153,8 @@ export async function createLinuxWorkerCampaignFixture(input: {
     const active = await activateFixtureWorker(queued, `offline-${input.label}`);
     const agent = await store.loadAgentRun({ runId: queued.runId, material: authority.material, releaseKeys: signed.releaseKeys });
     const fixture = { ...queued, ...active, authority, agent, signed };
-    await batch(fixture, [{ name: 'edit', input: { path: 'a', old_text: 'before', new_text: 'after' } }]);
+    await batch(fixture, [{ name: 'edit', input: { path: 'a',
+      old_text: input.edit?.oldText ?? 'before', new_text: input.edit?.newText ?? 'after' } }]);
     const beforeSeal = await store.readRecoveryClosure(queued.runId);
     const checkpointId = identityHash('cliq-offline-campaign-prefix-checkpoint-v1', queued.runId);
     const prefixProof = await quiescedToolCheckpoint(fixture, checkpointId);

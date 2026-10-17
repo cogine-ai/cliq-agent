@@ -1,0 +1,447 @@
+# I1 coherent terminal retirement — implementation contract
+
+Status: implementation direction approved on 2026-10-16. The original nine-fix
+candidate `2630f23` passed both exact-source Linux campaigns, including 29 native
+cases per event; that does not complete I1. The owner additionally approved
+repairing two shutdown-order defects and a further credential-finalizer shutdown
+gap in the same PR on 2026-10-17. Admission shutdown now passes both exact-source
+Linux events at `db6f658`; preparation shutdown has genuine forced-stop RED.
+Execution producer and credential-finalizer shutdown repairs still require
+qualification. At `d9770e2`, both preparation probes lost their final writer
+observation before the target stop; their later cleanup exit 1 remains an
+unresolved production-retirement signal, not a passing cut. The native
+inspection cancellation component reached genuine RED; ABI2 implementation and
+the independent installed/effect controls are under qualification. This document itself
+qualifies nothing. The owner accepted one WorkerLaunch preparation
+spine plus genuine preparation-retirement/private rollback evidence, including
+fail-closed incomplete birth. Model unknown retains the existing strictly newer
+StateOwner rule. Normative RFC/WP amendments and implementation must ship
+together; none of this document itself grants authority.
+
+## Goal and limits
+
+Complete installed Run cancellation/deadline handling across an in-flight
+private edit, worker-death recovery and a generation that never reached worker
+launch. Keep one lifecycle rather than adding a stop engine, operation-status
+protocol, second ledger, Run status or generic recovery bypass.
+
+Reuse StopIntent precedence, WorkerLaunch, WorkspaceGeneration, Journal,
+BudgetSettlement, Checkpoint, Session publication and the sole terminal reducer.
+The default CLI, Workspace Trust, per-tool permission and OS sandbox remain
+independent. No new productive dispatch or permission is allowed after stop.
+
+## Confirmed gaps addressed by the implementation candidate
+
+- Installed cancel previously closed model transports, not the tool operation
+  owner. Native invocation result polling has no cancellation input.
+- The driver previously submitted a tool result with its pre-cancel Run revision, although
+  the existing tool reducer can accept genuine evidence at the current stopped
+  cut. Cancellation must not make a real result disappear.
+- Worker recovery previously rejected stop/expiry because its terminal
+  quiescence branch is absent. Removing that check would incorrectly requeue.
+- Activation previously created a generation and controller before WorkerLaunch reservation.
+  Closing their descriptors is not positive durable retirement of either tree.
+- Recovery previously eagerly created a replacement before retiring the predecessor,
+  leaving an unused generation when cancellation wins.
+- Claimed private edits need typed rollback closure when no genuine result is
+  available; ordinary no-dispatch cancellation cannot close that claim.
+
+## One execution owner, two distinct operations
+
+Add one narrow internal operation to the existing execution module:
+`requestStop()` means request productive revocation and retain the original
+producer's join. It neither means terminal nor returns death evidence.
+It is distinct from final `close()`, which permanently closes the execution
+module and launcher. The native resources needed for drain must remain owned.
+
+The control response still acknowledges the persisted StopIntent, not completion
+of whole-tree cleanup. After that transaction, revocation enters the real native
+owner immediately. The owning join is retained by scheduling; duplicate stop
+requests do not create another producer or drop an existing failed join.
+Cleanup uses its own bounded recovery continuation, not the aborted productive
+signal. A stop during a physical inspection must not cancel that inspection
+merely because its authority-reducing work is still needed.
+
+```text
+StopIntent commit → revoke productive release → join original producer
+                 → preserve actual result / unknown and original charge
+                 → prove original physical retirement
+                 → typed closure + terminal Checkpoint + Session item
+```
+
+## Supervisor shutdown — revoke before joining, fence after settlement
+
+Supervisor shutdown is not `run.cancel`: it creates no StopIntent and must not
+erase an accepted admission or replace a genuinely received result with unknown.
+Use two phases in the same resource owners, not concurrent full service/Store
+closure, a second lifecycle or a transferable shutdown receipt.
+
+The first phase synchronously closes productive gates and starts revocation
+before waiting for control handlers or installed scheduling tasks. A submission
+owns its complete asynchronous handler, including source capture, independent
+instruction capture, assembly, admission and the accepted Run's agent load.
+Its existing AbortSignal remains bound to its original private admission token;
+the existing transaction-scoped workspace recheck checks abortion before the
+first admission write. No post-acceptance abortion check discards the original
+committed response. Historical replay does not borrow that transient token.
+
+Start original model transport closure in this phase too: a control handler may
+be queued behind its installed credential/runtime borrow. Keep the original
+transport, memoized join and dispatch fence through typed settlement. Closing
+the transport is neither a refund nor a replacement no-release/death proof.
+
+An in-flight credential finalizer must similarly retain its exact original
+native inspection job. The approved signed credential-platform ABI revision
+adds cancel-and-join only to that inspection owner; ABI1 is not a fallback.
+Shutdown starts cancellation before draining the public finalizer handler,
+while its credential scope remains held through the actual worker, watchdog,
+bus/runtime descriptor and main-loop timer joins. A JS timeout, detached native
+Promise or early lock release is not cancellation. The transaction's existing
+closing gate must continue to reject new authority; a previously committed
+operation keeps its exact replay result. A failed native retirement remains
+sticky and prevents StateOwner or installation release.
+
+An execution's first phase must abort preparation and revoke its original
+pending native controller before joining that task; aborting only a file walker
+cannot interrupt a native BIND/launch wait. Already claimed/received tool work
+must retain its original join and genuinely received result. An idle worker
+supporting an in-flight model operation is not fenced in this phase. Any narrow
+received-tool drain after the closed gate must retain the exact original worker
+and physical owner; it does not reopen dispatch, lease or grant authority.
+
+After the actual tool result arrives, its original owner also retains unfinished
+checkpoint and completion publications. A positively joined CAS write ENOSPC or
+an actual SQL mutation failure with successful original rollback may resume the
+same immutable settlement, not rebuild its graph or reset native freshness
+attempts. Original claim, worker, generation, checkpoint, journal, items and
+budgets must still match. Only an exactly validated monotonic StopIntent change
+can rebind the revision; the public conflicting call still refuses first.
+Other execution and model-release entries stay fenced while this result is
+retained. Final close first attempts that same completion and retains StateOwner
+and its installation on failure. Joined I/O classification is not an execution,
+retirement or retry capability. The candidate's real Linux fault regressions
+remain distinct from a full-disk or precise installed crash qualification.
+
+Final close joins complete handlers and producers while StateOwner and the
+installation remain held, settles original model outcomes, then performs the
+existing worker fencing/death/retirement and descriptor joins. Only successful
+retirement permits the existing graceful owner transition and SQL/lock release.
+Initiation and join failures remain retained, and one failure must not prevent
+independent owners from starting revocation. No best-effort close is a positive
+retirement receipt.
+
+Keep the installed service's two-second stop policy unchanged. Its regression
+requires actual zero exit, the original owner's committed `graceful_release`
+and a validated successor acquisition, not merely a missing process. The
+existing worker inspection's original persisted deadline is also unchanged;
+these controls do not assert universal two-second completion for an in-flight
+thirty-second inspection or qualify an unobserved precise cut.
+
+The harness-only `3dd1536` kept production identical to `2630f23`. Its PR event
+`38990393818` positively observed the original pending admission and AGENTS.md
+descriptor, then recorded `Result=timeout`, `ExecMainCode=2`, `ExecMainStatus=9`
+under the ordinary two-second policy. The push event `38990389971` legitimately
+finished gracefully. Both original reports and the unchanged-runner cleanup
+evidence are retained; the positive event does not erase the genuine RED.
+Neither observation proves the exact private precommit-abort cut.
+
+At `db6f658`, push `38993016349` and PR `38993020888` both pass admission shutdown
+with positive original process/instruction-descriptor/pending-handler checks,
+zero service exit, committed graceful owner release and exact successor history.
+The PR preparation job `117279313425` positively brackets the queued, unclaimed
+Run cut with original Supervisor generation-write observations, then records
+the ordinary service's two-second `timeout`, code 2, status 9. That is the
+execution shutdown RED. The push preparation failure occurred at the final
+pre-stop observation; its later cleanup timeout is not evidence for that cut.
+Both failures remain preserved, rather than being conflated or rerun away.
+
+At `d9770e2`, push `38994258934` / PR `38994262929` preserve two further
+pre-stop observation failures and cleanup `exit-code`, status 1. No target
+preparation stop or graceful release is inferred. Sampling may retry a whole
+three-observation attempt within the same thirty-second deadline; it must still
+positively observe the original writer, strict public queued cut, same-generation
+writer and final same-generation writer immediately before ordinary SIGTERM.
+Missing observations are never successful stops. Fixed source-enum diagnostics
+may help distinguish genuine preparation registration, activation and native
+retirement failures, but cannot release resources or stand in for evidence.
+
+The native component RED on completed push job `117283158935` positively records
+an actual pending inspection, then `cancelJoinedWithin1500ms: false`, with the
+original inspection connection retired and both children joined. Its specific
+cancel-and-join assertion fails; the other three component cases and subsequent
+92-test Supervisor suite pass. This is not a compilation/setup failure and does
+not qualify the installed finalizer. The new ABI2 owner must pass that same real
+component test and the independent signed installed finalizer stop scenario.
+
+The `e8500dd` preparation reports reached the positive original writer/public
+queued cut and ordinary SIGTERM, then recorded `exit-code`, status 1, rather
+than a forced kill. The first fixed diagnostic classified preparation only as
+`unclassified`; this is still unresolved retirement, not graceful release.
+The native cancellation component step succeeds, but installed finalizer
+qualification separately failed before observing the original inspection.
+Only bounded source-enum/independent child-exit diagnostics may distinguish that
+unreached cut; extending the probe deadline or manually manufacturing a
+continuation cannot qualify it.
+
+The push effect probes reached genuine snapshot progress and an unanswered
+complete POST, respectively, but failed their strict retained exit-history
+assertion before owner validation. Their observer was started before admission;
+submit-to-stop lasted 24.646 and 11.907 seconds, beyond its unchanged ten-second
+input deadline. Retain the actual unit only after the first positive cut,
+recheck the same original effect, and then stop. Keep the original exit-code
+assertion, two-second service policy and observer deadline. Record every
+observer independently so successful cleanup cannot overwrite an earlier
+failed target observation. Lost cuts remain negative.
+
+The same close package must own `session.create` as well as `run.submit`.
+Its existing Trust scanner yields per entry but the installed Session path
+currently supplies no abort signal or whole-handler registry entry. First
+exercise the unchanged production path through the signed entry: a real
+controlled-home Trust-directory cursor must advance while the original public
+Session request is pending and its Session is absent, before ordinary SIGTERM.
+An opaque directory cookie is an enumeration observation, not a byte or entry
+count and not an exact private precommit cut. A legitimate raced commit must
+retain its original response; absence alone does not prove an exact abort cut.
+
+The unchanged Session path at `2072c4d` reached that real Trust-enumeration
+cut in both push `38997514864` and PR `38997520147`, then hit the ordinary
+two-second `timeout`, exit code 2/status 9. Run admission in the same jobs
+passed independently. The repair therefore reuses one complete Session/Run
+admission producer registry, propagates its original AbortSignal to the Trust
+walker, and checks cancellation before the first transaction time-fence/write.
+New replay aliases are writes too; already committed exact responses are not
+discarded by a post-commit abort check. A focused real-cursor test does not
+replace the installed Session RED-to-GREEN requirement.
+
+At `2072c4d`, both push effect controls and the PR pending-model control pass
+their actual strict stop, original graceful owner release and successor
+continuations. The PR received-tool control instead encountered the original
+attempt's tool UNKNOWN before its target snapshot; that negative cut remains
+unqualified. Preparation diagnostics now narrow failure to the retirement
+call expression after the resource joins, not yet a particular reducer check.
+Subsequent fixed-point diagnostics narrowed the original failure without
+changing lifecycle or proof predicates. After both matching real received-tool
+campaigns passed, the temporary diagnostics were removed together; those
+historical negative reports remain retained. The diagnostic-free source still
+needs its own matching complete Linux evidence.
+
+The installed finalizer's setup is separate from its inspection cut. The normal
+signed enrollment at `e8500dd` took 26.308 seconds; the early fixture's ten-second
+wait from helper spawn expired with a live helper before any creation call.
+Keep the original sixty-second complete-entry budget, authenticate that same
+signed helper's actual CreateItem caller, and only then begin the unchanged
+ten-second inspection observation. Retain unit history after the original
+Supervisor inspection actually enters, recheck the same unanswered connection
+and original processes, then apply the unchanged two-second stop. Neither
+setup readiness nor these diagnostics substitute for the actual cancellation
+join, original owner release, orphan cleanup and successor replay evidence.
+
+Startup recovery is another complete producer: SIGTERM must not wait through
+the entire retained-Run inventory before revoking already-created owners. Its
+new control first creates a genuine retained unknown model call through the
+existing public path. On restart it requires the actual successor StateOwner,
+original process identity and signed broker executable mapping while public
+control is still absent, then ordinary two-second stop and a third real owner.
+An open broker FD is not this evidence: installation selection already opens
+all signed images. The executable mapping is bounded read-only observation of
+the actual dlopen, not a loader instruction hook or fake inventory. Lost cuts
+and the not-yet-repaired startup producer remain explicitly unqualified.
+
+At `7892b1f`, both actual one-retained-Run startup controls pass: the original
+second owner and signed broker mapping are present before control readiness,
+the unchanged two-second ordinary stop exits successfully, and the third owner
+validates the exact clean predecessor. This is not a startup failure reproduction
+or a qualification of a large retained inventory or the earlier unpublished
+StateStore window. The minimal startup repair synchronously latches Supervisor
+stop and revokes a published Store before waiting for startup; each later
+resource/Run load boundary returns without publishing further control or work.
+Final close still joins the original startup before releasing authority. Real
+loading and retirement errors remain failures, not deliberate-stop successes.
+
+Both `7892b1f` preparation campaigns reach the original physical writer and
+fail in `preparation_transaction`. A deterministic defect is present there:
+the resource recheck calls `assertActiveStateOwner` through the outer driver
+inside a scoped write transaction. The driver correctly refuses that access.
+Both born and unallocated retirement rechecks must use the actual transaction
+connection for SQL; the original driver remains the physical broker registry's
+identity. No driver guard, native join, freshness, quarantine or CAS predicate
+is removed. Its installed GREEN remains pending until the same campaign passes.
+
+At `be6a34a`, the PR preparation campaign completes the genuine original writer,
+unchanged two-second normal exit, same-directory quarantine/retirement, original
+graceful owner release, validated successor and one terminal publication. Its
+push counterpart passes physical retirement and normal stop, then fails inside
+the successor owner-history helper; that report remains negative. Bounded
+source frames for that existing helper may diagnose the difference but cannot
+substitute for its assertions.
+New cardinality wire checks fail earlier because strict JSON objects have null
+prototypes while their expected literals do not. Correcting those comparisons
+to complete canonical bytes preserves every field/value assertion. That harness
+failure supplies no evidence of an actual wrong refusal code, and the later
+normal/authority/storage targets did not execute in those negative campaigns.
+
+## Tool result and settlement rules
+
+| Actual cut | Required behavior |
+| --- | --- |
+| Prepared, never claimed | Existing positive no-dispatch settlement; undispatched call/suffix cancellation only. |
+| Genuine result, same unfenced claim/frontier/native owner | Revalidate current cut and reuse completeTool with current revision; retain executed/error and actual post-effect Checkpoint. No next dispatch. |
+| Claimed private edit, result not positively known | Preserve unknown and pessimistically settle once; real whole-containment death plus original generation quarantine/rollback must precede typed failed closure. |
+| Unknown external effect | Preserve the existing ReplayClass-specific reconciliation/manual wait; physical zero alone is not effect resolution. |
+
+Private rollback evidence must be a closed union branch binding the original
+op/attempt/dispatch, request/grant/target, WorkerLaunch, generation, last ready
+Checkpoint, actual death/quarantine/retirement and current inspector. Its normal
+tool result reports a proven abandoned private effect, never "not executed".
+An unknown-to-failed transition reuses the existing settlement: no second charge,
+refund or dispatch permission. Cross-fence late results remain audit-only when
+their frontier/subject is no longer current. Every call closes exactly once.
+
+## Stop-aware worker recovery
+
+Reuse the exact persisted worker-death subject, probe nonce and immutable
+quarantine anchor. StopIntent may change Run revision; the owner may reread that
+same subject and verify a newer stopping cut, not accept an arbitrary frontier.
+
+The final stopped-recovery commit must not expose a queued Run or an invalid
+intermediate wait. In particular, a worker-death wait cannot remain installed
+after its required reconciling launch/fenced generation are silently replaced
+with retired rows. Prepare immutable artifacts and fresh native observations,
+then use the existing owning reducers' private commit plans to atomically close
+the wait, launch/generation, required invocation settlement and terminal facts.
+If an external ambiguity remains, retain its valid typed wait instead of
+pretending terminal quiescence. There is no generic clear-wait operation.
+Physical closure must not prematurely change the reconciling launch and
+fenced_reconciling generation required by that worker-death wait. Keep that
+valid tuple, with only existing probe CAS transitions, until full terminal
+closure can commit atomically. Switching to another wait would require its
+complete owning-validator contract; this proposal does not assume one exists.
+
+This bounded, authority-reducing recovery may proceed after the Run deadline;
+it never extends productive eligibility. Keep the original probe deadline,
+backoff, five-second evidence freshness, StateOwner and canonical-time gates.
+An expired probe, clock regression, CAS drift or failed join retains recovery.
+The quarantine target derives from the original anchor even after a physical
+move before SQL commit; a new probe/version must not select another target.
+
+Create replacements lazily: retire the original domain first, then prepare the
+next generation only if the current Run is still allowed to continue. Stopped,
+candidate and unknown branches never create a replacement just to clean it up.
+
+## Approved preparation contract
+
+Keep the existing unique unretired WorkerLaunch per Run. Add a discriminated
+`preparing` branch to that same spine, committed before resource creation:
+
+```text
+preparing → reserved → preactivated → activated → reconciling / retired
+    └────────────────── genuine preparation retirement ─────────→ retired
+```
+
+Preparing records only known logical identity: original Run/revision/owner,
+source Checkpoint, launch/nonces, fixed deadline and derived resource locators.
+It has no worker creation, activation, lease, operation grant, broker release or
+private-write authority. Never fill missing generationRef, inode, controller
+PID/start, plan/spec or death facts with placeholder values.
+
+A genuine native preparation owner creates resources and records their actual
+birth identities. Include the controller leaf/process and reservation, not only
+the generation. Record the actual generation identity before copying payload;
+partial materialization cannot become ready. Only the real readonly snapshot,
+complete plan/spec and durable original BIND acknowledgement allow a CAS from
+preparing to the existing reserved branch. Do not reset the original preparation
+deadline when promoting. Existing blocked birth/activation ordering then stays.
+
+Early no-worker retirement consumes genuine preparation closure plus original
+tree/descriptor/controller/broker joins. It is not preactivation_failed,
+launch_aborted, sealed, or ProcessContainmentNoSpawnEvidence with missing fields.
+Native records hold real birth facts, not another durable Run phase ledger.
+The existing anchor remains a root pin, not an implicit StateOwner/Run authority.
+
+Durable intent is a blocker, not proof: missing, truncated or substituted birth
+records remain explicit RECOVERY_REQUIRED after owner loss. Automatic recovery
+of every mkdir/clone-before-registration cut is not established by this proposal.
+That broader guarantee would require additional native registration design and
+real evidence. Old unpaired generations are not backfilled with fictional
+launch history or accepted through a permissive legacy path.
+
+## Model unknown — preserved strict rule
+
+The existing `broker_release_fenced` terminal-abandonment contract and its
+literal lock action remain unchanged. Installed broker quiescence or
+transport.close by the claiming owner cannot be relabeled as that evidence.
+
+The owner additionally approved a distinct `broker_process_domain_dead` branch
+on 2026-10-16. It binds the original permanent claim/token and historical
+process identity to a genuine fresh PID/start-lifetime death observation under
+a strictly newer StateOwner. The initial implementation is limited to the same
+verified signed installed runtime and fixed native broker recipe; this recipe
+has nontransferable creator-process release authority, including across its
+fixed fork/exec paths. Graceful release, a new Supervisor id, a missing socket,
+or a caller PID/digest are not death evidence. An old process that is still
+alive remains waiting. No token-revoked or active-release-zero observation is
+invented for a mutex that disappeared with its process.
+
+Immutable `8c56faf` reached the genuine installed public-cancel terminal RED
+after the original fifteen-second deadline in both Linux runs, with unchanged
+unknown/full charge and completed joins/scans/cleanup. The next implementation
+adds the worker-free owning producer and terminal/history consumer; their new
+Linux qualification remains pending. Pure closed-data decoders establish no
+native authority. The owning plan holds the real branded signed installation
+through its terminal transaction, binds the actual current process and private
+native lock, reads the original Journal/Owner/process/recipe closure itself,
+and fresh-rechecks native death, lineage and the five-second canonical-time cut
+at terminal commit. Active-worker unknowns continue refusing before any seal
+preparation; this branch does not substitute for the whole retirement package.
+The original unknown and full charge remain unchanged;
+there is no retry, fabricated failed result or duplicate settlement. Same-owner
+automatic terminal abandonment remains outside this package, and process-domain
+death does not resolve provider effect or billing.
+
+The shared retained-owner reader walks genesis through the recorded inspector,
+including one exact successor witness if that inspector later died in a
+takeover. It does not demand today's active owner or installation and does not
+turn a graceful transition into death evidence. Its birth validation supports
+the two implemented `fresh_empty|fresh_installed` recipes at the exact current
+schema/hash; arbitrary older schemas and migrated origins remain unsupported,
+not silently accepted. A historical birth snapshot is never mistaken for a
+requirement that the now-grown business database or CAS be empty again.
+
+The owner approved closing the original companion source contract: installed
+genesis now records `modelAuthoritySource` as explicit `none` or
+`present(closureRef,closureDigest)` from the genuinely held verified installation
+in the same first StateOwner transaction. The companion is signed after the
+bundle; current installation lookup and CAS search cannot reconstruct its
+original provenance. Retained validation requires every original bundle data/
+structured edge and that exact companion's typed inventory, and refuses missing,
+extra or substituted members even when surrounding snapshot hashes are redone.
+The data-only companion validator returns no verified authority; live import
+still authenticates every signature. No legacy fallback or new ledger exists.
+Local data/history regressions and genuine Linux-only installation regressions
+are separate: the latter and the installed terminal/restart consumer must pass
+on the next immutable Linux candidate before this package is qualified.
+
+## Validation contract
+
+Use the real signed installed entry/v1 UDS and existing genuine native worker
+campaigns. Pure decisions/SQL diagnostics prove only their existing data seam.
+Keep free standard Linux runners, every original timeout, secret scan, native
+identity check, cleanup and baseline assertion. Do not reconstruct blocked pause
+workflows or call timing, an elapsed sleep, or a claim row a precise fork proof.
+
+| Scenario | Required direct evidence |
+| --- | --- |
+| Queued cancel/expiry | No new productive request or generation; terminal Checkpoint and Session publication once. |
+| Preparing cancel | Original preparation joined/retired; no worker activation, invented no-spawn or released slot before proof. |
+| Reserved/preactivated stop | Exact original no-spawn or created/dead branch and complete quarantine/retirement. |
+| In-flight edit stop/result race | Actual original invocation/release cut observed; producer joined; real result or typed rollback, one claim and no next model/tool dispatch. |
+| Stop/expiry during recovery | Original wait/nonce/anchor retained; no replacement/lease; valid final atomic closure, no transient queued state. |
+| Restart after quarantine | Same deterministic locator and original claim; no redispatch or duplicate settlement/Session item. |
+| Corrupt birth, ABA, failed join, clock regression | Explicit recovery, no terminal/proof/slot release; original authority remains fenced. |
+| Normal installed loop | Existing model→edit→model, ready Checkpoint, lease renewal, reconnect/restart, credentials/endpoint and native/P1/P2 campaigns all remain green. |
+
+Exact cuts not genuinely exercised remain unverified, including preparation
+pre-registration crashes, native result-versus-revocation, controller-leaf crash
+reclamation and move-before-commit interruptions. Designing an assertion or
+adding a diagnostic does not qualify a cut. Full I1 and merge readiness remain
+false until their required implementation and exact-source evidence are present.

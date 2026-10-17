@@ -11,6 +11,7 @@ import type { ArtifactCatalog } from './artifacts.js';
 import { decodeWorkspaceGenerationSnapshotEvidence, decodeWorkspaceState, decodeWorkspaceEntries } from './decoders.js';
 import { toolCheckpointId, validateMatchingWorkerDeath } from './tool-checkpoint.js';
 import { compileOutputSchema } from '../tools/input-schema.js';
+import { validatePrivateToolRollback } from './private-tool-rollback.js';
 
 /** Reachability and durable ownership. The loaded Run additionally verifies release signatures and replays the fixed evaluator. */
 export async function validateToolRecovery(input: {
@@ -162,11 +163,34 @@ export async function validateToolRecovery(input: {
         entry.timestamp < grant.issuedAt || entry.timestamp >= grant.expiresAt)) throw new TypeError('tool grant claim lifetime or use count mismatch');
     if (prepared.timestamp < grant.issuedAt || prepared.timestamp >= grant.expiresAt) throw new TypeError('tool preparation uses an expired grant');
     const failed = attempts.find((entry) => entry.attempt === prepared.attempt && entry.phase === 'failed');
+    const unknown = attempts.find(entry => entry.attempt === prepared.attempt && entry.phase === 'unknown');
+    const failedClaim = claims.find(entry => entry.attempt === prepared.attempt);
     if (failed && run.stopIntentRef && failed.errorRef === run.stopIntentRef) {
       const detail = await readCanonicalArtifact<TerminalDetail>(artifacts, run.terminalDetailRef!);
       if (!['failed', 'cancelled'].includes(run.status) || failed.timestamp !== detail.createdAt || detail.createdAt > run.updatedAt ||
           claims.some((claim) => claim.attempt === prepared.attempt)) throw new TypeError('stop refund is not an atomic undispatched terminal closure');
       requireEqual(failed.budgetDelta, { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 }, 'stop no-dispatch refund');
+    } else if (failed && unknown && failedClaim && prepared.replayClass === 'manual') {
+      const { evidence } = await validatePrivateToolRollback(artifacts, { prepared, claim: failedClaim, unknown, failed,
+        generations: input.workspaceGenerations, checkpoints: input.checkpoints });
+      const item = [...items.values()].find(item => item.kind === 'tool_result' && item.opId === prepared.opId);
+      if (!run.stopIntentRef || !['failed', 'cancelled'].includes(run.status) || item?.kind !== 'tool_result' ||
+          item.outcome !== 'error' || item.createdAt !== failed.timestamp || item.batchItemId !== request.batchItemId ||
+          item.callId !== request.callId || item.index !== request.callIndex)
+        throw new TypeError('private rollback has no atomic terminal ordered result');
+      const payload = await readCanonicalArtifact<ToolResultPayloadV1>(artifacts, item.resultRef);
+      if (payload.outcome !== 'error' || payload.code !== 'TOOL_EXECUTION_FAILED' || payload.opId !== prepared.opId ||
+          payload.attempt !== prepared.attempt || payload.journalErrorRef !== failed.errorRef ||
+          payload.journalErrorDigest !== evidence.evidenceDigest || payload.diagnosticRef !== failed.errorRef ||
+          payload.diagnosticDigest !== evidence.evidenceDigest)
+        throw new TypeError('private rollback result substitutes its original failed Journal proof');
+      const model = await readCanonicalArtifact<ToolResultModelContentV1>(artifacts, payload.modelContentRef);
+      requireEqual(model.content, { code: 'TOOL_EXECUTION_FAILED', failureKind: 'private_effect_rolled_back' }, 'private rollback model-safe truth');
+      requireEqual(failed.budgetDelta, { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 }, 'private rollback never charges twice');
+      const terminalCheckpoint = input.checkpoints.find(checkpoint => checkpoint.id === run.latestCheckpointId);
+      if (!terminalCheckpoint || terminalCheckpoint.journalSeq < failed.seq || terminalCheckpoint.createdAt < failed.timestamp ||
+          terminalCheckpoint.workspaceStateRef !== evidence.workspaceStateRef)
+        throw new TypeError('private rollback terminal does not restore its last ready workspace');
     } else if (failed) {
       const expiry = await readCanonicalArtifact<ToolGrantExpiryV1>(artifacts, failed.errorRef!);
       const proof = await approvalWait(expiry.waitingSubjectRef);

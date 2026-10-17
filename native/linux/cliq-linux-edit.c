@@ -130,9 +130,12 @@ static int edit_target(const struct text *path, const struct text *old, const st
     free(contents); contents = decoded; size = decoded_size;
     size_t match = 0, matches = 0;
     if (old->length != 0) {
-        for (size_t i = 0; i + old->length <= size;) {
-            if (memcmp(contents + i, old->bytes, old->length) == 0) { match = i; matches++; i += old->length; }
-            else i++;
+        const unsigned char *first = memmem(contents, size, old->bytes, old->length);
+        if (first != NULL) {
+            match = (size_t)(first - contents);
+            /* Matches are nonoverlapping; a second is enough to refuse. */
+            const unsigned char *next = first + old->length;
+            matches = memmem(next, size - match - old->length, old->bytes, old->length) == NULL ? 1 : 2;
         }
     } else {
         /* Preserve String.split('') / replace('', ...) for the signed existing

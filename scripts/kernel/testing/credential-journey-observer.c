@@ -1,4 +1,5 @@
-/* Test-only, read-only observer for the actual installed credential journey.
+/* Test-only observer for the actual installed credential journey. The closed
+ * retain-systemd mode holds only unit-object references while exit is observed.
  * The prerequisite entry is renamed, never invoked: its create/delete and
  * failure-deletion paths are not part of this observer's command interface.
  * cc -std=c11 -O2 -Wall -Wextra -Werror credential-journey-observer.c \
@@ -7,6 +8,7 @@
 #define main prerequisite_main
 #include "../cliq-secret-service-probe.c"
 #undef main
+#include <signal.h>
 
 #define OBSERVER_MAX_ITEMS 4096
 #define OBSERVER_MAX_PATH_BYTES 32768
@@ -123,7 +125,102 @@ static gboolean observer_compare(Probe *p) {
   p->readback = TRUE; return TRUE;
 }
 
+static gboolean observer_systemd_units(const char *supervisor, const char *keeper) {
+  const char *supervisor_suffix = "-supervisor.service", *keeper_suffix = "-keeper.service";
+  const gsize prefix = 5 + 64;
+  if (strlen(supervisor) != prefix + strlen(supervisor_suffix) || strncmp(supervisor, "cliq-", 5) ||
+      strcmp(supervisor + prefix, supervisor_suffix) || strlen(keeper) != prefix + strlen(keeper_suffix) ||
+      memcmp(supervisor, keeper, prefix) || strcmp(keeper + prefix, keeper_suffix)) return FALSE;
+  for (gsize i = 5; i < prefix; i++) {
+    if (!((supervisor[i] >= '0' && supervisor[i] <= '9') || (supervisor[i] >= 'a' && supervisor[i] <= 'f'))) return FALSE;
+  }
+  return TRUE;
+}
+
+static gboolean observer_systemd_owner(Probe *p) {
+  g_autoptr(GVariant) owner = call(p, BUS, BUS_PATH, BUS, "GetNameOwner",
+    g_variant_new("(s)", "org.freedesktop.systemd1"), "(s)");
+  if (!owner) return FALSE;
+  const char *name; g_variant_get(owner, "(&s)", &name);
+  if (!g_dbus_is_unique_name(name) || strlen(name) > 255 || (p->owner && strcmp(name, p->owner)))
+    return fail(p, "observer-systemd-owner", NULL);
+  if (!p->owner) p->owner = g_strdup(name);
+  g_autoptr(GVariant) uid = call(p, BUS, BUS_PATH, BUS, "GetConnectionUnixUser", g_variant_new("(s)", p->owner), "(u)");
+  g_autoptr(GVariant) pid = call(p, BUS, BUS_PATH, BUS, "GetConnectionUnixProcessID", g_variant_new("(s)", p->owner), "(u)");
+  if (!uid || !pid) return FALSE;
+  guint32 actual_uid, actual_pid;
+  g_variant_get(uid, "(u)", &actual_uid); g_variant_get(pid, "(u)", &actual_pid);
+  if (actual_uid != p->uid || !actual_pid || actual_pid > INT_MAX || (p->service_pid && actual_pid != p->service_pid))
+    return fail(p, "observer-systemd-credentials", NULL);
+  p->service_uid = actual_uid; p->service_pid = actual_pid;
+  return TRUE;
+}
+
+static gboolean observer_systemd_release_input(Probe *p) {
+  const gint64 deadline = g_get_monotonic_time() + TIMEOUT_MS * G_TIME_SPAN_MILLISECOND;
+  guint8 bytes[2]; gsize count = 0;
+  for (;;) {
+    const gint64 remaining = deadline - g_get_monotonic_time();
+    if (remaining <= 0) return fail(p, "observer-systemd-release-input", NULL);
+    struct pollfd input = { .fd = STDIN_FILENO, .events = POLLIN };
+    int ready = poll(&input, 1, (int) ((remaining + G_TIME_SPAN_MILLISECOND - 1) / G_TIME_SPAN_MILLISECOND));
+    if (ready < 0 && errno == EINTR) continue;
+    if (ready <= 0 || (input.revents & (POLLERR | POLLNVAL)) || !(input.revents & (POLLIN | POLLHUP)))
+      return fail(p, "observer-systemd-release-input", NULL);
+    ssize_t n = read(STDIN_FILENO, bytes + count, sizeof(bytes) - count);
+    if (n < 0 && errno == EINTR) continue;
+    if (n < 0) return fail(p, "observer-systemd-release-input", NULL);
+    if (g_get_monotonic_time() >= deadline) return fail(p, "observer-systemd-release-input", NULL);
+    if (!n) return count == 1 || fail(p, "observer-systemd-release-frame", NULL);
+    count += (gsize) n;
+    if (count != 1 || bytes[0] != 'R') return fail(p, "observer-systemd-release-frame", NULL);
+  }
+}
+
+static int observer_retain_systemd(int argc, char **argv) {
+  Probe p = { .runtime_fd = -1, .uid = getuid() };
+  const char *units[2] = { NULL, NULL }; guint retained = 0;
+  if (unsetenv("G_DBUS_DEBUG") || signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
+    fail(&p, "observer-systemd-initialize", NULL); goto done;
+  }
+  if (argc != 4 || !p.uid || geteuid() != p.uid || !observer_systemd_units(argv[2], argv[3])) {
+    fail(&p, "observer-systemd-arguments", NULL); goto done;
+  }
+  units[0] = argv[2]; units[1] = argv[3];
+  if (!connect_bus(&p) || !observer_systemd_owner(&p)) goto done;
+  for (guint i = 0; i < 2; i++) {
+    g_autoptr(GVariant) reply = call(&p, p.owner, "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager",
+      "RefUnit", g_variant_new("(s)", units[i]), "()");
+    if (!reply) goto done;
+    retained++;
+  }
+  if (!observer_systemd_owner(&p)) goto done;
+  if (fputs("systemd_units_retained\n", stdout) == EOF || fflush(stdout)) {
+    fail(&p, "observer-systemd-ready-output", NULL); goto done;
+  }
+  observer_systemd_release_input(&p);
+done:
+  while (retained) {
+    g_autoptr(GVariant) reply = call(&p, p.owner, "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager",
+      "UnrefUnit", g_variant_new("(s)", units[--retained]), "()");
+    if (!reply) p.failed = 1;
+  }
+  if (p.bus && p.owner && !observer_systemd_owner(&p)) p.failed = 1;
+  if (p.bus) {
+    GError *error = NULL;
+    p.connection_closed = g_dbus_connection_close_sync(p.bus, NULL, &error);
+    if (!p.connection_closed) fail(&p, "observer-systemd-connection-close", &error);
+    g_object_unref(p.bus);
+  }
+  if (p.runtime_fd >= 0 && close(p.runtime_fd)) fail(&p, "observer-systemd-runtime-close", NULL);
+  g_free(p.owner); g_free(p.unique);
+  if (!p.failed && (fputs("systemd_units_released\n", stdout) == EOF || fflush(stdout)))
+    fail(&p, "observer-systemd-release-output", NULL);
+  return p.failed ? 1 : 0;
+}
+
 int main(int argc, char **argv) {
+  if (argc > 1 && !strcmp(argv[1], "retain-systemd")) return observer_retain_systemd(argc, argv);
   Probe p = { .runtime_fd = -1, .uid = getuid() };
   g_autoptr(GPtrArray) items = NULL;
   g_autoptr(GPtrArray) after = NULL;

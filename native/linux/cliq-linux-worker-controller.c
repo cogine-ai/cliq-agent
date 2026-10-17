@@ -762,8 +762,11 @@ static int controller(void) {
                 scope_process_current(&scopes[scope->parent]) && scope_process_current(scope)) {
                 scope->released = true;
                 int extra[5]; size_t extras;
-                ok = cliq_send(scope->channel, &request, NULL, 0) && readable(scope->channel, OBSERVATION_TIMEOUT_MS) &&
-                    cliq_receive(scope->channel, &response, extra, &extras) && extras == 0 && response.command == CLIQ_WRITE_RESULT;
+                if (cliq_send(scope->channel, &request, NULL, 0) && readable(scope->channel, OBSERVATION_TIMEOUT_MS) &&
+                    cliq_receive(scope->channel, &response, extra, &extras)) {
+                    ok = extras == 0 && response.command == CLIQ_WRITE_RESULT;
+                    for (size_t i = 0; i < extras; i++) close(extra[i]);
+                }
             }
         } else if (request.command == CLIQ_STOP_SCOPE && count == 0) ok = stop_scope(request.scope, &response);
         else if (request.command == CLIQ_STOP_CONTROLLER && count == 0) {

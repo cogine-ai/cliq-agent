@@ -4,23 +4,27 @@ import { addCanonicalDuration, digestOmitting, identityHash, sha256Bytes } from 
 import type { ProcessContainmentDeathEvidenceV1, ReconciliationProbeEvidenceV1, ReconciliationProbeTimeoutClosureV1, Run, SupervisorInspectorIdentityV1,
   WorkerDeathWait, WorkerRecoveryEvidenceV1, WorkspaceGenerationQuarantineEvidenceV1, WorkspaceGenerationStateV1 } from '../../kernel/types.js';
 import { immutableSnapshot } from '../../model/immutable.js';
+import { decodeRetainedRunAssembly } from '../../model/run-assembly.js';
 import { exactKeys } from '../../policy/runtime-authority.js';
-import { assertNativeContainmentDeath, type NativeContainmentDeathObservation } from '../../sandbox/linux-worker.js';
+import { assertNativeContainmentDeath, type NativeContainmentDeathObservation, type NativeRetainedWorkerRetirement } from '../../sandbox/linux-worker.js';
 import { observeRetainedRunWorkspace, readRetainedWorkspaceObservation } from '../../workspace/run-workspace/generation.js';
 import { insertArtifactMetadata, type ArtifactCatalog } from '../artifacts.js';
 import { advanceTimeFence, sampleCanonicalNow, type TimeFenceAdvance } from '../canonical-time.js';
 import { joinResourceOperations, KernelStorageError, stateOperation } from '../errors.js';
 import { readRetainedWorkerLaunchClosure } from '../execution-closure.js';
 import { readRecoveryClosure } from '../recovery-closure.js';
-import { nextJournalSequence } from '../repositories/journal.js';
-import { readRequiredWorkerLaunch, updateWorkerLaunch } from '../repositories/worker-launches.js';
-import { readRequiredWorkspaceGenerationByRef, updateWorkspaceGeneration } from '../repositories/workspace-generations.js';
+import { nextJournalSequence, readInvocationJournal } from '../repositories/journal.js';
+import { readRequiredWorkerLaunch, readWorkerLaunchesForRun, updateWorkerLaunch } from '../repositories/worker-launches.js';
+import { readRequiredWorkspaceGenerationByRef, readWorkspaceGenerationsForRun, updateWorkspaceGeneration } from '../repositories/workspace-generations.js';
 import { readRun } from '../rows.js';
 import type { SqliteConnection, SqliteDriver } from '../sqlite-driver.js';
 import { assertActiveStateOwner, type StateOwnerContext } from '../state-owner.js';
-import { openWorkerInvocations, readWorkerProbeOwnerDeath, readWorkerRecoveryAnchor, WORKER_PROBE_BACKOFF_MS } from '../worker-recovery.js';
+import { hasOnlySettledInstalledModelUnknowns, openWorkerInvocations, readWorkerProbeOwnerDeath, readWorkerRecoveryAnchor, WORKER_PROBE_BACKOFF_MS } from '../worker-recovery.js';
 import { assertWorkerRecoveryTaskReceipt, type WorkerRecoveryTaskReceipt } from '../worker-recovery-task.js';
+import { assertInstalledBrokerQuiescence, type InstalledBrokerQuiescence } from '../store.js';
 import { appendRunStateEvent, requireHealthyFence } from './invocation.js';
+import { prepareWorkerRecoveryTerminalPlan, type WorkerRecoveryTerminalPlan } from '../worker-recovery-terminal.js';
+import { hasOnlySettledPrivateToolUnknowns } from '../private-tool-rollback.js';
 
 export type BeginWorkerRecoveryInput = { runId: string; expectedRunRevision: number };
 
@@ -253,7 +257,8 @@ export const beginWorkerRecovery = stateOperation('RECOVERY_REQUIRED', async (
 /** Internal owning reducer. A control client cannot supply proof, a path or a tree observation. */
 export const completeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', async (
   driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, input: BeginWorkerRecoveryInput,
-  death: NativeContainmentDeathObservation, signal?: AbortSignal
+  death: NativeContainmentDeathObservation, signal?: AbortSignal, brokerQuiescence?: InstalledBrokerQuiescence,
+  stoppedOwner?: { retire(): Promise<NativeRetainedWorkerRetirement>; finish(plan: WorkerRecoveryTerminalPlan): Promise<Run> }
 ): Promise<Run> => {
   input = immutableSnapshot(input);
   signal?.throwIfAborted();
@@ -263,9 +268,9 @@ export const completeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', a
     throw new KernelStorageError('INVALID_REQUEST', 'worker recovery completion requires a Run id and expected revision');
   }
   const inspectingOwner = assertActiveStateOwner(driver, owner);
-  const cut = await readRecoveryClosure(driver, artifacts, input.runId);
+  let cut = await readRecoveryClosure(driver, artifacts, input.runId);
   signal?.throwIfAborted();
-  const { run } = cut;
+  let { run } = cut;
   if (run.revision !== input.expectedRunRevision) throw new KernelStorageError('REVISION_CONFLICT', 'worker recovery completion Run revision changed');
   if (run.status !== 'waiting' || run.waitingReason !== 'reconciliation' || !run.waitingOnRef) {
     throw new KernelStorageError('STATE_TRANSITION_INVALID', 'worker recovery completion has no installed inspection');
@@ -276,10 +281,46 @@ export const completeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', a
       wait.probeState.dispatch.owningSupervisorInstanceId !== owner.supervisorInstanceId) {
     throw new KernelStorageError('STATE_TRANSITION_INVALID', 'worker recovery completion cannot resolve another inspection nonce');
   }
-  if (openWorkerInvocations(cut.journal).length !== 0) {
-    throw new KernelStorageError('RECOVERY_REQUIRED', 'open worker invocations require their typed settlement or explicit manual-risk wait before quarantine');
+  function refreshStopCut(connection: SqliteConnection): boolean {
+    signal?.throwIfAborted();
+    assertActiveStateOwner(connection, owner);
+    const current = readRun(connection, run.id);
+    const unchanged = canonicalSha256(current) === canonicalSha256(run);
+    const stable = ({ revision: _revision, updatedAt: _time, stopIntentRef: _intent, cancelRequested: _cancel, ...data }: Run) => data;
+    if ((!unchanged && (!stoppedOwner || !brokerQuiescence || !current.stopIntentRef || current.revision <= run.revision ||
+        current.updatedAt < run.updatedAt || run.cancelRequested && !current.cancelRequested ||
+        canonicalSha256(stable(current)) !== canonicalSha256(stable(run)))) ||
+        canonicalSha256(readInvocationJournal(connection, run.id)) !== canonicalSha256(cut.journal) ||
+        canonicalSha256(readWorkerLaunchesForRun(connection, run.id, true)) !== canonicalSha256(cut.workerLaunches) ||
+        canonicalSha256(readWorkspaceGenerationsForRun(connection, run.id)) !== canonicalSha256(cut.workspaceGenerations)) {
+      throw new KernelStorageError('REVISION_CONFLICT', 'worker recovery completion cut changed');
+    }
+    if (unchanged) return false;
+    run = current; cut = { ...cut, run };
+    return true;
   }
-  if (run.stopIntentRef || run.cancelRequested || sampleCanonicalNow() >= run.deadlineAt) {
+  const open = openWorkerInvocations(cut.journal);
+  const assembly = open.length ? decodeRetainedRunAssembly(await artifacts.readCanonical(cut.runSpec.assemblyRef)) : undefined;
+  // The closure, wait and assembly reads may yield to a real StopIntent. Decide
+  // only after checking the current exact subject and immutable resource cut.
+  refreshStopCut(driver);
+  if (open.length !== 0) {
+    // Effect ambiguity is not physical release authority. Only this exact
+    // fully validated, fully charged broker branch may remain unknown while
+    // its worker is quarantined; every other open invocation still blocks.
+    const privateRollback = !!run.stopIntentRef && hasOnlySettledPrivateToolUnknowns(cut.journal);
+    const undispatched = !!run.stopIntentRef && open.every(prepared => cut.journal.filter(entry =>
+      entry.opId === prepared.opId && entry.attempt === prepared.attempt).length === 1);
+    if ((!hasOnlySettledInstalledModelUnknowns(assembly!, cut.journal) && !privateRollback && !undispatched) || !brokerQuiescence) {
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'open worker invocations require their typed settlement or explicit manual-risk wait before quarantine');
+    }
+    assertInstalledBrokerQuiescence(brokerQuiescence, driver, owner, run.id);
+    if (cut.workspaceGenerations.some(row => row.phase === 'materializing' || row.phase === 'preactivated_readonly')) {
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'unknown model worker quarantine cannot select an existing replacement generation');
+    }
+  }
+  let stopping = !!run.stopIntentRef || run.cancelRequested || sampleCanonicalNow() >= run.deadlineAt;
+  if (stopping && (!stoppedOwner || !run.stopIntentRef || !brokerQuiescence)) {
     throw new KernelStorageError('RECOVERY_REQUIRED', 'stopped worker recovery requires its terminal quiescence reducer');
   }
   const launch = cut.workerLaunches[0]!;
@@ -293,8 +334,9 @@ export const completeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', a
       death.observedAt < wait.probeState.dispatch.probeStartedAt || death.observedAt > wait.probeState.dispatch.probeDeadlineAt) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'native worker death does not observe this persisted inspection');
   }
-  const observation = readRetainedWorkspaceObservation(await observeRetainedRunWorkspace({ filesystem: owner.filesystem, artifacts,
-    identity: closure.generation, sourceRowVersion: intent.sourceRowVersion, signal }));
+  const workspaceRetirement = await observeRetainedRunWorkspace({ filesystem: owner.filesystem, artifacts,
+    identity: closure.generation, sourceRowVersion: intent.sourceRowVersion, signal });
+  const observation = readRetainedWorkspaceObservation(workspaceRetirement);
   signal?.throwIfAborted();
   if (observation.generationRef !== generation.generationRef || observation.generationIdentityDigest !== generation.generationIdentityDigest ||
       observation.observedAt < death.observedAt || observation.observedAt > wait.probeState.dispatch.probeDeadlineAt) {
@@ -310,15 +352,24 @@ export const completeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', a
   function requireCurrentCut(connection: SqliteConnection) {
     signal?.throwIfAborted();
     assertActiveStateOwner(connection, owner);
-    if (canonicalSha256(readRun(connection, run.id)) !== canonicalSha256(run) ||
-        canonicalSha256(readRequiredWorkerLaunch(connection, launch.launchId)) !== canonicalSha256(launch) ||
+    if (open.length !== 0) {
+      assertInstalledBrokerQuiescence(brokerQuiescence!, driver, owner, run.id);
+      // A readonly replacement registration need not change Run revision or
+      // Journal high-water. Re-read its inventory at both exact final cuts.
+      if (readWorkspaceGenerationsForRun(connection, run.id).some(row =>
+        row.phase === 'materializing' || row.phase === 'preactivated_readonly')) {
+        throw new KernelStorageError('REVISION_CONFLICT', 'unknown model worker quarantine acquired a competing replacement generation');
+      }
+    }
+    if (refreshStopCut(connection)) stopping = true;
+    if (canonicalSha256(readRequiredWorkerLaunch(connection, launch.launchId)) !== canonicalSha256(launch) ||
         canonicalSha256(readRequiredWorkspaceGenerationByRef(connection, generation.generationRef)) !== canonicalSha256(generation) ||
         (replacement && canonicalSha256(readRequiredWorkspaceGenerationByRef(connection, replacement.generationRef)) !== canonicalSha256(replacement)) ||
         nextJournalSequence(connection, run.id) !== cut.journal.length + 1) {
       throw new KernelStorageError('REVISION_CONFLICT', 'worker recovery completion cut changed');
     }
     const now = sampleCanonicalNow();
-    if (now >= probeDeadlineAt || now >= run.deadlineAt) {
+    if (now >= probeDeadlineAt || (!stopping && now >= run.deadlineAt)) {
       throw new KernelStorageError('RECOVERY_REQUIRED', 'worker recovery inspection expired before its exact completion cut');
     }
     return now;
@@ -378,6 +429,16 @@ export const completeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', a
   const wrapperArtifact = await artifacts.publishCanonical(wrapper, wrapper.format);
   signal?.throwIfAborted();
   const metadata = [inspectorArtifact, deathArtifact, recoveryArtifact, quarantineArtifact, wrapperArtifact];
+  requireCurrentCut(driver);
+  if (stopping) {
+    if (launch.phase !== 'reconciling') throw new KernelStorageError('RECOVERY_REQUIRED', 'stopped recovery lost its original reconciling launch');
+    const nativeRetirement = await stoppedOwner!.retire();
+    requireCurrentCut(driver);
+    const plan = await prepareWorkerRecoveryTerminalPlan(driver, artifacts, owner, { cut, wait, launch, generation,
+      quarantine, quarantineArtifact, wrapperArtifact, metadata, nativeRetirement, workspaceRetirement,
+      brokerQuiescence: brokerQuiescence! });
+    return stoppedOwner!.finish(plan);
+  }
   let outcome: TimeFenceAdvance | undefined, updated!: Run;
   driver.transaction(connection => {
     const now = requireCurrentCut(connection);

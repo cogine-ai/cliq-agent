@@ -10,7 +10,7 @@ import { assertRequestId } from '../kernel/identity.js';
 import { parseJsonStrict } from '../kernel/json.js';
 import { immutableSnapshot } from '../model/immutable.js';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
-import { openInstalledControlClient, withHeldInstalledRuntime, type HeldInstalledRuntime } from './installed-runtime.js';
+import { CredentialScopeBusyError, openInstalledControlClient, withHeldInstalledRuntime, type HeldInstalledRuntime } from './installed-runtime.js';
 import type { HeldInstalledControlClient } from './native-owner.js';
 import { observeInstalledCredentialSupervisor, type InstalledCredentialSupervisorObservation } from './installed-services.js';
 
@@ -100,9 +100,15 @@ export function decodeInstalledCredentialControlResult(response: unknown, method
     exact(value, ['protocolVersion', 'ok', 'method', 'error']);
     if (value.protocolVersion !== 1 || value.method !== method) throw new TypeError('unexpected installed control refusal');
     const error = value.error as Record<string, unknown>; const code = text(error?.code);
-    const extra = code === 'INVALID_REQUEST' ? ['issues'] : code === 'INTERNAL' ? ['errorId'] :
+    const extra = code === 'INVALID_REQUEST' ? ['issues'] : code === 'INTERNAL' ? ['errorId'] : code === 'RATE_LIMITED' ? ['retryAfterMs'] :
       code === 'INCOMPATIBLE_PROTOCOL' ? ['supportedControlRange', 'supportedHeadlessRange', 'upgradeAction'] : [];
     exact(error, ['schemaVersion', 'code', 'retryable', 'messageCode', ...extra]);
+    if (code === 'RATE_LIMITED') {
+      if (method !== 'credential.finalize' || error.schemaVersion !== 1 || error.retryable !== true ||
+          error.retryAfterMs !== 1000 || error.messageCode !== 'run.credential_scope_busy')
+        throw new TypeError('invalid installed control refusal');
+      throw new CredentialScopeBusyError();
+    }
     if (error.schemaVersion !== 1 || error.retryable !== false || !['INVALID_REQUEST', 'INTERNAL', 'INCOMPATIBLE_PROTOCOL',
       'NOT_FOUND', 'AUTHORIZATION_REQUIRED', 'ARTIFACT_MISMATCH', 'UNSUPPORTED_PLATFORM', 'REQUEST_ID_CONFLICT'].includes(code))
       throw new TypeError('invalid installed control refusal');
@@ -238,7 +244,8 @@ export async function ensureInstalledCredentialSupervisor(selected: HeldInstalle
             refuse('installed credential finalization did not return the original committed operation');
           await checkCurrent(); return immutableSnapshot(operation);
         } catch (error) {
-          const failure = error instanceof KernelStorageError ? error : new KernelStorageError('RECOVERY_REQUIRED', 'installed credential finalization response is invalid');
+          const failure = error instanceof KernelStorageError || error instanceof CredentialScopeBusyError ? error
+            : new KernelStorageError('RECOVERY_REQUIRED', 'installed credential finalization response is invalid');
           fail(failure); await retire(); throw failure;
         }
       })();

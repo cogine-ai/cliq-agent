@@ -9,11 +9,17 @@ import type { ToolOperationGrantV1, ToolRequestV1, ToolTargetV1 } from '../kerne
 import type { ToolCallInputV1 } from '../protocol/agent-ir.js';
 import { decodeRetainedRunAssembly } from '../model/run-assembly.js';
 import { immutableSnapshot } from '../model/immutable.js';
+import type { SqliteDriver } from './sqlite-driver.js';
+import { assertActiveStateOwner, type StateOwnerContext } from './state-owner.js';
+import { readRun } from './rows.js';
+import { readRequiredWorkerLaunch } from './repositories/worker-launches.js';
+import { readRequiredWorkspaceGenerationByRef } from './repositories/workspace-generations.js';
 import type { RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { readCanonicalArtifact } from './agent-context.js';
 import type { ArtifactCatalog } from './artifacts.js';
 import { decodeRunSpec, decodeStateLockIdentity, decodeStateRootIdentity, decodeWorkerIdentity, decodeWorkspaceGenerationIdentity } from './decoders.js';
 import { joinResourceOperations, KernelStorageError } from './errors.js';
+import { validatePreactivationQuarantine } from './preactivation-retirement.js';
 
 type WorkerSpec = Extract<SandboxLaunchSpecV1, { purpose: 'worker_activation' }>;
 type WorkerOwner = WorkerSpec['owner'];
@@ -97,6 +103,10 @@ function filesystemBinding(value: unknown): void {
 /** Worker purpose only. Other canonical purposes fail closed until their reserving transitions exist. */
 export function decodeWorkerContainmentPlan(value: unknown): ProcessContainmentPlanV1 & { owner: WorkerOwner } {
   return decodeLinuxContainmentPlan(value, 'worker_activation') as ProcessContainmentPlanV1 & { owner: WorkerOwner };
+}
+/** Retained data only; this cannot mint a native launch closure. */
+export function decodeBuiltinEditContainmentPlan(value: unknown): ProcessContainmentPlanV1 {
+  return decodeLinuxContainmentPlan(value, 'run_invocation');
 }
 function decodeLinuxContainmentPlan(value: unknown, purpose: 'worker_activation' | 'run_invocation'): ProcessContainmentPlanV1 {
   const plan = record(value, ['schemaVersion', 'format', 'owner', 'filesystemBinding', 'launchNonceDigest', 'backend', 'createdAt', 'planDigest',
@@ -223,6 +233,10 @@ function mounts(value: unknown, allowGenerationWrites: boolean): SandboxMountV1[
 
 export function decodeWorkerSandboxLaunchSpec(value: unknown): WorkerSpec {
   return decodeLinuxLaunchSpec(value, 'worker_activation') as WorkerSpec;
+}
+/** Retained data only; productive creation still requires the branded closure. */
+export function decodeBuiltinEditSandboxLaunchSpec(value: unknown): EditSpec {
+  return decodeLinuxLaunchSpec(value, 'tool') as EditSpec;
 }
 function decodeLinuxLaunchSpec(value: unknown, purpose: 'worker_activation' | 'tool'): WorkerSpec | EditSpec {
   const spec = record(value, ['schemaVersion', 'format', 'runtime', 'executable', 'environment', 'filesystem', 'mounts', 'mountsDigest',
@@ -388,6 +402,71 @@ export async function readRetainedWorkerLaunchClosure(artifacts: ArtifactCatalog
   return closure;
 }
 
+/** Current closed-quarantine inspection only. It reconstructs the original
+ * launch, never fabricates a fenced Run or grants activation of the old tree. */
+export async function readQuarantinedWorkerLaunchClosure(driver: SqliteDriver, artifacts: ArtifactCatalog,
+  owner: StateOwnerContext, input: { run: Run; launch: WorkerLaunch; generation: WorkspaceGenerationStateV1 }) {
+  input = immutableSnapshot(input);
+  const { run, launch, generation } = input;
+  const currentOwner = assertActiveStateOwner(driver, owner);
+  if (launch.retirementKind === 'preparation') {
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'preparation retirement requires its exact owning resource closure');
+  }
+  if (launch.phase !== 'retired') mismatch('retirement inspection requires its exact closed original launch');
+  function current() {
+    assertActiveStateOwner(driver, owner);
+    equal(readRun(driver, run.id), run, 'quarantined retirement current Run');
+    equal(readRequiredWorkerLaunch(driver, launch.launchId), launch, 'quarantined retirement current launch');
+    equal(readRequiredWorkspaceGenerationByRef(driver, generation.generationRef), generation, 'quarantined retirement current generation');
+  }
+  current();
+  if (generation.phase !== 'quarantined') mismatch('retirement inspection requires its exact original quarantine');
+  const quarantine = await readCanonicalArtifact<import('../kernel/types.js').WorkspaceGenerationQuarantineEvidenceV1>(artifacts, generation.quarantineEvidenceRef);
+  if (quarantine.reason === 'launch_aborted' || quarantine.reason === 'launch_died_before_activation') {
+    if (run.status !== 'queued' || run.activeWorkerLaunchId !== undefined || generation.phase !== 'quarantined')
+      mismatch('preactivation quarantine inspection requires its exact lease-free queued cut');
+    await validatePreactivationQuarantine(artifacts, driver, run, generation, quarantine);
+    const plan = decodeWorkerContainmentPlan(await readCanonicalArtifact(artifacts, launch.containmentPlanRef));
+    if (quarantine.workerLaunchId !== launch.launchId) mismatch('preactivation retirement substitutes its original launch');
+    // The original plan owns this epoch and source Checkpoint. A successor
+    // may already have advanced both; never fabricate an old Run to read it.
+    const closure = await readWorkerExecutionClosure(artifacts, currentOwner, { run, ...launch }, plan.owner, generation.sourceCheckpointId);
+    if (closure.generation.identityDigest !== generation.generationIdentityDigest || closure.generation.generationId !== generation.generationId ||
+        closure.generation.sourceWorkspaceStateRef !== generation.sourceWorkspaceStateRef ||
+        closure.generation.sourceWorkspaceStateDigest !== generation.sourceWorkspaceStateDigest)
+      mismatch('preactivation retirement substitutes its immutable generation');
+    current(); return closure;
+  }
+  if (run.status !== 'queued' || run.activeWorkerLaunchId !== undefined || launch.phase !== 'retired' ||
+      launch.generationWriteState !== 'fenced_reconciling' || launch.runId !== run.id || !launch.leaseEpoch || launch.leaseEpoch > run.leaseEpoch ||
+      !launch.workerIdentityDigest || !launch.processContainmentRef || !launch.retirementEvidenceRef ||
+      generation.phase !== 'quarantined' || generation.runId !== run.id || generation.generationRef !== launch.workspaceGenerationRef)
+    mismatch('retirement inspection requires its exact closed original quarantine');
+  if (quarantine.reason !== 'worker_recovery' || quarantine.fromPhase !== 'fenced_reconciling' ||
+      quarantine.runId !== run.id || quarantine.generationRef !== generation.generationRef ||
+      quarantine.generationIdentityDigest !== generation.generationIdentityDigest || quarantine.evidenceDigest !== generation.quarantineEvidenceDigest ||
+      quarantine.evidenceDigest !== digestOmitting(quarantine, 'evidenceDigest')) mismatch('retirement has no exact original worker quarantine');
+  const recovery = await readCanonicalArtifact<import('../kernel/types.js').WorkerRecoveryEvidenceV1>(artifacts, quarantine.workerRecoveryEvidenceRef);
+  const wrapper = await readCanonicalArtifact<import('../kernel/types.js').ReconciliationProbeEvidenceV1>(artifacts, launch.retirementEvidenceRef);
+  if (recovery.evidenceDigest !== quarantine.workerRecoveryEvidenceDigest || recovery.evidenceDigest !== digestOmitting(recovery, 'evidenceDigest') ||
+      recovery.runId !== run.id || recovery.oldWorkerLaunchId !== launch.launchId || recovery.oldLeaseEpoch !== launch.leaseEpoch ||
+      recovery.processContainmentRef !== launch.processContainmentRef || recovery.oldWorkerIdentityDigest !== launch.workerIdentityDigest ||
+      recovery.workspaceGenerationRef !== generation.generationRef || wrapper.outcome !== 'subject_observation' ||
+      wrapper.subjectEvidenceKind !== 'worker_recovery' || wrapper.subjectEvidenceRef !== quarantine.workerRecoveryEvidenceRef ||
+      wrapper.subjectEvidenceDigest !== recovery.evidenceDigest || wrapper.evidenceDigest !== digestOmitting(wrapper, 'evidenceDigest'))
+    mismatch('retirement substitutes its retained recovery and original launch');
+  const closure = await readWorkerExecutionClosure(artifacts, currentOwner, { run, ...launch },
+    { kind: 'worker_activation', runId: run.id, intendedLeaseEpoch: launch.leaseEpoch, workerLaunchId: launch.launchId }, generation.sourceCheckpointId);
+  const containment = decodeWorkerProcessContainment(await readCanonicalArtifact(artifacts, launch.processContainmentRef));
+  const identity = decodeWorkerIdentity(await readCanonicalArtifact(artifacts, launch.workerIdentityDigest));
+  if (closure.generation.identityDigest !== generation.generationIdentityDigest || closure.generation.generationId !== generation.generationId ||
+      closure.generation.sourceWorkspaceStateRef !== generation.sourceWorkspaceStateRef ||
+      closure.generation.sourceWorkspaceStateDigest !== generation.sourceWorkspaceStateDigest) mismatch('retirement substitutes its immutable generation');
+  assertActualWorkerClosure(closure, containment, identity, launch, launch.processContainmentRef, launch.supervisorInstanceId);
+  current();
+  return closure;
+}
+
 export type BuiltinEditLaunchClosureInput = {
   run: Run; launch: WorkerLaunch; generation: WorkspaceGenerationStateV1; prepared: InvocationJournalEntry;
   request: ToolRequestV1; target: ToolTargetV1; grant: ToolOperationGrantV1; call: ToolCallInputV1;
@@ -455,6 +534,7 @@ export function decodeWorkerProcessContainment(value: unknown): ProcessContainme
 export async function readWorkerPreactivationClosure(artifacts: ArtifactCatalog, owner: StateOwnerRecordV1, input: {
   run: Run; launch: WorkerLaunch; processContainmentRef: string; identity: WorkerIdentity;
 }) {
+  if (input.launch.phase !== 'reserved') mismatch('worker preactivation requires its exact reserved launch');
   const closure = await readWorkerLaunchClosure(artifacts, owner, { run: input.run, ...input.launch });
   const containment = decodeWorkerProcessContainment(await readCanonicalArtifact(artifacts, input.processContainmentRef));
   assertActualWorkerClosure(closure, containment, input.identity, input.launch, input.processContainmentRef, owner.supervisorInstanceId);

@@ -2,13 +2,16 @@ import { randomUUID } from 'node:crypto';
 import { canonicalJsonBytes } from '../kernel/canonical.js';
 import { normalizeBoundedText, sha256Bytes } from '../kernel/identity.js';
 import { parseJsonStrict } from '../kernel/json.js';
-import type { RunSnapshotV1 } from '../kernel/types.js';
+import type { RunSnapshotV1, SessionSnapshotV1, ControlResultV1 } from '../kernel/types.js';
 import type { LocalControlConnection } from './control-channel.js';
 import { EventCursorExpiredError, type ReadControlRequest, type ReadControlResult } from './control-read.js';
-import { CredentialFinalizationTimeError, KernelStorageError, ResourceRetirementError } from './errors.js';
+import { CredentialFinalizationTimeError, InstalledModelAuthorizationError, KernelStorageError, ResourceRetirementError, RunTerminalError } from './errors.js';
 import type { StateStore } from './store.js';
 import type { CredentialAuthorityOperationV1 } from '../kernel/credential-authority.js';
 import type { CredentialFinalizeRequest } from './installed-credential-client.js';
+import { InstalledRunAuthorityError } from './installed-run.js';
+import { InstalledRunCapacityError } from './installed-run-capacity.js';
+import { CredentialScopeBusyError } from './installed-runtime.js';
 
 export type RuntimeBundlePublicSummaryV1 = Readonly<{
   schemaVersion: 1;
@@ -45,7 +48,8 @@ export type ControlMethodV1 = typeof METHODS[number];
 type Range = { min: number; max: number };
 type HelloRequest = { protocolVersion: 1; method: 'control.hello'; clientBuild: string;
   controlSchemaRange: Range; headlessSchemaRange: Range; requestedFeatureIds: string[] };
-export type InstalledControlResultV1 = ReadControlResult | SupervisorStatusV1 | { method: 'credential.finalize'; operation: CredentialAuthorityOperationV1 } | (SupervisorHelloV1 & {
+export type InstalledControlResultV1 = ReadControlResult | Extract<ControlResultV1, { method: 'session.create' | 'run.submit' | 'run.cancel' }> |
+  SupervisorStatusV1 | { method: 'credential.finalize'; operation: CredentialAuthorityOperationV1 } | (SupervisorHelloV1 & {
   method: 'control.hello'; protocolVersion: 1; serverBuild: string;
   controlSchemaRange: { min: 1; max: 1 }; enabledFeatureIds: string[];
 });
@@ -53,13 +57,18 @@ type ErrorBase = { schemaVersion: 1; messageCode: string };
 type InvalidError = ErrorBase & { code: 'INVALID_REQUEST'; retryable: false;
   issues: Array<{ path: string; issueCode: string }> };
 export type InstalledControlErrorV1 = InvalidError
+  | InstalledRunCapacityError['controlError']
+  | CredentialScopeBusyError['controlError']
   | (ErrorBase & { code: 'INCOMPATIBLE_PROTOCOL'; retryable: false;
       supportedControlRange: { min: 1; max: 1 }; supportedHeadlessRange: Range;
       upgradeAction: 'upgrade_client' | 'upgrade_supervisor' })
   | (ErrorBase & { code: 'EVENT_CURSOR_EXPIRED'; retryable: false;
       earliestEventSeq: number; latestEventSeq: number; snapshot: RunSnapshotV1 })
   | (ErrorBase & { code: 'INTERNAL'; retryable: false; errorId: string })
-  | (ErrorBase & { code: 'NOT_FOUND' | 'AUTHORIZATION_REQUIRED' | 'ARTIFACT_MISMATCH' | 'UNSUPPORTED_PLATFORM' | 'REQUEST_ID_CONFLICT'; retryable: false });
+  | (ErrorBase & { code: 'REVISION_CONFLICT'; retryable: true; currentRevision: number;
+      conflict: { resourceKind: 'session'; currentSnapshot: SessionSnapshotV1 } | { resourceKind: 'run'; currentSnapshot: RunSnapshotV1 } })
+  | (ErrorBase & { code: 'NOT_FOUND' | 'AUTHORIZATION_REQUIRED' | 'ARTIFACT_MISMATCH' | 'UNSUPPORTED_PLATFORM' |
+      'REQUEST_ID_CONFLICT' | 'ADMISSION_KEY_CONFLICT' | 'MODEL_COST_UNKNOWN' | 'BUDGET_EXHAUSTED' | 'CANCEL_REQUESTED' | 'RUN_TERMINAL'; retryable: false });
 export type InstalledControlResponseV1 =
   | { protocolVersion: 1; ok: true; result: InstalledControlResultV1 }
   | { protocolVersion: 1; ok: false; method: ControlMethodV1; error: InstalledControlErrorV1 }
@@ -70,7 +79,8 @@ const MAX_OUTSTANDING = 64;
 // All owned partial/request/response bodies share this budget. Each connection
 // has four-byte input/output headers; Store metadata is separately bounded.
 const BUFFER_BYTES = (MAX_OUTSTANDING + 1) * FRAME_BYTES;
-const FEATURES = ['session.get', 'run.get', 'run.attach', 'supervisor.status', 'credential.finalize'];
+const FEATURES = ['session.get', 'run.get', 'run.attach', 'supervisor.status', 'credential.finalize', 'session.create', 'run.submit', 'run.cancel'];
+const RUN_FEATURES = ['session.create', 'run.submit', 'run.cancel'];
 const record = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 function text(value: unknown): string {
@@ -113,7 +123,8 @@ type Pending = { connection: Connection; body: Buffer };
 // A new server cannot turn uncertain native retirement into successful close.
 let controlRetirementFailure: ResourceRetirementError | undefined;
 
-/** Bounded v1 native UDS service; no Run admission, execution or provider I/O. */
+/** Bounded v1 native UDS service. Installed composition alone advertises the
+ * fixed Run recipe; authenticated channels never supply principal authority. */
 export function openInstalledControl(store: StateStore,
   options: Readonly<{ serverBuild: string }>, onError: (error: Error) => void): InstalledControlService {
   if (controlRetirementFailure) throw controlRetirementFailure;
@@ -161,9 +172,20 @@ export function openInstalledControl(store: StateStore,
     if (error instanceof EventCursorExpiredError) return { schemaVersion: 1, code: 'EVENT_CURSOR_EXPIRED', retryable: false,
       messageCode: 'control.event_cursor_expired', earliestEventSeq: error.earliestEventSeq,
       latestEventSeq: error.latestEventSeq, snapshot: error.snapshot };
+    if (error instanceof RunTerminalError) return { schemaVersion: 1, code: 'RUN_TERMINAL', retryable: false,
+      messageCode: 'control.run_terminal' };
+    if (error instanceof InstalledModelAuthorizationError) return { schemaVersion: 1, code: 'AUTHORIZATION_REQUIRED',
+      retryable: false, messageCode: 'run.model_authority_refused' };
+    if (error instanceof InstalledRunAuthorityError) return { schemaVersion: 1,
+      code: error.refusalCode === 'MODEL_COST_UNKNOWN' ? 'MODEL_COST_UNKNOWN' : error.refusalCode === 'MODEL_CAPABILITY_UNKNOWN'
+        ? 'AUTHORIZATION_REQUIRED' : 'ARTIFACT_MISMATCH', retryable: false,
+      messageCode: error.refusalCode === 'MODEL_COST_UNKNOWN' ? 'run.model_cost_unknown' : error.refusalCode === 'MODEL_CAPABILITY_UNKNOWN'
+        ? 'run.model_capability_unknown' : 'run.assembly_invalid' };
+    if (error instanceof InstalledRunCapacityError) return error.controlError;
     if (error instanceof TypeError || (error instanceof KernelStorageError && error.code === 'INVALID_REQUEST')) return invalid();
-    if (credential && error instanceof KernelStorageError && error.code === 'REQUEST_ID_CONFLICT') return {
-      schemaVersion: 1, code: 'REQUEST_ID_CONFLICT', retryable: false, messageCode: 'control.request_id_conflict' };
+    if (error instanceof KernelStorageError && ['REQUEST_ID_CONFLICT', 'ADMISSION_KEY_CONFLICT', 'BUDGET_EXHAUSTED'].includes(error.code)) return {
+      schemaVersion: 1, code: error.code as 'REQUEST_ID_CONFLICT' | 'ADMISSION_KEY_CONFLICT' | 'BUDGET_EXHAUSTED',
+      retryable: false, messageCode: 'control.mutation_refused' };
     if (credential && error instanceof KernelStorageError && error.code === 'STATE_TRANSITION_INVALID') {
       const reason = error instanceof CredentialFinalizationTimeError ? error.reason : undefined;
       const messageCode = reason === 'noncausal_time' ? 'credential.finalize.noncausal_time' :
@@ -200,12 +222,18 @@ export function openInstalledControl(store: StateStore,
           connection.handshaken = true;
           return { protocolVersion: 1, ok: true, result: { ...observed, method: 'control.hello', protocolVersion: 1,
             serverBuild, controlSchemaRange: { min: 1, max: 1 }, enabledFeatureIds: candidate.requestedFeatureIds.filter(feature =>
-              FEATURES.includes(feature) && (feature !== 'credential.finalize' || store.supportsCredentialFinalization())) }
+              FEATURES.includes(feature) && (feature !== 'credential.finalize' || store.supportsCredentialFinalization()) &&
+              (!RUN_FEATURES.includes(feature) || store.supportsInstalledRuns())) }
           } satisfies InstalledControlResponseV1;
         }
         if (!connection.handshaken) return { protocolVersion: 1, ok: false, method: knownMethod,
           error: { schemaVersion: 1, code: 'AUTHORIZATION_REQUIRED', retryable: false, messageCode: 'control.hello_required' } } satisfies InstalledControlResponseV1;
         if (request.protocolVersion !== 1) throw new TypeError('protocol version must be 1');
+        if (RUN_FEATURES.includes(method) && !store.supportsInstalledRuns()) return { protocolVersion: 1, ok: false, method: knownMethod,
+          error: { schemaVersion: 1, code: 'AUTHORIZATION_REQUIRED', retryable: false, messageCode: 'control.method_not_enabled' } } satisfies InstalledControlResponseV1;
+        if (method === 'session.create') return (await store.createInstalledSession(request, identity)).response;
+        if (method === 'run.submit') return (await store.submitInstalledRun(request, identity)).response;
+        if (method === 'run.cancel') return (await store.cancelInstalledRun(request, identity)).response;
         if (method === 'credential.finalize') return { protocolVersion: 1, ok: true,
           result: { method: 'credential.finalize', operation: await store.finalizeCredential(request as CredentialFinalizeRequest, identity) }
         } satisfies InstalledControlResponseV1;
@@ -219,6 +247,27 @@ export function openInstalledControl(store: StateStore,
         return { protocolVersion: 1, ok: false, method: knownMethod,
           error: { schemaVersion: 1, code: 'AUTHORIZATION_REQUIRED', retryable: false, messageCode: 'control.method_not_enabled' } } satisfies InstalledControlResponseV1;
       } catch (error) {
+        if ((method === 'run.submit' || method === 'credential.finalize') && error instanceof CredentialScopeBusyError) {
+          return { protocolVersion: 1, ok: false, method: knownMethod, error: error.controlError } satisfies InstalledControlResponseV1;
+        }
+        if (error instanceof KernelStorageError && error.code === 'REVISION_CONFLICT') {
+          // Read a fresh authenticated authoritative snapshot, not the stale
+          // producer cut or a fabricated metadata-only conflict response.
+          try {
+            const observed = method === 'run.submit'
+              ? await store.readControl({ protocolVersion: 1, method: 'session.get', sessionId: request.sessionId as string }, identity)
+              : method === 'run.cancel'
+                ? await store.readControl({ protocolVersion: 1, method: 'run.get', runId: request.runId as string }, identity) : undefined;
+            if (observed?.method === 'session.get') return { protocolVersion: 1, ok: false, method: knownMethod,
+              error: { schemaVersion: 1, code: 'REVISION_CONFLICT', retryable: true, messageCode: 'control.revision_conflict',
+                currentRevision: observed.snapshot.session.contextRevision,
+                conflict: { resourceKind: 'session', currentSnapshot: observed.snapshot } } } satisfies InstalledControlResponseV1;
+            if (observed?.method === 'run.get') return { protocolVersion: 1, ok: false, method: knownMethod,
+              error: { schemaVersion: 1, code: 'REVISION_CONFLICT', retryable: true, messageCode: 'control.revision_conflict',
+                currentRevision: observed.snapshot.run.revision,
+                conflict: { resourceKind: 'run', currentSnapshot: observed.snapshot } } } satisfies InstalledControlResponseV1;
+          } catch (snapshotFailure) { return { protocolVersion: 1, ok: false, method: knownMethod, error: errorResult(snapshotFailure) } satisfies InstalledControlResponseV1; }
+        }
         return { protocolVersion: 1, ok: false, method: knownMethod, error: errorResult(error, method === 'credential.finalize') } satisfies InstalledControlResponseV1;
       }
     });

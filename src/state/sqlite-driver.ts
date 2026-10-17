@@ -52,17 +52,27 @@ export interface SqliteDriver extends SqliteConnection {
   close(): void;
 }
 
+const rolledBackTransactionFailures = new WeakMap<SqliteDriver, WeakSet<Error>>();
+
+/** Exact native mutation failure after this driver's successful rollback and
+ * scope cleanup. It grants no authority to replay an invocation or callback. */
+export function isRolledBackSqliteTransactionFailure(driver: SqliteDriver, error: unknown): error is Error {
+  return error instanceof Error && rolledBackTransactionFailures.get(driver)?.has(error) === true;
+}
+
 class NodeSqliteStatement implements SqliteStatement {
   constructor(
     private readonly statement: StatementSync,
-    private readonly requireUsable: () => void = () => undefined
+    private readonly requireUsable: () => void = () => undefined,
+    private readonly onRunFailure?: (error: unknown) => void
   ) {
     statement.setReadBigInts(true);
   }
 
   run(...parameters: SqliteInputValue[]): SqliteRunResult {
     this.requireUsable();
-    return this.statement.run(...parameters) as SqliteRunResult;
+    try { return this.statement.run(...parameters) as SqliteRunResult; }
+    catch (error) { this.onRunFailure?.(error); throw error; }
   }
 
   get<Row = SqliteRow>(...parameters: SqliteInputValue[]): Row | undefined {
@@ -188,7 +198,8 @@ function assertNoTransactionControl(sql: string, readOnly = false): void {
 class TransactionScopedConnection implements SqliteConnection {
   private active = true;
 
-  constructor(private readonly database: DatabaseSync, private readonly readOnly = false) {}
+  constructor(private readonly database: DatabaseSync, private readonly readOnly = false,
+    private readonly onRunFailure?: (error: unknown) => void) {}
 
   deactivate(): void {
     this.active = false;
@@ -204,7 +215,7 @@ class TransactionScopedConnection implements SqliteConnection {
     this.requireActive();
     assertNoTransactionControl(sql, this.readOnly);
     return new TransactionScopedStatement(
-      new NodeSqliteStatement(this.database.prepare(sql)),
+      new NodeSqliteStatement(this.database.prepare(sql), undefined, this.onRunFailure),
       this.requireActive
     );
   }
@@ -270,12 +281,19 @@ class NodeSqliteDriver implements SqliteDriver {
     if (restoreQueryOnly) this.database.exec('PRAGMA query_only=ON');
     try { this.database.exec(readOnly ? 'BEGIN' : 'BEGIN IMMEDIATE'); }
     catch (error) {
+      if (error instanceof Error) rolledBackTransactionFailures.get(this)?.delete(error);
       if (restoreQueryOnly) this.restoreWritableConnection(error);
       throw error;
     }
     this.transactionActive = true;
-    const scopedConnection = new TransactionScopedConnection(this.database, readOnly);
-    let primaryError: unknown;
+    let nativeFailure: Error | undefined;
+    const recordNativeFailure = (error: unknown) => {
+      if (error instanceof Error) rolledBackTransactionFailures.get(this)?.delete(error);
+      nativeFailure = !readOnly && error instanceof Error &&
+        Object.getOwnPropertyDescriptor(error, 'code')?.value === 'ERR_SQLITE_ERROR' ? error : undefined;
+    };
+    const scopedConnection = new TransactionScopedConnection(this.database, readOnly, recordNativeFailure);
+    let primaryError: unknown, rolledBack = false;
     try {
       const result = operation(scopedConnection) as ReturnType<Operation>;
       scopedConnection.deactivate();
@@ -283,15 +301,19 @@ class NodeSqliteDriver implements SqliteDriver {
         observeRejectedThenable(result);
         throw new TypeError(`SQLite ${readOnly ? 'read snapshot' : 'transaction'} callback must be synchronous`);
       }
-      this.database.exec('COMMIT');
+      try { this.database.exec('COMMIT'); }
+      catch (error) { recordNativeFailure(error); throw error; }
       return result;
     } catch (error) {
       primaryError = error;
+      if (error instanceof Error) rolledBackTransactionFailures.get(this)?.delete(error);
       scopedConnection.deactivate();
       try {
         this.database.exec('ROLLBACK');
+        rolledBack = true;
       } catch (rollbackError) {
         this.poisoned = true;
+        rolledBackTransactionFailures.delete(this);
         try {
           this.database.close();
         } catch {
@@ -305,6 +327,10 @@ class NodeSqliteDriver implements SqliteDriver {
       scopedConnection.deactivate();
       this.transactionActive = false;
       if (restoreQueryOnly && !this.poisoned) this.restoreWritableConnection(primaryError);
+      if (rolledBack && !this.poisoned && nativeFailure !== undefined && primaryError === nativeFailure) {
+        const failures = rolledBackTransactionFailures.get(this) ?? new WeakSet<Error>();
+        failures.add(nativeFailure); rolledBackTransactionFailures.set(this, failures);
+      }
     }
   }
 
@@ -312,6 +338,7 @@ class NodeSqliteDriver implements SqliteDriver {
     try { this.database.exec('PRAGMA query_only=OFF'); }
     catch (error) {
       this.poisoned = true;
+      rolledBackTransactionFailures.delete(this);
       try { this.database.close(); } catch { /* Permanently refuse the uncertain connection. */ }
       throw new AggregateError(primaryError === undefined ? [error] : [primaryError, error],
         'SQLite read snapshot could not restore connection settings');
@@ -320,7 +347,8 @@ class NodeSqliteDriver implements SqliteDriver {
 
   close(): void {
     this.requireNoActiveTransaction();
-    this.database.close();
+    try { this.database.close(); }
+    finally { rolledBackTransactionFailures.delete(this); }
   }
 
   private readonly requireNoActiveTransaction = (): void => {

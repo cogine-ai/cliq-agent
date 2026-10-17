@@ -11,13 +11,14 @@ import { BUILTIN_POLICY_RULES, modeDecisions } from '../../policy/tool-policy.js
 import type { RunPolicySnapshotV1 } from '../../kernel/tool-authorization.js';
 import { sampleCanonicalNow } from '../canonical-time.js';
 import { DEFAULT_RUN_BUDGETS } from '../rows.js';
+import { publishOfflineModelEndpoint } from './model-endpoint.js';
 
 /** Real CAS + SQLite/lease, with offline signed-authority verification fixtures; no provider or tool I/O. */
 export async function createAgentFixture(label: string, budgets?: Partial<RunSpec['budgets']>, options: {
   tools?: Array<keyof typeof builtinInputContracts>; mode?: RunPolicySnapshotV1['mode'];
-  rules?: RunPolicySnapshotV1['decisionRules']; outputSchema?: unknown;
+  rules?: RunPolicySnapshotV1['decisionRules']; outputSchema?: unknown; contextLimitTokens?: number;
 } = {}) {
-  const authority = testFixture();
+  const authority = testFixture('openai', true, options.contextLimitTokens);
   const builtins = (options.tools ?? ['read']).map((name) => builtinInputContracts[name])
     .sort((left, right) => Buffer.compare(Buffer.from(left.name), Buffer.from(right.name)));
   const selected = builtins.map((builtin) => ({ name: builtin.name, description: `Use ${builtin.name}`, inputSchema: builtin.inputSchema,
@@ -35,12 +36,19 @@ export async function createAgentFixture(label: string, budgets?: Partial<RunSpe
   manifest.manifestDigest = digestOmitting(manifest, 'manifestDigest');
   const signed = await signedToolBundle(authority.assembly, manifest.entries);
   const credentials: string[] = [];
-  const fixture = await createActiveFixture(label, { budgets, runtimeAuthority: signed, credentialGrantRefs: credentials, assembly: async (store) => {
-    const grant = await store.artifacts.publishCanonical({ format: 'cliq-offline-credential-fixture-v1' }, 'cliq-offline-credential-fixture-v1');
-    credentials.push(grant.ref);
+  const fixture = await createActiveFixture(label, { budgets, runtimeAuthority: signed, credentialGrantRefs: credentials, assembly: async (store, identity) => {
+    const endpoint = await publishOfflineModelEndpoint({ artifacts: store.artifacts, principalId: identity.ownerPrincipalId,
+      bundle: signed.bundle, trustStorePem: signed.trustStorePem, createdAt: sampleCanonicalNow() });
+    credentials.push(...endpoint.credentialRefs);
+    authority.assembly.provider.endpoint = endpoint.endpoint;
+    authority.material.capabilityEvidence.value.endpointIdentityDigest = endpoint.endpoint.endpointIdentityDigest;
+    authority.material.priceTable!.value.endpointIdentityDigest = endpoint.endpoint.endpointIdentityDigest;
     authority.assembly.provider.credentialGrantRefs = credentials;
     authority.material.additionalCredentialGrantRefs = [];
     authority.runSpecCredentialGrantRefs = credentials;
+    authority.material.verifyProviderEndpoint = input => input.provider === authority.assembly.provider.name &&
+      input.model === authority.assembly.provider.model && canonicalSha256(input.endpoint) === canonicalSha256(endpoint.endpoint) &&
+      canonicalSha256(input.credentialGrantRefs) === canonicalSha256(credentials);
     for (const tool of selected) await store.artifacts.publishCanonical(tool.inputSchema, 'cliq-tool-input-schema-v1');
     if (options.outputSchema !== undefined) await store.artifacts.publishCanonical(options.outputSchema, 'cliq-tool-output-schema-v1');
     const root = await store.artifacts.publishCanonical(manifest, manifest.format);

@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { chmod, link, lstat, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { test, type TestContext } from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
 import type { PlatformProcessIdentityV1 } from '../kernel/types.js';
 import { loadNativeStateOwner } from './native-owner.js';
 import type { SqliteDriver } from './sqlite-driver.js';
@@ -196,6 +198,163 @@ test('native death inspection requires a held lock and positive PID/start-token 
   assert.throws(() => held.assertPriorProcessDead(acquired.pid!, acquired.token!), /changed or closed/);
   const successor = native.acquireLock(root, false);
   try { successor.assertPriorProcessDead(acquired.pid!, acquired.token!); } finally { successor.close(); }
+});
+
+test('native prior-process death observations require actual lifetime absence and a fresh native time under the original lock', async t => {
+  const root = await rootFor(t);
+  const child = await childFor(t, root, 'native');
+  const acquired = await child.request('acquire');
+  assert.equal(acquired.state, 'held');
+  assert.equal((await child.request('close')).state, 'released');
+  const held = native.acquireLock(root, false);
+  try {
+    const observe = Reflect.get(held, 'observePriorProcessDeath') as unknown;
+    assert.equal(typeof observe, 'function', 'prior-process death requires its real native observation, not a caller clock');
+    const read = (pid: number, token: string): unknown => Reflect.apply(observe as (...args: unknown[]) => unknown, held, [pid, token]);
+    assert.throws(() => read(acquired.pid!, acquired.token!), /still present/);
+    assert.throws(() => read(process.pid, native.processStartToken()), /still present/);
+    for (const pid of [0, -1, 1.5, NaN, Infinity, 2 ** 32 + process.pid])
+      assert.throws(() => read(pid, acquired.token!), /invalid prior/);
+    const foreignToken = process.platform === 'linux' ? 'darwin-proc-start-time:1:000001' : 'linux-proc-start-ticks:1';
+    const prefix = process.platform === 'linux' ? 'linux-proc-start-ticks:' : 'darwin-proc-start-time:';
+    const suffix = process.platform === 'linux' ? '' : ':000001';
+    for (const token of ['', 'unknown-token', foreignToken, 'x'.repeat(128), `${acquired.token}\0ignored`,
+      `${prefix}0${suffix}`, `${prefix}+1${suffix}`, `${prefix}01${suffix}`,
+      `${prefix}18446744073709551616${suffix}`])
+      assert.throws(() => read(acquired.pid!, token), /invalid prior/);
+    assert.throws(() => Reflect.apply(observe as (...args: unknown[]) => unknown, {}, [acquired.pid, acquired.token]),
+      /invalid StateOwner lock handle/);
+    const mismatch = read(process.pid, acquired.token!);
+    assert.equal(typeof mismatch, 'number', 'a genuine different start lifetime exercises the positive PID-reuse branch');
+    child.child.disconnect();
+    const [code, signal] = await child.exited;
+    assert.equal(code, 0); assert.equal(signal, null);
+    const wallClock = Date.now.bind(Date);
+    t.mock.method(Date, 'now', () => 0);
+    let previous = 0;
+    for (let index = 0; index < 2; index++) {
+      if (index) await delay(5);
+      const before = wallClock(), observed = read(acquired.pid!, acquired.token!), after = wallClock();
+      assert.equal(typeof observed, 'number');
+      assert.ok(Number.isSafeInteger(observed));
+      assert.ok((observed as number) >= before && (observed as number) <= after,
+        'each observation must sample the actual native wall clock after inspecting the dead original process');
+      assert.ok((observed as number) > previous); previous = observed as number;
+    }
+  } finally { held.close(); }
+  assert.throws(() => Reflect.apply(Reflect.get(held, 'observePriorProcessDeath'), held, [acquired.pid, acquired.token]),
+    /changed or closed/);
+});
+
+test('uncertain prior-process observation close retains its original OS lock and never closes a reused descriptor', async t => {
+  const container = await rootFor(t), binary = path.join(container, 'fault.node');
+  const includes = JSON.parse(execFileSync(process.execPath, [
+    fileURLToPath(new URL('../../scripts/kernel/build-state-owner-native.mjs', import.meta.url)), '--print-includes'
+  ], { encoding: 'utf8' })) as string[];
+  const compiled = spawnSync('cc', ['-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', '-pthread',
+    ...(process.platform === 'linux' ? ['-shared', '-fPIC'] : ['-bundle', '-undefined', 'dynamic_lookup']),
+    ...includes.flatMap(include => ['-I', include]),
+    fileURLToPath(new URL('./testing/current-process-fault-native.c', import.meta.url)), '-o', binary], { encoding: 'utf8' });
+  assert.equal(compiled.status, 0, compiled.stderr);
+  const subjectRoot = path.join(container, 'subject'); await mkdir(subjectRoot, { mode: 0o700 });
+  const subject = await childFor(t, subjectRoot, 'native');
+  const lifetime = await subject.request('acquire'); assert.equal(lifetime.state, 'held');
+  assert.equal((await subject.request('close')).state, 'released'); subject.child.disconnect();
+  const [code, signal] = await subject.exited; assert.equal(code, 0); assert.equal(signal, null);
+  const points = ['after_directory_close', ...(process.platform === 'linux' ? ['after_fclose'] : [])];
+  for (const point of points) await t.test(point, async () => {
+    const stateRoot = path.join(container, point); await mkdir(stateRoot, { mode: 0o700 });
+    const child = spawnSync(process.execPath, ['--expose-gc', '--input-type=module', '-e', `
+      import assert from 'node:assert/strict';
+      import { Module } from 'node:module';
+      import { openSync, writeFileSync, fstatSync, readSync } from 'node:fs';
+      import { constants } from 'node:os';
+      import { setImmediate as nextTurn } from 'node:timers/promises';
+      const [binary, root, point, priorPid, priorToken] = process.argv.slice(1);
+      const loaded = new Module(binary); process.dlopen(loaded, binary); const binding = loaded.exports;
+      let lock = binding.acquireLock(root, true); const sentinel = root + '/sentinel';
+      // The dead subject has no proc stat stream to close. Linux's fclose
+      // case inspects this actual live lifetime and must retain the close
+      // uncertainty instead of reporting only the ordinary alive refusal.
+      const inspectedPid = point === 'after_fclose' ? process.pid : Number(priorPid);
+      const inspectedToken = point === 'after_fclose' ? binding.processStartToken() : priorToken;
+      const bytes = Buffer.from('unrelated reused descriptor must survive');
+      writeFileSync(sentinel, bytes, { mode: 0o600 });
+      let faulted = 0, retiredFd = -1, reusedFd = -1;
+      binding.setFault(point, 1, fd => {
+        faulted++; retiredFd = fd;
+        for (let count = 0; count < 256; count++) {
+          const opened = openSync(sentinel, 'r');
+          assert(opened <= fd);
+          if (opened === fd) { reusedFd = opened; break; }
+        }
+        assert.equal(reusedFd, fd);
+        return constants.errno.EIO;
+      });
+      let observation, observationCode, heldCode, heldMessage, firstCode, firstMessage, secondCode;
+      try { observation = lock.observePriorProcessDeath(inspectedPid, inspectedToken); } catch (error) { observationCode = error.code; }
+      try { lock.assertHeld(); } catch (error) { heldCode = error.code; heldMessage = error.message; }
+      let generation, generationGranted = false, generationClosed = true;
+      try { generation = lock.createGenerationTree('observation-fatal', 'g'.repeat(43)); generationGranted = true; }
+      catch {}
+      finally {
+        // Even RED must retire the actual accidentally minted child and drop
+        // its JS reference before the later real lock-GC observation.
+        try { generation?.close(); } catch { generationClosed = false; }
+        generation = undefined;
+      }
+      try { lock.close(); } catch (error) { firstCode = error.code; firstMessage = error.message; }
+      try { lock.close(); } catch (error) { secondCode = error.code; }
+      const kernelLockBusy = () => {
+        let competing, busy = false;
+        try { competing = binding.acquireLock(root, false); }
+        catch (error) { busy = /StateOwner OS lock is already held/.test(error.message); }
+        try { competing?.close(); } catch {}
+        return busy;
+      };
+      const intact = () => {
+        const read = Buffer.alloc(bytes.length);
+        return fstatSync(reusedFd).isFile() && readSync(reusedFd, read, 0, read.length, 0) === bytes.length && read.equals(bytes);
+      };
+      const kernelBusy = kernelLockBusy(), sentinelIntactBeforeGc = intact();
+      let collected = false, gcProbeCount = 0, kernelBusyAfterGc = true;
+      const registry = new FinalizationRegistry(() => { collected = true; });
+      const weak = new WeakRef(lock); registry.register(lock, 'original-lock'); lock = undefined;
+      for (let round = 0; round < 32 && gcProbeCount < 3; round++) {
+        await nextTurn(); global.gc(); await nextTurn();
+        if (collected && weak.deref() === undefined) {
+          // JS collection is not a C-finalizer attestation. These are repeated
+          // actual flock acquisitions after the original handle was collected.
+          const busy = kernelLockBusy(); kernelBusyAfterGc = kernelBusyAfterGc && busy; gcProbeCount++;
+        }
+      }
+      console.log(JSON.stringify({ faulted, retiredFdReused: retiredFd === reusedFd, sentinelIntact: intact(), sentinelIntactBeforeGc,
+        observationGranted: observation !== undefined, observationCode, heldCode, heldMessage,
+        firstCode, firstMessage, secondCode, kernelBusy, collected, gcProbeCount, kernelBusyAfterGc, generationGranted, generationClosed }));
+      // Actual process exit, not a successful close assertion, releases the lock.
+    `, binary, stateRoot, point, String(lifetime.pid), lifetime.token!], { encoding: 'utf8', timeout: 10000 });
+    assert.equal(child.error, undefined); assert.equal(child.status, 0, child.stderr); assert.equal(child.signal, null);
+    const observed = JSON.parse(child.stdout.trim()) as { faulted: number; retiredFdReused: boolean; sentinelIntact: boolean;
+      sentinelIntactBeforeGc: boolean; collected: boolean; gcProbeCount: number; kernelBusyAfterGc: boolean;
+      generationGranted: boolean; generationClosed: boolean;
+      observationGranted: boolean; observationCode?: string; heldCode?: string; heldMessage?: string;
+      firstCode?: string; firstMessage?: string; secondCode?: string; kernelBusy: boolean };
+    assert.equal(observed.faulted, 1); assert.equal(observed.retiredFdReused, true); assert.equal(observed.sentinelIntact, true);
+    assert.equal(observed.sentinelIntactBeforeGc, true);
+    assert.equal(observed.observationGranted, false); assert.equal(observed.observationCode, 'ERR_CLIQ_RESOURCE_RETIREMENT');
+    assert.equal(observed.heldCode, 'ERR_CLIQ_RESOURCE_RETIREMENT', 'uncertain process observation must poison this exact lock');
+    assert.match(observed.heldMessage!, /prior process observation.*StateOwner remains held/);
+    assert.equal(observed.firstCode, 'ERR_CLIQ_RESOURCE_RETIREMENT');
+    assert.match(observed.firstMessage!, /prior process observation.*StateOwner remains held/);
+    assert.equal(observed.secondCode, 'ERR_CLIQ_RESOURCE_RETIREMENT');
+    assert.equal(observed.kernelBusy, true, 'the actual OS lock must remain held through both refused closes');
+    assert.equal(observed.collected, true, 'the original JS handle must actually be garbage-collected');
+    assert.equal(observed.gcProbeCount, 3, 'bounded GC must include three real kernel lock probes after collection');
+    assert.equal(observed.kernelBusyAfterGc, true, 'collecting the poisoned handle must not release its actual OS lock');
+    assert.equal(observed.generationClosed, true, 'even an unexpected native child must positively close before GC');
+    assert.equal(observed.generationGranted, false, 'a poisoned lock must not mint new productive generation resources');
+    const successor = native.acquireLock(stateRoot, false); successor.close();
+  });
 });
 
 test('failed graceful release keeps the OS lock until durable terminalization succeeds', async (t) => {

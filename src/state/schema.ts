@@ -569,16 +569,47 @@ BEGIN
 END;
 `;
 
-export const KERNEL_SCHEMA_SQL = `${KERNEL_SCHEMA_V1_SQL}\n${KERNEL_SCHEMA_V2_SQL}\n${KERNEL_SCHEMA_V3_SQL}\n${KERNEL_SCHEMA_V4_SQL}`;
+export const KERNEL_SCHEMA_V5_SQL = `
+DROP TRIGGER worker_launches_validate_insert;
+DROP TRIGGER worker_launches_validate_update;
 
-const REQUIRED_TABLES = [
+CREATE TRIGGER worker_launches_validate_insert
+BEFORE INSERT ON worker_launches BEGIN
+  SELECT CASE
+    WHEN NEW.phase NOT IN ('preparing', 'reserved', 'preactivated', 'activated', 'reconciling', 'retired')
+      THEN RAISE(ABORT, 'worker launch phase is invalid')
+    WHEN (NEW.phase = 'retired') != (NEW.retired_at IS NOT NULL)
+      THEN RAISE(ABORT, 'worker launch retired_at does not match phase')
+  END;
+END;
+CREATE TRIGGER worker_launches_validate_update
+BEFORE UPDATE ON worker_launches BEGIN
+  SELECT CASE
+    WHEN NEW.launch_id != OLD.launch_id OR NEW.run_id != OLD.run_id
+      THEN RAISE(ABORT, 'worker launch identity is immutable')
+    WHEN NOT (
+      (OLD.phase = 'preparing' AND NEW.phase IN ('preparing', 'reserved', 'retired')) OR
+      (OLD.phase = 'reserved' AND NEW.phase IN ('preactivated', 'retired')) OR
+      (OLD.phase = 'preactivated' AND NEW.phase IN ('activated', 'retired')) OR
+      (OLD.phase = 'activated' AND NEW.phase IN ('activated', 'reconciling', 'retired')) OR
+      (OLD.phase = 'reconciling' AND NEW.phase = 'retired')
+    ) THEN RAISE(ABORT, 'worker launch phase transition is invalid')
+    WHEN (NEW.phase = 'retired') != (NEW.retired_at IS NOT NULL)
+      THEN RAISE(ABORT, 'worker launch retired_at does not match phase')
+  END;
+END;
+`;
+
+export const KERNEL_SCHEMA_SQL = `${KERNEL_SCHEMA_V1_SQL}\n${KERNEL_SCHEMA_V2_SQL}\n${KERNEL_SCHEMA_V3_SQL}\n${KERNEL_SCHEMA_V4_SQL}\n${KERNEL_SCHEMA_V5_SQL}`;
+
+/** One table inventory for pristine bootstrap and its retained birth recipe. */
+export const KERNEL_AUTHORITY_TABLES = Object.freeze([
   'canonical_time_fence',
   'state_owners',
   'artifacts',
   'sessions',
   'items',
   'runs',
-  'source_inspection_attempts',
   'checkpoints',
   'run_journal',
   'run_events',
@@ -591,9 +622,11 @@ const REQUIRED_TABLES = [
   'list_read_cut_entries',
   'child_allocations',
   'authorization_grants',
+  'source_inspection_attempts',
   'mcp_registrations',
   'admin_operations'
-] as const;
+] as const);
+const REQUIRED_TABLES = KERNEL_AUTHORITY_TABLES;
 
 function pragmaScalar(driver: SqliteConnection, name: string): unknown {
   const row = driver.prepare(`PRAGMA ${name}`).get();
@@ -604,7 +637,7 @@ function pragmaScalar(driver: SqliteConnection, name: string): unknown {
 export function applyKernelSchema(driver: SqliteDriver): void {
   const userVersion = requiredSafeInteger(pragmaScalar(driver, 'user_version'), 'user_version');
   const applicationId = requiredSafeInteger(pragmaScalar(driver, 'application_id'), 'application_id');
-  if (![0, 1, 2, 3, KERNEL_STATE_SCHEMA_VERSION].includes(userVersion)) {
+  if (![0, 1, 2, 3, 4, KERNEL_STATE_SCHEMA_VERSION].includes(userVersion)) {
     throw new Error(`unsupported kernel schema version ${userVersion}`);
   }
   if (applicationId !== 0 && applicationId !== KERNEL_SQLITE_APPLICATION_ID) {
@@ -631,7 +664,8 @@ export function applyKernelSchema(driver: SqliteDriver): void {
     driver.transaction((connection) => {
       if (userVersion === 1) connection.exec(KERNEL_SCHEMA_V2_SQL);
       if (userVersion < 3) connection.exec(KERNEL_SCHEMA_V3_SQL);
-      connection.exec(KERNEL_SCHEMA_V4_SQL);
+      if (userVersion < 4) connection.exec(KERNEL_SCHEMA_V4_SQL);
+      if (userVersion < 5) connection.exec(KERNEL_SCHEMA_V5_SQL);
       connection.exec(`PRAGMA user_version=${KERNEL_STATE_SCHEMA_VERSION}`);
     });
   }

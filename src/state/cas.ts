@@ -29,6 +29,13 @@ const ROOT_MODE = 0o700;
 const PERMISSION_AND_SPECIAL_BITS = 0o7777;
 const TEMPORARY_SUFFIX_LENGTH = 32;
 export const ARTIFACT_CHUNK_BYTES = 64 * 1024;
+const joinedCasPublicationFailures = new WeakSet<Error>();
+
+/** Internal I/O classification only, not authority to retry an effect or
+ * replace a native owner. The exact publication's resource joins mint it. */
+export function isJoinedCasPublicationFailure(error: unknown): error is Error {
+  return error instanceof Error && joinedCasPublicationFailures.has(error);
+}
 
 function digest(bytes: Uint8Array): ArtifactRef {
   return crypto.createHash('sha256').update(bytes).digest('hex');
@@ -416,6 +423,7 @@ export class ContentAddressedStore {
   async publishChunks(source: AsyncIterable<Uint8Array>, maxByteLength: number): Promise<ArtifactStat> {
     if (!Number.isSafeInteger(maxByteLength) || maxByteLength < 0) throw new TypeError('artifact stream requires a nonnegative safe byte ceiling');
 
+    let writeFailure: Error | undefined, joinedFailure: Error | undefined;
     return this.withRoot(async (openedRoot) => {
       let name = `.tmp-stream-${crypto.randomBytes(TEMPORARY_SUFFIX_LENGTH / 2).toString('hex')}`;
       let temporaryPath = path.join(this.root, name);
@@ -442,7 +450,14 @@ export class ContentAddressedStore {
             }
             const bytes = Buffer.from(chunk);
             hash.update(bytes);
-            await handle.writeFile(bytes);
+            try { await handle.writeFile(bytes); }
+            catch (error) {
+              if (error instanceof Error) joinedCasPublicationFailures.delete(error);
+              if (error instanceof Error && !(error instanceof ResourceRetirementError) &&
+                  Object.getOwnPropertyDescriptor(error, 'code')?.value === 'ENOSPC')
+                writeFailure = error;
+              throw error;
+            }
             byteLength += bytes.length;
             await assertRootPathStable(this.root, openedRoot);
           }
@@ -497,6 +512,7 @@ export class ContentAddressedStore {
           await recoverLinkedTemporary(this.root, openedRoot, ref);
         }
       } catch (error) {
+        if (error instanceof Error) joinedCasPublicationFailures.delete(error);
         publicationError = error;
       }
 
@@ -513,7 +529,13 @@ export class ContentAddressedStore {
         throw new ResourceRetirementError('CAS publication and temporary retirement both failed',
           new AggregateError([publicationError, cleanupError], 'artifact publication and cleanup both failed'));
       }
-      if (publicationError !== undefined) throw publicationError;
+      if (publicationError !== undefined) {
+        if (publicationError === writeFailure) {
+          try { await assertRootPathStable(this.root, openedRoot); joinedFailure = writeFailure; }
+          catch { /* A failed identity recheck cannot classify the original error as joined. */ }
+        }
+        throw publicationError;
+      }
       if (cleanupError !== undefined) throw new ResourceRetirementError('CAS temporary retirement failed', cleanupError);
 
       const published = await openPublishedFile(this.root, openedRoot, ref);
@@ -526,6 +548,17 @@ export class ContentAddressedStore {
         await closeCasHandle(published.handle);
       }
       return { ref, byteLength };
+    }).catch(error => {
+      if (error instanceof Error) {
+        // An error reused by a source/other failing publication cannot borrow
+        // an earlier publication's successful cleanup classification.
+        joinedCasPublicationFailures.delete(error);
+        if (error === joinedFailure && !(error instanceof ResourceRetirementError))
+          joinedCasPublicationFailures.add(error);
+      }
+      // withRoot has now joined its original root FD too. Preserve the exact
+      // original Error object; failed close/cleanup must never mint this fact.
+      throw error;
     });
   }
 

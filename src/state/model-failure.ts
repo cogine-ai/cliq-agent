@@ -1,5 +1,5 @@
 import { digestOmitting, modelOperationId, parseCanonicalTime } from '../kernel/identity.js';
-import type { ModelResponseFailureEvidenceV1 } from '../kernel/stop.js';
+import type { RuntimeFailureEvidenceV1 } from '../kernel/stop.js';
 import type { RecoveryClosureV1, RunAssemblyV1, RunFrontier, StateOwnerRecordV1, SupervisorInspectorIdentityV1 } from '../kernel/types.js';
 import type { ModelRequestV1, NormalPromptProjectionV1 } from '../model/request.js';
 import { exactKeys, requireEqual } from '../policy/runtime-authority.js';
@@ -12,6 +12,7 @@ import { isZeroBudget } from './invariants.js';
 import { readStateOwner } from './state-owner.js';
 import type { SqliteDriver } from './sqlite-driver.js';
 import { readSupervisorInspector } from './supervisor-inspector.js';
+import { readCredentialRedemptionFailureCause } from './credential-redemption-failure.js';
 
 type Inspector = { inspectorIdentityRef: string; inspectorIdentityDigest: string };
 
@@ -46,13 +47,14 @@ async function readModelFailureCause(artifacts: ArtifactCatalog, cut: RecoveryCl
 }
 
 /** The state owner observes its Journal now and constructs the wrapper; callers supply no reason or evidence artifact. */
-export async function prepareModelFailureStop(artifacts: ArtifactCatalog, owner: StateOwnerRecordV1, assembly: RunAssemblyV1,
+export async function prepareModelFailureStop(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerRecordV1, assembly: RunAssemblyV1,
   cut: RecoveryClosureV1, identity: Inspector, observedAt: string) {
   if (assembly.mcpServers.length) return undefined;
-  const cause = await readModelFailureCause(artifacts, cut, observedAt);
+  const cause = await readModelFailureCause(artifacts, cut, observedAt) ??
+    await readCredentialRedemptionFailureCause(driver, artifacts, cut, observedAt);
   if (!cause) return undefined;
   await readSupervisorInspector(artifacts, owner, assembly, { ...identity, observedAt });
-  const evidence: ModelResponseFailureEvidenceV1 = { schemaVersion: 1, format: 'cliq-runtime-failure-evidence-v1',
+  const evidence: RuntimeFailureEvidenceV1 = { schemaVersion: 1, format: 'cliq-runtime-failure-evidence-v1',
     runId: cut.run.id, ...cause, ...identity, observedAt, evidenceDigest: '' };
   evidence.evidenceDigest = digestOmitting(evidence, 'evidenceDigest');
   const artifact = await artifacts.publishCanonical(evidence, evidence.format);
@@ -65,17 +67,25 @@ export async function prepareModelFailureStop(artifacts: ArtifactCatalog, owner:
 
 /** Historical evidence stays valid after restart; freshness is relative to its original stop commit, not recovery time. */
 export async function validateModelFailureStop(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1, intent: ModelFailureStopIntent) {
-  const evidence = await readCanonicalArtifact<ModelResponseFailureEvidenceV1>(artifacts, intent.runtimeFailureRef);
-  if (!exactKeys(evidence, ['schemaVersion', 'format', 'runId', 'frontierRef', 'frontierDigest', 'failingOpId',
-    'inspectorIdentityRef', 'inspectorIdentityDigest', 'observedAt', 'evidenceDigest', 'failureKind', 'unusableResponseRef', 'unusableResponseDigest']) ||
+  const evidence = await readCanonicalArtifact<RuntimeFailureEvidenceV1>(artifacts, intent.runtimeFailureRef);
+  const fields = ['schemaVersion', 'format', 'runId', 'frontierRef', 'frontierDigest', 'failingOpId',
+    'inspectorIdentityRef', 'inspectorIdentityDigest', 'observedAt', 'evidenceDigest', 'failureKind'];
+  if (evidence.failureKind === 'model_unusable_response') fields.push('unusableResponseRef', 'unusableResponseDigest');
+  else if (evidence.failureKind === 'credential_redemption_failed') {
+    fields.push('credentialGrantRef', 'credentialGrantDigest', 'endpointRegistrationRef', 'endpointRegistrationDigest',
+      'credentialAuthorityRecordDigest', 'authorityRevision', 'credentialServiceRevision', 'failureCode');
+    if (evidence.failureCode === 'endpoint_revoked') fields.push('endpointAuthorityRecordDigest', 'endpointAuthorityRevision');
+  } else throw new TypeError('runtime stop requires its owning failure evidence branch');
+  if (!exactKeys(evidence, fields) ||
       evidence.schemaVersion !== 1 || evidence.format !== 'cliq-runtime-failure-evidence-v1' || evidence.runId !== cut.run.id ||
       evidence.evidenceDigest !== intent.runtimeFailureDigest || digestOmitting(evidence, 'evidenceDigest') !== evidence.evidenceDigest ||
       evidence.failingOpId !== intent.failingOpId || evidence.observedAt > intent.createdAt ||
       parseCanonicalTime(intent.createdAt) - parseCanonicalTime(evidence.observedAt) > 5_000) {
     throw new TypeError('runtime stop has no exact fresh model failure evidence');
   }
-  const cause = await readModelFailureCause(artifacts, cut, evidence.observedAt);
-  if (!cause) throw new TypeError('runtime stop has no settled unusable model response');
+  const cause = evidence.failureKind === 'model_unusable_response' ? await readModelFailureCause(artifacts, cut, evidence.observedAt) :
+    await readCredentialRedemptionFailureCause(driver, artifacts, cut, evidence.observedAt);
+  if (!cause) throw new TypeError('runtime stop has no settled exact model failure cause');
   requireEqual(evidence, { schemaVersion: 1, format: evidence.format, runId: cut.run.id, ...cause,
     inspectorIdentityRef: evidence.inspectorIdentityRef, inspectorIdentityDigest: evidence.inspectorIdentityDigest,
     observedAt: evidence.observedAt, evidenceDigest: evidence.evidenceDigest }, 'runtime model failure cause');

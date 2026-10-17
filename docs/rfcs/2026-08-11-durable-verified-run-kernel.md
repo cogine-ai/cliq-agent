@@ -2566,6 +2566,23 @@ The internal authority API has one lock-aware form, `withCredentialAuthorityLock
 
 Enrollment/rotation is request-idempotent and crash ordered. `CredentialAuthorityCommandCoreV1` is the complete persisted secret-free command: its inline external subject rehashes to `externalSubjectDigest`; `credentialTargetDigest = SHA-256(JCS({credentialGrantId,ownerPrincipalId,purpose,endpointRegistrationRef,endpointIdentityDigest,tlsPolicyDigest,expiresAt,externalSubjectDigest}))`; `commandDigest = SHA-256(JCS(commandCore with commandDigest omitted))`; and `requestDigest = commandDigest`. Operation owner/kind/grant/target/subject fields must repeat the core, and `intendedAuthorityRevision`/`intendedSecretGeneration` are exactly one greater than the latest row for rotation or both one for enrollment. Every enroll/rotate/revoke operation also retains the first-commit authenticated `channelIdentityRef/channelIdentityDigest`, closed-decodes it for the same owner, and keeps it outside the command/request digest so later-channel replay cannot rewrite provenance or create a false request conflict. Raw secret bytes are deliberately excluded and never hashed/persisted. `operationId = H(ownerPrincipalId,requestId,requestDigest,attempt)`, attempts are contiguous `1..3`, and at most one nonterminal attempt exists. Under the lock, append `prepared` with the already-frozen command/subject; write a fresh logical-identity-bound platform item; read it back through the same-user store and compare in memory; run the fixed read-only provider subject/scopes validator or bind the successful opaque roundtrip to that frozen subject; require equality with the command; append `secret_stored`; then the narrow Supervisor finalizer atomically appends the active authority revision and `committed` operation after the sole canonical-time prefix. Only after commit may rotation delete the superseded item. `operationDigest` omits itself, request-id+different-digest conflict is permanent, and a committed replay returns the same grant/revision **without reading, comparing, or storing newly submitted secret bytes**. Changing a committed secret requires a new request/secret-submission id and `rotate`.
 
+For the fixed installed Linux nonstreaming JSON model recipe, fresh
+`model_endpoint` enroll/rotate accepts only 1..65536 original bytes in
+`0x21..0x7e`, and refuses a secret that is a nonempty byte substring of any one
+of the separate fixed protocol literals `{`, `}`, `[`, `]`, `"`, `:`, `application/json`.
+Check after frozen-intent validation but before subject generation, `prepared`
+or platform creation. This closed deterministic-conflict contract checks the
+original bytes without trimming, normalization, encoding, hashing or secret
+commitment; it adds no arbitrary minimum length and does not reject a longer
+key merely for containing a literal. The native broker repeats the same check
+on its actual redeemed bytes before preparation readiness and permanent claim.
+Other credential purposes retain their opaque-byte contract. Committed replay
+still precedes reading new input. No-echo filtering, including its encoded and
+decoded projections, remains unchanged. Passing these finite checks is neither
+provider credential/capability/billing validation nor a guarantee against every
+future response collision. A later ambiguous released request retains the
+existing full charge and no-retry rules.
+
 Credential revocation has no enrollment/rotation attempt: its `operationId = H(ownerPrincipalId,requestId,requestDigest)`. Cleanup transitions retain that same operation identity; retrying an indeterminate deletion never creates a new attempt or restores authority.
 
 Opaque subject production freezes the complete 256-bit candidate and its
@@ -2669,6 +2686,110 @@ Model authority is loaded once from the exact retained assembly and signed Runti
 
 The selected signed RuntimeBundle obeys work package 06's exact `structuredArtifacts` closure. Each root binds kind/id/provider/model, a complete-byte root ref, an independently recomputed self-omitting semantic digest, and unique byte-sorted all-and-only member refs. Members are signed non-executable `bundle_object` entries whose digests equal their complete-byte ArtifactRefs. Install descriptor-verifies and imports every root/member before activation. Exactly one `system_prompt` and one `compaction_prompt` root match the assembly provider/model: the former is nonempty `ModelTextV1` and binds `instructions.systemPromptRef/systemPromptDigest`; the latter is `CompactionPromptEnvelopeV1`, binds the assembly envelope pair, and has exactly its three `ModelTextV1` members. Complete-byte and semantic digests never collapse. The same general closure retains bundled-skill files, guest image/signature, MCP recovery arguments/predicates and Windows projection schemas. Recovery never assumes preseeded CAS or rereads ambient package paths. The actual tokenizer/model files of managed local inference remain part of its signed model closure; they are not a host-side remote token counter.
 
+Installed remote-model authority uses an acyclic post-bundle companion, not a
+new RuntimeBundle structured kind or mutable model-authority ledger. The
+existing catalog and price-table schemas remain unchanged:
+
+```ts
+type InstalledModelAuthorityClosureV1 = {
+  schemaVersion: 1
+  format: 'cliq-installed-model-authority-v1'
+  publisherKeyId: string
+  signatureAlgorithm: 'ed25519'
+  runtimeBundleRef: ArtifactRef
+  runtimeBundleManifestDigest: string
+  objects: readonly {
+    artifactRef: ArtifactRef
+    byteCount: number
+    kind: 'model_catalog_entry' | 'model_price_table' | 'ed25519_signature'
+  }[]
+  closureDigest: string
+  signature: string
+}
+```
+
+`closureDigest` omits itself and `signature` under JCS; the companion's
+ArtifactRef hashes its complete signed bytes. `runtimeBundleRef` and the
+manifest digest equal the already completed selected RuntimeBundle. Build
+and sign executable/prompt/trust-store Bundle bytes first, derive that exact
+endpoint/TLS identity second, sign catalog/price objects third, and sign the
+companion last. The Bundle never references the companion. A catalog or
+endpoint-bound price table cannot be inserted back into its own Bundle, and
+placeholder refs, external unsigned metadata and preseeded CAS are not
+substitutes for this publication order.
+
+The signature domains are exactly the ASCII strings
+`cliq-model-catalog-entry-v1\0`, `cliq-model-price-table-v1\0`, and
+`cliq-installed-model-authority-v1\0`, respectively followed by the relevant
+lowercase 64-hex semantic digest in UTF-8. Catalog and price `signatureRef`
+resolve raw 64-byte Ed25519 signatures. The companion's `signature` is the
+canonical base64 encoding of exactly 64 signature bytes. All three signer
+ids equal the selected Bundle's publisher id and resolve its unique embedded
+release key; user, unknown, duplicate, different-role/domain or differently
+Bundle-bound signatures fail closed. A signature alone is not a credible
+provider capability or cost-ceiling qualification.
+
+The companion is at most 1 MiB. Its object inventory is unique and byte-sorted
+by ArtifactRef, at most 128 objects and 8 MiB of complete object bytes.
+Catalog/price objects are each at most 64 KiB and strict canonical bounded
+JSON; signature objects are exactly 64 bytes. There are 1..32 unique
+`(provider,model,endpointIdentityDigest)` tuples, each with exactly one catalog
+and one price table, no Ollama branch, and all-and-only their detached signature
+objects. Every ref/count/hash, closed schema, validity ordering, matching
+provider/model/endpoint, catalog claims, Bundle pair and actual signed
+`provider_adapter` id/version/digest verifies before eligibility. Admission
+independently requires the existing capability/price validity through its
+deadline and a substantiated full request ceiling; credential, endpoint and
+billing authority are never inferred from the companion.
+
+The literal package layout is `model-authority.json` plus
+`model-objects/sha256/<first-two-hex>/<complete-ref>` beside the original Bundle
+package. Those paths are reserved and cannot be Bundle entries. The companion
+declares no arbitrary paths. The installed owner descriptor-captures and
+revalidates both complete closed package graphs, imports the companion and
+every member through existing hash/O_EXCL/fsync CAS, and then atomically
+publishes `modelAuthorityRef` alongside `bundleDigest` in the one existing
+`runtime/active.json` selection. No second selection file, SQL authority
+table, refresh ledger, download, caller ref, custom key or mutable path lookup
+is added. A selection without that ref remains capability-incomplete and
+cannot admit an installed Run; it is not a legacy execution fallback.
+
+Admission selects from the held current companion using public model and
+endpoint/credential ids, resolves the real principal-bound owners, and pins
+the existing signed catalog, evidence, price, endpoint and frozen credential
+refs in the ordinary assembly. Recovery verifies those individually signed
+retained CAS members against the Run's exact Bundle/endpoint identities; it
+never chooses current companion members, substitutes rotated credentials or
+rereads a package. The current selected companion is a CAS root; retained
+Runs independently root their selected members and signatures. This companion
+is discovery/import only and contains no additional runtime eligibility,
+revocation, automatic refresh or retry authority.
+
+System/compaction prompt closure remains the exact signed `structuredArtifacts`
+contract. The Linux I1 recipe supports one fixed policy profile and at most
+32 paired provider/model prompt identities; each compaction root has exactly
+the distinct refs of its three validated `ModelTextV1` members. Only those
+all-and-only signed `bundle_object` members are imported; unused or arbitrary
+object roots fail. Builtin tool contract/schema bytes may use existing signed
+non-executable `schema` entries, but the trusted assembler still validates
+their exact builtin contracts and executable identities before exposing tools.
+
+An owned scripted HTTPS fixture can qualify this installation/transport
+composition only with genuine signed fixture adapter/catalog/pricing/TLS
+bytes, actual endpoint and Secret Service credentials, exact claim-before-send
+and the second release gate, no redirects, and complete joined resources.
+Its table requires its real bounded server contract and may declare zero
+charges only for that owned server; it does not use managed-local zero-cost
+provenance. It never qualifies actual-provider capability, billing, release
+signing or the unexecuted I1 negative/crash cuts. Unsupported or unqualified
+real providers remain `MODEL_CAPABILITY_UNKNOWN` or `MODEL_COST_UNKNOWN`.
+
+The initial installed Linux broker recipe is nonstreaming JSON only. A signed
+catalog claiming streaming is discovery data, not supported execution: reject
+it with `MODEL_CAPABILITY_UNKNOWN` before admission. The native response path
+accepts only bounded `application/json`; SSE and other media types fail closed.
+No streaming qualification is implied by the general provider contract.
+
 Normal prompt construction is a total stored projection, not adapter assembly. `NormalPromptProjectionV1.projectionDigest = SHA-256(JCS(projection with projectionDigest omitted))`; its Run/spec/assembly/context refs equal the current authoritative Run and ready Checkpoint, `contextManifestDigest` equals the decoded `ContextManifest.projectionDigest`, `basedOnRunRevision` is the revision being dispatched, and `frontierDigest = SHA-256(JCS(the exact current RunFrontier))`. Message indices and tool indices are contiguous from zero. The producer walks only the frozen artifacts in this order:
 
 1. Emit one system message from a closed instruction projection. The first, mandatory nonempty piece is the decoded signed-RuntimeBundle `RunAssembly.instructions.systemPromptRef` `ModelTextV1.utf8`. If the decoded workspace manifest has entries, the next piece is UTF-8 JCS of `{format:'cliq-workspace-instruction-prompt-v1',entries:[{order,canonicalRootRelativePath,appliesToSubtree:true,instructionUtf8}]}`, using every manifest entry in order and the exact decoded `ModelTextV1.utf8`; this preserves each nested scope instead of guessing one ambient target path. Each selected skill then contributes UTF-8 JCS of `{format:'cliq-skill-instruction-prompt-v1',skillId,sourceScope,instructionUtf8}` in the assembly's explicit skill order. Omit only the empty workspace block, require every skill instruction to be nonempty, and join the remaining exact pieces with two LF bytes. Every ref/digest, source identity, and text digest rehashes, and `sourceKind='assembly_instructions'`, `sourceId=assemblyRef`.
@@ -2676,7 +2797,7 @@ Normal prompt construction is a total stored projection, not adapter assembly. `
 3. Emit one user message for the exact `RunObjectiveV1.utf8` named by `RunSpec.objectiveRef`, with `sourceKind='run_objective'` and that ref as `sourceId`.
 4. Walk the current `ContextManifest.segments` in order. A summary emits its exact `ModelTextV1` as one user message. An `excluded_control` segment emits none. Every raw item must be one of the following model-visible forms; every other item belongs in `excluded_control`: a `ModelTurnItem` emits one assistant message whose text equals its `ModelTextV1` and whose ordered calls equal the decoded `AgentModelTurn`; each call's `arguments` retains `{encoding:'jcs_json',value}` or `{encoding:'utf8_json_fragment',utf8}` directly from its observation, with no internal stringify/parse round trip, and its ref/digest/id/index/name equal `ToolCallInputV1`; a `ToolResultItem` emits one tool message whose content is `UTF8(JCS(decoded ToolResultModelContentV1.content))`; a `UserInputItem` emits one user message containing exact text or `UTF8(JCS(value))` from its ref-free `UserInputModelContentV1`; a `RepairDiagnosticItem` emits one user message per ordered diagnostic using only `VerifierRepairModelContentV1.message`; and a `ChildResultItem` emits one user message containing `UTF8(JCS(ChildResultModelContentV1.content))`. The source item id and source kind match each message. No authority/audit payload, raw verifier output, principal, grant, StopIntent, containment fact, or legacy payload is serialized.
 
-The `tools` array is empty for text-only mode. Otherwise it is the contiguous projection of `provider.negotiation.exposedToolNames` in that order: every name selects exactly one `ToolContractManifestV1` entry, description is byte-identical, and `inputSchemaRef/inputSchemaDigest/inputSchema` rehash and decode the exact finite JSON-domain schema. There are no hidden or adapter-added tools. The entire projection's JCS is bounded to the admitted context/model limit before dispatch; an indivisible oversized message follows the context-window failure rule rather than truncation.
+The `tools` array is empty for text-only mode. Otherwise it is the contiguous projection of `provider.negotiation.exposedToolNames` in that order: every name selects exactly one `ToolContractManifestV1` entry, description is byte-identical, and `inputSchemaRef/inputSchemaDigest/inputSchema` rehash and decode the exact finite JSON-domain schema. There are no hidden or adapter-added tools. Before dispatch the full model-visible projection passes both the admitted context estimate and the actual provider-native JCS body limit of 1,048,576 bytes, including adapter framing and JSON escaping. The same wire constructor determines eligibility and the retained outgoing bytes; an indivisible oversized message follows the context-window failure rule rather than truncation. This byte limit never reduces the signed request-token ceiling or the frozen context/output caps.
 
 Every normal or context-compaction model Journal `requestRef` decodes the single `ModelRequestV1`; `requestDigest` omits itself under JCS. Run/op/attempt, assembly ref/digest, provider/model/mode, projection pair, body ref/count/path, streaming flag, output cap, estimate and reservation equal the prepared attempt. Normal mode is the frozen assembly mode, output cap is `O`, and `compactionPlanRef` is absent. Compaction mode is `text-only`, cap is `S`, and the plan is the current frontier's exact plan. Its stored projection is the retained envelope's system message plus user prefix/source/suffix, with no tools or fabricated framing. `AgentModelTurn` repeats the applicable projection pair and request digest. Recovery reloads the same immutable closure and re-prepares the retained projection, reproducing the same request and wire bytes before accepting a response.
 
@@ -3370,8 +3491,11 @@ type RuntimeFailureEvidenceV1 = RuntimeFailureEvidenceBaseV1 & (
       credentialAuthorityRecordDigest: string
       authorityRevision: number
       credentialServiceRevision: number
-      failureCode: 'expired' | 'revoked' | 'platform_item_absent' | 'platform_store_unavailable'
-    }
+      } & (
+        | { failureCode: 'expired' | 'revoked' | 'credential_binding_changed' | 'platform_item_absent' | 'platform_store_unavailable'
+            endpointAuthorityRecordDigest?: never; endpointAuthorityRevision?: never }
+        | { failureCode: 'endpoint_revoked'; endpointAuthorityRecordDigest: string; endpointAuthorityRevision: number }
+      )
   | {
       failureKind: 'retry_unknown_exhausted'
       retryUnknownResultRef: ArtifactRef
@@ -3476,7 +3600,7 @@ type StopIntent =
             modelOpId: string
             attempt: number
           }
-        | {
+        | ({
             runtimeSubtype: 'context_window_exhausted'
             contextManifestRef: ArtifactRef
             nextPromptTokens: number
@@ -3484,7 +3608,10 @@ type StopIntent =
             hardPromptTokens: number
             protectedTokens: number
             sourceInputTokenCap: number
-          }
+          } & (
+            | { trigger?: never; modelVisiblePromptDigest?: never; requestBodyBytes?: never; requestBodyLimitBytes?: never }
+            | { trigger: 'request_body_bytes'; modelVisiblePromptDigest: ArtifactRef; requestBodyBytes: number; requestBodyLimitBytes: 1048576 }
+          ))
         | {
             runtimeSubtype: 'delivery_merge_conflict'
             deliveryMergeConflictItemRef: ArtifactRef
@@ -3557,7 +3684,7 @@ The status/reason mapping is exact: `succeeded -> verified`; `completed_unverifi
 
 Stop-to-**reason-detail** derivation is total and one-to-one; `StopIntentBase` deliberately has no generic evidence ref. The terminal primary-evidence matrix is exact and acyclic: verifier/dependency integrity use `integrityEvidenceRef`; parent cancellation uses `sourceStopIntentRef`; local-inference failure uses `failureDetailRef`; direct verifier/delivery/dependency policy denial uses `policyChannelEvidenceRef`; generic runtime uses `runtimeFailureRef`; manual abandon uses `attestationRef`; every user cancellation, deadline/budget, verification, context-compaction/window, delivery-merge, or delivery-publication branch uses the winning `stopIntentRef` itself after that immutable artifact has been published. The corresponding `TerminalReasonDetail` copies the exact branch fields; its `stopIntentRef|evidenceRef` where present equals that same selected primary ref. Each `origin='runtime'` variant maps only to the detail with identical `runtimeSubtype`; generic runtime requires its exact `RuntimeFailureEvidenceV1` ref/digest and matching `failingOpId`. Storage rejects a subtype/detail mismatch, missing field, alternate primary ref, or caller-selected reason projection. This post-publication pointer creates no content hash cycle because the StopIntent contains no self ref. The surrounding publication/manual/retry closure fields are a separate deterministic projection of authoritative Journal/items at terminal quiescence; they may close facts learned after the winning intent without changing its reason. Candidate, diagnostic, verifier-receipt, and child-result facts remain in their already ordered typed Run-item/Journal graph and are not copied into implementation-selected TerminalDetail lists.
 
-`RuntimeFailureEvidenceV1.evidenceDigest = SHA-256(JCS(evidence with evidenceDigest omitted))`. Its Run/frontier/failing op/current-inspector fields equal the proposed Run and the inspector is fresh under the canonical five-second rule. `model_unusable_response` rehashes the exact `ModelUnusableResponseV1` that is the completed Journal result for that op. `model_attempts_exhausted` names the final contiguous failed model attempt, exact normal/compaction request, Journal sequence, and literal `transport_exhausted`; that failed row must satisfy the ordinary pre-dispatch or exact post-claim-no-release closure and therefore cannot claim a provider response. `credential_redemption_failed` is produced while holding the credential-authority lock before target I/O; its immutable binding/endpoint equal the Run assembly, and its latest authority-record digest/revisions plus canonical time or platform-store observation prove exactly expired, revoked, absent item, or unavailable store. `retry_unknown_exhausted` rehashes exact `RetryUnknownCancelledResult` and its Journal/settlement/dispatch-closure chain. `dependency_acquisition_failed` equals the current candidate plan and final acquisition Journal attempt/sequence with one closed failure code. `local_service_identity_mismatch` rehashes the assembly provenance/service spec plus the current boundary evidence that failed the active-launch/stable-identity gate before provider release. No branch accepts another branch's members, generic diagnostic text, a provider/worker boolean, or an untyped Journal error. The StopIntent and TerminalDetail repeat the same evidence ref/digest/failing op, and storage re-walks the named Journal/request/authority graph before terminal commit.
+`RuntimeFailureEvidenceV1.evidenceDigest = SHA-256(JCS(evidence with evidenceDigest omitted))`. Its Run/frontier/failing op/current-inspector fields equal the proposed Run and the inspector is fresh under the canonical five-second rule. `model_unusable_response` rehashes the exact `ModelUnusableResponseV1` that is the completed Journal result for that op. `model_attempts_exhausted` names the final contiguous failed model attempt, exact normal/compaction request, Journal sequence, and literal `transport_exhausted`; that failed row must satisfy the ordinary pre-dispatch or exact post-claim-no-release closure and therefore cannot claim a provider response. `credential_redemption_failed` is produced while holding the credential-authority lock before target I/O; its immutable binding/endpoint equal the Run assembly, and its latest authority-record digest/revisions plus canonical time or platform-store observation prove exactly expired, revoked, changed frozen credential binding, revoked endpoint, absent item, or unavailable store. `credential_binding_changed` requires a later active authority revision/generation that differs from the frozen original binding, without relabeling it as revoked. `endpoint_revoked` additionally binds the exact latest endpoint authority record digest/revision while the credential itself may remain active. Missing or corrupt history and noncausal time require recovery, not a synthetic authorization failure. `retry_unknown_exhausted` rehashes exact `RetryUnknownCancelledResult` and its Journal/settlement/dispatch-closure chain. `dependency_acquisition_failed` equals the current candidate plan and final acquisition Journal attempt/sequence with one closed failure code. `local_service_identity_mismatch` rehashes the assembly provenance/service spec plus the current boundary evidence that failed the active-launch/stable-identity gate before provider release. No branch accepts another branch's members, generic diagnostic text, a provider/worker boolean, or an untyped Journal error. The StopIntent and TerminalDetail repeat the same evidence ref/digest/failing op, and storage re-walks the named Journal/request/authority graph before terminal commit.
 
 Kernel-integrity stop evidence is one closed chain. `KernelIntegrityEvidenceV1.evidenceDigest = SHA-256(JCS(evidence with evidenceDigest omitted))`; its Run/source projection/generation/current inspector match the exact Journal claim and frozen RunSpec. Canonical target paths are NFC admitted-root-relative paths with no empty/`.`/`..` component. An `audited_write_attempt` is emitted only by the strong sandbox filesystem or trusted broker at the blocked syscall/request boundary, repeats the exact request/containment/SandboxLaunch, has `sourceBeforeRef === sourceAfterRef` and equal digests, and proves no byte changed. A `source_digest_drift` rehashes two exact SourceManifests, requires unequal digests and a nonempty unique byte-sorted list of the changed WorkspaceEntry digests. Its source XOR either forbids both containment/spec refs for a trusted Supervisor rehash outside a child process, or requires both and matches them to the same owning Journal claim and actual containment; ref-only or spec-only drift is invalid. The verifier subject matches one verifier Journal op/attempt/result source, while dependency matches the exact candidate plan and acquisition op/attempt. For both kernel-integrity StopIntent variants, branch `integrityEvidenceRef` and digest name this same artifact; `TerminalReasonDetail` and `primaryEvidenceRef` copy the identical ref/digest. A verifier `source_mutation` receipt requires both violation fields and the verifier form of this artifact; every other outcome forbids both. The audited branch requires equal receipt source digests, the drift branch requires unequal ones. Dependency completion/ready state is forbidden and its integrity StopIntent uses the dependency form. A generic CAS ref, verifier text, caught un-audited read-only error, or adapter assertion cannot win kernel-integrity precedence.
 
@@ -3869,6 +3996,7 @@ type WorkspaceGenerationQuarantineEvidenceV1 = {
   sourceRowVersion: number
   observedState:
     | { kind: 'complete_tree'; treeDigest: string }
+    | { kind: 'unverified_preparation' }
     | {
         kind: 'unreadable_partial'
         failureCode: 'descriptor_io_failed' | 'artifact_missing_or_corrupt' | 'path_or_entry_invalid' | 'git_closure_invalid'
@@ -3884,6 +4012,13 @@ type WorkspaceGenerationQuarantineEvidenceV1 = {
   observedAt: string
   evidenceDigest: string
 } & (
+  | {
+      reason: 'preparation_retired'
+      fromPhase: 'materializing' | 'preactivated_readonly'
+      workerLaunchId: string
+      preparationRetirementEvidenceRef: ArtifactRef
+      preparationRetirementEvidenceDigest: string
+    }
   | {
       reason: 'materialization_failed'
       fromPhase: 'materializing'
@@ -4303,13 +4438,27 @@ Phase/op-kind validation is closed at storage, not left to adapters:
 - `prepared` requires immutable request, target, ReplayClass, original epoch, applicable grant, and the complete four-counter reservation in `budgetDelta`; it forbids dispatch/result/receipt/error evidence ref/digest and a settlement ref. The sole zero-reservation form is a typed abort-directory recovery-maintenance request admitted by `claimRecoveryMaintenance`'s preconditions.
 - `dispatch_claimed` requires the one matching prepared row, `dispatchId`, trusted Supervisor instance plus exact active `stateOwnerEpoch`, the broker-token-digest XOR above, the complete four-counter zero value in `budgetDelta`, and no terminal fields, evidence pair, or budget settlement.
 - `completed` requires the matching claim, exact `budgetSettlementRef`, plus an op-kind result: exact usable `AgentModelTurn` or exact `ModelUnusableResponseV1` for `model`, under their closed XOR; result artifact for `tool|mcp`; exact `McpServerInstanceIdentityV1` result plus `McpServerLaunchReceiptV1` for `mcp-server`; a passed/assertion/source-mutation verification receipt for `verifier`; or exact `PublicationProofV1(kind='terminal_receipt')` for `publish`.
-- `failed` is a closed XOR. `pre_dispatch` requires the exact prepared row, error, settlement, and zero consumed `budgetDelta`, while forbidding dispatch/Supervisor/owner/token/result/receipt/evidence pair/attestation fields; the absence of any claim under the universal dispatch gate is itself authoritative proof that no target capability or request byte was released. `post_claim` repeats the exact claim and is legal only in two forms: its `evidenceRef/evidenceDigest` decodes exact `PostClaimNoReleaseEvidenceV1`, or an `opKind='verifier'` infrastructure failure carries its cross-field-valid `infra_failed` receipt plus exact containment-death closure and forbids the generic pair. The first form consumes zero and proves the same live owner closed the second gate before any release/spawn; the verifier form consumes its exact attempt usage. Every other claimed failure with no typed result is `unknown`, while a typed negative target response is `completed` with its exact result artifact. A verifier stopped by Run cancel/deadline has a `VerifierStopItem` and no receipt. A malformed response received from an executed/billable provider is `completed` with an unusable-response artifact, not a false no-effect failure.
+- `failed` is a closed XOR. `pre_dispatch` requires the exact prepared row, error, settlement, and zero consumed `budgetDelta`, while forbidding dispatch/Supervisor/owner/token/result/receipt/evidence pair/attestation fields; the absence of any claim under the universal dispatch gate is itself authoritative proof that no target capability or request byte was released. `post_claim` repeats the exact claim and is legal only in three closed forms: its `evidenceRef/evidenceDigest` decodes exact `PostClaimNoReleaseEvidenceV1`, or an `opKind='verifier'` infrastructure failure carries its cross-field-valid `infra_failed` receipt plus exact containment-death closure and forbids the generic pair; or the sole stopped-recovery terminal transaction resolves a previously fully charged private edit unknown with exact `PrivateToolRollbackV1`, preserving that original settlement. The first form consumes zero and proves the same live owner closed the second gate before any release/spawn; the verifier form consumes its exact attempt usage. Private rollback appends zero additional budget, never a refund or another settlement. Every other claimed failure with no typed result is `unknown`, while a typed negative target response is `completed` with its exact result artifact. A verifier stopped by Run cancel/deadline has a `VerifierStopItem` and no receipt. A malformed response received from an executed/billable provider is `completed` with an unusable-response artifact, not a false no-effect failure.
 - `unknown` requires the matching claim, an `evidenceRef/evidenceDigest` pair decoding exact `InvocationAmbiguityEvidenceV1`, and the exact conservative full `budgetSettlementRef`.
 - `abandoned` requires an existing `unknown` whose ReplayClass is exactly `manual`, repeats that unknown row's settlement ref with zero additional delta, carries the local-principal attestation described below, forbids its own evidence pair, fabricates no result, and has the terminal-only identity-matched `ToolAbandonedItem` when the invocation originated from a tool/MCP call. It is administrative closure, not completion/failure evidence.
 
 Every Journal evidence ref is accompanied by its digest or both are absent; the phase/op-kind decoder fixes the only legal artifact type. `InvocationAmbiguityEvidenceV1.evidenceDigest = SHA-256(JCS(evidence with evidenceDigest omitted))`. Its Run/frontier/op/kind/attempt/dispatch/claim sequence, immutable request and target pairs, claiming Supervisor/StateOwner epoch, current inspector, and observation time equal the exact claimed attempt and the frontier transaction entering `unknown`; no caller/worker payload is accepted. `claim_owner_lost` rehashes exact `StateOwnerAcquisitionEvidenceV1(takeover_after_owner_death)` for the historical claim owner and requires the inspector to be that strictly newer active owner. `broker_channel_lost_after_claim` is limited to a claim that stored the same broker fence-token digest; the same still-live owner records one closed deadline/connection/stream failure after the second release gate and proves the Journal has no durable terminal result. `sandbox_channel_lost_after_claim` rehashes the claim's exact SandboxLaunchSpec and actual containment; its same-owner live branch requires `observedAt >= responseDeadlineAt`, an authenticated channel-close time, and no result, while its death branch rehashes exact all-descendant `ProcessContainmentDeathEvidenceV1` and proves no terminal result was durably received before death. `publication_path_ambiguous` rehashes only the same claim's exact `PublicationProofV1(kind='path_ambiguity')`. Any other kind/mechanism combination, free error string, missing pair, current-owner mismatch, or evidence that instead proves completion/failure is invalid. The `unknown` row repeats this exact pair; a later `ManualAbandonAttestationV1` must repeat the same pair byte-for-byte, not substitute newer display or probe evidence.
 
-`PostClaimNoReleaseEvidenceV1.evidenceDigest` omits itself. Its Run/op/attempt/dispatch/claim sequence, request/target/grant, claiming Supervisor/owner epoch, and current inspector ref/digest equal the prepared/claim rows and current `SupervisorInspectorIdentityV1`; the inspector is the same still-live owner and the observation is within five seconds. The broker branch is legal iff the claim stored that exact fence-token digest: while holding the broker release mutex, the same owner revokes the still-unreleased token, observes zero matching active release, publishes the artifact, and appends post-claim failed plus zero-consumption settlement in one transaction before dropping the mutex. The process branch is legal iff the claim's exact SandboxLaunchSpec has not spawned; its ref and `ProcessContainmentNoSpawnEvidenceV1` rehash the same plan/spec/nonce and positively prove zero matching process. It likewise commits with the failed row before spawn authority can be released. A restart, owner change, absent live token, observed process/release, partial rollback, generic death, adapter assertion, or inline boolean cannot produce this artifact and therefore routes the claim to `unknown` unless the verifier-specific receipt/death form applies. No other op-specific post-claim failed evidence is admitted in v1.
+`PostClaimNoReleaseEvidenceV1.evidenceDigest` omits itself. Its Run/op/attempt/dispatch/claim sequence, request/target/grant, claiming Supervisor/owner epoch, and current inspector ref/digest equal the prepared/claim rows and current `SupervisorInspectorIdentityV1`; the inspector is the same still-live owner and the observation is within five seconds. The broker branch is legal iff the claim stored that exact fence-token digest: while holding the broker release mutex, the same owner revokes the still-unreleased token, observes zero matching active release, publishes the artifact, and appends post-claim failed plus zero-consumption settlement in one transaction before dropping the mutex. The process branch is legal iff the claim's exact SandboxLaunchSpec has not spawned; its ref and `ProcessContainmentNoSpawnEvidenceV1` rehash the same plan/spec/nonce and positively prove zero matching process. It likewise commits with the failed row before spawn authority can be released. A restart, owner change, absent live token, observed process/release, partial rollback, generic death, adapter assertion, or inline boolean cannot produce this artifact and therefore routes the claim to `unknown` unless the verifier-specific receipt/death form applies. The separate `PrivateToolRollbackV1` exception resolves an already charged unknown only after positive rollback/retirement of the original fixed private edit domain; it is never this no-release evidence or permission to retry.
+`PrivateToolRollbackV1` is terminal-stop-only and limited to the original signed
+Linux fixed builtin edit recipe whose native boundary permits effects only in
+its exact private generation. The original replay class remains `manual`; no
+retry authority is added. Its request/target/grant, claim, worker launch/epoch,
+generation identity, preceding ready Checkpoint and exact whole-domain death,
+quarantine and retirement graph must all agree. The original UNKNOWN remains
+fully charged; the added failed row reuses its immutable BudgetSettlement and
+has zero additional budget. The same sole terminal transaction closes the
+original worker-death wait/probe nonce/anchor, appends the explicit
+`private_effect_rolled_back` error result and only the undispatched suffix,
+and publishes one terminal Checkpoint and Session item. A real received result
+instead retains its actual outcome and post-effect Checkpoint. External manual
+effects, generic death, partial rollback and caller booleans cannot enter this
+branch; they remain under their existing reconciliation/manual wait.
 
 Every `completed|unknown|abandoned` row and every post-claim `failed` row binds exactly one claim and immutable request. Only pre-dispatch `failed` binds the prepared row while proving claim absence and forbidding claim identity. Fields forbidden by the relevant phase/op-kind combination are rejected. These constraints apply equally to importer and test helpers, so no generic insert can fabricate a receipt or completion.
 
@@ -4342,6 +4491,68 @@ A completed model Journal result is a closed XOR. A usable response's `resultRef
 Terminal abandonment of a `retry` unknown also requires `InvocationDispatchClosureEvidenceV1`; `evidenceDigest = SHA-256(JCS(evidence with evidenceDigest omitted))`, and Run/op/attempt/dispatch/unknown sequence equal the one claimed-then-unknown Journal chain. `containment_death` rehashes its containment/death pairs and decodes exact `ProcessContainmentDeathEvidenceV1` whose owner/spec/dispatch closure matches that invocation. `broker_release_fenced` is legal only for a brokered claim with no child containment and decodes exact `BrokerReleaseFenceEvidenceV1`; its `evidenceDigest` omits itself under JCS. Run/op/attempt/dispatch/claim sequence/request/grant/target equal the Journal claim and decoded `OperationGrantV1`; claiming Supervisor/epoch equal its historical StateOwner row; current inspector ref/digest/epoch equal the sole active StateOwner and that epoch is strictly newer. Under the state-owner and broker locks, the current Supervisor atomically revokes the exact persisted fence-token digest, prevents a new matching release, waits for that dispatch's active-release count to reach zero, and only then records the two times/literal disposition. A token minted only in memory, token/claim/target drift, untrusted worker assertion, elapsed lease, socket loss, or mere new Supervisor id is not closure evidence. `RetryUnknownCancelledResult` and `TerminalDetail` repeat the exact settlement and dispatch-closure refs; storage decodes both before allowing the result to remain unused at terminal stop.
 
 `unknown` pessimistically settles the attempt once by consuming and releasing its full reservation. A later positive-evidence `unknown -> completed|failed` fact carries zero additional budget settlement and never refunds, releases, or charges that attempt again. If it is still the highest attempt and its exact frontier/wait subject matches, the Supervisor applies the normalized op-kind reducer atomically; only a superseded attempt is audit-only.
+
+#### Independent installed broker process-domain death
+
+`InvocationDispatchClosureEvidenceV1.closure.kind='broker_process_domain_dead'`
+is a separate positive dispatch-closure branch, not a different interpretation
+of `broker_release_fenced`. It rehashes exact
+`BrokerProcessDomainDeathEvidenceV1`; the latter's `evidenceDigest` omits itself.
+Both artifacts are closed data: only plain or null-prototype records with all
+and only their own data fields are valid. Identities are nonempty Unicode
+scalar strings of at most 256 UTF-8 bytes without NUL; refs/digests are lowercase
+64-hex, `attempt` is a nonnegative safe integer (including zero), Journal
+sequences/owner epochs are positive safe integers, and times are canonical UTC
+milliseconds. The inspector epoch is strictly greater than the claiming epoch.
+Mixed lock-action/process-death fields, native booleans and forged omission
+digests are invalid. Decoding never mints native or StateOwner authority.
+
+This initial branch applies only to the fixed Linux installed native broker
+recipe. Its original RunSpec/assembly, original claiming owner and current
+verified inspector must resolve the same signed RuntimeBundle and exact native
+broker entry/code digest. The fixed domain is
+`linux_installed_native_creator_process_v1`: a private native handle is bound
+to its creating PID, Node environment and main thread; its random token is not
+importable or serializable as release authority. The complete trusted process
+creation path must preserve this property: a non-CLONE_VM child enters only the
+fixed FD-whitelisted sealed controller exec-or-exit path, never returns to Node
+or transfers a broker handle/connection; subsequent controller forks occur
+after that exec. A signed arbitrary past/future adapter or a digest by itself
+does not establish this contract. Cross-live-update qualification is not implied.
+
+Only the production owning plan holding the actual driver/current StateOwner
+may produce this evidence. It reads the exact prepared/claim/unknown Journal
+chain, request/grant/target, original stored fence-token digest and original
+StateOwner/process artifacts; it takes no caller-selected PID, process digest,
+clock or observation callback as authority. `claimingProcessIdentityRef` and
+its digest equal that historical owner's exact process pair, and the claim
+belongs to that owner's lifetime. Under the actual held StateRoot/lock, a
+genuine native observation must prove the original PID/start lifetime absent
+or its start token different, revalidate that root/lock, retire every temporary
+descriptor without uncertainty, and sample actual wall time. The final SQL
+transaction repeats the native check, exact owner/Journal/lineage CAS and
+healthy canonical-time gate; the recorded observation is not future-dated and
+is at most five seconds old. A graceful owner release alone is not death;
+graceful and crash restarts both need the exact fresh native lifetime check.
+An old process still alive, unavailable proc observation, stale evidence,
+failed retirement or runtime/claim/token mismatch remains recovery-required.
+
+The evidence asserts no old-mutex action, token-revocation time or observed
+zero active-release count. It proves only that the original nontransferable
+local release domain no longer exists; bytes already sent and remote effects
+may still exist. The original `unknown`, ambiguity evidence and full-charge
+settlement remain byte-identical: no new failed/abandoned Journal row, refund,
+second charge or retry follows from this terminal-only closure. Terminal detail
+lists every and only such unused `retry` unknown with its original settlement
+and dispatch-closure refs. Tool/MCP call origins use the existing exact
+`RetryUnknownCancelledResult`; a non-call model origin creates no fabricated
+model turn or ToolResult. Historical recovery rewalks the original claiming and
+inspecting owners, their process/root/lock/acquisition/runtime chains and the
+claim/unknown/settlement/closure edges, never a current installation lookup.
+These artifacts and their full transitive graph stay rooted while the Run or
+terminal history is retained; a missing or unsupported edge fails recovery and
+makes GC delete nothing. Real signed-installed restart/cancel evidence is
+required independently of pure decoding and data tests.
 
 ### 8.2 Meanings
 
@@ -5506,32 +5717,111 @@ type WorkerIdentity = {
   processContainmentRef: ArtifactRef
 }
 
-type WorkerLaunch = {
-  schemaVersion: 1
-  launchId: string
-  runId: string
-  plannedRunRevision: number
-  supervisorInstanceId: string
-  spawnNonceDigest: string
-  activationNonceDigest: string
-  phase: 'reserved' | 'preactivated' | 'activated' | 'reconciling' | 'retired'
-  workspaceGenerationRef: ArtifactRef
-  containmentPlanRef: ArtifactRef
-  sandboxLaunchSpecRef: ArtifactRef
-  workerIdentityDigest?: string
-  processContainmentRef?: ArtifactRef
-  leaseEpoch?: number
-  leaseVersion: number
-  leaseExpiresAt?: string
-  generationWriteState: 'preactivated_readonly' | 'active' | 'revoking' | 'checkpointing' | 'fenced_reconciling' | 'sealed'
-  quiesceId?: string
-  createdAt: string
-  activationDeadlineAt: string
-  activatedAt?: string
-  retiredAt?: string
-  retirementEvidenceRef?: ArtifactRef
-}
+/** Logical intent only. A schema-valid value is not a resource birth witness. */
+type WorkerPreparation = {
+  stateOwnerEpoch: number;
+  sourceCheckpointId: string;
+  sourceWorkspaceStateRef: ArtifactRef;
+  generationCreationNonceDigest: string;
+  generationId: string;
+  generation?: { generationRef: ArtifactRef; generationIdentityDigest: string };
+  controller?: { birthIdentityRef: ArtifactRef; birthIdentityDigest: string };
+  reservation?: { deviceId: string; fileId: string; ownerUid: number };
+};
+
+type BoundWorkerPreparation = WorkerPreparation & Required<Pick<WorkerPreparation, 'generation' | 'controller' | 'reservation'>>;
+
+type WorkerLaunchIdentity = {
+  schemaVersion: 1;
+  launchId: string;
+  runId: string;
+  plannedRunRevision: number;
+  supervisorInstanceId: string;
+  spawnNonceDigest: string;
+  activationNonceDigest: string;
+  createdAt: string;
+  activationDeadlineAt: string;
+};
+
+type WorkerLaunchWithoutExecution = {
+  workspaceGenerationRef?: never;
+  containmentPlanRef?: never;
+  sandboxLaunchSpecRef?: never;
+  workerIdentityDigest?: never;
+  processContainmentRef?: never;
+  leaseEpoch?: never;
+  leaseVersion?: never;
+  leaseExpiresAt?: never;
+  generationWriteState?: never;
+  quiesceId?: never;
+  activatedAt?: never;
+};
+
+type PreparingWorkerLaunch = WorkerLaunchIdentity & WorkerLaunchWithoutExecution & {
+  phase: 'preparing';
+  preparation: WorkerPreparation;
+  retirementKind?: never;
+  retiredAt?: never;
+  retirementEvidenceRef?: never;
+};
+
+type RetiredWorkerPreparation = WorkerLaunchIdentity & WorkerLaunchWithoutExecution & {
+  phase: 'retired';
+  retirementKind: 'preparation';
+  preparation: WorkerPreparation;
+  retiredAt: string;
+  retirementEvidenceRef: ArtifactRef;
+};
+
+type BoundWorkerLaunch = WorkerLaunchIdentity & {
+  phase: 'reserved' | 'preactivated' | 'activated' | 'reconciling' | 'retired';
+  retirementKind?: never;
+  preparation?: BoundWorkerPreparation;
+  workspaceGenerationRef: ArtifactRef;
+  containmentPlanRef: ArtifactRef;
+  sandboxLaunchSpecRef: ArtifactRef;
+  workerIdentityDigest?: string;
+  processContainmentRef?: ArtifactRef;
+  leaseEpoch?: number;
+  leaseVersion: number;
+  leaseExpiresAt?: string;
+  generationWriteState:
+    | 'preactivated_readonly'
+    | 'active'
+    | 'revoking'
+    | 'checkpointing'
+    | 'fenced_reconciling'
+    | 'sealed';
+  quiesceId?: string;
+  activatedAt?: string;
+  retiredAt?: string;
+  retirementEvidenceRef?: ArtifactRef;
+};
+
+type WorkerLaunch = PreparingWorkerLaunch | RetiredWorkerPreparation | BoundWorkerLaunch;
 ```
+
+`preparing` is the same unique unretired WorkerLaunch spine, committed before
+physical allocation. It contains only logical ownership and fixed locators;
+it has no worker, lease, launch spec, broker release or private-write authority.
+The original owner registers the actual generation identity and materializing
+row before copying, then the actual controller and reservation births. Only a
+complete readonly snapshot, reproduced plan/spec and genuine original BIND
+allow promotion to `reserved`, without resetting the preparation deadline.
+An interrupted or substituted birth is recovery-required, never backfilled.
+
+Preparation retirement uses the closed `cliq-worker-preparation-retirement-evidence-v1`
+union. Its `born` branch binds the original preparing row, generation birth,
+all original workspace/controller/reservation joins, exact no-replace quarantine
+anchor, inspector and fresh canonical time. The preparation-only quarantine has
+reason `preparation_retired` and observed state `unverified_preparation`: it makes
+no complete-tree, payload or Git-closure claim and is forbidden for every other
+quarantine reason. The generation's materializing/readonly → quarantined →
+retired changes and preparing → retired commit atomically. Its `unallocated`
+branch accepts only the still-held original materialization owner's joined
+receipt whose allocation-request latch was never entered. A failed native
+allocation attempt, absent path, row count or owner loss cannot mint that
+receipt. Neither branch is worker no-spawn, preactivation failure or sealing.
 
 The immutable identity binds PID/start token/spawn/activation nonce **and** an immutable `ProcessContainmentRef` whose backend identity covers every descendant for the lifetime of the activation. The containment owner is a closed union: a worker identity must reference `worker_activation` matching its Run/epoch/launch; an invocation containment must reference `run_invocation` matching the exact durable claim and a parent containment in the same Run activation; an admin row must reference `admin_probe` matching its operation/attempt/principal/method/request/target/Supervisor and may not contain Run/lease/worker fields; a local-inference launch must reference `local_inference_service` matching the exact service/launch/principal/spec/Supervisor row and may not contain Run, Journal, or admin fields; a source inspection must reference `source_inspection` matching its sole attempt/principal/target/original Supervisor and has no Run, worker, Journal, admin or service fields. Worker activations use `run-generation`; admin probes, local inference and source inspection use `isolated-empty-root`; invocation bindings follow the frozen tool contract. A top-level worker, admin, local-inference or source-inspection containment has no parent, while a run invocation's parent chain must terminate at its exact worker activation.
 
@@ -5579,6 +5869,21 @@ extra or changed seed objects, a replaced/closed installation or a different hel
 StateRoot fail closed. Ordinary `fresh_empty` still requires an empty CAS; later
 clean acquisition never reinterprets a grown namespace as a new installed seed.
 This source adds no ledger, Run authority or execution permission.
+
+`fresh_installed.modelAuthoritySource` records the original optional companion
+as the closed union `{kind:'none'}` or
+`{kind:'present',closureRef,closureDigest}`. The complete-byte ref and independently
+recomputed semantic digest name that original signed companion, not the runtime
+manifest (which is signed before the companion). Only the same continuously
+held, verified installation supplies this field in the existing first StateOwner
+transaction. Other origins forbid it. Historical validation reconstructs the
+all-and-only seed from the original RuntimeBundle's data/structured-member edges
+and this exact companion's typed catalog/price/signature inventory. It rehashes
+the retained bytes and pairing/digest/closed-shape invariants without minting
+verified execution authority or trusting a key supplied by retained data. The
+owning installed gate separately authenticates release keys. Missing source,
+missing/extra/substituted members or mismatched digests fail closed; today's
+selection, a CAS search or a legacy fallback cannot supply original provenance.
 
 Every `inspectorIdentityRef` decodes only to `SupervisorInspectorIdentityV1`; `identityDigest = SHA-256(JCS(identity with identityDigest omitted))`, and the evidence repeats that digest. The referenced signed RuntimeBundle manifest must contain exactly the named executable entry with role `supervisor` and matching version/digest; its complete signed manifest rehashes to the named ref/digest. `supervisorInstanceId`, current `stateOwnerEpoch`, RuntimeBundle/entry, process identity, lock identity, and instance nonce must equal the sole active `StateOwnerRecordV1` held throughout the evidence transaction. The identity is published only after that active row commits while the process holds the exact OS lock; it becomes historical when ownership changes and cannot justify a later observation. Evidence digests omit themselves under JCS; `inspectorSupervisorInstanceId` must equal the **current** state-owning Supervisor and the decoded identity's instance, while the original spawner remains bound independently through the plan owner, WorkerLaunch/AdminOperation, and nonces. Observation time must be within the state transaction's bounded freshness window (default/max 5s). No PID exit, timeout, worker assertion, stale inspector identity, or schema-valid artifact with mismatched plan/nonce/owner/bundle is proof.
 
@@ -5632,6 +5937,21 @@ witnesses, and preparations or dispatch claims after it. Later trusted
 settlements or abandonment retain those original witnesses; their current
 phases still come only from the Journal. Neither timestamps (which may be equal
 on both sides of the fence) nor `run_events` reconstruct this historical cut.
+
+An already fully settled installed-model broker `unknown` is still an open
+effect witness, not a releasable worker operation. The fixed signed broker
+recipe may complete only the `quarantined` worker-recovery disposition while
+retaining such witnesses when every open attempt has exact validated original
+claim/ambiguity/full-reservation settlement and ReplayClass `retry`, and the
+genuine current installed Store proves its native broker producers joined.
+That live broker quiescence must be reasserted before the physical move and in
+the final state-owner transaction alongside the unchanged Run/Journal/native
+death gates. No replacement generation may be present or created by this
+branch. Prepared, claimed, unsettled, tool/manual or other-adapter attempts
+still block it. Unknown, consumed/reserved budgets, frontier and frozen
+`openInvocationRefs` remain unchanged. This is not effect resolution, a new
+Checkpoint, terminal dispatch closure or authority to retry; later generation
+retirement still requires its own complete zero-resource proof.
 
 A new Supervisor instance never adopts or reconnects an old worker, even when its persisted lease has not yet expired. Launch claims and broker channels are bound to the old `supervisorInstanceId`; takeover revokes them, kills/proves the entire containment, quarantines/restores through a Checkpoint, and uses a fresh launch/epoch. This removes an adoption protocol and prevents two trusted processes from sharing effect authority.
 
@@ -5824,7 +6144,7 @@ type SandboxResourceSpec = {
   memoryBytes: number        // default 4 GiB; range 256 MiB..32 GiB, host-clamped
   cpuQuotaMicrosPerSecond: number // default 400000; range 10000..1600000
   maxOpenFiles: number       // default 1024; range 64..8192
-  maxSingleFileBytes: number // default 2 GiB; range 1 MiB..16 GiB
+  maxSingleFileBytes: number // default 256 MiB; range 1 MiB..16 GiB
   maxGenerationBytes: number // default 20 GiB; range 256 MiB..100 GiB
   maxInvocationOutputBytes: number // default 16 MiB; range 64 KiB..64 MiB
   maxIpcFrameBytes: number   // fixed 16 MiB
@@ -6298,7 +6618,9 @@ Cancellation, deadline, or failure atomically appends `cancelled` results for un
 
 Long horizon cannot depend on an ever-growing prompt or implicit provider truncation. The assembly freezes `C/O/H/T/R/S/K/P` under the estimate policy above and the exact `CompactionPromptEnvelopeV1`. Each of its three `ModelTextV1` members is valid NFC/no-NUL UTF-8, rehashes, and the combined fixed text is at most 256 KiB. The logical source placeholder cannot occur in fixed text and is not emitted. `K` estimates exactly system content and user prefix + empty source + suffix, plus two-message overhead; plan/source data do not participate in the envelope digest. A compaction response requests actual provider output cap `S` and accepts only complete nonempty Markdown of at most `min(262144,3*S)` UTF-8 bytes, whose text estimate is therefore at most `S`. Context estimates are not signed billing bounds or proof of provider context acceptance.
 
-Before normal dispatch, trusted code estimates the next prompt. If `N<=T`, dispatch normally. Otherwise protect fixed admitted Session/parent context, instructions/skills/tools and every live frontier/wait/StopIntent/invocation/child/candidate/verifier reference. Protect newest whole segments until their model-visible content estimates total at least `R`, extending backward for other live references. Candidates are contiguous sequence-one prefixes ending at closed segment boundaries before the protected suffix. Their source is the current model-visible projection, including existing summaries but excluding control payloads. A legal source has estimated content `<=P` and `>=S+512`; choose the greatest `throughItemSeq`. Summary replacement reduces estimated source content by at least 512 units; admission of the replacement must also verify that the complete next-prompt estimate decreases (including message overhead). If `N>T` and no legal range exists, make no call and propose `runtime_failed(context_window_exhausted)` with exact manifest/estimate evidence. Never truncate, split an item, loosen protection or loop on the same summary.
+Before normal dispatch, trusted code estimates the next prompt and constructs its exact provider-native JCS body with frozen provider/model/mode/streaming, context and output caps. Dispatch normally only if `N<=T` and this body is at most 1,048,576 bytes. Otherwise protect fixed admitted Session/parent context, instructions/skills/tools and every live frontier/wait/StopIntent/invocation/child/candidate/verifier reference. Protect newest whole segments until their model-visible content estimates total at least `R`, extending backward for other live references. Candidates are contiguous sequence-one prefixes ending at closed segment boundaries before the protected suffix. Their source is the current model-visible projection, including existing summaries but excluding control payloads. A legal source has estimated content `<=P` and `>=S+512`, and its actual tools-disabled request, including the retained envelope and all JSON escaping, is at most 1,048,576 bytes; choose the greatest `throughItemSeq`. The same constructor is used for eligibility and preparation, and preparation independently enforces the hard byte limit. Summary replacement reduces estimated source content by at least 512 units; admission of the replacement must also verify that the complete next-prompt estimate decreases (including message overhead).
+
+If no legal range exists, make no call and propose `runtime_failed(context_window_exhausted)`. For `N>T`, retain the existing exact manifest/estimate evidence shape. For `N<=T` with an oversized native body, require the closed `trigger='request_body_bytes'` branch with the exact `requestBodyBytes>requestBodyLimitBytes`, literal `requestBodyLimitBytes=1048576`, and `modelVisiblePromptDigest=SHA-256(JCS(ModelVisiblePromptV1))`. This digest binds the complete messages/tools/response contract without a revision-dependent audit projection. The StopIntent owner and recovery independently reproduce these facts and the absence of a legal candidate from retained context, assembly and envelope; a caught `RangeError`, caller-selected reason, or larger estimated source is not proof. The installed scheduler enters the same proof-backed StopIntent/retirement/terminal transaction without preparing or claiming another attempt. Never truncate, split an item, loosen protection or loop on the same summary; signed billing ceilings and frozen `C/O/T/R/S/P/K` are unchanged.
 
 For the chosen range, publish immutable `RunContextCompactionPlan`, set `phase='context_compaction'`, and use an ordinary tools-disabled Journaled model attempt with frozen retry/budget policy. Plan envelope pair, `C/O/T/R/S/K/P` and byte limit equal assembly; `promptOverheadTokens=K`; source range/digest/estimate equal the chosen projection. `RunContextCompactionItem.summaryRef` must be that highest/current completed turn's `AgentModelTurn.textRef`, decoding bounded NFC/no-NUL `ModelTextV1`; both item and replacement segment repeat its `textDigest`. A text-only provider may compact because the response is content, not a control envelope. Tool-bearing, non-end, malformed or oversized responses cannot become a summary. Raw items remain durable.
 
@@ -6885,6 +7207,17 @@ type InvocationAmbiguityEvidenceV1 = InvocationAmbiguityEvidenceBaseV1 & (
     }
 )
 
+type PrivateToolRollbackV1 = {
+  schemaVersion: 1; format: 'cliq-private-tool-rollback-v1'; code: 'TOOL_EXECUTION_FAILED';
+  failureKind: 'private_effect_rolled_back'; runId: string; opId: string; attempt: number; dispatchId: string;
+  preparedJournalSeq: number; claimJournalSeq: number; unknownJournalSeq: number;
+  requestRef: string; targetRef: string; grantRef: string; sandboxLaunchSpecRef: string;
+  workerLaunchId: string; leaseEpoch: number; generationRef: string; generationIdentityDigest: string;
+  checkpointId: string; workspaceStateRef: string; quarantineEvidenceRef: string; quarantineEvidenceDigest: string;
+  retirementEvidenceRef: string; retirementEvidenceDigest: string; inspectorIdentityRef: string; inspectorIdentityDigest: string;
+  observedAt: string; evidenceDigest: string;
+};
+
 type PostClaimNoReleaseEvidenceV1 = {
   schemaVersion: 1
   format: 'cliq-post-claim-no-release-evidence-v1'
@@ -6946,6 +7279,31 @@ type BrokerReleaseFenceEvidenceV1 = {
   evidenceDigest: string
 }
 
+type BrokerProcessDomainDeathEvidenceV1 = {
+  schemaVersion: 1
+  format: 'cliq-broker-process-domain-death-evidence-v1'
+  runId: string
+  opId: string
+  attempt: number
+  dispatchId: string
+  dispatchJournalSeq: number
+  operationRequestRef: ArtifactRef
+  operationTargetDigest: string
+  operationGrantRef: ArtifactRef
+  claimingSupervisorInstanceId: string
+  claimingStateOwnerEpoch: number
+  claimingProcessIdentityRef: ArtifactRef
+  claimingProcessIdentityDigest: string
+  inspectorIdentityRef: ArtifactRef
+  inspectorIdentityDigest: string
+  inspectorStateOwnerEpoch: number
+  brokerFenceTokenDigest: string
+  authorityDomain: 'linux_installed_native_creator_process_v1'
+  processObservation: 'absent_or_start_token_mismatch'
+  observedAt: string
+  evidenceDigest: string
+}
+
 type InvocationDispatchClosureEvidenceV1 = {
   schemaVersion: 1
   format: 'cliq-invocation-dispatch-closure-evidence-v1'
@@ -6966,6 +7324,11 @@ type InvocationDispatchClosureEvidenceV1 = {
         kind: 'broker_release_fenced'
         brokerFenceEvidenceRef: ArtifactRef
         brokerFenceEvidenceDigest: string
+      }
+    | {
+        kind: 'broker_process_domain_dead'
+        brokerProcessDeathEvidenceRef: ArtifactRef
+        brokerProcessDeathEvidenceDigest: string
       }
   observedAt: string
   evidenceDigest: string
@@ -7976,7 +8339,7 @@ type TerminalReasonDetail =
       attempt: number
       evidenceRef: ArtifactRef
     }
-  | {
+  | ({
       kind: 'context_window_exhausted'
       contextManifestRef: ArtifactRef
       nextPromptTokens: number
@@ -7985,7 +8348,10 @@ type TerminalReasonDetail =
       protectedTokens: number
       sourceInputTokenCap: number
       evidenceRef: ArtifactRef
-    }
+    } & (
+      | { trigger?: never; modelVisiblePromptDigest?: never; requestBodyBytes?: never; requestBodyLimitBytes?: never }
+      | { trigger: 'request_body_bytes'; modelVisiblePromptDigest: ArtifactRef; requestBodyBytes: number; requestBodyLimitBytes: 1048576 }
+    ))
   | {
       kind: 'dependency_source_integrity'
       dependencyPlanRef: ArtifactRef
@@ -8693,7 +9059,7 @@ type RunSubmitRequest = MutationBase & {
 }
 ```
 
-The `RunModelRequest` discriminator is authoritative and unknown/forbidden fields are errors, never ignored. `ollama` has no endpoint or model-credential member and resolves only the exact same-user active `LocalModelRegistrationV1`/managed launch contract above. Every remote provider requires `endpoint.kind='registered'` plus its explicit id; a built-in default is simply an `EndpointRegistrationV1(registrationKind='bundled_default')` whose id the client obtained from `cliq auth`, never a hidden provider-to-endpoint lookup. Every billable branch requires `modelCredentialGrantIds` to contain 1..32 unique ids, each active, purpose `model_endpoint`, owner-matched, and bound to that exact resolved endpoint identity/TLS through the Run deadline. Empty/extra/duplicate/mismatched credentials, endpoint omission, a registered id on Ollama, or a credential member on Ollama fails before capability negotiation, provider/local-service I/O, CAS publication, or Run creation. These normalized branch bytes enter both request and admission-intent digests.
+The `RunModelRequest` discriminator is authoritative and unknown/forbidden fields are errors, never ignored. `ollama` has no endpoint or model-credential member and resolves only the exact same-user active `LocalModelRegistrationV1`/managed launch contract above. Every remote provider requires `endpoint.kind='registered'` plus its explicit id; a built-in default is simply an `EndpointRegistrationV1(registrationKind='bundled_default')` whose id the client obtained from `cliq auth`, never a hidden provider-to-endpoint lookup. Every billable branch requires `modelCredentialGrantIds` to contain 1..32 unique ids, each active, purpose `model_endpoint`, owner-matched, and bound to that exact resolved endpoint identity/TLS through the Run deadline. Empty/extra/duplicate/mismatched credentials, endpoint omission, a registered id on Ollama, or a credential member on Ollama fails before capability negotiation, provider/local-service I/O, CAS publication, or Run creation. As for every MutationBase, the request digest binds the original supplied branch's JCS values; only the admission-intent digest uses its normalized values. Normalization and default expansion never rewrite the original request provenance or its digest. JCS identity does not preserve transport whitespace, key order or equivalent JSON escape spelling.
 
 Admission normalizes `RunSubmitRequest.objective` exactly once to NFC, applies
 the `RunObjectiveV1` scalar/UTF-8 bounds, publishes that artifact, and installs
@@ -9942,6 +10308,7 @@ type KernelGenerationIdentityV1 = {
       pristineSchemaDigest: string
       runtimeBundleRef?: never
       runtimeBundleManifestDigest?: never
+      modelAuthoritySource?: never
       candidateRef?: never
       candidateDigest?: never
       migrationId?: never
@@ -9953,6 +10320,9 @@ type KernelGenerationIdentityV1 = {
       pristineSchemaDigest: string
       runtimeBundleRef: ArtifactRef
       runtimeBundleManifestDigest: string
+      modelAuthoritySource:
+        | { kind: 'none' }
+        | { kind: 'present'; closureRef: ArtifactRef; closureDigest: string }
       candidateRef?: never
       candidateDigest?: never
       migrationId?: never
@@ -9967,6 +10337,7 @@ type KernelGenerationIdentityV1 = {
       pristineSchemaDigest?: never
       runtimeBundleRef?: never
       runtimeBundleManifestDigest?: never
+      modelAuthoritySource?: never
   }
 )
 
@@ -10771,9 +11142,10 @@ directory name, WAL timestamp, SQLite row count, or partial CAS scan may supply
 one independently. A `fresh_empty` or `fresh_installed` generation additionally
 requires `pristineSchemaManifestRef|Digest` equal its decoded database image's exact
 schema-manifest pair and `pristineSchemaDigest` equal both decoded artifacts'
-`schemaDigest`. Only `fresh_installed` requires `runtimeBundleRef` and
-`runtimeBundleManifestDigest`, which bind its held signed installation and
-epoch-one acquisition; the other origins forbid both fields. A
+`schemaDigest`. Only `fresh_installed` requires `runtimeBundleRef`,
+`runtimeBundleManifestDigest` and the closed original `modelAuthoritySource`,
+which bind its held signed installation and epoch-one acquisition; the other
+origins forbid all three fields. A
 `migrated_candidate` forbids those three pristine fields and
 instead requires its candidate's decoded database image to carry the same
 signed schema manifest/digest; the candidate's literal installed/state schema

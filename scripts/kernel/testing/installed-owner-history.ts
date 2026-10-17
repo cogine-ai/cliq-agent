@@ -61,11 +61,14 @@ export async function qualifyInstalledOwnerProcess(input: RootInput & {
 
 export async function qualifyInstalledOwnerLinks(input: RootInput & {
   bundle: RuntimeBundleManifest; imageDigest: string; report: Record<string, unknown>;
+  scenario?: 'startup_shutdown';
 }) {
   input.report.qualified = false;
+  assert(input.scenario === undefined || input.scenario === 'startup_shutdown');
   const history = inspectInstalledOwnerHistory(input.stateRoot); input.report.history = history;
   const owners = history.owners;
-  assert(owners.length >= 2 && owners.length <= 3, 'only the manual and automatic installed successors are qualified');
+  if (input.scenario === 'startup_shutdown') assert.equal(owners.length, 3, 'startup shutdown requires exactly two clean successors');
+  else assert(owners.length >= 2 && owners.length <= 3, 'only the manual and automatic installed successors are qualified');
   for (const key of ['supervisorInstanceId', 'processIdentityRef', 'instanceNonceDigest'] as const)
     assert.equal(new Set(owners.map(owner => owner[key])).size, owners.length);
   const supervisor = input.bundle.entries.find(entry => entry.role === 'supervisor'); assert(supervisor);
@@ -100,10 +103,13 @@ export async function qualifyInstalledOwnerLinks(input: RootInput & {
         kernelGenerationIdentityDigest: acquisition.kernelGenerationIdentityDigest });
     } else {
       const prior = owners[owner.ownerEpoch - 2]!; assert(prior.state === 'terminal');
-      const reason = owner.ownerEpoch === 2 ? 'graceful_release' : 'superseded_after_owner_death';
+      // The caller fixes this finite scenario before looking at actual rows.
+      // Ordinary campaigns still require epoch three to be a real takeover.
+      const cleanAcquisition = owner.ownerEpoch === 2 || (owner.ownerEpoch === 3 && input.scenario === 'startup_shutdown');
+      const reason = cleanAcquisition ? 'graceful_release' : 'superseded_after_owner_death';
       assert.equal(prior.terminalReason, reason);
       equalJson(acquisition, { ...common,
-        kind: owner.ownerEpoch === 2 ? 'acquire_after_graceful_release' : 'takeover_after_owner_death',
+        kind: cleanAcquisition ? 'acquire_after_graceful_release' : 'takeover_after_owner_death',
         priorOwnerEpoch: prior.ownerEpoch, priorTerminalRowDigest: prior.rowDigest,
         priorTransitionEvidenceRef: prior.transitionEvidenceRef, priorTransitionEvidenceDigest: prior.transitionEvidenceDigest,
         priorTerminalReason: reason });

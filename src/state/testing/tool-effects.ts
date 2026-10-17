@@ -31,7 +31,8 @@ export async function fixtureInspector(fixture: Awaited<ReturnType<typeof create
 export async function quiescedToolCheckpoint(fixture: Awaited<ReturnType<typeof createAgentFixture>>, checkpointId: string, changedWorkspace = false) {
   const { store, runId } = fixture;
   const closure = await store.readRecoveryClosure(runId);
-  const launch = closure.workerLaunches.find((launch) => launch.launchId === closure.run.activeWorkerLaunchId)!;
+  const launch = closure.workerLaunches.find((launch) => launch.launchId === closure.run.activeWorkerLaunchId);
+  if (!launch || launch.phase !== 'activated') throw new Error('retained checkpoint fixture requires its activated worker launch');
   const generation = closure.workspaceGenerations.find((generation) => generation.generationRef === launch.workspaceGenerationRef)!;
   const revoking = store.beginGenerationRevocation({ launchId: launch.launchId, expectedLeaseVersion: launch.leaseVersion,
     expectedGenerationRowVersion: generation.rowVersion, quiesceId: 'tool-test-quiesce' });

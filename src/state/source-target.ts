@@ -12,6 +12,8 @@ import { readCanonicalArtifact } from './agent-context.js';
 import { validateControlChannelClosure, type AuthenticatedControlIdentity } from './control-channel.js';
 import { decodeWorkspaceIdentity } from './decoders.js';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
+import { withHeldInstalledRuntime, type HeldInstalledRuntime } from './installed-runtime.js';
+import { DEFAULT_SANDBOX_RESOURCES } from './installed-sandbox-profile.js';
 import { decodeSandboxProfile } from './execution-closure.js';
 import { assertHeldWorkspaceRoot, heldWorkspaceRootPath, type HeldWorkspaceRoot } from './native-owner.js';
 import { DEFAULT_RUN_BUDGETS, mergeBudgets, readAdmissionReplay, readSession, readSessionPrincipalId } from './rows.js';
@@ -126,10 +128,7 @@ function model(value: unknown): RunModelRequest {
     endpoint: { kind: 'registered', endpointRegistrationId: text(endpoint.endpointRegistrationId) },
     modelCredentialGrantIds: ids(data.modelCredentialGrantIds, 32, 1) };
 }
-const RESOURCE_DEFAULTS: SandboxResourceSpec = { maxProcesses: 256, memoryBytes: 4 * 1024 ** 3,
-  cpuQuotaMicrosPerSecond: 400_000, maxOpenFiles: 1024, maxSingleFileBytes: 2 * 1024 ** 3,
-  maxGenerationBytes: 20 * 1024 ** 3, maxInvocationOutputBytes: 16 * 1024 ** 2,
-  maxIpcFrameBytes: 16 * 1024 ** 2, maxQueuedIpcBytes: 64 * 1024 ** 2 };
+const RESOURCE_DEFAULTS = DEFAULT_SANDBOX_RESOURCES;
 const RESOURCE_RANGES: Record<keyof SandboxResourceSpec, readonly [number, number]> = {
   maxProcesses: [1, 1024], memoryBytes: [256 * 1024 ** 2, 32 * 1024 ** 3], cpuQuotaMicrosPerSecond: [10_000, 1_600_000],
   maxOpenFiles: [64, 8192], maxSingleFileBytes: [1024 ** 2, 16 * 1024 ** 3], maxGenerationBytes: [256 * 1024 ** 2, 100 * 1024 ** 3],
@@ -161,9 +160,9 @@ function boundedJson(value: unknown, depth = 0, total = { members: 0 }): void {
   if (total.members > 10_000) invalid('inline JSON exceeds its member bound');
 }
 
-/** Request hashing retains the supplied optional fields; the admission intent
- * separately incorporates their normative defaults. No resolved capture ref
- * is accepted or mixed into either domain. */
+/** Request identity retains the original JCS values, before normalization or
+ * defaults. Only the admission intent uses the normalized/defaulted request.
+ * No resolved capture ref is accepted or mixed into either domain. */
 export function normalizeRunSubmitRequest(value: unknown): {
   request: NormalizedRunSubmitRequest; originalRequest: object; originalRequestDigest: string;
 } {
@@ -191,9 +190,10 @@ export function normalizeRunSubmitRequest(value: unknown): {
       ...(data.sandboxResources === undefined ? {} : { sandboxResources: object(data.sandboxResources, [], Object.keys(RESOURCE_DEFAULTS)) }),
       ...(data.maxChangedPaths === undefined ? {} : { maxChangedPaths: integer(data.maxChangedPaths, 0, 100_000) }),
       ...(data.maxChangedBytes === undefined ? {} : { maxChangedBytes: integer(data.maxChangedBytes, 0, 4 * 1024 ** 3) }) };
-    const originalRequest = { ...core, requestDigest };
+    const { requestDigest: _wireDigest, ...originalCore } = data;
+    const originalRequest = { ...originalCore, requestDigest };
     if (canonicalJsonBytes(originalRequest).length > 1_048_576) invalid('inline request exceeds 1 MiB');
-    if (canonicalSha256(core) !== requestDigest) invalid('inline requestDigest does not match canonical request bytes');
+    if (canonicalSha256(originalCore) !== requestDigest) invalid('inline requestDigest does not match canonical request bytes');
     const request = { ...core, requestDigest, budgets: mergeBudgets(budgets), sandboxResources: resourceOptions(data.sandboxResources),
       maxChangedPaths: core.maxChangedPaths ?? 10_000, maxChangedBytes: core.maxChangedBytes ?? 512 * 1024 ** 2 };
     return immutableSnapshot({ request, originalRequest, originalRequestDigest: requestDigest });
@@ -269,6 +269,7 @@ export async function recheckVerifiedSourceInspectionTarget(owner: StateOwnerCon
 export async function createVerifiedSourceInspectionTarget(context: {
   driver: SqliteDriver; artifacts: ArtifactCatalog; owner: StateOwnerContext; bootstrap: SourceInspectionBootstrap;
   workspaceRoot: HeldWorkspaceRoot; trust: HeldWorkspaceSourceTrust;
+  selectedRuntime?: HeldInstalledRuntime;
 }, inlineRequest: unknown, identity: AuthenticatedControlIdentity): Promise<VerifiedSourceInspectionTarget> {
   const normalized = normalizeRunSubmitRequest(inlineRequest), request = normalized.request;
   identity = immutableSnapshot(identity);
@@ -291,14 +292,25 @@ export async function createVerifiedSourceInspectionTarget(context: {
   assertWorkspaceSourceTrust(trust, request.workspacePath);
   if (request.sourceIncludes.some(include => include.readGrantId !== undefined)) invalid('source read grants are not implemented; ignored bytes cannot be captured');
   if (request.verifiers.length || request.dependency.mode !== 'none') invalid('verifier/dependency admission is not yet implemented');
-  if (request.model.provider !== 'ollama' || request.registeredMcpServerIds.length || request.skillIds.length)
-    invalid('remote model/MCP/skill admission authority is not yet implemented');
+  if (request.registeredMcpServerIds.length || request.skillIds.length) invalid('MCP/skill admission authority is not yet implemented');
+  if (request.model.provider !== 'ollama') {
+    if (!context.selectedRuntime || request.model.provider !== 'openai-compatible')
+      invalid('remote model admission requires the genuine installed fixed broker recipe');
+    await withHeldInstalledRuntime(context.selectedRuntime, async installed => {
+      await installed.revalidate();
+      if (installed.bundleDigest !== canonicalSha256(bootstrap.bundle) ||
+          !installed.modelAuthority?.models.some(model => model.catalog.value.provider === request.model.provider &&
+            model.catalog.value.model === request.model.model && model.catalog.value.adapter.adapterId === 'openai-compatible-broker-v1' &&
+            model.catalog.value.adapter.version === '1')) invalid('remote model source capture lacks the selected signed model authority');
+      await installed.revalidate();
+    });
+  }
   const workspace = decodeWorkspaceIdentity(await readCanonicalArtifact(artifacts, session.workspaceIdentityRef));
   if (workspace.kind !== 'live' || workspace.ownerPrincipalId !== identity.principalId || workspace.platform !== hostPlatform() ||
       workspace.canonicalRootPath !== request.workspacePath || canonicalSha256(workspace.rootIdentity) !== canonicalSha256(workspaceRoot.identity) ||
       (workspace.repositoryIdentityRef === undefined) !== (workspaceRoot.repositoryDirectory === undefined))
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'live workspace does not match the exact Session identity');
-  if (workspace.repositoryIdentityRef !== undefined) await recaptureLiveWorkspaceIdentity(workspace, request.workspacePath);
+  if (workspace.repositoryIdentityRef !== undefined) await recaptureLiveWorkspaceIdentity(workspace, request.workspacePath, context.selectedRuntime);
   verifyRuntimeBundle(bootstrap.bundle, bootstrap.releaseKeys);
   const runtimeBundleRef = canonicalSha256(bootstrap.bundle);
   if (active.runtimeBundleRef !== runtimeBundleRef || active.runtimeBundleManifestDigest !== bootstrap.bundle.manifestDigest ||

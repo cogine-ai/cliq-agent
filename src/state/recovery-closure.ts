@@ -39,9 +39,13 @@ import { readChildAllocationsForRun } from './repositories/child-allocations.js'
 import { readInvocationJournal } from './repositories/journal.js';
 import { readWorkerLaunchesForRun } from './repositories/worker-launches.js';
 import { readWorkspaceGenerationsForRun } from './repositories/workspace-generations.js';
-import { checkpointFromRow, readCheckpoint, readRun } from './rows.js';
+import { checkpointFromRow, readCheckpoint, readRun, readSession, readSessionPrincipalId } from './rows.js';
 import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
 import { validateRetainedWorkerSeal } from './tool-checkpoint.js';
+import { readRetiredGenerationSource } from './generation-retirement.js';
+import { validateInstalledBrokerAmbiguityHistory } from './broker-ambiguity.js';
+import { validateInstalledModelNoReleaseHistory } from './broker-no-release.js';
+import { validateWorkerPreparationHistory } from './worker-preparation.js';
 
 const ZERO_BUDGET: BudgetUsage = {
   modelTokens: 0,
@@ -509,6 +513,10 @@ async function validateLaunchGraph(
 ): Promise<void> {
   const byRef = new Map(generations.map((generation) => [generation.generationRef, generation]));
   for (const launch of launches) {
+    // Its owning history validator checked the logical intent, actual recorded
+    // births and original live owner. No execution fields exist in this branch.
+    if (launch.phase === 'preparing') continue;
+    if (launch.retirementKind === 'preparation') recoveryFailure('retired preparation is not an unretired launch');
     await requireRecoveryArtifacts(artifacts, [
       ['WorkerLaunch.workspaceGenerationRef', launch.workspaceGenerationRef],
       ['WorkerLaunch.containmentPlanRef', launch.containmentPlanRef],
@@ -568,6 +576,11 @@ export async function readRecoveryClosure(
 ): Promise<RecoveryClosureV1> {
   const databaseCut = driver.transaction((connection) => {
     const run = readRun(connection, runId);
+    const principalId = connection.prepare('SELECT principal_id FROM runs WHERE id = ?').get<{ principal_id: string }>(run.id)?.principal_id;
+    const session = readSession(connection, run.sessionId);
+    if (!principalId || principalId !== readSessionPrincipalId(connection, session.id)) {
+      recoveryFailure('Run does not share its original Session principal');
+    }
     if (run.revision < 1 || run.latestCheckpointId.length === 0) {
       recoveryFailure('Run is missing its initial ready Checkpoint');
     }
@@ -577,13 +590,15 @@ export async function readRecoveryClosure(
     const allWorkerLaunches = readWorkerLaunchesForRun(connection, run.id);
     return {
       run,
+      principalId,
+      workspaceIdentityRef: session.workspaceIdentityRef,
       latestCheckpoint,
       checkpoints,
       items: readRunItems(connection, run.id),
       journal: readInvocationJournal(connection, run.id),
       workerLaunches: allWorkerLaunches.filter(launch => launch.phase !== 'retired'),
       allWorkerLaunches,
-      workspaceGenerations: readWorkspaceGenerationsForRun(connection, run.id, true),
+      workspaceGenerations: readWorkspaceGenerationsForRun(connection, run.id),
       childAllocations: readChildAllocationsForRun(connection, run.id)
     };
   });
@@ -596,6 +611,10 @@ export async function readRecoveryClosure(
     workspaceGenerations,
     childAllocations
   } = databaseCut;
+  try {
+    await validateWorkerPreparationHistory(driver, artifacts, { run, launches: databaseCut.allWorkerLaunches,
+      generations: workspaceGenerations });
+  } catch (error) { recoveryFailure(`worker preparation history is invalid: ${(error as Error).message}`, error); }
   requireRecoveryArtifactRef(run.specRef, 'Run.specRef');
   for (const [label, ref] of [
     ['Run.frontierRef', run.frontierRef],
@@ -672,11 +691,25 @@ export async function readRecoveryClosure(
   );
   const groups = validateJournalGraph(journal);
   const journalBudgets = await validateJournalArtifactsAndBudgets(artifacts, groups);
+  const generationProofs: WorkspaceGenerationStateV1[] = [];
+  if (workspaceGenerations.some(generation => generation.phase === 'retired')) {
+    try {
+      const assembly = await artifacts.readCanonical<RunAssemblyV1>(runSpec.assemblyRef);
+      if (assembly.format !== 'cliq-run-assembly-v1') throw new TypeError('generation retirement requires its typed historical runtime');
+      for (const generation of workspaceGenerations) generationProofs.push(generation.phase === 'retired'
+        ? (await readRetiredGenerationSource(driver, artifacts, { run, spec: runSpec, assembly, generation })).source : generation);
+    } catch (error) { recoveryFailure(`generation retirement history is invalid: ${(error as Error).message}`, error); }
+  } else generationProofs.push(...workspaceGenerations);
+  await validateGenerationArtifacts(artifacts, generationProofs);
   if (journal.some((entry) => entry.opKind === 'model')) {
     try {
       await validateAgentRecovery({ artifacts, run, spec: runSpec, items, journal,
-        checkpoints: databaseCut.checkpoints, workspaceGenerations,
+        principalId: databaseCut.principalId, workspaceIdentityRef: databaseCut.workspaceIdentityRef,
+        checkpoints: databaseCut.checkpoints, workspaceGenerations: generationProofs,
         context: decodeContextManifest(await artifacts.readCanonical(latestCheckpoint.contextManifestRef)) });
+      const assembly = await artifacts.readCanonical<RunAssemblyV1>(runSpec.assemblyRef);
+      if (assembly.format === 'cliq-run-assembly-v1') await validateInstalledBrokerAmbiguityHistory({ driver, artifacts,
+        run, spec: runSpec, assembly, journal, principalId: databaseCut.principalId });
     } catch (error) {
       recoveryFailure(`typed agent recovery closure is invalid: ${(error as Error).message}`, error);
     }
@@ -694,8 +727,7 @@ export async function readRecoveryClosure(
   if (run.status !== 'running' && !isZeroBudget(run.budgetReserved) && journal.length === 0) {
     recoveryFailure('lease-free Run has an unexplained budget reservation');
   }
-  await validateGenerationArtifacts(artifacts, workspaceGenerations);
-  const sealedGenerations = workspaceGenerations.filter(generation => generation.phase === 'sealed');
+  const sealedGenerations = generationProofs.filter(generation => generation.phase === 'sealed');
   const sealedLaunches = databaseCut.allWorkerLaunches.filter(launch => launch.phase === 'retired' && launch.generationWriteState === 'sealed');
   if (sealedGenerations.length || sealedLaunches.length) {
     const assembly = await artifacts.readCanonical<RunAssemblyV1>(runSpec.assemblyRef);
@@ -715,7 +747,7 @@ export async function readRecoveryClosure(
     }
   }
   await validateLaunchGraph(artifacts, run, workerLaunches, workspaceGenerations);
-  try { await validateWorkerRecoveryWait(artifacts, databaseCut, driver); }
+  try { await validateWorkerRecoveryWait(artifacts, { ...databaseCut, workspaceGenerations: generationProofs }, driver); }
   catch (error) { recoveryFailure(`worker recovery closure is invalid: ${(error as Error).message}`, error); }
   await validateChildAllocationArtifacts(artifacts, childAllocations);
 
@@ -729,7 +761,10 @@ export async function readRecoveryClosure(
     workspaceGenerations,
     childAllocations
   };
-  try { await validateStopRecovery(driver, artifacts, closure); }
+  try {
+    await validateInstalledModelNoReleaseHistory(driver, artifacts, closure);
+    await validateStopRecovery(driver, artifacts, closure);
+  }
   catch (error) { recoveryFailure(`stop recovery closure is invalid: ${(error as Error).message}`, error); }
   return closure;
 }

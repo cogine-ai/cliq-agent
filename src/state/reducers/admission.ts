@@ -1,5 +1,7 @@
 import { canonicalSha256 } from '../../kernel/canonical.js';
 import { immutableSnapshot } from '../../model/immutable.js';
+import { decodeRetainedRunAssembly } from '../../model/run-assembly.js';
+import { exactKeys } from '../../policy/runtime-authority.js';
 import {
   addCanonicalDuration,
   assertAdmissionKey,
@@ -27,7 +29,7 @@ import type {
 import type { ArtifactCatalog, PublishedArtifact } from '../artifacts.js';
 import { insertArtifactMetadata } from '../artifacts.js';
 import { advanceTimeFence, sampleCanonicalNow, type TimeFenceAdvance } from '../canonical-time.js';
-import { validateControlChannelClosure } from '../control-channel.js';
+import { assertCurrentControlFrame, readRetainedControlChannelClosure, validateControlChannelClosure, type AuthenticatedControlIdentity } from '../control-channel.js';
 import {
   decodeAdmittedContext,
   decodeContextManifest,
@@ -44,6 +46,12 @@ import {
   decodeWorkspaceState
 } from '../decoders.js';
 import { KernelStorageError } from '../errors.js';
+import { readCanonicalArtifact } from '../agent-context.js';
+import { readInstalledRunAdmission, recheckInstalledRunWorkspace, type AssembledInstalledRun } from '../installed-run.js';
+import { assertInstalledRunAdmissionCapacity } from '../installed-run-capacity.js';
+import { normalizeRunSubmitRequest, runSubmitIntentDigest } from '../source-target.js';
+import { readSourceInspectionAttempt, readSourceInspectionOriginalRequest } from '../source-inspection.js';
+import { readSourceInspectionErrorResponse, readSourceInspectionRetirement } from '../source-inspection-owner.js';
 import { assertActiveStateOwner, type StateOwnerContext } from '../state-owner.js';
 import {
   DEFAULT_RUN_BUDGETS,
@@ -52,12 +60,15 @@ import {
   mergeBudgets,
   readAdmissionReplay,
   readControlRequest,
+  readCheckpoint,
+  readRun,
   readSession,
   readSessionPrincipalId,
   ZERO_BUDGET
 } from '../rows.js';
 import type { SqliteDriver } from '../sqlite-driver.js';
 import { recaptureLiveWorkspaceIdentity } from '../workspace-identity.js';
+import type { SourceInspectionTargetV1 } from '../../kernel/execution.js';
 
 export type AdmitRunInput = {
   principalId: string;
@@ -154,7 +165,7 @@ async function readPublishedResponse(
   artifacts: ArtifactCatalog,
   responseRef: string
 ): Promise<RunSubmitResponse> {
-  const response = await artifacts.readCanonical<ControlApplicationResponseV1>(responseRef);
+  const response = await readCanonicalArtifact<ControlApplicationResponseV1>(artifacts, responseRef);
   if (response.ok && response.result.method === 'run.submit') {
     return { protocolVersion: 1, ok: true, result: response.result };
   }
@@ -230,11 +241,174 @@ async function replayAdmitRun(
   return undefined;
 }
 
-export async function admitRun(
+/** Original public request bytes are retained at their existing wire digest.
+ * This is inert provenance, not a second operation/authority ledger. Replays
+ * never recapture source, choose new assemblies or refresh model authority. */
+export async function replayInstalledRunAdmission(
+  driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
+  supplied: ReturnType<typeof normalizeRunSubmitRequest>, identity: AuthenticatedControlIdentity
+): Promise<AdmitRunResult | undefined> {
+  assertCurrentControlFrame(owner, identity);
+  const normalized = normalizeRunSubmitRequest(supplied.originalRequest), request = normalized.request;
+  const { principalId } = identity, requestDigest = normalized.originalRequestDigest;
+  const intent = runSubmitIntentDigest(principalId, request);
+  const channel = await validateControlChannelClosure(artifacts, owner, identity);
+  assertActiveStateOwner(driver, owner);
+  const control = readControlRequest(driver, principalId, 'run.submit', request.requestId);
+  if (control && control.requestDigest !== requestDigest)
+    throw new KernelStorageError('REQUEST_ID_CONFLICT', 'run.submit requestId was reused with different bytes');
+  const admission = readAdmissionReplay(driver, 'runs', principalId, 'run.submit', request.admissionKey);
+  if (!admission) {
+    if (control) {
+      const source = readSourceInspectionAttempt(driver, { principalId, admissionKey: request.admissionKey, admissionIntentDigest: intent });
+      if (!source || source.phase !== 'retired' || source.outcome.kind === 'captured' || source.outcome.errorResponseRef !== control.responseRef)
+        throw new KernelStorageError('RECOVERY_REQUIRED', 'installed Run replay has neither admission nor its original source refusal');
+      await readSourceInspectionErrorResponse(artifacts, source);
+    }
+    return undefined;
+  }
+  if (admission.admissionIntentDigest !== intent)
+    throw new KernelStorageError('ADMISSION_KEY_CONFLICT', 'run.submit admissionKey was reused with a different intent');
+  if (!admission.admissionRequestId) throw new KernelStorageError('RECOVERY_REQUIRED', 'installed Run admission has no original request');
+  const originalControl = readControlRequest(driver, principalId, 'run.submit', admission.admissionRequestId);
+  if (!originalControl || (control && control.responseRef !== originalControl.responseRef))
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'installed Run original response link is missing or inconsistent');
+  const originalCore = await readCanonicalArtifact<object>(artifacts, originalControl.requestDigest);
+  const original = normalizeRunSubmitRequest({ ...originalCore, requestDigest: originalControl.requestDigest });
+  if (original.request.requestId !== admission.admissionRequestId || original.request.admissionKey !== request.admissionKey ||
+      runSubmitIntentDigest(principalId, original.request) !== intent)
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'installed Run original public request does not bind its admission');
+
+  const source = readSourceInspectionAttempt(driver, { principalId, admissionKey: request.admissionKey, admissionIntentDigest: intent });
+  if (!source || source.phase !== 'retired' || source.outcome.kind !== 'captured')
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'installed Run original source is not captured and retired');
+  const target = await readCanonicalArtifact<SourceInspectionTargetV1>(artifacts, source.targetRef);
+  const sourceOriginal = normalizeRunSubmitRequest(await readCanonicalArtifact(artifacts, target.originalRequestRef));
+  const sourceIndex = readSourceInspectionOriginalRequest(driver, source.inspectionId);
+  if (!exactKeys(target, ['schemaVersion', 'format', 'principalId', 'method', 'admissionKey', 'admissionIntentDigest',
+      'originalRequestRef', 'originalRequestDigest', 'sessionId', 'expectedContextRevision', 'workspaceIdentityRef', 'workspaceIdentityDigest',
+      'sourceReadGrantRefs', 'runtimeBundleRef', 'runtimeBundleManifestDigest', 'sandboxProfileRef', 'sandboxProfileDigest', 'targetDigest']) ||
+      target.schemaVersion !== 1 || target.format !== 'cliq-source-inspection-target-v1' || target.method !== 'run.submit' ||
+      target.workspaceIdentityDigest !== source.workspaceIdentityDigest || target.sessionId !== request.sessionId ||
+      target.expectedContextRevision !== request.expectedContextRevision || !Array.isArray(target.sourceReadGrantRefs) || target.sourceReadGrantRefs.length !== 0 ||
+      target.targetDigest !== source.targetDigest || target.targetDigest !== digestOmitting(target, 'targetDigest') ||
+      target.principalId !== principalId || target.admissionKey !== request.admissionKey || target.admissionIntentDigest !== intent ||
+      target.originalRequestDigest !== sourceOriginal.originalRequestDigest || sourceIndex.originalRequestId !== sourceOriginal.request.requestId ||
+      sourceIndex.originalRequestDigest !== sourceOriginal.originalRequestDigest || runSubmitIntentDigest(principalId, sourceOriginal.request) !== intent)
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'installed Run source original request closure changed');
+  await readSourceInspectionRetirement(driver, artifacts, source, target);
+
+  const response = await readPublishedResponse(artifacts, originalControl.responseRef), run = response.result.snapshot.run;
+  const actual = readRun(driver, admission.id), spec = decodeRunSpec(await readCanonicalArtifact(artifacts, actual.specRef));
+  const checkpoint = readCheckpoint(driver, identityHash('cliq-checkpoint-id-v1', actual.id, 'initial', 0));
+  const expectedFrontier: RunFrontier = { schemaVersion: 1, kind: 'agent', phase: 'model_turn',
+    turnId: identityHash('cliq-turn-id-v1', actual.id, 'initial'), contextItemSeq: 0, cause: 'initial' };
+  const expectedRun: Run = { id: actual.id, sessionId: actual.sessionId, specRef: actual.specRef, status: 'queued', nextStep: 'agent',
+    frontierRef: canonicalSha256(expectedFrontier), revision: 1, leaseEpoch: 0, latestCheckpointId: checkpoint.id,
+    budgetReserved: ZERO_BUDGET, budgetConsumed: ZERO_BUDGET, repairCount: 0, cancelRequested: false,
+    createdAt: actual.createdAt, deadlineAt: actual.deadlineAt, updatedAt: actual.createdAt };
+  const expectedResponse: RunSubmitResponse = { protocolVersion: 1, ok: true,
+    result: { method: 'run.submit', snapshot: { schemaVersion: 1, operation: 'agent', run: expectedRun, latestRunItemSeq: 0 } } };
+  if (actual.id !== identityHash('cliq-run-id-v1', principalId, 'run.submit', request.admissionKey) || actual.sessionId !== request.sessionId ||
+      actual.deadlineAt !== addCanonicalDuration(actual.createdAt, request.budgets.wallTimeMs) ||
+      canonicalSha256(expectedResponse) !== originalControl.responseRef || canonicalSha256(response) !== originalControl.responseRef ||
+      checkpoint.runId !== actual.id || checkpoint.basedOnRunRevision !== 0 || checkpoint.runItemSeq !== 0 || checkpoint.journalSeq !== 0 ||
+      checkpoint.reason !== 'initial' || checkpoint.createdAt !== actual.createdAt ||
+      spec.operation !== 'agent' || canonicalSha256(spec.budgets) !== canonicalSha256(request.budgets) ||
+      spec.baseWorkspaceManifestRef !== source.outcome.sourceManifestRef)
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'installed Run original response, budget or initial checkpoint closure changed');
+  const objective = decodeRunObjective(await readCanonicalArtifact(artifacts, spec.objectiveRef));
+  const context = decodeAdmittedContext(await readCanonicalArtifact(artifacts, spec.admittedContextRef));
+  const workspace = decodeWorkspaceIdentity(await readCanonicalArtifact(artifacts, target.workspaceIdentityRef));
+  const manifest = decodeSourceManifest(await readCanonicalArtifact(artifacts, spec.baseWorkspaceManifestRef));
+  const frozenIgnore = decodeFrozenIgnoreRules(await readCanonicalArtifact(artifacts, manifest.frozenIgnoreRulesRef));
+  const projection = decodeSourceProjection(await readCanonicalArtifact(artifacts, spec.sourceProjectionRef));
+  const assembly = decodeRetainedRunAssembly(await readCanonicalArtifact(artifacts, spec.assemblyRef));
+  const state = decodeWorkspaceState(await readCanonicalArtifact(artifacts, checkpoint.workspaceStateRef));
+  const initialContext = decodeContextManifest(await readCanonicalArtifact(artifacts, checkpoint.contextManifestRef));
+  if (objective.utf8 !== request.objective || context.sessionId !== request.sessionId ||
+      context.sessionContextRevision !== request.expectedContextRevision || workspace.kind !== 'live' || workspace.ownerPrincipalId !== principalId ||
+      workspace.canonicalRootPath !== request.workspacePath || workspace.identityDigest !== target.workspaceIdentityDigest ||
+      manifest.manifestDigest !== source.outcome.sourceManifestDigest || manifest.workspaceIdentityDigest !== workspace.identityDigest ||
+      manifest.role !== 'base' || manifest.sourceProjectionRef !== spec.sourceProjectionRef || manifest.sourceProjectionDigest !== projection.projectionDigest ||
+      manifest.frozenIgnoreRulesDigest !== frozenIgnore.rulesDigest || projection.frozenIgnoreRulesRef !== manifest.frozenIgnoreRulesRef ||
+      projection.frozenIgnoreRulesDigest !== frozenIgnore.rulesDigest || assembly.createdAt !== actual.createdAt ||
+      assembly.runtime.runtimeBundleRef !== target.runtimeBundleRef || assembly.runtime.runtimeBundleManifestDigest !== target.runtimeBundleManifestDigest ||
+      state.runId !== actual.id || state.baseWorkspaceManifestRef !== spec.baseWorkspaceManifestRef ||
+      state.entriesRef !== manifest.entriesRef || state.sourceProjectionDigest !== manifest.sourceProjectionDigest || state.invalidatedEphemeralPaths.length !== 0 ||
+      initialContext.runId !== actual.id || initialContext.throughItemSeq !== 0 || initialContext.assemblyRef !== spec.assemblyRef ||
+      initialContext.admittedContextRef !== spec.admittedContextRef || initialContext.segments.length !== 0)
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'installed Run frozen objective/context/source closure changed');
+  const { channel: initialChannel } = await readRetainedControlChannelClosure(artifacts, owner, { principalId,
+    channelIdentityRef: originalControl.channelIdentityRef, channelIdentityDigest: originalControl.channelIdentityDigest });
+  const consent = decodeUnverifiedConsent(await readCanonicalArtifact(artifacts, spec.unverifiedConsentRef!));
+  const { unverifiedConsentRef: _consent, ...specCore } = spec;
+  if (initialChannel.channelIdentityDigest !== originalControl.channelIdentityDigest || initialChannel.principalId !== principalId ||
+      consent.principalId !== principalId || consent.admissionIntentDigest !== intent || consent.createdAt !== actual.createdAt ||
+      consent.channelIdentityRef !== originalControl.channelIdentityRef || consent.channelIdentityDigest !== originalControl.channelIdentityDigest ||
+      canonicalSha256(consent.client) !== canonicalSha256(initialChannel.client) || consent.runSpecCoreDigest !== canonicalSha256(specCore) || !request.allowUnverified)
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'installed Run original direct consent closure changed');
+  const admittedRequestDigest = canonicalSha256({ admissionIntentDigest: intent, objectiveRef: spec.objectiveRef,
+    admittedContextRef: spec.admittedContextRef, runSpecRef: actual.specRef, workspaceIdentityDigest: workspace.identityDigest,
+    repositoryIdentityDigest: workspace.repositoryIdentityDigest ?? null, sourceProjectionRef: spec.sourceProjectionRef,
+    frozenIgnoreRulesRef: manifest.frozenIgnoreRulesRef, baseWorkspaceManifestRef: spec.baseWorkspaceManifestRef,
+    workspaceStateRef: checkpoint.workspaceStateRef, assemblyRef: spec.assemblyRef, policyRef: spec.policyRef,
+    sandboxProfileRef: spec.sandboxProfileRef, verifierSpecRef: spec.verifierSpecRef, unverifiedConsentRef: spec.unverifiedConsentRef ?? null,
+    credentialGrantRefs: spec.credentialGrantRefs });
+  const frozen = driver.prepare('SELECT admitted_request_digest FROM runs WHERE id = ?').get<{ admitted_request_digest: string }>(actual.id);
+  if (frozen?.admitted_request_digest !== admittedRequestDigest)
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'installed Run final admitted closure no longer rehashes');
+
+  if (!control) {
+    const { requestDigest: _digest, ...core } = normalized.originalRequest as Record<string, unknown>;
+    const requestArtifact = await artifacts.publishCanonical(core, 'cliq-run-submit-request-core-v1');
+    if (requestArtifact.ref !== requestDigest) throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed replay public core digest changed');
+    let fenceOutcome: TimeFenceAdvance | undefined;
+    driver.transaction(connection => {
+      const raced = readControlRequest(connection, principalId, 'run.submit', request.requestId);
+      if (raced) {
+        if (raced.requestDigest !== requestDigest || raced.responseRef !== originalControl.responseRef)
+          throw new KernelStorageError('REQUEST_ID_CONFLICT', 'run.submit requestId was reused with different bytes');
+        return;
+      }
+      if (canonicalSha256(readAdmissionReplay(connection, 'runs', principalId, 'run.submit', request.admissionKey)) !== canonicalSha256(admission) ||
+          canonicalSha256(readControlRequest(connection, principalId, 'run.submit', admission.admissionRequestId!)) !== canonicalSha256(originalControl) ||
+          connection.prepare('SELECT admitted_request_digest FROM runs WHERE id = ?').get<{ admitted_request_digest: string }>(actual.id)?.admitted_request_digest !== admittedRequestDigest)
+        throw new KernelStorageError('RECOVERY_REQUIRED', 'installed Run replay retained cut changed');
+      assertCurrentControlFrame(owner, identity); assertActiveStateOwner(connection, owner); const now = sampleCanonicalNow();
+      fenceOutcome = advanceTimeFence(connection, owner.ownerEpoch, now); if (fenceOutcome !== 'healthy') return;
+      for (const artifact of [...channel.metadata, requestArtifact]) insertArtifactMetadata(connection, artifact, now);
+      insertControlRequest(connection, { ...identity, method: 'run.submit', requestId: request.requestId, requestDigest,
+        responseRef: originalControl.responseRef, committedAt: now });
+    });
+    if (fenceOutcome && fenceOutcome !== 'healthy') throw new KernelStorageError('INVALID_REQUEST', 'canonical clock has regressed; installed admission replay is paused');
+  }
+  assertCurrentControlFrame(owner, identity); assertActiveStateOwner(driver, owner);
+  return { replayed: true, run, response };
+}
+
+type InstalledAdmission = Readonly<{ prepared: AssembledInstalledRun; identity: AuthenticatedControlIdentity;
+  data: ReturnType<typeof readInstalledRunAdmission> }>;
+
+/** Public-id production path. The private WeakMap friend, not caller refs or
+ * an arbitrary digest override, binds the exact authenticated original frame. */
+export async function admitInstalledRun(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
+  prepared: AssembledInstalledRun, identity: AuthenticatedControlIdentity): Promise<AdmitRunResult> {
+  const data = readInstalledRunAdmission(prepared, driver, owner, identity);
+  assertCurrentControlFrame(owner, identity);
+  return admitRunInternal(driver, artifacts, owner, data.input, { prepared, identity, data });
+}
+
+export function admitRun(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, input: AdmitRunInput): Promise<AdmitRunResult> {
+  return admitRunInternal(driver, artifacts, owner, input);
+}
+
+async function admitRunInternal(
   driver: SqliteDriver,
   artifacts: ArtifactCatalog,
   owner: StateOwnerContext,
-  input: AdmitRunInput
+  input: AdmitRunInput,
+  installed?: InstalledAdmission
 ): Promise<AdmitRunResult> {
   assertRequestId(input.requestId);
   assertAdmissionKey(input.admissionKey);
@@ -256,10 +430,13 @@ export async function admitRun(
   const objectiveText = normalizeBoundedText(input.objective, 1, 262_144);
   const budgets = mergeBudgets(input.budgets);
   input = immutableSnapshot({ ...input, workspacePath, objective: objectiveText, budgets });
-  const admissionIntentDigest = admitIntent(input, workspacePath, objectiveText, budgets);
-  const requestDigest = admitRequestDigest(input, workspacePath, objectiveText, budgets);
+  const admissionIntentDigest = installed ? runSubmitIntentDigest(input.principalId, installed.data.normalized.request) :
+    admitIntent(input, workspacePath, objectiveText, budgets);
+  const requestDigest = installed?.data.normalized.originalRequestDigest ?? admitRequestDigest(input, workspacePath, objectiveText, budgets);
+  const replay = () => installed ? replayInstalledRunAdmission(driver, artifacts, owner, installed.data.normalized, installed.identity) :
+    replayAdmitRun(driver, artifacts, owner, input, admissionIntentDigest, requestDigest);
 
-  const replayed = await replayAdmitRun(driver, artifacts, owner, input, admissionIntentDigest, requestDigest);
+  const replayed = await replay();
   if (replayed !== undefined) return replayed;
 
   const channelClosure = await validateControlChannelClosure(artifacts, owner, input);
@@ -281,7 +458,8 @@ export async function admitRun(
   if (workspaceIdentity.ownerPrincipalId !== input.principalId) {
     throw new KernelStorageError('INVALID_REQUEST', 'workspace identity is not owned by the calling principal');
   }
-  await recaptureLiveWorkspaceIdentity(workspaceIdentity, workspacePath);
+  if (installed) recheckInstalledRunWorkspace(installed.prepared, driver, owner, installed.identity);
+  else await recaptureLiveWorkspaceIdentity(workspaceIdentity, workspacePath);
 
   const projection = decodeSessionProjection(await artifacts.readCanonical(session.contextProjectionRef));
   if (
@@ -349,7 +527,7 @@ export async function admitRun(
     )
   ]);
 
-  const now = sampleCanonicalNow();
+  const now = installed?.data.admittedAt ?? sampleCanonicalNow();
   const runId = identityHash('cliq-run-id-v1', input.principalId, 'run.submit', input.admissionKey);
   const checkpointId = identityHash('cliq-checkpoint-id-v1', runId, 'initial', 0);
   const turnId = identityHash('cliq-turn-id-v1', runId, 'initial');
@@ -363,6 +541,12 @@ export async function admitRun(
   };
   objective.objectiveDigest = digestOmitting(objective, 'objectiveDigest');
   const published: PublishedArtifact[] = [...channelClosure.metadata, ...referencedMetadata];
+  if (installed) {
+    const { requestDigest: _digest, ...core } = installed.data.normalized.originalRequest as Record<string, unknown>;
+    const requestArtifact = await artifacts.publishCanonical(core, 'cliq-run-submit-request-core-v1');
+    if (requestArtifact.ref !== requestDigest) throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed original public core digest changed');
+    published.push(requestArtifact);
+  }
   const objectiveArtifact = await artifacts.publishCanonical(objective, 'cliq-run-objective-v1');
   published.push(objectiveArtifact);
   decodeRunObjective(objective);
@@ -464,7 +648,9 @@ export async function admitRun(
   const frontierArtifact = await artifacts.publishCanonical(frontier, 'cliq-run-frontier-v1');
   published.push(frontierArtifact);
 
-  const deadlineAt = addCanonicalDuration(now, budgets.wallTimeMs);
+  const deadlineAt = installed?.data.deadlineAt ?? addCanonicalDuration(now, budgets.wallTimeMs);
+  if (deadlineAt !== addCanonicalDuration(now, budgets.wallTimeMs))
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed Run interval does not preserve the complete requested duration');
   const run: Run = {
     id: runId,
     sessionId: session.id,
@@ -558,8 +744,16 @@ export async function admitRun(
     }
 
     assertActiveStateOwner(connection, owner);
-    fenceOutcome = advanceTimeFence(connection, owner.ownerEpoch);
+    const freshNow = sampleCanonicalNow();
+    fenceOutcome = advanceTimeFence(connection, owner.ownerEpoch, freshNow);
     if (fenceOutcome !== 'healthy') return;
+    if (installed) {
+      assertCurrentControlFrame(owner, installed.identity);
+      recheckInstalledRunWorkspace(installed.prepared, driver, owner, installed.identity, connection);
+      if (freshNow < now || freshNow >= deadlineAt)
+        throw new KernelStorageError('INVALID_REQUEST', 'installed admission interval is not current at its final time fence');
+      assertInstalledRunAdmissionCapacity(connection);
+    }
     for (const artifact of published) insertArtifactMetadata(connection, artifact, now);
 
     connection
@@ -620,7 +814,7 @@ export async function admitRun(
     throw new KernelStorageError('INVALID_REQUEST', 'canonical clock is still in clock_regressed');
   }
   if (committed) return { replayed: false, run, response };
-  const raced = await replayAdmitRun(driver, artifacts, owner, input, admissionIntentDigest, requestDigest);
+  const raced = await replay();
   if (raced !== undefined) return raced;
   throw new KernelStorageError('RECOVERY_REQUIRED', 'run.submit transaction committed no Run');
 }

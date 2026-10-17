@@ -1,5 +1,5 @@
 import { canonicalJsonBytes, canonicalSha256 } from '../../kernel/canonical.js';
-import { planCanonicalArtifact } from '../../kernel/artifact-plan.js';
+import { planCanonicalArtifact, type PlannedArtifact } from '../../kernel/artifact-plan.js';
 import { digestOmitting, identityHash, parseCanonicalTime } from '../../kernel/identity.js';
 import type { Run, RunAssemblyV1, RunFrontier, RunSpec, ToolResultItem, ToolResultPayloadV1, ToolResultModelContentV1 } from '../../kernel/types.js';
 import type { PolicyEngineProfileV1, RunPolicySnapshotV1, ToolObservationV1, ToolOperationGrantV1,
@@ -18,25 +18,31 @@ import { readCanonicalArtifact } from '../agent-context.js';
 import { insertArtifactMetadata, type ArtifactCatalog } from '../artifacts.js';
 import { advanceTimeFence, readTimeFence, sampleCanonicalNow, type TimeFenceAdvance } from '../canonical-time.js';
 import { validateControlChannelClosure } from '../control-channel.js';
-import { prepareContinuationCommit } from '../continuation-commit.js';
+import { planContinuationCommit, prepareContinuationCommit } from '../continuation-commit.js';
+import { isJoinedCasPublicationFailure } from '../cas.js';
 import { decodeWorkspaceIdentity } from '../decoders.js';
 import { joinResourceOperations, KernelStorageError, stateOperation } from '../errors.js';
 import { readBuiltinEditLaunchClosure } from '../execution-closure.js';
-import { nextJournalSequence, readHighestPreparedAttempt, readInvocationAttempt } from '../repositories/journal.js';
+import { nextJournalSequence, readHighestPreparedAttempt, readInvocationAttempt, readInvocationJournal } from '../repositories/journal.js';
+import { readWorkerLaunchesForRun } from '../repositories/worker-launches.js';
+import { readWorkspaceGenerationsForRun } from '../repositories/workspace-generations.js';
 import { insertControlRequest, readCheckpoint, readControlRequest, readRun, readSession, readSessionPrincipalId, ZERO_BUDGET } from '../rows.js';
-import type { SqliteConnection, SqliteDriver } from '../sqlite-driver.js';
+import { isRolledBackSqliteTransactionFailure, type SqliteConnection, type SqliteDriver } from '../sqlite-driver.js';
 import { assertActiveStateOwner, type StateOwnerContext } from '../state-owner.js';
 import { prepareToolCheckpoint, toolCheckpointId, type NativeWorkerRetirement } from '../tool-checkpoint.js';
 import { readToolCut, type ToolCut } from '../tool-cut.js';
 import { readToolApproval, readToolApprovalWait, type ApprovalResponse } from '../tool-approval-recovery.js';
 import { loadAgentStop } from './stop.js';
 import { appendRunStateEvent, assertLiveDispatchState, claimValidatedInvocation, prepareValidatedInvocation,
-  requireHealthyFence, settleValidatedInvocation, type ClaimInvocationDispatchInput } from './invocation.js';
+  prepareValidatedInvocationSettlement, requireHealthyFence, settleValidatedInvocation, type ClaimInvocationDispatchInput } from './invocation.js';
 import { loadInputContinuation } from './input.js';
+import { decodeAgentStop, selectAgentStop, type AgentStopIntent } from '../../runtime/stop.js';
+import type { HeldInstalledRuntime } from '../installed-runtime.js';
 
 const TOOL_BUDGET = Object.freeze({ modelTokens: 0, costMicros: 0, toolCalls: 1, repairAttempts: 0 });
 type ResultFields<T = Exclude<ToolResultPayloadV1, { source: 'user_input' }>> = T extends ToolResultPayloadV1
   ? Omit<T, 'schemaVersion' | 'format' | 'runId' | 'batchItemId' | 'callId' | 'index' | 'toolName' | 'modelContentRef' | 'modelContentDigest' | 'payloadDigest'> : never;
+type ToolCompletionInput = { opId: string; attempt: number; expectedRunRevision: number; observationRef: string };
 
 function policyItem(evidence: ToolPolicyChannelEvidenceV1, decision: { grantRef: string } | { outcomeItemRef: string },
   approval?: ToolApprovalDecisionV1): ToolPolicyDecisionItem {
@@ -83,7 +89,7 @@ function nextFrontier(cut: ToolCut, addedItems: number): RunFrontier {
 export async function loadToolContinuation(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, input: {
   run: Run; spec: RunSpec; assembly: RunAssemblyV1; contracts: ToolInputAuthority[];
   resolveToolInput: ResolveToolInput; releaseKeys?: readonly ReleaseTrustKey[];
-}, reobserve?: NativeWorkerRetirement) {
+}, reobserve?: NativeWorkerRetirement, installedRuntime?: HeldInstalledRuntime) {
   const { run: admittedRun, spec, assembly, contracts, resolveToolInput } = input;
   const runId = admittedRun.id;
   const session = readSession(driver, admittedRun.sessionId);
@@ -226,8 +232,197 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
   };
   const inputContinuation = await loadInputContinuation(driver, artifacts, owner, { ...controlAuthority, contracts }, reobserve);
 
+  function completionOwner(original: ToolCompletionInput) {
+    const readItems = (connection: SqliteConnection) => connection.prepare(
+      'SELECT item_id, item_seq, kind, payload_ref, created_at FROM items WHERE run_id = ? ORDER BY item_seq'
+    ).all<{ item_id: string; item_seq: bigint; kind: string; payload_ref: string; created_at: string }>(runId)
+      .map(row => ({ ...row, item_seq: Number(row.item_seq) }));
+    let selection: { selected: ToolCut; expected: ReturnType<typeof requestFor>; items: ReturnType<typeof readItems> } | undefined;
+    let normalized: { observation: ToolObservationV1; ref: string; artifacts: PlannedArtifact[] } | undefined;
+    const published = new Set<string>();
+    let seal: Awaited<ReturnType<typeof prepareToolCheckpoint>> | undefined;
+    let established = false, refreshed = false, failure: { error: unknown } | undefined;
+    let settlement: ReturnType<typeof prepareValidatedInvocationSettlement> | undefined;
+    let graph: ReturnType<typeof planContinuationCommit> | undefined;
+    let observationMetadata: Awaited<ReturnType<ArtifactCatalog['describe']>> | undefined;
+    let checkedRun: Run | undefined, checkedStop: AgentStopIntent | undefined;
+    let stopConflict: { error: KernelStorageError; revision: number } | undefined;
+
+    function validateOriginalCut(connection: SqliteConnection, current: Run) {
+      if (!selection) throw new KernelStorageError('RECOVERY_REQUIRED', 'tool completion has no original selected cut');
+      const { selected, items } = selection;
+      const stable = ({ revision: _revision, updatedAt: _time, stopIntentRef: _intent, cancelRequested: _cancel, ...data }: Run) => data;
+      const unchanged = canonicalSha256(current) === canonicalSha256(selected.run);
+      if ((!unchanged && (current.revision <= selected.run.revision || current.updatedAt < selected.run.updatedAt ||
+          !current.stopIntentRef || selected.run.cancelRequested && !current.cancelRequested ||
+          canonicalSha256(stable(current)) !== canonicalSha256(stable(selected.run)))) ||
+          canonicalSha256(readInvocationJournal(connection, runId)) !== canonicalSha256(selected.journal) ||
+          canonicalSha256(readItems(connection)) !== canonicalSha256(items) ||
+          canonicalSha256(readCheckpoint(connection, current.latestCheckpointId)) !== canonicalSha256(selected.checkpoint) ||
+          canonicalSha256(readWorkerLaunchesForRun(connection, runId, true)) !== canonicalSha256(selected.workerLaunches) ||
+          canonicalSha256(readWorkspaceGenerationsForRun(connection, runId)) !== canonicalSha256(selected.workspaceGenerations)) {
+        throw new KernelStorageError('REVISION_CONFLICT', 'retained tool completion differs from its original cut');
+      }
+      assertCut(connection, current, selected);
+    }
+    function validateSnapshot(connection: SqliteConnection, current: Run) {
+      validateOriginalCut(connection, current);
+      if (!checkedRun || canonicalSha256(current) !== canonicalSha256(checkedRun)) {
+        throw new KernelStorageError('REVISION_CONFLICT', 'tool completion has not verified this exact StopIntent cut');
+      }
+    }
+    function changedStopCut(current: Run, expectedRunRevision: number): never {
+      validateOriginalCut(driver, current);
+      const error = new KernelStorageError('REVISION_CONFLICT', 'tool completion StopIntent revision changed during validation');
+      if (current.revision > expectedRunRevision && current.stopIntentRef) stopConflict = { error, revision: current.revision };
+      throw error;
+    }
+    async function checkStopCut(expectedRunRevision: number) {
+      if (!selection || !checkedRun) throw new KernelStorageError('RECOVERY_REQUIRED', 'tool completion has no original StopIntent cut');
+      const current = readRun(driver, runId);
+      if (current.revision !== expectedRunRevision) changedStopCut(current, expectedRunRevision);
+      if (canonicalSha256(current) === canonicalSha256(checkedRun)) { validateSnapshot(driver, current); return; }
+      // cut() authenticates the retained StopIntent, including its original
+      // control row/channel or reproducible resource cause. Decoding a ref
+      // alone would not establish that ownership.
+      const next = await cut();
+      const { run: _originalRun, ...originalData } = selection.selected;
+      const { run: _nextRun, ...nextData } = next;
+      validateOriginalCut(driver, next.run);
+      if (canonicalSha256(nextData) !== canonicalSha256(originalData) || next.run.revision <= checkedRun.revision ||
+          next.run.updatedAt < checkedRun.updatedAt || checkedRun.cancelRequested && !next.run.cancelRequested || !next.run.stopIntentRef) {
+        throw new KernelStorageError('REVISION_CONFLICT', 'tool completion StopIntent replaced its original continuation');
+      }
+      const intent = decodeAgentStop(await readCanonicalArtifact(artifacts, next.run.stopIntentRef), next.run);
+      if (next.run.stopIntentRef !== checkedRun.stopIntentRef &&
+          (selectAgentStop(checkedStop, intent) !== intent || checkedStop !== undefined && intent.createdAt < checkedStop.createdAt)) {
+        throw new KernelStorageError('REVISION_CONFLICT', 'tool completion StopIntent is not a monotonic upgrade');
+      }
+      const observed = readRun(driver, runId);
+      if (next.run.revision !== expectedRunRevision || canonicalSha256(observed) !== canonicalSha256(next.run)) changedStopCut(observed, expectedRunRevision);
+      checkedRun = next.run; checkedStop = intent;
+      validateSnapshot(driver, observed);
+    }
+
+    return { input: original, get established() { return established; }, async complete(expectedRunRevision: number) {
+      if (failure && !isJoinedCasPublicationFailure(failure.error) && !isRolledBackSqliteTransactionFailure(driver, failure.error) &&
+          !settlement?.hasRevisionConflict(failure.error, expectedRunRevision) &&
+          !(stopConflict !== undefined && stopConflict.error === failure.error && expectedRunRevision >= stopConflict.revision)) throw failure.error;
+      const retryCommit = failure !== undefined && isRolledBackSqliteTransactionFailure(driver, failure.error);
+      try {
+        if (!selection) {
+          const selected = await cut(expectedRunRevision), expected = requestFor(selected), items = readItems(driver);
+          requireEqual(items.map(row => [row.item_id, Number(row.item_seq), row.kind, row.payload_ref]),
+            selected.items.map(row => [row.item.itemId, row.itemSeq, row.item.kind, row.itemRef]), 'original completion items');
+          selection = { selected, expected, items };
+          // The original ToolCut already validated the complete historical
+          // stop closure; retain only its exact typed intent for precedence.
+          checkedRun = selected.run;
+          checkedStop = selected.run.stopIntentRef ? decodeAgentStop(await readCanonicalArtifact(artifacts, selected.run.stopIntentRef), selected.run) : undefined;
+        }
+        const { selected, expected } = selection;
+        await checkStopCut(expectedRunRevision);
+        // Awaiting even an already checked cut yields. A cancellation which
+        // commits in that gap is another pending conflict, not a sticky
+        // rejection or permission to skip its asynchronous ownership check.
+        const current = readRun(driver, runId);
+        if (current.revision !== expectedRunRevision) changedStopCut(current, expectedRunRevision);
+        if (failure && settlement?.hasRevisionConflict(failure.error, expectedRunRevision) &&
+            !settlement.acceptRevisionConflict(failure.error, expectedRunRevision)) throw failure.error;
+        stopConflict = undefined;
+        validateSnapshot(driver, current);
+        const entries = readInvocationAttempt(driver, runId, original.opId, original.attempt);
+        const prepared = entries.find(entry => entry.phase === 'prepared'), claim = entries.find(entry => entry.phase === 'dispatch_claimed');
+        if (!prepared?.grantRef || !claim || original.opId !== expected.request.opId ||
+            readHighestPreparedAttempt(driver, runId, original.opId)?.attempt !== original.attempt) {
+          throw new KernelStorageError('STATE_TRANSITION_INVALID', 'tool completion requires its current permanent dispatch claim');
+        }
+        if (!normalized) {
+          const proof = await verifyGrant(prepared.grantRef);
+          requireEqual(proof.request, expected.request, 'completed tool request');
+          let observationRef = original.observationRef;
+          let observation = await readCanonicalArtifact<ToolObservationV1>(artifacts, observationRef);
+          if (!exactKeys(observation, ['schemaVersion', 'format', 'runId', 'opId', 'attempt', 'requestRef', 'targetRef', 'grantRef', 'dispatchId',
+            'observedAt', 'observationDigest', 'outcome', ...(observation.postEffect === undefined ? [] : ['postEffect']),
+            ...(observation.outcome === 'executed' ? ['content'] : ['code', 'diagnosticRef', 'diagnosticDigest'])]) ||
+              observation.schemaVersion !== 1 || observation.format !== 'cliq-tool-observation-v1' || observation.runId !== runId ||
+              observation.opId !== original.opId || observation.attempt !== original.attempt || observation.requestRef !== prepared.requestRef ||
+              observation.targetRef !== prepared.target || observation.grantRef !== prepared.grantRef || observation.dispatchId !== claim.dispatchId ||
+              digestOmitting(observation, 'observationDigest') !== observation.observationDigest || observation.observedAt < claim.timestamp ||
+              parseCanonicalTime(observation.observedAt) > parseCanonicalTime(sampleCanonicalNow())) throw new TypeError('tool observation does not match its claimed request');
+          const plans: PlannedArtifact[] = [];
+          if (observation.outcome === 'executed' && (canonicalJsonBytes(observation.content).byteLength > 1_048_576 ||
+              outputSchemas.get(expected.entry.name)?.(observation.content) === false)) {
+            const diagnostic = planCanonicalArtifact({ schemaVersion: 1, format: 'cliq-tool-output-diagnostic-v1',
+              code: 'TOOL_PROTOCOL_ERROR', observationRef }, 'cliq-tool-output-diagnostic-v1');
+            const { content: _content, observationDigest: _digest, ...base } = observation;
+            const core = { ...base, outcome: 'error' as const, code: 'TOOL_PROTOCOL_ERROR' as const,
+              diagnosticRef: diagnostic.ref, diagnosticDigest: diagnostic.ref };
+            observation = { ...core, observationDigest: canonicalSha256(core) };
+            const revised = planCanonicalArtifact(observation, observation.format);
+            plans.push(diagnostic, revised); observationRef = revised.ref;
+          }
+          normalized = { observation, ref: observationRef, artifacts: plans };
+        }
+        for (const plan of normalized.artifacts) if (!published.has(plan.ref)) {
+          await artifacts.publishBytes(plan.bytes, plan.mediaType, plan.schemaKind); published.add(plan.ref);
+        }
+        const observed = normalized.observation, observationRef = normalized.ref;
+        if (!established) {
+          if (observed.outcome === 'error') {
+            if (!['TOOL_EXECUTION_FAILED', 'TOOL_PROTOCOL_ERROR', 'TOOL_RESOURCE_EXHAUSTED'].includes(observed.code) ||
+                canonicalSha256(await readCanonicalArtifact(artifacts, observed.diagnosticRef)) !== observed.diagnosticDigest) throw new TypeError('tool error diagnostic mismatch');
+          } else if (observed.outcome !== 'executed') throw new TypeError('unknown tool observation outcome');
+          const mutating = expected.entry.access !== 'read';
+          if (mutating !== (observed.postEffect !== undefined) || (observed.postEffect !== undefined &&
+              !exactKeys(observed.postEffect, ['workspaceStateRef', 'snapshotEvidenceRef', 'retirementEvidenceRef']))) {
+            throw new TypeError('mutating tool completion requires its exact post-effect checkpoint; read-only tools cannot replace workspace state');
+          }
+          seal = observed.postEffect === undefined ? undefined : await prepareToolCheckpoint(driver, artifacts, owner, {
+            run: selected.run, spec, assembly, checkpointId: toolCheckpointId(runId, original.opId, original.attempt),
+            observedAt: observed.observedAt, postEffect: observed.postEffect
+          }, reobserve);
+          established = true;
+        }
+        if (!settlement) settlement = prepareValidatedInvocationSettlement(driver, artifacts, owner, { ...original, runId },
+          { phase: 'completed', resultRef: observationRef, consumed: TOOL_BUDGET }, async ({ settlement: fixed }) => {
+            if (!graph) {
+              const payload = observed.outcome === 'executed' ? { outcome: 'executed' as const, source: 'invocation' as const,
+                opId: original.opId, attempt: original.attempt, journalResultRef: observationRef, journalResultDigest: observed.observationDigest,
+                ...(expected.entry.outputSchemaRef ? { outputSchemaRef: expected.entry.outputSchemaRef, outputSchemaDigest: expected.entry.outputSchemaDigest } : {}) }
+                : { outcome: 'error' as const, code: observed.code, opId: original.opId, attempt: original.attempt,
+                    journalErrorRef: observationRef, journalErrorDigest: observed.observationDigest,
+                    diagnosticRef: observed.diagnosticRef, diagnosticDigest: observed.diagnosticDigest };
+              const result = resultPlan(expected.request, fixed.settledAt, payload, observed.outcome === 'executed' ? observed.content : { code: observed.code });
+              graph = planContinuationCommit(artifacts, { context: selected.context, existingItems: selected.items,
+                items: [result.item], frontier: nextFrontier(selected, 1), checkpointId: toolCheckpointId(runId, original.opId, original.attempt),
+                workspaceStateRef: observed.postEffect?.workspaceStateRef ?? selected.checkpoint.workspaceStateRef, artifacts: result.artifacts });
+            }
+            const plan = await graph.publish();
+            observationMetadata ??= await artifacts.describe(observationRef, 'application/json', observed.format);
+            if (!refreshed) { await seal?.refresh(); refreshed = true; }
+            return { get metadata() { return [observationMetadata!, ...plan.metadata, ...(seal?.metadata ?? [])]; },
+              commit(connection, current, journal, committedAt) {
+                assertCut(connection, current, selected);
+                if (fixed.settledAt < observed.observedAt) throw new TypeError('tool settlement precedes its observation');
+                seal?.commit(connection, current, committedAt);
+                plan.commit(connection, current, journal.seq, committedAt);
+              } };
+          }, validateSnapshot);
+        // A rolled-back SQL attempt may need a newer observation, but never a
+        // new seal, allowance counter, settlement timestamp or result graph.
+        if (retryCommit) await seal?.refresh();
+        const result = await settlement.settle(expectedRunRevision);
+        failure = undefined;
+        return result;
+      } catch (error) { failure = { error }; throw error; }
+    } };
+  }
+  let pendingCompletion: ReturnType<typeof completionOwner> | undefined;
+  let completing: Promise<Awaited<ReturnType<ReturnType<typeof completionOwner>['complete']>>> | undefined;
+
   return {
-    ...loadAgentStop(driver, artifacts, owner, controlAuthority, reobserve),
+    ...loadAgentStop(driver, artifacts, owner, controlAuthority, reobserve, installedRuntime),
     waitForInput: inputContinuation.waitForInput,
     submitInput: inputContinuation.submitInput,
     prepareTool: stateOperation('RECOVERY_REQUIRED', async (input: { expectedRunRevision: number; leaseEpoch: number }) => {
@@ -543,74 +738,31 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
         })
       });
     }),
-    completeTool: stateOperation('INVALID_REQUEST', async (input: {
-      opId: string; attempt: number; expectedRunRevision: number; observationRef: string;
-    }) => {
+    completeTool: stateOperation('INVALID_REQUEST', async (input: ToolCompletionInput) => {
       input = immutableSnapshot(input);
-      const selected = await cut(input.expectedRunRevision);
-      const expected = requestFor(selected);
-      const entries = readInvocationAttempt(driver, runId, input.opId, input.attempt);
-      const prepared = entries.find((entry) => entry.phase === 'prepared'), claim = entries.find((entry) => entry.phase === 'dispatch_claimed');
-      if (!prepared?.grantRef || !claim || input.opId !== expected.request.opId || readHighestPreparedAttempt(driver, runId, input.opId)?.attempt !== input.attempt) {
-        throw new KernelStorageError('STATE_TRANSITION_INVALID', 'tool completion requires its current permanent dispatch claim');
+      if (readRun(driver, runId).revision !== input.expectedRunRevision) {
+        throw new KernelStorageError('REVISION_CONFLICT', 'tool Run revision changed');
       }
-      const proof = await verifyGrant(prepared.grantRef);
-      requireEqual(proof.request, expected.request, 'completed tool request');
-      let observationRef = input.observationRef;
-      let observation = await readCanonicalArtifact<ToolObservationV1>(artifacts, observationRef);
-      if (!exactKeys(observation, ['schemaVersion', 'format', 'runId', 'opId', 'attempt', 'requestRef', 'targetRef', 'grantRef', 'dispatchId',
-        'observedAt', 'observationDigest', 'outcome', ...(observation.postEffect === undefined ? [] : ['postEffect']),
-        ...(observation.outcome === 'executed' ? ['content'] : ['code', 'diagnosticRef', 'diagnosticDigest'])]) ||
-          observation.schemaVersion !== 1 || observation.format !== 'cliq-tool-observation-v1' || observation.runId !== runId ||
-          observation.opId !== input.opId || observation.attempt !== input.attempt || observation.requestRef !== prepared.requestRef ||
-          observation.targetRef !== prepared.target || observation.grantRef !== prepared.grantRef || observation.dispatchId !== claim.dispatchId ||
-          digestOmitting(observation, 'observationDigest') !== observation.observationDigest || observation.observedAt < claim.timestamp ||
-          parseCanonicalTime(observation.observedAt) > parseCanonicalTime(sampleCanonicalNow())) throw new TypeError('tool observation does not match its claimed request');
-      if (observation.outcome === 'executed' && (canonicalJsonBytes(observation.content).byteLength > 1_048_576 ||
-          outputSchemas.get(expected.entry.name)?.(observation.content) === false)) {
-        const diagnostic = await artifacts.publishCanonical({ schemaVersion: 1, format: 'cliq-tool-output-diagnostic-v1',
-          code: 'TOOL_PROTOCOL_ERROR', observationRef }, 'cliq-tool-output-diagnostic-v1');
-        const { content: _content, observationDigest: _digest, ...base } = observation;
-        const core = { ...base, outcome: 'error' as const, code: 'TOOL_PROTOCOL_ERROR' as const, diagnosticRef: diagnostic.ref, diagnosticDigest: diagnostic.ref };
-        observation = { ...core, observationDigest: canonicalSha256(core) };
-        observationRef = (await artifacts.publishCanonical(observation, observation.format)).ref;
+      if (completing) throw new KernelStorageError('REVISION_CONFLICT', 'tool completion already has its original operation in flight');
+      if (pendingCompletion && (pendingCompletion.input.opId !== input.opId || pendingCompletion.input.attempt !== input.attempt ||
+          pendingCompletion.input.observationRef !== input.observationRef)) {
+        throw new KernelStorageError('REVISION_CONFLICT', 'tool completion already retains another original observation');
       }
-      if (observation.outcome === 'error') {
-        if (!['TOOL_EXECUTION_FAILED', 'TOOL_PROTOCOL_ERROR', 'TOOL_RESOURCE_EXHAUSTED'].includes(observation.code) ||
-            canonicalSha256(await readCanonicalArtifact(artifacts, observation.diagnosticRef)) !== observation.diagnosticDigest) throw new TypeError('tool error diagnostic mismatch');
-      } else if (observation.outcome !== 'executed') throw new TypeError('unknown tool observation outcome');
-      const mutating = expected.entry.access !== 'read';
-      if (mutating !== (observation.postEffect !== undefined) || (observation.postEffect !== undefined &&
-          !exactKeys(observation.postEffect, ['workspaceStateRef', 'snapshotEvidenceRef', 'retirementEvidenceRef']))) {
-        throw new TypeError('mutating tool completion requires its exact post-effect checkpoint; read-only tools cannot replace workspace state');
+      const retained = pendingCompletion ??= completionOwner(input);
+      const operation = retained.complete(input.expectedRunRevision);
+      completing = operation;
+      try {
+        const result = immutableSnapshot(await operation);
+        if (pendingCompletion === retained) pendingCompletion = undefined;
+        return result;
+      } catch (error) {
+        // Invalid observations never become a retained completion authority.
+        // A joined publication failure keeps even its partial immutable plan.
+        if (!retained.established && !isJoinedCasPublicationFailure(error) && pendingCompletion === retained) pendingCompletion = undefined;
+        throw error;
+      } finally {
+        if (completing === operation) completing = undefined;
       }
-      const checkpointId = toolCheckpointId(runId, input.opId, input.attempt);
-      const seal = observation.postEffect === undefined ? undefined : await prepareToolCheckpoint(driver, artifacts, owner, {
-        run: selected.run, spec, assembly, checkpointId, observedAt: observation.observedAt, postEffect: observation.postEffect
-      }, reobserve);
-      const observed = observation;
-      // A received tool error is a known, executed result, not proof that dispatch released nothing.
-      return immutableSnapshot(await settleValidatedInvocation(driver, artifacts, owner, { ...input, runId },
-        { phase: 'completed', resultRef: observationRef, consumed: TOOL_BUDGET }, async ({ run, settlement }) => {
-        const payload = observed.outcome === 'executed' ? { outcome: 'executed' as const, source: 'invocation' as const, opId: input.opId, attempt: input.attempt,
-          journalResultRef: observationRef, journalResultDigest: observed.observationDigest,
-          ...(expected.entry.outputSchemaRef ? { outputSchemaRef: expected.entry.outputSchemaRef, outputSchemaDigest: expected.entry.outputSchemaDigest } : {}) }
-          : { outcome: 'error' as const, code: observed.code, opId: input.opId, attempt: input.attempt,
-              journalErrorRef: observationRef, journalErrorDigest: observed.observationDigest,
-              diagnosticRef: observed.diagnosticRef, diagnosticDigest: observed.diagnosticDigest };
-        const result = resultPlan(expected.request, settlement.settledAt, payload, observed.outcome === 'executed' ? observed.content : { code: observed.code });
-        const plan = await prepareContinuationCommit(artifacts, { context: selected.context, existingItems: selected.items,
-          items: [result.item], frontier: nextFrontier(selected, 1), checkpointId,
-          workspaceStateRef: observed.postEffect?.workspaceStateRef ?? selected.checkpoint.workspaceStateRef, artifacts: result.artifacts });
-        const observationMetadata = await artifacts.describe(observationRef, 'application/json', observed.format);
-        await seal?.refresh();
-        return { metadata: [observationMetadata, ...plan.metadata, ...(seal?.metadata ?? [])], commit(connection, current, journal, committedAt) {
-          assertCut(connection, current, selected);
-          if (settlement.settledAt < observed.observedAt || run.revision !== selected.run.revision) throw new TypeError('tool settlement precedes its observation');
-          seal?.commit(connection, current, committedAt);
-          plan.commit(connection, current, journal.seq, committedAt);
-        } };
-      }));
     })
   };
 }

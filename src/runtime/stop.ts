@@ -47,7 +47,13 @@ export function decodeAgentStop(value: unknown, run: Run): AgentStopIntent {
       fields.push('contextManifestRef', 'nextPromptTokens', 'triggerThresholdTokens', 'hardPromptTokens', 'protectedTokens', 'sourceInputTokenCap');
       assertArtifactRef(intent.contextManifestRef);
       if ([intent.nextPromptTokens, intent.triggerThresholdTokens, intent.hardPromptTokens, intent.protectedTokens, intent.sourceInputTokenCap]
-        .some((n) => !Number.isSafeInteger(n) || n < 0) || intent.nextPromptTokens <= intent.triggerThresholdTokens) throw new TypeError('invalid context exhaustion');
+        .some((n) => !Number.isSafeInteger(n) || n < 0)) throw new TypeError('invalid context exhaustion');
+      if (intent.trigger === 'request_body_bytes') {
+        fields.push('trigger', 'modelVisiblePromptDigest', 'requestBodyBytes', 'requestBodyLimitBytes');
+        assertArtifactRef(intent.modelVisiblePromptDigest);
+        if (intent.nextPromptTokens > intent.triggerThresholdTokens || intent.requestBodyLimitBytes !== 1_048_576 ||
+            !Number.isSafeInteger(intent.requestBodyBytes) || intent.requestBodyBytes <= intent.requestBodyLimitBytes) throw new TypeError('invalid request body exhaustion');
+      } else if (intent.nextPromptTokens <= intent.triggerThresholdTokens) throw new TypeError('invalid context exhaustion');
     } else if (intent.runtimeSubtype === 'runtime') {
       fields.push('failingOpId', 'runtimeFailureRef', 'runtimeFailureDigest');
       assertArtifactRef(intent.runtimeFailureRef);
@@ -67,13 +73,20 @@ export function agentStopDetail(intent: AgentStopIntent, stopIntentRef: string, 
       ? { kind: 'runtime', failingOpId: intent.failingOpId, runtimeFailureRef: intent.runtimeFailureRef, runtimeFailureDigest: intent.runtimeFailureDigest }
     : intent.runtimeSubtype === 'context_compaction_failed'
       ? { kind: intent.runtimeSubtype, compactionPlanRef: intent.compactionPlanRef, modelOpId: intent.modelOpId, attempt: intent.attempt, evidenceRef: stopIntentRef }
-      : { kind: intent.runtimeSubtype, contextManifestRef: intent.contextManifestRef, nextPromptTokens: intent.nextPromptTokens,
-          triggerThresholdTokens: intent.triggerThresholdTokens, hardPromptTokens: intent.hardPromptTokens,
-          protectedTokens: intent.protectedTokens, sourceInputTokenCap: intent.sourceInputTokenCap, evidenceRef: stopIntentRef };
+      : contextExhaustionDetail(intent, stopIntentRef);
   return { schemaVersion: 1, runId: intent.runId, reason: intent.reason,
     reasonDetail,
     primaryEvidenceRef: intent.origin === 'runtime' && intent.runtimeSubtype === 'runtime' ? intent.runtimeFailureRef : stopIntentRef,
     publicationResultItemRefs: [], abandonedRetryInvocations: [], createdAt };
+}
+
+function contextExhaustionDetail(intent: Extract<AgentStopIntent, { runtimeSubtype: 'context_window_exhausted' }>, evidenceRef: string): TerminalDetail['reasonDetail'] {
+  const detail = { kind: intent.runtimeSubtype, contextManifestRef: intent.contextManifestRef, nextPromptTokens: intent.nextPromptTokens,
+    triggerThresholdTokens: intent.triggerThresholdTokens, hardPromptTokens: intent.hardPromptTokens,
+    protectedTokens: intent.protectedTokens, sourceInputTokenCap: intent.sourceInputTokenCap, evidenceRef };
+  return intent.trigger === 'request_body_bytes' ? { ...detail, trigger: intent.trigger,
+    modelVisiblePromptDigest: intent.modelVisiblePromptDigest, requestBodyBytes: intent.requestBodyBytes,
+    requestBodyLimitBytes: intent.requestBodyLimitBytes } : detail;
 }
 
 /** Equal precedence retains the first committed fact; supported resource stops cannot outrank cancellation. */

@@ -63,7 +63,7 @@ function compactionEnvelope(): CompactionPromptEnvelopeMaterial {
   };
 }
 
-export function testFixture(provider: ProviderName = 'openai', nativeToolCalling = true): ValidateRunAssemblyInput {
+export function testFixture(provider: ProviderName = 'openai', nativeToolCalling = true, contextLimitTokens = 32768): ValidateRunAssemblyInput {
   const model = 'model-1';
   const localEndpoint = { scheme: 'http' as const, host: '127.0.0.1' as const, port: 11434 };
   const endpointIdentityDigest = provider === 'ollama' ? canonicalSha256(localEndpoint) : ref(1);
@@ -72,7 +72,7 @@ export function testFixture(provider: ProviderName = 'openai', nativeToolCalling
     nativeToolCalling,
     streaming: true,
     trustedUsageEvidence: false,
-    contextLimitTokens: 32768,
+    contextLimitTokens,
     maxOutputTokens: 8192
   };
   const capability: ModelCapabilityEvidenceV1 = seal(
@@ -112,7 +112,8 @@ export function testFixture(provider: ProviderName = 'openai', nativeToolCalling
     currency: 'USD',
     unit: 'micros_per_million_tokens',
     prices: { input: 1000000, output: 2000000, cacheRead: 500000, cacheWrite: 1500000 },
-    requestTokenCeiling: { inputTokens: 32768, outputTokens: 8192, cacheReadTokens: 32768, cacheWriteTokens: 32768 },
+    requestTokenCeiling: { inputTokens: contextLimitTokens, outputTokens: 8192,
+      cacheReadTokens: contextLimitTokens, cacheWriteTokens: contextLimitTokens },
     validFrom: '2026-09-05T00:00:00.000Z',
     validThrough: '2026-09-07T00:00:00.000Z',
     tableDigest: ''
@@ -164,6 +165,8 @@ export function testFixture(provider: ProviderName = 'openai', nativeToolCalling
   const toolManifestRef = planCanonicalArtifact(manifest, manifest.format).ref;
   const envelope = compactionEnvelope();
   const k = compactionEnvelopeEstimate(envelope);
+  const output = 4096, hardPromptTokens = contextLimitTokens - output;
+  const summaryTokenCap = Math.min(8192, Math.floor(contextLimitTokens / 8));
   const assembly: RunAssemblyV1 = seal(
     {
       schemaVersion: 1,
@@ -228,14 +231,14 @@ export function testFixture(provider: ProviderName = 'openai', nativeToolCalling
       context: {
         compactionPromptEnvelopeRef: envelope.ref,
         compactionPromptEnvelopeDigest: envelope.value.envelopeDigest,
-        contextLimitTokens: 32768,
-        reservedOutputTokens: 4096,
-        hardPromptTokens: 28672,
-        triggerThresholdTokens: 20480,
-        protectedRecentTokens: 8192,
-        summaryTokenCap: 4096,
+        contextLimitTokens,
+        reservedOutputTokens: output,
+        hardPromptTokens,
+        triggerThresholdTokens: Math.min(Math.floor(7 * contextLimitTokens / 10), hardPromptTokens - 8192),
+        protectedRecentTokens: Math.min(32768, Math.floor(contextLimitTokens / 4)),
+        summaryTokenCap,
         compactionEnvelopeTokens: k,
-        sourceInputTokenCap: Math.min(16384, 32768 - 4096 - k),
+        sourceInputTokenCap: Math.min(Math.floor(contextLimitTokens / 2), contextLimitTokens - summaryTokenCap - k),
         maxSummaryBytes: 262144
       },
       createdAt: '2026-09-05T00:00:00.000Z'

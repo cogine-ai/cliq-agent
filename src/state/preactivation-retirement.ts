@@ -49,6 +49,9 @@ export async function retireAbandonedPreactivations(driver: SqliteDriver, artifa
       // an installed scope. Discovery is part of retirement, not a harmless
       // validation failure that may release the actual owner lock.
       const launch = readRequiredWorkerLaunch(driver, row.launch_id);
+      if (launch.phase !== 'reserved' && launch.phase !== 'preactivated') {
+        throw new KernelStorageError('RECOVERY_REQUIRED', 'abandoned preactivation launch changed its exact phase');
+      }
       const plan = decodeWorkerContainmentPlan(await readCanonicalArtifact(artifacts, launch.containmentPlanRef));
       if (plan.backend.kind === 'linux' && plan.backend.nativeReservation) launches.push(launch);
     }
@@ -83,6 +86,9 @@ function fresh(now: string, observedAt: string): void {
 function checkedCut(connection: SqliteConnection | SqliteDriver, owner: StateOwnerContext, launchId: string) {
   const inspectingOwner = assertActiveStateOwner(connection, owner);
   const launch = readRequiredWorkerLaunch(connection, launchId);
+  if (launch.phase !== 'reserved' && launch.phase !== 'preactivated') {
+    throw new KernelStorageError('STATE_TRANSITION_INVALID', 'preactivation retirement requires its exact powerless queued launch and ready generation');
+  }
   const run = readRun(connection, launch.runId);
   const generation = readRequiredWorkspaceGenerationByRef(connection, launch.workspaceGenerationRef);
   const checkpoint = readCheckpoint(connection, generation.sourceCheckpointId);
@@ -328,6 +334,10 @@ export async function validatePreactivationQuarantine(
 ): Promise<void> {
   if (generation.phase !== 'quarantined') throw new TypeError('preactivation history has no quarantined generation');
   const launch = readRequiredWorkerLaunch(driver, quarantine.workerLaunchId);
+  if (launch.retirementKind === 'preparation') {
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'preparation retirement requires its exact owning resource closure');
+  }
+  if (launch.phase !== 'retired') throw new TypeError('preactivation history has no retired original launch');
   const plan = decodeWorkerContainmentPlan(await readCanonicalArtifact(artifacts, launch.containmentPlanRef));
   const spec = decodeWorkerSandboxLaunchSpec(await readCanonicalArtifact(artifacts, launch.sandboxLaunchSpecRef));
   const identity = decodeWorkspaceGenerationIdentity(await readCanonicalArtifact(artifacts, generation.generationRef));

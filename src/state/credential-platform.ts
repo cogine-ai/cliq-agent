@@ -26,6 +26,9 @@ export type NativeSecretServiceInput =
   | Readonly<{ kind: 'create_compare'; selector: SecretServiceSelector; secret: Buffer }>
   | Readonly<{ kind: 'inspect'; selector: SecretServiceSelector; expectedObservation: SecretServiceObservation }>
   | Readonly<{ kind: 'delete_known'; selector: SecretServiceSelector }>;
+/** The original inspection Promise also retains its exact native cancellation
+ * join. It grants no observation or authority before that Promise settles. */
+export type NativeCredentialInspection = Promise<unknown> & Readonly<{ cancelAndJoin(): Promise<void> }>;
 export type NativeSystemdCommand = Readonly<{ path: string; argv: readonly string[]; flags: readonly string[] }>;
 export type InstalledUnitObservation = Readonly<{
   Id: string; Names: readonly string[]; Following: string; LoadState: string; ActiveState: string; SubState: string;
@@ -51,8 +54,9 @@ export type UserManagerObservation = Readonly<{
   bus: PlatformBusObservation; manager: PlatformServiceObservation; unit?: InstalledUnitObservation; jobPath?: string;
 }>;
 export type NativeCredentialPlatformBinding = Readonly<{
-  interfaceVersion: 1;
+  interfaceVersion: 2;
   currentUser(): CredentialPlatformUser;
+  secretService(input: Extract<NativeSecretServiceInput, { kind: 'inspect' }>): NativeCredentialInspection;
   secretService(input: NativeSecretServiceInput): Promise<unknown>;
   userManager(input: NativeUserManagerInput): Promise<unknown>;
 }>;

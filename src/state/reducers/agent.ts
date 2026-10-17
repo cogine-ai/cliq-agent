@@ -28,6 +28,9 @@ import { loadToolContinuation } from './tool.js';
 import { readToolCut } from '../tool-cut.js';
 import type { ReleaseTrustKey } from '../../policy/runtime-authority.js';
 import type { NativeWorkerRetirement } from '../tool-checkpoint.js';
+import { planModelOperationGrant } from '../../kernel/model-grant.js';
+import { readModelGrantClosure, readModelTarget } from '../model-grant.js';
+import type { HeldInstalledRuntime } from '../installed-runtime.js';
 
 export type LoadAgentRunInput = {
   runId: string;
@@ -115,7 +118,7 @@ function appendItems(connection: SqliteConnection, run: Run, items: Continuation
 /** A loaded authority handle only: every mutable Run/frontier/Journal value is read from SQLite on each operation. */
 export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function loadAgentRun(
   driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, input: LoadAgentRunInput,
-  reobserve?: NativeWorkerRetirement
+  reobserve?: NativeWorkerRetirement, installedRuntime?: HeldInstalledRuntime
 ) {
   const runId = input.runId;
   const releaseKeys = input.releaseKeys === undefined ? undefined : immutableSnapshot(input.releaseKeys);
@@ -181,7 +184,7 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
     const items = await readContextItems(driver, artifacts, runId, context.throughItemSeq);
     const projection = await readModelContext({ artifacts, run, spec, assembly, context, systemInstruction, tools });
     const reproduced = planContextCompaction({ context, contextRef: plan.sourceContextManifestRef, items, projection,
-      policy: assembly.context, createdAt: plan.createdAt });
+      policy: assembly.context, provider: assembly.provider, compactionEnvelope: material.compactionEnvelope, createdAt: plan.createdAt });
     if (reproduced.kind !== 'compact' || canonicalSha256(reproduced.plan) !== planRef) {
       throw new TypeError('compaction plan cannot be reproduced from retained context and frozen policy');
     }
@@ -213,6 +216,13 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
     const request = await readCanonicalArtifact<ModelRequestV1>(artifacts, entry.requestRef);
     const reproduced = await reproduceRequest(admittedRun, request);
     if (reproduced.requestRef !== entry.requestRef) throw new TypeError('retained native request cannot be reproduced');
+    if (!entry.grantRef) throw new TypeError('retained model preparation has no operation grant');
+    const retainedGrant = await readCanonicalArtifact<import('../../kernel/model-grant.js').ModelOperationGrantV1>(artifacts, entry.grantRef);
+    const frontier = await readCanonicalArtifact<RunFrontier>(artifacts, retainedGrant.frontierRef);
+    if (frontier.kind !== 'agent') throw new TypeError('retained model grant has no model frontier');
+    const closure = await readModelGrantClosure(driver, artifacts, { run: admittedRun, spec, assembly, frontier,
+      frontierRef: retainedGrant.frontierRef, request, requestRef: entry.requestRef, grantRef: entry.grantRef });
+    if (entry.target !== closure.targetRef || entry.timestamp < closure.grant.issuedAt) throw new TypeError('retained model preparation differs from its grant');
     const completed = recovered.journal.find((result) => result.opId === entry.opId && result.attempt === entry.attempt && result.phase === 'completed');
     if (completed?.resultRef) {
       const root = await readCanonicalArtifact<{ format: string }>(artifacts, completed.resultRef);
@@ -237,7 +247,7 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
 
   const toolContinuation = await loadToolContinuation(driver, artifacts, owner, {
     run: admittedRun, spec, assembly, contracts, resolveToolInput, releaseKeys
-  }, reobserve);
+  }, reobserve, installedRuntime);
   return Object.freeze({
     ...toolContinuation,
     model,
@@ -265,6 +275,10 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
       const request = await readCanonicalArtifact<ModelRequestV1>(artifacts, entry.requestRef);
       const prepared = await reproduceRequest(closure.run, request);
       if (prepared.requestRef !== entry.requestRef) throw new TypeError('retained model request cannot be reproduced');
+      if (!entry.grantRef || frontier.kind !== 'agent') throw new TypeError('model attempt has no exact model operation grant');
+      const authority = await readModelGrantClosure(driver, artifacts, { run: closure.run, spec, assembly, frontier,
+        frontierRef: closure.run.frontierRef, request, requestRef: entry.requestRef, grantRef: entry.grantRef });
+      if (entry.target !== authority.targetRef) throw new TypeError('model attempt target differs from its operation grant');
       let disposition: 'candidate_required' | 'stop_required' | undefined;
       if (state.phase === 'completed') {
         const root = await readCanonicalArtifact<{ format: string; stopReason?: string }>(artifacts, state.resultRef!);
@@ -283,7 +297,8 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
       const projection = await project(cut.run, cut.context, cut.checkpoint.contextManifestRef);
       const selection = cut.frontier.phase === 'context_compaction' ? await compactionSource(cut.run, cut.frontier.compactionPlanRef!)
         : planContextCompaction({ context: cut.context, contextRef: cut.checkpoint.contextManifestRef, items: cut.items,
-          projection, policy: assembly.context, createdAt: sampleCanonicalNow() });
+          projection, policy: assembly.context, provider: assembly.provider, compactionEnvelope: material.compactionEnvelope,
+          createdAt: sampleCanonicalNow() });
       if (selection.kind === 'exhausted') {
         const evidence = planCanonicalArtifact(selection.evidence, selection.evidence.format);
         await publishPlans(artifacts, [evidence]);
@@ -305,18 +320,33 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
         compactionPlanRef: planArtifact!.ref, sourceContextUtf8: compaction.sourceContextUtf8 })
         : model.prepare({ kind: 'normal', invocation: { runId, opId, attempt }, projectionRef: projectionArtifact.ref, projection });
       if (history.length) assertSameModelOperation(await readCanonicalArtifact<ModelRequestV1>(artifacts, history[0]!.requestRef), prepared.request);
-      const metadata = await publishPlans(artifacts, [projectionArtifact, frontierPlan, ...(planArtifact ? [planArtifact] : []), ...prepared.artifacts]);
+      const target = await readModelTarget(driver, artifacts, { run: cut.run, spec, assembly });
+      const grantIssuedAt = sampleCanonicalNow();
+      if (grantIssuedAt >= cut.run.deadlineAt) {
+        throw new KernelStorageError('LEASE_FENCED', 'Run deadline elapsed before model grant preparation');
+      }
+      const grant = planModelOperationGrant({ ...target, run: cut.run, spec, assembly, frontier, frontierRef: frontierPlan.ref,
+        request: prepared.request as ModelRequestV1, requestRef: prepared.requestRef }, grantIssuedAt, cut.run.deadlineAt);
+      const grantPlan = planCanonicalArtifact(grant, grant.format);
+      const targetMetadata = await artifacts.describe(target.targetRef, 'application/json',
+        target.target.format === 'cliq-endpoint-registration-v1' ? 'cliq-endpoint-registration-v1' : 'cliq-local-zero-cost-v1');
+      const metadata = [...await publishPlans(artifacts, [projectionArtifact, frontierPlan, grantPlan,
+        ...(planArtifact ? [planArtifact] : []), ...prepared.artifacts]), targetMetadata];
       const admitted = await prepareValidatedInvocation(driver, artifacts, owner, {
         runId, expectedRunRevision, leaseEpoch, opId, opKind: 'model',
-        target: assembly.provider.model, requestRef: prepared.requestRef, replayClass: 'retry',
+        target: target.targetRef, requestRef: prepared.requestRef, replayClass: 'retry', grantRef: grantPlan.ref,
         reservation: { modelTokens: prepared.request.reservation.modelTokens, costMicros: prepared.request.reservation.costMicros,
           toolCalls: 0, repairAttempts: 0 }
-      }, { metadata, validate: (connection, run, actualAttempt) => {
+      }, { metadata, validate: (connection, run, actualAttempt, now) => {
         if (actualAttempt !== attempt || run.frontierRef !== cut.run.frontierRef || run.latestCheckpointId !== cut.run.latestCheckpointId) {
           throw new KernelStorageError('REVISION_CONFLICT', 'model request no longer matches its state cut');
         }
         if (requireRetryReady(modelRetryState(assembly.retry.model, readOperationJournal(connection, runId, opId), sampleCanonicalNow())) !== attempt) {
           throw new KernelStorageError('REVISION_CONFLICT', 'model retry history changed before reservation');
+        }
+        if (now < grant.issuedAt || now >= grant.expiresAt ||
+            connection.prepare('SELECT principal_id FROM runs WHERE id = ?').get<{ principal_id: string }>(runId)?.principal_id !== target.principalId) {
+          throw new KernelStorageError('LEASE_FENCED', 'model grant lifetime or principal changed before reservation');
         }
       }, commit(connection) {
         connection.prepare('UPDATE runs SET frontier_ref = ? WHERE id = ?').run(frontierPlan.ref, runId);
@@ -325,126 +355,157 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
     }),
     completeModel: stateOperation('INVALID_REQUEST', async (input: Omit<SettleInvocationInput, 'runId'> & { result: ModelAttemptResult }) => {
       // Snapshot before the first await; planned byte getters cannot swap data during CAS publication.
-      const { opId, attempt, expectedRunRevision } = input;
+      const { opId, attempt } = input;
+      let expectedRunRevision = input.expectedRunRevision;
       const plans = input.result.artifacts.map((plan) => planArtifactBytes(plan.bytes, plan.mediaType, plan.schemaKind));
       const result = input.result.kind === 'usable'
         ? { kind: 'usable' as const, ref: input.result.turnRef }
         : { kind: 'unusable' as const, ref: input.result.responseRef };
-      const entries = readInvocationAttempt(driver, runId, opId, attempt);
-      const prepared = entries.find((entry) => entry.phase === 'prepared');
-      if (prepared?.opKind !== 'model') throw new KernelStorageError('STATE_TRANSITION_INVALID', 'model completion has no matching prepared Journal entry');
-      const request = await readCanonicalArtifact<ModelRequestV1>(artifacts, prepared.requestRef);
-      const cut = await agentCut(driver, artifacts, runId, expectedRunRevision);
-      if (request.kind !== (cut.frontier.phase === 'model_turn' ? 'normal' : 'context_compaction') ||
-          request.compactionPlanRef !== cut.frontier.compactionPlanRef || request.runId !== runId || request.opId !== opId || request.attempt !== attempt ||
-          opId !== modelOpId(runId, cut.frontier) || readHighestPreparedAttempt(driver, runId, opId)?.attempt !== attempt) {
-        throw new KernelStorageError('STATE_TRANSITION_INVALID', 'model completion does not match the current frontier or highest attempt');
-      }
-      const replayed = await reproduceRequest(cut.run, request);
-      if (replayed.requestRef !== prepared.requestRef || canonicalSha256(prepared.budgetDelta) !== canonicalSha256({
-        modelTokens: request.reservation.modelTokens, costMicros: request.reservation.costMicros, toolCalls: 0, repairAttempts: 0
-      })) throw new KernelStorageError('RECOVERY_REQUIRED', 'retained request or reservation cannot be reproduced from its loaded authority');
-      await publishPlans(artifacts, plans);
-      const material = result.kind === 'usable' ? await readModelTurnMaterial(artifacts, result.ref) : undefined;
-      const resultMetadata: PublishedArtifact[] = [];
-      if (material === undefined) {
-        const unusable = await readCanonicalArtifact<ModelUnusableResponseV1>(artifacts, result.ref);
-        validateUnusableModelResponse(request, prepared.requestRef, unusable);
-        const bytes = await artifacts.readBytes(unusable.observedResponse.bytesRef);
-        if (bytes.byteLength !== unusable.observedResponse.byteCount) throw new TypeError('unusable observation byte count mismatch');
-        resultMetadata.push(await artifacts.describe(result.ref, 'application/json', unusable.format),
-          await artifacts.describe(unusable.observedResponse.bytesRef, 'application/octet-stream', 'cliq-observed-model-response-bytes-v1'));
-      } else {
-        resultMetadata.push(await artifacts.describe(result.ref, 'application/json', material.turn.format),
-          await artifacts.describe(material.turn.textRef, 'application/json', material.text.format));
-        for (const [index, input] of material.inputs.entries()) {
-          resultMetadata.push(await artifacts.describe(material.turn.toolCalls[index]!.inputRef, 'application/json', input.value.format),
-            await artifacts.describe(input.value.observedInputRef, 'application/json', input.observed.format));
-          if (input.value.diagnosticRef) {
-            const diagnostic = await readCanonicalArtifact<{ format: string; diagnosticDigest: string }>(artifacts, input.value.diagnosticRef);
-            if (diagnostic.format !== 'cliq-tool-input-diagnostic-v1' || diagnostic.diagnosticDigest !== input.value.diagnosticDigest ||
-                digestOmitting(diagnostic, 'diagnosticDigest') !== diagnostic.diagnosticDigest) throw new TypeError('tool diagnostic does not rehash');
-            resultMetadata.push(await artifacts.describe(input.value.diagnosticRef, 'application/json', diagnostic.format));
+      const originalRun = readRun(driver, runId);
+      if (originalRun.revision !== expectedRunRevision) throw new KernelStorageError('REVISION_CONFLICT', 'model completion started at a stale Run revision');
+      const originalJournal = readInvocationAttempt(driver, runId, opId, attempt);
+      const completionSubject = (run: Run) => {
+        const { revision: _revision, updatedAt: _updatedAt, stopIntentRef: _stopIntentRef, cancelRequested: _cancelRequested, ...subject } = run;
+        return canonicalSha256(subject);
+      };
+      for (let retry = 0; retry < 8; retry++) {
+        try {
+          const entries = readInvocationAttempt(driver, runId, opId, attempt);
+          const prepared = entries.find((entry) => entry.phase === 'prepared');
+          if (prepared?.opKind !== 'model') throw new KernelStorageError('STATE_TRANSITION_INVALID', 'model completion has no matching prepared Journal entry');
+          const request = await readCanonicalArtifact<ModelRequestV1>(artifacts, prepared.requestRef);
+          const cut = await agentCut(driver, artifacts, runId, expectedRunRevision);
+          if (request.kind !== (cut.frontier.phase === 'model_turn' ? 'normal' : 'context_compaction') ||
+              request.compactionPlanRef !== cut.frontier.compactionPlanRef || request.runId !== runId || request.opId !== opId || request.attempt !== attempt ||
+              opId !== modelOpId(runId, cut.frontier) || readHighestPreparedAttempt(driver, runId, opId)?.attempt !== attempt) {
+            throw new KernelStorageError('STATE_TRANSITION_INVALID', 'model completion does not match the current frontier or highest attempt');
           }
-        }
-      }
-      if (material?.turn.stopReason === 'cancelled' && material.turn.abortStopIntentRef !== cut.run.stopIntentRef) {
-        throw new TypeError('cancelled model turn does not match a persisted StopIntent');
-      }
-      const compaction = request.kind === 'context_compaction' ? await compactionSource(cut.run, request.compactionPlanRef!) : undefined;
-      if (compaction && compaction.plan.sourceContextManifestRef !== cut.checkpoint.contextManifestRef) {
-        throw new TypeError('compaction completion no longer matches its source checkpoint');
-      }
-      let disposition!: ModelContinuationPlan['disposition'];
-      const settled = await settleValidatedInvocation(driver, artifacts, owner, { opId, attempt, expectedRunRevision, runId }, {
-        phase: 'completed', resultRef: result.ref, consumed: ZERO_BUDGET
-      }, async ({ run, settlement }) => {
-        if (run.frontierRef !== cut.run.frontierRef || run.latestCheckpointId !== cut.run.latestCheckpointId) {
-          throw new KernelStorageError('REVISION_CONFLICT', 'model continuation state changed');
-        }
-        let plan: ModelContinuationPlan;
-        if (material === undefined) plan = { items: [], artifacts: [], disposition: 'stop_required' };
-        else if (compaction) {
-          validateModelTurn(request, material, resolveToolInput);
-          const { compactionPlanRef: _, ...normalFrontier } = cut.frontier;
-          plan = { artifacts: [], disposition: 'context_compacted', items: [{ schemaVersion: 1, kind: 'context_compaction',
-            itemId: identityHash('cliq-run-compaction-item-v1', runId, opId, String(attempt)), runId,
-            planRef: request.compactionPlanRef!, modelOpId: opId, modelAttempt: attempt,
-            summaryRef: material.turn.textRef, summaryDigest: material.text.textDigest,
-            coveredFromItemSeq: 1, coveredThroughItemSeq: compaction.plan.compactThroughItemSeq,
-            sourceItemsDigest: compaction.plan.sourceItemsDigest, createdAt: settlement.settledAt }],
-            frontier: { ...normalFrontier, phase: 'model_turn', contextItemSeq: cut.context.throughItemSeq + 1 } };
-        } else plan = planModelContinuation({ request, turnRef: result.ref, material,
-          throughItemSeq: cut.context.throughItemSeq, createdAt: settlement.settledAt, resolveToolInput });
-        let itemPlans = plan.items.map((item) => planCanonicalArtifact(item, `cliq-${item.kind.replaceAll('_', '-')}-item-v1`));
-        let context = compaction && material
-          ? replaceCompactedPrefix(cut.context, compaction.plan, { itemId: plan.items[0]!.itemId,
-              summaryRef: material.turn.textRef, summaryDigest: material.text.textDigest })
-          : structuredClone(cut.context);
-        plan.items.forEach((item, index) => {
-          const seq = cut.context.throughItemSeq + index + 1;
-          context.segments.push(item.kind === 'model_turn' || item.kind === 'tool_result'
-            ? { kind: 'raw', fromItemSeq: seq, throughItemSeq: seq, items: [{ itemSeq: seq, itemRef: itemPlans[index]!.ref }] }
-            : { kind: 'excluded_control', fromItemSeq: seq, throughItemSeq: seq,
-                sourceItemsDigest: contextSourceDigest([{ itemSeq: seq, itemRef: itemPlans[index]!.ref, item }]) });
-        });
-        context.throughItemSeq += plan.items.length;
-        context.projectionDigest = digestOmitting(context, 'projectionDigest');
-        let contextPlan = planCanonicalArtifact(context, context.format);
-        validateContextItems(context, [...cut.items, ...plan.items.map((item, index) => ({
-          item, itemSeq: cut.context.throughItemSeq + index + 1, itemRef: itemPlans[index]!.ref
-        }))]);
-        if (compaction && material) {
-          const before = await project(run, cut.context, cut.checkpoint.contextManifestRef);
-          const after = await project(run, context, contextPlan.ref);
-          if (estimatePromptTokens(projectModelVisiblePrompt(after, assembly.provider.negotiation.mode)) >=
-              estimatePromptTokens(projectModelVisiblePrompt(before, assembly.provider.negotiation.mode))) {
-            // A shape-valid but ineffective summary is still an executed, fully charged response.
-            // Leave the old context intact and hand the completed attempt to the stop reducer.
-            plan = { items: [], artifacts: [], disposition: 'stop_required' };
-            itemPlans = [];
-            context = structuredClone(cut.context);
-            contextPlan = planCanonicalArtifact(context, context.format);
+          const replayed = await reproduceRequest(cut.run, request);
+          if (replayed.requestRef !== prepared.requestRef || canonicalSha256(prepared.budgetDelta) !== canonicalSha256({
+            modelTokens: request.reservation.modelTokens, costMicros: request.reservation.costMicros, toolCalls: 0, repairAttempts: 0
+          })) throw new KernelStorageError('RECOVERY_REQUIRED', 'retained request or reservation cannot be reproduced from its loaded authority');
+          if (!prepared.grantRef) throw new TypeError('model completion has no original operation grant');
+          const authority = await readModelGrantClosure(driver, artifacts, { run: cut.run, spec, assembly, frontier: cut.frontier,
+            frontierRef: cut.run.frontierRef!, request, requestRef: prepared.requestRef, grantRef: prepared.grantRef });
+          if (prepared.target !== authority.targetRef || prepared.timestamp < authority.grant.issuedAt) {
+            throw new TypeError('model completion differs from its original target/grant');
           }
+          await publishPlans(artifacts, plans);
+          const material = result.kind === 'usable' ? await readModelTurnMaterial(artifacts, result.ref) : undefined;
+          const resultMetadata: PublishedArtifact[] = [];
+          if (material === undefined) {
+            const unusable = await readCanonicalArtifact<ModelUnusableResponseV1>(artifacts, result.ref);
+            validateUnusableModelResponse(request, prepared.requestRef, unusable);
+            const bytes = await artifacts.readBytes(unusable.observedResponse.bytesRef);
+            if (bytes.byteLength !== unusable.observedResponse.byteCount) throw new TypeError('unusable observation byte count mismatch');
+            resultMetadata.push(await artifacts.describe(result.ref, 'application/json', unusable.format),
+              await artifacts.describe(unusable.observedResponse.bytesRef, 'application/octet-stream', 'cliq-observed-model-response-bytes-v1'));
+          } else {
+            resultMetadata.push(await artifacts.describe(result.ref, 'application/json', material.turn.format),
+              await artifacts.describe(material.turn.textRef, 'application/json', material.text.format));
+            for (const [index, input] of material.inputs.entries()) {
+              resultMetadata.push(await artifacts.describe(material.turn.toolCalls[index]!.inputRef, 'application/json', input.value.format),
+                await artifacts.describe(input.value.observedInputRef, 'application/json', input.observed.format));
+              if (input.value.diagnosticRef) {
+                const diagnostic = await readCanonicalArtifact<{ format: string; diagnosticDigest: string }>(artifacts, input.value.diagnosticRef);
+                if (diagnostic.format !== 'cliq-tool-input-diagnostic-v1' || diagnostic.diagnosticDigest !== input.value.diagnosticDigest ||
+                    digestOmitting(diagnostic, 'diagnosticDigest') !== diagnostic.diagnosticDigest) throw new TypeError('tool diagnostic does not rehash');
+                resultMetadata.push(await artifacts.describe(input.value.diagnosticRef, 'application/json', diagnostic.format));
+              }
+            }
+          }
+          if (material?.turn.stopReason === 'cancelled' && material.turn.abortStopIntentRef !== cut.run.stopIntentRef) {
+            throw new TypeError('cancelled model turn does not match a persisted StopIntent');
+          }
+          const compaction = request.kind === 'context_compaction' ? await compactionSource(cut.run, request.compactionPlanRef!) : undefined;
+          if (compaction && compaction.plan.sourceContextManifestRef !== cut.checkpoint.contextManifestRef) {
+            throw new TypeError('compaction completion no longer matches its source checkpoint');
+          }
+          let disposition!: ModelContinuationPlan['disposition'];
+          const settled = await settleValidatedInvocation(driver, artifacts, owner, { opId, attempt, expectedRunRevision, runId }, {
+            phase: 'completed', resultRef: result.ref, consumed: ZERO_BUDGET
+          }, async ({ run, settlement }) => {
+            if (run.frontierRef !== cut.run.frontierRef || run.latestCheckpointId !== cut.run.latestCheckpointId) {
+              throw new KernelStorageError('REVISION_CONFLICT', 'model continuation state changed');
+            }
+            let plan: ModelContinuationPlan;
+            if (material === undefined) plan = { items: [], artifacts: [], disposition: 'stop_required' };
+            else if (compaction) {
+              validateModelTurn(request, material, resolveToolInput);
+              const { compactionPlanRef: _, ...normalFrontier } = cut.frontier;
+              plan = { artifacts: [], disposition: 'context_compacted', items: [{ schemaVersion: 1, kind: 'context_compaction',
+                itemId: identityHash('cliq-run-compaction-item-v1', runId, opId, String(attempt)), runId,
+                planRef: request.compactionPlanRef!, modelOpId: opId, modelAttempt: attempt,
+                summaryRef: material.turn.textRef, summaryDigest: material.text.textDigest,
+                coveredFromItemSeq: 1, coveredThroughItemSeq: compaction.plan.compactThroughItemSeq,
+                sourceItemsDigest: compaction.plan.sourceItemsDigest, createdAt: settlement.settledAt }],
+                frontier: { ...normalFrontier, phase: 'model_turn', contextItemSeq: cut.context.throughItemSeq + 1 } };
+            } else plan = planModelContinuation({ request, turnRef: result.ref, material,
+              throughItemSeq: cut.context.throughItemSeq, createdAt: settlement.settledAt, resolveToolInput });
+            let itemPlans = plan.items.map((item) => planCanonicalArtifact(item, `cliq-${item.kind.replaceAll('_', '-')}-item-v1`));
+            let context = compaction && material
+              ? replaceCompactedPrefix(cut.context, compaction.plan, { itemId: plan.items[0]!.itemId,
+                  summaryRef: material.turn.textRef, summaryDigest: material.text.textDigest })
+              : structuredClone(cut.context);
+            plan.items.forEach((item, index) => {
+              const seq = cut.context.throughItemSeq + index + 1;
+              context.segments.push(item.kind === 'model_turn' || item.kind === 'tool_result'
+                ? { kind: 'raw', fromItemSeq: seq, throughItemSeq: seq, items: [{ itemSeq: seq, itemRef: itemPlans[index]!.ref }] }
+                : { kind: 'excluded_control', fromItemSeq: seq, throughItemSeq: seq,
+                    sourceItemsDigest: contextSourceDigest([{ itemSeq: seq, itemRef: itemPlans[index]!.ref, item }]) });
+            });
+            context.throughItemSeq += plan.items.length;
+            context.projectionDigest = digestOmitting(context, 'projectionDigest');
+            let contextPlan = planCanonicalArtifact(context, context.format);
+            validateContextItems(context, [...cut.items, ...plan.items.map((item, index) => ({
+              item, itemSeq: cut.context.throughItemSeq + index + 1, itemRef: itemPlans[index]!.ref
+            }))]);
+            if (compaction && material) {
+              const before = await project(run, cut.context, cut.checkpoint.contextManifestRef);
+              const after = await project(run, context, contextPlan.ref);
+              if (estimatePromptTokens(projectModelVisiblePrompt(after, assembly.provider.negotiation.mode)) >=
+                  estimatePromptTokens(projectModelVisiblePrompt(before, assembly.provider.negotiation.mode))) {
+                // A shape-valid but ineffective summary is still an executed, fully charged response.
+                // Leave the old context intact and hand the completed attempt to the stop reducer.
+                plan = { items: [], artifacts: [], disposition: 'stop_required' };
+                itemPlans = [];
+                context = structuredClone(cut.context);
+                contextPlan = planCanonicalArtifact(context, context.format);
+              }
+            }
+            disposition = plan.disposition;
+            const frontierPlan = plan.frontier === undefined ? undefined : planCanonicalArtifact(plan.frontier, 'cliq-run-frontier-v1');
+            const metadata = await publishPlans(artifacts, [...itemPlans, ...plan.artifacts, contextPlan, ...(frontierPlan ? [frontierPlan] : [])]);
+            const checkpointId = identityHash('cliq-continuation-checkpoint-v1', runId, result.ref, contextPlan.ref);
+            return { metadata: [...resultMetadata, ...metadata], commit(connection, currentRun, entry) {
+              appendItems(connection, currentRun, plan.items, itemPlans.map((item) => item.ref), cut.context.throughItemSeq);
+              connection.prepare(`INSERT INTO checkpoints (id, schema_version, run_id, based_on_run_revision, run_item_seq,
+                context_manifest_ref, journal_seq, workspace_state_ref, created_at, reason) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, 'auto')`)
+                .run(checkpointId, runId, BigInt(currentRun.revision), BigInt(context.throughItemSeq), contextPlan.ref,
+                  BigInt(entry.seq), cut.checkpoint.workspaceStateRef, settlement.settledAt);
+              connection.prepare('UPDATE runs SET latest_checkpoint_id = ?, frontier_ref = ?, next_step = ? WHERE id = ?')
+                .run(checkpointId, frontierPlan?.ref ?? currentRun.frontierRef!, plan.frontier?.kind ?? currentRun.nextStep, runId);
+            } };
+          });
+          return { ...settled, disposition, ...(disposition === 'stop_required' && compaction ? {
+            failure: { kind: 'context_compaction_failed' as const, compactionPlanRef: request.compactionPlanRef!, modelOpId: opId,
+              attempt, evidenceRef: result.ref }
+          } : {}) };
+        } catch (error) {
+          const current = readRun(driver, runId);
+          // A StopIntent can race the real CAS publication. Retain this same
+          // observation and replan only that authority-reducing revision drift;
+          // never rebase a different claim/frontier, worker, checkpoint or
+          // budget, and never permit another provider dispatch.
+          if (!(error instanceof KernelStorageError) || error.code !== 'REVISION_CONFLICT' ||
+              current.revision <= expectedRunRevision || !current.stopIntentRef ||
+              originalRun.cancelRequested && !current.cancelRequested ||
+              completionSubject(current) !== completionSubject(originalRun) ||
+              canonicalSha256(readInvocationAttempt(driver, runId, opId, attempt)) !== canonicalSha256(originalJournal)) throw error;
+          expectedRunRevision = current.revision;
         }
-        disposition = plan.disposition;
-        const frontierPlan = plan.frontier === undefined ? undefined : planCanonicalArtifact(plan.frontier, 'cliq-run-frontier-v1');
-        const metadata = await publishPlans(artifacts, [...itemPlans, ...plan.artifacts, contextPlan, ...(frontierPlan ? [frontierPlan] : [])]);
-        const checkpointId = identityHash('cliq-continuation-checkpoint-v1', runId, result.ref, contextPlan.ref);
-        return { metadata: [...resultMetadata, ...metadata], commit(connection, currentRun, entry) {
-          appendItems(connection, currentRun, plan.items, itemPlans.map((item) => item.ref), cut.context.throughItemSeq);
-          connection.prepare(`INSERT INTO checkpoints (id, schema_version, run_id, based_on_run_revision, run_item_seq,
-            context_manifest_ref, journal_seq, workspace_state_ref, created_at, reason) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, 'auto')`)
-            .run(checkpointId, runId, BigInt(currentRun.revision), BigInt(context.throughItemSeq), contextPlan.ref,
-              BigInt(entry.seq), cut.checkpoint.workspaceStateRef, settlement.settledAt);
-          connection.prepare('UPDATE runs SET latest_checkpoint_id = ?, frontier_ref = ?, next_step = ? WHERE id = ?')
-            .run(checkpointId, frontierPlan?.ref ?? currentRun.frontierRef!, plan.frontier?.kind ?? currentRun.nextStep, runId);
-        } };
-      });
-      return { ...settled, disposition, ...(disposition === 'stop_required' && compaction ? {
-        failure: { kind: 'context_compaction_failed' as const, compactionPlanRef: request.compactionPlanRef!, modelOpId: opId,
-          attempt, evidenceRef: result.ref }
-      } : {}) };
+      }
+      throw new KernelStorageError('REVISION_CONFLICT', 'model completion stop cut kept changing');
     })
   });
 });

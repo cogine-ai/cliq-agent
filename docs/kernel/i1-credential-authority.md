@@ -85,6 +85,35 @@ Integration invokes the same fixed signed `runtime/bootstrap
 base64url; raw secret bytes use fd 0 only and are never part of that envelope.
 Identity, channel, subject, core hashes and platform selectors are producer-owned.
 
+For the fixed installed model broker, fresh `model_endpoint` enroll/rotate
+input must contain 1..65536 bytes, each in `0x21..0x7e`, matching its Bearer
+representation check. The existing active record determines a rotation's
+purpose. Check the original input after the frozen-intent check and before
+subject generation, `prepared` or platform creation; do not trim, encode, hash
+or persist the secret. Other purposes still accept opaque bounded bytes.
+The same fixed recipe additionally rejects an original secret that is a
+nonempty byte substring of any one of these separate required protocol
+literals: `{`, `}`, `[`, `]`, `"`, `:`, or `application/json`. The brackets are
+required by the fixed response's `choices` array. This is a closed,
+deterministic-conflict input contract, not an arbitrary minimum length or a
+general credential-usability heuristic. Do not concatenate those literals,
+normalize or transform the key, or reject a longer key merely because it
+contains one of them. Native Secret Service redemption independently repeats
+the identical check during preparation, before a permanent model claim, with
+the original platform bytes; it does not export the key to Supervisor JS.
+The response no-echo checks remain unchanged, including their encoded and
+decoded projections. Passing this finite check promises neither that another
+key will avoid every response collision nor that a provider accepts it.
+Committed replay still returns before reading or validating new input. This
+representation check and a platform roundtrip do not validate a real provider's
+credential, capabilities or billing.
+
+The new enroll/rotate protocol-conflict assertions use the existing real signed
+installed command and require no active record, no prepared operation, unchanged
+original platform item and unchanged services. Their Linux execution and the
+native pre-claim redemption check remain unqualified until the corresponding
+actual campaigns pass; pure input examples are not installed evidence.
+
 - `{schemaVersion:1,kind:'read',credentialGrantId}` returns
   `{schemaVersion:1,record}` with latest committed metadata or null.
 - `{schemaVersion:1,kind:'install_services'}` is explicit installation setup,

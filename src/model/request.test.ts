@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
+import { parseJsonStrict } from '../kernel/json.js';
 import { planCanonicalArtifact } from '../kernel/artifact-plan.js';
 import type { ProviderName } from '../kernel/types.js';
 import type { ModelTextV1, ToolCallInputV1 } from '../protocol/agent-ir.js';
@@ -8,7 +9,9 @@ import type { ObservedToolArguments } from '../protocol/agent-ir.js';
 import { type ResolveToolInput, type CompiledModelObservation } from './attempt.js';
 import { validateRunAssembly } from './run-assembly.js';
 import { priceTableDigest } from './pricing.js';
-import { MISSING_TOOL_NAME, type NormalPromptProjectionV1 } from './request.js';
+import { observeProviderResponse } from './provider-observation.js';
+import { buildModelRequestWire, estimatePromptTokens, MODEL_REQUEST_BODY_LIMIT_BYTES, MISSING_TOOL_NAME,
+  type ModelVisiblePromptV1, type NormalPromptProjectionV1 } from './request.js';
 import { normalInput, ref, reseal, testFixture } from './testing/fixtures.js';
 
 const AT = '2026-09-05T00:00:02.000Z';
@@ -272,6 +275,34 @@ test('request handles cannot be forged, substituted, or used with a different lo
   assert.throws(() => model.prepare(extended), /invocation.*shape/);
 });
 
+test('valid observed arguments retain canonical prompt identity even when fragment wire bytes match', () => {
+  const response = { model: 'model-1', choices: [{ index: 0, finish_reason: 'tool_calls', message: {
+    role: 'assistant', content: 'Owned reply.', tool_calls: [{ id: 'owned-call', type: 'function',
+      function: { name: 'owned_unavailable_tool', arguments: '{}' } }]
+  } }] };
+  const observed = observeProviderResponse({ provider: 'openai-compatible', model: 'model-1', negotiatedMode: 'native-tools',
+    status: 200, mediaType: 'application/json', bytes: encode(response), observedAt: AT }).observation;
+  assert.equal(observed.kind, 'decoded');
+  if (observed.kind !== 'decoded') return;
+  const argumentsValue = observed.toolCalls[0]!.input;
+  assert.deepEqual(canonicalJsonBytes(argumentsValue), canonicalJsonBytes({ encoding: 'jcs_json', value: {} }));
+  const prompt = (args: ObservedToolArguments): ModelVisiblePromptV1 => ({ format: 'cliq-model-visible-prompt-v1',
+    responseContract: { mode: 'native-tools', toolCallsAllowed: true }, tools: [], messages: [
+      { role: 'assistant', contentUtf8: 'Owned reply.', toolCalls: [{ callId: 'owned-call', index: 0,
+        toolName: 'owned_unavailable_tool', arguments: args }] },
+      { role: 'tool', toolCallId: 'owned-call', contentUtf8: '{"code":"TOOL_NOT_FOUND"}' }
+    ] });
+  const canonical = prompt(argumentsValue);
+  const strictForecast = prompt({ encoding: 'jcs_json', value: parseJsonStrict(response.choices[0]!.message.tool_calls[0]!.function.arguments) });
+  const fragment = prompt({ encoding: 'utf8_json_fragment', utf8: '{}' });
+  assert.equal(canonicalSha256(strictForecast), canonicalSha256(canonical));
+  assert.notEqual(canonicalSha256(fragment), canonicalSha256(canonical));
+  const authority = { provider: 'openai-compatible' as const, model: 'model-1', streaming: false, contextLimitTokens: 32768 };
+  assert.deepEqual(buildModelRequestWire(authority, fragment, 4096, 'native-tools').bodyBytes,
+    buildModelRequestWire(authority, canonical, 4096, 'native-tools').bodyBytes);
+  assert.equal(estimatePromptTokens(fragment), estimatePromptTokens(canonical));
+});
+
 test('object-native histories preserve typed arguments and malformed fragments without decoding them again', () => {
   const args: ObservedToolArguments[] = [
     { encoding: 'jcs_json', value: { path: 'one.ts' } },
@@ -376,6 +407,40 @@ test('small normal output caps do not impose an unrelated smaller compaction out
     { role: 'system', content: 'Summarize faithfully.' },
     { role: 'user', content: 'Summarize this context:\n\nPrevious work.\n\nReturn Markdown only.' }
   ]);
+});
+
+test('normal and compaction preparation keep the exact 1 MiB wire bound including JSON escaping', () => {
+  const input = testFixture('openai', false, 1_048_576);
+  const model = load(input);
+  const expectedNormal = { model: 'model-1', input: [
+    { role: 'system', content: 'Use tools carefully.' }, { role: 'user', content: '' }
+  ], stream: true, store: false, max_output_tokens: 4096, truncation: 'disabled', include: ['reasoning.encrypted_content'] };
+  const expectedCompaction = { model: 'model-1', input: [
+    { role: 'system', content: 'Summarize faithfully.' },
+    { role: 'user', content: 'Summarize this context:\n\n\n\nReturn Markdown only.' }
+  ], stream: true, store: false, max_output_tokens: 8192, truncation: 'disabled', include: ['reasoning.encrypted_content'] };
+  for (const compact of [false, true]) {
+    const emptyBytes = canonicalJsonBytes(compact ? expectedCompaction : expectedNormal).byteLength;
+    const availableBytes = MODEL_REQUEST_BODY_LIMIT_BYTES - emptyBytes;
+    // A quote is one source byte but exactly two wire bytes in these literals.
+    const exactText = '"'.repeat(Math.floor(availableBytes / 2)) + 'a'.repeat(availableBytes % 2);
+    const prepare = (text: string) => {
+      if (compact) return model.prepare({ kind: 'context_compaction', invocation: { runId: 'run-1', opId: 'compact-1', attempt: 0 },
+        compactionPlanRef: ref(500), sourceContextUtf8: text });
+      const prompt = normalInput(input);
+      prompt.projection.messages[1]!.contentUtf8 = text;
+      resealProjection(prompt);
+      return model.prepare(prompt);
+    };
+    const prepared = prepare(exactText);
+    assert.equal(prepared.outbound.bodyBytes.byteLength, 1_048_576);
+    assert.equal(prepared.request.bodyByteCount, 1_048_576);
+    assert.equal(prepared.request.reservation.inputTokens, 1_048_576);
+    assert.equal(prepared.request.reservation.outputTokens, 8192);
+    assert.equal(prepared.request.maximumOutputTokens, compact ? 8192 : 4096);
+    assert.ok(prepared.request.estimatedInputTokens < input.assembly.context.triggerThresholdTokens);
+    assert.throws(() => prepare(exactText + 'a'), { name: 'RangeError', message: 'native request body exceeds 1 MiB' });
+  }
 });
 
 test('Responses retains all calls including a missing name and malformed input, and closes a second request', () => {

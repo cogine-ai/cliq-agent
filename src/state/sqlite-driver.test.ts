@@ -10,6 +10,7 @@ import { DatabaseSync } from 'node:sqlite';
 import {
   openSqliteDriver,
   iterateNodeSqliteStatement,
+  isRolledBackSqliteTransactionFailure,
   type SqliteConnection,
   type SqliteDriver,
   type SqliteStatement
@@ -117,6 +118,109 @@ test('BEGIN IMMEDIATE transaction rolls back every write when the callback fails
   } finally {
     await rm(stateRoot, { recursive: true, force: true });
   }
+});
+
+test('a real native trigger failure is classified only after its original transaction fully rolls back', async () => {
+  const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-sqlite-native-rollback-'));
+  const driver = openSqliteDriver(path.join(stateRoot, 'kernel.sqlite3'));
+  try {
+    driver.exec("CREATE TABLE records (id INTEGER PRIMARY KEY) STRICT; " +
+      "CREATE TRIGGER refuse_second BEFORE INSERT ON records WHEN NEW.id = 2 " +
+      "BEGIN SELECT RAISE(ABORT, 'real native trigger failure'); END");
+    let nativeFailure: Error | undefined, retained: SqliteStatement | undefined;
+    assert.throws(() => driver.transaction(connection => {
+      connection.prepare('INSERT INTO records VALUES (1)').run();
+      retained = connection.prepare('INSERT INTO records VALUES (2)');
+      try { retained.run(); }
+      catch (error) {
+        assert(error instanceof Error); nativeFailure = error;
+        assert.equal(isRolledBackSqliteTransactionFailure(driver, error), false);
+        throw error;
+      }
+    }), error => error === nativeFailure && error instanceof Error && Reflect.get(error, 'code') === 'ERR_SQLITE_ERROR');
+    assert(nativeFailure);
+    assert.equal(driver.prepare('SELECT count(*) AS count FROM records').get<{ count: bigint }>()!.count, 0n);
+    assert.equal(isRolledBackSqliteTransactionFailure(driver, nativeFailure), true);
+    const other = openSqliteDriver(path.join(stateRoot, 'kernel.sqlite3'));
+    try { assert.equal(isRolledBackSqliteTransactionFailure(other, nativeFailure), false); }
+    finally { other.close(); }
+    assert.throws(() => retained!.run(), /scope is no longer active/);
+    driver.exec('DROP TRIGGER refuse_second');
+    driver.transaction(connection => connection.prepare('INSERT INTO records VALUES (2)').run());
+    assert.equal(driver.prepare('SELECT count(*) AS count FROM records').get<{ count: bigint }>()!.count, 1n);
+    assert.throws(() => driver.transaction(() => { throw nativeFailure; }), error => error === nativeFailure);
+    assert.equal(isRolledBackSqliteTransactionFailure(driver, nativeFailure), false,
+      'reusing the old native Error as a callback failure cannot borrow its earlier rollback classification');
+  } finally { driver.close(); await rm(stateRoot, { recursive: true, force: true }); }
+});
+
+for (const stage of ['callback_vendor', 'callback_type', 'callback_lease', 'prepare', 'get', 'all'] as const) {
+  test('rollback classification requires the actual scoped mutation error, not ' + stage, async () => {
+    const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-sqlite-failure-origin-'));
+    const driver = openSqliteDriver(path.join(stateRoot, 'kernel.sqlite3'));
+    try {
+      driver.exec('CREATE TABLE records (id INTEGER PRIMARY KEY) STRICT');
+      let failure: unknown;
+      assert.throws(() => driver.transaction(connection => {
+        connection.prepare('INSERT INTO records VALUES (1)').run();
+        if (stage === 'callback_vendor') throw Object.assign(new Error('caller supplied vendor fields'), { code: 'ERR_SQLITE_ERROR', errcode: 1811 });
+        if (stage === 'callback_type') throw new TypeError('callback rejected its input');
+        if (stage === 'callback_lease') throw Object.assign(new Error('callback guard refused authority'), { code: 'LEASE_FENCED' });
+        if (stage === 'prepare') { connection.prepare('INSERT INTO absent_table VALUES (2)'); return; }
+        const statement = connection.prepare('SELECT abs(-9223372036854775808)');
+        if (stage === 'get') statement.get(); else statement.all();
+      }), error => { failure = error; return error instanceof Error; });
+      assert.equal(isRolledBackSqliteTransactionFailure(driver, failure), false);
+      assert.equal(driver.prepare('SELECT count(*) AS count FROM records').get<{ count: bigint }>()!.count, 0n);
+      driver.transaction(connection => connection.prepare('INSERT INTO records VALUES (3)').run());
+    } finally { driver.close(); await rm(stateRoot, { recursive: true, force: true }); }
+  });
+}
+
+test('a real deferred foreign-key COMMIT failure is classified after successful rollback', async () => {
+  const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-sqlite-commit-rollback-'));
+  const driver = openSqliteDriver(path.join(stateRoot, 'kernel.sqlite3'));
+  let closed = false;
+  try {
+    driver.exec('CREATE TABLE parents (id INTEGER PRIMARY KEY) STRICT; ' +
+      'CREATE TABLE children (parent_id INTEGER REFERENCES parents(id) DEFERRABLE INITIALLY DEFERRED) STRICT');
+    let ran = false, failure: unknown;
+    assert.throws(() => driver.transaction(connection => {
+      connection.prepare('INSERT INTO children VALUES (99)').run(); ran = true;
+    }), error => { failure = error; return error instanceof Error && Reflect.get(error, 'code') === 'ERR_SQLITE_ERROR'; });
+    assert.equal(ran, true, 'the original native statement succeeds; only actual COMMIT rejects the deferred constraint');
+    assert.equal(isRolledBackSqliteTransactionFailure(driver, failure), true);
+    assert.equal(driver.prepare('SELECT count(*) AS count FROM children').get<{ count: bigint }>()!.count, 0n);
+    driver.transaction(connection => {
+      connection.prepare('INSERT INTO parents VALUES (99)').run(); connection.prepare('INSERT INTO children VALUES (99)').run();
+    });
+    driver.close(); closed = true;
+    assert.equal(isRolledBackSqliteTransactionFailure(driver, failure), false);
+  } finally { if (!closed) driver.close(); await rm(stateRoot, { recursive: true, force: true }); }
+});
+
+test('an actual native statement failure never qualifies when its original rollback fails', async () => {
+  const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-sqlite-native-rollback-failed-'));
+  const driver = openSqliteDriver(path.join(stateRoot, 'kernel.sqlite3'));
+  let rollbackFailed = false;
+  try {
+    driver.exec("CREATE TABLE records (id INTEGER PRIMARY KEY) STRICT; " +
+      "CREATE TRIGGER refuse_insert BEFORE INSERT ON records BEGIN SELECT RAISE(ABORT, 'native refusal'); END");
+    const internals = driver as unknown as { database: { exec(sql: string): void } };
+    const originalExec = internals.database.exec.bind(internals.database), rollbackFailure = new Error('rollback failed');
+    let nativeFailure: unknown;
+    assert.throws(() => driver.transaction(connection => {
+      try { connection.prepare('INSERT INTO records VALUES (1)').run(); }
+      catch (error) {
+        nativeFailure = error;
+        internals.database.exec = sql => { if (sql === 'ROLLBACK') { rollbackFailed = true; throw rollbackFailure; } originalExec(sql); };
+        throw error;
+      }
+    }), error => error instanceof AggregateError && error.errors.length === 2 &&
+      error.errors[0] === nativeFailure && error.errors[1] === rollbackFailure);
+    assert.equal(isRolledBackSqliteTransactionFailure(driver, nativeFailure), false);
+    assert.throws(() => driver.prepare('SELECT 1'), /abandoned after a failed rollback/);
+  } finally { if (!rollbackFailed) driver.close(); await rm(stateRoot, { recursive: true, force: true }); }
 });
 
 test('read snapshots keep one WAL cut without blocking a concurrent writer', async () => {

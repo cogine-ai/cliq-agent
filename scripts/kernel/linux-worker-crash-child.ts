@@ -10,10 +10,10 @@ import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME } from '../../src/config
 import { canonicalJsonBytes, canonicalSha256 } from '../../src/kernel/canonical.js';
 import { digestOmitting, identityHash } from '../../src/kernel/identity.js';
 import type { ProcessContainmentNoSpawnEvidenceV1, ProcessContainmentPlanV1 } from '../../src/kernel/execution.js';
-import type { ToolContractManifestV1, WorkerDeathWait, WorkerIdentity, WorkspaceGenerationIdentityV1,
+import type { RunAssemblyV1, ToolContractManifestV1, WorkerDeathWait, WorkerIdentity, WorkspaceGenerationIdentityV1,
   WorkspaceGenerationQuarantineEvidenceV1, WorkspaceGenerationStateV1 } from '../../src/kernel/types.js';
-import type { RunAssemblyValidationMaterial, RunAssemblyToolAuthority } from '../../src/model/run-assembly.js';
-import { testFixture } from '../../src/model/testing/fixtures.js';
+import type { RunAssemblyToolAuthority } from '../../src/model/run-assembly.js';
+import { restoreOfflineWorkerCampaignMaterial, type OfflineWorkerCampaignMaterialData } from '../../src/sandbox/testing/worker-campaign-material.js';
 import { decodeWorkerIdentity } from '../../src/state/decoders.js';
 import { ResourceRetirementError } from '../../src/state/errors.js';
 import { decodeWorkerProcessContainment } from '../../src/state/execution-closure.js';
@@ -28,8 +28,7 @@ export type CrashChildInput = {
   stateRoot: string; runId: string; runtimeAuthority: StateStoreRuntimeAuthority;
   preactivationCrash?: 'reserved_before_create' | 'ready_before_identity' | 'preactivated_before_activation' | 'queued_post_move_before_retirement' | 'monitor_fork_before_ready' | 'monitor_fork_controller_loss';
   retirementFault?: 'pre_probe' | 'timeout_closure' | 'controller_loss';
-  materialData: Omit<RunAssemblyValidationMaterial, 'resolveVerifiedCapabilityClaims' | 'verifyLocalZeroCostAuthority' |
-    'resolvePriceTableAuthority' | 'resolveVerifiedTools' | 'verifyReference' | 'verifyProviderAdapter' | 'verifyProviderEndpoint'>;
+  materialData: OfflineWorkerCampaignMaterialData;
 };
 export type CrashChildPaused = { state: 'post_move_pre_cas'; runId: string; waitingOnRef: string;
   generationRef: string; sourceRowVersion: number; archiveRelativePath: string; archiveDevice: string; archiveInode: string;
@@ -107,8 +106,9 @@ async function stopPreactivation(input: CrashChildInput, metadata: ReturnType<ty
       assert.deepEqual(data, canonicalJsonBytes(receipt));
       assert.equal(receipt.evidenceDigest, digestOmitting(receipt, 'evidenceDigest'));
       const launch = soleLaunch(); assert.deepEqual(launch, failedLaunch);
+      assert.ok(launch.phase !== 'preparing' && launch.retirementKind !== 'preparation');
       const cut = metadata.readSnapshot(connection => {
-        const run = readRun(connection, input.runId), generation = readRequiredWorkspaceGenerationByRef(connection, failedLaunch!.workspaceGenerationRef);
+        const run = readRun(connection, input.runId), generation = readRequiredWorkspaceGenerationByRef(connection, launch.workspaceGenerationRef);
         assert.deepEqual(run, before.run); assert.deepEqual(readInvocationJournal(connection, input.runId), before.journal);
         assert.equal(run.status, 'queued'); assert.equal(run.activeWorkerLaunchId, undefined);
         assert.equal(generation.phase, 'preactivated_readonly'); assert.deepEqual(generation, failedGeneration,
@@ -258,7 +258,7 @@ async function stopPreactivation(input: CrashChildInput, metadata: ReturnType<ty
 async function run(input: CrashChildInput) {
   const store = await openStateStore(input.stateRoot, input.runtimeAuthority);
   const before = await store.readRecoveryClosure(input.runId);
-  const assembly = await store.artifacts.readCanonical<{ tools: { manifestRef: string; manifestDigest: string } }>(before.runSpec.assemblyRef);
+  const assembly = await store.artifacts.readCanonical<RunAssemblyV1>(before.runSpec.assemblyRef);
   const manifest = await store.artifacts.readCanonical<ToolContractManifestV1>(assembly.tools.manifestRef);
   assert.equal(canonicalSha256(manifest), assembly.tools.manifestRef);
   assert.equal(manifest.manifestDigest, assembly.tools.manifestDigest);
@@ -274,8 +274,7 @@ async function run(input: CrashChildInput) {
   // Only the already-declared offline admission resolvers are reconstructed.
   // Runtime signatures are the parent's original bytes; tool resolution is
   // restricted to the exact retained manifest and independently rehashed schemas.
-  const material: RunAssemblyValidationMaterial = { ...testFixture().material, ...input.materialData,
-    resolveVerifiedTools: reference => canonicalSha256(reference) === canonicalSha256(assembly.tools) ? tools : null };
+  const material = restoreOfflineWorkerCampaignMaterial({ materialData: input.materialData, assembly, tools });
   const execution = await store.loadRunExecution({ runId: input.runId, material });
   const metadata = openSqliteDriver(path.join(input.stateRoot, KERNEL_DATABASE_FILENAME));
   const sample = await open(path.join(input.stateRoot, KERNEL_CAS_DIRECTORY, before.runSpec.policyRef), fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
