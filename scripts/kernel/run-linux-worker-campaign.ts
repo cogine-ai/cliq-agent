@@ -677,7 +677,16 @@ async function receivedToolSurvivesDeathPublicationFailure() {
       const generation = cut.closure.workspaceGenerations.find(row => row.generationRef === launch.workspaceGenerationRef)!;
       assert.equal(generation.phase, 'checkpointing'); assert.equal(generation.activeWorkerLaunchId, launch.launchId);
       assert.equal(cut.closure.run.budgetConsumed.toolCalls, 0); assert.equal(cut.closure.run.budgetReserved.toolCalls, 1);
-      assert.deepEqual(cut.closure.latestCheckpoint, before.closure.latestCheckpoint); assert.deepEqual(cut.bytes, fixture.original);
+      const prepared = cut.closure.journal.filter(entry => entry.opKind === 'tool' && entry.phase === 'prepared');
+      assert.equal(prepared.length, 1); assert(prepared[0]!.grantRef);
+      // Tool preparation legitimately commits its policy/admission Checkpoint
+      // before claim. It still contains the unchanged pre-effect workspace;
+      // neither the received edit nor its completion is published there yet.
+      assert.equal(cut.closure.latestCheckpoint.id, identityHash('cliq-tool-admission-checkpoint-v1', prepared[0]!.grantRef));
+      assert.equal(cut.closure.latestCheckpoint.reason, 'auto');
+      assert.equal(cut.closure.latestCheckpoint.journalSeq, prepared[0]!.seq);
+      assert.equal(cut.closure.latestCheckpoint.workspaceStateRef, before.closure.latestCheckpoint.workspaceStateRef);
+      assert.deepEqual(cut.bytes, fixture.original);
       const identity = await fixture.store.artifacts.readCanonical<WorkspaceGenerationIdentityV1>(launch.workspaceGenerationRef);
       if (identity.locator.kind !== 'linux_directory') throw new Error('received tool has no original Linux generation');
       root = await open(path.join(fixture.stateRoot, identity.locator.canonicalRootRelativePath),
