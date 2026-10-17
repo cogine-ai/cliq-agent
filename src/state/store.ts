@@ -1578,7 +1578,7 @@ export class StateStore {
   // Reserve the Run through validation and join that opening during shutdown.
   // This protects resources; SQLite remains the sole lifecycle authority.
   private readonly executions = new Map<string, Promise<Awaited<ReturnType<typeof loadRunExecution>>>>();
-  private readonly loadedExecutions = new Map<string, RunExecution>();
+  private readonly loadedExecutionScopes = new Map<string, Awaited<ReturnType<typeof loadRunExecution>>>();
   private readonly sourceInspectionTasks = new Set<SourceInspectionTask>();
   private readonly sourceInspections = new Map<string, { intent: string; task: SourceInspectionTask }>();
   private readonly installedSubmissionTasks = new Set<{ abort: AbortController; promise: Promise<unknown> }>();
@@ -1926,8 +1926,8 @@ export class StateStore {
     // Enter each already-loaded native owner synchronously after StopIntent.
     // The owners retain their joins; acknowledgement is not a cleanup receipt.
     try {
-      const execution = this.loadedExecutions.get(runId);
-      const stopping = execution ? execution.requestStop() : this.executions.get(runId)?.then(scope => scope.execution.requestStop());
+      const scope = this.loadedExecutionScopes.get(runId);
+      const stopping = scope ? scope.execution.requestStop() : this.executions.get(runId)?.then(opened => opened.execution.requestStop());
       void stopping?.catch(failed);
     } catch (error) { failed(error); }
     try { void this.modelTransports.get(runId)?.close().catch(failed); }
@@ -1965,7 +1965,7 @@ export class StateStore {
       catch (error) { throw error instanceof ResourceRetirementError ? error :
         new ResourceRetirementError('terminal Run launcher did not retire', error); }
       if (this.executions.get(runId) === opening) this.executions.delete(runId);
-      this.loadedExecutions.delete(runId);
+      this.loadedExecutionScopes.delete(runId);
     }
     this.installedAgents.delete(runId);
     this.installedRunFailures.delete(runId);
@@ -2724,7 +2724,7 @@ export class StateStore {
         await scope.close();
         throw new KernelStorageError('LEASE_FENCED', 'StateStore closed while loading execution');
       }
-      this.loadedExecutions.set(runId, scope.execution);
+      this.loadedExecutionScopes.set(runId, scope);
       return scope.execution;
     } catch (error) {
       // A failed factory whose cleanup completed releases its reservation.
@@ -2893,6 +2893,16 @@ export class StateStore {
         this.closeRevocationFailure ??= new ResourceRetirementError('StateStore producer revocation did not start cleanly', error);
       }
     }
+    for (const scope of this.loadedExecutionScopes.values()) {
+      try {
+        // Revoke the original pending producer before installedRunTasks are
+        // drained. Its memoized join remains owned by final scope.close(); an
+        // idle worker backing a model settlement is not fenced by this phase.
+        void scope.beginClose().catch(() => {});
+      } catch (error) {
+        this.closeRevocationFailure ??= new ResourceRetirementError('StateStore execution revocation did not start cleanly', error);
+      }
+    }
   }
 
   close(): Promise<void> {
@@ -2952,7 +2962,7 @@ export class StateStore {
       if (this.closeRevocationFailure) throw this.closeRevocationFailure;
       if (failure?.status === 'rejected') throw failure.reason;
       this.executions.clear();
-      this.loadedExecutions.clear();
+      this.loadedExecutionScopes.clear();
       if (!this.released) {
         await retireAbandonedPreactivations(this.driver, this.artifacts, this.owner,
           this.runtimeAuthority?.execution && { ...this.runtimeAuthority.execution,

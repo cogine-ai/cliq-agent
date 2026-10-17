@@ -3,9 +3,11 @@
 Status: implementation direction approved on 2026-10-16. The original nine-fix
 candidate `2630f23` passed both exact-source Linux campaigns, including 29 native
 cases per event; that does not complete I1. The owner additionally approved
-repairing two shutdown-order defects in the same PR on 2026-10-17. The admission
-defect now has genuine installed Linux RED evidence; its repair and the execution
-producer's shutdown controls still require qualification. This document itself
+repairing two shutdown-order defects and a further credential-finalizer shutdown
+gap in the same PR on 2026-10-17. Admission shutdown now passes both exact-source
+Linux events at `db6f658`; preparation shutdown has genuine forced-stop RED.
+Execution producer and credential-finalizer shutdown repairs still require
+qualification. This document itself
 qualifies nothing. The owner accepted one WorkerLaunch preparation
 spine plus genuine preparation-retirement/private rollback evidence, including
 fail-closed incomplete birth. Model unknown retains the existing strictly newer
@@ -84,6 +86,17 @@ be queued behind its installed credential/runtime borrow. Keep the original
 transport, memoized join and dispatch fence through typed settlement. Closing
 the transport is neither a refund nor a replacement no-release/death proof.
 
+An in-flight credential finalizer must similarly retain its exact original
+native inspection job. The approved signed credential-platform ABI revision
+adds cancel-and-join only to that inspection owner; ABI1 is not a fallback.
+Shutdown starts cancellation before draining the public finalizer handler,
+while its credential scope remains held through the actual worker, watchdog,
+bus/runtime descriptor and main-loop timer joins. A JS timeout, detached native
+Promise or early lock release is not cancellation. The transaction's existing
+closing gate must continue to reject new authority; a previously committed
+operation keeps its exact replay result. A failed native retirement remains
+sticky and prevents StateOwner or installation release.
+
 An execution's first phase must abort preparation and revoke its original
 pending native controller before joining that task; aborting only a file walker
 cannot interrupt a native BIND/launch wait. Already claimed/received tool work
@@ -114,6 +127,16 @@ under the ordinary two-second policy. The push event `38990389971` legitimately
 finished gracefully. Both original reports and the unchanged-runner cleanup
 evidence are retained; the positive event does not erase the genuine RED.
 Neither observation proves the exact private precommit-abort cut.
+
+At `db6f658`, push `38993016349` and PR `38993020888` both pass admission shutdown
+with positive original process/instruction-descriptor/pending-handler checks,
+zero service exit, committed graceful owner release and exact successor history.
+The PR preparation job `117279313425` positively brackets the queued, unclaimed
+Run cut with original Supervisor generation-write observations, then records
+the ordinary service's two-second `timeout`, code 2, status 9. That is the
+execution shutdown RED. The push preparation failure occurred at the final
+pre-stop observation; its later cleanup timeout is not evidence for that cut.
+Both failures remain preserved, rather than being conflated or rerun away.
 
 ## Tool result and settlement rules
 

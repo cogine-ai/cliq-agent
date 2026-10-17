@@ -969,33 +969,36 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
         assert.equal(run.specRef, admitted.specRef); assert.equal(run.latestCheckpointId, admitted.latestCheckpointId);
         assert.equal(cut.highWaterJournalSeq, 0); assert.deepEqual(cut.journal, []);
       };
-      mark('actual_scheduler_generation_write_bracketed_by_public_queued_cut');
-      const observeBy = Date.now() + 30000;
       let observed: WriteObservation | undefined;
-      while (!observed) {
-        assert(Date.now() < observeBy, 'the actual installed scheduler preparation write was not positively observed');
-        const before = await heldGenerationWrite();
-        if (!before) { await delay(1); continue; }
-        preparingCut(await publicRead());
-        observed = await heldGenerationWrite(before);
-      }
-      assert.equal(requestsReceived, 0); assert(!providerFailure);
-      report.shutdownPreparation = { qualified: false, diagnosticOnly: true, sourceFiles: fileCount, bytesPerFile: bytes.length,
-        distinctSourceInodes: new Set([...sourceFiles.values()].map(info => `${info.dev}:${info.ino}`)).size,
-        deduplicatedSourceBlobRef: blobRef, originalSupervisorProcessMatched: true, originalWritableGenerationMatched: true,
-        publicQueuedCutBracketed: true, noActiveWorkerAtObservedPublicCut: true, noJournalAtObservedPublicCut: true,
-        generationId: observed.generationId, generationDeviceId: observed.deviceId, generationDirectoryFileId: observed.directoryFileId,
-        controllerRetirementQualified: false, receivedToolQualified: false, exactPreparingGateCutQualified: false };
-      assert.equal(report.shutdownPreparation.distinctSourceInodes, fileCount);
       const contract = command('/usr/bin/systemctl', ['--user', 'show', services.supervisorUnit,
         '--property=TimeoutStopUSec,KillSignal,FinalKillSignal,SendSIGKILL', '--no-pager']);
       assert.equal(contract.status, 0);
       const stopPolicy = Object.fromEntries(contract.stdout.trim().split('\n').map(line => line.split('=')));
       assert.equal(stopPolicy.TimeoutStopUSec, '2s'); assert.equal(stopPolicy.KillSignal, '15');
       assert.equal(stopPolicy.FinalKillSignal, '9'); assert.equal(stopPolicy.SendSIGKILL, 'yes');
-      report.shutdownPreparation.standardStopTimeoutMs = 2000;
-      mark('ordinary_systemd_sigterm_during_scheduler_generation_copy');
+      // Retain unit history before observing the short-lived producer, not
+      // after it. Starting this independent observer must not consume the
+      // actual copy window between our positive cut and the unchanged stop.
       await withRetainedUnitHistory([services.supervisorUnit, services.keeperUnit], async () => {
+        mark('actual_scheduler_generation_write_bracketed_by_public_queued_cut');
+        const observeBy = Date.now() + 30000;
+        while (!observed) {
+          assert(Date.now() < observeBy, 'the actual installed scheduler preparation write was not positively observed');
+          const before = await heldGenerationWrite();
+          if (!before) { await delay(1); continue; }
+          preparingCut(await publicRead());
+          observed = await heldGenerationWrite(before);
+        }
+        assert.equal(requestsReceived, 0); assert(!providerFailure);
+        report.shutdownPreparation = { qualified: false, diagnosticOnly: true, sourceFiles: fileCount, bytesPerFile: bytes.length,
+          distinctSourceInodes: new Set([...sourceFiles.values()].map(info => `${info.dev}:${info.ino}`)).size,
+          deduplicatedSourceBlobRef: blobRef, originalSupervisorProcessMatched: true, originalWritableGenerationMatched: true,
+          publicQueuedCutBracketed: true, noActiveWorkerAtObservedPublicCut: true, noJournalAtObservedPublicCut: true,
+          generationId: observed.generationId, generationDeviceId: observed.deviceId, generationDirectoryFileId: observed.directoryFileId,
+          controllerRetirementQualified: false, receivedToolQualified: false, exactPreparingGateCutQualified: false,
+          standardStopTimeoutMs: 2000 };
+        assert.equal(report.shutdownPreparation.distinctSourceInodes, fileCount);
+        mark('ordinary_systemd_sigterm_during_scheduler_generation_copy');
         assert(await heldGenerationWrite(observed), 'a genuine same-generation writer must still be observed immediately before ordinary SIGTERM');
         const stopped = command('/usr/bin/systemctl', ['--user', 'stop', services.supervisorUnit]), exit = show(services.supervisorUnit);
         report.shutdownPreparation.serviceExit = projectInstalledServiceExit(exit);
@@ -1005,6 +1008,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
         assert.equal(exit.Result, 'success'); assert.equal(exit.ExecMainCode, '1'); assert.equal(exit.ExecMainStatus, '0');
         await assert.rejects(lstat(`/proc/${originalPid}`), { code: 'ENOENT' });
       });
+      assert(observed, 'ordinary shutdown must retain its positively observed generation');
       const releasedOwners = inspectInstalledOwnerHistory(recipe.stateRoot).owners;
       assert.equal(releasedOwners.length, 1);
       const releasedOwner = releasedOwners[0]!; assert.equal(releasedOwner.state, 'terminal');

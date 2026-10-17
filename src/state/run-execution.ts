@@ -171,7 +171,8 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
   bootstrap: { bundle: RuntimeBundleManifest; releaseKeys: readonly ReleaseTrustKey[]; execution?: RunExecutionInstallation } | undefined,
   input: LoadRunExecutionInput, isClosing: () => boolean = () => false,
   selectedRuntime?: HeldInstalledRuntime, installedAnchor?: HeldInstalledAnchor, executionStore?: StateStore
-): Promise<{ execution: RunExecution; closeWorkerRecoveryProbe(input: { runId: string; expectedRunRevision: number }): Promise<Run>; close(): Promise<void> }> {
+): Promise<{ execution: RunExecution; closeWorkerRecoveryProbe(input: { runId: string; expectedRunRevision: number }): Promise<Run>;
+  beginClose(): Promise<void>; close(): Promise<void> }> {
   // Validation material includes trusted resolver functions; retain those
   // functions while snapshotting their data, just like loadAgentRun does.
   input = { runId: input.runId, material: Object.fromEntries(Object.entries(input.material).map(([key, value]) =>
@@ -186,7 +187,11 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
     await openLinuxWorkerLauncher(bootstrap?.execution && { ...immutableSnapshot(bootstrap.execution), runtimeAuthority: bootstrap });
   let worker: LinuxBlockedWorker | undefined;
   async function reobserveRetirement() {
-    if (closed || isClosing() || !worker || !activeWorker) {
+    // An already received result still belongs to its original producer.
+    // Closing forbids new work, not that exact producer's final death check.
+    const completingOriginalTool = closingTool !== undefined && closingTool.operation === pending && toolPhase === 'received' &&
+      closingTool.worker === worker && closingTool.activeWorker === activeWorker;
+    if (((closed || isClosing()) && !completingOriginalTool) || !worker || !activeWorker) {
       throw new KernelStorageError('LEASE_FENCED', 'native worker retirement scope is closing or unavailable');
     }
     assertActiveStateOwner(driver, owner);
@@ -213,7 +218,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
     throw error;
   }
   let pending: Promise<Run> | undefined, closed = false, cleanupFailure: unknown;
-  let operationAbort: AbortController | undefined, closing: Promise<void> | undefined;
+  let operationAbort: AbortController | undefined, revoking: Promise<void> | undefined, closing: Promise<void> | undefined;
   let probe: { run: Run; wait: WorkerDeathWait; task: WorkerRecoveryTask; closure?: Promise<Run> } | undefined;
   let generation: RunWorkspaceGeneration | undefined, controller: LinuxWorkerController | undefined;
   let reservation: HeldWorkerReservation | undefined;
@@ -221,9 +226,53 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
   let activeWorker: ActiveWorker | undefined;
   let stopJoin: Promise<void> | undefined;
   let toolPhase: 'preparing' | 'claimed' | 'received' | undefined;
+  let closingTool: { operation: Promise<Run>; worker: LinuxBlockedWorker; activeWorker: ActiveWorker } | undefined;
   let retirementController: LinuxWorkerController | undefined;
   let preparation: PreparingWorkerLaunch | undefined, materialization: RunWorkspaceMaterialization | undefined;
   let workspaceBirth: RunWorkspaceBirth | undefined;
+  function revokeOriginalWorker(): Promise<void> {
+    if (stopJoin) return stopJoin;
+    const retainedController = controller, retainedWorker = worker;
+    // Enter irreversible native revocation before returning to a draining
+    // caller. Its original join remains available to result/recovery owners.
+    let revoked: Promise<void> | undefined;
+    try { revoked = retainedController?.close(); }
+    catch (error) { revoked = Promise.reject(error); }
+    stopJoin = (async () => {
+      await revoked;
+      await retainedWorker?.closeAfterControllerJoin();
+    })().catch(error => {
+      cleanupFailure ??= error;
+      throw error;
+    });
+    void stopJoin.catch(() => {});
+    return stopJoin;
+  }
+  function beginClose(): Promise<void> {
+    if (revoking) return revoking;
+    closed = true;
+    if (pending && worker && activeWorker && (toolPhase === 'claimed' || toolPhase === 'received')) {
+      closingTool = { operation: pending, worker, activeWorker };
+    }
+    // A claimed producer may still deliver its genuine result after native
+    // revocation. Do not abort that result's Checkpoint/settlement path.
+    if (toolPhase !== 'claimed' && toolPhase !== 'received') operationAbort?.abort();
+    const joins: Promise<unknown>[] = [];
+    try { if (probe) joins.push(probe.task.cancelAndJoin()); }
+    catch (error) { cleanupFailure ??= error; }
+    // Idle model workers remain physically held until StateStore has joined
+    // their original broker settlement. Pending executions must be revoked
+    // now, including BIND/READY polls that do not consume the abort signal.
+    try { if (pending) joins.push(revokeOriginalWorker()); }
+    catch (error) { cleanupFailure ??= error; }
+    revoking = Promise.allSettled(joins).then(results => {
+      const failed = results.find(result => result.status === 'rejected');
+      if (failed?.status === 'rejected') cleanupFailure ??= failed.reason;
+      if (cleanupFailure !== undefined) throw cleanupFailure;
+    });
+    void revoking.catch(() => {});
+    return revoking;
+  }
   async function observeOriginalWorkerDeath(current: ActiveWorker) {
     if (current !== activeWorker || !worker) throw new KernelStorageError('LEASE_FENCED', 'worker retirement lost its original physical owner');
     if (!stopJoin) {
@@ -449,7 +498,10 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           throw cleanupFailure;
         }
         throw failure;
-      } finally { pending = undefined; toolPhase = undefined; if (operationAbort === abort) operationAbort = undefined; }
+      } finally {
+        if (closingTool?.operation === operation) closingTool = undefined;
+        pending = undefined; toolPhase = undefined; if (operationAbort === abort) operationAbort = undefined;
+      }
     });
     pending = operation;
     return operation;
@@ -507,26 +559,17 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
   }
   const execution: RunExecution = Object.freeze({
     requestStop: () => {
-      if (stopJoin) return stopJoin;
       const current = readRun(driver, runId);
       assertActiveStateOwner(driver, owner);
       if (!current.stopIntentRef) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'productive revocation requires the committed StopIntent');
+      if (stopJoin) return stopJoin;
       // Inspections are authority reducing and retain their own original join.
       // A stop must not cancel the very proof needed to close that wait.
       if (probe && current.status === 'waiting' && current.waitingOnRef === probe.run.waitingOnRef) return Promise.resolve();
       if (toolPhase !== 'claimed' && toolPhase !== 'received') operationAbort?.abort();
-      const retainedController = controller, retainedWorker = worker;
       // close enters irreversible native channel revocation synchronously,
       // before the control request can acknowledge its durable intent.
-      const revoked = retainedController?.close();
-      stopJoin = (async () => {
-        await revoked;
-        await retainedWorker?.closeAfterControllerJoin();
-      })().catch(error => {
-        cleanupFailure ??= error;
-        throw error;
-      });
-      return stopJoin;
+      return revokeOriginalWorker();
     },
     renewCurrentWorkerLease: () => {
       // An operation in flight owns its current lease. Maintenance cannot
@@ -715,12 +758,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           // wins before the blocked child/RELEASE handshake. Join the actual
           // producer, preserve uncertainty and charge once; only the separate
           // genuine private rollback closure may later resolve that unknown.
-          if (!stopJoin) {
-            const retainedController = controller, retainedWorker = worker;
-            const revoke = retainedController?.close();
-            stopJoin = (async () => { await revoke; await retainedWorker?.closeAfterControllerJoin(); })();
-          }
-          await stopJoin;
+          await revokeOriginalWorker();
           const history = readInvocationAttempt(driver, runId, claimedTool.entry.opId, claimedTool.entry.attempt);
           if (history.at(-1)?.phase === 'dispatch_claimed') {
             const ambiguity = await artifacts.publishCanonical({ schemaVersion: 1, format: 'cliq-private-tool-ambiguity-v1',
@@ -1002,15 +1040,11 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       return operation;
     }
   });
-  return { execution, closeWorkerRecoveryProbe: input => closeProbe(input), close() {
+  return { execution, closeWorkerRecoveryProbe: input => closeProbe(input), beginClose, close() {
     if (closing) return closing;
-    closed = true;
-    operationAbort?.abort();
-    // Abort first: native inspection polling synchronously starts its own
-    // revocation/join, and file walkers stop at their real stream checkpoints.
-    const cancel = probe?.task.cancelAndJoin();
+    const revoked = beginClose();
     const attempt = (async () => {
-      const joins = await Promise.allSettled([...(cancel ? [cancel] : []), ...(pending ? [pending.catch(() => {})] : [])]);
+      const joins = await Promise.allSettled([revoked, ...(pending ? [pending.catch(() => {})] : [])]);
       const failure = joins.find(result => result.status === 'rejected');
       if (failure?.status === 'rejected') cleanupFailure ??= failure.reason;
       if (activeWorker) {

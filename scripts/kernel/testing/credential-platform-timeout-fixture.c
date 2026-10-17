@@ -38,7 +38,7 @@ struct fixture {
   char first_sender[256];
   /* Fixed independent broker scenario; none of these values is production
    * authority. The actual native create_compare supplies its observation. */
-  bool broker_mode, created, preparation_entered, preparation_gone, released, timely;
+  bool broker_mode, inspection_mode, created, preparation_entered, preparation_gone, released, timely;
   char preparation_sender[256], control[32]; size_t control_used;
   int notify; guint control_watch, secret_registrations[3];
   GVariant *item_attributes, *item_secret;
@@ -57,7 +57,7 @@ static gboolean observe_children(gpointer data) {
   else if (status.si_pid == fixture->child) {
     fixture->child_ok = status.si_code == CLD_EXITED && status.si_status == 0;
     if (!fixture->child_ok) fixture->failed = true;
-    if (!fixture->broker_mode || !fixture->preparation_entered || (fixture->first_gone && fixture->preparation_gone))
+    if ((!fixture->broker_mode && !fixture->inspection_mode) || !fixture->preparation_entered || (fixture->first_gone && fixture->preparation_gone))
       g_main_loop_quit(fixture->loop);
   }
   return G_SOURCE_CONTINUE;
@@ -327,8 +327,9 @@ int main(int argc, char **argv) {
   struct fixture fixture = {.daemon = -1, .child = -1}; uid_t uid; gid_t gid; char address[128]; int ready[2] = {-1, -1};
   int notify[2] = {-1, -1}, control[2] = {-1, -1};
   GError *error = NULL; GDBusNodeInfo *shape = NULL; int original_namespace = -1; bool pre_exec_root_owned = false, children_joined = true;
-  if ((argc == 4 || argc == 6) && argv[0][0] == '/' && argv[1][0] == '/' && argv[2][0] == '/' && argv[3][0] == '/' &&
-      (argc == 4 || (argv[4][0] == '/' && argv[5][0] == '/'))) {
+  bool inspection = argc == 5 && !strcmp(argv[4], "--inspect-cancel");
+  if ((argc == 4 || inspection || argc == 6) && argv[0][0] == '/' && argv[1][0] == '/' && argv[2][0] == '/' && argv[3][0] == '/' &&
+      (argc != 6 || (argv[4][0] == '/' && argv[5][0] == '/'))) {
     original_namespace = open("/proc/self/ns/mnt", O_RDONLY | O_CLOEXEC);
     if (original_namespace < 3 || !isolated_runtime(&uid, &gid, address)) goto failed;
     struct stat proc; if (lstat("/proc/self/stat", &proc) || !S_ISREG(proc.st_mode) || (proc.st_uid && proc.st_uid != uid)) goto failed;
@@ -339,16 +340,18 @@ int main(int argc, char **argv) {
     /* A normal, non-setuid exec gives this service its ordinary non-root
      * /proc identity. Never toggle dumpability or weaken native UID checks. */
     char *continued[] = {argv[0], "--ordinary-nonroot", descriptor, pre_exec_root_owned ? "1" : "0", argv[1], argv[2], argv[3],
-      argc == 6 ? argv[4] : NULL, argc == 6 ? argv[5] : NULL, NULL};
+      argc >= 5 ? argv[4] : NULL, argc == 6 ? argv[5] : NULL, NULL};
     execv(argv[0], continued); goto failed;
   }
-  if ((argc != 7 && argc != 9) || strcmp(argv[1], "--ordinary-nonroot") || (strcmp(argv[3], "0") && strcmp(argv[3], "1"))) goto failed;
+  if ((argc != 7 && argc != 8 && argc != 9) || strcmp(argv[1], "--ordinary-nonroot") || (strcmp(argv[3], "0") && strcmp(argv[3], "1"))) goto failed;
   char *end; errno = 0; long descriptor = strtol(argv[2], &end, 10);
   if (errno || *end || descriptor < 3 || descriptor > INT_MAX) goto failed;
   original_namespace = (int)descriptor; pre_exec_root_owned = !strcmp(argv[3], "1"); argv += 3; argc -= 3;
   fixture.broker_mode = argc == 6;
-  if (fixture.broker_mode && signal(SIGPIPE, SIG_IGN) == SIG_ERR) goto failed;
-  if ((argc != 4 && argc != 6) || argv[1][0] != '/' || argv[2][0] != '/' || argv[3][0] != '/' ||
+  fixture.inspection_mode = argc == 5 && !strcmp(argv[4], "--inspect-cancel");
+  bool secret_mode = fixture.broker_mode || fixture.inspection_mode;
+  if (secret_mode && signal(SIGPIPE, SIG_IGN) == SIG_ERR) goto failed;
+  if ((argc != 4 && !fixture.inspection_mode && argc != 6) || argv[1][0] != '/' || argv[2][0] != '/' || argv[3][0] != '/' ||
       (fixture.broker_mode && (argv[4][0] != '/' || argv[5][0] != '/')) ||
       !post_exec_runtime(&original_namespace, &uid, &gid, address)) goto failed;
   (void)uid; (void)gid;
@@ -364,7 +367,7 @@ int main(int argc, char **argv) {
     G_DBUS_CONNECTION_FLAGS_MESSAGE_BUS_CONNECTION, NULL, NULL, &error);
   if (!fixture.bus) goto failed;
   g_dbus_connection_set_exit_on_close(fixture.bus, FALSE);
-  shape = g_dbus_node_info_new_for_xml(fixture.broker_mode ?
+  shape = g_dbus_node_info_new_for_xml(secret_mode ?
     "<node><interface name='org.freedesktop.Secret.Service'>"
     "<method name='ReadAlias'><arg type='s' direction='in'/><arg type='o' direction='out'/></method>"
     "<method name='SearchItems'><arg type='a{ss}' direction='in'/><arg type='ao' direction='out'/><arg type='ao' direction='out'/></method>"
@@ -379,7 +382,7 @@ int main(int argc, char **argv) {
     "<node><interface name='org.freedesktop.systemd1.Manager'><method name='Reload'/></interface></node>", &error);
   if (!shape) goto failed;
   const GDBusInterfaceVTable methods = {.method_call = reload}, secret_methods = {.method_call = secret_call, .get_property = secret_property};
-  if (fixture.broker_mode) {
+  if (secret_mode) {
     const char *paths[] = { SECRET_ROOT, SECRET_COLLECTION, SECRET_ITEM };
     for (size_t index = 0; index < 3; index++) {
       fixture.secret_registrations[index] = g_dbus_connection_register_object(fixture.bus, paths[index], shape->interfaces[index],
@@ -393,20 +396,20 @@ int main(int argc, char **argv) {
   fixture.subscription = g_dbus_connection_signal_subscribe(fixture.bus, "org.freedesktop.DBus", "org.freedesktop.DBus",
     "NameOwnerChanged", "/org/freedesktop/DBus", NULL, G_DBUS_SIGNAL_FLAGS_NONE, name_changed, &fixture, NULL);
   GVariant *name = g_dbus_connection_call_sync(fixture.bus, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
-    "RequestName", g_variant_new("(su)", fixture.broker_mode ? "org.freedesktop.secrets" : "org.freedesktop.systemd1", 4u),
+    "RequestName", g_variant_new("(su)", secret_mode ? "org.freedesktop.secrets" : "org.freedesktop.systemd1", 4u),
     G_VARIANT_TYPE("(u)"), G_DBUS_CALL_FLAGS_NO_AUTO_START, 5000, NULL, &error);
   if (!name) goto failed;
   guint32 name_owned; g_variant_get(name, "(u)", &name_owned); g_variant_unref(name); if (name_owned != 1) goto failed;
   fixture.loop = g_main_loop_new(NULL, FALSE);
-  if (fixture.broker_mode) {
+  if (secret_mode) {
     if (pipe2(notify, O_CLOEXEC) || pipe2(control, O_CLOEXEC)) goto failed;
     fixture.notify = notify[1];
   }
-  char *node_args[] = {argv[1], "--no-warnings", argv[2], argv[3], fixture.broker_mode ? argv[4] : NULL,
+  char *node_args[] = {argv[1], "--no-warnings", argv[2], argv[3], secret_mode ? argv[4] : NULL,
     fixture.broker_mode ? argv[5] : NULL, NULL};
-  fixture.child = start_child(node_args, fixture.broker_mode ? control[1] : -1, fixture.broker_mode ? notify[0] : -1);
+  fixture.child = start_child(node_args, secret_mode ? control[1] : -1, secret_mode ? notify[0] : -1);
   if (fixture.child < 0) goto failed;
-  if (fixture.broker_mode) {
+  if (secret_mode) {
     owned = control[1]; control[1] = -1; if (close(owned)) goto failed;
     owned = notify[0]; notify[0] = -1; if (close(owned)) goto failed;
     fixture.control_watch = g_unix_fd_add(control[0], G_IO_IN | G_IO_HUP | G_IO_ERR, control_reply, &fixture);
@@ -415,7 +418,7 @@ int main(int argc, char **argv) {
   fixture.timeout = g_timeout_add_seconds(45, stop_fixture, &fixture);
   fixture.interrupted = g_unix_signal_add(SIGTERM, stop_fixture, &fixture);
   g_main_loop_run(fixture.loop);
-  if (!fixture.child_ok || !fixture.first_gone || (fixture.broker_mode ?
+  if (!fixture.child_ok || !fixture.first_gone || (secret_mode ?
       (!fixture.preparation_entered || !fixture.preparation_gone || !fixture.released || !fixture.timely) : fixture.calls != 2)) goto failed;
   goto cleanup;
 failed:
@@ -448,6 +451,13 @@ cleanup:
   if (fixture.item_attributes) g_variant_unref(fixture.item_attributes);
   if (fixture.item_secret) g_variant_unref(fixture.item_secret);
   g_clear_error(&error); if (shape) g_dbus_node_info_unref(shape); if (fixture.loop) g_main_loop_unref(fixture.loop);
+  if (fixture.inspection_mode) {
+    printf("{\"diagnosticOnly\":true,\"actualInspectionEntered\":%s,\"cancelJoinedWithin1500ms\":%s,"
+      "\"actualInspectionConnectionRetired\":%s,\"childrenJoined\":%s,\"installedI1Qualified\":false}\n",
+      fixture.preparation_entered ? "true" : "false", fixture.timely ? "true" : "false", fixture.preparation_gone ? "true" : "false",
+      children_joined && fixture.child < 0 && fixture.daemon < 0 ? "true" : "false");
+    return fixture.failed ? 1 : 0;
+  }
   if (fixture.broker_mode) {
     printf("{\"diagnosticOnly\":true,\"actualPreparationEntered\":%s,\"closeJoinedWithin1500ms\":%s,"
       "\"actualPreparationConnectionRetired\":%s,\"childrenJoined\":%s,\"installedI1Qualified\":false}\n",
