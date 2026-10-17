@@ -437,7 +437,7 @@ Implementation notes:
                 modelOpId: string
                 attempt: number
               }
-            | {
+            | ({
                 runtimeSubtype: 'context_window_exhausted'
                 contextManifestRef: ArtifactRef
                 nextPromptTokens: number
@@ -445,7 +445,10 @@ Implementation notes:
                 hardPromptTokens: number
                 protectedTokens: number
                 sourceInputTokenCap: number
-              }
+              } & (
+                | { trigger?: never; modelVisiblePromptDigest?: never; requestBodyBytes?: never; requestBodyLimitBytes?: never }
+                | { trigger: 'request_body_bytes'; modelVisiblePromptDigest: ArtifactRef; requestBodyBytes: number; requestBodyLimitBytes: 1048576 }
+              ))
             | {
                 runtimeSubtype: 'delivery_merge_conflict'
                 deliveryMergeConflictItemRef: ArtifactRef
