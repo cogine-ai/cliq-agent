@@ -18,6 +18,7 @@ import { decodeCredentialAuthorityOperation, decodeCredentialAuthorityRevokeOper
 import { digestOmitting, identityHash, sha256Bytes } from '../../src/kernel/identity.js';
 import { parseJsonStrict } from '../../src/kernel/json.js';
 import type { CredentialFinalizeRequest } from '../../src/state/installed-credential-client.js';
+import { MODEL_BROKER_ENTRY_ID, MODEL_BROKER_RELATIVE_PATH } from '../../src/state/model-broker-native.js';
 import { buildInstalledSupervisorPackage } from './testing/installed-supervisor-package.js';
 import { createCredentialSecretScanner } from './testing/credential-secret-scan.js';
 import { scanCredentialSecretCorpus } from './testing/credential-secret-corpus.js';
@@ -39,7 +40,7 @@ const model = 'installed-run-transport-fixture';
 const rejectedResponse = '{"error":{"message":"Owned fixture rejected this request."}}';
 type CampaignMode = '--campaign' | '--failure-campaign' | '--retry-campaign' | '--authority-failure-campaign' |
   '--storage-failure-campaign' | '--shutdown-admission-campaign' | '--shutdown-session-campaign' | '--shutdown-preparation-campaign' |
-  '--shutdown-received-tool-campaign' | '--shutdown-pending-model-campaign';
+  '--shutdown-received-tool-campaign' | '--shutdown-pending-model-campaign' | '--shutdown-startup-campaign';
 const requestTokenCeiling = { inputTokens: 32768, outputTokens: 4096, cacheReadTokens: 0, cacheWriteTokens: 0 };
 const imageFields = ['dev', 'ino', 'size', 'uid', 'gid', 'mode', 'nlink', 'mtimeNs', 'ctimeNs'] as const;
 const receivedToolBefore = 'owned received-tool OLD token';
@@ -168,10 +169,13 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
   const shutdownSessionOnly = mode === '--shutdown-session-campaign';
   const shutdownPreparationOnly = mode === '--shutdown-preparation-campaign';
   const shutdownReceivedToolOnly = mode === '--shutdown-received-tool-campaign';
-  const shutdownPendingModelOnly = mode === '--shutdown-pending-model-campaign';
+  const shutdownStartupOnly = mode === '--shutdown-startup-campaign';
+  const shutdownPendingModelOnly = mode === '--shutdown-pending-model-campaign' || shutdownStartupOnly;
   const shutdownEffectsOnly = shutdownReceivedToolOnly || shutdownPendingModelOnly;
   const report: Record<string, any> = { diagnosticOnly: true, qualified: false, phase: 'installation',
-    scope: shutdownReceivedToolOnly
+    scope: shutdownStartupOnly
+      ? 'independent signed installed Linux startup SIGTERM after the actual successor StateOwner and selected native broker executable mapping exist but before v1 control opens, with one genuinely retained unknown model claim, unchanged two-second policy and exact third-owner terminal recovery; not an exact retained-Run loader instruction, provider or complete I1 qualification'
+      : shutdownReceivedToolOnly
       ? 'independent signed installed Linux SIGTERM after positively observed original received-tool snapshot progress, unchanged two-second service timeout, original executed result and ready Checkpoint, then successor continuation and terminal cancellation; not an exact private close gate, provider or complete I1 qualification'
       : shutdownPendingModelOnly
       ? 'independent signed installed Linux SIGTERM with one complete owned model POST awaiting a response, unchanged two-second service timeout, original socket join and fully charged UNKNOWN before durable worker fencing, then strict successor terminal cancellation; not an exact native mutex, provider or complete I1 qualification'
@@ -957,7 +961,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
     if (shutdownEffectsOnly) {
       const effect: Record<string, any> = { diagnosticOnly: true, qualified: false, standardStopTimeoutMs: 2000,
         exactPrivateCloseGateQualified: false, exactNativeMutexOrderQualified: false, completeI1Qualified: false };
-      report[shutdownReceivedToolOnly ? 'shutdownReceivedTool' : 'shutdownPendingModel'] = effect;
+      report[shutdownStartupOnly ? 'shutdownStartup' : shutdownReceivedToolOnly ? 'shutdownReceivedTool' : 'shutdownPendingModel'] = effect;
       const fileBytes = 64 * 1024 * 1024, payloadPath = path.join(recipe.workspace, 'payload.txt');
       let payloadBefore: BigIntStats | undefined, originalBlob: string | undefined, editedBlob: string | undefined;
       if (shutdownReceivedToolOnly) {
@@ -1178,6 +1182,116 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       const sameKeeper = show(services.keeperUnit);
       assert.equal(sameKeeper.MainPID, keeperBefore.MainPID); assert.equal(sameKeeper.InvocationID, keeperBefore.InvocationID);
       assert.deepEqual(await readFile(path.join(recipe.stateRoot, 'runtime/keeper.ready')), keeperReady);
+      const precedingOwners = [releasedOwner];
+      if (shutdownStartupOnly) {
+        mark('actual_retained_run_successor_startup');
+        const startup: Record<string, any> = { diagnosticOnly: true, qualified: false,
+          exactRetainedRunLoaderInstructionQualified: false, standardStopTimeoutMs: 2000 };
+        effect.retainedRunStartup = startup;
+        const brokerEntry = signed.bundle.entries.find(entry => entry.entryId === MODEL_BROKER_ENTRY_ID);
+        assert(brokerEntry && brokerEntry.role === 'provider_adapter' && brokerEntry.executable &&
+          brokerEntry.relativePath === MODEL_BROKER_RELATIVE_PATH && brokerEntry.digest === report.bundle.brokerDigest);
+        const brokerImage = path.join(recipe.stateRoot, 'runtime/bundles', bundleDigest, brokerEntry.relativePath);
+        const brokerBefore = await lstat(brokerImage, { bigint: true });
+        assert(brokerBefore.isFile() && !brokerBefore.isSymbolicLink() && brokerBefore.uid === BigInt(ledger.uid) && brokerBefore.nlink === 1n);
+        const socketPath = path.join(recipe.stateRoot, 'runtime/control-v1.sock');
+        await assert.rejects(lstat(socketPath), { code: 'ENOENT' });
+        assert.equal(command('/usr/bin/systemctl', ['--user', 'start', services.supervisorUnit]).status, 0);
+        const originalStartup = show(services.supervisorUnit), startupBy = Date.now() + 30000;
+        const startupPid = Number(originalStartup.MainPID), startupStart = await fixtureProcess(startupPid, ledger.uid);
+        assert.notEqual(originalStartup.MainPID, supervisorBefore.MainPID);
+        assert.notEqual(originalStartup.InvocationID, supervisorBefore.InvocationID);
+        const selectedBefore = await lstat(selectedImage, { bigint: true });
+        const originalStartupProcess = async () => {
+          assert(Date.now() < startupBy, 'the retained-Run startup cut exceeded the original observation deadline');
+          assert.equal(await fixtureProcess(startupPid, ledger.uid), startupStart);
+          const image = await readlink(`/proc/${startupPid}/exe`);
+          if (image !== selectedImage) {
+            assert(image === path.join(recipe.stateRoot, 'runtime/bootstrap'), 'startup executable differs from both fixed installed images'); return false;
+          }
+          const actual = await stat(`/proc/${startupPid}/exe`, { bigint: true });
+          for (const field of imageFields) assert.equal(actual[field], selectedBefore[field]);
+          return true;
+        };
+        const originalStartupCut = async () => {
+          if (!await originalStartupProcess()) return undefined;
+          // openSelected already holds every signed image FD. An open broker
+          // FD therefore proves nothing about scheduler startup. Only its real
+          // executable VMA distinguishes loadModelBroker's process.dlopen here:
+          // its only other production caller is model dispatch, which cannot
+          // run before startInstalledRuns finishes and opens public control.
+          const maps = await open(`/proc/${startupPid}/maps`, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+          const bytes = Buffer.alloc(262145); let count = 0, mapped = false;
+          try {
+            for (;;) {
+              const part = await maps.read(bytes, count, bytes.length - count, null); count += part.bytesRead;
+              assert(count < bytes.length, 'original native image mapping inventory exceeded its fixed bound');
+              if (!part.bytesRead) break;
+            }
+            const lines = new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, count)).trim().split('\n');
+            assert(lines.length <= 4096);
+            const major = (brokerBefore.dev >> 8n & 0xfffn) | (brokerBefore.dev >> 32n & 0xfffff000n);
+            const minor = (brokerBefore.dev & 0xffn) | (brokerBefore.dev >> 12n & 0xffffff00n);
+            for (const line of lines) {
+              const mapping = /^([0-9a-f]+)-([0-9a-f]+)\s+([r-][w-][x-][ps])\s+[0-9a-f]+\s+([0-9a-f]+):([0-9a-f]+)\s+([0-9]+)\s*(.*)$/u.exec(line);
+              assert(mapping, 'original native image mapping inventory is malformed');
+              if (mapping[3] !== 'r-xp' || mapping[7] !== brokerImage) continue;
+              assert(BigInt(`0x${mapping[1]!}`) < BigInt(`0x${mapping[2]!}`));
+              assert.equal(BigInt(`0x${mapping[4]}`), major); assert.equal(BigInt(`0x${mapping[5]}`), minor);
+              assert.equal(BigInt(mapping[6]!), brokerBefore.ino); mapped = true;
+            }
+          } finally { bytes.fill(0); await maps.close(); }
+          if (!mapped) return undefined;
+          const currentBroker = await lstat(brokerImage, { bigint: true });
+          for (const field of imageFields) assert.equal(currentBroker[field], brokerBefore[field]);
+          // This absence is a mandatory cut, not a connect/retry heuristic.
+          await assert.rejects(lstat(socketPath), { code: 'ENOENT' });
+          const owners = inspectInstalledOwnerHistory(recipe.stateRoot).owners;
+          assert.equal(owners.length, 2); assert.deepEqual(owners[0], releasedOwner);
+          const active = owners[1]!; assert.equal(active.state, 'active');
+          assert.equal(active.ownerEpoch, originalOwner.ownerEpoch + 1);
+          const identity = parseJsonStrict((await readCas(active.processIdentityRef)).toString('utf8')) as Record<string, any>;
+          assert.equal(identity.identityDigest, active.processIdentityDigest); assert.equal(identity.identityDigest, digestOmitting(identity, 'identityDigest'));
+          assert.equal(identity.pid, startupPid); assert.equal(identity.ownerUid, ledger.uid);
+          assert.equal(identity.processStartToken, `linux-proc-start-ticks:${startupStart}`);
+          assert.equal(identity.executableImageDigest, report.bundle.supervisorDigest);
+          assert(await originalStartupProcess());
+          await assert.rejects(lstat(socketPath), { code: 'ENOENT' });
+          return active;
+        };
+        let startupOwner: ReturnType<typeof inspectInstalledOwnerHistory>['owners'][number] | undefined;
+        while (!startupOwner) {
+          assert(Date.now() < startupBy, 'the actual retained-Run startup was not positively observed');
+          startupOwner = await originalStartupCut(); if (!startupOwner) await delay(10);
+        }
+        startup.originalProcessAndBrokerMappingMatched = true; startup.publicControlAbsent = true;
+        startup.ownerEpoch = startupOwner.ownerEpoch; startup.brokerEntryId = MODEL_BROKER_ENTRY_ID;
+        startup.brokerImageDigest = brokerEntry.digest; startup.brokerDeviceId = brokerBefore.dev.toString();
+        startup.brokerFileId = brokerBefore.ino.toString();
+        await withRetainedUnitHistory([services.supervisorUnit, services.keeperUnit], async assertRetained => {
+          assert.deepEqual(await originalStartupCut(), startupOwner); assertRetained();
+          mark('ordinary_sigterm_during_retained_run_startup');
+          const stopped = command('/usr/bin/systemctl', ['--user', 'stop', services.supervisorUnit]), exit = show(services.supervisorUnit);
+          startup.serviceExit = projectInstalledServiceExit(exit);
+          if (exit.Result !== 'success' || exit.ExecMainStatus !== '0') startup.shutdownRefusal = observeShutdownRefusal(services.supervisorUnit, exit.ExecMainPID);
+          assert.equal(stopped.status, 0); assert.equal(exit.ActiveState, 'inactive'); assert.equal(exit.MainPID, '0');
+          assert.equal(exit.Result, 'success'); assert.equal(exit.ExecMainCode, '1'); assert.equal(exit.ExecMainStatus, '0');
+        });
+        await assert.rejects(lstat(`/proc/${startupPid}`), { code: 'ENOENT' });
+        const retired = inspectInstalledOwnerHistory(recipe.stateRoot).owners;
+        assert.equal(retired.length, 2); assert.deepEqual(retired[0], releasedOwner);
+        const terminal = retired[1]!; assert.equal(terminal.state, 'terminal');
+        if (terminal.state !== 'terminal') throw new Error('the original startup StateOwner did not retire');
+        assert.equal(terminal.terminalReason, 'graceful_release');
+        for (const field of ['ownerEpoch', 'supervisorInstanceId', 'processIdentityRef', 'processIdentityDigest',
+          'stateLockIdentityRef', 'stateLockIdentityDigest', 'instanceNonceDigest', 'acquiredAt'] as const) assert.equal(terminal[field], startupOwner[field]);
+        const unchangedKeeper = show(services.keeperUnit);
+        assert.equal(unchangedKeeper.MainPID, keeperBefore.MainPID); assert.equal(unchangedKeeper.InvocationID, keeperBefore.InvocationID);
+        assert.deepEqual(await readFile(path.join(recipe.stateRoot, 'runtime/keeper.ready')), keeperReady);
+        assert.equal(requestsReceived, 1); assert.equal(acceptedTcpConnections, 1); assert.equal(acceptedTlsConnections, 1); assert(!providerFailure);
+        precedingOwners.push(terminal); startup.qualified = true; startup.originalOwnerGracefullyReleased = true;
+        startup.noProductiveRedispatch = true; startup.transitionEvidenceRef = terminal.transitionEvidenceRef;
+      }
       mark('effect_original_owner_successor');
       assert.equal(command('/usr/bin/systemctl', ['--user', 'start', services.supervisorUnit]).status, 0);
       const successor = show(services.supervisorUnit), recoverBy = Date.now() + 30000;
@@ -1186,9 +1300,10 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       const links: Record<string, unknown> = {};
       const history = await qualifyInstalledOwnerLinks({ stateRoot: recipe.stateRoot, uid: ledger.uid, bundle: signed.bundle,
         imageDigest: report.bundle.supervisorDigest, report: links });
-      assert.equal(links.qualified, true); assert.equal(history.owners.length, 2); assert.deepEqual(history.owners[0], releasedOwner);
-      const successorOwner = history.owners[1]!; assert.equal(successorOwner.state, 'active');
-      assert.equal(successorOwner.ownerEpoch, originalOwner.ownerEpoch + 1);
+      assert.equal(links.qualified, true); assert.equal(history.owners.length, precedingOwners.length + 1);
+      assert.deepEqual(history.owners.slice(0, -1), precedingOwners);
+      const successorOwner = history.owners.at(-1)!; assert.equal(successorOwner.state, 'active');
+      assert.equal(successorOwner.ownerEpoch, precedingOwners.at(-1)!.ownerEpoch + 1);
       const successorProcess = parseJsonStrict((await readCas(successorOwner.processIdentityRef)).toString('utf8')) as Record<string, any>;
       assert.equal(successorProcess.identityDigest, successorOwner.processIdentityDigest);
       assert.equal(successorProcess.pid, Number(successor.MainPID));
@@ -1196,6 +1311,8 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       effect.ownerLineage = { qualified: true, originalOwnerEpoch: originalOwner.ownerEpoch,
         originalProcessIdentityRef: originalOwner.processIdentityRef, terminalReason: 'graceful_release',
         transitionEvidenceRef: releasedOwner.transitionEvidenceRef, successorOwnerEpoch: successorOwner.ownerEpoch,
+        ...(shutdownStartupOnly ? { intermediateStartupOwnerEpoch: precedingOwners[1]!.ownerEpoch,
+          finalAcquisitionPredecessorOwnerEpoch: precedingOwners.at(-1)!.ownerEpoch } : {}),
         acquisitionEvidenceRef: successorOwner.acquisitionEvidenceRef, acquisitionKind: 'acquire_after_graceful_release' };
       shutdownClient = await persistentClient();
       let ready: Record<string, any>;
@@ -3550,5 +3667,5 @@ assert.equal(process.platform, 'linux'); assert.equal(process.arch, 'x64');
 const [mode, filename, ...extra] = process.argv.slice(2);
 assert(mode === '--campaign' || mode === '--failure-campaign' || mode === '--retry-campaign' || mode === '--authority-failure-campaign' ||
   mode === '--storage-failure-campaign' || mode === '--shutdown-admission-campaign' || mode === '--shutdown-session-campaign' || mode === '--shutdown-preparation-campaign' ||
-  mode === '--shutdown-received-tool-campaign' || mode === '--shutdown-pending-model-campaign'); assert(filename && extra.length === 0);
+  mode === '--shutdown-received-tool-campaign' || mode === '--shutdown-pending-model-campaign' || mode === '--shutdown-startup-campaign'); assert(filename && extra.length === 0);
 await campaign(filename, mode);

@@ -286,6 +286,12 @@ jobs:
         run: |
           probe_node=$(realpath "$(command -v node)")
           sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --run-shutdown-pending-model-journey "$probe_node" "$RUNNER_TEMP/cliq-installed-shutdown-pending-model"
+      - name: Stop a genuine retained-Run successor after native broker load and before public control
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          probe_node=$(realpath "$(command -v node)")
+          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --run-shutdown-startup-journey "$probe_node" "$RUNNER_TEMP/cliq-installed-shutdown-startup"
       - name: Retain bounded received-tool shutdown and unchanged-runner feedback
         if: always()
         uses: actions/upload-artifact@v4
@@ -300,6 +306,14 @@ jobs:
         with:
           name: installed-shutdown-pending-model-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/cliq-installed-shutdown-pending-model/*.json
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Retain bounded startup shutdown and unchanged-runner feedback
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installed-shutdown-startup-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cliq-installed-shutdown-startup/*.json
           if-no-files-found: warn
           retention-days: 7
 

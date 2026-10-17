@@ -220,6 +220,17 @@ and original processes, then apply the unchanged two-second stop. Neither
 setup readiness nor these diagnostics substitute for the actual cancellation
 join, original owner release, orphan cleanup and successor replay evidence.
 
+Startup recovery is another complete producer: SIGTERM must not wait through
+the entire retained-Run inventory before revoking already-created owners. Its
+new control first creates a genuine retained unknown model call through the
+existing public path. On restart it requires the actual successor StateOwner,
+original process identity and signed broker executable mapping while public
+control is still absent, then ordinary two-second stop and a third real owner.
+An open broker FD is not this evidence: installation selection already opens
+all signed images. The executable mapping is bounded read-only observation of
+the actual dlopen, not a loader instruction hook or fake inventory. Lost cuts
+and the not-yet-repaired startup producer remain explicitly unqualified.
+
 ## Tool result and settlement rules
 
 | Actual cut | Required behavior |

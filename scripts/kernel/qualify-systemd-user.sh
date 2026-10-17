@@ -30,10 +30,11 @@ case ${1:-} in
   --run-shutdown-preparation-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--shutdown-preparation-campaign; shift ;;
   --run-shutdown-received-tool-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--shutdown-received-tool-campaign; shift ;;
   --run-shutdown-pending-model-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--shutdown-pending-model-campaign; shift ;;
+  --run-shutdown-startup-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--shutdown-startup-campaign; shift ;;
 esac
 readonly probe_campaign_kind probe_run_driver_mode probe_finalizer_shutdown
 if [[ $(id -u) != 0 || $# -lt 1 || $# -gt 2 ]]; then
-  printf 'usage: sudo bash %s [--installed|--installed-retirement-refusal|--secrets|--credentials|--credential-finalizer-shutdown|--run-journey|--run-failure-journey|--run-retry-journey|--run-authority-failure-journey|--run-storage-failure-journey|--run-shutdown-admission-journey|--run-shutdown-session-journey|--run-shutdown-preparation-journey|--run-shutdown-received-tool-journey|--run-shutdown-pending-model-journey] ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' "$0" >&2
+  printf 'usage: sudo bash %s [--installed|--installed-retirement-refusal|--secrets|--credentials|--credential-finalizer-shutdown|--run-journey|--run-failure-journey|--run-retry-journey|--run-authority-failure-journey|--run-storage-failure-journey|--run-shutdown-admission-journey|--run-shutdown-session-journey|--run-shutdown-preparation-journey|--run-shutdown-received-tool-journey|--run-shutdown-pending-model-journey|--run-shutdown-startup-journey] ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' "$0" >&2
   exit 2
 fi
 readonly probe_node=$1
