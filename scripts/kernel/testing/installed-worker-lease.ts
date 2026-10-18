@@ -186,55 +186,76 @@ export function inspectInstalledWorkerRetirement(stateRoot: string, uid: number,
     for (const value of [original.leaseEpoch, original.pid]) requireValue(Number.isSafeInteger(value) && value > 0);
     requireValue(/^linux-proc-start-ticks:(?:0|[1-9][0-9]*)$/u.test(original.processStartToken));
     parseCanonicalTime(original.activatedAt); parseCanonicalTime(original.observedAt);
-    return readWorkerDiagnostic(stateRoot, uid, (database, databaseIdentity, readCas) => {
-      const { launch, generation } = readWorkerRows(database, original.runId, original.launchId);
-      requireValue(launch.phase === 'retired' && launch.generationWriteState === 'sealed' && launch.retiredAt &&
-        launch.retirementEvidenceRef && generation.phase === 'sealed' && generation.updatedAt === launch.retiredAt);
-      const current = workerProjection(databaseIdentity, launch, generation, readCas);
-      const { observedAt: _originalTime, ...captured } = original, { observedAt, ...retained } = current;
-      requireValue(canonicalSha256(captured) === canonicalSha256(retained) && launch.retiredAt >= original.observedAt && launch.retiredAt <= observedAt);
-      const snapshot = decodeWorkspaceGenerationSnapshotEvidence(readCas(generation.snapshotEvidenceRef));
-      requireValue(snapshot.purpose === 'sealed_to_checkpoint' && snapshot.runId === original.runId &&
-        snapshot.generationRef === original.workspaceGenerationRef && snapshot.generationIdentityDigest === original.generationIdentityDigest &&
-        snapshot.evidenceDigest === generation.snapshotEvidenceDigest && snapshot.treeDigest === generation.lastVerifiedTreeDigest &&
-        snapshot.observedAt >= original.activatedAt && snapshot.observedAt <= launch.retiredAt);
-      const death = readCas(launch.retirementEvidenceRef);
-      closedRecord(death, ['schemaVersion', 'kind', 'containmentRef', 'planRef', 'sandboxLaunchSpecRef', 'sandboxLaunchSpecDigest',
-        'owner', 'launchNonceDigest', 'inspectorSupervisorInstanceId', 'inspectorIdentityRef', 'inspectorIdentityDigest', 'backend', 'observedAt', 'evidenceDigest']);
-      requireValue(death.schemaVersion === 1 && death.kind === 'containment_all_descendants_dead' &&
-        death.evidenceDigest === digestOmitting(death, 'evidenceDigest') && death.containmentRef === original.processContainmentRef &&
-        death.planRef === launch.containmentPlanRef && death.sandboxLaunchSpecRef === launch.sandboxLaunchSpecRef &&
-        death.launchNonceDigest === launch.spawnNonceDigest && boundedString(death.inspectorSupervisorInstanceId));
-      for (const value of [death.sandboxLaunchSpecDigest, death.inspectorIdentityRef, death.inspectorIdentityDigest, death.evidenceDigest]) requireValue(digest(value));
-      closedRecord(death.owner, ['kind', 'runId', 'intendedLeaseEpoch', 'workerLaunchId']);
-      requireValue(death.owner.kind === 'worker_activation' && death.owner.runId === original.runId &&
-        death.owner.intendedLeaseEpoch === original.leaseEpoch && death.owner.workerLaunchId === original.launchId);
-      const identityKeys = ['pidNamespaceReservationId', 'pidNamespaceId', 'cgroupPath', 'cgroupId', 'namespaceInitStartToken', 'subreaperStartToken'];
-      closedRecord(death.backend, ['kind', ...identityKeys, 'cgroupPopulated', 'namespaceInitDeadAndReaped', 'remainingTrackedDescendants']);
-      const backend = death.backend;
-      requireValue(backend.kind === 'linux' && identityKeys.every(key => typeof backend[key] === 'string' &&
-        (backend[key] as string).length > 0 && (backend[key] as string).length <= 4096) &&
-        backend.cgroupPopulated === 0 && backend.namespaceInitDeadAndReaped === true && backend.remainingTrackedDescendants === 0);
-      const containment = readCas(original.processContainmentRef);
-      closedRecord(containment, ['schemaVersion', 'planRef', 'sandboxLaunchSpecRef', 'sandboxLaunchSpecDigest', 'owner',
-        'filesystemBinding', 'launchNonceDigest', 'backend', 'createdAt']);
-      requireValue(containment.schemaVersion === 1 && containment.planRef === death.planRef &&
-        containment.sandboxLaunchSpecRef === death.sandboxLaunchSpecRef && containment.sandboxLaunchSpecDigest === death.sandboxLaunchSpecDigest &&
-        containment.launchNonceDigest === death.launchNonceDigest && canonicalSha256(containment.owner) === canonicalSha256(death.owner) &&
-        canonicalSha256(containment.filesystemBinding) === canonicalSha256({ kind: 'run-generation', generationRef: original.workspaceGenerationRef }));
-      closedRecord(containment.backend, ['kind', ...identityKeys]);
-      requireValue(containment.backend.kind === backend.kind && identityKeys.every(key =>
-        (containment.backend as Record<string, unknown>)[key] === backend[key]));
-      requireValue(typeof containment.createdAt === 'string'); parseCanonicalTime(containment.createdAt);
-      requireValue(containment.createdAt <= original.activatedAt);
-      requireValue(typeof death.observedAt === 'string'); parseCanonicalTime(death.observedAt);
-      requireValue(death.observedAt >= snapshot.observedAt && death.observedAt <= launch.retiredAt);
-      return Object.freeze({ ...current, phase: 'retired', generationWriteState: 'sealed', generationPhase: 'sealed',
-        retiredAt: launch.retiredAt, retirementEvidenceRef: launch.retirementEvidenceRef,
-        snapshotEvidenceRef: generation.snapshotEvidenceRef, snapshotEvidenceDigest: generation.snapshotEvidenceDigest,
-        deathObservedAt: death.observedAt });
-    });
+    return readRetiredWorkerHistory(stateRoot, uid, original, original);
   } catch { throw new Error('installed worker retirement inspection refused'); }
+}
+
+/** Retained data only, for an exact launch selected by its original invocation.
+ * Unlike the live-identity API, this makes no claim to have observed the worker
+ * before retirement. Full Run recovery and independent death checks remain the
+ * owning campaign's responsibility; a missing row is never proof of retirement. */
+export function inspectInstalledWorkerRetirementHistory(stateRoot: string, uid: number,
+  expected: Readonly<{ runId: string; launchId: string }>): InstalledWorkerRetirementInspection {
+  try {
+    closedRecord(expected, ['runId', 'launchId']);
+    requireValue(boundedString(expected.runId) && boundedString(expected.launchId));
+    return readRetiredWorkerHistory(stateRoot, uid, expected);
+  } catch { throw new Error('installed worker retirement history inspection refused'); }
+}
+
+function readRetiredWorkerHistory(stateRoot: string, uid: number, expected: Readonly<{ runId: string; launchId: string }>,
+  original?: InstalledWorkerIdentityInspection): InstalledWorkerRetirementInspection {
+  return readWorkerDiagnostic(stateRoot, uid, (database, databaseIdentity, readCas) => {
+    const { launch, generation } = readWorkerRows(database, expected.runId, expected.launchId);
+    requireValue(launch.phase === 'retired' && launch.generationWriteState === 'sealed' && launch.retiredAt &&
+      launch.retirementEvidenceRef && generation.phase === 'sealed' && generation.updatedAt === launch.retiredAt);
+    const current = workerProjection(databaseIdentity, launch, generation, readCas);
+    requireValue(launch.retiredAt <= current.observedAt);
+    if (original) {
+      const { observedAt: _originalTime, ...captured } = original, { observedAt: _observedAt, ...retained } = current;
+      requireValue(canonicalSha256(captured) === canonicalSha256(retained) && launch.retiredAt >= original.observedAt);
+    }
+    const snapshot = decodeWorkspaceGenerationSnapshotEvidence(readCas(generation.snapshotEvidenceRef));
+    requireValue(snapshot.purpose === 'sealed_to_checkpoint' && snapshot.runId === current.runId &&
+      snapshot.generationRef === current.workspaceGenerationRef && snapshot.generationIdentityDigest === current.generationIdentityDigest &&
+      snapshot.evidenceDigest === generation.snapshotEvidenceDigest && snapshot.treeDigest === generation.lastVerifiedTreeDigest &&
+      snapshot.observedAt >= current.activatedAt && snapshot.observedAt <= launch.retiredAt);
+    const death = readCas(launch.retirementEvidenceRef);
+    closedRecord(death, ['schemaVersion', 'kind', 'containmentRef', 'planRef', 'sandboxLaunchSpecRef', 'sandboxLaunchSpecDigest',
+      'owner', 'launchNonceDigest', 'inspectorSupervisorInstanceId', 'inspectorIdentityRef', 'inspectorIdentityDigest', 'backend', 'observedAt', 'evidenceDigest']);
+    requireValue(death.schemaVersion === 1 && death.kind === 'containment_all_descendants_dead' &&
+      death.evidenceDigest === digestOmitting(death, 'evidenceDigest') && death.containmentRef === current.processContainmentRef &&
+      death.planRef === launch.containmentPlanRef && death.sandboxLaunchSpecRef === launch.sandboxLaunchSpecRef &&
+      death.launchNonceDigest === launch.spawnNonceDigest && boundedString(death.inspectorSupervisorInstanceId));
+    for (const value of [death.sandboxLaunchSpecDigest, death.inspectorIdentityRef, death.inspectorIdentityDigest, death.evidenceDigest]) requireValue(digest(value));
+    closedRecord(death.owner, ['kind', 'runId', 'intendedLeaseEpoch', 'workerLaunchId']);
+    requireValue(death.owner.kind === 'worker_activation' && death.owner.runId === current.runId &&
+      death.owner.intendedLeaseEpoch === current.leaseEpoch && death.owner.workerLaunchId === current.launchId);
+    const identityKeys = ['pidNamespaceReservationId', 'pidNamespaceId', 'cgroupPath', 'cgroupId', 'namespaceInitStartToken', 'subreaperStartToken'];
+    closedRecord(death.backend, ['kind', ...identityKeys, 'cgroupPopulated', 'namespaceInitDeadAndReaped', 'remainingTrackedDescendants']);
+    const backend = death.backend;
+    requireValue(backend.kind === 'linux' && identityKeys.every(key => typeof backend[key] === 'string' &&
+      (backend[key] as string).length > 0 && (backend[key] as string).length <= 4096) &&
+      backend.cgroupPopulated === 0 && backend.namespaceInitDeadAndReaped === true && backend.remainingTrackedDescendants === 0);
+    const containment = readCas(current.processContainmentRef);
+    closedRecord(containment, ['schemaVersion', 'planRef', 'sandboxLaunchSpecRef', 'sandboxLaunchSpecDigest', 'owner',
+      'filesystemBinding', 'launchNonceDigest', 'backend', 'createdAt']);
+    requireValue(containment.schemaVersion === 1 && containment.planRef === death.planRef &&
+      containment.sandboxLaunchSpecRef === death.sandboxLaunchSpecRef && containment.sandboxLaunchSpecDigest === death.sandboxLaunchSpecDigest &&
+      containment.launchNonceDigest === death.launchNonceDigest && canonicalSha256(containment.owner) === canonicalSha256(death.owner) &&
+      canonicalSha256(containment.filesystemBinding) === canonicalSha256({ kind: 'run-generation', generationRef: current.workspaceGenerationRef }));
+    closedRecord(containment.backend, ['kind', ...identityKeys]);
+    requireValue(containment.backend.kind === backend.kind && identityKeys.every(key =>
+      (containment.backend as Record<string, unknown>)[key] === backend[key]));
+    requireValue(typeof containment.createdAt === 'string'); parseCanonicalTime(containment.createdAt);
+    requireValue(containment.createdAt <= current.activatedAt);
+    requireValue(typeof death.observedAt === 'string'); parseCanonicalTime(death.observedAt);
+    requireValue(death.observedAt >= snapshot.observedAt && death.observedAt <= launch.retiredAt);
+    return Object.freeze({ ...current, phase: 'retired', generationWriteState: 'sealed', generationPhase: 'sealed',
+      retiredAt: launch.retiredAt, retirementEvidenceRef: launch.retirementEvidenceRef,
+      snapshotEvidenceRef: generation.snapshotEvidenceRef, snapshotEvidenceDigest: generation.snapshotEvidenceDigest,
+      deathObservedAt: death.observedAt });
+  });
 }
 
 /** A fresh short-lived readonly connection observes one joined SQL cut. */

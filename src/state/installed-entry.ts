@@ -17,6 +17,7 @@ import { decodeCredentialWriteRequest, writeCredentialAuthority, decodeCredentia
 import { installServices } from './installed-services.js';
 import { loadInstalledCredentialPlatform } from './installed-runtime.js';
 import { installedSandboxProfile } from './installed-sandbox-profile.js';
+import { noteInstalledCredentialPhase } from './installed-diagnostics.js';
 
 // Hidden Linux SEA entry. Default CLI startup is unchanged. Release roots are
 // embedded at image construction, never selected by argv/environment/control.
@@ -30,6 +31,7 @@ let anchor: HeldInstalledAnchor | undefined;
 let containmentHealth: ReturnType<typeof setInterval> | undefined;
 let closing: Promise<void> | undefined;
 let supervisorStopRequested = false;
+let credentialRole = false;
 
 function stopSupervisorStartup(): boolean {
   if (!supervisorStopRequested) return false;
@@ -39,6 +41,7 @@ function stopSupervisorStartup(): boolean {
 
 function close(): Promise<void> {
   return closing ??= (async () => {
+    if (credentialRole) noteInstalledCredentialPhase('retire');
     clearInterval(containmentHealth);
     if (keeper) {
       // Independent native ownership: even uncertain anchor retirement must
@@ -136,11 +139,13 @@ async function start(): Promise<void> {
     .decode(getAsset('release-trust-roots.json'))) as ReleaseTrustKey[];
   const runtime = createInstalledRuntime({ releaseKeys });
   const mode = process.argv[2];
+  credentialRole = mode === '--bootstrap-credential' || mode === '--installed-credential';
   if (mode === '--bootstrap-supervisor' || mode === '--bootstrap-keeper' || mode === '--bootstrap-endpoint' || mode === '--bootstrap-credential') {
     const runtimeRoot = path.dirname(executable);
     if (process.argv.length !== (mode === '--bootstrap-credential' ? 4 : 3) || path.basename(executable) !== 'bootstrap' || path.basename(runtimeRoot) !== 'runtime')
       throw new Error('expected only a fixed role at StateRoot/runtime/bootstrap');
     if (mode === '--bootstrap-credential') readCredentialRequest(process.argv[3]);
+    if (credentialRole) noteInstalledCredentialPhase('open_selected');
     selected = await runtime.openSelected(path.dirname(runtimeRoot));
     // Bootstrap has no StateOwner, Store, control/worker handles or graceful
     // SIGTERM handler. Exec is terminal, never a running-owner restart API.
@@ -164,6 +169,7 @@ async function start(): Promise<void> {
     // releasing Store, containment or installation descriptors.
     void starting.then(close, close).catch(error => { report(error); process.exitCode = 1; });
   });
+  if (credentialRole) noteInstalledCredentialPhase('open_selected');
   selected = await runtime.openSelected(stateRoot);
   if (stopSupervisorStartup()) return;
   const supervisor = selected.bundle.entries.find(entry => entry.role === 'supervisor')!;

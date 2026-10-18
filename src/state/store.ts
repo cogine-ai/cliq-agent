@@ -61,6 +61,7 @@ import { decodeSecretServiceObservation, decodeRetainedSecretServiceObservation,
   decodeSecretServiceSelector, type SecretServiceObservation, type SecretServiceSelector,
   type NativeCredentialInspection, type NativeCredentialPlatformBinding } from './credential-platform.js';
 import { ensureInstalledCredentialSupervisor, type CredentialFinalizeRequest } from './installed-credential-client.js';
+import { noteInstalledCredentialPhase } from './installed-diagnostics.js';
 import { ContentAddressedStore } from './cas.js';
 import { openLocalControlListener, type AuthenticatedControlIdentity, type LocalControlConnection, type LocalControlListener } from './control-channel.js';
 import { readControl, type ReadControlRequest } from './control-read.js';
@@ -769,6 +770,7 @@ async function readCredentialSecret(): Promise<Buffer> {
 /** Complete fixed installed business action. Input and phase writers are owned
  * here, not exposed as injectable callbacks/factories or public phase methods. */
 export async function writeCredentialAuthority(selected: HeldInstalledRuntime, request: CredentialWriteRequest): Promise<CredentialAuthorityOperationV1> {
+  noteInstalledCredentialPhase('history');
   const initial = await withCredentialAuthorityLock(selected, async token => {
     const held = checkedCredentialToken(token); request = decodeCredentialWriteRequest(request);
     return credentialWriteContinuation(held, request);
@@ -788,13 +790,17 @@ export async function writeCredentialAuthority(selected: HeldInstalledRuntime, r
     });
     if (resumed?.phase === 'committed') return resumed;
   }
+  noteInstalledCredentialPhase('first_supervisor');
   let client = await ensureInstalledCredentialSupervisor(selected);
   let secret: Buffer | undefined;
   try {
+    noteInstalledCredentialPhase('secret_input');
     secret = await readCredentialSecret();
     // Input waited without credential locks. Reconnect/observe the actual
     // current owner before preparation instead of reusing old readiness.
+    noteInstalledCredentialPhase('second_supervisor');
     await client.close(); client = await ensureInstalledCredentialSupervisor(selected);
+    noteInstalledCredentialPhase('platform_store');
     platform ??= await loadInstalledCredentialPlatform(selected);
     const operation = await withCredentialAuthorityLock(selected, async token => {
       const held = checkedCredentialToken(token), raced = credentialWriteContinuation(held, request);
@@ -828,6 +834,7 @@ export async function writeCredentialAuthority(selected: HeldInstalledRuntime, r
     });
     if (operation.phase === 'committed') return operation;
     // This call starts only after both pager and native scope have retired.
+    noteInstalledCredentialPhase('finalize');
     const committed = await client.finalize({ protocolVersion: 1, method: 'credential.finalize', requestId: operation.requestId,
       operationId: operation.operationId, attempt: operation.attempt, commandDigest: operation.requestDigest });
     if (committed.kind === 'rotate') {
@@ -849,7 +856,7 @@ export async function writeCredentialAuthority(selected: HeldInstalledRuntime, r
       } catch (error) { if (error instanceof ResourceRetirementError) throw error; }
     }
     return committed;
-  } finally { secret?.fill(0); await client.close(); }
+  } finally { secret?.fill(0); noteInstalledCredentialPhase('retire'); await client.close(); }
 }
 
 function commitCredentialRevocation(held: CredentialBinding, request: CredentialRevokeRequest): CredentialAuthorityRevokeOperationV1 {

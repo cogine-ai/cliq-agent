@@ -7,12 +7,24 @@ import { chmod, copyFile, lstat, open, readFile, writeFile } from 'node:fs/promi
 import path from 'node:path';
 import { build } from 'esbuild';
 import { inject } from 'postject';
+import { INSTALLED_CREDENTIAL_PHASE_CHANNEL, INSTALLED_CREDENTIAL_PHASES } from '../../../src/state/installed-diagnostics.js';
 
 export const SUPERVISOR_SEA_NODE_VERSION = '24.21.0';
 export const SUPERVISOR_SEA_CARRIER_CHECKSUMS: Readonly<Record<string, string>> = {
   'linux-x64': 'fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6',
   'darwin-arm64': '6239d4cf92d864487ec8cd3615038f7b67e7f58b77b21cd2f09ea9fbd68065fe',
 };
+
+// Fixed trusted composition, not caller-supplied banner code or a runtime
+// option. The subscriber itself must catch every error: diagnostics_channel
+// reports subscriber throws as uncaught exceptions outside publish().
+export const CREDENTIAL_PHASE_DIAGNOSTIC_BANNER = `;(() => { try {
+  const diagnostic = require('node:diagnostics_channel').channel(${JSON.stringify(INSTALLED_CREDENTIAL_PHASE_CHANNEL)});
+  const phases = new Set(${JSON.stringify(INSTALLED_CREDENTIAL_PHASES)}), write = require('node:fs').writeSync;
+  diagnostic.subscribe(phase => { try {
+    if (typeof phase === 'string' && phases.has(phase)) write(2, 'CLIQ_CREDENTIAL_PHASE_V1:' + phase + '\\n');
+  } catch {} });
+} catch {} })();`;
 
 function run(fixture: string, executable: string, args: string[]) {
   const result = spawnSync(executable, args, { encoding: 'utf8', timeout: 60_000, cwd: fixture,
@@ -51,10 +63,13 @@ export async function prepareSupervisorSeaCarrier(fixture: string, cachedArchive
 export async function buildSupervisorSeaImage(input: {
   fixture: string; carrier: string; entryPoint: string; executable: string;
   variant: string; assets: Record<string, string>; defines?: Record<string, string>;
+  credentialPhaseDiagnostics?: true;
 }): Promise<string> {
+  assert(input.credentialPhaseDiagnostics === undefined || input.credentialPhaseDiagnostics === true);
   const main = path.join(input.fixture, `${input.variant}.cjs`);
   const result = await build({ entryPoints: [input.entryPoint], outfile: main,
     bundle: true, platform: 'node', format: 'cjs', target: 'node24.21', metafile: true,
+    ...(input.credentialPhaseDiagnostics === true ? { banner: { js: CREDENTIAL_PHASE_DIAGNOSTIC_BANNER } } : {}),
     // These entries run only as SEA. The ordinary ESM helper branch cannot run.
     define: { 'import.meta.url': 'undefined', ...input.defines } });
   for (const emitted of Object.values(result.metafile!.outputs)) {

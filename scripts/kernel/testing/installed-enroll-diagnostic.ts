@@ -5,6 +5,14 @@ import { spawn } from 'node:child_process';
 import { readFile, stat } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { CredentialSecretScanner } from './credential-secret-scan.js';
+import { INSTALLED_CREDENTIAL_PHASES, type InstalledCredentialPhase } from '../../../src/state/installed-diagnostics.js';
+
+const phaseMarkers = INSTALLED_CREDENTIAL_PHASES.map(phase => ({ phase, bytes: Buffer.from(`CLIQ_CREDENTIAL_PHASE_V1:${phase}\n`) }));
+/** Closed data only: unknown/partial bytes are never copied into a report. */
+export function decodeEnrollCredentialPhase(input: unknown): InstalledCredentialPhase | undefined {
+  if (!Buffer.isBuffer(input)) return undefined;
+  return phaseMarkers.find(marker => marker.bytes.equals(input))?.phase;
+}
 
 export type EnrollProcessCounters = Readonly<{ pid: number; parent: number; group: number; session: number;
   startTicks: string; userTicks: string; systemTicks: string; rchar: string; syscr: string; readBytes: string }>;
@@ -38,6 +46,9 @@ export type InstalledEnrollDiagnostic = {
   launcherObserved: boolean; authObserved: boolean; launcherJoined: boolean; authJoined: boolean; processAndPipesJoined: boolean;
   completeInputWriteJoined: boolean;
   samples: Array<{ elapsedMs: number; process: EnrollProcessSample; owner: EnrollOwnerStage }>;
+  /** First 32 complete markers observed on this original child's scanned
+   * stderr; not a realtime state, full trace or credential/effect authority. */
+  phases: Array<{ elapsedMs: number; phase: InstalledCredentialPhase }>;
 };
 type Fact = { pid: number; parent: number; group: number; session: number; start: string; uids: number[]; raw: string };
 async function processFact(pid: number): Promise<Fact | undefined> {
@@ -87,7 +98,7 @@ export async function runOwnedEnrollDiagnostic(input: Readonly<{
   const started = performance.now(), by = started + input.originalDeadlineMs, diagnostic = input.diagnostic;
   Object.assign(diagnostic, { diagnosticOnly: true, originalDeadlineMs: input.originalDeadlineMs, elapsedMs: 0, outcome: 'observation_failed',
     launcherObserved: false, authObserved: false, launcherJoined: false, authJoined: false, processAndPipesJoined: false,
-    completeInputWriteJoined: false, samples: [] });
+    completeInputWriteJoined: false, samples: [], phases: [] });
   const images = await Promise.all([stat(input.bootstrapImage, { bigint: true }), stat(input.installedImage, { bigint: true })]);
   assert(images.every(image => image.isFile()));
   const scans: ReturnType<CredentialSecretScanner['openStream']>[] = [];
@@ -107,6 +118,26 @@ export async function runOwnedEnrollDiagnostic(input: Readonly<{
   let finished = false, launcher: Fact | undefined, auth: Fact | undefined;
   let failure: unknown, error: (Error & { code: string }) | undefined, stopping: Promise<void> | undefined;
   const stdout: Buffer[] = [], stderr: Buffer[] = []; let captured = 0, inputJoined = false, inputStarted = false, monitorDone = false;
+  let phaseTail = Buffer.alloc(0), discardPhaseLine = false;
+  const observePhases = (bytes: Buffer) => {
+    // Preserve the original raw output/scanner budget independently. Only a
+    // small complete source-owned marker can become retained diagnostic data.
+    for (let offset = 0; offset < bytes.length;) {
+      const newline = bytes.indexOf(10, offset), end = newline < 0 ? bytes.length : newline + 1;
+      if (!discardPhaseLine) {
+        const part = bytes.subarray(offset, end);
+        if (phaseTail.length + part.length > 96) { phaseTail = Buffer.alloc(0); discardPhaseLine = true; }
+        else phaseTail = Buffer.concat([phaseTail, part]);
+      }
+      if (newline >= 0) {
+        const phase = discardPhaseLine ? undefined : decodeEnrollCredentialPhase(phaseTail);
+        if (phase !== undefined && diagnostic.phases.length < 32)
+          diagnostic.phases.push({ elapsedMs: Math.floor(performance.now() - started), phase });
+        phaseTail.fill(0); phaseTail = Buffer.alloc(0); discardPhaseLine = false;
+      }
+      offset = end;
+    }
+  };
   let rejectRetirement!: (error: unknown) => void;
   const retirementFailed = new Promise<never>((_, reject) => { rejectRetirement = reject; });
   void retirementFailed.catch(() => {});
@@ -152,6 +183,7 @@ export async function runOwnedEnrollDiagnostic(input: Readonly<{
     catch (error) { failure ??= error; fail('observation_failed', 'ESCAN'); stop(); return; }
     if (captured + bytes.length > 2 * 1024 * 1024) { fail('output_limit', 'ENOBUFS'); stop(); return; }
     captured += bytes.length; chunks.push(Buffer.from(bytes));
+    if (index === 1) observePhases(bytes);
   };
   child.stdout.on('data', (bytes: Buffer) => capture(stdout, bytes, 0));
   child.stderr.on('data', (bytes: Buffer) => capture(stderr, bytes, 1));
@@ -259,6 +291,7 @@ export async function runOwnedEnrollDiagnostic(input: Readonly<{
     try { await within(streamsClosed, 5000); await within(inputWritten, 5000); diagnostic.processAndPipesJoined = finished; }
     catch (error) { cleanup.push(error); }
     for (const scan of scans) scan.close();
+    phaseTail.fill(0); phaseTail = Buffer.alloc(0);
     diagnostic.completeInputWriteJoined = inputJoined;
     diagnostic.elapsedMs = Math.floor(performance.now() - started);
   }

@@ -13,6 +13,7 @@ import { sampleCanonicalNow } from '../../../src/state/canonical-time.js';
 import { openStateStore, publishInProcessChannel, type StateStore } from '../../../src/state/store.js';
 import { uuidv7 } from '../../../src/state/testing/fixtures.js';
 import { verifierCheckpointId, type VerifierRetirementV1 } from '../../../src/state/verifier-recovery.js';
+import { inspectInstalledWorkerRetirementHistory } from './installed-worker-lease.js';
 
 const successfulScript = `import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -115,8 +116,12 @@ test('must really exceed output cap',()=>{for(let i=0;i<32;i++)fs.writeSync(1,Bu
       assert.equal(launch.owner.kind, 'run_invocation'); assert.equal(launch.purpose, 'verifier');
       if (launch.owner.kind !== 'run_invocation') throw new Error('verifier did not claim its real nested invocation');
       assert.ok(!priorLaunches.has(launch.owner.workerLaunchId), 'the dead final-candidate worker cannot be reused');
-      const verifierWorker = after.workerLaunches.find(worker => worker.launchId === launch.owner.workerLaunchId);
-      assert.ok(verifierWorker); assert.equal(verifierWorker.generationWriteState, 'sealed');
+      const verifierWorker = inspectInstalledWorkerRetirementHistory(fixture.stateRoot, process.geteuid!(),
+        { runId: fixture.runId, launchId: launch.owner.workerLaunchId });
+      assert.equal(verifierWorker.phase, 'retired'); assert.equal(verifierWorker.generationWriteState, 'sealed');
+      assert.equal(verifierWorker.generationPhase, 'sealed');
+      assert.ok(!before.workspaceGenerations.some(generation => generation.generationRef === verifierWorker.workspaceGenerationRef),
+        'the dead final-candidate generation cannot be reused by the verifier');
       assert.equal(after.run.activeWorkerLaunchId, undefined);
       const receipt = await store.artifacts.readCanonical<VerificationReceipt>(done.receiptRef);
       assert.equal(receipt.runId, fixture.runId); assert.equal(receipt.attempt, 0);
@@ -142,6 +147,9 @@ test('must really exceed output cap',()=>{for(let i=0;i<32;i++)fs.writeSync(1,Bu
       assert.equal(retirement.runId, fixture.runId); assert.equal(retirement.opId, claim.opId);
       assert.equal(retirement.attempt, claim.attempt); assert.equal(retirement.dispatchId, claim.dispatchId);
       assert.equal(retirement.leaseEpoch, claim.leaseEpoch); assert.equal(retirement.checkpointId, checkpoint.id);
+      assert.equal(verifierWorker.leaseEpoch, claim.leaseEpoch);
+      assert.equal(verifierWorker.retirementEvidenceRef, retirement.parentRetirementEvidenceRef);
+      assert.equal(verifierWorker.snapshotEvidenceRef, retirement.snapshotEvidenceRef);
       assert.equal(retirement.workspaceStateRef, checkpoint.workspaceStateRef);
       assert.equal(retirement.sourceAfterRef, receipt.resultSourceRef); assert.equal(retirement.sourceAfterDigest, receipt.sourceDigestAfter);
       const death = await store.artifacts.readCanonical<ProcessContainmentDeathEvidenceV1>(retirement.deathEvidenceRef);
@@ -222,6 +230,10 @@ test('must really exceed output cap',()=>{for(let i=0;i<32;i++)fs.writeSync(1,Bu
       const measured = await store.readRecoveryClosure(fixture.runId);
       const measuredClaim = measured.journal.find(row => row.opKind === 'verifier' && row.phase === 'dispatch_claimed')!;
       assert.ok(measuredClaim);
+      const measuredInvocation = await store.artifacts.readCanonical<SandboxLaunchSpecV1>(measuredClaim.sandboxLaunchSpecRef!);
+      if (measuredInvocation.owner.kind !== 'run_invocation') throw new Error('controlled stop has no original verifier parent');
+      const measuredParent = inspectInstalledWorkerRetirementHistory(fixture.stateRoot, process.geteuid!(),
+        { runId: fixture.runId, launchId: measuredInvocation.owner.workerLaunchId });
       const verifierCheckpoint = measured.latestCheckpoint;
       assert.equal(verifierCheckpoint.id, verifierCheckpointId(fixture.runId, measuredClaim.opId, measuredClaim.attempt));
       const failed = measured.journal.filter(row => row.opId === measuredClaim.opId && row.attempt === measuredClaim.attempt).at(-1)!;
@@ -263,10 +275,15 @@ test('must really exceed output cap',()=>{for(let i=0;i<32;i++)fs.writeSync(1,Bu
       const invocation = await store.artifacts.readCanonical<SandboxLaunchSpecV1>(claim.sandboxLaunchSpecRef!);
       if (invocation.owner.kind !== 'run_invocation') throw new Error('controlled stop has no original verifier parent');
       const parentLaunchId = invocation.owner.workerLaunchId;
-      const parent = measured.workerLaunches.find(row => row.launchId === parentLaunchId)!;
-      assert.ok(parent && parent.phase === 'retired');
-      assert.equal(parent.retirementEvidenceRef, retirement.parentRetirementEvidenceRef);
-      assert.equal(canonicalSha256(after.workerLaunches.find(row => row.launchId === parent.launchId)), canonicalSha256(parent),
+      assert.equal(canonicalSha256(invocation), canonicalSha256(measuredInvocation));
+      assert.equal(measuredParent.launchId, parentLaunchId); assert.equal(measuredParent.phase, 'retired');
+      assert.equal(measuredParent.generationWriteState, 'sealed'); assert.equal(measuredParent.generationPhase, 'sealed');
+      assert.equal(measuredParent.retirementEvidenceRef, retirement.parentRetirementEvidenceRef);
+      assert.equal(measuredParent.snapshotEvidenceRef, retirement.snapshotEvidenceRef);
+      const { observedAt: _measuredAt, ...originalParent } = measuredParent;
+      const { observedAt: _afterAt, ...afterParent } = inspectInstalledWorkerRetirementHistory(fixture.stateRoot, process.geteuid!(),
+        { runId: fixture.runId, launchId: parentLaunchId });
+      assert.equal(canonicalSha256(afterParent), canonicalSha256(originalParent),
         'worker-free terminal Stop preserves the original verifier parent retirement lineage');
       assert.equal(evidence.sourceDigestBefore, evidence.sourceDigestAfter);
       assert.equal(after.run.budgetConsumed.toolCalls, before.run.budgetConsumed.toolCalls + 1);

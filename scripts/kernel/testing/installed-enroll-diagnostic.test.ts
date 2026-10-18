@@ -3,8 +3,21 @@ import test from 'node:test';
 import { chmod, copyFile, mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { decodeEnrollProcessCounters, runOwnedEnrollDiagnostic, type InstalledEnrollDiagnostic } from './installed-enroll-diagnostic.js';
+import { decodeEnrollCredentialPhase, decodeEnrollProcessCounters, runOwnedEnrollDiagnostic, type InstalledEnrollDiagnostic } from './installed-enroll-diagnostic.js';
 import { createCredentialSecretScanner } from './credential-secret-scan.js';
+
+test('enroll phase observations accept only the complete fixed source-owned byte markers', () => {
+  for (const phase of ['open_selected', 'history', 'first_supervisor', 'secret_input', 'second_supervisor', 'platform_store', 'finalize', 'retire'])
+    assert.equal(decodeEnrollCredentialPhase(Buffer.from(`CLIQ_CREDENTIAL_PHASE_V1:${phase}\n`)), phase);
+  let accessed = false;
+  const hostile = Object.defineProperty({}, 'length', { get() { accessed = true; throw new Error('must not inspect caller fields'); } });
+  for (const input of [hostile, 'CLIQ_CREDENTIAL_PHASE_V1:history\n', null, Buffer.from('CLIQ_CREDENTIAL_PHASE_V1:secret'),
+    Buffer.from('CLIQ_CREDENTIAL_PHASE_V1:history\nextra'), Buffer.from('CLIQ_CREDENTIAL_PHASE_V1:history\r\n'),
+    Buffer.from('CLIQ_CREDENTIAL_PHASE_V1:history'), Buffer.from('CLIQ_CREDENTIAL_PHASE_V1:unknown\n'),
+    Buffer.from([0xff, 0x0a]), Buffer.from('arbitrary-private-content\n')])
+    assert.equal(decodeEnrollCredentialPhase(input), undefined);
+  assert.equal(accessed, false);
+});
 
 test('enroll diagnostics retain only exact numeric process counters, including values beyond safe integers', () => {
   const fields = ['S', '12', '34', '34', ...Array(7).fill('0'), '120', '45', ...Array(5).fill('0'), '0', '678', '0'];
@@ -69,6 +82,30 @@ test('an actual enroll launcher spawn refusal cannot appear completed or leave s
       assert.equal(diagnostic.processAndPipesJoined, true); assert.equal(diagnostic.completeInputWriteJoined, false);
       assert.equal(scanner.stats().streamsOpened, 2); assert.equal(scanner.stats().streamsClosed, 2);
     } finally { scanner.close(); }
+  });
+
+test('real owned enroll stderr preserves raw output while retaining bounded fixed split phase observations only',
+  { skip: process.platform !== 'linux' ? 'requires actual Linux owned process and scanned pipes; not credential qualification' : false }, async () => {
+    const fixture = await realpath(await mkdtemp(path.join(os.tmpdir(), 'cliq-enroll-phases-')));
+    const scanner = createCredentialSecretScanner([Buffer.from('fixture-private-input')], { maxBytes: 1024 * 1024, maxStreams: 16 });
+    try {
+      const image = path.join(fixture, 'node'); await copyFile(process.execPath, image); await chmod(image, 0o500);
+      const diagnostic = {} as InstalledEnrollDiagnostic;
+      const first = 'unretained-status\n' + 'x'.repeat(200) + '\nCLIQ_CREDENTIAL_PHASE_V1:his';
+      const last = 'tory\nCLIQ_CREDENTIAL_PHASE_V1:unknown\n' + 'CLIQ_CREDENTIAL_PHASE_V1:retire\n'.repeat(40);
+      const result = await runOwnedEnrollDiagnostic({ command: { executable: image, args: ['-e',
+        `const fs=require('node:fs');process.stdin.resume();process.stdin.once('end',()=>{fs.writeSync(2,${JSON.stringify(first)});setTimeout(()=>{fs.writeSync(2,${JSON.stringify(last)});fs.writeSync(1,'joined-output')},20)})`],
+        cwd: fixture, env: {} }, input: Buffer.from('fixture-private-input'), uid: process.geteuid!(),
+        bootstrapImage: image, installedImage: image, originalDeadlineMs: 2000, scanner, diagnostic });
+      assert.equal(result.error, undefined); assert.equal(result.status, 0); assert.equal(result.signal, null);
+      assert.equal(result.stdout, 'joined-output'); assert.equal(result.stderr, first + last);
+      assert.equal(diagnostic.phases.length, 32);
+      assert.equal(diagnostic.phases[0]!.phase, 'history'); assert(diagnostic.phases.slice(1).every(row => row.phase === 'retire'));
+      assert(diagnostic.phases.every((row, index) => row.elapsedMs >= (diagnostic.phases[index - 1]?.elapsedMs ?? 0) && row.elapsedMs <= diagnostic.elapsedMs));
+      assert.equal(diagnostic.authJoined, true); assert.equal(diagnostic.launcherJoined, true); assert.equal(diagnostic.processAndPipesJoined, true);
+      assert(!JSON.stringify(diagnostic).includes('unretained-status')); assert(!JSON.stringify(diagnostic).includes('fixture-private-input'));
+      assert.equal(scanner.stats().matched, false); assert.equal(scanner.stats().streamsOpened, scanner.stats().streamsClosed);
+    } finally { scanner.close(); await rm(fixture, { recursive: true, force: true }); }
   });
 
 test('secret output refusal still joins the actual original process and scan owners',

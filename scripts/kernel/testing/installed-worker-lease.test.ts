@@ -11,7 +11,7 @@ import { canonicalJsonBytes, canonicalSha256 } from '../../../src/kernel/canonic
 import { digestOmitting, sha256Bytes } from '../../../src/kernel/identity.js';
 import type { WorkerIdentity, WorkerLaunch, WorkspaceGenerationStateV1 } from '../../../src/kernel/types.js';
 import { assertInstalledWorkerLeaseRenewed, inspectInstalledWorkerIdentity, inspectInstalledWorkerLease,
-  inspectInstalledWorkerRetirement } from './installed-worker-lease.js';
+  inspectInstalledWorkerRetirement, inspectInstalledWorkerRetirementHistory } from './installed-worker-lease.js';
 
 async function fixture(t: TestContext) {
   const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-installed-worker-lease-'));
@@ -173,6 +173,30 @@ test('retirement diagnostic follows the captured original worker after the Run p
   assert.deepEqual(second, first, 'the original seal is independent of the later Run pointer and status');
 });
 
+test('retirement history reads a real retained seal without inventing an earlier live observation', async t => {
+  const value = await workerFixture(t), expected = { runId: value.expected.runId, launchId: value.expected.launchId };
+  assert.throws(() => inspectInstalledWorkerRetirementHistory(value.stateRoot, value.expected.uid, expected),
+    { message: 'installed worker retirement history inspection refused' });
+  const retired = await retireFixture(value), before = await readFile(value.filename), names = await readdir(value.cas);
+  const bytes = await Promise.all(names.map(name => readFile(path.join(value.cas, name))));
+  const observed = inspectInstalledWorkerRetirementHistory(value.stateRoot, value.expected.uid, expected);
+  assert.equal(observed.diagnosticOnly, true); assert.equal(observed.launchId, value.expected.launchId);
+  assert.equal(observed.phase, 'retired'); assert.equal(observed.generationWriteState, 'sealed'); assert.equal(observed.generationPhase, 'sealed');
+  assert.equal(observed.retirementEvidenceRef, retired.retiredLaunch.retirementEvidenceRef);
+  assert.equal(observed.snapshotEvidenceRef, retired.sealedGeneration.snapshotEvidenceRef);
+  assert.equal(observed.snapshotEvidenceDigest, retired.sealedGeneration.snapshotEvidenceDigest);
+  assert.equal(observed.deathObservedAt, retired.death.observedAt); assert(observed.observedAt >= observed.retiredAt);
+  assert(Object.isFrozen(observed)); assert.equal(Object.hasOwn(observed, 'qualified'), false);
+  assert.equal(Object.hasOwn(observed, 'nativeObservation'), false);
+  assert.deepEqual(await readFile(value.filename), before); assert.deepEqual(await readdir(value.cas), names);
+  assert.deepEqual(await Promise.all(names.map(name => readFile(path.join(value.cas, name)))), bytes);
+  for (const changed of [{ ...expected, runId: 'other' }, { ...expected, launchId: 'successor-launch' },
+    { ...expected, nativeObservation: true }]) {
+    assert.throws(() => inspectInstalledWorkerRetirementHistory(value.stateRoot, value.expected.uid, changed),
+      { message: 'installed worker retirement history inspection refused' });
+  }
+});
+
 const workerCasChanges: Array<[string, (value: Awaited<ReturnType<typeof workerFixture>>) => Promise<void>]> = [
   ['writable CAS object', async value => { await chmod(value.workerFilename, 0o600); }],
   ['CAS object hardlink', async value => { await link(value.workerFilename, path.join(value.stateRoot, 'worker-alias')); }],
@@ -297,6 +321,17 @@ for (const [label, change] of retirementChanges) {
     const retired = await retireFixture(value); await change(value, retired);
     assert.throws(() => inspectInstalledWorkerRetirement(value.stateRoot, value.expected.uid, original), error => {
       assert(error instanceof Error); assert.equal(error.message, 'installed worker retirement inspection refused');
+      assert.equal(error.cause, undefined); return true;
+    });
+  });
+  // These two checks need the genuinely captured earlier identity, so remain
+  // mandatory on the original API above, not falsely promised by a history read.
+  if (label === 'changed original generation source' || label === 'replaced database inode') continue;
+  test(`retirement history inspection refuses ${label}`, async t => {
+    const value = await workerFixture(t), retired = await retireFixture(value); await change(value, retired);
+    assert.throws(() => inspectInstalledWorkerRetirementHistory(value.stateRoot, value.expected.uid,
+      { runId: value.expected.runId, launchId: value.expected.launchId }), error => {
+      assert(error instanceof Error); assert.equal(error.message, 'installed worker retirement history inspection refused');
       assert.equal(error.cause, undefined); return true;
     });
   });
