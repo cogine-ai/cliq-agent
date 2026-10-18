@@ -103,10 +103,12 @@ function checkProjection(projection: SourceProjectionSpec): void {
 type CandidateSourceGraph = {
   source: SourceManifest; sourceRef: string; diff: WorkspaceDiffV1; diffRef: string; metadata: PublishedArtifact[];
 };
+type CandidateSourceLimit = { reason: 'changed_paths' | 'changed_bytes'; observed: number; limit: number };
 
-async function planCandidateSource(artifacts: ArtifactCatalog, spec: RunSpec, workspaceStateRef: string): Promise<{
-  graph: CandidateSourceGraph; publications: Array<{ value: unknown; artifact: PublishedArtifact }>;
-}> {
+async function planCandidateSource(artifacts: ArtifactCatalog, spec: RunSpec, workspaceStateRef: string): Promise<
+  | { kind: 'ready'; graph: CandidateSourceGraph; publications: Array<{ value: unknown; artifact: PublishedArtifact }> }
+  | { kind: 'limited'; limit: CandidateSourceLimit }
+> {
   const metadata = new Map<string, PublishedArtifact>();
   const publications: Array<{ value: unknown; artifact: PublishedArtifact }> = [];
   const remember = (artifact: PublishedArtifact) => {
@@ -199,9 +201,9 @@ async function planCandidateSource(artifacts: ArtifactCatalog, spec: RunSpec, wo
     }
   }
   if (operations.length > projection.maxChangedPaths)
-    throw new CandidateSourceLimitError('changed_paths', operations.length, projection.maxChangedPaths);
+    return { kind: 'limited', limit: { reason: 'changed_paths', observed: operations.length, limit: projection.maxChangedPaths } };
   if (changedBytes > projection.maxChangedBytes)
-    throw new CandidateSourceLimitError('changed_bytes', changedBytes, projection.maxChangedBytes);
+    return { kind: 'limited', limit: { reason: 'changed_bytes', observed: changedBytes, limit: projection.maxChangedBytes } };
   let entriesRef = workspace.entriesRef;
   if (selected.length !== currentEntries.entries.length) entriesRef = plan(entries, entries.format).ref;
   const source: SourceManifest = { ...base, role: 'result', entriesRef, treeDigest: entries.treeDigest, manifestDigest: '' };
@@ -211,19 +213,30 @@ async function planCandidateSource(artifacts: ArtifactCatalog, spec: RunSpec, wo
     resultSourceRef: publishedSource.ref, operations, diffDigest: '' };
   diff.diffDigest = digestOmitting(diff, 'diffDigest');
   const publishedDiff = plan(diff, diff.format);
-  return { graph: { source, sourceRef: publishedSource.ref, diff, diffRef: publishedDiff.ref, metadata: [...metadata.values()] }, publications };
+  return { kind: 'ready', graph: { source, sourceRef: publishedSource.ref, diff, diffRef: publishedDiff.ref, metadata: [...metadata.values()] }, publications };
+}
+
+/** Immutable data only. This cannot propose a stop or adopt a worker snapshot. */
+export async function readCandidateSourceLimit(artifacts: ArtifactCatalog, spec: RunSpec, workspaceStateRef: string) {
+  const plan = await planCandidateSource(artifacts, spec, workspaceStateRef);
+  return plan.kind === 'limited' ? plan.limit : undefined;
+}
+
+function requireReady(plan: Awaited<ReturnType<typeof planCandidateSource>>) {
+  if (plan.kind === 'limited') throw new CandidateSourceLimitError(plan.limit.reason, plan.limit.observed, plan.limit.limit);
+  return plan;
 }
 
 /** Pure retained-data reconstruction for historical recovery. No CAS object,
  * SQL row, execution permission or physical proof is created by this read. */
 export async function readCandidateSource(artifacts: ArtifactCatalog, spec: RunSpec, workspaceStateRef: string): Promise<CandidateSourceGraph> {
-  return (await planCandidateSource(artifacts, spec, workspaceStateRef)).graph;
+  return requireReady(await planCandidateSource(artifacts, spec, workspaceStateRef)).graph;
 }
 
 /** The owning reducer independently validates the Run, original worker seal
  * and current SQL cut before committing the artifact-first projected graph. */
 export async function prepareCandidateSource(artifacts: ArtifactCatalog, spec: RunSpec, workspaceStateRef: string) {
-  const { graph, publications } = await planCandidateSource(artifacts, spec, workspaceStateRef);
+  const { graph, publications } = requireReady(await planCandidateSource(artifacts, spec, workspaceStateRef));
   const published = new Set<string>();
   return { graph, async publish(): Promise<CandidateSourceGraph> {
     for (const { value, artifact } of publications) if (!published.has(artifact.ref)) {

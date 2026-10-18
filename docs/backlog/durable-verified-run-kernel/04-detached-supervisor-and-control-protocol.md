@@ -449,6 +449,7 @@ Implementation notes:
                 | { trigger?: never; modelVisiblePromptDigest?: never; requestBodyBytes?: never; requestBodyLimitBytes?: never }
                 | { trigger: 'request_body_bytes'; modelVisiblePromptDigest: ArtifactRef; requestBodyBytes: number; requestBodyLimitBytes: 1048576 }
               ))
+            | ({ runtimeSubtype: 'result_source_limit_exceeded' } & ResultSourceLimitCause)
             | {
                 runtimeSubtype: 'delivery_merge_conflict'
                 deliveryMergeConflictItemRef: ArtifactRef

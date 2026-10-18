@@ -532,7 +532,7 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
   let installedServices: { supervisorUnit: string; keeperUnit: string } | undefined;
   let retryPlatform: ReturnType<typeof observe> | undefined, aliasRestoreCollection: string | undefined;
   let server: Server | undefined;
-  let primary: unknown, providerFailure = false, requestsReceived = 0, reflectionEnabled = false, shortRunEnabled = false;
+  let primary: unknown, providerFailure = false, requestsReceived = 0, reflectionEnabled = false, shortRunEnabled = false, resultLimitsEnabled = false;
   let busySubmit: (Record<string, unknown> & { admissionKey: string }) | undefined;
   let busyFinalize: CredentialFinalizeRequest | undefined;
   let storageClient: Awaited<ReturnType<typeof persistentClient>> | undefined;
@@ -916,8 +916,8 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
             exactCredentialMatched: true, status: 200, latestBodyDigest: sha256Bytes(bodyBytes), latestBodyBytes: bodyBytes.length };
           return;
         }
-        assert(ordinal <= (shortRunEnabled ? 4 : reflectionEnabled ? 3 : 2), 'replay or restart must not redispatch the completed model attempts');
-        if (ordinal === 2) {
+        assert(ordinal <= (resultLimitsEnabled ? 8 : shortRunEnabled ? 4 : reflectionEnabled ? 3 : 2), 'replay or restart must not redispatch the completed model attempts');
+        if (ordinal === 2 || resultLimitsEnabled && (ordinal === 6 || ordinal === 8)) {
           assert.equal(body.messages.filter((message: any) => message.role === 'tool' && message.tool_call_id === 'owned-private-edit-call').length, 1);
         }
         let reflectedArguments: string | undefined;
@@ -930,8 +930,15 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
           reflectedArguments = `{"path":"example.txt","old_text":${JSON.stringify(hostBefore)},"new_text":"${unicodeKey}"}`;
         }
         if (ordinal === 4) assert(shortRunEnabled, 'only the separately admitted short Run may send the fourth model request');
+        if (ordinal > 4) {
+          assert(resultLimitsEnabled && ordinal <= 8, 'only the two separately admitted source-limit Runs may make four further requests');
+          const kind = ordinal <= 6 ? 'changed_paths' : 'changed_bytes';
+          assert(body.messages.some((message: any) => message.role === 'user' && typeof message.content === 'string' &&
+            message.content.includes(`Make one owned private edit, then finish with the frozen ${kind} limit.`)));
+        }
+        const editReply = ordinal === 1 || ordinal === 3 || resultLimitsEnabled && (ordinal === 5 || ordinal === 7);
         const payload = { id: `owned-fixture-turn-${ordinal}`, object: 'chat.completion', model,
-          choices: [{ index: 0, finish_reason: ordinal === 1 || ordinal === 3 ? 'tool_calls' : 'stop', message: ordinal === 1 || ordinal === 3
+          choices: [{ index: 0, finish_reason: editReply ? 'tool_calls' : 'stop', message: editReply
             ? { role: 'assistant', content: '', tool_calls: [{ id: 'owned-private-edit-call', type: 'function',
               function: { name: 'edit', arguments: reflectedArguments ?? JSON.stringify(shutdownReceivedToolOnly
                 ? { path: 'payload.txt', old_text: receivedToolBefore, new_text: receivedToolAfter }
@@ -939,7 +946,9 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
             : { role: 'assistant', content: 'The private edit is complete.' } }],
           usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 } };
         const bytes = Buffer.from(JSON.stringify(payload)); scanBytes(bytes);
-        if (ordinal === 2 || ordinal === 4) { assert(captureResponseWorker); await captureResponseWorker(body); }
+        if (ordinal === 2 || ordinal === 4 || resultLimitsEnabled && (ordinal === 6 || ordinal === 8)) {
+          assert(captureResponseWorker); await captureResponseWorker(body);
+        }
         outgoing.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': String(bytes.length), Connection: 'close' }); outgoing.end(bytes);
         report.providerRequests = { received: ordinal, method: 'POST', requestPath: '/v1/chat/completions', tls13: true,
           exactCredentialMatched: true, latestBodyDigest: sha256Bytes(bodyBytes), latestBodyBytes: bodyBytes.length };
@@ -4262,6 +4271,115 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       terminalCancellationPrecedence, restartedTerminalCancellationPrecedence,
       cancelReplayPreserved: true, contiguousAttachPreserved: true, noResultPublished: true,
       terminalHistoryReopenedAfterActualSupervisorRestart: true };
+    mark('final_source_limits_keep_the_real_edit_and_retire');
+    resultLimitsEnabled = true;
+    const limitedResults: Array<{ cut: Record<string, any>; sessionCut: Record<string, any>; submission: Record<string, any>;
+      admission: Response; retirement: Awaited<ReturnType<typeof assertOriginalRetirement>> }> = [];
+    for (const [index, limitKind] of ['changed_paths', 'changed_bytes'].entries()) {
+      const targetRequest = request({ protocolVersion: 1, method: 'session.create',
+        requestId: `019a0012-0000-7000-8000-00000000016${index * 2}`,
+        admissionKey: randomBytes(32).toString('base64url'), workspacePath: recipe.workspace, name: `Final source ${limitKind}` });
+      const target = accepted(exchange([targetRequest])[0]!, 'session.create').snapshot.session;
+      assert.equal(target.latestItemSeq, 0); assert.equal(target.contextRevision, 1);
+      const limit = limitKind === 'changed_paths' ? 0 : Buffer.byteLength(privateAfter) - 1;
+      const submission = request({ ...positiveCore, sessionId: target.id, expectedContextRevision: target.contextRevision,
+        requestId: `019a0012-0000-7000-8000-00000000016${index * 2 + 1}`,
+        admissionKey: randomBytes(32).toString('base64url'),
+        objective: `Make one owned private edit, then finish with the frozen ${limitKind} limit.`,
+        maxChangedPaths: limitKind === 'changed_paths' ? limit : 1000,
+        maxChangedBytes: limitKind === 'changed_bytes' ? limit : 16 * 1024 ** 2 });
+      registerSubmission(submission);
+      const admission = exchange([submission])[0]!, limitedRun = accepted(admission, 'run.submit').snapshot.run;
+      const readLimited = () => accepted(exchange([{ protocolVersion: 1, method: 'run.get', runId: limitedRun.id }])[0]!, 'run.get');
+      const finishBy = Date.now() + 90000;
+      let cut = readLimited();
+      while (cut.snapshot.run.status !== 'failed') {
+        assert(!['cancelled', 'succeeded', 'completed_unverified'].includes(cut.snapshot.run.status));
+        assert(!providerFailure); assert(Date.now() < finishBy, 'source-limit failure must physically retire and release its worker slot');
+        await delay(50); cut = readLimited();
+      }
+      const run = cut.snapshot.run;
+      assert.equal(run.terminalReason, 'runtime_failed'); assert.equal(run.cancelRequested, false);
+      assert(run.stopIntentRef && run.terminalDetailRef); assert.equal(run.resultRef, undefined);
+      assert.equal(run.activeWorkerLaunchId, undefined); assert.equal(run.nextStep, null); assert.equal(run.frontierRef, undefined);
+      assert.equal(run.waitingReason, undefined); assert.equal(run.waitingOnRef, undefined);
+      assert.equal(canonicalSha256(run.budgetConsumed), canonicalSha256({ ...zeroBudget, modelTokens: 73728, toolCalls: 1 }));
+      assert.equal(canonicalSha256(run.budgetReserved), canonicalSha256(zeroBudget));
+      assert.deepEqual(cut.journal.map((entry: any) => [entry.opKind, entry.phase]), [
+        ['model', 'prepared'], ['model', 'dispatch_claimed'], ['model', 'completed'],
+        ['tool', 'prepared'], ['tool', 'dispatch_claimed'], ['tool', 'completed'],
+        ['model', 'prepared'], ['model', 'dispatch_claimed'], ['model', 'completed'] ]);
+      assert.equal(cut.nextItemSeq, cut.highWaterItemSeq); assert.equal(cut.nextJournalSeq, cut.highWaterJournalSeq);
+      assert.equal(cut.nextCheckpointCursor, cut.highWaterCheckpointCursor);
+      const object = async (ref: string) => parseJsonStrict((await readCas(ref)).toString('utf8')) as Record<string, any>;
+      const items = await Promise.all(cut.items.map((row: any) => object(row.payloadRef)));
+      assert.equal(items.some(item => item.kind === 'final_candidate'), false);
+      const producer = items.at(-1)!, final = cut.journal.at(-1)!;
+      assert.equal(producer.kind, 'model_turn'); assert.equal(producer.stopReason, 'end');
+      assert.equal(producer.modelOpId, final.opId); assert.equal(producer.modelAttempt, final.attempt);
+      assert.equal(producer.modelTurnRef, final.resultRef);
+      const sourceCheckpoint = cut.checkpoints.find((cp: any) => cp.id === identityHash('cliq-continuation-checkpoint-v1',
+        run.id, final.resultRef, cp.contextManifestRef));
+      assert(sourceCheckpoint); assert.equal(sourceCheckpoint.createdAt, final.timestamp);
+      assert.equal(sourceCheckpoint.journalSeq, final.seq); assert.equal(sourceCheckpoint.runItemSeq, cut.highWaterItemSeq);
+      const stop = await object(run.stopIntentRef);
+      const cause = { sourceCheckpointId: sourceCheckpoint.id, workspaceStateRef: sourceCheckpoint.workspaceStateRef,
+        producingItemId: producer.itemId, modelOpId: final.opId, attempt: final.attempt, limitKind,
+        observed: limitKind === 'changed_paths' ? 1 : Buffer.byteLength(privateAfter), limit };
+      assert.equal(canonicalSha256(stop), canonicalSha256({ schemaVersion: 1, runId: run.id, createdAt: stop.createdAt,
+        origin: 'runtime', targetStatus: 'failed', reason: 'runtime_failed', runtimeSubtype: 'result_source_limit_exceeded', ...cause }));
+      const sealed = cut.checkpoints.find((cp: any) => cp.id === identityHash('cliq-final-candidate-checkpoint-v1', run.id, producer.itemId));
+      const terminal = cut.checkpoints.find((cp: any) => cp.id === run.latestCheckpointId);
+      assert(sealed && terminal); assert(sealed.createdAt >= stop.createdAt);
+      for (const cp of [sealed, terminal]) {
+        assert.equal(cp.workspaceStateRef, sourceCheckpoint.workspaceStateRef);
+        assert.equal(cp.contextManifestRef, sourceCheckpoint.contextManifestRef);
+        assert.equal(cp.journalSeq, final.seq); assert.equal(cp.runItemSeq, cut.highWaterItemSeq);
+      }
+      const toolCheckpoint = cut.checkpoints.find((cp: any) => cp.journalSeq === cut.journal[5].seq);
+      assert(toolCheckpoint); await privateCheckpoint(toolCheckpoint);
+      assert.equal(toolCheckpoint.workspaceStateRef, sourceCheckpoint.workspaceStateRef);
+      const detail = await object(run.terminalDetailRef);
+      assert.equal(detail.primaryEvidenceRef, run.stopIntentRef); assert.deepEqual(detail.publicationResultItemRefs, []);
+      assert.deepEqual(detail.abandonedRetryInvocations, []);
+      assert.equal(canonicalSha256(detail.reasonDetail), canonicalSha256({ kind: 'result_source_limit_exceeded', ...cause,
+        evidenceRef: run.stopIntentRef }));
+      const retirement = await assertOriginalRetirement(cut);
+      const sessionCut = accepted(exchange([{ protocolVersion: 1, method: 'session.get', sessionId: target.id,
+        afterItemSeq: target.latestItemSeq }])[0]!, 'session.get');
+      assert.equal(sessionCut.items.length, 1); assert.equal(sessionCut.snapshot.session.latestItemSeq, target.latestItemSeq + 1);
+      assert.equal(sessionCut.snapshot.session.contextRevision, target.contextRevision + 1);
+      assert.equal(canonicalSha256(await object(sessionCut.items[0].payloadRef)), canonicalSha256({ schemaVersion: 1,
+        format: 'cliq-session-run-terminal-v1', kind: 'run_terminal', itemKey: `run-terminal:${run.id}`, runId: run.id,
+        operation: 'agent', admittedSessionItemSeq: (await object((await object(run.specRef)).admittedContextRef)).throughSessionItemSeq,
+        status: 'failed', terminalReason: 'runtime_failed', terminalDetailRef: run.terminalDetailRef }));
+      assert.equal(requestsReceived, 6 + index * 2); assert(!providerFailure);
+      assert.deepEqual(exchange([submission])[0], admission); assert.deepEqual(readLimited(), cut);
+      await assertTerminalCancelRefused(cut, `019a0012-0000-7000-8000-00000000017${index}`);
+      limitedResults.push({ cut, sessionCut, submission, admission, retirement });
+      for (const field of imageFields) assert.equal((await lstat(source, { bigint: true }))[field], sourceBefore[field]);
+      assert.equal(await readFile(source, 'utf8'), hostBefore);
+    }
+    mark('source_limit_terminal_history_after_actual_supervisor_restart');
+    assert.equal(command('/usr/bin/systemctl', ['--user', 'restart', services.supervisorUnit], undefined, 30000).status, 0);
+    const limitedSuccessor = show(services.supervisorUnit), limitedRecoveryBy = Date.now() + 30000;
+    assert.notEqual(limitedSuccessor.InvocationID, terminalHistorySupervisor.InvocationID);
+    const limitedSuccessorStart = await selectedSupervisor(services.supervisorUnit, limitedSuccessor, successorImagePath, limitedRecoveryBy);
+    for (const result of limitedResults) {
+      assert.deepEqual(accepted(exchange([{ protocolVersion: 1, method: 'run.get', runId: result.cut.snapshot.run.id }])[0]!, 'run.get'), result.cut);
+      assert.deepEqual(exchange([result.submission])[0], result.admission);
+      assert.deepEqual(await assertOriginalRetirement(result.cut), result.retirement);
+      assert.deepEqual(accepted(exchange([{ protocolVersion: 1, method: 'session.get', sessionId: result.cut.snapshot.run.sessionId,
+        afterItemSeq: 0 }])[0]!, 'session.get'), result.sessionCut);
+    }
+    assert.equal(requestsReceived, 8); assert(!providerFailure);
+    assert.equal(await fixtureProcess(Number(limitedSuccessor.MainPID), ledger.uid), limitedSuccessorStart);
+    assert.equal(show(services.keeperUnit).MainPID, keeperBefore.MainPID);
+    assert.deepEqual(await readFile(path.join(recipe.stateRoot, 'runtime/keeper.ready')), keeperReady);
+    report.resultSourceLimits = { qualified: true, limitKinds: ['changed_paths', 'changed_bytes'],
+      realPrivateEdits: 2, modelRequests: 4, noCandidateOrResult: true, samePreparedSeal: true,
+      uniqueSessionPublication: true, terminalHistoryAfterActualRestart: true, noRedispatch: true,
+      preciseCancellationOrDeadlineRaceQualified: false, completeI2Qualified: false };
     }
     }
     report.qualified = true; mark('run_assertions_complete');

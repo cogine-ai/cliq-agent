@@ -5,7 +5,7 @@ import type { ContinuationItem, InvocationJournalEntry, Run, RunCancel, StopInte
 import type { ModelTextV1 } from '../protocol/agent-ir.js';
 import { exactKeys } from '../policy/runtime-authority.js';
 
-export type ResourceStopIntent = Extract<StopIntent, { origin: 'budget' } | { runtimeSubtype: 'context_compaction_failed' | 'context_window_exhausted' }>;
+export type ResourceStopIntent = Extract<StopIntent, { origin: 'budget' } | { runtimeSubtype: 'context_compaction_failed' | 'context_window_exhausted' | 'result_source_limit_exceeded' }>;
 export type ModelFailureStopIntent = Extract<StopIntent, { runtimeSubtype: 'runtime' }>;
 export type AgentStopIntent = Extract<StopIntent, { origin: 'user_cancel' | 'deadline' }> | ResourceStopIntent | ModelFailureStopIntent;
 export const stopCheckpointId = (runId: string, stopIntentRef: string) => identityHash('cliq-stop-checkpoint-v1', runId, stopIntentRef);
@@ -54,6 +54,14 @@ export function decodeAgentStop(value: unknown, run: Run): AgentStopIntent {
         if (intent.nextPromptTokens > intent.triggerThresholdTokens || intent.requestBodyLimitBytes !== 1_048_576 ||
             !Number.isSafeInteger(intent.requestBodyBytes) || intent.requestBodyBytes <= intent.requestBodyLimitBytes) throw new TypeError('invalid request body exhaustion');
       } else if (intent.nextPromptTokens <= intent.triggerThresholdTokens) throw new TypeError('invalid context exhaustion');
+    } else if (intent.runtimeSubtype === 'result_source_limit_exceeded') {
+      fields.push('sourceCheckpointId', 'workspaceStateRef', 'producingItemId', 'modelOpId', 'attempt', 'limitKind', 'observed', 'limit');
+      assertArtifactRef(intent.workspaceStateRef);
+      if ([intent.sourceCheckpointId, intent.producingItemId, intent.modelOpId].some(value =>
+        typeof value !== 'string' || !value || value.includes('\0') || Buffer.byteLength(value) > 256) ||
+          !['changed_paths', 'changed_bytes'].includes(intent.limitKind) ||
+          [intent.attempt, intent.observed, intent.limit].some(value => !Number.isSafeInteger(value) || value < 0) || intent.observed <= intent.limit)
+        throw new TypeError('invalid result source exhaustion');
     } else if (intent.runtimeSubtype === 'runtime') {
       fields.push('failingOpId', 'runtimeFailureRef', 'runtimeFailureDigest');
       assertArtifactRef(intent.runtimeFailureRef);
@@ -73,6 +81,10 @@ export function agentStopDetail(intent: AgentStopIntent, stopIntentRef: string, 
       ? { kind: 'runtime', failingOpId: intent.failingOpId, runtimeFailureRef: intent.runtimeFailureRef, runtimeFailureDigest: intent.runtimeFailureDigest }
     : intent.runtimeSubtype === 'context_compaction_failed'
       ? { kind: intent.runtimeSubtype, compactionPlanRef: intent.compactionPlanRef, modelOpId: intent.modelOpId, attempt: intent.attempt, evidenceRef: stopIntentRef }
+    : intent.runtimeSubtype === 'result_source_limit_exceeded'
+      ? { kind: intent.runtimeSubtype, sourceCheckpointId: intent.sourceCheckpointId, workspaceStateRef: intent.workspaceStateRef,
+          producingItemId: intent.producingItemId, modelOpId: intent.modelOpId, attempt: intent.attempt,
+          limitKind: intent.limitKind, observed: intent.observed, limit: intent.limit, evidenceRef: stopIntentRef }
       : contextExhaustionDetail(intent, stopIntentRef);
   return { schemaVersion: 1, runId: intent.runId, reason: intent.reason,
     reasonDetail,

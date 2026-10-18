@@ -724,12 +724,16 @@ async function nativeEditSearchSemantics() {
 }
 
 async function finalTurnRetainedPublication() {
-  for (const recovery of ['resume', 'cancel', 'close', 'expired_death', 'expired_death_retry'] as const) await finalTurnPublication(recovery);
+  for (const recovery of ['resume', 'cancel', 'close', 'expired_death', 'expired_death_retry', 'changed_paths', 'changed_bytes'] as const)
+    await finalTurnPublication(recovery);
 }
 
-async function finalTurnPublication(recovery: 'resume' | 'cancel' | 'close' | 'expired_death' | 'expired_death_retry') {
+async function finalTurnPublication(recovery: 'resume' | 'cancel' | 'close' | 'expired_death' | 'expired_death_retry' | 'changed_paths' | 'changed_bytes') {
   const expiresDeath = recovery === 'expired_death' || recovery === 'expired_death_retry';
-  const fixture = await createLinuxWorkerCampaignFixture({ ...options, label: `final-turn-${recovery}` });
+  const limited = recovery === 'changed_paths' || recovery === 'changed_bytes';
+  const fixture = await createLinuxWorkerCampaignFixture({ ...options, label: `final-turn-${recovery}`,
+    ...(limited ? { resultLimits: { maxChangedPaths: recovery === 'changed_paths' ? 0 : 1000,
+      maxChangedBytes: recovery === 'changed_bytes' ? 5 : 16 * 1024 ** 2 } } : {}) });
   let reopened: StateStore | undefined, sample: FileHandle | undefined, root: FileHandle | undefined, file: FileHandle | undefined;
   let prototype: { writeFile: FileHandle['writeFile'] } | undefined, originalWrite: FileHandle['writeFile'] | undefined;
   let operationFailure: { error: unknown } | undefined, reopeningFailed = false;
@@ -797,6 +801,31 @@ async function finalTurnPublication(recovery: 'resume' | 'cancel' | 'close' | 'e
       ['prepared', 'dispatch_claimed', 'completed']);
     const producerId = identityHash('cliq-model-turn-item-v1', fixture.runId, prepared.entry.opId, String(prepared.entry.attempt));
     const checkpointId = identityHash('cliq-final-candidate-checkpoint-v1', fixture.runId, producerId);
+    const capturePreparedSeal = async () => {
+      assert(initialDeath && snapshot); assert.equal(held, undefined);
+      assert.equal(initialDeath.backend.kind, 'linux');
+      if (initialDeath.backend.kind !== 'linux') throw new Error('final turn did not retire its real Linux containment');
+      assert.equal(initialDeath.backend.cgroupPopulated, 0); assert.equal(initialDeath.backend.namespaceInitDeadAndReaped, true);
+      assert.equal(initialDeath.backend.remainingTrackedDescendants, 0);
+      assert.match(await readFile(path.join(initialDeath.backend.cgroupPath, 'cgroup.events'), 'utf8'), /(?:^|\n)populated 0\n/u);
+      held = await checkpointBytes(fixture.store, fixture.runId);
+      assert.equal(held.closure.run.status, 'running'); assert.equal(held.closure.run.activeWorkerLaunchId, originalLaunch.launchId);
+      assert.deepEqual(held.closure.journal, finalCut.closure.journal); assert.deepEqual(held.closure.items, finalCut.closure.items);
+      assert.deepEqual(held.closure.latestCheckpoint, finalCut.closure.latestCheckpoint);
+      assert.equal(held.closure.workerLaunches[0]!.generationWriteState, 'checkpointing');
+      const generation = held.closure.workspaceGenerations.find(row => row.generationRef === originalLaunch.workspaceGenerationRef)!;
+      assert.equal(generation.phase, 'checkpointing');
+      const identity = await fixture.store.artifacts.readCanonical<WorkspaceGenerationIdentityV1>(originalLaunch.workspaceGenerationRef);
+      if (identity.locator.kind !== 'linux_directory') throw new Error('final-turn witness has no Linux private directory');
+      root = await open(path.join(fixture.stateRoot, identity.locator.canonicalRootRelativePath),
+        fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+      const physical = await root.stat({ bigint: true });
+      assert.equal(String(physical.dev), identity.locator.deviceId); assert.equal(String(physical.ino), identity.locator.directoryFileId);
+      file = await open(`/proc/self/fd/${root.fd}/a`, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+      assert.equal((await file.stat()).size, Buffer.byteLength('after\n'));
+      assert.deepEqual(await witnessBytes(file, Buffer.byteLength('after\n')), Buffer.from('after\n'));
+      assert.deepEqual(await readFile(path.join(fixture.workspace, 'a')), fixture.original);
+    };
     sample = await open(path.join(fixture.workspace, 'a'), fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
     prototype = Object.getPrototypeOf(sample) as { writeFile: FileHandle['writeFile'] }; originalWrite = prototype.writeFile;
     await sample.close(); sample = undefined;
@@ -814,7 +843,8 @@ async function finalTurnPublication(recovery: 'resume' | 'cancel' | 'close' | 'e
         assert.equal(death.evidenceDigest, digestOmitting(death, 'evidenceDigest'));
         assert.equal(death.containmentRef, originalLaunch.processContainmentRef);
         if (!initialDeath) { initialDeath = death; return; }
-        assert(snapshot && held, 'D1 follows the actual snapshot and complete candidate publication');
+        if (limited && !held) await capturePreparedSeal();
+        assert(snapshot && held, 'D1 follows the actual snapshot and either candidate publication or a durable resource StopIntent');
         assert.deepEqual({ ...death, observedAt: initialDeath.observedAt, evidenceDigest: initialDeath.evidenceDigest }, initialDeath);
         const observationRef = canonicalSha256(death), priorBytes = finalObservationBytes.get(observationRef);
         if (priorBytes) {
@@ -846,35 +876,20 @@ async function finalTurnPublication(recovery: 'resume' | 'cancel' | 'close' | 'e
         assert.equal(snapshot.evidenceDigest, digestOmitting(snapshot, 'evidenceDigest')); return;
       }
       if (value.kind !== 'final_candidate' || value.runId !== fixture.runId) return;
+      assert.equal(limited, false, 'a source-limit failure must never publish a candidate');
       assert(initialDeath && snapshot);
       assert.equal(value.producingItemId, producerId); assert.equal(value.producingOpId, prepared.entry.opId);
       candidateWrites.push(Buffer.from(args[0]));
       if (held) { assert.deepEqual(candidateWrites.at(-1), candidateWrites[0], 'retry preserves the exact original candidate bytes'); return; }
-      assert.equal(initialDeath.backend.kind, 'linux');
-      if (initialDeath.backend.kind !== 'linux') throw new Error('final turn did not retire its real Linux containment');
-      assert.equal(initialDeath.backend.cgroupPopulated, 0); assert.equal(initialDeath.backend.namespaceInitDeadAndReaped, true);
-      assert.equal(initialDeath.backend.remainingTrackedDescendants, 0);
-      assert.match(await readFile(path.join(initialDeath.backend.cgroupPath, 'cgroup.events'), 'utf8'), /(?:^|\n)populated 0\n/u);
-      held = await checkpointBytes(fixture.store, fixture.runId);
-      assert.equal(held.closure.run.status, 'running'); assert.equal(held.closure.run.activeWorkerLaunchId, originalLaunch.launchId);
-      assert.deepEqual(held.closure.journal, finalCut.closure.journal); assert.deepEqual(held.closure.items, finalCut.closure.items);
-      assert.deepEqual(held.closure.latestCheckpoint, finalCut.closure.latestCheckpoint);
-      assert.equal(held.closure.workerLaunches[0]!.generationWriteState, 'checkpointing');
-      const generation = held.closure.workspaceGenerations.find(row => row.generationRef === originalLaunch.workspaceGenerationRef)!;
-      assert.equal(generation.phase, 'checkpointing');
-      const identity = await fixture.store.artifacts.readCanonical<WorkspaceGenerationIdentityV1>(originalLaunch.workspaceGenerationRef);
-      if (identity.locator.kind !== 'linux_directory') throw new Error('final-turn witness has no Linux private directory');
-      root = await open(path.join(fixture.stateRoot, identity.locator.canonicalRootRelativePath),
-        fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
-      const physical = await root.stat({ bigint: true });
-      assert.equal(String(physical.dev), identity.locator.deviceId); assert.equal(String(physical.ino), identity.locator.directoryFileId);
-      file = await open(`/proc/self/fd/${root.fd}/a`, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
-      assert.equal((await file.stat()).size, Buffer.byteLength('after\n'));
-      assert.deepEqual(await witnessBytes(file, Buffer.byteLength('after\n')), Buffer.from('after\n'));
-      assert.deepEqual(await readFile(path.join(fixture.workspace, 'a')), fixture.original);
+      await capturePreparedSeal();
       if (!expiresDeath) { injected++; throw storageFailure; }
     }) as FileHandle['writeFile'];
-    if (recovery === 'expired_death') {
+    if (limited) {
+      const sealed = await bounded(execution.finishCurrentFinalTurn({ expectedRunRevision: finalCut.closure.run.revision }));
+      assert.equal(sealed.status, 'queued'); assert.equal(sealed.activeWorkerLaunchId, undefined);
+      assert.equal(sealed.latestCheckpointId, checkpointId); assert(sealed.stopIntentRef);
+      assert.equal(execution.hasPendingCompletion(), false); assert.equal(injected, 0); assert.equal(candidateWrites.length, 0);
+    } else if (recovery === 'expired_death') {
       await assert.rejects(bounded(execution.finishCurrentFinalTurn({ expectedRunRevision: finalCut.closure.run.revision }), 40_000), staleRetirement);
     } else await assert.rejects(bounded(execution.finishCurrentFinalTurn({ expectedRunRevision: finalCut.closure.run.revision })), error => error === storageFailure);
     assert(held && initialDeath && snapshot && file);
@@ -899,14 +914,16 @@ async function finalTurnPublication(recovery: 'resume' | 'cancel' | 'close' | 'e
       assert.equal(wait.subject.oldWorkerLaunchId, originalLaunch.launchId); assert.deepEqual(wait.subject.openInvocationRefs, []);
       assert.equal(fenced.closure.run.resultRef, undefined);
     } else {
-      assert.equal(injected, 1); assert.equal(execution.hasPendingCompletion(storageFailure), true);
-      assert.deepEqual(await checkpointBytes(fixture.store, fixture.runId), held, 'storage failure retains the original owner, cut and accounted workspace');
+      if (!limited) {
+        assert.equal(injected, 1); assert.equal(execution.hasPendingCompletion(storageFailure), true);
+        assert.deepEqual(await checkpointBytes(fixture.store, fixture.runId), held, 'storage failure retains the original owner, cut and accounted workspace');
+      }
       if (recovery === 'close') {
         await bounded(fixture.store.close());
         try { reopened = await openStateStore(fixture.stateRoot, fixture.runtimeAuthority); }
         catch (error) { reopeningFailed = true; throw error; }
         observingStore = reopened;
-      } else {
+      } else if (!limited) {
         let stopIntentRef: string | undefined;
         if (recovery === 'cancel') {
           const stopped = await agent.cancelRun({ ...await publishInProcessChannel(fixture.store), requestId: uuidv7(),
@@ -937,11 +954,21 @@ async function finalTurnPublication(recovery: 'resume' | 'cancel' | 'close' | 'e
       assert.ok(Date.parse(c) - Date.parse(d1.observedAt) <= 5000);
       const currentAgent = await observingStore.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material,
         releaseKeys: fixture.signed.releaseKeys });
-      if (recovery === 'cancel') {
-        assert.deepEqual(sealed.closure.items, finalCut.closure.items); assert.equal(candidateWrites.length, 1);
+      if (recovery === 'cancel' || limited) {
+        assert.deepEqual(sealed.closure.items, finalCut.closure.items); assert.equal(candidateWrites.length, limited ? 0 : 1);
         assert.equal(sealed.closure.run.nextStep, 'agent'); assert(sealed.closure.run.stopIntentRef);
+        if (limited) {
+          const stop = await observingStore.artifacts.readCanonical<Record<string, unknown>>(sealed.closure.run.stopIntentRef);
+          assert.equal(stop.origin, 'runtime'); assert.equal(stop.runtimeSubtype, 'result_source_limit_exceeded');
+          assert.equal(stop.sourceCheckpointId, finalCut.closure.latestCheckpoint.id);
+          assert.equal(stop.workspaceStateRef, finalCut.closure.latestCheckpoint.workspaceStateRef);
+          assert.equal(stop.producingItemId, producerId); assert.equal(stop.modelOpId, prepared.entry.opId);
+          assert.equal(stop.attempt, prepared.entry.attempt); assert.equal(stop.limitKind, recovery);
+          assert.equal(stop.observed, recovery === 'changed_paths' ? 1 : 6); assert.equal(stop.limit, recovery === 'changed_paths' ? 0 : 5);
+        }
         const terminal = await execution.finishCurrentStop({ expectedRunRevision: sealed.closure.run.revision });
-        assert.equal(terminal.status, 'cancelled'); assert.equal(terminal.resultRef, undefined);
+        assert.equal(terminal.status, limited ? 'failed' : 'cancelled'); assert.equal(terminal.resultRef, undefined);
+        if (limited) assert.equal(terminal.terminalReason, 'runtime_failed');
         assert.equal(terminal.stopIntentRef, sealed.closure.run.stopIntentRef);
       } else {
         assert.equal(candidateWrites.length, 2); assert.equal(sealed.closure.items.length, finalCut.closure.items.length + 1);

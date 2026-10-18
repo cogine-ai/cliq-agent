@@ -1,26 +1,33 @@
 // Existing real StateStore/CAS seam. All model and quiescence facts below reuse
 // the offline fixture; no filesystem capture, native death or installation is qualified.
 import assert from 'node:assert/strict';
+import { promises as fs } from 'node:fs';
+import type { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
-import { KERNEL_DATABASE_FILENAME } from '../config.js';
+import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME } from '../config.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting, identityHash, sha256Bytes } from '../kernel/identity.js';
 import type { FinalCandidateItem, RunResult, SourceManifest, SourceProjectionSpec, WorkspaceDiffV1, WorkspaceEntry,
-  WorkspaceEntryManifest, WorkspaceStateManifest } from '../kernel/types.js';
+  WorkspaceEntryManifest, WorkspaceStateManifest, StopIntent, TerminalDetail } from '../kernel/types.js';
+import type { ToolObservationV1 } from '../kernel/tool-authorization.js';
 import { sampleCanonicalNow } from './canonical-time.js';
+import { isJoinedCasPublicationFailure } from './cas.js';
 import { CandidateSourceLimitError } from './result-source.js';
 import { openStateStore, publishInProcessChannel } from './store.js';
 import { createAgentFixture } from './testing/agent-fixtures.js';
 import { activateFixtureWorker, admissionKey, disposeFixture, uuidv7 } from './testing/fixtures.js';
 import { quiescedToolCheckpoint } from './testing/tool-effects.js';
+import { batch, claimTool, observation, prepareTool } from './testing/tool-calls.js';
+import { openSqliteDriver } from './sqlite-driver.js';
 
 type Fixture = Awaited<ReturnType<typeof createAgentFixture>>;
 
 async function sourceFixture(label: string, changes?: Partial<Pick<SourceProjectionSpec,
-  'maxChangedPaths' | 'maxChangedBytes' | 'explicitExcludes'>>): Promise<Fixture> {
-  const fixture = await createAgentFixture(label, undefined, { mode: 'plan' });
+  'maxChangedPaths' | 'maxChangedBytes' | 'explicitExcludes'>>, edits = false, wallTimeMs?: number): Promise<Fixture> {
+  const fixture = await createAgentFixture(label, wallTimeMs === undefined ? undefined : { wallTimeMs },
+    edits ? { mode: 'accept-edits', tools: ['edit'] } : { mode: 'plan' });
   if (!changes) return fixture;
   try {
     const { runSpec } = await fixture.store.readRecoveryClosure(fixture.runId);
@@ -102,6 +109,219 @@ async function candidateGraph(fixture: Fixture) {
   const diff = await fixture.store.artifacts.readCanonical<WorkspaceDiffV1>(candidate.diffRef);
   return { cut, candidate, source, entries, diff };
 }
+
+async function accountedSourceFixture(label: string, changes: Partial<Pick<SourceProjectionSpec, 'maxChangedPaths' | 'maxChangedBytes'>>, wallTimeMs?: number) {
+  const fixture = await sourceFixture(label, changes, true, wallTimeMs);
+  try {
+    await batch(fixture, [{ name: 'edit', input: { path: 'a', old_text: 'before', new_text: 'after' } }]);
+    const claimed = await claimTool(fixture, await prepareTool(fixture));
+    const checkpointId = identityHash('cliq-tool-checkpoint-v1', fixture.runId, claimed.entry.opId, String(claimed.entry.attempt));
+    const original = await fixture.store.artifacts.readCanonical<ToolObservationV1>(await observation(fixture, claimed, 'Offline edit completed.'));
+    const checkpoint = await sourceProof(fixture, checkpointId, [await file(fixture, 'a', 'after\n')]);
+    const value = { ...original, postEffect: checkpoint, observationDigest: '' };
+    value.observationDigest = digestOmitting(value, 'observationDigest');
+    await fixture.agent.completeTool({ expectedRunRevision: fixture.store.getRun(fixture.runId).revision,
+      opId: claimed.entry.opId, attempt: claimed.entry.attempt,
+      observationRef: (await fixture.store.artifacts.publishCanonical(value, value.format)).ref });
+    Object.assign(fixture, await activateFixtureWorker(fixture, `${label}-final-worker`));
+    fixture.agent = await fixture.store.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material,
+      releaseKeys: fixture.signed.releaseKeys });
+    return fixture;
+  } catch (error) { await disposeFixture(fixture); throw error; }
+}
+
+test('an accounted result exceeding its frozen path limit seals the original final cut and publishes one recoverable resource terminal', async () => {
+  const fixture = await accountedSourceFixture('candidate-source-resource-path', { maxChangedPaths: 0, maxChangedBytes: 0 });
+  try {
+    const { completed, owner, checkpointId } = await completeFinalTurn(fixture);
+    const before = await fixture.store.readRecoveryClosure(fixture.runId), sessionBefore = fixture.store.getSession(before.run.sessionId);
+    const proof = await quiescedToolCheckpoint(fixture, checkpointId);
+    const sealed = await owner.complete({ expectedRunRevision: completed.run.revision, checkpoint: proof.checkpoint });
+    assert.equal(sealed.disposition, 'stopped');
+    const cut = await fixture.store.readRecoveryClosure(fixture.runId);
+    assert.equal(cut.run.status, 'queued'); assert.equal(cut.run.nextStep, 'agent'); assert.equal(cut.run.activeWorkerLaunchId, undefined);
+    assert.deepEqual(cut.items, before.items); assert.deepEqual(cut.journal, before.journal);
+    assert.equal(cut.latestCheckpoint.id, checkpointId); assert.equal(cut.latestCheckpoint.workspaceStateRef, before.latestCheckpoint.workspaceStateRef);
+    const intent = await fixture.store.artifacts.readCanonical<StopIntent>(cut.run.stopIntentRef!);
+    assert.deepEqual(intent, { schemaVersion: 1, runId: fixture.runId, createdAt: intent.createdAt, origin: 'runtime',
+      targetStatus: 'failed', reason: 'runtime_failed', runtimeSubtype: 'result_source_limit_exceeded',
+      sourceCheckpointId: before.latestCheckpoint.id, workspaceStateRef: before.latestCheckpoint.workspaceStateRef,
+      producingItemId: before.items.at(-1)!.itemId, modelOpId: before.journal.at(-1)!.opId,
+      attempt: before.journal.at(-1)!.attempt, limitKind: 'changed_paths', observed: 1, limit: 0 });
+    const terminal = await fixture.agent.commitTerminalStop({ expectedRunRevision: cut.run.revision });
+    assert.equal(terminal.run.status, 'failed'); assert.equal(terminal.run.terminalReason, 'runtime_failed'); assert.equal(terminal.run.resultRef, undefined);
+    const detail = await fixture.store.artifacts.readCanonical<TerminalDetail>(terminal.run.terminalDetailRef!);
+    assert.equal(detail.primaryEvidenceRef, cut.run.stopIntentRef);
+    assert.equal(detail.reasonDetail.kind, 'result_source_limit_exceeded');
+    const session = fixture.store.getSession(before.run.sessionId);
+    assert.equal(session.latestItemSeq, sessionBefore.latestItemSeq + 1); assert.equal(session.contextRevision, sessionBefore.contextRevision + 1);
+    await fixture.store.close(); fixture.store = await openStateStore(fixture.stateRoot, fixture.signed);
+    assert.deepEqual(fixture.store.getRun(fixture.runId), terminal.run);
+    assert.deepEqual(fixture.store.getSession(session.id), session);
+    const reopened = await fixture.store.readRecoveryClosure(fixture.runId);
+    assert.deepEqual(reopened.journal, before.journal); assert.deepEqual(reopened.items, before.items);
+    assert.deepEqual(reopened.run.budgetConsumed, before.run.budgetConsumed); assert.deepEqual(reopened.run.budgetReserved, before.run.budgetReserved);
+  } finally { await disposeFixture(fixture); }
+});
+
+test('accounted result limits accept exact path/byte boundaries and fail only the strictly exceeded byte ceiling', async t => {
+  for (const maxChangedBytes of [6, 5]) await t.test(`${maxChangedBytes} bytes`, async () => {
+    const fixture = await accountedSourceFixture(`candidate-source-resource-bytes-${maxChangedBytes}`, { maxChangedPaths: 1, maxChangedBytes });
+    try {
+      const { completed, owner, checkpointId } = await completeFinalTurn(fixture);
+      const before = await fixture.store.readRecoveryClosure(fixture.runId);
+      if (maxChangedBytes === 6) {
+        await assert.rejects(fixture.agent.stopForResourceFailure({ expectedRunRevision: before.run.revision }), { code: 'STATE_TRANSITION_INVALID' });
+        assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
+      }
+      const proof = await quiescedToolCheckpoint(fixture, checkpointId);
+      const sealed = await owner.complete({ expectedRunRevision: fixture.store.getRun(fixture.runId).revision, checkpoint: proof.checkpoint });
+      assert.equal(sealed.disposition, maxChangedBytes === 6 ? 'candidate' : 'stopped');
+      const cut = await fixture.store.readRecoveryClosure(fixture.runId);
+      assert.deepEqual(cut.journal, before.journal); assert.deepEqual(cut.run.budgetConsumed, before.run.budgetConsumed);
+      if (maxChangedBytes === 6) {
+        assert.equal(cut.run.stopIntentRef, undefined);
+        const graph = await candidateGraph(fixture);
+        assert.deepEqual(graph.diff.operations, [{ kind: 'add', path: 'a', after: await file(fixture, 'a', 'after\n') }]);
+      } else {
+        const intent = await fixture.store.artifacts.readCanonical<StopIntent>(cut.run.stopIntentRef!);
+        assert.ok(intent.origin === 'runtime' && intent.runtimeSubtype === 'result_source_limit_exceeded');
+        assert.equal(intent.limitKind, 'changed_bytes'); assert.equal(intent.observed, 6); assert.equal(intent.limit, 5);
+        assert.deepEqual(cut.items, before.items); assert.equal(cut.run.resultRef, undefined);
+        assert.equal((await fixture.agent.commitTerminalStop({ expectedRunRevision: cut.run.revision })).run.status, 'failed');
+      }
+    } finally { await disposeFixture(fixture); }
+  });
+});
+
+test('joined result-stop publication failure retains one final owner and preserves resource, cancellation and deadline precedence', async t => {
+  for (const winner of ['resource', 'cancel', 'deadline'] as const) await t.test(winner, async t => {
+    let clock = Date.now(); t.mock.method(Date, 'now', () => clock);
+    const fixture = await accountedSourceFixture(`candidate-source-stop-cas-${winner}`, { maxChangedPaths: 0 }, 60_000);
+    try {
+      const { completed, owner, checkpointId } = await completeFinalTurn(fixture);
+      if (winner === 'deadline') clock = Date.parse(completed.run.deadlineAt) - 1000;
+      const proof = await quiescedToolCheckpoint(fixture, checkpointId), before = await fixture.store.readRecoveryClosure(fixture.runId);
+      const sample = await fs.open(path.join(fixture.stateRoot, KERNEL_CAS_DIRECTORY, proof.workspaceStateRef), 'r');
+      const prototype = Object.getPrototypeOf(sample) as { writeFile: FileHandle['writeFile'] }, original = prototype.writeFile;
+      await sample.close();
+      const failure = Object.assign(new Error('result stop publication ENOSPC after its actual write'), { code: 'ENOSPC' });
+      let injected = 0, candidates = 0;
+      const writer = t.mock.method(prototype, 'writeFile', async function(this: FileHandle, ...args: unknown[]) {
+        await Reflect.apply(original, this, args);
+        if (!Buffer.isBuffer(args[0])) return;
+        const text = args[0].toString('utf8');
+        if (text.includes('"kind":"final_candidate"')) candidates++;
+        if (!injected && text.includes('"runtimeSubtype":"result_source_limit_exceeded"')) { injected++; throw failure; }
+      });
+      const request = { expectedRunRevision: completed.run.revision, checkpoint: proof.checkpoint };
+      await assert.rejects(owner.complete(request), error => error === failure);
+      assert.equal(injected, 1); assert(isJoinedCasPublicationFailure(failure));
+      assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
+      if (winner === 'cancel') await fixture.agent.cancelRun({ ...await publishInProcessChannel(fixture.store), requestId: uuidv7(),
+        expectedRunRevision: before.run.revision });
+      if (winner === 'deadline') clock = Date.parse(before.run.deadlineAt);
+      const sealed = await owner.complete({ ...request, expectedRunRevision: fixture.store.getRun(fixture.runId).revision });
+      writer.mock.restore(); assert.equal(candidates, 0); assert.equal(sealed.disposition, 'stopped');
+      const cut = await fixture.store.readRecoveryClosure(fixture.runId);
+      const intent = await fixture.store.artifacts.readCanonical<StopIntent>(cut.run.stopIntentRef!);
+      assert.equal(intent.origin, winner === 'resource' ? 'runtime' : winner === 'cancel' ? 'user_cancel' : 'deadline');
+      assert.equal(cut.latestCheckpoint.id, checkpointId); assert.deepEqual(cut.items, before.items); assert.deepEqual(cut.journal, before.journal);
+      const terminal = await fixture.agent.commitTerminalStop({ expectedRunRevision: cut.run.revision });
+      assert.equal(terminal.run.status, winner === 'cancel' ? 'cancelled' : 'failed');
+      assert.equal(terminal.run.terminalReason, winner === 'resource' ? 'runtime_failed' : winner === 'cancel' ? 'cancelled_by_user' : 'budget_exhausted');
+      assert.equal(terminal.run.resultRef, undefined);
+      await fixture.store.close(); fixture.store = await openStateStore(fixture.stateRoot, fixture.signed);
+      assert.deepEqual(fixture.store.getRun(fixture.runId), terminal.run);
+      assert.deepEqual((await fixture.store.readRecoveryClosure(fixture.runId)).journal, before.journal);
+    } finally { await disposeFixture(fixture); }
+  });
+});
+
+test('a rolled-back resource seal retains its original source Checkpoint and commits no candidate on retry', async () => {
+  const fixture = await accountedSourceFixture('candidate-source-stop-sql', { maxChangedBytes: 5 });
+  const fault = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+  try {
+    const { completed, owner, checkpointId } = await completeFinalTurn(fixture);
+    const proof = await quiescedToolCheckpoint(fixture, checkpointId), before = await fixture.store.readRecoveryClosure(fixture.runId);
+    fault.exec("CREATE TRIGGER fail_result_resource_checkpoint BEFORE INSERT ON checkpoints BEGIN SELECT RAISE(ABORT, 'injected resource seal rollback'); END");
+    const request = { expectedRunRevision: completed.run.revision, checkpoint: proof.checkpoint };
+    await assert.rejects(owner.complete(request), /injected resource seal rollback/);
+    const stopped = await fixture.store.readRecoveryClosure(fixture.runId);
+    assert(stopped.run.stopIntentRef); assert.equal(stopped.run.revision, before.run.revision + 1);
+    assert.deepEqual(stopped.latestCheckpoint, before.latestCheckpoint); assert.deepEqual(stopped.journal, before.journal); assert.deepEqual(stopped.items, before.items);
+    fault.exec('DROP TRIGGER fail_result_resource_checkpoint');
+    const sealed = await owner.complete({ ...request, expectedRunRevision: stopped.run.revision });
+    assert.equal(sealed.disposition, 'stopped'); assert.equal(sealed.run.stopIntentRef, stopped.run.stopIntentRef);
+    const intent = await fixture.store.artifacts.readCanonical<StopIntent>(sealed.run.stopIntentRef!);
+    assert.ok(intent.origin === 'runtime' && intent.runtimeSubtype === 'result_source_limit_exceeded');
+    assert.equal(intent.sourceCheckpointId, before.latestCheckpoint.id);
+    const cut = await fixture.store.readRecoveryClosure(fixture.runId);
+    assert.deepEqual(cut.journal, before.journal); assert.deepEqual(cut.items, before.items); assert.equal(cut.latestCheckpoint.id, checkpointId);
+    const terminal = await fixture.agent.commitTerminalStop({ expectedRunRevision: cut.run.revision });
+    assert.equal(terminal.run.status, 'failed'); assert.equal(terminal.run.resultRef, undefined);
+  } finally { fault.close(); await disposeFixture(fixture); }
+});
+
+test('result-source stop recovery rejects altered causes, producer identities and the original accounted Checkpoint', async () => {
+  const fixture = await accountedSourceFixture('candidate-source-stop-forged', { maxChangedPaths: 0, maxChangedBytes: 0 });
+  const fault = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+  try {
+    const { completed, owner, checkpointId } = await completeFinalTurn(fixture);
+    const before = await fixture.store.readRecoveryClosure(fixture.runId), proof = await quiescedToolCheckpoint(fixture, checkpointId);
+    const sealed = await owner.complete({ expectedRunRevision: completed.run.revision, checkpoint: proof.checkpoint });
+    const originalRef = sealed.run.stopIntentRef!, intent = await fixture.store.artifacts.readCanonical<StopIntent>(originalRef);
+    assert.ok(intent.origin === 'runtime' && intent.runtimeSubtype === 'result_source_limit_exceeded');
+    for (const replacement of [
+      { ...intent, sourceCheckpointId: checkpointId },
+      { ...intent, workspaceStateRef: before.runSpec.baseWorkspaceManifestRef },
+      { ...intent, producingItemId: before.items[0]!.itemId },
+      { ...intent, modelOpId: before.journal[0]!.opId },
+      { ...intent, attempt: intent.attempt + 1 },
+      { ...intent, limitKind: 'changed_bytes', observed: 6 },
+      { ...intent, observed: 2 },
+      { ...intent, observed: 0 },
+      { ...intent, limit: 1 },
+      { ...intent, limitKind: 'other' },
+      { ...intent, diagnostic: 'a caught error cannot be a closed resource cause' }
+    ]) {
+      const forged = await fixture.store.artifacts.publishCanonical(replacement, 'cliq-stop-intent-v1');
+      fault.prepare('UPDATE runs SET stop_intent_ref = ? WHERE id = ?').run(forged.ref, fixture.runId);
+      try { await assert.rejects(fixture.store.readRecoveryClosure(fixture.runId), { code: 'RECOVERY_REQUIRED' }); }
+      finally { fault.prepare('UPDATE runs SET stop_intent_ref = ? WHERE id = ?').run(originalRef, fixture.runId); }
+    }
+    const source = before.latestCheckpoint;
+    // Existing isolated corruption seam: restore the exact schema guard inside
+    // each write transaction before any production recovery reader is invoked.
+    const guard = fault.prepare("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'checkpoints_immutable_update'")
+      .get<{ sql: string }>()!.sql;
+    const corruptCheckpoint = (column: string, value: string | number) => fault.transaction(connection => {
+      connection.exec('DROP TRIGGER checkpoints_immutable_update');
+      connection.prepare(`UPDATE checkpoints SET ${column} = ? WHERE id = ?`).run(value, source.id);
+      connection.exec(guard);
+    });
+    const initial = fault.prepare('SELECT workspace_state_ref, context_manifest_ref FROM checkpoints WHERE id = ?')
+      .get<{ workspace_state_ref: string; context_manifest_ref: string }>(identityHash('cliq-checkpoint-id-v1', fixture.runId, 'initial', 0))!;
+    for (const [column, changed, original] of [
+      ['workspace_state_ref', initial.workspace_state_ref, source.workspaceStateRef],
+      ['context_manifest_ref', initial.context_manifest_ref, source.contextManifestRef],
+      ['run_item_seq', source.runItemSeq - 1, source.runItemSeq],
+      ['journal_seq', source.journalSeq - 1, source.journalSeq],
+      ['created_at', new Date(Date.parse(source.createdAt) + 1).toISOString(), source.createdAt],
+      ['based_on_run_revision', sealed.run.revision, source.basedOnRunRevision]
+    ] as const) {
+      corruptCheckpoint(column, changed);
+      try { await assert.rejects(fixture.store.readRecoveryClosure(fixture.runId), { code: 'RECOVERY_REQUIRED' }); }
+      finally { corruptCheckpoint(column, original); }
+    }
+    const valid = await fixture.store.readRecoveryClosure(fixture.runId);
+    assert.deepEqual(valid.items, before.items); assert.deepEqual(valid.journal, before.journal);
+    const terminal = await fixture.agent.commitTerminalStop({ expectedRunRevision: valid.run.revision });
+    assert.equal(terminal.run.status, 'failed'); assert.equal(terminal.run.resultRef, undefined);
+    await fixture.store.close(); fixture.store = await openStateStore(fixture.stateRoot, fixture.signed);
+    assert.deepEqual(fixture.store.getRun(fixture.runId), terminal.run);
+  } finally { fault.close(); await disposeFixture(fixture); }
+});
 
 test('an unchanged retained workspace publishes an exact empty candidate diff and reuses its entry object', async () => {
   const fixture = await sourceFixture('candidate-source-empty');

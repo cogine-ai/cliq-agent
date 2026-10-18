@@ -27,6 +27,7 @@ import { publishOfflineModelEndpoint } from '../../state/testing/model-endpoint.
 export async function createLinuxWorkerCampaignFixture(input: {
   installationRoot: string; cgroupParent: string; stateVolume: string; label: string; paddingBytes?: number;
   edit?: { contents: Uint8Array; oldText: string; newText: string };
+  resultLimits?: Pick<SourceProjectionSpec, 'maxChangedPaths' | 'maxChangedBytes'>;
 }) {
   if (process.platform !== 'linux') throw new Error('Linux worker campaign requires Linux; no skipped qualification');
   const stateRoot = await mkdtemp(path.join(input.stateVolume, 's-'));
@@ -115,8 +116,9 @@ export async function createLinuxWorkerCampaignFixture(input: {
     rules.rulesDigest = digestOmitting(rules, 'rulesDigest');
     const rulesRef = (await store.artifacts.publishCanonical(rules, rules.format)).ref;
     const projection: SourceProjectionSpec = { schemaVersion: 1, matcherVersion: 'cliq-exact-path-v1', frozenIgnoreRulesRef: rulesRef,
-      frozenIgnoreRulesDigest: rules.rulesDigest, explicitIncludes: [], explicitExcludes: [], maxChangedPaths: 1000,
-      maxChangedBytes: 16 * 1024 ** 2, projectionDigest: '' };
+      frozenIgnoreRulesDigest: rules.rulesDigest, explicitIncludes: [], explicitExcludes: [],
+      maxChangedPaths: input.resultLimits?.maxChangedPaths ?? 1000,
+      maxChangedBytes: input.resultLimits?.maxChangedBytes ?? 16 * 1024 ** 2, projectionDigest: '' };
     projection.projectionDigest = digestOmitting(projection, 'projectionDigest');
     const projectionRef = (await store.artifacts.publishCanonical(projection, 'cliq-source-projection-v1')).ref;
     // Capture this declared one-file, non-Git test workspace. No fake snapshot

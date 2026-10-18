@@ -23,7 +23,7 @@ import { readInvocationJournal, readHighestPreparedAttempt } from './repositorie
 import { readWorkerLaunchesForRun } from './repositories/worker-launches.js';
 import { readWorkspaceGenerationsForRun } from './repositories/workspace-generations.js';
 import { readCheckpoint, readRun } from './rows.js';
-import { prepareCandidateSource } from './result-source.js';
+import { CandidateSourceLimitError, prepareCandidateSource } from './result-source.js';
 import { isRolledBackSqliteTransactionFailure, type SqliteConnection, type SqliteDriver } from './sqlite-driver.js';
 import { assertActiveStateOwner, type StateOwnerContext } from './state-owner.js';
 import { prepareToolCheckpoint, type NativeWorkerRetirement } from './tool-checkpoint.js';
@@ -44,6 +44,7 @@ class CandidateDeadlineReached extends KernelStorageError {
 export function loadFinalCandidate(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, authority: {
   run: Run; spec: RunSpec; assembly: RunAssemblyV1; resolveToolInput: ResolveToolInput;
   expireRun(input: { expectedRunRevision: number }): Promise<{ run: Run }>;
+  stopForResourceFailure(input: { expectedRunRevision: number }): Promise<{ run: Run }>;
 }, reobserve?: NativeWorkerRetirement) {
   const { run: admitted, spec, assembly, resolveToolInput } = authority, runId = admitted.id;
   let beginning: Promise<FinalCandidateOwner> | undefined, retained: FinalCandidateOwner | undefined;
@@ -209,7 +210,15 @@ export function loadFinalCandidate(driver: SqliteDriver, artifacts: ArtifactCata
               }
               let latest = await checkCut(expected);
               if (!latest.stopIntentRef) {
-                source ??= await prepareCandidateSource(artifacts, spec, input.checkpoint.workspaceStateRef);
+                try { source ??= await prepareCandidateSource(artifacts, spec, input.checkpoint.workspaceStateRef); }
+                catch (error) {
+                  // The exception requests a fresh authoritative derivation; none
+                  // of its fields are evidence. Never seal an unaccounted tree.
+                  if (!(error instanceof CandidateSourceLimitError) || input.checkpoint.workspaceStateRef !== selected.latestCheckpoint.workspaceStateRef) throw error;
+                  const stopped = await authority.stopForResourceFailure({ expectedRunRevision: expected });
+                  expected = stopped.run.revision;
+                  continue;
+                }
                 await source.publish();
                 if (!candidate) {
                   const createdAt = sampleCanonicalNow();

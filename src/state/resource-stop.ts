@@ -1,23 +1,25 @@
 import { canonicalSha256 } from '../kernel/canonical.js';
-import { digestOmitting, identityHash } from '../kernel/identity.js';
-import type { BudgetUsage, ContextManifest, ContinuationItem, RecoveryClosureV1, RunAssemblyV1, RunContextCompactionPlan, ToolContractManifestV1 } from '../kernel/types.js';
+import { digestOmitting, identityHash, modelOperationId } from '../kernel/identity.js';
+import type { BudgetUsage, ContextManifest, ContinuationItem, RecoveryClosureV1, RunAssemblyV1, RunContextCompactionPlan, RunFrontier, ToolContractManifestV1 } from '../kernel/types.js';
 import type { RunPolicySnapshotV1 } from '../kernel/tool-authorization.js';
 import type { ToolCallInputV1, ModelUnusableResponseV1, ModelTextV1 } from '../protocol/agent-ir.js';
 import { createModelRequestReservation, priceTableDigest, type ModelPriceTableV1, type LocalZeroCostProvenanceV1 } from '../model/pricing.js';
-import { estimatePromptTokens, projectModelVisiblePrompt, type CompactionPromptEnvelopeV1, type ModelRequestV1 } from '../model/request.js';
+import { estimatePromptTokens, projectModelVisiblePrompt, type CompactionPromptEnvelopeV1, type ModelRequestV1, type NormalPromptProjectionV1 } from '../model/request.js';
 import { loadToolPolicy, planToolRequest, toolOperationId } from '../policy/tool-policy.js';
-import { requireEqual } from '../policy/runtime-authority.js';
-import { planContextCompaction, replaceCompactedPrefix, type ContextItem } from '../runtime/context-compaction.js';
-import { validateModelTurn, validateUnusableModelResponse } from '../runtime/continuation.js';
+import { exactKeys, requireEqual } from '../policy/runtime-authority.js';
+import { planContextCompaction, replaceCompactedPrefix, validateContextItems, type ContextItem } from '../runtime/context-compaction.js';
+import { planModelContinuation, validateModelTurn, validateUnusableModelResponse } from '../runtime/continuation.js';
 import { openStopBatch, stopInvocationHistory, type ResourceStopIntent } from '../runtime/stop.js';
 import { loadInstructionText, readCanonicalArtifact, readModelContext, readModelTurnMaterial } from './agent-context.js';
 import type { ArtifactCatalog } from './artifacts.js';
 import { decodeContextManifest, decodeWorkspaceIdentity } from './decoders.js';
 import { isZeroBudget } from './invariants.js';
-import { readSession } from './rows.js';
+import { readCheckpoint, readSession } from './rows.js';
 import type { SqliteDriver } from './sqlite-driver.js';
 import { readToolApproval } from './tool-approval-recovery.js';
 import { joinResourceOperations, stateOperation } from './errors.js';
+import { readHighestPreparedAttempt } from './repositories/journal.js';
+import { readCandidateSourceLimit } from './result-source.js';
 
 type WithoutIdentity<T> = T extends ResourceStopIntent ? Omit<T, 'schemaVersion' | 'runId' | 'createdAt'> : never;
 type ResourceCause = WithoutIdentity<ResourceStopIntent>;
@@ -46,6 +48,12 @@ export const readResourceStopCause = stateOperation('RECOVERY_REQUIRED', async f
   // Terminal drain adds only an undispatched suffix. Reconstruct the pre-drain call cut for its stop proof.
   const items = allItems.filter(({ item }) => item.kind !== 'tool_result' || item.outcome !== 'cancelled');
   const pending = openStopBatch(items.map(({ item }) => item));
+  const lastItem = items.at(-1)?.item;
+  if (lastItem?.kind === 'model_turn' && lastItem.stopReason === 'end') {
+    // A completed final response requires no next model reservation or context
+    // compaction. Its result limits are a separate immutable resource fact.
+    return readFinalSourceLimit(driver, artifacts, cut, assembly, items, observedAt);
+  }
   const budgetCause = (required: BudgetUsage): ResourceCause | undefined => {
     for (const counter of ['modelTokens', 'costMicros', 'toolCalls'] as const) {
       const ceiling = spec.budgets[counter], consumed = run.budgetConsumed[counter], reserved = run.budgetReserved[counter];
@@ -159,3 +167,72 @@ export const readResourceStopCause = stateOperation('RECOVERY_REQUIRED', async f
   }
   return budgetCause({ modelTokens: reservation.modelTokens, costMicros: reservation.costMicros, toolCalls: 0, repairAttempts: 0 });
 });
+
+/** Reproduce the original model continuation, not a later seal/terminal's
+ * mutable latest pointer. No caught exception or caller count is evidence. */
+async function readFinalSourceLimit(driver: SqliteDriver, artifacts: ArtifactCatalog,
+  cut: Pick<RecoveryClosureV1, 'run' | 'runSpec' | 'latestCheckpoint' | 'items' | 'journal'>,
+  assembly: RunAssemblyV1, items: ContextItem[], observedAt: string): Promise<ResourceCause | undefined> {
+  const { run, runSpec: spec, journal, latestCheckpoint: latest } = cut;
+  const row = cut.items.at(-1)!, producer = items.at(-1)!.item, completed = journal.at(-1);
+  if (spec.operation !== 'agent' || run.parentRunId || producer.kind !== 'model_turn' || producer.stopReason !== 'end' ||
+      !exactKeys(producer, ['schemaVersion', 'itemId', 'runId', 'kind', 'modelOpId', 'modelAttempt', 'modelTurnRef', 'stopReason', 'textRef', 'createdAt']) ||
+      !completed || completed.opKind !== 'model' || completed.phase !== 'completed' || !completed.resultRef || completed.receiptRef ||
+      completed.opId !== producer.modelOpId || completed.attempt !== producer.modelAttempt || completed.resultRef !== producer.modelTurnRef ||
+      row.itemId !== producer.itemId || row.itemSeq !== cut.items.length || row.payloadDigest !== row.payloadRef || producer.schemaVersion !== 1 ||
+      row.payloadRef !== canonicalSha256(producer) || producer.runId !== run.id || producer.createdAt !== completed.timestamp ||
+      row.createdAt !== completed.timestamp || completed.timestamp > observedAt)
+    throw new TypeError('result resource failure has no exact final model producer');
+  const prepared = readHighestPreparedAttempt(driver, run.id, completed.opId);
+  if (!prepared || prepared.attempt !== completed.attempt || prepared.opKind !== 'model' || prepared.requestRef !== completed.requestRef)
+    throw new TypeError('result resource failure does not own the highest final model attempt');
+  const request = await readCanonicalArtifact<ModelRequestV1>(artifacts, completed.requestRef);
+  const material = await readModelTurnMaterial(artifacts, completed.resultRef);
+  const noToolInput = () => { throw new TypeError('final result resource failure cannot resolve a tool call'); };
+  validateModelTurn(request, material, noToolInput);
+  if (request.kind !== 'normal' || request.compactionPlanRef !== undefined || request.runId !== run.id || request.opId !== completed.opId ||
+      request.attempt !== completed.attempt || request.assemblyRef !== spec.assemblyRef || request.assemblyDigest !== assembly.assemblyDigest ||
+      request.provider !== assembly.provider.name || request.model !== assembly.provider.model ||
+      request.negotiatedMode !== assembly.provider.negotiation.mode || request.requestDigest !== digestOmitting(request, 'requestDigest') ||
+      material.turn.stopReason !== 'end' || material.turn.toolCalls.length || material.inputs.length || !material.text.utf8.trim())
+    throw new TypeError('result resource failure is not a usable final normal response');
+  const projection = await readCanonicalArtifact<NormalPromptProjectionV1>(artifacts, request.promptProjectionRef);
+  const frontier = await readCanonicalArtifact<RunFrontier>(artifacts, projection.frontierDigest);
+  if (!exactKeys(projection, ['schemaVersion', 'format', 'runId', 'basedOnRunRevision', 'frontierDigest', 'runSpecRef', 'assemblyRef',
+      'assemblyDigest', 'contextManifestRef', 'contextManifestDigest', 'messages', 'tools', 'projectionDigest']) ||
+      projection.schemaVersion !== 1 || projection.format !== 'cliq-normal-prompt-projection-v1' || projection.runId !== run.id || projection.runSpecRef !== run.specRef ||
+      projection.assemblyRef !== spec.assemblyRef || projection.assemblyDigest !== assembly.assemblyDigest ||
+      projection.projectionDigest !== request.promptProjectionDigest || projection.projectionDigest !== digestOmitting(projection, 'projectionDigest') ||
+      !Number.isSafeInteger(projection.basedOnRunRevision) || projection.basedOnRunRevision < 1 ||
+      !exactKeys(frontier, ['schemaVersion', 'kind', 'phase', 'turnId', 'contextItemSeq', 'cause']) ||
+      frontier.schemaVersion !== 1 || frontier.kind !== 'agent' || frontier.phase !== 'model_turn' || frontier.compactionPlanRef !== undefined ||
+      modelOperationId(run.id, frontier) !== completed.opId || run.frontierRef !== undefined && run.frontierRef !== projection.frontierDigest)
+    throw new TypeError('result resource failure substitutes its original normal frontier');
+  const context = decodeContextManifest(await readCanonicalArtifact(artifacts, projection.contextManifestRef));
+  if (context.projectionDigest !== projection.contextManifestDigest || context.throughItemSeq + 1 !== row.itemSeq || frontier.contextItemSeq !== context.throughItemSeq)
+    throw new TypeError('result resource failure has a foreign pre-model context');
+  validateContextItems(context, items.slice(0, -1));
+  const continuation = planModelContinuation({ request, turnRef: completed.resultRef, material, throughItemSeq: context.throughItemSeq,
+    createdAt: completed.timestamp, resolveToolInput: noToolInput });
+  requireEqual(continuation.items, [producer], 'result resource final continuation');
+  const post = structuredClone(context);
+  post.segments.push({ kind: 'raw', fromItemSeq: row.itemSeq, throughItemSeq: row.itemSeq,
+    items: [{ itemSeq: row.itemSeq, itemRef: row.payloadRef }] });
+  post.throughItemSeq++;
+  post.projectionDigest = digestOmitting(post, 'projectionDigest');
+  const contextRef = canonicalSha256(post), sourceCheckpointId = identityHash('cliq-continuation-checkpoint-v1', run.id, completed.resultRef, contextRef);
+  requireEqual(await readCanonicalArtifact(artifacts, contextRef), post, 'result resource original post-model context');
+  validateContextItems(post, items);
+  const checkpoint = readCheckpoint(driver, sourceCheckpointId);
+  if (checkpoint.runId !== run.id || checkpoint.reason !== 'auto' || checkpoint.contextManifestRef !== contextRef ||
+      checkpoint.runItemSeq !== row.itemSeq || checkpoint.journalSeq !== completed.seq || completed.seq !== journal.length ||
+      checkpoint.createdAt !== completed.timestamp || checkpoint.basedOnRunRevision < 1 || checkpoint.basedOnRunRevision >= run.revision ||
+      projection.basedOnRunRevision > checkpoint.basedOnRunRevision ||
+      latest.contextManifestRef !== contextRef || latest.workspaceStateRef !== checkpoint.workspaceStateRef ||
+      latest.runItemSeq !== row.itemSeq || latest.journalSeq !== completed.seq)
+    throw new TypeError('result resource failure has no original accounted model Checkpoint');
+  const limit = await readCandidateSourceLimit(artifacts, spec, checkpoint.workspaceStateRef);
+  return limit ? { origin: 'runtime', targetStatus: 'failed', reason: 'runtime_failed', runtimeSubtype: 'result_source_limit_exceeded',
+    sourceCheckpointId, workspaceStateRef: checkpoint.workspaceStateRef, producingItemId: producer.itemId,
+    modelOpId: completed.opId, attempt: completed.attempt, limitKind: limit.reason, observed: limit.observed, limit: limit.limit } : undefined;
+}

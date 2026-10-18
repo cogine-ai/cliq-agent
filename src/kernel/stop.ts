@@ -2,6 +2,12 @@ import type { ArtifactRef, BudgetUsage, RunStatus, RunTerminalReason } from './t
 
 type StopIdentity = { schemaVersion: 1; runId: string; createdAt: string };
 
+/** Independently reproduced from the original final-model Checkpoint and frozen projection. */
+export type ResultSourceLimitCause = {
+  sourceCheckpointId: string; workspaceStateRef: ArtifactRef; producingItemId: string; modelOpId: string; attempt: number;
+  limitKind: 'changed_paths' | 'changed_bytes'; observed: number; limit: number;
+};
+
 /** The token trigger retains its original closed shape. Byte exhaustion is a
  * separate, reproducible pre-dispatch fact, never an arbitrary caught error. */
 export type ContextWindowExhaustionCause = {
@@ -57,6 +63,7 @@ export type StopIntent = StopIdentity & (
   | ({ origin: 'runtime'; targetStatus: 'failed'; reason: 'runtime_failed' } & (
       | { runtimeSubtype: 'context_compaction_failed'; compactionPlanRef: ArtifactRef; modelOpId: string; attempt: number }
       | ({ runtimeSubtype: 'context_window_exhausted' } & ContextWindowExhaustionCause)
+      | ({ runtimeSubtype: 'result_source_limit_exceeded' } & ResultSourceLimitCause)
       | { runtimeSubtype: 'delivery_merge_conflict'; deliveryMergeConflictItemRef: ArtifactRef; conflictRef: ArtifactRef }
       | { runtimeSubtype: 'delivery_publication_failed'; deliveryPlanRef: ArtifactRef; sequence: 'forward' | 'abort'; operationId: string }
       | { runtimeSubtype: 'local_inference_unavailable'; activationCycleId: string; serviceId: string; frontierRef: ArtifactRef; failureDetailRef: ArtifactRef }
@@ -71,6 +78,7 @@ export type TerminalReasonDetail =
   | { kind: 'budget_exhausted' | 'cancelled'; stopIntentRef: ArtifactRef }
   | { kind: 'context_compaction_failed'; compactionPlanRef: ArtifactRef; modelOpId: string; attempt: number; evidenceRef: ArtifactRef }
   | ({ kind: 'context_window_exhausted'; evidenceRef: ArtifactRef } & ContextWindowExhaustionCause)
+  | ({ kind: 'result_source_limit_exceeded'; evidenceRef: ArtifactRef } & ResultSourceLimitCause)
   | { kind: 'dependency_source_integrity'; dependencyPlanRef: ArtifactRef; failingOpId: string; integrityEvidenceRef: ArtifactRef; integrityEvidenceDigest: string }
   | { kind: 'delivery_merge_conflict'; deliveryMergeConflictItemRef: ArtifactRef; conflictRef: ArtifactRef }
   | { kind: 'delivery_publication_failed'; deliveryPlanRef: ArtifactRef; sequence: 'forward' | 'abort'; operationId: string; evidenceRef: ArtifactRef }
