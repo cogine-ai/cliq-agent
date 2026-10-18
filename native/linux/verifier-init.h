@@ -2,6 +2,7 @@
 #define CLIQ_VERIFIER_INIT_H
 
 #include "verifier-protocol.h"
+#include "verifier-node.h"
 #include <linux/audit.h>
 #include <linux/capability.h>
 #include <linux/filter.h>
@@ -167,8 +168,29 @@ static bool verifier_mount_observed(const char *target, bool readonly, bool exec
     free(bytes); return valid && found;
 }
 
+static bool verifier_node_mount(const struct cliq_verifier_config *config) {
+    int usr = open("/usr", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    int directory = usr >= 0 ? openat(usr, "bin", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    bool valid = directory >= 0;
+    if (usr >= 0 && close(usr) != 0) valid = false;
+    int image = -1; struct stat held;
+    for (uint32_t i = 0; valid && i < config->file_count; i++) {
+        if (strcmp(config->files[i].path, "/usr/bin/node") == 0)
+            image = cliq_verifier_node_open(directory, config->files[i].byte_count, config->files[i].digest, &held);
+    }
+    char source[64];
+    int length = snprintf(source, sizeof(source), "/proc/self/fd/%d", image);
+    valid = valid && image >= 0 && length > 0 && (size_t)length < sizeof(source) &&
+        cliq_verifier_node_current(directory, image, &held) && mount(source, "/usr/bin/node", NULL, MS_BIND, NULL) == 0 &&
+        cliq_verifier_node_current(directory, image, &held);
+    if (image >= 0 && close(image) != 0) valid = false;
+    if (directory >= 0 && close(directory) != 0) valid = false;
+    return valid;
+}
+
 static bool verifier_confinement(const struct cliq_verifier_config *config) {
-    if (!verifier_mount_attributes("/", AT_RECURSIVE, MOUNT_ATTR_NOEXEC | MOUNT_ATTR_NOSUID, 0) ||
+    if (!verifier_node_mount(config) ||
+        !verifier_mount_attributes("/", AT_RECURSIVE, MOUNT_ATTR_NOEXEC | MOUNT_ATTR_NOSUID, 0) ||
         !verifier_mount_attributes("/", 0, MOUNT_ATTR_RDONLY | MOUNT_ATTR_NODEV, 0) ||
         !verifier_mount_attributes("/work", AT_RECURSIVE, MOUNT_ATTR_RDONLY | MOUNT_ATTR_NOEXEC | MOUNT_ATTR_NODEV, 0) ||
         !verifier_mount_attributes("/tmp", AT_RECURSIVE, MOUNT_ATTR_NOEXEC | MOUNT_ATTR_NODEV, 0) ||

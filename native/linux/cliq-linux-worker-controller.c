@@ -358,7 +358,13 @@ static void verifier_bubblewrap(int generation_source, int helper_source, int bw
     const char *directories[] = { "/usr", "/usr/bin", "/usr/lib", "/usr/lib/x86_64-linux-gnu", "/lib", "/lib/x86_64-linux-gnu", "/lib64" };
     for (size_t i = 0; i < sizeof(directories) / sizeof(directories[0]); i++) { ARG("--dir"); ARG(directories[i]); }
     for (uint32_t i = 0; i < config->file_count; i++) {
-        ARG("--perms"); ARG("0555"); ARG("--ro-bind-data"); ARG(descriptors[i + 1]); ARG(config->files[i].path);
+        /* Node spawns process.execPath. Unlike --ro-bind-data's unlinked
+         * backing inode, this fixed named copy survives that lookup. Trusted
+         * init verifies its complete bytes and self binds that same held copy
+         * before applying the unchanged executable-mount confinement. */
+        ARG("--perms"); ARG("0555");
+        ARG(strcmp(config->files[i].path, "/usr/bin/node") == 0 ? "--file" : "--ro-bind-data");
+        ARG(descriptors[i + 1]); ARG(config->files[i].path);
     }
     ARG("--ro-bind"); ARG(source); ARG("/work"); ARG("--proc"); ARG("/proc"); ARG("--dev"); ARG("/dev");
     ARG("--tmpfs"); ARG("/tmp"); ARG("--dir"); ARG("/home"); ARG("--tmpfs"); ARG("/home/cliq");
