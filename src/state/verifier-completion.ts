@@ -1,7 +1,7 @@
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting, identityHash } from '../kernel/identity.js';
 import type { ProcessContainmentDeathEvidenceV1 } from '../kernel/execution.js';
-import type { ContinuationItem, Run, RunAssemblyV1, RunFrontier, RunSpec } from '../kernel/types.js';
+import type { ContinuationItem, InvocationJournalEntry, Run, RunAssemblyV1, RunFrontier, RunSpec } from '../kernel/types.js';
 import type { ToolCheckpointProof } from '../kernel/tool-authorization.js';
 import type { VerificationReceipt, VerifierResultItem, VerifierStopEvidence, VerifierStopItem } from '../kernel/verifier.js';
 import { immutableSnapshot } from '../model/immutable.js';
@@ -73,16 +73,19 @@ export async function beginVerifierCompletion(driver: SqliteDriver, artifacts: A
     'SELECT item_id, item_seq, payload_ref, created_at FROM items WHERE run_id = ? ORDER BY item_seq')
     .all<{ item_id: string; item_seq: bigint; payload_ref: string; created_at: string }>(runId)
     .map(row => ({ itemId: row.item_id, itemSeq: Number(row.item_seq), payloadRef: row.payload_ref, createdAt: row.created_at }));
-  function validateSnapshot(connection: SqliteConnection, actual: Run) {
+  function validateSnapshotWithJournal(connection: SqliteConnection, actual: Run, expectedJournal: readonly InvocationJournalEntry[]) {
     assertActiveStateOwner(connection, owner);
     if (canonicalSha256(stable(actual)) !== canonicalSha256(stable(run)) || actual.revision < checkedRun.revision ||
         actual.updatedAt < checkedRun.updatedAt || checkedRun.cancelRequested && !actual.cancelRequested ||
         actual.stopIntentRef !== checkedRun.stopIntentRef ||
         canonicalSha256(readCheckpoint(connection, run.latestCheckpointId)) !== canonicalSha256(selected.latestCheckpoint) ||
-        canonicalSha256(readInvocationJournal(connection, runId)) !== canonicalSha256(selected.journal) ||
+        canonicalSha256(readInvocationJournal(connection, runId)) !== canonicalSha256(expectedJournal) ||
         canonicalSha256(itemIdentities(connection)) !== canonicalSha256(selected.items.map(({ itemId, itemSeq, payloadRef, createdAt }) =>
           ({ itemId, itemSeq, payloadRef, createdAt }))))
       throw new KernelStorageError('REVISION_CONFLICT', 'verifier original result or checked StopIntent cut changed');
+  }
+  function validateSnapshot(connection: SqliteConnection, actual: Run) {
+    validateSnapshotWithJournal(connection, actual, selected.journal);
   }
   async function checkCurrent(expected: number) {
     const actual = readRun(driver, runId);
@@ -252,7 +255,9 @@ export async function beginVerifierCompletion(driver: SqliteDriver, artifacts: A
             return { get metadata() { return [...outputMetadata!, ...retirementMetadata!, ...(integrityMetadata ? [integrityMetadata] : []),
               receiptMetadata ?? stoppedMetadata!, ...plan.metadata, ...seal!.metadata]; },
               commit(connection, actual, journal, committedAt) {
-                validateSnapshot(connection, actual);
+                // The settlement has already appended this exact terminal row
+                // after validating the original cut in the same transaction.
+                validateSnapshotWithJournal(connection, actual, [...selected.journal, journal]);
                 if (fixed.settledAt < native.endedAt) throw new TypeError('verifier settlement precedes its original native observation');
                 seal!.commit(connection, actual, committedAt); plan.commit(connection, actual, journal.seq, committedAt);
               } };

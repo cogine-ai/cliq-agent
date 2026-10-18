@@ -65,6 +65,10 @@ if (process.platform === 'linux') test('signed installed endpoint read works wit
     assert(observer);
     assert.throws(() => observer.currentUser(), { code: 'ARTIFACT_MISMATCH' });
     await assert.rejects(observer.inspect('cliq-not-this-selection.service'), { code: 'ARTIFACT_MISMATCH' });
+    // The ordinary manager observer must not acquire credential authority.
+    // The following real endpoint read does acquire its separate native scope,
+    // which legitimately creates the private credential directory and lock.
+    await assert.rejects(lstat(path.join(stateRoot, 'credentials')), { code: 'ENOENT' });
     const response = spawnSync(path.join(stateRoot, 'runtime/bootstrap'), ['--bootstrap-endpoint'], {
       input: JSON.stringify({ schemaVersion: 1, kind: 'read', endpointRegistrationId: 'missing-endpoint' }),
       encoding: 'utf8', timeout: 60000, killSignal: 'SIGKILL', maxBuffer: 65536,
@@ -75,7 +79,10 @@ if (process.platform === 'linux') test('signed installed endpoint read works wit
     assert.deepEqual(JSON.parse(response.stdout), { schemaVersion: 1, record: null });
     assert.deepEqual(await readdir(path.join(stateRoot, KERNEL_CAS_DIRECTORY)), casBefore);
     assert.deepEqual(await casDigests(), bytesBefore);
-    for (const relative of [KERNEL_DATABASE_FILENAME, 'credentials', 'runtime/state-owner.lock', 'runtime/keeper.ready', 'runtime/control-v1.sock'])
+    const credentials = await lstat(path.join(stateRoot, 'credentials'));
+    assert(credentials.isDirectory() && !credentials.isSymbolicLink());
+    assert.equal(credentials.uid, process.geteuid!()); assert.equal(credentials.mode & 0o7777, 0o700);
+    for (const relative of [KERNEL_DATABASE_FILENAME, 'runtime/state-owner.lock', 'runtime/keeper.ready', 'runtime/control-v1.sock'])
       await assert.rejects(lstat(path.join(stateRoot, relative)), { code: 'ENOENT' });
   } finally { await rm(fixture, { recursive: true, force: true }); }
 });
