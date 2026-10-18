@@ -4,6 +4,8 @@
 # containment-death authority. --secrets observes credential-platform and SQLite
 # path prerequisites without qualifying production credential authority.
 # --credentials exercises one actual installed enrollment/read journey, not I1.
+# --credentials-model-input independently retains every model-input refusal,
+# actual rotate/revoke/cleanup and complete secret scan, not lifecycle or I1.
 # Invoke with sudo, an absolute existing Node path
 # and an optional new output directory. Do not run on a host
 # without an independently disposable test UID and actual systemd user manager.
@@ -13,12 +15,14 @@ export LC_ALL=C
 
 probe_campaign_kind=diagnostic
 probe_run_driver_mode=--campaign
+probe_credential_driver_mode=--campaign
 probe_finalizer_shutdown=0
 case ${1:-} in
   --installed) probe_campaign_kind=installed; shift ;;
   --installed-retirement-refusal) probe_campaign_kind=retirement; shift ;;
   --secrets) probe_campaign_kind=secrets; shift ;;
   --credentials) probe_campaign_kind=credentials; shift ;;
+  --credentials-model-input) probe_campaign_kind=credentials; probe_credential_driver_mode=--model-input-campaign; shift ;;
   --credential-finalizer-shutdown) probe_campaign_kind=credentials; probe_finalizer_shutdown=1; shift ;;
   --run-journey) probe_campaign_kind=run-journey; shift ;;
   --run-failure-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--failure-campaign; shift ;;
@@ -33,9 +37,9 @@ case ${1:-} in
   --run-shutdown-pending-model-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--shutdown-pending-model-campaign; shift ;;
   --run-shutdown-startup-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--shutdown-startup-campaign; shift ;;
 esac
-readonly probe_campaign_kind probe_run_driver_mode probe_finalizer_shutdown
+readonly probe_campaign_kind probe_run_driver_mode probe_credential_driver_mode probe_finalizer_shutdown
 if [[ $(id -u) != 0 || $# -lt 1 || $# -gt 2 ]]; then
-  printf 'usage: sudo bash %s [--installed|--installed-retirement-refusal|--secrets|--credentials|--credential-finalizer-shutdown|--run-journey|--run-failure-journey|--run-retry-journey|--run-authority-failure-journey|--run-storage-failure-journey|--run-request-resource-journey|--run-shutdown-admission-journey|--run-shutdown-session-journey|--run-shutdown-preparation-journey|--run-shutdown-received-tool-journey|--run-shutdown-pending-model-journey|--run-shutdown-startup-journey] ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' "$0" >&2
+  printf 'usage: sudo bash %s [--installed|--installed-retirement-refusal|--secrets|--credentials|--credentials-model-input|--credential-finalizer-shutdown|--run-journey|--run-failure-journey|--run-retry-journey|--run-authority-failure-journey|--run-storage-failure-journey|--run-request-resource-journey|--run-shutdown-admission-journey|--run-shutdown-session-journey|--run-shutdown-preparation-journey|--run-shutdown-received-tool-journey|--run-shutdown-pending-model-journey|--run-shutdown-startup-journey] ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' "$0" >&2
   exit 2
 fi
 readonly probe_node=$1
@@ -738,7 +742,7 @@ elif [[ "$probe_campaign_kind" = retirement ]]; then
 elif [[ "$probe_campaign_kind" = credentials ]]; then
   # No returned production unit name becomes privileged cleanup authority.
   # The immutable ledger's exact fresh UID/manager owns the complete retirement.
-  "$probe_node" --import "$probe_installed_loader" "$probe_credential_driver" --campaign "$probe_ledger"
+  "$probe_node" --import "$probe_installed_loader" "$probe_credential_driver" "$probe_credential_driver_mode" "$probe_ledger"
 elif [[ "$probe_campaign_kind" = run-journey ]]; then
   # Fixed driver, exact fresh UID and the same frozen ledger/baseline/cleanup.
   # No arbitrary driver, production pause flag or manager-policy override.

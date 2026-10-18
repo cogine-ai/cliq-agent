@@ -47,3 +47,21 @@ test('Linux qualification cleanup kills and removes the whole delegated cgroup t
     /printf '1\\n' \| sudo tee "\$CLIQ_CGROUP_PARENT\/cgroup\.kill"[\s\S]*grep -q '\^populated 0\$' "\$CLIQ_CGROUP_PARENT\/cgroup\.events"[\s\S]*while IFS= read -r -d '' child; do\n\s+sudo rmdir "\$child"\n\s+done < <\(find "\$CLIQ_CGROUP_PARENT" -mindepth 1 -depth -type d -print0\)\n\s+sudo rmdir "\$CLIQ_CGROUP_PARENT"/
   );
 });
+
+test('credential lifecycle and model-input coverage require independent unchanged-budget Linux jobs', async () => {
+  const workflow = await readFile(workflowUrl, 'utf8');
+  for (const [jobId, mode, artifact] of [
+    ['linux-credential-authority', '--credentials', 'credential-journey'],
+    ['linux-credential-model-input', '--credentials-model-input', 'credential-model-input'],
+  ]) {
+    const job = workflow.match(new RegExp(`\\n  ${jobId}:\\n[\\s\\S]*?(?=\\n  [a-z][a-z0-9-]*:\\n|$)`))?.[0];
+    assert(job, `missing independent required coverage job ${jobId}`);
+    assert.match(job, /runs-on: ubuntu-22\.04\n/);
+    assert.match(job, /timeout-minutes: 20\n/);
+    assert.doesNotMatch(job, /(?:continue-on-error|needs):/);
+    assert.match(job, new RegExp(`qualify-systemd-user\\.sh ${mode} "\\$probe_node"`));
+    assert.match(job, new RegExp(`name: ${artifact}-\\$\\{\\{ github\\.run_id \\}\\}-\\$\\{\\{ github\\.run_attempt \\}\\}`));
+    assert.match(job, /if: always\(\)[\s\S]*uses: actions\/upload-artifact@v4/);
+    assert.match(job, /retention-days: 7/);
+  }
+});

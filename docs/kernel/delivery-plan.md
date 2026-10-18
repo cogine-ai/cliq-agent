@@ -124,14 +124,19 @@ joined CAS failures and rolled-back SQL commits. It shares the existing
 received-completion lifecycle with tools, including two-phase Store shutdown;
 it does not introduce another recovery owner or redispatch permission. Component
 regressions cover same-owner retry, monotonic cancellation/deadline upgrades,
-concurrent joining, exact replay and rejected proof substitution. Result-limit
-failure still needs its own closed, reproducible StopIntent evidence rather
-than context-exhaustion truth; an unsupported result fails closed, not as a
-successful delivery.
+concurrent joining, exact replay and rejected proof substitution. A final
+source exceeding its frozen changed-path or changed-byte limit now records a
+closed `result_source_limit_exceeded` StopIntent. Its evidence is independently
+rederived from the original completed final model, prompt projection, context,
+Checkpoint and complete source measurement; it is not context exhaustion.
+The same completion owner retains the already-accounted workspace and performs
+only the nonproductive Stop checkpoint, then the existing worker-free failed
+terminal transaction. It publishes neither a candidate nor a successful result.
 
 The native campaign now exercises real edited workspaces, final workers,
 D0/snapshot/D1 and candidate-publication failure followed by resume, cancel or
-Store close/reopen. It also requires real storage delay to exhaust three D1
+Store close/reopen, plus changed-path and changed-byte resource failures. It
+also requires real storage delay to exhaust three D1
 observations, including a pending D1 publication retried after ENOSPC without
 resetting that budget. Offline final-model data in this campaign is explicitly
 not provider qualification. All new native assertions still need Linux execution.
@@ -141,6 +146,12 @@ still owns its worker, rather than depend on a completed final turn holding the
 worker forever. Neither UNKNOWN cancellation nor terminal cancellation refusal
 qualifies the unobserved received-before-candidate cancellation cut.
 
+The installed normal journey additionally requires two independent final
+source-limit Runs, exact original final-turn/Checkpoint evidence, actual private
+edit and worker retirement, unique Session outcomes, and unchanged replay after
+Supervisor restart. These new physical cases are not qualified until their
+Linux campaigns complete.
+
 The installed final-turn handoff must retain one original completion owner. If
 a validated monotonic Stop wins, its same prepared seal may commit only a
 nonproductive Checkpoint at the original snapshot's Checkpoint id, with the
@@ -148,7 +159,7 @@ original context/items/Journal/frontier and already-accounted workspace. It
 must not append a candidate, start verification or publish a result. Persist
 deadline Stop before taking that branch; preserve the original freshness
 budget, and then use the existing worker-free terminal stop. This narrowly
-scoped Stop-only revalidation must be clarified in the RFC alongside its
+scoped Stop-only revalidation is specified in the RFC alongside its
 implementation. Ordinary SIGTERM without Stop is not this branch: finish the
 eligible original candidate or leave its uncommitted cut for successor recovery.
 
@@ -181,9 +192,11 @@ the initial one-item raw segment forever.
 Local verification of this development batch: `npm run build` passed; the
 candidate/result/publication component campaign passed all 42 tests and the
 existing tool/freshness/owner scheduling regressions passed all 27 tests. The
-frozen production implementation's full `npm test` run passed all 2,152 tests
-in 686,267 ms, with no failures, skips, cancellations or todos. Both modified
-Linux campaign entrypoints pass strict TypeScript including library checks
+first frozen production implementation's full `npm test` run passed all 2,152
+tests. After final-source resource failure and credential workload partitioning,
+a fresh `npm run build` and full `npm test` passed all 2,163 tests in 753,482 ms,
+with no failures, skips, cancellations or todos. All three modified Linux
+campaign entrypoints pass strict TypeScript including library checks
 (only the existing `postject` package's missing declaration is supplied in
 memory). Design-contract regressions, full drift check, native source guard
 and existing workflow/client guards pass.
@@ -199,6 +212,13 @@ allowlisted JSON reports to their run/attempt/artifact digests; raw logs,
 credential material and mixed state bundles were not retained. This old run
 does not qualify the newly integrated producer or revised campaigns. The work
 branch remains on the existing free workflow, with no foundation-only PR.
+
+To keep the unchanged 20-minute free-runner limit, the independent negative
+model-credential input cases now run in their own real installed job. They keep
+every original enrollment/rotation refusal, platform readback, service identity,
+cleanup, join and bounded secret-scan assertion. The authority-lifecycle job
+retains the original remaining cases; both jobs must pass. This is test workload
+partitioning, not a production performance fix or a weaker qualification gate.
 
 One authorized, memory-only manual request to the official DeepSeek endpoint
 confirmed that `deepseek-flash` is listed and returns a normal response with

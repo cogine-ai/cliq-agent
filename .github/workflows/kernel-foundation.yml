@@ -73,6 +73,40 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+  linux-credential-model-input:
+    name: Linux installed model credential input diagnostics
+    # Independently required with the lifecycle campaign. The exact negative
+    # cases retain full real installation, platform checks, joins and scans.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+        id: build
+      - name: Install actual platform and worker build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev musl-tools bubblewrap strace
+      - name: Exercise signed model input refusals with complete independent retirement
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          probe_node=$(realpath "$(command -v node)")
+          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --credentials-model-input "$probe_node" "$RUNNER_TEMP/cliq-credential-model-input"
+      - name: Retain the bounded model-input credential feedback
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: credential-model-input-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cliq-credential-model-input/*.json
+          if-no-files-found: warn
+          retention-days: 7
+
   linux-installed-finalizer-shutdown:
     name: Linux installed original credential finalizer ordinary SIGTERM
     # The owned external service stays on the actual disposable-user bus for
