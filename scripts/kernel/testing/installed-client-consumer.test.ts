@@ -2,7 +2,7 @@
 // an installed Supervisor or qualify native authentication/execution.
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { openInstalledClientConsumer } from './installed-client-consumer.js';
+import { InstalledClientConsumerDeadlineError, InstalledClientDriverError, openInstalledClientConsumer } from './installed-client-consumer.js';
 
 const protocol = `import {createInterface} from 'node:readline';
 const emit=v=>process.stdout.write(JSON.stringify(v)+'\\n');
@@ -59,8 +59,29 @@ test('the genuine-driver consumer rejects overlapping sends and makes a malforme
 
 test('the genuine-driver consumer never retries after its original request deadline', async () => {
   const { client, counts } = await fixture();
-  await assert.rejects(client.send({ protocolVersion: 1, method: 'run.submit', delay: 40 }, 5));
+  await assert.rejects(client.send({ protocolVersion: 1, method: 'run.submit', delay: 40 }, 5), error => {
+    assert(error instanceof InstalledClientConsumerDeadlineError);
+    assert.deepEqual(Object.keys(error.diagnostic).sort(), ['elapsedMs', 'frames', 'kind', 'originalDeadlineMs', 'stage']);
+    assert.equal(error.diagnostic.kind, 'installed_client_deadline'); assert.equal(error.diagnostic.stage, 'request');
+    assert.equal(error.diagnostic.originalDeadlineMs, 5); assert.equal(error.diagnostic.frames, 1);
+    assert(Number.isSafeInteger(error.diagnostic.elapsedMs) && error.diagnostic.elapsedMs >= 0);
+    return true;
+  });
   await assert.rejects(client.send({ protocolVersion: 1, method: 'run.submit' }));
   await assert.rejects(client.close());
   assert.deepEqual(counts(), { opened: 2, closed: 2, joined: 0 });
+});
+
+test('the genuine-driver consumer retains only the fixed driver failure stage and still joins its child', async () => {
+  let closed = 0, joined = false;
+  await assert.rejects(openInstalledClientConsumer({ executable: process.execPath,
+    args: ['-e', "process.stderr.write('installed control client driver failed phase=selection\\n');process.exitCode=1"],
+    cwd: process.cwd(), env: process.env,
+    openScan: () => ({ scan() {}, close() { closed++; } }), onJoined() { joined = true; }
+  }), error => {
+    assert(error instanceof InstalledClientDriverError);
+    assert.deepEqual(error.diagnostic, { kind: 'installed_client_driver', stage: 'selection' });
+    assert(!error.message.includes('apiKey')); return true;
+  });
+  assert.equal(closed, 2); assert.equal(joined, false);
 });

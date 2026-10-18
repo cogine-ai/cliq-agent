@@ -15,7 +15,7 @@ test('installed client driver refuses an unowned composition without reflecting 
   assert.equal(result.signal, null);
   assert.equal(result.status, 1);
   assert.equal(result.stdout, '');
-  assert.equal(result.stderr, 'installed control client driver failed\n');
+  assert.equal(result.stderr, `installed control client driver failed phase=${process.platform === 'linux' && process.arch === 'x64' ? 'composition' : 'platform'}\n`);
 });
 
 test('installed client driver bundles as one ordinary Node consumer with no external application loader', async () => {

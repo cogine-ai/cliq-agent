@@ -11,7 +11,8 @@ import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
-import { openInstalledClientConsumer } from './testing/installed-client-consumer.js';
+import { InstalledClientConsumerDeadlineError, InstalledClientDriverError, openInstalledClientConsumer } from './testing/installed-client-consumer.js';
+import { fixtureCommandJoinDiagnostic } from './testing/fixture-command-diagnostic.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../../src/kernel/canonical.js';
 import type { AuthorizationGrantSummaryV1, VerifierIdentityCreateRequest } from '../../src/kernel/authorization.js';
 import { decodeCredentialAuthorityOperation, decodeEndpointAuthorityOperation, type EndpointRegistrationV1 } from '../../src/kernel/credential-authority.js';
@@ -122,10 +123,13 @@ async function campaign(filename: string): Promise<void> {
   const prefix = ['--user', ledger.username, '--', '/usr/bin/env', '-i', 'HOME=' + ledger.home, 'PATH=/usr/bin:/bin', 'LANG=C', 'LC_ALL=C',
     'XDG_RUNTIME_DIR=/run/user/' + ledger.uid, 'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/' + ledger.uid + '/bus'];
   const command = (executable: string, args: string[], input?: Buffer, timeout = 30000) => {
+    const started = performance.now();
     const result = spawnSync('/usr/sbin/runuser', [...prefix, executable, ...args], { env: environment, cwd: ledger.home,
       timeout, killSignal: 'SIGKILL', maxBuffer: 2 * 1024 * 1024, input });
     assert(Buffer.isBuffer(result.stdout) && Buffer.isBuffer(result.stderr));
     scanBytes(result.stdout); scanBytes(result.stderr);
+    const failure = fixtureCommandJoinDiagnostic(result, timeout, started);
+    if (failure) report.commandJoinFailure ??= failure;
     assert.equal(result.error, undefined, 'actual fixture command must join'); assert.equal(result.signal, null);
     return { status: result.status, stdout: result.stdout.toString('utf8'), stderr: result.stderr.toString('utf8') };
   };
@@ -764,16 +768,18 @@ async function campaign(filename: string): Promise<void> {
       report.qualified = false;
       const frames: Array<{ file: string; line: number; column: number }> = [];
       const failureKinds: Array<{ kind: 'assertion' } | { kind: 'sqlite'; primaryCode: number } |
-        { kind: 'installed_verifier_outcome'; stage: InstalledVerifierOutcomeError['diagnosticStage'] }> = [];
+        { kind: 'installed_verifier_outcome'; stage: InstalledVerifierOutcomeError['diagnosticStage'] } |
+        InstalledClientConsumerDeadlineError['diagnostic'] | InstalledClientDriverError['diagnostic']> = [];
       const errors: unknown[] = [primary];
       for (let index = 0; index < 8 && errors.length; index++) {
         const error = errors.shift(); if (!(error instanceof Error)) continue;
         const diagnostic = error as Error & { code?: unknown; errcode?: unknown };
-        if (error instanceof InstalledVerifierOutcomeError) failureKinds.push({ kind: 'installed_verifier_outcome', stage: error.diagnosticStage });
+        if (error instanceof InstalledClientConsumerDeadlineError || error instanceof InstalledClientDriverError) failureKinds.push(error.diagnostic);
+        else if (error instanceof InstalledVerifierOutcomeError) failureKinds.push({ kind: 'installed_verifier_outcome', stage: error.diagnosticStage });
         else if (diagnostic.code === 'ERR_ASSERTION') failureKinds.push({ kind: 'assertion' });
         else if (diagnostic.code === 'ERR_SQLITE_ERROR' && typeof diagnostic.errcode === 'number' && Number.isSafeInteger(diagnostic.errcode) &&
             diagnostic.errcode >= 0 && diagnostic.errcode <= 65535) failureKinds.push({ kind: 'sqlite', primaryCode: diagnostic.errcode & 0xff });
-        for (const match of (error.stack ?? '').matchAll(/\b(qualify-installed-verifier-journey|installed-verifier-result|installed-guest-package|installed-supervisor-package|installed-model-package|installed-read-control)\.ts:([1-9][0-9]{0,6}):([1-9][0-9]{0,6})/gu)) {
+        for (const match of (error.stack ?? '').matchAll(/\b(qualify-installed-verifier-journey|installed-verifier-result|installed-guest-package|installed-supervisor-package|installed-model-package|installed-read-control|installed-client-consumer)\.ts:([1-9][0-9]{0,6}):([1-9][0-9]{0,6})/gu)) {
           if (frames.length < 8) frames.push({ file: match[1]! + '.ts', line: Number(match[2]), column: Number(match[3]) });
         }
         if (error instanceof AggregateError) errors.unshift(...error.errors.slice(0, 4));

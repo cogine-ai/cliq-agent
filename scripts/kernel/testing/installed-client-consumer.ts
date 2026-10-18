@@ -10,12 +10,33 @@ type Response = { protocolVersion: 1; ok: boolean; method?: string;
   result?: Record<string, any>; error?: Record<string, unknown> };
 type Input = { executable: string; args: readonly string[]; cwd: string; env: NodeJS.ProcessEnv;
   openScan(): Scan; onJoined(): void; timeout?: number };
+export type InstalledClientDriverStage = 'platform' | 'composition' | 'selection' | 'authentication' | 'request' | 'output' | 'retirement';
 
-async function bounded<T>(operation: Promise<T>, milliseconds: number): Promise<T> {
+export class InstalledClientDriverError extends Error {
+  readonly diagnostic: Readonly<{ kind: 'installed_client_driver'; stage: InstalledClientDriverStage }>;
+  constructor(stage: InstalledClientDriverStage) {
+    super('original installed client driver failed');
+    this.diagnostic = Object.freeze({ kind: 'installed_client_driver', stage });
+  }
+}
+
+/** Source-owned bounded timing only; never input, peer diagnostics or authority. */
+export class InstalledClientConsumerDeadlineError extends Error {
+  readonly diagnostic: Readonly<{ kind: 'installed_client_deadline'; stage: 'ready' | 'request' | 'close';
+    originalDeadlineMs: number; elapsedMs: number; frames: number }>;
+  constructor(stage: 'ready' | 'request' | 'close', originalDeadlineMs: number, started: number, frames: number) {
+    super('original installed client consumer deadline expired');
+    this.diagnostic = Object.freeze({ kind: 'installed_client_deadline', stage, originalDeadlineMs,
+      elapsedMs: Math.floor(performance.now() - started), frames });
+  }
+}
+
+async function bounded<T>(operation: Promise<T>, milliseconds: number,
+  stage: 'ready' | 'request' | 'close', frames: () => number,
+  originalDeadlineMs = milliseconds, started = performance.now()): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const expired = new Error('original installed client consumer deadline expired');
   try { return await Promise.race([operation, new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(expired), milliseconds);
+    timer = setTimeout(() => reject(new InstalledClientConsumerDeadlineError(stage, originalDeadlineMs, started, frames())), milliseconds);
   })]); } finally { clearTimeout(timer); }
 }
 
@@ -29,6 +50,7 @@ export async function openInstalledClientConsumer(input: Input) {
   try { child = spawn(input.executable, [...input.args], { cwd: input.cwd, env: input.env, stdio: ['pipe', 'pipe', 'pipe'] }); }
   catch (error) { outScan.close(); errorScan.close(); throw error; }
   let output = Buffer.alloc(0), errorBytes = 0, failure: unknown, frames = 0;
+  let errorTail = '', driverStage: InstalledClientDriverStage | undefined;
   let pending: { method: string; resolve(value: Response): void; reject(error: unknown): void } | undefined;
   let readyResolve!: (value: Response) => void, readyReject!: (error: unknown) => void;
   const ready = new Promise<Response>((resolve, reject) => { readyResolve = resolve; readyReject = reject; });
@@ -56,25 +78,33 @@ export async function openInstalledClientConsumer(input: Input) {
     } catch (error) { refuse(error); }
   });
   child.stderr.on('data', (bytes: Buffer) => {
-    try { errorScan.scan(bytes); errorBytes += bytes.length; assert(errorBytes <= 65536); }
+    try {
+      errorScan.scan(bytes); errorBytes += bytes.length; assert(errorBytes <= 65536);
+      // Retain no arbitrary stderr: only an exact source-owned fixed marker.
+      errorTail = (errorTail + bytes.toString('utf8')).slice(-256);
+      const match = /(?:^|\n)installed control client driver failed phase=(platform|composition|selection|authentication|request|output|retirement)\n$/u.exec(errorTail);
+      if (match) driverStage = match[1] as InstalledClientDriverStage;
+    }
     catch (error) { refuse(error); }
   });
   child.once('error', refuse); child.stdin.on('error', refuse); child.stdout.on('error', refuse); child.stderr.on('error', refuse);
   const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolve => child.once('close', (code, signal) => {
     try { outScan.close(); } catch (error) { refuse(error); }
     try { errorScan.close(); } catch (error) { refuse(error); }
-    if (frames === 0 || pending) refuse(new Error('original installed client driver closed before its response'));
+    errorTail = '';
+    if (frames === 0 || pending) refuse(driverStage ? new InstalledClientDriverError(driverStage) :
+      new Error('original installed client driver closed before its response'));
     resolve({ code, signal });
   }));
   let closing: Promise<void> | undefined;
   const close = () => closing ??= (async () => {
     child.stdin.end(); let exit: Awaited<typeof closed>;
-    try { exit = await bounded(closed, 10000); }
+    try { exit = await bounded(closed, 10000, 'close', () => frames); }
     catch (error) {
       child.kill('SIGKILL');
       // The outer disposable-UID coordinator still owns uncertain descendants.
       // A wrapper exit without original inherited pipe join is never success.
-      try { await bounded(closed, 10000); }
+      try { await bounded(closed, 10000, 'close', () => frames); }
       catch (joinError) { throw new AggregateError([error, joinError], 'installed client consumer did not retire'); }
       throw error;
     }
@@ -89,14 +119,14 @@ export async function openInstalledClientConsumer(input: Input) {
     const bytes = canonicalJsonBytes(value); assert(bytes.length > 0 && bytes.length <= 1048576);
     const reply = new Promise<Response>((resolve, reject) => { pending = { method: value.method as string, resolve, reject }; });
     child.stdin.write(Buffer.concat([bytes, Buffer.from('\n')]));
-    try { const response = await bounded(reply, milliseconds); assert(performance.now() < by); return response; }
+    try { const response = await bounded(reply, milliseconds, 'request', () => frames); assert(performance.now() < by); return response; }
     catch (error) { refuse(error); throw error; }
   };
   try {
     const remaining = by - performance.now(); assert(remaining > 0);
     const greeting = await bounded(Promise.race([ready, closed.then(() => {
       throw new Error('original installed client driver closed before readiness');
-    })]), Math.ceil(remaining));
+    })]), Math.ceil(remaining), 'ready', () => frames, timeout, by - timeout);
     assert(performance.now() < by);
     return Object.freeze({ send, close, hello: greeting.result!, supervisorInstanceId: greeting.result!.supervisorInstanceId as string });
   } catch (error) { refuse(error); try { await close(); } catch {} throw error; }

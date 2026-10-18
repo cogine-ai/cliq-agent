@@ -28,7 +28,7 @@ import { assertInstalledWorkerLeaseRenewed, inspectInstalledWorkerIdentity, insp
   inspectInstalledWorkerRetirement, type InstalledWorkerIdentityInspection } from './testing/installed-worker-lease.js';
 import { inspectInstalledOwnerHistory } from './testing/installed-read-control.js';
 import { createInstalledRunObserver } from './testing/installed-run-observer.js';
-import { openInstalledClientConsumer } from './testing/installed-client-consumer.js';
+import { InstalledClientConsumerDeadlineError, InstalledClientDriverError, openInstalledClientConsumer } from './testing/installed-client-consumer.js';
 import { qualifyInstalledOwnerLinks } from './testing/installed-owner-history.js';
 import { projectInstalledRunProgress, projectInstalledServiceExit, projectInstalledSupervisorStatus } from '../../src/sandbox/testing/installed-run-progress.js';
 import { decodeFinalCandidateItem, decodeRunResult, decodeVerificationClosure, decodeVerifierPlan, decodeWorkspaceDiff } from '../../src/state/result-artifacts.js';
@@ -4653,15 +4653,17 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
     if (primary) {
       report.qualified = false;
       const sourceFrames: Array<{ file: string; line: number; column: number }> = [];
-      const failureKinds: Array<{ kind: 'sqlite'; primaryCode: number } | { kind: 'assertion' }> = [];
+      const failureKinds: Array<{ kind: 'sqlite'; primaryCode: number } | { kind: 'assertion' } |
+        InstalledClientConsumerDeadlineError['diagnostic'] | InstalledClientDriverError['diagnostic']> = [];
       const pending = [primary];
       for (let visited = 0; pending.length && visited < 8 && sourceFrames.length < 8; visited++) {
         const error = pending.shift(); if (!(error instanceof Error)) continue;
         const diagnostic = error as Error & { code?: unknown; errcode?: unknown };
-        if (diagnostic.code === 'ERR_SQLITE_ERROR' && typeof diagnostic.errcode === 'number' && Number.isSafeInteger(diagnostic.errcode) &&
+        if (error instanceof InstalledClientConsumerDeadlineError || error instanceof InstalledClientDriverError) failureKinds.push(error.diagnostic);
+        else if (diagnostic.code === 'ERR_SQLITE_ERROR' && typeof diagnostic.errcode === 'number' && Number.isSafeInteger(diagnostic.errcode) &&
             diagnostic.errcode >= 0 && diagnostic.errcode <= 65535) failureKinds.push({ kind: 'sqlite', primaryCode: diagnostic.errcode & 0xff });
         else if (diagnostic.code === 'ERR_ASSERTION') failureKinds.push({ kind: 'assertion' });
-        for (const match of (error.stack ?? '').matchAll(/\b(qualify-installed-run-journey|installed-supervisor-package|installed-model-package|installed-owner-history|installed-read-control)\.ts:([1-9][0-9]{0,6}):([1-9][0-9]{0,6})/gu)) {
+        for (const match of (error.stack ?? '').matchAll(/\b(qualify-installed-run-journey|installed-supervisor-package|installed-model-package|installed-owner-history|installed-read-control|installed-client-consumer)\.ts:([1-9][0-9]{0,6}):([1-9][0-9]{0,6})/gu)) {
           sourceFrames.push({ file: `${match[1]}.ts`, line: Number(match[2]), column: Number(match[3]) }); if (sourceFrames.length === 8) break;
         }
         if (error instanceof AggregateError) pending.unshift(...error.errors.slice(0, 4));

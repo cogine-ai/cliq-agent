@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,6 +8,7 @@ import { parseJsonStrict } from '../../src/kernel/json.js';
 import { qualifyGuestToolchainExtraction } from './testing/guest-toolchain-native.js';
 import { qualifyLinuxGuestVerifier } from './testing/guest-verifier-native.js';
 import { prepareSupervisorSeaCarrier } from './testing/supervisor-sea-builder.js';
+import { joinGuestExtractionChild } from './testing/guest-campaign-child.js';
 
 // The guest raw image is never mounted. CI's separately disposable ext4
 // StateRoot volume is a fixture, not a runtime guest-image loader/authority.
@@ -29,10 +30,10 @@ if (mode === '--prepare') {
     imageByteCount: metadata.guestImageByteCount, nodeDigest: metadata.node.digest,
     source: 'existing checksum-pinned actual SEA Node carrier, not host Node fallback', qualified: false }));
 } else {
-  assert.equal(mode, '--run'); assert.equal(arguments_.length, 1);
+  assert(mode === '--run' || mode === '--extract'); assert.equal(arguments_.length, 1);
   assert.notEqual(process.getuid!(), 0, 'the actual verifier campaign must exercise non-root delegation');
   const reportRoot = arguments_[0]!; assert.ok(path.isAbsolute(reportRoot));
-  await mkdir(reportRoot, { mode: 0o700 });
+  if (mode === '--run') await mkdir(reportRoot, { mode: 0o700 });
   const required = (name: string) => { const value = process.env[name]; assert.ok(value && path.isAbsolute(value), `missing absolute ${name}`); return value; };
   const input = { installationRoot: required('CLIQ_I1_INSTALLATION'), guestImageRoot: required('CLIQ_I1_GUEST_IMAGE'),
     cgroupParent: required('CLIQ_I1_CGROUP_PARENT'), stateVolume: required('CLIQ_I1_GUEST_STATE_VOLUME') };
@@ -41,18 +42,34 @@ if (mode === '--prepare') {
   const identity = { sourceRevision, node: process.version, platform: process.platform, architecture: process.arch };
   let phase = 'guest_extraction';
   try {
-    const extraction = await qualifyGuestToolchainExtraction(input);
-    await writeFile(path.join(reportRoot, 'guest-extractor-report.json'), JSON.stringify({ schemaVersion: 1,
-      format: 'cliq-real-guest-extractor-report-v1', ...identity, ...extraction }), { flag: 'wx', mode: 0o600 });
-    phase = 'guest_verifier';
-    const verifier = await qualifyLinuxGuestVerifier({ ...input, stateVolume: input.stateVolume });
-    const report = { schemaVersion: 1, format: 'cliq-real-guest-verifier-report-v1', ...identity, ...verifier };
-    await writeFile(path.join(reportRoot, 'guest-verifier-report.json'), JSON.stringify(report), { flag: 'wx', mode: 0o600 });
-    console.log(JSON.stringify({ phase: 'guest_campaign_complete', sourceRevision,
-      reportDigest: canonicalSha256(report), cases: verifier.reports.length, qualified: verifier.qualified,
-      scope: verifier.scope, unverifiedCuts: verifier.unverifiedCuts }));
+    if (mode === '--extract') {
+      const extraction = await qualifyGuestToolchainExtraction(input);
+      await writeFile(path.join(reportRoot, 'guest-extractor-report.json'), JSON.stringify({ schemaVersion: 1,
+        format: 'cliq-real-guest-extractor-report-v1', ...identity, ...extraction }), { flag: 'wx', mode: 0o600 });
+    } else {
+      // Keep the real native stages separate so closed /proc/self/fd/N load
+      // names are never reused for different addons in one campaign process.
+      const controller = new AbortController();
+      const stop = () => controller.abort();
+      process.once('SIGTERM', stop); process.once('SIGINT', stop);
+      try {
+        const child = spawn(process.execPath, [...process.execArgv, fileURLToPath(import.meta.url), '--extract', reportRoot],
+          { env: process.env, cwd: process.cwd(), stdio: 'inherit' });
+        await joinGuestExtractionChild(child, controller.signal);
+        assert(!controller.signal.aborted, 'original extractor stage was interrupted');
+      } finally { process.removeListener('SIGTERM', stop); process.removeListener('SIGINT', stop); }
+    }
+    if (mode === '--run') {
+      phase = 'guest_verifier';
+      const verifier = await qualifyLinuxGuestVerifier({ ...input, stateVolume: input.stateVolume });
+      const report = { schemaVersion: 1, format: 'cliq-real-guest-verifier-report-v1', ...identity, ...verifier };
+      await writeFile(path.join(reportRoot, 'guest-verifier-report.json'), JSON.stringify(report), { flag: 'wx', mode: 0o600 });
+      console.log(JSON.stringify({ phase: 'guest_campaign_complete', sourceRevision,
+        reportDigest: canonicalSha256(report), cases: verifier.reports.length, qualified: verifier.qualified,
+        scope: verifier.scope, unverifiedCuts: verifier.unverifiedCuts }));
+    }
   } catch (error) {
-    await writeFile(path.join(reportRoot, 'guest-campaign-failure.json'), JSON.stringify({ schemaVersion: 1,
+    if (mode === '--run') await writeFile(path.join(reportRoot, 'guest-campaign-failure.json'), JSON.stringify({ schemaVersion: 1,
       format: 'cliq-real-guest-campaign-failure-v1', ...identity, phase, qualified: false,
       source: 'fixed failure metadata only; no raw log, StateRoot, key or process proof is serialized' }), { flag: 'wx', mode: 0o600 });
     throw error;

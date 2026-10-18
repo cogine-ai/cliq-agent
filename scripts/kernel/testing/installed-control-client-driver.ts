@@ -13,6 +13,9 @@ import type { ReleaseTrustKey } from '../../../src/policy/runtime-authority.js';
 import { ResourceRetirementError } from '../../../src/state/errors.js';
 import { createInstalledRuntime, type HeldInstalledRuntime } from '../../../src/state/installed-runtime.js';
 import { openInstalledSupervisorClient, type InstalledSupervisorClient } from '../../../src/state/installed-control-client.js';
+import type { InstalledClientDriverStage } from './installed-client-consumer.js';
+
+let phase: InstalledClientDriverStage = 'platform';
 
 const sameFile = (left: BigIntStats, right: BigIntStats) =>
   (['dev', 'ino', 'mode', 'nlink', 'uid', 'gid', 'size', 'mtimeNs', 'ctimeNs'] as const).every(key => left[key] === right[key]);
@@ -97,6 +100,7 @@ async function main(): Promise<void> {
   assert.equal(process.platform, 'linux'); assert.equal(process.arch, 'x64');
   assert(process.geteuid!() > 0 && process.getegid!() > 0);
   const [filename, ...extra] = process.argv.slice(2); assert(filename && extra.length === 0);
+  phase = 'composition';
   const composition = await fixtureComposition(filename);
   let selected: HeldInstalledRuntime | undefined, client: InstalledSupervisorClient | undefined, failure: unknown;
   let stopping: Promise<void> | undefined, stopRequested = false;
@@ -106,22 +110,30 @@ async function main(): Promise<void> {
     if (client) { stopping ??= client.close(); void stopping.catch(() => {}); }
   };
   process.once('SIGTERM', stop); process.once('SIGINT', stop); process.stdout.on('error', stop);
+  let failedPhase: InstalledClientDriverStage | undefined;
   try {
+    phase = 'selection';
     selected = await createInstalledRuntime({ releaseKeys: composition.releaseKeys }).openSelected(composition.stateRoot);
     assert(!stopRequested, 'installed client driver is stopping');
+    phase = 'authentication';
     client = await openInstalledSupervisorClient(selected);
     assert(!stopRequested, 'installed client driver is stopping');
+    phase = 'output';
     await output({ protocolVersion: 1, ok: true, result: client.hello });
+    phase = 'request';
     for await (const bytes of requests()) {
+      phase = 'request';
       const request = decodeInstalledControlRequest(decodeControlFrame(bytes));
       assert(INSTALLED_CONTROL_FEATURES.includes(request.method as InstalledControlFeature), 'only connected installed methods may be sent');
       // The canonical table supplies the dynamic JSONL adapter; each generated
       // method and the common transport independently enforce its exact method.
-      await output(await Reflect.apply(client[request.method as InstalledControlFeature], client, [request]));
+      const response = await Reflect.apply(client[request.method as InstalledControlFeature], client, [request]);
+      phase = 'output'; await output(response); phase = 'request';
     }
     assert(!stopRequested, 'installed client driver stopped before EOF');
-  } catch (error) { failure = error; }
+  } catch (error) { failure = error; failedPhase = phase; }
   finally {
+    phase = 'retirement';
     try {
       // Never close the selected original images under an uncertain native
       // client. The nonzero process exit, not a claimed join, is the fallback.
@@ -132,11 +144,11 @@ async function main(): Promise<void> {
       process.removeListener('SIGTERM', stop); process.removeListener('SIGINT', stop); process.stdout.removeListener('error', stop);
     }
   }
-  if (failure !== undefined) throw failure;
+  if (failure !== undefined) { phase = failedPhase!; throw failure; }
   assert(!stopRequested, 'installed client driver stopped before process join');
 }
 try { await main(); }
 catch {
   // No user input, provider bytes, remote diagnostic, key or arbitrary cause.
-  process.stderr.write('installed control client driver failed\n'); process.exitCode = 1;
+  process.stderr.write(`installed control client driver failed phase=${phase}\n`); process.exitCode = 1;
 }

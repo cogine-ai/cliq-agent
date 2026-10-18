@@ -9,7 +9,7 @@ const verifier = readFileSync(new URL('../qualify-installed-verifier-journey.ts'
 const matches = (text, pattern) => assert(pattern.test(text), 'fixed genuine installed consumer wiring missing: ' + pattern.source);
 
 test('the complete ordinary installed journey sends initial admission and terminal delivery through the genuine client', () => {
-  matches(journey, /import \{ openInstalledClientConsumer \} from '\.\/testing\/installed-client-consumer\.js'/u);
+  matches(journey, /import \{ InstalledClientConsumerDeadlineError, InstalledClientDriverError, openInstalledClientConsumer \} from '\.\/testing\/installed-client-consumer\.js'/u);
   matches(journey, /const sessionReply = mode === '--campaign' \? await sendGenuine\(sessionRequest\)/u);
   matches(journey, /const submitReply = mode === '--campaign' \? await sendGenuine\(submit\)/u);
   matches(journey, /const events = accepted\(await sendGenuine\(\{ protocolVersion: 1, method: 'run\.attach'/u);

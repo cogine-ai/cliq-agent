@@ -9,6 +9,10 @@ import path from 'node:path';
 import { test } from 'node:test';
 import vm from 'node:vm';
 import ts from 'typescript';
+import { tsImport } from 'tsx/esm/api';
+
+const { InstalledClientConsumerDeadlineError, InstalledClientDriverError } =
+  await tsImport('./installed-client-consumer.ts', import.meta.url);
 
 const source = readFileSync(new URL('../qualify-installed-run-journey.ts', import.meta.url), 'utf8');
 const literal = /^const clientScript = (`[\s\S]*?`);/mu.exec(source)?.[1]; assert(literal);
@@ -321,23 +325,42 @@ test('ordinary mutating requests are sent once and never replayed after a connec
   assert.equal(commands, 1);
 });
 
-test('installed journey failures retain only fixed SQLite or assertion classifications, never error messages or arbitrary frames', () => {
+test('installed journey failures retain only fixed classifications from actual errors, never error messages or arbitrary frames', () => {
   const from = source.indexOf('      const sourceFrames: Array<{ file: string; line: number; column: number }> = [];');
   const through = source.indexOf('\n    }\n    let publication:', from);
   assert(from >= 0 && through > from);
   const classification = ts.transpileModule(source.slice(from, through),
     { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
-  for (const code of ['ERR_SQLITE_ERROR', 'ERR_ASSERTION', 'unrecognized-sensitive-code']) {
-    const primary = Object.assign(new Error('Bearer private diagnostic must not survive'), { code, errcode: 261 });
+  const classify = primary => {
     primary.stack = 'Error: private diagnostic must not survive\n at inspect (installed-read-control.ts:24:21)\n at secret-source.ts:99:2';
-    const context = { primary, report: {}, Error, AggregateError, Number };
+    const context = { primary, report: {}, Error, AggregateError, Number,
+      InstalledClientConsumerDeadlineError, InstalledClientDriverError };
     vm.createContext(context); vm.runInContext(classification, context);
     const result = JSON.parse(JSON.stringify(context.report.error));
     assert.deepEqual(result.sourceFrames, [{ file: 'installed-read-control.ts', line: 24, column: 21 }]);
-    assert.deepEqual(result.failureKinds, code === 'ERR_SQLITE_ERROR' ? [{ kind: 'sqlite', primaryCode: 5 }]
-      : code === 'ERR_ASSERTION' ? [{ kind: 'assertion' }] : []);
     assert(!JSON.stringify(result).includes('private')); assert(!JSON.stringify(result).includes('unrecognized-sensitive-code'));
+    assert.deepEqual(Object.keys(result).sort(), ['diagnosticOnly', 'failureKinds', 'kind', 'sourceFrames']);
+    assert.equal(result.diagnosticOnly, true); assert.equal(result.kind, 'installed_run_journey_failed');
+    return result.failureKinds;
+  };
+  for (const code of ['ERR_SQLITE_ERROR', 'ERR_ASSERTION', 'unrecognized-sensitive-code']) {
+    const primary = Object.assign(new Error('Bearer private diagnostic must not survive'), { code, errcode: 261 });
+    assert.deepEqual(classify(primary), code === 'ERR_SQLITE_ERROR' ? [{ kind: 'sqlite', primaryCode: 5 }]
+      : code === 'ERR_ASSERTION' ? [{ kind: 'assertion' }] : []);
   }
+  for (const stage of ['platform', 'composition', 'selection', 'authentication', 'request', 'output', 'retirement']) {
+    const primary = new InstalledClientDriverError(stage);
+    assert.deepEqual(classify(primary), [{ kind: 'installed_client_driver', stage }]);
+  }
+  for (const stage of ['ready', 'request', 'close']) {
+    const primary = new InstalledClientConsumerDeadlineError(stage, stage === 'request' ? 30000 : stage === 'close' ? 10000 : 5000,
+      performance.now(), 17);
+    assert.deepEqual(classify(primary), [primary.diagnostic]);
+  }
+  const impostor = Object.assign(new Error('Bearer private diagnostic must not survive'), {
+    diagnostic: { kind: 'installed_client_driver', stage: 'request', private: 'untrusted diagnostic must not survive' },
+  });
+  assert.deepEqual(classify(impostor), []);
 });
 
 test('persistent public client reads separate cuts on its one original socket and never reconnects after refusal', { timeout: 10000 }, async t => {

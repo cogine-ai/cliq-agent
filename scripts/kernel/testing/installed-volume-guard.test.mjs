@@ -13,6 +13,11 @@ const source = shell.slice(start + marker.length, shell.indexOf('\nNODE\n}', sta
   .replace(/^import[\s\S]*?from 'node:fs';\n/u, '');
 assert(source.includes("action === 'retire-cut'"));
 
+// Node 26's generated assertion message can be undefined for an unmapped VM
+// frame when a loader enables source maps. Keep the real assertion and exact
+// guard expression, supplying only a fixed diagnosis in this data fixture.
+const vmAssert = Object.assign((value, message = 'fixed bounded volume guard refused') => assert(value, message), assert);
+
 const fixture = '/var/tmp/cliq-systemd-probe.Abc123', home = `${fixture}/home`, image = `${fixture}/run-home.ext4`;
 const originalFile = `${fixture}/run-home-original.json`, mountedFile = `${fixture}/run-home-mounted.json`;
 const output = '/var/tmp/cliq-systemd-output/run-filesystem.json', uid = 20001, size = 1024 ** 3;
@@ -75,7 +80,7 @@ function setup(overrides = {}) {
   };
   function run(action, code = source) {
     let stdout = '';
-    vm.runInNewContext(code, { ...api, assert, Buffer,
+    vm.runInNewContext(code, { ...api, assert: vmAssert, Buffer,
       process: { geteuid: () => 0, argv: ['node', '-', action, fixture, '1:1:0', home, image, originalFile, mountedFile,
         String(uid), String(uid), output], stdout: { write(text) { stdout += text; } } } }, { timeout: 1000 });
     return stdout;
@@ -125,4 +130,13 @@ test('a targeted quota-guard mutation is caught by the original oversized-capaci
   assert.throws(() => changed.run('capture'), /AssertionError/u);
   const mutation = source.replace('assert(observed.totalBytes <= ceiling);', '/* deliberate test-only mutation */');
   assert.notEqual(mutation, source); changed.run('capture', mutation);
+});
+
+test('VM boolean refusal retains the real AssertionError and a fixed non-sensitive diagnosis', () => {
+  assert.throws(() => setup({ options: 'rw,nodev,nosuid,noexec' }).run('capture'), error => {
+    assert(error instanceof assert.AssertionError, 'the original guard must throw the real AssertionError');
+    assert.equal(error.code, 'ERR_ASSERTION'); assert.equal(error.actual, false); assert.equal(error.expected, true);
+    assert.equal(error.message, 'fixed bounded volume guard refused');
+    return true;
+  });
 });
