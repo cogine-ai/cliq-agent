@@ -8334,7 +8334,16 @@ executed-Journal rule above applies only to `source='invocation'`.
 
 Every completed visible model attempt first appends one `ModelTurnItem`; a call turn's `ToolBatchItem.modelTurnRef` and `modelOpId/attempt` must match it. Every `FinalCandidateItem` decodes its base/result SourceManifests and exact `WorkspaceDiffV1`; the diff base/result refs equal the candidate, `sourceDigest` equals the result SourceManifest's `manifestDigest`, and `diffDigest` equals the decoded diff's self digest. The `agent` branch names a same-Run `ModelTurnItem(stopReason='end')`, requires `producingOpId === modelOpId`, and requires `summaryRef === textRef` where that `ModelTextV1` is nonempty. The `delivery` branch structurally forbids `producingOpId`, names the exact same-Run `DeliveryMergeItem`, and copies its captured-base/result/diff/summary refs; that summary also decodes `ModelTextV1`, while source Run, B/S/A/M, and plan fields satisfy the delivery equations above. No candidate points directly at an unowned provider artifact. `commitRunResult` requires its `baseSourceRef`, `resultSourceRef`, `diffRef`, and `summaryRef` to equal the current candidate byte-for-byte, then independently rehashes the result source and diff; `SessionRunTerminalItem.resultRef` names only that committed RunResult. A caller-derived summary, alternate diff, tree digest substituted for manifest digest, or delivery merge op invented after the fact is invalid.
 
-`DeliveryPlan.forwardOperations` is contiguous, ancestor-before-descendant for creation, contains no duplicate path/operation id/transient sibling, and represents every semantic materialization action; `abortOperations` is a separately indexed deepest-first list over planned delivery-created directories. Both arrays may be empty only when the captured real-workspace source ref already equals `desiredSourceRef`; that no-op delivery creates no approval/publish frontier and proceeds directly through the shared verification/provenance and finalize closure. Otherwise forward operations are nonempty. The discriminated union is exact: `mkdir` has only expected absence and fixed mode `0755`; `create` has one absent staging sibling and no quarantine; `replace` has absent staging plus quarantine siblings; `delete` has one absent quarantine sibling and no staging. Every leaf expected/desired state is a file or symlink, never a directory. `parent` is present on every operation and either binds an already captured directory identity or the earlier exact mkdir operation that created it; no optional parent/transient field is inferred by kind.
+`DeliveryPlan.forwardOperations` is contiguous, ancestor-before-descendant for creation, contains no duplicate path/operation id/transient sibling, and represents every semantic materialization action; `abortOperations` is a separately indexed deepest-first list over planned delivery-created directories. Both arrays may be empty only when the captured real-workspace source normalized to result role equals `desiredSourceRef`; that no-op delivery creates no approval/publish frontier and proceeds directly through the shared verification/provenance and finalize closure. Otherwise forward operations are nonempty. The discriminated union is exact: `mkdir` has only expected absence and fixed mode `0755`; `create` has one absent staging sibling and no quarantine; `replace` has absent staging plus quarantine siblings; `delete` has one absent quarantine sibling and no staging. Every leaf expected/desired state is a file or symlink, never a directory. `parent` is present on every operation and either binds an already captured directory identity or the earlier exact mkdir operation that created it; no optional parent/transient field is inferred by kind.
+
+The no-op comparison never mutates captured manifest A or substitutes a tree
+digest for its identity. Copy A, change only `role` to `result`, recompute its
+self-omitting `manifestDigest`, and hash the complete canonical artifact; that
+ref must equal M. A itself remains the exact base-role artifact in admission,
+the merge item, and the A-to-M diff. This role normalization is only the
+no-materialization test. Inherited verification still requires strict equality
+of M and the original source result S, with its complete provenance closure;
+equal trees, a no-op, or normalized A alone never grants that reuse.
 
 Every publication receipt/evidence ref decodes only `PublicationProofV1`, and `proofDigest = SHA-256(JCS(proof with proofDigest omitted))`. Base fields equal the delivery Run, immutable plan, live Session workspace identity, and the exact current signed Supervisor inspector. A path observation is produced by no-follow descriptor traversal from that root: absent forbids all entry identity fields, every present state requires all three, and the file/symlink/directory state is rehashed or reidentified from the held entry. `PublicationPathProgressItem.destinationEvidenceRef` is the exact post-swap destination `path_observation`; optional `transientObservationRef` is present iff this plan operation has a staging/quarantine sibling still pending cleanup and decodes to the exact present sibling path/descriptor state frozen by the plan. It replaces any untyped transient identity handle. A terminal receipt matches one plan operation and Journal claim byte-for-byte; `before` equals its expected state, `after` equals desired for forward completion or the abort operation's exact postcondition, transient observations are unique byte-sorted and all absent, preserved preimage is required exactly when the leaf displaced bytes, the parent identities satisfy the plan parent edge, and `directoryFsyncCompleted` is the inspector's retained post-fsync fact. Journal `opKind='publish',phase='completed'` has `receiptRef` and `evidenceRef` equal to this terminal-receipt artifact, and the matching completed `PublicationPathResultItem` repeats it in both fields. `not_created` has no receipt and requires a `path_observation` proving exact absence plus no completed creating operation. `retained_planned_descendant` has no receipt and requires a `planned_descendant` proof whose operation ids are exactly still-retained completed plan descendants. `failed` has no terminal receipt and carries the exact final path observation. `unknown` carries only `path_ambiguity`: it repeats the claim dispatch/op/attempt/plan operation, a closed failure literal, and any unique byte-sorted last-known path-observation refs; an adapter string/exception is forbidden. Neither outcome satisfies forward or abort closure. Publish is `reconcile`, so this item has no abandoned outcome.
 
@@ -8746,6 +8755,20 @@ The parent settles `child_terminal` rows only inside its own next expected-revis
 
 All parent/child and delivery drift merges use frozen `cliq-diff3-v1`; “may merge” is not an implementation choice. Per path, exact base/current/desired digest equality resolves unchanged/already-applied/one-sided changes first. Only same-type, same-mode regular UTF-8 files without NUL may text-merge. The algorithm splits while retaining line terminators, computes deterministic Myers shortest-edit scripts from base to current and base to desired with lowest-base-index then deletion-before-insertion tie breaks, represents edits as half-open base-line ranges, and accepts only disjoint edits or byte-identical replacements of the identical range. It applies accepted edits in base order without conflict markers. Every other overlap—binary, symlink, type/mode, delete/modify, add/add with different bytes, or overlapping nonidentical text—returns a structured conflict before verification/publication. `assemblyRef` pins the algorithm version.
 
+Lines are separated only by LF, retaining that terminator and any preceding
+CR verbatim; a bare CR remains content. No newline or Unicode normalization
+changes the merged file bytes. The shortest-edit tie selects the earliest actual base edit, not whichever
+alignment a greedy forward implementation happens to retain: changing
+`x\nx\n` to `x\n` deletes base line 0. Zero-width insertions have positional
+semantics: two insertions at the same base position merge only when their bytes
+are identical; an insertion strictly inside a nonempty edit conflicts, while
+one touching its start or end remains disjoint. A start-boundary insertion is
+emitted before that range's replacement bytes and an end-boundary insertion
+after them. Thus replacing `x\n` with `a\n` and independently inserting
+`y\n` before the original line yields `y\na\n`, not `a\ny\n`.
+Deletion-before-insertion resolves shortest-edit alignment ties; it does not
+reverse these boundary positions when applying accepted merge edits.
+
 Invocation retries remain Journal attempts inside the same Run. A user-requested retry after any terminal outcome is a new admitted Run; delivery is likewise a new `operation='delivery'` Run linked to, but never mutating, the source RunResult.
 
 ## 13. Verification And Bounded Repair
@@ -8928,6 +8951,25 @@ The v1 wire contract is generated from one canonical TypeScript/JSON-Schema pack
 | `session.create/fork` | `requestId`, admission key+digest, bounded workspace/source/cursor fields; fork also expected context revision | one idempotent Session snapshot |
 | `session.compact` | `requestId`, request digest, Session id, expected context revision, bounded item range and <=256 KiB UTF-8 summary | idempotently replayable post-commit Session snapshot; raw items preserved |
 | `session.handoff.create` | Session id, expected context revision and optional cursor | deterministic immutable JSON/Markdown artifact refs |
+
+For `artifact.get`, `length` is a requested upper bound in `1..4194304`, not
+an exact response size. The server may return a shorter verified chunk to keep
+the complete base64 response within its unchanged transport frame limit. A
+non-EOF response advances `nextOffset` by the decoded nonempty byte count;
+clients use that returned cursor. `offset` is a nonnegative safe integer no
+greater than the complete size; an exact-end read returns empty bytes and
+`eof=true`, including an empty artifact. The complete original object must
+pass its existing hash, length, descriptor and resource-retirement checks
+before any selected bytes are returned.
+
+The exact StateRoot, platform and owner uid determine its sole genuine local
+principal. A fresh authenticated request for that root may read only a
+registered artifact from the same root's captured catalog cut; unregistered
+orphan bytes and a different root's channel are not readable by this method.
+The descriptor's first media/schema labels are neither a read ACL nor typed-use
+or execution authority. Result, delivery and dispatch consumers still validate
+their own complete typed provenance and permission graphs; downloading bytes
+does not validate or authorize any of those operations.
 
 Every `requestId`, admission key, id, ref, integer, enum, and payload has a schema/count/byte bound before state access. Mutator responses are idempotently replayable by authenticated principal plus method/request id. The closed error union is `INVALID_REQUEST | INCOMPATIBLE_PROTOCOL | NOT_FOUND | REVISION_CONFLICT | WAIT_SUBJECT_MISMATCH | REQUEST_ID_CONFLICT | ADMISSION_KEY_CONFLICT | AUTHORIZATION_REQUIRED | POLICY_DENIED | MODEL_COST_UNKNOWN | BUDGET_EXHAUSTED | RESOURCE_EXHAUSTED | RESULT_UNAVAILABLE | RUN_TERMINAL | CANCEL_REQUESTED | UNSUPPORTED_PLATFORM | UNSUPPORTED_EXECUTION_IDENTITY | ARTIFACT_MISMATCH | RECOVERY_REQUIRED | EVENT_CURSOR_EXPIRED | RATE_LIMITED | INTERNAL`. Revision conflict inlines the exact current Session-or-Run snapshot, wait mismatch returns the exact current `WaitingSubject` ref/digest, and cursor expiry inlines the authoritative `RunSnapshotV1` captured with its bounds; other variants expose only their schema-required retry/range/resource/redacted fields. No generic current ref, snapshot artifact, or arbitrary stack data exists.
 

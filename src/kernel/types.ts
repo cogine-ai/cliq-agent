@@ -1648,6 +1648,8 @@ export type ControlResultV1 =
   | { method: 'run.cancel'; snapshot: RunSnapshotV1 }
   | { method: 'run.result'; runId: string; result: ArtifactDescriptorV1; verificationClosureRef: ArtifactRef }
   | { method: 'run.diff'; runId: string; diff: ArtifactDescriptorV1 }
+  | { method: 'artifact.get'; artifact: ArtifactDescriptorV1; offset: number;
+      bytesBase64: string; nextOffset: number; eof: boolean }
   | {
       method: 'run.get';
       snapshot: RunSnapshotV1;

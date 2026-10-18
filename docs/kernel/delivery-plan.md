@@ -247,7 +247,7 @@ locally; the other failures receive bounded fixed diagnostics without changing
 their original time limits or required outcomes. These corrections and the
 new verifier integration are not qualified by that older run.
 
-Latest pushed checkpoint `2bff50a9b0abac4fc4f7dd15b0c8c3e0c613e5e9` has
+Earlier pushed checkpoint `2bff50a9b0abac4fc4f7dd15b0c8c3e0c613e5e9` has
 [CI run 39097677773](https://github.com/cogine-ai/cliq-agent/actions/runs/39097677773):
 15 of 17 jobs passed, two failed. The original admission-stop and
 request-resource cases are now green. The full journey fails at `secret_corpus`:
@@ -261,6 +261,48 @@ content or relaxed checks. Final evidence binds 72 allowlisted JSON reports
 across 15 categories to this exact run/attempt/source; capture digest
 `d7774426d88e774dd43a7a55eee864d3d57e308993b0ce95c31ed8fa57ce4475`.
 No raw logs, archives, state/WAL or credentials are retained.
+
+Checkpoint `31f671e8a03f9cfe4e37bd87d74b90cfef888fd6` passed build and all
+2,205 local tests, with no failures, skips, cancellations or todos. Its
+[Linux/matrix run 39100392330](https://github.com/cogine-ai/cliq-agent/actions/runs/39100392330)
+finished with five passing jobs and thirteen failures. All four TypeScript
+matrix jobs and namespace/cgroup qualification passed; native and installed
+coverage stopped at compilation, before the verifier cases. The final retained
+report capture digest is
+`4be060a3652cfce33fdc5f92a5a947b2f4d3bcc4bcc999abcef78a85f1af1433`.
+
+The fixed receive helper now accepts the caller's actual FD capacity and
+rejects/retires excess rights without lowering the forty-FD protocol maximum.
+That fix, checkpoint `0c9bbe2df6b4fee37343e7f6e582b2176c433b0b`, again passed
+build and all 2,205 local tests. Its
+[run 39101759920](https://github.com/cogine-ai/cliq-agent/actions/runs/39101759920)
+passed the real socketpair capacity/truncation/FD-retirement regression and
+the original seccomp assertions. Image compilation then exposed a separate
+extractor-private `revoke` name collision with the system declaration. The
+local rename is not yet Linux-qualified; no installed verifier case is inferred
+from the passing lower-level tests.
+
+The next consumer batch adds authenticated `artifact.get`: only registered
+objects in the genuine principal's exact StateRoot are readable, and a complete
+CAS hash/identity/resource join precedes every short response. Current pages
+are at most 64 KiB within the unchanged 1 MiB frame. Each page still rehashes
+the complete object, so a complete download costs roughly O(S²/64KiB) I/O;
+large-artifact performance remains unqualified. Component tests cover exact
+EOF, corruption outside the selected page, foreign roots, request snapshots,
+and genuine close failure retaining StateOwner. The signed installed journey
+requires fresh byte downloads across reconnect and actual restart; it has not
+run successfully yet.
+
+The deterministic text merger and non-Git B/S/A/M planner are data consumers,
+not delivery authority. They preserve exact bytes, complete manifest identity,
+structured conflicts, the A-to-M diff, strict M===S reuse and the distinct
+normalized-A no-op test. Source validation is shared with the existing agent
+candidate path. Full delivery admission, resource ownership, materialization,
+permission, publication and recovery are still required. Directory/type
+publication and pre-admission physical-generation wording have real normative
+gaps awaiting the owner's integrated design decision; no second lifecycle,
+unsupported conversion disguised as a merge conflict, or early workspace-write
+probe is authorized by these component results.
 
 The first nonempty verifier path selects only the signed guest Node identity;
 it does not borrow host Node, PATH, modules or the ordinary edit adapter. The

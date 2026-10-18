@@ -418,20 +418,20 @@ static void retire(struct extraction *job) {
     settle_close(job);
     if (hook_removed) release(job); /* May free an already-finalized receiver. */
 }
-static void revoke(struct extraction *job) {
+static void revoke_extraction(struct extraction *job) {
     atomic_store_explicit(&job->held.revoked, true, memory_order_release);
     atomic_store_explicit(&job->cancelled, true, memory_order_release);
 }
 static void complete(napi_env env, napi_status status, void *data) {
     (void)env; struct extraction *job = data; job->work_complete = true;
-    if (status != napi_ok) { job->unsafe = true; atomic_store(&retirement_failed, true); revoke(job); }
+    if (status != napi_ok) { job->unsafe = true; atomic_store(&retirement_failed, true); revoke_extraction(job); }
     if (atomic_load_explicit(&job->held.revoked, memory_order_acquire)) retire(job);
 }
 static void cleanup(napi_async_cleanup_hook_handle handle, void *data) {
-    (void)handle; struct extraction *job = data; job->env_closing = true; revoke(job); retire(job);
+    (void)handle; struct extraction *job = data; job->env_closing = true; revoke_extraction(job); retire(job);
 }
 static void finalize(napi_env env, void *data, void *hint) {
-    (void)env; (void)hint; struct extraction *job = data; revoke(job); retire(job); release(job);
+    (void)env; (void)hint; struct extraction *job = data; revoke_extraction(job); retire(job); release(job);
 }
 static bool receiver(napi_env env, napi_callback_info info, struct extraction **job) {
     size_t argc = 1; napi_value args[1], self; bool tagged = false;
@@ -480,7 +480,7 @@ static napi_value describe(napi_env env, napi_callback_info info) {
 static napi_value close_owner(napi_env env, napi_callback_info info) {
     struct extraction *job;
     if (!receiver(env, info, &job)) return failure(env, "native guest close requires its original owner");
-    revoke(job); /* Irreversible before promise allocation, never after an await. */
+    revoke_extraction(job); /* Irreversible before promise allocation, never after an await. */
     napi_value promise;
     if (job->close_promise) {
         if (napi_get_reference_value(env, job->close_promise, &promise) != napi_ok) return failure(env, "native guest join unavailable");
@@ -598,7 +598,7 @@ static napi_value begin(napi_env env, napi_callback_info info) {
     }
     job->work_complete = false;
     if (napi_queue_async_work(env, job->work) != napi_ok) {
-        job->work_complete = true; job->error = "guest_worker_unavailable"; revoke(job); retire(job);
+        job->work_complete = true; job->error = "guest_worker_unavailable"; revoke_extraction(job); retire(job);
     }
     return object;
 }

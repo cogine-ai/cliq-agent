@@ -3,9 +3,9 @@ import { assertArtifactRef, normalizeBoundedText, parseCanonicalTime, requiredSa
 import { parseJsonStrict } from '../kernel/json.js';
 import type { ArtifactDescriptorV1, Checkpoint, ControlResultV1, ResultUnavailableControlErrorV1, Run, RunEvent, RunItemReferenceV1, RunSnapshotV1, Session, SessionItem } from '../kernel/types.js';
 import type { ArtifactCatalog } from './artifacts.js';
-import { validateControlChannelClosure, type AuthenticatedControlIdentity } from './control-channel.js';
+import { assertCurrentControlFrame, validateControlChannelClosure, type AuthenticatedControlIdentity } from './control-channel.js';
 import { decodeRunSpec } from './decoders.js';
-import { KernelStorageError } from './errors.js';
+import { KernelStorageError, ResourceRetirementError } from './errors.js';
 import { decodeBudgetUsage, isRecord } from './invariants.js';
 import { journalEntryFromRow, type JournalSqlRow } from './repositories/journal.js';
 import { checkpointFromRow, runFromRow, sessionFromRow } from './rows.js';
@@ -20,8 +20,9 @@ export type ReadControlRequest =
       checkpointCursor?: string; itemLimit?: number; journalLimit?: number; checkpointLimit?: number }
   | { protocolVersion: 1; method: 'run.result'; runId: string }
   | { protocolVersion: 1; method: 'run.diff'; runId: string }
+  | { protocolVersion: 1; method: 'artifact.get'; digest: string; offset: number; length: number }
   | { protocolVersion: 1; method: 'run.attach'; runId: string; afterEventSeq: number; limit?: number };
-export type ReadControlResult = Extract<ControlResultV1, { method: 'session.get' | 'run.get' | 'run.attach' | 'run.result' | 'run.diff' }>;
+export type ReadControlResult = Extract<ControlResultV1, { method: 'session.get' | 'run.get' | 'run.attach' | 'run.result' | 'run.diff' | 'artifact.get' }>;
 type SessionResult = Extract<ReadControlResult, { method: 'session.get' }>;
 type RunResult = Extract<ReadControlResult, { method: 'run.get' | 'run.attach' }>;
 type CapturedRead = { result: SessionResult } | {
@@ -31,6 +32,7 @@ type CapturedRead = { result: SessionResult } | {
 type ItemRow = { item_id: string; item_seq: unknown; kind: string; payload_ref: string; created_at: string; session_id: string };
 type CheckpointPosition = { createdAt: string; checkpointId: string };
 const METADATA_BYTES = 1024 * 1024;
+const ARTIFACT_PAGE_BYTES = 64 * 1024;
 const CHECKPOINT_TEXT_BOUNDS = { id: 128, run_id: 128, context_manifest_ref: 64,
   workspace_state_ref: 64, created_at: 24, reason: 10 };
 const CHECKPOINT_COLUMNS = ['schema_version', 'based_on_run_revision', 'run_item_seq', 'journal_seq',
@@ -98,10 +100,23 @@ function limit(value: unknown): number {
 }
 function validateRequest(request: ReadControlRequest): ReadControlRequest {
   try {
-    if (!isRecord(request) || request.protocolVersion !== 1 || Object.values(request).some(value => value === undefined)) {
+    if (!isRecord(request) || ![Object.prototype, null].includes(Object.getPrototypeOf(request))) {
+      throw new TypeError('read request must be a plain JSON object');
+    }
+    const fields = Object.getOwnPropertyDescriptors(request);
+    if (Reflect.ownKeys(fields).some(key => typeof key !== 'string' || !Object.hasOwn(fields[key]!, 'value') ||
+        !fields[key]!.enumerable || fields[key]!.value === undefined) ||
+        !Object.hasOwn(fields, 'protocolVersion') || !Object.hasOwn(fields, 'method') || request.protocolVersion !== 1) {
       throw new TypeError('read request requires an exact protocolVersion=1 JSON object');
     }
     // Copy the exact normalized request before any asynchronous authentication.
+    if (request.method === 'artifact.get') {
+      exactKeys(request, ['protocolVersion', 'method', 'digest', 'offset', 'length']);
+      artifactRef(request.digest);
+      const length = requestInteger(request.length);
+      if (length < 1 || length > 4 * 1024 * 1024) throw new TypeError('artifact length must be in 1..4 MiB');
+      return { protocolVersion: 1, method: request.method, digest: request.digest, offset: requestInteger(request.offset), length };
+    }
     if (request.method === 'run.result' || request.method === 'run.diff') {
       exactKeys(request, ['protocolVersion', 'method', 'runId']);
       return { protocolVersion: 1, method: request.method, runId: id(request.runId) };
@@ -392,14 +407,17 @@ function runAttachCut(connection: SqliteConnection, request: Extract<ReadControl
  * is returned. A future delivery consumer must independently validate its full
  * result/receipt/death graph, never treat a query descriptor as permission. */
 async function readResultQuery(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
-  request: Extract<ReadControlRequest, { method: 'run.result' | 'run.diff' }>, identity: AuthenticatedControlIdentity): Promise<ReadControlResult> {
+  request: Extract<ReadControlRequest, { method: 'run.result' | 'run.diff' }>, identity: AuthenticatedControlIdentity,
+  signal?: AbortSignal): Promise<ReadControlResult> {
   const run = driver.readSnapshot(connection => {
     assertActiveStateOwner(connection, owner);
     return checkedRun(requireOwnedRow(connection, 'runs', request.runId, identity.principalId));
   });
   if (run.status !== 'succeeded' && run.status !== 'completed_unverified') throw new ResultUnavailableError(run);
   const result = decodeRunResult(await readCanonicalArtifact(artifacts, run.resultRef!));
+  signal?.throwIfAborted();
   const closure = decodeVerificationClosure(await readCanonicalArtifact(artifacts, result.verificationClosureRef));
+  signal?.throwIfAborted();
   if (result.runId !== run.id || closure.runId !== run.id || result.resultSourceRef !== closure.resultSourceRef ||
       result.createdAt > run.updatedAt || closure.createdAt > result.createdAt || closure.verification.kind !== 'local' ||
       closure.verification.outcome !== (run.status === 'succeeded' ? 'verified' : 'unverified'))
@@ -417,19 +435,78 @@ async function readResultQuery(driver: SqliteDriver, artifacts: ArtifactCatalog,
         normalizeBoundedText(metadata.media_type, 1, 128) !== metadata.media_type) corrupt('selected result descriptor is invalid');
     return { schemaVersion: 1 as const, ref, digest: ref, sizeBytes, mediaType: metadata.media_type } satisfies ArtifactDescriptorV1;
   });
-  await validateControlChannelClosure(artifacts, owner, identity); assertActiveStateOwner(driver, owner);
+  await validateControlChannelClosure(artifacts, owner, identity);
+  signal?.throwIfAborted(); assertActiveStateOwner(driver, owner);
   return request.method === 'run.result'
     ? { method: request.method, runId: run.id, result: descriptor, verificationClosureRef: result.verificationClosureRef }
     : { method: request.method, runId: run.id, diff: descriptor };
 }
 
+/** This StateRoot has one genuine principal, derived from its exact root,
+ * platform and owner uid. Registration is read membership, not a typed-use or
+ * execution grant. Orphan CAS bytes are never exposed by this method. */
+async function readArtifactQuery(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
+  request: Extract<ReadControlRequest, { method: 'artifact.get' }>, identity: AuthenticatedControlIdentity,
+  frameIdentity: AuthenticatedControlIdentity, signal?: AbortSignal): Promise<Extract<ReadControlResult, { method: 'artifact.get' }>> {
+  const descriptor = () => driver.readSnapshot(connection => {
+    assertActiveStateOwner(connection, owner);
+    const metadata = connection.prepare(`SELECT byte_length,
+      CASE WHEN length(CAST(media_type AS BLOB)) <= 128 THEN media_type ELSE NULL END AS media_type
+      FROM artifacts WHERE ref = ?`).get<{ byte_length: unknown; media_type: unknown }>(request.digest);
+    if (!metadata) throw new KernelStorageError('NOT_FOUND', 'artifact is not registered in this StateRoot');
+    const sizeBytes = Number(metadata.byte_length);
+    if (!Number.isSafeInteger(sizeBytes) || sizeBytes < 0 || typeof metadata.media_type !== 'string') corrupt('artifact descriptor is invalid');
+    let mediaType: string;
+    try { mediaType = normalizeBoundedText(metadata.media_type, 1, 128); }
+    catch { corrupt('artifact descriptor media type is invalid'); }
+    if (mediaType !== metadata.media_type) corrupt('artifact descriptor media type is not canonical');
+    return { schemaVersion: 1 as const, ref: request.digest, digest: request.digest, sizeBytes, mediaType };
+  });
+  const artifact = descriptor();
+  if (request.offset > artifact.sizeBytes) invalid('artifact offset exceeds its complete byte count');
+  const length = Math.min(request.length, ARTIFACT_PAGE_BYTES, artifact.sizeBytes - request.offset);
+  const bytes = Buffer.alloc(length);
+  let observed = 0, copied = 0;
+  try {
+    // Selected bytes remain private staging until the *whole* original stream
+    // has verified its digest/identity and closed both held descriptors. This
+    // intentionally has no cached integrity or authorization shortcut.
+    for await (const chunk of artifacts.readChunks(request.digest, artifact.sizeBytes)) {
+      signal?.throwIfAborted();
+      if (chunk.byteLength > artifact.sizeBytes - observed) corrupt('artifact stream exceeds its registered byte count');
+      const from = Math.max(0, request.offset - observed);
+      const through = Math.min(chunk.byteLength, request.offset + length - observed);
+      if (through > from) {
+        chunk.copy(bytes, copied, from, through);
+        copied += through - from;
+      }
+      observed += chunk.byteLength;
+    }
+  } catch (cause) {
+    if (cause instanceof ResourceRetirementError || (signal?.aborted && cause === signal.reason)) throw cause;
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'registered artifact failed complete integrity validation', { cause });
+  }
+  signal?.throwIfAborted();
+  if (observed !== artifact.sizeBytes || copied !== length) corrupt('artifact stream did not reproduce its registered byte count');
+  const current = await validateControlChannelClosure(artifacts, owner, identity);
+  signal?.throwIfAborted();
+  if (current.channel.transport.kind === 'uds_peer') assertCurrentControlFrame(owner, frameIdentity);
+  if (canonicalSha256(descriptor()) !== canonicalSha256(artifact)) corrupt('artifact registration changed during the read');
+  const nextOffset = request.offset + bytes.byteLength;
+  return { method: 'artifact.get', artifact, offset: request.offset, bytesBase64: bytes.toString('base64'),
+    nextOffset, eof: nextOffset === artifact.sizeBytes };
+}
+
 export async function readControl(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
-  request: ReadControlRequest, identity: AuthenticatedControlIdentity): Promise<ReadControlResult> {
+  request: ReadControlRequest, identity: AuthenticatedControlIdentity, signal?: AbortSignal): Promise<ReadControlResult> {
+  signal?.throwIfAborted();
   const normalized = validateRequest(request);
   const authenticated = { principalId: identity.principalId, channelIdentityRef: identity.channelIdentityRef, channelIdentityDigest: identity.channelIdentityDigest };
   await validateControlChannelClosure(artifacts, owner, authenticated);
+  signal?.throwIfAborted();
+  if (normalized.method === 'artifact.get') return readArtifactQuery(driver, artifacts, owner, normalized, authenticated, identity, signal);
   if (normalized.method === 'run.result' || normalized.method === 'run.diff')
-    return readResultQuery(driver, artifacts, owner, normalized, authenticated);
+    return readResultQuery(driver, artifacts, owner, normalized, authenticated, signal);
   const cut = driver.readSnapshot(connection => {
     assertActiveStateOwner(connection, owner);
     try {
@@ -453,6 +530,7 @@ export async function readControl(driver: SqliteDriver, artifacts: ArtifactCatal
     if (cut.expired) expired = new EventCursorExpiredError(cut.expired.earliest, cut.expired.latest, snapshot);
   } else result = cut.result;
   await validateControlChannelClosure(artifacts, owner, authenticated);
+  signal?.throwIfAborted();
   assertActiveStateOwner(driver, owner);
   if (expired) throw expired;
   return result;

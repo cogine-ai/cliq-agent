@@ -84,7 +84,7 @@ const MAX_OUTSTANDING = 64;
 // has four-byte input/output headers; Store metadata is separately bounded.
 const BUFFER_BYTES = (MAX_OUTSTANDING + 1) * FRAME_BYTES;
 const FEATURES = ['session.get', 'run.get', 'run.attach', 'supervisor.status', 'credential.finalize', 'session.create', 'run.submit', 'run.cancel',
-  'authorization.create', 'authorization.revoke', 'run.result', 'run.diff'];
+  'authorization.create', 'authorization.revoke', 'run.result', 'run.diff', 'artifact.get'];
 const RUN_FEATURES = ['session.create', 'run.submit', 'run.cancel'];
 const record = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -247,7 +247,7 @@ export function openInstalledControl(store: StateStore,
         if (method === 'credential.finalize') return { protocolVersion: 1, ok: true,
           result: { method: 'credential.finalize', operation: await store.finalizeCredential(request as CredentialFinalizeRequest, identity) }
         } satisfies InstalledControlResponseV1;
-        if (method === 'session.get' || method === 'run.get' || method === 'run.attach' || method === 'run.result' || method === 'run.diff') {
+        if (method === 'session.get' || method === 'run.get' || method === 'run.attach' || method === 'run.result' || method === 'run.diff' || method === 'artifact.get') {
           return { protocolVersion: 1, ok: true, result: await store.readControl(request as ReadControlRequest, identity) } satisfies InstalledControlResponseV1;
         }
         if (method === 'supervisor.status') {

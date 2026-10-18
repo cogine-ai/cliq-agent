@@ -16,6 +16,8 @@ import type { AuthorizationGrantSummaryV1, VerifierIdentityCreateRequest } from 
 import { decodeCredentialAuthorityOperation, decodeEndpointAuthorityOperation, type EndpointRegistrationV1 } from '../../src/kernel/credential-authority.js';
 import { digestOmitting, identityHash, sha256Bytes } from '../../src/kernel/identity.js';
 import { parseJsonStrict } from '../../src/kernel/json.js';
+import type { ArtifactDescriptorV1 } from '../../src/kernel/types.js';
+import { decodeRunResult, decodeWorkspaceDiff } from '../../src/state/result-artifacts.js';
 import { buildInstalledSupervisorPackage } from './testing/installed-supervisor-package.js';
 import { CredentialSecretScanError, createCredentialSecretScanner } from './testing/credential-secret-scan.js';
 import { CredentialSecretCorpusError, scanCredentialSecretCorpus } from './testing/credential-secret-corpus.js';
@@ -156,7 +158,7 @@ async function campaign(filename: string): Promise<void> {
   const hello = { protocolVersion: 1, method: 'control.hello', clientBuild: 'installed-verifier-journey',
     controlSchemaRange: { min: 1, max: 1 }, headlessSchemaRange: { min: 1, max: 1 },
     requestedFeatureIds: ['session.create', 'session.get', 'run.submit', 'run.get', 'run.attach', 'run.cancel',
-      'authorization.create', 'authorization.revoke', 'run.result', 'run.diff', 'supervisor.status'] };
+      'authorization.create', 'authorization.revoke', 'run.result', 'run.diff', 'artifact.get', 'supervisor.status'] };
   const accepted = (response: Response, method: string) => {
     if (!response.ok) report.lastRefusal = { method,
       code: ['INVALID_REQUEST', 'INTERNAL', 'AUTHORIZATION_REQUIRED', 'UNSUPPORTED_EXECUTION_IDENTITY', 'ARTIFACT_MISMATCH',
@@ -228,7 +230,9 @@ async function campaign(filename: string): Promise<void> {
     try {
       await bounded(Promise.race([ready, closed.then(() => { throw new Error('original public client closed before readiness'); })]),
         5000, 'original public client did not connect');
-      accepted(await send(hello), 'control.hello'); return { send, close };
+      const greeting = accepted(await send(hello), 'control.hello');
+      assert(Array.isArray(greeting.enabledFeatureIds) && greeting.enabledFeatureIds.includes('artifact.get'));
+      return { send, close };
     } catch (error) { try { await close(); } catch {} throw error; }
   };
   const withRetainedUnitHistory = async (units: readonly [string, string], body: (assertRetained: () => void) => Promise<void>): Promise<void> => {
@@ -358,8 +362,47 @@ async function campaign(filename: string): Promise<void> {
   const send = async (body: Record<string, unknown>, method: string, timeout = 5000) => {
     assert(client); return accepted(await client.send(body, timeout), method);
   };
+  // Retained comparison bytes only: every fresh/restarted client must still
+  // download the complete object again. Never use this map as an I/O shortcut.
+  const originalPublicResultBytes = new Map<string, Buffer>();
+  const downloadArtifact = async (artifact: ArtifactDescriptorV1, expected: Buffer): Promise<Buffer> => {
+    assert(client); assert.match(artifact.ref, /^[a-f0-9]{64}$/u); assert.equal(artifact.digest, artifact.ref);
+    assert.equal(artifact.schemaVersion, 1); assert.equal(artifact.mediaType, 'application/json');
+    assert.equal(artifact.sizeBytes, expected.length); assert(expected.length > 0 && expected.length <= 1_048_576);
+    const bytes = Buffer.alloc(artifact.sizeBytes);
+    let offset = 0, pages = 0;
+    for (;;) {
+      assert(++pages <= 18, 'bounded public result download must make progress');
+      // Force a real non-EOF first page even for these small typed artifacts;
+      // subsequent 4 MiB requests exercise the unchanged short-response cap.
+      const length = offset === 0 ? 17 : 4 * 1024 * 1024;
+      const response = await client.send({ protocolVersion: 1, method: 'artifact.get', digest: artifact.ref, offset, length });
+      assert(canonicalJsonBytes(response).length < 1_048_576);
+      const result = accepted(response, 'artifact.get');
+      assert.equal(typeof result.bytesBase64, 'string'); assert(result.bytesBase64.length <= 87_384);
+      const chunk = Buffer.from(result.bytesBase64, 'base64');
+      assert.equal(chunk.toString('base64'), result.bytesBase64, 'artifact bytes must use canonical base64');
+      assert(chunk.length <= Math.min(length, 65_536, artifact.sizeBytes - offset));
+      const nextOffset = offset + chunk.length, eof = nextOffset === artifact.sizeBytes;
+      assert.equal(canonicalSha256(response), canonicalSha256({ protocolVersion: 1, ok: true, result: {
+        method: 'artifact.get', artifact, offset, bytesBase64: result.bytesBase64, nextOffset, eof } }));
+      chunk.copy(bytes, offset); offset = nextOffset;
+      if (eof) break;
+      assert(chunk.length > 0, 'a non-EOF artifact page must advance the exact offset');
+    }
+    assert.equal(offset, artifact.sizeBytes); assert(pages >= 2);
+    assert.equal(sha256Bytes(bytes), artifact.ref); assert(bytes.equals(expected)); scanBytes(bytes);
+    const original = originalPublicResultBytes.get(artifact.ref);
+    if (original) assert(bytes.equals(original), 'reconnect/restart must preserve the exact original downloaded bytes');
+    else { originalPublicResultBytes.set(artifact.ref, Buffer.from(bytes)); assert(originalPublicResultBytes.size <= 6); }
+    return bytes;
+  };
   const resultQueries = async (cut: Record<string, any>): Promise<Response[]> => {
     const run = cut.snapshot.run; assert(client);
+    const expectedResultBytes = run.resultRef ? await readCas(run.resultRef) : undefined;
+    const expectedResult = expectedResultBytes
+      ? decodeRunResult(parseJsonStrict(new TextDecoder('utf-8', { fatal: true }).decode(expectedResultBytes))) : undefined;
+    if (expectedResult) { assert.equal(expectedResult.runId, run.id); assert(canonicalJsonBytes(expectedResult).equals(expectedResultBytes!)); }
     const replies: Response[] = [];
     for (const method of ['run.result', 'run.diff']) {
       const response = await client.send({ protocolVersion: 1, method, runId: run.id }); replies.push(response);
@@ -368,14 +411,26 @@ async function campaign(filename: string): Promise<void> {
           schemaVersion: 1, code: 'RESULT_UNAVAILABLE', messageCode: 'run.result_unavailable', retryable: false,
           runId: run.id, status: run.status, terminalDetailRef: run.terminalDetailRef } }));
       } else {
-        const result = parseJsonStrict((await readCas(run.resultRef)).toString('utf8')) as Record<string, any>;
+        assert(expectedResult && expectedResultBytes); const result = expectedResult;
         const ref = method === 'run.result' ? run.resultRef : result.diffRef;
-        const descriptor = { schemaVersion: 1, ref, digest: ref, sizeBytes: (await readCas(ref)).length, mediaType: 'application/json' };
+        const expected = method === 'run.result' ? expectedResultBytes : await readCas(ref);
+        const descriptor: ArtifactDescriptorV1 = { schemaVersion: 1, ref, digest: ref, sizeBytes: expected.length, mediaType: 'application/json' };
         assert.equal(canonicalSha256(response), canonicalSha256({ protocolVersion: 1, ok: true, result: method === 'run.result'
           ? { method, runId: run.id, result: descriptor, verificationClosureRef: result.verificationClosureRef }
           : { method, runId: run.id, diff: descriptor } }));
+        const downloaded = await downloadArtifact(descriptor, expected);
+        const value = parseJsonStrict(new TextDecoder('utf-8', { fatal: true }).decode(downloaded));
+        assert(canonicalJsonBytes(value).equals(downloaded));
+        if (method === 'run.result') assert.deepEqual(decodeRunResult(value), result);
+        else {
+          const diff = decodeWorkspaceDiff(value);
+          assert.equal(diff.baseSourceRef, result.baseSourceRef); assert.equal(diff.resultSourceRef, result.resultSourceRef);
+          assert.deepEqual(diff, decodeWorkspaceDiff(parseJsonStrict(new TextDecoder('utf-8', { fatal: true }).decode(expected))));
+        }
       }
     }
+    assert.deepEqual(await send({ protocolVersion: 1, method: 'run.get', runId: run.id }, 'run.get'), cut,
+      'public artifact reads must not append a Journal, execute a tool or change the terminal Run');
     return replies;
   };
   const selectedSupervisor = async (unit: string, shown: Record<string, string>, image: string, by: number) => {
@@ -686,6 +741,7 @@ async function campaign(filename: string): Promise<void> {
         exactVerifierProcessLifetimesIndependentlyAbsent: true, proof });
     }
     assert.equal(postCount, 8); assert.equal(acceptedTcp, postCount); assert.equal(acceptedTls, postCount); assert(!responderFailure);
+    assert.equal(originalPublicResultBytes.size, 6, 'all three successful Runs must download their own result and diff');
     mark('fresh_client_reconnect_and_actual_restart');
     await client.close(); client = await persistentClient();
     for (const entry of completed) {

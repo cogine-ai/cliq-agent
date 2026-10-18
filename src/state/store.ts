@@ -2998,7 +2998,11 @@ export class StateStore {
 
   /** Canonical bounded queries shared by clients; identity comes from the control channel, never the request. */
   readControl(request: ReadControlRequest, identity: AuthenticatedControlIdentity) {
-    return readControl(this.driver, this.artifacts, this.owner, request, identity);
+    if (this.closed || this.closeRequested || this.released)
+      return Promise.reject(new KernelStorageError('LEASE_FENCED', 'StateStore is closing or closed'));
+    // Register this complete query producer before its first await, retaining
+    // StateOwner until a cancelled CAS stream has joined its original handles.
+    return this.ownInstalledAdmission(signal => readControl(this.driver, this.artifacts, this.owner, request, identity, signal));
   }
 
   getRun(runId: string): Run {

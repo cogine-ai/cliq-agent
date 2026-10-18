@@ -9,6 +9,7 @@ import { KERNEL_DATABASE_FILENAME } from '../config.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting } from '../kernel/identity.js';
 import type { SessionContextProjection, SessionItem } from '../kernel/types.js';
+import { insertArtifactMetadata } from './artifacts.js';
 import { openInstalledControl } from './installed-control.js';
 import { openSqliteDriver } from './sqlite-driver.js';
 import type { StateStore } from './store.js';
@@ -105,6 +106,60 @@ function byteFrame(body: Buffer): Buffer {
 
 const compatibleHello = { protocolVersion: 1, method: 'control.hello', clientBuild: 'wire-client-fixture',
   controlSchemaRange: { min: 1, max: 1 }, headlessSchemaRange: { min: 1, max: 1 }, requestedFeatureIds: [] };
+
+test('authenticated artifact.get fetches registered bytes through bounded real UDS frames without a write oracle', async t => {
+  const fixture = await createQueuedFixture('wire-artifact');
+  t.after(() => disposeFixture(fixture));
+  const errors: Error[] = [];
+  const service = openInstalledControl(fixture.store, { serverBuild: 'wire-artifact-fixture' }, error => errors.push(error));
+  t.after(() => service.close());
+  const bytes = Buffer.alloc(131_079, 0x87);
+  const artifact = await fixture.store.artifacts.publishBytes(bytes, 'application/octet-stream', 'cliq-query-data-fixture-v1');
+  const orphan = await fixture.store.artifacts.publishBytes(Buffer.from('unregistered test data'), 'application/octet-stream', 'cliq-query-data-fixture-v1');
+  const driver = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+  t.after(() => driver.close());
+  driver.transaction(connection => insertArtifactMetadata(connection, artifact, fixture.store.getRun(fixture.runId).createdAt));
+  const footprint = () => ({ fence: driver.prepare('SELECT * FROM canonical_time_fence').get(),
+    replay: driver.prepare('SELECT count(*) AS n FROM control_requests').get(), run: fixture.store.getRun(fixture.runId) });
+  const before = footprint();
+  const peer = await connectPeer(t, path.join(fixture.stateRoot, 'runtime/control-v1.sock'));
+  const request = { protocolVersion: 1, method: 'artifact.get', digest: artifact.ref, offset: 0, length: 4 * 1024 * 1024 };
+  await peer.write(frame(request));
+  assert.equal((await peer.response()).error.messageCode, 'control.hello_required');
+  await peer.write(frame({ ...compatibleHello, requestedFeatureIds: ['artifact.get'] }));
+  assert.deepEqual((await peer.response()).result.enabledFeatureIds, ['artifact.get']);
+  const chunks: Buffer[] = [];
+  let offset = 0;
+  for (;;) {
+    await peer.write(frame({ ...request, offset }));
+    const response = await peer.response();
+    assert.equal(response.ok, true);
+    assert.equal(response.result.method, 'artifact.get');
+    assert.deepEqual(response.result.artifact, { schemaVersion: 1, ref: artifact.ref, digest: artifact.ref,
+      sizeBytes: bytes.length, mediaType: 'application/octet-stream' });
+    assert.equal(response.result.offset, offset);
+    const chunk = Buffer.from(response.result.bytesBase64, 'base64');
+    assert.ok(chunk.length <= 65_536);
+    assert.equal(response.result.nextOffset, offset + chunk.length);
+    assert.ok(canonicalJsonBytes(response).length < 1024 * 1024);
+    chunks.push(chunk); offset = response.result.nextOffset;
+    if (response.result.eof) break;
+    assert.ok(chunk.length > 0);
+  }
+  assert.equal(offset, bytes.length);
+  assert.deepEqual(Buffer.concat(chunks), bytes);
+  await peer.write(frame({ ...request, offset }));
+  const eof = await peer.response();
+  assert.equal(eof.result.bytesBase64, ''); assert.equal(eof.result.nextOffset, offset); assert.equal(eof.result.eof, true);
+  for (const bad of [{ ...request, length: 0 }, { ...request, length: 4 * 1024 * 1024 + 1 },
+    { ...request, requestId: 'not-a-mutator' }, { ...request, principalId: fixture.principalId }]) {
+    await peer.write(frame(bad)); assert.equal((await peer.response()).error.code, 'INVALID_REQUEST');
+  }
+  await peer.write(frame({ ...request, digest: orphan.ref }));
+  assert.equal((await peer.response()).error.code, 'NOT_FOUND');
+  assert.deepEqual(footprint(), before);
+  assert.deepEqual(errors, []);
+});
 
 /** Retained display arrangement only, not Session mutation or execution qualification. */
 async function retainLargeSessionDisplay(store: StateStore, sessionId: string): Promise<void> {
