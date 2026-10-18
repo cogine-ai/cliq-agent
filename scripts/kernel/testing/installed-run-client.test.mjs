@@ -239,3 +239,34 @@ test('response-time worker diagnostics use the same public hello, not queued ins
   assert(resourceFrom >= 0 && resourceThrough > resourceFrom);
   assert.doesNotMatch(source.slice(resourceFrom, resourceThrough), /method: 'supervisor\.status'/u);
 });
+
+test('immutable result assertions compare complete canonical data from the actual strict JSON decoder', async () => {
+  const load = async relative => {
+    const module = ts.transpileModule(readFileSync(new URL(relative, import.meta.url), 'utf8'),
+      { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText;
+    return import(`data:text/javascript;base64,${Buffer.from(module).toString('base64')}`);
+  };
+  const { parseJsonStrict } = await load('../../../src/kernel/json.ts');
+  const { canonicalJsonBytes } = await load('../../../src/kernel/canonical.ts');
+  const dependency = source.split('\n').find(line => line.includes('closure.resultSourceRef, candidate.resultSourceRef)'));
+  const verification = source.split('\n').find(line => line.includes('closure.verification') && line.includes('unverifiedConsentRef: spec.unverifiedConsentRef'));
+  assert(dependency && verification);
+  const validate = new Function('assert', 'canonicalJsonBytes', 'closure', 'candidate', 'spec', `${dependency}\n${verification}`);
+  const spec = { unverifiedConsentRef: 'consent-data-only' }, candidate = { resultSourceRef: 'result-data-only' };
+  const expected = { resultSourceRef: candidate.resultSourceRef, dependency: { kind: 'none' },
+    verification: { kind: 'local', outcome: 'unverified', unverifiedConsentRef: spec.unverifiedConsentRef, entries: [] } };
+  const decoded = parseJsonStrict(canonicalJsonBytes(expected).toString('utf8'));
+  assert.equal(Object.getPrototypeOf(decoded.dependency), null);
+  validate(assert, canonicalJsonBytes, decoded, candidate, spec);
+  for (const change of [
+    value => { value.dependency.extra = true; },
+    value => { value.dependency.kind = 'ready'; },
+    value => { value.verification.outcome = 'verified'; },
+    value => { value.verification.unverifiedConsentRef = 'another-consent'; },
+    value => { value.verification.entries.push({ verifierId: 'unexpected' }); },
+  ]) {
+    const changed = parseJsonStrict(canonicalJsonBytes(expected).toString('utf8')); change(changed);
+    assert.throws(() => validate(assert, canonicalJsonBytes, changed, candidate, spec));
+  }
+  assert.throws(() => parseJsonStrict('{"kind":"none","kind":"ready"}'));
+});

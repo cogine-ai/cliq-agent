@@ -1160,8 +1160,8 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       assert.equal(candidate.summaryRef, producer.textRef); assert.equal(candidate.baseSourceRef, spec.baseWorkspaceManifestRef);
       const closure = decodeVerificationClosure(await object(result.verificationClosureRef));
       assert.equal(closure.runId, run.id); assert.equal(closure.candidateItemId, candidate.itemId);
-      assert.equal(closure.resultSourceRef, candidate.resultSourceRef); assert.deepEqual(closure.dependency, { kind: 'none' });
-      assert.deepEqual(closure.verification, { kind: 'local', outcome: 'unverified', unverifiedConsentRef: spec.unverifiedConsentRef, entries: [] });
+      assert.equal(closure.resultSourceRef, candidate.resultSourceRef); assert.deepEqual(canonicalJsonBytes(closure.dependency), canonicalJsonBytes({ kind: 'none' }));
+      assert.deepEqual(canonicalJsonBytes(closure.verification), canonicalJsonBytes({ kind: 'local', outcome: 'unverified', unverifiedConsentRef: spec.unverifiedConsentRef, entries: [] }));
       const plan = decodeVerifierPlan(await object(closure.verifierPlanRef)); assert.deepEqual(plan.entries, []);
       assert.equal(plan.runId, run.id); assert.equal(plan.candidateItemId, candidate.itemId); assert.equal(plan.resultSourceRef, candidate.resultSourceRef);
       const verifiers = await object(spec.verifierSpecRef); assert.deepEqual(verifiers.verifiers, []);
