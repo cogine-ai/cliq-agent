@@ -36,6 +36,7 @@ jobs:
       - run: node --test scripts/kernel/check-design-contracts.test.mjs
       - run: node scripts/kernel/check-design-contracts.mjs
       - run: node scripts/kernel/test-linux-worker-text.mjs
+      - run: node --test --import tsx scripts/kernel/testing/supervisor-sea-builder.test.ts
       - run: npm run build
       - run: npm test
 

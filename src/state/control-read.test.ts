@@ -151,7 +151,7 @@ test('StateStore close cancels and joins the original artifact query before rele
       return handle;
     }) as typeof fs.open;
     reading = fixture.store.readControl({ protocolVersion: 1, method: 'artifact.get', digest: artifact.ref, offset: 0, length: 1 }, identity);
-    const observedRead = assert.rejects(reading, error => error instanceof Error && error.name === 'AbortError');
+    const observedRead = assert.rejects(reading, isCode('LEASE_FENCED'));
     await closingHandle;
     let closed = false;
     closing = fixture.store.close().then(() => { closed = true; });
@@ -162,13 +162,19 @@ test('StateStore close cancels and joins the original artifact query before rele
     release();
     await observedRead; await closing;
     assert.equal(closed, true);
+    fs.open = originalOpen;
+    fixture.store = await openStateStore(fixture.stateRoot, fixture.runtimeAuthority);
+    const successor = await publishInProcessChannel(fixture.store);
+    const reread = await fixture.store.readControl({ protocolVersion: 1, method: 'artifact.get', digest: artifact.ref, offset: 0, length: 1 }, successor);
+    assert.ok(reread.method === 'artifact.get');
+    assert.equal(reread.bytesBase64, 'Bw==', 'the cancelled original query must preserve the registered bytes for its genuine successor');
   } finally {
     release(); await reading?.catch(() => {}); await closing?.catch(() => {});
     fs.open = originalOpen; driver.close(); await disposeFixture(fixture);
   }
 });
 
-test('an uncertain actual artifact close remains sticky and retains the original Store owner until process death', async () => {
+test('an uncertain actual artifact close overrides shutdown cancellation and retains the original Store owner until process death', async () => {
   const directory = await makePrivateDir('.cliq-artifact-query-retirement-');
   // Same real Store/CAS seam in an independent process: the injected negative
   // observation follows FileHandle.close; it never fabricates death or a join.
@@ -194,7 +200,11 @@ test('an uncertain actual artifact close remains sticky and retains the original
         const handle = await originalOpen(...args);
         if (args[0] === target) {
           const actualClose = handle.close.bind(handle);
-          handle.close = async () => { await actualClose(); actualCloses += 1; throw failure; };
+          handle.close = async () => {
+            await actualClose(); actualCloses += 1;
+            store.beginClose();
+            throw failure;
+          };
         }
         return handle;
       };

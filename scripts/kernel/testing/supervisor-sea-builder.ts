@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
-import { chmod, copyFile, open, readFile, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, lstat, open, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { build } from 'esbuild';
 import { inject } from 'postject';
@@ -27,6 +27,8 @@ export async function prepareSupervisorSeaCarrier(fixture: string, cachedArchive
   const checksum = SUPERVISOR_SEA_CARRIER_CHECKSUMS[platform];
   assert(checksum, `no qualified SEA carrier for ${platform}`);
   const archiveName = `node-v${SUPERVISOR_SEA_NODE_VERSION}-${platform}.tar.xz`;
+  const nodeRoot = path.join(fixture, `node-v${SUPERVISOR_SEA_NODE_VERSION}-${platform}`);
+  await assert.rejects(lstat(nodeRoot), { code: 'ENOENT' }, 'carrier extraction directory must not already exist');
   // A read-only cache is still checked in full before fresh extraction; never
   // reuse/adopt an already extracted executable or native-header directory.
   const archive = cachedArchive ? await readFile(cachedArchive) : await (async () => {
@@ -38,8 +40,9 @@ export async function prepareSupervisorSeaCarrier(fixture: string, cachedArchive
   assert.equal(createHash('sha256').update(archive).digest('hex'), checksum, 'official carrier checksum mismatch');
   const archivePath = path.join(fixture, archiveName);
   await writeFile(archivePath, archive, { flag: 'wx', mode: 0o600 });
-  run(fixture, 'tar', ['-xJf', archivePath, '-C', fixture]);
-  const nodeRoot = path.join(fixture, `node-v${SUPERVISOR_SEA_NODE_VERSION}-${platform}`);
+  // Create fresh files owned by this builder, including when invoked as root;
+  // archived publisher uid/gid are not local protected-source authority.
+  run(fixture, 'tar', ['--no-same-owner', '-xJf', archivePath, '-C', fixture]);
   const carrier = path.join(nodeRoot, 'bin/node');
   assert.equal(run(fixture, carrier, ['--version']).stdout.trim(), `v${SUPERVISOR_SEA_NODE_VERSION}`);
   return { nodeRoot, carrier };
@@ -67,8 +70,8 @@ export async function buildSupervisorSeaImage(input: {
   { flag: 'wx', mode: 0o600 });
   run(input.fixture, input.carrier, ['--experimental-sea-config', configuration]);
   await copyFile(input.carrier, input.executable, constants.COPYFILE_EXCL);
-  // Root extraction preserves the official carrier's archived UID/GID, and
-  // Node 22 copyFile can copy them too. Own only this newly created image;
+  // Keep explicit ownership on this newly created copy independently of the
+  // carrier extraction policy and platform copyFile metadata behavior;
   // never relax the fresh-package transfer oracle or chown the carrier tree.
   const image = await open(input.executable, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {

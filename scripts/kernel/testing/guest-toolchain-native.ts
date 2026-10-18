@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createHash, generateKeyPairSync, sign } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { constants, fstatSync, readdirSync, readlinkSync } from 'node:fs';
 import { copyFile, open, readFile, rm, type FileHandle } from 'node:fs/promises';
 import { Module } from 'node:module';
@@ -7,10 +7,14 @@ import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { canonicalSha256 } from '../../../src/kernel/canonical.js';
 import { parseJsonStrict } from '../../../src/kernel/json.js';
+import { testFixture } from '../../../src/model/testing/fixtures.js';
 import { GUEST_EXTRACTOR_RECIPE, type NativeGuestExtractionInput, type NativeGuestExtractorBinding,
   type NativeGuestToolchain } from '../../../src/sandbox/guest-toolchain.js';
-import { verifyRuntimeBundle, type RuntimeBundleManifest } from '../../../src/policy/runtime-authority.js';
+import { verifyRuntimeBundle } from '../../../src/policy/runtime-authority.js';
 import type { NativeWorkerBinding } from '../../../src/sandbox/linux-worker.js';
+import { signedLinuxWorkerTestRuntime } from '../../../src/sandbox/testing/worker-runtime.js';
+import { fixtureSandboxProfile } from '../../../src/state/testing/worker-launch.js';
+import { builtinInputContracts } from '../../../src/tools/builtin-inputs.js';
 
 /** Actual signed test extractor, owned complete raw image and real native-owned joins. No StateOwner,
  * release authority, admission proof or child execution is fabricated here. */
@@ -18,18 +22,21 @@ export async function qualifyGuestToolchainExtraction(input: { installationRoot:
   assert.equal(process.platform, 'linux', 'native guest qualification cannot be skipped');
   const bytes = await readFile(path.join(input.installationRoot, 'linux-guest-extractor.node'));
   const digest = createHash('sha256').update(bytes).digest('hex');
-  const keys = generateKeyPairSync('ed25519');
-  const bundle: RuntimeBundleManifest = { schemaVersion: 1, bundleVersion: 'actual-guest-extractor-ci-v1',
-    controlProtocolRange: { min: 1, max: 1 }, headlessSchemaRange: { min: 1, max: 1 },
-    stateSchemaRange: { min: 1, max: 1 }, workerProtocolRange: { min: 1, max: 1 },
-    entries: [{ entryId: GUEST_EXTRACTOR_RECIPE.entryId, role: 'platform_helper',
-      relativePath: GUEST_EXTRACTOR_RECIPE.relativePath, digest, byteCount: bytes.length, executable: true, version: '1' }],
-    structuredArtifacts: [], guestToolchainManifestRefs: [], publisherKeyId: 'actual-guest-extractor-ci', manifestDigest: '', signature: '' };
-  const { manifestDigest: _digest, signature: _signature, ...core } = bundle;
-  bundle.manifestDigest = canonicalSha256(core);
-  bundle.signature = sign(null, Buffer.from(`cliq-runtime-bundle-v1\0${bundle.manifestDigest}`), keys.privateKey).toString('base64');
-  verifyRuntimeBundle(bundle, [{ keyId: bundle.publisherKeyId,
-    publicKeyPem: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString() }]);
+  // Keep the production bundle verifier: a signed addon-only object is not a
+  // RuntimeBundle. Reuse the same complete, actual-image CI closure as the
+  // later verifier campaign, without creating a StateOwner, Run or receipt.
+  const builtin = builtinInputContracts.edit;
+  const signed = await signedLinuxWorkerTestRuntime({ ...input, assembly: testFixture().assembly,
+    sandboxProfile: fixtureSandboxProfile(), tools: [{ name: builtin.name, version: '1',
+      description: 'Edit the isolated campaign workspace', access: builtin.access,
+      inputSchemaRef: canonicalSha256(builtin.inputSchema), inputSchemaDigest: canonicalSha256(builtin.inputSchema),
+      replayClass: builtin.replayClass,
+      execution: { kind: 'builtin', adapterId: 'edit', adapterVersion: '1', adapterCodeDigest: '' } }] });
+  verifyRuntimeBundle(signed.bundle, signed.releaseKeys);
+  const selected = signed.bundle.entries.filter(entry => entry.entryId === GUEST_EXTRACTOR_RECIPE.entryId);
+  assert.equal(selected.length, 1);
+  assert.deepEqual(selected[0], { entryId: GUEST_EXTRACTOR_RECIPE.entryId, role: 'platform_helper',
+    relativePath: GUEST_EXTRACTOR_RECIPE.relativePath, digest, byteCount: bytes.length, executable: true, version: '1' });
   const handles: FileHandle[] = [];
   async function hold(filename: string) {
     const handle = await open(filename, constants.O_RDONLY | constants.O_NOFOLLOW);

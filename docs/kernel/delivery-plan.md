@@ -282,6 +282,48 @@ extractor-private `revoke` name collision with the system declaration. The
 local rename is not yet Linux-qualified; no installed verifier case is inferred
 from the passing lower-level tests.
 
+Checkpoint `67c7327a0df300804f004f3c6f1893a29ed05ae0` passed build and all
+2,238 local tests, plus twenty design/protocol guard tests, without failures,
+skips or cancellations. Its
+[run 39102873007](https://github.com/cogine-ai/cliq-agent/actions/runs/39102873007)
+finished with fourteen passing jobs and four failures; all four TypeScript
+matrix jobs passed. Native image compilation passed. The native lifecycle
+campaign explicitly passed twenty-four scenarios, then failed the original
+`close-during-factory-open` assertion: shutdown supplied a default AbortError
+instead of `LEASE_FENCED`. The remaining seven scenarios did not execute.
+The separate guest campaign built its image, then rejected the extractor
+fixture's incomplete RuntimeBundle before extraction. The installed verifier
+campaign stopped earlier, constructing its guest package: root extraction
+preserved the checksum-pinned archive's publisher uid, which the existing
+protected-source check correctly refused. Neither verifier campaign supplies
+execution or artifact-download qualification.
+
+The received-tool campaign's original service and all retained writers now
+join successfully, with the original graceful-release/successor-owner lineage
+intact. Its successor still fails the unchanged thirty-second completion
+deadline: the last cut is queued/verify, nine Journal rows are completed, and
+no finalize cut was observed. This is not evidence of a result-finalizer or
+stop-timeout failure. The independent full journey reached its retained-corpus
+scan, but CAS inventory entry 1,025 triggered the unchanged 1,024-entry guard;
+no clean corpus is inferred. The final closed-report capture digest is
+`64aa935dd09b66d219d1301951c54858c8aee89fcd80b84a3596054a50d0b71b`.
+Only allowlisted JSON reports are retained, not raw logs, archives, StateRoot
+contents, WAL or credentials. Local fixes and further diagnostics still need
+their own exact-source Linux validation.
+
+The follow-up retains every original acceptance bound and full corpus scan.
+Ordinary `run.get` polling now reuses its authenticated connection rather than
+creating three fresh identity objects per poll. Planned rotation includes the
+hello in the unchanged 1,024-frame client budget, joins the old connection,
+and shares the original read deadline; socket failures never trigger reconnect
+or replay. Explicit fresh-client, admission-replay and actual-restart checks
+remain separate. Failed campaigns also retain the existing closed shutdown
+phase/count observation when their original process stops successfully. That
+observation describes the real stop boundary, not the earlier timeout cut.
+Neither change yet proves the CAS-overbreadth or successor-completion blocker
+resolved on Linux. Repeated full-recovery reads are measured separately;
+the sticky original-execution retirement gate and complete hashes remain.
+
 The next consumer batch adds authenticated `artifact.get`: only registered
 objects in the genuine principal's exact StateRoot are readable, and a complete
 CAS hash/identity/resource join precedes every short response. Current pages

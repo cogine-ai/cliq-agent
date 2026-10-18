@@ -3061,7 +3061,10 @@ export class StateStore {
     // while listeners/opening resources are being joined.
     this.closeRequested = true;
     clearTimeout(this.installedMaintenanceTimer); this.installedMaintenanceTimer = undefined;
-    for (const task of this.installedAdmissionTasks) task.abort.abort();
+    // Closing revokes this Store's producers with the same typed fence used
+    // by new calls; the signal is cancellation, never proof of their join.
+    for (const task of this.installedAdmissionTasks)
+      task.abort.abort(new KernelStorageError('LEASE_FENCED', 'StateStore is closing or closed'));
     for (const task of this.sourceInspectionTasks) task.abort.abort();
     const credential = installedCredentialFinalizers.get(this);
     if (credential?.inspection && !credential.inspectionJoin) {

@@ -17,7 +17,7 @@ const persistentLiteral = /^const persistentClientScript = (`[\s\S]*?`);/mu.exec
 const persistentClientScript = vm.runInNewContext(persistentLiteral); assert.equal(typeof persistentClientScript, 'string');
 const hello = { protocolVersion: 1, method: 'control.hello' };
 const mutation = { protocolVersion: 1, method: 'run.submit', requestId: 'test-request-once' };
-const helloReply = JSON.stringify({ protocolVersion: 1, ok: true, result: { method: 'control.hello' } });
+const helloReply = JSON.stringify({ protocolVersion: 1, ok: true, result: { method: 'control.hello', supervisorInstanceId: 'fixture-owner' } });
 
 test('stop diagnosis retains only fixed phases and bounded counts, never journal text or execution evidence', () => {
   // Journal output is ordinary untrusted input here. This parser regression
@@ -56,11 +56,11 @@ socket.once('error',error=>process.stderr.write('client-connect-observation:'+er
 async function fixture(t) {
   const directory = await mkdtemp('/tmp/cliq-run-client-'), socketPath = path.join(directory, 'control.sock');
   const sockets = new Set(), children = new Set(); let server;
-  const requests = []; let connections = 0;
+  const requests = []; let connections = 0, closedConnections = 0;
   async function listen(onRequest) {
     assert.equal(server, undefined);
     server = net.createServer(socket => {
-      connections++; sockets.add(socket); socket.once('close', () => sockets.delete(socket));
+      connections++; sockets.add(socket); socket.once('close', () => { sockets.delete(socket); closedConnections++; });
       socket.on('error', () => {});
       let input = Buffer.alloc(0);
       socket.on('data', chunk => {
@@ -101,8 +101,9 @@ async function fixture(t) {
     });
     return { result, firstConnectFailure };
   }
-  function persistent() {
-    const child = spawn(process.execPath, ['--input-type=module', '-e', persistentClientScript, socketPath],
+  function persistent(requireLiveClose = false) {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', persistentClientScript, socketPath,
+      ...(requireLiveClose ? ['live-close'] : [])],
       { stdio: ['pipe', 'pipe', 'pipe'] });
     children.add(child);
     let stdout = '', stderr = '', waiting;
@@ -138,13 +139,131 @@ async function fixture(t) {
     if (server) await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
     await rm(directory, { recursive: true, force: true });
   });
-  return { listen, client, persistent, requests, get connections() { return connections; } };
+  return { listen, client, persistent, requests, get connections() { return connections; },
+    get closedConnections() { return closedConnections; } };
 }
 
 function respond(socket, text = helloReply) {
   const body = Buffer.from(text), header = Buffer.alloc(4); header.writeUInt32BE(body.length);
   socket.write(Buffer.concat([header, body]));
 }
+
+async function readObserver(value) {
+  const module = ts.transpileModule(readFileSync(new URL('./installed-run-observer.ts', import.meta.url), 'utf8'),
+    { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText;
+  const { createInstalledRunObserver } = await import(`data:text/javascript;base64,${Buffer.from(module).toString('base64')}`);
+  return createInstalledRunObserver(async () => {
+    const client = value.persistent(true); assert.equal(await client.line(), 'connected');
+    const send = async (request, timeout) => {
+      client.child.stdin.write(`${JSON.stringify(request)}\n`);
+      let timer;
+      try { return JSON.parse(JSON.parse(await Promise.race([client.line(), new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('actual observer reply deadline expired')), timeout);
+      })]))); } finally { clearTimeout(timer); }
+    };
+    const handshake = await send(hello, 5000);
+    return { send, supervisorInstanceId: handshake.result.supervisorInstanceId, close: async () => {
+      client.child.stdin.end(); const exit = await client.result;
+      assert.equal(exit.code, 0, exit.stderr); assert.equal(exit.signal, null);
+    } };
+  });
+}
+
+test('ordinary Run observer reads independent cuts on one real socket and joins before it closes', { timeout: 10000 }, async t => {
+  const value = await fixture(t); let reads = 0;
+  await value.listen((socket, request) => respond(socket, request.method === 'control.hello' ? helloReply
+    : JSON.stringify({ protocolVersion: 1, ok: true, result: { method: 'run.get', cut: ++reads } })));
+  const observer = await readObserver(value);
+  const first = await observer.read('first'), second = await observer.read('second');
+  assert.equal(first.response.result.cut, 1); assert.equal(second.response.result.cut, 2);
+  assert.equal(first.supervisorInstanceId, 'fixture-owner'); assert.equal(second.supervisorInstanceId, 'fixture-owner');
+  await observer.close();
+  assert.equal(value.connections, 1);
+  assert.deepEqual(value.requests, [hello, { protocolVersion: 1, method: 'run.get', runId: 'first' },
+    { protocolVersion: 1, method: 'run.get', runId: 'second' }]);
+  await assert.rejects(observer.read('after-close'));
+});
+
+test('ordinary Run observer counts hello in its 1024-frame budget and joins before a planned read-only rotation', { timeout: 10000 }, async t => {
+  const value = await fixture(t); let ordinal = 0;
+  await value.listen((socket, request) => {
+    if (value.connections === 2) assert.equal(value.closedConnections, 1, 'the original actual socket must join before the next connection');
+    respond(socket, request.method === 'control.hello' ? JSON.stringify({ protocolVersion: 1, ok: true,
+      result: { method: 'control.hello', supervisorInstanceId: value.connections === 1 ? 'first-owner' : 'rotated-owner' } })
+      : JSON.stringify({ protocolVersion: 1, ok: true, result: { method: 'run.get', cut: ++ordinal } }));
+  });
+  const observer = await readObserver(value);
+  for (let index = 0; index < 1023; index++) assert.equal((await observer.read('retained')).response.result.cut, index + 1);
+  assert.equal(value.connections, 1); assert.equal(value.requests.length, 1024);
+  const rotated = await observer.read('after-budget');
+  assert.equal(rotated.response.result.cut, 1024); assert.equal(rotated.supervisorInstanceId, 'rotated-owner');
+  await observer.close();
+  assert.equal(value.connections, 2); assert.equal(value.requests.length, 1026);
+  assert.equal(value.requests.filter(request => request.method === 'control.hello').length, 2);
+  assert.equal(value.requests.every(request => ['control.hello', 'run.get'].includes(request.method)), true);
+});
+
+test('ordinary Run observer does not reset its original read deadline while rotating and handshaking', { timeout: 10000 }, async t => {
+  const value = await fixture(t);
+  await value.listen((socket, request) => {
+    if (request.method === 'control.hello' && value.connections === 2) setTimeout(() => respond(socket), 150);
+    else respond(socket, request.method === 'control.hello' ? helloReply
+      : JSON.stringify({ protocolVersion: 1, ok: true, result: { method: 'run.get' } }));
+  });
+  const observer = await readObserver(value);
+  for (let index = 0; index < 1023; index++) await observer.read('retained');
+  await assert.rejects(observer.read('must-not-send-after-deadline', 50), /deadline/u);
+  await assert.rejects(observer.read('must-not-reconnect'));
+  await observer.close();
+  assert.equal(value.connections, 2); assert.equal(value.requests.length, 1025);
+  assert.equal(value.requests.at(-1).method, 'control.hello');
+});
+
+test('ordinary Run observer never reconnects or resends after its real socket fails', { timeout: 10000 }, async t => {
+  const value = await fixture(t);
+  await value.listen((socket, request) => request.method === 'control.hello' ? respond(socket) : socket.destroy());
+  const observer = await readObserver(value);
+  await assert.rejects(observer.read('once'));
+  await assert.rejects(observer.read('never-sent'));
+  await assert.rejects(observer.close());
+  assert.equal(value.connections, 1);
+  assert.deepEqual(value.requests, [hello, { protocolVersion: 1, method: 'run.get', runId: 'once' }]);
+});
+
+test('ordinary Run observer cannot disguise an already closed peer as a clean budget rotation', { timeout: 10000 }, async t => {
+  const value = await fixture(t); let closedResolve;
+  const closed = new Promise(resolve => { closedResolve = resolve; });
+  await value.listen((socket, request) => {
+    respond(socket, request.method === 'control.hello' ? helloReply
+      : JSON.stringify({ protocolVersion: 1, ok: true, result: { method: 'run.get' } }));
+    if (value.requests.length === 1024) { socket.once('close', closedResolve); socket.end(); }
+  });
+  const observer = await readObserver(value);
+  for (let index = 0; index < 1023; index++) await observer.read('retained');
+  await closed;
+  await assert.rejects(observer.read('must-not-rotate-after-peer-loss'));
+  await assert.rejects(observer.read('must-not-reconnect'));
+  await assert.rejects(observer.close());
+  assert.equal(value.connections, 1); assert.equal(value.requests.length, 1024);
+});
+
+test('ordinary Run observer refuses concurrent reads and joins the actual in-flight read before close', { timeout: 10000 }, async t => {
+  const value = await fixture(t); let release, enteredResolve;
+  const entered = new Promise(resolve => { enteredResolve = resolve; });
+  await value.listen((socket, request) => {
+    if (request.method === 'control.hello') respond(socket);
+    else { release = () => respond(socket, JSON.stringify({ protocolVersion: 1, ok: true, result: { method: 'run.get' } })); enteredResolve(); }
+  });
+  const observer = await readObserver(value), original = observer.read('original');
+  await entered;
+  await assert.rejects(observer.read('concurrent'));
+  let joined = false; const closing = observer.close().then(() => { joined = true; });
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(joined, false);
+  assert.equal(value.closedConnections, 0); release();
+  await original; await closing;
+  assert.equal(value.connections, 1);
+  assert.deepEqual(value.requests, [hello, { protocolVersion: 1, method: 'run.get', runId: 'original' }]);
+});
 
 test('ordinary non-retrying client fails on absence; hello-only client joins after an observed absent socket becomes ready', { timeout: 10000 }, async t => {
   const value = await fixture(t);
@@ -249,6 +368,18 @@ test('persistent public client closes and joins its original socket when its own
   original.child.stdin.end();
   const joined = await original.result;
   assert.equal(joined.code, 0, joined.stderr); assert.equal(joined.signal, null); assert.equal(joined.stderr, '');
+  assert.equal(value.connections, 1); assert.deepEqual(value.requests, [hello]);
+});
+
+test('an explicitly closed idle public peer retains the separate shutdown-client join behavior', { timeout: 10000 }, async t => {
+  const value = await fixture(t); let closedResolve;
+  const closed = new Promise(resolve => { closedResolve = resolve; });
+  await value.listen(socket => { socket.once('close', closedResolve); respond(socket); socket.end(); });
+  const client = value.persistent(); assert.equal(await client.line(), 'connected');
+  client.child.stdin.write(`${JSON.stringify(hello)}\n`);
+  assert.equal(JSON.parse(await client.line()), helloReply); await closed;
+  client.child.stdin.end(); const exit = await client.result;
+  assert.equal(exit.code, 0, exit.stderr); assert.equal(exit.signal, null);
   assert.equal(value.connections, 1); assert.deepEqual(value.requests, [hello]);
 });
 

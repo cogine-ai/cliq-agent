@@ -26,6 +26,7 @@ import { CredentialSecretCorpusError, scanCredentialSecretCorpus } from './testi
 import { assertInstalledWorkerLeaseRenewed, inspectInstalledWorkerIdentity, inspectInstalledWorkerLease,
   inspectInstalledWorkerRetirement, type InstalledWorkerIdentityInspection } from './testing/installed-worker-lease.js';
 import { inspectInstalledOwnerHistory } from './testing/installed-read-control.js';
+import { createInstalledRunObserver } from './testing/installed-run-observer.js';
 import { qualifyInstalledOwnerLinks } from './testing/installed-owner-history.js';
 import { projectInstalledRunProgress, projectInstalledServiceExit, projectInstalledSupervisorStatus } from '../../src/sandbox/testing/installed-run-progress.js';
 import { decodeFinalCandidateItem, decodeRunResult, decodeVerificationClosure, decodeVerifierPlan, decodeWorkspaceDiff } from '../../src/state/result-artifacts.js';
@@ -147,6 +148,7 @@ finally{socket.destroy();await closed;}console.log(JSON.stringify(reply));`;
 // creation is refused; new connection identities themselves publish to CAS.
 const persistentClientScript = `import assert from 'node:assert/strict';import net from 'node:net';
 import {createInterface} from 'node:readline';
+const requireLiveClose=process.argv[2]==='live-close';assert(process.argv[2]===undefined||requireLiveClose);
 const socket=net.createConnection(process.argv[1]);let input=Buffer.alloc(0),waiter,error,count=0;
 const closed=new Promise(resolve=>socket.once('close',resolve));
 socket.on('data',chunk=>{try{input=Buffer.concat([input,chunk]);assert(input.length<=1048580);
@@ -160,7 +162,8 @@ try{await new Promise((resolve,reject)=>{socket.once('connect',resolve);socket.o
 console.log('connected');const lines=createInterface({input:process.stdin,crlfDelay:Infinity});
 for await(const line of lines){assert(++count<=1024&&!waiter&&!error);const body=Buffer.from(line);assert(body.length>=1&&body.length<=1048576);
 const header=Buffer.alloc(4);header.writeUInt32BE(body.length);const text=await new Promise((resolve,reject)=>{
-waiter={resolve,reject};socket.write(Buffer.concat([header,body]));});console.log(JSON.stringify(text));}}
+waiter={resolve,reject};socket.write(Buffer.concat([header,body]));});console.log(JSON.stringify(text));}
+if(requireLiveClose)assert(!error,'the original public peer failed before planned client close');}
 finally{socket.destroy();await closed;}`;
 
 async function campaign(filename: string, mode: CampaignMode): Promise<void> {
@@ -314,14 +317,23 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
     assert.equal(response.protocolVersion, 1); assert.equal(response.ok, true, `actual installed ${method} must be enabled and accepted`);
     assert(response.result && response.result.method === method); return response.result;
   };
-  const persistentClient = async () => {
+  const persistentClient = async (timeout?: number, requireLiveClose = false) => {
+    assert(timeout === undefined || (Number.isSafeInteger(timeout) && timeout > 0 && timeout <= 30000));
+    const deadline = timeout === undefined ? undefined : performance.now() + timeout;
+    const remainingHandshake = () => {
+      if (deadline === undefined) return 5000;
+      const remaining = deadline - performance.now();
+      assert(remaining > 0, 'original public client handshake exhausted its original read budget');
+      return Math.min(5000, Math.ceil(remaining));
+    };
     const outScan = scanner.openStream();
     let errorScan: ReturnType<typeof scanner.openStream>;
     try { errorScan = scanner.openStream(); } catch (error) { outScan.close(); throw error; }
     let child: ChildProcessWithoutNullStreams;
     try {
       child = spawn('/usr/sbin/runuser', [...prefix, process.execPath, '--input-type=module', '-e', persistentClientScript,
-        path.join(recipe.stateRoot, 'runtime/control-v1.sock')], { env: environment, cwd: ledger.home, stdio: ['pipe', 'pipe', 'pipe'] });
+        path.join(recipe.stateRoot, 'runtime/control-v1.sock'), ...(requireLiveClose ? ['live-close'] : [])],
+      { env: environment, cwd: ledger.home, stdio: ['pipe', 'pipe', 'pipe'] });
     } catch (error) { outScan.close(); errorScan.close(); throw error; }
     let output = '', errorBytes = 0, failure: unknown, readyResolve!: () => void, readyReject!: (error: unknown) => void;
     let pending: { resolve(text: string): void; reject(error: unknown): void } | undefined;
@@ -386,10 +398,24 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
     };
     try {
       await bounded(Promise.race([ready, closed.then(() => { throw new Error('original public client closed before readiness'); })]),
-        5000, 'original public client did not connect');
-      accepted(await send(hello), 'control.hello'); return { send, close, joinAfterPeerShutdown };
+        remainingHandshake(), 'original public client did not connect');
+      const handshake = accepted(await send(hello, remainingHandshake()), 'control.hello');
+      remainingHandshake(); assert(typeof handshake.supervisorInstanceId === 'string');
+      return Object.freeze({ send, close, joinAfterPeerShutdown, supervisorInstanceId: handshake.supervisorInstanceId });
     } catch (error) { try { await close(); } catch {} throw error; }
   };
+  const openRunObserverClient = (timeout: number) => persistentClient(timeout, true);
+  let runObserver = createInstalledRunObserver(openRunObserverClient);
+  const closeRunObserver = async () => {
+    await runObserver.close();
+    // Only an explicit campaign lifecycle boundary can create a new observer.
+    // It remains disconnected until a read after the existing readiness gate.
+    // A failed observer never reconnects itself or resends any request.
+    runObserver = createInstalledRunObserver(openRunObserverClient);
+  };
+  const observeRun = async (runId: string, timeout = 30000) =>
+    accepted((await runObserver.read(runId, timeout)).response, 'run.get');
+  const freshRun = (runId: string) => accepted(exchange([{ protocolVersion: 1, method: 'run.get', runId }])[0]!, 'run.get');
   const show = (unit: string) => {
     const result = command('/usr/bin/systemctl', ['--user', 'show', unit, '--property=Id,ActiveState,SubState,MainPID,ExecMainPID,InvocationID,ControlGroup,Type,Delegate,KillMode,Result,ExecMainCode,ExecMainStatus,TimeoutStopUSec', '--no-pager']);
     assert.equal(result.status, 0); return Object.fromEntries(result.stdout.trim().split('\n').map(line => {
@@ -1510,6 +1536,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       const blockerCancel = request({ protocolVersion: 1, method: 'run.cancel', requestId: '019a0012-0000-7000-8000-000000000210',
         runId: blockerRun.id, expectedRevision: blocker.snapshot.run.revision });
       const blockerCancelReply = await client.send(blockerCancel); accepted(blockerCancelReply, 'run.cancel');
+      await closeRunObserver();
       assert.equal(command('/usr/bin/systemctl', ['--user', 'restart', services.supervisorUnit], undefined, 30000).status, 0);
       const blockerSuccessor = show(services.supervisorUnit);
       assert.notEqual(blockerSuccessor.MainPID, supervisorBefore.MainPID); assert.notEqual(blockerSuccessor.InvocationID, supervisorBefore.InvocationID);
@@ -2935,10 +2962,11 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
     assert.equal(admitted.status, 'queued'); assert.equal(admitted.revision, 1);
     if (!failureOnly && !retryOnly) report.unauthorizedAdmissionRefused = { qualified: true, refusalCode: 'AUTHORIZATION_REQUIRED',
       fixedReason: 'run.model_authority_refused', noProviderRequest: true, sameAdmissionKeySubsequentlyAccepted: true };
-    // The submission client has exited and closed its actual socket. All
-    // further observation uses a fresh native authenticated connection.
-    const read = () => {
-      const cut = accepted(exchange([{ protocolVersion: 1, method: 'run.get', runId: admitted.id }])[0]!, 'run.get');
+    // The submission client has exited and closed its actual socket. Ordinary
+    // polling owns a separate real connection; explicit reconnect/replay cuts
+    // below still open fresh native authenticated connections.
+    const read = async () => {
+      const cut = await observeRun(admitted.id);
       report.lastPublicCut = projectInstalledRunProgress(cut, { requestsReceived, providerFailure });
       return cut;
     };
@@ -3015,6 +3043,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       assert.deepEqual((await publicRead()).journal, settled.journal); assert.deepEqual(currentSession(), session);
       await storageClient.close(); storageClient = undefined;
       mark('settled_unknown_actual_successor_then_public_cancellation');
+      await closeRunObserver();
       assert.equal(command('/usr/bin/systemctl', ['--user', 'restart', services.supervisorUnit], undefined, 30000).status, 0);
       const successor = show(services.supervisorUnit), recoverBy = Date.now() + 30000;
       assert.notEqual(successor.MainPID, sameSupervisor.MainPID); assert.notEqual(successor.InvocationID, sameSupervisor.InvocationID);
@@ -3023,7 +3052,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       await selectedSupervisor(services.supervisorUnit, successor, path.join(recipe.stateRoot, 'runtime/bundles', bundleDigest, 'supervisor'), recoverBy);
       let recovered: Record<string, any>;
       for (;;) {
-        await delay(50); recovered = read(); assert.deepEqual(recovered.journal, settled.journal);
+        await delay(50); recovered = await read(); assert.deepEqual(recovered.journal, settled.journal);
         if (recovered.snapshot.run.status === 'queued' && !recovered.snapshot.run.activeWorkerLaunchId) break;
         assert(Date.now() < recoverBy, 'the successor did not physically retire the original worker');
       }
@@ -3035,7 +3064,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       const terminalBy = Date.now() + 15000;
       let terminal: Record<string, any>;
       for (;;) {
-        await delay(50); terminal = read(); assert.deepEqual(terminal.journal, settled.journal);
+        await delay(50); terminal = await read(); assert.deepEqual(terminal.journal, settled.journal);
         assert.equal(requestsReceived, 1); assert.equal(acceptedTcpConnections, 1); assert.equal(acceptedTlsConnections, 1); assert(!providerFailure);
         if (terminal.snapshot.run.status === 'cancelled') break;
         assert(Date.now() < terminalBy, 'the successor could not complete proof-backed cancellation');
@@ -3055,12 +3084,13 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       assert.equal(sessionCut.snapshot.session.contextRevision, session.contextRevision + 1);
       assert.equal(sessionCut.snapshot.session.latestItemSeq, session.latestItemSeq + 1);
       assert.deepEqual(exchange([cancel])[0], cancelReply); assert.deepEqual(exchange([submit])[0], submitReply);
+      await closeRunObserver();
       assert.equal(command('/usr/bin/systemctl', ['--user', 'restart', services.supervisorUnit], undefined, 30000).status, 0);
       const terminalSupervisor = show(services.supervisorUnit), terminalReadyBy = Date.now() + 30000;
       assert.notEqual(terminalSupervisor.MainPID, successor.MainPID); assert.notEqual(terminalSupervisor.InvocationID, successor.InvocationID);
       await selectedSupervisor(services.supervisorUnit, terminalSupervisor,
         path.join(recipe.stateRoot, 'runtime/bundles', bundleDigest, 'supervisor'), terminalReadyBy);
-      assert.deepEqual(read(), terminal); assert.deepEqual(exchange([cancel])[0], cancelReply);
+      assert.deepEqual(freshRun(admitted.id), terminal); assert.deepEqual(exchange([cancel])[0], cancelReply);
       assert.deepEqual(accepted(exchange([{ protocolVersion: 1, method: 'session.get', sessionId: session.id,
         afterItemSeq: session.latestItemSeq }])[0]!, 'session.get'), sessionCut);
       assert.equal(requestsReceived, 1); assert.equal(acceptedTcpConnections, 1); assert.equal(acceptedTlsConnections, 1); assert(!providerFailure);
@@ -3076,7 +3106,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       const candidateBy = Date.now() + 15000;
       let candidate: Record<string, any>;
       for (;;) {
-        await delay(50); candidate = read(); assert(!providerFailure);
+        await delay(50); candidate = await read(); assert(!providerFailure);
         if (candidate.journal.at(-1)?.phase === 'unknown') break;
         assert(Date.now() < candidateBy, 'the genuine native refusal did not retain its original unknown worker');
       }
@@ -3087,8 +3117,8 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
         admissionKey: randomBytes(32).toString('base64url'), expectedContextRevision: currentSession().contextRevision,
         objective: 'Stop truthfully if the original model credential is revoked before dispatch.' });
       const queuedReply = exchange([queuedRequest])[0]!, queued = accepted(queuedReply, 'run.submit').snapshot.run;
-      const readQueued = () => accepted(exchange([{ protocolVersion: 1, method: 'run.get', runId: queued.id }])[0]!, 'run.get');
-      const beforeRevoke = readQueued();
+      const readQueued = async () => observeRun(queued.id);
+      const beforeRevoke = await readQueued();
       assert.equal(beforeRevoke.snapshot.run.status, 'queued'); assert.equal(beforeRevoke.snapshot.run.activeWorkerLaunchId, undefined);
       assert.deepEqual(beforeRevoke.journal, []); assert.equal(requestsReceived, 1);
       mark('revoke_real_credential_after_admission_before_dispatch');
@@ -3099,12 +3129,13 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       const revokedPlatform = observe(); assert.deepEqual(revokedPlatform.items, []);
       assert.equal(revokedPlatform.nameOwner, enrolledPlatform.nameOwner); assert.equal(revokedPlatform.servicePid, enrolledPlatform.servicePid);
       const cancel = request({ protocolVersion: 1, method: 'run.cancel', requestId: '019a0012-0000-7000-8000-000000000127',
-        runId: admitted.id, expectedRevision: read().snapshot.run.revision });
+        runId: admitted.id, expectedRevision: (await read()).snapshot.run.revision });
       const cancelReply = exchange([cancel])[0]!; accepted(cancelReply, 'run.cancel');
       // Broker close is not old-process-domain death. Only the real successor
       // may close this settled UNKNOWN after proving the original lifetime.
-      const beforeDomainRestart = read(); assert.equal(beforeDomainRestart.snapshot.run.cancelRequested, true);
+      const beforeDomainRestart = await read(); assert.equal(beforeDomainRestart.snapshot.run.cancelRequested, true);
       assert.notEqual(beforeDomainRestart.snapshot.run.status, 'cancelled');
+      await closeRunObserver();
       assert.equal(command('/usr/bin/systemctl', ['--user', 'restart', services.supervisorUnit], undefined, 30000).status, 0);
       const stopSuccessor = show(services.supervisorUnit);
       assert.notEqual(stopSuccessor.MainPID, supervisorBefore.MainPID); assert.notEqual(stopSuccessor.InvocationID, supervisorBefore.InvocationID);
@@ -3114,7 +3145,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       const terminalBy = Date.now() + 30000;
       let firstTerminal: Record<string, any>, refusedTerminal: Record<string, any>;
       for (;;) {
-        await delay(50); firstTerminal = read(); refusedTerminal = readQueued();
+        await delay(50); firstTerminal = await read(); refusedTerminal = await readQueued();
         assert(!providerFailure); assert.equal(requestsReceived, 1, 'a revoked credential must never reach the provider');
         if (firstTerminal.snapshot.run.status === 'cancelled' && refusedTerminal.snapshot.run.status === 'failed') break;
         assert(Date.now() < terminalBy, 'authority refusal retained the only execution lane instead of retiring');
@@ -3153,13 +3184,14 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       assert.deepEqual(published.map(item => [item.runId, item.status]), [[admitted.id, 'cancelled'], [queued.id, 'failed']]);
       assert.deepEqual(exchange([queuedRequest])[0], queuedReply); assert.deepEqual(exchange([cancel])[0], cancelReply);
       mark('revoked_credential_terminal_history_after_real_restart');
+      await closeRunObserver();
       assert.equal(command('/usr/bin/systemctl', ['--user', 'restart', services.supervisorUnit], undefined, 30000).status, 0);
       const successor = show(services.supervisorUnit), retainedKeeper = show(services.keeperUnit), recoverBy = Date.now() + 30000;
       assert.notEqual(successor.MainPID, stopSuccessor.MainPID); assert.notEqual(successor.InvocationID, stopSuccessor.InvocationID);
       assert.equal(retainedKeeper.MainPID, keeperBefore.MainPID); assert.equal(retainedKeeper.InvocationID, keeperBefore.InvocationID);
       await selectedSupervisor(services.supervisorUnit, successor,
         path.join(recipe.stateRoot, 'runtime/bundles', bundleDigest, 'supervisor'), recoverBy);
-      assert.deepEqual(read(), firstTerminal); assert.deepEqual(readQueued(), refusedTerminal);
+      assert.deepEqual(freshRun(admitted.id), firstTerminal); assert.deepEqual(freshRun(queued.id), refusedTerminal);
       assert.deepEqual(exchange([queuedRequest])[0], queuedReply); assert.deepEqual(exchange([cancel])[0], cancelReply);
       assert.deepEqual(accepted(exchange([{ protocolVersion: 1, method: 'session.get', sessionId: session.id,
         afterItemSeq: session.latestItemSeq }])[0]!, 'session.get'), sessionCut);
@@ -3180,7 +3212,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       const failedBy = Date.now() + 10000;
       let failedCut: Record<string, any>;
       for (;;) {
-        await delay(50); failedCut = read(); assert(!providerFailure); assert.equal(requestsReceived, 0);
+        await delay(50); failedCut = await read(); assert(!providerFailure); assert.equal(requestsReceived, 0);
         assert(!['failed', 'cancelled', 'succeeded', 'completed_unverified'].includes(failedCut.snapshot.run.status));
         if (failedCut.journal.at(-1)?.phase === 'failed') break;
         assert(Date.now() < failedBy, 'real alias drift did not settle its preparation without dispatch');
@@ -3227,7 +3259,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       const resumedBy = Date.now() + 15000;
       let resumed: Record<string, any>;
       for (;;) {
-        await delay(50); resumed = read(); assert(!providerFailure);
+        await delay(50); resumed = await read(); assert(!providerFailure);
         assert.equal(resumed.snapshot.run.leaseEpoch, originalEpoch); assert.equal(resumed.snapshot.run.stopIntentRef, undefined);
         if (resumed.snapshot.run.status === 'completed_unverified') break;
         assert(['running', 'queued'].includes(resumed.snapshot.run.status));
@@ -3270,7 +3302,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       const terminal = resumed, sessionCut = resultProof.sessionCut;
       await assertTerminalCancelRefused(terminal, '019a0012-0000-7000-8000-000000000115');
       const ready = accepted(exchange([{ protocolVersion: 1, method: 'supervisor.status' }])[0]!, 'supervisor.status');
-      assert.equal(ready.health, 'ready'); assert.deepEqual(read(), terminal); assert.deepEqual(exchange([submit])[0], submitReply);
+      assert.equal(ready.health, 'ready'); assert.deepEqual(freshRun(admitted.id), terminal); assert.deepEqual(exchange([submit])[0], submitReply);
       assert.deepEqual(accepted(exchange([{ protocolVersion: 1, method: 'session.get', sessionId: session.id,
         afterItemSeq: session.latestItemSeq }])[0]!, 'session.get'), sessionCut);
       assert.equal(requestsReceived, 1); assert(!providerFailure);
@@ -3301,15 +3333,15 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       assert.equal(Date.parse(connectionAdmitted.deadlineAt) - Date.parse(connectionAdmitted.createdAt), 45000);
       report.connectionRefusal = { diagnosticOnly: true, qualified: false, runId: connectionAdmitted.id,
         ownedListenerAndSocketsJoined: true, terminalOutcomeQualified: false, preConnectClaimGapQualified: false };
-      const readConnection = () => {
-        const value = accepted(exchange([{ protocolVersion: 1, method: 'run.get', runId: connectionAdmitted.id }])[0]!, 'run.get');
+      const readConnection = async () => {
+        const value = await observeRun(connectionAdmitted.id);
         report.lastConnectionRefusalCut = projectInstalledRunProgress(value, { requestsReceived, providerFailure });
         return value;
       };
       const connectionBy = Date.now() + 15000;
       let connectionCut: Record<string, any>;
       for (;;) {
-        await delay(50); connectionCut = readConnection();
+        await delay(50); connectionCut = await readConnection();
         assert(Date.now() < connectionBy, 'actual post-claim connection refusal did not settle as conservative unknown');
         assert(!providerFailure); assert.equal(requestsReceived, 1);
         assert(!['failed', 'cancelled', 'succeeded', 'completed_unverified'].includes(connectionCut.snapshot.run.status));
@@ -3368,7 +3400,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       // retry, cancelling this unknown or pretending it has terminal proof.
       await delay(2500);
       assert(Date.now() < Date.parse(connectionAdmitted.deadlineAt));
-      assert.deepEqual(readConnection(), connectionCut); assert.deepEqual(exchange([connectionSubmit])[0], connectionReply);
+      assert.deepEqual(freshRun(connectionAdmitted.id), connectionCut); assert.deepEqual(exchange([connectionSubmit])[0], connectionReply);
       assert.deepEqual(currentSession(), connectionSession); assert.equal(requestsReceived, 1); assert(!providerFailure);
       report.connectionRefusal = { ...report.connectionRefusal, qualified: true,
         originalPermanentClaimPreserved: true, fullReservationCharged: true, zeroReservationRemaining: true,
@@ -3380,7 +3412,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       const terminalBy = Date.now() + 30000;
       let terminal: Record<string, any>;
       for (;;) {
-        await delay(50); terminal = read(); assert(!providerFailure, 'owned HTTP429 responder observed a protocol failure');
+        await delay(50); terminal = await read(); assert(!providerFailure, 'owned HTTP429 responder observed a protocol failure');
         if (terminal.snapshot.run.status === 'failed') break;
         assert(!['cancelled', 'succeeded', 'completed_unverified'].includes(terminal.snapshot.run.status));
         assert(Date.now() < terminalBy, 'positively received HTTP429 did not stop and physically join before the independent 30s bound');
@@ -3463,7 +3495,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       assert.equal(canonicalSha256(publication), canonicalSha256({ schemaVersion: 1, format: 'cliq-session-run-terminal-v1', kind: 'run_terminal',
         itemKey: `run-terminal:${admitted.id}`, runId: admitted.id, operation: 'agent', admittedSessionItemSeq: session.latestItemSeq,
         status: 'failed', terminalReason: 'runtime_failed', terminalDetailRef: failed.terminalDetailRef }));
-      assert.deepEqual(read(), terminal, 'a fresh authenticated connection must preserve the exact terminal Run');
+      assert.deepEqual(freshRun(admitted.id), terminal, 'a fresh authenticated connection must preserve the exact terminal Run');
       assert.deepEqual(exchange([submit])[0], submitReply, 'replaying admission must not repeat the rejected request or Session publication');
       assert.deepEqual(accepted(exchange([{ protocolVersion: 1, method: 'session.get', sessionId: session.id, afterItemSeq: session.latestItemSeq }])[0]!, 'session.get'), sessionCut);
       assert.equal(requestsReceived, 1); assert(!providerFailure);
@@ -3495,7 +3527,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       for (const name of [enrolledClientName, finalizerClientName]) assert.match(name, /^:[0-9]+\.[0-9]+$/u);
       assert.deepEqual(finalizerAuthority, enrolledAuthority,
         'scope-busy refusal and committed replay must preserve the same real service, collection and item');
-      assert.equal(requestsReceived, 1); assert.deepEqual(read(), terminal);
+      assert.equal(requestsReceived, 1); assert.deepEqual(freshRun(admitted.id), terminal);
       report.credentialFinalizeScopeBusy = { ...report.credentialFinalizeScopeBusy, qualified: true,
         originalCommittedContinuationPreserved: true, originalPlatformItemPreserved: true,
         providerRequestsUnchanged: true, terminalRunUnchanged: true,
@@ -3544,7 +3576,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
         assert.equal(canonicalSha256(replays[index]), canonicalSha256({ protocolVersion: 1, ok: false, method: 'run.submit',
           error: { schemaVersion: 1, code, retryable: false, messageCode: 'control.mutation_refused' } }));
       }
-      assert.deepEqual(currentSession(), refusalSession); assert.deepEqual(read(), terminal);
+      assert.deepEqual(currentSession(), refusalSession); assert.deepEqual(freshRun(admitted.id), terminal);
       assert.equal(requestsReceived, 1); assert(!providerFailure);
       for (const key of imageFields) assert.equal((await lstat(source, { bigint: true }))[key], sourceBefore[key]);
       assert.equal(await readFile(source, 'utf8'), hostBefore);
@@ -3572,7 +3604,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       const objective = parseJsonStrict((await readCas(admittedSpec.objectiveRef)).toString('utf8')) as Record<string, any>;
       assert.equal(objective.utf8, 'Observe the owned caf\u00e9 model failure without using a tool.');
       assert.equal(objective.byteCount, Buffer.byteLength(objective.utf8));
-      assert.deepEqual(currentSession(), refusalSession); assert.deepEqual(read(), terminal);
+      assert.deepEqual(currentSession(), refusalSession); assert.deepEqual(freshRun(admitted.id), terminal);
       assert.equal(requestsReceived, 1); assert(!providerFailure);
       report.runSubmitWireIdentity = { qualified: true, originalRequestDigest: submit.requestDigest,
         normalizedSpellingRequestDigest: normalizedSubmit.requestDigest, normalizedObjectiveRef: admittedSpec.objectiveRef,
@@ -3605,7 +3637,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
           error: { schemaVersion: 1, code, retryable: false, messageCode: 'control.mutation_refused' } }));
       }
       assert.deepEqual(wireSessionReplies[2], wireSessionReply, 'a fresh nonce with the same normalized intent must bind the original raw-wire Session response');
-      assert.deepEqual(currentSession(), refusalSession); assert.deepEqual(read(), terminal);
+      assert.deepEqual(currentSession(), refusalSession); assert.deepEqual(freshRun(admitted.id), terminal);
       assert.equal(requestsReceived, 1); assert(!providerFailure);
       for (const key of imageFields) assert.equal((await lstat(source, { bigint: true }))[key], sourceBefore[key]);
       assert.equal(await readFile(source, 'utf8'), hostBefore);
@@ -3629,7 +3661,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
     const completeBy = Date.now() + 90000;
     for (;;) {
       await delay(50); assert(!providerFailure, 'owned TLS responder observed a protocol failure');
-      current = read();
+      current = await read();
       if (current.snapshot.run.status === 'completed_unverified') break;
       assert(Date.now() < completeBy, 'the real edit did not reach its complete consent-backed result');
       assert(!['failed', 'cancelled', 'succeeded'].includes(current.snapshot.run.status));
@@ -3676,6 +3708,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       consumed: cut.snapshot.run.budgetConsumed, journal: cut.journal, attachedHighWater: events.highWaterEventSeq,
       supervisor: supervisorBefore, keeper: keeperBefore, originalWorkerRetiredBeforeRestart: true };
     mark('actual_supervisor_restart_after_result');
+    await closeRunObserver();
     assert.equal(command('/usr/bin/systemctl', ['--user', 'restart', services.supervisorUnit], undefined, 30000).status, 0);
     const recoverBy = Date.now() + 30000, successor = show(services.supervisorUnit), retainedKeeper = show(services.keeperUnit);
     assert.equal(successor.ActiveState, 'active'); assert.notEqual(successor.InvocationID, supervisorBefore.InvocationID);
@@ -3684,7 +3717,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
     const successorStart = await selectedSupervisor(services.supervisorUnit, successor, successorImagePath, recoverBy);
     assert.equal(retainedKeeper.InvocationID, keeperBefore.InvocationID); assert.equal(retainedKeeper.MainPID, keeperBefore.MainPID);
     assert.deepEqual(await readFile(path.join(recipe.stateRoot, 'runtime/keeper.ready')), keeperReady);
-    assert.deepEqual(read(), cut); assert.deepEqual(exchange([submit])[0], submitReply);
+    assert.deepEqual(freshRun(admitted.id), cut); assert.deepEqual(exchange([submit])[0], submitReply);
     const successorNonceReplay = request({ ...submitCore, requestId: '019a0012-0000-7000-8000-000000000109' });
     assert.deepEqual(exchange([successorNonceReplay])[0], submitReply);
     assert.deepEqual(accepted(exchange([{ protocolVersion: 1, method: 'session.get', sessionId: session.id,
@@ -3717,7 +3750,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
     let refused: Record<string, any>;
     for (;;) {
       await delay(50); assert(!providerFailure, 'owned reflection fixture observed a protocol failure');
-      refused = accepted(exchange([{ protocolVersion: 1, method: 'run.get', runId: reflectionAdmitted.id }])[0]!, 'run.get');
+      refused = await observeRun(reflectionAdmitted.id);
       if (refused.journal.some((entry: any) => entry.phase === 'unknown')) break;
       assert(Date.now() < reflectionBy, 'native reflection refusal did not reach the conservative permanent unknown cut');
     }
@@ -3790,7 +3823,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       evidenceRef: ambiguityEntry.evidenceRef, fullReservationCharged: true, noToolDispatch: true,
       currentSupervisorNativeRefusalMatched: true, noResultPublished: true,
       terminalOutcomeQualified: false, arbitraryTransformConfidentialityQualified: false };
-    const readReflection = () => accepted(exchange([{ protocolVersion: 1, method: 'run.get', runId: reflectionAdmitted.id }])[0]!, 'run.get');
+    const readReflection = async () => observeRun(reflectionAdmitted.id);
     let blockerCut = refused;
     mark('idle_unknown_worker_across_original_lease');
     const leaseSupervisor = accepted(exchange([{ protocolVersion: 1, method: 'supervisor.status' }])[0]!, 'supervisor.status');
@@ -3949,7 +3982,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
     assert.equal(deadlineDetail.primaryEvidenceRef, deadlineCut.snapshot.run.stopIntentRef);
     assert.deepEqual(deadlineDetail.reasonDetail, Object.assign(Object.create(null),
       { kind: 'budget_exhausted', stopIntentRef: deadlineCut.snapshot.run.stopIntentRef }));
-    blockerCut = readReflection();
+    blockerCut = await readReflection();
     assert.equal(blockerCut.snapshot.run.status, 'running');
     assert.equal(blockerCut.snapshot.run.activeWorkerLaunchId, originalUnknownCut.snapshot.run.activeWorkerLaunchId);
     assert.equal(blockerCut.snapshot.run.leaseEpoch, originalUnknownCut.snapshot.run.leaseEpoch);
@@ -3986,6 +4019,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
     assert.equal(refused.snapshot.run.status, 'running'); assert(refused.snapshot.run.activeWorkerLaunchId);
     const unknownEvents = accepted(exchange([{ protocolVersion: 1, method: 'run.attach', runId: reflectionAdmitted.id, afterEventSeq: 0 }])[0]!, 'run.attach');
     assert.equal(unknownEvents.nextEventSeq, unknownEvents.highWaterEventSeq);
+    await closeRunObserver();
     const nextRestart = command('/usr/bin/systemctl', ['--user', 'restart', services.supervisorUnit], undefined, 30000);
     assert.equal(nextRestart.status, 0);
     const historicalBy = Date.now() + 30000;
@@ -3999,7 +4033,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
     for (;;) {
       assert(Date.now() < historicalBy, 'successor did not recover the original unknown claim through its historical owner');
       await delay(50); assert(!providerFailure);
-      historical = accepted(exchange([{ protocolVersion: 1, method: 'run.get', runId: reflectionAdmitted.id }])[0]!, 'run.get');
+      historical = await observeRun(reflectionAdmitted.id);
       report.lastHistoricalUnknownCut = projectInstalledRunProgress(historical, { requestsReceived, providerFailure });
       assert(Date.now() < historicalBy, 'successor did not recover the original unknown claim through its historical owner');
       if (historical.snapshot.run.revision > refused.snapshot.run.revision && historical.snapshot.run.status === 'queued' &&
@@ -4049,11 +4083,11 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
     assert.notEqual(shortAdmitted.id, admitted.id); assert.notEqual(shortAdmitted.id, reflectionAdmitted.id);
     assert.equal(shortAdmitted.status, 'queued');
     assert.equal(Date.parse(shortAdmitted.deadlineAt) - Date.parse(shortAdmitted.createdAt), 45000);
-    const readShort = () => accepted(exchange([{ protocolVersion: 1, method: 'run.get', runId: shortAdmitted.id }])[0]!, 'run.get');
+    const readShort = async () => observeRun(shortAdmitted.id);
     const shortBy = Date.now() + 30000;
     let shortTerminal: Record<string, any>;
     for (;;) {
-      await delay(50); shortTerminal = readShort(); assert(!providerFailure);
+      await delay(50); shortTerminal = await readShort(); assert(!providerFailure);
       if (shortTerminal.snapshot.run.status === 'completed_unverified') break;
       assert(!['failed', 'cancelled', 'succeeded'].includes(shortTerminal.snapshot.run.status));
       assert(Date.now() < shortBy, 'short Run did not reach its exact consent-backed terminal result');
@@ -4123,9 +4157,9 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       await delay(Math.min(50, domainRemaining()));
       domainRemaining();
       // Keep the original 15-second observation deadline. A last-millisecond
-      // fork must still join; its separate bounded RPC time is not permission
+      // read must still join; its separate bounded RPC time is not permission
       // to accept a late terminal result, which domainRemaining below rejects.
-      domainTerminal = accepted(exchange([{ protocolVersion: 1, method: 'run.get', runId: reflectionAdmitted.id }], 0, 5000)[0]!, 'run.get');
+      domainTerminal = await observeRun(reflectionAdmitted.id, 5000);
       domainReport.lastPublicCut = projectInstalledRunProgress(domainTerminal, { requestsReceived, providerFailure });
       report.lastPublicCut = domainReport.lastPublicCut;
       assert.equal(requestsReceived, 4); assert(!providerFailure);
@@ -4268,6 +4302,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
     const terminalCancellationPrecedence = qualifyTerminalCancelPrecedence(domainTerminal, domainCancel, domainCancelReply,
       beforeDomainSession.latestItemSeq, afterDomainSession);
     mark('closed_broker_terminal_history_after_actual_supervisor_restart');
+    await closeRunObserver();
     const terminalRestart = command('/usr/bin/systemctl', ['--user', 'restart', services.supervisorUnit], undefined, 30000);
     assert.equal(terminalRestart.status, 0);
     const terminalHistoryBy = Date.now() + 30000;
@@ -4322,13 +4357,13 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
         maxChangedBytes: limitKind === 'changed_bytes' ? limit : 16 * 1024 ** 2 });
       registerSubmission(submission);
       const admission = exchange([submission])[0]!, limitedRun = accepted(admission, 'run.submit').snapshot.run;
-      const readLimited = () => accepted(exchange([{ protocolVersion: 1, method: 'run.get', runId: limitedRun.id }])[0]!, 'run.get');
+      const readLimited = async () => observeRun(limitedRun.id);
       const finishBy = Date.now() + 90000;
-      let cut = readLimited();
+      let cut = await readLimited();
       while (cut.snapshot.run.status !== 'failed') {
         assert(!['cancelled', 'succeeded', 'completed_unverified'].includes(cut.snapshot.run.status));
         assert(!providerFailure); assert(Date.now() < finishBy, 'source-limit failure must physically retire and release its worker slot');
-        await delay(50); cut = readLimited();
+        await delay(50); cut = await readLimited();
       }
       const run = cut.snapshot.run;
       assert.equal(run.terminalReason, 'runtime_failed'); assert.equal(run.cancelRequested, false);
@@ -4386,13 +4421,14 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
         operation: 'agent', admittedSessionItemSeq: (await object((await object(run.specRef)).admittedContextRef)).throughSessionItemSeq,
         status: 'failed', terminalReason: 'runtime_failed', terminalDetailRef: run.terminalDetailRef }));
       assert.equal(requestsReceived, 6 + index * 2); assert(!providerFailure);
-      assert.deepEqual(exchange([submission])[0], admission); assert.deepEqual(readLimited(), cut);
+      assert.deepEqual(exchange([submission])[0], admission); assert.deepEqual(freshRun(limitedRun.id), cut);
       await assertTerminalCancelRefused(cut, `019a0012-0000-7000-8000-00000000017${index}`);
       limitedResults.push({ cut, sessionCut, submission, admission, retirement });
       for (const field of imageFields) assert.equal((await lstat(source, { bigint: true }))[field], sourceBefore[field]);
       assert.equal(await readFile(source, 'utf8'), hostBefore);
     }
     mark('source_limit_terminal_history_after_actual_supervisor_restart');
+    await closeRunObserver();
     assert.equal(command('/usr/bin/systemctl', ['--user', 'restart', services.supervisorUnit], undefined, 30000).status, 0);
     const limitedSuccessor = show(services.supervisorUnit), limitedRecoveryBy = Date.now() + 30000;
     assert.notEqual(limitedSuccessor.InvocationID, terminalHistorySupervisor.InvocationID);
@@ -4438,6 +4474,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
         await bounded(Promise.all(socketClosures), 10000, 'owned TLS sockets did not close'); report.httpsJoined = true;
       }
     } catch (error) { cleanupFailures.push(error); }
+    try { await runObserver.close(); } catch (error) { cleanupFailures.push(error); }
     try { await storageClient?.close(); } catch (error) { cleanupFailures.push(error); }
     try { await maintenanceObserverClient?.close(); } catch (error) { cleanupFailures.push(error); }
     try { await queuedObserverClient?.close(); } catch (error) { cleanupFailures.push(error); }
@@ -4453,8 +4490,11 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
           const stoppedUnits = units.map(unit => show(unit));
           report.installedServiceExit = { supervisor: projectInstalledServiceExit(stoppedUnits[0]),
             keeper: projectInstalledServiceExit(stoppedUnits[1]) };
-          if (stoppedUnits[0]!.Result !== 'success' || stoppedUnits[0]!.ExecMainStatus !== '0')
-            report.shutdownRefusal = observeShutdownRefusal(installedServices!.supervisorUnit, stoppedUnits[0]!.ExecMainPID);
+          // A failed campaign can still stop cleanly. Retain the same closed
+          // stop-boundary progress for its original process, without treating
+          // that observation as the earlier timeout cut or a refusal proof.
+          if (primary || stoppedUnits[0]!.Result !== 'success' || stoppedUnits[0]!.ExecMainStatus !== '0')
+            report.shutdownRefusal = observeShutdownRefusal(installedServices!.supervisorUnit, before[0]!.MainPID);
           for (let index = 0; index < units.length; index++) {
             const stopped = stoppedUnits[index]!;
             assert.equal(stopped.ActiveState, 'inactive'); assert.equal(stopped.MainPID, '0');
