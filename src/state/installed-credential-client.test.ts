@@ -5,6 +5,61 @@ import type { InstalledControlErrorV1 } from './installed-control.js';
 import { decodeInstalledCredentialControlResult } from './installed-credential-client.js';
 import { KernelStorageError } from './errors.js';
 import { CredentialScopeBusyError } from './installed-runtime.js';
+import { decodeInstalledControlRehello } from './installed-control-transport.js';
+import type { InstalledControlResultFor } from '../kernel/control-wire.js';
+
+const rehelloRequest = { protocolVersion: 1 as const, method: 'control.hello' as const,
+  clientBuild: 'cliq-installed-credential-v1', controlSchemaRange: { min: 1, max: 1 },
+  headlessSchemaRange: { min: 1, max: 1 }, requestedFeatureIds: ['credential.finalize'] };
+const originalHello = { method: 'control.hello' as const, protocolVersion: 1 as const,
+  serverBuild: 'cliq-installed-v1', controlSchemaRange: { min: 1, max: 1 },
+  headlessSchemaRange: { min: 1, max: 1 }, enabledFeatureIds: ['credential.finalize'],
+  supervisorInstanceId: '01900000-0000-7000-8000-000000000001',
+  activeRuntimeBundle: { schemaVersion: 1 as const, runtimeBundleRef: 'a'.repeat(64), bundleDigest: 'a'.repeat(64), bundleVersion: '1' } } satisfies InstalledControlResultFor<'control.hello'>;
+
+// Pure data comparison only: no installed selection, socket, StateOwner or
+// credential permission is created by a repeated hello response.
+test('credential rehello accepts only the original complete decoded hello', () => {
+  const response = { protocolVersion: 1, ok: true, result: structuredClone(originalHello) };
+  assert.deepEqual(decodeInstalledControlRehello(response, rehelloRequest, originalHello), originalHello);
+});
+
+for (const { name, changes } of [
+  { name: 'StateOwner instance', changes: { supervisorInstanceId: '01900000-0000-7000-8000-000000000002' } },
+  { name: 'server build', changes: { serverBuild: 'another-server-build' } },
+  { name: 'headless range', changes: { headlessSchemaRange: { min: 1, max: 2 } } },
+  { name: 'enabled features', changes: { enabledFeatureIds: [] } },
+  { name: 'runtime bundle', changes: { activeRuntimeBundle: { ...originalHello.activeRuntimeBundle,
+    runtimeBundleRef: 'b'.repeat(64), bundleDigest: 'b'.repeat(64) } } },
+  { name: 'bundle version', changes: { activeRuntimeBundle: { ...originalHello.activeRuntimeBundle, bundleVersion: '2' } } }
+]) {
+  test(`credential rehello refuses a changed ${name} without adopting new readiness`, () => {
+    const before = structuredClone(originalHello);
+    assert.throws(() => decodeInstalledControlRehello({ protocolVersion: 1, ok: true,
+      result: { ...originalHello, ...changes } }, rehelloRequest, originalHello), {
+      name: 'KernelStorageError', code: 'RECOVERY_REQUIRED',
+      message: 'installed Supervisor hello changed on its original connection'
+    });
+    assert.deepEqual(originalHello, before);
+  });
+}
+
+test('credential rehello preserves the strict response decoder and rejects refusal rather than retrying', () => {
+  for (const response of [
+    { protocolVersion: 2, ok: true, result: originalHello },
+    { protocolVersion: 1, ok: true, result: { ...originalHello, controlSchemaRange: { min: 1, max: 2 } } },
+    { protocolVersion: 1, ok: true, result: { ...originalHello, extra: 'untrusted-data' } },
+    { protocolVersion: 1, ok: true, result: originalHello, extra: 'untrusted-data' },
+    { protocolVersion: 1, ok: true, result: { ...originalHello, method: 'credential.finalize' } },
+    Object.defineProperty({}, 'result', { enumerable: true, get() { throw new Error('response accessor must not run'); } })
+  ]) assert.throws(() => decodeInstalledControlRehello(response, rehelloRequest, originalHello), TypeError);
+  assert.throws(() => decodeInstalledControlRehello({ protocolVersion: 1, ok: false, method: 'control.hello',
+    error: { schemaVersion: 1, code: 'INTERNAL', retryable: false, messageCode: 'control.internal',
+      errorId: '00000000-0000-4000-8000-000000000001' } }, rehelloRequest, originalHello), {
+    name: 'KernelStorageError', code: 'RECOVERY_REQUIRED',
+    message: 'installed Supervisor refused the authenticated control handshake'
+  });
+});
 
 // Pure wire-data conformance only. These values create no authenticated peer,
 // installed handle, credential scope or finalization authority.

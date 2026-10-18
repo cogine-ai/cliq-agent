@@ -19,6 +19,7 @@ import { loadInstalledSupervisorObserver, type InstalledCredentialSupervisorObse
  * normal clients observe the installed service without starting it. */
 export type InstalledControlTransport = Readonly<{
   hello: InstalledControlResultFor<'control.hello'>;
+  reobserve(): Promise<void>;
   request<M extends InstalledControlMethod>(request: Extract<InstalledControlRequestV1, { method: M }>): Promise<InstalledControlResponseFor<M>>;
   close(): Promise<void>;
 }>;
@@ -28,6 +29,16 @@ function refuse(message: string, cause?: unknown): never {
   throw new KernelStorageError('RECOVERY_REQUIRED', message, cause === undefined ? undefined : { cause });
 }
 function same(left: unknown, right: unknown): boolean { return canonicalJsonBytes(left).equals(canonicalJsonBytes(right)); }
+/** Pure response-data seam. The original is the complete immutable hello
+ * already decoded by this connection; equality grants no live authority. */
+export function decodeInstalledControlRehello(response: unknown,
+  request: Extract<InstalledControlRequestV1, { method: 'control.hello' }>,
+  original: InstalledControlResultFor<'control.hello'>): InstalledControlResultFor<'control.hello'> {
+  const decoded = decodeInstalledControlResponse(response, request);
+  if (!decoded.ok) refuse('installed Supervisor refused the authenticated control handshake');
+  if (!same(decoded.result, original)) refuse('installed Supervisor hello changed on its original connection');
+  return decoded.result;
+}
 function invocation(observation: InstalledCredentialSupervisorObservation): void {
   for (const unit of [observation.keeper, observation.supervisor]) {
     if (unit.ActiveState !== 'active' || unit.SubState !== 'running' || unit.MainPID < 1 || unit.MainPID !== unit.ExecMainPID ||
@@ -173,9 +184,38 @@ export async function openInstalledControlTransport(selected: HeldInstalledRunti
     native.assertHeld(); const current = await observer.observe(); stable(observed, current);
     await peerBinding(native, current); return current;
   };
+  const helloRequest = (): Extract<InstalledControlRequestV1, { method: 'control.hello' }> => {
+    const requestedFeatureIds = purpose === 'credential' ? ['credential.finalize'] : [...INSTALLED_CONTROL_FEATURES];
+    const request = decodeInstalledControlRequest({ protocolVersion: 1, method: 'control.hello',
+      clientBuild: purpose === 'credential' ? 'cliq-installed-credential-v1' : 'cliq-installed-client-v1',
+      controlSchemaRange: { min: 1, max: 1 }, headlessSchemaRange: { min: 1, max: 1 }, requestedFeatureIds });
+    if (request.method !== 'control.hello') throw new TypeError('invalid fixed installed handshake');
+    return request;
+  };
   let helloResult: InstalledControlResultFor<'control.hello'>;
   const client: InstalledControlTransport = Object.freeze({
     get hello() { return helloResult; },
+    reobserve(): Promise<void> {
+      if (this !== client) return Promise.reject(new TypeError('invalid installed control client'));
+      if (running || closing || stopped) return Promise.reject(new KernelStorageError('RECOVERY_REQUIRED', 'installed control client is closed or busy'));
+      const pending = (async () => {
+        try {
+          // A fresh hello also crosses the application's current StateOwner and
+          // closing gates. Manager/peer observation alone cannot replace it.
+          await checkCurrent();
+          const request = helloRequest();
+          decodeInstalledControlRehello(await exchange(request), request, helloResult);
+          await checkCurrent();
+          if (stopped || closing || retirementFailure)
+            throw retirementFailure ?? failure ?? new KernelStorageError('RECOVERY_REQUIRED', 'installed control client is closing');
+        } catch (error) {
+          const reason = error instanceof KernelStorageError || error instanceof ResourceRetirementError ? error
+            : new KernelStorageError('RECOVERY_REQUIRED', 'installed control hello response is invalid');
+          fail(reason); await retire(); throw reason;
+        }
+      })();
+      running = pending; void pending.finally(() => { running = undefined; }).catch(() => {}); return pending;
+    },
     request<M extends InstalledControlMethod>(request: Extract<InstalledControlRequestV1, { method: M }>): Promise<InstalledControlResponseFor<M>> {
       if (this !== client) return Promise.reject(new TypeError('invalid installed control client'));
       if (running || closing || stopped) return Promise.reject(new KernelStorageError('RECOVERY_REQUIRED', 'installed control client is closed or busy'));
@@ -207,10 +247,7 @@ export async function openInstalledControlTransport(selected: HeldInstalledRunti
   });
   try {
     await checkCurrent();
-    const requestedFeatureIds = purpose === 'credential' ? ['credential.finalize'] : [...INSTALLED_CONTROL_FEATURES];
-    const request = decodeInstalledControlRequest({ protocolVersion: 1, method: 'control.hello',
-      clientBuild: purpose === 'credential' ? 'cliq-installed-credential-v1' : 'cliq-installed-client-v1',
-      controlSchemaRange: { min: 1, max: 1 }, headlessSchemaRange: { min: 1, max: 1 }, requestedFeatureIds });
+    const request = helloRequest();
     const response = decodeInstalledControlResponse(await exchange(request), request) as InstalledControlResponseFor<'control.hello'>;
     if (!response.ok) refuse('installed Supervisor refused the authenticated control handshake');
     const hello = response.result, bundle = hello.activeRuntimeBundle;

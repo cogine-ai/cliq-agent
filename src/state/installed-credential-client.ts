@@ -6,6 +6,7 @@ import { openInstalledControlTransport } from './installed-control-transport.js'
 
 export type { CredentialFinalizeRequest } from '../kernel/control-wire.js';
 export type InstalledCredentialSupervisor = Readonly<{
+  reobserve(): Promise<void>;
   finalize(request: CredentialFinalizeRequest): Promise<CredentialAuthorityOperationV1>;
   close(): Promise<void>;
 }>;
@@ -35,9 +36,22 @@ export function decodeInstalledCredentialControlResult(response: unknown, method
  * the same authenticated transport without starting a service. */
 export async function ensureInstalledCredentialSupervisor(selected: HeldInstalledRuntime): Promise<InstalledCredentialSupervisor> {
   const transport = await openInstalledControlTransport(selected, 'credential');
-  let running: Promise<CredentialAuthorityOperationV1> | undefined, closing: Promise<void> | undefined;
+  let running: Promise<unknown> | undefined, closing: Promise<void> | undefined;
   let stopped = false;
   const client: InstalledCredentialSupervisor = Object.freeze({
+    reobserve() {
+      if (this !== client) return Promise.reject(new TypeError('invalid installed credential client'));
+      if (running || closing || stopped) return Promise.reject(new KernelStorageError('RECOVERY_REQUIRED', 'installed credential client is closed or busy'));
+      const pending = (async () => {
+        try {
+          await transport.reobserve();
+          if (closing || stopped) throw new KernelStorageError('RECOVERY_REQUIRED', 'installed credential client is closing');
+        } catch (error) {
+          stopped = true; await transport.close(); throw error;
+        }
+      })();
+      running = pending; void pending.finally(() => { running = undefined; }).catch(() => {}); return pending;
+    },
     finalize(request) {
       if (this !== client) return Promise.reject(new TypeError('invalid installed credential client'));
       if (running || closing || stopped) return Promise.reject(new KernelStorageError('RECOVERY_REQUIRED', 'installed credential client is closed or busy'));

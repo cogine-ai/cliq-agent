@@ -796,10 +796,10 @@ export async function writeCredentialAuthority(selected: HeldInstalledRuntime, r
   try {
     noteInstalledCredentialPhase('secret_input');
     secret = await readCredentialSecret();
-    // Input waited without credential locks. Reconnect/observe the actual
+    // Input waited without credential locks. Freshly authenticate the same
     // current owner before preparation instead of reusing old readiness.
     noteInstalledCredentialPhase('second_supervisor');
-    await client.close(); client = await ensureInstalledCredentialSupervisor(selected);
+    await client.reobserve();
     noteInstalledCredentialPhase('platform_store');
     platform ??= await loadInstalledCredentialPlatform(selected);
     const operation = await withCredentialAuthorityLock(selected, async token => {

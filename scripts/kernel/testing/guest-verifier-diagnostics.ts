@@ -9,9 +9,49 @@ const prefix = 'CLIQ_GUEST_BOUNDARY_V1:';
 const errorCodes = ['ERR_MODULE_NOT_FOUND', 'ERR_TEST_FAILURE', 'ERR_WORKER_INIT_FAILED', 'ERR_CHILD_PROCESS_IPC_REQUIRED',
   'EACCES', 'EPERM', 'ENOMEM', 'EMFILE', 'ENFILE', 'ENOENT', 'ETIMEDOUT'] as const;
 type MarkerStatus = 'absent' | 'ordered' | 'invalid_sequence' | 'invalid_utf8';
+type SpawnFailure = Readonly<{ spawnSyscall: 'spawn' | 'other_or_absent';
+  spawnTarget: 'canonical_node' | 'deleted_canonical_node' | 'deleted_bindfile' | 'other_or_absent' }>;
 type OutputFailure = Readonly<{ outcome: VerificationReceipt['outcome']; stdoutBytes: number; stderrBytes: number;
-  markerStatus: MarkerStatus; reportedErrorCodes: readonly typeof errorCodes[number][] }>;
+  markerStatus: MarkerStatus; reportedErrorCodes: readonly typeof errorCodes[number][] } & SpawnFailure>;
 const outputFailures = new WeakMap<Error, OutputFailure>();
+
+function reportedSpawn(stdout: string | undefined, stderr: string | undefined): SpawnFailure {
+  const absent: SpawnFailure = { spawnSyscall: 'other_or_absent', spawnTarget: 'other_or_absent' };
+  if (stdout === undefined || stderr === undefined) return absent;
+  const observations: SpawnFailure[] = [];
+  for (const text of [stdout, stderr]) {
+    let block: { indent: string; error?: string; code?: string; invalid: boolean } | undefined;
+    const lines = text.split('\n');
+    // Only a complete Node TAP diagnostic block can identify a reported
+    // spawn. Test names, comments, partial lines and arbitrary path strings
+    // never become a target. This remains a diagnostic, not a native cause.
+    for (const line of lines.slice(0, -1).map(value => value.endsWith('\r') ? value.slice(0, -1) : value)) {
+      const start = /^( {2,16})---$/u.exec(line);
+      if (start) { block = { indent: start[1]!, invalid: block !== undefined }; continue; }
+      if (!block) continue;
+      if (line === block.indent + '...') {
+        if (block.invalid) observations.push(absent);
+        else if (block.error?.startsWith("'spawn ")) {
+          const match = /^'spawn (\/[^'\r\n]{1,256}) ENOENT'$/u.exec(block.error);
+          const target = match?.[1];
+          const spawnTarget = target === '/usr/bin/node' ? 'canonical_node' :
+            target === '/usr/bin/node (deleted)' ? 'deleted_canonical_node' :
+              target !== undefined && /^\/bindfile[A-Za-z0-9]{6} \(deleted\)$/u.test(target) ? 'deleted_bindfile' : undefined;
+          observations.push(spawnTarget && block.code === "'ENOENT'" ? { spawnSyscall: 'spawn', spawnTarget } : absent);
+        }
+        block = undefined; continue;
+      }
+      for (const key of ['error', 'code'] as const) {
+        const prefix = block.indent + key + ': ';
+        if (!line.startsWith(prefix)) continue;
+        if (block[key] !== undefined) block.invalid = true;
+        block[key] = line.slice(prefix.length);
+      }
+    }
+    if (block) observations.push(absent);
+  }
+  return observations.length === 1 ? observations[0]! : absent;
+}
 
 function markers(text: string): { status: Exclude<MarkerStatus, 'invalid_utf8'>; stage?: typeof stages[number] } {
   let next = 0;
@@ -49,7 +89,7 @@ export function recordGuestVerifierBoundaryFailure(error: unknown, outcome: Veri
     const reportedErrorCodes = errorCodes.filter(code => [text, errorText].some(value =>
       value !== undefined && new RegExp(`\\b${code}\\b`, 'u').test(value)));
     outputFailures.set(error, Object.freeze({ outcome, stdoutBytes: stdout.byteLength, stderrBytes: stderr.byteLength,
-      markerStatus: observed.status, reportedErrorCodes: Object.freeze(reportedErrorCodes) }));
+      markerStatus: observed.status, reportedErrorCodes: Object.freeze(reportedErrorCodes), ...reportedSpawn(text, errorText) }));
   }
 }
 

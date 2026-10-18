@@ -107,6 +107,40 @@ function byteFrame(body: Buffer): Buffer {
 const compatibleHello = { protocolVersion: 1, method: 'control.hello', clientBuild: 'wire-client-fixture',
   controlSchemaRange: { min: 1, max: 1 }, headlessSchemaRange: { min: 1, max: 1 }, requestedFeatureIds: [] };
 
+test('the same genuine peer can rehello and read, but cannot reuse readiness after Store begins closing', async t => {
+  const fixture = await createQueuedFixture('wire-rehello');
+  t.after(() => disposeFixture(fixture));
+  const errors: Error[] = [];
+  const service = openInstalledControl(fixture.store, { serverBuild: 'wire-rehello-fixture' }, error => errors.push(error));
+  t.after(() => service.close());
+  const peer = await connectPeer(t, path.join(fixture.stateRoot, 'runtime/control-v1.sock'));
+  const hello = { ...compatibleHello, requestedFeatureIds: ['run.get'] };
+  await peer.write(frame(hello));
+  const initial = await peer.response();
+  assert.equal(initial.ok, true);
+  await peer.write(frame(hello));
+  assert.deepEqual(await peer.response(), initial, 'a fresh server hello binds the same complete active owner');
+  const run = fixture.store.getRun(fixture.runId), ownerEpoch = fixture.store.ownerEpoch;
+  await peer.write(frame({ protocolVersion: 1, method: 'run.get', runId: run.id }));
+  assert.deepEqual((await peer.response()).result.snapshot.run, run);
+  assert.deepEqual(errors, []);
+
+  // The actual process and accepted native socket stay alive. Only the Store's
+  // synchronous gate changes, so manager/PID observation cannot replace hello.
+  fixture.store.beginClose();
+  assert.equal(fixture.store.ownerEpoch, ownerEpoch);
+  await peer.write(frame(hello));
+  const closed = await peer.response();
+  assert.equal(closed.ok, false);
+  assert.equal(closed.method, 'control.hello');
+  assert.equal(closed.error.code, 'INTERNAL');
+  assert.equal(closed.error.messageCode, 'control.internal');
+  assert.equal(errors.length, 1);
+  assert.equal((errors[0] as { code?: string }).code, 'RECOVERY_REQUIRED');
+  await service.close();
+  await peer.receive('closed');
+});
+
 test('authenticated artifact.get fetches registered bytes through bounded real UDS frames without a write oracle', async t => {
   const fixture = await createQueuedFixture('wire-artifact');
   t.after(() => disposeFixture(fixture));
