@@ -25,6 +25,7 @@ case ${1:-} in
   --credentials-model-input) probe_campaign_kind=credentials; probe_credential_driver_mode=--model-input-campaign; shift ;;
   --credential-finalizer-shutdown) probe_campaign_kind=credentials; probe_finalizer_shutdown=1; shift ;;
   --run-journey) probe_campaign_kind=run-journey; shift ;;
+  --run-final-source-limits-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--final-source-limits-campaign; shift ;;
   --run-verifier-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--verifier-campaign; shift ;;
   --run-failure-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--failure-campaign; shift ;;
   --run-retry-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--retry-campaign; shift ;;
@@ -40,7 +41,7 @@ case ${1:-} in
 esac
 readonly probe_campaign_kind probe_run_driver_mode probe_credential_driver_mode probe_finalizer_shutdown
 if [[ $(id -u) != 0 || $# -lt 1 || $# -gt 2 ]]; then
-  printf 'usage: sudo bash %s [--installed|--installed-retirement-refusal|--secrets|--credentials|--credentials-model-input|--credential-finalizer-shutdown|--run-journey|--run-verifier-journey|--run-failure-journey|--run-retry-journey|--run-authority-failure-journey|--run-storage-failure-journey|--run-request-resource-journey|--run-shutdown-admission-journey|--run-shutdown-session-journey|--run-shutdown-preparation-journey|--run-shutdown-received-tool-journey|--run-shutdown-pending-model-journey|--run-shutdown-startup-journey] ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' "$0" >&2
+  printf 'usage: sudo bash %s [--installed|--installed-retirement-refusal|--secrets|--credentials|--credentials-model-input|--credential-finalizer-shutdown|--run-journey|--run-final-source-limits-journey|--run-verifier-journey|--run-failure-journey|--run-retry-journey|--run-authority-failure-journey|--run-storage-failure-journey|--run-request-resource-journey|--run-shutdown-admission-journey|--run-shutdown-session-journey|--run-shutdown-preparation-journey|--run-shutdown-received-tool-journey|--run-shutdown-pending-model-journey|--run-shutdown-startup-journey] ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' "$0" >&2
   exit 2
 fi
 readonly probe_node=$1

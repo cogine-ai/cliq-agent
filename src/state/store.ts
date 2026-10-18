@@ -2085,6 +2085,7 @@ export class StateStore {
         "SELECT 1 FROM workspace_generations WHERE run_id = ? AND phase = 'quarantined' LIMIT 1").get(runId))) {
         this.installedRunPhases.set(runId, 'drive_retirement');
         current = await (await nativeExecution()).resumeCurrentRetirement({ expectedRunRevision: current.revision });
+        this.installedRunPhases.set(runId, 'drive_agent');
       }
       if (sampleCanonicalNow() >= current.deadlineAt && !current.stopIntentRef) {
         current = (await agent.expireRun({ expectedRunRevision: current.revision })).run;

@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { constants, fstatSync, readdirSync, readlinkSync } from 'node:fs';
-import { copyFile, open, readFile, rm, type FileHandle } from 'node:fs/promises';
+import { copyFile, mkdtemp, open, readFile, rm, rmdir, type FileHandle } from 'node:fs/promises';
 import { Module } from 'node:module';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -15,6 +16,7 @@ import type { NativeWorkerBinding } from '../../../src/sandbox/linux-worker.js';
 import { signedLinuxWorkerTestRuntime } from '../../../src/sandbox/testing/worker-runtime.js';
 import { fixtureSandboxProfile } from '../../../src/state/testing/worker-launch.js';
 import { builtinInputContracts } from '../../../src/tools/builtin-inputs.js';
+import { planGuestElfStringFixtures } from './guest-elf-fixtures.js';
 
 /** Actual signed test extractor, owned complete raw image and real native-owned joins. No StateOwner,
  * release authority, admission proof or child execution is fabricated here. */
@@ -81,6 +83,21 @@ export async function qualifyGuestToolchainExtraction(input: { installationRoot:
       nodeDigest: metadata.node.digest, architecture: 'x86_64',
       pinnedExecutables: [metadata.worker, metadata.shell, metadata.git, metadata.node].map(entry =>
         ({ path: entry.canonicalGuestPath, digest: entry.digest })) };
+    // Read only this held, measured image. debugfs is a test data editor, never
+    // a loader; neither the original Node nor a malformed Node is executed.
+    const debugfs = (args: string[], descriptor: number, maxBuffer = 1_048_576) => {
+      const child = spawnSync('/usr/sbin/debugfs', args, { stdio: ['ignore', 'pipe', 'pipe', descriptor],
+        timeout: 10_000, maxBuffer });
+      assert.ok(!child.error && child.status === 0 && child.signal === null, 'owned ELF fixture data editing must complete');
+      return child.stdout;
+    };
+    const nodeBytes = debugfs(['-R', 'cat /usr/bin/node', '/proc/self/fd/3'], source.fd, GUEST_EXTRACTOR_RECIPE.maxImageBytes);
+    const originalNode = metadata.files.find((entry: any) => entry.path === request.nodePath);
+    assert(originalNode); assert.equal(nodeBytes.length, originalNode.byteCount);
+    assert.equal(createHash('sha256').update(nodeBytes).digest('hex'), request.nodeDigest);
+    const elfPlan = planGuestElfStringFixtures(nodeBytes);
+    assert.ok(elfPlan.stringTableBytes > 1_048_576 && elfPlan.stringTableBytes <= nodeBytes.length,
+      'the unchanged official Node must exercise the owner-approved large-table acceptance');
     async function ready(job: NativeGuestToolchain) {
       const started = performance.now();
       while (!job.pollReady()) {
@@ -121,6 +138,69 @@ export async function qualifyGuestToolchainExtraction(input: { installationRoot:
     assert.deepEqual(await ready(copied), result, 'the owned regular source must be copied, hashed and sealed by the real asynchronous owner');
     await close(copied);
     await assertOriginalDescriptors();
+    // Each mutation is placed inside its own complete, fully rehashed image.
+    // Only actual native refusal followed by the original <=2s close is a pass.
+    const malformedElfCases: { id: string; code: string; refused: true; joined: true }[] = [];
+    const elfDirectory = await mkdtemp(path.join(input.guestImageRoot, 'guest-elf-'));
+    const elfNodePath = path.join(elfDirectory, 'node'), elfImagePath = path.join(elfDirectory, 'image.ext4');
+    let elfCompleted = false;
+    try {
+      for (const scenario of elfPlan.cases) {
+        let nodeCopy: FileHandle | undefined, imageCopy: FileHandle | undefined, job: NativeGuestToolchain | undefined;
+        try {
+          nodeCopy = await open(elfNodePath, constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+          await nodeCopy.writeFile(nodeBytes);
+          for (const patch of scenario.patches) {
+            let offset = 0;
+            while (offset < patch.bytes.length) {
+              const written = await nodeCopy.write(patch.bytes, offset, patch.bytes.length - offset, patch.offset + offset);
+              assert(written.bytesWritten > 0); offset += written.bytesWritten;
+            }
+          }
+          await nodeCopy.sync(); await nodeCopy.chmod(0o400);
+          const nodeHash = createHash('sha256');
+          for await (const chunk of nodeCopy.createReadStream({ autoClose: false, start: 0 })) nodeHash.update(chunk);
+          const nodeDigest = nodeHash.digest('hex');
+          await copyFile(path.join(input.guestImageRoot, 'guest-toolchain.ext4'), elfImagePath, constants.COPYFILE_EXCL);
+          imageCopy = await open(elfImagePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+          await imageCopy.chmod(0o600); await imageCopy.close(); imageCopy = undefined;
+          debugfs(['-w', '-R', 'rm /usr/bin/node', elfImagePath], nodeCopy.fd);
+          debugfs(['-w', '-R', 'write /proc/self/fd/3 /usr/bin/node', elfImagePath], nodeCopy.fd);
+          debugfs(['-w', '-R', 'set_inode_field /usr/bin/node mode 0100555', elfImagePath], nodeCopy.fd);
+          await nodeCopy.close(); nodeCopy = undefined;
+          imageCopy = await open(elfImagePath, constants.O_RDWR | constants.O_NOFOLLOW);
+          await imageCopy.sync(); await imageCopy.chmod(0o400);
+          const imageHash = createHash('sha256');
+          for await (const chunk of imageCopy.createReadStream({ autoClose: false, start: 0 })) imageHash.update(chunk);
+          // Reopen read-only: write access itself remains forbidden at native
+          // begin, including on a protected file with mode 0400.
+          await imageCopy.close(); imageCopy = await open(elfImagePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+          assert.equal((await imageCopy.stat()).size, request.imageByteCount);
+          const actualNode = debugfs(['-R', 'cat /usr/bin/node', '/proc/self/fd/3'], imageCopy.fd, GUEST_EXTRACTOR_RECIPE.maxImageBytes);
+          assert.equal(actualNode.length, nodeBytes.length);
+          assert.equal(createHash('sha256').update(actualNode).digest('hex'), nodeDigest);
+          job = begin({ ...request, imageDigest: imageHash.digest('hex'), nodeDigest,
+            pinnedExecutables: request.pinnedExecutables.map(entry => entry.path === request.nodePath ? { ...entry, digest: nodeDigest } : entry) }, imageCopy.fd);
+          await assert.rejects(() => ready(job!), error => error instanceof Error && error.message === scenario.expectedCode,
+            `actual malformed ELF ${scenario.id} must reach its exact native guard`);
+          await close(job); assert.throws(() => job!.pollReady()); assert.throws(() => job!.describe()); job = undefined;
+          await assertOriginalDescriptors();
+          malformedElfCases.push({ id: scenario.id, code: scenario.expectedCode, refused: true, joined: true });
+        } finally {
+          // A failed join is never converted into a positive case or hidden by
+          // deleting its resources. The outer coordinator still owns failure.
+          if (job) await close(job);
+          await imageCopy?.close(); await nodeCopy?.close();
+          await rm(elfImagePath, { force: true }); await rm(elfNodePath, { force: true });
+        }
+      }
+      elfCompleted = true;
+    } finally {
+      // Do not hide the original failure (especially an uncertain native join)
+      // behind an ENOTEMPTY cleanup failure. The disposable coordinator keeps
+      // ownership of any retained fixture directory on this negative path.
+      if (elfCompleted) await rmdir(elfDirectory);
+    }
     // Exercise an actual libext2fs open failure, not an earlier digest or
     // layout rejection: change only the superblock's measured mount time,
     // preserving layout but invalidating its ext4 metadata checksum. This is
@@ -188,6 +268,7 @@ export async function qualifyGuestToolchainExtraction(input: { installationRoot:
       source: 'injected Ed25519 CI test root; not a Cliq release or installed Run qualification',
       imageDigest: request.imageDigest, imageByteCount: request.imageByteCount, mappedFiles: result.files.length,
       mappedBytes: result.files.reduce((sum, file) => sum + file.byteCount, 0),
+      elfStringTable: { byteCount: elfPlan.stringTableBytes, neededCount: elfPlan.neededCount, accepted: true }, malformedElfCases,
       filesystemOpenFailureJoined: true, originalDescriptorsPreserved: true, reusedDescriptorPreserved: true, qualified: true };
   } finally {
     let failure: unknown;

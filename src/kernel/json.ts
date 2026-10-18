@@ -1,7 +1,7 @@
 const JSON_WHITESPACE = new Set([' ', '\t', '\n', '\r']);
 const NUMBER_PREFIX = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/u;
-const MAX_JSON_DEPTH = 32;
-const MAX_JSON_CONTAINER_ENTRIES = 10_000;
+export const MAX_JSON_DEPTH = 32;
+export const MAX_JSON_CONTAINER_ENTRIES = 10_000;
 
 export class StrictJsonError extends SyntaxError {
   constructor(message: string, readonly offset: number) {
@@ -174,8 +174,13 @@ export function parseJsonStrict(source: string): unknown {
   return new StrictJsonParser(source).parse();
 }
 
-export function assertBoundedJsonValue(value: unknown, label = 'JSON value'): void {
+/** Same aggregate object-member/array-element and container-depth accounting
+ * as the strict parser, shared by bounded response producers. */
+export function measureBoundedJsonValue(value: unknown, label = 'JSON value'): {
+  containerEntries: number; maxContainerDepth: number;
+} {
   let entries = 0;
+  let maxContainerDepth = 0;
   const ancestors = new Set<object>();
   const visit = (current: unknown, depth: number): void => {
     if (current === null || typeof current === 'boolean' || typeof current === 'string') return;
@@ -185,6 +190,7 @@ export function assertBoundedJsonValue(value: unknown, label = 'JSON value'): vo
     }
     if (typeof current !== 'object') throw new TypeError(`${label} is outside the JSON domain`);
     if (depth >= MAX_JSON_DEPTH) throw new TypeError(`${label} exceeds JSON depth ${MAX_JSON_DEPTH}`);
+    maxContainerDepth = Math.max(maxContainerDepth, depth + 1);
     if (ancestors.has(current)) throw new TypeError(`${label} contains a cycle`);
     ancestors.add(current);
     try {
@@ -215,4 +221,9 @@ export function assertBoundedJsonValue(value: unknown, label = 'JSON value'): vo
     }
   };
   visit(value, 0);
+  return { containerEntries: entries, maxContainerDepth };
+}
+
+export function assertBoundedJsonValue(value: unknown, label = 'JSON value'): void {
+  measureBoundedJsonValue(value, label);
 }

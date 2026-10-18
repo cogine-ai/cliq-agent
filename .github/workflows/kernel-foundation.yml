@@ -404,8 +404,8 @@ jobs:
           node-version: 22.13.0
           cache: npm
       - run: npm ci
-      - run: node --test scripts/kernel/testing/installed-volume-guard.test.mjs scripts/kernel/testing/installed-run-client.test.mjs
-      - run: node --test --import tsx scripts/kernel/testing/installed-worker-lease.test.ts
+      - run: node --test scripts/kernel/testing/installed-volume-guard.test.mjs scripts/kernel/testing/installed-run-client.test.mjs scripts/kernel/testing/installed-run-partition.test.mjs scripts/kernel/testing/installed-client-journey.test.mjs
+      - run: node --test --import tsx scripts/kernel/testing/installed-worker-lease.test.ts scripts/kernel/testing/installed-client-consumer.test.ts scripts/kernel/testing/installed-control-client-driver.test.ts
       - run: npm run build
         id: build
       - name: Install actual signed transport and worker build prerequisites
@@ -424,6 +424,20 @@ jobs:
         with:
           name: installed-run-journey-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/cliq-installed-run-journey/*.json
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Exercise independent final-source limits through the actual installed terminal drain
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          probe_node=$(realpath "$(command -v node)")
+          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --run-final-source-limits-journey "$probe_node" "$RUNNER_TEMP/cliq-installed-run-source-limits"
+      - name: Retain independent final-source limits and unchanged-runner cleanup evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installed-run-source-limits-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cliq-installed-run-source-limits/*.json
           if-no-files-found: warn
           retention-days: 7
       - name: Exercise one received rejection through the actual installed terminal drain
@@ -937,8 +951,8 @@ jobs:
           node-version: 22.13.0
           cache: npm
       - run: npm ci
-      - run: node --test scripts/kernel/testing/installed-volume-guard.test.mjs scripts/kernel/testing/installed-run-client.test.mjs
-      - run: node --test --import tsx scripts/kernel/testing/installed-guest-package.test.ts
+      - run: node --test scripts/kernel/testing/installed-volume-guard.test.mjs scripts/kernel/testing/installed-run-client.test.mjs scripts/kernel/testing/installed-client-journey.test.mjs
+      - run: node --test --import tsx scripts/kernel/testing/installed-guest-package.test.ts scripts/kernel/testing/installed-client-consumer.test.ts scripts/kernel/testing/installed-control-client-driver.test.ts
       - run: npm run build
         id: build
       - name: Install actual guest, transport and Secret Service prerequisites

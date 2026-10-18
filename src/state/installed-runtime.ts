@@ -13,7 +13,7 @@ import { assertArtifactRef, digestOmitting, encodeCanonicalTime, identityHash,
 import type { LocalControlChannelIdentityV1, LocalPrincipalIdentityV1, PlatformProcessIdentityV1, StateRootIdentityV1 } from '../kernel/types.js';
 import { immutableSnapshot } from '../model/immutable.js';
 import { exactKeys, policyProfile, type ReleaseTrustKey, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
-import { ContentAddressedStore } from './cas.js';
+import { ARTIFACT_CHUNK_BYTES, ContentAddressedStore } from './cas.js';
 import { joinResourceOperations, KernelStorageError, ResourceRetirementError } from './errors.js';
 import { decodeSandboxRootProfile } from './execution-closure.js';
 import { decodeControlChannel, decodeLocalPrincipalIdentity, decodePlatformProcessIdentity, decodeStateRootIdentity } from './decoders.js';
@@ -492,6 +492,11 @@ async function readSmall(file: InstalledFile, limit = SMALL_BYTES): Promise<Buff
 async function verifyBytes(file: InstalledFile, signal?: AbortSignal): Promise<void> {
   for await (const _chunk of chunks(file, signal)) { /* streamed integrity check */ }
 }
+async function* artifactChunks(file: InstalledFile): AsyncGenerator<Buffer> {
+  for await (const bytes of chunks(file))
+    for (let offset = 0; offset < bytes.length; offset += ARTIFACT_CHUNK_BYTES)
+      yield bytes.subarray(offset, offset + ARTIFACT_CHUNK_BYTES);
+}
 async function checkPackageGraph(scope: Scope, root: Directory, bundle: RuntimeBundleManifest,
   companion?: VerifiedInstalledModelAuthority): Promise<void> {
   const expected = new Map<string, Set<string>>();
@@ -697,7 +702,7 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
           }
           for (const [ref, file] of signed.streamedRoots) {
             await destination.assertDirectories();
-            const result = await cas.publishChunks(chunks(file), Number(file.info.size));
+            const result = await cas.publishChunks(artifactChunks(file), Number(file.info.size));
             if (result.ref !== ref || BigInt(result.byteLength) !== file.info.size)
               mismatch('installed guest image CAS publication changed its complete identity');
             await destination.assertDirectories();

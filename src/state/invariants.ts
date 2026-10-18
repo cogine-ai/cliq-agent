@@ -16,7 +16,7 @@ import type {
 } from '../kernel/types.js';
 import { KernelStorageError } from './errors.js';
 
-const BUDGET_FIELDS = ['modelTokens', 'costMicros', 'toolCalls', 'repairAttempts'] as const;
+import { BUDGET_FIELDS, decodeWireBudget, decodeWireJournal } from '../kernel/control-wire-data.js';
 const ZERO_BUDGET: BudgetUsage = {
   modelTokens: 0,
   costMicros: 0,
@@ -114,15 +114,8 @@ function requireEvidencePair(value: Record<string, unknown>, refKey: string, dig
 }
 
 export function decodeBudgetUsage(value: unknown, label = 'BudgetUsage'): BudgetUsage {
-  const record = requireRecord(value, label);
-  rejectUnknownKeys(record, BUDGET_FIELDS, label);
-  for (const field of BUDGET_FIELDS) requireSafeInteger(record[field], `${label}.${field}`);
-  return {
-    modelTokens: record.modelTokens as number,
-    costMicros: record.costMicros as number,
-    toolCalls: record.toolCalls as number,
-    repairAttempts: record.repairAttempts as number
-  };
+  try { return decodeWireBudget(value, label); }
+  catch (error) { if (error instanceof TypeError) invalid(error.message); throw error; }
 }
 
 export function isZeroBudget(value: BudgetUsage): boolean {
@@ -163,133 +156,9 @@ export function assertBudgetWithin(
   }
 }
 
-const JOURNAL_BASE_KEYS = [
-  'seq',
-  'runId',
-  'opId',
-  'opKind',
-  'attempt',
-  'leaseEpoch',
-  'phase',
-  'target',
-  'requestRef',
-  'replayClass',
-  'idempotencyKey',
-  'grantRef',
-  'budgetDelta',
-  'timestamp'
-] as const;
-const JOURNAL_CLAIM_KEYS = [
-  'sandboxLaunchSpecRef',
-  'dispatchId',
-  'supervisorInstanceId',
-  'stateOwnerEpoch',
-  'brokerFenceTokenDigest'
-] as const;
-const JOURNAL_TERMINAL_KEYS = [
-  'resultRef',
-  'receiptRef',
-  'errorRef',
-  'evidenceRef',
-  'evidenceDigest',
-  'attestationRef',
-  'budgetSettlementRef'
-] as const;
-
-function decodeJournalBase(record: Record<string, unknown>): void {
-  requireSafeInteger(record.seq, 'Journal.seq', 1);
-  requireString(record.runId, 'Journal.runId');
-  requireString(record.opId, 'Journal.opId');
-  if (!['model', 'tool', 'mcp-server', 'mcp', 'verifier', 'publish'].includes(String(record.opKind))) {
-    invalid('Journal.opKind is not closed');
-  }
-  requireSafeInteger(record.attempt, 'Journal.attempt');
-  requireSafeInteger(record.leaseEpoch, 'Journal.leaseEpoch', 1);
-  requireString(record.target, 'Journal.target');
-  requireArtifactRef(record.requestRef, 'Journal.requestRef');
-  if (!['retry', 'workspace-rollback-retry', 'reconcile', 'manual'].includes(String(record.replayClass))) {
-    invalid('Journal.replayClass is not closed');
-  }
-  if (has(record, 'idempotencyKey')) requireString(record.idempotencyKey, 'Journal.idempotencyKey');
-  if (has(record, 'grantRef')) requireArtifactRef(record.grantRef, 'Journal.grantRef');
-  decodeBudgetUsage(record.budgetDelta, 'Journal.budgetDelta');
-  requireCanonicalTime(record.timestamp, 'Journal.timestamp');
-  requireEvidencePair(record, 'evidenceRef', 'evidenceDigest', 'Journal');
-}
-
-function requireClaimIdentity(record: Record<string, unknown>): void {
-  requireString(record.dispatchId, 'Journal.dispatchId');
-  requireString(record.supervisorInstanceId, 'Journal.supervisorInstanceId');
-  requireSafeInteger(record.stateOwnerEpoch, 'Journal.stateOwnerEpoch', 1);
-  if (has(record, 'sandboxLaunchSpecRef')) {
-    requireArtifactRef(record.sandboxLaunchSpecRef, 'Journal.sandboxLaunchSpecRef');
-  }
-  if (has(record, 'brokerFenceTokenDigest')) {
-    requireDigest(record.brokerFenceTokenDigest, 'Journal.brokerFenceTokenDigest');
-  }
-}
-
 export function decodeInvocationJournalEntry(value: unknown): InvocationJournalEntry {
-  const record = requireRecord(value, 'Journal');
-  decodeJournalBase(record);
-  const phase = record.phase;
-  if (!['prepared', 'dispatch_claimed', 'completed', 'failed', 'unknown', 'abandoned'].includes(String(phase))) {
-    invalid('Journal.phase is not closed');
-  }
-
-  if (phase === 'prepared') {
-    rejectUnknownKeys(record, JOURNAL_BASE_KEYS, 'Journal(prepared)');
-    requireAbsent(record, [...JOURNAL_CLAIM_KEYS, ...JOURNAL_TERMINAL_KEYS], 'Journal(prepared)');
-  } else if (phase === 'dispatch_claimed') {
-    rejectUnknownKeys(record, [...JOURNAL_BASE_KEYS, ...JOURNAL_CLAIM_KEYS], 'Journal(dispatch_claimed)');
-    requireClaimIdentity(record);
-    if (!isZeroBudget(decodeBudgetUsage(record.budgetDelta, 'Journal.budgetDelta'))) {
-      invalid('dispatch_claimed must have zero budgetDelta');
-    }
-    requireAbsent(record, JOURNAL_TERMINAL_KEYS, 'Journal(dispatch_claimed)');
-  } else if (phase === 'completed') {
-    rejectUnknownKeys(record, [...JOURNAL_BASE_KEYS, ...JOURNAL_CLAIM_KEYS, 'resultRef', 'receiptRef', 'budgetSettlementRef'], 'Journal(completed)');
-    requireClaimIdentity(record);
-    requireArtifactRef(record.budgetSettlementRef, 'Journal.budgetSettlementRef');
-    if (!has(record, 'resultRef') && !has(record, 'receiptRef')) invalid('completed requires a result or receipt');
-    if (has(record, 'resultRef')) requireArtifactRef(record.resultRef, 'Journal.resultRef');
-    if (has(record, 'receiptRef')) requireArtifactRef(record.receiptRef, 'Journal.receiptRef');
-  } else if (phase === 'unknown') {
-    rejectUnknownKeys(record, [...JOURNAL_BASE_KEYS, ...JOURNAL_CLAIM_KEYS, 'evidenceRef', 'evidenceDigest', 'budgetSettlementRef'], 'Journal(unknown)');
-    requireClaimIdentity(record);
-    requireEvidencePair(record, 'evidenceRef', 'evidenceDigest', 'Journal(unknown)');
-    if (!has(record, 'evidenceRef')) invalid('unknown requires ambiguity evidence');
-    requireArtifactRef(record.budgetSettlementRef, 'Journal.budgetSettlementRef');
-  } else if (phase === 'abandoned') {
-    rejectUnknownKeys(record, [...JOURNAL_BASE_KEYS, ...JOURNAL_CLAIM_KEYS, 'attestationRef', 'budgetSettlementRef'], 'Journal(abandoned)');
-    requireClaimIdentity(record);
-    requireArtifactRef(record.attestationRef, 'Journal.attestationRef');
-    requireArtifactRef(record.budgetSettlementRef, 'Journal.budgetSettlementRef');
-    if (!isZeroBudget(decodeBudgetUsage(record.budgetDelta, 'Journal.budgetDelta'))) {
-      invalid('abandoned must have zero additional budgetDelta');
-    }
-  } else {
-    const claimed = has(record, 'dispatchId') || has(record, 'supervisorInstanceId') || has(record, 'stateOwnerEpoch');
-    if (claimed) {
-      rejectUnknownKeys(record, [...JOURNAL_BASE_KEYS, ...JOURNAL_CLAIM_KEYS, 'errorRef', 'receiptRef', 'evidenceRef', 'evidenceDigest', 'budgetSettlementRef'], 'Journal(failed post-claim)');
-      requireClaimIdentity(record);
-      requireArtifactRef(record.errorRef, 'Journal.errorRef');
-      requireArtifactRef(record.budgetSettlementRef, 'Journal.budgetSettlementRef');
-      if (has(record, 'evidenceRef')) requireEvidencePair(record, 'evidenceRef', 'evidenceDigest', 'Journal(failed post-claim)');
-      if (!has(record, 'evidenceRef') && record.opKind !== 'verifier') {
-        invalid('post-claim failed requires no-release evidence');
-      }
-      if (has(record, 'receiptRef')) requireArtifactRef(record.receiptRef, 'Journal.receiptRef');
-    } else {
-      rejectUnknownKeys(record, [...JOURNAL_BASE_KEYS, 'errorRef', 'budgetSettlementRef'], 'Journal(failed pre-dispatch)');
-      requireArtifactRef(record.errorRef, 'Journal.errorRef');
-      requireArtifactRef(record.budgetSettlementRef, 'Journal.budgetSettlementRef');
-      if (!isZeroBudget(decodeBudgetUsage(record.budgetDelta, 'Journal.budgetDelta'))) {
-        invalid('pre-dispatch failed must consume zero budget');
-      }
-    }
-  }
-  return record as InvocationJournalEntry;
+  try { return decodeWireJournal(value); }
+  catch (error) { if (error instanceof TypeError) invalid(error.message); throw error; }
 }
 
 const WORKER_BASE_KEYS = [

@@ -1,116 +1,34 @@
 import { randomUUID } from 'node:crypto';
 import { canonicalJsonBytes } from '../kernel/canonical.js';
+import { CONTROL_FRAME_BYTES as FRAME_BYTES, CONTROL_METHODS_V1 as METHODS, INSTALLED_CONTROL_FEATURES, decodeControlHelloRequest as hello,
+  decodeControlFrame, decodeInstalledControlRequest, type ControlRangeV1 as Range, type ControlMethodV1,
+  type InstalledControlErrorV1, type InstalledControlResponseV1 } from '../kernel/control-wire.js';
+export type { RuntimeBundlePublicSummaryV1, SupervisorHelloV1, SupervisorStatusV1,
+  ControlMethodV1, InstalledControlResultV1, InstalledControlErrorV1, InstalledControlResponseV1 } from '../kernel/control-wire.js';
 import { normalizeBoundedText, sha256Bytes } from '../kernel/identity.js';
-import { parseJsonStrict } from '../kernel/json.js';
-import type { RunSnapshotV1, SessionSnapshotV1, ControlResultV1 } from '../kernel/types.js';
 import type { LocalControlConnection } from './control-channel.js';
-import { EventCursorExpiredError, ResultUnavailableError, type ReadControlRequest, type ReadControlResult } from './control-read.js';
+import { EventCursorExpiredError, ResultUnavailableError, type ReadControlRequest } from './control-read.js';
 import { CredentialFinalizationTimeError, InstalledModelAuthorizationError, KernelStorageError, ResourceRetirementError, RunTerminalError } from './errors.js';
 import type { StateStore } from './store.js';
-import type { CredentialAuthorityOperationV1 } from '../kernel/credential-authority.js';
 import type { CredentialFinalizeRequest } from './installed-credential-client.js';
 import { InstalledRunAuthorityError } from './installed-run.js';
 import { InstalledRunCapacityError } from './installed-run-capacity.js';
 import { CredentialScopeBusyError } from './installed-runtime.js';
 import { VerifierAuthorizationError } from './authorization-artifacts.js';
 
-export type RuntimeBundlePublicSummaryV1 = Readonly<{
-  schemaVersion: 1;
-  runtimeBundleRef: string;
-  bundleDigest: string;
-  bundleVersion: string;
-}>;
-
-export type SupervisorHelloV1 = Readonly<{
-  supervisorInstanceId: string;
-  activeRuntimeBundle: RuntimeBundlePublicSummaryV1;
-  headlessSchemaRange: Readonly<{ min: number; max: number }>;
-}>;
-
-export type SupervisorStatusV1 = Readonly<{
-  method: 'supervisor.status';
-  health: 'starting' | 'ready' | 'draining' | 'degraded';
-  supervisorInstanceId: string;
-  queue: Readonly<{ queuedRuns: number; runningRuns: number; capacity: number }>;
-  stateSchemaVersion: number;
-  activeRuntimeBundle: RuntimeBundlePublicSummaryV1;
-  installedRuntimeBundles: readonly RuntimeBundlePublicSummaryV1[];
-  incompatiblePinnedRunCount: number;
-}>;
-
 export type InstalledControlService = Readonly<{ close(): Promise<void> }>;
-
-const METHODS = ['control.hello', 'session.create', 'session.list', 'session.get', 'session.fork',
-  'session.compact', 'session.handoff.create', 'run.submit', 'run.list', 'run.get', 'run.attach',
-  'run.cancel', 'run.approve', 'run.input', 'run.reconcile', 'run.diff', 'run.result', 'run.apply',
-  'authorization.create', 'authorization.list', 'authorization.revoke', 'mcp.register',
-  'mcp.refresh', 'mcp.list', 'artifact.get', 'supervisor.status', 'credential.finalize'] as const;
-export type ControlMethodV1 = typeof METHODS[number];
-type Range = { min: number; max: number };
-type HelloRequest = { protocolVersion: 1; method: 'control.hello'; clientBuild: string;
-  controlSchemaRange: Range; headlessSchemaRange: Range; requestedFeatureIds: string[] };
-export type InstalledControlResultV1 = ReadControlResult | Extract<ControlResultV1, { method: 'session.create' | 'run.submit' | 'run.cancel' }> |
-  import('../kernel/authorization.js').AuthorizationResponse['result'] |
-  SupervisorStatusV1 | { method: 'credential.finalize'; operation: CredentialAuthorityOperationV1 } | (SupervisorHelloV1 & {
-  method: 'control.hello'; protocolVersion: 1; serverBuild: string;
-  controlSchemaRange: { min: 1; max: 1 }; enabledFeatureIds: string[];
-});
-type ErrorBase = { schemaVersion: 1; messageCode: string };
-type InvalidError = ErrorBase & { code: 'INVALID_REQUEST'; retryable: false;
-  issues: Array<{ path: string; issueCode: string }> };
-export type InstalledControlErrorV1 = InvalidError
-  | import('../kernel/types.js').ResultUnavailableControlErrorV1
-  | InstalledRunCapacityError['controlError']
-  | CredentialScopeBusyError['controlError']
-  | (ErrorBase & { code: 'INCOMPATIBLE_PROTOCOL'; retryable: false;
-      supportedControlRange: { min: 1; max: 1 }; supportedHeadlessRange: Range;
-      upgradeAction: 'upgrade_client' | 'upgrade_supervisor' })
-  | (ErrorBase & { code: 'EVENT_CURSOR_EXPIRED'; retryable: false;
-      earliestEventSeq: number; latestEventSeq: number; snapshot: RunSnapshotV1 })
-  | (ErrorBase & { code: 'INTERNAL'; retryable: false; errorId: string })
-  | (ErrorBase & { code: 'REVISION_CONFLICT'; retryable: true; currentRevision: number;
-      conflict: { resourceKind: 'session'; currentSnapshot: SessionSnapshotV1 } | { resourceKind: 'run'; currentSnapshot: RunSnapshotV1 } })
-  | (ErrorBase & { code: 'NOT_FOUND' | 'AUTHORIZATION_REQUIRED' | 'ARTIFACT_MISMATCH' | 'UNSUPPORTED_PLATFORM' |
-      'REQUEST_ID_CONFLICT' | 'ADMISSION_KEY_CONFLICT' | 'MODEL_COST_UNKNOWN' | 'BUDGET_EXHAUSTED' | 'CANCEL_REQUESTED' | 'RUN_TERMINAL' |
-      'UNSUPPORTED_EXECUTION_IDENTITY'; retryable: false });
-export type InstalledControlResponseV1 =
-  | { protocolVersion: 1; ok: true; result: InstalledControlResultV1 }
-  | { protocolVersion: 1; ok: false; method: ControlMethodV1; error: InstalledControlErrorV1 }
-  | { protocolVersion: 1; ok: false; rejectedMethodDigest: string; error: InvalidError };
-
-const FRAME_BYTES = 1024 * 1024;
+type InvalidError = Extract<InstalledControlErrorV1, { code: 'INVALID_REQUEST' }>;
 const MAX_OUTSTANDING = 64;
 // All owned partial/request/response bodies share this budget. Each connection
 // has four-byte input/output headers; Store metadata is separately bounded.
 const BUFFER_BYTES = (MAX_OUTSTANDING + 1) * FRAME_BYTES;
-const FEATURES = ['session.get', 'run.get', 'run.attach', 'supervisor.status', 'credential.finalize', 'session.create', 'run.submit', 'run.cancel',
-  'authorization.create', 'authorization.revoke', 'run.result', 'run.diff', 'artifact.get'];
+const FEATURES: readonly string[] = INSTALLED_CONTROL_FEATURES;
 const RUN_FEATURES = ['session.create', 'run.submit', 'run.cancel'];
 const record = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 function text(value: unknown): string {
   if (typeof value !== 'string' || normalizeBoundedText(value, 1, 128) !== value) throw new TypeError('invalid bounded text');
   return value;
-}
-function exact(value: Record<string, unknown>, keys: readonly string[]): void {
-  if (Object.keys(value).length !== keys.length || keys.some(key => !Object.hasOwn(value, key))) throw new TypeError('unknown or missing field');
-}
-function range(value: unknown): Range {
-  if (!record(value)) throw new TypeError('invalid schema range');
-  exact(value, ['min', 'max']);
-  if (!Number.isSafeInteger(value.min) || !Number.isSafeInteger(value.max) ||
-      (value.min as number) < 1 || (value.max as number) < (value.min as number)) throw new TypeError('invalid schema range');
-  return { min: value.min as number, max: value.max as number };
-}
-function hello(value: Record<string, unknown>): HelloRequest {
-  exact(value, ['protocolVersion', 'method', 'clientBuild', 'controlSchemaRange', 'headlessSchemaRange', 'requestedFeatureIds']);
-  if (value.protocolVersion !== 1 || !Array.isArray(value.requestedFeatureIds) || value.requestedFeatureIds.length > 64) {
-    throw new TypeError('invalid hello');
-  }
-  const featureIds = value.requestedFeatureIds.map(text);
-  if (new Set(featureIds).size !== featureIds.length) throw new TypeError('duplicate requested feature');
-  return { protocolVersion: 1, method: 'control.hello', clientBuild: text(value.clientBuild),
-    controlSchemaRange: range(value.controlSchemaRange), headlessSchemaRange: range(value.headlessSchemaRange), requestedFeatureIds: featureIds };
 }
 const invalid = (): InvalidError => ({ schemaVersion: 1, code: 'INVALID_REQUEST', retryable: false,
   messageCode: 'control.invalid_request', issues: [{ path: 'request', issueCode: 'invalid_request' }] });
@@ -211,9 +129,8 @@ export function openInstalledControl(store: StateStore,
   const respond = async (pending: Pending): Promise<void> => {
     if (controlRetirementFailure) throw controlRetirementFailure;
     const connection = pending.connection;
-    const source = new TextDecoder('utf-8', { fatal: true }).decode(pending.body);
-    const request = parseJsonStrict(source);
-    if (!record(request) || !pending.body.equals(canonicalJsonBytes(request))) throw new TypeError('noncanonical application frame');
+    const request = decodeControlFrame(pending.body);
+    if (!record(request)) throw new TypeError('control application frame requires a record');
     const method = text(request.method);
     const response = await connection.channel.dispatch(async identity => {
       if (!METHODS.includes(method as ControlMethodV1)) return { protocolVersion: 1, ok: false,
@@ -251,7 +168,7 @@ export function openInstalledControl(store: StateStore,
           return { protocolVersion: 1, ok: true, result: await store.readControl(request as ReadControlRequest, identity) } satisfies InstalledControlResponseV1;
         }
         if (method === 'supervisor.status') {
-          exact(request, ['protocolVersion', 'method']);
+          decodeInstalledControlRequest(request);
           return { protocolVersion: 1, ok: true, result: await store.readSupervisorStatus(identity) } satisfies InstalledControlResponseV1;
         }
         return { protocolVersion: 1, ok: false, method: knownMethod,

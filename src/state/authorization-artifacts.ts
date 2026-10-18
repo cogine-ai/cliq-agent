@@ -1,4 +1,7 @@
 import { canonicalSha256 } from '../kernel/canonical.js';
+import { decodeVerifierIdentityCreateRequest as decodeCreateRequest, decodeAuthorizationRevokeRequest,
+  UnsupportedExecutionIdentityRequestError } from '../kernel/control-wire.js';
+export { decodeAuthorizationRevokeRequest } from '../kernel/control-wire.js';
 import type { AuthorizationConsumptionReceiptV1, AuthorizationGrantBaseV1, AuthorizationGrantSummaryV1,
   AuthorizationGrantV1, AuthorizationRevokeRequest, VerifierIdentityCreateRequest } from '../kernel/authorization.js';
 import { assertArtifactRef, assertRequestId, digestOmitting, identityHash, normalizeAbsolutePath, normalizeBoundedText, parseCanonicalTime } from '../kernel/identity.js';
@@ -83,28 +86,9 @@ export function decodeAuthorizationConsumptionReceipt(value: unknown): Authoriza
   return data as AuthorizationConsumptionReceiptV1;
 }
 export function decodeVerifierIdentityCreateRequest(value: unknown): VerifierIdentityCreateRequest {
-  if (!plain(value)) throw new TypeError('authorization request is not a record');
-  exact(value, ['protocolVersion', 'method', 'requestId', 'requestDigest', 'decision', ...(Object.hasOwn(value, 'ttlMs') ? ['ttlMs'] : [])]);
-  if (value.protocolVersion !== 1 || value.method !== 'authorization.create') throw new TypeError('invalid authorization method');
-  assertRequestId(value.requestId as string); ref(value.requestDigest);
-  const { requestDigest, ...core } = value;
-  if (canonicalSha256(core) !== requestDigest) throw new TypeError('authorization request digest does not rehash');
-  if (!plain(value.decision)) throw new TypeError('authorization decision is not a record');
-  if (value.decision.kind !== 'execution_identity_read' || value.decision.purpose !== 'verifier' ||
-      !plain(value.decision.target) || value.decision.target.kind !== 'guest_toolchain')
-    throw new VerifierAuthorizationError('UNSUPPORTED_EXECUTION_IDENTITY');
-  exact(value.decision, ['kind', 'purpose', 'target']);
-  const target = exact(value.decision.target, ['kind', 'guestToolchainManifestId', 'toolId']);
-  text(target.guestToolchainManifestId); text(target.toolId);
-  if (Object.hasOwn(value, 'ttlMs') && (!Number.isSafeInteger(value.ttlMs) || (value.ttlMs as number) < 1 || (value.ttlMs as number) > 86_400_000))
-    throw new TypeError('authorization TTL is outside its bound');
-  return value as VerifierIdentityCreateRequest;
-}
-export function decodeAuthorizationRevokeRequest(value: unknown): AuthorizationRevokeRequest {
-  const data = exact(value, ['protocolVersion', 'method', 'requestId', 'requestDigest', 'grantId']);
-  if (data.protocolVersion !== 1 || data.method !== 'authorization.revoke') throw new TypeError('invalid authorization method');
-  assertRequestId(data.requestId as string); ref(data.requestDigest); text(data.grantId);
-  const { requestDigest, ...core } = data;
-  if (canonicalSha256(core) !== requestDigest) throw new TypeError('authorization revoke digest does not rehash');
-  return data as AuthorizationRevokeRequest;
+  try { return decodeCreateRequest(value); }
+  catch (error) {
+    if (error instanceof UnsupportedExecutionIdentityRequestError) throw new VerifierAuthorizationError('UNSUPPORTED_EXECUTION_IDENTITY');
+    throw error;
+  }
 }

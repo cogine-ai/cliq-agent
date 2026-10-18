@@ -1,4 +1,6 @@
 import { requiredSafeInteger } from '../kernel/identity.js';
+import { DEFAULT_RUN_BUDGETS, mergeBudgets as mergePublicBudgets } from '../kernel/control-submit.js';
+export { DEFAULT_RUN_BUDGETS } from '../kernel/control-submit.js';
 import type {
   BudgetUsage,
   Checkpoint,
@@ -18,24 +20,6 @@ export const ZERO_BUDGET: BudgetUsage = {
   costMicros: 0,
   toolCalls: 0,
   repairAttempts: 0
-};
-
-export const DEFAULT_RUN_BUDGETS: {
-  wallTimeMs: number;
-  modelTokens: number;
-  costMicros: number;
-  toolCalls: number;
-  repairAttempts: number;
-  childDepth: number;
-  childConcurrency: number;
-} = {
-  wallTimeMs: 86_400_000,
-  modelTokens: 2_000_000,
-  costMicros: 10_000_000,
-  toolCalls: 1_000,
-  repairAttempts: 2,
-  childDepth: 2,
-  childConcurrency: 4
 };
 
 function optionalString(value: unknown): string | undefined {
@@ -229,24 +213,10 @@ export function insertRunEvent(connection: SqliteConnection, event: Extract<RunE
     .run(event.runId, BigInt(event.eventSeq), JSON.stringify(event), event.occurredAt);
 }
 
-function requireBudgetField(value: number, label: string, min: number, max: number): number {
-  if (!Number.isSafeInteger(value) || value < min || value > max) {
-    throw new KernelStorageError('INVALID_REQUEST', `${label} is outside ${min}..${max}`);
+export function mergeBudgets(overrides?: Partial<typeof DEFAULT_RUN_BUDGETS>): typeof DEFAULT_RUN_BUDGETS {
+  try { return mergePublicBudgets(overrides); }
+  catch (cause) {
+    if (cause instanceof TypeError) throw new KernelStorageError('INVALID_REQUEST', cause.message);
+    throw cause;
   }
-  return value;
-}
-
-export function mergeBudgets(
-  overrides?: Partial<typeof DEFAULT_RUN_BUDGETS>
-): typeof DEFAULT_RUN_BUDGETS {
-  const budgets = { ...DEFAULT_RUN_BUDGETS, ...overrides };
-  return {
-    wallTimeMs: requireBudgetField(budgets.wallTimeMs, 'wallTimeMs', 1_000, 2_592_000_000),
-    modelTokens: requireBudgetField(budgets.modelTokens, 'modelTokens', 1, 100_000_000),
-    costMicros: requireBudgetField(budgets.costMicros, 'costMicros', 1, 1_000_000_000_000),
-    toolCalls: requireBudgetField(budgets.toolCalls, 'toolCalls', 1, 1_000_000),
-    repairAttempts: requireBudgetField(budgets.repairAttempts, 'repairAttempts', 0, 64),
-    childDepth: requireBudgetField(budgets.childDepth, 'childDepth', 0, 8),
-    childConcurrency: requireBudgetField(budgets.childConcurrency, 'childConcurrency', 1, 64)
-  };
 }

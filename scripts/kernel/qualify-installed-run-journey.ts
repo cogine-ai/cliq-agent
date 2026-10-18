@@ -17,6 +17,7 @@ import { decodeCredentialAuthorityOperation, decodeCredentialAuthorityRevokeOper
   decodeEndpointAuthorityOperation, type EndpointRegistrationV1 } from '../../src/kernel/credential-authority.js';
 import { digestOmitting, identityHash, sha256Bytes } from '../../src/kernel/identity.js';
 import { parseJsonStrict } from '../../src/kernel/json.js';
+import type { ArtifactDescriptorV1 } from '../../src/kernel/types.js';
 import { buildModelRequestWire, estimatePromptTokens, type ModelVisiblePromptV1 } from '../../src/model/request.js';
 import type { CredentialFinalizeRequest } from '../../src/state/installed-credential-client.js';
 import { MODEL_BROKER_ENTRY_ID, MODEL_BROKER_RELATIVE_PATH } from '../../src/state/model-broker-native.js';
@@ -27,6 +28,7 @@ import { assertInstalledWorkerLeaseRenewed, inspectInstalledWorkerIdentity, insp
   inspectInstalledWorkerRetirement, type InstalledWorkerIdentityInspection } from './testing/installed-worker-lease.js';
 import { inspectInstalledOwnerHistory } from './testing/installed-read-control.js';
 import { createInstalledRunObserver } from './testing/installed-run-observer.js';
+import { openInstalledClientConsumer } from './testing/installed-client-consumer.js';
 import { qualifyInstalledOwnerLinks } from './testing/installed-owner-history.js';
 import { projectInstalledRunProgress, projectInstalledServiceExit, projectInstalledSupervisorStatus } from '../../src/sandbox/testing/installed-run-progress.js';
 import { decodeFinalCandidateItem, decodeRunResult, decodeVerificationClosure, decodeVerifierPlan, decodeWorkspaceDiff } from '../../src/state/result-artifacts.js';
@@ -43,7 +45,7 @@ const privateAfter = 'after the private edit\n';
 const excludedVendorInstruction = 'Ordinary vendor instructions remain independent of source exclusion.\n';
 const model = 'installed-run-transport-fixture';
 const rejectedResponse = '{"error":{"message":"Owned fixture rejected this request."}}';
-type CampaignMode = '--campaign' | '--failure-campaign' | '--retry-campaign' | '--authority-failure-campaign' |
+type CampaignMode = '--campaign' | '--final-source-limits-campaign' | '--failure-campaign' | '--retry-campaign' | '--authority-failure-campaign' |
   '--storage-failure-campaign' | '--shutdown-admission-campaign' | '--shutdown-session-campaign' | '--shutdown-preparation-campaign' |
   '--shutdown-received-tool-campaign' | '--shutdown-pending-model-campaign' | '--shutdown-startup-campaign' | '--request-resource-campaign';
 const requestTokenCeiling = { inputTokens: 32768, outputTokens: 4096, cacheReadTokens: 0, cacheWriteTokens: 0 };
@@ -51,6 +53,12 @@ const imageFields = ['dev', 'ino', 'size', 'uid', 'gid', 'mode', 'nlink', 'mtime
 const receivedToolBefore = 'owned received-tool OLD token';
 const receivedToolAfter = 'owned received-tool NEW token';
 const resourceBlockerObjective = 'Hold the resource queue with one genuinely refused owned model response.';
+
+function finalSourceLimitTurn(ordinal: number): Readonly<{ limitKind: 'changed_paths' | 'changed_bytes'; editReply: boolean }> {
+  assert(Number.isSafeInteger(ordinal) && ordinal >= 1 && ordinal <= 4,
+    'the independent source-limit workload owns exactly four model requests');
+  return { limitKind: ordinal <= 2 ? 'changed_paths' : 'changed_bytes', editReply: ordinal % 2 === 1 };
+}
 
 async function bounded<T>(pending: Promise<T>, milliseconds: number, label: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -169,7 +177,9 @@ finally{socket.destroy();await closed;}`;
 async function campaign(filename: string, mode: CampaignMode): Promise<void> {
   assert.equal(process.geteuid!(), 0);
   const ledger = await readLedger(filename), recipe = ledger.runJourney;
+  const installedClientDriver = path.join(recipe.buildFixture, 'installed-control-client-driver.mjs');
   const failureOnly = mode === '--failure-campaign';
+  const sourceLimitsOnly = mode === '--final-source-limits-campaign';
   const retryOnly = mode === '--retry-campaign';
   const authorityOnly = mode === '--authority-failure-campaign';
   const storageOnly = mode === '--storage-failure-campaign';
@@ -235,7 +245,9 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
       modelVisiblePromptDigest: canonicalSha256(prompt) };
   };
   const report: Record<string, any> = { diagnosticOnly: true, qualified: false, phase: 'installation',
-    scope: requestResourceOnly
+    scope: sourceLimitsOnly
+      ? 'independent signed installed Linux final-source path and byte limit failures, two genuine edit/end Runs, exact original sealed retirement, unique Session publication and actual Supervisor restart, with complete unchanged secret-corpus bounds; not a provider, precise stop race or complete I1/I2 qualification'
+      : requestResourceOnly
       ? 'independent signed installed Linux request-byte admission with owned HTTPS replies, whole-prefix compaction, proof-backed resource terminal retirement and genuine queued successor progress; not an actual provider, billing or complete I1 qualification'
       : shutdownStartupOnly
       ? 'independent signed installed Linux startup SIGTERM after the actual successor StateOwner and selected native broker executable mapping exist but before v1 control opens, with one genuinely retained unknown model claim, unchanged two-second policy and exact third-owner terminal recovery; not an exact retained-Run loader instruction, provider or complete I1 qualification'
@@ -405,6 +417,24 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
     } catch (error) { try { await close(); } catch {} throw error; }
   };
   const openRunObserverClient = (timeout: number) => persistentClient(timeout, true);
+  let genuineClient: Awaited<ReturnType<typeof openInstalledClientConsumer>> | undefined, genuineClientFailure: unknown;
+  const closeGenuineClient = async () => {
+    try { await genuineClient?.close(); genuineClient = undefined; }
+    catch (error) { genuineClientFailure ??= error; throw error; }
+  };
+  const sendGenuine = async (value: Record<string, unknown>, timeout = 30000): Promise<Response> => {
+    assert.equal(mode, '--campaign'); assert.equal(genuineClientFailure, undefined);
+    assert(Number.isSafeInteger(timeout) && timeout > 0 && timeout <= 30000);
+    const by = performance.now() + timeout;
+    const remaining = () => { const left = by - performance.now(); assert(left > 0); return Math.ceil(left); };
+    try {
+      genuineClient ??= await openInstalledClientConsumer({ executable: '/usr/sbin/runuser',
+        args: [...prefix, process.execPath, '--disable-warning=ExperimentalWarning', installedClientDriver, filename], cwd: ledger.home, env: environment,
+        openScan: () => scanner.openStream(), onJoined: () => { report.originalPublicClientJoined = true; },
+        timeout: Math.min(5000, remaining()) });
+      const response = await genuineClient.send(value, remaining()); remaining(); return response;
+    } catch (error) { genuineClientFailure ??= error; throw error; }
+  };
   let runObserver = createInstalledRunObserver(openRunObserverClient);
   const closeRunObserver = async () => {
     await runObserver.close();
@@ -574,7 +604,7 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
   let installedServices: { supervisorUnit: string; keeperUnit: string } | undefined;
   let retryPlatform: ReturnType<typeof observe> | undefined, aliasRestoreCollection: string | undefined;
   let server: Server | undefined;
-  let primary: unknown, providerFailure = false, requestsReceived = 0, reflectionEnabled = false, shortRunEnabled = false, resultLimitsEnabled = false;
+  let primary: unknown, providerFailure = false, requestsReceived = 0, reflectionEnabled = false, shortRunEnabled = false;
   let busySubmit: (Record<string, unknown> & { admissionKey: string }) | undefined;
   let busyFinalize: CredentialFinalizeRequest | undefined;
   let storageClient: Awaited<ReturnType<typeof persistentClient>> | undefined;
@@ -958,12 +988,13 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
             exactCredentialMatched: true, status: 200, latestBodyDigest: sha256Bytes(bodyBytes), latestBodyBytes: bodyBytes.length };
           return;
         }
-        assert(ordinal <= (resultLimitsEnabled ? 8 : shortRunEnabled ? 4 : reflectionEnabled ? 3 : 2), 'replay or restart must not redispatch the completed model attempts');
-        if (ordinal === 2 || resultLimitsEnabled && (ordinal === 6 || ordinal === 8)) {
+        const sourceLimit = sourceLimitsOnly ? finalSourceLimitTurn(ordinal) : undefined;
+        assert(ordinal <= (sourceLimitsOnly ? 4 : shortRunEnabled ? 4 : reflectionEnabled ? 3 : 2), 'replay or restart must not redispatch the completed model attempts');
+        if (sourceLimit ? !sourceLimit.editReply : ordinal === 2) {
           assert.equal(body.messages.filter((message: any) => message.role === 'tool' && message.tool_call_id === 'owned-private-edit-call').length, 1);
         }
         let reflectedArguments: string | undefined;
-        if (ordinal === 3) {
+        if (!sourceLimitsOnly && ordinal === 3) {
           assert(reflectionEnabled);
           // Deliberately hostile owned-server bytes only. No raw authorization
           // header or reflected response is ever logged/persisted. This exact
@@ -971,14 +1002,12 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
           const unicodeKey = [...secret].map(byte => `\\u${byte.toString(16).padStart(4, '0')}`).join('');
           reflectedArguments = `{"path":"example.txt","old_text":${JSON.stringify(hostBefore)},"new_text":"${unicodeKey}"}`;
         }
-        if (ordinal === 4) assert(shortRunEnabled, 'only the separately admitted short Run may send the fourth model request');
-        if (ordinal > 4) {
-          assert(resultLimitsEnabled && ordinal <= 8, 'only the two separately admitted source-limit Runs may make four further requests');
-          const kind = ordinal <= 6 ? 'changed_paths' : 'changed_bytes';
+        if (!sourceLimitsOnly && ordinal === 4) assert(shortRunEnabled, 'only the separately admitted short Run may send the fourth model request');
+        if (sourceLimit) {
           assert(body.messages.some((message: any) => message.role === 'user' && typeof message.content === 'string' &&
-            message.content.includes(`Make one owned private edit, then finish with the frozen ${kind} limit.`)));
+            message.content.includes(`Make one owned private edit, then finish with the frozen ${sourceLimit.limitKind} limit.`)));
         }
-        const editReply = ordinal === 1 || ordinal === 3 || resultLimitsEnabled && (ordinal === 5 || ordinal === 7);
+        const editReply = sourceLimit ? sourceLimit.editReply : ordinal === 1 || ordinal === 3;
         const payload = { id: `owned-fixture-turn-${ordinal}`, object: 'chat.completion', model,
           choices: [{ index: 0, finish_reason: editReply ? 'tool_calls' : 'stop', message: editReply
             ? { role: 'assistant', content: '', tool_calls: [{ id: 'owned-private-edit-call', type: 'function',
@@ -988,7 +1017,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
             : { role: 'assistant', content: 'The private edit is complete.' } }],
           usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 } };
         const bytes = Buffer.from(JSON.stringify(payload)); scanBytes(bytes);
-        if (ordinal === 2 || ordinal === 4 || resultLimitsEnabled && (ordinal === 6 || ordinal === 8)) {
+        if (sourceLimit ? !sourceLimit.editReply : ordinal === 2 || ordinal === 4) {
           assert(captureResponseWorker); await captureResponseWorker(body);
         }
         outgoing.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': String(bytes.length), Connection: 'close' }); outgoing.end(bytes);
@@ -1015,6 +1044,13 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       outfile: recipe.installerEntry, bundle: true, platform: 'node', format: 'esm', target: 'node22.13', metafile: true, write: false });
     assert(Object.values(staged.metafile!.outputs).flatMap(value => value.imports).every(value => value.external && value.path.startsWith('node:')));
     assert.equal(staged.outputFiles!.length, 1); await writeFile(recipe.installerEntry, staged.outputFiles![0]!.contents, { flag: 'wx', mode: 0o444 });
+    if (mode === '--campaign') {
+      const consumer = await build({ entryPoints: [fileURLToPath(new URL('./testing/installed-control-client-driver.ts', import.meta.url))],
+        outfile: installedClientDriver, bundle: true, platform: 'node', format: 'esm', target: 'node22.13', metafile: true, write: false });
+      assert(Object.values(consumer.metafile!.outputs).flatMap(value => value.imports).every(value => value.external && value.path.startsWith('node:')));
+      assert.equal(consumer.outputFiles!.length, 1); assert(consumer.outputFiles![0]!.contents.length <= 16 * 1024 * 1024);
+      await writeFile(installedClientDriver, consumer.outputFiles![0]!.contents, { flag: 'wx', mode: 0o444 });
+    }
     await writeFile(recipe.releaseKeysFile, canonicalJsonBytes(signed.releaseKeys), { flag: 'wx', mode: 0o444 });
     await transferPackage(recipe.packageRoot, ledger.uid, ledger.gid);
     const home = path.join(ledger.home, '.cliq'); await mkdir(home, { mode: 0o700 }); await chown(home, ledger.uid, ledger.gid);
@@ -1140,7 +1176,8 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
     }
     const sessionRequest = request({ protocolVersion: 1, method: 'session.create', requestId: '019a0012-0000-7000-8000-000000000103',
       admissionKey: randomBytes(32).toString('base64url'), workspacePath: recipe.workspace, name: 'Installed Run journey' });
-    const sessionReply = exchange([sessionRequest])[0]!, session = accepted(sessionReply, 'session.create').snapshot.session;
+    const sessionReply = mode === '--campaign' ? await sendGenuine(sessionRequest) : exchange([sessionRequest])[0]!;
+    const session = accepted(sessionReply, 'session.create').snapshot.session;
     assert.deepEqual(exchange([sessionRequest])[0], sessionReply, 'new authenticated connection must replay the original Session response');
     const currentSession = () => accepted(exchange([{ protocolVersion: 1, method: 'session.get', sessionId: session.id }])[0]!, 'session.get').snapshot.session;
     const registerSubmission = (value: Record<string, any>) => {
@@ -1282,6 +1319,56 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       return { resultRef: run.resultRef, candidateItemId: candidate.itemId, verificationClosureRef: result.verificationClosureRef,
         resultSourceContentsQualified: true, exactWorkspaceDiffQualified: true,
         originalWorkerRetirement: await assertOriginalRetirement(cut), sessionCut };
+    };
+    const originalGenuineResultBytes = new Map<string, Buffer>();
+    const assertGenuineResult = async (cut: Record<string, any>, timeout = 30000) => {
+      assert(Number.isSafeInteger(timeout) && timeout > 0 && timeout <= 30000);
+      const replies: Response[] = [], by = performance.now() + timeout;
+      const remaining = () => { const left = by - performance.now(); assert(left > 0); return Math.ceil(left); };
+      const run = cut.snapshot.run; assert.equal(run.status, 'completed_unverified'); assert(run.resultRef);
+      const resultBytes = await readCas(run.resultRef), result = decodeRunResult(parseJsonStrict(resultBytes.toString('utf8')));
+      assert.equal(result.runId, run.id); assert(canonicalJsonBytes(result).equals(resultBytes));
+      for (const method of ['run.result', 'run.diff'] as const) {
+        const ref = method === 'run.result' ? run.resultRef : result.diffRef;
+        const expected = method === 'run.result' ? resultBytes : await readCas(ref);
+        assert(expected.length > 17 && expected.length <= 1048576);
+        const artifact: ArtifactDescriptorV1 = { schemaVersion: 1, ref, digest: ref, sizeBytes: expected.length, mediaType: 'application/json' };
+        const response = await sendGenuine({ protocolVersion: 1, method, runId: run.id }, remaining());
+        assert.equal(canonicalSha256(response), canonicalSha256({ protocolVersion: 1, ok: true, result: method === 'run.result'
+          ? { method, runId: run.id, result: artifact, verificationClosureRef: result.verificationClosureRef }
+          : { method, runId: run.id, diff: artifact } }));
+        replies.push(response);
+        const bytes = Buffer.alloc(expected.length); let offset = 0, pages = 0;
+        for (;;) {
+          assert(++pages <= 18); const length = offset === 0 ? 17 : 4 * 1024 * 1024;
+          const page = await sendGenuine({ protocolVersion: 1, method: 'artifact.get', digest: ref, offset, length }, remaining());
+          assert(canonicalJsonBytes(page).length < 1048576);
+          const value = accepted(page, 'artifact.get'); assert.equal(typeof value.bytesBase64, 'string');
+          assert(value.bytesBase64.length <= 87384); const chunk = Buffer.from(value.bytesBase64, 'base64');
+          assert.equal(chunk.toString('base64'), value.bytesBase64);
+          assert(chunk.length <= Math.min(length, 65536, expected.length - offset));
+          const nextOffset = offset + chunk.length, eof = nextOffset === expected.length;
+          assert.equal(canonicalSha256(page), canonicalSha256({ protocolVersion: 1, ok: true, result: {
+            method: 'artifact.get', artifact, offset, bytesBase64: value.bytesBase64, nextOffset, eof } }));
+          chunk.copy(bytes, offset); offset = nextOffset;
+          if (eof) break;
+          assert(chunk.length > 0);
+        }
+        assert(pages >= 2); assert.equal(sha256Bytes(bytes), ref); assert(bytes.equals(expected)); scanBytes(bytes);
+        const original = originalGenuineResultBytes.get(ref);
+        if (original) assert(bytes.equals(original));
+        else { originalGenuineResultBytes.set(ref, Buffer.from(bytes)); assert(originalGenuineResultBytes.size <= 2); }
+        const value = parseJsonStrict(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+        assert(canonicalJsonBytes(value).equals(bytes));
+        if (method === 'run.result') assert.deepEqual(decodeRunResult(value), result);
+        else {
+          const diff = decodeWorkspaceDiff(value); assert.equal(diff.baseSourceRef, result.baseSourceRef);
+          assert.equal(diff.resultSourceRef, result.resultSourceRef);
+          assert.deepEqual(diff, decodeWorkspaceDiff(parseJsonStrict(expected.toString('utf8'))));
+        }
+      }
+      assert.deepEqual(accepted(await sendGenuine({ protocolVersion: 1, method: 'run.get', runId: run.id }, remaining()), 'run.get'), cut);
+      return replies;
     };
     const assertTerminalCancelRefused = async (cut: Record<string, any>, requestId: string) => {
       const run = cut.snapshot.run, before = accepted(exchange([{ protocolVersion: 1, method: 'session.get', sessionId: run.sessionId }])[0]!, 'session.get');
@@ -2870,6 +2957,120 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       sourceExcludes: failureOnly ? [{ path: 'vendor', scope: 'subtree' }] : [],
       registeredMcpServerIds: [], skillIds: [], allowUnverified: true });
     const { requestDigest: _resourceDigest, ...resourceCore } = submit;
+    const qualifyFinalSourceLimits = async () => {
+      const zeroBudget = Object.assign(Object.create(null), { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 });
+      const successorImagePath = path.join(recipe.stateRoot, 'runtime/bundles', bundleDigest, 'supervisor');
+      const sourceLimitSupervisor = show(services.supervisorUnit);
+      mark('final_source_limits_keep_the_real_edit_and_retire');
+      const limitedResults: Array<{ cut: Record<string, any>; sessionCut: Record<string, any>; submission: Record<string, any>;
+        admission: Response; retirement: Awaited<ReturnType<typeof assertOriginalRetirement>> }> = [];
+      for (const [index, limitKind] of ['changed_paths', 'changed_bytes'].entries()) {
+        const targetRequest = request({ protocolVersion: 1, method: 'session.create',
+          requestId: `019a0012-0000-7000-8000-00000000016${index * 2}`,
+          admissionKey: randomBytes(32).toString('base64url'), workspacePath: recipe.workspace, name: `Final source ${limitKind}` });
+        const target = accepted(exchange([targetRequest])[0]!, 'session.create').snapshot.session;
+        assert.equal(target.latestItemSeq, 0); assert.equal(target.contextRevision, 1);
+        const limit = limitKind === 'changed_paths' ? 0 : Buffer.byteLength(privateAfter) - 1;
+        const submission = request({ ...resourceCore, sessionId: target.id, expectedContextRevision: target.contextRevision,
+          requestId: `019a0012-0000-7000-8000-00000000016${index * 2 + 1}`,
+          admissionKey: randomBytes(32).toString('base64url'),
+          objective: `Make one owned private edit, then finish with the frozen ${limitKind} limit.`,
+          maxChangedPaths: limitKind === 'changed_paths' ? limit : 1000,
+          maxChangedBytes: limitKind === 'changed_bytes' ? limit : 16 * 1024 ** 2 });
+        registerSubmission(submission);
+        const admission = exchange([submission])[0]!, limitedRun = accepted(admission, 'run.submit').snapshot.run;
+        const readLimited = async () => observeRun(limitedRun.id);
+        const finishBy = Date.now() + 90000;
+        let cut = await readLimited();
+        while (cut.snapshot.run.status !== 'failed') {
+          assert(!['cancelled', 'succeeded', 'completed_unverified'].includes(cut.snapshot.run.status));
+          assert(!providerFailure); assert(Date.now() < finishBy, 'source-limit failure must physically retire and release its worker slot');
+          await delay(50); cut = await readLimited();
+        }
+        const run = cut.snapshot.run;
+        assert.equal(run.terminalReason, 'runtime_failed'); assert.equal(run.cancelRequested, false);
+        assert(run.stopIntentRef && run.terminalDetailRef); assert.equal(run.resultRef, undefined);
+        assert.equal(run.activeWorkerLaunchId, undefined); assert.equal(run.nextStep, null); assert.equal(run.frontierRef, undefined);
+        assert.equal(run.waitingReason, undefined); assert.equal(run.waitingOnRef, undefined);
+        assert.equal(canonicalSha256(run.budgetConsumed), canonicalSha256({ ...zeroBudget, modelTokens: 73728, toolCalls: 1 }));
+        assert.equal(canonicalSha256(run.budgetReserved), canonicalSha256(zeroBudget));
+        assert.deepEqual(cut.journal.map((entry: any) => [entry.opKind, entry.phase]), [
+          ['model', 'prepared'], ['model', 'dispatch_claimed'], ['model', 'completed'],
+          ['tool', 'prepared'], ['tool', 'dispatch_claimed'], ['tool', 'completed'],
+          ['model', 'prepared'], ['model', 'dispatch_claimed'], ['model', 'completed'] ]);
+        assert.equal(cut.nextItemSeq, cut.highWaterItemSeq); assert.equal(cut.nextJournalSeq, cut.highWaterJournalSeq);
+        assert.equal(cut.nextCheckpointCursor, cut.highWaterCheckpointCursor);
+        const object = async (ref: string) => parseJsonStrict((await readCas(ref)).toString('utf8')) as Record<string, any>;
+        const items = await Promise.all(cut.items.map((row: any) => object(row.payloadRef)));
+        assert.equal(items.some(item => item.kind === 'final_candidate'), false);
+        const producer = items.at(-1)!, final = cut.journal.at(-1)!;
+        assert.equal(producer.kind, 'model_turn'); assert.equal(producer.stopReason, 'end');
+        assert.equal(producer.modelOpId, final.opId); assert.equal(producer.modelAttempt, final.attempt);
+        assert.equal(producer.modelTurnRef, final.resultRef);
+        const sourceCheckpoint = cut.checkpoints.find((cp: any) => cp.id === identityHash('cliq-continuation-checkpoint-v1',
+          run.id, final.resultRef, cp.contextManifestRef));
+        assert(sourceCheckpoint); assert.equal(sourceCheckpoint.createdAt, final.timestamp);
+        assert.equal(sourceCheckpoint.journalSeq, final.seq); assert.equal(sourceCheckpoint.runItemSeq, cut.highWaterItemSeq);
+        const stop = await object(run.stopIntentRef);
+        const cause = { sourceCheckpointId: sourceCheckpoint.id, workspaceStateRef: sourceCheckpoint.workspaceStateRef,
+          producingItemId: producer.itemId, modelOpId: final.opId, attempt: final.attempt, limitKind,
+          observed: limitKind === 'changed_paths' ? 1 : Buffer.byteLength(privateAfter), limit };
+        assert.equal(canonicalSha256(stop), canonicalSha256({ schemaVersion: 1, runId: run.id, createdAt: stop.createdAt,
+          origin: 'runtime', targetStatus: 'failed', reason: 'runtime_failed', runtimeSubtype: 'result_source_limit_exceeded', ...cause }));
+        const sealed = cut.checkpoints.find((cp: any) => cp.id === identityHash('cliq-final-candidate-checkpoint-v1', run.id, producer.itemId));
+        const terminal = cut.checkpoints.find((cp: any) => cp.id === run.latestCheckpointId);
+        assert(sealed && terminal); assert(sealed.createdAt >= stop.createdAt);
+        for (const cp of [sealed, terminal]) {
+          assert.equal(cp.workspaceStateRef, sourceCheckpoint.workspaceStateRef);
+          assert.equal(cp.contextManifestRef, sourceCheckpoint.contextManifestRef);
+          assert.equal(cp.journalSeq, final.seq); assert.equal(cp.runItemSeq, cut.highWaterItemSeq);
+        }
+        const toolCheckpoint = cut.checkpoints.find((cp: any) => cp.journalSeq === cut.journal[5].seq);
+        assert(toolCheckpoint); await privateCheckpoint(toolCheckpoint);
+        assert.equal(toolCheckpoint.workspaceStateRef, sourceCheckpoint.workspaceStateRef);
+        const detail = await object(run.terminalDetailRef);
+        assert.equal(detail.primaryEvidenceRef, run.stopIntentRef); assert.deepEqual(detail.publicationResultItemRefs, []);
+        assert.deepEqual(detail.abandonedRetryInvocations, []);
+        assert.equal(canonicalSha256(detail.reasonDetail), canonicalSha256({ kind: 'result_source_limit_exceeded', ...cause,
+          evidenceRef: run.stopIntentRef }));
+        const retirement = await assertOriginalRetirement(cut);
+        const sessionCut = accepted(exchange([{ protocolVersion: 1, method: 'session.get', sessionId: target.id,
+          afterItemSeq: target.latestItemSeq }])[0]!, 'session.get');
+        assert.equal(sessionCut.items.length, 1); assert.equal(sessionCut.snapshot.session.latestItemSeq, target.latestItemSeq + 1);
+        assert.equal(sessionCut.snapshot.session.contextRevision, target.contextRevision + 1);
+        assert.equal(canonicalSha256(await object(sessionCut.items[0].payloadRef)), canonicalSha256({ schemaVersion: 1,
+          format: 'cliq-session-run-terminal-v1', kind: 'run_terminal', itemKey: `run-terminal:${run.id}`, runId: run.id,
+          operation: 'agent', admittedSessionItemSeq: (await object((await object(run.specRef)).admittedContextRef)).throughSessionItemSeq,
+          status: 'failed', terminalReason: 'runtime_failed', terminalDetailRef: run.terminalDetailRef }));
+        assert.equal(requestsReceived, 2 + index * 2); assert(!providerFailure);
+        assert.deepEqual(exchange([submission])[0], admission); assert.deepEqual(freshRun(limitedRun.id), cut);
+        await assertTerminalCancelRefused(cut, `019a0012-0000-7000-8000-00000000017${index}`);
+        limitedResults.push({ cut, sessionCut, submission, admission, retirement });
+        for (const field of imageFields) assert.equal((await lstat(source, { bigint: true }))[field], sourceBefore[field]);
+        assert.equal(await readFile(source, 'utf8'), hostBefore);
+      }
+      mark('source_limit_terminal_history_after_actual_supervisor_restart');
+      await closeRunObserver();
+      assert.equal(command('/usr/bin/systemctl', ['--user', 'restart', services.supervisorUnit], undefined, 30000).status, 0);
+      const limitedSuccessor = show(services.supervisorUnit), limitedRecoveryBy = Date.now() + 30000;
+      assert.notEqual(limitedSuccessor.InvocationID, sourceLimitSupervisor.InvocationID);
+      const limitedSuccessorStart = await selectedSupervisor(services.supervisorUnit, limitedSuccessor, successorImagePath, limitedRecoveryBy);
+      for (const result of limitedResults) {
+        assert.deepEqual(accepted(exchange([{ protocolVersion: 1, method: 'run.get', runId: result.cut.snapshot.run.id }])[0]!, 'run.get'), result.cut);
+        assert.deepEqual(exchange([result.submission])[0], result.admission);
+        assert.deepEqual(await assertOriginalRetirement(result.cut), result.retirement);
+        assert.deepEqual(accepted(exchange([{ protocolVersion: 1, method: 'session.get', sessionId: result.cut.snapshot.run.sessionId,
+          afterItemSeq: 0 }])[0]!, 'session.get'), result.sessionCut);
+      }
+      assert.equal(requestsReceived, 4); assert(!providerFailure);
+      assert.equal(await fixtureProcess(Number(limitedSuccessor.MainPID), ledger.uid), limitedSuccessorStart);
+      assert.equal(show(services.keeperUnit).MainPID, keeperBefore.MainPID);
+      assert.deepEqual(await readFile(path.join(recipe.stateRoot, 'runtime/keeper.ready')), keeperReady);
+      report.resultSourceLimits = { qualified: true, limitKinds: ['changed_paths', 'changed_bytes'],
+        realPrivateEdits: 2, modelRequests: 4, noCandidateOrResult: true, samePreparedSeal: true,
+        uniqueSessionPublication: true, terminalHistoryAfterActualRestart: true, noRedispatch: true,
+        preciseCancellationOrDeadlineRaceQualified: false, completeI2Qualified: false };
+    };
     if (failureOnly) {
       busySubmit = request({ ...resourceCore, requestId: '019a0012-0000-7000-8000-000000000123',
         admissionKey: randomBytes(32).toString('base64url') });
@@ -2938,8 +3139,12 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       assert.equal(beforeStorage.health, 'ready');
       report.storageInitialSupervisorInstanceId = beforeStorage.supervisorInstanceId;
     }
+    if (sourceLimitsOnly) {
+      await qualifyFinalSourceLimits();
+    } else {
     registerSubmission(submit);
-    const submitReply = exchange([submit])[0]!, admitted = accepted(submitReply, 'run.submit').snapshot.run;
+    const submitReply = mode === '--campaign' ? await sendGenuine(submit) : exchange([submit])[0]!;
+    const admitted = accepted(submitReply, 'run.submit').snapshot.run;
     report.defaultPolicyRefused = { qualified: true, refusalCode: 'INVALID_REQUEST', noProviderRequest: true,
       sessionUnchanged: true, permissionsAutoAllowed: false, sameAdmissionKeySubsequentlyAccepted: true };
     report.oversizedFileLimitRefused = { requestedBytes: 2_147_483_648, installedLimitBytes: 268_435_456,
@@ -3685,6 +3890,8 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
     const resultProof = await assertUnverifiedResult(cut, session, { exampleText: privateAfter });
     report.consentBackedResult = { qualified: true, ...resultProof,
       completeVerifiedI2Qualified: false, requiredVerifierExecutionQualified: false };
+    assert.deepEqual(accepted(await sendGenuine({ protocolVersion: 1, method: 'run.get', runId: admitted.id }), 'run.get'), cut);
+    const genuineResultQueries = await assertGenuineResult(cut);
     assert.deepEqual(exchange([submit])[0], submitReply, 'completed work must replay original admission, never dispatch another effect');
     const { requestDigest: _submitDigest, ...submitCore } = submit;
     const freshNonceReplay = request({ ...submitCore, requestId: '019a0012-0000-7000-8000-000000000108' });
@@ -3696,7 +3903,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
     const { requestDigest: _digest, ...changedCore } = changed;
     const conflict = exchange([request(changedCore)])[0]!; assert.equal(conflict.ok, false); assert.equal(conflict.error!.code, 'ADMISSION_KEY_CONFLICT');
     await assertTerminalCancelRefused(cut, '019a0012-0000-7000-8000-000000000106');
-    const events = accepted(exchange([{ protocolVersion: 1, method: 'run.attach', runId: admitted.id, afterEventSeq: 0 }])[0]!, 'run.attach');
+    const events = accepted(await sendGenuine({ protocolVersion: 1, method: 'run.attach', runId: admitted.id, afterEventSeq: 0 }), 'run.attach');
     assert.equal(events.nextEventSeq, events.highWaterEventSeq);
     assert.equal(events.events.filter((event: any) => event.kind === 'state_changed' && event.status === 'completed_unverified').length, 1);
     for (let index = 0; index < events.events.length; index++) assert.equal(events.events[index].eventSeq, index + 1);
@@ -3707,14 +3914,30 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       supervisorInstanceId: status.supervisorInstanceId, latestCheckpointId: cut.snapshot.run.latestCheckpointId,
       consumed: cut.snapshot.run.budgetConsumed, journal: cut.journal, attachedHighWater: events.highWaterEventSeq,
       supervisor: supervisorBefore, keeper: keeperBefore, originalWorkerRetiredBeforeRestart: true };
+    // Deliberate complete client retirement, then one explicitly new genuine
+    // installed connection. No failed request is retried by this lifecycle.
+    await closeGenuineClient();
+    assert.deepEqual(accepted(await sendGenuine({ protocolVersion: 1, method: 'run.get', runId: admitted.id }), 'run.get'), cut);
+    assert.deepEqual(await sendGenuine(sessionRequest), sessionReply);
+    assert.deepEqual(await sendGenuine(submit), submitReply);
+    assert.deepEqual(accepted(await sendGenuine({ protocolVersion: 1, method: 'run.attach', runId: admitted.id, afterEventSeq: 0 }), 'run.attach'), events);
+    assert.deepEqual(await assertGenuineResult(cut), genuineResultQueries);
     mark('actual_supervisor_restart_after_result');
     await closeRunObserver();
+    await closeGenuineClient();
     assert.equal(command('/usr/bin/systemctl', ['--user', 'restart', services.supervisorUnit], undefined, 30000).status, 0);
     const recoverBy = Date.now() + 30000, successor = show(services.supervisorUnit), retainedKeeper = show(services.keeperUnit);
     assert.equal(successor.ActiveState, 'active'); assert.notEqual(successor.InvocationID, supervisorBefore.InvocationID);
     assert.equal(successor.MainPID, successor.ExecMainPID); assert.notEqual(successor.MainPID, supervisorBefore.MainPID);
     const successorImagePath = path.join(recipe.stateRoot, 'runtime/bundles', bundleDigest, 'supervisor');
     const successorStart = await selectedSupervisor(services.supervisorUnit, successor, successorImagePath, recoverBy);
+    assert.deepEqual(accepted(await sendGenuine({ protocolVersion: 1, method: 'run.get', runId: admitted.id }, recoverBy - Date.now()), 'run.get'), cut);
+    assert.deepEqual(await sendGenuine(sessionRequest, recoverBy - Date.now()), sessionReply);
+    assert.deepEqual(await sendGenuine(submit, recoverBy - Date.now()), submitReply);
+    assert.deepEqual(accepted(await sendGenuine({ protocolVersion: 1, method: 'session.get', sessionId: session.id,
+      afterItemSeq: session.latestItemSeq }, recoverBy - Date.now()), 'session.get'), resultProof.sessionCut);
+    assert.deepEqual(accepted(await sendGenuine({ protocolVersion: 1, method: 'run.attach', runId: admitted.id, afterEventSeq: 0 }, recoverBy - Date.now()), 'run.attach'), events);
+    assert.deepEqual(await assertGenuineResult(cut, recoverBy - Date.now()), genuineResultQueries);
     assert.equal(retainedKeeper.InvocationID, keeperBefore.InvocationID); assert.equal(retainedKeeper.MainPID, keeperBefore.MainPID);
     assert.deepEqual(await readFile(path.join(recipe.stateRoot, 'runtime/keeper.ready')), keeperReady);
     assert.deepEqual(freshRun(admitted.id), cut); assert.deepEqual(exchange([submit])[0], submitReply);
@@ -3737,6 +3960,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
     assert.equal(await readFile(source, 'utf8'), hostBefore);
     report.sourceWorkspace = { unchangedBytes: true, unchangedDeviceInodeMetadata: true, originalDigest: sha256Bytes(Buffer.from(hostBefore)) };
     mark('native_nested_unicode_reflection_refusal');
+    await closeGenuineClient();
     const reflectionStartedAt = Date.now();
     reflectionEnabled = true;
     const { requestDigest: _positiveDigest, ...positiveCore } = submit;
@@ -4338,116 +4562,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       terminalCancellationPrecedence, restartedTerminalCancellationPrecedence,
       cancelReplayPreserved: true, contiguousAttachPreserved: true, noResultPublished: true,
       terminalHistoryReopenedAfterActualSupervisorRestart: true };
-    mark('final_source_limits_keep_the_real_edit_and_retire');
-    resultLimitsEnabled = true;
-    const limitedResults: Array<{ cut: Record<string, any>; sessionCut: Record<string, any>; submission: Record<string, any>;
-      admission: Response; retirement: Awaited<ReturnType<typeof assertOriginalRetirement>> }> = [];
-    for (const [index, limitKind] of ['changed_paths', 'changed_bytes'].entries()) {
-      const targetRequest = request({ protocolVersion: 1, method: 'session.create',
-        requestId: `019a0012-0000-7000-8000-00000000016${index * 2}`,
-        admissionKey: randomBytes(32).toString('base64url'), workspacePath: recipe.workspace, name: `Final source ${limitKind}` });
-      const target = accepted(exchange([targetRequest])[0]!, 'session.create').snapshot.session;
-      assert.equal(target.latestItemSeq, 0); assert.equal(target.contextRevision, 1);
-      const limit = limitKind === 'changed_paths' ? 0 : Buffer.byteLength(privateAfter) - 1;
-      const submission = request({ ...positiveCore, sessionId: target.id, expectedContextRevision: target.contextRevision,
-        requestId: `019a0012-0000-7000-8000-00000000016${index * 2 + 1}`,
-        admissionKey: randomBytes(32).toString('base64url'),
-        objective: `Make one owned private edit, then finish with the frozen ${limitKind} limit.`,
-        maxChangedPaths: limitKind === 'changed_paths' ? limit : 1000,
-        maxChangedBytes: limitKind === 'changed_bytes' ? limit : 16 * 1024 ** 2 });
-      registerSubmission(submission);
-      const admission = exchange([submission])[0]!, limitedRun = accepted(admission, 'run.submit').snapshot.run;
-      const readLimited = async () => observeRun(limitedRun.id);
-      const finishBy = Date.now() + 90000;
-      let cut = await readLimited();
-      while (cut.snapshot.run.status !== 'failed') {
-        assert(!['cancelled', 'succeeded', 'completed_unverified'].includes(cut.snapshot.run.status));
-        assert(!providerFailure); assert(Date.now() < finishBy, 'source-limit failure must physically retire and release its worker slot');
-        await delay(50); cut = await readLimited();
-      }
-      const run = cut.snapshot.run;
-      assert.equal(run.terminalReason, 'runtime_failed'); assert.equal(run.cancelRequested, false);
-      assert(run.stopIntentRef && run.terminalDetailRef); assert.equal(run.resultRef, undefined);
-      assert.equal(run.activeWorkerLaunchId, undefined); assert.equal(run.nextStep, null); assert.equal(run.frontierRef, undefined);
-      assert.equal(run.waitingReason, undefined); assert.equal(run.waitingOnRef, undefined);
-      assert.equal(canonicalSha256(run.budgetConsumed), canonicalSha256({ ...zeroBudget, modelTokens: 73728, toolCalls: 1 }));
-      assert.equal(canonicalSha256(run.budgetReserved), canonicalSha256(zeroBudget));
-      assert.deepEqual(cut.journal.map((entry: any) => [entry.opKind, entry.phase]), [
-        ['model', 'prepared'], ['model', 'dispatch_claimed'], ['model', 'completed'],
-        ['tool', 'prepared'], ['tool', 'dispatch_claimed'], ['tool', 'completed'],
-        ['model', 'prepared'], ['model', 'dispatch_claimed'], ['model', 'completed'] ]);
-      assert.equal(cut.nextItemSeq, cut.highWaterItemSeq); assert.equal(cut.nextJournalSeq, cut.highWaterJournalSeq);
-      assert.equal(cut.nextCheckpointCursor, cut.highWaterCheckpointCursor);
-      const object = async (ref: string) => parseJsonStrict((await readCas(ref)).toString('utf8')) as Record<string, any>;
-      const items = await Promise.all(cut.items.map((row: any) => object(row.payloadRef)));
-      assert.equal(items.some(item => item.kind === 'final_candidate'), false);
-      const producer = items.at(-1)!, final = cut.journal.at(-1)!;
-      assert.equal(producer.kind, 'model_turn'); assert.equal(producer.stopReason, 'end');
-      assert.equal(producer.modelOpId, final.opId); assert.equal(producer.modelAttempt, final.attempt);
-      assert.equal(producer.modelTurnRef, final.resultRef);
-      const sourceCheckpoint = cut.checkpoints.find((cp: any) => cp.id === identityHash('cliq-continuation-checkpoint-v1',
-        run.id, final.resultRef, cp.contextManifestRef));
-      assert(sourceCheckpoint); assert.equal(sourceCheckpoint.createdAt, final.timestamp);
-      assert.equal(sourceCheckpoint.journalSeq, final.seq); assert.equal(sourceCheckpoint.runItemSeq, cut.highWaterItemSeq);
-      const stop = await object(run.stopIntentRef);
-      const cause = { sourceCheckpointId: sourceCheckpoint.id, workspaceStateRef: sourceCheckpoint.workspaceStateRef,
-        producingItemId: producer.itemId, modelOpId: final.opId, attempt: final.attempt, limitKind,
-        observed: limitKind === 'changed_paths' ? 1 : Buffer.byteLength(privateAfter), limit };
-      assert.equal(canonicalSha256(stop), canonicalSha256({ schemaVersion: 1, runId: run.id, createdAt: stop.createdAt,
-        origin: 'runtime', targetStatus: 'failed', reason: 'runtime_failed', runtimeSubtype: 'result_source_limit_exceeded', ...cause }));
-      const sealed = cut.checkpoints.find((cp: any) => cp.id === identityHash('cliq-final-candidate-checkpoint-v1', run.id, producer.itemId));
-      const terminal = cut.checkpoints.find((cp: any) => cp.id === run.latestCheckpointId);
-      assert(sealed && terminal); assert(sealed.createdAt >= stop.createdAt);
-      for (const cp of [sealed, terminal]) {
-        assert.equal(cp.workspaceStateRef, sourceCheckpoint.workspaceStateRef);
-        assert.equal(cp.contextManifestRef, sourceCheckpoint.contextManifestRef);
-        assert.equal(cp.journalSeq, final.seq); assert.equal(cp.runItemSeq, cut.highWaterItemSeq);
-      }
-      const toolCheckpoint = cut.checkpoints.find((cp: any) => cp.journalSeq === cut.journal[5].seq);
-      assert(toolCheckpoint); await privateCheckpoint(toolCheckpoint);
-      assert.equal(toolCheckpoint.workspaceStateRef, sourceCheckpoint.workspaceStateRef);
-      const detail = await object(run.terminalDetailRef);
-      assert.equal(detail.primaryEvidenceRef, run.stopIntentRef); assert.deepEqual(detail.publicationResultItemRefs, []);
-      assert.deepEqual(detail.abandonedRetryInvocations, []);
-      assert.equal(canonicalSha256(detail.reasonDetail), canonicalSha256({ kind: 'result_source_limit_exceeded', ...cause,
-        evidenceRef: run.stopIntentRef }));
-      const retirement = await assertOriginalRetirement(cut);
-      const sessionCut = accepted(exchange([{ protocolVersion: 1, method: 'session.get', sessionId: target.id,
-        afterItemSeq: target.latestItemSeq }])[0]!, 'session.get');
-      assert.equal(sessionCut.items.length, 1); assert.equal(sessionCut.snapshot.session.latestItemSeq, target.latestItemSeq + 1);
-      assert.equal(sessionCut.snapshot.session.contextRevision, target.contextRevision + 1);
-      assert.equal(canonicalSha256(await object(sessionCut.items[0].payloadRef)), canonicalSha256({ schemaVersion: 1,
-        format: 'cliq-session-run-terminal-v1', kind: 'run_terminal', itemKey: `run-terminal:${run.id}`, runId: run.id,
-        operation: 'agent', admittedSessionItemSeq: (await object((await object(run.specRef)).admittedContextRef)).throughSessionItemSeq,
-        status: 'failed', terminalReason: 'runtime_failed', terminalDetailRef: run.terminalDetailRef }));
-      assert.equal(requestsReceived, 6 + index * 2); assert(!providerFailure);
-      assert.deepEqual(exchange([submission])[0], admission); assert.deepEqual(freshRun(limitedRun.id), cut);
-      await assertTerminalCancelRefused(cut, `019a0012-0000-7000-8000-00000000017${index}`);
-      limitedResults.push({ cut, sessionCut, submission, admission, retirement });
-      for (const field of imageFields) assert.equal((await lstat(source, { bigint: true }))[field], sourceBefore[field]);
-      assert.equal(await readFile(source, 'utf8'), hostBefore);
     }
-    mark('source_limit_terminal_history_after_actual_supervisor_restart');
-    await closeRunObserver();
-    assert.equal(command('/usr/bin/systemctl', ['--user', 'restart', services.supervisorUnit], undefined, 30000).status, 0);
-    const limitedSuccessor = show(services.supervisorUnit), limitedRecoveryBy = Date.now() + 30000;
-    assert.notEqual(limitedSuccessor.InvocationID, terminalHistorySupervisor.InvocationID);
-    const limitedSuccessorStart = await selectedSupervisor(services.supervisorUnit, limitedSuccessor, successorImagePath, limitedRecoveryBy);
-    for (const result of limitedResults) {
-      assert.deepEqual(accepted(exchange([{ protocolVersion: 1, method: 'run.get', runId: result.cut.snapshot.run.id }])[0]!, 'run.get'), result.cut);
-      assert.deepEqual(exchange([result.submission])[0], result.admission);
-      assert.deepEqual(await assertOriginalRetirement(result.cut), result.retirement);
-      assert.deepEqual(accepted(exchange([{ protocolVersion: 1, method: 'session.get', sessionId: result.cut.snapshot.run.sessionId,
-        afterItemSeq: 0 }])[0]!, 'session.get'), result.sessionCut);
-    }
-    assert.equal(requestsReceived, 8); assert(!providerFailure);
-    assert.equal(await fixtureProcess(Number(limitedSuccessor.MainPID), ledger.uid), limitedSuccessorStart);
-    assert.equal(show(services.keeperUnit).MainPID, keeperBefore.MainPID);
-    assert.deepEqual(await readFile(path.join(recipe.stateRoot, 'runtime/keeper.ready')), keeperReady);
-    report.resultSourceLimits = { qualified: true, limitKinds: ['changed_paths', 'changed_bytes'],
-      realPrivateEdits: 2, modelRequests: 4, noCandidateOrResult: true, samePreparedSeal: true,
-      uniqueSessionPublication: true, terminalHistoryAfterActualRestart: true, noRedispatch: true,
-      preciseCancellationOrDeadlineRaceQualified: false, completeI2Qualified: false };
     }
     }
     report.qualified = true; mark('run_assertions_complete');
@@ -4475,6 +4590,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       }
     } catch (error) { cleanupFailures.push(error); }
     try { await runObserver.close(); } catch (error) { cleanupFailures.push(error); }
+    try { await closeGenuineClient(); } catch (error) { cleanupFailures.push(error); }
     try { await storageClient?.close(); } catch (error) { cleanupFailures.push(error); }
     try { await maintenanceObserverClient?.close(); } catch (error) { cleanupFailures.push(error); }
     try { await queuedObserverClient?.close(); } catch (error) { cleanupFailures.push(error); }
@@ -4566,7 +4682,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
 
 assert.equal(process.platform, 'linux'); assert.equal(process.arch, 'x64');
 const [mode, filename, ...extra] = process.argv.slice(2);
-assert(mode === '--campaign' || mode === '--failure-campaign' || mode === '--retry-campaign' || mode === '--authority-failure-campaign' ||
+assert(mode === '--campaign' || mode === '--final-source-limits-campaign' || mode === '--failure-campaign' || mode === '--retry-campaign' || mode === '--authority-failure-campaign' ||
   mode === '--storage-failure-campaign' || mode === '--shutdown-admission-campaign' || mode === '--shutdown-session-campaign' || mode === '--shutdown-preparation-campaign' ||
   mode === '--shutdown-received-tool-campaign' || mode === '--shutdown-pending-model-campaign' || mode === '--shutdown-startup-campaign' ||
   mode === '--request-resource-campaign'); assert(filename && extra.length === 0);

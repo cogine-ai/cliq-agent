@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { decodeSessionCreatePublicRequest } from '../../kernel/control-wire.js';
 import { canonicalSha256 } from '../../kernel/canonical.js';
 import { immutableSnapshot } from '../../model/immutable.js';
 import { exactKeys } from '../../policy/runtime-authority.js';
@@ -76,26 +77,9 @@ type InstalledSessionRequest = {
 
 function readSessionCreatePublicRequest(request: unknown,
   errorCode: 'INVALID_REQUEST' | 'RECOVERY_REQUIRED' = 'INVALID_REQUEST') {
-  try {
-    const value = immutableSnapshot(request) as Record<string, unknown>;
-    if (!value || typeof value !== 'object' || Array.isArray(value) ||
-        !exactKeys(value, ['protocolVersion', 'method', 'requestId', 'requestDigest', 'admissionKey', 'workspacePath',
-          ...(Object.hasOwn(value, 'name') ? ['name'] : [])]) || value.protocolVersion !== 1 || value.method !== 'session.create' ||
-        typeof value.requestId !== 'string' || typeof value.admissionKey !== 'string' || typeof value.workspacePath !== 'string' ||
-        (Object.hasOwn(value, 'name') && typeof value.name !== 'string'))
-      throw new TypeError('session.create requires its exact public inline contract');
-    const { requestDigest, ...core } = value;
-    if (typeof requestDigest !== 'string' || requestDigest !== canonicalSha256(core))
-      throw new TypeError('session.create public request digest differs');
-    assertRequestId(value.requestId); assertAdmissionKey(value.admissionKey);
-    normalizeAbsolutePath(value.workspacePath);
-    if (value.name !== undefined) normalizeBoundedText(value.name as string, 1, 256);
-    return { core: core as SessionCreatePublicCore, requestDigest };
-  } catch (cause) {
-    throw new KernelStorageError(errorCode, 'session.create public request is invalid', { cause });
-  }
+  try { return decodeSessionCreatePublicRequest(request); }
+  catch (cause) { throw new KernelStorageError(errorCode, 'session.create public request is invalid', { cause }); }
 }
-
 async function publishSessionCreatePublicCore(artifacts: ArtifactCatalog, installed: InstalledSessionRequest): Promise<PublishedArtifact> {
   const artifact = await artifacts.publishCanonical(installed.core, 'cliq-session-create-request-core-v1');
   if (artifact.ref !== installed.requestDigest)

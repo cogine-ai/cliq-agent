@@ -28,7 +28,10 @@
 #define CHUNK_BYTES 65536
 #define MAX_PHDRS 128
 #define MAX_DYNAMIC 4096
-#define MAX_STRING_TABLE (1024 * 1024)
+#define NEEDED_NAME_BYTES 256
+/* Existing file-count and per-ELF NEEDED limits bound the complete job's
+ * requested name windows. The full string table is never read or allocated. */
+#define MAX_NEEDED_READ_BYTES ((uint64_t)CLIQ_GUEST_MAX_FILES * CLIQ_GUEST_MAX_FILES * NEEDED_NAME_BYTES)
 
 static atomic_bool retirement_failed;
 struct pinned_file { char path[CLIQ_GUEST_PATH_BYTES], digest[65]; ext2_ino_t inode; };
@@ -41,7 +44,7 @@ struct extraction {
     atomic_bool cancelled, finished;
     bool unsafe; const char *error;
     int image_fd, source_fd; struct stat source_identity;
-    uint64_t image_bytes, mapped_bytes;
+    uint64_t image_bytes, mapped_bytes, needed_read_bytes;
     uint32_t pinned_count; struct pinned_file pinned[CLIQ_GUEST_MAX_PINNED];
     ext2_ino_t mapped_inodes[CLIQ_GUEST_MAX_FILES];
 };
@@ -253,8 +256,8 @@ static int extract_file(struct extraction *job, ext2_filsys fs, const char *path
 }
 
 static bool library_name(const char *value) {
-    size_t length = strnlen(value, 256);
-    if (!length || length >= 256 || !strcmp(value, ".") || !strcmp(value, "..")) return false;
+    size_t length = strnlen(value, NEEDED_NAME_BYTES);
+    if (!length || length >= NEEDED_NAME_BYTES || !strcmp(value, ".") || !strcmp(value, "..")) return false;
     for (size_t i = 0; i < length; i++) if (!((value[i] >= 'A' && value[i] <= 'Z') || (value[i] >= 'a' && value[i] <= 'z') ||
         (value[i] >= '0' && value[i] <= '9') || strchr("._+-", value[i]))) return false;
     return true;
@@ -311,21 +314,38 @@ static bool elf_dependencies(struct extraction *job, ext2_filsys fs, uint32_t in
         if (entry->d_tag == DT_STRSZ) { if (size_seen) return fail(job, "guest_elf_strings"); size_seen = true; string_bytes = entry->d_un.d_val; }
         if (entry->d_tag == DT_NEEDED) { if (needed_count == CLIQ_GUEST_MAX_FILES) return fail(job, "guest_needed_count"); needed[needed_count++] = entry->d_un.d_val; }
     }
-    if (!end || !address_seen || !size_seen || !string_bytes || string_bytes > MAX_STRING_TABLE) return fail(job, "guest_elf_strings");
-    uint64_t string_offset = 0; bool located = false;
+    if (!end || !address_seen || !size_seen || !string_bytes || string_address > UINT64_MAX - string_bytes)
+        return fail(job, "guest_elf_strings");
+    uint64_t string_offset = 0; size_t string_load = MAX_PHDRS;
     for (size_t i = 0; i < header.e_phnum; i++) {
         Elf64_Phdr *ph = &phdrs[i];
         if (ph->p_type != PT_LOAD || string_address < ph->p_vaddr || string_address - ph->p_vaddr > ph->p_filesz ||
             string_bytes > ph->p_filesz - (string_address - ph->p_vaddr)) continue;
-        if (located) return fail(job, "guest_elf_string_alias");
-        located = true; string_offset = ph->p_offset + (string_address - ph->p_vaddr);
+        if (string_load != MAX_PHDRS) return fail(job, "guest_elf_string_alias");
+        string_load = i; string_offset = ph->p_offset + (string_address - ph->p_vaddr);
     }
-    if (!located) return fail(job, "guest_elf_strings");
+    if (string_load == MAX_PHDRS || string_offset > file->byte_count || string_bytes > file->byte_count - string_offset)
+        return fail(job, "guest_elf_strings");
+    /* A second LOAD may alias only part of the table, or the same file bytes
+     * at another address. Neither is a unique mapping of this full extent. All
+     * additions below are bounded by the header checks and complete extent. */
+    for (size_t i = 0; i < header.e_phnum; i++) {
+        Elf64_Phdr *ph = &phdrs[i];
+        if (i == string_load || ph->p_type != PT_LOAD) continue;
+        if ((ph->p_memsz && string_address < ph->p_vaddr + ph->p_memsz && ph->p_vaddr < string_address + string_bytes) ||
+            (ph->p_filesz && string_offset < ph->p_offset + ph->p_filesz && ph->p_offset < string_offset + string_bytes))
+            return fail(job, "guest_elf_string_alias");
+    }
     for (size_t i = 0; i < needed_count; i++) {
         if (!active(job) || needed[i] >= string_bytes) return fail(job, "guest_needed_bounds");
-        size_t available = string_bytes - needed[i] < 256 ? (size_t)(string_bytes - needed[i]) : 256; char name[256];
-        if (!read_at(job, file->fd, file->byte_count, string_offset + needed[i], name, available) || !memchr(name, '\0', available) ||
-            !dependency(job, fs, name)) return false;
+        size_t available = string_bytes - needed[i] < NEEDED_NAME_BYTES ? (size_t)(string_bytes - needed[i]) : NEEDED_NAME_BYTES;
+        char name[NEEDED_NAME_BYTES];
+        if (job->needed_read_bytes > MAX_NEEDED_READ_BYTES || available > MAX_NEEDED_READ_BYTES - job->needed_read_bytes)
+            return fail(job, "guest_needed_budget");
+        job->needed_read_bytes += available; /* Reserve the whole window before any read. */
+        if (!read_at(job, file->fd, file->byte_count, string_offset + needed[i], name, available)) return false;
+        if (!memchr(name, '\0', available)) return fail(job, "guest_needed_name");
+        if (!dependency(job, fs, name)) return false;
     }
     return true;
 }

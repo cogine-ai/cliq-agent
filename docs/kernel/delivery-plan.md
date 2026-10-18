@@ -324,6 +324,96 @@ Neither change yet proves the CAS-overbreadth or successor-completion blocker
 resolved on Linux. Repeated full-recovery reads are measured separately;
 the sticky original-execution retirement gate and complete hashes remain.
 
+Checkpoint `8c06e2de6e3a3a20822c694609978e72fa5092d1` passed build and all
+2,238 local tests, plus thirty-two design/client/builder guards, with no
+failures, skips, cancellations or todos. Its
+[run 39105569017](https://github.com/cogine-ai/cliq-agent/actions/runs/39105569017)
+finished with thirteen passing jobs and five failures; all four TypeScript
+matrix jobs passed. All thirty-two actual native lifecycle scenarios passed.
+The separate guest extraction failed at `guest_elf_strings`; this does not
+erase the lifecycle evidence or qualify guest execution. The installed
+verifier built its signed package, then failed initial installation before any
+business verifier case. The original installer streams 1 MiB batches into a
+CAS publisher whose unchanged maximum is 64 KiB; the local follow-up splits
+only that publication stream, retaining the existing complete hash/copy I/O
+window and every source identity/EOF/join check. Its new real installer/CAS
+regression still requires Linux execution.
+
+The normal installed journey passed its business assertions, including the
+two final-source-limit Runs and their actual restart, then failed the complete
+retained-corpus scan at the unchanged cumulative 4,096-stream ceiling. No
+secret match was observed, but no clean corpus is inferred; the fallback
+report does not identify whether SQL values or CAS names/files exhausted the
+budget, nor prove that CAS inventory passed. The independent source-limit
+pair is being moved to its own full installed StateRoot/campaign, preserving
+its complete scan, original limits and every assertion. The shared
+normal/UNKNOWN/lease/capacity/recovery/domain-death history stays together.
+Both complete groups must pass; neither a budget reset nor an omitted value
+or CAS object is permitted.
+
+The received-tool successor still reached queued/verify without completing
+within thirty seconds. Its original processes and retained writers joined
+successfully. The closed stop diagnostic reported `drive_retirement`, but
+that label previously survived later model work and final-completion joins;
+it is not a stack sample or proof of the earlier timeout's exact await. The
+local follow-up resets that existing label after retirement returns, without
+removing any recovery/retirement validation. The separate credential-finalizer
+campaign passed its genuine two-second original service stop, then failed a
+successor-history read. The follow-up reuses the existing readiness observer
+that treats only real SQLITE_BUSY as pending inside the unchanged deadline;
+strict complete history/link verification remains mandatory afterward.
+
+The final exact-source capture binds all seventeen report categories with no
+pending/rejected category; its digest is
+`a740b3ac25a108ba2ccd8ebfa2d5c7c69bed4affb93f97f8d99fb64a329ff9a0`.
+Twelve report categories qualify their own bounded mechanisms. The other
+five, including absent guest success reports, remain unqualified. Raw logs,
+archives, StateRoot/WAL and credentials were not retained.
+
+The guest ELF blocker is a real recipe-contract decision, not permission to
+raise a guard. Independent memory-only inspection of the checksum-pinned
+Node archive reproduced the exact CI Node digest
+`7fde7b8afa198da66257f42ee2001d874c7355631e6d1579a5fb5ef1f246df4c`:
+its unique `DT_STRSZ` is 2,082,484 bytes, exceeding the current 1 MiB whole
+string-table acceptance guard. Dependency names are already read individually
+in at most 256-byte slices; windowed reading alone cannot preserve that
+acceptance rule while admitting this same binary. Changing the extent rule
+requires explicit owner approval, retained signed-file/unique-LOAD/bounds and
+resource checks, malformed-ELF regressions and actual Linux execution. The
+guard was unchanged at that checkpoint pending that decision; no compatibility
+binary was silently substituted or modified. The owner has since explicitly
+approved the bounded extent-contract revision. The implementation now checks
+the complete table against its unique LOAD and signed-file extent, rejects
+partial virtual/file aliases, and reserves every actual dependency-name read
+against the fixed cumulative 262,144-byte budget before reading. The existing
+256-byte name window and all file/count/hash/seal/close checks remain. Eighteen
+malformed cases are wired to the original real native extraction campaign;
+pure fixture tests are not their Linux execution evidence. This revision and
+the normal signed extraction still require a new exact-source Linux run.
+
+The connected client follow-up shares one canonical request/result decoder
+between the original server and a genuine authenticated installed client.
+The fourteen enabled methods are only those with existing server consumers;
+recognizing another RFC method name grants neither an implementation nor
+authority. The credential API is a thin wrapper over the same held-selection,
+native peer, image, manager, socket and hello checks. Connections do not
+automatically reconnect, replay a mutation, manufacture request ids, or start
+the Supervisor from an observation query. The qualification-only child driver
+and its scanned parent are being connected to actual Session/Run submission,
+result/diff downloads, explicit reconnect and real Supervisor restart; their
+local process tests do not qualify that Linux installation path.
+
+Read pagination now budgets the complete response envelope, not just its
+arrays, against the unchanged 1 MiB, 10,000-member and 32-container-depth
+limits. An excluded entry never advances its cursor or permits a later stream
+to jump over it; a single entry that cannot fit an otherwise empty response
+is refused. The immutable RunSpec is validated before the final same-owner,
+same-spec SQL snapshot determines all watermarks. Real UDS component tests
+cover 1,000-entry Journal, Checkpoint and Event histories, continuous short
+pages and the exact complete-frame byte boundary. This is not permission to
+claim scale, installed-client or recovery qualification before those separate
+campaigns pass.
+
 The next consumer batch adds authenticated `artifact.get`: only registered
 objects in the genuine principal's exact StateRoot are readable, and a complete
 CAS hash/identity/resource join precedes every short response. Current pages

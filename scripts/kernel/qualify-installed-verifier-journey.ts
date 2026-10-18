@@ -11,6 +11,7 @@ import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
+import { openInstalledClientConsumer } from './testing/installed-client-consumer.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../../src/kernel/canonical.js';
 import type { AuthorizationGrantSummaryV1, VerifierIdentityCreateRequest } from '../../src/kernel/authorization.js';
 import { decodeCredentialAuthorityOperation, decodeEndpointAuthorityOperation, type EndpointRegistrationV1 } from '../../src/kernel/credential-authority.js';
@@ -103,29 +104,13 @@ async function transferPackage(filename: string, uid: number, gid: number): Prom
   } finally { await held.close(); }
 }
 
-const persistentClientScript = `import assert from 'node:assert/strict';import net from 'node:net';
-import {createInterface} from 'node:readline';
-const socket=net.createConnection(process.argv[1]);let input=Buffer.alloc(0),waiter,error,count=0;
-const closed=new Promise(resolve=>socket.once('close',resolve));
-socket.on('data',chunk=>{try{input=Buffer.concat([input,chunk]);assert(input.length<=1048580);
-while(input.length>=4){const size=input.readUInt32BE(0);assert(size>=1&&size<=1048576);if(input.length<size+4)break;
-const text=new TextDecoder('utf-8',{fatal:true}).decode(input.subarray(4,size+4));input=input.subarray(size+4);
-assert(waiter);const pending=waiter;waiter=undefined;pending.resolve(text);}}
-catch(failure){error=failure;waiter?.reject(failure);socket.destroy();}});
-socket.on('error',failure=>{error=failure;waiter?.reject(failure);});
-socket.on('close',()=>{error??=new Error('original public connection closed');waiter?.reject(error);});
-try{await new Promise((resolve,reject)=>{socket.once('connect',resolve);socket.once('error',reject);});
-console.log('connected');const lines=createInterface({input:process.stdin,crlfDelay:Infinity});
-for await(const line of lines){assert(++count<=1024&&!waiter&&!error);const body=Buffer.from(line);assert(body.length>=1&&body.length<=1048576);
-const header=Buffer.alloc(4);header.writeUInt32BE(body.length);const text=await new Promise((resolve,reject)=>{
-waiter={resolve,reject};socket.write(Buffer.concat([header,body]));});console.log(JSON.stringify(text));}}
-finally{socket.destroy();await closed;}`;
 
 
 
 async function campaign(filename: string): Promise<void> {
   assert.equal(process.geteuid!(), 0);
   const ledger = await readLedger(filename), recipe = ledger.runJourney;
+  const installedClientDriver = path.join(recipe.buildFixture, 'installed-control-client-driver.mjs');
   const report: Record<string, any> = { diagnosticOnly: true, qualified: false, phase: 'installation',
     scope: 'actual signed Linux installed Node required/advisory verifier, repair and exhausted timeout using public v1 UDS and owned HTTPS; not actual provider, release, default/ask policy or complete I2/I1 fault qualification',
     actualProviderQualified: false, actualProviderBillingQualified: false, completeI1Qualified: false, completeI2Qualified: false,
@@ -155,10 +140,6 @@ async function campaign(filename: string): Promise<void> {
   let requestOrdinal = 0;
   const nextId = () => '019a0013-0000-7000-8000-' + String(++requestOrdinal).padStart(12, '0');
   const request = <T extends Record<string, unknown>>(core: T): T & { requestDigest: string } => ({ ...core, requestDigest: canonicalSha256(core) });
-  const hello = { protocolVersion: 1, method: 'control.hello', clientBuild: 'installed-verifier-journey',
-    controlSchemaRange: { min: 1, max: 1 }, headlessSchemaRange: { min: 1, max: 1 },
-    requestedFeatureIds: ['session.create', 'session.get', 'run.submit', 'run.get', 'run.attach', 'run.cancel',
-      'authorization.create', 'authorization.revoke', 'run.result', 'run.diff', 'artifact.get', 'supervisor.status'] };
   const accepted = (response: Response, method: string) => {
     if (!response.ok) report.lastRefusal = { method,
       code: ['INVALID_REQUEST', 'INTERNAL', 'AUTHORIZATION_REQUIRED', 'UNSUPPORTED_EXECUTION_IDENTITY', 'ARTIFACT_MISMATCH',
@@ -168,72 +149,11 @@ async function campaign(filename: string): Promise<void> {
     assert(response.result && response.result.method === method); return response.result;
   };
   const persistentClient = async () => {
-    const outScan = scanner.openStream();
-    let errorScan: ReturnType<typeof scanner.openStream>;
-    try { errorScan = scanner.openStream(); } catch (error) { outScan.close(); throw error; }
-    let child: ChildProcessWithoutNullStreams;
-    try {
-      child = spawn('/usr/sbin/runuser', [...prefix, process.execPath, '--input-type=module', '-e', persistentClientScript,
-        path.join(recipe.stateRoot, 'runtime/control-v1.sock')], { env: environment, cwd: ledger.home, stdio: ['pipe', 'pipe', 'pipe'] });
-    } catch (error) { outScan.close(); errorScan.close(); throw error; }
-    let output = '', errorBytes = 0, failure: unknown, readyResolve!: () => void, readyReject!: (error: unknown) => void;
-    let pending: { resolve(text: string): void; reject(error: unknown): void } | undefined;
-    const ready = new Promise<void>((resolve, reject) => { readyResolve = resolve; readyReject = reject; });
-    const refuse = (error: unknown) => { failure ??= error; readyReject(error); pending?.reject(error); };
-    child.stdout.on('data', (bytes: Buffer) => {
-      try {
-        outScan.scan(bytes); output += bytes.toString('utf8'); assert(Buffer.byteLength(output) <= 2 * 1048580);
-        for (;;) {
-          const at = output.indexOf('\n'); if (at < 0) break;
-          const line = output.slice(0, at); output = output.slice(at + 1);
-          if (line === 'connected') { readyResolve(); continue; }
-          assert(pending, 'persistent client emitted an unsolicited response');
-          const text = parseJsonStrict(line); assert.equal(typeof text, 'string');
-          const original = pending; pending = undefined; original.resolve(text as string);
-        }
-      } catch (error) { refuse(error); }
-    });
-    child.stderr.on('data', (bytes: Buffer) => {
-      try { errorScan.scan(bytes); errorBytes += bytes.length; assert(errorBytes <= 65536); }
-      catch (error) { refuse(error); }
-    });
-    child.once('error', refuse); child.stdin.on('error', refuse); child.stdout.on('error', refuse); child.stderr.on('error', refuse);
-    const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolve => child.once('close', (code, signal) => {
-      outScan.close(); errorScan.close(); if (pending) refuse(new Error('original public client closed before its response'));
-      resolve({ code, signal });
-    }));
-    let closing: Promise<void> | undefined;
-    const close = () => closing ??= (async () => {
-      child.stdin.end();
-      let exit: Awaited<typeof closed>;
-      try { exit = await bounded(closed, 10000, 'original public client did not join'); }
-      catch (error) {
-        child.kill('SIGKILL');
-        // runuser can have an actual child holding its inherited pipes. Do
-        // not turn failed cleanup into an unbounded wait or a positive join;
-        // the outer UID-scoped coordinator still owns final child retirement.
-        try { await bounded(closed, 10000, 'original public client pipes did not join after wrapper exit'); }
-        catch (joinError) { throw new AggregateError([error, joinError], 'original public client retirement failed'); }
-        throw error;
-      }
-      assert.equal(exit.code, 0); assert.equal(exit.signal, null); assert.equal(failure, undefined); assert.equal(output, '');
-      assert.equal(errorBytes, 0); report.originalPublicClientJoined = true;
-    })();
-    const send = async (value: Record<string, unknown>, timeout = 5000): Promise<Response> => {
-      assert(!pending && !failure && !closing); const bytes = canonicalJsonBytes(value); assert(bytes.length <= 1048576);
-      const reply = new Promise<string>((resolve, reject) => { pending = { resolve, reject }; });
-      child.stdin.write(Buffer.concat([bytes, Buffer.from('\n')]));
-      const text = await bounded(reply, timeout, 'original public client request did not complete');
-      const response = parseJsonStrict(text) as Response; assert.equal(text, canonicalJsonBytes(response).toString('utf8'));
-      return response;
-    };
-    try {
-      await bounded(Promise.race([ready, closed.then(() => { throw new Error('original public client closed before readiness'); })]),
-        5000, 'original public client did not connect');
-      const greeting = accepted(await send(hello), 'control.hello');
-      assert(Array.isArray(greeting.enabledFeatureIds) && greeting.enabledFeatureIds.includes('artifact.get'));
-      return { send, close };
-    } catch (error) { try { await close(); } catch {} throw error; }
+    const client = await openInstalledClientConsumer({ executable: '/usr/sbin/runuser',
+      args: [...prefix, process.execPath, '--disable-warning=ExperimentalWarning', installedClientDriver, filename], cwd: ledger.home, env: environment,
+      openScan: () => scanner.openStream(), onJoined: () => { report.originalPublicClientJoined = true; } });
+    assert(Array.isArray(client.hello.enabledFeatureIds) && client.hello.enabledFeatureIds.includes('artifact.get'));
+    return client;
   };
   const withRetainedUnitHistory = async (units: readonly [string, string], body: (assertRetained: () => void) => Promise<void>): Promise<void> => {
     assert.equal(units.length, 2);
@@ -540,6 +460,11 @@ async function campaign(filename: string): Promise<void> {
     assert(Object.values(installer.metafile!.outputs).flatMap(value => value.imports).every(value => value.external && value.path.startsWith('node:')));
     assert.equal(installer.outputFiles!.length, 1);
     await writeFile(recipe.installerEntry, installer.outputFiles![0]!.contents, { flag: 'wx', mode: 0o444 });
+    const consumer = await build({ entryPoints: [fileURLToPath(new URL('./testing/installed-control-client-driver.ts', import.meta.url))],
+      outfile: installedClientDriver, bundle: true, platform: 'node', format: 'esm', target: 'node22.13', metafile: true, write: false });
+    assert(Object.values(consumer.metafile!.outputs).flatMap(value => value.imports).every(value => value.external && value.path.startsWith('node:')));
+    assert.equal(consumer.outputFiles!.length, 1); assert(consumer.outputFiles![0]!.contents.length <= 16 * 1024 * 1024);
+    await writeFile(installedClientDriver, consumer.outputFiles![0]!.contents, { flag: 'wx', mode: 0o444 });
     await writeFile(recipe.releaseKeysFile, canonicalJsonBytes(signed.releaseKeys), { flag: 'wx', mode: 0o444 });
     await transferPackage(recipe.packageRoot, ledger.uid, ledger.gid);
     const cliqHome = path.join(ledger.home, '.cliq'); await mkdir(cliqHome, { mode: 0o700 }); await chown(cliqHome, ledger.uid, ledger.gid);

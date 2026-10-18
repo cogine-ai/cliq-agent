@@ -314,17 +314,19 @@ test('bounded Run reads survive real native reconnect and owner restart without 
   await assert.rejects(f.store.readControl({ protocolVersion: 1, method: 'run.get', runId: seeded.runId }, copied),
     { code: 'ARTIFACT_MISMATCH' });
 
-  // Pause only the real immutable CAS read after the SQL cut. A real reducer
+  // Pause the final real authenticated-channel CAS read after the SQL cut,
+  // not the immutable RunSpec preflight that now precedes it. A real reducer
   // can commit meanwhile without changing that cut's Run or stream high-waters.
   const catalog = f.store.artifacts;
   const readCanonical = catalog.readCanonical.bind(catalog);
   const captured = deferred<void>();
   const release = deferred<void>();
   const originalRun = f.store.getRun(seeded.runId);
-  let pause = true;
+  let pause = true, selectedSpec = false;
   catalog.readCanonical = async <T>(ref: string): Promise<T> => {
     const value = await readCanonical<T>(ref);
-    if (pause && ref === originalRun.specRef) {
+    if (ref === originalRun.specRef) selectedSpec = true;
+    if (pause && selectedSpec && ref === copied.channelIdentityRef) {
       pause = false; captured.resolve(); await release.promise;
     }
     return value;
