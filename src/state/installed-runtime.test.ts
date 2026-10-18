@@ -120,6 +120,29 @@ test('installed read-only manager observation rejects structural selections befo
   assert.equal(inspected, false);
 });
 
+if (process.platform === 'linux') test('readiness hints cannot outlive a genuine selected runtime close', async () => {
+  const fixture = await realpath(await mkdtemp(path.join(os.tmpdir(), 'cliq-installed-readiness-close-')));
+  const packageRoot = path.join(fixture, 'package'), stateRoot = path.join(fixture, 'state');
+  let selected: HeldInstalledRuntime | undefined;
+  try {
+    const signed = await writeInstallerOnlyPackage(packageRoot);
+    const runtime = createInstalledRuntime({ releaseKeys: signed.releaseKeys });
+    await runtime.installInitial({ packageRoot, stateRoot });
+    selected = await runtime.openSelected(stateRoot);
+    // This is only a genuine held-selection lifetime/metadata gate. Opaque
+    // fixture executables are never loaded or treated as manager readiness.
+    assert.doesNotThrow(() => assertInstalledManagerObservationAvailable(selected!));
+    const closing = selected.close();
+    assert.throws(() => assertInstalledManagerObservationAvailable(selected!), {
+      code: 'ARTIFACT_MISMATCH', message: 'installed runtime handle is closed'
+    });
+    await closing;
+    assert.throws(() => assertInstalledManagerObservationAvailable(selected!), { code: 'ARTIFACT_MISMATCH' });
+    selected = undefined;
+    await assert.rejects(lstat(path.join(stateRoot, KERNEL_DATABASE_FILENAME)), { code: 'ENOENT' });
+  } finally { await selected?.close(); await rm(fixture, { recursive: true, force: true }); }
+});
+
 if (process.platform === 'linux' && process.arch === 'x64') test('ordinary installed manager observation requires its actual signed addon without granting credential authority', async () => {
   const fixture = await realpath(await mkdtemp(path.join(os.tmpdir(), 'cliq-installed-manager-observer-')));
   const packageRoot = path.join(fixture, 'package'), stateRoot = path.join(fixture, 'state');

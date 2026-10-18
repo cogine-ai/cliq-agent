@@ -73,7 +73,7 @@ test('a real Node test-runner pre-body spawn failure projects only the fixed exe
     assert.equal(readGuestVerifierBoundaryFailure(original), undefined);
     assert.deepEqual(readGuestVerifierOutputFailure(original), { outcome: 'assertion_failed', stdoutBytes: actual.stdout.length,
       stderrBytes: 0, markerStatus: 'absent', reportedErrorCodes: ['ENOENT'],
-      spawnSyscall: 'spawn', spawnTarget: 'deleted_canonical_node' });
+      spawnSyscall: 'spawn', spawnTarget: 'deleted_canonical_node', diagnosticFormat: 'tap', reportedOperation: 'spawn' });
     assert.equal(original.message, 'original outcome assertion');
   } finally { await rm(root, { recursive: true, force: true }); }
 });
@@ -85,22 +85,119 @@ test('spawn diagnostics recognize only complete fixed Node TAP targets without r
     const stdout = Buffer.from(`  ---\n  error: 'spawn ${target} ENOENT'\n  code: 'ENOENT'\n  ...\n`);
     recordGuestVerifierBoundaryFailure(error, 'assertion_failed', stdout, Buffer.alloc(0));
     assert.deepEqual(readGuestVerifierOutputFailure(error), { outcome: 'assertion_failed', stdoutBytes: stdout.length,
-      stderrBytes: 0, markerStatus: 'absent', reportedErrorCodes: ['ENOENT'], spawnSyscall: 'spawn', spawnTarget });
+      stderrBytes: 0, markerStatus: 'absent', reportedErrorCodes: ['ENOENT'], spawnSyscall: 'spawn', spawnTarget,
+      diagnosticFormat: 'tap', reportedOperation: 'spawn' });
     assert.equal(JSON.stringify(readGuestVerifierOutputFailure(error)).includes(target), false);
+  }
+});
+
+test('the real default and explicit spec reporter preserve a pre-body spawn independently of its target class', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'cliq-guest-spec-diagnostic-'));
+  try {
+    const filename = path.join(root, 'never-started.test.mjs'), preload = path.join(root, 'missing-executable.cjs');
+    await writeFile(filename, "throw new Error('test body must never execute');\n");
+    const childEnv = { ...process.env }; delete childEnv.NODE_TEST_CONTEXT;
+    for (const [target, category] of [['/unretained-owned-test-executable', 'other_or_absent'],
+      ['/usr/bin/node (deleted)', 'deleted_canonical_node']] as const) for (const reporter of ['default', 'spec'] as const) {
+      await writeFile(preload, `process.execPath = ${JSON.stringify(target)};\n`);
+      const actual = spawnSync(process.execPath, ['--test', ...(reporter === 'spec' ? ['--test-reporter=spec'] : []), '--require', preload, filename],
+        { env: childEnv, timeout: 5000, maxBuffer: 65_536 });
+      assert.equal(actual.error, undefined); assert.equal(actual.status, 1); assert.equal(actual.stderr.length, 0);
+      const text = actual.stdout.toString('utf8'), format = text.startsWith('TAP version 13\n') ? 'tap' : 'spec';
+      if (reporter === 'spec') assert.equal(format, 'spec');
+      const original = new Error('original pre-body assertion');
+      recordGuestVerifierBoundaryFailure(original, 'assertion_failed', actual.stdout, actual.stderr);
+      assert.deepEqual(readGuestVerifierOutputFailure(original), { outcome: 'assertion_failed', stdoutBytes: actual.stdout.length,
+        stderrBytes: 0, markerStatus: 'absent', reportedErrorCodes: ['ENOENT'], diagnosticFormat: format,
+        reportedOperation: 'spawn', spawnSyscall: 'spawn', spawnTarget: category });
+      assert.equal(JSON.stringify(readGuestVerifierOutputFailure(original)).includes('unretained-owned'), false);
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('actual Node TAP serialization covers all inspect quote forms, literal blocks and only fixed ENOENT operations', () => {
+  const serializer = `import {tap} from 'node:test/reporters';
+const input=JSON.parse(process.argv[1]); const error=new Error(input.message); error.code='ENOENT';
+async function* events(){yield {type:'test:fail',data:{nesting:0,testNumber:1,name:'source-owned pure diagnostic',
+file:'source-owned-diagnostic',line:1,column:1,details:{duration_ms:1,error}}};}
+for await(const text of tap(events()))process.stdout.write(text);`;
+  const messages = [
+    { message: 'spawn /usr/bin/node (deleted) ENOENT', operation: 'spawn', target: 'deleted_canonical_node', shape: /error: '/u },
+    { message: "spawn /owned'alias ENOENT", operation: 'spawn', target: 'other_or_absent', shape: /error: "/u },
+    { message: 'spawn /owned\'and"alias ENOENT', operation: 'spawn', target: 'other_or_absent', shape: /error: `/u },
+    { message: 'spawn /owned\nalias ENOENT', operation: 'other_or_absent', target: 'other_or_absent', shape: /error: \|-/u },
+    ...['spawnSync', 'open', 'stat', 'lstat', 'access', 'readlink', 'scandir'].map(operation => ({
+      message: operation === 'spawnSync' ? 'spawnSync /owned ENOENT' : `ENOENT: no such file or directory, ${operation} '/owned'`,
+      operation, target: 'other_or_absent', shape: /error: /u })),
+  ];
+  for (const input of messages) {
+    const actual = spawnSync(process.execPath, ['--input-type=module', '--eval', serializer, JSON.stringify(input)],
+      { timeout: 5000, maxBuffer: 65_536 });
+    assert.equal(actual.error, undefined); assert.equal(actual.status, 0); assert.equal(actual.stderr.length, 0);
+    assert(input.shape.test(actual.stdout.toString('utf8')));
+    const original = new Error('original outcome assertion');
+    recordGuestVerifierBoundaryFailure(original, 'assertion_failed', actual.stdout, actual.stderr);
+    const result = readGuestVerifierOutputFailure(original);
+    assert.equal(result?.diagnosticFormat, 'tap'); assert.equal(result?.reportedOperation, input.operation);
+    assert.equal(result?.spawnSyscall, input.operation === 'spawn' ? 'spawn' : 'other_or_absent');
+    assert.equal(result?.spawnTarget, input.target); assert.equal(JSON.stringify(result).includes('/owned'), false);
+  }
+});
+
+test('spec diagnostic needs a unique complete failing-test inspect object and matching code, syscall and path', () => {
+  const known = "✖ failing tests:\n\ntest at source-owned:1:1\n✖ source-owned\n  Error: spawn /usr/bin/node (deleted) ENOENT\n"
+    + "      at source-owned (source-owned:1:1) {\n    errno: -2,\n    code: 'ENOENT',\n    syscall: 'spawn /usr/bin/node (deleted)',\n"
+    + "    path: '/usr/bin/node (deleted)',\n    spawnargs: []\n  }\n";
+  const original = new Error('original source-owned assertion');
+  recordGuestVerifierBoundaryFailure(original, 'assertion_failed', Buffer.from(known), Buffer.alloc(0));
+  assert.equal(readGuestVerifierOutputFailure(original)?.diagnosticFormat, 'spec');
+  assert.equal(readGuestVerifierOutputFailure(original)?.spawnTarget, 'deleted_canonical_node');
+  for (const operation of ['spawnSync', 'open', 'stat', 'lstat', 'access', 'readlink', 'scandir']) {
+    const message = operation === 'spawnSync' ? 'spawnSync /usr/bin/node (deleted) ENOENT'
+      : `ENOENT: no such file or directory, ${operation} '/usr/bin/node (deleted)'`;
+    const text = known.replace('Error: spawn /usr/bin/node (deleted) ENOENT', 'Error: ' + message)
+      .replace("syscall: 'spawn /usr/bin/node (deleted)'", `syscall: '${operation === 'spawnSync' ? operation + ' /usr/bin/node (deleted)' : operation}'`);
+    const error = new Error('source-owned operation data');
+    recordGuestVerifierBoundaryFailure(error, 'assertion_failed', Buffer.from(text), Buffer.alloc(0));
+    const result = readGuestVerifierOutputFailure(error);
+    assert.equal(result?.diagnosticFormat, 'spec'); assert.equal(result?.reportedOperation, operation);
+    assert.equal(result?.spawnSyscall, 'other_or_absent'); assert.equal(result?.spawnTarget, 'other_or_absent');
+  }
+  for (const text of [known + known, known.replace('✖ failing tests:\n', ''), known.replace(/^/gmu, '# '),
+    known.replace('test at source-owned:1:1\n', ''), known.replace('✖ source-owned\n', ''),
+    known.replace(' {\n', '\n'), known.replace('  }\n', ''), known.replace('  }\n', '  }'),
+    known.replace("    code: 'ENOENT',", "    code: 'ENOENT',\n    code: 'ENOENT',"),
+    known.replace("    syscall: 'spawn /usr/bin/node (deleted)',", "    syscall: 'spawn /other',"),
+    known.replace("    path: '/usr/bin/node (deleted)',", "    path: '/other',"),
+    known.replace("    path: '/usr/bin/node (deleted)',", "    path: '/usr/bin/node (deleted)',\n    path: '/usr/bin/node (deleted)',"),
+    known + "  ---\n  error: 'spawn /usr/bin/node ENOENT'\n  code: 'ENOENT'\n  ...\n"]) {
+    const error = new Error('original source-owned assertion');
+    recordGuestVerifierBoundaryFailure(error, 'assertion_failed', Buffer.from(text), Buffer.alloc(0));
+    assert.equal(readGuestVerifierOutputFailure(error)?.spawnSyscall, 'other_or_absent');
+    assert.equal(readGuestVerifierOutputFailure(error)?.spawnTarget, 'other_or_absent');
+    assert.equal(error.message, 'original source-owned assertion');
   }
 });
 
 test('unknown, malicious, conflicting and partial TAP cannot become a fixed spawn target', () => {
   const known = "  ---\n  error: 'spawn /usr/bin/node (deleted) ENOENT'\n  code: 'ENOENT'\n  ...\n";
   const foreign = "  ---\n  error: 'spawn /unretained-private-path ENOENT'\n  code: 'ENOENT'\n  ...\n";
-  for (const stdout of [foreign, known + foreign, known + known, known.replace("  code: 'ENOENT'", "  code: 'EPERM'"),
+  for (const stdout of [foreign, known.replace(' (deleted)', ' (deleted)/unexpected'),
+    known.replace(' (deleted)', String.raw`\x20(deleted)`),
+    known.replace('/usr/bin/node (deleted)', '/bindfileAB12cd (deleted)/unexpected'),
+    known.replace('/usr/bin/node (deleted)', '/bindfileTOO_LONG (deleted)')]) {
+    const original = new Error('original outcome assertion');
+    recordGuestVerifierBoundaryFailure(original, 'assertion_failed', Buffer.from(stdout), Buffer.alloc(0));
+    const result = readGuestVerifierOutputFailure(original);
+    assert.equal(result?.spawnSyscall, 'spawn'); assert.equal(result?.reportedOperation, 'spawn');
+    assert.equal(result?.spawnTarget, 'other_or_absent'); assert.equal(result?.diagnosticFormat, 'tap');
+    assert.equal(JSON.stringify(result).includes('/unretained-private-path'), false);
+  }
+  for (const stdout of [known + foreign, known + known, known.replace("  code: 'ENOENT'", "  code: 'EPERM'"),
     known.replace("  code: 'ENOENT'", "  code: 'ENOENT'\n  code: 'ENOENT'"),
-    known.replace(' (deleted)', ' (deleted)/unexpected'), known.replace(' (deleted)', String.raw`\x20(deleted)`),
     known.replace('  ...\n', '  ...'), known.replace('  ...\n', ''),
     known.replace(/^/gmu, '# '), "Error: spawn /usr/bin/node (deleted) ENOENT\n",
-    known.replace('/usr/bin/node (deleted)', '/bindfileAB12cd (deleted)/unexpected'),
-    known.replace('/usr/bin/node (deleted)', '/bindfileTOO_LONG (deleted)'),
-    known.replace('/usr/bin/node (deleted)', '/' + 'x'.repeat(256)), known + known.replace('  ...\n', ''),
+    known.replace('/usr/bin/node (deleted)', '/' + 'x'.repeat(257)), known + known.replace('  ...\n', ''),
     known.replace('  ---\n', '---\n'), known.replace("  error:", "    error:"),
     known.replace('  ---\n', '  ---\n    ---\n')]) {
     const original = new Error('original outcome assertion');
@@ -170,7 +267,7 @@ test('a failure before the callback retains only bounded counts, marker status a
   assert.equal(readGuestVerifierBoundaryFailure(error), undefined);
   assert.deepEqual(readGuestVerifierOutputFailure(error), { outcome: 'assertion_failed', stdoutBytes: stdout.length,
     stderrBytes: stderr.length, markerStatus: 'absent', reportedErrorCodes: ['ERR_MODULE_NOT_FOUND', 'ENOENT'],
-    spawnSyscall: 'other_or_absent', spawnTarget: 'other_or_absent' });
+    spawnSyscall: 'other_or_absent', spawnTarget: 'other_or_absent', diagnosticFormat: 'other_or_absent', reportedOperation: 'other_or_absent' });
   assert.equal(readGuestVerifierOutputFailure(new Error('unrelated')), undefined);
   assert.equal(readGuestVerifierOutputFailure({ outputFailure: readGuestVerifierOutputFailure(error) }), undefined);
 });
@@ -184,7 +281,8 @@ test('malformed markers, UTF-8 and oversized output do not become a valid bounda
     const error = new Error('original');
     recordGuestVerifierBoundaryFailure(error, 'infra_failed', stdout, Buffer.from('code: UNLISTED_NATIVE_TEXT'));
     assert.deepEqual(readGuestVerifierOutputFailure(error), { outcome: 'infra_failed', stdoutBytes: stdout.length,
-      stderrBytes: 26, markerStatus, reportedErrorCodes: [], spawnSyscall: 'other_or_absent', spawnTarget: 'other_or_absent' });
+      stderrBytes: 26, markerStatus, reportedErrorCodes: [], spawnSyscall: 'other_or_absent', spawnTarget: 'other_or_absent',
+      diagnosticFormat: 'other_or_absent', reportedOperation: 'other_or_absent' });
   }
   const error = new Error('oversized');
   recordGuestVerifierBoundaryFailure(error, 'infra_failed', Buffer.alloc(65_536), Buffer.from('x'));

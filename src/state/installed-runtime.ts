@@ -159,6 +159,7 @@ type InstalledRuntimeBinding = {
   loadWorkerNative(signal?: AbortSignal): Promise<NativeWorkerBinding>;
   loadCredentialPlatform(): Promise<NativeCredentialPlatformBinding>;
   loadManagerObserver(): Promise<InstalledManagerObserver>;
+  assertManagerObservationAvailable(): void;
   loadModelBroker(): Promise<NativeModelBrokerBinding>;
   openControlClient(): Promise<HeldInstalledControlClient>;
   sealWorkerImage(entryId: string): Promise<NativeWorkerImage>;
@@ -206,7 +207,7 @@ function managerObservationBinding(selected: HeldInstalledRuntime): InstalledRun
 /** Inert gate for a connection's already-loaded observer. It must run before
  * borrow enqueue, never wait behind its own acquiring/active/draining scope. */
 export function assertInstalledManagerObservationAvailable(selected: HeldInstalledRuntime): void {
-  managerObservationBinding(selected);
+  managerObservationBinding(selected).assertManagerObservationAvailable();
 }
 /** Ordinary installed clients may inspect only this selection's two fixed
  * units. The credential backend retains its separate signed-SEA gate. */
@@ -980,6 +981,10 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
         });
         heldInstalledRuntimes.set(selected, {
           factory: runtime,
+          assertManagerObservationAvailable() {
+            if (closed) mismatch('installed runtime handle is closed');
+            assertSelection();
+          },
           credentialScope(operation) {
             return enqueue(async () => {
               if (!isMainThread || !isSea() || process.versions.node !== '24.21.0')

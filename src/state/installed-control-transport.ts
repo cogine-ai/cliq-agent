@@ -10,7 +10,7 @@ import { CONTROL_FRAME_BYTES as FRAME_BYTES, INSTALLED_CONTROL_FEATURES, decodeC
   type InstalledControlResultFor } from '../kernel/control-wire.js';
 import { immutableSnapshot } from '../model/immutable.js';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
-import { openInstalledControlClient, withHeldInstalledRuntime, type HeldInstalledRuntime } from './installed-runtime.js';
+import { assertInstalledManagerObservationAvailable, openInstalledControlClient, withHeldInstalledRuntime, type HeldInstalledRuntime } from './installed-runtime.js';
 import type { HeldInstalledControlClient } from './native-owner.js';
 import { loadInstalledSupervisorObserver, type InstalledCredentialSupervisorObservation } from './installed-services.js';
 
@@ -91,14 +91,48 @@ export async function openInstalledControlTransport(selected: HeldInstalledRunti
   const observer = await loadInstalledSupervisorObserver(selected, purpose);
   let observed = await observer.observe(purpose === 'credential');
   const deadline = performance.now() + 30000;
+  let candidateIdentity: string | undefined;
+  let nextObservationAt = 0;
+  let firstHint = true;
   for (;;) {
-    const socket = await lstat(path.join(observed.stateRoot, 'runtime/control-v1.sock')).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === 'ENOENT') return undefined; throw error;
-    });
-    if (socket?.isSocket() && observed.supervisor.ActiveState === 'active' && observed.keeper.ActiveState === 'active') break;
+    // Preserve synchronous close/retirement/held-metadata refusal even while
+    // this negative scheduling poll has no authority-bearing observation.
+    assertInstalledManagerObservationAvailable(selected);
     if (performance.now() >= deadline || [observed.supervisor, observed.keeper].some(unit => unit.ActiveState === 'failed'))
       refuse('installed Supervisor startup did not reach authenticated readiness');
-    await delay(20); observed = await observer.observe();
+    // A named socket is only a wake-up hint, not a peer, service invocation
+    // or StateOwner. Negative polls must not repeatedly hash the entire
+    // installed guest image while its real Supervisor is still starting.
+    const socket = await lstat(path.join(observed.stateRoot, 'runtime/control-v1.sock'), { bigint: true }).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return undefined; throw error;
+    });
+    assertInstalledManagerObservationAvailable(selected);
+    if (performance.now() >= deadline)
+      refuse('installed Supervisor startup did not reach authenticated readiness');
+    // Preserve the original already-running fast path without adding another
+    // complete image walk. Only this first hint may use the just-completed
+    // initial observation; a negative hint permanently ends that scheduling
+    // shortcut, so a socket appearing later always requires a fresh cut.
+    const initiallyReady = firstHint && socket?.isSocket() &&
+      observed.supervisor.ActiveState === 'active' && observed.keeper.ActiveState === 'active';
+    firstHint = false;
+    if (initiallyReady) break;
+    if (socket?.isSocket()) {
+      const identity = `${socket.dev}:${socket.ino}`;
+      if (identity !== candidateIdentity || performance.now() >= nextObservationAt) {
+        candidateIdentity = identity;
+        // Even a previously present/stale socket needs a fresh complete cut.
+        // A manager may leave activating without changing that socket inode;
+        // retry only this readiness observation after a fixed cooldown, never
+        // a connection, request or mutation. The absolute budget is unchanged.
+        observed = await observer.observe();
+        if (performance.now() >= deadline || [observed.supervisor, observed.keeper].some(unit => unit.ActiveState === 'failed'))
+          refuse('installed Supervisor startup did not reach authenticated readiness');
+        if (observed.supervisor.ActiveState === 'active' && observed.keeper.ActiveState === 'active') break;
+        nextObservationAt = performance.now() + 1000;
+      }
+    } else candidateIdentity = undefined;
+    await delay(Math.min(20, Math.max(0, deadline - performance.now())));
   }
   invocation(observed);
   const selection = await withHeldInstalledRuntime(selected, async installed => immutableSnapshot({
