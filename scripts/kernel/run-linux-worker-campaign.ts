@@ -18,12 +18,14 @@ import type { ProcessContainment, ProcessContainmentDeathEvidenceV1, ProcessCont
 import type { ReconciliationProbeEvidenceV1, ReconciliationProbeTimeoutClosureV1 } from '../../src/kernel/reconciliation.js';
 import type { WorkerDeathWait, WorkerIdentity, WorkspaceEntryManifest, WorkspaceGenerationIdentityV1,
   WorkspaceGenerationQuarantineEvidenceV1, WorkspaceGenerationStateV1, WorkspaceStateManifest, PlatformProcessIdentityV1,
-  WorkspaceGenerationRetirementEvidenceV1, SupervisorInspectorIdentityV1, Run, WorkerLaunch, BudgetSettlementV1 } from '../../src/kernel/types.js';
+  WorkspaceGenerationRetirementEvidenceV1, SupervisorInspectorIdentityV1, Run, WorkerLaunch, BudgetSettlementV1,
+  StateOwnerRecordV1 } from '../../src/kernel/types.js';
 import { openLinuxWorkerLauncher, type LinuxWorkerController, type LinuxWorkerLauncher } from '../../src/sandbox/linux-worker.js';
 import * as linuxWorker from '../../src/sandbox/linux-worker.js';
 import { createLinuxWorkerCampaignFixture } from '../../src/sandbox/testing/worker-campaign-fixture.js';
 import type { LocalControlConnection, LocalControlListener } from '../../src/state/control-channel.js';
-import { decodeWorkerIdentity } from '../../src/state/decoders.js';
+import { decodePlatformProcessIdentity, decodeStateOwnerAcquisitionEvidence, decodeStateOwnerTransitionEvidence,
+  decodeWorkerIdentity } from '../../src/state/decoders.js';
 import { decodeWorkerProcessContainment } from '../../src/state/execution-closure.js';
 import { loadNativeStateOwner, type HeldStateOwnerLock } from '../../src/state/native-owner.js';
 import { journalEntryFromRow, readInvocationJournal, type JournalSqlRow } from '../../src/state/repositories/journal.js';
@@ -31,7 +33,7 @@ import { readRequiredWorkerLaunch, readWorkerLaunchesForRun } from '../../src/st
 import { readRequiredWorkspaceGenerationByRef } from '../../src/state/repositories/workspace-generations.js';
 import { readRun } from '../../src/state/rows.js';
 import { openSqliteDriver, type SqliteConnection } from '../../src/state/sqlite-driver.js';
-import { readLatestStateOwner } from '../../src/state/state-owner.js';
+import { readLatestStateOwner, readStateOwner } from '../../src/state/state-owner.js';
 import { openStateStore, publishInProcessChannel, type StateStore } from '../../src/state/store.js';
 import { uuidv7 } from '../../src/state/testing/fixtures.js';
 import type { CrashChildInput, CrashChildPaused, CrashChildQueuedPostMove, CrashChildRetirementRefused, CrashChildControllerLossRefused } from './linux-worker-crash-child.js';
@@ -1566,12 +1568,75 @@ function preactivationRefusalRows(connection: SqliteConnection, runId: string) {
     launches: connection.prepare('SELECT launch_id, run_id, phase, row_json, retired_at FROM worker_launches WHERE run_id=? ORDER BY launch_id').all<CampaignLaunchRow>(runId),
     generations: connection.prepare('SELECT generation_id, run_id, phase, row_version, row_json FROM workspace_generations WHERE run_id=? ORDER BY generation_id').all<CampaignGenerationRow>(runId),
     journal: connection.prepare('SELECT run_id, seq, op_id, op_kind, attempt, phase, entry_json FROM run_journal WHERE run_id=? ORDER BY seq').all<CampaignJournalRow>(runId),
-    // The fixture's offline prefix may already contain these kinds. Compare
-    // exact registered rows, never mislabel its metadata as native evidence.
-    proofs: connection.prepare(`SELECT ref, media_type, schema_kind, byte_length, created_at FROM artifacts WHERE schema_kind IN (
-      'cliq-worker-identity-v1', 'cliq-process-containment-v1', 'cliq-process-containment-death-evidence-v1',
-      'cliq-process-containment-no-spawn-evidence-v1', 'cliq-workspace-generation-quarantine-evidence-v1') ORDER BY ref`).all<CampaignArtifactRow>()
+    // First-declaration labels are not an exhaustive index of typed uses.
+    artifacts: connection.prepare('SELECT ref, media_type, schema_kind, byte_length, created_at FROM artifacts ORDER BY ref')
+      .all<CampaignArtifactRow>()
   };
+}
+
+function assertRefusalArtifactChanges(stateRoot: string, before: readonly CampaignArtifactRow[], after: readonly CampaignArtifactRow[],
+  prior: Extract<StateOwnerRecordV1, { state: 'active' }>, terminal: StateOwnerRecordV1 | undefined,
+  successor: Extract<StateOwnerRecordV1, { state: 'active' }>) {
+  assert.ok(terminal?.state === 'terminal');
+  assert.equal(successor.ownerEpoch, prior.ownerEpoch + 1);
+  const { releasedAt: _releasedAt, terminalReason, transitionEvidenceRef, transitionEvidenceDigest,
+    rowDigest: _terminalDigest, state: _terminalState, rowVersion: _terminalVersion, ...terminalIdentity } = terminal;
+  const { rowDigest: _priorDigest, state: _priorState, rowVersion: _priorVersion, ...priorIdentity } = prior;
+  assert.deepEqual(terminalIdentity, priorIdentity, 'takeover cannot rewrite the original owner identity');
+  assert.equal(terminalReason, 'superseded_after_owner_death');
+  for (const field of ['runtimeBundleRef', 'runtimeBundleManifestDigest', 'supervisorEntryId', 'supervisorEntryVersion',
+    'supervisorExecutableDigest', 'stateLockIdentityRef', 'stateLockIdentityDigest'] as const) {
+    assert.equal(successor[field], prior[field]);
+  }
+  const processIdentity = decodePlatformProcessIdentity(frozenArtifact(stateRoot, successor.processIdentityRef));
+  assert.equal(processIdentity.platform, 'linux');
+  assert.equal(processIdentity.ownerUid, process.geteuid!());
+  assert.equal(processIdentity.identityDigest, successor.processIdentityDigest);
+  assert.equal(processIdentity.executableImageDigest, successor.supervisorExecutableDigest);
+  assert.equal(processIdentity.observedAt, successor.acquiredAt);
+  assert.equal(successor.supervisorInstanceId, identityHash('cliq-supervisor-instance-v1', processIdentity.identityDigest,
+    successor.acquiredAt, String(successor.ownerEpoch)));
+  const acquisition = decodeStateOwnerAcquisitionEvidence(frozenArtifact(stateRoot, successor.acquisitionEvidenceRef));
+  assert.deepEqual(acquisition, {
+    schemaVersion: 1, format: 'cliq-state-owner-acquisition-evidence-v1', kind: 'takeover_after_owner_death',
+    ownerEpoch: successor.ownerEpoch, supervisorInstanceId: successor.supervisorInstanceId,
+    runtimeBundleRef: successor.runtimeBundleRef, runtimeBundleManifestDigest: successor.runtimeBundleManifestDigest,
+    processIdentityRef: successor.processIdentityRef, processIdentityDigest: successor.processIdentityDigest,
+    stateLockIdentityRef: successor.stateLockIdentityRef, stateLockIdentityDigest: successor.stateLockIdentityDigest,
+    instanceNonceDigest: successor.instanceNonceDigest, acquiredAt: successor.acquiredAt, evidenceDigest: successor.acquisitionEvidenceDigest,
+    priorOwnerEpoch: prior.ownerEpoch, priorTerminalRowDigest: terminal.rowDigest,
+    priorTransitionEvidenceRef: transitionEvidenceRef, priorTransitionEvidenceDigest: transitionEvidenceDigest,
+    priorTerminalReason: 'superseded_after_owner_death'
+  });
+  const transition = decodeStateOwnerTransitionEvidence(frozenArtifact(stateRoot, transitionEvidenceRef));
+  assert.deepEqual(transition, {
+    schemaVersion: 1, format: 'cliq-state-owner-transition-evidence-v1', kind: 'superseded_after_owner_death',
+    priorOwnerEpoch: prior.ownerEpoch, priorSupervisorInstanceId: prior.supervisorInstanceId,
+    priorProcessIdentityRef: prior.processIdentityRef, priorProcessIdentityDigest: prior.processIdentityDigest,
+    stateLockIdentityRef: prior.stateLockIdentityRef, stateLockIdentityDigest: prior.stateLockIdentityDigest,
+    observedAt: successor.acquiredAt, evidenceDigest: transitionEvidenceDigest,
+    priorProcessObservation: 'absent_or_start_token_mismatch', successorOwnerEpoch: successor.ownerEpoch,
+    successorSupervisorInstanceId: successor.supervisorInstanceId, successorRuntimeBundleRef: successor.runtimeBundleRef,
+    successorRuntimeBundleManifestDigest: successor.runtimeBundleManifestDigest,
+    successorProcessIdentityRef: successor.processIdentityRef, successorProcessIdentityDigest: successor.processIdentityDigest,
+    successorInstanceNonceDigest: successor.instanceNonceDigest
+  });
+  const original = new Map(before.map(row => [row.ref, row]));
+  assert.deepEqual(after.filter(row => original.has(row.ref)), before,
+    'refusal cannot remove or change any original artifact descriptor, label or timestamp');
+  const ownerObjects = new Map([
+    [successor.processIdentityRef, BigInt(canonicalJsonBytes(processIdentity).byteLength)],
+    [successor.acquisitionEvidenceRef, BigInt(canonicalJsonBytes(acquisition).byteLength)],
+    [transitionEvidenceRef, BigInt(canonicalJsonBytes(transition).byteLength)]
+  ]);
+  for (const [ref, byteLength] of ownerObjects) {
+    const row = after.find(row => row.ref === ref);
+    assert.ok(row, 'the independently verified successor closure must be registered');
+    assert.equal(row.byte_length, byteLength, 'successor descriptor length must equal its complete verified canonical bytes');
+  }
+  assert.deepEqual(after.filter(row => !original.has(row.ref)).map(row => row.ref),
+    [...ownerObjects.keys()].filter(ref => !original.has(ref)).sort(),
+    'refusal may register only its exact successor owner closure, never positive native/quarantine proof');
 }
 
 async function releaseForkTracer(tracer: LinuxForkTracer) {
@@ -2019,11 +2084,16 @@ async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInpu
         assert.deepEqual(readInvocationJournal(connection, fixture.runId), before.closure.journal);
         assert.deepEqual(readRequiredWorkerLaunch(connection, held.launch.launchId), held.launch);
         assert.deepEqual(readRequiredWorkspaceGenerationByRef(connection, held.generation.generationRef), held.generation);
-        assert.deepEqual(preactivationRefusalRows(connection, fixture.runId), held.refusalRows,
-          'invalid birth refusal cannot change any Run events, Journal, launch/generation rows or register positive native/quarantine proof');
+        const { artifacts: currentArtifacts, ...currentRows } = preactivationRefusalRows(connection, fixture.runId);
+        const { artifacts: originalArtifacts, ...originalRows } = held.refusalRows!;
+        assert.deepEqual(currentRows, originalRows,
+          'invalid birth refusal cannot change any Run events, Journal or launch/generation rows');
         const owner = readLatestStateOwner(connection)!;
-        assert.equal(owner.state, 'active'); assert.ok(owner.ownerEpoch > held.owner.ownerEpoch);
-        assert.notEqual(owner.supervisorInstanceId, held.owner.supervisorInstanceId); return owner;
+        assert.ok(owner.state === 'active' && held.owner.state === 'active');
+        assert.notEqual(owner.supervisorInstanceId, held.owner.supervisorInstanceId);
+        assertRefusalArtifactChanges(fixture.stateRoot, originalArtifacts, currentArtifacts, held.owner,
+          readStateOwner(connection, held.owner.ownerEpoch), owner);
+        return owner;
       });
       const helperIdentity = frozenArtifact<PlatformProcessIdentityV1>(fixture.stateRoot, refusingOwner.processIdentityRef);
       assert.equal(helperIdentity.platform, 'linux'); assert.equal(helperIdentity.pid, helper.pid);
@@ -2685,6 +2755,7 @@ function frozenArtifact<T>(stateRoot: string, ref: string): T {
     assert.ok(before.isFile() && before.size <= 1024n * 1024n && before.nlink === 1n);
     assert.equal(before.mode & 0o7777n, 0o400n);
     const bytes = fs.readFileSync(fd);
+    assert.equal(createHash('sha256').update(bytes).digest('hex'), ref);
     const value: T = JSON.parse(bytes.toString('utf8'));
     assert.equal(canonicalSha256(value), ref); assert.deepEqual(canonicalJsonBytes(value), bytes);
     const after = fs.fstatSync(fd, { bigint: true });

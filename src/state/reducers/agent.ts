@@ -20,7 +20,7 @@ import { joinResourceOperations, KernelStorageError, ModelRetryPendingError, sta
 import { sampleCanonicalNow } from '../canonical-time.js';
 import { readHighestPreparedAttempt, readInvocationAttempt, readOperationJournal } from '../repositories/journal.js';
 import { readRecoveryClosure } from '../recovery-closure.js';
-import { readCheckpoint, readRun, ZERO_BUDGET } from '../rows.js';
+import { readCheckpoint, readRun, readSessionPrincipalId, ZERO_BUDGET } from '../rows.js';
 import type { SqliteConnection, SqliteDriver } from '../sqlite-driver.js';
 import type { StateOwnerContext } from '../state-owner.js';
 import { prepareValidatedInvocation, readModelRetryHistory, settleValidatedInvocation, type SettleInvocationInput } from './invocation.js';
@@ -31,6 +31,8 @@ import type { NativeWorkerRetirement } from '../tool-checkpoint.js';
 import { planModelOperationGrant } from '../../kernel/model-grant.js';
 import { readModelGrantClosure, readModelTarget } from '../model-grant.js';
 import type { HeldInstalledRuntime } from '../installed-runtime.js';
+import { loadFinalCandidate } from '../final-candidate.js';
+import { loadRunResult } from '../run-result.js';
 
 export type LoadAgentRunInput = {
   runId: string;
@@ -250,6 +252,8 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
   }, reobserve, installedRuntime);
   return Object.freeze({
     ...toolContinuation,
+    ...loadFinalCandidate(driver, artifacts, owner, { run: admittedRun, spec, assembly, resolveToolInput }, reobserve),
+    ...loadRunResult(driver, artifacts, owner, { run: admittedRun, spec, principalId: readSessionPrincipalId(driver, admittedRun.sessionId) }),
     model,
     resolveToolInput,
     /** Read the current durable call. This projection is neither a grant nor permission to dispatch it. */

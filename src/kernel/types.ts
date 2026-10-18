@@ -1,5 +1,8 @@
 export type ArtifactRef = string;
 
+export type { FinalCandidateItem, FinalCandidateItemBase, VerifierPlan, VerificationClosureV1, RunResult,
+  WorkspaceDiffV1, WorkspaceDiffOperationV1 } from './result.js';
+
 export type { BrokerProcessDomainDeathEvidenceV1 } from './broker-process-domain-death.js';
 
 export type {

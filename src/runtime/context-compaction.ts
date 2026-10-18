@@ -57,7 +57,7 @@ export function validateContextItems(context: ContextManifest, items: readonly C
           throw new TypeError('summary is not backed by its exact compaction item and source range');
         }
       } else if (segment.kind !== 'excluded_control' || source.some(({ item }) =>
-        item.kind !== 'assistant_tool_batch' && item.kind !== 'context_compaction' && item.kind !== 'policy_decision' && item.kind !== 'input_request')) {
+        item.kind !== 'assistant_tool_batch' && item.kind !== 'context_compaction' && item.kind !== 'policy_decision' && item.kind !== 'input_request' && item.kind !== 'final_candidate')) {
         throw new TypeError('model-visible items cannot be hidden as excluded control');
       }
     }
@@ -103,6 +103,8 @@ function closedBoundaries(items: readonly ContextItem[]): Set<number> {
       if (!batch || item.batchItemId !== batch.itemId || item.index !== nextIndex || item.callId !== batch.calls[nextIndex]?.callId) {
         throw new TypeError('input control item cannot overtake its open call');
       }
+    } else if (item.kind === 'final_candidate') {
+      if (batch || awaitingBatch) throw new TypeError('final candidate cannot overtake an open tool batch');
     } else if (item.kind !== 'context_compaction' && item.kind !== 'policy_decision') throw new TypeError('unsupported live context item');
     if (!batch && !awaitingBatch) closed.add(itemSeq);
   }

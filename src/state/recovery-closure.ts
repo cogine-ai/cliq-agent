@@ -46,6 +46,7 @@ import { readRetiredGenerationSource } from './generation-retirement.js';
 import { validateInstalledBrokerAmbiguityHistory } from './broker-ambiguity.js';
 import { validateInstalledModelNoReleaseHistory } from './broker-no-release.js';
 import { validateWorkerPreparationHistory } from './worker-preparation.js';
+import { validateRunResultRecovery } from './run-result-recovery.js';
 
 const ZERO_BUDGET: BudgetUsage = {
   modelTokens: 0,
@@ -764,6 +765,7 @@ export async function readRecoveryClosure(
   try {
     await validateInstalledModelNoReleaseHistory(driver, artifacts, closure);
     await validateStopRecovery(driver, artifacts, closure);
+    await validateRunResultRecovery(driver, artifacts, closure);
   }
   catch (error) { recoveryFailure(`stop recovery closure is invalid: ${(error as Error).message}`, error); }
   return closure;

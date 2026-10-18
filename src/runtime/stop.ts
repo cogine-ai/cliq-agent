@@ -121,6 +121,8 @@ export function openStopBatch(items: readonly ContinuationItem[]): { batch: Tool
       if (++pending.next === pending.batch.calls.length) pending = undefined;
     } else if (item.kind === 'input_request' || item.kind === 'user_input') {
       if (!pending || item.batchItemId !== pending.batch.itemId || item.index !== pending.next || item.callId !== pending.batch.calls[pending.next]?.callId) throw new TypeError('input overtakes its result-less call');
+    } else if (item.kind === 'final_candidate') {
+      if (pending || model) throw new TypeError('final candidate overtakes an open batch');
     } else if (item.kind !== 'policy_decision' && item.kind !== 'context_compaction') throw new TypeError('unsupported stop transcript item');
   }
   if (model) throw new TypeError('model turn is missing its batch');

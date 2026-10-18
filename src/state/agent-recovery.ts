@@ -20,6 +20,7 @@ import { decodeModelOperationGrant } from '../kernel/model-grant.js';
 import { decodeRetainedRunAssembly } from '../model/run-assembly.js';
 import { readModelGrantData } from './model-grant.js';
 import { decodeAdmittedContext, decodeContextManifest, decodeSourceManifest, decodeWorkspaceIdentity } from './decoders.js';
+import { validateFinalCandidateRecovery } from './final-candidate-recovery.js';
 
 /** Recovery checks retained reachability/identity; loading the agent additionally reproduces native requests and validates schemas. */
 export async function validateAgentRecovery(input: {
@@ -164,6 +165,8 @@ export async function validateAgentRecovery(input: {
       if (payload.outcome === 'error') await artifacts.readBytes(payload.diagnosticRef);
     }
   }
+  await validateFinalCandidateRecovery({ artifacts, run, spec, items: input.items, journal,
+    checkpoints: input.checkpoints, workspaceGenerations: input.workspaceGenerations, decodedItems: items });
   await validateToolRecovery({ artifacts, run, spec, items, journal, checkpoints: input.checkpoints, workspaceGenerations: input.workspaceGenerations });
   await validateUserInputRecovery({ artifacts, run, spec, items, journal, checkpoints: input.checkpoints });
   validateContextItems(input.context, input.items.map((row) => ({

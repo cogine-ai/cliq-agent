@@ -35,6 +35,7 @@ import { readWorkerRecoveryTerminalPlan, type WorkerRecoveryTerminalPlan } from 
 import { planPrivateRollbackResult } from '../private-tool-rollback.js';
 import { validateInstalledModelNoReleaseHistory } from '../broker-no-release.js';
 import { appendRunStateEvent, requireHealthyFence, resolvePrivateRollbackInvocation } from './invocation.js';
+import { decodeVerificationClosure } from '../result-artifacts.js';
 
 /** Loaded authority only. Cancellation fences immediately; terminal drain independently proves the entire current cut. */
 export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, authority: {
@@ -46,7 +47,7 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
   const result = (run: Run) => ({ run, checkpointId: stopCheckpointId(runId, run.stopIntentRef!) });
   const deadlineIntent = (createdAt: string): AgentStopIntent => ({ schemaVersion: 1, runId, createdAt, origin: 'deadline',
     targetStatus: 'failed', reason: 'budget_exhausted', deadlineAt: admitted.deadlineAt });
-  async function cut(revision: number, allowWorkerRecovery = false) {
+  async function cut(revision: number, allowWorkerRecovery = false, allowUnstartedCandidate = false) {
     if (!Number.isSafeInteger(revision) || revision < 1) throw new TypeError('invalid stop revision');
     const selected = await readRecoveryClosure(driver, artifacts, runId);
     const { run } = selected;
@@ -55,6 +56,27 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
     if (spec.operation !== 'agent' || run.parentRunId || selected.childAllocations.length ||
         driver.prepare('SELECT 1 FROM runs WHERE parent_run_id = ? LIMIT 1').get(runId)) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'child stop requires the parent/child settlement reducer');
     if (['succeeded', 'completed_unverified', 'failed', 'cancelled'].includes(run.status)) throw new RunTerminalError();
+    if (run.nextStep === 'verify' || run.nextStep === 'finalize') {
+      // Only the just-sealed candidate is supported here. Once verification
+      // starts, its own process/receipt closure must prove quiescence; a stop
+      // cannot turn a verifier claim or later frontier into a worker-free one.
+      const frontier = await readCanonicalArtifact<RunFrontier>(artifacts, run.frontierRef!);
+      if (!allowUnstartedCandidate || run.status !== 'queued' || run.activeWorkerLaunchId || run.waitingReason || run.waitingOnRef ||
+          frontier.schemaVersion !== 1 ||
+          selected.journal.some(entry => !['model', 'tool'].includes(entry.opKind)))
+        throw new KernelStorageError('STATE_TRANSITION_INVALID', 'candidate stop requires verification not to have started');
+      if (frontier.kind === 'verify' && run.nextStep === 'verify' && exactKeys(frontier, ['schemaVersion', 'kind', 'phase', 'candidateItemId',
+        'resultSourceRef', 'verifierPlanRef', 'nextVerifierIndex', 'afterPass']) && frontier.phase === 'verifiers' &&
+          frontier.nextVerifierIndex === 0 && frontier.afterPass === 'finalize') return selected;
+      if (frontier.kind !== 'finalize' || run.nextStep !== 'finalize' || frontier.operation !== 'agent' ||
+          !exactKeys(frontier, ['schemaVersion', 'kind', 'operation', 'candidateItemId', 'resultSourceRef', 'verificationClosureRef']))
+        throw new KernelStorageError('STATE_TRANSITION_INVALID', 'candidate stop requires its exact unstarted verification or consent-backed finalization');
+      const closure = decodeVerificationClosure(await readCanonicalArtifact(artifacts, frontier.verificationClosureRef));
+      if (closure.runId !== run.id || closure.candidateItemId !== frontier.candidateItemId || closure.resultSourceRef !== frontier.resultSourceRef ||
+          closure.verification.kind !== 'local' || closure.verification.unverifiedConsentRef !== spec.unverifiedConsentRef)
+        throw new KernelStorageError('STATE_TRANSITION_INVALID', 'candidate stop has no exact unverified closure');
+      return selected;
+    }
     // Cancellation/deadline may fence a validated worker-death wait, but cannot clear it or drain it.
     if (!['queued', 'running', 'waiting'].includes(run.status) || !['agent', 'tool'].includes(run.nextStep ?? '') ||
         (run.status === 'waiting' && !['approval', 'input'].includes(run.waitingReason ?? '') &&
@@ -127,7 +149,7 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
       };
       const existing = await replay();
       if (existing) return existing;
-      const selected = await cut(input.expectedRunRevision, true);
+      const selected = await cut(input.expectedRunRevision, true, true);
       const prior = selected.run.stopIntentRef ? await readAgentStop(driver, artifacts, selected) : undefined;
       for (let retry = 0; retry < 8; retry++) {
         const now = sampleCanonicalNow();
@@ -166,7 +188,7 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
     expireRun: stateOperation('INVALID_REQUEST', async (input: { expectedRunRevision: number }) => {
       input = immutableSnapshot(input);
       if (!exactKeys(input, ['expectedRunRevision'])) throw new TypeError('unknown deadline stop field');
-      const selected = await cut(input.expectedRunRevision, true);
+      const selected = await cut(input.expectedRunRevision, true, true);
       if (sampleCanonicalNow() < selected.run.deadlineAt) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'Run deadline has not elapsed');
       return commitDerivedStop(selected, async (now) => {
         if (now < selected.run.deadlineAt) throw new KernelStorageError('RECOVERY_REQUIRED', 'deadline clock regressed');
@@ -212,7 +234,7 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
         return immutableSnapshot({ run: recovered.run });
       }
       const workerRecovery = recovery === undefined ? undefined : readWorkerRecoveryTerminalPlan(driver, owner, recovery, runId);
-      const selected = await cut(input.expectedRunRevision, workerRecovery !== undefined);
+      const selected = await cut(input.expectedRunRevision, workerRecovery !== undefined, true);
       const { run, latestCheckpoint: checkpoint } = selected;
       if (workerRecovery) requireEqual(selected, workerRecovery.cut, 'terminal original worker recovery cut');
       if (!run.stopIntentRef) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'terminal drain requires a persisted StopIntent');

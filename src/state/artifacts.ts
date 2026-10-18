@@ -72,6 +72,13 @@ export function insertArtifactMetadata(
   artifact: PublishedArtifact,
   createdAt: string
 ): void {
+  assertArtifactRef(artifact.ref);
+  if (!Number.isSafeInteger(artifact.byteLength) || artifact.byteLength < 0) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'artifact byte length is not a nonnegative safe integer');
+  }
+  // A CAS ref identifies bytes, not a unique typed use. Preserve the first
+  // descriptor verbatim; every later consumer must independently rehash and
+  // decode its required schema. Labels never grant permission or authority.
   connection
     .prepare(
       `INSERT OR IGNORE INTO artifacts (ref, media_type, schema_kind, byte_length, created_at)
@@ -79,17 +86,15 @@ export function insertArtifactMetadata(
     )
     .run(artifact.ref, artifact.mediaType, artifact.schemaKind, BigInt(artifact.byteLength), createdAt);
   const stored = connection
-    .prepare('SELECT media_type, schema_kind, byte_length FROM artifacts WHERE ref = ?')
-    .get<{ media_type: string; schema_kind: string; byte_length: unknown }>(artifact.ref);
+    .prepare('SELECT byte_length FROM artifacts WHERE ref = ?')
+    .get<{ byte_length: unknown }>(artifact.ref);
   if (
     stored === undefined ||
-    stored.media_type !== artifact.mediaType ||
-    stored.schema_kind !== artifact.schemaKind ||
     Number(stored.byte_length) !== artifact.byteLength
   ) {
     throw new KernelStorageError(
       'ARTIFACT_MISMATCH',
-      `artifact ${artifact.ref} metadata conflicts with its first authoritative declaration`
+      `artifact ${artifact.ref} byte length conflicts with its immutable first descriptor`
     );
   }
 }
