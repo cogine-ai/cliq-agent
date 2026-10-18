@@ -13,6 +13,7 @@ import { tsImport } from 'tsx/esm/api';
 
 const { InstalledClientConsumerDeadlineError, InstalledClientDriverError } =
   await tsImport('./installed-client-consumer.ts', import.meta.url);
+const { canonicalSha256 } = await tsImport('../../../src/kernel/canonical.ts', import.meta.url);
 
 const source = readFileSync(new URL('../qualify-installed-run-journey.ts', import.meta.url), 'utf8');
 const literal = /^const clientScript = (`[\s\S]*?`);/mu.exec(source)?.[1]; assert(literal);
@@ -153,6 +154,75 @@ function respond(socket, text = helloReply) {
   const body = Buffer.from(text), header = Buffer.alloc(4); header.writeUInt32BE(body.length);
   socket.write(Buffer.concat([header, body]));
 }
+
+test('admission absence inspection uses its independent prewarmed socket while the original mutation remains pending', { timeout: 10000 }, async t => {
+  // Ordinary UDS/process orchestration only: no installed identity, held
+  // instruction descriptor, admission authority or signal cut is fabricated.
+  const value = await fixture(t), readAdmission = { protocolVersion: 1, method: 'run.get', runId: 'data-only-admission' };
+  const absent = { protocolVersion: 1, ok: false, method: 'run.get', error: { schemaVersion: 1,
+    code: 'NOT_FOUND', retryable: false, messageCode: 'control.read_rejected' } };
+  let reply = absent, originalSocket, enteredResolve;
+  const entered = new Promise(resolve => { enteredResolve = resolve; });
+  await value.listen((socket, request) => {
+    if (request.method === 'control.hello') respond(socket);
+    else if (request.method === 'run.submit') { originalSocket = socket; enteredResolve(); }
+    else { assert.equal(request.method, 'run.get'); respond(socket, JSON.stringify(reply)); }
+  });
+  const inspector = value.persistent(); assert.equal(await inspector.line(), 'connected');
+  inspector.child.stdin.write(`${JSON.stringify(hello)}\n`); assert.equal(JSON.parse(await inspector.line()), helloReply);
+  const original = value.persistent(); assert.equal(await original.line(), 'connected');
+  original.child.stdin.write(`${JSON.stringify(hello)}\n`); assert.equal(JSON.parse(await original.line()), helloReply);
+  original.child.stdin.write(`${JSON.stringify(mutation)}\n`); await entered;
+  const expression = /      const assertAbsent = ([^\n]+);/u.exec(source)?.[1]; assert(expression);
+  const code = ts.transpileModule(`globalThis.check = ${expression};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  const context = { assert, canonicalSha256, readAdmission, absent,
+    exchange() { assert.fail('the resource cut must not start another throwaway client'); },
+    shutdownAdmissionInspector: { async send(request, timeout) {
+      assert.deepEqual(request, readAdmission); assert.equal(timeout, 30000);
+      inspector.child.stdin.write(`${JSON.stringify(request)}\n`); return JSON.parse(JSON.parse(await inspector.line()));
+    } } };
+  vm.createContext(context); vm.runInContext(code, context);
+  await context.check();
+  for (const wrong of [{ ...absent, extra: true }, { ...absent, error: { ...absent.error, retryable: true } },
+    { ...absent, error: { ...absent.error, code: 'INTERNAL' } }]) {
+    reply = wrong; await assert.rejects(async () => context.check());
+  }
+  assert.equal(value.connections, 2); assert.equal(value.requests.filter(request => request.method === 'run.submit').length, 1);
+  assert.deepEqual(value.requests.slice(0, 3), [hello, hello, mutation]);
+  respond(originalSocket, JSON.stringify({ protocolVersion: 1, ok: true, result: { method: 'run.submit' } }));
+  assert.equal(JSON.parse(JSON.parse(await original.line())).result.method, 'run.submit');
+  for (const client of [original, inspector]) {
+    client.child.stdin.end(); const exit = await client.result;
+    assert.deepEqual(exit, { code: 0, signal: null, stderr: '' });
+  }
+});
+
+test('admission shutdown keeps the original final resource, pending, provider and two-second assertions after the independent read', () => {
+  // Caller wiring only; the actual Linux descriptor/signal cut must still run
+  // independently. In particular a missed final resource remains a failure.
+  const start = source.indexOf('    } else if (shutdownAdmissionOnly || shutdownSessionOnly) {');
+  const end = source.indexOf('\n    } else {', start); assert(start >= 0 && end > start);
+  const branch = source.slice(start, end), mutationAt = branch.indexOf('const pendingAdmission = shutdownClient.send(admission, 120000)');
+  assert(mutationAt > branch.indexOf("shutdownAdmissionInspector = await persistentClient(undefined, false, 'inspection')"));
+  assert(mutationAt > branch.indexOf('const contract = command('));
+  assert.equal(branch.match(/shutdownClient\.send\(admission, 120000\)/gu)?.length, 1);
+  assert.match(branch, /const observeBy = Date\.now\(\) \+ 30000/u);
+  const firstFinal = branch.indexOf("assert(await heldAdmissionResource(resource), 'the exact original resource must remain held at the signal cut')");
+  const joined = branch.indexOf('await shutdownAdmissionInspector.close(); shutdownAdmissionInspector = undefined;');
+  assert(firstFinal > branch.lastIndexOf('await assertAbsent();', firstFinal)); assert(joined > firstFinal);
+  const retained = branch.indexOf('await withRetainedUnitHistory('), signal = branch.indexOf("const stopped = command('/usr/bin/systemctl'");
+  assert(retained > firstFinal); assert(signal > retained);
+  assert(joined > signal); assert(joined < branch.indexOf('const releasedOwners ='));
+  assert.match(branch.slice(retained, signal), /assert\(await heldAdmissionResource\(resource\)\);\s+assert\.equal\(requestFinished, false\);/u);
+  assert.match(branch.slice(firstFinal, retained), /assert\.equal\(requestFinished, false\); assert\.equal\(requestsReceived, 0\); assert\(!providerFailure\);/u);
+  assert.match(branch, /assert\.equal\(stopPolicy\.TimeoutStopUSec, '2s'\)/u);
+  assert.match(branch, /bounded\(pendingAdmission, 10000,/u);
+  const cleanup = source.slice(source.indexOf('\n  finally {\n    const cleanupFailures: unknown[] = [];'));
+  assert.match(cleanup, /try \{ await shutdownAdmissionInspector\?\.close\(\); \} catch \(error\) \{ cleanupFailures\.push\(error\); \}/u);
+  assert.match(cleanup, /try \{ await shutdownClient\?\.close\(\); \} catch \(error\) \{ cleanupFailures\.push\(error\); \}/u);
+  const factory = source.slice(source.indexOf('  const persistentClient = async ('), source.indexOf('  const openRunObserverClient ='));
+  assert.equal(factory.match(/if \(joinRole === 'original'\) report\.originalPublicClientJoined = true/gu)?.length, 2);
+});
 
 async function readObserver(value) {
   const module = ts.transpileModule(readFileSync(new URL('./installed-run-observer.ts', import.meta.url), 'utf8'),

@@ -14,6 +14,7 @@ import { openStateStore, publishInProcessChannel, type StateStore } from '../../
 import { uuidv7 } from '../../../src/state/testing/fixtures.js';
 import { verifierCheckpointId, type VerifierRetirementV1 } from '../../../src/state/verifier-recovery.js';
 import { inspectInstalledWorkerRetirementHistory } from './installed-worker-lease.js';
+import { recordGuestVerifierBoundaryFailure } from './guest-verifier-diagnostics.js';
 
 const successfulScript = `import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -21,32 +22,46 @@ import fs from 'node:fs';
 import net from 'node:net';
 import {spawn, spawnSync} from 'node:child_process';
 test('same-image Node, readonly source, no ambient runtime or executable writable surface', async () => {
+  const boundary = stage => { try { fs.writeSync(1, 'CLIQ_GUEST_BOUNDARY_V1:' + stage + '\\n'); } catch {} };
+  boundary('runtime_identity');
   assert.equal(process.version, 'v24.21.0');
   assert.equal(process.execPath, '/usr/bin/node');
   assert.equal(process.cwd(), '/work');
+  boundary('source_read');
   assert.equal(fs.readFileSync('a', 'utf8'), 'after\\n');
+  boundary('environment');
   assert.equal(process.env.PATH, '/usr/bin');
   for (const key of ['NODE_OPTIONS','LD_PRELOAD','LD_LIBRARY_PATH']) assert.equal(process.env[key], undefined);
+  boundary('ambient_paths');
   for (const name of ['/bin/sh','/usr/bin/git','/usr/local/bin/node','/etc/passwd','/host']) assert.equal(fs.existsSync(name), false);
+  boundary('source_readonly');
   assert.throws(() => fs.writeFileSync('a', 'not allowed'), {code:'EROFS'});
+  boundary('descriptor_surface');
   for (const fd of fs.readdirSync('/proc/self/fd')) {
     let target; try { target = fs.readlinkSync('/proc/self/fd/' + fd); } catch (e) { if (e.code === 'ENOENT') continue; throw e; }
     assert.doesNotMatch(target, /cliq-guest|cliq-scope|cliq-verifier|objects\\/sha256|state\\.sqlite/);
   }
+  boundary('workspace_noexec');
   assert.equal(spawnSync('/work/untrusted-elf', [], {timeout:1000}).error?.code, 'EACCES');
+  boundary('tmp_noexec');
   const libc = ['/lib/x86_64-linux-gnu/libc.so.6','/usr/lib/x86_64-linux-gnu/libc.so.6'].find(name=>fs.existsSync(name));
   assert.ok(libc); fs.copyFileSync(libc, '/tmp/untrusted-elf'); fs.chmodSync('/tmp/untrusted-elf', 0o755);
   assert.equal(spawnSync('/tmp/untrusted-elf', [], {timeout:1000}).error?.code, 'EACCES');
+  boundary('loader_noexec');
   const loader = spawnSync('/lib64/ld-linux-x86-64.so.2', ['/tmp/untrusted-elf'], {encoding:'utf8',timeout:1000});
   assert.equal(loader.status, 127); assert.match(loader.stderr, /failed to map segment|Operation not permitted|Permission denied/);
+  boundary('network_denied');
   await new Promise((resolve,reject) => { const socket = net.createConnection({host:'127.0.0.1',port:9});
     socket.once('error', error => { try { assert.equal(error.code,'EPERM'); resolve(); } catch (e) { reject(e); } });
     socket.once('connect', () => { socket.destroy(); reject(new Error('network boundary bypassed')); }); });
+  boundary('child_node');
   const child = spawnSync('/usr/bin/node', ['--no-addons','-e','process.stdout.write(process.version)'], {encoding:'utf8',timeout:1000});
   assert.equal(child.status, 0); assert.equal(child.stdout,'v24.21.0');
+  boundary('child_domain');
   const background = spawn('/usr/bin/node', ['--no-addons','-e','setInterval(()=>{},1000)'], {detached:true,stdio:'ignore'});
   await new Promise((resolve,reject) => { background.once('spawn',resolve); background.once('error',reject); });
   background.unref(); await new Promise(resolve => setTimeout(resolve,250));
+  boundary('complete');
 });
 `;
 
@@ -125,8 +140,19 @@ test('must really exceed output cap',()=>{for(let i=0;i<32;i++)fs.writeSync(1,Bu
       assert.equal(after.run.activeWorkerLaunchId, undefined);
       const receipt = await store.artifacts.readCanonical<VerificationReceipt>(done.receiptRef);
       assert.equal(receipt.runId, fixture.runId); assert.equal(receipt.attempt, 0);
-      assert.equal(receipt.terminationReason, scenario.reason); assert.equal(receipt.outcome, scenario.outcome);
-      if ('exitCode' in scenario) assert.equal(receipt.exitCode, scenario.exitCode);
+      // Read complete CAS objects through the original full-hash/held-FD path
+      // before projecting diagnostics. No TAP or output bytes enter reports.
+      const stdout = await store.artifacts.readBytes(receipt.stdoutRef), stderr = await store.artifacts.readBytes(receipt.stderrRef);
+      assert.ok(stdout.length + stderr.length <= 65_536);
+      if (scenario.reason === 'resource_failure') assert.ok(receipt.stdoutTruncated || receipt.stderrTruncated);
+      else assert.equal(receipt.stdoutTruncated || receipt.stderrTruncated, false);
+      try {
+        assert.equal(receipt.terminationReason, scenario.reason); assert.equal(receipt.outcome, scenario.outcome);
+        if ('exitCode' in scenario) assert.equal(receipt.exitCode, scenario.exitCode);
+      } catch (error) {
+        if (scenario.name === 'pass-boundaries-child-domain') recordGuestVerifierBoundaryFailure(error, receipt.outcome, stdout);
+        throw error;
+      }
       assert.equal(receipt.sourceDigestBefore, receipt.sourceDigestAfter);
       assert.equal(receipt.resultSourceRef, frontier.resultSourceRef);
       const source = await store.artifacts.readCanonical<SourceManifest>(receipt.resultSourceRef);
@@ -137,10 +163,6 @@ test('must really exceed output cap',()=>{for(let i=0;i<32;i++)fs.writeSync(1,Bu
       const entries = await store.artifacts.readCanonical<WorkspaceEntryManifest>(workspace.entriesRef);
       const editedFile = entries.entries.find(entry => entry.path === 'a');
       assert.ok(editedFile?.kind === 'file'); assert.deepEqual(await store.artifacts.readBytes(editedFile.blobRef), Buffer.from('after\n'));
-      const stdout = await store.artifacts.readBytes(receipt.stdoutRef), stderr = await store.artifacts.readBytes(receipt.stderrRef);
-      assert.ok(stdout.length + stderr.length <= 65_536);
-      if (scenario.reason === 'resource_failure') assert.ok(receipt.stdoutTruncated || receipt.stderrTruncated);
-      else assert.equal(receipt.stdoutTruncated || receipt.stderrTruncated, false);
       if (scenario.outcome === 'passed') assert.match(stdout.toString('utf8'), /same-image Node/);
       const retirement = await store.artifacts.readCanonical<VerifierRetirementV1>(receipt.containmentEvidenceRef);
       assert.equal(retirement.format, 'cliq-verifier-retirement-v1');

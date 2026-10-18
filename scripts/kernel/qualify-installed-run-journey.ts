@@ -329,7 +329,7 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
     assert.equal(response.protocolVersion, 1); assert.equal(response.ok, true, `actual installed ${method} must be enabled and accepted`);
     assert(response.result && response.result.method === method); return response.result;
   };
-  const persistentClient = async (timeout?: number, requireLiveClose = false) => {
+  const persistentClient = async (timeout?: number, requireLiveClose = false, joinRole: 'original' | 'inspection' = 'original') => {
     assert(timeout === undefined || (Number.isSafeInteger(timeout) && timeout > 0 && timeout <= 30000));
     const deadline = timeout === undefined ? undefined : performance.now() + timeout;
     const remainingHandshake = () => {
@@ -388,7 +388,7 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
         throw error;
       }
       assert.equal(exit.code, 0); assert.equal(exit.signal, null); assert.equal(failure, undefined); assert.equal(output, '');
-      assert.equal(errorBytes, 0); report.originalPublicClientJoined = true;
+      assert.equal(errorBytes, 0); if (joinRole === 'original') report.originalPublicClientJoined = true;
     })();
     const joinAfterPeerShutdown = () => closing ??= (async () => {
       // Only the isolated SIGTERM case calls this after observing the actual
@@ -398,7 +398,7 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
       const exit = await bounded(closed, 10000, 'disconnected original public client did not join');
       assert.equal(exit.signal, null); assert.equal(exit.code, 1);
       assert(failure instanceof Error); assert.equal(output, '');
-      assert(errorBytes > 0 && errorBytes <= 65536); report.originalPublicClientJoined = true;
+      assert(errorBytes > 0 && errorBytes <= 65536); if (joinRole === 'original') report.originalPublicClientJoined = true;
     })();
     const send = async (value: Record<string, unknown>, timeout = 5000): Promise<Response> => {
       assert(!pending && !failure && !closing); const bytes = canonicalJsonBytes(value); assert(bytes.length <= 1048576);
@@ -613,6 +613,7 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
   let maintenanceObserverClient: Awaited<ReturnType<typeof persistentClient>> | undefined;
   let queuedObserverClient: Awaited<ReturnType<typeof persistentClient>> | undefined;
   let shutdownClient: Awaited<ReturnType<typeof persistentClient>> | undefined;
+  let shutdownAdmissionInspector: Awaited<ReturnType<typeof persistentClient>> | undefined;
   let restoreCasWrite: (() => Promise<void>) | undefined;
   let storagePost: { destroy(): void; closed: Promise<void>; assertPending(): void } | undefined;
   let storagePostResolve!: () => void;
@@ -2760,15 +2761,26 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
         : { protocolVersion: 1, method: 'run.get', runId: admittedId };
       const absent = { protocolVersion: 1, ok: false, method: readAdmission.method, error: { schemaVersion: 1,
         code: 'NOT_FOUND', retryable: false, messageCode: 'control.read_rejected' } };
-      const assertAbsent = () => assert.equal(canonicalSha256(exchange([readAdmission])[0]), canonicalSha256(absent));
-      assertAbsent();
+      const assertAbsent = async () => assert.equal(canonicalSha256(await shutdownAdmissionInspector!.send(readAdmission, 30000)), canonicalSha256(absent));
+      // Prewarm an independent read-only connection before the one original
+      // mutation. A throwaway Node/hello process after observing the resource
+      // can consume the ordinary capture window without testing any shutdown.
+      shutdownAdmissionInspector = await persistentClient(undefined, false, 'inspection');
+      await assertAbsent();
       const originalStatus = accepted(exchange([{ protocolVersion: 1, method: 'supervisor.status' }])[0]!, 'supervisor.status');
       assert.equal(originalStatus.health, 'ready');
+      assert.equal(shutdownAdmissionInspector.supervisorInstanceId, originalStatus.supervisorInstanceId);
       const originalOwners = inspectInstalledOwnerHistory(recipe.stateRoot).owners;
       assert.equal(originalOwners.length, 1);
       const originalOwner = originalOwners[0]!;
       assert.equal(originalOwner.state, 'active'); assert.equal(originalOwner.supervisorInstanceId, originalStatus.supervisorInstanceId);
       shutdownClient = await persistentClient();
+      const contract = command('/usr/bin/systemctl', ['--user', 'show', services.supervisorUnit,
+        '--property=TimeoutStopUSec,KillSignal,FinalKillSignal,SendSIGKILL', '--no-pager']);
+      assert.equal(contract.status, 0);
+      const stopPolicy = Object.fromEntries(contract.stdout.trim().split('\n').map(line => line.split('=')));
+      assert.equal(stopPolicy.TimeoutStopUSec, '2s'); assert.equal(stopPolicy.KillSignal, '15');
+      assert.equal(stopPolicy.FinalKillSignal, '9'); assert.equal(stopPolicy.SendSIGKILL, 'yes');
       let requestFinished = false;
       const pendingAdmission = shutdownClient.send(admission, 120000).then(response => {
         requestFinished = true; return { kind: 'response' as const, response };
@@ -2788,12 +2800,16 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
           // not a file byte offset, percentage or count of validated entries.
           // A changed cookie on the same held directory proves enumeration
           // advanced; merely seeing a pinned directory would prove no work.
-          if (!firstCursor) { firstCursor = current; assertAbsent(); continue; }
+          if (!firstCursor) { firstCursor = current; await assertAbsent(); continue; }
           if (current.position === firstCursor.position) { await delay(1); continue; }
         }
         resource = current;
       }
-      assertAbsent();
+      await assertAbsent();
+      // These are ordered observations, not an atomic absence+FD or private
+      // precommit cut. After the independent read, the same original resource
+      // must still be held; a missed cut fails. Join the inspection child only
+      // after stop, not by adding another process wait in this resource window.
       assert(await heldAdmissionResource(resource), 'the exact original resource must remain held at the signal cut');
       assert.equal(requestFinished, false); assert.equal(requestsReceived, 0); assert(!providerFailure);
       report.shutdownAdmission = { qualified: false, diagnosticOnly: true,
@@ -2804,12 +2820,6 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
           : { originalInstructionDescriptorMatched: true, instructionDocuments: 1, instructionBytes: instructionBytes.length, sourceSubtreeExcluded: true }),
         originalSupervisorProcessMatched: true, metadataEntries, inFlightSourcePayloadQualified: false, workerPreparationQualified: false,
         receivedToolQualified: false, immutableResultOrClaimQualified: false };
-      const contract = command('/usr/bin/systemctl', ['--user', 'show', services.supervisorUnit,
-        '--property=TimeoutStopUSec,KillSignal,FinalKillSignal,SendSIGKILL', '--no-pager']);
-      assert.equal(contract.status, 0);
-      const stopPolicy = Object.fromEntries(contract.stdout.trim().split('\n').map(line => line.split('=')));
-      assert.equal(stopPolicy.TimeoutStopUSec, '2s'); assert.equal(stopPolicy.KillSignal, '15');
-      assert.equal(stopPolicy.FinalKillSignal, '9'); assert.equal(stopPolicy.SendSIGKILL, 'yes');
       report.shutdownAdmission.standardStopTimeoutMs = 2000;
       mark(shutdownSessionOnly ? 'ordinary_systemd_sigterm_during_session_trust_enumeration' : 'ordinary_systemd_sigterm_during_instruction_capture');
       let originalAdmissionResponse: Response | undefined;
@@ -2829,6 +2839,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
         assert.equal(exit.Result, 'success'); assert.equal(exit.ExecMainCode, '1'); assert.equal(exit.ExecMainStatus, '0');
         await assert.rejects(lstat(`/proc/${originalPid}`), { code: 'ENOENT' });
       });
+      await shutdownAdmissionInspector.close(); shutdownAdmissionInspector = undefined;
       const releasedOwners = inspectInstalledOwnerHistory(recipe.stateRoot).owners;
       assert.equal(releasedOwners.length, 1);
       const releasedOwner = releasedOwners[0]!;
@@ -4596,6 +4607,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
     try { await storageClient?.close(); } catch (error) { cleanupFailures.push(error); }
     try { await maintenanceObserverClient?.close(); } catch (error) { cleanupFailures.push(error); }
     try { await queuedObserverClient?.close(); } catch (error) { cleanupFailures.push(error); }
+    try { await shutdownAdmissionInspector?.close(); } catch (error) { cleanupFailures.push(error); }
     try { await shutdownClient?.close(); } catch (error) { cleanupFailures.push(error); }
     try {
       if (installedServices) {

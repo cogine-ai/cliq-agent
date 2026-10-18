@@ -39,7 +39,9 @@ export async function buildInstalledSupervisorPackage(fixture: string,
   const supervisorFile = await buildSupervisorSeaImage({ fixture, carrier,
     entryPoint: path.join(repository, 'src/state/installed-entry.ts'),
     executable: path.join(packageRoot, 'supervisor'), variant: 'installed-supervisor',
-    credentialPhaseDiagnostics: true,
+    // Only the verifier qualifier consumes these fixed observations. Other
+    // installed campaigns retain the original single-JSON stderr contract.
+    ...(options.guestToolchain === 'node-test-v1' ? { credentialPhaseDiagnostics: true as const } : {}),
     assets: { 'release-trust-roots.json': rootAsset } });
   const helper = path.join(packageRoot, STATE_OWNER_NATIVE_RELATIVE_PATH);
   await mkdir(path.dirname(helper), { recursive: true, mode: 0o700 });
