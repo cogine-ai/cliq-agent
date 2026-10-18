@@ -13,6 +13,21 @@ import { createCredentialSecretScanner } from './credential-secret-scan.js';
 // They are not credential rows, retained process proof or installed evidence.
 const limits = { maxBytes: 32 * 1024 * 1024, maxStreams: 4096 };
 const secret = () => Buffer.from('diagnostic-only-secret-avoid-logging');
+
+test('whole corpus refusal exposes only the fixed stage and bounded progress, never an input path or cause', async () => {
+  const scanner = createCredentialSecretScanner([secret()], limits);
+  try {
+    await assert.rejects(scanCredentialSecretCorpus({ stateRoot: '/private-untrusted-corpus-path', uid: 1001, evidenceDirs: [], scanner }), error => {
+      assert(error instanceof CredentialSecretCorpusError);
+      assert.deepEqual(error.corpusFailure, { stage: 'input', errorClass: 'guard_refused', filesScanned: 0,
+        fileBytesScanned: 0, sqliteDatabasesScanned: 0, logicalRowsScanned: 0, logicalValuesScanned: 0,
+        logicalBytesScanned: 0, evidenceDirectoriesScanned: 0, inventoryEntriesObserved: 0 });
+      assert.equal(Object.isFrozen(error.corpusFailure), true);
+      assert.equal(Object.hasOwn(error, 'cause'), false); assert(!JSON.stringify(error).includes('private-untrusted'));
+      assert.equal(scanner.stats().bytesScanned, 0); return true;
+    });
+  } finally { scanner.close(); }
+});
 async function copyFixture(work: (filename: string) => Promise<void>) {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'cliq-credential-corpus-'));
   try { await chmod(directory, 0o700); await work(path.join(directory, 'authority.sqlite')); }
@@ -239,6 +254,25 @@ async function actualFixture(layout: typeof stateLayouts[number], work: (stateRo
     await work(stateRoot, cas);
   } finally { await rm(fixture, { recursive: true, force: true }); }
 }
+
+test('actual Linux over-breadth corpus reports the unchanged 1024-entry guard before reading or omitting any CAS object', linux, async () => {
+  await actualFixture('home/.cliq/kernel-v1', async (stateRoot, cas) => {
+    for (let index = 0; index < 1025; index++)
+      await writeFile(path.join(cas, index.toString(16).padStart(64, '0')), '', { flag: 'wx', mode: 0o400 });
+    const scanner = createCredentialSecretScanner([secret()], limits);
+    try {
+      await assert.rejects(scanCredentialSecretCorpus({ stateRoot, uid: process.geteuid!(), evidenceDirs: [], scanner }), error => {
+        assert(error instanceof CredentialSecretCorpusError);
+        assert.equal(error.corpusFailure?.stage, 'cas_inventory'); assert.equal(error.corpusFailure.errorClass, 'entry_limit_exceeded');
+        assert.equal(error.corpusFailure.inventoryEntriesObserved, 1025); assert.equal(error.corpusFailure.filesScanned, 2);
+        assert.equal(error.corpusFailure.sqliteDatabasesScanned, 2); assert.equal(error.corpusFailure.logicalRowsScanned, 2);
+        assert.equal(error.corpusFailure.evidenceDirectoriesScanned, 0); assert(!JSON.stringify(error).includes(stateRoot));
+        assert.equal(Object.hasOwn(error, 'cause'), false); return true;
+      });
+      assert.equal(scanner.stats().matched, false); assert.equal(scanner.stats().limitExceeded, false);
+    } finally { scanner.close(); }
+  });
+});
 
 for (const layout of stateLayouts) test(`actual Linux ${layout} fixed-file corpus covers both databases and a flat pinned CAS object`, linux, async () => {
   await actualFixture(layout, async (stateRoot, cas) => {

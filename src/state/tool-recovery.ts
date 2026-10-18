@@ -87,7 +87,7 @@ export async function validateToolRecovery(input: {
     }
   }
   const approvedWaits = new Set<string>();
-  for (const item of items.values()) if (item.kind === 'policy_decision') {
+  for (const item of items.values()) if (item.kind === 'policy_decision' && item.subjectKind === 'tool_call') {
     const { evidence, request, target, batch, call } = await policyRequest(item.policyChannelEvidenceRef);
     const priorResults = [...items.values()].slice(0, [...items.keys()].indexOf(item.itemId))
       .filter((prior) => prior.kind === 'tool_result' && prior.batchItemId === request.batchItemId);

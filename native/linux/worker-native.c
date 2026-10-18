@@ -5,10 +5,13 @@
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #if defined(__linux__)
 #include "worker-common.h"
 #include "worker-reservation.h"
+#include "guest-toolchain.h"
+#include "verifier-protocol.h"
 #include <linux/magic.h>
 #include <linux/sched.h>
 #include <poll.h>
@@ -45,7 +48,9 @@ struct controller { int socket, stdout_fd, stderr_fd; pid_t pid; bool closed, re
     napi_deferred close_deferred; napi_ref close_promise;
 };
 struct native_scope { struct controller *controller; struct native_scope *next, *parent; unsigned int id, references;
-    bool ready, released, activated, stopped, invocation, result_received; int image_fd;
+    bool ready, released, activated, stopped, invocation, result_received, verifier, stop_requested, stop_queued; int image_fd;
+    uint64_t output_limit;
+    napi_ref verifier_value;
     struct cliq_worker_packet identity, result; };
 
 static napi_value failure(napi_env env, const char *message) {
@@ -287,6 +292,7 @@ static void controller_release(struct controller *controller) {
 static void scope_release_memory(struct native_scope *scope) {
     if (--scope->references != 0) return;
     if (!retire_descriptor(&scope->image_fd)) scope->controller->retirement_failed = true;
+    if (scope->verifier_value) napi_delete_reference(scope->controller->env, scope->verifier_value);
     controller_release(scope->controller); free(scope);
 }
 
@@ -421,7 +427,7 @@ static int poll_response(struct controller *controller, struct native_scope *sco
                          struct cliq_worker_packet *response) {
     if (controller->closed || controller->pending_scope != scope || controller->pending == 0)
         return poll_failure(controller, scope, expected, NULL, 0, 0, 1);
-    int fds[5]; size_t count;
+    int fds[CLIQ_WORKER_MAX_FDS]; size_t count;
     if (!cliq_receive_flags(controller->socket, response, fds, &count, MSG_DONTWAIT)) {
         int receive_errno = errno;
         if (receive_errno == EAGAIN || receive_errno == EWOULDBLOCK) return 0;
@@ -600,9 +606,9 @@ static bool scope_image_current(struct native_scope *scope) {
         held.st_size <= 0 || held.st_size > 268435456 || stat(path, &current) != 0 ||
         held.st_dev != current.st_dev || held.st_ino != current.st_ino) return false;
     snprintf(path, sizeof(path), "/proc/%ld/root/runtime/%s", (long)scope->identity.pid,
-        scope->invocation ? "cliq-linux-edit" : "cliq-linux-worker");
+        scope->verifier ? "cliq-linux-worker-init" : scope->invocation ? "cliq-linux-edit" : "cliq-linux-worker");
     return stat(path, &current) == 0 && held.st_dev == current.st_dev && held.st_ino == current.st_ino &&
-        cliq_generation_mount((pid_t)scope->identity.pid, scope->identity.generation_device, scope->identity.generation_inode, !scope->invocation) &&
+        cliq_generation_mount((pid_t)scope->identity.pid, scope->identity.generation_device, scope->identity.generation_inode, !scope->invocation || scope->verifier) &&
         cliq_process_token((pid_t)scope->identity.pid, token) && strcmp(token, scope->identity.start_token) == 0 &&
         scope_placement_current(scope);
 }
@@ -615,7 +621,7 @@ static napi_value scope_inspect(napi_env env, napi_callback_info info) {
     napi_value result = scope_observation(env, &scope->identity); struct stat image;
     if (fstat(scope->image_fd, &image) != 0) return failure(env, "native executable image unavailable");
     set_number(env, result, "imageFd", scope->image_fd); set_number(env, result, "imageByteCount", (double)image.st_size);
-    set_string(env, result, "executableRealpath", scope->invocation ? "/runtime/cliq-linux-edit" : "/runtime/cliq-linux-worker");
+    set_string(env, result, "executableRealpath", scope->verifier ? "/runtime/cliq-linux-worker-init" : scope->invocation ? "/runtime/cliq-linux-edit" : "/runtime/cliq-linux-worker");
     return result;
 }
 static napi_value scope_activate(napi_env env, napi_callback_info info) {
@@ -655,7 +661,7 @@ static napi_value scope_release(napi_env env, napi_callback_info info) {
     napi_get_cb_info(env, info, &argc, NULL, &self, NULL);
     if (!tagged(env, self, &SCOPE_TAG, (void **)&scope) || !scope->ready || !scope->invocation || scope->stopped || scope->released || scope->controller->closed)
         return failure(env, "native invocation release was revoked or consumed");
-    struct cliq_worker_packet request = cliq_packet(CLIQ_RELEASE_WRITE); request.scope = scope->id;
+    struct cliq_worker_packet request = cliq_packet(scope->verifier ? CLIQ_RELEASE_VERIFIER : CLIQ_RELEASE_WRITE); request.scope = scope->id;
     memcpy(request.nonce, scope->identity.nonce, sizeof(request.nonce));
     scope->released = true;
     /* Retained active flags are not evidence that the real parent survived.
@@ -670,12 +676,113 @@ static napi_value scope_release(napi_env env, napi_callback_info info) {
     return undefined(env);
 }
 
+static bool verifier_reply(struct native_scope *scope, const struct cliq_worker_packet *response, int *files, size_t count) {
+    napi_env env = scope->controller->env;
+    bool valid = response->status == 0 && response->command == CLIQ_POLL_VERIFIER && response->scope == scope->id &&
+        response->verifier_reason <= CLIQ_VERIFIER_CONTROLLER_STOP;
+    if (response->verifier_reason == CLIQ_VERIFIER_PENDING) {
+        valid = valid && count == 0;
+    } else {
+        valid = valid && count == 2 && response->started_at_ms > 0 && response->observed_at_ms >= response->started_at_ms &&
+            response->observed_at_ms <= UINT64_C(9007199254740991) && response->duration_ms <= UINT64_C(9007199254740991) &&
+            response->stdout_truncated <= 1 && response->stderr_truncated <= 1 &&
+            (response->verifier_reason != CLIQ_VERIFIER_EXIT || response->exit_status <= 255) &&
+            (response->verifier_reason != CLIQ_VERIFIER_SIGNAL || (response->verifier_signal > 0 && response->verifier_signal <= 64)) &&
+            (response->verifier_reason != CLIQ_VERIFIER_SPAWN_ERROR || response->verifier_errno > 0) &&
+            (response->verifier_reason != CLIQ_VERIFIER_CONTROLLER_STOP ||
+                (scope->stop_requested && response->exit_status == 0 && response->verifier_signal == 0 && response->verifier_errno == 0)) &&
+            response->populated == 0 && response->init_reaped == 1 && response->remaining_descendants == 0 &&
+            response->cgroup_device == scope->identity.cgroup_device && response->cgroup_inode == scope->identity.cgroup_inode &&
+            response->pid_namespace_inode == scope->identity.pid_namespace_inode &&
+            strcmp(response->init_start_token, scope->identity.init_start_token) == 0;
+        napi_value value = NULL;
+        if (valid && napi_create_object(env, &value) != napi_ok) valid = false;
+        uint64_t saved = 0;
+        for (size_t i = 0; valid && i < 2; i++) {
+            struct stat metadata; int seals = fcntl(files[i], F_GET_SEALS);
+            int required = F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL;
+            if (fstat(files[i], &metadata) != 0 || !S_ISREG(metadata.st_mode) || metadata.st_size < 0 ||
+                seals < 0 || (seals & required) != required || (uint64_t)metadata.st_size > scope->output_limit - saved) { valid = false; break; }
+            uint64_t observed = i == 0 ? response->stdout_bytes : response->stderr_bytes;
+            uint32_t truncated = i == 0 ? response->stdout_truncated : response->stderr_truncated;
+            if ((uint64_t)metadata.st_size > observed || ((uint64_t)metadata.st_size < observed) != (truncated == 1)) { valid = false; break; }
+            saved += (uint64_t)metadata.st_size;
+            napi_value bytes; void *data;
+            if (napi_create_buffer(env, (size_t)metadata.st_size, &data, &bytes) != napi_ok) { valid = false; break; }
+            size_t offset = 0;
+            while (offset < (size_t)metadata.st_size) {
+                ssize_t copied = pread(files[i], (char *)data + offset, (size_t)metadata.st_size - offset, (off_t)offset);
+                if (copied < 0 && errno == EINTR) continue;
+                if (copied <= 0) { valid = false; break; }
+                offset += (size_t)copied;
+            }
+            if (valid && napi_set_named_property(env, value, i == 0 ? "stdout" : "stderr", bytes) != napi_ok) valid = false;
+        }
+        if (valid) {
+            set_number(env, value, "termination", response->verifier_reason);
+            set_number(env, value, "exitCode", response->exit_status); set_number(env, value, "signal", response->verifier_signal);
+            set_number(env, value, "nativeErrorCode", response->verifier_errno);
+            set_number(env, value, "startedAtMs", (double)response->started_at_ms);
+            set_number(env, value, "endedAtMs", (double)response->observed_at_ms);
+            set_number(env, value, "durationMs", (double)response->duration_ms);
+            set_number(env, value, "stdoutTruncated", response->stdout_truncated);
+            set_number(env, value, "stderrTruncated", response->stderr_truncated);
+            napi_value death = scope_observation(env, response);
+            if (napi_set_named_property(env, value, "death", death) != napi_ok) valid = false;
+            valid = valid && napi_create_reference(env, value, 1, &scope->verifier_value) == napi_ok;
+            if (valid) { scope->result = *response; scope->result_received = true; }
+        }
+    }
+    for (size_t i = 0; i < count; i++) if (!retire_descriptor(&files[i])) {
+        scope->controller->retirement_failed = true; valid = false;
+    }
+    return valid;
+}
+
+static int poll_verifier_reply(struct native_scope *scope) {
+    struct controller *controller = scope->controller;
+    if (controller->closed || controller->pending_scope != scope || controller->pending != CLIQ_POLL_VERIFIER) return -1;
+    struct cliq_worker_packet response; int files[CLIQ_WORKER_MAX_FDS]; size_t count;
+    if (!cliq_receive_flags(controller->socket, &response, files, &count, MSG_DONTWAIT)) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
+        return -1;
+    }
+    bool valid = verifier_reply(scope, &response, files, count);
+    controller->pending = 0; controller->pending_scope = NULL;
+    return valid ? 1 : -1;
+}
+
+static napi_value scope_verifier_result(napi_env env, struct native_scope *scope) {
+    struct controller *controller = scope->controller;
+    if (!scope->released || (controller->closed && !scope->result_received)) return failure(env, "native verifier outcome is indeterminate");
+    if (!scope->result_received && (!scope->stop_requested || scope->stopped)) {
+        if (controller->pending == CLIQ_RELEASE_VERIFIER && controller->pending_scope == scope) {
+            struct cliq_worker_packet acknowledged;
+            int observed = poll_response(controller, scope, CLIQ_RELEASE_VERIFIER, &acknowledged);
+            if (observed < 0) return failure(env, "verifier release acknowledgement is indeterminate");
+            if (observed == 0) return undefined(env);
+        }
+        if (controller->pending == 0) {
+            struct cliq_worker_packet request = cliq_packet(CLIQ_POLL_VERIFIER); request.scope = scope->id;
+            if (!begin_request(controller, scope, &request, NULL, 0)) return failure(env, "verifier result observation unavailable");
+        }
+        int observed = poll_verifier_reply(scope);
+        if (observed < 0) { (void)close_controller(controller); return failure(env, "native verifier reply is indeterminate"); }
+    }
+    if (!scope->result_received) return undefined(env);
+    napi_value value;
+    if (!scope->verifier_value || napi_get_reference_value(env, scope->verifier_value, &value) != napi_ok)
+        return failure(env, "native verifier result ownership is unavailable");
+    return value;
+}
+
 static napi_value scope_result(napi_env env, napi_callback_info info) {
     size_t argc = 0; napi_value self; struct native_scope *scope;
     napi_get_cb_info(env, info, &argc, NULL, &self, NULL);
     if (!tagged(env, self, &SCOPE_TAG, (void **)&scope) || !scope->invocation || !scope->released ||
         (scope->controller->closed && !scope->result_received))
         return failure(env, "native invocation outcome is indeterminate");
+    if (scope->verifier) return scope_verifier_result(env, scope);
     if (!scope->result_received) {
         int observed = poll_response(scope->controller, scope, CLIQ_WRITE_RESULT, &scope->result);
         if (observed < 0) return failure(env, "native invocation outcome is indeterminate");
@@ -690,6 +797,21 @@ static napi_value scope_stop(napi_env env, napi_callback_info info) {
     napi_get_cb_info(env, info, &argc, NULL, &self, NULL);
     if (!tagged(env, self, &SCOPE_TAG, (void **)&scope) || !scope->ready || scope->controller->closed) return failure(env, "invalid native stop scope");
     struct cliq_worker_packet request = cliq_packet(CLIQ_STOP_SCOPE); request.scope = scope->id;
+    if (scope->verifier) {
+        scope->stop_requested = true;
+        if (scope->controller->pending != 0 && scope->controller->pending_scope == scope &&
+            (scope->controller->pending == CLIQ_POLL_VERIFIER || scope->controller->pending == CLIQ_RELEASE_VERIFIER)) {
+            if (scope->stop_queued) return undefined(env);
+            /* Revoke now, even while the bounded previous observation reply is
+             * in flight. pollStopped consumes that reply before the STOP reply;
+             * no productive command or new release can enter this channel. */
+            scope->stop_queued = true;
+            if (!cliq_send(scope->controller->socket, &request, NULL, 0)) {
+                (void)close_controller(scope->controller); return failure(env, "verifier stop revocation could not be sent");
+            }
+            return undefined(env);
+        }
+    }
     if (!begin_request(scope->controller, scope, &request, NULL, 0)) return failure(env, "complete native death could not be requested");
     return undefined(env);
 }
@@ -698,6 +820,18 @@ static napi_value scope_poll_stopped(napi_env env, napi_callback_info info) {
     size_t argc = 0; napi_value self; struct native_scope *scope;
     napi_get_cb_info(env, info, &argc, NULL, &self, NULL);
     if (!tagged(env, self, &SCOPE_TAG, (void **)&scope) || scope->controller->closed) return failure(env, "invalid native death observation");
+    if (scope->stop_queued) {
+        int observed;
+        if (scope->controller->pending == CLIQ_POLL_VERIFIER) observed = poll_verifier_reply(scope);
+        else if (scope->controller->pending == CLIQ_RELEASE_VERIFIER) {
+            struct cliq_worker_packet acknowledged;
+            observed = poll_response(scope->controller, scope, CLIQ_RELEASE_VERIFIER, &acknowledged);
+        } else return failure(env, "verifier stop lost its original ordered observation");
+        if (observed < 0) { (void)close_controller(scope->controller); return failure(env, "verifier stop observation is indeterminate"); }
+        if (observed == 0) return undefined(env);
+        scope->controller->pending = CLIQ_STOP_SCOPE; scope->controller->pending_scope = scope;
+        scope->stop_queued = false;
+    }
     if (!scope->stopped || (scope->controller->pending == CLIQ_STOP_SCOPE && scope->controller->pending_scope == scope)) {
         struct cliq_worker_packet response;
         int observed = poll_response(scope->controller, scope, CLIQ_STOP_SCOPE, &response);
@@ -750,6 +884,21 @@ static napi_value scope_poll_ready(napi_env env, napi_callback_info info) {
     napi_value result; napi_get_boolean(env, observed == 1, &result); return result;
 }
 
+static bool scope_projection(napi_env env, napi_value config, struct cliq_worker_packet *request) {
+    return field_string(env, config, "cgroupName", request->cgroup_name, sizeof(request->cgroup_name)) &&
+        field_string(env, config, "spawnNonceDigest", request->nonce, sizeof(request->nonce)) &&
+        field_string(env, config, "activationNonceDigest", request->activation_nonce, sizeof(request->activation_nonce)) &&
+        field_number(env, config, "generationDevice", &request->generation_device) &&
+        field_number(env, config, "generationInode", &request->generation_inode) &&
+        field_number(env, config, "maxProcesses", &request->max_processes) &&
+        field_number(env, config, "memoryBytes", &request->memory_bytes) &&
+        field_number(env, config, "cpuQuotaMicrosPerSecond", &request->cpu_quota) &&
+        field_number(env, config, "maxOpenFiles", &request->max_open_files) &&
+        field_number(env, config, "maxSingleFileBytes", &request->max_file_bytes) &&
+        field_number(env, config, "maxGenerationBytes", &request->max_generation_bytes) &&
+        field_number(env, config, "maxInvocationOutputBytes", &request->max_output_bytes);
+}
+
 static napi_value create_scope(napi_env env, napi_callback_info info, bool invocation) {
     if (atomic_load(&native_retirement_failed)) return failure(env, "native resource retirement remains uncertain");
     size_t expected = invocation ? 7 : 6;
@@ -769,18 +918,7 @@ static napi_value create_scope(napi_env env, napi_callback_info info, bool invoc
     request.scope = controller->next_scope++;
     if (invocation) request.parent = parent->id;
     napi_value config = args[invocation ? 6 : 5];
-    if (!field_string(env, config, "cgroupName", request.cgroup_name, sizeof(request.cgroup_name)) ||
-        !field_string(env, config, "spawnNonceDigest", request.nonce, sizeof(request.nonce)) ||
-        !field_string(env, config, "activationNonceDigest", request.activation_nonce, sizeof(request.activation_nonce)) ||
-        !field_number(env, config, "generationDevice", &request.generation_device) ||
-        !field_number(env, config, "generationInode", &request.generation_inode) ||
-        !field_number(env, config, "maxProcesses", &request.max_processes) ||
-        !field_number(env, config, "memoryBytes", &request.memory_bytes) ||
-        !field_number(env, config, "cpuQuotaMicrosPerSecond", &request.cpu_quota) ||
-        !field_number(env, config, "maxOpenFiles", &request.max_open_files) ||
-        !field_number(env, config, "maxSingleFileBytes", &request.max_file_bytes) ||
-        !field_number(env, config, "maxGenerationBytes", &request.max_generation_bytes) ||
-        !field_number(env, config, "maxInvocationOutputBytes", &request.max_output_bytes)) return failure(env, "invalid closed scope projection");
+    if (!scope_projection(env, config, &request)) return failure(env, "invalid closed scope projection");
     if (!invocation) {
         const struct cliq_worker_packet *binding = &controller->reservation;
         if (request.generation_device != binding->generation_device || request.generation_inode != binding->generation_inode ||
@@ -814,6 +952,118 @@ static napi_value create_scope(napi_env env, napi_callback_info info, bool invoc
 }
 static napi_value create_worker(napi_env env, napi_callback_info info) { return create_scope(env, info, false); }
 static napi_value create_invocation(napi_env env, napi_callback_info info) { return create_scope(env, info, true); }
+
+static bool verifier_string(struct cliq_verifier_config *config, const char *value, uint32_t *offset) {
+    size_t bytes = strlen(value) + 1;
+    if (bytes > CLIQ_VERIFIER_STRING_BYTES - config->string_bytes) return false;
+    *offset = config->string_bytes;
+    memcpy(config->strings + config->string_bytes, value, bytes); config->string_bytes += (uint32_t)bytes;
+    return true;
+}
+
+static bool verifier_arguments(napi_env env, napi_value source, struct cliq_verifier_config *config) {
+    napi_value array; uint32_t count; bool is_array = false;
+    if (napi_get_named_property(env, source, "arguments", &array) != napi_ok ||
+        napi_is_array(env, array, &is_array) != napi_ok || !is_array || napi_get_array_length(env, array, &count) != napi_ok || count != 3 ||
+        !verifier_string(config, config->executable, &config->arguments[0]) ||
+        !verifier_string(config, "--no-addons", &config->arguments[1])) return false;
+    config->argument_count = 5;
+    for (uint32_t i = 0; i < count; i++) {
+        napi_value argument; char value[CLIQ_VERIFIER_PATH_BYTES]; size_t bytes;
+        if (napi_get_element(env, array, i, &argument) != napi_ok ||
+            napi_get_value_string_utf8(env, argument, value, sizeof(value), &bytes) != napi_ok ||
+            bytes == 0 || bytes >= sizeof(value) || strlen(value) != bytes ||
+            (i == 0 && strcmp(value, "--test") != 0) || (i == 1 && strcmp(value, "--test-concurrency=1") != 0)) return false;
+        if (i == 2) {
+            char absolute[CLIQ_VERIFIER_PATH_BYTES];
+            int length = snprintf(absolute, sizeof(absolute), "/work/%s", value);
+            if (length < 0 || (size_t)length >= sizeof(absolute) || !cliq_verifier_path(absolute) ||
+                value[0] == '-' || bytes < 5 || strcmp(value + bytes - 4, ".mjs") != 0) return false;
+        }
+        if (!verifier_string(config, value, &config->arguments[i + 2])) return false;
+    }
+    return true;
+}
+
+static bool verifier_environment(napi_env env, napi_value source, struct cliq_verifier_config *config) {
+    const char *fixed[] = { "LANG=C", "LC_ALL=C", "HOME=/home/cliq", "TMPDIR=/tmp", "PATH=/usr/bin" };
+    for (size_t i = 0; i < sizeof(fixed) / sizeof(fixed[0]); i++)
+        if (!verifier_string(config, fixed[i], &config->environment[config->environment_count++])) return false;
+    napi_value array; uint32_t count; bool is_array = false;
+    return napi_get_named_property(env, source, "environment", &array) == napi_ok &&
+        napi_is_array(env, array, &is_array) == napi_ok && is_array && napi_get_array_length(env, array, &count) == napi_ok && count == 0;
+}
+
+static napi_value create_verifier(napi_env env, napi_callback_info info) {
+    size_t argc = 6; napi_value arguments[6], self; struct controller *controller;
+    struct native_scope *parent; struct image *helper, *bwrap; struct cliq_guest_toolchain *guest; uint64_t generation;
+    napi_get_cb_info(env, info, &argc, arguments, &self, NULL);
+    if (atomic_load(&native_retirement_failed) || argc != 6 || !tagged(env, self, &CONTROLLER_TAG, (void **)&controller) ||
+        controller->closed || !controller->ready || controller->pending || controller->next_scope >= CLIQ_WORKER_MAX_SCOPES ||
+        !number(env, arguments[0], &generation) || generation > INT32_MAX ||
+        !tagged(env, arguments[1], &SCOPE_TAG, (void **)&parent) || parent->controller != controller || parent->invocation ||
+        parent->stopped || !parent->activated || !tagged(env, arguments[2], &IMAGE_TAG, (void **)&helper) ||
+        !tagged(env, arguments[3], &IMAGE_TAG, (void **)&bwrap) ||
+        !tagged(env, arguments[4], &CLIQ_GUEST_TOOLCHAIN_TAG, (void **)&guest) || guest->abi_version != CLIQ_GUEST_ABI_VERSION ||
+        !atomic_load_explicit(&guest->ready, memory_order_acquire) || atomic_load(&guest->revoked) ||
+        guest->file_count == 0 || guest->file_count > CLIQ_GUEST_MAX_FILES) return failure(env, "verifier requires its original held parent and frozen guest toolchain");
+    struct cliq_verifier_config *config = calloc(1, sizeof(*config));
+    if (!config) return failure(env, "verifier configuration allocation unavailable");
+    config->magic = CLIQ_VERIFIER_CONFIG_MAGIC; config->version = 1; config->file_count = guest->file_count;
+    memcpy(config->executable, guest->node_path, sizeof(config->executable));
+    struct cliq_worker_packet request = cliq_packet(CLIQ_CREATE_VERIFIER);
+    request.scope = controller->next_scope; request.parent = parent->id;
+    bool valid = scope_projection(env, arguments[5], &request) &&
+        field_string(env, arguments[5], "cwd", config->cwd, sizeof(config->cwd)) &&
+        field_number(env, arguments[5], "timeoutMs", &config->timeout_ms) &&
+        field_number(env, arguments[5], "outputLimitBytes", &config->output_limit) &&
+        config->output_limit <= request.max_output_bytes && verifier_arguments(env, arguments[5], config) &&
+        verifier_environment(env, arguments[5], config);
+    int files[CLIQ_WORKER_MAX_FDS] = { (int)generation, helper->fd, bwrap->fd, -1 };
+    for (uint32_t i = 0; valid && i < guest->file_count; i++) {
+        struct stat metadata; int seals = fcntl(guest->files[i].fd, F_GET_SEALS);
+        int required = F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL;
+        valid = fstat(guest->files[i].fd, &metadata) == 0 && S_ISREG(metadata.st_mode) &&
+            metadata.st_size > 0 && (uint64_t)metadata.st_size == guest->files[i].byte_count &&
+            seals >= 0 && (seals & required) == required;
+        if (valid) {
+            memcpy(config->files[i].path, guest->files[i].path, sizeof(config->files[i].path));
+            memcpy(config->files[i].digest, guest->files[i].digest, sizeof(config->files[i].digest));
+            config->files[i].byte_count = guest->files[i].byte_count; files[4 + i] = guest->files[i].fd;
+        }
+    }
+    valid = valid && cliq_verifier_config_valid(config);
+    int input = valid ? memfd_create("cliq-verifier-config", MFD_CLOEXEC | MFD_ALLOW_SEALING) : -1;
+    if (input < 0 || write(input, config, sizeof(*config)) != (ssize_t)sizeof(*config) ||
+        fchmod(input, 0400) != 0 || fcntl(input, F_ADD_SEALS, F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL) != 0) valid = false;
+    uint64_t output_limit = config->output_limit;
+    free(config);
+    if (!valid) { if (input >= 0) close(input); return failure(env, "verifier command or frozen image mapping is outside the fixed recipe"); }
+    files[3] = input;
+    struct native_scope *scope = calloc(1, sizeof(*scope));
+    if (!scope) { close(input); return failure(env, "verifier native lifetime allocation unavailable"); }
+    scope->controller = controller; scope->id = request.scope; scope->identity = request; scope->image_fd = -1;
+    scope->invocation = true; scope->verifier = true; scope->parent = parent; scope->references = 2;
+    scope->output_limit = output_limit;
+    napi_value result;
+    napi_property_descriptor properties[] = {
+        { "observe", NULL, scope_inspect, NULL, NULL, NULL, napi_default, NULL },
+        { "pollReady", NULL, scope_poll_ready, NULL, NULL, NULL, napi_default, NULL },
+        { "release", NULL, scope_release, NULL, NULL, NULL, napi_default, NULL },
+        { "result", NULL, scope_result, NULL, NULL, NULL, napi_default, NULL },
+        { "stop", NULL, scope_stop, NULL, NULL, NULL, napi_default, NULL },
+        { "pollStopped", NULL, scope_poll_stopped, NULL, NULL, NULL, napi_default, NULL },
+    };
+    if (napi_create_object(env, &result) != napi_ok || napi_type_tag_object(env, result, &SCOPE_TAG) != napi_ok ||
+        napi_define_properties(env, result, 6, properties) != napi_ok || napi_wrap(env, result, scope, finalize_scope, NULL, NULL) != napi_ok) {
+        (void)retire_descriptor(&input); free(scope); return failure(env, "verifier native receiver allocation unavailable");
+    }
+    scope->next = controller->scopes; controller->scopes = scope; controller->references++; controller->next_scope++;
+    bool sent = begin_request(controller, scope, &request, files, 4 + guest->file_count);
+    if (!retire_descriptor(&input)) { controller->retirement_failed = true; sent = false; }
+    if (!sent) { (void)close_controller(controller); return failure(env, "blocked verifier native creation is indeterminate"); }
+    return result;
+}
 
 static bool parse_retained_tokens(const char *init_token, const char *subreaper_token, struct cliq_worker_packet *request) {
     int consumed = 0;
@@ -1221,7 +1471,7 @@ static napi_value controller_close(napi_env env, napi_callback_info info) {
     struct native_scope *scope = controller->pending_scope;
     if (!controller->closed && controller->pending == CLIQ_RELEASE_WRITE && scope && scope->invocation && scope->released) {
         struct cliq_worker_packet response;
-        int descriptors[5]; size_t count = 0;
+        int descriptors[CLIQ_WORKER_MAX_FDS]; size_t count = 0;
         bool received = cliq_receive_flags(controller->socket, &response, descriptors, &count, MSG_DONTWAIT);
         if (received) {
             for (size_t i = 0; i < count; i++) {
@@ -1233,6 +1483,13 @@ static napi_value controller_close(napi_env env, napi_callback_info info) {
                 controller->pending = 0; controller->pending_scope = NULL;
             }
         }
+    }
+    if (!controller->closed && controller->pending == CLIQ_POLL_VERIFIER && scope && scope->verifier && scope->released) {
+        /* Preserve only a complete authenticated result already delivered on
+         * this same channel. The nonblocking observation never waits or sends
+         * another command before irreversible revocation. */
+        int observed = poll_verifier_reply(scope);
+        if (observed < 0) controller->retirement_failed = true;
     }
     if (napi_create_promise(env, &controller->close_deferred, &promise) != napi_ok) {
         (void)close_controller(controller); return failure(env, "controller close promise unavailable");
@@ -1349,6 +1606,7 @@ static napi_value open_controller(napi_env env, napi_callback_info info) {
         { "assertPreactivationRetired", NULL, assert_preactivation_retired, NULL, NULL, NULL, napi_default, NULL },
         { "createWorker", NULL, create_worker, NULL, NULL, NULL, napi_default, NULL },
         { "createInvocation", NULL, create_invocation, NULL, NULL, NULL, napi_default, NULL },
+        { "createVerifier", NULL, create_verifier, NULL, NULL, NULL, napi_default, NULL },
         { "terminateRetained", NULL, terminate_retained, NULL, NULL, NULL, napi_default, NULL },
         { "pollRetained", NULL, poll_retained, NULL, NULL, NULL, napi_default, NULL },
         { "assertRetainedRetired", NULL, assert_retained_retired, NULL, NULL, NULL, napi_default, NULL },
@@ -1403,12 +1661,16 @@ static napi_value open_controller(napi_env env, napi_callback_info info) {
 }
 
 static napi_value initialize(napi_env env, napi_value exports) {
+    napi_value verifier_version;
+    if (napi_create_uint32(env, 1, &verifier_version) != napi_ok) return NULL;
     napi_property_descriptor properties[] = {
         { "sealImage", NULL, seal_image, NULL, NULL, NULL, napi_default, NULL },
         { "sealImageBuffer", NULL, seal_input, NULL, NULL, NULL, napi_default, NULL },
-        { "openController", NULL, open_controller, NULL, NULL, NULL, napi_default, NULL }
+        { "openController", NULL, open_controller, NULL, NULL, NULL, napi_default, NULL },
+        { "verifierInterfaceVersion", NULL, NULL, NULL, NULL, verifier_version, napi_default, NULL }
     };
-    napi_define_properties(env, exports, 3, properties); set_number(env, exports, "interfaceVersion", 3); return exports;
+    if (napi_define_properties(env, exports, 4, properties) != napi_ok) return NULL;
+    set_number(env, exports, "interfaceVersion", 3); return exports;
 }
 #else
 static napi_value unsupported(napi_env env, napi_callback_info info) {

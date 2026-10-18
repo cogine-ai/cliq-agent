@@ -36,6 +36,9 @@ import { planPrivateRollbackResult } from '../private-tool-rollback.js';
 import { validateInstalledModelNoReleaseHistory } from '../broker-no-release.js';
 import { appendRunStateEvent, requireHealthyFence, resolvePrivateRollbackInvocation } from './invocation.js';
 import { decodeVerificationClosure } from '../result-artifacts.js';
+import { readVerifierProgress } from '../verifier-recovery.js';
+import { readVerifierFailureCause, readVerifierIntegrityCause, readVerifierPolicyDenial, validateVerifierStoppedHistory } from '../verifier-stop-history.js';
+import type { VerifierPolicyDecisionItem } from '../../kernel/verifier-invocation.js';
 
 /** Loaded authority only. Cancellation fences immediately; terminal drain independently proves the entire current cut. */
 export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, authority: {
@@ -57,18 +60,24 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
         driver.prepare('SELECT 1 FROM runs WHERE parent_run_id = ? LIMIT 1').get(runId)) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'child stop requires the parent/child settlement reducer');
     if (['succeeded', 'completed_unverified', 'failed', 'cancelled'].includes(run.status)) throw new RunTerminalError();
     if (run.nextStep === 'verify' || run.nextStep === 'finalize') {
-      // Only the just-sealed candidate is supported here. Once verification
-      // starts, its own process/receipt closure must prove quiescence; a stop
-      // cannot turn a verifier claim or later frontier into a worker-free one.
+      // The full recovery reader validates the original candidate, frozen
+      // verifier progress and exact active/death-wait lifecycle. A stop only
+      // adds a fence; terminal drain below still requires the original claim
+      // and invocation/parent retirement, never a worker-free substitution.
       const frontier = await readCanonicalArtifact<RunFrontier>(artifacts, run.frontierRef!);
-      if (!allowUnstartedCandidate || run.status !== 'queued' || run.activeWorkerLaunchId || run.waitingReason || run.waitingOnRef ||
-          frontier.schemaVersion !== 1 ||
-          selected.journal.some(entry => !['model', 'tool'].includes(entry.opKind)))
-        throw new KernelStorageError('STATE_TRANSITION_INVALID', 'candidate stop requires verification not to have started');
+      if (!allowUnstartedCandidate || !['queued', 'running', 'waiting'].includes(run.status) || frontier.schemaVersion !== 1 ||
+          run.status === 'waiting' && !(allowWorkerRecovery && run.waitingReason === 'reconciliation'))
+        throw new KernelStorageError('STATE_TRANSITION_INVALID', 'candidate stop requires its exact verification lifecycle');
       if (frontier.kind === 'verify' && run.nextStep === 'verify' && exactKeys(frontier, ['schemaVersion', 'kind', 'phase', 'candidateItemId',
         'resultSourceRef', 'verifierPlanRef', 'nextVerifierIndex', 'afterPass']) && frontier.phase === 'verifiers' &&
-          frontier.nextVerifierIndex === 0 && frontier.afterPass === 'finalize') return selected;
+          frontier.afterPass === 'finalize') {
+        const progress = await readVerifierProgress(driver, artifacts, selected, frontier.candidateItemId);
+        if (frontier.nextVerifierIndex !== progress.nextVerifierIndex || frontier.verifierPlanRef !== progress.planRef ||
+            frontier.resultSourceRef !== progress.candidate.resultSourceRef) throw new TypeError('stop substituted its exact verifier progress');
+        return selected;
+      }
       if (frontier.kind !== 'finalize' || run.nextStep !== 'finalize' || frontier.operation !== 'agent' ||
+          run.status !== 'queued' || run.activeWorkerLaunchId || run.waitingReason || run.waitingOnRef ||
           !exactKeys(frontier, ['schemaVersion', 'kind', 'operation', 'candidateItemId', 'resultSourceRef', 'verificationClosureRef']))
         throw new KernelStorageError('STATE_TRANSITION_INVALID', 'candidate stop requires its exact unstarted verification or consent-backed finalization');
       const closure = decodeVerificationClosure(await readCanonicalArtifact(artifacts, frontier.verificationClosureRef));
@@ -101,14 +110,16 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
     return { accepted: outcome === 'healthy', outcome };
   }
   async function commitDerivedStop(selected: Awaited<ReturnType<typeof cut>>, derive: (now: string) => Promise<{
-    intent: AgentStopIntent; metadata?: PublishedArtifact[];
+    intent: AgentStopIntent; metadata?: PublishedArtifact[]; commit?: (connection: SqliteConnection, run: Run, committedAt: string) => void;
   } | undefined>) {
     const prior = selected.run.stopIntentRef ? await readAgentStop(driver, artifacts, selected) : undefined;
-    if (prior?.origin === 'user_cancel') return immutableSnapshot(result(selected.run));
     for (let retry = 0; retry < 8; retry++) {
       const now = sampleCanonicalNow();
       const proposal = await derive(now);
-      if (!proposal) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'current continuation has no supported failure');
+      if (!proposal) {
+        if (prior) return immutableSnapshot(result(selected.run));
+        throw new KernelStorageError('STATE_TRANSITION_INVALID', 'current continuation has no supported failure');
+      }
       const intent = selectAgentStop(prior, proposal.intent);
       if (intent === prior) return immutableSnapshot(result(selected.run));
       const artifact = await artifacts.publishCanonical(intent, 'cliq-stop-intent-v1');
@@ -123,6 +134,7 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
         }
         for (const metadata of proposal.metadata ?? []) insertArtifactMetadata(connection, metadata, now);
         insertArtifactMetadata(connection, artifact, now);
+        proposal.commit?.(connection, selected.run, now);
         connection.prepare('UPDATE runs SET stop_intent_ref = ?, revision = revision + 1, updated_at = ? WHERE id = ?').run(artifact.ref, now, runId);
         updated = readRun(connection, runId);
         appendRunStateEvent(connection, updated, now);
@@ -153,10 +165,11 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
       const prior = selected.run.stopIntentRef ? await readAgentStop(driver, artifacts, selected) : undefined;
       for (let retry = 0; retry < 8; retry++) {
         const now = sampleCanonicalNow();
-        // User cancellation outranks a deadline; equal precedence preserves the first committed intent.
-        const intent: AgentStopIntent = prior?.origin === 'user_cancel' ? prior : {
+        // The cancellation fence is monotonic even when integrity already
+        // outranks it. Equal precedence preserves the first committed intent.
+        const intent = selectAgentStop(prior, {
           schemaVersion: 1, runId, createdAt: now, origin: 'user_cancel', targetStatus: 'cancelled', reason: 'cancelled_by_user',
-          requestId: input.requestId, principalId };
+          requestId: input.requestId, principalId });
         const intentArtifact = await artifacts.publishCanonical(intent, 'cliq-stop-intent-v1');
         const next: Run = { ...selected.run, stopIntentRef: intentArtifact.ref, cancelRequested: true, revision: selected.run.revision + 1, updatedAt: now };
         const response: CancelResponse = { protocolVersion: 1, ok: true, result: { method: 'run.cancel',
@@ -222,6 +235,52 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
         }, now);
       });
     }),
+    stopForVerification: stateOperation('INVALID_REQUEST', async (input: { expectedRunRevision: number }) => {
+      input = immutableSnapshot(input);
+      if (!exactKeys(input, ['expectedRunRevision'])) throw new TypeError('unknown verification stop field');
+      assertActiveStateOwner(driver, owner); await authority.assertAuthority();
+      const selected = await cut(input.expectedRunRevision, true, true);
+      return commitDerivedStop(selected, async now => {
+        const integrity = await readVerifierIntegrityCause(driver, artifacts, selected, now);
+        if (integrity) return { intent: integrity };
+        if (now >= selected.run.deadlineAt) return { intent: deadlineIntent(now) };
+        const cause = await readVerifierFailureCause(driver, artifacts, selected, now);
+        return cause ? { intent: cause } : undefined;
+      });
+    }),
+    stopForVerifierPolicyDenial: stateOperation('INVALID_REQUEST', async (input: { expectedRunRevision: number }) => {
+      input = immutableSnapshot(input);
+      if (!exactKeys(input, ['expectedRunRevision'])) throw new TypeError('unknown verifier policy stop field');
+      assertActiveStateOwner(driver, owner); await authority.assertAuthority();
+      const selected = await cut(input.expectedRunRevision, false, true);
+      return commitDerivedStop(selected, async now => {
+        const integrity = await readVerifierIntegrityCause(driver, artifacts, selected, now);
+        if (integrity) return { intent: integrity };
+        if (now >= selected.run.deadlineAt) return { intent: deadlineIntent(now) };
+        const cause = await readVerifierPolicyDenial(driver, artifacts, selected, now);
+        if (!cause) return undefined;
+        const evidence = await artifacts.publishCanonical(cause.evidence, cause.evidence.format);
+        const intent: AgentStopIntent = { schemaVersion: 1, runId, createdAt: now, origin: 'policy_deny', subjectKind: 'verifier',
+          targetStatus: 'failed', reason: 'verification_failed', opId: cause.planned.request.opId,
+          policyChannelEvidenceRef: evidence.ref, policyChannelEvidenceDigest: cause.evidence.evidenceDigest };
+        const intentRef = planCanonicalArtifact(intent, 'cliq-stop-intent-v1').ref;
+        const item: VerifierPolicyDecisionItem = { schemaVersion: 1, kind: 'policy_decision', subjectKind: 'verifier_launch',
+          itemId: identityHash('cliq-verifier-policy-item-v1', runId, intent.opId, evidence.ref), runId, opId: intent.opId,
+          principalId: cause.principalId, decisionRef: evidence.ref, policyChannelEvidenceRef: evidence.ref,
+          policyChannelEvidenceDigest: cause.evidence.evidenceDigest, createdAt: now, decisionSource: 'direct_policy', decision: 'deny',
+          denialOutcome: { kind: 'stop_intent', subjectKind: 'verifier_launch', stopIntentRef: intentRef } };
+        const checkpointId = identityHash('cliq-verifier-denial-checkpoint-v1', runId, intent.opId, evidence.ref);
+        const graph = await prepareContinuationCommit(artifacts, {
+          context: decodeContextManifest(await readCanonicalArtifact(artifacts, selected.latestCheckpoint.contextManifestRef)),
+          existingItems: await Promise.all(selected.items.map(async row => ({ itemSeq: row.itemSeq, itemRef: row.payloadRef,
+            item: await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef) }))),
+          items: [item], frontier: cause.frontier, checkpointId, workspaceStateRef: selected.latestCheckpoint.workspaceStateRef,
+          artifacts: [planCanonicalArtifact(cause.planned.request, cause.planned.request.format), planCanonicalArtifact(cause.planned.target, cause.planned.target.format)]
+        });
+        return { intent, metadata: [evidence, ...graph.metadata],
+          commit(connection: SqliteConnection, run: Run, committedAt: string) { graph.commit(connection, run, selected.journal.length, committedAt); } };
+      });
+    }),
     commitTerminalStop: stateOperation('INVALID_REQUEST', async (input: { expectedRunRevision: number; checkpoint?: ToolCheckpointProof },
       recovery?: WorkerRecoveryTerminalPlan) => {
       input = immutableSnapshot(input);
@@ -246,6 +305,10 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
         throw new TypeError('terminal stop retains an unsealed retired worker');
       }
       const intent = await readAgentStop(driver, artifacts, selected);
+      const integrity = await readVerifierIntegrityCause(driver, artifacts, selected, sampleCanonicalNow());
+      if (integrity && (intent.origin !== 'kernel_integrity' || intent.verifierOpId !== integrity.verifierOpId ||
+          intent.integrityEvidenceRef !== integrity.integrityEvidenceRef || intent.integrityEvidenceDigest !== integrity.integrityEvidenceDigest))
+        throw new KernelStorageError('STATE_TRANSITION_INVALID', 'terminal stop requires the higher-priority retained verifier integrity intent');
       const checkpointId = stopCheckpointId(runId, run.stopIntentRef);
       const frontier = await readCanonicalArtifact<RunFrontier>(artifacts, run.frontierRef!);
       const items = await Promise.all(selected.items.map(async (row) => ({ itemSeq: row.itemSeq, itemRef: row.payloadRef,
@@ -257,14 +320,16 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
       const unknowns: InvocationJournalEntry[] = [];
       const rollback = workerRecovery?.rollback;
       const noRelease = await validateInstalledModelNoReleaseHistory(driver, artifacts, selected);
+      const verifierStops = await validateVerifierStoppedHistory(driver, artifacts, selected);
       for (const { entry, hasClaim } of stopInvocationHistory(selected.journal).values()) {
         if (rollback && entry.opKind === 'tool' && entry.phase === 'unknown' && entry.seq === rollback.unknown.seq) continue;
         if (installedRuntime && entry.opKind === 'model' && entry.replayClass === 'retry' && entry.phase === 'unknown') {
           unknowns.push(entry);
           continue;
         }
-        if (!['model', 'tool'].includes(entry.opKind) || (!['prepared', 'completed'].includes(entry.phase) &&
-            (entry.phase !== 'failed' || hasClaim && !(entry.opKind === 'model' && noRelease.has(entry.seq)))))
+        if (!['model', 'tool', 'verifier'].includes(entry.opKind) || (!['prepared', 'completed'].includes(entry.phase) &&
+            (entry.phase !== 'failed' || hasClaim && !(entry.opKind === 'model' && noRelease.has(entry.seq) ||
+              entry.opKind === 'verifier' && verifierStops.has(entry.seq)))))
           throw new KernelStorageError('STATE_TRANSITION_INVALID', 'terminal stop awaits exact dispatch/reconciliation closure');
         if (entry.phase === 'prepared') prepared.push(entry);
       }
@@ -297,7 +362,7 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
         }
         for (let retry = 0; retry < 8; retry++) {
           const now = sampleCanonicalNow();
-          const refunds: Array<{ artifact: PlannedArtifact; entry: InvocationJournalEntry }> = [];
+          const refunds: Array<{ artifact: PlannedArtifact; closure?: PlannedArtifact; entry: InvocationJournalEntry }> = [];
           let reserved = run.budgetReserved;
           for (const entry of prepared.sort((a, b) => a.seq - b.seq)) {
             const remaining = subtractBudget(reserved, entry.budgetDelta, 'stop refund');
@@ -308,8 +373,12 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
               budgetReservedBefore: reserved, budgetReservedAfter: remaining, settledAt: now, settlementDigest: '' };
             settlement.settlementDigest = digestOmitting(settlement, 'settlementDigest');
             const artifact = planCanonicalArtifact(settlement, settlement.format);
-            refunds.push({ artifact, entry: { ...entry, phase: 'failed' as const, seq: settlement.terminalJournalSeq,
-              budgetDelta: ZERO_BUDGET, errorRef: run.stopIntentRef, budgetSettlementRef: artifact.ref, timestamp: now } });
+            const closure = entry.opKind === 'verifier' ? planCanonicalArtifact({ schemaVersion: 1,
+              format: 'cliq-verifier-preparation-closure-v1', runId, opId: entry.opId, attempt: entry.attempt,
+              preparedJournalSeq: entry.seq, requestRef: entry.requestRef, targetRef: entry.target, grantRef: entry.grantRef,
+              disposition: 'unclaimed' }, 'cliq-verifier-preparation-closure-v1') : undefined;
+            refunds.push({ artifact, ...(closure ? { closure } : {}), entry: { ...entry, phase: 'failed' as const, seq: settlement.terminalJournalSeq,
+              budgetDelta: ZERO_BUDGET, errorRef: closure?.ref ?? run.stopIntentRef, budgetSettlementRef: artifact.ref, timestamp: now } });
             reserved = remaining;
           }
           if (!isZeroBudget(reserved)) throw new TypeError('stop retains an unexplained reservation');
@@ -320,7 +389,8 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
             abandonedRetryInvocations: abandoned }, 'cliq-terminal-detail-v1');
           const continuation = await prepareContinuationCommit(artifacts, { context: decodeContextManifest(await readCanonicalArtifact(artifacts, checkpoint.contextManifestRef)),
             existingItems: items, items: [...(rollbackResult ? [rollbackResult.item] : []), ...cancelled.map(({ item }) => item)], frontier, checkpointId, workspaceStateRef: checkpoint.workspaceStateRef,
-            artifacts: [detail, ...(rollbackResult?.artifacts ?? []), ...refunds.map(({ artifact }) => artifact), ...cancelled.flatMap(({ artifacts }) => artifacts)] });
+            artifacts: [detail, ...(rollbackResult?.artifacts ?? []), ...refunds.flatMap(({ artifact, closure }) => [artifact, ...(closure ? [closure] : [])]),
+              ...cancelled.flatMap(({ artifacts }) => artifacts)] });
           const session = readSession(driver, run.sessionId);
           const projection = decodeSessionProjection(await readCanonicalArtifact(artifacts, session.contextProjectionRef));
           if (projection.sessionId !== session.id || projection.contextRevision !== session.contextRevision || projection.throughItemSeq !== session.latestItemSeq) throw new TypeError('Session stop projection is not current');

@@ -29,7 +29,7 @@ import { validateControlChannelClosure, type AuthenticatedControlIdentity } from
 import { decodeSourceManifest, decodeWorkspaceIdentity } from './decoders.js';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
 import { decodeSandboxProfile } from './execution-closure.js';
-import { loadInstalledCredentialPlatform, withHeldInstalledRuntime, type HeldInstalledRuntime, type InstalledRuntimeBorrow } from './installed-runtime.js';
+import { loadInstalledCredentialPlatform, loadInstalledWorkerNative, withHeldInstalledRuntime, type HeldInstalledRuntime, type InstalledRuntimeBorrow } from './installed-runtime.js';
 import { installedSandboxProfile } from './installed-sandbox-profile.js';
 import { assertHeldWorkspaceRoot, heldWorkspaceRootPath, type HeldWorkspaceCursor, type HeldWorkspaceEntry, type HeldWorkspaceRoot, type NativeStateOwner } from './native-owner.js';
 import { readSession, readSessionPrincipalId } from './rows.js';
@@ -38,7 +38,10 @@ import { normalizeRunSubmitRequest, readRetainedSourceInspectionTarget, runSubmi
 import { assertWorkspaceSourceTrust, holdWorkspaceSourceTrust } from './source-trust.js';
 import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
 import { assertActiveStateOwner, type StateOwnerContext } from './state-owner.js';
+import { assertSupportedVerifierRequests, prepareVerifierSpec, readVerifierRequestIdentities } from './verifier-admission.js';
 import type { AdmitRunInput } from './reducers/admission.js';
+import { readRetainedVerifierToolchain } from './guest-toolchain.js';
+import { VerifierAuthorizationError } from './authorization-artifacts.js';
 
 type RetiredSource = Extract<SourceInspectionAttemptV1, { phase: 'retired' }>;
 type InstructionEntry = { canonicalRootRelativePath: string; directoryDepth: number;
@@ -78,7 +81,7 @@ export function assertInstalledRunRecipe(request: NormalizedRunSubmitRequest,
   endpoint?: EndpointRegistrationV1): asserts request is NormalizedRunSubmitRequest & {
   model: Exclude<NormalizedRunSubmitRequest['model'], { provider: 'ollama' }>;
 } {
-  if (request.model.provider !== 'openai-compatible' || request.verifiers.length || request.dependency.mode !== 'none' ||
+  if (request.model.provider !== 'openai-compatible' || request.dependency.mode !== 'none' ||
       request.registeredMcpServerIds.length || request.skillIds.length || request.sourceIncludes.length ||
       request.sandboxResources.maxProcesses < 8 || request.sandboxResources.maxSingleFileBytes > 268_435_456)
     invalid('installed Run selects an unsupported model, execution resource, verifier, dependency, MCP, skill or source inclusion');
@@ -86,6 +89,7 @@ export function assertInstalledRunRecipe(request: NormalizedRunSubmitRequest,
     invalid('installed Run requires exactly one model bearer credential');
   if (request.policyMode === 'default')
     invalid('installed Run default policy requires unavailable interactive approval');
+  assertSupportedVerifierRequests(request.verifiers, request.policyMode);
   if (endpoint) {
     // The native broker has 64 pin slots. Registration already requires the
     // original array to be nonempty, unique and sorted; never truncate it.
@@ -246,7 +250,8 @@ async function readInstructions(artifacts: ArtifactCatalog, assembly: RunAssembl
   return immutableSnapshot(manifest);
 }
 
-async function materialFor(installed: InstalledRuntimeBorrow, artifacts: ArtifactCatalog, assembly: RunAssemblyV1): Promise<RunAssemblyValidationMaterial> {
+async function materialFor(installed: InstalledRuntimeBorrow, artifacts: ArtifactCatalog, assembly: RunAssemblyV1, signal?: AbortSignal): Promise<RunAssemblyValidationMaterial> {
+  signal?.throwIfAborted();
   if (assembly.provider.name !== 'openai-compatible' || assembly.provider.endpoint.kind !== 'registered' ||
       assembly.provider.negotiation.streaming || assembly.mcpServers.length || assembly.instructions.skills.length)
     invalid('installed assembly selects an unsupported model, MCP or skill recipe');
@@ -310,6 +315,14 @@ async function materialFor(installed: InstalledRuntimeBorrow, artifacts: Artifac
     { kind: 'compaction_prompt_envelope', ref: compaction.material.ref, digest: compaction.material.value.envelopeDigest },
     { kind: 'workspace_instructions', ref: assembly.instructions.workspaceInstructionsRef, digest: instructions.manifestDigest },
   ];
+  if (assembly.runtime.guestToolchainManifestRef !== undefined) {
+    const toolchain = await readRetainedVerifierToolchain(artifacts, { bundle: installed.bundle, releaseKeys: installed.releaseKeys,
+      guestToolchainManifestRef: assembly.runtime.guestToolchainManifestRef, signal });
+    if (toolchain.manifest.manifestDigest !== assembly.runtime.guestToolchainManifestDigest)
+      mismatch('retained material substitutes its signed guest toolchain');
+    references.push({ kind: 'guest_toolchain_manifest', ref: toolchain.manifestRef, digest: toolchain.manifest.manifestDigest });
+  }
+  signal?.throwIfAborted();
   return Object.freeze({ capabilityEvidence: immutableSnapshot({ ref: assembly.provider.negotiation.capabilityEvidenceRef, value: capability }),
     resolveVerifiedCapabilityClaims: source => source.kind === 'signed_catalog' && source.runtimeBundleRef === installed.bundleDigest &&
       source.catalogEntryRef === model.catalog.ref && source.catalogEntryDigest === catalog.catalogEntryDigest ? catalog.claims : null,
@@ -327,14 +340,16 @@ async function materialFor(installed: InstalledRuntimeBorrow, artifacts: Artifac
   } satisfies RunAssemblyValidationMaterial);
 }
 
-export async function loadInstalledRunMaterial(input: { selected: HeldInstalledRuntime; artifacts: ArtifactCatalog; assemblyRef: string }) {
+export async function loadInstalledRunMaterial(input: { selected: HeldInstalledRuntime; artifacts: ArtifactCatalog; assemblyRef: string; signal?: AbortSignal }) {
+  input.signal?.throwIfAborted();
   return withHeldInstalledRuntime(input.selected, async installed => {
-    await installed.revalidate();
+    await installed.revalidate(input.signal);
     const assembly = decodeRetainedRunAssembly(await readCanonicalArtifact(input.artifacts, input.assemblyRef));
     if (assembly.runtime.runtimeBundleRef !== installed.bundleDigest || assembly.runtime.runtimeBundleManifestDigest !== installed.bundle.manifestDigest)
       mismatch('retained Run requires a different installed runtime');
-    const material = await materialFor(installed, input.artifacts, assembly); await installed.revalidate(); return material;
-  });
+    const material = await materialFor(installed, input.artifacts, assembly, input.signal); await installed.revalidate(input.signal);
+    input.signal?.throwIfAborted(); return material;
+  }, input.signal);
 }
 
 export async function assembleInstalledRun(input: {
@@ -349,6 +364,12 @@ export async function assembleInstalledRun(input: {
     credentialBindings: input.credentialBindings.map(decodeEndpointCredentialGrantBinding) });
   if (!same(currentOriginal.request, request)) mismatch('installed producer did not receive the exact normalized current public frame');
   assertInstalledRunRecipe(request, endpoint);
+  if (request.verifiers.length) {
+    // Native loading uses the installed queue itself; never invoke it from a
+    // held-runtime borrow that would wait behind its own queued operation.
+    const native = await loadInstalledWorkerNative(selected, signal);
+    if (native.verifierInterfaceVersion !== 1) throw new VerifierAuthorizationError('UNSUPPORTED_EXECUTION_IDENTITY');
+  }
   const remote = request.model;
   await validateControlChannelClosure(artifacts, owner, identity); assertActiveStateOwner(driver, owner); signal?.throwIfAborted();
   const session = readSession(driver, request.sessionId), workspace = decodeWorkspaceIdentity(await readCanonicalArtifact(artifacts, session.workspaceIdentityRef));
@@ -368,13 +389,13 @@ export async function assembleInstalledRun(input: {
   if (sourceManifest.workspaceIdentityDigest !== workspace.identityDigest || sourceManifest.manifestDigest !== source.outcome.sourceManifestDigest || sourceManifest.git)
     mismatch('installed source closure differs from the authenticated non-Git capture');
   const held = await withHeldInstalledRuntime(selected, async installed => {
-    await installed.revalidate(); const active = assertActiveStateOwner(driver, owner);
+    await installed.revalidate(signal); const active = assertActiveStateOwner(driver, owner);
     if (active.runtimeBundleRef !== installed.bundleDigest || target.runtimeBundleRef !== installed.bundleDigest ||
         active.runtimeBundleManifestDigest !== installed.bundle.manifestDigest) mismatch('installed assembly and capture have another runtime owner');
     await readRetainedSourceInspectionTarget(artifacts, source, readSourceInspectionOriginalRequest(driver, source.inspectionId),
       { bundle: installed.bundle, releaseKeys: installed.releaseKeys, sandboxProfile: decodeSandboxProfile(await readCanonicalArtifact(artifacts, target.sandboxProfileRef)) });
-    const native = await installed.loadStateOwner(); await installed.revalidate(); return native;
-  });
+    const native = await installed.loadStateOwner(signal); await installed.revalidate(signal); return native;
+  }, signal);
   const platform = await loadInstalledCredentialPlatform(selected), user = platform.currentUser();
   if (path.join(user.home, '.cliq') !== controlledHome) mismatch('installed instruction home is not the actual platform controlled home');
   const resources: Array<{ close(): void }> = []; let failure: unknown;
@@ -389,7 +410,7 @@ export async function assembleInstalledRun(input: {
   } catch (error) { failure = error; throw error; } finally { closeOwned(resources, failure); }
   const admittedAt = sampleCanonicalNow(), deadlineAt = addCanonicalDuration(admittedAt, request.budgets.wallTimeMs);
   return withHeldInstalledRuntime(selected, async installed => {
-    await installed.revalidate(); await validateControlChannelClosure(artifacts, owner, identity); assertActiveStateOwner(driver, owner);
+    await installed.revalidate(signal); await validateControlChannelClosure(artifacts, owner, identity); assertActiveStateOwner(driver, owner);
     const model = selectedModel(installed, remote.provider, remote.model, endpoint), catalog = model.catalog.value;
     if (catalog.claims.streaming) throw new InstalledRunAuthorityError('MODEL_CAPABILITY_UNKNOWN');
     if (endpoint.ownerPrincipalId !== identity.principalId || endpoint.endpointRegistrationId !== remote.endpoint.endpointRegistrationId ||
@@ -427,6 +448,9 @@ export async function assembleInstalledRun(input: {
     const worker = installed.bundle.entries.find(entry => entry.entryId === LINUX_WORKER_RECIPE.workerId);
     if (!system || !compaction || !worker || worker.role !== 'worker' || !worker.executable) mismatch('installed Run lacks its exact signed prompt or worker recipe');
     const c = catalog.claims.contextLimitTokens, o = Math.min(catalog.claims.maxOutputTokens, Math.floor(c / 4));
+    const verifierIdentities = request.verifiers.length ? await readVerifierRequestIdentities(driver, artifacts, owner,
+      { bundle: installed.bundle, releaseKeys: installed.releaseKeys }, identity.principalId, request.verifiers, undefined, signal) : [];
+    const verifierToolchain = verifierIdentities[0]?.selected;
     const h = c - o, s = Math.min(8192, Math.floor(c / 8)), k = compactionEnvelopeEstimate(compaction.material);
     const assembly: RunAssemblyV1 = { schemaVersion: 1, format: 'cliq-run-assembly-v1', provider: { name: catalog.provider, model: catalog.model,
       endpoint: { kind: 'registered', registrationKind: endpoint.registrationKind, endpointRegistrationRef: endpointArtifact.ref,
@@ -440,7 +464,9 @@ export async function assembleInstalledRun(input: {
       instructions: { systemPromptRef: system.ref, systemPromptDigest: system.value.textDigest, workspaceInstructionsRef: instructions.ref,
         workspaceInstructionsDigest: instructions.value.manifestDigest, skills: [] },
       runtime: { runtimeBundleRef: installed.bundleDigest, runtimeBundleManifestDigest: installed.bundle.manifestDigest,
-        workerExecutableId: worker.entryId, workerExecutableDigest: worker.digest, sandboxBackend: 'linux_namespace' },
+        workerExecutableId: worker.entryId, workerExecutableDigest: worker.digest, sandboxBackend: 'linux_namespace',
+        ...(verifierToolchain ? { guestToolchainManifestRef: verifierToolchain.manifestRef,
+          guestToolchainManifestDigest: verifierToolchain.manifest.manifestDigest } : {}) },
       retry: { model: { maxDispatchedAttempts: 3, maxZeroByteTransportRetriesPerAttempt: 0, postAttemptDelaysMs: [500, 2000] },
         tools: tools.entries.map(entry => ({ toolName: entry.name, replayClass: 'manual', maxDispatchedAttempts: 1, postAttemptDelaysMs: [] })) },
       context: { compactionPromptEnvelopeRef: compaction.material.ref, compactionPromptEnvelopeDigest: compaction.material.value.envelopeDigest,
@@ -448,7 +474,7 @@ export async function assembleInstalledRun(input: {
         protectedRecentTokens: Math.min(32768, Math.floor(c / 4)), summaryTokenCap: s, compactionEnvelopeTokens: k,
         sourceInputTokenCap: Math.min(Math.floor(c / 2), c - s - k), maxSummaryBytes: 262144 }, createdAt: admittedAt, assemblyDigest: '' };
     assembly.assemblyDigest = digestOmitting(assembly, 'assemblyDigest');
-    const material = await materialFor(installed, artifacts, assembly), assemblyRef = canonicalSha256(assembly);
+    const material = await materialFor(installed, artifacts, assembly, signal), assemblyRef = canonicalSha256(assembly);
     const valid = validateRunAssembly({ assemblyRef, assembly, admittedAt, deadlineAt, maxRunCostMicros: request.budgets.costMicros,
       runSpecCredentialGrantRefs: credentialGrantRefs, material });
     if (!valid.ok) throw new InstalledRunAuthorityError(valid.code);
@@ -462,24 +488,26 @@ export async function assembleInstalledRun(input: {
     policy.policyDigest = digestOmitting(policy, 'policyDigest');
     verifyToolRuntimeAuthority({ assembly, policy, bundle: installed.bundle, profile, tools: tools.entries, releaseKeys: installed.releaseKeys });
     const sandbox = installedSandboxProfile(request.sandboxResources);
-    const verifier: VerifierSpec = { schemaVersion: 1, format: 'cliq-verifier-spec-v1', verifiers: [], specDigest: '' };
-    verifier.specDigest = digestOmitting(verifier, 'specDigest');
+    const sandboxProfileRef = (await artifacts.publishCanonical(sandbox, sandbox.format)).ref;
+    const verifier = await prepareVerifierSpec(driver, artifacts, owner, { bundle: installed.bundle, releaseKeys: installed.releaseKeys },
+      { principalId: identity.principalId, requests: request.verifiers, policyMode: request.policyMode, assembly,
+        sourceProjectionRef: sourceManifest.sourceProjectionRef, sandboxProfileRef }, undefined, signal);
     await artifacts.publishCanonical(assembly, assembly.format);
     const policyRef = (await artifacts.publishCanonical(policy, policy.format)).ref;
-    const sandboxProfileRef = (await artifacts.publishCanonical(sandbox, sandbox.format)).ref;
-    const verifierSpecRef = (await artifacts.publishCanonical(verifier, verifier.format)).ref;
-    await installed.revalidate(); await validateControlChannelClosure(artifacts, owner, identity); assertActiveStateOwner(driver, owner);
+    const verifierSpecRef = verifier.specRef;
+    await installed.revalidate(signal); await validateControlChannelClosure(artifacts, owner, identity); assertActiveStateOwner(driver, owner);
     const result: AssembledInstalledRun = Object.freeze({ assemblyRef, assembly: immutableSnapshot(assembly), policyRef, sandboxProfileRef, verifierSpecRef,
       credentialGrantRefs: Object.freeze(credentialGrantRefs), sourceProjectionRef: sourceManifest.sourceProjectionRef,
       frozenIgnoreRulesRef: sourceManifest.frozenIgnoreRulesRef, baseWorkspaceManifestRef: capturedSourceRef, material, admittedAt, deadlineAt });
     admissions.set(result, { driver, owner, selected, identity, normalized: currentOriginal, source, native: held, workspace, signal,
       input: immutableSnapshot({ ...identity, requestId: request.requestId, admissionKey: request.admissionKey, sessionId: request.sessionId,
         expectedContextRevision: request.expectedContextRevision, workspacePath: request.workspacePath, objective: request.objective,
-        assemblyRef, policyRef, sandboxProfileRef, verifierSpecRef, credentialGrantRefs, budgets: request.budgets,
+        assemblyRef, policyRef, sandboxProfileRef, verifierSpecRef,
+        ...(request.verifiers.length ? { verifierRequests: request.verifiers } : {}), credentialGrantRefs, budgets: request.budgets,
         allowUnverified: request.allowUnverified, sourceProjectionRef: sourceManifest.sourceProjectionRef,
         frozenIgnoreRulesRef: sourceManifest.frozenIgnoreRulesRef, baseWorkspaceManifestRef: capturedSourceRef }), admittedAt, deadlineAt });
     return result;
-  });
+  }, signal);
 }
 
 /** Genuine-brand-first admission friend. Data objects, proxies and callbacks

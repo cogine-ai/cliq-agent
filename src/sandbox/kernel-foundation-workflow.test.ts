@@ -65,3 +65,50 @@ test('credential lifecycle and model-input coverage require independent unchange
     assert.match(job, /retention-days: 7/);
   }
 });
+
+test('real guest verifier stays in the existing free bounded job without replacing ordinary lifecycle coverage', async () => {
+  const workflow = await readFile(workflowUrl, 'utf8');
+  const job = workflow.match(/\n  linux-run-execution:\n[\s\S]*?(?=\n  [a-z][a-z0-9-]*:\n|$)/u)?.[0];
+  assert(job);
+  assert.match(job, /runs-on: ubuntu-22\.04\n/); assert.match(job, /timeout-minutes: 20\n/);
+  assert.doesNotMatch(job, /continue-on-error:/u);
+  assert.match(job, /libext2fs-dev pkg-config/u);
+  assert.match(job, /truncate -s 128M "\$image"/u, 'ordinary native capacity and all existing assertions stay intact');
+  assert.match(job, /run-linux-worker-campaign\.ts/u);
+  assert.match(job, /run-linux-guest-verifier-campaign\.ts --prepare/u, 'uses the checksum-pinned SEA carrier builder');
+  assert.match(job, /truncate -s 512M "\$guest_state_image"/u, 'the complete 256 MiB image fits a separate disposable CAS volume');
+  assert.match(job, /run-linux-guest-verifier-campaign\.ts --run/u);
+  assert.match(job, /CLIQ_I1_GUEST_STATE_VOLUME[\s\S]*--clear-groups/u);
+  const cleanup = stepBlocks(job).find(block => block.includes('- name: Retire disposable execution resources'));
+  assert(cleanup); assert.match(cleanup, /if: always\(\)/u);
+  assert.match(cleanup, /cgroup\.kill[\s\S]*populated 0[\s\S]*sudo rmdir/u);
+  const guestCleanup = stepBlocks(job).find(block => block.includes('- name: Retire the independent guest StateRoot fixture'));
+  assert(guestCleanup); assert.match(guestCleanup, /if: always\(\)/u);
+  assert.match(guestCleanup, /mountpoint -q "\$CLIQ_I1_GUEST_VOLUME"; then sudo umount "\$CLIQ_I1_GUEST_VOLUME"/u);
+  assert.match(job, /name: native-guest-verifier-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/u);
+  assert.match(job, /guest-extractor-report\.json[\s\S]*guest-verifier-report\.json[\s\S]*guest-campaign-failure\.json/u);
+  assert.match(job, /retention-days: 7/u);
+});
+
+test('installed verifier uses its own free bounded manager journey without weakening any original campaign', async () => {
+  const workflow = await readFile(workflowUrl, 'utf8');
+  const job = workflow.match(/\n  linux-installed-verifier:\n[\s\S]*?(?=\n  [a-z][a-z0-9-]*:\n|$)/u)?.[0];
+  assert(job); assert.match(job, /runs-on: ubuntu-22\.04\n/u); assert.match(job, /timeout-minutes: 20\n/u);
+  assert.doesNotMatch(job, /(?:continue-on-error|needs):/u);
+  assert.match(job, /persist-credentials: false/u);
+  assert.match(job, /libext2fs-dev pkg-config/u);
+  assert.match(job, /qualify-systemd-user\.sh --run-verifier-journey "\$probe_node"/u);
+  assert.match(job, /if: always\(\)[\s\S]*actions\/upload-artifact@v4/u);
+  assert.match(job, /name: installed-verifier-journey-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/u);
+  assert.match(job, /retention-days: 7/u);
+  const shell = await readFile(new URL('../../scripts/kernel/qualify-systemd-user.sh', import.meta.url), 'utf8');
+  assert.match(shell, /--run-verifier-journey\) probe_campaign_kind=run-journey; probe_run_driver_mode=--verifier-campaign;/u);
+  assert.match(shell, /probe_run_driver_mode" = --verifier-campaign[\s\S]*?qualify-installed-verifier-journey\.ts[\s\S]*?else[\s\S]*?qualify-installed-run-journey\.ts/u);
+  const driver = await readFile(new URL('../../scripts/kernel/qualify-installed-verifier-journey.ts', import.meta.url), 'utf8');
+  assert.match(driver, /maxBytes: 512 \* 1024 \* 1024, maxStreams: 4096/u);
+  assert.match(driver, /'required_pass', 'required_repair', 'advisory_failure', 'required_timeout'/u);
+  assert.match(driver, /scanCredentialSecretCorpus\(\{ stateRoot: recipe\.stateRoot, uid: ledger\.uid, evidenceDirs: \[\], scanner \}\)/u);
+  assert.match(driver, /stopped\.TimeoutStopUSec, '2s'/u);
+  assert.match(driver, /setTimeout\(resolve,60000\)/u);
+  assert.match(driver, /retries: kind === 'required_timeout' \? 1 : 0/u);
+});

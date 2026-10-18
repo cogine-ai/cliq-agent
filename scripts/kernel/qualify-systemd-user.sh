@@ -25,6 +25,7 @@ case ${1:-} in
   --credentials-model-input) probe_campaign_kind=credentials; probe_credential_driver_mode=--model-input-campaign; shift ;;
   --credential-finalizer-shutdown) probe_campaign_kind=credentials; probe_finalizer_shutdown=1; shift ;;
   --run-journey) probe_campaign_kind=run-journey; shift ;;
+  --run-verifier-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--verifier-campaign; shift ;;
   --run-failure-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--failure-campaign; shift ;;
   --run-retry-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--retry-campaign; shift ;;
   --run-authority-failure-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--authority-failure-campaign; shift ;;
@@ -39,7 +40,7 @@ case ${1:-} in
 esac
 readonly probe_campaign_kind probe_run_driver_mode probe_credential_driver_mode probe_finalizer_shutdown
 if [[ $(id -u) != 0 || $# -lt 1 || $# -gt 2 ]]; then
-  printf 'usage: sudo bash %s [--installed|--installed-retirement-refusal|--secrets|--credentials|--credentials-model-input|--credential-finalizer-shutdown|--run-journey|--run-failure-journey|--run-retry-journey|--run-authority-failure-journey|--run-storage-failure-journey|--run-request-resource-journey|--run-shutdown-admission-journey|--run-shutdown-session-journey|--run-shutdown-preparation-journey|--run-shutdown-received-tool-journey|--run-shutdown-pending-model-journey|--run-shutdown-startup-journey] ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' "$0" >&2
+  printf 'usage: sudo bash %s [--installed|--installed-retirement-refusal|--secrets|--credentials|--credentials-model-input|--credential-finalizer-shutdown|--run-journey|--run-verifier-journey|--run-failure-journey|--run-retry-journey|--run-authority-failure-journey|--run-storage-failure-journey|--run-request-resource-journey|--run-shutdown-admission-journey|--run-shutdown-session-journey|--run-shutdown-preparation-journey|--run-shutdown-received-tool-journey|--run-shutdown-pending-model-journey|--run-shutdown-startup-journey] ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' "$0" >&2
   exit 2
 fi
 readonly probe_node=$1
@@ -71,7 +72,11 @@ fi
 readonly probe_credential_source="$probe_source_dir/testing/credential-journey-observer.c"
 readonly probe_credential_store_source="$probe_source_dir/testing/credential-store-fixture.c"
 readonly probe_finalizer_source="$probe_source_dir/testing/credential-finalizer-service.c"
-readonly probe_run_driver="$probe_source_dir/qualify-installed-run-journey.ts"
+if [[ "$probe_run_driver_mode" = --verifier-campaign ]]; then
+  readonly probe_run_driver="$probe_source_dir/qualify-installed-verifier-journey.ts"
+else
+  readonly probe_run_driver="$probe_source_dir/qualify-installed-run-journey.ts"
+fi
 if [[ "$probe_campaign_kind" = installed || "$probe_campaign_kind" = retirement || "$probe_campaign_kind" = secrets || "$probe_campaign_kind" = credentials || "$probe_campaign_kind" = run-journey ]]; then
   probe_typescript_driver=$probe_installed_driver
   if [[ "$probe_campaign_kind" = secrets ]]; then

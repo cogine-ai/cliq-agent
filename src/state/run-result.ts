@@ -1,6 +1,6 @@
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting, identityHash } from '../kernel/identity.js';
-import type { RunResult, VerificationClosureV1 } from '../kernel/result.js';
+import type { RunResult } from '../kernel/result.js';
 import type { RecoveryClosureV1, Run, RunFrontier, RunSpec, SessionRunTerminalItem } from '../kernel/types.js';
 import { immutableSnapshot } from '../model/immutable.js';
 import { exactKeys, requireEqual } from '../policy/runtime-authority.js';
@@ -9,24 +9,29 @@ import { insertArtifactMetadata, type ArtifactCatalog } from './artifacts.js';
 import { advanceTimeFence, sampleCanonicalNow, type TimeFenceAdvance } from './canonical-time.js';
 import { decodeAdmittedContext, decodeSessionProjection } from './decoders.js';
 import { KernelStorageError, stateOperation } from './errors.js';
-import { finalCandidateCheckpointId } from './final-candidate-plan.js';
 import { assertRetiredGenerationCut } from './generation-retirement.js';
 import { readRecoveryClosure } from './recovery-closure.js';
 import { readInvocationJournal } from './repositories/journal.js';
 import { readWorkerLaunchesForRun } from './repositories/worker-launches.js';
 import { readWorkspaceGenerationsForRun } from './repositories/workspace-generations.js';
 import { decodeRunResult, decodeVerificationClosure } from './result-artifacts.js';
-import { readUnverifiedFinalization, readUnverifiedResultBasis, runResultCheckpointId, verificationCheckpointId } from './run-result-recovery.js';
+import { expectedVerificationClosure, readFinalization, readResultBasis, runResultCheckpointId, verificationCheckpointId } from './run-result-recovery.js';
 import { readCheckpoint, readControlRequest, readRun, readSession } from './rows.js';
 import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
 import { assertActiveStateOwner, type StateOwnerContext } from './state-owner.js';
 import { appendRunStateEvent, requireHealthyFence } from './reducers/invocation.js';
 
-/** Store-derived completion only. A no-check result is explicitly unverified;
+/** Fixed, inert progress labels for the installed owner's shutdown diagnosis.
+ * They carry no result data, permission, time fence or recovery evidence. */
+export type RunResultPhase = 'result_recovery' | 'result_basis' | 'result_finalization' |
+  'result_publication' | 'result_session' | 'result_commit';
+
+/** Store-derived completion only. A no-required-check result is explicitly unverified;
  * this module grants no execution permission and accepts no caller proof/list. */
 export function loadRunResult(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
-  authority: { run: Run; spec: RunSpec; principalId: string }) {
+  authority: { run: Run; spec: RunSpec; principalId: string }, onPhase?: (phase: RunResultPhase) => void) {
   const { run: admitted, spec, principalId } = authority, runId = admitted.id;
+  const phase = (value: RunResultPhase) => { try { onPhase?.(value); } catch { /* Diagnosis cannot decide execution. */ } };
   function revision(input: { expectedRunRevision: number }): number {
     if (!input || !exactKeys(input, ['expectedRunRevision']) || !Number.isSafeInteger(input.expectedRunRevision) || input.expectedRunRevision < 1)
       throw new TypeError('result requires one exact expected revision');
@@ -34,10 +39,12 @@ export function loadRunResult(driver: SqliteDriver, artifacts: ArtifactCatalog, 
   }
   async function load() {
     assertActiveStateOwner(driver, owner);
+    phase('result_recovery');
     const cut = await readRecoveryClosure(driver, artifacts, runId);
     if (cut.run.specRef !== admitted.specRef || cut.run.createdAt !== admitted.createdAt || cut.run.deadlineAt !== admitted.deadlineAt ||
         canonicalSha256(cut.runSpec) !== canonicalSha256(spec)) throw new TypeError('result authority no longer belongs to this Run');
-    const basis = await readUnverifiedResultBasis(driver, artifacts, cut);
+    phase('result_basis');
+    const basis = await readResultBasis(driver, artifacts, cut);
     if (basis.principalId !== principalId) throw new TypeError('result authority belongs to another principal');
     return { cut, basis };
   }
@@ -50,7 +57,7 @@ export function loadRunResult(driver: SqliteDriver, artifacts: ArtifactCatalog, 
     'SELECT item_id, item_seq, kind, payload_ref, created_at FROM items WHERE run_id = ? ORDER BY item_seq')
     .all<{ item_id: string; item_seq: bigint; kind: string; payload_ref: string; created_at: string }>(runId)
     .map(row => ({ ...row, item_seq: Number(row.item_seq) }));
-  function capture(cut: RecoveryClosureV1, basis: Awaited<ReturnType<typeof readUnverifiedResultBasis>>) {
+  function capture(cut: RecoveryClosureV1, basis: Awaited<ReturnType<typeof readResultBasis>>) {
     const launches = readWorkerLaunchesForRun(driver, runId), generations = readWorkspaceGenerationsForRun(driver, runId), items = itemRows(driver);
     return (connection: SqliteConnection) => {
       assertActiveStateOwner(connection, owner);
@@ -87,7 +94,7 @@ export function loadRunResult(driver: SqliteDriver, artifacts: ArtifactCatalog, 
       if (cut.run.nextStep === 'finalize') {
         unstopped(cut.run, 'finalize');
         const frontier = await readCanonicalArtifact<Extract<RunFrontier, { kind: 'finalize' }>>(artifacts, cut.run.frontierRef!);
-        const historical = await readUnverifiedFinalization(driver, artifacts, cut, basis, frontier.verificationClosureRef);
+        const historical = await readFinalization(driver, artifacts, cut, basis, frontier.verificationClosureRef);
         if (![cut.run.revision, historical.checkpoint.basedOnRunRevision].includes(expected))
           throw new KernelStorageError('REVISION_CONFLICT', 'verification replay revision differs from its original cut');
         return immutableSnapshot({ run: cut.run, verificationClosureRef: frontier.verificationClosureRef, checkpointId: historical.checkpoint.id });
@@ -95,16 +102,12 @@ export function loadRunResult(driver: SqliteDriver, artifacts: ArtifactCatalog, 
       if (cut.run.revision !== expected) throw new KernelStorageError('REVISION_CONFLICT', 'verification Run revision changed');
       unstopped(cut.run, 'verify');
       const expectedFrontier: RunFrontier = { schemaVersion: 1, kind: 'verify', phase: 'verifiers', candidateItemId: basis.candidate.itemId,
-        resultSourceRef: basis.candidate.resultSourceRef, verifierPlanRef: basis.planRef, nextVerifierIndex: 0, afterPass: 'finalize' };
-      requireEqual(await readCanonicalArtifact(artifacts, cut.run.frontierRef!), expectedFrontier, 'empty verification current frontier');
-      if (cut.latestCheckpoint.id !== finalCandidateCheckpointId(runId, basis.candidate.producingItemId))
-        throw new TypeError('empty verification has no exact candidate Checkpoint');
+        resultSourceRef: basis.candidate.resultSourceRef, verifierPlanRef: basis.planRef, nextVerifierIndex: basis.plan.entries.length, afterPass: 'finalize' };
+      requireEqual(await readCanonicalArtifact(artifacts, cut.run.frontierRef!), expectedFrontier, 'complete verification current frontier');
+      if (cut.latestCheckpoint.id !== basis.completionCheckpoint.id)
+        throw new TypeError('verification has no exact final producer Checkpoint');
       const assertCut = capture(cut, basis), createdAt = sampleCanonicalNow();
-      const closure: VerificationClosureV1 = { schemaVersion: 1, format: 'cliq-verification-closure-v1', runId,
-        candidateItemId: basis.candidate.itemId, resultSourceRef: basis.candidate.resultSourceRef, verifierPlanRef: basis.planRef,
-        dependency: { kind: 'none' }, verification: { kind: 'local', outcome: 'unverified', unverifiedConsentRef: spec.unverifiedConsentRef!, entries: [] },
-        createdAt, closureDigest: '' };
-      closure.closureDigest = digestOmitting(closure, 'closureDigest'); decodeVerificationClosure(closure);
+      const closure = expectedVerificationClosure(basis, createdAt); decodeVerificationClosure(closure);
       const published = await artifacts.publishCanonical(closure, closure.format);
       const frontier: Extract<RunFrontier, { kind: 'finalize'; operation: 'agent' }> = { schemaVersion: 1, kind: 'finalize', operation: 'agent',
         candidateItemId: basis.candidate.itemId, resultSourceRef: basis.candidate.resultSourceRef, verificationClosureRef: published.ref };
@@ -127,31 +130,34 @@ export function loadRunResult(driver: SqliteDriver, artifacts: ArtifactCatalog, 
     }),
     commitRunResult: stateOperation('INVALID_REQUEST', async (input: { expectedRunRevision: number }) => {
       const expected = revision(input), { cut, basis } = await load();
-      if (cut.run.status === 'completed_unverified') {
+      if (cut.run.status === 'completed_unverified' || cut.run.status === 'succeeded') {
         if (![cut.run.revision, cut.latestCheckpoint.basedOnRunRevision].includes(expected))
           throw new KernelStorageError('REVISION_CONFLICT', 'result replay revision differs from its original cut');
         return immutableSnapshot({ run: cut.run, resultRef: cut.run.resultRef! });
       }
       if (cut.run.revision !== expected) throw new KernelStorageError('REVISION_CONFLICT', 'result Run revision changed');
       unstopped(cut.run, 'finalize');
+      phase('result_finalization');
       const frontier = await readCanonicalArtifact<Extract<RunFrontier, { kind: 'finalize' }>>(artifacts, cut.run.frontierRef!);
-      const historical = await readUnverifiedFinalization(driver, artifacts, cut, basis, frontier.verificationClosureRef);
+      const historical = await readFinalization(driver, artifacts, cut, basis, frontier.verificationClosureRef);
       requireEqual(frontier, historical.frontier, 'result current finalize frontier');
       const assertCut = capture(cut, basis), createdAt = sampleCanonicalNow();
       const result: RunResult = { schemaVersion: 1, runId, baseSourceRef: basis.candidate.baseSourceRef,
         resultSourceRef: basis.candidate.resultSourceRef, diffRef: basis.candidate.diffRef,
-        verificationClosureRef: frontier.verificationClosureRef, verificationReceiptRefs: [], summaryRef: basis.candidate.summaryRef, createdAt };
+        verificationClosureRef: frontier.verificationClosureRef, verificationReceiptRefs: basis.verificationReceiptRefs, summaryRef: basis.candidate.summaryRef, createdAt };
       decodeRunResult(result);
+      phase('result_publication');
       const resultArtifact = await artifacts.publishCanonical(result, 'cliq-run-result-v1');
       const admittedContext = decodeAdmittedContext(await readCanonicalArtifact(artifacts, spec.admittedContextRef));
       const terminal: SessionRunTerminalItem = { schemaVersion: 1, format: 'cliq-session-run-terminal-v1', kind: 'run_terminal',
         itemKey: `run-terminal:${runId}`, runId, operation: 'agent', admittedSessionItemSeq: admittedContext.throughSessionItemSeq,
-        status: 'completed_unverified', terminalReason: 'no_required_verifier', resultRef: resultArtifact.ref,
+        status: basis.status, terminalReason: basis.terminalReason, resultRef: resultArtifact.ref,
         summaryRef: result.summaryRef, summaryDigest: basis.summary.textDigest };
       const terminalArtifact = await artifacts.publishCanonical(terminal, terminal.format);
       const itemId = identityHash('cliq-session-run-terminal-item-v1', cut.run.sessionId, runId);
       const checkpointId = runResultCheckpointId(runId, basis.candidate.itemId, resultArtifact.ref);
       for (let attempt = 0; attempt < 8; attempt++) {
+        phase('result_session');
         const session = readSession(driver, cut.run.sessionId);
         const projection = decodeSessionProjection(await readCanonicalArtifact(artifacts, session.contextProjectionRef));
         if (projection.sessionId !== session.id || projection.contextRevision !== session.contextRevision || projection.throughItemSeq !== session.latestItemSeq)
@@ -163,6 +169,7 @@ export function loadRunResult(driver: SqliteDriver, artifacts: ArtifactCatalog, 
         projection.projectionDigest = digestOmitting(projection, 'projectionDigest');
         const projectionArtifact = await artifacts.publishCanonical(projection, projection.format);
         let outcome: TimeFenceAdvance | undefined, updated: Run | undefined;
+        phase('result_commit');
         driver.transaction(connection => {
           assertCut(connection);
           if (canonicalSha256(readSession(connection, session.id)) !== canonicalSha256(session)) return;
@@ -170,9 +177,9 @@ export function loadRunResult(driver: SqliteDriver, artifacts: ArtifactCatalog, 
           const { committedAt } = accepted;
           for (const artifact of [resultArtifact, terminalArtifact, projectionArtifact]) insertArtifactMetadata(connection, artifact, committedAt);
           checkpoint(connection, cut, checkpointId, committedAt);
-          connection.prepare(`UPDATE runs SET status = 'completed_unverified', next_step = NULL, frontier_ref = NULL,
-            result_ref = ?, terminal_reason = 'no_required_verifier', latest_checkpoint_id = ?, revision = revision + 1, updated_at = ? WHERE id = ?`)
-            .run(resultArtifact.ref, checkpointId, committedAt, runId);
+          connection.prepare(`UPDATE runs SET status = ?, next_step = NULL, frontier_ref = NULL,
+            result_ref = ?, terminal_reason = ?, latest_checkpoint_id = ?, revision = revision + 1, updated_at = ? WHERE id = ?`)
+            .run(basis.status, resultArtifact.ref, basis.terminalReason, checkpointId, committedAt, runId);
           connection.prepare("INSERT INTO items (item_id, session_id, run_id, item_seq, kind, payload_ref, created_at) VALUES (?, ?, NULL, ?, 'run_terminal', ?, ?)")
             .run(itemId, session.id, BigInt(seq), terminalArtifact.ref, committedAt);
           connection.prepare('UPDATE sessions SET latest_item_seq = ?, context_revision = context_revision + 1, context_projection_ref = ?, updated_at = ? WHERE id = ?')

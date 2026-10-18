@@ -1622,8 +1622,19 @@ export type RecoveryClosureV1 = {
   childAllocations: ChildAllocationV1[];
 };
 
+export type ArtifactDescriptorV1 = {
+  schemaVersion: 1; ref: ArtifactRef; digest: string; sizeBytes: number; mediaType: string;
+};
+export type ResultUnavailableControlErrorV1 = {
+  schemaVersion: 1; code: 'RESULT_UNAVAILABLE'; messageCode: string;
+} & ({ retryable: true; runId: string; status: 'queued' | 'running' | 'waiting'; currentRevision: number } |
+  { retryable: false; runId: string; status: 'failed' | 'cancelled'; terminalDetailRef: ArtifactRef });
+
 export type ControlResultV1 =
   | { method: 'session.create'; snapshot: SessionSnapshotV1 }
+  | { method: 'authorization.create'; grant: import('./authorization.js').AuthorizationGrantSummaryV1 }
+  | { method: 'authorization.revoke'; disposition: 'revoked' | 'already_revoked' | 'already_consumed';
+      grant: import('./authorization.js').AuthorizationGrantSummaryV1 }
   | {
       method: 'session.get';
       snapshot: SessionSnapshotV1;
@@ -1635,6 +1646,8 @@ export type ControlResultV1 =
   | { method: 'run.approve'; snapshot: RunSnapshotV1; decisionRef: ArtifactRef }
   | { method: 'run.input'; snapshot: RunSnapshotV1; inputItemRef: ArtifactRef }
   | { method: 'run.cancel'; snapshot: RunSnapshotV1 }
+  | { method: 'run.result'; runId: string; result: ArtifactDescriptorV1; verificationClosureRef: ArtifactRef }
+  | { method: 'run.diff'; runId: string; diff: ArtifactDescriptorV1 }
   | {
       method: 'run.get';
       snapshot: RunSnapshotV1;

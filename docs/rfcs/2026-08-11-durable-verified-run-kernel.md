@@ -7703,6 +7703,7 @@ type VerificationReceipt = {
     | 'spawn_error'
     | 'sandbox_denial'
     | 'resource_failure'
+    | 'controller_stop' // only source_mutation; never a gating or retry receipt
   exitCode?: number
   signal?: string
   stdoutRef: ArtifactRef
@@ -8786,6 +8787,10 @@ Repair diagnostics have one closed audit-to-model projection. `VerifierRepairDia
 `RepairDiagnosticItem.failedVerifierResultItemIds` and `diagnostics` are equal-length, nonempty, and ordered by the corresponding contiguous `VerifierPlan.entries` indices. Every result item is unique, required, assertion-failed for this candidate, and its exact receipt is the same receipt named by the same-index diagnostic. The entry repeats the diagnostic's verifier id, diagnostic ref/digest, and model-content ref/digest byte-for-byte; verifier ids and result item ids are unique. The repair reducer publishes all diagnostics and model-content artifacts before the single counter/frontier transaction. Normal prompt construction decodes only the ordered `VerifierRepairModelContentV1` artifacts; it never serializes the audit diagnostic or verifier output.
 
 If required assertions still fail when the frozen repair budget is exhausted, the Run terminates as `failed` with reason `verification_failed`. Candidate source, diff, diagnostics, and failed receipts remain inspectable, but they are not a verified `RunResult` and cannot enter the safe delivery path. `completed_unverified` means only that the RunSpec declared no required verifier.
+
+The fixed Linux Node recipe may retain `controller_stop` only when the original controller actually observed RELEASE, then irreversibly stopped that same containment and joined every output stream. Its measured interval is RELEASE-to-quiescence, not an assertion that Node exec succeeded. A previously received real wait result takes precedence. `controller_stop` has no exit code, signal or guessed native error; it can appear only in typed verifier-stop evidence tied to an already durable cancellation/deadline, or in a fatal `source_mutation` receipt backed by the independent exact trusted rehash. It is forbidden in pass, assertion-failure and infrastructure receipts, grants no retry/repair, and cannot by itself stop a Run. Before RELEASE, or without the complete original death/output proof, the claim remains unknown and fully charged; no measurement is fabricated.
+
+For trusted source drift, union the canonical paths from the exact before/after WorkspaceEntry manifests. For every unequal entry pair, include each existing side's SHA-256(JCS(WorkspaceEntry)); deduplicate those digests and sort by UTF-8 bytes. An added or removed entry contributes only its existing side. The resulting nonempty list is `changedEntryDigests`, never an implementation-chosen sample.
 
 ### 13.3 Verification Receipt
 

@@ -21,8 +21,8 @@ import { buildModelRequestWire, estimatePromptTokens, type ModelVisiblePromptV1 
 import type { CredentialFinalizeRequest } from '../../src/state/installed-credential-client.js';
 import { MODEL_BROKER_ENTRY_ID, MODEL_BROKER_RELATIVE_PATH } from '../../src/state/model-broker-native.js';
 import { buildInstalledSupervisorPackage } from './testing/installed-supervisor-package.js';
-import { createCredentialSecretScanner } from './testing/credential-secret-scan.js';
-import { scanCredentialSecretCorpus } from './testing/credential-secret-corpus.js';
+import { CredentialSecretScanError, createCredentialSecretScanner } from './testing/credential-secret-scan.js';
+import { CredentialSecretCorpusError, scanCredentialSecretCorpus } from './testing/credential-secret-corpus.js';
 import { assertInstalledWorkerLeaseRenewed, inspectInstalledWorkerIdentity, inspectInstalledWorkerLease,
   inspectInstalledWorkerRetirement, type InstalledWorkerIdentityInspection } from './testing/installed-worker-lease.js';
 import { inspectInstalledOwnerHistory } from './testing/installed-read-control.js';
@@ -412,6 +412,8 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
       `_UID=${ledger.uid}`, `_SYSTEMD_USER_UNIT=${unit}`, `_PID=${pid}`],
     { env: environment, timeout: 5000, killSignal: 'SIGKILL', maxBuffer: 65536 });
     const refusals: Array<{ code: string; origin: string }> = [];
+    const progress: Array<{ phases: Record<string, number>; driverTasks: number; agentLoads: number; admissions: number;
+      modelOperations: number; modelCompletions: number; modelClosures: number }> = [];
     try {
       if (Buffer.isBuffer(result.stdout)) scanBytes(result.stdout);
       if (Buffer.isBuffer(result.stderr)) scanBytes(result.stderr);
@@ -422,13 +424,25 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
         try {
           const value = parseJsonStrict(line) as Record<string, unknown>;
           if (value?.diagnosticOnly !== true) continue;
+          if (value.scope === 'installed-shutdown-progress' && progress.length < 2) {
+            const phases = value.phases;
+            const labels = ['scheduled', 'drive_material', 'drive_agent', 'drive_retirement', 'drive_verify', 'drive_finalize',
+              'terminal_retirement', 'result_recovery', 'result_basis', 'result_finalization', 'result_publication', 'result_session', 'result_commit'];
+            const counters = ['driverTasks', 'agentLoads', 'admissions', 'modelOperations', 'modelCompletions', 'modelClosures'] as const;
+            if (!phases || typeof phases !== 'object' || Array.isArray(phases) || Object.keys(phases).some(key => !labels.includes(key)) ||
+                [...Object.values(phases), ...counters.map(key => value[key])].some(count => !Number.isSafeInteger(count) || (count as number) < 0 || (count as number) > 1000)) continue;
+            progress.push({ phases: { ...phases } as Record<string, number>, driverTasks: value.driverTasks as number,
+              agentLoads: value.agentLoads as number, admissions: value.admissions as number, modelOperations: value.modelOperations as number,
+              modelCompletions: value.modelCompletions as number, modelClosures: value.modelClosures as number });
+            continue;
+          }
           if (value.scope !== 'installed-read-startup') continue;
           const code = ['RECOVERY_REQUIRED', 'LEASE_FENCED', 'ARTIFACT_MISMATCH', 'STATE_TRANSITION_INVALID'].includes(value.code as string)
             ? value.code as string : 'unclassified';
           refusals.push({ code, origin: typeof value.message === 'string' ? origins.get(value.message) ?? 'unclassified' : 'unclassified' });
         } catch { /* Non-source journal data supplies no diagnostic fact. */ }
       }
-      return { diagnosticOnly: true, available: refusals.length > 0, refusals };
+      return { diagnosticOnly: true, available: refusals.length > 0 || progress.length > 0, refusals, progress };
     } finally { result.stdout?.fill(0); result.stderr?.fill(0); }
   };
   const observe = () => {
@@ -2010,7 +2024,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       const successor = show(services.supervisorUnit), recoverBy = Date.now() + 30000;
       const recoveryStarted = performance.now();
       effect.successorTiming = { diagnosticOnly: true, originalDeadlineMs: 30000, selectedReadyMs: 0, ownerHistoryReadyMs: 0,
-        publicCutsObserved: 0, elapsedMs: 0 };
+        publicCutsObserved: 0, elapsedMs: 0, firstFinalizeMs: null };
       assert.notEqual(successor.MainPID, supervisorBefore.MainPID); assert.notEqual(successor.InvocationID, supervisorBefore.InvocationID);
       const successorStart = await selectedSupervisor(services.supervisorUnit, successor, selectedImage, recoverBy);
       effect.successorTiming.selectedReadyMs = Math.floor(performance.now() - recoveryStarted);
@@ -2039,6 +2053,8 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
         ready = await publicRead(); assert(!providerFailure);
         effect.successorTiming.publicCutsObserved++;
         effect.successorTiming.elapsedMs = Math.floor(performance.now() - recoveryStarted);
+        if (ready.snapshot.run.nextStep === 'finalize' && effect.successorTiming.firstFinalizeMs === null)
+          effect.successorTiming.firstFinalizeMs = effect.successorTiming.elapsedMs;
         assert(Date.now() < recoverBy, 'the actual effect successor did not reach its required final or independently cancellable cut');
         if (shutdownReceivedToolOnly ? requestsReceived === 2 && ready.journal.length === 9 && ready.journal[8].phase === 'completed' && ready.snapshot.run.status === 'completed_unverified'
           : ready.snapshot.run.status === 'queued' && !ready.snapshot.run.activeWorkerLaunchId && !ready.snapshot.run.waitingReason) break;
@@ -4470,7 +4486,13 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
         assert.equal(report.secretCorpus.sqliteDatabasesScanned, 2); assert.equal(report.secretCorpus.evidenceDirectoriesScanned, 0);
         mark('complete');
       }
-      catch (error) { primary = error; }
+      catch (error) {
+        if (error instanceof CredentialSecretCorpusError) {
+          if (error.databaseFailure) report.secretCorpusDatabaseFailure = error.databaseFailure;
+          if (error.corpusFailure) report.secretCorpusFailure = error.corpusFailure;
+        } else if (error instanceof CredentialSecretScanError) report.secretCorpusScanFailure = { code: error.code };
+        primary = error;
+      }
     }
     if (primary) {
       report.qualified = false;

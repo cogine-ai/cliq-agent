@@ -57,7 +57,7 @@ jobs:
       - run: npm run build
         id: build
       - name: Install actual platform and worker build prerequisites
-        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev musl-tools bubblewrap strace
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev musl-tools bubblewrap strace libext2fs-dev pkg-config
       - name: Exercise signed credential commands and Supervisor autostart
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
@@ -91,7 +91,7 @@ jobs:
       - run: npm run build
         id: build
       - name: Install actual platform and worker build prerequisites
-        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev musl-tools bubblewrap strace
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev musl-tools bubblewrap strace libext2fs-dev pkg-config
       - name: Exercise signed model input refusals with complete independent retirement
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
@@ -125,7 +125,7 @@ jobs:
       - run: npm run build
         id: build
       - name: Install actual signed image and D-Bus fixture prerequisites
-        run: sudo apt-get update && sudo apt-get install -y libglib2.0-dev musl-tools bubblewrap
+        run: sudo apt-get update && sudo apt-get install -y libglib2.0-dev musl-tools bubblewrap libext2fs-dev pkg-config
       - name: Join the original installed finalizer before ordinary two-second stop
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
@@ -157,7 +157,7 @@ jobs:
       - run: npm run build
         id: build
       - name: Install actual signed transport and worker build prerequisites
-        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap e2fsprogs
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap e2fsprogs libext2fs-dev pkg-config
       - name: Revoke the real admitted credential and require truthful retirement and restart
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
@@ -190,7 +190,7 @@ jobs:
       - run: npm run build
         id: build
       - name: Install actual signed transport and bounded ext4 prerequisites
-        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap e2fsprogs
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap e2fsprogs libext2fs-dev pkg-config
       - name: Refuse real CAS publication and settle the same original claim after exact restoration
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
@@ -225,7 +225,7 @@ jobs:
       - run: npm run build
         id: build
       - name: Install actual signed transport and worker build prerequisites
-        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap e2fsprogs
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap e2fsprogs libext2fs-dev pkg-config
       - name: Stop the real Supervisor during positively observed instruction capture
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
@@ -275,7 +275,7 @@ jobs:
       - run: npm run build
         id: build
       - name: Install actual signed transport and worker build prerequisites
-        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap e2fsprogs
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap e2fsprogs libext2fs-dev pkg-config
       - name: Stop the real scheduler during positively observed generation writes
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
@@ -308,7 +308,7 @@ jobs:
       - run: npm run build
         id: build
       - name: Install actual signed transport and worker build prerequisites
-        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap e2fsprogs
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap e2fsprogs libext2fs-dev pkg-config
       - name: Preserve the actual received private-tool result through ordinary stop
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
@@ -372,7 +372,7 @@ jobs:
       - run: npm run build
         id: build
       - name: Install actual signed transport and worker build prerequisites
-        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap e2fsprogs
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap e2fsprogs libext2fs-dev pkg-config
       - name: Exercise byte-triggered whole-prefix compaction and genuine queued successor progress
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
@@ -408,7 +408,7 @@ jobs:
       - run: npm run build
         id: build
       - name: Install actual signed transport and worker build prerequisites
-        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap e2fsprogs
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap e2fsprogs libext2fs-dev pkg-config
       - name: Compile the native transport with visible compiler diagnostics
         run: node scripts/kernel/build-linux-model-broker.mjs "$RUNNER_TEMP/cliq-model-broker-compile"
       - name: Exercise actual installed Run, ready Checkpoint, reconnect and restart
@@ -472,7 +472,7 @@ jobs:
       - run: npm run build
         id: build
       - name: Install actual platform and worker build prerequisites
-        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev musl-tools bubblewrap strace
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev musl-tools bubblewrap strace libext2fs-dev pkg-config
       # These independent disposable fixtures must not spend the stateful
       # credential journey's unchanged budget. Keep their exact assertions
       # on the same qualified OS/Node baseline; no authority crosses jobs.
@@ -701,7 +701,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
-      - run: sudo apt-get update && sudo apt-get install -y bubblewrap musl-tools e2fsprogs
+      - run: sudo apt-get update && sudo apt-get install -y bubblewrap musl-tools e2fsprogs libext2fs-dev pkg-config
       - name: Verify real worker seccomp ABI and syscall denials
         shell: bash
         run: |
@@ -821,6 +821,53 @@ jobs:
                 /usr/bin/env HOME="$CLIQ_RUNNER_HOME" PATH="$CLIQ_RUNNER_PATH" \
                 "$CLIQ_NODE_PATH" --import tsx scripts/kernel/run-linux-worker-campaign.ts
             '
+      - name: Build the actual same-image guest toolchain and separate CAS fixture
+        id: guest
+        # Preserve all original native scenarios and their 128 MiB capacity
+        # oracle. Only this independent StateRoot fixture uses a larger volume;
+        # the raw guest ext4 itself is never mounted, loop-attached or sudo-run.
+        if: ${{ !cancelled() && steps.images.outcome == 'success' && steps.fixture.outcome == 'success' }}
+        shell: bash
+        run: |
+          guest_root="$RUNNER_TEMP/cliq-guest-toolchain-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          carrier_root="$RUNNER_TEMP/cliq-guest-carrier-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          report_root="$RUNNER_TEMP/cliq-guest-report-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          printf 'guest_root=%s\nreport_root=%s\n' "$guest_root" "$report_root" >> "$GITHUB_OUTPUT"
+          node --import tsx scripts/kernel/run-linux-guest-verifier-campaign.ts --prepare \
+            "$guest_root" '${{ steps.images.outputs.installation }}' "$carrier_root"
+          guest_state_volume="$RUNNER_TEMP/cliq-i1-guest-volume-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          guest_state_image="$RUNNER_TEMP/cliq-i1-guest-volume-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.ext4"
+          printf 'state_volume=%s\n' "$guest_state_volume" >> "$GITHUB_OUTPUT"
+          mkdir -m 0700 "$guest_state_volume"
+          truncate -s 512M "$guest_state_image"
+          mkfs.ext4 -q -F "$guest_state_image"
+          sudo mount -o loop,nodev,nosuid,noexec "$guest_state_image" "$guest_state_volume"
+          sudo chown "$(id -u):$(id -g)" "$guest_state_volume"
+          sudo chmod 0700 "$guest_state_volume"
+      - name: Exercise real signed guest extraction and required Node verifier lifecycle
+        if: ${{ !cancelled() && steps.guest.outcome == 'success' }}
+        env:
+          CLIQ_I1_INSTALLATION: ${{ steps.images.outputs.installation }}
+          CLIQ_I1_GUEST_IMAGE: ${{ steps.guest.outputs.guest_root }}
+          CLIQ_I1_GUEST_STATE_VOLUME: ${{ steps.guest.outputs.state_volume }}
+          CLIQ_I1_CGROUP_PARENT: ${{ steps.fixture.outputs.parent }}
+          CLIQ_GUEST_REPORT_ROOT: ${{ steps.guest.outputs.report_root }}
+        shell: bash
+        run: |
+          runner_uid=$(id -u)
+          runner_gid=$(id -g)
+          runner_home=$HOME
+          runner_path=$PATH
+          node_path=$(command -v node)
+          sudo --preserve-env=CLIQ_I1_INSTALLATION,CLIQ_I1_GUEST_IMAGE,CLIQ_I1_GUEST_STATE_VOLUME,CLIQ_I1_CGROUP_PARENT,CLIQ_GUEST_REPORT_ROOT \
+            env CLIQ_RUNNER_UID="$runner_uid" CLIQ_RUNNER_GID="$runner_gid" \
+              CLIQ_RUNNER_HOME="$runner_home" CLIQ_RUNNER_PATH="$runner_path" CLIQ_NODE_PATH="$node_path" \
+            /bin/bash -c '
+              printf "%s\n" "$$" > "$CLIQ_I1_CGROUP_PARENT/supervisor/cgroup.procs"
+              exec /usr/bin/setpriv --reuid="$CLIQ_RUNNER_UID" --regid="$CLIQ_RUNNER_GID" --clear-groups \
+                /usr/bin/env HOME="$CLIQ_RUNNER_HOME" PATH="$CLIQ_RUNNER_PATH" \
+                "$CLIQ_NODE_PATH" --import tsx scripts/kernel/run-linux-guest-verifier-campaign.ts --run "$CLIQ_GUEST_REPORT_ROOT"
+            '
       - name: Retire disposable execution resources
         if: always() && steps.fixture.outputs.parent != ''
         env:
@@ -839,6 +886,25 @@ jobs:
             sudo rmdir "$CLIQ_I1_PARENT"
           fi
           if [ -n "$CLIQ_I1_VOLUME" ] && mountpoint -q "$CLIQ_I1_VOLUME"; then sudo umount "$CLIQ_I1_VOLUME"; fi
+      - name: Retire the independent guest StateRoot fixture
+        if: always() && steps.guest.outputs.state_volume != ''
+        env:
+          CLIQ_I1_GUEST_VOLUME: ${{ steps.guest.outputs.state_volume }}
+        shell: bash
+        run: |
+          if mountpoint -q "$CLIQ_I1_GUEST_VOLUME"; then sudo umount "$CLIQ_I1_GUEST_VOLUME"; fi
+          if mountpoint -q "$CLIQ_I1_GUEST_VOLUME"; then exit 1; fi
+      - name: Retain only bounded guest verifier feedback
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-guest-verifier-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.guest.outputs.report_root }}/guest-extractor-report.json
+            ${{ steps.guest.outputs.report_root }}/guest-verifier-report.json
+            ${{ steps.guest.outputs.report_root }}/guest-campaign-failure.json
+          if-no-files-found: warn
+          retention-days: 7
       - name: Remove the independent ownership regression installation
         if: always() && steps.images.outputs.foreign_installation != ''
         env:
@@ -849,3 +915,39 @@ jobs:
             rm -f -- "$CLIQ_I1_FOREIGN_INSTALLATION/$image"
           done
           rmdir -- "$CLIQ_I1_FOREIGN_INSTALLATION"
+
+  linux-installed-verifier:
+    name: Linux signed installed required and advisory Node verifier
+    # Standard public-repository runner. Its own full installation/corpus and
+    # 20-minute budget do not replace or dilute any original campaign.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+      - run: npm ci
+      - run: node --test scripts/kernel/testing/installed-volume-guard.test.mjs scripts/kernel/testing/installed-run-client.test.mjs
+      - run: node --test --import tsx scripts/kernel/testing/installed-guest-package.test.ts
+      - run: npm run build
+        id: build
+      - name: Install actual guest, transport and Secret Service prerequisites
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap e2fsprogs libext2fs-dev pkg-config
+      - name: Exercise signed installed identity grant, Node verifier, repair and terminal replay
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          probe_node=$(realpath "$(command -v node)")
+          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --run-verifier-journey "$probe_node" "$RUNNER_TEMP/cliq-installed-verifier-journey"
+      - name: Retain only bounded installed verifier and unchanged-runner cleanup evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installed-verifier-journey-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cliq-installed-verifier-journey/*.json
+          if-no-files-found: warn
+          retention-days: 7

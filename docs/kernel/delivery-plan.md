@@ -115,8 +115,11 @@ sealed worker and supports an explicitly consented, empty-verifier
 `verify → finalize → completed_unverified` result. The installed scheduler now
 drives that path without another model request or a productive worker for
 verification/finalization. This consumer integration is implemented, not yet
-qualified on Linux. Nonempty verifiers, dependencies and Git projection remain
-explicitly rejected; no verified success or explicit delivery is implemented.
+qualified on Linux. The development branch now connects the exact fixed Node
+verifier subset to the same lifecycle and result transactions; dependencies,
+Git projection and other verifier recipes remain explicitly rejected. Verified
+success still lacks actual Linux qualification, and explicit delivery is not
+implemented.
 
 The original final-turn owner is established before physical quiescence and
 retains its one checkpoint/source/candidate publication plan through positively
@@ -228,3 +231,89 @@ was zero at account precision, which is not proof of zero charge. This is not
 installed-Run, native, tool-roundtrip or billing qualification. The installed
 path still needs faithful thinking continuation, qualified model configuration,
 CNY budget accounting, endpoint eligibility and complete real lifecycle proof.
+
+### Fixed Node verifier request and permission projection (in development)
+
+Previous pushed checkpoint `e9dfa3342a754145c4bdd712519e90d6fc0f6761` has
+[CI run 39095867253](https://github.com/cogine-ai/cliq-agent/actions/runs/39095867253):
+13 of 17 jobs passed, four failed. The exact full, request-resource,
+admission-stop and received-tool-stop reports remain failures, not inferred
+successes. All 15 allowlisted report categories are retained with the immutable
+source/run/job/artifact identity; the final capture digest is
+`9b8cc4c08ab22a3f5712678aed5d7417094f6f4bf1fa50016549d31945c90bc7`.
+Raw logs, mixed state bundles and credential material were not retained.
+Two scenario-specific health/clean-restart assertions have been corrected
+locally; the other failures receive bounded fixed diagnostics without changing
+their original time limits or required outcomes. These corrections and the
+new verifier integration are not qualified by that older run.
+
+Latest pushed checkpoint `2bff50a9b0abac4fc4f7dd15b0c8c3e0c613e5e9` has
+[CI run 39097677773](https://github.com/cogine-ai/cliq-agent/actions/runs/39097677773):
+15 of 17 jobs passed, two failed. The original admission-stop and
+request-resource cases are now green. The full journey fails at `secret_corpus`:
+its output scanner reports no match or exceeded limit, but the retained corpus
+operation did not produce its complete result. No cause or clean corpus is
+inferred. The received-tool successor reaches queued/finalize with all nine
+Journal rows settled, but does not complete within the unchanged 30 seconds;
+its later cleanup also exceeds the unchanged stop bound. Neither is treated as
+test flakiness. Fixed stage/count diagnostics are being added, without raw
+content or relaxed checks. Final evidence binds 72 allowlisted JSON reports
+across 15 categories to this exact run/attempt/source; capture digest
+`d7774426d88e774dd43a7a55eee864d3d57e308993b0ce95c31ed8fa57ce4475`.
+No raw logs, archives, state/WAL or credentials are retained.
+
+The first nonempty verifier path selects only the signed guest Node identity;
+it does not borrow host Node, PATH, modules or the ordinary edit adapter. The
+identity-read authorization is consumed once by the original Run admission,
+in the same transaction as its Run and initial Checkpoint. Required and
+advisory entries retain their exact command/environment/spec bytes. An
+advisory-only Run still needs the original authenticated explicit unverified
+consent. Replays and reopen validate those original sources without recreating
+missing CAS objects or resolving an old public toolchain id against today.
+
+`VerifierRequestV1` and `VerifierTargetV1` are closed internal projections of
+that frozen graph. Their own digest omits only its own digest member. The
+target binds candidate, result source/digest, plan/spec, ordered entry, exact
+command/environment and frozen attempt ceiling. The stable operation id is
+`H('cliq-verifier-operation-v1',runId,candidateItemId,verifierPlanRef,String(index))`.
+Attempts remain separate Journal facts under that operation, not new request
+identities. The policy channel is the RFC's `named-action` with the literal
+`verifier/<verifierId>` key; its full candidate/plan identity is also retained.
+The same snapshot validation and fixed rule precedence used by ordinary tools
+recompute the exact evidence. Only a direct allow may produce the separate
+`verifier_launch` operation grant; neither Workspace Trust nor the identity-read
+grant grants execution. Templates and interactive verifier approval remain
+explicitly unsupported until their own consumers exist.
+
+The launch reader consumes the owning preparation, current verify frontier,
+original WorkerLaunch/generation, retained signed policy/toolchain and exact
+request/target/grant before minting its process-local brand. A clone, an ordinary
+worker/edit closure, or caller-supplied artifact refs cannot mint it. The
+implemented branch is agent/finalize without dependency acquisition and uses
+only the fixed read-only Node test recipe with no requested environment values
+or writable roots. These local StateStore/policy/retained-data regressions are
+not physical execution, containment-death or installed Linux qualification.
+The development branch connects the supported nonempty-verifier preflight to
+execution, receipt, recovery and result consumers, retaining every identity,
+permission and resource check. A dedicated real installed campaign must pass
+required success, actual repair, advisory-only unverified completion, and
+timeout/retry exhaustion, plus exact budgets, original worker/child retirement,
+result/diff inspection, reconnect and Supervisor restart. These are not yet
+Linux-qualified. The new authenticated result/diff queries expose only the
+successful transaction's immutable descriptors; stopped or live Runs return
+the exact closed `RESULT_UNAVAILABLE` cut, never a failed candidate or delivery
+permission. There is no partial progress PR; explicit delivery remains a
+required connected part of package A.
+
+The first fixed Node recipe also rejects unsupported resource declarations
+before admission. `maxProcesses` must be at least the shared fixed minimum 32;
+ordinary worker support at 8 processes does not qualify Node's test runner.
+`maxSingleFileBytes` must cover the complete signed guest image byte count and
+remain no greater than the fixed 256 MiB recipe limit. The raw image is a
+conservative bound for every extracted executable/library that bubblewrap
+copies under this same file limit; no unsigned builder inventory or special
+copying exemption can authorize a smaller envelope. Caller values are never
+clamped or enlarged. Defaults remain 256 processes and 256 MiB per file. Exact
+boundaries and refusal/unused-grant behavior have StateStore regressions;
+physical execution at the declared boundary still requires the real Linux
+campaign and is not inferred from these inert signed-data fixtures.

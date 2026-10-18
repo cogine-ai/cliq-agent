@@ -4,6 +4,7 @@ import { lstat, mkdir, open, readdir, rename, type FileHandle } from 'node:fs/pr
 import { isMainThread } from 'node:worker_threads';
 import { Module } from 'node:module';
 import { isSea } from 'node:sea';
+import { setImmediate as yieldImmediate } from 'node:timers/promises';
 
 import { KERNEL_CAS_DIRECTORY } from '../config.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
@@ -25,6 +26,9 @@ import { MODEL_BROKER_ENTRY_ID, MODEL_BROKER_RELATIVE_PATH, InstalledModelBroker
 import { runInstalledCredentialAuthority, type HeldCredentialAuthorityLock } from './store.js';
 import type { NativeWorkerBinding, NativeWorkerImage } from '../sandbox/linux-worker.js';
 import type { NativeCredentialInspection, NativeCredentialPlatformBinding, NativeSecretServiceInput } from './credential-platform.js';
+import { GUEST_EXTRACTOR_RECIPE, type NativeGuestExtractorBinding, type NativeGuestToolchain } from '../sandbox/guest-toolchain.js';
+import { decodeGuestToolchainManifest, guestToolchainExecutables, guestToolchainRoots, validateGuestToolchainMetadata,
+  type RetainedVerifierToolchain } from './guest-toolchain.js';
 import { acquireHeldInstalledAnchor, executeHeldInstalledImage, initializeHeldInstalledKeeper, loadHeldStateOwnerImage,
   stateRootIdentityFromDescriptor, withHeldCredentialNativeScope, STATE_OWNER_NATIVE_ENTRY_ID, STATE_OWNER_NATIVE_RELATIVE_PATH,
   type NativeStateOwner } from './native-owner.js';
@@ -136,20 +140,22 @@ export type InstalledRuntimeBorrow = Readonly<{
   structured: InstalledStructuredArtifacts;
   objects: ReadonlyMap<string, Buffer>;
   seed: readonly Readonly<{ artifactRef: string; byteCount: number; mediaType: string; schemaKind: string }>[];
-  revalidate(): Promise<void>;
-  loadStateOwner(): Promise<NativeStateOwner>;
+  revalidate(signal?: AbortSignal): Promise<void>;
+  loadStateOwner(signal?: AbortSignal): Promise<NativeStateOwner>;
 }>;
 type InstalledRuntimeBinding = {
   factory: InstalledRuntime;
-  borrow<T>(operation: (installed: InstalledRuntimeBorrow) => Promise<T>): Promise<T>;
+  borrow<T>(operation: (installed: InstalledRuntimeBorrow) => Promise<T>, signal?: AbortSignal): Promise<T>;
   execute(role: 'keeper' | 'supervisor' | 'endpoint' | 'credential', command?: string): Promise<never>;
   initializeKeeper(): Promise<HeldInstalledKeeper>;
   acquireAnchor(): Promise<HeldInstalledAnchor>;
-  loadWorkerNative(): Promise<NativeWorkerBinding>;
+  loadWorkerNative(signal?: AbortSignal): Promise<NativeWorkerBinding>;
   loadCredentialPlatform(): Promise<NativeCredentialPlatformBinding>;
   loadModelBroker(): Promise<NativeModelBrokerBinding>;
   openControlClient(): Promise<HeldInstalledControlClient>;
   sealWorkerImage(entryId: string): Promise<NativeWorkerImage>;
+  startGuestToolchain(toolchain: RetainedVerifierToolchain, options: { signal?: AbortSignal }): Promise<NativeGuestToolchain>;
+  closeGuestToolchain(job: NativeGuestToolchain): Promise<void>;
   credentialScope<T>(operation: (token: HeldCredentialAuthorityLock) => Promise<T>): Promise<T>;
 };
 const heldInstalledRuntimes = new WeakMap<HeldInstalledRuntime, InstalledRuntimeBinding>();
@@ -169,10 +175,10 @@ export function withInstalledWorkerRoot(selected: HeldInstalledRuntime, anchor: 
 
 /** Private fixed-image bridges: original selected FileHandles remain owned by
  * their existing scope; only the new seal is owned by the worker launcher. */
-export function loadInstalledWorkerNative(selected: HeldInstalledRuntime): Promise<NativeWorkerBinding> {
+export function loadInstalledWorkerNative(selected: HeldInstalledRuntime, signal?: AbortSignal): Promise<NativeWorkerBinding> {
   const binding = heldInstalledRuntimes.get(selected);
   if (!binding) mismatch('installed runtime is not a verified held selection');
-  return binding.loadWorkerNative();
+  return binding.loadWorkerNative(signal);
 }
 /** These two fixed friends carry no StateOwner/credential lock. The selected
  * producer supplies and retains the actual signed image/root descriptors. */
@@ -209,6 +215,22 @@ export function sealInstalledWorkerImage(selected: HeldInstalledRuntime, entryId
   return binding.sealWorkerImage(entryId);
 }
 
+/** Private fixed extractor bridge. The original imported CAS image remains
+ * descriptor-held; native begin owns its asynchronous copy/hash/seal and join. */
+export function startInstalledGuestToolchain(selected: HeldInstalledRuntime, toolchain: RetainedVerifierToolchain,
+  options: { signal?: AbortSignal } = {}): Promise<NativeGuestToolchain> {
+  const binding = heldInstalledRuntimes.get(selected);
+  if (!binding) mismatch('guest extraction requires a genuine held installed selection');
+  return binding.startGuestToolchain(toolchain, options);
+}
+/** Join the original native producer and release its installation registry
+ * reference. No copied description, plain object or different selection works. */
+export function closeInstalledGuestToolchain(selected: HeldInstalledRuntime, job: NativeGuestToolchain): Promise<void> {
+  const binding = heldInstalledRuntimes.get(selected);
+  if (!binding) mismatch('guest retirement requires a genuine held installed selection');
+  return binding.closeGuestToolchain(job);
+}
+
 export function initializeInstalledKeeper(held: HeldInstalledRuntime): Promise<HeldInstalledKeeper> {
   const binding = heldInstalledRuntimes.get(held);
   if (binding === undefined) mismatch('installed runtime is not a verified held selection');
@@ -224,10 +246,10 @@ export function acquireInstalledAnchor(held: HeldInstalledRuntime): Promise<Held
 /** Look up the producer's private brand before observing any caller property.
  * Structural objects, proxies and clones cannot impersonate a held selection. */
 export function withHeldInstalledRuntime<T>(held: HeldInstalledRuntime,
-  operation: (installed: InstalledRuntimeBorrow) => Promise<T>): Promise<T> {
+  operation: (installed: InstalledRuntimeBorrow) => Promise<T>, signal?: AbortSignal): Promise<T> {
   const binding = heldInstalledRuntimes.get(held);
   if (binding === undefined) mismatch('installed runtime is not a verified held selection');
-  return binding.borrow(operation);
+  return binding.borrow(operation, signal);
 }
 
 export class CredentialScopeBusyError extends TypeError {
@@ -267,6 +289,7 @@ type Directory = { handle: FileHandle; info: BigIntStats; parent?: Directory; na
 type InstalledFile = { handle: FileHandle; info: BigIntStats; parent: Directory; name: string; digest?: string };
 type VerifiedPackage = { root: Directory; manifest: InstalledFile; bundle: RuntimeBundleManifest;
   bundleDigest: string; manifestBytes: Buffer; entries: Map<string, InstalledFile>; roots: Map<string, Buffer>;
+  streamedRoots: Map<string, InstalledFile>;
   structured: InstalledStructuredArtifacts; modelAuthority?: VerifiedInstalledModelAuthority;
   companionFiles: InstalledFile[] };
 
@@ -437,21 +460,27 @@ async function assertFile(file: InstalledFile): Promise<void> {
   const named = await lstat(childPath(file.parent, file.name), { bigint: true });
   if (!sameFile(file.info, held) || !sameFile(held, named)) mismatch('installed runtime held file or its independent path changed');
 }
-async function* chunks(file: InstalledFile): AsyncGenerator<Buffer> {
+async function* chunks(file: InstalledFile, signal?: AbortSignal): AsyncGenerator<Buffer> {
+  signal?.throwIfAborted();
   await assertFile(file);
+  signal?.throwIfAborted();
   const hash = createHash('sha256');
   const count = Number(file.info.size);
   let position = 0;
   while (position < count) {
+    signal?.throwIfAborted();
     const buffer = Buffer.allocUnsafe(Math.min(CHUNK_BYTES, count - position));
     const { bytesRead } = await file.handle.read(buffer, 0, buffer.length, position);
+    signal?.throwIfAborted();
     if (!bytesRead) mismatch('installed runtime file ended before its signed byte count');
     const bytes = buffer.subarray(0, bytesRead); hash.update(bytes); position += bytesRead;
     yield bytes;
   }
   const extra = await file.handle.read(Buffer.allocUnsafe(1), 0, 1, position);
+  signal?.throwIfAborted();
   if (extra.bytesRead) mismatch('installed runtime file exceeds its signed byte count');
   await assertFile(file);
+  signal?.throwIfAborted();
   if (file.digest !== undefined && hash.digest('hex') !== file.digest) mismatch('installed runtime signed file digest differs');
 }
 async function readSmall(file: InstalledFile, limit = SMALL_BYTES): Promise<Buffer> {
@@ -460,7 +489,9 @@ async function readSmall(file: InstalledFile, limit = SMALL_BYTES): Promise<Buff
   for await (const chunk of chunks(file)) bytes.push(chunk);
   return Buffer.concat(bytes);
 }
-async function verifyBytes(file: InstalledFile): Promise<void> { for await (const _chunk of chunks(file)) { /* streamed integrity check */ } }
+async function verifyBytes(file: InstalledFile, signal?: AbortSignal): Promise<void> {
+  for await (const _chunk of chunks(file, signal)) { /* streamed integrity check */ }
+}
 async function checkPackageGraph(scope: Scope, root: Directory, bundle: RuntimeBundleManifest,
   companion?: VerifiedInstalledModelAuthority): Promise<void> {
   const expected = new Map<string, Set<string>>();
@@ -496,13 +527,14 @@ async function verifyPackage(scope: Scope, root: Directory, releaseKeys: readonl
   manifest.digest = bundleDigest;
   const entries = new Map<string, InstalledFile>();
   const roots = new Map<string, Buffer>([[bundleDigest, manifestBytes]]);
+  const streamedRoots = new Map<string, InstalledFile>();
   const inodes = new Set<string>([`${manifest.info.dev}:${manifest.info.ino}`]);
   for (const entry of bundle.entries) {
     const file = await scope.file(root, entry.relativePath, entry.executable ? 0o500 : 0o400, entry.byteCount, entry.digest);
     const identity = `${file.info.dev}:${file.info.ino}`;
     if (inodes.has(identity)) mismatch('distinct signed entries alias one installed inode');
     inodes.add(identity); entries.set(entry.entryId, file);
-    if (['policy_engine', 'sandbox_root_profile', 'system_prompt', 'compaction_prompt', 'bundle_object', 'schema'].includes(entry.role)) {
+    if (['policy_engine', 'sandbox_root_profile', 'system_prompt', 'compaction_prompt', 'guest_toolchain', 'schema'].includes(entry.role)) {
       if (entry.executable) mismatch('signed structured roots must be data');
       const bytes = await readSmall(file); const value = checkCanonicalBytes(bytes);
       if (entry.role === 'policy_engine') {
@@ -511,9 +543,33 @@ async function verifyPackage(scope: Scope, root: Directory, releaseKeys: readonl
       roots.set(entry.digest, bytes);
     } else if (entry.role === 'trust_store') {
       const bytes = await readSmall(file, TRUST_BYTES); validateTrustStore(bytes); roots.set(entry.digest, bytes);
-    } else await verifyBytes(file);
+    } else if (entry.role !== 'bundle_object') await verifyBytes(file);
+  }
+  const guests = guestToolchainRoots(bundle).map(root => {
+    const bytes = roots.get(root.artifactRef);
+    if (!bytes) mismatch('installed guest manifest has no complete signed bytes');
+    return { ref: root.artifactRef, manifest: decodeGuestToolchainManifest(checkCanonicalBytes(bytes)), bytes };
+  });
+  const imageRefs = new Set(guests.map(guest => guest.manifest.guestImageRef));
+  const signatureRefs = new Set(guests.map(guest => guest.manifest.signatureRef));
+  for (const entry of bundle.entries.filter(entry => entry.role === 'bundle_object')) {
+    const file = entries.get(entry.entryId)!;
+    if (imageRefs.has(entry.digest)) {
+      if (entry.executable || entry.byteCount < 1 || entry.byteCount > GUEST_EXTRACTOR_RECIPE.maxImageBytes)
+        mismatch('installed guest image exceeds the supported signed recipe bound');
+      await verifyBytes(file); streamedRoots.set(entry.digest, file);
+    } else {
+      const bytes = await readSmall(file, signatureRefs.has(entry.digest) ? 64 : SMALL_BYTES);
+      if (!signatureRefs.has(entry.digest)) checkCanonicalBytes(bytes);
+      roots.set(entry.digest, bytes);
+    }
   }
   const structured = validateInstalledStructuredArtifacts(bundle, roots);
+  for (const guest of guests) {
+    const signature = roots.get(guest.manifest.signatureRef);
+    if (!signature || !streamedRoots.has(guest.manifest.guestImageRef)) mismatch('installed guest closure is incomplete');
+    validateGuestToolchainMetadata(bundle, guest.ref, guest.bytes, signature, releaseKeys);
+  }
   const companionFiles: InstalledFile[] = [];
   let modelAuthority: VerifiedInstalledModelAuthority | undefined;
   if (sourceCompanion) {
@@ -542,7 +598,7 @@ async function verifyPackage(scope: Scope, root: Directory, releaseKeys: readonl
     }
   }
   await checkPackageGraph(scope, root, bundle, modelAuthority); await scope.assertDirectories();
-  return { root, manifest, bundle, bundleDigest, manifestBytes, entries, roots, structured, companionFiles,
+  return { root, manifest, bundle, bundleDigest, manifestBytes, entries, roots, streamedRoots, structured, companionFiles,
     ...(modelAuthority ? { modelAuthority } : {}) };
 }
 
@@ -639,6 +695,14 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
             await destination.assertDirectories();
             casFiles.push(await destination.file(casRoot, ref, 0o400, bytes.length, ref));
           }
+          for (const [ref, file] of signed.streamedRoots) {
+            await destination.assertDirectories();
+            const result = await cas.publishChunks(chunks(file), Number(file.info.size));
+            if (result.ref !== ref || BigInt(result.byteLength) !== file.info.size)
+              mismatch('installed guest image CAS publication changed its complete identity');
+            await destination.assertDirectories();
+            casFiles.push(await destination.file(casRoot, ref, 0o400, result.byteLength, ref));
+          }
           await verifyPackage(destination, stage, releaseKeys, signed.bundleDigest);
           await verifyBytes(await destination.file(root, 'bootstrap', 0o500, supervisor.byteCount, supervisor.digest));
           await checkPackageGraph(sourceScope, sourceRoot, signed.bundle, signed.modelAuthority);
@@ -692,6 +756,8 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
         const bootstrap = await scope.file(root, 'bootstrap', 0o500, supervisor.byteCount, supervisor.digest);
         const casFiles: InstalledFile[] = [];
         for (const [ref, bytes] of signed.roots) casFiles.push(await scope.file(casRoot, ref, 0o400, bytes.length, ref));
+        for (const [ref, image] of signed.streamedRoots)
+          casFiles.push(await scope.file(casRoot, ref, 0o400, Number(image.info.size), ref));
         if (selection.modelAuthorityRef !== undefined) {
           try {
             const file = await scope.file(casRoot, selection.modelAuthorityRef, 0o400, undefined, selection.modelAuthorityRef);
@@ -708,40 +774,67 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
           } catch (cause) { mismatch('selected installed model companion verification failed', cause); }
         }
         let closed = false;
+        const guestShutdown = new AbortController();
         let poisoned: unknown;
         let tail = Promise.resolve();
         let closePromise: Promise<void> | undefined;
         let workerNative: NativeWorkerBinding | undefined;
         let credentialPlatform: NativeCredentialPlatformBinding | undefined;
         let modelBroker: NativeModelBrokerBinding | undefined;
+        let guestExtractor: NativeGuestExtractorBinding | undefined;
         const platformJobs = new Set<Promise<unknown>>();
         const brokerTransports = new Set<NativeModelTransport>();
+        const guestJobs = new Set<NativeGuestToolchain>();
+        const guestJoins = new Map<NativeGuestToolchain, Promise<void>>();
+        const retiredGuestJobs = new WeakSet<NativeGuestToolchain>();
+        const closeGuestToolchain = (job: NativeGuestToolchain): Promise<void> => {
+          if (retiredGuestJobs.has(job)) return Promise.resolve();
+          if (!guestJobs.has(job)) return Promise.reject(new KernelStorageError('ARTIFACT_MISMATCH', 'guest retirement is not owned by this selection'));
+          const joining = guestJoins.get(job);
+          if (joining) return joining;
+          const pending = Promise.resolve().then(() => job.close()).then(() => {
+            guestJobs.delete(job); guestJoins.delete(job); retiredGuestJobs.add(job);
+          }, error => {
+            const failure = error instanceof ResourceRetirementError ? error : new ResourceRetirementError('installed guest extractor did not retire', error);
+            rememberRetirement(failure); throw failure;
+          });
+          guestJoins.set(job, pending); return pending;
+        };
         const assertSelection = () => {
           if (poisoned !== undefined) throw poisoned;
           try { scope.assertMetadata([active, signed.manifest, bootstrap, ...signed.entries.values(), ...casFiles]); }
           catch (error) { rememberRetirement(error); poisoned = error; throw error; }
         };
-        const revalidate = async () => {
+        const revalidate = async (signal?: AbortSignal) => {
+          signal?.throwIfAborted();
           healthy(); await scope.assertDirectories();
-          for (const file of [active, signed.manifest, bootstrap, ...signed.entries.values(), ...casFiles]) await verifyBytes(file);
+          signal?.throwIfAborted();
+          for (const file of [active, signed.manifest, bootstrap, ...signed.entries.values(), ...casFiles]) await verifyBytes(file, signal);
           await checkPackageGraph(scope, version, signed.bundle);
+          signal?.throwIfAborted();
           await checkSelectedVersion(scope, bundles, signed.bundleDigest); await scope.assertDirectories();
+          signal?.throwIfAborted();
         };
         await revalidate();
-        const checkedRevalidate = async () => {
+        const checkedRevalidate = async (signal?: AbortSignal) => {
           if (poisoned !== undefined) throw poisoned;
-          try { await revalidate(); }
-          catch (error) { rememberRetirement(error); poisoned = error; throw error; }
+          try { await revalidate(signal); }
+          catch (error) {
+            // Cancellation joins the same held descriptors; it is not an
+            // integrity failure. Never suppress a different concurrent error.
+            if (!signal?.aborted || error !== signal.reason) { rememberRetirement(error); poisoned = error; }
+            throw error;
+          }
         };
-        const loadSelectedNative = async (): Promise<NativeStateOwner> => {
-          await checkedRevalidate();
+        const loadSelectedNative = async (signal?: AbortSignal): Promise<NativeStateOwner> => {
+          await checkedRevalidate(signal);
           const entry = signed.bundle.entries.find(entry => entry.entryId === STATE_OWNER_NATIVE_ENTRY_ID);
           const file = signed.entries.get(STATE_OWNER_NATIVE_ENTRY_ID);
           if (!entry || !file || entry.role !== 'platform_helper' || !entry.executable || entry.version !== '1' ||
               entry.relativePath !== STATE_OWNER_NATIVE_RELATIVE_PATH || entry.byteCount <= 0 || entry.byteCount > TRUST_BYTES)
             mismatch('installed StateOwner requires its fixed signed native entry');
           const native = await loadHeldStateOwnerImage(file.handle, signed.bundle);
-          await checkedRevalidate();
+          await checkedRevalidate(signal);
           return native;
         };
         const enqueue = <T>(operation: () => Promise<T>): Promise<T> => {
@@ -775,8 +868,10 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
               role === 'sandbox_root_profile' ? 'cliq-sandbox-root-profile-v1' :
               role === 'trust_store' ? 'cliq-https-trust-store-v1' : mismatch('installed seed contains an unsupported object'));
             return Object.freeze({ artifactRef, byteCount: bytes.length,
-              mediaType: role === 'trust_store' || companionKind === 'ed25519_signature' ? 'application/octet-stream' : 'application/json', schemaKind });
-          })
+              mediaType: role === 'trust_store' || companionKind === 'ed25519_signature' || schemaKind === 'cliq-ed25519-signature-v1'
+                ? 'application/octet-stream' : 'application/json', schemaKind });
+          }).concat([...signed.streamedRoots].map(([artifactRef, file]) => ({ artifactRef, byteCount: Number(file.info.size),
+            mediaType: 'application/octet-stream', schemaKind: 'cliq-guest-image-raw-ext4-v1' })))
             .sort((left, right) => left.artifactRef < right.artifactRef ? -1 : left.artifactRef > right.artifactRef ? 1 : 0)),
         });
         const selected: HeldInstalledRuntime = Object.freeze({
@@ -788,19 +883,26 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
           close(this: HeldInstalledRuntime): Promise<void> {
             if (this !== selected) return Promise.reject(new KernelStorageError('ARTIFACT_MISMATCH', 'installed runtime handle receiver is not its held instance'));
             closed = true;
+            guestShutdown.abort();
             return closePromise ??= (async () => {
               // Every preparation already has its actual closeable owner.
               // Cancel before joining producers, without acquiring the
               // credential lock those pending producers may still hold.
-              const transports = await Promise.allSettled([...brokerTransports].map(transport => transport.close()));
+              const transportJoins = [...brokerTransports].map(transport => transport.close());
+              const guestClosures = [...guestJobs].map(closeGuestToolchain);
+              const [transports, guests] = await Promise.all([Promise.allSettled(transportJoins), Promise.allSettled(guestClosures)]);
               await tail;
               const producers = await Promise.allSettled([...platformJobs]);
               const remaining = await Promise.allSettled([...platformJobs]);
-              const failed = [...producers, ...transports, ...remaining].find(result => result.status === 'rejected' &&
+              const failed = [...producers, ...transports, ...guests, ...remaining].find(result => result.status === 'rejected' &&
                 result.reason instanceof ResourceRetirementError);
               if (failed?.status === 'rejected') throw failed.reason;
               if (brokerTransports.size !== 0) {
                 const failure = new ResourceRetirementError('installed model transports did not all retire', undefined);
+                rememberRetirement(failure); throw failure;
+              }
+              if (guestJobs.size !== 0) {
+                const failure = new ResourceRetirementError('installed guest extractors did not all retire', undefined);
                 rememberRetirement(failure); throw failure;
               }
               await scope.close();
@@ -879,9 +981,9 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
               });
             }).catch(error => { rememberRetirement(error); throw error; });
           },
-          loadWorkerNative() {
+          loadWorkerNative(signal) {
             return enqueue(async () => {
-              await checkedRevalidate();
+              await checkedRevalidate(signal);
               if (!workerNative) {
                 const entry = signed.bundle.entries.find(value => value.entryId === 'linux_worker_native');
                 const file = signed.entries.get('linux_worker_native');
@@ -895,7 +997,7 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
                   mismatch('unsupported installed native worker interface');
                 workerNative = native;
               }
-              await checkedRevalidate();
+              await checkedRevalidate(signal);
               return workerNative;
             });
           },
@@ -1166,6 +1268,61 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
               }
             });
           },
+          startGuestToolchain(toolchain, options) {
+            return enqueue(async () => {
+              const signal = options.signal ? AbortSignal.any([options.signal, guestShutdown.signal]) : guestShutdown.signal;
+              const current = () => {
+                signal.throwIfAborted(); healthy();
+                if (closed) throw new KernelStorageError('RECOVERY_REQUIRED', 'installed guest extraction is closing');
+                assertSelection();
+              };
+              current();
+              if (!isMainThread || !isSea() || process.arch !== 'x64' || process.versions.node !== '24.21.0')
+                throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'guest extraction requires the fixed signed Linux backend');
+              await checkedRevalidate(signal); current();
+              const bytes = signed.roots.get(toolchain.manifestRef);
+              if (!bytes) mismatch('guest extraction is not in the selected signed closure');
+              const manifest = decodeGuestToolchainManifest(checkCanonicalBytes(bytes));
+              const signature = signed.roots.get(manifest.signatureRef);
+              if (!signature) mismatch('guest extraction has no retained signature');
+              const expected = validateGuestToolchainMetadata(signed.bundle, toolchain.manifestRef, bytes, signature, releaseKeys);
+              if (canonicalSha256(expected) !== canonicalSha256(toolchain) || manifest.architecture !== 'x86_64' ||
+                  manifest.guestImageByteCount > GUEST_EXTRACTOR_RECIPE.maxImageBytes)
+                mismatch('guest extraction substitutes the pinned fixed recipe');
+              const image = casFiles.find(file => file.digest === manifest.guestImageRef);
+              if (!image) mismatch('guest extraction lacks its original imported CAS image');
+              if (!guestExtractor) {
+                const entry = signed.bundle.entries.find(entry => entry.entryId === GUEST_EXTRACTOR_RECIPE.entryId);
+                const file = signed.entries.get(GUEST_EXTRACTOR_RECIPE.entryId);
+                if (!entry || !file || entry.role !== 'platform_helper' || !entry.executable || entry.version !== GUEST_EXTRACTOR_RECIPE.version ||
+                    entry.relativePath !== GUEST_EXTRACTOR_RECIPE.relativePath || entry.byteCount < 1 || entry.byteCount > TRUST_BYTES)
+                  mismatch('fixed signed guest extractor is missing');
+                const loaded = new Module('cliq-installed-linux-guest-extractor');
+                process.dlopen(loaded, `/proc/self/fd/${file.handle.fd}`);
+                const native = loaded.exports as NativeGuestExtractorBinding;
+                if (native.interfaceVersion !== 1 || typeof native.begin !== 'function') mismatch('unsupported installed guest extractor interface');
+                guestExtractor = native;
+              }
+              current();
+              const job = guestExtractor.begin(image.handle.fd, { imageDigest: manifest.guestImageDigest, imageByteCount: manifest.guestImageByteCount,
+                architecture: 'x86_64', nodePath: manifest.node.canonicalGuestPath, nodeDigest: manifest.node.digest,
+                pinnedExecutables: guestToolchainExecutables(manifest).map(entry => ({ path: entry.canonicalGuestPath, digest: entry.digest })) });
+              // Register immediately after native begin: even post-check failure
+              // or Store shutdown must cancel and join this exact original job.
+              guestJobs.add(job);
+              try {
+                current();
+                while (!job.pollReady()) { current(); await yieldImmediate(); }
+                current();
+                const description = job.describe();
+                if (description.imageDigest !== manifest.guestImageRef || description.nodePath !== manifest.node.canonicalGuestPath ||
+                    description.nodeDigest !== manifest.node.digest || description.files.length < 1 || description.files.length > GUEST_EXTRACTOR_RECIPE.maxMappedFiles)
+                  mismatch('native guest extraction differs from the retained manifest');
+                await checkedRevalidate(signal); current(); return job;
+              } catch (error) { await closeGuestToolchain(job); throw error; }
+            });
+          },
+          closeGuestToolchain,
           acquireAnchor(): Promise<HeldInstalledAnchor> {
             return enqueue(async () => {
               const native = await loadSelectedNative();
@@ -1310,24 +1467,24 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
             void closePromise.catch(() => undefined);
             return pending;
           },
-          borrow<T>(operation: (installed: InstalledRuntimeBorrow) => Promise<T>): Promise<T> {
+          borrow<T>(operation: (installed: InstalledRuntimeBorrow) => Promise<T>, signal?: AbortSignal): Promise<T> {
             return enqueue(async () => {
-              await checkedRevalidate();
+              await checkedRevalidate(signal);
               let active = true;
               const revalidations: Promise<void>[] = [];
               const installed: InstalledRuntimeBorrow = Object.freeze({
                 ...observation,
-                revalidate(): Promise<void> {
+                revalidate(checkSignal?: AbortSignal): Promise<void> {
                   if (!active) mismatch('installed runtime borrow has ended');
-                  const pending = checkedRevalidate();
+                  const pending = checkedRevalidate(signal && checkSignal ? AbortSignal.any([signal, checkSignal]) : signal ?? checkSignal);
                   revalidations.push(pending);
                   // The borrow owns joining even a caller-unawaited check.
                   void pending.catch(() => undefined);
                   return pending;
                 },
-                loadStateOwner(): Promise<NativeStateOwner> {
+                loadStateOwner(loadSignal?: AbortSignal): Promise<NativeStateOwner> {
                   if (!active) mismatch('installed runtime borrow has ended');
-                  const pending = loadSelectedNative();
+                  const pending = loadSelectedNative(signal && loadSignal ? AbortSignal.any([signal, loadSignal]) : signal ?? loadSignal);
                   // The borrow owns joining even an unawaited loader. Its sole
                   // file-owning Scope cannot close before this operation ends.
                   const joined = pending.then(() => undefined);

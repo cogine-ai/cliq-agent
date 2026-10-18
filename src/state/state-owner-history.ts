@@ -18,6 +18,8 @@ import { checkCanonicalBytes, validateInstalledStructuredArtifacts, validateTrus
 import { KERNEL_AUTHORITY_TABLES, KERNEL_SCHEMA_SQL } from './schema.js';
 import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
 import { readStateOwner } from './state-owner.js';
+import { decodeGuestToolchainManifest, guestToolchainMembers, guestToolchainRoots } from './guest-toolchain.js';
+import { GUEST_EXTRACTOR_RECIPE } from '../sandbox/guest-toolchain.js';
 import { hostPlatform } from './workspace-identity.js';
 
 type Entry = { owner: StateOwnerRecordV1; process: PlatformProcessIdentityV1;
@@ -32,12 +34,12 @@ export type RetainedStateOwnerHistory = Readonly<{
 function invalid(message: string): never { throw new KernelStorageError('RECOVERY_REQUIRED', message); }
 
 type BirthMember = { artifactRef: string; byteCount: number };
-/** Same fixed data bounds/roles as the original installer. No executable is a
+/** Same fixed data bounds/roles as the original installer. No standalone executable is a
  * CAS edge, and no current selection or self-selected signing key is read. */
 async function readInstalledSeed(artifacts: ArtifactCatalog, first: Entry,
   generation: Extract<KernelGenerationIdentityV1, { origin: 'fresh_installed' }>, members: readonly BirthMember[]): Promise<void> {
   const smallBytes = 1_048_576, trustBytes = 16 * smallBytes;
-  const dataRoles = new Set(['policy_engine', 'sandbox_root_profile', 'system_prompt', 'compaction_prompt', 'bundle_object', 'schema', 'trust_store']);
+  const dataRoles = new Set(['policy_engine', 'sandbox_root_profile', 'system_prompt', 'compaction_prompt', 'bundle_object', 'guest_toolchain', 'schema', 'trust_store']);
   const inventory = new Map(members.map(member => [member.artifactRef, member.byteCount]));
   const expected = new Map<string, number>(), buffers = new Map<string, Buffer>();
   const requireMember = (ref: string, byteCount: number) => {
@@ -67,6 +69,15 @@ async function readInstalledSeed(artifacts: ArtifactCatalog, first: Entry,
     if (entry.executable) invalid('retained installed seed data entry is executable');
     requireMember(entry.digest, entry.byteCount);
   }
+  const guests = [];
+  for (const root of guestToolchainRoots(bundle)) {
+    const size = inventory.get(root.artifactRef);
+    if (size === undefined) invalid('retained installed genesis lacks its original guest manifest');
+    const manifest = decodeGuestToolchainManifest(checkCanonicalBytes(await read(root.artifactRef, size, smallBytes)));
+    guestToolchainMembers(bundle, root.artifactRef, manifest); guests.push(manifest);
+  }
+  const guestImages = new Set(guests.map(manifest => manifest.guestImageRef));
+  const guestSignatures = new Set(guests.map(manifest => manifest.signatureRef));
   const source = generation.modelAuthoritySource;
   if (!source || typeof source !== 'object' || (source.kind === 'none'
     ? !exactKeys(source, ['kind'])
@@ -83,7 +94,17 @@ async function readInstalledSeed(artifacts: ArtifactCatalog, first: Entry,
   }
   if (expected.size !== inventory.size) invalid('retained installed genesis has missing or extra original seed objects');
   for (const entry of data) {
-    const bytes = await read(entry.digest, entry.byteCount, entry.role === 'trust_store' ? trustBytes : smallBytes);
+    if (guestImages.has(entry.digest)) {
+      if (entry.byteCount < 1 || entry.byteCount > GUEST_EXTRACTOR_RECIPE.maxImageBytes)
+        invalid('retained installed guest image exceeds its original recipe bound');
+      for await (const _chunk of artifacts.readChunks(entry.digest, entry.byteCount)) { /* Complete original image, never a metadata-only digest. */ }
+      continue;
+    }
+    const bytes = await read(entry.digest, entry.byteCount, guestSignatures.has(entry.digest) ? 64 : entry.role === 'trust_store' ? trustBytes : smallBytes);
+    if (guestSignatures.has(entry.digest)) {
+      if (bytes.length !== 64) invalid('retained installed guest signature is not complete');
+      continue;
+    }
     if (entry.role === 'trust_store') validateTrustStore(bytes);
     else {
       const value = checkCanonicalBytes(bytes);

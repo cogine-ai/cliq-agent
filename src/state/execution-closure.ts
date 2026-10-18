@@ -3,9 +3,11 @@ import { canonicalSha256 } from '../kernel/canonical.js';
 import { assertArtifactRef, digestOmitting, parseCanonicalTime } from '../kernel/identity.js';
 import type { ProcessContainment, ProcessContainmentPlanV1, SandboxLaunchSpecV1, SandboxProfileV1, SandboxRootProfileV1,
   SandboxResourceSpec, SandboxMountV1 } from '../kernel/execution.js';
-import type { InvocationJournalEntry, Run, RunAssemblyV1, RunSpec, StateOwnerRecordV1, WorkerIdentity, WorkerLaunch,
-  WorkspaceGenerationIdentityV1, WorkspaceGenerationStateV1 } from '../kernel/types.js';
+import type { InvocationJournalEntry, Run, RunAssemblyV1, RunFrontier, RunSpec, StateOwnerRecordV1, WorkerIdentity, WorkerLaunch,
+  WorkspaceGenerationIdentityV1, WorkspaceGenerationStateV1, ToolContractManifestV1 } from '../kernel/types.js';
 import type { ToolOperationGrantV1, ToolRequestV1, ToolTargetV1 } from '../kernel/tool-authorization.js';
+import type { PolicyEngineProfileV1, RunPolicySnapshotV1 } from '../kernel/tool-authorization.js';
+import type { VerifierOperationGrantV1, VerifierPolicyChannelEvidenceV1, VerifierRequestV1, VerifierTargetV1 } from '../kernel/verifier-invocation.js';
 import type { ToolCallInputV1 } from '../protocol/agent-ir.js';
 import { decodeRetainedRunAssembly } from '../model/run-assembly.js';
 import { immutableSnapshot } from '../model/immutable.js';
@@ -14,19 +16,27 @@ import { assertActiveStateOwner, type StateOwnerContext } from './state-owner.js
 import { readRun } from './rows.js';
 import { readRequiredWorkerLaunch } from './repositories/worker-launches.js';
 import { readRequiredWorkspaceGenerationByRef } from './repositories/workspace-generations.js';
-import type { RuntimeBundleManifest } from '../policy/runtime-authority.js';
+import { verifyToolRuntimeAuthority, type ReleaseTrustKey, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { readCanonicalArtifact } from './agent-context.js';
 import type { ArtifactCatalog } from './artifacts.js';
-import { decodeRunSpec, decodeStateLockIdentity, decodeStateRootIdentity, decodeWorkerIdentity, decodeWorkspaceGenerationIdentity } from './decoders.js';
+import { decodeRunSpec, decodeSourceManifest, decodeStateLockIdentity, decodeStateRootIdentity,
+  decodeWorkerIdentity, decodeWorkspaceGenerationIdentity, decodeWorkspaceState } from './decoders.js';
 import { joinResourceOperations, KernelStorageError } from './errors.js';
 import { validatePreactivationQuarantine } from './preactivation-retirement.js';
+import { readRetainedVerifierToolchain } from './guest-toolchain.js';
+import { decodeVerifierPlan } from './result-artifacts.js';
+import { decodeVerifierCommand, decodeVerifierEnvironment, decodeVerifierSpec } from './verifier-artifacts.js';
+import { loadVerifierPolicy } from './verifier-policy.js';
+import { readCandidateSource } from './result-source.js';
 
 type WorkerSpec = Extract<SandboxLaunchSpecV1, { purpose: 'worker_activation' }>;
 type WorkerOwner = WorkerSpec['owner'];
 type EditSpec = Extract<SandboxLaunchSpecV1, { owner: { kind: 'run_invocation' } }> & { purpose: 'tool' };
+type VerifierSpec = Extract<SandboxLaunchSpecV1, { owner: { kind: 'run_invocation' } }> & { purpose: 'verifier' };
 type InvocationOwner = EditSpec['owner'];
 const workerClosures = new WeakSet<object>();
 const editClosures = new WeakSet<object>();
+const verifierClosures = new WeakSet<object>();
 
 /** A structural clone is retained metadata, not authority to mint a native launch. */
 export function assertWorkerLaunchClosure(value: unknown): asserts value is WorkerLaunchClosure {
@@ -34,6 +44,9 @@ export function assertWorkerLaunchClosure(value: unknown): asserts value is Work
 }
 export function assertBuiltinEditLaunchClosure(value: unknown): asserts value is BuiltinEditLaunchClosure {
   if (value === null || typeof value !== 'object' || !editClosures.has(value)) mismatch('native edit launch requires its trusted retained-artifact closure');
+}
+export function assertVerifierLaunchClosure(value: unknown): asserts value is VerifierLaunchClosure {
+  if (value === null || typeof value !== 'object' || !verifierClosures.has(value)) mismatch('native verifier launch requires its trusted retained-artifact closure');
 }
 
 function mismatch(message: string): never { throw new KernelStorageError('ARTIFACT_MISMATCH', message); }
@@ -238,10 +251,14 @@ export function decodeWorkerSandboxLaunchSpec(value: unknown): WorkerSpec {
 export function decodeBuiltinEditSandboxLaunchSpec(value: unknown): EditSpec {
   return decodeLinuxLaunchSpec(value, 'tool') as EditSpec;
 }
-function decodeLinuxLaunchSpec(value: unknown, purpose: 'worker_activation' | 'tool'): WorkerSpec | EditSpec {
+/** Retained data only; a decoder cannot mint the native verifier brand. */
+export function decodeVerifierSandboxLaunchSpec(value: unknown): VerifierSpec {
+  return decodeLinuxLaunchSpec(value, 'verifier') as VerifierSpec;
+}
+function decodeLinuxLaunchSpec(value: unknown, purpose: 'worker_activation' | 'tool' | 'verifier'): WorkerSpec | EditSpec | VerifierSpec {
   const spec = record(value, ['schemaVersion', 'format', 'runtime', 'executable', 'environment', 'filesystem', 'mounts', 'mountsDigest',
     'sandboxProfileRef', 'sandboxProfileDigest', 'resources', 'resourcesDigest', 'containmentPlanRef', 'containmentPlanDigest', 'createdAt',
-    'launchSpecDigest', 'owner', 'purpose', 'processInvocation', ...(purpose === 'tool'
+    'launchSpecDigest', 'owner', 'purpose', 'processInvocation', ...(purpose !== 'worker_activation'
       ? ['operationGrantRef', 'requestRef', 'requestDigest', 'targetRef', 'targetDigest', 'parentWorkerContainmentRef'] : [])], 'launch spec');
   literal(spec.schemaVersion, 1, 'launch schema'); literal(spec.format, 'cliq-sandbox-launch-v1', 'launch format');
   literal(spec.purpose, purpose, 'launch purpose');
@@ -253,19 +270,29 @@ function decodeLinuxLaunchSpec(value: unknown, purpose: 'worker_activation' | 't
   const runtime = record(spec.runtime, ['runtimeBundleRef', 'runtimeBundleManifestDigest', 'sandboxBackend', 'toolchain', 'launcher', 'runtimeDigest'], 'launch runtime');
   digest(runtime.runtimeBundleRef, 'runtime bundle ref'); digest(runtime.runtimeBundleManifestDigest, 'runtime bundle digest');
   literal(runtime.sandboxBackend, 'linux_namespace', 'worker runtime backend');
-  literal(record(runtime.toolchain, ['kind'], 'Linux toolchain').kind, 'none', 'Linux toolchain');
+  const toolchain = record(runtime.toolchain, purpose === 'verifier'
+    ? ['kind', 'guestToolchainManifestRef', 'guestToolchainManifestDigest', 'guestImageRef', 'guestImageDigest'] : ['kind'], 'Linux toolchain');
+  literal(toolchain.kind, purpose === 'verifier' ? 'guest_toolchain' : 'none', 'Linux toolchain');
+  if (purpose === 'verifier') for (const key of ['guestToolchainManifestRef', 'guestToolchainManifestDigest', 'guestImageRef', 'guestImageDigest']) digest(toolchain[key], key);
   const launcher = record(runtime.launcher, ['executableId', 'executableDigest'], 'sandbox launcher'); text(launcher.executableId, 'launcher id'); digest(launcher.executableDigest, 'launcher digest');
   rehash(runtime, 'runtimeDigest', 'launch runtime');
-  const executable = record(spec.executable, ['kind', 'runtimeBundleRef', 'runtimeBundleManifestDigest', 'executableId', 'role', 'executionPath', 'executableDigest'], 'worker executable');
-  literal(executable.kind, 'runtime_bundle', 'Linux executable source'); literal(executable.role, purpose === 'worker_activation' ? 'worker' : 'tool_adapter', 'executable role');
-  digest(executable.runtimeBundleRef, 'worker bundle ref'); digest(executable.runtimeBundleManifestDigest, 'worker bundle digest');
-  text(executable.executableId, 'worker executable id'); absolute(executable.executionPath, 'worker executable path'); digest(executable.executableDigest, 'worker executable digest');
+  const executable = record(spec.executable, purpose === 'verifier'
+    ? ['kind', 'guestToolchainManifestRef', 'guestToolchainManifestDigest', 'toolId', 'role', 'executionPath', 'executableDigest']
+    : ['kind', 'runtimeBundleRef', 'runtimeBundleManifestDigest', 'executableId', 'role', 'executionPath', 'executableDigest'], 'worker executable');
+  literal(executable.kind, purpose === 'verifier' ? 'guest_toolchain' : 'runtime_bundle', 'Linux executable source');
+  literal(executable.role, purpose === 'worker_activation' ? 'worker' : purpose === 'verifier' ? 'verifier' : 'tool_adapter', 'executable role');
+  if (purpose === 'verifier') {
+    digest(executable.guestToolchainManifestRef, 'guest manifest ref'); digest(executable.guestToolchainManifestDigest, 'guest manifest digest'); text(executable.toolId, 'guest tool id');
+  } else {
+    digest(executable.runtimeBundleRef, 'worker bundle ref'); digest(executable.runtimeBundleManifestDigest, 'worker bundle digest'); text(executable.executableId, 'worker executable id');
+  }
+  absolute(executable.executionPath, 'worker executable path'); digest(executable.executableDigest, 'worker executable digest');
   const invocation = record(spec.processInvocation, purpose === 'worker_activation'
     ? ['kind', 'purpose', 'recipe', 'runtimeSource', 'executableSource', 'argvSource', 'cwdSource', 'stdio']
     : ['kind', 'purpose', 'recipe', 'requestRef', 'requestDigest', 'targetRef', 'targetDigest', 'argvCwdSource', 'stdio'], 'process recipe');
   const recipe = purpose === 'worker_activation' ? { kind: 'worker_entrypoint', purpose, recipe: 'cliq-worker-entrypoint-v1',
     runtimeSource: 'launch_runtime', executableSource: 'launch_executable', argvSource: 'fixed_empty', cwdSource: 'generation_root' }
-    : { kind: 'run_request', purpose, recipe: 'cliq-tool-launch-v1', requestRef: spec.requestRef, requestDigest: spec.requestDigest,
+    : { kind: 'run_request', purpose, recipe: purpose === 'verifier' ? 'cliq-verifier-command-v1' : 'cliq-tool-launch-v1', requestRef: spec.requestRef, requestDigest: spec.requestDigest,
       targetRef: spec.targetRef, targetDigest: spec.targetDigest, argvCwdSource: 'trusted_recipe_decode_of_request_and_target' };
   for (const [key, expected] of Object.entries(recipe)) literal(invocation[key], expected, `process recipe ${key}`);
   equal(record(invocation.stdio, ['stdin', 'stdout', 'stderr', 'extraFileDescriptors'], 'worker stdio'),
@@ -273,13 +300,13 @@ function decodeLinuxLaunchSpec(value: unknown, purpose: 'worker_activation' | 't
       ? 'authenticated_worker_channel_only' : 'authenticated_operation_channel_only' }, 'process stdio');
   environment(spec.environment);
   const filesystem = record(spec.filesystem, ['kind', 'generationRef', 'access', 'sourceProjectionRef', 'independentGit'], 'worker filesystem');
-  literal(filesystem.kind, 'run_generation', 'filesystem kind'); literal(filesystem.access, purpose === 'worker_activation' ? 'preactivated_readonly' : 'read_write', 'filesystem access');
+  literal(filesystem.kind, 'run_generation', 'filesystem kind'); literal(filesystem.access, purpose === 'worker_activation' ? 'preactivated_readonly' : purpose === 'verifier' ? 'read_only' : 'read_write', 'filesystem access');
   digest(filesystem.generationRef, 'worker generation'); digest(filesystem.sourceProjectionRef, 'worker projection'); literal(filesystem.independentGit, true, 'worker private Git');
   mounts(spec.mounts, purpose === 'tool'); literal(digest(spec.mountsDigest, 'mount digest'), canonicalSha256(spec.mounts), 'mount digest');
   resources(spec.resources); literal(digest(spec.resourcesDigest, 'resources digest'), canonicalSha256(spec.resources), 'resources digest');
   for (const member of ['sandboxProfileRef', 'sandboxProfileDigest', 'containmentPlanRef', 'containmentPlanDigest']) digest(spec[member], member);
   time(spec.createdAt, 'launch creation'); rehash(spec, 'launchSpecDigest', 'worker launch');
-  return spec as WorkerSpec | EditSpec;
+  return spec as WorkerSpec | EditSpec | VerifierSpec;
 }
 
 export type WorkerLaunchClosureInput = {
@@ -287,7 +314,7 @@ export type WorkerLaunchClosureInput = {
 };
 
 async function readExecutionEnvironment(artifacts: ArtifactCatalog, owner: StateOwnerRecordV1, runSpec: RunSpec,
-  spec: WorkerSpec | EditSpec, generation: WorkspaceGenerationIdentityV1) {
+  spec: WorkerSpec | EditSpec | VerifierSpec, generation: WorkspaceGenerationIdentityV1) {
   const [assemblyValue, profileValue, bundle, lockValue, rootValue] = await joinResourceOperations([
     readCanonicalArtifact(artifacts, runSpec.assemblyRef), readCanonicalArtifact(artifacts, runSpec.sandboxProfileRef),
     readCanonicalArtifact<RuntimeBundleManifest>(artifacts, owner.runtimeBundleRef), readCanonicalArtifact(artifacts, owner.stateLockIdentityRef),
@@ -301,8 +328,8 @@ async function readExecutionEnvironment(artifacts: ArtifactCatalog, owner: State
   if (bundle.schemaVersion !== 1 || !Array.isArray(bundle.entries) || bundle.manifestDigest !== owner.runtimeBundleManifestDigest) mismatch('current StateOwner does not retain a signed execution bundle');
   const { signature: _signature, manifestDigest: _manifestDigest, ...bundleCore } = bundle;
   literal(bundle.manifestDigest, canonicalSha256(bundleCore), 'retained bundle digest');
-  if (spec.executable.kind !== 'runtime_bundle') mismatch('Linux executable does not resolve the runtime bundle');
-  for (const source of [assembly.runtime, spec.runtime, spec.executable]) {
+  if (spec.executable.kind !== 'runtime_bundle' && !(spec.purpose === 'verifier' && spec.executable.kind === 'guest_toolchain')) mismatch('Linux executable does not resolve a supported signed source');
+  for (const source of [assembly.runtime, spec.runtime, ...(spec.executable.kind === 'runtime_bundle' ? [spec.executable] : [])]) {
     if (source.runtimeBundleRef !== owner.runtimeBundleRef || source.runtimeBundleManifestDigest !== owner.runtimeBundleManifestDigest) mismatch('execution runtime is not the current verified StateOwner bundle');
   }
   literal(assembly.runtime.sandboxBackend, 'linux_namespace', 'assembly backend'); literal(profile.backend, assembly.runtime.sandboxBackend, 'profile backend');
@@ -310,7 +337,7 @@ async function readExecutionEnvironment(artifacts: ArtifactCatalog, owner: State
   literal(spec.sandboxProfileRef, runSpec.sandboxProfileRef, 'frozen profile ref'); literal(spec.sandboxProfileDigest, profile.profileDigest, 'frozen profile digest'); equal(spec.resources, profile.resources, 'frozen resources');
   const selected = bundle.entries.find((entry) => spec.executable.kind === 'runtime_bundle' && entry.entryId === spec.executable.executableId);
   const launcher = bundle.entries.find((entry) => entry.entryId === spec.runtime.launcher.executableId);
-  if (selected?.role !== spec.executable.role || !selected.executable || selected.digest !== spec.executable.executableDigest ||
+  if ((spec.executable.kind === 'runtime_bundle' && (selected?.role !== spec.executable.role || !selected.executable || selected.digest !== spec.executable.executableDigest)) ||
       launcher?.role !== 'platform_helper' || !launcher.executable || launcher.digest !== spec.runtime.launcher.executableDigest) mismatch('executable or launcher does not resolve the exact signed entry');
   for (const mount of spec.mounts) {
     if (mount.kind === 'cas_artifact') await artifacts.readBytes(mount.artifactRef);
@@ -519,6 +546,111 @@ export async function readBuiltinEditLaunchClosure(artifacts: ArtifactCatalog, o
 }
 
 export type BuiltinEditLaunchClosure = Awaited<ReturnType<typeof readBuiltinEditLaunchClosure>>;
+
+export type VerifierLaunchClosureInput = {
+  run: Run; launch: WorkerLaunch; generation: WorkspaceGenerationStateV1; prepared: InvocationJournalEntry;
+  request: VerifierRequestV1; target: VerifierTargetV1; grant: VerifierOperationGrantV1; evidence: VerifierPolicyChannelEvidenceV1;
+  dispatchId: string; sandboxLaunchSpecRef: string;
+};
+
+/** The current owning preparation plus reproduced named policy are the only
+ * entrance to this brand. It observes no native process and supplies no death
+ * evidence; the physical launcher must still claim/release this exact attempt. */
+export async function readVerifierLaunchClosure(artifacts: ArtifactCatalog, owner: StateOwnerRecordV1,
+  input: VerifierLaunchClosureInput, releaseKeys: readonly ReleaseTrustKey[], signal?: AbortSignal) {
+  signal?.throwIfAborted(); input = immutableSnapshot(input);
+  const { run, launch, generation: row, prepared, request, target, grant, evidence } = input;
+  if (run.status !== 'running' || run.nextStep !== 'verify' || run.stopIntentRef !== undefined || run.cancelRequested || run.activeWorkerLaunchId !== launch.launchId ||
+      launch.phase !== 'activated' || launch.runId !== run.id || launch.leaseEpoch !== run.leaseEpoch ||
+      launch.supervisorInstanceId !== owner.supervisorInstanceId || launch.generationWriteState !== 'active' ||
+      row.phase !== 'active' || row.generationRef !== launch.workspaceGenerationRef || row.activeWorkerLaunchId !== launch.launchId || row.leaseEpoch !== run.leaseEpoch ||
+      prepared.phase !== 'prepared' || prepared.opKind !== 'verifier' || prepared.runId !== run.id || prepared.leaseEpoch !== run.leaseEpoch ||
+      prepared.replayClass !== 'retry' || prepared.requestRef !== canonicalSha256(request) || prepared.target !== canonicalSha256(target) ||
+      prepared.grantRef !== canonicalSha256(grant) || request.runId !== run.id || request.opId !== prepared.opId ||
+      !Number.isSafeInteger(prepared.attempt) || prepared.attempt < 0 || grant.expiresAt > run.deadlineAt ||
+      prepared.timestamp < grant.issuedAt || prepared.timestamp >= grant.expiresAt)
+    mismatch('verifier launch does not bind its current validated preparation and activation');
+  text(input.dispatchId, 'verifier dispatch id');
+  const spec = decodeVerifierSandboxLaunchSpec(await readCanonicalArtifact(artifacts, input.sandboxLaunchSpecRef));
+  const plan = decodeLinuxContainmentPlan(await readCanonicalArtifact(artifacts, spec.containmentPlanRef), 'run_invocation');
+  const generation = decodeWorkspaceGenerationIdentity(await readCanonicalArtifact(artifacts, row.generationRef));
+  const runSpec = decodeRunSpec(await readCanonicalArtifact(artifacts, run.specRef));
+  if (!run.frontierRef) mismatch('verifier launch has no current frontier');
+  const frontier = await readCanonicalArtifact<RunFrontier>(artifacts, run.frontierRef);
+  record(frontier, ['schemaVersion', 'kind', 'phase', 'candidateItemId', 'resultSourceRef', 'verifierPlanRef', 'nextVerifierIndex', 'afterPass'], 'verifier frontier');
+  if (frontier.kind !== 'verify' || frontier.phase !== 'verifiers' || frontier.candidateItemId !== target.candidateItemId ||
+      frontier.verifierPlanRef !== target.verifierPlanRef || frontier.nextVerifierIndex !== target.verifierIndex ||
+      frontier.schemaVersion !== 1 || frontier.resultSourceRef !== target.resultSourceRef || frontier.afterPass !== 'finalize' ||
+      request.frontierRef !== run.frontierRef || request.assemblyRef !== runSpec.assemblyRef) mismatch('verifier launch substitutes its current candidate frontier');
+  const verifierPlan = decodeVerifierPlan(await readCanonicalArtifact(artifacts, target.verifierPlanRef));
+  if (runSpec.dependencyPolicyRef !== undefined || verifierPlan.dependencyPlanRef !== undefined)
+    mismatch('this verifier launch recipe does not implement dependency acquisition');
+  const verifierSpec = decodeVerifierSpec(await readCanonicalArtifact(artifacts, runSpec.verifierSpecRef));
+  const command = decodeVerifierCommand(await readCanonicalArtifact(artifacts, target.commandRef));
+  const environment = decodeVerifierEnvironment(await readCanonicalArtifact(artifacts, target.environmentRef));
+  const resultSource = decodeSourceManifest(await readCanonicalArtifact(artifacts, target.resultSourceRef));
+  const state = decodeWorkspaceState(await readCanonicalArtifact(artifacts, generation.sourceWorkspaceStateRef));
+  const projected = await readCandidateSource(artifacts, runSpec, generation.sourceWorkspaceStateRef, signal);
+  if (resultSource.role !== 'result' || resultSource.manifestDigest !== target.sourceDigest || resultSource.sourceProjectionRef !== runSpec.sourceProjectionRef ||
+      state.runId !== run.id || projected.sourceRef !== target.resultSourceRef || projected.source.manifestDigest !== target.sourceDigest ||
+      state.sourceProjectionDigest !== resultSource.sourceProjectionDigest ||
+      environment.sourceProjectionRef !== runSpec.sourceProjectionRef || environment.sourceAccess !== 'read_only' || environment.networkAccess !== 'denied')
+    mismatch('verifier launch does not use its exact read-only candidate source');
+  const expectedOwner: InvocationOwner = { kind: 'run_invocation', runId: run.id, intendedLeaseEpoch: run.leaseEpoch,
+    workerLaunchId: launch.launchId, opId: prepared.opId, attempt: prepared.attempt, dispatchId: input.dispatchId };
+  equal(spec.owner, expectedOwner, 'verifier launch owner'); equal(plan.owner, expectedOwner, 'verifier plan owner');
+  literal(spec.containmentPlanDigest, plan.planDigest, 'verifier containment digest');
+  literal(spec.parentWorkerContainmentRef, launch.processContainmentRef, 'verifier parent worker');
+  literal(plan.parentContainmentRef, launch.processContainmentRef, 'verifier plan parent worker');
+  equal(plan.filesystemBinding, { kind: 'run-generation', generationRef: row.generationRef }, 'verifier plan generation');
+  equal(spec.filesystem, { kind: 'run_generation', generationRef: row.generationRef, access: 'read_only', sourceProjectionRef: runSpec.sourceProjectionRef,
+    independentGit: true }, 'verifier read-only source envelope');
+  if (generation.runId !== run.id || generation.identityDigest !== row.generationIdentityDigest || generation.generationId !== row.generationId ||
+      generation.sourceCheckpointId !== row.sourceCheckpointId || generation.sourceWorkspaceStateRef !== row.sourceWorkspaceStateRef ||
+      generation.sourceWorkspaceStateDigest !== row.sourceWorkspaceStateDigest) mismatch('verifier generation substitutes its active immutable identity');
+  for (const [key, expected] of Object.entries({ operationGrantRef: prepared.grantRef, requestRef: prepared.requestRef,
+    requestDigest: request.requestDigest, targetRef: prepared.target, targetDigest: target.targetDigest })) literal(spec[key as keyof VerifierSpec], expected, `verifier ${key}`);
+  const execution = await readExecutionEnvironment(artifacts, owner, runSpec, spec, generation);
+  const policy = await readCanonicalArtifact<RunPolicySnapshotV1>(artifacts, runSpec.policyRef);
+  const profile = await readCanonicalArtifact<PolicyEngineProfileV1>(artifacts, policy.engine.profileRef);
+  const tools = await readCanonicalArtifact<ToolContractManifestV1>(artifacts, execution.assembly.tools.manifestRef);
+  verifyToolRuntimeAuthority({ assembly: execution.assembly, bundle: execution.bundle, policy, profile, tools: tools.entries, releaseKeys });
+  const evaluator = loadVerifierPolicy({ policy, policyRef: runSpec.policyRef, assembly: execution.assembly, assemblyRef: runSpec.assemblyRef,
+    principalId: policy.principalId, workspaceIdentityDigest: policy.workspaceIdentityDigest,
+    context: { runId: run.id, frontierRef: run.frontierRef, assemblyRef: runSpec.assemblyRef, candidateItemId: frontier.candidateItemId,
+      resultSourceRef: target.resultSourceRef, sourceDigest: resultSource.manifestDigest, verifierPlanRef: frontier.verifierPlanRef,
+      plan: verifierPlan, verifierSpecRef: runSpec.verifierSpecRef, verifierSpec, verifierIndex: frontier.nextVerifierIndex, command, environment } });
+  equal(evidence, evaluator.evaluate(request, target, evidence.evaluatedAt), 'verifier exact policy evidence');
+  equal(grant, evaluator.grant(request, target, evidence, grant.issuedAt, grant.expiresAt), 'verifier exact operation grant');
+  if (command.executable.kind !== 'guest_toolchain' || spec.executable.kind !== 'guest_toolchain' || spec.runtime.toolchain.kind !== 'guest_toolchain')
+    mismatch('verifier requires its supported signed guest executable');
+  const toolchain = await readRetainedVerifierToolchain(artifacts, { bundle: execution.bundle, releaseKeys,
+    guestToolchainManifestRef: command.executable.guestToolchainManifestRef, signal });
+  const { abiFingerprint: _abi, ...commandExecutable } = command.executable;
+  equal(commandExecutable, { kind: 'guest_toolchain', guestToolchainManifestRef: toolchain.manifestRef,
+    guestToolchainManifestDigest: toolchain.manifest.manifestDigest, toolId: toolchain.manifest.node.logicalName,
+    executionPath: toolchain.manifest.node.canonicalGuestPath, executableDigest: toolchain.manifest.node.digest }, 'verifier signed executable');
+  literal(command.executable.abiFingerprint, toolchain.abiFingerprint, 'verifier ABI fingerprint');
+  equal(spec.executable, { kind: 'guest_toolchain', guestToolchainManifestRef: toolchain.manifestRef,
+    guestToolchainManifestDigest: toolchain.manifest.manifestDigest, toolId: toolchain.manifest.node.logicalName, role: 'verifier',
+    executionPath: toolchain.manifest.node.canonicalGuestPath, executableDigest: toolchain.manifest.node.digest }, 'verifier launch executable');
+  equal(spec.runtime.toolchain, { kind: 'guest_toolchain', guestToolchainManifestRef: toolchain.manifestRef,
+    guestToolchainManifestDigest: toolchain.manifest.manifestDigest, guestImageRef: toolchain.manifest.guestImageRef,
+    guestImageDigest: toolchain.manifest.guestImageDigest }, 'verifier runtime toolchain');
+  if (environment.guestToolchainManifestRef !== toolchain.manifestRef || environment.guestToolchainManifestDigest !== toolchain.manifest.manifestDigest ||
+      environment.runtimeBundleRef !== owner.runtimeBundleRef || environment.runtimeBundleManifestDigest !== owner.runtimeBundleManifestDigest ||
+      execution.assembly.runtime.guestToolchainManifestRef !== toolchain.manifestRef || execution.assembly.runtime.guestToolchainManifestDigest !== toolchain.manifest.manifestDigest)
+    mismatch('verifier frozen environment/assembly differs from its signed toolchain');
+  const parent = decodeWorkerProcessContainment(await readCanonicalArtifact(artifacts, launch.processContainmentRef!));
+  equal(parent.owner, { kind: 'worker_activation', runId: run.id, intendedLeaseEpoch: run.leaseEpoch, workerLaunchId: launch.launchId }, 'verifier actual parent');
+  equal(parent.filesystemBinding, plan.filesystemBinding, 'verifier parent generation');
+  literal(parent.planRef, launch.containmentPlanRef, 'verifier parent plan'); literal(parent.sandboxLaunchSpecRef, launch.sandboxLaunchSpecRef, 'verifier parent launch');
+  if (parent.backend.kind !== 'linux' || plan.backend.kind !== 'linux' || !plan.backend.cgroupPath.startsWith(`${parent.backend.cgroupPath}/`)) mismatch('verifier containment is not nested beneath its original worker');
+  signal?.throwIfAborted();
+  return mint({ spec, plan, generation, runSpec, ...execution, request, target, grant, evidence, command, environment, toolchain,
+    verifierEntry: verifierSpec.verifiers[frontier.nextVerifierIndex]!, run, launch, prepared, sandboxLaunchSpecRef: input.sandboxLaunchSpecRef }, verifierClosures);
+}
+export type VerifierLaunchClosure = Awaited<ReturnType<typeof readVerifierLaunchClosure>>;
 
 export function decodeWorkerProcessContainment(value: unknown): ProcessContainment & { owner: WorkerOwner } {
   const containment = record(value, ['schemaVersion', 'planRef', 'sandboxLaunchSpecRef', 'sandboxLaunchSpecDigest', 'owner', 'filesystemBinding', 'launchNonceDigest', 'backend', 'createdAt'], 'worker containment');

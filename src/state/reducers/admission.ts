@@ -69,6 +69,10 @@ import {
 import type { SqliteDriver } from '../sqlite-driver.js';
 import { recaptureLiveWorkspaceIdentity } from '../workspace-identity.js';
 import type { SourceInspectionTargetV1 } from '../../kernel/execution.js';
+import type { VerifierRequest } from '../../kernel/control-submit.js';
+import type { AuthorizationRuntime } from '../authorization.js';
+import { assertVerifierRequestData, prepareVerifierSpec, prepareVerifierConsumption, validateVerifierRunAdmission } from '../verifier-admission.js';
+import { VerifierAuthorizationError } from '../authorization-artifacts.js';
 
 export type AdmitRunInput = {
   principalId: string;
@@ -84,6 +88,7 @@ export type AdmitRunInput = {
   policyRef: string;
   sandboxProfileRef: string;
   verifierSpecRef: string;
+  verifierRequests?: VerifierRequest[];
   credentialGrantRefs?: string[];
   budgets?: Partial<typeof DEFAULT_RUN_BUDGETS>;
   allowUnverified: boolean;
@@ -123,6 +128,7 @@ function admitIntent(
       policyRef: input.policyRef,
       sandboxProfileRef: input.sandboxProfileRef,
       verifierSpecRef: input.verifierSpecRef,
+      ...(input.verifierRequests?.length ? { verifierRequests: input.verifierRequests } : {}),
       credentialGrantRefs: input.credentialGrantRefs ?? [],
       budgets,
       allowUnverified: input.allowUnverified,
@@ -133,13 +139,13 @@ function admitIntent(
   });
 }
 
-function admitRequestDigest(
+function admitRequestCore(
   input: AdmitRunInput,
   workspacePath: string,
   objective: string,
   budgets: typeof DEFAULT_RUN_BUDGETS
-): string {
-  return canonicalSha256({
+): object {
+  return {
     protocolVersion: 1,
     requestId: input.requestId,
     method: 'run.submit',
@@ -152,13 +158,18 @@ function admitRequestDigest(
     policyRef: input.policyRef,
     sandboxProfileRef: input.sandboxProfileRef,
     verifierSpecRef: input.verifierSpecRef,
+    ...(input.verifierRequests?.length ? { verifierRequests: input.verifierRequests } : {}),
     credentialGrantRefs: input.credentialGrantRefs ?? [],
     budgets,
     allowUnverified: input.allowUnverified,
     sourceProjectionRef: input.sourceProjectionRef,
     frozenIgnoreRulesRef: input.frozenIgnoreRulesRef,
     baseWorkspaceManifestRef: input.baseWorkspaceManifestRef
-  });
+  };
+}
+
+function admitRequestDigest(input: AdmitRunInput, workspacePath: string, objective: string, budgets: typeof DEFAULT_RUN_BUDGETS): string {
+  return canonicalSha256(admitRequestCore(input, workspacePath, objective, budgets));
 }
 
 async function readPublishedResponse(
@@ -246,8 +257,9 @@ async function replayAdmitRun(
  * never recapture source, choose new assemblies or refresh model authority. */
 export async function replayInstalledRunAdmission(
   driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
-  supplied: ReturnType<typeof normalizeRunSubmitRequest>, identity: AuthenticatedControlIdentity
+  supplied: ReturnType<typeof normalizeRunSubmitRequest>, identity: AuthenticatedControlIdentity, runtime?: AuthorizationRuntime, signal?: AbortSignal
 ): Promise<AdmitRunResult | undefined> {
+  signal?.throwIfAborted();
   assertCurrentControlFrame(owner, identity);
   const normalized = normalizeRunSubmitRequest(supplied.originalRequest), request = normalized.request;
   const { principalId } = identity, requestDigest = normalized.originalRequestDigest;
@@ -341,20 +353,31 @@ export async function replayInstalledRunAdmission(
     throw new KernelStorageError('RECOVERY_REQUIRED', 'installed Run frozen objective/context/source closure changed');
   const { channel: initialChannel } = await readRetainedControlChannelClosure(artifacts, owner, { principalId,
     channelIdentityRef: originalControl.channelIdentityRef, channelIdentityDigest: originalControl.channelIdentityDigest });
-  const consent = decodeUnverifiedConsent(await readCanonicalArtifact(artifacts, spec.unverifiedConsentRef!));
-  const { unverifiedConsentRef: _consent, ...specCore } = spec;
-  if (initialChannel.channelIdentityDigest !== originalControl.channelIdentityDigest || initialChannel.principalId !== principalId ||
-      consent.principalId !== principalId || consent.admissionIntentDigest !== intent || consent.createdAt !== actual.createdAt ||
-      consent.channelIdentityRef !== originalControl.channelIdentityRef || consent.channelIdentityDigest !== originalControl.channelIdentityDigest ||
-      canonicalSha256(consent.client) !== canonicalSha256(initialChannel.client) || consent.runSpecCoreDigest !== canonicalSha256(specCore) || !request.allowUnverified)
-    throw new KernelStorageError('RECOVERY_REQUIRED', 'installed Run original direct consent closure changed');
+  const verifierSpec = decodeVerifierSpec(await readCanonicalArtifact(artifacts, spec.verifierSpecRef));
+  if (verifierSpec.verifiers.some(entry => entry.gate === 'required')) {
+    if (request.allowUnverified || spec.unverifiedConsentRef !== undefined) throw new TypeError('required verifier admission cannot carry unverified consent');
+  } else {
+    const consent = decodeUnverifiedConsent(await readCanonicalArtifact(artifacts, spec.unverifiedConsentRef!));
+    const { unverifiedConsentRef: _consent, ...specCore } = spec;
+    if (initialChannel.channelIdentityDigest !== originalControl.channelIdentityDigest || initialChannel.principalId !== principalId ||
+        consent.principalId !== principalId || consent.admissionIntentDigest !== intent || consent.createdAt !== actual.createdAt ||
+        consent.channelIdentityRef !== originalControl.channelIdentityRef || consent.channelIdentityDigest !== originalControl.channelIdentityDigest ||
+        canonicalSha256(consent.client) !== canonicalSha256(initialChannel.client) || consent.runSpecCoreDigest !== canonicalSha256(specCore) || !request.allowUnverified)
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'installed Run original direct consent closure changed');
+  }
+  let verifierHistory: Awaited<ReturnType<typeof validateVerifierRunAdmission>> | undefined;
+  if (verifierSpec.verifiers.length) {
+    if (!runtime) throw new TypeError('verifier replay has no trusted retained release keys');
+    verifierHistory = await validateVerifierRunAdmission(driver, artifacts, owner, runtime, actual.id, signal);
+  }
   const admittedRequestDigest = canonicalSha256({ admissionIntentDigest: intent, objectiveRef: spec.objectiveRef,
     admittedContextRef: spec.admittedContextRef, runSpecRef: actual.specRef, workspaceIdentityDigest: workspace.identityDigest,
     repositoryIdentityDigest: workspace.repositoryIdentityDigest ?? null, sourceProjectionRef: spec.sourceProjectionRef,
     frozenIgnoreRulesRef: manifest.frozenIgnoreRulesRef, baseWorkspaceManifestRef: spec.baseWorkspaceManifestRef,
     workspaceStateRef: checkpoint.workspaceStateRef, assemblyRef: spec.assemblyRef, policyRef: spec.policyRef,
     sandboxProfileRef: spec.sandboxProfileRef, verifierSpecRef: spec.verifierSpecRef, unverifiedConsentRef: spec.unverifiedConsentRef ?? null,
-    credentialGrantRefs: spec.credentialGrantRefs });
+    credentialGrantRefs: spec.credentialGrantRefs,
+    ...(verifierHistory ? { authorizationReceiptRefs: verifierHistory.authorizationReceiptRefs } : {}) });
   const frozen = driver.prepare('SELECT admitted_request_digest FROM runs WHERE id = ?').get<{ admitted_request_digest: string }>(actual.id);
   if (frozen?.admitted_request_digest !== admittedRequestDigest)
     throw new KernelStorageError('RECOVERY_REQUIRED', 'installed Run final admitted closure no longer rehashes');
@@ -393,14 +416,15 @@ type InstalledAdmission = Readonly<{ prepared: AssembledInstalledRun; identity: 
 /** Public-id production path. The private WeakMap friend, not caller refs or
  * an arbitrary digest override, binds the exact authenticated original frame. */
 export async function admitInstalledRun(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
-  prepared: AssembledInstalledRun, identity: AuthenticatedControlIdentity): Promise<AdmitRunResult> {
+  prepared: AssembledInstalledRun, identity: AuthenticatedControlIdentity, runtime?: AuthorizationRuntime, signal?: AbortSignal): Promise<AdmitRunResult> {
   const data = readInstalledRunAdmission(prepared, driver, owner, identity);
   assertCurrentControlFrame(owner, identity);
-  return admitRunInternal(driver, artifacts, owner, data.input, { prepared, identity, data });
+  return admitRunInternal(driver, artifacts, owner, data.input, { prepared, identity, data }, runtime, signal);
 }
 
-export function admitRun(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, input: AdmitRunInput): Promise<AdmitRunResult> {
-  return admitRunInternal(driver, artifacts, owner, input);
+export function admitRun(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, input: AdmitRunInput,
+  runtime?: AuthorizationRuntime, signal?: AbortSignal): Promise<AdmitRunResult> {
+  return admitRunInternal(driver, artifacts, owner, input, undefined, runtime, signal);
 }
 
 async function admitRunInternal(
@@ -408,8 +432,16 @@ async function admitRunInternal(
   artifacts: ArtifactCatalog,
   owner: StateOwnerContext,
   input: AdmitRunInput,
-  installed?: InstalledAdmission
+  installed?: InstalledAdmission,
+  runtime?: AuthorizationRuntime,
+  signal?: AbortSignal
 ): Promise<AdmitRunResult> {
+  signal?.throwIfAborted();
+  const verifierInput = Object.getOwnPropertyDescriptor(input, 'verifierRequests');
+  if (verifierInput) {
+    if (!verifierInput.enumerable || !Object.hasOwn(verifierInput, 'value')) throw new TypeError('verifier requests must be plain data');
+    assertVerifierRequestData(verifierInput.value);
+  }
   assertRequestId(input.requestId);
   assertAdmissionKey(input.admissionKey);
   for (const ref of [
@@ -433,11 +465,17 @@ async function admitRunInternal(
   const admissionIntentDigest = installed ? runSubmitIntentDigest(input.principalId, installed.data.normalized.request) :
     admitIntent(input, workspacePath, objectiveText, budgets);
   const requestDigest = installed?.data.normalized.originalRequestDigest ?? admitRequestDigest(input, workspacePath, objectiveText, budgets);
-  const replay = () => installed ? replayInstalledRunAdmission(driver, artifacts, owner, installed.data.normalized, installed.identity) :
+  const replay = () => installed ? replayInstalledRunAdmission(driver, artifacts, owner, installed.data.normalized, installed.identity, runtime, signal) :
     replayAdmitRun(driver, artifacts, owner, input, admissionIntentDigest, requestDigest);
 
   const replayed = await replay();
-  if (replayed !== undefined) return replayed;
+  if (replayed !== undefined) {
+    if (input.verifierRequests?.length) {
+      if (!runtime) throw new TypeError('verifier replay has no retained runtime roots');
+      await validateVerifierRunAdmission(driver, artifacts, owner, runtime, replayed.run.id, signal);
+    }
+    return replayed;
+  }
 
   const channelClosure = await validateControlChannelClosure(artifacts, owner, input);
   const channel = channelClosure.channel;
@@ -508,6 +546,16 @@ async function admitRunInternal(
   if (requiredVerifiers.length === 0 && !input.allowUnverified) {
     throw new KernelStorageError('INVALID_REQUEST', 'an empty required verifier set needs allowUnverified=true');
   }
+  const verifierRequests = installed?.data.normalized.request.verifiers ?? input.verifierRequests ?? [];
+  let verifierPreparation: Awaited<ReturnType<typeof prepareVerifierSpec>> | undefined;
+  if (verifierSpec.verifiers.length || verifierRequests.length) {
+    if (!runtime || !verifierRequests.length) throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');
+    const policy = await readCanonicalArtifact<{ mode: string }>(artifacts, input.policyRef);
+    verifierPreparation = await prepareVerifierSpec(driver, artifacts, owner, runtime, { principalId: input.principalId,
+      requests: verifierRequests, policyMode: policy.mode, assembly: decodeRetainedRunAssembly(await readCanonicalArtifact(artifacts, input.assemblyRef)),
+      sourceProjectionRef: input.sourceProjectionRef, sandboxProfileRef: input.sandboxProfileRef }, undefined, signal);
+    if (verifierPreparation.specRef !== input.verifierSpecRef) throw new KernelStorageError('ARTIFACT_MISMATCH', 'verifier spec differs from the authorized public command and environment');
+  }
 
   await artifacts.readBytes(input.assemblyRef);
   await artifacts.readBytes(input.policyRef);
@@ -529,6 +577,8 @@ async function admitRunInternal(
 
   const now = installed?.data.admittedAt ?? sampleCanonicalNow();
   const runId = identityHash('cliq-run-id-v1', input.principalId, 'run.submit', input.admissionKey);
+  const verifierConsumption = verifierPreparation && await prepareVerifierConsumption(artifacts, verifierPreparation,
+    { runId, admissionIntentDigest, admittedAt: now });
   const checkpointId = identityHash('cliq-checkpoint-id-v1', runId, 'initial', 0);
   const turnId = identityHash('cliq-turn-id-v1', runId, 'initial');
 
@@ -541,10 +591,15 @@ async function admitRunInternal(
   };
   objective.objectiveDigest = digestOmitting(objective, 'objectiveDigest');
   const published: PublishedArtifact[] = [...channelClosure.metadata, ...referencedMetadata];
+  if (verifierPreparation && verifierConsumption) published.push(...verifierPreparation.metadata, ...verifierConsumption.metadata);
   if (installed) {
     const { requestDigest: _digest, ...core } = installed.data.normalized.originalRequest as Record<string, unknown>;
     const requestArtifact = await artifacts.publishCanonical(core, 'cliq-run-submit-request-core-v1');
     if (requestArtifact.ref !== requestDigest) throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed original public core digest changed');
+    published.push(requestArtifact);
+  } else if (verifierPreparation) {
+    const requestArtifact = await artifacts.publishCanonical(admitRequestCore(input, workspacePath, objectiveText, budgets), 'cliq-run-submit-internal-request-core-v1');
+    if (requestArtifact.ref !== requestDigest) throw new TypeError('internal verifier admission request identity changed');
     published.push(requestArtifact);
   }
   const objectiveArtifact = await artifacts.publishCanonical(objective, 'cliq-run-objective-v1');
@@ -711,12 +766,14 @@ async function admitRunInternal(
     sandboxProfileRef: input.sandboxProfileRef,
     verifierSpecRef: input.verifierSpecRef,
     unverifiedConsentRef: runSpec.unverifiedConsentRef ?? null,
-    credentialGrantRefs: runSpec.credentialGrantRefs
+    credentialGrantRefs: runSpec.credentialGrantRefs,
+    ...(verifierConsumption ? { authorizationReceiptRefs: verifierConsumption.refs } : {})
   });
 
   let committed = false;
   let fenceOutcome: TimeFenceAdvance | undefined;
   driver.transaction((connection) => {
+    signal?.throwIfAborted();
     const control = readControlRequest(connection, input.principalId, 'run.submit', input.requestId);
     if (control !== undefined) {
       if (control.requestDigest !== requestDigest) {
@@ -755,6 +812,7 @@ async function admitRunInternal(
       assertInstalledRunAdmissionCapacity(connection);
     }
     for (const artifact of published) insertArtifactMetadata(connection, artifact, now);
+    verifierConsumption?.commit(connection, freshNow);
 
     connection
       .prepare(

@@ -6,7 +6,7 @@ import { KERNEL_DATABASE_FILENAME } from '../config.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import { addCanonicalDuration, digestOmitting } from '../kernel/identity.js';
 import type { Checkpoint, InvocationJournalEntry, RunItemReferenceV1, SessionContextProjection, SessionItem } from '../kernel/types.js';
-import { EventCursorExpiredError } from './control-read.js';
+import { EventCursorExpiredError, ResultUnavailableError } from './control-read.js';
 import { KernelStorageError } from './errors.js';
 import { openSqliteDriver, type SqliteConnection, type SqliteDriver } from './sqlite-driver.js';
 import { openStateStore, publishInProcessChannel, type StateStore } from './store.js';
@@ -55,6 +55,17 @@ test('control reads expose the empty Session and the admitted Run initial checkp
     assert.equal(caughtUp.highWaterCheckpointCursor, cursor);
     const attached = await fixture.store.readControl({ protocolVersion: 1, method: 'run.attach', runId: run.id, afterEventSeq: 0 }, identity);
     assert.ok(attached.method === 'run.attach');
+    for (const method of ['run.result', 'run.diff'] as const) {
+      await assert.rejects(fixture.store.readControl({ protocolVersion: 1, method, runId: run.id }, identity), error => {
+        assert.ok(error instanceof ResultUnavailableError);
+        assert.deepEqual(error.controlError, { schemaVersion: 1, code: 'RESULT_UNAVAILABLE', messageCode: 'run.result_unavailable',
+          retryable: true, runId: run.id, status: run.status, currentRevision: run.revision });
+        return true;
+      });
+      await assert.rejects(fixture.store.readControl({ protocolVersion: 1, method, runId: 'unknown-run' }, identity), isCode('NOT_FOUND'));
+      await assert.rejects(fixture.store.readControl({ protocolVersion: 1, method, runId: run.id, requestId: uuidv7() } as never, identity),
+        isCode('INVALID_REQUEST'));
+    }
     // Query authority is read-only: it does not advance canonical time or allocate mutator replay rows.
     assert.deepEqual(footprint(), before);
   } finally { inspector.close(); await disposeFixture(fixture); }

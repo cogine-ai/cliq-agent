@@ -1,27 +1,26 @@
 import assert from 'node:assert/strict';
+import { fork } from 'node:child_process';
+import { once } from 'node:events';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import { setImmediate as nextTurn } from 'node:timers/promises';
 import { KERNEL_CAS_DIRECTORY } from '../config.js';
-import type { ToolContractManifestV1 } from '../kernel/types.js';
 import type { AgentModelTurn, ToolCallInputV1 } from '../protocol/agent-ir.js';
 import { ResourceRetirementError } from './errors.js';
+import { loadNativeStateOwner, type HeldStateOwnerLock } from './native-owner.js';
+import { openStateStore, type StateStoreRuntimeAuthority } from './store.js';
 import { createAgentFixture } from './testing/agent-fixtures.js';
-import { createQueuedFixture, disposeFixture } from './testing/fixtures.js';
+import { createQueuedFixture, disposeFixture, makePrivateDir } from './testing/fixtures.js';
+import { ownerAt } from './testing/state-owner-process.js';
 import { batch } from './testing/tool-calls.js';
+import { canonicalSha256 } from '../kernel/canonical.js';
 
-for (const operation of ['recovery read', 'agent opening'] as const) {
+for (const operation of ['recovery read'] as const) {
   test(`a failed ${operation} joins every real CAS handle and retains any retirement failure`, async () => {
-    const agentFixture = operation === 'agent opening'
-      ? await createAgentFixture('agent-opening-join', undefined, { tools: ['edit', 'read'] }) : undefined;
-    const fixture = agentFixture ?? await createQueuedFixture('recovery-read-join');
+    const fixture = await createQueuedFixture('recovery-read-join');
     const before = await fixture.store.readRecoveryClosure(fixture.runId);
-    let missingRef = before.run.specRef, delayedRef = before.run.frontierRef!;
-    if (agentFixture) {
-      const manifest = await fixture.store.artifacts.readCanonical<ToolContractManifestV1>(agentFixture.authority.assembly.tools.manifestRef);
-      missingRef = manifest.entries[0]!.inputSchemaRef; delayedRef = manifest.entries[1]!.inputSchemaRef;
-    }
+    const missingRef = before.run.specRef, delayedRef = before.run.frontierRef!;
     const missingPath = path.join(fixture.stateRoot, KERNEL_CAS_DIRECTORY, missingRef);
     const savedPath = `${missingPath}.fault-fixture`;
     const delayedPath = path.join(fixture.stateRoot, KERNEL_CAS_DIRECTORY, delayedRef);
@@ -46,8 +45,7 @@ for (const operation of ['recovery read', 'agent opening'] as const) {
       return handle;
     }) as typeof fs.open;
     try {
-      reading = agentFixture ? fixture.store.loadAgentRun({ runId: fixture.runId, material: agentFixture.authority.material })
-        : fixture.store.readRecoveryClosure(fixture.runId);
+      reading = fixture.store.readRecoveryClosure(fixture.runId);
       void reading.then(() => { settled = true; }, () => { settled = true; });
       await closing;
       await nextTurn();
@@ -66,6 +64,52 @@ for (const operation of ['recovery read', 'agent opening'] as const) {
     }
   });
 }
+
+test('a failed agent opening joins real CAS reads and retains the original owner until its process dies', async () => {
+  const directory = await makePrivateDir('.cliq-agent-opening-retirement-');
+  const child = fork(new URL('./testing/agent-opening-retirement-child.ts', import.meta.url), [directory], {
+    execArgv: ['--expose-gc', '--import', 'tsx'], stdio: ['ignore', 'ignore', 'inherit', 'ipc']
+  });
+  const exited = once(child, 'exit'), closed = once(child, 'close');
+  let successorResourcesRetired = false;
+  try {
+    const reply = async () => (await once(child, 'message', { signal: AbortSignal.timeout(30_000) }))[0] as {
+      state: string; stateRoot?: string; workspace?: string; runId?: string; beforeDigest?: string; epoch?: number;
+      authority?: StateStoreRuntimeAuthority; message?: string;
+    };
+    assert.equal((await reply()).state, 'ready');
+    const response = reply(); child.send('exercise');
+    const retained = await response;
+    assert.equal(retained.state, 'retained', retained.message);
+    assert(retained.stateRoot && retained.workspace && retained.runId && retained.beforeDigest && retained.authority && retained.epoch);
+    assert.equal(path.dirname(retained.stateRoot), directory);
+    assert.equal(path.dirname(retained.workspace), directory);
+    const original = ownerAt(retained.stateRoot);
+    assert.equal(original.state, 'active'); assert.equal(original.ownerEpoch, retained.epoch);
+    const native = await loadNativeStateOwner();
+    let incorrectlyAcquired: HeldStateOwnerLock | undefined;
+    try { incorrectlyAcquired = native.acquireLock(retained.stateRoot, false); }
+    catch (error) { assert.match(String(error), /OS lock is already held/); }
+    if (incorrectlyAcquired) {
+      incorrectlyAcquired.close();
+      assert.fail('a failed agent opening or Store.close released the real OS owner lock before its process died');
+    }
+    child.kill('SIGKILL');
+    assert.equal((await exited)[1], 'SIGKILL'); assert.equal((await closed)[1], 'SIGKILL');
+    // The old process really exited. A genuine successor acquires the same
+    // StateRoot, preserving the original ready cut rather than faking a join.
+    const successor = await openStateStore(retained.stateRoot, retained.authority);
+    try {
+      assert.equal(successor.ownerEpoch, original.ownerEpoch + 1);
+      assert.equal(canonicalSha256(await successor.readRecoveryClosure(retained.runId)), retained.beforeDigest);
+    } finally { await successor.close(); successorResourcesRetired = true; }
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    await exited; await closed;
+    if (successorResourcesRetired) await fs.rm(directory, { recursive: true, force: true });
+    else console.error(`preserving uncertain agent-opening fixture: ${directory}`);
+  }
+});
 
 test('typed recovery preserves actual CAS retirement failure without tagging a missing model input', async () => {
   const fixture = await createAgentFixture('typed-recovery-retirement');

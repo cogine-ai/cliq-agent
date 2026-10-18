@@ -327,7 +327,7 @@ Promise<SourceInspectionAttemptV1> {
     trust = await holdWorkspaceSourceTrust(home, request.workspacePath, captureSignal); resources.push(trust);
     captureSignal.throwIfAborted(); workspaceRoot = native.openWorkspaceRoot(request.workspacePath); resources.push(workspaceRoot);
     target = await createVerifiedSourceInspectionTarget({ driver, artifacts, owner, bootstrap, workspaceRoot, trust,
-      selectedRuntime }, normalized.originalRequest, identity);
+      selectedRuntime, signal: captureSignal }, normalized.originalRequest, identity);
     captureSignal.throwIfAborted();
     const held = readVerifiedSourceInspectionTarget(owner, target);
     stage = owner.filesystem.createSourceInspectionStaging(held.inspectionId, sha256Bytes(randomBytes(32)));

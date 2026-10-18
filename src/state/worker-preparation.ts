@@ -27,6 +27,8 @@ import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
 import { assertActiveStateOwner, readStateOwner, type StateOwnerContext } from './state-owner.js';
 import { assertInstalledBrokerQuiescence, type InstalledBrokerQuiescence } from './store.js';
 import { readSupervisorInspector, supervisorInspectorIdentity } from './supervisor-inspector.js';
+import { readVerifierProgress } from './verifier-recovery.js';
+import { stopInvocationHistory } from '../runtime/stop.js';
 
 type ControllerBirth = Readonly<{ schemaVersion: 1; format: 'cliq-controller-preparation-birth-v1';
   identity: ReturnType<typeof readNativeControllerPreparationBirth>['identity']; birthDigest: string }>;
@@ -73,6 +75,10 @@ export async function beginWorkerPreparation(driver: SqliteDriver, artifacts: Ar
       !/^[A-Za-z0-9_-]{43}$/u.test(input.launchId)) throw new KernelStorageError('INVALID_REQUEST', 'worker preparation requires its exact logical intent');
   for (const digest of [input.spawnNonceDigest, input.activationNonceDigest, input.generationCreationNonceDigest]) assertArtifactRef(digest);
   const cut = await readRecoveryClosure(driver, artifacts, input.runId);
+  const verifier = cut.run.nextStep === 'verify' ? await readVerifierProgress(driver, artifacts, cut) : undefined;
+  if (verifier && (verifier.complete || [...stopInvocationHistory(cut.journal).values()].some(({ entry }) =>
+    entry.opKind === 'verifier' && entry.phase !== 'completed' && entry.phase !== 'failed')))
+    fail('verifier worker preparation cannot overtake a complete plan or unsettled original invocation');
   let result: PreparingWorkerLaunch | undefined;
   driver.transaction(connection => {
     assertActiveStateOwner(connection, owner);
@@ -81,7 +87,8 @@ export async function beginWorkerPreparation(driver: SqliteDriver, artifacts: Ar
     const run = readRun(connection, input.runId);
     requireEqual(run, cut.run, 'worker preparation selected Run');
     if (run.revision !== input.expectedRunRevision || run.status !== 'queued' || run.activeWorkerLaunchId ||
-        run.cancelRequested || run.stopIntentRef || now >= run.deadlineAt || run.nextStep !== 'agent' && run.nextStep !== 'tool')
+        run.cancelRequested || run.stopIntentRef || now >= run.deadlineAt ||
+        run.nextStep !== 'agent' && run.nextStep !== 'tool' && !(run.nextStep === 'verify' && verifier))
       throw new KernelStorageError('LEASE_FENCED', 'worker preparation requires its unstopped productive queued cut');
     if (readWorkerLaunchesForRun(connection, run.id, true).length ||
         readWorkspaceGenerationsForRun(connection, run.id).some(value => value.phase !== 'retired' && value.phase !== 'sealed'))

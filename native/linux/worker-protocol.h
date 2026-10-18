@@ -7,8 +7,9 @@
 #include <stdint.h>
 
 #define CLIQ_WORKER_MAGIC UINT32_C(0x43575131)
-#define CLIQ_WORKER_VERSION UINT32_C(2)
+#define CLIQ_WORKER_VERSION UINT32_C(3)
 #define CLIQ_WORKER_MAX_SCOPES 16
+#define CLIQ_WORKER_MAX_FDS 40
 #define CLIQ_WORKER_TOKEN_BYTES 192
 #define CLIQ_WORKER_PATH_BYTES 4096
 #define CLIQ_WORKER_CHANNEL_FD 3
@@ -26,7 +27,11 @@ enum cliq_worker_command {
     CLIQ_WRITE_RESULT = 10,
     CLIQ_TERMINATE_RETAINED = 11,
     CLIQ_BIND_RESERVATION = 12,
-    CLIQ_INSPECT_RESERVATION = 13
+    CLIQ_INSPECT_RESERVATION = 13,
+    CLIQ_CREATE_VERIFIER = 14,
+    CLIQ_RELEASE_VERIFIER = 15,
+    CLIQ_POLL_VERIFIER = 16,
+    CLIQ_VERIFIER_RESULT = 17
 };
 
 struct cliq_worker_packet {
@@ -61,6 +66,9 @@ struct cliq_worker_packet {
     uint32_t remaining_descendants;
     uint32_t init_reaped;
     uint32_t reservation_observation;
+    uint32_t verifier_reason, verifier_signal, verifier_errno;
+    uint32_t stdout_truncated, stderr_truncated;
+    uint64_t stdout_bytes, stderr_bytes, started_at_ms, duration_ms;
     char nonce[65];
     char activation_nonce[65];
     char start_token[CLIQ_WORKER_TOKEN_BYTES];

@@ -124,6 +124,9 @@ import {
   type RegisterWorkspaceGenerationInput
 } from './reducers/workspace-transition.js';
 import { readRecoveryClosure } from './recovery-closure.js';
+import { readVerifierProgress } from './verifier-recovery.js';
+import { verifierOperationId } from './verifier-policy.js';
+import type { RunResultPhase } from './run-result.js';
 import { beginWorkerRecovery, beginWorkerRecoveryProbe, closeWorkerRecoveryProbe, type BeginWorkerRecoveryInput } from './reducers/worker-recovery.js';
 import { readRun, readSession } from './rows.js';
 import { applyKernelSchema, assertPristineKernelSchema, KERNEL_AUTHORITY_TABLES, KERNEL_SCHEMA_SQL, readSchemaUserVersion } from './schema.js';
@@ -1600,6 +1603,8 @@ export class StateStore {
     closure?: ModelBrokerClosed; initial: Awaited<ReturnType<typeof readModelClaimCut>>;
   }>();
   private readonly installedRunTasks = new Map<string, Promise<void>>();
+  private readonly installedRunPhases = new Map<string, RunResultPhase | 'scheduled' | 'drive_material' | 'drive_agent' |
+    'drive_retirement' | 'drive_verify' | 'drive_finalize' | 'terminal_retirement'>();
   private readonly installedAgents = new Map<string, AgentRunState>();
   private readonly installedAgentLoads = new Map<string, Promise<AgentRunState>>();
   private readonly installedRunFailures = new Map<string, unknown>();
@@ -1633,6 +1638,26 @@ export class StateStore {
   supportsCredentialFinalization(): boolean { return installedCredentialFinalizers.has(this); }
   supportsInstalledRuns(): boolean { return this.schedulerStarted && this.schedulerFailure === undefined && !this.closeRequested && !this.closed; }
 
+  createAuthorization(request: unknown, identity: AuthenticatedControlIdentity) {
+    if (this.closed || this.closeRequested || this.released) throw new KernelStorageError('LEASE_FENCED', 'StateStore is closing or closed');
+    return this.ownInstalledAdmission(async signal => {
+      signal.throwIfAborted();
+      const { createAuthorization } = await import('./authorization.js');
+      signal.throwIfAborted();
+      return createAuthorization(this.driver, this.artifacts, this.owner, this.runtimeAuthority, request, identity, signal);
+    });
+  }
+
+  revokeAuthorization(request: unknown, identity: AuthenticatedControlIdentity) {
+    if (this.closed || this.closeRequested || this.released) throw new KernelStorageError('LEASE_FENCED', 'StateStore is closing or closed');
+    return this.ownInstalledAdmission(async signal => {
+      signal.throwIfAborted();
+      const { revokeAuthorization } = await import('./authorization.js');
+      signal.throwIfAborted();
+      return revokeAuthorization(this.driver, this.artifacts, this.owner, this.runtimeAuthority, request, identity, signal);
+    });
+  }
+
   async createInstalledSession(request: unknown, identity: AuthenticatedControlIdentity) {
     if (!this.supportsInstalledRuns() || !this.installedRuntime || !this.runtimeAuthority?.sourceInspection)
       throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'installed Run composition is not ready');
@@ -1656,12 +1681,19 @@ export class StateStore {
     // Own the complete handler before its first asynchronous action, not only
     // its Trust/source leaf. Session capture, Run assembly, admission/replay
     // and any accepted Run agent load must join before StateOwner is released.
-    const promise = Promise.resolve().then(() => operation(abort.signal));
+    let enter!: () => void;
+    const promise = new Promise<T>((resolve, reject) => {
+      enter = () => { try { resolve(operation(abort.signal)); } catch (error) { reject(error); } };
+    });
     const task = { abort, promise }; this.installedAdmissionTasks.add(task);
     const release = (error?: unknown) => {
       if (!(error instanceof ResourceRetirementError)) this.installedAdmissionTasks.delete(task);
     };
     void promise.then(() => release(), release);
+    // Register before entry, but do not queue that entry in another microtask:
+    // each real producer snapshots its caller-owned inputs synchronously before
+    // its first await. Deferring entry would reopen an authority-mutation race.
+    enter();
     return promise;
   }
 
@@ -1673,7 +1705,7 @@ export class StateStore {
     await validateControlChannelClosure(this.artifacts, this.owner, identity);
     signal.throwIfAborted();
     const { replayInstalledRunAdmission, admitInstalledRun } = await import('./reducers/admission.js');
-    const replay = await replayInstalledRunAdmission(this.driver, this.artifacts, this.owner, normalized, identity);
+    const replay = await replayInstalledRunAdmission(this.driver, this.artifacts, this.owner, normalized, identity, this.runtimeAuthority, signal);
     if (replay) {
       if ('run' in replay) {
         if (['queued', 'running', 'waiting'].includes(readRun(this.driver, replay.run.id).status)) await this.retainInstalledAgent(replay.run.id);
@@ -1746,7 +1778,7 @@ export class StateStore {
       if (authority.bindings.some(binding => binding.expiresAt !== undefined && binding.expiresAt < assembled.deadlineAt))
         throw new InstalledModelAuthorizationError();
       assertCurrentControlFrame(this.owner, identity); token.assertHeld();
-      return admitInstalledRun(this.driver, this.artifacts, this.owner, assembled, identity);
+      return admitInstalledRun(this.driver, this.artifacts, this.owner, assembled, identity, this.runtimeAuthority, signal);
     });
     const runId = identityHash('cliq-run-id-v1', identity.principalId, 'run.submit', normalized.request.admissionKey);
     // Register before that asynchronous producer can commit a visible Run.
@@ -1795,19 +1827,22 @@ export class StateStore {
   private retainInstalledAgent(runId: string, material?: RunAssemblyValidationMaterial, admission?: Promise<AdmitRunResult>): Promise<AgentRunState> {
     const existing = this.installedAgents.get(runId); if (existing) return Promise.resolve(existing);
     const loading = this.installedAgentLoads.get(runId); if (loading) return loading;
-    const task = (async () => {
+    const task = this.ownInstalledAdmission(async signal => {
+      signal.throwIfAborted();
       if (admission && (await admission).run.id !== runId)
         throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed admission deadline owner names a different Run');
       if (!material) {
         const { loadInstalledRunMaterial } = await import('./installed-run.js');
         const run = readRun(this.driver, runId), spec = decodeRunSpec(await this.artifacts.readCanonical(run.specRef));
-        material = await loadInstalledRunMaterial({ selected: this.installedRuntime!, artifacts: this.artifacts, assemblyRef: spec.assemblyRef });
+        material = await loadInstalledRunMaterial({ selected: this.installedRuntime!, artifacts: this.artifacts, assemblyRef: spec.assemblyRef, signal });
       }
       const agent = await loadAgentRun(this.driver, this.artifacts, this.owner,
-        { runId, material, releaseKeys: this.runtimeAuthority!.releaseKeys }, undefined, this.installedRuntime);
+        { runId, material, releaseKeys: this.runtimeAuthority!.releaseKeys }, undefined, this.installedRuntime, signal,
+        phase => { if (this.installedRunPhases.has(runId)) this.installedRunPhases.set(runId, phase); });
+      signal.throwIfAborted();
       if (['queued', 'running', 'waiting'].includes(readRun(this.driver, runId).status)) this.installedAgents.set(runId, agent);
       return agent;
-    })();
+    });
     this.installedAgentLoads.set(runId, task);
     void task.then(() => this.installedAgentLoads.delete(runId), error => {
       if (!(error instanceof ResourceRetirementError)) this.installedAgentLoads.delete(runId);
@@ -1954,9 +1989,13 @@ export class StateStore {
 
   private scheduleInstalledRun(runId: string): void {
     if (!this.supportsInstalledRuns() || this.installedRunTasks.has(runId)) return;
+    this.installedRunPhases.set(runId, 'scheduled');
     const task = this.installedQueue.then(async () => {
       try { await this.driveInstalledRun(runId); }
-      finally { await this.retireInstalledTerminalRun(runId); }
+      finally {
+        try { await this.retireInstalledTerminalRun(runId); }
+        finally { this.installedRunPhases.delete(runId); }
+      }
     });
     this.installedRunTasks.set(runId, task);
     this.installedQueue = task.catch(error => {
@@ -1976,6 +2015,7 @@ export class StateStore {
     // A model end is not terminal. Validate the actual terminal graph before
     // releasing its original installation/launcher image owners; failures keep
     // both the cache and StateOwner, never masquerading as positive cleanup.
+    this.installedRunPhases.set(runId, 'terminal_retirement');
     await readRecoveryClosure(this.driver, this.artifacts, runId);
     const opening = this.executions.get(runId);
     if (opening) {
@@ -2003,11 +2043,13 @@ export class StateStore {
         !this.driver.prepare('SELECT 1 FROM workspace_generations WHERE run_id = ? LIMIT 1').get(runId) &&
         !this.driver.prepare('SELECT 1 FROM worker_launches WHERE run_id = ? LIMIT 1').get(runId) &&
         !this.installedWorkerSlotAvailable(runId)) return;
+    this.installedRunPhases.set(runId, 'drive_material');
     const spec = decodeRunSpec(await this.artifacts.readCanonical(run.specRef));
     const material = await loadInstalledRunMaterial({ selected: this.installedRuntime!, artifacts: this.artifacts, assemblyRef: spec.assemblyRef });
     const opening = this.executions.get(runId);
     let execution = opening ? (await opening).execution : undefined;
     const nativeExecution = async () => execution ??= await this.loadRunExecution({ runId, material });
+    this.installedRunPhases.set(runId, 'drive_agent');
     const agent = await this.retainInstalledAgent(runId, material);
     let predecessorWorker = !opening && run.status === 'running' && run.activeWorkerLaunchId !== undefined;
     for (;;) {
@@ -2041,23 +2083,59 @@ export class StateStore {
       if (current.status === 'waiting') return;
       if (current.status === 'queued' && (execution || this.driver.prepare(
         "SELECT 1 FROM workspace_generations WHERE run_id = ? AND phase = 'quarantined' LIMIT 1").get(runId))) {
+        this.installedRunPhases.set(runId, 'drive_retirement');
         current = await (await nativeExecution()).resumeCurrentRetirement({ expectedRunRevision: current.revision });
       }
       if (sampleCanonicalNow() >= current.deadlineAt && !current.stopIntentRef) {
         current = (await agent.expireRun({ expectedRunRevision: current.revision })).run;
         this.requestInstalledRunStop(runId);
       }
+      if (current.nextStep === 'verify' && (current.cancelRequested || current.stopIntentRef)) {
+        const cut = await readRecoveryClosure(this.driver, this.artifacts, runId);
+        const progress = await readVerifierProgress(this.driver, this.artifacts, cut);
+        if (cut.run.revision !== current.revision || readRun(this.driver, runId).revision !== current.revision) continue;
+        // A positively retained integrity observation outranks a prior cancel
+        // or deadline. It is derived again by the normal stop reducer.
+        if (progress.entries.some(entry => entry.receipt?.outcome === 'source_mutation'))
+          current = (await agent.stopForVerification({ expectedRunRevision: current.revision })).run;
+      }
       if (current.cancelRequested || current.stopIntentRef) {
         if (execution || current.activeWorkerLaunchId) await (await nativeExecution()).finishCurrentStop({ expectedRunRevision: current.revision });
         else await agent.commitTerminalStop({ expectedRunRevision: current.revision });
         return;
       }
-      // A sealed candidate has no productive worker. Closure and result
-      // transactions neither borrow launcher images nor compete for that slot.
       if (current.nextStep === 'verify') {
-        await agent.completeVerification({ expectedRunRevision: current.revision }); continue;
+        this.installedRunPhases.set(runId, 'drive_verify');
+        const cut = await readRecoveryClosure(this.driver, this.artifacts, runId);
+        const progress = await readVerifierProgress(this.driver, this.artifacts, cut);
+        if (readRun(this.driver, runId).revision !== current.revision || cut.run.revision !== current.revision) continue;
+        const mutation = progress.entries.some(entry => entry.receipt?.outcome === 'source_mutation');
+        const assertion = progress.entries.some(entry => entry.planEntry.required && entry.receipt?.outcome === 'assertion_failed');
+        const exhaustedInfrastructure = progress.entries.some(entry => entry.planEntry.required && entry.receipt?.outcome === 'infra_failed' &&
+          cut.journal.filter(row => row.opId === entry.terminalJournal?.opId && row.phase === 'dispatch_claimed').length >= entry.planEntry.maxAttempts);
+        if (mutation || exhaustedInfrastructure || assertion && current.repairCount >= spec.budgets.repairAttempts) {
+          await agent.stopForVerification({ expectedRunRevision: current.revision });
+          this.requestInstalledRunStop(runId); continue;
+        }
+        if (assertion) {
+          await agent.authorizeVerifierRepair({ expectedRunRevision: current.revision }); continue;
+        }
+        // Empty and fully eligible plans need no worker. The result closure
+        // accepts only its independently validated immutable receipts.
+        if (progress.complete) {
+          await agent.completeVerification({ expectedRunRevision: current.revision }); continue;
+        }
+        const opId = verifierOperationId(runId, progress.candidate.itemId, progress.planRef, progress.nextVerifierIndex);
+        const operation = cut.journal.filter(row => row.opId === opId), last = operation.at(-1);
+        if (last && ['prepared', 'dispatch_claimed', 'unknown', 'abandoned'].includes(last.phase)) return;
+        if (last?.phase === 'failed' && operation.some(row => row.attempt === last.attempt && row.phase === 'dispatch_claimed')) return;
+        if (current.status === 'queued' && !this.installedWorkerSlotAvailable(runId)) return;
+        await (await nativeExecution()).executeCurrentVerifier({ expectedRunRevision: current.revision }); continue;
       }
+      // Final result transactions never borrow launcher images or compete for
+      // a productive worker slot.
       if (current.nextStep === 'finalize') {
+        this.installedRunPhases.set(runId, 'drive_finalize');
         await agent.commitRunResult({ expectedRunRevision: current.revision }); continue;
       }
       if (current.status === 'queued' && !this.installedWorkerSlotAvailable(runId)) return;
@@ -2120,14 +2198,10 @@ export class StateStore {
     const { requestDigest, ...core } = value;
     if (requestDigest !== canonicalSha256(core)) throw new KernelStorageError('INVALID_REQUEST', 'run.cancel request digest differs');
     await validateControlChannelClosure(this.artifacts, this.owner, identity);
-    const runId = value.runId as string, run = readRun(this.driver, runId), spec = decodeRunSpec(await this.artifacts.readCanonical(run.specRef));
+    const runId = value.runId as string;
     let agent = this.installedAgents.get(runId);
     if (!agent) {
-      const { loadInstalledRunMaterial } = await import('./installed-run.js');
-      const material = await loadInstalledRunMaterial({ selected: this.installedRuntime, artifacts: this.artifacts, assemblyRef: spec.assemblyRef });
-      agent = await loadAgentRun(this.driver, this.artifacts, this.owner,
-        { runId, material, releaseKeys: this.runtimeAuthority.releaseKeys }, undefined, this.installedRuntime);
-      if (['queued', 'running', 'waiting'].includes(readRun(this.driver, runId).status)) this.installedAgents.set(runId, agent);
+      agent = await this.retainInstalledAgent(runId);
     }
     const result = await agent.cancelRun({ ...identity, requestId: value.requestId as string, expectedRunRevision: value.expectedRevision as number });
     // The StopIntent commits first; revocation enters native synchronously.
@@ -2459,6 +2533,8 @@ export class StateStore {
       await retireAbandonedSourceInspections(driver, artifacts, ownerContext,
         runtimeAuthority?.sourceInspection && { bundle: runtimeAuthority.bundle,
           releaseKeys: runtimeAuthority.releaseKeys, sandboxProfile: runtimeAuthority.sourceInspection.sandboxProfile });
+      const { validateAuthorizationHistory } = await import('./authorization.js');
+      await validateAuthorizationHistory(driver, artifacts, ownerContext, runtimeAuthority);
       return new StateStore(stateRoot, driver, artifacts, ownerContext, runtimeAuthority, installedRuntime, installedAnchor);
     } catch (error) {
       failStateStoreOpening(heldLock, driver, error);
@@ -2470,7 +2546,8 @@ export class StateStore {
   }
 
   admitRun(input: AdmitRunInput): Promise<AdmitRunResult> {
-    return admitRun(this.driver, this.artifacts, this.owner, input);
+    if (this.closed || this.closeRequested || this.released) throw new KernelStorageError('LEASE_FENCED', 'StateStore is closing or closed');
+    return this.ownInstalledAdmission(signal => admitRun(this.driver, this.artifacts, this.owner, input, this.runtimeAuthority, signal));
   }
 
   registerWorkspaceGeneration(input: RegisterWorkspaceGenerationInput) {
@@ -2517,7 +2594,7 @@ export class StateStore {
   }
 
   loadAgentRun(input: LoadAgentRunInput) {
-    return loadAgentRun(this.driver, this.artifacts, this.owner, input, undefined, this.installedRuntime);
+    return this.ownInstalledAdmission(signal => loadAgentRun(this.driver, this.artifacts, this.owner, input, undefined, this.installedRuntime, signal));
   }
 
   /** Production broker only. The native image owns raw credential/header bytes
@@ -2791,8 +2868,8 @@ export class StateStore {
     if (this.closed || this.closeRequested || this.released) throw new KernelStorageError('LEASE_FENCED', 'StateStore is closing or closed');
     const runId = input.runId;
     if (this.executions.has(runId)) throw new KernelStorageError('REVISION_CONFLICT', 'Run already has an execution resource owner');
-    const opening = loadRunExecution(this.driver, this.artifacts, this.owner, this.runtimeAuthority, input,
-      () => this.closed || this.closeRequested || this.released, this.installedRuntime, this.installedAnchor, this);
+    const opening = this.ownInstalledAdmission(signal => loadRunExecution(this.driver, this.artifacts, this.owner, this.runtimeAuthority, input,
+      () => this.closed || this.closeRequested || this.released, this.installedRuntime, this.installedAnchor, this, signal));
     this.executions.set(runId, opening);
     let scope: Awaited<typeof opening> | undefined;
     try {
@@ -2964,6 +3041,18 @@ export class StateStore {
    * This is not a join, worker fence or permission to release StateOwner. */
   beginClose(): void {
     if (this.closed) return;
+    if (!this.closeRequested && this.installedRuntime && this.installedRunTasks.size) {
+      // A single fixed, secret-free observation at the actual stop boundary.
+      // It neither extends the stop deadline nor supplies recovery evidence.
+      try {
+        const phases: Partial<Record<NonNullable<ReturnType<typeof this.installedRunPhases.get>>, number>> = {};
+        for (const phase of this.installedRunPhases.values()) phases[phase] = (phases[phase] ?? 0) + 1;
+        console.error(canonicalJsonBytes({ diagnosticOnly: true, scope: 'installed-shutdown-progress', phases,
+          driverTasks: this.installedRunTasks.size, agentLoads: this.installedAgentLoads.size,
+          admissions: this.installedAdmissionTasks.size, modelOperations: this.modelOperations.size,
+          modelCompletions: this.installedModelCompletions.size, modelClosures: this.installedModelClosures.size }).toString('utf8'));
+      } catch { /* Reporting must not prevent synchronous revocation. */ }
+    }
     // The gate is synchronous: existing execution references cannot dispatch
     // while listeners/opening resources are being joined.
     this.closeRequested = true;

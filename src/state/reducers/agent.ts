@@ -15,7 +15,7 @@ import { assertSameModelOperation, modelRetryState, type ModelRetryState } from 
 import { contextSourceDigest, planContextCompaction, replaceCompactedPrefix, validateContextItems, type ContextItem } from '../../runtime/context-compaction.js';
 import { loadInstructionText, projectNormalContext, readCanonicalArtifact, readModelContext, readModelTurnMaterial } from '../agent-context.js';
 import type { ArtifactCatalog, PublishedArtifact } from '../artifacts.js';
-import { decodeContextManifest, decodeRunSpec } from '../decoders.js';
+import { decodeContextManifest, decodeRunSpec, decodeVerifierSpec } from '../decoders.js';
 import { joinResourceOperations, KernelStorageError, ModelRetryPendingError, stateOperation } from '../errors.js';
 import { sampleCanonicalNow } from '../canonical-time.js';
 import { readHighestPreparedAttempt, readInvocationAttempt, readOperationJournal } from '../repositories/journal.js';
@@ -26,13 +26,18 @@ import type { StateOwnerContext } from '../state-owner.js';
 import { prepareValidatedInvocation, readModelRetryHistory, settleValidatedInvocation, type SettleInvocationInput } from './invocation.js';
 import { loadToolContinuation } from './tool.js';
 import { readToolCut } from '../tool-cut.js';
-import type { ReleaseTrustKey } from '../../policy/runtime-authority.js';
+import type { ReleaseTrustKey, RuntimeBundleManifest } from '../../policy/runtime-authority.js';
 import type { NativeWorkerRetirement } from '../tool-checkpoint.js';
 import { planModelOperationGrant } from '../../kernel/model-grant.js';
 import { readModelGrantClosure, readModelTarget } from '../model-grant.js';
 import type { HeldInstalledRuntime } from '../installed-runtime.js';
 import { loadFinalCandidate } from '../final-candidate.js';
-import { loadRunResult } from '../run-result.js';
+import { loadRunResult, type RunResultPhase } from '../run-result.js';
+import { loadVerifierContinuation } from '../verifier-execution.js';
+import { loadVerifierRepair } from '../verifier-repair.js';
+import { beginVerifierCompletion } from '../verifier-completion.js';
+import type { NativeVerifierResult } from '../../sandbox/linux-worker.js';
+import { validateVerifierRunAdmission } from '../verifier-admission.js';
 
 export type LoadAgentRunInput = {
   runId: string;
@@ -120,8 +125,10 @@ function appendItems(connection: SqliteConnection, run: Run, items: Continuation
 /** A loaded authority handle only: every mutable Run/frontier/Journal value is read from SQLite on each operation. */
 export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function loadAgentRun(
   driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, input: LoadAgentRunInput,
-  reobserve?: NativeWorkerRetirement, installedRuntime?: HeldInstalledRuntime
+  reobserve?: NativeWorkerRetirement, installedRuntime?: HeldInstalledRuntime, signal?: AbortSignal,
+  onResultPhase?: (phase: RunResultPhase) => void
 ) {
+  signal?.throwIfAborted();
   const runId = input.runId;
   const releaseKeys = input.releaseKeys === undefined ? undefined : immutableSnapshot(input.releaseKeys);
   const material = Object.fromEntries(Object.entries(input.material).map(([key, value]) =>
@@ -131,6 +138,11 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
   const spec = immutableSnapshot(decodeRunSpec(await readCanonicalArtifact(artifacts, admittedRun.specRef)));
   if (spec.operation !== 'agent') throw new TypeError('delivery Runs cannot load a model');
   const assembly = immutableSnapshot(await readCanonicalArtifact<RunAssemblyV1>(artifacts, spec.assemblyRef));
+  if (decodeVerifierSpec(await readCanonicalArtifact(artifacts, spec.verifierSpecRef)).verifiers.length) {
+    if (!releaseKeys) throw new TypeError('verifier authority requires the original trusted Supervisor release roots');
+    const bundle = await readCanonicalArtifact<RuntimeBundleManifest>(artifacts, assembly.runtime.runtimeBundleRef);
+    await validateVerifierRunAdmission(driver, artifacts, owner, { bundle, releaseKeys }, runId, signal);
+  }
   const manifest = await readCanonicalArtifact<ToolContractManifestV1>(artifacts, assembly.tools.manifestRef);
   const exactKeys = (value: object, keys: string[]) => Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
   if (manifest.schemaVersion !== 1 || manifest.format !== 'cliq-tool-contracts-v1' ||
@@ -250,11 +262,18 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
   const toolContinuation = await loadToolContinuation(driver, artifacts, owner, {
     run: admittedRun, spec, assembly, contracts, resolveToolInput, releaseKeys
   }, reobserve, installedRuntime);
+  const verifierAuthority = { run: admittedRun, spec, assembly, releaseKeys };
+  const verifierContinuation = await loadVerifierContinuation(driver, artifacts, owner, verifierAuthority);
   return Object.freeze({
     ...toolContinuation,
+    ...verifierContinuation,
+    ...loadVerifierRepair(driver, artifacts, owner, { run: admittedRun, spec }),
+    beginVerifierCompletion: stateOperation('RECOVERY_REQUIRED', (input: {
+      expectedRunRevision: number; opId: string; attempt: number; result: NativeVerifierResult
+    }) => beginVerifierCompletion(driver, artifacts, owner, verifierAuthority, input, reobserve)),
     ...loadFinalCandidate(driver, artifacts, owner, { run: admittedRun, spec, assembly, resolveToolInput,
       expireRun: toolContinuation.expireRun, stopForResourceFailure: toolContinuation.stopForResourceFailure }, reobserve),
-    ...loadRunResult(driver, artifacts, owner, { run: admittedRun, spec, principalId: readSessionPrincipalId(driver, admittedRun.sessionId) }),
+    ...loadRunResult(driver, artifacts, owner, { run: admittedRun, spec, principalId: readSessionPrincipalId(driver, admittedRun.sessionId) }, onResultPhase),
     model,
     resolveToolInput,
     /** Read the current durable call. This projection is neither a grant nor permission to dispatch it. */

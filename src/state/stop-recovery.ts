@@ -10,7 +10,7 @@ import { readHistoricalControlChannel } from './control-channel.js';
 import { decodeAdmittedContext, decodeSessionProjection } from './decoders.js';
 import { joinResourceOperations } from './errors.js';
 import { isZeroBudget } from './invariants.js';
-import { readControlRequest, readSession, readSessionPrincipalId } from './rows.js';
+import { readCheckpoint, readControlRequest, readSession, readSessionPrincipalId } from './rows.js';
 import type { SqliteDriver } from './sqlite-driver.js';
 import { readResourceStopCause } from './resource-stop.js';
 import { validateModelFailureStop } from './model-failure.js';
@@ -18,6 +18,9 @@ import { assertRetiredGenerationCut } from './generation-retirement.js';
 import { validateInstalledBrokerTerminalHistory } from './broker-ambiguity.js';
 import { validateInstalledModelNoReleaseHistory } from './broker-no-release.js';
 import { validatePrivateToolRollbackHistory } from './private-tool-rollback.js';
+import { readVerifierFailureCause, readVerifierIntegrityCause, readVerifierPolicyDenial, validateVerifierStoppedHistory } from './verifier-stop-history.js';
+import type { VerifierPolicyDecisionItem } from '../kernel/verifier-invocation.js';
+import type { VerifierRecoveryCut } from './verifier-recovery.js';
 
 export type CancelResponse = Extract<ControlApplicationResponseV1, { ok: true }> & { result: Extract<ControlResultV1, { method: 'run.cancel' }> };
 
@@ -41,7 +44,11 @@ export async function readCancelResponse(driver: SqliteDriver, artifacts: Artifa
       readSessionPrincipalId(driver, run.sessionId) !== principalId ||
       driver.prepare('SELECT principal_id FROM runs WHERE id = ?').get<{ principal_id: string }>(run.id)?.principal_id !== principalId) throw new TypeError('cancellation control channel has a foreign owner');
   const stop = decodeAgentStop(await readCanonicalArtifact(artifacts, snapshot.run.stopIntentRef!), snapshot.run);
-  if (stop.origin !== 'user_cancel' || stop.principalId !== principalId) throw new TypeError('cancellation snapshot has no owning StopIntent');
+  // A later cancellation still installs its monotonic fence when an already
+  // proven integrity stop wins. This response is control ownership, not proof
+  // of the integrity cause (the full recovery walk checks that separately).
+  if (!(stop.origin === 'user_cancel' && stop.principalId === principalId || stop.origin === 'kernel_integrity'))
+    throw new TypeError('cancellation snapshot has no owning StopIntent');
   return { response, row };
 }
 
@@ -52,15 +59,78 @@ export async function readAgentStop(driver: SqliteDriver, artifacts: ArtifactCat
     if (!run.cancelRequested) throw new TypeError('cancellation lost its monotonic dispatch fence');
     const { response, row } = await readCancelResponse(driver, artifacts, run, intent.principalId, intent.requestId);
     if (response.result.snapshot.run.stopIntentRef !== run.stopIntentRef || row.committedAt !== intent.createdAt) throw new TypeError('winning cancellation has no exact control-row owner');
-  } else if (run.cancelRequested) throw new TypeError('resource/deadline stop cannot override user cancellation');
+  } else if (run.cancelRequested) {
+    if (intent.origin !== 'kernel_integrity') throw new TypeError('resource/deadline stop cannot override user cancellation');
+    const principalId = readSessionPrincipalId(driver, run.sessionId);
+    let owned = false;
+    for (const row of driver.prepare("SELECT request_id, response_ref FROM control_requests WHERE principal_id = ? AND method = 'run.cancel'")
+      .all<{ request_id: string; response_ref: string }>(principalId)) {
+      const response = await readCanonicalArtifact<CancelResponse>(artifacts, row.response_ref);
+      if (response.result?.snapshot?.run.id !== run.id) continue;
+      await readCancelResponse(driver, artifacts, run, principalId, row.request_id); owned = true;
+    }
+    if (!owned) throw new TypeError('integrity stop lost the original monotonic cancellation owner');
+  }
   if (intent.origin === 'runtime' && intent.runtimeSubtype === 'runtime') {
     await validateModelFailureStop(driver, artifacts, closure, intent);
   } else if (intent.origin === 'budget' || intent.origin === 'runtime') {
     const cause = await readResourceStopCause(driver, artifacts, closure, intent.createdAt);
     if (!cause) throw new TypeError('resource stop has no reproducible failure');
     requireEqual(intent, { schemaVersion: 1, runId: run.id, createdAt: intent.createdAt, ...cause }, 'resource stop cause');
+  } else if (intent.origin === 'verification') {
+    const cause = await readVerifierFailureCause(driver, artifacts, closure, intent.createdAt, intent.candidateItemId);
+    if (!cause) throw new TypeError('verification stop has no reproducible exhausted required failure');
+    requireEqual(intent, cause, 'verification stop cause');
+  } else if (intent.origin === 'kernel_integrity') {
+    const cause = await readVerifierIntegrityCause(driver, artifacts, closure, intent.createdAt);
+    if (!cause) throw new TypeError('verifier integrity stop has no exact typed mutation evidence');
+    requireEqual(intent, cause, 'verifier integrity stop cause');
   }
+  await validateVerifierPolicyDenialHistory(driver, artifacts, closure);
+  await validateVerifierStoppedHistory(driver, artifacts, closure);
   return intent;
+}
+
+/** Validate every retained denial, including one superseded by cancellation.
+ * Does not load a RecoveryClosure or infer permission from its caller. */
+export async function validateVerifierPolicyDenialHistory(driver: SqliteDriver, artifacts: ArtifactCatalog, closure: VerifierRecoveryCut) {
+  const { run } = closure;
+  const validated = new Set<string>();
+  let currentDenialValidated = false;
+  for (const itemRow of closure.items) {
+    const item = await readCanonicalArtifact<ContinuationItem>(artifacts, itemRow.payloadRef);
+    if (item.kind !== 'policy_decision' || item.subjectKind !== 'verifier_launch' || item.decision !== 'deny') continue;
+    if (!run.stopIntentRef) throw new TypeError('verifier denial lost its Run stop fence');
+    const stopRef = item.denialOutcome.stopIntentRef;
+    const intent = decodeAgentStop(await readCanonicalArtifact(artifacts, stopRef), run);
+    if (intent.origin !== 'policy_deny') throw new TypeError('verifier denial does not name its original policy stop');
+    const cause = await readVerifierPolicyDenial(driver, artifacts, closure, intent.createdAt, intent.opId);
+    if (!cause || canonicalSha256(cause.evidence) !== intent.policyChannelEvidenceRef || cause.evidence.evidenceDigest !== intent.policyChannelEvidenceDigest)
+      throw new TypeError('verifier policy denial has no exact reproduced named-action decision');
+    requireEqual(await readCanonicalArtifact(artifacts, intent.policyChannelEvidenceRef), cause.evidence, 'retained verifier denial evidence');
+    requireEqual(await readCanonicalArtifact(artifacts, cause.evidence.requestRef), cause.planned.request, 'retained verifier denied request');
+    requireEqual(await readCanonicalArtifact(artifacts, cause.evidence.targetRef), cause.planned.target, 'retained verifier denied target');
+    const expected: VerifierPolicyDecisionItem = { schemaVersion: 1, kind: 'policy_decision', subjectKind: 'verifier_launch',
+      itemId: identityHash('cliq-verifier-policy-item-v1', run.id, intent.opId, intent.policyChannelEvidenceRef), runId: run.id,
+      opId: intent.opId, principalId: cause.principalId, decisionRef: intent.policyChannelEvidenceRef,
+      policyChannelEvidenceRef: intent.policyChannelEvidenceRef, policyChannelEvidenceDigest: intent.policyChannelEvidenceDigest,
+      createdAt: intent.createdAt, decisionSource: 'direct_policy', decision: 'deny',
+      denialOutcome: { kind: 'stop_intent', subjectKind: 'verifier_launch', stopIntentRef: stopRef } };
+    const rows = closure.items.filter(row => row.itemId === expected.itemId);
+    if (rows.length !== 1 || rows[0]!.createdAt !== intent.createdAt) throw new TypeError('verifier denial has no unique original policy item');
+    requireEqual(await readCanonicalArtifact(artifacts, rows[0]!.payloadRef), expected, 'verifier denied policy item');
+    const checkpoint = readCheckpoint(driver, identityHash('cliq-verifier-denial-checkpoint-v1', run.id, intent.opId, intent.policyChannelEvidenceRef));
+    if (checkpoint.runId !== run.id || checkpoint.runItemSeq !== rows[0]!.itemSeq || checkpoint.createdAt !== intent.createdAt ||
+        checkpoint.journalSeq > closure.journal.length || closure.journal.some(entry => entry.opId === intent.opId))
+      throw new TypeError('verifier denied policy item has no exact undispatched atomic Checkpoint');
+    if (closure.journal.some(entry => entry.seq > checkpoint.journalSeq && entry.phase === 'prepared'))
+      throw new TypeError('verifier policy denial was followed by a productive preparation');
+    if (stopRef === run.stopIntentRef) currentDenialValidated = true;
+    validated.add(item.itemId);
+  }
+  if (run.stopIntentRef && decodeAgentStop(await readCanonicalArtifact(artifacts, run.stopIntentRef), run).origin === 'policy_deny' && !currentDenialValidated)
+    throw new TypeError('verifier policy denial lacks its original policy decision');
+  return validated;
 }
 
 export async function validateStopRecovery(driver: SqliteDriver, artifacts: ArtifactCatalog, closure: RecoveryClosureV1) {
@@ -96,13 +166,14 @@ export async function validateStopRecovery(driver: SqliteDriver, artifacts: Arti
   assertRetiredGenerationCut(driver, run, closure.workspaceGenerations);
   const modelNoRelease = await validateInstalledModelNoReleaseHistory(driver, artifacts, closure);
   const privateRollbacks = await validatePrivateToolRollbackHistory(driver, artifacts, closure);
+  const verifierStops = await validateVerifierStoppedHistory(driver, artifacts, closure);
   for (const { entry, hasClaim } of stopInvocationHistory(journal).values()) {
     if (entry.opKind === 'model' && entry.replayClass === 'retry' && entry.phase === 'unknown' && abandoned.some(closed =>
       closed.opId === entry.opId && closed.attempt === entry.attempt && closed.unknownJournalSeq === entry.seq &&
       closed.budgetSettlementRef === entry.budgetSettlementRef)) continue;
     if (entry.phase === 'failed' && (entry.opKind === 'model' && modelNoRelease.has(entry.seq) ||
-        entry.opKind === 'tool' && privateRollbacks.has(entry.seq))) continue;
-    if (!['model', 'tool'].includes(entry.opKind) || (entry.phase !== 'completed' &&
+        entry.opKind === 'tool' && privateRollbacks.has(entry.seq) || entry.opKind === 'verifier' && verifierStops.has(entry.seq))) continue;
+    if (!['model', 'tool', 'verifier'].includes(entry.opKind) || (entry.phase !== 'completed' &&
         (entry.phase !== 'failed' || hasClaim))) throw new TypeError('terminal stop retains unresolved dispatch evidence');
     if (entry.phase === 'failed' && entry.errorRef === run.stopIntentRef && entry.timestamp !== preparedAt) throw new TypeError('stop refund has no atomic terminal owner');
   }

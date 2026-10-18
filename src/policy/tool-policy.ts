@@ -67,12 +67,12 @@ export function planToolRequest(input: {
   return { request: { ...core, requestDigest: canonicalSha256(core) } satisfies ToolRequestV1, target, entry };
 }
 
-/** Fixed evaluator over immutable requests. It accepts no caller-selected channel, primary key or decision. */
-export function loadToolPolicy(input: {
-  policy: RunPolicySnapshotV1; policyRef: string; assembly: RunAssemblyV1; assemblyRef: string;
-  principalId: string; workspaceIdentityRef: string; workspaceIdentityDigest: string; contracts: ToolInputAuthority[];
-}) {
-  const { policy, policyRef, assembly, assemblyRef, principalId, workspaceIdentityRef, workspaceIdentityDigest, contracts } = immutableSnapshot(input);
+/** Shared closed snapshot validation for ordinary tools and named effects. */
+export function assertRunPolicySnapshot(input: {
+  policy: RunPolicySnapshotV1; policyRef: string; assembly: RunAssemblyV1;
+  principalId: string; workspaceIdentityDigest: string;
+}): void {
+  const { policy, policyRef, assembly, principalId, workspaceIdentityDigest } = input;
   if (!exactKeys(policy, ['schemaVersion', 'format', 'principalId', 'workspaceIdentityDigest', 'mode', 'engine', 'toolManifestRef',
     'toolManifestDigest', 'decisions', 'decisionRules', 'repositoryRequestRefs', 'policyDigest', 'createdAt']) ||
       policy.schemaVersion !== 1 || policy.format !== 'cliq-run-policy-v1' || policy.principalId !== principalId ||
@@ -95,6 +95,35 @@ export function loadToolPolicy(input: {
   requireEqual(policy.decisionRules.filter((rule) => rule.source === 'builtin'), BUILTIN_POLICY_RULES, 'builtin deny floor');
   requireEqual(policy.repositoryRequestRefs, sorted(policy.decisionRules.filter((rule) => rule.source === 'repository_request')
     .map((rule) => rule.sourceRef!)), 'repository request source set');
+}
+
+/** The same fixed precedence applies to every typed primary key. Callers must
+ * derive channel/key from their closed subject, never from public overrides. */
+export function evaluateFrozenPolicyKey(policy: RunPolicySnapshotV1, actionClass: PolicyActionClass,
+  channel: RunPolicySnapshotV1['decisionRules'][number]['channel'], key: string,
+  bash?: { nestedBuiltinDenyHeads: readonly string[]; unsafeForAllow: boolean }) {
+  const rules = [...policy.decisionRules].sort((a, b) => {
+    const priority = (rule: typeof a) => rule.disposition === 'deny' ? rule.source === 'builtin' ? 0 : 1 : rule.disposition === 'allow' ? 2 : 3;
+    return priority(a) - priority(b) || a.order - b.order;
+  });
+  for (const rule of rules) {
+    if (rule.channel !== channel || (channel === 'bash' && !key && rule.disposition !== 'deny')) continue;
+    const nestedMatch = channel === 'bash' && rule.disposition === 'deny' && bash?.nestedBuiltinDenyHeads.some(head => matches(rule.pattern, head));
+    if (!nestedMatch && !matches(rule.pattern, key)) continue;
+    if (rule.source === 'repository_request' && RANK[rule.disposition] < RANK[policy.decisions[actionClass]]) continue;
+    const disposition = rule.disposition === 'allow' && channel === 'bash' && bash?.unsafeForAllow ? 'ask' : rule.disposition;
+    return { disposition, ruleId: rule.ruleId };
+  }
+  return { disposition: policy.decisions[actionClass], ruleId: undefined };
+}
+
+/** Fixed evaluator over immutable requests. It accepts no caller-selected channel, primary key or decision. */
+export function loadToolPolicy(input: {
+  policy: RunPolicySnapshotV1; policyRef: string; assembly: RunAssemblyV1; assemblyRef: string;
+  principalId: string; workspaceIdentityRef: string; workspaceIdentityDigest: string; contracts: ToolInputAuthority[];
+}) {
+  const { policy, policyRef, assembly, assemblyRef, principalId, workspaceIdentityRef, workspaceIdentityDigest, contracts } = immutableSnapshot(input);
+  assertRunPolicySnapshot({ policy, policyRef, assembly, principalId, workspaceIdentityDigest });
   const resolver = loadToolContracts(contracts);
   const byName = new Map(contracts.map(({ inputSchema: _schema, ...entry }) => [entry.name, entry]));
 
@@ -144,21 +173,8 @@ export function loadToolPolicy(input: {
       : channel.channel === 'bash' ? [channel.outerCommandHead ?? '']
         : channel.channel === 'mcp' ? [`${channel.registrationId}/${channel.serverToolName}`]
           : 'normalizedPlanIdentity' in channel ? [channel.normalizedPlanIdentity] : [];
-    const rules = [...policy.decisionRules].sort((a, b) => {
-      const priority = (rule: typeof a) => rule.disposition === 'deny' ? rule.source === 'builtin' ? 0 : 1 : rule.disposition === 'allow' ? 2 : 3;
-      return priority(a) - priority(b) || a.order - b.order;
-    });
-    const evaluateKey = (key: string) => {
-      for (const rule of rules) {
-        if (rule.channel !== channel.channel || (channel.channel === 'bash' && !key && rule.disposition !== 'deny')) continue;
-        const nestedMatch = channel.channel === 'bash' && rule.disposition === 'deny' && channel.nestedBuiltinDenyHeads.some((head) => matches(rule.pattern, head));
-        if (!nestedMatch && !matches(rule.pattern, key)) continue;
-        if (rule.source === 'repository_request' && RANK[rule.disposition] < RANK[policy.decisions[actionClass]]) continue;
-        const disposition = rule.disposition === 'allow' && channel.channel === 'bash' && channel.unsafeForAllow ? 'ask' : rule.disposition;
-        return { disposition, ruleId: rule.ruleId };
-      }
-      return { disposition: policy.decisions[actionClass], ruleId: undefined };
-    };
+    const evaluateKey = (key: string) => evaluateFrozenPolicyKey(policy, actionClass, channel.channel, key,
+      channel.channel === 'bash' ? channel : undefined);
     const winning = keys.map(evaluateKey).reduce((a, b) => RANK[b.disposition] > RANK[a.disposition] ? b : a);
     const core = { schemaVersion: 1 as const, format: 'cliq-policy-channel-evidence-v1' as const, principalId, runId: request.runId,
       policyRef, policyDigest: policy.policyDigest, frontierRef: request.frontierRef, opId: request.opId,

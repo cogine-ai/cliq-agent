@@ -3,6 +3,8 @@ import type { ArtifactRef, ReplayClass } from './types.js';
 import type { ToolPolicyDecisionItem } from './tool-authorization.js';
 import type { InputRequestItem, UserInputItem } from './user-input.js';
 import type { FinalCandidateItem } from './result.js';
+import type { VerifierPolicyDecisionItem } from './verifier-invocation.js';
+import type { VerifierResultItem, RepairDiagnosticItem, VerifierStopItem } from './verifier.js';
 
 export type ToolContractManifestV1 = {
   schemaVersion: 1;
@@ -132,4 +134,5 @@ export type RunContextCompactionItem = ItemIdentity & {
   sourceItemsDigest: string;
 };
 
-export type ContinuationItem = ModelTurnItem | ToolBatchItem | ToolResultItem | RunContextCompactionItem | ToolPolicyDecisionItem | InputRequestItem | UserInputItem | FinalCandidateItem;
+export type ContinuationItem = ModelTurnItem | ToolBatchItem | ToolResultItem | RunContextCompactionItem | ToolPolicyDecisionItem | InputRequestItem | UserInputItem | FinalCandidateItem |
+  VerifierPolicyDecisionItem | VerifierResultItem | RepairDiagnosticItem | VerifierStopItem;

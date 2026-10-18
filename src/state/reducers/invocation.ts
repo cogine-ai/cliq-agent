@@ -212,6 +212,9 @@ export async function prepareValidatedInvocation(
     metadata: PublishedArtifact[];
     validate: (connection: SqliteConnection, run: Run, attempt: number, now: string) => void;
     commit?: (connection: SqliteConnection, run: Run, entry: InvocationJournalEntry) => void;
+    /** Only the verifier owner may reproduce a completed infrastructure
+     * receipt's positive death and frozen same-candidate retry allowance. */
+    retryCompletedVerifier?: (connection: SqliteConnection, entries: InvocationJournalEntry[]) => void;
   }
 ): Promise<{ entry: InvocationJournalEntry; run: Run }> {
   decodeBudgetUsage(input.reservation, 'invocation reservation');
@@ -255,9 +258,10 @@ export async function prepareValidatedInvocation(
     typed?.validate(connection, run, attempt, now);
     if (highest !== undefined) {
       const previous = readInvocationAttempt(connection, input.runId, input.opId, highest.attempt);
-      if (!previousAttemptAllowsRetry(previous)) {
+      if (!previousAttemptAllowsRetry(previous) && !(input.opKind === 'verifier' && previous.at(-1)?.phase === 'completed' && typed?.retryCompletedVerifier)) {
         throw new KernelStorageError('STATE_TRANSITION_INVALID', 'prior invocation attempt is not retryable and settled');
       }
+      if (previous.at(-1)?.phase === 'completed') typed?.retryCompletedVerifier?.(connection, previous);
     }
     assertBudgetWithin(run.budgetConsumed, run.budgetReserved, input.reservation, ceilings);
     const nextReserved = addBudget(run.budgetReserved, input.reservation, 'Run budget reservation');
@@ -393,7 +397,7 @@ export async function claimInvocationDispatch(
 ): Promise<InvocationJournalEntry> {
   input = { ...input };
   const prepared = readHighestPreparedAttempt(driver, input.runId, input.opId);
-  if (prepared && (prepared.opKind === 'tool' || prepared.opKind === 'mcp')) {
+  if (prepared && (prepared.opKind === 'tool' || prepared.opKind === 'mcp' || prepared.opKind === 'verifier')) {
     const run = readRun(driver, input.runId);
     const spec = decodeRunSpec(await artifacts.readCanonical(run.specRef));
     const assembly = await artifacts.readCanonical<{ format?: string }>(spec.assemblyRef);
@@ -594,7 +598,7 @@ async function settleInitialInvocation(
     const prepared = entries.find((entry) => entry.phase === 'prepared');
     const claim = entries.find((entry) => entry.phase === 'dispatch_claimed');
     if (prepared === undefined) throw new KernelStorageError('NOT_FOUND', 'prepared invocation attempt is missing');
-    if (continuation === undefined && (prepared.opKind === 'tool' || prepared.opKind === 'mcp')) {
+    if (continuation === undefined && (prepared.opKind === 'tool' || prepared.opKind === 'mcp' || prepared.opKind === 'verifier')) {
       const spec = decodeRunSpec(await artifacts.readCanonical(snapshotRun.specRef));
       const assembly = await artifacts.readCanonical<{ format?: string }>(spec.assemblyRef);
       if (assembly.format === 'cliq-run-assembly-v1' && terminal.phase !== 'unknown') {

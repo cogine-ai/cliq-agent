@@ -11,7 +11,7 @@ import type { ModelTextV1 } from '../protocol/agent-ir.js';
 import { sampleCanonicalNow } from './canonical-time.js';
 import { openSqliteDriver } from './sqlite-driver.js';
 import { createAgentFixture } from './testing/agent-fixtures.js';
-import { activateFixtureWorker, admissionKey, disposeFixture, uuidv7 } from './testing/fixtures.js';
+import { admissionKey, disposeFixture, uuidv7 } from './testing/fixtures.js';
 import { quiescedToolCheckpoint } from './testing/tool-effects.js';
 import { openStateStore, publishInProcessChannel } from './store.js';
 
@@ -230,10 +230,14 @@ test('reopened recovery independently rejects an alternate candidate summary eve
   }
 });
 
-test('a candidate rejects unsupported nonempty verifiers rather than accepting a digest-only command and environment', async () => {
+test('digest-only verifier artifacts cannot pass admission without the exact public request and identity authority', async () => {
   const fixture = await createAgentFixture('candidate-nonempty-verifier', undefined, { mode: 'plan' });
+  const database = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
   try {
-    const { runSpec } = await fixture.store.readRecoveryClosure(fixture.runId);
+    const before = await fixture.store.readRecoveryClosure(fixture.runId), { runSpec } = before;
+    const counts = () => ['runs', 'worker_launches', 'control_requests'].map(table =>
+      database.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get<{ count: bigint }>()!.count);
+    const originalCounts = counts();
     // Deliberately schema-invalid canonical data, not an executable identity,
     // verifier grant, permission, launch or physical execution evidence.
     const command = { schemaVersion: 1, format: 'not-a-verifier-command', commandDigest: '' };
@@ -249,24 +253,17 @@ test('a candidate rejects unsupported nonempty verifiers rather than accepting a
     const spec: VerifierSpec = { schemaVersion: 1, format: 'cliq-verifier-spec-v1', verifiers: [entry], specDigest: '' };
     spec.specDigest = digestOmitting(spec, 'specDigest');
     const verifierSpecRef = (await fixture.store.artifacts.publishCanonical(spec, spec.format)).ref;
-    // Normal admission creates the exact RunSpec and consent under the same
-    // StateOwner. No authority or historical RunSpec is manufactured by SQL.
-    const admitted = await fixture.store.admitRun({ ...await publishInProcessChannel(fixture.store), requestId: uuidv7(),
+    // Publishing digest-bearing CAS data is not permission. Refuse before Run
+    // admission, rather than waiting for a candidate or manufacturing a grant.
+    await assert.rejects(fixture.store.admitRun({ ...await publishInProcessChannel(fixture.store), requestId: uuidv7(),
       admissionKey: admissionKey('candidate-verifier-data-only'), sessionId: fixture.store.getRun(fixture.runId).sessionId,
       expectedContextRevision: 1, workspacePath: fixture.workspace, objective: 'Reject an unsupported verifier chain.', allowUnverified: true,
       assemblyRef: runSpec.assemblyRef, policyRef: runSpec.policyRef, sandboxProfileRef: runSpec.sandboxProfileRef,
       verifierSpecRef, credentialGrantRefs: runSpec.credentialGrantRefs, budgets: runSpec.budgets,
       sourceProjectionRef: runSpec.sourceProjectionRef, baseWorkspaceManifestRef: runSpec.baseWorkspaceManifestRef,
-      frozenIgnoreRulesRef: (await fixture.store.artifacts.readCanonical<{ frozenIgnoreRulesRef: string }>(runSpec.sourceProjectionRef)).frozenIgnoreRulesRef });
-    const target = { ...fixture,
-      ...await activateFixtureWorker({ ...fixture, runId: admitted.run.id }, 'candidate-nonempty-verifier-worker') };
-    target.agent = await fixture.store.loadAgentRun({ runId: target.runId, material: fixture.authority.material,
-      releaseKeys: fixture.signed.releaseKeys });
-    const { completed, owner, checkpointId } = await completeFinalTurn(target);
-    const proof = await quiescedToolCheckpoint(target, checkpointId, true);
-    const before = await fixture.store.readRecoveryClosure(target.runId);
-    await assert.rejects(owner.complete({ expectedRunRevision: completed.run.revision,
-      checkpoint: proof.checkpoint }), { code: 'STATE_TRANSITION_INVALID' });
-    assert.deepEqual(await fixture.store.readRecoveryClosure(target.runId), before);
-  } finally { await disposeFixture(fixture); }
+      frozenIgnoreRulesRef: (await fixture.store.artifacts.readCanonical<{ frozenIgnoreRulesRef: string }>(runSpec.sourceProjectionRef)).frozenIgnoreRulesRef }),
+    { code: 'STATE_TRANSITION_INVALID', refusalCode: 'AUTHORIZATION_REQUIRED' });
+    assert.deepEqual(counts(), originalCounts);
+    assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
+  } finally { database.close(); await disposeFixture(fixture); }
 });

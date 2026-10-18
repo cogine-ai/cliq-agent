@@ -18,6 +18,34 @@ const persistentClientScript = vm.runInNewContext(persistentLiteral); assert.equ
 const hello = { protocolVersion: 1, method: 'control.hello' };
 const mutation = { protocolVersion: 1, method: 'run.submit', requestId: 'test-request-once' };
 const helloReply = JSON.stringify({ protocolVersion: 1, ok: true, result: { method: 'control.hello' } });
+
+test('stop diagnosis retains only fixed phases and bounded counts, never journal text or execution evidence', () => {
+  // Journal output is ordinary untrusted input here. This parser regression
+  // neither stops a service nor qualifies an actual installed lifecycle.
+  const start = source.indexOf('  const observeShutdownRefusal = '), end = source.indexOf('\n  const observe =', start);
+  assert(start >= 0 && end > start);
+  const code = ts.transpileModule(source.slice(start, end) + '\nglobalThis.inspectStop = observeShutdownRefusal;',
+    { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  const counters = { driverTasks: 1, agentLoads: 0, admissions: 0, modelOperations: 0, modelCompletions: 0, modelClosures: 0 };
+  const valid = { diagnosticOnly: true, scope: 'installed-shutdown-progress', phases: { result_recovery: 1 }, ...counters };
+  const untrusted = [valid, { ...valid, phases: { arbitrary_payload: 1 } }, { ...valid, driverTasks: 1001 },
+    { ...valid, phases: { result_commit: -1 } }, { ...valid, modelClosures: '1' }];
+  let scans = 0, calls = 0;
+  const context = { Buffer, ledger: { uid: 12345 }, environment: {}, parseJsonStrict: JSON.parse,
+    scanBytes: bytes => { assert(Buffer.isBuffer(bytes)); scans++; },
+    spawnSync: () => { calls++; return { status: 0, signal: null,
+      stdout: Buffer.from(untrusted.map(value => JSON.stringify({ ...value, message: 'do-not-retain-this-content' })).join('\n')),
+      stderr: Buffer.alloc(0) }; } };
+  vm.runInNewContext(code, context);
+  const result = JSON.parse(JSON.stringify(context.inspectStop('owned.service', '123')));
+  assert.deepEqual(result, { diagnosticOnly: true, available: true, refusals: [],
+    progress: [{ phases: { result_recovery: 1 }, ...counters }] });
+  assert.equal(JSON.stringify(result).includes('do-not-retain-this-content'), false);
+  assert.equal(calls, 1); assert.equal(scans, 2);
+  assert.deepEqual(JSON.parse(JSON.stringify(context.inspectStop('owned.service', 'untrusted-pid'))),
+    { diagnosticOnly: true, available: false });
+  assert.equal(calls, 1);
+});
 // Observation only: preserve and return the real Socket. This lets the parent
 // wait for an actual pre-connect kernel error before publishing the listener.
 const observeConnect = `import clientProbeNet from 'node:net';

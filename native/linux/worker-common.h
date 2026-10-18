@@ -34,9 +34,9 @@ static inline bool cliq_close_range(unsigned int first, unsigned int last) {
 
 static inline bool cliq_send(int socket, const struct cliq_worker_packet *packet,
                       const int *fds, size_t count) {
-    if (count > 5) { errno = EINVAL; return false; }
+    if (count > CLIQ_WORKER_MAX_FDS) { errno = EINVAL; return false; }
     struct iovec iov = { .iov_base = (void *)packet, .iov_len = sizeof(*packet) };
-    char ancillary[CMSG_SPACE(5 * sizeof(int))];
+    char ancillary[CMSG_SPACE(CLIQ_WORKER_MAX_FDS * sizeof(int))];
     memset(ancillary, 0, sizeof(ancillary));
     struct msghdr message = { .msg_iov = &iov, .msg_iovlen = 1 };
     if (count != 0) {
@@ -54,10 +54,10 @@ static inline bool cliq_send(int socket, const struct cliq_worker_packet *packet
 }
 
 static inline bool cliq_receive_flags(int socket, struct cliq_worker_packet *packet,
-                         int fds[5], size_t *count, int flags) {
+                         int fds[CLIQ_WORKER_MAX_FDS], size_t *count, int flags) {
     *count = 0;
     struct iovec iov = { .iov_base = packet, .iov_len = sizeof(*packet) };
-    char ancillary[CMSG_SPACE(5 * sizeof(int))];
+    char ancillary[CMSG_SPACE(CLIQ_WORKER_MAX_FDS * sizeof(int))];
     memset(ancillary, 0, sizeof(ancillary));
     struct msghdr message = { .msg_iov = &iov, .msg_iovlen = 1,
         .msg_control = ancillary, .msg_controllen = sizeof(ancillary) };
@@ -74,7 +74,7 @@ static inline bool cliq_receive_flags(int socket, struct cliq_worker_packet *pac
         size_t descriptors = (header->cmsg_len - CMSG_LEN(0)) / sizeof(int);
         int *passed = (int *)CMSG_DATA(header);
         for (size_t i = 0; i < descriptors; i++) {
-            if (*count < 5) fds[(*count)++] = passed[i]; else { ancillary_valid = false; close(passed[i]); }
+            if (*count < CLIQ_WORKER_MAX_FDS) fds[(*count)++] = passed[i]; else { ancillary_valid = false; close(passed[i]); }
         }
     }
     bool valid = ancillary_valid && received == (ssize_t)sizeof(*packet) &&
@@ -96,7 +96,7 @@ static inline bool cliq_receive_flags(int socket, struct cliq_worker_packet *pac
     return valid;
 }
 
-static inline bool cliq_receive(int socket, struct cliq_worker_packet *packet, int fds[5], size_t *count) {
+static inline bool cliq_receive(int socket, struct cliq_worker_packet *packet, int fds[CLIQ_WORKER_MAX_FDS], size_t *count) {
     return cliq_receive_flags(socket, packet, fds, count, 0);
 }
 

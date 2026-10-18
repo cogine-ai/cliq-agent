@@ -14,8 +14,13 @@ const entryLimit = 1024, rowLimit = 8192, cellLimit = 65536;
 type DatabaseFailureStage = 'open' | 'configure' | 'schema' | 'prepare' | 'rows' | 'stability';
 type DatabaseFailureClass = 'sqlite_error' | 'sqlite_busy' | 'sqlite_locked' | 'sqlite_io' | 'sqlite_corrupt'
   | 'sqlite_readonly' | 'sqlite_not_database' | 'out_of_range' | 'type_error' | 'other';
+type CorpusFailureStage = 'input' | 'root' | 'databases' | 'cas_inventory' | 'cas_files' | 'evidence' | 'stability' | 'cleanup';
+type CorpusFailureClass = 'guard_refused' | 'deadline_exceeded' | 'file_limit_exceeded' | 'entry_limit_exceeded'
+  | 'not_found' | 'access_refused' | 'symlink_refused' | 'descriptor_limit' | 'io_error' | 'other';
+export type CredentialSecretCorpusFailure = Readonly<Stats & { stage: CorpusFailureStage; errorClass: CorpusFailureClass; inventoryEntriesObserved: number }>;
 export class CredentialSecretCorpusError extends Error {
-  constructor(readonly databaseFailure?: Readonly<{ database: 'kernel' | 'authority'; stage: DatabaseFailureStage; errorClass: DatabaseFailureClass }>) {
+  constructor(readonly databaseFailure?: Readonly<{ database: 'kernel' | 'authority'; stage: DatabaseFailureStage; errorClass: DatabaseFailureClass }>,
+    readonly corpusFailure?: CredentialSecretCorpusFailure) {
     super('credential secret corpus did not qualify'); this.name = 'CredentialSecretCorpusError';
   }
 }
@@ -117,7 +122,13 @@ export async function scanCredentialSecretCorpus(input: CredentialSecretCorpusIn
   const stats: Stats = { filesScanned: 0, fileBytesScanned: 0, sqliteDatabasesScanned: 0,
     logicalRowsScanned: 0, logicalValuesScanned: 0, logicalBytesScanned: 0, evidenceDirectoriesScanned: 0 };
   const deadline = performance.now() + 60000;
-  const bounded = () => check(performance.now() < deadline && stats.filesScanned <= 2048);
+  let stage: CorpusFailureStage = 'input', inventoryEntriesObserved = 0;
+  const diagnostic = (errorClass: CorpusFailureClass): CredentialSecretCorpusFailure => Object.freeze({ stage, errorClass, ...stats, inventoryEntriesObserved });
+  const fail = (errorClass: CorpusFailureClass): never => { throw new CredentialSecretCorpusError(undefined, diagnostic(errorClass)); };
+  const bounded = () => {
+    if (performance.now() >= deadline) fail('deadline_exceeded');
+    if (stats.filesScanned > 2048) fail('file_limit_exceeded');
+  };
   const descriptorPath = (directory: Directory, leaf = '') => path.join(`/proc/self/fd/${directory.handle.fd}`, leaf);
   const current = async (directory: Directory, exact = false) => {
     const held = await directory.handle.stat({ bigint: true });
@@ -145,7 +156,8 @@ export async function scanCredentialSecretCorpus(input: CredentialSecretCorpusIn
     await current(directory); const entries: string[] = [];
     // Streaming enumeration is bounded; readdir would allocate all entries.
     const opened = await opendir(descriptorPath(directory));
-    try { for (;;) { const entry = await opened.read(); if (!entry) break; check(entries.length < entryLimit); entries.push(entry.name); } }
+    try { for (;;) { const entry = await opened.read(); if (!entry) break; inventoryEntriesObserved = entries.length + 1;
+      if (entries.length >= entryLimit) fail('entry_limit_exceeded'); entries.push(entry.name); } }
     finally { await opened.close(); }
     await current(directory, true); return entries.sort();
   };
@@ -188,11 +200,13 @@ export async function scanCredentialSecretCorpus(input: CredentialSecretCorpusIn
     check(Array.isArray(input.evidenceDirs) && input.evidenceDirs.length <= 16 && new Set(input.evidenceDirs).size === input.evidenceDirs.length);
     const fixture = path.resolve(input.stateRoot, '../../..');
     for (const filename of input.evidenceDirs) check(path.dirname(filename) === fixture && /^credential-prepared-crash-[A-Za-z0-9]+$/u.test(path.basename(filename)));
+    stage = 'root';
     const root = await absoluteDirectory(input.stateRoot);
     check(root.info.uid === BigInt(input.uid) && (root.info.mode & 0o7777n) === 0o700n);
     const credential = await openDirectory(path.join(input.stateRoot, 'credentials'), root, 'credentials');
     check(credential.info.uid === BigInt(input.uid) && (credential.info.mode & 0o7777n) === 0o700n);
     snapshot = await mkdtemp(path.join(os.tmpdir(), 'cliq-credential-corpus-'));
+    stage = 'databases';
     for (const [directory, main] of [[root, 'kernel.sqlite3'], [credential, 'authority.sqlite']] as const) {
       const mainBytes = await file(directory, main, { mode: [0o600n], limit: sqliteLimit, copy: true });
       let walBytes: Buffer | undefined;
@@ -210,7 +224,9 @@ export async function scanCredentialSecretCorpus(input: CredentialSecretCorpusIn
     }
     const cas = await openDirectory(path.join(input.stateRoot, 'cas'), root, 'cas');
     check(cas.info.uid === BigInt(input.uid) && (cas.info.mode & 0o7777n) === 0o700n);
+    stage = 'cas_inventory';
     const casNames = await names(cas);
+    stage = 'cas_files';
     for (const leaf of casNames) {
       const published = /^[0-9a-f]{64}$/u.test(leaf);
       check(published || /^\.tmp-[0-9a-f]{64}-[0-9a-f]{32}$/u.test(leaf));
@@ -219,6 +235,7 @@ export async function scanCredentialSecretCorpus(input: CredentialSecretCorpusIn
       await file(cas, leaf, { mode: published ? [0o400n] : [0o400n, 0o600n], links: published ? [1n] : [1n, 2n], limit: fileLimit });
     }
     check(JSON.stringify(await names(cas)) === JSON.stringify(casNames));
+    stage = 'evidence';
     for (const filename of input.evidenceDirs) {
       const evidence = await absoluteDirectory(filename);
       check(evidence.info.uid === 0n && (evidence.info.mode & 0o7777n) === 0o755n);
@@ -232,6 +249,7 @@ export async function scanCredentialSecretCorpus(input: CredentialSecretCorpusIn
       }
       check(JSON.stringify(await names(trace)) === JSON.stringify(traceNames)); stats.evidenceDirectoriesScanned++;
     }
+    stage = 'stability';
     for (const observed of observedFiles) {
       let info: BigIntStats | undefined;
       try { info = await lstat(descriptorPath(observed.directory, observed.leaf), { bigint: true }); }
@@ -241,12 +259,19 @@ export async function scanCredentialSecretCorpus(input: CredentialSecretCorpusIn
     for (const directory of directories) await current(directory);
     return Object.freeze({ diagnosticOnly: true as const, qualified: true as const, ...stats });
   } catch (error) {
-    if (error instanceof CredentialSecretScanError || error instanceof CredentialSecretCorpusError) throw error;
-    return refused();
+    if (error instanceof CredentialSecretScanError) throw error;
+    if (error instanceof CredentialSecretCorpusError) {
+      if (error.corpusFailure) throw error;
+      throw new CredentialSecretCorpusError(error.databaseFailure, diagnostic('guard_refused'));
+    }
+    const code = error instanceof Error ? Object.getOwnPropertyDescriptor(error, 'code')?.value : undefined;
+    const errorClass: CorpusFailureClass = code === 'ENOENT' ? 'not_found' : code === 'EACCES' || code === 'EPERM' ? 'access_refused'
+      : code === 'ELOOP' ? 'symlink_refused' : code === 'EMFILE' || code === 'ENFILE' ? 'descriptor_limit' : code === 'EIO' ? 'io_error' : 'other';
+    throw new CredentialSecretCorpusError(undefined, diagnostic(errorClass));
   } finally {
     let failed = false;
     if (snapshot) try { await rm(snapshot, { recursive: true, force: true }); } catch { failed = true; }
     for (const directory of directories.reverse()) try { await directory.handle.close(); } catch { failed = true; }
-    if (failed) refused();
+    if (failed) { stage = 'cleanup'; fail('io_error'); }
   }
 }

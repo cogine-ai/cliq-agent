@@ -15,12 +15,18 @@ import { policyProfile, verifyRuntimeBundle, type RuntimeBundleManifest } from '
 import { STATE_OWNER_NATIVE_ENTRY_ID, STATE_OWNER_NATIVE_RELATIVE_PATH } from '../../../src/state/native-owner.js';
 import { buildSupervisorSeaImage, prepareSupervisorSeaCarrier } from './supervisor-sea-builder.js';
 import { installedModelPackageEntries, writeInstalledModelAuthority, type InstalledModelPackageFixture } from './installed-model-package.js';
+import { writeInstalledGuestToolchain } from './installed-guest-package.js';
+import { validateGuestToolchainMetadata } from '../../../src/state/guest-toolchain.js';
 
 /** Construct the same actual SEA/helper package for independent Linux startup
  * and user-manager qualifiers. Real worker images are installed, not launched:
  * they do not qualify admission, execution, release signing or complete I1. */
 export async function buildInstalledSupervisorPackage(fixture: string,
-  variant: 'complete' | 'retirement-native-missing' = 'complete', modelFixture?: InstalledModelPackageFixture) {
+  variant: 'complete' | 'retirement-native-missing' = 'complete', modelFixture?: InstalledModelPackageFixture,
+  options: Readonly<{ guestToolchain?: 'node-test-v1' }> = {}) {
+  assert(Object.keys(options).every(key => key === 'guestToolchain'));
+  assert(options.guestToolchain === undefined || options.guestToolchain === 'node-test-v1');
+  if (options.guestToolchain) assert(variant === 'complete' && modelFixture, 'installed verifier requires the complete model and native package');
   const repository = fileURLToPath(new URL('../../..', import.meta.url));
   const { nodeRoot, carrier } = await prepareSupervisorSeaCarrier(fixture);
   const keys = generateKeyPairSync('ed25519');
@@ -79,6 +85,16 @@ export async function buildInstalledSupervisorPackage(fixture: string,
     relativePath: `workers/${filename}`, executable: true, bytes: await readFile(path.join(workerRoot, filename)) })));
   const modelMaterial = modelFixture ? installedModelPackageEntries(modelFixture, modelBrokerBytes!,
     workerEntries.find(entry => entry.entryId === 'edit')!.bytes) : undefined;
+  let guest: Awaited<ReturnType<typeof writeInstalledGuestToolchain>> | undefined;
+  if (options.guestToolchain) {
+    const guestImageRoot = path.join(fixture, 'guest-image');
+    const built = spawnSync(process.execPath, [path.join(repository, 'scripts/kernel/build-linux-guest-toolchain.mjs'),
+      guestImageRoot, workerRoot, carrier], { encoding: 'utf8', timeout: 60_000, cwd: fixture, maxBuffer: 2 * 1024 * 1024 });
+    assert.equal(built.error, undefined, 'actual pinned guest image construction did not join');
+    assert.equal(built.status, 0, 'actual pinned guest image construction refused');
+    guest = await writeInstalledGuestToolchain({ packageRoot, guestImageRoot,
+      extractorPath: path.join(workerRoot, 'linux-guest-extractor.node'), publisherKeyId: releaseKeys[0]!.keyId, privateKey: keys.privateKey });
+  }
   const profile = policyProfile();
   const rootCore = { schemaVersion: 1, format: 'cliq-sandbox-root-profile-v1', protocol: 'cliq-fresh-empty-root-v1',
     filesystemKind: 'fresh_ephemeral_tmpfs', fixedDirectories: ['/home/cliq', '/tmp', '/work'], persistent: false, networkConfiguration: 'none' };
@@ -102,24 +118,30 @@ export async function buildInstalledSupervisorPackage(fixture: string,
     await writeFile(filename, entry.bytes, { flag: 'wx', mode: entry.executable ? 0o500 : 0o400 });
   }
   const bundle: RuntimeBundleManifest = {
-    schemaVersion: 1, bundleVersion: modelFixture ? 'installed-sea-run-fixture-v1' : 'installed-sea-read-qualification-v1',
+    schemaVersion: 1, bundleVersion: guest ? 'installed-sea-verifier-fixture-v1'
+      : modelFixture ? 'installed-sea-run-fixture-v1' : 'installed-sea-read-qualification-v1',
     controlProtocolRange: { min: 1, max: 1 }, headlessSchemaRange: { min: 1, max: 1 },
     stateSchemaRange: { min: 1, max: KERNEL_STATE_SCHEMA_VERSION }, workerProtocolRange: { min: 1, max: 1 },
-    entries: contents.map(({ bytes, ...entry }) => ({ ...entry, version: '1', digest: sha256Bytes(bytes), byteCount: bytes.byteLength })),
+    entries: [...contents.map(({ bytes, ...entry }) => ({ ...entry, version: '1', digest: sha256Bytes(bytes), byteCount: bytes.byteLength })),
+      ...(guest?.entries ?? [])],
     structuredArtifacts: [
       ...(modelMaterial?.structuredArtifacts.filter(root => root.kind === 'compaction_prompt') ?? []),
+      ...(guest ? [guest.root] : []),
       { kind: 'policy_engine_profile', artifactId: 'installed-policy', rootEntryId: 'installed-policy',
         artifactRef: canonicalSha256(profile), semanticDigest: profile.profileDigest, memberRefs: [] },
       ...(modelMaterial?.structuredArtifacts.filter(root => root.kind === 'system_prompt') ?? []),
     ],
-    guestToolchainManifestRefs: [], publisherKeyId: releaseKeys[0]!.keyId, manifestDigest: '', signature: '',
+    guestToolchainManifestRefs: guest ? [guest.manifestRef] : [], publisherKeyId: releaseKeys[0]!.keyId, manifestDigest: '', signature: '',
   };
   const { signature: _signature, manifestDigest: _digest, ...core } = bundle;
   bundle.manifestDigest = canonicalSha256(core);
   bundle.signature = sign(null, Buffer.from(`cliq-runtime-bundle-v1\0${bundle.manifestDigest}`), keys.privateKey).toString('base64');
   verifyRuntimeBundle(bundle, releaseKeys);
+  if (guest) validateGuestToolchainMetadata(bundle, guest.manifestRef, canonicalJsonBytes(guest.manifest),
+    await readFile(path.join(packageRoot, `objects/sha256/${guest.manifest.signatureRef.slice(0, 2)}/${guest.manifest.signatureRef}`)), releaseKeys);
   await writeFile(path.join(packageRoot, 'manifest.json'), canonicalJsonBytes(bundle), { flag: 'wx', mode: 0o400 });
   const modelAuthority = modelFixture ? await writeInstalledModelAuthority({ packageRoot, bundle,
     privateKey: keys.privateKey, fixture: modelFixture, material: modelMaterial! }) : undefined;
-  return { packageRoot, releaseKeys, bundle, contents, carrier, ...(modelAuthority ? { modelAuthority } : {}) };
+  return { packageRoot, releaseKeys, bundle, contents, carrier, ...(modelAuthority ? { modelAuthority } : {}),
+    ...(guest ? { guestToolchain: { manifest: guest.manifest, manifestRef: guest.manifestRef, manifestId: guest.manifestId } } : {}) };
 }

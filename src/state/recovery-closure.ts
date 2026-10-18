@@ -702,12 +702,15 @@ export async function readRecoveryClosure(
     } catch (error) { recoveryFailure(`generation retirement history is invalid: ${(error as Error).message}`, error); }
   } else generationProofs.push(...workspaceGenerations);
   await validateGenerationArtifacts(artifacts, generationProofs);
-  if (journal.some((entry) => entry.opKind === 'model')) {
+  if (journal.some((entry) => entry.opKind === 'model' || entry.opKind === 'verifier') || run.repairCount !== 0 ||
+      runSpec.operation === 'agent' && items.length > 0) {
     try {
-      await validateAgentRecovery({ artifacts, run, spec: runSpec, items, journal,
+      const history = await validateAgentRecovery({ driver, artifacts, run, spec: runSpec, items, journal,
         principalId: databaseCut.principalId, workspaceIdentityRef: databaseCut.workspaceIdentityRef,
         checkpoints: databaseCut.checkpoints, workspaceGenerations: generationProofs,
         context: decodeContextManifest(await artifacts.readCanonical(latestCheckpoint.contextManifestRef)) });
+      journalBudgets.consumed = addBudget(journalBudgets.consumed,
+        { ...ZERO_BUDGET, repairAttempts: history.repairAttempts }, 'recovery authorized repair budget');
       const assembly = await artifacts.readCanonical<RunAssemblyV1>(runSpec.assemblyRef);
       if (assembly.format === 'cliq-run-assembly-v1') await validateInstalledBrokerAmbiguityHistory({ driver, artifacts,
         run, spec: runSpec, assembly, journal, principalId: databaseCut.principalId });

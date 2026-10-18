@@ -10,6 +10,7 @@ import { compactionEnvelopeEstimate, type CompactionPromptEnvelopeMaterial, type
 import { exactKeys, policyProfile, verifyRuntimeBundle, type ReleaseTrustKey, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import type { ModelTextV1 } from '../protocol/agent-ir.js';
 import { KernelStorageError } from './errors.js';
+import { decodeGuestToolchainManifest, guestToolchainMembers, guestToolchainRoots } from './guest-toolchain.js';
 
 function mismatch(message: string, cause?: unknown): never {
   throw new KernelStorageError('ARTIFACT_MISMATCH', message, cause === undefined ? undefined : { cause });
@@ -35,7 +36,6 @@ export function validateBundle(value: unknown, releaseKeys: readonly ReleaseTrus
     const bundle = value as RuntimeBundleManifest;
     if (!Array.isArray(bundle.entries) || !Array.isArray(bundle.structuredArtifacts) || !Array.isArray(bundle.guestToolchainManifestRefs)) mismatch('installed runtime manifest graph must contain arrays');
     verifyRuntimeBundle(bundle, releaseKeys);
-    if (bundle.guestToolchainManifestRefs.length) mismatch('installed runtime contains unsupported guest roots');
     for (const entry of bundle.entries) {
       if (entry.relativePath.normalize('NFC') !== entry.relativePath || Buffer.byteLength(entry.relativePath) > 4096 ||
           entry.relativePath === 'manifest.json' || entry.relativePath.startsWith('manifest.json/') ||
@@ -43,7 +43,8 @@ export function validateBundle(value: unknown, releaseKeys: readonly ReleaseTrus
           entry.relativePath === 'model-objects' || entry.relativePath.startsWith('model-objects/') ||
           (entry.executable && entry.byteCount === 0) ||
           (['supervisor', 'worker', 'provider_adapter', 'tool_adapter', 'platform_helper', 'mcp_server', 'mcp_recovery_adapter', 'local_inference'].includes(entry.role) && !entry.executable) ||
-          ['guest_toolchain', 'skill_bundle', 'mcp_recovery_profile'].includes(entry.role) ||
+          ['skill_bundle', 'mcp_recovery_profile'].includes(entry.role) ||
+          (entry.role === 'guest_toolchain' && entry.executable) ||
           (['policy_engine', 'system_prompt', 'compaction_prompt', 'bundle_object', 'schema'].includes(entry.role) && entry.executable)) {
         mismatch('installed runtime entry path or role is unsupported');
       }
@@ -58,7 +59,7 @@ function boundedText(value: unknown): string {
   if (typeof value !== 'string' || normalizeBoundedText(value, 1, 512) !== value) mismatch('installed structured root text is invalid');
   return value;
 }
-/** This installed recipe supports only its fixed policy and provider prompts.
+/** This installed recipe supports its fixed policy, prompts and signed guest.
  * Other normative kinds require their own complete implemented decoders. */
 function structuredMetadata(bundle: RuntimeBundleManifest): StructuredRoot[] {
   if (bundle.structuredArtifacts.length > 65) mismatch('installed structured root inventory exceeds its bound');
@@ -67,7 +68,7 @@ function structuredMetadata(bundle: RuntimeBundleManifest): StructuredRoot[] {
   for (const root of bundle.structuredArtifacts) {
     const prompt = root.kind === 'system_prompt' || root.kind === 'compaction_prompt';
     if (!exactKeys(root, ['artifactId', 'rootEntryId', 'artifactRef', 'semanticDigest', 'memberRefs', 'kind',
-      ...(prompt ? ['provider', 'model'] : [])]) || (!prompt && root.kind !== 'policy_engine_profile'))
+      ...(prompt ? ['provider', 'model'] : [])]) || (!prompt && root.kind !== 'policy_engine_profile' && root.kind !== 'guest_toolchain'))
       mismatch('installed runtime contains an unsupported structured root');
     boundedText(root.artifactId); boundedText(root.rootEntryId);
     if (prompt && (!['openai', 'anthropic', 'openrouter', 'openai-compatible', 'zhipu', 'ollama'].includes(boundedText(root.provider)) ||
@@ -83,12 +84,12 @@ function structuredMetadata(bundle: RuntimeBundleManifest): StructuredRoot[] {
     if (!entry || entry.executable || entry.role !== role || entry.digest !== root.artifactRef || entry.byteCount > 1048576 ||
         !Array.isArray(root.memberRefs) || root.memberRefs.length > 3 ||
         root.memberRefs.some((ref, index) => { assertArtifactRef(ref); return ref === root.artifactRef || (index > 0 && ref <= root.memberRefs[index - 1]!); }) ||
-        (root.kind !== 'compaction_prompt' && root.memberRefs.length !== 0))
+        (root.kind !== 'compaction_prompt' && root.kind !== 'guest_toolchain' && root.memberRefs.length !== 0))
       mismatch('installed structured root does not bind its complete signed entry');
     roots.push(root);
   }
   if (roots.filter(root => root.kind === 'policy_engine_profile').length !== 1 ||
-      bundle.entries.some(entry => ['policy_engine', 'system_prompt', 'compaction_prompt'].includes(entry.role) && !entries.has(entry.entryId)))
+      bundle.entries.some(entry => ['policy_engine', 'system_prompt', 'compaction_prompt', 'guest_toolchain'].includes(entry.role) && !entries.has(entry.entryId)))
     mismatch('installed signed structured entries are missing their exact discovery roots');
   for (const root of roots.filter(root => root.kind === 'system_prompt')) {
     if (!roots.some(other => other.kind === 'compaction_prompt' && other.provider === root.provider && other.model === root.model))
@@ -98,6 +99,7 @@ function structuredMetadata(bundle: RuntimeBundleManifest): StructuredRoot[] {
     if (!roots.some(other => other.kind === 'system_prompt' && other.provider === root.provider && other.model === root.model))
       mismatch('installed provider prompt pair is incomplete');
   }
+  guestToolchainRoots(bundle);
   return roots;
 }
 
@@ -107,7 +109,9 @@ export type InstalledStructuredArtifacts = Readonly<{
   objects: readonly Readonly<{ artifactRef: string; schemaKind: string }>[];
 }>;
 
-/** Complete signed prompt/member validation, after physical byte capture.
+/** Complete structured metadata/member validation, after physical byte capture.
+ * Guest image bytes are streamed by installation, never buffered as JSON here;
+ * that owner independently authenticates each guest's detached release signature.
  * A valid data graph does not authorize a process, model or tool dispatch. */
 export function validateInstalledStructuredArtifacts(bundle: RuntimeBundleManifest,
   objects: ReadonlyMap<string, Buffer>): InstalledStructuredArtifacts {
@@ -116,12 +120,13 @@ export function validateInstalledStructuredArtifacts(bundle: RuntimeBundleManife
     const metadata = new Map<string, string>(), members = new Set<string>();
     const systemPrompts: Array<{ provider: ProviderName; model: string; ref: string; value: ModelTextV1 }> = [];
     const compactionPrompts: Array<{ provider: ProviderName; model: string; material: CompactionPromptEnvelopeMaterial }> = [];
-    const read = (ref: string): unknown => {
+    const raw = (ref: string): Buffer => {
       const entry = bundle.entries.find(entry => entry.digest === ref), bytes = objects.get(ref);
       if (!entry || !Buffer.isBuffer(bytes) || bytes.length !== entry.byteCount || sha256Bytes(bytes) !== ref)
         mismatch('installed structured object bytes do not bind their signed entry');
-      return checkCanonicalBytes(bytes);
+      return bytes;
     };
+    const read = (ref: string): unknown => checkCanonicalBytes(raw(ref));
     for (const root of roots) {
       const value = read(root.artifactRef);
       if (root.kind === 'policy_engine_profile') {
@@ -135,6 +140,14 @@ export function validateInstalledStructuredArtifacts(bundle: RuntimeBundleManife
         if (!text.utf8.trim() || text.textDigest !== root.semanticDigest) mismatch('installed system prompt is empty or has another semantic digest');
         metadata.set(root.artifactRef, text.format);
         systemPrompts.push({ provider: root.provider as ProviderName, model: root.model!, ref: root.artifactRef, value: text });
+      } else if (root.kind === 'guest_toolchain') {
+        const manifest = decodeGuestToolchainManifest(value);
+        guestToolchainMembers(bundle, root.artifactRef, manifest);
+        if (raw(manifest.signatureRef).length !== 64) mismatch('guest detached signature is not complete');
+        for (const member of root.memberRefs) members.add(member);
+        metadata.set(root.artifactRef, manifest.format);
+        metadata.set(manifest.signatureRef, 'cliq-ed25519-signature-v1');
+        metadata.set(manifest.guestImageRef, 'cliq-guest-image-raw-ext4-v1');
       } else {
         const envelope = value as CompactionPromptEnvelopeV1;
         const expected = [...new Set([envelope.systemInstructionRef, envelope.userPrefixRef, envelope.userSuffixRef])].sort();

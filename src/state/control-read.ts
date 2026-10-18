@@ -1,7 +1,7 @@
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import { assertArtifactRef, normalizeBoundedText, parseCanonicalTime, requiredSafeInteger } from '../kernel/identity.js';
 import { parseJsonStrict } from '../kernel/json.js';
-import type { Checkpoint, ControlResultV1, Run, RunEvent, RunItemReferenceV1, RunSnapshotV1, Session, SessionItem } from '../kernel/types.js';
+import type { ArtifactDescriptorV1, Checkpoint, ControlResultV1, ResultUnavailableControlErrorV1, Run, RunEvent, RunItemReferenceV1, RunSnapshotV1, Session, SessionItem } from '../kernel/types.js';
 import type { ArtifactCatalog } from './artifacts.js';
 import { validateControlChannelClosure, type AuthenticatedControlIdentity } from './control-channel.js';
 import { decodeRunSpec } from './decoders.js';
@@ -11,13 +11,17 @@ import { journalEntryFromRow, type JournalSqlRow } from './repositories/journal.
 import { checkpointFromRow, runFromRow, sessionFromRow } from './rows.js';
 import type { SqliteConnection, SqliteDriver, SqliteRow } from './sqlite-driver.js';
 import { assertActiveStateOwner, type StateOwnerContext } from './state-owner.js';
+import { readCanonicalArtifact } from './agent-context.js';
+import { decodeRunResult, decodeVerificationClosure } from './result-artifacts.js';
 
 export type ReadControlRequest =
   | { protocolVersion: 1; method: 'session.get'; sessionId: string; afterItemSeq?: number; limit?: number }
   | { protocolVersion: 1; method: 'run.get'; runId: string; afterItemSeq?: number; afterJournalSeq?: number;
       checkpointCursor?: string; itemLimit?: number; journalLimit?: number; checkpointLimit?: number }
+  | { protocolVersion: 1; method: 'run.result'; runId: string }
+  | { protocolVersion: 1; method: 'run.diff'; runId: string }
   | { protocolVersion: 1; method: 'run.attach'; runId: string; afterEventSeq: number; limit?: number };
-export type ReadControlResult = Extract<ControlResultV1, { method: 'session.get' | 'run.get' | 'run.attach' }>;
+export type ReadControlResult = Extract<ControlResultV1, { method: 'session.get' | 'run.get' | 'run.attach' | 'run.result' | 'run.diff' }>;
 type SessionResult = Extract<ReadControlResult, { method: 'session.get' }>;
 type RunResult = Extract<ReadControlResult, { method: 'run.get' | 'run.attach' }>;
 type CapturedRead = { result: SessionResult } | {
@@ -46,6 +50,21 @@ type PublicState = Pick<Run, 'status' | 'nextStep' | 'frontierRef' | 'waitingRea
 export class EventCursorExpiredError extends KernelStorageError {
   constructor(readonly earliestEventSeq: number, readonly latestEventSeq: number, readonly snapshot: RunSnapshotV1) {
     super('EVENT_CURSOR_EXPIRED', 'Run event cursor precedes the retained display stream');
+  }
+}
+
+/** The exact unavailable cut, not a generic failed transition or a candidate
+ * selected as a substitute result. Query errors never create replay rows. */
+export class ResultUnavailableError extends KernelStorageError {
+  readonly controlError: ResultUnavailableControlErrorV1;
+  constructor(run: Run) {
+    super('STATE_TRANSITION_INVALID', 'this Run has no committed immutable result');
+    const base = { schemaVersion: 1 as const, code: 'RESULT_UNAVAILABLE' as const, messageCode: 'run.result_unavailable', runId: run.id };
+    if (run.status === 'queued' || run.status === 'running' || run.status === 'waiting')
+      this.controlError = { ...base, retryable: true, status: run.status, currentRevision: run.revision };
+    else if ((run.status === 'failed' || run.status === 'cancelled') && run.terminalDetailRef)
+      this.controlError = { ...base, retryable: false, status: run.status, terminalDetailRef: run.terminalDetailRef };
+    else throw new TypeError('unavailable result has an invalid Run cut');
   }
 }
 
@@ -83,6 +102,10 @@ function validateRequest(request: ReadControlRequest): ReadControlRequest {
       throw new TypeError('read request requires an exact protocolVersion=1 JSON object');
     }
     // Copy the exact normalized request before any asynchronous authentication.
+    if (request.method === 'run.result' || request.method === 'run.diff') {
+      exactKeys(request, ['protocolVersion', 'method', 'runId']);
+      return { protocolVersion: 1, method: request.method, runId: id(request.runId) };
+    }
     if (request.method === 'session.get') {
       exactKeys(request, ['protocolVersion', 'method', 'sessionId', 'afterItemSeq', 'limit']);
       return { protocolVersion: 1, method: request.method, sessionId: id(request.sessionId),
@@ -364,11 +387,49 @@ function runAttachCut(connection: SqliteConnection, request: Extract<ReadControl
       events, nextEventSeq: events.at(-1)?.eventSeq ?? request.afterEventSeq } };
 }
 
+/** Inspect only the immutable refs already selected by the successful terminal
+ * transaction. No failed candidate fallback, raw CAS access or live authority
+ * is returned. A future delivery consumer must independently validate its full
+ * result/receipt/death graph, never treat a query descriptor as permission. */
+async function readResultQuery(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
+  request: Extract<ReadControlRequest, { method: 'run.result' | 'run.diff' }>, identity: AuthenticatedControlIdentity): Promise<ReadControlResult> {
+  const run = driver.readSnapshot(connection => {
+    assertActiveStateOwner(connection, owner);
+    return checkedRun(requireOwnedRow(connection, 'runs', request.runId, identity.principalId));
+  });
+  if (run.status !== 'succeeded' && run.status !== 'completed_unverified') throw new ResultUnavailableError(run);
+  const result = decodeRunResult(await readCanonicalArtifact(artifacts, run.resultRef!));
+  const closure = decodeVerificationClosure(await readCanonicalArtifact(artifacts, result.verificationClosureRef));
+  if (result.runId !== run.id || closure.runId !== run.id || result.resultSourceRef !== closure.resultSourceRef ||
+      result.createdAt > run.updatedAt || closure.createdAt > result.createdAt || closure.verification.kind !== 'local' ||
+      closure.verification.outcome !== (run.status === 'succeeded' ? 'verified' : 'unverified'))
+    corrupt('result inspection lost its exact successful terminal selection');
+  const ref = request.method === 'run.result' ? run.resultRef! : result.diffRef;
+  const descriptor = driver.readSnapshot(connection => {
+    assertActiveStateOwner(connection, owner);
+    if (canonicalSha256(checkedRun(requireOwnedRow(connection, 'runs', request.runId, identity.principalId))) !== canonicalSha256(run))
+      corrupt('immutable result selection changed while being inspected');
+    const metadata = connection.prepare('SELECT byte_length, media_type FROM artifacts WHERE ref = ?')
+      .get<{ byte_length: bigint; media_type: string }>(ref);
+    if (!metadata) corrupt('selected result descriptor has no retained catalog entry');
+    const sizeBytes = Number(metadata.byte_length);
+    if (!Number.isSafeInteger(sizeBytes) || sizeBytes < 0 || typeof metadata.media_type !== 'string' ||
+        normalizeBoundedText(metadata.media_type, 1, 128) !== metadata.media_type) corrupt('selected result descriptor is invalid');
+    return { schemaVersion: 1 as const, ref, digest: ref, sizeBytes, mediaType: metadata.media_type } satisfies ArtifactDescriptorV1;
+  });
+  await validateControlChannelClosure(artifacts, owner, identity); assertActiveStateOwner(driver, owner);
+  return request.method === 'run.result'
+    ? { method: request.method, runId: run.id, result: descriptor, verificationClosureRef: result.verificationClosureRef }
+    : { method: request.method, runId: run.id, diff: descriptor };
+}
+
 export async function readControl(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
   request: ReadControlRequest, identity: AuthenticatedControlIdentity): Promise<ReadControlResult> {
   const normalized = validateRequest(request);
   const authenticated = { principalId: identity.principalId, channelIdentityRef: identity.channelIdentityRef, channelIdentityDigest: identity.channelIdentityDigest };
   await validateControlChannelClosure(artifacts, owner, authenticated);
+  if (normalized.method === 'run.result' || normalized.method === 'run.diff')
+    return readResultQuery(driver, artifacts, owner, normalized, authenticated);
   const cut = driver.readSnapshot(connection => {
     assertActiveStateOwner(connection, owner);
     try {

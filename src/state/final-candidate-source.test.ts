@@ -14,7 +14,7 @@ import type { FinalCandidateItem, RunResult, SourceManifest, SourceProjectionSpe
 import type { ToolObservationV1 } from '../kernel/tool-authorization.js';
 import { sampleCanonicalNow } from './canonical-time.js';
 import { isJoinedCasPublicationFailure } from './cas.js';
-import { CandidateSourceLimitError } from './result-source.js';
+import { CandidateSourceLimitError, readCandidateSource } from './result-source.js';
 import { openStateStore, publishInProcessChannel } from './store.js';
 import { createAgentFixture } from './testing/agent-fixtures.js';
 import { activateFixtureWorker, admissionKey, disposeFixture, uuidv7 } from './testing/fixtures.js';
@@ -503,7 +503,7 @@ test('unsafe symlink lookup and a missing directory cannot become a candidate so
   });
 });
 
-test('a frozen subtree exclude stays outside result and diff without hiding a same-prefix sibling or recovery state', async () => {
+test('a frozen subtree exclude stays outside result and diff without hiding a same-prefix sibling or recovery state', async t => {
   const fixture = await sourceFixture('candidate-source-exclude', { explicitExcludes: [{ path: 'cache', scope: 'subtree' }] });
   try {
     const values: WorkspaceEntry[] = [{ kind: 'directory', path: 'cache', mode: 0o755 },
@@ -521,5 +521,31 @@ test('a frozen subtree exclude stays outside result and diff without hiding a sa
     const recovered = await fixture.store.artifacts.readCanonical<WorkspaceEntryManifest>(recovery.entriesRef);
     assert.deepEqual(recovered.entries.map(entry => entry.path), ['cache', 'cache/hidden', 'cache2', 'cache2/keep', 'keep']);
     assert.notEqual(graph.source.entriesRef, recovery.entriesRef);
+    // Verifier launch must compare this exact frozen projection, not require
+    // its full private generation's entry ref to equal the projected source.
+    const projected = await readCandidateSource(fixture.store.artifacts, graph.cut.runSpec, graph.cut.latestCheckpoint.workspaceStateRef);
+    assert.equal(projected.sourceRef, graph.candidate.resultSourceRef);
+    assert.equal(projected.source.manifestDigest, graph.candidate.sourceDigest);
+    const excluded = values.find(entry => entry.path === 'cache/hidden');
+    assert.ok(excluded?.kind === 'file');
+    const abort = new AbortController(), reason = new Error('abort actual verifier projection file read');
+    const original = fixture.store.artifacts.readChunks.bind(fixture.store.artifacts);
+    let observed = 0, joined = false;
+    const reader = t.mock.method(fixture.store.artifacts, 'readChunks', async function* (ref: string, expectedByteCount: number) {
+      try {
+        for await (const chunk of original(ref, expectedByteCount)) {
+          if (ref === excluded.blobRef) { observed++; abort.abort(reason); }
+          yield chunk;
+        }
+      } finally { if (ref === excluded.blobRef) joined = true; }
+    });
+    try {
+      await assert.rejects(readCandidateSource(fixture.store.artifacts, graph.cut.runSpec,
+        graph.cut.latestCheckpoint.workspaceStateRef, abort.signal), error => error === reason);
+      assert.equal(observed, 1, 'excluded bytes still pass through the real CAS reader before cancellation');
+      assert.equal(joined, true, 'aborting projection joins the original reader rather than abandoning its descriptor');
+    } finally { reader.mock.restore(); }
+    assert.equal((await readCandidateSource(fixture.store.artifacts, graph.cut.runSpec,
+      graph.cut.latestCheckpoint.workspaceStateRef)).sourceRef, graph.candidate.resultSourceRef);
   } finally { await disposeFixture(fixture); }
 });

@@ -93,6 +93,22 @@ test('installed recipe refuses unavailable default approvals without changing ge
   }
 });
 
+test('installed recipe reaches only its connected exact Node verifier subset without inferring execution permission', () => {
+  // Data-only preflight. This does not mint an identity grant or qualify a
+  // physical installation; admission still consumes the real original grant.
+  const request = normalizeRunSubmitRequest(inlineRequest({
+    model: { provider: 'openai-compatible', model: 'owned-fixture-model',
+      endpoint: { kind: 'registered', endpointRegistrationId: 'owned-fixture-endpoint' }, modelCredentialGrantIds: ['owned-fixture-grant'] },
+    policyMode: 'yolo', allowUnverified: false, verifiers: [{ id: 'test', version: '1', required: true, executable: { kind: 'toolchain', toolId: 'node' },
+      argv: [{ kind: 'non_secret_literal', value: '--test' }, { kind: 'non_secret_literal', value: '--test-concurrency=1' },
+        { kind: 'non_secret_literal', value: 'test.mjs' }], cwd: '.', env: {}, writableEphemeralPaths: [], identityReadGrantId: 'original-read-grant' }]
+  })).request;
+  assert.doesNotThrow(() => assertInstalledRunRecipe(request));
+  assert.throws(() => assertInstalledRunRecipe({ ...request, policyMode: 'accept-edits' }), { refusalCode: 'AUTHORIZATION_REQUIRED' });
+  assert.throws(() => assertInstalledRunRecipe({ ...request, verifiers: [{ ...request.verifiers[0]!,
+    executable: { kind: 'toolchain', toolId: 'bash' } }] }), { refusalCode: 'UNSUPPORTED_EXECUTION_IDENTITY' });
+});
+
 for (const count of [0, 1, 2, 32]) {
   test(`installed recipe requires one bearer credential while generic normalization retains its bounds (${count} grants)`, () => {
     const normalize = () => normalizeRunSubmitRequest(inlineRequest({

@@ -140,7 +140,7 @@ test('compatible split hello unlocks three real bounded reads with coalesced fra
   const peer = await connectPeer(t, path.join(fixture.stateRoot, 'runtime/control-v1.sock'));
   const hello = frame({ protocolVersion: 1, method: 'control.hello', clientBuild: 'wire-client-fixture',
     controlSchemaRange: { min: 1, max: 1 }, headlessSchemaRange: { min: 1, max: 1 },
-    requestedFeatureIds: ['session.get', 'run.get', 'run.attach', 'run.submit'] });
+    requestedFeatureIds: ['session.get', 'run.get', 'run.attach', 'run.result', 'run.diff', 'run.submit'] });
   await peer.write(hello.subarray(0, 1));
   await peer.write(hello.subarray(1, 3));
   const run = fixture.store.getRun(fixture.runId);
@@ -157,7 +157,7 @@ test('compatible split hello unlocks three real bounded reads with coalesced fra
   assert.equal(greeting.result.serverBuild, 'installed-control-wire-fixture');
   assert.deepEqual(greeting.result.controlSchemaRange, { min: 1, max: 1 });
   assert.deepEqual(greeting.result.headlessSchemaRange, { min: 1, max: 1 });
-  assert.deepEqual(greeting.result.enabledFeatureIds, ['session.get', 'run.get', 'run.attach']);
+  assert.deepEqual(greeting.result.enabledFeatureIds, ['session.get', 'run.get', 'run.attach', 'run.result', 'run.diff']);
   assert.ok(greeting.result.supervisorInstanceId);
   assert.equal(greeting.result.activeRuntimeBundle.runtimeBundleRef, canonicalSha256(fixture.runtimeAuthority.bundle));
   assert.equal(greeting.result.activeRuntimeBundle.bundleVersion, fixture.runtimeAuthority.bundle.bundleVersion);
@@ -182,6 +182,12 @@ test('compatible split hello unlocks three real bounded reads with coalesced fra
   assert.equal(attached.result.events.length, 1);
   assert.equal(attached.result.events[0].eventSeq, 1);
   assert.equal(attached.result.nextEventSeq, 1);
+  for (const method of ['run.result', 'run.diff']) {
+    await peer.write(frame({ protocolVersion: 1, method, runId: run.id }));
+    assert.deepEqual(await peer.response(), { protocolVersion: 1, method, ok: false,
+      error: { schemaVersion: 1, code: 'RESULT_UNAVAILABLE', messageCode: 'run.result_unavailable', retryable: true,
+        runId: run.id, status: run.status, currentRevision: run.revision } });
+  }
   assert.deepEqual(fixture.store.getRun(run.id), run, 'wire reads do not execute or mutate the queued Run');
   assert.deepEqual(errors, []);
 });

@@ -42,6 +42,20 @@ try {
   ]);
   await chmod(addon, 0o500);
   await rename(addon, path.join(output, 'linux-worker.node'));
+  // Guest-only helper: ordinary worker/edit loading never links libext2fs.
+  // Its protected OS library dependencies follow the existing GIO helper
+  // build model; the guest itself receives only same-image extracted files.
+  const ext2 = spawnSync('pkg-config', ['--cflags', '--libs', 'ext2fs'], { encoding: 'utf8', timeout: 10000 });
+  if (ext2.error || ext2.status !== 0 || ext2.stdout.length > 8192)
+    throw new Error('The guest extractor needs the actual libext2fs development package');
+  const extractor = path.join(staging, 'linux-guest-extractor.node');
+  compile(process.env.CLIQ_WORKER_ADDON_CC ?? 'cc', [
+    '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', '-shared', '-fPIC', '-pthread', '-I', include,
+    path.join(repository, 'native/linux/guest-extractor.c'), '-o', extractor,
+    ...ext2.stdout.trim().split(/\s+/u), '-lcom_err'
+  ]);
+  await chmod(extractor, 0o500);
+  await rename(extractor, path.join(output, 'linux-guest-extractor.node'));
   let bubblewrap;
   for (const directory of (process.env.PATH ?? '').split(path.delimiter)) {
     if (!path.isAbsolute(directory)) continue;
@@ -61,6 +75,7 @@ console.log(`LINUX_WORKER_INSTALLATION=${output}`);
 const entries = [];
 for (const [entryId, role, relativePath] of [
   ['linux_worker_native', 'platform_helper', 'linux-worker.node'],
+  ['linux_guest_extractor', 'platform_helper', 'linux-guest-extractor.node'],
   ['linux_worker_controller', 'platform_helper', 'cliq-linux-worker-controller'],
   ['linux_bubblewrap', 'platform_helper', 'cliq-linux-bubblewrap'],
   ['linux_worker', 'worker', 'cliq-linux-worker'],

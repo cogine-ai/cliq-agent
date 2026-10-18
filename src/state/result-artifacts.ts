@@ -10,7 +10,7 @@ function closed(value: unknown, required: readonly string[], optional: readonly 
       ![Object.prototype, null].includes(Object.getPrototypeOf(value)) ||
       required.some(key => !Object.hasOwn(value, key)) ||
       Reflect.ownKeys(value).some(key => typeof key !== 'string' || !required.includes(key) && !optional.includes(key)) ||
-      Object.values(Object.getOwnPropertyDescriptors(value)).some(property => !Object.hasOwn(property, 'value')))
+      Object.values(Object.getOwnPropertyDescriptors(value)).some(property => !Object.hasOwn(property, 'value') || !property.enumerable))
     mismatch('result artifact has an invalid closed shape');
   return value as Record<string, unknown>;
 }
@@ -28,6 +28,14 @@ function ref(value: unknown): string {
 function integer(value: unknown, minimum = 0): number {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < minimum)
     mismatch('result artifact integer is outside its range');
+  return value;
+}
+function list(value: unknown, maximum = 32): unknown[] {
+  if (!Array.isArray(value) || value.length > maximum) mismatch('result artifact list exceeds its bound');
+  const properties = Object.getOwnPropertyDescriptors(value);
+  if (Reflect.ownKeys(properties).length !== value.length + 1 ||
+      Array.from({ length: value.length }, (_, index) => properties[String(index)]).some(property =>
+        !property || !Object.hasOwn(property, 'value') || !property.enumerable)) mismatch('result artifact list is not dense enumerable data');
   return value;
 }
 function entryPath(value: unknown): string {
@@ -134,9 +142,9 @@ export function decodeVerifierPlan(value: unknown): VerifierPlan {
   return plan as VerifierPlan;
 }
 
-/** Only the implemented, consent-backed empty-verifier closure is accepted.
- * Required/advisory execution and inherited proofs need their own complete
- * consumers before those branches can become retained finalization facts. */
+/** Local no-dependency branches only. Decoding creates neither a receipt nor
+ * execution authority; the result consumer rederives every ordered disposition
+ * from its owning highest eligible Journal/result/receipt graph. */
 export function decodeVerificationClosure(value: unknown): VerificationClosureV1 {
   const closure = closed(value, ['schemaVersion', 'format', 'runId', 'candidateItemId', 'resultSourceRef',
     'verifierPlanRef', 'dependency', 'verification', 'closureDigest', 'createdAt']);
@@ -145,10 +153,34 @@ export function decodeVerificationClosure(value: unknown): VerificationClosureV1
   for (const key of ['resultSourceRef', 'verifierPlanRef', 'closureDigest']) ref(closure[key]);
   try { parseCanonicalTime(text(closure.createdAt)); } catch { mismatch('verification closure time is invalid'); }
   const dependency = closed(closure.dependency, ['kind']);
-  const verification = closed(closure.verification, ['kind', 'outcome', 'unverifiedConsentRef', 'entries']);
-  if (dependency.kind !== 'none' || verification.kind !== 'local' || verification.outcome !== 'unverified' ||
-      !Array.isArray(verification.entries) || verification.entries.length !== 0) mismatch('verification closure branch is not implemented');
-  ref(verification.unverifiedConsentRef);
+  const verification = closed(closure.verification, ['kind', 'outcome', 'entries'], ['unverifiedConsentRef']);
+  if (dependency.kind !== 'none' || verification.kind !== 'local' || !['verified', 'unverified'].includes(String(verification.outcome)))
+    mismatch('verification closure branch is not implemented');
+  const entries = list(verification.entries), verifierIds = new Set<string>(), resultItems = new Set<string>(), receipts = new Set<string>(), ops = new Set<string>();
+  let required = 0, specDigest: string | undefined;
+  for (const [index, value] of entries.entries()) {
+    const entry = closed(value, ['verifierIndex', 'verifierId', 'verifierSpecDigest', 'verifierEntryDigest', 'required', 'disposition']);
+    const id = text(entry.verifierId), spec = ref(entry.verifierSpecDigest); ref(entry.verifierEntryDigest);
+    if (integer(entry.verifierIndex) !== index || verifierIds.has(id) || typeof entry.required !== 'boolean' || specDigest !== undefined && specDigest !== spec)
+      mismatch('verification closure entries are not one ordered frozen spec');
+    verifierIds.add(id); specDigest = spec;
+    const kind = (entry.disposition as { kind?: unknown } | null)?.kind;
+    const disposition = closed(entry.disposition, ['kind', 'verifierResultItemId', 'opId', 'attempt', 'receiptRef',
+      ...(kind === 'passed' ? ['completedJournalSeq'] : ['outcome', 'terminalJournalSeq'])]);
+    if (kind !== 'passed' && (kind !== 'advisory_nonpassing' || entry.required ||
+        !['assertion_failed', 'infra_failed'].includes(String(disposition.outcome)))) mismatch('verification closure disposition is not an eligible local result');
+    const itemId = text(disposition.verifierResultItemId), opId = text(disposition.opId), receiptRef = ref(disposition.receiptRef);
+    integer(disposition.attempt); integer(disposition[kind === 'passed' ? 'completedJournalSeq' : 'terminalJournalSeq'], 1);
+    if (resultItems.has(itemId) || receipts.has(receiptRef) || ops.has(opId)) mismatch('verification closure reuses one result, receipt or operation');
+    resultItems.add(itemId); receipts.add(receiptRef); ops.add(opId);
+    if (entry.required) required++;
+  }
+  if (verification.outcome === 'verified') {
+    if (!required || Object.hasOwn(verification, 'unverifiedConsentRef')) mismatch('verified closure must have a required pass and no unverified consent');
+  } else {
+    if (required) mismatch('unverified closure cannot satisfy a required gate');
+    ref(verification.unverifiedConsentRef);
+  }
   if (digestOmitting(closure, 'closureDigest') !== closure.closureDigest) mismatch('verification closure digest does not rehash');
   return closure as VerificationClosureV1;
 }
@@ -161,8 +193,8 @@ export function decodeRunResult(value: unknown): RunResult {
   if (result.schemaVersion !== 1) mismatch('Run result has the wrong schema');
   text(result.runId);
   for (const key of ['baseSourceRef', 'resultSourceRef', 'diffRef', 'verificationClosureRef', 'summaryRef']) ref(result[key]);
-  if (!Array.isArray(result.verificationReceiptRefs) || result.verificationReceiptRefs.length !== 0)
-    mismatch('Run result verifier receipts require their implemented execution closure');
+  const receipts = list(result.verificationReceiptRefs).map(ref);
+  if (new Set(receipts).size !== receipts.length) mismatch('Run result reuses a verification receipt');
   try { parseCanonicalTime(text(result.createdAt)); } catch { mismatch('Run result time is invalid'); }
   return result as RunResult;
 }

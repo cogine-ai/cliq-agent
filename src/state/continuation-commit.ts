@@ -19,7 +19,7 @@ export function planContinuationCommit(artifacts: ArtifactCatalog, input: {
   const context = structuredClone(input.context);
   for (const entry of added) {
     const range = { fromItemSeq: entry.itemSeq, throughItemSeq: entry.itemSeq };
-    context.segments.push(entry.item.kind === 'model_turn' || entry.item.kind === 'tool_result' || entry.item.kind === 'user_input'
+    context.segments.push(entry.item.kind === 'model_turn' || entry.item.kind === 'tool_result' || entry.item.kind === 'user_input' || entry.item.kind === 'repair_diagnostic'
       ? { kind: 'raw', ...range, items: [{ itemSeq: entry.itemSeq, itemRef: entry.itemRef }] }
       : { kind: 'excluded_control', ...range, sourceItemsDigest: contextSourceDigest([entry]) });
   }

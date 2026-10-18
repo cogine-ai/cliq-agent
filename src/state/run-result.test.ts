@@ -8,8 +8,11 @@ import { digestOmitting, identityHash } from '../kernel/identity.js';
 import type { FinalCandidateItem, RunResult, VerificationClosureV1 } from '../kernel/result.js';
 import type { DirectUnverifiedConsentV1, RunFrontier, RunSpec, SessionRunTerminalItem } from '../kernel/types.js';
 import { sampleCanonicalNow } from './canonical-time.js';
+import { ResultUnavailableError } from './control-read.js';
+import { loadRunResult, type RunResultPhase } from './run-result.js';
 import { openStateStore, publishInProcessChannel } from './store.js';
-import { openSqliteDriver } from './sqlite-driver.js';
+import { openSqliteDriver, type SqliteDriver } from './sqlite-driver.js';
+import type { StateOwnerContext } from './state-owner.js';
 import { createAgentFixture } from './testing/agent-fixtures.js';
 import { admissionKey, disposeFixture, uuidv7 } from './testing/fixtures.js';
 import { quiescedToolCheckpoint } from './testing/tool-effects.js';
@@ -61,11 +64,34 @@ test('explicitly consented empty verification publishes one unverified immutable
     await reopen(fixture);
     assert.equal((await fixture.agent.completeVerification(verificationRequest)).verificationClosureRef, frontier.verificationClosureRef);
     const request = { expectedRunRevision: revision(fixture) };
-    const committed = await fixture.agent.commitRunResult(request);
+    const phases: RunResultPhase[] = [];
+    // Borrow the actual already-held fixture owner, never manufacture a lock
+    // or native proof merely to exercise an inert diagnostic callback.
+    const held = fixture.store as unknown as { driver: SqliteDriver; owner: StateOwnerContext };
+    const resultOwner = loadRunResult(held.driver, fixture.store.artifacts, held.owner,
+      { run: before.run, spec: before.runSpec, principalId: fixture.principalId }, value => {
+        phases.push(value);
+        throw new Error('an inert diagnosis consumer cannot decide the result');
+      });
+    const committed = await resultOwner.commitRunResult(request);
+    assert.deepEqual(phases, ['result_recovery', 'result_basis', 'result_finalization', 'result_publication', 'result_session', 'result_commit']);
     assert.equal(committed.run.status, 'completed_unverified'); assert.equal(committed.run.terminalReason, 'no_required_verifier');
     assert.equal(committed.run.nextStep, null); assert.equal(committed.run.frontierRef, undefined);
     assert.equal(committed.run.stopIntentRef, undefined); assert.equal(committed.run.terminalDetailRef, undefined);
     const result = await fixture.store.artifacts.readCanonical<RunResult>(committed.resultRef);
+    const inspectionIdentity = await publishInProcessChannel(fixture.store);
+    const inspected = await fixture.store.readControl({ protocolVersion: 1, method: 'run.result', runId: fixture.runId }, inspectionIdentity);
+    assert.equal(inspected.method, 'run.result');
+    if (inspected.method !== 'run.result') throw new Error('result inspection selected another method');
+    assert.equal(inspected.runId, fixture.runId); assert.equal(inspected.result.ref, committed.resultRef);
+    assert.equal(inspected.result.digest, committed.resultRef); assert.equal(inspected.result.schemaVersion, 1);
+    assert.equal(inspected.result.sizeBytes, (await fixture.store.artifacts.readBytes(committed.resultRef)).byteLength);
+    assert.equal(inspected.verificationClosureRef, result.verificationClosureRef);
+    const inspectedDiff = await fixture.store.readControl({ protocolVersion: 1, method: 'run.diff', runId: fixture.runId }, inspectionIdentity);
+    assert.equal(inspectedDiff.method, 'run.diff');
+    if (inspectedDiff.method !== 'run.diff') throw new Error('diff inspection selected another method');
+    assert.equal(inspectedDiff.diff.ref, result.diffRef); assert.equal(inspectedDiff.diff.digest, result.diffRef);
+    assert.equal(inspectedDiff.diff.sizeBytes, (await fixture.store.artifacts.readBytes(result.diffRef)).byteLength);
     for (const key of ['baseSourceRef', 'resultSourceRef', 'diffRef', 'summaryRef'] as const) assert.equal(result[key], item[key]);
     assert.equal(result.verificationClosureRef, frontier.verificationClosureRef); assert.deepEqual(result.verificationReceiptRefs, []);
     const after = await fixture.store.readRecoveryClosure(fixture.runId);
@@ -139,6 +165,15 @@ for (const stop of ['cancel', 'deadline'] as const) test(`a durable finalize fro
     await reopen(fixture);
     const after = await fixture.store.readRecoveryClosure(fixture.runId);
     assert.deepEqual(after.run, terminal.run); assert.deepEqual(after.items, before.items); assert.deepEqual(after.journal, before.journal);
+    const identity = await publishInProcessChannel(fixture.store);
+    for (const method of ['run.result', 'run.diff'] as const) {
+      await assert.rejects(fixture.store.readControl({ protocolVersion: 1, method, runId: fixture.runId }, identity), error => {
+        assert.ok(error instanceof ResultUnavailableError);
+        assert.deepEqual(error.controlError, { schemaVersion: 1, code: 'RESULT_UNAVAILABLE', messageCode: 'run.result_unavailable',
+          retryable: false, runId: fixture.runId, status: terminal.run.status, terminalDetailRef: terminal.run.terminalDetailRef });
+        return true;
+      });
+    }
     assert.equal(fixture.store.getSession(before.run.sessionId).latestItemSeq, 1);
   } finally { await disposeFixture(fixture); }
 });

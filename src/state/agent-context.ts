@@ -13,6 +13,8 @@ import type { ModelTurnMaterial } from '../runtime/continuation.js';
 import type { ArtifactCatalog } from './artifacts.js';
 import { decodeAdmittedContext, decodeRunObjective, decodeSessionProjection } from './decoders.js';
 import { joinResourceOperations, KernelStorageError } from './errors.js';
+import { decodeRepairDiagnosticItem, decodeVerificationReceipt, decodeVerifierRepairDiagnostic,
+  decodeVerifierRepairModelContent, verifierRepairModelContent } from './verifier-artifacts.js';
 
 export async function readCanonicalArtifact<T>(artifacts: ArtifactCatalog, ref: string): Promise<T> {
   const value = await artifacts.readCanonical<T>(ref);
@@ -152,6 +154,23 @@ export async function readModelContext(input: ContextProjectionInput): Promise<P
             !['text', 'json'].includes(content.inputKind) || pendingCalls[0] !== item.callId) throw new TypeError('input context does not belong to its open call');
         pendingInputs.push({ itemId: item.itemId, content: content.inputKind === 'text'
           ? content.value as string : canonicalJsonBytes(content.value).toString('utf8') });
+      } else if (item.kind === 'repair_diagnostic') {
+        const repair = decodeRepairDiagnosticItem(item);
+        if (pendingCalls.length || pendingInputs.length) throw new TypeError('verifier repair overtakes an unanswered tool call');
+        for (const entry of repair.diagnostics) {
+          const diagnostic = decodeVerifierRepairDiagnostic(await readCanonicalArtifact(artifacts, entry.diagnosticRef));
+          const receipt = decodeVerificationReceipt(await readCanonicalArtifact(artifacts, diagnostic.receiptRef));
+          const content = decodeVerifierRepairModelContent(await readCanonicalArtifact(artifacts, entry.modelContentRef));
+          if (diagnostic.runId !== run.id || diagnostic.candidateItemId !== repair.candidateItemId || diagnostic.verifierPlanRef !== repair.verifierPlanRef ||
+              diagnostic.verifierId !== entry.verifierId || diagnostic.diagnosticDigest !== entry.diagnosticDigest ||
+              diagnostic.modelContentRef !== entry.modelContentRef || diagnostic.modelContentDigest !== entry.modelContentDigest ||
+              content.contentDigest !== entry.modelContentDigest || receipt.runId !== run.id || receipt.verifierId !== entry.verifierId ||
+              receipt.receiptDigest !== diagnostic.receiptDigest || receipt.stdoutRef !== diagnostic.stdoutRef || receipt.stderrRef !== diagnostic.stderrRef ||
+              canonicalSha256(content) !== canonicalSha256(verifierRepairModelContent(receipt)))
+            throw new TypeError('verifier repair model content differs from its fixed receipt projection');
+          // Raw stdout/stderr are deliberately never opened by prompt construction.
+          user('verifier_repair', repair.itemId, content.message);
+        }
       } else throw new TypeError(`control item ${item.kind} cannot be projected as raw model context`);
   };
   for (const segment of context.segments) {

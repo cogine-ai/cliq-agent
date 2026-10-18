@@ -8,7 +8,7 @@ import type { ProcessContainment, SourceManifest, WorkerIdentity, WorkspaceEntry
 import { publishInProcessChannel } from './store.js';
 import { openSqliteDriver } from './sqlite-driver.js';
 import { readActiveStateOwner } from './state-owner.js';
-import { assertBuiltinEditLaunchClosure, assertWorkerLaunchClosure, readBuiltinEditLaunchClosure, readRetainedWorkerLaunchClosure, readWorkerLaunchClosure } from './execution-closure.js';
+import { assertBuiltinEditLaunchClosure, assertVerifierLaunchClosure, assertWorkerLaunchClosure, readBuiltinEditLaunchClosure, readRetainedWorkerLaunchClosure, readWorkerLaunchClosure } from './execution-closure.js';
 import type { ToolOperationGrantV1 } from '../kernel/tool-authorization.js';
 import type { ToolCallInputV1 } from '../protocol/agent-ir.js';
 import { createQueuedFixture, prepareFixtureGeneration, disposeFixture, digest, uuidv7, admissionKey } from './testing/fixtures.js';
@@ -47,6 +47,8 @@ test('worker reservation rejects a canonical launch closed over another Run with
     const execution = await readWorkerLaunchClosure(store.artifacts, retainedOwner(fixture.stateRoot), { ...launch.input, run: store.getRun(runId) });
     assert.throws(() => assertWorkerLaunchClosure(structuredClone(execution)), { code: 'ARTIFACT_MISMATCH' });
     assert.doesNotThrow(() => assertWorkerLaunchClosure(execution));
+    assert.throws(() => assertVerifierLaunchClosure(execution), { code: 'ARTIFACT_MISMATCH' }, 'a worker closure is not verifier execution authority');
+    assert.throws(() => assertVerifierLaunchClosure(structuredClone(execution)), { code: 'ARTIFACT_MISMATCH' });
   } finally { await disposeFixture(fixture); }
 });
 

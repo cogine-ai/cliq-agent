@@ -21,14 +21,18 @@ import { decodeRetainedRunAssembly } from '../model/run-assembly.js';
 import { readModelGrantData } from './model-grant.js';
 import { decodeAdmittedContext, decodeContextManifest, decodeSourceManifest, decodeWorkspaceIdentity } from './decoders.js';
 import { validateFinalCandidateRecovery } from './final-candidate-recovery.js';
+import type { SqliteDriver } from './sqlite-driver.js';
+import { readVerifierProgress, type VerifierProgress } from './verifier-recovery.js';
+import { validateVerifierHistory } from './verifier-history.js';
 
 /** Recovery checks retained reachability/identity; loading the agent additionally reproduces native requests and validates schemas. */
 export async function validateAgentRecovery(input: {
+  driver?: SqliteDriver;
   artifacts: ArtifactCatalog; run: Run; spec: RunSpec; items: RunItemReferenceV1[];
   journal: InvocationJournalEntry[]; context: ContextManifest;
   checkpoints: Checkpoint[]; workspaceGenerations: WorkspaceGenerationStateV1[];
   principalId: string; workspaceIdentityRef: string;
-}): Promise<void> {
+}): Promise<{ repairAttempts: number }> {
   const { artifacts, run, spec, journal } = input;
   const workspace = decodeWorkspaceIdentity(await readCanonicalArtifact(artifacts, input.workspaceIdentityRef));
   const source = decodeSourceManifest(await readCanonicalArtifact(artifacts, spec.baseWorkspaceManifestRef));
@@ -117,6 +121,8 @@ export async function validateAgentRecovery(input: {
       throw new TypeError('Run item differs from its durable owner row');
     }
     items.set(item.itemId, item);
+    if (item.kind === 'policy_decision' && item.subjectKind !== 'tool_call' && item.subjectKind !== 'verifier_launch')
+      throw new TypeError('policy decision has an unsupported subject');
     if (item.kind === 'model_turn' || item.kind === 'assistant_tool_batch') {
       const turn = turns.get(item.modelTurnRef)?.turn;
       const completion = journal.find((entry) => entry.opKind === 'model' && entry.phase === 'completed' &&
@@ -165,11 +171,25 @@ export async function validateAgentRecovery(input: {
       if (payload.outcome === 'error') await artifacts.readBytes(payload.diagnosticRef);
     }
   }
+  const verifierProgressByCandidate = new Map<string, VerifierProgress>();
+  for (const row of input.items.filter(row => items.get(row.itemId)?.kind === 'final_candidate')) {
+    if (!input.driver) throw new TypeError('candidate recovery requires its owning retained SQLite cut');
+    verifierProgressByCandidate.set(row.itemId, await readVerifierProgress(input.driver, artifacts, {
+      run, runSpec: spec, items: input.items, journal, workspaceGenerations: input.workspaceGenerations
+    }, row.itemId));
+  }
   await validateFinalCandidateRecovery({ artifacts, run, spec, items: input.items, journal,
-    checkpoints: input.checkpoints, workspaceGenerations: input.workspaceGenerations, decodedItems: items });
+    checkpoints: input.checkpoints, workspaceGenerations: input.workspaceGenerations, decodedItems: items, verifierProgressByCandidate });
+  let repairAttempts = 0;
+  if (input.driver) ({ repairAttempts } = await validateVerifierHistory({ driver: input.driver, artifacts, run, spec, items: input.items, journal,
+    checkpoints: input.checkpoints, workspaceGenerations: input.workspaceGenerations, decodedItems: items, verifierProgressByCandidate }));
+  else if ([...items.values()].some(item => ['final_candidate', 'verifier_result', 'verifier_stop', 'repair_diagnostic'].includes(item.kind)) ||
+    journal.some(entry => entry.opKind === 'verifier') || run.repairCount || run.budgetConsumed.repairAttempts)
+    throw new TypeError('verifier history requires its original retained SQLite cut');
   await validateToolRecovery({ artifacts, run, spec, items, journal, checkpoints: input.checkpoints, workspaceGenerations: input.workspaceGenerations });
   await validateUserInputRecovery({ artifacts, run, spec, items, journal, checkpoints: input.checkpoints });
   validateContextItems(input.context, input.items.map((row) => ({
     itemSeq: row.itemSeq, itemRef: row.payloadRef, item: items.get(row.itemId)!
   })));
+  return { repairAttempts };
 }

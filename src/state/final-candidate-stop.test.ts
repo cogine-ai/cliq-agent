@@ -2,13 +2,16 @@
 // establish reducer invariants, not installed verifier or physical-death qualification.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import path from 'node:path';
+import { KERNEL_DATABASE_FILENAME } from '../config.js';
 import { identityHash } from '../kernel/identity.js';
 import type { StopIntent } from '../kernel/types.js';
 import { sampleCanonicalNow } from './canonical-time.js';
 import { openStateStore, publishInProcessChannel } from './store.js';
 import { createAgentFixture } from './testing/agent-fixtures.js';
-import { disposeFixture, uuidv7 } from './testing/fixtures.js';
+import { activateFixtureWorker, disposeFixture, uuidv7 } from './testing/fixtures.js';
 import { quiescedToolCheckpoint } from './testing/tool-effects.js';
+import { openSqliteDriver } from './sqlite-driver.js';
 
 type Fixture = Awaited<ReturnType<typeof createAgentFixture>>;
 const revision = (fixture: Fixture) => fixture.store.getRun(fixture.runId).revision;
@@ -38,6 +41,36 @@ async function reopen(fixture: Fixture) {
   fixture.agent = await fixture.store.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material,
     releaseKeys: fixture.signed.releaseKeys });
 }
+
+test('candidate recovery retains the exact worker revocation, checkpointing and death wait without advancing verification', async () => {
+  const fixture = await createAgentFixture('candidate-worker-recovery', undefined, { mode: 'plan' });
+  try {
+    await prepareCandidate(fixture);
+    const before = await fixture.store.readRecoveryClosure(fixture.runId), frontierRef = before.run.frontierRef!;
+    const active = await activateFixtureWorker(fixture, 'candidate-exact-worker');
+    const activated = await fixture.store.readRecoveryClosure(fixture.runId);
+    assert.equal(activated.run.frontierRef, frontierRef); assert.equal(activated.run.nextStep, 'verify');
+    const revoking = fixture.store.beginGenerationRevocation({ launchId: active.launchId, expectedLeaseVersion: active.leaseVersion,
+      expectedGenerationRowVersion: active.generationRowVersion, quiesceId: 'candidate-verifier-quiesce' });
+    assert.equal((await fixture.store.readRecoveryClosure(fixture.runId)).workspaceGenerations.at(-1)!.phase, 'revoking');
+    fixture.store.beginGenerationCheckpoint({ launchId: active.launchId, expectedLeaseVersion: revoking.launch.leaseVersion,
+      expectedGenerationRowVersion: revoking.generation.rowVersion, quiesceId: 'candidate-verifier-quiesce' });
+    assert.equal((await fixture.store.readRecoveryClosure(fixture.runId)).workspaceGenerations.at(-1)!.phase, 'checkpointing');
+    await fixture.store.beginWorkerRecovery({ runId: fixture.runId, expectedRunRevision: revision(fixture) });
+    const waiting = await fixture.store.readRecoveryClosure(fixture.runId);
+    assert.equal(waiting.run.status, 'waiting'); assert.equal(waiting.run.waitingReason, 'reconciliation');
+    assert.equal(waiting.run.frontierRef, frontierRef); assert.equal(waiting.run.activeWorkerLaunchId, undefined);
+    assert.deepEqual(waiting.journal, before.journal); assert.deepEqual(waiting.items, before.items);
+    const original = await fixture.store.artifacts.readCanonical<Record<string, unknown>>(frontierRef);
+    const forged = await fixture.store.artifacts.publishCanonical({ ...original, nextVerifierIndex: 1 }, 'cliq-run-frontier-v1');
+    const writer = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+    try {
+      writer.prepare('UPDATE runs SET frontier_ref = ? WHERE id = ?').run(forged.ref, fixture.runId);
+      try { await assert.rejects(fixture.store.readRecoveryClosure(fixture.runId), { code: 'RECOVERY_REQUIRED' }); }
+      finally { writer.prepare('UPDATE runs SET frontier_ref = ? WHERE id = ?').run(frontierRef, fixture.runId); }
+    } finally { writer.close(); }
+  } finally { await disposeFixture(fixture); }
+});
 
 test('cancel retires an unstarted candidate without executing a verifier or publishing its result, including replay after reopen', async () => {
   const fixture = await createAgentFixture('candidate-stop-cancel', undefined, { mode: 'plan' });
@@ -70,6 +103,44 @@ test('cancel retires an unstarted candidate without executing a verifier or publ
     assert.deepEqual(await fixture.agent.commitTerminalStop(terminalRequest), terminal);
     assert.deepEqual(fixture.store.getSession(session.id), terminalSession);
     assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), after);
+  } finally { await disposeFixture(fixture); }
+});
+
+test('cancel fences an active verifier parent without inventing a receipt or clearing its retirement requirement', async () => {
+  const fixture = await createAgentFixture('candidate-active-stop', undefined, { mode: 'plan' });
+  try {
+    await prepareCandidate(fixture);
+    await activateFixtureWorker(fixture, 'candidate-active-stop-worker');
+    const before = await fixture.store.readRecoveryClosure(fixture.runId);
+    const stopped = await fixture.agent.cancelRun(await cancelCommand(fixture));
+    assert.equal(stopped.run.cancelRequested, true);
+    assert.equal(stopped.run.activeWorkerLaunchId, before.run.activeWorkerLaunchId);
+    assert.equal(stopped.run.frontierRef, before.run.frontierRef);
+    await assert.rejects(fixture.agent.commitTerminalStop({ expectedRunRevision: revision(fixture) }), /positive retirement/);
+    const proof = await quiescedToolCheckpoint(fixture, stopped.checkpointId);
+    const terminal = await fixture.agent.commitTerminalStop({ expectedRunRevision: revision(fixture), checkpoint: proof.checkpoint });
+    assert.equal(terminal.run.status, 'cancelled');
+    const after = await fixture.store.readRecoveryClosure(fixture.runId);
+    assert.deepEqual(after.items, before.items); assert.deepEqual(after.journal, before.journal);
+    await reopen(fixture);
+    assert.deepEqual((await fixture.store.readRecoveryClosure(fixture.runId)).run, terminal.run);
+  } finally { await disposeFixture(fixture); }
+});
+
+test('cancel fences a verifier worker-death wait without clearing its original reconciliation subject', async () => {
+  const fixture = await createAgentFixture('candidate-wait-stop', undefined, { mode: 'plan' });
+  try {
+    await prepareCandidate(fixture);
+    await activateFixtureWorker(fixture, 'candidate-wait-stop-worker');
+    await fixture.store.beginWorkerRecovery({ runId: fixture.runId, expectedRunRevision: revision(fixture) });
+    const before = await fixture.store.readRecoveryClosure(fixture.runId);
+    const stopped = await fixture.agent.cancelRun(await cancelCommand(fixture));
+    assert.equal(stopped.run.status, 'waiting'); assert.equal(stopped.run.cancelRequested, true);
+    assert.equal(stopped.run.waitingOnRef, before.run.waitingOnRef); assert.equal(stopped.run.frontierRef, before.run.frontierRef);
+    await assert.rejects(fixture.agent.commitTerminalStop({ expectedRunRevision: revision(fixture) }), /requires an agent continuation|candidate stop/);
+    const after = await fixture.store.readRecoveryClosure(fixture.runId);
+    assert.deepEqual(after.items, before.items); assert.deepEqual(after.journal, before.journal);
+    assert.deepEqual(after.workspaceGenerations, before.workspaceGenerations);
   } finally { await disposeFixture(fixture); }
 });
 

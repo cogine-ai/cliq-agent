@@ -9,7 +9,7 @@ import type { ToolObservationV1 } from '../kernel/tool-authorization.js';
 import { decodeRetainedRunAssembly, type RunAssemblyValidationMaterial } from '../model/run-assembly.js';
 import { immutableSnapshot } from '../model/immutable.js';
 import { exactKeys, requireEqual, type RuntimeBundleManifest, type ReleaseTrustKey } from '../policy/runtime-authority.js';
-import { assertNativeContainmentDeath, assertNativePreactivationObservation, LINUX_WORKER_RECIPE,
+import { assertNativeContainmentDeath, assertNativePreactivationObservation, LINUX_WORKER_RECIPE, LINUX_VERIFIER_RECIPE,
   openInstalledLinuxWorkerLauncher, openLinuxWorkerLauncher, type LinuxBlockedWorker, type LinuxWorkerController,
   type LinuxWorkerInstallation, type NativePreactivationRetirement, type NativeRetainedWorkerRetirement } from '../sandbox/linux-worker.js';
 import { borrowRunWorkspaceForExecution, createRunWorkspaceMaterialization, observeRetainedRunWorkspace,
@@ -18,7 +18,7 @@ import type { ArtifactCatalog } from './artifacts.js';
 import { isJoinedCasPublicationFailure } from './cas.js';
 import { readTimeFence, sampleCanonicalNow } from './canonical-time.js';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
-import { decodeSandboxProfile, readBuiltinEditLaunchClosure, readWorkerLaunchClosure, readRetainedWorkerLaunchClosure, readQuarantinedWorkerLaunchClosure, decodeWorkerProcessContainment, type WorkerLaunchClosure } from './execution-closure.js';
+import { decodeSandboxProfile, readBuiltinEditLaunchClosure, readWorkerLaunchClosure, readRetainedWorkerLaunchClosure, readQuarantinedWorkerLaunchClosure, decodeWorkerProcessContainment, readVerifierLaunchClosure, type WorkerLaunchClosure } from './execution-closure.js';
 import { loadAgentRun } from './reducers/agent.js';
 import { assertLiveDispatchState, markInvocationUnknown } from './reducers/invocation.js';
 import { beginWorkerRecovery, beginWorkerRecoveryProbe, closeWorkerRecoveryProbe, completeWorkerRecoveryProbe } from './reducers/worker-recovery.js';
@@ -44,6 +44,10 @@ import { hasOnlySettledInstalledModelUnknowns } from './worker-recovery.js';
 import { readInvocationAttempt } from './repositories/journal.js';
 import { beginWorkerPreparation, recordWorkerPreparationGeneration, recordWorkerPreparationController, retireWorkerPreparation } from './worker-preparation.js';
 import { validateInstalledModelNoReleaseHistory } from './broker-no-release.js';
+import { readVerifierProgress } from './verifier-recovery.js';
+import { decodeGuestToolchainManifest } from './guest-toolchain.js';
+import { decodeVerifierCommand } from './verifier-artifacts.js';
+import { validateVerifierStoppedHistory } from './verifier-stop-history.js';
 
 /** Trusted installation paths belong to Supervisor bootstrap, not a Run or a control frame. */
 export type RunExecutionInstallation = Pick<LinuxWorkerInstallation, 'installationRoot' | 'cgroupParent'>;
@@ -54,6 +58,7 @@ export type RunExecution = Readonly<{
   assertCurrentModelWorker(input: { runId: string; leaseEpoch: number; launchId: string; generationRef: string; workerIdentityDigest: string }): void;
   renewCurrentWorkerLease(): 'inactive' | 'unchanged' | 'renewed' | 'expired';
   executeCurrentTool(input: { expectedRunRevision: number }): Promise<Run>;
+  executeCurrentVerifier(input: { expectedRunRevision: number }): Promise<Run>;
   hasPendingCompletion(error?: unknown): boolean;
   resumeCurrentCompletion(input: { expectedRunRevision: number }): Promise<Run>;
   finishCurrentFinalTurn(input: { expectedRunRevision: number }): Promise<Run>;
@@ -169,14 +174,56 @@ async function publishInspector(artifacts: ArtifactCatalog, owner: StateOwnerRec
   return { inspectorIdentityRef: (await artifacts.publishCanonical(inspector, inspector.format)).ref, inspectorIdentityDigest: inspector.identityDigest };
 }
 
+async function publishVerifierRecipe(artifacts: ArtifactCatalog, workerSpec: WorkerSpec, parentContainmentRef: string, parentCgroup: string,
+  prepared: Extract<Awaited<ReturnType<Awaited<ReturnType<typeof loadAgentRun>>['prepareVerifier']>>, { disposition: 'prepared' }>, dispatchId: string) {
+  const command = decodeVerifierCommand(await artifacts.readCanonical(prepared.target.commandRef));
+  if (command.executable.kind !== 'guest_toolchain' || workerSpec.filesystem.kind !== 'run_generation')
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'verifier requires its exact signed guest and private generation');
+  const executable = command.executable;
+  const guest = decodeGuestToolchainManifest(await artifacts.readCanonical(executable.guestToolchainManifestRef));
+  const owner = { kind: 'run_invocation' as const, runId: prepared.run.id, intendedLeaseEpoch: prepared.run.leaseEpoch,
+    workerLaunchId: workerSpec.owner.workerLaunchId, opId: prepared.entry.opId, attempt: prepared.entry.attempt, dispatchId };
+  const parentPlan = await artifacts.readCanonical<ProcessContainmentPlanV1>(workerSpec.containmentPlanRef);
+  if (parentPlan.backend.kind !== 'linux') throw new KernelStorageError('ARTIFACT_MISMATCH', 'verifier requires its original Linux parent');
+  const cgroupNameReservationDigest = canonicalSha256(['cliq-verifier-cgroup-v1', dispatchId]);
+  const plan: ProcessContainmentPlanV1 = { schemaVersion: 1, format: 'cliq-process-containment-plan-v1', owner,
+    filesystemBinding: { kind: 'run-generation', generationRef: workerSpec.filesystem.generationRef }, parentContainmentRef,
+    launchNonceDigest: nonce(), backend: { kind: 'linux', cgroupPath: path.posix.join(parentCgroup, `cliq-${cgroupNameReservationDigest}`),
+      cgroupNameReservationDigest, pidNamespaceReservationId: identityHash('cliq-verifier-namespace-v1', dispatchId),
+      subreaperStartToken: parentPlan.backend.subreaperStartToken }, createdAt: sampleCanonicalNow(), planDigest: '' };
+  plan.planDigest = digestOmitting(plan, 'planDigest');
+  const containmentPlanRef = (await artifacts.publishCanonical(plan, plan.format)).ref;
+  const runtime: SandboxRuntimeBindingV1 = { ...workerSpec.runtime, toolchain: { kind: 'guest_toolchain',
+    guestToolchainManifestRef: executable.guestToolchainManifestRef, guestToolchainManifestDigest: guest.manifestDigest,
+    guestImageRef: guest.guestImageRef, guestImageDigest: guest.guestImageDigest }, runtimeDigest: '' };
+  runtime.runtimeDigest = digestOmitting(runtime, 'runtimeDigest');
+  const mounts = LINUX_VERIFIER_RECIPE.mounts.map(mount => ({ ...mount, privateRootId: identityHash(dispatchId, mount.purpose) }));
+  const spec: EditSpec = { ...workerSpec, owner, purpose: 'verifier', runtime,
+    executable: { kind: 'guest_toolchain', guestToolchainManifestRef: executable.guestToolchainManifestRef,
+      guestToolchainManifestDigest: guest.manifestDigest, toolId: executable.toolId, role: 'verifier',
+      executionPath: executable.executionPath, executableDigest: executable.executableDigest },
+    processInvocation: { kind: 'run_request', purpose: 'verifier', recipe: 'cliq-verifier-command-v1',
+      requestRef: prepared.entry.requestRef, requestDigest: prepared.request.requestDigest,
+      targetRef: prepared.entry.target, targetDigest: prepared.target.targetDigest, argvCwdSource: 'trusted_recipe_decode_of_request_and_target',
+      stdio: { stdin: 'closed', stdout: 'captured', stderr: 'captured', extraFileDescriptors: 'authenticated_operation_channel_only' } },
+    filesystem: { ...workerSpec.filesystem, access: 'read_only' }, environment: LINUX_VERIFIER_RECIPE.environment,
+    mounts, mountsDigest: canonicalSha256(mounts), parentWorkerContainmentRef: parentContainmentRef,
+    requestRef: prepared.entry.requestRef, requestDigest: prepared.request.requestDigest, targetRef: prepared.entry.target,
+    targetDigest: prepared.target.targetDigest, operationGrantRef: prepared.entry.grantRef!, containmentPlanRef,
+    containmentPlanDigest: plan.planDigest, createdAt: sampleCanonicalNow(), launchSpecDigest: '' };
+  spec.launchSpecDigest = digestOmitting(spec, 'launchSpecDigest');
+  return (await artifacts.publishCanonical(spec, spec.format)).ref;
+}
+
 /** Deep internal resource owner. Opening validates only; process creation is lazy.
  * Durable lifecycle, retry and budgets remain exclusively in the existing reducers. */
 export async function loadRunExecution(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
   bootstrap: { bundle: RuntimeBundleManifest; releaseKeys: readonly ReleaseTrustKey[]; execution?: RunExecutionInstallation } | undefined,
   input: LoadRunExecutionInput, isClosing: () => boolean = () => false,
-  selectedRuntime?: HeldInstalledRuntime, installedAnchor?: HeldInstalledAnchor, executionStore?: StateStore
+  selectedRuntime?: HeldInstalledRuntime, installedAnchor?: HeldInstalledAnchor, executionStore?: StateStore, openingSignal?: AbortSignal
 ): Promise<{ execution: RunExecution; closeWorkerRecoveryProbe(input: { runId: string; expectedRunRevision: number }): Promise<Run>;
   beginClose(): Promise<void>; close(): Promise<void> }> {
+  openingSignal?.throwIfAborted();
   // Validation material includes trusted resolver functions; retain those
   // functions while snapshotting their data, just like loadAgentRun does.
   input = { runId: input.runId, material: Object.fromEntries(Object.entries(input.material).map(([key, value]) =>
@@ -187,7 +234,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
   if (installed) {
     withInstalledWorkerRoot(selectedRuntime!, installedAnchor!, (_fd, cgroupParent) => { installation = { cgroupParent }; });
   } else installation = bootstrap?.execution && immutableSnapshot(bootstrap.execution);
-  const launcher = installed ? await openInstalledLinuxWorkerLauncher(selectedRuntime!, installedAnchor!) :
+  const launcher = installed ? await openInstalledLinuxWorkerLauncher(selectedRuntime!, installedAnchor!, { ...(openingSignal ? { signal: openingSignal } : {}) }) :
     await openLinuxWorkerLauncher(bootstrap?.execution && { ...immutableSnapshot(bootstrap.execution), runtimeAuthority: bootstrap });
   let worker: LinuxBlockedWorker | undefined;
   async function reobserveRetirement() {
@@ -204,8 +251,10 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
   }
   let agent: Awaited<ReturnType<typeof loadAgentRun>>;
   try {
+    openingSignal?.throwIfAborted();
     agent = await loadAgentRun(driver, artifacts, owner, { runId, material: input.material, releaseKeys: bootstrap!.releaseKeys },
-      reobserveRetirement, selectedRuntime);
+      reobserveRetirement, selectedRuntime, openingSignal);
+    openingSignal?.throwIfAborted();
     const run = readRun(driver, runId);
     if (run.parentRunId !== undefined) throw new KernelStorageError('INVALID_REQUEST', 'this installed execution recipe does not support child Runs');
     const runSpec = decodeRunSpec(await artifacts.readCanonical(run.specRef));
@@ -217,6 +266,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         !profile.allowedOwners.includes('worker_activation') || !profile.allowedOwners.includes('run_invocation') || profile.resources.maxProcesses < 8) {
       throw new KernelStorageError('INVALID_REQUEST', 'frozen Run requires an unsupported execution recipe');
     }
+    openingSignal?.throwIfAborted();
   } catch (error) {
     try { await launcher.close(); }
     catch (failure) { throw new ResourceRetirementError('execution opening failed and its installation cleanup did not complete', failure); }
@@ -231,7 +281,8 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
   let activeWorker: ActiveWorker | undefined;
   let stopJoin: Promise<void> | undefined;
   let operationPhase: 'preparing' | 'claimed' | 'received' | undefined;
-  let receivedCompletion: { kind: 'tool' | 'final_turn'; worker: LinuxBlockedWorker; activeWorker: ActiveWorker;
+  let verifierReleased = false;
+  let receivedCompletion: { kind: 'tool' | 'final_turn' | 'verifier'; worker: LinuxBlockedWorker; activeWorker: ActiveWorker;
     finish(): Promise<Run>; failure?: unknown } | undefined;
   let closingCompletion: { operation?: Promise<Run>; completion?: typeof receivedCompletion; worker: LinuxBlockedWorker; activeWorker: ActiveWorker } | undefined;
   let retirementController: LinuxWorkerController | undefined;
@@ -630,7 +681,8 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
     renewCurrentWorkerLease: () => {
       // An operation in flight owns its current lease. Maintenance cannot
       // race its native activation, revocation or Checkpoint transition.
-      if (closed || isClosing() || pending || receivedCompletion || !activeWorker || !worker || !generation || !controller || !reservation) return 'inactive';
+      if (closed || isClosing() || pending && !(verifierReleased && operationPhase === 'claimed') || receivedCompletion ||
+          !activeWorker || !worker || !generation || !controller || !reservation) return 'inactive';
       if (cleanupFailure !== undefined) throw new KernelStorageError('RECOVERY_REQUIRED', 'worker maintenance retains a resource retirement failure');
       const retained = activeWorker, run = readRun(driver, runId);
       if (run.status !== 'running' || run.cancelRequested || run.stopIntentRef !== undefined || run.activeWorkerLaunchId === undefined) return 'inactive';
@@ -700,7 +752,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
     },
     finishCurrentFinalTurn: async value => {
       const expectedRunRevision = revision(value, true);
-      if (receivedCompletion?.kind === 'tool') throw new KernelStorageError('REVISION_CONFLICT', 'a tool result cannot become a final-turn completion');
+      if (receivedCompletion && receivedCompletion.kind !== 'final_turn') throw new KernelStorageError('REVISION_CONFLICT', 'another result cannot become a final-turn completion');
       const abort = new AbortController(); operationAbort = abort;
       if (receivedCompletion) return ownOperation(receivedCompletion.finish(), abort);
       const signal = abort.signal;
@@ -744,9 +796,102 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       })();
       return ownOperation(work, abort);
     },
+    executeCurrentVerifier: async value => {
+      const expectedRunRevision = revision(value, true);
+      if (receivedCompletion && receivedCompletion.kind !== 'verifier')
+        throw new KernelStorageError('REVISION_CONFLICT', 'another received result cannot become a verifier execution');
+      const abort = new AbortController(); operationAbort = abort;
+      if (receivedCompletion) return ownOperation(receivedCompletion.finish(), abort);
+      const signal = abort.signal;
+      operationPhase = 'preparing';
+      let preparedVerifier: Extract<Awaited<ReturnType<typeof agent.prepareVerifier>>, { disposition: 'prepared' }> | undefined;
+      let claimedVerifier: Awaited<ReturnType<typeof agent.claimVerifier>> | undefined;
+      const work = (async () => {
+        signal.throwIfAborted();
+        const selected = await readRecoveryClosure(driver, artifacts, runId);
+        signal.throwIfAborted();
+        const progress = await readVerifierProgress(driver, artifacts, selected);
+        if (selected.run.revision !== expectedRunRevision || selected.run.nextStep !== 'verify' || progress.complete ||
+            selected.run.cancelRequested || selected.run.stopIntentRef || sampleCanonicalNow() >= selected.run.deadlineAt)
+          throw new KernelStorageError('STATE_TRANSITION_INVALID', 'verifier requires its exact unstopped pending candidate');
+        const queued = selected.run.status === 'queued' && !selected.run.activeWorkerLaunchId;
+        const current = queued ? await activateWorker(selected, signal) : activeWorker;
+        if (!current || !worker || !generation || !controller || !reservation ||
+            ownedLaunchId !== current.activated.launch.launchId || readRun(driver, runId).activeWorkerLaunchId !== ownedLaunchId)
+          throw new KernelStorageError('LEASE_FENCED', 'verifier cannot adopt another parent worker');
+        const currentWorker = worker, run = readRun(driver, runId);
+        const prepared = await agent.prepareVerifier({ expectedRunRevision: run.revision, leaseEpoch: run.leaseEpoch });
+        if (prepared.disposition !== 'prepared') {
+          const stopped = await agent.stopForVerifierPolicyDenial({ expectedRunRevision: prepared.run.revision });
+          const checkpointId = stopCheckpointId(runId, stopped.run.stopIntentRef!);
+          const proof = await retireToCheckpoint(current, checkpointId, signal);
+          return (await agent.commitTerminalStop({ expectedRunRevision: readRun(driver, runId).revision, checkpoint: proof.postEffect })).run;
+        }
+        preparedVerifier = prepared;
+        signal.throwIfAborted();
+        if (currentWorker.containment.backend.kind !== 'linux') throw new KernelStorageError('ARTIFACT_MISMATCH', 'verifier parent is not Linux');
+        const dispatchId = identityHash('cliq-verifier-dispatch-v1', runId, prepared.entry.opId, String(prepared.entry.attempt), nonce());
+        const sandboxLaunchSpecRef = await publishVerifierRecipe(artifacts, current.recipe.spec, current.processContainmentRef,
+          currentWorker.containment.backend.cgroupPath, prepared, dispatchId);
+        signal.throwIfAborted();
+        const claimed = await agent.claimVerifier({ expectedRunRevision: prepared.run.revision, leaseEpoch: prepared.run.leaseEpoch,
+          opId: prepared.entry.opId, attempt: prepared.entry.attempt, dispatchId, sandboxLaunchSpecRef }, signal);
+        claimedVerifier = claimed; operationPhase = 'claimed';
+        const grant = await artifacts.readCanonical<import('../kernel/verifier-invocation.js').VerifierOperationGrantV1>(claimed.entry.grantRef!);
+        const evidence = await artifacts.readCanonical<import('../kernel/verifier-invocation.js').VerifierPolicyChannelEvidenceV1>(grant.provenance.channelEvidenceRef);
+        const live = assertLiveDispatchState(driver, owner, runId, prepared.run.revision, prepared.run.leaseEpoch, sampleCanonicalNow());
+        const closure = await readVerifierLaunchClosure(artifacts, assertActiveStateOwner(driver, owner), { ...live, prepared: prepared.entry,
+          request: claimed.request, target: claimed.target, grant, evidence, dispatchId, sandboxLaunchSpecRef }, bootstrap!.releaseKeys, signal);
+        const invocation = await currentWorker.createVerifier(closure, { signal });
+        signal.throwIfAborted();
+        await claimed.release(invocation); verifierReleased = true;
+        const result = await invocation.result();
+        verifierReleased = false; operationPhase = 'received';
+        // Register before any post-result await. Closing can revoke the
+        // original producer but cannot replace its genuinely received result.
+        let completion: Awaited<ReturnType<typeof agent.beginVerifierCompletion>> | undefined;
+        const retire = checkpointRetirement(current, prepared.checkpointId, signal);
+        let proof: Awaited<ReturnType<typeof retire>> | undefined;
+        receivedCompletion = { kind: 'verifier', worker: currentWorker, activeWorker: current, finish: async () => {
+          if (activeWorker !== current || worker !== currentWorker || ownedLaunchId !== current.activated.launch.launchId)
+            throw new KernelStorageError('LEASE_FENCED', 'verifier result lost its original physical producer');
+          assertActiveStateOwner(driver, owner);
+          let actual = readRun(driver, runId);
+          if (!actual.stopIntentRef && sampleCanonicalNow() >= actual.deadlineAt)
+            actual = (await agent.expireRun({ expectedRunRevision: actual.revision })).run;
+          completion ??= await agent.beginVerifierCompletion({ expectedRunRevision: actual.revision,
+            opId: prepared.entry.opId, attempt: prepared.entry.attempt, result });
+          proof ??= await retire();
+          return (await completion.complete({ expectedRunRevision: readRun(driver, runId).revision, checkpoint: proof.postEffect })).run;
+        } };
+        if (closingCompletion?.worker === currentWorker && closingCompletion.activeWorker === current) closingCompletion.completion = receivedCompletion;
+        return receivedCompletion.finish();
+      })().catch(async error => {
+        verifierReleased = false;
+        if (claimedVerifier && operationPhase !== 'received') {
+          await revokeOriginalWorker();
+          const history = readInvocationAttempt(driver, runId, claimedVerifier.entry.opId, claimedVerifier.entry.attempt);
+          if (history.at(-1)?.phase === 'dispatch_claimed') {
+            const ambiguity = await artifacts.publishCanonical({ schemaVersion: 1, format: 'cliq-verifier-ambiguity-v1', runId,
+              opId: claimedVerifier.entry.opId, attempt: claimedVerifier.entry.attempt, dispatchId: claimedVerifier.entry.dispatchId,
+              claimJournalSeq: claimedVerifier.entry.seq, requestRef: claimedVerifier.entry.requestRef,
+              targetRef: claimedVerifier.entry.target, grantRef: claimedVerifier.entry.grantRef,
+              reason: 'original_producer_joined_without_result' }, 'cliq-verifier-ambiguity-v1');
+            await markInvocationUnknown(driver, artifacts, owner, { runId, opId: claimedVerifier.entry.opId,
+              attempt: claimedVerifier.entry.attempt, expectedRunRevision: readRun(driver, runId).revision,
+              evidenceRef: ambiguity.ref, evidenceDigest: ambiguity.ref });
+          }
+        } else if (preparedVerifier && operationPhase !== 'received') {
+          await agent.failVerifierPreparation({ expectedRunRevision: readRun(driver, runId).revision,
+            opId: preparedVerifier.entry.opId, attempt: preparedVerifier.entry.attempt });
+        }
+        throw error;
+      });
+      return ownOperation(work, abort);
+    },
     executeCurrentTool: async value => {
       const expectedRunRevision = revision(value, true);
-      if (receivedCompletion?.kind === 'final_turn') throw new KernelStorageError('REVISION_CONFLICT', 'a final turn cannot become another tool execution');
+      if (receivedCompletion && receivedCompletion.kind !== 'tool') throw new KernelStorageError('REVISION_CONFLICT', 'another result cannot become a tool execution');
       const abort = new AbortController();
       operationAbort = abort;
       if (receivedCompletion) return ownOperation(receivedCompletion.finish(), abort);
@@ -909,9 +1054,11 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       // is worker-free; it cannot authorize sealing an active worker.
       if (selected.run.activeWorkerLaunchId !== undefined) {
         const noRelease = await validateInstalledModelNoReleaseHistory(driver, artifacts, selected);
+        const stoppedVerifiers = await validateVerifierStoppedHistory(driver, artifacts, selected);
         for (const { entry, hasClaim } of stopInvocationHistory(selected.journal).values()) {
-          if (!['model', 'tool'].includes(entry.opKind) || (!['prepared', 'completed'].includes(entry.phase) &&
-              (entry.phase !== 'failed' || hasClaim && !(entry.opKind === 'model' && noRelease.has(entry.seq))))) {
+          if (!['model', 'tool', 'verifier'].includes(entry.opKind) || (!['prepared', 'completed'].includes(entry.phase) &&
+              (entry.phase !== 'failed' || hasClaim && !(entry.opKind === 'model' && noRelease.has(entry.seq)) &&
+                !(entry.opKind === 'verifier' && stoppedVerifiers.has(entry.seq))))) {
             throw new KernelStorageError('STATE_TRANSITION_INVALID', 'terminal stop awaits exact dispatch/reconciliation closure');
           }
         }

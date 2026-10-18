@@ -1,6 +1,6 @@
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting, identityHash } from '../kernel/identity.js';
-import type { Checkpoint, ContinuationItem, InvocationJournalEntry, Run, RunFrontier, RunItemReferenceV1, RunSpec, WorkspaceGenerationStateV1 } from '../kernel/types.js';
+import type { Checkpoint, ContinuationItem, InvocationJournalEntry, Run, RunFrontier, RunItemReferenceV1, RunSpec, WorkerDeathWait, WorkspaceGenerationStateV1 } from '../kernel/types.js';
 import type { ModelRequestV1 } from '../model/request.js';
 import { modelResponseDigest } from '../model/attempt.js';
 import { exactKeys, requireEqual } from '../policy/runtime-authority.js';
@@ -12,6 +12,7 @@ import { finalCandidateCheckpointId, finalCandidateItemId, readCandidateVerifier
 import { decodeFinalCandidateItem, decodeVerificationClosure, decodeVerifierPlan, decodeWorkspaceDiff } from './result-artifacts.js';
 import { readCandidateSource } from './result-source.js';
 import { isZeroBudget } from './invariants.js';
+import type { VerifierProgress } from './verifier-recovery.js';
 
 /** Retained provenance only. The enclosing recovery walk validates the actual
  * sealed generation and original worker proof; this function mints neither. */
@@ -19,6 +20,7 @@ export async function validateFinalCandidateRecovery(input: {
   artifacts: ArtifactCatalog; run: Run; spec: RunSpec; items: RunItemReferenceV1[];
   journal: InvocationJournalEntry[]; checkpoints: Checkpoint[]; workspaceGenerations: WorkspaceGenerationStateV1[];
   decodedItems: Map<string, ContinuationItem>;
+  verifierProgressByCandidate: ReadonlyMap<string, VerifierProgress>;
 }): Promise<void> {
   const { artifacts, run, spec, items, journal, checkpoints, decodedItems } = input;
   const rows = items.filter(row => decodedItems.get(row.itemId)?.kind === 'final_candidate');
@@ -109,6 +111,9 @@ export async function validateFinalCandidateRecovery(input: {
     const planRef = canonicalSha256(expectedPlan);
     const plan = decodeVerifierPlan(await readCanonicalArtifact(artifacts, planRef));
     requireEqual(plan, expectedPlan, 'candidate recovery frozen verifier plan');
+    const progress = input.verifierProgressByCandidate.get(candidate.itemId);
+    if (!progress || progress.planRef !== planRef || canonicalSha256(progress.candidate) !== canonicalSha256(candidate))
+      throw new TypeError('candidate recovery has no exact independently validated verifier history');
     const initialFrontier: RunFrontier = { schemaVersion: 1, kind: 'verify', phase: 'verifiers',
       candidateItemId: candidate.itemId, resultSourceRef: candidate.resultSourceRef, verifierPlanRef: planRef,
       nextVerifierIndex: 0, afterPass: 'finalize' };
@@ -123,10 +128,27 @@ export async function validateFinalCandidateRecovery(input: {
   if ((current && current.kind === 'verify') || run.nextStep === 'verify') {
     if (!current || current.kind !== 'verify' || !verifierFrontiers.has(current.candidateItemId))
       throw new TypeError('current verifier frontier has no validated candidate');
-    requireEqual(current, verifierFrontiers.get(current.candidateItemId), 'candidate recovery current verifier frontier');
-    if (run.status !== 'queued' || run.nextStep !== 'verify' || run.activeWorkerLaunchId ||
-        run.waitingReason || run.waitingOnRef || !isZeroBudget(run.budgetReserved))
-      throw new TypeError('candidate recovery verifier cut retains worker execution authority');
+    const progress = input.verifierProgressByCandidate.get(current.candidateItemId)!;
+    requireEqual(current, { ...verifierFrontiers.get(current.candidateItemId), nextVerifierIndex: progress.nextVerifierIndex }, 'candidate recovery current verifier frontier');
+    let lifecycle = false;
+    if (run.status === 'queued') lifecycle = !run.activeWorkerLaunchId && !run.waitingReason && !run.waitingOnRef && isZeroBudget(run.budgetReserved);
+    else if (run.status === 'running') lifecycle = !!run.activeWorkerLaunchId && !run.waitingReason && !run.waitingOnRef &&
+      input.workspaceGenerations.some(generation => (generation.phase === 'active' || generation.phase === 'revoking' || generation.phase === 'checkpointing') &&
+        generation.activeWorkerLaunchId === run.activeWorkerLaunchId && generation.leaseEpoch === run.leaseEpoch);
+    else if (run.status === 'waiting' && run.waitingReason === 'reconciliation' && run.waitingOnRef && !run.activeWorkerLaunchId) {
+      // This is the existing whole-worker death lifecycle, never a new
+      // verifier status-query contract. Its complete launch/probe closure is
+      // independently checked by validateWorkerRecoveryWait in the same walk.
+      const fenced = input.workspaceGenerations.filter(generation => generation.phase === 'fenced_reconciling' &&
+        generation.leaseEpoch === run.leaseEpoch && generation.waitingSubjectRef === run.waitingOnRef && generation.waitingSubjectDigest === run.waitingOnRef);
+      const wait = await readCanonicalArtifact<WorkerDeathWait>(artifacts, run.waitingOnRef);
+      const generation = fenced[0];
+      lifecycle = fenced.length === 1 && generation?.phase === 'fenced_reconciling' && wait.schemaVersion === 1 && wait.kind === 'reconciliation' && wait.runId === run.id &&
+        wait.frontierRef === run.frontierRef && wait.subject.kind === 'worker_death' && wait.subject.oldLeaseEpoch === run.leaseEpoch &&
+        wait.subject.workspaceGenerationRef === generation.generationRef && wait.subject.oldWorkerLaunchId === generation.activeWorkerLaunchId;
+    }
+    if (run.nextStep !== 'verify' || !lifecycle)
+      throw new TypeError('candidate recovery verifier cut has no exact queued or active execution lifecycle');
   } else if ((current && current.kind === 'finalize') || run.nextStep === 'finalize') {
     const planFrontier = current && current.kind === 'finalize' && verifierFrontiers.get(current.candidateItemId);
     if (!current || current.kind !== 'finalize' || current.operation !== 'agent' || !planFrontier || planFrontier.kind !== 'verify')

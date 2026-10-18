@@ -36,9 +36,13 @@ enum spawn_rejection {
 };
 
 struct scope {
-    bool created, active, released, stopped, invocation;
+    bool created, active, released, stopped, invocation, verifier, verifier_finished;
     unsigned int parent;
     int cgroup, process_group, channel, stdout_fd, stderr_fd;
+    int stdout_pipe, stderr_pipe;
+    int64_t verifier_started;
+    struct cliq_verifier_config *verifier_config;
+    struct cliq_worker_packet verifier_result;
     pid_t monitor, init, worker;
     char monitor_start_token[CLIQ_WORKER_TOKEN_BYTES];
     struct cliq_worker_packet identity;
@@ -128,11 +132,11 @@ static bool scope_process_current(const struct scope *scope) {
     snprintf(filename, sizeof(filename), "/proc/%ld/exe", (long)scope->worker);
     if (stat(filename, &image) != 0 || !S_ISREG(image.st_mode)) return false;
     snprintf(filename, sizeof(filename), "/proc/%ld/root/runtime/%s", (long)scope->worker,
-        scope->invocation ? "cliq-linux-edit" : "cliq-linux-worker");
+        scope->verifier ? "cliq-linux-worker-init" : scope->invocation ? "cliq-linux-edit" : "cliq-linux-worker");
     if (stat(filename, &runtime) != 0 || runtime.st_dev != image.st_dev || runtime.st_ino != image.st_ino) return false;
     snprintf(filename, sizeof(filename), "/proc/%ld/ns/pid", (long)scope->worker);
     return stat(filename, &namespace) == 0 && (uint64_t)namespace.st_ino == scope->identity.pid_namespace_inode &&
-        cliq_generation_mount(scope->worker, scope->identity.generation_device, scope->identity.generation_inode, !scope->invocation) &&
+        cliq_generation_mount(scope->worker, scope->identity.generation_device, scope->identity.generation_inode, !scope->invocation || scope->verifier) &&
         cliq_process_token(scope->worker, token) && strcmp(token, scope->identity.start_token) == 0;
 }
 
@@ -185,16 +189,19 @@ static int independent_image_fd(int source, int minimum) {
 
 static bool close_above_channel(void) { return cliq_close_range(4, UINT_MAX); }
 
+#include "verifier-init.h"
+
 /* Same installed controller image, executed as PID 1 by --as-pid-1. No user
  * source is loaded until all host generation/cgroup/runtime FDs are closed. */
 static int namespace_init(void) {
     if (!close_above_channel() || getpid() != 1 || prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0 ||
         prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) != 1) return 70;
     struct cliq_worker_packet request;
-    int passed[5]; size_t count;
+    int passed[CLIQ_WORKER_MAX_FDS]; size_t count;
     if (!cliq_receive(3, &request, passed, &count) ||
-        (request.command != CLIQ_CREATE_WORKER && request.command != CLIQ_CREATE_WRITE) ||
-        count != (request.command == CLIQ_CREATE_WRITE ? 1U : 0U)) return 70;
+        (request.command != CLIQ_CREATE_WORKER && request.command != CLIQ_CREATE_WRITE && request.command != CLIQ_CREATE_VERIFIER) ||
+        count != (request.command == CLIQ_CREATE_WORKER ? 0U : 1U)) return 70;
+    if (request.command == CLIQ_CREATE_VERIFIER) return verifier_namespace(request, passed[0]);
     bool invocation = request.command == CLIQ_CREATE_WRITE;
     int input = invocation ? passed[0] : -1;
     int channel[2];
@@ -272,7 +279,7 @@ static bool inspect_processes(struct scope *scope, const struct cliq_worker_pack
     return scope->init > 0 && scope->worker > 0 && scope->init != scope->worker;
 }
 
-static bool bind_worker_reservation(const struct cliq_worker_packet *request, int passed[5], size_t count) {
+static bool bind_worker_reservation(const struct cliq_worker_packet *request, int passed[CLIQ_WORKER_MAX_FDS], size_t count) {
     char token[CLIQ_WORKER_TOKEN_BYTES]; struct stat file;
     if (count != 1 || request->scope != 0 || worker_reservation.fd >= 0 || !reservation_binding_valid(request) ||
         request->subreaper_pid != getpid() || !cliq_process_token(getpid(), token) ||
@@ -294,19 +301,87 @@ static bool worker_request_matches_reservation(const struct cliq_worker_packet *
         strcmp(request->nonce, binding->nonce) == 0 && strcmp(request->activation_nonce, binding->activation_nonce) == 0;
 }
 
-static bool spawn_worker(struct cliq_worker_packet *request, int passed[5], size_t count,
+static int descriptor_order(const void *left, const void *right) { return *(const int *)left - *(const int *)right; }
+static bool retain_descriptors(const int *descriptors, size_t count) {
+    int sorted[CLIQ_WORKER_MAX_FDS];
+    if (count > CLIQ_WORKER_MAX_FDS) return false;
+    memcpy(sorted, descriptors, count * sizeof(*sorted)); qsort(sorted, count, sizeof(*sorted), descriptor_order);
+    unsigned int first = 4;
+    for (size_t i = 0; i < count; i++) {
+        if (sorted[i] < 4 || (i && sorted[i] == sorted[i - 1]) || (unsigned int)sorted[i] < first ||
+            ((unsigned int)sorted[i] > first && !cliq_close_range(first, (unsigned int)sorted[i] - 1))) return false;
+        first = (unsigned int)sorted[i] + 1;
+    }
+    return cliq_close_range(first, UINT_MAX);
+}
+static void verifier_bubblewrap(int generation_source, int helper_source, int bwrap_source,
+                               const int *files, const struct cliq_verifier_config *config) {
+    int keep[CLIQ_WORKER_MAX_FDS]; size_t count = 0;
+    /* The original controller may own many retired scopes. Prune its unrelated
+     * descriptors first, then replace one source at a time. Holding two whole
+     * toolchain copies would exceed the unchanged, supported 64-FD limit. */
+    keep[count++] = generation_source; keep[count++] = helper_source; keep[count++] = bwrap_source;
+    for (uint32_t i = 0; i < config->file_count; i++) keep[count++] = files[i];
+    if (!retain_descriptors(keep, count)) _exit(70);
+    count = 0;
+    int generation = fcntl(generation_source, F_DUPFD, 4);
+    if (generation < 0 || generation == INT_MAX) _exit(70);
+    if (close(generation_source) != 0) _exit(70);
+    keep[count++] = generation;
+    int helper = independent_image_fd(helper_source, 4);
+    if (helper < 0 || helper == INT_MAX) _exit(70);
+    if (close(helper_source) != 0) _exit(70);
+    keep[count++] = helper;
+    int bwrap = fcntl(bwrap_source, F_DUPFD_CLOEXEC, 4);
+    if (bwrap < 0 || bwrap == INT_MAX) _exit(70);
+    if (close(bwrap_source) != 0) _exit(70);
+    keep[count++] = bwrap;
+    char descriptors[CLIQ_VERIFIER_MAX_FILES + 1][24], source[64];
+    snprintf(source, sizeof(source), "/proc/self/fd/%d", generation);
+    snprintf(descriptors[0], sizeof(descriptors[0]), "%d", helper);
+    for (uint32_t i = 0; i < config->file_count; i++) {
+        int fd = independent_image_fd(files[i], 4);
+        if (fd < 0 || fd == INT_MAX) _exit(70);
+        if (close(files[i]) != 0) _exit(70);
+        keep[count++] = fd;
+        snprintf(descriptors[i + 1], sizeof(descriptors[i + 1]), "%d", fd);
+    }
+    if (!retain_descriptors(keep, count)) _exit(70);
+    char *arguments[256]; size_t at = 0;
+#define ARG(value) do { if (at >= sizeof(arguments) / sizeof(arguments[0]) - 1) _exit(70); arguments[at++] = (char *)(value); } while (0)
+    ARG("bwrap"); ARG("--unshare-user"); ARG("--uid"); ARG("0"); ARG("--gid"); ARG("0");
+    ARG("--unshare-pid"); ARG("--as-pid-1"); ARG("--unshare-net"); ARG("--unshare-ipc");
+    ARG("--unshare-uts"); ARG("--unshare-cgroup"); ARG("--new-session"); ARG("--die-with-parent");
+    ARG("--cap-drop"); ARG("ALL"); ARG("--cap-add"); ARG("CAP_SYS_ADMIN"); ARG("--cap-add"); ARG("CAP_SETPCAP");
+    ARG("--clearenv"); ARG("--tmpfs"); ARG("/"); ARG("--dir"); ARG("/runtime");
+    ARG("--perms"); ARG("0555"); ARG("--ro-bind-data"); ARG(descriptors[0]); ARG("/runtime/cliq-linux-worker-init");
+    const char *directories[] = { "/usr", "/usr/bin", "/usr/lib", "/usr/lib/x86_64-linux-gnu", "/lib", "/lib/x86_64-linux-gnu", "/lib64" };
+    for (size_t i = 0; i < sizeof(directories) / sizeof(directories[0]); i++) { ARG("--dir"); ARG(directories[i]); }
+    for (uint32_t i = 0; i < config->file_count; i++) {
+        ARG("--perms"); ARG("0555"); ARG("--ro-bind-data"); ARG(descriptors[i + 1]); ARG(config->files[i].path);
+    }
+    ARG("--ro-bind"); ARG(source); ARG("/work"); ARG("--proc"); ARG("/proc"); ARG("--dev"); ARG("/dev");
+    ARG("--tmpfs"); ARG("/tmp"); ARG("--dir"); ARG("/home"); ARG("--tmpfs"); ARG("/home/cliq");
+    ARG("--chdir"); ARG("/work"); ARG("--"); ARG("/runtime/cliq-linux-worker-init"); arguments[at] = NULL;
+#undef ARG
+    char *const environment[] = { "LANG=C", "LC_ALL=C", NULL };
+    fexecve(bwrap, arguments, environment); _exit(70);
+}
+
+static bool spawn_worker(struct cliq_worker_packet *request, int passed[CLIQ_WORKER_MAX_FDS], size_t count,
                           struct cliq_worker_packet *response) {
     response->status = CLIQ_SPAWN_INPUT_GATE;
-    if (count != 5) return false;
-    bool invocation = request->command == CLIQ_CREATE_WRITE;
+    bool verifier = request->command == CLIQ_CREATE_VERIFIER;
+    if ((!verifier && count != 5) || (verifier && (count < 5 || count > 4 + CLIQ_VERIFIER_MAX_FILES))) return false;
+    bool invocation = request->command == CLIQ_CREATE_WRITE || verifier;
     if (!invocation && !worker_request_matches_reservation(request)) return false;
     bool parent_ok = invocation ? request->parent > 0 && request->parent < CLIQ_WORKER_MAX_SCOPES &&
         scopes[request->parent].created && scopes[request->parent].active && !scopes[request->parent].stopped &&
         !scopes[request->parent].invocation : request->parent == 0;
     int cgroup_parent = invocation && parent_ok ? scopes[request->parent].cgroup : passed[1];
-    int helper_image = passed[invocation ? 1 : 2], executable_image = passed[invocation ? 2 : 3],
-        bwrap_image = passed[invocation ? 3 : 4], input = invocation ? passed[4] : -1;
-    if (count != 5 || request->scope == 0 || request->scope >= CLIQ_WORKER_MAX_SCOPES || !parent_ok ||
+    int helper_image = passed[invocation ? 1 : 2], executable_image = verifier ? helper_image : passed[invocation ? 2 : 3],
+        bwrap_image = passed[verifier ? 2 : invocation ? 3 : 4], input = verifier ? passed[3] : invocation ? passed[4] : -1;
+    if (request->scope == 0 || request->scope >= CLIQ_WORKER_MAX_SCOPES || !parent_ok ||
         !valid_cgroup_name(request->cgroup_name) || !cliq_hex_digest(request->nonce) ||
         !cliq_hex_digest(request->activation_nonce) || scopes[request->scope].created ||
         !native_cgroup(cgroup_parent) || !generation_matches(passed[0], request)) return false;
@@ -316,7 +391,19 @@ static bool spawn_worker(struct cliq_worker_packet *request, int passed[5], size
     if (invocation && (request->generation_device != scopes[request->parent].identity.generation_device ||
         request->generation_inode != scopes[request->parent].identity.generation_inode)) return false;
     struct scope *scope = &scopes[request->scope];
-    scope->invocation = invocation; scope->parent = request->parent;
+    scope->invocation = invocation; scope->parent = request->parent; scope->verifier = verifier;
+    if (verifier) {
+        scope->verifier_config = calloc(1, sizeof(*scope->verifier_config));
+        if (!scope->verifier_config || !verifier_read_config(input, scope->verifier_config) ||
+            count != 4 + scope->verifier_config->file_count || scope->verifier_config->output_limit > request->max_output_bytes) return false;
+        for (uint32_t i = 0; i < scope->verifier_config->file_count; i++) {
+            struct stat file; int seals = fcntl(passed[4 + i], F_GET_SEALS);
+            if (fstat(passed[4 + i], &file) != 0 || !S_ISREG(file.st_mode) ||
+                (uint64_t)file.st_size != scope->verifier_config->files[i].byte_count ||
+                seals < 0 || (seals & (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL)) !=
+                    (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL)) return false;
+        }
+    }
     response->status = CLIQ_SPAWN_CGROUP_CREATE;
     if (!invocation) {
         unsigned char intent[32] = {0}; memcpy(intent, "CREATE1", 7);
@@ -346,25 +433,48 @@ static bool spawn_worker(struct cliq_worker_packet *request, int passed[5], size
     response->status = CLIQ_SPAWN_STDIO;
     scope->stdout_fd = memfd_create("cliq-scope-stdout", MFD_CLOEXEC | MFD_ALLOW_SEALING);
     scope->stderr_fd = memfd_create("cliq-scope-stderr", MFD_CLOEXEC | MFD_ALLOW_SEALING);
-    if (scope->stdout_fd < 0 || scope->stderr_fd < 0 ||
-        ftruncate(scope->stdout_fd, (off_t)(request->max_output_bytes / 2)) != 0 ||
+    if (scope->stdout_fd < 0 || scope->stderr_fd < 0) return false;
+    if (!verifier && (ftruncate(scope->stdout_fd, (off_t)(request->max_output_bytes / 2)) != 0 ||
         ftruncate(scope->stderr_fd, (off_t)(request->max_output_bytes / 2)) != 0 ||
         fcntl(scope->stdout_fd, F_ADD_SEALS, F_SEAL_GROW | F_SEAL_SEAL) != 0 ||
-        fcntl(scope->stderr_fd, F_ADD_SEALS, F_SEAL_GROW | F_SEAL_SEAL) != 0) return false;
+        fcntl(scope->stderr_fd, F_ADD_SEALS, F_SEAL_GROW | F_SEAL_SEAL) != 0)) return false;
+    int output[2] = {-1, -1}, diagnostic[2] = {-1, -1};
+    if (verifier) {
+        if (pipe2(output, O_CLOEXEC) != 0) return false;
+        scope->stdout_pipe = output[0];
+        if (pipe2(diagnostic, O_CLOEXEC) != 0) { close(output[1]); return false; }
+        scope->stderr_pipe = diagnostic[0];
+        if (fcntl(output[0], F_SETFL, O_NONBLOCK) != 0 || fcntl(diagnostic[0], F_SETFL, O_NONBLOCK) != 0) {
+            close(output[1]); close(diagnostic[1]); return false;
+        }
+    }
     int channel[2], barrier[2];
     response->status = CLIQ_SPAWN_CHANNEL;
-    if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, channel) != 0) return false;
-    if (pipe2(barrier, O_CLOEXEC) != 0) { close(channel[0]); close(channel[1]); return false; }
+    if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, channel) != 0) {
+        if (verifier) { close(output[1]); close(diagnostic[1]); }
+        return false;
+    }
+    if (pipe2(barrier, O_CLOEXEC) != 0) {
+        close(channel[0]); close(channel[1]);
+        if (verifier) { close(output[1]); close(diagnostic[1]); }
+        return false;
+    }
     response->status = CLIQ_SPAWN_FORK;
     scope->monitor = fork();
-    if (scope->monitor < 0) { close(channel[0]); close(channel[1]); close(barrier[0]); close(barrier[1]); return false; }
+    if (scope->monitor < 0) {
+        close(channel[0]); close(channel[1]); close(barrier[0]); close(barrier[1]);
+        if (verifier) { close(output[1]); close(diagnostic[1]); }
+        return false;
+    }
     if (scope->monitor == 0) {
         close(channel[0]); close(barrier[1]);
         char go;
         if (read(barrier[0], &go, 1) != 1 || go != '1' ||
-            dup2(scope->stdout_fd, 1) < 0 || dup2(scope->stderr_fd, 2) < 0 || !configure_limits(request)) _exit(70);
+            dup2(verifier ? output[1] : scope->stdout_fd, 1) < 0 ||
+            dup2(verifier ? diagnostic[1] : scope->stderr_fd, 2) < 0 || !configure_limits(request)) _exit(70);
         close(barrier[0]);
         if (dup2(channel[1], 3) < 0) _exit(70);
+        if (verifier) verifier_bubblewrap(passed[0], helper_image, bwrap_image, passed + 4, scope->verifier_config);
         int generation = fcntl(passed[0], F_DUPFD, 20);
         if (generation < 0 || generation == INT_MAX) _exit(70);
         int helper = independent_image_fd(helper_image, generation + 1);
@@ -397,6 +507,7 @@ static bool spawn_worker(struct cliq_worker_packet *request, int passed[5], size
         _exit(70);
     }
     close(channel[1]); close(barrier[0]);
+    if (verifier) { close(output[1]); close(diagnostic[1]); }
     scope->channel = channel[0];
     response->status = CLIQ_SPAWN_MONITOR_TOKEN;
     if (!cliq_process_token(scope->monitor, scope->monitor_start_token)) { close(barrier[1]); return false; }
@@ -416,7 +527,7 @@ static bool spawn_worker(struct cliq_worker_packet *request, int passed[5], size
     if (!cliq_send(scope->channel, request, input >= 0 ? &input : NULL, input >= 0 ? 1 : 0)) return false;
     response->status = CLIQ_SPAWN_READY_WAIT;
     if (!readable(scope->channel, OBSERVATION_TIMEOUT_MS)) return false;
-    struct cliq_worker_packet ready; int extra[5]; size_t extras;
+    struct cliq_worker_packet ready; int extra[CLIQ_WORKER_MAX_FDS]; size_t extras;
     response->status = CLIQ_SPAWN_READY_RECEIVE;
     if (!cliq_receive(scope->channel, &ready, extra, &extras) || extras != 0 || ready.command != CLIQ_WORKER_READY) return false;
     response->status = CLIQ_SPAWN_PROCESS_INSPECTION;
@@ -554,6 +665,95 @@ static bool held_scope_dead(const struct scope *scope) {
         original_process_absent(scope->worker, scope->identity.start_token);
 }
 
+static bool drain_verifier_pipe(struct scope *scope, bool diagnostic, bool *eof) {
+    int *pipe = diagnostic ? &scope->stderr_pipe : &scope->stdout_pipe;
+    int output = diagnostic ? scope->stderr_fd : scope->stdout_fd;
+    uint64_t *observed = diagnostic ? &scope->verifier_result.stderr_bytes : &scope->verifier_result.stdout_bytes;
+    uint32_t *truncated = diagnostic ? &scope->verifier_result.stderr_truncated : &scope->verifier_result.stdout_truncated;
+    if (*pipe < 0) { *eof = true; return true; }
+    unsigned char buffer[65536];
+    /* A noisy producer cannot starve the independent control/stop channel. */
+    for (unsigned int chunk = 0; chunk < 16; chunk++) {
+        ssize_t bytes = read(*pipe, buffer, sizeof(buffer));
+        if (bytes < 0 && errno == EINTR) { chunk--; continue; }
+        if (bytes < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return true;
+        if (bytes < 0) return false;
+        if (bytes == 0) {
+            int owned = *pipe; *pipe = -1;
+            if (close(owned) != 0) return false;
+            *eof = true; return true;
+        }
+        if (*observed > UINT64_MAX - (uint64_t)bytes) return false;
+        *observed += (uint64_t)bytes;
+        struct stat first, second;
+        if (fstat(scope->stdout_fd, &first) != 0 || fstat(scope->stderr_fd, &second) != 0 ||
+            first.st_size < 0 || second.st_size < 0) return false;
+        uint64_t saved = (uint64_t)first.st_size + (uint64_t)second.st_size;
+        uint64_t remaining = saved < scope->verifier_config->output_limit ? scope->verifier_config->output_limit - saved : 0;
+        size_t keep = (uint64_t)bytes < remaining ? (size_t)bytes : (size_t)remaining;
+        if (keep && write(output, buffer, keep) != (ssize_t)keep) return false;
+        if (keep != (size_t)bytes) *truncated = 1;
+    }
+    return true;
+}
+
+static bool finish_verifier_outputs(struct scope *scope) {
+    if (!scope->verifier || scope->verifier_finished) return true;
+    int64_t start = milliseconds();
+    if (start < 0) return false;
+    bool stdout_eof = false, stderr_eof = false;
+    while (!stdout_eof || !stderr_eof) {
+        int64_t now = milliseconds();
+        if (now < 0 || now - start > 2000 ||
+            !drain_verifier_pipe(scope, false, &stdout_eof) || !drain_verifier_pipe(scope, true, &stderr_eof)) return false;
+        if (!stdout_eof || !stderr_eof) {
+            struct pollfd pipes[2] = { { .fd = scope->stdout_pipe, .events = POLLIN }, { .fd = scope->stderr_pipe, .events = POLLIN } };
+            if (poll(pipes, 2, 1) < 0 && errno != EINTR) return false;
+        }
+    }
+    int seals = F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL;
+    if (fchmod(scope->stdout_fd, 0400) != 0 || fchmod(scope->stderr_fd, 0400) != 0 ||
+        fcntl(scope->stdout_fd, F_ADD_SEALS, seals) != 0 || fcntl(scope->stderr_fd, F_ADD_SEALS, seals) != 0) return false;
+    if (scope->verifier_result.verifier_reason != CLIQ_VERIFIER_CONTROLLER_STOP &&
+        (scope->verifier_result.stdout_truncated || scope->verifier_result.stderr_truncated))
+        scope->verifier_result.verifier_reason = CLIQ_VERIFIER_RESOURCE;
+    if (scope->released) {
+        int64_t now = milliseconds();
+        if (now < scope->verifier_started || !held_scope_dead(scope) || !stamp_observation(&scope->verifier_result) ||
+            scope->verifier_result.observed_at_ms < scope->verifier_result.started_at_ms) return false;
+        scope->verifier_result.duration_ms = (uint64_t)(now - scope->verifier_started);
+        scope->verifier_result.populated = 0;
+        scope->verifier_result.init_reaped = 1;
+        scope->verifier_result.remaining_descendants = 0;
+        if (scope->verifier_result.verifier_reason == CLIQ_VERIFIER_PENDING)
+            scope->verifier_result.verifier_reason = CLIQ_VERIFIER_CONTROLLER_STOP;
+    }
+    scope->verifier_finished = true;
+    return true;
+}
+
+/* Retain an already available real wait result before revoking its producer.
+ * An absent reply is not an inferred signal/exit. Only a released, genuinely
+ * dead and output-joined scope may later receive CONTROLLER_STOP instead. */
+static bool observe_verifier_wait(struct scope *scope, bool stopping) {
+    if (!scope->verifier || !scope->released || scope->channel < 0 ||
+        scope->verifier_result.verifier_reason != CLIQ_VERIFIER_PENDING) return true;
+    struct cliq_worker_packet result; int extra[CLIQ_WORKER_MAX_FDS]; size_t count;
+    if (!cliq_receive_flags(scope->channel, &result, extra, &count, MSG_DONTWAIT))
+        return errno == EAGAIN || errno == EWOULDBLOCK || (stopping && errno == EPIPE);
+    for (size_t i = 0; i < count; i++) close(extra[i]);
+    if (count != 0 || result.command != CLIQ_VERIFIER_RESULT || result.verifier_reason < CLIQ_VERIFIER_EXIT ||
+        result.verifier_reason > CLIQ_VERIFIER_SPAWN_ERROR ||
+        (result.verifier_reason == CLIQ_VERIFIER_EXIT && result.exit_status > 255) ||
+        (result.verifier_reason == CLIQ_VERIFIER_SIGNAL && (result.verifier_signal == 0 || result.verifier_signal > 64)) ||
+        (result.verifier_reason == CLIQ_VERIFIER_SPAWN_ERROR && result.verifier_errno == 0)) return false;
+    scope->verifier_result.verifier_reason = result.verifier_reason;
+    scope->verifier_result.exit_status = result.exit_status;
+    scope->verifier_result.verifier_signal = result.verifier_signal;
+    scope->verifier_result.verifier_errno = result.verifier_errno;
+    return true;
+}
+
 static bool stop_scope(unsigned int id, struct cliq_worker_packet *response) {
     if (id == 0 || id >= CLIQ_WORKER_MAX_SCOPES || !scopes[id].created) return false;
     struct scope *scope = &scopes[id];
@@ -566,6 +766,7 @@ static bool stop_scope(unsigned int id, struct cliq_worker_packet *response) {
         if (!stamp_observation(response)) return false;
         scope->identity = *response; return true;
     }
+    if (!observe_verifier_wait(scope, true)) return false;
     scope->active = false;
     struct tracked_set tracked = {0};
     if (!collect_processes(scope->cgroup, &tracked, 0) ||
@@ -595,11 +796,34 @@ static bool stop_scope(unsigned int id, struct cliq_worker_packet *response) {
             *response = scope->identity;
             response->command = CLIQ_STOP_SCOPE;
             if (!stamp_observation(response)) return false;
-            scope->identity = *response; return true;
+            scope->identity = *response; return finish_verifier_outputs(scope);
         }
         struct timespec delay = { 0, 10000000 }; nanosleep(&delay, NULL);
     }
     return false;
+}
+
+static bool pump_verifiers(void) {
+    for (unsigned int id = 1; id < CLIQ_WORKER_MAX_SCOPES; id++) {
+        struct scope *scope = &scopes[id];
+        if (!scope->created || !scope->verifier || !scope->released || scope->stopped) continue;
+        bool ignored = false;
+        if (!drain_verifier_pipe(scope, false, &ignored) || !drain_verifier_pipe(scope, true, &ignored)) return false;
+        if (!observe_verifier_wait(scope, false)) return false;
+        int64_t now = milliseconds();
+        if (now < scope->verifier_started) return false;
+        if (scope->verifier_result.stdout_truncated || scope->verifier_result.stderr_truncated) {
+            scope->verifier_result.verifier_reason = CLIQ_VERIFIER_RESOURCE;
+        } else if (scope->verifier_result.verifier_reason == CLIQ_VERIFIER_PENDING &&
+            (uint64_t)(now - scope->verifier_started) >= scope->verifier_config->timeout_ms) {
+            scope->verifier_result.verifier_reason = CLIQ_VERIFIER_TIMEOUT;
+        }
+        if (scope->verifier_result.verifier_reason != CLIQ_VERIFIER_PENDING) {
+            struct cliq_worker_packet death;
+            if (!stop_scope(id, &death)) return false;
+        }
+    }
+    return true;
 }
 
 static bool terminate_retained_until(struct cliq_worker_packet *request, int directory,
@@ -646,7 +870,7 @@ static bool terminate_retained(struct cliq_worker_packet *request, int directory
 
 /* This command never adopts execution or reads an arbitrary locator. The
  * immutable header is checked before signalling its original controller. */
-static bool inspect_worker_reservation(struct cliq_worker_packet *request, int passed[5], size_t count,
+static bool inspect_worker_reservation(struct cliq_worker_packet *request, int passed[CLIQ_WORKER_MAX_FDS], size_t count,
                                       struct cliq_worker_packet *response) {
     int64_t start = milliseconds();
     if (start < 0) return false;
@@ -726,6 +950,7 @@ static int controller(void) {
     for (size_t i = 0; i < CLIQ_WORKER_MAX_SCOPES; i++) {
         scopes[i].cgroup = -1; scopes[i].process_group = -1; scopes[i].channel = -1;
         scopes[i].stdout_fd = -1; scopes[i].stderr_fd = -1;
+        scopes[i].stdout_pipe = -1; scopes[i].stderr_pipe = -1;
     }
     if (prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0 || prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) return 70;
     struct sigaction action; memset(&action, 0, sizeof(action)); action.sa_handler = request_shutdown;
@@ -735,13 +960,23 @@ static int controller(void) {
     hello.pid = getpid();
     if (!cliq_process_token(getpid(), hello.start_token) || !cliq_send(3, &hello, NULL, 0)) return 70;
     while (!shutdown_requested) {
-        struct cliq_worker_packet request, response; int passed[5]; size_t count;
+        if (!pump_verifiers()) break;
+        bool verifier_running = false;
+        for (size_t i = 1; i < CLIQ_WORKER_MAX_SCOPES; i++)
+            if (scopes[i].verifier && scopes[i].released && !scopes[i].stopped) verifier_running = true;
+        struct pollfd control = { .fd = 3, .events = POLLIN };
+        int available = poll(&control, 1, verifier_running ? 10 : -1);
+        if (available < 0 && errno == EINTR) continue;
+        if (available < 0 || (available > 0 && !(control.revents & POLLIN))) break;
+        if (available == 0) continue;
+        struct cliq_worker_packet request, response; int passed[CLIQ_WORKER_MAX_FDS]; size_t count;
         if (!cliq_receive(3, &request, passed, &count)) break;
         response = cliq_packet(request.command); response.scope = request.scope;
-        bool ok = false;
+        bool ok = false; int outputs[2]; size_t output_count = 0;
         if (request.command == CLIQ_BIND_RESERVATION) ok = bind_worker_reservation(&request, passed, count);
         else if (request.command == CLIQ_INSPECT_RESERVATION) ok = inspect_worker_reservation(&request, passed, count, &response);
-        else if (request.command == CLIQ_CREATE_WORKER || request.command == CLIQ_CREATE_WRITE) ok = spawn_worker(&request, passed, count, &response);
+        else if (request.command == CLIQ_CREATE_WORKER || request.command == CLIQ_CREATE_WRITE || request.command == CLIQ_CREATE_VERIFIER)
+            ok = spawn_worker(&request, passed, count, &response);
         else if (request.command == CLIQ_TERMINATE_RETAINED && count == 1) ok = terminate_retained(&request, passed[0], &response);
         else if (request.command == CLIQ_ACTIVATE_WORKER && count == 0 && request.scope > 0 && request.scope < CLIQ_WORKER_MAX_SCOPES) {
             struct scope *scope = &scopes[request.scope];
@@ -749,7 +984,7 @@ static int controller(void) {
                 strcmp(request.nonce, scope->identity.activation_nonce) == 0) {
                 /* The blocked worker receives only its one-use activation capability. */
                 memcpy(request.nonce, scope->identity.nonce, sizeof(request.nonce));
-                int extra[5]; size_t extras;
+                int extra[CLIQ_WORKER_MAX_FDS]; size_t extras;
                 ok = cliq_send(scope->channel, &request, NULL, 0) && readable(scope->channel, OBSERVATION_TIMEOUT_MS) &&
                     cliq_receive(scope->channel, &response, extra, &extras) && extras == 0 && response.command == CLIQ_WORKER_ACTIVATED;
                 if (ok) scope->active = true;
@@ -761,12 +996,34 @@ static int controller(void) {
                 strcmp(request.nonce, scope->identity.nonce) == 0 &&
                 scope_process_current(&scopes[scope->parent]) && scope_process_current(scope)) {
                 scope->released = true;
-                int extra[5]; size_t extras;
+                int extra[CLIQ_WORKER_MAX_FDS]; size_t extras;
                 if (cliq_send(scope->channel, &request, NULL, 0) && readable(scope->channel, OBSERVATION_TIMEOUT_MS) &&
                     cliq_receive(scope->channel, &response, extra, &extras)) {
                     ok = extras == 0 && response.command == CLIQ_WRITE_RESULT;
                     for (size_t i = 0; i < extras; i++) close(extra[i]);
                 }
+            }
+        } else if (request.command == CLIQ_RELEASE_VERIFIER && count == 0 && request.scope > 0 && request.scope < CLIQ_WORKER_MAX_SCOPES) {
+            struct scope *scope = &scopes[request.scope];
+            if (scope->created && scope->verifier && !scope->stopped && !scope->released &&
+                scopes[scope->parent].active && !scopes[scope->parent].stopped &&
+                strcmp(request.nonce, scope->identity.nonce) == 0 &&
+                scope_process_current(&scopes[scope->parent]) && scope_process_current(scope)) {
+                scope->released = true; scope->verifier_started = milliseconds();
+                scope->verifier_result = scope->identity;
+                scope->verifier_result.command = CLIQ_VERIFIER_RESULT;
+                ok = scope->verifier_started >= 0 && stamp_observation(&scope->verifier_result);
+                scope->verifier_result.started_at_ms = scope->verifier_result.observed_at_ms;
+                if (ok) ok = cliq_send(scope->channel, &request, NULL, 0);
+            }
+        } else if (request.command == CLIQ_POLL_VERIFIER && count == 0 && request.scope > 0 && request.scope < CLIQ_WORKER_MAX_SCOPES) {
+            struct scope *scope = &scopes[request.scope];
+            if (scope->created && scope->verifier && scope->released) {
+                response = scope->verifier_result; response.command = CLIQ_POLL_VERIFIER;
+                ok = true;
+                if (scope->verifier_finished && response.verifier_reason != CLIQ_VERIFIER_PENDING) {
+                    outputs[0] = scope->stdout_fd; outputs[1] = scope->stderr_fd; output_count = 2;
+                } else response.verifier_reason = CLIQ_VERIFIER_PENDING;
             }
         } else if (request.command == CLIQ_STOP_SCOPE && count == 0) ok = stop_scope(request.scope, &response);
         else if (request.command == CLIQ_STOP_CONTROLLER && count == 0) {
@@ -779,7 +1036,7 @@ static int controller(void) {
         }
         response.status = ok ? 0 : (response.status != 0 ? response.status : 1);
         response.scope = request.scope;
-        if (!cliq_send(3, &response, NULL, 0)) break;
+        if (!cliq_send(3, &response, output_count ? outputs : NULL, output_count)) break;
     }
     stop_everything();
     return 0;

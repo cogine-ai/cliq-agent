@@ -105,10 +105,11 @@ type CandidateSourceGraph = {
 };
 type CandidateSourceLimit = { reason: 'changed_paths' | 'changed_bytes'; observed: number; limit: number };
 
-async function planCandidateSource(artifacts: ArtifactCatalog, spec: RunSpec, workspaceStateRef: string): Promise<
+async function planCandidateSource(artifacts: ArtifactCatalog, spec: RunSpec, workspaceStateRef: string, signal?: AbortSignal): Promise<
   | { kind: 'ready'; graph: CandidateSourceGraph; publications: Array<{ value: unknown; artifact: PublishedArtifact }> }
   | { kind: 'limited'; limit: CandidateSourceLimit }
 > {
+  signal?.throwIfAborted();
   const metadata = new Map<string, PublishedArtifact>();
   const publications: Array<{ value: unknown; artifact: PublishedArtifact }> = [];
   const remember = (artifact: PublishedArtifact) => {
@@ -120,7 +121,9 @@ async function planCandidateSource(artifacts: ArtifactCatalog, spec: RunSpec, wo
     if (!prior) metadata.set(artifact.ref, artifact);
   };
   const read = async <T>(ref: string, schemaKind: string): Promise<T> => {
+    signal?.throwIfAborted();
     const value = await readCanonicalArtifact<T>(artifacts, ref);
+    signal?.throwIfAborted();
     remember({ ref, mediaType: 'application/json', schemaKind, byteLength: canonicalJsonBytes(value).byteLength });
     return value;
   };
@@ -177,7 +180,8 @@ async function planCandidateSource(artifacts: ArtifactCatalog, spec: RunSpec, wo
   // Exhaustion rehashes every complete object with bounded memory. Identical
   // base/current blobs are read once and never copied back into CAS.
   for (const [ref, byteLength] of files) {
-    for await (const _chunk of artifacts.readChunks(ref, byteLength)) { /* complete immutable-byte validation */ }
+    signal?.throwIfAborted();
+    for await (const _chunk of artifacts.readChunks(ref, byteLength)) { signal?.throwIfAborted(); }
     remember({ ref, byteLength, mediaType: 'application/octet-stream', schemaKind: 'cliq-workspace-file-v1' });
   }
   const selected = currentEntries.entries.filter(entry => !excluded(entry.path));
@@ -213,6 +217,7 @@ async function planCandidateSource(artifacts: ArtifactCatalog, spec: RunSpec, wo
     resultSourceRef: publishedSource.ref, operations, diffDigest: '' };
   diff.diffDigest = digestOmitting(diff, 'diffDigest');
   const publishedDiff = plan(diff, diff.format);
+  signal?.throwIfAborted();
   return { kind: 'ready', graph: { source, sourceRef: publishedSource.ref, diff, diffRef: publishedDiff.ref, metadata: [...metadata.values()] }, publications };
 }
 
@@ -229,8 +234,8 @@ function requireReady(plan: Awaited<ReturnType<typeof planCandidateSource>>) {
 
 /** Pure retained-data reconstruction for historical recovery. No CAS object,
  * SQL row, execution permission or physical proof is created by this read. */
-export async function readCandidateSource(artifacts: ArtifactCatalog, spec: RunSpec, workspaceStateRef: string): Promise<CandidateSourceGraph> {
-  return requireReady(await planCandidateSource(artifacts, spec, workspaceStateRef)).graph;
+export async function readCandidateSource(artifacts: ArtifactCatalog, spec: RunSpec, workspaceStateRef: string, signal?: AbortSignal): Promise<CandidateSourceGraph> {
+  return requireReady(await planCandidateSource(artifacts, spec, workspaceStateRef, signal)).graph;
 }
 
 /** The owning reducer independently validates the Run, original worker seal

@@ -1,13 +1,15 @@
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { planCanonicalArtifact } from '../kernel/artifact-plan.js';
-import { assertArtifactRef, assertRequestId, identityHash, parseCanonicalTime } from '../kernel/identity.js';
+import { assertArtifactRef, assertRequestId, identityHash, normalizeBoundedText, parseCanonicalTime } from '../kernel/identity.js';
 import type { ContinuationItem, InvocationJournalEntry, Run, RunCancel, StopIntent, TerminalDetail, ToolBatchItem, ToolResultItem, ToolResultModelContentV1, ToolResultPayloadV1 } from '../kernel/types.js';
 import type { ModelTextV1 } from '../protocol/agent-ir.js';
 import { exactKeys } from '../policy/runtime-authority.js';
 
 export type ResourceStopIntent = Extract<StopIntent, { origin: 'budget' } | { runtimeSubtype: 'context_compaction_failed' | 'context_window_exhausted' | 'result_source_limit_exceeded' }>;
 export type ModelFailureStopIntent = Extract<StopIntent, { runtimeSubtype: 'runtime' }>;
-export type AgentStopIntent = Extract<StopIntent, { origin: 'user_cancel' | 'deadline' }> | ResourceStopIntent | ModelFailureStopIntent;
+export type VerifierStopIntent = Extract<StopIntent, { origin: 'verification' } | { origin: 'kernel_integrity'; reason: 'verifier_mutated_source' } |
+  { origin: 'policy_deny'; subjectKind: 'verifier' }>;
+export type AgentStopIntent = Extract<StopIntent, { origin: 'user_cancel' | 'deadline' }> | ResourceStopIntent | ModelFailureStopIntent | VerifierStopIntent;
 export const stopCheckpointId = (runId: string, stopIntentRef: string) => identityHash('cliq-stop-checkpoint-v1', runId, stopIntentRef);
 
 export function cancelRequestDigest(runId: string, input: RunCancel): string {
@@ -22,6 +24,7 @@ export function cancelRequestDigest(runId: string, input: RunCancel): string {
 export function decodeAgentStop(value: unknown, run: Run): AgentStopIntent {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new TypeError('invalid StopIntent');
   const intent = value as AgentStopIntent;
+  const identifier = (value: unknown) => typeof value === 'string' && normalizeBoundedText(value, 1, 256) === value;
   const fields = ['schemaVersion', 'runId', 'createdAt', 'origin', 'targetStatus', 'reason'];
   if (intent.origin === 'user_cancel') {
     fields.push('requestId', 'principalId');
@@ -30,6 +33,20 @@ export function decodeAgentStop(value: unknown, run: Run): AgentStopIntent {
   } else if (intent.origin === 'deadline') {
     fields.push('deadlineAt');
     if (intent.targetStatus !== 'failed' || intent.reason !== 'budget_exhausted' || intent.deadlineAt !== run.deadlineAt || intent.createdAt < run.deadlineAt) throw new TypeError('deadline stop precedes the immutable deadline');
+  } else if (intent.origin === 'kernel_integrity') {
+    fields.push('verifierOpId', 'integrityEvidenceRef', 'integrityEvidenceDigest');
+    if (intent.targetStatus !== 'failed' || intent.reason !== 'verifier_mutated_source' || !identifier(intent.verifierOpId)) throw new TypeError('invalid verifier integrity stop');
+    assertArtifactRef(intent.integrityEvidenceRef); assertArtifactRef(intent.integrityEvidenceDigest);
+  } else if (intent.origin === 'verification') {
+    fields.push('candidateItemId', 'verifierPlanRef');
+    if (intent.targetStatus !== 'failed' || !['verification_failed', 'verifier_infrastructure_failed'].includes(intent.reason) ||
+        !identifier(intent.candidateItemId)) throw new TypeError('invalid verification stop');
+    assertArtifactRef(intent.verifierPlanRef);
+  } else if (intent.origin === 'policy_deny') {
+    fields.push('subjectKind', 'opId', 'policyChannelEvidenceRef', 'policyChannelEvidenceDigest');
+    if (intent.targetStatus !== 'failed' || intent.subjectKind !== 'verifier' || intent.reason !== 'verification_failed' || !identifier(intent.opId))
+      throw new TypeError('invalid verifier policy denial');
+    assertArtifactRef(intent.policyChannelEvidenceRef); assertArtifactRef(intent.policyChannelEvidenceDigest);
   } else if (intent.origin === 'budget') {
     fields.push('counter', 'ceiling', 'consumed', 'reserved', 'required');
     if (!['modelTokens', 'costMicros', 'toolCalls'].includes(intent.counter) ||
@@ -75,7 +92,15 @@ export function decodeAgentStop(value: unknown, run: Run): AgentStopIntent {
 }
 
 export function agentStopDetail(intent: AgentStopIntent, stopIntentRef: string, createdAt: string): TerminalDetail {
-  const reasonDetail: TerminalDetail['reasonDetail'] = intent.origin !== 'runtime'
+  const reasonDetail: TerminalDetail['reasonDetail'] = intent.origin === 'kernel_integrity'
+    ? { kind: 'verifier_source_mutation', verifierOpId: intent.verifierOpId,
+        violationOrDigestEvidenceRef: intent.integrityEvidenceRef, violationOrDigestEvidenceDigest: intent.integrityEvidenceDigest }
+    : intent.origin === 'verification'
+      ? { kind: 'verification', candidateItemId: intent.candidateItemId, verifierPlanRef: intent.verifierPlanRef }
+    : intent.origin === 'policy_deny'
+      ? { kind: 'policy_denied', subjectKind: intent.subjectKind, opId: intent.opId,
+          policyChannelEvidenceRef: intent.policyChannelEvidenceRef, policyChannelEvidenceDigest: intent.policyChannelEvidenceDigest }
+    : intent.origin !== 'runtime'
     ? { kind: intent.origin === 'user_cancel' ? 'cancelled' : 'budget_exhausted', stopIntentRef }
     : intent.runtimeSubtype === 'runtime'
       ? { kind: 'runtime', failingOpId: intent.failingOpId, runtimeFailureRef: intent.runtimeFailureRef, runtimeFailureDigest: intent.runtimeFailureDigest }
@@ -88,7 +113,8 @@ export function agentStopDetail(intent: AgentStopIntent, stopIntentRef: string, 
       : contextExhaustionDetail(intent, stopIntentRef);
   return { schemaVersion: 1, runId: intent.runId, reason: intent.reason,
     reasonDetail,
-    primaryEvidenceRef: intent.origin === 'runtime' && intent.runtimeSubtype === 'runtime' ? intent.runtimeFailureRef : stopIntentRef,
+    primaryEvidenceRef: intent.origin === 'kernel_integrity' ? intent.integrityEvidenceRef : intent.origin === 'policy_deny'
+      ? intent.policyChannelEvidenceRef : intent.origin === 'runtime' && intent.runtimeSubtype === 'runtime' ? intent.runtimeFailureRef : stopIntentRef,
     publicationResultItemRefs: [], abandonedRetryInvocations: [], createdAt };
 }
 
@@ -101,9 +127,11 @@ function contextExhaustionDetail(intent: Extract<AgentStopIntent, { runtimeSubty
     requestBodyLimitBytes: intent.requestBodyLimitBytes } : detail;
 }
 
-/** Equal precedence retains the first committed fact; supported resource stops cannot outrank cancellation. */
+/** Integrity wins even after cancellation; the separate dispatch fence remains
+ * monotonic. Equal precedence retains the first already committed fact. */
 export function selectAgentStop(prior: AgentStopIntent | undefined, proposed: AgentStopIntent): AgentStopIntent {
-  const priority = (intent: AgentStopIntent) => intent.origin === 'user_cancel' ? 3 : intent.origin === 'runtime' ? 1 : 2;
+  const priority = (intent: AgentStopIntent) => intent.origin === 'kernel_integrity' ? 7 : intent.origin === 'user_cancel' ? 6
+    : intent.reason === 'budget_exhausted' ? 4 : intent.reason === 'verification_failed' ? 3 : intent.reason === 'verifier_infrastructure_failed' ? 2 : 1;
   return prior && priority(prior) >= priority(proposed) ? prior : proposed;
 }
 
@@ -133,8 +161,8 @@ export function openStopBatch(items: readonly ContinuationItem[]): { batch: Tool
       if (++pending.next === pending.batch.calls.length) pending = undefined;
     } else if (item.kind === 'input_request' || item.kind === 'user_input') {
       if (!pending || item.batchItemId !== pending.batch.itemId || item.index !== pending.next || item.callId !== pending.batch.calls[pending.next]?.callId) throw new TypeError('input overtakes its result-less call');
-    } else if (item.kind === 'final_candidate') {
-      if (pending || model) throw new TypeError('final candidate overtakes an open batch');
+    } else if (item.kind === 'final_candidate' || item.kind === 'verifier_result' || item.kind === 'verifier_stop' || item.kind === 'repair_diagnostic') {
+      if (pending || model) throw new TypeError('candidate or verifier evidence overtakes an open batch');
     } else if (item.kind !== 'policy_decision' && item.kind !== 'context_compaction') throw new TypeError('unsupported stop transcript item');
   }
   if (model) throw new TypeError('model turn is missing its batch');

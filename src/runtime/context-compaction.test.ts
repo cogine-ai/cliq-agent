@@ -88,6 +88,39 @@ test('small prompts do not compact; an oversized indivisible prefix or protected
   assert.equal(Object.hasOwn(tokenExhausted.evidence, 'requestBodyBytes'), false);
 });
 
+test('verifier audit is excluded but a repair message cannot be hidden or split from its closed transcript', () => {
+  const input = history(['small']), createdAt = baseTime;
+  const append = (item: ContinuationItem, visible: boolean) => {
+    const itemSeq = input.items.length + 1, itemRef = canonicalSha256(item), entry = { item, itemRef, itemSeq };
+    input.items.push(entry);
+    input.context.segments.push(visible ? { kind: 'raw', fromItemSeq: itemSeq, throughItemSeq: itemSeq, items: [{ itemSeq, itemRef }] }
+      : { kind: 'excluded_control', fromItemSeq: itemSeq, throughItemSeq: itemSeq, sourceItemsDigest: contextSourceDigest([entry]) });
+    input.context.throughItemSeq = itemSeq;
+    input.context.projectionDigest = digestOmitting(input.context, 'projectionDigest'); input.contextRef = canonicalSha256(input.context);
+  };
+  append({ schemaVersion: 1, kind: 'verifier_result', itemId: 'verifier-result', runId: 'run', candidateItemId: 'candidate',
+    verifierPlanRef: ref(1), verifierIndex: 0, verifierId: 'tests', opId: 'verifier', attempt: 0, outcome: 'assertion_failed', receiptRef: ref(2), createdAt }, false);
+  const auditSegment = structuredClone(input.context.segments.at(-1)!);
+  append({ schemaVersion: 1, kind: 'repair_diagnostic', itemId: 'repair', runId: 'run', candidateItemId: 'candidate', verifierPlanRef: ref(1),
+    failedVerifierResultItemIds: ['verifier-result'], diagnostics: [{ verifierId: 'tests', diagnosticRef: ref(3), diagnosticDigest: ref(4),
+      modelContentRef: ref(5), modelContentDigest: ref(6) }], repairOrdinal: 1, createdAt }, true);
+  input.projection.messages.push({ index: input.projection.messages.length, role: 'user', sourceKind: 'verifier_repair', sourceId: 'repair',
+    contentUtf8: 'Verifier "tests" failed an assertion (exit 1). Revise the candidate and try again.' });
+  validateContextItems(input.context, input.items); assert.equal(planContextCompaction(input).kind, 'normal');
+  const invalid = structuredClone(input.context), repair = input.items.at(-1)!;
+  invalid.segments[invalid.segments.length - 1] = { kind: 'excluded_control', fromItemSeq: repair.itemSeq, throughItemSeq: repair.itemSeq,
+    sourceItemsDigest: contextSourceDigest([repair]) };
+  invalid.projectionDigest = digestOmitting(invalid, 'projectionDigest');
+  assert.throws(() => validateContextItems(invalid, input.items), /cannot be hidden/);
+  const audit = input.items.at(-2)!;
+  invalid.segments[invalid.segments.length - 1] = structuredClone(input.context.segments.at(-1)!);
+  invalid.segments[invalid.segments.length - 2] = { kind: 'raw', fromItemSeq: audit.itemSeq, throughItemSeq: audit.itemSeq,
+    items: [{ itemSeq: audit.itemSeq, itemRef: audit.itemRef }] };
+  invalid.projectionDigest = digestOmitting(invalid, 'projectionDigest');
+  assert.throws(() => validateContextItems(invalid, input.items), /control items/);
+  assert.equal(auditSegment.kind, 'excluded_control');
+});
+
 test('a normal request exceeding the wire bound compacts a safe whole prefix even below the token trigger', () => {
   const input = largeWindow(history(['a'.repeat(40_000), '"'.repeat(540_000)]));
   const selected = planContextCompaction(input);

@@ -22,6 +22,7 @@ import { assertWorkspaceSourceTrust, type HeldWorkspaceSourceTrust } from './sou
 import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
 import { assertActiveStateOwner, type StateOwnerContext } from './state-owner.js';
 import { hostPlatform, recaptureLiveWorkspaceIdentity } from './workspace-identity.js';
+import { assertSupportedVerifierRequests, readVerifierRequestIdentities } from './verifier-admission.js';
 
 function invalid(message: string): never { throw new KernelStorageError('INVALID_REQUEST', message); }
 function object(value: unknown, required: readonly string[], optional: readonly string[] = []): Record<string, unknown> {
@@ -270,6 +271,7 @@ export async function createVerifiedSourceInspectionTarget(context: {
   driver: SqliteDriver; artifacts: ArtifactCatalog; owner: StateOwnerContext; bootstrap: SourceInspectionBootstrap;
   workspaceRoot: HeldWorkspaceRoot; trust: HeldWorkspaceSourceTrust;
   selectedRuntime?: HeldInstalledRuntime;
+  signal?: AbortSignal;
 }, inlineRequest: unknown, identity: AuthenticatedControlIdentity): Promise<VerifiedSourceInspectionTarget> {
   const normalized = normalizeRunSubmitRequest(inlineRequest), request = normalized.request;
   identity = immutableSnapshot(identity);
@@ -291,7 +293,9 @@ export async function createVerifiedSourceInspectionTarget(context: {
   if (heldWorkspaceRootPath(workspaceRoot) !== request.workspacePath) throw new KernelStorageError('ARTIFACT_MISMATCH', 'held workspace path differs from inline request');
   assertWorkspaceSourceTrust(trust, request.workspacePath);
   if (request.sourceIncludes.some(include => include.readGrantId !== undefined)) invalid('source read grants are not implemented; ignored bytes cannot be captured');
-  if (request.verifiers.length || request.dependency.mode !== 'none') invalid('verifier/dependency admission is not yet implemented');
+  if (request.dependency.mode !== 'none') invalid('dependency admission is not yet implemented');
+  assertSupportedVerifierRequests(request.verifiers, request.policyMode);
+  if (request.verifiers.length) await readVerifierRequestIdentities(driver, artifacts, owner, bootstrap, identity.principalId, request.verifiers, undefined, context.signal);
   if (request.registeredMcpServerIds.length || request.skillIds.length) invalid('MCP/skill admission authority is not yet implemented');
   if (request.model.provider !== 'ollama') {
     if (!context.selectedRuntime || request.model.provider !== 'openai-compatible')

@@ -4,7 +4,7 @@ import { normalizeBoundedText, sha256Bytes } from '../kernel/identity.js';
 import { parseJsonStrict } from '../kernel/json.js';
 import type { RunSnapshotV1, SessionSnapshotV1, ControlResultV1 } from '../kernel/types.js';
 import type { LocalControlConnection } from './control-channel.js';
-import { EventCursorExpiredError, type ReadControlRequest, type ReadControlResult } from './control-read.js';
+import { EventCursorExpiredError, ResultUnavailableError, type ReadControlRequest, type ReadControlResult } from './control-read.js';
 import { CredentialFinalizationTimeError, InstalledModelAuthorizationError, KernelStorageError, ResourceRetirementError, RunTerminalError } from './errors.js';
 import type { StateStore } from './store.js';
 import type { CredentialAuthorityOperationV1 } from '../kernel/credential-authority.js';
@@ -12,6 +12,7 @@ import type { CredentialFinalizeRequest } from './installed-credential-client.js
 import { InstalledRunAuthorityError } from './installed-run.js';
 import { InstalledRunCapacityError } from './installed-run-capacity.js';
 import { CredentialScopeBusyError } from './installed-runtime.js';
+import { VerifierAuthorizationError } from './authorization-artifacts.js';
 
 export type RuntimeBundlePublicSummaryV1 = Readonly<{
   schemaVersion: 1;
@@ -49,6 +50,7 @@ type Range = { min: number; max: number };
 type HelloRequest = { protocolVersion: 1; method: 'control.hello'; clientBuild: string;
   controlSchemaRange: Range; headlessSchemaRange: Range; requestedFeatureIds: string[] };
 export type InstalledControlResultV1 = ReadControlResult | Extract<ControlResultV1, { method: 'session.create' | 'run.submit' | 'run.cancel' }> |
+  import('../kernel/authorization.js').AuthorizationResponse['result'] |
   SupervisorStatusV1 | { method: 'credential.finalize'; operation: CredentialAuthorityOperationV1 } | (SupervisorHelloV1 & {
   method: 'control.hello'; protocolVersion: 1; serverBuild: string;
   controlSchemaRange: { min: 1; max: 1 }; enabledFeatureIds: string[];
@@ -57,6 +59,7 @@ type ErrorBase = { schemaVersion: 1; messageCode: string };
 type InvalidError = ErrorBase & { code: 'INVALID_REQUEST'; retryable: false;
   issues: Array<{ path: string; issueCode: string }> };
 export type InstalledControlErrorV1 = InvalidError
+  | import('../kernel/types.js').ResultUnavailableControlErrorV1
   | InstalledRunCapacityError['controlError']
   | CredentialScopeBusyError['controlError']
   | (ErrorBase & { code: 'INCOMPATIBLE_PROTOCOL'; retryable: false;
@@ -68,7 +71,8 @@ export type InstalledControlErrorV1 = InvalidError
   | (ErrorBase & { code: 'REVISION_CONFLICT'; retryable: true; currentRevision: number;
       conflict: { resourceKind: 'session'; currentSnapshot: SessionSnapshotV1 } | { resourceKind: 'run'; currentSnapshot: RunSnapshotV1 } })
   | (ErrorBase & { code: 'NOT_FOUND' | 'AUTHORIZATION_REQUIRED' | 'ARTIFACT_MISMATCH' | 'UNSUPPORTED_PLATFORM' |
-      'REQUEST_ID_CONFLICT' | 'ADMISSION_KEY_CONFLICT' | 'MODEL_COST_UNKNOWN' | 'BUDGET_EXHAUSTED' | 'CANCEL_REQUESTED' | 'RUN_TERMINAL'; retryable: false });
+      'REQUEST_ID_CONFLICT' | 'ADMISSION_KEY_CONFLICT' | 'MODEL_COST_UNKNOWN' | 'BUDGET_EXHAUSTED' | 'CANCEL_REQUESTED' | 'RUN_TERMINAL' |
+      'UNSUPPORTED_EXECUTION_IDENTITY'; retryable: false });
 export type InstalledControlResponseV1 =
   | { protocolVersion: 1; ok: true; result: InstalledControlResultV1 }
   | { protocolVersion: 1; ok: false; method: ControlMethodV1; error: InstalledControlErrorV1 }
@@ -79,7 +83,8 @@ const MAX_OUTSTANDING = 64;
 // All owned partial/request/response bodies share this budget. Each connection
 // has four-byte input/output headers; Store metadata is separately bounded.
 const BUFFER_BYTES = (MAX_OUTSTANDING + 1) * FRAME_BYTES;
-const FEATURES = ['session.get', 'run.get', 'run.attach', 'supervisor.status', 'credential.finalize', 'session.create', 'run.submit', 'run.cancel'];
+const FEATURES = ['session.get', 'run.get', 'run.attach', 'supervisor.status', 'credential.finalize', 'session.create', 'run.submit', 'run.cancel',
+  'authorization.create', 'authorization.revoke', 'run.result', 'run.diff'];
 const RUN_FEATURES = ['session.create', 'run.submit', 'run.cancel'];
 const record = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -164,6 +169,7 @@ export function openInstalledControl(store: StateStore,
     }
   };
   const errorResult = (error: unknown, credential = false): InstalledControlErrorV1 => {
+    if (error instanceof ResultUnavailableError) return error.controlError;
     if (error instanceof ResourceRetirementError) {
       retirementFailure ??= error;
       controlRetirementFailure ??= error;
@@ -174,6 +180,8 @@ export function openInstalledControl(store: StateStore,
       latestEventSeq: error.latestEventSeq, snapshot: error.snapshot };
     if (error instanceof RunTerminalError) return { schemaVersion: 1, code: 'RUN_TERMINAL', retryable: false,
       messageCode: 'control.run_terminal' };
+    if (error instanceof VerifierAuthorizationError) return { schemaVersion: 1, code: error.refusalCode, retryable: false,
+      messageCode: 'authorization.verifier_identity_refused' };
     if (error instanceof InstalledModelAuthorizationError) return { schemaVersion: 1, code: 'AUTHORIZATION_REQUIRED',
       retryable: false, messageCode: 'run.model_authority_refused' };
     if (error instanceof InstalledRunAuthorityError) return { schemaVersion: 1,
@@ -234,10 +242,12 @@ export function openInstalledControl(store: StateStore,
         if (method === 'session.create') return (await store.createInstalledSession(request, identity)).response;
         if (method === 'run.submit') return (await store.submitInstalledRun(request, identity)).response;
         if (method === 'run.cancel') return (await store.cancelInstalledRun(request, identity)).response;
+        if (method === 'authorization.create') return (await store.createAuthorization(request, identity)).response;
+        if (method === 'authorization.revoke') return (await store.revokeAuthorization(request, identity)).response;
         if (method === 'credential.finalize') return { protocolVersion: 1, ok: true,
           result: { method: 'credential.finalize', operation: await store.finalizeCredential(request as CredentialFinalizeRequest, identity) }
         } satisfies InstalledControlResponseV1;
-        if (method === 'session.get' || method === 'run.get' || method === 'run.attach') {
+        if (method === 'session.get' || method === 'run.get' || method === 'run.attach' || method === 'run.result' || method === 'run.diff') {
           return { protocolVersion: 1, ok: true, result: await store.readControl(request as ReadControlRequest, identity) } satisfies InstalledControlResponseV1;
         }
         if (method === 'supervisor.status') {
