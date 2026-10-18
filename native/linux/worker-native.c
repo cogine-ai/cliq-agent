@@ -428,7 +428,7 @@ static int poll_response(struct controller *controller, struct native_scope *sco
     if (controller->closed || controller->pending_scope != scope || controller->pending == 0)
         return poll_failure(controller, scope, expected, NULL, 0, 0, 1);
     int fds[CLIQ_WORKER_MAX_FDS]; size_t count;
-    if (!cliq_receive_flags(controller->socket, response, fds, &count, MSG_DONTWAIT)) {
+    if (!cliq_receive_flags(controller->socket, response, fds, sizeof(fds) / sizeof(fds[0]), &count, MSG_DONTWAIT)) {
         int receive_errno = errno;
         if (receive_errno == EAGAIN || receive_errno == EWOULDBLOCK) return 0;
         (void)close_controller(controller);
@@ -743,7 +743,7 @@ static int poll_verifier_reply(struct native_scope *scope) {
     struct controller *controller = scope->controller;
     if (controller->closed || controller->pending_scope != scope || controller->pending != CLIQ_POLL_VERIFIER) return -1;
     struct cliq_worker_packet response; int files[CLIQ_WORKER_MAX_FDS]; size_t count;
-    if (!cliq_receive_flags(controller->socket, &response, files, &count, MSG_DONTWAIT)) {
+    if (!cliq_receive_flags(controller->socket, &response, files, sizeof(files) / sizeof(files[0]), &count, MSG_DONTWAIT)) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
         return -1;
     }
@@ -1472,7 +1472,7 @@ static napi_value controller_close(napi_env env, napi_callback_info info) {
     if (!controller->closed && controller->pending == CLIQ_RELEASE_WRITE && scope && scope->invocation && scope->released) {
         struct cliq_worker_packet response;
         int descriptors[CLIQ_WORKER_MAX_FDS]; size_t count = 0;
-        bool received = cliq_receive_flags(controller->socket, &response, descriptors, &count, MSG_DONTWAIT);
+        bool received = cliq_receive_flags(controller->socket, &response, descriptors, sizeof(descriptors) / sizeof(descriptors[0]), &count, MSG_DONTWAIT);
         if (received) {
             for (size_t i = 0; i < count; i++) {
                 if (!retire_descriptor(&descriptors[i])) controller->retirement_failed = true;

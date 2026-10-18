@@ -198,7 +198,7 @@ static int namespace_init(void) {
         prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) != 1) return 70;
     struct cliq_worker_packet request;
     int passed[CLIQ_WORKER_MAX_FDS]; size_t count;
-    if (!cliq_receive(3, &request, passed, &count) ||
+    if (!cliq_receive(3, &request, passed, sizeof(passed) / sizeof(passed[0]), &count) ||
         (request.command != CLIQ_CREATE_WORKER && request.command != CLIQ_CREATE_WRITE && request.command != CLIQ_CREATE_VERIFIER) ||
         count != (request.command == CLIQ_CREATE_WORKER ? 0U : 1U)) return 70;
     if (request.command == CLIQ_CREATE_VERIFIER) return verifier_namespace(request, passed[0]);
@@ -222,7 +222,7 @@ static int namespace_init(void) {
     if (input >= 0) close(input);
     if (!sent || !readable(channel[0], OBSERVATION_TIMEOUT_MS)) return 70;
     struct cliq_worker_packet ready;
-    if (!cliq_receive(channel[0], &ready, passed, &count) || count != 0 || ready.command != CLIQ_WORKER_READY) return 70;
+    if (!cliq_receive(channel[0], &ready, NULL, 0, &count) || ready.command != CLIQ_WORKER_READY) return 70;
     ready.namespace_init_pid = 1;
     struct stat namespace;
     if (!cliq_process_token(1, ready.init_start_token) || stat("/proc/self/ns/pid", &namespace) != 0) return 70;
@@ -230,16 +230,16 @@ static int namespace_init(void) {
     if (!cliq_send(3, &ready, NULL, 0)) return 70;
     bool active = false;
     for (;;) {
-        if (!cliq_receive(3, &request, passed, &count) || count != 0) break;
+        if (!cliq_receive(3, &request, NULL, 0, &count)) break;
         if (request.command == CLIQ_ACTIVATE_WORKER && !invocation && !active) {
             if (!cliq_send(channel[0], &request, NULL, 0) || !readable(channel[0], OBSERVATION_TIMEOUT_MS) ||
-                !cliq_receive(channel[0], &ready, passed, &count) || count != 0 || ready.command != CLIQ_WORKER_ACTIVATED) break;
+                !cliq_receive(channel[0], &ready, NULL, 0, &count) || ready.command != CLIQ_WORKER_ACTIVATED) break;
             active = true;
             if (!cliq_send(3, &ready, NULL, 0)) break;
         } else if (request.command == CLIQ_RELEASE_WRITE && invocation && !active) {
             active = true;
             if (!cliq_send(channel[0], &request, NULL, 0) || !readable(channel[0], OBSERVATION_TIMEOUT_MS) ||
-                !cliq_receive(channel[0], &ready, passed, &count) || count != 0 || ready.command != CLIQ_WRITE_RESULT ||
+                !cliq_receive(channel[0], &ready, NULL, 0, &count) || ready.command != CLIQ_WRITE_RESULT ||
                 !cliq_send(3, &ready, NULL, 0)) break;
             while (waitpid(worker, NULL, 0) < 0 && errno == EINTR) {}
         } else break;
@@ -527,9 +527,9 @@ static bool spawn_worker(struct cliq_worker_packet *request, int passed[CLIQ_WOR
     if (!cliq_send(scope->channel, request, input >= 0 ? &input : NULL, input >= 0 ? 1 : 0)) return false;
     response->status = CLIQ_SPAWN_READY_WAIT;
     if (!readable(scope->channel, OBSERVATION_TIMEOUT_MS)) return false;
-    struct cliq_worker_packet ready; int extra[CLIQ_WORKER_MAX_FDS]; size_t extras;
+    struct cliq_worker_packet ready; size_t extras;
     response->status = CLIQ_SPAWN_READY_RECEIVE;
-    if (!cliq_receive(scope->channel, &ready, extra, &extras) || extras != 0 || ready.command != CLIQ_WORKER_READY) return false;
+    if (!cliq_receive(scope->channel, &ready, NULL, 0, &extras) || ready.command != CLIQ_WORKER_READY) return false;
     response->status = CLIQ_SPAWN_PROCESS_INSPECTION;
     if (!inspect_processes(scope, &ready)) return false;
     scope->identity = ready;
@@ -739,7 +739,7 @@ static bool observe_verifier_wait(struct scope *scope, bool stopping) {
     if (!scope->verifier || !scope->released || scope->channel < 0 ||
         scope->verifier_result.verifier_reason != CLIQ_VERIFIER_PENDING) return true;
     struct cliq_worker_packet result; int extra[CLIQ_WORKER_MAX_FDS]; size_t count;
-    if (!cliq_receive_flags(scope->channel, &result, extra, &count, MSG_DONTWAIT))
+    if (!cliq_receive_flags(scope->channel, &result, extra, sizeof(extra) / sizeof(extra[0]), &count, MSG_DONTWAIT))
         return errno == EAGAIN || errno == EWOULDBLOCK || (stopping && errno == EPIPE);
     for (size_t i = 0; i < count; i++) close(extra[i]);
     if (count != 0 || result.command != CLIQ_VERIFIER_RESULT || result.verifier_reason < CLIQ_VERIFIER_EXIT ||
@@ -970,7 +970,7 @@ static int controller(void) {
         if (available < 0 || (available > 0 && !(control.revents & POLLIN))) break;
         if (available == 0) continue;
         struct cliq_worker_packet request, response; int passed[CLIQ_WORKER_MAX_FDS]; size_t count;
-        if (!cliq_receive(3, &request, passed, &count)) break;
+        if (!cliq_receive(3, &request, passed, sizeof(passed) / sizeof(passed[0]), &count)) break;
         response = cliq_packet(request.command); response.scope = request.scope;
         bool ok = false; int outputs[2]; size_t output_count = 0;
         if (request.command == CLIQ_BIND_RESERVATION) ok = bind_worker_reservation(&request, passed, count);
@@ -984,9 +984,9 @@ static int controller(void) {
                 strcmp(request.nonce, scope->identity.activation_nonce) == 0) {
                 /* The blocked worker receives only its one-use activation capability. */
                 memcpy(request.nonce, scope->identity.nonce, sizeof(request.nonce));
-                int extra[CLIQ_WORKER_MAX_FDS]; size_t extras;
+                size_t extras;
                 ok = cliq_send(scope->channel, &request, NULL, 0) && readable(scope->channel, OBSERVATION_TIMEOUT_MS) &&
-                    cliq_receive(scope->channel, &response, extra, &extras) && extras == 0 && response.command == CLIQ_WORKER_ACTIVATED;
+                    cliq_receive(scope->channel, &response, NULL, 0, &extras) && response.command == CLIQ_WORKER_ACTIVATED;
                 if (ok) scope->active = true;
             }
         } else if (request.command == CLIQ_RELEASE_WRITE && count == 0 && request.scope > 0 && request.scope < CLIQ_WORKER_MAX_SCOPES) {
@@ -998,7 +998,7 @@ static int controller(void) {
                 scope->released = true;
                 int extra[CLIQ_WORKER_MAX_FDS]; size_t extras;
                 if (cliq_send(scope->channel, &request, NULL, 0) && readable(scope->channel, OBSERVATION_TIMEOUT_MS) &&
-                    cliq_receive(scope->channel, &response, extra, &extras)) {
+                    cliq_receive(scope->channel, &response, extra, sizeof(extra) / sizeof(extra[0]), &extras)) {
                     ok = extras == 0 && response.command == CLIQ_WRITE_RESULT;
                     for (size_t i = 0; i < extras; i++) close(extra[i]);
                 }

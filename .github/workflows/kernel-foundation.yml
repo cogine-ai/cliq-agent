@@ -706,6 +706,11 @@ jobs:
         shell: bash
         run: |
           regression="$RUNNER_TEMP/cliq-worker-seccomp-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          channel_regression="$RUNNER_TEMP/cliq-worker-channel-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          musl-gcc -std=c11 -O2 -Wall -Wextra -Werror -static \
+            -idirafter /usr/include -idirafter "/usr/include/$(musl-gcc -dumpmachine)" \
+            native/linux/worker-channel.test.c -o "$channel_regression"
+          "$channel_regression"
           musl-gcc -std=c11 -O2 -Wall -Wextra -Werror -static \
             -idirafter /usr/include -idirafter "/usr/include/$(musl-gcc -dumpmachine)" \
             native/linux/worker-seccomp.test.c -o "$regression"

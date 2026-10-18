@@ -221,8 +221,8 @@ static int verifier_namespace(struct cliq_worker_packet request, int input) {
         stat("/proc/self/ns/pid", &namespace) != 0) { free(config); return 70; }
     ready.pid_namespace_inode = (uint64_t)namespace.st_ino;
     if (!cliq_send(3, &ready, NULL, 0)) { free(config); return 70; }
-    int extra[CLIQ_WORKER_MAX_FDS]; size_t count;
-    if (!cliq_receive(3, &request, extra, &count) || count != 0 || request.command != CLIQ_RELEASE_VERIFIER) { free(config); return 70; }
+    size_t count;
+    if (!cliq_receive(3, &request, NULL, 0, &count) || request.command != CLIQ_RELEASE_VERIFIER) { free(config); return 70; }
     if (write(barrier[1], "1", 1) != 1 || close(barrier[1]) != 0) { free(config); return 70; }
     int status; pid_t joined;
     do { joined = waitpid(child, &status, 0); } while (joined < 0 && errno == EINTR);

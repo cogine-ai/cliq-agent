@@ -54,8 +54,13 @@ static inline bool cliq_send(int socket, const struct cliq_worker_packet *packet
 }
 
 static inline bool cliq_receive_flags(int socket, struct cliq_worker_packet *packet,
-                         int fds[CLIQ_WORKER_MAX_FDS], size_t *count, int flags) {
+                         int *fds, size_t capacity, size_t *count, int flags) {
     *count = 0;
+    /* The protocol maximum is not the caller's actual destination extent.
+     * Older fixed commands intentionally hold fewer descriptors than verifier
+     * creation. Consume and retire every excess right, never overrun a caller
+     * or silently accept a packet whose rights did not fit. */
+    if (capacity > CLIQ_WORKER_MAX_FDS || (capacity != 0 && fds == NULL)) { errno = EINVAL; return false; }
     struct iovec iov = { .iov_base = packet, .iov_len = sizeof(*packet) };
     char ancillary[CMSG_SPACE(CLIQ_WORKER_MAX_FDS * sizeof(int))];
     memset(ancillary, 0, sizeof(ancillary));
@@ -74,7 +79,7 @@ static inline bool cliq_receive_flags(int socket, struct cliq_worker_packet *pac
         size_t descriptors = (header->cmsg_len - CMSG_LEN(0)) / sizeof(int);
         int *passed = (int *)CMSG_DATA(header);
         for (size_t i = 0; i < descriptors; i++) {
-            if (*count < CLIQ_WORKER_MAX_FDS) fds[(*count)++] = passed[i]; else { ancillary_valid = false; close(passed[i]); }
+            if (*count < capacity) fds[(*count)++] = passed[i]; else { ancillary_valid = false; close(passed[i]); }
         }
     }
     bool valid = ancillary_valid && received == (ssize_t)sizeof(*packet) &&
@@ -96,8 +101,8 @@ static inline bool cliq_receive_flags(int socket, struct cliq_worker_packet *pac
     return valid;
 }
 
-static inline bool cliq_receive(int socket, struct cliq_worker_packet *packet, int fds[CLIQ_WORKER_MAX_FDS], size_t *count) {
-    return cliq_receive_flags(socket, packet, fds, count, 0);
+static inline bool cliq_receive(int socket, struct cliq_worker_packet *packet, int *fds, size_t capacity, size_t *count) {
+    return cliq_receive_flags(socket, packet, fds, capacity, count, 0);
 }
 
 /* Resolve a host process to its PID in the innermost namespace. Start ticks

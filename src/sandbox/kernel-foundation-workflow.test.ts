@@ -72,6 +72,10 @@ test('real guest verifier stays in the existing free bounded job without replaci
   assert(job);
   assert.match(job, /runs-on: ubuntu-22\.04\n/); assert.match(job, /timeout-minutes: 20\n/);
   assert.doesNotMatch(job, /continue-on-error:/u);
+  const nativeRegression = stepBlocks(job).find(block => block.includes('- name: Verify real worker seccomp ABI and syscall denials'));
+  assert(nativeRegression);
+  assert.match(nativeRegression, /musl-gcc -std=c11 -O2 -Wall -Wextra -Werror -static[\s\S]*native\/linux\/worker-channel\.test\.c -o "\$channel_regression"\n\s+"\$channel_regression"/u);
+  assert.match(nativeRegression, /native\/linux\/worker-seccomp\.test\.c -o "\$regression"\n\s+"\$regression"/u);
   assert.match(job, /libext2fs-dev pkg-config/u);
   assert.match(job, /truncate -s 128M "\$image"/u, 'ordinary native capacity and all existing assertions stay intact');
   assert.match(job, /run-linux-worker-campaign\.ts/u);
