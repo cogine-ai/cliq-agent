@@ -204,3 +204,38 @@ test('persistent public client closes and joins its original socket when its own
   assert.equal(joined.code, 0, joined.stderr); assert.equal(joined.signal, null); assert.equal(joined.stderr, '');
   assert.equal(value.connections, 1); assert.deepEqual(value.requests, [hello]);
 });
+
+test('response-time worker diagnostics use the same public hello, not queued installed inventory', () => {
+  // Actual caller code, serialized replies only. This does not mint a native
+  // identity; Linux independently observes the original worker and retirement.
+  const start = source.indexOf('  const exchange = ('), end = source.indexOf('\n  const accepted =', start);
+  assert(start >= 0 && end > start);
+  const script = ts.transpileModule(source.slice(start, end) + '\nglobalThis.exchangeUnderTest = exchange;',
+    { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  const get = { protocolVersion: 1, method: 'run.get', runId: 'data-only-run' };
+  const hello = { protocolVersion: 1, method: 'control.hello' };
+  const helloResponse = { protocolVersion: 1, ok: true, result: { method: 'control.hello', supervisorInstanceId: 'original-instance' } };
+  const getResponse = { protocolVersion: 1, ok: true, result: { method: 'run.get' } };
+  let commands = 0, observed;
+  const context = { assert, Buffer, hello, clientScript, process: { execPath: process.execPath }, path,
+    recipe: { stateRoot: '/unused-fixture-data' }, canonicalJsonBytes: body => Buffer.from(JSON.stringify(body)), parseJsonStrict: JSON.parse,
+    command(_executable, arguments_) {
+      commands++;
+      const sent = JSON.parse(Buffer.from(arguments_[4], 'base64url')).map(text => JSON.parse(Buffer.from(text, 'base64url')));
+      assert.deepEqual(sent, [hello, get]);
+      return { status: 0, stdout: JSON.stringify([helloResponse, getResponse].map(value => JSON.stringify(value))) };
+    } };
+  vm.createContext(context); vm.runInContext(script, context);
+  const replies = context.exchangeUnderTest([get], 0, 30000, value => { observed = value; });
+  assert.equal(commands, 1);
+  assert.equal(observed?.supervisorInstanceId, 'original-instance');
+  assert.equal(replies.length, 1); assert.equal(replies[0].result.method, 'run.get');
+  const callbackFrom = source.indexOf('    captureResponseWorker = async body => {');
+  const callbackThrough = source.indexOf('\n    const assertOriginalRetirement', callbackFrom);
+  assert(callbackFrom >= 0 && callbackThrough > callbackFrom);
+  assert.doesNotMatch(source.slice(callbackFrom, callbackThrough), /method: 'supervisor\.status'/u);
+  const resourceFrom = source.indexOf('      observeResourceWorkerBeforeReply = async () => {');
+  const resourceThrough = source.indexOf('\n      };', resourceFrom);
+  assert(resourceFrom >= 0 && resourceThrough > resourceFrom);
+  assert.doesNotMatch(source.slice(resourceFrom, resourceThrough), /method: 'supervisor\.status'/u);
+});

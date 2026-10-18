@@ -287,7 +287,8 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
   const hello = { protocolVersion: 1, method: 'control.hello', clientBuild: 'installed-run-journey',
     controlSchemaRange: { min: 1, max: 1 }, headlessSchemaRange: { min: 1, max: 1 },
     requestedFeatureIds: ['session.create', 'session.get', 'run.submit', 'run.get', 'run.attach', 'run.cancel', 'supervisor.status', 'credential.finalize'] };
-  const exchange = (requests: Record<string, unknown>[], connectBy = 0, timeout = 30000): Response[] => {
+  const exchange = (requests: Record<string, unknown>[], connectBy = 0, timeout = 30000,
+    onHello?: (result: Record<string, any>) => void): Response[] => {
     assert(connectBy === 0 || requests.length === 0, 'startup connection retry is hello-only, never a request replay');
     assert(Number.isSafeInteger(timeout) && timeout > 0 && timeout <= 30000);
     const entries = [hello, ...requests].map(value => canonicalJsonBytes(value).toString('base64url'));
@@ -300,6 +301,7 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
     const replies = parseJsonStrict(result.stdout.trim()) as string[]; assert.equal(replies.length, entries.length);
     const parsed = replies.map(text => { const value = parseJsonStrict(text) as Response; assert.equal(text, canonicalJsonBytes(value).toString('utf8')); return value; });
     assert.equal(parsed[0]!.ok, true, 'real compatible hello refused'); assert.equal(parsed[0]!.result!.method, 'control.hello');
+    onHello?.(parsed[0]!.result!);
     return parsed.slice(1);
   };
   const accepted = (response: Response, method: string) => {
@@ -1110,12 +1112,17 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
         message.role === 'user' && typeof message.content === 'string' && message.content.includes(objective)));
       assert(selected, 'the owned final response must name a normally admitted Run');
       const [, runId] = selected;
-      const cut = accepted(exchange([{ protocolVersion: 1, method: 'run.get', runId }])[0]!, 'run.get'), run = cut.snapshot.run;
-      const status = accepted(exchange([{ protocolVersion: 1, method: 'supervisor.status' }])[0]!, 'supervisor.status');
+      let supervisorInstanceId: string | undefined;
+      // The pending response owns the credential/installation scope. Inventory
+      // queues behind that scope, so use this read's existing authenticated
+      // hello instead of making the responder wait on its own response.
+      const cut = accepted(exchange([{ protocolVersion: 1, method: 'run.get', runId }], 0, 30000,
+        hello => { assert.equal(typeof hello.supervisorInstanceId, 'string'); supervisorInstanceId = hello.supervisorInstanceId; })[0]!, 'run.get');
+      const run = cut.snapshot.run; assert(supervisorInstanceId);
       assert.equal(run.status, 'running'); assert(run.activeWorkerLaunchId); assert.equal(run.stopIntentRef, undefined);
       const original = inspectInstalledWorkerIdentity(recipe.stateRoot, { uid: ledger.uid, runId,
         launchId: run.activeWorkerLaunchId, leaseEpoch: run.leaseEpoch, runRevision: run.revision,
-        supervisorInstanceId: status.supervisorInstanceId, deadlineAt: run.deadlineAt });
+        supervisorInstanceId, deadlineAt: run.deadlineAt });
       assert.equal(`linux-proc-start-ticks:${await fixtureProcess(original.pid, ledger.uid)}`, original.processStartToken);
       assert.equal(responseWorkers.has(runId), false); responseWorkers.set(runId, original);
     };
@@ -1468,19 +1475,21 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
         budget(queued.snapshot.run.budgetConsumed, 0); budget(queued.snapshot.run.budgetReserved, 0);
       }
       const queue = await send({ protocolVersion: 1, method: 'supervisor.status' }, 'supervisor.status');
-      assert.equal(queue.health, 'ready'); assert.equal(queue.queue.capacity, 1);
+      assert.equal(queue.health, 'degraded', 'the genuine owned UNKNOWN must remain visibly degraded'); assert.equal(queue.queue.capacity, 1);
       assert.equal(queue.queue.runningRuns, 1); assert.equal(queue.queue.queuedRuns, 3); assert.equal(requestsReceived, 1);
       let originalWorker: InstalledWorkerIdentityInspection | undefined;
       observeResourceWorkerBeforeReply = async () => {
         assert.equal(originalWorker, undefined);
-        const active = accepted(exchange([{ protocolVersion: 1, method: 'run.get', runId: exhaustedRun.id }])[0]!, 'run.get');
+        let supervisorInstanceId: string | undefined;
+        const active = accepted(exchange([{ protocolVersion: 1, method: 'run.get', runId: exhaustedRun.id }], 0, 30000,
+          hello => { assert.equal(typeof hello.supervisorInstanceId, 'string'); supervisorInstanceId = hello.supervisorInstanceId; })[0]!, 'run.get');
         const run = active.snapshot.run;
         assert.equal(run.id, exhaustedRun.id); assert.equal(run.status, 'running'); assert(run.activeWorkerLaunchId);
         assert.deepEqual(active.journal.map((entry: any) => entry.phase), ['prepared', 'dispatch_claimed']);
-        const status = accepted(exchange([{ protocolVersion: 1, method: 'supervisor.status' }])[0]!, 'supervisor.status');
+        assert(supervisorInstanceId);
         const original = inspectInstalledWorkerIdentity(recipe.stateRoot, { uid: ledger.uid, runId: run.id,
           launchId: run.activeWorkerLaunchId, leaseEpoch: run.leaseEpoch, runRevision: run.revision,
-          supervisorInstanceId: status.supervisorInstanceId, deadlineAt: run.deadlineAt });
+          supervisorInstanceId, deadlineAt: run.deadlineAt });
         assert.equal(`linux-proc-start-ticks:${await fixtureProcess(original.pid, ledger.uid)}`, original.processStartToken);
         originalWorker = original; resource.originalWorker = { ...original, sameOriginalProcessObservedAlive: true };
       };
