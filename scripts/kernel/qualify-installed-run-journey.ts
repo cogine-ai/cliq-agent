@@ -1654,7 +1654,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       assert.equal(show(services.keeperUnit).InvocationID, keeper.InvocationID);
       const ownerProof: Record<string, unknown> = {};
       const history = await qualifyInstalledOwnerLinks({ stateRoot: recipe.stateRoot, uid: ledger.uid, bundle: signed.bundle,
-        imageDigest: report.bundle.supervisorDigest, report: ownerProof });
+        imageDigest: report.bundle.supervisorDigest, report: ownerProof, scenario: 'resource_two_graceful_restarts' });
       assert.equal(history.owners.length, 3);
       resource.ownerHistory = { qualified: true, owners: history.owners.map(owner => ({ ownerEpoch: owner.ownerEpoch,
         supervisorInstanceId: owner.supervisorInstanceId, state: owner.state, rowDigest: owner.rowDigest,
@@ -2008,13 +2008,18 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       mark('effect_original_owner_successor');
       assert.equal(command('/usr/bin/systemctl', ['--user', 'start', services.supervisorUnit]).status, 0);
       const successor = show(services.supervisorUnit), recoverBy = Date.now() + 30000;
+      const recoveryStarted = performance.now();
+      effect.successorTiming = { diagnosticOnly: true, originalDeadlineMs: 30000, selectedReadyMs: 0, ownerHistoryReadyMs: 0,
+        publicCutsObserved: 0, elapsedMs: 0 };
       assert.notEqual(successor.MainPID, supervisorBefore.MainPID); assert.notEqual(successor.InvocationID, supervisorBefore.InvocationID);
       const successorStart = await selectedSupervisor(services.supervisorUnit, successor, selectedImage, recoverBy);
+      effect.successorTiming.selectedReadyMs = Math.floor(performance.now() - recoveryStarted);
       const links: Record<string, unknown> = {};
       const history = await qualifyInstalledOwnerLinks({ stateRoot: recipe.stateRoot, uid: ledger.uid, bundle: signed.bundle,
         imageDigest: report.bundle.supervisorDigest, report: links,
         ...(shutdownStartupOnly ? { scenario: 'startup_shutdown' as const } : {}) });
       assert.equal(links.qualified, true); assert.equal(history.owners.length, precedingOwners.length + 1);
+      effect.successorTiming.ownerHistoryReadyMs = Math.floor(performance.now() - recoveryStarted);
       assert.deepEqual(history.owners.slice(0, -1), precedingOwners);
       const successorOwner = history.owners.at(-1)!; assert.equal(successorOwner.state, 'active');
       assert.equal(successorOwner.ownerEpoch, precedingOwners.at(-1)!.ownerEpoch + 1);
@@ -2032,6 +2037,8 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       let ready: Record<string, any>;
       for (;;) {
         ready = await publicRead(); assert(!providerFailure);
+        effect.successorTiming.publicCutsObserved++;
+        effect.successorTiming.elapsedMs = Math.floor(performance.now() - recoveryStarted);
         assert(Date.now() < recoverBy, 'the actual effect successor did not reach its required final or independently cancellable cut');
         if (shutdownReceivedToolOnly ? requestsReceived === 2 && ready.journal.length === 9 && ready.journal[8].phase === 'completed' && ready.snapshot.run.status === 'completed_unverified'
           : ready.snapshot.run.status === 'queued' && !ready.snapshot.run.activeWorkerLaunchId && !ready.snapshot.run.waitingReason) break;
@@ -3771,7 +3778,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
     let blockerCut = refused;
     mark('idle_unknown_worker_across_original_lease');
     const leaseSupervisor = accepted(exchange([{ protocolVersion: 1, method: 'supervisor.status' }])[0]!, 'supervisor.status');
-    assert.equal(leaseSupervisor.health, 'ready');
+    assert.equal(leaseSupervisor.health, 'degraded', 'the genuine owned UNKNOWN remains degraded while its original worker lease is maintained');
     const leaseProcessStart = await fixtureProcess(Number(successor.MainPID), ledger.uid);
     const leaseExpected = { uid: ledger.uid, runId: reflectionAdmitted.id, launchId: blockerCut.snapshot.run.activeWorkerLaunchId,
       leaseEpoch: blockerCut.snapshot.run.leaseEpoch, runRevision: blockerCut.snapshot.run.revision,
@@ -3814,7 +3821,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       assert.equal(requestsReceived, 3);
       const maintenanceStatus = accepted(maintenanceSupervisor!, 'supervisor.status');
       assert.equal(maintenanceStatus.supervisorInstanceId, leaseSupervisor.supervisorInstanceId);
-      assert.equal(maintenanceStatus.health, 'ready'); assert.equal(maintenanceStatus.queue.capacity, 1);
+      assert.equal(maintenanceStatus.health, 'degraded'); assert.equal(maintenanceStatus.queue.capacity, 1);
       assert.equal(maintenanceStatus.queue.runningRuns, 1); assert.equal(maintenanceStatus.incompatiblePinnedRunCount, 0);
     } while (performance.now() - idleStarted < 65000);
     await maintenanceObserverClient.close(); maintenanceObserverClient = undefined;
@@ -3898,7 +3905,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
     // three-second Run budget. Every frame still authenticates the same peer.
     await observeQueuedImages(initialQueued);
     const capacityStatus = accepted(await queuedObserverClient.send({ protocolVersion: 1, method: 'supervisor.status' }), 'supervisor.status');
-    assert.equal(capacityStatus.health, 'ready'); assert.equal(capacityStatus.queue.capacity, 1);
+    assert.equal(capacityStatus.health, 'degraded'); assert.equal(capacityStatus.queue.capacity, 1);
     assert.equal(capacityStatus.queue.runningRuns, 1); assert.equal(capacityStatus.queue.queuedRuns, 1);
     const queuedDeadlineBy = Date.now() + 30000;
     let deadlineCut: Record<string, any>;
@@ -4468,15 +4475,20 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
     if (primary) {
       report.qualified = false;
       const sourceFrames: Array<{ file: string; line: number; column: number }> = [];
+      const failureKinds: Array<{ kind: 'sqlite'; primaryCode: number } | { kind: 'assertion' }> = [];
       const pending = [primary];
       for (let visited = 0; pending.length && visited < 8 && sourceFrames.length < 8; visited++) {
         const error = pending.shift(); if (!(error instanceof Error)) continue;
-        for (const match of (error.stack ?? '').matchAll(/\b(qualify-installed-run-journey|installed-supervisor-package|installed-model-package|installed-owner-history)\.ts:([1-9][0-9]{0,6}):([1-9][0-9]{0,6})/gu)) {
+        const diagnostic = error as Error & { code?: unknown; errcode?: unknown };
+        if (diagnostic.code === 'ERR_SQLITE_ERROR' && typeof diagnostic.errcode === 'number' && Number.isSafeInteger(diagnostic.errcode) &&
+            diagnostic.errcode >= 0 && diagnostic.errcode <= 65535) failureKinds.push({ kind: 'sqlite', primaryCode: diagnostic.errcode & 0xff });
+        else if (diagnostic.code === 'ERR_ASSERTION') failureKinds.push({ kind: 'assertion' });
+        for (const match of (error.stack ?? '').matchAll(/\b(qualify-installed-run-journey|installed-supervisor-package|installed-model-package|installed-owner-history|installed-read-control)\.ts:([1-9][0-9]{0,6}):([1-9][0-9]{0,6})/gu)) {
           sourceFrames.push({ file: `${match[1]}.ts`, line: Number(match[2]), column: Number(match[3]) }); if (sourceFrames.length === 8) break;
         }
         if (error instanceof AggregateError) pending.unshift(...error.errors.slice(0, 4));
       }
-      report.error = { diagnosticOnly: true, kind: 'installed_run_journey_failed', sourceFrames };
+      report.error = { diagnosticOnly: true, kind: 'installed_run_journey_failed', sourceFrames, failureKinds };
     }
     let publication: Buffer;
     try { const bytes = Buffer.from(JSON.stringify(report, null, 2) + '\n'); scanBytes(bytes); bytes.fill(0); scanner.close();

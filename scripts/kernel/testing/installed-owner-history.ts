@@ -61,13 +61,14 @@ export async function qualifyInstalledOwnerProcess(input: RootInput & {
 
 export async function qualifyInstalledOwnerLinks(input: RootInput & {
   bundle: RuntimeBundleManifest; imageDigest: string; report: Record<string, unknown>;
-  scenario?: 'startup_shutdown';
+  scenario?: 'startup_shutdown' | 'resource_two_graceful_restarts';
 }) {
   input.report.qualified = false;
-  assert(input.scenario === undefined || input.scenario === 'startup_shutdown');
+  assert(input.scenario === undefined || input.scenario === 'startup_shutdown' || input.scenario === 'resource_two_graceful_restarts');
   const history = inspectInstalledOwnerHistory(input.stateRoot); input.report.history = history;
   const owners = history.owners;
   if (input.scenario === 'startup_shutdown') assert.equal(owners.length, 3, 'startup shutdown requires exactly two clean successors');
+  else if (input.scenario === 'resource_two_graceful_restarts') assert.equal(owners.length, 3, 'resource retirement requires exactly its two clean successors');
   else assert(owners.length >= 2 && owners.length <= 3, 'only the manual and automatic installed successors are qualified');
   for (const key of ['supervisorInstanceId', 'processIdentityRef', 'instanceNonceDigest'] as const)
     assert.equal(new Set(owners.map(owner => owner[key])).size, owners.length);
@@ -105,7 +106,7 @@ export async function qualifyInstalledOwnerLinks(input: RootInput & {
       const prior = owners[owner.ownerEpoch - 2]!; assert(prior.state === 'terminal');
       // The caller fixes this finite scenario before looking at actual rows.
       // Ordinary campaigns still require epoch three to be a real takeover.
-      const cleanAcquisition = owner.ownerEpoch === 2 || (owner.ownerEpoch === 3 && input.scenario === 'startup_shutdown');
+      const cleanAcquisition = owner.ownerEpoch === 2 || (owner.ownerEpoch === 3 && input.scenario !== undefined);
       const reason = cleanAcquisition ? 'graceful_release' : 'superseded_after_owner_death';
       assert.equal(prior.terminalReason, reason);
       equalJson(acquisition, { ...common,

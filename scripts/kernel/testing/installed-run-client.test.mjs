@@ -174,6 +174,25 @@ test('ordinary mutating requests are sent once and never replayed after a connec
   assert.equal(commands, 1);
 });
 
+test('installed journey failures retain only fixed SQLite or assertion classifications, never error messages or arbitrary frames', () => {
+  const from = source.indexOf('      const sourceFrames: Array<{ file: string; line: number; column: number }> = [];');
+  const through = source.indexOf('\n    }\n    let publication:', from);
+  assert(from >= 0 && through > from);
+  const classification = ts.transpileModule(source.slice(from, through),
+    { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  for (const code of ['ERR_SQLITE_ERROR', 'ERR_ASSERTION', 'unrecognized-sensitive-code']) {
+    const primary = Object.assign(new Error('Bearer private diagnostic must not survive'), { code, errcode: 261 });
+    primary.stack = 'Error: private diagnostic must not survive\n at inspect (installed-read-control.ts:24:21)\n at secret-source.ts:99:2';
+    const context = { primary, report: {}, Error, AggregateError, Number };
+    vm.createContext(context); vm.runInContext(classification, context);
+    const result = JSON.parse(JSON.stringify(context.report.error));
+    assert.deepEqual(result.sourceFrames, [{ file: 'installed-read-control.ts', line: 24, column: 21 }]);
+    assert.deepEqual(result.failureKinds, code === 'ERR_SQLITE_ERROR' ? [{ kind: 'sqlite', primaryCode: 5 }]
+      : code === 'ERR_ASSERTION' ? [{ kind: 'assertion' }] : []);
+    assert(!JSON.stringify(result).includes('private')); assert(!JSON.stringify(result).includes('unrecognized-sensitive-code'));
+  }
+});
+
 test('persistent public client reads separate cuts on its one original socket and never reconnects after refusal', { timeout: 10000 }, async t => {
   const value = await fixture(t);
   const get = { protocolVersion: 1, method: 'run.get', runId: 'ordinary-data-only' };
