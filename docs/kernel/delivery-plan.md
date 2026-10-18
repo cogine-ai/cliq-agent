@@ -110,21 +110,36 @@ authorized by an implementation status label.
 
 ## Current implementation boundary (2026-10-18)
 
-The new StateStore path derives the exact non-Git candidate from its original
+The StateStore path derives the exact non-Git candidate from its original
 sealed worker and supports an explicitly consented, empty-verifier
-`verify → finalize → completed_unverified` result. Candidate/result/Session
-provenance, restart/replay, cancellation and deadline invariants are being
-validated through the existing real SQLite/CAS seam with retained offline
-signed model/seal data. These are component regressions, not installed or
-native qualification. Nonempty verifiers, dependencies and Git projection
-remain explicitly rejected; no verified success or delivery is implemented.
+`verify → finalize → completed_unverified` result. The installed scheduler now
+drives that path without another model request or a productive worker for
+verification/finalization. This consumer integration is implemented, not yet
+qualified on Linux. Nonempty verifiers, dependencies and Git projection remain
+explicitly rejected; no verified success or explicit delivery is implemented.
 
-Do not enable the installed candidate producer until its original physical
-retirement/publication owner survives joined storage failures, monotonic stop
-races and two-phase shutdown without rebuilding death observations or resetting
-the cumulative three-observation limit. Result-limit failure must acquire its
-own closed, reproducible evidence rather than borrow context-exhaustion truth.
-All related real Linux cases belong to the same delivery campaign.
+The original final-turn owner is established before physical quiescence and
+retains its one checkpoint/source/candidate publication plan through positively
+joined CAS failures and rolled-back SQL commits. It shares the existing
+received-completion lifecycle with tools, including two-phase Store shutdown;
+it does not introduce another recovery owner or redispatch permission. Component
+regressions cover same-owner retry, monotonic cancellation/deadline upgrades,
+concurrent joining, exact replay and rejected proof substitution. Result-limit
+failure still needs its own closed, reproducible StopIntent evidence rather
+than context-exhaustion truth; an unsupported result fails closed, not as a
+successful delivery.
+
+The native campaign now exercises real edited workspaces, final workers,
+D0/snapshot/D1 and candidate-publication failure followed by resume, cancel or
+Store close/reopen. It also requires real storage delay to exhaust three D1
+observations, including a pending D1 publication retried after ENOSPC without
+resetting that budget. Offline final-model data in this campaign is explicitly
+not provider qualification. All new native assertions still need Linux execution.
+Installed campaigns independently check complete final source bytes and exact
+diffs; existing lease/capacity checks move to a genuinely settled UNKNOWN that
+still owns its worker, rather than depend on a completed final turn holding the
+worker forever. Neither UNKNOWN cancellation nor terminal cancellation refusal
+qualifies the unobserved received-before-candidate cancellation cut.
 
 The installed final-turn handoff must retain one original completion owner. If
 a validated monotonic Stop wins, its same prepared seal may commit only a
@@ -156,7 +171,7 @@ no labels grant authority and no new ledger or schema migration is introduced.
 The Linux negative-refusal campaign now compares all original descriptors,
 not a label-filtered subset, and permits only the independently decoded exact
 successor-owner closure to be newly registered. Its physical assertions remain
-unchanged; the modified campaign still needs real Linux execution.
+unchanged; that modified campaign passed on the previous exact source below.
 
 Session compaction is a later consumer obligation: when it is implemented,
 historical terminal-result verification must rewalk the immutable terminal item
@@ -164,14 +179,26 @@ and its compaction provenance, not require today's Session projection to retain
 the initial one-item raw segment forever.
 
 Local verification of this development batch: `npm run build` passed; the
-serial five-file candidate/result campaign passed all 36 tests with no skips,
-cancellations or todos. The frozen implementation's full `npm test` run passed
-all 2,146 tests in 649,544 ms, with no failures, skips, cancellations or todos.
-Design-contract regressions passed 9/9; the full design drift check, native
-source guard, strict campaign TypeScript check and existing campaign/workflow
-guards also passed. No new Linux qualification or completed delivery package
-is claimed; the work branch is being submitted to the existing free workflow,
-not opened as a separate foundation-only PR.
+candidate/result/publication component campaign passed all 42 tests and the
+existing tool/freshness/owner scheduling regressions passed all 27 tests. The
+frozen production implementation's full `npm test` run passed all 2,152 tests
+in 686,267 ms, with no failures, skips, cancellations or todos. Both modified
+Linux campaign entrypoints pass strict TypeScript including library checks
+(only the existing `postject` package's missing declaration is supplied in
+memory). Design-contract regressions, full drift check, native source guard
+and existing workflow/client guards pass.
+
+Previous pushed source `8eaae4d670a79123d90c73b37dde907b08fc0872` has
+[CI run 39089005603](https://github.com/cogine-ai/cliq-agent/actions/runs/39089005603):
+15 jobs succeeded and credential diagnostics hit the unchanged 20-minute job
+limit. It is not all green. The credential campaign continued through
+`revoked_endpoint_admission` near timeout; no completed journey, cleanup or
+after-baseline report exists. Those missing reports cannot be inferred from
+other green jobs. An exact-SHA evidence manifest binds the 65 retained original
+allowlisted JSON reports to their run/attempt/artifact digests; raw logs,
+credential material and mixed state bundles were not retained. This old run
+does not qualify the newly integrated producer or revised campaigns. The work
+branch remains on the existing free workflow, with no foundation-only PR.
 
 One authorized, memory-only manual request to the official DeepSeek endpoint
 confirmed that `deepseek-flash` is listed and returns a normal response with

@@ -222,11 +222,15 @@ export async function readCandidateSource(artifacts: ArtifactCatalog, spec: RunS
 
 /** The owning reducer independently validates the Run, original worker seal
  * and current SQL cut before committing the artifact-first projected graph. */
-export async function publishCandidateSource(artifacts: ArtifactCatalog, spec: RunSpec, workspaceStateRef: string): Promise<CandidateSourceGraph> {
+export async function prepareCandidateSource(artifacts: ArtifactCatalog, spec: RunSpec, workspaceStateRef: string) {
   const { graph, publications } = await planCandidateSource(artifacts, spec, workspaceStateRef);
-  for (const { value, artifact } of publications) {
-    const published = await artifacts.publishCanonical(value, artifact.schemaKind);
-    if (canonicalSha256(published) !== canonicalSha256(artifact)) mismatch('candidate source publication differs from its retained plan');
-  }
-  return graph;
+  const published = new Set<string>();
+  return { graph, async publish(): Promise<CandidateSourceGraph> {
+    for (const { value, artifact } of publications) if (!published.has(artifact.ref)) {
+      const result = await artifacts.publishCanonical(value, artifact.schemaKind);
+      if (canonicalSha256(result) !== canonicalSha256(artifact)) mismatch('candidate source publication differs from its retained plan');
+      published.add(artifact.ref);
+    }
+    return graph;
+  } };
 }

@@ -54,7 +54,9 @@ export type RunExecution = Readonly<{
   assertCurrentModelWorker(input: { runId: string; leaseEpoch: number; launchId: string; generationRef: string; workerIdentityDigest: string }): void;
   renewCurrentWorkerLease(): 'inactive' | 'unchanged' | 'renewed' | 'expired';
   executeCurrentTool(input: { expectedRunRevision: number }): Promise<Run>;
-  hasPendingToolCompletion(error?: unknown): boolean;
+  hasPendingCompletion(error?: unknown): boolean;
+  resumeCurrentCompletion(input: { expectedRunRevision: number }): Promise<Run>;
+  finishCurrentFinalTurn(input: { expectedRunRevision: number }): Promise<Run>;
   finishCurrentStop(input: { expectedRunRevision: number }): Promise<Run>;
   resumeCurrentRetirement(input: { expectedRunRevision: number }): Promise<Run>;
   recoverWorker(input: { expectedRunRevision: number }): Promise<Run>;
@@ -191,10 +193,10 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
   async function reobserveRetirement() {
     // An already received result still belongs to its original producer.
     // Closing forbids new work, not that exact producer's final death check.
-    const completingOriginalTool = closingTool !== undefined && toolPhase === 'received' &&
-      (closingTool.operation === pending || receivedTool !== undefined && closingTool.completion === receivedTool) &&
-      closingTool.worker === worker && closingTool.activeWorker === activeWorker;
-    if (((closed || isClosing()) && !completingOriginalTool) || !worker || !activeWorker) {
+    const completingOriginal = closingCompletion !== undefined && operationPhase === 'received' &&
+      (closingCompletion.operation === pending || receivedCompletion !== undefined && closingCompletion.completion === receivedCompletion) &&
+      closingCompletion.worker === worker && closingCompletion.activeWorker === activeWorker;
+    if (((closed || isClosing()) && !completingOriginal) || !worker || !activeWorker) {
       throw new KernelStorageError('LEASE_FENCED', 'native worker retirement scope is closing or unavailable');
     }
     assertActiveStateOwner(driver, owner);
@@ -228,9 +230,10 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
   let ownedLaunchId: string | undefined;
   let activeWorker: ActiveWorker | undefined;
   let stopJoin: Promise<void> | undefined;
-  let toolPhase: 'preparing' | 'claimed' | 'received' | undefined;
-  let receivedTool: { worker: LinuxBlockedWorker; activeWorker: ActiveWorker; finish(): Promise<Run>; failure?: unknown } | undefined;
-  let closingTool: { operation?: Promise<Run>; completion?: typeof receivedTool; worker: LinuxBlockedWorker; activeWorker: ActiveWorker } | undefined;
+  let operationPhase: 'preparing' | 'claimed' | 'received' | undefined;
+  let receivedCompletion: { kind: 'tool' | 'final_turn'; worker: LinuxBlockedWorker; activeWorker: ActiveWorker;
+    finish(): Promise<Run>; failure?: unknown } | undefined;
+  let closingCompletion: { operation?: Promise<Run>; completion?: typeof receivedCompletion; worker: LinuxBlockedWorker; activeWorker: ActiveWorker } | undefined;
   let retirementController: LinuxWorkerController | undefined;
   let preparation: PreparingWorkerLaunch | undefined, materialization: RunWorkspaceMaterialization | undefined;
   let workspaceBirth: RunWorkspaceBirth | undefined;
@@ -255,19 +258,19 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
   function beginClose(): Promise<void> {
     if (revoking) return revoking;
     closed = true;
-    if ((pending || receivedTool) && worker && activeWorker && (toolPhase === 'claimed' || toolPhase === 'received')) {
-      closingTool = { operation: pending, completion: receivedTool, worker, activeWorker };
+    if ((pending || receivedCompletion) && worker && activeWorker && (operationPhase === 'claimed' || operationPhase === 'received')) {
+      closingCompletion = { operation: pending, completion: receivedCompletion, worker, activeWorker };
     }
     // A claimed producer may still deliver its genuine result after native
     // revocation. Do not abort that result's Checkpoint/settlement path.
-    if (toolPhase !== 'claimed' && toolPhase !== 'received') operationAbort?.abort();
+    if (operationPhase !== 'claimed' && operationPhase !== 'received') operationAbort?.abort();
     const joins: Promise<unknown>[] = [];
     try { if (probe) joins.push(probe.task.cancelAndJoin()); }
     catch (error) { cleanupFailure ??= error; }
     // Idle model workers remain physically held until StateStore has joined
     // their original broker settlement. Pending executions must be revoked
     // now, including BIND/READY polls that do not consume the abort signal.
-    try { if (pending || receivedTool) joins.push(revokeOriginalWorker()); }
+    try { if (pending || receivedCompletion) joins.push(revokeOriginalWorker()); }
     catch (error) { cleanupFailure ??= error; }
     revoking = Promise.allSettled(joins).then(results => {
       const failed = results.find(result => result.status === 'rejected');
@@ -323,14 +326,14 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
     catch (failure) { cleanupFailure ??= failure; }
     if (cleanupFailure !== undefined) throw cleanupFailure;
   }
-  const revision = (value: { expectedRunRevision: number }, completingReceivedTool = false) => {
+  const revision = (value: { expectedRunRevision: number }, completingReceived = false) => {
     if (!exactKeys(value, ['expectedRunRevision']) || !Number.isSafeInteger(value.expectedRunRevision) || value.expectedRunRevision < 1) {
       throw new KernelStorageError('INVALID_REQUEST', 'execution requires one exact Run revision');
     }
     if (closed || isClosing()) throw new KernelStorageError('LEASE_FENCED', 'Run execution scope is closing or closed');
     if (cleanupFailure !== undefined) throw new KernelStorageError('RECOVERY_REQUIRED', 'Run execution scope has an unresolved retirement failure');
     if (pending) throw new KernelStorageError('REVISION_CONFLICT', 'Run execution already has an operation in flight');
-    if (receivedTool && !completingReceivedTool) throw new KernelStorageError('REVISION_CONFLICT', 'Run execution retains its original tool completion');
+    if (receivedCompletion && !completingReceived) throw new KernelStorageError('REVISION_CONFLICT', 'Run execution retains its original completion');
     if (readRun(driver, runId).revision !== value.expectedRunRevision) throw new KernelStorageError('REVISION_CONFLICT', 'Run execution revision changed');
     assertActiveStateOwner(driver, owner);
     return value.expectedRunRevision;
@@ -482,11 +485,11 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
     let retainedCompletion = false;
     const operation = work.catch(async error => {
       operationFailure = { error };
-      if (receivedTool && cleanupFailure === undefined && receivedTool.worker === worker && receivedTool.activeWorker === activeWorker &&
+      if (receivedCompletion && cleanupFailure === undefined && receivedCompletion.worker === worker && receivedCompletion.activeWorker === activeWorker &&
           (isJoinedCasPublicationFailure(error) || isRolledBackSqliteTransactionFailure(driver, error))) {
         // A known result is not UNKNOWN. Keep its exact physical owner and
         // unfinished immutable publications after positively joined I/O failure.
-        receivedTool.failure = error;
+        receivedCompletion.failure = error;
         retainedCompletion = true;
         throw error;
       }
@@ -542,9 +545,9 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         throw failure;
       } finally {
         if (!retainedCompletion) {
-          receivedTool = undefined;
-          if (closingTool?.operation === operation || closingTool?.completion !== undefined) closingTool = undefined;
-          toolPhase = undefined;
+          receivedCompletion = undefined;
+          if (closingCompletion?.operation === operation || closingCompletion?.completion !== undefined) closingCompletion = undefined;
+          operationPhase = undefined;
         }
         pending = undefined; if (operationAbort === abort) operationAbort = undefined;
       }
@@ -604,7 +607,13 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
     }
   }
   const execution: RunExecution = Object.freeze({
-    hasPendingToolCompletion: error => receivedTool !== undefined && (error === undefined || receivedTool.failure === error),
+    hasPendingCompletion: error => receivedCompletion !== undefined && (error === undefined || receivedCompletion.failure === error),
+    resumeCurrentCompletion: async value => {
+      revision(value, true);
+      if (!receivedCompletion) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'Run execution has no original completion to resume');
+      const abort = new AbortController(); operationAbort = abort;
+      return ownOperation(receivedCompletion.finish(), abort);
+    },
     requestStop: () => {
       const current = readRun(driver, runId);
       assertActiveStateOwner(driver, owner);
@@ -613,7 +622,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       // Inspections are authority reducing and retain their own original join.
       // A stop must not cancel the very proof needed to close that wait.
       if (probe && current.status === 'waiting' && current.waitingOnRef === probe.run.waitingOnRef) return Promise.resolve();
-      if (toolPhase !== 'claimed' && toolPhase !== 'received') operationAbort?.abort();
+      if (operationPhase !== 'claimed' && operationPhase !== 'received') operationAbort?.abort();
       // close enters irreversible native channel revocation synchronously,
       // before the control request can acknowledge its durable intent.
       return revokeOriginalWorker();
@@ -621,7 +630,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
     renewCurrentWorkerLease: () => {
       // An operation in flight owns its current lease. Maintenance cannot
       // race its native activation, revocation or Checkpoint transition.
-      if (closed || isClosing() || pending || receivedTool || !activeWorker || !worker || !generation || !controller || !reservation) return 'inactive';
+      if (closed || isClosing() || pending || receivedCompletion || !activeWorker || !worker || !generation || !controller || !reservation) return 'inactive';
       if (cleanupFailure !== undefined) throw new KernelStorageError('RECOVERY_REQUIRED', 'worker maintenance retains a resource retirement failure');
       const retained = activeWorker, run = readRun(driver, runId);
       if (run.status !== 'running' || run.cancelRequested || run.stopIntentRef !== undefined || run.activeWorkerLaunchId === undefined) return 'inactive';
@@ -650,7 +659,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
     assertCurrentModelWorker: value => {
       if (!exactKeys(value, ['runId', 'leaseEpoch', 'launchId', 'generationRef', 'workerIdentityDigest']) ||
           value.runId !== runId || !Number.isSafeInteger(value.leaseEpoch) || value.leaseEpoch < 1 ||
-          closed || isClosing() || cleanupFailure !== undefined || pending || receivedTool || !activeWorker || !worker || !generation || !controller || !reservation ||
+          closed || isClosing() || cleanupFailure !== undefined || pending || receivedCompletion || !activeWorker || !worker || !generation || !controller || !reservation ||
           value.launchId !== ownedLaunchId || value.launchId !== activeWorker.activated.launch.launchId ||
           value.generationRef !== activeWorker.authority.generationRef || value.workerIdentityDigest !== activeWorker.activated.launch.workerIdentityDigest) {
         throw new KernelStorageError('LEASE_FENCED', 'model release does not name this execution owner\'s original physical worker');
@@ -689,13 +698,60 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       })();
       return ownOperation(work, abort, true);
     },
+    finishCurrentFinalTurn: async value => {
+      const expectedRunRevision = revision(value, true);
+      if (receivedCompletion?.kind === 'tool') throw new KernelStorageError('REVISION_CONFLICT', 'a tool result cannot become a final-turn completion');
+      const abort = new AbortController(); operationAbort = abort;
+      if (receivedCompletion) return ownOperation(receivedCompletion.finish(), abort);
+      const signal = abort.signal;
+      operationPhase = 'preparing';
+      const work = (async () => {
+        signal.throwIfAborted();
+        if (!activeWorker || !worker || !generation || !controller || !reservation ||
+            ownedLaunchId !== activeWorker.activated.launch.launchId) {
+          throw new KernelStorageError('RECOVERY_REQUIRED', 'final turn requires its original physical worker owner');
+        }
+        const current = activeWorker, currentWorker = worker;
+        // Fix the completed producer before the first quiescence or immutable
+        // publication. This is not permission to request another model turn.
+        const candidate = await agent.beginFinalCandidate({ expectedRunRevision });
+        signal.throwIfAborted();
+        const retire = checkpointRetirement(current, candidate.checkpointId, signal);
+        let proof: Awaited<ReturnType<typeof retire>> | undefined;
+        operationPhase = 'received';
+        receivedCompletion = { kind: 'final_turn', worker: currentWorker, activeWorker: current, finish: async () => {
+          if (activeWorker !== current || worker !== currentWorker || ownedLaunchId !== current.activated.launch.launchId) {
+            throw new KernelStorageError('LEASE_FENCED', 'final-turn completion lost its original physical owner');
+          }
+          assertActiveStateOwner(driver, owner);
+          proof ??= await retire();
+          for (let completion = 0; ; completion++) {
+            const selected = readRun(driver, runId);
+            if (selected.activeWorkerLaunchId !== ownedLaunchId || selected.leaseEpoch !== current.activated.launch.leaseEpoch) {
+              throw new KernelStorageError('LEASE_FENCED', 'final turn no longer belongs to its original active worker');
+            }
+            try {
+              return (await candidate.complete({ expectedRunRevision: selected.revision, checkpoint: proof.postEffect })).run;
+            } catch (error) {
+              if (!(error instanceof KernelStorageError) || error.code !== 'REVISION_CONFLICT' || completion >= 7 ||
+                  readRun(driver, runId).revision === selected.revision) throw error;
+            }
+          }
+        } };
+        if (closingCompletion?.worker === currentWorker && closingCompletion.activeWorker === current)
+          closingCompletion.completion = receivedCompletion;
+        return receivedCompletion.finish();
+      })();
+      return ownOperation(work, abort);
+    },
     executeCurrentTool: async value => {
       const expectedRunRevision = revision(value, true);
+      if (receivedCompletion?.kind === 'final_turn') throw new KernelStorageError('REVISION_CONFLICT', 'a final turn cannot become another tool execution');
       const abort = new AbortController();
       operationAbort = abort;
-      if (receivedTool) return ownOperation(receivedTool.finish(), abort);
+      if (receivedCompletion) return ownOperation(receivedCompletion.finish(), abort);
       const signal = abort.signal;
-      toolPhase = 'preparing';
+      operationPhase = 'preparing';
       let claimedTool: Awaited<ReturnType<typeof agent.claimTool>> | undefined;
       const work = (async () => {
         signal.throwIfAborted();
@@ -755,7 +811,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         const claimed = await agent.claimTool({ expectedRunRevision: prepared.run.revision, leaseEpoch: activated.run.leaseEpoch,
           opId: prepared.entry.opId, attempt: prepared.entry.attempt, dispatchId, sandboxLaunchSpecRef });
         claimedTool = claimed;
-        toolPhase = 'claimed';
+        operationPhase = 'claimed';
         const call = await artifacts.readCanonical<import('../protocol/agent-ir.js').ToolCallInputV1>(claimed.request.inputRef);
         const grant = await artifacts.readCanonical<import('../kernel/tool-authorization.js').ToolOperationGrantV1>(claimed.entry.grantRef!);
         const live = assertLiveDispatchState(driver, owner, runId, prepared.run.revision, activated.run.leaseEpoch, sampleCanonicalNow());
@@ -766,7 +822,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         signal.throwIfAborted();
         await claimed.release(invocation);
         const result = await invocation.result();
-        toolPhase = 'received';
+        operationPhase = 'received';
         const observedAt = sampleCanonicalNow();
         // Register the original result before the first post-effect await.
         // This closure owns only that result's persistence, never a new dispatch.
@@ -775,7 +831,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         let diagnostic: Awaited<ReturnType<ArtifactCatalog['publishCanonical']>> | undefined;
         let observation: ToolObservationV1 | undefined;
         let observationRef: string | undefined;
-        receivedTool = { worker: currentWorker, activeWorker: current, finish: async () => {
+        receivedCompletion = { kind: 'tool', worker: currentWorker, activeWorker: current, finish: async () => {
           if (activeWorker !== current || worker !== currentWorker || ownedLaunchId !== activated.launch.launchId) {
             throw new KernelStorageError('LEASE_FENCED', 'received tool completion lost its original physical owner');
           }
@@ -814,10 +870,10 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           }
           return readRun(driver, runId);
         } };
-        if (closingTool?.worker === currentWorker && closingTool.activeWorker === current) closingTool.completion = receivedTool;
-        return receivedTool.finish();
+        if (closingCompletion?.worker === currentWorker && closingCompletion.activeWorker === current) closingCompletion.completion = receivedCompletion;
+        return receivedCompletion.finish();
       })().catch(async error => {
-        if (claimedTool && toolPhase !== 'received') {
+        if (claimedTool && operationPhase !== 'received') {
           // A permanent claim is possibly dispatched even when cancellation
           // wins before the blocked child/RELEASE handshake. Join the actual
           // producer, preserve uncertainty and charge once; only the separate
@@ -1111,12 +1167,12 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       const joins = await Promise.allSettled([revoked, ...(pending ? [pending.catch(() => {})] : [])]);
       const failure = joins.find(result => result.status === 'rejected');
       if (failure?.status === 'rejected') cleanupFailure ??= failure.reason;
-      if (receivedTool) {
+      if (receivedCompletion) {
         // Close cannot turn a received result into recovery or release its
         // image owner while its exact durable completion remains unfinished.
         const abort = new AbortController();
         operationAbort = abort;
-        await ownOperation(receivedTool.finish(), abort);
+        await ownOperation(receivedCompletion.finish(), abort);
       }
       if (activeWorker) {
         try {

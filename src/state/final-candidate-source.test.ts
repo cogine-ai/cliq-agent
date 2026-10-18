@@ -62,7 +62,8 @@ async function completeFinalTurn(fixture: Fixture) {
     expectedRunRevision: prepared.run.revision, result: reader.finish(sampleCanonicalNow(), fixture.agent.resolveToolInput) });
   assert.equal(completed.disposition, 'candidate_required');
   const producerId = identityHash('cliq-model-turn-item-v1', fixture.runId, prepared.entry.opId, String(prepared.entry.attempt));
-  return { completed, checkpointId: identityHash('cliq-final-candidate-checkpoint-v1', fixture.runId, producerId) };
+  const owner = await fixture.agent.beginFinalCandidate({ expectedRunRevision: completed.run.revision });
+  return { completed, owner, checkpointId: owner.checkpointId };
 }
 
 async function file(fixture: Fixture, path: string, bytes: string | Buffer): Promise<WorkspaceEntry> {
@@ -105,9 +106,9 @@ async function candidateGraph(fixture: Fixture) {
 test('an unchanged retained workspace publishes an exact empty candidate diff and reuses its entry object', async () => {
   const fixture = await sourceFixture('candidate-source-empty');
   try {
-    const { completed, checkpointId } = await completeFinalTurn(fixture);
+    const { completed, owner, checkpointId } = await completeFinalTurn(fixture);
     const checkpoint = await sourceProof(fixture, checkpointId, []);
-    await fixture.agent.prepareFinalCandidate({ expectedRunRevision: completed.run.revision, checkpoint });
+    await owner.complete({ expectedRunRevision: completed.run.revision, checkpoint });
     const graph = await candidateGraph(fixture);
     const base = await fixture.store.artifacts.readCanonical<SourceManifest>(graph.candidate.baseSourceRef);
     assert.deepEqual(graph.diff.operations, []);
@@ -153,10 +154,10 @@ test('an ordinary source file can share bytes with a retained structured artifac
       assert.equal(sha256Bytes(await fixture.store.artifacts.readBytes(blobRef)), blobRef);
     }
     await assertSharedBytes();
-    const { completed, checkpointId } = await completeFinalTurn(fixture);
+    const { completed, owner, checkpointId } = await completeFinalTurn(fixture);
     const checkpoint = await sourceProof(fixture, checkpointId, [entry]);
     await assertSharedBytes();
-    await fixture.agent.prepareFinalCandidate({ expectedRunRevision: completed.run.revision, checkpoint });
+    await owner.complete({ expectedRunRevision: completed.run.revision, checkpoint });
     const graph = await candidateGraph(fixture);
     assert.deepEqual(graph.entries.entries, [entry]);
     assert.deepEqual(graph.diff.operations.map(operation => [operation.kind, operation.path]), [['add', 'rules-copy.json']]);
@@ -190,10 +191,10 @@ test('a file cannot reuse a real retained artifact ref with a different declared
     const original = await fixture.store.artifacts.readBytes(projection.frozenIgnoreRulesRef);
     const entry: WorkspaceEntry = { kind: 'file', path: 'wrong-size.json', mode: 0o644,
       blobRef: projection.frozenIgnoreRulesRef, size: original.byteLength + 1 };
-    const { completed, checkpointId } = await completeFinalTurn(fixture);
+    const { completed, owner, checkpointId } = await completeFinalTurn(fixture);
     const checkpoint = await sourceProof(fixture, checkpointId, [entry]);
     const before = await fixture.store.readRecoveryClosure(fixture.runId);
-    await assert.rejects(fixture.agent.prepareFinalCandidate({ expectedRunRevision: completed.run.revision, checkpoint }), /unexpected byte count/);
+    await assert.rejects(owner.complete({ expectedRunRevision: completed.run.revision, checkpoint }), /unexpected byte count/);
     assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
     assert.deepEqual(await fixture.store.artifacts.readBytes(projection.frozenIgnoreRulesRef), original);
   } finally { await disposeFixture(fixture); }
@@ -207,9 +208,9 @@ test('new directories, binary files and a safe Unicode symlink retain one byte-o
       { kind: 'symlink', path: 'link', mode: 0o777, target, targetDigest: sha256Bytes(Buffer.from(target)) },
       { kind: 'directory', path: 'empty', mode: 0o755 }, await file(fixture, 'a/é.txt', '你好'),
       { kind: 'directory', path: 'a', mode: 0o755 }, await file(fixture, 'Z', 'Z')];
-    const { completed, checkpointId } = await completeFinalTurn(fixture);
+    const { completed, owner, checkpointId } = await completeFinalTurn(fixture);
     const checkpoint = await sourceProof(fixture, checkpointId, values);
-    await fixture.agent.prepareFinalCandidate({ expectedRunRevision: completed.run.revision, checkpoint });
+    await owner.complete({ expectedRunRevision: completed.run.revision, checkpoint });
     const graph = await candidateGraph(fixture);
     assert.deepEqual(graph.diff.operations.map(operation => [operation.kind, operation.path]),
       [['add', 'Z'], ['add', 'a'], ['add', 'a/é.txt'], ['add', 'empty'], ['add', 'link'], ['add', 'ä']]);
@@ -228,10 +229,10 @@ test('new directories, binary files and a safe Unicode symlink retain one byte-o
 test('zero frozen changed paths rejects a new file without installing a candidate or altering its cut', async () => {
   const fixture = await sourceFixture('candidate-source-zero-paths', { maxChangedPaths: 0 });
   try {
-    const { completed, checkpointId } = await completeFinalTurn(fixture);
+    const { completed, owner, checkpointId } = await completeFinalTurn(fixture);
     const checkpoint = await sourceProof(fixture, checkpointId, [await file(fixture, 'new', 'x')]);
     const before = await fixture.store.readRecoveryClosure(fixture.runId);
-    await assert.rejects(fixture.agent.prepareFinalCandidate({ expectedRunRevision: completed.run.revision, checkpoint }),
+    await assert.rejects(owner.complete({ expectedRunRevision: completed.run.revision, checkpoint }),
       error => error instanceof CandidateSourceLimitError && error.reason === 'changed_paths' && error.observed === 1 && error.limit === 0);
     assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
     assert.equal(before.items.length, 1); assert.equal(before.run.resultRef, undefined);
@@ -242,7 +243,7 @@ test('the frozen changed-byte ceiling accepts its exact UTF-8 size and rejects o
   for (const limit of [2, 1]) await t.test(`a two-byte character with a ${limit}-byte ceiling`, async () => {
     const fixture = await sourceFixture(`candidate-source-bytes-${limit}`, { maxChangedBytes: limit });
     try {
-      const { completed, checkpointId } = await completeFinalTurn(fixture);
+      const { completed, owner, checkpointId } = await completeFinalTurn(fixture);
       const entry = await file(fixture, 'text', 'é');
       assert.equal(entry.kind, 'file');
       if (entry.kind !== 'file') throw new Error('source byte test requires a regular file');
@@ -250,12 +251,12 @@ test('the frozen changed-byte ceiling accepts its exact UTF-8 size and rejects o
       const checkpoint = await sourceProof(fixture, checkpointId, [entry]);
       const before = await fixture.store.readRecoveryClosure(fixture.runId);
       if (limit === 2) {
-        await fixture.agent.prepareFinalCandidate({ expectedRunRevision: completed.run.revision, checkpoint });
+        await owner.complete({ expectedRunRevision: completed.run.revision, checkpoint });
         const graph = await candidateGraph(fixture);
         assert.deepEqual(graph.diff.operations, [{ kind: 'add', path: 'text', after: entry }]);
         assert.equal(graph.entries.byteCount, 2);
       } else {
-        await assert.rejects(fixture.agent.prepareFinalCandidate({ expectedRunRevision: completed.run.revision, checkpoint }),
+        await assert.rejects(owner.complete({ expectedRunRevision: completed.run.revision, checkpoint }),
           error => error instanceof CandidateSourceLimitError && error.reason === 'changed_bytes' && error.observed === 2 && error.limit === 1);
         assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
       }
@@ -271,10 +272,10 @@ test('unsafe symlink lookup and a missing directory cannot become a candidate so
         ? [await file(fixture, 'absent/file', 'x')]
         : (kind === 'escape' ? [['link', '../outside']] : [['a', 'b'], ['b', 'a']]).map(([path, target]) =>
           ({ kind: 'symlink', path, mode: 0o777, target, targetDigest: sha256Bytes(Buffer.from(target)) }));
-      const { completed, checkpointId } = await completeFinalTurn(fixture);
+      const { completed, owner, checkpointId } = await completeFinalTurn(fixture);
       const checkpoint = await sourceProof(fixture, checkpointId, values);
       const before = await fixture.store.readRecoveryClosure(fixture.runId);
-      await assert.rejects(fixture.agent.prepareFinalCandidate({ expectedRunRevision: completed.run.revision, checkpoint }),
+      await assert.rejects(owner.complete({ expectedRunRevision: completed.run.revision, checkpoint }),
         { code: 'ARTIFACT_MISMATCH' });
       assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
       assert.equal(before.items.length, 1); assert.equal(before.run.resultRef, undefined);
@@ -288,9 +289,9 @@ test('a frozen subtree exclude stays outside result and diff without hiding a sa
     const values: WorkspaceEntry[] = [{ kind: 'directory', path: 'cache', mode: 0o755 },
       await file(fixture, 'cache/hidden', 'excluded payload'), { kind: 'directory', path: 'cache2', mode: 0o755 },
       await file(fixture, 'cache2/keep', 'visible'), await file(fixture, 'keep', 'kept')];
-    const { completed, checkpointId } = await completeFinalTurn(fixture);
+    const { completed, owner, checkpointId } = await completeFinalTurn(fixture);
     const checkpoint = await sourceProof(fixture, checkpointId, values);
-    await fixture.agent.prepareFinalCandidate({ expectedRunRevision: completed.run.revision, checkpoint });
+    await owner.complete({ expectedRunRevision: completed.run.revision, checkpoint });
     const graph = await candidateGraph(fixture);
     assert.deepEqual(graph.entries.entries.map(entry => entry.path), ['cache2', 'cache2/keep', 'keep']);
     assert.deepEqual(graph.diff.operations.map(operation => [operation.kind, operation.path]),

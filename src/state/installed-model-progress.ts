@@ -11,9 +11,14 @@ export type InstalledModelProgress = Readonly<{
 
 /** Scheduling only, never permission to create/claim a model invocation. The
  * owner validates its cut; an automatic wake also needs its original hint. */
-export function selectInstalledModelProgress(attempt: InstalledModelProgress | undefined): 'prepare' | 'retry' | 'stop' | 'retain' {
+export function selectInstalledModelProgress(attempt: InstalledModelProgress | undefined): 'prepare' | 'retry' | 'candidate' | 'stop' | 'retain' {
   if (!attempt) return 'prepare';
-  if (attempt.phase === 'completed') return attempt.disposition === 'stop_required' ? 'stop' : 'retain';
+  if (attempt.phase === 'completed') {
+    if (attempt.disposition === 'stop_required') return 'stop';
+    if (attempt.disposition === 'candidate_required' && attempt.hasDispatchClaim && attempt.hasSettlement && attempt.retry === 'completed')
+      return 'candidate';
+    return 'retain';
+  }
   if (attempt.phase === 'failed' && !attempt.hasDispatchClaim && attempt.hasSettlement && attempt.retry === 'ready') return 'retry';
   return 'retain';
 }

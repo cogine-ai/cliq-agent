@@ -30,18 +30,19 @@ async function completeFinalTurn(fixture: Fixture) {
     expectedRunRevision: prepared.run.revision, result: reader.finish(sampleCanonicalNow(), fixture.agent.resolveToolInput) });
   assert.equal(completed.disposition, 'candidate_required');
   const producerId = identityHash('cliq-model-turn-item-v1', fixture.runId, prepared.entry.opId, String(prepared.entry.attempt));
-  return { completed, checkpointId: identityHash('cliq-final-candidate-checkpoint-v1', fixture.runId, producerId) };
+  const owner = await fixture.agent.beginFinalCandidate({ expectedRunRevision: completed.run.revision });
+  return { completed, owner, checkpointId: owner.checkpointId };
 }
 
 test('a complete model turn cannot publish a candidate while its owning worker remains writable', async () => {
   const fixture = await createAgentFixture('candidate-still-writable');
   try {
-    const { completed } = await completeFinalTurn(fixture);
+    const { completed, owner } = await completeFinalTurn(fixture);
     const before = await fixture.store.readRecoveryClosure(fixture.runId);
     assert.equal(before.workerLaunches[0]!.generationWriteState, 'active');
     // All refs name retained data, but none is a worker snapshot/death proof.
     const workspaceStateRef = before.latestCheckpoint.workspaceStateRef;
-    await assert.rejects(fixture.agent.prepareFinalCandidate({ expectedRunRevision: completed.run.revision,
+    await assert.rejects(owner.complete({ expectedRunRevision: completed.run.revision,
       checkpoint: { workspaceStateRef, snapshotEvidenceRef: workspaceStateRef, retirementEvidenceRef: workspaceStateRef } }));
     assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
   } finally { await disposeFixture(fixture); }
@@ -50,13 +51,13 @@ test('a complete model turn cannot publish a candidate while its owning worker r
 test('a candidate refuses a substituted checkpoint identity or a foreign Run workspace without changing its cut', async () => {
   const fixture = await createAgentFixture('candidate-foreign-proof');
   try {
-    const { completed, checkpointId } = await completeFinalTurn(fixture);
+    const { completed, owner, checkpointId } = await completeFinalTurn(fixture);
     const proof = await quiescedToolCheckpoint(fixture, checkpointId, true);
     const before = await fixture.store.readRecoveryClosure(fixture.runId);
     const wrongCheckpoint = { ...proof.snapshot, checkpointId: 'another-candidate-checkpoint', evidenceDigest: '' };
     wrongCheckpoint.evidenceDigest = digestOmitting(wrongCheckpoint, 'evidenceDigest');
     const wrongSnapshotRef = (await fixture.store.artifacts.publishCanonical(wrongCheckpoint, wrongCheckpoint.format)).ref;
-    await assert.rejects(fixture.agent.prepareFinalCandidate({ expectedRunRevision: completed.run.revision,
+    await assert.rejects(owner.complete({ expectedRunRevision: completed.run.revision,
       checkpoint: { ...proof.checkpoint, snapshotEvidenceRef: wrongSnapshotRef } }));
     assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
 
@@ -67,7 +68,7 @@ test('a candidate refuses a substituted checkpoint identity or a foreign Run wor
     const foreignSnapshot = { ...proof.snapshot, workspaceStateRef, workspaceStateDigest: foreignWorkspace.stateDigest, evidenceDigest: '' };
     foreignSnapshot.evidenceDigest = digestOmitting(foreignSnapshot, 'evidenceDigest');
     const snapshotEvidenceRef = (await fixture.store.artifacts.publishCanonical(foreignSnapshot, foreignSnapshot.format)).ref;
-    await assert.rejects(fixture.agent.prepareFinalCandidate({ expectedRunRevision: completed.run.revision,
+    await assert.rejects(owner.complete({ expectedRunRevision: completed.run.revision,
       checkpoint: { ...proof.checkpoint, workspaceStateRef, snapshotEvidenceRef } }));
     assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
   } finally { await disposeFixture(fixture); }
@@ -76,10 +77,10 @@ test('a candidate refuses a substituted checkpoint identity or a foreign Run wor
 test('a candidate cannot consume a valid worker seal at a stale Run revision', async () => {
   const fixture = await createAgentFixture('candidate-stale-revision');
   try {
-    const { completed, checkpointId } = await completeFinalTurn(fixture);
+    const { completed, owner, checkpointId } = await completeFinalTurn(fixture);
     const proof = await quiescedToolCheckpoint(fixture, checkpointId, true);
     const before = await fixture.store.readRecoveryClosure(fixture.runId);
-    await assert.rejects(fixture.agent.prepareFinalCandidate({ expectedRunRevision: completed.run.revision - 1,
+    await assert.rejects(owner.complete({ expectedRunRevision: completed.run.revision - 1,
       checkpoint: proof.checkpoint }), { code: 'REVISION_CONFLICT' });
     assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
   } finally { await disposeFixture(fixture); }
@@ -88,14 +89,14 @@ test('a candidate cannot consume a valid worker seal at a stale Run revision', a
 test('a committed cancellation wins over a previously completed final model turn and valid candidate seal', async () => {
   const fixture = await createAgentFixture('candidate-cancel-wins');
   try {
-    const { completed, checkpointId } = await completeFinalTurn(fixture);
+    const { completed, owner, checkpointId } = await completeFinalTurn(fixture);
     const proof = await quiescedToolCheckpoint(fixture, checkpointId, true);
     const stopped = await fixture.agent.cancelRun({ ...await publishInProcessChannel(fixture.store),
       requestId: uuidv7(), expectedRunRevision: completed.run.revision });
     assert.ok(stopped.run.stopIntentRef);
     assert.equal(stopped.run.cancelRequested, true);
     const before = await fixture.store.readRecoveryClosure(fixture.runId);
-    await assert.rejects(fixture.agent.prepareFinalCandidate({ expectedRunRevision: stopped.run.revision,
+    await assert.rejects(owner.complete({ expectedRunRevision: stopped.run.revision,
       checkpoint: proof.checkpoint }));
     assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
     assert.equal(fixture.store.getRun(fixture.runId).stopIntentRef, stopped.run.stopIntentRef);
@@ -107,9 +108,9 @@ test('reopened recovery independently rejects an alternate candidate summary eve
   let writer: ReturnType<typeof openSqliteDriver> | undefined;
   let restore: (() => void) | undefined;
   try {
-    const { completed, checkpointId } = await completeFinalTurn(fixture);
+    const { completed, owner, checkpointId } = await completeFinalTurn(fixture);
     const proof = await quiescedToolCheckpoint(fixture, checkpointId, true);
-    const accepted = await fixture.agent.prepareFinalCandidate({ expectedRunRevision: completed.run.revision,
+    const accepted = await owner.complete({ expectedRunRevision: completed.run.revision,
       checkpoint: proof.checkpoint });
     const original = await fixture.store.readRecoveryClosure(fixture.runId);
     assert.equal(original.run.status, 'queued');
@@ -261,10 +262,10 @@ test('a candidate rejects unsupported nonempty verifiers rather than accepting a
       ...await activateFixtureWorker({ ...fixture, runId: admitted.run.id }, 'candidate-nonempty-verifier-worker') };
     target.agent = await fixture.store.loadAgentRun({ runId: target.runId, material: fixture.authority.material,
       releaseKeys: fixture.signed.releaseKeys });
-    const { completed, checkpointId } = await completeFinalTurn(target);
+    const { completed, owner, checkpointId } = await completeFinalTurn(target);
     const proof = await quiescedToolCheckpoint(target, checkpointId, true);
     const before = await fixture.store.readRecoveryClosure(target.runId);
-    await assert.rejects(target.agent.prepareFinalCandidate({ expectedRunRevision: completed.run.revision,
+    await assert.rejects(owner.complete({ expectedRunRevision: completed.run.revision,
       checkpoint: proof.checkpoint }), { code: 'STATE_TRANSITION_INVALID' });
     assert.deepEqual(await fixture.store.readRecoveryClosure(target.runId), before);
   } finally { await disposeFixture(fixture); }

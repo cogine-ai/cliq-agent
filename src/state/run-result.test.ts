@@ -28,9 +28,10 @@ async function candidate(fixture: Fixture) {
     expectedRunRevision: prepared.run.revision, result: reader.finish(sampleCanonicalNow(), fixture.agent.resolveToolInput) });
   assert.equal(completed.disposition, 'candidate_required');
   const producerId = identityHash('cliq-model-turn-item-v1', fixture.runId, prepared.entry.opId, String(prepared.entry.attempt));
+  const owner = await fixture.agent.beginFinalCandidate({ expectedRunRevision: completed.run.revision });
   const proof = await quiescedToolCheckpoint(fixture,
     identityHash('cliq-final-candidate-checkpoint-v1', fixture.runId, producerId), true);
-  return fixture.agent.prepareFinalCandidate({ expectedRunRevision: completed.run.revision, checkpoint: proof.checkpoint });
+  return owner.complete({ expectedRunRevision: completed.run.revision, checkpoint: proof.checkpoint });
 }
 async function reopen(fixture: Fixture) {
   await fixture.store.close();

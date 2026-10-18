@@ -252,7 +252,8 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
   }, reobserve, installedRuntime);
   return Object.freeze({
     ...toolContinuation,
-    ...loadFinalCandidate(driver, artifacts, owner, { run: admittedRun, spec, assembly, resolveToolInput }, reobserve),
+    ...loadFinalCandidate(driver, artifacts, owner, { run: admittedRun, spec, assembly, resolveToolInput,
+      expireRun: toolContinuation.expireRun }, reobserve),
     ...loadRunResult(driver, artifacts, owner, { run: admittedRun, spec, principalId: readSessionPrincipalId(driver, admittedRun.sessionId) }),
     model,
     resolveToolInput,

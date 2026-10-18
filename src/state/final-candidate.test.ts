@@ -24,9 +24,10 @@ test('a complete final turn becomes one exact-source candidate only after its ow
       expectedRunRevision: prepared.run.revision, result: reader.finish(sampleCanonicalNow(), fixture.agent.resolveToolInput) });
     assert.equal(completed.disposition, 'candidate_required');
     const producerId = identityHash('cliq-model-turn-item-v1', fixture.runId, prepared.entry.opId, String(prepared.entry.attempt));
+    const owner = await fixture.agent.beginFinalCandidate({ expectedRunRevision: completed.run.revision });
     const proof = await quiescedToolCheckpoint(fixture,
       identityHash('cliq-final-candidate-checkpoint-v1', fixture.runId, producerId), true);
-    const result = await fixture.agent.prepareFinalCandidate({ expectedRunRevision: completed.run.revision, checkpoint: proof.checkpoint });
+    const result = await owner.complete({ expectedRunRevision: completed.run.revision, checkpoint: proof.checkpoint });
     assert.equal(result.run.status, 'queued'); assert.equal(result.run.nextStep, 'verify');
     assert.equal(result.run.activeWorkerLaunchId, undefined); assert.equal(result.run.resultRef, undefined);
     const cut = await fixture.store.readRecoveryClosure(fixture.runId);

@@ -5987,6 +5987,22 @@ and tool effects are never rebuilt or replayed. An unrelated Run advancing
 the global time fence does not invalidate immutable preparation; an exact
 prepared cut change rejects it. A cold StateStore command has no refresh
 capability and must supply valid current canonical evidence or refuse.
+The original in-memory completion owner may revalidate a strictly monotonic
+StopIntent-only revision change, including its complete retained authority and
+precedence, without rebuilding its prepared seal or resetting the three-attempt
+budget. Every other Run field, original Checkpoint, Journal, item, launch and
+generation cut remains exact. When this happens before final-candidate commit,
+the same owner may only seal the already-accounted workspace at the original
+snapshot's Checkpoint id, preserving the original context and agent frontier
+and appending no candidate. It retains the winning StopIntent/cancel fields;
+deadline must first persist its ordinary StopIntent. D0/S may precede that
+intent because the original containment is already irreversibly dead; D1/C
+ordering and freshness are unchanged. The existing worker-free terminal-stop
+transaction then writes its separate stop Checkpoint and Session outcome.
+This is not candidate/verification/result authority after stop, a cold-owner
+adoption capability, or a seal-only branch for ordinary Supervisor shutdown
+without a StopIntent. Unreachable CAS objects published before stop won remain
+ordinary retained orphans, never registered candidates or success evidence.
 Uncertain death, exhausted freshness, owner/cut loss or clock regression
 publishes no completion, ready Checkpoint or charge. This does not promise
 success under arbitrary disk blocking, nor freshness at the unknowable future

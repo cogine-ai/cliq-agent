@@ -1884,7 +1884,7 @@ export class StateStore {
           }
         }
         run = readRun(this.driver, id);
-        if (this.loadedExecutionScopes.get(id)?.execution.hasPendingToolCompletion() ||
+        if (this.loadedExecutionScopes.get(id)?.execution.hasPendingCompletion() ||
             run.stopIntentRef || run.status === 'waiting' && run.waitingReason === 'reconciliation' ||
             run.status === 'queued' && !this.installedRunFailures.has(id)) this.scheduleInstalledRun(id);
         else if (run.status === 'running' && run.nextStep === 'agent' &&
@@ -2006,17 +2006,18 @@ export class StateStore {
     const spec = decodeRunSpec(await this.artifacts.readCanonical(run.specRef));
     const material = await loadInstalledRunMaterial({ selected: this.installedRuntime!, artifacts: this.artifacts, assemblyRef: spec.assemblyRef });
     const opening = this.executions.get(runId);
-    const execution = opening ? (await opening).execution : await this.loadRunExecution({ runId, material });
+    let execution = opening ? (await opening).execution : undefined;
+    const nativeExecution = async () => execution ??= await this.loadRunExecution({ runId, material });
     const agent = await this.retainInstalledAgent(runId, material);
     let predecessorWorker = !opening && run.status === 'running' && run.activeWorkerLaunchId !== undefined;
     for (;;) {
       if (!this.supportsInstalledRuns()) return;
       let current = readRun(this.driver, runId);
       if (!['queued', 'running', 'waiting'].includes(current.status)) return;
-      if (execution.hasPendingToolCompletion()) {
+      if (execution?.hasPendingCompletion()) {
         const failure = this.installedRunFailures.get(runId);
-        const completingFailure = execution.hasPendingToolCompletion(failure);
-        await execution.executeCurrentTool({ expectedRunRevision: current.revision });
+        const completingFailure = execution.hasPendingCompletion(failure);
+        await execution.resumeCurrentCompletion({ expectedRunRevision: current.revision });
         if (completingFailure && this.installedRunFailures.get(runId) === failure) this.installedRunFailures.delete(runId);
         continue;
       }
@@ -2030,21 +2031,38 @@ export class StateStore {
       }
       if (predecessorWorker && current.status === 'running' && current.activeWorkerLaunchId) {
         predecessorWorker = false;
-        current = await execution.recoverWorker({ expectedRunRevision: current.revision });
+        current = await (await nativeExecution()).recoverWorker({ expectedRunRevision: current.revision });
       }
       if (current.status === 'waiting' && current.waitingReason === 'reconciliation' && current.waitingOnRef) {
         const wait = await this.artifacts.readCanonical<import('../kernel/types.js').WorkerDeathWait>(current.waitingOnRef);
         if (wait.subject?.kind !== 'worker_death') return;
-        current = await execution.recoverWorker({ expectedRunRevision: current.revision });
+        current = await (await nativeExecution()).recoverWorker({ expectedRunRevision: current.revision });
       }
       if (current.status === 'waiting') return;
-      if (current.status === 'queued') current = await execution.resumeCurrentRetirement({ expectedRunRevision: current.revision });
+      if (current.status === 'queued' && (execution || this.driver.prepare(
+        "SELECT 1 FROM workspace_generations WHERE run_id = ? AND phase = 'quarantined' LIMIT 1").get(runId))) {
+        current = await (await nativeExecution()).resumeCurrentRetirement({ expectedRunRevision: current.revision });
+      }
+      if (sampleCanonicalNow() >= current.deadlineAt && !current.stopIntentRef) {
+        current = (await agent.expireRun({ expectedRunRevision: current.revision })).run;
+        this.requestInstalledRunStop(runId);
+      }
       if (current.cancelRequested || current.stopIntentRef) {
-        await execution.finishCurrentStop({ expectedRunRevision: current.revision }); return;
+        if (execution || current.activeWorkerLaunchId) await (await nativeExecution()).finishCurrentStop({ expectedRunRevision: current.revision });
+        else await agent.commitTerminalStop({ expectedRunRevision: current.revision });
+        return;
+      }
+      // A sealed candidate has no productive worker. Closure and result
+      // transactions neither borrow launcher images nor compete for that slot.
+      if (current.nextStep === 'verify') {
+        await agent.completeVerification({ expectedRunRevision: current.revision }); continue;
+      }
+      if (current.nextStep === 'finalize') {
+        await agent.commitRunResult({ expectedRunRevision: current.revision }); continue;
       }
       if (current.status === 'queued' && !this.installedWorkerSlotAvailable(runId)) return;
       if (current.nextStep === 'tool') {
-        await execution.executeCurrentTool({ expectedRunRevision: current.revision }); continue;
+        await (await nativeExecution()).executeCurrentTool({ expectedRunRevision: current.revision }); continue;
       }
       if (current.nextStep !== 'agent') return;
       const prior = await agent.readModelAttempt();
@@ -2061,12 +2079,16 @@ export class StateStore {
         this.requestInstalledRunStop(runId);
         continue;
       }
-      // Candidate ends and permanent/unknown claims stay retained. A fresh
+      // Permanent/unknown claims stay retained. A fresh
       // explicit/recovery drive may retry a validated free failure; only the
       // automatic maintenance wake additionally requires its original hint.
       if (progress === 'retain') return;
+      const native = await nativeExecution();
       if (current.status === 'queued') {
-        current = await execution.activateCurrentWorker({ expectedRunRevision: current.revision });
+        current = await native.activateCurrentWorker({ expectedRunRevision: current.revision });
+      }
+      if (progress === 'candidate') {
+        await native.finishCurrentFinalTurn({ expectedRunRevision: current.revision }); continue;
       }
       let prepared: Awaited<ReturnType<AgentRunState['prepareModel']>>;
       try { prepared = await agent.prepareModel({ expectedRunRevision: current.revision, leaseEpoch: current.leaseEpoch }); }
@@ -2078,7 +2100,7 @@ export class StateStore {
         this.requestInstalledRunStop(runId);
         continue;
       }
-      try { await this.dispatchInstalledModel(execution, agent, prepared); }
+      try { await this.dispatchInstalledModel(native, agent, prepared); }
       catch (error) {
         if (error instanceof ResourceRetirementError) throw error;
         const stopped = readRun(this.driver, runId);
