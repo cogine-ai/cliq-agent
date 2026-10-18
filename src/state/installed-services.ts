@@ -9,7 +9,7 @@ import { immutableSnapshot } from '../model/immutable.js';
 import { decodeCredentialPlatformUser, decodeUserManagerObservation, type CredentialPlatformUser,
   type InstalledUnitObservation, type NativeCredentialPlatformBinding, type UserManagerObservation } from './credential-platform.js';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
-import { loadInstalledCredentialPlatform, loadInstalledManagerObserver, withHeldInstalledRuntime,
+import { assertInstalledManagerObservationAvailable, loadInstalledCredentialPlatform, loadInstalledManagerObserver, withHeldInstalledRuntime,
   type HeldInstalledRuntime, type InstalledManagerObserver } from './installed-runtime.js';
 import { stateRootIdentityFromDescriptor } from './native-owner.js';
 
@@ -204,10 +204,13 @@ async function withProfiles<T, P extends NativeCredentialPlatformBinding | Insta
   // Both fixed loaders look up the genuine selection before observing caller
   // properties. The ordinary client supplies no mutating platform capability.
   healthy();
-  const user = decodeCredentialPlatformUser(platform.currentUser());
-  if (process.platform !== 'linux' || user.uid !== process.geteuid!() || user.gid !== process.getegid!() || normalizeAbsolutePath(user.home) !== user.home)
-    refuse('installed service setup requires the actual same-user Linux passwd home');
+  assertInstalledManagerObservationAvailable(selected);
   return withHeldInstalledRuntime(selected, async installed => {
+    // A cached native capability still observes the user anew, only after this
+    // borrow's full-byte entry revalidation. Metadata is never its substitute.
+    const user = decodeCredentialPlatformUser(platform.currentUser());
+    if (process.platform !== 'linux' || user.uid !== process.geteuid!() || user.gid !== process.getegid!() || normalizeAbsolutePath(user.home) !== user.home)
+      refuse('installed service setup requires the actual same-user Linux passwd home');
     if (installed.stateRoot.ownerUid !== user.uid) refuse('installed service root owner differs from the actual user');
     const root = stateRootIdentityFromDescriptor(installed.stateRoot.canonicalPath, installed.stateRoot);
     const profiles = installedServiceProfiles(root.canonicalAbsolutePath, root.identityDigest), scope = new ProfileScope(user.uid);
@@ -265,9 +268,8 @@ async function keeperReadyHint(stateRoot: string, uid: number): Promise<boolean>
 /** Fixed internal friend: callers cannot choose a unit, manager, PID or profile.
  * Ordinary clients observe only; explicit credential ensure may start already
  * compatible profiles, never install or reload them. */
-export async function observeInstalledCredentialSupervisor(selected: HeldInstalledRuntime, startIfNeeded = false): Promise<InstalledCredentialSupervisorObservation> {
-  const credentialPlatform = startIfNeeded ? await loadInstalledCredentialPlatform(selected) : undefined;
-  const platform = credentialPlatform ?? await loadInstalledManagerObserver(selected);
+async function observeSupervisor(selected: HeldInstalledRuntime, platform: NativeCredentialPlatformBinding | InstalledManagerObserver,
+  credentialPlatform?: NativeCredentialPlatformBinding): Promise<InstalledCredentialSupervisorObservation> {
   return withProfiles(selected, false, platform, async ({ platform, user, profiles, scope, directoryPath, stateRoot }) => {
     const inspect = async (profile: Profile) => {
       const result = 'inspect' in platform ? await platform.inspect(profile.unit)
@@ -310,4 +312,37 @@ export async function observeInstalledCredentialSupervisor(selected: HeldInstall
     return immutableSnapshot({ stateRoot, uid: user.uid, gid: user.gid, supervisor: supervisor.unit, keeper: keeper.unit,
       manager: supervisor.observation.manager, bus: supervisor.observation.bus });
   });
+}
+
+/** One connection reuses only its original loaded platform. Each observation
+ * opens, reads in full and joins a new ProfileScope; no profile inode, manager
+ * observation, user identity or full-byte validation result is cached. */
+export async function loadInstalledSupervisorObserver(selected: HeldInstalledRuntime, purpose: 'control' | 'credential') {
+  if (purpose !== 'control' && purpose !== 'credential') throw new TypeError('invalid installed service observation purpose');
+  const credentialPlatform = purpose === 'credential' ? await loadInstalledCredentialPlatform(selected) : undefined;
+  let managerObserver = purpose === 'control' ? await loadInstalledManagerObserver(selected) : undefined;
+  const observer = Object.freeze({
+    observe(this: unknown, startIfNeeded = false): Promise<InstalledCredentialSupervisorObservation> {
+      if (this !== observer || typeof startIfNeeded !== 'boolean' || startIfNeeded && !credentialPlatform)
+        return Promise.reject(new TypeError('installed observation requires its original fixed-purpose connection'));
+      // These synchronous original gates precede enqueue. The real manager
+      // operation below uses its existing direct native job registry, never
+      // another load/borrow that would wait on this cut's own selection tail.
+      assertInstalledManagerObservationAvailable(selected);
+      if (startIfNeeded && credentialPlatform) return observeSupervisor(selected, credentialPlatform, credentialPlatform);
+      // A readonly cut retains the original readonly facade's per-call Busy
+      // checks; a previously loaded credential capability is not its substitute.
+      if (managerObserver) return observeSupervisor(selected, managerObserver);
+      return loadInstalledManagerObserver(selected).then(platform => {
+        managerObserver = platform;
+        return observeSupervisor(selected, platform);
+      });
+    },
+  });
+  return observer;
+}
+
+export async function observeInstalledCredentialSupervisor(selected: HeldInstalledRuntime, startIfNeeded = false): Promise<InstalledCredentialSupervisorObservation> {
+  const observer = await loadInstalledSupervisorObserver(selected, startIfNeeded ? 'credential' : 'control');
+  return observer.observe(!!startIfNeeded);
 }

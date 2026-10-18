@@ -16,7 +16,8 @@ import { STATE_OWNER_NATIVE_ENTRY_ID, STATE_OWNER_NATIVE_PATH, STATE_OWNER_NATIV
  * release root. The installed bootstrap is not executed, and this is not SEA,
  * worker, headless-output, admission/model or complete I1 qualification.
  * The independently signed opaque worker is never exec'ed or dlopened. */
-export async function writeInstalledControlPackage(packageRoot: string, options: { modelAuthority?: boolean } = {}) {
+export async function writeInstalledControlPackage(packageRoot: string,
+  options: { modelAuthority?: boolean; credentialPlatform?: string } = {}) {
   await mkdir(packageRoot, { mode: 0o700 });
   const profile = policyProfile();
   const rootCore = {
@@ -39,6 +40,9 @@ export async function writeInstalledControlPackage(packageRoot: string, options:
     { entryId: 'control-empty-root', role: 'sandbox_root_profile', relativePath: 'profiles/empty-root.json', executable: false,
       bytes: canonicalJsonBytes(rootRecipe) },
   ];
+  if (options.credentialPlatform) contents.push({ entryId: 'linux_credential_platform', role: 'platform_helper',
+    relativePath: 'native/linux-x64/linux-credential-platform.node', executable: true,
+    bytes: await readFile(options.credentialPlatform) });
   if (options.modelAuthority) contents.push({ entryId: 'unused-control-provider', role: 'provider_adapter',
     relativePath: 'adapters/unused-control-provider', executable: true,
     bytes: Buffer.from('signed control fixture opaque provider adapter; never execute or load\n') });

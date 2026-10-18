@@ -22,6 +22,13 @@ if (process.platform === 'linux') test('fixed signed application enters and drai
       fileURLToPath(new URL('../../../native/state-owner/state-owner.c', import.meta.url)), '-o', helper],
     { encoding: 'utf8', timeout: 60000 });
     assert.equal(compiled.error, undefined); assert.equal(compiled.status, 0, compiled.stderr); await chmod(helper, 0o500);
+    // The scope race loads the actual fixed platform addon but never invokes
+    // a manager or Secret Service operation. No synthetic platform can satisfy
+    // the signed installation's native loader/receiver checks.
+    const platform = spawnSync(process.execPath, [fileURLToPath(new URL('../build-linux-credential-platform.mjs', import.meta.url)),
+      path.join(fixture, 'credential-platform'), path.join(carrier.nodeRoot, 'include/node')],
+    { encoding: 'utf8', timeout: 65000, maxBuffer: 65536 });
+    assert.equal(platform.error, undefined); assert.equal(platform.signal, null); assert.equal(platform.status, 0, platform.stderr);
     const executable = await buildSupervisorSeaImage({ fixture, carrier: carrier.carrier,
       entryPoint: fileURLToPath(new URL('../../../src/state/testing/credential-scope-sea-child.ts', import.meta.url)),
       executable: path.join(fixture, 'credential-scope-supervisor'), variant: 'credential-scope', assets: {} });

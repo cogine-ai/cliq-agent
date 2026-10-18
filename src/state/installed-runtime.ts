@@ -191,6 +191,9 @@ export function loadInstalledWorkerNative(selected: HeldInstalledRuntime, signal
 /** These two fixed friends carry no StateOwner/credential lock. The selected
  * producer supplies and retains the actual signed image/root descriptors. */
 export function loadInstalledCredentialPlatform(selected: HeldInstalledRuntime): Promise<NativeCredentialPlatformBinding> {
+  return managerObservationBinding(selected).loadCredentialPlatform();
+}
+function managerObservationBinding(selected: HeldInstalledRuntime): InstalledRuntimeBinding {
   const binding = heldInstalledRuntimes.get(selected);
   if (!binding) mismatch('installed runtime is not a verified held selection');
   healthy();
@@ -198,16 +201,17 @@ export function loadInstalledCredentialPlatform(selected: HeldInstalledRuntime):
   // here during a scope would wait behind its own pending native operation,
   // preventing the public caller from ever reaching the existing Busy gate.
   if (credentialScopeReserved) throw new CredentialScopeBusyError();
-  return binding.loadCredentialPlatform();
+  return binding;
+}
+/** Inert gate for a connection's already-loaded observer. It must run before
+ * borrow enqueue, never wait behind its own acquiring/active/draining scope. */
+export function assertInstalledManagerObservationAvailable(selected: HeldInstalledRuntime): void {
+  managerObservationBinding(selected);
 }
 /** Ordinary installed clients may inspect only this selection's two fixed
  * units. The credential backend retains its separate signed-SEA gate. */
 export function loadInstalledManagerObserver(selected: HeldInstalledRuntime): Promise<InstalledManagerObserver> {
-  const binding = heldInstalledRuntimes.get(selected);
-  if (!binding) mismatch('installed runtime is not a verified held selection');
-  healthy();
-  if (credentialScopeReserved) throw new CredentialScopeBusyError();
-  return binding.loadManagerObserver();
+  return managerObservationBinding(selected).loadManagerObserver();
 }
 export function loadInstalledModelBroker(selected: HeldInstalledRuntime): Promise<NativeModelBrokerBinding> {
   const binding = heldInstalledRuntimes.get(selected);

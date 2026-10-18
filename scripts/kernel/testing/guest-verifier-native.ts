@@ -150,7 +150,7 @@ test('must really exceed output cap',()=>{for(let i=0;i<32;i++)fs.writeSync(1,Bu
         assert.equal(receipt.terminationReason, scenario.reason); assert.equal(receipt.outcome, scenario.outcome);
         if ('exitCode' in scenario) assert.equal(receipt.exitCode, scenario.exitCode);
       } catch (error) {
-        if (scenario.name === 'pass-boundaries-child-domain') recordGuestVerifierBoundaryFailure(error, receipt.outcome, stdout);
+        if (scenario.name === 'pass-boundaries-child-domain') recordGuestVerifierBoundaryFailure(error, receipt.outcome, stdout, stderr);
         throw error;
       }
       assert.equal(receipt.sourceDigestBefore, receipt.sourceDigestAfter);

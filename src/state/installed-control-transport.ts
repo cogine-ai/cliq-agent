@@ -12,7 +12,7 @@ import { immutableSnapshot } from '../model/immutable.js';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
 import { openInstalledControlClient, withHeldInstalledRuntime, type HeldInstalledRuntime } from './installed-runtime.js';
 import type { HeldInstalledControlClient } from './native-owner.js';
-import { observeInstalledCredentialSupervisor, type InstalledCredentialSupervisorObservation } from './installed-services.js';
+import { loadInstalledSupervisorObserver, type InstalledCredentialSupervisorObservation } from './installed-services.js';
 
 /** Internal common transport: only genuine held installed selections can open
  * it. The fixed credential purpose is the existing explicit ensure-start path;
@@ -77,7 +77,8 @@ export async function openInstalledControlTransport(selected: HeldInstalledRunti
   if (purpose !== 'control' && purpose !== 'credential') throw new TypeError('invalid installed control purpose');
   if (retirementFailure) throw retirementFailure;
   // The fixed friend authenticates the selection before any caller property.
-  let observed = await observeInstalledCredentialSupervisor(selected, purpose === 'credential');
+  const observer = await loadInstalledSupervisorObserver(selected, purpose);
+  let observed = await observer.observe(purpose === 'credential');
   const deadline = performance.now() + 30000;
   for (;;) {
     const socket = await lstat(path.join(observed.stateRoot, 'runtime/control-v1.sock')).catch((error: NodeJS.ErrnoException) => {
@@ -86,7 +87,7 @@ export async function openInstalledControlTransport(selected: HeldInstalledRunti
     if (socket?.isSocket() && observed.supervisor.ActiveState === 'active' && observed.keeper.ActiveState === 'active') break;
     if (performance.now() >= deadline || [observed.supervisor, observed.keeper].some(unit => unit.ActiveState === 'failed'))
       refuse('installed Supervisor startup did not reach authenticated readiness');
-    await delay(20); observed = await observeInstalledCredentialSupervisor(selected);
+    await delay(20); observed = await observer.observe();
   }
   invocation(observed);
   const selection = await withHeldInstalledRuntime(selected, async installed => immutableSnapshot({
@@ -169,7 +170,7 @@ export async function openInstalledControlTransport(selected: HeldInstalledRunti
   };
   const checkCurrent = async () => {
     if (stopped || retirementFailure) throw retirementFailure ?? failure ?? new KernelStorageError('RECOVERY_REQUIRED', 'installed control client is closing');
-    native.assertHeld(); const current = await observeInstalledCredentialSupervisor(selected); stable(observed, current);
+    native.assertHeld(); const current = await observer.observe(); stable(observed, current);
     await peerBinding(native, current); return current;
   };
   let helloResult: InstalledControlResultFor<'control.hello'>;

@@ -6,14 +6,17 @@ import path from 'node:path';
 import { isSea } from 'node:sea';
 import { KERNEL_DATABASE_FILENAME } from '../../config.js';
 import { KernelStorageError } from '../errors.js';
-import { createInstalledRuntime, withCredentialAuthorityLock, type HeldCredentialAuthorityLock } from '../installed-runtime.js';
+import { assertInstalledManagerObservationAvailable, createInstalledRuntime, withCredentialAuthorityLock,
+  type HeldCredentialAuthorityLock } from '../installed-runtime.js';
+import { loadInstalledSupervisorObserver } from '../installed-services.js';
 import { writeInstalledControlPackage } from './installed-control-fixture.js';
 
 async function main() {
   assert(isSea()); assert.equal(process.versions.node, '24.21.0'); assert.equal(process.platform, 'linux');
   const fixture = process.argv[2]!;
   const source = path.join(fixture, 'package'), stateRoot = path.join(fixture, 'state');
-  const signed = await writeInstalledControlPackage(source);
+  const signed = await writeInstalledControlPackage(source,
+    { credentialPlatform: path.join(fixture, 'credential-platform/linux-credential-platform.node') });
   const runtime = createInstalledRuntime({ releaseKeys: signed.releaseKeys });
   await runtime.installInitial({ packageRoot: source, stateRoot });
   const selected = await runtime.openSelected(stateRoot);
@@ -22,16 +25,31 @@ async function main() {
   const enteredScope = new Promise<void>(resolve => { entered = resolve; });
   const holdScope = new Promise<void>(resolve => { release = resolve; });
   try {
+    const observer = await loadInstalledSupervisorObserver(selected, 'credential');
+    // The real readonly loader is queued first. Its two full-byte validations
+    // yield while the original credential scope reserves the same tail. Once
+    // loaded, this observation must refuse before queuing behind that scope.
+    const observing = observer.observe();
+    void observing.catch(() => undefined);
+    assert.equal(await withCredentialAuthorityLock(selected, async token => {
+      token.assertHeld();
+      await assert.rejects(observing, { name: 'CredentialScopeBusyError' });
+      return 'readonly_refused_before_scope_tail';
+    }), 'readonly_refused_before_scope_tail');
     let old!: HeldCredentialAuthorityLock;
     const first = withCredentialAuthorityLock(selected, async token => {
       old = token; token.assertHeld();
       assert.deepEqual(Object.keys(token), ['assertHeld']);
+      // This synchronous gate must refuse before a cached connection can
+      // enqueue behind its own still-running real credential scope.
+      assert.throws(() => assertInstalledManagerObservationAvailable(selected), { name: 'CredentialScopeBusyError' });
       assert.throws(() => withCredentialAuthorityLock(selected, async () => 0), /acquiring|active|draining/);
       assert.throws(() => ({ ...token }).assertHeld(), /receiver/);
       return 'first';
     });
     // This observes the real pre-enqueue reservation, not just the active body.
     assert.throws(() => withCredentialAuthorityLock(selected, async () => 0), /acquiring|active|draining/);
+    assert.throws(() => assertInstalledManagerObservationAvailable(selected), { name: 'CredentialScopeBusyError' });
     assert.equal(await first, 'first');
     assert.throws(() => old.assertHeld(), error => error instanceof KernelStorageError && error.code === 'ARTIFACT_MISMATCH');
     const failure = new Error('callback failed');
@@ -52,6 +70,7 @@ async function main() {
       let closed = false;
       void closing.then(() => { closed = true; }, () => { closed = true; });
       await Promise.resolve(); assert.equal(closed, false);
+      assert.throws(() => assertInstalledManagerObservationAvailable(selected), { name: 'CredentialScopeBusyError' });
       release(); assert.equal(await pending, 'drained'); await closing;
       assert.equal(await withCredentialAuthorityLock(second, async token => { token.assertHeld(); return 'next'; }), 'next');
     } finally { release(); await second.close(); }

@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { runInNewContext } from 'node:vm';
-import { readGuestVerifierBoundaryFailure, recordGuestVerifierBoundaryFailure } from './guest-verifier-diagnostics.js';
+import { readGuestVerifierBoundaryFailure, readGuestVerifierOutputFailure, recordGuestVerifierBoundaryFailure } from './guest-verifier-diagnostics.js';
 
 test('a failed boundary assertion retains only its last fixed stdout stage and actual outcome', () => {
   const failure = new Error('unretained TAP and arbitrary diagnostic text');
@@ -32,6 +32,18 @@ test('unretained diagnostic fixture', () => { fs.writeSync(1, 'CLIQ_GUEST_BOUNDA
     const error = new Error('the original outcome assertion');
     recordGuestVerifierBoundaryFailure(error, 'assertion_failed', actual.stdout);
     assert.deepEqual(readGuestVerifierBoundaryFailure(error), { stage: 'runtime_identity', outcome: 'assertion_failed' });
+    const bootstrap = path.join(root, 'bootstrap.test.mjs');
+    await writeFile(bootstrap, "import './absent-owned-bootstrap.mjs';\n");
+    const refused = spawnSync(process.execPath, ['--test', '--test-reporter=tap', bootstrap],
+      { env: childEnv, timeout: 5000, maxBuffer: 65_536 });
+    assert.equal(refused.error, undefined); assert.equal(refused.status, 1);
+    const original = new Error('original bootstrap outcome assertion');
+    recordGuestVerifierBoundaryFailure(original, 'assertion_failed', refused.stdout, refused.stderr);
+    assert.equal(readGuestVerifierBoundaryFailure(original), undefined);
+    const diagnostic = readGuestVerifierOutputFailure(original);
+    assert.equal(diagnostic?.markerStatus, 'absent');
+    assert.ok(diagnostic.reportedErrorCodes.includes('ERR_MODULE_NOT_FOUND'));
+    assert.equal(diagnostic.stdoutBytes, refused.stdout.length); assert.equal(diagnostic.stderrBytes, refused.stderr.length);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -73,4 +85,32 @@ try { throw original; } catch (error) { if (error !== original) process.exit(3);
 fs.writeSync(2, 'assertion_reached');`], { timeout: 5000, maxBuffer: 65_536 });
   assert.equal(child.error, undefined); assert.equal(child.status, 0);
   assert.equal(child.stdout.length, 0); assert.equal(child.stderr.toString('utf8'), 'assertion_reached');
+});
+
+test('a failure before the callback retains only bounded counts, marker status and finite error codes', () => {
+  const error = new Error('original outcome assertion');
+  const stdout = Buffer.from('unretained path and test name\n');
+  const stderr = Buffer.from("Error [ERR_MODULE_NOT_FOUND]: unretained module/path and secret-like text\ncode: 'ENOENT'\n");
+  recordGuestVerifierBoundaryFailure(error, 'assertion_failed', stdout, stderr);
+  assert.equal(readGuestVerifierBoundaryFailure(error), undefined);
+  assert.deepEqual(readGuestVerifierOutputFailure(error), { outcome: 'assertion_failed', stdoutBytes: stdout.length,
+    stderrBytes: stderr.length, markerStatus: 'absent', reportedErrorCodes: ['ERR_MODULE_NOT_FOUND', 'ENOENT'] });
+  assert.equal(readGuestVerifierOutputFailure(new Error('unrelated')), undefined);
+  assert.equal(readGuestVerifierOutputFailure({ outputFailure: readGuestVerifierOutputFailure(error) }), undefined);
+});
+
+test('malformed markers, UTF-8 and oversized output do not become a valid boundary or arbitrary diagnostic', () => {
+  for (const [stdout, markerStatus] of [
+    [Buffer.from('CLIQ_GUEST_BOUNDARY_V1:source_read\n'), 'invalid_sequence'],
+    [Buffer.from([0xff]), 'invalid_utf8'],
+    [Buffer.from('CLIQ_GUEST_BOUNDARY_V1:runtime_identity\n'), 'ordered'],
+  ] as const) {
+    const error = new Error('original');
+    recordGuestVerifierBoundaryFailure(error, 'infra_failed', stdout, Buffer.from('code: UNLISTED_NATIVE_TEXT'));
+    assert.deepEqual(readGuestVerifierOutputFailure(error), { outcome: 'infra_failed', stdoutBytes: stdout.length,
+      stderrBytes: 26, markerStatus, reportedErrorCodes: [] });
+  }
+  const error = new Error('oversized');
+  recordGuestVerifierBoundaryFailure(error, 'infra_failed', Buffer.alloc(65_536), Buffer.from('x'));
+  assert.equal(readGuestVerifierOutputFailure(error), undefined);
 });

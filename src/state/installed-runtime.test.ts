@@ -11,7 +11,7 @@ import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import { identityHash, sha256Bytes } from '../kernel/identity.js';
 import { policyProfile, verifyRuntimeBundle, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { ARTIFACT_CHUNK_BYTES, ContentAddressedStore } from './cas.js';
-import { createInstalledRuntime, loadInstalledCredentialPlatform, loadInstalledManagerObserver,
+import { assertInstalledManagerObservationAvailable, createInstalledRuntime, loadInstalledCredentialPlatform, loadInstalledManagerObserver,
   type HeldInstalledRuntime } from './installed-runtime.js';
 import { STATE_OWNER_NATIVE_ENTRY_ID, STATE_OWNER_NATIVE_RELATIVE_PATH } from './native-owner.js';
 import { openInstalledLinuxWorkerLauncher } from '../sandbox/linux-worker.js';
@@ -116,6 +116,7 @@ test('installed read-only manager observation rejects structural selections befo
   let inspected = false;
   const fake = new Proxy({}, { get() { inspected = true; throw new Error('caller property was inspected'); } });
   assert.throws(() => loadInstalledManagerObserver(fake as HeldInstalledRuntime), { code: 'ARTIFACT_MISMATCH' });
+  assert.throws(() => assertInstalledManagerObservationAvailable(fake as HeldInstalledRuntime), { code: 'ARTIFACT_MISMATCH' });
   assert.equal(inspected, false);
 });
 

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { installedServiceProfiles, installServices, observeInstalledCredentialSupervisor } from './installed-services.js';
+import { installedServiceProfiles, installServices, loadInstalledSupervisorObserver, observeInstalledCredentialSupervisor } from './installed-services.js';
 
 test('installed profiles bind the complete root identity and preserve a literal non-shell executable', () => {
   const identity = 'a'.repeat(64), profiles = installedServiceProfiles('/home/cliq/state', identity);
@@ -33,6 +33,8 @@ test('service setup rejects an unverified selection before observing its caller 
   await assert.rejects(installServices(selected as Parameters<typeof installServices>[0]), { code: 'ARTIFACT_MISMATCH' });
   for (const startIfNeeded of [false, true])
     await assert.rejects(observeInstalledCredentialSupervisor(selected as Parameters<typeof installServices>[0], startIfNeeded), { code: 'ARTIFACT_MISMATCH' });
+  for (const purpose of ['control', 'credential'] as const)
+    await assert.rejects(loadInstalledSupervisorObserver(selected as never, purpose), { code: 'ARTIFACT_MISMATCH' });
 });
 
 test('installed roles select a fixed working directory instead of an implicit user-manager home', () => {
