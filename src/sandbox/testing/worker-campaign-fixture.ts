@@ -24,6 +24,20 @@ import { readRetainedVerifierToolchain } from '../../state/guest-toolchain.js';
 import { composeVerifierSpec } from '../../state/verifier-admission.js';
 import type { VerifierRequest } from '../../kernel/control-submit.js';
 
+/** Fixed campaign profile DATA, signed by the same fixture below. This is not
+ * a quota observation, a native result, or a production resource override. */
+export function workerCampaignSandboxProfile(verifier?: { maxOpenFiles?: number }) {
+  const sandbox = fixtureSandboxProfile();
+  Object.assign(sandbox.resources, { maxProcesses: 32, memoryBytes: 256 * 1024 ** 2, cpuQuotaMicrosPerSecond: 100000,
+    maxOpenFiles: verifier?.maxOpenFiles ?? 128, maxSingleFileBytes: (verifier ? 256 : 16) * 1024 ** 2,
+    // Only the independent guest StateRoot uses the existing 512 MiB ext4
+    // backing needed for its complete raw image in CAS. The native capacity
+    // guard still checks this frozen, subsequently signed ceiling unchanged.
+    maxGenerationBytes: (verifier ? 512 : 256) * 1024 ** 2 });
+  sandbox.profileDigest = digestOmitting(sandbox, 'profileDigest');
+  return sandbox;
+}
+
 /** Campaign setup only. Its model prefix and first worker retirement are
  * explicitly offline retained fixtures, never native execution evidence.
  * The later StateStore.loadRunExecution path must create and inspect the real
@@ -53,11 +67,7 @@ export async function createLinuxWorkerCampaignFixture(input: {
     inputSchemaRef: selected[0].inputSchemaRef, inputSchemaDigest: selected[0].inputSchemaDigest,
     replayClass: builtin.replayClass, execution: { kind: 'builtin', adapterId: 'edit', adapterVersion: '1', adapterCodeDigest: '' }
   }], manifestDigest: '' };
-  const sandbox = fixtureSandboxProfile();
-  Object.assign(sandbox.resources, { maxProcesses: 32, memoryBytes: 256 * 1024 ** 2, cpuQuotaMicrosPerSecond: 100000,
-    maxOpenFiles: input.verifier?.maxOpenFiles ?? 128, maxSingleFileBytes: (input.verifier ? 256 : 16) * 1024 ** 2,
-    maxGenerationBytes: 256 * 1024 ** 2 });
-  sandbox.profileDigest = digestOmitting(sandbox, 'profileDigest');
+  const sandbox = workerCampaignSandboxProfile(input.verifier);
   const signed = await signedLinuxWorkerTestRuntime({ installationRoot: input.installationRoot,
     assembly: authority.assembly, tools: manifest.entries, sandboxProfile: sandbox,
     ...(input.verifier ? { guestImageRoot: input.verifier.guestImageRoot } : {}) });

@@ -9,6 +9,7 @@ import type { FinalCandidateItem, RunResult, VerificationClosureV1 } from '../ke
 import type { DirectUnverifiedConsentV1, RunFrontier, RunSpec, SessionRunTerminalItem } from '../kernel/types.js';
 import { sampleCanonicalNow } from './canonical-time.js';
 import { ResultUnavailableError } from './control-read.js';
+import { readRecoveryClosure, type RecoveryClosurePhase } from './recovery-closure.js';
 import { loadRunResult, type RunResultPhase } from './run-result.js';
 import { openStateStore, publishInProcessChannel } from './store.js';
 import { openSqliteDriver, type SqliteDriver } from './sqlite-driver.js';
@@ -68,13 +69,22 @@ test('explicitly consented empty verification publishes one unverified immutable
     // Borrow the actual already-held fixture owner, never manufacture a lock
     // or native proof merely to exercise an inert diagnostic callback.
     const held = fixture.store as unknown as { driver: SqliteDriver; owner: StateOwnerContext };
+    const recoveryPhases: RecoveryClosurePhase[] = [];
+    const recovered = await readRecoveryClosure(held.driver, fixture.store.artifacts, fixture.runId, value => {
+      recoveryPhases.push(value);
+      throw new Error('an inert recovery diagnosis cannot decide the retained cut');
+    });
+    assert.deepEqual(recovered.run, fixture.store.getRun(fixture.runId));
+    assert.deepEqual(recoveryPhases, ['spec', 'context', 'journal', 'generations', 'history', 'seals', 'terminal']);
     const resultOwner = loadRunResult(held.driver, fixture.store.artifacts, held.owner,
       { run: before.run, spec: before.runSpec, principalId: fixture.principalId }, value => {
         phases.push(value);
         throw new Error('an inert diagnosis consumer cannot decide the result');
       });
     const committed = await resultOwner.commitRunResult(request);
-    assert.deepEqual(phases, ['result_recovery', 'result_basis', 'result_finalization', 'result_publication', 'result_session', 'result_commit']);
+    assert.deepEqual(phases, ['result_recovery', 'result_recovery_spec', 'result_recovery_context', 'result_recovery_journal',
+      'result_recovery_generations', 'result_recovery_history', 'result_recovery_seals', 'result_recovery_terminal',
+      'result_basis', 'result_finalization', 'result_publication', 'result_session', 'result_commit']);
     assert.equal(committed.run.status, 'completed_unverified'); assert.equal(committed.run.terminalReason, 'no_required_verifier');
     assert.equal(committed.run.nextStep, null); assert.equal(committed.run.frontierRef, undefined);
     assert.equal(committed.run.stopIntentRef, undefined); assert.equal(committed.run.terminalDetailRef, undefined);

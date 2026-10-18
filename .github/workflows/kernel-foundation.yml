@@ -952,7 +952,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: node --test scripts/kernel/testing/installed-volume-guard.test.mjs scripts/kernel/testing/installed-run-client.test.mjs scripts/kernel/testing/installed-client-journey.test.mjs
-      - run: node --test --import tsx scripts/kernel/testing/installed-guest-package.test.ts scripts/kernel/testing/installed-client-consumer.test.ts scripts/kernel/testing/installed-control-client-driver.test.ts
+      - run: node --test --import tsx scripts/kernel/testing/installed-guest-package.test.ts scripts/kernel/testing/installed-client-consumer.test.ts scripts/kernel/testing/installed-control-client-driver.test.ts scripts/kernel/testing/installed-enroll-diagnostic.test.ts
       - run: npm run build
         id: build
       - name: Install actual guest, transport and Secret Service prerequisites

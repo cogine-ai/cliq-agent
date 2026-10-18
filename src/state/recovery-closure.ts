@@ -570,11 +570,16 @@ async function validateLaunchGraph(
   }
 }
 
+/** Fixed, inert progress only: no refs, timing, authority or retry decisions. */
+export type RecoveryClosurePhase = 'spec' | 'context' | 'journal' | 'generations' | 'history' | 'seals' | 'terminal';
+
 export async function readRecoveryClosure(
   driver: SqliteDriver,
   artifacts: ArtifactCatalog,
-  runId: string
+  runId: string,
+  onPhase?: (phase: RecoveryClosurePhase) => void
 ): Promise<RecoveryClosureV1> {
+  const phase = (value: RecoveryClosurePhase) => { try { onPhase?.(value); } catch { /* Diagnosis cannot decide recovery. */ } };
   const databaseCut = driver.transaction((connection) => {
     const run = readRun(connection, runId);
     const principalId = connection.prepare('SELECT principal_id FROM runs WHERE id = ?').get<{ principal_id: string }>(run.id)?.principal_id;
@@ -616,6 +621,7 @@ export async function readRecoveryClosure(
     await validateWorkerPreparationHistory(driver, artifacts, { run, launches: databaseCut.allWorkerLaunches,
       generations: workspaceGenerations });
   } catch (error) { recoveryFailure(`worker preparation history is invalid: ${(error as Error).message}`, error); }
+  phase('spec');
   requireRecoveryArtifactRef(run.specRef, 'Run.specRef');
   for (const [label, ref] of [
     ['Run.frontierRef', run.frontierRef],
@@ -669,6 +675,7 @@ export async function readRecoveryClosure(
 
   const runSpec = decodeRunSpec(await artifacts.readCanonical(run.specRef));
   await validateRunSpecArtifacts(artifacts, runSpec);
+  phase('context');
   const context = decodeContextManifest(await artifacts.readCanonical(latestCheckpoint.contextManifestRef));
   if (context.runId !== run.id || context.throughItemSeq !== latestCheckpoint.runItemSeq) {
     recoveryFailure('Checkpoint ContextManifest does not match its Run cut');
@@ -684,6 +691,7 @@ export async function readRecoveryClosure(
     latestWorkspace.state.baseWorkspaceManifestRef !== runSpec.baseWorkspaceManifestRef
   ) recoveryFailure('workspace state is not bound to the admitted RunSpec');
 
+  phase('journal');
   if (latestCheckpoint.runItemSeq > items.length) recoveryFailure('Checkpoint item cursor exceeds recovery items');
   if (latestCheckpoint.journalSeq > journal.length) recoveryFailure('Checkpoint Journal cursor exceeds recovery Journal');
   await requireRecoveryArtifacts(
@@ -692,6 +700,7 @@ export async function readRecoveryClosure(
   );
   const groups = validateJournalGraph(journal);
   const journalBudgets = await validateJournalArtifactsAndBudgets(artifacts, groups);
+  phase('generations');
   const generationProofs: WorkspaceGenerationStateV1[] = [];
   if (workspaceGenerations.some(generation => generation.phase === 'retired')) {
     try {
@@ -702,6 +711,7 @@ export async function readRecoveryClosure(
     } catch (error) { recoveryFailure(`generation retirement history is invalid: ${(error as Error).message}`, error); }
   } else generationProofs.push(...workspaceGenerations);
   await validateGenerationArtifacts(artifacts, generationProofs);
+  phase('history');
   if (journal.some((entry) => entry.opKind === 'model' || entry.opKind === 'verifier') || run.repairCount !== 0 ||
       runSpec.operation === 'agent' && items.length > 0) {
     try {
@@ -731,6 +741,7 @@ export async function readRecoveryClosure(
   if (run.status !== 'running' && !isZeroBudget(run.budgetReserved) && journal.length === 0) {
     recoveryFailure('lease-free Run has an unexplained budget reservation');
   }
+  phase('seals');
   const sealedGenerations = generationProofs.filter(generation => generation.phase === 'sealed');
   const sealedLaunches = databaseCut.allWorkerLaunches.filter(launch => launch.phase === 'retired' && launch.generationWriteState === 'sealed');
   if (sealedGenerations.length || sealedLaunches.length) {
@@ -755,6 +766,7 @@ export async function readRecoveryClosure(
   catch (error) { recoveryFailure(`worker recovery closure is invalid: ${(error as Error).message}`, error); }
   await validateChildAllocationArtifacts(artifacts, childAllocations);
 
+  phase('terminal');
   const closure: RecoveryClosureV1 = {
     runSpec,
     run,

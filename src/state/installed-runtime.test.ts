@@ -11,11 +11,13 @@ import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import { identityHash, sha256Bytes } from '../kernel/identity.js';
 import { policyProfile, verifyRuntimeBundle, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { ARTIFACT_CHUNK_BYTES, ContentAddressedStore } from './cas.js';
-import { createInstalledRuntime } from './installed-runtime.js';
+import { createInstalledRuntime, loadInstalledCredentialPlatform, loadInstalledManagerObserver,
+  type HeldInstalledRuntime } from './installed-runtime.js';
 import { STATE_OWNER_NATIVE_ENTRY_ID, STATE_OWNER_NATIVE_RELATIVE_PATH } from './native-owner.js';
 import { openInstalledLinuxWorkerLauncher } from '../sandbox/linux-worker.js';
 import { KernelStorageError } from './errors.js';
 import { GUEST_EXTRACTOR_RECIPE } from '../sandbox/guest-toolchain.js';
+import { observeInstalledCredentialSupervisor } from './installed-services.js';
 
 /** Real signed files for installer/CAS semantics only. The opaque executable
  * entries are deliberately not running Supervisor/worker/addon images and are
@@ -109,6 +111,39 @@ async function writeInstallerOnlyPackage(packageRoot: string, unclosedPromptRole
   await writeFile(path.join(packageRoot, 'manifest.json'), canonicalJsonBytes(bundle), { flag: 'wx', mode: 0o400 });
   return { bundle, releaseKeys, profile, rootRecipe, contents };
 }
+
+test('installed read-only manager observation rejects structural selections before inspecting caller properties', () => {
+  let inspected = false;
+  const fake = new Proxy({}, { get() { inspected = true; throw new Error('caller property was inspected'); } });
+  assert.throws(() => loadInstalledManagerObserver(fake as HeldInstalledRuntime), { code: 'ARTIFACT_MISMATCH' });
+  assert.equal(inspected, false);
+});
+
+if (process.platform === 'linux' && process.arch === 'x64') test('ordinary installed manager observation requires its actual signed addon without granting credential authority', async () => {
+  const fixture = await realpath(await mkdtemp(path.join(os.tmpdir(), 'cliq-installed-manager-observer-')));
+  const packageRoot = path.join(fixture, 'package'), stateRoot = path.join(fixture, 'state');
+  let selected: HeldInstalledRuntime | undefined;
+  try {
+    // Genuine signed installation, deliberately without a native platform.
+    // No successful manager observation or native qualification is asserted.
+    const signed = await writeInstallerOnlyPackage(packageRoot);
+    const runtime = createInstalledRuntime({ releaseKeys: signed.releaseKeys });
+    await runtime.installInitial({ packageRoot, stateRoot });
+    selected = await runtime.openSelected(stateRoot);
+    const noPlatform = (error: unknown) => error instanceof KernelStorageError && error.code === 'ARTIFACT_MISMATCH' &&
+      error.message === 'fixed signed credential platform module is missing';
+    // This must reach the actual signed-entry check, not the unrelated SEA
+    // credential-authority gate that formerly rejected every ordinary client.
+    await assert.rejects(loadInstalledManagerObserver(selected), noPlatform);
+    await assert.rejects(observeInstalledCredentialSupervisor(selected), noPlatform);
+    await assert.rejects(observeInstalledCredentialSupervisor(selected, true), { code: 'UNSUPPORTED_PLATFORM' });
+    await assert.rejects(loadInstalledCredentialPlatform(selected), { code: 'UNSUPPORTED_PLATFORM' });
+    const copy = { ...selected };
+    assert.throws(() => loadInstalledManagerObserver(copy), { code: 'ARTIFACT_MISMATCH' });
+    await selected.close(); selected = undefined;
+    await assert.rejects(lstat(path.join(stateRoot, KERNEL_DATABASE_FILENAME)), { code: 'ENOENT' });
+  } finally { await selected?.close(); await rm(fixture, { recursive: true, force: true }); }
+});
 
 if (process.platform === 'linux') test('initial installation streams a complete signed guest image across the unchanged CAS chunk bound', async () => {
   const fixture = await realpath(await mkdtemp(path.join(os.tmpdir(), 'cliq-installed-guest-stream-')));

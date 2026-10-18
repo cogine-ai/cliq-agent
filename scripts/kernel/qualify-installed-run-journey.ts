@@ -483,7 +483,9 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
           if (value.scope === 'installed-shutdown-progress' && progress.length < 2) {
             const phases = value.phases;
             const labels = ['scheduled', 'drive_material', 'drive_agent', 'drive_retirement', 'drive_verify', 'drive_finalize',
-              'terminal_retirement', 'result_recovery', 'result_basis', 'result_finalization', 'result_publication', 'result_session', 'result_commit'];
+              'terminal_retirement', 'result_recovery', 'result_recovery_spec', 'result_recovery_context', 'result_recovery_journal',
+              'result_recovery_generations', 'result_recovery_history', 'result_recovery_seals', 'result_recovery_terminal',
+              'result_basis', 'result_finalization', 'result_publication', 'result_session', 'result_commit'];
             const counters = ['driverTasks', 'agentLoads', 'admissions', 'modelOperations', 'modelCompletions', 'modelClosures'] as const;
             if (!phases || typeof phases !== 'object' || Array.isArray(phases) || Object.keys(phases).some(key => !labels.includes(key)) ||
                 [...Object.values(phases), ...counters.map(key => value[key])].some(count => !Number.isSafeInteger(count) || (count as number) < 0 || (count as number) > 1000)) continue;

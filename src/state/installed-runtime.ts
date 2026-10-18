@@ -25,7 +25,7 @@ import { MODEL_BROKER_ENTRY_ID, MODEL_BROKER_RELATIVE_PATH, InstalledModelBroker
   type ModelBrokerBinding, type NativeModelBrokerBinding, type NativeModelTransport, type NativeModelNoReleaseFence } from './model-broker-native.js';
 import { runInstalledCredentialAuthority, type HeldCredentialAuthorityLock } from './store.js';
 import type { NativeWorkerBinding, NativeWorkerImage } from '../sandbox/linux-worker.js';
-import type { NativeCredentialInspection, NativeCredentialPlatformBinding, NativeSecretServiceInput } from './credential-platform.js';
+import type { CredentialPlatformUser, NativeCredentialInspection, NativeCredentialPlatformBinding, NativeSecretServiceInput } from './credential-platform.js';
 import { GUEST_EXTRACTOR_RECIPE, type NativeGuestExtractorBinding, type NativeGuestToolchain } from '../sandbox/guest-toolchain.js';
 import { decodeGuestToolchainManifest, guestToolchainExecutables, guestToolchainRoots, validateGuestToolchainMetadata,
   type RetainedVerifierToolchain } from './guest-toolchain.js';
@@ -39,6 +39,13 @@ export type HeldInstalledRuntime = Readonly<{
   bundleDigest: string;
   assertHeld(): Promise<void>;
   close(): Promise<void>;
+}>;
+/** Same-selection manager reads only. This handle is not an observation or a
+ * credential authority; neither native binding nor start/reload/secret APIs
+ * escape its original held installation. */
+export type InstalledManagerObserver = Readonly<{
+  currentUser(): CredentialPlatformUser;
+  inspect(unit: string): Promise<unknown>;
 }>;
 /** A continuously held original containment anchor, not execution authority or
  * a transferable descriptor/PID locator. */
@@ -151,6 +158,7 @@ type InstalledRuntimeBinding = {
   acquireAnchor(): Promise<HeldInstalledAnchor>;
   loadWorkerNative(signal?: AbortSignal): Promise<NativeWorkerBinding>;
   loadCredentialPlatform(): Promise<NativeCredentialPlatformBinding>;
+  loadManagerObserver(): Promise<InstalledManagerObserver>;
   loadModelBroker(): Promise<NativeModelBrokerBinding>;
   openControlClient(): Promise<HeldInstalledControlClient>;
   sealWorkerImage(entryId: string): Promise<NativeWorkerImage>;
@@ -191,6 +199,15 @@ export function loadInstalledCredentialPlatform(selected: HeldInstalledRuntime):
   // preventing the public caller from ever reaching the existing Busy gate.
   if (credentialScopeReserved) throw new CredentialScopeBusyError();
   return binding.loadCredentialPlatform();
+}
+/** Ordinary installed clients may inspect only this selection's two fixed
+ * units. The credential backend retains its separate signed-SEA gate. */
+export function loadInstalledManagerObserver(selected: HeldInstalledRuntime): Promise<InstalledManagerObserver> {
+  const binding = heldInstalledRuntimes.get(selected);
+  if (!binding) mismatch('installed runtime is not a verified held selection');
+  healthy();
+  if (credentialScopeReserved) throw new CredentialScopeBusyError();
+  return binding.loadManagerObserver();
 }
 export function loadInstalledModelBroker(selected: HeldInstalledRuntime): Promise<NativeModelBrokerBinding> {
   const binding = heldInstalledRuntimes.get(selected);
@@ -785,6 +802,8 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
         let closePromise: Promise<void> | undefined;
         let workerNative: NativeWorkerBinding | undefined;
         let credentialPlatform: NativeCredentialPlatformBinding | undefined;
+        let credentialPlatformNative: NativeCredentialPlatformBinding | undefined;
+        let managerObserver: InstalledManagerObserver | undefined;
         let modelBroker: NativeModelBrokerBinding | undefined;
         let guestExtractor: NativeGuestExtractorBinding | undefined;
         const platformJobs = new Set<Promise<unknown>>();
@@ -847,6 +866,47 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
           const pending = tail.then(operation);
           tail = pending.then(() => undefined, () => undefined);
           return pending;
+        };
+        // Both clients retain the same signed addon and original FD. Only the
+        // full credential entry below can expose its mutating operations.
+        const loadCredentialPlatformNative = (): NativeCredentialPlatformBinding => {
+          assertSelection();
+          if (!credentialPlatformNative) {
+            const entry = signed.bundle.entries.find(value => value.entryId === 'linux_credential_platform');
+            const file = signed.entries.get('linux_credential_platform');
+            if (!entry || !file || entry.role !== 'platform_helper' || !entry.executable || entry.version !== '1' ||
+                entry.relativePath !== 'native/linux-x64/linux-credential-platform.node')
+              mismatch('fixed signed credential platform module is missing');
+            const loaded = new Module('cliq-installed-linux-credential-platform');
+            process.dlopen(loaded, `/proc/self/fd/${file.handle.fd}`);
+            const native = loaded.exports as NativeCredentialPlatformBinding;
+            if (native.interfaceVersion !== 2 || typeof native.secretService !== 'function' || typeof native.userManager !== 'function' ||
+                typeof native.currentUser !== 'function')
+              mismatch('unsupported installed credential platform interface');
+            credentialPlatformNative = native;
+          }
+          assertSelection();
+          return credentialPlatformNative;
+        };
+        const refusePlatformOperation = (error: unknown): never => {
+          if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT') {
+            const failure = new ResourceRetirementError('credential platform resources did not retire', error);
+            rememberRetirement(failure); throw failure;
+          }
+          // Only fixed native status codes survive. Remote/native messages,
+          // payloads and stacks never become retained observation data.
+          const value = error as { code?: unknown; platformCode?: unknown } | null;
+          const platformCode = value?.code === 'ERR_CLIQ_CREDENTIAL_PLATFORM' &&
+            (value.platformCode === 'delete_denied' || value.platformCode === 'delete_failed')
+            ? value.platformCode : 'platform_store_unavailable';
+          throw new KernelStorageError('RECOVERY_REQUIRED', 'installed credential platform rejected an operation',
+            { cause: Object.freeze({ platformCode }) });
+        };
+        const trackPlatformOperation = <T>(pending: Promise<T>): Promise<T> => {
+          const job = pending.then(result => { assertSelection(); return result; }, refusePlatformOperation);
+          platformJobs.add(job);
+          void job.finally(() => platformJobs.delete(job)).catch(() => {});
+          return job;
         };
         const identity = (directory: Directory): InstalledDirectoryIdentity => Object.freeze({
           deviceId: directory.info.dev.toString(), fileId: directory.info.ino.toString(), ownerUid: Number(directory.info.uid),
@@ -1012,37 +1072,8 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
                 throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'credential platform requires the fixed signed Linux backend');
               await checkedRevalidate();
               if (!credentialPlatform) {
-                const entry = signed.bundle.entries.find(value => value.entryId === 'linux_credential_platform');
-                const file = signed.entries.get('linux_credential_platform');
-                if (!entry || !file || entry.role !== 'platform_helper' || !entry.executable || entry.version !== '1' ||
-                    entry.relativePath !== 'native/linux-x64/linux-credential-platform.node')
-                  mismatch('fixed signed credential platform module is missing');
-                const loaded = new Module('cliq-installed-linux-credential-platform');
-                process.dlopen(loaded, `/proc/self/fd/${file.handle.fd}`);
-                const native = loaded.exports as NativeCredentialPlatformBinding;
-                if (native.interfaceVersion !== 2 || typeof native.secretService !== 'function' || typeof native.userManager !== 'function' ||
-                    typeof native.currentUser !== 'function')
-                  mismatch('unsupported installed credential platform interface');
-                const refused = (error: unknown): never => {
-                  if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT') {
-                    const failure = new ResourceRetirementError('credential platform resources did not retire', error);
-                    rememberRetirement(failure); throw failure;
-                  }
-                  // Only fixed native status codes survive. Remote/native
-                  // messages, payloads and stacks never become receipt data.
-                  const value = error as { code?: unknown; platformCode?: unknown } | null;
-                  const platformCode = value?.code === 'ERR_CLIQ_CREDENTIAL_PLATFORM' &&
-                    (value.platformCode === 'delete_denied' || value.platformCode === 'delete_failed')
-                    ? value.platformCode : 'platform_store_unavailable';
-                  throw new KernelStorageError('RECOVERY_REQUIRED', 'installed credential platform rejected an operation',
-                    { cause: Object.freeze({ platformCode }) });
-                };
-                const track = <T>(pending: Promise<T>): Promise<T> => {
-                  const job = pending.then(result => { assertSelection(); return result; }, refused);
-                  platformJobs.add(job);
-                  void job.finally(() => platformJobs.delete(job)).catch(() => {});
-                  return job;
-                };
+                const native = loadCredentialPlatformNative();
+                const refused = refusePlatformOperation, track = trackPlatformOperation;
                 const invoke = <T>(operation: () => Promise<T>): Promise<T> => {
                   if (closed) mismatch('installed runtime handle is closed');
                   assertSelection();
@@ -1102,6 +1133,50 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
               }
               await checkedRevalidate();
               return credentialPlatform;
+            });
+          },
+          loadManagerObserver() {
+            return enqueue(async () => {
+              const [major, minor] = process.versions.node.split('.').map(Number);
+              if (!isMainThread || process.platform !== 'linux' || process.arch !== 'x64' ||
+                  !(major > 22 || (major === 22 && minor >= 13)))
+                throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'installed manager observation requires Linux x64 and Node >=22.13');
+              await checkedRevalidate();
+              const native = loadCredentialPlatformNative();
+              if (!managerObserver) {
+                const root = stateRootIdentityFromDescriptor(stateRoot, identity(state));
+                const units = new Set([`cliq-${root.identityDigest}-keeper.service`, `cliq-${root.identityDigest}-supervisor.service`]);
+                const assertObserver = (receiver: unknown, extraArguments: number) => {
+                  if (receiver !== managerObserver || extraArguments) throw new TypeError('installed manager observation requires its original receiver and exact fields');
+                  if (closed) mismatch('installed runtime handle is closed');
+                  if (credentialScopeReserved) throw new CredentialScopeBusyError();
+                  healthy(); assertSelection();
+                };
+                managerObserver = Object.freeze({
+                  currentUser(this: InstalledManagerObserver, ...args: unknown[]) {
+                    assertObserver(this, args.length);
+                    let user: CredentialPlatformUser;
+                    try { user = native.currentUser(); }
+                    catch (error) { return refusePlatformOperation(error); }
+                    assertSelection(); return immutableSnapshot(user);
+                  },
+                  inspect(this: InstalledManagerObserver, unit: string, ...args: unknown[]) {
+                    try {
+                      assertObserver(this, args.length);
+                      // Primitive fixed literals only: objects/accessors,
+                      // arbitrary units, reload, start and secret inputs never
+                      // reach the actual native manager operation.
+                      if (typeof unit !== 'string' || !units.has(unit)) throw new TypeError('installed manager observation requires a fixed selected unit');
+                      // The actual job is registered before returning, with
+                      // the same metadata checks and physical join as the full
+                      // platform. Never enqueue behind its awaiting borrow.
+                      return trackPlatformOperation(Promise.resolve().then(() => native.userManager({ kind: 'inspect', unit })));
+                    } catch (error) { return Promise.reject(error); }
+                  },
+                });
+              }
+              await checkedRevalidate();
+              return managerObserver;
             });
           },
           loadModelBroker() {

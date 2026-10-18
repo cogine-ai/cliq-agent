@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 import { InstalledClientConsumerDeadlineError, InstalledClientDriverError, openInstalledClientConsumer } from './testing/installed-client-consumer.js';
 import { fixtureCommandJoinDiagnostic } from './testing/fixture-command-diagnostic.js';
+import { runOwnedEnrollDiagnostic, type InstalledEnrollDiagnostic } from './testing/installed-enroll-diagnostic.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../../src/kernel/canonical.js';
 import type { AuthorizationGrantSummaryV1, VerifierIdentityCreateRequest } from '../../src/kernel/authorization.js';
 import { decodeCredentialAuthorityOperation, decodeEndpointAuthorityOperation, type EndpointRegistrationV1 } from '../../src/kernel/credential-authority.js';
@@ -537,9 +538,64 @@ async function campaign(filename: string): Promise<void> {
       schemaVersion: 1, kind: 'commit', requestId: nextId(), commandCore: { ...registerCore, commandDigest: digestOmitting(registerCore, 'commandDigest') } }));
     assert.equal(decodeEndpointAuthorityOperation(success(registered, 'operation')).disposition, 'registered');
     const credentialId = 'installed-verifier-credential';
-    const enrolled = decodeCredentialAuthorityOperation(success(credential({ schemaVersion: 1, kind: 'enroll',
-      requestId: nextId(), credentialGrantId: credentialId, purpose: 'model_endpoint', endpointRegistrationId: registration.endpointRegistrationId,
-      secretSubmissionId: 'installed-verifier-fixture-secret', expiresAt: '2099-01-01T00:00:00.000Z' }, secret), 'operation'));
+    const enrollment = { schemaVersion: 1, kind: 'enroll', requestId: nextId(), credentialGrantId: credentialId,
+      purpose: 'model_endpoint', endpointRegistrationId: registration.endpointRegistrationId,
+      secretSubmissionId: 'installed-verifier-fixture-secret', expiresAt: '2099-01-01T00:00:00.000Z' };
+    const enrollDiagnostic = {} as InstalledEnrollDiagnostic;
+    report.enrollDiagnostic = enrollDiagnostic;
+    const summarizeUnits = () => {
+      const precedingFailure = report.commandJoinFailure;
+      const summary = (unit: string) => {
+        const value = show(unit);
+        const activeState = ['active', 'activating', 'inactive', 'deactivating', 'failed', 'reloading', 'maintenance'].includes(value.ActiveState!)
+          ? value.ActiveState : 'other';
+        const subState = ['running', 'dead', 'failed', 'start', 'start-pre', 'start-post', 'exited', 'auto-restart',
+          'stop', 'stop-sigterm', 'stop-sigkill', 'stop-post', 'final-sigterm', 'final-sigkill'].includes(value.SubState!) ? value.SubState : 'other';
+        return { activeState, subState };
+      };
+      try { return { keeper: summary(installed.keeperUnit), supervisor: summary(installed.supervisorUnit) }; }
+      catch { return { kind: 'unavailable' }; }
+      finally {
+        // Diagnostic-only probes do not replace the main command's original
+        // failure classification or invent a new admission requirement.
+        if (precedingFailure === undefined) delete report.commandJoinFailure;
+        else report.commandJoinFailure = precedingFailure;
+      }
+    };
+    // Live sampling performs no synchronous external command. These two fixed
+    // manager cuts lie outside the original 60s enroll lifetime, not inside a
+    // timer callback that could prevent it from firing on time.
+    report.enrollUnitStates = { before: summarizeUnits(), liveObserved: false, afterJoin: { kind: 'unavailable' } };
+    let enrollmentResult: Awaited<ReturnType<typeof runOwnedEnrollDiagnostic>>;
+    const enrollmentStarted = performance.now();
+    try {
+      enrollmentResult = await runOwnedEnrollDiagnostic({ command: { executable: '/usr/sbin/runuser',
+        args: [...prefix, path.join(recipe.stateRoot, 'runtime/bootstrap'), '--bootstrap-credential', canonicalJsonBytes(enrollment).toString('base64url')],
+        env: environment, cwd: ledger.home }, input: secret, uid: ledger.uid,
+        bootstrapImage: path.join(recipe.stateRoot, 'runtime/bootstrap'),
+        installedImage: path.join(recipe.stateRoot, 'runtime/bundles', bundleDigest, 'supervisor'), originalDeadlineMs: 60000,
+        scanner, diagnostic: enrollDiagnostic, observeOwner: () => {
+          try {
+            const owners = inspectInstalledOwnerHistory(recipe.stateRoot).owners;
+            if (owners.length > 2) return { kind: 'unavailable' };
+            const owner = owners.at(-1);
+            return owner ? { kind: owner.state === 'active' ? 'active' : 'terminal', epoch: owner.ownerEpoch } : { kind: 'absent' };
+          } catch (error) {
+            const value = error as { code?: unknown; errcode?: unknown };
+            return { kind: value?.code === 'ERR_SQLITE_ERROR' && typeof value.errcode === 'number' && (value.errcode & 255) === 5 ? 'busy' : 'unavailable' };
+          }
+        } });
+      const enrollmentFailure = fixtureCommandJoinDiagnostic(enrollmentResult, 60000, enrollmentStarted);
+      if (enrollmentFailure) report.commandJoinFailure ??= enrollmentFailure;
+    } finally {
+      if (enrollDiagnostic.processAndPipesJoined && enrollDiagnostic.authJoined) report.enrollUnitStates.afterJoin = summarizeUnits();
+      // A plain Node SQLite path cannot honestly guarantee both no-follow and
+      // the original live WAL identity. Never open the main FD with a wrong
+      // sidecar path, create raw snapshots, or call unreadable state absent.
+      report.enrollCredentialAfterJoin = { kind: 'unavailable', reason: 'no_safe_readonly_wal_reader' };
+    }
+    assert.equal(enrollmentResult.error, undefined, 'actual fixture command must join'); assert.equal(enrollmentResult.signal, null);
+    const enrolled = decodeCredentialAuthorityOperation(success(enrollmentResult, 'operation'));
     assert.equal(enrolled.phase, 'committed'); assert.equal(enrolled.ownerPrincipalId, principal); assert.equal(enrolled.attempt, 1);
     const enrolledPlatform = observeSecretService(); assert.equal(enrolledPlatform.items.length, 1);
     assert.equal(enrolledPlatform.servicePid, platform.servicePid); assert.equal(enrolledPlatform.nameOwner, platform.nameOwner);

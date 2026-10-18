@@ -9,7 +9,8 @@ import { immutableSnapshot } from '../model/immutable.js';
 import { decodeCredentialPlatformUser, decodeUserManagerObservation, type CredentialPlatformUser,
   type InstalledUnitObservation, type NativeCredentialPlatformBinding, type UserManagerObservation } from './credential-platform.js';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
-import { loadInstalledCredentialPlatform, withHeldInstalledRuntime, type HeldInstalledRuntime } from './installed-runtime.js';
+import { loadInstalledCredentialPlatform, loadInstalledManagerObserver, withHeldInstalledRuntime,
+  type HeldInstalledRuntime, type InstalledManagerObserver } from './installed-runtime.js';
 import { stateRootIdentityFromDescriptor } from './native-owner.js';
 
 // The initial ELF must not consume these loading inputs before the signed
@@ -196,11 +197,13 @@ function checkEffectiveUnit(observation: UserManagerObservation, profile: Profil
   return unit;
 }
 
-async function withProfiles<T>(selected: HeldInstalledRuntime, create: boolean,
-  operation: (input: { platform: NativeCredentialPlatformBinding; user: CredentialPlatformUser; profiles: Profiles;
+async function withProfiles<T, P extends NativeCredentialPlatformBinding | InstalledManagerObserver>(selected: HeldInstalledRuntime,
+  create: boolean, platform: P,
+  operation: (input: { platform: P; user: CredentialPlatformUser; profiles: Profiles;
     scope: ProfileScope; directory: Directory; directoryPath: string; stateRoot: string }) => Promise<T>): Promise<T> {
-  // Genuine selection lookup precedes currentUser or any caller property.
-  const platform = await loadInstalledCredentialPlatform(selected); healthy();
+  // Both fixed loaders look up the genuine selection before observing caller
+  // properties. The ordinary client supplies no mutating platform capability.
+  healthy();
   const user = decodeCredentialPlatformUser(platform.currentUser());
   if (process.platform !== 'linux' || user.uid !== process.geteuid!() || user.gid !== process.getegid!() || normalizeAbsolutePath(user.home) !== user.home)
     refuse('installed service setup requires the actual same-user Linux passwd home');
@@ -232,7 +235,7 @@ async function withProfiles<T>(selected: HeldInstalledRuntime, create: boolean,
 /** Explicit same-user setup only: create missing fixed bytes, fsync, reload.
  * It never overwrites edited profiles, enables units or starts the manager. */
 export async function installServices(selected: HeldInstalledRuntime): Promise<Readonly<{ keeperUnit: string; supervisorUnit: string }>> {
-  return withProfiles(selected, true, async ({ platform, user, profiles, scope, directoryPath }) => {
+  return withProfiles(selected, true, await loadInstalledCredentialPlatform(selected), async ({ platform, user, profiles, scope, directoryPath }) => {
     checkedManager(await platform.userManager({ kind: 'reload' }), 'reload', user); await scope.assertHeld();
     for (const profile of [profiles.keeper, profiles.supervisor])
       checkEffectiveUnit(checkedManager(await platform.userManager({ kind: 'inspect', unit: profile.unit }), 'inspect', user), profile, profiles, directoryPath);
@@ -260,18 +263,23 @@ async function keeperReadyHint(stateRoot: string, uid: number): Promise<boolean>
 }
 
 /** Fixed internal friend: callers cannot choose a unit, manager, PID or profile.
- * Ordinary auth only starts already-compatible profiles, never installs/reloads. */
+ * Ordinary clients observe only; explicit credential ensure may start already
+ * compatible profiles, never install or reload them. */
 export async function observeInstalledCredentialSupervisor(selected: HeldInstalledRuntime, startIfNeeded = false): Promise<InstalledCredentialSupervisorObservation> {
-  return withProfiles(selected, false, async ({ platform, user, profiles, scope, directoryPath, stateRoot }) => {
+  const credentialPlatform = startIfNeeded ? await loadInstalledCredentialPlatform(selected) : undefined;
+  const platform = credentialPlatform ?? await loadInstalledManagerObserver(selected);
+  return withProfiles(selected, false, platform, async ({ platform, user, profiles, scope, directoryPath, stateRoot }) => {
     const inspect = async (profile: Profile) => {
-      const observation = checkedManager(await platform.userManager({ kind: 'inspect', unit: profile.unit }), 'inspect', user);
+      const result = 'inspect' in platform ? await platform.inspect(profile.unit)
+        : await platform.userManager({ kind: 'inspect', unit: profile.unit });
+      const observation = checkedManager(result, 'inspect', user);
       return { observation, unit: checkEffectiveUnit(observation, profile, profiles, directoryPath) };
     };
     let keeper = await inspect(profiles.keeper), supervisor = await inspect(profiles.supervisor);
-    if (startIfNeeded && supervisor.unit.ActiveState !== 'active' && supervisor.unit.ActiveState !== 'activating') {
+    if (credentialPlatform && supervisor.unit.ActiveState !== 'active' && supervisor.unit.ActiveState !== 'activating') {
       if (keeper.unit.ActiveState === 'failed') refuse('installed keeper failed; explicit containment recovery is required');
       if (keeper.unit.ActiveState !== 'active' && keeper.unit.ActiveState !== 'activating') {
-        checkedManager(await platform.userManager({ kind: 'start', unit: profiles.keeper.unit }), 'start', user);
+        checkedManager(await credentialPlatform.userManager({ kind: 'start', unit: profiles.keeper.unit }), 'start', user);
         keeper = await inspect(profiles.keeper);
       }
       // Type=exec orders only initial ELF startup, not keeper publication.
@@ -293,7 +301,7 @@ export async function observeInstalledCredentialSupervisor(selected: HeldInstall
           keeper.unit.ExecMainPID !== readyKeeper.ExecMainPID || keeper.unit.InvocationID !== readyKeeper.InvocationID ||
           keeper.unit.ControlGroup !== readyKeeper.ControlGroup)
         refuse('installed keeper invocation changed after its startup scheduling hint');
-      checkedManager(await platform.userManager({ kind: 'start', unit: profiles.supervisor.unit }), 'start', user);
+      checkedManager(await credentialPlatform.userManager({ kind: 'start', unit: profiles.supervisor.unit }), 'start', user);
       keeper = await inspect(profiles.keeper); supervisor = await inspect(profiles.supervisor);
     }
     if (!canonicalJsonBytes(keeper.observation.bus).equals(canonicalJsonBytes(supervisor.observation.bus)) ||

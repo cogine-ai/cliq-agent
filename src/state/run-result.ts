@@ -10,7 +10,7 @@ import { advanceTimeFence, sampleCanonicalNow, type TimeFenceAdvance } from './c
 import { decodeAdmittedContext, decodeSessionProjection } from './decoders.js';
 import { KernelStorageError, stateOperation } from './errors.js';
 import { assertRetiredGenerationCut } from './generation-retirement.js';
-import { readRecoveryClosure } from './recovery-closure.js';
+import { readRecoveryClosure, type RecoveryClosurePhase } from './recovery-closure.js';
 import { readInvocationJournal } from './repositories/journal.js';
 import { readWorkerLaunchesForRun } from './repositories/worker-launches.js';
 import { readWorkspaceGenerationsForRun } from './repositories/workspace-generations.js';
@@ -24,7 +24,7 @@ import { appendRunStateEvent, requireHealthyFence } from './reducers/invocation.
 /** Fixed, inert progress labels for the installed owner's shutdown diagnosis.
  * They carry no result data, permission, time fence or recovery evidence. */
 export type RunResultPhase = 'result_recovery' | 'result_basis' | 'result_finalization' |
-  'result_publication' | 'result_session' | 'result_commit';
+  'result_publication' | 'result_session' | 'result_commit' | `result_recovery_${RecoveryClosurePhase}`;
 
 /** Store-derived completion only. A no-required-check result is explicitly unverified;
  * this module grants no execution permission and accepts no caller proof/list. */
@@ -40,7 +40,7 @@ export function loadRunResult(driver: SqliteDriver, artifacts: ArtifactCatalog, 
   async function load() {
     assertActiveStateOwner(driver, owner);
     phase('result_recovery');
-    const cut = await readRecoveryClosure(driver, artifacts, runId);
+    const cut = await readRecoveryClosure(driver, artifacts, runId, value => phase(`result_recovery_${value}`));
     if (cut.run.specRef !== admitted.specRef || cut.run.createdAt !== admitted.createdAt || cut.run.deadlineAt !== admitted.deadlineAt ||
         canonicalSha256(cut.runSpec) !== canonicalSha256(spec)) throw new TypeError('result authority no longer belongs to this Run');
     phase('result_basis');

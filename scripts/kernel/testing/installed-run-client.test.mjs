@@ -32,8 +32,10 @@ test('stop diagnosis retains only fixed phases and bounded counts, never journal
     { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
   const counters = { driverTasks: 1, agentLoads: 0, admissions: 0, modelOperations: 0, modelCompletions: 0, modelClosures: 0 };
   const valid = { diagnosticOnly: true, scope: 'installed-shutdown-progress', phases: { result_recovery: 1 }, ...counters };
+  const recovery = { ...valid, phases: Object.fromEntries(['spec', 'context', 'journal', 'generations', 'history', 'seals', 'terminal']
+    .map(stage => [`result_recovery_${stage}`, 1])) };
   const untrusted = [valid, { ...valid, phases: { arbitrary_payload: 1 } }, { ...valid, driverTasks: 1001 },
-    { ...valid, phases: { result_commit: -1 } }, { ...valid, modelClosures: '1' }];
+    { ...valid, phases: { result_commit: -1 } }, { ...valid, modelClosures: '1' }, recovery];
   let scans = 0, calls = 0;
   const context = { Buffer, ledger: { uid: 12345 }, environment: {}, parseJsonStrict: JSON.parse,
     scanBytes: bytes => { assert(Buffer.isBuffer(bytes)); scans++; },
@@ -43,7 +45,7 @@ test('stop diagnosis retains only fixed phases and bounded counts, never journal
   vm.runInNewContext(code, context);
   const result = JSON.parse(JSON.stringify(context.inspectStop('owned.service', '123')));
   assert.deepEqual(result, { diagnosticOnly: true, available: true, refusals: [],
-    progress: [{ phases: { result_recovery: 1 }, ...counters }] });
+    progress: [{ phases: { result_recovery: 1 }, ...counters }, { phases: recovery.phases, ...counters }] });
   assert.equal(JSON.stringify(result).includes('do-not-retain-this-content'), false);
   assert.equal(calls, 1); assert.equal(scans, 2);
   assert.deepEqual(JSON.parse(JSON.stringify(context.inspectStop('owned.service', 'untrusted-pid'))),
