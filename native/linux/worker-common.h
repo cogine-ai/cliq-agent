@@ -2,6 +2,7 @@
 #define CLIQ_WORKER_COMMON_H
 
 #include "worker-protocol.h"
+#include "verifier-setup.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -85,6 +86,7 @@ static inline bool cliq_receive_flags(int socket, struct cliq_worker_packet *pac
     bool valid = ancillary_valid && received == (ssize_t)sizeof(*packet) &&
         (message.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) == 0 &&
         packet->magic == CLIQ_WORKER_MAGIC && packet->version == CLIQ_WORKER_VERSION &&
+        (packet->command == CLIQ_VERIFIER_SETUP || packet->status != 0 || cliq_verifier_setup_empty(&packet->setup)) &&
         packet->nonce[sizeof(packet->nonce) - 1] == '\0' && packet->activation_nonce[sizeof(packet->activation_nonce) - 1] == '\0' &&
         packet->start_token[sizeof(packet->start_token) - 1] == '\0' && packet->init_start_token[sizeof(packet->init_start_token) - 1] == '\0' &&
         packet->init_native_start_token[sizeof(packet->init_native_start_token) - 1] == '\0' &&

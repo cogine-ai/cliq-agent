@@ -7,7 +7,7 @@
 #include <stdint.h>
 
 #define CLIQ_WORKER_MAGIC UINT32_C(0x43575131)
-#define CLIQ_WORKER_VERSION UINT32_C(3)
+#define CLIQ_WORKER_VERSION UINT32_C(4)
 #define CLIQ_WORKER_MAX_SCOPES 16
 #define CLIQ_WORKER_MAX_FDS 40
 #define CLIQ_WORKER_TOKEN_BYTES 192
@@ -31,7 +31,17 @@ enum cliq_worker_command {
     CLIQ_CREATE_VERIFIER = 14,
     CLIQ_RELEASE_VERIFIER = 15,
     CLIQ_POLL_VERIFIER = 16,
-    CLIQ_VERIFIER_RESULT = 17
+    CLIQ_VERIFIER_RESULT = 17,
+    CLIQ_VERIFIER_SETUP = 18
+};
+
+/* Private pre-READY diagnosis only. Never process, release, time or death
+ * authority; successful replies must retain all-zero diagnostic fields. */
+struct cliq_verifier_setup_observation {
+    uint32_t stage;
+    /* -2 means this wait did not call poll; otherwise its actual return. */
+    int32_t poll_result;
+    uint32_t poll_revents, poll_errno, elapsed_ms;
 };
 
 struct cliq_worker_packet {
@@ -41,6 +51,7 @@ struct cliq_worker_packet {
     uint32_t scope;
     uint32_t parent;
     uint32_t status;
+    struct cliq_verifier_setup_observation setup;
     uint64_t max_processes;
     uint64_t memory_bytes;
     uint64_t cpu_quota;

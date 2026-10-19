@@ -9,7 +9,7 @@ import { qualifyGuestToolchainExtraction } from './testing/guest-toolchain-nativ
 import { qualifyLinuxGuestVerifier } from './testing/guest-verifier-native.js';
 import { prepareSupervisorSeaCarrier } from './testing/supervisor-sea-builder.js';
 import { joinGuestExtractionChild } from './testing/guest-campaign-child.js';
-import { readGuestVerifierBoundaryFailure, readGuestVerifierOutputFailure } from './testing/guest-verifier-diagnostics.js';
+import { readGuestVerifierBoundaryFailure, readGuestVerifierOutputFailure, readGuestVerifierPreReadyFailure } from './testing/guest-verifier-diagnostics.js';
 
 // The guest raw image is never mounted. CI's separately disposable ext4
 // StateRoot volume is a fixture, not a runtime guest-image loader/authority.
@@ -72,10 +72,12 @@ if (mode === '--prepare') {
   } catch (error) {
     const boundaryFailure = phase === 'guest_verifier' ? readGuestVerifierBoundaryFailure(error) : undefined;
     const outputFailure = phase === 'guest_verifier' ? readGuestVerifierOutputFailure(error) : undefined;
+    const preReadyFailure = phase === 'guest_verifier' ? readGuestVerifierPreReadyFailure(error) : undefined;
     if (mode === '--run') await writeFile(path.join(reportRoot, 'guest-campaign-failure.json'), JSON.stringify({ schemaVersion: 1,
       format: 'cliq-real-guest-campaign-failure-v1', ...identity, phase, qualified: false,
       ...(boundaryFailure ? { boundaryFailure } : {}),
       ...(outputFailure ? { outputFailure } : {}),
+      ...(preReadyFailure ? { preReadyFailure } : {}),
       source: 'fixed failure metadata only; no raw log, StateRoot, key or process proof is serialized' }), { flag: 'wx', mode: 0o600 });
     throw error;
   }

@@ -13,7 +13,7 @@ function run(executable, arguments_) {
   if (result.status !== 0) throw new Error('Portable native worker contract failed');
 }
 try {
-  for (const name of ['edit-text', 'verifier-node']) {
+  for (const name of ['edit-text', 'verifier-node', 'verifier-setup']) {
     const binary = path.join(staging, `${name}-test`);
     run(process.env.CLIQ_WORKER_TEST_CC ?? 'cc', ['-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
       path.join(repository, 'native/linux', `${name}.test.c`), '-o', binary]);

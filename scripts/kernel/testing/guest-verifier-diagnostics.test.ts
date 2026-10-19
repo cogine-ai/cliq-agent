@@ -7,6 +7,63 @@ import path from 'node:path';
 import test from 'node:test';
 import { runInNewContext } from 'node:vm';
 import { readGuestVerifierBoundaryFailure, readGuestVerifierOutputFailure, recordGuestVerifierBoundaryFailure } from './guest-verifier-diagnostics.js';
+import { readGuestVerifierPreReadyFailure } from './guest-verifier-diagnostics.js';
+import { ResourceRetirementError } from '../../../src/state/errors.js';
+
+const preReadyMessage = 'native controller reply failed: request=14 requestScope=2 expected=8 expectedScope=2 '
+  + 'received=14 receivedScope=2 status=1011 fds=0 receiveErrno=0 boundary=3 '
+  + 'setupStage=2 setupPollResult=0 setupPollRevents=0 setupPollErrno=0 setupElapsedMs=5000';
+
+test('pre-READY diagnosis finds one closed native failure without replacing the original retirement error', () => {
+  const native = new Error(preReadyMessage), join = new Error('unretained original cleanup diagnostic');
+  const aggregate = new AggregateError([native, join], 'unretained original construction diagnostic');
+  const original = new ResourceRetirementError('unretained original retirement diagnostic', aggregate);
+  assert.deepEqual(readGuestVerifierPreReadyFailure(original), { stage: 'node_check', rejection: 'ready_wait',
+    pollResult: 0, pollRevents: 0, pollErrno: 0, elapsedMs: 5000 });
+  assert.equal(original.cause, aggregate); assert.equal(aggregate.errors[0], native);
+  assert.equal(original.code, 'RECOVERY_REQUIRED');
+  assert.equal(readGuestVerifierPreReadyFailure(new Error('unrelated')), undefined);
+});
+
+test('pre-READY diagnosis retains actual poll events without calling before_ready execution evidence', () => {
+  for (const [stage, name] of [[0, 'not_observed'], [1, 'entry'], [2, 'node_check'], [3, 'node_bind'],
+    [4, 'confinement'], [5, 'before_ready']] as const) {
+    const message = preReadyMessage.replace('status=1011', 'status=1012').replace('setupStage=2', 'setupStage=' + stage)
+      .replace('setupPollResult=0', 'setupPollResult=1').replace('setupPollRevents=0', 'setupPollRevents=16');
+    assert.deepEqual(readGuestVerifierPreReadyFailure(new Error(message)), { stage: name, rejection: 'ready_receive',
+      pollResult: 1, pollRevents: 16, pollErrno: 0, elapsedMs: 5000 });
+  }
+  const interrupted = preReadyMessage.replace('setupPollResult=0', 'setupPollResult=-1').replace('setupPollErrno=0', 'setupPollErrno=4');
+  assert.equal(readGuestVerifierPreReadyFailure(new Error(interrupted))?.pollErrno, 4);
+  const notPolled = preReadyMessage.replace('setupPollResult=0', 'setupPollResult=-2');
+  assert.equal(readGuestVerifierPreReadyFailure(new Error(notPolled))?.pollResult, -2);
+});
+
+test('pre-READY diagnosis refuses malformed, conflicting, cyclic-overflow and accessor data', () => {
+  for (const message of [preReadyMessage + ' unretained', 'unretained ' + preReadyMessage,
+    preReadyMessage.replace('request=14', 'request=4'), preReadyMessage.replace('status=1011', 'status=1013'),
+    preReadyMessage.replace('expectedScope=2', 'expectedScope=3'), preReadyMessage.replace(/Scope=2/gu, 'Scope=16'),
+    preReadyMessage.replace('setupStage=2', 'setupStage=6'), preReadyMessage.replace('setupStage=2', 'setupStage=02'),
+    preReadyMessage.replace('setupPollResult=0', 'setupPollResult=2'), preReadyMessage.replace('setupPollResult=0', 'setupPollResult=-1'),
+    preReadyMessage.replace('setupPollErrno=0', 'setupPollErrno=1'), preReadyMessage.replace('setupPollErrno=0', 'setupPollErrno=4096'),
+    preReadyMessage.replace('setupPollRevents=0', 'setupPollRevents=65536'), preReadyMessage.replace('setupElapsedMs=5000', 'setupElapsedMs=4294967296'),
+    preReadyMessage.replace('setupElapsedMs=5000', 'setupElapsedMs=-1')]) {
+    assert.equal(readGuestVerifierPreReadyFailure(new Error(message)), undefined);
+  }
+  const first = new Error(preReadyMessage);
+  assert.equal(readGuestVerifierPreReadyFailure(new AggregateError([first, new Error(preReadyMessage)])), undefined);
+  assert.equal(readGuestVerifierPreReadyFailure(new AggregateError(Array.from({ length: 17 }, () => first))), undefined);
+  let called = false;
+  const accessor = new Error('unretained');
+  Object.defineProperty(accessor, 'message', { get() { called = true; throw new Error('must not invoke'); } });
+  Object.defineProperty(accessor, 'cause', { get() { called = true; throw new Error('must not invoke'); } });
+  assert.equal(readGuestVerifierPreReadyFailure(accessor), undefined); assert.equal(called, false);
+  const cyclic = new Error('unretained', { cause: first }); first.cause = cyclic;
+  assert.equal(readGuestVerifierPreReadyFailure(cyclic)?.stage, 'node_check');
+  let deep: Error = first;
+  for (let index = 0; index < 10; index++) deep = new Error('unretained', { cause: deep });
+  assert.equal(readGuestVerifierPreReadyFailure(deep), undefined);
+});
 
 test('a failed boundary assertion retains only its last fixed stdout stage and actual outcome', () => {
   const failure = new Error('unretained TAP and arbitrary diagnostic text');

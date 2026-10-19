@@ -12,6 +12,7 @@
 #include "worker-reservation.h"
 #include "guest-toolchain.h"
 #include "verifier-protocol.h"
+#include "verifier-setup.h"
 #include <linux/magic.h>
 #include <linux/sched.h>
 #include <poll.h>
@@ -409,14 +410,21 @@ static bool begin_request(struct controller *controller, struct native_scope *sc
 static int poll_failure(struct controller *controller, struct native_scope *scope, uint32_t expected,
                         const struct cliq_worker_packet *response, size_t descriptors, int receive_errno,
                         unsigned int boundary) {
-    char message[384];
+    char message[512];
+    const struct cliq_verifier_setup_observation empty = {0};
+    const struct cliq_verifier_setup_observation *setup = response && scope &&
+        controller->pending == CLIQ_CREATE_VERIFIER && expected == CLIQ_WORKER_READY &&
+        response->command == CLIQ_CREATE_VERIFIER && response->scope == scope->id &&
+        (response->status == 1011 || response->status == 1012) && cliq_verifier_setup_valid(&response->setup) ? &response->setup : &empty;
     int length = snprintf(message, sizeof(message),
         "native controller reply failed: request=%u requestScope=%u expected=%u expectedScope=%u "
-        "received=%u receivedScope=%u status=%u fds=%zu receiveErrno=%d boundary=%u",
+        "received=%u receivedScope=%u status=%u fds=%zu receiveErrno=%d boundary=%u "
+        "setupStage=%u setupPollResult=%d setupPollRevents=%u setupPollErrno=%u setupElapsedMs=%u",
         (unsigned int)controller->pending, scope && controller->pending_scope == scope ? scope->id : 0,
         (unsigned int)expected, scope ? scope->id : 0,
         response ? (unsigned int)response->command : 0, response ? (unsigned int)response->scope : 0,
-        response ? (unsigned int)response->status : 0, descriptors, receive_errno, boundary);
+        response ? (unsigned int)response->status : 0, descriptors, receive_errno, boundary,
+        setup->stage, setup->poll_result, setup->poll_revents, setup->poll_errno, setup->elapsed_ms);
     (void)failure(controller->env, length >= 0 && (size_t)length < sizeof(message) ? message :
         "native controller reply failed; diagnostic formatting unavailable");
     return -1;
@@ -435,7 +443,8 @@ static int poll_response(struct controller *controller, struct native_scope *sco
         return poll_failure(controller, scope, expected, NULL, 0, receive_errno, 2);
     }
     for (size_t i = 0; i < count; i++) close(fds[i]);
-    if (count != 0 || response->status != 0 || response->command != expected || response->scope != (scope ? scope->id : 0)) {
+    if (count != 0 || response->status != 0 || response->command != expected || response->scope != (scope ? scope->id : 0) ||
+        !cliq_verifier_setup_empty(&response->setup)) {
         (void)close_controller(controller);
         return poll_failure(controller, scope, expected, response, count, 0, 3);
     }

@@ -65,7 +65,8 @@ int main(int argc, char **argv) {
     assert(cliq_verifier_node_open(directory, UINT64_C(268435457), digest, &held) < 0);
     assert(cliq_verifier_node_open(directory, 3,
         "aa7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", &held) < 0);
-    assert(cliq_verifier_node_open(directory, 3, "", &held) < 0);
+    char empty_digest[65] = "";
+    assert(cliq_verifier_node_open(directory, 3, empty_digest, &held) < 0);
     assert(cliq_verifier_node_open(directory, 3,
         "Ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", &held) < 0);
 

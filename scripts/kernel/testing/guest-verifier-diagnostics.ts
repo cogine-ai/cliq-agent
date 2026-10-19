@@ -16,6 +16,49 @@ type SpawnFailure = Readonly<{ spawnSyscall: 'spawn' | 'other_or_absent';
 type OutputFailure = Readonly<{ outcome: VerificationReceipt['outcome']; stdoutBytes: number; stderrBytes: number;
   markerStatus: MarkerStatus; reportedErrorCodes: readonly typeof errorCodes[number][] } & SpawnFailure>;
 const outputFailures = new WeakMap<Error, OutputFailure>();
+const setupStages = ['not_observed', 'entry', 'node_check', 'node_bind', 'confinement', 'before_ready'] as const;
+type PreReadyFailure = Readonly<{ stage: typeof setupStages[number]; rejection: 'ready_wait' | 'ready_receive';
+  pollResult: number; pollRevents: number; pollErrno: number; elapsedMs: number }>;
+
+/** Fixed native rejection metadata only, never READY, release or retirement
+ * evidence. Preserve the original error (including uncertain resource join).
+ * Bounded own-data traversal does not invoke arbitrary exception getters. */
+export function readGuestVerifierPreReadyFailure(error: unknown): PreReadyFailure | undefined {
+  const pending = [{ value: error, depth: 0 }], seen = new Set<Error>();
+  let result: PreReadyFailure | undefined, matches = 0;
+  try {
+    while (pending.length) {
+      const { value, depth } = pending.pop()!;
+      if (!(value instanceof Error) || seen.has(value)) continue;
+      if (depth > 8 || seen.size >= 32) return;
+      seen.add(value);
+      const message = Object.getOwnPropertyDescriptor(value, 'message')?.value;
+      if (typeof message === 'string' && message.length <= 768) {
+        const match = /^native controller reply failed: request=14 requestScope=([1-9][0-9]?) expected=8 expectedScope=\1 received=14 receivedScope=\1 status=(1011|1012) fds=0 receiveErrno=0 boundary=3 setupStage=([0-5]) setupPollResult=(-2|-1|0|1) setupPollRevents=(0|[1-9][0-9]{0,4}) setupPollErrno=(0|[1-9][0-9]{0,3}) setupElapsedMs=(0|[1-9][0-9]{0,9})$/u.exec(message);
+        if (match) {
+          const [scope, status, stage, pollResult, pollRevents, pollErrno, elapsedMs] = match.slice(1).map(Number);
+          if (scope! >= 16 || pollRevents! > 65_535 || pollErrno! > 4095 || elapsedMs! > 0xffff_ffff ||
+              pollResult! !== 1 && pollRevents !== 0 || (pollResult === -1) !== (pollErrno! > 0)) return;
+          if (++matches !== 1) return;
+          result = Object.freeze({ stage: setupStages[stage!]!, rejection: status === 1011 ? 'ready_wait' : 'ready_receive',
+            pollResult: pollResult!, pollRevents: pollRevents!, pollErrno: pollErrno!, elapsedMs: elapsedMs! });
+        }
+      }
+      const cause = Object.getOwnPropertyDescriptor(value, 'cause');
+      if (cause && 'value' in cause) pending.push({ value: cause.value, depth: depth + 1 });
+      if (value instanceof AggregateError) {
+        const errors = Object.getOwnPropertyDescriptor(value, 'errors')?.value;
+        if (!Array.isArray(errors) || errors.length > 16) return;
+        for (let index = 0; index < errors.length; index++) {
+          const item = Object.getOwnPropertyDescriptor(errors, String(index));
+          if (!item || !('value' in item)) return;
+          pending.push({ value: item.value, depth: depth + 1 });
+        }
+      }
+    }
+    return result;
+  } catch { return undefined; }
+}
 
 type ReportedError = { format: 'tap' | 'spec'; message: string; code: string; syscall?: string; path?: string };
 const absent: SpawnFailure = { spawnSyscall: 'other_or_absent', spawnTarget: 'other_or_absent',

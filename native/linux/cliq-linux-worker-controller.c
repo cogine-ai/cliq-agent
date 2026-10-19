@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "worker-common.h"
 #include "worker-reservation.h"
+#include "verifier-setup.h"
 #include <dirent.h>
 #include <poll.h>
 #include <signal.h>
@@ -531,11 +532,31 @@ static bool spawn_worker(struct cliq_worker_packet *request, int passed[CLIQ_WOR
     if (!started) return false;
     response->status = CLIQ_SPAWN_INITIAL_SEND;
     if (!cliq_send(scope->channel, request, input >= 0 ? &input : NULL, input >= 0 ? 1 : 0)) return false;
-    response->status = CLIQ_SPAWN_READY_WAIT;
-    if (!readable(scope->channel, OBSERVATION_TIMEOUT_MS)) return false;
     struct cliq_worker_packet ready; size_t extras;
-    response->status = CLIQ_SPAWN_READY_RECEIVE;
-    if (!cliq_receive(scope->channel, &ready, NULL, 0, &extras) || ready.command != CLIQ_WORKER_READY) return false;
+    if (verifier) {
+        const int64_t started = cliq_verifier_setup_now();
+        if (started < 0 || started > INT64_MAX - OBSERVATION_TIMEOUT_MS) return false;
+        const int64_t deadline = started + OBSERVATION_TIMEOUT_MS;
+        uint32_t stage = 0;
+        for (;;) {
+            response->status = CLIQ_SPAWN_READY_WAIT;
+            if (!cliq_verifier_setup_readable(scope->channel, started, deadline, &response->setup, &shutdown_requested)) return false;
+            response->status = CLIQ_SPAWN_READY_RECEIVE;
+            if (!cliq_receive(scope->channel, &ready, NULL, 0, &extras)) return false;
+            if (ready.command == CLIQ_VERIFIER_SETUP) {
+                if (!cliq_verifier_setup_accept(&ready, request->scope, &stage)) return false;
+                response->setup.stage = stage; continue;
+            }
+            if (ready.command != CLIQ_WORKER_READY || !cliq_verifier_setup_empty(&ready.setup)) return false;
+            break;
+        }
+    } else {
+        response->status = CLIQ_SPAWN_READY_WAIT;
+        if (!readable(scope->channel, OBSERVATION_TIMEOUT_MS)) return false;
+        response->status = CLIQ_SPAWN_READY_RECEIVE;
+        if (!cliq_receive(scope->channel, &ready, NULL, 0, &extras) || ready.command != CLIQ_WORKER_READY ||
+            !cliq_verifier_setup_empty(&ready.setup)) return false;
+    }
     response->status = CLIQ_SPAWN_PROCESS_INSPECTION;
     if (!inspect_processes(scope, &ready)) return false;
     scope->identity = ready;

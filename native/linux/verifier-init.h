@@ -3,6 +3,7 @@
 
 #include "verifier-protocol.h"
 #include "verifier-node.h"
+#include "verifier-setup.h"
 #include <linux/audit.h>
 #include <linux/capability.h>
 #include <linux/filter.h>
@@ -168,7 +169,13 @@ static bool verifier_mount_observed(const char *target, bool readonly, bool exec
     free(bytes); return valid && found;
 }
 
-static bool verifier_node_mount(const struct cliq_verifier_config *config) {
+static bool verifier_setup_stage(uint32_t scope, uint32_t stage) {
+    struct cliq_worker_packet progress = cliq_verifier_setup_packet(scope, stage);
+    return cliq_send(3, &progress, NULL, 0);
+}
+
+static bool verifier_node_mount(const struct cliq_verifier_config *config, uint32_t scope) {
+    if (!verifier_setup_stage(scope, CLIQ_VERIFIER_SETUP_NODE_CHECK)) return false;
     int usr = open("/usr", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     int directory = usr >= 0 ? openat(usr, "bin", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
     bool valid = directory >= 0;
@@ -181,15 +188,16 @@ static bool verifier_node_mount(const struct cliq_verifier_config *config) {
     char source[64];
     int length = snprintf(source, sizeof(source), "/proc/self/fd/%d", image);
     valid = valid && image >= 0 && length > 0 && (size_t)length < sizeof(source) &&
-        cliq_verifier_node_current(directory, image, &held) && mount(source, "/usr/bin/node", NULL, MS_BIND, NULL) == 0 &&
+        cliq_verifier_node_current(directory, image, &held) && verifier_setup_stage(scope, CLIQ_VERIFIER_SETUP_NODE_BIND) &&
+        mount(source, "/usr/bin/node", NULL, MS_BIND, NULL) == 0 &&
         cliq_verifier_node_current(directory, image, &held);
     if (image >= 0 && close(image) != 0) valid = false;
     if (directory >= 0 && close(directory) != 0) valid = false;
     return valid;
 }
 
-static bool verifier_confinement(const struct cliq_verifier_config *config) {
-    if (!verifier_node_mount(config) ||
+static bool verifier_confinement(const struct cliq_verifier_config *config, uint32_t scope) {
+    if (!verifier_node_mount(config, scope) || !verifier_setup_stage(scope, CLIQ_VERIFIER_SETUP_CONFINEMENT) ||
         !verifier_mount_attributes("/", AT_RECURSIVE, MOUNT_ATTR_NOEXEC | MOUNT_ATTR_NOSUID, 0) ||
         !verifier_mount_attributes("/", 0, MOUNT_ATTR_RDONLY | MOUNT_ATTR_NODEV, 0) ||
         !verifier_mount_attributes("/work", AT_RECURSIVE, MOUNT_ATTR_RDONLY | MOUNT_ATTR_NOEXEC | MOUNT_ATTR_NODEV, 0) ||
@@ -209,11 +217,12 @@ static bool verifier_confinement(const struct cliq_verifier_config *config) {
 }
 
 static int verifier_namespace(struct cliq_worker_packet request, int input) {
+    if (!verifier_setup_stage(request.scope, CLIQ_VERIFIER_SETUP_ENTRY)) return 70;
     struct cliq_verifier_config *config = calloc(1, sizeof(*config));
     if (!config) return 70;
     bool valid = verifier_read_config(input, config);
     if (close(input) != 0) valid = false;
-    if (!valid || !verifier_confinement(config)) { free(config); return 70; }
+    if (!valid || !verifier_confinement(config, request.scope)) { free(config); return 70; }
     int barrier[2], execution[2];
     if (pipe2(barrier, O_CLOEXEC) != 0) { free(config); return 70; }
     if (pipe2(execution, O_CLOEXEC | O_NONBLOCK) != 0) { close(barrier[0]); close(barrier[1]); free(config); return 70; }
@@ -242,7 +251,8 @@ static int verifier_namespace(struct cliq_worker_packet request, int input) {
     if (!cliq_process_token(child, ready.start_token) || !cliq_process_token(1, ready.init_start_token) ||
         stat("/proc/self/ns/pid", &namespace) != 0) { free(config); return 70; }
     ready.pid_namespace_inode = (uint64_t)namespace.st_ino;
-    if (!cliq_send(3, &ready, NULL, 0)) { free(config); return 70; }
+    if (!verifier_setup_stage(request.scope, CLIQ_VERIFIER_SETUP_BEFORE_READY) ||
+        !cliq_send(3, &ready, NULL, 0)) { free(config); return 70; }
     size_t count;
     if (!cliq_receive(3, &request, NULL, 0, &count) || request.command != CLIQ_RELEASE_VERIFIER) { free(config); return 70; }
     if (write(barrier[1], "1", 1) != 1 || close(barrier[1]) != 0) { free(config); return 70; }

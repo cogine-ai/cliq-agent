@@ -2,6 +2,7 @@
  * synthetic descriptor, kernel response, or weakened ancillary/frame limit. */
 #define _GNU_SOURCE
 #include "worker-common.h"
+#include "verifier-setup.h"
 #include <assert.h>
 #include <dirent.h>
 
@@ -100,6 +101,26 @@ int main(void) {
     assert(!cliq_receive(channel[1], &packet, &untouched, CLIQ_WORKER_MAX_FDS + 1, &count) &&
         errno == EINVAL && count == 0 && untouched == -1234567);
     assert(open_descriptors() == before);
+    /* The same production SCM receiver accepts only the fixed, ordered setup
+     * data. An unexpected right is still retired and refuses the whole frame. */
+    uint32_t stage = 0;
+    for (uint32_t next = CLIQ_VERIFIER_SETUP_ENTRY; next <= CLIQ_VERIFIER_SETUP_BEFORE_READY; next++) {
+        struct cliq_worker_packet progress = cliq_verifier_setup_packet(2, next);
+        assert(cliq_send(channel[0], &progress, NULL, 0));
+        assert(cliq_receive(channel[1], &packet, NULL, 0, &count) && count == 0);
+        assert(cliq_verifier_setup_accept(&packet, 2, &stage) && stage == next);
+    }
+    struct cliq_worker_packet progress = cliq_verifier_setup_packet(2, CLIQ_VERIFIER_SETUP_ENTRY);
+    assert(cliq_send(channel[0], &progress, &descriptor, 1));
+    assert(!cliq_receive(channel[1], &packet, NULL, 0, &count) && count == 0 && errno == EPROTO);
+    assert(open_descriptors() == before);
+    assert(cliq_send(channel[0], &progress, NULL, 0));
+    assert(cliq_receive(channel[1], &packet, NULL, 0, &count) && count == 0);
+    assert(!cliq_verifier_setup_accept(&packet, 2, &stage));
+    progress = cliq_packet(CLIQ_WORKER_READY); progress.setup.stage = CLIQ_VERIFIER_SETUP_BEFORE_READY;
+    assert(cliq_send(channel[0], &progress, NULL, 0));
+    assert(!cliq_receive(channel[1], &packet, NULL, 0, &count) && count == 0 && errno == EPROTO);
+    puts("PASS setup diagnostics do not accept duplicates or unexpected rights");
     assert(close(descriptor) == 0 && close(channel[0]) == 0 && close(channel[1]) == 0);
     puts("PASS nonblocking and invalid-capacity requests preserve descriptor ownership");
     return 0;
