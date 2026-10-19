@@ -27,9 +27,13 @@ export type PublicationRecoveryOriginV1 = {
   schemaVersion: 1; format: 'cliq-publication-recovery-origin-v1'; deliveryRunId: string; deliveryPlanRef: ArtifactRef;
   opId: string; attempt: number; dispatchId: string; claimJournalSeq: number;
   arenaBirthRef: ArtifactRef; arenaBirthDigest: string; inspectorIdentityRef: ArtifactRef; inspectorIdentityDigest: string;
-  ownerDeathAcquisitionEvidenceRef: ArtifactRef; ownerDeathAcquisitionEvidenceDigest: string;
   observedAt: string; originDigest: string;
-};
+} & ({ ownerDeathAcquisitionEvidenceRef: ArtifactRef; ownerDeathAcquisitionEvidenceDigest: string; gracefulOwnerDeath?: never } |
+  { ownerDeathAcquisitionEvidenceRef?: never; ownerDeathAcquisitionEvidenceDigest?: never;
+    gracefulOwnerDeath: { kind: 'observed_after_graceful_release'; priorOwnerRowDigest: string;
+      priorProcessIdentityRef: ArtifactRef; priorProcessIdentityDigest: string;
+      gracefulTransitionEvidenceRef: ArtifactRef; gracefulTransitionEvidenceDigest: string;
+      processObservation: 'absent_or_start_token_mismatch' } });
 
 // Canonical RFC recovery artifacts. Their retained shape is not a native observation.
 type WorkerRecoveryEvidenceBaseV1 = {

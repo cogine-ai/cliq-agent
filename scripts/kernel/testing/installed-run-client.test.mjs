@@ -436,6 +436,10 @@ test('installed journey failures retain only fixed classifications from actual e
     assert.deepEqual(classify(primary), [primary.diagnostic]);
     assert.equal(primary.diagnostic.lastObservedDriverStage, lastObservedDriverStage);
   }
+  const observed = new InstalledClientConsumerDeadlineError('ready', 5000, performance.now(), 0, 'authentication',
+    [{ stage: 'hello_exchange_started', elapsedMs: 12, observedElapsedMs: 15 }]);
+  assert.deepEqual(classify(observed), [observed.diagnostic]);
+  assert.deepEqual(observed.diagnostic.authentication, [{ stage: 'hello_exchange_started', elapsedMs: 12, observedElapsedMs: 15 }]);
   const impostor = Object.assign(new Error('Bearer private diagnostic must not survive'), {
     diagnostic: { kind: 'installed_client_driver', stage: 'request', private: 'untrusted diagnostic must not survive' },
   });

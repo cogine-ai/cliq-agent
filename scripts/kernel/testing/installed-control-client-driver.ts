@@ -13,6 +13,10 @@ import type { ReleaseTrustKey } from '../../../src/policy/runtime-authority.js';
 import { ResourceRetirementError } from '../../../src/state/errors.js';
 import { createInstalledRuntime, type HeldInstalledRuntime } from '../../../src/state/installed-runtime.js';
 import { openInstalledSupervisorClient, type InstalledSupervisorClient } from '../../../src/state/installed-control-client.js';
+import { channel } from 'node:diagnostics_channel';
+import { INSTALLED_CLIENT_PHASE_CHANNEL, INSTALLED_CLIENT_PHASES } from '../../../src/state/installed-diagnostics.js';
+import { INSTALLED_WORK_CHANNEL, type InstalledWorkSnapshot } from '../../../src/state/installed-work-diagnostics.js';
+import { copyInstalledClientAuthenticationWork, installedClientAuthenticationMarker } from './installed-client-consumer.js';
 import type { InstalledClientDriverStage } from './installed-client-consumer.js';
 
 let phase: InstalledClientDriverStage = 'platform';
@@ -30,6 +34,25 @@ function setPhase(next: InstalledClientDriverStage): void {
     observedPhases.add(next);
     writeMarker('progress', next);
   }
+}
+function observeAuthentication(): () => void {
+  const started = performance.now(), phases = new Set<string>();
+  let work: InstalledWorkSnapshot | undefined;
+  const workChannel = channel(INSTALLED_WORK_CHANNEL), authenticationChannel = channel(INSTALLED_CLIENT_PHASE_CHANNEL);
+  const observeWork = (value: unknown) => {
+    try { work = value === 'truncated' ? undefined : copyInstalledClientAuthenticationWork(value); }
+    catch { work = undefined; }
+  };
+  const observePhase = (value: unknown) => {
+    try {
+      if (typeof value !== 'string' || !INSTALLED_CLIENT_PHASES.some(phase => phase === value) || phases.has(value)) return;
+      const stage = INSTALLED_CLIENT_PHASES.find(phase => phase === value)!;
+      phases.add(stage);
+      writeSync(2, installedClientAuthenticationMarker(stage, Math.floor(performance.now() - started), work));
+    } catch { /* This trusted subscriber's sink/measurement cannot decide work. */ }
+  };
+  workChannel.subscribe(observeWork); authenticationChannel.subscribe(observePhase);
+  return () => { workChannel.unsubscribe(observeWork); authenticationChannel.unsubscribe(observePhase); };
 }
 
 const sameFile = (left: BigIntStats, right: BigIntStats) =>
@@ -118,6 +141,7 @@ async function main(): Promise<void> {
   const [filename, ...extra] = process.argv.slice(2); assert(filename && extra.length === 0);
   setPhase('composition');
   const composition = await fixtureComposition(filename);
+  const closeAuthentication = observeAuthentication();
   let selected: HeldInstalledRuntime | undefined, client: InstalledSupervisorClient | undefined, failure: unknown;
   let stopping: Promise<void> | undefined, stopRequested = false;
   const stop = () => {
@@ -158,6 +182,7 @@ async function main(): Promise<void> {
     } catch (error) {
       failedPhase = phase; throw error;
     } finally {
+      closeAuthentication();
       process.removeListener('SIGTERM', stop); process.removeListener('SIGINT', stop); process.stdout.removeListener('error', stop);
     }
   }

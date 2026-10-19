@@ -30,9 +30,13 @@ import { assertInstalledVerifierOutcome, InstalledVerifierOutcomeError } from '.
 import { runInstalledDeliveryCases } from './installed-delivery-journey.js';
 import { InstalledDeliveryOutcomeError } from './installed-delivery-result.js';
 import type { InstalledVerifierRetirementIdentity } from './installed-verifier-evidence.js';
+import { qualifyInstalledOwnerLinks, qualifyInstalledOwnerProcess } from './installed-owner-history.js';
+import { startPublicationCrashObserver } from './installed-publication-crash-observer.js';
+import { assertInstalledPublicationCleanupRecovery } from './installed-publication-recovery.js';
+import { inspectInstalledPublicationClaim, inspectInstalledRecoveredWorkerRetirement } from './installed-worker-lease.js';
 
 type Recipe = { buildFixture: string; packageRoot: string; installerEntry: string; stateRoot: string; releaseKeysFile: string;
-  controlDirectory: string; observer: string; storeFixture: string; workspace: string; reportFile: string };
+  controlDirectory: string; observer: string; storeFixture: string; publicationObserver: string; workspace: string; reportFile: string };
 type Ledger = { diagnosticOnly: true; fixture: string; fixtureIdentity: string; username: string;
   uid: number; gid: number; runnerUid: number; home: string; runJourney: Recipe };
 type Response = { protocolVersion: 1; ok: boolean; method?: string; result?: Record<string, any>; error?: Record<string, unknown> };
@@ -79,7 +83,7 @@ async function readLedger(filename: string): Promise<Ledger> {
   assert.equal(ledger.username, `cliq-probe-${ledger.fixture.split('.').at(-1)!.toLowerCase()}`);
   const recipe = ledger.runJourney;
   assert.deepEqual(Object.keys(recipe).sort(), ['buildFixture', 'controlDirectory', 'installerEntry', 'observer',
-    'packageRoot', 'releaseKeysFile', 'reportFile', 'stateRoot', 'storeFixture', 'workspace'].sort());
+    'packageRoot', 'publicationObserver', 'releaseKeysFile', 'reportFile', 'stateRoot', 'storeFixture', 'workspace'].sort());
   assert.equal(recipe.buildFixture, path.join(ledger.fixture, 'run-package-build'));
   assert.equal(recipe.packageRoot, path.join(recipe.buildFixture, 'package'));
   assert.equal(recipe.installerEntry, path.join(recipe.buildFixture, 'installed-runtime-installer.mjs'));
@@ -88,6 +92,10 @@ async function readLedger(filename: string): Promise<Ledger> {
   assert.equal(recipe.controlDirectory, path.join(ledger.home, 'probe/run-secret-service-control'));
   assert.equal(recipe.observer, path.join(ledger.fixture, 'cliq-credential-journey-observer'));
   assert.equal(recipe.storeFixture, path.join(ledger.fixture, 'cliq-credential-store-fixture'));
+  assert.equal(recipe.publicationObserver, path.join(ledger.fixture, 'cliq-publication-cleanup-crash-observer'));
+  const publicationObserver = await lstat(recipe.publicationObserver);
+  assert(publicationObserver.isFile() && !publicationObserver.isSymbolicLink() && publicationObserver.uid === 0 && publicationObserver.gid === 0 &&
+    publicationObserver.nlink === 1 && (publicationObserver.mode & 0o7777) === 0o555);
   const storeFixture = await lstat(recipe.storeFixture);
   assert(storeFixture.isFile() && !storeFixture.isSymbolicLink() && storeFixture.uid === 0 && storeFixture.gid === 0 &&
     storeFixture.nlink === 1 && (storeFixture.mode & 0o7777) === 0o555);
@@ -842,6 +850,134 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
           assert.equal(show(services!.keeperUnit).MainPID, keeperBefore.MainPID);
           assert.deepEqual(await readFile(path.join(recipe.stateRoot, 'runtime/keeper.ready')), keeperReady);
         },
+        cleanupCrash: async source => {
+          mark('delivery_cleanup_crash_observer');
+          const diagnostic: Record<string, unknown> = { diagnosticOnly: true, qualified: false, stage: 'observer_start',
+            originalReceiptCasObjectAbsenceQualified: false, rebootQualified: false };
+          report.publicationCleanupCrash = diagnostic;
+          const ownersBefore = inspectInstalledOwnerHistory(recipe.stateRoot).owners;
+          assert.equal(ownersBefore.length, 2); const original = ownersBefore[1]!; assert.equal(original.state, 'active');
+          const shown = show(services!.supervisorUnit), pid = Number(shown.MainPID), supervisorEntry = signed.bundle.entries.find(entry => entry.role === 'supervisor');
+          assert(supervisorEntry); const supervisorDigest = supervisorEntry.digest;
+          const actual = await qualifyInstalledOwnerProcess({ stateRoot: recipe.stateRoot, uid: ledger.uid,
+            pid, selectedImage: installedImage, imageDigest: supervisorDigest }, original, {});
+          const image = await lstat(installedImage, { bigint: true });
+          const observer = startPublicationCrashObserver({ executable: recipe.publicationObserver, prefix, cwd: ledger.home, env: environment,
+            stateRoot: recipe.stateRoot, pid, uid: ledger.uid, startTicks: actual.processStartToken.slice('linux-proc-start-ticks:'.length),
+            imageDigest: supervisorDigest, imageDevice: image.dev.toString(), imageInode: image.ino.toString(), imageSize: image.size.toString(), scan: scanBytes });
+          let failure: unknown;
+          try {
+            await bounded(observer.ready, 30000, 'actual cleanup crash observer did not arm its original watch');
+            // Fixture-owner change before new admission; no model invocation or
+            // productive Run is created by the observer/readonly SQL diagnostic.
+            for (const file of source.files.filter(file => file.path === 'example.txt')) {
+              const target = path.join(source.workspace, file.path), held = await open(target, constants.O_WRONLY | constants.O_NOFOLLOW);
+              try { const before = await held.stat(); assert(before.isFile() && before.uid === ledger.uid && before.nlink === 1);
+                await held.truncate(0); await held.writeFile(file.before); await held.sync(); }
+              finally { await held.close(); }
+            }
+            const core = request({ protocolVersion: 1, method: 'run.apply', requestId: nextId(), admissionKey: randomBytes(32).toString('base64url'),
+              sourceRunId: source.cut.snapshot.run.id, expectedRunResultRef: source.cut.snapshot.run.resultRef,
+              budgets: { wallTimeMs: 300000, toolCalls: 1000 } });
+            const admitted = await client!.send(core, 30000), runId = accepted(admitted, 'run.apply').snapshot.run.id;
+            const by = Date.now() + 90000; diagnostic.stage = 'original_claim'; diagnostic.runId = runId;
+            let claimed: ReturnType<typeof inspectInstalledPublicationClaim>;
+            for (;;) {
+              claimed = inspectInstalledPublicationClaim(recipe.stateRoot, ledger.uid, runId);
+              if (claimed) break;
+              assert(Date.now() < by, 'the genuine original publication claim was not observed'); await delay(0);
+            }
+            assert.equal(claimed.originalReceiptCommitted, false, 'the physical cut was missed: original receipt already committed');
+            assert.equal(claimed.journal.length, 2); assert.equal(claimed.claim.supervisorInstanceId, original.supervisorInstanceId);
+            assert.equal(claimed.claim.stateOwnerEpoch, original.ownerEpoch); diagnostic.claimCutDigest = claimed.sqlCutDigest;
+            diagnostic.originalOwnerEpoch = original.ownerEpoch; diagnostic.originalSupervisorPid = pid;
+            diagnostic.arenaBirthRef = claimed.claim.evidenceRef;
+            const restartBy = Date.now() + 30000;
+            observer.arm(claimed.birth); diagnostic.stage = 'physical_kill';
+            await bounded(observer.joined, Math.min(90000, by - Date.now()), 'actual cleanup crash observer did not join');
+            const joinedAt = new Date().toISOString(); diagnostic.observerJoined = true;
+            // This is the first actual complete original SQL cut after the
+            // joined kill, not a reconstruction from eventual terminal bytes.
+            const crash = inspectInstalledPublicationClaim(recipe.stateRoot, ledger.uid, runId); assert(crash);
+            assert.equal(crash.databaseIdentity, claimed.databaseIdentity); assert.equal(crash.originalReceiptCommitted, false,
+              'the physical cut was missed: original receipt/handoff committed before actual kill');
+            // An automatically started successor may already have recorded the
+            // original UNKNOWN. That is not an original receipt commit, but
+            // the two original permanent-claim rows must remain byte-identical.
+            assert(crash.journal.length === 2 || crash.journal.length === 3 && crash.journal[2]!.phase === 'unknown');
+            assert.deepEqual(crash.journal.slice(0, 2), claimed.journal); assert.deepEqual(crash.birth, claimed.birth);
+            assert.equal(crash.progress.filter(value => value.item.state === 'desired_committed_cleanup_pending').length, 1);
+            diagnostic.firstPostKillSqlCutDigest = crash.sqlCutDigest; diagnostic.originalReceiptCommitAbsent = true; diagnostic.durableProgressPresent = true;
+            await client!.close(); client = undefined; await inspectionClient?.close(); inspectionClient = undefined;
+            diagnostic.stage = 'successor';
+            let successorUnit: Record<string, string>;
+            for (;;) {
+              successorUnit = show(services!.supervisorUnit);
+              if (successorUnit.MainPID !== '0' && successorUnit.MainPID !== shown.MainPID && successorUnit.InvocationID !== shown.InvocationID) break;
+              assert(Date.now() < restartBy, 'actual cleanup crash restart exceeded the original 30-second budget'); await delay(50);
+            }
+            await selectedSupervisor(services!.supervisorUnit, successorUnit, installedImage, restartBy);
+            const history = inspectInstalledOwnerHistory(recipe.stateRoot).owners;
+            assert.equal(history.length, 3); assert.equal(history[1]!.terminalReason, 'superseded_after_owner_death');
+            assert.equal(history[2]!.state, 'active');
+            await qualifyInstalledOwnerLinks({ stateRoot: recipe.stateRoot, uid: ledger.uid, bundle: signed.bundle, imageDigest: supervisorDigest, report: {} });
+            assert.equal(show(services!.keeperUnit).MainPID, keeperBefore.MainPID);
+            assert.deepEqual(await readFile(path.join(recipe.stateRoot, 'runtime/keeper.ready')), keeperReady);
+            diagnostic.sameKeeper = true; client = await persistentClient();
+            diagnostic.stage = 'current_namespace'; let recovered: Record<string, any>;
+            for (;;) {
+              recovered = accepted(await client.send({ protocolVersion: 1, method: 'run.get', runId }), 'run.get');
+              if (['succeeded', 'failed', 'cancelled', 'completed_unverified'].includes(recovered.snapshot.run.status)) break;
+              assert(Date.now() < by, 'actual cleanup crash recovery exceeded its original 90-second window'); await delay(50);
+            }
+            const proof = await assertInstalledPublicationCleanupRecovery({ cut: recovered, originalBirth: claimed.birth,
+              expectedFiles: source.files.map(file => ({ path: file.path, text: file.after })), sourceResultRef: source.cut.snapshot.run.resultRef,
+              readRetainedArtifact: readCas, readOwnerHistory: async () => inspectInstalledOwnerHistory(recipe.stateRoot).owners });
+            assert(joinedAt <= proof.probeStartedAt, 'external observer process, pipes and FDs must join before the fresh native probe');
+            const retired = inspectInstalledRecoveredWorkerRetirement(recipe.stateRoot, ledger.uid, { runId,
+              supervisorInstanceId: claimed.claim.supervisorInstanceId!, leaseEpoch: claimed.claim.leaseEpoch,
+              inspectorIdentityRef: proof.inspectorIdentityRef, inspectorIdentityDigest: proof.inspectorIdentityDigest, resources: proof.generationResources });
+            try { assert.notEqual('linux-proc-start-ticks:' + await processStart(retired.pid), retired.processStartToken); }
+            catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+            await assert.rejects(lstat(path.join(recipe.stateRoot, retired.quarantinePath)), (error: unknown) => (error as NodeJS.ErrnoException).code === 'ENOENT');
+            assert.deepEqual((await readdir(source.workspace)).sort(), source.files.map(file => file.path).sort());
+            for (const file of source.files) {
+              const target = path.join(source.workspace, file.path), info = await lstat(target);
+              assert(info.isFile() && !info.isSymbolicLink() && info.uid === ledger.uid && info.gid === ledger.gid && info.nlink === 1 && (info.mode & 0o7777) === 0o644);
+              assert.equal(await readFile(target, 'utf8'), file.after);
+            }
+            assert.deepEqual(accepted(await client.send({ protocolVersion: 1, method: 'run.get', runId: source.cut.snapshot.run.id }), 'run.get'), source.cut,
+              'the preverified original source Run cannot be changed by recovery');
+            const queries = [];
+            for (const method of ['run.result', 'run.diff']) {
+              const response = await client.send({ protocolVersion: 1, method, runId }), result = accepted(response, method);
+              const descriptor = method === 'run.result' ? result.result : result.diff;
+              const expectedRef = method === 'run.result' ? proof.resultRef : proof.diffRef;
+              assert.equal(result.runId, runId); assert.equal(descriptor.ref, expectedRef); assert.equal(descriptor.digest, expectedRef);
+              assert.equal(descriptor.mediaType, 'application/json');
+              if (method === 'run.result') assert.equal(result.verificationClosureRef, proof.verificationClosureRef);
+              const downloaded = await readPublicArtifact(descriptor.ref); assert.equal(downloaded.length, descriptor.sizeBytes);
+              assert.equal(sha256Bytes(downloaded), descriptor.digest); queries.push(response);
+            }
+            const projectionBytes = await readPublicArtifact(proof.projectionRef); assert.equal(sha256Bytes(projectionBytes), proof.projectionRef);
+            const events = accepted(await client.send({ protocolVersion: 1, method: 'run.attach', runId, afterEventSeq: 0, limit: 1000 }), 'run.attach');
+            assert.equal(events.nextEventSeq, events.highWaterEventSeq);
+            const terminals = events.events.filter((event: any) => event.kind === 'state_changed' &&
+              ['succeeded', 'failed', 'cancelled', 'completed_unverified'].includes(event.status));
+            assert.equal(terminals.length, 1); assert.equal(terminals[0].status, 'succeeded'); assert.equal(terminals[0].resultRef, proof.resultRef);
+            await client.close(); client = await persistentClient();
+            assert.deepEqual(accepted(await client.send({ protocolVersion: 1, method: 'run.get', runId }), 'run.get'), recovered);
+            assert.deepEqual(await client.send(core, 30000), admitted);
+            for (const [index, method] of ['run.result', 'run.diff'].entries()) assert.deepEqual(await client.send({ protocolVersion: 1, method, runId }), queries[index]);
+            Object.assign(diagnostic, { qualified: true, stage: 'complete', successorOwnerEpoch: proof.successorOwnerEpoch,
+              namespaceEvidenceRef: proof.namespaceEvidenceRef, originalUnknownSettlementRef: proof.originalUnknownSettlementRef,
+              resolutionBudgetDeltaZero: true, redispatchCount: 0, originalRetiredWorkerObservedAbsent: true, sameReplayAfterReconnect: true });
+          } catch (error) { failure = error; throw error; }
+          finally {
+            try { await observer.close(); }
+            catch (error) { if (failure) throw new AggregateError([failure, error], 'cleanup crash observer did not join after its original failure'); throw error; }
+          }
+        },
       });
       assert.equal(postCount, 6); assert.equal(acceptedTcp, postCount); assert.equal(acceptedTls, postCount); assert(!responderFailure);
       assert.equal(originalPublicResultBytes.size, 6);
@@ -921,7 +1057,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         else if (diagnostic.code === 'ERR_ASSERTION') failureKinds.push({ kind: 'assertion' });
         else if (diagnostic.code === 'ERR_SQLITE_ERROR' && typeof diagnostic.errcode === 'number' && Number.isSafeInteger(diagnostic.errcode) &&
             diagnostic.errcode >= 0 && diagnostic.errcode <= 65535) failureKinds.push({ kind: 'sqlite', primaryCode: diagnostic.errcode & 0xff });
-        for (const match of (error.stack ?? '').matchAll(/\b(qualify-installed-verifier-journey|qualify-installed-delivery-journey|installed-node-journey|installed-delivery-journey|installed-delivery-result|installed-verifier-result|installed-guest-package|installed-supervisor-package|installed-model-package|installed-read-control|installed-client-consumer)\.ts:([1-9][0-9]{0,6}):([1-9][0-9]{0,6})/gu)) {
+        for (const match of (error.stack ?? '').matchAll(/\b(qualify-installed-verifier-journey|qualify-installed-delivery-journey|installed-node-journey|installed-delivery-journey|installed-delivery-result|installed-verifier-result|installed-guest-package|installed-supervisor-package|installed-model-package|installed-read-control|installed-client-consumer|installed-enroll-diagnostic|installed-worker-lease|installed-publication-recovery|installed-publication-crash-observer)\.ts:([1-9][0-9]{0,6}):([1-9][0-9]{0,6})/gu)) {
           if (frames.length < 8) frames.push({ file: match[1]! + '.ts', line: Number(match[2]), column: Number(match[3]) });
         }
         if (error instanceof AggregateError) errors.unshift(...error.errors.slice(0, 4));

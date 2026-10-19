@@ -73,6 +73,7 @@ else
 fi
 readonly probe_credential_source="$probe_source_dir/testing/credential-journey-observer.c"
 readonly probe_credential_store_source="$probe_source_dir/testing/credential-store-fixture.c"
+readonly probe_publication_observer_source="$probe_source_dir/testing/publication-cleanup-crash-observer.c"
 readonly probe_finalizer_source="$probe_source_dir/testing/credential-finalizer-service.c"
 if [[ "$probe_run_driver_mode" = --verifier-campaign ]]; then
   readonly probe_run_driver="$probe_source_dir/qualify-installed-verifier-journey.ts"
@@ -578,6 +579,7 @@ const runJourney = mode === 'run-journey' ? {
   controlDirectory: `${home}/probe/run-secret-service-control`,
   observer: `${fixture}/cliq-credential-journey-observer`, storeFixture: `${fixture}/cliq-credential-store-fixture`,
   workspace: `${home}/probe/run-workspace`,
+  publicationObserver: `${fixture}/cliq-publication-cleanup-crash-observer`,
   reportFile: `${output}/installed-run-journey.json`,
 } : undefined;
 writeFileSync(file, JSON.stringify({ diagnosticOnly: true, fixture, fixtureIdentity, username,
@@ -647,6 +649,9 @@ if [[ "$probe_campaign_kind" = run-journey ]]; then
   chmod 0555 "$probe_fixture/cliq-credential-journey-observer"
   cc -std=c11 -O2 -Wall -Wextra -Werror "$probe_credential_store_source" -o "$probe_fixture/cliq-credential-store-fixture" "${probe_gio_flags[@]}"
   chmod 0555 "$probe_fixture/cliq-credential-store-fixture"
+  [[ -f "$probe_publication_observer_source" && ! -L "$probe_publication_observer_source" ]] || exit 2
+  cc -std=c11 -O2 -Wall -Wextra -Werror "$probe_publication_observer_source" -o "$probe_fixture/cliq-publication-cleanup-crash-observer"
+  chmod 0555 "$probe_fixture/cliq-publication-cleanup-crash-observer"
 fi
 mkdir -m 0755 -- "$probe_home/.config" "$probe_home/.config/systemd" "$probe_home/.config/systemd/user"
 if [[ "$probe_campaign_kind" = credentials || "$probe_campaign_kind" = run-journey ]]; then

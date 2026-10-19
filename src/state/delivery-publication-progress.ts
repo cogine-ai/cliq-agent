@@ -793,7 +793,10 @@ export async function readPublicationPrefix(driver: SqliteDriver, artifacts: Art
         'publication result exact original received probe association');
       const terminal = entry.history.find(value => value.phase === (item.outcome === 'completed' ? 'completed' : item.outcome === 'unknown' ? 'unknown' : 'failed') &&
         value.evidenceRef === item.evidenceRef);
-      if (!terminal || terminal.timestamp > item.createdAt || terminal.seq <= entry.claim.seq ||
+      // Only the fully validated original-UNKNOWN probe branch writes the
+      // new terminal row at SQL commit time, after preparing its fixed item.
+      // Initial settlements keep their original settledAt-before-item rule.
+      if (!terminal || (probeDeadlineAt === undefined ? terminal.timestamp > item.createdAt : terminal.timestamp < item.createdAt) || terminal.seq <= entry.claim.seq ||
           entry.result && (entry.result.row.itemSeq >= row.itemSeq || item.outcome === 'unknown'))
         throw new TypeError('publication result has no later original-claim terminal Journal observation');
       if (item.outcome === 'completed') {
@@ -840,6 +843,12 @@ export async function readPublicationPrefix(driver: SqliteDriver, artifacts: Art
       const isLastForward = entry.sequence === 'forward' && entry.operation.index === entry.plan.forwardOperations.length - 1 && item.outcome === 'completed';
       const resultCheckpointId = publicationResultCheckpointId(cut.run.id, item.opId, item.attempt, item.evidenceRef);
       const lastAbortHandoff = isLastForward && item.abortStopIntentRef !== undefined;
+      if (probeDeadlineAt !== undefined) {
+        const atomicCheckpoint = readCheckpoint(driver, isLastForward && !lastAbortHandoff
+          ? deliveryPublicationTerminalCheckpointId(cut.run.id, entry.planRef) : resultCheckpointId);
+        if (terminal.timestamp !== atomicCheckpoint.createdAt)
+          throw new TypeError('publication recovered terminal is not its exact original atomic result Checkpoint time');
+      }
       if (item.abortStopIntentRef) {
         if (!cut.run.stopIntentRef || cut.run.resultRef) throw new TypeError('publication abort handoff has no monotonic stopping branch');
         const { readRetainedAgentStop } = await import('./stop-recovery.js');

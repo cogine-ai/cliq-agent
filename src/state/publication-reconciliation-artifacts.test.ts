@@ -31,6 +31,29 @@ test('publication current-inspector origin is closed data and never accepts inve
   assert.throws(() => decodePublicationRecoveryOrigin(hidden), TypeError);
 });
 
+test('publication graceful history needs a disjoint exact-process death observation, never graceful release alone', () => {
+  const { ownerDeathAcquisitionEvidenceRef: _ref, ownerDeathAcquisitionEvidenceDigest: _digest, ...base } = origin();
+  const gracefulOwnerDeath = { kind: 'observed_after_graceful_release', priorOwnerRowDigest: ref,
+    priorProcessIdentityRef: ref, priorProcessIdentityDigest: ref, gracefulTransitionEvidenceRef: ref,
+    gracefulTransitionEvidenceDigest: ref, processObservation: 'absent_or_start_token_mismatch' };
+  const value = { ...base, gracefulOwnerDeath };
+  value.originDigest = digestOmitting(value, 'originDigest');
+  assert.deepEqual(decodePublicationRecoveryOrigin(value), value);
+  for (const bad of [base, { ...value, ownerDeathAcquisitionEvidenceRef: ref },
+    { ...value, ownerDeathAcquisitionEvidenceRef: ref, ownerDeathAcquisitionEvidenceDigest: ref },
+    { ...value, gracefulOwnerDeath: { ...gracefulOwnerDeath, processObservation: 'graceful_release' } },
+    { ...value, gracefulOwnerDeath: { ...gracefulOwnerDeath, priorOwnerRowDigest: 'bad' } },
+    { ...value, gracefulOwnerDeath: { ...gracefulOwnerDeath, nativeHeld: true } },
+    { ...value, gracefulOwnerDeath: { ...gracefulOwnerDeath, kind: 'broker_process_domain_dead' } }]) {
+    const rehashed = { ...bad, originDigest: '' }; rehashed.originDigest = digestOmitting(rehashed, 'originDigest');
+    assert.throws(() => decodePublicationRecoveryOrigin(rehashed), TypeError);
+  }
+  const hostile = { ...gracefulOwnerDeath };
+  Object.defineProperty(hostile, 'priorProcessIdentityRef', { enumerable: true,
+    get() { assert.fail('untrusted graceful process getter executed'); } });
+  assert.throws(() => decodePublicationRecoveryOrigin({ ...value, gracefulOwnerDeath: hostile }), TypeError);
+});
+
 test('publication in-flight data retains its exact pending predecessor instead of accepting an ordinal alone', () => {
   const createdAt = '2026-10-19T00:00:00.000Z';
   const subject = { kind: 'publication_path' as const, deliveryPlanRef: ref, pathOperationId: id, attempt: 0 };

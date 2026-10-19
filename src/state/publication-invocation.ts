@@ -23,6 +23,7 @@ import { decodeContextManifest, decodeSourceManifest, decodeStateLockIdentity, d
 import { joinResourceOperations, KernelStorageError, ResourceRetirementError } from './errors.js';
 import { assertHeldWorkspaceRoot, heldWorkspaceRootPath, openHeldPublicationOperation, readHeldPublicationBirth,
   readRetiredPublicationArena, openHeldPublicationNamespaceObserver, retireHeldPublicationNamespace, readRetiredPublicationNamespace,
+  stateRootIdentityForLock,
   type HeldPublicationNamespaceObserver, type HeldPublicationOperation, type HeldWorkspaceRoot, type NativePublicationObservation, type NativePublicationOperationInput } from './native-owner.js';
 import { assertPublicationPreflight, preparePublicationPreflight, type PublicationPreflight } from './publication-preflight.js';
 import { readRecoveryClosure } from './recovery-closure.js';
@@ -34,7 +35,7 @@ import { readCheckpoint, readRun, readSession, readSessionPrincipalId, ZERO_BUDG
 import { assertDeliveryPublicationExecution, assertDeliveryPublicationMaintenanceExecution, type DeliveryPublicationMaintenanceTask,
   type DeliveryPublicationTask, type RunExecutionWorkerIdentity } from './run-execution.js';
 import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
-import { assertActiveStateOwner, type StateOwnerContext } from './state-owner.js';
+import { assertActiveStateOwner, readStateOwner, type StateOwnerContext } from './state-owner.js';
 import { supervisorInspectorIdentity } from './supervisor-inspector.js';
 import { insertArtifactMetadata } from './artifacts.js';
 import { planContinuationCommit } from './continuation-commit.js';
@@ -55,6 +56,7 @@ import { decodePublicationRecoveryOrigin } from './publication-reconciliation-ar
 import { readPublicationRecoveryOrigin } from './publication-reconciliation-history.js';
 import { readPublicationReconciliation, updatePublicationReconciliationProgress } from './publication-reconciliation.js';
 import { readStateOwnerDeath } from './state-owner-death.js';
+import { readRetainedStateOwnerHistory, type RetainedStateOwnerHistory } from './state-owner-history.js';
 import { readPublicationGenerationResources, type RetainedPublicationOperation } from './delivery-publication-progress.js';
 import { readRetiredGenerationSource } from './generation-retirement.js';
 import { assertNativeContainmentDeath, type NativeContainmentDeathObservation } from '../sandbox/linux-worker.js';
@@ -1349,6 +1351,7 @@ type ReconciliationBinding = {
   installedProgress?: ReturnType<typeof reconciliationSqlCut>;
   progressTransfer?: OwnedPublicationReconciliationProgress;
   acceptedLateAudit?: PublicationLateObservationItem;
+  originHistory?: RetainedStateOwnerHistory;
 };
 const reconciliationResults = new WeakMap<object, ReconciliationBinding>();
 const lateObservations = new WeakMap<object, ReconciliationBinding>();
@@ -1482,6 +1485,60 @@ async function readClosedMaintenanceM(driver: SqliteDriver, artifacts: ArtifactC
       { run: cut.run, journal: cut.journal, workerLaunches: [launch], workspaceGenerations: [retained.source] }, driver);
   }
 }
+/** One publication-only source preparation. A graceful row is not death:
+ * only this genuine current lock observes the original retained PID/token.
+ * No extra artifact, release permit or general death authority is created. */
+async function prepareRecoveryOrigin(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
+  cut: RecoveryClosureV1, entry: RetainedPublicationOperation, observedAfter: string, deadlineAt?: string) {
+  const claim = entry.claim!, birth = entry.birth!;
+  const active = assertActiveStateOwner(driver, owner), prior = readStateOwner(driver, claim.stateOwnerEpoch!);
+  if (!prior || active.ownerEpoch <= prior.ownerEpoch || prior.supervisorInstanceId !== claim.supervisorInstanceId)
+    invalid('publication recovery requires its exact older original claim holder');
+  const inspector = supervisorInspectorIdentity(active), inspectorPlan = planCanonicalArtifact(inspector, inspector.format);
+  let source: Pick<PublicationRecoveryOriginV1, 'ownerDeathAcquisitionEvidenceRef' | 'ownerDeathAcquisitionEvidenceDigest' | 'gracefulOwnerDeath'>;
+  let originHistory: RetainedStateOwnerHistory | undefined, observedAt: string;
+  if (prior.state === 'terminal' && prior.terminalReason === 'graceful_release') {
+    originHistory = await readRetainedStateOwnerHistory(driver, artifacts, active.ownerEpoch);
+    const claiming = originHistory.entries.find(frame => frame.owner.ownerEpoch === prior.ownerEpoch);
+    const inspecting = originHistory.entries.find(frame => frame.owner.ownerEpoch === active.ownerEpoch);
+    if (!claiming || !inspecting || claiming.transition?.kind !== 'graceful_release' ||
+        claim.timestamp < prior.acquiredAt || claim.timestamp > prior.releasedAt)
+      invalid('publication graceful history does not bind its original exact process lifetime');
+    requireEqual(claiming.owner, prior, 'publication original graceful StateOwner');
+    requireEqual(inspecting.owner, active, 'publication current actual inspector');
+    const root = stateRootIdentityForLock(owner.filesystem);
+    requireEqual(root, originHistory.rootIdentity, 'publication actual current lock and retained original root');
+    if (canonicalSha256(root) !== owner.stateRootIdentityRef || root.identityDigest !== owner.stateRootIdentityDigest)
+      invalid('publication death observation changed its original StateRoot');
+    // This samples native time only after actual process absence/start-token
+    // mismatch and real descriptor joins, never after graceful release alone.
+    observedAt = new Date(owner.filesystem.observePriorProcessDeath(claiming.process.pid, claiming.process.processStartToken)).toISOString();
+    if (observedAt < prior.releasedAt || observedAt < active.acquiredAt)
+      invalid('publication original process-death observation regressed its owning lifetimes');
+    source = { gracefulOwnerDeath: { kind: 'observed_after_graceful_release', priorOwnerRowDigest: prior.rowDigest,
+      priorProcessIdentityRef: prior.processIdentityRef, priorProcessIdentityDigest: prior.processIdentityDigest,
+      gracefulTransitionEvidenceRef: prior.transitionEvidenceRef, gracefulTransitionEvidenceDigest: prior.transitionEvidenceDigest,
+      processObservation: 'absent_or_start_token_mismatch' } };
+  } else {
+    const death = await readStateOwnerDeath(artifacts, driver, { supervisorInstanceId: claim.supervisorInstanceId!, ownedAt: claim.timestamp });
+    if (death.priorOwner.ownerEpoch !== claim.stateOwnerEpoch || owner.ownerEpoch < death.successorOwner.ownerEpoch)
+      invalid('publication inspection has no actual original owner-death acquisition');
+    source = { ownerDeathAcquisitionEvidenceRef: death.acquisitionEvidenceRef, ownerDeathAcquisitionEvidenceDigest: death.acquisitionEvidenceDigest };
+    observedAt = sampleCanonicalNow();
+  }
+  if (observedAt < observedAfter || deadlineAt !== undefined && observedAt >= deadlineAt)
+    throw new KernelStorageError('LEASE_FENCED', 'publication owner death arrived outside its actual owning lifetime');
+  requireEqual(assertActiveStateOwner(driver, owner), active, 'publication original active death inspector');
+  originHistory?.assertUnchanged(driver);
+  const value = { schemaVersion: 1, format: 'cliq-publication-recovery-origin-v1',
+    deliveryRunId: cut.run.id, deliveryPlanRef: entry.planRef, opId: claim.opId, attempt: claim.attempt, dispatchId: claim.dispatchId!,
+    claimJournalSeq: claim.seq, arenaBirthRef: claim.evidenceRef!, arenaBirthDigest: birth.birthDigest,
+    inspectorIdentityRef: inspectorPlan.ref, inspectorIdentityDigest: inspector.identityDigest,
+    ...source, observedAt, originDigest: '' };
+  value.originDigest = digestOmitting(value, 'originDigest');
+  const origin = decodePublicationRecoveryOrigin(value);
+  return { origin, inspector, inspectorPlan, originPlan: planCanonicalArtifact(origin, origin.format), ...(originHistory ? { originHistory } : {}) };
+}
 async function prepareReconciliationNative(value: ReconciliationBinding) {
   const selected = value.selection!, { entry, prefix, cut } = selected, claim = entry.claim!, birth = entry.birth!;
   if (entry.progress) {
@@ -1514,20 +1571,12 @@ async function prepareReconciliationNative(value: ReconciliationBinding) {
     // A successor never reconstructs an unrecorded birth or removes an arena
     // merely because its derived pathname or content happens to match.
     if (!selected.target.progress || !entry.progress) invalid('successor publication inspection requires its original durable progress');
-    const death = await readStateOwnerDeath(value.artifacts.withReadSignal(value.signal), value.driver,
-      { supervisorInstanceId: claim.supervisorInstanceId!, ownedAt: claim.timestamp });
-    if (death.priorOwner.ownerEpoch !== claim.stateOwnerEpoch || value.owner.ownerEpoch <= claim.stateOwnerEpoch!)
-      invalid('publication inspection has no actual original owner-death acquisition');
-    const active = assertActiveStateOwner(value.driver, value.owner), inspector = supervisorInspectorIdentity(active);
-    const inspectorPlan = planCanonicalArtifact(inspector, inspector.format), observedAt = sampleCanonicalNow();
-    const origin: PublicationRecoveryOriginV1 = { schemaVersion: 1, format: 'cliq-publication-recovery-origin-v1',
-      deliveryRunId: cut.run.id, deliveryPlanRef: entry.planRef, opId: claim.opId, attempt: claim.attempt,
-      dispatchId: claim.dispatchId!, claimJournalSeq: claim.seq, arenaBirthRef: claim.evidenceRef!, arenaBirthDigest: birth.birthDigest,
-      inspectorIdentityRef: inspectorPlan.ref, inspectorIdentityDigest: inspector.identityDigest,
-      ownerDeathAcquisitionEvidenceRef: death.acquisitionEvidenceRef, ownerDeathAcquisitionEvidenceDigest: death.acquisitionEvidenceDigest,
-      observedAt, originDigest: '' };
-    origin.originDigest = digestOmitting(origin, 'originDigest'); decodePublicationRecoveryOrigin(origin);
-    const originPlan = planCanonicalArtifact(origin, origin.format), reads = value.artifacts.withReadSignal(value.signal);
+    const state = selected.wait.probeState;
+    if (state.phase !== 'automatic_in_flight' && state.phase !== 'user_in_flight') invalid('publication inspection lost its actual dispatch');
+    const { origin, inspector, inspectorPlan, originPlan, originHistory } = await prepareRecoveryOrigin(value.driver,
+      value.artifacts.withReadSignal(value.signal), value.owner, cut, entry, state.dispatch.probeStartedAt, state.dispatch.probeDeadlineAt);
+    value.originHistory = originHistory;
+    const observedAt = origin.observedAt, reads = value.artifacts.withReadSignal(value.signal);
     const metadata = await joinResourceOperations([value.artifacts.publishBytes(inspectorPlan.bytes, inspectorPlan.mediaType, inspectorPlan.schemaKind),
       value.artifacts.publishBytes(originPlan.bytes, originPlan.mediaType, originPlan.schemaKind)]);
     await readPublicationRecoveryOrigin(value.driver, reads, selected.admission, claim, birth, {
@@ -1680,6 +1729,7 @@ async function readInstalledReconciliationProgress(value: ReconciliationBinding)
 function assertReconciliationSql(value: ReconciliationBinding, connection: SqliteConnection) {
   assertOwnedPublicationReconciliationTask(value.driver, value.owner, value.execution, value.task, value.artifacts);
   assertActiveStateOwner(connection, value.owner);
+  value.originHistory?.assertUnchanged(connection);
   if (!value.selection || !value.snapshot || canonicalSha256(reconciliationSqlCut(connection, value.selection.run.id,
       value.selection.admission.source.run.id)) !== canonicalSha256(value.snapshot))
     throw new KernelStorageError('REVISION_CONFLICT', 'publication inspection original source, principal, claim, resources or Stop changed');
@@ -2130,6 +2180,7 @@ type InitialAmbiguityBinding = {
   cut: RecoveryClosureV1; prefix: Prefix; entry: RetainedPublicationOperation;
   evidence: Extract<PublicationProofV1, { kind: 'path_ambiguity' }>; evidenceRef: string; metadata: PublishedArtifact[];
   continuation: ReconciliationContinuation; snapshot: ReturnType<typeof reconciliationSqlCut>; stop?: AgentStopIntent;
+  originHistory?: RetainedStateOwnerHistory;
 } & ({ kind: 'worker_death'; death: NativeContainmentDeathObservation; wait: WorkerDeathWait;
   launch: RecoveryClosureV1['workerLaunches'][number]; generation: RecoveryClosureV1['workspaceGenerations'][number] } |
   { kind: 'closed_maintenance'; execution: unknown; task: DeliveryPublicationReconciliationTask });
@@ -2151,20 +2202,9 @@ async function prepareInitialAmbiguityGraph(driver: SqliteDriver, artifacts: Art
       claim.stateOwnerEpoch >= owner.ownerEpoch || claim.seq !== cut.journal.length)
     invalid('publication initial ambiguity cannot substitute its original permanent claim or owner death');
   const reads = signal ? artifacts.withReadSignal(signal) : artifacts;
-  const deathSource = await readStateOwnerDeath(reads, driver, { supervisorInstanceId: claim.supervisorInstanceId, ownedAt: claim.timestamp });
-  if (deathSource.priorOwner.ownerEpoch !== claim.stateOwnerEpoch || owner.ownerEpoch < deathSource.successorOwner.ownerEpoch)
-    invalid('publication initial ambiguity has no genuine original owner-death acquisition');
-  const active = assertActiveStateOwner(driver, owner), inspector = supervisorInspectorIdentity(active), observedAt = sampleCanonicalNow();
-  if (observedAt < observedAfter || deadlineAt !== undefined && observedAt >= deadlineAt)
-    throw new KernelStorageError('LEASE_FENCED', 'publication initial ambiguity arrived outside its actual owning lifetime');
-  const inspectorPlan = planCanonicalArtifact(inspector, inspector.format);
-  const origin: PublicationRecoveryOriginV1 = { schemaVersion: 1, format: 'cliq-publication-recovery-origin-v1', deliveryRunId: cut.run.id,
-    deliveryPlanRef: entry.planRef, opId: claim.opId, attempt: claim.attempt, dispatchId: claim.dispatchId, claimJournalSeq: claim.seq,
-    arenaBirthRef: claim.evidenceRef, arenaBirthDigest: birth.birthDigest, inspectorIdentityRef: inspectorPlan.ref,
-    inspectorIdentityDigest: inspector.identityDigest, ownerDeathAcquisitionEvidenceRef: deathSource.acquisitionEvidenceRef,
-    ownerDeathAcquisitionEvidenceDigest: deathSource.acquisitionEvidenceDigest, observedAt, originDigest: '' };
-  origin.originDigest = digestOmitting(origin, 'originDigest'); decodePublicationRecoveryOrigin(origin);
-  const originPlan = planCanonicalArtifact(origin, origin.format);
+  const { origin, inspector, inspectorPlan, originPlan, originHistory } = await prepareRecoveryOrigin(driver, reads, owner,
+    cut, entry, observedAfter, deadlineAt);
+  const observedAt = origin.observedAt;
   const evidenceValue: Extract<PublicationProofV1, { kind: 'path_ambiguity' }> = { schemaVersion: 1, format: 'cliq-publication-proof-v1', deliveryRunId: cut.run.id,
     deliveryPlanRef: entry.planRef, workspaceIdentityRef: birth.workspaceIdentityRef, workspaceIdentityDigest: birth.workspaceIdentityDigest,
     inspectorIdentityRef: inspectorPlan.ref, inspectorIdentityDigest: inspector.identityDigest,
@@ -2184,7 +2224,8 @@ async function prepareInitialAmbiguityGraph(driver: SqliteDriver, artifacts: Art
   requireEqual(snapshot.source, prefix.admission.source.run, 'publication initial ambiguity fully verified source Run');
   requireEqual(snapshot.sourceSession, immutableSessionIdentity(prefix.admission.source.session),
     'publication initial ambiguity fully verified source Session identity');
-  return { cut, prefix, entry, evidence, evidenceRef: evidencePlan.ref, metadata, continuation, snapshot, ...(stop ? { stop } : {}) };
+  return { cut, prefix, entry, evidence, evidenceRef: evidencePlan.ref, metadata, continuation, snapshot,
+    ...(originHistory ? { originHistory } : {}), ...(stop ? { stop } : {}) };
 }
 export async function prepareOwnedPublicationInitialAmbiguity(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
   input: { runId: string; expectedRunRevision: number }, death: NativeContainmentDeathObservation, signal?: AbortSignal): Promise<OwnedPublicationInitialAmbiguity> {
@@ -2279,6 +2320,7 @@ export function assertOwnedPublicationInitialAmbiguitySql(driver: SqliteDriver, 
   token: OwnedPublicationInitialAmbiguity, connection: SqliteConnection): void {
   const value = originalInitialAmbiguity(driver, artifacts, owner, token);
   assertActiveStateOwner(connection, owner);
+  value.originHistory?.assertUnchanged(connection);
   const now = sampleCanonicalNow();
   if (now < value.evidence.observedAt || value.kind === 'worker_death' &&
       (value.wait.probeState.phase !== 'automatic_in_flight' || now >= value.wait.probeState.dispatch.probeDeadlineAt))

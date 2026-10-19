@@ -81,3 +81,31 @@ test('Delivery connects the actual handoff seal to readonly SQL retirement and i
   assert(fixture.includes('retirement: publicationRetirement'));
   assert(fixture.includes('selected.launchIds.includes(publicationRetirement.launchId)'));
 });
+
+test('the cleanup crash is an additional strict physical subcase, never a fourth source or a timing pause', () => {
+  const fixture = source('./installed-node-journey.ts'), delivery = source('./installed-delivery-journey.ts'),
+    observer = source('./publication-cleanup-crash-observer.c'), shell = source('../qualify-systemd-user.sh');
+  assert(delivery.includes('await context.cleanupCrash(first)'));
+  assert.equal((delivery.match(/await context.createSource\(/gu) ?? []).length, 3);
+  assert(fixture.includes('assert.equal(postCount, 6)')); assert(fixture.includes('assert.equal(originalPublicResultBytes.size, 6)'));
+  assert(fixture.includes('assert.equal(crash.originalReceiptCommitted, false'));
+  assert(fixture.includes('assert.deepEqual(crash.journal.slice(0, 2), claimed.journal)'));
+  assert(fixture.includes('joinedAt <= proof.probeStartedAt'));
+  assert(fixture.includes('await observer.close()')); assert(fixture.includes('originalReceiptCasObjectAbsenceQualified: false, rebootQualified: false'));
+  assert(shell.includes('readonly probe_publication_observer_source="$probe_source_dir/testing/publication-cleanup-crash-observer.c"'));
+  assert.equal((observer.match(/SYS_pidfd_send_signal, process, SIGKILL/gu) ?? []).length, 1);
+  assert(observer.includes('IN_CREATE | IN_DELETE | IN_ONLYDIR')); assert(observer.includes('named.st_nlink != 0'));
+  assert(!/SIGSTOP|SIGCONT|ptrace\(|process\.kill\(|kill\(/u.test(observer));
+});
+
+test('cleanup after the normal restart joins only an inspection client that is still held', () => {
+  const fixture = source('./installed-node-journey.ts'), delivery = source('./installed-delivery-journey.ts');
+  const restart = fixture.slice(fixture.indexOf('restart: async () => {'), fixture.indexOf('cleanupCrash: async source => {'));
+  const crash = fixture.slice(fixture.indexOf('cleanupCrash: async source => {'));
+  assert(restart.includes('await inspectionClient!.close(); inspectionClient = undefined'));
+  assert(delivery.indexOf('for (const action of [context.reconnect, context.restart])') < delivery.indexOf('await context.cleanupCrash(first)'));
+  assert(crash.includes('await inspectionClient?.close(); inspectionClient = undefined;'),
+    'the normal restart already joined and cleared the original inspection consumer');
+  assert(!crash.includes('inspectionClient!.close()'));
+  assert(!crash.includes('inspectionClient = await persistentClient()'), 'the cut must not open an unnecessary second authenticated consumer');
+});

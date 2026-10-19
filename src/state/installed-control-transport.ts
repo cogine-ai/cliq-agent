@@ -13,6 +13,7 @@ import { KernelStorageError, ResourceRetirementError } from './errors.js';
 import { assertInstalledManagerObservationAvailable, openInstalledControlClient, withHeldInstalledRuntime, type HeldInstalledRuntime } from './installed-runtime.js';
 import type { HeldInstalledControlClient } from './native-owner.js';
 import { loadInstalledSupervisorObserver, type InstalledCredentialSupervisorObservation } from './installed-services.js';
+import { noteInstalledClientPhase } from './installed-diagnostics.js';
 
 /** Internal common transport: only genuine held installed selections can open
  * it. The fixed credential purpose is the existing explicit ensure-start path;
@@ -89,7 +90,9 @@ export async function openInstalledControlTransport(selected: HeldInstalledRunti
   if (retirementFailure) throw retirementFailure;
   // The fixed friend authenticates the selection before any caller property.
   const observer = await loadInstalledSupervisorObserver(selected, purpose);
+  noteInstalledClientPhase('manager_observer_loaded');
   let observed = await observer.observe(purpose === 'credential');
+  noteInstalledClientPhase('initial_current_observed');
   const deadline = performance.now() + 30000;
   let candidateIdentity: string | undefined;
   let nextObservationAt = 0;
@@ -151,6 +154,7 @@ export async function openInstalledControlTransport(selected: HeldInstalledRunti
     try { native.close(); } catch (error) { retainedGuards.add(native); retirementFailure ??= new ResourceRetirementError('installed native control acquisition did not retire', new AggregateError([cause, error])); throw retirementFailure; }
     throw cause;
   }
+  noteInstalledClientPhase('native_connected');
   const socketClosed = new Promise<void>(resolve => socket.once('close', () => resolve()));
   let failure: unknown; let stopped = false; let retiring: Promise<void> | undefined; let closing: Promise<void> | undefined;
   let running: Promise<unknown> | undefined;
@@ -281,8 +285,11 @@ export async function openInstalledControlTransport(selected: HeldInstalledRunti
   });
   try {
     await checkCurrent();
+    noteInstalledClientPhase('pre_hello_current_verified');
     const request = helloRequest();
+    noteInstalledClientPhase('hello_exchange_started');
     const response = decodeInstalledControlResponse(await exchange(request), request) as InstalledControlResponseFor<'control.hello'>;
+    noteInstalledClientPhase('hello_received');
     if (!response.ok) refuse('installed Supervisor refused the authenticated control handshake');
     const hello = response.result, bundle = hello.activeRuntimeBundle;
     if (hello.serverBuild !== 'cliq-installed-v1' || !same(hello.controlSchemaRange, { min: 1, max: 1 }) ||
@@ -291,7 +298,7 @@ export async function openInstalledControlTransport(selected: HeldInstalledRunti
         bundle.runtimeBundleRef !== selection.bundleDigest || bundle.bundleDigest !== selection.bundleDigest || bundle.bundleVersion !== selection.bundleVersion)
       refuse('installed Supervisor hello is incompatible with the selected installed runtime');
     controlWireText(hello.supervisorInstanceId); helloResult = immutableSnapshot(hello);
-    await checkCurrent(); return client;
+    await checkCurrent(); noteInstalledClientPhase('final_current_verified'); return client;
   } catch (error) {
     const reason = error instanceof KernelStorageError || error instanceof ResourceRetirementError ? error
       : new KernelStorageError('RECOVERY_REQUIRED', 'installed control hello response is invalid');

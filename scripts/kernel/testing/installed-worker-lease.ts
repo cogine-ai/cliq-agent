@@ -5,11 +5,14 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME, KERNEL_STATE_SCHEMA_VERSION } from '../../../src/config.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../../../src/kernel/canonical.js';
-import { digestOmitting, encodeCanonicalTime, normalizeBoundedText, parseCanonicalTime } from '../../../src/kernel/identity.js';
+import { digestOmitting, encodeCanonicalTime, identityHash, normalizeBoundedText, parseCanonicalTime } from '../../../src/kernel/identity.js';
 import { parseJsonStrict } from '../../../src/kernel/json.js';
 import type { BoundWorkerLaunch, WorkspaceGenerationStateV1 } from '../../../src/kernel/types.js';
 import { decodeWorkerIdentity, decodeWorkspaceGenerationSnapshotEvidence } from '../../../src/state/decoders.js';
 import { decodeWorkerLaunch, decodeWorkspaceGenerationState } from '../../../src/state/invariants.js';
+import { decodePublicationArenaBirth, decodePublicationPathProgressItem } from '../../../src/kernel/publication.js';
+import { journalEntryFromRow, type JournalSqlRow } from '../../../src/state/repositories/journal.js';
+import type { PublicationGenerationResourcesV1 } from '../../../src/kernel/publication.js';
 
 export type InstalledWorkerLeaseExpected = { uid: number; runId: string; launchId: string; leaseEpoch: number;
   runRevision: number; supervisorInstanceId: string; deadlineAt: string };
@@ -90,6 +93,176 @@ function readWorkerDiagnostic<T>(stateRoot: string, uid: number,
   } finally {
     try { database?.close(); } finally { for (const fd of held.reverse()) closeSync(fd); }
   }
+}
+
+/** One actual readonly SQL cut, used only to arm the external crash actor or
+ * record the first post-kill cut. A missing claim is not a missing resource. */
+export function inspectInstalledPublicationClaim(stateRoot: string, uid: number, runId: string) {
+  requireValue(boundedString(runId));
+  return readWorkerDiagnostic(stateRoot, uid, (database, databaseIdentity, readCas) => {
+    database.exec('BEGIN');
+    const rows = database.prepare(`SELECT run_id,seq,op_id,op_kind,attempt,phase,
+      CASE WHEN typeof(entry_json)='text' AND length(CAST(entry_json AS BLOB)) BETWEEN 1 AND 65536
+      THEN entry_json ELSE NULL END AS entry_json FROM run_journal WHERE run_id=? ORDER BY seq LIMIT 5`).all(runId);
+    requireValue(rows.length <= 4 && rows.every(row => typeof row.entry_json === 'string'));
+    const journal = rows.map(row => journalEntryFromRow(row as JournalSqlRow));
+    journal.forEach((row, index) => requireValue(row.runId === runId && row.seq === index + 1 && row.opKind === 'publish'));
+    const claims = journal.filter(row => row.phase === 'dispatch_claimed');
+    requireValue(claims.length <= 1);
+    if (!claims.length) { database.exec('COMMIT'); return undefined; }
+    const claim = claims[0]!;
+    requireValue(claim.attempt === 0 && claim.evidenceRef && claim.evidenceDigest && claim.dispatchId && claim.stateOwnerEpoch);
+    const birth = decodePublicationArenaBirth(readCas(claim.evidenceRef));
+    requireValue(birth.deliveryRunId === runId && birth.opId === claim.opId && birth.dispatchId === claim.dispatchId &&
+      birth.birthDigest === claim.evidenceDigest && birth.sequence === 'forward' && birth.attempt === 0);
+    const items = database.prepare(`SELECT item_id,item_seq,payload_ref,kind,created_at FROM items WHERE run_id=? ORDER BY item_seq LIMIT 17`).all(runId);
+    requireValue(items.length <= 16);
+    const progress = items.filter(row => row.kind === 'publication_path_progress').map(row => {
+      requireValue(typeof row.payload_ref === 'string'); const item = decodePublicationPathProgressItem(readCas(row.payload_ref));
+      requireValue(item.runId === runId && item.itemId === row.item_id && item.createdAt === row.created_at); return { row, item };
+    });
+    const originalReceiptCommitted = journal.some(row => row.phase === 'completed' || row.phase === 'failed') ||
+      progress.some(value => value.item.state === 'received_handoff');
+    const result = Object.freeze({ diagnosticOnly: true, databaseIdentity, sqlCutDigest: canonicalSha256({ journal, items }),
+      birth, claim, originalReceiptCommitted, journal, progress });
+    database.exec('COMMIT'); return result;
+  });
+}
+
+/** Strict recovery branch only. Retained data cannot replace the owning
+ * campaign's independent observation of the actual PID/start lifetime. */
+export function inspectInstalledRecoveredWorkerRetirement(stateRoot: string, uid: number, expected: {
+  runId: string; supervisorInstanceId: string; leaseEpoch: number;
+  inspectorIdentityRef: string; inspectorIdentityDigest: string;
+  resources: Extract<PublicationGenerationResourcesV1, { kind: 'genuinely_retired_from_verified_checkpoint' }>;
+}) {
+  const closedValue = (value: object, keys: readonly string[]) => { closedRecord(value, keys); };
+  try {
+    closedRecord(expected, ['runId', 'supervisorInstanceId', 'leaseEpoch', 'inspectorIdentityRef', 'inspectorIdentityDigest', 'resources']);
+    closedRecord(expected.resources, ['kind', 'workerLaunchId', 'generationRef', 'sourceCheckpointId', 'quarantineEvidenceRef', 'retirementEvidenceRef']);
+    requireValue(boundedString(expected.runId) && boundedString(expected.supervisorInstanceId) && Number.isSafeInteger(expected.leaseEpoch) && expected.leaseEpoch > 0 &&
+      digest(expected.inspectorIdentityRef) && digest(expected.inspectorIdentityDigest));
+    const resources = expected.resources;
+    requireValue(resources.kind === 'genuinely_retired_from_verified_checkpoint' && boundedString(resources.workerLaunchId) &&
+      boundedString(resources.sourceCheckpointId) && [resources.generationRef, resources.quarantineEvidenceRef, resources.retirementEvidenceRef].every(digest));
+    return readWorkerDiagnostic(stateRoot, uid, (database, databaseIdentity, readCas) => {
+      database.exec('BEGIN');
+      const { row, launch, generation } = readWorkerRows(database, expected.runId, resources.workerLaunchId);
+      requireValue(launch.phase === 'retired' && launch.generationWriteState === 'fenced_reconciling' && launch.retiredAt && launch.retirementEvidenceRef &&
+        launch.supervisorInstanceId === expected.supervisorInstanceId && launch.leaseEpoch === expected.leaseEpoch &&
+        generation.phase === 'retired' && generation.generationRef === resources.generationRef &&
+        generation.sourceCheckpointId === resources.sourceCheckpointId && generation.retirementEvidenceRef === resources.retirementEvidenceRef &&
+        row.active_worker_launch_id === null);
+      requireValue(!database.prepare("SELECT 1 FROM worker_launches WHERE phase!='retired' AND json_extract(row_json,'$.workspaceGenerationRef')=? LIMIT 1")
+        .get(generation.generationRef));
+      const read = (ref: string): Record<string, any> => {
+        const value = readCas(ref); requireValue(value && typeof value === 'object' && !Array.isArray(value)); return value as Record<string, any>;
+      };
+      const evidence = (ref: string, expectedDigest?: string) => {
+        const value = read(ref); requireValue(value.schemaVersion === 1 && value.evidenceDigest === digestOmitting(value, 'evidenceDigest') &&
+          (expectedDigest === undefined || value.evidenceDigest === expectedDigest)); parseCanonicalTime(value.observedAt); return value;
+      };
+      const retired = evidence(resources.retirementEvidenceRef, generation.retirementEvidenceDigest);
+      closedValue(retired, ['schemaVersion', 'format', 'runId', 'generationRef', 'generationIdentityDigest', 'inspectorIdentityRef', 'inspectorIdentityDigest',
+        'observedAt', 'evidenceDigest', 'fromPhase', 'quarantineEvidenceRef', 'quarantineEvidenceDigest', 'sourceQuarantinedRowVersion',
+        'activeRunPointerCount', 'nonretiredWorkerLaunchCount', 'liveContainmentCount', 'activeMountCount', 'releasableBrokerClaimCount']);
+      requireValue(retired.format === 'cliq-workspace-generation-retirement-evidence-v1' && retired.fromPhase === 'quarantined' &&
+        retired.runId === expected.runId && retired.generationRef === generation.generationRef && retired.generationIdentityDigest === generation.generationIdentityDigest &&
+        retired.quarantineEvidenceRef === resources.quarantineEvidenceRef && retired.sourceQuarantinedRowVersion === generation.rowVersion - 1 &&
+        retired.observedAt >= launch.retiredAt && retired.observedAt <= generation.updatedAt &&
+        ['activeRunPointerCount', 'nonretiredWorkerLaunchCount', 'liveContainmentCount', 'activeMountCount', 'releasableBrokerClaimCount'].every(key => retired[key] === 0));
+      const quarantine = evidence(resources.quarantineEvidenceRef, retired.quarantineEvidenceDigest);
+      closedValue(quarantine, ['schemaVersion', 'format', 'runId', 'generationRef', 'generationIdentityDigest', 'sourceRowVersion', 'observedState',
+        'inspectorIdentityRef', 'inspectorIdentityDigest', 'quarantineCanonicalRootRelativePath', 'quarantineDeviceId', 'quarantineFileId',
+        'originalLocatorAbsent', 'renameNoReplace', 'directoryFsyncComplete', 'observedAt', 'evidenceDigest', 'reason', 'fromPhase',
+        'workerRecoveryEvidenceRef', 'workerRecoveryEvidenceDigest']);
+      requireValue(quarantine.format === 'cliq-workspace-generation-quarantine-evidence-v1' && quarantine.reason === 'worker_recovery' &&
+        quarantine.fromPhase === 'fenced_reconciling' && quarantine.runId === expected.runId && quarantine.generationRef === generation.generationRef &&
+        quarantine.generationIdentityDigest === generation.generationIdentityDigest && quarantine.originalLocatorAbsent === true &&
+        quarantine.renameNoReplace === true && quarantine.directoryFsyncComplete === true &&
+        quarantine.quarantineCanonicalRootRelativePath === `quarantine/workspace-generations/${identityHash(generation.generationId, String(quarantine.sourceRowVersion))}` &&
+        /^(0|[1-9][0-9]*)$/u.test(quarantine.quarantineDeviceId) && /^(0|[1-9][0-9]*)$/u.test(quarantine.quarantineFileId));
+      const recovery = evidence(quarantine.workerRecoveryEvidenceRef, quarantine.workerRecoveryEvidenceDigest);
+      closedValue(recovery, ['schemaVersion', 'format', 'runId', 'waitingSubjectRef', 'oldWorkerLaunchId', 'oldLeaseEpoch', 'oldWorkerIdentityDigest',
+        'processContainmentRef', 'containmentDeathEvidenceRef', 'containmentDeathEvidenceDigest', 'workspaceGenerationRef', 'generationTreeDigest',
+        'inspectorIdentityRef', 'inspectorIdentityDigest', 'observedAt', 'evidenceDigest', 'generationDisposition']);
+      requireValue(recovery.format === 'cliq-worker-recovery-evidence-v1' && recovery.generationDisposition === 'quarantined' &&
+        recovery.runId === expected.runId && recovery.oldWorkerLaunchId === launch.launchId && recovery.oldLeaseEpoch === launch.leaseEpoch &&
+        recovery.oldWorkerIdentityDigest === launch.workerIdentityDigest && recovery.processContainmentRef === launch.processContainmentRef &&
+        recovery.workspaceGenerationRef === generation.generationRef && recovery.generationTreeDigest === generation.lastVerifiedTreeDigest &&
+        recovery.observedAt <= quarantine.observedAt && quarantine.observedAt <= launch.retiredAt);
+      const wrapper = evidence(launch.retirementEvidenceRef), death = evidence(recovery.containmentDeathEvidenceRef, recovery.containmentDeathEvidenceDigest);
+      closedValue(wrapper, ['schemaVersion', 'format', 'runId', 'waitingSubjectRef', 'waitingSubjectDigest', 'probeKind', 'probeOrdinal', 'probeNonceDigest',
+        'probeDispatchDigest', 'probeStartedAt', 'probeDeadlineAt', 'inspectorIdentityRef', 'inspectorIdentityDigest', 'observedAt', 'evidenceDigest',
+        'outcome', 'subjectEvidenceKind', 'subjectEvidenceRef', 'subjectEvidenceDigest']);
+      requireValue(wrapper.format === 'cliq-reconciliation-probe-evidence-v1' && wrapper.runId === expected.runId &&
+        wrapper.outcome === 'subject_observation' && wrapper.subjectEvidenceKind === 'worker_recovery' &&
+        wrapper.subjectEvidenceRef === quarantine.workerRecoveryEvidenceRef && wrapper.subjectEvidenceDigest === recovery.evidenceDigest &&
+        wrapper.waitingSubjectRef === recovery.waitingSubjectRef && wrapper.waitingSubjectDigest === recovery.waitingSubjectRef &&
+        wrapper.observedAt === recovery.observedAt);
+      const wait = read(recovery.waitingSubjectRef), dispatch = wait.probeState?.dispatch;
+      closedValue(wait, ['schemaVersion', 'kind', 'runId', 'createdFromRevision', 'createdAt', 'frontierRef', 'subject', 'probeState']);
+      closedValue(wait.subject, ['kind', 'oldWorkerLaunchId', 'oldLeaseEpoch', 'oldWorkerIdentity', 'processContainmentRef', 'workspaceGenerationRef', 'openInvocationRefs']);
+      closedValue(wait.probeState, ['phase', 'automaticProbeCount', 'userProbeCount', 'dispatch']);
+      closedValue(dispatch, ['schemaVersion', 'format', 'runId', 'reconciliationSubjectDigest', 'probeKind', 'probeOrdinal', 'probeNonceDigest',
+        'probeStartedAt', 'probeDeadlineAt', 'owningSupervisorInstanceId', 'dispatchDigest', 'subjectKind', 'inspectorTaskId', 'inspectionTargetDigest']);
+      requireValue(digest(wait.frontierRef) && Number.isSafeInteger(wait.createdFromRevision) && wait.createdFromRevision > 0 &&
+        parseCanonicalTime(wait.createdAt) <= parseCanonicalTime(dispatch.probeStartedAt) &&
+        dispatch.schemaVersion === 1 && dispatch.format === 'cliq-reconciliation-probe-dispatch-v1' &&
+        dispatch.reconciliationSubjectDigest === canonicalSha256(wait.subject) && digest(dispatch.probeNonceDigest) &&
+        dispatch.inspectorTaskId === identityHash(expected.runId, canonicalSha256(wait.subject), 'automatic', dispatch.probeOrdinal, dispatch.probeNonceDigest) &&
+        dispatch.owningSupervisorInstanceId === death.inspectorSupervisorInstanceId);
+      requireValue(Array.isArray(wait.subject.openInvocationRefs) && wait.subject.openInvocationRefs.length <= 16);
+      let priorSeq = 0;
+      for (const ref of wait.subject.openInvocationRefs) {
+        requireValue(digest(ref)); const witness = read(ref);
+        const journal = database.prepare(`SELECT run_id,seq,op_id,op_kind,attempt,phase,
+          CASE WHEN typeof(entry_json)='text' AND length(CAST(entry_json AS BLOB)) BETWEEN 1 AND 65536
+          THEN entry_json ELSE NULL END AS entry_json FROM run_journal WHERE run_id=? AND seq=? LIMIT 2`).all(expected.runId, witness.seq);
+        requireValue(journal.length === 1 && typeof journal[0]!.entry_json === 'string');
+        const actual = journalEntryFromRow(journal[0] as JournalSqlRow);
+        requireValue(actual.phase === 'prepared' && actual.seq > priorSeq && actual.timestamp <= dispatch.probeStartedAt && canonicalSha256(actual) === ref);
+        priorSeq = actual.seq;
+      }
+      requireValue(wait.schemaVersion === 1 && wait.kind === 'reconciliation' && wait.runId === expected.runId &&
+        wait.subject?.kind === 'worker_death' && wait.subject.oldWorkerLaunchId === launch.launchId &&
+        wait.subject.oldLeaseEpoch === launch.leaseEpoch && wait.subject.oldWorkerIdentity === launch.workerIdentityDigest &&
+        wait.subject.processContainmentRef === launch.processContainmentRef && wait.subject.workspaceGenerationRef === generation.generationRef &&
+        wait.probeState?.phase === 'automatic_in_flight' && wait.probeState.userProbeCount === 0 &&
+        dispatch?.subjectKind === 'worker_recovery' && dispatch.dispatchDigest === digestOmitting(dispatch, 'dispatchDigest') &&
+        dispatch.runId === expected.runId && dispatch.probeKind === 'automatic' && dispatch.probeOrdinal === wait.probeState.automaticProbeCount &&
+        dispatch.probeOrdinal >= 1 && dispatch.probeOrdinal <= 8 && dispatch.probeDeadlineAt === new Date(parseCanonicalTime(dispatch.probeStartedAt) + 30000).toISOString() &&
+        wrapper.probeKind === 'automatic' && wrapper.probeOrdinal === dispatch.probeOrdinal && wrapper.probeNonceDigest === dispatch.probeNonceDigest &&
+        wrapper.probeDispatchDigest === dispatch.dispatchDigest && wrapper.probeStartedAt === dispatch.probeStartedAt && wrapper.probeDeadlineAt === dispatch.probeDeadlineAt &&
+        death.observedAt >= dispatch.probeStartedAt && death.observedAt <= recovery.observedAt && recovery.observedAt <= dispatch.probeDeadlineAt &&
+        quarantine.observedAt < dispatch.probeDeadlineAt);
+      const anchor = decodeWorkspaceGenerationState(readCas(dispatch.inspectionTargetDigest)); requireValue(anchor.phase === 'fenced_reconciling');
+      requireValue(anchor.generationRef === generation.generationRef && anchor.generationIdentityDigest === generation.generationIdentityDigest &&
+        anchor.activeWorkerLaunchId === launch.launchId && anchor.leaseEpoch === launch.leaseEpoch &&
+        anchor.sourceCheckpointId === generation.sourceCheckpointId && anchor.sourceWorkspaceStateRef === generation.sourceWorkspaceStateRef &&
+        quarantine.sourceRowVersion === anchor.rowVersion + 1);
+      const containment = read(launch.processContainmentRef!);
+      closedValue(death, ['schemaVersion', 'kind', 'containmentRef', 'planRef', 'sandboxLaunchSpecRef', 'sandboxLaunchSpecDigest', 'owner', 'launchNonceDigest',
+        'inspectorSupervisorInstanceId', 'inspectorIdentityRef', 'inspectorIdentityDigest', 'backend', 'observedAt', 'evidenceDigest']);
+      requireValue(death.kind === 'containment_all_descendants_dead' && death.containmentRef === launch.processContainmentRef &&
+        death.planRef === launch.containmentPlanRef && death.sandboxLaunchSpecRef === launch.sandboxLaunchSpecRef &&
+        death.launchNonceDigest === launch.spawnNonceDigest && death.sandboxLaunchSpecDigest === containment.sandboxLaunchSpecDigest &&
+        canonicalSha256(death.owner) === canonicalSha256({ kind: 'worker_activation', runId: expected.runId,
+          intendedLeaseEpoch: expected.leaseEpoch, workerLaunchId: launch.launchId }) &&
+        canonicalSha256(containment.owner) === canonicalSha256(death.owner) &&
+        canonicalSha256(containment.filesystemBinding) === canonicalSha256({ kind: 'run-generation', generationRef: generation.generationRef }));
+      requireValue(death.backend?.kind === 'linux' && canonicalSha256(death.backend) === canonicalSha256({ ...containment.backend,
+        cgroupPopulated: 0, namespaceInitDeadAndReaped: true, remainingTrackedDescendants: 0 }));
+      for (const fact of [retired, quarantine, recovery, death, wrapper]) requireValue(fact.inspectorIdentityRef === expected.inspectorIdentityRef &&
+        fact.inspectorIdentityDigest === expected.inspectorIdentityDigest);
+      const current = workerProjection(databaseIdentity, launch, generation, readCas);
+      database.exec('COMMIT');
+      return Object.freeze({ ...current, generationPhase: 'retired' as const, generationWriteState: 'fenced_reconciling' as const,
+        retiredAt: launch.retiredAt, retirementEvidenceRef: resources.retirementEvidenceRef,
+        quarantineEvidenceRef: resources.quarantineEvidenceRef, containmentDeathEvidenceRef: recovery.containmentDeathEvidenceRef,
+        deathObservedAt: death.observedAt as string, quarantinePath: quarantine.quarantineCanonicalRootRelativePath as string });
+    });
+  } catch { throw new Error('installed recovered worker retirement inspection refused'); }
 }
 
 function readWorkerRows(database: DatabaseSync, runId: string, launchId: string) {

@@ -33,14 +33,24 @@ function subject(value: unknown): PublicationReconciliationSubject {
 }
 
 export function decodePublicationRecoveryOrigin(value: unknown): PublicationRecoveryOriginV1 {
+  const graceful = !!value && typeof value === 'object' && Object.hasOwn(value, 'gracefulOwnerDeath');
   const data = closed(value, ['schemaVersion', 'format', 'deliveryRunId', 'deliveryPlanRef', 'opId', 'attempt', 'dispatchId',
     'claimJournalSeq', 'arenaBirthRef', 'arenaBirthDigest', 'inspectorIdentityRef', 'inspectorIdentityDigest',
-    'ownerDeathAcquisitionEvidenceRef', 'ownerDeathAcquisitionEvidenceDigest', 'observedAt', 'originDigest']);
+    ...(graceful ? ['gracefulOwnerDeath'] : ['ownerDeathAcquisitionEvidenceRef', 'ownerDeathAcquisitionEvidenceDigest']), 'observedAt', 'originDigest']);
   if (data.schemaVersion !== 1 || data.format !== 'cliq-publication-recovery-origin-v1')
     throw new TypeError('invalid publication recovery origin format');
   for (const field of ['deliveryRunId', 'opId', 'dispatchId']) text(data[field]);
-  for (const field of ['deliveryPlanRef', 'arenaBirthRef', 'arenaBirthDigest', 'inspectorIdentityRef', 'inspectorIdentityDigest',
-    'ownerDeathAcquisitionEvidenceRef', 'ownerDeathAcquisitionEvidenceDigest', 'originDigest']) reference(data[field]);
+  for (const field of ['deliveryPlanRef', 'arenaBirthRef', 'arenaBirthDigest', 'inspectorIdentityRef', 'inspectorIdentityDigest', 'originDigest']) reference(data[field]);
+  if (graceful) {
+    const death = closed(data.gracefulOwnerDeath, ['kind', 'priorOwnerRowDigest', 'priorProcessIdentityRef', 'priorProcessIdentityDigest',
+      'gracefulTransitionEvidenceRef', 'gracefulTransitionEvidenceDigest', 'processObservation']);
+    if (death.kind !== 'observed_after_graceful_release' || death.processObservation !== 'absent_or_start_token_mismatch')
+      throw new TypeError('publication graceful history has no exact original process-death observation');
+    for (const field of ['priorOwnerRowDigest', 'priorProcessIdentityRef', 'priorProcessIdentityDigest',
+      'gracefulTransitionEvidenceRef', 'gracefulTransitionEvidenceDigest']) reference(death[field]);
+  } else {
+    reference(data.ownerDeathAcquisitionEvidenceRef); reference(data.ownerDeathAcquisitionEvidenceDigest);
+  }
   integer(data.attempt); integer(data.claimJournalSeq, 1); time(data.observedAt);
   if (data.originDigest !== digestOmitting(data, 'originDigest')) throw new TypeError('publication recovery origin digest differs');
   return immutableSnapshot(value) as PublicationRecoveryOriginV1;

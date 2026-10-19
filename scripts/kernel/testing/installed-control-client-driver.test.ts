@@ -18,14 +18,21 @@ test('a real diagnostic sink failure cannot skip original retirement or replace 
     const originalMain=main;main=async()=>{try{await originalMain()}catch(error){observeFailure(error);throw error}};
     ${ending}\nreturn {phase,failedPhase};})()`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
   for (const mode of ['success', 'business_failure', 'retirement_failure']) {
-    const result = spawnSync(process.execPath, ['--input-type=module', '-e', `
+    // Only this data-only child deliberately closes fd2; suppress its loader's
+    // unrelated warning after that close. Qualification driver argv is unchanged.
+    const result = spawnSync(process.execPath, ['--no-warnings', '--import', 'tsx', '--input-type=module', '-e', `
       import assert from 'node:assert/strict';import vm from 'node:vm';
+      import {channel} from 'node:diagnostics_channel';
       import {openSync,closeSync,fstatSync,writeSync} from 'node:fs';
+      const {copyInstalledClientAuthenticationWork,installedClientAuthenticationMarker}=await import(${JSON.stringify(new URL('./installed-client-consumer.ts', import.meta.url).href)});
+      const {INSTALLED_CLIENT_PHASE_CHANNEL,INSTALLED_CLIENT_PHASES}=await import(${JSON.stringify(new URL('../../../src/state/installed-diagnostics.ts', import.meta.url).href)});
+      const {INSTALLED_WORK_CHANNEL}=await import(${JSON.stringify(new URL('../../../src/state/installed-work-diagnostics.ts', import.meta.url).href)});
       const mode=${JSON.stringify(mode)},events=[],clientFd=openSync('/dev/null','r'),selectedFd=openSync('/dev/null','r');
       const business=new Error('original business failure'),retirement=new Error('original retirement failure');
       const joined=fd=>{try{fstatSync(fd);return false}catch(error){assert.equal(error.code,'EBADF');return true}};
       let originalFailure='none',exitCode=0,escaped=false;
-      const context={assert,writeSync,ResourceRetirementError:class extends Error{},
+      const context={assert,writeSync,performance,channel,INSTALLED_CLIENT_PHASE_CHANNEL,INSTALLED_CLIENT_PHASES,
+        INSTALLED_WORK_CHANNEL,copyInstalledClientAuthenticationWork,installedClientAuthenticationMarker,ResourceRetirementError:class extends Error{},
         observeFailure(error){originalFailure=error===business?'business':error===retirement?'retirement':'other'},
         process:{platform:'linux',arch:'x64',geteuid:()=>1001,getegid:()=>1001,argv:['node','driver','data-only'],
           once(){},removeListener(){events.push('remove-listener')},stdin:{destroy(){}},stdout:{on(){},removeListener(){events.push('remove-listener')}},
@@ -33,13 +40,16 @@ test('a real diagnostic sink failure cannot skip original retirement or replace 
         fixtureComposition:async()=>({stateRoot:'data-only',releaseKeys:[]}),
         createInstalledRuntime:()=>({openSelected:async()=>({close:async()=>{events.push('selected-close');closeSync(selectedFd)}})}),
         openInstalledSupervisorClient:async()=>({hello:{},close:async()=>{events.push('client-close');closeSync(clientFd);if(mode==='retirement_failure')throw retirement}}),
-        output:async()=>{},requests:async function*(){closeSync(2);if(mode==='business_failure')throw business}};
+        output:async()=>{},requests:async function*(){closeSync(2);
+          channel(INSTALLED_WORK_CHANNEL).publish(Object.defineProperty({},'package',{get(){throw new Error('diagnostic getter')}}));
+          channel(INSTALLED_CLIENT_PHASE_CHANNEL).publish('final_current_verified');
+          if(mode==='business_failure')throw business}};
       try{await vm.runInNewContext(${JSON.stringify(code)},context)}catch{escaped=true}
       const report={escaped,originalFailure,exitCode,events,clientJoined:joined(clientFd),selectedJoined:joined(selectedFd)};
       if(!report.clientJoined)closeSync(clientFd);if(!report.selectedJoined)closeSync(selectedFd);
       console.log(JSON.stringify(report));
     `], { encoding: 'utf8', timeout: 10000 });
-    assert.equal(result.error, undefined); assert.equal(result.signal, null); assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.error, undefined); assert.equal(result.signal, null); assert.equal(result.status, 0, result.stdout);
     assert.deepEqual(JSON.parse(result.stdout), { escaped: false, originalFailure: mode === 'success' ? 'none' : mode === 'business_failure' ? 'business' : 'retirement',
       exitCode: mode === 'success' ? 0 : 1, events: mode === 'retirement_failure'
         ? ['client-close', 'remove-listener', 'remove-listener', 'remove-listener']

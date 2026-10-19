@@ -29,6 +29,7 @@ type Context = {
   assertRunWorkersRetired(runId: string, observedLaunchIds: readonly string[], publicationRetirement?: InstalledWorkerRetirementBinding | null): Promise<number>;
   assertVerifierProcessesAbsent(retirement: InstalledVerifierRetirementIdentity): Promise<void>;
   mark(phase: string): void; reconnect(): Promise<void>; restart(): Promise<void>;
+  cleanupCrash(source: Source): Promise<void>;
 };
 const ZERO = { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 };
 const metadata = async (filename: string) => {
@@ -226,7 +227,8 @@ export async function runInstalledDeliveryCases(context: Context) {
       cancellation: { request: cancellation, response: cancellationResponse } });
     await context.assertVerifierProcessesAbsent(identity); await retirements(stoppedRun.id);
   }
-  return { diagnosticOnly: true, qualified: true, cases: completed.map(entry => {
+  await context.cleanupCrash(first);
+  return { diagnosticOnly: true, qualified: true, cleanupCrashQualified: true, cases: completed.map(entry => {
     const { verifierRetirementIdentities, publicationWorkerRetirement, ...proof } = entry.proof;
     return { ...proof, verifierRetirementCount: verifierRetirementIdentities.length };
   }),

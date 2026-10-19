@@ -20,6 +20,7 @@ import type { SqliteDriver } from './sqlite-driver.js';
 import { readStateOwner } from './state-owner.js';
 import { readStateOwnerDeath } from './state-owner-death.js';
 import { readSupervisorInspector } from './supervisor-inspector.js';
+import { readRetainedStateOwnerHistory } from './state-owner-history.js';
 import { WORKER_PROBE_BACKOFF_MS } from './worker-recovery.js';
 
 type Admission = Awaited<ReturnType<typeof readDeliveryRunAdmission>>;
@@ -56,24 +57,46 @@ export async function readPublicationRecoveryOrigin(driver: SqliteDriver, artifa
     throw new TypeError('publication recovery substituted the original claim, birth or current observation');
   const retainedInspector = await readCanonicalArtifact<SupervisorInspectorIdentityV1>(artifacts, origin.inspectorIdentityRef);
   const owner = readStateOwner(driver, retainedInspector.stateOwnerEpoch);
-  const death = await readStateOwnerDeath(artifacts, driver, { supervisorInstanceId: claim.supervisorInstanceId, ownedAt: claim.timestamp });
-  if (!owner || death.priorOwner.ownerEpoch !== claim.stateOwnerEpoch || owner.ownerEpoch <= claim.stateOwnerEpoch ||
-      owner.ownerEpoch < death.successorOwner.ownerEpoch || origin.ownerDeathAcquisitionEvidenceRef !== death.acquisitionEvidenceRef ||
-      origin.ownerDeathAcquisitionEvidenceDigest !== death.acquisitionEvidenceDigest || origin.observedAt < death.successorOwner.acquiredAt ||
-      origin.observedAt < owner.acquiredAt || owner.state === 'terminal' && proof.observedAt > owner.releasedAt)
+  if (!owner || owner.ownerEpoch <= claim.stateOwnerEpoch || origin.observedAt < owner.acquiredAt ||
+      owner.state === 'terminal' && proof.observedAt > owner.releasedAt)
     throw new TypeError('publication recovery requires actual original owner death and a strictly newer inspector lifetime');
+  let priorOwner;
+  if (origin.gracefulOwnerDeath) {
+    const history = await readRetainedStateOwnerHistory(driver, artifacts, owner.ownerEpoch);
+    const claiming = history.entries.find(entry => entry.owner.ownerEpoch === claim.stateOwnerEpoch);
+    const inspecting = history.entries.find(entry => entry.owner.ownerEpoch === owner.ownerEpoch);
+    const death = origin.gracefulOwnerDeath;
+    if (!claiming || !inspecting || claiming.owner.state !== 'terminal' || claiming.owner.terminalReason !== 'graceful_release' ||
+        claiming.owner.supervisorInstanceId !== claim.supervisorInstanceId || claim.timestamp < claiming.owner.acquiredAt ||
+        claim.timestamp > claiming.owner.releasedAt || origin.observedAt < claiming.owner.releasedAt ||
+        death.priorOwnerRowDigest !== claiming.owner.rowDigest || death.priorProcessIdentityRef !== claiming.owner.processIdentityRef ||
+        death.priorProcessIdentityDigest !== claiming.owner.processIdentityDigest ||
+        death.gracefulTransitionEvidenceRef !== claiming.owner.transitionEvidenceRef ||
+        death.gracefulTransitionEvidenceDigest !== claiming.owner.transitionEvidenceDigest || claiming.transition?.kind !== 'graceful_release')
+      throw new TypeError('publication graceful owner death lost its exact original process and released history');
+    requireEqual(inspecting.owner, owner, 'publication graceful-death recorded inspector');
+    history.assertUnchanged(driver);
+    priorOwner = claiming.owner;
+  } else {
+    const death = await readStateOwnerDeath(artifacts, driver, { supervisorInstanceId: claim.supervisorInstanceId, ownedAt: claim.timestamp });
+    if (death.priorOwner.ownerEpoch !== claim.stateOwnerEpoch || owner.ownerEpoch < death.successorOwner.ownerEpoch ||
+        origin.ownerDeathAcquisitionEvidenceRef !== death.acquisitionEvidenceRef ||
+        origin.ownerDeathAcquisitionEvidenceDigest !== death.acquisitionEvidenceDigest || origin.observedAt < death.successorOwner.acquiredAt)
+      throw new TypeError('publication recovery requires actual original owner death and a strictly newer inspector lifetime');
+    priorOwner = death.priorOwner;
+  }
   parseCanonicalTime(proof.observedAt);
   const inspector = await readSupervisorInspector(artifacts, owner, admission.source.assembly, proof);
   const lock = decodeStateLockIdentity(await readCanonicalArtifact(artifacts, owner.stateLockIdentityRef));
-  const originalLock = decodeStateLockIdentity(await readCanonicalArtifact(artifacts, death.priorOwner.stateLockIdentityRef));
+  const originalLock = decodeStateLockIdentity(await readCanonicalArtifact(artifacts, priorOwner.stateLockIdentityRef));
   if (lock.stateRootIdentityRef !== originalLock.stateRootIdentityRef || lock.stateRootIdentityDigest !== originalLock.stateRootIdentityDigest ||
       birth.stateRootIdentityRef !== originalLock.stateRootIdentityRef || birth.stateRootIdentityDigest !== originalLock.stateRootIdentityDigest)
     throw new TypeError('publication recovery changed the original StateRoot or lock ownership');
-  const birthInspector = await readSupervisorInspector(artifacts, death.priorOwner, admission.source.assembly, birth);
+  const birthInspector = await readSupervisorInspector(artifacts, priorOwner, admission.source.assembly, birth);
   if (birthInspector.stateOwnerEpoch !== claim.stateOwnerEpoch || birthInspector.supervisorInstanceId !== claim.supervisorInstanceId ||
-      birth.observedAt > claim.timestamp || birth.observedAt > death.priorOwner.releasedAt)
+      birth.observedAt > claim.timestamp || birth.observedAt > priorOwner.releasedAt)
     throw new TypeError('publication recovery birth is not from its original claimed native owner');
-  return immutableSnapshot({ origin, owner, inspector, lock, death });
+  return immutableSnapshot({ origin, owner, inspector, lock, priorOwner });
 }
 
 /** Original public enqueue source; the post-enqueue response never substitutes

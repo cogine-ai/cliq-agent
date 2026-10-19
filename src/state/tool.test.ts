@@ -14,6 +14,62 @@ import { postEffectObservation } from './testing/tool-effects.js';
 
 import { batch, prepareTool, claimTool, observation } from './testing/tool-calls.js';
 
+// Corrupt retained data at the existing disposable SQLite/CAS seam. These
+// refusals do not construct verifier admission, a launch, or physical proof.
+for (const subjectKind of ['verifier_launch', 'delivery_plan', 'unknown'] as const)
+  test(`loading an Agent never skips an unowned ${subjectKind} policy decision`, async () => {
+    const fixture = await createAgentFixture('tool-policy-subject', undefined, { mode: 'yolo' });
+    const driver = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+    try {
+      const run = fixture.store.getRun(fixture.runId);
+      const item = { schemaVersion: 1, kind: 'policy_decision', subjectKind, itemId: 'unowned-policy',
+        runId: fixture.runId, opId: 'unowned-operation', principalId: fixture.principalId,
+        decisionRef: 'a'.repeat(64), policyChannelEvidenceRef: 'a'.repeat(64), policyChannelEvidenceDigest: 'b'.repeat(64),
+        createdAt: run.updatedAt, decisionSource: 'direct_policy', decision: 'allow', grantRef: 'c'.repeat(64) };
+      const payload = await fixture.store.artifacts.publishCanonical(item, 'offline-corrupt-policy-data');
+      driver.prepare('INSERT INTO items (item_id, session_id, run_id, item_seq, kind, payload_ref, created_at) VALUES (?, NULL, ?, ?, ?, ?, ?)')
+        .run(item.itemId, fixture.runId, 1n, item.kind, payload.ref, item.createdAt);
+      const refusal = { code: 'RECOVERY_REQUIRED', message: subjectKind === 'verifier_launch'
+        ? /verifier policy item has no owned candidate/ : /policy decision has an unsupported subject/ };
+      await assert.rejects(fixture.store.readRecoveryClosure(fixture.runId), refusal);
+      await assert.rejects(fixture.store.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material,
+        releaseKeys: fixture.signed!.releaseKeys }), refusal);
+      assert.deepEqual(fixture.store.getRun(fixture.runId), run);
+    } finally { driver.close(); await disposeFixture(fixture); }
+  });
+
+test('loading an Agent refuses policy rows appended after its complete recovery cut', async () => {
+  const fixture = await createAgentFixture('tool-policy-cut', undefined, { mode: 'yolo' });
+  const driver = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+  try {
+    const run = fixture.store.getRun(fixture.runId);
+    const item = { schemaVersion: 1, kind: 'policy_decision', subjectKind: 'verifier_launch', itemId: 'late-unowned-policy',
+      runId: fixture.runId, opId: 'unowned-operation', principalId: fixture.principalId,
+      decisionRef: 'a'.repeat(64), policyChannelEvidenceRef: 'a'.repeat(64), policyChannelEvidenceDigest: 'b'.repeat(64),
+      createdAt: run.updatedAt, decisionSource: 'direct_policy', decision: 'allow', grantRef: 'c'.repeat(64) };
+    const payload = await fixture.store.artifacts.publishCanonical(item, 'offline-corrupt-policy-data');
+    const resolve = fixture.authority.material.resolveVerifiedTools;
+    let appended = false;
+    const material = { ...fixture.authority.material, resolveVerifiedTools: (reference: Parameters<typeof resolve>[0]) => {
+      const tools = resolve(reference);
+      // Assembly validation follows the actual full recovery read. This
+      // existing resolver seam adds inert corrupt data, never a grant/launch.
+      if (!appended) {
+        driver.prepare('INSERT INTO items (item_id, session_id, run_id, item_seq, kind, payload_ref, created_at) VALUES (?, NULL, ?, ?, ?, ?, ?)')
+          .run(item.itemId, fixture.runId, 1n, item.kind, payload.ref, item.createdAt);
+        appended = true;
+      }
+      return tools;
+    } };
+    await assert.rejects(fixture.store.loadAgentRun({ runId: fixture.runId, material,
+      releaseKeys: fixture.signed!.releaseKeys }), { code: 'REVISION_CONFLICT', message: /policy recovery cut changed/ });
+    assert.equal(appended, true);
+    assert.deepEqual(fixture.store.getRun(fixture.runId), run);
+    await assert.rejects(fixture.store.readRecoveryClosure(fixture.runId), { code: 'RECOVERY_REQUIRED',
+      message: /verifier policy item has no owned candidate/ });
+  } finally { driver.close(); await disposeFixture(fixture); }
+});
+
 test('canonical allow, permanent claim and ordered results continue through the real loaded Run without authority in prompts', async () => {
   const fixture = await createAgentFixture('tool-ordered', undefined, { mode: 'default' });
   try {

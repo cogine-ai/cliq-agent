@@ -214,7 +214,7 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
   }
 
   const { controlAuthority, ...toolContinuation } = await loadToolContinuation(driver, artifacts, owner, {
-    run: admittedRun, spec, assembly, contracts, resolveToolInput, releaseKeys
+    run: admittedRun, spec, assembly, contracts, resolveToolInput, releaseKeys, recoveredItems: recovered.items
   }, reobserve);
   const continuation = await loadRunContinuation(driver, artifacts, owner, authority, reobserve, installedRuntime, controlAuthority);
   return Object.freeze({

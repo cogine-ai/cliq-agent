@@ -1029,6 +1029,23 @@ Implementation notes:
     zero-charge post-stop abort maintenance has its own exact original-Plan/
     creator-receipt/prefix authority, not a relaxed productive grant.
 
+    Publication recovery preserves the existing original-owner takeover-death
+    acquisition pair. Its only additional origin branch is the disjoint closed
+    `gracefulOwnerDeath`: exact original terminal row digest, process identity
+    ref/digest, graceful transition ref/digest, fixed
+    `kind='observed_after_graceful_release'` and
+    `processObservation='absent_or_start_token_mismatch'`. A strictly newer
+    genuine StateOwner must observe that original PID/start lifetime dead using
+    its actual held native lock; the native observation supplies the unchanged
+    origin time. Graceful release, a free lock or epoch alone never suffices.
+    The original claim/birth and complete owner/process/runtime/lock/root graph
+    revalidate and the writer rechecks that SQL history unchanged. No historical
+    owner/acquisition row, old FD, worker/broker death authority, claim, nonce or
+    charge is created or rewritten. Missing progress/resources remain waiting;
+    new namespace observations still require full original-inode bytes and
+    separate exact maintenance/fsync/join. Real installed SIGTERM/exit/restart
+    qualification remains required; decoder/native refusal tests are not it.
+
     All receipt/evidence edges decode canonical `PublicationProofV1`, whose
     self-omitting digest, original Run/Plan/inspector and actual producer/claim/
     resource provenance revalidate. `PublicationLocationV1` distinguishes held

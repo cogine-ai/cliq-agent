@@ -541,9 +541,22 @@ Data/CAS/SQLite and forged-token regressions pass; the physical progress-to-
 cancellation cut and two-second installed shutdown remain unqualified.
 
 A new inspector must prove actual original StateOwner process death and strict
-takeover in the same StateRoot, not merely a larger epoch. Its separate
-`PublicationRecoveryOriginV1` binds that acquisition, original claim/birth and
-current inspector. Claim-bound observations/receipt/retirement can name this
+new ownership in the same StateRoot, not merely a larger epoch. Its separate
+`PublicationRecoveryOriginV1` retains the existing exact takeover-acquisition
+pair, or exclusively carries closed `gracefulOwnerDeath` data: the original
+terminal row digest, process identity ref/digest, graceful transition ref/digest,
+fixed `kind='observed_after_graceful_release'` and fixed absent/start-token-
+mismatch observation. The latter is produced only by the current genuine
+lock's actual `observePriorProcessDeath` for the retained original PID/token;
+its native time becomes `origin.observedAt`, no earlier than release and current
+acquisition. Full original claim/birth/owner/process/runtime/lock/root history
+is read before I/O and compared unchanged by the original SQL friend. The
+graceful owner row and all acquisition history remain untouched. No broker or
+worker-death authority, old FD, new claim, nonce or budget is derived from this
+publication-only provenance. An alive or unobservable original process still
+refuses. The real installed SIGTERM→exit→restart/namespace recovery branch
+remains unqualified until executed; data and actual native-alive refusal do
+not qualify it. Claim-bound observations/receipt/retirement can name this
 origin; fresh whole-workspace observations cannot. The original same-owner
 branch retains its existing exact inspector checks. The acyclic graph is
 result/handoff → probe evidence → actual receipt/proof → recovery origin;
@@ -602,6 +615,11 @@ are under implementation, not installed Linux qualification:
 A late audit is never positive authority for a later nonce. Progress requires
 a new actual bounded probe, independently qualified original-holder death and
 current namespace evidence, then the unchanged sole result/terminal writer.
+For that validated original-UNKNOWN resolution only, the result item is
+prepared before its new zero-delta Journal row: receipt/probe observation ≤
+item creation ≤ Journal time = the exact atomic result Checkpoint time.
+Initial settlement retains its original settled-time-before-item ordering;
+neither branch retimes the original receipt, UNKNOWN or BudgetSettlement.
 The new receipt/retirement/aggregate branches are disjoint from original
 descriptor retirement and cover every claimed envelope without inventing
 empty old-slot arrays. A still-live original claim holder remains waiting;

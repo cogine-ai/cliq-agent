@@ -12,6 +12,143 @@ import { digestOmitting, sha256Bytes } from '../../../src/kernel/identity.js';
 import type { WorkerIdentity, WorkerLaunch, WorkspaceGenerationStateV1 } from '../../../src/kernel/types.js';
 import { assertInstalledWorkerLeaseRenewed, inspectInstalledWorkerIdentity, inspectInstalledWorkerLease,
   inspectInstalledWorkerRetirement, inspectInstalledWorkerRetirementHistory, inspectInstalledWorkerLaunchIds } from './installed-worker-lease.js';
+import { inspectInstalledPublicationClaim, inspectInstalledRecoveredWorkerRetirement } from './installed-worker-lease.js';
+import { publicationArenaId } from '../../../src/kernel/publication.js';
+import { addCanonicalDuration, identityHash } from '../../../src/kernel/identity.js';
+
+test('publication crash diagnostics never accept an absent claim or manufacture a birth from a pathname', async t => {
+  const value = await workerFixture(t);
+  update(value.filename, database => database.exec(`CREATE TABLE run_journal(run_id TEXT,seq INTEGER,op_id TEXT,op_kind TEXT,attempt INTEGER,phase TEXT,entry_json TEXT);
+    CREATE TABLE items(run_id TEXT,item_id TEXT,item_seq INTEGER,payload_ref TEXT,kind TEXT,created_at TEXT);`));
+  const before = await readFile(value.filename), names = await readdir(value.cas);
+  assert.equal(inspectInstalledPublicationClaim(value.stateRoot, value.expected.uid, value.expected.runId), undefined);
+  assert.deepEqual(await readFile(value.filename), before); assert.deepEqual(await readdir(value.cas), names);
+});
+
+test('publication crash diagnostics bind actual canonical birth and retain an already-committed receipt as a missed cut', async t => {
+  const value = await workerFixture(t), hash = 'a'.repeat(64), time = new Date().toISOString();
+  const budget = { modelTokens: 0, costMicros: 0, toolCalls: 1, repairAttempts: 0 };
+  const birth = { schemaVersion: 1, format: 'cliq-publication-arena-birth-v1', deliveryRunId: value.expected.runId,
+    deliveryPlanRef: hash, workspaceIdentityRef: hash, workspaceIdentityDigest: hash, stateRootIdentityRef: hash, stateRootIdentityDigest: hash,
+    inspectorIdentityRef: hash, inspectorIdentityDigest: hash, sequence: 'forward', operationIndex: 0, operationId: 'O'.repeat(43),
+    opId: 'actual-original-op', attempt: 0, dispatchId: 'actual-dispatch',
+    arenaId: publicationArenaId(value.expected.runId, 'O'.repeat(43), 'actual-original-op', 0, 'actual-dispatch'),
+    arenaIdentity: { deviceId: '1', fileId: '20', ownerUid: value.expected.uid, mode: 0o700 },
+    parentIdentity: { deviceId: '1', fileId: '21', ownerUid: value.expected.uid, mode: 0o700 }, observedAt: time, birthDigest: '' };
+  birth.birthDigest = digestOmitting(birth, 'birthDigest'); const bytes = canonicalJsonBytes(birth), birthRef = sha256Bytes(bytes);
+  await writeFile(path.join(value.cas, birthRef), bytes, { mode: 0o400, flag: 'wx' });
+  const prepared = { runId: value.expected.runId, seq: 1, opId: birth.opId, opKind: 'publish', attempt: 0, phase: 'prepared',
+    leaseEpoch: 1, requestRef: hash, target: hash, grantRef: hash, replayClass: 'reconcile', budgetDelta: budget, timestamp: time };
+  const claim = { ...prepared, seq: 2, phase: 'dispatch_claimed', budgetDelta: { ...budget, toolCalls: 0 },
+    evidenceRef: birthRef, evidenceDigest: birth.birthDigest, dispatchId: birth.dispatchId, stateOwnerEpoch: 1, supervisorInstanceId: value.expected.supervisorInstanceId };
+  const insert = (database: DatabaseSync, row: typeof prepared) => database.prepare('INSERT INTO run_journal VALUES(?,?,?,?,?,?,?)')
+    .run(row.runId, row.seq, row.opId, row.opKind, row.attempt, row.phase, JSON.stringify(row));
+  update(value.filename, database => {
+    database.exec(`CREATE TABLE run_journal(run_id TEXT,seq INTEGER,op_id TEXT,op_kind TEXT,attempt INTEGER,phase TEXT,entry_json TEXT);
+      CREATE TABLE items(run_id TEXT,item_id TEXT,item_seq INTEGER,payload_ref TEXT,kind TEXT,created_at TEXT);`);
+    insert(database, prepared); insert(database, claim);
+  });
+  const before = await readFile(value.filename), observed = inspectInstalledPublicationClaim(value.stateRoot, value.expected.uid, value.expected.runId)!;
+  assert.equal(observed.originalReceiptCommitted, false); assert.deepEqual(observed.birth, birth); assert.equal(observed.claim.dispatchId, birth.dispatchId);
+  assert.deepEqual(await readFile(value.filename), before); assert.equal(Object.hasOwn(observed, 'qualified'), false);
+  update(value.filename, database => insert(database, { ...claim, seq: 3, phase: 'completed', budgetDelta: budget,
+    budgetSettlementRef: hash, receiptRef: birthRef } as typeof prepared));
+  assert.equal(inspectInstalledPublicationClaim(value.stateRoot, value.expected.uid, value.expected.runId)!.originalReceiptCommitted, true);
+});
+
+test('a normal sealed worker is not the genuinely retired recovery branch', async t => {
+  const value = await workerFixture(t); await retireFixture(value);
+  assert.throws(() => inspectInstalledRecoveredWorkerRetirement(value.stateRoot, value.expected.uid, {
+    runId: value.expected.runId, supervisorInstanceId: value.expected.supervisorInstanceId, leaseEpoch: 1,
+    inspectorIdentityRef: 'a'.repeat(64), inspectorIdentityDigest: 'a'.repeat(64),
+    resources: { kind: 'genuinely_retired_from_verified_checkpoint', workerLaunchId: value.expected.launchId,
+      generationRef: value.generation.generationRef, sourceCheckpointId: value.generation.sourceCheckpointId,
+      quarantineEvidenceRef: 'a'.repeat(64), retirementEvidenceRef: 'a'.repeat(64) },
+  }), { message: 'installed recovered worker retirement inspection refused' });
+});
+
+async function recoveredFixture(t: TestContext) {
+  const value = await workerFixture(t), hash = 'a'.repeat(64);
+  const time = (n: number) => new Date(Date.parse(value.launch.activatedAt!) + n).toISOString();
+  const published = new Set<string>();
+  const put = async (object: unknown) => {
+    const ref = canonicalSha256(object); if (published.has(ref)) return ref;
+    await publishFixture(value, object); published.add(ref); return ref;
+  };
+  const seal = <T extends Record<string, unknown>>(object: T) => ({ ...object, evidenceDigest: digestOmitting(object, 'evidenceDigest') });
+  const subject = { kind: 'worker_death', oldWorkerLaunchId: value.launch.launchId, oldLeaseEpoch: 1,
+    oldWorkerIdentity: value.launch.workerIdentityDigest, processContainmentRef: value.launch.processContainmentRef,
+    workspaceGenerationRef: value.generation.generationRef, openInvocationRefs: [] };
+  const pending = { schemaVersion: 1, kind: 'reconciliation', runId: value.expected.runId, createdFromRevision: 4,
+    createdAt: time(100), frontierRef: hash, subject,
+    probeState: { phase: 'automatic_pending', automaticProbeCount: 0, userProbeCount: 0, nextProbeAt: time(100) } };
+  const pendingRef = await put(pending);
+  const anchor = { ...value.generation, rowVersion: 4, phase: 'fenced_reconciling', updatedAt: time(100),
+    waitingSubjectRef: pendingRef, waitingSubjectDigest: pendingRef, fencedJournalSeq: 2, fencedFromPhase: 'active' };
+  const anchorRef = await put(anchor), nonce = canonicalSha256('inert worker probe');
+  const dispatch: Record<string, any> = { schemaVersion: 1, format: 'cliq-reconciliation-probe-dispatch-v1', runId: value.expected.runId,
+    reconciliationSubjectDigest: canonicalSha256(subject), probeKind: 'automatic', probeOrdinal: 1, probeNonceDigest: nonce,
+    probeStartedAt: time(200), probeDeadlineAt: addCanonicalDuration(time(200), 30000), owningSupervisorInstanceId: 'inert-successor',
+    subjectKind: 'worker_recovery', inspectorTaskId: identityHash(value.expected.runId, canonicalSha256(subject), 'automatic', 1, nonce),
+    inspectionTargetDigest: anchorRef };
+  dispatch.dispatchDigest = digestOmitting(dispatch, 'dispatchDigest');
+  const wait = { ...pending, probeState: { phase: 'automatic_in_flight', automaticProbeCount: 1, userProbeCount: 0, dispatch } }, waitRef = await put(wait);
+  const death = seal({ schemaVersion: 1, kind: 'containment_all_descendants_dead', containmentRef: value.launch.processContainmentRef,
+    planRef: value.launch.containmentPlanRef, sandboxLaunchSpecRef: value.launch.sandboxLaunchSpecRef, sandboxLaunchSpecDigest: hash,
+    owner: value.containment.owner, launchNonceDigest: value.launch.spawnNonceDigest, inspectorSupervisorInstanceId: 'inert-successor',
+    inspectorIdentityRef: hash, inspectorIdentityDigest: hash, backend: { ...value.containment.backend,
+      cgroupPopulated: 0, namespaceInitDeadAndReaped: true, remainingTrackedDescendants: 0 }, observedAt: time(300) });
+  const recovery = seal({ schemaVersion: 1, format: 'cliq-worker-recovery-evidence-v1', runId: value.expected.runId,
+    waitingSubjectRef: waitRef, oldWorkerLaunchId: value.launch.launchId, oldLeaseEpoch: 1, oldWorkerIdentityDigest: value.launch.workerIdentityDigest,
+    processContainmentRef: value.launch.processContainmentRef, containmentDeathEvidenceRef: await put(death), containmentDeathEvidenceDigest: death.evidenceDigest,
+    workspaceGenerationRef: value.generation.generationRef, generationTreeDigest: value.generation.lastVerifiedTreeDigest,
+    inspectorIdentityRef: hash, inspectorIdentityDigest: hash, observedAt: time(400), generationDisposition: 'quarantined' });
+  const quarantine = seal({ schemaVersion: 1, format: 'cliq-workspace-generation-quarantine-evidence-v1', runId: value.expected.runId,
+    generationRef: value.generation.generationRef, generationIdentityDigest: value.generation.generationIdentityDigest, sourceRowVersion: 5,
+    observedState: { kind: 'complete_tree', treeDigest: value.generation.lastVerifiedTreeDigest }, inspectorIdentityRef: hash, inspectorIdentityDigest: hash,
+    quarantineCanonicalRootRelativePath: `quarantine/workspace-generations/${identityHash(value.generation.generationId, '5')}`,
+    quarantineDeviceId: '1', quarantineFileId: '2', originalLocatorAbsent: true, renameNoReplace: true, directoryFsyncComplete: true,
+    observedAt: time(500), reason: 'worker_recovery', fromPhase: 'fenced_reconciling', workerRecoveryEvidenceRef: await put(recovery),
+    workerRecoveryEvidenceDigest: recovery.evidenceDigest });
+  const quarantineRef = await put(quarantine), wrapper = seal({ schemaVersion: 1, format: 'cliq-reconciliation-probe-evidence-v1',
+    runId: value.expected.runId, waitingSubjectRef: waitRef, waitingSubjectDigest: waitRef, probeKind: 'automatic', probeOrdinal: 1,
+    probeNonceDigest: nonce, probeDispatchDigest: dispatch.dispatchDigest, probeStartedAt: dispatch.probeStartedAt, probeDeadlineAt: dispatch.probeDeadlineAt,
+    inspectorIdentityRef: hash, inspectorIdentityDigest: hash, observedAt: recovery.observedAt, outcome: 'subject_observation',
+    subjectEvidenceKind: 'worker_recovery', subjectEvidenceRef: await put(recovery), subjectEvidenceDigest: recovery.evidenceDigest });
+  const retired = seal({ schemaVersion: 1, format: 'cliq-workspace-generation-retirement-evidence-v1', runId: value.expected.runId,
+    generationRef: value.generation.generationRef, generationIdentityDigest: value.generation.generationIdentityDigest,
+    inspectorIdentityRef: hash, inspectorIdentityDigest: hash, observedAt: time(700), fromPhase: 'quarantined',
+    quarantineEvidenceRef: quarantineRef, quarantineEvidenceDigest: quarantine.evidenceDigest, sourceQuarantinedRowVersion: 6,
+    activeRunPointerCount: 0, nonretiredWorkerLaunchCount: 0, liveContainmentCount: 0, activeMountCount: 0, releasableBrokerClaimCount: 0 });
+  const retiredRef = await put(retired);
+  const { snapshotEvidenceRef: _snapshot, snapshotEvidenceDigest: _digest, activeWorkerLaunchId: _active, leaseEpoch: _lease, ...base } = value.generation;
+  const generation = { ...base, phase: 'retired', rowVersion: 7, updatedAt: time(800), retirementEvidenceRef: retiredRef, retirementEvidenceDigest: retired.evidenceDigest };
+  const launch = { ...value.launch, phase: 'retired', generationWriteState: 'fenced_reconciling', retiredAt: time(600), retirementEvidenceRef: await put(wrapper) };
+  update(value.filename, database => {
+    database.prepare('UPDATE runs SET active_worker_launch_id=NULL,status=?').run('succeeded');
+    database.prepare('UPDATE worker_launches SET phase=?,row_json=?,retired_at=?').run('retired', JSON.stringify(launch), launch.retiredAt);
+    database.prepare('UPDATE workspace_generations SET phase=?,row_version=?,row_json=?').run('retired', generation.rowVersion, JSON.stringify(generation));
+  });
+  const expected = { runId: value.expected.runId, supervisorInstanceId: value.expected.supervisorInstanceId, leaseEpoch: 1,
+    inspectorIdentityRef: hash, inspectorIdentityDigest: hash,
+    resources: { kind: 'genuinely_retired_from_verified_checkpoint' as const, workerLaunchId: value.expected.launchId,
+      generationRef: generation.generationRef, sourceCheckpointId: generation.sourceCheckpointId,
+      quarantineEvidenceRef: quarantineRef, retirementEvidenceRef: retiredRef } };
+  return { ...value, expected, retired, retiredRef, put };
+}
+
+test('actual readonly SQL recovery diagnostics require the complete original quarantine, death and retirement graph', async t => {
+  const value = await recoveredFixture(t), before = await readFile(value.filename), names = await readdir(value.cas);
+  const observed = inspectInstalledRecoveredWorkerRetirement(value.stateRoot, process.getuid!(), value.expected);
+  assert.equal(observed.generationPhase, 'retired'); assert.equal(observed.generationWriteState, 'fenced_reconciling');
+  assert.equal(observed.retirementEvidenceRef, value.expected.resources.retirementEvidenceRef);
+  assert.equal(observed.pid, 12345); assert.equal(Object.hasOwn(observed, 'qualified'), false);
+  assert.deepEqual(await readFile(value.filename), before); assert.deepEqual(await readdir(value.cas), names);
+  assert.throws(() => inspectInstalledRecoveredWorkerRetirement(value.stateRoot, process.getuid!(), {
+    ...value.expected, inspectorIdentityDigest: 'b'.repeat(64) }));
+  assert.throws(() => inspectInstalledRecoveredWorkerRetirement(value.stateRoot, process.getuid!(), {
+    ...value.expected, resources: { ...value.expected.resources, sourceCheckpointId: 'another-checkpoint' } }));
+});
 
 async function fixture(t: TestContext) {
   const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-installed-worker-lease-'));

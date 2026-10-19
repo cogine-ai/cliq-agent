@@ -9634,10 +9634,31 @@ no rename, cleanup or semantic operation; any later exact private cleanup
 requires its separate original-claim gate and real joined producer.
 
 `PublicationRecoveryOriginV1` binds Run/Plan/op/attempt/dispatch/claim sequence,
-the original birth, current inspector and exact StateOwner death-acquisition
-evidence under the same StateRoot. Its current-inspector branch requires
-actual death of the original claiming process and strict takeover; a larger
-epoch alone is insufficient. Only claim-bound observations, ambiguity,
+the original birth, current inspector and exact original-process death evidence
+under the same StateRoot. The existing takeover branch retains the exact
+`ownerDeathAcquisitionEvidenceRef/ownerDeathAcquisitionEvidenceDigest` pair.
+It is an exclusive union with `gracefulOwnerDeath`, a closed object containing
+`kind='observed_after_graceful_release'`, `priorOwnerRowDigest`,
+`priorProcessIdentityRef/priorProcessIdentityDigest`,
+`gracefulTransitionEvidenceRef/gracefulTransitionEvidenceDigest`, and fixed
+`processObservation='absent_or_start_token_mismatch'`. Both or neither branch,
+partial pairs, unknown fields and accessors are refused; `originDigest` covers
+the entire selected branch with only itself omitted.
+
+The graceful branch does not treat release, a larger epoch, lock acquisition or
+the old receipt as process death. Before any original-envelope inspection, the
+genuine strictly newer current StateOwner uses its held native lock to observe
+the exact PID/start token from the fully retained original owner's process
+identity. A live exact lifetime or unavailable/uncertain observation refuses.
+`origin.observedAt` is that actual native observation time, no earlier than the
+original graceful release or current inspector acquisition. The full retained
+owner/transition/process/runtime/lock/StateRoot graph must match the exact claim
+and birth, and its SQL history must remain unchanged at the original writer's
+commit. Neither historical row, transition, acquisition nor epoch is rewritten.
+This is publication provenance only: it grants no broker/worker containment
+death, old FD, semantic release, new claim or budget allowance. The probe's
+original deadline, current desired inode/full hash, durable progress and actual
+joined maintenance checks remain required. Only claim-bound observations, ambiguity,
 receipt or arena retirement may name this origin, never a fresh whole-root
 projection. Same-owner observations retain their original exact owner checks.
 An original claimed attempt lacking UNKNOWN first needs that truthful
@@ -9707,6 +9728,11 @@ delivery only, result `createdAt` is the truthful preparation time: it must not
 precede the actual terminal projection observation or exceed the accepted
 commit time. Publication/result Checkpoint times are the actual accepted SQL
 commit time, not backdated to make the old two-transaction inequality pass.
+Likewise, a path result resolving a fully validated original UNKNOWN retains
+`receipt/probe observation <= item.createdAt <= new Journal.timestamp`, with
+that Journal time exactly equal to its original atomic result Checkpoint time.
+Initial path settlement keeps its original settled-time-before-item ordering;
+neither branch retimes the old receipt, UNKNOWN or BudgetSettlement.
 The genuine owner rechecks projection/death freshness and the exact original
 Run/Stop/Session cut at final commit. Ordinary agent-result timing is unchanged.
 The internal result writer accepts only the original genuine publication

@@ -1,4 +1,7 @@
-/* Test-only build of the actual publisher. Production has no syscall fault
+#define _GNU_SOURCE
+/* Feature selection must precede the first libc header, including in this
+ * wrapper; the included production translation unit cannot set it afterwards.
+ * Test-only build of the actual publisher. Production has no syscall fault
  * controls. Consume a failing close before reporting uncertainty, matching the
  * real close contract in which its numeric descriptor may already be reused. */
 #include <unistd.h>

@@ -1,7 +1,7 @@
 import { canonicalJsonBytes, canonicalSha256 } from '../../kernel/canonical.js';
 import { planCanonicalArtifact, type PlannedArtifact } from '../../kernel/artifact-plan.js';
 import { digestOmitting, identityHash, parseCanonicalTime } from '../../kernel/identity.js';
-import type { Run, RunAssemblyV1, RunFrontier, RunSpec, ToolResultItem, ToolResultPayloadV1, ToolResultModelContentV1 } from '../../kernel/types.js';
+import type { ContinuationItem, Run, RunAssemblyV1, RunFrontier, RunItemReferenceV1, RunSpec, ToolResultItem, ToolResultPayloadV1, ToolResultModelContentV1 } from '../../kernel/types.js';
 import type { PolicyEngineProfileV1, RunPolicySnapshotV1, ToolObservationV1, ToolOperationGrantV1,
   ToolPolicyChannelEvidenceV1, ToolPolicyDecisionItem, ToolRequestV1, ToolTargetV1, ToolApprovalDecisionV1,
   ToolCheckpointProof, ToolGrantExpiryV1 } from '../../kernel/tool-authorization.js';
@@ -86,7 +86,7 @@ function nextFrontier(cut: ToolCut, addedItems: number): RunFrontier {
 /** Internal to the loaded Run. Static authority is shared; every mutable selection comes from SQLite again. */
 export async function loadToolContinuation(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, input: {
   run: Run; spec: RunSpec; assembly: RunAssemblyV1; contracts: ToolInputAuthority[];
-  resolveToolInput: ResolveToolInput; releaseKeys?: readonly ReleaseTrustKey[];
+  resolveToolInput: ResolveToolInput; releaseKeys?: readonly ReleaseTrustKey[]; recoveredItems: readonly RunItemReferenceV1[];
 }, reobserve?: NativeWorkerRetirement) {
   const { run: admittedRun, spec, assembly, contracts, resolveToolInput } = input;
   const runId = admittedRun.id;
@@ -201,10 +201,21 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
   }
 
   // Recovery independently reproduces committed decisions, including deny, before exposing a usable handle.
-  const retained = driver.prepare("SELECT payload_ref FROM items WHERE run_id = ? AND kind = 'policy_decision' ORDER BY item_seq")
-    .all<{ payload_ref: string }>(runId);
-  for (const row of retained) {
-    const item = await readCanonicalArtifact<ToolPolicyDecisionItem>(artifacts, row.payload_ref);
+  const retained = driver.prepare('SELECT item_id, item_seq, kind, payload_ref, created_at FROM items WHERE run_id = ? ORDER BY item_seq')
+    .all<{ item_id: string; item_seq: bigint; kind: string; payload_ref: string; created_at: string }>(runId);
+  if (retained.length !== input.recoveredItems.length || retained.some((row, index) => {
+    const original = input.recoveredItems[index]!;
+    return row.item_id !== original.itemId || Number(row.item_seq) !== original.itemSeq ||
+      row.payload_ref !== original.payloadRef || row.created_at !== original.createdAt;
+  })) throw new KernelStorageError('REVISION_CONFLICT', 'retained policy recovery cut changed');
+  for (const row of retained.filter(row => row.kind === 'policy_decision')) {
+    const item = await readCanonicalArtifact<ContinuationItem>(artifacts, row.payload_ref);
+    if (item.kind !== 'policy_decision') throw new TypeError('retained policy item differs from its owner row');
+    // The sole caller first runs readRunAuthority/full recovery, including the
+    // verifier's complete subject-owned history. Its request is not a tool
+    // request and has no inputRef; never reinterpret it as tool authority.
+    if (item.subjectKind === 'verifier_launch') continue;
+    if (item.subjectKind !== 'tool_call') throw new TypeError('retained tool policy item has an unsupported subject');
     const evidence = await readCanonicalArtifact<ToolPolicyChannelEvidenceV1>(artifacts, item.policyChannelEvidenceRef);
     const request = await readCanonicalArtifact<ToolRequestV1>(artifacts, evidence.requestRef);
     const target = await readCanonicalArtifact<ToolTargetV1>(artifacts, evidence.targetRef);
