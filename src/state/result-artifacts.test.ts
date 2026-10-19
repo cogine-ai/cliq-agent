@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting } from '../kernel/identity.js';
-import type { VerificationClosureV1 } from '../kernel/result.js';
-import { decodeRunResult, decodeVerificationClosure } from './result-artifacts.js';
+import type { InheritedVerificationProvenanceV1, VerificationClosureV1 } from '../kernel/result.js';
+import { decodeInheritedVerificationProvenance, decodeRunResult, decodeVerificationClosure } from './result-artifacts.js';
 
 function closure(required = true): VerificationClosureV1 {
   const ref = canonicalSha256;
@@ -49,4 +49,53 @@ test('verification closure rejects contradictory status, nonpassed required evid
   if (noConsent.verification.kind !== 'local') assert.fail();
   delete noConsent.verification.unverifiedConsentRef; noConsent.closureDigest = digestOmitting(noConsent, 'closureDigest');
   assert.throws(() => decodeVerificationClosure(noConsent));
+});
+
+test('delivery inherited closure and provenance retain exact closed source identities without relabeling receipts', () => {
+  const reference = canonicalSha256;
+  const provenance: InheritedVerificationProvenanceV1 = { schemaVersion: 1, format: 'cliq-inherited-verification-provenance-v1',
+    deliveryRunId: 'delivery', sourceRunId: 'source', sourceRunResultRef: reference('result'), sourceRunResultDigest: reference('result'),
+    sourceVerificationClosureRef: reference('source-closure'), sourceVerificationClosureDigest: reference('closure-digest'),
+    resultSourceRef: reference('source'), verifierSpecRef: reference('spec'), verifierSpecDigest: reference('spec-digest'),
+    verificationReceiptRefs: [reference('receipt')], verificationReceiptDigests: [reference('receipt-digest')],
+    createdAt: '2026-10-18T00:00:00.000Z', provenanceDigest: '' };
+  provenance.provenanceDigest = digestOmitting(provenance, 'provenanceDigest');
+  assert.deepEqual(decodeInheritedVerificationProvenance(provenance), provenance);
+  const inherited: VerificationClosureV1 = { ...closure(), runId: 'delivery', verification: { kind: 'inherited_verified',
+    sourceRunId: provenance.sourceRunId, sourceRunResultRef: provenance.sourceRunResultRef,
+    sourceVerificationClosureRef: provenance.sourceVerificationClosureRef, inheritedProvenanceRef: reference(provenance) } };
+  inherited.closureDigest = digestOmitting(inherited, 'closureDigest');
+  assert.deepEqual(decodeVerificationClosure(inherited), inherited);
+  for (const changed of [{ ...provenance, sourceRunId: 'delivery' }, { ...provenance, verificationReceiptDigests: [] },
+    { ...provenance, verificationReceiptRefs: [...provenance.verificationReceiptRefs, ...provenance.verificationReceiptRefs],
+      verificationReceiptDigests: [...provenance.verificationReceiptDigests, ...provenance.verificationReceiptDigests] },
+    { ...provenance, sourceRunResultDigest: reference('other') }, { ...provenance, extra: true }]) {
+    changed.provenanceDigest = digestOmitting(changed, 'provenanceDigest');
+    assert.throws(() => decodeInheritedVerificationProvenance(changed));
+  }
+  for (const verification of [{ ...inherited.verification, sourceRunId: 'delivery' },
+    { ...inherited.verification, entries: [] }, { ...inherited.verification, unverifiedConsentRef: reference('consent') }]) {
+    const changed = { ...inherited, verification }; changed.closureDigest = digestOmitting(changed, 'closureDigest');
+    assert.throws(() => decodeVerificationClosure(changed));
+  }
+  let observed = false;
+  const accessor = Object.defineProperty({}, 'kind', { enumerable: true, get() { observed = true; return 'inherited_verified'; } });
+  assert.throws(() => decodeVerificationClosure({ ...inherited, verification: accessor }));
+  assert.equal(observed, false);
+  const hidden = Object.defineProperty({ ...provenance }, 'sourceRunId', { value: 'source', enumerable: false });
+  assert.throws(() => decodeInheritedVerificationProvenance(hidden));
+  const sparse = { ...provenance, verificationReceiptDigests: Array(1) };
+  assert.throws(() => decodeInheritedVerificationProvenance(sparse));
+});
+
+test('RunResult admits only exact optional delivery proof refs, never fields that imply source authority', () => {
+  const reference = canonicalSha256;
+  const result = { schemaVersion: 1, runId: 'delivery', baseSourceRef: reference('base'), resultSourceRef: reference('result'),
+    diffRef: reference('diff'), verificationClosureRef: reference('closure'), verificationReceiptRefs: [reference('receipt')],
+    verificationProvenanceRef: reference('provenance'), deliveryTerminalProjectionEvidenceRef: reference('projection'),
+    summaryRef: reference('summary'), createdAt: '2026-10-18T00:00:00.000Z' };
+  assert.deepEqual(decodeRunResult(result), result);
+  for (const changed of [{ ...result, deliveryTerminalProjectionEvidenceRef: 'not-a-ref' }, { ...result, verificationProvenanceRef: undefined },
+    { ...result, sourceRunId: 'source' }, { ...result, dependencyPlanRef: reference('unsupported-dependency') }])
+    assert.throws(() => decodeRunResult(changed));
 });

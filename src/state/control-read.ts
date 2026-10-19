@@ -289,7 +289,7 @@ function runAttachCut(connection: SqliteConnection, request: Extract<ReadControl
 
 /** Inspect only the immutable refs already selected by the successful terminal
  * transaction. No failed candidate fallback, raw CAS access or live authority
- * is returned. A future delivery consumer must independently validate its full
+ * is returned. A delivery consumer must independently validate its full
  * result/receipt/death graph, never treat a query descriptor as permission. */
 async function readResultQuery(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
   request: Extract<ReadControlRequest, { method: 'run.result' | 'run.diff' }>, identity: AuthenticatedControlIdentity,
@@ -299,13 +299,22 @@ async function readResultQuery(driver: SqliteDriver, artifacts: ArtifactCatalog,
     return checkedRun(requireOwnedRow(connection, 'runs', request.runId, identity.principalId));
   });
   if (run.status !== 'succeeded' && run.status !== 'completed_unverified') throw new ResultUnavailableError(run);
+  const spec = decodeRunSpec(await readCanonicalArtifact(artifacts, run.specRef));
+  signal?.throwIfAborted();
   const result = decodeRunResult(await readCanonicalArtifact(artifacts, run.resultRef!));
   signal?.throwIfAborted();
   const closure = decodeVerificationClosure(await readCanonicalArtifact(artifacts, result.verificationClosureRef));
   signal?.throwIfAborted();
   if (result.runId !== run.id || closure.runId !== run.id || result.resultSourceRef !== closure.resultSourceRef ||
-      result.createdAt > run.updatedAt || closure.createdAt > result.createdAt || closure.verification.kind !== 'local' ||
-      closure.verification.outcome !== (run.status === 'succeeded' ? 'verified' : 'unverified'))
+      result.createdAt > run.updatedAt || closure.createdAt > result.createdAt ||
+      (spec.operation === 'agent' && (result.deliveryTerminalProjectionEvidenceRef !== undefined || result.verificationProvenanceRef !== undefined)) ||
+      (spec.operation === 'delivery' && (run.status !== 'succeeded' || result.deliveryTerminalProjectionEvidenceRef === undefined)))
+    corrupt('result inspection lost its exact successful terminal selection');
+  const verification = closure.verification;
+  const selected = verification.kind === 'local'
+    ? verification.outcome === (run.status === 'succeeded' ? 'verified' : 'unverified') && result.verificationProvenanceRef === undefined
+    : spec.operation === 'delivery' && run.status === 'succeeded' && result.verificationProvenanceRef === verification.inheritedProvenanceRef;
+  if (!selected)
     corrupt('result inspection lost its exact successful terminal selection');
   const ref = request.method === 'run.result' ? run.resultRef! : result.diffRef;
   const descriptor = driver.readSnapshot(connection => {

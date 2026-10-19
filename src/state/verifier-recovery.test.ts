@@ -21,6 +21,34 @@ import { disposeFixture } from './testing/fixtures.js';
 import { loadVerifierPolicy, planVerifierRequest } from './verifier-policy.js';
 import { readVerifierProgress, type VerifierRecoveryCut } from './verifier-recovery.js';
 
+test('retained delivery verification selects its exact proof-carrying delivery frontier and rejects an agent candidate', async () => {
+  const fixture = await createAgentFixture('delivery-verifier-frontier', undefined, { mode: 'plan' });
+  const driver = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+  try {
+    const original = await fixture.store.readRecoveryClosure(fixture.runId), artifacts = fixture.store.artifacts;
+    const runSpec: RunSpec = { ...original.runSpec, operation: 'delivery' };
+    const candidate: FinalCandidateItem = { schemaVersion: 1, kind: 'final_candidate', operation: 'delivery', itemId: 'data-delivery-candidate',
+      runId: fixture.runId, producingItemId: 'data-delivery-merge', baseSourceRef: runSpec.baseWorkspaceManifestRef,
+      resultSourceRef: canonicalSha256('data-result'), diffRef: canonicalSha256('data-diff'), summaryRef: canonicalSha256('data-summary'),
+      sourceDigest: canonicalSha256('data-source'), diffDigest: canonicalSha256('data-diff-digest'), createdAt: original.run.createdAt };
+    const candidateArtifact = await artifacts.publishCanonical(candidate, 'offline-data-not-delivery-authority');
+    const plan = await readCandidateVerifierPlan(artifacts, runSpec, { runId: fixture.runId, candidateItemId: candidate.itemId,
+      resultSourceRef: candidate.resultSourceRef });
+    const planArtifact = await artifacts.publishCanonical(plan, 'cliq-verifier-plan-v1');
+    const frontier: Extract<RunFrontier, { kind: 'delivery'; phase: 'approval' }> = { schemaVersion: 1, kind: 'delivery', phase: 'approval',
+      sourceRunResultRef: canonicalSha256('data-source-result'), candidateItemId: candidate.itemId, resultSourceRef: candidate.resultSourceRef,
+      verifierPlanRef: planArtifact.ref, verificationClosureRef: canonicalSha256('data-closure'), deliveryPlanRef: canonicalSha256('data-plan') };
+    const frontierArtifact = await artifacts.publishCanonical(frontier, 'offline-data-not-delivery-authority');
+    const row = { schemaVersion: 1 as const, itemId: candidate.itemId, itemSeq: 1, payloadRef: candidateArtifact.ref,
+      payloadDigest: candidateArtifact.ref, createdAt: candidate.createdAt };
+    const cut: VerifierRecoveryCut = { run: { ...original.run, nextStep: 'delivery', frontierRef: frontierArtifact.ref },
+      runSpec, workspaceGenerations: original.workspaceGenerations, items: [row], journal: [] };
+    const progress = await readVerifierProgress(driver, artifacts, cut);
+    assert.equal(progress.candidate.operation, 'delivery'); assert.equal(progress.complete, true); assert.deepEqual(progress.entries, []);
+    await assert.rejects(readVerifierProgress(driver, artifacts, { ...cut, runSpec: original.runSpec }), /candidate.*operation/);
+  } finally { driver.close(); await disposeFixture(fixture); }
+});
+
 test('retained verifier projection validates every undispatched attempt and cannot replace missing original authority with its latest grant', async () => {
   const fixture = await createAgentFixture('verifier-retained-attempts', undefined, { mode: 'yolo' });
   const driver = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));

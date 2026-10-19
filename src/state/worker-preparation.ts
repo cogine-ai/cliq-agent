@@ -1,6 +1,6 @@
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { addCanonicalDuration, assertArtifactRef, digestOmitting, identityHash, parseCanonicalTime } from '../kernel/identity.js';
-import type { PreparingWorkerLaunch, RetiredWorkerPreparation, Run, RunAssemblyV1, WorkerLaunch,
+import type { PreparingWorkerLaunch, RetiredWorkerPreparation, Run, RunAssemblyV1, RunFrontier, WorkerLaunch,
   WorkspaceGenerationQuarantineEvidenceV1, WorkspaceGenerationRetirementEvidenceV1, WorkspaceGenerationStateV1 } from '../kernel/types.js';
 import { immutableSnapshot } from '../model/immutable.js';
 import { exactKeys, requireEqual } from '../policy/runtime-authority.js';
@@ -15,14 +15,17 @@ import { advanceTimeFence, sampleCanonicalNow } from './canonical-time.js';
 import { decodeRunSpec, decodeWorkspaceEntries, decodeWorkspaceGenerationIdentity, decodeWorkspaceGenerationSnapshotEvidence,
   decodeWorkspaceState } from './decoders.js';
 import { KernelStorageError } from './errors.js';
+import { readPublicationPrefix } from './delivery-publication-progress.js';
 import { decodeWorkerLaunch, decodeWorkspaceGenerationState } from './invariants.js';
 import { borrowWorkerReservationForExecution, readWorkerReservationRetirement, type GenerationQuarantineMove,
   type HeldWorkerReservation } from './native-owner.js';
 import { readRecoveryClosure } from './recovery-closure.js';
+import { readChildAllocationsForRun } from './repositories/child-allocations.js';
+import { readInvocationJournal } from './repositories/journal.js';
 import { insertWorkerLaunch, readRequiredWorkerLaunch, readWorkerLaunchesForRun, updateWorkerLaunch } from './repositories/worker-launches.js';
 import { insertWorkspaceGeneration, readRequiredWorkspaceGeneration, readWorkspaceGenerationsForRun,
   updateWorkspaceGeneration } from './repositories/workspace-generations.js';
-import { readCheckpoint, readRun } from './rows.js';
+import { readCheckpoint, readRun, readSession, readSessionPrincipalId } from './rows.js';
 import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
 import { assertActiveStateOwner, readStateOwner, type StateOwnerContext } from './state-owner.js';
 import { assertInstalledBrokerQuiescence, type InstalledBrokerQuiescence } from './store.js';
@@ -66,6 +69,23 @@ function bindableRun(connection: SqliteConnection | SqliteDriver, launch: Prepar
   return run;
 }
 
+// This is only a same-transaction SQL snapshot. It does not replace the full
+// retained readers or authorize a physical birth from structural CAS data.
+function preparationSqlCut(connection: SqliteConnection, runId: string) {
+  const run = readRun(connection, runId);
+  return { run, checkpoint: readCheckpoint(connection, run.latestCheckpointId), session: readSession(connection, run.sessionId),
+    principalId: readSessionPrincipalId(connection, run.sessionId),
+    admission: connection.prepare(`SELECT principal_id,admission_method,admission_key,admission_intent_digest,
+      admitted_request_digest,admission_request_id FROM runs WHERE id=?`).get(runId),
+    journal: readInvocationJournal(connection, runId), launches: readWorkerLaunchesForRun(connection, runId),
+    generations: readWorkspaceGenerationsForRun(connection, runId),
+    items: connection.prepare('SELECT item_id,session_id,run_id,item_seq,kind,payload_ref,created_at FROM items WHERE run_id=? ORDER BY item_seq')
+      .all<{ item_id: string; session_id: string | null; run_id: string; item_seq: bigint; kind: string; payload_ref: string; created_at: string }>(runId)
+      .map(row => ({ ...row, item_seq: Number(row.item_seq) })),
+    childAllocations: readChildAllocationsForRun(connection, runId),
+    children: connection.prepare('SELECT id FROM runs WHERE parent_run_id=? ORDER BY id').all<{ id: string }>(runId) };
+}
+
 export async function beginWorkerPreparation(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, input: {
   runId: string; expectedRunRevision: number; launchId: string; spawnNonceDigest: string;
   activationNonceDigest: string; generationCreationNonceDigest: string;
@@ -74,11 +94,34 @@ export async function beginWorkerPreparation(driver: SqliteDriver, artifacts: Ar
   if (!exactKeys(input, ['runId', 'expectedRunRevision', 'launchId', 'spawnNonceDigest', 'activationNonceDigest', 'generationCreationNonceDigest']) ||
       !/^[A-Za-z0-9_-]{43}$/u.test(input.launchId)) throw new KernelStorageError('INVALID_REQUEST', 'worker preparation requires its exact logical intent');
   for (const digest of [input.spawnNonceDigest, input.activationNonceDigest, input.generationCreationNonceDigest]) assertArtifactRef(digest);
+  const original = driver.readSnapshot(connection => preparationSqlCut(connection, input.runId));
   const cut = await readRecoveryClosure(driver, artifacts, input.runId);
   const verifier = cut.run.nextStep === 'verify' ? await readVerifierProgress(driver, artifacts, cut) : undefined;
   if (verifier && (verifier.complete || [...stopInvocationHistory(cut.journal).values()].some(({ entry }) =>
     entry.opKind === 'verifier' && entry.phase !== 'completed' && entry.phase !== 'failed')))
     fail('verifier worker preparation cannot overtake a complete plan or unsettled original invocation');
+  const delivery = cut.run.nextStep === 'delivery' && cut.runSpec.operation === 'delivery'
+    ? await readPublicationPrefix(driver, artifacts, cut) : undefined;
+  let source: ReturnType<typeof preparationSqlCut> | undefined;
+  if (delivery) {
+    const authorization = delivery.authorization;
+    if (!authorization?.grant || !authorization.grantRef || authorization.decision.decision !== 'allow' ||
+        delivery.abort.length || delivery.abortResults.length || delivery.forward.length >= authorization.context.plan.forwardOperations.length ||
+        delivery.entries.size !== delivery.forward.length || [...delivery.entries.values()].some(entry =>
+          entry.preparationClosure || entry.receivedHandoff || entry.sequence !== 'forward' ||
+          !entry.claim || entry.result?.item.outcome !== 'completed' || entry.history.at(-1)?.phase !== 'completed'))
+      throw new KernelStorageError('LEASE_FENCED', 'delivery worker preparation requires its complete settled forward prefix and another path');
+    if (!cut.run.frontierRef) fail('delivery worker preparation has no exact authorized publish frontier');
+    requireEqual(await readCanonicalArtifact<RunFrontier>(artifacts, cut.run.frontierRef),
+      { ...authorization.frontier, phase: 'publish', nextPathOperationIndex: delivery.forward.length },
+      'delivery worker preparation exact next unpublished path');
+    requireEqual(cut.latestCheckpoint, delivery.previousCheckpoint, 'delivery worker preparation original ordered result Checkpoint');
+    source = driver.readSnapshot(connection => preparationSqlCut(connection, delivery.admission.source.run.id));
+    requireEqual(source.run, delivery.admission.source.run, 'delivery worker preparation verified source Run');
+    requireEqual(source.session, delivery.admission.source.session, 'delivery worker preparation original source Session');
+    if (source.principalId !== authorization.grant.principalId || original.principalId !== authorization.grant.principalId)
+      fail('delivery worker preparation changed its original principal');
+  }
   let result: PreparingWorkerLaunch | undefined;
   driver.transaction(connection => {
     assertActiveStateOwner(connection, owner);
@@ -86,9 +129,14 @@ export async function beginWorkerPreparation(driver: SqliteDriver, artifacts: Ar
     if (advanceTimeFence(connection, owner.ownerEpoch, now) !== 'healthy') return;
     const run = readRun(connection, input.runId);
     requireEqual(run, cut.run, 'worker preparation selected Run');
+    if (canonicalSha256(preparationSqlCut(connection, input.runId)) !== canonicalSha256(original) || source &&
+        canonicalSha256(preparationSqlCut(connection, source.run.id)) !== canonicalSha256(source))
+      throw new KernelStorageError('REVISION_CONFLICT', 'worker preparation original continuation, Session or source SQL cut changed');
     if (run.revision !== input.expectedRunRevision || run.status !== 'queued' || run.activeWorkerLaunchId ||
         run.cancelRequested || run.stopIntentRef || now >= run.deadlineAt ||
-        run.nextStep !== 'agent' && run.nextStep !== 'tool' && !(run.nextStep === 'verify' && verifier))
+        run.nextStep !== 'agent' && run.nextStep !== 'tool' && !(run.nextStep === 'verify' && verifier) &&
+          !(run.nextStep === 'delivery' && delivery?.authorization?.grant &&
+            now >= delivery.authorization.grant.issuedAt && now < delivery.authorization.grant.expiresAt))
       throw new KernelStorageError('LEASE_FENCED', 'worker preparation requires its unstopped productive queued cut');
     if (readWorkerLaunchesForRun(connection, run.id, true).length ||
         readWorkspaceGenerationsForRun(connection, run.id).some(value => value.phase !== 'retired' && value.phase !== 'sealed'))

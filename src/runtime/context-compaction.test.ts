@@ -209,6 +209,24 @@ test('context validation rejects gaps, hidden model content and the old non-norm
   }
 });
 
+test('late publication audit is excluded control, never raw model context', () => {
+  const input = history(['small']);
+  // Context partitioning only: inert audit data does not claim a publication
+  // owner, valid proof graph, cleanup, or settlement.
+  const item = { schemaVersion: 1, kind: 'publication_late_observation', itemId: 'audit-only', runId: 'run', createdAt: baseTime } as ContinuationItem;
+  const itemSeq = input.items.length + 1, itemRef = canonicalSha256(item), entry = { item, itemSeq, itemRef };
+  input.items.push(entry);
+  input.context.throughItemSeq = itemSeq;
+  input.context.segments.push({ kind: 'excluded_control', fromItemSeq: itemSeq, throughItemSeq: itemSeq,
+    sourceItemsDigest: contextSourceDigest([entry]) });
+  input.context.projectionDigest = digestOmitting(input.context, 'projectionDigest');
+  validateContextItems(input.context, input.items);
+  input.context.segments[input.context.segments.length - 1] = { kind: 'raw', fromItemSeq: itemSeq, throughItemSeq: itemSeq,
+    items: [{ itemSeq, itemRef }] };
+  input.context.projectionDigest = digestOmitting(input.context, 'projectionDigest');
+  assert.throws(() => validateContextItems(input.context, input.items), /control items cannot enter raw model context/);
+});
+
 test('compaction preserves deferred user-message order and keeps the input/result batch indivisible', () => {
   const input = history(['a'.repeat(20_000), 'b'.repeat(20_000), 'c'.repeat(28_000)], 'Alice');
   const selected = planContextCompaction(input);

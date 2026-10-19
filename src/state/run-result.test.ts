@@ -10,7 +10,9 @@ import type { DirectUnverifiedConsentV1, RunFrontier, RunSpec, SessionRunTermina
 import { sampleCanonicalNow } from './canonical-time.js';
 import { ResultUnavailableError } from './control-read.js';
 import { readRecoveryClosure, type RecoveryClosurePhase } from './recovery-closure.js';
+import { readVerifiedDeliverySource } from './delivery-source-authority.js';
 import { loadRunResult, type RunResultPhase } from './run-result.js';
+import { prepareDeliveryNoOpVerification, readDeliveryVerification, readDeliveryVerificationMode } from './run-result-recovery.js';
 import { openStateStore, publishInProcessChannel } from './store.js';
 import { openSqliteDriver, type SqliteDriver } from './sqlite-driver.js';
 import type { StateOwnerContext } from './state-owner.js';
@@ -83,6 +85,9 @@ test('explicitly consented empty verification publishes one unverified immutable
         throw new Error('an inert diagnosis consumer cannot decide the result');
       });
     const committed = await resultOwner.commitRunResult(request);
+    await assert.rejects(readVerifiedDeliverySource(held.driver, fixture.store.artifacts, held.owner, {
+      principalId: fixture.principalId, sourceRunId: fixture.runId, expectedRunResultRef: committed.resultRef
+    }), { code: 'INVALID_REQUEST' });
     assert.deepEqual(phases, ['result_recovery', 'result_recovery_spec', 'result_recovery_context', 'result_recovery_journal',
       'result_recovery_generations', 'result_recovery_history', 'result_recovery_history_model', 'result_recovery_history_items',
       'result_recovery_history_candidate', 'result_recovery_history_verifier', 'result_recovery_history_tool',
@@ -123,6 +128,53 @@ test('explicitly consented empty verification publishes one unverified immutable
     assert.deepEqual(fixture.store.getSession(session.id), terminalSession);
     assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), after);
   } finally { await disposeFixture(fixture); }
+});
+
+test('delivery-shaped terminal proof refs cannot expand a real Agent result or provide delivery verification authority', async () => {
+  const fixture = await createAgentFixture('run-result-no-delivery-proof', undefined, { mode: 'plan' });
+  const writer = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+  try {
+    await candidate(fixture); await fixture.agent.completeVerification({ expectedRunRevision: revision(fixture) });
+    const committed = await fixture.agent.commitRunResult({ expectedRunRevision: revision(fixture) });
+    const before = await fixture.store.readRecoveryClosure(fixture.runId), session = fixture.store.getSession(before.run.sessionId);
+    const inspectionIdentity = await publishInProcessChannel(fixture.store);
+    const held = fixture.store as unknown as { driver: SqliteDriver };
+    await assert.rejects(readDeliveryVerification(held.driver, fixture.store.artifacts, before, 'a'.repeat(64)), /cannot reinterpret an Agent Run/);
+    await assert.rejects(prepareDeliveryNoOpVerification(held.driver, fixture.store.artifacts, before, sampleCanonicalNow()), /cannot reinterpret an Agent Run/);
+    await assert.rejects(readDeliveryVerificationMode(held.driver, fixture.store.artifacts, before), /delivery continuation cannot carry/);
+    const result = await fixture.store.artifacts.readCanonical<RunResult>(committed.resultRef);
+    for (const extra of [{ deliveryTerminalProjectionEvidenceRef: 'b'.repeat(64) },
+      { deliveryTerminalProjectionEvidenceRef: 'b'.repeat(64), verificationProvenanceRef: 'c'.repeat(64) }]) {
+      const changed = await fixture.store.artifacts.publishCanonical({ ...result, ...extra }, 'cliq-run-result-v1');
+      writer.prepare('UPDATE runs SET result_ref=? WHERE id=?').run(changed.ref, fixture.runId);
+      try {
+        for (const method of ['run.result', 'run.diff'] as const)
+          await assert.rejects(fixture.store.readControl({ protocolVersion: 1, method, runId: fixture.runId }, inspectionIdentity),
+            { code: 'RECOVERY_REQUIRED' });
+        await assert.rejects(fixture.store.readRecoveryClosure(fixture.runId), error => {
+          assert.equal((error as { code: string }).code, 'RECOVERY_REQUIRED');
+          assert.match((error as Error).message, /Agent finalization cannot borrow delivery projection proof/); return true;
+        });
+        assert.deepEqual(fixture.store.getSession(before.run.sessionId), session);
+      } finally { writer.prepare('UPDATE runs SET result_ref=? WHERE id=?').run(committed.resultRef, fixture.runId); }
+    }
+    const originalClosure = await fixture.store.artifacts.readCanonical<VerificationClosureV1>(result.verificationClosureRef);
+    const inherited: VerificationClosureV1 = { ...originalClosure, verification: { kind: 'inherited_verified',
+      sourceRunId: 'data-only-other-source', sourceRunResultRef: 'd'.repeat(64), sourceVerificationClosureRef: 'e'.repeat(64),
+      inheritedProvenanceRef: 'c'.repeat(64) }, closureDigest: '' };
+    inherited.closureDigest = digestOmitting(inherited, 'closureDigest');
+    const closureRef = (await fixture.store.artifacts.publishCanonical(inherited, 'inert-inherited-closure-not-authority')).ref;
+    const changed = await fixture.store.artifacts.publishCanonical({ ...result, verificationClosureRef: closureRef,
+      deliveryTerminalProjectionEvidenceRef: 'b'.repeat(64), verificationProvenanceRef: 'c'.repeat(64) }, 'cliq-run-result-v1');
+    writer.prepare('UPDATE runs SET result_ref=? WHERE id=?').run(changed.ref, fixture.runId);
+    try {
+      for (const method of ['run.result', 'run.diff'] as const)
+        await assert.rejects(fixture.store.readControl({ protocolVersion: 1, method, runId: fixture.runId }, inspectionIdentity),
+          { code: 'RECOVERY_REQUIRED' });
+      assert.deepEqual(fixture.store.getSession(before.run.sessionId), session);
+    } finally { writer.prepare('UPDATE runs SET result_ref=? WHERE id=?').run(committed.resultRef, fixture.runId); }
+    assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
+  } finally { writer.close(); await disposeFixture(fixture); }
 });
 
 test('an actual later channel cannot be substituted as the historical consent channel even with rehashed matching control data', async () => {
@@ -216,6 +268,23 @@ test('verification and result transaction failures leave no partial frontier, re
     assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), finalized);
     assert.deepEqual(fixture.store.getSession(session.id), session);
     writer.exec('DROP TRIGGER fail_result');
+    const metadata = writer.prepare('SELECT * FROM artifacts ORDER BY ref').all();
+    const checkpoints = writer.prepare('SELECT * FROM checkpoints WHERE run_id=? ORDER BY id').all(fixture.runId);
+    // Real SQLite fault at artifact registration, after asynchronous immutable
+    // preparation. Neither the Session change nor any terminal prefix may
+    // survive the original transaction's rejection.
+    writer.exec(`CREATE TABLE result_session_drift_probe (value INTEGER);
+      CREATE TRIGGER drift_result_session BEFORE INSERT ON artifacts WHEN NEW.schema_kind='cliq-run-result-v1'
+      BEGIN INSERT INTO result_session_drift_probe VALUES (1);
+        UPDATE sessions SET updated_at='${new Date(Date.parse(session.updatedAt) + 1).toISOString()}' WHERE id='${session.id}'; END`);
+    await assert.rejects(fixture.agent.commitRunResult({ expectedRunRevision: revision(fixture) }),
+      { code: 'REVISION_CONFLICT', message: 'result Session changed during artifact registration' });
+    assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), finalized);
+    assert.deepEqual(fixture.store.getSession(session.id), session);
+    assert.deepEqual(writer.prepare('SELECT * FROM artifacts ORDER BY ref').all(), metadata);
+    assert.deepEqual(writer.prepare('SELECT * FROM checkpoints WHERE run_id=? ORDER BY id').all(fixture.runId), checkpoints);
+    assert.deepEqual(writer.prepare('SELECT * FROM result_session_drift_probe').all(), []);
+    writer.exec('DROP TRIGGER drift_result_session');
     const request = { expectedRunRevision: revision(fixture) }, result = await fixture.agent.commitRunResult(request);
     assert.deepEqual(await fixture.agent.commitRunResult(request), result);
     assert.equal(fixture.store.getSession(session.id).latestItemSeq, session.latestItemSeq + 1);

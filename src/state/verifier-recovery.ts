@@ -53,7 +53,8 @@ export type VerifierRecoveryCut = Pick<RecoveryClosureV1, 'run' | 'runSpec' | 'i
 async function currentCandidate(artifacts: ArtifactCatalog, cut: VerifierRecoveryCut): Promise<string> {
   if (cut.run.frontierRef) {
     const frontier = await readCanonicalArtifact<RunFrontier>(artifacts, cut.run.frontierRef);
-    if (frontier.kind === 'verify' || frontier.kind === 'finalize') return frontier.candidateItemId;
+    if (frontier.kind === 'verify' || frontier.kind === 'finalize' || frontier.kind === 'delivery' && frontier.phase !== 'merge')
+      return frontier.candidateItemId;
   }
   if (cut.run.resultRef) {
     const result = decodeRunResult(await readCanonicalArtifact(artifacts, cut.run.resultRef));
@@ -137,6 +138,7 @@ export async function readVerifierProgress(driver: SqliteDriver, artifacts: Arti
   if (candidates.length !== 1) throw new TypeError('verifier progress has no unique owned candidate');
   const candidate = decodeFinalCandidateItem(await readCanonicalArtifact(artifacts, candidates[0]!.payloadRef));
   if (candidate.runId !== cut.run.id || candidate.itemId !== selectedId) throw new TypeError('verifier candidate belongs to another Run');
+  if (candidate.operation !== cut.runSpec.operation) throw new TypeError('verifier candidate operation differs from its owning Run');
   const plan = decodeVerifierPlan(await readCandidateVerifierPlan(artifacts, cut.runSpec, { runId: cut.run.id,
     candidateItemId: selectedId, resultSourceRef: candidate.resultSourceRef }));
   const planRef = canonicalSha256(plan);
@@ -153,7 +155,8 @@ export async function readVerifierProgress(driver: SqliteDriver, artifacts: Arti
     const command = decodeVerifierCommand(await readCanonicalArtifact(artifacts, specEntry.commandRef));
     const environment = decodeVerifierEnvironment(await readCanonicalArtifact(artifacts, specEntry.environmentRef));
     const frontier: Extract<RunFrontier, { kind: 'verify' }> = { schemaVersion: 1, kind: 'verify', phase: 'verifiers',
-      candidateItemId: selectedId, resultSourceRef: candidate.resultSourceRef, verifierPlanRef: planRef, nextVerifierIndex: index, afterPass: 'finalize' };
+      candidateItemId: selectedId, resultSourceRef: candidate.resultSourceRef, verifierPlanRef: planRef, nextVerifierIndex: index,
+      afterPass: cut.runSpec.operation === 'delivery' ? 'delivery_approval' : 'finalize' };
     const context = { runId: cut.run.id, frontierRef: canonicalSha256(frontier), assemblyRef: cut.runSpec.assemblyRef,
       candidateItemId: selectedId, resultSourceRef: candidate.resultSourceRef, sourceDigest: candidate.sourceDigest,
       verifierPlanRef: planRef, plan, verifierSpecRef: cut.runSpec.verifierSpecRef, verifierSpec: spec, verifierIndex: index, command, environment };

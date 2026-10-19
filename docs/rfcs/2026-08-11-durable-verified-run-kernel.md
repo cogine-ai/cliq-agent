@@ -3111,6 +3111,7 @@ type ReconciliationProbeDispatchV1 = {
       subjectKind: 'publication'
       inspectorTaskId: string
       inspectionTargetDigest: string
+      previousWaitingSubjectRef: ArtifactRef
     }
   | {
       subjectKind: 'worker_recovery'
@@ -3172,6 +3173,29 @@ type ReconciliationProbeTimeoutClosureV1 = {
     }
 )
 
+type ReconciliationProbeCancellationClosureV1 = {
+  schemaVersion: 1
+  format: 'cliq-reconciliation-probe-cancellation-closure-v1'
+  reason: 'owning_supervisor_shutdown'
+  runId: string
+  waitingSubjectRef: ArtifactRef
+  probeKind: 'automatic' | 'user_requested'
+  probeOrdinal: number
+  probeNonceDigest: string
+  probeDispatchDigest: string
+  probeDeadlineAt: string
+  inspectorIdentityRef: ArtifactRef
+  inspectorIdentityDigest: string
+  closedAt: string
+  closureDigest: string
+  subjectKind: 'publication'
+  deliveryPlanRef: ArtifactRef
+  pathOperationId: string
+  attempt: number
+  inspectorTaskId: string
+  taskClosure: { closureKind: 'cancelled_and_joined'; inspectorTaskCancelledAndJoined: true }
+}
+
 type ReconciliationProbeEvidenceV1 = {
   schemaVersion: 1
   format: 'cliq-reconciliation-probe-evidence-v1'
@@ -3205,6 +3229,17 @@ type ReconciliationProbeEvidenceV1 = {
       subjectEvidenceKind?: never
       subjectEvidenceRef?: never
       subjectEvidenceDigest?: never
+    }
+  | {
+      outcome: 'probe_cancelled'
+      cancellationReason: 'owning_supervisor_shutdown'
+      cancellationClosureRef: ArtifactRef
+      cancellationClosureDigest: string
+      subjectEvidenceKind?: never
+      subjectEvidenceRef?: never
+      subjectEvidenceDigest?: never
+      timeoutClosureRef?: never
+      timeoutClosureDigest?: never
     }
 )
 
@@ -3532,6 +3567,21 @@ type ResultSourceLimitCause = {
   limit: number
 }
 
+type DeliveryMergeLimitCause = {
+  sourceCheckpointId: string // original Delivery initial Checkpoint, not a model producer
+  workspaceStateRef: ArtifactRef // original W_A
+  sourceRunResultRef: ArtifactRef
+  sourceBaseRef: ArtifactRef
+  sourceDesiredRef: ArtifactRef
+  capturedWorkspaceRef: ArtifactRef
+  sourceProjectionRef: ArtifactRef
+  sandboxProfileRef: ArtifactRef
+  mergeAlgorithm: 'cliq-diff3-v1'
+  limitKind: 'changed_paths' | 'changed_bytes' | 'generation_bytes' | 'single_file_bytes' | 'merged_entries'
+  observed: number
+  limit: number
+}
+
 type StopIntent =
   | (StopIntentBase & {
       origin: 'kernel_integrity'
@@ -3624,6 +3674,7 @@ type StopIntent =
             | { trigger: 'request_body_bytes'; modelVisiblePromptDigest: ArtifactRef; requestBodyBytes: number; requestBodyLimitBytes: 1048576 }
           ))
         | ({ runtimeSubtype: 'result_source_limit_exceeded' } & ResultSourceLimitCause)
+        | ({ runtimeSubtype: 'delivery_merge_limit_exceeded' } & DeliveryMergeLimitCause)
         | {
             runtimeSubtype: 'delivery_merge_conflict'
             deliveryMergeConflictItemRef: ArtifactRef
@@ -4362,7 +4413,11 @@ neither the ready Checkpoint, frontier, Journal, budgets nor lease epoch.
 
 A published Checkpoint records the pre-publication Run revision whose item, Journal, context, and workspace cut it captures. The same transaction advances the authoritative Run to `basedOnRunRevision + 1` while installing `latestCheckpointId`. A crash before step 3 leaves only unreferenced artifacts eligible for garbage collection. The database must never reference a missing or unverified artifact.
 
-Admission is the one insert form of that rule. It uses virtual pre-admission revision `0`: CAS/CAS-artifact work happens first, then one SQLite transaction inserts the initial Checkpoint with `basedOnRunRevision=0`, `runItemSeq=0`, `journalSeq=0`, and the frozen admitted context/workspace refs; inserts the Run at `revision=1`, `status='queued'`, its operation-specific initial frontier and non-null `latestCheckpointId`; appends event sequence 1; and records the idempotent admission response. An agent Run starts at its initial agent frontier. `run.apply` first performs the same descriptor-safe immutable real-workspace capture used by publication and publishes source manifest **A**. Trusted code then materializes A into a new empty private delivery generation and publishes recovery image **W_A**, an exact `WorkspaceStateManifest` whose `runId` is the new delivery Run, `baseWorkspaceManifestRef=A`, entries/private-Git state reproduce A, and source-projection/repository/index/tree identities validate against A. The admitted `RunSpec.baseWorkspaceManifestRef` and initial `delivery:merge.capturedWorkspaceRef` both equal A, while the initial Checkpoint `workspaceStateRef` equals W_A and can never equal the differently typed A artifact. The Run starts directly at `delivery:merge {sourceRunResultRef,capturedWorkspaceRef:A}`. There is no admitted delivery Run whose required capture/recovery image is absent and no post-admission `delivery:capture` choice. No revision-0 Run row is externally visible. A failed transaction leaves only unreachable artifacts and no accepted Run.
+Admission is the one insert form of that rule. It uses virtual pre-admission revision `0`: CAS/CAS-artifact work happens first, then one SQLite transaction inserts the initial Checkpoint with `basedOnRunRevision=0`, `runItemSeq=0`, `journalSeq=0`, and the frozen admitted context/workspace refs; inserts the Run at `revision=1`, `status='queued'`, its operation-specific initial frontier and non-null `latestCheckpointId`; appends event sequence 1; and records the idempotent admission response. An agent Run starts at its initial agent frontier.
+
+`run.apply` first performs the same descriptor-safe immutable real-workspace capture used by publication and publishes source manifest **A**. Before admission, trusted code completely reads, hashes and validates A's entire recovery closure and publishes **W_A**, an exact restorable `WorkspaceStateManifest` whose `runId` is the proposed delivery Run, `baseWorkspaceManifestRef=A`, entries/private-Git state reproduce A, and source-projection/repository/index/tree identities validate against A. Every referenced object must already be durable; neither an unchecked manifest nor today's mutable workspace may stand in for the captured recovery bytes. This pre-admission step publishes data only: it does not create a physical private generation or claim that such a generation has been validated. The admitted `RunSpec.baseWorkspaceManifestRef` and initial `delivery:merge.capturedWorkspaceRef` both equal A, while the initial Checkpoint `workspaceStateRef` equals W_A and can never equal the differently typed A artifact. The Run starts directly at `delivery:merge {sourceRunResultRef,capturedWorkspaceRef:A}`. There is no admitted delivery Run whose required capture/recovery image is absent and no post-admission `delivery:capture` choice. No revision-0 Run row is externally visible. A failed transaction leaves only unreachable artifacts and no accepted Run.
+
+Only after that atomic admission may the existing WorkerLaunch `preparing` lifecycle register the delivery generation's ownership intent, create its descriptor-anchored directory, materialize W_A, fsync and re-walk it, and produce the original physical snapshot/preactivation evidence. The same cancellation, resource ownership, retirement and successor-recovery rules apply as for agent generations; delivery adds no second resource ledger or lifecycle. Private merge or verification may use that generation only after those physical checks succeed. A crash before admission cannot leave an unregistered physical generation, while a crash during later preparation never converts the immutable W_A into evidence that physical creation, execution or retirement completed.
 
 Checkpoints are published only at quiescent boundaries. An open invocation is represented by the RunJournal, not embedded in a Checkpoint.
 
@@ -4488,9 +4543,58 @@ At `automatic_exhausted`, authenticated `run.reconcile(probe_now)` is an enqueue
 
 Every automatic/user result first publishes exactly one `ReconciliationProbeEvidenceV1`; its omission digest, Run/wait digest, dispatch digest, kind/ordinal/nonce/start/deadline, current inspector, and observation time equal the persisted in-flight dispatch. `subject_observation` wraps exactly one subject-allowed artifact and rehashes its ref/digest: `McpRecoveryProbeEvidenceV1`, `PublicationProofV1`, or `WorkerRecoveryEvidenceV1`; MCP evidence additionally repeats the same probe-dispatch digest and broker identities. `probe_timeout` is legal only at or after the stored deadline and its ref/digest decodes exact `ReconciliationProbeTimeoutClosureV1`; `closureDigest` omits itself under JCS and all common probe/inspector/dispatch fields equal the wrapper/in-flight state. MCP closure first atomically revokes the exact persisted fence token, waits for the broker's matching active-release count to become zero, and records the same dispatch/target/token plus `noActiveReleaseForNonce=true`. Publication/worker closure repeats the persisted task id and either proves synchronous cancellation-and-join by its owning live Supervisor or names exact `StateOwnerAcquisitionEvidenceV1(takeover_after_owner_death)` proving that task's owning process died before the successor observed closure. Timeout authorizes no claim that the underlying effect completed or failed. It follows the same unresolved edge and schedule as an unresolved response. A late response for a closed nonce is audit-only and cannot clear a newer nonce or advance the Run. Each completed probe installs the wrapper's ref/digest or atomically applies the subject reducer. There is no public evidence payload, counter reset, automatic ninth probe, invalid ref-without-digest combination, or claim that repeated user inspection must eventually resolve. A global Supervisor ceiling bounds all probes.
 
+Every publication dispatch additionally roots `previousWaitingSubjectRef`,
+the exact durable pending/exhausted wait selected by that revision CAS. The
+strict reader validates this original prior wait, counts, backoff and evidence
+chain rather than inferring history from the newest progress. The fixed target
+contains only the UNKNOWN and optional progress visible when first selected;
+later cleanup progress cannot retroactively change that target. This edge
+grants no new cleanup or execution authority and introduces no separate ledger.
+
+Publication inspection has one additional authority-reducing closure for
+graceful Supervisor shutdown, not an early timeout. After synchronous
+cancellation and the actual original task/resource join, its still-owning
+Supervisor may publish `ReconciliationProbeCancellationClosureV1`, format
+`cliq-reconciliation-probe-cancellation-closure-v1`, reason
+`owning_supervisor_shutdown`, with the exact original Run/wait, probe
+kind/ordinal/nonce/dispatch/deadline, inspector, publication subject and task id.
+Its `taskClosure` is only the genuine `cancelled_and_joined` branch; neither a
+caller boolean nor successor death can mint it. `closedAt` is the actual joined
+time, which may precede the deadline, and its digest omits only `closureDigest`.
+The wrapper's disjoint `probe_cancelled` variant contains only
+`cancellationReason='owning_supervisor_shutdown'` and that closure ref/digest,
+never subject evidence or timeout fields. It closes the original nonce through
+the same unresolved-count/backoff edge before graceful owner release, without
+resetting a counter, extending the deadline, observing a path outcome or
+granting cleanup/retry. A genuine received outcome takes priority and retains
+its original result/handoff; cancellation cannot overwrite it. A failed join
+or persistence leaves closure incomplete and retains the StateOwner/failure.
+The original two-second stop standard is unchanged; waiting until the
+thirty-second probe deadline is not an implementation of bounded shutdown.
+
 Dispatch uses two mandatory checks shared by broker, sandbox launcher, model, MCP, verifier, and publish paths. `claimDispatch` reads Run plus `activeWorkerLaunchId` in one SQLite transaction and requires `status='running'`, the exact activated launch/current epoch/identity/generation/containment, unexpired launch lease, no `stopIntentRef`, no cancel flag, `now < deadlineAt`, the highest/current prepared attempt with no prior claim, matching typed frontier/operation, live grant, and matching reservation; it atomically appends the unique claim. Immediately before releasing any target capability or request bytes, `releaseClaimedDispatch` re-reads the same Run plus launch and the live stop/cancel/deadline/grant/frontier/reservation predicates and requires the exact just-created `dispatchId` as current—rather than the now-false “no claim” predicate. Failure closes or reconciles that claim without I/O. Only a successful second check authorizes new I/O.
 
-There is one narrower post-stop gate, `claimRecoveryMaintenance`, and it is not a back door into `claimDispatch`. It runs only inside the trusted publication broker, requires an approved immutable DeliveryPlan and the historical decision/grant binding for that exact plan (the productive grant may now be expired), an active StopIntent, no live semantic publication claim, and an exact `abortOperations` entry whose referenced mkdir receipt proves this delivery created the directory. It prepares/claims a zero-budget `opKind='publish', ReplayClass='reconcile'` maintenance attempt using the Run's current monotonic `leaseEpoch`, current Supervisor instance, and no worker-launch authority, then allows only descriptor-relative `rmdir` of that exact proven-empty directory plus fsync/evidence. `releaseRecoveryMaintenance` rechecks those predicates and rejects any file write, desired-path create/replace/delete, nonempty/unexpected directory, or target drift. Completing cleanup inside an already-claimed leaf uses that leaf's existing claim and a similarly bounded recovery continuation; it never creates a second claim. These two paths are the only mutation exceptions after stop/deadline.
+There is one narrower post-stop gate, `claimRecoveryMaintenance`, and it is not
+a back door into `claimDispatch`. It runs only inside the trusted publication
+broker, requires an approved immutable DeliveryPlan and the historical
+decision/grant binding for that exact plan (the productive grant may now be
+expired), an active StopIntent, no live semantic publication claim, and an exact
+`abortOperations` entry whose referenced mkdir or directory-producing replace
+receipt proves this delivery created the directory. It prepares/claims a
+zero-budget `opKind='publish', ReplayClass='reconcile'` maintenance attempt using
+the Run's current monotonic `leaseEpoch`, current Supervisor instance, and no
+worker-launch authority. This allows only descriptor-relative no-replace
+quarantine of that exact proven-empty directory into its original claim's
+fixed private `preimage`, followed by actual identity/emptiness validation,
+CAS preservation, the genuine durable PathProgress barrier and exact private
+rmdir/fsync/evidence/arena retirement. `releaseRecoveryMaintenance` rechecks
+those predicates and rejects productive file writes, create/replace/delete
+outside that exact empty-directory maintenance envelope, nonempty/unexpected
+directories, or target drift. A last-cut unexpected displaced inode remains
+retained and unknown, never cleaned. Completing cleanup inside an
+already-claimed leaf uses that leaf's existing claim and a similarly bounded
+recovery continuation; it never creates a second claim. These two paths are the
+only mutation exceptions after stop/deadline.
 
 `assertEvidenceAuthority` is deliberately different. A trusted Supervisor may accept signed broker receipts, target status evidence, or positively inspected containment/process evidence for an already claimed attempt after its lease, grant, deadline, or cancellation state changed; expiry cannot erase what happened. It validates the immutable request/claim/original epoch and evidence provenance, but authorizes no new productive I/O. If the attempt is still highest/current and the exact `frontierRef` or `WaitingSubject` still matches, one transaction may append its terminal fact, normalized op-kind item, budget settlement, and subject-specific frontier reducer. If a newer attempt/frontier exists, the evidence is audit/billing-only and cannot change Run-visible state. An unauthenticated late worker assertion is never sufficient evidence.
 
@@ -6670,7 +6774,7 @@ The Kernel Cut has no provider- or UI-specific continuation state. These are the
 | `verify:dependencies` | completed exact `DependencyReadyItem` plus post-effect Checkpoint, or an already matching ready Checkpoint | `verify:verifiers` at index zero; no verifier launch before readiness |
 | `verify:verifiers` | one matching verifier receipt/skip and its Journal evidence | same frontier/index or retry; `agent` for a counted assertion repair on agent Runs only; publish one closure and install `finalize` when `afterPass='finalize'`, or the proof-carrying `delivery:approval` frontier when `afterPass='delivery_approval'`; otherwise exact failure/cancel path |
 | `finalize` | candidate + Journal-backed verification/provenance closure | `commitRunResult` and terminal state |
-| `delivery:merge` | admission-owned immutable current-workspace capture plus merged candidate/diff/plan or conflict | shared `verify` frontier with `afterPass='delivery_approval'`, proof-carrying `delivery:approval` when identical provenance is valid, direct verified no-op projection/finalize when the plan is empty, or `runtime_failed(delivery_merge_conflict)` StopIntent/detail |
+| `delivery:merge` | admission-owned immutable current-workspace capture plus merged candidate/diff/plan or conflict | shared `verify` frontier with `afterPass='delivery_approval'`, proof-carrying `delivery:approval` when identical provenance is valid, direct verified no-op projection/finalize when the plan is empty, or `runtime_failed(delivery_merge_conflict)` / `runtime_failed(delivery_merge_limit_exceeded)` StopIntent/detail |
 | `delivery:approval` | typed allow decision over the carried candidate/plan/closure | `delivery:publish` at path index zero preserving those refs; denial cancels |
 | `delivery:publish` | one path receipt/reconciliation result for the exact index | next index preserving candidate/plan/closure, or publish forward projection evidence and install `finalize(operation='delivery')` with the same closure after all paths close |
 
@@ -8026,13 +8130,18 @@ type McpServerStoppedItem = {
 
 type PathState =
   | { kind: 'absent' }
-  | { kind: 'directory'; mode: number; identityDigest?: string }
+  | { kind: 'directory'; mode: number; identityDigest: string; empty: boolean }
   | { kind: 'file'; digest: string; mode: number }
   | { kind: 'symlink'; target: string; digest: string }
 
 type PublicationLeafState =
   | { kind: 'file'; digest: string; mode: number }
   | { kind: 'symlink'; target: string; digest: string }
+
+type PublicationExpectedEntry = PublicationLeafState |
+  { kind: 'directory'; mode: number; identityDigest: string; empty: true }
+type PublicationDesiredEntry = PublicationLeafState |
+  { kind: 'directory'; mode: 493 }
 
 type PublicationParent =
   | { kind: 'existing_directory'; expectedIdentityDigest: string }
@@ -8066,8 +8175,8 @@ type PublicationOperation = PublicationOperationBase & (
     }
   | {
       kind: 'replace'
-      expected: PublicationLeafState
-      desired: PublicationLeafState
+      expected: PublicationExpectedEntry
+      desired: PublicationDesiredEntry
       stagingName: string
       stagingExpected: { kind: 'absent' }
       quarantineName: string
@@ -8075,7 +8184,7 @@ type PublicationOperation = PublicationOperationBase & (
     }
   | {
       kind: 'delete'
-      expected: PublicationLeafState
+      expected: PublicationExpectedEntry
       desired: { kind: 'absent' }
       stagingName?: never
       stagingExpected?: never
@@ -8090,6 +8199,8 @@ type PublicationAbortOperation = {
   kind: 'abort_rmdir'
   path: string
   createdByOperationId: string
+  quarantineName: 'preimage'
+  quarantineExpected: { kind: 'absent' }
 }
 
 type DeliveryPlan = {
@@ -8099,6 +8210,8 @@ type DeliveryPlan = {
   sourceBaseRef: ArtifactRef
   sourceDesiredRef: ArtifactRef
   capturedWorkspaceRef: ArtifactRef
+  captureTopologyRef: ArtifactRef
+  captureTopologyDigest: string
   desiredSourceRef: ArtifactRef
   diffRef: ArtifactRef
   mergeAlgorithm: 'cliq-diff3-v1'
@@ -8107,8 +8220,41 @@ type DeliveryPlan = {
   abortOperations: PublicationAbortOperation[]
 }
 
+type PublicationLocationV1 =
+  | { kind: 'workspace'; path: string }
+  | { kind: 'publication_arena'; arenaId: string; component: string }
+
+type PublicationArenaBirthV1 = {
+  schemaVersion: 1
+  format: 'cliq-publication-arena-birth-v1'
+  deliveryRunId: string
+  deliveryPlanRef: ArtifactRef
+  workspaceIdentityRef: ArtifactRef
+  workspaceIdentityDigest: string
+  stateRootIdentityRef: ArtifactRef
+  stateRootIdentityDigest: string
+  inspectorIdentityRef: ArtifactRef
+  inspectorIdentityDigest: string
+  sequence: 'forward' | 'abort'
+  operationIndex: number
+  operationId: string
+  opId: string
+  attempt: number
+  dispatchId: string
+  arenaId: string
+  arenaIdentity: { deviceId: string; fileId: string; ownerUid: number; mode: 448 }
+  parentIdentity: { deviceId: string; fileId: string; ownerUid: number; mode: 448 }
+  observedAt: string
+  birthDigest: string
+}
+
+type PublicationArenaRetirementObservation =
+  | { kind: 'linux_unlinked'; linkCount: 0 }
+  | { kind: 'darwin_unlinked'; heldPathUnchanged: true;
+      parentPathUnchanged: true; observedLinkCount: number }
+
 type PublicationPathObservationV1 = {
-  path: string
+  location: PublicationLocationV1
   state: PathState
   parentDeviceId: string
   parentFileId: string
@@ -8132,11 +8278,51 @@ type PublicationProofBaseV1 = {
 
 type PublicationProofV1 = PublicationProofBaseV1 & (
   | {
-      kind: 'path_observation'
-      observation: PublicationPathObservationV1
+      kind: 'arena_namespace_absence'
+      arenaId: string
+      stateRootIdentityRef: ArtifactRef
+      stateRootIdentityDigest: string
+      registeredArenaIdentity: PublicationArenaBirthV1['arenaIdentity']
+      namespaceParentIdentity: PublicationArenaBirthV1['parentIdentity']
+      coveredLocations: PublicationLocationV1[]
+      destinationObservationRef: ArtifactRef
+      arenaAbsent: true
+      arenaParentFsyncCompleted: true
+      workspaceParentFsyncCompleted: true
+      namespaceHandlesJoined: true
+      recoveryOriginRef: ArtifactRef
+      recoveryOriginDigest: string
       proofDigest: string
     }
   | {
+      kind: 'arena_retirement'
+      arenaId: string
+      stateRootIdentityRef: ArtifactRef
+      stateRootIdentityDigest: string
+      arenaIdentity: PublicationArenaBirthV1['arenaIdentity']
+      parentIdentity: PublicationArenaBirthV1['parentIdentity']
+      arenaAbsent: true
+      arenaParentFsyncCompleted: true
+      retirementObservation: PublicationArenaRetirementObservation
+      recoveryOriginRef?: ArtifactRef
+      recoveryOriginDigest?: string
+      proofDigest: string
+    }
+  | {
+      kind: 'path_observation'
+      observation: PublicationPathObservationV1
+      recoveryOriginRef?: ArtifactRef
+      recoveryOriginDigest?: string
+      proofDigest: string
+    }
+  | {
+      kind: 'ancestor_projection_absence'
+      path: string
+      ancestorPath: string
+      ancestorObservationRef: ArtifactRef
+      proofDigest: string
+    }
+  | ({
       kind: 'terminal_receipt'
       sequence: 'forward' | 'abort'
       operationIndex: number
@@ -8146,12 +8332,17 @@ type PublicationProofV1 = PublicationProofBaseV1 & (
       before: PublicationPathObservationV1
       after: PublicationPathObservationV1
       preservedPreimageRef?: ArtifactRef
-      transientFinalObservations: PublicationPathObservationV1[]
       parentIdentityBeforeDigest: string
       parentIdentityAfterDigest: string
       directoryFsyncCompleted: true
+      recoveryOriginRef?: ArtifactRef
+      recoveryOriginDigest?: string
       proofDigest: string
-    }
+    } & (
+      | { transientFinalObservations: PublicationPathObservationV1[]; namespaceRetirementEvidenceRef?: never }
+      | { namespaceRetirementEvidenceRef: ArtifactRef; transientFinalObservations?: never;
+          recoveryOriginRef: ArtifactRef; recoveryOriginDigest: string }
+    ))
   | {
       kind: 'planned_descendant'
       abortOperationId: string
@@ -8173,14 +8364,19 @@ type PublicationProofV1 = PublicationProofBaseV1 & (
         | 'transient_state_ambiguous'
         | 'parent_fsync_unconfirmed'
       lastKnownObservationRefs: ArtifactRef[]
+      recoveryOriginRef?: ArtifactRef
+      recoveryOriginDigest?: string
       proofDigest: string
     }
-  | {
+  | ({
       kind: 'transient_absence'
-      transientPaths: string[]
-      observationRefs: ArtifactRef[]
+      transientLocations: PublicationLocationV1[]
       proofDigest: string
-    }
+    } & (
+      | { observationRefs: ArtifactRef[]; arenaRetirementRefs: ArtifactRef[]; envelopeRetirements?: never }
+      | { envelopeRetirements: Array<{ arenaId: string; retirement: PublicationPathRetirementV1 }>;
+          observationRefs?: never; arenaRetirementRefs?: never }
+    ))
   | {
       kind: 'projection_closure'
       selectedBranch: 'forward_finalize' | 'abort'
@@ -8243,12 +8439,36 @@ type PublicationPathProgressItem = {
   operationId: string
   opId: string
   attempt: number
-  state: 'desired_committed_cleanup_pending'
-  destinationEvidenceRef: ArtifactRef
-  preservedPreimageRef?: ArtifactRef
-  transientObservationRef?: ArtifactRef
   createdAt: string
-}
+} & (
+  | {
+      state: 'desired_committed_cleanup_pending'
+      beforeObservationRef: ArtifactRef
+      destinationEvidenceRef: ArtifactRef
+      preservedPreimageRef?: ArtifactRef
+      transientObservationRef?: ArtifactRef
+    }
+  | {
+      state: 'received_handoff'
+      sequence: 'forward'
+      attempt: 0
+      dispatchId: string
+      claimJournalSeq: number
+      receiptRef: ArtifactRef
+      receiptDigest: string
+      retirement: PublicationPathRetirementV1
+      generationResources:
+        | { kind: 'sealed'; workerLaunchId: string; generationRef: ArtifactRef; snapshotEvidenceRef: ArtifactRef }
+        | { kind: 'genuinely_retired_from_verified_checkpoint'; workerLaunchId: string; generationRef: ArtifactRef;
+            sourceCheckpointId: string; quarantineEvidenceRef: ArtifactRef; retirementEvidenceRef: ArtifactRef }
+      reconciliationEvidenceRef?: ArtifactRef
+      reconciliationEvidenceDigest?: string
+    }
+)
+
+type PublicationPathRetirementV1 =
+  | { slotObservationRefs: ArtifactRef[]; arenaRetirementRef: ArtifactRef }
+  | { kind: 'current_namespace'; namespaceEvidenceRef: ArtifactRef }
 
 type PublicationPathResultItem = {
   schemaVersion: 1
@@ -8264,9 +8484,157 @@ type PublicationPathResultItem = {
   outcome: 'completed' | 'not_created' | 'retained_planned_descendant' | 'failed' | 'unknown'
   receiptRef?: ArtifactRef
   evidenceRef: ArtifactRef
+  abortStopIntentRef?: ArtifactRef
+  reconciliationEvidenceRef?: ArtifactRef
+  reconciliationEvidenceDigest?: string
+  retirement?: PublicationPathRetirementV1
   createdAt: string
 }
+
+type PublicationLateObservationItem = {
+  schemaVersion: 1
+  itemId: string
+  runId: string
+  kind: 'publication_late_observation'
+  deliveryPlanRef: ArtifactRef
+  sequence: 'forward' | 'abort'
+  operationIndex: number
+  operationId: string
+  opId: string
+  attempt: 0
+  dispatchId: string
+  claimJournalSeq: number
+  probeWaitingSubjectRef: ArtifactRef
+  probeDispatchDigest: string
+  evidenceRef: ArtifactRef
+  evidenceDigest: string
+  completedAt: string
+  createdAt: string
+} & (
+  | { disposition: 'unknown'; retirement?: never }
+  | { disposition: 'received' | 'stopped_before_effect' | 'retained_planned_descendant';
+      retirement: PublicationPathRetirementV1 }
+)
 ```
+
+`PublicationPathResultItem.retirement` is required for every claimed
+`completed|failed|retained_planned_descendant` result and forbidden for
+`unknown|not_created`. In the original-descriptor branch it retains only the
+original producer's actual joined retirement: `slotObservationRefs` names all and only that claim's private
+components in `PublicationLocationV1` order, and `arenaRetirementRef` names
+that original arena's completed retirement. The owning result-item/Checkpoint
+transaction registers these artifacts and this exact edge together with the
+original Journal terminal fact and once-only settlement; the last forward
+result includes it in the sole publication/RunResult/Session transaction.
+Readers revalidate each absence observation, original claim/birth/inspector
+and StateOwner lifetime, arena and parent inode, StateRoot/platform, and
+absence-before-retirement-before-terminal ordering. A receipt's inline
+transient observations equal these named observations. A later terminal
+projection repeats these exact original refs, rather than substituting a
+fresh inspector's guess about an old arena. This durable graph lets recovery
+read a genuinely retired envelope after restart; it never recreates its live
+native owner, authorizes another effect/cleanup, adopts a remnant by name, or
+discovers missing provenance by scanning orphan CAS objects.
+
+The disjoint `current_namespace` branch never manufactures those old-FD
+observations. Its `arena_namespace_absence` must bind the complete original
+claim/birth, original durable cleanup progress and complete preserved payload,
+strict successor StateOwner acquisition with real original-holder death, and
+the current inspector's independent namespace observation. Its registered
+arena identity is historical provenance, not a claim to hold that old FD.
+The actual private parent must equal the original birth parent. The current
+desired destination must retain the original progress inode/type/complete
+bytes and captured parent; an equivalent replacement is not enough. All and
+only the original private locations are covered, the actual arena is absent,
+both actual parents are fsynced and every observer/temporary descriptor is
+joined. Only an exact held empty original arena may be removed by this
+fixed same-claim maintenance; no preimage may be unlinked by the namespace
+observer. A unique registered original preimage may route to the unchanged
+retained cleanup contract only after this observer closes/joins. Extra names,
+foreign identity, incomplete provenance or uncertain close have no fallback.
+The namespace receipt requires the same recovery origin/current inspector
+and fresh desired observation; it forbids inline old-slot observations.
+Unclaimed preparation cannot use this branch. A terminal transient aggregate
+using `envelopeRetirements` covers every claimed arena exactly once, in arena
+order, with complete original private-location coverage; it is XOR with the
+old descriptor arrays, not permission to omit an unproven slot.
+
+A genuine original probe result completed after its persisted deadline is
+retained only as `PublicationLateObservationItem` in the same Continuation.
+`completedAt` is the original producer's fixed actual completion sample,
+including required fsync/join, and is later than the original deadline. Raw
+evidence `observedAt` is unchanged and no later than `completedAt`; the item
+creation and Checkpoint cannot predate completion or the actual selected Stop.
+Known dispositions require their actual complete retirement, UNKNOWN forbids
+it. The fixed item/Checkpoint identity domains bind Run/op/attempt, original
+dispatch digest and evidence ref. Only this producer's opaque result can
+append one excluded-control item and same-W_M Checkpoint plus Run revision and
+time; it must not alter status/wait/nonce/frontier, Journal, budget or original
+BudgetSettlement. A synchronous exact committed-delta transfer updates its
+two original closure caches before any cancellable follow-up. Joined storage
+failure preserves this original fact and item; a newer monotonic Stop may be
+reselected but neither the raw evidence nor completion sample may be retimed.
+
+This late item is audit, not a current subject-observation wrapper or positive
+authority for a new nonce. Its original task must actually join and close
+under the existing deadline/shutdown contract. Further progress requires a
+new genuine bounded readonly probe and independently satisfied original-death,
+birth/progress, current full-byte, fsync/join and unique terminal-writer checks.
+A still-live original claim holder remains waiting; transport closure does
+not substitute for its death. A timely known result's complete retirement
+must be within its own original probe deadline. Missing original evidence
+remains recovery, without replay, a second charge, epoch-only adoption or CAS
+scanning. These contracts require independent installed Linux late-return,
+cleanup-before-ack, restart/once-only, storage/Stop and two-second stop evidence;
+schema or native component passes do not qualify those unexecuted cuts.
+
+An original publication owner may retire its preparation before any permanent
+claim. It synchronously revokes release, joins its original pending
+factory/claim, and proves that the Journal still contains only its original
+`prepared`, with no claim, arm or commit. Native factory state is one of
+`not_attempted|returned|unknown`: the call is marked `unknown` before entry and
+only its actual return changes it to `returned`. An exception or partial birth
+cannot be represented as no birth, reopened by name or refunded as retired.
+`not_attempted` needs no arena; `returned` requires the original held native
+object's discard, complete private-slot absence, arena retirement and actual
+joined close. A close failure stays sticky. Neither branch performs a
+workspace effect or manufactures a claim.
+
+The resulting `failed.errorRef` is exactly one closed
+`PublicationPreparationClosureV1` with format
+`cliq-publication-preparation-closure-v1`. It repeats Run/Plan/sequence/index,
+operation/op/attempt zero, `preparedJournalSeq`, original request/target/grant
+refs, original unclaimed `dispatchId`, StateOwner epoch/Supervisor/lease,
+inspector ref/digest, `observedAt` and an omission `closureDigest`. Its sole
+`retirement` branch is `{kind:'no_birth'}` or
+`{kind:'retired',arenaBirthRef,slotObservationRefs,arenaRetirementRef}`. The
+same original owner's fixed typed adapter atomically registers that graph,
+appends its original `prepared -> failed` fact and one `BudgetSettlementV1`
+with `consumed=ZERO` and exact original reservation refund. It appends no path
+result, native effect, claim or synthetic Checkpoint. CAS/rolled-back SQL
+failure retains that same owner, closure and settlement. Recovery validates
+the complete original StateOwner/activated-worker or maintenance-Stop graph,
+actual returned birth/retirement when present, exact Journal and zero
+settlement. Only this proved unclaimed suffix remains semantic `unstarted`;
+it does not erase a prior claimed forward prefix. It is not ordinary or
+verifier preparation failure evidence. Closing an unclaimed attempt does not
+authorize a replacement attempt or rearm: with the current fixed-attempt
+contract, any needed replacement remains explicitly waiting rather than
+silently redispatched, including closure without a Run StopIntent.
+
+`PublicationPathResultItem.abortStopIntentRef` is present exactly when a
+forward `completed|failed` result selects `abort_cleanup`. It names the
+winning StopIntent actually selected by that result's original transaction;
+abort results, unknown results, and normal forward finalization forbid it.
+The same transaction installs the ordinary path-result Checkpoint. Readers
+validate that exact result/Checkpoint edge and the original Stop's complete
+cause/control graph against the actual recovery closure, then prove it is the
+current winner or a legal monotonic predecessor of that winner. A later Stop,
+same-millisecond timestamps, current cancellation flags, or prunable events
+cannot retroactively turn a successful final forward operation into an abort
+handoff. A retained settlement after a rolled-back transaction keeps its
+original charge and effect; its uncommitted result's Stop edge may be prepared
+again with the actual selected winner, never by dispatching again.
 
 `InheritedVerificationProvenanceV1` is the only artifact legal at `inheritedProvenanceRef` or a delivery `RunResult.verificationProvenanceRef`. `provenanceDigest = SHA-256(JCS(provenance with provenanceDigest omitted))`. The source Run must be terminal `succeeded(verified)` with the exact result/result digest and required `verificationClosureRef`; the source closure digest, result source, verifier spec/digest, and ordered receipt refs/digests must equal that immutable source graph. `deliveryRunId` is the consuming delivery Run, which must have produced the identical `resultSourceRef`; neither receipts nor source-owned ids are copied or relabeled. The delivery `VerificationClosureV1.inherited_verified` fields and final RunResult must repeat these exact refs. Storage decodes and re-walks the source result/closure/Journal/receipt graph before publishing or accepting the provenance; a loose list of passing receipts or equal directory bytes is insufficient.
 
@@ -8334,7 +8702,23 @@ executed-Journal rule above applies only to `source='invocation'`.
 
 Every completed visible model attempt first appends one `ModelTurnItem`; a call turn's `ToolBatchItem.modelTurnRef` and `modelOpId/attempt` must match it. Every `FinalCandidateItem` decodes its base/result SourceManifests and exact `WorkspaceDiffV1`; the diff base/result refs equal the candidate, `sourceDigest` equals the result SourceManifest's `manifestDigest`, and `diffDigest` equals the decoded diff's self digest. The `agent` branch names a same-Run `ModelTurnItem(stopReason='end')`, requires `producingOpId === modelOpId`, and requires `summaryRef === textRef` where that `ModelTextV1` is nonempty. The `delivery` branch structurally forbids `producingOpId`, names the exact same-Run `DeliveryMergeItem`, and copies its captured-base/result/diff/summary refs; that summary also decodes `ModelTextV1`, while source Run, B/S/A/M, and plan fields satisfy the delivery equations above. No candidate points directly at an unowned provider artifact. `commitRunResult` requires its `baseSourceRef`, `resultSourceRef`, `diffRef`, and `summaryRef` to equal the current candidate byte-for-byte, then independently rehashes the result source and diff; `SessionRunTerminalItem.resultRef` names only that committed RunResult. A caller-derived summary, alternate diff, tree digest substituted for manifest digest, or delivery merge op invented after the fact is invalid.
 
-`DeliveryPlan.forwardOperations` is contiguous, ancestor-before-descendant for creation, contains no duplicate path/operation id/transient sibling, and represents every semantic materialization action; `abortOperations` is a separately indexed deepest-first list over planned delivery-created directories. Both arrays may be empty only when the captured real-workspace source normalized to result role equals `desiredSourceRef`; that no-op delivery creates no approval/publish frontier and proceeds directly through the shared verification/provenance and finalize closure. Otherwise forward operations are nonempty. The discriminated union is exact: `mkdir` has only expected absence and fixed mode `0755`; `create` has one absent staging sibling and no quarantine; `replace` has absent staging plus quarantine siblings; `delete` has one absent quarantine sibling and no staging. Every leaf expected/desired state is a file or symlink, never a directory. `parent` is present on every operation and either binds an already captured directory identity or the earlier exact mkdir operation that created it; no optional parent/transient field is inferred by kind.
+`DeliveryPlan.forwardOperations` is contiguous, has no duplicate path or
+operation id, and includes every semantic materialization action. Missing
+parents precede children; removed descendants precede directory removal or
+conversion. `abortOperations` is a separately indexed deepest-first list over
+planned delivery-created directories. Both lists may be empty only when the
+captured workspace normalized to result role equals `desiredSourceRef`; that
+no-op creates no approval/publish frontier and uses the shared verification and
+native final-projection closure directly. `mkdir` has only expected absence and
+fixed desired mode `0755`; `create` has one private staging component;
+`replace` has private staging and quarantine components; `delete` has only
+quarantine. Their expected-absence fields are mandatory exactly in those
+branches. Components are relative to the original claim's arena, never the
+workspace parent. Replace/delete may expect a captured directory only with its
+exact raw mode/identity and fresh emptiness proof. A directory-to-directory
+replacement is not an unneeded semantic edit. `parent` binds a captured
+directory or the earlier exact mkdir/type-conversion creator; no omitted
+parent or transient field is inferred from an operation's name.
 
 The no-op comparison never mutates captured manifest A or substitutes a tree
 digest for its identity. Copy A, change only `role` to `result`, recompute its
@@ -8345,11 +8729,120 @@ no-materialization test. Inherited verification still requires strict equality
 of M and the original source result S, with its complete provenance closure;
 equal trees, a no-op, or normalized A alone never grants that reuse.
 
-Every publication receipt/evidence ref decodes only `PublicationProofV1`, and `proofDigest = SHA-256(JCS(proof with proofDigest omitted))`. Base fields equal the delivery Run, immutable plan, live Session workspace identity, and the exact current signed Supervisor inspector. A path observation is produced by no-follow descriptor traversal from that root: absent forbids all entry identity fields, every present state requires all three, and the file/symlink/directory state is rehashed or reidentified from the held entry. `PublicationPathProgressItem.destinationEvidenceRef` is the exact post-swap destination `path_observation`; optional `transientObservationRef` is present iff this plan operation has a staging/quarantine sibling still pending cleanup and decodes to the exact present sibling path/descriptor state frozen by the plan. It replaces any untyped transient identity handle. A terminal receipt matches one plan operation and Journal claim byte-for-byte; `before` equals its expected state, `after` equals desired for forward completion or the abort operation's exact postcondition, transient observations are unique byte-sorted and all absent, preserved preimage is required exactly when the leaf displaced bytes, the parent identities satisfy the plan parent edge, and `directoryFsyncCompleted` is the inspector's retained post-fsync fact. Journal `opKind='publish',phase='completed'` has `receiptRef` and `evidenceRef` equal to this terminal-receipt artifact, and the matching completed `PublicationPathResultItem` repeats it in both fields. `not_created` has no receipt and requires a `path_observation` proving exact absence plus no completed creating operation. `retained_planned_descendant` has no receipt and requires a `planned_descendant` proof whose operation ids are exactly still-retained completed plan descendants. `failed` has no terminal receipt and carries the exact final path observation. `unknown` carries only `path_ambiguity`: it repeats the claim dispatch/op/attempt/plan operation, a closed failure literal, and any unique byte-sorted last-known path-observation refs; an adapter string/exception is forbidden. Neither outcome satisfies forward or abort closure. Publish is `reconcile`, so this item has no abandoned outcome.
+Every publication receipt/evidence ref decodes only `PublicationProofV1`, and
+`proofDigest = SHA-256(JCS(proof with proofDigest omitted))`. Its base binds the
+delivery Run, immutable Plan, live Session workspace, and original signed
+Supervisor inspector. Historical inspector identity alone does not prove a
+physical observation: the owning reader validates the original producer's
+claim/arena/resource provenance and durable item/Checkpoint graph. A workspace
+observation traverses the held workspace root; an arena observation traverses
+the same claim's held StateRoot arena and validates that exact arena identity.
+Absent forbids entry identity fields; present requires all three and actual
+content/type/raw-mode or directory-identity validation.
 
-The three terminal-projection proof refs are likewise exact. `transient_absence` lists every plan-derived staging/quarantine path exactly once in byte order and its parallel observation refs all decode to absent `path_observation` proofs for those paths. `projection_closure` repeats the projection artifact's branch/source, its observed-path evidence refs in path order, its plan-ordered result refs, and its exact unstarted suffix. `git_index_unchanged` is the canonical all-absent four-field form for a non-Git workspace; for Git, all four fields are required, both refs rehash their digest members, captured fields equal captured manifest A, and observed digest/ref are byte-identical. No opaque adapter receipt, unhashed boolean, or alternate proof shape may advance publication or terminalize the Run.
+A `path_observation` always records its actual existing direct parent, including
+that parent's actual positive link count. For a top-level destination, the
+original held workspace-root FD supplies that count through a fresh fstat under
+the same identity/no-follow checks as its raw-mode observation; it is not an
+identity-digest member. A removed or non-directory direct parent cannot be
+replaced by the root, a former receipt, an invented inode or a zero link count.
+Only terminal projection or the read-only `not_created` branch below may
+instead use `ancestor_projection_absence`: `path`
+is a strict canonical descendant of `ancestorPath` at a slash boundary, and
+`ancestorObservationRef` names exactly one actual workspace `path_observation`
+for that ancestor in state `absent`, `file` or `symlink`, never `directory`.
+Under the frozen no-follow SourceProjection that ancestor cannot be traversed,
+so only the descendant's projected state is absent; a symlink says nothing about
+existence at its target. This covers a planned child deletion followed by
+directory deletion or directory-to-leaf conversion without fictional parent
+metadata. Both proofs retain exactly the same Run, Plan, workspace, inspector
+and original physical `observedAt`; logical derivation samples no new clock.
+The owning reader fully rehashes and validates both proofs and their original
+owner graph, rejects arena anchors and recursive derived-proof chains, and
+binds the target path to the terminal projection's exact touched-path list, or
+to the exact original abort operation in that read-only not-created branch.
+`projection_closure` roots the derived ref and its exact single anchor edge.
+This branch cannot substitute for an operation receipt, PathProgress, release,
+preimage preservation or cleanup authority.
 
-`DeliveryTerminalProjectionEvidence.evidenceDigest = SHA-256(JCS(evidence with evidenceDigest omitted))`. Observed paths are canonical, unique, byte-sorted, and exactly cover every plan-touched destination/transient; each state/evidence ref is descriptor-derived from the admitted root and the Git-index proof matches the capture. `forward_finalize` requires every forward operation's plan-ordered completed result, empty abort/unstarted lists, no transient, and `observedSourceRef === DeliveryPlan.desiredSourceRef`. `abort` requires one non-unknown result for every started forward operation, the exact remaining contiguous forward-operation-id suffix in `unstartedForwardOperationIds`, and one plan-ordered non-unknown result for every abort operation. A known failed result may explain retained partial state but never proves rollback; abort `observedSourceRef` need equal neither base nor desired. Missing/unknown/unmatched evidence remains reconciliation. Successful delivery installs this artifact in the delivery finalize frontier and `RunResult`. A failed/cancelled delivery requires `TerminalDetail.deliveryTerminalProjectionEvidenceRef` only when a forward publication claim existed; merge conflict, approval denial, or cancellation before the first forward claim forbids it. The reason-bound `primaryEvidenceRef` follows the exact StopIntent branch matrix (and is the StopIntent ref for delivery merge/publication stops), while `publicationResultItemRefs` equals the abort evidence's forward-then-abort result refs. Therefore success and safe partial publication retain one authoritative projection proof without mutating or replacing StopIntent truth.
+For `state='desired_committed_cleanup_pending'`,
+`PublicationPathProgressItem.beforeObservationRef` roots the original complete
+pre-release path observation, including its captured parent identity and link
+count. The original producer must publish it before the release and retain it
+in this same progress item; a successor cannot reconstruct that observation
+from a displaced inode, a current parent or matching bytes. Missing original
+before evidence remains recovery-required. `destinationEvidenceRef` is the
+post-release workspace observation. `transientObservationRef` is present exactly when an
+original private component still awaits cleanup and binds its arena locator,
+parent and entry identities. A terminal receipt matches one Plan operation and
+Journal claim; `before` equals its expected state, `after` equals desired or the
+exact abort postcondition, final transient locators are unique/canonical and
+absent, and every displaced preimage is preserved with its actual type. Parent
+identity edges and both-parent fsync facts are mandatory. Journal publish
+`completed` uses that same terminal-receipt artifact for receipt/evidence, and
+the completed result repeats it in both fields. `not_created` proves that the
+planned directory was not created, not that every such path is absent. There
+must be no unresolved creator: it is unstarted, has a joined unclaimed
+preparation closure, or has an earlier fully settled stopped-before-effect
+result with complete original retirement and no PathProgress. A later failure
+cannot retroactively justify this observation. Read-only evidence records
+actual absence, or the complete unchanged captured `A` file (raw mode and
+full-byte hash) / symlink (exact target bytes and hash) for an unperformed
+leaf-to-directory conversion. This does not claim the capture retained a leaf
+inode identity and grants no deletion, normalization or new cleanup authority
+over that original leaf. An unchanged captured non-directory ancestor can
+derive only the existing no-follow projection absence for a descendant; its
+own observation remains a present leaf. `retained_planned_descendant` names exactly
+the retained completed descendants. `failed` carries the final concrete
+observation. `unknown` carries only `path_ambiguity` with the original
+dispatch/operation/attempt, a closed failure literal and canonical last-known
+observation refs, never an adapter string. Neither failure nor ambiguity proves
+forward or abort completion; publish has no abandoned outcome.
+
+The three terminal-projection proof refs are likewise exact.
+`transient_absence` lists each original-claim arena component required by the
+started envelope exactly once in canonical locator order; parallel observation
+refs prove exact absence in that same held arena. Unstarted operations have no
+claim-derived arena and cannot invent one for the absence list. Its ordered
+`arenaRetirementRefs` covers each actual claimed arena exactly once, including
+a mkdir whose desired component was consumed by release. Every retirement
+proof matches the original birth's arena/private-parent identities and
+StateRoot. Slot cleanup is not arena retirement: the genuine operation must
+remove the exact empty arena, observe its name absent, fsync the private parent,
+and actually join every descriptor before the retired-resource friend can be
+consumed. A removed-but-not-fsynced retry must really fsync again. Linux records
+the held unlinked inode's actual zero link count. Darwin uses the existing
+source-staging mechanism: successful exact rmdir, original held-inode identity,
+unchanged held/parent F_GETPATH observations, named absence, and its truthful
+observed link count; APFS may retain a cached count of two. Platform branches
+must match the original StateRoot and actual producer; neither invents zero or
+substitutes a pathname for descriptor-relative I/O. Reappearing foreign arenas,
+failed joins or missing durable birth/retirement evidence remain reconciliation.
+`projection_closure` repeats the projection branch/source, its workspace-path
+evidence refs in path order, plan-ordered result refs, and exact unstarted
+suffix. `git_index_unchanged` is the canonical all-absent four-field form for a
+non-Git workspace; Git requires all four fields, both refs rehash their digest
+members, captured fields equal A, and observed digest/ref are byte-identical.
+No adapter receipt, unhashed boolean or alternate proof shape grants progress.
+
+`DeliveryTerminalProjectionEvidence.evidenceDigest = SHA-256(JCS(evidence with evidenceDigest omitted))`.
+Workspace paths are canonical, unique, byte-sorted and exactly cover the
+Plan-touched destinations. Private transient locators have their own complete
+arena absence proof; they are never interpreted as workspace paths. All
+observations have actual producer/root provenance and the Git-index proof
+matches the capture. `forward_finalize` requires every Plan-ordered forward
+completed result, empty abort/unstarted lists, no transient, and
+`observedSourceRef === DeliveryPlan.desiredSourceRef`. `abort` requires one
+non-unknown result for each started forward operation, the exact unstarted
+contiguous suffix, and one Plan-ordered non-unknown result for each abort
+operation. Known failure may explain partial state but never proves rollback;
+abort's source need equal neither base nor desired. Missing/unknown/unmatched
+evidence remains reconciliation. Success installs this artifact in both the
+delivery finalize frontier and RunResult. Failure/cancellation requires it only
+when a forward publication claim existed; pre-claim conflict, denial or
+cancellation forbids it. The reason-bound `primaryEvidenceRef` follows the
+StopIntent matrix, and `publicationResultItemRefs` equals the abort proof's
+forward-then-abort list. Partial publication never rewrites StopIntent truth.
 
 Terminal detail is also typed:
 
@@ -8395,6 +8888,7 @@ type TerminalReasonDetail =
       | { trigger: 'request_body_bytes'; modelVisiblePromptDigest: ArtifactRef; requestBodyBytes: number; requestBodyLimitBytes: 1048576 }
     ))
   | ({ kind: 'result_source_limit_exceeded'; evidenceRef: ArtifactRef } & ResultSourceLimitCause)
+  | ({ kind: 'delivery_merge_limit_exceeded'; evidenceRef: ArtifactRef } & DeliveryMergeLimitCause)
   | {
       kind: 'dependency_source_integrity'
       dependencyPlanRef: ArtifactRef
@@ -8867,7 +9361,7 @@ The default result is immutable and reviewable. A successful agent Run does not 
 
 `cliq apply <runId>` descriptor-captures current real-workspace SourceManifest A as part of admission, installs A in RunSpec/initial `delivery:merge`, installs its distinct restorable WorkspaceStateManifest W_A in the initial Checkpoint, and then creates a narrow delivery Run that:
 
-1. uses the already-admitted immutable current-workspace capture without changing it;
+1. uses the already-admitted immutable current-workspace capture without changing it; creates its physical private generation only through section 7.2's post-admission `preparing` ownership/materialization/validation lifecycle, never by treating pre-admission W_A publication as physical evidence;
 2. applies the verified diff in a private merge view;
 3. detects conflicts and result digest drift;
 4. reruns required verifiers when the merged result reference differs; when it is the identical content-addressed `resultSourceRef`, validates and records explicit inherited-verification provenance instead of manufacturing delivery-owned receipts;
@@ -8898,21 +9392,348 @@ otherwise an exact launch may wait for approval. This keeps delivery
 deterministic and makes a failed drift check return to a new agent Run rather
 than smuggling an undefined repair frontier into apply.
 
-Publication is descriptor-anchored. The broker opens and holds the admitted real-workspace root as a no-follow directory handle and revalidates device/file identity against the delivery capture. Every parent component is walked relative to that handle with no symlink traversal or escape: Linux uses `openat2(RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS)`; macOS uses `openat(O_DIRECTORY|O_NOFOLLOW)` one component at a time plus `fstat` identity checks. Leaf temp/create/exchange/quarantine operations use only the resulting directory descriptors; an absolute path is never reopened after validation. Any root/ancestor identity change enters typed publication reconciliation before another write.
+Publication is descriptor-anchored and authorizes the exact captured root and
+parent inode objects, not an atomic lock on their future namespace ancestry.
+The broker opens and holds the admitted real-workspace root as a no-follow
+directory handle and revalidates device/file identity against the delivery
+capture. Every parent component is walked relative to that handle without
+symlink traversal or resolution-time escape: Linux uses
+`openat2(RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS)`; macOS uses
+`openat(O_DIRECTORY|O_NOFOLLOW)` one component at a time plus `fstat` identity
+checks. Leaf create/exchange/quarantine operations use only the resulting
+directory descriptors; an absolute path is never reopened after validation.
+The complete source, projection, permission/grant, root, parent, device and
+entry checks remain mandatory. A root/ancestor identity or linkage change
+detected by preflight or a precheck refuses the operation before its write and
+enters typed publication reconciliation; it never retargets the captured object
+or authorizes a replacement found at the old path.
 
-`DeliveryPlan.forwardOperations` includes every missing parent directory before its children and contains only `mkdir|create|replace|delete`. A directory create requires expected absence, `mkdirat`, normalized mode `0755`, descriptor re-open/no-follow verification, and directory fsync. Recovery may accept an already-created directory only when its identity/type/mode and contents are exactly the prefix permitted by this same immutable plan; unexpected contents wait for reconciliation. The separate immutable `abortOperations` list enumerates planned delivery-created directories deepest first. If its forward mkdir never completed, a read-only reducer proves there is no creation receipt and the path is still absent, appends `not_created`, and advances without a maintenance claim. Otherwise maintenance removes it only when its creation receipt belongs to this delivery and it is proven empty; it records `retained_planned_descendant` when the only contents are already-completed desired descendants, and waits on any unexpected content. It never removes a pre-existing directory. Each operation has a stable id, required evidence, and reconciliation predicate; multi-path publication remains explicitly non-atomic.
+The supported contract requires a quiescent human workspace. No-follow
+resolution and a final ancestry check do not atomically fence an uncooperative
+actor from moving an already captured root or parent between that check and the
+namespace syscall. In that final gap the syscall may affect the original
+captured object, including after it has moved outside the current workspace
+path. On detecting that drift the producer must refuse successful completion,
+stop further semantic publication, retain the original descriptors and every
+actual displaced inode/preimage, and reconcile the same claim. It cannot claim
+zero namespace effect, an atomic current-path/no-outside-write guarantee, or
+blindly roll the operation back over another edit. Detection does not grant new
+permission, another semantic dispatch, or permission to discard retained data.
 
-Every leaf plan freezes exactly the unpredictable sibling components required by its union branch, their expected absence, desired digest/type/mode, admitted destination preimage, parent identity/linkage, and operation id; none is derived after a crash. Replace reconciliation follows one versioned state machine: `none -> desired_staged_and_fsynced -> exchanged (destination=desired, staging=actual displaced) -> displaced_quarantined -> displaced_preserved_in_CAS -> leaf_completed`. Create uses its stage/no-replace subset; delete uses destination-to-quarantine/preserve and has no staging state. Each observation is descriptor-relative and validates all involved identities/digests; a field forbidden by the operation branch makes the plan invalid rather than ignored.
+`DeliveryPlan.forwardOperations` contains only `mkdir|create|replace|delete` and
+represents directory removal and file/symlink/directory type conversion as well
+as ordinary leaf edits. Missing parents precede children; planned descendant
+removals precede removal or conversion of their directory. An expected directory
+binds its captured physical identity and raw mode, and must actually be empty
+before removal or conversion. Unexpected children block publication and remain
+untouched. Desired directories have normalized mode `0755`; captured raw modes
+are not confused with logical SourceManifest modes.
 
-A leaf is one indivisible publication envelope and one `toolCalls` reservation: staging/exchange or no-replace, preservation of the actual displaced bytes in CAS, exact transient cleanup, and parent fsync. Before deleting a staging/quarantine sibling, the Supervisor commits a `PublicationPathProgressItem` that binds the destination evidence, actual preserved preimage CAS ref, and exact transient identity while the same Journal attempt remains open. A crash before that item leaves the sibling intact; a crash after it can prove either the exact pending sibling or its exact absence and cannot lose the preimage association. Journal `completed` plus `PublicationPathResultItem` is legal only after every transient for that leaf is absent and the directory is fsynced. “Destination has desired digest” alone is never completion.
+Publication uses one private arena for each original permanent Journal claim:
+`StateRoot/runtime/publications/<arenaId>`, where
+`arenaId = identityHash('cliq-publication-arena-v1', runId, operationId, opId, String(attempt), dispatchId)`.
+This is a physical resource of the existing claim, not a new permission ledger,
+retry owner, or worker lifecycle. The same StateOwner holds and validates the
+actual no-follow directory descriptors and private `0700` ownership boundary.
+Every staging and displaced-preimage component is inside this arena, never a
+mutable workspace sibling. The canonical Plan uses the fixed private
+components `desired` and `preimage`; it does not allocate collision-avoiding
+workspace siblings. A directory or symlink is born, opened, normalized
+where applicable, and fsynced inside that boundary before its atomic release to
+the captured workspace parent. A path, matching bytes or target text never
+substitutes for the original inode's birth identity. An arena is protected by
+the existing StateRoot threat boundary; `0700` is not claimed to isolate an
+arbitrary malicious process running as the same OS user.
 
-Cancellation, deadline, or another StopIntent forbids a new semantic forward operation, but it cannot strand a claimed publication envelope. The already-reserved envelope may perform only bounded no-new-semantic-effect recovery after stop: status/identity queries, CAS preservation, removal of its exact staging/quarantine sibling, fsync, and terminal evidence. It then switches the delivery frontier to `abort_cleanup`; undispatched semantic forward operations are skipped, and the deterministic deepest-first abort list handles only delivery-created directories. Abort cleanup and completion of an already-claimed envelope consume no additional `toolCalls` and are allowed after deadline because they reduce external ambiguity rather than create new desired state. Failure to prove exact identity/emptiness remains `waiting(reconciliation)`; it is never guessed away. Normal success never executes the abort list. Thus one linear reducer never mixes success and rollback branches, and terminalization requires the chosen branch complete with no transient sibling.
+Before the first workspace write, one complete read-only preflight checks all
+planned touched existing parents against the held root/topology and verifies
+that every arena-to-workspace move is on the same actual filesystem. It also
+rejects every touched multiply linked regular file before any workspace write;
+the actual operation rechecks this single-link requirement. Capture may read
+such a file but cannot authorize publication over it. Capability probing does
+not create a file or directory in the user workspace. Cross-filesystem
+publication is unsupported and explicitly unqualified: it fails before any
+workspace write, with no sibling fallback, copy/delete emulation or weaker
+primitive. Mount drift, `EXDEV` and a failed preflight do not grant a fallback.
+
+The separate immutable `abortOperations` list enumerates only planned
+delivery-created directories deepest first, including a directory created by a
+type conversion. If its forward creator never completed, a read-only reducer
+proves that no creator remains unresolved and that there is no completed
+creation receipt. It records actual absence or the completely unchanged
+captured `A` leaf described above, appends `not_created`, and advances without
+a maintenance claim. A present original file or symlink is never called an
+absent path and is left untouched. Changed bytes, raw file mode, symlink
+target, a present directory, or an unresolved create require reconciliation.
+Otherwise maintenance
+removes it only when its creation receipt belongs to this delivery and it is
+proven empty; it records `retained_planned_descendant` when the only contents are
+already-completed desired descendants, and waits on any unexpected content. It
+never removes a pre-existing directory. A claimed `abort_rmdir` is a distinct
+empty-directory maintenance operation, not a productive `delete` cast. It uses
+the same original physical arm/revoke fence: a revoked native object cannot be
+rearmed, while a separately authorized abort claim has its own original object.
+It no-replace moves the actual directory into that claim's fixed private
+`preimage` slot before rechecking the exact creator inode and emptiness. A
+foreign or newly nonempty displaced directory remains retained and unknown;
+it is never unlinked or treated as successful maintenance. The workspace-absent
+observation, exact empty-directory CAS preimage and still-present private slot
+enter the existing `desired_committed_cleanup_pending` PathProgress lifecycle;
+only the genuine durable progress barrier authorizes exact private rmdir,
+both-parent fsync, arena retirement and joined close. This consumes the same
+zero-budget maintenance claim, not another dispatch or permission. Recovery requires original durable
+claim/birth/progress evidence for the same exact inode; a derived arena name,
+directory scan, matching mode or hash cannot adopt a crash remnant. Missing or
+insufficient birth evidence remains reconciliation. Multi-path publication
+remains explicitly non-atomic.
+
+Every plan freezes exactly its branch-specific private staging/quarantine
+components, expected absence, desired digest/type/mode, captured destination
+preimage, parent identity/linkage, and operation id. Arena identity is derived
+only from that immutable operation and its original permanent claim, never the
+successor's owner epoch. Create and mkdir use no-replace release from the held
+arena to the held workspace parent. Replace follows one versioned state
+machine: `none -> desired_staged_and_fsynced -> exchanged (destination=desired,
+private staging=actual displaced) -> displaced_quarantined ->
+displaced_preserved_in_CAS -> leaf_completed`. Delete uses a no-replace move
+into the private quarantine and has no desired staging state. Both affected
+directories must be fsynced after an arena/workspace move. Observations use a
+closed workspace-or-publication-arena locator and retain the actual parent and
+entry descriptor identities; a StateRoot slot is never disguised as a path
+under the workspace identity. Forbidden branch fields are errors, not ignored.
+
+An uncooperative writer can change a destination after its last precheck.
+Exchange or quarantine must retain the **actual** displaced inode and bounded
+bytes/type in the private arena. A mismatch with the captured preimage enters
+typed reconciliation: it cannot produce a successful receipt, delete the
+unexpected preimage, or blindly exchange it back over a later edit. These
+primitives do not promise zero namespace effect in that concurrent cut.
+
+A path is one indivisible publication envelope and one `toolCalls`
+reservation: private staging, exchange or no-replace release, preservation of
+the actual displaced preimage in CAS, exact transient cleanup, and fsync of all
+affected parents. Before deleting a private staging/quarantine object, the
+Supervisor commits a `PublicationPathProgressItem` binding the destination
+evidence, actual preserved preimage CAS ref, and exact arena/slot/inode identity
+while the same Journal attempt remains open. Only the genuine producer-owned
+native operation can supply the progress object to that SQL barrier; a decoded
+artifact or caller-provided boolean does not authorize cleanup. A crash before
+the barrier leaves the object intact; a crash after it can prove the exact
+pending object or its exact absence without losing the preimage association.
+CAS or rolled-back SQL failure retains the original live owner and operation,
+not a new semantic dispatch. Journal `completed` plus
+`PublicationPathResultItem` is legal only after every transient for that path
+is absent and the affected directories are fsynced. Desired destination bytes
+alone never prove completion.
+
+Cancellation, deadline, or another StopIntent forbids a new semantic forward
+operation, but cannot strand a claimed publication envelope. Revoke semantic
+release before joining producers. The already-reserved envelope may perform
+only bounded no-new-semantic-effect recovery after stop: status/identity
+queries, CAS preservation, removal of its exact private staging/quarantine
+object, fsync, and terminal evidence. It then switches the delivery frontier to
+`abort_cleanup`; undispatched semantic forward operations are skipped, and the
+deterministic deepest-first abort list handles only delivery-created
+directories. Abort maintenance and completion of an already-claimed envelope
+consume no additional `toolCalls` and remain allowed after deadline because
+they reduce ambiguity rather than create new desired state. Their distinct
+maintenance authority must bind the original Plan/claim, actual creator
+receipt, correct abort prefix and stopping/retirement facts; it is not obtained
+by relaxing an ordinary productive grant's expiry or release gate. Failure to
+prove exact identity/emptiness remains `waiting(reconciliation)`. Normal
+success never executes abort, and terminalization requires the chosen branch
+complete with no private transient. None of these rules extends the existing
+stop, freshness or recovery time bounds.
+
+The productive child `PublicationPathGrantV1` has only
+`subject.sequence='forward'`, exactly one dispatched attempt, and the original
+plan grant's unchanged expiry. It cannot represent an abort. The separate
+closed `PublicationMaintenanceAuthorityV1` has format
+`cliq-publication-maintenance-authority-v1`, the original principal, Run,
+policy, frontier, operation request/target refs and digests, and this subject:
+
+```ts
+subject: {
+  kind: 'publication_abort_maintenance'
+  deliveryPlanRef: ArtifactRef
+  operationIndex: number
+  operationId: string
+  operationDigest: Digest
+  createdByOperationId: string
+  creatorReceiptRef: ArtifactRef
+  stopIntentRef: ArtifactRef
+}
+```
+
+Its provenance is exactly `delivery_plan_maintenance` with the original
+`planAuthorizationGrantRef` and `deliveryDecisionItemId`; it has
+`maxDispatchedAttempts=1`, `issuedAt`, and `authorityDigest`, but no productive
+expiry or execution capability. The authority id binds Run, exact abort op id,
+request digest, original parent grant ref and decision item id, winning Stop
+ref, actual completed creator receipt ref, and issue time under domain
+`cliq-publication-maintenance-authority-v1`. The authority digest hashes the
+whole canonical object with that member omitted. Unknown fields, an ordinary
+grant in an abort preparation, or a maintenance authority in a forward
+preparation are rejected. The existing preparation's grant ref retains this
+typed authority; no second ledger is introduced.
+
+Retained validation reconstructs the exact authority and revalidates the
+original completed creator, creation receipt, Stop and ordered abort prefix.
+The live owner independently checks the same facts, actual original directory
+identity and emptiness before arming the native operation. An expired parent
+may identify that original approved Plan for maintenance only; neither its age
+nor these canonical bytes grants productive release or makes a missing native
+proof true. Already-claimed forward cleanup retains its original claim rather
+than minting another maintenance dispatch.
+
+The original private M resource Checkpoint has the stable intended id
+`identityHash('cliq-delivery-publication-checkpoint-v1', runId, deliveryPlanRef)`.
+The original M worker's quiescence/snapshot owner can therefore bind that id
+before the later fresh real-workspace projection exists. A genuine known
+completion of the last forward operation first publishes the closed
+`received_handoff` item. Its distinct id is
+`identityHash('cliq-publication-received-handoff-item-v1', runId, opId, '0')`;
+it never replaces the earlier cleanup-pending item or grants cleanup. Only
+the actual original producer, after the exact receipt and complete private
+slot/arena retirement and joined descriptors, may commit it. The same
+StateOwner transaction registers the complete immutable graph, commits that
+original M seal once, appends this excluded-control continuation item and its
+resource auto-Checkpoint, clears the active worker pointer and queues the Run.
+The Run remains nonterminal and occupies capacity. Its publication frontier,
+Journal, PathResults, reserved/consumed budgets and reservation do not advance
+or settle. An unresolved UNKNOWN, uncertain join or unreturned birth cannot
+hand off. A genuinely resolved original UNKNOWN follows the explicit
+same-claim recovery branch below, not this ordinary new-settlement branch.
+
+The closed `generationResources` union distinguishes the actual resource
+history. `sealed` binds the original `workerLaunchId`, `generationRef` and
+`snapshotEvidenceRef`. `genuinely_retired_from_verified_checkpoint` instead
+binds the original launch/generation, `sourceCheckpointId`,
+`quarantineEvidenceRef` and `retirementEvidenceRef`; it requires complete
+reconciliation evidence and the actual retired SQL launch/generation graph,
+original whole-domain death/quarantine/retirement and unchanged verified W_M.
+It never manufactures a snapshot, changes retired to sealed, recreates M or
+waives physical retirement. Readers accept neither missing fields nor a
+legacy fallback that treats these histories as equivalent.
+
+For a publication UNKNOWN, worker retirement and publication inspection are
+separate, ordered parts of the same lifecycle. A forward claim requires the
+genuinely retired original M. An abort-maintenance claim may bind its same
+already sealed M and retired original launch, but only with the complete
+original seal graph, exact current Stop, creator and maintenance authority;
+it cannot fake a sealed-to-retired transition or adopt a newer worker. Retiring
+M revokes semantic release but retains continuously held original publication handles until their
+actual reconciliation/close. The first `PublicationInspectionTargetV1` freezes
+only the original complete prefix's prepared/claim/UNKNOWN Journal sequences,
+original ambiguity/settlement and optional durable progress/Checkpoint. A
+successor may reopen a cleanup-only original envelope only with the exact
+durable birth/progress and inode/resource graph; missing records, unreturned
+births or an unsupported missing slot remain waiting. A path, derived name,
+hash or CAS enumeration cannot adopt a resource. A read-only probe performs
+no rename, cleanup or semantic operation; any later exact private cleanup
+requires its separate original-claim gate and real joined producer.
+
+`PublicationRecoveryOriginV1` binds Run/Plan/op/attempt/dispatch/claim sequence,
+the original birth, current inspector and exact StateOwner death-acquisition
+evidence under the same StateRoot. Its current-inspector branch requires
+actual death of the original claiming process and strict takeover; a larger
+epoch alone is insufficient. Only claim-bound observations, ambiguity,
+receipt or arena retirement may name this origin, never a fresh whole-root
+projection. Same-owner observations retain their original exact owner checks.
+An original claimed attempt lacking UNKNOWN first needs that truthful
+claim-loss ambiguity and its sole full settlement before an inspection wait;
+it is not silently skipped. A real original worker-death inspection may write
+that ambiguity and full reservation charge before the same worker's quarantine,
+without changing its wait, anchor or fenced Journal cursor. A worker-free
+abort instead requires its genuine readonly maintenance task and already
+closed original resource graph, plus the actual original-claim owner death;
+it uses the same initial-ambiguity item/Checkpoint writer with zero reservation,
+release and consumption, never a fabricated worker-death wait. Both retain
+the original W_M and frontier and re-read the complete actual cut afterwards;
+neither opens an arena or proves a successful path operation. The acyclic retained graph is
+result/handoff → reconciliation wrapper → actual receipt/proof → recovery
+origin, while the frozen target refers only to older UNKNOWN/progress facts.
+
+Positive same-claim resolution preserves the immutable original UNKNOWN and
+its full BudgetSettlement. It appends the actual completed/failed Journal fact
+with zero additional budget and that exact settlement, never refunding,
+charging again or creating another claim/attempt. A last recovered outcome
+first persists the actual sealed-or-retired resource handoff, then freshly
+validates the complete workspace. The sole terminal transaction still commits
+the final Journal/result/Checkpoint/RunResult/Session graph. Stop chooses the
+original abort contract without erasing or repeating the real effect. Missing
+or ambiguous outcome/resources continue waiting.
+
+Only after this actual transaction succeeds may shutdown cancel and join the
+separate expensive read-only root projection. Storage failure keeps the same
+original owner and fixed item/graph; it cannot permit a second dispatch,
+another M retirement/seal owner, early settlement or a timeout-as-join.
+A successor fully validates the original claim, birth, receipt/semantic digest,
+slot/arena retirement, original sealed generation/WorkerLaunch and actual
+resource Checkpoint, plus predecessor retirement under the existing fence.
+It may mint only the fixed non-release read-only recovery task, never an old
+native owner, arm/retry capability or a freshly invented generation-free cut.
+It must recapture the actual original workspace through the same full
+projection and current inspector. Stop selects the original receipt's
+once-only settlement and abort branch without changing that received fact.
+Missing, partial, corrupt or unreadable handoffs require recovery. All existing
+two-second shutdown and five-second evidence limits remain unchanged.
+
+When and only when that complete handoff exists, the final publication
+Checkpoint has id
+`identityHash('cliq-delivery-publication-terminal-checkpoint-v1', runId, deliveryPlanRef)`.
+Without a handoff, the early-Stop and no-op branches keep the original resource
+Checkpoint id as their terminal publication Checkpoint. Readers determine this
+closed branch from the fully validated handoff, never by fallback or name
+existence. The terminal projection is bound by the exact
+last-result/Journal/frontier/Checkpoint transaction, not by its inclusion in
+an id. CAS or rolled-back SQL failure retains the same owner, snapshot and
+cumulative D1 budget; a changed fresh observation cannot mint a new seal owner.
+The successful delivery becomes terminal only when the last path's
+Journal/result/settlement, publication Checkpoint/finalize edge and the sole
+RunResult and Session outcome commit in **one** transaction. Its original M
+seal is either already rooted by that exact handoff, or commits in the same
+terminal transaction on the branch without a handoff; it never commits twice.
+No productive or externally visible forward-finalize-ready Run is committed
+between those steps. The
+transaction first installs the genuine publication Checkpoint based on revision
+`r` and its finalize row at `r+1`, then the existing unique result writer installs
+the result Checkpoint based on `r+1` and the terminal row at `r+2`. The no-op
+branch keeps its verification/publication Checkpoints based on the same original
+revision and uses the same terminal writer, without a publish claim or worker.
+
+Immutable result/Session bytes are prepared before that transaction. For atomic
+delivery only, result `createdAt` is the truthful preparation time: it must not
+precede the actual terminal projection observation or exceed the accepted
+commit time. Publication/result Checkpoint times are the actual accepted SQL
+commit time, not backdated to make the old two-transaction inequality pass.
+The genuine owner rechecks projection/death freshness and the exact original
+Run/Stop/Session cut at final commit. Ordinary agent-result timing is unchanged.
+The internal result writer accepts only the original genuine publication
+completion and synchronously rechecks its just-installed exact SQL graph; a
+structural future cut or caller callback is not proof. There is no asynchronous
+CAS/recovery read inside the SQL transaction, and a result or Session conflict
+rolls back the **whole** transaction rather than leaving a publication-only
+commit. Retrying immutable/Session preparation retains the original physical
+completion and cumulative D1 budget, never another path effect or claim.
+
+A Stop or expiry that wins before the transaction follows the complete abort
+branch and fresh abort projection required above, not the old forward
+projection. After the transaction, cancellation receives the existing terminal
+Run refusal. No Stop-adoption ledger, early terminal Stop Checkpoint, or
+post-success re-insertion of the publication Checkpoint is introduced.
 
 Verification receipts always retain the `runId` that actually executed the verifier. A delivery Run may reuse source-Run receipts only when its normalized private merge view resolves to the exact same content-addressed `resultSourceRef`, the source Run is still `succeeded(verified)`, every receipt/artifact digest and the frozen `VerifierSpec` validate, and an immutable provenance artifact binds the delivery Run, source RunResult, identical result reference, verifier spec, and receipt set. If any condition differs, the delivery Run executes the required verifiers and produces receipts bound to its own `runId`. Arbitrary historical receipts or digest-only similarity are never proof.
 
-If delivery fails, the original agent Run remains succeeded for its original immutable result. A partial or ambiguous materialization never rewrites that truth; the delivery Run waits for reconciliation or fails independently. Multi-path application is not claimed to be atomic, and the explicit apply UI requires a quiescent human workspace; same-user concurrent writers are outside global fencing, but any displaced bytes observed at an atomic swap must be preserved rather than silently lost.
+If delivery fails, the original agent Run remains succeeded for its original immutable result. A partial or ambiguous materialization never rewrites that truth; the delivery Run waits for reconciliation or fails independently. Multi-path application is not claimed to be atomic, and the explicit apply UI requires a quiescent human workspace. Same-user concurrent writers are outside global fencing: the captured-object contract above does not promise that a final-gap ancestor move has no effect outside the current workspace path. Every detected drift still blocks successful completion, and any actual displaced bytes must be retained rather than silently lost.
 
 Delivery adds no new terminal-reason enum. A deterministic `cliq-diff3-v1` conflict proposes `runtime_failed` with typed detail subtype `delivery_merge_conflict`; a positively failed forward/cleanup/abort operation proposes `runtime_failed` with subtype `delivery_publication_failed` and exact plan/operation/evidence refs. An ambiguous publication remains waiting and cannot be mislabeled failed. Cancellation/deadline/integrity StopIntent precedence still wins according to section 6.
+
+A complete deterministic Delivery merge that exceeds a frozen output limit instead proposes the separate `runtime_failed(delivery_merge_limit_exceeded)` cause. It is not the Agent final-model `result_source_limit_exceeded` branch. Independently reproduce B/S/A from the original verified source RunResult, original retired capture, initial Checkpoint and W_A, immutable SourceProjection and strict SandboxProfile. Exhaust and hash every original file object before accepting any measurement, then run the fixed merge and validate the complete combined graph. No planned/unpublished M artifact, caller count, caught error, output truncation or physical allocation failure is evidence. A conflict is still a conflict; invalid/missing/corrupt data, I/O, cancellation, arbitrary computation failure or memory exhaustion cannot become a resource Stop.
+
+For a complete conflict-free M, compare in this fixed priority: `changed_paths`, `changed_bytes` (the exact A→M diff counts defined in section 10.5), `generation_bytes` (sum of the full sizes of all regular-file entries in M, counting each path even when CAS bytes are shared), `single_file_bytes` (maximum regular-file size in M, or zero when none), then `merged_entries` (the complete M.entries length versus the existing `MAX_SOURCE_PROJECTION_ENTRIES = 100000` fixed walker guard). The two byte ceilings are exactly the original SandboxProfile `maxGenerationBytes` / `maxSingleFileBytes`; symlink target bytes, directories, native filesystem allocation/quota and metadata inventory are not regular-file bytes. The `merged_entries` measurement is only a necessary lower bound: more than 100000 projected entries proves a complete walker must refuse, while at most 100000 does not prove that hidden/excluded inventory, allocation or any other physical check will fit. It is not a fabricated live inventory and does not replace any walker guard. Equality passes; `observed` and `limit` are nonnegative safe integers with `observed > limit`. The complete deterministic merged graph may itself exceed an output ceiling even when each input fits. No arbitrary semantic length limit or timeout is added.
+
+The source resource branch owns only the original worker-free merge cut: no Run item, Journal invocation, worker launch, workspace generation, child, reservation or consumption, with lease epoch zero. Before terminalization its frontier remains the exact original `delivery:merge` and its latest Checkpoint remains initial; terminal/reopen validation requires the same initial context, W_A and zero cursors. The owning merge composes the existing resource-Stop reducer, which independently re-reads this full admission/source graph and derives the closed cause before the existing Stop transaction. It publishes no M/candidate/merge item/Plan and grants no execution authority. The unchanged sole Stop/Session transaction produces one failed outcome and releases capacity only when genuinely terminal. Winning cancellation/deadline/integrity, CAS/SQL failure, recovery and replay preserve their existing rules; unsupported or incomplete evidence remains recovery-required.
 
 ## 15. Surfaces And Ecosystem Thin Waist
 

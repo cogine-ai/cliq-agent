@@ -31,7 +31,7 @@ export function planContinuationCommit(artifacts: ArtifactCatalog, input: {
   const plans = [...itemPlans, contextPlan, frontierPlan, ...(input.artifacts ?? [])];
   const published: Array<PublishedArtifact | undefined> = plans.map(() => undefined);
   let publishing: Promise<PublishedArtifact[]> | undefined;
-  const plan = { throughItemSeq: context.throughItemSeq,
+  const plan = { throughItemSeq: context.throughItemSeq, contextManifestRef: contextPlan.ref,
     runUpdate: { latestCheckpointId: checkpointId, frontierRef: frontierPlan.ref, nextStep: frontierKind },
     commit(connection: SqliteConnection, run: Run, journalSeq: number, createdAt: string) {
     for (const entry of added) connection.prepare(

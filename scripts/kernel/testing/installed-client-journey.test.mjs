@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 const journey = readFileSync(new URL('../qualify-installed-run-journey.ts', import.meta.url), 'utf8');
-const verifier = readFileSync(new URL('../qualify-installed-verifier-journey.ts', import.meta.url), 'utf8');
+const verifier = readFileSync(new URL('./installed-node-journey.ts', import.meta.url), 'utf8');
 const matches = (text, pattern) => assert(pattern.test(text), 'fixed genuine installed consumer wiring missing: ' + pattern.source);
 
 test('the complete ordinary installed journey sends initial admission and terminal delivery through the genuine client', () => {
@@ -25,7 +25,7 @@ test('the complete ordinary installed journey sends initial admission and termin
 
 test('both real installed workloads bundle the production driver and join its scanned child before corpus qualification', () => {
   for (const text of [journey, verifier]) {
-    matches(text, /new URL\('\.\/testing\/installed-control-client-driver\.ts', import\.meta\.url\)/u);
+    matches(text, /new URL\('\.\/(?:testing\/)?installed-control-client-driver\.ts', import\.meta\.url\)/u);
     matches(text, /args: \[\.\.\.prefix, process\.execPath, '--disable-warning=ExperimentalWarning', installedClientDriver, filename\]/u);
     assert(!/--no-warnings|NODE_NO_WARNINGS/u.test(text), 'never silence arbitrary warnings or stderr');
     matches(text, /openScan: \(\) => scanner\.openStream\(\)/u);

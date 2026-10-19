@@ -58,7 +58,9 @@ export function validateContextItems(context: ContextManifest, items: readonly C
         }
       } else if (segment.kind !== 'excluded_control' || source.some(({ item }) =>
         item.kind !== 'assistant_tool_batch' && item.kind !== 'context_compaction' && item.kind !== 'policy_decision' && item.kind !== 'input_request' &&
-        item.kind !== 'final_candidate' && item.kind !== 'verifier_result' && item.kind !== 'verifier_stop')) {
+        item.kind !== 'final_candidate' && item.kind !== 'verifier_result' && item.kind !== 'verifier_stop' &&
+        item.kind !== 'delivery_merge' && item.kind !== 'delivery_merge_conflict' && item.kind !== 'delivery_decision' &&
+        item.kind !== 'publication_path_progress' && item.kind !== 'publication_path_result' && item.kind !== 'publication_late_observation')) {
         throw new TypeError('model-visible items cannot be hidden as excluded control');
       }
     }

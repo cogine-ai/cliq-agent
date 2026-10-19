@@ -201,7 +201,7 @@ test('excluded-only metadata inventory yields before completion and observes can
 test('caller-shaped source roots cannot mint captured filesystem bytes', async t => {
   const { artifacts } = await captureFixture(t);
   const fake: HeldWorkspaceRoot = {
-    identity: { deviceId: '1', fileId: '2', ownerUid: process.getuid!() },
+    identity: { deviceId: '1', fileId: '2', ownerUid: process.getuid!() }, mode: 0o700, linkCount: 2,
     assertHeld() {}, readGitConfigChunk() { return null; }, close() {},
     openInstructionSnapshot() { throw new Error('untrusted instruction cursor must not be used'); },
     openSnapshot() { return { next() { return null; }, assertComplete() {}, close() {} }; }

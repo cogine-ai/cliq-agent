@@ -483,17 +483,21 @@ async function assertFile(file: InstalledFile): Promise<void> {
   const named = await lstat(childPath(file.parent, file.name), { bigint: true });
   if (!sameFile(file.info, held) || !sameFile(held, named)) mismatch('installed runtime held file or its independent path changed');
 }
-async function* chunks(file: InstalledFile, signal?: AbortSignal): AsyncGenerator<Buffer> {
+async function* chunks(file: InstalledFile, signal?: AbortSignal, discardAfterHash = false): AsyncGenerator<Buffer> {
   signal?.throwIfAborted();
   await assertFile(file);
   signal?.throwIfAborted();
   const hash = createHash('sha256');
   const count = Number(file.info.size);
   let position = 0;
+  // Only verifyBytes opts in: it discards each synchronously hashed chunk.
+  // Consumers retaining yielded bytes must keep their independent buffers.
+  let scratch: Buffer | undefined;
   while (position < count) {
     signal?.throwIfAborted();
-    const buffer = Buffer.allocUnsafe(Math.min(CHUNK_BYTES, count - position));
-    const { bytesRead } = await file.handle.read(buffer, 0, buffer.length, position);
+    const buffer = discardAfterHash ? (scratch ??= Buffer.allocUnsafe(Math.min(CHUNK_BYTES, count - position)))
+      : Buffer.allocUnsafe(Math.min(CHUNK_BYTES, count - position));
+    const { bytesRead } = await file.handle.read(buffer, 0, Math.min(buffer.length, count - position), position);
     noteInstalledWorkRead(bytesRead);
     signal?.throwIfAborted();
     if (!bytesRead) mismatch('installed runtime file ended before its signed byte count');
@@ -515,7 +519,7 @@ async function readSmall(file: InstalledFile, limit = SMALL_BYTES): Promise<Buff
   return Buffer.concat(bytes);
 }
 async function verifyBytes(file: InstalledFile, signal?: AbortSignal): Promise<void> {
-  for await (const _chunk of chunks(file, signal)) { /* streamed integrity check */ }
+  for await (const _chunk of chunks(file, signal, true)) { /* streamed integrity check */ }
 }
 async function* artifactChunks(file: InstalledFile): AsyncGenerator<Buffer> {
   for await (const bytes of chunks(file))

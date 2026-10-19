@@ -47,6 +47,7 @@ import { validateInstalledBrokerAmbiguityHistory } from './broker-ambiguity.js';
 import { validateInstalledModelNoReleaseHistory } from './broker-no-release.js';
 import { validateWorkerPreparationHistory } from './worker-preparation.js';
 import { validateRunResultRecovery } from './run-result-recovery.js';
+import { assertDeliveryModelFreeCut } from './run-model-free.js';
 
 const ZERO_BUDGET: BudgetUsage = {
   modelTokens: 0,
@@ -675,6 +676,7 @@ export async function readRecoveryClosure(
   }
 
   const runSpec = decodeRunSpec(await artifacts.readCanonical(run.specRef));
+  if (runSpec.operation === 'delivery') assertDeliveryModelFreeCut({ run, runSpec, journal, childAllocations });
   await validateRunSpecArtifacts(artifacts, runSpec);
   phase('context');
   const context = decodeContextManifest(await artifacts.readCanonical(latestCheckpoint.contextManifestRef));
@@ -714,7 +716,7 @@ export async function readRecoveryClosure(
   await validateGenerationArtifacts(artifacts, generationProofs);
   phase('history');
   if (journal.some((entry) => entry.opKind === 'model' || entry.opKind === 'verifier') || run.repairCount !== 0 ||
-      runSpec.operation === 'agent' && items.length > 0) {
+      runSpec.operation === 'agent' && items.length > 0 || runSpec.operation === 'delivery') {
     try {
       const history = await validateAgentRecovery({ driver, artifacts, run, spec: runSpec, items, journal,
         principalId: databaseCut.principalId, workspaceIdentityRef: databaseCut.workspaceIdentityRef,
@@ -783,6 +785,14 @@ export async function readRecoveryClosure(
     childAllocations
   };
   try {
+    if (runSpec.operation === 'delivery') {
+      // Use the complete actual cut, not a filled-in verifier/agent subset.
+      // Reverse coverage requires the unique policy + delivery decision and
+      // their original wait/control/Checkpoint graph even if a later stop
+      // outranks the decision. No pure decoder result grants publication.
+      const { readPublicationPrefix } = await import('./delivery-publication-progress.js');
+      await readPublicationPrefix(driver, artifacts, closure);
+    }
     await validateInstalledModelNoReleaseHistory(driver, artifacts, closure);
     await validateStopRecovery(driver, artifacts, closure);
     await validateRunResultRecovery(driver, artifacts, closure);

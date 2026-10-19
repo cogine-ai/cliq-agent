@@ -19,7 +19,7 @@ import { decodeBudgetSettlement, decodeRunSpec } from './decoders.js';
 import { KernelStorageError } from './errors.js';
 import { readModelGrantData } from './model-grant.js';
 import { MODEL_BROKER_ENTRY_ID, MODEL_BROKER_RELATIVE_PATH } from './model-broker-native.js';
-import { readHighestPreparedAttempt, readInvocationAttempt } from './repositories/journal.js';
+import { readHighestPreparedAttempt, readInvocationAttempt, readInvocationJournal } from './repositories/journal.js';
 import { readRun, readSessionPrincipalId } from './rows.js';
 import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
 import { assertActiveStateOwner, readStateOwner, type StateOwnerContext } from './state-owner.js';
@@ -28,6 +28,7 @@ import { assertInstalledModelBrokerProcess, withHeldInstalledRuntime, type HeldI
 import { stateRootIdentityForLock } from './native-owner.js';
 import { readRetainedStateOwnerHistory, type RetainedStateOwnerHistory } from './state-owner-history.js';
 import { stopInvocationHistory } from '../runtime/stop.js';
+import { assertDeliveryModelFreeCut } from './run-model-free.js';
 
 const same = (left: unknown, right: unknown) => canonicalSha256(left) === canonicalSha256(right);
 function invalid(): never { throw new KernelStorageError('RECOVERY_REQUIRED', 'installed broker ambiguity does not close its original permanent claim'); }
@@ -191,6 +192,7 @@ function unusedUnknowns(journal: readonly InvocationJournalEntry[]): InvocationJ
 }
 
 async function terminalFrames(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1): Promise<TerminalFrame[]> {
+  if (cut.runSpec.operation === 'delivery') assertDeliveryModelFreeCut(cut);
   const unknowns = unusedUnknowns(cut.journal);
   if (!unknowns.length) return [];
   const { run, runSpec: spec } = cut;
@@ -263,6 +265,24 @@ export type InstalledBrokerTerminalClosurePlan = Readonly<{
 export async function withInstalledBrokerTerminalClosure<T>(driver: SqliteDriver, artifacts: ArtifactCatalog,
   owner: StateOwnerContext, selected: HeldInstalledRuntime | undefined, cut: RecoveryClosureV1,
   operation: (plan: InstalledBrokerTerminalClosurePlan) => Promise<T>): Promise<T> {
+  if (cut.runSpec.operation === 'delivery') {
+    assertDeliveryModelFreeCut(cut);
+    assertActiveStateOwner(driver, owner);
+    const unchanged = (connection: SqliteConnection, current = readRun(connection, cut.run.id)) => {
+      assertActiveStateOwner(connection, owner);
+      if (!same(current, cut.run) || !same(readRun(connection, cut.run.id), cut.run) ||
+          !same(readInvocationJournal(connection, cut.run.id), cut.journal))
+        terminalFailure();
+    };
+    // This is absence of any model invocation in an independently verified
+    // model-free Run, not a claim that a token/process was killed or revoked.
+    // Publisher/verifier retirement remains a separate required closure.
+    unchanged(driver);
+    return operation(Object.freeze({ metadata: [], abandonedRetryInvocations: [],
+      reobserve(connection) { unchanged(connection); },
+      validate(connection, currentRun) { unchanged(connection, currentRun); }
+    }));
+  }
   if (!unusedUnknowns(cut.journal).length) return operation(Object.freeze({
     metadata: [], abandonedRetryInvocations: [], reobserve() {}, validate() {}
   }));

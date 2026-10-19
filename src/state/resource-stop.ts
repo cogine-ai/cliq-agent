@@ -20,13 +20,18 @@ import { readToolApproval } from './tool-approval-recovery.js';
 import { joinResourceOperations, stateOperation } from './errors.js';
 import { readHighestPreparedAttempt } from './repositories/journal.js';
 import { readCandidateSourceLimit } from './result-source.js';
+import { assertDeliveryModelFreeCut } from './run-model-free.js';
+import { readDeliveryVerificationMode } from './run-result-recovery.js';
+import { readVerifierPendingPolicy } from './verifier-stop-history.js';
+import { readDeliveryAuthorization } from './delivery-approval.js';
+import { readDeliveryMergeLimitCause } from './delivery-recovery.js';
 
 type WithoutIdentity<T> = T extends ResourceStopIntent ? Omit<T, 'schemaVersion' | 'runId' | 'createdAt'> : never;
 type ResourceCause = WithoutIdentity<ResourceStopIntent>;
 
 /** Reproduce deterministic resource failure from retained facts, not a caught error or caller reason. */
 export const readResourceStopCause = stateOperation('RECOVERY_REQUIRED', async function readResourceStopCause(driver: SqliteDriver, artifacts: ArtifactCatalog,
-  cut: Pick<RecoveryClosureV1, 'run' | 'runSpec' | 'latestCheckpoint' | 'items' | 'journal'>, observedAt: string
+  cut: RecoveryClosureV1, observedAt: string
 ): Promise<ResourceCause | undefined> {
   const { run, runSpec: spec, latestCheckpoint: checkpoint, journal } = cut;
   if (run.waitingReason || !isZeroBudget(run.budgetReserved)) return undefined;
@@ -34,6 +39,25 @@ export const readResourceStopCause = stateOperation('RECOVERY_REQUIRED', async f
   // A resource proof must remain true during drain. Unresolved external results can still change the
   // continuation/consumption; their owning reconciliation reducer must settle them first.
   if (history.some(({ entry, hasClaim }) => entry.phase !== 'completed' && (entry.phase !== 'failed' || hasClaim))) return undefined;
+  const budgetCause = (required: BudgetUsage): ResourceCause | undefined => {
+    for (const counter of ['modelTokens', 'costMicros', 'toolCalls'] as const) {
+      const ceiling = spec.budgets[counter], consumed = run.budgetConsumed[counter], reserved = run.budgetReserved[counter];
+      if (BigInt(consumed) + BigInt(reserved) + BigInt(required[counter]) > BigInt(ceiling)) {
+        return { origin: 'budget', targetStatus: 'failed', reason: 'budget_exhausted', counter, ceiling, consumed, reserved, required: required[counter] };
+      }
+    }
+    return undefined;
+  };
+  // Delivery has no model request, pricing, tool schema or context-compaction
+  // admission. Select its actual frozen productive invocation before testing
+  // the same complete budget counters as Agent Runs.
+  if (spec.operation === 'delivery') {
+    const limit = await readDeliveryMergeLimitCause(driver, artifacts, cut);
+    if (limit) return { origin: 'runtime', targetStatus: 'failed', reason: 'runtime_failed',
+      runtimeSubtype: 'delivery_merge_limit_exceeded', ...limit };
+    const required = await readDeliveryPendingReservation(driver, artifacts, cut, observedAt);
+    return required && budgetCause(required);
+  }
   const assembly = await readCanonicalArtifact<RunAssemblyV1>(artifacts, spec.assemblyRef);
   if (assembly.mcpServers.length) return undefined;
   const manifest = await readCanonicalArtifact<ToolContractManifestV1>(artifacts, assembly.tools.manifestRef);
@@ -54,15 +78,6 @@ export const readResourceStopCause = stateOperation('RECOVERY_REQUIRED', async f
     // compaction. Its result limits are a separate immutable resource fact.
     return readFinalSourceLimit(driver, artifacts, cut, assembly, items, observedAt);
   }
-  const budgetCause = (required: BudgetUsage): ResourceCause | undefined => {
-    for (const counter of ['modelTokens', 'costMicros', 'toolCalls'] as const) {
-      const ceiling = spec.budgets[counter], consumed = run.budgetConsumed[counter], reserved = run.budgetReserved[counter];
-      if (BigInt(consumed) + BigInt(reserved) + BigInt(required[counter]) > BigInt(ceiling)) {
-        return { origin: 'budget', targetStatus: 'failed', reason: 'budget_exhausted', counter, ceiling, consumed, reserved, required: required[counter] };
-      }
-    }
-    return undefined;
-  };
   if (pending) {
     const callIdentity = pending.batch.calls[pending.next]!;
     const opId = toolOperationId(run.id, pending.batch.itemId, callIdentity.callId);
@@ -167,6 +182,29 @@ export const readResourceStopCause = stateOperation('RECOVERY_REQUIRED', async f
   }
   return budgetCause({ modelTokens: reservation.modelTokens, costMicros: reservation.costMicros, toolCalls: 0, repairAttempts: 0 });
 });
+
+async function readDeliveryPendingReservation(driver: SqliteDriver, artifacts: ArtifactCatalog,
+  cut: RecoveryClosureV1, observedAt: string): Promise<BudgetUsage | undefined> {
+  assertDeliveryModelFreeCut(cut);
+  const candidates = await joinResourceOperations(cut.items.map(async row => ({ row,
+    item: await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef) })));
+  if (candidates.filter(({ item }) => item.kind === 'final_candidate').length !== 1) return undefined;
+  // Publication requires its full ordered progress/physical closure. Until
+  // that reader owns the cut, an approval or raw path result is deliberately
+  // not promoted to a reproducible next-path capacity fact.
+  if (await readDeliveryAuthorization(driver, artifacts, cut)) return undefined;
+  const mode = await readDeliveryVerificationMode(driver, artifacts, cut);
+  if (mode.kind === 'inherited') return undefined;
+  const pending = await readVerifierPendingPolicy(driver, artifacts, cut, observedAt);
+  if (!pending || pending.evidence.effectiveDisposition !== 'allow' ||
+      pending.progress.entries.slice(0, pending.frontier.nextVerifierIndex).some(entry => !entry.disposition)) return undefined;
+  const attempts = cut.journal.filter(entry => entry.opId === pending.planned.request.opId), last = attempts.at(-1);
+  if (last && !(last.phase === 'completed' && pending.current.receipt?.outcome === 'infra_failed' &&
+      pending.current.terminalJournal?.seq === last.seq && attempts.filter(entry => entry.phase === 'dispatch_claimed').length < pending.current.planEntry.maxAttempts))
+    return undefined;
+  if (pending.current.resultItem && pending.current.receipt?.outcome !== 'infra_failed') return undefined;
+  return { modelTokens: 0, costMicros: 0, toolCalls: 1, repairAttempts: 0 };
+}
 
 /** Reproduce the original model continuation, not a later seal/terminal's
  * mutable latest pointer. No caught exception or caller count is evidence. */

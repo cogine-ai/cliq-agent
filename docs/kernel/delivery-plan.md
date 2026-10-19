@@ -108,7 +108,7 @@ installed validation and release qualification distinct. No automatic apply,
 paid model experiment, public release, final default switch or PR merge is
 authorized by an implementation status label.
 
-## Current implementation boundary (2026-10-18)
+## Current implementation boundary (2026-10-19)
 
 The StateStore path derives the exact non-Git candidate from its original
 sealed worker and supports an explicitly consented, empty-verifier
@@ -118,8 +118,17 @@ verification/finalization. This consumer integration is implemented, not yet
 qualified on Linux. The development branch now connects the exact fixed Node
 verifier subset to the same lifecycle and result transactions; dependencies,
 Git projection and other verifier recipes remain explicitly rejected. Verified
-success still lacks actual Linux qualification, and explicit delivery is not
-implemented.
+success still lacks complete Linux qualification. Explicit delivery now has
+consumer-connected development code, but its full installed campaign and
+bounded publication shutdown/recovery remain incomplete as recorded below.
+The development production composition now connects the fixed supported Linux
+Delivery subset, including no-op projection and claimed Stop drain; the real
+campaign has no feature override. Its separate standard free Linux job retains
+the original twenty-minute budget and all prior jobs. This enables genuine
+installation testing, not an installed/release qualification claim. Git,
+nonempty frozen ignore rules, includes and dependency contracts remain refused
+where their complete implementation is absent. The newly approved late-return
+and registered-namespace branches still require their actual installed cuts.
 
 The original final-turn owner is established before physical quiescence and
 retains its one checkpoint/source/candidate publication plan through positively
@@ -430,11 +439,13 @@ not delivery authority. They preserve exact bytes, complete manifest identity,
 structured conflicts, the A-to-M diff, strict M===S reuse and the distinct
 normalized-A no-op test. Source validation is shared with the existing agent
 candidate path. Full delivery admission, resource ownership, materialization,
-permission, publication and recovery are still required. Directory/type
-publication and pre-admission physical-generation wording have real normative
-gaps awaiting the owner's integrated design decision; no second lifecycle,
-unsupported conversion disguised as a merge conflict, or early workspace-write
-probe is authorized by these component results.
+permission, publication and recovery are still required. The owner approved
+directory/type conversion and the admission timing revision: fully validate
+and persist recoverable A/W_A before the atomic Run/initial-Checkpoint commit;
+only the existing post-admission preparing lifecycle creates physical resources.
+Touched multi-hardlink files must be refused before any publication write.
+Those decisions authorize neither an early workspace-write probe nor a second
+lifecycle, and do not establish physical publication qualification.
 
 The first nonempty verifier path selects only the signed guest Node identity;
 it does not borrow host Node, PATH, modules or the ordinary edit adapter. The
@@ -491,3 +502,653 @@ clamped or enlarged. Defaults remain 256 processes and 256 MiB per file. Exact
 boundaries and refusal/unused-grant behavior have StateStore regressions;
 physical execution at the declared boundary still requires the real Linux
 campaign and is not inferred from these inert signed-data fixtures.
+
+## Exact-source validation and current publication blocker
+
+The complete A archive at tree
+`0e941df3c6bc8deed8d853af0a564b6039daf5dc`, based on `3ec01eb`, now passes
+its own `npm ci`, build, portable native contracts, shell syntax, strict
+typechecking with actual dependency types, and unchanged full `npm test`:
+2,543 tests, 2,542 passes, no failures/cancellations/todos and one original
+conditional cross-device skip (888,884.786125 ms). Its relevant script union
+passes 189 tests with four original Linux-only skips; all 26 tests in the
+previously failing neighboring files pass. All 929 source blobs/modes in the
+archive and main checkout match before/after validation, and every process
+and pipe joined. The main helper remains unchanged. Final local record
+SHA-256: `409d0ac519d16e495f25fff499a024823a6e88d471b61f75952e0f23b90b048f`.
+This qualifies neither the skipped filesystem condition nor installed A.
+
+Latest pushed source `3ec01eb759504398e93693ba2f53b46128b8ea8b`, tree
+`6e12d3ebd717bbc7e354d4f3fdcb6bc3a69635cc`, completed
+[run 39210509388](https://github.com/cogine-ai/cliq-agent/actions/runs/39210509388).
+It contains only the seventeen-file diagnostic/fixture correction, not A.
+Its own independent exact-source build, portable and strict checks and original
+full test run passed 2,276/2,276 with no failures, skips, cancellations or todos
+(780,264.649667 ms); the committed tree equals that tested tree. Final local
+record SHA-256:
+`f160f7a5d6d865035dc140f195cf17c9e02d56054a13d29bf96e33e94cb6ec77`.
+
+That Linux/macOS workflow has fifteen successes and three failures. All four
+TypeScript matrix jobs pass, including the original unchanged-deadline
+portable scheduling regression. The ordinary installed Run/reconnect/restart
+campaign and original finalizer, storage-refusal, admission, preparation and
+request-resource campaigns also pass. The remaining failures are not waived:
+
+- Installed verifier enrollment times out at 60,016 ms. The actual native
+  `create_compare` settled in 183 ms; the last fixed credential phase is
+  `finalize`, not a still-unentered platform call. Auth measured 43 installed
+  revalidations started, 42 settled, 33,456,176,754 actual bytes read and
+  27,631 ms inclusive span time. These counters are not CPU time and do not
+  account for the whole deadline; process samples also show startup waiting.
+- The native guest's last pre-READY stage is `node_check`, followed by the
+  unchanged absolute five-second `ready_wait` expiry. It is not qualified;
+  the missing guest success report is preserved as missing, not reconstructed.
+- Received-tool SIGTERM exits successfully under the original stop contract,
+  but its successor is still queued at `verify` after 30,019 ms. All nine
+  original Journal rows are complete. The final progress label is
+  `result_basis`, which can also cover the subsequent verification publication;
+  it is not proof that this function consumed the entire wait. The 224 public
+  queries are not 224 reads of the 64 MiB candidate.
+
+Final append-only `capture-004.json` retains eighteen closed categories,
+zero pending/rejected categories and one metadata-only artifact; the native
+guest category explicitly lacks its success report. SHA-256:
+`1ef9085ca7c62c87b480e99029e7af1a94f3bde8d422530afeed13c1b8538e5d`.
+No raw logs, ZIPs, StateRoot, WAL or credentials are retained.
+
+The next complete candidate includes two measured throughput changes, without
+reducing any check or revalidation count: only the discard-only image verifier
+reuses its private one-MiB scratch buffer; the portable SHA-256 updater feeds
+complete blocks directly, retaining the identical transform/finalization and
+partial-tail semantics. Retaining consumers still receive independent bytes.
+The original and optimized updater pass 266 fixed-vector/chunk combinations
+and 1,300 independent Node-crypto differential cases; the candidate also passes
+sanitizer checks. Local
+M4/Node-24.21.0 measurements show about 1.58x memory-hash and 1.61x real-file
+throughput; they are not Linux five-second/sixty-second qualification. New
+multi-MiB bundle/CAS tail-corruption regressions and a new full-tree validation
+must run with this candidate; the earlier A result is not borrowed for it.
+Late audit, registered-namespace recovery and all retained physical fault cuts
+remain unqualified. No PR is opened.
+
+### Earlier immutable attempts
+
+The complete-development archive at tree
+`29e44364973c08249c084f1a10f2e9c2ed22c026` did not pass its full local test
+run: 2,533 tests, 2,527 passes, five failures and one explicit cross-device
+skip. Four assertions failed; the fifth failure records the controlled
+termination of an owned test whose obsolete `readFile` barrier never observed
+the real chunked `read`. All processes and pipes subsequently joined. This
+failed attempt is retained, not reused as a validation precondition. The
+replacement race now pauses the actual read and passes its three focused
+tests; the workflow contract now follows the exact verifier consumer into
+its shared implementation and passes all five tests without removing any
+original limit assertion. The remaining failures require independent current
+source verification before a new complete-tree run. Neither those local
+repairs nor the late-audit/namespace components qualify real Linux recovery.
+
+Earlier pushed source `9fbd0949c8d463acb38a2ab0b0161cf67739ab87`, tree
+`55c462828bca64d49993c87ac375617cda055e4a`, completed
+[run 39199348670](https://github.com/cogine-ai/cliq-agent/actions/runs/39199348670).
+It contains only thirteen fixed pre-READY diagnostic/GCC fixture files, not
+the development delivery implementation. It retains the same single absolute
+five-second READY deadline across bounded fixed progress packets and EINTR;
+stage/poll/elapsed data never authorize READY, release, identity or retirement.
+The private packet revision changes together within the signed candidate; the
+public v1 UDS contract does not change. Failure JSON adds only six fixed
+enum/integer fields, not logs, filenames or process output.
+
+Its independent short-path archive passed its own real `npm ci`,
+`npm run build`, portable native contracts, the original five strict script
+roots with actual dependency types and `skipLibCheck=false`, fifteen diagnostic
+regressions and unchanged full `npm test`: 2,274/2,274, zero failures, skips,
+cancellations or todos (791,374.958916 ms). All 840 tracked blobs/modes and
+thirteen main selected blobs match the tested tree, independently rechecked by
+the root before staging. The actual committed tree equals that exact tested
+tree. Every process/pipe joined and the main native helper remained unchanged.
+Final local record SHA-256:
+`c5fe5a79caa645128bd2f51598bb68d4c3f99046328c76428b5b5fde18592c8f`.
+The new separate bounded evidence collector passed 185 contract checks, two
+original-JSON-byte retention cases and nineteen malicious ZIP/JSON classes;
+historical collector/captures are unchanged. This is not Linux GCC, real READY,
+installation, publication or complete A qualification. No PR is opened.
+
+The final workflow result is fourteen successes and four failures. Both
+Ubuntu TypeScript jobs now pass, so the original GCC empty-digest fixture
+failure is resolved on those actual runners. macOS/Node 22.13 instead exposes
+an unrelated new portable-test scheduling assumption: the forked test child
+did not deliver both delayed bytes within the parent's 150 ms window
+(`verifier-setup.test.c:92`). A local correction synchronously queues those
+bytes and additionally proves an expired original deadline neither polls nor
+consumes queued data. The original 150 ms/2 s test assertions, EINTR, fixed
+5 s cancellation and production deadline remain unchanged. That correction
+was pending at that capture; its completed exact-source validation and push
+are recorded under `3ec01eb` above.
+
+The real native guest has progressed past READY and execution/output/source
+checks to `guest-verifier-native.ts:173`. That fixture incorrectly equates
+the original D0 death ref in the receipt with the later actual D1 ref rooted
+in WorkerLaunch SQL. The RFC and production retained reader require the full
+D0 → snapshot → D1 → commit graph, not equality of distinct observations.
+The fixture correction validates the actual complete CAS graph,
+original worker/containment/inspector identity, causal order and unchanged
+5 s freshness; it does not remove production refresh or declare the whole
+guest campaign qualified from the earlier passed assertions.
+
+The ordinary signed installed Run journey passes this run, including its
+existing reconnect/restart checks; its previous failure remains historical
+evidence, not erased. Received-tool SIGTERM successor validation instead
+fails its original bounded wait at queued `verify`, with all nine original
+Journal entries complete and no result; it is not qualified. Installed
+required/advisory verification still stops during enrollment at 60,013 ms,
+last fixed phase `platform_store` at 58,156 ms. That marker precedes another
+five complete installed revalidations and does not prove D-Bus create_compare
+has begun. Repeated full validation is a measured byte-volume hypothesis,
+not yet a per-function causal measurement or permission to cache authority.
+The latest auth sample is 27,640,001,753 logical bytes and zero `readBytes`.
+
+Final append-only `capture-003.json` retains eighteen closed categories,
+zero pending/rejected categories and one metadata-only artifact; SHA-256
+`e26413044036efeb48fdf785187896ac08db5bc7f0186a81ac5941c07a082571`.
+Raw CI logs/ZIPs/StateRoot/WAL/credentials remain unretained. Neither this
+run nor its earlier successful checks qualify complete I1, I2 or A.
+
+Previous pushed source `c935f18ec0a5e54019283e2d30118479a9bc9c1c`, tree
+`3b6a302cd565b5eff3e438a819db7a94cea0ee4e`, completed
+[run 39158658035](https://github.com/cogine-ai/cliq-agent/actions/runs/39158658035).
+It contains only the five-file canonical guest-Node correction, not the
+development delivery implementation. Its independent short-path archive
+passes real `npm ci`, `npm run build`, portable native contracts, the original
+five strict script roots with actual dependency types and `skipLibCheck=false`,
+and the unchanged full `npm test`: 2,274/2,274, zero failures, skips,
+cancellations or todos (811,155.398458 ms). All 838 tracked blobs and modes
+match the candidate before/after validation; the root reviewer independently
+rechecked the complete archive and exact selected source blobs. Final local
+record SHA-256 is
+`b2903684169e9b78826d7bd171774767f82621b52e7b3f1dfc2bc3f5f16bce78`.
+Original namespace, image-integrity, syscall and time bounds are unchanged.
+The final result is thirteen jobs passing and five failing. Both Ubuntu
+TypeScript jobs fail before build/test at the portable C fixture: GCC rejects
+the one-byte empty string passed to a `digest[65]` parameter with
+`stringop-overread` under the unchanged `-Werror`. The local correction uses a
+real 65-byte buffer containing the same invalid empty value; production guards
+and the empty-value refusal remain unchanged. At that capture it had only
+portable local coverage; the later exact candidate above includes it.
+
+Actual extraction, the 2,082,484-byte ELF string table and all eighteen malformed
+ELF refusals pass. The real guest now fails before READY with the fixed
+`CLIQ_SPAWN_READY_WAIT` status (1011). This status alone cannot distinguish a
+five-second timeout from poll HUP/error, and supplies no Node-body or boundary
+evidence. The old ENOENT is not proven to have recurred. Fixed readiness
+phase/poll/elapsed diagnostics are required before choosing another repair;
+the five-second limit and resource/retirement gates must not be loosened.
+
+Installed verifier enrollment again expires at 60,025 ms: first Supervisor
+stage at 8,687 ms, secret input at 53,443 ms, second Supervisor at 53,447 ms,
+platform store at 57,900 ms, and no finalize marker. The logical read sample is
+27,874,947,402 bytes with zero physical `readBytes`; this is not per-function
+hash timing. The ordinary installed Run restart also remains failing. The
+received-tool SIGTERM campaign passes this time; that does not erase its
+previous failure or establish a shared cause for the enrollment/guest failures.
+
+Final append-only `capture-003.json` retains all eighteen closed categories,
+zero pending/rejected categories and one metadata-only artifact; SHA-256
+`389ee575913f0071e3b5007368a94e18b46fc43347a66e2e3d9b572d15db61ac`.
+No raw logs, ZIPs, StateRoot, WAL or credentials are retained. Real Linux
+self-spawn, confinement and installation qualification is still incomplete;
+this does not qualify the local delivery WIP and no PR is opened.
+
+Previous pushed source `414048c5ac3b3fd7ac40b3cfcd980e64dbce1d21`, tree
+`92c420d6a71a165afdec3ef77656c7dd824f98f6`, completed
+[run 39153652710](https://github.com/cogine-ai/cliq-agent/actions/runs/39153652710).
+It contains only the five-file startup-poll/reporter correction below, not
+the development delivery implementation. Its supported short-path archive
+passes its own real `npm ci`, build, strict checking and unchanged full
+`npm test`: 2,274/2,274, zero failures/skips/cancellations/todos
+(950,713.497209 ms). All 836 tracked blobs and modes and all five selected
+main-worktree blobs match the immutable validated tree. Final local record
+SHA-256: `56f0695299bbd0c843d75f3b1ee0a07270afc742c0d6ef5c7dc49221feeb0884`.
+This is not Linux or complete delivery qualification; no PR is opened.
+
+Fourteen jobs pass and four fail. The closed default-`spec` diagnostic now
+reports `spawn`, `ENOENT` and `deleted_canonical_node` (1,789 stdout bytes,
+zero stderr bytes, absent test-body marker). This identifies the reported
+self-spawn target; it is not a successful Node or containment qualification.
+The actual extractor and all eighteen malformed ELF refusals still pass.
+The five-file candidate under independent local validation gives only the
+canonical Node a namespace-private named copy of the original sealed image,
+checks its full authenticated bytes and exact held/named metadata, then binds
+that same held inode before the unchanged readonly/noexec/executable-mount,
+capability and syscall restrictions. Its real-file regressions are not a
+substitute for the pending real Linux self-spawn and boundary campaign.
+
+Enrollment still misses its unchanged 60-second limit (60,023 ms): the first
+Supervisor stage begins at 8,700 ms, secret input at 52,985 ms, the second
+Supervisor stage at 52,989 ms and platform-store work at 57,593 ms. No finalizer
+or retirement stage is observed; all actual process/input/pipe joins complete.
+Its last bounded read sample is 28,151,052,835 bytes, not proof that startup
+performance is now acceptable. The ordinary journey reaches
+`completed_unverified` and actual original-worker retirement, but its restart
+request still exhausts the original budget (220 ms remaining, twelve frames).
+The received-tool successor remains queued at `verify` after 222 cuts and
+30,009 ms, with no finalize cut; its original two-second stop and joins remain
+valid, not permission to extend either limit.
+
+Final append-only `capture-002.json` retains all eighteen closed categories,
+zero pending/rejected categories and one metadata-only artifact; SHA-256
+`a2e6fa1e490df641ff43e0cd2f7420dada2996fb3af16b4af058fe66ffb2862d`.
+The guest failure record SHA-256 is
+`b541eae021207946cd9aa701e91e469135590c12cba5340a27f8ed07e36b5886`.
+No raw log, ZIP, StateRoot, WAL or credential was retained. These failures
+remain failures; the development publication implementation is not in this
+pushed source and no complete delivery qualification or PR is claimed.
+
+Previous pushed source `d39dd9a94ce80f73ab55defedf32c36adcd528b9`, tree
+`db19c1fed421168890eabc30af74299293b6f6f2`, completed
+[run 39143189861](https://github.com/cogine-ai/cliq-agent/actions/runs/39143189861).
+Its own fresh archive, real `npm ci`, build and all 2,274 tests pass
+(1,426,677.799542 ms; zero failures, skips, cancellations or todos). Five
+script roots pass strict checking against actual dependency types, with
+`skipLibCheck=false`; nine focused guest diagnostic regressions pass. All
+836 tracked source blobs and modes match the validated tree. The final local
+validation manifest SHA-256 is
+`ce1234b58964a5f38462355bcbfdda9802011e55cd61f93eb3df70e15d67beae`.
+This exact seven-file batch retains the original control connection and
+performs full hello plus fresh before/after installation checks, including the
+actual active-StateOwner/closing check. It neither reconnects nor resends a
+credential mutation. The guest failure diagnostic adds only fixed syscall and
+target enums from a complete reported Node ENOENT block; it does not retain a
+raw path or prove a native cause. Original deadlines remain unchanged. The
+development publication implementation is not in this pushed candidate and no
+PR has been opened.
+
+Fourteen CI jobs pass and four fail. Required-verifier enrollment still times
+out at 60,009 ms before secret input: `first_supervisor` begins at 9,926 ms,
+and the same credential process has read 36,920,066,291 bytes by its 57,010 ms
+sample. This is not evidence of a Secret Service write/finalizer failure.
+The ordinary journey again reaches real result/restart, then exhausts the
+original request budget (73 ms remaining). The received-tool successor also
+misses its original 30-second cut: it retains all nine completed Journal rows,
+two owned HTTPS requests and an active original-owner lineage, but remains
+queued at `verify` after 231 public cuts; no finalize cut was observed. Its
+original service stop and actual process/pipe joins pass, so this is not
+evidence that a longer two-second stop is acceptable. The pending-model and
+retained-startup campaigns still pass. Native extraction and all eighteen
+malformed ELF refusals pass; Node remains pre-body `ENOENT` with 1,788 stdout
+bytes and both reported spawn enums `other_or_absent`. No specific target or
+native cause is established by those unknown enums.
+
+Final append-only capture `capture-004.json` retains all eighteen closed
+categories, no pending/rejected category, and one metadata-only artifact;
+SHA-256 `ddf6604da57570fb955bf77d9269fd23bb8502b64d69200b8aa5c374df117ff2`.
+Its collector remains the frozen pre-reporter-extension version. No raw log,
+ZIP, StateRoot, WAL or credential was retained. Local reproduction using the
+fixed verified Node 24.21.0 has since shown that its default reporter is `spec`,
+whereas the first diagnostic regression explicitly forced TAP. The diagnostic
+must cover the actual default format without changing execution arguments;
+this explains a coverage gap, not the underlying runtime ENOENT.
+
+A five-file follow-up was frozen at tree
+`92c420d6a71a165afdec3ef77656c7dd824f98f6`. It removes full installation
+rehashing from negative socket polls without granting authority from that
+hint, and extends only the closed guest diagnostic to the actual reporter.
+Its own real `npm ci`, build, strict script checking and twelve diagnostic
+regressions pass, but its first complete local test run has 2,273 passes and
+one failure out of 2,274 (1,227,450.301417 ms; no skips or cancellations).
+That attempt did not retain a fixed failure location; it is not a passing
+validation. Its append-only local validation SHA-256 is
+`879cc8e04f313096e9d2a461660cf01b87cc3f77021a9a640ad3af969411b75a`.
+A second unchanged full run retained 2,271 passes and three failures. Its
+append-only SHA-256 is
+`c53e2e21f512c5762744fe65fa30abb36977cd9567bdd523cdae564d09743391`.
+The repeated artifact-query failure was the actual native fixed socket-path
+limit: the long archive produced 104 path bytes plus its terminating NUL,
+exceeding Darwin's 104-byte `sun_path`. Neither the test nor native guard was
+changed. The additional two lease failures are retained without claiming a
+confirmed cause. A fresh shorter archive of the exact same tree passed the
+original artifact test, all eleven affected focused lease/recovery tests and
+the complete third run reported above. Both previous failed attempts remain
+retained and are not relabeled as passes.
+
+Previous pushed source `666fc58df4d825eaf5e0f7a876fe83ba04d7d81b`, tree
+`4ee3abd1a601a967a16a017fad8ee80ce1c9a08b`, completed
+[run 39139337290](https://github.com/cogine-ai/cliq-agent/actions/runs/39139337290).
+Its own fresh archive, real `npm ci`, build and all 2,265 tests pass
+(946,924.714166 ms; zero failures, skips, cancellations or todos). Five script
+roots pass strict checking against the actual dependency types; six guest
+diagnostic regressions pass. The exact thirteen blobs were independently
+reviewed and compared with the validated tree before the normal commit/push.
+Cancelled superseded candidates are not counted as successful validation.
+
+The observer now retains its actual selected native platform while preserving
+each fresh profile/manager observation and the original installation checks
+before and after it. A credential scope must reject both before lazy loading
+and before entering the later serialized borrow; the real Linux scope race
+uses the signed actual platform addon and is not yet qualified locally. The
+guest report adds only bounded byte counts, a fixed marker-status enum and
+allowlisted reported error-code tokens from fully verified receipt output.
+It retains no raw TAP, stack, path or credential. This batch includes no
+development delivery implementation, and no PR has been opened.
+
+Fifteen jobs pass and three fail. The received-tool, pending-model and retained
+startup SIGTERM campaigns now all pass their unchanged assertions. Installed
+verifier enrollment still times out at 60,014 ms: first-Supervisor spans
+8,963–53,203 ms, followed by secret input and a second connection acquisition;
+all original input/process/pipe owners join. The normal journey reaches the
+actual Supervisor restart after a real result, then exhausts its original
+request budget (46 ms remaining at the final failed request). Neither is
+qualified by changing a deadline. Native extraction passes, including the
+2,082,484-byte ELF string table and eighteen malformed-input refusals. The
+first Node verifier fails before the first body marker; its fully verified
+output projects to 1,789 stdout bytes, zero stderr bytes, absent markers and
+the reported literal `ENOENT`. That literal alone does not identify the
+failing syscall or justify changing arguments, isolation or acceptance.
+
+The final capture retains all eighteen closed report categories, with none
+pending/rejected and one metadata-only artifact. Manifest SHA-256:
+`cb8e7be1dad759900ef9a7edefc292494349fc71cc7d80a49fcfa6bcc01784fc`.
+No raw logs, ZIPs, StateRoots, WALs or credentials were retained. The next
+credential optimization must keep the current active-StateOwner/closing check
+inside hello; fresh manager/PID observations alone cannot replace it.
+
+Previous pushed source `91b2873d9580e511ac82b62c090e89b15a22fb20`, tree
+`121d1c47e66b8760d1f01faafc0bf35c0168fac2`, completed
+[run 39131868935](https://github.com/cogine-ai/cliq-agent/actions/runs/39131868935).
+Fourteen jobs passed and four failed. Admission SIGTERM and original credential
+finalizer SIGTERM now both pass with the unchanged two-second stop contract.
+The received-effects campaign preserves and joins its real effects and service
+stops but misses its original thirty-second successor-result deadline; the
+snapshot is queued at verification, not a completed result or proof of deadlock.
+Installed verifier enroll again exceeds sixty seconds, with all original input,
+process and pipe owners joined. Its first-Supervisor phase spans about 48 seconds;
+logical reads and CPU counters progress, but do not by themselves identify which
+full validation consumes that time. The native guest and normal installed
+journey also remain failed. No failed qualification is counted as complete.
+
+The final capture retains all eighteen closed report categories, with none
+pending or rejected and one metadata-only artifact. Its manifest SHA-256 is
+`50b24bfb44042df39906b0f598db1e4f6a808b8904d8da58fe11dee39b5fe88e`.
+No raw logs, archives, StateRoots, WALs or credentials were retained.
+
+Its own fresh Git archive and real `npm ci` passed build and all 2,265 local
+tests (966,791.194583 ms; no failures, skips, cancellations or todos). The
+focused script batch has 34 passes and four explicit Linux-only skips; strict
+script checking passes with actual dependency types and no skipped checks.
+This seven-file source batch prewarms the separate read-only admission observer,
+confines the credential phase banner to its actual verifier fixture consumer,
+and adds finite source-owned guest boundary markers. The actual guest script's
+assertions, isolation, deadlines and output limits are unchanged; marker output
+failures are contained and raw TAP/error/output bytes are not retained. A
+boundary stage is diagnostic data, never native or installed qualification.
+No delivery implementation is included in this commit, and no PR is open.
+
+Previous source `475da21a8069a1a310fd84be4a034d1424260464`, tree
+`670a7d05dcd1a8373e01640bcd386df21517e432`, completed
+[run 39128460344](https://github.com/cogine-ai/cliq-agent/actions/runs/39128460344).
+Thirteen jobs passed and five failed; this is not a Linux pass. Its own fresh Git archive and real `npm ci` passed
+build and all 2,265 local tests (814,834.776458 ms; no failures, skips,
+cancellations or todos). The separate script batch has 118 passes and four
+explicit Linux-only skips, and strict script type checking passes without
+skipping dependency checks. Only the fixed eight credential-phase observations
+and seven client-stage observations may enter closed diagnostics; original
+secret scanning, deadlines, frame limits, real input/process/pipe joins and
+execution decisions remain unchanged. A diagnostic output refusal is contained
+and cannot skip the original resource close order.
+
+The guest verifier now reads the real retired WorkerLaunch, full seal/death CAS
+closure and original invocation identity rather than looking for it in the
+public recovery view's deliberately non-retired set. This history API does not
+pretend to have made an earlier live observation and is not execution authority.
+The original live-identity API retains its additional prior database/source
+identity checks. No delivery implementation is included in this diagnostic
+commit, and no PR has been opened.
+
+The final bounded capture retains all eighteen closed report categories, with
+none pending or rejected and one metadata-only artifact. Its manifest SHA-256
+is `9ebfe850001853e19c54b4f4826abe7cd99cc0b570f0d0fbd6a4ef1f508e7b3b`.
+No raw logs, archives, StateRoots, WALs or credentials were retained.
+
+The received-tool/model SIGTERM campaign passes without changing its assertions.
+The normal installed journey now reaches Supervisor restart after its actual
+result, but a later request exhausts its remaining original deadline. The
+verifier enroll finishes in 58,926 ms within its unchanged 60-second limit;
+its next client authentication reaches the original five-second deadline with
+no frame. Its roughly 72 GB `rchar` is logical bytes read, not physical disk
+I/O (`readBytes` remains zero in the samples). Repeated complete installation
+closure validation is under investigation; metadata-only caching or deleting
+authorization-cut checks is not an accepted fix.
+
+Two other failures are in test orchestration: admission loses its observed
+resource before SIGTERM, and the fixture credential marker pollutes another
+campaign's original single-JSON stderr. Local corrections preserve the actual
+resource checks, two-second stop limit and strict stderr decoder; neither is
+counted as a Linux pass until exact-source validation succeeds. The native guest
+campaign gets past the retired-worker lookup and now reports an actual
+`assertion_failed` where the successful-script scenario requires `passed`.
+Source-owned finite boundary diagnostics are being added without retaining raw
+guest output or changing that assertion. Full publication integration and
+qualification remain incomplete.
+
+Previous pushed source `8238346954345fb51d93cdad944b0f6bccc41982`, tree
+`29beab5869d835cc291899a7fad44496362c5ca4`, has
+[run 39125571188](https://github.com/cogine-ai/cliq-agent/actions/runs/39125571188)
+completed with fourteen successful jobs and four failures. Its fresh Git
+archive with its own real `npm ci` passed build and
+all 2,263 local tests (782,003.659167 ms; no failures, skips, cancellations or
+todos). This two-file commit corrects the verifier settlement Journal cut and
+the endpoint observer test ordering, not the uncommitted delivery
+implementation. No PR has been opened.
+
+In that previous run, the new installed verifier campaign fails before any verifier scenario:
+the real enroll command reaches its unchanged 60-second deadline. The original
+credential PID/start/image, complete input write, process and pipes were joined;
+the same process had read about 42 GB by the final 57-second sample. The
+Supervisor's real StateOwner first appears in the bounded samples at 45 seconds.
+These counters do not identify which credential phase consumed the deadline,
+and do not authorize a cached or metadata-only substitute for full verification.
+
+The normal installed client now fails at its original five-second readiness
+deadline with no response frame, rather than the previous SEA-only loader
+refusal. The received-tool campaign preserves its real original snapshot and
+all nine completed model/tool Journal entries; both observed service stops
+succeed under the original two-second limit. Its remaining failure is the
+successor's thirty-second completion deadline: the Run is queued at verification
+and shutdown observes `drive_retirement`, not a completed result or a proven
+deadlock. The native guest lifecycle now completes the original verifier
+settlement, then fails a test assertion that searches the recovery view's
+explicitly non-retired worker set for a retired verifier. The correction must
+read the actual original retirement row and validate its death/seal/identity
+graph; absence is not retirement evidence and the production recovery view
+must not be widened. The endpoint observer campaign now passes on Linux; its
+absence-before-read and private-directory type/owner/mode checks retain all
+original no-Run/StateOwner/keeper/socket and CAS assertions.
+
+The final capture retains all eighteen closed report categories, with none
+pending or rejected and one metadata-only artifact. Its manifest SHA-256 is
+`51a5dcdf162a016138cf8b06807d9ef79ef1aa4d1a903f4220408914e0a34824`.
+No raw logs, archives, StateRoots, WALs or credentials were retained. Neither
+these diagnostic fixes nor the corrected fixture declaration qualify the full
+verifier or delivery lifecycle, and the failed run is not treated as green.
+
+The completed [Linux/macOS workflow for `6c9ff54`](https://github.com/cogine-ai/cliq-agent/actions/runs/39115284729)
+tested full SHA `6c9ff5440cfbbceb0c112a41ccf1614068a78078`, tree
+`81b57329e2b42d45c0a9b9eda4188b5f326126e4`. Fourteen of eighteen jobs passed,
+including all four Node 22.13/24 Linux/macOS TypeScript matrices, the original
+credential-finalizer SIGTERM/successor checks, and source-limit qualification.
+A fresh archive of that exact tree, with its own `npm ci`, passed build and all
+2,260 tests locally (887,373.570125 ms; no failures, skips, cancellations or
+todos). This does not qualify the uncommitted delivery implementation.
+
+The signed guest extraction passed the owner-approved ELF string-table
+contract and eighteen malformed-ELF cases. Its subsequent native failure is
+now identified: the guest campaign's existing 512 MiB filesystem exceeds its
+signed fixture's incorrectly declared 256 MiB generation limit. The original
+native capacity guard correctly refuses before guest verifier execution. The
+guest-only signed test declaration must match its actual backing volume;
+ordinary fixtures and production resource limits remain unchanged. The later
+guest-verifier phase is not thereby qualified.
+
+The normal installed client's new fixed diagnostic identifies authentication,
+not a ready timeout: its read-only manager observation incorrectly enters the
+SEA-only credential-authority loader. A same-installation, read-only manager
+capability is being validated without changing the full credential loader's
+SEA/version gate, peer authentication or hello checks. The verifier campaign
+enrollment reaches the unchanged 60-second deadline. Static analysis identifies
+substantial repeated complete image verification, but its runtime cause is not
+yet measured. Bounded diagnostic observation must not replace hashes, extend
+the deadline or turn failure into success. All four failed jobs remain failed.
+
+The original received-tool result and its model/tool Journal completions were
+retained. The successor was still queued at verification, and shutdown observed
+`result_recovery` in `completeVerification`; this identifies the incomplete
+stage, not a measured root cause. Repeated complete CAS verification is visible
+in the code, but no performance diagnosis or metadata-only hash shortcut is
+authorized by that fact. Minimal fixed-stage/elapsed/join diagnostics and
+independently joined native campaign stages are being validated separately.
+
+The closed terminal evidence capture retained all eighteen report categories,
+with no pending or rejected artifacts. Its manifest SHA-256 is
+`d0bb9c25c1edb9c8ac6ab9637e61a091dee7a7141a33f190a7ca188e950d35b8`.
+The archive retains only allowlisted bounded report bytes and provenance, not
+raw logs, ZIPs, StateRoots, WALs or credentials. A source-limit collector success
+predicate was corrected to require that its observer did **not** exit before
+release; the producer and acceptance assertions were unchanged.
+
+New real native fault regressions expose a publication design blocker, not a
+passed capability. Directory `mkdirat` and symlink `symlinkat` do not return a
+birth descriptor: concurrent replacement before the first open can substitute
+an unrelated inode. Even a descriptor-held regular staging file can be
+substituted at its workspace pathname between the check and `rename`, and a
+quarantine pathname can be substituted between its check and `unlink`. A
+post-syscall refusal cannot undo having published or deleted the foreign inode.
+Empty checks, extra `stat` calls, equal bytes and equal targets do not solve
+these races.
+
+The owner approved one integrated private-area contract: keep **all** staging
+and quarantine objects in a StateRoot-controlled publication arena, owned by
+the same original Journal claim, through the atomic effect and exact cleanup.
+The development implementation now uses that arena and an all-operation
+read-only same-filesystem preflight before any workspace write. Component
+regressions show that substitution of the old workspace-side transient names
+does not publish, adopt or delete those unrelated objects. Actual arena birth,
+slot absence, parent fsync, directory retirement and descriptor close remain
+separate required evidence; protected StateRoot is not claimed to fence a
+malicious same-UID actor. This is not installed publication qualification.
+
+Cross-filesystem publication remains explicitly unsupported/unqualified, with
+no workspace-side fallback. Supporting it requires a separately justified
+controlled-birth mechanism. The owner explicitly retained the RFC's
+captured-object/quiescent-workspace boundary: a detectable prior drift refuses
+before release, but an ancestor moved after the final check can receive the
+first descriptor-relative effect on the same captured inode outside its current
+workspace path. Subsequent drift detection refuses success and additional
+semantic release and retains the original claim's physical evidence. This is
+not an atomic current-path ancestry fence. The original stronger
+`outsidePublished: false` assertion remains a historical RED, not a passed
+capability. A separate regression for the approved boundary verifies the exact
+captured inode/effect, foreign-object preservation and refusal of further
+semantic release; it does not prohibit correctly fenced same-claim maintenance
+after identities are restored. All twenty-three native fault tests now pass
+locally, including exact-empty abort-directory maintenance, foreign
+empty-directory replacement and post-check content creation. The combined
+native/data/planner batch has 78 passes and one real cross-device Linux-only
+skip. Neither result qualifies installed Linux publication or the production
+SQL cleanup barrier.
+
+Actual displaced-preimage retention now has a strict retained-data wrapper:
+the original claim/birth, fixed private slot, physical identity and complete raw
+CAS bytes remain linked even for an UNKNOWN effect. Twenty-six local decoder
+and full-byte reader regressions pass. This grants no cleanup, forward release
+or physical success and does not replace the missing live producer. Complete
+capture under the original frozen non-Git projection now has 24 passing actual
+directory/CAS component regressions, including new paths, payload-time inode
+drift, cancellation and structural-handle refusal before CAS access. The
+original rule refs are retained, not reparsed from live repository files; no
+snapshot, terminal-projection or permission authority is inferred from this
+component result.
+The development consumer now connects no-op finalization, forward publication,
+typed path settlement, preparation retirement, Stop maintenance and the sole
+RunResult/Session or Stop writer. Closed unclaimed preparations require their
+complete original native retirement and once-only zero settlement; a failed
+phase or refunded budget is not enough. The abort terminal path uses a fresh
+partial-root projection and shares the original M retirement owner and seal
+budget. It does not invent an abort item for a file-only Plan.
+
+With the rebuilt production macOS helper, a focused physical/component batch
+has 64 passes and one explicit second-filesystem Linux-only skip. The later
+combined preparation/Stop/decoder/execution batch has 41 passes; project type
+checking passes. These overlap earlier component batches and must not be added
+as distinct qualification coverage. Independent review found and fixed two
+prepare-return cancellation gaps: register the original completion before the
+revoked claim gate drains its genuine preparation. No synthetic authority is
+used to turn those refusal/component tests into an installed positive case.
+
+The production capability remains disabled pending complete integration and
+real installed Linux evidence. The approved same-invocation known-result
+handoff is now connected: the original producer atomically roots its actual
+claim, receipt, arena/slot retirement and M seal in an excluded-control item
+and resource Checkpoint, without settling or advancing the publication
+frontier. Only then may the separate read-only projection cancel and join. A
+successor validates that complete graph and freshly captures the root before
+the sole terminal settlement; it cannot reconstruct a native owner, reopen M,
+redispatch or reseal. A distinct terminal Checkpoint preserves the immutable
+resource Checkpoint. Same-owner storage retries retain their original token
+and single BudgetSettlement. Stop retains the real receipt and selects the
+existing abort branch. Missing evidence or storage failure remains recovery,
+not replay permission or success.
+
+The sole worker-preparation boundary now accepts Delivery only after complete
+source/allow/prefix validation and an exact unchanged SQL cut; handoffs,
+unsettled operations and closed fixed-attempt preparations cannot open a new M.
+Driver prefix reads use the existing cancellable, joined Store read scope even
+before an execution scope opens; reads entering after shutdown are refused
+before CAS access. Two genuine Store/CAS regressions cover cancellation/join
+and that closed entry, not a positive Delivery or a two-second installed stop.
+The installed campaign additionally binds handoff data to the original actual
+readonly SQL worker/generation/snapshot and independent process-retirement
+checks, on initial inspection, reconnect and restart. Its local data/SQLite
+regressions are not execution of those installed cuts.
+
+Real handoff commit, shutdown, Stop/storage-failure and cold successor
+once-settlement cuts remain unqualified. UNKNOWN same-claim successor
+reconciliation, unclaimed fixed-attempt replacement, ambiguous native-open
+windows, cross-filesystem publication and unobserved crash cuts remain explicit
+qualification/implementation gaps. Package A is incomplete and no PR is opened.
+
+The owner-approved late-result and registered-namespace branches are now
+connected in the development producer, same-Continuation audit writer, full
+retained readers and sole finalization/abort consumers. Actual completion time
+is retained separately from an earlier raw path observation; deadline-late
+facts never become timely probe evidence. A committed audit updates both
+original task caches synchronously without changing the wait/nonce, Journal,
+frontier or BudgetSettlement. A later true probe cannot reuse its old fact.
+New current-namespace retirement never synthesizes old slot-parent FDs or
+unlink witnesses; absent/empty and original registered-preimage cases have
+disjoint native behavior. The normal installed campaign continues requiring
+its original uninterrupted descriptor branch rather than pretending to test
+successor recovery.
+
+A fresh combined component/retained-data/refusal batch passes 101/101 tests,
+zero skips/failures/cancellations/todos (22,362.930625 ms); project TypeScript
+and diff checking pass. The independent actual native fault addon passes
+11/11, including real cleanup-before-fsync and rmdir-before-fsync failures,
+foreign identity/extra entries, complete desired bytes, strict preimage
+routing and sticky temporary-descriptor close failure. Its initial close-
+failure RED exposed a genuine swallowed StateRoot revalidation close error;
+the new role now uses the existing retirement-error sink throughout, not a
+shifted fault ordinal. The old publication constructor/arm/cleanup/retirement
+guards remain unchanged. The main helper was not rebuilt during fixtures.
+These batches overlap earlier checks and do not qualify a real installed
+Delivery, original-owner takeover, late return/new nonce, once settlement or
+two-second stop. Full exact-source local and independent Linux evidence
+remains required before enabling the installed capability or opening a PR.
+
+The approved directory-not-created correction retains a present original `A`
+file/symlink as a leaf, with full-byte hash/raw file mode or exact link target;
+it grants no deletion or cleanup authority. Eleven real read-only observation
+regressions pass locally, including the unchanged conversion leaf, bounded
+reads, actual mutation refusal and close-failure priority. The public result
+query now derives local/inherited selection from the real RunSpec and rejects
+Agent results carrying Delivery-only proof fields; its genuine StateStore/UDS
+batch has 28 passes. These are component/negative checks, not a genuine
+installed Delivery success or conversion/cancellation qualification.

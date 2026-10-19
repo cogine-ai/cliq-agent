@@ -3,7 +3,7 @@
 import { canonicalJsonBytes, canonicalSha256 } from '../../../src/kernel/canonical.js';
 import { digestOmitting, identityHash, parseCanonicalTime, sha256Bytes } from '../../../src/kernel/identity.js';
 import { parseJsonStrict } from '../../../src/kernel/json.js';
-import type { Checkpoint, ContinuationItem, InvocationJournalEntry, Run, WorkspaceEntry } from '../../../src/kernel/types.js';
+import type { Checkpoint, ContinuationItem, InvocationJournalEntry, Run, StateOwnerRecordV1, WorkspaceEntry } from '../../../src/kernel/types.js';
 import type { FinalCandidateItem, VerifierPlan, VerificationClosureV1 } from '../../../src/kernel/result.js';
 import type { VerificationReceipt, VerifierResultItem } from '../../../src/kernel/verifier.js';
 import type { VerifierOperationGrantV1, VerifierPolicyChannelEvidenceV1 } from '../../../src/kernel/verifier-invocation.js';
@@ -15,21 +15,17 @@ import { exactKeys } from '../../../src/policy/runtime-authority.js';
 import { validateContextItems } from '../../../src/runtime/context-compaction.js';
 import { agentStopDetail, decodeAgentStop, stopCheckpointId } from '../../../src/runtime/stop.js';
 import { decodeAdmittedContext, decodeBudgetSettlement, decodeContextManifest, decodeRunSpec, decodeSessionProjection,
-  decodeSourceManifest, decodeUnverifiedConsent, decodeWorkspaceEntries, decodeWorkspaceGenerationSnapshotEvidence,
+  decodeSourceManifest, decodeUnverifiedConsent, decodeWorkspaceEntries,
   decodeWorkspaceIdentity, decodeWorkspaceState } from '../../../src/state/decoders.js';
-import { decodeVerifierSandboxLaunchSpec } from '../../../src/state/execution-closure.js';
-import { decodeGuestToolchainManifest } from '../../../src/state/guest-toolchain.js';
-import { joinResourceOperations } from '../../../src/state/errors.js';
 import { decodeFinalCandidateItem, decodeRunResult, decodeVerificationClosure, decodeVerifierPlan,
   decodeWorkspaceDiff } from '../../../src/state/result-artifacts.js';
-import { validateMatchingWorkerDeath } from '../../../src/state/tool-checkpoint.js';
-import { decodeRepairDiagnosticItem, decodeVerificationReceipt, decodeVerifierCommand, decodeVerifierEnvironment,
+import { decodeRepairDiagnosticItem, decodeVerificationReceipt,
   decodeVerifierResultItem } from '../../../src/state/verifier-artifacts.js';
 import { decodeVerifierSpec } from '../../../src/state/verifier-artifacts.js';
 import { loadVerifierPolicy, planVerifierRequest, verifierOperationId } from '../../../src/state/verifier-policy.js';
-import { verifierCheckpointId, verifierResultItemId, type VerifierProgress,
-  type VerifierRetirementV1 } from '../../../src/state/verifier-recovery.js';
+import { verifierCheckpointId, verifierResultItemId, type VerifierProgress } from '../../../src/state/verifier-recovery.js';
 import { planVerifierRepair } from '../../../src/state/verifier-repair.js';
+import { assertInstalledVerifierRetirement, readInstalledVerifierInputs } from './installed-verifier-evidence.js';
 
 type CaseKind = 'required_pass' | 'required_repair' | 'advisory_failure' | 'required_timeout';
 type ProcessIdentity = { role: 'namespace_init' | 'monitor' | 'subreaper'; pid: number; startTicks: string };
@@ -66,6 +62,7 @@ const comparePath = (left: { path: string }, right: { path: string }) => Buffer.
  * workspace bytes, argv, environment values or untrusted decoder messages. */
 export async function assertInstalledVerifierOutcome(input: {
   cut: Record<string, any>; sessionCut: Record<string, any>; readCas: (ref: string) => Promise<Buffer>;
+  readOwnerHistory: () => Promise<readonly StateOwnerRecordV1[]>;
   caseKind: CaseKind; expectedFiles: readonly { path: string; before: string; after: string }[]; principalId: string;
 }): Promise<InstalledVerifierOutcome> {
   let stage: InstalledVerifierDiagnosticStage = 'public_cut';
@@ -149,24 +146,7 @@ export async function assertInstalledVerifierOutcome(input: {
       check(consent.allowUnverified && consent.principalId === input.principalId && consent.createdAt === run.createdAt &&
         consent.runSpecCoreDigest === canonicalSha256(core));
     }
-    const commands = await joinResourceOperations(frozen.verifiers.map(async entry => decodeVerifierCommand(await object(entry.commandRef))));
-    const environments = await joinResourceOperations(frozen.verifiers.map(async entry => decodeVerifierEnvironment(await object(entry.environmentRef))));
-    for (const [index, entry] of frozen.verifiers.entries()) {
-      const command = commands[index]!, environment = environments[index]!;
-      check(command.verifierId === entry.id && command.verifierVersion === entry.version && command.commandDigest === entry.commandDigest &&
-        environment.verifierId === entry.id && environment.verifierVersion === entry.version && environment.environmentDigest === entry.environmentDigest &&
-        environment.commandRef === entry.commandRef && environment.commandDigest === entry.commandDigest && environment.sourceProjectionRef === spec.sourceProjectionRef &&
-        environment.runtimeBundleRef === assembly.runtime.runtimeBundleRef && environment.runtimeBundleManifestDigest === assembly.runtime.runtimeBundleManifestDigest &&
-        environment.guestToolchainManifestRef === assembly.runtime.guestToolchainManifestRef &&
-        environment.guestToolchainManifestDigest === assembly.runtime.guestToolchainManifestDigest);
-      check(command.executable.kind === 'guest_toolchain');
-      if (command.executable.kind !== 'guest_toolchain') throw new Error('unsupported installed verifier executable');
-      const guest = decodeGuestToolchainManifest(await object(command.executable.guestToolchainManifestRef));
-      check(command.executable.guestToolchainManifestRef === environment.guestToolchainManifestRef &&
-        command.executable.guestToolchainManifestDigest === guest.manifestDigest && guest.manifestDigest === environment.guestToolchainManifestDigest &&
-        command.executable.toolId === guest.node.logicalName && command.executable.executionPath === guest.node.canonicalGuestPath &&
-        command.executable.executableDigest === guest.node.digest && command.executable.abiFingerprint === guest.manifestDigest);
-    }
+    const { commands, environments } = await readInstalledVerifierInputs(spec, bytes);
 
     stage = 'source_and_candidate';
     check(input.expectedFiles.length > 0 && input.expectedFiles.length <= 32);
@@ -323,52 +303,13 @@ export async function assertInstalledVerifierOutcome(input: {
             outcome: receipt.outcome, receiptRef: terminal.receiptRef!, createdAt: terminal.timestamp };
           same(resultItem, expectedItem); check(resultRow.itemSeq > decisionRow.itemSeq); seenVerifierItems.add(resultId);
           stage = 'verifier_retirement';
-          const retirement = await object<VerifierRetirementV1>(receipt.containmentEvidenceRef);
-          check(exactKeys(retirement, ['schemaVersion', 'format', 'runId', 'opId', 'attempt', 'dispatchId', 'leaseEpoch', 'containmentRef', 'deathEvidenceRef',
-            'checkpointId', 'workspaceStateRef', 'snapshotEvidenceRef', 'parentRetirementEvidenceRef', 'sourceAfterRef', 'sourceAfterDigest', 'evidenceDigest']) &&
-            retirement.schemaVersion === 1 && retirement.format === 'cliq-verifier-retirement-v1' && retirement.evidenceDigest === digestOmitting(retirement, 'evidenceDigest') &&
-            retirement.runId === run.id && retirement.opId === opId && retirement.attempt === attemptIndex && retirement.dispatchId === claim.dispatchId && retirement.leaseEpoch === claim.leaseEpoch &&
-            retirement.checkpointId === verifierCheckpointId(run.id, opId, attemptIndex) && retirement.sourceAfterRef === candidate.resultSourceRef && retirement.sourceAfterDigest === candidate.sourceDigest);
-          const cp = checkpoint(retirement.checkpointId), snapshot = decodeWorkspaceGenerationSnapshotEvidence(await object(retirement.snapshotEvidenceRef));
-          const workspaceState = await state(cp, source.entriesRef); await context(cp);
-          check(cp.journalSeq === terminal.seq && cp.runItemSeq === resultRow.itemSeq && cp.workspaceStateRef === retirement.workspaceStateRef && cp.createdAt >= terminal.timestamp && cp.createdAt < run.deadlineAt &&
-            snapshot.purpose === 'sealed_to_checkpoint' && snapshot.checkpointId === cp.id && snapshot.workspaceStateRef === cp.workspaceStateRef && snapshot.runId === run.id &&
-            snapshot.workspaceStateDigest === workspaceState.stateDigest && snapshot.entriesRef === workspaceState.entriesRef && snapshot.treeDigest === entries.treeDigest &&
-            snapshot.observedAt <= cp.createdAt && snapshot.observedAt >= receipt.endedAt);
-          const launch = decodeVerifierSandboxLaunchSpec(await object(claim.sandboxLaunchSpecRef!));
-          check(launch.requestRef === prepared.requestRef && launch.requestDigest === planned.request.requestDigest && launch.targetRef === prepared.target && launch.targetDigest === planned.target.targetDigest &&
-            launch.operationGrantRef === prepared.grantRef && launch.filesystem.kind === 'run_generation' && launch.filesystem.generationRef === snapshot.generationRef &&
-            launch.filesystem.sourceProjectionRef === spec.sourceProjectionRef && launch.owner.kind === 'run_invocation');
-          if (launch.owner.kind !== 'run_invocation') throw new Error('wrong verifier launch owner');
-          same(launch.owner, { kind: 'run_invocation', runId: run.id, intendedLeaseEpoch: claim.leaseEpoch, workerLaunchId: launch.owner.workerLaunchId, opId, attempt: attemptIndex, dispatchId: claim.dispatchId });
-          const containment = await object(retirement.containmentRef), death = await object(retirement.deathEvidenceRef), parentDeath = await object(retirement.parentRetirementEvidenceRef);
-          check(exactKeys(containment, ['schemaVersion', 'planRef', 'sandboxLaunchSpecRef', 'sandboxLaunchSpecDigest', 'owner', 'filesystemBinding', 'parentContainmentRef', 'launchNonceDigest', 'backend', 'createdAt']) &&
-            containment.schemaVersion === 1 && containment.planRef === launch.containmentPlanRef && containment.sandboxLaunchSpecRef === claim.sandboxLaunchSpecRef && containment.sandboxLaunchSpecDigest === launch.launchSpecDigest &&
-            containment.parentContainmentRef === launch.parentWorkerContainmentRef && containment.backend.kind === 'linux');
-          check(exactKeys(containment.backend, ['kind', 'pidNamespaceReservationId', 'pidNamespaceId', 'cgroupPath', 'cgroupId', 'namespaceInitStartToken', 'subreaperStartToken']));
-          same(containment.owner, launch.owner); same(containment.filesystemBinding, { kind: 'run-generation', generationRef: snapshot.generationRef });
-          check(exactKeys(death, ['schemaVersion', 'kind', 'containmentRef', 'planRef', 'sandboxLaunchSpecRef', 'sandboxLaunchSpecDigest', 'owner', 'launchNonceDigest',
-            'inspectorSupervisorInstanceId', 'inspectorIdentityRef', 'inspectorIdentityDigest', 'backend', 'observedAt', 'evidenceDigest']) &&
-            death.schemaVersion === 1 && death.kind === 'containment_all_descendants_dead' && death.evidenceDigest === digestOmitting(death, 'evidenceDigest') &&
-            death.containmentRef === retirement.containmentRef && death.planRef === containment.planRef && death.sandboxLaunchSpecRef === containment.sandboxLaunchSpecRef &&
-            death.sandboxLaunchSpecDigest === containment.sandboxLaunchSpecDigest && death.launchNonceDigest === containment.launchNonceDigest &&
-            death.inspectorSupervisorInstanceId === claim.supervisorInstanceId && death.observedAt >= receipt.endedAt && death.observedAt <= snapshot.observedAt);
-          same(death.owner, launch.owner); same(death.backend, { ...containment.backend, cgroupPopulated: 0, namespaceInitDeadAndReaped: true, remainingTrackedDescendants: 0 });
-          check(parentDeath.kind === 'containment_all_descendants_dead' && parentDeath.containmentRef === launch.parentWorkerContainmentRef &&
-            parentDeath.evidenceDigest === digestOmitting(parentDeath, 'evidenceDigest') && parentDeath.observedAt >= death.observedAt && parentDeath.observedAt <= cp.createdAt);
-          check(parentDeath.schemaVersion === 1 && parentDeath.backend.kind === 'linux' && parentDeath.backend.cgroupPopulated === 0 &&
-            parentDeath.backend.namespaceInitDeadAndReaped === true && parentDeath.backend.remainingTrackedDescendants === 0);
-          same(parentDeath.owner, { kind: 'worker_activation', runId: run.id, intendedLeaseEpoch: claim.leaseEpoch, workerLaunchId: launch.owner.workerLaunchId });
-          validateMatchingWorkerDeath(await object(snapshot.quiescenceEvidenceRef!), parentDeath, 'installed verifier parent retirement');
-          const init = /^linux-namespace-init:([1-9][0-9]*):([0-9]+):monitor:([1-9][0-9]*):([0-9]+)$/u.exec(containment.backend.namespaceInitStartToken);
-          const subreaper = /^linux-subreaper:([1-9][0-9]*):linux-proc-start-ticks:([0-9]+)$/u.exec(containment.backend.subreaperStartToken);
-          check(init && subreaper);
-          const processes: ProcessIdentity[] = [{ role: 'namespace_init', pid: Number(init![1]), startTicks: init![2]! },
-            { role: 'monitor', pid: Number(init![3]), startTicks: init![4]! }, { role: 'subreaper', pid: Number(subreaper![1]), startTicks: subreaper![2]! }];
-          check(processes.every(process => Number.isSafeInteger(process.pid) && process.pid > 0));
-          retirementIdentities.push({ opId, attempt: attemptIndex, containmentRef: retirement.containmentRef, deathEvidenceRef: retirement.deathEvidenceRef,
-            namespaceInitStartToken: containment.backend.namespaceInitStartToken, subreaperStartToken: containment.backend.subreaperStartToken, processes });
-          check((await bytes(receipt.stdoutRef, specEntry.outputLimitBytes)).length + (await bytes(receipt.stderrRef, specEntry.outputLimitBytes)).length <= specEntry.outputLimitBytes);
+          const physical = await assertInstalledVerifierRetirement({ run, checkpoints, prepared, claim, terminal, requestContext,
+            measurement: { retirementRef: receipt.containmentEvidenceRef, endedAt: receipt.endedAt, stdoutRef: receipt.stdoutRef, stderrRef: receipt.stderrRef },
+            readRetainedArtifact: bytes, readOwnerHistory: input.readOwnerHistory });
+          const cp = physical.checkpoint;
+          await state(cp, source.entriesRef); await context(cp);
+          check(cp.runItemSeq === resultRow.itemSeq);
+          retirementIdentities.push(physical.identity);
           previous = { terminal, receipt, claimed: true, checkpointAt: cp.createdAt };
           if (attemptIndex === preparedRows.length - 1) {
             Object.assign(entryProgress, { receipt, resultItem, terminalJournal: terminal });

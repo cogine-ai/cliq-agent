@@ -108,11 +108,34 @@ test('installed verifier uses its own free bounded manager journey without weake
   const shell = await readFile(new URL('../../scripts/kernel/qualify-systemd-user.sh', import.meta.url), 'utf8');
   assert.match(shell, /--run-verifier-journey\) probe_campaign_kind=run-journey; probe_run_driver_mode=--verifier-campaign;/u);
   assert.match(shell, /probe_run_driver_mode" = --verifier-campaign[\s\S]*?qualify-installed-verifier-journey\.ts[\s\S]*?else[\s\S]*?qualify-installed-run-journey\.ts/u);
-  const driver = await readFile(new URL('../../scripts/kernel/qualify-installed-verifier-journey.ts', import.meta.url), 'utf8');
+  const consumer = await readFile(new URL('../../scripts/kernel/qualify-installed-verifier-journey.ts', import.meta.url), 'utf8');
+  assert.match(consumer, /import \{ runInstalledNodeJourney \} from '\.\/testing\/installed-node-journey\.js'/u);
+  assert.match(consumer, /assert\.equal\(mode, '--verifier-campaign'\); assert\(filename && extra\.length === 0\)/u);
+  assert.match(consumer, /await runInstalledNodeJourney\(filename, 'verifier'\)/u);
+  const driver = await readFile(new URL('../../scripts/kernel/testing/installed-node-journey.ts', import.meta.url), 'utf8');
   assert.match(driver, /maxBytes: 512 \* 1024 \* 1024, maxStreams: 4096/u);
   assert.match(driver, /'required_pass', 'required_repair', 'advisory_failure', 'required_timeout'/u);
   assert.match(driver, /scanCredentialSecretCorpus\(\{ stateRoot: recipe\.stateRoot, uid: ledger\.uid, evidenceDirs: \[\], scanner \}\)/u);
   assert.match(driver, /stopped\.TimeoutStopUSec, '2s'/u);
   assert.match(driver, /setTimeout\(resolve,60000\)/u);
   assert.match(driver, /retries: kind === 'required_timeout' \? 1 : 0/u);
+});
+
+test('installed Delivery keeps its own free bounded production journey and cannot override its capability gate', async () => {
+  const workflow = await readFile(workflowUrl, 'utf8');
+  const job = workflow.match(/\n  linux-installed-delivery:\n[\s\S]*?(?=\n  [a-z][a-z0-9-]*:\n|$)/u)?.[0];
+  assert(job, 'Delivery requires its own real installed campaign');
+  assert.match(job, /runs-on: ubuntu-22\.04\n/u); assert.match(job, /timeout-minutes: 20\n/u);
+  assert.doesNotMatch(job, /(?:continue-on-error|needs):/u);
+  assert.match(job, /persist-credentials: false/u);
+  assert.match(job, /libext2fs-dev pkg-config/u);
+  assert.match(job, /qualify-systemd-user\.sh --run-delivery-journey "\$probe_node"/u);
+  assert.match(job, /if: always\(\)[\s\S]*actions\/upload-artifact@v4/u);
+  assert.match(job, /name: installed-delivery-journey-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/u);
+  assert.match(job, /retention-days: 7/u);
+  const consumer = await readFile(new URL('../../scripts/kernel/qualify-installed-delivery-journey.ts', import.meta.url), 'utf8');
+  assert.match(consumer, /await runInstalledNodeJourney\(filename, 'delivery'\)/u);
+  const driver = await readFile(new URL('../../scripts/kernel/testing/installed-node-journey.ts', import.meta.url), 'utf8');
+  assert.match(driver, /assert\(supported,[\s\S]*the genuine production composition must advertise explicit Delivery/u);
+  assert.doesNotMatch(driver, /INSTALLED_DELIVERY_COMPOSITION_COMPLETE|supportsInstalledDelivery\s*=|featureOverride/u);
 });

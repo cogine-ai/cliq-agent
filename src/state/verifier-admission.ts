@@ -15,7 +15,7 @@ import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
 import type { StateOwnerContext } from './state-owner.js';
 import { decodeVerifierCommand, decodeVerifierEnvironment, decodeVerifierSpec } from './verifier-artifacts.js';
 import { sampleCanonicalNow } from './canonical-time.js';
-import { exactKeys } from '../policy/runtime-authority.js';
+import { exactKeys, verifyRuntimeBundle } from '../policy/runtime-authority.js';
 import { decodeRetainedRunAssembly } from '../model/run-assembly.js';
 import { readCheckpoint, readControlRequest, readRun } from './rows.js';
 import { readRetainedControlChannelClosure } from './control-channel.js';
@@ -220,6 +220,16 @@ export async function validateVerifierRunAdmission(driver: SqliteDriver, artifac
   runtime: AuthorizationRuntime, runId: string, signal?: AbortSignal): Promise<{ authorizationReceiptRefs: string[] }> {
   signal?.throwIfAborted();
   const run = readRun(driver, runId), spec = await readCanonicalArtifact<RunSpec>(artifacts, run.specRef);
+  if (spec.operation === 'delivery') {
+    verifyRuntimeBundle(runtime.bundle, runtime.releaseKeys);
+    const { readDeliveryRunAdmission } = await import('./reducers/delivery-admission.js');
+    const original = await readDeliveryRunAdmission(driver, artifacts, runId, { signal });
+    if (!same(original.run, run) || !same(original.spec, spec) ||
+        original.source.assembly.runtime.runtimeBundleRef !== canonicalSha256(runtime.bundle) ||
+        original.source.assembly.runtime.runtimeBundleManifestDigest !== runtime.bundle.manifestDigest)
+      throw new TypeError('delivery verifier admission changed its original retained source runtime');
+    return { authorizationReceiptRefs: [] };
+  }
   const frozen = decodeVerifierSpec(await readCanonicalArtifact(artifacts, spec.verifierSpecRef));
   if (!frozen.verifiers.length) return { authorizationReceiptRefs: [] };
   const admission = driver.prepare('SELECT principal_id, admission_key, admission_intent_digest, admitted_request_digest, admission_request_id FROM runs WHERE id = ?')

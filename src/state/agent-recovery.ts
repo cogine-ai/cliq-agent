@@ -24,6 +24,16 @@ import { validateFinalCandidateRecovery } from './final-candidate-recovery.js';
 import type { SqliteDriver } from './sqlite-driver.js';
 import { readVerifierProgress, type VerifierProgress } from './verifier-recovery.js';
 import { validateVerifierHistory } from './verifier-history.js';
+import { validateDeliveryRecovery } from './delivery-recovery.js';
+
+/** Data restriction only. Each permitted subject still requires its complete
+ * subject-specific retained policy/control/Journal history below. */
+export function assertRunPolicyDecisionSubject(operation: RunSpec['operation'], subjectKind: unknown): void {
+  if (!['agent', 'delivery'].includes(operation) || subjectKind !== 'verifier_launch' &&
+      !(operation === 'agent' && subjectKind === 'tool_call') &&
+      !(operation === 'delivery' && subjectKind === 'delivery_plan'))
+    throw new TypeError('policy decision has an unsupported subject for its Run operation');
+}
 
 /** Fixed inert boundaries only, never refs, timing or execution authority. */
 export type AgentRecoveryPhase = 'model' | 'items' | 'candidate' | 'verifier' | 'tool' | 'input';
@@ -127,8 +137,10 @@ export async function validateAgentRecovery(input: {
       throw new TypeError('Run item differs from its durable owner row');
     }
     items.set(item.itemId, item);
-    if (item.kind === 'policy_decision' && item.subjectKind !== 'tool_call' && item.subjectKind !== 'verifier_launch')
-      throw new TypeError('policy decision has an unsupported subject');
+    if (spec.operation === 'delivery' && !['delivery_merge', 'delivery_merge_conflict', 'final_candidate', 'verifier_result',
+      'verifier_stop', 'policy_decision', 'delivery_decision', 'publication_path_progress', 'publication_path_result', 'publication_late_observation'].includes(item.kind))
+      throw new TypeError('delivery history acquired an agentic continuation item');
+    if (item.kind === 'policy_decision') assertRunPolicyDecisionSubject(spec.operation, item.subjectKind);
     if (item.kind === 'model_turn' || item.kind === 'assistant_tool_batch') {
       const turn = turns.get(item.modelTurnRef)?.turn;
       const completion = journal.find((entry) => entry.opKind === 'model' && entry.phase === 'completed' &&
@@ -177,6 +189,10 @@ export async function validateAgentRecovery(input: {
       if (payload.outcome === 'error') await artifacts.readBytes(payload.diagnosticRef);
     }
   }
+  if (spec.operation === 'delivery' && !input.driver) throw new TypeError('delivery history requires its owning retained SQLite cut');
+  const deliveryMerges = input.driver ? await validateDeliveryRecovery(input.driver, artifacts, {
+    run, runSpec: spec, items: input.items, journal, checkpoints: input.checkpoints, decodedItems: items
+  }) : undefined;
   phase('candidate');
   const verifierProgressByCandidate = new Map<string, VerifierProgress>();
   for (const row of input.items.filter(row => items.get(row.itemId)?.kind === 'final_candidate')) {
@@ -186,7 +202,7 @@ export async function validateAgentRecovery(input: {
     }, row.itemId));
   }
   await validateFinalCandidateRecovery({ artifacts, run, spec, items: input.items, journal,
-    checkpoints: input.checkpoints, workspaceGenerations: input.workspaceGenerations, decodedItems: items, verifierProgressByCandidate });
+    checkpoints: input.checkpoints, workspaceGenerations: input.workspaceGenerations, decodedItems: items, verifierProgressByCandidate, deliveryMerges });
   phase('verifier');
   let repairAttempts = 0;
   if (input.driver) ({ repairAttempts } = await validateVerifierHistory({ driver: input.driver, artifacts, run, spec, items: input.items, journal,
@@ -194,10 +210,12 @@ export async function validateAgentRecovery(input: {
   else if ([...items.values()].some(item => ['final_candidate', 'verifier_result', 'verifier_stop', 'repair_diagnostic'].includes(item.kind)) ||
     journal.some(entry => entry.opKind === 'verifier') || run.repairCount || run.budgetConsumed.repairAttempts)
     throw new TypeError('verifier history requires its original retained SQLite cut');
-  phase('tool');
-  await validateToolRecovery({ artifacts, run, spec, items, journal, checkpoints: input.checkpoints, workspaceGenerations: input.workspaceGenerations });
-  phase('input');
-  await validateUserInputRecovery({ artifacts, run, spec, items, journal, checkpoints: input.checkpoints });
+  if (spec.operation === 'agent') {
+    phase('tool');
+    await validateToolRecovery({ artifacts, run, spec, items, journal, checkpoints: input.checkpoints, workspaceGenerations: input.workspaceGenerations });
+    phase('input');
+    await validateUserInputRecovery({ artifacts, run, spec, items, journal, checkpoints: input.checkpoints });
+  }
   validateContextItems(input.context, input.items.map((row) => ({
     itemSeq: row.itemSeq, itemRef: row.payloadRef, item: items.get(row.itemId)!
   })));

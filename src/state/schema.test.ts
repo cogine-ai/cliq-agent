@@ -11,9 +11,67 @@ import {
   KERNEL_SCHEMA_V2_SQL,
   KERNEL_SCHEMA_V3_SQL,
   KERNEL_SCHEMA_V4_SQL,
+  KERNEL_SCHEMA_V5_SQL,
   readSchemaUserVersion
 } from './schema.js';
 import { openSqliteDriver } from './sqlite-driver.js';
+
+test('schema v5 retains exact source history while adding only the apply method to its owning table', async () => {
+  const stateRoot = await mkdtemp(path.join(process.cwd(), '.cliq-delivery-schema-upgrade-'));
+  const driver = openSqliteDriver(path.join(stateRoot, 'kernel.sqlite3'));
+  const catalog = () => driver.prepare('SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name').all<{type: string;name: string;tbl_name: string;sql: string|null}>();
+  const row = { inspectionId: 'original', principalId: 'principal', method: 'run.submit', admissionKey: 'retained', admissionIntentDigest: 'intent',
+    workspaceIdentityDigest: 'workspace', phase: 'capturing', rowVersion: 1, cancelRequested: false };
+  const insert = (method: string, id: string, workspace: string) => driver.prepare(`INSERT INTO source_inspection_attempts
+    (inspection_id,principal_id,method,admission_key,admission_intent_digest,original_request_id,original_request_digest,
+     workspace_identity_digest,phase,row_version,row_json) VALUES (?,'principal',?,'retained','intent',?,'digest',?,'capturing',1,?)`)
+    .run(id, method, id, workspace, JSON.stringify({ ...row, inspectionId: id, method, workspaceIdentityDigest: workspace }));
+  try {
+    driver.transaction(connection => {
+      connection.exec(`PRAGMA application_id=${KERNEL_SQLITE_APPLICATION_ID}`);
+      connection.exec([KERNEL_SCHEMA_V1_SQL, KERNEL_SCHEMA_V2_SQL, KERNEL_SCHEMA_V3_SQL, KERNEL_SCHEMA_V4_SQL, KERNEL_SCHEMA_V5_SQL].join('\n'));
+      connection.exec('PRAGMA user_version=5');
+    });
+    insert('run.submit', 'original', 'workspace');
+    const original = driver.prepare('SELECT * FROM source_inspection_attempts').all();
+    assert.throws(() => insert('run.apply', 'fresh-apply', 'other-workspace'), /CHECK constraint failed/);
+    const before = catalog();
+    applyKernelSchema(driver);
+    assert.equal(readSchemaUserVersion(driver), KERNEL_STATE_SCHEMA_VERSION);
+    assert.deepEqual(driver.prepare('SELECT * FROM source_inspection_attempts').all(), original);
+    const expected = before.map(entry => ({ ...entry, sql: entry.name === 'source_inspection_attempts'
+      ? entry.sql!.replace("method = 'run.submit'", "method IN ('run.submit', 'run.apply')") : entry.sql }));
+    assert.deepEqual(catalog().map(entry => ({ ...entry })), expected, 'no other table, trigger, index or retained history may change');
+    insert('run.apply', 'fresh-apply', 'other-workspace');
+    assert.throws(() => insert('run.other', 'not-allowed', 'third-workspace'), /CHECK constraint failed/);
+    assert.throws(() => driver.prepare('DELETE FROM source_inspection_attempts WHERE inspection_id=?').run('original'), /history is retained/);
+    assert.throws(() => driver.prepare('UPDATE source_inspection_attempts SET method=? WHERE inspection_id=?').run('run.apply', 'original'), /identity is immutable/);
+    const after = catalog(); applyKernelSchema(driver); assert.deepEqual(catalog(), after);
+  } finally { driver.close(); await rm(stateRoot, { recursive: true, force: true }); }
+});
+
+test('failed apply schema migration rolls back original history, dropped guards and schema version together', async () => {
+  const stateRoot = await mkdtemp(path.join(process.cwd(), '.cliq-delivery-schema-rollback-'));
+  const driver = openSqliteDriver(path.join(stateRoot, 'kernel.sqlite3'));
+  const snapshot = () => ({ version: readSchemaUserVersion(driver),
+    catalog: driver.prepare('SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name').all(),
+    history: driver.prepare('SELECT * FROM source_inspection_attempts').all() });
+  try {
+    driver.transaction(connection => {
+      connection.exec(`PRAGMA application_id=${KERNEL_SQLITE_APPLICATION_ID}`);
+      connection.exec([KERNEL_SCHEMA_V1_SQL, KERNEL_SCHEMA_V2_SQL, KERNEL_SCHEMA_V3_SQL, KERNEL_SCHEMA_V4_SQL, KERNEL_SCHEMA_V5_SQL].join('\n'));
+      connection.exec('PRAGMA user_version=5');
+      // A real SQLite name collision fails after the migration drops its
+      // guards. No mocked transaction or manufactured recovery fact is used.
+      connection.exec('CREATE TABLE source_inspection_attempts_v5 (sentinel TEXT) STRICT');
+    });
+    const before = snapshot();
+    assert.throws(() => applyKernelSchema(driver), /already another table|already exists/);
+    assert.deepEqual(snapshot(), before);
+    driver.exec('DROP TABLE source_inspection_attempts_v5'); applyKernelSchema(driver);
+    assert.equal(readSchemaUserVersion(driver), KERNEL_STATE_SCHEMA_VERSION);
+  } finally { driver.close(); await rm(stateRoot, { recursive: true, force: true }); }
+});
 
 test('schema version is readable within the same read-only WAL snapshot as owner state', async () => {
   const stateRoot = await mkdtemp(path.join(process.cwd(), '.cliq-schema-read-cut-'));
@@ -153,8 +211,10 @@ test('schema v4 migration adds preparing to the same WorkerLaunch spine without 
     ]) assert.ok(update.includes(edge), `retained WorkerLaunch edge: ${edge}`);
     for (const trigger of [insert, update]) assert.ok(trigger.includes("WHEN (NEW.phase = 'retired') != (NEW.retired_at IS NOT NULL)"));
     assert.ok(update.includes('WHEN NEW.launch_id != OLD.launch_id OR NEW.run_id != OLD.run_id'));
-    assert.equal(readSchemaUserVersion(driver), 5);
-    const unchanged = (rows: ReturnType<typeof readCatalog>) => rows.filter(row => row.name !== insertName && row.name !== updateName);
+    assert.equal(readSchemaUserVersion(driver), KERNEL_STATE_SCHEMA_VERSION);
+    const unchanged = (rows: ReturnType<typeof readCatalog>) => rows.filter(row => row.name !== insertName && row.name !== updateName)
+      .map(row => ({ ...row, sql: row.name === 'source_inspection_attempts'
+        ? row.sql!.replace("method = 'run.submit'", "method IN ('run.submit', 'run.apply')") : row.sql }));
     assert.deepEqual(unchanged(after), unchanged(before), 'every table, index and other trigger must remain unchanged');
     const unretiredIndex = after.find(row => row.name === 'worker_launches_one_unretired_per_run');
     assert.equal(unretiredIndex?.type, 'index');
@@ -162,7 +222,7 @@ test('schema v4 migration adds preparing to the same WorkerLaunch spine without 
     assert.equal(after.filter(row => row.type === 'trigger').length, 21);
     applyKernelSchema(driver);
     assert.deepEqual(readCatalog(), after, 'schema v5 application is idempotent');
-    assert.equal(readSchemaUserVersion(driver), 5);
+    assert.equal(readSchemaUserVersion(driver), KERNEL_STATE_SCHEMA_VERSION);
   } finally {
     driver.close();
     await rm(stateRoot, { recursive: true, force: true });

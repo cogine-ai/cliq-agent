@@ -13,13 +13,19 @@ import { ArtifactCatalog } from './artifacts.js';
 import { ContentAddressedStore } from './cas.js';
 import { planDeliverySource } from './delivery-source.js';
 import { KernelStorageError } from './errors.js';
-import { CandidateSourceLimitError } from './result-source.js';
+import { fixtureSandboxProfile } from './testing/worker-launch.js';
+import type { DeliverySourceInput } from './delivery-source.js';
+import type { Diff3ComputationV1 } from '../kernel/diff3.js';
+import type { SandboxResourceSpec } from '../kernel/execution.js';
 
-async function fixture(t: TestContext, projectionChanges: Partial<SourceProjectionSpec> = {}) {
+async function fixture(t: TestContext, projectionChanges: Partial<SourceProjectionSpec> = {}, resourceChanges: Partial<SandboxResourceSpec> = {}) {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'cliq-delivery-source-'));
   const root = path.join(directory, 'cas'); await mkdir(root, { mode: 0o700 });
   t.after(() => rm(directory, { recursive: true, force: true }));
   const artifacts = new ArtifactCatalog(new ContentAddressedStore(root));
+  const profile = fixtureSandboxProfile();
+  Object.assign(profile.resources, resourceChanges); profile.profileDigest = digestOmitting(profile, 'profileDigest');
+  const sandboxProfileRef = (await artifacts.publishCanonical(profile, profile.format)).ref;
   const rules: FrozenIgnoreRulesV1 = { schemaVersion: 1, format: 'cliq-frozen-ignore-rules-v1',
     matcherVersion: 'cliq-git-wildmatch-v1', sources: [], rules: [], rulesDigest: '' };
   rules.rulesDigest = digestOmitting(rules, 'rulesDigest');
@@ -48,7 +54,9 @@ async function fixture(t: TestContext, projectionChanges: Partial<SourceProjecti
     value.manifestDigest = digestOmitting(value, 'manifestDigest');
     return { ref: (await artifacts.publishCanonical(value, value.format)).ref, value, entries };
   };
-  return { root, artifacts, rules, rulesRef, projection, projectionRef, file, source };
+  const plan = (input: DeliverySourceInput, computation?: Diff3ComputationV1) =>
+    planDeliverySource(artifacts, { ...input, sandboxProfileRef }, computation);
+  return { root, artifacts, rules, rulesRef, projection, projectionRef, file, source, plan, sandboxProfileRef };
 }
 
 test('delivery plans the exact B/S/A/M projection and A-to-M diff without publishing partial artifacts', async t => {
@@ -57,7 +65,7 @@ test('delivery plans the exact B/S/A/M projection and A-to-M diff without publis
   const desired = await f.source('result', [await f.file('a', 'agent\n'), await f.file('b', 'old\n')]);
   const captured = await f.source('base', [await f.file('a', 'old\n'), await f.file('b', 'user\n')]);
   const before = (await readdir(f.root)).sort();
-  const plan = await planDeliverySource(f.artifacts, { sourceBaseRef: base.ref, sourceDesiredRef: desired.ref,
+  const plan = await f.plan({ sourceBaseRef: base.ref, sourceDesiredRef: desired.ref,
     capturedWorkspaceRef: captured.ref });
   assert.equal(plan.kind, 'ready');
   if (plan.kind !== 'ready') assert.fail('disjoint path changes must merge');
@@ -82,7 +90,7 @@ test('strict source-result reuse and normalized captured no-op are separate comp
   for (const [s, a, identicalToSourceDesired, noOp] of [
     [desired, base, true, false], [desired, alreadyApplied, true, true], [unchangedDesired, userCaptured, false, true],
   ] as const) {
-    const plan = await planDeliverySource(f.artifacts, { sourceBaseRef: base.ref, sourceDesiredRef: s.ref, capturedWorkspaceRef: a.ref });
+    const plan = await f.plan({ sourceBaseRef: base.ref, sourceDesiredRef: s.ref, capturedWorkspaceRef: a.ref });
     assert.equal(plan.kind, 'ready');
     if (plan.kind !== 'ready') assert.fail('one-sided source changes must be deterministic');
     assert.equal(plan.identicalToSourceDesired, identicalToSourceDesired); assert.equal(plan.noOp, noOp);
@@ -102,7 +110,7 @@ test('same-mode text merge preserves BOM, Unicode, CRLF and exact new blob bytes
   const desired = await f.source('result', [await f.file('a', '\ufeffFIRST\r\n二\nlast')]);
   const captured = await f.source('base', [await f.file('a', '\ufefffirst\r\n二\nLAST🙂')]);
   const input = { sourceBaseRef: base.ref, sourceDesiredRef: desired.ref, capturedWorkspaceRef: captured.ref };
-  const before = (await readdir(f.root)).sort(), plan = await planDeliverySource(f.artifacts, input);
+  const before = (await readdir(f.root)).sort(), plan = await f.plan(input);
   assert.equal(plan.kind, 'ready');
   if (plan.kind !== 'ready') assert.fail('disjoint text edits must merge');
   const result = plan.entries.entries[0]; assert.equal(result.kind, 'file');
@@ -118,7 +126,7 @@ test('same-mode text merge preserves BOM, Unicode, CRLF and exact new blob bytes
     const published = await f.artifacts.publishBytes(artifact.bytes, artifact.mediaType, artifact.schemaKind);
     assert.equal(published.ref, artifact.ref);
   }
-  const repeated = await planDeliverySource(f.artifacts, input);
+  const repeated = await f.plan(input);
   assert.equal(repeated.kind, 'ready');
   if (repeated.kind !== 'ready') assert.fail('publishing the plan must not change the merge');
   assert.equal(repeated.sourceRef, plan.sourceRef); assert.equal(repeated.diffRef, plan.diffRef); assert.equal(repeated.summaryRef, plan.summaryRef);
@@ -140,13 +148,13 @@ test('only eligible regular files enter text merge; binary one-sided changes rem
   for (const entry of cases) {
     const base = await f.source('base', [entry.base]), desired = await f.source('result', [entry.desired]), captured = await f.source('base', [entry.current]);
     const before = (await readdir(f.root)).sort();
-    const plan = await planDeliverySource(f.artifacts, { sourceBaseRef: base.ref, sourceDesiredRef: desired.ref, capturedWorkspaceRef: captured.ref });
+    const plan = await f.plan({ sourceBaseRef: base.ref, sourceDesiredRef: desired.ref, capturedWorkspaceRef: captured.ref });
     assert.equal(plan.kind, 'conflict');
     if (plan.kind !== 'conflict') assert.fail('ineligible bilateral content must conflict');
     assert.equal(plan.conflicts[0].reason, entry.reason);
     for (const field of ['source', 'sourceRef', 'diff', 'diffRef', 'summary', 'summaryRef', 'publications']) assert.equal(Object.hasOwn(plan, field), false);
     assert.deepEqual((await readdir(f.root)).sort(), before);
-    const oneSided = await planDeliverySource(f.artifacts, { sourceBaseRef: base.ref, sourceDesiredRef: desired.ref, capturedWorkspaceRef: base.ref });
+    const oneSided = await f.plan({ sourceBaseRef: base.ref, sourceDesiredRef: desired.ref, capturedWorkspaceRef: base.ref });
     assert.equal(oneSided.kind, 'ready');
     if (oneSided.kind === 'ready') assert.equal(oneSided.sourceRef, desired.ref);
   }
@@ -164,7 +172,7 @@ test('individually valid source graphs can conflict only after combination witho
   for (const value of cases) {
     const base = await f.source('base', value.base), desired = await f.source('result', value.desired), captured = await f.source('base', value.current);
     const before = (await readdir(f.root)).sort();
-    const plan = await planDeliverySource(f.artifacts, { sourceBaseRef: base.ref, sourceDesiredRef: desired.ref, capturedWorkspaceRef: captured.ref });
+    const plan = await f.plan({ sourceBaseRef: base.ref, sourceDesiredRef: desired.ref, capturedWorkspaceRef: captured.ref });
     assert.equal(plan.kind, 'conflict');
     if (plan.kind !== 'conflict') assert.fail('the combined graph must not be repaired silently');
     assert.deepEqual(plan.conflicts, [{ reason: 'merged_graph' }]);
@@ -172,7 +180,7 @@ test('individually valid source graphs can conflict only after combination witho
     assert.deepEqual((await readdir(f.root)).sort(), before);
   }
   const base = await f.source('base', []), bad = await f.source('result', [await f.file('p/child', 'bad input')]);
-  await assert.rejects(planDeliverySource(f.artifacts, { sourceBaseRef: base.ref, sourceDesiredRef: bad.ref, capturedWorkspaceRef: base.ref }),
+  await assert.rejects(f.plan({ sourceBaseRef: base.ref, sourceDesiredRef: bad.ref, capturedWorkspaceRef: base.ref }),
     error => error instanceof KernelStorageError && error.code === 'ARTIFACT_MISMATCH');
 });
 
@@ -184,19 +192,19 @@ test('complete role, workspace, entry, projection and ignore identities are chec
     { frozenIgnoreRulesDigest: '3'.repeat(64) }, { treeDigest: '4'.repeat(64) }, { unknown: true },
   ]) {
     const bad = await f.source('result', [entry], changes as Partial<SourceManifest>);
-    await assert.rejects(planDeliverySource(f.artifacts, { sourceBaseRef: base.ref, sourceDesiredRef: bad.ref, capturedWorkspaceRef: base.ref }),
+    await assert.rejects(f.plan({ sourceBaseRef: base.ref, sourceDesiredRef: bad.ref, capturedWorkspaceRef: base.ref }),
       error => error instanceof KernelStorageError && error.code === 'ARTIFACT_MISMATCH');
   }
   assert.equal(entry.kind, 'file');
   if (entry.kind !== 'file') assert.fail('fixture must contain a file');
   const badSize = await f.source('result', [{ ...entry, size: entry.size + 1 }]);
-  await assert.rejects(planDeliverySource(f.artifacts, { sourceBaseRef: base.ref, sourceDesiredRef: badSize.ref, capturedWorkspaceRef: base.ref }),
+  await assert.rejects(f.plan({ sourceBaseRef: base.ref, sourceDesiredRef: badSize.ref, capturedWorkspaceRef: base.ref }),
     error => error instanceof KernelStorageError && error.code === 'ARTIFACT_MISMATCH');
   const unsafe = await f.source('result', [{ path: 'A', kind: 'directory', mode: 0o755 }, { path: 'a', kind: 'directory', mode: 0o755 }]);
-  await assert.rejects(planDeliverySource(f.artifacts, { sourceBaseRef: base.ref, sourceDesiredRef: unsafe.ref, capturedWorkspaceRef: base.ref }),
+  await assert.rejects(f.plan({ sourceBaseRef: base.ref, sourceDesiredRef: unsafe.ref, capturedWorkspaceRef: base.ref }),
     error => error instanceof KernelStorageError && error.code === 'ARTIFACT_MISMATCH');
   const selected = { sourceBaseRef: base.ref, sourceDesiredRef: desired.ref, capturedWorkspaceRef: base.ref };
-  const pending = planDeliverySource(f.artifacts, selected); selected.sourceDesiredRef = badSize.ref;
+  const pending = f.plan(selected); selected.sourceDesiredRef = badSize.ref;
   const plan = await pending;
   assert.equal(plan.kind, 'ready'); assert.equal(plan.input.sourceDesiredRef, desired.ref);
 });
@@ -205,7 +213,7 @@ test('Git, includes and nonempty ignore behavior is explicitly unsupported rathe
   const f = await fixture(t), entry = await f.file('a', 'data'), base = await f.source('base', [entry]);
   const git = await f.source('result', [entry], { git: { repositoryIdentityDigest: '1'.repeat(64),
     head: { kind: 'unborn', branch: 'main' }, indexRef: '2'.repeat(64), indexTreeObjectId: '3'.repeat(40) } });
-  await assert.rejects(planDeliverySource(f.artifacts, { sourceBaseRef: base.ref, sourceDesiredRef: git.ref, capturedWorkspaceRef: base.ref }),
+  await assert.rejects(f.plan({ sourceBaseRef: base.ref, sourceDesiredRef: git.ref, capturedWorkspaceRef: base.ref }),
     error => error instanceof KernelStorageError && error.code === 'UNSUPPORTED_PLATFORM');
   for (const unsupported of ['includes', 'ignore'] as const) {
     const rules = { ...f.rules, ...(unsupported === 'ignore' ? { rules: [{ order: 0, sourceIndex: 0, sourceLine: 1,
@@ -219,7 +227,7 @@ test('Git, includes and nonempty ignore behavior is explicitly unsupported rathe
     const changes = { sourceProjectionRef: projectionRef, sourceProjectionDigest: projection.projectionDigest,
       frozenIgnoreRulesRef: rulesRef, frozenIgnoreRulesDigest: rules.rulesDigest };
     const b = await f.source('base', [entry], changes), s = await f.source('result', [entry], changes);
-    await assert.rejects(planDeliverySource(f.artifacts, { sourceBaseRef: b.ref, sourceDesiredRef: s.ref, capturedWorkspaceRef: b.ref }),
+    await assert.rejects(f.plan({ sourceBaseRef: b.ref, sourceDesiredRef: s.ref, capturedWorkspaceRef: b.ref }),
       error => error instanceof KernelStorageError && error.code === 'UNSUPPORTED_PLATFORM');
   }
 });
@@ -231,7 +239,7 @@ test('unchanged blobs are completely rehashed even when another path would produ
   assert.equal(retained.kind, 'file'); if (retained.kind !== 'file') assert.fail('fixture must contain a file');
   const actual = path.join(f.root, retained.blobRef);
   await chmod(actual, 0o600); await writeFile(actual, Buffer.from('RETAINED')); await chmod(actual, 0o400);
-  await assert.rejects(planDeliverySource(f.artifacts, { sourceBaseRef: base.ref, sourceDesiredRef: desired.ref, capturedWorkspaceRef: captured.ref }), /byte count|corrupt/u);
+  await assert.rejects(f.plan({ sourceBaseRef: base.ref, sourceDesiredRef: desired.ref, capturedWorkspaceRef: captured.ref }), /byte count|corrupt/u);
 });
 
 test('ordinary files may reuse structured bytes without schema labels substituting for either validation', async t => {
@@ -239,32 +247,131 @@ test('ordinary files may reuse structured bytes without schema labels substituti
   assert.equal(shared.kind, 'file'); if (shared.kind !== 'file') assert.fail('fixture must contain a file');
   assert.equal(shared.blobRef, f.projectionRef);
   const base = await f.source('base', [shared]), desired = await f.source('result', [shared]);
-  const plan = await planDeliverySource(f.artifacts, { sourceBaseRef: base.ref, sourceDesiredRef: desired.ref, capturedWorkspaceRef: base.ref });
+  const plan = await f.plan({ sourceBaseRef: base.ref, sourceDesiredRef: desired.ref, capturedWorkspaceRef: base.ref });
   assert.equal(plan.kind, 'ready');
   const descriptions = plan.metadata.filter(value => value.ref === f.projectionRef);
   assert.equal(descriptions.length, 1); assert.equal(descriptions[0].schemaKind, 'cliq-source-projection-v1');
 });
 
-test('frozen result limits and owner cancellation remain exceptions, with no partial publication', async t => {
+test('frozen result limits return deterministic measured refusals without publishing partial source', async t => {
   for (const [limits, reason] of [[{ maxChangedPaths: 0 }, 'changed_paths'], [{ maxChangedBytes: 0 }, 'changed_bytes']] as const) {
     const f = await fixture(t, limits), base = await f.source('base', [await f.file('a', 'before')]);
     const desired = await f.source('result', [await f.file('a', 'after')]), before = (await readdir(f.root)).sort();
-    await assert.rejects(planDeliverySource(f.artifacts, { sourceBaseRef: base.ref, sourceDesiredRef: desired.ref, capturedWorkspaceRef: base.ref }),
-      error => error instanceof CandidateSourceLimitError && error.reason === reason);
+    const plan = await f.plan({ sourceBaseRef: base.ref, sourceDesiredRef: desired.ref, capturedWorkspaceRef: base.ref });
+    assert.deepEqual(plan.kind === 'limited' && plan.limit, { kind: reason, observed: reason === 'changed_paths' ? 1 : 5, limit: 0 });
+    for (const field of ['source', 'sourceRef', 'entries', 'diff', 'diffRef', 'summary', 'summaryRef', 'publications'])
+      assert.equal(Object.hasOwn(plan, field), false);
     assert.deepEqual((await readdir(f.root)).sort(), before);
   }
+});
+
+test('owner cancellation and arbitrary work errors remain errors, never deterministic source limits', async t => {
   const f = await fixture(t), long = 'x'.repeat(50_000), base = await f.source('base', [await f.file('a', `${long}\ntail`)]);
   const desired = await f.source('result', [await f.file('a', `${long}\nTAIL`)]);
   const captured = await f.source('base', [await f.file('a', `y${long}\ntail`)]);
   const input = { sourceBaseRef: base.ref, sourceDesiredRef: desired.ref, capturedWorkspaceRef: captured.ref };
   const before = (await readdir(f.root)).sort(), cancellation = new Error('owner cancelled merge'), resource = new Error('owner exhausted merge work');
-  const early = new AbortController(), pending = planDeliverySource(f.artifacts, input, { signal: early.signal }); early.abort(cancellation);
+  const early = new AbortController(), pending = f.plan(input, { signal: early.signal }); early.abort(cancellation);
   await assert.rejects(pending, error => error === cancellation);
-  await assert.rejects(planDeliverySource(f.artifacts, input, { onWork: ({ totalWork }) => { if (totalWork >= 4096) throw resource; } }), error => error === resource);
+  await assert.rejects(f.plan(input, { onWork: ({ totalWork }) => { if (totalWork >= 4096) throw resource; } }), error => error === resource);
   const controller = new AbortController();
-  await assert.rejects(planDeliverySource(f.artifacts, input, { signal: controller.signal,
+  await assert.rejects(f.plan(input, { signal: controller.signal,
     onWork: ({ totalWork }) => { if (totalWork >= 4096) setImmediate(() => controller.abort(cancellation)); } }), error => error === cancellation);
   assert.deepEqual((await readdir(f.root)).sort(), before);
+});
+
+test('a parent catalog cancellation after real diff3 work rejects the same computation without partial publication', async t => {
+  const f = await fixture(t), long = 'x'.repeat(50_000), base = await f.source('base', [await f.file('a', `${long}\ntail`)]);
+  const desired = await f.source('result', [await f.file('a', `${long}\nTAIL`)]);
+  const captured = await f.source('base', [await f.file('a', `y${long}\ntail`)]);
+  const before = (await readdir(f.root)).sort(), parent = new AbortController(), reason = new Error('parent catalog revoked during diff3');
+  const view = f.artifacts.withReadSignal(parent.signal);
+  let worked = false;
+  await assert.rejects(planDeliverySource(view, { sourceBaseRef: base.ref, sourceDesiredRef: desired.ref,
+    capturedWorkspaceRef: captured.ref, sandboxProfileRef: f.sandboxProfileRef }, {
+    onWork({ totalWork }) { if (totalWork >= 4096 && !worked) { worked = true; parent.abort(reason); } }
+  }), error => error === reason);
+  assert.equal(worked, true, 'the original complete CAS reads must reach real diff3 CPU work before cancellation');
+  assert.deepEqual((await readdir(f.root)).sort(), before);
+});
+
+test('merged regular bytes and largest file reproduce the frozen profile limits without counting symlink payloads', async t => {
+  const f = await fixture(t, { maxChangedBytes: 4 * 1024 ** 3 },
+    { maxGenerationBytes: 256 * 1024 ** 2, maxSingleFileBytes: 1024 ** 2 });
+  const shared = await f.file('shared', Buffer.alloc(1024 ** 2, 42));
+  const files = (count: number) => Array.from({ length: count }, (_, index) => ({ ...shared, path: `file-${String(index).padStart(3, '0')}` }));
+  const base = await f.source('base', []), captured = await f.source('base', files(128)), desired = await f.source('result', files(257).slice(128));
+  const before = (await readdir(f.root)).sort();
+  const over = await f.plan({ sourceBaseRef: base.ref, sourceDesiredRef: desired.ref, capturedWorkspaceRef: captured.ref });
+  assert.deepEqual(over.kind === 'limited' && over.limit, { kind: 'generation_bytes', observed: 257 * 1024 ** 2, limit: 256 * 1024 ** 2 });
+  const exactSource = await f.source('result', files(256));
+  const exact = await f.plan({ sourceBaseRef: base.ref, sourceDesiredRef: exactSource.ref, capturedWorkspaceRef: base.ref });
+  assert.equal(exact.kind, 'ready');
+  const link = { path: 'link', kind: 'symlink' as const, mode: 0o777, target: 'file-000', targetDigest: sha256Bytes(Buffer.from('file-000')) };
+  const withLink = await f.source('result', [...files(256), link]);
+  assert.equal((await f.plan({ sourceBaseRef: base.ref, sourceDesiredRef: withLink.ref, capturedWorkspaceRef: base.ref })).kind, 'ready');
+  // Each genuine byte input fits 1 MiB; disjoint line insertions combine to
+  // 1 MiB + 1 only in M. No oversized input is passed off as an admitted Run.
+  const firstLine = 'a'.repeat(524_287), lastLine = 'b'.repeat(524_287);
+  const textBase = await f.source('base', [await f.file('large', `${firstLine}\n${lastLine}`)]);
+  const big = await f.source('result', [await f.file('large', `${firstLine}a\n${lastLine}`)]);
+  const textCaptured = await f.source('base', [await f.file('large', `${firstLine}\n${lastLine}b`)]);
+  const singleInput = { sourceBaseRef: textBase.ref, sourceDesiredRef: big.ref, capturedWorkspaceRef: textCaptured.ref };
+  const single = await f.plan(singleInput);
+  assert.deepEqual(single.kind === 'limited' && single.limit, { kind: 'single_file_bytes', observed: 1024 ** 2 + 1, limit: 1024 ** 2 });
+  const afterPlanning = (await readdir(f.root)).sort();
+  assert.ok(afterPlanning.length > before.length, 'only explicit fixture publications add new CAS objects');
+  const againBefore = afterPlanning;
+  const again = await f.plan(singleInput);
+  assert.deepEqual(again, single); assert.deepEqual((await readdir(f.root)).sort(), againBefore);
+});
+
+test('fixed limit precedence, equality and original profile integrity are reproduced from complete CAS bytes', async t => {
+  const f = await fixture(t, { maxChangedPaths: 1, maxChangedBytes: 1 }, { maxSingleFileBytes: 1024 ** 2 });
+  const base = await f.source('base', []), bigFile = await f.file('large', Buffer.alloc(1024 ** 2 + 1, 45));
+  const desired = await f.source('result', [bigFile, await f.file('second', 'b')]);
+  const input = { sourceBaseRef: base.ref, sourceDesiredRef: desired.ref, capturedWorkspaceRef: base.ref };
+  const paths = await f.plan(input);
+  assert.deepEqual(paths.kind === 'limited' && paths.limit, { kind: 'changed_paths', observed: 2, limit: 1 });
+  const oneFile = await f.source('result', [bigFile]);
+  const bytes = await f.plan({ ...input, sourceDesiredRef: oneFile.ref });
+  assert.deepEqual(bytes.kind === 'limited' && bytes.limit, { kind: 'changed_bytes', observed: 1024 ** 2 + 1, limit: 1 });
+  const exactSource = await f.source('result', [await f.file('one', 'a')]);
+  assert.equal((await f.plan({ ...input, sourceDesiredRef: exactSource.ref })).kind, 'ready');
+  const profile = await f.artifacts.readCanonical<Record<string, unknown>>(f.sandboxProfileRef);
+  const invalidProfile = await f.artifacts.publishCanonical({ ...profile, ignored: true }, 'cliq-sandbox-profile-v1');
+  await assert.rejects(planDeliverySource(f.artifacts, { ...input, sandboxProfileRef: invalidProfile.ref }), { code: 'ARTIFACT_MISMATCH' });
+  assert.equal(bigFile.kind, 'file');
+  if (bigFile.kind !== 'file') assert.fail('fixture must be regular');
+  const blobPath = path.join(f.root, bigFile.blobRef);
+  await chmod(blobPath, 0o600); await writeFile(blobPath, Buffer.alloc(bigFile.size, 46)); await chmod(blobPath, 0o400);
+  await assert.rejects(f.plan(input), /corrupt/u);
+});
+
+test('a limited text merge retains only completely read source metadata, never unpublished M artifacts', async t => {
+  const f = await fixture(t, { maxChangedPaths: 0 }), base = await f.source('base', [await f.file('a', 'head\ntail\n')]);
+  const desired = await f.source('result', [await f.file('a', 'HEAD\ntail\n')]), captured = await f.source('base', [await f.file('a', 'head\nTAIL\n')]);
+  const before = (await readdir(f.root)).sort();
+  const limited = await f.plan({ sourceBaseRef: base.ref, sourceDesiredRef: desired.ref, capturedWorkspaceRef: captured.ref });
+  assert.equal(limited.kind, 'limited');
+  for (const metadata of limited.metadata) assert.equal((await f.artifacts.readBytes(metadata.ref)).byteLength, metadata.byteLength);
+  assert.deepEqual((await readdir(f.root)).sort(), before);
+});
+
+test('a merge with 100001 explicit entries proves the fixed walker entry ceiling is exceeded even when its diff fits', async t => {
+  const f = await fixture(t), common: WorkspaceEntry[] = Array.from({ length: 99_999 }, (_, index) =>
+    ({ path: `d${String(index).padStart(6, '0')}`, kind: 'directory', mode: 0o755 }));
+  const base = await f.source('base', common);
+  const desired = await f.source('result', [...common, { path: 'source-added', kind: 'directory', mode: 0o755 }]);
+  const captured = await f.source('base', [...common, { path: 'user-added', kind: 'directory', mode: 0o755 }]);
+  const before = (await readdir(f.root)).sort();
+  const limited = await f.plan({ sourceBaseRef: base.ref, sourceDesiredRef: desired.ref, capturedWorkspaceRef: captured.ref });
+  assert.deepEqual(limited.kind === 'limited' && limited.limit, { kind: 'merged_entries', observed: 100_001, limit: 100_000 });
+  assert.deepEqual((await readdir(f.root)).sort(), before);
+  // Removing the bilateral addition is an exact 100000-entry output. This is
+  // not a proof that a real walk has no other hidden/excluded inventory.
+  const exact = await f.plan({ sourceBaseRef: base.ref, sourceDesiredRef: desired.ref, capturedWorkspaceRef: base.ref });
+  assert.equal(exact.kind, 'ready');
 });
 
 test('add, delete, mode and type fast paths preserve full entries while bilateral differences conflict', async t => {
@@ -293,7 +400,7 @@ test('add, delete, mode and type fast paths preserve full entries while bilatera
     const base = await f.source('base', value.base ? [value.base] : []);
     const desired = await f.source('result', value.desired ? [value.desired] : []);
     const captured = await f.source('base', value.current ? [value.current] : []);
-    const plan = await planDeliverySource(f.artifacts, { sourceBaseRef: base.ref, sourceDesiredRef: desired.ref, capturedWorkspaceRef: captured.ref });
+    const plan = await f.plan({ sourceBaseRef: base.ref, sourceDesiredRef: desired.ref, capturedWorkspaceRef: captured.ref });
     assert.equal(plan.kind, value.conflict ? 'conflict' : 'ready', JSON.stringify(value));
     if (plan.kind === 'ready') assert.deepEqual(plan.entries.entries, value.expected ? [value.expected] : []);
     else assert.equal(plan.conflicts[0].reason, value.conflict);
@@ -307,7 +414,7 @@ test('legal one-sided directory additions, removals and complete type replacemen
     [[], [dir]], [[dir], []], [[dir, child], [replacement]], [[replacement], [dir, child]],
   ] as Array<[WorkspaceEntry[], WorkspaceEntry[]]>) {
     const base = await f.source('base', baseEntries), desired = await f.source('result', desiredEntries);
-    const plan = await planDeliverySource(f.artifacts, { sourceBaseRef: base.ref, sourceDesiredRef: desired.ref, capturedWorkspaceRef: base.ref });
+    const plan = await f.plan({ sourceBaseRef: base.ref, sourceDesiredRef: desired.ref, capturedWorkspaceRef: base.ref });
     assert.equal(plan.kind, 'ready');
     if (plan.kind !== 'ready') assert.fail('data projection cannot hide a missing publication primitive');
     assert.equal(plan.sourceRef, desired.ref); assert.equal(plan.identicalToSourceDesired, true);
@@ -325,7 +432,7 @@ test('text content is rehashed per path rather than retained from a whole-graph 
   assert.equal(laterDesired.kind, 'file'); if (laterDesired.kind !== 'file') assert.fail('fixture must contain a file');
   const before = (await readdir(f.root)).sort();
   let changed = false;
-  await assert.rejects(planDeliverySource(f.artifacts, { sourceBaseRef: base.ref, sourceDesiredRef: desired.ref, capturedWorkspaceRef: captured.ref }, {
+  await assert.rejects(f.plan({ sourceBaseRef: base.ref, sourceDesiredRef: desired.ref, capturedWorkspaceRef: captured.ref }, {
     // Only this disposable fixture's storage is changed; no process pause,
     // synthetic proof or production source is involved in the read regression.
     onWork: () => {
@@ -343,7 +450,7 @@ test('merged bytes already retained at another input path reuse that blob with n
   const base = await f.source('base', [await f.file('a', 'one\nkeep\nlast'), existing]);
   const desired = await f.source('result', [await f.file('a', 'one\nkeep\nLAST'), existing]);
   const captured = await f.source('base', [await f.file('a', 'ONE\nkeep\nlast'), existing]);
-  const plan = await planDeliverySource(f.artifacts, { sourceBaseRef: base.ref, sourceDesiredRef: desired.ref, capturedWorkspaceRef: captured.ref });
+  const plan = await f.plan({ sourceBaseRef: base.ref, sourceDesiredRef: desired.ref, capturedWorkspaceRef: captured.ref });
   assert.equal(plan.kind, 'ready');
   if (plan.kind !== 'ready') assert.fail('disjoint edits may select an already retained blob');
   const merged = plan.entries.entries[0]; assert.equal(merged.kind, 'file'); assert.equal(existing.kind, 'file');
@@ -359,7 +466,7 @@ test('text work observations accumulate across paths so an owner budget cannot r
   const desired = await f.source('result', [await f.file('a', 'one\nkeep\nLAST'), await f.file('b', 'first\nkeep\nEND')]);
   const captured = await f.source('base', [await f.file('a', 'ONE\nkeep\nlast'), await f.file('b', 'FIRST\nkeep\nend')]);
   let previous = -1, starts = 0;
-  const plan = await planDeliverySource(f.artifacts, { sourceBaseRef: base.ref, sourceDesiredRef: desired.ref, capturedWorkspaceRef: captured.ref }, {
+  const plan = await f.plan({ sourceBaseRef: base.ref, sourceDesiredRef: desired.ref, capturedWorkspaceRef: captured.ref }, {
     onWork: ({ phase, totalWork }) => {
       assert.ok(totalWork >= previous, `text-work budget reset from ${previous} to ${totalWork}`);
       if (phase === 'tokenize') starts++;

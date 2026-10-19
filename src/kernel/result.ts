@@ -57,6 +57,24 @@ export type VerifierPlan = {
   planDigest: string;
 };
 
+export type InheritedVerificationProvenanceV1 = {
+  schemaVersion: 1;
+  format: 'cliq-inherited-verification-provenance-v1';
+  deliveryRunId: string;
+  sourceRunId: string;
+  sourceRunResultRef: ArtifactRef;
+  sourceRunResultDigest: string;
+  sourceVerificationClosureRef: ArtifactRef;
+  sourceVerificationClosureDigest: string;
+  resultSourceRef: ArtifactRef;
+  verifierSpecRef: ArtifactRef;
+  verifierSpecDigest: string;
+  verificationReceiptRefs: ArtifactRef[];
+  verificationReceiptDigests: string[];
+  createdAt: string;
+  provenanceDigest: string;
+};
+
 export type VerificationClosureV1 = {
   schemaVersion: 1;
   format: 'cliq-verification-closure-v1';

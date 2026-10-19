@@ -15,6 +15,7 @@ import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
 
 export type SourceInspectionReplayKey = Readonly<{
   principalId: string;
+  method?: 'run.submit' | 'run.apply';
   admissionKey: string;
   admissionIntentDigest: string;
 }>;
@@ -96,12 +97,12 @@ function plan(value: unknown): void {
 function decode(value: unknown): SourceInspectionAttemptV1 {
   const data = record(value, [...BASE, 'phase', 'inputRef', 'inputDigest', 'plan', 'processContainmentRef',
     'retirementEvidenceRef', 'retiredAt', 'outcome'], 'source inspection row');
-  if (data.schemaVersion !== 1 || data.attempt !== 1 || data.method !== 'run.submit') invalid('source inspection identity schema differs');
+  if (data.schemaVersion !== 1 || data.attempt !== 1 || data.method !== 'run.submit' && data.method !== 'run.apply') invalid('source inspection identity schema differs');
   for (const key of ['inspectionId', 'principalId', 'supervisorInstanceId']) text(data[key], key);
   const admissionKey = text(data.admissionKey, 'admission key');
   try { assertAdmissionKey(admissionKey); } catch { invalid('source inspection admission key is invalid'); }
   for (const key of ['admissionIntentDigest', 'targetRef', 'targetDigest', 'workspaceIdentityDigest', 'stagingNonceDigest', 'rowDigest']) digest(data[key], key);
-  if (data.inspectionId !== identityHash('cliq-source-inspection-v1', data.principalId, 'run.submit', data.admissionKey, data.admissionIntentDigest))
+  if (data.inspectionId !== identityHash('cliq-source-inspection-v1', data.principalId, data.method, data.admissionKey, data.admissionIntentDigest))
     invalid('source inspection id does not bind its exact admission key/intent');
   integer(data.stateOwnerEpoch, 'source inspection owner epoch', 1);
   const version = integer(data.rowVersion, 'source inspection row version', 1);
@@ -123,11 +124,16 @@ function decode(value: unknown): SourceInspectionAttemptV1 {
       digest(data.inputRef, 'inspection input ref'); digest(data.inputDigest, 'inspection input digest'); plan(data.plan);
       if (Object.hasOwn(data, 'processContainmentRef')) digest(data.processContainmentRef, 'inspection actual containment');
     } else if (Object.hasOwn(data, 'processContainmentRef')) invalid('retired inspection actual containment lacks its input/plan');
-    const result = record(data.outcome, ['kind', 'sourceManifestRef', 'sourceManifestDigest', 'privateGitStateRef', 'errorResponseRef'], 'inspection outcome');
+    const result = record(data.outcome, ['kind', 'sourceManifestRef', 'sourceManifestDigest', 'privateGitStateRef', 'errorResponseRef',
+      'captureTopologyRef', 'captureTopologyDigest'], 'inspection outcome');
     if (result.kind === 'captured') {
-      record(result, ['kind', 'sourceManifestRef', 'sourceManifestDigest', 'privateGitStateRef'], 'captured inspection outcome');
+      record(result, ['kind', 'sourceManifestRef', 'sourceManifestDigest', 'privateGitStateRef',
+        ...(data.method === 'run.apply' ? ['captureTopologyRef', 'captureTopologyDigest'] : [])], 'captured inspection outcome');
       digest(result.sourceManifestRef, 'source manifest ref'); digest(result.sourceManifestDigest, 'source manifest digest');
       if (Object.hasOwn(result, 'privateGitStateRef')) digest(result.privateGitStateRef, 'private Git state ref');
+      if (data.method === 'run.apply') {
+        digest(result.captureTopologyRef, 'capture topology ref'); digest(result.captureTopologyDigest, 'capture topology digest');
+      }
     } else if (result.kind === 'failed' || result.kind === 'cancelled') {
       record(result, ['kind', 'errorResponseRef'], 'failed inspection outcome'); digest(result.errorResponseRef, 'inspection error response');
     } else invalid('inspection outcome is not part of its closed schema');
@@ -159,8 +165,10 @@ export function readSourceInspectionAttempt(connection: SqliteConnection | Sqlit
   key: SourceInspectionReplayKey): SourceInspectionAttemptV1 | undefined {
   text(key.principalId, 'principal'); digest(key.admissionIntentDigest, 'admission intent');
   try { assertAdmissionKey(text(key.admissionKey, 'admission key')); } catch { invalid('admission key is invalid'); }
-  const row = connection.prepare(`${SELECT} WHERE principal_id = ? AND method = 'run.submit' AND admission_key = ?`)
-    .get<SqlRow>(key.principalId, key.admissionKey);
+  const method = key.method ?? 'run.submit';
+  if (method !== 'run.submit' && method !== 'run.apply') invalid('source inspection method is unsupported');
+  const row = connection.prepare(`${SELECT} WHERE principal_id = ? AND method = ? AND admission_key = ?`)
+    .get<SqlRow>(key.principalId, method, key.admissionKey);
   if (!row) return undefined;
   if (row.admission_intent_digest !== key.admissionIntentDigest)
     throw new KernelStorageError('ADMISSION_KEY_CONFLICT', 'source inspection admission key belongs to a different original intent');
@@ -179,9 +187,11 @@ export function readNextUnretiredSourceInspection(connection: SqliteConnection |
 /** Bounded original-request index only. Async replay still verifies that the
  * retained target/request bytes derive these columns before adopting a row. */
 export function readSourceInspectionRequest(connection: SqliteConnection | SqliteDriver,
-  principalId: string, requestId: string): { attempt: SourceInspectionAttemptV1; originalRequestId: string; originalRequestDigest: string } | undefined {
-  const row = connection.prepare(`${SELECT} WHERE principal_id = ? AND method = 'run.submit' AND original_request_id = ?`)
-    .get<SqlRow>(principalId, requestId);
+  principalId: string, requestId: string, method: 'run.submit' | 'run.apply' = 'run.submit'):
+{ attempt: SourceInspectionAttemptV1; originalRequestId: string; originalRequestDigest: string } | undefined {
+  if (method !== 'run.submit' && method !== 'run.apply') invalid('source inspection method is unsupported');
+  const row = connection.prepare(`${SELECT} WHERE principal_id = ? AND method = ? AND original_request_id = ?`)
+    .get<SqlRow>(principalId, method, requestId);
   if (!row) return undefined;
   return { attempt: fromRow(row), originalRequestId: row.original_request_id, originalRequestDigest: row.original_request_digest };
 }
@@ -202,7 +212,7 @@ export async function reserveSourceInspectionAttempt(driver: SqliteDriver, _arti
 Promise<Extract<SourceInspectionAttemptV1, { phase: 'capturing' }>> {
   await recheckVerifiedSourceInspectionTarget(owner, target);
   const held = readVerifiedSourceInspectionTarget(owner, target);
-  const key = { principalId: held.target.principalId, admissionKey: held.target.admissionKey,
+  const key = { principalId: held.target.principalId, method: held.target.method, admissionKey: held.target.admissionKey,
     admissionIntentDigest: held.target.admissionIntentDigest };
   let result: Extract<SourceInspectionAttemptV1, { phase: 'capturing' }> | undefined;
   let clockRejected = false;
@@ -212,16 +222,16 @@ Promise<Extract<SourceInspectionAttemptV1, { phase: 'capturing' }>> {
     if (physical.inspectionId !== held.inspectionId || physical.stagingIdentity.ownerUid !== owner.filesystem.root.ownerUid)
       throw new KernelStorageError('ARTIFACT_MISMATCH', 'source staging is not the verified target reservation');
     const existing = readSourceInspectionAttempt(connection, key);
-    const sameRequest = readSourceInspectionRequest(connection, key.principalId, held.request.requestId);
+    const sameRequest = readSourceInspectionRequest(connection, key.principalId, held.request.requestId, key.method);
     if (sameRequest && (sameRequest.originalRequestDigest !== held.request.requestDigest || sameRequest.attempt.inspectionId !== held.inspectionId))
       throw new KernelStorageError('REQUEST_ID_CONFLICT', 'source request id belongs to a different original intent');
-    const control = readControlRequest(connection, key.principalId, 'run.submit', held.request.requestId);
+    const control = readControlRequest(connection, key.principalId, key.method, held.request.requestId);
     if (control && control.requestDigest !== held.request.requestDigest)
       throw new KernelStorageError('REQUEST_ID_CONFLICT', 'source request id already has a different first response');
     if (control) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'source request already has a terminal response; replay it without capture');
-    const admitted = readAdmissionReplay(connection, 'runs', key.principalId, 'run.submit', key.admissionKey);
+    const admitted = readAdmissionReplay(connection, 'runs', key.principalId, key.method, key.admissionKey);
     if (admitted && admitted.admissionIntentDigest !== key.admissionIntentDigest)
-      throw new KernelStorageError('ADMISSION_KEY_CONFLICT', 'run.submit key names a different intent');
+      throw new KernelStorageError('ADMISSION_KEY_CONFLICT', 'source key names a different intent');
     if (existing || admitted) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'source intent already owns a retained attempt or Run');
     if (connection.prepare(`SELECT inspection_id FROM source_inspection_attempts
       WHERE workspace_identity_digest = ? AND phase != 'retired' LIMIT 1`).get(held.workspace.identityDigest))
@@ -230,7 +240,7 @@ Promise<Extract<SourceInspectionAttemptV1, { phase: 'capturing' }>> {
     if (advanceTimeFence(connection, owner.ownerEpoch) !== 'healthy') { clockRejected = true; return; }
     const now = readTimeFence(connection)!.lastAcceptedAt;
     const row: Extract<SourceInspectionAttemptV1, { phase: 'capturing' }> = {
-      schemaVersion: 1, inspectionId: held.inspectionId, attempt: 1, ...key, method: 'run.submit',
+      schemaVersion: 1, inspectionId: held.inspectionId, attempt: 1, ...key,
       targetRef: held.targetRef, targetDigest: held.target.targetDigest, workspaceIdentityDigest: held.workspace.identityDigest,
       stateOwnerEpoch: owner.ownerEpoch, supervisorInstanceId: owner.supervisorInstanceId,
       stagingNonceDigest: physical.stagingNonceDigest, stagingIdentity: physical.stagingIdentity,
@@ -242,7 +252,7 @@ Promise<Extract<SourceInspectionAttemptV1, { phase: 'capturing' }>> {
     connection.prepare(`INSERT INTO source_inspection_attempts
       (inspection_id, principal_id, method, admission_key, admission_intent_digest, original_request_id, original_request_digest,
        workspace_identity_digest, phase, row_version, row_json)
-      VALUES (?, ?, 'run.submit', ?, ?, ?, ?, ?, 'capturing', 1, ?)`).run(row.inspectionId, row.principalId, row.admissionKey,
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'capturing', 1, ?)`).run(row.inspectionId, row.principalId, row.method, row.admissionKey,
       row.admissionIntentDigest, held.request.requestId, held.request.requestDigest, row.workspaceIdentityDigest, canonicalJsonBytes(row).toString());
     result = immutableSnapshot(row);
   });

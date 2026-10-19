@@ -8,8 +8,9 @@ import { setImmediate } from 'node:timers/promises';
 import { DatabaseSync } from 'node:sqlite';
 
 import { canonicalSha256 } from '../kernel/canonical.js';
-import { digestOmitting, identityHash, normalizeAbsolutePath } from '../kernel/identity.js';
+import { digestOmitting, identityHash, normalizeAbsolutePath, sha256Bytes } from '../kernel/identity.js';
 import type { StateRootIdentityV1, WorkspaceGenerationIdentityV1 } from '../kernel/types.js';
+import type { PublicationArenaRetirementObservation } from '../kernel/publication.js';
 import type { RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { decodeWorkspaceGenerationIdentity } from './decoders.js';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
@@ -375,6 +376,12 @@ export function heldWorkspaceRootPath(root: HeldWorkspaceRoot): string {
  * opening; this handle neither grants permission nor exposes an execution FD. */
 export type HeldWorkspaceRoot = Readonly<{
   identity: DescriptorIdentity;
+  /** Current raw permission bits from the original held root FD. Source
+   * manifests normalize directory mode separately; identity stays unchanged. */
+  readonly mode: number;
+  /** Current actual link count from that same held root FD, never an identity
+   * field or a substituted value for a missing destination parent. */
+  readonly linkCount: number;
   repositoryDirectory?: DescriptorIdentity;
   assertHeld(): void;
   readGitConfigChunk(): Buffer | null;
@@ -417,7 +424,288 @@ type NativeLock = Omit<HeldStateOwnerLock, 'quarantineGeneration' | 'createGener
   openSourceInspectionStaging(stagingId: string, deviceId: string, fileId: string): NativeSourceInspectionStaging;
   createWorkerReservation(reservationId: string): NativeWorkerReservation;
   openWorkerReservation(reservationId: string, deviceId: string, fileId: string, ownerUid: number): NativeWorkerReservation;
+  openPublicationOperation(root: HeldWorkspaceRoot, operation: NativePublicationOperationInput): HeldPublicationOperation;
+  openPublicationNamespaceObserver(root: HeldWorkspaceRoot, input: NativePublicationNamespaceInput): NativePublicationNamespaceObserver;
 };
+type NativePublicationExpected = Readonly<{ kind: 'file'; mode: number; byteCount: number; digest: string } |
+  { kind: 'directory'; mode: number; identity: DescriptorIdentity } | { kind: 'symlink'; target: string; digest: string }>;
+type NativePublicationDesired = Readonly<{ kind: 'file'; mode: 420 | 493; byteCount: number; digest: string } |
+  { kind: 'directory'; mode: 493 } | { kind: 'symlink'; target: string; digest: string }>;
+export type NativePublicationOperationInput = Readonly<{ arenaId: string; path: string; parents: readonly (DescriptorIdentity & { mode: number })[];
+  /** Actual persisted PathProgress identities, not an adoption by name/hash.
+   * The owning production reader additionally requires its genuine brand. */
+  retained?: Readonly<{ arena: Pick<DescriptorIdentity, 'deviceId' | 'fileId'>;
+    destination?: Pick<DescriptorIdentity, 'deviceId' | 'fileId'>; preimage?: Pick<DescriptorIdentity, 'deviceId' | 'fileId'> }>;
+} & (
+  { kind: 'create'; expected: { kind: 'absent' }; desired: Exclude<NativePublicationDesired, { kind: 'directory' }>; stagingName: string } |
+  { kind: 'replace'; expected: NativePublicationExpected; desired: NativePublicationDesired; stagingName: string; quarantineName: string } |
+  { kind: 'mkdir'; expected: { kind: 'absent' }; desired: { kind: 'directory'; mode: 493 } } |
+  { kind: 'delete'; expected: NativePublicationExpected; desired: { kind: 'absent' }; quarantineName: string } |
+  { kind: 'abort_rmdir'; expected: Extract<NativePublicationExpected, { kind: 'directory' }>;
+      desired: { kind: 'absent' }; quarantineName: 'preimage' }
+)>;
+type PublicationPrivateIdentity = DescriptorIdentity & { mode: 448 };
+export type NativePublicationNamespaceInput = Readonly<{ arenaId: string; path: string;
+  parents: readonly (DescriptorIdentity & { mode: number })[]; arenaIdentity: PublicationPrivateIdentity; parentIdentity: PublicationPrivateIdentity;
+  desired: NativePublicationDesired | { kind: 'absent' }; destinationIdentity?: DescriptorIdentity;
+  stagingName?: string; quarantineName?: string; retainedPreimage?: Pick<DescriptorIdentity, 'deviceId' | 'fileId'>;
+}>;
+export type NativePublicationNamespaceObservation = Readonly<{ state: 'arena_absent' | 'original_arena_empty' | 'original_slots_present';
+  parentIdentity: PublicationPrivateIdentity; destination: NativePublicationObservation;
+  parent: Readonly<{ identity: DescriptorIdentity; mode: number; linkCount: number }> }>;
+export type PublicationNamespaceRetirement = Readonly<{ kind: 'namespace_absence'; arenaId: string; parentIdentity: PublicationPrivateIdentity;
+  arenaAbsent: true; arenaParentFsyncCompleted: true; workspaceParentFsyncCompleted: true }>;
+/** Read-only physical role. There is no method for release or maintenance. */
+export type HeldPublicationNamespaceObserver = Readonly<{ assertHeld(): void; observe(): NativePublicationNamespaceObservation;
+  readDestinationChunk(): Buffer | null; close(): void }>;
+type NativePublicationNamespaceObserver = HeldPublicationNamespaceObserver & { retireNamespace(): void; assertNamespaceRetired(): PublicationNamespaceRetirement };
+export type NativePublicationObservation = Readonly<{ kind: 'absent' } | {
+  kind: 'file' | 'directory' | 'symlink' | 'unsupported'; identity: DescriptorIdentity;
+  mode: number; byteCount: number; linkCount: number; digest?: string; target?: string; empty?: boolean;
+}>;
+/** Actual displaced data only. A complete read never validates the approved
+ * preimage or permits cleanup, reconciliation success or another release. */
+export type NativePublicationActualPreimage = Readonly<{
+  location: Readonly<{ kind: 'publication_arena'; arenaId: string; component: string }>;
+  kind: 'file' | 'directory' | 'symlink' | 'unsupported'; identity: DescriptorIdentity;
+  mode: number; linkCount: number; byteCount: string; digest?: string; empty?: boolean;
+}>;
+/** Fixed physical mechanism, not approval or a Journal/native execution claim.
+ * The trusted publication producer is its sole production consumer. */
+export type HeldPublicationOperation = Readonly<{
+  assertHeld(): void; stage(): void; writeChunk(bytes: Buffer): void; finishStage(): boolean;
+  /** Physical release fence only. The sole producer calls this only after the
+   * original permanent SQL claim; this method creates no permission itself. */
+  arm(): void;
+  readOriginalChunk(): Buffer | null; readPreimageChunk(): Buffer | null;
+  /** Full expected-byte read while the original namespace is still unstarted,
+   * including a partially/fully staged but irreversibly fenced operation. */
+  readInspectionOriginalChunk(): Buffer | null;
+  describeActualPreimage(): NativePublicationActualPreimage; readActualPreimageChunk(): Buffer | null;
+  readDestinationChunk(): Buffer | null;
+  /** One-way semantic fence. Original-claim maintenance may still observe,
+   * preserve and remove its exact unpublished staging before actual close. */
+  revoke(): void; discardStage(): void;
+  /** Read-only original-inode namespace classification, not durable evidence. */
+  inspectState(): 'unstarted' | 'effect_present' | 'cleaned';
+  reconcile(): 'unstarted' | 'committed' | 'cleaned';
+  restartRead(kind: 'original' | 'inspection_original' | 'preimage' | 'destination' | 'actual_preimage'): void;
+  commit(): void; observe(): Readonly<{ parent: Readonly<{ identity: DescriptorIdentity; mode: number; linkCount: number }>;
+    arena: Readonly<{ id: string; identity: DescriptorIdentity; mode: 448; linkCount: number;
+      parentIdentity: DescriptorIdentity & { mode: 448 }; absent: boolean; retired: boolean; retirementObservation?: PublicationArenaRetirementObservation }>;
+    destination: NativePublicationObservation; staging?: NativePublicationObservation; quarantine?: NativePublicationObservation }>;
+  finishCleanup(): void; finishArenaRetirement(): void; assertArenaRetired(): void; close(): void;
+}>;
+const publicationLocks = new WeakMap<HeldStateOwnerLock, NativeLock>();
+type PublicationArenaPhysicalRetirement = Readonly<{ arenaId: string; arenaIdentity: DescriptorIdentity & { mode: 448 };
+  parentIdentity: DescriptorIdentity & { mode: 448 }; retirementObservation: PublicationArenaRetirementObservation }>;
+const publicationOperations = new WeakMap<HeldPublicationOperation, {
+  lock: HeldStateOwnerLock; closed: boolean; retirement?: PublicationArenaPhysicalRetirement;
+}>();
+/** Actual held birth observation, not a retained artifact, grant or claim.
+ * A structural value cannot enter the producer's native proof boundary. */
+export function readHeldPublicationBirth(lock: HeldStateOwnerLock, operation: HeldPublicationOperation): Readonly<{
+  arenaId: string; arenaIdentity: DescriptorIdentity & { mode: 448 }; parentIdentity: DescriptorIdentity & { mode: 448 };
+}> {
+  const binding = publicationOperations.get(operation);
+  if (!binding || binding.lock !== lock) throw new TypeError('publication birth requires its exact original native owner');
+  lock.assertHeld(); operation.assertHeld();
+  const { arena } = operation.observe();
+  if (arena.absent || arena.retired || arena.mode !== 448 || arena.parentIdentity.mode !== 448)
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'publication native birth is not held in its actual private parent');
+  return Object.freeze({ arenaId: arena.id, arenaIdentity: Object.freeze({ ...arena.identity, mode: arena.mode }),
+    parentIdentity: Object.freeze({ ...arena.parentIdentity }) });
+}
+/** Joined actual original lifecycle only. Reopening the protected parent is a
+ * readonly absence recheck, never an adoption or reconstruction of an arena. */
+export function readRetiredPublicationArena(lock: HeldStateOwnerLock, operation: HeldPublicationOperation): PublicationArenaPhysicalRetirement {
+  const binding = publicationOperations.get(operation);
+  if (!binding || binding.lock !== lock) throw new TypeError('publication retirement requires its exact original native owner');
+  lock.assertHeld();
+  if (!binding.closed || !binding.retirement) throw new KernelStorageError('RECOVERY_REQUIRED', 'publication arena retirement and descriptor join are incomplete');
+  operation.assertArenaRetired(); return binding.retirement;
+}
+/** Composition-only bridge. Reject structural stand-ins before reading any
+ * caller properties; C independently checks both actual native type brands. */
+export function openHeldPublicationOperation(lock: HeldStateOwnerLock, root: HeldWorkspaceRoot,
+  input: NativePublicationOperationInput): HeldPublicationOperation {
+  const native = publicationLocks.get(lock);
+  if (!native || !workspaceRoots.has(root)) throw new TypeError('publication requires actual StateOwner and workspace handles');
+  lock.assertHeld(); root.assertHeld();
+  const file = (value: { mode: number; byteCount: number; digest: string }, desired: boolean) =>
+    Number.isSafeInteger(value.mode) && value.mode >= 0 && value.mode <= 0o7777 && (!desired || [0o644, 0o755].includes(value.mode)) &&
+    Number.isSafeInteger(value.byteCount) && value.byteCount >= 0 && /^[0-9a-f]{64}$/u.test(value.digest);
+  const symlink = (value: { target: string; digest: string }) => typeof value.target === 'string' && value.target.length > 0 &&
+    value.target === value.target.normalize('NFC') && Buffer.from(value.target).toString() === value.target && !value.target.includes('\0') &&
+    !value.target.includes('\\') && !value.target.startsWith('/') && Buffer.byteLength(value.target) <= 4096 &&
+    !value.target.split('/').some(part => part.toLowerCase() === '.git') && sha256Bytes(Buffer.from(value.target)) === value.digest;
+  const creates = input?.kind === 'create' || input?.kind === 'mkdir';
+  const stages = input?.kind === 'create' || input?.kind === 'replace';
+  const removes = input?.kind === 'delete' || input?.kind === 'abort_rmdir';
+  const displaces = input?.kind === 'replace' || removes;
+  const inode = (value: Pick<DescriptorIdentity, 'deviceId' | 'fileId'> | undefined) => value &&
+    /^(0|[1-9]\d*)$/u.test(value.deviceId) && /^[1-9]\d*$/u.test(value.fileId);
+  if (!input || !/^[A-Za-z0-9_-]{43}$/u.test(input.arenaId) || !['create', 'replace', 'mkdir', 'delete', 'abort_rmdir'].includes(input.kind) || typeof input.path !== 'string' ||
+      normalizeBoundedPublicationPath(input.path) !== input.path || !Array.isArray(input.parents) || input.parents.length !== input.path.split('/').length ||
+      input.parents.some(parent => !parent || !/^(0|[1-9]\d*)$/u.test(parent.deviceId) || !/^[1-9]\d*$/u.test(parent.fileId) ||
+        !Number.isSafeInteger(parent.ownerUid) || parent.ownerUid < 0 || parent.ownerUid > 0xffffffff ||
+        !Number.isSafeInteger(parent.mode) || parent.mode < 0 || parent.mode > 0o7777) ||
+      !(creates ? input.expected?.kind === 'absent' : input.expected?.kind === 'file' ? file(input.expected, false) :
+        input.expected?.kind === 'symlink' ? symlink(input.expected) :
+        input.expected?.kind === 'directory' && Number.isSafeInteger(input.expected.mode) && input.expected.mode >= 0 && input.expected.mode <= 0o7777 &&
+        input.expected.identity && /^(0|[1-9]\d*)$/u.test(input.expected.identity.deviceId) && /^[1-9]\d*$/u.test(input.expected.identity.fileId) &&
+        Number.isSafeInteger(input.expected.identity.ownerUid) && input.expected.identity.ownerUid >= 0 && input.expected.identity.ownerUid <= 0xffffffff) ||
+      !(removes ? input.desired?.kind === 'absent' : input.desired?.kind === 'directory' ? input.kind !== 'create' && input.desired.mode === 0o755 :
+        input.desired?.kind === 'symlink' ? input.kind !== 'mkdir' && symlink(input.desired) : input.desired?.kind === 'file' && input.kind !== 'mkdir' && file(input.desired, true)) ||
+      stages && (!('stagingName' in input) || typeof input.stagingName !== 'string' || normalizeBoundedPublicationPath(input.stagingName) !== input.stagingName || input.stagingName.includes('/')) ||
+      displaces && (!('quarantineName' in input) || typeof input.quarantineName !== 'string' || normalizeBoundedPublicationPath(input.quarantineName) !== input.quarantineName || input.quarantineName.includes('/')) ||
+      input.kind === 'abort_rmdir' && (input.expected.kind !== 'directory' || input.quarantineName !== 'preimage' || 'stagingName' in input) ||
+      input.retained !== undefined && (!input.retained || !inode(input.retained.arena) || (!removes && !inode(input.retained.destination)) ||
+        displaces && !inode(input.retained.preimage)))
+    throw new TypeError('publication requires one exact canonical operation');
+  const failed = (error: unknown): never => {
+    if (error instanceof ResourceRetirementError || error instanceof KernelStorageError) throw error;
+    if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT')
+      throw new ResourceRetirementError('publication descriptors did not retire', error);
+    // A directory probe can fail while retiring its temporary descriptor.
+    // Its sticky native owner state takes precedence over the read error.
+    try { native.assertHeld(); }
+    catch (retirement) {
+      if ((retirement as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT')
+        throw new ResourceRetirementError('publication descriptors did not retire', new AggregateError([error, retirement]));
+    }
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'fixed native publication did not prove its exact operation', { cause: error });
+  };
+  let owned: HeldPublicationOperation;
+  try { owned = native.openPublicationOperation(root, input); } catch (error) { failed(error); }
+  const receiver = (value: unknown) => { if (value !== handle) throw new TypeError('invalid publication operation handle'); };
+  const handle: HeldPublicationOperation = Object.freeze({
+    assertHeld() { receiver(this); try { owned.assertHeld(); } catch (error) { failed(error); } },
+    stage() { receiver(this); try { owned.stage(); } catch (error) { failed(error); } },
+    arm() { receiver(this); try { owned.arm(); } catch (error) { failed(error); } },
+    writeChunk(bytes: Buffer) { receiver(this); try { owned.writeChunk(bytes); } catch (error) { failed(error); } },
+    finishStage() { receiver(this); try { return owned.finishStage(); } catch (error) { return failed(error); } },
+    readOriginalChunk() { receiver(this); try { return owned.readOriginalChunk(); } catch (error) { return failed(error); } },
+    readInspectionOriginalChunk() { receiver(this); try { return owned.readInspectionOriginalChunk(); } catch (error) { return failed(error); } },
+    readPreimageChunk() { receiver(this); try { return owned.readPreimageChunk(); } catch (error) { return failed(error); } },
+    describeActualPreimage() { receiver(this); try { return owned.describeActualPreimage(); } catch (error) { return failed(error); } },
+    readActualPreimageChunk() { receiver(this); try { return owned.readActualPreimageChunk(); } catch (error) { return failed(error); } },
+    readDestinationChunk() { receiver(this); try { return owned.readDestinationChunk(); } catch (error) { return failed(error); } },
+    revoke() { receiver(this); try { owned.revoke(); } catch (error) { return failed(error); } },
+    discardStage() { receiver(this); try { owned.discardStage(); } catch (error) { return failed(error); } },
+    inspectState() { receiver(this); try { return owned.inspectState(); } catch (error) { return failed(error); } },
+    reconcile() { receiver(this); try { return owned.reconcile(); } catch (error) { return failed(error); } },
+    restartRead(kind) { receiver(this); try { owned.restartRead(kind); } catch (error) { return failed(error); } },
+    commit() { receiver(this); try { owned.commit(); } catch (error) { failed(error); } },
+    observe() { receiver(this); try { return owned.observe(); } catch (error) { return failed(error); } },
+    finishCleanup() { receiver(this); try { owned.finishCleanup(); } catch (error) { failed(error); } },
+    finishArenaRetirement() { receiver(this); try {
+      owned.finishArenaRetirement(); const { arena } = owned.observe(), observation = arena.retirementObservation;
+      if (!arena.retired || !arena.absent || !observation ||
+          (process.platform === 'linux' ? observation.kind !== 'linux_unlinked' : process.platform !== 'darwin' || observation.kind !== 'darwin_unlinked'))
+        throw new KernelStorageError('RECOVERY_REQUIRED', 'publication retirement lacks its actual platform unlink observation');
+      publicationOperations.get(handle)!.retirement = Object.freeze({ arenaId: arena.id,
+        arenaIdentity: Object.freeze({ ...arena.identity, mode: arena.mode }), parentIdentity: Object.freeze({ ...arena.parentIdentity }),
+        retirementObservation: Object.freeze({ ...observation }) });
+    } catch (error) { failed(error); } },
+    assertArenaRetired() { receiver(this); try { owned.assertArenaRetired(); } catch (error) { failed(error); } },
+    close() { receiver(this); try { owned.close(); publicationOperations.get(handle)!.closed = true; } catch (error) { failed(error); } }
+  });
+  publicationOperations.set(handle, { lock, closed: false });
+  return handle;
+}
+type PublicationNamespaceBinding = { lock: HeldStateOwnerLock; native: NativePublicationNamespaceObserver;
+  closed: boolean; retired: boolean; fail(error: unknown): never };
+const publicationNamespaceObservers = new WeakMap<HeldPublicationNamespaceObserver, PublicationNamespaceBinding>();
+/** Descriptor-only physical role. The sole production consumer must first
+ * validate the complete original claim/birth/progress/takeover graph. */
+export function openHeldPublicationNamespaceObserver(lock: HeldStateOwnerLock, root: HeldWorkspaceRoot,
+  input: NativePublicationNamespaceInput): HeldPublicationNamespaceObserver {
+  const native = publicationLocks.get(lock);
+  if (!native || !workspaceRoots.has(root)) throw new TypeError('publication namespace requires actual StateOwner and workspace handles');
+  lock.assertHeld(); root.assertHeld();
+  const closed = (value: unknown, required: readonly string[], optional: readonly string[] = []) => {
+    if (!value || typeof value !== 'object') return false;
+    const fields = Object.getOwnPropertyDescriptors(value), keys = Reflect.ownKeys(fields);
+    return required.every(key => Object.hasOwn(fields, key)) && keys.every(key => typeof key === 'string' &&
+      [...required, ...optional].includes(key) && fields[key]!.enumerable && Object.hasOwn(fields[key]!, 'value') && fields[key]!.value !== undefined);
+  };
+  const inode = (value: unknown) => {
+    if (!value || typeof value !== 'object') return false;
+    const fields = Object.getOwnPropertyDescriptors(value), device = fields.deviceId?.value, file = fields.fileId?.value;
+    return typeof device === 'string' && /^(0|[1-9]\d*)$/u.test(device) && typeof file === 'string' && /^[1-9]\d*$/u.test(file);
+  };
+  const identity = (value: DescriptorIdentity | undefined) => closed(value, ['deviceId', 'fileId', 'ownerUid']) && inode(value) &&
+    Number.isSafeInteger(value!.ownerUid) && value!.ownerUid >= 0 && value!.ownerUid <= 0xffffffff;
+  const parent = (value: DescriptorIdentity & { mode: number }) => closed(value, ['deviceId', 'fileId', 'ownerUid', 'mode']) && inode(value) &&
+    Number.isSafeInteger(value.ownerUid) && value.ownerUid >= 0 && value.ownerUid <= 0xffffffff &&
+    Number.isSafeInteger(value.mode) && value.mode >= 0 && value.mode <= 0o7777;
+  const slot = (value: string | undefined) => value === undefined || typeof value === 'string' &&
+    normalizeBoundedPublicationPath(value) === value && !value.includes('/');
+  if (!closed(input, ['arenaId', 'path', 'parents', 'arenaIdentity', 'parentIdentity', 'desired'],
+      ['destinationIdentity', 'stagingName', 'quarantineName', 'retainedPreimage']) ||
+      typeof input.arenaId !== 'string' || !/^[A-Za-z0-9_-]{43}$/u.test(input.arenaId) || typeof input.path !== 'string' || normalizeBoundedPublicationPath(input.path) !== input.path ||
+      !Array.isArray(input.parents) || input.parents.length !== input.path.split('/').length || input.parents.some(value => !parent(value)) ||
+      !parent(input.arenaIdentity) || input.arenaIdentity.mode !== 0o700 || !parent(input.parentIdentity) || input.parentIdentity.mode !== 0o700 ||
+      !slot(input.stagingName) || !slot(input.quarantineName) || !input.stagingName && !input.quarantineName ||
+      input.stagingName !== undefined && input.stagingName === input.quarantineName ||
+      input.retainedPreimage !== undefined && (!input.quarantineName || !closed(input.retainedPreimage, ['deviceId', 'fileId']) || !inode(input.retainedPreimage)))
+    throw new TypeError('invalid fixed registered publication namespace');
+  const desired = input.desired;
+  if (!closed(desired, desired?.kind === 'file' ? ['kind', 'mode', 'byteCount', 'digest'] : desired?.kind === 'directory' ? ['kind', 'mode'] :
+      desired?.kind === 'symlink' ? ['kind', 'target', 'digest'] : ['kind']) ||
+      !(desired.kind === 'absent' ? input.destinationIdentity === undefined : identity(input.destinationIdentity)) ||
+      !(desired.kind === 'absent' || desired.kind === 'directory' && desired.mode === 0o755 || desired.kind === 'file' &&
+        [0o644, 0o755].includes(desired.mode) && Number.isSafeInteger(desired.byteCount) && desired.byteCount >= 0 && desired.byteCount <= 256 * 1024 * 1024 &&
+        /^[0-9a-f]{64}$/u.test(desired.digest) || desired.kind === 'symlink' && typeof desired.target === 'string' && desired.target.length > 0 &&
+        desired.target === desired.target.normalize('NFC') && Buffer.from(desired.target).toString() === desired.target && !desired.target.includes('\0') &&
+        !desired.target.includes('\\') && !desired.target.startsWith('/') && Buffer.byteLength(desired.target) <= 4096 &&
+        !desired.target.split('/').some(part => part.toLowerCase() === '.git') && sha256Bytes(Buffer.from(desired.target)) === desired.digest))
+    throw new TypeError('invalid fixed publication namespace desired state');
+  const fail = (error: unknown): never => {
+    if ((error as NodeJS.ErrnoException)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT')
+      throw new ResourceRetirementError('publication namespace descriptors did not retire', error);
+    try { lock.assertHeld(); } catch (retirement) {
+      if (retirement instanceof ResourceRetirementError) throw retirement;
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'publication namespace lost its actual StateOwner', { cause: retirement });
+    }
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'publication registered namespace is not exactly observable', { cause: error });
+  };
+  const owned = (() => { try { return native.openPublicationNamespaceObserver(root, input); } catch (error) { return fail(error); } })();
+  const receiver = (value: unknown) => { if (value !== handle) throw new TypeError('invalid publication namespace observer receiver'); };
+  const handle: HeldPublicationNamespaceObserver = Object.freeze({
+    assertHeld() { receiver(this); try { owned.assertHeld(); } catch (error) { fail(error); } },
+    observe() { receiver(this); try { return owned.observe(); } catch (error) { return fail(error); } },
+    readDestinationChunk() { receiver(this); try { return owned.readDestinationChunk(); } catch (error) { return fail(error); } },
+    close() { receiver(this); try { owned.close(); publicationNamespaceObservers.get(handle)!.closed = true; } catch (error) { fail(error); } }
+  });
+  publicationNamespaceObservers.set(handle, { lock, native: owned, closed: false, retired: false, fail }); return handle;
+}
+function publicationNamespaceBinding(lock: HeldStateOwnerLock, handle: HeldPublicationNamespaceObserver) {
+  const held = publicationNamespaceObservers.get(handle);
+  if (!held || held.lock !== lock) throw new TypeError('publication namespace requires its genuine same-lock observer');
+  return held;
+}
+/** Fixed original-claim maintenance only, never part of the read-only facade.
+ * The producer repeats its genuine same-claim gate before calling this. */
+export function retireHeldPublicationNamespace(lock: HeldStateOwnerLock, handle: HeldPublicationNamespaceObserver): void {
+  const held = publicationNamespaceBinding(lock, handle);
+  lock.assertHeld();
+  if (held.closed) throw new KernelStorageError('RECOVERY_REQUIRED', 'publication namespace maintenance cannot reopen closed handles');
+  try { held.native.retireNamespace(); held.retired = true; } catch (error) { held.fail(error); }
+}
+/** Current namespace absence, not old-FD unlink or cleanup permission. */
+export function readRetiredPublicationNamespace(lock: HeldStateOwnerLock, handle: HeldPublicationNamespaceObserver): PublicationNamespaceRetirement {
+  const held = publicationNamespaceBinding(lock, handle); lock.assertHeld();
+  if (!held.closed || !held.retired) throw new KernelStorageError('RECOVERY_REQUIRED', 'publication namespace lacks actual sync and joined handles');
+  try { return held.native.assertNamespaceRetired(); } catch (error) { return held.fail(error); }
+}
+function normalizeBoundedPublicationPath(value: string): string {
+  if (value.normalize('NFC') !== value || Buffer.byteLength(value) > 4096 || value.includes('\0') || value.includes('\\') ||
+      value.split('/').some(part => !part || part === '.' || part === '..' || part.toLowerCase() === '.git' || Buffer.byteLength(part) > 255))
+    throw new TypeError('publication path is not canonical');
+  return value;
+}
 type NativeCurrentProcess = Readonly<{
   pid: number; uid: number; processStartToken: string;
   imageFd: number; imageByteCount: number; imageIdentityKey: string;
@@ -814,6 +1102,7 @@ function wrapLock(held: NativeLock, stateRoot: string): HeldStateOwnerLock {
     }
   };
   roots.set(handle, root);
+  publicationLocks.set(handle, held);
   return handle;
 }
 

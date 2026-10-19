@@ -1,5 +1,36 @@
 import type { ArtifactRef } from './types.js';
 
+/** The RFC publication subject names the original permanently claimed path,
+ * not a request to run the publication operation again. */
+export type PublicationReconciliationSubject = {
+  kind: 'publication_path'; deliveryPlanRef: ArtifactRef; pathOperationId: string; attempt: number;
+};
+export type PublicationPathWait = {
+  schemaVersion: 1; kind: 'reconciliation'; runId: string; createdFromRevision: number; createdAt: string;
+  frontierRef: ArtifactRef; subject: PublicationReconciliationSubject; probeState: ReconciliationProbeStateV1;
+};
+
+/** Fixed first inspection target. All fields come from the original fully
+ * validated Journal/prefix; no probe can substitute a later claim or target. */
+export type PublicationInspectionTargetV1 = {
+  schemaVersion: 1; format: 'cliq-publication-inspection-target-v1'; runId: string;
+  subject: PublicationReconciliationSubject; preparedJournalSeq: number; claimJournalSeq: number; unknownJournalSeq: number;
+  unknownEvidenceRef: ArtifactRef; unknownBudgetSettlementRef: ArtifactRef;
+  progress?: { itemRef: ArtifactRef; checkpointId: string };
+};
+
+/** Retained current-inspector provenance only. It cannot recreate an old
+ * native owner, prove a path outcome, or authorize another semantic release.
+ * This record never refers to a wait, probe, or the proof that names it, so a
+ * wrapper -> proof -> origin graph is acyclic. */
+export type PublicationRecoveryOriginV1 = {
+  schemaVersion: 1; format: 'cliq-publication-recovery-origin-v1'; deliveryRunId: string; deliveryPlanRef: ArtifactRef;
+  opId: string; attempt: number; dispatchId: string; claimJournalSeq: number;
+  arenaBirthRef: ArtifactRef; arenaBirthDigest: string; inspectorIdentityRef: ArtifactRef; inspectorIdentityDigest: string;
+  ownerDeathAcquisitionEvidenceRef: ArtifactRef; ownerDeathAcquisitionEvidenceDigest: string;
+  observedAt: string; originDigest: string;
+};
+
 // Canonical RFC recovery artifacts. Their retained shape is not a native observation.
 type WorkerRecoveryEvidenceBaseV1 = {
   schemaVersion: 1;
@@ -38,7 +69,7 @@ export type ReconciliationProbeDispatchV1 = {
   dispatchDigest: string;
 } & (
   | { subjectKind: 'mcp_recovery'; brokerDispatchId: string; brokerRequestDigest: string; brokerTargetDigest: string; brokerFenceTokenDigest: string }
-  | { subjectKind: 'publication'; inspectorTaskId: string; inspectionTargetDigest: string }
+  | { subjectKind: 'publication'; inspectorTaskId: string; inspectionTargetDigest: string; previousWaitingSubjectRef: ArtifactRef }
   | { subjectKind: 'worker_recovery'; inspectorTaskId: string; inspectionTargetDigest: string }
 );
 
@@ -66,6 +97,18 @@ export type ReconciliationProbeTimeoutClosureV1 = {
   | { subjectKind: 'worker_recovery'; oldWorkerLaunchId: string; processContainmentRef: ArtifactRef; inspectorTaskId: string; taskClosure: ReconciliationInspectorTaskClosureV1 }
 );
 
+/** A real owning process joined its descriptor-only publication probe during
+ * shutdown. This is neither a deadline timeout nor a path outcome. */
+export type ReconciliationProbeCancellationClosureV1 = {
+  schemaVersion: 1; format: 'cliq-reconciliation-probe-cancellation-closure-v1'; runId: string;
+  waitingSubjectRef: ArtifactRef; probeKind: 'automatic' | 'user_requested'; probeOrdinal: number;
+  probeNonceDigest: string; probeDispatchDigest: string; probeDeadlineAt: string;
+  inspectorIdentityRef: ArtifactRef; inspectorIdentityDigest: string; closedAt: string; closureDigest: string;
+  reason: 'owning_supervisor_shutdown'; subjectKind: 'publication'; deliveryPlanRef: ArtifactRef;
+  pathOperationId: string; attempt: number; inspectorTaskId: string;
+  taskClosure: Extract<ReconciliationInspectorTaskClosureV1, { closureKind: 'cancelled_and_joined' }>;
+};
+
 export type ReconciliationProbeEvidenceV1 = {
   schemaVersion: 1;
   format: 'cliq-reconciliation-probe-evidence-v1';
@@ -85,6 +128,9 @@ export type ReconciliationProbeEvidenceV1 = {
 } & (
   | { outcome: 'subject_observation'; subjectEvidenceKind: 'mcp_recovery' | 'publication' | 'worker_recovery'; subjectEvidenceRef: ArtifactRef; subjectEvidenceDigest: string; timeoutClosureRef?: never; timeoutClosureDigest?: never }
   | { outcome: 'probe_timeout'; timeoutReason: 'no_authoritative_observation_before_deadline'; timeoutClosureRef: ArtifactRef; timeoutClosureDigest: string; subjectEvidenceKind?: never; subjectEvidenceRef?: never; subjectEvidenceDigest?: never }
+  | { outcome: 'probe_cancelled'; cancellationReason: 'owning_supervisor_shutdown'; cancellationClosureRef: ArtifactRef;
+      cancellationClosureDigest: string; subjectEvidenceKind?: never; subjectEvidenceRef?: never; subjectEvidenceDigest?: never;
+      timeoutClosureRef?: never; timeoutClosureDigest?: never }
 );
 
 export type ReconciliationLastProbeEvidenceV1 =

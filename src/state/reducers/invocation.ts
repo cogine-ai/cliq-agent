@@ -45,6 +45,8 @@ import { assertModelGrantDispatch, readModelGrantClosure } from '../model-grant.
 import { prepareInstalledBrokerAmbiguity } from '../broker-ambiguity.js';
 import { MODEL_BROKER_ENTRY_ID } from '../model-broker-native.js';
 import { readWorkerRecoveryTerminalPlan, type WorkerRecoveryTerminalPlan } from '../worker-recovery-terminal.js';
+import type { OwnedPublicationInitialAmbiguity, OwnedPublicationReconciliationResult, PublicationInvocationOwner } from '../publication-invocation.js';
+import type { OwnedPublicationReceivedResult } from '../publication-finalization.js';
 
 const ZERO_BUDGET: BudgetUsage = {
   modelTokens: 0,
@@ -192,6 +194,9 @@ export async function prepareInvocation(
 ): Promise<{ entry: InvocationJournalEntry; run: Run }> {
   if (input.opKind === 'model') {
     throw new KernelStorageError('INVALID_REQUEST', 'model invocations require the typed model admission path');
+  }
+  if (input.opKind === 'publish') {
+    throw new KernelStorageError('INVALID_REQUEST', 'publication requires its typed original path owner');
   }
   const run = readRun(driver, input.runId);
   const spec = decodeRunSpec(await artifacts.readCanonical(run.specRef));
@@ -397,7 +402,7 @@ export async function claimInvocationDispatch(
 ): Promise<InvocationJournalEntry> {
   input = { ...input };
   const prepared = readHighestPreparedAttempt(driver, input.runId, input.opId);
-  if (prepared && (prepared.opKind === 'tool' || prepared.opKind === 'mcp' || prepared.opKind === 'verifier')) {
+  if (prepared && (prepared.opKind === 'tool' || prepared.opKind === 'mcp' || prepared.opKind === 'verifier' || prepared.opKind === 'publish')) {
     const run = readRun(driver, input.runId);
     const spec = decodeRunSpec(await artifacts.readCanonical(run.specRef));
     const assembly = await artifacts.readCanonical<{ format?: string }>(spec.assemblyRef);
@@ -411,10 +416,17 @@ export async function claimInvocationDispatch(
 /** Internal claim seam. Only the typed reducer supplies its independently reproduced authority check. */
 export async function claimValidatedInvocation(
   driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, input: ClaimInvocationDispatchInput,
-  validate?: (connection: SqliteConnection, run: Run, prepared: InvocationJournalEntry, now: string) => void
+  validate?: (connection: SqliteConnection, run: Run, prepared: InvocationJournalEntry, now: string) => void,
+  publicationOwner?: PublicationInvocationOwner
 ): Promise<InvocationJournalEntry> {
   input = { ...input };
+  // The attachment is an original same-Store native owner, not caller metadata
+  // or an injectable authority callback. Its module owns the only issuer.
+  const publication = publicationOwner === undefined ? undefined :
+    (await import('../publication-invocation.js')).assertPublicationClaimForInvocation(driver, owner, publicationOwner, input);
   const preparedSnapshot = readHighestPreparedAttempt(driver, input.runId, input.opId);
+  if ((preparedSnapshot?.opKind === 'publish') !== (publication !== undefined))
+    throw new KernelStorageError('INVALID_REQUEST', 'publication claims require their original typed native owner');
   const modelCut = preparedSnapshot?.opKind === 'model' ? await readModelClaimCut(driver, artifacts, preparedSnapshot) : undefined;
   if (input.sandboxLaunchSpecRef !== undefined) await artifacts.readBytes(input.sandboxLaunchSpecRef);
   const launchSpecMetadata = input.sandboxLaunchSpecRef === undefined
@@ -461,6 +473,7 @@ export async function claimValidatedInvocation(
     if (modelCut) assertModelGrantDispatch(modelCut.authority.grant, { run, prepared: highest,
       history: readOperationJournal(connection, run.id, highest.opId), now });
     validate?.(connection, run, highest, now);
+    publication?.validate(connection, run, highest, now);
     claimed = {
       ...highest,
       seq: nextJournalSequence(connection, input.runId),
@@ -475,6 +488,11 @@ export async function claimValidatedInvocation(
     if (input.brokerFenceTokenDigest !== undefined) {
       claimed.brokerFenceTokenDigest = input.brokerFenceTokenDigest;
     }
+    if (publication) {
+      claimed.evidenceRef = publication.evidenceRef;
+      claimed.evidenceDigest = publication.evidenceDigest;
+      for (const artifact of publication.metadata) insertArtifactMetadata(connection, artifact, now);
+    }
     if (modelCut) modelRetryState(modelCut.retryPolicy, [...readOperationJournal(connection, run.id, highest.opId), claimed], now);
     if (launchSpecMetadata !== undefined) insertArtifactMetadata(connection, launchSpecMetadata, now);
     appendInvocationJournalEntry(connection, claimed);
@@ -484,7 +502,7 @@ export async function claimValidatedInvocation(
 }
 
 type InitialSettlementKind =
-  | { phase: 'completed'; resultRef?: string; receiptRef?: string; consumed: BudgetUsage }
+  | { phase: 'completed'; resultRef?: string; receiptRef?: string; evidenceRef?: string; evidenceDigest?: string; consumed: BudgetUsage }
   | { phase: 'failed'; errorRef: string; evidenceRef?: string; evidenceDigest?: string; consumed: BudgetUsage; requireClaim: boolean }
   | { phase: 'unknown'; evidenceRef: string; evidenceDigest: string };
 
@@ -520,6 +538,9 @@ export async function settleValidatedInvocation(
 
 type RetainedSettlement = {
   validateSnapshot(connection: SqliteConnection, run: Run): void;
+  /** Set only by the genuine publication adapter factory below. A caller's
+   * continuation callback never substitutes for this original owner. */
+  publicationOwner?: PublicationInvocationOwner | OwnedPublicationReceivedResult | OwnedPublicationInitialAmbiguity;
   settlement?: BudgetSettlementV1;
   plan?: PlannedArtifact;
   artifact?: PublishedArtifact;
@@ -553,11 +574,86 @@ export function prepareValidatedInvocationSettlement(
   } };
 }
 
+/** Original publication adapter only: no input refs, terminal data or callbacks
+ * are accepted here. Its own producer supplies the complete closed plan. */
+export function preparePublicationInvocationSettlement(driver: SqliteDriver, artifacts: ArtifactCatalog,
+  owner: StateOwnerContext, publicationOwner: PublicationInvocationOwner | OwnedPublicationReceivedResult | OwnedPublicationInitialAmbiguity) {
+  let retained: RetainedSettlement | undefined;
+  return { async settle(expectedRunRevision: number) {
+    const { assertPublicationSettlementForInvocation } = await import('../publication-settlement.js');
+    const original = assertPublicationSettlementForInvocation(driver, owner, publicationOwner);
+    if (original.artifacts !== artifacts)
+      throw new TypeError('publication settlement requires its original artifact catalog');
+    retained ??= { validateSnapshot: original.validateSnapshot, publicationOwner };
+    return settleInitialInvocation(driver, original.readArtifacts, owner, { ...original.input, expectedRunRevision },
+      original.terminal, original.continuation, retained);
+  } };
+}
+
+/** Only the fixed genuine publication recovery/received adapter can append a
+ * later observation of an already charged claim. This is not initial
+ * settlement, a retry, a new reservation, or a caller evidence interface. */
+export function preparePublicationReconciliationInvocationSettlement(driver: SqliteDriver, artifacts: ArtifactCatalog,
+  owner: StateOwnerContext, key: OwnedPublicationReconciliationResult | OwnedPublicationReceivedResult) {
+  return { async settle(expectedRunRevision: number) {
+    const { assertPublicationReconciliationSettlementForInvocation } = await import('../publication-settlement.js');
+    const original = assertPublicationReconciliationSettlementForInvocation(driver, owner, key);
+    if (original.artifacts !== artifacts) throw new TypeError('publication reconciliation requires its original artifact catalog');
+    const run = readRun(driver, original.input.runId);
+    if (run.revision !== expectedRunRevision) throw new KernelStorageError('REVISION_CONFLICT', 'publication resolution Run revision changed');
+    const plan = await original.continuation({ run, prepared: original.prepared, settlement: original.settlement });
+    let result!: { run: Run; entry: InvocationJournalEntry; settlement: BudgetSettlementV1 }, outcome: TimeFenceAdvance | undefined;
+    driver.transaction(connection => {
+      const bound = assertPublicationReconciliationSettlementForInvocation(driver, owner, key);
+      if (bound !== original) throw new KernelStorageError('ARTIFACT_MISMATCH', 'publication resolution owner changed during preparation');
+      assertActiveStateOwner(connection, owner);
+      const current = readRun(connection, run.id), entries = readInvocationAttempt(connection, run.id, original.prepared.opId, original.prepared.attempt);
+      if (JSON.stringify(current) !== JSON.stringify(run) || entries.length !== 3 ||
+          JSON.stringify(entries[0]) !== JSON.stringify(original.prepared) || JSON.stringify(entries[1]) !== JSON.stringify(original.claim) ||
+          JSON.stringify(entries[2]) !== JSON.stringify(original.unknown) || entries[2]!.phase !== 'unknown' ||
+          !original.unknown.budgetSettlementRef || nextJournalSequence(connection, run.id) !== original.journalSeq)
+        throw new KernelStorageError('REVISION_CONFLICT', 'publication resolution lost its original charged UNKNOWN and exact Journal tail');
+      const now = sampleCanonicalNow(); outcome = advanceTimeFence(connection, owner.ownerEpoch, now);
+      if (outcome !== 'healthy') return;
+      original.validateSnapshot(connection, current); plan.validate?.(connection, current, now);
+      if (now < original.observedAt || now < current.updatedAt)
+        throw new KernelStorageError('RECOVERY_REQUIRED', 'publication resolution precedes its actual observation or Run cut');
+      for (const metadata of [...original.metadata, ...plan.metadata]) insertArtifactMetadata(connection, metadata, now);
+      const terminal = original.terminal;
+      const entry: InvocationJournalEntry = { ...original.claim, seq: original.journalSeq, phase: terminal.phase,
+        budgetDelta: ZERO_BUDGET, budgetSettlementRef: original.unknown.budgetSettlementRef,
+        evidenceRef: terminal.evidenceRef, evidenceDigest: terminal.evidenceDigest, timestamp: now,
+        ...(terminal.phase === 'completed' ? { receiptRef: terminal.receiptRef } : { errorRef: terminal.errorRef }) };
+      appendInvocationJournalEntry(connection, entry);
+      const updated = connection.prepare('UPDATE runs SET revision=revision+1,updated_at=? WHERE id=? AND revision=?')
+        .run(now, run.id, BigInt(run.revision));
+      if (updated.changes !== 1n) throw new KernelStorageError('REVISION_CONFLICT', 'publication resolution lost its original Run update');
+      plan.commit?.(connection, current, entry, now);
+      const after = readRun(connection, run.id);
+      if (JSON.stringify(after.budgetConsumed) !== JSON.stringify(current.budgetConsumed) ||
+          JSON.stringify(after.budgetReserved) !== JSON.stringify(current.budgetReserved))
+        throw new KernelStorageError('ARTIFACT_MISMATCH', 'publication reconciliation attempted to change its once-settled budget');
+      appendRunStateEvent(connection, after, now); result = { run: after, entry, settlement: original.settlement };
+    });
+    requireHealthyFence(outcome); return result;
+  } };
+}
+
 async function settleInitialInvocation(
   driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
   input: SettleInvocationInput, terminal: InitialSettlementKind, continuation?: SettlementContinuation,
   retained?: RetainedSettlement
 ): Promise<{ entry: InvocationJournalEntry; settlement: BudgetSettlementV1; run: Run }> {
+  let publication: ReturnType<typeof import('../publication-settlement.js')['assertPublicationSettlementForInvocation']> | undefined;
+  if (retained?.publicationOwner) {
+    const { assertPublicationSettlementForInvocation } = await import('../publication-settlement.js');
+    const original = assertPublicationSettlementForInvocation(driver, owner, retained.publicationOwner);
+    publication = original;
+    if (input.runId !== original.input.runId || input.opId !== original.input.opId || input.attempt !== original.input.attempt ||
+        JSON.stringify(terminal) !== JSON.stringify(original.terminal) || continuation !== original.continuation ||
+        retained.validateSnapshot !== original.validateSnapshot || artifacts !== original.readArtifacts)
+      throw new KernelStorageError('INVALID_REQUEST', 'publication settlement changed its original owning continuation');
+  }
   const artifactRefs = terminal.phase === 'completed'
     ? [terminal.resultRef, terminal.receiptRef]
     : terminal.phase === 'failed'
@@ -598,6 +694,9 @@ async function settleInitialInvocation(
     const prepared = entries.find((entry) => entry.phase === 'prepared');
     const claim = entries.find((entry) => entry.phase === 'dispatch_claimed');
     if (prepared === undefined) throw new KernelStorageError('NOT_FOUND', 'prepared invocation attempt is missing');
+    if (prepared.opKind === 'publish' && !retained?.publicationOwner) {
+      throw new KernelStorageError('INVALID_REQUEST', 'publication settlement requires its original owned physical continuation');
+    }
     if (continuation === undefined && (prepared.opKind === 'tool' || prepared.opKind === 'mcp' || prepared.opKind === 'verifier')) {
       const spec = decodeRunSpec(await artifacts.readCanonical(snapshotRun.specRef));
       const assembly = await artifacts.readCanonical<{ format?: string }>(spec.assemblyRef);
@@ -665,7 +764,11 @@ async function settleInitialInvocation(
     if (retained) retained.plan = settlementPlan;
     const settlementArtifact = retained?.artifact ?? await artifacts.publishBytes(settlementPlan.bytes, settlementPlan.mediaType, settlementPlan.schemaKind);
     if (retained) retained.artifact = settlementArtifact;
-    const continuationPlan = retained?.continuation ?? await continuation?.({ run: snapshotRun, prepared, settlement });
+    // A winning Stop may select an uncommitted abort frontier after a CAS or
+    // rolled-back SQL failure. Only this exact publication owner can rebuild
+    // that data projection; the original settlement/effect remains fixed.
+    const continuationPlan = (retained?.publicationOwner ? undefined : retained?.continuation) ??
+      await continuation?.({ run: snapshotRun, prepared, settlement });
     if (retained) retained.continuation = continuationPlan;
     if (continuationPlan?.unknownEvidence && terminal.phase !== 'unknown') {
       throw new KernelStorageError('INVALID_REQUEST', 'only a protected unknown settlement can restage its evidence');
@@ -688,7 +791,8 @@ async function settleInitialInvocation(
         (connection, run, committedAt) => {
           retained?.validateSnapshot(connection, run);
           continuationPlan?.validate?.(connection, run, committedAt);
-        }
+        },
+        publication
       );
     } catch (error) {
       if (error instanceof ReducerSnapshotChanged) {
@@ -721,7 +825,8 @@ function commitInitialSettlement(
   settlementArtifact: PublishedArtifact,
   terminalMetadata: PublishedArtifact[],
   commitContinuation?: (connection: SqliteConnection, run: Run, entry: InvocationJournalEntry, committedAt: string) => void,
-  validateTerminal?: (connection: SqliteConnection, run: Run, committedAt: string) => void
+  validateTerminal?: (connection: SqliteConnection, run: Run, committedAt: string) => void,
+  publication?: ReturnType<typeof import('../publication-settlement.js')['assertPublicationSettlementForInvocation']>
 ): { entry: InvocationJournalEntry; settlement: BudgetSettlementV1; run: Run } {
   let result!: { entry: InvocationJournalEntry; settlement: BudgetSettlementV1; run: Run };
   let fenceOutcome: TimeFenceAdvance | undefined;
@@ -736,7 +841,10 @@ function commitInitialSettlement(
     ) throw new ReducerSnapshotChanged();
     // Journal-only evidence may settle, but only the recovery reducer may advance
     // a frontier retained by its exact reconciliation wait.
-    if (commitContinuation && run.waitingReason === 'reconciliation') {
+    const initialPublication = publication?.kind === 'initial_ambiguity' && preparedSnapshot.opKind === 'publish' &&
+      terminal.phase === 'unknown' && publication.input.runId === run.id && publication.input.opId === preparedSnapshot.opId &&
+      publication.input.attempt === preparedSnapshot.attempt && publication.terminal === terminal;
+    if (commitContinuation && run.waitingReason === 'reconciliation' && !initialPublication) {
       throw new KernelStorageError('STATE_TRANSITION_INVALID', 'invocation continuation awaits worker recovery');
     }
     const entries = readInvocationAttempt(connection, input.runId, input.opId, input.attempt);
@@ -768,6 +876,12 @@ function commitInitialSettlement(
     if (terminal.phase === 'completed') {
       if (terminal.resultRef !== undefined) entry.resultRef = terminal.resultRef;
       if (terminal.receiptRef !== undefined) entry.receiptRef = terminal.receiptRef;
+      if (prepared!.opKind === 'publish') {
+        if (!terminal.evidenceRef || !terminal.evidenceDigest || terminal.evidenceRef !== terminal.receiptRef)
+          throw new KernelStorageError('INVALID_REQUEST', 'completed publication requires its actual identical terminal receipt and evidence');
+        // A claim carries birth evidence, not evidence of its later effect.
+        entry.evidenceRef = terminal.evidenceRef; entry.evidenceDigest = terminal.evidenceDigest;
+      }
     } else if (terminal.phase === 'failed') {
       entry.errorRef = terminal.errorRef;
       if (terminal.evidenceRef !== undefined) {

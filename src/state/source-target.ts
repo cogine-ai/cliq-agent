@@ -1,6 +1,7 @@
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { normalizeRunSubmitRequest as decodeRunSubmitRequest, InvalidRunSubmitRequestError } from '../kernel/control-submit.js';
 import type { NormalizedRunSubmitRequest } from '../kernel/control-submit.js';
+import { normalizeRunApplyRequest, runApplyIntentDigest, type NormalizedRunApplyRequest } from '../kernel/control-apply.js';
 import type { SandboxProfileV1, SourceInspectionTargetV1 } from '../kernel/execution.js';
 import { assertArtifactRef, digestOmitting, identityHash, normalizeBoundedText } from '../kernel/identity.js';
 import type { SourceInspectionAttemptV1 } from '../kernel/execution.js';
@@ -10,7 +11,8 @@ import { verifyRuntimeBundle, type ReleaseTrustKey, type RuntimeBundleManifest }
 import type { ArtifactCatalog, PublishedArtifact } from './artifacts.js';
 import { readCanonicalArtifact } from './agent-context.js';
 import { validateControlChannelClosure, type AuthenticatedControlIdentity } from './control-channel.js';
-import { decodeWorkspaceIdentity } from './decoders.js';
+import { decodeFrozenIgnoreRules, decodeSourceProjection, decodeWorkspaceIdentity } from './decoders.js';
+import { assertVerifiedDeliverySource, readRetainedVerifiedDeliverySource, type VerifiedDeliverySource } from './delivery-source-authority.js';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
 import { withHeldInstalledRuntime, type HeldInstalledRuntime } from './installed-runtime.js';
 import { decodeSandboxProfile } from './execution-closure.js';
@@ -48,6 +50,47 @@ export function runSubmitIntentDigest(principalId: string, request: NormalizedRu
   const { protocolVersion: _version, requestId: _id, requestDigest: _digest, admissionKey: _key, ...intent } = request;
   return canonicalSha256({ principalId, method: 'run.submit', request: intent });
 }
+export type NormalizedSourceRequest = NormalizedRunSubmitRequest | NormalizedRunApplyRequest;
+/** The original wire request remains distinct from this Supervisor-resolved
+ * capture selection. These fields are never accepted from run.apply callers. */
+export type SourceCaptureSelection = Pick<NormalizedRunSubmitRequest, 'sessionId' | 'expectedContextRevision' | 'workspacePath' |
+  'sourceIncludes' | 'sourceExcludes' | 'maxChangedPaths' | 'maxChangedBytes' | 'sandboxResources'> & {
+    method: 'run.submit' | 'run.apply'; requestId: string; requestDigest: string; admissionKey: string;
+    budgets: { wallTimeMs: number };
+    frozenProjection?: { sourceProjectionRef: string; frozenIgnoreRulesRef: string };
+  };
+export function normalizeSourceInspectionRequest(value: unknown) {
+  return value && typeof value === 'object' && Object.getOwnPropertyDescriptor(value, 'method')?.value === 'run.apply'
+    ? normalizeRunApplyRequest(value) : normalizeRunSubmitRequest(value);
+}
+export function sourceInspectionIntentDigest(principalId: string, request: NormalizedSourceRequest): string {
+  return request.method === 'run.apply' ? runApplyIntentDigest(principalId, request) : runSubmitIntentDigest(principalId, request);
+}
+export async function resolveDeliverySourceCapture(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
+  request: NormalizedRunApplyRequest, principalId: string, selected: VerifiedDeliverySource, signal?: AbortSignal): Promise<SourceCaptureSelection> {
+  const source = assertVerifiedDeliverySource(driver, owner, selected);
+  if (source.run.id !== request.sourceRunId || source.run.resultRef !== request.expectedRunResultRef ||
+      readSessionPrincipalId(driver, source.session.id) !== principalId) invalid('delivery source does not match its original request');
+  const session = readSession(driver, source.session.id);
+  if (session.workspaceIdentityRef !== source.session.workspaceIdentityRef) invalid('delivery source Session identity changed');
+  const workspace = decodeWorkspaceIdentity(await readCanonicalArtifact(artifacts, session.workspaceIdentityRef));
+  const projection = decodeSourceProjection(await readCanonicalArtifact(artifacts, source.spec.sourceProjectionRef));
+  const rules = decodeFrozenIgnoreRules(await readCanonicalArtifact(artifacts, projection.frozenIgnoreRulesRef));
+  const profile = decodeSandboxProfile(await readCanonicalArtifact(artifacts, source.spec.sandboxProfileRef));
+  signal?.throwIfAborted();
+  if (workspace.kind !== 'live' || workspace.ownerPrincipalId !== principalId) invalid('delivery requires its original live Session identity');
+  // An old consumed admission read grant cannot authorize a new live capture.
+  // Only the connected ordinary builtin projection is currently implemented.
+  if (projection.explicitIncludes.length || rules.sources.length || rules.rules.length || projection.frozenIgnoreRulesDigest !== rules.rulesDigest)
+    throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'delivery capture of granted/ignored source is not implemented');
+  if (source.spec.dependencyPolicyRef !== undefined || request.verifierExecutionGrantIds.length)
+    throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'delivery dependency/template admission is not implemented');
+  return immutableSnapshot({ method: 'run.apply', requestId: request.requestId, requestDigest: request.requestDigest,
+    admissionKey: request.admissionKey, budgets: request.budgets, sessionId: session.id, expectedContextRevision: session.contextRevision,
+    workspacePath: workspace.canonicalRootPath, sourceIncludes: [], sourceExcludes: projection.explicitExcludes,
+    maxChangedPaths: projection.maxChangedPaths, maxChangedBytes: projection.maxChangedBytes, sandboxResources: profile.resources,
+    frozenProjection: { sourceProjectionRef: source.spec.sourceProjectionRef, frozenIgnoreRulesRef: projection.frozenIgnoreRulesRef } });
+}
 
 /** Only trusted Supervisor composition selects this policy and release root.
  * The profile is generated admission policy, not a signed root image or a
@@ -59,7 +102,7 @@ export type VerifiedSourceInspectionTarget = Readonly<{ kind: 'verified_source_i
 type TargetBinding = {
   driver: SqliteDriver; artifacts: ArtifactCatalog; owner: StateOwnerContext;
   workspaceRoot: HeldWorkspaceRoot; trust: HeldWorkspaceSourceTrust; identity: AuthenticatedControlIdentity;
-  request: NormalizedRunSubmitRequest; originalRequest: object; target: SourceInspectionTargetV1;
+  request: SourceCaptureSelection; originalRequest: object; target: SourceInspectionTargetV1;
   targetRef: string; inspectionId: string; workspace: Extract<WorkspaceIdentityV1, { kind: 'live' }>;
   metadata: readonly PublishedArtifact[];
 };
@@ -112,17 +155,21 @@ export async function createVerifiedSourceInspectionTarget(context: {
   workspaceRoot: HeldWorkspaceRoot; trust: HeldWorkspaceSourceTrust;
   selectedRuntime?: HeldInstalledRuntime;
   signal?: AbortSignal;
-}, inlineRequest: unknown, identity: AuthenticatedControlIdentity): Promise<VerifiedSourceInspectionTarget> {
-  const normalized = normalizeRunSubmitRequest(inlineRequest), request = normalized.request;
+}, inlineRequest: unknown, identity: AuthenticatedControlIdentity,
+deliverySource?: VerifiedDeliverySource): Promise<VerifiedSourceInspectionTarget> {
+  const normalized = normalizeSourceInspectionRequest(inlineRequest), wire = normalized.request;
   identity = immutableSnapshot(identity);
   const bootstrap = immutableSnapshot(context.bootstrap), { driver, artifacts, owner, workspaceRoot, trust } = context;
-  const admissionIntentDigest = runSubmitIntentDigest(identity.principalId, request);
+  const request: SourceCaptureSelection = wire.method === 'run.apply'
+    ? await resolveDeliverySourceCapture(driver, artifacts, owner, wire, identity.principalId,
+      assertVerifiedDeliverySource(driver, owner, deliverySource), context.signal) : wire;
+  const admissionIntentDigest = sourceInspectionIntentDigest(identity.principalId, wire);
   // Any retained attempt/Run is handled by the caller's replay path. Never
   // reopen/capture a mutable source to reconstruct a historical result.
-  const key = { principalId: identity.principalId, admissionKey: request.admissionKey, admissionIntentDigest };
+  const key = { principalId: identity.principalId, method: wire.method, admissionKey: request.admissionKey, admissionIntentDigest };
   const existing = readSourceInspectionAttempt(driver, key);
-  const admitted = readAdmissionReplay(driver, 'runs', identity.principalId, 'run.submit', request.admissionKey);
-  if (admitted && admitted.admissionIntentDigest !== admissionIntentDigest) throw new KernelStorageError('ADMISSION_KEY_CONFLICT', 'run.submit key names a different intent');
+  const admitted = readAdmissionReplay(driver, 'runs', identity.principalId, wire.method, request.admissionKey);
+  if (admitted && admitted.admissionIntentDigest !== admissionIntentDigest) throw new KernelStorageError('ADMISSION_KEY_CONFLICT', 'source key names a different intent');
   if (existing || admitted) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'source intent is retained; join or replay it without recapture');
   const channel = await validateControlChannelClosure(artifacts, owner, identity);
   const active = assertActiveStateOwner(driver, owner);
@@ -133,21 +180,23 @@ export async function createVerifiedSourceInspectionTarget(context: {
   if (heldWorkspaceRootPath(workspaceRoot) !== request.workspacePath) throw new KernelStorageError('ARTIFACT_MISMATCH', 'held workspace path differs from inline request');
   assertWorkspaceSourceTrust(trust, request.workspacePath);
   if (request.sourceIncludes.some(include => include.readGrantId !== undefined)) invalid('source read grants are not implemented; ignored bytes cannot be captured');
-  if (request.dependency.mode !== 'none') invalid('dependency admission is not yet implemented');
-  assertSupportedVerifierRequests(request.verifiers, request.policyMode);
-  if (request.verifiers.length) await readVerifierRequestIdentities(driver, artifacts, owner, bootstrap, identity.principalId, request.verifiers, undefined, context.signal);
-  if (request.registeredMcpServerIds.length || request.skillIds.length) invalid('MCP/skill admission authority is not yet implemented');
-  if (request.model.provider !== 'ollama') {
-    if (!context.selectedRuntime || request.model.provider !== 'openai-compatible')
+  if (wire.method === 'run.submit') {
+    if (wire.dependency.mode !== 'none') invalid('dependency admission is not yet implemented');
+    assertSupportedVerifierRequests(wire.verifiers, wire.policyMode);
+    if (wire.verifiers.length) await readVerifierRequestIdentities(driver, artifacts, owner, bootstrap, identity.principalId, wire.verifiers, undefined, context.signal);
+    if (wire.registeredMcpServerIds.length || wire.skillIds.length) invalid('MCP/skill admission authority is not yet implemented');
+  }
+  if (wire.method === 'run.submit' && wire.model.provider !== 'ollama') {
+    if (!context.selectedRuntime || wire.model.provider !== 'openai-compatible')
       invalid('remote model admission requires the genuine installed fixed broker recipe');
     await withHeldInstalledRuntime(context.selectedRuntime, async installed => {
-      await installed.revalidate();
+      await installed.revalidate(context.signal);
       if (installed.bundleDigest !== canonicalSha256(bootstrap.bundle) ||
-          !installed.modelAuthority?.models.some(model => model.catalog.value.provider === request.model.provider &&
-            model.catalog.value.model === request.model.model && model.catalog.value.adapter.adapterId === 'openai-compatible-broker-v1' &&
+          !installed.modelAuthority?.models.some(model => model.catalog.value.provider === wire.model.provider &&
+            model.catalog.value.model === wire.model.model && model.catalog.value.adapter.adapterId === 'openai-compatible-broker-v1' &&
             model.catalog.value.adapter.version === '1')) invalid('remote model source capture lacks the selected signed model authority');
-      await installed.revalidate();
-    });
+      await installed.revalidate(context.signal);
+    }, context.signal);
   }
   const workspace = decodeWorkspaceIdentity(await readCanonicalArtifact(artifacts, session.workspaceIdentityRef));
   if (workspace.kind !== 'live' || workspace.ownerPrincipalId !== identity.principalId || workspace.platform !== hostPlatform() ||
@@ -166,7 +215,7 @@ export async function createVerifiedSourceInspectionTarget(context: {
   const original = await artifacts.publishCanonical(normalized.originalRequest, 'cliq-control-request-v1');
   const selectedProfile = await artifacts.publishCanonical(profile, profile.format);
   const target: SourceInspectionTargetV1 = { schemaVersion: 1, format: 'cliq-source-inspection-target-v1', principalId: identity.principalId,
-    method: 'run.submit', admissionKey: request.admissionKey, admissionIntentDigest,
+    method: wire.method, admissionKey: request.admissionKey, admissionIntentDigest,
     originalRequestRef: original.ref, originalRequestDigest: normalized.originalRequestDigest,
     sessionId: request.sessionId, expectedContextRevision: request.expectedContextRevision,
     workspaceIdentityRef: session.workspaceIdentityRef, workspaceIdentityDigest: workspace.identityDigest, sourceReadGrantRefs: [],
@@ -177,16 +226,16 @@ export async function createVerifiedSourceInspectionTarget(context: {
   const result: VerifiedSourceInspectionTarget = Object.freeze({ kind: 'verified_source_inspection_target' });
   verifiedTargets.set(result, { driver, artifacts, owner, workspaceRoot, trust, identity, request,
     originalRequest: normalized.originalRequest, target: immutableSnapshot(target), targetRef: published.ref,
-    inspectionId: identityHash('cliq-source-inspection-v1', identity.principalId, 'run.submit', request.admissionKey, admissionIntentDigest),
+    inspectionId: identityHash('cliq-source-inspection-v1', identity.principalId, wire.method, request.admissionKey, admissionIntentDigest),
     workspace: immutableSnapshot(workspace), metadata: immutableSnapshot([...channel.metadata, original, selectedProfile, published]) });
   await recheckVerifiedSourceInspectionTarget(owner, result);
   return result;
 }
 
-/** Retained replay checks bytes and indexes without reopening a live source.
- * This returns no native/read capability and cannot authorize fresh capture. */
-export async function readRetainedSourceInspectionTarget(artifacts: ArtifactCatalog, attempt: SourceInspectionAttemptV1,
-  originalIndex: { originalRequestId: string; originalRequestDigest: string }, bootstrap: SourceInspectionBootstrap) {
+/** Shared retained-data binding, not a native/read capability. Runtime trust
+ * and the inherited source are independently checked by its owning reader. */
+export async function readSourceInspectionTargetData(artifacts: ArtifactCatalog, attempt: SourceInspectionAttemptV1,
+  originalIndex: { originalRequestId: string; originalRequestDigest: string }) {
   try {
     const targetData = object(await readCanonicalArtifact(artifacts, attempt.targetRef), ['schemaVersion', 'format', 'principalId', 'method',
       'admissionKey', 'admissionIntentDigest', 'originalRequestRef', 'originalRequestDigest', 'sessionId', 'expectedContextRevision',
@@ -195,28 +244,62 @@ export async function readRetainedSourceInspectionTarget(artifacts: ArtifactCata
     for (const key of ['admissionIntentDigest', 'originalRequestRef', 'originalRequestDigest', 'workspaceIdentityRef',
       'workspaceIdentityDigest', 'runtimeBundleRef', 'runtimeBundleManifestDigest', 'sandboxProfileRef', 'sandboxProfileDigest', 'targetDigest'])
       assertArtifactRef(text(targetData[key], 64));
-    if (targetData.schemaVersion !== 1 || targetData.format !== 'cliq-source-inspection-target-v1' || targetData.method !== 'run.submit' ||
+    if (targetData.schemaVersion !== 1 || targetData.format !== 'cliq-source-inspection-target-v1' || targetData.method !== attempt.method ||
         targetData.targetDigest !== digestOmitting(targetData, 'targetDigest') || targetData.targetDigest !== attempt.targetDigest ||
         targetData.principalId !== attempt.principalId || targetData.admissionKey !== attempt.admissionKey ||
         targetData.admissionIntentDigest !== attempt.admissionIntentDigest || targetData.workspaceIdentityDigest !== attempt.workspaceIdentityDigest ||
-        !Array.isArray(targetData.sourceReadGrantRefs) || targetData.sourceReadGrantRefs.length !== 0) invalid('retained target does not bind its original source attempt');
-    const original = normalizeRunSubmitRequest(await readCanonicalArtifact(artifacts, text(targetData.originalRequestRef, 64)));
+        !Array.isArray(targetData.sourceReadGrantRefs) || targetData.sourceReadGrantRefs.length !== 0 ||
+        typeof targetData.sessionId !== 'string' || normalizeBoundedText(targetData.sessionId, 1, 128) !== targetData.sessionId ||
+        !Number.isSafeInteger(targetData.expectedContextRevision) || (targetData.expectedContextRevision as number) < 1)
+      invalid('retained target does not bind its original source attempt');
+    const original = normalizeSourceInspectionRequest(await readCanonicalArtifact(artifacts, text(targetData.originalRequestRef, 64)));
     if (original.request.requestId !== originalIndex.originalRequestId || original.originalRequestDigest !== originalIndex.originalRequestDigest ||
-        original.originalRequestDigest !== targetData.originalRequestDigest || original.request.sessionId !== targetData.sessionId ||
-        original.request.expectedContextRevision !== targetData.expectedContextRevision ||
-        runSubmitIntentDigest(attempt.principalId, original.request) !== attempt.admissionIntentDigest)
+        original.originalRequestDigest !== targetData.originalRequestDigest || original.request.method !== attempt.method ||
+        sourceInspectionIntentDigest(attempt.principalId, original.request) !== attempt.admissionIntentDigest)
       invalid('retained target original request or derived index differs');
-    const workspace = decodeWorkspaceIdentity(await readCanonicalArtifact(artifacts, text(targetData.workspaceIdentityRef, 64)));
+    return { target: immutableSnapshot(targetData as SourceInspectionTargetV1), original: original.request };
+  } catch (cause) {
+    if (cause instanceof ResourceRetirementError) throw cause;
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'source inspection retained target is invalid', { cause });
+  }
+}
+
+/** Retained replay checks bytes and indexes without reopening a live source.
+ * This returns no native/read capability and cannot authorize fresh capture. */
+export async function readRetainedSourceInspectionTarget(artifacts: ArtifactCatalog, attempt: SourceInspectionAttemptV1,
+  originalIndex: { originalRequestId: string; originalRequestDigest: string }, bootstrap: SourceInspectionBootstrap,
+  retained?: { driver: SqliteDriver; signal?: AbortSignal }) {
+  try {
+    const { target: targetData, original } = await readSourceInspectionTargetData(artifacts, attempt, originalIndex);
+    const workspace = decodeWorkspaceIdentity(await readCanonicalArtifact(artifacts, targetData.workspaceIdentityRef));
     if (workspace.kind !== 'live' || workspace.identityDigest !== targetData.workspaceIdentityDigest ||
-        workspace.ownerPrincipalId !== attempt.principalId || workspace.canonicalRootPath !== original.request.workspacePath)
+        workspace.ownerPrincipalId !== attempt.principalId)
       invalid('retained target workspace differs from its original request');
     const bundle = await readCanonicalArtifact<RuntimeBundleManifest>(artifacts, text(targetData.runtimeBundleRef, 64));
     verifyRuntimeBundle(bundle, bootstrap.releaseKeys);
     if (bundle.manifestDigest !== targetData.runtimeBundleManifestDigest) invalid('retained target signed runtime differs');
     const profile = decodeSandboxProfile(await readCanonicalArtifact(artifacts, text(targetData.sandboxProfileRef, 64)));
-    if (profile.profileDigest !== targetData.sandboxProfileDigest || !profile.allowedOwners.includes('source_inspection') ||
-        canonicalSha256(profile.resources) !== canonicalSha256(original.request.sandboxResources)) invalid('retained target source profile differs');
-    return { target: targetData as SourceInspectionTargetV1, original: original.request, bundle };
+    if (profile.profileDigest !== targetData.sandboxProfileDigest || !profile.allowedOwners.includes('source_inspection'))
+      invalid('retained target source profile differs');
+    if (original.method === 'run.submit') {
+      if (original.sessionId !== targetData.sessionId || original.expectedContextRevision !== targetData.expectedContextRevision ||
+          workspace.canonicalRootPath !== original.workspacePath ||
+          canonicalSha256(profile.resources) !== canonicalSha256(original.sandboxResources)) invalid('retained submit capture selection differs');
+    } else {
+      if (!retained) invalid('retained delivery target requires its original source recovery context');
+      const source = await readRetainedVerifiedDeliverySource(retained.driver, artifacts, { principalId: attempt.principalId,
+        sourceRunId: original.sourceRunId, expectedRunResultRef: original.expectedRunResultRef, signal: retained.signal });
+      const projection = decodeSourceProjection(await readCanonicalArtifact(artifacts, source.spec.sourceProjectionRef));
+      const rules = decodeFrozenIgnoreRules(await readCanonicalArtifact(artifacts, projection.frozenIgnoreRulesRef));
+      if (source.run.sessionId !== targetData.sessionId || source.session.workspaceIdentityRef !== targetData.workspaceIdentityRef ||
+          !Number.isSafeInteger(targetData.expectedContextRevision) || (targetData.expectedContextRevision as number) < 1 ||
+          (targetData.expectedContextRevision as number) > source.session.contextRevision ||
+          source.spec.sandboxProfileRef !== targetData.sandboxProfileRef || source.assembly.runtime.runtimeBundleRef !== targetData.runtimeBundleRef ||
+          projection.explicitIncludes.length || rules.sources.length || rules.rules.length || source.spec.dependencyPolicyRef !== undefined ||
+          original.verifierExecutionGrantIds.length)
+        invalid('retained delivery capture selection differs from its exact original source');
+    }
+    return { target: targetData, original, bundle };
   } catch (cause) {
     if (cause instanceof ResourceRetirementError) throw cause;
     throw new KernelStorageError('RECOVERY_REQUIRED', 'source inspection retained provenance is invalid', { cause });

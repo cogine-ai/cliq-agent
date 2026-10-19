@@ -141,6 +141,46 @@ test('the same genuine peer can rehello and read, but cannot reuse readiness aft
   await peer.receive('closed');
 });
 
+test('delivery remains unavailable on a genuine authenticated peer without its complete installed composition', async t => {
+  const fixture = await createQueuedFixture('w-apply');
+  t.after(() => disposeFixture(fixture));
+  const errors: Error[] = [];
+  const service = openInstalledControl(fixture.store, { serverBuild: 'wire-delivery-fixture' }, error => errors.push(error));
+  t.after(() => service.close());
+  const driver = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+  t.after(() => driver.close());
+  const before = { runs: driver.prepare('SELECT count(*) AS n FROM runs').get(), inspections: driver.prepare('SELECT count(*) AS n FROM source_inspection_attempts').get(),
+    controls: driver.prepare('SELECT count(*) AS n FROM control_requests').get(), run: fixture.store.getRun(fixture.runId) };
+  assert.equal(fixture.store.supportsInstalledDelivery(), false);
+  await assert.rejects(fixture.store.applyInstalledRun({}, {} as never), { code: 'UNSUPPORTED_PLATFORM' });
+  await assert.rejects(fixture.store.approveInstalledRun({}, {} as never), { code: 'UNSUPPORTED_PLATFORM' });
+  await assert.rejects(fixture.store.reconcileInstalledRun({}, {} as never), { code: 'UNSUPPORTED_PLATFORM' });
+  const peer = await connectPeer(t, path.join(fixture.stateRoot, 'runtime/control-v1.sock'));
+  await peer.write(frame({ ...compatibleHello, requestedFeatureIds: ['run.apply', 'run.approve', 'run.reconcile'] }));
+  assert.deepEqual((await peer.response()).result.enabledFeatureIds, []);
+  const core = { protocolVersion: 1, method: 'run.apply', requestId: '01900000-0000-7000-8000-000000000001',
+    admissionKey: 'a'.repeat(22), sourceRunId: fixture.runId, expectedRunResultRef: 'a'.repeat(64) };
+  await peer.write(frame({ ...core, requestDigest: canonicalSha256(core) }));
+  const response = await peer.response();
+  assert.equal(response.method, 'run.apply'); assert.equal(response.ok, false);
+  assert.equal(response.error.code, 'AUTHORIZATION_REQUIRED'); assert.equal(response.error.messageCode, 'control.method_not_enabled');
+  const approval = { protocolVersion: 1, method: 'run.approve', requestId: '01900000-0000-7000-8000-000000000002',
+    runId: fixture.runId, expectedRevision: before.run.revision, waitingOnRef: 'b'.repeat(64), decision: 'allow' };
+  await peer.write(frame({ ...approval, requestDigest: canonicalSha256(approval) }));
+  const unavailable = await peer.response();
+  assert.equal(unavailable.method, 'run.approve'); assert.equal(unavailable.ok, false);
+  assert.equal(unavailable.error.code, 'AUTHORIZATION_REQUIRED'); assert.equal(unavailable.error.messageCode, 'control.method_not_enabled');
+  const reconcile = { protocolVersion: 1, method: 'run.reconcile', requestId: '01900000-0000-7000-8000-000000000003',
+    runId: fixture.runId, expectedRevision: before.run.revision, waitingOnRef: 'b'.repeat(64), resolution: { kind: 'probe_now' } };
+  await peer.write(frame({ ...reconcile, requestDigest: canonicalSha256(reconcile) }));
+  const refused = await peer.response();
+  assert.equal(refused.method, 'run.reconcile'); assert.equal(refused.ok, false);
+  assert.equal(refused.error.code, 'AUTHORIZATION_REQUIRED'); assert.equal(refused.error.messageCode, 'control.method_not_enabled');
+  assert.deepEqual({ runs: driver.prepare('SELECT count(*) AS n FROM runs').get(), inspections: driver.prepare('SELECT count(*) AS n FROM source_inspection_attempts').get(),
+    controls: driver.prepare('SELECT count(*) AS n FROM control_requests').get(), run: fixture.store.getRun(fixture.runId) }, before);
+  assert.deepEqual(errors, []);
+});
+
 test('authenticated artifact.get fetches registered bytes through bounded real UDS frames without a write oracle', async t => {
   const fixture = await createQueuedFixture('wire-artifact');
   t.after(() => disposeFixture(fixture));

@@ -3,7 +3,10 @@ import type { ArtifactRef, ReplayClass } from './types.js';
 import type { ToolPolicyDecisionItem } from './tool-authorization.js';
 import type { InputRequestItem, UserInputItem } from './user-input.js';
 import type { FinalCandidateItem } from './result.js';
+import type { DeliveryMergeItem, DeliveryMergeConflictItem, DeliveryDecisionItem } from './delivery.js';
+import type { PublicationPathProgressItem, PublicationPathResultItem, PublicationLateObservationItem } from './publication.js';
 import type { VerifierPolicyDecisionItem } from './verifier-invocation.js';
+import type { DeliveryPolicyDecisionItem } from './delivery-invocation.js';
 import type { VerifierResultItem, RepairDiagnosticItem, VerifierStopItem } from './verifier.js';
 
 export type ToolContractManifestV1 = {
@@ -135,4 +138,5 @@ export type RunContextCompactionItem = ItemIdentity & {
 };
 
 export type ContinuationItem = ModelTurnItem | ToolBatchItem | ToolResultItem | RunContextCompactionItem | ToolPolicyDecisionItem | InputRequestItem | UserInputItem | FinalCandidateItem |
-  VerifierPolicyDecisionItem | VerifierResultItem | RepairDiagnosticItem | VerifierStopItem;
+  VerifierPolicyDecisionItem | VerifierResultItem | RepairDiagnosticItem | VerifierStopItem |
+  DeliveryMergeItem | DeliveryMergeConflictItem | DeliveryDecisionItem | DeliveryPolicyDecisionItem | PublicationPathProgressItem | PublicationPathResultItem | PublicationLateObservationItem;

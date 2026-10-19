@@ -447,13 +447,18 @@ type RunResult = {
 
 type PathState =
   | { kind: 'absent' }
-  | { kind: 'directory'; mode: number; identityDigest?: string }
+  | { kind: 'directory'; mode: number; identityDigest: string; empty: boolean }
   | { kind: 'file'; digest: string; mode: number }
   | { kind: 'symlink'; target: string; digest: string }
 
 type PublicationLeafState =
   | { kind: 'file'; digest: string; mode: number }
   | { kind: 'symlink'; target: string; digest: string }
+
+type PublicationExpectedEntry = PublicationLeafState |
+  { kind: 'directory'; mode: number; identityDigest: string; empty: true }
+type PublicationDesiredEntry = PublicationLeafState |
+  { kind: 'directory'; mode: 493 }
 
 type PublicationParent =
   | { kind: 'existing_directory'; expectedIdentityDigest: string }
@@ -487,8 +492,8 @@ type PublicationOperation = PublicationOperationBase & (
     }
   | {
       kind: 'replace'
-      expected: PublicationLeafState
-      desired: PublicationLeafState
+      expected: PublicationExpectedEntry
+      desired: PublicationDesiredEntry
       stagingName: string
       stagingExpected: { kind: 'absent' }
       quarantineName: string
@@ -496,7 +501,7 @@ type PublicationOperation = PublicationOperationBase & (
     }
   | {
       kind: 'delete'
-      expected: PublicationLeafState
+      expected: PublicationExpectedEntry
       desired: { kind: 'absent' }
       stagingName?: never
       stagingExpected?: never
@@ -511,6 +516,8 @@ type PublicationAbortOperation = {
   kind: 'abort_rmdir'
   path: string
   createdByOperationId: string
+  quarantineName: 'preimage'
+  quarantineExpected: { kind: 'absent' }
 }
 
 type DeliveryPlan = {
@@ -520,6 +527,8 @@ type DeliveryPlan = {
   sourceBaseRef: ArtifactRef
   sourceDesiredRef: ArtifactRef
   capturedWorkspaceRef: ArtifactRef
+  captureTopologyRef: ArtifactRef
+  captureTopologyDigest: string
   desiredSourceRef: ArtifactRef
   diffRef: ArtifactRef
   mergeAlgorithm: 'cliq-diff3-v1'
@@ -528,8 +537,41 @@ type DeliveryPlan = {
   abortOperations: PublicationAbortOperation[]
 }
 
+type PublicationLocationV1 =
+  | { kind: 'workspace'; path: string }
+  | { kind: 'publication_arena'; arenaId: string; component: string }
+
+type PublicationArenaBirthV1 = {
+  schemaVersion: 1
+  format: 'cliq-publication-arena-birth-v1'
+  deliveryRunId: string
+  deliveryPlanRef: ArtifactRef
+  workspaceIdentityRef: ArtifactRef
+  workspaceIdentityDigest: string
+  stateRootIdentityRef: ArtifactRef
+  stateRootIdentityDigest: string
+  inspectorIdentityRef: ArtifactRef
+  inspectorIdentityDigest: string
+  sequence: 'forward' | 'abort'
+  operationIndex: number
+  operationId: string
+  opId: string
+  attempt: number
+  dispatchId: string
+  arenaId: string
+  arenaIdentity: { deviceId: string; fileId: string; ownerUid: number; mode: 448 }
+  parentIdentity: { deviceId: string; fileId: string; ownerUid: number; mode: 448 }
+  observedAt: string
+  birthDigest: string
+}
+
+type PublicationArenaRetirementObservation =
+  | { kind: 'linux_unlinked'; linkCount: 0 }
+  | { kind: 'darwin_unlinked'; heldPathUnchanged: true;
+      parentPathUnchanged: true; observedLinkCount: number }
+
 type PublicationPathObservationV1 = {
-  path: string
+  location: PublicationLocationV1
   state: PathState
   parentDeviceId: string
   parentFileId: string
@@ -552,7 +594,21 @@ type PublicationProofBaseV1 = {
 }
 
 type PublicationProofV1 = PublicationProofBaseV1 & (
+  | {
+      kind: 'arena_retirement'
+      arenaId: string
+      stateRootIdentityRef: ArtifactRef
+      stateRootIdentityDigest: string
+      arenaIdentity: PublicationArenaBirthV1['arenaIdentity']
+      parentIdentity: PublicationArenaBirthV1['parentIdentity']
+      arenaAbsent: true
+      arenaParentFsyncCompleted: true
+      retirementObservation: PublicationArenaRetirementObservation
+      proofDigest: string
+    }
   | { kind: 'path_observation'; observation: PublicationPathObservationV1; proofDigest: string }
+  | { kind: 'ancestor_projection_absence'; path: string; ancestorPath: string;
+      ancestorObservationRef: ArtifactRef; proofDigest: string }
   | {
       kind: 'terminal_receipt'
       sequence: 'forward' | 'abort'
@@ -592,7 +648,8 @@ type PublicationProofV1 = PublicationProofBaseV1 & (
       lastKnownObservationRefs: ArtifactRef[]
       proofDigest: string
     }
-  | { kind: 'transient_absence'; transientPaths: string[]; observationRefs: ArtifactRef[]; proofDigest: string }
+  | { kind: 'transient_absence'; transientLocations: PublicationLocationV1[];
+      observationRefs: ArtifactRef[]; arenaRetirementRefs: ArtifactRef[]; proofDigest: string }
   | {
       kind: 'projection_closure'
       selectedBranch: 'forward_finalize' | 'abort'
@@ -874,10 +931,103 @@ Implementation notes:
 7. Implement the RFC-exact `delegate` and `await_children` built-ins—no untyped spawn API. `delegate` accepts bounded inline exposed built-in names and MCP registration ids, validates objective, `read_only|mutating` mode, parent-current/summary context refs, complete requested ceilings, `inherit_parent|none` verifier mode, and explicit unverified-helper permission; the model never supplies an authority/CAS grant ref. Its stable `opId`/`admissionKey` derive from parent Run, owning batch item id, call index/id, and canonical request digest; admission is retry-safe and appends exactly one identity-complete `ChildHandleItem`. Multiple calls can admit isolated children that run concurrently. `await_children` accepts a unique ordered list of direct handles, freezes batch/call/index identity in `ChildWaitSet`, and produces exactly one ordered discriminated `ChildResultItem` per child. Each item/terminal revalidates the exact terminal child Run result-or-detail and carries only its bounded ref-free `ChildResultModelContentV1` into the model. The reducer branches only on successful patch-bearing mutating results: zero appends the normalized await result/advances the original batch (or returns finalize settlement to `agent:child_results`), even if mutating children failed/cancelled; one or more installs a `ChildMergeBatchItem` for only those successful patches in wait order. Failed/cancelled/read-only child results remain in the final ordered result/context and never create merge calls.
 8. Child admission compare-and-swaps the parent, child, and `child_allocations` row in one transaction: it reserves granted token/cost/tool/repair ceilings, caps deadline, checks ancestry/direct-nonterminal slot, and records full delegate identity. An ancestor already reserved that parent's subtree ceiling. Child terminal writes inclusive descendant usage/result into the allocation row without changing a running parent revision. The parent settles terminal rows once in its own expected-revision transaction; only a lease-free exact `await_tool|finalize_settlement|stop_settlement` subject may settle atomically with the final child terminal. Direct concurrency slots derive from child terminal rows. Own repairs increment own and inclusive usage; wall time is neither summed nor reserved. Cancellation/unresolved effects retain conservative reservations until settlement evidence. A no-tool final turn cannot create `FinalCandidateItem` while any direct allocation is nonterminal or unsettled: `finalize_settlement` returns child results to a fresh agent frontier and requires a new complete final turn.
 9. A mutating child returns a canonical file-operation manifest, not an untrusted text patch. Each operation is `add | modify | delete | mode | symlink` with canonical path and expected/result identity. The parent rejects a base different from the admitted fork. Serial application MUST use `cliq-diff3-v1`; every merge call is a kernel `workspace-rollback-retry` with pre-effect Checkpoint and stable opId, and `completed` + ChildMergeBatch result + settlement + post-effect Checkpoint + frontier/revision/event commit through work package 01's `commitWorkspaceEffect`. No merged state commits first.
-10. `run.apply` descriptor-captures immutable real-workspace SourceManifest A before admission, stores A in RunSpec and `delivery:merge.capturedWorkspaceRef`, materializes A into a private delivery generation, and publishes distinct WorkspaceStateManifest W_A as the initial Checkpoint `workspaceStateRef`; no accepted delivery Run lacks either artifact and there is no post-admission capture phase. Let B be the source RunResult base, S its verified result, and M=`cliq-diff3-v1(B,S,A)`. The merge item/plan repeat `sourceBaseRef=B`, `sourceDesiredRef=S`, `capturedWorkspaceRef=A`; the plan desired/result is M and its diff is A-to-M. The delivery candidate and RunResult use `baseSourceRef=A`, `resultSourceRef=M`, and the identical A-to-M diff. Conflict repeats B/S/A but has no M/diff and proposes the exact `runtimeSubtype='delivery_merge_conflict'` StopIntent carrying `deliveryMergeConflictItemRef`/`conflictRef` before permission/publication. Positively failed publication proposes `runtimeSubtype='delivery_publication_failed'` with exact plan/forward-or-abort/operation/evidence. `commitTerminalStop` projects those fields one-to-one into their identically named TerminalReasonDetail; no generic detail is caller-selected. The private merge view is disposable. CAS-first publication stores the normalized candidate/diff and canonical `DeliveryPlan` before frontier advance. A delivery Run inherits the source `DependencyPolicy`, never a stale plan or source readiness; each merge candidate derives its lockfile-bound plan and, when enabled, executes delivery-owned setup unless the same delivery Run already has the exact ready Checkpoint from recovery. Delivery is non-agentic (`modelTokens=costMicros=repairAttempts=childDepth=childConcurrency=0`): verifier assertion fails the delivery Run and never opens repair. Exact source result reuses receipts only through validated inherited verification provenance; otherwise delivery runs the same required verifier spec and owns fresh receipts. Permission binds the complete plan digest and receives the already-published verification closure.
-11. Publication holds a no-follow real-workspace root descriptor and revalidates root identity. Linux walks every ancestor with `openat2(RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS)`; macOS walks each component using `openat(O_DIRECTORY|O_NOFOLLOW)` plus `fstat`. Every operation uses only parent descriptors and the exact `PublicationOperation` union: mkdir has no transient, create has staging only, replace has staging plus quarantine, delete has quarantine only, and every operation has an existing-directory identity or earlier planned-mkdir parent. Forbidden/omitted kind fields invalidate the plan. `DeliveryPlan.forwardOperations` is ordered ancestor-first; a separate deepest-first `abortOperations` contains only planned delivery-created directories. A forward mkdir is mode 0755, identity-checked and fsynced. Abort records `not_created` without I/O when no matching creation receipt exists, otherwise uses the Supervisor-only recovery-maintenance gate to remove only this delivery's proven-empty directory; unexpected identity/content waits. Normal success never executes abort operations and no absolute-path reopen or check-then-overwrite fallback exists.
-12. Every leaf freezes the kind-specific unpredictable sibling name(s), expected absence, exact pre/desired leaf state, parent linkage, and stable opId. Create uses one staging sibling and the probed no-replace primitive; replace uses staging plus quarantine and exchange; delete uses only no-replace quarantine—Linux/macOS flags are mutually exclusive. One leaf is one indivisible Journal/tool-budget envelope: stage/swap where applicable, CAS-preserve actual displaced bytes, commit `PublicationPathProgressItem`, remove the exact transient, fsync the parent, then commit Journal `completed` plus `PublicationPathResultItem`. A separate cleanup attempt is forbidden. Recovery inspects descriptor-relative identities and the durable progress item; desired destination bytes alone never prove completion. Stop/deadline may finish this already-claimed no-new-semantic-effect envelope and zero-charge abort maintenance, but may start no new forward publication.
-   Every receipt/evidence edge above decodes only canonical `PublicationProofV1`. Its base must match the delivery Run, plan, live workspace identity, and current signed inspector, and `proofDigest` omits itself under JCS. Descriptor path observations have exact absent-vs-present identity XORs. `PublicationPathProgressItem.destinationEvidenceRef` is the post-swap path observation; `transientObservationRef` replaces any untyped identity handle and is present exactly for the plan-derived sibling still pending cleanup. A completed path uses the same `terminal_receipt` artifact for Journal receipt/evidence and result receipt/evidence; it matches claim/operation/pre/post/transient/preimage/parent/fsync facts exactly. No-I/O `not_created`, retained planned descendants, concrete failed observations, `path_ambiguity` unknowns, transient absence, projection closure, and Git-index equality each use their own closed branch. The Git branch requires two exact canonical `GitIndexSnapshotV1` refs/digests and byte-identical snapshot authority; non-Git forbids them all. The projection's observed path refs and three closure refs must decode to those exact branches and repeat its ordered path/result/source values. An adapter-local JSON receipt, raw `.git/index` blob, inode/time comparison, or bare assertion cannot complete a leaf or terminalize delivery.
+10. `run.apply` descriptor-captures immutable real-workspace SourceManifest A before admission, completely reads/hashes/validates its recovery closure, and publishes distinct restorable WorkspaceStateManifest W_A. The atomic admission stores A in RunSpec and `delivery:merge.capturedWorkspaceRef` and W_A as the initial Checkpoint `workspaceStateRef`; no accepted delivery Run lacks either artifact and there is no post-admission capture phase. Only the existing post-admission WorkerLaunch `preparing` lifecycle may register ownership intent, create and materialize the private delivery generation from W_A, fsync/re-walk it, and publish physical snapshot/preactivation evidence. Durable W_A proves recovery bytes, not physical creation or retirement; no second lifecycle or pre-admission unregistered directory is permitted. Let B be the source RunResult base, S its verified result, and M=`cliq-diff3-v1(B,S,A)`. The merge item/plan repeat `sourceBaseRef=B`, `sourceDesiredRef=S`, `capturedWorkspaceRef=A`; the plan desired/result is M and its diff is A-to-M. The delivery candidate and RunResult use `baseSourceRef=A`, `resultSourceRef=M`, and the identical A-to-M diff. Conflict repeats B/S/A but has no M/diff and proposes the exact `runtimeSubtype='delivery_merge_conflict'` StopIntent carrying `deliveryMergeConflictItemRef`/`conflictRef` before permission/publication. Positively failed publication proposes `runtimeSubtype='delivery_publication_failed'` with exact plan/forward-or-abort/operation/evidence. `commitTerminalStop` projects those fields one-to-one into their identically named TerminalReasonDetail; no generic detail is caller-selected. The private merge view is disposable. CAS-first publication stores the normalized candidate/diff and canonical `DeliveryPlan` before frontier advance. A delivery Run inherits the source `DependencyPolicy`, never a stale plan or source readiness; each merge candidate derives its lockfile-bound plan and, when enabled, executes delivery-owned setup unless the same delivery Run already has the exact ready Checkpoint from recovery. Delivery is non-agentic (`modelTokens=costMicros=repairAttempts=childDepth=childConcurrency=0`): verifier assertion fails the delivery Run and never opens repair. Exact source result reuses receipts only through validated inherited verification provenance; otherwise delivery runs the same required verifier spec and owns fresh receipts. Permission binds the complete plan digest and receives the already-published verification closure.
+11. Publication holds a no-follow real-workspace root descriptor and revalidates
+    the exact captured root/parent inode identities. Linux walks every ancestor
+    with `openat2(RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS)`;
+    macOS walks each component using `openat(O_DIRECTORY|O_NOFOLLOW)` plus
+    `fstat`. These are resolution-time checks, not an atomic ancestry lock.
+    Preflight/precheck identity or linkage drift refuses the operation before
+    its write and enters typed reconciliation. Apply requires a quiescent human
+    workspace; an uncooperative final-check-to-syscall parent/root move may
+    affect the original captured object outside the current workspace path.
+    Detected drift must refuse successful completion, stop further semantic
+    publication and retain the original descriptors/actual preimages for the
+    same claim. No atomic current-path/no-outside-write guarantee is claimed;
+    source/projection/grant checks and no-follow traversal remain mandatory.
+    Every operation uses only those parent descriptors and the exact
+    `PublicationOperation` union: mkdir has no Plan staging/quarantine fields
+    but births its physical `desired` directory in the private arena; create
+    has private staging only, replace has private staging plus quarantine, and
+    delete has private quarantine only. Every parent is an exact captured
+    directory or the earlier receipt-bound mkdir/type-conversion creator.
+    Forbidden/omitted kind fields invalidate the plan. Forward dependencies are
+    ancestor-first and removals descendant-first; separate deepest-first
+    `abortOperations` contains only delivery-created directories. A forward
+    mkdir is normalized to mode 0755 and fsynced inside the arena before
+    no-replace release. Abort records `not_created` only with positive absence
+    and no matching creation receipt; otherwise Supervisor-only maintenance
+    removes only this delivery's proven-empty directory. Unexpected identity
+    or content waits. Normal success never runs abort, reopens an absolute
+    workspace path, or falls back to check-then-overwrite.
+12. Every path freezes its exact branch-specific private components, absence,
+    pre/desired state, parent linkage and stable operation id. Directory removal
+    and file/symlink/directory conversion use this same Plan, with exact captured
+    raw directory identity and fresh emptiness checks. Missing parents precede
+    children; removed children precede directory conversion/removal. All staging,
+    directory/symlink births and displaced preimages live in the original
+    claim's StateRoot private arena, never mutable workspace siblings. Its id is
+    `identityHash('cliq-publication-arena-v1',runId,operationId,opId,String(attempt),dispatchId)`;
+    a successor cannot derive a different arena from its owner epoch or adopt an
+    inode merely by matching that name. Before any workspace write, full readonly
+    preflight rejects cross-filesystem moves and all touched multi-hardlink
+    regular files; no capability probe writes the workspace. Cross-filesystem
+    support remains explicitly unqualified, with no sibling/copy-delete fallback.
+    Create/mkdir release via no-replace, replace via exchange, and delete via
+    no-replace quarantine. Linux/macOS flags are mutually exclusive. One path is
+    one Journal/tool-budget envelope: native birth/stage, semantic release,
+    actual preimage CAS preservation, genuine `PublicationPathProgressItem`
+    barrier, exact private cleanup, both-parent fsync, and Journal/result commit.
+    No extra cleanup dispatch or charge is allowed. Unexpected displaced inodes
+    are retained and block completion; no blind exchange-back or foreign unlink.
+    Missing original birth/progress evidence after a crash remains reconciliation.
+    Stop first revokes new semantic release, then joins the original envelope;
+    zero-charge post-stop abort maintenance has its own exact original-Plan/
+    creator-receipt/prefix authority, not a relaxed productive grant.
+
+    All receipt/evidence edges decode canonical `PublicationProofV1`, whose
+    self-omitting digest, original Run/Plan/inspector and actual producer/claim/
+    resource provenance revalidate. `PublicationLocationV1` distinguishes held
+    workspace destinations from original-claim arena components. Present/absent
+    identity fields are exact XORs. Progress names the actual post-release
+    destination, preserved preimage and still-present private transient; a
+    structural CAS object alone cannot authorize cleanup. Completed Journal and
+    result use the same exact terminal receipt in both receipt/evidence fields.
+    Failure/unknown/no-I/O/retained-descendant/absence/projection/Git branches are
+    closed and cannot substitute for one another. Absence covers all and only
+    actual claimed arenas/components, never fabricated arenas for an unstarted
+    suffix. Terminal workspace paths are separate from private locators. Git
+    requires exact captured/observed index refs/digests and byte equality;
+    non-Git forbids them. Full result/source/context/Checkpoint closure, not a
+    decoder, adapter receipt, raw index blob or inode/time comparison, proves
+    terminal delivery. Native component tests and local graph regressions do not
+    replace the required real Linux installation/Run/restart qualification.
+    Every ordinary path observation keeps its actual existing direct-parent
+    inode and positive link count; top-level paths use a fresh fstat of the
+    genuine held root, with its original identity/no-follow checks. A deleted
+    or non-directory parent never borrows root metadata, an older receipt or
+    zero links. Only terminal absent path states may use
+    `ancestor_projection_absence`: a strict canonical descendant path plus one
+    exact ancestor observation ref. That actual workspace `path_observation`
+    must be `absent|file|symlink`, never directory or arena; no-follow source
+    projection cannot traverse it, and no claim is made about a link target.
+    Original Run/Plan/workspace/inspector and observedAt match exactly, without
+    sampling a new clock for the derived fact. Both closed artifacts and their
+    owner graph are fully revalidated; chains, wrong refs/paths/times and
+    fictional parent metadata reject. Projection closure roots the exact
+    derived ref and its single original anchor. This terminal-only fact grants
+    no operation release, PathProgress, preimage or cleanup capability.
+    A claimed `abort_rmdir` has its own zero-budget maintenance object and the
+    same physical arm/revoke gate; it cannot rearm a revoked forward object.
+    Its only private component is fixed `preimage`. Move the actual directory
+    there with no-replace, then prove the original creator inode and actual
+    emptiness before preserving its empty-directory CAS closure. Foreign or
+    newly nonempty directories remain retained and unknown. The original
+    `desired_committed_cleanup_pending` PathProgress binds workspace absence,
+    that exact preimage and private inode; only its genuine durable barrier
+    permits private rmdir, both-parent fsync, arena retirement and real joined
+    close. A native component test cannot supply or substitute that SQL barrier.
+
 13. Successful delivery terminalization and any failed/cancelled delivery after a forward publication claim validate one immutable `DeliveryTerminalProjectionEvidence`; `evidenceDigest` is JCS/SHA-256 with itself omitted. For `selectedBranch='forward_finalize'`, every forward operation has exactly one plan-ordered `completed` result, `abortResultItemRefs` and `unstartedForwardOperationIds` are empty, and `observedSourceRef` equals the verified `DeliveryPlan.desiredSourceRef`; the finalize frontier and RunResult retain that exact evidence ref. For `selectedBranch='abort'`, every claimed/dispatched forward operation has exactly one non-`unknown` terminal result, `unstartedForwardOperationIds` equals the remaining contiguous plan-ordered suffix after the last started forward operation, and every abort operation has exactly one plan-ordered non-`unknown` terminal result. A positively evidenced `failed` result may explain a known retained path; it never proves rollback. Both branches require exhaustive byte-sorted canonical observations for every plan-touched path, all transients absent, no unexplained or ambiguous state, and the Git index unchanged. Failed/cancelled abort terminalization requires `TerminalDetail.deliveryTerminalProjectionEvidenceRef` to reference this artifact and `TerminalDetail.publicationResultItemRefs` to equal its ordered forward-then-abort result refs; `primaryEvidenceRef` remains the immutable winning StopIntent evidence. The observed partial `observedSourceRef` need equal neither the desired result nor the captured base. Merge conflict, approval denial, or cancellation before any forward claim forbids the projection field and uses its ordinary typed terminal evidence. Missing receipts, an `unknown` result, an unmatched path, or incomplete closure evidence remains `waiting(reconciliation)` and is not terminal. The source Run is unchanged.
 
 Reuse existing code:
@@ -1004,7 +1154,8 @@ multi-path publication remains non-atomic and preserves displaced bytes.
 - [ ] `run.apply` descriptor-captures SourceManifest A before admission, stores A only in RunSpec/initial delivery frontier, stores the distinct W_A recovery image in the initial Checkpoint, and installs `delivery:merge` as the first frontier; no delivery Run begins with an absent base/recovery image or a post-admission capture phase. The merge directory is disposable: authoritative state references only immutable A/W_A/result/diff/publication-plan artifacts committed before frontier advance, and recovery restores from W_A without inventing a workspace-effect cut.
 - [ ] Publication requires explicit permission and is Journaled; partial or ambiguous publication becomes `waiting(reconciliation)` or an independent delivery failure.
 - [ ] Verification receipts retain the executing Run id. Identical-result delivery reuse succeeds only through a validated provenance artifact for the exact same content-addressed ref/spec/source RunResult; digest-only or unrelated historical receipts are rejected, and changed results produce delivery-owned receipts.
-- [ ] Delivery permission binds the complete immutable plan. `PublicationOperation` is a strict four-branch union with required/forbidden staging/quarantine fields and exact parent identity/creation linkage; malformed or inferred fields are rejected. A held root dirfd and beneath/no-follow ancestor walk prevent symlink/rename escape; forward mkdir/leaf operations and the separate receipt-derived abort branch are ordered, fsynced, and independently reconcilable. An unexecuted mkdir advances abort with positive absence/no-receipt evidence; only delivery-created proven-empty directories may be removed.
+- [ ] Delivery permission binds the complete immutable plan. `PublicationOperation` is a strict four-branch union with required/forbidden private-arena staging/quarantine fields and exact parent identity/creation linkage; mkdir's physical `desired` is private even though its Plan omits those fields. Malformed/inferred fields are rejected. A held root dirfd and beneath/no-follow ancestor walk prevent symlink resolution escape and bind the captured objects, not their future namespace ancestry. Forward mkdir/leaf operations and the separate receipt-derived abort branch are ordered, fsynced, and independently reconcilable. An unexecuted mkdir advances abort with positive absence/no-receipt evidence; only delivery-created proven-empty directories may be removed.
+- [ ] The owner-approved captured-object/quiescent-workspace contract is validated at both cuts: drift detected before the syscall causes no write; drift introduced in the final check-to-syscall gap may affect only the original captured object but must refuse successful completion, stop further semantic publication and retain exact descriptors/actual displaced data for reconciliation. Keep the stronger historical parent-move RED observation without relabeling its original no-outside-effect assertion as passed. New-contract component and installed Linux verification remain separate requirements; no atomic current-path/no-outside-write guarantee is claimed.
 - [ ] Startup probes distinct no-replace/exchange primitives. Frozen staging/quarantine names and `cliq-publish-v1` recover every crash state; desired destination alone is not completion. Each leaf is one indivisible claimed envelope and completes only after actual displaced bytes are CAS-referenced, durable progress exists, the exact transient is absent, and the parent directory is fsynced—there is no separately budgeted cleanup operation.
 - [ ] Successful delivery forward/finalize has one plan-ordered `completed` result per forward operation, no abort/unstarted entries, exhaustive path/transient/index evidence, and an observed source projection exactly equal to the verified `DeliveryPlan.desiredSourceRef`.
 - [ ] Delivery admission publishes SourceManifest A plus distinct restorable WorkspaceStateManifest W_A; RunSpec/frontier use A and Checkpoint uses W_A. With source B/S, every merge item/plan repeats B/S/A, M is exactly `cliq-diff3-v1(B,S,A)`, plan diff is A-to-M, and candidate/closure/RunResult are exactly base A/result M/diff A-to-M; conflict has B/S/A and no invented M.

@@ -5,7 +5,7 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME, KERNEL_STATE_SCHEMA_VERSION } from '../../../src/config.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../../../src/kernel/canonical.js';
-import { digestOmitting, encodeCanonicalTime, parseCanonicalTime } from '../../../src/kernel/identity.js';
+import { digestOmitting, encodeCanonicalTime, normalizeBoundedText, parseCanonicalTime } from '../../../src/kernel/identity.js';
 import { parseJsonStrict } from '../../../src/kernel/json.js';
 import type { BoundWorkerLaunch, WorkspaceGenerationStateV1 } from '../../../src/kernel/types.js';
 import { decodeWorkerIdentity, decodeWorkspaceGenerationSnapshotEvidence } from '../../../src/state/decoders.js';
@@ -23,8 +23,11 @@ export type InstalledWorkerIdentityInspection = Readonly<{ diagnosticOnly: true;
 export type InstalledWorkerRetirementInspection = InstalledWorkerIdentityInspection & Readonly<{
   phase: 'retired'; generationWriteState: 'sealed'; generationPhase: 'sealed'; retiredAt: string;
   retirementEvidenceRef: string; snapshotEvidenceRef: string; snapshotEvidenceDigest: string; deathObservedAt: string }>;
+export type InstalledWorkerRetirementBinding = Readonly<Pick<InstalledWorkerRetirementInspection,
+  'launchId' | 'supervisorInstanceId' | 'leaseEpoch' | 'workspaceGenerationRef' | 'snapshotEvidenceRef' | 'snapshotEvidenceDigest' | 'retiredAt'>>;
 const identityFields = ['dev', 'ino', 'uid', 'gid', 'mode', 'nlink'] as const;
 const refused = 'installed worker lease inspection refused';
+const MAX_ENUMERATED_WORKER_LAUNCHES = 16;
 function requireValue(value: unknown): asserts value { if (!value) throw new Error(refused); }
 function identity(value: BigIntStats) {
   return Object.fromEntries(identityFields.map(field => [field, value[field].toString()]));
@@ -195,12 +198,50 @@ export function inspectInstalledWorkerRetirement(stateRoot: string, uid: number,
  * before retirement. Full Run recovery and independent death checks remain the
  * owning campaign's responsibility; a missing row is never proof of retirement. */
 export function inspectInstalledWorkerRetirementHistory(stateRoot: string, uid: number,
-  expected: Readonly<{ runId: string; launchId: string }>): InstalledWorkerRetirementInspection {
+  expected: Readonly<{ runId: string; launchId: string; retirement?: InstalledWorkerRetirementBinding }>): InstalledWorkerRetirementInspection {
   try {
-    closedRecord(expected, ['runId', 'launchId']);
+    const bound = Object.hasOwn(expected, 'retirement');
+    closedRecord(expected, bound ? ['runId', 'launchId', 'retirement'] : ['runId', 'launchId']);
     requireValue(boundedString(expected.runId) && boundedString(expected.launchId));
-    return readRetiredWorkerHistory(stateRoot, uid, expected);
+    const observed = readRetiredWorkerHistory(stateRoot, uid, expected);
+    if (bound) {
+      const keys = ['launchId', 'supervisorInstanceId', 'leaseEpoch', 'workspaceGenerationRef',
+        'snapshotEvidenceRef', 'snapshotEvidenceDigest', 'retiredAt'] as const;
+      closedRecord(expected.retirement, keys);
+      requireValue(keys.every(key => expected.retirement![key] === observed[key]));
+    }
+    return observed;
   } catch { throw new Error('installed worker retirement history inspection refused'); }
+}
+
+/** Original identifiers only, not worker/retirement evidence. A known empty
+ * Run is distinguished from a missing Run; every returned launch still needs
+ * the complete retained seal reader and independent process checks. Sixteen
+ * is this fixed campaign diagnostic's bound, not a production Run limit. */
+export function inspectInstalledWorkerLaunchIds(stateRoot: string, uid: number, runId: string): Readonly<{
+  diagnosticOnly: true; databaseIdentity: string; runId: string; launchIds: readonly string[];
+}> {
+  try {
+    requireValue(typeof runId === 'string' && normalizeBoundedText(runId, 1, 128) === runId);
+    return readWorkerDiagnostic(stateRoot, uid, (database, databaseIdentity) => {
+      const rows = database.prepare(`SELECT r.id AS run_id,
+        CASE WHEN typeof(w.launch_id)='text' AND length(CAST(w.launch_id AS BLOB)) BETWEEN 1 AND 128
+          THEN w.launch_id ELSE NULL END AS launch_id, w.run_id AS worker_run_id
+        FROM runs r LEFT JOIN worker_launches w ON w.run_id=r.id
+        WHERE r.id=? ORDER BY w.launch_id LIMIT ?`).all(runId, MAX_ENUMERATED_WORKER_LAUNCHES + 1);
+      requireValue(rows.length > 0 && rows.length <= MAX_ENUMERATED_WORKER_LAUNCHES);
+      const launchIds: string[] = [];
+      for (const row of rows) {
+        requireValue(row.run_id === runId);
+        if (row.launch_id === null) { requireValue(rows.length === 1 && row.worker_run_id === null); continue; }
+        if (typeof row.launch_id !== 'string') throw new Error('invalid original worker identifier');
+        requireValue(row.worker_run_id === runId &&
+          normalizeBoundedText(row.launch_id, 1, 128) === row.launch_id && !launchIds.includes(row.launch_id));
+        launchIds.push(row.launch_id);
+      }
+      return Object.freeze({ diagnosticOnly: true as const, databaseIdentity, runId, launchIds: Object.freeze(launchIds) });
+    });
+  } catch { throw new Error('installed worker launch enumeration refused'); }
 }
 
 function readRetiredWorkerHistory(stateRoot: string, uid: number, expected: Readonly<{ runId: string; launchId: string }>,

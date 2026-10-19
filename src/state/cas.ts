@@ -37,10 +37,6 @@ export function isJoinedCasPublicationFailure(error: unknown): error is Error {
   return error instanceof Error && joinedCasPublicationFailures.has(error);
 }
 
-function digest(bytes: Uint8Array): ArtifactRef {
-  return crypto.createHash('sha256').update(bytes).digest('hex');
-}
-
 function assertArtifactRef(ref: string): asserts ref is ArtifactRef {
   if (!/^[0-9a-f]{64}$/.test(ref)) throw new Error(`invalid artifact ref: ${JSON.stringify(ref)}`);
 }
@@ -184,42 +180,40 @@ async function openOwnedImmutablePath(
 async function readAndVerifyOpened(
   ref: ArtifactRef,
   opened: OpenedArtifact,
-  expectedLinkCount?: number
+  expectedLinkCount = 1,
+  signal?: AbortSignal
 ): Promise<Buffer> {
-  if (expectedLinkCount !== undefined && opened.info.nlink !== expectedLinkCount) {
-    throw new Error(`artifact ${ref} has invalid link count ${opened.info.nlink}`);
+  signal?.throwIfAborted();
+  const bytes = Buffer.allocUnsafe(opened.info.size); let offset = 0;
+  for await (const chunk of verifiedChunks(ref, opened, opened.info.size, expectedLinkCount, signal)) {
+    chunk.copy(bytes, offset); offset += chunk.length;
   }
-  const bytes = await opened.handle.readFile();
-  const after = await opened.handle.stat();
-  assertOwnedImmutableFile(`artifact ${ref}`, after);
-  if (!sameInode(opened.info, after) || opened.info.size !== after.size) {
-    throw new Error(`artifact ${ref} changed while it was read`);
-  }
-  if (expectedLinkCount !== undefined && after.nlink !== expectedLinkCount) {
-    throw new Error(`artifact ${ref} changed link count while it was read`);
-  }
-  if (bytes.byteLength !== after.size) throw new Error(`artifact ${ref} has an inconsistent size`);
-  if (digest(bytes) !== ref) throw new Error(`artifact ${ref} is corrupt`);
+  signal?.throwIfAborted();
   return bytes;
 }
 
 async function* verifiedChunks(ref: ArtifactRef, opened: OpenedArtifact, expectedByteLength: number,
-  expectedLinkCount: number | null = 1): AsyncGenerator<Buffer> {
+  expectedLinkCount: number | null = 1, signal?: AbortSignal): AsyncGenerator<Buffer> {
+  signal?.throwIfAborted();
   assertOwnedImmutableFile(`artifact ${ref}`, opened.info);
   if (expectedLinkCount !== null && opened.info.nlink !== expectedLinkCount) throw new Error(`artifact ${ref} has an invalid link count`);
   if (opened.info.size !== expectedByteLength) throw new Error(`artifact ${ref} has an unexpected byte count`);
   const hash = crypto.createHash('sha256');
   let offset = 0;
   while (offset < expectedByteLength) {
+    signal?.throwIfAborted();
     const chunk = Buffer.allocUnsafe(Math.min(ARTIFACT_CHUNK_BYTES, expectedByteLength - offset));
     const { bytesRead } = await opened.handle.read(chunk, 0, chunk.length, offset);
+    signal?.throwIfAborted();
     if (bytesRead === 0) throw new Error(`artifact ${ref} ended before its declared byte count`);
     const bytes = chunk.subarray(0, bytesRead);
     hash.update(bytes);
     offset += bytesRead;
     yield bytes;
   }
+  signal?.throwIfAborted();
   const after = await opened.handle.stat();
+  signal?.throwIfAborted();
   assertOwnedImmutableFile(`artifact ${ref}`, after);
   if (expectedLinkCount !== null && after.nlink !== expectedLinkCount) throw new Error(`artifact ${ref} changed link count while it was streamed`);
   if (!sameInode(opened.info, after) || after.size !== expectedByteLength ||
@@ -564,32 +558,42 @@ export class ContentAddressedStore {
 
   /** Chunks are staging bytes until the iterator is exhausted and its hash,
    * byte count and held-file metadata pass. Early return closes both handles. */
-  async *readChunks(ref: ArtifactRef, expectedByteLength: number): AsyncGenerator<Buffer> {
+  async *readChunks(ref: ArtifactRef, expectedByteLength: number, signal?: AbortSignal): AsyncGenerator<Buffer> {
     assertArtifactRef(ref);
     if (!Number.isSafeInteger(expectedByteLength) || expectedByteLength < 0) throw new TypeError('artifact stream requires an exact nonnegative safe byte count');
+    signal?.throwIfAborted();
     const root = await openRoot(this.root);
     try {
+      signal?.throwIfAborted();
       const opened = await openPublishedFile(this.root, root, ref);
       try {
-        for await (const chunk of verifiedChunks(ref, opened, expectedByteLength)) {
+        for await (const chunk of verifiedChunks(ref, opened, expectedByteLength, 1, signal)) {
           await assertRootPathStable(this.root, root);
+          signal?.throwIfAborted();
           yield chunk;
         }
         await assertRootPathStable(this.root, root);
+        signal?.throwIfAborted();
       } finally { await closeCasHandle(opened.handle); }
     } finally { await closeCasHandle(root.handle); }
+    signal?.throwIfAborted();
   }
 
-  async read(ref: ArtifactRef): Promise<Buffer> {
+  async read(ref: ArtifactRef, signal?: AbortSignal): Promise<Buffer> {
     assertArtifactRef(ref);
-    return this.withRoot(async (openedRoot) => {
+    signal?.throwIfAborted();
+    const bytes = await this.withRoot(async (openedRoot) => {
+      signal?.throwIfAborted();
       const opened = await openPublishedFile(this.root, openedRoot, ref);
       try {
-        return await readAndVerifyOpened(ref, opened, 1);
+        const bytes = await readAndVerifyOpened(ref, opened, 1, signal);
+        await assertRootPathStable(this.root, openedRoot); signal?.throwIfAborted();
+        return bytes;
       } finally {
         await closeCasHandle(opened.handle);
       }
     });
+    signal?.throwIfAborted(); return bytes;
   }
 
   async stat(ref: ArtifactRef): Promise<ArtifactStat> {

@@ -1,13 +1,13 @@
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { identityHash, parseCanonicalTime } from '../kernel/identity.js';
 import type { ControlApplicationResponseV1, ControlResultV1, ContinuationItem, RecoveryClosureV1, Run, RunAssemblyV1, SessionRunTerminalItem, TerminalDetail } from '../kernel/types.js';
-import { cancelledCall, agentStopDetail, decodeAgentStop, openStopBatch, stopCheckpointId, stopInvocationHistory } from '../runtime/stop.js';
+import { cancelledCall, agentStopDetail, decodeAgentStop, openStopBatch, selectAgentStop, stopCheckpointId, stopInvocationHistory } from '../runtime/stop.js';
 import { toolOperationId } from '../policy/tool-policy.js';
 import { requireEqual } from '../policy/runtime-authority.js';
 import { readCanonicalArtifact } from './agent-context.js';
 import type { ArtifactCatalog } from './artifacts.js';
 import { readHistoricalControlChannel } from './control-channel.js';
-import { decodeAdmittedContext, decodeSessionProjection } from './decoders.js';
+import { decodeAdmittedContext, decodeRunSpec, decodeSessionProjection } from './decoders.js';
 import { joinResourceOperations } from './errors.js';
 import { isZeroBudget } from './invariants.js';
 import { readCheckpoint, readControlRequest, readSession, readSessionPrincipalId } from './rows.js';
@@ -21,6 +21,10 @@ import { validatePrivateToolRollbackHistory } from './private-tool-rollback.js';
 import { readVerifierFailureCause, readVerifierIntegrityCause, readVerifierPolicyDenial, validateVerifierStoppedHistory } from './verifier-stop-history.js';
 import type { VerifierPolicyDecisionItem } from '../kernel/verifier-invocation.js';
 import type { VerifierRecoveryCut } from './verifier-recovery.js';
+import { assertDeliveryModelFreeCut } from './run-model-free.js';
+import { readDeliveryMergeConflictCause } from './delivery-recovery.js';
+import { readDeliveryPolicyDenial } from './delivery-approval.js';
+import { readDeliveryTerminalProjection, readUnclaimedPublicationStopHistory } from './delivery-publication-recovery.js';
 
 export type CancelResponse = Extract<ControlApplicationResponseV1, { ok: true }> & { result: Extract<ControlResultV1, { method: 'run.cancel' }> };
 
@@ -29,9 +33,10 @@ export async function readCancelResponse(driver: SqliteDriver, artifacts: Artifa
   const row = readControlRequest(driver, principalId, 'run.cancel', requestId);
   if (!row) throw new TypeError('cancellation has no durable control request');
   const response = await readCanonicalArtifact<CancelResponse>(artifacts, row.responseRef);
+  const spec = decodeRunSpec(await readCanonicalArtifact(artifacts, run.specRef));
   const snapshot = response.result?.snapshot;
   if (response.protocolVersion !== 1 || response.ok !== true || response.result.method !== 'run.cancel' ||
-      snapshot.schemaVersion !== 1 || snapshot.operation !== 'agent' || snapshot.run.id !== run.id ||
+      snapshot.schemaVersion !== 1 || snapshot.operation !== spec.operation || snapshot.run.id !== run.id ||
       snapshot.run.sessionId !== run.sessionId || snapshot.run.specRef !== run.specRef || snapshot.run.createdAt !== run.createdAt ||
       snapshot.run.deadlineAt !== run.deadlineAt || snapshot.run.updatedAt !== row.committedAt || !snapshot.run.cancelRequested ||
       !Number.isSafeInteger(snapshot.run.revision) || snapshot.run.revision < 2 || snapshot.run.revision > run.revision ||
@@ -53,16 +58,41 @@ export async function readCancelResponse(driver: SqliteDriver, artifacts: Artifa
 }
 
 export async function readAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, closure: RecoveryClosureV1) {
+  return readStopReference(driver, artifacts, closure, closure.run.stopIntentRef!, true);
+}
+
+/** An explicit historical edge in the actual retained graph. The original
+ * Stop is validated without replacing the Run/current cut with a fabricated
+ * snapshot, then must remain the winner or a valid monotonic predecessor. */
+export async function readRetainedAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, closure: RecoveryClosureV1, ref: string) {
+  const current = await readAgentStop(driver, artifacts, closure);
+  if (ref === closure.run.stopIntentRef) return current;
+  const original = await readStopReference(driver, artifacts, closure, ref, false);
+  if (selectAgentStop(original, current) !== current) throw new TypeError('historical StopIntent is not a monotonic predecessor of the current winner');
+  return original;
+}
+
+async function readStopReference(driver: SqliteDriver, artifacts: ArtifactCatalog, closure: RecoveryClosureV1,
+  ref: string, requireCurrentFence: boolean) {
+  if (closure.runSpec.operation === 'delivery') assertDeliveryModelFreeCut(closure);
   const { run } = closure;
-  const intent = decodeAgentStop(await readCanonicalArtifact(artifacts, run.stopIntentRef!), run);
+  const intent = decodeAgentStop(await readCanonicalArtifact(artifacts, ref), run);
+  const deliveryDenial = closure.runSpec.operation === 'delivery'
+    ? await readDeliveryPolicyDenial(driver, artifacts, closure) : undefined;
   if (intent.origin === 'user_cancel') {
     if (!run.cancelRequested) throw new TypeError('cancellation lost its monotonic dispatch fence');
-    const { response, row } = await readCancelResponse(driver, artifacts, run, intent.principalId, intent.requestId);
-    if (response.result.snapshot.run.stopIntentRef !== run.stopIntentRef || row.committedAt !== intent.createdAt) throw new TypeError('winning cancellation has no exact control-row owner');
-  } else if (run.cancelRequested) {
+    if (deliveryDenial?.origin === 'user_cancel' && canonicalSha256(deliveryDenial) === ref) {
+      // The complete approval reader already checked the original run.approve
+      // channel, wait, decision and response. Never pretend it was run.cancel.
+      requireEqual(intent, deliveryDenial, 'winning delivery approval denial');
+    } else {
+      const { response, row } = await readCancelResponse(driver, artifacts, run, intent.principalId, intent.requestId);
+      if (response.result.snapshot.run.stopIntentRef !== ref || row.committedAt !== intent.createdAt) throw new TypeError('cancellation has no exact control-row owner');
+    }
+  } else if (requireCurrentFence && run.cancelRequested) {
     if (intent.origin !== 'kernel_integrity') throw new TypeError('resource/deadline stop cannot override user cancellation');
     const principalId = readSessionPrincipalId(driver, run.sessionId);
-    let owned = false;
+    let owned = deliveryDenial?.origin === 'user_cancel';
     for (const row of driver.prepare("SELECT request_id, response_ref FROM control_requests WHERE principal_id = ? AND method = 'run.cancel'")
       .all<{ request_id: string; response_ref: string }>(principalId)) {
       const response = await readCanonicalArtifact<CancelResponse>(artifacts, row.response_ref);
@@ -73,6 +103,8 @@ export async function readAgentStop(driver: SqliteDriver, artifacts: ArtifactCat
   }
   if (intent.origin === 'runtime' && intent.runtimeSubtype === 'runtime') {
     await validateModelFailureStop(driver, artifacts, closure, intent);
+  } else if (intent.origin === 'runtime' && intent.runtimeSubtype === 'delivery_merge_conflict') {
+    requireEqual(intent, await readDeliveryMergeConflictCause(driver, artifacts, closure), 'delivery merge conflict cause');
   } else if (intent.origin === 'budget' || intent.origin === 'runtime') {
     const cause = await readResourceStopCause(driver, artifacts, closure, intent.createdAt);
     if (!cause) throw new TypeError('resource stop has no reproducible failure');
@@ -85,6 +117,9 @@ export async function readAgentStop(driver: SqliteDriver, artifacts: ArtifactCat
     const cause = await readVerifierIntegrityCause(driver, artifacts, closure, intent.createdAt);
     if (!cause) throw new TypeError('verifier integrity stop has no exact typed mutation evidence');
     requireEqual(intent, cause, 'verifier integrity stop cause');
+  } else if (intent.origin === 'policy_deny' && intent.subjectKind === 'delivery') {
+    if (!deliveryDenial) throw new TypeError('delivery policy stop has no original decision');
+    requireEqual(intent, deliveryDenial, 'winning delivery direct-policy denial');
   }
   await validateVerifierPolicyDenialHistory(driver, artifacts, closure);
   await validateVerifierStoppedHistory(driver, artifacts, closure);
@@ -128,8 +163,11 @@ export async function validateVerifierPolicyDenialHistory(driver: SqliteDriver, 
     if (stopRef === run.stopIntentRef) currentDenialValidated = true;
     validated.add(item.itemId);
   }
-  if (run.stopIntentRef && decodeAgentStop(await readCanonicalArtifact(artifacts, run.stopIntentRef), run).origin === 'policy_deny' && !currentDenialValidated)
-    throw new TypeError('verifier policy denial lacks its original policy decision');
+  if (run.stopIntentRef) {
+    const current = decodeAgentStop(await readCanonicalArtifact(artifacts, run.stopIntentRef), run);
+    if (current.origin === 'policy_deny' && current.subjectKind === 'verifier' && !currentDenialValidated)
+      throw new TypeError('verifier policy denial lacks its original policy decision');
+  }
   return validated;
 }
 
@@ -145,7 +183,8 @@ export async function validateStopRecovery(driver: SqliteDriver, artifacts: Arti
     if (!['queued', 'running', 'waiting'].includes(run.status) || run.terminalReason || run.terminalDetailRef || run.resultRef) throw new TypeError('nonterminal stop has terminal fields');
     return;
   }
-  if (spec.operation !== 'agent' || run.parentRunId || closure.childAllocations.length || !isZeroBudget(run.budgetReserved) ||
+  if (spec.operation === 'delivery') assertDeliveryModelFreeCut(closure);
+  if (run.parentRunId || closure.childAllocations.length || !isZeroBudget(run.budgetReserved) ||
       run.status !== intent.targetStatus || run.terminalReason !== intent.reason || !run.terminalDetailRef || run.resultRef ||
       run.nextStep !== null || run.frontierRef || run.activeWorkerLaunchId || run.waitingOnRef || run.waitingReason ||
       closure.workerLaunches.some((launch) => launch.phase !== 'retired') ||
@@ -157,8 +196,20 @@ export async function validateStopRecovery(driver: SqliteDriver, artifacts: Arti
   parseCanonicalTime(preparedAt);
   if (preparedAt < intent.createdAt || preparedAt > run.updatedAt) throw new TypeError('terminal preparation time is outside its intent and committed Checkpoint');
   const abandoned = await validateInstalledBrokerTerminalHistory(driver, artifacts, closure, detail);
+  const hasPublicationClaim = journal.some(entry => entry.opKind === 'publish' && entry.phase === 'dispatch_claimed');
+  const publication = hasPublicationClaim && spec.operation === 'delivery' && detail.deliveryTerminalProjectionEvidenceRef
+    ? await readDeliveryTerminalProjection(driver, artifacts, closure, detail.deliveryTerminalProjectionEvidenceRef) : undefined;
+  if (hasPublicationClaim && (!publication || publication.evidence.selectedBranch !== 'abort') ||
+      !hasPublicationClaim && detail.deliveryTerminalProjectionEvidenceRef !== undefined)
+    throw new TypeError('terminal stop lacks its exact original aborted publication projection');
+  if (publication && (publication.evidence.observedAt > preparedAt || publication.checkpoint.createdAt !== run.updatedAt ||
+      publication.checkpoint.basedOnRunRevision !== checkpoint.basedOnRunRevision ||
+      publication.checkpoint.contextManifestRef !== checkpoint.contextManifestRef || publication.checkpoint.workspaceStateRef !== checkpoint.workspaceStateRef))
+    throw new TypeError('terminal stop publication projection was not the same original terminal transaction');
   requireEqual(detail, { ...agentStopDetail(intent, run.stopIntentRef, preparedAt),
-    abandonedRetryInvocations: abandoned }, 'terminal reason closure');
+    abandonedRetryInvocations: abandoned,
+    ...(publication ? { publicationResultItemRefs: [...publication.evidence.forwardResultItemRefs, ...publication.evidence.abortResultItemRefs],
+      deliveryTerminalProjectionEvidenceRef: publication.evidenceRef } : {}) }, 'terminal reason closure');
   const assembly = await readCanonicalArtifact<RunAssemblyV1>(artifacts, spec.assemblyRef);
   if (assembly.format !== 'cliq-run-assembly-v1' || assembly.mcpServers.length) throw new TypeError('terminal stop lacks its typed containment closure');
   // Common recovery verified every complete seal or retirement/source graph;
@@ -167,7 +218,10 @@ export async function validateStopRecovery(driver: SqliteDriver, artifacts: Arti
   const modelNoRelease = await validateInstalledModelNoReleaseHistory(driver, artifacts, closure);
   const privateRollbacks = await validatePrivateToolRollbackHistory(driver, artifacts, closure);
   const verifierStops = await validateVerifierStoppedHistory(driver, artifacts, closure);
+  const unclaimedPublications = !hasPublicationClaim && spec.operation === 'delivery' && journal.some(entry => entry.opKind === 'publish')
+    ? await readUnclaimedPublicationStopHistory(driver, artifacts, closure) : new Set<number>();
   for (const { entry, hasClaim } of stopInvocationHistory(journal).values()) {
+    if (entry.opKind === 'publish' && (publication?.closedPublicationJournalSeqs.has(entry.seq) || unclaimedPublications.has(entry.seq))) continue;
     if (entry.opKind === 'model' && entry.replayClass === 'retry' && entry.phase === 'unknown' && abandoned.some(closed =>
       closed.opId === entry.opId && closed.attempt === entry.attempt && closed.unknownJournalSeq === entry.seq &&
       closed.budgetSettlementRef === entry.budgetSettlementRef)) continue;
@@ -189,7 +243,7 @@ export async function validateStopRecovery(driver: SqliteDriver, artifacts: Arti
   }
   const admitted = decodeAdmittedContext(await readCanonicalArtifact(artifacts, spec.admittedContextRef));
   const expected: SessionRunTerminalItem = { schemaVersion: 1, format: 'cliq-session-run-terminal-v1', kind: 'run_terminal',
-    itemKey: `run-terminal:${run.id}`, runId: run.id, operation: 'agent', admittedSessionItemSeq: admitted.throughSessionItemSeq,
+    itemKey: `run-terminal:${run.id}`, runId: run.id, operation: spec.operation, admittedSessionItemSeq: admitted.throughSessionItemSeq,
     status: run.status, terminalReason: run.terminalReason!, terminalDetailRef: run.terminalDetailRef };
   const itemId = identityHash('cliq-session-run-terminal-item-v1', run.sessionId, run.id);
   const row = driver.prepare('SELECT session_id, run_id, item_seq, kind, payload_ref, created_at FROM items WHERE item_id = ?')

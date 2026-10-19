@@ -32,12 +32,10 @@ import { assertActiveStateOwner, type StateOwnerContext } from '../state-owner.j
 import { prepareToolCheckpoint, toolCheckpointId, type NativeWorkerRetirement } from '../tool-checkpoint.js';
 import { readToolCut, type ToolCut } from '../tool-cut.js';
 import { readToolApproval, readToolApprovalWait, type ApprovalResponse } from '../tool-approval-recovery.js';
-import { loadAgentStop } from './stop.js';
 import { appendRunStateEvent, assertLiveDispatchState, claimValidatedInvocation, prepareValidatedInvocation,
   prepareValidatedInvocationSettlement, requireHealthyFence, settleValidatedInvocation, type ClaimInvocationDispatchInput } from './invocation.js';
 import { loadInputContinuation } from './input.js';
 import { decodeAgentStop, selectAgentStop, type AgentStopIntent } from '../../runtime/stop.js';
-import type { HeldInstalledRuntime } from '../installed-runtime.js';
 
 const TOOL_BUDGET = Object.freeze({ modelTokens: 0, costMicros: 0, toolCalls: 1, repairAttempts: 0 });
 type ResultFields<T = Exclude<ToolResultPayloadV1, { source: 'user_input' }>> = T extends ToolResultPayloadV1
@@ -89,7 +87,7 @@ function nextFrontier(cut: ToolCut, addedItems: number): RunFrontier {
 export async function loadToolContinuation(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, input: {
   run: Run; spec: RunSpec; assembly: RunAssemblyV1; contracts: ToolInputAuthority[];
   resolveToolInput: ResolveToolInput; releaseKeys?: readonly ReleaseTrustKey[];
-}, reobserve?: NativeWorkerRetirement, installedRuntime?: HeldInstalledRuntime) {
+}, reobserve?: NativeWorkerRetirement) {
   const { run: admittedRun, spec, assembly, contracts, resolveToolInput } = input;
   const runId = admittedRun.id;
   const session = readSession(driver, admittedRun.sessionId);
@@ -422,7 +420,7 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
   let completing: Promise<Awaited<ReturnType<ReturnType<typeof completionOwner>['complete']>>> | undefined;
 
   return {
-    ...loadAgentStop(driver, artifacts, owner, controlAuthority, reobserve, installedRuntime),
+    controlAuthority,
     waitForInput: inputContinuation.waitForInput,
     submitInput: inputContinuation.submitInput,
     prepareTool: stateOperation('RECOVERY_REQUIRED', async (input: { expectedRunRevision: number; leaseEpoch: number }) => {

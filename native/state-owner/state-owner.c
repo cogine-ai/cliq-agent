@@ -57,6 +57,7 @@ typedef struct control_listener control_listener;
 typedef struct generation_tree generation_tree;
 typedef struct source_staging source_staging;
 typedef struct worker_reservation worker_reservation;
+typedef struct publication_operation publication_operation;
 
 typedef struct {
     int root_fd, runtime_fd, lock_fd;
@@ -66,8 +67,10 @@ typedef struct {
     generation_tree *trees;
     source_staging *source_stagings;
     worker_reservation *worker_reservations;
+    publication_operation *publication_operations;
     int source_retirement_error, worker_reservation_error, generation_retirement_error;
     int process_observation_retirement_error;
+    int publication_retirement_error;
     int finalized;
 } state_lock;
 
@@ -88,6 +91,9 @@ static napi_value open_source_staging(napi_env env, napi_callback_info info);
 static int close_lock_worker_reservations(state_lock *lock);
 static napi_value create_worker_reservation(napi_env env, napi_callback_info info);
 static napi_value open_worker_reservation(napi_env env, napi_callback_info info);
+static int close_lock_publication_operations(state_lock *lock);
+static napi_value open_publication_operation(napi_env env, napi_callback_info info);
+static napi_value open_publication_namespace_observer(napi_env env, napi_callback_info info);
 
 /* Reopening a path is only a locator check. Authority stays on these held
  * descriptors, and flock is released solely by closing the lock descriptor. */
@@ -96,6 +102,7 @@ static void close_lock(state_lock *lock) {
     close_lock_trees(lock);
     close_lock_source_stagings(lock);
     close_lock_worker_reservations(lock);
+    close_lock_publication_operations(lock);
     if (lock->lock_fd >= 0) close(lock->lock_fd);
     if (lock->runtime_fd >= 0) close(lock->runtime_fd);
     if (lock->root_fd >= 0) close(lock->root_fd);
@@ -103,7 +110,7 @@ static void close_lock(state_lock *lock) {
 }
 
 static void free_lock_if_done(state_lock *lock) {
-    if (!lock->finalized || lock->trees || lock->listeners || lock->source_stagings || lock->worker_reservations) return;
+    if (!lock->finalized || lock->trees || lock->listeners || lock->source_stagings || lock->worker_reservations || lock->publication_operations) return;
     free(lock->path);
     free(lock);
 }
@@ -113,7 +120,7 @@ static void finalize_lock(napi_env env, void *data, void *hint) {
     state_lock *lock = data;
     /* Fatal observation uncertainty cannot turn GC into a successful release.
      * Retain this exact allocation and its OS lock until actual process death. */
-    if (lock->process_observation_retirement_error) return;
+    if (lock->process_observation_retirement_error || lock->publication_retirement_error) return;
     close_lock(lock);
     lock->finalized = 1;
     free_lock_if_done(lock);
@@ -202,6 +209,9 @@ static napi_value assert_held(napi_env env, napi_callback_info info) {
     if (lock->generation_retirement_error) {
         napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "generation descriptors did not retire; StateOwner remains held"); return NULL;
     }
+    if (lock->publication_retirement_error) {
+        napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "publication descriptors did not retire; StateOwner remains held"); return NULL;
+    }
     if (!lock_is_held(lock)) return native_error(env, "StateOwner root/runtime/lock descriptor identity changed or closed");
     napi_value result;
     if (napi_get_undefined(env, &result) != napi_ok) return NULL;
@@ -214,12 +224,16 @@ static napi_value release_lock(napi_env env, napi_callback_info info) {
     if (lock->process_observation_retirement_error) return prior_process_observation_retirement_error(env, lock);
     int source_failed = close_lock_source_stagings(lock);
     int reservation_failed = close_lock_worker_reservations(lock);
+    int publication_failed = close_lock_publication_operations(lock);
     close_lock_trees(lock);
     if (source_failed) {
         napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "source staging descriptors did not retire; StateOwner remains held"); return NULL;
     }
     if (reservation_failed) {
         napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "worker reservation descriptors did not retire; StateOwner remains held"); return NULL;
+    }
+    if (publication_failed) {
+        napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "publication descriptors did not retire; StateOwner remains held"); return NULL;
     }
     if (lock->generation_retirement_error) {
         napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "generation descriptors did not retire; StateOwner remains held"); return NULL;
@@ -301,6 +315,8 @@ static napi_value acquire_lock(napi_env env, napi_callback_info info) {
         {"openSourceInspectionStaging", NULL, open_source_staging, NULL, NULL, NULL, napi_default, NULL},
         {"createWorkerReservation", NULL, create_worker_reservation, NULL, NULL, NULL, napi_default, NULL},
         {"openWorkerReservation", NULL, open_worker_reservation, NULL, NULL, NULL, napi_default, NULL},
+        {"openPublicationOperation", NULL, open_publication_operation, NULL, NULL, NULL, napi_default, NULL},
+        {"openPublicationNamespaceObserver", NULL, open_publication_namespace_observer, NULL, NULL, NULL, napi_default, NULL},
         {"close", NULL, release_lock, NULL, NULL, NULL, napi_default, NULL}
     };
     error = "StateOwner lock handle creation failed";
@@ -543,6 +559,7 @@ static int observe_process(pid_t pid, char token[128]) {
 #include "source-staging.c"
 #include "worker-reservation.c"
 #include "source-root.c"
+#include "publication.c"
 #include "credential-authority.c"
 
 static napi_value process_start_token(napi_env env, napi_callback_info info) {

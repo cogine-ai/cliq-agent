@@ -60,3 +60,66 @@ test('verifier and repair control items never hide an open tool batch during ter
     assert.throws(() => openStopBatch([{ ...end, stopReason: 'tool_calls' }, control]));
   }
 });
+
+test('delivery merge conflict retains typed evidence and cannot outrank cancellation or deadline', () => {
+  const conflict: StopIntent = { schemaVersion: 1, runId: run.id, createdAt, origin: 'runtime', targetStatus: 'failed',
+    reason: 'runtime_failed', runtimeSubtype: 'delivery_merge_conflict', deliveryMergeConflictItemRef: reference, conflictRef: 'b'.repeat(64) };
+  assert.deepEqual(decodeAgentStop(conflict, run), conflict);
+  assert.deepEqual(agentStopDetail(conflict, 'c'.repeat(64), createdAt).reasonDetail,
+    { kind: 'delivery_merge_conflict', deliveryMergeConflictItemRef: reference, conflictRef: 'b'.repeat(64) });
+  assert.equal(agentStopDetail(conflict, 'c'.repeat(64), createdAt).primaryEvidenceRef, 'c'.repeat(64));
+  const deadline: StopIntent = { schemaVersion: 1, runId: run.id, createdAt, origin: 'deadline', targetStatus: 'failed',
+    reason: 'budget_exhausted', deadlineAt: run.deadlineAt };
+  assert.strictEqual(selectAgentStop(decodeAgentStop(conflict, run), decodeAgentStop(deadline, run)), deadline);
+  assert.strictEqual(selectAgentStop(decodeAgentStop(deadline, run), decodeAgentStop(conflict, run)), deadline);
+  for (const invalid of [{ ...conflict, conflictRef: reference, ignored: true }, { ...conflict, conflictRef: undefined },
+    { ...conflict, runtimeSubtype: 'delivery_publication_failed' }]) assert.throws(() => decodeAgentStop(invalid, run));
+});
+
+test('delivery merge resource stops retain exact original sources and closed measurements, not model producer evidence', () => {
+  const cause = { sourceCheckpointId: 'initial', workspaceStateRef: reference, sourceRunResultRef: 'b'.repeat(64),
+    sourceBaseRef: 'c'.repeat(64), sourceDesiredRef: 'd'.repeat(64), capturedWorkspaceRef: 'e'.repeat(64),
+    sourceProjectionRef: 'f'.repeat(64), sandboxProfileRef: '0'.repeat(64), mergeAlgorithm: 'cliq-diff3-v1' as const,
+    limitKind: 'changed_paths' as const, observed: 2, limit: 1 };
+  const intent = { schemaVersion: 1 as const, runId: run.id, createdAt, origin: 'runtime' as const, targetStatus: 'failed' as const,
+    reason: 'runtime_failed' as const, runtimeSubtype: 'delivery_merge_limit_exceeded' as const, ...cause };
+  assert.deepEqual(decodeAgentStop(intent, run), intent);
+  assert.deepEqual(agentStopDetail(decodeAgentStop(intent, run), reference, createdAt).reasonDetail,
+    { kind: 'delivery_merge_limit_exceeded', ...cause, evidenceRef: reference });
+  for (const limitKind of ['changed_paths', 'changed_bytes', 'generation_bytes', 'single_file_bytes', 'merged_entries'])
+    assert.equal(decodeAgentStop({ ...intent, limitKind }, run).origin, 'runtime');
+  for (const changed of [{ ...intent, observed: 1 }, { ...intent, limit: -1 }, { ...intent, observed: 1.1 },
+    { ...intent, limit: true }, { ...intent, limitKind: 'memory' }, { ...intent, sourceCheckpointId: '' },
+    { ...intent, sandboxProfileRef: undefined }, { ...intent, sourceBaseRef: 'not-a-ref' }, { ...intent, mergeAlgorithm: 'guess' },
+    { ...intent, modelOpId: 'pretend-final-model' }, { ...intent, sourceCheckpointId: '\0initial' }])
+    assert.throws(() => decodeAgentStop(changed, run));
+});
+
+test('delivery policy denial has its own closed runtime-failure branch, never verifier or dependency authority', () => {
+  const intent: StopIntent = { schemaVersion: 1, runId: run.id, createdAt, origin: 'policy_deny',
+    targetStatus: 'failed', reason: 'runtime_failed', subjectKind: 'delivery', opId: 'delivery',
+    policyChannelEvidenceRef: reference, policyChannelEvidenceDigest: 'b'.repeat(64) };
+  assert.deepEqual(decodeAgentStop(intent, run), intent);
+  assert.deepEqual(agentStopDetail(decodeAgentStop(intent, run), 'c'.repeat(64), createdAt).reasonDetail,
+    { kind: 'policy_denied', subjectKind: 'delivery', opId: 'delivery', policyChannelEvidenceRef: reference, policyChannelEvidenceDigest: 'b'.repeat(64) });
+  assert.throws(() => decodeAgentStop({ ...intent, reason: 'verification_failed' }, run));
+  assert.throws(() => decodeAgentStop({ ...intent, subjectKind: 'dependency_install_scripts' }, run));
+});
+
+test('delivery merge control facts cannot hide a live model tool batch or permit unknown kinds', () => {
+  const merge: ContinuationItem = { schemaVersion: 1, kind: 'delivery_merge', itemId: 'merge', runId: run.id,
+    sourceRunResultRef: reference, sourceBaseRef: reference, sourceDesiredRef: reference, capturedWorkspaceRef: reference,
+    resultSourceRef: reference, diffRef: reference, summaryRef: reference, deliveryPlanRef: reference, createdAt };
+  const conflict: ContinuationItem = { schemaVersion: 1, kind: 'delivery_merge_conflict', itemId: 'conflict', runId: run.id,
+    sourceRunResultRef: reference, sourceBaseRef: reference, sourceDesiredRef: reference, capturedWorkspaceRef: reference,
+    mergeAlgorithm: 'cliq-diff3-v1', conflictRef: reference, createdAt };
+  const open: ContinuationItem = { schemaVersion: 1, kind: 'model_turn', itemId: 'model', runId: run.id, modelOpId: 'model',
+    modelAttempt: 0, modelTurnRef: reference, stopReason: 'tool_calls', textRef: reference, createdAt };
+  const decision: ContinuationItem = { schemaVersion: 1, kind: 'delivery_decision', itemId: 'decision', runId: run.id,
+    deliveryPlanRef: reference, approvalOpId: 'approval', decision: 'deny', decisionRef: reference, createdAt };
+  for (const item of [merge, conflict, decision]) {
+    assert.equal(openStopBatch([item]), undefined);
+    assert.throws(() => openStopBatch([open, item]));
+  }
+  assert.throws(() => openStopBatch([{ ...merge, kind: 'unknown_delivery_fact' } as unknown as ContinuationItem]));
+});

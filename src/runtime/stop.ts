@@ -5,11 +5,13 @@ import type { ContinuationItem, InvocationJournalEntry, Run, RunCancel, StopInte
 import type { ModelTextV1 } from '../protocol/agent-ir.js';
 import { exactKeys } from '../policy/runtime-authority.js';
 
-export type ResourceStopIntent = Extract<StopIntent, { origin: 'budget' } | { runtimeSubtype: 'context_compaction_failed' | 'context_window_exhausted' | 'result_source_limit_exceeded' }>;
+export type ResourceStopIntent = Extract<StopIntent, { origin: 'budget' } | { runtimeSubtype: 'context_compaction_failed' | 'context_window_exhausted' | 'result_source_limit_exceeded' | 'delivery_merge_limit_exceeded' }>;
 export type ModelFailureStopIntent = Extract<StopIntent, { runtimeSubtype: 'runtime' }>;
 export type VerifierStopIntent = Extract<StopIntent, { origin: 'verification' } | { origin: 'kernel_integrity'; reason: 'verifier_mutated_source' } |
   { origin: 'policy_deny'; subjectKind: 'verifier' }>;
-export type AgentStopIntent = Extract<StopIntent, { origin: 'user_cancel' | 'deadline' }> | ResourceStopIntent | ModelFailureStopIntent | VerifierStopIntent;
+export type DeliveryMergeStopIntent = Extract<StopIntent, { runtimeSubtype: 'delivery_merge_conflict' }>;
+export type DeliveryPolicyStopIntent = Extract<StopIntent, { origin: 'policy_deny' }> & { subjectKind: 'delivery'; reason: 'runtime_failed' };
+export type AgentStopIntent = Extract<StopIntent, { origin: 'user_cancel' | 'deadline' }> | ResourceStopIntent | ModelFailureStopIntent | VerifierStopIntent | DeliveryMergeStopIntent | DeliveryPolicyStopIntent;
 export const stopCheckpointId = (runId: string, stopIntentRef: string) => identityHash('cliq-stop-checkpoint-v1', runId, stopIntentRef);
 
 export function cancelRequestDigest(runId: string, input: RunCancel): string {
@@ -44,8 +46,10 @@ export function decodeAgentStop(value: unknown, run: Run): AgentStopIntent {
     assertArtifactRef(intent.verifierPlanRef);
   } else if (intent.origin === 'policy_deny') {
     fields.push('subjectKind', 'opId', 'policyChannelEvidenceRef', 'policyChannelEvidenceDigest');
-    if (intent.targetStatus !== 'failed' || intent.subjectKind !== 'verifier' || intent.reason !== 'verification_failed' || !identifier(intent.opId))
-      throw new TypeError('invalid verifier policy denial');
+    if (intent.targetStatus !== 'failed' || !identifier(intent.opId) ||
+        !(intent.subjectKind === 'verifier' && intent.reason === 'verification_failed' ||
+          intent.subjectKind === 'delivery' && intent.reason === 'runtime_failed'))
+      throw new TypeError('invalid typed policy denial');
     assertArtifactRef(intent.policyChannelEvidenceRef); assertArtifactRef(intent.policyChannelEvidenceDigest);
   } else if (intent.origin === 'budget') {
     fields.push('counter', 'ceiling', 'consumed', 'reserved', 'required');
@@ -79,6 +83,18 @@ export function decodeAgentStop(value: unknown, run: Run): AgentStopIntent {
           !['changed_paths', 'changed_bytes'].includes(intent.limitKind) ||
           [intent.attempt, intent.observed, intent.limit].some(value => !Number.isSafeInteger(value) || value < 0) || intent.observed <= intent.limit)
         throw new TypeError('invalid result source exhaustion');
+    } else if (intent.runtimeSubtype === 'delivery_merge_limit_exceeded') {
+      fields.push('sourceCheckpointId', 'workspaceStateRef', 'sourceRunResultRef', 'sourceBaseRef', 'sourceDesiredRef',
+        'capturedWorkspaceRef', 'sourceProjectionRef', 'sandboxProfileRef', 'mergeAlgorithm', 'limitKind', 'observed', 'limit');
+      for (const ref of [intent.workspaceStateRef, intent.sourceRunResultRef, intent.sourceBaseRef, intent.sourceDesiredRef,
+        intent.capturedWorkspaceRef, intent.sourceProjectionRef, intent.sandboxProfileRef]) assertArtifactRef(ref);
+      if (!identifier(intent.sourceCheckpointId) || intent.mergeAlgorithm !== 'cliq-diff3-v1' ||
+          !['changed_paths', 'changed_bytes', 'generation_bytes', 'single_file_bytes', 'merged_entries'].includes(intent.limitKind) ||
+          [intent.observed, intent.limit].some(value => !Number.isSafeInteger(value) || value < 0) || intent.observed <= intent.limit)
+        throw new TypeError('invalid delivery merge exhaustion');
+    } else if (intent.runtimeSubtype === 'delivery_merge_conflict') {
+      fields.push('deliveryMergeConflictItemRef', 'conflictRef');
+      assertArtifactRef(intent.deliveryMergeConflictItemRef); assertArtifactRef(intent.conflictRef);
     } else if (intent.runtimeSubtype === 'runtime') {
       fields.push('failingOpId', 'runtimeFailureRef', 'runtimeFailureDigest');
       assertArtifactRef(intent.runtimeFailureRef);
@@ -104,17 +120,26 @@ export function agentStopDetail(intent: AgentStopIntent, stopIntentRef: string, 
     ? { kind: intent.origin === 'user_cancel' ? 'cancelled' : 'budget_exhausted', stopIntentRef }
     : intent.runtimeSubtype === 'runtime'
       ? { kind: 'runtime', failingOpId: intent.failingOpId, runtimeFailureRef: intent.runtimeFailureRef, runtimeFailureDigest: intent.runtimeFailureDigest }
+    : intent.runtimeSubtype === 'delivery_merge_conflict'
+      ? { kind: 'delivery_merge_conflict', deliveryMergeConflictItemRef: intent.deliveryMergeConflictItemRef, conflictRef: intent.conflictRef }
     : intent.runtimeSubtype === 'context_compaction_failed'
       ? { kind: intent.runtimeSubtype, compactionPlanRef: intent.compactionPlanRef, modelOpId: intent.modelOpId, attempt: intent.attempt, evidenceRef: stopIntentRef }
     : intent.runtimeSubtype === 'result_source_limit_exceeded'
       ? { kind: intent.runtimeSubtype, sourceCheckpointId: intent.sourceCheckpointId, workspaceStateRef: intent.workspaceStateRef,
           producingItemId: intent.producingItemId, modelOpId: intent.modelOpId, attempt: intent.attempt,
           limitKind: intent.limitKind, observed: intent.observed, limit: intent.limit, evidenceRef: stopIntentRef }
+    : intent.runtimeSubtype === 'delivery_merge_limit_exceeded'
+      ? { kind: intent.runtimeSubtype, sourceCheckpointId: intent.sourceCheckpointId, workspaceStateRef: intent.workspaceStateRef,
+          sourceRunResultRef: intent.sourceRunResultRef, sourceBaseRef: intent.sourceBaseRef, sourceDesiredRef: intent.sourceDesiredRef,
+          capturedWorkspaceRef: intent.capturedWorkspaceRef, sourceProjectionRef: intent.sourceProjectionRef,
+          sandboxProfileRef: intent.sandboxProfileRef, mergeAlgorithm: intent.mergeAlgorithm,
+          limitKind: intent.limitKind, observed: intent.observed, limit: intent.limit, evidenceRef: stopIntentRef }
       : contextExhaustionDetail(intent, stopIntentRef);
   return { schemaVersion: 1, runId: intent.runId, reason: intent.reason,
     reasonDetail,
     primaryEvidenceRef: intent.origin === 'kernel_integrity' ? intent.integrityEvidenceRef : intent.origin === 'policy_deny'
-      ? intent.policyChannelEvidenceRef : intent.origin === 'runtime' && intent.runtimeSubtype === 'runtime' ? intent.runtimeFailureRef : stopIntentRef,
+      ? intent.policyChannelEvidenceRef : intent.origin === 'runtime' && intent.runtimeSubtype === 'runtime' ? intent.runtimeFailureRef
+      : stopIntentRef,
     publicationResultItemRefs: [], abandonedRetryInvocations: [], createdAt };
 }
 
@@ -161,7 +186,8 @@ export function openStopBatch(items: readonly ContinuationItem[]): { batch: Tool
       if (++pending.next === pending.batch.calls.length) pending = undefined;
     } else if (item.kind === 'input_request' || item.kind === 'user_input') {
       if (!pending || item.batchItemId !== pending.batch.itemId || item.index !== pending.next || item.callId !== pending.batch.calls[pending.next]?.callId) throw new TypeError('input overtakes its result-less call');
-    } else if (item.kind === 'final_candidate' || item.kind === 'verifier_result' || item.kind === 'verifier_stop' || item.kind === 'repair_diagnostic') {
+    } else if (item.kind === 'final_candidate' || item.kind === 'verifier_result' || item.kind === 'verifier_stop' || item.kind === 'repair_diagnostic' ||
+        item.kind === 'delivery_merge' || item.kind === 'delivery_merge_conflict' || item.kind === 'delivery_decision') {
       if (pending || model) throw new TypeError('candidate or verifier evidence overtakes an open batch');
     } else if (item.kind !== 'policy_decision' && item.kind !== 'context_compaction') throw new TypeError('unsupported stop transcript item');
   }

@@ -24,6 +24,7 @@ const MAX_OUTSTANDING = 64;
 const BUFFER_BYTES = (MAX_OUTSTANDING + 1) * FRAME_BYTES;
 const FEATURES: readonly string[] = INSTALLED_CONTROL_FEATURES;
 const RUN_FEATURES = ['session.create', 'run.submit', 'run.cancel'];
+const DELIVERY_FEATURES = ['run.apply', 'run.approve', 'run.reconcile'];
 const record = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 function text(value: unknown): string {
@@ -148,6 +149,7 @@ export function openInstalledControl(store: StateStore,
           return { protocolVersion: 1, ok: true, result: { ...observed, method: 'control.hello', protocolVersion: 1,
             serverBuild, controlSchemaRange: { min: 1, max: 1 }, enabledFeatureIds: candidate.requestedFeatureIds.filter(feature =>
               FEATURES.includes(feature) && (feature !== 'credential.finalize' || store.supportsCredentialFinalization()) &&
+              (!DELIVERY_FEATURES.includes(feature) || store.supportsInstalledDelivery()) &&
               (!RUN_FEATURES.includes(feature) || store.supportsInstalledRuns())) }
           } satisfies InstalledControlResponseV1;
         }
@@ -156,8 +158,13 @@ export function openInstalledControl(store: StateStore,
         if (request.protocolVersion !== 1) throw new TypeError('protocol version must be 1');
         if (RUN_FEATURES.includes(method) && !store.supportsInstalledRuns()) return { protocolVersion: 1, ok: false, method: knownMethod,
           error: { schemaVersion: 1, code: 'AUTHORIZATION_REQUIRED', retryable: false, messageCode: 'control.method_not_enabled' } } satisfies InstalledControlResponseV1;
+        if (DELIVERY_FEATURES.includes(method) && !store.supportsInstalledDelivery()) return { protocolVersion: 1, ok: false, method: knownMethod,
+          error: { schemaVersion: 1, code: 'AUTHORIZATION_REQUIRED', retryable: false, messageCode: 'control.method_not_enabled' } } satisfies InstalledControlResponseV1;
         if (method === 'session.create') return (await store.createInstalledSession(request, identity)).response;
         if (method === 'run.submit') return (await store.submitInstalledRun(request, identity)).response;
+        if (method === 'run.apply') return (await store.applyInstalledRun(request, identity)).response;
+        if (method === 'run.approve') return (await store.approveInstalledRun(request, identity)).response;
+        if (method === 'run.reconcile') return (await store.reconcileInstalledRun(request, identity)).response;
         if (method === 'run.cancel') return (await store.cancelInstalledRun(request, identity)).response;
         if (method === 'authorization.create') return (await store.createAuthorization(request, identity)).response;
         if (method === 'authorization.revoke') return (await store.revokeAuthorization(request, identity)).response;
@@ -183,7 +190,7 @@ export function openInstalledControl(store: StateStore,
           try {
             const observed = method === 'run.submit'
               ? await store.readControl({ protocolVersion: 1, method: 'session.get', sessionId: request.sessionId as string }, identity)
-              : method === 'run.cancel'
+              : method === 'run.cancel' || method === 'run.approve' || method === 'run.reconcile'
                 ? await store.readControl({ protocolVersion: 1, method: 'run.get', runId: request.runId as string }, identity) : undefined;
             if (observed?.method === 'session.get') return { protocolVersion: 1, ok: false, method: knownMethod,
               error: { schemaVersion: 1, code: 'REVISION_CONFLICT', retryable: true, messageCode: 'control.revision_conflict',

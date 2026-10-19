@@ -68,13 +68,26 @@ static inline void sha256_init(struct sha256_context *context) {
 }
 
 static inline void sha256_update(struct sha256_context *context, const uint8_t *data, size_t length) {
-    for (size_t index = 0; index < length; index++) {
-        context->data[context->data_length++] = data[index];
+    if (length == 0) return;
+    if (context->data_length != 0) {
+        size_t wanted = 64 - context->data_length;
+        size_t count = length < wanted ? length : wanted;
+        if (count != 0) memcpy(context->data + context->data_length, data, count);
+        context->data_length += count; data += count; length -= count;
         if (context->data_length == 64) {
             sha256_transform(context, context->data);
             context->bit_length += 512;
             context->data_length = 0;
         }
+    }
+    while (length >= 64) {
+        sha256_transform(context, data);
+        context->bit_length += 512;
+        data += 64; length -= 64;
+    }
+    if (length != 0) {
+        memcpy(context->data, data, length);
+        context->data_length = length;
     }
 }
 

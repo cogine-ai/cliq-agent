@@ -275,7 +275,8 @@ export const completeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', a
   if (run.status !== 'waiting' || run.waitingReason !== 'reconciliation' || !run.waitingOnRef) {
     throw new KernelStorageError('STATE_TRANSITION_INVALID', 'worker recovery completion has no installed inspection');
   }
-  const wait = await artifacts.readCanonical<WorkerDeathWait>(run.waitingOnRef);
+  const workerWaitingSubjectRef = run.waitingOnRef;
+  const wait = await artifacts.readCanonical<WorkerDeathWait>(workerWaitingSubjectRef);
   signal?.throwIfAborted();
   if (wait.subject.kind !== 'worker_death' || wait.probeState.phase !== 'automatic_in_flight' ||
       wait.probeState.dispatch.owningSupervisorInstanceId !== owner.supervisorInstanceId) {
@@ -299,8 +300,29 @@ export const completeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', a
     run = current; cut = { ...cut, run };
     return true;
   }
-  const open = openWorkerInvocations(cut.journal);
+  let open = openWorkerInvocations(cut.journal);
+  if (cut.runSpec.operation === 'delivery' && open.length === 1 && open[0]!.opKind === 'publish') {
+    const history = cut.journal.filter(row => row.opId === open[0]!.opId && row.attempt === open[0]!.attempt);
+    if (history.length === 2 && history[1]!.phase === 'dispatch_claimed') {
+      const publication = await import('../publication-invocation.js');
+      const initial = await publication.prepareOwnedPublicationInitialAmbiguity(driver, artifacts, owner,
+        { runId: run.id, expectedRunRevision: run.revision }, death, signal);
+      const { preparePublicationInitialAmbiguitySettlement } = await import('../publication-settlement.js');
+      const settlement = await preparePublicationInitialAmbiguitySettlement(driver, artifacts, owner, initial);
+      await settlement.settle({ expectedRunRevision: run.revision });
+      // The new CP is a true excluded-control continuation of the same W_M,
+      // not the old generation fence or a replacement worker/path wait.
+      const current = await readRecoveryClosure(driver, artifacts, run.id);
+      if (current.run.status !== 'waiting' || current.run.waitingOnRef !== run.waitingOnRef ||
+          current.latestCheckpoint.workspaceStateRef !== cut.latestCheckpoint.workspaceStateRef ||
+          canonicalSha256(current.workerLaunches) !== canonicalSha256(cut.workerLaunches) ||
+          canonicalSha256(current.workspaceGenerations) !== canonicalSha256(cut.workspaceGenerations))
+        throw new KernelStorageError('RECOVERY_REQUIRED', 'initial publication ambiguity changed the original worker-death fence');
+      cut = current; run = current.run; open = openWorkerInvocations(cut.journal);
+    }
+  }
   const assembly = open.length ? decodeRetainedRunAssembly(await artifacts.readCanonical(cut.runSpec.assemblyRef)) : undefined;
+  let publicationUnknown: Awaited<ReturnType<typeof import('../publication-worker-retirement.js')['readUnresolvedPublicationWorkerCut']>> | undefined;
   // The closure, wait and assembly reads may yield to a real StopIntent. Decide
   // only after checking the current exact subject and immutable resource cut.
   refreshStopCut(driver);
@@ -311,7 +333,10 @@ export const completeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', a
     const privateRollback = !!run.stopIntentRef && hasOnlySettledPrivateToolUnknowns(cut.journal);
     const undispatched = !!run.stopIntentRef && open.every(prepared => cut.journal.filter(entry =>
       entry.opId === prepared.opId && entry.attempt === prepared.attempt).length === 1);
-    if ((!hasOnlySettledInstalledModelUnknowns(assembly!, cut.journal) && !privateRollback && !undispatched) || !brokerQuiescence) {
+    const publication = cut.runSpec.operation === 'delivery' && open.some(entry => entry.opKind === 'publish')
+      ? await (await import('../publication-worker-retirement.js')).readUnresolvedPublicationWorkerCut(driver, artifacts, cut) : undefined;
+    publicationUnknown = publication;
+    if ((!hasOnlySettledInstalledModelUnknowns(assembly!, cut.journal) && !privateRollback && !undispatched && !publication) || !brokerQuiescence) {
       throw new KernelStorageError('RECOVERY_REQUIRED', 'open worker invocations require their typed settlement or explicit manual-risk wait before quarantine');
     }
     assertInstalledBrokerQuiescence(brokerQuiescence, driver, owner, run.id);
@@ -352,6 +377,7 @@ export const completeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', a
   function requireCurrentCut(connection: SqliteConnection) {
     signal?.throwIfAborted();
     assertActiveStateOwner(connection, owner);
+    publicationUnknown?.assertSourceCut(connection);
     if (open.length !== 0) {
       assertInstalledBrokerQuiescence(brokerQuiescence!, driver, owner, run.id);
       // A readonly replacement registration need not change Run revision or
@@ -397,7 +423,7 @@ export const completeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', a
   const deathArtifact = await artifacts.publishCanonical(deathEvidence, 'cliq-process-containment-death-evidence-v1');
   signal?.throwIfAborted();
   const recovery: WorkerRecoveryEvidenceV1 = { schemaVersion: 1, format: 'cliq-worker-recovery-evidence-v1', runId: run.id,
-    waitingSubjectRef: run.waitingOnRef, oldWorkerLaunchId: launch.launchId, oldLeaseEpoch: launch.leaseEpoch!,
+    waitingSubjectRef: workerWaitingSubjectRef, oldWorkerLaunchId: launch.launchId, oldLeaseEpoch: launch.leaseEpoch!,
     oldWorkerIdentityDigest: launch.workerIdentityDigest!, processContainmentRef: launch.processContainmentRef!,
     containmentDeathEvidenceRef: deathArtifact.ref, containmentDeathEvidenceDigest: deathEvidence.evidenceDigest,
     workspaceGenerationRef: generation.generationRef, generationTreeDigest: generation.lastVerifiedTreeDigest, ...inspectorPair,
@@ -419,7 +445,7 @@ export const completeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', a
   const quarantineArtifact = await artifacts.publishCanonical(quarantine, quarantine.format);
   signal?.throwIfAborted();
   const wrapper: ReconciliationProbeEvidenceV1 = { schemaVersion: 1, format: 'cliq-reconciliation-probe-evidence-v1', runId: run.id,
-    waitingSubjectRef: run.waitingOnRef, waitingSubjectDigest: run.waitingOnRef, probeKind: 'automatic',
+    waitingSubjectRef: workerWaitingSubjectRef, waitingSubjectDigest: workerWaitingSubjectRef, probeKind: 'automatic',
     probeOrdinal: wait.probeState.automaticProbeCount, probeNonceDigest: wait.probeState.dispatch.probeNonceDigest,
     probeDispatchDigest: wait.probeState.dispatch.dispatchDigest, probeStartedAt: wait.probeState.dispatch.probeStartedAt,
     probeDeadlineAt: wait.probeState.dispatch.probeDeadlineAt, ...inspectorPair, observedAt, evidenceDigest: '',
@@ -437,6 +463,11 @@ export const completeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', a
     const plan = await prepareWorkerRecoveryTerminalPlan(driver, artifacts, owner, { cut, wait, launch, generation,
       quarantine, quarantineArtifact, wrapperArtifact, metadata, nativeRetirement, workspaceRetirement,
       brokerQuiescence: brokerQuiescence! });
+    if (cut.runSpec.operation === 'delivery' && cut.journal.some(entry => entry.opKind === 'publish' && entry.phase === 'dispatch_claimed')) {
+      const { commitStoppedPublicationWorkerRetirement, commitUnresolvedPublicationWorkerRetirement } = await import('../publication-worker-retirement.js');
+      return publicationUnknown ? commitUnresolvedPublicationWorkerRetirement(driver, artifacts, owner, plan, run.id, signal)
+        : commitStoppedPublicationWorkerRetirement(driver, artifacts, owner, plan, run.id, signal);
+    }
     return stoppedOwner!.finish(plan);
   }
   let outcome: TimeFenceAdvance | undefined, updated!: Run;

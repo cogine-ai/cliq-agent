@@ -82,6 +82,22 @@ static napi_value source_assert(napi_env env, napi_callback_info info) {
     if (!source_held(root)) return native_error(env, "source workspace descriptor identity changed or closed");
     napi_value value; return napi_get_undefined(env, &value) == napi_ok ? value : NULL;
 }
+static napi_value source_mode(napi_env env, napi_callback_info info) {
+    source_root *root = unwrap_source_root(env, info); struct stat observed; napi_value value;
+    if (!root) return NULL;
+    if (!source_held(root) || fstat(root->fds[root->count - 1], &observed) < 0 ||
+        !same_inode(&observed, &root->ids[root->count - 1])) return native_error(env, "source workspace descriptor identity changed or closed");
+    return napi_create_uint32(env, observed.st_mode & 07777, &value) == napi_ok ? value : NULL;
+}
+static napi_value source_link_count(napi_env env, napi_callback_info info) {
+    source_root *root = unwrap_source_root(env, info); struct stat observed; napi_value value;
+    if (!root) return NULL;
+    if (!source_held(root) || fstat(root->fds[root->count - 1], &observed) < 0 ||
+        !same_inode(&observed, &root->ids[root->count - 1])) return native_error(env, "source workspace descriptor identity changed or closed");
+    if (observed.st_nlink < 1 || (double)observed.st_nlink > 9007199254740991.0)
+        return native_error(env, "source workspace link count is not a positive exact integer");
+    return napi_create_double(env, (double)observed.st_nlink, &value) == napi_ok ? value : NULL;
+}
 static napi_value source_close(napi_env env, napi_callback_info info) {
     source_root *root = unwrap_source_root(env, info);
     if (!root) return NULL;
@@ -156,6 +172,8 @@ static napi_value open_workspace_root(napi_env env, napi_callback_info info) {
     if (!source_held(root)) goto fail;
     napi_value result;
     const napi_property_descriptor methods[] = {
+        {"mode", NULL, NULL, source_mode, NULL, NULL, napi_default, NULL},
+        {"linkCount", NULL, NULL, source_link_count, NULL, NULL, napi_default, NULL},
         {"assertHeld", NULL, source_assert, NULL, NULL, NULL, napi_default, NULL},
         {"readGitConfigChunk", NULL, source_config_chunk, NULL, NULL, NULL, napi_default, NULL},
         {"openSnapshot", NULL, source_open_snapshot, NULL, NULL, NULL, napi_default, NULL},

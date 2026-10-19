@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, sign } from 'node:crypto';
 import { channel } from 'node:diagnostics_channel';
-import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { chmod, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -129,7 +130,9 @@ if (process.platform === 'linux') test('installed work measurements count the re
   const subscriber = (value: unknown) => { if (typeof value === 'object') observed.push(value as InstalledWorkSnapshot); };
   let selected: HeldInstalledRuntime | undefined;
   try {
-    const signed = await writeInstallerOnlyPackage(packageRoot, undefined, undefined, Buffer.alloc(ARTIFACT_CHUNK_BYTES + 17, 0x61));
+    const image = Buffer.alloc(2 * 1_048_576 + 17, 0x61);
+    image.fill(0x63, 1_048_576, 2 * 1_048_576); image[image.length - 1] = 0x7a;
+    const signed = await writeInstallerOnlyPackage(packageRoot, undefined, undefined, image);
     const runtime = createInstalledRuntime({ releaseKeys: signed.releaseKeys });
     const installation = await runtime.installInitial({ packageRoot, stateRoot });
     const manifestBytes = canonicalJsonBytes(signed.bundle).length;
@@ -155,6 +158,42 @@ if (process.platform === 'linux') test('installed work measurements count the re
     diagnostic.unsubscribe(subscriber); await selected?.close(); await rm(fixture, { recursive: true, force: true });
   }
 });
+
+if (process.platform === 'linux') for (const copy of ['bundle', 'cas'] as const) {
+  test(`a newly opened selection rejects the last corrupted byte of its independent ${copy} guest image`, async () => {
+    const fixture = await realpath(await mkdtemp(path.join(os.tmpdir(), `cliq-installed-${copy}-tail-`)));
+    const packageRoot = path.join(fixture, 'package'), stateRoot = path.join(fixture, 'state');
+    let selected: HeldInstalledRuntime | undefined;
+    try {
+      const image = Buffer.alloc(2 * 1_048_576 + 17, 0x61);
+      image.fill(0x63, 1_048_576, 2 * 1_048_576); image[image.length - 1] = 0x7a;
+      const signed = await writeInstallerOnlyPackage(packageRoot, undefined, undefined, image);
+      const runtime = createInstalledRuntime({ releaseKeys: signed.releaseKeys });
+      const installation = await runtime.installInitial({ packageRoot, stateRoot }), ref = sha256Bytes(image);
+      const entry = signed.bundle.entries.find(value => value.digest === ref)!;
+      const installedImage = path.join(stateRoot, 'runtime/bundles', installation.bundleDigest, entry.relativePath);
+      const casImage = path.join(stateRoot, KERNEL_CAS_DIRECTORY, ref);
+      const installedInfo = await lstat(installedImage), casInfo = await lstat(casImage);
+      assert.equal(installedInfo.nlink, 1); assert.equal(casInfo.nlink, 1);
+      assert.notEqual(`${installedInfo.dev}:${installedInfo.ino}`, `${casInfo.dev}:${casInfo.ino}`);
+      // This owner-controlled corruption precedes openSelected's fresh stat.
+      // Refusal must therefore reach the full signed digest, not an old mtime.
+      const filename = copy === 'bundle' ? installedImage : casImage;
+      await chmod(filename, 0o600);
+      const handle = await open(filename, constants.O_WRONLY | constants.O_NOFOLLOW);
+      try {
+        const { bytesWritten } = await handle.write(Buffer.from([0x62]), 0, 1, image.length - 1);
+        assert.equal(bytesWritten, 1); await handle.sync();
+      } finally { await handle.close(); }
+      await chmod(filename, 0o400);
+      assert.deepEqual(await readFile(copy === 'bundle' ? casImage : installedImage), image,
+        'the independent original copy remains complete and cannot validate the changed inode');
+      await assert.rejects(async () => { selected = await runtime.openSelected(stateRoot); }, error =>
+        error instanceof KernelStorageError && error.code === 'ARTIFACT_MISMATCH' &&
+        error.message === 'installed runtime signed file digest differs');
+    } finally { await selected?.close(); await rm(fixture, { recursive: true, force: true }); }
+  });
+}
 
 if (process.platform === 'linux') test('readiness hints cannot outlive a genuine selected runtime close', async () => {
   const fixture = await realpath(await mkdtemp(path.join(os.tmpdir(), 'cliq-installed-readiness-close-')));

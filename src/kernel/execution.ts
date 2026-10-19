@@ -555,7 +555,7 @@ export type SourceInspectionTargetV1 = {
   schemaVersion: 1
   format: 'cliq-source-inspection-target-v1'
   principalId: string
-  method: 'run.submit'
+  method: 'run.submit' | 'run.apply'
   admissionKey: string
   admissionIntentDigest: string
   originalRequestRef: ArtifactRef
@@ -637,7 +637,7 @@ export type SourceInspectionAttemptBaseV1 = {
   inspectionId: string
   attempt: 1
   principalId: string
-  method: 'run.submit'
+  method: 'run.submit' | 'run.apply'
   admissionKey: string
   admissionIntentDigest: string
   targetRef: ArtifactRef
@@ -690,10 +690,17 @@ export type SourceInspectionAttemptV1 = SourceInspectionAttemptBaseV1 & (
       phase: 'retired'
       retirementEvidenceRef: ArtifactRef
       retiredAt: string
-      outcome:
-        | { kind: 'captured'; sourceManifestRef: ArtifactRef; sourceManifestDigest: string; privateGitStateRef?: ArtifactRef }
-        | { kind: 'failed' | 'cancelled'; errorResponseRef: ArtifactRef }
     } & (
+      | { outcome: { kind: 'failed' | 'cancelled'; errorResponseRef: ArtifactRef } }
+      | { method: 'run.submit'; outcome: {
+          kind: 'captured'; sourceManifestRef: ArtifactRef; sourceManifestDigest: string; privateGitStateRef?: ArtifactRef
+          captureTopologyRef?: never; captureTopologyDigest?: never
+        } }
+      | { method: 'run.apply'; outcome: {
+          kind: 'captured'; sourceManifestRef: ArtifactRef; sourceManifestDigest: string; privateGitStateRef?: ArtifactRef
+          captureTopologyRef: ArtifactRef; captureTopologyDigest: string
+        } }
+    ) & (
       | { inputRef?: never; inputDigest?: never; plan?: never; processContainmentRef?: never }
       | { inputRef: ArtifactRef; inputDigest: string; plan: SourceInspectionPlanV1; processContainmentRef?: never }
       | { inputRef: ArtifactRef; inputDigest: string; plan: SourceInspectionPlanV1; processContainmentRef: ArtifactRef }

@@ -285,6 +285,81 @@ test('StateStore close cancels and joins the original artifact query before rele
   }
 });
 
+test('a driver publication-prefix read cannot open CAS after Store shutdown has begun', async () => {
+  const fixture = await createAgentFixture('publication-driver-read-closed');
+  const originalOpen = fs.open; let opens = 0;
+  try {
+    fixture.store.beginClose();
+    fs.open = (async (...args: Parameters<typeof fs.open>) => { opens++; return originalOpen(...args); }) as typeof fs.open;
+    const driver = fixture.store as unknown as { readInstalledPublicationCut(runId: string): Promise<unknown> };
+    await assert.rejects(driver.readInstalledPublicationCut(fixture.runId), isCode('LEASE_FENCED'));
+    assert.equal(opens, 0, 'a read started after synchronous revocation must not escape the original abort traversal');
+  } finally { fs.open = originalOpen; await disposeFixture(fixture); }
+});
+
+test('Store shutdown revokes a cached continuation reader after its initial load producer has finished', async () => {
+  const fixture = await createAgentFixture('cached-continuation-read-close');
+  const originalOpen = fs.open; let opens = 0;
+  try {
+    const readAbort = new AbortController(), view = fixture.store.artifacts.withReadSignal(readAbort.signal);
+    // Only the in-memory read-scope lifetime is under test. Reuse a genuine
+    // loaded Agent, not a fabricated Delivery, source, receipt or native owner.
+    const held = fixture.store as unknown as {
+      installedAgents: Map<string, { agent: typeof fixture.agent; readAbort?: AbortController }>;
+    };
+    held.installedAgents.set(fixture.runId, { agent: fixture.agent, readAbort });
+    const specRef = fixture.store.getRun(fixture.runId).specRef;
+    fixture.store.beginClose();
+    fs.open = (async (...args: Parameters<typeof fs.open>) => { opens++; return originalOpen(...args); }) as typeof fs.open;
+    assert.equal(readAbort.signal.aborted, true, 'a cached reader must not lose cancellation when its load task leaves the producer set');
+    await assert.rejects(view.readCanonical(specRef), isCode('LEASE_FENCED'));
+    assert.equal(opens, 0);
+  } finally { fs.open = originalOpen; await disposeFixture(fixture); }
+});
+
+test('the driver publication-prefix read cancels and joins its actual CAS close before releasing StateOwner', async () => {
+  // Exercise only the existing genuine Store/CAS read lifecycle. This Agent
+  // fixture cannot supply a verified Delivery, claim, receipt or native seal.
+  const fixture = await createAgentFixture('publication-driver-read-join');
+  const observer = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+  const originalOpen = fs.open;
+  let release!: () => void, entered!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const actualCloseReached = new Promise<void>(resolve => { entered = resolve; });
+  let reading: Promise<unknown> | undefined, cancelled: Promise<void> | undefined, closing: Promise<void> | undefined;
+  try {
+    const target = path.join(fixture.stateRoot, KERNEL_CAS_DIRECTORY, fixture.store.getRun(fixture.runId).specRef);
+    let closes = 0;
+    fs.open = (async (...args: Parameters<typeof fs.open>) => {
+      const handle = await originalOpen(...args);
+      if (args[0] === target) {
+        const actualClose = handle.close.bind(handle);
+        handle.close = async () => { await actualClose(); closes++; entered(); await held; };
+      }
+      return handle;
+    }) as typeof fs.open;
+    const driver = fixture.store as unknown as { readInstalledPublicationCut(runId: string): Promise<unknown> };
+    reading = driver.readInstalledPublicationCut(fixture.runId);
+    cancelled = assert.rejects(reading, error => error instanceof KernelStorageError && error.code === 'RECOVERY_REQUIRED' &&
+      error.cause instanceof KernelStorageError && error.cause.code === 'LEASE_FENCED');
+    await actualCloseReached;
+    let closed = false;
+    closing = fixture.store.close().then(() => { closed = true; });
+    await nextTurn();
+    assert.equal(closed, false, 'driver graph reads must join even before a native execution scope has opened');
+    assert.equal(observer.prepare("SELECT state FROM state_owners WHERE state='active'").get()?.state, 'active');
+    release(); await cancelled; await closing;
+    assert.equal(closes, 1, 'cancellation must not reopen or finish the original full graph after its first joined CAS object');
+    assert.equal(closed, true);
+    fs.open = originalOpen;
+    fixture.store = await openStateStore(fixture.stateRoot, fixture.runtimeAuthority);
+    assert.equal((await fixture.store.readRecoveryClosure(fixture.runId)).run.id, fixture.runId);
+  } finally {
+    release(); await reading?.catch(() => {}); await cancelled?.catch(() => {}); await closing?.catch(() => {});
+    fs.open = originalOpen; observer.close(); await disposeFixture(fixture);
+  }
+});
+
 test('an uncertain actual artifact close overrides shutdown cancellation and retains the original Store owner until process death', async () => {
   const directory = await makePrivateDir('.cliq-artifact-query-retirement-');
   // Same real Store/CAS seam in an independent process: the injected negative

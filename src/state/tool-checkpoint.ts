@@ -186,16 +186,19 @@ export async function prepareToolCheckpoint(driver: SqliteDriver, artifacts: Art
         canonicalSha256(readRequiredWorkspaceGenerationByRef(connection, launch.workspaceGenerationRef)) !== canonicalSha256(generation)) {
       throw new KernelStorageError('REVISION_CONFLICT', 'post-effect generation changed before atomic completion');
     }
-    updateWorkspaceGeneration(connection, generation, {
+    const sealedGeneration: WorkspaceGenerationStateV1 = {
       schemaVersion: 1, generationId: generation.generationId, runId: run.id, generationRef: generation.generationRef,
       generationIdentityDigest: generation.generationIdentityDigest, rowVersion: generation.rowVersion + 1,
       sourceCheckpointId: generation.sourceCheckpointId, sourceWorkspaceStateRef: generation.sourceWorkspaceStateRef,
       sourceWorkspaceStateDigest: generation.sourceWorkspaceStateDigest, lastVerifiedTreeDigest: snapshot.treeDigest,
       updatedAt: createdAt, phase: 'sealed', snapshotEvidenceRef: postEffect.snapshotEvidenceRef, snapshotEvidenceDigest: snapshot.evidenceDigest
-    });
-    updateWorkerLaunch(connection, launch, { ...launch, phase: 'retired', generationWriteState: 'sealed',
-      retiredAt: createdAt, retirementEvidenceRef: retirement.retirementEvidenceRef });
+    };
+    const retiredLaunch: WorkerLaunch = { ...launch, phase: 'retired', generationWriteState: 'sealed',
+      retiredAt: createdAt, retirementEvidenceRef: retirement.retirementEvidenceRef };
+    updateWorkspaceGeneration(connection, generation, sealedGeneration);
+    updateWorkerLaunch(connection, launch, retiredLaunch);
     connection.prepare("UPDATE runs SET status = 'queued', active_worker_launch_id = NULL WHERE id = ?").run(run.id);
+    return { generation: sealedGeneration, launch: retiredLaunch };
   } };
 }
 

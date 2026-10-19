@@ -971,3 +971,39 @@ jobs:
           path: ${{ runner.temp }}/cliq-installed-verifier-journey/*.json
           if-no-files-found: warn
           retention-days: 7
+
+  linux-installed-delivery:
+    name: Linux signed installed explicit Delivery and terminal replay
+    # Independent standard public runner; no feature override or replacement
+    # for verifier, ordinary Run, shutdown or namespace qualification.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+      - run: npm ci
+      - run: node --test scripts/kernel/testing/installed-volume-guard.test.mjs scripts/kernel/testing/installed-run-client.test.mjs scripts/kernel/testing/installed-delivery-journey.test.mjs
+      - run: node --test --import tsx scripts/kernel/testing/installed-delivery-result.test.ts scripts/kernel/testing/installed-delivery-publication-result.test.ts scripts/kernel/testing/installed-client-consumer.test.ts scripts/kernel/testing/installed-control-client-driver.test.ts scripts/kernel/testing/installed-enroll-diagnostic.test.ts
+      - run: npm run build
+        id: build
+      - name: Install actual guest, transport and Secret Service prerequisites
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap e2fsprogs libext2fs-dev pkg-config
+      - name: Exercise explicit publication, drift merge, cancellation, reconnect and restart
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          probe_node=$(realpath "$(command -v node)")
+          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --run-delivery-journey "$probe_node" "$RUNNER_TEMP/cliq-installed-delivery-journey"
+      - name: Retain only bounded installed Delivery and unchanged-runner cleanup evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installed-delivery-journey-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cliq-installed-delivery-journey/*.json
+          if-no-files-found: warn
+          retention-days: 7

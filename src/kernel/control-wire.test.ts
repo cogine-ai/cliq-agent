@@ -6,10 +6,10 @@ import { canonicalSha256 } from './canonical.js';
 import { digestOmitting, identityHash } from './identity.js';
 
 // Pure wire conformance: no installed selection, peer, grant or execution proof.
-test('connected method metadata is immutable and never advertises unimplemented capabilities', () => {
+test('connected composition ceiling is immutable while the actual Supervisor selects enabled capabilities', () => {
   assert.deepEqual(INSTALLED_CONTROL_FEATURES, ['session.get', 'run.get', 'run.attach', 'supervisor.status', 'credential.finalize',
-    'session.create', 'run.submit', 'run.cancel', 'authorization.create', 'authorization.revoke', 'run.result', 'run.diff', 'artifact.get']);
-  assert.throws(() => Reflect.apply(Array.prototype.push, INSTALLED_CONTROL_FEATURES, ['run.apply']));
+    'session.create', 'run.submit', 'run.cancel', 'authorization.create', 'authorization.revoke', 'run.result', 'run.diff', 'artifact.get', 'run.apply', 'run.approve', 'run.reconcile']);
+  assert.throws(() => Reflect.apply(Array.prototype.push, INSTALLED_CONTROL_FEATURES, ['unexpected.method']));
   assert.throws(() => Reflect.apply(Array.prototype.push, CONTROL_METHODS_V1, ['unexpected.method']));
 });
 
@@ -99,6 +99,65 @@ test('one canonical request decoder covers current methods, not unimplemented ca
     requestDigest: 'a'.repeat(64), operationId: 'a'.repeat(43), attempt: 1, commandDigest: 'b'.repeat(64) }));
 });
 
+test('publication reconciliation wire freezes only the exact no-new-effect probe request', () => {
+  const core = { protocolVersion: 1, method: 'run.reconcile', requestId: '01900000-0000-7000-8000-000000000001',
+    runId: 'delivery-1', expectedRevision: 9, waitingOnRef: 'a'.repeat(64), resolution: { kind: 'probe_now' } };
+  const request = { ...core, requestDigest: canonicalSha256(core) };
+  assert.deepEqual(decodeInstalledControlRequest(request), request);
+  assert(Object.isFrozen(decodeInstalledControlRequest(request)));
+  for (const bad of [{ ...core, expectedRevision: 0 }, { ...core, expectedRevision: Number.MAX_SAFE_INTEGER + 1 },
+    { ...core, waitingOnRef: 'not-a-ref' }, { ...core, target: '/not-caller-authority' },
+    { ...core, resolution: { kind: 'probe_now', evidenceRef: 'b'.repeat(64) } },
+    { ...core, resolution: { kind: 'abandon_run', acknowledgeExactRisk: true } },
+    { ...core, resolution: 'probe_now' }])
+    assert.throws(() => decodeInstalledControlRequest({ ...bad, requestDigest: canonicalSha256(bad) }));
+  assert.throws(() => decodeInstalledControlRequest({ ...request, requestDigest: 'b'.repeat(64) }));
+});
+
+test('reconciliation response reports an enqueue, never an inspection result or another wait', () => {
+  const ref = 'a'.repeat(64), at = '2026-10-19T00:00:00.000Z';
+  const budget = { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 };
+  const core = { protocolVersion: 1, method: 'run.reconcile', requestId: '01900000-0000-7000-8000-000000000001',
+    runId: 'delivery-1', expectedRevision: 9, waitingOnRef: ref, resolution: { kind: 'probe_now' } } as const;
+  const request = { ...core, requestDigest: canonicalSha256(core) };
+  const run = { id: 'delivery-1', sessionId: 'session-1', specRef: ref, status: 'waiting', waitingReason: 'reconciliation',
+    waitingOnRef: 'b'.repeat(64), nextStep: 'delivery', frontierRef: ref, revision: 10, leaseEpoch: 1,
+    latestCheckpointId: 'checkpoint-1', budgetReserved: budget, budgetConsumed: budget,
+    repairCount: 0, cancelRequested: false, createdAt: at, deadlineAt: at, updatedAt: at };
+  const result = { method: 'run.reconcile', snapshot: { schemaVersion: 1, operation: 'delivery', run, latestRunItemSeq: 3 },
+    resolution: { kind: 'probe_enqueued', dispatchDigest: 'c'.repeat(64), userProbeCount: 1 } };
+  const response = { protocolVersion: 1, ok: true, result };
+  assert.deepEqual(decodeInstalledControlResponse(response, request), response);
+  for (const changed of [{ id: 'other' }, { revision: 9 }, { revision: 11 }, { waitingOnRef: ref },
+    { status: 'queued' }, { waitingReason: 'approval' }])
+    assert.throws(() => decodeInstalledControlResponse({ ...response, result: { ...result,
+      snapshot: { ...result.snapshot, run: { ...run, ...changed } } } }, request));
+  for (const resolution of [{ ...result.resolution, userProbeCount: 0 }, { ...result.resolution, dispatchDigest: 'bad' },
+    { ...result.resolution, evidenceRef: ref }, { kind: 'completed', evidenceRef: ref }, { kind: 'abandoned', evidenceRef: ref }])
+    assert.throws(() => decodeInstalledControlResponse({ ...response, result: { ...result, resolution } }, request));
+});
+
+test('reconciliation revision refusal binds the current Run without becoming malformed data or retry permission', () => {
+  const ref = 'a'.repeat(64), at = '2026-10-19T00:00:00.000Z';
+  const budget = { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 };
+  const core = { protocolVersion: 1, method: 'run.reconcile', requestId: '01900000-0000-7000-8000-000000000001',
+    runId: 'delivery-1', expectedRevision: 9, waitingOnRef: ref, resolution: { kind: 'probe_now' } } as const;
+  const request = { ...core, requestDigest: canonicalSha256(core) };
+  const snapshot = { schemaVersion: 1, operation: 'delivery', run: { id: core.runId, sessionId: 'session-1', specRef: ref,
+    status: 'waiting', waitingReason: 'reconciliation', waitingOnRef: 'b'.repeat(64), nextStep: 'delivery', frontierRef: ref,
+    revision: 10, leaseEpoch: 1, latestCheckpointId: 'checkpoint-1', budgetReserved: budget, budgetConsumed: budget,
+    repairCount: 0, cancelRequested: false, createdAt: at, deadlineAt: at, updatedAt: at }, latestRunItemSeq: 3 };
+  const error = { schemaVersion: 1, code: 'REVISION_CONFLICT', retryable: true, messageCode: 'control.revision_conflict',
+    currentRevision: 10, conflict: { resourceKind: 'run', currentSnapshot: snapshot } };
+  const response = { protocolVersion: 1, ok: false, method: 'run.reconcile', error };
+  assert.deepEqual(decodeInstalledControlResponse(response, request), response);
+  for (const bad of [{ ...error, currentRevision: 9 }, { ...error, retryable: false }, { ...error, evidenceRef: ref },
+    { ...error, conflict: { resourceKind: 'session', currentSnapshot: snapshot } },
+    { ...error, conflict: { resourceKind: 'run', currentSnapshot: { ...snapshot, run: { ...snapshot.run, id: 'other' } } } }])
+    assert.throws(() => decodeInstalledControlResponse({ ...response, error: bad }, request));
+  assert.throws(() => decodeInstalledControlResponse({ ...response, method: 'run.cancel' }, request));
+});
+
 test('control wire binds bounded artifact pages to the original request', () => {
   const digest = 'a'.repeat(64);
   const request = { protocolVersion: 1, method: 'artifact.get', digest, offset: 0, length: 3 } as const;
@@ -161,7 +220,9 @@ test('control hello and result inspection retain exact connected capabilities an
     supervisorInstanceId: 'supervisor-1', activeRuntimeBundle: { schemaVersion: 1, runtimeBundleRef: digest, bundleDigest: digest, bundleVersion: '1' } };
   assert.deepEqual(decodeInstalledControlResponse({ protocolVersion: 1, ok: true, result }, hello),
     { protocolVersion: 1, ok: true, result });
-  for (const enabledFeatureIds of [['run.apply'], ['run.diff', 'run.result'], ['run.result', 'run.result'], ['session.get']])
+  assert.deepEqual(decodeInstalledControlResponse({ protocolVersion: 1, ok: true, result: { ...result, enabledFeatureIds: ['run.apply'] } }, hello),
+    { protocolVersion: 1, ok: true, result: { ...result, enabledFeatureIds: ['run.apply'] } });
+  for (const enabledFeatureIds of [['run.approve'], ['run.diff', 'run.result'], ['run.result', 'run.result'], ['session.get']])
     assert.throws(() => decodeInstalledControlResponse({ protocolVersion: 1, ok: true, result: { ...result, enabledFeatureIds } }, hello));
   for (const method of ['run.result', 'run.diff'] as const) {
     const descriptor = { schemaVersion: 1, ref: digest, digest, sizeBytes: 0, mediaType: 'application/json' };
@@ -259,4 +320,63 @@ test('credential continuation result is the original committed pure-data operati
   assert.deepEqual(decodeInstalledControlResponse(response, original), response);
   assert.throws(() => decodeInstalledControlResponse(response, { ...original, operationId: 'b'.repeat(43) }));
   assert.throws(() => decodeInstalledControlResponse(response, { ...original, commandDigest: 'b'.repeat(64) }));
+});
+test('installed delivery decoding preserves original wire identity without exposing internal capture or execution fields', () => {
+  const core = { protocolVersion: 1, method: 'run.apply', requestId: '01900000-0000-7000-8000-000000000001',
+    admissionKey: 'a'.repeat(32), sourceRunId: 'source-cafe\u0301', expectedRunResultRef: 'a'.repeat(64), budgets: { toolCalls: 3 } };
+  const request = { ...core, requestDigest: canonicalSha256(core) };
+  assert.deepEqual(decodeInstalledControlRequest(request), request);
+  for (const extras of [{ workspacePath: '/tmp/work' }, { capturedWorkspaceRef: 'b'.repeat(64) }, { objective: 'changed' },
+    { policyMode: 'yolo' }, { allowUnverified: true }, { budgets: { modelTokens: 1 } }]) {
+    const value = { ...core, ...extras };
+    assert.throws(() => decodeInstalledControlRequest({ ...value, requestDigest: canonicalSha256(value) }));
+  }
+});
+
+test('delivery wire success is an explicit delivery snapshot and never relabels an agent Run as apply', () => {
+  const core = { protocolVersion: 1, method: 'run.apply', requestId: '01900000-0000-7000-8000-000000000001',
+    admissionKey: 'a'.repeat(22), sourceRunId: 'source-run', expectedRunResultRef: 'a'.repeat(64) } as const;
+  const request = { ...core, requestDigest: canonicalSha256(core) };
+  const at = '2026-10-18T00:00:00.000Z', budget = { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 };
+  const run = { id: 'delivery-run', sessionId: 'session', specRef: 'a'.repeat(64), status: 'queued', nextStep: 'delivery',
+    frontierRef: 'b'.repeat(64), revision: 1, leaseEpoch: 0, latestCheckpointId: 'initial', budgetReserved: budget,
+    budgetConsumed: budget, repairCount: 0, cancelRequested: false, createdAt: at, deadlineAt: '2026-10-19T00:00:00.000Z', updatedAt: at };
+  const snapshot = { schemaVersion: 1, operation: 'delivery', run, latestRunItemSeq: 0 };
+  const response = { protocolVersion: 1, ok: true, result: { method: 'run.apply', snapshot } };
+  assert.deepEqual(decodeInstalledControlResponse(response, request), response);
+  assert.throws(() => decodeInstalledControlResponse({ ...response, result: { ...response.result,
+    snapshot: { ...snapshot, operation: 'agent' } } }, request), /explicit delivery/);
+  assert.throws(() => decodeInstalledControlResponse({ ...response, result: { ...response.result,
+    snapshot: { ...snapshot, run: { ...run, id: request.sourceRunId } } } }, request), /distinct explicit delivery/);
+  assert.throws(() => decodeInstalledControlResponse({ ...response, result: { ...response.result, capturedWorkspaceRef: 'a'.repeat(64) } }, request));
+});
+
+test('delivery capacity refusal retains the fixed Run queue contract without model credential retry authority', () => {
+  const core = { protocolVersion: 1, method: 'run.apply', requestId: '01900000-0000-7000-8000-000000000001',
+    admissionKey: 'a'.repeat(22), sourceRunId: 'source-run', expectedRunResultRef: 'a'.repeat(64) } as const;
+  const request = { ...core, requestDigest: canonicalSha256(core) };
+  const response = { protocolVersion: 1, ok: false, method: 'run.apply', error: { schemaVersion: 1,
+    code: 'RESOURCE_EXHAUSTED', retryable: true, resourceKind: 'run_queue', retryAfterMs: 1000, messageCode: 'run.queue_capacity' } };
+  assert.deepEqual(decodeInstalledControlResponse(response, request), response);
+  for (const changed of [{ retryAfterMs: 1001 }, { resourceKind: 'model' }, { retryable: false },
+    { code: 'RATE_LIMITED', messageCode: 'run.credential_scope_busy' }]) {
+    const error = { ...response.error, ...changed };
+    if (changed.code === 'RATE_LIMITED') Reflect.deleteProperty(error, 'resourceKind');
+    assert.throws(() => decodeInstalledControlResponse({ ...response, error }, request));
+  }
+});
+
+test('installed approval binds the exact wait, revision and one public digest without client authority fields', () => {
+  const core = { protocolVersion: 1, method: 'run.approve', requestId: '01900000-0000-7000-8000-000000000001',
+    runId: 'delivery-run', expectedRevision: 7, waitingOnRef: 'a'.repeat(64), decision: 'allow', ttlMs: 1 } as const;
+  const request = { ...core, requestDigest: canonicalSha256(core) };
+  assert.deepEqual(decodeInstalledControlRequest(request), request);
+  for (const changed of [{ expectedRevision: 0 }, { decision: 'allow_always' }, { ttlMs: 0 }, { ttlMs: 86_400_001 },
+    { grantRef: 'b'.repeat(64) }, { principalId: 'forged' }]) {
+    const value = { ...core, ...changed };
+    assert.throws(() => decodeInstalledControlRequest({ ...value, requestDigest: canonicalSha256(value) }));
+  }
+  const response = { protocolVersion: 1, ok: false, method: 'run.approve', error: { schemaVersion: 1,
+    code: 'AUTHORIZATION_REQUIRED', retryable: false, messageCode: 'control.method_not_enabled' } };
+  assert.deepEqual(decodeInstalledControlResponse(response, request), response);
 });

@@ -71,7 +71,7 @@ test('enroll diagnostics retain only exact numeric process counters, including v
 });
 
 test('the verifier enroll alone uses the owned asynchronous command without changing the original deadline or raw-state policy', async () => {
-  const source = await readFile(new URL('../qualify-installed-verifier-journey.ts', import.meta.url), 'utf8');
+  const source = await readFile(new URL('./installed-node-journey.ts', import.meta.url), 'utf8');
   assert.equal((source.match(/await runOwnedEnrollDiagnostic\(/gu) ?? []).length, 1);
   assert(source.includes("const setup = credential({ schemaVersion: 1, kind: 'install_services' })"));
   assert(source.includes('originalDeadlineMs: 60000'));

@@ -13,7 +13,19 @@ export type PublishedArtifact = {
 };
 
 export class ArtifactCatalog {
-  constructor(private readonly cas: ContentAddressedStore) {}
+  constructor(private readonly cas: ContentAddressedStore, private readonly readSignal?: AbortSignal) {}
+
+  /** Same real CAS and checks, with a tighter read lifetime. This view grants
+   * no authority, starts no work and cannot discard a parent's cancellation. */
+  withReadSignal(signal: AbortSignal): ArtifactCatalog {
+    return new ArtifactCatalog(this.cas, this.readSignal ? AbortSignal.any([this.readSignal, signal]) : signal);
+  }
+
+  /** Same read lifetime during computation between CAS operations. This is
+   * only a cancellation checkpoint, not a new scope or execution authority. */
+  assertReadActive(): void {
+    this.readSignal?.throwIfAborted();
+  }
 
   async publishBytes(
     bytes: Uint8Array,
@@ -37,22 +49,27 @@ export class ArtifactCatalog {
   /** Exhaustion verifies the complete object; partially consumed chunks cannot establish authority. */
   readChunks(ref: ArtifactRef, expectedByteCount: number): AsyncIterable<Buffer> {
     assertArtifactRef(ref);
-    return this.cas.readChunks(ref, expectedByteCount);
+    return this.cas.readChunks(ref, expectedByteCount, this.readSignal);
   }
 
   async readBytes(ref: ArtifactRef): Promise<Buffer> {
     assertArtifactRef(ref);
-    return this.cas.read(ref);
+    this.readSignal?.throwIfAborted();
+    const bytes = await this.cas.read(ref, this.readSignal);
+    this.readSignal?.throwIfAborted(); return bytes;
   }
 
   async readCanonical<T>(ref: ArtifactRef): Promise<T> {
     const bytes = await this.readBytes(ref);
+    this.readSignal?.throwIfAborted();
     if (sha256Bytes(bytes) !== ref) {
       throw new KernelStorageError('ARTIFACT_MISMATCH', `artifact ${ref} failed a digest rehash`);
     }
     try {
-      return JSON.parse(bytes.toString('utf8')) as T;
+      const value = JSON.parse(bytes.toString('utf8')) as T;
+      this.readSignal?.throwIfAborted(); return value;
     } catch (cause) {
+      if (this.readSignal?.aborted && cause === this.readSignal.reason) throw cause;
       throw new KernelStorageError('ARTIFACT_MISMATCH', `artifact ${ref} is not JSON`);
     }
   }
@@ -63,6 +80,7 @@ export class ArtifactCatalog {
     schemaKind: string
   ): Promise<PublishedArtifact> {
     const bytes = await this.readBytes(ref);
+    this.readSignal?.throwIfAborted();
     return { ref, mediaType, schemaKind, byteLength: bytes.byteLength };
   }
 }

@@ -580,7 +580,8 @@ export async function readVerifierLaunchClosure(artifacts: ArtifactCatalog, owne
   record(frontier, ['schemaVersion', 'kind', 'phase', 'candidateItemId', 'resultSourceRef', 'verifierPlanRef', 'nextVerifierIndex', 'afterPass'], 'verifier frontier');
   if (frontier.kind !== 'verify' || frontier.phase !== 'verifiers' || frontier.candidateItemId !== target.candidateItemId ||
       frontier.verifierPlanRef !== target.verifierPlanRef || frontier.nextVerifierIndex !== target.verifierIndex ||
-      frontier.schemaVersion !== 1 || frontier.resultSourceRef !== target.resultSourceRef || frontier.afterPass !== 'finalize' ||
+      frontier.schemaVersion !== 1 || frontier.resultSourceRef !== target.resultSourceRef ||
+      frontier.afterPass !== (runSpec.operation === 'agent' ? 'finalize' : 'delivery_approval') ||
       request.frontierRef !== run.frontierRef || request.assemblyRef !== runSpec.assemblyRef) mismatch('verifier launch substitutes its current candidate frontier');
   const verifierPlan = decodeVerifierPlan(await readCanonicalArtifact(artifacts, target.verifierPlanRef));
   if (runSpec.dependencyPolicyRef !== undefined || verifierPlan.dependencyPlanRef !== undefined)

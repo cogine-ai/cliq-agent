@@ -1,5 +1,9 @@
 export type ArtifactRef = string;
 
+export type { DeliveryMergeItem, DeliveryMergeConflictItem, DeliveryDecisionItem } from './delivery.js';
+export type { DeliveryPlan, PublicationOperation, PublicationAbortOperation, PublicationProofV1,
+  PublicationPathProgressItem, PublicationPathResultItem, PublicationLateObservationItem, DeliveryTerminalProjectionEvidence } from './publication.js';
+
 export type { FinalCandidateItem, FinalCandidateItemBase, VerifierPlan, VerificationClosureV1, RunResult,
   WorkspaceDiffV1, WorkspaceDiffOperationV1 } from './result.js';
 
@@ -1643,9 +1647,12 @@ export type ControlResultV1 =
       nextItemSeq: number;
     }
   | { method: 'run.submit'; snapshot: RunSnapshotV1 }
+  | { method: 'run.apply'; snapshot: RunSnapshotV1 }
   | { method: 'run.approve'; snapshot: RunSnapshotV1; decisionRef: ArtifactRef }
   | { method: 'run.input'; snapshot: RunSnapshotV1; inputItemRef: ArtifactRef }
   | { method: 'run.cancel'; snapshot: RunSnapshotV1 }
+  | { method: 'run.reconcile'; snapshot: RunSnapshotV1;
+      resolution: { kind: 'probe_enqueued'; dispatchDigest: string; userProbeCount: number } }
   | { method: 'run.result'; runId: string; result: ArtifactDescriptorV1; verificationClosureRef: ArtifactRef }
   | { method: 'run.diff'; runId: string; diff: ArtifactDescriptorV1 }
   | { method: 'artifact.get'; artifact: ArtifactDescriptorV1; offset: number;

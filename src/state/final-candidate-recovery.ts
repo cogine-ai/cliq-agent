@@ -13,6 +13,7 @@ import { decodeFinalCandidateItem, decodeVerificationClosure, decodeVerifierPlan
 import { readCandidateSource } from './result-source.js';
 import { isZeroBudget } from './invariants.js';
 import type { VerifierProgress } from './verifier-recovery.js';
+import type { RetainedDeliveryMerge } from './delivery-recovery.js';
 
 /** Retained provenance only. The enclosing recovery walk validates the actual
  * sealed generation and original worker proof; this function mints neither. */
@@ -21,6 +22,7 @@ export async function validateFinalCandidateRecovery(input: {
   journal: InvocationJournalEntry[]; checkpoints: Checkpoint[]; workspaceGenerations: WorkspaceGenerationStateV1[];
   decodedItems: Map<string, ContinuationItem>;
   verifierProgressByCandidate: ReadonlyMap<string, VerifierProgress>;
+  deliveryMerges?: ReadonlyMap<string, RetainedDeliveryMerge>;
 }): Promise<void> {
   const { artifacts, run, spec, items, journal, checkpoints, decodedItems } = input;
   const rows = items.filter(row => decodedItems.get(row.itemId)?.kind === 'final_candidate');
@@ -29,6 +31,26 @@ export async function validateFinalCandidateRecovery(input: {
   for (const row of rows) {
     const candidate = decodeFinalCandidateItem(await readCanonicalArtifact(artifacts, row.payloadRef));
     requireEqual(candidate, decodedItems.get(row.itemId), 'candidate recovery item');
+    if (candidate.operation === 'delivery') {
+      const merged = input.deliveryMerges?.get(candidate.producingItemId);
+      if (spec.operation !== 'delivery' || !merged || run.parentRunId !== undefined ||
+          [...decodedItems.values()].some(item => ['child_handle', 'child_result'].includes(item.kind)))
+        throw new TypeError('delivery candidate has no fully validated original merge lifecycle');
+      requireEqual(candidate, merged.candidate, 'delivery candidate original immutable merge');
+      const expectedPlan = await readCandidateVerifierPlan(artifacts, spec, { runId: run.id,
+        candidateItemId: candidate.itemId, resultSourceRef: candidate.resultSourceRef });
+      const planRef = canonicalSha256(expectedPlan);
+      requireEqual(decodeVerifierPlan(await readCanonicalArtifact(artifacts, planRef)), expectedPlan, 'delivery frozen verifier plan');
+      const progress = input.verifierProgressByCandidate.get(candidate.itemId);
+      if (!progress || progress.planRef !== planRef || canonicalSha256(progress.candidate) !== canonicalSha256(candidate))
+        throw new TypeError('delivery candidate has no exact independently validated verifier history');
+      const initialFrontier: RunFrontier = { schemaVersion: 1, kind: 'verify', phase: 'verifiers',
+        candidateItemId: candidate.itemId, resultSourceRef: candidate.resultSourceRef, verifierPlanRef: planRef,
+        nextVerifierIndex: 0, afterPass: 'delivery_approval' };
+      requireEqual(await readCanonicalArtifact(artifacts, canonicalSha256(initialFrontier)), initialFrontier, 'delivery initial verifier frontier');
+      verifierFrontiers.set(candidate.itemId, initialFrontier);
+      continue;
+    }
     if (candidate.operation !== 'agent' || spec.operation !== 'agent' || run.parentRunId !== undefined ||
         [...decodedItems.values()].some(item => ['child_handle', 'child_result'].includes(item.kind)))
       throw new TypeError('candidate recovery has no implemented delivery or child lifecycle');
@@ -151,17 +173,31 @@ export async function validateFinalCandidateRecovery(input: {
       throw new TypeError('candidate recovery verifier cut has no exact queued or active execution lifecycle');
   } else if ((current && current.kind === 'finalize') || run.nextStep === 'finalize') {
     const planFrontier = current && current.kind === 'finalize' && verifierFrontiers.get(current.candidateItemId);
-    if (!current || current.kind !== 'finalize' || current.operation !== 'agent' || !planFrontier || planFrontier.kind !== 'verify')
+    if (!current || current.kind !== 'finalize' || current.operation !== spec.operation || !planFrontier || planFrontier.kind !== 'verify')
       throw new TypeError('current finalization frontier has no validated candidate');
-    requireEqual(current, { schemaVersion: 1, kind: 'finalize', operation: 'agent', candidateItemId: planFrontier.candidateItemId,
-      resultSourceRef: planFrontier.resultSourceRef, verificationClosureRef: current.verificationClosureRef }, 'candidate recovery finalize frontier');
+    requireEqual(current, { schemaVersion: 1, kind: 'finalize', operation: spec.operation, candidateItemId: planFrontier.candidateItemId,
+      resultSourceRef: planFrontier.resultSourceRef, verificationClosureRef: current.verificationClosureRef,
+      ...(current.operation === 'delivery' ? { deliveryTerminalProjectionEvidenceRef: current.deliveryTerminalProjectionEvidenceRef } : {}) }, 'candidate recovery finalize frontier');
     const closure = decodeVerificationClosure(await readCanonicalArtifact(artifacts, current.verificationClosureRef));
     if (closure.runId !== run.id || closure.candidateItemId !== current.candidateItemId ||
         closure.resultSourceRef !== current.resultSourceRef || closure.verifierPlanRef !== planFrontier.verifierPlanRef ||
-        closure.verification.kind !== 'local' || closure.verification.unverifiedConsentRef !== spec.unverifiedConsentRef ||
+        spec.operation === 'agent' && (closure.verification.kind !== 'local' || closure.verification.unverifiedConsentRef !== spec.unverifiedConsentRef) ||
+        spec.operation === 'delivery' && closure.verification.kind === 'local' && closure.verification.outcome !== 'verified' ||
         run.status !== 'queued' || run.nextStep !== 'finalize' || run.activeWorkerLaunchId || run.waitingReason ||
         run.waitingOnRef || !isZeroBudget(run.budgetReserved))
       throw new TypeError('candidate recovery finalization is not its exact worker-free verification closure');
+  } else if (current && current.kind === 'delivery' && current.phase !== 'merge') {
+    const initial = verifierFrontiers.get(current.candidateItemId);
+    const candidate = decodedItems.get(current.candidateItemId);
+    const merged = candidate?.kind === 'final_candidate' && input.deliveryMerges?.get(candidate.producingItemId);
+    if (spec.operation !== 'delivery' || run.nextStep !== 'delivery' || initial?.kind !== 'verify' || !merged ||
+        current.resultSourceRef !== initial.resultSourceRef || current.verifierPlanRef !== initial.verifierPlanRef ||
+        current.deliveryPlanRef !== merged.planRef)
+      throw new TypeError('delivery continuation lost its exact original candidate, verification or publication plan');
+    const closure = decodeVerificationClosure(await readCanonicalArtifact(artifacts, current.verificationClosureRef));
+    if (closure.runId !== run.id || closure.candidateItemId !== current.candidateItemId || closure.resultSourceRef !== current.resultSourceRef ||
+        closure.verifierPlanRef !== initial.verifierPlanRef || closure.verification.kind === 'local' && closure.verification.outcome !== 'verified')
+      throw new TypeError('delivery continuation has no exact verified closure');
   } else if (rows.length && rows.at(-1) === items.at(-1) && !run.stopIntentRef) {
     throw new TypeError('unconsumed candidate is not at its validated verifier frontier');
   }

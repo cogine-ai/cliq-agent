@@ -195,9 +195,9 @@ export async function readVerifierIntegrityCause(driver: SqliteDriver, artifacts
   return winning;
 }
 
-/** Named-action denial is re-evaluated from the exact frozen current plan.
- * No approval, identity-read grant or caller-provided error can substitute. */
-export async function readVerifierPolicyDenial(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: VerifierRecoveryCut,
+/** One retained named-action selection for denial and deterministic capacity
+ * failure. It creates neither an execution grant nor retry permission. */
+export async function readVerifierPendingPolicy(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: VerifierRecoveryCut,
   observedAt: string, historicalOpId?: string) {
   parseCanonicalTime(observedAt);
   if (observedAt >= cut.run.deadlineAt) return undefined;
@@ -213,6 +213,17 @@ export async function readVerifierPolicyDenial(driver: SqliteDriver, artifacts: 
         frontier = await readCanonicalArtifact<RunFrontier>(artifacts, evidence.frontierRef);
       }
     }
+  } else if (cut.runSpec.operation === 'delivery') {
+    // Terminal resource drain removes the current frontier. Reproduce its
+    // exact immutable candidate/progress frontier, never infer it from a path,
+    // caught BUDGET_EXHAUSTED error or receipt enumeration.
+    const candidates = (await readItems(artifacts, cut)).filter(entry => entry.item.kind === 'final_candidate');
+    if (candidates.length !== 1) return undefined;
+    const progress = await readVerifierProgress(driver, artifacts, cut, candidates[0]!.row.itemId);
+    frontier = { schemaVersion: 1, kind: 'verify', phase: 'verifiers', candidateItemId: progress.candidate.itemId,
+      resultSourceRef: progress.candidate.resultSourceRef, verifierPlanRef: progress.planRef,
+      nextVerifierIndex: progress.nextVerifierIndex, afterPass: 'delivery_approval' };
+    requireEqual(await readCanonicalArtifact(artifacts, canonicalSha256(frontier)), frontier, 'delivery resource original verifier frontier');
   }
   if (!frontier || frontier.kind !== 'verify') return undefined;
   const progress = await readVerifierProgress(driver, artifacts, cut, frontier.candidateItemId);
@@ -220,7 +231,8 @@ export async function readVerifierPolicyDenial(driver: SqliteDriver, artifacts: 
     identityHash('cliq-final-candidate-checkpoint-v1', cut.run.id, progress.candidate.producingItemId)).createdAt > observedAt)
     throw new TypeError('verifier policy denial precedes its original durable candidate');
   if (frontier.nextVerifierIndex !== progress.nextVerifierIndex || frontier.verifierPlanRef !== progress.planRef ||
-      frontier.resultSourceRef !== progress.candidate.resultSourceRef || frontier.phase !== 'verifiers' || frontier.afterPass !== 'finalize' ||
+      frontier.resultSourceRef !== progress.candidate.resultSourceRef || frontier.phase !== 'verifiers' ||
+      frontier.afterPass !== (cut.runSpec.operation === 'agent' ? 'finalize' : 'delivery_approval') ||
       !exactKeys(frontier, ['schemaVersion', 'kind', 'phase', 'candidateItemId', 'resultSourceRef', 'verifierPlanRef', 'nextVerifierIndex', 'afterPass']))
     throw new TypeError('verifier policy stop does not own its current exact plan frontier');
   const current = progress.entries[frontier.nextVerifierIndex];
@@ -233,12 +245,20 @@ export async function readVerifierPolicyDenial(driver: SqliteDriver, artifacts: 
     verifierIndex: frontier.nextVerifierIndex, command, environment };
   const planned = planVerifierRequest(context);
   if (historicalOpId && planned.request.opId !== historicalOpId) throw new TypeError('verifier policy denial substitutes its original operation');
-  if (cut.journal.some(entry => entry.opId === planned.request.opId)) return undefined;
   const session = readSession(driver, cut.run.sessionId), principalId = readSessionPrincipalId(driver, session.id);
   const workspace = decodeWorkspaceIdentity(await readCanonicalArtifact(artifacts, session.workspaceIdentityRef));
   const evaluator = loadVerifierPolicy({ policy: await readCanonicalArtifact<RunPolicySnapshotV1>(artifacts, cut.runSpec.policyRef),
     policyRef: cut.runSpec.policyRef, assembly: decodeRetainedRunAssembly(await readCanonicalArtifact(artifacts, cut.runSpec.assemblyRef)),
     assemblyRef: cut.runSpec.assemblyRef, principalId, workspaceIdentityDigest: workspace.identityDigest, context });
   const evidence = evaluator.evaluate(planned.request, planned.target, observedAt);
-  return evidence.effectiveDisposition === 'deny' ? { evidence, planned, principalId, frontier } : undefined;
+  return { evidence, planned, principalId, frontier, progress, current };
+}
+
+/** Named-action denial is re-evaluated from the exact frozen current plan.
+ * No approval, identity-read grant or caller-provided error can substitute. */
+export async function readVerifierPolicyDenial(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: VerifierRecoveryCut,
+  observedAt: string, historicalOpId?: string) {
+  const selected = await readVerifierPendingPolicy(driver, artifacts, cut, observedAt, historicalOpId);
+  return selected?.evidence.effectiveDisposition === 'deny' &&
+    !cut.journal.some(entry => entry.opId === selected.planned.request.opId) ? selected : undefined;
 }

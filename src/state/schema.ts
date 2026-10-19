@@ -600,7 +600,24 @@ BEFORE UPDATE ON worker_launches BEGIN
 END;
 `;
 
-export const KERNEL_SCHEMA_SQL = `${KERNEL_SCHEMA_V1_SQL}\n${KERNEL_SCHEMA_V2_SQL}\n${KERNEL_SCHEMA_V3_SQL}\n${KERNEL_SCHEMA_V4_SQL}\n${KERNEL_SCHEMA_V5_SQL}`;
+// Reuse the fixed historical DDL, not sqlite_schema text from the database.
+// Only this table's method CHECK changes. Copy before recreating its insertion
+// trigger so retained prepared/active/retired rows remain byte-for-byte intact.
+const sourceInspectionSchema = KERNEL_SCHEMA_V4_SQL.slice(KERNEL_SCHEMA_V4_SQL.indexOf('CREATE TABLE source_inspection_attempts'),
+  KERNEL_SCHEMA_V4_SQL.indexOf('CREATE TRIGGER sessions_admission_identity_immutable'));
+const sourceInspectionIndexes = sourceInspectionSchema.indexOf('CREATE UNIQUE INDEX');
+export const KERNEL_SCHEMA_V6_SQL = `
+DROP TRIGGER source_inspections_validate_insert;
+DROP TRIGGER source_inspections_validate_update;
+DROP TRIGGER source_inspections_immutable_delete;
+DROP INDEX source_inspections_one_unretired_per_workspace;
+ALTER TABLE source_inspection_attempts RENAME TO source_inspection_attempts_v5;
+${sourceInspectionSchema.slice(0, sourceInspectionIndexes).replace("method = 'run.submit'", "method IN ('run.submit', 'run.apply')")}
+INSERT INTO source_inspection_attempts SELECT * FROM source_inspection_attempts_v5;
+DROP TABLE source_inspection_attempts_v5;
+${sourceInspectionSchema.slice(sourceInspectionIndexes)}
+`;
+export const KERNEL_SCHEMA_SQL = `${KERNEL_SCHEMA_V1_SQL}\n${KERNEL_SCHEMA_V2_SQL}\n${KERNEL_SCHEMA_V3_SQL}\n${KERNEL_SCHEMA_V4_SQL}\n${KERNEL_SCHEMA_V5_SQL}\n${KERNEL_SCHEMA_V6_SQL}`;
 
 /** One table inventory for pristine bootstrap and its retained birth recipe. */
 export const KERNEL_AUTHORITY_TABLES = Object.freeze([
@@ -637,7 +654,7 @@ function pragmaScalar(driver: SqliteConnection, name: string): unknown {
 export function applyKernelSchema(driver: SqliteDriver): void {
   const userVersion = requiredSafeInteger(pragmaScalar(driver, 'user_version'), 'user_version');
   const applicationId = requiredSafeInteger(pragmaScalar(driver, 'application_id'), 'application_id');
-  if (![0, 1, 2, 3, 4, KERNEL_STATE_SCHEMA_VERSION].includes(userVersion)) {
+  if (![0, 1, 2, 3, 4, 5, KERNEL_STATE_SCHEMA_VERSION].includes(userVersion)) {
     throw new Error(`unsupported kernel schema version ${userVersion}`);
   }
   if (applicationId !== 0 && applicationId !== KERNEL_SQLITE_APPLICATION_ID) {
@@ -666,6 +683,7 @@ export function applyKernelSchema(driver: SqliteDriver): void {
       if (userVersion < 3) connection.exec(KERNEL_SCHEMA_V3_SQL);
       if (userVersion < 4) connection.exec(KERNEL_SCHEMA_V4_SQL);
       if (userVersion < 5) connection.exec(KERNEL_SCHEMA_V5_SQL);
+      if (userVersion < 6) connection.exec(KERNEL_SCHEMA_V6_SQL);
       connection.exec(`PRAGMA user_version=${KERNEL_STATE_SCHEMA_VERSION}`);
     });
   }

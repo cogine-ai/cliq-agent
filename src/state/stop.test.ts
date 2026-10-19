@@ -13,6 +13,9 @@ import { createAgentFixture } from './testing/agent-fixtures.js';
 import { activateFixtureWorker, admissionKey, disposeFixture, uuidv7 } from './testing/fixtures.js';
 import { batch, claimTool, observation, prepareTool } from './testing/tool-calls.js';
 import { quiescedToolCheckpoint } from './testing/tool-effects.js';
+import { readRetainedAgentStop } from './stop-recovery.js';
+import type { StateOwnerContext } from './state-owner.js';
+import type { SqliteDriver } from './sqlite-driver.js';
 
 type Fixture = Awaited<ReturnType<typeof createAgentFixture>>;
 const revision = (fixture: Fixture) => fixture.store.getRun(fixture.runId).revision;
@@ -209,6 +212,17 @@ test('deadline uses canonical time and user cancellation wins without resetting 
     assert.equal((await fixture.store.artifacts.readCanonical<StopIntent>(deadline.run.stopIntentRef!)).origin, 'deadline');
     const first = await fixture.agent.cancelRun(await cancelCommand(fixture));
     assert.notEqual(first.run.stopIntentRef, deadline.run.stopIntentRef);
+    const held = fixture.store as unknown as { driver: SqliteDriver; owner: StateOwnerContext };
+    const actual = await fixture.store.readRecoveryClosure(fixture.runId);
+    assert.equal((await readRetainedAgentStop(held.driver, fixture.store.artifacts, actual, deadline.run.stopIntentRef!)).origin, 'deadline');
+    assert.equal((await readRetainedAgentStop(held.driver, fixture.store.artifacts, actual, first.run.stopIntentRef!)).origin, 'user_cancel');
+    assert.equal(actual.run.stopIntentRef, first.run.stopIntentRef, 'history reads never replace the actual winning SQL cut');
+    const originalCancel = await fixture.store.artifacts.readCanonical<StopIntent>(first.run.stopIntentRef!);
+    if (originalCancel.origin !== 'user_cancel') assert.fail('the actual control call must own its cancellation');
+    const substituted = await fixture.store.artifacts.publishCanonical({ ...originalCancel, requestId: 'never-issued-control-request' }, 'inert-stop-data');
+    await assert.rejects(readRetainedAgentStop(held.driver, fixture.store.artifacts, actual, substituted.ref),
+      /cancellation|control|request/u);
+    assert.deepEqual(fixture.store.getRun(fixture.runId), actual.run, 'a rejected historical ref cannot write the current Run');
     now++;
     const second = await fixture.agent.cancelRun(await cancelCommand(fixture));
     assert.equal(second.run.stopIntentRef, first.run.stopIntentRef);

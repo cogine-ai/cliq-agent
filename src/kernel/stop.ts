@@ -8,6 +8,14 @@ export type ResultSourceLimitCause = {
   limitKind: 'changed_paths' | 'changed_bytes'; observed: number; limit: number;
 };
 
+/** Deterministic immutable Delivery output, never a model turn or physical failure. */
+export type DeliveryMergeLimitCause = {
+  sourceCheckpointId: string; workspaceStateRef: ArtifactRef; sourceRunResultRef: ArtifactRef;
+  sourceBaseRef: ArtifactRef; sourceDesiredRef: ArtifactRef; capturedWorkspaceRef: ArtifactRef;
+  sourceProjectionRef: ArtifactRef; sandboxProfileRef: ArtifactRef; mergeAlgorithm: 'cliq-diff3-v1';
+  limitKind: 'changed_paths' | 'changed_bytes' | 'generation_bytes' | 'single_file_bytes' | 'merged_entries'; observed: number; limit: number;
+};
+
 /** The token trigger retains its original closed shape. Byte exhaustion is a
  * separate, reproducible pre-dispatch fact, never an arbitrary caught error. */
 export type ContextWindowExhaustionCause = {
@@ -64,6 +72,7 @@ export type StopIntent = StopIdentity & (
       | { runtimeSubtype: 'context_compaction_failed'; compactionPlanRef: ArtifactRef; modelOpId: string; attempt: number }
       | ({ runtimeSubtype: 'context_window_exhausted' } & ContextWindowExhaustionCause)
       | ({ runtimeSubtype: 'result_source_limit_exceeded' } & ResultSourceLimitCause)
+      | ({ runtimeSubtype: 'delivery_merge_limit_exceeded' } & DeliveryMergeLimitCause)
       | { runtimeSubtype: 'delivery_merge_conflict'; deliveryMergeConflictItemRef: ArtifactRef; conflictRef: ArtifactRef }
       | { runtimeSubtype: 'delivery_publication_failed'; deliveryPlanRef: ArtifactRef; sequence: 'forward' | 'abort'; operationId: string }
       | { runtimeSubtype: 'local_inference_unavailable'; activationCycleId: string; serviceId: string; frontierRef: ArtifactRef; failureDetailRef: ArtifactRef }
@@ -79,6 +88,7 @@ export type TerminalReasonDetail =
   | { kind: 'context_compaction_failed'; compactionPlanRef: ArtifactRef; modelOpId: string; attempt: number; evidenceRef: ArtifactRef }
   | ({ kind: 'context_window_exhausted'; evidenceRef: ArtifactRef } & ContextWindowExhaustionCause)
   | ({ kind: 'result_source_limit_exceeded'; evidenceRef: ArtifactRef } & ResultSourceLimitCause)
+  | ({ kind: 'delivery_merge_limit_exceeded'; evidenceRef: ArtifactRef } & DeliveryMergeLimitCause)
   | { kind: 'dependency_source_integrity'; dependencyPlanRef: ArtifactRef; failingOpId: string; integrityEvidenceRef: ArtifactRef; integrityEvidenceDigest: string }
   | { kind: 'delivery_merge_conflict'; deliveryMergeConflictItemRef: ArtifactRef; conflictRef: ArtifactRef }
   | { kind: 'delivery_publication_failed'; deliveryPlanRef: ArtifactRef; sequence: 'forward' | 'abort'; operationId: string; evidenceRef: ArtifactRef }

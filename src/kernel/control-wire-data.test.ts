@@ -98,6 +98,25 @@ test('one shared Journal decoder preserves closed phases and the storage error p
   assert.equal(decodeInvocationJournalEntry(retained), retained);
 });
 
+test('a publication dispatch carries its complete original birth pair without opening ordinary claim terminal fields', () => {
+  // Inert wire/storage data only: these refs do not supply the native birth,
+  // StateOwner, original claim or live publication capability.
+  const claim = { seq: 2, runId: 'run-1', opId: 'publish-1', opKind: 'publish', attempt: 0, leaseEpoch: 1,
+    phase: 'dispatch_claimed', target: 'path', requestRef: ref, grantRef: ref, replayClass: 'reconcile', budgetDelta: budget,
+    timestamp: at, dispatchId: 'dispatch-1', supervisorInstanceId: 'supervisor-1', stateOwnerEpoch: 1,
+    evidenceRef: ref, evidenceDigest: 'b'.repeat(64) };
+  assert.deepEqual(decodeWireJournal(claim), claim);
+  assert.deepEqual(decodeInvocationJournalEntry(claim), claim);
+  const { evidenceRef: _birth, evidenceDigest: _digest, ...withoutBirth } = claim;
+  for (const value of [withoutBirth, { ...withoutBirth, evidenceRef: ref }, { ...withoutBirth, evidenceDigest: ref },
+    { ...claim, evidenceRef: 'not-a-cas-ref' }, { ...claim, evidenceDigest: 'not-a-digest' },
+    ...['resultRef', 'receiptRef', 'errorRef', 'attestationRef', 'budgetSettlementRef'].map(key => ({ ...claim, [key]: ref })),
+    ...['model', 'tool', 'mcp-server', 'mcp', 'verifier'].map(opKind => ({ ...claim, opKind }))]) {
+    assert.throws(() => decodeWireJournal(value), TypeError);
+    assert.throws(() => decodeInvocationJournalEntry(value), { code: 'STATE_TRANSITION_INVALID' });
+  }
+});
+
 test('public descriptors and summaries close all fields without importing the underlying authority', () => {
   const descriptor = { schemaVersion: 1, ref, digest: ref, sizeBytes: 3, mediaType: 'text/plain' };
   assert.deepEqual(decodeWireArtifactDescriptor(descriptor), descriptor);
@@ -120,6 +139,20 @@ test('public descriptors and summaries close all fields without importing the un
   const { payloadDigest: _digest, ...sessionItem } = item;
   assert.deepEqual(decodeWireSessionItem({ ...sessionItem, sessionId: 'ancestor-1', kind: 'run_terminal' }),
     { ...sessionItem, sessionId: 'ancestor-1', kind: 'run_terminal' });
+});
+
+test('completed publication data requires the same terminal receipt and evidence without widening other Journal kinds', () => {
+  const entry = { seq: 3, runId: 'data-run', opId: 'data-publish', opKind: 'publish', attempt: 0, leaseEpoch: 1,
+    phase: 'completed', target: ref, requestRef: ref, replayClass: 'reconcile', budgetDelta: budget, timestamp: at,
+    dispatchId: 'data-dispatch', supervisorInstanceId: 'data-supervisor', stateOwnerEpoch: 1,
+    receiptRef: ref, evidenceRef: ref, evidenceDigest: 'b'.repeat(64), budgetSettlementRef: ref };
+  assert.deepEqual(decodeWireJournal(entry), entry);
+  assert.deepEqual(decodeInvocationJournalEntry(entry), entry);
+  const { evidenceRef: _evidence, evidenceDigest: _digest, ...missing } = entry;
+  for (const value of [missing, { ...entry, evidenceRef: 'c'.repeat(64) },
+    { ...entry, receiptRef: undefined }, { ...entry, evidenceDigest: undefined },
+    ...['model', 'tool', 'verifier', 'mcp', 'mcp-server'].map(opKind => ({ ...entry, opKind }))])
+    assert.throws(() => decodeWireJournal(value), TypeError);
 });
 
 test('control data rejects accessors, hidden fields, sparse arrays and non-JSON values before reading them', () => {

@@ -11,7 +11,7 @@ import { canonicalJsonBytes, canonicalSha256 } from '../../../src/kernel/canonic
 import { digestOmitting, sha256Bytes } from '../../../src/kernel/identity.js';
 import type { WorkerIdentity, WorkerLaunch, WorkspaceGenerationStateV1 } from '../../../src/kernel/types.js';
 import { assertInstalledWorkerLeaseRenewed, inspectInstalledWorkerIdentity, inspectInstalledWorkerLease,
-  inspectInstalledWorkerRetirement, inspectInstalledWorkerRetirementHistory } from './installed-worker-lease.js';
+  inspectInstalledWorkerRetirement, inspectInstalledWorkerRetirementHistory, inspectInstalledWorkerLaunchIds } from './installed-worker-lease.js';
 
 async function fixture(t: TestContext) {
   const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-installed-worker-lease-'));
@@ -62,6 +62,37 @@ function update(filename: string, operation: (database: DatabaseSync) => void) {
   const database = new DatabaseSync(filename);
   try { operation(database); } finally { database.close(); }
 }
+
+test('bounded readonly launch enumeration distinguishes an existing empty Run from missing and preserves original bytes', async t => {
+  const value = await fixture(t); await mkdir(path.join(value.stateRoot, KERNEL_CAS_DIRECTORY), { mode: 0o700 });
+  const databaseBefore = await readFile(value.filename), namesBefore = await readdir(value.stateRoot);
+  const observed = inspectInstalledWorkerLaunchIds(value.stateRoot, value.expected.uid, value.expected.runId);
+  assert.deepEqual(observed.launchIds, [value.expected.launchId]); assert.equal(observed.diagnosticOnly, true);
+  assert.equal(Object.hasOwn(observed, 'qualified'), false); assert(Object.isFrozen(observed) && Object.isFrozen(observed.launchIds));
+  assert.deepEqual(await readFile(value.filename), databaseBefore); assert.deepEqual(await readdir(value.stateRoot), namesBefore);
+  assert.throws(() => inspectInstalledWorkerLaunchIds(value.stateRoot, value.expected.uid, 'missing'),
+    { message: 'installed worker launch enumeration refused' });
+  update(value.filename, db => db.prepare('DELETE FROM worker_launches WHERE run_id=?').run(value.expected.runId));
+  assert.deepEqual(inspectInstalledWorkerLaunchIds(value.stateRoot, value.expected.uid, value.expected.runId).launchIds, []);
+});
+
+test('readonly launch enumeration has an exact bound, scopes the original Run and refuses malformed IDs', async t => {
+  const value = await fixture(t); await mkdir(path.join(value.stateRoot, KERNEL_CAS_DIRECTORY), { mode: 0o700 });
+  const add = (runId: string, id: string) => update(value.filename, db => db.prepare('INSERT INTO worker_launches VALUES(?,?,?,?,?)')
+    .run(id, runId, 'data-only', '{}', null));
+  add('unrelated-run', 'must-not-escape');
+  for (let index = 1; index < 16; index++) add(value.expected.runId, `data-launch-${String(index).padStart(2, '0')}`);
+  const observed = inspectInstalledWorkerLaunchIds(value.stateRoot, value.expected.uid, value.expected.runId);
+  assert.equal(observed.launchIds.length, 16); assert(!observed.launchIds.includes('must-not-escape'));
+  add(value.expected.runId, 'seventeenth');
+  assert.throws(() => inspectInstalledWorkerLaunchIds(value.stateRoot, value.expected.uid, value.expected.runId));
+  update(value.filename, db => { db.prepare('DELETE FROM worker_launches WHERE run_id=?').run(value.expected.runId); });
+  add(value.expected.runId, '');
+  assert.throws(() => inspectInstalledWorkerLaunchIds(value.stateRoot, value.expected.uid, value.expected.runId));
+  update(value.filename, db => { db.prepare('DELETE FROM worker_launches WHERE run_id=?').run(value.expected.runId); });
+  add(value.expected.runId, 'x'.repeat(129));
+  assert.throws(() => inspectInstalledWorkerLaunchIds(value.stateRoot, value.expected.uid, value.expected.runId));
+});
 
 // Pure serialized data for the diagnostic seam, never a native birth/death proof.
 async function workerFixture(t: TestContext) {
@@ -188,6 +219,18 @@ test('retirement history reads a real retained seal without inventing an earlier
   assert.equal(observed.deathObservedAt, retired.death.observedAt); assert(observed.observedAt >= observed.retiredAt);
   assert(Object.isFrozen(observed)); assert.equal(Object.hasOwn(observed, 'qualified'), false);
   assert.equal(Object.hasOwn(observed, 'nativeObservation'), false);
+  const retirement = { launchId: value.expected.launchId, supervisorInstanceId: value.expected.supervisorInstanceId,
+    leaseEpoch: 1, workspaceGenerationRef: value.generation.generationRef,
+    snapshotEvidenceRef: retired.sealedGeneration.snapshotEvidenceRef,
+    snapshotEvidenceDigest: retired.sealedGeneration.snapshotEvidenceDigest, retiredAt: retired.retiredLaunch.retiredAt! };
+  assert.equal(inspectInstalledWorkerRetirementHistory(value.stateRoot, value.expected.uid,
+    { ...expected, retirement }).snapshotEvidenceRef, retirement.snapshotEvidenceRef);
+  for (const changed of [{ ...retirement, launchId: 'other-launch' }, { ...retirement, supervisorInstanceId: 'other-supervisor' },
+    { ...retirement, leaseEpoch: 2 }, { ...retirement, workspaceGenerationRef: 'c'.repeat(64) },
+    { ...retirement, snapshotEvidenceRef: 'd'.repeat(64) }, { ...retirement, snapshotEvidenceDigest: 'e'.repeat(64) },
+    { ...retirement, retiredAt: '2026-01-01T00:00:00.000Z' }, { ...retirement, nativeObservation: true }])
+    assert.throws(() => inspectInstalledWorkerRetirementHistory(value.stateRoot, value.expected.uid,
+      { ...expected, retirement: changed }), { message: 'installed worker retirement history inspection refused' });
   assert.deepEqual(await readFile(value.filename), before); assert.deepEqual(await readdir(value.cas), names);
   assert.deepEqual(await Promise.all(names.map(name => readFile(path.join(value.cas, name)))), bytes);
   for (const changed of [{ ...expected, runId: 'other' }, { ...expected, launchId: 'successor-launch' },

@@ -333,19 +333,25 @@ export function decodeWireJournal(value: unknown): InvocationJournalEntry {
     rejectUnknownKeys(record, JOURNAL_BASE_KEYS, 'Journal(prepared)');
     requireAbsent(record, [...JOURNAL_CLAIM_KEYS, ...JOURNAL_TERMINAL_KEYS], 'Journal(prepared)');
   } else if (phase === 'dispatch_claimed') {
-    rejectUnknownKeys(record, [...JOURNAL_BASE_KEYS, ...JOURNAL_CLAIM_KEYS], 'Journal(dispatch_claimed)');
+    const birthKeys = record.opKind === 'publish' ? ['evidenceRef', 'evidenceDigest'] : [];
+    rejectUnknownKeys(record, [...JOURNAL_BASE_KEYS, ...JOURNAL_CLAIM_KEYS, ...birthKeys], 'Journal(dispatch_claimed)');
     requireClaimIdentity(record);
     if (!isZeroBudget(decodeWireBudget(record.budgetDelta, 'Journal.budgetDelta'))) {
       invalid('dispatch_claimed must have zero budgetDelta');
     }
-    requireAbsent(record, JOURNAL_TERMINAL_KEYS, 'Journal(dispatch_claimed)');
+    requireAbsent(record, JOURNAL_TERMINAL_KEYS.filter(key => !birthKeys.includes(key)), 'Journal(dispatch_claimed)');
+    if (record.opKind === 'publish' && (!has(record, 'evidenceRef') || !has(record, 'evidenceDigest')))
+      invalid('publication dispatch requires its complete original arena birth evidence');
   } else if (phase === 'completed') {
-    rejectUnknownKeys(record, [...JOURNAL_BASE_KEYS, ...JOURNAL_CLAIM_KEYS, 'resultRef', 'receiptRef', 'budgetSettlementRef'], 'Journal(completed)');
+    rejectUnknownKeys(record, [...JOURNAL_BASE_KEYS, ...JOURNAL_CLAIM_KEYS, 'resultRef', 'receiptRef', 'budgetSettlementRef',
+      ...(record.opKind === 'publish' ? ['evidenceRef', 'evidenceDigest'] : [])], 'Journal(completed)');
     requireClaimIdentity(record);
     requireArtifactRef(record.budgetSettlementRef, 'Journal.budgetSettlementRef');
     if (!has(record, 'resultRef') && !has(record, 'receiptRef')) invalid('completed requires a result or receipt');
     if (has(record, 'resultRef')) requireArtifactRef(record.resultRef, 'Journal.resultRef');
     if (has(record, 'receiptRef')) requireArtifactRef(record.receiptRef, 'Journal.receiptRef');
+    if (record.opKind === 'publish' && (!has(record, 'receiptRef') || !has(record, 'evidenceRef') ||
+        record.receiptRef !== record.evidenceRef)) invalid('completed publication requires its identical terminal receipt and evidence');
   } else if (phase === 'unknown') {
     rejectUnknownKeys(record, [...JOURNAL_BASE_KEYS, ...JOURNAL_CLAIM_KEYS, 'evidenceRef', 'evidenceDigest', 'budgetSettlementRef'], 'Journal(unknown)');
     requireClaimIdentity(record);

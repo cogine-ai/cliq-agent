@@ -1,6 +1,6 @@
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { assertArtifactRef, digestOmitting, normalizeBoundedText, parseCanonicalTime, sha256Bytes } from '../kernel/identity.js';
-import type { FinalCandidateItem, VerifierPlan, VerificationClosureV1, RunResult, WorkspaceDiffV1 } from '../kernel/result.js';
+import type { FinalCandidateItem, VerifierPlan, VerificationClosureV1, RunResult, WorkspaceDiffV1, InheritedVerificationProvenanceV1 } from '../kernel/result.js';
 import type { WorkspaceEntry } from '../kernel/types.js';
 import { KernelStorageError } from './errors.js';
 
@@ -142,7 +142,7 @@ export function decodeVerifierPlan(value: unknown): VerifierPlan {
   return plan as VerifierPlan;
 }
 
-/** Local no-dependency branches only. Decoding creates neither a receipt nor
+/** Local/inherited no-dependency branches only. Decoding creates neither a receipt nor
  * execution authority; the result consumer rederives every ordered disposition
  * from its owning highest eligible Journal/result/receipt graph. */
 export function decodeVerificationClosure(value: unknown): VerificationClosureV1 {
@@ -153,8 +153,18 @@ export function decodeVerificationClosure(value: unknown): VerificationClosureV1
   for (const key of ['resultSourceRef', 'verifierPlanRef', 'closureDigest']) ref(closure[key]);
   try { parseCanonicalTime(text(closure.createdAt)); } catch { mismatch('verification closure time is invalid'); }
   const dependency = closed(closure.dependency, ['kind']);
+  if (dependency.kind !== 'none') mismatch('verification dependency branch is not implemented');
+  const kind = closed(closure.verification, ['kind'], ['sourceRunId', 'sourceRunResultRef', 'sourceVerificationClosureRef',
+    'inheritedProvenanceRef', 'outcome', 'entries', 'unverifiedConsentRef']).kind;
+  if (kind === 'inherited_verified') {
+    const inherited = closed(closure.verification, ['kind', 'sourceRunId', 'sourceRunResultRef', 'sourceVerificationClosureRef', 'inheritedProvenanceRef']);
+    if (text(inherited.sourceRunId) === closure.runId) mismatch('verification cannot inherit itself');
+    for (const key of ['sourceRunResultRef', 'sourceVerificationClosureRef', 'inheritedProvenanceRef']) ref(inherited[key]);
+    if (digestOmitting(closure, 'closureDigest') !== closure.closureDigest) mismatch('verification closure digest does not rehash');
+    return closure as VerificationClosureV1;
+  }
   const verification = closed(closure.verification, ['kind', 'outcome', 'entries'], ['unverifiedConsentRef']);
-  if (dependency.kind !== 'none' || verification.kind !== 'local' || !['verified', 'unverified'].includes(String(verification.outcome)))
+  if (verification.kind !== 'local' || !['verified', 'unverified'].includes(String(verification.outcome)))
     mismatch('verification closure branch is not implemented');
   const entries = list(verification.entries), verifierIds = new Set<string>(), resultItems = new Set<string>(), receipts = new Set<string>(), ops = new Set<string>();
   let required = 0, specDigest: string | undefined;
@@ -185,14 +195,36 @@ export function decodeVerificationClosure(value: unknown): VerificationClosureV1
   return closure as VerificationClosureV1;
 }
 
+/** Closed inert provenance only. The consumer must independently re-walk the
+ * original succeeded source Run, source closure and receipt Journal graph. */
+export function decodeInheritedVerificationProvenance(value: unknown): InheritedVerificationProvenanceV1 {
+  const provenance = closed(value, ['schemaVersion', 'format', 'deliveryRunId', 'sourceRunId', 'sourceRunResultRef', 'sourceRunResultDigest',
+    'sourceVerificationClosureRef', 'sourceVerificationClosureDigest', 'resultSourceRef', 'verifierSpecRef', 'verifierSpecDigest',
+    'verificationReceiptRefs', 'verificationReceiptDigests', 'createdAt', 'provenanceDigest']);
+  if (provenance.schemaVersion !== 1 || provenance.format !== 'cliq-inherited-verification-provenance-v1' ||
+      text(provenance.deliveryRunId) === text(provenance.sourceRunId)) mismatch('inherited provenance has invalid identities');
+  for (const key of ['sourceRunResultRef', 'sourceRunResultDigest', 'sourceVerificationClosureRef', 'sourceVerificationClosureDigest',
+    'resultSourceRef', 'verifierSpecRef', 'verifierSpecDigest', 'provenanceDigest']) ref(provenance[key]);
+  if (provenance.sourceRunResultDigest !== provenance.sourceRunResultRef) mismatch('inherited source result digest is not its CAS identity');
+  const refs = list(provenance.verificationReceiptRefs).map(ref), digests = list(provenance.verificationReceiptDigests).map(ref);
+  if (!refs.length || refs.length !== digests.length || new Set(refs).size !== refs.length || new Set(digests).size !== digests.length)
+    mismatch('inherited provenance has no one-to-one ordered receipt identities');
+  try { parseCanonicalTime(text(provenance.createdAt)); } catch { mismatch('inherited provenance time is invalid'); }
+  if (digestOmitting(provenance, 'provenanceDigest') !== provenance.provenanceDigest) mismatch('inherited provenance digest does not rehash');
+  return provenance as InheritedVerificationProvenanceV1;
+}
+
 /** RunResult intentionally has neither a format nor a self-digest. Its CAS
  * ref is its identity, and the consumer binds every field to the candidate. */
 export function decodeRunResult(value: unknown): RunResult {
   const result = closed(value, ['schemaVersion', 'runId', 'baseSourceRef', 'resultSourceRef', 'diffRef',
-    'verificationClosureRef', 'verificationReceiptRefs', 'summaryRef', 'createdAt']);
+    'verificationClosureRef', 'verificationReceiptRefs', 'summaryRef', 'createdAt'], ['verificationProvenanceRef', 'deliveryTerminalProjectionEvidenceRef']);
   if (result.schemaVersion !== 1) mismatch('Run result has the wrong schema');
   text(result.runId);
   for (const key of ['baseSourceRef', 'resultSourceRef', 'diffRef', 'verificationClosureRef', 'summaryRef']) ref(result[key]);
+  for (const key of ['verificationProvenanceRef', 'deliveryTerminalProjectionEvidenceRef']) if (Object.hasOwn(result, key)) ref(result[key]);
+  if (Object.hasOwn(result, 'verificationProvenanceRef') && !Object.hasOwn(result, 'deliveryTerminalProjectionEvidenceRef'))
+    mismatch('inherited delivery result lost its terminal projection');
   const receipts = list(result.verificationReceiptRefs).map(ref);
   if (new Set(receipts).size !== receipts.length) mismatch('Run result reuses a verification receipt');
   try { parseCanonicalTime(text(result.createdAt)); } catch { mismatch('Run result time is invalid'); }

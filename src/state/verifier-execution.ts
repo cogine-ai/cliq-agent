@@ -19,13 +19,22 @@ import { readHighestPreparedAttempt, readInvocationAttempt, readInvocationJourna
 import { readCheckpoint, readRun, readSession, readSessionPrincipalId, ZERO_BUDGET } from './rows.js';
 import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
 import { assertActiveStateOwner, type StateOwnerContext } from './state-owner.js';
+import { assertDeliveryModelFreeCut } from './run-model-free.js';
 import { decodeVerifierCommand, decodeVerifierEnvironment } from './verifier-artifacts.js';
 import { loadVerifierPolicy, planVerifierRequest } from './verifier-policy.js';
 import { readVerifierProgress, verifierCheckpointId } from './verifier-recovery.js';
+import { readDeliveryVerificationMode } from './run-result-recovery.js';
 import { assertLiveDispatchState, claimValidatedInvocation, prepareValidatedInvocation, requireHealthyFence, settleValidatedInvocation,
   type ClaimInvocationDispatchInput } from './reducers/invocation.js';
 
 const VERIFIER_BUDGET = Object.freeze({ modelTokens: 0, costMicros: 0, toolCalls: 1, repairAttempts: 0 });
+
+/** An authority-reducing routing invariant, not local execution permission.
+ * Its live caller obtains the mode from the complete original source graph. */
+export function assertLocalDeliveryVerifierSelection(mode: { kind: 'local' | 'inherited' }): void {
+  if (mode?.kind !== 'local')
+    throw new KernelStorageError('STATE_TRANSITION_INVALID', 'identical delivery must inherit its original verification and cannot dispatch a local verifier');
+}
 
 /** The verifier is an ordinary Journal-owned productive invocation, not a
  * second runner. Every selection and policy decision is reproduced from State. */
@@ -37,14 +46,21 @@ export async function loadVerifierContinuation(driver: SqliteDriver, artifacts: 
     assertActiveStateOwner(driver, owner);
     if (!authority.releaseKeys) throw new KernelStorageError('RECOVERY_REQUIRED', 'verifier authority requires retained trusted release roots');
     const selected = await readRecoveryClosure(driver, artifacts, runId), { run } = selected;
+    if (spec.operation === 'delivery') {
+      assertDeliveryModelFreeCut(selected);
+      // Scheduler routing is not a release gate. Preparation and permanent
+      // claim both re-enter this cut, before reserving or releasing anything.
+      assertLocalDeliveryVerifierSelection(await readDeliveryVerificationMode(driver, artifacts, selected));
+    }
     if (run.specRef !== admitted.specRef || run.createdAt !== admitted.createdAt || run.deadlineAt !== admitted.deadlineAt)
       throw new TypeError('verifier authority no longer belongs to its original Run');
     if (expected !== undefined && run.revision !== expected) throw new KernelStorageError('REVISION_CONFLICT', 'verifier revision changed');
-    if (run.nextStep !== 'verify' || !run.frontierRef || spec.operation !== 'agent' || run.parentRunId || spec.dependencyPolicyRef !== undefined)
-      throw new KernelStorageError('STATE_TRANSITION_INVALID', 'verifier requires its root agent frontier');
+    if (run.nextStep !== 'verify' || !run.frontierRef || run.parentRunId || spec.dependencyPolicyRef !== undefined)
+      throw new KernelStorageError('STATE_TRANSITION_INVALID', 'verifier requires its root Run frontier');
     const frontier = await readCanonicalArtifact<RunFrontier>(artifacts, run.frontierRef);
     const progress = await readVerifierProgress(driver, artifacts, selected);
-    if (frontier.kind !== 'verify' || frontier.phase !== 'verifiers' || frontier.afterPass !== 'finalize' ||
+    if (frontier.kind !== 'verify' || frontier.phase !== 'verifiers' ||
+        frontier.afterPass !== (spec.operation === 'agent' ? 'finalize' : 'delivery_approval') ||
         frontier.nextVerifierIndex !== progress.nextVerifierIndex || frontier.verifierPlanRef !== progress.planRef || progress.complete)
       throw new KernelStorageError('STATE_TRANSITION_INVALID', 'verifier has no current frozen pending entry');
     if (progress.entries.slice(0, frontier.nextVerifierIndex).some(entry => !entry.disposition))

@@ -1,16 +1,17 @@
 import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
-import { chmod, link, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, link, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import path from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { setImmediate as scheduleImmediate } from 'node:timers';
 import type { FrozenIgnoreRulesV1, SourceManifest, SourceProjectionSpec, WorkspaceEntryManifest } from '../kernel/types.js';
-import { sha256Bytes } from '../kernel/identity.js';
+import { digestOmitting, identityHash, sha256Bytes } from '../kernel/identity.js';
 import { ArtifactCatalog } from '../state/artifacts.js';
 import { ContentAddressedStore } from '../state/cas.js';
 import { loadNativeStateOwner } from '../state/native-owner.js';
-import { publishNonGitSourceProjection } from './source-projection.js';
+import { captureFrozenSourceProjection, publishNonGitSourceProjection } from './source-projection.js';
+import { decodeDeliveryCaptureTopology, publicationDirectoryIdentityDigest } from '../kernel/publication.js';
 
 async function fixture(t: TestContext) {
   const directory = await mkdtemp(path.join(process.cwd(), '.cliq-source-projection-'));
@@ -28,6 +29,70 @@ async function fixture(t: TestContext) {
     sourceIncludes: [], sourceExcludes: [] as Array<{ path: string; scope: 'entry' | 'subtree' }>,
     maxChangedPaths: 0, maxChangedBytes: 0, maxEntries: 100_000, maxBytes: 1024 * 1024, maxSingleFileBytes: 512 * 1024 } };
 }
+
+async function heldDescriptors(paths: string[]): Promise<string[]> {
+  // Read-only OS resource observation, not a native capture/proof stand-in.
+  const identities = new Set(await Promise.all(paths.map(async filename => {
+    const info = await stat(filename, { bigint: true }); return `${info.dev}:${info.ino}`;
+  })));
+  const directory = process.platform === 'linux' ? '/proc/self/fd' : '/dev/fd', observed: string[] = [];
+  for (const fd of await readdir(directory)) {
+    try {
+      const info = await stat(path.join(directory, fd), { bigint: true }), identity = `${info.dev}:${info.ino}`;
+      if (identities.has(identity)) observed.push(`${fd}:${identity}`);
+    } catch (error) {
+      // The listing's own descriptor can close before its entry is inspected.
+      if (!['ENOENT', 'EBADF'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
+    }
+  }
+  return observed.sort();
+}
+
+test('frozen capture rejects structural native handles before accessing CAS or caller callbacks', async t => {
+  const { input } = await fixture(t);
+  let accessed = false;
+  const artifacts = Object.defineProperty({}, 'readCanonical', { get() {
+    accessed = true; throw new Error('structural handles must be refused before CAS');
+  } }) as ArtifactCatalog;
+  for (const key of ['workspaceRoot', 'controlledHome', 'stateOwnerLock'] as const) {
+    await assert.rejects(captureFrozenSourceProjection({ ...input, artifacts, [key]: {} as never,
+      sourceProjectionRef: 'b'.repeat(64), sourceProjectionDigest: 'c'.repeat(64) }), TypeError);
+    assert.equal(accessed, false);
+  }
+});
+
+test('delivery topology retains the same held capture directories and raw modes without inventing physical generation evidence', async t => {
+  const { workspace, input } = await fixture(t);
+  await mkdir(path.join(workspace, 'private'), { mode: 0o700 });
+  await mkdir(path.join(workspace, 'empty'), { mode: 0o750 });
+  await chmod(path.join(workspace, 'empty'), 0o750);
+  await mkdir(path.join(workspace, 'pruned'), { mode: 0o700 });
+  await writeFile(path.join(workspace, 'private', 'file'), 'captured\n', { mode: 0o600 });
+  await writeFile(path.join(workspace, 'pruned', 'file'), 'not selected\n');
+  const selected = { ...input, sourceExcludes: [{ path: 'pruned', scope: 'subtree' as const }],
+    deliveryCapture: { inspectionId: identityHash('cliq-source-inspection-v1', 'fixture-principal', 'run.apply', 'fixture-key', 'fixture-intent'),
+      workspaceIdentityRef: 'b'.repeat(64), capturedAt: '2026-10-18T00:00:00.000Z' } };
+  const result = await publishNonGitSourceProjection(selected);
+  assert.ok(result.captureTopologyRef);
+  const topology = decodeDeliveryCaptureTopology(await input.artifacts.readCanonical(result.captureTopologyRef));
+  assert.equal(topology.inspectionId, selected.deliveryCapture.inspectionId);
+  assert.equal(topology.capturedWorkspaceRef, result.baseWorkspaceManifestRef);
+  assert.equal(topology.workspaceIdentityRef, selected.deliveryCapture.workspaceIdentityRef);
+  assert.equal(topology.workspaceIdentityDigest, input.workspaceIdentityDigest);
+  assert.equal(topology.capturedAt, selected.deliveryCapture.capturedAt);
+  assert.equal(topology.rootIdentity.mode, 0o700);
+  assert.deepEqual(topology.directories.map(entry => [entry.path, entry.mode]), [['empty', 0o750], ['private', 0o700]]);
+  assert.deepEqual(topology.fileModes, [{ path: 'private/file', mode: 0o600 }]);
+  for (const entry of [topology.rootIdentity, ...topology.directories])
+    assert.equal(entry.identityDigest, publicationDirectoryIdentityDigest(input.workspaceIdentityDigest, entry));
+  const entries = await input.artifacts.readCanonical<WorkspaceEntryManifest>(result.entriesRef);
+  assert.deepEqual(entries.entries.filter(entry => entry.kind === 'directory').map(entry => [entry.path, entry.mode]),
+    [['empty', 0o755], ['private', 0o755]], 'logical source modes must not replace physical directory observations');
+  assert.equal(result.metadata.some(entry => entry.ref === result.captureTopologyRef && entry.schemaKind === topology.format), true);
+  const ordinary = await publishNonGitSourceProjection({ ...input, sourceExcludes: selected.sourceExcludes });
+  assert.equal(ordinary.baseWorkspaceManifestRef, result.baseWorkspaceManifestRef);
+  assert.equal(ordinary.captureTopologyRef, undefined);
+});
 
 test('non-Git projection publishes ordinary real bytes and empty directories while pruning exact exclusions and genuine managed roots', async t => {
   const { workspace, home, state, input } = await fixture(t);
@@ -66,6 +131,153 @@ test('non-Git projection publishes ordinary real bytes and empty directories whi
   assert.equal(await readFile(path.join(workspace, 'dir', 'a'), 'utf8'), 'real bytes\n');
   const after = await stat(path.join(workspace, 'dir', 'a'));
   assert.equal(after.ino, before.ino); assert.equal(after.mtimeMs, before.mtimeMs); assert.equal(after.ctimeMs, before.ctimeMs);
+  input.workspaceRoot.assertHeld(); input.controlledHome.assertHeld(); input.stateOwnerLock.assertHeld();
+});
+
+test('frozen projection captures the complete current tree including new paths without rereading ignore or configuration', async t => {
+  const { workspace, home, state, input } = await fixture(t);
+  await writeFile(path.join(workspace, 'existing'), 'before');
+  await mkdir(path.join(workspace, 'excluded'));
+  await writeFile(path.join(workspace, 'excluded', 'unreadable'), 'not source');
+  input.sourceExcludes = [{ path: 'excluded', scope: 'subtree' }];
+  const base = await publishNonGitSourceProjection(input);
+  await writeFile(path.join(workspace, 'existing'), 'after');
+  await mkdir(path.join(workspace, 'new-directory'));
+  await writeFile(path.join(workspace, 'new-directory', 'new-file'), 'new actual bytes');
+  await mkdir(path.join(workspace, 'empty'));
+  await writeFile(path.join(workspace, '.gitignore'), 'new-directory/\nexisting\n');
+  await mkdir(path.join(workspace, '.cliq'));
+  await writeFile(path.join(workspace, '.cliq', 'config'), '{invalid: never execute this as configuration');
+  await writeFile(path.join(home, 'auth.json'), 'must not read home');
+  await writeFile(path.join(state, 'secret'), 'must not read state');
+  for (const filename of [path.join(home, 'auth.json'), path.join(state, 'secret'), path.join(workspace, 'excluded', 'unreadable')])
+    await chmod(filename, 0);
+  const result = await captureFrozenSourceProjection({ ...input,
+    sourceProjectionRef: base.sourceProjectionRef, sourceProjectionDigest: base.sourceProjectionDigest });
+  const source = await input.artifacts.readCanonical<SourceManifest>(result.resultWorkspaceManifestRef);
+  const entries = await input.artifacts.readCanonical<WorkspaceEntryManifest>(result.entriesRef);
+  assert.equal(source.role, 'result');
+  assert.equal(source.workspaceIdentityDigest, input.workspaceIdentityDigest);
+  assert.equal(source.sourceProjectionRef, base.sourceProjectionRef);
+  assert.equal(source.sourceProjectionDigest, base.sourceProjectionDigest);
+  assert.equal(source.frozenIgnoreRulesRef, base.frozenIgnoreRulesRef);
+  assert.equal(source.frozenIgnoreRulesDigest, base.frozenIgnoreRulesDigest);
+  assert.deepEqual(entries.entries.map(entry => [entry.path, entry.kind]), [
+    ['.cliq', 'directory'], ['.cliq/config', 'file'], ['.gitignore', 'file'], ['empty', 'directory'],
+    ['existing', 'file'], ['new-directory', 'directory'], ['new-directory/new-file', 'file']
+  ]);
+  const added = entries.entries.find(entry => entry.path === 'new-directory/new-file');
+  assert(added?.kind === 'file'); assert.equal((await input.artifacts.readBytes(added.blobRef)).toString(), 'new actual bytes');
+  const updated = entries.entries.find(entry => entry.path === 'existing');
+  assert(updated?.kind === 'file'); assert.equal((await input.artifacts.readBytes(updated.blobRef)).toString(), 'after');
+  assert.equal(result.metadata.some(item => item.ref === sha256Bytes(Buffer.from('must not read home'))), false);
+  assert.equal(result.metadata.some(item => item.ref === sha256Bytes(Buffer.from('must not read state'))), false);
+  assert.equal(result.metadata.filter(item => item.schemaKind === 'cliq-source-projection-v1').length, 1);
+  assert.equal(result.metadata.filter(item => item.schemaKind === 'cliq-frozen-ignore-rules-v1').length, 1);
+});
+
+test('frozen capture rejects altered, noncanonical and unsupported retained projection closures before source publication', async t => {
+  const { workspace, state, input } = await fixture(t);
+  await writeFile(path.join(workspace, 'ordinary'), 'actual source bytes');
+  const base = await publishNonGitSourceProjection(input);
+  const projection = await input.artifacts.readCanonical<SourceProjectionSpec>(base.sourceProjectionRef);
+  const rules = await input.artifacts.readCanonical<FrozenIgnoreRulesV1>(base.frozenIgnoreRulesRef);
+  const selected = { ...input, sourceProjectionRef: base.sourceProjectionRef, sourceProjectionDigest: base.sourceProjectionDigest };
+  await assert.rejects(captureFrozenSourceProjection({ ...selected, sourceProjectionDigest: 'f'.repeat(64) }), /retained digest/);
+  const publishProjection = async (changes: object) => {
+    const value = { ...projection, ...changes }; value.projectionDigest = digestOmitting(value, 'projectionDigest');
+    const artifact = await input.artifacts.publishCanonical(value, 'cliq-source-projection-v1');
+    return { ...selected, sourceProjectionRef: artifact.ref, sourceProjectionDigest: value.projectionDigest };
+  };
+  await assert.rejects(captureFrozenSourceProjection(await publishProjection({ extra: true })), /invalid fields/);
+  await assert.rejects(captureFrozenSourceProjection(await publishProjection({ matcherVersion: 'future-matcher' })), /wrong schema/);
+  await assert.rejects(captureFrozenSourceProjection(await publishProjection({ explicitIncludes: [
+    { path: 'ordinary', scope: 'entry', authorizationRef: 'b'.repeat(64) }
+  ] })), /includes require.*implemented authorization/);
+  await assert.rejects(captureFrozenSourceProjection(await publishProjection({ explicitExcludes: [
+    { path: 'ordinary', scope: 'glob' }
+  ] })), /exclude has invalid fields/);
+  for (const changedRules of [{ ...rules, extra: true }, { ...rules, repositoryIdentityDigest: 'b'.repeat(64) },
+    { ...rules, matcherVersion: 'future-matcher' }, { ...rules, rules: [{}] }, { ...rules, sources: [{}] }]) {
+    changedRules.rulesDigest = digestOmitting(changedRules, 'rulesDigest');
+    const artifact = await input.artifacts.publishCanonical(changedRules, 'cliq-frozen-ignore-rules-v1');
+    await assert.rejects(captureFrozenSourceProjection(await publishProjection({ frozenIgnoreRulesRef: artifact.ref,
+      frozenIgnoreRulesDigest: changedRules.rulesDigest })), /invalid fields|nonempty ignore matching/);
+  }
+  await assert.rejects(captureFrozenSourceProjection(await publishProjection({ frozenIgnoreRulesDigest: 'f'.repeat(64) })), /ignore rules differ/);
+  const noncanonical = await input.artifacts.publishBytes(Buffer.from(JSON.stringify(projection) + '\n'), 'application/json', 'cliq-source-projection-v1');
+  await assert.rejects(captureFrozenSourceProjection({ ...selected, sourceProjectionRef: noncanonical.ref }), /not canonical JSON/);
+  const original = await readFile(path.join(state, 'objects', base.frozenIgnoreRulesRef));
+  await chmod(path.join(state, 'objects', base.frozenIgnoreRulesRef), 0o600);
+  await writeFile(path.join(state, 'objects', base.frozenIgnoreRulesRef), Buffer.concat([original, Buffer.from(' ')]));
+  await chmod(path.join(state, 'objects', base.frozenIgnoreRulesRef), 0o400);
+  await assert.rejects(captureFrozenSourceProjection(selected), /artifact [a-f0-9]{64} is corrupt/);
+  input.workspaceRoot.assertHeld(); input.stateOwnerLock.assertHeld();
+});
+
+test('frozen capture closes every actual capture descriptor after payload-time inode drift without publishing a result', async t => {
+  const { workspace, input } = await fixture(t);
+  await mkdir(path.join(workspace, 'directory'));
+  const ordinary = path.join(workspace, 'directory', 'ordinary'), excluded = path.join(workspace, 'excluded');
+  await writeFile(ordinary, 'before'); await writeFile(excluded, 'before');
+  input.sourceExcludes = [{ path: 'excluded', scope: 'entry' }];
+  const base = await publishNonGitSourceProjection(input), bytes = Buffer.from('new actual bytes');
+  await writeFile(ordinary, bytes);
+  const named = [workspace, path.join(workspace, 'directory'), ordinary, excluded];
+  const before = await heldDescriptors(named), excludedBefore = await stat(excluded);
+  const originalOpen = fs.open; let changed = false;
+  fs.open = (async (...args: Parameters<typeof fs.open>) => {
+    const handle = await originalOpen(...args);
+    if (typeof args[0] === 'string' && path.basename(args[0]).startsWith('.tmp-stream-')) {
+      const originalWrite = handle.writeFile.bind(handle);
+      handle.writeFile = async (...writeArgs: Parameters<typeof handle.writeFile>) => {
+        await originalWrite(...writeArgs);
+        if (!changed && writeArgs[0] instanceof Uint8Array && Buffer.from(writeArgs[0]).equals(bytes)) {
+          changed = true; await rename(excluded, `${excluded}-original`); await writeFile(excluded, 'foreign replacement');
+        }
+      };
+    }
+    return handle;
+  }) as typeof fs.open;
+  try {
+    await assert.rejects(captureFrozenSourceProjection({ ...input,
+      sourceProjectionRef: base.sourceProjectionRef, sourceProjectionDigest: base.sourceProjectionDigest }), /changed|identity/);
+    assert.equal(changed, true); assert.notEqual((await stat(excluded)).ino, excludedBefore.ino);
+  } finally { fs.open = originalOpen; }
+  assert.deepEqual(await heldDescriptors([...named, `${excluded}-original`]), before);
+  assert.equal(await readFile(excluded, 'utf8'), 'foreign replacement');
+  input.workspaceRoot.assertHeld(); input.controlledHome.assertHeld(); input.stateOwnerLock.assertHeld();
+});
+
+test('frozen capture cooperatively cancels real payload reading and fully joins its original descriptors', async t => {
+  const { workspace, input } = await fixture(t);
+  const base = await publishNonGitSourceProjection(input);
+  await mkdir(path.join(workspace, 'new-directory'));
+  const ordinary = path.join(workspace, 'new-directory', 'ordinary');
+  await writeFile(ordinary, Buffer.alloc(65536 * 3, 0x63));
+  const named = [workspace, path.join(workspace, 'new-directory'), ordinary], before = await heldDescriptors(named);
+  const cancellation = new AbortController(), reason = new Error('cancel actual frozen source payload');
+  const originalOpen = fs.open; let cancelled = false;
+  fs.open = (async (...args: Parameters<typeof fs.open>) => {
+    const handle = await originalOpen(...args);
+    if (typeof args[0] === 'string' && path.basename(args[0]).startsWith('.tmp-stream-')) {
+      const originalWrite = handle.writeFile.bind(handle);
+      handle.writeFile = async (...writeArgs: Parameters<typeof handle.writeFile>) => {
+        await originalWrite(...writeArgs);
+        if (!cancelled && writeArgs[0] instanceof Uint8Array && writeArgs[0].byteLength === 65536) {
+          cancelled = true; cancellation.abort(reason);
+        }
+      };
+    }
+    return handle;
+  }) as typeof fs.open;
+  try {
+    await assert.rejects(captureFrozenSourceProjection({ ...input,
+      sourceProjectionRef: base.sourceProjectionRef, sourceProjectionDigest: base.sourceProjectionDigest,
+      signal: cancellation.signal }), error => error === reason);
+    assert.equal(cancelled, true);
+  } finally { fs.open = originalOpen; }
+  assert.deepEqual(await heldDescriptors(named), before);
   input.workspaceRoot.assertHeld(); input.controlledHome.assertHeld(); input.stateOwnerLock.assertHeld();
 });
 

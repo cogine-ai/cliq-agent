@@ -25,18 +25,21 @@ export type WorkerRecoveryTerminalPlan = Readonly<{ [terminalRecoveryBrand]: tru
 type RetiredGeneration = Extract<WorkspaceGenerationStateV1, { phase: 'retired' }>;
 type Plan = {
   driver: SqliteDriver; owner: StateOwnerContext; cut: RecoveryClosureV1;
-  metadata: PublishedArtifact[]; generation: RetiredGeneration;
+  metadata: PublishedArtifact[]; quarantineMetadata: PublishedArtifact[]; generation: RetiredGeneration;
   rollback?: { prepared: InvocationJournalEntry; claim: InvocationJournalEntry; unknown: InvocationJournalEntry;
     evidence: PrivateToolRollbackV1; artifact: PublishedArtifact; request: ToolRequestV1 };
   reobserve(connection: SqliteConnection): void;
   validate(connection: SqliteConnection | SqliteDriver, now: string): void;
+  validateQuarantined(connection: SqliteConnection, now: string): void;
+  commitQuarantined(connection: SqliteConnection, now: string): void;
   commit(connection: SqliteConnection, now: string): void;
 };
 const plans = new WeakMap<WorkerRecoveryTerminalPlan, Plan>();
 
 /** All artifacts are prepared while SQL retains its valid original worker wait.
- * The sole terminal reducer consumes the live native owners and applies these
- * row changes inside its Checkpoint/Session transaction, never through queued. */
+ * The terminal reducer commits retirement with its Checkpoint/Session. A known
+ * stopped publication may instead preserve the original Checkpoint and commit
+ * only quarantine, then use the existing physical quarantine-retirement path. */
 export async function prepareWorkerRecoveryTerminalPlan(driver: SqliteDriver, artifacts: ArtifactCatalog,
   owner: StateOwnerContext, input: {
     cut: RecoveryClosureV1; wait: WorkerDeathWait; launch: BoundWorkerLaunch;
@@ -145,8 +148,32 @@ export async function prepareWorkerRecoveryTerminalPlan(driver: SqliteDriver, ar
     }
     assertFreshNativeOwners(fresh.observations, now);
   }
+  function commitGenerationQuarantine(connection: SqliteConnection, now: string) {
+    const quarantined: Extract<WorkspaceGenerationStateV1, { phase: 'quarantined' }> = { ...base,
+      phase: 'quarantined', rowVersion: generation.rowVersion + 1, updatedAt: now,
+      quarantineEvidenceRef: input.quarantineArtifact.ref, quarantineEvidenceDigest: quarantine.evidenceDigest,
+      observedState: quarantine.observedState };
+    updateWorkspaceGeneration(connection, generation, quarantined);
+    return quarantined;
+  }
+  function validateQuarantined(connection: SqliteConnection, now: string) {
+    assertOriginalCut(connection);
+    if (now < quarantine.observedAt || now >= dispatch.probeDeadlineAt)
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'publication quarantine exceeds its original observation or worker probe');
+    if (!fresh || fresh.connection !== connection)
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'publication quarantine has no actual resource observations for this transaction');
+    // This branch does not register/consume the separately prepared terminal
+    // retirement artifact. Its own physical freshness is the actual same-FD
+    // native/workspace observation just performed in this transaction.
+    assertFreshNativeOwners(fresh.observations, now);
+  }
+  function retireLaunch(connection: SqliteConnection, now: string) {
+    updateWorkerLaunch(connection, launch, { ...launch, phase: 'retired', retiredAt: now,
+      retirementEvidenceRef: input.wrapperArtifact.ref });
+  }
   const token = Object.freeze({}) as WorkerRecoveryTerminalPlan;
   plans.set(token, { driver, owner, cut, metadata: [...input.metadata, artifact, ...(rollback ? [rollback.artifact] : [])],
+    quarantineMetadata: [...input.metadata],
     generation: retired, rollback,
     reobserve(connection) {
       // Each real native assertion produces a new physical observation time.
@@ -158,18 +185,18 @@ export async function prepareWorkerRecoveryTerminalPlan(driver: SqliteDriver, ar
       fresh = { connection, observations };
     },
     validate,
+    validateQuarantined,
+    commitQuarantined(connection, now) {
+      validateQuarantined(connection, now);
+      commitGenerationQuarantine(connection, now); retireLaunch(connection, now);
+    },
     commit(connection, now) {
       validate(connection, now);
-      const quarantined: Extract<WorkspaceGenerationStateV1, { phase: 'quarantined' }> = { ...base,
-        phase: 'quarantined', rowVersion: generation.rowVersion + 1, updatedAt: now,
-        quarantineEvidenceRef: input.quarantineArtifact.ref, quarantineEvidenceDigest: quarantine.evidenceDigest,
-        observedState: quarantine.observedState };
+      const quarantined = commitGenerationQuarantine(connection, now);
       // Both monotone CAS transitions belong to this one terminal transaction;
       // no reader can observe a worker wait whose required fenced row vanished.
-      updateWorkspaceGeneration(connection, generation, quarantined);
       updateWorkspaceGeneration(connection, quarantined, { ...retired, updatedAt: now });
-      updateWorkerLaunch(connection, launch, { ...launch, phase: 'retired', retiredAt: now,
-        retirementEvidenceRef: input.wrapperArtifact.ref });
+      retireLaunch(connection, now);
     } });
   return token;
 }

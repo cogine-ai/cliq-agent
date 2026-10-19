@@ -234,6 +234,13 @@ Implementation notes:
 
    `run.apply` completes descriptor-safe immutable capture of the source Run Session's exact live descriptor-reopened workspace before admission and publishes distinct artifacts: exact `SourceManifest A` and exact recovery `WorkspaceStateManifest W_A`. It accepts no caller path and rejects a `legacy_unavailable` source Session/fork. `RunSpec.baseWorkspaceManifestRef=A`, initial `delivery:merge.capturedWorkspaceRef=A`, `W_A.baseWorkspaceManifestRef=A`, and the initial Checkpoint `workspaceStateRef=W_A`; every workspace/repository ref and digest equals the source Session artifacts. The Supervisor never passes `A` as a workspace-state ref or conflates deliverable source with private recovery state. There is no admitted delivery Run awaiting `delivery:capture`; a failed, drifted, root/`.git`-replaced, or cross-projection capture creates no Run/control success.
 
+   Pre-admission A/W_A publication verifies their complete durable CAS closure;
+   it does not create or attest a physical delivery generation. After atomic
+   Run/initial-Checkpoint admission, only the existing WorkerLaunch `preparing`
+   lifecycle may register ownership intent, create/materialize/fsync the private
+   generation and publish genuine snapshot/preactivation evidence. Cancellation
+   and recovery use that same lifecycle, with no additional resource ledger.
+
 6. **Detach is attachment state, not Run state.** `cliq run` submits and repeatedly reads bounded `run.attach` pages; `cliq run --detach` submits and returns after durable acknowledgement. Client disconnect, EOF, output error, or terminal close ends only that client's paging loop. Public v1 has no implicit push subscription. Cancellation occurs only through a durable `run.cancel` request.
 
 7. **Keep scheduling deliberately small.** The Supervisor orders runnable Runs by durable `(createdAt, id)` FIFO. There are no priorities. Default concurrency is `max(1, min(4, floor(availableParallelism / 2)))`, configurable within `1..16` in trusted user-level Cliq configuration. Admission allows at most 128 queued runnable Runs by default; a full queue returns `RESOURCE_EXHAUSTED(resourceKind='run_queue')` before acknowledgement. Parent/child budget and concurrency ceilings still apply and may lower eligibility.

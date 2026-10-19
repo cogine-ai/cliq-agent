@@ -1,13 +1,12 @@
 import { canonicalSha256 } from '../../kernel/canonical.js';
 import { planArtifactBytes, planCanonicalArtifact, type PlannedArtifact } from '../../kernel/artifact-plan.js';
-import { assertArtifactRef, digestOmitting, identityHash, modelOperationId as modelOpId, sha256Bytes } from '../../kernel/identity.js';
+import { digestOmitting, identityHash, modelOperationId as modelOpId, sha256Bytes } from '../../kernel/identity.js';
 import type {
-  Run, RunAssemblyV1, RunFrontier, ContextManifest, ContinuationItem, ToolContractManifestV1, RunContextCompactionPlan, ToolBatchItem
+  Run, RunFrontier, ContextManifest, ContinuationItem, RunContextCompactionPlan, ToolBatchItem
 } from '../../kernel/types.js';
 import { immutableSnapshot } from '../../model/immutable.js';
 import type { ModelAttemptResult } from '../../model/model-session.js';
 import type { ModelUnusableResponseV1 } from '../../protocol/agent-ir.js';
-import { loadToolContracts } from '../../tools/input-contract.js';
 import { validateRunAssembly, type RunAssemblyValidationMaterial } from '../../model/run-assembly.js';
 import { estimatePromptTokens, projectModelVisiblePrompt, type ModelRequestV1, type NormalPromptProjectionV1 } from '../../model/request.js';
 import { planModelContinuation, validateModelTurn, validateUnusableModelResponse, type ModelContinuationPlan } from '../../runtime/continuation.js';
@@ -15,7 +14,7 @@ import { assertSameModelOperation, modelRetryState, type ModelRetryState } from 
 import { contextSourceDigest, planContextCompaction, replaceCompactedPrefix, validateContextItems, type ContextItem } from '../../runtime/context-compaction.js';
 import { loadInstructionText, projectNormalContext, readCanonicalArtifact, readModelContext, readModelTurnMaterial } from '../agent-context.js';
 import type { ArtifactCatalog, PublishedArtifact } from '../artifacts.js';
-import { decodeContextManifest, decodeRunSpec, decodeVerifierSpec } from '../decoders.js';
+import { decodeContextManifest } from '../decoders.js';
 import { joinResourceOperations, KernelStorageError, ModelRetryPendingError, stateOperation } from '../errors.js';
 import { sampleCanonicalNow } from '../canonical-time.js';
 import { readHighestPreparedAttempt, readInvocationAttempt, readOperationJournal } from '../repositories/journal.js';
@@ -26,18 +25,16 @@ import type { StateOwnerContext } from '../state-owner.js';
 import { prepareValidatedInvocation, readModelRetryHistory, settleValidatedInvocation, type SettleInvocationInput } from './invocation.js';
 import { loadToolContinuation } from './tool.js';
 import { readToolCut } from '../tool-cut.js';
-import type { ReleaseTrustKey, RuntimeBundleManifest } from '../../policy/runtime-authority.js';
+import type { ReleaseTrustKey } from '../../policy/runtime-authority.js';
 import type { NativeWorkerRetirement } from '../tool-checkpoint.js';
 import { planModelOperationGrant } from '../../kernel/model-grant.js';
 import { readModelGrantClosure, readModelTarget } from '../model-grant.js';
 import type { HeldInstalledRuntime } from '../installed-runtime.js';
 import { loadFinalCandidate } from '../final-candidate.js';
 import { loadRunResult, type RunResultPhase } from '../run-result.js';
-import { loadVerifierContinuation } from '../verifier-execution.js';
 import { loadVerifierRepair } from '../verifier-repair.js';
-import { beginVerifierCompletion } from '../verifier-completion.js';
-import type { NativeVerifierResult } from '../../sandbox/linux-worker.js';
-import { validateVerifierRunAdmission } from '../verifier-admission.js';
+import { readRunAuthority } from '../run-authority.js';
+import { loadRunContinuation } from '../run-continuation.js';
 
 export type LoadAgentRunInput = {
   runId: string;
@@ -130,52 +127,10 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
 ) {
   signal?.throwIfAborted();
   const runId = input.runId;
-  const releaseKeys = input.releaseKeys === undefined ? undefined : immutableSnapshot(input.releaseKeys);
   const material = Object.fromEntries(Object.entries(input.material).map(([key, value]) =>
     [key, typeof value === 'function' ? value : immutableSnapshot(value)])) as RunAssemblyValidationMaterial;
-  const recovered = await readRecoveryClosure(driver, artifacts, runId);
-  const admittedRun = recovered.run;
-  const spec = immutableSnapshot(decodeRunSpec(await readCanonicalArtifact(artifacts, admittedRun.specRef)));
-  if (spec.operation !== 'agent') throw new TypeError('delivery Runs cannot load a model');
-  const assembly = immutableSnapshot(await readCanonicalArtifact<RunAssemblyV1>(artifacts, spec.assemblyRef));
-  if (decodeVerifierSpec(await readCanonicalArtifact(artifacts, spec.verifierSpecRef)).verifiers.length) {
-    if (!releaseKeys) throw new TypeError('verifier authority requires the original trusted Supervisor release roots');
-    const bundle = await readCanonicalArtifact<RuntimeBundleManifest>(artifacts, assembly.runtime.runtimeBundleRef);
-    await validateVerifierRunAdmission(driver, artifacts, owner, { bundle, releaseKeys }, runId, signal);
-  }
-  const manifest = await readCanonicalArtifact<ToolContractManifestV1>(artifacts, assembly.tools.manifestRef);
-  const exactKeys = (value: object, keys: string[]) => Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
-  if (manifest.schemaVersion !== 1 || manifest.format !== 'cliq-tool-contracts-v1' ||
-      !exactKeys(manifest, ['schemaVersion', 'format', 'entries', 'manifestDigest']) ||
-      manifest.manifestDigest !== assembly.tools.manifestDigest || digestOmitting(manifest, 'manifestDigest') !== manifest.manifestDigest ||
-      new Set(manifest.entries.map((entry) => entry.name)).size !== manifest.entries.length) {
-    throw new TypeError('Run tool manifest does not match its retained assembly');
-  }
-  const contracts = immutableSnapshot(await joinResourceOperations(manifest.entries.map(async (entry) => {
-    const output = entry.outputSchemaRef !== undefined;
-    if (!exactKeys(entry, ['name', 'version', 'description', 'access', 'inputSchemaRef', 'inputSchemaDigest', 'replayClass', 'execution',
-      ...(output ? ['outputSchemaRef', 'outputSchemaDigest'] : [])]) || typeof entry.version !== 'string' || !entry.version ||
-        !['read', 'write', 'exec', 'plan', 'control'].includes(entry.access)) throw new TypeError('invalid frozen tool contract schema');
-    const execution = entry.execution;
-    if (execution.kind === 'builtin') {
-      if (!exactKeys(execution, ['kind', 'adapterId', 'adapterVersion', 'adapterCodeDigest']) ||
-          !['manual', 'retry'].includes(entry.replayClass) || typeof execution.adapterId !== 'string' || !execution.adapterId ||
-          typeof execution.adapterVersion !== 'string' || !execution.adapterVersion) throw new TypeError('invalid builtin execution contract');
-      assertArtifactRef(execution.adapterCodeDigest);
-    } else if (execution.kind === 'mcp') {
-      if (!exactKeys(execution, ['kind', 'registrationId', 'registryRevisionRef', 'registryManifestDigest', 'serverToolName', 'toolContractDigest']) ||
-          typeof execution.serverToolName !== 'string' || !execution.serverToolName || !assembly.mcpServers.some((server) =>
-            server.registrationId === execution.registrationId && server.registryRevisionRef === execution.registryRevisionRef &&
-            server.manifestDigest === execution.registryManifestDigest)) throw new TypeError('tool contract differs from the frozen MCP registration');
-      assertArtifactRef(execution.toolContractDigest);
-    } else throw new TypeError('unknown tool execution contract');
-    const schema = await readCanonicalArtifact(artifacts, entry.inputSchemaRef);
-    if (canonicalSha256(schema) !== entry.inputSchemaDigest) throw new TypeError('tool input schema digest mismatch');
-    if (output && canonicalSha256(await readCanonicalArtifact(artifacts, entry.outputSchemaRef!)) !== entry.outputSchemaDigest) {
-      throw new TypeError('tool output schema digest mismatch');
-    }
-    return { ...entry, inputSchema: schema };
-  })));
+  const authority = await readRunAuthority(driver, artifacts, owner, { runId, operation: 'agent', releaseKeys: input.releaseKeys }, signal);
+  const { recovered, run: admittedRun, spec, assembly, releaseKeys, contracts, toolContracts } = authority;
   const tools = contracts.map((entry) => ({ name: entry.name, description: entry.description, inputSchemaRef: entry.inputSchemaRef,
     inputSchemaDigest: entry.inputSchemaDigest, inputSchema: entry.inputSchema, replayClass: entry.replayClass }));
   const validated = validateRunAssembly({ assemblyRef: spec.assemblyRef, assembly, admittedAt: admittedRun.createdAt,
@@ -187,7 +142,6 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
   if (!validated.ok) throw new TypeError(`${validated.code}: ${validated.reason}`);
   const { model } = validated;
   const systemInstruction = await loadInstructionText(artifacts, assembly);
-  const toolContracts = loadToolContracts(contracts);
   const { resolveToolInput } = toolContracts;
   const project = (run: Run, context: ContextManifest, contextRef: string) => projectNormalContext({
     artifacts, run, spec, assembly, context, contextRef, systemInstruction, tools
@@ -259,20 +213,18 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
     }
   }
 
-  const toolContinuation = await loadToolContinuation(driver, artifacts, owner, {
+  const { controlAuthority, ...toolContinuation } = await loadToolContinuation(driver, artifacts, owner, {
     run: admittedRun, spec, assembly, contracts, resolveToolInput, releaseKeys
-  }, reobserve, installedRuntime);
-  const verifierAuthority = { run: admittedRun, spec, assembly, releaseKeys };
-  const verifierContinuation = await loadVerifierContinuation(driver, artifacts, owner, verifierAuthority);
+  }, reobserve);
+  const continuation = await loadRunContinuation(driver, artifacts, owner, authority, reobserve, installedRuntime, controlAuthority);
   return Object.freeze({
+    operation: 'agent' as const,
     ...toolContinuation,
-    ...verifierContinuation,
+    ...continuation.shared,
+    ...continuation.agentOnly,
     ...loadVerifierRepair(driver, artifacts, owner, { run: admittedRun, spec }),
-    beginVerifierCompletion: stateOperation('RECOVERY_REQUIRED', (input: {
-      expectedRunRevision: number; opId: string; attempt: number; result: NativeVerifierResult
-    }) => beginVerifierCompletion(driver, artifacts, owner, verifierAuthority, input, reobserve)),
     ...loadFinalCandidate(driver, artifacts, owner, { run: admittedRun, spec, assembly, resolveToolInput,
-      expireRun: toolContinuation.expireRun, stopForResourceFailure: toolContinuation.stopForResourceFailure }, reobserve),
+      expireRun: continuation.shared.expireRun, stopForResourceFailure: continuation.shared.stopForResourceFailure }, reobserve),
     ...loadRunResult(driver, artifacts, owner, { run: admittedRun, spec, principalId: readSessionPrincipalId(driver, admittedRun.sessionId) }, onResultPhase),
     model,
     resolveToolInput,
