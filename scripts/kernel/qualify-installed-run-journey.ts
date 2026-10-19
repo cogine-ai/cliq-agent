@@ -487,6 +487,8 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
           if (value.scope === 'installed-shutdown-progress' && progress.length < 2) {
             const phases = value.phases;
             const labels = ['scheduled', 'drive_material', 'drive_agent', 'drive_retirement', 'drive_verify', 'drive_finalize',
+              'drive_retirement_history', 'drive_retirement_quarantine_closure', 'drive_retirement_native_retirement',
+              'drive_retirement_workspace_observation', 'drive_retirement_retirement_commit', 'drive_retirement_resource_join',
               'terminal_retirement', 'result_recovery', 'result_recovery_spec', 'result_recovery_context', 'result_recovery_journal',
               'result_recovery_generations', 'result_recovery_history', 'result_recovery_seals', 'result_recovery_terminal',
               'result_recovery_history_model', 'result_recovery_history_items', 'result_recovery_history_candidate',

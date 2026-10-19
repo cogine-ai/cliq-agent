@@ -36,9 +36,12 @@ test('stop diagnosis retains only fixed phases and bounded counts, never journal
   const recovery = { ...valid, phases: Object.fromEntries(['spec', 'context', 'journal', 'generations', 'history', 'history_model',
     'history_items', 'history_candidate', 'history_verifier', 'history_tool', 'history_input', 'history_broker', 'seals', 'terminal']
     .map(stage => [`result_recovery_${stage}`, 1])) };
+  Object.assign(recovery.phases, Object.fromEntries(['history', 'quarantine_closure', 'native_retirement',
+    'workspace_observation', 'retirement_commit', 'resource_join'].map(stage => [`drive_retirement_${stage}`, 1])));
   const untrusted = [valid, { ...valid, phases: { arbitrary_payload: 1 } }, { ...valid, driverTasks: 1001 },
     { ...valid, phases: { result_commit: -1 } }, { ...valid, modelClosures: '1' },
-    { ...valid, phases: { result_recovery_history_unknown: 1 } }, recovery];
+    { ...valid, phases: { result_recovery_history_unknown: 1 } },
+    { ...valid, phases: { drive_retirement_unknown: 1 } }, recovery];
   let scans = 0, calls = 0;
   const context = { Buffer, ledger: { uid: 12345 }, environment: {}, parseJsonStrict: JSON.parse,
     scanBytes: bytes => { assert(Buffer.isBuffer(bytes)); scans++; },
@@ -54,6 +57,37 @@ test('stop diagnosis retains only fixed phases and bounded counts, never journal
   assert.deepEqual(JSON.parse(JSON.stringify(context.inspectStop('owned.service', 'untrusted-pid'))),
     { diagnosticOnly: true, available: false });
   assert.equal(calls, 1);
+});
+
+test('retirement diagnosis invokes only an inert guarded observer at fixed await boundaries', () => {
+  // This exercises the production note's exact source, not a native/Run proof.
+  const execution = readFileSync(new URL('../../../src/state/run-execution.ts', import.meta.url), 'utf8');
+  const note = /^  const retirementPhase = .*;$/mu.exec(execution)?.[0]; assert(note, 'production retirement note must exist');
+  const code = ts.transpileModule(note + '\nglobalThis.note = retirementPhase;',
+    { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  const phases = ['history', 'quarantine_closure', 'native_retirement', 'workspace_observation', 'retirement_commit', 'resource_join'];
+  const observed = [];
+  const context = { onRetirementPhase: phase => { observed.push(phase); throw phase; } };
+  vm.runInNewContext(code, context);
+  for (const phase of phases) assert.doesNotThrow(() => context.note(phase));
+  assert.deepEqual(observed, phases);
+  for (const failure of [undefined, null, new Error('observer only'), Symbol('observer only'), {}]) {
+    const throwing = { onRetirementPhase: () => { throw failure; } };
+    vm.runInNewContext(code, throwing);
+    assert.doesNotThrow(() => throwing.note('history'));
+  }
+  const absent = {}; vm.runInNewContext(code, absent);
+  assert.doesNotThrow(() => absent.note('history'));
+  const start = execution.indexOf('    resumeCurrentRetirement: async value => {');
+  const end = execution.indexOf('\n    ', execution.indexOf('      return ownOperation(work, abort, true);', start) + 1);
+  assert(start >= 0 && end > start);
+  const resume = execution.slice(start, end);
+  assert.deepEqual([...resume.matchAll(/retirementPhase\('([^']+)'\)/gu)].map(match => match[1]),
+    ['history', 'quarantine_closure', 'native_retirement', 'workspace_observation', 'retirement_commit', 'resource_join', 'history']);
+  for (const [phase, awaited] of [['history', 'readRecoveryClosure'], ['quarantine_closure', 'readQuarantinedWorkerLaunchClosure'],
+    ['native_retirement', 'launcher.startController'], ['workspace_observation', 'observeRetainedRunWorkspace'],
+    ['retirement_commit', 'retireQuarantinedGeneration'], ['resource_join', 'retireWorkerResources']])
+    assert.match(resume, new RegExp(`retirementPhase\\('${phase}'\\);\\s+(?:const [^=]+ = |let cut = |cut = |controller = )?await ${awaited.replace('.', '\\.')}`));
 });
 // Observation only: preserve and return the real Socket. This lets the parent
 // wait for an actual pre-connect kernel error before publishing the listener.

@@ -384,21 +384,24 @@ class Scope {
   }
   close(): Promise<void> {
     return this.closePromise ??= (async () => {
-      // Accepted borrows still finish. A hash ACK is not retirement: every
-      // registered batch settles only after its original Workers actually exit.
+      // Accepted borrows still finish. Successful jobs join their actual sync
+      // reads, not the idle executor. Close then owns a FIFO executor-exit
+      // barrier before any original descriptor may retire.
       const batches = await Promise.allSettled([...this.verifications]);
+      const executor = await Promise.allSettled([retireDiscardPool()]);
       const handles = [...this.handles].reverse();
       const results = await Promise.allSettled(handles.map(handle => this.retire(handle)));
       const failures = [...batches.filter(result => result.status === 'rejected' && result.reason instanceof ResourceRetirementError),
-        ...results].filter((result): result is PromiseRejectedResult => result.status === 'rejected');
-      if (failures.length) throw retirementFailure ?? new ResourceRetirementError('installed runtime retirement did not join', failures.map(result => result.reason));
+        ...executor, ...results].filter((result): result is PromiseRejectedResult => result.status === 'rejected');
+      if (failures.length) throw retirementFailure ??
+        (failures.find(result => result.reason instanceof ResourceRetirementError) ?? failures[0]!).reason;
     })();
   }
   verifyDiscard(files: readonly InstalledFile[], signal?: AbortSignal): Promise<void> {
     if (this.closePromise) return Promise.reject(new KernelStorageError('ARTIFACT_MISMATCH', 'installed runtime scope is closed'));
     const pending = verifyDiscardFiles(files, signal);
-    // verifyDiscardFiles first awaits its permit. Ownership precedes Worker
-    // construction, including a queued/aborted job or partial startup failure.
+    // Ownership precedes the permit, including queued cancellation. A success
+    // joins its original reads; the Scope's close barrier joins idle Workers.
     this.verifications.add(pending);
     void pending.then(() => this.verifications.delete(pending), () => this.verifications.delete(pending));
     return pending;
@@ -566,8 +569,7 @@ const fields = ['dev','ino','size','uid','gid','mode','nlink','mtimeNs','ctimeNs
 const check = file => { const actual = fstatSync(file.fd, { bigint: true });
   if (!fields.every(key => String(actual[key]) === file.info[key])) throw 'metadata'; };
 const cancel = () => { if (Atomics.load(stop, 0)) throw 'cancelled'; };
-parentPort.on('message', file => {
-  if (file.kind === 'close') { parentPort.close(); return; }
+const verify = file => {
   try {
     cancel(); check(file); const hash = createHash('sha256'); let at = 0;
     while (at < file.byteCount) {
@@ -577,113 +579,184 @@ parentPort.on('message', file => {
     }
     cancel(); const extra = readSync(file.fd, scratch, 0, 1, at);
     Atomics.add(counts, workerData.lane, BigInt(extra)); if (extra) throw 'long'; cancel();
-    check(file); parentPort.postMessage({ id: file.id, code: 'ok', digest: hash.digest('hex') });
-  } catch (error) { parentPort.postMessage({ id: file.id,
-    code: ['metadata','cancelled','short','long'].includes(error) ? error : 'read' }); }
+    check(file); return { id: file.id, code: 'ok', digest: hash.digest('hex') };
+  } catch (error) { return { id: file.id,
+    code: ['metadata','cancelled','short','long'].includes(error) ? error : 'read' }; }
+};
+parentPort.on('message', file => {
+  if (file.kind === 'close') { parentPort.close(); return; }
+  // All real reads/EOF/stat have returned and the verifier frame is gone.
+  // Clear its task (including the borrowed FD) before sending the inert ACK.
+  const reply = verify(file); file = undefined; parentPort.postMessage(reply);
 });
 `;
 type HashReply = { id: number; code: 'ok' | 'metadata' | 'cancelled' | 'short' | 'long' | 'read'; digest?: string };
-async function verifyParallelFiles(files: readonly InstalledFile[], signal?: AbortSignal): Promise<void> {
-  const laneCount = files.length >= 4 ? 4 : 2;
-  const control = new SharedArrayBuffer(8 + 8 * laneCount), stop = new Int32Array(control, 0, 1), counts = new BigInt64Array(control, 8, laneCount);
-  const counted = Array<bigint>(laneCount).fill(0n), failures: unknown[] = [];
-  type Lane = { worker: Worker; exited: boolean; exit: Promise<void>; pending?: { id: number; resolve(reply?: HashReply): void } };
-  const lanes: Lane[] = [];
-  const abort = () => { Atomics.store(stop, 0, 1); };
-  const fail = (error: unknown) => { failures.push(error); abort(); };
-  const workerFailure = () => new KernelStorageError('ARTIFACT_MISMATCH', 'installed runtime hash worker failed');
-  const account = () => { for (let index = 0; index < laneCount; index++) {
-    const current = Atomics.load(counts, index), delta = current - counted[index]!;
-    if (delta) noteInstalledWorkRead(Number(delta)); counted[index] = current;
-  } };
-  let next = 0, verified = 0, closing = false;
-  signal?.addEventListener('abort', abort, { once: true });
-  try {
-    signal?.throwIfAborted();
-    for (let index = 0; index < laneCount; index++) {
+type HashLane = { worker: Worker; exited: boolean; exit: Promise<void>; pending?: { id: number; resolve(reply?: HashReply): void } };
+const hashWorkerFailure = () => new KernelStorageError('ARTIFACT_MISMATCH', 'installed runtime hash worker failed');
+function throwHashFailure(failures: readonly unknown[], signal?: AbortSignal): never {
+  const retirement = failures.findIndex(error => error instanceof ResourceRetirementError);
+  const substantive = failures.findIndex(error => !signal?.aborted || error !== signal.reason);
+  throw failures[retirement >= 0 ? retirement : substantive >= 0 ? substantive : 0];
+}
+let hashJobId = 0;
+/** One process-private executor, exclusively accessed under discardPermit.
+ * Only threads/code/scratch survive a successful job; never an FD, hash,
+ * observation, result or cancelled job. No Worker is unref'ed. */
+class DiscardPool {
+  private readonly control: SharedArrayBuffer;
+  private readonly stop: Int32Array;
+  private readonly counts: BigInt64Array;
+  private readonly counted: bigint[];
+  private readonly lanes: HashLane[] = [];
+  private readonly failures: unknown[] = [];
+  private currentFailures?: unknown[];
+  private closing = false;
+  constructor(readonly laneCount: 2 | 4) {
+    this.control = new SharedArrayBuffer(8 + 8 * laneCount);
+    this.stop = new Int32Array(this.control, 0, 1); this.counts = new BigInt64Array(this.control, 8, laneCount);
+    this.counted = Array<bigint>(laneCount).fill(0n);
+  }
+  private abort = () => { Atomics.store(this.stop, 0, 1); };
+  private fail(error: unknown): void {
+    this.failures.push(error); this.currentFailures?.push(error); this.abort();
+  }
+  private assertHealthy(): void { if (this.failures.length) throwHashFailure(this.failures); }
+  private account(): void {
+    for (let index = 0; index < this.laneCount; index++) {
+      const current = Atomics.load(this.counts, index), delta = current - this.counted[index]!;
+      if (delta) noteInstalledWorkRead(Number(delta)); this.counted[index] = current;
+    }
+  }
+  start(): void {
+    for (let index = 0; index < this.laneCount; index++) {
       const worker = new Worker(INSTALLED_HASH_WORKER_SOURCE, { eval: true, env: {}, execArgv: [], argv: [],
         resourceLimits: { maxOldGenerationSizeMb: 16, maxYoungGenerationSizeMb: 4, codeRangeSizeMb: 2, stackSizeMb: 1 },
-        workerData: { control, lane: index, laneCount } });
-      const lane: Lane = { worker, exited: false, exit: new Promise<void>(resolve => worker.once('exit', code => {
+        workerData: { control: this.control, lane: index, laneCount: this.laneCount } });
+      const lane: HashLane = { worker, exited: false, exit: new Promise<void>(resolve => worker.once('exit', code => {
         lane.exited = true;
-        if (code !== 0 || !closing || lane.pending) fail(workerFailure());
+        if (code !== 0 || !this.closing || lane.pending) this.fail(hashWorkerFailure());
         lane.pending?.resolve(); delete lane.pending; resolve();
       })) };
-      lanes.push(lane);
-      worker.on('error', () => fail(workerFailure()));
+      this.lanes.push(lane);
+      // These routers belong to this executor, never to a previous R's local
+      // arrays/listeners. An idle failure remains visible to the next R/close.
+      worker.on('error', () => this.fail(hashWorkerFailure()));
       worker.on('message', (reply: unknown) => {
         if (!reply || typeof reply !== 'object' || Object.getPrototypeOf(reply) !== Object.prototype) {
-          fail(workerFailure()); lane.pending?.resolve(); delete lane.pending; return;
+          this.fail(hashWorkerFailure()); lane.pending?.resolve(); delete lane.pending; return;
         }
         const data = Object.getOwnPropertyDescriptors(reply), id = data.id?.value, code = data.code?.value;
         const keys = Object.keys(data).sort().join(',');
         if (!lane.pending || id !== lane.pending.id || !['ok', 'metadata', 'cancelled', 'short', 'long', 'read'].includes(code) ||
           Object.values(data).some(value => !('value' in value)) || keys !== (code === 'ok' ? 'code,digest,id' : 'code,id') ||
           code === 'ok' && (typeof data.digest?.value !== 'string' || !/^[a-f0-9]{64}$/u.test(data.digest.value))) {
-          fail(workerFailure()); lane.pending?.resolve(); delete lane.pending; return;
+          this.fail(hashWorkerFailure()); lane.pending?.resolve(); delete lane.pending; return;
         }
         lane.pending.resolve(reply as HashReply); delete lane.pending;
       });
     }
-    const run = async (lane: Lane) => {
-      while (!Atomics.load(stop, 0) && next < files.length) {
-        const id = next++, file = files[id]!;
-        try {
-          signal?.throwIfAborted(); await assertFile(file); signal?.throwIfAborted();
-          const reply = await new Promise<HashReply | undefined>(resolve => {
-            lane.pending = { id, resolve };
-            try { lane.worker.postMessage({ id, fd: file.handle.fd, byteCount: Number(file.info.size),
-              info: Object.fromEntries(['dev', 'ino', 'size', 'uid', 'gid', 'mode', 'nlink', 'mtimeNs', 'ctimeNs']
-                .map(key => [key, String(file.info[key as keyof BigIntStats])])) }); }
-            catch (error) { delete lane.pending; fail(error); resolve(undefined); }
-          });
-          account(); if (!reply) break;
-          if (reply.code === 'cancelled') {
-            if (!Atomics.load(stop, 0) && !signal?.aborted && !failures.length) fail(workerFailure());
-            break;
-          }
-          if (reply.code !== 'ok') mismatch(reply.code === 'metadata' ? 'installed runtime held file or its independent path changed' :
-            reply.code === 'short' ? 'installed runtime file ended before its signed byte count' :
-            reply.code === 'long' ? 'installed runtime file exceeds its signed byte count' : 'installed runtime original file read failed');
-          await assertFile(file);
-          // A computed SHA mismatch is already an observed real failure; a
-          // simultaneous original abort must not replace it with cancellation.
-          if (file.digest !== undefined && reply.digest !== file.digest) mismatch('installed runtime signed file digest differs');
-          signal?.throwIfAborted(); verified++;
-        } catch (error) { if (!signal?.aborted || error !== signal.reason) fail(error); else abort(); }
-      }
-    };
-    await Promise.all(lanes.map(run));
-  } catch (error) { if (!signal?.aborted || error !== signal.reason) fail(error); else abort(); }
-  finally {
-    abort(); closing = true;
-    for (const lane of lanes) if (!lane.exited) {
-      try { lane.worker.postMessage({ kind: 'close' }); } catch (error) { fail(error); }
+  }
+  async verify(files: readonly InstalledFile[], signal?: AbortSignal): Promise<void> {
+    const failures: unknown[] = []; let next = 0, verified = 0;
+    this.assertHealthy();
+    this.currentFailures = failures;
+    const fail = (error: unknown) => { failures.push(error); this.abort(); };
+    signal?.addEventListener('abort', this.abort, { once: true });
+    try {
+      signal?.throwIfAborted();
+      const run = async (lane: HashLane) => {
+        while (!Atomics.load(this.stop, 0) && next < files.length) {
+          const file = files[next++]!;
+          try {
+            signal?.throwIfAborted(); await assertFile(file); signal?.throwIfAborted();
+            if (hashJobId >= Number.MAX_SAFE_INTEGER) throw hashWorkerFailure();
+            const id = ++hashJobId;
+            const reply = await new Promise<HashReply | undefined>(resolve => {
+              lane.pending = { id, resolve };
+              try { lane.worker.postMessage({ id, fd: file.handle.fd, byteCount: Number(file.info.size),
+                info: Object.fromEntries(['dev', 'ino', 'size', 'uid', 'gid', 'mode', 'nlink', 'mtimeNs', 'ctimeNs']
+                  .map(key => [key, String(file.info[key as keyof BigIntStats])])) }); }
+              catch (error) { delete lane.pending; fail(error); resolve(undefined); }
+            });
+            this.account(); if (!reply) break;
+            if (reply.code === 'cancelled') {
+              if (!Atomics.load(this.stop, 0) && !signal?.aborted && !failures.length) fail(hashWorkerFailure());
+              break;
+            }
+            if (reply.code !== 'ok') mismatch(reply.code === 'metadata' ? 'installed runtime held file or its independent path changed' :
+              reply.code === 'short' ? 'installed runtime file ended before its signed byte count' :
+              reply.code === 'long' ? 'installed runtime file exceeds its signed byte count' : 'installed runtime original file read failed');
+            await assertFile(file);
+            // A computed SHA mismatch is already an observed real failure; a
+            // simultaneous original abort cannot replace it with cancellation.
+            if (file.digest !== undefined && reply.digest !== file.digest) mismatch('installed runtime signed file digest differs');
+            signal?.throwIfAborted(); verified++;
+          } catch (error) { if (!signal?.aborted || error !== signal.reason) fail(error); else this.abort(); }
+        }
+      };
+      await Promise.all(this.lanes.map(run));
+    } finally {
+      this.account(); signal?.removeEventListener('abort', this.abort); this.currentFailures = undefined;
     }
-    await Promise.all(lanes.map(lane => lane.exit));
-    account(); signal?.removeEventListener('abort', abort);
+    if (failures.length) throwHashFailure(failures, signal);
+    this.assertHealthy();
+    signal?.throwIfAborted();
+    if (verified !== files.length) throw hashWorkerFailure();
+    // No job is left in flight. Do not carry old byte counts into a new R or
+    // let an indefinitely reused executor accumulate a signed-int64 wrap.
+    for (let index = 0; index < this.laneCount; index++) {
+      Atomics.store(this.counts, index, 0n); this.counted[index] = 0n;
+    }
   }
-  if (failures.length) {
-    const retirement = failures.findIndex(error => error instanceof ResourceRetirementError);
-    throw failures[retirement >= 0 ? retirement : 0];
+  async close(): Promise<void> {
+    this.abort(); this.closing = true;
+    for (const lane of this.lanes) if (!lane.exited) {
+      try { lane.worker.postMessage({ kind: 'close' }); } catch (error) { this.fail(error); }
+    }
+    await Promise.all(this.lanes.map(lane => lane.exit)); this.account(); this.assertHealthy();
   }
-  signal?.throwIfAborted();
-  if (verified !== files.length) throw workerFailure();
+}
+let discardPool: DiscardPool | undefined;
+async function retireDiscardPoolLocked(): Promise<void> {
+  const owned = discardPool;
+  if (!owned) return;
+  try { await owned.close(); } finally { discardPool = undefined; }
+}
+async function retireDiscardPool(): Promise<void> {
+  if (!isMainThread) return;
+  const release = await discardPermit();
+  try { await retireDiscardPoolLocked(); } finally { release(); }
 }
 async function verifyDiscardFiles(files: readonly InstalledFile[], signal?: AbortSignal): Promise<void> {
   if (!isMainThread) { for (const file of files) await verifyBytesPipeline(file, signal); return; }
   const release = await discardPermit(signal);
   try {
     const large = files.filter(file => file.info.size >= 8_388_608n);
-    if (large.length < 2) { for (const file of files) await verifyBytesPipeline(file, signal); return; }
-    for (const file of files) if (file.info.size < 8_388_608n) await verifyBytesPipeline(file, signal);
-    await verifyParallelFiles(large, signal);
+    if (large.length < 2) {
+      await retireDiscardPoolLocked();
+      for (const file of files) await verifyBytesPipeline(file, signal);
+      return;
+    }
+    const laneCount = large.length >= 4 ? 4 : 2;
+    try {
+      if (discardPool && discardPool.laneCount !== laneCount) await retireDiscardPoolLocked();
+      if (!discardPool) { discardPool = new DiscardPool(laneCount); discardPool.start(); }
+      // Small files use the same scratch too: an idle pool plus a parent
+      // pipeline would exceed one MiB. Large-first scheduling balances lanes.
+      await discardPool.verify([...large, ...files.filter(file => file.info.size < 8_388_608n)], signal);
+    } catch (error) {
+      // A concurrent real executor/retirement failure cannot disappear under
+      // the caller's cancellation, including a literally undefined failure.
+      const retired = await Promise.allSettled([retireDiscardPoolLocked()]);
+      throwHashFailure([error, ...retired.filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+        .map(result => result.reason)], signal);
+    }
   } finally { release(); }
 }
 async function verifyBytes(file: InstalledFile, signal?: AbortSignal): Promise<void> {
   if (!isMainThread) return verifyBytesPipeline(file, signal);
   const release = await discardPermit(signal);
-  try { await verifyBytesPipeline(file, signal); } finally { release(); }
+  try { await retireDiscardPoolLocked(); await verifyBytesPipeline(file, signal); } finally { release(); }
 }
 async function verifyBytesPipeline(file: InstalledFile, signal?: AbortSignal): Promise<void> {
   signal?.throwIfAborted();

@@ -334,7 +334,12 @@ test('must really exceed output cap',()=>{for(let i=0;i<32;i++)fs.writeSync(1,Bu
       assert.equal(canonicalSha256(invocation), canonicalSha256(measuredInvocation));
       assert.equal(measuredParent.launchId, parentLaunchId); assert.equal(measuredParent.phase, 'retired');
       assert.equal(measuredParent.generationWriteState, 'sealed'); assert.equal(measuredParent.generationPhase, 'sealed');
-      assert.equal(measuredParent.retirementEvidenceRef, retirement.parentRetirementEvidenceRef);
+      const parentSnapshot = await store.artifacts.readCanonical<WorkspaceGenerationSnapshotEvidenceV1>(measuredParent.snapshotEvidenceRef);
+      if (parentSnapshot.purpose !== 'sealed_to_checkpoint') assert.fail('controlled-stop verifier parent must have its original sealed snapshot');
+      const parentD0 = await store.artifacts.readCanonical<ProcessContainmentDeathEvidenceV1>(parentSnapshot.quiescenceEvidenceRef);
+      const parentD1 = await store.artifacts.readCanonical<ProcessContainmentDeathEvidenceV1>(measuredParent.retirementEvidenceRef);
+      assertGuestVerifierParentRetirement({ worker: measuredParent, retirement, snapshot: parentSnapshot,
+        initialDeath: parentD0, finalDeath: parentD1, checkpoint: verifierCheckpoint });
       assert.equal(measuredParent.snapshotEvidenceRef, retirement.snapshotEvidenceRef);
       const { observedAt: _measuredAt, ...originalParent } = measuredParent;
       const { observedAt: _afterAt, ...afterParent } = inspectInstalledWorkerRetirementHistory(fixture.stateRoot, process.geteuid!(),

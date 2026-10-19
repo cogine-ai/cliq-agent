@@ -391,17 +391,22 @@ async function publishVerifierRecipe(artifacts: ArtifactCatalog, workerSpec: Wor
   return (await artifacts.publishCanonical(spec, spec.format)).ref;
 }
 
+/** Inert installed shutdown diagnosis, never retirement evidence or authority. */
+export type RunRetirementPhase = 'history' | 'quarantine_closure' | 'native_retirement' |
+  'workspace_observation' | 'retirement_commit' | 'resource_join';
 /** Deep internal resource owner. Opening validates only; process creation is lazy.
  * Durable lifecycle, retry and budgets remain exclusively in the existing reducers. */
 export async function loadRunExecution(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
   bootstrap: { bundle: RuntimeBundleManifest; releaseKeys: readonly ReleaseTrustKey[]; execution?: RunExecutionInstallation;
     sourceInspection?: { controlledHome: string } } | undefined,
   input: LoadRunExecutionInput, isClosing: () => boolean = () => false,
-  selectedRuntime?: HeldInstalledRuntime, installedAnchor?: HeldInstalledAnchor, executionStore?: StateStore, openingSignal?: AbortSignal
+  selectedRuntime?: HeldInstalledRuntime, installedAnchor?: HeldInstalledAnchor, executionStore?: StateStore, openingSignal?: AbortSignal,
+  onRetirementPhase?: (phase: RunRetirementPhase) => void
 ): Promise<{ execution: RunExecution; closeWorkerRecoveryProbe(input: { runId: string; expectedRunRevision: number }): Promise<Run>;
   beginClose(): Promise<void>; close(): Promise<void> }> {
   openingSignal?.throwIfAborted();
   const runId = input.runId;
+  const retirementPhase = (phase: RunRetirementPhase) => { try { onRetirementPhase?.(phase); } catch { /* Diagnosis cannot decide retirement. */ } };
   // Delivery never reads or validates live model material. Agent resolvers
   // retain their original trusted functions and snapshot BEFORE the first
   // asynchronous read. The explicit selector is checked against retained State,
@@ -1996,6 +2001,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       const abort = new AbortController(); operationAbort = abort;
       const signal = abort.signal;
       const work = (async () => {
+        retirementPhase('history');
         let cut = await readRecoveryClosure(driver, artifacts, runId);
         signal.throwIfAborted();
         if (cut.run.revision !== expectedRunRevision) throw new KernelStorageError('REVISION_CONFLICT', 'retirement resume revision changed');
@@ -2024,7 +2030,9 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           const launches = readWorkerLaunchesForRun(driver, runId).filter(launch => launch.workspaceGenerationRef === row.generationRef);
           if (launches.length !== 1) throw new KernelStorageError('RECOVERY_REQUIRED', 'retirement resume has no unique original worker launch');
           const launch = launches[0]!;
+          retirementPhase('quarantine_closure');
           const closure = await readQuarantinedWorkerLaunchClosure(driver, artifacts, owner, { run: cut.run, launch, generation: row });
+          retirementPhase('native_retirement');
           controller = await launcher.startController({ signal });
           let retirement: { workerRetirement: NativeRetainedWorkerRetirement } | { preactivationRetirement: NativePreactivationRetirement };
           if (quarantine.reason === 'worker_recovery') {
@@ -2050,13 +2058,17 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
             if (observed.kind === 'created') assertNativeContainmentDeath(observed.death);
             retirement = { preactivationRetirement: await controller.closePreactivation() };
           }
+          retirementPhase('workspace_observation');
           const workspaceRetirement = await observeRetainedRunWorkspace({ filesystem: owner.filesystem, artifacts,
             identity: closure.generation, sourceRowVersion: quarantine.sourceRowVersion, signal });
           signal.throwIfAborted();
           const brokerQuiescence = observeInstalledBrokerQuiescence(executionStore, runId);
+          retirementPhase('retirement_commit');
           await retireQuarantinedGeneration(driver, artifacts, owner, { runId, expectedRunRevision: cut.run.revision,
             expectedGenerationRowVersion: row.rowVersion, generationRef: row.generationRef, ...retirement, workspaceRetirement, brokerQuiescence });
+          retirementPhase('resource_join');
           await retireWorkerResources();
+          retirementPhase('history');
           cut = await readRecoveryClosure(driver, artifacts, runId);
         }
         return cut.run;

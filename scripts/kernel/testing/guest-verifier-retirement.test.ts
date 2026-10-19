@@ -73,6 +73,17 @@ test('guest verifier association permits the same original observation and exact
   assert.doesNotThrow(() => assertGuestVerifierParentRetirement(value));
 });
 
+test('controlled stop preserves the verifier checkpoint association, not the later terminal Stop checkpoint', () => {
+  const value = association();
+  assert.notEqual(value.retirement.parentRetirementEvidenceRef, value.worker.retirementEvidenceRef);
+  assert.doesNotThrow(() => assertGuestVerifierParentRetirement(value));
+  const stopCheckpoint = { ...value.checkpoint, id: 'later-terminal-stop',
+    basedOnRunRevision: value.checkpoint.basedOnRunRevision + 1,
+    createdAt: new Date(Date.parse(value.checkpoint.createdAt) + 1).toISOString() };
+  assert.throws(() => assertGuestVerifierParentRetirement({ ...value, checkpoint: stopCheckpoint }));
+  assert.doesNotThrow(() => assertGuestVerifierParentRetirement(value), 'terminal Stop must not rewrite the original verifier association');
+});
+
 const changes: ReadonlyArray<readonly [string, (value: ReturnType<typeof association>) => void]> = [
   ['another final containment', value => { value.finalDeath.containmentRef = 'd'.repeat(64); }],
   ['another final worker', value => { value.finalDeath.owner = { kind: 'worker_activation', runId: 'data-run', intendedLeaseEpoch: 2, workerLaunchId: 'another-worker' }; }],

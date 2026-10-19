@@ -146,7 +146,7 @@ import {
 import { hostPlatform } from './workspace-identity.js';
 import { readRetainedStateOwnerHistory, readRetainedStateOwnerProcess as readStateOwnerProcess } from './state-owner-history.js';
 import { immutableSnapshot } from '../model/immutable.js';
-import { loadRunExecution, type LoadRunExecutionInput, type RunExecutionInstallation } from './run-execution.js';
+import { loadRunExecution, type LoadRunExecutionInput, type RunExecutionInstallation, type RunRetirementPhase } from './run-execution.js';
 import { retireAbandonedPreactivations } from './preactivation-retirement.js';
 import { exactKeys, verifyRuntimeBundle, type ReleaseTrustKey, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import type { SandboxProfileV1, SourceInspectionAttemptV1 } from '../kernel/execution.js';
@@ -1623,7 +1623,7 @@ export class StateStore {
   }>();
   private readonly installedRunTasks = new Map<string, Promise<void>>();
   private readonly installedRunPhases = new Map<string, RunResultPhase | 'scheduled' | 'drive_material' | 'drive_agent' |
-    'drive_retirement' | 'drive_verify' | 'drive_finalize' | 'terminal_retirement'>();
+    'drive_retirement' | `drive_retirement_${RunRetirementPhase}` | 'drive_verify' | 'drive_finalize' | 'terminal_retirement'>();
   private readonly installedAgents = new Map<string, { agent: InstalledContinuation; readAbort?: AbortController }>();
   private readonly installedAgentLoads = new Map<string, Promise<InstalledContinuation>>();
   private readonly installedRunFailures = new Map<string, unknown>();
@@ -3097,7 +3097,8 @@ export class StateStore {
     const runId = input.runId;
     if (this.executions.has(runId)) throw new KernelStorageError('REVISION_CONFLICT', 'Run already has an execution resource owner');
     const opening = this.ownInstalledAdmission(signal => loadRunExecution(this.driver, this.artifacts, this.owner, this.runtimeAuthority, input,
-      () => this.closed || this.closeRequested || this.released, this.installedRuntime, this.installedAnchor, this, signal));
+      () => this.closed || this.closeRequested || this.released, this.installedRuntime, this.installedAnchor, this, signal,
+      phase => { if (this.installedRunPhases.has(runId)) this.installedRunPhases.set(runId, `drive_retirement_${phase}`); }));
     this.executions.set(runId, opening);
     let scope: Awaited<typeof opening> | undefined;
     try {

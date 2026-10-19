@@ -1196,18 +1196,16 @@ remain required. Local parallel-hash measurements and source-level performance
 hypotheses are not installed Linux qualification. Package A and I1 remain
 incomplete; no PR is opened on the strength of those measurements.
 
-The development discard-only reader now uses a fresh bounded batch for each
-original revalidation; no revalidation call, independent inode or byte is
-deduplicated. At least two original files of 8 MiB each are needed to start
-workers: two lanes normally, four for at least four large files. Main-isolate
-discard batches share one cancellable permit, and their total live hash scratch
-is one MiB including idle workers. Other isolates and retaining reads keep their
-original pipeline; this is not a process-wide RSS or arbitrary-isolate allocator.
-Each new worker has fixed old/young/code-range/stack limits of 16/4/2/1 MiB,
-with additional Node/native overhead. Fixed CJS is embedded in the signed image;
-tasks borrow original FDs, not paths or caller code. Every actual worker exit
-precedes permit release and FD retirement. Accepted-borrow close semantics and
-all post-native verification remain unchanged.
+At `7dd954e`, the development discard-only reader used fresh bounded workers
+for each original revalidation; no revalidation call, independent inode or byte
+was deduplicated. At least two original files of 8 MiB each were needed to
+start workers: two lanes normally, four for at least four large files.
+Main-isolate discard batches shared one cancellable permit and one MiB of
+live discard hash scratch, including idle workers. Each worker had fixed
+old/young/code-range/stack limits of 16/4/2/1 MiB, with additional Node/native
+overhead. Every actual worker exit preceded permit release and FD retirement.
+Other isolates and retaining reads kept their original pipeline; these bounds
+were not a process-wide RSS or arbitrary-isolate allocator.
 
 The native SHA-256 reader also retains its original portable implementation.
 Only a real per-context CPUID check for SHA, SSSE3 and SSE4.1 selects the local
@@ -1219,3 +1217,77 @@ musl, installed publication or the original Linux readiness deadline. The
 existing free native job must execute the actual musl-built algorithm vectors
 before running its unchanged guest campaign. No capability is enabled by these
 optimizations alone.
+
+The exact `7dd954ed5a759a4e3fed920f09b6a8f34cad6886` tree passes the original
+isolated local build and full test command: 2,549 passes and the same original
+conditional cross-filesystem skip, zero failures/cancellations/todos. Linux
+run `39279571752`, attempt 1, has a closed artifact capture with fourteen
+qualified and five failed report categories, zero rejected artifacts. These
+are report categories, not terminal job counts: both available job-metadata
+API shapes still returned queued jobs without steps at capture time. The
+capture SHA-256 is
+`324df397d8209d44276621bc86ae27277a9844948164e89fefc2c34c441ea60b`.
+
+The native musl vector executable reports `portable_and_sha_ni`. The actual
+guest campaign advances through its four ordinary scenarios, then fails a
+controlled-stop assertion incorrectly equating the original quiescence death
+reference D0 with the final SQL death reference D1. The repair uses the same
+complete S/D0/D1/Checkpoint association as ordinary completion, including
+matching original containment/worker/inspector identities, full CAS hashes,
+`D0 <= S <= D1 <= C` and the existing five-second final freshness bound. It
+uses the original verifier Checkpoint, never the later terminal Stop
+Checkpoint. The real Node execution, two-second stop, exact claim, accounting,
+source-integrity and no-replay assertions remain unchanged. Its local data
+regressions are not a replacement for rerunning that real Linux campaign;
+the guest verifier success report was not generated in this run.
+
+Both installed Delivery and verifier journeys still fail before their actual
+cases at the original five-second client readiness limit. They observe
+thirteen complete revalidations and a real hello reply; the subsequent fresh
+manager/peer observation still requires three more complete revalidations.
+No post-hello result is replaced with an earlier observation. Separately,
+credential qualification fails its original cumulative trace-file-count guard
+without reporting the actual count. The received-tool successor preserves
+ordinary service exit and owner lineage but does not reach its required final
+cut within thirty seconds. Neither failure is reclassified as success or
+attributed to an unmeasured cause. All previously listed late-result,
+cleanup-before-acknowledgement and full installed Delivery cuts remain open.
+
+The next development repair changes only the private hash executor lifetime,
+not any complete-byte verification cut. Every revalidation still reads each
+original independent FD from byte zero through EOF, computes a fresh SHA,
+checks parent named/held and worker held identities, and completes the original
+directory/package/version barriers. Successful jobs return only after actual
+reads and stats have returned and the worker task has cleared its FD reference;
+only fixed code, threads and scratch remain idle. No hash, observation or result
+is reused. Unique job identities reject old replies, old abort listeners are
+removed, and idle failures cannot be cleared by silently replacing the pool.
+
+The executor is process-private, main-isolate-only and limited to four workers
+under the same FIFO permit. Large batches send small files through that same
+scratch too. A standalone discard pipeline, a batch with fewer than two large
+files, or a lane-count change first joins every old worker exit, so idle and
+parent discard scratch never overlap beyond one MiB. Cancellation and failure
+also join actual exits before returning. Scope close retains the original
+accepted-borrow/tail join, then joins registered jobs and a FIFO executor-exit
+barrier before closing original FDs; a result ACK is not executor retirement.
+Fixed worker limits, embedded CJS, all sixteen client revalidations and all
+production deadlines remain unchanged. This is an explicit resource-lifetime
+change, not a claim that retaining threads is risk-free or that Linux passed.
+
+An exact Node 24.21 Mac experiment over sixteen complete reads of the same
+four original files measures 12.1% lower wall time and 17.0% lower CPU time for
+four retained workers versus fresh workers. Separate real-FD mechanism checks
+exercise fresh reads, old-signal isolation, idle death, old-packet refusal,
+cancellation and actual exits. They do not exercise the production Linux
+descriptor path, global FIFO/Scope integration, total traced TID bound or the
+original five-second client and two-second stop qualification. Those real
+Linux regressions and both installed publication/recovery branches remain
+required before Package A or I1 can be declared complete.
+
+Received-tool recovery now reports six fixed retirement await boundaries in
+the existing shutdown diagnostic: history, quarantine closure, native
+retirement, workspace observation, retirement commit and resource join.
+Observer exceptions cannot affect execution; no public method, authority,
+deadline, history check or retry changes. These labels locate an unfinished
+await, not its cause or a positive retirement/recovery proof.
