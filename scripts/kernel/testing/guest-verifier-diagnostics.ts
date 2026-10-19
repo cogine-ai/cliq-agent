@@ -19,6 +19,46 @@ const outputFailures = new WeakMap<Error, OutputFailure>();
 const setupStages = ['not_observed', 'entry', 'node_check', 'node_bind', 'confinement', 'before_ready'] as const;
 type PreReadyFailure = Readonly<{ stage: typeof setupStages[number]; rejection: 'ready_wait' | 'ready_receive';
   pollResult: number; pollRevents: number; pollErrno: number; elapsedMs: number }>;
+type CancellationObservation = Readonly<{ claimObserved: boolean; invocationPlanObserved: boolean; actualNodeObserved: boolean;
+  executionState: 'pending' | 'fulfilled' | 'rejected'; elapsedMs: number; polls: number;
+  commCounts: Readonly<{ node: number; main_thread: number; other: number }>;
+  imageCounts: Readonly<{ matched: number; not_node: number; absent: number; deadline: number; refused: number }>; }>;
+const cancellationCodes = ['RECOVERY_REQUIRED', 'LEASE_FENCED', 'STATE_TRANSITION_INVALID', 'REVISION_CONFLICT',
+  'UNSUPPORTED_PLATFORM', 'ARTIFACT_MISMATCH', 'ERR_ASSERTION', 'other_or_absent'] as const;
+type CancellationFailure = CancellationObservation & Readonly<{ rejectionCode?: typeof cancellationCodes[number]; preReadyFailure?: PreReadyFailure }>;
+const cancellationFailures = new WeakMap<Error, CancellationFailure>();
+
+/** Fixed observations at the original failing precondition only. Settled is
+ * not a process observation or success; errors and authority remain original. */
+export function recordGuestVerifierCancellationFailure(error: unknown, value: CancellationObservation, rejected?: unknown): void {
+  if (!(error instanceof Error)) return;
+  const closed = (input: unknown, names: readonly string[]) => {
+    if (!input || typeof input !== 'object' || ![Object.prototype, null].includes(Object.getPrototypeOf(input))) throw new Error();
+    const fields = Object.getOwnPropertyDescriptors(input);
+    if (Reflect.ownKeys(fields).length !== names.length || names.some(name => !Object.hasOwn(fields, name)) ||
+      Object.values(fields).some(field => !field.enumerable || !('value' in field))) throw new Error();
+  };
+  const integer = (input: unknown) => { if (!Number.isSafeInteger(input) || (input as number) < 0 || (input as number) > 0xffffffff) throw new Error(); };
+  try {
+    closed(value, ['claimObserved', 'invocationPlanObserved', 'actualNodeObserved', 'executionState', 'elapsedMs', 'polls', 'commCounts', 'imageCounts']);
+    for (const member of [value.claimObserved, value.invocationPlanObserved, value.actualNodeObserved]) if (typeof member !== 'boolean') return;
+    if (!['pending', 'fulfilled', 'rejected'].includes(value.executionState) ||
+      value.invocationPlanObserved && !value.claimObserved || value.actualNodeObserved && !value.invocationPlanObserved) return;
+    integer(value.elapsedMs); integer(value.polls);
+    closed(value.commCounts, ['node', 'main_thread', 'other']); closed(value.imageCounts, ['matched', 'not_node', 'absent', 'deadline', 'refused']);
+    for (const count of [...Object.values(value.commCounts), ...Object.values(value.imageCounts)]) integer(count);
+    if (value.actualNodeObserved !== (value.imageCounts.matched > 0)) return;
+    const rawCode = rejected instanceof Error ? Object.getOwnPropertyDescriptor(rejected, 'code')?.value : undefined;
+    const rejectionCode = cancellationCodes.find(code => code === rawCode) ?? 'other_or_absent';
+    const preReadyFailure = value.executionState === 'rejected' ? readGuestVerifierPreReadyFailure(rejected) : undefined;
+    cancellationFailures.set(error, Object.freeze({ ...value, commCounts: Object.freeze({ ...value.commCounts }), imageCounts: Object.freeze({ ...value.imageCounts }),
+      ...(value.executionState === 'rejected' ? { rejectionCode, ...(preReadyFailure ? { preReadyFailure } : {}) } : {}) }));
+  } catch { /* Diagnostics cannot replace the original failed precondition. */ }
+}
+
+export function readGuestVerifierCancellationFailure(error: unknown): CancellationFailure | undefined {
+  return error instanceof Error ? cancellationFailures.get(error) : undefined;
+}
 
 /** Fixed native rejection metadata only, never READY, release or retirement
  * evidence. Preserve the original error (including uncertain resource join).

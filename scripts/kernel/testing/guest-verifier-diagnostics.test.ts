@@ -9,6 +9,41 @@ import { runInNewContext } from 'node:vm';
 import { readGuestVerifierBoundaryFailure, readGuestVerifierOutputFailure, recordGuestVerifierBoundaryFailure } from './guest-verifier-diagnostics.js';
 import { readGuestVerifierPreReadyFailure } from './guest-verifier-diagnostics.js';
 import { ResourceRetirementError } from '../../../src/state/errors.js';
+import { recordGuestVerifierCancellationFailure, readGuestVerifierCancellationFailure } from './guest-verifier-diagnostics.js';
+
+test('in-flight cancellation requires a live verified executable, never the mutable comm label', async () => {
+  const source = await readFile(new URL('./guest-verifier-native.ts', import.meta.url), 'utf8');
+  assert(!source.includes(".trim() === 'node') actualNode = true"), 'Node 24 names its main thread MainThread; comm is not executable identity');
+  assert(source.includes('observeGuestVerifierProcess('));
+  assert(source.includes('actualNode && invocationPath && !settled'));
+  assert(source.includes('performance.now() - started < 15_000'));
+  assert(source.includes('performance.now() - stopStarted <= 2000'));
+});
+
+test('cancellation precondition diagnostics retain separate actual observations and settlement, never turning completion into a Node observation', () => {
+  const original = new Error('unretained original failure'), rejected = new Error('unretained producer failure');
+  Object.defineProperty(rejected, 'code', { value: 'LEASE_FENCED' });
+  const input = { claimObserved: true, invocationPlanObserved: true, actualNodeObserved: false, executionState: 'rejected' as const,
+    elapsedMs: 15001, polls: 12, commCounts: { node: 0, main_thread: 3, other: 4 },
+    imageCounts: { matched: 0, not_node: 3, absent: 4, deadline: 0, refused: 0 } };
+  recordGuestVerifierCancellationFailure(original, input, rejected);
+  assert.deepEqual(readGuestVerifierCancellationFailure(original), { ...input, rejectionCode: 'LEASE_FENCED' });
+  assert.equal(original.message, 'unretained original failure'); assert.equal(Object.hasOwn(original, 'cause'), false);
+  for (const mutate of [
+    (v: any) => { v.path = '/unretained'; }, (v: any) => { v.actualNodeObserved = true; },
+    (v: any) => { v.polls = -1; }, (v: any) => { v.commCounts.other = NaN; },
+    (v: any) => { v.imageCounts.raw = 'unretained'; }, (v: any) => { v.executionState = 'success'; },
+    (v: any) => { Object.defineProperty(v, 'elapsedMs', { get() { throw new Error('must not invoke'); } }); },
+  ]) {
+    const data = structuredClone(input); mutate(data); const error = new Error('original');
+    recordGuestVerifierCancellationFailure(error, data, rejected); assert.equal(readGuestVerifierCancellationFailure(error), undefined);
+  }
+  for (const state of ['pending', 'fulfilled'] as const) {
+    const error = new Error('original'); recordGuestVerifierCancellationFailure(error, { ...input, executionState: state }, rejected);
+    assert.deepEqual(readGuestVerifierCancellationFailure(error), { ...input, executionState: state });
+  }
+  assert.equal(readGuestVerifierCancellationFailure({ executionState: 'fulfilled' }), undefined);
+});
 
 const preReadyMessage = 'native controller reply failed: request=14 requestScope=2 expected=8 expectedScope=2 '
   + 'received=14 receivedScope=2 status=1011 fds=0 receiveErrno=0 boundary=3 '

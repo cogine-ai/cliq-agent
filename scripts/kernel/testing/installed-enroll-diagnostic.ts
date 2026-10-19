@@ -127,7 +127,7 @@ export type InstalledEnrollDiagnostic = {
   phases: Array<{ elapsedMs: number; phase: InstalledCredentialPhase }>;
   work?: InstalledEnrollWork;
 };
-type Fact = { pid: number; parent: number; group: number; session: number; start: string; uids: number[]; raw: string };
+type Fact = { pid: number; parent: number; group: number; session: number; start: string; state: string; uids: number[]; raw: string };
 async function processFact(pid: number): Promise<Fact | undefined> {
   try {
     const raw = await readFile(`/proc/${pid}/stat`, 'utf8');
@@ -137,9 +137,10 @@ async function processFact(pid: number): Promise<Fact | undefined> {
     const status = await readFile(`/proc/${pid}/status`, 'utf8'); assert(status.length <= 65536);
     const uid = /^Uid:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)$/mu.exec(status); assert(uid);
     const confirmed = await readFile(`/proc/${pid}/stat`, 'utf8'); assert(confirmed.startsWith(`${pid} (`));
-    assert.equal(confirmed.slice(confirmed.lastIndexOf(')') + 2).trim().split(/\s+/u)[19], fields[19]);
+    const confirmedFields = confirmed.slice(confirmed.lastIndexOf(')') + 2).trim().split(/\s+/u);
+    assert(/^[A-Za-z]$/u.test(confirmedFields[0]!)); assert.equal(confirmedFields[19], fields[19]);
     return { pid, parent: Number(fields[1]), group: Number(fields[2]), session: Number(fields[3]), start: fields[19]!,
-      uids: uid.slice(1).map(Number), raw };
+      state: confirmedFields[0]!, uids: uid.slice(1).map(Number), raw };
   } catch (error) {
     if (['ENOENT', 'ESRCH'].includes((error as NodeJS.ErrnoException).code ?? '')) return undefined;
     throw new Error('owned enroll process identity is unavailable');
@@ -310,7 +311,12 @@ export async function runOwnedEnrollDiagnostic(input: Readonly<{
             // runuser's fixed /usr/bin/env transition is not the signed auth.
             // Wait without writing secret input until the original real image
             // and complete current child identity have both been observed.
-            if (!selectedImage || !confirmed) {
+            // A real exited-but-unreaped child still has its original process
+            // lifetime, but Linux has already removed its executable link.
+            // Do not write input or call that a live image replacement. Only
+            // the original parent's real reap and waitGone can supply join.
+            if (confirmed && ['Z', 'X', 'x'].includes(confirmed.state)) candidate = undefined;
+            else if (!selectedImage || !confirmed) {
               assert(!auth || !confirmed, 'original owned auth executable image changed');
               candidate = undefined;
             }

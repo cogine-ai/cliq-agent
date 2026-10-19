@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, sign } from 'node:crypto';
 import { channel } from 'node:diagnostics_channel';
-import { constants } from 'node:fs';
-import { chmod, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { constants, fstatSync } from 'node:fs';
+import { chmod, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rm, writeFile, type FileHandle } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -14,7 +14,7 @@ import { identityHash, sha256Bytes } from '../kernel/identity.js';
 import { policyProfile, verifyRuntimeBundle, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { ARTIFACT_CHUNK_BYTES, ContentAddressedStore } from './cas.js';
 import { assertInstalledManagerObservationAvailable, createInstalledRuntime, loadInstalledCredentialPlatform, loadInstalledManagerObserver,
-  type HeldInstalledRuntime } from './installed-runtime.js';
+  type HeldInstalledRuntime, withHeldInstalledRuntime } from './installed-runtime.js';
 import { STATE_OWNER_NATIVE_ENTRY_ID, STATE_OWNER_NATIVE_RELATIVE_PATH } from './native-owner.js';
 import { openInstalledLinuxWorkerLauncher } from '../sandbox/linux-worker.js';
 import { KernelStorageError } from './errors.js';
@@ -194,6 +194,147 @@ if (process.platform === 'linux') for (const copy of ['bundle', 'cas'] as const)
     } finally { await selected?.close(); await rm(fixture, { recursive: true, force: true }); }
   });
 }
+
+if (process.platform === 'linux') test('a cancelled original revalidation job joins before selected close and a fresh selection verifies all image bytes', async () => {
+  const fixture = await realpath(await mkdtemp(path.join(os.tmpdir(), 'cliq-installed-image-cancel-')));
+  const packageRoot = path.join(fixture, 'package'), stateRoot = path.join(fixture, 'state');
+  const diagnostic = channel(INSTALLED_WORK_CHANNEL), abort = new AbortController();
+  const reason = new Error('complete image verification cancelled');
+  let selected: HeldInstalledRuntime | undefined, reopened: HeldInstalledRuntime | undefined;
+  let closing: Promise<void> | undefined, armed = false, scheduled = false;
+  let baselineStarted = 0, initialReadBase: number | undefined, last: InstalledWorkSnapshot | undefined;
+  const subscriber = (value: unknown) => {
+    if (!value || typeof value !== 'object') return;
+    last = value as InstalledWorkSnapshot;
+    initialReadBase ??= last.revalidate.bytesRead;
+    if (armed && !scheduled && last.revalidate.started > baselineStarted) {
+      scheduled = true;
+      // The real original job is registered, not a fabricated I/O owner. This
+      // checks entry cancellation/close, not an in-flight pread fault seam.
+      abort.abort(reason); closing = selected!.close();
+    }
+  };
+  try {
+    const image = Buffer.alloc(3 * 1_048_576 + 17, 0x61);
+    image.fill(0x63, 1_048_576, 2 * 1_048_576); image[image.length - 1] = 0x7a;
+    const signed = await writeInstallerOnlyPackage(packageRoot, undefined, undefined, image);
+    const runtime = createInstalledRuntime({ releaseKeys: signed.releaseKeys });
+    await runtime.installInitial({ packageRoot, stateRoot });
+    diagnostic.subscribe(subscriber);
+    selected = await runtime.openSelected(stateRoot);
+    const opened = last!;
+    const completeBytes = opened.revalidate.bytesRead - initialReadBase!;
+    baselineStarted = opened.revalidate.started; armed = true;
+    let borrowed = false;
+    await assert.rejects(withHeldInstalledRuntime(selected, async () => { borrowed = true; }, abort.signal), error => error === reason);
+    assert.equal(borrowed, false, 'a cancelled prefix is not a successful verified borrow');
+    assert.equal(scheduled, true);
+    await closing;
+    assert.equal(last!.revalidate.started, opened.revalidate.started + 1);
+    assert.equal(last!.revalidate.completed, opened.revalidate.completed + 1);
+    armed = false;
+    const beforeReopen = last!;
+    reopened = await runtime.openSelected(stateRoot);
+    assert.equal(last!.revalidate.bytesRead - beforeReopen.revalidate.bytesRead, completeBytes,
+      'a fresh selection repeats the entire original bundle and independent CAS image');
+    await reopened.assertHeld();
+    assert.equal(last!.revalidate.bytesRead - beforeReopen.revalidate.bytesRead, completeBytes * 2);
+  } finally {
+    armed = false; diagnostic.unsubscribe(subscriber);
+    await closing; await reopened?.close(); await selected?.close();
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+if (process.platform === 'linux') test('selected close waits for a submitted real image read to deliver after cancellation', async () => {
+  const fixture = await realpath(await mkdtemp(path.join(os.tmpdir(), 'cliq-installed-image-read-join-')));
+  const packageRoot = path.join(fixture, 'package'), stateRoot = path.join(fixture, 'state');
+  let selected: HeldInstalledRuntime | undefined, reopened: HeldInstalledRuntime | undefined;
+  let verification: Promise<void> | undefined, closing: Promise<void> | undefined;
+  let prototype: object | undefined, readDescriptor: PropertyDescriptor | undefined;
+  let captured: FileHandle | undefined, closeDescriptor: PropertyDescriptor | undefined;
+  let releaseDelivery!: () => void, actualReturned!: (bytesRead: number) => void;
+  const delivery = new Promise<void>(resolve => { releaseDelivery = resolve; });
+  const returned = new Promise<number>(resolve => { actualReturned = resolve; });
+  const diagnostic = channel(INSTALLED_WORK_CHANNEL);
+  let initialReadBase: number | undefined, observed: InstalledWorkSnapshot | undefined;
+  const subscriber = (value: unknown) => {
+    if (!value || typeof value !== 'object') return;
+    observed = value as InstalledWorkSnapshot; initialReadBase ??= observed.revalidate.bytesRead;
+  };
+  let reads = 0, closeAttempts = 0, verificationSettled = false, closeSettled = false, borrowed = false;
+  const restore = () => {
+    if (prototype && readDescriptor) Object.defineProperty(prototype, 'read', readDescriptor);
+    if (captured && closeDescriptor) Object.defineProperty(captured, 'close', closeDescriptor);
+  };
+  try {
+    const image = Buffer.alloc(3 * 1_048_576 + 17, 0x61);
+    image.fill(0x63, 1_048_576, 2 * 1_048_576); image[image.length - 1] = 0x7a;
+    const signed = await writeInstallerOnlyPackage(packageRoot, undefined, undefined, image);
+    const runtime = createInstalledRuntime({ releaseKeys: signed.releaseKeys });
+    const installation = await runtime.installInitial({ packageRoot, stateRoot });
+    diagnostic.subscribe(subscriber);
+    selected = await runtime.openSelected(stateRoot);
+    const completeBytes = observed!.revalidate.bytesRead - initialReadBase!;
+    const imageRef = sha256Bytes(image), entry = signed.bundle.entries.find(value => value.digest === imageRef)!;
+    const filename = path.join(stateRoot, 'runtime/bundles', installation.bundleDigest, entry.relativePath);
+    const expected = await lstat(filename, { bigint: true });
+    const probe = await open(filename, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try { prototype = Object.getPrototypeOf(probe); }
+    finally { await probe.close(); }
+    readDescriptor = Object.getOwnPropertyDescriptor(prototype!, 'read')!;
+    const originalRead = readDescriptor.value as FileHandle['read'];
+    Object.defineProperty(prototype!, 'read', { ...readDescriptor, value: function (this: FileHandle, ...args: unknown[]) {
+      // Complete every potentially throwing identity/descriptor check before
+      // submitting I/O, so a test observer failure cannot orphan a real read.
+      const actual = fstatSync(this.fd, { bigint: true });
+      if (actual.dev !== expected.dev || actual.ino !== expected.ino || ++reads !== 2)
+        return Reflect.apply(originalRead, this, args);
+      captured = this;
+      closeDescriptor = Object.getOwnPropertyDescriptor(this, 'close')!;
+      assert(closeDescriptor?.configurable && typeof closeDescriptor.value === 'function');
+      const originalClose = closeDescriptor.value as FileHandle['close'];
+      Object.defineProperty(this, 'close', { ...closeDescriptor, value: function (this: FileHandle, ...closeArgs: unknown[]) {
+        closeAttempts++; return Reflect.apply(originalClose, this, closeArgs);
+      } });
+      // Now the original genuine FileHandle submits the real system I/O. Its
+      // unchanged result promise is immediately owned by the returned chain.
+      const result = Reflect.apply(originalRead, this, args) as ReturnType<FileHandle['read']>;
+      return result.then(async value => {
+        // The OS read has already returned. Only JS delivery is delayed; this
+        // is explicitly not a physical slow-disk or stalled-kernel fixture.
+        actualReturned(value.bytesRead); await delivery; return value;
+      });
+    } });
+    const abort = new AbortController(), reason = new Error('submitted image read cancelled');
+    verification = withHeldInstalledRuntime(selected, async () => { borrowed = true; }, abort.signal);
+    void verification.then(() => { verificationSettled = true; }, () => { verificationSettled = true; });
+    assert((await Promise.race([returned, verification.then(() => { throw new Error('real image read was not observed'); })])) > 0);
+    abort.abort(reason); closing = selected.close();
+    void closing.then(() => { closeSettled = true; }, () => { closeSettled = true; });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(verificationSettled, false, 'the submitted original read has not delivered');
+    assert.equal(closeAttempts, 0, 'the original FileHandle must not close before its read delivers');
+    assert.equal(closeSettled, false);
+    releaseDelivery();
+    await assert.rejects(verification, error => error === reason); await closing;
+    assert.equal(borrowed, false);
+    assert.equal(closeAttempts, 1, 'the original image descriptor retires once, after the read joins');
+    restore();
+    const beforeReopen = observed!.revalidate.bytesRead;
+    reopened = await runtime.openSelected(stateRoot);
+    assert.equal(observed!.revalidate.bytesRead - beforeReopen, completeBytes);
+    await reopened.assertHeld();
+    assert.equal(observed!.revalidate.bytesRead - beforeReopen, completeBytes * 2);
+  } finally {
+    releaseDelivery();
+    await Promise.allSettled([...(verification ? [verification] : []), ...(closing ? [closing] : [])]);
+    restore();
+    await reopened?.close(); await selected?.close();
+    diagnostic.unsubscribe(subscriber);
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
 
 if (process.platform === 'linux') test('readiness hints cannot outlive a genuine selected runtime close', async () => {
   const fixture = await realpath(await mkdtemp(path.join(os.tmpdir(), 'cliq-installed-readiness-close-')));

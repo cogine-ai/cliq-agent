@@ -1152,3 +1152,18 @@ query now derives local/inherited selection from the real RunSpec and rejects
 Agent results carrying Delivery-only proof fields; its genuine StateStore/UDS
 batch has 28 passes. These are component/negative checks, not a genuine
 installed Delivery success or conversion/cancellation qualification.
+
+The exact `4c7dbae36de2d15159fbf803c2e6d01fb63145f5` tree passes its
+isolated local build and original full test command: 2,549 passes and one
+original conditional cross-filesystem skip, zero failures/cancellations/todos.
+Its Linux workflow run `39258706081`, attempt 1, finishes with nine successful
+and ten failed jobs. This is not installed Delivery or recovery qualification.
+In particular, the Delivery journey fails authentication before entering its
+publication cuts: the fixed five-second readiness deadline remains unchanged.
+The verifier journey separately reaches the original sixty-second credential
+enroll timeout. A process-image observation during timeout cleanup does not
+establish that timeout's cause. The next repair batch addresses verified
+fixture-contract and real-I/O-hook drift, strengthens the guest-process
+observation, and attempts bounded read/hash overlap without removing any
+complete-image revalidation. All positive installed recovery and timing cuts
+above remain unverified until the corresponding actual campaigns pass.

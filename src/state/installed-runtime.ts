@@ -483,20 +483,16 @@ async function assertFile(file: InstalledFile): Promise<void> {
   const named = await lstat(childPath(file.parent, file.name), { bigint: true });
   if (!sameFile(file.info, held) || !sameFile(held, named)) mismatch('installed runtime held file or its independent path changed');
 }
-async function* chunks(file: InstalledFile, signal?: AbortSignal, discardAfterHash = false): AsyncGenerator<Buffer> {
+async function* chunks(file: InstalledFile, signal?: AbortSignal): AsyncGenerator<Buffer> {
   signal?.throwIfAborted();
   await assertFile(file);
   signal?.throwIfAborted();
   const hash = createHash('sha256');
   const count = Number(file.info.size);
   let position = 0;
-  // Only verifyBytes opts in: it discards each synchronously hashed chunk.
-  // Consumers retaining yielded bytes must keep their independent buffers.
-  let scratch: Buffer | undefined;
   while (position < count) {
     signal?.throwIfAborted();
-    const buffer = discardAfterHash ? (scratch ??= Buffer.allocUnsafe(Math.min(CHUNK_BYTES, count - position)))
-      : Buffer.allocUnsafe(Math.min(CHUNK_BYTES, count - position));
+    const buffer = Buffer.allocUnsafe(Math.min(CHUNK_BYTES, count - position));
     const { bytesRead } = await file.handle.read(buffer, 0, Math.min(buffer.length, count - position), position);
     noteInstalledWorkRead(bytesRead);
     signal?.throwIfAborted();
@@ -519,7 +515,49 @@ async function readSmall(file: InstalledFile, limit = SMALL_BYTES): Promise<Buff
   return Buffer.concat(bytes);
 }
 async function verifyBytes(file: InstalledFile, signal?: AbortSignal): Promise<void> {
-  for await (const _chunk of chunks(file, signal, true)) { /* streamed integrity check */ }
+  signal?.throwIfAborted();
+  await assertFile(file);
+  signal?.throwIfAborted();
+  const hash = createHash('sha256'), count = Number(file.info.size);
+  // Discard-only verification may reuse these two private halves. Their total
+  // capacity never exceeds the original one-MiB scratch bound. Retaining chunks
+  // above continue to own independent buffers and are not pipelined.
+  const length = Math.min(CHUNK_BYTES / 2, count);
+  const buffers = [Buffer.allocUnsafe(length), Buffer.allocUnsafe(length)];
+  let position = 0, index = 0, failed = false, failure: unknown;
+  let pending: ReturnType<FileHandle['read']> | undefined;
+  const read = (slot: number, at: number) => file.handle.read(buffers[slot]!, 0, Math.min(length, count - at), at).then(result => {
+    noteInstalledWorkRead(result.bytesRead); return result;
+  });
+  try {
+    if (count) pending = read(index, position);
+    while (pending) {
+      const current = pending; pending = undefined;
+      const { bytesRead } = await current;
+      signal?.throwIfAborted();
+      if (!bytesRead) mismatch('installed runtime file ended before its signed byte count');
+      const bytes = buffers[index]!.subarray(0, bytesRead); position += bytesRead; index = 1 - index;
+      // Only the next positional read is in flight while the completed half is
+      // synchronously hashed; no buffer is overwritten before its hash ends.
+      if (position < count) pending = read(index, position);
+      hash.update(bytes);
+    }
+  } catch (error) { failed = true; failure = error; throw error; }
+  finally {
+    // Abort/hash failure never lets the owning borrow or selected.close retire
+    // the original FileHandle under an outstanding real read.
+    if (pending) {
+      if (failed) await joinResourceOperations([Promise.reject(failure), pending] as const);
+      else await pending;
+    }
+  }
+  const extra = await file.handle.read(Buffer.allocUnsafe(1), 0, 1, position);
+  noteInstalledWorkRead(extra.bytesRead);
+  signal?.throwIfAborted();
+  if (extra.bytesRead) mismatch('installed runtime file exceeds its signed byte count');
+  await assertFile(file);
+  signal?.throwIfAborted();
+  if (file.digest !== undefined && hash.digest('hex') !== file.digest) mismatch('installed runtime signed file digest differs');
 }
 async function* artifactChunks(file: InstalledFile): AsyncGenerator<Buffer> {
   for await (const bytes of chunks(file))

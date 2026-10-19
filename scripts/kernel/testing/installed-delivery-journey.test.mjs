@@ -3,8 +3,51 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import ts from 'typescript';
 
 const source = name => readFileSync(new URL(name, import.meta.url), 'utf8');
+
+test('every installed Run driver accepts exactly the emitted fixed recipe and verifies the one root-owned publication helper', () => {
+  const expected = ['buildFixture', 'controlDirectory', 'installerEntry', 'observer', 'packageRoot', 'publicationObserver',
+    'releaseKeysFile', 'reportFile', 'stateRoot', 'storeFixture', 'workspace'].sort();
+  const shell = source('../qualify-systemd-user.sh'), start = shell.indexOf('const runJourney =');
+  assert(start >= 0);
+  const producer = ts.createSourceFile('runJourney.ts', shell.slice(start, shell.indexOf('\nwriteFileSync(file,', start)), ts.ScriptTarget.Latest, true);
+  const declaration = producer.statements[0].declarationList.declarations[0];
+  assert.equal(declaration.name.getText(producer), 'runJourney');
+  assert(ts.isConditionalExpression(declaration.initializer)); assert(ts.isObjectLiteralExpression(declaration.initializer.whenTrue));
+  const emitted = declaration.initializer.whenTrue.properties.map(property => {
+    assert(ts.isPropertyAssignment(property) && ts.isIdentifier(property.name)); return property.name.text;
+  }).sort();
+  assert.deepEqual(emitted, expected);
+  for (const filename of ['../qualify-installed-run-journey.ts', './installed-node-journey.ts']) {
+    const text = source(filename), file = ts.createSourceFile(filename, text, ts.ScriptTarget.Latest, true);
+    const checks = [], types = [];
+    const visit = node => {
+      if (ts.isCallExpression(node) && node.expression.getText(file) === 'assert.deepEqual' &&
+          node.arguments[0]?.getText(file) === 'Object.keys(recipe).sort()') checks.push(node);
+      if (ts.isTypeAliasDeclaration(node) && node.name.text === 'Recipe') types.push(node);
+      ts.forEachChild(node, visit);
+    };
+    visit(file); assert.equal(checks.length, 1, filename); assert.equal(types.length, 1, filename);
+    const sorted = checks[0].arguments[1];
+    assert(ts.isCallExpression(sorted) && sorted.arguments.length === 0 && ts.isPropertyAccessExpression(sorted.expression) && sorted.expression.name.text === 'sort');
+    const keys = sorted.expression.expression; assert(ts.isArrayLiteralExpression(keys));
+    assert(keys.elements.every(key => ts.isStringLiteral(key)));
+    assert.deepEqual(keys.elements.map(key => key.text).sort(), expected, filename + ' must not reject the actual emitted recipe');
+    assert(ts.isTypeLiteralNode(types[0].type));
+    assert.deepEqual(types[0].type.members.map(member => {
+      assert(ts.isPropertySignature(member) && ts.isIdentifier(member.name) && !member.questionToken); return member.name.text;
+    }).sort(), expected, filename + ' must require every fixed field');
+    for (const guard of [
+      "assert.equal(recipe.publicationObserver, path.join(ledger.fixture, 'cliq-publication-cleanup-crash-observer'))",
+      'const publicationObserver = await lstat(recipe.publicationObserver)',
+      'publicationObserver.isFile() && !publicationObserver.isSymbolicLink() && publicationObserver.uid === 0 && publicationObserver.gid === 0 &&',
+      'publicationObserver.nlink === 1 && (publicationObserver.mode & 0o7777) === 0o555',
+      'open(filename, constants.O_RDONLY | constants.O_NOFOLLOW)',
+    ]) assert(text.includes(guard), filename + ' must retain the same fixed helper identity and file guards');
+  }
+});
 
 test('verifier and Delivery are fixed consumers of one real installed lifecycle', () => {
   const shared = source('./installed-node-journey.ts');

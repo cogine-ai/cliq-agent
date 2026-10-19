@@ -3,7 +3,7 @@ import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { canonicalSha256 } from '../../../src/kernel/canonical.js';
-import { identityHash } from '../../../src/kernel/identity.js';
+import { digestOmitting, identityHash } from '../../../src/kernel/identity.js';
 import type { ProcessContainmentDeathEvidenceV1, ProcessContainmentPlanV1, SandboxLaunchSpecV1 } from '../../../src/kernel/execution.js';
 import type { VerificationReceipt, VerifierStopEvidence, VerifierStopItem } from '../../../src/kernel/verifier.js';
 import type { RunFrontier, SourceManifest, WorkspaceEntryManifest, WorkspaceGenerationSnapshotEvidenceV1, WorkspaceStateManifest } from '../../../src/kernel/types.js';
@@ -14,8 +14,9 @@ import { openStateStore, publishInProcessChannel, type StateStore } from '../../
 import { uuidv7 } from '../../../src/state/testing/fixtures.js';
 import { verifierCheckpointId, type VerifierRetirementV1 } from '../../../src/state/verifier-recovery.js';
 import { inspectInstalledWorkerRetirementHistory } from './installed-worker-lease.js';
-import { recordGuestVerifierBoundaryFailure } from './guest-verifier-diagnostics.js';
+import { recordGuestVerifierBoundaryFailure, recordGuestVerifierCancellationFailure } from './guest-verifier-diagnostics.js';
 import { assertGuestVerifierParentRetirement } from './guest-verifier-retirement.js';
+import { observeGuestVerifierProcess } from './guest-verifier-process.js';
 
 const successfulScript = `import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -223,17 +224,35 @@ test('must really exceed output cap',()=>{for(let i=0;i<32;i++)fs.writeSync(1,Bu
     try {
       const { execution, candidate, agent } = await stageCandidate(fixture, store);
       const before = await store.readRecoveryClosure(fixture.runId);
-      let settled = false;
+      let settled = false, executionState: 'pending' | 'fulfilled' | 'rejected' = 'pending', executionError: unknown;
       const running = execution.executeCurrentVerifier({ expectedRunRevision: candidate.revision });
-      const joined = running.then(value => { settled = true; return { value }; }, error => { settled = true; return { error }; });
+      const joined = running.then(value => { settled = true; executionState = 'fulfilled'; return { value }; },
+        error => { settled = true; executionState = 'rejected'; executionError = error; return { error }; });
       const started = performance.now(); let actualNode = false; let invocationPath: string | undefined;
+      let claimObserved = false, polls = 0;
+      const commCounts = { node: 0, main_thread: 0, other: 0 }, imageCounts = { matched: 0, not_node: 0, absent: 0, deadline: 0, refused: 0 };
+      try {
       while (!actualNode && !settled && performance.now() - started < 15_000) {
+        polls++;
         const cut = await store.readRecoveryClosure(fixture.runId);
         const claim = cut.journal.find(row => row.opKind === 'verifier' && row.phase === 'dispatch_claimed');
         if (claim?.sandboxLaunchSpecRef) {
+          claimObserved = true;
           const launch = await store.artifacts.readCanonical<SandboxLaunchSpecV1>(claim.sandboxLaunchSpecRef);
           const plan = await store.artifacts.readCanonical<ProcessContainmentPlanV1>(launch.containmentPlanRef);
           if (plan.backend.kind !== 'linux') throw new Error('cancel campaign requires the actual nested Linux cgroup');
+          assert.equal(launch.purpose, 'verifier'); assert.equal(launch.owner.kind, 'run_invocation');
+          if (launch.owner.kind !== 'run_invocation' || launch.executable.kind !== 'guest_toolchain') throw new Error('cancel observation lost its original verifier identity');
+          assert.equal(launch.owner.runId, fixture.runId); assert.equal(launch.owner.opId, claim.opId);
+          assert.equal(launch.owner.attempt, claim.attempt); assert.equal(launch.owner.dispatchId, claim.dispatchId);
+          assert.equal(launch.owner.intendedLeaseEpoch, claim.leaseEpoch); assert.equal(launch.owner.workerLaunchId, cut.run.activeWorkerLaunchId);
+          assert.equal(canonicalSha256(launch.owner), canonicalSha256(plan.owner));
+          assert.equal(plan.planDigest, launch.containmentPlanDigest); assert.equal(plan.planDigest, digestOmitting(plan, 'planDigest'));
+          assert.equal(launch.launchSpecDigest, digestOmitting(launch, 'launchSpecDigest'));
+          assert.equal(plan.parentContainmentRef, launch.parentWorkerContainmentRef);
+          assert.equal(launch.executable.executionPath, '/usr/bin/node');
+          assert.equal(launch.executable.executableDigest, fixture.signed.guest!.manifest.node.digest);
+          assert.equal(fixture.signed.guest!.manifest.node.canonicalGuestPath, '/usr/bin/node');
           invocationPath = plan.backend.cgroupPath;
           let pids = '';
           try { pids = (await readFile(path.join(invocationPath, 'cgroup.procs'), 'utf8')).trim(); }
@@ -244,13 +263,22 @@ test('must really exceed output cap',()=>{for(let i=0;i<32;i++)fs.writeSync(1,Bu
           }
           if (pids) for (const value of pids.split('\n')) {
             assert.match(value, /^[1-9][0-9]{0,9}$/u);
-            try { if ((await readFile(`/proc/${value}/comm`, 'utf8')).trim() === 'node') actualNode = true; }
-            catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+            let observed;
+            try { observed = await observeGuestVerifierProcess({ pid: Number(value), uid: process.geteuid!(), cgroupPath: invocationPath,
+              executablePath: '/usr/bin/node', executableDigest: fixture.signed.guest!.manifest.node.digest, deadline: started + 15_000 }); }
+            catch (error) { imageCounts.refused++; throw error; }
+            imageCounts[observed.kind]++; if (observed.comm) commCounts[observed.comm]++;
+            if (observed.kind === 'matched') { actualNode = true; break; }
           }
         }
         if (!actualNode) await delay(25);
       }
       assert.ok(actualNode && invocationPath && !settled, 'cancel only after the real claimed guest Node is executing');
+      } catch (error) {
+        recordGuestVerifierCancellationFailure(error, { claimObserved, invocationPlanObserved: invocationPath !== undefined,
+          actualNodeObserved: actualNode, executionState, elapsedMs: Math.round(performance.now() - started), polls, commCounts, imageCounts }, executionError);
+        throw error;
+      }
       await agent.cancelRun({ ...await publishInProcessChannel(store), requestId: uuidv7(), expectedRunRevision: store.getRun(fixture.runId).revision });
       const stopStarted = performance.now(); await execution.requestStop();
       assert.ok(performance.now() - stopStarted <= 2000, 'actual in-flight verifier cancellation must join within the existing stop bound');

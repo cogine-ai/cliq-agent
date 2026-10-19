@@ -720,6 +720,7 @@ jobs:
       - name: Verify real worker seccomp ABI and syscall denials
         shell: bash
         run: |
+          node --test --import tsx scripts/kernel/testing/guest-verifier-process.test.ts scripts/kernel/testing/guest-verifier-diagnostics.test.ts
           regression="$RUNNER_TEMP/cliq-worker-seccomp-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           channel_regression="$RUNNER_TEMP/cliq-worker-channel-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           musl-gcc -std=c11 -O2 -Wall -Wextra -Werror -static \

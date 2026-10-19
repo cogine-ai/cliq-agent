@@ -35,7 +35,7 @@ import { decodeFinalCandidateItem, decodeRunResult, decodeVerificationClosure, d
 import { decodeSourceManifest, decodeWorkspaceEntries, decodeWorkspaceState } from '../../src/state/decoders.js';
 
 type Recipe = { buildFixture: string; packageRoot: string; installerEntry: string; stateRoot: string; releaseKeysFile: string;
-  controlDirectory: string; observer: string; storeFixture: string; workspace: string; reportFile: string };
+  controlDirectory: string; observer: string; storeFixture: string; publicationObserver: string; workspace: string; reportFile: string };
 type Ledger = { diagnosticOnly: true; fixture: string; fixtureIdentity: string; username: string;
   uid: number; gid: number; runnerUid: number; home: string; runJourney: Recipe };
 type Response = { protocolVersion: 1; ok: boolean; method?: string; result?: Record<string, any>; error?: Record<string, unknown> };
@@ -89,7 +89,7 @@ async function readLedger(filename: string): Promise<Ledger> {
   assert.equal(ledger.username, `cliq-probe-${ledger.fixture.split('.').at(-1)!.toLowerCase()}`);
   const recipe = ledger.runJourney;
   assert.deepEqual(Object.keys(recipe).sort(), ['buildFixture', 'controlDirectory', 'installerEntry', 'observer',
-    'packageRoot', 'releaseKeysFile', 'reportFile', 'stateRoot', 'storeFixture', 'workspace'].sort());
+    'packageRoot', 'publicationObserver', 'releaseKeysFile', 'reportFile', 'stateRoot', 'storeFixture', 'workspace'].sort());
   assert.equal(recipe.buildFixture, path.join(ledger.fixture, 'run-package-build'));
   assert.equal(recipe.packageRoot, path.join(recipe.buildFixture, 'package'));
   assert.equal(recipe.installerEntry, path.join(recipe.buildFixture, 'installed-runtime-installer.mjs'));
@@ -98,6 +98,10 @@ async function readLedger(filename: string): Promise<Ledger> {
   assert.equal(recipe.controlDirectory, path.join(ledger.home, 'probe/run-secret-service-control'));
   assert.equal(recipe.observer, path.join(ledger.fixture, 'cliq-credential-journey-observer'));
   assert.equal(recipe.storeFixture, path.join(ledger.fixture, 'cliq-credential-store-fixture'));
+  assert.equal(recipe.publicationObserver, path.join(ledger.fixture, 'cliq-publication-cleanup-crash-observer'));
+  const publicationObserver = await lstat(recipe.publicationObserver);
+  assert(publicationObserver.isFile() && !publicationObserver.isSymbolicLink() && publicationObserver.uid === 0 && publicationObserver.gid === 0 &&
+    publicationObserver.nlink === 1 && (publicationObserver.mode & 0o7777) === 0o555);
   const storeFixture = await lstat(recipe.storeFixture);
   assert(storeFixture.isFile() && !storeFixture.isSymbolicLink() && storeFixture.uid === 0 && storeFixture.gid === 0 &&
     storeFixture.nlink === 1 && (storeFixture.mode & 0o7777) === 0o555);

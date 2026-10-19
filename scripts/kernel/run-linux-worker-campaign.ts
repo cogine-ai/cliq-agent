@@ -3418,18 +3418,17 @@ async function noOpenInvocationRecovery(cancelInspection = false) {
   const policyPath = path.join(fixture.stateRoot, KERNEL_CAS_DIRECTORY, before.runSpec.policyRef);
   const sample = await open(policyPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
   const policyIdentity = await sample.stat({ bigint: true });
-  const filePrototype = Object.getPrototypeOf(sample) as { readFile: FileHandle['readFile'] };
-  const originalReadFile = filePrototype.readFile;
+  const filePrototype = Object.getPrototypeOf(sample) as Pick<FileHandle, 'read'>;
+  const originalRead = filePrototype.read;
   await sample.close();
   let fault: { workerPid: number; processStartToken: string; generationRef: string; scope: string;
     originalPath: string; originalDevice: bigint; originalInode: bigint } | undefined;
-  // FileHandle.readFile is the actual CAS OS boundary (CAS is asynchronous;
-  // mocking fs.readSync would not exercise this path). Return real OS bytes
-  // everywhere except the single explicitly injected I/O failure after an
-  // exact frozen worker is SIGKILLed, before any tool attempt exists.
-  filePrototype.readFile = (async function(this: FileHandle, ...args: unknown[]) {
-    const bytes: unknown = await Reflect.apply(originalReadFile, this, args);
-    if (!fault && Buffer.isBuffer(bytes)) {
+  // FileHandle.read is the actual bounded CAS OS boundary. Complete that
+  // original read without changing its bytes/EOF, then inject the single I/O
+  // failure after an exact frozen worker is SIGKILLed, before any tool attempt.
+  filePrototype.read = (async function(this: FileHandle, ...args: unknown[]) {
+    const result: Awaited<ReturnType<FileHandle['read']>> = await Reflect.apply(originalRead, this, args);
+    if (!fault && result.bytesRead > 0) {
       const held = fs.fstatSync(this.fd, { bigint: true });
       if (held.dev === policyIdentity.dev && held.ino === policyIdentity.ino) {
         const launch = metadata.readSnapshot(connection => {
@@ -3441,6 +3440,14 @@ async function noOpenInvocationRecovery(cancelInspection = false) {
           return readRequiredWorkerLaunch(connection, row.active_worker_launch_id);
         });
         if (launch?.phase === 'activated') {
+          // Independently verify all real bytes from this same original held
+          // inode; a bounded first chunk is not the complete policy artifact.
+          const bytes = Buffer.alloc(Number(policyIdentity.size));
+          for (let offset = 0; offset < bytes.length;) {
+            const count = fs.readSync(this.fd, bytes, offset, bytes.length - offset, offset);
+            assert.ok(count > 0); offset += count;
+          }
+          assert.equal(createHash('sha256').update(bytes).digest('hex'), before.runSpec.policyRef);
           assert.equal(canonicalSha256(JSON.parse(bytes.toString('utf8'))), before.runSpec.policyRef);
           const worker = decodeWorkerIdentity(frozenArtifact<WorkerIdentity>(fixture.stateRoot, launch.workerIdentityDigest!));
           const containment = decodeWorkerProcessContainment(frozenArtifact(fixture.stateRoot, launch.processContainmentRef!));
@@ -3460,13 +3467,13 @@ async function noOpenInvocationRecovery(cancelInspection = false) {
         }
       }
     }
-    return bytes;
-  }) as FileHandle['readFile'];
+    return result;
+  }) as FileHandle['read'];
   try {
     await assert.rejects(bounded(execution.executeCurrentTool({ expectedRunRevision: before.run.revision })));
     assert.ok(fault, 'activated-before-prepare loss must occur; missing fault coverage fails the campaign');
     // Remove the OS instrumentation before native inspection/recovery.
-    filePrototype.readFile = originalReadFile;
+    filePrototype.read = originalRead;
     const failed = await fixture.store.readRecoveryClosure(fixture.runId);
     assert.equal(failed.run.status, 'waiting'); assert.equal(failed.run.waitingReason, 'reconciliation');
     const wait = await fixture.store.artifacts.readCanonical<WorkerDeathWait>(failed.run.waitingOnRef!);
@@ -3511,7 +3518,7 @@ async function noOpenInvocationRecovery(cancelInspection = false) {
       restoredCheckpointId: before.latestCheckpoint.id, nativeEffectsAfterRecovery: 1,
       note: 'actual native whole-hierarchy death plus descriptor archive; CAS EIO explicitly injected at OS boundary' }));
   } finally {
-    filePrototype.readFile = originalReadFile; metadata.close();
+    filePrototype.read = originalRead; metadata.close();
     if (store !== fixture.store) await store.close();
     try { await fixture.dispose(); }
     catch (error) { console.error('no-open recovery StateStore.close failed:', error); throw error; }

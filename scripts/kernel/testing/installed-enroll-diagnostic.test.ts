@@ -1,11 +1,32 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { chmod, copyFile, mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
+import { once } from 'node:events';
+import { chmod, copyFile, mkdtemp, readFile, realpath, rm, stat } from 'node:fs/promises';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
 import { createEnrollWorkObservation, decodeEnrollWorkFrame, decodeEnrollCredentialPhase, decodeEnrollProcessCounters,
   runOwnedEnrollDiagnostic, type InstalledEnrollDiagnostic } from './installed-enroll-diagnostic.js';
 import { createCredentialSecretScanner } from './credential-secret-scan.js';
+
+async function ownedFixture(fixture: string): Promise<string> {
+  const executable = path.join(fixture, 'owned-process');
+  const result = spawnSync('cc', ['-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
+    fileURLToPath(new URL('./credential-producer-lifetime-probe.c', import.meta.url)), '-o', executable],
+  { encoding: 'utf8', timeout: 60000 });
+  assert.equal(result.error, undefined); assert.equal(result.signal, null); assert.equal(result.status, 0, result.stderr);
+  return executable;
+}
+
+async function joinedWithin<T>(pending: Promise<T>, milliseconds: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try { return await Promise.race([pending, new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error('owned lifetime fixture did not join')), milliseconds);
+  })]); } finally { clearTimeout(timer); }
+}
 
 test('enroll phase observations accept only the complete fixed source-owned byte markers', () => {
   for (const phase of ['open_selected', 'history', 'first_supervisor', 'secret_input', 'second_supervisor', 'platform_store', 'finalize', 'retire'])
@@ -166,5 +187,86 @@ test('secret output refusal still joins the actual original process and scan own
       assert.equal(diagnostic.authJoined, true); assert.equal(diagnostic.launcherJoined, true); assert.equal(diagnostic.processAndPipesJoined, true);
       assert.equal(scanner.stats().streamsOpened, 2); assert.equal(scanner.stats().streamsClosed, 2);
       assert(!JSON.stringify(diagnostic).includes('fixture-private-input'));
+    } finally { scanner.close(); await rm(fixture, { recursive: true, force: true }); }
+  });
+
+test('a naturally exited original auth zombie is not a live foreign image and joins only after its real parent reaps it',
+  { timeout: 15000, skip: process.platform !== 'linux' ? 'requires actual Linux natural exit and owned WNOWAIT/reap; not installed qualification' : false }, async () => {
+    const fixture = await realpath(await mkdtemp(path.join(os.tmpdir(), 'cliq-enroll-zombie-')));
+    const scanner = createCredentialSecretScanner([Buffer.from('fixture-private-input')], { maxBytes: 1024 * 1024, maxStreams: 16 });
+    const diagnostic = {} as InstalledEnrollDiagnostic, server = net.createServer();
+    let control: net.Socket | undefined, controlJoined: Promise<unknown> | undefined;
+    let completed: Promise<{ value: Awaited<ReturnType<typeof runOwnedEnrollDiagnostic>> } | { error: unknown }> | undefined;
+    try {
+      const launcher = await ownedFixture(fixture), image = path.join(fixture, 'node');
+      await copyFile(process.execPath, image); await chmod(image, 0o500);
+      const accepted = once(server, 'connection') as Promise<[net.Socket]>;
+      const socketPath = path.join(fixture, 'control'); server.listen(socketPath); await once(server, 'listening');
+      completed = runOwnedEnrollDiagnostic({ command: { executable: launcher,
+        args: ['--enroll-natural-exit', image, socketPath], cwd: fixture, env: {} }, input: Buffer.from('fixture-private-input'),
+        uid: process.geteuid!(), bootstrapImage: image, installedImage: image, originalDeadlineMs: 5000, scanner, diagnostic })
+        .then(value => ({ value }), error => ({ error }));
+      [control] = await joinedWithin(accepted, 5000); controlJoined = once(control, 'close');
+      let message = '', oversized = false;
+      control.on('data', bytes => { if (message.length + bytes.length > 128) oversized = true; else message += bytes.toString('ascii'); });
+      const by = performance.now() + 5000;
+      while (!message.endsWith('\n')) { assert(!oversized && performance.now() < by); await delay(5); }
+      const live = /^LIVE ([1-9][0-9]*)\n$/u.exec(message); assert(live);
+      const pid = Number(live[1]);
+      while (!diagnostic.samples.some(sample => sample.process.kind === 'observed' && sample.process.pid === pid)) {
+        assert(performance.now() < by); await delay(5);
+      }
+      control.write('e');
+      while (message.split('\n').length < 3) { assert(!oversized && performance.now() < by); await delay(5); }
+      assert.equal(message, `LIVE ${pid}\nZOMBIE ${pid}\n`);
+      const original = await readFile(`/proc/${pid}/stat`, 'utf8');
+      const fields = original.slice(original.lastIndexOf(')') + 2).trim().split(/\s+/u);
+      assert.equal(fields[0], 'Z'); await assert.rejects(stat(`/proc/${pid}/exe`), { code: 'ENOENT' });
+      assert(diagnostic.samples.some(sample => sample.process.kind === 'observed' && sample.process.pid === pid && sample.process.startTicks === fields[19]));
+      // Wait for an actual later monitor sample of this still-unreaped child,
+      // not a sleep that assumes the image check has executed. The old helper
+      // instead records observation_failed at its live-image assertion.
+      while (diagnostic.outcome === 'completed' && !diagnostic.samples.some(sample => sample.process.kind === 'unavailable')) {
+        assert(performance.now() < by); await delay(5);
+      }
+      const beforeReap = await readFile(`/proc/${pid}/stat`, 'utf8');
+      assert.equal(beforeReap.slice(beforeReap.lastIndexOf(')') + 2).trim().split(/\s+/u)[19], fields[19]);
+      assert.equal(diagnostic.authJoined, false); assert.equal(diagnostic.processAndPipesJoined, false);
+      control.end('r');
+      const result = await joinedWithin(completed, 6000);
+      if ('error' in result) throw result.error;
+      assert.equal(result.value.status, 0); assert.equal(result.value.signal, null); assert.equal(result.value.error, undefined);
+      assert.equal(result.value.stdout, 'joined-output'); assert.equal(result.value.stderr, '');
+      assert.equal(diagnostic.outcome, 'completed'); assert.equal(diagnostic.authJoined, true);
+      assert.equal(diagnostic.launcherJoined, true); assert.equal(diagnostic.processAndPipesJoined, true);
+      assert.equal(diagnostic.completeInputWriteJoined, true);
+      await assert.rejects(readFile(`/proc/${pid}/stat`), { code: 'ENOENT' });
+      assert.equal(scanner.stats().matched, false); assert.equal(scanner.stats().streamsOpened, scanner.stats().streamsClosed);
+    } finally {
+      if (control && !control.destroyed) control.end('r');
+      if (completed) await joinedWithin(completed, 11000);
+      control?.destroy(); if (controlJoined) await controlJoined;
+      if (server.listening) await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+      scanner.close(); await rm(fixture, { recursive: true, force: true });
+    }
+  });
+
+test('a still-live original auth that really execs a foreign image is rejected and fully joined',
+  { timeout: 15000, skip: process.platform !== 'linux' ? 'requires actual Linux exec and original owned child identity; not installed qualification' : false }, async () => {
+    const fixture = await realpath(await mkdtemp(path.join(os.tmpdir(), 'cliq-enroll-foreign-')));
+    const scanner = createCredentialSecretScanner([Buffer.from('fixture-private-input')], { maxBytes: 1024 * 1024, maxStreams: 16 });
+    const diagnostic = {} as InstalledEnrollDiagnostic;
+    try {
+      const launcher = await ownedFixture(fixture), image = path.join(fixture, 'auth-image');
+      await copyFile(launcher, image); await chmod(image, 0o500);
+      await assert.rejects(runOwnedEnrollDiagnostic({ command: { executable: launcher,
+        args: ['--enroll-live-foreign', image], cwd: fixture, env: {} }, input: Buffer.from('fixture-private-input'),
+        uid: process.geteuid!(), bootstrapImage: image, installedImage: image, originalDeadlineMs: 5000, scanner, diagnostic }),
+      error => error instanceof AggregateError && error.errors.some(value => value instanceof assert.AssertionError &&
+        value.message === 'original owned auth executable image changed'));
+      assert.equal(diagnostic.outcome, 'observation_failed'); assert.equal(diagnostic.authObserved, true);
+      assert.equal(diagnostic.completeInputWriteJoined, true); assert.equal(diagnostic.authJoined, true);
+      assert.equal(diagnostic.launcherJoined, true); assert.equal(diagnostic.processAndPipesJoined, true);
+      assert.equal(scanner.stats().matched, false); assert.equal(scanner.stats().streamsOpened, scanner.stats().streamsClosed);
     } finally { scanner.close(); await rm(fixture, { recursive: true, force: true }); }
   });
