@@ -33,6 +33,7 @@ import { acquireHeldInstalledAnchor, executeHeldInstalledImage, initializeHeldIn
   stateRootIdentityFromDescriptor, withHeldCredentialNativeScope, STATE_OWNER_NATIVE_ENTRY_ID, STATE_OWNER_NATIVE_RELATIVE_PATH,
   type NativeStateOwner } from './native-owner.js';
 import { openHeldInstalledControlClient, type HeldInstalledControlClient } from './native-owner.js';
+import { noteInstalledWorkRead, observeInstalledWork } from './installed-work-diagnostics.js';
 
 export type HeldInstalledRuntime = Readonly<{
   bundle: RuntimeBundleManifest;
@@ -493,12 +494,14 @@ async function* chunks(file: InstalledFile, signal?: AbortSignal): AsyncGenerato
     signal?.throwIfAborted();
     const buffer = Buffer.allocUnsafe(Math.min(CHUNK_BYTES, count - position));
     const { bytesRead } = await file.handle.read(buffer, 0, buffer.length, position);
+    noteInstalledWorkRead(bytesRead);
     signal?.throwIfAborted();
     if (!bytesRead) mismatch('installed runtime file ended before its signed byte count');
     const bytes = buffer.subarray(0, bytesRead); hash.update(bytes); position += bytesRead;
     yield bytes;
   }
   const extra = await file.handle.read(Buffer.allocUnsafe(1), 0, 1, position);
+  noteInstalledWorkRead(extra.bytesRead);
   signal?.throwIfAborted();
   if (extra.bytesRead) mismatch('installed runtime file exceeds its signed byte count');
   await assertFile(file);
@@ -546,6 +549,10 @@ async function checkSelectedVersion(scope: Scope, bundles: Directory, bundleDige
   await scope.assertDirectory(bundles);
 }
 async function verifyPackage(scope: Scope, root: Directory, releaseKeys: readonly ReleaseTrustKey[], expectedDigest?: string,
+  sourceCompanion = false): Promise<VerifiedPackage> {
+  return observeInstalledWork('package', () => verifyPackageBytes(scope, root, releaseKeys, expectedDigest, sourceCompanion));
+}
+async function verifyPackageBytes(scope: Scope, root: Directory, releaseKeys: readonly ReleaseTrustKey[], expectedDigest?: string,
   sourceCompanion = false): Promise<VerifiedPackage> {
   const manifest = await scope.file(root, 'manifest.json', 0o400, undefined, expectedDigest);
   const manifestBytes = await readSmall(manifest);
@@ -834,7 +841,7 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
           try { scope.assertMetadata([active, signed.manifest, bootstrap, ...signed.entries.values(), ...casFiles]); }
           catch (error) { rememberRetirement(error); poisoned = error; throw error; }
         };
-        const revalidate = async (signal?: AbortSignal) => {
+        const revalidate = (signal?: AbortSignal) => observeInstalledWork('revalidate', async () => {
           signal?.throwIfAborted();
           healthy(); await scope.assertDirectories();
           signal?.throwIfAborted();
@@ -843,7 +850,7 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
           signal?.throwIfAborted();
           await checkSelectedVersion(scope, bundles, signed.bundleDigest); await scope.assertDirectories();
           signal?.throwIfAborted();
-        };
+        });
         await revalidate();
         const checkedRevalidate = async (signal?: AbortSignal) => {
           if (poisoned !== undefined) throw poisoned;
@@ -1089,7 +1096,9 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
                   return track(Promise.resolve().then(operation));
                 };
                 const secretService = ((input: NativeSecretServiceInput): Promise<unknown> => {
-                  if (input.kind !== 'inspect') return invoke(() => native.secretService(input));
+                  if (input.kind !== 'inspect') return invoke(() => input.kind === 'create_compare'
+                    ? observeInstalledWork('create_compare', () => native.secretService(input))
+                    : native.secretService(input));
                   if (closed) mismatch('installed runtime handle is closed');
                   assertSelection();
                   let original: NativeCredentialInspection;

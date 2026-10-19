@@ -3,7 +3,8 @@ import test from 'node:test';
 import { chmod, copyFile, mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { decodeEnrollCredentialPhase, decodeEnrollProcessCounters, runOwnedEnrollDiagnostic, type InstalledEnrollDiagnostic } from './installed-enroll-diagnostic.js';
+import { createEnrollWorkObservation, decodeEnrollWorkFrame, decodeEnrollCredentialPhase, decodeEnrollProcessCounters,
+  runOwnedEnrollDiagnostic, type InstalledEnrollDiagnostic } from './installed-enroll-diagnostic.js';
 import { createCredentialSecretScanner } from './credential-secret-scan.js';
 
 test('enroll phase observations accept only the complete fixed source-owned byte markers', () => {
@@ -17,6 +18,42 @@ test('enroll phase observations accept only the complete fixed source-owned byte
     Buffer.from([0xff, 0x0a]), Buffer.from('arbitrary-private-content\n')])
     assert.equal(decodeEnrollCredentialPhase(input), undefined);
   assert.equal(accessed, false);
+});
+
+test('work frames are closed numeric data and a split stream keeps bounded sparse history plus the latest inflight work', () => {
+  const frame = (role: string, started: number, completed: number, bytes: number, nativeStarted = 0, nativeCompleted = 0) =>
+    Buffer.from(`CLIQ_INSTALLED_WORK_V1:${role}:${started}:${completed}:${bytes}:10:0:0:0:0:${nativeStarted}:${nativeCompleted}:0:0\n`);
+  const first = frame('bootstrap', 1, 0, 7), parsed = decodeEnrollWorkFrame(first)!;
+  assert.deepEqual(parsed, { role: 'bootstrap', package: { started: 1, completed: 0, bytesRead: 7, spanElapsedMs: 10 },
+    revalidate: { started: 0, completed: 0, bytesRead: 0, spanElapsedMs: 0 },
+    createCompare: { started: 0, completed: 0, bytesRead: 0, spanElapsedMs: 0 } });
+  let accessed = false;
+  const hostile = Object.defineProperty({}, 'length', { get() { accessed = true; throw 0; } });
+  for (const value of [hostile, first.toString(), Buffer.concat([first, Buffer.from('\n')]),
+    Buffer.from(first.toString().replace(':7:', ':07:')), Buffer.from(first.toString().replace(':7:', ':9007199254740992:')),
+    frame('unknown-private-role', 1, 0, 7), frame('credential', 0, 1, 7), Buffer.from([0xff, ...first]),
+    Buffer.from(first.toString().replace(':0:0\n', ':1:0\n')), Buffer.from('private-unretained-content\n')])
+    assert.equal(decodeEnrollWorkFrame(value), undefined);
+  assert.equal(accessed, false);
+  const observer = createEnrollWorkObservation();
+  observer.write(first.subarray(0, 11), 1); observer.write(first.subarray(11), 2);
+  observer.write(frame('credential', 1, 0, 8), 5);
+  // Counters may reset only on the single real bootstrap -> credential cut.
+  observer.write(frame('bootstrap', 9, 0, 99), 6);
+  observer.write(frame('credential', 0, 0, 0), 7);
+  for (let i = 2; i <= 45; i++) observer.write(frame('credential', i, i - 1, i * 10), i * 3000);
+  observer.write(frame('credential', 46, 45, 461, 1, 0), 135001);
+  observer.write(Buffer.from('x'.repeat(300) + '\n'), 135002);
+  observer.finish();
+  const report = observer.result!;
+  assert.equal(report.snapshots.length, 32); assert.equal(report.truncated, true);
+  assert.equal(report.snapshots[0]!.role, 'bootstrap');
+  assert.equal(report.snapshots.at(-1)!.role, 'credential');
+  assert.equal(report.snapshots.at(-1)!.package.bytesRead, 461);
+  assert.equal(report.snapshots.at(-1)!.package.started - report.snapshots.at(-1)!.package.completed, 1);
+  assert.equal(report.snapshots.at(-1)!.createCompare.started, 1);
+  assert.equal(report.snapshots.at(-1)!.createCompare.completed, 0);
+  assert(!JSON.stringify(report).includes('private-unretained-content'));
 });
 
 test('enroll diagnostics retain only exact numeric process counters, including values beyond safe integers', () => {
@@ -52,8 +89,9 @@ test('an owned enroll diagnostic really joins an over-deadline process and both 
     try {
       const image = path.join(fixture, 'node'); await copyFile(process.execPath, image); await chmod(image, 0o500);
       const diagnostic = {} as InstalledEnrollDiagnostic;
+      const work = 'CLIQ_INSTALLED_WORK_V1:credential:1:0:7:10:0:0:0:0:1:0:0:5\n';
       const result = await runOwnedEnrollDiagnostic({ command: { executable: image,
-        args: ['-e', 'process.stdin.resume(); process.stdout.write("joined-output"); setInterval(()=>{},1000)'], cwd: fixture, env: {} },
+        args: ['-e', `process.stdin.resume(); process.stderr.write(${JSON.stringify(work)}); process.stdout.write("joined-output"); setInterval(()=>{},1000)`], cwd: fixture, env: {} },
         input: Buffer.from('fixture-private-input'), uid: process.geteuid!(), bootstrapImage: image, installedImage: image,
         originalDeadlineMs: 1000, scanner, diagnostic });
       assert.equal(result.error?.code, 'ETIMEDOUT'); assert.equal(result.signal, 'SIGKILL'); assert.equal(diagnostic.outcome, 'timeout');
@@ -66,6 +104,9 @@ test('an owned enroll diagnostic really joins an over-deadline process and both 
       await assert.rejects(readFile(`/proc/${sample.process.pid}/stat`), { code: 'ENOENT' });
       assert.equal(scanner.stats().streamsOpened, 2); assert.equal(scanner.stats().streamsClosed, 2);
       assert.equal(scanner.stats().matched, false); assert(!JSON.stringify(diagnostic).includes('fixture-private-input'));
+      assert.equal(diagnostic.work?.snapshots.at(-1)!.createCompare.started, 1);
+      assert.equal(diagnostic.work?.snapshots.at(-1)!.createCompare.completed, 0);
+      assert.equal(diagnostic.work?.snapshots.at(-1)!.package.bytesRead, 7);
     } finally { scanner.close(); await rm(fixture, { recursive: true, force: true }); }
   });
 
@@ -91,8 +132,8 @@ test('real owned enroll stderr preserves raw output while retaining bounded fixe
     try {
       const image = path.join(fixture, 'node'); await copyFile(process.execPath, image); await chmod(image, 0o500);
       const diagnostic = {} as InstalledEnrollDiagnostic;
-      const first = 'unretained-status\n' + 'x'.repeat(200) + '\nCLIQ_CREDENTIAL_PHASE_V1:his';
-      const last = 'tory\nCLIQ_CREDENTIAL_PHASE_V1:unknown\n' + 'CLIQ_CREDENTIAL_PHASE_V1:retire\n'.repeat(40);
+      const first = 'unretained-status\n' + 'x'.repeat(200) + '\nCLIQ_INSTALLED_WORK_V1:credential:1:0:7:10:0:0:0:0:0:0:0:0\nCLIQ_CREDENTIAL_PHASE_V1:his';
+      const last = 'tory\nCLIQ_INSTALLED_WORK_V1:credential:1:1:9:11:0:0:0:0:1:1:0:2\nCLIQ_CREDENTIAL_PHASE_V1:unknown\n' + 'CLIQ_CREDENTIAL_PHASE_V1:retire\n'.repeat(40);
       const result = await runOwnedEnrollDiagnostic({ command: { executable: image, args: ['-e',
         `const fs=require('node:fs');process.stdin.resume();process.stdin.once('end',()=>{fs.writeSync(2,${JSON.stringify(first)});setTimeout(()=>{fs.writeSync(2,${JSON.stringify(last)});fs.writeSync(1,'joined-output')},20)})`],
         cwd: fixture, env: {} }, input: Buffer.from('fixture-private-input'), uid: process.geteuid!(),
@@ -105,6 +146,8 @@ test('real owned enroll stderr preserves raw output while retaining bounded fixe
       assert.equal(diagnostic.authJoined, true); assert.equal(diagnostic.launcherJoined, true); assert.equal(diagnostic.processAndPipesJoined, true);
       assert(!JSON.stringify(diagnostic).includes('unretained-status')); assert(!JSON.stringify(diagnostic).includes('fixture-private-input'));
       assert.equal(scanner.stats().matched, false); assert.equal(scanner.stats().streamsOpened, scanner.stats().streamsClosed);
+      assert.equal(diagnostic.work?.snapshots.at(-1)!.package.bytesRead, 9);
+      assert.equal(diagnostic.work?.snapshots.at(-1)!.createCompare.completed, 1);
     } finally { scanner.close(); await rm(fixture, { recursive: true, force: true }); }
   });
 

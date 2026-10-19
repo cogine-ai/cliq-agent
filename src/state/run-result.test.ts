@@ -75,7 +75,8 @@ test('explicitly consented empty verification publishes one unverified immutable
       throw new Error('an inert recovery diagnosis cannot decide the retained cut');
     });
     assert.deepEqual(recovered.run, fixture.store.getRun(fixture.runId));
-    assert.deepEqual(recoveryPhases, ['spec', 'context', 'journal', 'generations', 'history', 'seals', 'terminal']);
+    assert.deepEqual(recoveryPhases, ['spec', 'context', 'journal', 'generations', 'history', 'history_model',
+      'history_items', 'history_candidate', 'history_verifier', 'history_tool', 'history_input', 'history_broker', 'seals', 'terminal']);
     const resultOwner = loadRunResult(held.driver, fixture.store.artifacts, held.owner,
       { run: before.run, spec: before.runSpec, principalId: fixture.principalId }, value => {
         phases.push(value);
@@ -83,7 +84,9 @@ test('explicitly consented empty verification publishes one unverified immutable
       });
     const committed = await resultOwner.commitRunResult(request);
     assert.deepEqual(phases, ['result_recovery', 'result_recovery_spec', 'result_recovery_context', 'result_recovery_journal',
-      'result_recovery_generations', 'result_recovery_history', 'result_recovery_seals', 'result_recovery_terminal',
+      'result_recovery_generations', 'result_recovery_history', 'result_recovery_history_model', 'result_recovery_history_items',
+      'result_recovery_history_candidate', 'result_recovery_history_verifier', 'result_recovery_history_tool',
+      'result_recovery_history_input', 'result_recovery_history_broker', 'result_recovery_seals', 'result_recovery_terminal',
       'result_basis', 'result_finalization', 'result_publication', 'result_session', 'result_commit']);
     assert.equal(committed.run.status, 'completed_unverified'); assert.equal(committed.run.terminalReason, 'no_required_verifier');
     assert.equal(committed.run.nextStep, null); assert.equal(committed.run.frontierRef, undefined);
@@ -194,14 +197,22 @@ test('verification and result transaction failures leave no partial frontier, re
   try {
     await candidate(fixture);
     const before = await fixture.store.readRecoveryClosure(fixture.runId);
+    const held = fixture.store as unknown as { driver: SqliteDriver; owner: StateOwnerContext };
+    const phases: RunResultPhase[] = [];
+    const observed = loadRunResult(held.driver, fixture.store.artifacts, held.owner,
+      { run: before.run, spec: before.runSpec, principalId: fixture.principalId }, value => {
+        phases.push(value);
+        throw new Error('diagnosis must not replace the original transaction failure');
+      });
     writer.exec("CREATE TRIGGER fail_verification BEFORE INSERT ON checkpoints BEGIN SELECT RAISE(ABORT, 'injected verification failure'); END");
-    await assert.rejects(fixture.agent.completeVerification({ expectedRunRevision: revision(fixture) }), /injected verification failure/);
+    await assert.rejects(observed.completeVerification({ expectedRunRevision: revision(fixture) }), /injected verification failure/);
+    assert(phases.includes('result_recovery_history_candidate')); assert(phases.includes('result_recovery_history_tool'));
     assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
     writer.exec('DROP TRIGGER fail_verification');
     await fixture.agent.completeVerification({ expectedRunRevision: revision(fixture) });
     const finalized = await fixture.store.readRecoveryClosure(fixture.runId), session = fixture.store.getSession(before.run.sessionId);
     writer.exec("CREATE TRIGGER fail_result BEFORE INSERT ON items WHEN NEW.session_id IS NOT NULL BEGIN SELECT RAISE(ABORT, 'injected result failure'); END");
-    await assert.rejects(fixture.agent.commitRunResult({ expectedRunRevision: revision(fixture) }), /injected result failure/);
+    await assert.rejects(observed.commitRunResult({ expectedRunRevision: revision(fixture) }), /injected result failure/);
     assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), finalized);
     assert.deepEqual(fixture.store.getSession(session.id), session);
     writer.exec('DROP TRIGGER fail_result');

@@ -8,6 +8,7 @@ import path from 'node:path';
 import { build } from 'esbuild';
 import { inject } from 'postject';
 import { INSTALLED_CREDENTIAL_PHASE_CHANNEL, INSTALLED_CREDENTIAL_PHASES } from '../../../src/state/installed-diagnostics.js';
+import { INSTALLED_WORK_CHANNEL } from '../../../src/state/installed-work-diagnostics.js';
 
 export const SUPERVISOR_SEA_NODE_VERSION = '24.21.0';
 export const SUPERVISOR_SEA_CARRIER_CHECKSUMS: Readonly<Record<string, string>> = {
@@ -23,6 +24,41 @@ export const CREDENTIAL_PHASE_DIAGNOSTIC_BANNER = `;(() => { try {
   const phases = new Set(${JSON.stringify(INSTALLED_CREDENTIAL_PHASES)}), write = require('node:fs').writeSync;
   diagnostic.subscribe(phase => { try {
     if (typeof phase === 'string' && phases.has(phase)) write(2, 'CLIQ_CREDENTIAL_PHASE_V1:' + phase + '\\n');
+  } catch {} });
+} catch {} })();`;
+
+// No timer or arbitrary serialization. This subscriber belongs only to the
+// trusted disposable image. Every getter/output error is contained here, not
+// delegated to diagnostics_channel's publish() exception behavior.
+export const INSTALLED_WORK_DIAGNOSTIC_BANNER = `;(() => { try {
+  const role = process.argv[2] === '--bootstrap-credential' ? 'bootstrap'
+    : process.argv[2] === '--installed-credential' ? 'credential' : undefined;
+  if (!role) return;
+  const diagnostic = require('node:diagnostics_channel').channel(${JSON.stringify(INSTALLED_WORK_CHANNEL)});
+  const write = require('node:fs').writeSync;
+  let emitted = 0, stopped = false;
+  const truncate = () => { if (!stopped) { stopped = true; write(2, 'CLIQ_INSTALLED_WORK_V1:' + role + ':truncated\\n'); } };
+  const values = (object, keys) => {
+    if (!object || typeof object !== 'object' || Array.isArray(object)) throw 0;
+    const fields = Object.getOwnPropertyDescriptors(object);
+    if (Reflect.ownKeys(fields).length !== keys.length) throw 0;
+    return keys.map(key => { const field = fields[key];
+      if (!field || !Object.hasOwn(field, 'value')) throw 0; return field.value; });
+  };
+  diagnostic.subscribe(snapshot => { try {
+    if (stopped) return;
+    if (snapshot === 'truncated') { truncate(); return; }
+    const rows = values(snapshot, ['package', 'revalidate', 'createCompare']);
+    const numbers = rows.flatMap(row => {
+      const result = values(row, ['started', 'completed', 'bytesRead', 'spanElapsedMs']);
+      if (!result.every(value => Number.isSafeInteger(value) && value >= 0) || result[1] > result[0]) throw 0;
+      return result;
+    });
+    if (numbers[10] !== 0) return;
+    const frame = 'CLIQ_INSTALLED_WORK_V1:' + role + ':' + numbers.join(':') + '\\n';
+    if (frame.length > 256) { truncate(); return; }
+    if (emitted >= 256) { truncate(); return; }
+    emitted++; write(2, frame);
   } catch {} });
 } catch {} })();`;
 
@@ -69,7 +105,7 @@ export async function buildSupervisorSeaImage(input: {
   const main = path.join(input.fixture, `${input.variant}.cjs`);
   const result = await build({ entryPoints: [input.entryPoint], outfile: main,
     bundle: true, platform: 'node', format: 'cjs', target: 'node24.21', metafile: true,
-    ...(input.credentialPhaseDiagnostics === true ? { banner: { js: CREDENTIAL_PHASE_DIAGNOSTIC_BANNER } } : {}),
+    ...(input.credentialPhaseDiagnostics === true ? { banner: { js: CREDENTIAL_PHASE_DIAGNOSTIC_BANNER + INSTALLED_WORK_DIAGNOSTIC_BANNER } } : {}),
     // These entries run only as SEA. The ordinary ESM helper branch cannot run.
     define: { 'import.meta.url': 'undefined', ...input.defines } });
   for (const emitted of Object.values(result.metafile!.outputs)) {

@@ -6,12 +6,88 @@ import { readFile, stat } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { CredentialSecretScanner } from './credential-secret-scan.js';
 import { INSTALLED_CREDENTIAL_PHASES, type InstalledCredentialPhase } from '../../../src/state/installed-diagnostics.js';
+import type { InstalledWorkCounters, InstalledWorkSnapshot } from '../../../src/state/installed-work-diagnostics.js';
 
 const phaseMarkers = INSTALLED_CREDENTIAL_PHASES.map(phase => ({ phase, bytes: Buffer.from(`CLIQ_CREDENTIAL_PHASE_V1:${phase}\n`) }));
 /** Closed data only: unknown/partial bytes are never copied into a report. */
 export function decodeEnrollCredentialPhase(input: unknown): InstalledCredentialPhase | undefined {
   if (!Buffer.isBuffer(input)) return undefined;
   return phaseMarkers.find(marker => marker.bytes.equals(input))?.phase;
+}
+
+type WorkRole = 'bootstrap' | 'credential';
+type WorkFrame = ({ role: WorkRole } & InstalledWorkSnapshot) | { role: WorkRole; truncated: true };
+type WorkObservation = { elapsedMs: number; role: WorkRole } & InstalledWorkSnapshot;
+export type InstalledEnrollWork = { snapshots: WorkObservation[]; truncated: boolean };
+/** Separate 256-byte grammar; the original 96-byte phase grammar is unchanged. */
+export function decodeEnrollWorkFrame(input: unknown): WorkFrame | undefined {
+  if (!Buffer.isBuffer(input) || input.length > 256 || !input.length || input.some(byte => byte > 127)) return undefined;
+  const text = input.toString('utf8');
+  if (!text.endsWith('\n')) return undefined;
+  const fields = text.slice(0, -1).split(':');
+  if (fields[0] !== 'CLIQ_INSTALLED_WORK_V1' || fields[1] !== 'bootstrap' && fields[1] !== 'credential') return undefined;
+  const role: WorkRole = fields[1];
+  if (fields.length === 3 && fields[2] === 'truncated') return { role, truncated: true };
+  if (fields.length !== 14 || fields.slice(2).some(value => !/^(0|[1-9][0-9]{0,15})$/u.test(value))) return undefined;
+  const values = fields.slice(2).map(Number);
+  if (values.some(value => !Number.isSafeInteger(value))) return undefined;
+  const row = (offset: number): InstalledWorkCounters => ({ started: values[offset]!, completed: values[offset + 1]!,
+    bytesRead: values[offset + 2]!, spanElapsedMs: values[offset + 3]! });
+  const frame = { role, package: row(0), revalidate: row(4), createCompare: row(8) };
+  if ([frame.package, frame.revalidate, frame.createCompare].some(value => value.completed > value.started) || frame.createCompare.bytesRead !== 0)
+    return undefined;
+  return frame;
+}
+
+/** Bounded observations only: no raw line survives. Sparse history retains
+ * the latest cut even at the cap; a missing end is not a completed operation. */
+export function createEnrollWorkObservation() {
+  const work: InstalledEnrollWork = { snapshots: [], truncated: false };
+  let tail = Buffer.alloc(0), discard = false, seen = false, latest: WorkObservation | undefined;
+  const retain = (force: boolean) => {
+    if (!latest || work.snapshots.at(-1) === latest) return;
+    const preceding = work.snapshots.at(-1);
+    if (!force && preceding?.role === latest.role && latest.elapsedMs - preceding.elapsedMs < 3000) return;
+    if (work.snapshots.length < 32) work.snapshots.push(latest);
+    else { work.snapshots[31] = latest; work.truncated = true; }
+  };
+  return {
+    get result(): InstalledEnrollWork | undefined { return seen ? work : undefined; },
+    write(bytes: Buffer, elapsedMs: number): void {
+      if (!Number.isSafeInteger(elapsedMs) || elapsedMs < 0) return;
+      for (let offset = 0; offset < bytes.length;) {
+        const newline = bytes.indexOf(10, offset), end = newline < 0 ? bytes.length : newline + 1;
+        if (!discard) {
+          const part = bytes.subarray(offset, end);
+          if (tail.length + part.length > 256) { tail.fill(0); tail = Buffer.alloc(0); discard = true; }
+          else tail = Buffer.concat([tail, part]);
+        }
+        if (newline >= 0) {
+          const frame = discard ? undefined : decodeEnrollWorkFrame(tail);
+          tail.fill(0); tail = Buffer.alloc(0); discard = false;
+          if (frame) {
+            seen = true;
+            if ('truncated' in frame) work.truncated = true;
+            else {
+              const preceding = latest;
+              const sameRole = preceding?.role === frame.role;
+              const regressed = sameRole && (['package', 'revalidate', 'createCompare'] as const).some(kind =>
+                (['started', 'completed', 'bytesRead', 'spanElapsedMs'] as const).some(key => frame[kind][key] < preceding[kind][key]));
+              if (preceding && (elapsedMs < preceding.elapsedMs || preceding.role === 'credential' && frame.role === 'bootstrap') || regressed)
+                work.truncated = true;
+              else {
+                const nativeCut = !sameRole || frame.createCompare.started !== preceding!.createCompare.started ||
+                  frame.createCompare.completed !== preceding!.createCompare.completed;
+                latest = { elapsedMs, ...frame }; retain(nativeCut);
+              }
+            }
+          }
+        }
+        offset = end;
+      }
+    },
+    finish(): void { retain(true); tail.fill(0); tail = Buffer.alloc(0); discard = false; },
+  };
 }
 
 export type EnrollProcessCounters = Readonly<{ pid: number; parent: number; group: number; session: number;
@@ -49,6 +125,7 @@ export type InstalledEnrollDiagnostic = {
   /** First 32 complete markers observed on this original child's scanned
    * stderr; not a realtime state, full trace or credential/effect authority. */
   phases: Array<{ elapsedMs: number; phase: InstalledCredentialPhase }>;
+  work?: InstalledEnrollWork;
 };
 type Fact = { pid: number; parent: number; group: number; session: number; start: string; uids: number[]; raw: string };
 async function processFact(pid: number): Promise<Fact | undefined> {
@@ -99,6 +176,7 @@ export async function runOwnedEnrollDiagnostic(input: Readonly<{
   Object.assign(diagnostic, { diagnosticOnly: true, originalDeadlineMs: input.originalDeadlineMs, elapsedMs: 0, outcome: 'observation_failed',
     launcherObserved: false, authObserved: false, launcherJoined: false, authJoined: false, processAndPipesJoined: false,
     completeInputWriteJoined: false, samples: [], phases: [] });
+  delete diagnostic.work;
   const images = await Promise.all([stat(input.bootstrapImage, { bigint: true }), stat(input.installedImage, { bigint: true })]);
   assert(images.every(image => image.isFile()));
   const scans: ReturnType<CredentialSecretScanner['openStream']>[] = [];
@@ -119,6 +197,7 @@ export async function runOwnedEnrollDiagnostic(input: Readonly<{
   let failure: unknown, error: (Error & { code: string }) | undefined, stopping: Promise<void> | undefined;
   const stdout: Buffer[] = [], stderr: Buffer[] = []; let captured = 0, inputJoined = false, inputStarted = false, monitorDone = false;
   let phaseTail = Buffer.alloc(0), discardPhaseLine = false;
+  const work = createEnrollWorkObservation();
   const observePhases = (bytes: Buffer) => {
     // Preserve the original raw output/scanner budget independently. Only a
     // small complete source-owned marker can become retained diagnostic data.
@@ -183,7 +262,10 @@ export async function runOwnedEnrollDiagnostic(input: Readonly<{
     catch (error) { failure ??= error; fail('observation_failed', 'ESCAN'); stop(); return; }
     if (captured + bytes.length > 2 * 1024 * 1024) { fail('output_limit', 'ENOBUFS'); stop(); return; }
     captured += bytes.length; chunks.push(Buffer.from(bytes));
-    if (index === 1) observePhases(bytes);
+    if (index === 1) {
+      observePhases(bytes); work.write(bytes, Math.floor(performance.now() - started));
+      if (work.result) diagnostic.work = work.result;
+    }
   };
   child.stdout.on('data', (bytes: Buffer) => capture(stdout, bytes, 0));
   child.stderr.on('data', (bytes: Buffer) => capture(stderr, bytes, 1));
@@ -292,6 +374,7 @@ export async function runOwnedEnrollDiagnostic(input: Readonly<{
     catch (error) { cleanup.push(error); }
     for (const scan of scans) scan.close();
     phaseTail.fill(0); phaseTail = Buffer.alloc(0);
+    work.finish();
     diagnostic.completeInputWriteJoined = inputJoined;
     diagnostic.elapsedMs = Math.floor(performance.now() - started);
   }

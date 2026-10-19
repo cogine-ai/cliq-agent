@@ -33,10 +33,12 @@ test('stop diagnosis retains only fixed phases and bounded counts, never journal
     { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
   const counters = { driverTasks: 1, agentLoads: 0, admissions: 0, modelOperations: 0, modelCompletions: 0, modelClosures: 0 };
   const valid = { diagnosticOnly: true, scope: 'installed-shutdown-progress', phases: { result_recovery: 1 }, ...counters };
-  const recovery = { ...valid, phases: Object.fromEntries(['spec', 'context', 'journal', 'generations', 'history', 'seals', 'terminal']
+  const recovery = { ...valid, phases: Object.fromEntries(['spec', 'context', 'journal', 'generations', 'history', 'history_model',
+    'history_items', 'history_candidate', 'history_verifier', 'history_tool', 'history_input', 'history_broker', 'seals', 'terminal']
     .map(stage => [`result_recovery_${stage}`, 1])) };
   const untrusted = [valid, { ...valid, phases: { arbitrary_payload: 1 } }, { ...valid, driverTasks: 1001 },
-    { ...valid, phases: { result_commit: -1 } }, { ...valid, modelClosures: '1' }, recovery];
+    { ...valid, phases: { result_commit: -1 } }, { ...valid, modelClosures: '1' },
+    { ...valid, phases: { result_recovery_history_unknown: 1 } }, recovery];
   let scans = 0, calls = 0;
   const context = { Buffer, ledger: { uid: 12345 }, environment: {}, parseJsonStrict: JSON.parse,
     scanBytes: bytes => { assert(Buffer.isBuffer(bytes)); scans++; },

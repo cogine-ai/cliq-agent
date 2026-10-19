@@ -485,6 +485,8 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
             const labels = ['scheduled', 'drive_material', 'drive_agent', 'drive_retirement', 'drive_verify', 'drive_finalize',
               'terminal_retirement', 'result_recovery', 'result_recovery_spec', 'result_recovery_context', 'result_recovery_journal',
               'result_recovery_generations', 'result_recovery_history', 'result_recovery_seals', 'result_recovery_terminal',
+              'result_recovery_history_model', 'result_recovery_history_items', 'result_recovery_history_candidate',
+              'result_recovery_history_verifier', 'result_recovery_history_tool', 'result_recovery_history_input', 'result_recovery_history_broker',
               'result_basis', 'result_finalization', 'result_publication', 'result_session', 'result_commit'];
             const counters = ['driverTasks', 'agentLoads', 'admissions', 'modelOperations', 'modelCompletions', 'modelClosures'] as const;
             if (!phases || typeof phases !== 'object' || Array.isArray(phases) || Object.keys(phases).some(key => !labels.includes(key)) ||

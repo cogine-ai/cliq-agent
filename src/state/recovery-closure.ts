@@ -571,7 +571,8 @@ async function validateLaunchGraph(
 }
 
 /** Fixed, inert progress only: no refs, timing, authority or retry decisions. */
-export type RecoveryClosurePhase = 'spec' | 'context' | 'journal' | 'generations' | 'history' | 'seals' | 'terminal';
+export type RecoveryClosurePhase = 'spec' | 'context' | 'journal' | 'generations' | 'history' |
+  `history_${import('./agent-recovery.js').AgentRecoveryPhase}` | 'history_broker' | 'seals' | 'terminal';
 
 export async function readRecoveryClosure(
   driver: SqliteDriver,
@@ -718,12 +719,16 @@ export async function readRecoveryClosure(
       const history = await validateAgentRecovery({ driver, artifacts, run, spec: runSpec, items, journal,
         principalId: databaseCut.principalId, workspaceIdentityRef: databaseCut.workspaceIdentityRef,
         checkpoints: databaseCut.checkpoints, workspaceGenerations: generationProofs,
-        context: decodeContextManifest(await artifacts.readCanonical(latestCheckpoint.contextManifestRef)) });
+        context: decodeContextManifest(await artifacts.readCanonical(latestCheckpoint.contextManifestRef)) },
+      value => phase(`history_${value}`));
       journalBudgets.consumed = addBudget(journalBudgets.consumed,
         { ...ZERO_BUDGET, repairAttempts: history.repairAttempts }, 'recovery authorized repair budget');
       const assembly = await artifacts.readCanonical<RunAssemblyV1>(runSpec.assemblyRef);
-      if (assembly.format === 'cliq-run-assembly-v1') await validateInstalledBrokerAmbiguityHistory({ driver, artifacts,
-        run, spec: runSpec, assembly, journal, principalId: databaseCut.principalId });
+      if (assembly.format === 'cliq-run-assembly-v1') {
+        phase('history_broker');
+        await validateInstalledBrokerAmbiguityHistory({ driver, artifacts,
+          run, spec: runSpec, assembly, journal, principalId: databaseCut.principalId });
+      }
     } catch (error) {
       recoveryFailure(`typed agent recovery closure is invalid: ${(error as Error).message}`, error);
     }

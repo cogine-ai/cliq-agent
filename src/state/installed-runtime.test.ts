@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, sign } from 'node:crypto';
-import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { channel } from 'node:diagnostics_channel';
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -18,6 +19,7 @@ import { openInstalledLinuxWorkerLauncher } from '../sandbox/linux-worker.js';
 import { KernelStorageError } from './errors.js';
 import { GUEST_EXTRACTOR_RECIPE } from '../sandbox/guest-toolchain.js';
 import { observeInstalledCredentialSupervisor } from './installed-services.js';
+import { INSTALLED_WORK_CHANNEL, type InstalledWorkSnapshot } from './installed-work-diagnostics.js';
 
 /** Real signed files for installer/CAS semantics only. The opaque executable
  * entries are deliberately not running Supervisor/worker/addon images and are
@@ -118,6 +120,40 @@ test('installed read-only manager observation rejects structural selections befo
   assert.throws(() => loadInstalledManagerObserver(fake as HeldInstalledRuntime), { code: 'ARTIFACT_MISMATCH' });
   assert.throws(() => assertInstalledManagerObservationAvailable(fake as HeldInstalledRuntime), { code: 'ARTIFACT_MISMATCH' });
   assert.equal(inspected, false);
+});
+
+if (process.platform === 'linux') test('installed work measurements count the real complete package and both independent guest copies without changing validation', async () => {
+  const fixture = await realpath(await mkdtemp(path.join(os.tmpdir(), 'cliq-installed-work-')));
+  const packageRoot = path.join(fixture, 'package'), stateRoot = path.join(fixture, 'state');
+  const diagnostic = channel(INSTALLED_WORK_CHANNEL), observed: InstalledWorkSnapshot[] = [];
+  const subscriber = (value: unknown) => { if (typeof value === 'object') observed.push(value as InstalledWorkSnapshot); };
+  let selected: HeldInstalledRuntime | undefined;
+  try {
+    const signed = await writeInstallerOnlyPackage(packageRoot, undefined, undefined, Buffer.alloc(ARTIFACT_CHUNK_BYTES + 17, 0x61));
+    const runtime = createInstalledRuntime({ releaseKeys: signed.releaseKeys });
+    const installation = await runtime.installInitial({ packageRoot, stateRoot });
+    const manifestBytes = canonicalJsonBytes(signed.bundle).length;
+    const packageBytes = manifestBytes + signed.contents.reduce((sum, entry) => sum + entry.bytes.length, 0);
+    const activeBytes = (await readFile(path.join(stateRoot, 'runtime/active.json'))).length;
+    const casRoot = path.join(stateRoot, KERNEL_CAS_DIRECTORY);
+    let casBytes = 0;
+    for (const name of await readdir(casRoot)) casBytes += (await readFile(path.join(casRoot, name))).length;
+    const supervisorBytes = signed.contents.find(entry => entry.role === 'supervisor')!.bytes.length;
+    const revalidationBytes = activeBytes + packageBytes + supervisorBytes + casBytes;
+    diagnostic.subscribe(subscriber);
+    selected = await runtime.openSelected(stateRoot);
+    const opened = observed.at(-1)!;
+    assert.deepEqual({ ...opened.package, spanElapsedMs: 0 }, { started: 1, completed: 1, bytesRead: packageBytes, spanElapsedMs: 0 });
+    assert.deepEqual({ ...opened.revalidate, spanElapsedMs: 0 }, { started: 1, completed: 1, bytesRead: revalidationBytes, spanElapsedMs: 0 });
+    await selected.assertHeld();
+    assert.equal(observed.at(-1)!.revalidate.bytesRead, revalidationBytes * 2);
+    const supervisor = path.join(stateRoot, 'runtime/bundles', installation.bundleDigest, 'supervisor');
+    await chmod(supervisor, 0o700); await writeFile(supervisor, 'changed'); await chmod(supervisor, 0o500);
+    await assert.rejects(selected.assertHeld(), { code: 'ARTIFACT_MISMATCH' });
+    assert.equal(observed.at(-1)!.revalidate.started, 3); assert.equal(observed.at(-1)!.revalidate.completed, 3);
+  } finally {
+    diagnostic.unsubscribe(subscriber); await selected?.close(); await rm(fixture, { recursive: true, force: true });
+  }
 });
 
 if (process.platform === 'linux') test('readiness hints cannot outlive a genuine selected runtime close', async () => {

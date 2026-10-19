@@ -6,7 +6,7 @@ import { canonicalSha256 } from '../../../src/kernel/canonical.js';
 import { identityHash } from '../../../src/kernel/identity.js';
 import type { ProcessContainmentDeathEvidenceV1, ProcessContainmentPlanV1, SandboxLaunchSpecV1 } from '../../../src/kernel/execution.js';
 import type { VerificationReceipt, VerifierStopEvidence, VerifierStopItem } from '../../../src/kernel/verifier.js';
-import type { RunFrontier, SourceManifest, WorkspaceEntryManifest, WorkspaceStateManifest } from '../../../src/kernel/types.js';
+import type { RunFrontier, SourceManifest, WorkspaceEntryManifest, WorkspaceGenerationSnapshotEvidenceV1, WorkspaceStateManifest } from '../../../src/kernel/types.js';
 import { stopCheckpointId } from '../../../src/runtime/stop.js';
 import { createLinuxWorkerCampaignFixture } from '../../../src/sandbox/testing/worker-campaign-fixture.js';
 import { sampleCanonicalNow } from '../../../src/state/canonical-time.js';
@@ -15,6 +15,7 @@ import { uuidv7 } from '../../../src/state/testing/fixtures.js';
 import { verifierCheckpointId, type VerifierRetirementV1 } from '../../../src/state/verifier-recovery.js';
 import { inspectInstalledWorkerRetirementHistory } from './installed-worker-lease.js';
 import { recordGuestVerifierBoundaryFailure } from './guest-verifier-diagnostics.js';
+import { assertGuestVerifierParentRetirement } from './guest-verifier-retirement.js';
 
 const successfulScript = `import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -170,7 +171,12 @@ test('must really exceed output cap',()=>{for(let i=0;i<32;i++)fs.writeSync(1,Bu
       assert.equal(retirement.attempt, claim.attempt); assert.equal(retirement.dispatchId, claim.dispatchId);
       assert.equal(retirement.leaseEpoch, claim.leaseEpoch); assert.equal(retirement.checkpointId, checkpoint.id);
       assert.equal(verifierWorker.leaseEpoch, claim.leaseEpoch);
-      assert.equal(verifierWorker.retirementEvidenceRef, retirement.parentRetirementEvidenceRef);
+      const parentSnapshot = await store.artifacts.readCanonical<WorkspaceGenerationSnapshotEvidenceV1>(verifierWorker.snapshotEvidenceRef);
+      if (parentSnapshot.purpose !== 'sealed_to_checkpoint') assert.fail('actual verifier parent must have its original sealed snapshot');
+      const parentD0 = await store.artifacts.readCanonical<ProcessContainmentDeathEvidenceV1>(parentSnapshot.quiescenceEvidenceRef);
+      const parentD1 = await store.artifacts.readCanonical<ProcessContainmentDeathEvidenceV1>(verifierWorker.retirementEvidenceRef);
+      assertGuestVerifierParentRetirement({ worker: verifierWorker, retirement, snapshot: parentSnapshot,
+        initialDeath: parentD0, finalDeath: parentD1, checkpoint });
       assert.equal(verifierWorker.snapshotEvidenceRef, retirement.snapshotEvidenceRef);
       assert.equal(retirement.workspaceStateRef, checkpoint.workspaceStateRef);
       assert.equal(retirement.sourceAfterRef, receipt.resultSourceRef); assert.equal(retirement.sourceAfterDigest, receipt.sourceDigestAfter);

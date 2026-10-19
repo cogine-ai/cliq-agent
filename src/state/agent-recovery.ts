@@ -25,6 +25,9 @@ import type { SqliteDriver } from './sqlite-driver.js';
 import { readVerifierProgress, type VerifierProgress } from './verifier-recovery.js';
 import { validateVerifierHistory } from './verifier-history.js';
 
+/** Fixed inert boundaries only, never refs, timing or execution authority. */
+export type AgentRecoveryPhase = 'model' | 'items' | 'candidate' | 'verifier' | 'tool' | 'input';
+
 /** Recovery checks retained reachability/identity; loading the agent additionally reproduces native requests and validates schemas. */
 export async function validateAgentRecovery(input: {
   driver?: SqliteDriver;
@@ -32,7 +35,8 @@ export async function validateAgentRecovery(input: {
   journal: InvocationJournalEntry[]; context: ContextManifest;
   checkpoints: Checkpoint[]; workspaceGenerations: WorkspaceGenerationStateV1[];
   principalId: string; workspaceIdentityRef: string;
-}): Promise<{ repairAttempts: number }> {
+}, onPhase?: (phase: AgentRecoveryPhase) => void): Promise<{ repairAttempts: number }> {
+  const phase = (value: AgentRecoveryPhase) => { try { onPhase?.(value); } catch { /* Diagnosis cannot decide recovery. */ } };
   const { artifacts, run, spec, journal } = input;
   const workspace = decodeWorkspaceIdentity(await readCanonicalArtifact(artifacts, input.workspaceIdentityRef));
   const source = decodeSourceManifest(await readCanonicalArtifact(artifacts, spec.baseWorkspaceManifestRef));
@@ -44,6 +48,7 @@ export async function validateAgentRecovery(input: {
   const assembly = decodeRetainedRunAssembly(await readCanonicalArtifact(artifacts, spec.assemblyRef));
   const requests = new Map<string, ModelRequestV1>();
   const operationRequests = new Map<string, ModelRequestV1>();
+  phase('model');
   for (const prepared of journal.filter((entry) => entry.opKind === 'model' && entry.phase === 'prepared')) {
     const request = await readCanonicalArtifact<ModelRequestV1>(artifacts, prepared.requestRef);
     if (request.schemaVersion !== 1 || request.format !== 'cliq-model-request-v1' ||
@@ -114,6 +119,7 @@ export async function validateAgentRecovery(input: {
       turns.set(entry.resultRef, material);
     } else throw new TypeError('model completion has an untyped result');
   }
+  phase('items');
   const items = new Map<string, ContinuationItem>();
   for (const row of input.items) {
     const item = await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef);
@@ -171,6 +177,7 @@ export async function validateAgentRecovery(input: {
       if (payload.outcome === 'error') await artifacts.readBytes(payload.diagnosticRef);
     }
   }
+  phase('candidate');
   const verifierProgressByCandidate = new Map<string, VerifierProgress>();
   for (const row of input.items.filter(row => items.get(row.itemId)?.kind === 'final_candidate')) {
     if (!input.driver) throw new TypeError('candidate recovery requires its owning retained SQLite cut');
@@ -180,13 +187,16 @@ export async function validateAgentRecovery(input: {
   }
   await validateFinalCandidateRecovery({ artifacts, run, spec, items: input.items, journal,
     checkpoints: input.checkpoints, workspaceGenerations: input.workspaceGenerations, decodedItems: items, verifierProgressByCandidate });
+  phase('verifier');
   let repairAttempts = 0;
   if (input.driver) ({ repairAttempts } = await validateVerifierHistory({ driver: input.driver, artifacts, run, spec, items: input.items, journal,
     checkpoints: input.checkpoints, workspaceGenerations: input.workspaceGenerations, decodedItems: items, verifierProgressByCandidate }));
   else if ([...items.values()].some(item => ['final_candidate', 'verifier_result', 'verifier_stop', 'repair_diagnostic'].includes(item.kind)) ||
     journal.some(entry => entry.opKind === 'verifier') || run.repairCount || run.budgetConsumed.repairAttempts)
     throw new TypeError('verifier history requires its original retained SQLite cut');
+  phase('tool');
   await validateToolRecovery({ artifacts, run, spec, items, journal, checkpoints: input.checkpoints, workspaceGenerations: input.workspaceGenerations });
+  phase('input');
   await validateUserInputRecovery({ artifacts, run, spec, items, journal, checkpoints: input.checkpoints });
   validateContextItems(input.context, input.items.map((row) => ({
     itemSeq: row.itemSeq, itemRef: row.payloadRef, item: items.get(row.itemId)!

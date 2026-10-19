@@ -5,7 +5,6 @@
 #include <signal.h>
 #include <sys/socket.h>
 #include <sys/time.h>
-#include <sys/wait.h>
 #include <unistd.h>
 
 static volatile sig_atomic_t interrupted;
@@ -80,13 +79,9 @@ int main(void) {
     assert(close(channel[0]) == 0 && close(channel[1]) == 0);
 
     assert(socketpair(AF_UNIX, SOCK_STREAM, 0, channel) == 0);
-    pid_t child = fork(); assert(child >= 0);
-    if (child == 0) {
-        close(channel[1]); struct timespec pause = {0, 30000000};
-        for (int index = 0; index < 2; index++) { nanosleep(&pause, NULL); if (write(channel[0], "x", 1) != 1) _exit(1); }
-        pause.tv_nsec = 250000000; nanosleep(&pause, NULL); close(channel[0]); _exit(0);
-    }
-    assert(close(channel[0]) == 0); start = cliq_verifier_setup_now();
+    /* Queued progress must use the same absolute budget. Do not require a
+     * separately scheduled child to deliver before the test's deadline. */
+    assert(write(channel[0], "xx", 2) == 2); start = cliq_verifier_setup_now();
     const int64_t deadline = start + 150;
     for (int index = 0; index < 2; index++) {
         assert(cliq_verifier_setup_readable(channel[1], start, deadline, &observation, NULL));
@@ -94,7 +89,12 @@ int main(void) {
     }
     assert(!cliq_verifier_setup_readable(channel[1], start, deadline, &observation, NULL));
     assert(observation.poll_result == 0 && observation.elapsed_ms >= 150 && observation.elapsed_ms < 2000);
-    assert(close(channel[1]) == 0); int status;
-    assert(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    /* Expired budget wins even over already readable data: do not poll or
+     * consume it, and do not restart the clock for another progress packet. */
+    assert(write(channel[0], "x", 1) == 1);
+    assert(!cliq_verifier_setup_readable(channel[1], start, deadline, &observation, NULL));
+    assert(observation.poll_result == -2 && observation.poll_revents == 0 && observation.poll_errno == 0);
+    assert(read(channel[1], &byte, 1) == 1 && byte == 'x');
+    assert(close(channel[0]) == 0 && close(channel[1]) == 0);
     return 0;
 }
