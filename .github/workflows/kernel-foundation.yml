@@ -723,6 +723,7 @@ jobs:
           node --test --import tsx scripts/kernel/testing/guest-verifier-process.test.ts scripts/kernel/testing/guest-verifier-diagnostics.test.ts
           regression="$RUNNER_TEMP/cliq-worker-seccomp-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           channel_regression="$RUNNER_TEMP/cliq-worker-channel-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          hash_regression="$RUNNER_TEMP/cliq-worker-sha256-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           musl-gcc -std=c11 -O2 -Wall -Wextra -Werror -static \
             -idirafter /usr/include -idirafter "/usr/include/$(musl-gcc -dumpmachine)" \
             native/linux/worker-channel.test.c -o "$channel_regression"
@@ -731,6 +732,10 @@ jobs:
             -idirafter /usr/include -idirafter "/usr/include/$(musl-gcc -dumpmachine)" \
             native/linux/worker-seccomp.test.c -o "$regression"
           "$regression"
+          musl-gcc -std=c11 -O2 -Wall -Wextra -Werror -static \
+            -idirafter /usr/include -idirafter "/usr/include/$(musl-gcc -dumpmachine)" \
+            native/linux/worker-sha256.test.c -o "$hash_regression"
+          "$hash_regression"
       - name: Build real execution images
         id: images
         shell: bash

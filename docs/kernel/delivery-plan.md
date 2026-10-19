@@ -1167,3 +1167,55 @@ fixture-contract and real-I/O-hook drift, strengthens the guest-process
 observation, and attempts bounded read/hash overlap without removing any
 complete-image revalidation. All positive installed recovery and timing cuts
 above remain unverified until the corresponding actual campaigns pass.
+
+The next exact tree, `f2d117ef05a1ab5b7bba8937132bf3e60cd6bc74`, also passes
+its isolated original build and full test command: 2,549 passes and the same
+single conditional cross-filesystem skip, zero failures/cancellations/todos.
+Linux run `39266723237`, attempt 1, finishes with sixteen successful and three
+failed jobs. The native lifecycle step passes, and the received-tool shutdown
+journey observes the original service exit within two seconds and the cold
+successor's once-only settlement within the original thirty seconds. Neither
+result qualifies Delivery publication or the remaining exact crash cuts.
+
+The three remaining failures are distinct. Delivery's first client still
+exceeds its original five-second authentication deadline, before publication
+starts. The verifier job fails a newly added natural-zombie fixture before
+running its installed journey: the fixture's five-second lifetime cannot
+cover the monitor's existing six-second sample schedule. That fixture needs
+repair, not an extension of production enroll, readiness or stop deadlines.
+The guest verifier separately reports `node_check` at its original five-second
+READY timeout; this observation alone does not identify hash CPU, throttling,
+memory pressure, a particular test case, or successful Node execution.
+
+The closed final capture retains eighteen report categories, with zero rejected
+artifacts; the verifier journey report was never generated because its earlier
+fixture failed. Its manifest SHA-256 is
+`948094edb84d93f26994fe068adc2b41a38f0f474d111837436514c35362132d`.
+Complete-image revalidation, fixed resource limits and all original deadlines
+remain required. Local parallel-hash measurements and source-level performance
+hypotheses are not installed Linux qualification. Package A and I1 remain
+incomplete; no PR is opened on the strength of those measurements.
+
+The development discard-only reader now uses a fresh bounded batch for each
+original revalidation; no revalidation call, independent inode or byte is
+deduplicated. At least two original files of 8 MiB each are needed to start
+workers: two lanes normally, four for at least four large files. Main-isolate
+discard batches share one cancellable permit, and their total live hash scratch
+is one MiB including idle workers. Other isolates and retaining reads keep their
+original pipeline; this is not a process-wide RSS or arbitrary-isolate allocator.
+Each new worker has fixed old/young/code-range/stack limits of 16/4/2/1 MiB,
+with additional Node/native overhead. Fixed CJS is embedded in the signed image;
+tasks borrow original FDs, not paths or caller code. Every actual worker exit
+precedes permit release and FD retirement. Accepted-borrow close semantics and
+all post-native verification remain unchanged.
+
+The native SHA-256 reader also retains its original portable implementation.
+Only a real per-context CPUID check for SHA, SSSE3 and SSE4.1 selects the local
+hardware transform; unsupported CPUs retain portable compression. Complete
+bytes, padding, identity, seals, publication snapshots and resource/deadline
+guards are unchanged. Local portable vectors, independent digest comparisons
+and exact Node 24.21 ordinary/SEA worker mechanisms do not qualify real SHA-NI,
+musl, installed publication or the original Linux readiness deadline. The
+existing free native job must execute the actual musl-built algorithm vectors
+before running its unchanged guest campaign. No capability is enabled by these
+optimizations alone.

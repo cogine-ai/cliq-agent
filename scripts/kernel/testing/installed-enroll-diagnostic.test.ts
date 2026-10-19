@@ -202,14 +202,18 @@ test('a naturally exited original auth zombie is not a live foreign image and jo
       await copyFile(process.execPath, image); await chmod(image, 0o500);
       const accepted = once(server, 'connection') as Promise<[net.Socket]>;
       const socketPath = path.join(fixture, 'control'); server.listen(socketPath); await once(server, 'listening');
+      // This idle fixture must reach the original monitor's later sample:
+      // initial + first-auth observations can schedule it at six seconds.
+      // Its own 10s lifetime is not installed enroll's 60s, READY's 5s or
+      // Stop's 2s standard; none of those or the production cadence change.
+      const by = performance.now() + 10000;
       completed = runOwnedEnrollDiagnostic({ command: { executable: launcher,
         args: ['--enroll-natural-exit', image, socketPath], cwd: fixture, env: {} }, input: Buffer.from('fixture-private-input'),
-        uid: process.geteuid!(), bootstrapImage: image, installedImage: image, originalDeadlineMs: 5000, scanner, diagnostic })
+        uid: process.geteuid!(), bootstrapImage: image, installedImage: image, originalDeadlineMs: 10000, scanner, diagnostic })
         .then(value => ({ value }), error => ({ error }));
       [control] = await joinedWithin(accepted, 5000); controlJoined = once(control, 'close');
       let message = '', oversized = false;
       control.on('data', bytes => { if (message.length + bytes.length > 128) oversized = true; else message += bytes.toString('ascii'); });
-      const by = performance.now() + 5000;
       while (!message.endsWith('\n')) { assert(!oversized && performance.now() < by); await delay(5); }
       const live = /^LIVE ([1-9][0-9]*)\n$/u.exec(message); assert(live);
       const pid = Number(live[1]);

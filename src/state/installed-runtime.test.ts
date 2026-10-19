@@ -7,6 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { rootCertificates } from 'node:tls';
+import { Worker } from 'node:worker_threads';
 
 import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME, KERNEL_STATE_SCHEMA_VERSION } from '../config.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
@@ -130,7 +131,7 @@ if (process.platform === 'linux') test('installed work measurements count the re
   const subscriber = (value: unknown) => { if (typeof value === 'object') observed.push(value as InstalledWorkSnapshot); };
   let selected: HeldInstalledRuntime | undefined;
   try {
-    const image = Buffer.alloc(2 * 1_048_576 + 17, 0x61);
+    const image = Buffer.alloc(8 * 1_048_576 + 17, 0x61);
     image.fill(0x63, 1_048_576, 2 * 1_048_576); image[image.length - 1] = 0x7a;
     const signed = await writeInstallerOnlyPackage(packageRoot, undefined, undefined, image);
     const runtime = createInstalledRuntime({ releaseKeys: signed.releaseKeys });
@@ -165,7 +166,7 @@ if (process.platform === 'linux') for (const copy of ['bundle', 'cas'] as const)
     const packageRoot = path.join(fixture, 'package'), stateRoot = path.join(fixture, 'state');
     let selected: HeldInstalledRuntime | undefined;
     try {
-      const image = Buffer.alloc(2 * 1_048_576 + 17, 0x61);
+      const image = Buffer.alloc(8 * 1_048_576 + 17, 0x61);
       image.fill(0x63, 1_048_576, 2 * 1_048_576); image[image.length - 1] = 0x7a;
       const signed = await writeInstallerOnlyPackage(packageRoot, undefined, undefined, image);
       const runtime = createInstalledRuntime({ releaseKeys: signed.releaseKeys });
@@ -335,6 +336,121 @@ if (process.platform === 'linux') test('selected close waits for a submitted rea
     await rm(fixture, { recursive: true, force: true });
   }
 });
+
+if (process.platform === 'linux') for (const laneCount of [2, 4] as const) test(`discard batches join all ${laneCount} actual hash Workers before original image FDs close`, async () => {
+  const fixture = await realpath(await mkdtemp(path.join(os.tmpdir(), 'cliq-installed-hash-exit-')));
+  let selected: HeldInstalledRuntime | undefined, reopened: HeldInstalledRuntime | undefined;
+  let checking: Promise<void> | undefined, closing: Promise<void> | undefined;
+  let prototype: object | undefined, statDescriptor: PropertyDescriptor | undefined;
+  const postDescriptor = Object.getOwnPropertyDescriptor(Worker.prototype, 'postMessage')!;
+  const actual = new Map<number, FileHandle>(), workers = new Set<Worker>(), exited = new Set<Worker>();
+  const closes = new Map<FileHandle, { descriptor: PropertyDescriptor; attempts: number }>();
+  const delayed: Array<{ worker: Worker; args: unknown[] }> = [];
+  let armed = false, borrowed = false, earlyClose = false, ready!: () => void;
+  const bothClosing = new Promise<void>(resolve => { ready = resolve; });
+  const release = () => { for (const job of delayed.splice(0)) Reflect.apply(postDescriptor.value, job.worker, job.args); };
+  const restore = () => {
+    Object.defineProperty(Worker.prototype, 'postMessage', postDescriptor);
+    if (prototype && statDescriptor) Object.defineProperty(prototype, 'stat', statDescriptor);
+    for (const [handle, value] of closes) Object.defineProperty(handle, 'close', value.descriptor);
+  };
+  try {
+    const packageRoot = path.join(fixture, 'package'), stateRoot = path.join(fixture, 'state');
+    const image = Buffer.alloc(8 * 1_048_576 + 17, 0x61); image[image.length - 1] = 0x7a;
+    const supervisor = laneCount === 4 ? Buffer.alloc(8 * 1_048_576 + 31, 0x73) : undefined;
+    const signed = await writeInstallerOnlyPackage(packageRoot, undefined, supervisor, image);
+    const runtime = createInstalledRuntime({ releaseKeys: signed.releaseKeys });
+    await runtime.installInitial({ packageRoot, stateRoot }); selected = await runtime.openSelected(stateRoot);
+    const probe = await open(path.join(stateRoot, 'runtime/active.json'), constants.O_RDONLY | constants.O_NOFOLLOW);
+    try { prototype = Object.getPrototypeOf(probe); } finally { await probe.close(); }
+    statDescriptor = Object.getOwnPropertyDescriptor(prototype!, 'stat')!;
+    Object.defineProperty(prototype!, 'stat', { ...statDescriptor, value: function (this: FileHandle, ...args: unknown[]) {
+      if (armed) actual.set(this.fd, this);
+      return Reflect.apply(statDescriptor!.value, this, args);
+    } });
+    Object.defineProperty(Worker.prototype, 'postMessage', { ...postDescriptor, value: function (this: Worker, ...args: unknown[]) {
+      const message = args[0] as { fd?: number; kind?: string } | undefined;
+      if (armed && typeof message?.fd === 'number') {
+        if (!workers.has(this)) { workers.add(this); this.once('exit', () => exited.add(this)); }
+        const handle = actual.get(message.fd); assert(handle, 'the real original parent FileHandle preceded dispatch');
+        if (!closes.has(handle)) {
+          const descriptor = Object.getOwnPropertyDescriptor(handle, 'close')!;
+          const record = { descriptor, attempts: 0 }; closes.set(handle, record);
+          Object.defineProperty(handle, 'close', { ...descriptor, value: function (this: FileHandle, ...closeArgs: unknown[]) {
+            record.attempts++; if ([...workers].some(worker => !exited.has(worker))) earlyClose = true;
+            return Reflect.apply(descriptor.value, this, closeArgs);
+          } });
+        }
+      }
+      if (armed && workers.has(this) && message?.kind === 'close') {
+        // Real hashing has completed; delay only JS delivery of shutdown to
+        // the original Worker. This does not claim physically blocked I/O.
+        delayed.push({ worker: this, args }); if (delayed.length === laneCount) ready(); return;
+      }
+      return Reflect.apply(postDescriptor.value, this, args);
+    } });
+    const abort = new AbortController(), reason = new Error('owned parallel verification cancelled'); armed = true;
+    checking = withHeldInstalledRuntime(selected, async () => { borrowed = true; }, abort.signal);
+    await Promise.race([bothClosing, checking.then(() => { throw new Error('actual hash Workers were not observed'); })]);
+    assert.equal(workers.size, laneCount); assert.equal(exited.size, 0);
+    abort.abort(reason); closing = selected.close(); await new Promise<void>(resolve => setImmediate(resolve));
+    assert([...closes.values()].every(value => value.attempts === 0));
+    release(); await assert.rejects(checking, error => error === reason); await closing;
+    assert.equal(borrowed, false); assert.equal(earlyClose, false); assert.equal(exited.size, laneCount);
+    assert([...closes.values()].every(value => value.attempts === 1));
+    armed = false; restore(); reopened = await runtime.openSelected(stateRoot); await reopened.assertHeld();
+  } finally {
+    armed = false; release(); await Promise.allSettled([...(checking ? [checking] : []), ...(closing ? [closing] : [])]);
+    restore(); await reopened?.close(); await selected?.close(); await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+if (process.platform === 'linux') for (const fault of ['nonplain', 'unsolicited_cancelled', 'undefined_dispatch'] as const) {
+  test(`actual hash Worker ${fault} refuses verification, joins, and cannot clear its failure`, async () => {
+    const fixture = await realpath(await mkdtemp(path.join(os.tmpdir(), 'cliq-installed-hash-refusal-')));
+    let selected: HeldInstalledRuntime | undefined, armed = false, injected = false, borrowed = false;
+    const descriptor = Object.getOwnPropertyDescriptor(Worker.prototype, 'postMessage')!;
+    const workers = new Set<Worker>(), exited = new Set<Worker>();
+    try {
+      const packageRoot = path.join(fixture, 'package'), stateRoot = path.join(fixture, 'state');
+      const image = Buffer.alloc(8 * 1_048_576 + 17, 0x61); image[image.length - 1] = 0x7a;
+      const signed = await writeInstallerOnlyPackage(packageRoot, undefined, undefined, image);
+      const runtime = createInstalledRuntime({ releaseKeys: signed.releaseKeys });
+      await runtime.installInitial({ packageRoot, stateRoot }); selected = await runtime.openSelected(stateRoot);
+      Object.defineProperty(Worker.prototype, 'postMessage', { ...descriptor, value: function (this: Worker, ...args: unknown[]) {
+        const message = args[0] as { fd?: number } | undefined;
+        if (armed && typeof message?.fd === 'number') {
+          if (!workers.has(this)) { workers.add(this); this.once('exit', () => exited.add(this)); }
+          if (!injected) {
+            injected = true;
+            if (fault === 'undefined_dispatch') throw undefined;
+            // Only alter a genuine child's returned inert packet. No positive
+            // proof/Worker/FD is fabricated and no private runtime export exists.
+            this.prependOnceListener('message', (reply: { code: string; digest?: string }) => {
+              if (fault === 'nonplain') Object.setPrototypeOf(reply, null);
+              else { reply.code = 'cancelled'; delete reply.digest; }
+            });
+          }
+        }
+        return Reflect.apply(descriptor.value, this, args);
+      } });
+      armed = true;
+      let rejected = false, reason: unknown;
+      await withHeldInstalledRuntime(selected, async () => { borrowed = true; }).then(
+        () => undefined, error => { rejected = true; reason = error; });
+      assert.equal(injected, true); assert.equal(rejected, true); assert.equal(borrowed, false);
+      assert.equal(exited.size, workers.size, 'every observed real thread exited before rejection returned');
+      if (fault === 'undefined_dispatch') assert.equal(reason, undefined);
+      else assert(reason instanceof KernelStorageError && reason.code === 'ARTIFACT_MISMATCH');
+      const before = workers.size; rejected = false;
+      await selected.assertHeld().then(() => undefined, error => { rejected = true; assert.equal(error, reason); });
+      assert.equal(rejected, true); assert.equal(workers.size, before, 'sticky failure never silently starts replacement work');
+    } finally {
+      armed = false; Object.defineProperty(Worker.prototype, 'postMessage', descriptor);
+      await selected?.close(); await rm(fixture, { recursive: true, force: true });
+    }
+  });
+}
 
 if (process.platform === 'linux') test('readiness hints cannot outlive a genuine selected runtime close', async () => {
   const fixture = await realpath(await mkdtemp(path.join(os.tmpdir(), 'cliq-installed-readiness-close-')));

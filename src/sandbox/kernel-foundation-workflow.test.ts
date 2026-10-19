@@ -76,6 +76,8 @@ test('real guest verifier stays in the existing free bounded job without replaci
   assert(nativeRegression);
   assert.match(nativeRegression, /musl-gcc -std=c11 -O2 -Wall -Wextra -Werror -static[\s\S]*native\/linux\/worker-channel\.test\.c -o "\$channel_regression"\n\s+"\$channel_regression"/u);
   assert.match(nativeRegression, /native\/linux\/worker-seccomp\.test\.c -o "\$regression"\n\s+"\$regression"/u);
+  assert.match(nativeRegression, /musl-gcc -std=c11 -O2 -Wall -Wextra -Werror -static[\s\S]*native\/linux\/worker-sha256\.test\.c -o "\$hash_regression"\n\s+"\$hash_regression"/u,
+    'the actual musl toolchain must execute both portable and real-CPUID-selected SHA vectors before the guest campaign');
   assert.match(job, /libext2fs-dev pkg-config/u);
   assert.match(job, /truncate -s 128M "\$image"/u, 'ordinary native capacity and all existing assertions stay intact');
   assert.match(job, /run-linux-worker-campaign\.ts/u);

@@ -1,14 +1,39 @@
-/* Pure portable algorithm vectors only, not Linux startup or containment. */
+/* Pure algorithm vectors; SHA-NI executes only when real CPUID permits it.
+ * Neither backend's vectors qualify Linux startup or containment. */
 #include "worker-sha256.h"
 #include <assert.h>
 #include <stdlib.h>
+#include <stdio.h>
+
+static void check_cpu_feature_selection(void) {
+    /* Pure CPUID data only. This cannot make unsupported hardware execute an
+     * instruction: the real backend is selected separately by sha256_init. */
+    for (unsigned int mask = 0; mask < 8; mask++) {
+        uint32_t leaf1 = ((mask & 1u) ? UINT32_C(1) << 9 : 0) |
+                         ((mask & 2u) ? UINT32_C(1) << 19 : 0);
+        uint32_t leaf7 = (mask & 4u) ? UINT32_C(1) << 29 : 0;
+        assert(sha256_x86_features_supported(7, leaf1, leaf7) == (mask == 7));
+    }
+    const uint32_t leaf1 = (UINT32_C(1) << 9) | (UINT32_C(1) << 19);
+    const uint32_t leaf7 = UINT32_C(1) << 29;
+    assert(!sha256_x86_features_supported(0, leaf1, leaf7));
+    assert(!sha256_x86_features_supported(1, leaf1, leaf7));
+    assert(!sha256_x86_features_supported(6, leaf1, leaf7));
+    assert(sha256_x86_features_supported(31, leaf1 | 1u, leaf7 | 1u));
+}
 
 static void check_digest(const uint8_t *bytes, size_t length, const char expected[65]) {
     static const size_t chunks[] = { 0, 1, 2, 3, 7, 31, 55, 56, 63, 64, 65, 127, 1024, 65536 };
     static const char digits[] = "0123456789abcdef";
+    for (unsigned int portable = 0; portable < 2; portable++)
     for (size_t selected = 0; selected < sizeof(chunks) / sizeof(chunks[0]); selected++) {
         struct sha256_context hash;
         memset(&hash, 0xa5, sizeof(hash)); sha256_init(&hash);
+        assert(hash.use_x86_sha == sha256_x86_available());
+#if !defined(__x86_64__) || defined(__ILP32__)
+        assert(hash.use_x86_sha == 0);
+#endif
+        if (portable) hash.use_x86_sha = 0;
         sha256_update(&hash, NULL, 0);
         size_t offset = 0, chunk = chunks[selected] == 0 ? length : chunks[selected];
         while (offset < length) {
@@ -21,13 +46,20 @@ static void check_digest(const uint8_t *bytes, size_t length, const char expecte
             assert(hash.data_length == offset % 64 && hash.bit_length == (uint64_t)(offset / 64) * 512);
         }
         sha256_update(&hash, NULL, 0);
-        uint8_t digest[32]; char encoded[65]; sha256_final(&hash, digest);
+        /* Publication retains a by-value snapshot to finalize independently.
+         * Test both partial tails and complete blocks through the same seam. */
+        struct sha256_context snapshot = hash;
+        uint8_t digest[32], copied_digest[32]; char encoded[65];
+        sha256_final(&snapshot, copied_digest);
+        sha256_final(&hash, digest);
+        assert(memcmp(digest, copied_digest, sizeof(digest)) == 0);
         for (size_t i = 0; i < sizeof(digest); i++) { encoded[2 * i] = digits[digest[i] >> 4]; encoded[2 * i + 1] = digits[digest[i] & 15]; }
         encoded[64] = '\0'; assert(strcmp(encoded, expected) == 0);
     }
 }
 
 int main(void) {
+    check_cpu_feature_selection();
     check_digest(NULL, 0, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
     check_digest((const uint8_t *)"abc", 3, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
     static const uint8_t standard[] = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
@@ -58,5 +90,11 @@ int main(void) {
     uint8_t bytes[65537]; for (size_t i = 0; i < sizeof(bytes); i++) bytes[i] = (uint8_t)i;
     for (size_t i = 0; i < sizeof(boundaries) / sizeof(boundaries[0]); i++)
         check_digest(bytes, boundaries[i].length, boundaries[i].digest);
+    uint8_t unaligned[65 + 16];
+    for (size_t offset = 1; offset < 16; offset++) {
+        memcpy(unaligned + offset, bytes, 65);
+        check_digest(unaligned + offset, 65, boundaries[5].digest);
+    }
+    puts(sha256_x86_available() ? "sha256_backends=portable_and_sha_ni" : "sha256_backends=portable");
     return 0;
 }

@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { constants, fstatSync, lstatSync, type BigIntStats } from 'node:fs';
 import { lstat, mkdir, open, readdir, rename, type FileHandle } from 'node:fs/promises';
-import { isMainThread } from 'node:worker_threads';
+import { isMainThread, Worker } from 'node:worker_threads';
 import { Module } from 'node:module';
 import { isSea } from 'node:sea';
 import { setImmediate as yieldImmediate } from 'node:timers/promises';
@@ -366,6 +366,7 @@ function checkFile(info: BigIntStats, mode: number, byteCount?: number): void {
 class Scope {
   readonly directories: Directory[] = [];
   private readonly handles = new Set<FileHandle>();
+  private readonly verifications = new Set<Promise<void>>();
   private closePromise?: Promise<void>;
 
   own(handle: FileHandle): FileHandle { this.handles.add(handle); return handle; }
@@ -383,11 +384,24 @@ class Scope {
   }
   close(): Promise<void> {
     return this.closePromise ??= (async () => {
+      // Accepted borrows still finish. A hash ACK is not retirement: every
+      // registered batch settles only after its original Workers actually exit.
+      const batches = await Promise.allSettled([...this.verifications]);
       const handles = [...this.handles].reverse();
       const results = await Promise.allSettled(handles.map(handle => this.retire(handle)));
-      const failures = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected');
+      const failures = [...batches.filter(result => result.status === 'rejected' && result.reason instanceof ResourceRetirementError),
+        ...results].filter((result): result is PromiseRejectedResult => result.status === 'rejected');
       if (failures.length) throw retirementFailure ?? new ResourceRetirementError('installed runtime retirement did not join', failures.map(result => result.reason));
     })();
+  }
+  verifyDiscard(files: readonly InstalledFile[], signal?: AbortSignal): Promise<void> {
+    if (this.closePromise) return Promise.reject(new KernelStorageError('ARTIFACT_MISMATCH', 'installed runtime scope is closed'));
+    const pending = verifyDiscardFiles(files, signal);
+    // verifyDiscardFiles first awaits its permit. Ownership precedes Worker
+    // construction, including a queued/aborted job or partial startup failure.
+    this.verifications.add(pending);
+    void pending.then(() => this.verifications.delete(pending), () => this.verifications.delete(pending));
+    return pending;
   }
   async assertDirectory(directory: Directory): Promise<void> {
     const held = await directory.handle.stat({ bigint: true });
@@ -514,7 +528,164 @@ async function readSmall(file: InstalledFile, limit = SMALL_BYTES): Promise<Buff
   for await (const chunk of chunks(file)) bytes.push(chunk);
   return Buffer.concat(bytes);
 }
+// Main-isolate discard work shares a single scratch/Worker budget. Other
+// isolates retain the original pipeline and never create additional Workers.
+let discardBusy = false;
+type DiscardWait = { resolve(release: () => void): void; reject(error: unknown): void; signal?: AbortSignal; abort(): void };
+const discardWaits: DiscardWait[] = [];
+function grantDiscard(): void {
+  if (discardBusy) return;
+  const next = discardWaits.shift(); if (!next) return;
+  next.signal?.removeEventListener('abort', next.abort);
+  if (next.signal?.aborted) { next.reject(next.signal.reason); grantDiscard(); return; }
+  discardBusy = true; let released = false;
+  next.resolve(() => { if (!released) { released = true; discardBusy = false; grantDiscard(); } });
+}
+function discardPermit(signal?: AbortSignal): Promise<() => void> {
+  return new Promise((resolve, reject) => {
+    signal?.throwIfAborted();
+    const wait: DiscardWait = { resolve, reject, ...(signal ? { signal } : {}), abort() {
+      const index = discardWaits.indexOf(wait);
+      if (index >= 0) { discardWaits.splice(index, 1); reject(signal!.reason); }
+    } };
+    discardWaits.push(wait); signal?.addEventListener('abort', wait.abort, { once: true }); grantDiscard();
+  });
+}
+const INSTALLED_HASH_WORKER_SOURCE = String.raw`
+const { createHash } = require('node:crypto');
+const { fstatSync, readSync } = require('node:fs');
+const { parentPort, workerData } = require('node:worker_threads');
+if (![2,4].includes(workerData.laneCount) || !Number.isInteger(workerData.lane) ||
+  workerData.lane < 0 || workerData.lane >= workerData.laneCount ||
+  !(workerData.control instanceof SharedArrayBuffer) || workerData.control.byteLength !== 8 + 8 * workerData.laneCount)
+  throw new Error('fixed hash worker configuration is invalid');
+const stop = new Int32Array(workerData.control, 0, 1);
+const counts = new BigInt64Array(workerData.control, 8, workerData.laneCount);
+const scratch = Buffer.allocUnsafe(1048576 / workerData.laneCount);
+const fields = ['dev','ino','size','uid','gid','mode','nlink','mtimeNs','ctimeNs'];
+const check = file => { const actual = fstatSync(file.fd, { bigint: true });
+  if (!fields.every(key => String(actual[key]) === file.info[key])) throw 'metadata'; };
+const cancel = () => { if (Atomics.load(stop, 0)) throw 'cancelled'; };
+parentPort.on('message', file => {
+  if (file.kind === 'close') { parentPort.close(); return; }
+  try {
+    cancel(); check(file); const hash = createHash('sha256'); let at = 0;
+    while (at < file.byteCount) {
+      cancel(); const bytes = readSync(file.fd, scratch, 0, Math.min(scratch.length, file.byteCount - at), at);
+      Atomics.add(counts, workerData.lane, BigInt(bytes)); if (!bytes) throw 'short'; cancel();
+      hash.update(bytes === scratch.length ? scratch : scratch.subarray(0, bytes)); at += bytes;
+    }
+    cancel(); const extra = readSync(file.fd, scratch, 0, 1, at);
+    Atomics.add(counts, workerData.lane, BigInt(extra)); if (extra) throw 'long'; cancel();
+    check(file); parentPort.postMessage({ id: file.id, code: 'ok', digest: hash.digest('hex') });
+  } catch (error) { parentPort.postMessage({ id: file.id,
+    code: ['metadata','cancelled','short','long'].includes(error) ? error : 'read' }); }
+});
+`;
+type HashReply = { id: number; code: 'ok' | 'metadata' | 'cancelled' | 'short' | 'long' | 'read'; digest?: string };
+async function verifyParallelFiles(files: readonly InstalledFile[], signal?: AbortSignal): Promise<void> {
+  const laneCount = files.length >= 4 ? 4 : 2;
+  const control = new SharedArrayBuffer(8 + 8 * laneCount), stop = new Int32Array(control, 0, 1), counts = new BigInt64Array(control, 8, laneCount);
+  const counted = Array<bigint>(laneCount).fill(0n), failures: unknown[] = [];
+  type Lane = { worker: Worker; exited: boolean; exit: Promise<void>; pending?: { id: number; resolve(reply?: HashReply): void } };
+  const lanes: Lane[] = [];
+  const abort = () => { Atomics.store(stop, 0, 1); };
+  const fail = (error: unknown) => { failures.push(error); abort(); };
+  const workerFailure = () => new KernelStorageError('ARTIFACT_MISMATCH', 'installed runtime hash worker failed');
+  const account = () => { for (let index = 0; index < laneCount; index++) {
+    const current = Atomics.load(counts, index), delta = current - counted[index]!;
+    if (delta) noteInstalledWorkRead(Number(delta)); counted[index] = current;
+  } };
+  let next = 0, verified = 0, closing = false;
+  signal?.addEventListener('abort', abort, { once: true });
+  try {
+    signal?.throwIfAborted();
+    for (let index = 0; index < laneCount; index++) {
+      const worker = new Worker(INSTALLED_HASH_WORKER_SOURCE, { eval: true, env: {}, execArgv: [], argv: [],
+        resourceLimits: { maxOldGenerationSizeMb: 16, maxYoungGenerationSizeMb: 4, codeRangeSizeMb: 2, stackSizeMb: 1 },
+        workerData: { control, lane: index, laneCount } });
+      const lane: Lane = { worker, exited: false, exit: new Promise<void>(resolve => worker.once('exit', code => {
+        lane.exited = true;
+        if (code !== 0 || !closing || lane.pending) fail(workerFailure());
+        lane.pending?.resolve(); delete lane.pending; resolve();
+      })) };
+      lanes.push(lane);
+      worker.on('error', () => fail(workerFailure()));
+      worker.on('message', (reply: unknown) => {
+        if (!reply || typeof reply !== 'object' || Object.getPrototypeOf(reply) !== Object.prototype) {
+          fail(workerFailure()); lane.pending?.resolve(); delete lane.pending; return;
+        }
+        const data = Object.getOwnPropertyDescriptors(reply), id = data.id?.value, code = data.code?.value;
+        const keys = Object.keys(data).sort().join(',');
+        if (!lane.pending || id !== lane.pending.id || !['ok', 'metadata', 'cancelled', 'short', 'long', 'read'].includes(code) ||
+          Object.values(data).some(value => !('value' in value)) || keys !== (code === 'ok' ? 'code,digest,id' : 'code,id') ||
+          code === 'ok' && (typeof data.digest?.value !== 'string' || !/^[a-f0-9]{64}$/u.test(data.digest.value))) {
+          fail(workerFailure()); lane.pending?.resolve(); delete lane.pending; return;
+        }
+        lane.pending.resolve(reply as HashReply); delete lane.pending;
+      });
+    }
+    const run = async (lane: Lane) => {
+      while (!Atomics.load(stop, 0) && next < files.length) {
+        const id = next++, file = files[id]!;
+        try {
+          signal?.throwIfAborted(); await assertFile(file); signal?.throwIfAborted();
+          const reply = await new Promise<HashReply | undefined>(resolve => {
+            lane.pending = { id, resolve };
+            try { lane.worker.postMessage({ id, fd: file.handle.fd, byteCount: Number(file.info.size),
+              info: Object.fromEntries(['dev', 'ino', 'size', 'uid', 'gid', 'mode', 'nlink', 'mtimeNs', 'ctimeNs']
+                .map(key => [key, String(file.info[key as keyof BigIntStats])])) }); }
+            catch (error) { delete lane.pending; fail(error); resolve(undefined); }
+          });
+          account(); if (!reply) break;
+          if (reply.code === 'cancelled') {
+            if (!Atomics.load(stop, 0) && !signal?.aborted && !failures.length) fail(workerFailure());
+            break;
+          }
+          if (reply.code !== 'ok') mismatch(reply.code === 'metadata' ? 'installed runtime held file or its independent path changed' :
+            reply.code === 'short' ? 'installed runtime file ended before its signed byte count' :
+            reply.code === 'long' ? 'installed runtime file exceeds its signed byte count' : 'installed runtime original file read failed');
+          await assertFile(file);
+          // A computed SHA mismatch is already an observed real failure; a
+          // simultaneous original abort must not replace it with cancellation.
+          if (file.digest !== undefined && reply.digest !== file.digest) mismatch('installed runtime signed file digest differs');
+          signal?.throwIfAborted(); verified++;
+        } catch (error) { if (!signal?.aborted || error !== signal.reason) fail(error); else abort(); }
+      }
+    };
+    await Promise.all(lanes.map(run));
+  } catch (error) { if (!signal?.aborted || error !== signal.reason) fail(error); else abort(); }
+  finally {
+    abort(); closing = true;
+    for (const lane of lanes) if (!lane.exited) {
+      try { lane.worker.postMessage({ kind: 'close' }); } catch (error) { fail(error); }
+    }
+    await Promise.all(lanes.map(lane => lane.exit));
+    account(); signal?.removeEventListener('abort', abort);
+  }
+  if (failures.length) {
+    const retirement = failures.findIndex(error => error instanceof ResourceRetirementError);
+    throw failures[retirement >= 0 ? retirement : 0];
+  }
+  signal?.throwIfAborted();
+  if (verified !== files.length) throw workerFailure();
+}
+async function verifyDiscardFiles(files: readonly InstalledFile[], signal?: AbortSignal): Promise<void> {
+  if (!isMainThread) { for (const file of files) await verifyBytesPipeline(file, signal); return; }
+  const release = await discardPermit(signal);
+  try {
+    const large = files.filter(file => file.info.size >= 8_388_608n);
+    if (large.length < 2) { for (const file of files) await verifyBytesPipeline(file, signal); return; }
+    for (const file of files) if (file.info.size < 8_388_608n) await verifyBytesPipeline(file, signal);
+    await verifyParallelFiles(large, signal);
+  } finally { release(); }
+}
 async function verifyBytes(file: InstalledFile, signal?: AbortSignal): Promise<void> {
+  if (!isMainThread) return verifyBytesPipeline(file, signal);
+  const release = await discardPermit(signal);
+  try { await verifyBytesPipeline(file, signal); } finally { release(); }
+}
+async function verifyBytesPipeline(file: InstalledFile, signal?: AbortSignal): Promise<void> {
   signal?.throwIfAborted();
   await assertFile(file);
   signal?.throwIfAborted();
@@ -851,7 +1022,7 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
         }
         let closed = false;
         const guestShutdown = new AbortController();
-        let poisoned: unknown;
+        let poisoned: unknown, hasPoisoned = false;
         let tail = Promise.resolve();
         let closePromise: Promise<void> | undefined;
         let workerNative: NativeWorkerBinding | undefined;
@@ -879,15 +1050,15 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
           guestJoins.set(job, pending); return pending;
         };
         const assertSelection = () => {
-          if (poisoned !== undefined) throw poisoned;
+          if (hasPoisoned) throw poisoned;
           try { scope.assertMetadata([active, signed.manifest, bootstrap, ...signed.entries.values(), ...casFiles]); }
-          catch (error) { rememberRetirement(error); poisoned = error; throw error; }
+          catch (error) { rememberRetirement(error); poisoned = error; hasPoisoned = true; throw error; }
         };
         const revalidate = (signal?: AbortSignal) => observeInstalledWork('revalidate', async () => {
           signal?.throwIfAborted();
           healthy(); await scope.assertDirectories();
           signal?.throwIfAborted();
-          for (const file of [active, signed.manifest, bootstrap, ...signed.entries.values(), ...casFiles]) await verifyBytes(file, signal);
+          await scope.verifyDiscard([active, signed.manifest, bootstrap, ...signed.entries.values(), ...casFiles], signal);
           await checkPackageGraph(scope, version, signed.bundle);
           signal?.throwIfAborted();
           await checkSelectedVersion(scope, bundles, signed.bundleDigest); await scope.assertDirectories();
@@ -895,12 +1066,12 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
         });
         await revalidate();
         const checkedRevalidate = async (signal?: AbortSignal) => {
-          if (poisoned !== undefined) throw poisoned;
+          if (hasPoisoned) throw poisoned;
           try { await revalidate(signal); }
           catch (error) {
             // Cancellation joins the same held descriptors; it is not an
             // integrity failure. Never suppress a different concurrent error.
-            if (!signal?.aborted || error !== signal.reason) { rememberRetirement(error); poisoned = error; }
+            if (!signal?.aborted || error !== signal.reason) { rememberRetirement(error); poisoned = error; hasPoisoned = true; }
             throw error;
           }
         };
@@ -1496,7 +1667,7 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
                 });
                 heldInstalledAnchors.set(held, { selected, withRoot(operation) {
                   if (closed) mismatch('installed runtime handle is closed');
-                  if (poisoned !== undefined) throw poisoned;
+                  if (hasPoisoned) throw poisoned;
                   try { healthy(); anchor.withRoot(operation); }
                   catch (error) { rememberRetirement(error); throw error; }
                 } });
