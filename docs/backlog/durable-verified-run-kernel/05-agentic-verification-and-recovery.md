@@ -595,6 +595,23 @@ type PublicationProofBaseV1 = {
 
 type PublicationProofV1 = PublicationProofBaseV1 & (
   | {
+      kind: 'arena_namespace_absence'
+      arenaId: string
+      stateRootIdentityRef: ArtifactRef
+      stateRootIdentityDigest: string
+      registeredArenaIdentity: PublicationArenaBirthV1['arenaIdentity']
+      namespaceParentIdentity: PublicationArenaBirthV1['parentIdentity']
+      coveredLocations: PublicationLocationV1[]
+      destinationObservationRef: ArtifactRef
+      arenaAbsent: true
+      arenaParentFsyncCompleted: true
+      workspaceParentFsyncCompleted: true
+      namespaceHandlesJoined: true
+      recoveryOriginRef: ArtifactRef
+      recoveryOriginDigest: string
+      proofDigest: string
+    }
+  | {
       kind: 'arena_retirement'
       arenaId: string
       stateRootIdentityRef: ArtifactRef
@@ -604,12 +621,25 @@ type PublicationProofV1 = PublicationProofBaseV1 & (
       arenaAbsent: true
       arenaParentFsyncCompleted: true
       retirementObservation: PublicationArenaRetirementObservation
+      recoveryOriginRef?: ArtifactRef
+      recoveryOriginDigest?: string
       proofDigest: string
     }
-  | { kind: 'path_observation'; observation: PublicationPathObservationV1; proofDigest: string }
-  | { kind: 'ancestor_projection_absence'; path: string; ancestorPath: string;
-      ancestorObservationRef: ArtifactRef; proofDigest: string }
   | {
+      kind: 'path_observation'
+      observation: PublicationPathObservationV1
+      recoveryOriginRef?: ArtifactRef
+      recoveryOriginDigest?: string
+      proofDigest: string
+    }
+  | {
+      kind: 'ancestor_projection_absence'
+      path: string
+      ancestorPath: string
+      ancestorObservationRef: ArtifactRef
+      proofDigest: string
+    }
+  | ({
       kind: 'terminal_receipt'
       sequence: 'forward' | 'abort'
       operationIndex: number
@@ -619,12 +649,17 @@ type PublicationProofV1 = PublicationProofBaseV1 & (
       before: PublicationPathObservationV1
       after: PublicationPathObservationV1
       preservedPreimageRef?: ArtifactRef
-      transientFinalObservations: PublicationPathObservationV1[]
       parentIdentityBeforeDigest: string
       parentIdentityAfterDigest: string
       directoryFsyncCompleted: true
+      recoveryOriginRef?: ArtifactRef
+      recoveryOriginDigest?: string
       proofDigest: string
-    }
+    } & (
+      | { transientFinalObservations: PublicationPathObservationV1[]; namespaceRetirementEvidenceRef?: never }
+      | { namespaceRetirementEvidenceRef: ArtifactRef; transientFinalObservations?: never;
+          recoveryOriginRef: ArtifactRef; recoveryOriginDigest: string }
+    ))
   | {
       kind: 'planned_descendant'
       abortOperationId: string
@@ -646,10 +681,19 @@ type PublicationProofV1 = PublicationProofBaseV1 & (
         | 'transient_state_ambiguous'
         | 'parent_fsync_unconfirmed'
       lastKnownObservationRefs: ArtifactRef[]
+      recoveryOriginRef?: ArtifactRef
+      recoveryOriginDigest?: string
       proofDigest: string
     }
-  | { kind: 'transient_absence'; transientLocations: PublicationLocationV1[];
-      observationRefs: ArtifactRef[]; arenaRetirementRefs: ArtifactRef[]; proofDigest: string }
+  | ({
+      kind: 'transient_absence'
+      transientLocations: PublicationLocationV1[]
+      proofDigest: string
+    } & (
+      | { observationRefs: ArtifactRef[]; arenaRetirementRefs: ArtifactRef[]; envelopeRetirements?: never }
+      | { envelopeRetirements: Array<{ arenaId: string; retirement: PublicationPathRetirementV1 }>;
+          observationRefs?: never; arenaRetirementRefs?: never }
+    ))
   | {
       kind: 'projection_closure'
       selectedBranch: 'forward_finalize' | 'abort'

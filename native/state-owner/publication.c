@@ -1104,7 +1104,8 @@ static napi_value open_publication_operation(napi_env env, napi_callback_info in
             !S_ISDIR(operation->parent_ids[index].st_mode) ||
             operation->parent_ids[index].st_dev != root->ids[root->count - 1].st_dev ||
             napi_get_element(env, parents, (uint32_t)index, &value) != napi_ok || !publication_expected_parent(env, value, &operation->parent_ids[index])) goto fail;
-        if (!end) break; component = end + 1;
+        if (!end) break;
+        component = end + 1;
     }
     if (!publication_parent_held(operation) || (retaining && !publication_open_arena(env, operation, 1, retained))) goto fail;
     if (operation->replacing) {
@@ -1430,7 +1431,8 @@ static napi_value open_publication_namespace_observer(napi_env env, napi_callbac
         if (operation->parents[index] < 0 || fstat(operation->parents[index], &operation->parent_ids[index]) < 0 ||
             !S_ISDIR(operation->parent_ids[index].st_mode) || operation->parent_ids[index].st_dev != lock->root.st_dev ||
             napi_get_element(env, parents, (uint32_t)index, &value) != napi_ok || !publication_expected_parent(env, value, &operation->parent_ids[index])) goto fail;
-        if (!end) break; component = end + 1;
+        if (!end) break;
+        component = end + 1;
     }
     operation->arena_parent_fd = openat(lock->runtime_fd, "publications", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (operation->arena_parent_fd < 0 || fstat(operation->arena_parent_fd, &operation->arena_parent_id) < 0 ||
