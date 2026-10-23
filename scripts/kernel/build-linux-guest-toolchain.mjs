@@ -3,14 +3,15 @@ import { spawnSync } from 'node:child_process';
 import { constants, realpathSync } from 'node:fs';
 import { chmod, copyFile, lstat, mkdir, mkdtemp, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { guestImageLayout, GUEST_IMAGE_MAX_BYTES } from './guest-image-layout.mjs';
 
 // Build/publisher input only. No image is mounted or executed as a verifier,
 // no release signature/qualification/Run authority is manufactured here.
 if (process.platform !== 'linux' || process.arch !== 'x64') throw new Error('Guest toolchain build requires the qualified Linux x64 host');
 const [output, workerDirectory, nodeSource = process.execPath, ...extra] = process.argv.slice(2);
-if (!output || !workerDirectory || extra.length || ![output, workerDirectory, nodeSource].every(path.isAbsolute))
-  throw new Error('usage: build-linux-guest-toolchain.mjs NEW_ABSOLUTE_OUTPUT_DIRECTORY ABSOLUTE_BUILT_WORKER_DIRECTORY [ABSOLUTE_NODE]');
-const imageByteCount = 268_435_456;
+if (!output || !workerDirectory || extra.length > 1 || extra.length === 1 && extra[0] !== '--qualification-max' ||
+    ![output, workerDirectory, nodeSource].every(path.isAbsolute))
+  throw new Error('usage: build-linux-guest-toolchain.mjs NEW_ABSOLUTE_OUTPUT_DIRECTORY ABSOLUTE_BUILT_WORKER_DIRECTORY [ABSOLUTE_NODE] [--qualification-max]');
 await mkdir(output, { mode: 0o700 });
 const staging = await mkdtemp(path.join(output, '.build-'));
 const tree = path.join(staging, 'tree');
@@ -25,7 +26,7 @@ function command(program, arguments_) {
 }
 async function protectedSource(filename) {
   const source = realpathSync(filename), info = await stat(source);
-  if (!path.isAbsolute(source) || !info.isFile() || info.size <= 0 || info.size > imageByteCount ||
+  if (!path.isAbsolute(source) || !info.isFile() || info.size <= 0 || info.size > GUEST_IMAGE_MAX_BYTES ||
       info.mode & 0o022 || info.uid !== 0 && info.uid !== process.getuid()) throw new Error('Guest build source is not a protected regular image');
   return source;
 }
@@ -79,8 +80,10 @@ try {
   const node = await executable(selectedNode, '/usr/bin/node', 'node', nodeVersion.slice(1));
   const files = [...copied.values()].sort((a, b) => Buffer.compare(Buffer.from(a.path), Buffer.from(b.path)));
   const totalBytes = files.reduce((sum, file) => sum + file.byteCount, 0);
-  if (files.length > 32 || totalBytes > imageByteCount - 16 * 1024 ** 2)
+  if (files.length > 32)
     throw new Error('Actual guest toolchain cannot fit the fixed image/file bound');
+  const imageLayout = guestImageLayout(totalBytes, extra.length ? 'qualification_max' : 'compact');
+  const { imageByteCount } = imageLayout;
   const filename = path.join(staging, 'guest-toolchain.ext4');
   const image = await open(filename, 'wx', 0o600);
   try { await image.truncate(imageByteCount); await image.sync(); } finally { await image.close(); }
@@ -102,7 +105,7 @@ try {
     guestImageRef: imageDigest, guestImageDigest: imageDigest, guestImageByteCount: imageByteCount,
     guestImageFormat: 'raw-ext4-v1', architecture: 'x86_64', kernelAbi: 'linux-x86_64-v1',
     userspaceAbi: 'linux-x86_64-glibc-v1', worker, shell, git, node,
-    searchTools: [], verifiers: [], admittedExecutables: [], files, extractedFileBytes: totalBytes,
+    searchTools: [], verifiers: [], admittedExecutables: [], files, extractedFileBytes: totalBytes, imageLayout,
     scope: 'actual build bytes only; not release-signed, execution-qualified or a Run proof' };
   const metadataFile = path.join(staging, 'guest-toolchain-input.json');
   await writeFile(metadataFile, JSON.stringify(metadata), { flag: 'wx', mode: 0o400 });

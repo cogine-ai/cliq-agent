@@ -32,6 +32,7 @@ case ${1:-} in
   --run-delivery-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--delivery-campaign; shift ;;
   --run-delivery-delay-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--delivery-delay-campaign; shift ;;
   --run-delivery-stop-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--delivery-stop-campaign; shift ;;
+  --run-delivery-late-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--delivery-late-campaign; shift ;;
   --run-failure-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--failure-campaign; shift ;;
   --run-retry-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--retry-campaign; shift ;;
   --run-authority-failure-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--authority-failure-campaign; shift ;;
@@ -45,6 +46,13 @@ case ${1:-} in
   --run-shutdown-startup-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--shutdown-startup-campaign; shift ;;
 esac
 readonly probe_campaign_kind probe_run_driver_mode probe_credential_driver_mode probe_finalizer_shutdown probe_volume_mode
+# After the optional fixed volume and one campaign, only positional paths are
+# allowed. Reject mixed/duplicate modes before even inspecting host identities.
+for probe_argument in "$@"; do
+  [[ "$probe_argument" != --* ]] || {
+    printf 'campaign flags must be unique and precede the Node path\n' >&2; exit 2;
+  }
+done
 [[ "$probe_volume_mode" = loop || "$probe_campaign_kind" = run-journey ]] || {
   printf 'the fixed delayed volume is only supported by the installed Run campaign\n' >&2; exit 2;
 }
@@ -54,8 +62,11 @@ readonly probe_campaign_kind probe_run_driver_mode probe_credential_driver_mode 
 [[ "$probe_run_driver_mode" != --delivery-stop-campaign || "$probe_volume_mode" = delay-50ms ]] || {
   printf 'the fixed publication-stop campaign requires its owned delayed volume\n' >&2; exit 2;
 }
+[[ "$probe_run_driver_mode" != --delivery-late-campaign || "$probe_volume_mode" = delay-50ms ]] || {
+  printf 'the fixed publication-late campaign requires its owned delayed volume\n' >&2; exit 2;
+}
 if [[ $(id -u) != 0 || $# -lt 1 || $# -gt 2 ]]; then
-  printf 'usage: sudo bash %s [--delay-volume] [--installed|--installed-retirement-refusal|--secrets|--credentials|--credentials-model-input|--credential-finalizer-shutdown|--run-journey|--run-final-source-limits-journey|--run-verifier-journey|--run-delivery-journey|--run-delivery-delay-journey|--run-delivery-stop-journey|--run-failure-journey|--run-retry-journey|--run-authority-failure-journey|--run-storage-failure-journey|--run-request-resource-journey|--run-shutdown-admission-journey|--run-shutdown-session-journey|--run-shutdown-preparation-journey|--run-shutdown-received-tool-journey|--run-shutdown-pending-model-journey|--run-shutdown-startup-journey] ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' "$0" >&2
+  printf 'usage: sudo bash %s [--delay-volume] [--installed|--installed-retirement-refusal|--secrets|--credentials|--credentials-model-input|--credential-finalizer-shutdown|--run-journey|--run-final-source-limits-journey|--run-verifier-journey|--run-delivery-journey|--run-delivery-delay-journey|--run-delivery-stop-journey|--run-delivery-late-journey|--run-failure-journey|--run-retry-journey|--run-authority-failure-journey|--run-storage-failure-journey|--run-request-resource-journey|--run-shutdown-admission-journey|--run-shutdown-session-journey|--run-shutdown-preparation-journey|--run-shutdown-received-tool-journey|--run-shutdown-pending-model-journey|--run-shutdown-startup-journey] ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' "$0" >&2
   exit 2
 fi
 readonly probe_node=$1
@@ -90,7 +101,7 @@ readonly probe_publication_observer_source="$probe_source_dir/testing/publicatio
 readonly probe_finalizer_source="$probe_source_dir/testing/credential-finalizer-service.c"
 if [[ "$probe_run_driver_mode" = --verifier-campaign ]]; then
   readonly probe_run_driver="$probe_source_dir/qualify-installed-verifier-journey.ts"
-elif [[ "$probe_run_driver_mode" = --delivery-campaign || "$probe_run_driver_mode" = --delivery-delay-campaign || "$probe_run_driver_mode" = --delivery-stop-campaign ]]; then
+elif [[ "$probe_run_driver_mode" = --delivery-campaign || "$probe_run_driver_mode" = --delivery-delay-campaign || "$probe_run_driver_mode" = --delivery-late-campaign || "$probe_run_driver_mode" = --delivery-stop-campaign ]]; then
   readonly probe_run_driver="$probe_source_dir/qualify-installed-delivery-journey.ts"
 else
   readonly probe_run_driver="$probe_source_dir/qualify-installed-run-journey.ts"

@@ -21,6 +21,7 @@ import { crashPreparedCredentialWrite, inspectPreparedCredentialCrashFacts } fro
 import { createCredentialSecretScanner } from './credential-secret-scan.js';
 import { CredentialSecretCorpusError, scanCredentialSecretCorpus } from './credential-secret-corpus.js';
 import { observeInitialCredentialHello } from './credential-input-observation.js';
+import { createEnrollPhaseObservation, createEnrollWorkObservation } from './installed-enroll-diagnostic.js';
 
 type Recipe = { buildFixture: string; packageRoot: string; installerEntry: string; stateRoot: string;
   releaseKeysFile: string; controlDirectory: string; observer: string; storeFixture: string; reportFile: string };
@@ -188,7 +189,10 @@ async function campaign(filename: string, campaignKind: 'authority_lifecycle' | 
     diagnostic: { launcherObserved: boolean; directChildrenSeen: number | null; completeInputWriteJoined: boolean };
     ready(auth: NonNullable<Awaited<ReturnType<typeof processFact>>>): Promise<boolean>;
     beforeInput(auth: NonNullable<Awaited<ReturnType<typeof processFact>>>): Promise<void>;
-  }>) => {
+  }>, diagnosticKind?: 'completed_revoke_replay') => {
+    let phaseObservation = diagnosticKind === 'completed_revoke_replay' ? createEnrollPhaseObservation() : undefined;
+    let workObservation = diagnosticKind === 'completed_revoke_replay' ? createEnrollWorkObservation() : undefined;
+    const observationStarted = phaseObservation ? performance.now() : 0;
     const outputScans: ReturnType<typeof scanner.openStream>[] = [];
     try { for (let index = 0; index < 2; index++) outputScans.push(scanner.openStream()); }
     catch (error) { for (const scan of outputScans) scan.close(); throw error; }
@@ -202,6 +206,7 @@ async function campaign(filename: string, campaignKind: 'authority_lifecycle' | 
     const stdout: Buffer[] = [], stderr: Buffer[] = [];
     let scanFailure: unknown;
     let capturedBytes = 0, finished = false, spawnFailed = false, outputExceeded = false;
+    let pipesJoined = false;
     let launcher: Awaited<ReturnType<typeof processFact>>, auth: Awaited<ReturnType<typeof processFact>>;
     let submittedAuth: NonNullable<typeof auth> | undefined;
     const joined = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolve => {
@@ -213,6 +218,10 @@ async function campaign(filename: string, campaignKind: 'authority_lifecycle' | 
       try { outputScans[index]!.scan(bytes); } catch (error) { scanFailure = error; return; }
       if (outputExceeded || capturedBytes + bytes.length > 256 * 1024) { outputExceeded = true; return; }
       capturedBytes += bytes.length; chunks.push(bytes);
+      if (index === 1 && phaseObservation && workObservation) try {
+        const elapsedMs = Math.floor(performance.now() - observationStarted);
+        phaseObservation.write(bytes, elapsedMs); workObservation.write(bytes, elapsedMs);
+      } catch { phaseObservation = undefined; workObservation = undefined; }
     };
     child.stdout.on('data', (bytes: Buffer) => capture(stdout, bytes, 0));
     child.stderr.on('data', (bytes: Buffer) => capture(stderr, bytes, 1));
@@ -306,9 +315,21 @@ async function campaign(filename: string, campaignKind: 'authority_lifecycle' | 
       }
       // The pipe remains open until a result or timeout is decided above.
       for (const stream of streams) stream.destroy();
-      try { await bounded(streamsClosed, 5000); } catch (error) { failures.push(error); }
+      try { await bounded(streamsClosed, 5000); pipesJoined = true; } catch (error) { failures.push(error); }
       for (const stream of outputScans) stream.close();
       if (scanFailure && primary !== scanFailure) failures.push(scanFailure);
+      if (phaseObservation && workObservation && finished && pipesJoined) try {
+        phaseObservation.finish(); workObservation.finish();
+        // Failure-only observations of this original joined command. No raw
+        // output, process identity, current clock or authority is retained.
+        if (primary || failures.length) report.offlineCompletedReceiptReplayFailure = {
+          diagnosticOnly: true, originalDeadlineMs: 30000, commandKind: 'completed_revoke_replay',
+          launcherObserved: launcher !== undefined, authObserved: auth !== undefined,
+          secretInputPipeUnwrittenAndUnended: inputPlan === undefined && !child.stdin.writableEnded && child.stdin.writableLength === 0,
+          processAndPipesJoined: finished && pipesJoined, phases: phaseObservation.result,
+          ...(workObservation.result ? { work: workObservation.result } : {}),
+        };
+      } catch { /* Unavailable diagnostics never replace the original failure. */ }
       if (failures.length) throw new AggregateError([primary, ...failures].filter(Boolean), 'owned open-input fixture retirement failed');
     }
   };
@@ -437,7 +458,8 @@ async function campaign(filename: string, campaignKind: 'authority_lifecycle' | 
   let primary: unknown;
   try {
     await mkdir(recipe.buildFixture, { mode: 0o755 });
-    const signed = await buildInstalledSupervisorPackage(recipe.buildFixture);
+    const signed = await buildInstalledSupervisorPackage(recipe.buildFixture, 'complete', undefined,
+      campaignKind === 'authority_lifecycle' ? { credentialPhaseDiagnostics: true } : {});
     assert.equal(signed.packageRoot, recipe.packageRoot);
     await stageInstaller(recipe);
     await writeFile(recipe.releaseKeysFile, canonicalJsonBytes(signed.releaseKeys), { flag: 'wx', mode: 0o444 });
@@ -1649,7 +1671,7 @@ async function campaign(filename: string, campaignKind: 'authority_lifecycle' | 
       const completedBytes = `${canonicalJsonBytes({ schemaVersion: 1, operation: completedRevocation }).toString('utf8')}\n`;
       const completedReplayWithoutStore = async () => {
         const replay = await openInputCommand(path.join(recipe.stateRoot, 'runtime/bootstrap'),
-          ['--bootstrap-credential', revokeBytes.toString('base64url')]);
+          ['--bootstrap-credential', revokeBytes.toString('base64url')], undefined, 'completed_revoke_replay');
         assert.deepEqual(decodeCredentialAuthorityRevokeOperation(success(replay, 'operation')), completedRevocation);
         assert.equal(replay.stdout, completedBytes);
         assert.deepEqual(decodeCredentialAuthorityRecord(success(credential({ schemaVersion: 1, kind: 'read',

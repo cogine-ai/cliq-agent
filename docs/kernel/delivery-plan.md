@@ -1497,3 +1497,58 @@ secret scanner and actual process/pipe joins remain unchanged. Portable
 regressions and independent review pass; the combined candidate still needs
 its own complete validation and real Linux observations before any performance
 cause or installed qualification can be claimed.
+
+The corrected exact commit `e19edf5cc60da8cce5c6c76c285c6ac0983fe1bc`
+subsequently passes build, strict checks with the actual postject JavaScript,
+and the unchanged complete local test command: 2,558 passes, one original
+conditional cross-filesystem skip, no failures, cancellations or todos. Its
+final local validation SHA-256 is
+`c64f5f76ea28d5f9d9c746275aaa37db67ee911741fc65dfb0da5869743523a1`.
+Linux run `39999805623`, attempt 1, terminates with sixteen successful jobs
+and five failures. All twenty-two report categories and 100 original JSON
+files (491,785 bytes) are retained and independently rechecked, without
+filtering their bytes or reading the excluded preflight artifact. Final
+capture SHA-256:
+`604469cc89c07d035e9a395e853edb433307b9bf0fae478494f2fb98ddda7208`.
+All twenty cleanup reports have zero cleanup errors. The real owned delayed
+mount and its complete device/loop/image identity checks now pass; this does
+not qualify a publication fsync, late result or stop cut.
+
+Normal, delayed and original-stop Delivery still miss the original first
+five-second ready bound. The normal authentication reaches the actual hello
+response after thirteen complete revalidations; the recorded whole-process
+CPU increase is about 9.26 CPU seconds over 3.19 seconds of phase wall time.
+It is not per-hash CPU or proof of a single cause; zero raw getrusage fs
+counters do not mean zero logical image reads. The original full path still
+requires sixteen complete revalidations. Required verifier repair separately
+exceeds ninety seconds, with seven claimed and seven completed Journal rows
+and no remaining claimed/unknown row in the actual last public cut. Those
+counts alone establish neither deadlock nor sufficient performance. The
+credential journey also fails its original thirty-second completed-revocation
+replay with stdin deliberately left open and unwritten and all services
+absent. That fixture has no guest image, so reducing image padding cannot be
+assumed to fix it. All five failures and the unexecuted physical cuts remain
+open; added diagnostics are not substitute qualification evidence.
+
+The next combined candidate makes the shared publisher's default image layout
+compact while retaining every measured file, the original reserve, all full
+image revalidations and the unchanged maximum-image qualification path. It
+also adds a dedicated free Linux late-result campaign on the same fixed
+50-ms owned delayed volume. That campaign must capture two real public cuts
+(first in-flight and sole late audit), one same-nonce continuous native parent
+fsync crossing its original UTC deadline, the actual old-task join and timeout,
+the original backoff and a distinct fresh probe, then the complete original
+claim/accounting/CAS/result/replay/retirement/secret-scan closure. A missed cut
+fails; a terminal prefix, pure tuple test, delayed CAS or a complete journal
+group by itself cannot qualify it. Every journal query is a whole unfiltered
+window bracketed by the actual live successor's PID/start and full image.
+An exact complete first group may remain explicitly pending within the same
+five-second budget, but fragments and different windows are never assembled.
+
+Two fixed failure observations remain diagnostic only: relative timestamps
+already present in the public verifier cut, without reading a live clock;
+and bounded phase/work markers from the original joined offline revoke
+command. They change neither the original ninety/thirty-second assertions
+nor stdin, service access, recovery authority or production revoke behavior.
+All new physical cuts and both compact and maximum performance remain
+unverified until the exact combined source executes on Linux.

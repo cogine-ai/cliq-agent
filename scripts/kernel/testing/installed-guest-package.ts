@@ -12,6 +12,7 @@ import { exactKeys, type RuntimeBundleManifest } from '../../../src/policy/runti
 import { GUEST_EXTRACTOR_RECIPE } from '../../../src/sandbox/guest-toolchain.js';
 import { joinResourceOperations } from '../../../src/state/errors.js';
 import { decodeGuestToolchainManifest } from '../../../src/state/guest-toolchain.js';
+import { guestImageLayout } from '../guest-image-layout.mjs';
 
 const MANIFEST_ID = 'installed-node-test-toolchain';
 const ROOT_ENTRY_ID = 'installed-node-test-toolchain-root';
@@ -62,13 +63,13 @@ async function directory(root: string, relative: string) {
       fail('package directory is not private and owned');
   }
 }
-function publisher(value: unknown, publisherKeyId: string): GuestToolchainManifest {
+function publisher(value: unknown, publisherKeyId: string) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || !exactKeys(value, ['schemaVersion', 'format', 'guestImageRef',
     'guestImageDigest', 'guestImageByteCount', 'guestImageFormat', 'architecture', 'kernelAbi', 'userspaceAbi', 'worker', 'shell', 'git',
-    'node', 'searchTools', 'verifiers', 'admittedExecutables', 'files', 'extractedFileBytes', 'scope'])) fail('publisher input has an unknown shape');
+    'node', 'searchTools', 'verifiers', 'admittedExecutables', 'files', 'extractedFileBytes', 'imageLayout', 'scope'])) fail('publisher input has an unknown shape');
   const data = value as Record<string, unknown>;
   if (data.schemaVersion !== 1 || data.format !== 'cliq-guest-toolchain-publisher-input-v1' ||
-      data.guestImageByteCount !== GUEST_EXTRACTOR_RECIPE.maxImageBytes || data.architecture !== 'x86_64' ||
+      data.architecture !== 'x86_64' ||
       data.kernelAbi !== 'linux-x86_64-v1' || data.userspaceAbi !== 'linux-x86_64-glibc-v1' ||
       data.scope !== 'actual build bytes only; not release-signed, execution-qualified or a Run proof' ||
       [data.searchTools, data.verifiers, data.admittedExecutables].some(value => !Array.isArray(value) || value.length !== 0))
@@ -103,12 +104,21 @@ function publisher(value: unknown, publisherKeyId: string): GuestToolchainManife
   }
   if (total !== data.extractedFileBytes || [decoded.worker, decoded.shell, decoded.git, decoded.node]
     .some(entry => files.get(entry.canonicalGuestPath) !== entry.digest)) fail('publisher executable inventory is incomplete or inconsistent');
-  return decoded;
+  const supplied = data.imageLayout;
+  if (!supplied || typeof supplied !== 'object' || Array.isArray(supplied) || !exactKeys(supplied,
+    ['profile', 'kind', 'contentBytes', 'reserveBytes', 'alignmentBytes', 'imageByteCount'])) fail('publisher image layout is not closed');
+  const kind = (supplied as Record<string, unknown>).kind;
+  if (kind !== 'compact' && kind !== 'qualification_max') fail('publisher image layout profile is unsupported');
+  const imageLayout = guestImageLayout(total, kind);
+  if (canonicalSha256(supplied) !== canonicalSha256(imageLayout) || data.guestImageByteCount !== imageLayout.imageByteCount)
+    fail('publisher image size differs from its complete fixed layout');
+  return { manifest: decoded, imageLayout };
 }
 
 export async function writeInstalledGuestToolchain(input: {
   packageRoot: string; guestImageRoot: string; extractorPath: string; publisherKeyId: string; privateKey: KeyObject;
 }): Promise<{ manifest: GuestToolchainManifest; manifestRef: string; manifestId: typeof MANIFEST_ID;
+  imageLayout: ReturnType<typeof guestImageLayout>;
   entries: RuntimeBundleManifest['entries']; root: RuntimeBundleManifest['structuredArtifacts'][number] }> {
   if (!exactKeys(input, ['packageRoot', 'guestImageRoot', 'extractorPath', 'publisherKeyId', 'privateKey']) ||
       ![input.packageRoot, input.guestImageRoot, input.extractorPath].every(path.isAbsolute) ||
@@ -120,9 +130,9 @@ export async function writeInstalledGuestToolchain(input: {
   try {
     const metadata = await hold(path.join(input.guestImageRoot, 'guest-toolchain-input.json'), 0o400, MAX_METADATA_BYTES, handles);
     const bytes = (await completeHash(metadata, true)).bytes!;
-    const unsigned = publisher(parseJsonStrict(new TextDecoder('utf-8', { fatal: true }).decode(bytes)), input.publisherKeyId);
+    const { manifest: unsigned, imageLayout } = publisher(parseJsonStrict(new TextDecoder('utf-8', { fatal: true }).decode(bytes)), input.publisherKeyId);
     const image = await hold(path.join(input.guestImageRoot, 'guest-toolchain.ext4'), 0o400, GUEST_EXTRACTOR_RECIPE.maxImageBytes,
-      handles, GUEST_EXTRACTOR_RECIPE.maxImageBytes);
+      handles, unsigned.guestImageByteCount);
     if ((await completeHash(image)).digest !== unsigned.guestImageDigest) fail('complete publisher image digest differs');
     const extractor = await hold(input.extractorPath, 0o500, GUEST_EXTRACTOR_RECIPE.maxImageBytes, handles);
     const extractorDigest = (await completeHash(extractor)).digest;
@@ -156,7 +166,7 @@ export async function writeInstalledGuestToolchain(input: {
     entries.push({ entryId: GUEST_EXTRACTOR_RECIPE.entryId, role: 'platform_helper', relativePath: GUEST_EXTRACTOR_RECIPE.relativePath,
       digest: extractorDigest, byteCount: Number(extractor.identity.size), executable: true, version: GUEST_EXTRACTOR_RECIPE.version });
     await observe(metadata); await observe(image); await observe(extractor);
-    return { manifest, manifestRef, manifestId: MANIFEST_ID, entries,
+    return { manifest, manifestRef, manifestId: MANIFEST_ID, imageLayout, entries,
       root: { kind: 'guest_toolchain', artifactId: MANIFEST_ID, rootEntryId: ROOT_ENTRY_ID, artifactRef: manifestRef,
         semanticDigest: manifest.manifestDigest, memberRefs: [manifest.signatureRef, manifest.guestImageRef].sort() } };
   } finally { await joinResourceOperations(handles.map(handle => handle.close())); }

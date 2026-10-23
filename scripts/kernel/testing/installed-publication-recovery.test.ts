@@ -531,6 +531,7 @@ test('retained late audit requires the actual before/after public cuts and never
 });
 
 test('rehashed late facts cannot change the original producer, expired nonce, real completion or namespace closure', async () => {
+  let caseIndex = 0;
   for (const change of [
     (p: Record<string, any>) => { p.late.completedAt = p.dispatch.probeDeadlineAt; },
     (p: Record<string, any>) => { p.receipt.observedAt = addCanonicalDuration(p.late.completedAt, 1); },
@@ -544,7 +545,11 @@ test('rehashed late facts cannot change the original producer, expired nonce, re
     (p: Record<string, any>) => { p.namespace.observedAt = at(); },
   ]) {
     const data = lateAuditGraph(change);
-    await assert.rejects(recovery.assertInstalledPublicationLateAudit(data.lateInput));
+    if (caseIndex++ === 9) await assert.rejects(recovery.assertInstalledPublicationLateAudit(data.lateInput), {
+      name: 'AssertionError', code: 'ERR_ASSERTION',
+      message: 'publication observations must not predate their original probe or follow their actual receipt',
+    });
+    else await assert.rejects(recovery.assertInstalledPublicationLateAudit(data.lateInput));
   }
 });
 
@@ -655,6 +660,43 @@ test('only a new current probe can resolve the same UNKNOWN after its inert late
   assert.equal(result.expiredProbeDigest, data.late.probeDispatchDigest); assert.equal(result.currentProbeDigest, data.dispatch.dispatchDigest);
   assert.equal(result.originalWaitUnchanged, true); assert.equal(Object.hasOwn(result, 'qualified'), false);
   await assert.rejects(assertInstalledPublicationCleanupRecovery(data.terminalInput));
+});
+
+test('live late sampling distinguishes the actual first before/audit cuts and retains both final nonce bindings without reconstructing either cut', async () => {
+  const data = lateRecoveryGraph();
+  const read = (cut: Record<string, any>) => recovery.readInstalledPublicationProbeSample({ ...data.terminalInput, cut });
+  const before = await read(data.beforeCut), audit = await read(data.auditCut), final = await read(data.terminalInput.cut);
+  assert.equal(before.phase, 'first_before'); assert.equal(before.probes.length, 1);
+  assert.equal(audit.phase, 'first_audit'); assert.equal(audit.probes.length, 1);
+  assert.equal(audit.probes[0]!.completedAt, data.late.completedAt);
+  assert.equal(final.phase, 'other'); assert.equal(final.probes.length, 2);
+  assert.equal(final.probes[0]!.probeDispatchDigest, data.late.probeDispatchDigest);
+  assert.equal(final.probes[1]!.probeDispatchDigest, data.dispatch.dispatchDigest);
+  assert.notEqual(final.probes[0]!.key, final.probes[1]!.key);
+  assert(Object.isFrozen(final)); assert(Object.isFrozen(final.probes));
+  assert.equal(Object.hasOwn(final, 'beforeCut'), false); assert.equal(Object.hasOwn(final, 'auditCut'), false);
+});
+
+test('a within-probe miss retains its real single nonce but cannot claim a late audit, completion time or earlier cut', async () => {
+  const data = recoveryGraph(), original = structuredClone(data.input.cut);
+  const sampled = await recovery.readInstalledPublicationProbeSample(data.input);
+  assert.equal(sampled.phase, 'other'); assert.equal(sampled.probes.length, 1);
+  assert.equal(sampled.probes[0]!.probeOrdinal, 1); assert.equal(Object.hasOwn(sampled.probes[0], 'completedAt'), false);
+  assert.equal(Object.hasOwn(sampled, 'qualified'), false); assert.equal(Object.hasOwn(sampled, 'beforeCut'), false);
+  assert.deepEqual(data.input.cut, original);
+});
+
+test('sampling refuses partial public pages, substituted original birth, bad retained bytes and an audit without a strictly late completion', async () => {
+  const incomplete = lateRecoveryGraph(); incomplete.beforeCut.items.pop();
+  await assert.rejects(recovery.readInstalledPublicationProbeSample({ ...incomplete.terminalInput, cut: incomplete.beforeCut }));
+  const foreign = lateRecoveryGraph();
+  await assert.rejects(recovery.readInstalledPublicationProbeSample({ ...foreign.terminalInput,
+    originalBirth: { ...foreign.input.originalBirth, arenaId: canonicalSha256('another arena') } }));
+  const bytes = lateRecoveryGraph();
+  await assert.rejects(recovery.readInstalledPublicationProbeSample({ ...bytes.terminalInput,
+    readRetainedArtifact: async () => Buffer.from('{}') }));
+  const early = lateAuditGraph(value => { value.late.completedAt = value.dispatch.probeDeadlineAt; });
+  await assert.rejects(recovery.readInstalledPublicationProbeSample({ ...early.lateInput, cut: early.auditCut }));
 });
 
 test('a rehashed replacement nonce, unjoined old task or late-borrowed observation cannot complete recovery', async () => {

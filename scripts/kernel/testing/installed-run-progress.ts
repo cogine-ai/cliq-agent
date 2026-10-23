@@ -16,6 +16,7 @@ export type InstalledRunProgress = Readonly<{
     highWaterJournalSeq: number; nextItemSeq: number; nextJournalSeq: number }>;
   phaseCounts: Readonly<Record<InvocationPhase, number>>;
   lastJournal: Readonly<Pick<InvocationJournalEntry, 'opKind' | 'phase' | 'attempt'>> | null;
+  recordedElapsed: Readonly<{ latestRunUpdateMs: number; lastJournalMs: number | null }>;
 }>;
 function invalid(): never { throw new TypeError('invalid bounded installed Run progress data'); }
 
@@ -78,6 +79,12 @@ export function projectInstalledRunProgress(input: unknown): InstalledRunProgres
   const phaseCounts: Record<InvocationPhase, number> = { prepared: 0, dispatch_claimed: 0, completed: 0, failed: 0, unknown: 0, abandoned: 0 };
   for (const row of cut.journal) phaseCounts[row.phase]++;
   const last = cut.journal.at(-1);
+  // Relative retained timestamps only, never a live age or deadline proof.
+  const offset = (timestamp: string): number => {
+    const elapsed = Date.parse(timestamp) - Date.parse(run.createdAt);
+    if (!Number.isSafeInteger(elapsed) || elapsed < 0) invalid();
+    return elapsed;
+  };
   return Object.freeze({ diagnosticOnly: true, source: 'actual_public_run_get', caseKind: data.caseKind as CaseKind, postCount,
     status: run.status, nextStep: run.nextStep, revision: run.revision, activeWorkerRecorded: run.activeWorkerLaunchId !== undefined,
     waitingRecorded: run.waitingOnRef !== undefined, cancelRequested: run.cancelRequested,
@@ -87,5 +94,6 @@ export function projectInstalledRunProgress(input: unknown): InstalledRunProgres
       highWaterItemSeq: cut.highWaterItemSeq, highWaterJournalSeq: cut.highWaterJournalSeq,
       nextItemSeq: cut.nextItemSeq, nextJournalSeq: cut.nextJournalSeq }),
     phaseCounts: Object.freeze(phaseCounts),
-    lastJournal: last ? Object.freeze({ opKind: last.opKind, phase: last.phase, attempt: last.attempt }) : null });
+    lastJournal: last ? Object.freeze({ opKind: last.opKind, phase: last.phase, attempt: last.attempt }) : null,
+    recordedElapsed: Object.freeze({ latestRunUpdateMs: offset(run.updatedAt), lastJournalMs: last ? offset(last.timestamp) : null }) });
 }

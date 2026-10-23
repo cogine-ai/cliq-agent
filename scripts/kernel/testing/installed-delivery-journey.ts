@@ -45,9 +45,9 @@ const metadata = async (filename: string) => {
     [key, info[key as keyof typeof info]!.toString()]));
 };
 
-export async function runInstalledDeliveryCases(context: Context, options: Readonly<{ faultCase?: 'original_stop' }> = {}) {
+export async function runInstalledDeliveryCases(context: Context, options: Readonly<{ faultCase?: 'original_stop' | 'late_result' }> = {}) {
   assert.deepEqual(Object.keys(options), options.faultCase === undefined ? [] : ['faultCase']);
-  assert(options.faultCase === undefined || options.faultCase === 'original_stop');
+  assert(options.faultCase === undefined || options.faultCase === 'original_stop' || options.faultCase === 'late_result');
   if (options.faultCase === 'original_stop') assert.equal(typeof context.originalStop, 'function');
   const request = (core: Record<string, unknown>) => ({ ...core, requestDigest: canonicalSha256(core) });
   const accepted = (response: Response, method: string) => {
@@ -257,6 +257,7 @@ export async function runInstalledDeliveryCases(context: Context, options: Reado
       originalClaimAndGracefulOwnerClosureVerified: true, noUnknownOrRedispatch: true };
   } else await context.cleanupCrash(first);
   return { diagnosticOnly: true, qualified: true, cleanupCrashQualified: originalPublicationStopCase === undefined,
+    ...(options.faultCase === 'late_result' ? { latePublicationResultQualified: false, preciseInFlightPublicationStopQualified: false } : {}),
     ...(originalPublicationStopCase ? { originalPublicationStopCase, preciseInFlightPublicationStopQualified: true,
       latePublicationResultQualified: false } : {}), cases: completed.map(entry => {
     const { verifierRetirementIdentities, publicationWorkerRetirement, ...proof } = entry.proof;

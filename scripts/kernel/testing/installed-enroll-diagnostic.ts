@@ -15,6 +15,35 @@ export function decodeEnrollCredentialPhase(input: unknown): InstalledCredential
   return phaseMarkers.find(marker => marker.bytes.equals(input))?.phase;
 }
 
+/** Pure streaming facade for the existing fixed phase grammar. It neither
+ * opens a process nor changes the original enroll lifecycle consumer. */
+export function createEnrollPhaseObservation() {
+  const phases: { elapsedMs: number; phase: InstalledCredentialPhase }[] = [];
+  let tail = Buffer.alloc(0), discard = false, finished = false;
+  return {
+    get result() { return Object.freeze(phases.map(row => Object.freeze({ ...row }))); },
+    write(bytes: Buffer, elapsedMs: number): void {
+      if (finished || !Buffer.isBuffer(bytes) || !Number.isSafeInteger(elapsedMs) || elapsedMs < 0 ||
+          elapsedMs < (phases.at(-1)?.elapsedMs ?? 0)) return;
+      for (let offset = 0; offset < bytes.length;) {
+        const newline = bytes.indexOf(10, offset), end = newline < 0 ? bytes.length : newline + 1;
+        if (!discard) {
+          const part = bytes.subarray(offset, end);
+          if (tail.length + part.length > 96) { tail.fill(0); tail = Buffer.alloc(0); discard = true; }
+          else tail = Buffer.concat([tail, part]);
+        }
+        if (newline >= 0) {
+          const phase = discard ? undefined : decodeEnrollCredentialPhase(tail);
+          if (phase !== undefined && phases.length < 32) phases.push({ elapsedMs, phase });
+          tail.fill(0); tail = Buffer.alloc(0); discard = false;
+        }
+        offset = end;
+      }
+    },
+    finish(): void { finished = true; tail.fill(0); tail = Buffer.alloc(0); discard = false; },
+  };
+}
+
 type WorkRole = 'bootstrap' | 'credential';
 type WorkFrame = ({ role: WorkRole } & InstalledWorkSnapshot) | { role: WorkRole; truncated: true };
 type WorkObservation = { elapsedMs: number; role: WorkRole } & InstalledWorkSnapshot;

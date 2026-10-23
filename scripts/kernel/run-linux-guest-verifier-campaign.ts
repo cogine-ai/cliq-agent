@@ -23,7 +23,8 @@ if (mode === '--prepare') {
   await mkdir(carrierRoot, { mode: 0o700 });
   const { carrier } = await prepareSupervisorSeaCarrier(carrierRoot);
   const builder = fileURLToPath(new URL('./build-linux-guest-toolchain.mjs', import.meta.url));
-  const built = spawnSync(process.execPath, [builder, guestRoot, installationRoot, carrier], { stdio: 'inherit', timeout: 60_000 });
+  const built = spawnSync(process.execPath, [builder, guestRoot, installationRoot, carrier, '--qualification-max'],
+    { stdio: 'inherit', timeout: 60_000 });
   assert.equal(built.error, undefined); assert.equal(built.status, 0);
   const raw = await readFile(path.join(guestRoot, 'guest-toolchain-input.json'));
   assert.ok(raw.length > 0 && raw.length <= 1_048_576);

@@ -5,8 +5,11 @@ import { runInstalledNodeJourney } from './testing/installed-node-journey.js';
 assert.equal(process.platform, 'linux'); assert.equal(process.arch, 'x64');
 const [mode, filename, ...extra] = process.argv.slice(2);
 assert(filename && extra.length === 0);
+assert(!filename.startsWith('--'));
 if (mode === '--delivery-stop-campaign') {
   await runInstalledNodeJourney(filename, 'delivery', { publicationRetirementDiagnostics: true, publicationRetirementStop: true });
+} else if (mode === '--delivery-late-campaign') {
+  await runInstalledNodeJourney(filename, 'delivery', { publicationRetirementDiagnostics: true, publicationRetirementLate: true });
 } else if (mode === '--delivery-delay-campaign') {
   await runInstalledNodeJourney(filename, 'delivery', { publicationRetirementDiagnostics: true });
 } else {

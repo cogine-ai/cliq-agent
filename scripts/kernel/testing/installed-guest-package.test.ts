@@ -2,7 +2,7 @@
 // ext4/ELF, a native extractor success, or installed execution qualification.
 import assert from 'node:assert/strict';
 import { createHash, generateKeyPairSync, sign } from 'node:crypto';
-import { chmod, link, mkdir, mkdtemp, open, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, link, mkdir, mkdtemp, open, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -13,15 +13,16 @@ import { GUEST_EXTRACTOR_RECIPE } from '../../../src/sandbox/guest-toolchain.js'
 import { validateGuestToolchainMetadata } from '../../../src/state/guest-toolchain.js';
 import { writeInstalledGuestToolchain } from './installed-guest-package.js';
 
-async function fixture() {
+async function fixture(compact = false) {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'cliq-installed-guest-package-'));
   const guestImageRoot = path.join(directory, 'build'), packageRoot = path.join(directory, 'package');
   await mkdir(guestImageRoot, { mode: 0o700 }); await mkdir(packageRoot, { mode: 0o700 });
   const filename = path.join(guestImageRoot, 'guest-toolchain.ext4');
   const image = await open(filename, 'wx', 0o600);
-  try { await image.truncate(GUEST_EXTRACTOR_RECIPE.maxImageBytes); await image.chmod(0o400); } finally { await image.close(); }
+  const imageByteCount = compact ? 33_554_432 : GUEST_EXTRACTOR_RECIPE.maxImageBytes;
+  try { await image.truncate(imageByteCount); await image.chmod(0o400); } finally { await image.close(); }
   const hash = createHash('sha256'), zeroes = Buffer.alloc(65_536);
-  for (let count = 0; count < GUEST_EXTRACTOR_RECIPE.maxImageBytes; count += zeroes.length) hash.update(zeroes);
+  for (let count = 0; count < imageByteCount; count += zeroes.length) hash.update(zeroes);
   const digest = hash.digest('hex');
   const executable = (logicalName: string, canonicalGuestPath: string, version: string) =>
     ({ logicalName, canonicalGuestPath, version, digest: sha256Bytes(Buffer.from(logicalName)) });
@@ -30,9 +31,11 @@ async function fixture() {
   const files = [worker, shell, git, node].map(value => ({ path: value.canonicalGuestPath, digest: value.digest, byteCount: 1 }))
     .sort((left, right) => Buffer.compare(Buffer.from(left.path), Buffer.from(right.path)));
   const metadata = { schemaVersion: 1, format: 'cliq-guest-toolchain-publisher-input-v1', guestImageRef: digest, guestImageDigest: digest,
-    guestImageByteCount: GUEST_EXTRACTOR_RECIPE.maxImageBytes, guestImageFormat: 'raw-ext4-v1', architecture: 'x86_64',
+    guestImageByteCount: imageByteCount, guestImageFormat: 'raw-ext4-v1', architecture: 'x86_64',
     kernelAbi: 'linux-x86_64-v1', userspaceAbi: 'linux-x86_64-glibc-v1', worker, shell, git, node,
     searchTools: [], verifiers: [], admittedExecutables: [], files, extractedFileBytes: 4,
+    imageLayout: { profile: 'cliq-guest-image-layout-v1', kind: compact ? 'compact' : 'qualification_max', contentBytes: 4,
+      reserveBytes: 16_777_216, alignmentBytes: 16_777_216, imageByteCount },
     scope: 'actual build bytes only; not release-signed, execution-qualified or a Run proof' };
   const metadataPath = path.join(guestImageRoot, 'guest-toolchain-input.json');
   await writeFile(metadataPath, JSON.stringify(metadata), { flag: 'wx', mode: 0o400 });
@@ -43,10 +46,25 @@ async function fixture() {
     input: { packageRoot, guestImageRoot, extractorPath, publisherKeyId: 'installed-guest-data-test', privateKey: keys.privateKey } };
 }
 
+test('guest packaging preserves the complete signed compact image instead of requiring unused maximum padding', async () => {
+  const current = await fixture(true);
+  try {
+    const result = await writeInstalledGuestToolchain(current.input);
+    assert.equal(result.manifest.guestImageByteCount, 33_554_432);
+    assert.deepEqual(result.imageLayout, current.metadata.imageLayout);
+    assert.equal(result.entries.find(entry => entry.digest === result.manifest.guestImageRef)?.byteCount, 33_554_432);
+    assert.deepEqual(result.root.memberRefs, [result.manifest.signatureRef, result.manifest.guestImageRef].sort());
+    const retained = result.entries.find(entry => entry.digest === result.manifest.guestImageRef)!;
+    const bytes = await readFile(path.join(current.packageRoot, retained.relativePath));
+    assert.equal(bytes.length, 33_554_432); assert.equal(sha256Bytes(bytes), result.manifest.guestImageDigest);
+  } finally { await rm(current.directory, { recursive: true, force: true }); }
+});
+
 test('guest packaging streams the complete fixed image and produces the exact production-verifiable signed metadata closure', async () => {
   const current = await fixture();
   try {
     const result = await writeInstalledGuestToolchain(current.input);
+    assert.deepEqual(result.imageLayout, current.metadata.imageLayout);
     assert.equal(result.manifestId, 'installed-node-test-toolchain');
     assert.notEqual(result.root.rootEntryId, result.manifestId);
     assert.deepEqual(result.root.memberRefs, [result.manifest.signatureRef, result.manifest.guestImageRef].sort());
@@ -102,6 +120,41 @@ test('guest packaging refuses unknown publisher data and identities outside the 
     await assert.rejects(writeInstalledGuestToolchain(current.input), /complete publisher image digest differs/);
     await chmod(current.metadataPath, 0o600); await writeFile(current.metadataPath, Buffer.alloc(1_048_577)); await chmod(current.metadataPath, 0o400);
     await assert.rejects(writeInstalledGuestToolchain(current.input), /protected single-link regular file/);
+  } finally { await rm(current.directory, { recursive: true, force: true }); }
+});
+
+test('compact packaging refuses non-recomputable layouts, incomplete bytes and a changed final byte before signing', async () => {
+  const current = await fixture(true);
+  const replace = async (value: unknown) => { await chmod(current.metadataPath, 0o600); await writeFile(current.metadataPath, JSON.stringify(value)); await chmod(current.metadataPath, 0o400); };
+  try {
+    const { imageLayout: _, ...missing } = current.metadata;
+    const { reserveBytes: __, ...incomplete } = current.metadata.imageLayout;
+    for (const metadata of [missing, { ...current.metadata, imageLayout: incomplete },
+      { ...current.metadata, guestImageByteCount: 16_777_216 },
+      { ...current.metadata, guestImageByteCount: 50_331_648 },
+      ...[
+        { extra: true }, { profile: 'other' }, { kind: 'other' }, { kind: ['compact'] },
+        { contentBytes: 3 }, { contentBytes: 5 }, { contentBytes: '4' },
+        { reserveBytes: 0 }, { alignmentBytes: 1 }, { imageByteCount: 16_777_216 },
+        { imageByteCount: 50_331_648 }, { imageByteCount: 33_554_432.5 },
+        { kind: 'qualification_max', imageByteCount: 33_554_432 },
+      ].map(change => ({ ...current.metadata, imageLayout: { ...current.metadata.imageLayout, ...change } })),
+      { ...current.metadata, files: current.metadata.files.slice(1), extractedFileBytes: 3 },
+    ]) {
+      await replace(metadata);
+      await assert.rejects(writeInstalledGuestToolchain(current.input), /publisher|guest toolchain/);
+    }
+    await replace(current.metadata);
+    await chmod(current.filename, 0o600);
+    const incompleteImage = await open(current.filename, 'r+');
+    try { await incompleteImage.truncate(33_554_431); await incompleteImage.chmod(0o400); } finally { await incompleteImage.close(); }
+    await assert.rejects(writeInstalledGuestToolchain(current.input), /protected single-link regular file/);
+    await chmod(current.filename, 0o600);
+    const changedImage = await open(current.filename, 'r+');
+    try { await changedImage.write(Buffer.from([1]), 0, 1, 33_554_431); await changedImage.chmod(0o400); } finally { await changedImage.close(); }
+    await assert.rejects(writeInstalledGuestToolchain(current.input), /complete publisher image digest differs/);
+    assert.deepEqual(await readdir(current.packageRoot), [],
+      'refused layout or incomplete bytes cannot produce a partial signed package');
   } finally { await rm(current.directory, { recursive: true, force: true }); }
 });
 

@@ -2,7 +2,7 @@
 // verifier and owned HTTPS replies. Not a paid provider, complete fault matrix,
 // default/ask policy, macOS, reboot or release-publisher qualification.
 import assert from 'node:assert/strict';
-import { spawn, spawnSync, type ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess, type ChildProcessWithoutNullStreams, type SpawnSyncReturns } from 'node:child_process';
 import { randomBytes, X509Certificate } from 'node:crypto';
 import { constants, type BigIntStats } from 'node:fs';
 import { chown, lstat, mkdir, open, readFile, readdir, readlink, stat, writeFile } from 'node:fs/promises';
@@ -19,7 +19,7 @@ import type { AuthorizationGrantSummaryV1, VerifierIdentityCreateRequest } from 
 import { decodeCredentialAuthorityOperation, decodeEndpointAuthorityOperation, type EndpointRegistrationV1 } from '../../../src/kernel/credential-authority.js';
 import { digestOmitting, identityHash, sha256Bytes } from '../../../src/kernel/identity.js';
 import { parseJsonStrict } from '../../../src/kernel/json.js';
-import { decodeDeliveryPlan } from '../../../src/kernel/publication.js';
+import { decodeDeliveryPlan, type PublicationArenaBirthV1 } from '../../../src/kernel/publication.js';
 import type { ArtifactDescriptorV1 } from '../../../src/kernel/types.js';
 import { decodeRunResult, decodeWorkspaceDiff } from '../../../src/state/result-artifacts.js';
 import { buildInstalledSupervisorPackage } from './installed-supervisor-package.js';
@@ -33,8 +33,10 @@ import { InstalledDeliveryOutcomeError } from './installed-delivery-result.js';
 import type { InstalledVerifierRetirementIdentity } from './installed-verifier-evidence.js';
 import { qualifyInstalledOwnerLinks, qualifyInstalledOwnerProcess } from './installed-owner-history.js';
 import { startPublicationCrashObserver, startPublicationRetirementStopObserver } from './installed-publication-crash-observer.js';
-import { assertInstalledPublicationCleanupRecovery } from './installed-publication-recovery.js';
+import { assertInstalledPublicationCleanupRecovery, assertInstalledPublicationLateAudit, assertInstalledPublicationLateAuditRecovery,
+  readInstalledPublicationProbeSample } from './installed-publication-recovery.js';
 import { readInstalledNamespaceRetirementJournal, readInstalledOriginalRetirementJournal } from './installed-publication-journal.js';
+import { assessInstalledPublicationLateInterval, assertInstalledPublicationLateCausalOrder, readInstalledLatePublicationRetirementWindow, type InstalledPublicationLateDiagnostic } from './installed-publication-late-result.js';
 import { inspectInstalledPublicationClaim, inspectInstalledRecoveredWorkerRetirement } from './installed-worker-lease.js';
 import { isOriginalPublicationFirstParentSignalBracket, isPublicationSignalActorJoinedWithinStop } from './installed-publication-retirement.js';
 import { publicationClaimRetirementDiagnosticKey } from '../../../src/state/publication-retirement-diagnostics.js';
@@ -132,14 +134,17 @@ async function transferPackage(filename: string, uid: number, gid: number): Prom
 
 
 export async function runInstalledNodeJourney(filename: string, journeyKind: 'verifier' | 'delivery',
-  options: Readonly<{ publicationRetirementDiagnostics?: true; publicationRetirementStop?: true }> = {}): Promise<void> {
+  options: Readonly<{ publicationRetirementDiagnostics?: true; publicationRetirementStop?: true; publicationRetirementLate?: true }> = {}): Promise<void> {
   assert.equal(process.platform, 'linux'); assert.equal(process.arch, 'x64');
   assert(journeyKind === 'verifier' || journeyKind === 'delivery');
   assert.deepEqual(Object.keys(options).sort(), [
     ...(options.publicationRetirementDiagnostics === true ? ['publicationRetirementDiagnostics'] : []),
     ...(options.publicationRetirementStop === true ? ['publicationRetirementStop'] : []),
-  ]);
+    ...(options.publicationRetirementLate === true ? ['publicationRetirementLate'] : []),
+  ].sort());
   if (options.publicationRetirementStop) assert.equal(options.publicationRetirementDiagnostics, true);
+  if (options.publicationRetirementLate) assert.equal(options.publicationRetirementDiagnostics, true);
+  assert(!options.publicationRetirementStop || !options.publicationRetirementLate);
   if (options.publicationRetirementDiagnostics) assert.equal(journeyKind, 'delivery');
   assert.equal(process.geteuid!(), 0);
   const ledger = await readLedger(filename), recipe = ledger.runJourney;
@@ -160,6 +165,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
   });
   if (options.publicationRetirementStop) report.scope =
     'actual signed Linux complete original Delivery core and separate normal-publication first-parent fsync SIGTERM/owner restart; not UNKNOWN cleanup crash, late-result, paid provider, macOS, reboot or complete I1 qualification';
+  if (options.publicationRetirementLate) report.scope =
+    'actual signed Linux complete Delivery core and original UNKNOWN first-late audit/fresh-nonce recovery on the fixed delayed volume; not late-fsync SIGTERM, paid provider, macOS, reboot or complete I1 qualification';
   const secret = Buffer.from(randomBytes(32).toString('hex')), password = Buffer.from(randomBytes(32).toString('hex'));
   const scanner = createCredentialSecretScanner([secret, password], { maxBytes: 512 * 1024 * 1024, maxStreams: 4096 });
   const scanBytes = (bytes: Uint8Array) => { const stream = scanner.openStream(); try { stream.scan(bytes); } finally { stream.close(); } };
@@ -525,7 +532,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       claims: { nativeToolCalling: true, streaming: false, trustedUsageEvidence: false, contextLimitTokens: 32768, maxOutputTokens: 4096 },
       requestTokenCeiling: { inputTokens: 32768, outputTokens: 4096, cacheReadTokens: 0, cacheWriteTokens: 0 },
       validFrom: new Date(Date.now() - 60000).toISOString(), validThrough: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString() },
-    { guestToolchain: 'node-test-v1', publicationRetirementDiagnostics: options.publicationRetirementDiagnostics });
+    { guestToolchain: 'node-test-v1', publicationRetirementDiagnostics: options.publicationRetirementDiagnostics,
+      ...(journeyKind === 'verifier' ? { guestImageProfile: 'qualification_max' as const } : {}) });
     assert(signed.guestToolchain && signed.modelAuthority);
     const installer = await build({ entryPoints: [fileURLToPath(new URL('./installed-runtime-installer.ts', import.meta.url))],
       outfile: recipe.installerEntry, bundle: true, platform: 'node', format: 'esm', target: 'node22.13', metafile: true, write: false });
@@ -565,7 +573,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       guestToolchainManifestRef: signed.guestToolchain.manifestRef, guestImageRef: signed.guestToolchain.manifest.guestImageRef,
       guestImageByteCount: signed.guestToolchain.manifest.guestImageByteCount,
       actualReadOnlyImageCopies: imageCopies.length, totalImageCopyBytes: imageCopies.length * signed.guestToolchain.manifest.guestImageByteCount,
-      imageCopiesInCompleteSecretWriterCorpus: 1, unchangedCorpusByteLimit: 512 * 1024 * 1024, unchangedCorpusStreamLimit: 4096 };
+      imageCopiesInCompleteSecretWriterCorpus: 1, unchangedCorpusByteLimit: 512 * 1024 * 1024, unchangedCorpusStreamLimit: 4096,
+      ...(signed.guestToolchain.imageLayout.kind === 'compact' ? { guestImageLayout: signed.guestToolchain.imageLayout } : {}) };
     mark('actual_secret_service_and_credential');
     await mkdir(recipe.controlDirectory, { mode: 0o700 }); await chown(recipe.controlDirectory, ledger.uid, ledger.gid);
     daemon = spawn('/usr/sbin/runuser', [...prefix, '/usr/bin/gnome-keyring-daemon', '--foreground', '--components=secrets', '--unlock',
@@ -849,6 +858,31 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         try { assert.notEqual('linux-proc-start-ticks:' + await processStart(retired.pid), retired.processStartToken); }
         catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
       };
+      const assertArenaAbsent = async (birth: PublicationArenaBirthV1) => {
+        const held: Awaited<ReturnType<typeof open>>[] = [];
+        try {
+          for (const component of [recipe.stateRoot, 'runtime', 'publications']) {
+            const target = held.length ? `/proc/self/fd/${held.at(-1)!.fd}/${component}` : component;
+            const directory = await open(target, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW); held.push(directory);
+            const info = await directory.stat({ bigint: true });
+            assert(info.isDirectory() && info.uid === BigInt(ledger.uid) && (info.mode & 0o7777n) === 0o700n);
+          }
+          const parent = held.at(-1)!, identity = await parent.stat({ bigint: true });
+          assert.equal(identity.dev.toString(), birth.parentIdentity.deviceId); assert.equal(identity.ino.toString(), birth.parentIdentity.fileId);
+          const plan = decodeDeliveryPlan(parseJsonStrict(new TextDecoder('utf-8', { fatal: true }).decode(await readCas(birth.deliveryPlanRef))));
+          assert.equal(plan.forwardOperations.length, 1); const operation = plan.forwardOperations[0]!;
+          const locations = publicationEnvelopeLocations({ birth, operation }); assert.equal(locations.length, 2);
+          assert(locations.every(location => location.kind === 'publication_arena' && location.arenaId === birth.arenaId));
+          // Both fixed slots are children of this exact originally held
+          // arena. Observing its absence entails their absence without
+          // following or adopting a replacement arena or symlink.
+          await assert.rejects(lstat(`/proc/self/fd/${parent.fd}/${birth.arenaId}`),
+            (error: unknown) => (error as NodeJS.ErrnoException).code === 'ENOENT');
+        } finally {
+          const closes = await Promise.allSettled(held.reverse().map(directory => directory.close()));
+          assert(closes.every(result => result.status === 'fulfilled'), 'the original arena observation descriptors must all join');
+        }
+      };
       // A failed attempt may already have real effects. Do not retain the
       // initial not-started marker as a claim that nothing executed.
       report.delivery = { ...report.delivery, attemptStarted: true, reason: 'in_progress' };
@@ -998,37 +1032,12 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
             await qualifyInstalledOwnerLinks({ stateRoot: recipe.stateRoot, uid: ledger.uid, bundle: signed.bundle, imageDigest: supervisorDigest, report: {} });
             await sameKeeper(); client = await persistentClient(); diagnostic.sameKeeper = true; diagnostic.successorOwnerEpoch = 3;
             diagnostic.stage = 'closure';
-            const assertArenaAbsent = async () => {
-              const held: Awaited<ReturnType<typeof open>>[] = [];
-              try {
-                for (const component of [recipe.stateRoot, 'runtime', 'publications']) {
-                  const target = held.length ? `/proc/self/fd/${held.at(-1)!.fd}/${component}` : component;
-                  const directory = await open(target, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW); held.push(directory);
-                  const info = await directory.stat({ bigint: true });
-                  assert(info.isDirectory() && info.uid === BigInt(ledger.uid) && (info.mode & 0o7777n) === 0o700n);
-                }
-                const parent = held.at(-1)!, identity = await parent.stat({ bigint: true });
-                assert.equal(identity.dev.toString(), claimed.birth.parentIdentity.deviceId); assert.equal(identity.ino.toString(), claimed.birth.parentIdentity.fileId);
-                const plan = decodeDeliveryPlan(parseJsonStrict(new TextDecoder('utf-8', { fatal: true }).decode(await readCas(claimed.birth.deliveryPlanRef))));
-                assert.equal(plan.forwardOperations.length, 1); const operation = plan.forwardOperations[0]!;
-                const locations = publicationEnvelopeLocations({ birth: claimed.birth, operation }); assert.equal(locations.length, 2);
-                assert(locations.every(location => location.kind === 'publication_arena' && location.arenaId === claimed.birth.arenaId));
-                // Both fixed slots are children of this exact originally held
-                // arena. Observing its absence entails their absence without
-                // following or adopting a replacement arena or symlink.
-                await assert.rejects(lstat(`/proc/self/fd/${parent.fd}/${claimed.birth.arenaId}`),
-                  (error: unknown) => (error as NodeJS.ErrnoException).code === 'ENOENT');
-              } finally {
-                const closes = await Promise.allSettled(held.reverse().map(directory => directory.close()));
-                assert(closes.every(result => result.status === 'fulfilled'), 'the original arena observation descriptors must all join');
-              }
-            };
             return { admitted, beforeCut, terminalBy: by, verify: async (proof: InstalledPublicationStopResult) => {
               assert.equal(proof.runId, admitted.runId); assert.equal(proof.arenaBirthRef, claimed.claim.evidenceRef);
               assert.equal(proof.dispatchId, claimed.claim.dispatchId); assert.equal(proof.opId, claimed.claim.opId);
               assert.equal(proof.retirementDiagnosticKey, key); assert.equal(proof.originalOwnerEpoch, 2); assert.equal(proof.successorOwnerEpoch, 3);
               await assertWorkerRetired(admitted.runId, proof.publicationWorkerRetirement.launchId, proof.publicationWorkerRetirement);
-              await assertArenaAbsent(); await sameKeeper();
+              await assertArenaAbsent(claimed.birth); await sameKeeper();
               try { assert.notEqual(await processStart(pid), startTicks); }
               catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
               const since = Date.parse(claimed.claim.timestamp), logBy = Date.now() + 5000; assert(Number.isFinite(since));
@@ -1065,10 +1074,17 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
           }
         },
         cleanupCrash: async source => {
-          mark('delivery_cleanup_crash_observer');
+          mark(options.publicationRetirementLate ? 'delivery_late_publication_reconciliation' : 'delivery_cleanup_crash_observer');
           const diagnostic: Record<string, unknown> = { diagnosticOnly: true, qualified: false, stage: 'observer_start',
             originalReceiptCasObjectAbsenceQualified: false, rebootQualified: false };
           report.publicationCleanupCrash = diagnostic;
+          const lateDiagnostic: InstalledPublicationLateDiagnostic | undefined = options.publicationRetirementLate ? {
+            diagnosticOnly: true, qualified: false, stage: 'observer_start', physicalLateCutQualified: false,
+            realPublicCutsQualified: false, preciseInFlightPublicationStopQualified: false,
+            currentSealedMDirectoryPhysicalBytesQualified: false,
+          } : undefined;
+          if (lateDiagnostic) report.publicationLateResult = lateDiagnostic;
+          const originalPosts = postCount; if (lateDiagnostic) assert.equal(originalPosts, 6);
           const ownersBefore = inspectInstalledOwnerHistory(recipe.stateRoot).owners;
           assert.equal(ownersBefore.length, 2); const original = ownersBefore[1]!; assert.equal(original.state, 'active');
           const shown = show(services!.supervisorUnit), pid = Number(shown.MainPID), supervisorEntry = signed.bundle.entries.find(entry => entry.role === 'supervisor');
@@ -1095,6 +1111,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
               budgets: { wallTimeMs: 300000, toolCalls: 1000 } });
             const admitted = await client!.send(core, 30000), runId = accepted(admitted, 'run.apply').snapshot.run.id;
             const by = Date.now() + 90000; diagnostic.stage = 'original_claim'; diagnostic.runId = runId;
+            if (lateDiagnostic) Object.assign(lateDiagnostic, { stage: 'original_claim', runId });
             let claimed: ReturnType<typeof inspectInstalledPublicationClaim>;
             for (;;) {
               claimed = inspectInstalledPublicationClaim(recipe.stateRoot, ledger.uid, runId);
@@ -1108,6 +1125,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
             diagnostic.arenaBirthRef = claimed.claim.evidenceRef;
             const restartBy = Date.now() + 30000;
             observer.arm(claimed.birth); diagnostic.stage = 'physical_kill';
+            if (lateDiagnostic) lateDiagnostic.stage = 'physical_kill';
             await bounded(observer.joined, Math.min(90000, by - Date.now()), 'actual cleanup crash observer did not join');
             const joinedAt = new Date().toISOString(); diagnostic.observerJoined = true;
             // This is the first actual complete original SQL cut after the
@@ -1124,13 +1142,32 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
             diagnostic.firstPostKillSqlCutDigest = crash.sqlCutDigest; diagnostic.originalReceiptCommitAbsent = true; diagnostic.durableProgressPresent = true;
             await client!.close(); client = undefined; await inspectionClient?.close(); inspectionClient = undefined;
             diagnostic.stage = 'successor';
+            if (lateDiagnostic) lateDiagnostic.stage = 'successor';
             let successorUnit: Record<string, string>;
             for (;;) {
               successorUnit = show(services!.supervisorUnit);
               if (successorUnit.MainPID !== '0' && successorUnit.MainPID !== shown.MainPID && successorUnit.InvocationID !== shown.InvocationID) break;
               assert(Date.now() < restartBy, 'actual cleanup crash restart exceeded the original 30-second budget'); await delay(50);
             }
+            let windowStart: string | undefined, boundStart: string | undefined;
+            if (lateDiagnostic) {
+              // Bind the actual successor before opening the journal window,
+              // not merely when its eventual historical query starts.
+              for (;;) {
+                const observed = inspectInstalledOwnerHistory(recipe.stateRoot).owners;
+                if (observed.length === 3 && observed[2]!.state === 'active') {
+                  const process = await qualifyInstalledOwnerProcess({ stateRoot: recipe.stateRoot, uid: ledger.uid,
+                    pid: Number(successorUnit.MainPID), selectedImage: installedImage, imageDigest: supervisorDigest }, observed[2]!, {});
+                  boundStart = process.processStartToken.slice('linux-proc-start-ticks:'.length);
+                  assert.equal(await fixtureProcess(Number(successorUnit.MainPID), ledger.uid), boundStart);
+                  windowStart = new Date().toISOString(); lateDiagnostic.windowOpenedAt = windowStart;
+                  break;
+                }
+                assert(Date.now() < restartBy, 'actual late successor identity was not bound within the original restart budget'); await delay(50);
+              }
+            }
             const successorStart = await selectedSupervisor(services!.supervisorUnit, successorUnit, installedImage, restartBy);
+            if (lateDiagnostic) assert.equal(successorStart, boundStart);
             const history = inspectInstalledOwnerHistory(recipe.stateRoot).owners;
             assert.equal(history.length, 3); assert.equal(history[1]!.terminalReason, 'superseded_after_owner_death');
             assert.equal(history[2]!.state, 'active');
@@ -1139,16 +1176,100 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
             assert.deepEqual(await readFile(path.join(recipe.stateRoot, 'runtime/keeper.ready')), keeperReady);
             diagnostic.sameKeeper = true; client = await persistentClient();
             diagnostic.stage = 'current_namespace'; let recovered: Record<string, any>;
+            let beforeCut: Record<string, any> | undefined, auditCut: Record<string, any> | undefined;
+            let lastSampledCutDigest: string | undefined;
+            if (lateDiagnostic) lateDiagnostic.stage = 'sampling';
             for (;;) {
               recovered = accepted(await client.send({ protocolVersion: 1, method: 'run.get', runId }), 'run.get');
+              if (lateDiagnostic && canonicalSha256(recovered) !== lastSampledCutDigest) {
+                const sampled = await readInstalledPublicationProbeSample({ cut: recovered, originalBirth: claimed.birth,
+                  readRetainedArtifact: readCas, readOwnerHistory: async () => inspectInstalledOwnerHistory(recipe.stateRoot).owners });
+                // Identical actual public cuts cannot expose a new immutable
+                // CAS fact. Avoid rescanning their bytes on every poll; the
+                // full final readers independently reread all retained facts.
+                lastSampledCutDigest = sampled.observedCutDigest;
+                if (sampled.probes.length) lateDiagnostic.probes = sampled.probes;
+                if (sampled.phase === 'first_before' && !beforeCut) {
+                  beforeCut = recovered; lateDiagnostic.beforePublicCutDigest = sampled.observedCutDigest;
+                } else if (sampled.phase === 'first_audit' && !auditCut) {
+                  auditCut = recovered; lateDiagnostic.auditPublicCutDigest = sampled.observedCutDigest;
+                }
+              }
               if (['succeeded', 'failed', 'cancelled', 'completed_unverified'].includes(recovered.snapshot.run.status)) break;
               assert(Date.now() < by, 'actual cleanup crash recovery exceeded its original 90-second window'); await delay(50);
             }
-            const proof = await assertInstalledPublicationCleanupRecovery({ cut: recovered, originalBirth: claimed.birth,
+            const recoveryInput = { cut: recovered, originalBirth: claimed.birth,
               expectedFiles: source.files.map(file => ({ path: file.path, text: file.after })), sourceResultRef: source.cut.snapshot.run.resultRef,
-              readRetainedArtifact: readCas, readOwnerHistory: async () => inspectInstalledOwnerHistory(recipe.stateRoot).owners });
+              readRetainedArtifact: readCas, readOwnerHistory: async () => inspectInstalledOwnerHistory(recipe.stateRoot).owners };
+            if (lateDiagnostic) {
+              // Preserve the actual single or dual observed packets before
+              // asserting that this run hit the intended late cut. A normal
+              // within-probe miss is diagnostic only and still fails below.
+              const probes = lateDiagnostic.probes ?? []; assert(probes.length >= 1 && probes.length <= 2);
+              for (const probe of probes) assert.equal(probe.owningSupervisorInstanceId, history[2]!.supervisorInstanceId);
+              const successorPid = Number(successorUnit.MainPID), successor = history[2]!;
+              const bindCurrentProcess = async () => {
+                assert.equal(await fixtureProcess(successorPid, ledger.uid), successorStart);
+                const observed = await qualifyInstalledOwnerProcess({ stateRoot: recipe.stateRoot, uid: ledger.uid,
+                  pid: successorPid, selectedImage: installedImage, imageDigest: supervisorDigest }, successor, {});
+                assert.equal(observed.processStartToken, 'linux-proc-start-ticks:' + successorStart);
+                assert.equal(await fixtureProcess(successorPid, ledger.uid), successorStart);
+              };
+              assert(windowStart); const logBy = Date.now() + 5000;
+              for (;;) {
+                assert(Date.now() < logBy, 'actual late namespace packets were not observed within the original five-second window');
+                await bindCurrentProcess();
+                const remaining = logBy - Date.now(); assert(remaining > 0);
+                const until = new Date().toISOString(), started = performance.now();
+                const log: SpawnSyncReturns<Buffer> = spawnSync('/usr/bin/journalctl', ['--no-pager', '--all', '--no-tail', '--output=json', '--boot=0',
+                  `--since=@${(Date.parse(windowStart) / 1000).toFixed(3)}`, `--until=@${(Date.parse(until) / 1000).toFixed(3)}`,
+                  `_UID=${ledger.uid}`, `_PID=${successorPid}`, '_TRANSPORT=stdout'],
+                { env: environment, timeout: remaining, killSignal: 'SIGKILL', maxBuffer: 256 * 1024 });
+                assert(Buffer.isBuffer(log.stdout) && Buffer.isBuffer(log.stderr)); scanBytes(log.stdout); scanBytes(log.stderr);
+                const joinFailure = fixtureCommandJoinDiagnostic(log, remaining, started);
+                if (joinFailure) report.commandJoinFailure ??= joinFailure;
+                assert.equal(log.error, undefined, 'actual complete late journal command must join'); assert.equal(log.signal, null); assert.equal(log.status, 0);
+                const text = new TextDecoder('utf-8', { fatal: true }).decode(log.stdout);
+                let snapshots: InstalledPublicationLateDiagnostic['snapshots'];
+                if (probes.length === 2) {
+                  const observedWindow = readInstalledLatePublicationRetirementWindow(text, { uid: ledger.uid, pid: successorPid,
+                    invocationId: successorUnit.InvocationID!, expiredProbeKey: probes[0]!.key, freshProbeKey: probes[1]!.key });
+                  if (observedWindow.phase === 'complete') { snapshots = observedWindow.snapshots; delete lateDiagnostic.namespaceWindowProgress; }
+                  else if (observedWindow.phase === 'first_packet_only') {
+                    lateDiagnostic.snapshots = observedWindow.snapshots;
+                    lateDiagnostic.namespaceWindowProgress = { diagnosticOnly: true, complete: false, observedGroups: 1 };
+                  }
+                } else {
+                  const value = readInstalledNamespaceRetirementJournal(text, { uid: ledger.uid, pid: successorPid,
+                    invocationId: successorUnit.InvocationID!, key: probes[0]!.key });
+                  if (value) snapshots = Object.freeze([value]);
+                }
+                await bindCurrentProcess();
+                assert(Date.now() < logBy, 'actual late namespace packets exceeded the original five-second observation window');
+                if (snapshots) { lateDiagnostic.snapshots = snapshots; lateDiagnostic.stage = 'span_observed';
+                  lateDiagnostic.currentProcessLifetimeAndImageBound = true; break; }
+                await delay(Math.min(50, Math.max(0, logBy - Date.now())));
+              }
+              if (lateDiagnostic.snapshots!.length === 2) assertInstalledPublicationLateCausalOrder({
+                expiredSnapshot: lateDiagnostic.snapshots![0], freshSnapshot: lateDiagnostic.snapshots![1] });
+              if (probes[0]!.completedAt) lateDiagnostic.interval = assessInstalledPublicationLateInterval({
+                snapshot: lateDiagnostic.snapshots![0], key: probes[0]!.key, probeStartedAt: probes[0]!.probeStartedAt,
+                probeDeadlineAt: probes[0]!.probeDeadlineAt, completedAt: probes[0]!.completedAt });
+              assert(beforeCut && auditCut, 'actual first in-flight beforeCut and sole-audit auditCut must both be captured; an eventual prefix is not a substitute');
+              assert.equal(probes.length, 2); assert.equal(probes[0]!.probeOrdinal, 1); assert.equal(probes[1]!.probeOrdinal, 2);
+              assert(joinedAt <= probes[0]!.probeStartedAt, 'the original external observer must actually join before the first native probe');
+              assert(windowStart <= probes[0]!.probeStartedAt, 'the actual successor binding must precede the original probe window');
+              const audit = await assertInstalledPublicationLateAudit({ ...recoveryInput, beforeCut, auditCut });
+              assert.equal(audit.expiredProbeNonceDigest, probes[0]!.probeNonceDigest);
+              assert(probes[0]!.completedAt);
+              assert(lateDiagnostic.interval?.hit, 'the same original continuous parent fsync must really cross the original UTC probe deadline');
+              lateDiagnostic.realPublicCutsQualified = true; lateDiagnostic.stage = 'audit_verified';
+            }
+            const proof = lateDiagnostic
+              ? await assertInstalledPublicationLateAuditRecovery({ ...recoveryInput, beforeCut: beforeCut!, auditCut: auditCut! })
+              : await assertInstalledPublicationCleanupRecovery(recoveryInput);
             assert(joinedAt <= proof.probeStartedAt, 'external observer process, pipes and FDs must join before the fresh native probe');
-            if (options.publicationRetirementDiagnostics) {
+            if (options.publicationRetirementDiagnostics && !lateDiagnostic) {
               // This observation measures the actual namespace task only. It
               // does not turn either clock into authority or qualify a late
               // result / in-flight stop. The complete CAS proof above and all
@@ -1195,6 +1316,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
             try { assert.notEqual('linux-proc-start-ticks:' + await processStart(retired.pid), retired.processStartToken); }
             catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
             await assert.rejects(lstat(path.join(recipe.stateRoot, retired.quarantinePath)), (error: unknown) => (error as NodeJS.ErrnoException).code === 'ENOENT');
+            if (lateDiagnostic) await assertArenaAbsent(claimed.birth);
             assert.deepEqual((await readdir(source.workspace)).sort(), source.files.map(file => file.path).sort());
             for (const file of source.files) {
               const target = path.join(source.workspace, file.path), info = await lstat(target);
@@ -1227,13 +1349,20 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
             Object.assign(diagnostic, { qualified: true, stage: 'complete', successorOwnerEpoch: proof.successorOwnerEpoch,
               namespaceEvidenceRef: proof.namespaceEvidenceRef, originalUnknownSettlementRef: proof.originalUnknownSettlementRef,
               resolutionBudgetDeltaZero: true, redispatchCount: 0, originalRetiredWorkerObservedAbsent: true, sameReplayAfterReconnect: true });
+            if (lateDiagnostic) {
+              assert.equal(postCount, originalPosts);
+              Object.assign(lateDiagnostic, { stage: 'closure_verified', originalWaitUnchanged: true,
+                oldTaskJoinedAndTimedOut: true, originalBackoffAndFreshNonceVerified: true,
+                resolutionBudgetDeltaZero: true, redispatchCount: 0, additionalModelPosts: 0,
+                originalWorkerAndArenaIndependentlyAbsent: true, sameReplayAfterReconnect: true });
+            }
           } catch (error) { failure = error; throw error; }
           finally {
             try { await observer.close(); }
             catch (error) { if (failure) throw new AggregateError([failure, error], 'cleanup crash observer did not join after its original failure'); throw error; }
           }
         },
-      }, options.publicationRetirementStop ? { faultCase: 'original_stop' } : {});
+      }, options.publicationRetirementStop ? { faultCase: 'original_stop' } : options.publicationRetirementLate ? { faultCase: 'late_result' } : {});
       assert.equal(postCount, 6); assert.equal(acceptedTcp, postCount); assert.equal(acceptedTls, postCount); assert(!responderFailure);
       assert.equal(originalPublicResultBytes.size, 6);
     }
@@ -1293,6 +1422,18 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
             preciseInFlightPublicationStopQualified: true, sameReplayAfterReconnect: true });
           report.preciseInFlightPublicationStopQualified = true;
         }
+        if (options.publicationRetirementLate) {
+          const late: InstalledPublicationLateDiagnostic = report.publicationLateResult;
+          assert.equal(report.delivery.cleanupCrashQualified, true); assert.equal(late.stage, 'closure_verified');
+          assert.equal(late.realPublicCutsQualified, true); assert.equal(late.interval?.hit, true);
+          assert.equal(late.currentProcessLifetimeAndImageBound, true);
+          assert.equal(late.oldTaskJoinedAndTimedOut, true); assert.equal(late.originalBackoffAndFreshNonceVerified, true);
+          assert.equal(late.originalWaitUnchanged, true); assert.equal(late.resolutionBudgetDeltaZero, true);
+          assert.equal(late.redispatchCount, 0); assert.equal(late.additionalModelPosts, 0);
+          assert.equal(late.originalWorkerAndArenaIndependentlyAbsent, true); assert.equal(late.sameReplayAfterReconnect, true);
+          Object.assign(late, { stage: 'complete', qualified: true, physicalLateCutQualified: true });
+          report.latePublicationResultQualified = true; report.delivery.latePublicationResultQualified = true;
+        }
         mark('complete');
       } catch (error) {
         if (error instanceof CredentialSecretCorpusError) {
@@ -1310,6 +1451,11 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         if (report.publicationOriginalStop) Object.assign(report.publicationOriginalStop,
           { qualified: false, preciseInFlightPublicationStopQualified: false });
       }
+      if (options.publicationRetirementLate) {
+        report.latePublicationResultQualified = false;
+        if (report.delivery) report.delivery.latePublicationResultQualified = false;
+        if (report.publicationLateResult) Object.assign(report.publicationLateResult, { qualified: false, physicalLateCutQualified: false });
+      }
       const frames: Array<{ file: string; line: number; column: number }> = [];
       const failureKinds: Array<{ kind: 'assertion' } | { kind: 'sqlite'; primaryCode: number } |
         { kind: 'installed_verifier_outcome'; stage: InstalledVerifierOutcomeError['diagnosticStage'] } |
@@ -1325,7 +1471,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         else if (diagnostic.code === 'ERR_ASSERTION') failureKinds.push({ kind: 'assertion' });
         else if (diagnostic.code === 'ERR_SQLITE_ERROR' && typeof diagnostic.errcode === 'number' && Number.isSafeInteger(diagnostic.errcode) &&
             diagnostic.errcode >= 0 && diagnostic.errcode <= 65535) failureKinds.push({ kind: 'sqlite', primaryCode: diagnostic.errcode & 0xff });
-        for (const match of (error.stack ?? '').matchAll(/\b(qualify-installed-verifier-journey|qualify-installed-delivery-journey|installed-node-journey|installed-delivery-journey|installed-delivery-result|installed-verifier-result|installed-guest-package|installed-supervisor-package|installed-model-package|installed-read-control|installed-client-consumer|installed-enroll-diagnostic|installed-worker-lease|installed-publication-recovery|installed-publication-crash-observer|installed-publication-stop-result|installed-publication-journal|installed-publication-retirement)\.ts:([1-9][0-9]{0,6}):([1-9][0-9]{0,6})/gu)) {
+        for (const match of (error.stack ?? '').matchAll(/\b(qualify-installed-verifier-journey|qualify-installed-delivery-journey|installed-node-journey|installed-delivery-journey|installed-delivery-result|installed-verifier-result|installed-guest-package|installed-supervisor-package|installed-model-package|installed-read-control|installed-client-consumer|installed-enroll-diagnostic|installed-worker-lease|installed-publication-recovery|installed-publication-crash-observer|installed-publication-stop-result|installed-publication-journal|installed-publication-retirement|installed-publication-late-result)\.ts:([1-9][0-9]{0,6}):([1-9][0-9]{0,6})/gu)) {
+          if (match[1] === 'installed-publication-late-result' && !options.publicationRetirementLate) continue;
           if (frames.length < 8) frames.push({ file: match[1]! + '.ts', line: Number(match[2]), column: Number(match[3]) });
         }
         if (error instanceof AggregateError) errors.unshift(...error.errors.slice(0, 4));

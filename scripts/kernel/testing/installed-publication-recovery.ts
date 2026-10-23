@@ -59,7 +59,6 @@ function graph(input: ReadInput) {
   cut.journal.forEach((row, index) => { assert.equal(row.seq, index + 1); assert.equal(row.runId, cut.snapshot.run.id); });
   return { cut, object, bytes, items };
 }
-
 async function original(input: ReadInput) {
   const g = graph(input), { cut, object } = g, run = cut.snapshot.run;
   const spec = decodeRunSpec(await object(run.specRef)); assert.equal(spec.operation, 'delivery');
@@ -162,7 +161,8 @@ async function namespaceReceipt(v: Original, input: NamespaceInput) {
     assert.equal(observed.workspaceIdentityRef, birth.workspaceIdentityRef); assert.equal(observed.workspaceIdentityDigest, birth.workspaceIdentityDigest);
     assert.equal(observed.recoveryOriginRef, receipt.recoveryOriginRef); assert.equal(observed.recoveryOriginDigest, receipt.recoveryOriginDigest);
     assert.equal(observed.inspectorIdentityRef, receipt.inspectorIdentityRef); assert.equal(observed.inspectorIdentityDigest, receipt.inspectorIdentityDigest);
-    assert(observed.observedAt >= input.dispatch.probeStartedAt && observed.observedAt <= receipt.observedAt);
+    assert(observed.observedAt >= input.dispatch.probeStartedAt && observed.observedAt <= receipt.observedAt,
+      'publication observations must not predate their original probe or follow their actual receipt');
   }
   assert.equal(receipt.sequence, 'forward'); assert.equal(receipt.operationIndex, 0); assert.equal(receipt.operationId, operation.operationId);
   assert.equal(receipt.opId, claim.opId); assert.equal(receipt.attempt, 0);
@@ -506,4 +506,83 @@ async function completedCleanupRecovery(input: RecoveryInput, v: Original) {
     retirementDiagnosticKey: publicationRetirementDiagnosticKey({ runId: run.id, planRef: birth.deliveryPlanRef,
       opId: claim.opId, attempt: claim.attempt, dispatchId: claim.dispatchId!, probeNonceDigest: dispatch.probeNonceDigest }),
     generationResources: handoff.generationResources });
+}
+
+export type InstalledPublicationProbeSample = Readonly<{ diagnosticOnly: true;
+  phase: 'other' | 'first_before' | 'first_audit'; observedCutDigest: string;
+  probes: readonly Readonly<{ probeOrdinal: 1 | 2; probeDispatchDigest: string; probeNonceDigest: string;
+    owningSupervisorInstanceId: string; probeStartedAt: string; probeDeadlineAt: string; key: string; completedAt?: string }>[] }>;
+
+/** A bounded view of an actually supplied complete public cut. This identifies
+ * candidates to retain, never reconstructs an earlier cut or validates the
+ * before/audit delta. The existing full late readers remain mandatory. */
+export async function readInstalledPublicationProbeSample(input: ReadInput & { originalBirth: PublicationArenaBirthV1 }): Promise<InstalledPublicationProbeSample> {
+  const g = graph(input), { cut, object } = g, run = cut.snapshot.run;
+  const probes = new Map<number, InstalledPublicationProbeSample['probes'][number]>();
+  let phase: InstalledPublicationProbeSample['phase'] = 'other';
+  const result = () => Object.freeze({ diagnosticOnly: true as const, phase, observedCutDigest: canonicalSha256(cut),
+    probes: Object.freeze([...probes.values()].sort((left, right) => left.probeOrdinal - right.probeOrdinal)) });
+  const claims = cut.journal.filter(row => row.phase === 'dispatch_claimed');
+  if (claims.length !== 1 || claims[0]!.opKind !== 'publish' || !cut.journal.some(row => row.phase === 'unknown')) return result();
+  const claim = claims[0]!; assert(claim.evidenceRef && claim.dispatchId);
+  const birth = decodePublicationArenaBirth(await object(claim.evidenceRef)); same(birth, input.originalBirth);
+  assert.equal(birth.deliveryRunId, run.id); assert.equal(birth.opId, claim.opId); assert.equal(birth.attempt, claim.attempt);
+  assert.equal(birth.dispatchId, claim.dispatchId);
+  const items = await g.items(), lateRows = items.filter(row => row.item.kind === 'publication_late_observation');
+  assert(lateRows.length <= 1);
+  const probe = async (waitingRef: string, completedAt?: string) => {
+    const wait = decodePublicationPathWait(await object(waitingRef)); assert.equal(wait.runId, run.id);
+    assert.equal(wait.subject.kind, 'publication_path'); assert.equal(wait.subject.deliveryPlanRef, birth.deliveryPlanRef);
+    assert.equal(wait.subject.pathOperationId, birth.operationId); assert.equal(wait.subject.attempt, 0);
+    const state = wait.probeState;
+    if (state.phase !== 'automatic_in_flight') return undefined;
+    assert(state.automaticProbeCount === 1 || state.automaticProbeCount === 2);
+    const dispatch = state.dispatch; assert.equal(dispatch.subjectKind, 'publication');
+    same(await object(canonicalSha256(dispatch)), dispatch);
+    const target = decodePublicationInspectionTarget(await object(dispatch.inspectionTargetDigest));
+    assert.equal(target.runId, run.id); same(target.subject, wait.subject);
+    assert.equal(target.claimJournalSeq, claim.seq); assert.equal(target.preparedJournalSeq, 1); assert.equal(target.unknownJournalSeq, 3);
+    const value = Object.freeze({ probeOrdinal: state.automaticProbeCount, probeDispatchDigest: dispatch.dispatchDigest,
+      probeNonceDigest: dispatch.probeNonceDigest, owningSupervisorInstanceId: dispatch.owningSupervisorInstanceId,
+      probeStartedAt: dispatch.probeStartedAt, probeDeadlineAt: dispatch.probeDeadlineAt,
+      key: publicationRetirementDiagnosticKey({ runId: run.id, planRef: birth.deliveryPlanRef, opId: claim.opId,
+        attempt: claim.attempt, dispatchId: claim.dispatchId!, probeNonceDigest: dispatch.probeNonceDigest }),
+      ...(completedAt === undefined ? {} : { completedAt }) });
+    const previous = probes.get(value.probeOrdinal);
+    if (previous) {
+      const { completedAt: _previous, ...old } = previous, { completedAt: _current, ...next } = value; same(old, next);
+    } else probes.set(value.probeOrdinal, value);
+    return { wait, value };
+  };
+  let late: ReturnType<typeof decodePublicationLateObservationItem> | undefined;
+  if (lateRows[0]) {
+    late = decodePublicationLateObservationItem(lateRows[0].item);
+    assert.equal(late.opId, claim.opId); assert.equal(late.dispatchId, claim.dispatchId); assert.equal(late.claimJournalSeq, claim.seq);
+    assert.equal(late.deliveryPlanRef, birth.deliveryPlanRef); assert.equal(late.operationId, birth.operationId);
+    assert.equal(late.disposition, 'received'); assert('kind' in late.retirement && late.retirement.kind === 'current_namespace');
+    const first = await probe(late.probeWaitingSubjectRef, late.completedAt); assert(first && first.value.probeOrdinal === 1);
+    assert.equal(late.probeDispatchDigest, first.value.probeDispatchDigest);
+    assert(late.completedAt > first.value.probeDeadlineAt);
+  }
+  if (run.status === 'waiting' && run.waitingReason === 'reconciliation' && run.waitingOnRef) {
+    const raw = await object(run.waitingOnRef);
+    if (raw.subject?.kind === 'publication_path') {
+      const current = await probe(run.waitingOnRef);
+      if (current?.value.probeOrdinal === 1 && !items.some(row => row.item.state === 'received_handoff')) {
+        if (!late) phase = 'first_before';
+        else if (late.probeWaitingSubjectRef === run.waitingOnRef) phase = 'first_audit';
+      }
+    }
+  }
+  const completed = items.filter(row => row.item.kind === 'publication_path_result' && row.item.outcome === 'completed');
+  assert(completed.length <= 1);
+  if (completed[0]) {
+    const item = decodePublicationPathResultItem(completed[0].item);
+    assert(item.outcome === 'completed' && item.reconciliationEvidenceRef);
+    const wrapper = decodePublicationProbeEvidence(await object(item.reconciliationEvidenceRef)); assert.equal(wrapper.outcome, 'subject_observation');
+    const current = await probe(wrapper.waitingSubjectRef); assert(current);
+    assert.equal(wrapper.probeDispatchDigest, current.value.probeDispatchDigest); assert.equal(wrapper.probeNonceDigest, current.value.probeNonceDigest);
+  }
+  if (probes.size === 2) assert.notEqual(probes.get(1)!.probeNonceDigest, probes.get(2)!.probeNonceDigest);
+  return result();
 }

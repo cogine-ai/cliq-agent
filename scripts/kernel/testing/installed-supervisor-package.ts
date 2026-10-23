@@ -23,10 +23,15 @@ import { validateGuestToolchainMetadata } from '../../../src/state/guest-toolcha
  * they do not qualify admission, execution, release signing or complete I1. */
 export async function buildInstalledSupervisorPackage(fixture: string,
   variant: 'complete' | 'retirement-native-missing' = 'complete', modelFixture?: InstalledModelPackageFixture,
-  options: Readonly<{ guestToolchain?: 'node-test-v1'; publicationRetirementDiagnostics?: true }> = {}) {
-  assert(Object.keys(options).every(key => key === 'guestToolchain' || key === 'publicationRetirementDiagnostics'));
+  options: Readonly<{ guestToolchain?: 'node-test-v1'; guestImageProfile?: 'qualification_max'; publicationRetirementDiagnostics?: true; credentialPhaseDiagnostics?: true }> = {}) {
+  assert(Object.keys(options).every(key => key === 'guestToolchain' || key === 'guestImageProfile' || key === 'publicationRetirementDiagnostics' || key === 'credentialPhaseDiagnostics'));
   assert(options.guestToolchain === undefined || options.guestToolchain === 'node-test-v1');
+  // Publisher construction only: keep the original maximum-load qualifier
+  // separate from the default official compact image. No runtime flag exists.
+  assert(options.guestImageProfile === undefined || options.guestImageProfile === 'qualification_max');
+  if (options.guestImageProfile) assert(options.guestToolchain === 'node-test-v1');
   assert(options.publicationRetirementDiagnostics === undefined || options.publicationRetirementDiagnostics === true);
+  assert(options.credentialPhaseDiagnostics === undefined || options.credentialPhaseDiagnostics === true);
   if (options.publicationRetirementDiagnostics) assert(options.guestToolchain === 'node-test-v1',
     'fixed publication observations belong only to the installed delivery qualification image');
   if (options.guestToolchain) assert(variant === 'complete' && modelFixture, 'installed verifier requires the complete model and native package');
@@ -42,9 +47,9 @@ export async function buildInstalledSupervisorPackage(fixture: string,
   const supervisorFile = await buildSupervisorSeaImage({ fixture, carrier,
     entryPoint: path.join(repository, 'src/state/installed-entry.ts'),
     executable: path.join(packageRoot, 'supervisor'), variant: 'installed-supervisor',
-    // Only the verifier qualifier consumes these fixed observations. Other
-    // installed campaigns retain the original single-JSON stderr contract.
-    ...(options.guestToolchain === 'node-test-v1' ? { credentialPhaseDiagnostics: true as const } : {}),
+    // Fixed observations belong only to explicitly selected qualifiers.
+    // Default installed campaigns retain their original stderr contract.
+    ...(options.guestToolchain === 'node-test-v1' || options.credentialPhaseDiagnostics ? { credentialPhaseDiagnostics: true as const } : {}),
     ...(options.publicationRetirementDiagnostics ? { publicationRetirementDiagnostics: true as const } : {}),
     assets: { 'release-trust-roots.json': rootAsset } });
   const helper = path.join(packageRoot, STATE_OWNER_NATIVE_RELATIVE_PATH);
@@ -96,7 +101,8 @@ export async function buildInstalledSupervisorPackage(fixture: string,
   if (options.guestToolchain) {
     const guestImageRoot = path.join(fixture, 'guest-image');
     const built = spawnSync(process.execPath, [path.join(repository, 'scripts/kernel/build-linux-guest-toolchain.mjs'),
-      guestImageRoot, workerRoot, carrier], { encoding: 'utf8', timeout: 60_000, cwd: fixture, maxBuffer: 2 * 1024 * 1024 });
+      guestImageRoot, workerRoot, carrier, ...(options.guestImageProfile ? ['--qualification-max'] : [])],
+    { encoding: 'utf8', timeout: 60_000, cwd: fixture, maxBuffer: 2 * 1024 * 1024 });
     assert.equal(built.error, undefined, 'actual pinned guest image construction did not join');
     assert.equal(built.status, 0, 'actual pinned guest image construction refused');
     guest = await writeInstalledGuestToolchain({ packageRoot, guestImageRoot,
@@ -150,5 +156,6 @@ export async function buildInstalledSupervisorPackage(fixture: string,
   const modelAuthority = modelFixture ? await writeInstalledModelAuthority({ packageRoot, bundle,
     privateKey: keys.privateKey, fixture: modelFixture, material: modelMaterial! }) : undefined;
   return { packageRoot, releaseKeys, bundle, contents, carrier, ...(modelAuthority ? { modelAuthority } : {}),
-    ...(guest ? { guestToolchain: { manifest: guest.manifest, manifestRef: guest.manifestRef, manifestId: guest.manifestId } } : {}) };
+    ...(guest ? { guestToolchain: { manifest: guest.manifest, manifestRef: guest.manifestRef,
+      manifestId: guest.manifestId, imageLayout: guest.imageLayout } } : {}) };
 }

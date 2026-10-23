@@ -30,6 +30,7 @@ test('an actual public run.get cut projects only closed progress counts, not aut
     counts: { items: 2, journal: 1, checkpoints: 1, highWaterItemSeq: 2, highWaterJournalSeq: 1, nextItemSeq: 2, nextJournalSeq: 1 },
     phaseCounts: { prepared: 1, dispatch_claimed: 0, completed: 0, failed: 0, unknown: 0, abandoned: 0 },
     lastJournal: { opKind: 'verifier', phase: 'prepared', attempt: 0 },
+    recordedElapsed: { latestRunUpdateMs: 0, lastJournalMs: 0 },
   });
 });
 
@@ -40,6 +41,33 @@ test('valid item, journal and checkpoint prefixes never claim a complete cut', (
   for (const value of [items, journal, checkpoints]) assert.equal(projectInstalledRunProgress(value).completeCut, false);
   assert.equal(projectInstalledRunProgress(items).counts.items, 1);
   assert.equal(projectInstalledRunProgress(journal).counts.highWaterJournalSeq, 2);
+});
+
+test('recorded progress offsets preserve relative completion timing without reading a clock', () => {
+  const value = input();
+  value.cut.snapshot.run.updatedAt = '2026-10-18T00:01:20.300Z';
+  value.cut.snapshot.run.deadlineAt = '2026-10-18T00:05:00.000Z';
+  value.cut.journal[0].timestamp = '2026-10-18T00:01:18.000Z';
+  const originalNow = Date.now;
+  let clockReads = 0;
+  try {
+    Date.now = () => { clockReads++; throw new Error('a data projection must not read a clock'); };
+    assert.deepEqual(projectInstalledRunProgress(value).recordedElapsed,
+      { latestRunUpdateMs: 80300, lastJournalMs: 78000 });
+  } finally { Date.now = originalNow; }
+  assert.equal(clockReads, 0);
+});
+
+test('recorded elapsed fields keep an absent journal null and refuse timestamps preceding admission', () => {
+  const noJournal = input(); noJournal.cut.journal = [];
+  noJournal.cut.highWaterJournalSeq = noJournal.cut.nextJournalSeq = 0;
+  assert.deepEqual(projectInstalledRunProgress(noJournal).recordedElapsed, { latestRunUpdateMs: 0, lastJournalMs: null });
+  for (const field of ['run', 'journal']) {
+    const value = input();
+    if (field === 'run') value.cut.snapshot.run.updatedAt = '2026-10-17T23:59:59.999Z';
+    else value.cut.journal[0].timestamp = '2026-10-17T23:59:59.999Z';
+    assert.throws(() => projectInstalledRunProgress(value));
+  }
 });
 
 test('counts describe the returned journal, including every closed phase, and never deduplicate operation IDs', () => {
@@ -74,8 +102,9 @@ test('waiting and worker flags report only recorded public fields, not a guessed
 test('output is deeply frozen and independent of caller-owned data', () => {
   const value = input(), result = projectInstalledRunProgress(value), original = JSON.stringify(result);
   value.caseKind = 'required_pass'; value.cut.snapshot.run.revision = 99; value.cut.journal[0].phase = 'invalid';
-  for (const node of [result, result.counts, result.phaseCounts, result.lastJournal]) assert(Object.isFrozen(node));
+  for (const node of [result, result.counts, result.phaseCounts, result.lastJournal, result.recordedElapsed]) assert(Object.isFrozen(node));
   assert.throws(() => { (result.counts as any).items = 90; }, TypeError);
+  assert.throws(() => { (result.recordedElapsed as any).lastJournalMs = 99; }, TypeError);
   assert.equal(JSON.stringify(result), original);
   for (const forbidden of ['run-1', 'session-1', 'launch-1', 'node-tests', ref, at]) assert(!original.includes(forbidden));
 });

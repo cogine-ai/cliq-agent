@@ -7,7 +7,7 @@ import { decodeInstalledPublicationRetirements } from './installed-publication-r
 type Sender = Readonly<{
   uid: number; pid: number; invocationId: string; key: string;
 }>;
-function readRetirementJournal(text: string, expected: Sender, kind: 'original' | 'namespace'): PublicationRetirementDiagnostic | undefined {
+function readRetirementPackets(text: string, expected: Sender, kind: 'original' | 'namespace'): readonly PublicationRetirementDiagnostic[] | undefined {
   assert(Number.isSafeInteger(expected.uid) && expected.uid > 0);
   assert(Number.isSafeInteger(expected.pid) && expected.pid > 0);
   assert.match(expected.invocationId, /^[0-9a-f]{32}$/u); assert.match(expected.key, /^[0-9a-f]{64}$/u);
@@ -27,7 +27,12 @@ function readRetirementJournal(text: string, expected: Sender, kind: 'original' 
     if (typeof record.MESSAGE === 'string' && record.MESSAGE.startsWith('CLIQ_PUBLICATION_RETIRE_V1:')) messages.push(record.MESSAGE);
   }
   if (messages.length === 0) return undefined;
-  const packets = decodeInstalledPublicationRetirements(messages);
+  return decodeInstalledPublicationRetirements(messages);
+}
+
+function readRetirementJournal(text: string, expected: Sender, kind: 'original' | 'namespace'): PublicationRetirementDiagnostic | undefined {
+  const packets = readRetirementPackets(text, expected, kind);
+  if (!packets) return undefined;
   assert.equal(packets.length, 1, kind === 'namespace' ? 'the current Supervisor must emit exactly one namespace retirement group' :
     'the captured Supervisor must emit exactly one original retirement group');
   const packet = packets[0]!;
@@ -37,6 +42,25 @@ function readRetirementJournal(text: string, expected: Sender, kind: 'original' 
 
 export function readInstalledNamespaceRetirementJournal(text: string, expected: Sender): PublicationRetirementDiagnostic | undefined {
   return readRetirementJournal(text, expected, 'namespace');
+}
+
+/** One unfiltered journal window from the same independently live-bracketed
+ * current Supervisor. Both distinct keys must come from its complete retained
+ * probe graphs. Data matching alone establishes neither those origins nor a
+ * process lifetime, deadline crossing, native join or physical late result. */
+export function readInstalledLatePublicationRetirementJournal(text: string,
+  expected: Omit<Sender, 'key'> & Readonly<{ expiredProbeKey: string; freshProbeKey: string }>):
+  readonly [PublicationRetirementDiagnostic, PublicationRetirementDiagnostic] | undefined {
+  assert.match(expected.freshProbeKey, /^[0-9a-f]{64}$/u);
+  assert.notEqual(expected.expiredProbeKey, expected.freshProbeKey);
+  const packets = readRetirementPackets(text, { uid: expected.uid, pid: expected.pid, invocationId: expected.invocationId,
+    key: expected.expiredProbeKey }, 'namespace');
+  if (!packets) return undefined;
+  assert.equal(packets.length, 2, 'the current Supervisor must emit exactly the expired-then-fresh namespace retirement groups');
+  const [expired, fresh] = packets;
+  assert.equal(expired!.kind, 'namespace'); assert.equal(expired!.key, expected.expiredProbeKey);
+  assert.equal(fresh!.kind, 'namespace'); assert.equal(fresh!.key, expected.freshProbeKey);
+  return Object.freeze([expired!, fresh!] as const);
 }
 
 /** Original dispatch only, never a probe-nonce or process-death assertion. */
