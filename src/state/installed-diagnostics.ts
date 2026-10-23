@@ -29,3 +29,36 @@ export function noteInstalledClientPhase(phase: InstalledClientPhase): void {
   if (!client.hasSubscribers || typeof phase !== 'string' || !clientPhases.has(phase)) return;
   try { client.publish(phase); } catch { /* A diagnostic never decides an operation. */ }
 }
+
+export const INSTALLED_SERVER_AUTHENTICATION_CHANNEL = 'cliq.installed.server.authentication.v1';
+export const INSTALLED_SERVER_AUTHENTICATION_PHASES = Object.freeze(['image_hash', 'process_cas', 'principal_cas', 'peer_cas', 'channel_cas'] as const);
+type ServerAuthenticationPhase = typeof INSTALLED_SERVER_AUTHENTICATION_PHASES[number];
+const serverPhases: ReadonlySet<string> = new Set(INSTALLED_SERVER_AUTHENTICATION_PHASES);
+const server = channel(INSTALLED_SERVER_AUTHENTICATION_CHANNEL);
+let serverOrdinal = 0;
+
+/** Fixed trusted-composition observation only. These are complete JS await
+ * spans, never native fsync intervals, authentication or deadline authority.
+ * An ordinary image has no subscriber: no clock, ordinal, tuple or task. */
+export function beginInstalledServerAuthentication(): (<T>(phase: ServerAuthenticationPhase, operation: () => Promise<T>) => Promise<T>) | undefined {
+  if (!server.hasSubscribers || serverOrdinal >= Number.MAX_SAFE_INTEGER) return;
+  const ordinal = ++serverOrdinal;
+  const emit = (phase: string, elapsedNs: number) => {
+    try { server.publish(Object.freeze({ ordinal, phase, elapsedNs })); } catch { /* Diagnostic only. */ }
+  };
+  emit('publish_started', 0);
+  return async <T>(phase: ServerAuthenticationPhase, operation: () => Promise<T>): Promise<T> => {
+    if (typeof phase !== 'string' || !serverPhases.has(phase)) return operation();
+    let started: bigint | undefined;
+    try { started = process.hrtime.bigint(); } catch { /* Missing clocks never replace an operation. */ }
+    const completed = (outcome: 'completed' | 'failed') => {
+      try {
+        if (started === undefined) return;
+        const elapsed = process.hrtime.bigint() - started;
+        if (elapsed >= 0n && elapsed <= BigInt(Number.MAX_SAFE_INTEGER)) emit(phase + '_' + outcome, Number(elapsed));
+      } catch { /* Never turn missing diagnostic data into an operation failure. */ }
+    };
+    try { const value = await operation(); completed('completed'); return value; }
+    catch (error) { completed('failed'); throw error; }
+  };
+}

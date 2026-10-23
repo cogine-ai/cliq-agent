@@ -21,6 +21,7 @@ import { sampleCanonicalNow } from './canonical-time.js';
 import type { HeldControlListener, HeldControlPeer, NativePeerObservation } from './native-owner.js';
 import { hashHeldProcessImage } from './process-image.js';
 import { immutableSnapshot } from '../model/immutable.js';
+import { beginInstalledServerAuthentication } from './installed-diagnostics.js';
 
 export type AuthenticatedControlIdentity = Readonly<{
   principalId: string;
@@ -78,15 +79,17 @@ export function openLocalControlListener(artifacts: ArtifactCatalog, owner: Stat
       catch (error) { throw new KernelStorageError('ARTIFACT_MISMATCH', 'control peer native identity changed or became unavailable', { cause: error }); }
     };
     const publish = async () => {
+      const observe = beginInstalledServerAuthentication();
       const observedAt = sampleCanonicalNow();
       capture = peer.capture();
       const processIdentity: PlatformProcessIdentityV1 = {
         schemaVersion: 1, format: 'cliq-platform-process-identity-v1', platform: process.platform === 'linux' ? 'linux' : 'macos',
         pid: capture.pid, ownerUid: capture.uid, processStartToken: capture.processStartToken,
-        executableImageDigest: await hashNativeImage(peer, capture), observedAt, identityDigest: ''
+        executableImageDigest: observe ? await observe('image_hash', () => hashNativeImage(peer, capture!)) : await hashNativeImage(peer, capture), observedAt, identityDigest: ''
       };
       processIdentity.identityDigest = digestOmitting(processIdentity, 'identityDigest');
-      const processArtifact = await artifacts.publishCanonical(processIdentity, processIdentity.format);
+      const processArtifact = observe ? await observe('process_cas', () => artifacts.publishCanonical(processIdentity, processIdentity.format))
+        : await artifacts.publishCanonical(processIdentity, processIdentity.format);
       const principal: LocalPrincipalIdentityV1 = {
         schemaVersion: 1, format: 'cliq-local-principal-identity-v1', platform: processIdentity.platform,
         stateRootIdentityRef: owner.stateRootIdentityRef, stateRootIdentityDigest: owner.stateRootIdentityDigest,
@@ -94,7 +97,8 @@ export function openLocalControlListener(artifacts: ArtifactCatalog, owner: Stat
         principalId: identityHash('cliq-local-principal-v1', owner.stateRootIdentityDigest, processIdentity.platform, capture.uid), identityDigest: ''
       };
       principal.identityDigest = digestOmitting(principal, 'identityDigest');
-      const principalArtifact = await artifacts.publishCanonical(principal, principal.format);
+      const principalArtifact = observe ? await observe('principal_cas', () => artifacts.publishCanonical(principal, principal.format))
+        : await artifacts.publishCanonical(principal, principal.format);
       const observation: LocalSocketPeerObservationV1 = {
         schemaVersion: 1, format: 'cliq-local-socket-peer-observation-v1', platform: processIdentity.platform,
         stateRootIdentityRef: owner.stateRootIdentityRef, stateRootIdentityDigest: owner.stateRootIdentityDigest,
@@ -107,7 +111,8 @@ export function openLocalControlListener(artifacts: ArtifactCatalog, owner: Stat
         observedAt, observationDigest: ''
       };
       observation.observationDigest = digestOmitting(observation, 'observationDigest');
-      const peerArtifact = await artifacts.publishCanonical(observation, observation.format);
+      const peerArtifact = observe ? await observe('peer_cas', () => artifacts.publishCanonical(observation, observation.format))
+        : await artifacts.publishCanonical(observation, observation.format);
       const channel: LocalControlChannelIdentityV1 = {
         schemaVersion: 1, format: 'cliq-local-control-channel-identity-v1', client: 'rpc',
         principalIdentityRef: principalArtifact.ref, principalIdentityDigest: principal.identityDigest, principalId: principal.principalId,
@@ -118,7 +123,8 @@ export function openLocalControlListener(artifacts: ArtifactCatalog, owner: Stat
       decodeLocalPrincipalIdentity(principal);
       decodeLocalSocketPeerObservation(observation);
       decodeControlChannel(channel);
-      const channelArtifact = await artifacts.publishCanonical(channel, channel.format);
+      const channelArtifact = observe ? await observe('channel_cas', () => artifacts.publishCanonical(channel, channel.format))
+        : await artifacts.publishCanonical(channel, channel.format);
       assertCurrent();
       identity = Object.freeze({ principalId: principal.principalId, channelIdentityRef: channelArtifact.ref,
         channelIdentityDigest: channel.channelIdentityDigest });

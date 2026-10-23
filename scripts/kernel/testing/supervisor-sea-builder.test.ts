@@ -9,6 +9,77 @@ import { build } from 'esbuild';
 import { CREDENTIAL_PHASE_DIAGNOSTIC_BANNER, INSTALLED_WORK_DIAGNOSTIC_BANNER,
   prepareSupervisorSeaCarrier, SUPERVISOR_SEA_NODE_VERSION } from './supervisor-sea-builder.js';
 
+test('the signed server diagnostic banner writes only fixed ordinal/phase/elapsed spans and joins its producer', async () => {
+  const builder = await import('./supervisor-sea-builder.js') as Record<string, unknown>;
+  assert.equal(typeof builder.SERVER_AUTHENTICATION_DIAGNOSTIC_BANNER, 'string');
+  const bundled = await build({ stdin: { contents: `
+    (async()=>{
+      const {beginInstalledServerAuthentication} = require('./src/state/installed-diagnostics.ts');
+      const observe = beginInstalledServerAuthentication();
+      for (const phase of ['image_hash','process_cas','principal_cas','peer_cas','channel_cas'])
+        await observe(phase,async()=> 'private-original-value');
+      process.stdout.write('original-publisher-complete');
+    })();
+  `, resolveDir: fileURLToPath(new URL('../../..', import.meta.url)) }, bundle: true, write: false,
+  platform: 'node', format: 'cjs', banner: { js: builder.SERVER_AUTHENTICATION_DIAGNOSTIC_BANNER as string } });
+  const child = spawnSync(process.execPath, ['-e', bundled.outputFiles[0]!.text], { encoding: 'utf8', timeout: 5000 });
+  assert.equal(child.error, undefined); assert.equal(child.signal, null); assert.equal(child.status, 0, child.stderr);
+  assert.equal(child.stdout, 'original-publisher-complete');
+  const rows = child.stderr.trim().split('\n');
+  assert.equal(rows.length, 6); assert.equal(rows[0], 'CLIQ_SERVER_AUTH_V1:1:publish_started:0');
+  for (const [index, phase] of ['image_hash','process_cas','principal_cas','peer_cas','channel_cas'].entries())
+    assert.match(rows[index + 1]!, new RegExp('^CLIQ_SERVER_AUTH_V1:1:' + phase + '_completed:(0|[1-9][0-9]*)$'));
+  assert(rows.every(row => Buffer.byteLength(row + '\n') <= 128));
+});
+
+test('the server diagnostic subscriber rejects malformed or private fields without getters and contains output failure', async () => {
+  const { SERVER_AUTHENTICATION_DIAGNOSTIC_BANNER } = await import('./supervisor-sea-builder.js');
+  for (const closed of [false, true]) {
+    const bundled = await build({ stdin: { contents: `
+      const diagnostic = require('node:diagnostics_channel').channel('cliq.installed.server.authentication.v1');
+      if (${closed}) require('node:fs').closeSync(2);
+      let reads = 0;
+      const row = {ordinal:1,phase:'image_hash_completed',elapsedNs:123};
+      const privateText = 'private-request-path-key-and-error';
+      for (const value of [null,[],privateText,{...row,privateText},{...row,ordinal:0},
+        {...row,ordinal:9007199254740992},{...row,ordinal:'1'},{...row,elapsedNs:-1},
+        {...row,elapsedNs:1.2},{...row,elapsedNs:Infinity},{...row,elapsedNs:'1'},
+        {...row,elapsedNs:9007199254740992},{...row,phase:privateText},{...row,phase:['image_hash_completed']},
+        {...row,phase:'publish_started',elapsedNs:1},
+        Object.defineProperty({...row},'elapsedNs',{get(){reads++;throw Error(privateText)}}),
+        Object.defineProperty({...row},'hidden',{value:privateText}),
+        Object.assign({...row},{[Symbol('private')]:privateText}),
+        new Proxy(row,{ownKeys(){reads++;throw Error(privateText)}}),
+        new Proxy(row,{getOwnPropertyDescriptor(){reads++;throw Error(privateText)}}),
+        new Proxy(row,{getPrototypeOf(){reads++;throw Error(privateText)}}),
+        new Proxy(row,{get(){reads++;throw Error(privateText)}})]) diagnostic.publish(value);
+      diagnostic.publish(row);
+      process.stdout.write('original-publisher-complete:' + reads);
+    ` }, bundle: true, write: false, platform: 'node', format: 'cjs',
+    banner: { js: SERVER_AUTHENTICATION_DIAGNOSTIC_BANNER } });
+    const child = spawnSync(process.execPath, ['-e', bundled.outputFiles[0]!.text], { encoding: 'utf8', timeout: 5000 });
+    assert.equal(child.error, undefined); assert.equal(child.signal, null); assert.equal(child.status, 0, child.stderr);
+    assert.equal(child.stdout, 'original-publisher-complete:0');
+    assert.equal(child.stderr, closed ? '' : 'CLIQ_SERVER_AUTH_V1:1:image_hash_completed:123\n');
+  }
+});
+
+test('the server diagnostic sink has one explicit truncation marker after its 64 fixed records', async () => {
+  const { SERVER_AUTHENTICATION_DIAGNOSTIC_BANNER } = await import('./supervisor-sea-builder.js');
+  const bundled = await build({ stdin: { contents: `
+    const diagnostic = require('node:diagnostics_channel').channel('cliq.installed.server.authentication.v1');
+    for(let ordinal=1;ordinal<=80;ordinal++) diagnostic.publish({ordinal,phase:'publish_started',elapsedNs:0});
+    process.stdout.write('original-publisher-complete');
+  ` }, bundle: true, write: false, platform: 'node', format: 'cjs', banner: { js: SERVER_AUTHENTICATION_DIAGNOSTIC_BANNER } });
+  const child = spawnSync(process.execPath, ['-e', bundled.outputFiles[0]!.text], { encoding: 'utf8', timeout: 5000 });
+  assert.equal(child.error, undefined); assert.equal(child.signal, null); assert.equal(child.status, 0, child.stderr);
+  assert.equal(child.stdout, 'original-publisher-complete');
+  const rows = child.stderr.trim().split('\n'); assert.equal(rows.length, 65);
+  assert.equal(rows.at(-1), 'CLIQ_SERVER_AUTH_V1:truncated');
+  assert.equal(rows[63], 'CLIQ_SERVER_AUTH_V1:64:publish_started:0');
+  assert(rows.every(row => Buffer.byteLength(row + '\n') <= 128));
+});
+
 test('the publication fixture banner emits only the closed joined packet, bounded to four literal frames', async () => {
   const builder = await import('./supervisor-sea-builder.js') as Record<string, unknown>;
   const banner = builder.PUBLICATION_RETIREMENT_DIAGNOSTIC_BANNER;

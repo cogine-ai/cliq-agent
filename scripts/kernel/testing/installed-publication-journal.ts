@@ -1,5 +1,6 @@
 // Fixed-data journald observation only, not publication or clock authority.
 import assert from 'node:assert/strict';
+import { types } from 'node:util';
 import { parseJsonStrict } from '../../../src/kernel/json.js';
 import type { PublicationRetirementDiagnostic } from '../../../src/state/publication-retirement-diagnostics.js';
 import { decodeInstalledPublicationRetirements } from './installed-publication-retirement.js';
@@ -66,4 +67,61 @@ export function readInstalledLatePublicationRetirementJournal(text: string,
 /** Original dispatch only, never a probe-nonce or process-death assertion. */
 export function readInstalledOriginalRetirementJournal(text: string, expected: Sender): PublicationRetirementDiagnostic | undefined {
   return readRetirementJournal(text, expected, 'original');
+}
+
+const SERVER_AUTH_STAGES = ['image_hash', 'process_cas', 'principal_cas', 'peer_cas', 'channel_cas'] as const;
+type ServerAuthenticationPhase = 'publish_started' | `${typeof SERVER_AUTH_STAGES[number]}_${'completed' | 'failed'}`;
+export type InstalledServerAuthenticationObservation = Readonly<{
+  ordinal: number; phase: ServerAuthenticationPhase; elapsedNs: number;
+}>;
+
+/** One complete, unfiltered journal window from an independently identified
+ * original server. Prefixes and independent JS-await spans are diagnosis only,
+ * never authentication success, native timing, process death or authority. */
+export function readInstalledServerAuthenticationJournal(text: string,
+  expected: Readonly<{ uid: number; pid: number; invocationId: string }>):
+  readonly InstalledServerAuthenticationObservation[] | undefined {
+  // Fixed text avoids untrusted metadata and assertion source reconstruction.
+  function need(value: unknown): asserts value { assert(value, 'invalid fixed server authentication journal data'); }
+  need(typeof text === 'string');
+  need(expected && typeof expected === 'object' && !types.isProxy(expected) && !Array.isArray(expected));
+  need([Object.prototype, null].includes(Object.getPrototypeOf(expected)));
+  const fields = Object.getOwnPropertyDescriptors(expected), keys = Reflect.ownKeys(fields);
+  need(keys.length === 3);
+  for (const key of ['uid', 'pid', 'invocationId'])
+    need(Object.hasOwn(fields, key) && fields[key]!.enumerable && Object.hasOwn(fields[key]!, 'value'));
+  const { uid, pid, invocationId } = Object.fromEntries(keys.map(key => {
+    need(typeof key === 'string' && ['uid', 'pid', 'invocationId'].includes(key));
+    return [key, fields[key]!.value];
+  }));
+  need(Number.isSafeInteger(uid) && uid > 0); need(Number.isSafeInteger(pid) && pid > 0);
+  need(typeof invocationId === 'string' && /^[0-9a-f]{32}$/u.test(invocationId));
+  need(Buffer.byteLength(text, 'utf8') <= 256 * 1024);
+  const lines = text.trim().split('\n').filter(Boolean); need(lines.length <= 80);
+  const observations: InstalledServerAuthenticationObservation[] = [], stages = new Map<number, number>();
+  let previousOrdinal: number | undefined;
+  for (const line of lines) {
+    const record = parseJsonStrict(line) as Record<string, unknown>;
+    need(record && typeof record === 'object' && !Array.isArray(record));
+    need(record._UID === String(uid)); need(record._PID === String(pid));
+    need(record._TRANSPORT === 'stdout'); need(record._SYSTEMD_INVOCATION_ID === invocationId);
+    need(typeof record.MESSAGE === 'string');
+    if (!record.MESSAGE.startsWith('CLIQ_SERVER_AUTH_V1')) continue;
+    const matched = /^CLIQ_SERVER_AUTH_V1:([1-9][0-9]{0,15}):(publish_started|(?:image_hash|process_cas|principal_cas|peer_cas|channel_cas)_(?:completed|failed)):(0|[1-9][0-9]{0,15})$/u.exec(record.MESSAGE);
+    need(matched && matched[0] === record.MESSAGE && observations.length < 64);
+    const ordinal = Number(matched[1]), phase = matched[2] as ServerAuthenticationPhase, elapsedNs = Number(matched[3]);
+    need(Number.isSafeInteger(ordinal) && ordinal > 0 && Number.isSafeInteger(elapsedNs) && elapsedNs >= 0);
+    if (phase === 'publish_started') {
+      need(elapsedNs === 0 && !stages.has(ordinal));
+      need(previousOrdinal === undefined || ordinal === previousOrdinal + 1);
+      previousOrdinal = ordinal; stages.set(ordinal, 0);
+    } else {
+      const stage = stages.get(ordinal);
+      need(stage !== undefined && stage >= 0 && stage < SERVER_AUTH_STAGES.length);
+      need(phase === `${SERVER_AUTH_STAGES[stage]}_completed` || phase === `${SERVER_AUTH_STAGES[stage]}_failed`);
+      stages.set(ordinal, phase.endsWith('_failed') ? -1 : stage + 1);
+    }
+    observations.push(Object.freeze({ ordinal, phase, elapsedNs }));
+  }
+  return observations.length ? Object.freeze(observations) : undefined;
 }

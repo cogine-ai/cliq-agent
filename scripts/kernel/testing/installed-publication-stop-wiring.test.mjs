@@ -8,6 +8,45 @@ import { fileURLToPath } from 'node:url';
 
 const source = name => readFileSync(new URL(name, import.meta.url), 'utf8');
 
+test('fixed server timing is opt-in and cannot defer the original service stop or replace its deadline error', () => {
+  const owner = source('./installed-node-journey.ts');
+  assert(owner.includes('serverAuthenticationDiagnostics: options.publicationRetirementDiagnostics'));
+  const bind = owner.indexOf('serverAuthenticationBinding = Object.freeze(');
+  const firstClient = owner.indexOf('client = await persistentClient(); inspectionClient = await persistentClient();');
+  assert(bind >= 0 && firstClient > bind);
+  const stop = owner.indexOf("command('/usr/bin/systemctl', ['--user', 'stop', ...units])", owner.indexOf('  finally {\n    const cleanup'));
+  const originalJoin = owner.indexOf("stopped.ExecMainStatus, '0'", stop);
+  const read = owner.indexOf('readInstalledServerAuthenticationJournal(', originalJoin);
+  const joined = owner.indexOf('report.installedWritersJoined = true;', read);
+  assert(stop >= 0 && originalJoin > stop && read > originalJoin && joined > read);
+  const body = owner.slice(stop, read);
+  assert(body.includes("await assert.rejects(lstat('/proc/' + before[index]!.MainPID), { code: 'ENOENT' })"));
+  assert(body.includes("'--no-tail'")); assert(body.includes('maxBuffer: 256 * 1024'));
+  assert(body.includes('serverAuthenticationBinding.invocationId === before[0]!.InvocationID'));
+  assert(owner.includes('throw original; // Preserve the original consumer deadline and its timing.'));
+  const packageSource = source('./installed-supervisor-package.ts');
+  assert(packageSource.includes('if (options.serverAuthenticationDiagnostics) assert(options.publicationRetirementDiagnostics === true'));
+});
+
+test('server observations leave all five original identity operations serial and register authority only afterward', () => {
+  const control = source('../../../src/state/control-channel.ts');
+  const publish = control.slice(control.indexOf('    const publish = async () => {'), control.indexOf('    const connection: LocalControlConnection'));
+  assert.equal(publish.match(/beginInstalledServerAuthentication\(\)/gu)?.length, 1);
+  let previous = -1;
+  for (const phase of ['image_hash', 'process_cas', 'principal_cas', 'peer_cas', 'channel_cas']) {
+    const needle = `await observe('${phase}',`;
+    assert.equal(publish.split(needle).length, 2);
+    const at = publish.indexOf(needle); assert(at > previous); previous = at;
+  }
+  for (const operation of ['hashNativeImage(peer, capture)',
+    'artifacts.publishCanonical(processIdentity, processIdentity.format)', 'artifacts.publishCanonical(principal, principal.format)',
+    'artifacts.publishCanonical(observation, observation.format)', 'artifacts.publishCanonical(channel, channel.format)'])
+    assert(publish.includes(': await ' + operation));
+  const current = publish.indexOf('assertCurrent();'), register = publish.indexOf('channels.set(');
+  assert(current > previous && register > current);
+  assert(!/Promise\.all|sync:\s*false|\.catch\(/u.test(publish));
+});
+
 test('the original-stop entry is fixed and always includes native retirement diagnostics', () => {
   const entry = source('../qualify-installed-delivery-journey.ts');
   assert(entry.includes("mode === '--delivery-stop-campaign'"));

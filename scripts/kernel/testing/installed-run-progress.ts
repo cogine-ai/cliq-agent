@@ -3,7 +3,7 @@ import { types } from 'node:util';
 import { CONTROL_FRAME_BYTES, controlWireInteger, controlWireRecord,
   decodeInstalledControlEnvelope, decodeInstalledControlResponse } from '../../../src/kernel/control-wire.js';
 import { MAX_JSON_CONTAINER_ENTRIES, MAX_JSON_DEPTH } from '../../../src/kernel/json.js';
-import type { InvocationJournalEntry, InvocationPhase, RunNextStep, RunStatus } from '../../../src/kernel/types.js';
+import type { InvocationJournalEntry, InvocationPhase, RunNextStep, RunStatus, WaitingReason } from '../../../src/kernel/types.js';
 
 const CASES = ['required_pass', 'required_repair', 'advisory_failure', 'required_timeout',
   'delivery_publish', 'delivery_merge', 'delivery_cancel'] as const;
@@ -11,7 +11,7 @@ type CaseKind = typeof CASES[number];
 export type InstalledRunProgress = Readonly<{
   diagnosticOnly: true; source: 'actual_public_run_get'; caseKind: CaseKind; postCount: number;
   status: RunStatus; nextStep: RunNextStep; revision: number; activeWorkerRecorded: boolean;
-  waitingRecorded: boolean; cancelRequested: boolean; completeCut: boolean;
+  waitingRecorded: boolean; waitingReason: WaitingReason | null; cancelRequested: boolean; completeCut: boolean;
   counts: Readonly<{ items: number; journal: number; checkpoints: number; highWaterItemSeq: number;
     highWaterJournalSeq: number; nextItemSeq: number; nextJournalSeq: number }>;
   phaseCounts: Readonly<Record<InvocationPhase, number>>;
@@ -87,7 +87,7 @@ export function projectInstalledRunProgress(input: unknown): InstalledRunProgres
   };
   return Object.freeze({ diagnosticOnly: true, source: 'actual_public_run_get', caseKind: data.caseKind as CaseKind, postCount,
     status: run.status, nextStep: run.nextStep, revision: run.revision, activeWorkerRecorded: run.activeWorkerLaunchId !== undefined,
-    waitingRecorded: run.waitingOnRef !== undefined, cancelRequested: run.cancelRequested,
+    waitingRecorded: run.waitingOnRef !== undefined, waitingReason: run.waitingReason ?? null, cancelRequested: run.cancelRequested,
     completeCut: cut.nextItemSeq === cut.highWaterItemSeq && cut.nextJournalSeq === cut.highWaterJournalSeq &&
       cut.nextCheckpointCursor === cut.highWaterCheckpointCursor,
     counts: Object.freeze({ items: cut.items.length, journal: cut.journal.length, checkpoints: cut.checkpoints.length,

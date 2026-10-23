@@ -25,7 +25,7 @@ function input(): any {
 test('an actual public run.get cut projects only closed progress counts, not authority or retained content', () => {
   assert.deepEqual(projectInstalledRunProgress(input()), {
     diagnosticOnly: true, source: 'actual_public_run_get', caseKind: 'required_repair', postCount: 6,
-    status: 'running', nextStep: 'verify', revision: 2, activeWorkerRecorded: true, waitingRecorded: false,
+    status: 'running', nextStep: 'verify', revision: 2, activeWorkerRecorded: true, waitingRecorded: false, waitingReason: null,
     cancelRequested: false, completeCut: true,
     counts: { items: 2, journal: 1, checkpoints: 1, highWaterItemSeq: 2, highWaterJournalSeq: 1, nextItemSeq: 2, nextJournalSeq: 1 },
     phaseCounts: { prepared: 1, dispatch_claimed: 0, completed: 0, failed: 0, unknown: 0, abandoned: 0 },
@@ -88,12 +88,26 @@ test('counts describe the returned journal, including every closed phase, and ne
   assert.equal(projectInstalledRunProgress(value).lastJournal, null);
 });
 
-test('waiting and worker flags report only recorded public fields, not a guessed waiting kind', () => {
-  const value = input(); value.cut.snapshot.run.status = 'waiting'; delete value.cut.snapshot.run.activeWorkerLaunchId;
-  Object.assign(value.cut.snapshot.run, { waitingReason: 'reconciliation', waitingOnRef: ref });
-  const result = projectInstalledRunProgress(value);
-  assert.equal(result.waitingRecorded, true); assert.equal(result.activeWorkerRecorded, false);
-  assert.equal(Object.hasOwn(result, 'waitingKind'), false); assert.equal(Object.hasOwn(result, 'waitingReason'), false);
+test('waiting progress preserves only the actual closed public reason, while nonwaiting progress records null', () => {
+  assert.equal(projectInstalledRunProgress(input()).waitingReason, null);
+  const queued = input(); queued.cut.snapshot.run.status = 'queued'; delete queued.cut.snapshot.run.activeWorkerLaunchId;
+  assert.equal(projectInstalledRunProgress(queued).waitingReason, null);
+  for (const waitingReason of ['approval', 'input', 'child', 'reconciliation']) {
+    const value = input(); value.cut.snapshot.run.status = 'waiting'; delete value.cut.snapshot.run.activeWorkerLaunchId;
+    Object.assign(value.cut.snapshot.run, { waitingReason, waitingOnRef: ref });
+    const result = projectInstalledRunProgress(value);
+    assert.equal(result.waitingRecorded, true); assert.equal(result.activeWorkerRecorded, false);
+    assert.equal(result.waitingReason, waitingReason); assert.equal(Object.hasOwn(result, 'waitingKind'), false);
+    value.cut.snapshot.run.waitingReason = 'input';
+    assert.equal(result.waitingReason, waitingReason);
+  }
+  for (const waitingReason of [null, 'unknown', ['input'], {}, 0]) {
+    const value = input(); value.cut.snapshot.run.status = 'waiting'; delete value.cut.snapshot.run.activeWorkerLaunchId;
+    Object.assign(value.cut.snapshot.run, { waitingReason, waitingOnRef: ref });
+    assert.throws(() => projectInstalledRunProgress(value));
+  }
+  const nonwaiting = input(); Object.assign(nonwaiting.cut.snapshot.run, { waitingReason: 'input', waitingOnRef: ref });
+  assert.throws(() => projectInstalledRunProgress(nonwaiting));
   const noJournal = input(); noJournal.cut.journal = []; noJournal.cut.highWaterJournalSeq = noJournal.cut.nextJournalSeq = 0;
   assert.deepEqual(projectInstalledRunProgress(noJournal).phaseCounts,
     { prepared: 0, dispatch_claimed: 0, completed: 0, failed: 0, unknown: 0, abandoned: 0 });
@@ -117,7 +131,10 @@ test('getters, hidden fields, symbols and Proxy traps are refused without invoca
   const proxy = input(); proxy.cut = new Proxy(proxy.cut, { ownKeys() { calls++; throw 0; }, get() { calls++; throw 0; } });
   const toJSON = input(); Object.defineProperty(toJSON.cut, 'toJSON', { enumerable: true, get() { calls++; throw 0; } });
   const arrayProxy = input(); arrayProxy.cut.items = new Proxy([], { get() { calls++; throw 0; } });
-  for (const value of [accessor, hidden, symbol, proxy, toJSON, arrayProxy]) assert.throws(() => projectInstalledRunProgress(value));
+  const waitingAccessor = input(); Object.defineProperty(waitingAccessor.cut.snapshot.run, 'waitingReason',
+    { enumerable: true, get() { calls++; return 'input'; } });
+  const waitingProxy = input(); waitingProxy.cut.snapshot.run.waitingReason = new Proxy({}, { get() { calls++; throw 0; }, ownKeys() { calls++; throw 0; } });
+  for (const value of [accessor, hidden, symbol, proxy, toJSON, arrayProxy, waitingAccessor, waitingProxy]) assert.throws(() => projectInstalledRunProgress(value));
   assert.equal(calls, 0);
 });
 

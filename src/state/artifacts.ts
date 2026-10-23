@@ -59,6 +59,14 @@ export class ArtifactCatalog {
     this.readSignal?.throwIfAborted(); return bytes;
   }
 
+  /** Complete original-byte verification without retaining an object buffer. */
+  async verifyBytes(ref: ArtifactRef): Promise<void> {
+    assertArtifactRef(ref);
+    this.readSignal?.throwIfAborted();
+    await this.cas.verify(ref, this.readSignal);
+    this.readSignal?.throwIfAborted();
+  }
+
   async readCanonical<T>(ref: ArtifactRef): Promise<T> {
     const bytes = await this.readBytes(ref);
     this.readSignal?.throwIfAborted();

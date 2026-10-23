@@ -35,7 +35,8 @@ import { qualifyInstalledOwnerLinks, qualifyInstalledOwnerProcess } from './inst
 import { startPublicationCrashObserver, startPublicationRetirementStopObserver } from './installed-publication-crash-observer.js';
 import { assertInstalledPublicationCleanupRecovery, assertInstalledPublicationLateAudit, assertInstalledPublicationLateAuditRecovery,
   readInstalledPublicationProbeSample } from './installed-publication-recovery.js';
-import { readInstalledNamespaceRetirementJournal, readInstalledOriginalRetirementJournal } from './installed-publication-journal.js';
+import { readInstalledNamespaceRetirementJournal, readInstalledOriginalRetirementJournal,
+  readInstalledServerAuthenticationJournal } from './installed-publication-journal.js';
 import { assessInstalledPublicationLateInterval, assertInstalledPublicationLateCausalOrder, readInstalledLatePublicationRetirementWindow, type InstalledPublicationLateDiagnostic } from './installed-publication-late-result.js';
 import { inspectInstalledPublicationClaim, inspectInstalledRecoveredWorkerRetirement } from './installed-worker-lease.js';
 import { isOriginalPublicationFirstParentSignalBracket, isPublicationSignalActorJoinedWithinStop } from './installed-publication-retirement.js';
@@ -195,11 +196,14 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
   let requestOrdinal = 0;
   const nextId = () => '019a0013-0000-7000-8000-' + String(++requestOrdinal).padStart(12, '0');
   const request = <T extends Record<string, unknown>>(core: T): T & { requestDigest: string } => ({ ...core, requestDigest: canonicalSha256(core) });
-  const accepted = (response: Response, method: string) => {
+  const recordRefusal = (response: Response, method: string) => {
     if (!response.ok) report.lastRefusal = { method,
       code: ['INVALID_REQUEST', 'INTERNAL', 'AUTHORIZATION_REQUIRED', 'UNSUPPORTED_EXECUTION_IDENTITY', 'ARTIFACT_MISMATCH',
         'UNSUPPORTED_PLATFORM', 'REVISION_CONFLICT', 'BUDGET_EXHAUSTED', 'RATE_LIMITED'].includes(response.error?.code as string)
         ? response.error!.code : 'unclassified' };
+  };
+  const accepted = (response: Response, method: string) => {
+    recordRefusal(response, method);
     assert.equal(response.protocolVersion, 1); assert.equal(response.ok, true, 'actual installed method must be accepted: ' + method);
     assert(response.result && response.result.method === method); return response.result;
   };
@@ -336,6 +340,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
   let server: Server | undefined, daemon: ChildProcess | undefined, daemonExit: Promise<void> | undefined;
   let daemonPid: number | undefined, daemonStart: string | undefined;
   let services: { supervisorUnit: string; keeperUnit: string } | undefined;
+  let serverAuthenticationBinding: Readonly<{ pid: number; processStartToken: string; invocationId: string; windowOpenedAt: number }> | undefined;
+  let serverAuthenticationFailure = false;
   let client: Awaited<ReturnType<typeof persistentClient>> | undefined, inspectionClient: Awaited<ReturnType<typeof persistentClient>> | undefined;
   let primary: unknown, responderFailure = false, acceptedTcp = 0, acceptedTls = 0, postCount = 0;
   const responderErrors: unknown[] = [];
@@ -533,6 +539,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       requestTokenCeiling: { inputTokens: 32768, outputTokens: 4096, cacheReadTokens: 0, cacheWriteTokens: 0 },
       validFrom: new Date(Date.now() - 60000).toISOString(), validThrough: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString() },
     { guestToolchain: 'node-test-v1', publicationRetirementDiagnostics: options.publicationRetirementDiagnostics,
+      serverAuthenticationDiagnostics: options.publicationRetirementDiagnostics,
       ...(journeyKind === 'verifier' ? { guestImageProfile: 'qualification_max' as const } : {}) });
     assert(signed.guestToolchain && signed.modelAuthority);
     const installer = await build({ entryPoints: [fileURLToPath(new URL('./installed-runtime-installer.ts', import.meta.url))],
@@ -684,7 +691,35 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       assert.equal(await readlink('/proc/' + shown.MainPID + '/exe'), installedImage);
     }
     const keeperReady = await readFile(path.join(recipe.stateRoot, 'runtime/keeper.ready'));
-    client = await persistentClient(); inspectionClient = await persistentClient();
+    if (options.publicationRetirementDiagnostics) {
+      // Actual live binding before the first public-client attempt. A missing
+      // observation stays unavailable; never reconstruct it after a failure.
+      try {
+        const owners = inspectInstalledOwnerHistory(recipe.stateRoot).owners;
+        assert.equal(owners.length, 1); assert.equal(owners[0]!.state, 'active');
+        assert.equal(owners[0]!.runtimeBundleRef, bundleDigest);
+        const entry = signed.bundle.entries.find(entry => entry.role === 'supervisor'); assert(entry);
+        const pid = Number(supervisorBefore.MainPID);
+        const actual = await qualifyInstalledOwnerProcess({ stateRoot: recipe.stateRoot, uid: ledger.uid,
+          pid, selectedImage: installedImage, imageDigest: entry.digest }, owners[0]!, {});
+        assert.equal('linux-proc-start-ticks:' + await fixtureProcess(pid, ledger.uid), actual.processStartToken);
+        const same = show(services.supervisorUnit);
+        assert.equal(same.MainPID, supervisorBefore.MainPID); assert.equal(same.InvocationID, supervisorBefore.InvocationID);
+        serverAuthenticationBinding = Object.freeze({ pid, processStartToken: actual.processStartToken,
+          invocationId: supervisorBefore.InvocationID!, windowOpenedAt: Date.now() });
+      } catch { /* Optional binding failure cannot defer or decide authentication. */ }
+    }
+    try { client = await persistentClient(); inspectionClient = await persistentClient(); }
+    catch (original) {
+      if (options.publicationRetirementDiagnostics && original instanceof InstalledClientConsumerDeadlineError &&
+          original.diagnostic.stage === 'ready' && original.diagnostic.lastObservedDriverStage === 'authentication' &&
+          original.diagnostic.authentication?.at(-1)?.stage === 'hello_exchange_started') {
+        serverAuthenticationFailure = true;
+        report.serverAuthentication = { diagnosticOnly: true, kind: 'unavailable',
+          reason: serverAuthenticationBinding ? 'original_join_missing' : 'preexisting_binding_missing' };
+      }
+      throw original; // Preserve the original consumer deadline and its timing.
+    }
     assert.equal((await send({ protocolVersion: 1, method: 'supervisor.status' }, 'supervisor.status')).health, 'ready');
     const originalOwner = inspectInstalledOwnerHistory(recipe.stateRoot); assert.equal(originalOwner.owners.length, 1);
     assert.equal(originalOwner.owners[0]!.state, 'active'); assert.equal(originalOwner.owners[0]!.runtimeBundleRef, bundleDigest);
@@ -888,7 +923,10 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       report.delivery = { ...report.delivery, attemptStarted: true, reason: 'in_progress' };
       report.delivery = await runInstalledDeliveryCases({
         createSource: kind => createSource(`delivery_${kind}`),
-        send: async (body, timeout = 5000) => { assert(client); return await client.send(body, timeout); },
+        send: async (body, timeout = 5000) => {
+          assert(client); const response = await client.send(body, timeout);
+          recordRefusal(response, body.method as string); return response;
+        },
         nextId, readRetainedArtifact: readCas, downloadPublicArtifact: readPublicArtifact, uid: ledger.uid, gid: ledger.gid, mark,
         readOwnerHistory: async () => inspectInstalledOwnerHistory(recipe.stateRoot).owners,
         assertVerifierProcessesAbsent,
@@ -1383,6 +1421,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       if (services) {
         const units = [services.supervisorUnit, services.keeperUnit] as const;
         const before = units.map(unit => show(unit));
+        let serverAuthenticationObservation: Record<string, unknown> | undefined;
         await withRetainedUnitHistory(units, async assertRetained => {
           assertRetained();
           assert.equal(command('/usr/bin/systemctl', ['--user', 'stop', ...units]).status, 0);
@@ -1394,8 +1433,37 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
             assert.equal(stopped.ExecMainCode, '1'); assert.equal(stopped.ExecMainStatus, '0');
             if (/^[1-9][0-9]*$/u.test(before[index]!.MainPID!)) await assert.rejects(lstat('/proc/' + before[index]!.MainPID), { code: 'ENOENT' });
           }
+          // The original service stop, terminal status and actual PID absence
+          // above must finish first. No new image/journal await can hide a
+          // missed original stop boundary. Retain the exact old unit until the
+          // bounded whole-window read completes; never use a PID fallback.
+          if (serverAuthenticationFailure && serverAuthenticationBinding &&
+              String(serverAuthenticationBinding.pid) === before[0]!.MainPID &&
+              serverAuthenticationBinding.invocationId === before[0]!.InvocationID) {
+            report.serverAuthentication = { diagnosticOnly: true, kind: 'unavailable', reason: 'journal_unavailable' };
+            try {
+              assertRetained();
+              const until = Date.now(), logBy = until + 5000;
+              const timestamp = (value: number) => '@' + Math.floor(value / 1000) + '.' + String(value % 1000).padStart(3, '0');
+              const log = spawnSync('/usr/bin/journalctl', ['--no-pager', '--all', '--no-tail', '--output=json', '--boot=0',
+                `--since=${timestamp(serverAuthenticationBinding.windowOpenedAt)}`, `--until=${timestamp(until)}`,
+                `_UID=${ledger.uid}`, `_PID=${serverAuthenticationBinding.pid}`, '_TRANSPORT=stdout',
+                `_SYSTEMD_INVOCATION_ID=${serverAuthenticationBinding.invocationId}`],
+              { env: environment, timeout: 5000, killSignal: 'SIGKILL', maxBuffer: 256 * 1024 });
+              assert(Buffer.isBuffer(log.stdout) && Buffer.isBuffer(log.stderr)); scanBytes(log.stdout); scanBytes(log.stderr);
+              assert.equal(log.error, undefined, 'actual server diagnostic journal command must join');
+              assert.equal(log.signal, null); assert.equal(log.status, 0);
+              const records = readInstalledServerAuthenticationJournal(new TextDecoder('utf-8', { fatal: true }).decode(log.stdout),
+                { uid: ledger.uid, pid: serverAuthenticationBinding.pid, invocationId: serverAuthenticationBinding.invocationId });
+              assert(Date.now() < logBy, 'actual server diagnostic journal exceeded five seconds'); assertRetained();
+              if (records) serverAuthenticationObservation = { diagnosticOnly: true, kind: 'observed',
+                source: 'actual_joined_original_supervisor_journal', preexistingProcessStartAndFullImageBound: true,
+                originalInvocationBound: true, originalServerJoined: true, records };
+            } catch { /* Diagnosis never replaces the original failure or invents a missing observation. */ }
+          }
         });
         report.installedWritersJoined = true;
+        if (serverAuthenticationObservation) report.serverAuthentication = serverAuthenticationObservation;
       }
     } catch (error) { cleanup.push(error); }
     try {

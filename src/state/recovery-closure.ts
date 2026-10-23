@@ -90,7 +90,7 @@ async function requireRecoveryArtifacts(
   await joinResourceOperations(
     [...unique].map(async ([ref, label]) => {
       try {
-        await artifacts.readBytes(ref);
+        await artifacts.verifyBytes(ref);
       } catch (error) {
         recoveryFailure(`${label} is not readable from CAS: ${(error as Error).message}`, error);
       }

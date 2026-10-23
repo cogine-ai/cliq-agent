@@ -1552,3 +1552,36 @@ command. They change neither the original ninety/thirty-second assertions
 nor stdin, service access, recovery authority or production revoke behavior.
 All new physical cuts and both compact and maximum performance remain
 unverified until the exact combined source executes on Linux.
+
+The exact combined commit `5d093c473dbf22a31bf78424cb9e1a47d3141ce7`
+passes build, strict checks and the unchanged full local test command with
+2,558 passes, one original conditional cross-filesystem skip and no failures
+or cancellations. Final local validation SHA-256:
+`29d7a4df05d0ee2bba610523f1f8dd36ef87151a0b274ae63696d1bc1e316aaa`.
+[Linux run 40010944047](https://github.com/cogine-ai/cliq-agent/actions/runs/40010944047),
+attempt 1, is terminal: sixteen jobs succeed, including all four TypeScript
+matrices, and six fail. All twenty-three report categories are retained with
+no missing or rejected category. Final capture SHA-256:
+`7fb233a575b5d0b857f96e1858799e16c39ed21f7da7110851e6456ca4d45e6e`.
+
+Normal Delivery now reaches a verified source with the compact 160-MiB image,
+but its first `run.apply` is refused; the missing fixed refusal observation
+must be restored before attributing a cause. The maximum-image verifier still
+exceeds its original ninety-second repair bound, and received-tool successor
+completion exceeds its original thirty-second bound. The delayed, original-stop
+and late-result jobs still fail their original five-second authentication
+bound before any publication cut. Their owned volume cleanup succeeds, but
+none qualifies its physical cut. The complete credential campaign, including
+offline completed-receipt replay, succeeds this time; a single pass does not
+establish that the previous intermittent timeout has been repaired. These
+failures remain open, with no complete Delivery, I1 or release claim.
+
+The development follow-up reuses complete bounded CAS verification for
+discard-only recovery reads, preserving the original byte/hash/metadata checks,
+read cancellation and actual descriptor joins instead of retaining whole-object
+buffers. It also retains the existing fixed Delivery refusal observation and
+the public waiting reason. Only the explicitly signed delayed-test images
+subscribe to fixed server authentication spans. Their bounded original-server
+journal is read after the unchanged stop and joins, never before them. These
+are JS-await diagnostics, not native fsync timing, authentication authority or
+evidence that any previously failed deadline or physical cut now passes.

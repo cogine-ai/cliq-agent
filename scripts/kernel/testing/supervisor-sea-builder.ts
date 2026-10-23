@@ -7,7 +7,8 @@ import { chmod, copyFile, lstat, open, readFile, writeFile } from 'node:fs/promi
 import path from 'node:path';
 import { build } from 'esbuild';
 import { inject } from 'postject';
-import { INSTALLED_CREDENTIAL_PHASE_CHANNEL, INSTALLED_CREDENTIAL_PHASES } from '../../../src/state/installed-diagnostics.js';
+import { INSTALLED_CREDENTIAL_PHASE_CHANNEL, INSTALLED_CREDENTIAL_PHASES,
+  INSTALLED_SERVER_AUTHENTICATION_CHANNEL, INSTALLED_SERVER_AUTHENTICATION_PHASES } from '../../../src/state/installed-diagnostics.js';
 import { INSTALLED_WORK_CHANNEL } from '../../../src/state/installed-work-diagnostics.js';
 import { PUBLICATION_RETIREMENT_CHANNEL } from '../../../src/state/publication-retirement-diagnostics.js';
 
@@ -25,6 +26,29 @@ export const CREDENTIAL_PHASE_DIAGNOSTIC_BANNER = `;(() => { try {
   const phases = new Set(${JSON.stringify(INSTALLED_CREDENTIAL_PHASES)}), write = require('node:fs').writeSync;
   diagnostic.subscribe(phase => { try {
     if (typeof phase === 'string' && phases.has(phase)) write(2, 'CLIQ_CREDENTIAL_PHASE_V1:' + phase + '\\n');
+  } catch {} });
+} catch {} })();`;
+
+// Fixed test-image subscription only. Each span is the complete original JS
+// await, not an individual native syscall or a deadline/authority assertion.
+export const SERVER_AUTHENTICATION_DIAGNOSTIC_BANNER = `;(() => { try {
+  const diagnostic = require('node:diagnostics_channel').channel(${JSON.stringify(INSTALLED_SERVER_AUTHENTICATION_CHANNEL)});
+  const phases = new Set(['publish_started', ...${JSON.stringify(INSTALLED_SERVER_AUTHENTICATION_PHASES)}
+    .flatMap(phase => [phase + '_completed', phase + '_failed'])]);
+  const write = require('node:fs').writeSync, isProxy = require('node:util').types.isProxy, prefix = 'CLIQ_SERVER_AUTH_V1:';
+  let emitted = 0, stopped = false;
+  diagnostic.subscribe(value => { try {
+    if (stopped || !value || typeof value !== 'object' || isProxy(value) || Array.isArray(value)) return;
+    const fields = Object.getOwnPropertyDescriptors(value), keys = ['ordinal', 'phase', 'elapsedNs'];
+    if (Reflect.ownKeys(fields).length !== keys.length || keys.some(key => !fields[key] ||
+        !Object.hasOwn(fields[key], 'value') || !fields[key].enumerable)) return;
+    const ordinal = fields.ordinal.value, phase = fields.phase.value, elapsed = fields.elapsedNs.value;
+    if (!Number.isSafeInteger(ordinal) || ordinal < 1 || typeof phase !== 'string' || !phases.has(phase) ||
+        !Number.isSafeInteger(elapsed) || elapsed < 0 || phase === 'publish_started' && elapsed !== 0) return;
+    if (emitted >= 64) { stopped = true; try { write(2, prefix + 'truncated\\n'); } catch {} return; }
+    const frame = prefix + ordinal + ':' + phase + ':' + elapsed + '\\n';
+    if (frame.length > 128) return;
+    emitted++; try { if (write(2, frame) !== frame.length) stopped = true; } catch { stopped = true; }
   } catch {} });
 } catch {} })();`;
 
@@ -148,11 +172,14 @@ export async function buildSupervisorSeaImage(input: {
   variant: string; assets: Record<string, string>; defines?: Record<string, string>;
   credentialPhaseDiagnostics?: true;
   publicationRetirementDiagnostics?: true;
+  serverAuthenticationDiagnostics?: true;
 }): Promise<string> {
   assert(input.credentialPhaseDiagnostics === undefined || input.credentialPhaseDiagnostics === true);
   assert(input.publicationRetirementDiagnostics === undefined || input.publicationRetirementDiagnostics === true);
+  assert(input.serverAuthenticationDiagnostics === undefined || input.serverAuthenticationDiagnostics === true);
   const banner = (input.credentialPhaseDiagnostics ? CREDENTIAL_PHASE_DIAGNOSTIC_BANNER + INSTALLED_WORK_DIAGNOSTIC_BANNER : '') +
-    (input.publicationRetirementDiagnostics ? PUBLICATION_RETIREMENT_DIAGNOSTIC_BANNER : '');
+    (input.publicationRetirementDiagnostics ? PUBLICATION_RETIREMENT_DIAGNOSTIC_BANNER : '') +
+    (input.serverAuthenticationDiagnostics ? SERVER_AUTHENTICATION_DIAGNOSTIC_BANNER : '');
   const main = path.join(input.fixture, `${input.variant}.cjs`);
   const result = await build({ entryPoints: [input.entryPoint], outfile: main,
     bundle: true, platform: 'node', format: 'cjs', target: 'node24.21', metafile: true,

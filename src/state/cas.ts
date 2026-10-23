@@ -223,8 +223,10 @@ async function* verifiedChunks(ref: ArtifactRef, opened: OpenedArtifact, expecte
   if (hash.digest('hex') !== ref) throw new Error(`artifact ${ref} is corrupt`);
 }
 
-async function verifyOpened(ref: ArtifactRef, opened: OpenedArtifact): Promise<ArtifactStat> {
-  for await (const _chunk of verifiedChunks(ref, opened, opened.info.size)) { /* Exhaustion verifies the whole digest. */ }
+async function verifyOpened(ref: ArtifactRef, opened: OpenedArtifact, signal?: AbortSignal): Promise<ArtifactStat> {
+  signal?.throwIfAborted();
+  for await (const _chunk of verifiedChunks(ref, opened, opened.info.size, 1, signal)) { /* Exhaustion verifies the whole digest. */ }
+  signal?.throwIfAborted();
   return { ref, byteLength: opened.info.size };
 }
 
@@ -608,12 +610,18 @@ export class ContentAddressedStore {
     });
   }
 
-  async verify(ref: ArtifactRef): Promise<ArtifactStat> {
+  async verify(ref: ArtifactRef, signal?: AbortSignal): Promise<ArtifactStat> {
     assertArtifactRef(ref);
-    return this.withRoot(async root => {
+    signal?.throwIfAborted();
+    const result = await this.withRoot(async root => {
+      signal?.throwIfAborted();
       const opened = await openPublishedFile(this.root, root, ref);
-      try { return await verifyOpened(ref, opened); }
-      finally { await closeCasHandle(opened.handle); }
+      try {
+        const result = await verifyOpened(ref, opened, signal);
+        await assertRootPathStable(this.root, root); signal?.throwIfAborted();
+        return result;
+      } finally { await closeCasHandle(opened.handle); }
     });
+    signal?.throwIfAborted(); return result;
   }
 }
