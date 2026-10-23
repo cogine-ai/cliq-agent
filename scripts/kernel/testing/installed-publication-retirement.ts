@@ -63,7 +63,7 @@ function nanoseconds(value: unknown): bigint {
 /** Necessary fixed-data overlap only. The caller independently binds key to
  * the original CAS claim/probe and obtains actual native/actor observations.
  * Arena slot zero, aggregate counts and adjacent intervals cannot qualify. */
-export function isOriginalPublicationRetirementSignalBracket(packetInput: unknown, expectedKey: unknown, signalInput: unknown): boolean {
+function originalSignalBracket(packetInput: unknown, expectedKey: unknown, signalInput: unknown, parents: readonly (1 | 2)[]): boolean {
   const packet = decodePublicationRetirementDiagnostic(packetInput);
   if (typeof expectedKey !== 'string' || !/^[0-9a-f]{64}$/u.test(expectedKey)) return invalid();
   const signal = record(signalInput, ['monotonicEnterNs', 'realtimeEnterNs', 'monotonicReturnNs', 'realtimeReturnNs']);
@@ -71,8 +71,17 @@ export function isOriginalPublicationRetirementSignalBracket(packetInput: unknow
     returned = nanoseconds(signal.monotonicReturnNs), realReturned = nanoseconds(signal.realtimeReturnNs);
   if (returned < enter || realReturned < realEnter) return invalid();
   if (packet.kind !== 'original' || packet.key !== expectedKey) return false;
-  return [packet.slots[1], packet.slots[2]].some(span => span.length === 7 && span[0] === 1 && span[1] === 1 && span[2] === 'ok' &&
+  return parents.map(parent => packet.slots[parent]).some(span => span.length === 7 && span[0] === 1 && span[1] === 1 && span[2] === 'ok' &&
     BigInt(span[3]) < enter && returned < BigInt(span[5]) && BigInt(span[4]) < realEnter && realReturned < BigInt(span[6]));
+}
+
+export function isOriginalPublicationRetirementSignalBracket(packetInput: unknown, expectedKey: unknown, signalInput: unknown): boolean {
+  return originalSignalBracket(packetInput, expectedKey, signalInput, [1, 2]);
+}
+
+/** The original-stop campaign specifically requires arena-parent slot one. */
+export function isOriginalPublicationFirstParentSignalBracket(packetInput: unknown, expectedKey: unknown, signalInput: unknown): boolean {
+  return originalSignalBracket(packetInput, expectedKey, signalInput, [1]);
 }
 
 /** Independent unchanged stop bound, measured from original signal entry;

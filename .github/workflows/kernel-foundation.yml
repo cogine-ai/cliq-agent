@@ -1082,3 +1082,55 @@ jobs:
           path: ${{ runner.temp }}/cliq-installed-delivery-delayed-volume/*.json
           if-no-files-found: warn
           retention-days: 7
+
+  linux-installed-delivery-original-stop:
+    name: Linux installed publication retirement and actual original SIGTERM
+    # Independent complete Run/Delivery fixture. Neither the ordinary closure
+    # nor namespace UNKNOWN recovery is replaced by this first-parent cut.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+      - run: npm ci
+      - run: node --test scripts/kernel/testing/installed-volume-guard.test.mjs scripts/kernel/testing/installed-delivery-journey.test.mjs scripts/kernel/testing/installed-publication-stop-wiring.test.mjs
+      - run: node --test --import tsx scripts/kernel/testing/installed-publication-stop-result.test.ts scripts/kernel/testing/installed-publication-retirement.test.ts scripts/kernel/testing/installed-publication-journal.test.ts scripts/kernel/testing/installed-publication-crash-observer.test.ts scripts/kernel/testing/installed-publication-recovery.test.ts scripts/kernel/testing/installed-run-progress.test.ts
+      - run: npm run build
+        id: build
+      - name: Install actual guest, Secret Service and owned-volume prerequisites
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap e2fsprogs libext2fs-dev pkg-config dmsetup kmod
+      - name: Exercise both actual Linux root protocol-child lifetimes
+        shell: bash
+        run: |
+          probe_node=$(realpath "$(command -v node)")
+          sudo "$probe_node" --test --test-concurrency=1 --import tsx scripts/kernel/testing/installed-publication-crash-observer.test.ts
+      - name: Require the disposable hosted VM and its actual fixed delay target
+        shell: bash
+        run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          test "$RUNNER_ARCH" = X64
+          if [[ ! -d /sys/module/dm_delay ]]; then sudo /usr/sbin/modprobe dm_delay; fi
+          sudo /usr/bin/udevadm settle --timeout=5
+          test -d /sys/module/dm_mod
+          test -d /sys/module/dm_delay
+          test -c /dev/mapper/control
+      - name: Observe the original SIGTERM interval and finish the same retained claim after restart
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          probe_node=$(realpath "$(command -v node)")
+          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --delay-volume --run-delivery-stop-journey "$probe_node" "$RUNNER_TEMP/cliq-installed-delivery-original-stop"
+      - name: Retain only bounded reports and unchanged-runner cleanup evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installed-delivery-original-stop-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cliq-installed-delivery-original-stop/*.json
+          if-no-files-found: warn
+          retention-days: 7

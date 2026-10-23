@@ -19,6 +19,7 @@ import type { AuthorizationGrantSummaryV1, VerifierIdentityCreateRequest } from 
 import { decodeCredentialAuthorityOperation, decodeEndpointAuthorityOperation, type EndpointRegistrationV1 } from '../../../src/kernel/credential-authority.js';
 import { digestOmitting, identityHash, sha256Bytes } from '../../../src/kernel/identity.js';
 import { parseJsonStrict } from '../../../src/kernel/json.js';
+import { decodeDeliveryPlan } from '../../../src/kernel/publication.js';
 import type { ArtifactDescriptorV1 } from '../../../src/kernel/types.js';
 import { decodeRunResult, decodeWorkspaceDiff } from '../../../src/state/result-artifacts.js';
 import { buildInstalledSupervisorPackage } from './installed-supervisor-package.js';
@@ -31,10 +32,15 @@ import { runInstalledDeliveryCases } from './installed-delivery-journey.js';
 import { InstalledDeliveryOutcomeError } from './installed-delivery-result.js';
 import type { InstalledVerifierRetirementIdentity } from './installed-verifier-evidence.js';
 import { qualifyInstalledOwnerLinks, qualifyInstalledOwnerProcess } from './installed-owner-history.js';
-import { startPublicationCrashObserver } from './installed-publication-crash-observer.js';
+import { startPublicationCrashObserver, startPublicationRetirementStopObserver } from './installed-publication-crash-observer.js';
 import { assertInstalledPublicationCleanupRecovery } from './installed-publication-recovery.js';
-import { readInstalledNamespaceRetirementJournal } from './installed-publication-journal.js';
+import { readInstalledNamespaceRetirementJournal, readInstalledOriginalRetirementJournal } from './installed-publication-journal.js';
 import { inspectInstalledPublicationClaim, inspectInstalledRecoveredWorkerRetirement } from './installed-worker-lease.js';
+import { isOriginalPublicationFirstParentSignalBracket, isPublicationSignalActorJoinedWithinStop } from './installed-publication-retirement.js';
+import { publicationClaimRetirementDiagnosticKey } from '../../../src/state/publication-retirement-diagnostics.js';
+import { publicationEnvelopeLocations } from '../../../src/state/delivery-publication-progress.js';
+import type { InstalledPublicationStopResult } from './installed-publication-stop-result.js';
+import { projectInstalledRunProgress } from './installed-run-progress.js';
 
 type Recipe = { buildFixture: string; packageRoot: string; installerEntry: string; stateRoot: string; releaseKeysFile: string;
   controlDirectory: string; observer: string; storeFixture: string; publicationObserver: string; workspace: string; reportFile: string };
@@ -126,10 +132,14 @@ async function transferPackage(filename: string, uid: number, gid: number): Prom
 
 
 export async function runInstalledNodeJourney(filename: string, journeyKind: 'verifier' | 'delivery',
-  options: Readonly<{ publicationRetirementDiagnostics?: true }> = {}): Promise<void> {
+  options: Readonly<{ publicationRetirementDiagnostics?: true; publicationRetirementStop?: true }> = {}): Promise<void> {
   assert.equal(process.platform, 'linux'); assert.equal(process.arch, 'x64');
   assert(journeyKind === 'verifier' || journeyKind === 'delivery');
-  assert.deepEqual(Object.keys(options), options.publicationRetirementDiagnostics === true ? ['publicationRetirementDiagnostics'] : []);
+  assert.deepEqual(Object.keys(options).sort(), [
+    ...(options.publicationRetirementDiagnostics === true ? ['publicationRetirementDiagnostics'] : []),
+    ...(options.publicationRetirementStop === true ? ['publicationRetirementStop'] : []),
+  ]);
+  if (options.publicationRetirementStop) assert.equal(options.publicationRetirementDiagnostics, true);
   if (options.publicationRetirementDiagnostics) assert.equal(journeyKind, 'delivery');
   assert.equal(process.geteuid!(), 0);
   const ledger = await readLedger(filename), recipe = ledger.runJourney;
@@ -148,6 +158,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     storageDelayRequest: { diagnosticOnly: true, kind: 'dm-delay', scope: 'complete-home', readMs: 50, writeMs: 50, flushMs: 50 },
     latePublicationResultQualified: false, preciseInFlightPublicationStopQualified: false,
   });
+  if (options.publicationRetirementStop) report.scope =
+    'actual signed Linux complete original Delivery core and separate normal-publication first-parent fsync SIGTERM/owner restart; not UNKNOWN cleanup crash, late-result, paid provider, macOS, reboot or complete I1 qualification';
   const secret = Buffer.from(randomBytes(32).toString('hex')), password = Buffer.from(randomBytes(32).toString('hex'));
   const scanner = createCredentialSecretScanner([secret, password], { maxBytes: 512 * 1024 * 1024, maxStreams: 4096 });
   const scanBytes = (bytes: Uint8Array) => { const stream = scanner.openStream(); try { stream.scan(bytes); } finally { stream.close(); } };
@@ -729,7 +741,13 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         cut = await send({ protocolVersion: 1, method: 'run.get', runId: admitted.id }, 'run.get');
         assert(!responderFailure, 'owned responder must not refuse the literal expected request');
         if (['succeeded', 'completed_unverified', 'failed', 'cancelled'].includes(cut.snapshot.run.status)) break;
-        assert(Date.now() < by, 'actual candidate/verifier/result did not reach terminal within its fixed 90-second qualification window');
+        try {
+          assert(Date.now() < by, 'actual candidate/verifier/result did not reach terminal within its fixed 90-second qualification window');
+        } catch (original) {
+          try { report.runProgressAtTerminalDeadline = projectInstalledRunProgress({ caseKind: sourceKind, cut, postCount }); }
+          catch { /* Optional fixed-data diagnosis cannot replace the original deadline failure. */ }
+          throw original;
+        }
         await delay(50);
       }
       const sessionCut = await send({ protocolVersion: 1, method: 'session.get', sessionId: session.id }, 'session.get');
@@ -864,6 +882,187 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
           assert.equal(owners.owners[1]!.state, 'active'); assert.equal(owners.owners[1]!.runtimeBundleRef, bundleDigest);
           assert.equal(show(services!.keeperUnit).MainPID, keeperBefore.MainPID);
           assert.deepEqual(await readFile(path.join(recipe.stateRoot, 'runtime/keeper.ready')), keeperReady);
+        },
+        originalStop: async (source, operation) => {
+          assert.equal(options.publicationRetirementStop, true);
+          mark('delivery_original_publication_retirement_stop');
+          const diagnostic: Record<string, unknown> = { diagnosticOnly: true, qualified: false, stage: 'observer_start',
+            preciseInFlightPublicationStopQualified: false, latePublicationResultQualified: false,
+            currentSealedMDirectoryPhysicalBytesQualified: false };
+          report.publicationOriginalStop = diagnostic;
+          const ownersBefore = inspectInstalledOwnerHistory(recipe.stateRoot).owners;
+          assert.equal(ownersBefore.length, 2); const original = ownersBefore[1]!; assert.equal(original.state, 'active');
+          const shown = show(services!.supervisorUnit), pid = Number(shown.MainPID), invocationId = shown.InvocationID!;
+          assert.match(invocationId, /^[0-9a-f]{32}$/u); assert.equal(shown.TimeoutStopUSec, '2s');
+          const supervisorEntry = signed.bundle.entries.find(entry => entry.role === 'supervisor'); assert(supervisorEntry);
+          const supervisorDigest = supervisorEntry.digest;
+          const actual = await qualifyInstalledOwnerProcess({ stateRoot: recipe.stateRoot, uid: ledger.uid,
+            pid, selectedImage: installedImage, imageDigest: supervisorDigest }, original, {});
+          const startTicks = actual.processStartToken.slice('linux-proc-start-ticks:'.length);
+          const keeperPid = Number(keeperBefore.MainPID), keeperStart = await fixtureProcess(keeperPid, ledger.uid);
+          const sameKeeper = async () => {
+            assert.equal(show(services!.keeperUnit).MainPID, keeperBefore.MainPID);
+            assert.equal(await fixtureProcess(keeperPid, ledger.uid), keeperStart);
+            assert.deepEqual(await readFile(path.join(recipe.stateRoot, 'runtime/keeper.ready')), keeperReady);
+          };
+          await sameKeeper();
+          const image = await lstat(installedImage, { bigint: true });
+          const observer = startPublicationRetirementStopObserver({ executable: recipe.publicationObserver, prefix, cwd: ledger.home, env: environment,
+            stateRoot: recipe.stateRoot, pid, uid: ledger.uid, startTicks, imageDigest: supervisorDigest,
+            imageDevice: image.dev.toString(), imageInode: image.ino.toString(), imageSize: image.size.toString(), scan: scanBytes });
+          let failure: unknown;
+          try {
+            await bounded(observer.ready, 30000, 'actual publication retirement-stop observer did not arm its original watch');
+            // The fixture owner restores only its original known input before
+            // the extra admission. No new model call or source Run is added.
+            for (const file of source.files.filter(file => file.path === 'example.txt')) {
+              const target = path.join(source.workspace, file.path), held = await open(target, constants.O_WRONLY | constants.O_NOFOLLOW);
+              try { const before = await held.stat(); assert(before.isFile() && before.uid === ledger.uid && before.nlink === 1);
+                await held.truncate(0); await held.writeFile(file.before); await held.sync(); }
+              finally { await held.close(); }
+            }
+            const admitted = await operation.apply(), by = Date.now() + 90000;
+            diagnostic.stage = 'original_claim'; diagnostic.runId = admitted.runId;
+            let claimed: ReturnType<typeof inspectInstalledPublicationClaim>;
+            for (;;) {
+              claimed = inspectInstalledPublicationClaim(recipe.stateRoot, ledger.uid, admitted.runId);
+              if (claimed) break;
+              assert(Date.now() < by, 'the original stop publication claim was not observed within its fixed window'); await delay(0);
+            }
+            assert.equal(claimed.originalReceiptCommitted, false); assert.equal(claimed.journal.length, 2);
+            assert.equal(claimed.claim.supervisorInstanceId, original.supervisorInstanceId);
+            assert.equal(claimed.claim.stateOwnerEpoch, 2);
+            // This is a genuine complete public read before the only arm, not
+            // a prefix reconstructed from the eventual successful result.
+            const beforeCut = await operation.capture(admitted.runId);
+            assert.equal(beforeCut.method, 'run.get'); assert.equal(beforeCut.snapshot.operation, 'delivery');
+            assert.equal(beforeCut.snapshot.run.id, admitted.runId); assert.equal(beforeCut.snapshot.run.status, 'running');
+            assert(beforeCut.snapshot.run.activeWorkerLaunchId && !beforeCut.snapshot.run.resultRef);
+            assert.equal(beforeCut.nextItemSeq, beforeCut.highWaterItemSeq); assert.equal(beforeCut.items.length, beforeCut.highWaterItemSeq);
+            assert.equal(beforeCut.nextJournalSeq, beforeCut.highWaterJournalSeq); assert.equal(beforeCut.journal.length, beforeCut.highWaterJournalSeq);
+            assert.equal(beforeCut.nextCheckpointCursor, beforeCut.highWaterCheckpointCursor);
+            assert.deepEqual(beforeCut.journal, claimed.journal);
+            const current = inspectInstalledPublicationClaim(recipe.stateRoot, ledger.uid, admitted.runId); assert(current);
+            assert.equal(current.databaseIdentity, claimed.databaseIdentity); assert.equal(current.originalReceiptCommitted, false);
+            assert.deepEqual(current.journal, claimed.journal); assert.deepEqual(current.birth, claimed.birth);
+            assert.equal(show(services!.supervisorUnit).InvocationID, invocationId);
+            assert.equal(await fixtureProcess(pid, ledger.uid), startTicks);
+            diagnostic.claimCutDigest = claimed.sqlCutDigest; diagnostic.beforePublicCutDigest = canonicalSha256(beforeCut);
+            diagnostic.arenaBirthRef = claimed.claim.evidenceRef; diagnostic.originalOwnerEpoch = 2;
+            diagnostic.originalSupervisorPid = pid; diagnostic.originalInvocationId = invocationId;
+            const key = publicationClaimRetirementDiagnosticKey({ runId: admitted.runId, planRef: claimed.birth.deliveryPlanRef,
+              opId: claimed.claim.opId, attempt: 0, dispatchId: claimed.claim.dispatchId! });
+            diagnostic.retirementDiagnosticKey = key;
+            let stopped: Awaited<typeof observer.joined> | undefined;
+            // Keep the original 10-second unit-history lease outside admission
+            // and claim sampling. Missing the physical cut is a refusal, never
+            // a reason to extend the lease or signal the process again.
+            await withRetainedUnitHistory([services!.supervisorUnit, services!.keeperUnit], async assertRetained => {
+              assertRetained(); diagnostic.stage = 'physical_stop'; observer.arm(claimed.birth);
+              const remaining = by - Date.now(); assert(remaining > 0);
+              stopped = await bounded(observer.joined, Math.min(90000, remaining), 'actual original retirement-stop actor did not join');
+              await observer.close();
+              assert(isPublicationSignalActorJoinedWithinStop({ monotonicSignalEnterNs: stopped.signal.monotonicEnterNs,
+                monotonicJoinedNs: stopped.joined.monotonicNs }));
+              const exitBy = Date.now() + 5000;
+              for (;;) {
+                const exited = show(services!.supervisorUnit);
+                if (exited.ActiveState === 'inactive' && exited.MainPID === '0') {
+                  assert.equal(exited.SubState, 'dead'); assert.equal(exited.TimeoutStopUSec, '2s'); assert.equal(exited.Result, 'success');
+                  assert.equal(exited.ExecMainPID, String(pid)); assert.equal(exited.ExecMainCode, '1'); assert.equal(exited.ExecMainStatus, '0');
+                  break;
+                }
+                assert(Date.now() < exitBy, 'the original retained unit did not expose its actual graceful exit'); await delay(50);
+              }
+              assertRetained(); await sameKeeper();
+            });
+            assert(stopped); diagnostic.actorProcessAndPipesJoined = true; diagnostic.originalSupervisorGracefulExitObserved = true;
+            diagnostic.signal = stopped.signal; diagnostic.joined = stopped.joined;
+            const known = inspectInstalledPublicationClaim(recipe.stateRoot, ledger.uid, admitted.runId); assert(known);
+            assert.equal(known.databaseIdentity, claimed.databaseIdentity); assert.deepEqual(known.journal.slice(0, 2), claimed.journal);
+            assert.deepEqual(known.birth, claimed.birth); assert.equal(known.originalReceiptCommitted, true);
+            assert(known.journal.length === 2 || known.journal.length === 3 && known.journal[2]!.phase === 'completed');
+            assert.equal(known.progress.filter(value => value.item.state === 'received_handoff').length, 1);
+            const released = inspectInstalledOwnerHistory(recipe.stateRoot).owners;
+            assert.equal(released.length, 2); assert.equal(released[1]!.state, 'terminal'); assert.equal(released[1]!.terminalReason, 'graceful_release');
+            await client!.close(); client = undefined; await inspectionClient?.close(); inspectionClient = undefined;
+            diagnostic.stage = 'successor';
+            const restartBy = Date.now() + 30000;
+            assert.equal(command('/usr/bin/systemctl', ['--user', 'start', services!.supervisorUnit]).status, 0);
+            const successorUnit = show(services!.supervisorUnit);
+            assert.notEqual(successorUnit.MainPID, '0'); assert.notEqual(successorUnit.InvocationID, invocationId);
+            await selectedSupervisor(services!.supervisorUnit, successorUnit, installedImage, restartBy);
+            const history = inspectInstalledOwnerHistory(recipe.stateRoot).owners;
+            assert.equal(history.length, 3); assert.equal(history[1]!.state, 'terminal'); assert.equal(history[1]!.terminalReason, 'graceful_release');
+            assert.equal(history[2]!.state, 'active'); assert.equal(history[2]!.runtimeBundleRef, bundleDigest);
+            await qualifyInstalledOwnerLinks({ stateRoot: recipe.stateRoot, uid: ledger.uid, bundle: signed.bundle, imageDigest: supervisorDigest, report: {} });
+            await sameKeeper(); client = await persistentClient(); diagnostic.sameKeeper = true; diagnostic.successorOwnerEpoch = 3;
+            diagnostic.stage = 'closure';
+            const assertArenaAbsent = async () => {
+              const held: Awaited<ReturnType<typeof open>>[] = [];
+              try {
+                for (const component of [recipe.stateRoot, 'runtime', 'publications']) {
+                  const target = held.length ? `/proc/self/fd/${held.at(-1)!.fd}/${component}` : component;
+                  const directory = await open(target, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW); held.push(directory);
+                  const info = await directory.stat({ bigint: true });
+                  assert(info.isDirectory() && info.uid === BigInt(ledger.uid) && (info.mode & 0o7777n) === 0o700n);
+                }
+                const parent = held.at(-1)!, identity = await parent.stat({ bigint: true });
+                assert.equal(identity.dev.toString(), claimed.birth.parentIdentity.deviceId); assert.equal(identity.ino.toString(), claimed.birth.parentIdentity.fileId);
+                const plan = decodeDeliveryPlan(parseJsonStrict(new TextDecoder('utf-8', { fatal: true }).decode(await readCas(claimed.birth.deliveryPlanRef))));
+                assert.equal(plan.forwardOperations.length, 1); const operation = plan.forwardOperations[0]!;
+                const locations = publicationEnvelopeLocations({ birth: claimed.birth, operation }); assert.equal(locations.length, 2);
+                assert(locations.every(location => location.kind === 'publication_arena' && location.arenaId === claimed.birth.arenaId));
+                // Both fixed slots are children of this exact originally held
+                // arena. Observing its absence entails their absence without
+                // following or adopting a replacement arena or symlink.
+                await assert.rejects(lstat(`/proc/self/fd/${parent.fd}/${claimed.birth.arenaId}`),
+                  (error: unknown) => (error as NodeJS.ErrnoException).code === 'ENOENT');
+              } finally {
+                const closes = await Promise.allSettled(held.reverse().map(directory => directory.close()));
+                assert(closes.every(result => result.status === 'fulfilled'), 'the original arena observation descriptors must all join');
+              }
+            };
+            return { admitted, beforeCut, terminalBy: by, verify: async (proof: InstalledPublicationStopResult) => {
+              assert.equal(proof.runId, admitted.runId); assert.equal(proof.arenaBirthRef, claimed.claim.evidenceRef);
+              assert.equal(proof.dispatchId, claimed.claim.dispatchId); assert.equal(proof.opId, claimed.claim.opId);
+              assert.equal(proof.retirementDiagnosticKey, key); assert.equal(proof.originalOwnerEpoch, 2); assert.equal(proof.successorOwnerEpoch, 3);
+              await assertWorkerRetired(admitted.runId, proof.publicationWorkerRetirement.launchId, proof.publicationWorkerRetirement);
+              await assertArenaAbsent(); await sameKeeper();
+              try { assert.notEqual(await processStart(pid), startTicks); }
+              catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+              const since = Date.parse(claimed.claim.timestamp), logBy = Date.now() + 5000; assert(Number.isFinite(since));
+              for (;;) {
+                const remaining = logBy - Date.now(); assert(remaining > 0, 'actual original retirement timing was not observed within five seconds');
+                const started = performance.now();
+                const log = spawnSync('/usr/bin/journalctl', ['--no-pager', '--all', '--output=json', '--lines=80', '--boot=0',
+                  `--since=@${Math.floor(since / 1000)}`, `--until=@${Math.ceil(Date.now() / 1000)}`,
+                  `_UID=${ledger.uid}`, `_PID=${pid}`, '_TRANSPORT=stdout', `_SYSTEMD_INVOCATION_ID=${invocationId}`],
+                { env: environment, timeout: remaining, killSignal: 'SIGKILL', maxBuffer: 256 * 1024 });
+                assert(Buffer.isBuffer(log.stdout) && Buffer.isBuffer(log.stderr)); scanBytes(log.stdout); scanBytes(log.stderr);
+                const joinFailure = fixtureCommandJoinDiagnostic(log, remaining, started); if (joinFailure) report.commandJoinFailure ??= joinFailure;
+                assert.equal(log.error, undefined, 'actual original journal command must join'); assert.equal(log.signal, null); assert.equal(log.status, 0);
+                const snapshot = readInstalledOriginalRetirementJournal(new TextDecoder('utf-8', { fatal: true }).decode(log.stdout),
+                  { uid: ledger.uid, pid, invocationId, key });
+                assert(Date.now() < logBy, 'actual original retirement timing exceeded five seconds');
+                if (snapshot) {
+                  assert(isOriginalPublicationFirstParentSignalBracket(snapshot, key, stopped!.signal), 'the original signal must lie strictly inside slot-one first fsync in both clocks');
+                  assert(BigInt(snapshot.slots[1][5]!) <= BigInt(stopped!.joined.monotonicNs),
+                    'the original native fsync must return before the observed original process death and join');
+                  diagnostic.snapshot = snapshot; break;
+                }
+                await delay(Math.min(50, Math.max(0, logBy - Date.now())));
+              }
+              assert.equal(postCount, 6); assert.equal(acceptedTcp, postCount); assert.equal(acceptedTls, postCount); assert(!responderFailure);
+              Object.assign(diagnostic, { stage: 'closure_verified', originalReceiptHandoffAndCasClosureVerified: true,
+                originalWorkerPidStartIndependentlyAbsent: true, originalArenaAndSlotsIndependentlyAbsent: true,
+                historicalSealedMAndRecoverableCheckpointVerified: true, redispatchCount: 0, additionalModelPosts: 0 });
+            } };
+          } catch (error) { failure = error; throw error; }
+          finally {
+            try { await observer.close(); }
+            catch (error) { if (failure) throw new AggregateError([failure, error], 'original stop observer did not join after its original failure'); throw error; }
+          }
         },
         cleanupCrash: async source => {
           mark('delivery_cleanup_crash_observer');
@@ -1034,7 +1233,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
             catch (error) { if (failure) throw new AggregateError([failure, error], 'cleanup crash observer did not join after its original failure'); throw error; }
           }
         },
-      });
+      }, options.publicationRetirementStop ? { faultCase: 'original_stop' } : {});
       assert.equal(postCount, 6); assert.equal(acceptedTcp, postCount); assert.equal(acceptedTls, postCount); assert(!responderFailure);
       assert.equal(originalPublicResultBytes.size, 6);
     }
@@ -1087,6 +1286,13 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         assert.equal(report.installedWritersJoined, true); assert.equal(report.httpsJoined, true); assert.equal(report.daemonJoined, true);
         report.secretCorpus = await scanCredentialSecretCorpus({ stateRoot: recipe.stateRoot, uid: ledger.uid, evidenceDirs: [], scanner });
         assert.equal(report.secretCorpus.sqliteDatabasesScanned, 2); assert.equal(report.secretCorpus.evidenceDirectoriesScanned, 0);
+        if (options.publicationRetirementStop) {
+          assert.equal(report.delivery.preciseInFlightPublicationStopQualified, true); assert.equal(report.delivery.cleanupCrashQualified, false);
+          assert.equal(report.publicationOriginalStop.stage, 'closure_verified');
+          Object.assign(report.publicationOriginalStop, { stage: 'complete', qualified: true,
+            preciseInFlightPublicationStopQualified: true, sameReplayAfterReconnect: true });
+          report.preciseInFlightPublicationStopQualified = true;
+        }
         mark('complete');
       } catch (error) {
         if (error instanceof CredentialSecretCorpusError) {
@@ -1098,6 +1304,12 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     }
     if (primary) {
       report.qualified = false;
+      if (options.publicationRetirementStop) {
+        report.preciseInFlightPublicationStopQualified = false;
+        if (report.delivery) report.delivery.preciseInFlightPublicationStopQualified = false;
+        if (report.publicationOriginalStop) Object.assign(report.publicationOriginalStop,
+          { qualified: false, preciseInFlightPublicationStopQualified: false });
+      }
       const frames: Array<{ file: string; line: number; column: number }> = [];
       const failureKinds: Array<{ kind: 'assertion' } | { kind: 'sqlite'; primaryCode: number } |
         { kind: 'installed_verifier_outcome'; stage: InstalledVerifierOutcomeError['diagnosticStage'] } |
@@ -1113,7 +1325,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         else if (diagnostic.code === 'ERR_ASSERTION') failureKinds.push({ kind: 'assertion' });
         else if (diagnostic.code === 'ERR_SQLITE_ERROR' && typeof diagnostic.errcode === 'number' && Number.isSafeInteger(diagnostic.errcode) &&
             diagnostic.errcode >= 0 && diagnostic.errcode <= 65535) failureKinds.push({ kind: 'sqlite', primaryCode: diagnostic.errcode & 0xff });
-        for (const match of (error.stack ?? '').matchAll(/\b(qualify-installed-verifier-journey|qualify-installed-delivery-journey|installed-node-journey|installed-delivery-journey|installed-delivery-result|installed-verifier-result|installed-guest-package|installed-supervisor-package|installed-model-package|installed-read-control|installed-client-consumer|installed-enroll-diagnostic|installed-worker-lease|installed-publication-recovery|installed-publication-crash-observer)\.ts:([1-9][0-9]{0,6}):([1-9][0-9]{0,6})/gu)) {
+        for (const match of (error.stack ?? '').matchAll(/\b(qualify-installed-verifier-journey|qualify-installed-delivery-journey|installed-node-journey|installed-delivery-journey|installed-delivery-result|installed-verifier-result|installed-guest-package|installed-supervisor-package|installed-model-package|installed-read-control|installed-client-consumer|installed-enroll-diagnostic|installed-worker-lease|installed-publication-recovery|installed-publication-crash-observer|installed-publication-stop-result|installed-publication-journal|installed-publication-retirement)\.ts:([1-9][0-9]{0,6}):([1-9][0-9]{0,6})/gu)) {
           if (frames.length < 8) frames.push({ file: match[1]! + '.ts', line: Number(match[2]), column: Number(match[3]) });
         }
         if (error instanceof AggregateError) errors.unshift(...error.errors.slice(0, 4));

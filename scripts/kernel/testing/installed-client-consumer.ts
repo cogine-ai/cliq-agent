@@ -2,23 +2,38 @@
 // owns its original JSONL child and scanned pipes, never Run/native authority.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { types } from 'node:util';
 import { canonicalJsonBytes } from '../../../src/kernel/canonical.js';
 import { parseJsonStrict } from '../../../src/kernel/json.js';
 import { INSTALLED_CLIENT_PHASES, type InstalledClientPhase } from '../../../src/state/installed-diagnostics.js';
 import type { InstalledWorkSnapshot } from '../../../src/state/installed-work-diagnostics.js';
 
 export type InstalledClientAuthenticationObservation = Readonly<{ stage: InstalledClientPhase; elapsedMs: number;
-  observedElapsedMs: number; work?: InstalledWorkSnapshot }>;
+  observedElapsedMs: number; work?: InstalledWorkSnapshot; process?: InstalledClientAuthenticationProcess }>;
+/** Node resourceUsage() cumulative values for this entire process, including
+ * threads. CPU times are microseconds; fsRead/fsWrite are getrusage counters,
+ * never bytes, per-hash timings, per-thread usage or execution evidence. */
+export type InstalledClientAuthenticationProcess = Readonly<{
+  userCPUTime: number; systemCPUTime: number; fsRead: number; fsWrite: number;
+}>;
 const authPrefix = 'CLIQ_INSTALLED_CLIENT_AUTH_V1:';
+const authProcessPrefix = 'CLIQ_INSTALLED_CLIENT_AUTH_V2:self_whole_process_cumulative:';
 const counterKeys = ['started', 'completed', 'bytesRead', 'spanElapsedMs'] as const;
 const workKeys = ['package', 'revalidate', 'createCompare'] as const;
+const processKeys = ['userCPUTime', 'systemCPUTime', 'fsRead', 'fsWrite'] as const;
 function fields(value: unknown, keys: readonly string[]): Record<string, PropertyDescriptor> {
-  assert(typeof value === 'object' && value !== null && !Array.isArray(value));
+  assert(typeof value === 'object' && value !== null && !Array.isArray(value) && !types.isProxy(value));
+  assert([Object.prototype, null].includes(Object.getPrototypeOf(value)));
   const descriptors = Object.getOwnPropertyDescriptors(value);
   assert.deepEqual(Reflect.ownKeys(descriptors).sort(), [...keys].sort());
-  assert(Object.values(descriptors).every(field => 'value' in field)); return descriptors;
+  assert(Object.values(descriptors).every(field => 'value' in field && field.enumerable)); return descriptors;
 }
 function integer(value: unknown): number { assert(typeof value === 'number' && Number.isSafeInteger(value) && value >= 0); return value; }
+export function copyInstalledClientAuthenticationProcess(value: unknown): InstalledClientAuthenticationProcess {
+  const row = fields(value, processKeys);
+  const [userCPUTime, systemCPUTime, fsRead, fsWrite] = processKeys.map(key => integer(row[key]!.value));
+  return Object.freeze({ userCPUTime: userCPUTime!, systemCPUTime: systemCPUTime!, fsRead: fsRead!, fsWrite: fsWrite! });
+}
 export function copyInstalledClientAuthenticationWork(value: unknown): InstalledWorkSnapshot {
   const outer = fields(value, workKeys);
   const rows = workKeys.map(key => {
@@ -30,33 +45,47 @@ export function copyInstalledClientAuthenticationWork(value: unknown): Installed
   return Object.freeze({ package: rows[0]!, revalidate: rows[1]!, createCompare: rows[2]! });
 }
 /** Closed ASCII data only. No source input, request, peer text or authority. */
-export function installedClientAuthenticationMarker(stage: InstalledClientPhase, elapsedMs: number, work?: InstalledWorkSnapshot): Buffer {
+export function installedClientAuthenticationMarker(stage: InstalledClientPhase, elapsedMs: number, work?: InstalledWorkSnapshot,
+  process?: InstalledClientAuthenticationProcess): Buffer {
   assert(typeof stage === 'string' && INSTALLED_CLIENT_PHASES.includes(stage)); integer(elapsedMs);
   const snapshot = work === undefined ? undefined : copyInstalledClientAuthenticationWork(work);
+  const self = process === undefined ? undefined : copyInstalledClientAuthenticationProcess(process);
   const suffix = snapshot ? workKeys.flatMap(key => counterKeys.map(field => snapshot[key][field])).join(':') : 'none';
-  const bytes = Buffer.from(`${authPrefix}${stage}:${elapsedMs}:${suffix}\n`); assert(bytes.length <= 512); return bytes;
+  const prefix = self ? authProcessPrefix : authPrefix;
+  const usage = self ? ':' + processKeys.map(key => self[key]).join(':') : '';
+  const bytes = Buffer.from(`${prefix}${stage}:${elapsedMs}:${suffix}${usage}\n`); assert(bytes.length <= 512); return bytes;
 }
 function authMarker(bytes: Buffer): Omit<InstalledClientAuthenticationObservation, 'observedElapsedMs'> {
   assert(bytes.length <= 512 && bytes.every(byte => byte < 128));
-  const text = bytes.toString('ascii'); assert(text.startsWith(authPrefix) && text.endsWith('\n'));
-  const parts = text.slice(authPrefix.length, -1).split(':');
+  const text = bytes.toString('ascii'), prefix = text.startsWith(authProcessPrefix) ? authProcessPrefix : authPrefix;
+  assert(text.startsWith(prefix) && text.endsWith('\n'));
+  const parts = text.slice(prefix.length, -1).split(':');
   const stage = INSTALLED_CLIENT_PHASES.find(value => value === parts[0]); assert(stage);
   const number = (text: string | undefined) => { assert(text !== undefined && /^(0|[1-9][0-9]{0,15})$/u.test(text)); return integer(Number(text)); };
   const elapsedMs = number(parts[1]);
-  if (parts.length === 3 && parts[2] === 'none') return Object.freeze({ stage, elapsedMs });
+  let process: InstalledClientAuthenticationProcess | undefined;
+  if (prefix === authProcessPrefix) {
+    assert(parts.length === 7 && parts[2] === 'none' || parts.length === 18);
+    process = copyInstalledClientAuthenticationProcess(Object.fromEntries(processKeys.map((key, index) => [key, number(parts[parts.length - 4 + index])])));
+    parts.splice(-4);
+  }
+  const usage = process ? { process } : {};
+  if (parts.length === 3 && parts[2] === 'none') return Object.freeze({ stage, elapsedMs, ...usage });
   assert.equal(parts.length, 14); const numbers = parts.slice(2).map(number);
   const row = (offset: number) => Object.fromEntries(counterKeys.map((key, index) => [key, numbers[offset + index]]));
-  return Object.freeze({ stage, elapsedMs, work: copyInstalledClientAuthenticationWork({ package: row(0), revalidate: row(4), createCompare: row(8) }) });
+  return Object.freeze({ stage, elapsedMs, work: copyInstalledClientAuthenticationWork({ package: row(0), revalidate: row(4), createCompare: row(8) }), ...usage });
 }
 function copyAuthentication(value: readonly InstalledClientAuthenticationObservation[]): readonly InstalledClientAuthenticationObservation[] {
   assert(Array.isArray(value) && value.length <= INSTALLED_CLIENT_PHASES.length);
   let previous = -1, elapsed = -1, observed = -1;
   let previousWork: InstalledWorkSnapshot | undefined;
+  let previousProcess: InstalledClientAuthenticationProcess | undefined;
   const result: InstalledClientAuthenticationObservation[] = [];
   for (let index = 0; index < value.length; index++) {
     const descriptor = Object.getOwnPropertyDescriptor(value, String(index)); assert(descriptor && 'value' in descriptor);
     const keys = Reflect.ownKeys(descriptor.value as object); assert(keys.every(key => typeof key === 'string'));
-    const row = fields(descriptor.value, keys.includes('work') ? ['stage', 'elapsedMs', 'observedElapsedMs', 'work'] : ['stage', 'elapsedMs', 'observedElapsedMs']);
+    const row = fields(descriptor.value, ['stage', 'elapsedMs', 'observedElapsedMs', ...(keys.includes('work') ? ['work'] : []),
+      ...(keys.includes('process') ? ['process'] : [])]);
     const stage = row.stage!.value; assert(typeof stage === 'string');
     const order = INSTALLED_CLIENT_PHASES.findIndex(phase => phase === stage); assert(order > previous); previous = order;
     const elapsedMs = integer(row.elapsedMs!.value), observedElapsedMs = integer(row.observedElapsedMs!.value);
@@ -64,7 +93,11 @@ function copyAuthentication(value: readonly InstalledClientAuthenticationObserva
     const work = row.work ? copyInstalledClientAuthenticationWork(row.work.value) : undefined;
     if (work && previousWork) assert(workKeys.every(key => counterKeys.every(field => work[key][field] >= previousWork![key][field])));
     if (work) previousWork = work;
-    result.push(Object.freeze({ stage: INSTALLED_CLIENT_PHASES[order]!, elapsedMs, observedElapsedMs, ...(work ? { work } : {}) }));
+    const process = row.process ? copyInstalledClientAuthenticationProcess(row.process.value) : undefined;
+    if (process && previousProcess) assert(processKeys.every(key => process[key] >= previousProcess![key]));
+    if (process) previousProcess = process;
+    result.push(Object.freeze({ stage: INSTALLED_CLIENT_PHASES[order]!, elapsedMs, observedElapsedMs,
+      ...(work ? { work } : {}), ...(process ? { process } : {}) }));
   }
   return Object.freeze(result);
 }
@@ -170,7 +203,8 @@ export async function openInstalledClientConsumer(input: Input) {
           const authText = errorTail.toString('ascii');
           assert(driverMarkers.some(marker => errorTail.length < marker.bytes.length &&
             marker.bytes.subarray(0, errorTail.length).equals(errorTail)) || errorTail.length <= 512 &&
-            errorTail.every(byte => byte < 128) && (authPrefix.startsWith(authText) || authText.startsWith(authPrefix)), 'unknown installed client stderr');
+            errorTail.every(byte => byte < 128) && [authPrefix, authProcessPrefix].some(prefix =>
+              prefix.startsWith(authText) || authText.startsWith(prefix)), 'unknown installed client stderr');
           break;
         }
         const line = errorTail.subarray(0, at + 1), marker = driverMarkers.find(value => value.bytes.equals(line));

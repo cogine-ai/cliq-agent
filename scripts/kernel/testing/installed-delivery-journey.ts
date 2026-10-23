@@ -16,10 +16,12 @@ import { decodeRunResult } from '../../../src/state/result-artifacts.js';
 import { assertInstalledDeliveryOutcome, assertInstalledDeliveryVerifier } from './installed-delivery-result.js';
 import type { InstalledVerifierRetirementIdentity } from './installed-verifier-evidence.js';
 import type { InstalledWorkerRetirementBinding } from './installed-worker-lease.js';
+import { assertInstalledPublicationStopResult, type InstalledPublicationStopResult } from './installed-publication-stop-result.js';
 
 type Response = { protocolVersion: 1; ok: boolean; method?: string; result?: Record<string, any>; error?: Record<string, unknown> };
 type Source = { cut: Record<string, any>; submit: Record<string, unknown>; admission: Response;
   files: readonly { path: string; before: string; after: string }[]; workspace: string };
+type Admission = { core: Record<string, unknown> & { requestDigest: string }; response: Response; runId: string };
 type Context = {
   createSource(kind: 'publish' | 'merge' | 'cancel'): Promise<Source>;
   send(request: Record<string, unknown>, timeout?: number): Promise<Response>;
@@ -30,6 +32,10 @@ type Context = {
   assertVerifierProcessesAbsent(retirement: InstalledVerifierRetirementIdentity): Promise<void>;
   mark(phase: string): void; reconnect(): Promise<void>; restart(): Promise<void>;
   cleanupCrash(source: Source): Promise<void>;
+  originalStop?(source: Source, operation: {
+    apply(): Promise<Admission>; capture(runId: string): Promise<Record<string, any>>;
+  }): Promise<{ admitted: Admission; beforeCut: Record<string, any>; terminalBy: number;
+    verify(proof: InstalledPublicationStopResult): Promise<void> }>;
 };
 const ZERO = { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 };
 const metadata = async (filename: string) => {
@@ -39,7 +45,10 @@ const metadata = async (filename: string) => {
     [key, info[key as keyof typeof info]!.toString()]));
 };
 
-export async function runInstalledDeliveryCases(context: Context) {
+export async function runInstalledDeliveryCases(context: Context, options: Readonly<{ faultCase?: 'original_stop' }> = {}) {
+  assert.deepEqual(Object.keys(options), options.faultCase === undefined ? [] : ['faultCase']);
+  assert(options.faultCase === undefined || options.faultCase === 'original_stop');
+  if (options.faultCase === 'original_stop') assert.equal(typeof context.originalStop, 'function');
   const request = (core: Record<string, unknown>) => ({ ...core, requestDigest: canonicalSha256(core) });
   const accepted = (response: Response, method: string) => {
     assert.equal(response.protocolVersion, 1); assert.equal(response.ok, true, 'actual explicit Delivery method must be accepted');
@@ -59,8 +68,7 @@ export async function runInstalledDeliveryCases(context: Context) {
     const launches = observedLaunches.get(runId) ?? [];
     return context.assertRunWorkersRetired(runId, [...launches], publicationRetirement);
   };
-  const terminal = async (runId: string) => {
-    const by = Date.now() + 90000;
+  const terminal = async (runId: string, by = Date.now() + 90000) => {
     for (;;) {
       const cut = await get(runId);
       if (['succeeded', 'completed_unverified', 'failed', 'cancelled'].includes(cut.snapshot.run.status)) return cut;
@@ -135,8 +143,8 @@ export async function runInstalledDeliveryCases(context: Context) {
     assert.deepEqual(await get(cut.snapshot.run.id), cut, 'inspection must never advance or execute the Run');
     return replies;
   };
-  const finish = async (source: Source, admitted: Awaited<ReturnType<typeof apply>>, kind: Completed['kind'], expected: Completed['expected']) => {
-    const cut = await terminal(admitted.runId), sessionCut = await send({ protocolVersion: 1, method: 'session.get', sessionId: cut.snapshot.run.sessionId });
+  const finish = async (source: Source, admitted: Admission, kind: Completed['kind'], expected: Completed['expected'], terminalBy?: number) => {
+    const cut = await terminal(admitted.runId, terminalBy), sessionCut = await send({ protocolVersion: 1, method: 'session.get', sessionId: cut.snapshot.run.sessionId });
     const proof = await assertInstalledDeliveryOutcome({ cut, sessionCut, sourceCut: source.cut, sourceResultRef: source.cut.snapshot.run.resultRef,
       expectedFiles: expected, kind, readRetainedArtifact: context.readRetainedArtifact, readOwnerHistory: context.readOwnerHistory });
     for (const identity of proof.verifierRetirementIdentities) await context.assertVerifierProcessesAbsent(identity);
@@ -205,8 +213,7 @@ export async function runInstalledDeliveryCases(context: Context) {
   }
 
   context.mark('delivery_reconnect_and_actual_supervisor_restart');
-  for (const action of [context.reconnect, context.restart]) {
-    await action();
+  const revalidate = async () => {
     for (const entry of completed) {
       assert.deepEqual(await get(entry.source.cut.snapshot.run.id), entry.source.cut);
       assert.deepEqual(await get(entry.admitted.runId), entry.cut);
@@ -226,9 +233,32 @@ export async function runInstalledDeliveryCases(context: Context) {
       readRetainedArtifact: context.readRetainedArtifact, readOwnerHistory: context.readOwnerHistory,
       cancellation: { request: cancellation, response: cancellationResponse } });
     await context.assertVerifierProcessesAbsent(identity); await retirements(stoppedRun.id);
-  }
-  await context.cleanupCrash(first);
-  return { diagnosticOnly: true, qualified: true, cleanupCrashQualified: true, cases: completed.map(entry => {
+  };
+  for (const action of [context.reconnect, context.restart]) { await action(); await revalidate(); }
+  let originalPublicationStopCase: Record<string, unknown> | undefined;
+  if (options.faultCase === 'original_stop') {
+    const stopped = await context.originalStop!(first, { apply: () => apply(first), capture: get });
+    await finish(first, stopped.admitted, 'publish', files(first), stopped.terminalBy);
+    const entry = completed.pop()!;
+    const prove = () => assertInstalledPublicationStopResult({ beforeCut: stopped.beforeCut, cut: entry.cut, sessionCut: entry.sessionCut,
+      sourceCut: first.cut, sourceResultRef: first.cut.snapshot.run.resultRef, expectedFiles: entry.expected,
+      readRetainedArtifact: context.readRetainedArtifact, readOwnerHistory: context.readOwnerHistory });
+    const proof = await prove(); await stopped.verify(proof);
+    await context.reconnect();
+    // Recheck both the extra case and every original core outcome after the
+    // actual owner-2 stop/owner-3 start. Do not turn this into a fourth source
+    // or change the default three successful cases' report cardinality.
+    completed.push(entry);
+    try { await revalidate(); await stopped.verify(await prove()); }
+    finally { assert.equal(completed.pop(), entry); }
+    const { verifierRetirementIdentities, publicationWorkerRetirement, ...outcome } = entry.proof;
+    assert.equal(verifierRetirementIdentities.length, 0);
+    originalPublicationStopCase = { ...outcome, verifierRetirementCount: 0,
+      originalClaimAndGracefulOwnerClosureVerified: true, noUnknownOrRedispatch: true };
+  } else await context.cleanupCrash(first);
+  return { diagnosticOnly: true, qualified: true, cleanupCrashQualified: originalPublicationStopCase === undefined,
+    ...(originalPublicationStopCase ? { originalPublicationStopCase, preciseInFlightPublicationStopQualified: true,
+      latePublicationResultQualified: false } : {}), cases: completed.map(entry => {
     const { verifierRetirementIdentities, publicationWorkerRetirement, ...proof } = entry.proof;
     return { ...proof, verifierRetirementCount: verifierRetirementIdentities.length };
   }),

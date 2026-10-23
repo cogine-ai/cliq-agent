@@ -29,6 +29,15 @@ test('only an original first parent fsync can strictly enclose the complete acto
     monotonicEnterNs: '310', realtimeEnterNs: '1210', monotonicReturnNs: '320', realtimeReturnNs: '1220' }), true);
 });
 
+test('the stop-specific bracket selects only first parent slot one without changing the any-parent reader', () => {
+  const packet = retirement.decodeInstalledPublicationRetirements(frames())[0]!;
+  const first = { monotonicEnterNs: '110', realtimeEnterNs: '1010', monotonicReturnNs: '120', realtimeReturnNs: '1020' };
+  const second = { monotonicEnterNs: '310', realtimeEnterNs: '1210', monotonicReturnNs: '320', realtimeReturnNs: '1220' };
+  assert.equal(retirement.isOriginalPublicationFirstParentSignalBracket(packet, key, first), true);
+  assert.equal(retirement.isOriginalPublicationFirstParentSignalBracket(packet, key, second), false);
+  assert.equal(retirement.isOriginalPublicationRetirementSignalBracket(packet, key, second), true);
+});
+
 test('the real actor join uses its original signal start and independent unchanged two-second limit', () => {
   assert.equal(retirement.isPublicationSignalActorJoinedWithinStop({ monotonicSignalEnterNs: '110', monotonicJoinedNs: '2000000110' }), true);
   assert.equal(retirement.isPublicationSignalActorJoinedWithinStop({ monotonicSignalEnterNs: '110', monotonicJoinedNs: '2000000111' }), false);
@@ -96,7 +105,10 @@ test('adjacent spans, one-clock overlap, non-parent slots, other keys and namesp
     { ...signal, realtimeEnterNs: '1000' }, { ...signal, realtimeReturnNs: '1100' },
     { monotonicEnterNs: '200', realtimeEnterNs: '1100', monotonicReturnNs: '300', realtimeReturnNs: '1200' },
     { ...signal, realtimeEnterNs: '1301', realtimeReturnNs: '1302' },
-  ]) assert.equal(retirement.isOriginalPublicationRetirementSignalBracket(packet, key, changed), false);
+  ]) {
+    assert.equal(retirement.isOriginalPublicationRetirementSignalBracket(packet, key, changed), false);
+    assert.equal(retirement.isOriginalPublicationFirstParentSignalBracket(packet, key, changed), false);
+  }
   assert.equal(retirement.isOriginalPublicationRetirementSignalBracket({ ...packet,
     slots: [[1, 1, 'ok', '100', '1000', '200', '1100'], [1, 1, 'unavailable'], [1, 1, 'unavailable']] }, key, signal), false);
 });
@@ -106,7 +118,10 @@ test('EINTR, repeated calls or attempts, unavailable and failed first fsync neve
   const signal = { monotonicEnterNs: '110', realtimeEnterNs: '1010', monotonicReturnNs: '120', realtimeReturnNs: '1020' };
   for (const span of [[1, 1, 'interrupted', '100', '1000', '200', '1100'], [1, 1, 'error', '100', '1000', '200', '1100'],
     [2, 2, 'ok', '100', '1000', '200', '1100'], [1, 2, 'ok', '100', '1000', '200', '1100'], [1, 1, 'unavailable']])
+  {
     assert.equal(retirement.isOriginalPublicationRetirementSignalBracket({ ...packet, slots: [null, span, [1, 1, 'unavailable']] }, key, signal), false);
+    assert.equal(retirement.isOriginalPublicationFirstParentSignalBracket({ ...packet, slots: [null, span, [1, 1, 'unavailable']] }, key, signal), false);
+  }
 });
 
 test('clock and actor-join inputs stay closed, canonical uint64 data rather than authority or clock coercion', () => {
@@ -114,7 +129,10 @@ test('clock and actor-join inputs stay closed, canonical uint64 data rather than
   const signal = { monotonicEnterNs: '110', realtimeEnterNs: '1010', monotonicReturnNs: '120', realtimeReturnNs: '1020' };
   for (const bad of [{ ...signal, extra: true }, { ...signal, monotonicEnterNs: 110 }, { ...signal, monotonicEnterNs: '0110' },
     { ...signal, monotonicEnterNs: '18446744073709551616' }, { ...signal, monotonicReturnNs: '109' }, { ...signal, realtimeReturnNs: '1009' }])
+  {
     assert.throws(() => retirement.isOriginalPublicationRetirementSignalBracket(packet, key, bad), TypeError);
+    assert.throws(() => retirement.isOriginalPublicationFirstParentSignalBracket(packet, key, bad), TypeError);
+  }
   for (const bad of [{ monotonicSignalEnterNs: '110', monotonicJoinedNs: '109' },
     { monotonicSignalEnterNs: '110', monotonicJoinedNs: '200', withinDeadline: true },
     { monotonicSignalEnterNs: '110', monotonicJoinedNs: '02' },

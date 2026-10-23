@@ -98,6 +98,28 @@ test('one shared Journal decoder preserves closed phases and the storage error p
   assert.equal(decodeInvocationJournalEntry(retained), retained);
 });
 
+test('Journal discriminators require primitive closed strings rather than string-coercible values', () => {
+  const prepared = { seq: 1, runId: 'run-1', opId: 'op-1', opKind: 'tool', attempt: 0, leaseEpoch: 1,
+    phase: 'prepared', target: 'tool', requestRef: ref, replayClass: 'retry', budgetDelta: budget, timestamp: at };
+  const failed = { ...prepared, phase: 'failed', errorRef: ref, budgetSettlementRef: ref };
+  let coerced = 0;
+  for (const [entry, key, literal] of [
+    [prepared, 'opKind', 'tool'], [prepared, 'replayClass', 'retry'], [failed, 'phase', 'failed'],
+  ] as const) {
+    for (const value of [[literal], { toString() { coerced++; return literal; } }, new String(literal)]) {
+      const malformed = { ...entry, [key]: value };
+      assert.throws(() => decodeWireJournal(malformed), TypeError);
+      assert.throws(() => decodeInvocationJournalEntry(malformed), error =>
+        error instanceof KernelStorageError && error.code === 'STATE_TRANSITION_INVALID');
+    }
+  }
+  assert.equal(coerced, 0, 'enum validation must never invoke caller coercion');
+  for (const opKind of ['model', 'tool', 'mcp-server', 'mcp', 'verifier', 'publish'])
+    assert.deepEqual(decodeWireJournal({ ...prepared, opKind }), { ...prepared, opKind });
+  for (const replayClass of ['retry', 'workspace-rollback-retry', 'reconcile', 'manual'])
+    assert.deepEqual(decodeWireJournal({ ...prepared, replayClass }), { ...prepared, replayClass });
+});
+
 test('a publication dispatch carries its complete original birth pair without opening ordinary claim terminal fields', () => {
   // Inert wire/storage data only: these refs do not supply the native birth,
   // StateOwner, original claim or live publication capability.

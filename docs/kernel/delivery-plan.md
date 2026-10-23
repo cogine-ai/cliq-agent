@@ -1413,3 +1413,87 @@ The delayed-volume job also explicitly runs the two root-only protocol-child
 regressions under its actual root test invocation. A non-root six-test result
 cannot be counted as those eight tests. This exercises actual process/pipe
 lifetime only; it does not run the C SIGTERM actor or qualify a native stop.
+
+The exact next commit, `dd4fcf13d73177ab8322f3af7723fa959ccf59f0`,
+passes the unchanged complete local build and full test command: 2,557 passes,
+one original conditional cross-filesystem skip, no failures, cancellations or
+todos. Its final local validation SHA-256 is
+`0e6f262a80586c997979415a55c8c7f4adfa712433a0392c770a352f0dfc9d36`.
+Linux run `39988808942`, attempt 1, is naturally terminal: seventeen jobs
+succeed and three fail, including four successful TypeScript matrices.
+All twenty-one report categories are retained with zero schema rejection;
+all 93 original JSON files (444,589 bytes) were independently checked again
+for complete bytes, size, hash, ownership, regular-file/no-follow identity
+and the closed schema. Final capture SHA-256:
+`9fb054a83deb6d9d2767bd4ba0a9ae1ca64dc11e0b9737437b00bf20e66da556`.
+The delayed-volume category retains its missing filesystem/journey reports
+and two cleanup errors; it is not qualified by retaining the other reports.
+
+The normal Delivery client fails its original five-second ready deadline
+before any business request. Its actual fixed authentication observations
+end at the real hello response: thirteen complete revalidations, each reading
+798,744,981 returned bytes, and no completed final manager/peer cut. The
+complete already-running path still requires sixteen revalidations; the
+remaining three cannot be replaced with earlier observations. These logical
+read counts and elapsed spans do not identify physical I/O, CPU or scheduler
+cost. The verifier separately passes its first required case but exceeds
+the original ninety-second terminal bound during required repair. Neither
+partial success qualifies its whole installed journey.
+
+The delayed-volume failure is earlier: libmount rewrites the supplied
+`/dev/dm-N` source to its mapper alias, while the original mountinfo guard
+correctly requires the exact frozen canonical source. A bounded in-memory
+projection confirms those two spellings and the original assertion location;
+the 72,126-byte source log SHA-256 is
+`b3aa562c054676245d95c50d4f75ede993f4e55d0104ed1781b7216ccd576aab`.
+The [fixed util-linux implementation](https://raw.githubusercontent.com/util-linux/util-linux/v2.37.2/lib/canonicalize.c)
+performs that spelling change. The candidate preserves the already fully
+checked absolute device and home
+paths by requesting `mount --no-canonicalize` for this one real delayed mount.
+It does not accept a mapper alias, follow an unverified link, skip mount(2),
+or change any device/UUID/loop/image/mount/cleanup/deadline assertion.
+The added regression observes the original missing-option failure and keeps
+both owned and foreign aliases refused by the original identity guard.
+Actual delayed mounting and complete normal retirement must still rerun.
+The terminal-deadline diagnostic projects only the already returned public
+cut's fixed enums and counts. The original ninety-second assertion, its sole
+clock sample and its thrown error remain unchanged; diagnostic failure cannot
+replace that error, query state again or provide any execution/recovery proof.
+Independent review also reproduces string-coercible arrays passing the shared
+Journal discriminators. The repair requires primitive strings for `opKind`,
+`replayClass` and `phase` in that one decoder, rather than duplicating rules in
+the diagnostic. The wire and retained-storage error projections both reject
+the malformed input without invoking coercion. Valid literals, all original
+phase rules and retained safe-bigint numeric compatibility remain unchanged.
+
+The separate original-publication-stop candidate reuses the complete normal
+Delivery journey and a fresh StateRoot, then adds one same-source publication.
+Its actual SIGTERM must fall strictly inside the first original arena-parent
+fsync in both clocks, and the real original process must die and join within
+two seconds from signal entry. It requires the original normal receipt,
+durable sealed-M handoff, graceful owner release, genuine successor, complete
+CAS/result/projection/public replay and independent original worker lifetime
+and arena retirement observations. It cannot reuse the UNKNOWN-crash reader
+or count the pure-data/actor protocol tests as physical qualification. Normal
+and UNKNOWN campaigns remain separate; the late-result cut and all other
+previously unverified acceptance boundaries remain explicitly open.
+
+The exact local tree `1e52734c25182c0aaa30d0d5fabbf0e2a0bb460b`
+completed build and the original full test command with 2,558 passes, zero
+failures and the original one conditional cross-filesystem skip. Its commit
+was stopped by `git diff --cached --check` for one surplus final blank line;
+no commit, push or CI run was made for that tree. That record is preserved,
+not counted as validation of the corrected, subsequent candidate.
+
+The subsequent qualification driver samples `process.resourceUsage()` once
+inside each existing authentication phase callback. The fixed V2 marker labels
+four cumulative whole-process counters, including threads: `userCPUTime` and
+`systemCPUTime` are microseconds; `fsRead` and `fsWrite` are raw getrusage
+counters, not bytes or a per-hash measurement. Unavailable sampling retains
+the original V1 marker. The closed reader preserves counter monotonicity
+across intervening V1 phases. The original seven-phase, 512-byte marker,
+64-KiB stderr and five-second authentication limits, complete image checks,
+secret scanner and actual process/pipe joins remain unchanged. Portable
+regressions and independent review pass; the combined candidate still needs
+its own complete validation and real Linux observations before any performance
+cause or installed qualification can be claimed.

@@ -16,8 +16,9 @@ import { openInstalledSupervisorClient, type InstalledSupervisorClient } from '.
 import { channel } from 'node:diagnostics_channel';
 import { INSTALLED_CLIENT_PHASE_CHANNEL, INSTALLED_CLIENT_PHASES } from '../../../src/state/installed-diagnostics.js';
 import { INSTALLED_WORK_CHANNEL, type InstalledWorkSnapshot } from '../../../src/state/installed-work-diagnostics.js';
-import { copyInstalledClientAuthenticationWork, installedClientAuthenticationMarker } from './installed-client-consumer.js';
-import type { InstalledClientDriverStage } from './installed-client-consumer.js';
+import { copyInstalledClientAuthenticationWork, copyInstalledClientAuthenticationProcess,
+  installedClientAuthenticationMarker } from './installed-client-consumer.js';
+import type { InstalledClientAuthenticationProcess, InstalledClientDriverStage } from './installed-client-consumer.js';
 
 let phase: InstalledClientDriverStage = 'platform';
 let failedPhase: InstalledClientDriverStage | undefined;
@@ -48,7 +49,15 @@ function observeAuthentication(): () => void {
       if (typeof value !== 'string' || !INSTALLED_CLIENT_PHASES.some(phase => phase === value) || phases.has(value)) return;
       const stage = INSTALLED_CLIENT_PHASES.find(phase => phase === value)!;
       phases.add(stage);
-      writeSync(2, installedClientAuthenticationMarker(stage, Math.floor(performance.now() - started), work));
+      let selfProcess: InstalledClientAuthenticationProcess | undefined;
+      try {
+        // One source-owned whole-process cumulative sample, including threads.
+        // CPU fields are Node microseconds; fsRead/fsWrite remain raw getrusage
+        // counters, not physical bytes or a measurement of any single R/hash.
+        const { userCPUTime, systemCPUTime, fsRead, fsWrite } = process.resourceUsage();
+        selfProcess = copyInstalledClientAuthenticationProcess({ userCPUTime, systemCPUTime, fsRead, fsWrite });
+      } catch { /* Unavailable measurement keeps the original V1 phase marker. */ }
+      writeSync(2, installedClientAuthenticationMarker(stage, Math.floor(performance.now() - started), work, selfProcess));
     } catch { /* This trusted subscriber's sink/measurement cannot decide work. */ }
   };
   workChannel.subscribe(observeWork); authenticationChannel.subscribe(observePhase);

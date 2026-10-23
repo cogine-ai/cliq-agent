@@ -6,6 +6,51 @@ import { readFileSync } from 'node:fs';
 import { build } from 'esbuild';
 import ts from 'typescript';
 
+test('each original auth phase samples actual self resource usage once, with inert V1 fallback when unavailable', () => {
+  // Exact source-owned subscriber and real child stderr, not an installed
+  // Supervisor, native authentication proof or injected execution authority.
+  const source = readFileSync(new URL('./installed-control-client-driver.ts', import.meta.url), 'utf8');
+  const block = source.slice(source.indexOf('function observeAuthentication()'), source.indexOf('\nconst sameFile'));
+  assert(block.startsWith('function observeAuthentication()'));
+  const code = ts.transpileModule(block, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  for (const mode of ['actual', 'unavailable', 'invalid']) {
+    const result = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', `
+      import assert from 'node:assert/strict';import {channel} from 'node:diagnostics_channel';
+      import {writeSync} from 'node:fs';import {resourceUsage} from 'node:process';
+      const {copyInstalledClientAuthenticationWork,copyInstalledClientAuthenticationProcess,installedClientAuthenticationMarker}=
+        await import(${JSON.stringify(new URL('./installed-client-consumer.ts', import.meta.url).href)});
+      const {INSTALLED_CLIENT_PHASE_CHANNEL,INSTALLED_CLIENT_PHASES}=
+        await import(${JSON.stringify(new URL('../../../src/state/installed-diagnostics.ts', import.meta.url).href)});
+      const {INSTALLED_WORK_CHANNEL}=await import(${JSON.stringify(new URL('../../../src/state/installed-work-diagnostics.ts', import.meta.url).href)});
+      let calls=0,snapshot=null;const mode=${JSON.stringify(mode)};
+      const ownProcess={resourceUsage(){calls++;if(mode==='unavailable')throw new Error('owned unavailable measurement');
+        if(mode==='invalid')return {userCPUTime:-1,systemCPUTime:0,fsRead:0,fsWrite:0};
+        const {userCPUTime,systemCPUTime,fsRead,fsWrite}=resourceUsage();
+        return snapshot={userCPUTime,systemCPUTime,fsRead,fsWrite};}};
+      const observe=new Function('channel','performance','INSTALLED_WORK_CHANNEL','INSTALLED_CLIENT_PHASE_CHANNEL',
+        'INSTALLED_CLIENT_PHASES','copyInstalledClientAuthenticationWork','copyInstalledClientAuthenticationProcess',
+        'installedClientAuthenticationMarker','writeSync','process',${JSON.stringify(code + ';return observeAuthentication;')})(
+          channel,performance,INSTALLED_WORK_CHANNEL,INSTALLED_CLIENT_PHASE_CHANNEL,INSTALLED_CLIENT_PHASES,
+          copyInstalledClientAuthenticationWork,copyInstalledClientAuthenticationProcess,installedClientAuthenticationMarker,writeSync,ownProcess);
+      const stop=observe();channel(INSTALLED_CLIENT_PHASE_CHANNEL).publish('native_connected');
+      channel(INSTALLED_CLIENT_PHASE_CHANNEL).publish('native_connected');stop();
+      assert.equal(calls,1);console.log(JSON.stringify({calls,snapshot}));
+    `], { encoding: 'utf8', timeout: 10000,
+      // This data-only child loads the source via tsx. Node 26's unrelated
+      // loader deprecation is not a driver marker; actual driver argv/env and
+      // the consumer's strict stderr scanner are deliberately unchanged.
+      env: { ...process.env, NODE_NO_WARNINGS: '1' } });
+    assert.equal(result.error, undefined); assert.equal(result.signal, null); assert.equal(result.status, 0);
+    const report = JSON.parse(result.stdout); assert.equal(report.calls, 1);
+    const prefix = mode === 'actual' ? 'CLIQ_INSTALLED_CLIENT_AUTH_V2:self_whole_process_cumulative:' : 'CLIQ_INSTALLED_CLIENT_AUTH_V1:';
+    assert(result.stderr.startsWith(prefix + 'native_connected:')); assert.equal(result.stderr.split('\n').length, 2);
+    const fields = result.stderr.slice(prefix.length).trimEnd().split(':');
+    assert.match(fields[1]!, /^(0|[1-9][0-9]*)$/u); assert.equal(fields[2], 'none');
+    assert.deepEqual(fields.slice(3).map(Number), mode === 'actual'
+      ? [report.snapshot.userCPUTime, report.snapshot.systemCPUTime, report.snapshot.fsRead, report.snapshot.fsWrite] : []);
+  }
+});
+
 test('a real diagnostic sink failure cannot skip original retirement or replace its original error', () => {
   // Exact driver control flow with real EBADF and real descriptor closes. This
   // data-only composition creates no installed client, native proof or grant.

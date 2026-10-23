@@ -256,6 +256,17 @@ test('VM boolean refusal retains the real AssertionError and a fixed non-sensiti
   });
 });
 
+test('the delayed mount keeps its already-verified canonical device spelling and never admits an alias as identity', () => {
+  assert(shell.includes('mount --no-canonicalize -t ext4 -o nodev,nosuid "$probe_volume_device" "$probe_home"'));
+  const base = { volumeMode: 'delay-50ms', source: '/dev/dm-9', device: '253:9', mountedDevice: '64777' };
+  setup(base).run('capture');
+  for (const alias of [`/dev/mapper/${delayName}`, '/dev/dm-10', '/dev/mapper/foreign']) {
+    const context = setup({ ...base, source: alias });
+    assert.throws(() => context.run('capture'), /AssertionError/u);
+    assert(context.commands.every(([, operation]) => ['table', '--probe', '--list'].includes(operation)));
+  }
+});
+
 test('the fixed delayed-volume mode accepts only its original private device chain', () => {
   const context = setup({ volumeMode: 'delay-50ms', source: '/dev/dm-9', device: '253:9', mountedDevice: '64777' });
   context.run('capture');

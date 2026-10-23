@@ -3,7 +3,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { InstalledClientConsumerDeadlineError, InstalledClientDriverError, openInstalledClientConsumer,
-  copyInstalledClientAuthenticationWork, installedClientAuthenticationMarker } from './installed-client-consumer.js';
+  copyInstalledClientAuthenticationWork, copyInstalledClientAuthenticationProcess,
+  installedClientAuthenticationMarker } from './installed-client-consumer.js';
 
 const protocol = `import {createInterface} from 'node:readline';
 const emit=v=>process.stdout.write(JSON.stringify(v)+'\\n');
@@ -167,6 +168,127 @@ test('authentication data never invokes supplied accessors or serializes unknown
   Object.defineProperty(rows, '0', { get() { accessed = true; throw 0; } });
   assert.throws(() => new InstalledClientConsumerDeadlineError('ready', 5000, performance.now(), 0, undefined, rows), assert.AssertionError);
   assert.equal(accessed, false);
+});
+
+test('V2 labels only explicitly supplied self whole-process cumulative counters and keeps V1 bytes unchanged', () => {
+  const process = { userCPUTime: 100, systemCPUTime: 20, fsRead: 3, fsWrite: 4 };
+  assert.equal(installedClientAuthenticationMarker('native_connected', 12, undefined, process).toString('ascii'),
+    'CLIQ_INSTALLED_CLIENT_AUTH_V2:self_whole_process_cumulative:native_connected:12:none:100:20:3:4\n');
+  assert.equal(installedClientAuthenticationMarker('native_connected', 12).toString('ascii'),
+    'CLIQ_INSTALLED_CLIENT_AUTH_V1:native_connected:12:none\n');
+});
+
+test('self process snapshots are exactly four primitive counters without getters or borrowed objects', () => {
+  const sample = { userCPUTime: 100, systemCPUTime: 20, fsRead: 3, fsWrite: 4 };
+  const result = copyInstalledClientAuthenticationProcess(sample); sample.userCPUTime = 101;
+  assert.deepEqual(result, { userCPUTime: 100, systemCPUTime: 20, fsRead: 3, fsWrite: 4 }); assert(Object.isFrozen(result));
+  let accessed = 0;
+  const getter = { ...sample }; Object.defineProperty(getter, 'userCPUTime', { enumerable: true, get() { accessed++; throw 0; } });
+  const hidden = { ...sample }; Object.defineProperty(hidden, 'fsRead', { value: 3, enumerable: false });
+  const symbol = { ...sample, [Symbol('extra')]: 0 };
+  const proxy = new Proxy(sample, { ownKeys() { accessed++; throw 0; }, get() { accessed++; throw 0; } });
+  for (const value of [getter, hidden, symbol, proxy, { ...sample, bytesRead: 0 }, [100, 20, 3, 4], null]) {
+    assert.throws(() => copyInstalledClientAuthenticationProcess(value));
+  }
+  for (const key of ['userCPUTime', 'systemCPUTime', 'fsRead', 'fsWrite']) {
+    for (const value of [-1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, '3', {}, undefined]) {
+      assert.throws(() => copyInstalledClientAuthenticationProcess({ ...sample, [key]: value }));
+    }
+  }
+  assert.equal(accessed, 0);
+});
+
+test('self process cumulative counters never reset across an intervening V1 phase', () => {
+  const own = { userCPUTime: 100, systemCPUTime: 20, fsRead: 3, fsWrite: 4 };
+  const rows = [
+    { stage: 'manager_observer_loaded', elapsedMs: 1, observedElapsedMs: 1, process: own },
+    { stage: 'initial_current_observed', elapsedMs: 2, observedElapsedMs: 2 },
+    { stage: 'native_connected', elapsedMs: 3, observedElapsedMs: 3, process: { ...own } },
+  ] as const;
+  const error = new InstalledClientConsumerDeadlineError('ready', 5000, performance.now(), 0, 'authentication', rows);
+  assert.deepEqual(error.diagnostic.authentication?.map(row => row.process), [own, undefined, own]);
+  assert(Object.isFrozen(error.diagnostic.authentication?.[0]?.process));
+  for (const key of ['userCPUTime', 'systemCPUTime', 'fsRead', 'fsWrite'] as const) {
+    const lower = rows.map(row => ({ ...row })); lower[2] = { ...rows[2], process: { ...own, [key]: own[key] - 1 } };
+    assert.throws(() => new InstalledClientConsumerDeadlineError('ready', 5000, performance.now(), 0, 'authentication', lower));
+  }
+  const max = Number.MAX_SAFE_INTEGER;
+  const work = { package: { started: max, completed: max, bytesRead: max, spanElapsedMs: max },
+    revalidate: { started: max, completed: max, bytesRead: max, spanElapsedMs: max },
+    createCompare: { started: max, completed: max, bytesRead: 0, spanElapsedMs: max } };
+  assert(installedClientAuthenticationMarker('final_current_verified', max, work,
+    { userCPUTime: max, systemCPUTime: max, fsRead: max, fsWrite: max }).length <= 512);
+});
+
+test('split V2 prefixes and counters are scanned before retention under the original ready deadline and actual join', async () => {
+  const marker = 'CLIQ_INSTALLED_CLIENT_AUTH_V2:self_whole_process_cumulative:hello_exchange_started:12:1:1:10:3:2:2:20:4:0:0:0:0:100:20:3:4\n';
+  const pieces = [marker.slice(0, 22), marker.slice(22, 48), marker.slice(48, -3), marker.slice(-3)];
+  const scanned: Buffer[] = []; let closed = 0;
+  await assert.rejects(openInstalledClientConsumer({ executable: process.execPath,
+    args: ['--input-type=module', '-e', `for(const piece of ${JSON.stringify(pieces)}){
+      process.stderr.write(piece);await new Promise(r=>setTimeout(r,10));}for await(const _ of process.stdin){}`],
+    cwd: process.cwd(), env: process.env, timeout: 500,
+    openScan: () => ({ scan(bytes) { scanned.push(Buffer.from(bytes)); }, close() { closed++; } }), onJoined() { assert.fail(); }
+  }), error => {
+    assert(error instanceof InstalledClientConsumerDeadlineError); assert.equal(error.diagnostic.originalDeadlineMs, 500);
+    assert.equal(error.diagnostic.frames, 0); const rows = error.diagnostic.authentication; assert.equal(rows?.length, 1);
+    assert.deepEqual(rows[0]?.process, { userCPUTime: 100, systemCPUTime: 20, fsRead: 3, fsWrite: 4 });
+    assert.equal(rows[0]?.work?.revalidate.bytesRead, 20); assert(Object.isFrozen(rows[0]?.process)); return true;
+  });
+  assert.equal(Buffer.concat(scanned).toString(), marker); assert.equal(closed, 2);
+});
+
+test('all seven V2 phases remain bounded scanned diagnostics and permit the unchanged real JSONL pipe join', async () => {
+  const stages = ['manager_observer_loaded', 'initial_current_observed', 'native_connected', 'pre_hello_current_verified',
+    'hello_exchange_started', 'hello_received', 'final_current_verified'] as const;
+  const markers = stages.map((stage, i) => installedClientAuthenticationMarker(stage, i, undefined,
+    { userCPUTime: i, systemCPUTime: i, fsRead: i, fsWrite: i }).toString()).join('');
+  const scanned: Buffer[] = []; let closed = 0, joined = 0;
+  const client = await openInstalledClientConsumer({ executable: process.execPath,
+    args: ['--input-type=module', '-e', `process.stderr.write(${JSON.stringify(markers)});${protocol}`],
+    cwd: process.cwd(), env: process.env,
+    openScan: () => ({ scan(bytes) { scanned.push(Buffer.from(bytes)); }, close() { closed++; } }), onJoined() { joined++; } });
+  assert.equal((await client.send({ protocolVersion: 1, method: 'run.get' })).result?.count, 1);
+  await client.close(); assert.equal(joined, 1); assert.equal(closed, 2);
+  assert(Buffer.concat(scanned).includes(Buffer.from(markers)));
+});
+
+test('malformed V2 labels, counter encodings and decreasing counters stay fatal without V1 borrowing', async () => {
+  const prefix = 'CLIQ_INSTALLED_CLIENT_AUTH_V2:self_whole_process_cumulative:';
+  const valid = prefix + 'native_connected:4:none:100:20:3:4\n';
+  const gap = 'CLIQ_INSTALLED_CLIENT_AUTH_V1:hello_exchange_started:5:none\n';
+  const bad = [prefix.replace('self_whole_process', 'single_thread') + 'native_connected:4:none:1:2:3:4\n',
+    prefix + 'native_connected:4:none:1:2:3\n', prefix + 'native_connected:4:none:1:2:3:4:5\n',
+    'CLIQ_INSTALLED_CLIENT_AUTH_V1:native_connected:4:none:1:2:3:4\n', valid.trimEnd(),
+    prefix + 'native_connected:4:none:1:2:3:4\u00ff\n'];
+  for (const encoded of ['-1', '01', '1e3', '0.5', '9007199254740992']) bad.push(prefix + `native_connected:4:none:${encoded}:2:3:4\n`);
+  for (const counters of ['99:20:3:4', '100:19:3:4', '100:20:2:4', '100:20:3:3']) {
+    bad.push(valid + gap + prefix + `hello_received:6:none:${counters}\n`);
+  }
+  for (const marker of bad) {
+    const bytes = Buffer.from(marker), scanned: Buffer[] = []; let opened = 0, closed = 0, joined = false, refused = false;
+    try {
+      const client = await openInstalledClientConsumer({ executable: process.execPath,
+        args: ['--input-type=module', '-e', `process.stderr.write(Buffer.from('${bytes.toString('base64')}','base64'));
+          process.stdout.write('{"ok":true,"protocolVersion":1,"result":{"method":"control.hello","supervisorInstanceId":"owned-framing-fixture"}}\\n');
+          for await(const _ of process.stdin){}`], cwd: process.cwd(), env: process.env,
+        openScan: () => { const stderr = ++opened === 2; return { scan(chunk) { if (stderr) scanned.push(Buffer.from(chunk)); }, close() { closed++; } }; },
+        onJoined() { joined = true; } });
+      await client.close();
+    } catch (error) { assert(!(error instanceof InstalledClientConsumerDeadlineError)); refused = true; }
+    assert(refused); assert.equal(joined, false); assert.equal(closed, 2); assert(Buffer.concat(scanned).equals(bytes));
+  }
+});
+
+test('the original secret scanner can refuse V2 before any process observation is retained', async () => {
+  const blocked = new Error('owned V2 scanner refusal'); let opened = 0, closed = 0;
+  const marker = 'CLIQ_INSTALLED_CLIENT_AUTH_V2:self_whole_process_cumulative:native_connected:0:none:1:2:3:4\n';
+  await assert.rejects(openInstalledClientConsumer({ executable: process.execPath,
+    args: ['--input-type=module', '-e', `process.stderr.write(${JSON.stringify(marker)});for await(const _ of process.stdin){}`],
+    cwd: process.cwd(), env: process.env,
+    openScan: () => { const stderr = ++opened === 2; return { scan() { if (stderr) throw blocked; }, close() { closed++; } }; },
+    onJoined() { assert.fail(); } }), error => error === blocked);
+  assert.equal(closed, 2);
 });
 
 test('unknown, partial, duplicate, unordered or invalid authentication markers remain fatal scanned stderr', async () => {

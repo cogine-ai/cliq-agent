@@ -292,14 +292,14 @@ function decodeJournalBase(record: Record<string, unknown>): void {
   requireSafeInteger(record.seq, 'Journal.seq', 1);
   requireString(record.runId, 'Journal.runId');
   requireString(record.opId, 'Journal.opId');
-  if (!['model', 'tool', 'mcp-server', 'mcp', 'verifier', 'publish'].includes(String(record.opKind))) {
+  if (typeof record.opKind !== 'string' || !['model', 'tool', 'mcp-server', 'mcp', 'verifier', 'publish'].includes(record.opKind)) {
     invalid('Journal.opKind is not closed');
   }
   requireSafeInteger(record.attempt, 'Journal.attempt');
   requireSafeInteger(record.leaseEpoch, 'Journal.leaseEpoch', 1);
   requireString(record.target, 'Journal.target');
   requireArtifactRef(record.requestRef, 'Journal.requestRef');
-  if (!['retry', 'workspace-rollback-retry', 'reconcile', 'manual'].includes(String(record.replayClass))) {
+  if (typeof record.replayClass !== 'string' || !['retry', 'workspace-rollback-retry', 'reconcile', 'manual'].includes(record.replayClass)) {
     invalid('Journal.replayClass is not closed');
   }
   if (has(record, 'idempotencyKey')) requireString(record.idempotencyKey, 'Journal.idempotencyKey');
@@ -325,7 +325,7 @@ export function decodeWireJournal(value: unknown): InvocationJournalEntry {
   const record = requireRecord(value, 'Journal');
   decodeJournalBase(record);
   const phase = record.phase;
-  if (!['prepared', 'dispatch_claimed', 'completed', 'failed', 'unknown', 'abandoned'].includes(String(phase))) {
+  if (typeof phase !== 'string' || !['prepared', 'dispatch_claimed', 'completed', 'failed', 'unknown', 'abandoned'].includes(phase)) {
     invalid('Journal.phase is not closed');
   }
 

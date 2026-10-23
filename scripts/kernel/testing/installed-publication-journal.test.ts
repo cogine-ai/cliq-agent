@@ -2,7 +2,7 @@
 // native resource, publication permission or physical cut is created here.
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readInstalledNamespaceRetirementJournal } from './installed-publication-journal.js';
+import { readInstalledNamespaceRetirementJournal, readInstalledOriginalRetirementJournal } from './installed-publication-journal.js';
 
 const key = 'a'.repeat(64), invocationId = 'b'.repeat(32);
 const expected = { uid: 1001, pid: 2345, invocationId, key };
@@ -21,6 +21,34 @@ test('one exact current-process namespace group remains a closed immutable timin
   assert.deepEqual(result, { version: 1, key, kind: 'namespace', joined: true,
     slots: [null, [1, 1, 'ok', '100', '1000', '200', '1100'], [1, 1, 'ok', '300', '1200', '400', '1300']] });
   assert(Object.isFrozen(result)); assert(Object.isFrozen(result.slots));
+});
+
+test('the normal-stop reader requires one original group from the captured trusted sender', () => {
+  const original = frames.map(value => value.replace(':namespace:', ':original:'));
+  const result = readInstalledOriginalRetirementJournal(journal(original), expected);
+  assert.equal(result?.kind, 'original'); assert.equal(result.key, key);
+  assert(Object.isFrozen(result)); assert(Object.isFrozen(result.slots));
+});
+
+test('a dead original sender requires its exact invocation enrichment rather than borrowing the live namespace rule', () => {
+  const original = frames.map(value => value.replace(':namespace:', ':original:'));
+  const text = original.map(message => {
+    const { _SYSTEMD_INVOCATION_ID: _unused, ...value } = record(message); return JSON.stringify(value);
+  }).join('\n');
+  assert.throws(() => readInstalledOriginalRetirementJournal(text, expected));
+});
+
+test('original groups refuse foreign sender metadata, namespace reuse, duplicate groups and existing bound violations', () => {
+  const original = frames.map(value => value.replace(':namespace:', ':original:'));
+  assert.equal(readInstalledOriginalRetirementJournal('', expected), undefined);
+  for (const field of ['_UID', '_PID', '_TRANSPORT', '_SYSTEMD_INVOCATION_ID']) {
+    const rows = original.map(record); rows[0] = { ...rows[0]!, [field]: 'foreign' };
+    assert.throws(() => readInstalledOriginalRetirementJournal(rows.map(value => JSON.stringify(value)).join('\n'), expected));
+  }
+  for (const messages of [frames, original.slice(0, 3), [...original, ...original],
+    original.map(value => value.replace(key, 'c'.repeat(64))),
+    Array.from({ length: 81 }, () => 'ordinary output'), ['x'.repeat(256 * 1024)]])
+    assert.throws(() => readInstalledOriginalRetirementJournal(journal(messages), expected));
 });
 
 test('zero fixed frames stays unobserved, while ordinary messages do not invent a timing packet', () => {

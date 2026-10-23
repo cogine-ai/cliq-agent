@@ -484,6 +484,38 @@ changed fixture lifetime, not the diagnostic or prior successful heads.
 
 ## Evidence
 
+The separate fixed original-publication-stop campaign reuses the complete
+installed Delivery source, publication, no-op, merge, cancellation, reconnect
+and first ordinary restart. Its additional publication is from the same
+verified source, not a fourth model Run or another provider request. It uses
+an independent StateRoot and the approved, uniquely owned fixed delayed
+volume; the ordinary campaign and its UNKNOWN cleanup-crash recovery remain
+separate and unchanged.
+
+This cut requires an actually returned public running cut with its original
+two-row claim and arena birth before arming the native actor. A terminal cut
+cannot be truncated into that observation. Only the first arena-parent fsync,
+with one actual call and attempt and an `ok` outcome, may qualify: both native
+clock intervals must strictly enclose the complete real SIGTERM syscall.
+The original signal entry starts the unchanged two-second process death and
+join limit, including the remaining fsync, receipt, seal and durable handoff
+work. The fixed 50 ms storage profile does not guarantee either overlap or
+timely shutdown; a missed interval is still unverified, not a reason to signal
+again, pause the process or change the device table.
+
+The original process's journal must be tied to its captured trusted sender and
+exact systemd invocation. Its death cannot borrow a successor's live-image
+observation to excuse missing identity metadata. An actual normal receipt and
+sealed-M handoff must precede the original owner's graceful release, followed
+by the real successor acquisition. Full retained source/result/Checkpoint
+bytes, exact original claim and budget, independent original worker PID/start
+absence, arena retirement, public downloads and replay remain mandatory.
+The historical seal and complete recoverable CAS Checkpoint are not a claim
+that the old generation directory currently exists unchanged or was deleted.
+The diagnostic and pure-data regressions alone qualify none of these physical
+facts. This successful normal branch neither replaces UNKNOWN recovery nor
+qualifies a late result, complete I1, cross-filesystem publication or reboot.
+
 Qualification evidence is indexed in the associated complete PR's Evidence
 section and preserved in its retained evidence archive. The manifest identifies
 the exact tested source SHA, workflow run and attempt, bounded journey report,
