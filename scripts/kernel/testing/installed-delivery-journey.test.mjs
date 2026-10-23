@@ -76,6 +76,26 @@ test('the root harness chooses only the fixed Delivery entry', () => {
   assert(!/probe_run_driver=\$[12]/u.test(shell));
 });
 
+test('controlled delayed storage is a fixed free-VM qualification mode, never a production feature switch', () => {
+  const shell = source('../qualify-systemd-user.sh'), entry = source('../qualify-installed-delivery-journey.ts');
+  const fixture = source('./installed-node-journey.ts');
+  const workflow = source('../../../.github/workflows/kernel-foundation.yml');
+  assert(shell.includes('--run-delivery-delay-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--delivery-delay-campaign; shift ;;'));
+  assert(shell.includes('"$probe_run_driver_mode" != --delivery-delay-campaign || "$probe_volume_mode" = delay-50ms'));
+  assert(entry.includes("mode === '--delivery-delay-campaign'"));
+  assert(entry.includes("await runInstalledNodeJourney(filename, 'delivery', { publicationRetirementDiagnostics: true })"));
+  assert(fixture.includes('publicationRetirementDiagnostics: options.publicationRetirementDiagnostics'));
+  assert(fixture.includes('latePublicationResultQualified: false, preciseInFlightPublicationStopQualified: false'));
+  const controlled = workflow.slice(workflow.indexOf('\n  linux-installed-delivery-delayed-volume:'));
+  assert(controlled.startsWith('\n  linux-installed-delivery-delayed-volume:'));
+  assert(controlled.includes('runs-on: ubuntu-22.04')); assert(controlled.includes('timeout-minutes: 20'));
+  assert(controlled.includes('test "$RUNNER_ENVIRONMENT" = github-hosted'));
+  assert(controlled.includes('test "$RUNNER_OS" = Linux')); assert(controlled.includes('test "$RUNNER_ARCH" = X64'));
+  assert(controlled.includes('sudo /usr/sbin/modprobe dm_delay'));
+  assert(controlled.includes('--delay-volume --run-delivery-delay-journey'));
+  assert(!/self-hosted|modprobe -r|dmsetup (?:remove_all|suspend|reload)|drop_caches/u.test(controlled));
+});
+
 test('Delivery keeps retained proof reads distinct from the actual public downloads and does not invent coverage', () => {
   const shared = source('./installed-node-journey.ts'), delivery = source('./installed-delivery-journey.ts');
   assert(shared.includes('readRetainedArtifact: readCas, downloadPublicArtifact: readPublicArtifact'));

@@ -15,7 +15,7 @@ import { identityHash, sha256Bytes } from '../kernel/identity.js';
 import { policyProfile, verifyRuntimeBundle, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { ARTIFACT_CHUNK_BYTES, ContentAddressedStore } from './cas.js';
 import { assertInstalledManagerObservationAvailable, createInstalledRuntime, loadInstalledCredentialPlatform, loadInstalledManagerObserver,
-  type HeldInstalledRuntime, withHeldInstalledRuntime } from './installed-runtime.js';
+  readInstalledRuntimeObservation, type InstalledRuntimeObservation, type HeldInstalledRuntime, withHeldInstalledRuntime } from './installed-runtime.js';
 import { STATE_OWNER_NATIVE_ENTRY_ID, STATE_OWNER_NATIVE_RELATIVE_PATH } from './native-owner.js';
 import { openInstalledLinuxWorkerLauncher } from '../sandbox/linux-worker.js';
 import { KernelStorageError } from './errors.js';
@@ -121,7 +121,47 @@ test('installed read-only manager observation rejects structural selections befo
   const fake = new Proxy({}, { get() { inspected = true; throw new Error('caller property was inspected'); } });
   assert.throws(() => loadInstalledManagerObserver(fake as HeldInstalledRuntime), { code: 'ARTIFACT_MISMATCH' });
   assert.throws(() => assertInstalledManagerObservationAvailable(fake as HeldInstalledRuntime), { code: 'ARTIFACT_MISMATCH' });
+  assert.throws(() => readInstalledRuntimeObservation(fake as HeldInstalledRuntime), { code: 'ARTIFACT_MISMATCH' });
   assert.equal(inspected, false);
+});
+
+if (process.platform === 'linux') test('a status-side installed read can finish before the model-side borrow receives its external response', async () => {
+  // Real installation/held-selection seam only. The signed opaque files are not
+  // runnable images and this test creates no StateOwner or model authority.
+  const fixture = await realpath(await mkdtemp(path.join(os.tmpdir(), 'cliq-installed-status-borrow-')));
+  const packageRoot = path.join(fixture, 'package'), stateRoot = path.join(fixture, 'state');
+  let selected: HeldInstalledRuntime | undefined, model: Promise<void> | undefined, queued: Promise<void> | undefined;
+  let status: Promise<InstalledRuntimeObservation> | undefined;
+  let modelEntered!: () => void, externalResponse!: () => void, timer: ReturnType<typeof setTimeout> | undefined;
+  const entered = new Promise<void>(resolve => { modelEntered = resolve; });
+  const response = new Promise<void>(resolve => { externalResponse = resolve; });
+  let responseReleased = false, queuedEntered = false;
+  try {
+    const signed = await writeInstallerOnlyPackage(packageRoot), runtime = createInstalledRuntime({ releaseKeys: signed.releaseKeys });
+    const installation = await runtime.installInitial({ packageRoot, stateRoot }); selected = await runtime.openSelected(stateRoot);
+    model = withHeldInstalledRuntime(selected, async () => { modelEntered(); await response; });
+    await entered;
+    queued = withHeldInstalledRuntime(selected, async () => { queuedEntered = true; });
+    status = readInstalledRuntimeObservation(selected);
+    const result = await Promise.race([status.then(inventory => ({ kind: 'observed' as const, inventory })),
+      new Promise<{ kind: 'deadline' }>(resolve => { timer = setTimeout(() => resolve({ kind: 'deadline' }), 5000); })]);
+    assert.equal(result.kind, 'observed', 'the status read must not wait behind the external response its caller is preparing');
+    assert.equal(responseReleased, false);
+    assert.equal(queuedEntered, false, 'ordinary authority-bearing borrows must retain their original FIFO');
+    if (result.kind === 'observed') {
+      assert.deepEqual(Object.keys(result.inventory).sort(), ['bundleDigest', 'bundleVersion', 'casRoot', 'manifestDigest', 'stateRoot']);
+      assert.equal(result.inventory.bundleDigest, installation.bundleDigest);
+      assert.equal(result.inventory.manifestDigest, signed.bundle.manifestDigest);
+      assert(Object.isFrozen(result.inventory) && Object.isFrozen(result.inventory.stateRoot) && Object.isFrozen(result.inventory.casRoot));
+    }
+    responseReleased = true; externalResponse();
+    await model; await queued;
+    assert.equal(queuedEntered, true, 'the original queued business borrow resumes only after its predecessor releases');
+  } finally {
+    if (timer) clearTimeout(timer);
+    responseReleased = true; externalResponse();
+    await Promise.allSettled([model, queued, status]); await selected?.close(); await rm(fixture, { recursive: true, force: true });
+  }
 });
 
 if (process.platform === 'linux') test('installed work measurements count the real complete package and both independent guest copies without changing validation', async () => {
@@ -298,7 +338,8 @@ if (process.platform === 'linux') test('a cancelled original revalidation job jo
   }
 });
 
-if (process.platform === 'linux') test('selected close waits for a submitted real image read to deliver after cancellation', async () => {
+if (process.platform === 'linux') for (const operation of ['borrow-close', 'observation-close', 'observation-execute'] as const) test(
+  `${operation} waits for a submitted real image read to deliver after cancellation`, async () => {
   const fixture = await realpath(await mkdtemp(path.join(os.tmpdir(), 'cliq-installed-image-read-join-')));
   const packageRoot = path.join(fixture, 'package'), stateRoot = path.join(fixture, 'state');
   let selected: HeldInstalledRuntime | undefined, reopened: HeldInstalledRuntime | undefined;
@@ -359,17 +400,33 @@ if (process.platform === 'linux') test('selected close waits for a submitted rea
       });
     } });
     const abort = new AbortController(), reason = new Error('submitted image read cancelled');
-    verification = withHeldInstalledRuntime(selected, async () => { borrowed = true; }, abort.signal);
+    verification = operation === 'borrow-close'
+      ? withHeldInstalledRuntime(selected, async () => { borrowed = true; }, abort.signal)
+      : readInstalledRuntimeObservation(selected, abort.signal).then(() => { borrowed = true; });
     void verification.then(() => { verificationSettled = true; }, () => { verificationSettled = true; });
     assert((await Promise.race([returned, verification.then(() => { throw new Error('real image read was not observed'); })])) > 0);
-    abort.abort(reason); closing = selected.close();
+    if (operation === 'observation-execute') {
+      // The real terminal consumer must cancel/join observation reads before
+      // trying to load this deliberately non-executable addon fixture. No
+      // actual exec or fake native image is accepted by the existing guard.
+      const refused = runtime.executeSelected(selected, 'supervisor');
+      closing = assert.rejects(refused, error => error instanceof KernelStorageError && error.code === 'ARTIFACT_MISMATCH' ||
+        (error as NodeJS.ErrnoException).code === 'ERR_DLOPEN_FAILED');
+    } else {
+      // The old business borrow keeps its explicit cancellation regression.
+      // The new observation must instead be cancelled by close itself.
+      if (operation === 'borrow-close') abort.abort(reason);
+      closing = selected.close();
+    }
     void closing.then(() => { closeSettled = true; }, () => { closeSettled = true; });
     await new Promise<void>(resolve => setImmediate(resolve));
     assert.equal(verificationSettled, false, 'the submitted original read has not delivered');
     assert.equal(closeAttempts, 0, 'the original FileHandle must not close before its read delivers');
     assert.equal(closeSettled, false);
     releaseDelivery();
-    await assert.rejects(verification, error => error === reason); await closing;
+    await assert.rejects(verification, error => operation === 'borrow-close'
+      ? error === reason : (error as Error).name === 'AbortError');
+    await closing;
     assert.equal(borrowed, false);
     assert.equal(closeAttempts, 1, 'the original image descriptor retires once, after the read joins');
     restore();
@@ -573,8 +630,10 @@ if (process.platform === 'linux') test('readiness hints cannot outlive a genuine
     assert.throws(() => assertInstalledManagerObservationAvailable(selected!), {
       code: 'ARTIFACT_MISMATCH', message: 'installed runtime handle is closed'
     });
+    assert.throws(() => readInstalledRuntimeObservation(selected!), { code: 'ARTIFACT_MISMATCH' });
     await closing;
     assert.throws(() => assertInstalledManagerObservationAvailable(selected!), { code: 'ARTIFACT_MISMATCH' });
+    assert.throws(() => readInstalledRuntimeObservation(selected!), { code: 'ARTIFACT_MISMATCH' });
     selected = undefined;
     await assert.rejects(lstat(path.join(stateRoot, KERNEL_DATABASE_FILENAME)), { code: 'ENOENT' });
   } finally { await selected?.close(); await rm(fixture, { recursive: true, force: true }); }

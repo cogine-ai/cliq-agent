@@ -1,13 +1,15 @@
 // Inert regression data only; no actual installed Run or native evidence is created.
 import test from 'node:test';
 import { readInstalledPublicationCrashBirth, assertInstalledPublicationCleanupRecovery } from './installed-publication-recovery.js';
+import * as recovery from './installed-publication-recovery.js';
 import { addCanonicalDuration } from '../../../src/kernel/identity.js';
 import { publicationEnvelopeLocations } from '../../../src/state/delivery-publication-progress.js';
 import assert from 'node:assert/strict';
 import { canonicalJsonBytes, canonicalSha256 } from '../../../src/kernel/canonical.js';
 import { encodeControlCheckpointCursor } from '../../../src/kernel/control-wire.js';
 import { digestOmitting, identityHash, sha256Bytes } from '../../../src/kernel/identity.js';
-import { decodePublicationProof, publicationArenaId, publicationDirectoryIdentityDigest } from '../../../src/kernel/publication.js';
+import { decodePublicationProof, publicationArenaId, publicationDirectoryIdentityDigest,
+  publicationLateObservationCheckpointId, publicationLateObservationItemId } from '../../../src/kernel/publication.js';
 import type { StateOwnerRecordV1 } from '../../../src/kernel/types.js';
 import { testFixture } from '../../../src/model/testing/fixtures.js';
 import { BUILTIN_POLICY_RULES, modeDecisions } from '../../../src/policy/tool-policy.js';
@@ -403,6 +405,8 @@ test('the recovered-data reader follows the same UNKNOWN claim and current names
   const data = recoveryGraph(), result = await assertInstalledPublicationCleanupRecovery(data.input);
   assert.equal(result.originalDurableReceiptAssociationAbsent, true); assert.equal(result.redispatchCount, 0);
   assert.equal(result.resolutionBudgetDeltaZero, true); assert.equal(result.originalOwnerEpoch, 1); assert.equal(result.successorOwnerEpoch, 2);
+  assert.equal(result.probeDeadlineAt, data.parts.wrapper.probeDeadlineAt);
+  assert.match(result.retirementDiagnosticKey, /^[0-9a-f]{64}$/u);
   assert.equal(Object.hasOwn(result, 'qualified'), false); assert.equal(Object.hasOwn(result, 'nativeObservation'), false);
 });
 
@@ -453,4 +457,218 @@ test('recovery also requires the complete terminal projection, exact result byte
   await assert.rejects(assertInstalledPublicationCleanupRecovery({ ...wrongBytes.input, expectedFiles: [{ path: 'example.txt', text: 'not the complete expected bytes' }] }));
   const noFinalCheckpoint = recoveryGraph(); noFinalCheckpoint.input.cut.checkpoints.pop();
   await assert.rejects(assertInstalledPublicationCleanupRecovery(noFinalCheckpoint.input));
+});
+
+function lateAuditGraph(change: (parts: Record<string, any>) => void = () => undefined) {
+  const data = recoveryGraph(), { objects, put, parts } = data;
+  const object = (ref: string) => JSON.parse(objects.get(ref)!.toString());
+  const beforeCut = structuredClone(data.input.cut), beforeRun = beforeCut.snapshot.run;
+  const wait = object(parts.wrapper.waitingSubjectRef), dispatch = wait.probeState.dispatch;
+  const completedAt = addCanonicalDuration(dispatch.probeDeadlineAt, 2), createdAt = addCanonicalDuration(completedAt, 1);
+  const desired = { ...parts.desired, observedAt: addCanonicalDuration(dispatch.probeStartedAt, 29999) };
+  desired.proofDigest = digestOmitting(desired, 'proofDigest');
+  const namespace = { ...parts.namespace, destinationObservationRef: put(desired), observedAt: dispatch.probeDeadlineAt };
+  namespace.proofDigest = digestOmitting(namespace, 'proofDigest');
+  const receipt = { ...parts.receipt, namespaceRetirementEvidenceRef: put(namespace), observedAt: completedAt };
+  receipt.proofDigest = digestOmitting(receipt, 'proofDigest');
+  const late: any = { schemaVersion: 1, itemId: '', runId: beforeRun.id, kind: 'publication_late_observation',
+    deliveryPlanRef: parts.result.deliveryPlanRef, sequence: 'forward', operationIndex: 0, operationId: parts.result.operationId,
+    opId: parts.result.opId, attempt: 0, dispatchId: parts.handoff.dispatchId, claimJournalSeq: parts.handoff.claimJournalSeq,
+    probeWaitingSubjectRef: put(wait), probeDispatchDigest: dispatch.dispatchDigest,
+    evidenceRef: put(receipt), evidenceDigest: receipt.proofDigest, disposition: 'received', completedAt,
+    retirement: { kind: 'current_namespace', namespaceEvidenceRef: put(namespace) }, createdAt };
+  beforeCut.journal.pop();
+  beforeCut.items = beforeCut.items.filter((row: any) => { const value = object(row.payloadRef); return value.outcome !== 'completed' && value.state !== 'received_handoff'; });
+  const previous = { ...beforeCut.checkpoints.find((row: any) => row.id === publicationProgressCheckpointId(beforeRun.id, late.opId, 0)),
+    id: identityHash('inert-original-in-flight-checkpoint'), basedOnRunRevision: 7, runItemSeq: beforeCut.items.length,
+    journalSeq: 3, createdAt: dispatch.probeStartedAt };
+  const beforeContext = object(previous.contextManifestRef);
+  beforeContext.throughItemSeq = beforeCut.items.length;
+  beforeContext.segments = beforeCut.items.map((row: any) => ({ kind: 'excluded_control', fromItemSeq: row.itemSeq,
+    throughItemSeq: row.itemSeq, sourceItemsDigest: contextSourceDigest([{ itemSeq: row.itemSeq, itemRef: row.payloadRef, item: object(row.payloadRef) }]) }));
+  beforeContext.projectionDigest = digestOmitting(beforeContext, 'projectionDigest'); previous.contextManifestRef = put(beforeContext);
+  beforeCut.checkpoints = beforeCut.checkpoints.filter((row: any) => row.runItemSeq < previous.runItemSeq);
+  beforeCut.checkpoints.push(previous);
+  Object.assign(beforeRun, { status: 'waiting', waitingReason: 'reconciliation', waitingOnRef: put(wait), nextStep: 'delivery',
+    frontierRef: wait.frontierRef, latestCheckpointId: previous.id, revision: 8, updatedAt: previous.createdAt });
+  delete beforeRun.resultRef; delete beforeRun.terminalReason;
+  beforeCut.snapshot.latestRunItemSeq = beforeCut.highWaterItemSeq = beforeCut.nextItemSeq = beforeCut.items.length;
+  beforeCut.highWaterJournalSeq = beforeCut.nextJournalSeq = 3;
+  beforeCut.highWaterCheckpointCursor = beforeCut.nextCheckpointCursor = encodeControlCheckpointCursor(beforeRun.id,
+    { createdAt: previous.createdAt, checkpointId: previous.id });
+  change({ beforeCut, late, desired, namespace, receipt, wait, dispatch, previous });
+  desired.proofDigest = digestOmitting(desired, 'proofDigest'); namespace.destinationObservationRef = put(desired);
+  namespace.proofDigest = digestOmitting(namespace, 'proofDigest'); receipt.namespaceRetirementEvidenceRef = put(namespace);
+  receipt.proofDigest = digestOmitting(receipt, 'proofDigest'); late.evidenceRef = put(receipt); late.evidenceDigest = receipt.proofDigest;
+  late.retirement.namespaceEvidenceRef = put(namespace);
+  late.itemId = publicationLateObservationItemId(beforeRun.id, late.opId, 0, late.probeDispatchDigest, late.evidenceRef);
+  const auditCut = structuredClone(beforeCut), row = { schemaVersion: 1, itemId: late.itemId, itemSeq: auditCut.items.length + 1,
+    payloadRef: put(late), payloadDigest: put(late), createdAt: late.createdAt };
+  auditCut.items.push(row);
+  const context = structuredClone(beforeContext);
+  context.throughItemSeq++; context.segments.push({ kind: 'excluded_control', fromItemSeq: row.itemSeq, throughItemSeq: row.itemSeq,
+    sourceItemsDigest: contextSourceDigest([{ itemSeq: row.itemSeq, itemRef: row.payloadRef, item: late }]) });
+  context.projectionDigest = digestOmitting(context, 'projectionDigest');
+  const checkpoint = { ...previous, id: publicationLateObservationCheckpointId(beforeRun.id, late.opId, 0, late.probeDispatchDigest, late.evidenceRef),
+    basedOnRunRevision: beforeRun.revision, runItemSeq: row.itemSeq, contextManifestRef: put(context), createdAt: late.createdAt };
+  auditCut.checkpoints.push(checkpoint);
+  Object.assign(auditCut.snapshot.run, { latestCheckpointId: checkpoint.id, revision: beforeRun.revision + 1, updatedAt: checkpoint.createdAt });
+  auditCut.snapshot.latestRunItemSeq = auditCut.highWaterItemSeq = auditCut.nextItemSeq = row.itemSeq;
+  auditCut.highWaterCheckpointCursor = auditCut.nextCheckpointCursor = encodeControlCheckpointCursor(beforeRun.id,
+    { createdAt: checkpoint.createdAt, checkpointId: checkpoint.id });
+  return { ...data, beforeCut, auditCut, late, receipt, namespace, desired,
+    lateInput: { originalBirth: data.input.originalBirth, beforeCut, auditCut,
+      readRetainedArtifact: data.input.readRetainedArtifact, readOwnerHistory: data.input.readOwnerHistory } };
+}
+
+test('retained late audit requires the actual before/after public cuts and never resolves its original UNKNOWN wait', async () => {
+  const data = lateAuditGraph();
+  const result = await (recovery as any).assertInstalledPublicationLateAudit(data.lateInput);
+  assert.equal(result.diagnosticOnly, true); assert.equal(result.expiredProbeDigest, data.late.probeDispatchDigest);
+  assert.equal(result.lateEvidenceRef, data.late.evidenceRef); assert.equal(result.originalUnknownSettlementRef, data.parts.unknown.budgetSettlementRef);
+  assert.equal(result.originalWaitUnchanged, true); assert.equal(Object.hasOwn(result, 'qualified'), false);
+  await assert.rejects((recovery as any).assertInstalledPublicationLateAudit({ ...data.lateInput, beforeCut: data.auditCut }));
+});
+
+test('rehashed late facts cannot change the original producer, expired nonce, real completion or namespace closure', async () => {
+  for (const change of [
+    (p: Record<string, any>) => { p.late.completedAt = p.dispatch.probeDeadlineAt; },
+    (p: Record<string, any>) => { p.receipt.observedAt = addCanonicalDuration(p.late.completedAt, 1); },
+    (p: Record<string, any>) => { p.late.claimJournalSeq = 3; },
+    (p: Record<string, any>) => { p.late.dispatchId = 'another-permanent-dispatch'; },
+    (p: Record<string, any>) => { p.late.probeDispatchDigest = canonicalSha256('another probe'); },
+    (p: Record<string, any>) => { p.namespace.stateRootIdentityRef = canonicalSha256('another StateRoot'); },
+    (p: Record<string, any>) => { p.namespace.namespaceHandlesJoined = false; },
+    (p: Record<string, any>) => { p.namespace.workspaceParentFsyncCompleted = false; },
+    (p: Record<string, any>) => { p.desired.observation.entryFileId = 'same-bytes-different-inode'; },
+    (p: Record<string, any>) => { p.namespace.observedAt = at(); },
+  ]) {
+    const data = lateAuditGraph(change);
+    await assert.rejects(recovery.assertInstalledPublicationLateAudit(data.lateInput));
+  }
+});
+
+test('the audit delta cannot clear waiting, reuse W_M, alter budgets or append Journal and extra checkpoints', async () => {
+  for (const change of [
+    (data: ReturnType<typeof lateAuditGraph>) => { data.auditCut.snapshot.run.status = 'running'; },
+    (data: ReturnType<typeof lateAuditGraph>) => { data.auditCut.snapshot.run.waitingOnRef = canonicalSha256('new nonce wait'); },
+    (data: ReturnType<typeof lateAuditGraph>) => { data.auditCut.snapshot.run.frontierRef = canonicalSha256('new frontier'); },
+    (data: ReturnType<typeof lateAuditGraph>) => { data.auditCut.snapshot.run.budgetConsumed = zero; },
+    (data: ReturnType<typeof lateAuditGraph>) => { data.auditCut.snapshot.run.revision++; },
+    (data: ReturnType<typeof lateAuditGraph>) => { data.auditCut.checkpoints.at(-1).workspaceStateRef = canonicalSha256('new W_M'); },
+    (data: ReturnType<typeof lateAuditGraph>) => { data.auditCut.checkpoints.at(-1).journalSeq++; },
+    (data: ReturnType<typeof lateAuditGraph>) => { data.auditCut.checkpoints.push(data.auditCut.checkpoints.at(-1)); },
+    (data: ReturnType<typeof lateAuditGraph>) => { data.auditCut.journal.pop(); data.auditCut.highWaterJournalSeq--; data.auditCut.nextJournalSeq--; },
+  ]) {
+    const data = lateAuditGraph(); change(data);
+    await assert.rejects(recovery.assertInstalledPublicationLateAudit(data.lateInput));
+  }
+  const missing = lateAuditGraph(); missing.objects.delete(missing.late.evidenceRef);
+  await assert.rejects(recovery.assertInstalledPublicationLateAudit(missing.lateInput));
+  const noBirth = lateAuditGraph();
+  await assert.rejects(recovery.assertInstalledPublicationLateAudit({ ...noBirth.lateInput,
+    originalBirth: { ...noBirth.lateInput.originalBirth, arenaId: canonicalSha256('replacement birth') } }));
+});
+
+test('the late namespace inspector must retain its exact owner row and acquisition, not only an equal identity projection', async () => {
+  const data = lateAuditGraph(), owners = await data.lateInput.readOwnerHistory();
+  for (const update of [
+    (owner: any) => ({ ...owner, rowDigest: canonicalSha256('not the actual owner row') }),
+    (owner: any) => seal({ ...owner, acquisitionEvidenceDigest: canonicalSha256('another acquisition') }, 'rowDigest'),
+  ]) {
+    const changed = owners.map(owner => owner.ownerEpoch === 2 ? update(owner) : owner);
+    await assert.rejects(recovery.assertInstalledPublicationLateAudit({ ...data.lateInput, readOwnerHistory: async () => changed }));
+  }
+});
+
+function lateRecoveryGraph(change: (value: any) => void = () => undefined) {
+  const data = lateAuditGraph(), { put, objects, parts } = data;
+  const sealed = (value: any, field: string) => { change(value); return seal(value, field); };
+  const object = (ref: string) => JSON.parse(objects.get(ref)!.toString()), cut = structuredClone(data.input.cut);
+  const expiredWait = object(data.late.probeWaitingSubjectRef), oldDispatch = expiredWait.probeState.dispatch;
+  const closedAt = addCanonicalDuration(data.late.createdAt, 1), nextProbeAt = addCanonicalDuration(closedAt, 1000);
+  const inspector = { inspectorIdentityRef: parts.receipt.inspectorIdentityRef, inspectorIdentityDigest: parts.receipt.inspectorIdentityDigest };
+  const closure = sealed({ schemaVersion: 1, format: 'cliq-reconciliation-probe-timeout-closure-v1', runId: data.late.runId,
+    waitingSubjectRef: data.late.probeWaitingSubjectRef, probeKind: 'automatic', probeOrdinal: 1,
+    probeNonceDigest: oldDispatch.probeNonceDigest, probeDispatchDigest: oldDispatch.dispatchDigest, probeDeadlineAt: oldDispatch.probeDeadlineAt,
+    ...inspector, closedAt, subjectKind: 'publication', deliveryPlanRef: data.late.deliveryPlanRef, pathOperationId: data.late.operationId,
+    attempt: 0, inspectorTaskId: oldDispatch.inspectorTaskId, taskClosure: { closureKind: 'cancelled_and_joined', inspectorTaskCancelledAndJoined: true } }, 'closureDigest');
+  const timeout = sealed({ schemaVersion: 1, format: 'cliq-reconciliation-probe-evidence-v1', runId: data.late.runId,
+    waitingSubjectRef: data.late.probeWaitingSubjectRef, waitingSubjectDigest: data.late.probeWaitingSubjectRef,
+    probeKind: 'automatic', probeOrdinal: 1, probeNonceDigest: oldDispatch.probeNonceDigest, probeDispatchDigest: oldDispatch.dispatchDigest,
+    probeStartedAt: oldDispatch.probeStartedAt, probeDeadlineAt: oldDispatch.probeDeadlineAt, ...inspector, observedAt: closedAt,
+    outcome: 'probe_timeout', timeoutReason: 'no_authoritative_observation_before_deadline', timeoutClosureRef: put(closure),
+    timeoutClosureDigest: closure.closureDigest }, 'evidenceDigest');
+  const pending = { ...expiredWait, probeState: { phase: 'automatic_pending', automaticProbeCount: 1, userProbeCount: 0,
+    nextProbeAt, lastProbeEvidenceRef: put(timeout), lastProbeEvidenceDigest: timeout.evidenceDigest } };
+  const nonce = canonicalSha256('a new actual probe nonce, never the late one'), dispatch = sealed({ ...oldDispatch, probeOrdinal: 2,
+    probeNonceDigest: nonce, probeStartedAt: nextProbeAt, probeDeadlineAt: addCanonicalDuration(nextProbeAt, 30000),
+    previousWaitingSubjectRef: put(pending), inspectorTaskId: identityHash(data.late.runId, canonicalSha256(expiredWait.subject), 'automatic', 2, nonce) }, 'dispatchDigest');
+  put(dispatch);
+  const wait = { ...expiredWait, probeState: { phase: 'automatic_in_flight', automaticProbeCount: 2, userProbeCount: 0, dispatch } };
+  const time = (offset: number) => addCanonicalDuration(nextProbeAt, offset);
+  const desired = sealed({ ...data.desired, observedAt: time(1) }, 'proofDigest');
+  const namespace = sealed({ ...data.namespace, destinationObservationRef: put(desired), observedAt: time(2) }, 'proofDigest');
+  const receipt = sealed({ ...data.receipt, namespaceRetirementEvidenceRef: put(namespace), observedAt: time(3) }, 'proofDigest');
+  const wrapper = sealed({ ...parts.wrapper, waitingSubjectRef: put(wait), waitingSubjectDigest: put(wait), probeOrdinal: 2,
+    probeNonceDigest: nonce, probeDispatchDigest: dispatch.dispatchDigest, probeStartedAt: dispatch.probeStartedAt,
+    probeDeadlineAt: dispatch.probeDeadlineAt, observedAt: receipt.observedAt, subjectEvidenceRef: put(receipt), subjectEvidenceDigest: receipt.proofDigest }, 'evidenceDigest');
+  const retirement = { kind: 'current_namespace', namespaceEvidenceRef: put(namespace) };
+  const handoff = { ...parts.handoff, receiptRef: put(receipt), receiptDigest: receipt.proofDigest, retirement,
+    reconciliationEvidenceRef: put(wrapper), reconciliationEvidenceDigest: wrapper.evidenceDigest, createdAt: time(4) };
+  const result = { ...parts.result, itemId: publicationResultItemId(data.late.runId, data.late.opId, 0, put(receipt)),
+    evidenceRef: put(receipt), receiptRef: put(receipt), retirement, reconciliationEvidenceRef: put(wrapper),
+    reconciliationEvidenceDigest: wrapper.evidenceDigest, createdAt: time(5) };
+  const completed = { ...parts.completed, evidenceRef: put(receipt), receiptRef: put(receipt), evidenceDigest: receipt.proofDigest, timestamp: time(6) };
+  cut.items = structuredClone(data.auditCut.items);
+  for (const item of [handoff, result]) cut.items.push({ schemaVersion: 1, itemId: item.itemId, itemSeq: cut.items.length + 1,
+    payloadRef: put(item), payloadDigest: put(item), createdAt: item.createdAt });
+  cut.journal = [...structuredClone(data.beforeCut.journal), completed];
+  const final = object(cut.snapshot.run.resultRef), projection = object(final.deliveryTerminalProjectionEvidenceRef);
+  const path = seal({ ...object(projection.observedPathStates[0].evidenceRef), observedAt: time(5) }, 'proofDigest');
+  const aggregate = seal({ ...object(projection.transientAbsenceEvidenceRef), envelopeRetirements: [{ arenaId: data.input.originalBirth.arenaId, retirement }], observedAt: time(5) }, 'proofDigest');
+  const projectionProof = seal({ ...object(projection.projectionClosureEvidenceRef), observedPathEvidenceRefs: [put(path)], forwardResultItemRefs: [put(result)], observedAt: time(5) }, 'proofDigest');
+  const git = seal({ ...object(projection.gitIndexUnchangedEvidenceRef), observedAt: time(5) }, 'proofDigest');
+  Object.assign(projection, { observedPathStates: [{ ...projection.observedPathStates[0], evidenceRef: put(path) }],
+    forwardResultItemRefs: [put(result)], transientAbsenceEvidenceRef: put(aggregate), projectionClosureEvidenceRef: put(projectionProof),
+    gitIndexUnchangedEvidenceRef: put(git), observedAt: time(5) }); projection.evidenceDigest = digestOmitting(projection, 'evidenceDigest');
+  final.deliveryTerminalProjectionEvidenceRef = put(projection); final.createdAt = time(5);
+  const terminal = { ...cut.checkpoints.find((row: any) => row.id === deliveryPublicationTerminalCheckpointId(data.late.runId, data.late.deliveryPlanRef)),
+    basedOnRunRevision: 13, runItemSeq: cut.items.length, createdAt: time(6) };
+  const context = object(terminal.contextManifestRef); context.throughItemSeq = cut.items.length;
+  context.segments = cut.items.map((row: any) => ({ kind: 'excluded_control', fromItemSeq: row.itemSeq, throughItemSeq: row.itemSeq,
+    sourceItemsDigest: contextSourceDigest([{ itemSeq: row.itemSeq, itemRef: row.payloadRef, item: object(row.payloadRef) }]) }));
+  context.projectionDigest = digestOmitting(context, 'projectionDigest'); terminal.contextManifestRef = put(context);
+  const finalRef = put(final), finalCheckpoint = { ...terminal, id: identityHash('cliq-run-result-checkpoint-v1', data.late.runId, 'candidate', finalRef), basedOnRunRevision: 14 };
+  cut.checkpoints = [...structuredClone(data.auditCut.checkpoints), terminal, finalCheckpoint];
+  Object.assign(cut.snapshot.run, { resultRef: finalRef, revision: 15, updatedAt: time(6), latestCheckpointId: finalCheckpoint.id });
+  cut.snapshot.latestRunItemSeq = cut.highWaterItemSeq = cut.nextItemSeq = cut.items.length;
+  const last = [...cut.checkpoints].sort((a: any, b: any) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id)).at(-1)!;
+  cut.highWaterCheckpointCursor = cut.nextCheckpointCursor = encodeControlCheckpointCursor(data.late.runId, { createdAt: last.createdAt, checkpointId: last.id });
+  return { ...data, dispatch, wrapper, receipt, namespace, closure, timeout, pending, terminalInput: { ...data.input, ...data.lateInput, cut } };
+}
+
+test('only a new current probe can resolve the same UNKNOWN after its inert late audit', async () => {
+  const data = lateRecoveryGraph();
+  const result = await (recovery as any).assertInstalledPublicationLateAuditRecovery(data.terminalInput);
+  assert.equal(result.resolutionBudgetDeltaZero, true); assert.equal(result.redispatchCount, 0);
+  assert.equal(result.expiredProbeDigest, data.late.probeDispatchDigest); assert.equal(result.currentProbeDigest, data.dispatch.dispatchDigest);
+  assert.equal(result.originalWaitUnchanged, true); assert.equal(Object.hasOwn(result, 'qualified'), false);
+  await assert.rejects(assertInstalledPublicationCleanupRecovery(data.terminalInput));
+});
+
+test('a rehashed replacement nonce, unjoined old task or late-borrowed observation cannot complete recovery', async () => {
+  for (const change of [
+    (value: any) => { if (value.format === 'cliq-reconciliation-probe-timeout-closure-v1') value.taskClosure.inspectorTaskCancelledAndJoined = false; },
+    (value: any) => { if (value.format === 'cliq-reconciliation-probe-timeout-closure-v1') value.probeDispatchDigest = canonicalSha256('foreign closed task'); },
+    (value: any) => { if (value.format === 'cliq-reconciliation-probe-evidence-v1' && value.outcome === 'probe_timeout') value.probeNonceDigest = canonicalSha256('foreign old nonce'); },
+    (value: any) => { if (value.format === 'cliq-reconciliation-probe-evidence-v1' && value.outcome === 'subject_observation') value.probeNonceDigest = canonicalSha256('fixed inert nonce'); },
+    (value: any) => { if (value.kind === 'terminal_receipt') value.observedAt = addCanonicalDuration(at(9), 30002); },
+    (value: any) => { if (value.kind === 'arena_namespace_absence') value.namespaceHandlesJoined = false; },
+  ]) {
+    const data = lateRecoveryGraph(change);
+    await assert.rejects(recovery.assertInstalledPublicationLateAuditRecovery(data.terminalInput));
+  }
+  const staleAudit = lateRecoveryGraph(); staleAudit.terminalInput.cut.items.splice(staleAudit.auditCut.items.length - 1, 1);
+  await assert.rejects(recovery.assertInstalledPublicationLateAuditRecovery(staleAudit.terminalInput));
 });

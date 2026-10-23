@@ -68,8 +68,8 @@ import { readControl, type ReadControlRequest } from './control-read.js';
 import { CredentialFinalizationTimeError, InstalledModelAuthorizationError, KernelStorageError, ResourceRetirementError, RunTerminalError } from './errors.js';
 import { assertInstalledCredentialScope, installedCredentialProvenance, observeInstalledCredentialProducer,
   type InstalledCredentialScope, type InstalledCredentialProvenance,
-  withHeldInstalledRuntime, withInstalledWorkerRoot, type HeldInstalledAnchor,
-  type HeldInstalledRuntime, type InstalledRuntimeBorrow } from './installed-runtime.js';
+  withHeldInstalledRuntime, withInstalledWorkerRoot, readInstalledRuntimeObservation, type HeldInstalledAnchor,
+  type HeldInstalledRuntime, type InstalledRuntimeBorrow, type InstalledRuntimeObservation } from './installed-runtime.js';
 import { CredentialScopeBusyError, withCredentialAuthorityLock, loadInstalledCredentialPlatform, loadInstalledModelBroker } from './installed-runtime.js';
 import { MODEL_BROKER_ENTRY_ID, InstalledModelBrokerRefusalError, type NativeModelTransport, type ModelBrokerBinding, type ModelBrokerClosed } from './model-broker-native.js';
 import { decodeBrokerInvocationAmbiguity, type BrokerInvocationAmbiguityEvidenceV1 } from '../kernel/broker-ambiguity.js';
@@ -2589,56 +2589,60 @@ export class StateStore {
     if (this.closed || this.closeRequested || this.released)
       throw new KernelStorageError('RECOVERY_REQUIRED', 'StateStore is closing or closed');
     const authenticated = { ...identity };
-    return withHeldInstalledRuntime(this.installedRuntime, async installed => {
-      await assertInstalledRootBinding(this.stateRoot, this.owner.filesystem, installed);
-      await validateControlChannelClosure(this.artifacts, this.owner, authenticated);
-      const cut = this.driver.readSnapshot(connection => {
-        try {
-          const owner = assertActiveStateOwner(connection, this.owner);
-          if (owner.runtimeBundleRef !== installed.bundleDigest ||
-              owner.runtimeBundleManifestDigest !== installed.bundle.manifestDigest)
-            throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed inventory differs from the active signed owner');
-          const counts = connection.prepare(`SELECT
-            COALESCE(SUM(status = 'queued'), 0) AS queued,
-            COALESCE(SUM(status = 'running'), 0) AS running,
-            COALESCE(SUM(status IN ('queued', 'running', 'waiting')), 0) AS nonterminal
-            FROM runs`).get<{ queued: unknown; running: unknown; nonterminal: unknown }>()!;
-          const nonterminal = requiredSafeInteger(counts.nonterminal, 'nonterminal Run count');
-          const pins = connection.prepare(`SELECT CASE WHEN length(CAST(spec_ref AS BLOB))=64 THEN spec_ref ELSE NULL END AS spec_ref
-            FROM runs WHERE status IN ('queued','running','waiting') ORDER BY id LIMIT ?`).all<{ spec_ref: string }>(INSTALLED_RUN_INVENTORY_LIMIT + 1);
-          if (pins.length !== nonterminal || pins.length > INSTALLED_RUN_INVENTORY_LIMIT)
-            throw new KernelStorageError('RECOVERY_REQUIRED', 'installed nonterminal pin inventory exceeds its bounded cut');
-          for (const pin of pins) assertArtifactRef(pin.spec_ref);
-          return { supervisorInstanceId: owner.supervisorInstanceId,
-            stateSchemaVersion: readSchemaUserVersion(connection),
-            queuedRuns: requiredSafeInteger(counts.queued, 'queued Run count'),
-            runningRuns: requiredSafeInteger(counts.running, 'running Run count'), pins };
-        } catch (cause) {
-          if (cause instanceof TypeError || cause instanceof SyntaxError)
-            throw new KernelStorageError('ARTIFACT_MISMATCH', 'retained Supervisor status metadata is invalid', { cause });
-          throw cause;
-        }
-      });
-      let incompatiblePinnedRunCount = 0;
-      for (const pin of cut.pins) {
-        const spec = decodeRunSpec(await this.artifacts.readCanonical(pin.spec_ref));
-        const assembly = (await import('../model/run-assembly.js')).decodeRetainedRunAssembly(await this.artifacts.readCanonical(spec.assemblyRef));
-        if (assembly.runtime.runtimeBundleRef !== installed.bundleDigest ||
-            assembly.runtime.runtimeBundleManifestDigest !== installed.bundle.manifestDigest) incompatiblePinnedRunCount++;
+    // Preserve the entry and both root-binding full revalidations. Only their
+    // fixed, authority-free observation is independent of business FIFO: a
+    // model's credential callback may be awaiting this client's response.
+    await readInstalledRuntimeObservation(this.installedRuntime);
+    const installed = await readInstalledRuntimeObservation(this.installedRuntime);
+    await assertInstalledObservedRootBinding(this.stateRoot, this.owner.filesystem, installed);
+    await validateControlChannelClosure(this.artifacts, this.owner, authenticated);
+    const cut = this.driver.readSnapshot(connection => {
+      try {
+        const owner = assertActiveStateOwner(connection, this.owner);
+        if (owner.runtimeBundleRef !== installed.bundleDigest ||
+            owner.runtimeBundleManifestDigest !== installed.manifestDigest)
+          throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed inventory differs from the active signed owner');
+        const counts = connection.prepare(`SELECT
+          COALESCE(SUM(status = 'queued'), 0) AS queued,
+          COALESCE(SUM(status = 'running'), 0) AS running,
+          COALESCE(SUM(status IN ('queued', 'running', 'waiting')), 0) AS nonterminal
+          FROM runs`).get<{ queued: unknown; running: unknown; nonterminal: unknown }>()!;
+        const nonterminal = requiredSafeInteger(counts.nonterminal, 'nonterminal Run count');
+        const pins = connection.prepare(`SELECT CASE WHEN length(CAST(spec_ref AS BLOB))=64 THEN spec_ref ELSE NULL END AS spec_ref
+          FROM runs WHERE status IN ('queued','running','waiting') ORDER BY id LIMIT ?`).all<{ spec_ref: string }>(INSTALLED_RUN_INVENTORY_LIMIT + 1);
+        if (pins.length !== nonterminal || pins.length > INSTALLED_RUN_INVENTORY_LIMIT)
+          throw new KernelStorageError('RECOVERY_REQUIRED', 'installed nonterminal pin inventory exceeds its bounded cut');
+        for (const pin of pins) assertArtifactRef(pin.spec_ref);
+        return { supervisorInstanceId: owner.supervisorInstanceId,
+          stateSchemaVersion: readSchemaUserVersion(connection),
+          queuedRuns: requiredSafeInteger(counts.queued, 'queued Run count'),
+          runningRuns: requiredSafeInteger(counts.running, 'running Run count'), pins };
+      } catch (cause) {
+        if (cause instanceof TypeError || cause instanceof SyntaxError)
+          throw new KernelStorageError('ARTIFACT_MISMATCH', 'retained Supervisor status metadata is invalid', { cause });
+        throw cause;
       }
-      await assertInstalledRootBinding(this.stateRoot, this.owner.filesystem, installed);
-      await validateControlChannelClosure(this.artifacts, this.owner, authenticated);
-      assertActiveStateOwner(this.driver, this.owner);
-      const summary = { schemaVersion: 1 as const, runtimeBundleRef: installed.bundleDigest,
-        bundleDigest: installed.bundleDigest, bundleVersion: installed.bundle.bundleVersion };
-      return immutableSnapshot({ method: 'supervisor.status' as const,
-        health: this.closeRequested ? 'draining' as const : this.supportsInstalledRuns() && incompatiblePinnedRunCount === 0 && this.installedRunFailures.size === 0
-          ? 'ready' as const : 'degraded' as const,
-        supervisorInstanceId: cut.supervisorInstanceId,
-        queue: { queuedRuns: cut.queuedRuns, runningRuns: cut.runningRuns, capacity: this.supportsInstalledRuns() ? 1 : 0 },
-        stateSchemaVersion: cut.stateSchemaVersion, activeRuntimeBundle: summary,
-        installedRuntimeBundles: [summary], incompatiblePinnedRunCount });
     });
+    let incompatiblePinnedRunCount = 0;
+    for (const pin of cut.pins) {
+      const spec = decodeRunSpec(await this.artifacts.readCanonical(pin.spec_ref));
+      const assembly = (await import('../model/run-assembly.js')).decodeRetainedRunAssembly(await this.artifacts.readCanonical(spec.assemblyRef));
+      if (assembly.runtime.runtimeBundleRef !== installed.bundleDigest ||
+          assembly.runtime.runtimeBundleManifestDigest !== installed.manifestDigest) incompatiblePinnedRunCount++;
+    }
+    await assertInstalledObservedRootBinding(this.stateRoot, this.owner.filesystem,
+      await readInstalledRuntimeObservation(this.installedRuntime));
+    await validateControlChannelClosure(this.artifacts, this.owner, authenticated);
+    assertActiveStateOwner(this.driver, this.owner);
+    const summary = { schemaVersion: 1 as const, runtimeBundleRef: installed.bundleDigest,
+      bundleDigest: installed.bundleDigest, bundleVersion: installed.bundleVersion };
+    return immutableSnapshot({ method: 'supervisor.status' as const,
+      health: this.closeRequested ? 'draining' as const : this.supportsInstalledRuns() && incompatiblePinnedRunCount === 0 && this.installedRunFailures.size === 0
+        ? 'ready' as const : 'degraded' as const,
+      supervisorInstanceId: cut.supervisorInstanceId,
+      queue: { queuedRuns: cut.queuedRuns, runningRuns: cut.runningRuns, capacity: this.supportsInstalledRuns() ? 1 : 0 },
+      stateSchemaVersion: cut.stateSchemaVersion, activeRuntimeBundle: summary,
+      installedRuntimeBundles: [summary], incompatiblePinnedRunCount });
   }
 
   /** Internal authenticated transport, not an installed public protocol server. */
@@ -3452,6 +3456,18 @@ export async function openStateStore(stateRoot: string, runtimeAuthority?: State
 async function assertInstalledRootBinding(stateRoot: string, heldLock: HeldStateOwnerLock, installed: InstalledRuntimeBorrow) {
   try {
     await installed.revalidate();
+    return await assertInstalledObservedRootBinding(stateRoot, heldLock, installed);
+  } catch (cause) {
+    if (cause instanceof KernelStorageError) throw cause;
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'held installed root validation failed', { cause });
+  }
+}
+
+/** A copied inventory never substitutes for the real owner/root checks. The
+ * caller must obtain a fresh fixed observation at each original validation cut. */
+async function assertInstalledObservedRootBinding(stateRoot: string, heldLock: HeldStateOwnerLock,
+  installed: Pick<InstalledRuntimeObservation, 'stateRoot' | 'casRoot'>) {
+  try {
     assertStateOwnerLock(heldLock);
     if (installed.stateRoot.canonicalPath !== stateRoot ||
         installed.stateRoot.deviceId !== heldLock.root.deviceId ||

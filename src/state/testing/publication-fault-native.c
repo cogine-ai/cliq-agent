@@ -7,19 +7,28 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <time.h>
 static int publication_fault_close(int fd);
 static struct dirent *publication_fault_readdir(DIR *directory);
 static int publication_fault_mkdirat(int parent, const char *name, mode_t mode);
 static int publication_fault_symlinkat(const char *target, int parent, const char *name);
+static int publication_fault_clock_gettime(clockid_t clock, struct timespec *value);
 #define close publication_fault_close
 #define readdir publication_fault_readdir
 #define mkdirat publication_fault_mkdirat
 #define symlinkat publication_fault_symlinkat
+#define clock_gettime publication_fault_clock_gettime
 #include "quarantine-fault-native.c"
 #undef close
 #undef readdir
 #undef mkdirat
 #undef symlinkat
+#undef clock_gettime
+static int publication_fault_clock_gettime(clockid_t clock, struct timespec *value) {
+    int error = inject("clock");
+    if (error) { errno = error; return -1; }
+    return clock_gettime(clock, value);
+}
 static int publication_fault_close(int fd) {
     int error = inject("close");
     if (!error) {

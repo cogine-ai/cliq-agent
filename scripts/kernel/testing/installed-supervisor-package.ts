@@ -23,9 +23,12 @@ import { validateGuestToolchainMetadata } from '../../../src/state/guest-toolcha
  * they do not qualify admission, execution, release signing or complete I1. */
 export async function buildInstalledSupervisorPackage(fixture: string,
   variant: 'complete' | 'retirement-native-missing' = 'complete', modelFixture?: InstalledModelPackageFixture,
-  options: Readonly<{ guestToolchain?: 'node-test-v1' }> = {}) {
-  assert(Object.keys(options).every(key => key === 'guestToolchain'));
+  options: Readonly<{ guestToolchain?: 'node-test-v1'; publicationRetirementDiagnostics?: true }> = {}) {
+  assert(Object.keys(options).every(key => key === 'guestToolchain' || key === 'publicationRetirementDiagnostics'));
   assert(options.guestToolchain === undefined || options.guestToolchain === 'node-test-v1');
+  assert(options.publicationRetirementDiagnostics === undefined || options.publicationRetirementDiagnostics === true);
+  if (options.publicationRetirementDiagnostics) assert(options.guestToolchain === 'node-test-v1',
+    'fixed publication observations belong only to the installed delivery qualification image');
   if (options.guestToolchain) assert(variant === 'complete' && modelFixture, 'installed verifier requires the complete model and native package');
   const repository = fileURLToPath(new URL('../../..', import.meta.url));
   const { nodeRoot, carrier } = await prepareSupervisorSeaCarrier(fixture);
@@ -42,6 +45,7 @@ export async function buildInstalledSupervisorPackage(fixture: string,
     // Only the verifier qualifier consumes these fixed observations. Other
     // installed campaigns retain the original single-JSON stderr contract.
     ...(options.guestToolchain === 'node-test-v1' ? { credentialPhaseDiagnostics: true as const } : {}),
+    ...(options.publicationRetirementDiagnostics ? { publicationRetirementDiagnostics: true as const } : {}),
     assets: { 'release-trust-roots.json': rootAsset } });
   const helper = path.join(packageRoot, STATE_OWNER_NATIVE_RELATIVE_PATH);
   await mkdir(path.dirname(helper), { recursive: true, mode: 0o700 });

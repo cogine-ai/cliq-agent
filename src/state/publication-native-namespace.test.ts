@@ -79,6 +79,48 @@ test('namespace friends reject structural locks and roots before input getters',
   assert.throws(() => readRetiredPublicationNamespace({} as HeldStateOwnerLock, hostile as never), /genuine same-lock observer/);
 });
 
+test('joined namespace diagnostics retain only the first real fsync interval in three fixed roles', async t => {
+  assert.deepEqual(await actual(t, `
+    const {operation,observationInput}=effect();operation.finishCleanup();operation.close();
+    const observer=lock.openPublicationNamespaceObserver(root,observationInput);
+    assert.throws(()=>observer.readRetirementDiagnostic());while(observer.readDestinationChunk()!==null){}
+    native.setFault('fsync',1,()=>4);observer.retireNamespace();
+    assert.throws(()=>observer.readRetirementDiagnostic());observer.close();assert.throws(()=>observer.readRetirementDiagnostic());
+    observer.assertNamespaceRetired();const spans=observer.readRetirementDiagnostic();
+    assert.equal(spans.length,3);assert.deepEqual(spans.map(row=>row.slice(0,3)),[[1,2,'interrupted'],[1,1,'ok'],[1,1,'ok']]);
+    for(const row of spans){assert.equal(row.length,7);for(const stamp of row.slice(3))assert.match(stamp,/^(0|[1-9][0-9]{0,19})$/);
+      assert(BigInt(row[5])>=BigInt(row[3]));}
+    const unchanged=structuredClone(spans);observer.assertNamespaceRetired();assert.deepEqual(observer.readRetirementDiagnostic(),unchanged);
+    assert.equal(readFileSync(path.join(workspace,'file'),'utf8'),'new');
+    console.log(JSON.stringify({firstInterval:true,actualEintrRetried:true,threeFixedRoles:true,postJoinOnly:true}));
+  `), { firstInterval: true, actualEintrRetried: true, threeFixedRoles: true, postJoinOnly: true });
+});
+
+test('an unavailable diagnostic clock cannot change the original fsync failure or its later real retry', async t => {
+  assert.deepEqual(await actual(t, `
+    const {operation,observationInput}=effect();operation.finishCleanup();operation.close();
+    const observer=lock.openPublicationNamespaceObserver(root,observationInput);while(observer.readDestinationChunk()!==null){}
+    native.setFault('fsync',1,()=>{native.setFault('clock',1,()=>4);return 5});
+    assert.throws(()=>observer.retireNamespace());observer.retireNamespace();observer.close();observer.assertNamespaceRetired();
+    const spans=observer.readRetirementDiagnostic();assert.deepEqual(spans[0],[2,2,'unavailable']);
+    assert.deepEqual(spans.slice(1).map(row=>row.slice(0,3)),[[1,1,'ok'],[1,1,'ok']]);
+    assert.equal(readFileSync(path.join(workspace,'file'),'utf8'),'new');
+    console.log(JSON.stringify({originalFailurePreserved:true,realRetry:true,clockOnlyUnavailable:true}));
+  `), { originalFailurePreserved: true, realRetry: true, clockOnlyUnavailable: true });
+});
+
+test('a post-join diagnostic does not open filesystem resources or consume the next genuine proof close failure', async t => {
+  assert.deepEqual(await actual(t, `
+    const {operation,observationInput}=effect();operation.finishCleanup();operation.close();
+    const observer=lock.openPublicationNamespaceObserver(root,observationInput);while(observer.readDestinationChunk()!==null){}
+    observer.retireNamespace();observer.close();observer.assertNamespaceRetired();const before=observer.readRetirementDiagnostic();
+    native.setFault('close',1,()=>5);assert.deepEqual(observer.readRetirementDiagnostic(),before);
+    assert.throws(()=>observer.assertNamespaceRetired(),{code:'ERR_CLIQ_RESOURCE_RETIREMENT'});
+    assert.throws(()=>observer.readRetirementDiagnostic());expectedRetirementFailure=true;
+    console.log(JSON.stringify({snapshotOnly:true,noDiagnosticOpenClose:true,genuineProofFailurePreserved:true}));
+  `), { snapshotOnly: true, noDiagnosticOpenClose: true, genuineProofFailurePreserved: true });
+});
+
 test('an already absent registered arena requires fresh real parent fsync and joined handles', async t => {
   assert.deepEqual(await actual(t, `
     const {operation,arena,observationInput}=effect();operation.finishCleanup();

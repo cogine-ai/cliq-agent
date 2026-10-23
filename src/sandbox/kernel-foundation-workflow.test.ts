@@ -123,6 +123,23 @@ test('installed verifier uses its own free bounded manager journey without weake
   assert.match(driver, /retries: kind === 'required_timeout' \? 1 : 0/u);
 });
 
+test('installed status deadlock regression observes the fixed original assertion without replacing candidate Linux coverage', async () => {
+  const workflow = await readFile(workflowUrl, 'utf8');
+  const job = workflow.match(/\n  linux-installed-verifier:\n[\s\S]*?(?=\n  [a-z][a-z0-9-]*:\n|$)/u)?.[0];
+  assert(job); assert.match(job, /runs-on: ubuntu-22\.04\n/u); assert.match(job, /timeout-minutes: 20\n/u);
+  assert.doesNotMatch(job, /(?:continue-on-error|needs):/u);
+  const experiment = stepBlocks(job).find(block => block.includes('- name: Observe the fixed original installed status deadlock'));
+  assert(experiment, 'the original exact deadline assertion must really fail on the immutable original source');
+  assert.match(experiment, /git cat-file -e 'b6140b57836e19b0fb937327af449e8138f47eca\^\{commit\}'/u);
+  assert.match(experiment, /git fetch --no-tags --depth=1 origin b6140b57836e19b0fb937327af449e8138f47eca/u);
+  assert.match(experiment, /node scripts\/kernel\/testing\/installed-status-regression\.mjs "\$RUNNER_TEMP\/cliq-installed-status-regression\/status-borrow-regression\.json"/u);
+  assert.doesNotMatch(experiment, /NODE_OPTIONS=|NODE_V8_COVERAGE=|timeout |\|\| true|set \+e/u);
+  assert.match(job, /node --test[^\n]*installed-status-regression\.test\.mjs/u);
+  assert.match(job, /qualify-systemd-user\.sh --run-verifier-journey "\$probe_node"/u);
+  assert.match(job, /name: installed-status-regression-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/u);
+  assert.match(job, /path: \$\{\{ runner\.temp \}\}\/cliq-installed-status-regression\/status-borrow-regression\.json/u);
+});
+
 test('installed Delivery keeps its own free bounded production journey and cannot override its capability gate', async () => {
   const workflow = await readFile(workflowUrl, 'utf8');
   const job = workflow.match(/\n  linux-installed-delivery:\n[\s\S]*?(?=\n  [a-z][a-z0-9-]*:\n|$)/u)?.[0];

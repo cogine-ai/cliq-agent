@@ -33,6 +33,7 @@ import type { InstalledVerifierRetirementIdentity } from './installed-verifier-e
 import { qualifyInstalledOwnerLinks, qualifyInstalledOwnerProcess } from './installed-owner-history.js';
 import { startPublicationCrashObserver } from './installed-publication-crash-observer.js';
 import { assertInstalledPublicationCleanupRecovery } from './installed-publication-recovery.js';
+import { readInstalledNamespaceRetirementJournal } from './installed-publication-journal.js';
 import { inspectInstalledPublicationClaim, inspectInstalledRecoveredWorkerRetirement } from './installed-worker-lease.js';
 
 type Recipe = { buildFixture: string; packageRoot: string; installerEntry: string; stateRoot: string; releaseKeysFile: string;
@@ -124,9 +125,12 @@ async function transferPackage(filename: string, uid: number, gid: number): Prom
 
 
 
-export async function runInstalledNodeJourney(filename: string, journeyKind: 'verifier' | 'delivery'): Promise<void> {
+export async function runInstalledNodeJourney(filename: string, journeyKind: 'verifier' | 'delivery',
+  options: Readonly<{ publicationRetirementDiagnostics?: true }> = {}): Promise<void> {
   assert.equal(process.platform, 'linux'); assert.equal(process.arch, 'x64');
   assert(journeyKind === 'verifier' || journeyKind === 'delivery');
+  assert.deepEqual(Object.keys(options), options.publicationRetirementDiagnostics === true ? ['publicationRetirementDiagnostics'] : []);
+  if (options.publicationRetirementDiagnostics) assert.equal(journeyKind, 'delivery');
   assert.equal(process.geteuid!(), 0);
   const ledger = await readLedger(filename), recipe = ledger.runJourney;
   const installedClientDriver = path.join(recipe.buildFixture, 'installed-control-client-driver.mjs');
@@ -137,6 +141,12 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
   if (journeyKind === 'delivery') Object.assign(report, {
     scope: 'actual signed Linux explicit Delivery from verified yolo sources, direct-policy publication, noOp, real verifier merge, cancel and public reconnect/restart; not interactive ask/deny, paid provider, release, reboot or complete I1 qualification',
     interactiveApprovalQualified: false, preciseClaimedCloseCutQualified: false,
+  });
+  if (options.publicationRetirementDiagnostics) Object.assign(report, {
+    // Requested recipe only. The separately retained root-owned filesystem
+    // receipt and completed physical lifecycle must establish the real volume.
+    storageDelayRequest: { diagnosticOnly: true, kind: 'dm-delay', scope: 'complete-home', readMs: 50, writeMs: 50, flushMs: 50 },
+    latePublicationResultQualified: false, preciseInFlightPublicationStopQualified: false,
   });
   const secret = Buffer.from(randomBytes(32).toString('hex')), password = Buffer.from(randomBytes(32).toString('hex'));
   const scanner = createCredentialSecretScanner([secret, password], { maxBytes: 512 * 1024 * 1024, maxStreams: 4096 });
@@ -503,7 +513,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       claims: { nativeToolCalling: true, streaming: false, trustedUsageEvidence: false, contextLimitTokens: 32768, maxOutputTokens: 4096 },
       requestTokenCeiling: { inputTokens: 32768, outputTokens: 4096, cacheReadTokens: 0, cacheWriteTokens: 0 },
       validFrom: new Date(Date.now() - 60000).toISOString(), validThrough: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString() },
-    { guestToolchain: 'node-test-v1' });
+    { guestToolchain: 'node-test-v1', publicationRetirementDiagnostics: options.publicationRetirementDiagnostics });
     assert(signed.guestToolchain && signed.modelAuthority);
     const installer = await build({ entryPoints: [fileURLToPath(new URL('./installed-runtime-installer.ts', import.meta.url))],
       outfile: recipe.installerEntry, bundle: true, platform: 'node', format: 'esm', target: 'node22.13', metafile: true, write: false });
@@ -921,7 +931,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
               if (successorUnit.MainPID !== '0' && successorUnit.MainPID !== shown.MainPID && successorUnit.InvocationID !== shown.InvocationID) break;
               assert(Date.now() < restartBy, 'actual cleanup crash restart exceeded the original 30-second budget'); await delay(50);
             }
-            await selectedSupervisor(services!.supervisorUnit, successorUnit, installedImage, restartBy);
+            const successorStart = await selectedSupervisor(services!.supervisorUnit, successorUnit, installedImage, restartBy);
             const history = inspectInstalledOwnerHistory(recipe.stateRoot).owners;
             assert.equal(history.length, 3); assert.equal(history[1]!.terminalReason, 'superseded_after_owner_death');
             assert.equal(history[2]!.state, 'active');
@@ -939,6 +949,47 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
               expectedFiles: source.files.map(file => ({ path: file.path, text: file.after })), sourceResultRef: source.cut.snapshot.run.resultRef,
               readRetainedArtifact: readCas, readOwnerHistory: async () => inspectInstalledOwnerHistory(recipe.stateRoot).owners });
             assert(joinedAt <= proof.probeStartedAt, 'external observer process, pipes and FDs must join before the fresh native probe');
+            if (options.publicationRetirementDiagnostics) {
+              // This observation measures the actual namespace task only. It
+              // does not turn either clock into authority or qualify a late
+              // result / in-flight stop. The complete CAS proof above and all
+              // original physical retirement checks below remain mandatory.
+              const successorPid = Number(successorUnit.MainPID), successor = history[2]!;
+              const logBy = Date.now() + 5000, since = Date.parse(proof.probeStartedAt);
+              assert(Number.isFinite(since));
+              const bindCurrentProcess = async () => {
+                assert.equal(await fixtureProcess(successorPid, ledger.uid), successorStart);
+                const observed = await qualifyInstalledOwnerProcess({ stateRoot: recipe.stateRoot, uid: ledger.uid,
+                  pid: successorPid, selectedImage: installedImage, imageDigest: supervisorDigest }, successor, {});
+                assert.equal(observed.processStartToken, 'linux-proc-start-ticks:' + successorStart);
+                assert.equal(await fixtureProcess(successorPid, ledger.uid), successorStart);
+              };
+              for (;;) {
+                assert(Date.now() < logBy, 'actual namespace retirement timing was not observed within the original five-second window');
+                await bindCurrentProcess();
+                const remaining = logBy - Date.now(); assert(remaining > 0);
+                const started = performance.now();
+                const log = spawnSync('/usr/bin/journalctl', ['--no-pager', '--all', '--output=json', '--lines=80', '--boot=0',
+                  `--since=@${Math.floor(since / 1000)}`, `--until=@${Math.ceil(Date.now() / 1000)}`,
+                  `_UID=${ledger.uid}`, `_PID=${successorPid}`, '_TRANSPORT=stdout'],
+                { env: environment, timeout: remaining, killSignal: 'SIGKILL', maxBuffer: 256 * 1024 });
+                assert(Buffer.isBuffer(log.stdout) && Buffer.isBuffer(log.stderr));
+                scanBytes(log.stdout); scanBytes(log.stderr);
+                const joinFailure = fixtureCommandJoinDiagnostic(log, remaining, started);
+                if (joinFailure) report.commandJoinFailure ??= joinFailure;
+                assert.equal(log.error, undefined, 'actual journal command must join'); assert.equal(log.signal, null); assert.equal(log.status, 0);
+                const snapshot = readInstalledNamespaceRetirementJournal(new TextDecoder('utf-8', { fatal: true }).decode(log.stdout), {
+                  uid: ledger.uid, pid: successorPid, invocationId: successorUnit.InvocationID!, key: proof.retirementDiagnosticKey });
+                await bindCurrentProcess();
+                assert(Date.now() < logBy, 'actual namespace retirement timing exceeded the original five-second observation window');
+                if (snapshot) {
+                  report.publicationRetirementTiming = { diagnosticOnly: true, physicalLateCutQualified: false,
+                    probeStartedAt: proof.probeStartedAt, probeDeadlineAt: proof.probeDeadlineAt, snapshot };
+                  break;
+                }
+                await delay(Math.min(50, Math.max(0, logBy - Date.now())));
+              }
+            }
             const retired = inspectInstalledRecoveredWorkerRetirement(recipe.stateRoot, ledger.uid, { runId,
               supervisorInstanceId: claimed.claim.supervisorInstanceId!, leaseEpoch: claimed.claim.leaseEpoch,
               inspectorIdentityRef: proof.inspectorIdentityRef, inspectorIdentityDigest: proof.inspectorIdentityDigest, resources: proof.generationResources });

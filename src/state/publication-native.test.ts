@@ -4,10 +4,13 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { createHash } from 'node:crypto';
+import { channel } from 'node:diagnostics_channel';
 import { identityHash } from '../kernel/identity.js';
 import { loadNativeStateOwner, openHeldPublicationOperation as openNativePublicationOperation,
-  readHeldPublicationBirth, readRetiredPublicationArena, type HeldPublicationOperation,
+  readHeldPublicationBirth, readRetiredPublicationArena, readJoinedPublicationRetirementSpans, noteNormalPublicationRetirement,
+  openHeldPublicationNamespaceObserver, retireHeldPublicationNamespace, readRetiredPublicationNamespace, type HeldPublicationOperation,
   type HeldStateOwnerLock, type HeldWorkspaceRoot, type NativePublicationOperationInput } from './native-owner.js';
+import { PUBLICATION_RETIREMENT_CHANNEL, publicationClaimRetirementDiagnosticKey } from './publication-retirement-diagnostics.js';
 
 type PhysicalInput<T = NativePublicationOperationInput> = T extends unknown ? Omit<T, 'arenaId'> & { arenaId?: string } : never;
 const arenaId = (kind: string, target: string) => identityHash('physical-publication-fixture', kind, target);
@@ -27,6 +30,7 @@ test('a structural publication birth stand-in is rejected before input propertie
   const hostile = Object.defineProperty({}, 'observe', { get() { assert.fail('structural birth must not be inspected'); } });
   assert.throws(() => readHeldPublicationBirth({} as HeldStateOwnerLock, hostile as HeldPublicationOperation), TypeError);
   assert.throws(() => readRetiredPublicationArena({} as HeldStateOwnerLock, hostile as HeldPublicationOperation), TypeError);
+  assert.throws(() => readJoinedPublicationRetirementSpans({} as HeldStateOwnerLock, hostile as HeldPublicationOperation), /genuine same-lock native owner/);
 });
 
 test('an actual private birth remains unarmed until its original physical release gate is applied', async t => {
@@ -57,7 +61,16 @@ test('the original operation retires its exact empty arena with truthful platfor
   t.after(async () => { root.close(); lock.close(); await rm(fixture, { recursive: true, force: true }); });
   const operation = openHeldPublicationOperation(lock, root, { kind: 'create', path: 'file', parents: [{ ...root.identity, mode: root.mode }],
     expected: { kind: 'absent' }, desired: { kind: 'file', mode: 420, byteCount: 4, digest: createHash('sha256').update('good').digest('hex') }, stagingName: '.stage' });
+  // Inert dispatch data at the approved real-native seam, not a Run/claim or
+  // installed normal-producer/CAS-failure qualification.
+  const dispatch = { runId: 'physical-fixture', planRef: 'a'.repeat(64), opId: 'fixture-op', attempt: 0, dispatchId: 'fixture-dispatch' };
+  const diagnostic = channel(PUBLICATION_RETIREMENT_CHANNEL), notes: unknown[] = [];
+  let callbackFailure: unknown;
+  const subscriber = (packet: unknown) => { try { notes.push(packet); noteNormalPublicationRetirement(lock, operation, dispatch); }
+    catch (error) { callbackFailure = error; } };
+  diagnostic.subscribe(subscriber);
   try {
+    noteNormalPublicationRetirement(lock, operation, dispatch); assert.equal(notes.length, 0);
     const birth = readHeldPublicationBirth(lock, operation);
     operation.stage(); operation.writeChunk(Buffer.from('good')); while (!operation.finishStage()) { /* bounded hash */ }
     operation.commit(); while (operation.readDestinationChunk() !== null) { /* actual destination */ }
@@ -71,13 +84,49 @@ test('the original operation retires its exact empty arena with truthful platfor
     assert.throws(() => readHeldPublicationBirth(lock, operation), { code: 'RECOVERY_REQUIRED' });
     operation.finishArenaRetirement(); assert.equal(await readFile(path.join(workspace, 'file'), 'utf8'), 'good');
     assert.throws(() => readRetiredPublicationArena(lock, operation), { code: 'RECOVERY_REQUIRED' });
+    assert.throws(() => readJoinedPublicationRetirementSpans(lock, operation), /completed post-join observation/);
     operation.close();
+    assert.throws(() => readJoinedPublicationRetirementSpans(lock, operation), /completed post-join observation/);
+    noteNormalPublicationRetirement(lock, operation, dispatch); assert.equal(notes.length, 0);
     const retirement = readRetiredPublicationArena(lock, operation);
+    diagnostic.unsubscribe(subscriber);
+    let accessed = false;
+    const unavailable = Object.defineProperty({ ...dispatch }, 'runId', { enumerable: true,
+      get() { accessed = true; throw new Error('inert diagnostic unavailable'); } });
+    noteNormalPublicationRetirement(lock, operation, unavailable); assert.equal(accessed, false);
+    diagnostic.subscribe(subscriber);
+    noteNormalPublicationRetirement({} as HeldStateOwnerLock, operation, unavailable); assert.equal(accessed, false);
+    assert.doesNotThrow(() => noteNormalPublicationRetirement(lock, operation, unavailable));
+    assert.equal(notes.length, 0); assert.equal(accessed, true);
+    noteNormalPublicationRetirement(lock, operation, dispatch);
+    noteNormalPublicationRetirement(lock, operation, dispatch);
+    assert.equal(notes.length, 1); assert.equal(callbackFailure, undefined);
+    assert.deepEqual(notes[0], { version: 1, key: publicationClaimRetirementDiagnosticKey(dispatch), kind: 'original', joined: true,
+      slots: readJoinedPublicationRetirementSpans(lock, operation) });
+    const intervals = readJoinedPublicationRetirementSpans(lock, operation);
+    assert.equal(intervals.length, 3);
+    assert.deepEqual(intervals.map(row => { assert(row); return row.slice(0, 3); }), [[1, 1, 'ok'], [1, 1, 'ok'], [1, 1, 'ok']]);
+    assert(Object.isFrozen(intervals)); assert(Object.isFrozen(intervals[0]));
+    assert.equal('readRetirementDiagnostic' in operation, false);
+    assert.throws(() => readJoinedPublicationRetirementSpans({} as HeldStateOwnerLock, operation), /genuine same-lock native owner/);
     assert.deepEqual(retirement.arenaIdentity, birth.arenaIdentity); assert.deepEqual(retirement.parentIdentity, birth.parentIdentity);
     assert.deepEqual(retirement.retirementObservation, observation.arena.retirementObservation);
+    assert(observation.destination.kind === 'file');
+    const namespace = openHeldPublicationNamespaceObserver(lock, root, { arenaId: birth.arenaId, path: 'file', parents: [{ ...root.identity, mode: root.mode }],
+      arenaIdentity: birth.arenaIdentity, parentIdentity: birth.parentIdentity, desired: { kind: 'file', mode: 420, byteCount: 4,
+        digest: createHash('sha256').update('good').digest('hex') }, destinationIdentity: observation.destination.identity, stagingName: '.stage' });
+    try {
+      while (namespace.readDestinationChunk() !== null) { /* Complete actual bytes, not a diagnostic. */ }
+      retireHeldPublicationNamespace(lock, namespace); namespace.close();
+      assert.throws(() => readJoinedPublicationRetirementSpans(lock, namespace), /completed post-join observation/);
+      readRetiredPublicationNamespace(lock, namespace);
+      const spans = readJoinedPublicationRetirementSpans(lock, namespace);
+      assert.equal(spans[0], null); assert.deepEqual(spans.slice(1).map(row => row!.slice(0, 3)), [[1, 1, 'ok'], [1, 1, 'ok']]);
+      assert.equal('readRetirementDiagnostic' in namespace, false);
+    } finally { namespace.close(); }
     await mkdir(arenaPath(state, 'create', 'file', ''), { mode: 0o700 });
     assert.throws(() => readRetiredPublicationArena(lock, operation), { code: 'RECOVERY_REQUIRED' });
-  } finally { operation.close(); }
+  } finally { diagnostic.unsubscribe(subscriber); operation.close(); }
   lock.close(); const successor = native.acquireLock(state, false); successor.close();
 });
 

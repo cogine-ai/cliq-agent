@@ -1,6 +1,7 @@
 // Approved fresh_installed contract. These tests exercise actual installation
 // and StateOwner acquisition, not SEA execution or complete I1 qualification.
 import assert from 'node:assert/strict';
+import { channel } from 'node:diagnostics_channel';
 import { chmod, mkdtemp, readdir, realpath, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -13,7 +14,8 @@ import type { StateOwnerAcquisitionEvidenceV1 } from '../kernel/types.js';
 import type { RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { ContentAddressedStore } from './cas.js';
 import { KernelStorageError } from './errors.js';
-import { createInstalledRuntime, type HeldInstalledRuntime } from './installed-runtime.js';
+import { createInstalledRuntime, withHeldInstalledRuntime, type HeldInstalledRuntime } from './installed-runtime.js';
+import { INSTALLED_WORK_CHANNEL, type InstalledWorkSnapshot } from './installed-work-diagnostics.js';
 import { openSqliteDriver } from './sqlite-driver.js';
 import { readLatestStateOwner } from './state-owner.js';
 import { openStateStore, publishInProcessChannel, type StateStore } from './store.js';
@@ -172,6 +174,57 @@ if (process.platform === 'linux') test('installed Supervisor status reports real
   } finally {
     await store?.close(); await selected?.close();
     await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+if (process.platform === 'linux') test('installed Supervisor status completes its three full revalidations while an actual held borrow waits for its client response', async () => {
+  const fixture = await realpath(await mkdtemp(path.join(os.tmpdir(), 'cliq-installed-status-response-')));
+  await chmod(fixture, 0o700);
+  const packageRoot = path.join(fixture, 'package'), stateRoot = path.join(fixture, 'state');
+  let selected: HeldInstalledRuntime | undefined, store: StateStore | undefined;
+  let held: Promise<void> | undefined, status: ReturnType<StateStore['readSupervisorStatus']> | undefined;
+  let entered!: () => void, respond!: () => void, timer: ReturnType<typeof setTimeout> | undefined;
+  const enteredBorrow = new Promise<void>(resolve => { entered = resolve; });
+  const clientResponse = new Promise<void>(resolve => { respond = resolve; });
+  let responseReleased = false, work: InstalledWorkSnapshot | undefined, initialBytes: number | undefined;
+  const diagnostic = channel(INSTALLED_WORK_CHANNEL);
+  const subscriber = (value: unknown) => {
+    if (value && typeof value === 'object') { work = value as InstalledWorkSnapshot; initialBytes ??= work.revalidate.bytesRead; }
+  };
+  try {
+    const signed = await writeInstalledControlPackage(packageRoot);
+    const runtime = createInstalledRuntime({ releaseKeys: signed.releaseKeys });
+    const installed = await runtime.installInitial({ packageRoot, stateRoot });
+    selected = await runtime.openSelected(stateRoot);
+    // This is the ordinary real Store acquisition, not supplied StateOwner or
+    // model authority. Only its original signed installation is borrowed.
+    store = await openStateStore(stateRoot, { bundle: selected.bundle, releaseKeys: signed.releaseKeys }, selected);
+    const identity = await publishInProcessChannel(store);
+    diagnostic.subscribe(subscriber);
+    held = withHeldInstalledRuntime(selected, async () => { entered(); await clientResponse; });
+    await enteredBorrow;
+    const before = work!.revalidate;
+    const completeBytes = before.bytesRead - initialBytes!;
+    assert(completeBytes > 0, 'the held callback entered only after an actual nonempty complete revalidation');
+    status = store.readSupervisorStatus(identity);
+    const result = await Promise.race([status.then(value => ({ kind: 'observed' as const, value })),
+      new Promise<{ kind: 'deadline' }>(resolve => { timer = setTimeout(() => resolve({ kind: 'deadline' }), 5000); })]);
+    assert.equal(result.kind, 'observed', 'status must return before the waiting client can provide its external response');
+    assert.equal(responseReleased, false);
+    if (result.kind === 'observed') {
+      assert.equal(result.value.activeRuntimeBundle.bundleDigest, installed.bundleDigest);
+      assert.deepEqual(result.value.queue, { queuedRuns: 0, runningRuns: 0, capacity: 0 });
+    }
+    assert.equal(work!.revalidate.started - before.started, 3, 'entry and both original root-binding checks remain');
+    assert.equal(work!.revalidate.completed - before.completed, 3);
+    assert.equal(work!.revalidate.bytesRead - before.bytesRead, completeBytes * 3,
+      'each independent status check rehashes the complete real installation, not cached metadata');
+  } finally {
+    if (timer) clearTimeout(timer);
+    responseReleased = true; respond();
+    await Promise.allSettled([held, status]);
+    diagnostic.unsubscribe(subscriber);
+    await store?.close(); await selected?.close(); await rm(fixture, { recursive: true, force: true });
   }
 });
 

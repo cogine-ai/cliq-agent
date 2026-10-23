@@ -1,5 +1,7 @@
 /* Test-only observer. One actual inotify deletion may trigger exactly one
- * SIGKILL of a preverified original Supervisor pidfd. Events confer no proof
+ * SIGKILL (default) or fixed retirement-stop SIGTERM of a preverified original
+ * Supervisor pidfd. The latter must observe real death/join within two seconds
+ * of the original signal start. Events and timestamps confer no proof
  * or permission. No pause, ptrace, DB/clock write, arbitrary signal or retry. */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -86,10 +88,52 @@ done:
 }
 static int64_t milliseconds(void) { struct timespec t; if (clock_gettime(CLOCK_MONOTONIC, &t)) return -1; return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000; }
 static int frame(const char *text) { size_t n = strlen(text); return write(STDOUT_FILENO, text, n) == (ssize_t)n; }
+static int stamp(uint64_t *monotonic, uint64_t *realtime) {
+    struct timespec m, r;
+    if (clock_gettime(CLOCK_MONOTONIC, &m) || clock_gettime(CLOCK_REALTIME, &r) || m.tv_sec < 0 || r.tv_sec < 0 ||
+        m.tv_nsec < 0 || m.tv_nsec >= 1000000000L || r.tv_nsec < 0 || r.tv_nsec >= 1000000000L ||
+        (uint64_t)m.tv_sec > (UINT64_MAX - (uint64_t)m.tv_nsec) / UINT64_C(1000000000) ||
+        (uint64_t)r.tv_sec > (UINT64_MAX - (uint64_t)r.tv_nsec) / UINT64_C(1000000000)) return 0;
+    *monotonic = (uint64_t)m.tv_sec * UINT64_C(1000000000) + (uint64_t)m.tv_nsec;
+    *realtime = (uint64_t)r.tv_sec * UINT64_C(1000000000) + (uint64_t)r.tv_nsec; return 1;
+}
+static int retirement_stop(int *process, int64_t watch_started) {
+    uint64_t enter_m, enter_r, return_m, return_r, joined_m, joined_r;
+    if (watch_started < 0 || (uint64_t)watch_started > UINT64_MAX / UINT64_C(1000000) - UINT64_C(90000) ||
+        !stamp(&enter_m, &enter_r) || enter_m > UINT64_MAX - UINT64_C(2000000000)) return 0;
+    uint64_t watch_deadline = ((uint64_t)watch_started + UINT64_C(90000)) * UINT64_C(1000000);
+    const uint64_t deadline = enter_m + UINT64_C(2000000000);
+    if (enter_m < (uint64_t)watch_started * UINT64_C(1000000) || deadline >= watch_deadline) return 0;
+    /* One fixed signal only. Its original pre-syscall sample starts the stop
+     * bound; neither a later native return nor an output consumer restarts it. */
+    if (syscall(SYS_pidfd_send_signal, *process, SIGTERM, NULL, 0) || !stamp(&return_m, &return_r) ||
+        return_m < enter_m || return_r < enter_r || return_m > deadline) return 0;
+    for (;;) {
+        uint64_t now_m, now_r;
+        if (!stamp(&now_m, &now_r) || now_m < return_m || now_r < return_r || now_m > deadline) return 0;
+        struct pollfd death = {*process, POLLIN, 0};
+        int exited = poll(&death, 1, (int)((deadline - now_m) / UINT64_C(1000000)));
+        if (exited < 0 && errno == EINTR) continue;
+        if (exited < 0 || (death.revents & (POLLERR | POLLNVAL))) return 0;
+        if (!exited) continue;
+        if (!(death.revents & POLLIN)) return 0;
+        break;
+    }
+    int original = *process; *process = -1; if (close(original)) return 0;
+    if (!stamp(&joined_m, &joined_r) || joined_m < return_m || joined_r < return_r ||
+        joined_m > deadline || joined_m >= watch_deadline) return 0;
+    char output[512];
+    int n = snprintf(output, sizeof(output),
+        "publication_retirement_signal_v1 %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 "\n"
+        "publication_retirement_joined_v1 %" PRIu64 " %" PRIu64 "\n"
+        "publication_retirement_original_supervisor_stopped_joined\n", enter_m, enter_r, return_m, return_r, joined_m, joined_r);
+    return n > 0 && n < (int)sizeof(output) && frame(output);
+}
 
 int main(int argc, char **argv) {
     uint64_t pid_value, ticks, uid_value, image_dev, image_ino, image_size;
-    if (argc != 9 || argv[1][0] != '/' || !number(argv[2], &pid_value) || !pid_value || pid_value > INT_MAX ||
+    int stopping = argc == 10 && !strcmp(argv[9], "--retirement-stop");
+    if ((argc != 9 && !stopping) || argv[1][0] != '/' || !number(argv[2], &pid_value) || !pid_value || pid_value > INT_MAX ||
         !number(argv[3], &ticks) || !number(argv[4], &uid_value) || !uid_value || uid_value > UINT32_MAX ||
         getuid() != (uid_t)uid_value || geteuid() != (uid_t)uid_value || !digest(argv[5]) ||
         !number(argv[6], &image_dev) || !number(argv[7], &image_ino) || !number(argv[8], &image_size)) return 98;
@@ -107,7 +151,7 @@ int main(int argc, char **argv) {
     notify = inotify_init1(IN_CLOEXEC | IN_NONBLOCK); if (notify < 0) goto done;
     char watched[64]; if (snprintf(watched, sizeof(watched), "/proc/self/fd/%d", parent) >= (int)sizeof(watched)) goto done;
     int watch = inotify_add_watch(notify, watched, IN_CREATE | IN_DELETE | IN_ONLYDIR | IN_MOVE_SELF | IN_DELETE_SELF);
-    if (watch < 0 || !frame("publication_parent_watch_ready\n")) goto done;
+    if (watch < 0 || !frame(stopping ? "publication_retirement_watch_ready\n" : "publication_parent_watch_ready\n")) goto done;
     int64_t started = milliseconds(); if (started < 0) goto done;
     char candidate[65] = {0}, input[256] = {0}; size_t used = 0; int armed = 0, deleted = 0, input_done = 0;
     for (;;) {
@@ -159,7 +203,7 @@ int main(int argc, char **argv) {
                 pd != (uint64_t)p.st_dev || pi != (uint64_t)p.st_ino || arena < 0 || strcmp(candidate, name) ||
                 ad != (uint64_t)captured.st_dev || ai != (uint64_t)captured.st_ino ||
                 snprintf(canonical, sizeof(canonical), "%s %s %s %s %s", name, a, b, c, d) != (int)used - 1 || strcmp(canonical, input)) goto done;
-            armed = 1; if (!frame("publication_original_birth_armed\n")) goto done;
+            armed = 1; if (!frame(stopping ? "publication_retirement_original_birth_armed\n" : "publication_original_birth_armed\n")) goto done;
         }
         if (armed && deleted) {
             if (fstat(parent, &named) || named.st_dev != p.st_dev || named.st_ino != p.st_ino || !private_directory(&named, uid) ||
@@ -171,6 +215,10 @@ int main(int argc, char **argv) {
             int *observations[] = {&arena, &notify, &parent, &runtime, &root};
             for (size_t i = 0; i < sizeof(observations) / sizeof(observations[0]); i++) {
                 int fd = *observations[i]; *observations[i] = -1; if (close(fd)) goto done;
+            }
+            if (stopping) {
+                if (!retirement_stop(&process, started)) goto done;
+                result = 0; break;
             }
             if (syscall(SYS_pidfd_send_signal, process, SIGKILL, NULL, 0)) goto done;
             for (;;) {

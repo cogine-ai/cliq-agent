@@ -23,9 +23,11 @@ import { decodeContextManifest, decodeSourceManifest, decodeStateLockIdentity, d
 import { joinResourceOperations, KernelStorageError, ResourceRetirementError } from './errors.js';
 import { assertHeldWorkspaceRoot, heldWorkspaceRootPath, openHeldPublicationOperation, readHeldPublicationBirth,
   readRetiredPublicationArena, openHeldPublicationNamespaceObserver, retireHeldPublicationNamespace, readRetiredPublicationNamespace,
+  readJoinedPublicationRetirementSpans, noteNormalPublicationRetirement,
   stateRootIdentityForLock,
   type HeldPublicationNamespaceObserver, type HeldPublicationOperation, type HeldWorkspaceRoot, type NativePublicationObservation, type NativePublicationOperationInput } from './native-owner.js';
 import { assertPublicationPreflight, preparePublicationPreflight, type PublicationPreflight } from './publication-preflight.js';
+import { noteJoinedPublicationRetirement, publicationRetirementDiagnosticKey } from './publication-retirement-diagnostics.js';
 import { readRecoveryClosure } from './recovery-closure.js';
 import { appendRunStateEvent, assertLiveDispatchState, claimValidatedInvocation, prepareValidatedInvocation, requireHealthyFence, type ClaimInvocationDispatchInput } from './reducers/invocation.js';
 import { appendInvocationJournalEntry, nextJournalSequence, readInvocationAttempt, readInvocationJournal } from './repositories/journal.js';
@@ -1227,6 +1229,8 @@ export function advancePublicationPath(driver: SqliteDriver, owner: StateOwnerCo
     if (!receipt) invalid('publication completion lost its retained actual receipt');
     const artifact = await publishFixed(held, receipt, receipt.format);
     held.completion = { evidence: receipt, evidenceRef: artifact.ref, receiptRef: artifact.ref, metadata: metadata(held) };
+    noteNormalPublicationRetirement(held.owner.filesystem, held.native!, { runId: held.claim!.runId,
+      planRef: held.authorization.context.planRef, opId: held.claim!.opId, attempt: held.claim!.attempt, dispatchId: held.claim!.dispatchId! });
     return held.disposition = Object.freeze({ disposition: 'received' });
   })().catch(async error => {
     if (error instanceof ResourceRetirementError) { held.retirementFailure ??= error; throw error; }
@@ -1352,6 +1356,7 @@ type ReconciliationBinding = {
   progressTransfer?: OwnedPublicationReconciliationProgress;
   acceptedLateAudit?: PublicationLateObservationItem;
   originHistory?: RetainedStateOwnerHistory;
+  retirementDiagnosticPublished?: boolean;
 };
 const reconciliationResults = new WeakMap<object, ReconciliationBinding>();
 const lateObservations = new WeakMap<object, ReconciliationBinding>();
@@ -1779,6 +1784,17 @@ function retainReconciliationResult(value: ReconciliationBinding, disposition: P
   const selected = value.selection!, state = selected.wait.probeState;
   if (state.phase !== 'automatic_in_flight' && state.phase !== 'user_in_flight') invalid('publication observation lost its persisted actual nonce');
   const dispatch = state.dispatch;
+  // Inert observation after the ORIGINAL actual retirement/close/post-join
+  // reader only. UNKNOWN/unjoined paths cannot manufacture a snapshot. The
+  // diagnostic is neither the saved completion clock nor an acceptance proof.
+  if (!value.retirementDiagnosticPublished) {
+    value.retirementDiagnosticPublished = true;
+    noteJoinedPublicationRetirement(() => ({ version: 1, kind: value.namespace ? 'namespace' : 'original', joined: true,
+      key: publicationRetirementDiagnosticKey({ runId: selected.run.id, planRef: selected.entry.planRef,
+        opId: selected.entry.claim!.opId, attempt: selected.entry.claim!.attempt,
+        dispatchId: selected.entry.claim!.dispatchId!, probeNonceDigest: dispatch.probeNonceDigest }),
+      slots: readJoinedPublicationRetirementSpans(value.owner.filesystem, value.namespace ?? value.physical!.native!) }));
+  }
   const timing = classifyPublicationObservationCompletion(dispatch.probeStartedAt, dispatch.probeDeadlineAt, evidence.observedAt, value.known.completedAt);
   value.evidence = immutableSnapshot(evidence); value.evidenceRef = canonicalSha256(evidence); value.disposition = disposition;
   if (timing === 'late_audit') {

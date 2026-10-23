@@ -9,6 +9,7 @@ import { build } from 'esbuild';
 import { inject } from 'postject';
 import { INSTALLED_CREDENTIAL_PHASE_CHANNEL, INSTALLED_CREDENTIAL_PHASES } from '../../../src/state/installed-diagnostics.js';
 import { INSTALLED_WORK_CHANNEL } from '../../../src/state/installed-work-diagnostics.js';
+import { PUBLICATION_RETIREMENT_CHANNEL } from '../../../src/state/publication-retirement-diagnostics.js';
 
 export const SUPERVISOR_SEA_NODE_VERSION = '24.21.0';
 export const SUPERVISOR_SEA_CARRIER_CHECKSUMS: Readonly<Record<string, string>> = {
@@ -62,6 +63,52 @@ export const INSTALLED_WORK_DIAGNOSTIC_BANNER = `;(() => { try {
   } catch {} });
 } catch {} })();`;
 
+// Fixed qualification composition only. Never serialize an arbitrary packet,
+// invoke its getters, or let a broken diagnostic sink affect the producer.
+export const PUBLICATION_RETIREMENT_DIAGNOSTIC_BANNER = `;(() => { try {
+  const diagnostic = require('node:diagnostics_channel').channel(${JSON.stringify(PUBLICATION_RETIREMENT_CHANNEL)});
+  const write = require('node:fs').writeSync, prefix = 'CLIQ_PUBLICATION_RETIRE_V1:';
+  let emitted = 0, stopped = false;
+  const values = (object, keys) => {
+    if (!object || typeof object !== 'object') throw 0;
+    const fields = Object.getOwnPropertyDescriptors(object);
+    if (Reflect.ownKeys(fields).length !== keys.length) throw 0;
+    return keys.map(key => { const field = fields[key];
+      if (!field || !Object.hasOwn(field, 'value') || key !== 'length' && !field.enumerable) throw 0; return field.value; });
+  };
+  const array = (value, length) => {
+    if (!Array.isArray(value)) throw 0;
+    const keys = Array.from({length}, (_, index) => String(index));
+    const fields = values(value, [...keys, 'length']);
+    if (fields.pop() !== length) throw 0; return fields;
+  };
+  const time = value => typeof value === 'string' && /^(0|[1-9][0-9]{0,19})$/.test(value) && BigInt(value) <= 18446744073709551615n;
+  const output = text => { try { if (write(2, text) !== text.length) stopped = true; } catch { stopped = true; } };
+  diagnostic.subscribe(packet => { try {
+    if (stopped || Array.isArray(packet)) return;
+    const [version, key, kind, joined, input] = values(packet, ['version', 'key', 'kind', 'joined', 'slots']);
+    if (version !== 1 || typeof key !== 'string' || !/^[a-f0-9]{64}$/.test(key) ||
+        kind !== 'original' && kind !== 'namespace' || joined !== true) return;
+    const slots = array(input, 3), head = prefix + key + ':' + kind + ':';
+    const frames = slots.map((slot, index) => {
+      if (slot === null) { if (index !== 0) throw 0; return head + index + ':none\\n'; }
+      if (!Array.isArray(slot)) throw 0;
+      const length = Object.getOwnPropertyDescriptor(slot, 'length');
+      const row = array(slot, length && Object.hasOwn(length, 'value') && length.value === 3 ? 3 : 7), [calls, attempts, outcome] = row;
+      if (!Number.isSafeInteger(calls) || calls < 1 || calls > 0xffffffff ||
+          !Number.isSafeInteger(attempts) || attempts < calls || attempts > 0xffffffff) throw 0;
+      if (row.length === 3) { if (outcome !== 'unavailable') throw 0; }
+      else if (!['ok', 'interrupted', 'error'].includes(outcome) || !row.slice(3).every(time) ||
+          BigInt(row[5]) < BigInt(row[3]) || BigInt(row[6]) < BigInt(row[4])) throw 0;
+      return head + index + ':' + row.join(':') + '\\n';
+    });
+    frames.push(head + 'joined\\n');
+    if (frames.some(frame => frame.length > 256) || frames.join('').length > 1024) return;
+    if (emitted >= 32) { stopped = true; try { write(2, prefix + 'truncated\\n'); } catch {} return; }
+    emitted++; output(frames.join(''));
+  } catch {} });
+} catch {} })();`;
+
 function run(fixture: string, executable: string, args: string[]) {
   const result = spawnSync(executable, args, { encoding: 'utf8', timeout: 60_000, cwd: fixture,
     maxBuffer: 2 * 1024 * 1024 });
@@ -100,12 +147,16 @@ export async function buildSupervisorSeaImage(input: {
   fixture: string; carrier: string; entryPoint: string; executable: string;
   variant: string; assets: Record<string, string>; defines?: Record<string, string>;
   credentialPhaseDiagnostics?: true;
+  publicationRetirementDiagnostics?: true;
 }): Promise<string> {
   assert(input.credentialPhaseDiagnostics === undefined || input.credentialPhaseDiagnostics === true);
+  assert(input.publicationRetirementDiagnostics === undefined || input.publicationRetirementDiagnostics === true);
+  const banner = (input.credentialPhaseDiagnostics ? CREDENTIAL_PHASE_DIAGNOSTIC_BANNER + INSTALLED_WORK_DIAGNOSTIC_BANNER : '') +
+    (input.publicationRetirementDiagnostics ? PUBLICATION_RETIREMENT_DIAGNOSTIC_BANNER : '');
   const main = path.join(input.fixture, `${input.variant}.cjs`);
   const result = await build({ entryPoints: [input.entryPoint], outfile: main,
     bundle: true, platform: 'node', format: 'cjs', target: 'node24.21', metafile: true,
-    ...(input.credentialPhaseDiagnostics === true ? { banner: { js: CREDENTIAL_PHASE_DIAGNOSTIC_BANNER + INSTALLED_WORK_DIAGNOSTIC_BANNER } } : {}),
+    ...(banner ? { banner: { js: banner } } : {}),
     // These entries run only as SEA. The ordinary ESM helper branch cannot run.
     define: { 'import.meta.url': 'undefined', ...input.defines } });
   for (const emitted of Object.values(result.metafile!.outputs)) {

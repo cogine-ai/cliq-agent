@@ -136,6 +136,16 @@ export { commitEndpointAuthority, readEndpointAuthority, readCredentialAuthority
 export type { HeldCredentialAuthorityLock } from './store.js';
 
 type InstalledDirectoryIdentity = Readonly<{ deviceId: string; fileId: string; ownerUid: number }>;
+/** Fixed read-only inventory, freshly verified against the original held
+ * installation. No callback, native loader, descriptor or execution authority
+ * escapes this observation, and its copied metadata is not a future proof. */
+export type InstalledRuntimeObservation = Readonly<{
+  bundleDigest: string;
+  manifestDigest: string;
+  bundleVersion: string;
+  stateRoot: InstalledDirectoryIdentity & Readonly<{ canonicalPath: string }>;
+  casRoot: InstalledDirectoryIdentity;
+}>;
 /** Trusted startup observation only. No descriptor or independently supplied
  * installation evidence can outlive the callback's held borrow. */
 export type InstalledRuntimeBorrow = Readonly<{
@@ -154,6 +164,7 @@ export type InstalledRuntimeBorrow = Readonly<{
 type InstalledRuntimeBinding = {
   factory: InstalledRuntime;
   borrow<T>(operation: (installed: InstalledRuntimeBorrow) => Promise<T>, signal?: AbortSignal): Promise<T>;
+  observe(signal?: AbortSignal): Promise<InstalledRuntimeObservation>;
   execute(role: 'keeper' | 'supervisor' | 'endpoint' | 'credential', command?: string): Promise<never>;
   initializeKeeper(): Promise<HeldInstalledKeeper>;
   acquireAnchor(): Promise<HeldInstalledAnchor>;
@@ -273,6 +284,16 @@ export function withHeldInstalledRuntime<T>(held: HeldInstalledRuntime,
   const binding = heldInstalledRuntimes.get(held);
   if (binding === undefined) mismatch('installed runtime is not a verified held selection');
   return binding.borrow(operation, signal);
+}
+
+/** This fixed observation does not wait for an authority callback which may
+ * itself be awaiting the observing client's response. Business borrows remain
+ * serialized; all actual observation work still belongs to their held Scope. */
+export function readInstalledRuntimeObservation(held: HeldInstalledRuntime,
+  signal?: AbortSignal): Promise<InstalledRuntimeObservation> {
+  const binding = heldInstalledRuntimes.get(held);
+  if (binding === undefined) mismatch('installed runtime is not a verified held selection');
+  return binding.observe(signal);
 }
 
 export class CredentialScopeBusyError extends TypeError {
@@ -1095,6 +1116,9 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
         }
         let closed = false;
         const guestShutdown = new AbortController();
+        const observationShutdown = new AbortController();
+        const observationJobs = new Set<Promise<InstalledRuntimeObservation>>();
+        let observationRetirement: ResourceRetirementError | undefined;
         let poisoned: unknown, hasPoisoned = false;
         let tail = Promise.resolve();
         let closePromise: Promise<void> | undefined;
@@ -1147,6 +1171,14 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
             if (!signal?.aborted || error !== signal.reason) { rememberRetirement(error); poisoned = error; hasPoisoned = true; }
             throw error;
           }
+        };
+        const joinObservations = async (): Promise<void> => {
+          const results = await Promise.allSettled([...observationJobs]);
+          const failed = results.find(result => result.status === 'rejected' && result.reason instanceof ResourceRetirementError);
+          if (failed?.status === 'rejected') throw failed.reason;
+          // A completed observation may have left the live set before close.
+          // Its retirement uncertainty must still dominate ordinary failures.
+          if (observationRetirement) throw observationRetirement;
         };
         const loadSelectedNative = async (signal?: AbortSignal): Promise<NativeStateOwner> => {
           await checkedRevalidate(signal);
@@ -1247,17 +1279,19 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
             if (this !== selected) return Promise.reject(new KernelStorageError('ARTIFACT_MISMATCH', 'installed runtime handle receiver is not its held instance'));
             closed = true;
             guestShutdown.abort();
+            observationShutdown.abort();
             return closePromise ??= (async () => {
               // Every preparation already has its actual closeable owner.
               // Cancel before joining producers, without acquiring the
               // credential lock those pending producers may still hold.
               const transportJoins = [...brokerTransports].map(transport => transport.close());
               const guestClosures = [...guestJobs].map(closeGuestToolchain);
-              const [transports, guests] = await Promise.all([Promise.allSettled(transportJoins), Promise.allSettled(guestClosures)]);
+              const [transports, guests, observations] = await Promise.all([Promise.allSettled(transportJoins),
+                Promise.allSettled(guestClosures), Promise.allSettled([joinObservations()])]);
               await tail;
               const producers = await Promise.allSettled([...platformJobs]);
               const remaining = await Promise.allSettled([...platformJobs]);
-              const failed = [...producers, ...transports, ...guests, ...remaining].find(result => result.status === 'rejected' &&
+              const failed = [...producers, ...transports, ...guests, ...observations, ...remaining].find(result => result.status === 'rejected' &&
                 result.reason instanceof ResourceRetirementError);
               if (failed?.status === 'rejected') throw failed.reason;
               if (brokerTransports.size !== 0) {
@@ -1274,6 +1308,24 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
         });
         heldInstalledRuntimes.set(selected, {
           factory: runtime,
+          observe(signal) {
+            if (closed) mismatch('installed runtime handle is closed');
+            const combined = signal ? AbortSignal.any([signal, observationShutdown.signal]) : observationShutdown.signal;
+            // Register before starting any work: even reentrant shutdown from
+            // a trusted diagnostic subscriber must join this exact operation.
+            const pending = Promise.resolve().then(async () => {
+              await checkedRevalidate(combined);
+              return immutableSnapshot({ bundleDigest: signed.bundleDigest,
+                manifestDigest: signed.bundle.manifestDigest, bundleVersion: signed.bundle.bundleVersion,
+                stateRoot: { ...identity(state), canonicalPath: stateRoot }, casRoot: identity(casRoot) });
+            }).catch(error => {
+              if (error instanceof ResourceRetirementError) observationRetirement ??= error;
+              throw error;
+            });
+            observationJobs.add(pending);
+            void pending.finally(() => observationJobs.delete(pending)).catch(() => undefined);
+            return pending;
+          },
           assertManagerObservationAvailable() {
             if (closed) mismatch('installed runtime handle is closed');
             assertSelection();
@@ -1813,10 +1865,12 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
           execute(role, command): Promise<never> {
             if (closed) mismatch('installed runtime handle is closed');
             closed = true; // Consume synchronously; join existing borrows first.
+            observationShutdown.abort();
             const pending = tail.then(async (): Promise<never> => {
               let image: FileHandle | undefined;
               let failure: unknown;
               try {
+                await joinObservations();
                 const native = await loadSelectedNative();
                 const file = signed.entries.get(supervisor.entryId)!;
                 // The original FileHandle stays strongly owned by this terminal

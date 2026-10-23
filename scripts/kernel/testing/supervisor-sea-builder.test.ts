@@ -9,6 +9,96 @@ import { build } from 'esbuild';
 import { CREDENTIAL_PHASE_DIAGNOSTIC_BANNER, INSTALLED_WORK_DIAGNOSTIC_BANNER,
   prepareSupervisorSeaCarrier, SUPERVISOR_SEA_NODE_VERSION } from './supervisor-sea-builder.js';
 
+test('the publication fixture banner emits only the closed joined packet, bounded to four literal frames', async () => {
+  const builder = await import('./supervisor-sea-builder.js') as Record<string, unknown>;
+  const banner = builder.PUBLICATION_RETIREMENT_DIAGNOSTIC_BANNER;
+  assert.equal(typeof banner, 'string', 'the fixed joined-publication diagnostic banner must exist');
+  const key = 'a'.repeat(64);
+  const packet = { version: 1, key, kind: 'namespace', joined: true,
+    slots: [null, [1, 1, 'ok', '10', '20', '11', '21'], [1, 1, 'ok', '12', '22', '13', '23']] };
+  const bundled = await build({ stdin: { contents: `
+    require('node:diagnostics_channel').channel('cliq.installed.publication.retirement.v1').publish(${JSON.stringify(packet)});
+    process.stdout.write('original-producer-complete');
+  ` }, bundle: true, write: false, platform: 'node', format: 'cjs', banner: { js: banner as string } });
+  const child = spawnSync(process.execPath, ['-e', bundled.outputFiles[0]!.text], { encoding: 'utf8', timeout: 5000 });
+  assert.equal(child.error, undefined); assert.equal(child.signal, null); assert.equal(child.status, 0, child.stderr);
+  assert.equal(child.stdout, 'original-producer-complete');
+  const prefix = 'CLIQ_PUBLICATION_RETIRE_V1:' + key + ':namespace:';
+  assert.equal(child.stderr, prefix + '0:none\n' + prefix + '1:1:1:ok:10:20:11:21\n' +
+    prefix + '2:1:1:ok:12:22:13:23\n' + prefix + 'joined\n');
+  assert(child.stderr.split('\n').filter(Boolean).every(line => Buffer.byteLength(line + '\n') <= 256));
+  assert(Buffer.byteLength(child.stderr) <= 1024);
+});
+
+test('publication diagnostics reject private or malformed data without getters, and contain their own output failure', async () => {
+  const builder = await import('./supervisor-sea-builder.js') as Record<string, unknown>;
+  for (const closeStderr of [false, true]) {
+    const bundled = await build({ stdin: { contents: `
+      const diagnostic = require('node:diagnostics_channel').channel('cliq.installed.publication.retirement.v1');
+      if (${closeStderr}) require('node:fs').closeSync(2);
+      let getters = 0;
+      const original = {version:1,key:'a'.repeat(64),kind:'namespace',joined:true,slots:[null,
+        [1,1,'ok','10','20','11','21'],[1,1,'ok','12','22','13','23']]};
+      const privateText = 'private-request-and-error-text';
+      for (const packet of [{...original,version:2},{...original,joined:false},
+        {...original,key:privateText},{...original,privateText},{...original,slots:Array(3)},
+        {...original,slots:[null,null,null]},
+        {...original,slots:[null,[4294967296,4294967296,'ok','10','20','11','21'],original.slots[2]]},
+        {...original,slots:[null,[1,1,'ok','10','20','9','21'],original.slots[2]]},
+        {...original,slots:[null,[0,1,'ok','10','20','11','21'],original.slots[2]]},
+        {...original,slots:[null,[1,0,'unavailable'],original.slots[2]]},
+        {...original,slots:[null,[1,1,privateText],original.slots[2]]},
+        {...original,slots:[null,[1,1,'ok','18446744073709551616','20','11','21'],original.slots[2]]},
+        {...original,slots:[null,[1,1,'ok','01','20','11','21'],original.slots[2]]},
+        Object.defineProperty({...original},'key',{get(){getters++;throw Error(privateText)}}),
+        {...original,slots:[null,Object.defineProperty([1,1,'ok','10','20','11','21'],3,
+          {get(){getters++;throw Error(privateText)}}),original.slots[2]]}]) diagnostic.publish(packet);
+      if (${closeStderr}) diagnostic.publish(original);
+      process.stdout.write('original-producer-complete:' + getters);
+    ` }, bundle: true, write: false, platform: 'node', format: 'cjs',
+    banner: { js: builder.PUBLICATION_RETIREMENT_DIAGNOSTIC_BANNER as string } });
+    const child = spawnSync(process.execPath, ['-e', bundled.outputFiles[0]!.text], { encoding: 'utf8', timeout: 5000 });
+    assert.equal(child.error, undefined); assert.equal(child.signal, null); assert.equal(child.status, 0, child.stderr);
+    assert.equal(child.stdout, 'original-producer-complete:0'); assert.equal(child.stderr, '');
+  }
+});
+
+test('the publication diagnostic sink explicitly stops at its fixed packet cap without affecting its producer', async () => {
+  const builder = await import('./supervisor-sea-builder.js') as Record<string, unknown>;
+  const bundled = await build({ stdin: { contents: `
+    const diagnostic = require('node:diagnostics_channel').channel('cliq.installed.publication.retirement.v1');
+    for(let i=0;i<40;i++) diagnostic.publish({version:1,key:'b'.repeat(64),kind:'original',joined:true,
+      slots:[null,[1,1,'unavailable'],[1,1,'ok','1','2','3','4']]});
+    process.stdout.write('original-producer-complete');
+  ` }, bundle: true, write: false, platform: 'node', format: 'cjs',
+  banner: { js: builder.PUBLICATION_RETIREMENT_DIAGNOSTIC_BANNER as string } });
+  const child = spawnSync(process.execPath, ['-e', bundled.outputFiles[0]!.text], { encoding: 'utf8', timeout: 5000 });
+  assert.equal(child.error, undefined); assert.equal(child.signal, null); assert.equal(child.status, 0, child.stderr);
+  assert.equal(child.stdout, 'original-producer-complete');
+  const lines = child.stderr.trim().split('\n'); assert.equal(lines.length, 129);
+  assert.equal(lines.at(-1), 'CLIQ_PUBLICATION_RETIRE_V1:truncated');
+  assert(lines.every(line => Buffer.byteLength(line + '\n') <= 256));
+});
+
+test('publication tuple length comes from copied metadata without reading an array property', async () => {
+  const builder = await import('./supervisor-sea-builder.js') as Record<string, unknown>;
+  const bundled = await build({ stdin: { contents: `
+    let reads = 0;
+    const span = new Proxy([1,1,'ok','10','20','11','21'], {
+      get(target,key,receiver) { reads++; return Reflect.get(target,key,receiver); }
+    });
+    require('node:diagnostics_channel').channel('cliq.installed.publication.retirement.v1')
+      .publish({version:1,key:'a'.repeat(64),kind:'original',joined:true,
+        slots:[null,span,[1,1,'ok','12','22','13','23']]});
+    process.stdout.write('property-reads:' + reads);
+  ` }, bundle: true, write: false, platform: 'node', format: 'cjs',
+  banner: { js: builder.PUBLICATION_RETIREMENT_DIAGNOSTIC_BANNER as string } });
+  const child = spawnSync(process.execPath, ['-e', bundled.outputFiles[0]!.text], { encoding: 'utf8', timeout: 5000 });
+  assert.equal(child.error, undefined); assert.equal(child.signal, null); assert.equal(child.status, 0, child.stderr);
+  assert.equal(child.stdout, 'property-reads:0');
+  assert.equal(child.stderr.split('\n').filter(Boolean).length, 4);
+});
+
 test('carrier preparation refuses an existing extraction directory without adopting or changing it', async () => {
   const fixture = await mkdtemp(path.join(os.tmpdir(), 'cliq-existing-carrier-'));
   try {

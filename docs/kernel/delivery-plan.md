@@ -1328,3 +1328,57 @@ must be checked before it can produce evidence. It must cross the original
 probe deadline in real post-gate resource work, not in CAS persistence or a
 changed clock. No experiment, late-result qualification or Package A completion
 is implied by approval of this fixture; the original stop/probe limits remain.
+
+The fresh awake validation of tree
+`d63f7a5617362ffe837e2bf8008553f2cc1c065a` passes the original build and
+full test command: 2,549 passes, one original conditional cross-filesystem
+skip and no failures, cancellations or todos. This does not erase the earlier
+sleep-interrupted failure. Its final local validation SHA-256 is
+`e097a46621de9cffd30ecf3c8b16b4c3f5707a27c0eda8134de7d43fdb94ac46`.
+
+Linux run `39970997194`, attempt 1, on exact commit
+`b6140b57836e19b0fb937327af449e8138f47eca` is terminal with seventeen
+successful and two failed jobs. All nineteen closed report categories are
+retained with no pending, incomplete or rejected category. The final capture
+SHA-256 is
+`81d7f5959eab9bd9a85c961248439cf3cb1db45a99e825e438f522665df11e7d`;
+all 89 original JSON files (445,142 bytes) were independently rehashed.
+Both owned enrollments complete and join. Neither result proves the precise
+pre-zombie `PF_EXITING` cut. The Delivery and verifier failures now retain
+their first responder error: an original 5,000 ms request deadline with two
+complete client frames (hello and `run.get`). The next ordered request is
+`supervisor.status`, while the owned HTTPS response is still pending. This is
+not a readiness failure, and the deadline remains unchanged. Full installed
+Delivery, late-result storage and precise retirement-stop qualification are
+still required; these failures are not a successful Package A or I1 result.
+
+The responder wait is a real dependency cycle: credential dispatch holds the
+business borrow while awaiting its external response, and the responder's
+`supervisor.status` was queued behind that same borrow. The repair gives only
+the fixed immutable manager observation a separately joined lifetime; it does
+not grant a general callback or bypass the business FIFO. Status retains all
+three fresh full-image revalidations and the original root, CAS, owner and
+channel checks. Close and execute abort and join every submitted observation
+before retiring original descriptors. A fixed baseline experiment must observe
+the exact five-second assertion on the original code; import, platform, helper
+or unrelated assertion failures cannot count as that RED. The candidate's
+Linux GREEN and both complete installed journeys remain independently required.
+
+The controlled storage campaign uses one frozen 50 ms read/write/flush table
+for the complete disposable home. Before activation and each later use it
+checks the unique mapper identity, original loop and image, and after an
+ordinary unmount/remove it must observe actual resource disappearance. Its
+real loop-descriptor handoff is recorded before opening the mounted device;
+missing or partial handoff evidence is retained, never adopted by pathname.
+The separate free hosted-VM job neither replaces an original campaign nor
+changes its twenty-minute limit. A requested profile is not a physical receipt.
+
+Fixed native retirement diagnostics record only the first actual fsync
+interval for each original parent, its outcome and complete join. Normal
+dispatch and current namespace probes have different diagnostic-key domains;
+neither invents a probe nonce for the other. These clock observations cannot
+authorize work or replace CAS/progress/death/retirement evidence. In particular,
+the 50 ms profile does not guarantee that a real post-gate fsync crosses the
+original thirty-second probe deadline. Late-result and in-flight-stop flags
+remain false until their own actual cuts and complete independent recovery
+assertions have passed; ordinary Delivery success is not a substitute.

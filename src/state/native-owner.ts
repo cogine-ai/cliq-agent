@@ -15,6 +15,8 @@ import type { RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { decodeWorkspaceGenerationIdentity } from './decoders.js';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
 import { hashHeldProcessImage } from './process-image.js';
+import { decodePublicationRetirementSpans, noteJoinedPublicationRetirement, publicationClaimRetirementDiagnosticKey,
+  type PublicationRetirementDispatch, type PublicationRetirementSpans } from './publication-retirement-diagnostics.js';
 
 export const STATE_OWNER_NATIVE_ENTRY_ID = 'state_owner_native';
 export const STATE_OWNER_NATIVE_RELATIVE_PATH = `native/${process.platform}-${process.arch}/state-owner.node`;
@@ -424,7 +426,7 @@ type NativeLock = Omit<HeldStateOwnerLock, 'quarantineGeneration' | 'createGener
   openSourceInspectionStaging(stagingId: string, deviceId: string, fileId: string): NativeSourceInspectionStaging;
   createWorkerReservation(reservationId: string): NativeWorkerReservation;
   openWorkerReservation(reservationId: string, deviceId: string, fileId: string, ownerUid: number): NativeWorkerReservation;
-  openPublicationOperation(root: HeldWorkspaceRoot, operation: NativePublicationOperationInput): HeldPublicationOperation;
+  openPublicationOperation(root: HeldWorkspaceRoot, operation: NativePublicationOperationInput): NativePublicationOperation;
   openPublicationNamespaceObserver(root: HeldWorkspaceRoot, input: NativePublicationNamespaceInput): NativePublicationNamespaceObserver;
 };
 type NativePublicationExpected = Readonly<{ kind: 'file'; mode: number; byteCount: number; digest: string } |
@@ -458,7 +460,8 @@ export type PublicationNamespaceRetirement = Readonly<{ kind: 'namespace_absence
 /** Read-only physical role. There is no method for release or maintenance. */
 export type HeldPublicationNamespaceObserver = Readonly<{ assertHeld(): void; observe(): NativePublicationNamespaceObservation;
   readDestinationChunk(): Buffer | null; close(): void }>;
-type NativePublicationNamespaceObserver = HeldPublicationNamespaceObserver & { retireNamespace(): void; assertNamespaceRetired(): PublicationNamespaceRetirement };
+type NativePublicationNamespaceObserver = HeldPublicationNamespaceObserver & { retireNamespace(): void; assertNamespaceRetired(): PublicationNamespaceRetirement;
+  readRetirementDiagnostic(): unknown };
 export type NativePublicationObservation = Readonly<{ kind: 'absent' } | {
   kind: 'file' | 'directory' | 'symlink' | 'unsupported'; identity: DescriptorIdentity;
   mode: number; byteCount: number; linkCount: number; digest?: string; target?: string; empty?: boolean;
@@ -497,10 +500,12 @@ export type HeldPublicationOperation = Readonly<{
   finishCleanup(): void; finishArenaRetirement(): void; assertArenaRetired(): void; close(): void;
 }>;
 const publicationLocks = new WeakMap<HeldStateOwnerLock, NativeLock>();
+type NativePublicationOperation = HeldPublicationOperation & { readRetirementDiagnostic(): unknown };
 type PublicationArenaPhysicalRetirement = Readonly<{ arenaId: string; arenaIdentity: DescriptorIdentity & { mode: 448 };
   parentIdentity: DescriptorIdentity & { mode: 448 }; retirementObservation: PublicationArenaRetirementObservation }>;
 const publicationOperations = new WeakMap<HeldPublicationOperation, {
-  lock: HeldStateOwnerLock; closed: boolean; retirement?: PublicationArenaPhysicalRetirement;
+  lock: HeldStateOwnerLock; native: NativePublicationOperation; closed: boolean; postJoinObserved?: boolean; retirement?: PublicationArenaPhysicalRetirement;
+  normalDiagnosticPublished?: boolean;
 }>();
 /** Actual held birth observation, not a retained artifact, grant or claim.
  * A structural value cannot enter the producer's native proof boundary. */
@@ -523,7 +528,7 @@ export function readRetiredPublicationArena(lock: HeldStateOwnerLock, operation:
   if (!binding || binding.lock !== lock) throw new TypeError('publication retirement requires its exact original native owner');
   lock.assertHeld();
   if (!binding.closed || !binding.retirement) throw new KernelStorageError('RECOVERY_REQUIRED', 'publication arena retirement and descriptor join are incomplete');
-  operation.assertArenaRetired(); return binding.retirement;
+  operation.assertArenaRetired(); binding.postJoinObserved = true; return binding.retirement;
 }
 /** Composition-only bridge. Reject structural stand-ins before reading any
  * caller properties; C independently checks both actual native type brands. */
@@ -576,7 +581,7 @@ export function openHeldPublicationOperation(lock: HeldStateOwnerLock, root: Hel
     }
     throw new KernelStorageError('RECOVERY_REQUIRED', 'fixed native publication did not prove its exact operation', { cause: error });
   };
-  let owned: HeldPublicationOperation;
+  let owned: NativePublicationOperation;
   try { owned = native.openPublicationOperation(root, input); } catch (error) { failed(error); }
   const receiver = (value: unknown) => { if (value !== handle) throw new TypeError('invalid publication operation handle'); };
   const handle: HeldPublicationOperation = Object.freeze({
@@ -611,12 +616,37 @@ export function openHeldPublicationOperation(lock: HeldStateOwnerLock, root: Hel
     assertArenaRetired() { receiver(this); try { owned.assertArenaRetired(); } catch (error) { failed(error); } },
     close() { receiver(this); try { owned.close(); publicationOperations.get(handle)!.closed = true; } catch (error) { failed(error); } }
   });
-  publicationOperations.set(handle, { lock, closed: false });
+  publicationOperations.set(handle, { lock, native: owned!, closed: false });
   return handle;
 }
 type PublicationNamespaceBinding = { lock: HeldStateOwnerLock; native: NativePublicationNamespaceObserver;
-  closed: boolean; retired: boolean; fail(error: unknown): never };
+  closed: boolean; retired: boolean; postJoinObserved?: boolean; fail(error: unknown): never };
 const publicationNamespaceObservers = new WeakMap<HeldPublicationNamespaceObserver, PublicationNamespaceBinding>();
+/** The original producer calls only after its receipt and completion are
+ * fixed. This observer grants no result or authority and never invents a probe
+ * nonce. No subscriber means no native read, identity access or output. */
+export function noteNormalPublicationRetirement(lock: HeldStateOwnerLock, operation: HeldPublicationOperation,
+  dispatch: PublicationRetirementDispatch): void {
+  noteJoinedPublicationRetirement(() => {
+    const held = publicationOperations.get(operation);
+    if (!held || held.lock !== lock || held.normalDiagnosticPublished) throw 0;
+    const slots = readJoinedPublicationRetirementSpans(lock, operation), key = publicationClaimRetirementDiagnosticKey(dispatch);
+    // Set before the trusted subscriber runs, including callback re-entry.
+    // This is diagnostic suppression only, never a cached physical result.
+    held.normalDiagnosticPublished = true;
+    return { version: 1, key, kind: 'original', joined: true, slots };
+  });
+}
+/** Diagnostic friend only. A structural handle, foreign lock, incomplete close
+ * or missing actual post-join observation cannot expose even inert intervals.
+ * This read neither performs retirement nor supplies a proof of it. */
+export function readJoinedPublicationRetirementSpans(lock: HeldStateOwnerLock,
+  handle: HeldPublicationOperation | HeldPublicationNamespaceObserver): PublicationRetirementSpans {
+  const held = publicationOperations.get(handle as HeldPublicationOperation) ?? publicationNamespaceObservers.get(handle as HeldPublicationNamespaceObserver);
+  if (!held || held.lock !== lock) throw new TypeError('publication diagnostic requires its genuine same-lock native owner');
+  if (!held.closed || !held.postJoinObserved) throw new TypeError('publication diagnostic requires its actual completed post-join observation');
+  return decodePublicationRetirementSpans(held.native.readRetirementDiagnostic());
+}
 /** Descriptor-only physical role. The sole production consumer must first
  * validate the complete original claim/birth/progress/takeover graph. */
 export function openHeldPublicationNamespaceObserver(lock: HeldStateOwnerLock, root: HeldWorkspaceRoot,
@@ -698,7 +728,7 @@ export function retireHeldPublicationNamespace(lock: HeldStateOwnerLock, handle:
 export function readRetiredPublicationNamespace(lock: HeldStateOwnerLock, handle: HeldPublicationNamespaceObserver): PublicationNamespaceRetirement {
   const held = publicationNamespaceBinding(lock, handle); lock.assertHeld();
   if (!held.closed || !held.retired) throw new KernelStorageError('RECOVERY_REQUIRED', 'publication namespace lacks actual sync and joined handles');
-  try { return held.native.assertNamespaceRetired(); } catch (error) { return held.fail(error); }
+  try { const actual = held.native.assertNamespaceRetired(); held.postJoinObserved = true; return actual; } catch (error) { return held.fail(error); }
 }
 function normalizeBoundedPublicationPath(value: string): string {
   if (value.normalize('NFC') !== value || Buffer.byteLength(value) > 4096 || value.includes('\0') || value.includes('\\') ||

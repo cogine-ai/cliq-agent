@@ -957,12 +957,20 @@ jobs:
           node-version: 22.13.0
           cache: npm
       - run: npm ci
-      - run: node --test scripts/kernel/testing/installed-volume-guard.test.mjs scripts/kernel/testing/installed-run-client.test.mjs scripts/kernel/testing/installed-client-journey.test.mjs
+      - run: node --test scripts/kernel/testing/installed-volume-guard.test.mjs scripts/kernel/testing/installed-run-client.test.mjs scripts/kernel/testing/installed-client-journey.test.mjs scripts/kernel/testing/installed-status-regression.test.mjs
       - run: node --test --import tsx scripts/kernel/testing/installed-guest-package.test.ts scripts/kernel/testing/installed-client-consumer.test.ts scripts/kernel/testing/installed-control-client-driver.test.ts scripts/kernel/testing/installed-enroll-diagnostic.test.ts
       - run: npm run build
         id: build
       - name: Install actual guest, transport and Secret Service prerequisites
         run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap e2fsprogs libext2fs-dev pkg-config
+      - name: Observe the fixed original installed status deadlock
+        shell: bash
+        run: |
+          if ! git cat-file -e 'b6140b57836e19b0fb937327af449e8138f47eca^{commit}'; then
+            git fetch --no-tags --depth=1 origin b6140b57836e19b0fb937327af449e8138f47eca
+          fi
+          mkdir -m 700 "$RUNNER_TEMP/cliq-installed-status-regression"
+          node scripts/kernel/testing/installed-status-regression.mjs "$RUNNER_TEMP/cliq-installed-status-regression/status-borrow-regression.json"
       - name: Exercise signed installed identity grant, Node verifier, repair and terminal replay
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
@@ -975,6 +983,14 @@ jobs:
         with:
           name: installed-verifier-journey-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/cliq-installed-verifier-journey/*.json
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Retain only the closed original status regression observation
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installed-status-regression-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cliq-installed-status-regression/status-borrow-regression.json
           if-no-files-found: warn
           retention-days: 7
 
@@ -1011,5 +1027,53 @@ jobs:
         with:
           name: installed-delivery-journey-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/cliq-installed-delivery-journey/*.json
+          if-no-files-found: warn
+          retention-days: 7
+
+  linux-installed-delivery-delayed-volume:
+    name: Linux installed Delivery on owned delayed storage
+    # A separate free standard disposable VM, not a host/global-disk fixture.
+    # This retains the ordinary complete Delivery assertions. Fixed timing
+    # diagnostics do not qualify a late result or an in-flight stop by themselves.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+      - run: npm ci
+      - run: node --test scripts/kernel/testing/installed-volume-guard.test.mjs scripts/kernel/testing/installed-delivery-journey.test.mjs
+      - run: node --test --import tsx scripts/kernel/testing/supervisor-sea-builder.test.ts scripts/kernel/testing/installed-publication-retirement.test.ts scripts/kernel/testing/installed-publication-journal.test.ts scripts/kernel/testing/installed-publication-crash-observer.test.ts scripts/kernel/testing/installed-publication-recovery.test.ts
+      - run: npm run build
+        id: build
+      - name: Install actual guest, Secret Service and owned-volume prerequisites
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap e2fsprogs libext2fs-dev pkg-config dmsetup kmod
+      - name: Require the disposable hosted VM and its actual fixed delay target
+        shell: bash
+        run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          test "$RUNNER_ARCH" = X64
+          if [[ ! -d /sys/module/dm_delay ]]; then sudo /usr/sbin/modprobe dm_delay; fi
+          sudo /usr/bin/udevadm settle --timeout=5
+          test -d /sys/module/dm_mod
+          test -d /sys/module/dm_delay
+          test -c /dev/mapper/control
+      - name: Exercise the unchanged installed Delivery closure on the unique owned delayed volume
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          probe_node=$(realpath "$(command -v node)")
+          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --delay-volume --run-delivery-delay-journey "$probe_node" "$RUNNER_TEMP/cliq-installed-delivery-delayed-volume"
+      - name: Retain only bounded reports and unchanged-runner cleanup evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installed-delivery-delayed-volume-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cliq-installed-delivery-delayed-volume/*.json
           if-no-files-found: warn
           retention-days: 7

@@ -5,6 +5,16 @@
  * of an on-disk staging name and never removes a transient as a GC side effect. */
 #include "../linux/worker-sha256.h"
 
+/* Inert, bounded observations only. Each role keeps its FIRST actual fsync
+ * enter/return, never an interval spanning an EINTR or a later maintenance
+ * retry. Counts make those repetitions explicit. No timestamp grants a proof,
+ * deadline extension, cleanup permission or descriptor ownership. */
+typedef struct {
+    unsigned int calls, attempts;
+    int unavailable, outcome;
+    unsigned long long monotonic_enter, realtime_enter, monotonic_return, realtime_return;
+} publication_retirement_span;
+
 struct publication_operation {
     state_lock *lock;
     source_root *root;
@@ -48,10 +58,80 @@ struct publication_operation {
     char actual_name[NAME_MAX + 1], actual_digest[65];
     off_t actual_offset;
     struct sha256_context actual_hash;
+    publication_retirement_span retirement_spans[3];
+    int retirement_post_join_observed;
     publication_operation *next;
 };
 static const napi_type_tag publication_operation_tag = {0x7cb0b58110b14e7aULL, 0x9d7eedadf26574c4ULL};
 static int publication_namespace_held(publication_operation *operation);
+static publication_operation *publication_unwrap(napi_env env, napi_callback_info info);
+
+static int publication_diagnostic_clock(clockid_t clock, unsigned long long *result) {
+    struct timespec value;
+    if (clock_gettime(clock, &value) != 0 || value.tv_sec < 0 || value.tv_nsec < 0 || value.tv_nsec >= 1000000000L ||
+        (unsigned long long)value.tv_sec > (ULLONG_MAX - (unsigned long long)value.tv_nsec) / 1000000000ULL) return 0;
+    *result = (unsigned long long)value.tv_sec * 1000000000ULL + (unsigned long long)value.tv_nsec;
+    return 1;
+}
+static int publication_retirement_sync(publication_operation *operation, unsigned int role, int fd) {
+    publication_retirement_span *span = &operation->retirement_spans[role];
+    if (span->calls == UINT_MAX) span->unavailable = 1; else span->calls++;
+    int status;
+    do {
+        int first = span->attempts == 0, saved = errno;
+        if (span->attempts == UINT_MAX) span->unavailable = 1; else span->attempts++;
+        if (first && (!publication_diagnostic_clock(CLOCK_MONOTONIC, &span->monotonic_enter) ||
+            !publication_diagnostic_clock(CLOCK_REALTIME, &span->realtime_enter))) span->unavailable = 1;
+        errno = saved;
+        status = fsync(fd);
+        saved = errno;
+        if (first) {
+            span->outcome = status == 0 ? 0 : saved == EINTR ? 1 : 2;
+            if (!publication_diagnostic_clock(CLOCK_MONOTONIC, &span->monotonic_return) ||
+                !publication_diagnostic_clock(CLOCK_REALTIME, &span->realtime_return) ||
+                span->monotonic_return < span->monotonic_enter || span->realtime_return < span->realtime_enter) span->unavailable = 1;
+        }
+        errno = saved;
+    } while (status < 0 && errno == EINTR);
+    return status == 0;
+}
+
+static napi_value publication_retirement_diagnostic(napi_env env, publication_operation *operation) {
+    napi_value result, row, member;
+    /* Historical snapshot only: never open/close a locator after the actual
+     * proof's joined recheck. Lifecycle flags and the original brand suffice;
+     * this data cannot assert that today's pathname or authority is valid. */
+    if (!operation->closed || !operation->retirement_post_join_observed || operation->lock->lock_fd < 0 ||
+        operation->lock->publication_retirement_error || operation->lock->generation_retirement_error ||
+        operation->lock->process_observation_retirement_error)
+        return native_error(env, "publication diagnostic requires its original completed post-join observation");
+    if (napi_create_array_with_length(env, 3, &result) != napi_ok) return NULL;
+    for (unsigned int role = 0; role < 3; role++) {
+        publication_retirement_span *span = &operation->retirement_spans[role];
+        if (!span->attempts) { if (napi_get_null(env, &row) != napi_ok) return NULL; }
+        else {
+            if (napi_create_array_with_length(env, span->unavailable ? 3 : 7, &row) != napi_ok ||
+                napi_create_uint32(env, span->calls, &member) != napi_ok || napi_set_element(env, row, 0, member) != napi_ok ||
+                napi_create_uint32(env, span->attempts, &member) != napi_ok || napi_set_element(env, row, 1, member) != napi_ok ||
+                napi_create_string_utf8(env, span->unavailable ? "unavailable" : span->outcome == 0 ? "ok" : span->outcome == 1 ? "interrupted" : "error",
+                    NAPI_AUTO_LENGTH, &member) != napi_ok || napi_set_element(env, row, 2, member) != napi_ok) return NULL;
+            if (!span->unavailable) {
+                unsigned long long stamps[] = {span->monotonic_enter, span->realtime_enter, span->monotonic_return, span->realtime_return};
+                for (unsigned int index = 0; index < 4; index++) {
+                    char text[21]; snprintf(text, sizeof(text), "%llu", stamps[index]);
+                    if (napi_create_string_utf8(env, text, NAPI_AUTO_LENGTH, &member) != napi_ok || napi_set_element(env, row, index + 3, member) != napi_ok) return NULL;
+                }
+            }
+            if (napi_object_freeze(env, row) != napi_ok) return NULL;
+        }
+        if (napi_set_element(env, result, role, row) != napi_ok) return NULL;
+    }
+    return napi_object_freeze(env, result) == napi_ok ? result : NULL;
+}
+static napi_value publication_read_retirement_diagnostic(napi_env env, napi_callback_info info) {
+    publication_operation *operation = publication_unwrap(env, info);
+    return operation ? publication_retirement_diagnostic(env, operation) : NULL;
+}
 
 static void publication_close_fd(publication_operation *operation, int *slot) {
     int fd = *slot; *slot = -1;
@@ -914,7 +994,7 @@ static napi_value publication_retire_arena(napi_env env, napi_callback_info info
     if (operation->arena_removed) goto sync_parents;
     if ((*operation->staging && !publication_absent(operation->arena_fd, operation->staging)) ||
         (*operation->quarantine && !publication_absent(operation->arena_fd, operation->quarantine)) ||
-        publication_empty_directory(operation, operation->arena_fd) != 1 || !sync_directory(operation->arena_fd))
+        publication_empty_directory(operation, operation->arena_fd) != 1 || !publication_retirement_sync(operation, 0, operation->arena_fd))
         return native_error(env, "publication arena is not exactly empty and synced");
 #ifdef __APPLE__
     char observed[PATH_MAX];
@@ -930,13 +1010,15 @@ static napi_value publication_retire_arena(napi_env env, napi_callback_info info
 sync_parents:
     if (!publication_arena_held(operation) ||
         fstatat(operation->arena_parent_fd, operation->arena_name, &named, AT_SYMLINK_NOFOLLOW) == 0 || errno != ENOENT ||
-        !sync_directory(operation->arena_parent_fd) || !sync_directory(operation->parents[operation->parent_count - 1]) || !publication_parent_held(operation))
+        !publication_retirement_sync(operation, 1, operation->arena_parent_fd) ||
+        !publication_retirement_sync(operation, 2, operation->parents[operation->parent_count - 1]) || !publication_parent_held(operation))
         return native_error(env, "publication arena original unlink or parent sync is unconfirmed");
     operation->phase = 6; return publication_undefined(env);
 }
 static napi_value publication_assert_arena_retired(napi_env env, napi_callback_info info) {
     publication_operation *operation = publication_unwrap(env, info); struct stat parent, named;
     if (!operation) return NULL;
+    operation->retirement_post_join_observed = 0;
     if (operation->lock->publication_retirement_error) return publication_retirement_error(env);
     if (!operation->closed || operation->phase != 6 || !operation->arena_removed || !lock_is_held(operation->lock))
         return native_error(env, "publication arena has no original completed unlink and joined descriptors");
@@ -948,6 +1030,7 @@ static napi_value publication_assert_arena_retired(napi_env env, napi_callback_i
     publication_close_fd(operation, &fd);
     if (operation->lock->publication_retirement_error) return publication_retirement_error(env);
     if (!valid) return native_error(env, "publication arena retirement named absence or original parent changed");
+    operation->retirement_post_join_observed = 1;
     return publication_undefined(env);
 }
 static int publication_string(napi_env env, napi_value object, const char *key, char *text, size_t capacity) {
@@ -1160,6 +1243,7 @@ static napi_value open_publication_operation(napi_env env, napi_callback_info in
         {"finishCleanup", NULL, publication_cleanup, NULL, NULL, NULL, napi_default, NULL},
         {"finishArenaRetirement", NULL, publication_retire_arena, NULL, NULL, NULL, napi_default, NULL},
         {"assertArenaRetired", NULL, publication_assert_arena_retired, NULL, NULL, NULL, napi_default, NULL},
+        {"readRetirementDiagnostic", NULL, publication_read_retirement_diagnostic, NULL, NULL, NULL, napi_default, NULL},
         {"close", NULL, publication_release, NULL, NULL, NULL, napi_default, NULL}
     };
     napi_value result;
@@ -1304,7 +1388,7 @@ static napi_value publication_namespace_retire(napi_env env, napi_callback_info 
     if (!publication_namespace_held(operation) || !publication_namespace_destination_held(operation) || !operation->destination_verified)
         return publication_namespace_error(env, operation, "publication namespace retirement requires its full desired read and exact empty envelope");
     if (operation->arena_fd >= 0 && !operation->arena_removed) {
-        if (publication_namespace_inventory(operation) != 1 || !sync_directory(operation->arena_fd) || !publication_namespace_held(operation))
+        if (publication_namespace_inventory(operation) != 1 || !publication_retirement_sync(operation, 0, operation->arena_fd) || !publication_namespace_held(operation))
             return publication_namespace_error(env, operation, "publication namespace original empty arena sync is unconfirmed");
 #ifdef __APPLE__
         char observed[PATH_MAX];
@@ -1318,7 +1402,8 @@ static napi_value publication_namespace_retire(napi_env env, napi_callback_info 
         operation->arena_removed = 1;
     }
     if (!publication_namespace_held(operation) || !publication_namespace_destination_held(operation) ||
-        !sync_directory(operation->arena_parent_fd) || !sync_directory(operation->parents[operation->parent_count - 1]) ||
+        !publication_retirement_sync(operation, 1, operation->arena_parent_fd) ||
+        !publication_retirement_sync(operation, 2, operation->parents[operation->parent_count - 1]) ||
         !publication_namespace_held(operation) || !publication_namespace_destination_held(operation))
         return publication_namespace_error(env, operation, "publication namespace current absence or parent sync is unconfirmed");
     operation->namespace_retired = 1;
@@ -1333,6 +1418,7 @@ static napi_value publication_namespace_release(napi_env env, napi_callback_info
 static napi_value publication_namespace_retired(napi_env env, napi_callback_info info) {
     publication_operation *operation = publication_namespace_unwrap(env, info); struct stat parent, named; napi_value result, fact;
     if (!operation) return NULL;
+    operation->retirement_post_join_observed = 0;
     if (operation->lock->publication_retirement_error) return publication_retirement_error(env);
     if (!operation->closed || !operation->namespace_retired ||
         !lock_is_held_with_retirement(operation->lock, &operation->lock->publication_retirement_error) || !source_held(operation->root))
@@ -1351,7 +1437,12 @@ static napi_value publication_namespace_retired(napi_env env, napi_callback_info
         napi_get_boolean(env, true, &fact) != napi_ok || napi_set_named_property(env, result, "arenaAbsent", fact) != napi_ok ||
         napi_set_named_property(env, result, "arenaParentFsyncCompleted", fact) != napi_ok ||
         napi_set_named_property(env, result, "workspaceParentFsyncCompleted", fact) != napi_ok) return NULL;
+    operation->retirement_post_join_observed = 1;
     return result;
+}
+static napi_value publication_namespace_read_retirement_diagnostic(napi_env env, napi_callback_info info) {
+    publication_operation *operation = publication_namespace_unwrap(env, info);
+    return operation ? publication_retirement_diagnostic(env, operation) : NULL;
 }
 static int publication_namespace_private_input(napi_env env, napi_value value) {
     napi_value member; unsigned long long device, inode; double uid, mode;
@@ -1461,6 +1552,7 @@ static napi_value open_publication_namespace_observer(napi_env env, napi_callbac
         {"readDestinationChunk", NULL, publication_namespace_read, NULL, NULL, NULL, napi_default, NULL},
         {"retireNamespace", NULL, publication_namespace_retire, NULL, NULL, NULL, napi_default, NULL},
         {"assertNamespaceRetired", NULL, publication_namespace_retired, NULL, NULL, NULL, napi_default, NULL},
+        {"readRetirementDiagnostic", NULL, publication_namespace_read_retirement_diagnostic, NULL, NULL, NULL, napi_default, NULL},
         {"close", NULL, publication_namespace_release, NULL, NULL, NULL, napi_default, NULL}
     };
     napi_value result;
