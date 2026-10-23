@@ -127,7 +127,21 @@ export type InstalledEnrollDiagnostic = {
   phases: Array<{ elapsedMs: number; phase: InstalledCredentialPhase }>;
   work?: InstalledEnrollWork;
 };
-type Fact = { pid: number; parent: number; group: number; session: number; start: string; state: string; uids: number[]; raw: string };
+/** Pure bounded proc-text decoding, not a process observation or death proof.
+ * Linux 5.15/6.8 expose task->flags in stat field 9; PF_EXITING is 0x4.
+ * exit_mm may remove exe before exit_notify changes the state letter to Z. */
+export function decodeEnrollTaskState(pid: number, raw: string): Readonly<{ state: string; exiting: boolean }> {
+  try {
+    if (!Number.isSafeInteger(pid) || pid < 1 || typeof raw !== 'string' || raw.length > 8192 || !raw.startsWith(`${pid} (`)) throw 0;
+    const at = raw.lastIndexOf(') '), fields = raw.slice(at + 2).trim().split(/\s+/u);
+    if (at < 0 || fields.length < 20 || !/^[A-Za-z]$/u.test(fields[0]!) ||
+        !/^(0|[1-9][0-9]{0,9})$/u.test(fields[6]!) || !/^[1-9][0-9]*$/u.test(fields[19]!)) throw 0;
+    const flags = BigInt(fields[6]!);
+    if (flags > 0xffffffffn) throw 0;
+    return Object.freeze({ state: fields[0]!, exiting: (flags & 4n) !== 0n });
+  } catch { throw new TypeError('enroll task state is invalid'); }
+}
+type Fact = { pid: number; parent: number; group: number; session: number; start: string; state: string; exiting: boolean; uids: number[]; raw: string };
 async function processFact(pid: number): Promise<Fact | undefined> {
   try {
     const raw = await readFile(`/proc/${pid}/stat`, 'utf8');
@@ -138,9 +152,9 @@ async function processFact(pid: number): Promise<Fact | undefined> {
     const uid = /^Uid:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)$/mu.exec(status); assert(uid);
     const confirmed = await readFile(`/proc/${pid}/stat`, 'utf8'); assert(confirmed.startsWith(`${pid} (`));
     const confirmedFields = confirmed.slice(confirmed.lastIndexOf(')') + 2).trim().split(/\s+/u);
-    assert(/^[A-Za-z]$/u.test(confirmedFields[0]!)); assert.equal(confirmedFields[19], fields[19]);
+    const task = decodeEnrollTaskState(pid, confirmed); assert.equal(confirmedFields[19], fields[19]);
     return { pid, parent: Number(fields[1]), group: Number(fields[2]), session: Number(fields[3]), start: fields[19]!,
-      state: confirmedFields[0]!, uids: uid.slice(1).map(Number), raw };
+      ...task, uids: uid.slice(1).map(Number), raw };
   } catch (error) {
     if (['ENOENT', 'ESRCH'].includes((error as NodeJS.ErrnoException).code ?? '')) return undefined;
     throw new Error('owned enroll process identity is unavailable');
@@ -317,7 +331,18 @@ export async function runOwnedEnrollDiagnostic(input: Readonly<{
             // the original parent's real reap and waitGone can supply join.
             if (confirmed && ['Z', 'X', 'x'].includes(confirmed.state)) candidate = undefined;
             else if (!selectedImage || !confirmed) {
-              assert(!auth || !confirmed, 'original owned auth executable image changed');
+              if (auth && confirmed) {
+                assert(candidate.pid === auth.pid && candidate.start === auth.start, 'original owned auth identity changed');
+                assert.equal(candidate.parent, auth.parent); assert.equal(candidate.group, auth.group);
+                assert.equal(candidate.session, auth.session); assert.deepEqual(candidate.uids, auth.uids);
+                // A positively observed foreign inode is still a refusal,
+                // even when the original task has begun exiting. Only an
+                // actual ENOENT/ESRCH plus this same task's PF_EXITING can be
+                // unavailable here. Keep the original auth for real reap and
+                // waitGone; this bit is never a thread-group death/join proof.
+                assert(!image, 'original owned auth executable image changed');
+                assert(confirmed.exiting, 'original owned auth executable image unavailable before task exit');
+              }
               candidate = undefined;
             }
           } else candidate = undefined;

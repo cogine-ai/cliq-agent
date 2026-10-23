@@ -309,6 +309,11 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
   let services: { supervisorUnit: string; keeperUnit: string } | undefined;
   let client: Awaited<ReturnType<typeof persistentClient>> | undefined, inspectionClient: Awaited<ReturnType<typeof persistentClient>> | undefined;
   let primary: unknown, responderFailure = false, acceptedTcp = 0, acceptedTls = 0, postCount = 0;
+  const responderErrors: unknown[] = [];
+  const noteResponderFailure = (error: unknown) => {
+    responderFailure = true;
+    if (!responderErrors.length) responderErrors.push(error);
+  };
   const sockets: Promise<void>[] = [];
   const activeCases = new Map<SourceCaseKind, { runId: string; posts: number; identities: InstalledWorkerIdentityInspection[] }>();
   const completed: Array<{ kind: CaseKind; cut: Record<string, any>; sessionCut: Record<string, any>; submit: Record<string, unknown>;
@@ -484,11 +489,11 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         const response = Buffer.from(JSON.stringify(payload)); scanBytes(response);
         outgoing.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': String(response.length), Connection: 'close' }); outgoing.end(response);
         report.transport = { postCount, acceptedTcp, acceptedTls, tls13: true, exactCredentialMatched: true };
-      } catch { responderFailure = true; incoming.destroy(); outgoing.destroy(); }
+      } catch (error) { noteResponderFailure(error); incoming.destroy(); outgoing.destroy(); }
     });
     server.on('connection', socket => { acceptedTcp++; sockets.push(new Promise<void>(resolve => socket.once('close', resolve))); });
-    server.on('secureConnection', socket => { acceptedTls++; if (socket.getProtocol() !== 'TLSv1.3') { responderFailure = true; socket.destroy(); } });
-    server.on('tlsClientError', () => { responderFailure = true; });
+    server.on('secureConnection', socket => { acceptedTls++; if (socket.getProtocol() !== 'TLSv1.3') { noteResponderFailure(new Error('owned responder TLS version refused')); socket.destroy(); } });
+    server.on('tlsClientError', () => { noteResponderFailure(new Error('owned responder TLS handshake refused')); });
     await new Promise<void>((resolve, reject) => { server!.once('error', reject); server!.listen(0, '127.0.0.1', resolve); });
     key.fill(0); const address = server.address(); assert(address && typeof address === 'object');
     const pin = sha256Bytes(new X509Certificate(cert).publicKey.export({ type: 'spki', format: 'der' }));
@@ -1047,7 +1052,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         { kind: 'installed_verifier_outcome'; stage: InstalledVerifierOutcomeError['diagnosticStage'] } |
         { kind: 'installed_delivery_outcome'; stage: InstalledDeliveryOutcomeError['diagnosticStage'] } |
         InstalledClientConsumerDeadlineError['diagnostic'] | InstalledClientDriverError['diagnostic']> = [];
-      const errors: unknown[] = [primary];
+      const errors: unknown[] = [...responderErrors, primary];
       for (let index = 0; index < 8 && errors.length; index++) {
         const error = errors.shift(); if (!(error instanceof Error)) continue;
         const diagnostic = error as Error & { code?: unknown; errcode?: unknown };

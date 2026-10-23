@@ -89,6 +89,46 @@ test('retirement diagnosis invokes only an inert guarded observer at fixed await
     ['retirement_commit', 'retireQuarantinedGeneration'], ['resource_join', 'retireWorkerResources']])
     assert.match(resume, new RegExp(`retirementPhase\\('${phase}'\\);\\s+(?:const [^=]+ = |let cut = |cut = |controller = )?await ${awaited.replace('.', '\\.')}`));
 });
+test('owned responder failure recording is sticky and retains only its first error', () => {
+  const source = readFileSync(new URL('./installed-node-journey.ts', import.meta.url), 'utf8');
+  const start = source.indexOf('  const responderErrors: unknown[] = [];');
+  const end = source.indexOf('\n  const sockets:', start);
+  assert(start >= 0 && end > start);
+  const code = ts.transpileModule(source.slice(start, end) + '\n globalThis.note = noteResponderFailure; globalThis.errors = responderErrors;',
+    { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  for (const first of [undefined, new Error('first')]) {
+    const context = { responderFailure: false }; vm.runInNewContext(code, context);
+    context.note(first); context.note(new Error('later'));
+    assert.equal(context.responderFailure, true);
+    assert.equal(context.errors.length, 1); assert.equal(context.errors[0], first);
+  }
+});
+test('an owned responder refusal retains only its original fixed source frames, never raw request or error text', () => {
+  // Exercise the existing closed projection, not an HTTPS/Run/native proof.
+  const source = readFileSync(new URL('./installed-node-journey.ts', import.meta.url), 'utf8');
+  const start = source.indexOf('      const frames: Array<');
+  const end = source.indexOf('      report.error = ', start);
+  assert(start >= 0 && end > start);
+  const finish = source.indexOf('\n', end);
+  const code = ts.transpileModule(source.slice(start, finish),
+    { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  const secret = 'synthetic-private-request-and-error-text';
+  const responder = new assert.AssertionError({ message: secret });
+  responder.stack = `AssertionError: ${secret}\n at owned (installed-node-journey.ts:444:9)\n at forbidden (${secret}.ts:1:2)`;
+  const primary = new assert.AssertionError({ message: 'outer refusal' });
+  primary.stack = 'AssertionError: outer refusal\n at owned (installed-node-journey.ts:715:9)';
+  const context = { primary, responderErrors: [responder], report: {}, journeyKind: 'delivery', Error, AggregateError,
+    InstalledClientConsumerDeadlineError: class {}, InstalledClientDriverError: class {},
+    InstalledVerifierOutcomeError: class {}, InstalledDeliveryOutcomeError: class {} };
+  vm.runInNewContext(code, context);
+  const result = JSON.parse(JSON.stringify(context.report));
+  assert.deepEqual(result.error.sourceFrames, [
+    { file: 'installed-node-journey.ts', line: 444, column: 9 },
+    { file: 'installed-node-journey.ts', line: 715, column: 9 },
+  ]);
+  assert.deepEqual(result.error.failureKinds, [{ kind: 'assertion' }, { kind: 'assertion' }]);
+  assert.equal(JSON.stringify(result).includes(secret), false);
+});
 // Observation only: preserve and return the real Socket. This lets the parent
 // wait for an actual pre-connect kernel error before publishing the listener.
 const observeConnect = `import clientProbeNet from 'node:net';

@@ -1291,3 +1291,40 @@ retirement, workspace observation, retirement commit and resource join.
 Observer exceptions cannot affect execution; no public method, authority,
 deadline, history check or retry changes. These labels locate an unfinished
 await, not its cause or a positive retirement/recovery proof.
+
+The exact `b88fdc3bb1a531509dbc779d091ab55371e2e865` Linux run
+`39285975957`, attempt 1, is terminal: seventeen jobs succeed and two fail.
+All nineteen report categories are retained, with no missing or rejected
+artifacts; the final capture SHA-256 is
+`00171a11262198e53ee8b51b76a512fe10fdaa9db777d9e69bee9ce92cac0b02`.
+The native verifier's five real scenarios, including in-flight cancellation,
+the full credential campaign and received-tool successor recovery now pass
+their original assertions. The latter recovery takes 29,744 ms against the
+unchanged 30,000 ms limit; this small margin is not a scale qualification.
+The exact local build and full test command also pass with 2,549 passes and
+the same original conditional cross-filesystem skip.
+
+Delivery still fails during its first source Run, before `run.apply`; its
+owned HTTPS responder discarded the actual rejection. The minimal diagnostic
+repair retains only the first error in memory and feeds it through the existing
+bounded, fixed-source-frame projection and secret scanner, never publishing
+request bytes or raw error text. All response and outcome assertions remain.
+The installed verifier fails an executable-image observation after the real
+credential retire marker, not the sixty-second enroll deadline. Its current
+report cannot distinguish a positively foreign inode from a missing exe link.
+Linux can remove that link in `exit_mm` before the task becomes a zombie.
+The observation repair treats only an already-identified, identity-matching
+task with an actually missing exe and `PF_EXITING` as unavailable for this
+sample: no input, new identity, death proof or join is granted. A positive
+foreign image or missing image without that exit flag still refuses. Actual
+parent reap, process disappearance and every output/resource join remain
+required. Pure decoder regressions do not prove this exact OS exit window or
+establish the cause of the failed run; both real installed journeys must rerun.
+
+The approved late-result storage fixture is restricted to a disposable Linux
+environment and its own test volume. Its complete device-mapper identity,
+original loop/image ownership, actual fsync interval and normal resource joins
+must be checked before it can produce evidence. It must cross the original
+probe deadline in real post-gate resource work, not in CAS persistence or a
+changed clock. No experiment, late-result qualification or Package A completion
+is implied by approval of this fixture; the original stop/probe limits remain.

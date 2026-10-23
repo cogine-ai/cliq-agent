@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
-import { createEnrollWorkObservation, decodeEnrollWorkFrame, decodeEnrollCredentialPhase, decodeEnrollProcessCounters,
+import { createEnrollWorkObservation, decodeEnrollWorkFrame, decodeEnrollCredentialPhase, decodeEnrollProcessCounters, decodeEnrollTaskState,
   runOwnedEnrollDiagnostic, type InstalledEnrollDiagnostic } from './installed-enroll-diagnostic.js';
 import { createCredentialSecretScanner } from './credential-secret-scan.js';
 
@@ -27,6 +27,27 @@ async function joinedWithin<T>(pending: Promise<T>, milliseconds: number): Promi
     timer = setTimeout(() => reject(new Error('owned lifetime fixture did not join')), milliseconds);
   })]); } finally { clearTimeout(timer); }
 }
+
+test('task exit observations decode the actual PF_EXITING bit independently of the non-atomic proc state letter', () => {
+  // Pure proc-text data, not an OS observation, process-death proof or auth.
+  const row = (state: string, flags: string, pid = 321) => {
+    const fields = Array<string>(20).fill('0');
+    fields[0] = state; fields[6] = flags; fields[19] = '12345';
+    return `${pid} (fixture ) task) ${fields.join(' ')}\n`;
+  };
+  for (const state of ['R', 'S', 'D', 'Z', 'X', 'x']) {
+    for (const flags of ['4', '5', '7', '4194308', '4294967295'])
+      assert.deepEqual(decodeEnrollTaskState(321, row(state, flags)), { state, exiting: true });
+    for (const flags of ['0', '1', '2', '3', '8', '4194304', '4294967291'])
+      assert.deepEqual(decodeEnrollTaskState(321, row(state, flags)), { state, exiting: false });
+  }
+  for (const flags of ['-1', '+4', '04', '4.0', '4e0', 'NaN', '4294967296', '9007199254740993', ''])
+    assert.throws(() => decodeEnrollTaskState(321, row('R', flags)), TypeError);
+  for (const raw of [row('RR', '4'), row('4', '4'), row('R', '4', 322), '321 (unterminated', 'x'.repeat(8193)])
+    assert.throws(() => decodeEnrollTaskState(321, raw), TypeError);
+  for (const pid of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])
+    assert.throws(() => decodeEnrollTaskState(pid, row('R', '4')), TypeError);
+});
 
 test('enroll phase observations accept only the complete fixed source-owned byte markers', () => {
   for (const phase of ['open_selected', 'history', 'first_supervisor', 'secret_input', 'second_supervisor', 'platform_store', 'finalize', 'retire'])
