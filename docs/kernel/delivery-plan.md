@@ -1382,3 +1382,34 @@ the 50 ms profile does not guarantee that a real post-gate fsync crosses the
 original thirty-second probe deadline. Late-result and in-flight-stop flags
 remain false until their own actual cuts and complete independent recovery
 assertions have passed; ordinary Delivery success is not a substitute.
+
+The exact next source, `5ad50f301bf5f38a673652f664e053464f75996d`,
+passes the original local build and full test command: 2,557 passes, one
+original conditional cross-filesystem skip and no failures or cancellations.
+Final validation SHA-256:
+`1897d8d0bd63dd1af74c8c87137b2548d477adc73419b7550ccae5606596de30`.
+Its Linux run `39984099584`, attempt 1, actually reproduces the fixed original
+five-second status assertion on baseline `b6140b5`; the closed 611-byte RED
+report SHA-256 is
+`1a682a1682a33f7799bc68afcd0e3cc1596926674ac5ae6ed5732a0fc160c148`.
+This is not the candidate's installed Delivery qualification.
+
+That run exposes an earlier common volume-fixture defect before its Run
+reports: util-linux formats BACK-MAJ:MIN with internal width padding, and its
+raw table encodes those spaces as `\x20`. The assertion compares that raw
+representation with the same canonical `259:1` identity and rejects it.
+The fixed in-memory log projection retains only known error codes, exact
+eval source positions and strictly numeric device cells; no raw log is saved.
+The source log SHA-256 is
+`0ec8bae10b9212cfcf13e315ea0ec378629b0d46d893241fccaa80028ddfd721`.
+The repair decodes only those formatting spaces in that one column and still
+requires exactly six cells and the exact original device, inode, offset,
+size limit and AUTOCLEAR. Different identities, other escapes, extra cells
+and encoded inode padding remain refused. Existing failure/cleanup evidence
+is retained; neither runner UID 1001's legitimate pre-existing manager nor
+an orphan fixture is adopted or removed to make a test pass.
+
+The delayed-volume job also explicitly runs the two root-only protocol-child
+regressions under its actual root test invocation. A non-root six-test result
+cannot be counted as those eight tests. This exercises actual process/pipe
+lifetime only; it does not run the C SIGTERM actor or qualify a native stop.

@@ -1052,6 +1052,11 @@ jobs:
         id: build
       - name: Install actual guest, Secret Service and owned-volume prerequisites
         run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap e2fsprogs libext2fs-dev pkg-config dmsetup kmod
+      - name: Exercise both actual Linux root protocol-child lifetimes
+        shell: bash
+        run: |
+          probe_node=$(realpath "$(command -v node)")
+          sudo "$probe_node" --test --test-concurrency=1 --import tsx scripts/kernel/testing/installed-publication-crash-observer.test.ts
       - name: Require the disposable hosted VM and its actual fixed delay target
         shell: bash
         run: |

@@ -92,6 +92,7 @@ test('controlled delayed storage is a fixed free-VM qualification mode, never a 
   assert(controlled.includes('test "$RUNNER_ENVIRONMENT" = github-hosted'));
   assert(controlled.includes('test "$RUNNER_OS" = Linux')); assert(controlled.includes('test "$RUNNER_ARCH" = X64'));
   assert(controlled.includes('sudo /usr/sbin/modprobe dm_delay'));
+  assert(controlled.includes('sudo "$probe_node" --test --test-concurrency=1 --import tsx scripts/kernel/testing/installed-publication-crash-observer.test.ts'));
   assert(controlled.includes('--delay-volume --run-delivery-delay-journey'));
   assert(!/self-hosted|modprobe -r|dmsetup (?:remove_all|suspend|reload)|drop_caches/u.test(controlled));
 });

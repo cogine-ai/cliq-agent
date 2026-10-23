@@ -312,7 +312,12 @@ function loop(mount, homeDevice, holders = []) {
   assert.deepEqual(entries(`/sys/dev/block/${mount.device}/slaves`), []);
   const actual = command('losetup', ['--list', '--raw', '--noheadings', '--output', 'NAME,BACK-INO,BACK-MAJ:MIN,OFFSET,SIZELIMIT,AUTOCLEAR', '--', mount.source]);
   const physical = imageIdentity();
-  assert.deepEqual(actual.split(/\s+/u), [mount.source, physical.inode, deviceNumber(physical.device), '0', '0', '1']);
+  const cells = actual.split(/\s+/u); assert.equal(cells.length, 6);
+  // util-linux pads BACK-MAJ:MIN internally; raw smartcols encodes those
+  // spaces as \x20. Decode only this formatting in this one device column.
+  // Other escapes, interior whitespace and every other identity stay exact.
+  cells[2] = cells[2].replaceAll('\\x20', ' ').trim();
+  assert.deepEqual(cells, [mount.source, physical.inode, deviceNumber(physical.device), '0', '0', '1']);
   return value;
 }
 function original() {

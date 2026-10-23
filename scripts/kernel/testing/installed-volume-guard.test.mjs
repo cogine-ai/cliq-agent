@@ -181,6 +181,28 @@ test('all fixed volume commands keep the original output cap and request a bound
   }
 });
 
+test('raw losetup padding is representation only; different backing identity and other escapes still refuse', () => {
+  // util-linux formats BACK-MAJ:MIN with internal width padding even in its
+  // raw table; libsmartcols encodes those spaces rather than a different dev.
+  for (const volumeMode of ['loop', 'delay-50ms']) {
+    const base = { volumeMode, ...(volumeMode === 'delay-50ms'
+      ? { source: '/dev/dm-9', device: '253:9', mountedDevice: '64777' } : {}) };
+    const context = setup({ ...base, loopBackingDevice: String.raw`\x20\x20\x20\x20\x20\x20\x200:1\x20\x20` });
+    context.run('capture');
+    assert(context.files.has(output));
+    const paddedInode = setup({ ...base, loopBackingInode: String.raw`\x203\x20` });
+    assert.throws(() => paddedInode.run('capture'), 'format decoding must never rewrite the original inode column');
+    assert(!paddedInode.files.has(output));
+    for (const device of [String.raw`\x200:2\x20`, String.raw`0\x20:1`, String.raw`\x090:1`,
+      String.raw`\x200:1\x0a`, String.raw`\x200:1\x20extra`, String.raw`\x200:1\x20 7:1`, '']) {
+      const refused = setup({ ...base, loopBackingDevice: device });
+      assert.throws(() => refused.run('capture'));
+      assert(!refused.files.has(output));
+      assert(!refused.commands.some(command => command[0] === '/usr/bin/umount' || command[1] === 'remove'));
+    }
+  }
+});
+
 test('current exact bounded ext4 fixture captures, revalidates and retires only after association disappears', () => {
   const context = setup(); context.run('capture');
   assert.equal(context.run('retire-cut'), 'mounted\n');
