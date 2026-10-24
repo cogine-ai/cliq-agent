@@ -1832,10 +1832,11 @@ export class StateStore {
 
   private async submitInstalledRunOwned(request: unknown, identity: AuthenticatedControlIdentity, signal: AbortSignal) {
     signal.throwIfAborted();
+    const reads = this.artifacts.withReadSignal(signal);
     if (!this.installedRuntime || !this.runtimeAuthority?.sourceInspection)
       throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'installed Run composition is not ready');
     const normalized = normalizeRunSubmitRequest(request);
-    await validateControlChannelClosure(this.artifacts, this.owner, identity);
+    await validateControlChannelClosure(reads, this.owner, identity);
     signal.throwIfAborted();
     const { replayInstalledRunAdmission, admitInstalledRun } = await import('./reducers/admission.js');
     const replay = await replayInstalledRunAdmission(this.driver, this.artifacts, this.owner, normalized, identity, this.runtimeAuthority, signal);
@@ -1856,14 +1857,14 @@ export class StateStore {
       // binds a fresh request id; it can never fall back to recapture.
       const { replaySubmittedSource, readSourceInspectionErrorResponse } = await import('./source-inspection-owner.js');
       assertCurrentControlFrame(this.owner, identity); assertActiveStateOwner(this.driver, this.owner);
-      const source = await replaySubmittedSource(this.driver, this.artifacts, this.owner,
+      const source = await replaySubmittedSource(this.driver, reads, this.owner,
         { bundle: this.runtimeAuthority.bundle, releaseKeys: this.runtimeAuthority.releaseKeys,
           ...this.runtimeAuthority.sourceInspection, sandboxProfile: installedSandboxProfile(normalized.request.sandboxResources) },
         normalized.request, identity);
       if (!source || canonicalSha256(source) !== canonicalSha256(retainedSource))
         throw new KernelStorageError('RECOVERY_REQUIRED', 'installed Run source refusal changed during retained replay');
-      const response = await readSourceInspectionErrorResponse(this.artifacts, source);
-      await validateControlChannelClosure(this.artifacts, this.owner, identity);
+      const response = await readSourceInspectionErrorResponse(reads, source);
+      await validateControlChannelClosure(reads, this.owner, identity);
       assertCurrentControlFrame(this.owner, identity); assertActiveStateOwner(this.driver, this.owner);
       const currentSource = readSourceInspectionAttempt(this.driver, sourceKey);
       if (!currentSource || canonicalSha256(currentSource) !== canonicalSha256(retainedSource))
@@ -1892,8 +1893,8 @@ export class StateStore {
     if (source.phase !== 'retired') throw new KernelStorageError('RECOVERY_REQUIRED', 'Run source inspection has not completely retired');
     if (source.outcome.kind !== 'captured') {
       const { readSourceInspectionErrorResponse } = await import('./source-inspection-owner.js');
-      const response = await readSourceInspectionErrorResponse(this.artifacts, source);
-      await validateControlChannelClosure(this.artifacts, this.owner, identity);
+      const response = await readSourceInspectionErrorResponse(reads, source);
+      await validateControlChannelClosure(reads, this.owner, identity);
       assertCurrentControlFrame(this.owner, identity); assertActiveStateOwner(this.driver, this.owner);
       return { response };
     }
@@ -3184,7 +3185,7 @@ export class StateStore {
     const abort = new AbortController();
     const promise = Promise.resolve().then(async () => {
       abort.signal.throwIfAborted();
-      await validateControlChannelClosure(this.artifacts, this.owner, input.identity);
+      await validateControlChannelClosure(this.artifacts.withReadSignal(abort.signal), this.owner, input.identity);
       abort.signal.throwIfAborted();
       assertActiveStateOwner(this.driver, this.owner);
       const { captureSubmittedSource, assertSourceInspectionRequestId } = await import('./source-inspection-owner.js');

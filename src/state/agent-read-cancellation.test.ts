@@ -20,6 +20,209 @@ function between(text: string, start: string, end: string): string {
   return text.slice(first, last);
 }
 
+test('installed admission scopes only its read-only CAS work and retains original publication and transaction boundaries', () => {
+  const submit = between(source('./store.ts'), 'private async submitInstalledRunOwned(', '/** One bounded production lane,');
+  assert.match(submit, /const reads = this\.artifacts\.withReadSignal\(signal\)/u);
+  assert.doesNotMatch(submit, /validateControlChannelClosure\(this\.artifacts|readSourceInspectionErrorResponse\(this\.artifacts/u);
+  const assembly = between(source('./installed-run.ts'), 'export async function assembleInstalledRun(', '/** Genuine-brand-first admission friend.');
+  assert.match(assembly, /const reads = signal \? artifacts\.withReadSignal\(signal\) : artifacts/u);
+  assert.doesNotMatch(assembly, /readCanonicalArtifact(?:<[^\n]+?>)?\(artifacts|validateControlChannelClosure\(artifacts|materialFor\(installed, artifacts/u);
+  assert.match(assembly, /captureInstalledWorkspaceInstructions\(root, artifacts,/u);
+  assert.match(assembly, /await artifacts\.publishCanonical\(assembly, assembly\.format\)/u);
+  const admission = source('./reducers/admission.ts');
+  const replay = between(admission, 'export async function replayInstalledRunAdmission(', 'type InstalledAdmission =');
+  const internal = admission.slice(admission.indexOf('async function admitRunInternal('));
+  for (const body of [replay, internal]) {
+    assert.match(body, /const reads = signal \? artifacts\.withReadSignal\(signal\) : artifacts/u);
+    assert.doesNotMatch(body, /readCanonicalArtifact(?:<[^\n]+?>)?\(artifacts|artifacts\.(?:readBytes|readCanonical|describe)\(|validateControlChannelClosure\(artifacts/u);
+    assert.match(body, /await artifacts\.publishCanonical\(/u, 'read cancellation cannot replace the original publication catalog');
+  }
+  assert.match(internal, /driver\.transaction\(\(connection\) => \{\s*signal\?\.throwIfAborted\(\);/u,
+    'the original final-transaction signal check must remain in place');
+});
+
+test('source capture preflight scopes reads without retaining an aborted catalog for genuine birth and retirement', () => {
+  const store = between(source('./store.ts'), '  async captureSubmittedSource(', '  claimInvocationDispatch(');
+  assert.match(store, /validateControlChannelClosure\(this\.artifacts\.withReadSignal\(abort\.signal\), this\.owner, input\.identity\)/u);
+  assert.match(store, /return captureSubmittedSource\(this\.driver, this\.artifacts, this\.owner,/u,
+    'the source owner must receive the original catalog for later actual result registration');
+  const owner = source('./source-inspection-owner.ts');
+  const replay = between(owner, 'export async function replaySubmittedSource(', 'async function publishSourceRetirement(');
+  assert.match(replay, /const reads = signal \? artifacts\.withReadSignal\(signal\) : artifacts/u);
+  assert.doesNotMatch(replay, /readCanonicalArtifact(?:<[^\n]+?>)?\(artifacts|validateControlChannelClosure\(artifacts|readRetainedSourceInspectionTarget\(artifacts|readDeliveryCaptureTopology\(artifacts|readSourceInspectionRetirement\(driver, artifacts/u);
+  const capture = owner.slice(owner.indexOf('export async function captureSubmittedSource('));
+  const preflight = capture.slice(0, capture.indexOf('  const resources:'));
+  assert.match(preflight, /const reads = signal \? artifacts\.withReadSignal\(signal\) : artifacts/u);
+  assert.doesNotMatch(preflight, /validateControlChannelClosure\(artifacts|readVerifiedDeliverySource\(driver, artifacts|resolveDeliverySourceCapture\(driver, artifacts/u);
+  assert.match(capture, /createVerifiedSourceInspectionTarget\(\{ driver, artifacts, owner,/u);
+  assert.match(capture, /reserveSourceInspectionAttempt\(driver, artifacts, owner, target, stage\)/u);
+  const target = between(source('./source-target.ts'), 'export async function createVerifiedSourceInspectionTarget(', '/** Shared retained-data binding,');
+  assert.match(target, /const reads = context\.signal \? artifacts\.withReadSignal\(context\.signal\) : artifacts/u);
+  const validation = target.slice(0, target.indexOf('  const original = await artifacts.publishCanonical('));
+  assert.doesNotMatch(validation, /readCanonicalArtifact(?:<[^\n]+?>)?\(artifacts|validateControlChannelClosure\(artifacts|resolveDeliverySourceCapture\(driver, artifacts|readVerifierRequestIdentities\(driver, artifacts/u);
+  assert.match(target, /verifiedTargets\.set\(result, \{ driver, artifacts, owner,/u,
+    'the original raw catalog, not the temporary read view, must remain in the genuine WeakMap binding');
+  assert.match(target, /await recheckVerifiedSourceInspectionTarget\(owner, result\)/u);
+});
+
+// Execute the exact workspace-object read expression only, not its decoder,
+// target constructor, WeakMap registration, native handles or authority checks.
+function sourceTargetPreflightRead(): (artifacts: ArtifactCatalog, reads: ArtifactCatalog, ref: string) => Promise<unknown> {
+  const body = between(source('./source-target.ts'), 'export async function createVerifiedSourceInspectionTarget(', '/** Shared retained-data binding,');
+  const parsed = ts.createSourceFile('source-target-read-data.ts', body, ts.ScriptTarget.Latest, true);
+  const expressions: ts.CallExpression[] = [];
+  const visit = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && node.expression.getText(parsed) === 'readCanonicalArtifact' &&
+        node.arguments[1]?.getText(parsed) === 'session.workspaceIdentityRef') expressions.push(node);
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed); assert.equal(expressions.length, 1);
+  const output = ts.transpileModule(`return ${expressions[0]!.getText(parsed)};`,
+    { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText;
+  const read = new Function('artifacts', 'reads', 'session', 'readCanonicalArtifact', output);
+  return (artifacts, reads, ref) => read(artifacts, reads, { workspaceIdentityRef: ref }, readCanonicalArtifact) as Promise<unknown>;
+}
+
+for (const fault of ['cancel', 'retirement'] as const)
+  test(`source target preflight joins its real CAS read before exposing ${fault}`, async t => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), 'cliq-source-preflight-read-'));
+    t.after(() => fs.rm(home, { recursive: true, force: true }));
+    const root = path.join(home, 'objects'); await fs.mkdir(root, { mode: 0o700 });
+    const cas = new ContentAddressedStore(root), artifacts = new ArtifactCatalog(cas);
+    const { ref } = await artifacts.publishCanonical({ diagnosticOnly: true, value: 'plain read bytes, never workspace authority' }, 'cliq-read-join-data-v1');
+    const owner = new AbortController(), reason = new Error('the original source preflight read was revoked');
+    const closeFailure = new Error('the original source preflight root closed but its report is uncertain');
+    const open = fs.open, read = cas.read.bind(cas), active = new Set<object>();
+    let enter!: () => void, release!: () => void, actualRootCloseFailure = false, joined = false;
+    const entered = new Promise<void>(resolve => { enter = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+    t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
+      const handle = await open(...args); active.add(handle); const close = handle.close.bind(handle);
+      t.mock.method(handle, 'close', async () => {
+        await close(); assert.equal(active.delete(handle), true);
+        if (fault === 'retirement' && args[0] === root) { actualRootCloseFailure = true; throw closeFailure; }
+      });
+      return handle;
+    });
+    t.mock.method(cas, 'read', async (...args: Parameters<typeof cas.read>) => {
+      let bytes: Buffer | undefined, failed: { error: unknown } | undefined;
+      try { bytes = await read(...args); } catch (error) { failed = { error }; }
+      assert.equal(active.size, 0); enter(); await gate;
+      if (failed) throw failed.error; return bytes!;
+    });
+    const work = sourceTargetPreflightRead()(artifacts, artifacts.withReadSignal(owner.signal), ref);
+    void work.then(() => { joined = true; }, () => { joined = true; });
+    try {
+      await entered; owner.abort(reason);
+      assert.equal(joined, false, 'revocation is not an early-return or resource-join receipt');
+      release();
+      await assert.rejects(work, error => fault === 'cancel' ? error === reason
+        : error instanceof ResourceRetirementError && error.cause === closeFailure);
+      assert.equal(actualRootCloseFailure, fault === 'retirement'); assert.equal(active.size, 0);
+    } finally { release(); await Promise.allSettled([work]); t.mock.restoreAll(); }
+  });
+
+// Execute only the original metadata-read expression over genuine CAS data.
+// This creates no admission, Run, StateOwner, native proof or authority seam.
+function admissionMetadata(): (input: Record<string, unknown>, sourceManifest: { entriesRef: string }, reads: ArtifactCatalog) => Promise<unknown> {
+  const parsed = ts.createSourceFile('admission-read-data.ts', source('./reducers/admission.ts'), ts.ScriptTarget.Latest, true);
+  const expressions: ts.Expression[] = [];
+  const visit = (node: ts.Node) => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === 'referencedMetadata' && node.initializer)
+      expressions.push(node.initializer);
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed); assert.equal(expressions.length, 1);
+  const output = ts.transpileModule(`return (async () => ${expressions[0]!.getText(parsed)})();`,
+    { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText;
+  const decode = new Function('input', 'sourceManifest', 'artifacts', 'reads', 'joinResourceOperations', output);
+  return (input, manifest, reads) => decode(input, manifest, reads, reads, joinResourceOperations) as Promise<unknown>;
+}
+
+for (const fault of ['cancel', 'ordinary', 'retirement'] as const)
+  test(`admission metadata reads join every original CAS sibling before exposing ${fault}`, async t => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), 'cliq-admission-read-join-'));
+    t.after(() => fs.rm(home, { recursive: true, force: true }));
+    const root = path.join(home, 'objects'); await fs.mkdir(root, { mode: 0o700 });
+    const cas = new ContentAddressedStore(root), catalog = new ArtifactCatalog(cas), refs: string[] = [];
+    for (let index = 0; index < 9; index++) refs.push((await catalog.publishCanonical({ diagnosticOnly: true, index }, 'cliq-read-join-data-v1')).ref);
+    const names = ['assemblyRef', 'policyRef', 'sandboxProfileRef', 'verifierSpecRef', 'sourceProjectionRef', 'frozenIgnoreRulesRef', 'baseWorkspaceManifestRef'];
+    const input = { ...Object.fromEntries(names.map((name, index) => [name, refs[index]!])), credentialGrantRefs: [refs[8]!] };
+    const owner = new AbortController(), reason = new Error('the original admission read was revoked');
+    const ordinaryFailure = new Error('the original first read failed after its actual descriptors joined');
+    const closeFailure = new Error('the original second root closed but its retirement report is uncertain');
+    const call = new AsyncLocalStorage<string>(), active = new Set<object>(), open = fs.open, read = cas.read.bind(cas);
+    const gates = refs.map(() => { let release!: () => void; return { promise: new Promise<void>(resolve => { release = resolve; }), release }; });
+    let enter!: () => void, returned = 0, outerJoined = false, actualRootCloseFailure = false;
+    const entered = new Promise<void>(resolve => { enter = resolve; });
+    t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
+      const handle = await open(...args), ref = call.getStore(); active.add(handle);
+      const close = handle.close.bind(handle);
+      t.mock.method(handle, 'close', async () => {
+        await close(); assert.equal(active.delete(handle), true);
+        if (fault === 'retirement' && ref === refs[1] && args[0] === root) {
+          actualRootCloseFailure = true; throw closeFailure;
+        }
+      });
+      return handle;
+    });
+    t.mock.method(cas, 'read', (...args: Parameters<typeof cas.read>) => call.run(args[0], async () => {
+      let bytes: Buffer | undefined, failed: { error: unknown } | undefined;
+      try { bytes = await read(...args); } catch (error) { failed = { error }; }
+      if (++returned === refs.length) enter();
+      await gates[refs.indexOf(args[0])]!.promise;
+      if (failed) throw failed.error;
+      if (fault === 'ordinary' && args[0] === refs[0]) throw ordinaryFailure;
+      return bytes!;
+    }));
+    const work = admissionMetadata()(input, { entriesRef: refs[7]! }, catalog.withReadSignal(owner.signal));
+    void work.then(() => { outerJoined = true; }, () => { outerJoined = true; });
+    try {
+      await Promise.race([entered, work.then(() => { throw new Error('the original nine CAS return gates were bypassed'); })]);
+      assert.equal(active.size, 0, 'all actual CAS descriptors join before the original return gates release');
+      if (fault !== 'ordinary') owner.abort(reason);
+      gates[0]!.release(); await setImmediate();
+      assert.equal(outerJoined, false, 'the first failure cannot detach eight pending original metadata reads');
+      gates.slice(1).forEach(gate => gate.release());
+      await assert.rejects(work, error => fault === 'retirement'
+        ? error instanceof ResourceRetirementError && error.cause === closeFailure
+        : error === (fault === 'ordinary' ? ordinaryFailure : reason));
+      assert.equal(actualRootCloseFailure, fault === 'retirement'); assert.equal(active.size, 0);
+    } finally { gates.forEach(gate => gate.release()); await Promise.allSettled([work]); t.mock.restoreAll(); }
+  });
+
+for (const publisher of ['original', 'read_view'] as const)
+  test(`read cancellation cannot truncate the ${publisher} catalog's genuine durable publication`, async t => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), 'cliq-admission-publish-join-'));
+    t.after(() => fs.rm(home, { recursive: true, force: true }));
+    const root = path.join(home, 'objects'); await fs.mkdir(root, { mode: 0o700 });
+    const catalog = new ArtifactCatalog(new ContentAddressedStore(root));
+    const owner = new AbortController(), reason = new Error('the original read owner closed during the actual publication write');
+    const reads = catalog.withReadSignal(owner.signal), open = fs.open, active = new Set<object>();
+    let originalWrites = 0;
+    t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
+      const handle = await open(...args); active.add(handle);
+      const close = handle.close.bind(handle), write = handle.writeFile.bind(handle);
+      t.mock.method(handle, 'close', async () => { await close(); assert.equal(active.delete(handle), true); });
+      t.mock.method(handle, 'writeFile', async (...values: Parameters<typeof handle.writeFile>) => {
+        const result = await write(...values);
+        originalWrites++;
+        if (originalWrites === 1) owner.abort(reason);
+        else assert.equal(owner.signal.aborted, true, 'later original chunks must persist after read cancellation');
+        return result;
+      });
+      return handle;
+    });
+    try {
+      const value = { diagnosticOnly: true, publisher, text: 'complete retained publication bytes '.repeat(4096) };
+      const result = await (publisher === 'original' ? catalog : reads).publishCanonical(value, 'cliq-read-cancellation-data-v1');
+      assert.equal(originalWrites, 3, 'all three bounded original writes complete after the first one cancels the read view');
+      assert.equal(owner.signal.aborted, true); assert.equal(active.size, 0, 'publication joins every real descriptor after cancellation');
+      await assert.rejects(reads.readBytes(result.ref), error => error === reason);
+      assert.deepEqual(await readCanonicalArtifact(catalog, result.ref), value, 'the complete immutable publication remains fully verifiable');
+      assert.equal(active.size, 0);
+    } finally { t.mock.restoreAll(); }
+  });
+
 test('cached Agent reads retain a close-owned signal without cancelling the received model settlement catalog', () => {
   const store = source('./store.ts'), agent = source('./reducers/agent.ts');
   assert.doesNotMatch(agent, /^\s*artifacts =/mu, 'constructor cancellation must not replace the received-result catalog');

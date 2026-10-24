@@ -8,6 +8,40 @@ import { transformSync } from 'esbuild';
 const source = await readFile(new URL('../../../src/state/store.ts', import.meta.url), 'utf8');
 const between = (start: string, end: string) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
 
+test('publication preparation diagnosis preserves the closed authority input and every original await boundary', async () => {
+  // Source wiring only: no execution, native task or authority is constructed.
+  const publication = await readFile(new URL('../../../src/state/publication-invocation.ts', import.meta.url), 'utf8');
+  const start = publication.indexOf('export async function preparePublicationInvocation(');
+  const end = publication.indexOf('\ntype MaintenanceInput', start);
+  assert(start >= 0 && end > start);
+  const body = publication.slice(start, end);
+  assert.match(body, /onPreparationPhase\?: \(phase: PublicationPreparationPhase\) => void/u);
+  assert.match(body, /const preparationPhase = \(phase: PublicationPreparationPhase\) => \{ try \{ onPreparationPhase\?\.\(phase\); \} catch \{ \/\* Diagnosis cannot decide preparation\. \*\/ \} \};/u);
+  for (const [phase, operation] of [['read', 'const cut = await readRecoveryClosure'],
+    ['grant', 'const derived = derivePublicationGrant'], ['cut', 'await assertPublicationReadCut'],
+    ['physical', 'const nativeInput = await physicalInput'], ['admit', 'const prepared = await prepareValidatedInvocation']])
+    assert(body.includes(`preparationPhase('publication_prepare_${phase}');\n  ${operation}`));
+  const gate = publication.slice(publication.indexOf('function closedInput('), publication.indexOf('\nasync function physicalInput('));
+  assert(gate.includes("keys = ['execution', 'worker', 'workspaceRoot', 'expectedRunRevision', 'task']"));
+  assert(!gate.includes('onPreparationPhase'), 'an observer is not an accepted authority field');
+  assert(body.indexOf('assertDeliveryPublicationExecution(') < body.indexOf("preparationPhase('publication_prepare_read')"));
+  const execution = await readFile(new URL('../../../src/state/run-execution.ts', import.meta.url), 'utf8');
+  assert.match(execution, /expectedRunRevision: readRun\(driver, runId\)\.revision, signal \}, publicationPhase\);/u);
+});
+
+test('the actual preparation observer contains a throwing sink without adding awaits, clocks or error replacement', async () => {
+  const publication = await readFile(new URL('../../../src/state/publication-invocation.ts', import.meta.url), 'utf8');
+  const declaration = publication.match(/const preparationPhase = \(phase: PublicationPreparationPhase\) => \{[^\n]+/u)?.[0];
+  assert(declaration);
+  assert(!/\bawait\b|Date\.|performance\./u.test(declaration));
+  const compiled = transformSync(`${declaration}\nglobalThis.invoke = preparationPhase;`, { loader: 'ts' }).code;
+  const phases: string[] = [];
+  const sink = { onPreparationPhase(phase: string) { phases.push(phase); throw new Error('owned diagnostic unavailable'); }, invoke: undefined as any };
+  new Script(compiled).runInNewContext(sink);
+  assert.doesNotThrow(() => sink.invoke('publication_prepare_grant'));
+  assert.deepEqual(phases, ['publication_prepare_grant']);
+});
+
 test('worker cancellation campaign observes an unpaused original producer and requires real two-second join before successor recovery', async () => {
   // Wiring only. Only the real Linux execution can qualify this live cut.
   const campaign = await readFile(new URL('../run-linux-worker-campaign.ts', import.meta.url), 'utf8');

@@ -32,6 +32,35 @@ const directoryIdentity = (info: BigIntStats) => [info.dev, info.ino, info.uid, 
 type Directory = { handle: FileHandle; physicalPath: string; info: BigIntStats };
 type Stats = { filesScanned: number; fileBytesScanned: number; sqliteDatabasesScanned: number;
   logicalRowsScanned: number; logicalValuesScanned: number; logicalBytesScanned: number; evidenceDirectoriesScanned: number };
+type TableBucket = 'artifacts' | 'control' | 'events' | 'items' | 'checkpoints' | 'journal' | 'other';
+type ScanSource = Readonly<{
+  kind: 'database_logical'; database: 'kernel' | 'authority'; tableBucket: TableBucket;
+  part: 'table_name' | 'table_sql' | 'cell';
+  logicalRowsObserved: number; logicalValuesAttempted: number; logicalBytesObserved: number;
+}> | Readonly<{ kind: 'database_file'; database: 'kernel' | 'authority'; part: 'main' | 'wal' | 'journal' | 'shm' }>
+  | Readonly<{ kind: 'cas'; part: 'entry_name' | 'file_bytes' }> | Readonly<{ kind: 'evidence'; part: 'file_bytes' }>;
+export type CredentialSecretCorpusScanProgress = Readonly<{ diagnosticOnly: true; source: ScanSource;
+  corpusCounters?: Readonly<Stats & { inventoryEntriesObserved: number }> }>;
+const scanFailures = new WeakMap<object, CredentialSecretCorpusScanProgress>();
+
+/** Counts attached only to the actual thrown scanner error, never caller data
+ * or proof. A value attempt may not have opened a stream or scanned any byte.
+ * Read after the corpus call rejects, not from the scanner's earlier observer. */
+export function readCredentialSecretCorpusScanProgress(error: unknown): CredentialSecretCorpusScanProgress | undefined {
+  if ((typeof error !== 'object' && typeof error !== 'function') || error === null) return;
+  return scanFailures.get(error);
+}
+function tableBucket(name: string): TableBucket {
+  switch (name) {
+    case 'artifacts': return 'artifacts';
+    case 'control_requests': return 'control';
+    case 'run_events': return 'events';
+    case 'items': return 'items';
+    case 'checkpoints': return 'checkpoints';
+    case 'run_journal': return 'journal';
+    default: return 'other';
+  }
+}
 function scanValue(scanner: CredentialSecretScanner, bytes: Uint8Array): void {
   const stream = scanner.openStream();
   try { for (let offset = 0; offset < bytes.length; offset += chunkBytes) stream.scan(bytes.subarray(offset, offset + chunkBytes)); }
@@ -45,6 +74,7 @@ export function scanCopiedCredentialDatabase(filename: string, scanner: Credenti
   let database: DatabaseSync | undefined;
   let stage: DatabaseFailureStage = 'open';
   let logicalRowsScanned = 0, logicalValuesScanned = 0, logicalBytesScanned = 0;
+  let bucket: TableBucket = 'other', part: 'table_name' | 'table_sql' | 'cell' = 'table_name';
   try {
     check(typeof filename === 'string');
     check(path.isAbsolute(filename) && path.normalize(filename) === filename &&
@@ -73,13 +103,15 @@ export function scanCopiedCredentialDatabase(filename: string, scanner: Credenti
     for (const table of tables) {
       check(typeof table.name === 'string' && /^[a-z][a-z0-9_]{0,63}$/u.test(table.name));
       check(typeof table.sql === 'string' && /^CREATE TABLE\s/iu.test(table.sql));
-      scan(table.name); scan(table.sql);
+      bucket = tableBucket(table.name);
+      part = 'table_name'; scan(table.name); part = 'table_sql'; scan(table.sql);
       const query = `SELECT * FROM "${table.name}"`;
       stage = 'prepare'; const statement = database.prepare(query);
       // INTEGER cells are not byte needles. Preserve SQLite's whole signed
       // 64-bit domain so conversion cannot stop the following TEXT/BLOB scan.
       statement.setReadBigInts(true);
       stage = 'rows';
+      part = 'cell';
       for (const row of iterateNodeSqliteStatement(statement)) {
         check(++logicalRowsScanned <= rowLimit);
         for (const value of Object.values(row)) scan(value);
@@ -94,7 +126,15 @@ export function scanCopiedCredentialDatabase(filename: string, scanner: Credenti
     check(directoryIdentity(lstatSync(path.dirname(filename), { bigint: true })) === directoryIdentity(directory));
     return Object.freeze({ logicalRowsScanned, logicalValuesScanned, logicalBytesScanned });
   } catch (error) {
-    if (error instanceof CredentialSecretScanError || error instanceof CredentialSecretCorpusError) throw error;
+    if (error instanceof CredentialSecretScanError) {
+      try {
+        scanFailures.set(error, Object.freeze({ diagnosticOnly: true, source: Object.freeze({ kind: 'database_logical',
+          database: path.basename(filename) === 'kernel.sqlite3' ? 'kernel' : 'authority', tableBucket: bucket, part,
+          logicalRowsObserved: logicalRowsScanned, logicalValuesAttempted: logicalValuesScanned, logicalBytesObserved: logicalBytesScanned }) }));
+      } catch { /* Diagnosis cannot change the original error or its finally. */ }
+      throw error;
+    }
+    if (error instanceof CredentialSecretCorpusError) throw error;
     // Keep only a closed code class and source-owned stage, never SQLite's
     // messages, input, table/column names, paths, numeric values or causes.
     const code = error instanceof Error ? Object.getOwnPropertyDescriptor(error, 'code')?.value : undefined;
@@ -123,6 +163,7 @@ export async function scanCredentialSecretCorpus(input: CredentialSecretCorpusIn
     logicalRowsScanned: 0, logicalValuesScanned: 0, logicalBytesScanned: 0, evidenceDirectoriesScanned: 0 };
   const deadline = performance.now() + 60000;
   let stage: CorpusFailureStage = 'input', inventoryEntriesObserved = 0;
+  let scanSource: ScanSource | undefined;
   const diagnostic = (errorClass: CorpusFailureClass): CredentialSecretCorpusFailure => Object.freeze({ stage, errorClass, ...stats, inventoryEntriesObserved });
   const fail = (errorClass: CorpusFailureClass): never => { throw new CredentialSecretCorpusError(undefined, diagnostic(errorClass)); };
   const bounded = () => {
@@ -208,15 +249,21 @@ export async function scanCredentialSecretCorpus(input: CredentialSecretCorpusIn
     snapshot = await mkdtemp(path.join(os.tmpdir(), 'cliq-credential-corpus-'));
     stage = 'databases';
     for (const [directory, main] of [[root, 'kernel.sqlite3'], [credential, 'authority.sqlite']] as const) {
+      const database = main === 'kernel.sqlite3' ? 'kernel' : 'authority';
+      scanSource = { kind: 'database_file', database, part: 'main' };
       const mainBytes = await file(directory, main, { mode: [0o600n], limit: sqliteLimit, copy: true });
       let walBytes: Buffer | undefined;
       try {
+        scanSource = { kind: 'database_file', database, part: 'wal' };
         walBytes = await file(directory, `${main}-wal`, { mode: [0o600n], limit: sqliteLimit, optional: true, copy: true });
         check(mainBytes && mainBytes.length >= 100);
+        scanSource = { kind: 'database_file', database, part: 'journal' };
         await file(directory, `${main}-journal`, { mode: [0o600n], limit: sqliteLimit, optional: true });
+        scanSource = { kind: 'database_file', database, part: 'shm' };
         await file(directory, `${main}-shm`, { mode: [0o600n], limit: sqliteLimit, optional: true });
         const copied = path.join(snapshot, main); await writeFile(copied, mainBytes, { flag: 'wx', mode: 0o600 });
         if (walBytes) await writeFile(`${copied}-wal`, walBytes, { flag: 'wx', mode: 0o600 });
+        scanSource = undefined;
         const logical = scanCopiedCredentialDatabase(copied, input.scanner);
         stats.logicalRowsScanned += logical.logicalRowsScanned; stats.logicalValuesScanned += logical.logicalValuesScanned;
         stats.logicalBytesScanned += logical.logicalBytesScanned; stats.sqliteDatabasesScanned++;
@@ -231,7 +278,9 @@ export async function scanCredentialSecretCorpus(input: CredentialSecretCorpusIn
       const published = /^[0-9a-f]{64}$/u.test(leaf);
       check(published || /^\.tmp-[0-9a-f]{64}-[0-9a-f]{32}$/u.test(leaf));
       const nameBytes = Buffer.from(leaf, 'ascii');
+      scanSource = { kind: 'cas', part: 'entry_name' };
       try { scanValue(input.scanner, nameBytes); } finally { nameBytes.fill(0); }
+      scanSource = { kind: 'cas', part: 'file_bytes' };
       await file(cas, leaf, { mode: published ? [0o400n] : [0o400n, 0o600n], links: published ? [1n] : [1n, 2n], limit: fileLimit });
     }
     check(JSON.stringify(await names(cas)) === JSON.stringify(casNames));
@@ -245,6 +294,7 @@ export async function scanCredentialSecretCorpus(input: CredentialSecretCorpusIn
       const traceNames = await names(trace); check(traceNames.length > 0);
       for (const leaf of traceNames) {
         check(/^auth\.trace\.[1-9][0-9]*$/u.test(leaf));
+        scanSource = { kind: 'evidence', part: 'file_bytes' };
         await file(trace, leaf, { mode: [0o600n, 0o644n], limit: 8 * 1024 * 1024 });
       }
       check(JSON.stringify(await names(trace)) === JSON.stringify(traceNames)); stats.evidenceDirectoriesScanned++;
@@ -259,7 +309,14 @@ export async function scanCredentialSecretCorpus(input: CredentialSecretCorpusIn
     for (const directory of directories) await current(directory);
     return Object.freeze({ diagnosticOnly: true as const, qualified: true as const, ...stats });
   } catch (error) {
-    if (error instanceof CredentialSecretScanError) throw error;
+    if (error instanceof CredentialSecretScanError) {
+      try {
+        const source = scanFailures.get(error)?.source ?? scanSource;
+        if (source) scanFailures.set(error, Object.freeze({ diagnosticOnly: true, source: Object.freeze(source),
+          corpusCounters: Object.freeze({ ...stats, inventoryEntriesObserved }) }));
+      } catch { /* Diagnosis cannot change the original error or its finally. */ }
+      throw error;
+    }
     if (error instanceof CredentialSecretCorpusError) {
       if (error.corpusFailure) throw error;
       throw new CredentialSecretCorpusError(error.databaseFailure, diagnostic('guard_refused'));

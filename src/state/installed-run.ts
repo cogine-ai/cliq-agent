@@ -359,6 +359,7 @@ export async function assembleInstalledRun(input: {
   endpoint: EndpointRegistrationV1; credentialBindings: readonly EndpointCredentialGrantBinding[]; controlledHome: string;
 }, signal?: AbortSignal): Promise<AssembledInstalledRun> {
   const { selected, driver, owner, artifacts, controlledHome } = input;
+  const reads = signal ? artifacts.withReadSignal(signal) : artifacts;
   const currentOriginal = normalizeRunSubmitRequest(input.originalRequest);
   const { identity, request, source, endpoint, credentialBindings } = immutableSnapshot({ identity: input.identity,
     request: input.request, source: input.source, endpoint: decodeEndpointRegistration(input.endpoint),
@@ -372,8 +373,8 @@ export async function assembleInstalledRun(input: {
     if (native.verifierInterfaceVersion !== 1) throw new VerifierAuthorizationError('UNSUPPORTED_EXECUTION_IDENTITY');
   }
   const remote = request.model;
-  await validateControlChannelClosure(artifacts, owner, identity); assertActiveStateOwner(driver, owner); signal?.throwIfAborted();
-  const session = readSession(driver, request.sessionId), workspace = decodeWorkspaceIdentity(await readCanonicalArtifact(artifacts, session.workspaceIdentityRef));
+  await validateControlChannelClosure(reads, owner, identity); assertActiveStateOwner(driver, owner); signal?.throwIfAborted();
+  const session = readSession(driver, request.sessionId), workspace = decodeWorkspaceIdentity(await readCanonicalArtifact(reads, session.workspaceIdentityRef));
   if (readSessionPrincipalId(driver, session.id) !== identity.principalId || session.contextRevision !== request.expectedContextRevision ||
       workspace.kind !== 'live' || workspace.ownerPrincipalId !== identity.principalId || workspace.canonicalRootPath !== request.workspacePath)
     mismatch('installed assembly does not belong to the authenticated Session and workspace');
@@ -382,19 +383,19 @@ export async function assembleInstalledRun(input: {
   if (!retained || retained.phase !== 'retired' || retained.outcome.kind !== 'captured' || !same(retained, source) || source.outcome.kind !== 'captured')
     mismatch('installed admission requires the exact committed captured and retired source');
   const capturedSourceRef = source.outcome.sourceManifestRef;
-  const target = await readCanonicalArtifact<import('../kernel/execution.js').SourceInspectionTargetV1>(artifacts, source.targetRef);
-  const original = normalizeRunSubmitRequest(await readCanonicalArtifact(artifacts, target.originalRequestRef));
+  const target = await readCanonicalArtifact<import('../kernel/execution.js').SourceInspectionTargetV1>(reads, source.targetRef);
+  const original = normalizeRunSubmitRequest(await readCanonicalArtifact(reads, target.originalRequestRef));
   if (runSubmitIntentDigest(identity.principalId, original.request) !== key.admissionIntentDigest || original.originalRequestDigest !== target.originalRequestDigest)
     mismatch('installed assembly substituted the original inline request domain');
-  const sourceManifest = decodeSourceManifest(await readCanonicalArtifact(artifacts, capturedSourceRef));
+  const sourceManifest = decodeSourceManifest(await readCanonicalArtifact(reads, capturedSourceRef));
   if (sourceManifest.workspaceIdentityDigest !== workspace.identityDigest || sourceManifest.manifestDigest !== source.outcome.sourceManifestDigest || sourceManifest.git)
     mismatch('installed source closure differs from the authenticated non-Git capture');
   const held = await withHeldInstalledRuntime(selected, async installed => {
     await installed.revalidate(signal); const active = assertActiveStateOwner(driver, owner);
     if (active.runtimeBundleRef !== installed.bundleDigest || target.runtimeBundleRef !== installed.bundleDigest ||
         active.runtimeBundleManifestDigest !== installed.bundle.manifestDigest) mismatch('installed assembly and capture have another runtime owner');
-    await readRetainedSourceInspectionTarget(artifacts, source, readSourceInspectionOriginalRequest(driver, source.inspectionId),
-      { bundle: installed.bundle, releaseKeys: installed.releaseKeys, sandboxProfile: decodeSandboxProfile(await readCanonicalArtifact(artifacts, target.sandboxProfileRef)) });
+    await readRetainedSourceInspectionTarget(reads, source, readSourceInspectionOriginalRequest(driver, source.inspectionId),
+      { bundle: installed.bundle, releaseKeys: installed.releaseKeys, sandboxProfile: decodeSandboxProfile(await readCanonicalArtifact(reads, target.sandboxProfileRef)) });
     const native = await installed.loadStateOwner(signal); await installed.revalidate(signal); return native;
   }, signal);
   const platform = await loadInstalledCredentialPlatform(selected), user = platform.currentUser();
@@ -411,7 +412,7 @@ export async function assembleInstalledRun(input: {
   } catch (error) { failure = error; throw error; } finally { closeOwned(resources, failure); }
   const admittedAt = sampleCanonicalNow(), deadlineAt = addCanonicalDuration(admittedAt, request.budgets.wallTimeMs);
   return withHeldInstalledRuntime(selected, async installed => {
-    await installed.revalidate(signal); await validateControlChannelClosure(artifacts, owner, identity); assertActiveStateOwner(driver, owner);
+    await installed.revalidate(signal); await validateControlChannelClosure(reads, owner, identity); assertActiveStateOwner(driver, owner);
     const model = selectedModel(installed, remote.provider, remote.model, endpoint), catalog = model.catalog.value;
     if (catalog.claims.streaming) throw new InstalledRunAuthorityError('MODEL_CAPABILITY_UNKNOWN');
     if (endpoint.ownerPrincipalId !== identity.principalId || endpoint.endpointRegistrationId !== remote.endpoint.endpointRegistrationId ||
@@ -449,7 +450,7 @@ export async function assembleInstalledRun(input: {
     const worker = installed.bundle.entries.find(entry => entry.entryId === LINUX_WORKER_RECIPE.workerId);
     if (!system || !compaction || !worker || worker.role !== 'worker' || !worker.executable) mismatch('installed Run lacks its exact signed prompt or worker recipe');
     const c = catalog.claims.contextLimitTokens, o = Math.min(catalog.claims.maxOutputTokens, Math.floor(c / 4));
-    const verifierIdentities = request.verifiers.length ? await readVerifierRequestIdentities(driver, artifacts, owner,
+    const verifierIdentities = request.verifiers.length ? await readVerifierRequestIdentities(driver, reads, owner,
       { bundle: installed.bundle, releaseKeys: installed.releaseKeys }, identity.principalId, request.verifiers, undefined, signal) : [];
     const verifierToolchain = verifierIdentities[0]?.selected;
     const h = c - o, s = Math.min(8192, Math.floor(c / 8)), k = compactionEnvelopeEstimate(compaction.material);
@@ -475,7 +476,7 @@ export async function assembleInstalledRun(input: {
         protectedRecentTokens: Math.min(32768, Math.floor(c / 4)), summaryTokenCap: s, compactionEnvelopeTokens: k,
         sourceInputTokenCap: Math.min(Math.floor(c / 2), c - s - k), maxSummaryBytes: 262144 }, createdAt: admittedAt, assemblyDigest: '' };
     assembly.assemblyDigest = digestOmitting(assembly, 'assemblyDigest');
-    const material = await materialFor(installed, artifacts, assembly, signal), assemblyRef = canonicalSha256(assembly);
+    const material = await materialFor(installed, reads, assembly, signal), assemblyRef = canonicalSha256(assembly);
     const valid = validateRunAssembly({ assemblyRef, assembly, admittedAt, deadlineAt, maxRunCostMicros: request.budgets.costMicros,
       runSpecCredentialGrantRefs: credentialGrantRefs, material });
     if (!valid.ok) throw new InstalledRunAuthorityError(valid.code);
@@ -490,13 +491,13 @@ export async function assembleInstalledRun(input: {
     verifyToolRuntimeAuthority({ assembly, policy, bundle: installed.bundle, profile, tools: tools.entries, releaseKeys: installed.releaseKeys });
     const sandbox = installedSandboxProfile(request.sandboxResources);
     const sandboxProfileRef = (await artifacts.publishCanonical(sandbox, sandbox.format)).ref;
-    const verifier = await prepareVerifierSpec(driver, artifacts, owner, { bundle: installed.bundle, releaseKeys: installed.releaseKeys },
+    const verifier = await prepareVerifierSpec(driver, reads, owner, { bundle: installed.bundle, releaseKeys: installed.releaseKeys },
       { principalId: identity.principalId, requests: request.verifiers, policyMode: request.policyMode, assembly,
         sourceProjectionRef: sourceManifest.sourceProjectionRef, sandboxProfileRef }, undefined, signal);
     await artifacts.publishCanonical(assembly, assembly.format);
     const policyRef = (await artifacts.publishCanonical(policy, policy.format)).ref;
     const verifierSpecRef = verifier.specRef;
-    await installed.revalidate(signal); await validateControlChannelClosure(artifacts, owner, identity); assertActiveStateOwner(driver, owner);
+    await installed.revalidate(signal); await validateControlChannelClosure(reads, owner, identity); assertActiveStateOwner(driver, owner);
     const result: AssembledInstalledRun = Object.freeze({ assemblyRef, assembly: immutableSnapshot(assembly), policyRef, sandboxProfileRef, verifierSpecRef,
       credentialGrantRefs: Object.freeze(credentialGrantRefs), sourceProjectionRef: sourceManifest.sourceProjectionRef,
       frozenIgnoreRulesRef: sourceManifest.frozenIgnoreRulesRef, baseWorkspaceManifestRef: capturedSourceRef, material, admittedAt, deadlineAt });

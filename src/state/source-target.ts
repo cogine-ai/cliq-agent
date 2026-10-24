@@ -160,8 +160,9 @@ deliverySource?: VerifiedDeliverySource): Promise<VerifiedSourceInspectionTarget
   const normalized = normalizeSourceInspectionRequest(inlineRequest), wire = normalized.request;
   identity = immutableSnapshot(identity);
   const bootstrap = immutableSnapshot(context.bootstrap), { driver, artifacts, owner, workspaceRoot, trust } = context;
+  const reads = context.signal ? artifacts.withReadSignal(context.signal) : artifacts;
   const request: SourceCaptureSelection = wire.method === 'run.apply'
-    ? await resolveDeliverySourceCapture(driver, artifacts, owner, wire, identity.principalId,
+    ? await resolveDeliverySourceCapture(driver, reads, owner, wire, identity.principalId,
       assertVerifiedDeliverySource(driver, owner, deliverySource), context.signal) : wire;
   const admissionIntentDigest = sourceInspectionIntentDigest(identity.principalId, wire);
   // Any retained attempt/Run is handled by the caller's replay path. Never
@@ -171,7 +172,7 @@ deliverySource?: VerifiedDeliverySource): Promise<VerifiedSourceInspectionTarget
   const admitted = readAdmissionReplay(driver, 'runs', identity.principalId, wire.method, request.admissionKey);
   if (admitted && admitted.admissionIntentDigest !== admissionIntentDigest) throw new KernelStorageError('ADMISSION_KEY_CONFLICT', 'source key names a different intent');
   if (existing || admitted) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'source intent is retained; join or replay it without recapture');
-  const channel = await validateControlChannelClosure(artifacts, owner, identity);
+  const channel = await validateControlChannelClosure(reads, owner, identity);
   const active = assertActiveStateOwner(driver, owner);
   const session = readSession(driver, request.sessionId);
   if (readSessionPrincipalId(driver, session.id) !== identity.principalId) throw new KernelStorageError('NOT_FOUND', 'Session does not belong to this principal');
@@ -183,7 +184,7 @@ deliverySource?: VerifiedDeliverySource): Promise<VerifiedSourceInspectionTarget
   if (wire.method === 'run.submit') {
     if (wire.dependency.mode !== 'none') invalid('dependency admission is not yet implemented');
     assertSupportedVerifierRequests(wire.verifiers, wire.policyMode);
-    if (wire.verifiers.length) await readVerifierRequestIdentities(driver, artifacts, owner, bootstrap, identity.principalId, wire.verifiers, undefined, context.signal);
+    if (wire.verifiers.length) await readVerifierRequestIdentities(driver, reads, owner, bootstrap, identity.principalId, wire.verifiers, undefined, context.signal);
     if (wire.registeredMcpServerIds.length || wire.skillIds.length) invalid('MCP/skill admission authority is not yet implemented');
   }
   if (wire.method === 'run.submit' && wire.model.provider !== 'ollama') {
@@ -198,7 +199,7 @@ deliverySource?: VerifiedDeliverySource): Promise<VerifiedSourceInspectionTarget
       await installed.revalidate(context.signal);
     }, context.signal);
   }
-  const workspace = decodeWorkspaceIdentity(await readCanonicalArtifact(artifacts, session.workspaceIdentityRef));
+  const workspace = decodeWorkspaceIdentity(await readCanonicalArtifact(reads, session.workspaceIdentityRef));
   if (workspace.kind !== 'live' || workspace.ownerPrincipalId !== identity.principalId || workspace.platform !== hostPlatform() ||
       workspace.canonicalRootPath !== request.workspacePath || canonicalSha256(workspace.rootIdentity) !== canonicalSha256(workspaceRoot.identity) ||
       (workspace.repositoryIdentityRef === undefined) !== (workspaceRoot.repositoryDirectory === undefined))
@@ -207,7 +208,7 @@ deliverySource?: VerifiedDeliverySource): Promise<VerifiedSourceInspectionTarget
   verifyRuntimeBundle(bootstrap.bundle, bootstrap.releaseKeys);
   const runtimeBundleRef = canonicalSha256(bootstrap.bundle);
   if (active.runtimeBundleRef !== runtimeBundleRef || active.runtimeBundleManifestDigest !== bootstrap.bundle.manifestDigest ||
-      canonicalSha256(await readCanonicalArtifact(artifacts, runtimeBundleRef)) !== runtimeBundleRef)
+      canonicalSha256(await readCanonicalArtifact(reads, runtimeBundleRef)) !== runtimeBundleRef)
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'source inspection runtime differs from the signed StateOwner bootstrap');
   const profile = decodeSandboxProfile(bootstrap.sandboxProfile);
   if (!profile.allowedOwners.includes('source_inspection') || canonicalSha256(profile.resources) !== canonicalSha256(request.sandboxResources))

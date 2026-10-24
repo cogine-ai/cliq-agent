@@ -45,7 +45,7 @@ import {
   decodeWorkspaceIdentity,
   decodeWorkspaceState
 } from '../decoders.js';
-import { KernelStorageError } from '../errors.js';
+import { joinResourceOperations, KernelStorageError } from '../errors.js';
 import { readCanonicalArtifact } from '../agent-context.js';
 import { readInstalledRunAdmission, recheckInstalledRunWorkspace, type AssembledInstalledRun } from '../installed-run.js';
 import { assertInstalledRunAdmissionCapacity } from '../installed-run-capacity.js';
@@ -260,11 +260,12 @@ export async function replayInstalledRunAdmission(
   supplied: ReturnType<typeof normalizeRunSubmitRequest>, identity: AuthenticatedControlIdentity, runtime?: AuthorizationRuntime, signal?: AbortSignal
 ): Promise<AdmitRunResult | undefined> {
   signal?.throwIfAborted();
+  const reads = signal ? artifacts.withReadSignal(signal) : artifacts;
   assertCurrentControlFrame(owner, identity);
   const normalized = normalizeRunSubmitRequest(supplied.originalRequest), request = normalized.request;
   const { principalId } = identity, requestDigest = normalized.originalRequestDigest;
   const intent = runSubmitIntentDigest(principalId, request);
-  const channel = await validateControlChannelClosure(artifacts, owner, identity);
+  const channel = await validateControlChannelClosure(reads, owner, identity);
   assertActiveStateOwner(driver, owner);
   const control = readControlRequest(driver, principalId, 'run.submit', request.requestId);
   if (control && control.requestDigest !== requestDigest)
@@ -275,7 +276,7 @@ export async function replayInstalledRunAdmission(
       const source = readSourceInspectionAttempt(driver, { principalId, admissionKey: request.admissionKey, admissionIntentDigest: intent });
       if (!source || source.phase !== 'retired' || source.outcome.kind === 'captured' || source.outcome.errorResponseRef !== control.responseRef)
         throw new KernelStorageError('RECOVERY_REQUIRED', 'installed Run replay has neither admission nor its original source refusal');
-      await readSourceInspectionErrorResponse(artifacts, source);
+      await readSourceInspectionErrorResponse(reads, source);
     }
     return undefined;
   }
@@ -285,7 +286,7 @@ export async function replayInstalledRunAdmission(
   const originalControl = readControlRequest(driver, principalId, 'run.submit', admission.admissionRequestId);
   if (!originalControl || (control && control.responseRef !== originalControl.responseRef))
     throw new KernelStorageError('RECOVERY_REQUIRED', 'installed Run original response link is missing or inconsistent');
-  const originalCore = await readCanonicalArtifact<object>(artifacts, originalControl.requestDigest);
+  const originalCore = await readCanonicalArtifact<object>(reads, originalControl.requestDigest);
   const original = normalizeRunSubmitRequest({ ...originalCore, requestDigest: originalControl.requestDigest });
   if (original.request.requestId !== admission.admissionRequestId || original.request.admissionKey !== request.admissionKey ||
       runSubmitIntentDigest(principalId, original.request) !== intent)
@@ -294,8 +295,8 @@ export async function replayInstalledRunAdmission(
   const source = readSourceInspectionAttempt(driver, { principalId, admissionKey: request.admissionKey, admissionIntentDigest: intent });
   if (!source || source.phase !== 'retired' || source.outcome.kind !== 'captured')
     throw new KernelStorageError('RECOVERY_REQUIRED', 'installed Run original source is not captured and retired');
-  const target = await readCanonicalArtifact<SourceInspectionTargetV1>(artifacts, source.targetRef);
-  const sourceOriginal = normalizeRunSubmitRequest(await readCanonicalArtifact(artifacts, target.originalRequestRef));
+  const target = await readCanonicalArtifact<SourceInspectionTargetV1>(reads, source.targetRef);
+  const sourceOriginal = normalizeRunSubmitRequest(await readCanonicalArtifact(reads, target.originalRequestRef));
   const sourceIndex = readSourceInspectionOriginalRequest(driver, source.inspectionId);
   if (!exactKeys(target, ['schemaVersion', 'format', 'principalId', 'method', 'admissionKey', 'admissionIntentDigest',
       'originalRequestRef', 'originalRequestDigest', 'sessionId', 'expectedContextRevision', 'workspaceIdentityRef', 'workspaceIdentityDigest',
@@ -308,10 +309,10 @@ export async function replayInstalledRunAdmission(
       target.originalRequestDigest !== sourceOriginal.originalRequestDigest || sourceIndex.originalRequestId !== sourceOriginal.request.requestId ||
       sourceIndex.originalRequestDigest !== sourceOriginal.originalRequestDigest || runSubmitIntentDigest(principalId, sourceOriginal.request) !== intent)
     throw new KernelStorageError('RECOVERY_REQUIRED', 'installed Run source original request closure changed');
-  await readSourceInspectionRetirement(driver, artifacts, source, target);
+  await readSourceInspectionRetirement(driver, reads, source, target);
 
-  const response = await readPublishedResponse(artifacts, originalControl.responseRef), run = response.result.snapshot.run;
-  const actual = readRun(driver, admission.id), spec = decodeRunSpec(await readCanonicalArtifact(artifacts, actual.specRef));
+  const response = await readPublishedResponse(reads, originalControl.responseRef), run = response.result.snapshot.run;
+  const actual = readRun(driver, admission.id), spec = decodeRunSpec(await readCanonicalArtifact(reads, actual.specRef));
   const checkpoint = readCheckpoint(driver, identityHash('cliq-checkpoint-id-v1', actual.id, 'initial', 0));
   const expectedFrontier: RunFrontier = { schemaVersion: 1, kind: 'agent', phase: 'model_turn',
     turnId: identityHash('cliq-turn-id-v1', actual.id, 'initial'), contextItemSeq: 0, cause: 'initial' };
@@ -329,15 +330,15 @@ export async function replayInstalledRunAdmission(
       spec.operation !== 'agent' || canonicalSha256(spec.budgets) !== canonicalSha256(request.budgets) ||
       spec.baseWorkspaceManifestRef !== source.outcome.sourceManifestRef)
     throw new KernelStorageError('RECOVERY_REQUIRED', 'installed Run original response, budget or initial checkpoint closure changed');
-  const objective = decodeRunObjective(await readCanonicalArtifact(artifacts, spec.objectiveRef));
-  const context = decodeAdmittedContext(await readCanonicalArtifact(artifacts, spec.admittedContextRef));
-  const workspace = decodeWorkspaceIdentity(await readCanonicalArtifact(artifacts, target.workspaceIdentityRef));
-  const manifest = decodeSourceManifest(await readCanonicalArtifact(artifacts, spec.baseWorkspaceManifestRef));
-  const frozenIgnore = decodeFrozenIgnoreRules(await readCanonicalArtifact(artifacts, manifest.frozenIgnoreRulesRef));
-  const projection = decodeSourceProjection(await readCanonicalArtifact(artifacts, spec.sourceProjectionRef));
-  const assembly = decodeRetainedRunAssembly(await readCanonicalArtifact(artifacts, spec.assemblyRef));
-  const state = decodeWorkspaceState(await readCanonicalArtifact(artifacts, checkpoint.workspaceStateRef));
-  const initialContext = decodeContextManifest(await readCanonicalArtifact(artifacts, checkpoint.contextManifestRef));
+  const objective = decodeRunObjective(await readCanonicalArtifact(reads, spec.objectiveRef));
+  const context = decodeAdmittedContext(await readCanonicalArtifact(reads, spec.admittedContextRef));
+  const workspace = decodeWorkspaceIdentity(await readCanonicalArtifact(reads, target.workspaceIdentityRef));
+  const manifest = decodeSourceManifest(await readCanonicalArtifact(reads, spec.baseWorkspaceManifestRef));
+  const frozenIgnore = decodeFrozenIgnoreRules(await readCanonicalArtifact(reads, manifest.frozenIgnoreRulesRef));
+  const projection = decodeSourceProjection(await readCanonicalArtifact(reads, spec.sourceProjectionRef));
+  const assembly = decodeRetainedRunAssembly(await readCanonicalArtifact(reads, spec.assemblyRef));
+  const state = decodeWorkspaceState(await readCanonicalArtifact(reads, checkpoint.workspaceStateRef));
+  const initialContext = decodeContextManifest(await readCanonicalArtifact(reads, checkpoint.contextManifestRef));
   if (objective.utf8 !== request.objective || context.sessionId !== request.sessionId ||
       context.sessionContextRevision !== request.expectedContextRevision || workspace.kind !== 'live' || workspace.ownerPrincipalId !== principalId ||
       workspace.canonicalRootPath !== request.workspacePath || workspace.identityDigest !== target.workspaceIdentityDigest ||
@@ -351,13 +352,13 @@ export async function replayInstalledRunAdmission(
       initialContext.runId !== actual.id || initialContext.throughItemSeq !== 0 || initialContext.assemblyRef !== spec.assemblyRef ||
       initialContext.admittedContextRef !== spec.admittedContextRef || initialContext.segments.length !== 0)
     throw new KernelStorageError('RECOVERY_REQUIRED', 'installed Run frozen objective/context/source closure changed');
-  const { channel: initialChannel } = await readRetainedControlChannelClosure(artifacts, owner, { principalId,
+  const { channel: initialChannel } = await readRetainedControlChannelClosure(reads, owner, { principalId,
     channelIdentityRef: originalControl.channelIdentityRef, channelIdentityDigest: originalControl.channelIdentityDigest });
-  const verifierSpec = decodeVerifierSpec(await readCanonicalArtifact(artifacts, spec.verifierSpecRef));
+  const verifierSpec = decodeVerifierSpec(await readCanonicalArtifact(reads, spec.verifierSpecRef));
   if (verifierSpec.verifiers.some(entry => entry.gate === 'required')) {
     if (request.allowUnverified || spec.unverifiedConsentRef !== undefined) throw new TypeError('required verifier admission cannot carry unverified consent');
   } else {
-    const consent = decodeUnverifiedConsent(await readCanonicalArtifact(artifacts, spec.unverifiedConsentRef!));
+    const consent = decodeUnverifiedConsent(await readCanonicalArtifact(reads, spec.unverifiedConsentRef!));
     const { unverifiedConsentRef: _consent, ...specCore } = spec;
     if (initialChannel.channelIdentityDigest !== originalControl.channelIdentityDigest || initialChannel.principalId !== principalId ||
         consent.principalId !== principalId || consent.admissionIntentDigest !== intent || consent.createdAt !== actual.createdAt ||
@@ -368,7 +369,7 @@ export async function replayInstalledRunAdmission(
   let verifierHistory: Awaited<ReturnType<typeof validateVerifierRunAdmission>> | undefined;
   if (verifierSpec.verifiers.length) {
     if (!runtime) throw new TypeError('verifier replay has no trusted retained release keys');
-    verifierHistory = await validateVerifierRunAdmission(driver, artifacts, owner, runtime, actual.id, signal);
+    verifierHistory = await validateVerifierRunAdmission(driver, reads, owner, runtime, actual.id, signal);
   }
   const admittedRequestDigest = canonicalSha256({ admissionIntentDigest: intent, objectiveRef: spec.objectiveRef,
     admittedContextRef: spec.admittedContextRef, runSpecRef: actual.specRef, workspaceIdentityDigest: workspace.identityDigest,
@@ -437,6 +438,7 @@ async function admitRunInternal(
   signal?: AbortSignal
 ): Promise<AdmitRunResult> {
   signal?.throwIfAborted();
+  const reads = signal ? artifacts.withReadSignal(signal) : artifacts;
   const verifierInput = Object.getOwnPropertyDescriptor(input, 'verifierRequests');
   if (verifierInput) {
     if (!verifierInput.enumerable || !Object.hasOwn(verifierInput, 'value')) throw new TypeError('verifier requests must be plain data');
@@ -466,18 +468,18 @@ async function admitRunInternal(
     admitIntent(input, workspacePath, objectiveText, budgets);
   const requestDigest = installed?.data.normalized.originalRequestDigest ?? admitRequestDigest(input, workspacePath, objectiveText, budgets);
   const replay = () => installed ? replayInstalledRunAdmission(driver, artifacts, owner, installed.data.normalized, installed.identity, runtime, signal) :
-    replayAdmitRun(driver, artifacts, owner, input, admissionIntentDigest, requestDigest);
+    replayAdmitRun(driver, reads, owner, input, admissionIntentDigest, requestDigest);
 
   const replayed = await replay();
   if (replayed !== undefined) {
     if (input.verifierRequests?.length) {
       if (!runtime) throw new TypeError('verifier replay has no retained runtime roots');
-      await validateVerifierRunAdmission(driver, artifacts, owner, runtime, replayed.run.id, signal);
+      await validateVerifierRunAdmission(driver, reads, owner, runtime, replayed.run.id, signal);
     }
     return replayed;
   }
 
-  const channelClosure = await validateControlChannelClosure(artifacts, owner, input);
+  const channelClosure = await validateControlChannelClosure(reads, owner, input);
   const channel = channelClosure.channel;
 
   const session = readSession(driver, input.sessionId);
@@ -488,7 +490,7 @@ async function admitRunInternal(
     throw new KernelStorageError('INVALID_REQUEST', 'session context revision does not match the admitted cursor');
   }
   const workspaceIdentity = decodeWorkspaceIdentity(
-    await artifacts.readCanonical(session.workspaceIdentityRef)
+    await reads.readCanonical(session.workspaceIdentityRef)
   ) as Extract<WorkspaceIdentityV1, { kind: 'live' }>;
   if (workspaceIdentity.kind !== 'live') {
     throw new KernelStorageError('INVALID_REQUEST', 'only live Sessions may admit a Run');
@@ -499,7 +501,7 @@ async function admitRunInternal(
   if (installed) recheckInstalledRunWorkspace(installed.prepared, driver, owner, installed.identity);
   else await recaptureLiveWorkspaceIdentity(workspaceIdentity, workspacePath);
 
-  const projection = decodeSessionProjection(await artifacts.readCanonical(session.contextProjectionRef));
+  const projection = decodeSessionProjection(await reads.readCanonical(session.contextProjectionRef));
   if (
     projection.sessionId !== session.id ||
     projection.contextRevision !== session.contextRevision ||
@@ -508,15 +510,15 @@ async function admitRunInternal(
     throw new KernelStorageError('RECOVERY_REQUIRED', 'session projection does not match the Session row');
   }
 
-  const frozenIgnore = decodeFrozenIgnoreRules(await artifacts.readCanonical(input.frozenIgnoreRulesRef));
-  const sourceProjection = decodeSourceProjection(await artifacts.readCanonical(input.sourceProjectionRef));
+  const frozenIgnore = decodeFrozenIgnoreRules(await reads.readCanonical(input.frozenIgnoreRulesRef));
+  const sourceProjection = decodeSourceProjection(await reads.readCanonical(input.sourceProjectionRef));
   if (
     sourceProjection.frozenIgnoreRulesRef !== input.frozenIgnoreRulesRef ||
     sourceProjection.frozenIgnoreRulesDigest !== frozenIgnore.rulesDigest
   ) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'source projection is not bound to the frozen ignore rules');
   }
-  const sourceManifest = decodeSourceManifest(await artifacts.readCanonical(input.baseWorkspaceManifestRef));
+  const sourceManifest = decodeSourceManifest(await reads.readCanonical(input.baseWorkspaceManifestRef));
   if (
     sourceManifest.role !== 'base' ||
     sourceManifest.sourceProjectionRef !== input.sourceProjectionRef ||
@@ -527,7 +529,7 @@ async function admitRunInternal(
   ) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'base SourceManifest is not bound to the admitted Session workspace');
   }
-  decodeWorkspaceEntries(await artifacts.readCanonical(sourceManifest.entriesRef));
+  decodeWorkspaceEntries(await reads.readCanonical(sourceManifest.entriesRef));
   if ((sourceManifest.git === undefined) !== (workspaceIdentity.repositoryIdentityDigest === undefined)) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'SourceManifest git identity does not match the live workspace');
   }
@@ -538,7 +540,7 @@ async function admitRunInternal(
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'SourceManifest repository digest does not match the live workspace');
   }
 
-  const verifierSpec = decodeVerifierSpec(await artifacts.readCanonical(input.verifierSpecRef));
+  const verifierSpec = decodeVerifierSpec(await reads.readCanonical(input.verifierSpecRef));
   const requiredVerifiers = verifierSpec.verifiers.filter((entry) => entry.gate === 'required');
   if (requiredVerifiers.length > 0 && input.allowUnverified) {
     throw new KernelStorageError('INVALID_REQUEST', 'allowUnverified is forbidden when a required verifier exists');
@@ -550,28 +552,28 @@ async function admitRunInternal(
   let verifierPreparation: Awaited<ReturnType<typeof prepareVerifierSpec>> | undefined;
   if (verifierSpec.verifiers.length || verifierRequests.length) {
     if (!runtime || !verifierRequests.length) throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');
-    const policy = await readCanonicalArtifact<{ mode: string }>(artifacts, input.policyRef);
-    verifierPreparation = await prepareVerifierSpec(driver, artifacts, owner, runtime, { principalId: input.principalId,
-      requests: verifierRequests, policyMode: policy.mode, assembly: decodeRetainedRunAssembly(await readCanonicalArtifact(artifacts, input.assemblyRef)),
+    const policy = await readCanonicalArtifact<{ mode: string }>(reads, input.policyRef);
+    verifierPreparation = await prepareVerifierSpec(driver, reads, owner, runtime, { principalId: input.principalId,
+      requests: verifierRequests, policyMode: policy.mode, assembly: decodeRetainedRunAssembly(await readCanonicalArtifact(reads, input.assemblyRef)),
       sourceProjectionRef: input.sourceProjectionRef, sandboxProfileRef: input.sandboxProfileRef }, undefined, signal);
     if (verifierPreparation.specRef !== input.verifierSpecRef) throw new KernelStorageError('ARTIFACT_MISMATCH', 'verifier spec differs from the authorized public command and environment');
   }
 
-  await artifacts.readBytes(input.assemblyRef);
-  await artifacts.readBytes(input.policyRef);
-  await artifacts.readBytes(input.sandboxProfileRef);
+  await reads.readBytes(input.assemblyRef);
+  await reads.readBytes(input.policyRef);
+  await reads.readBytes(input.sandboxProfileRef);
 
-  const referencedMetadata = await Promise.all([
-    artifacts.describe(input.assemblyRef, 'application/json', 'cliq-run-assembly-v1'),
-    artifacts.describe(input.policyRef, 'application/json', 'cliq-run-policy-v1'),
-    artifacts.describe(input.sandboxProfileRef, 'application/json', 'cliq-sandbox-profile-v1'),
-    artifacts.describe(input.verifierSpecRef, 'application/json', 'cliq-verifier-spec-v1'),
-    artifacts.describe(input.sourceProjectionRef, 'application/json', 'cliq-source-projection-v1'),
-    artifacts.describe(input.frozenIgnoreRulesRef, 'application/json', 'cliq-frozen-ignore-rules-v1'),
-    artifacts.describe(input.baseWorkspaceManifestRef, 'application/json', 'cliq-source-manifest-v1'),
-    artifacts.describe(sourceManifest.entriesRef, 'application/json', 'cliq-workspace-entries-v1'),
+  const referencedMetadata = await joinResourceOperations([
+    reads.describe(input.assemblyRef, 'application/json', 'cliq-run-assembly-v1'),
+    reads.describe(input.policyRef, 'application/json', 'cliq-run-policy-v1'),
+    reads.describe(input.sandboxProfileRef, 'application/json', 'cliq-sandbox-profile-v1'),
+    reads.describe(input.verifierSpecRef, 'application/json', 'cliq-verifier-spec-v1'),
+    reads.describe(input.sourceProjectionRef, 'application/json', 'cliq-source-projection-v1'),
+    reads.describe(input.frozenIgnoreRulesRef, 'application/json', 'cliq-frozen-ignore-rules-v1'),
+    reads.describe(input.baseWorkspaceManifestRef, 'application/json', 'cliq-source-manifest-v1'),
+    reads.describe(sourceManifest.entriesRef, 'application/json', 'cliq-workspace-entries-v1'),
     ...(input.credentialGrantRefs ?? []).map((ref) =>
-      artifacts.describe(ref, 'application/json', 'cliq-endpoint-credential-grant-binding-v1')
+      reads.describe(ref, 'application/json', 'cliq-endpoint-credential-grant-binding-v1')
     )
   ]);
 

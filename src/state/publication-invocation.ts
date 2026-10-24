@@ -35,7 +35,7 @@ import { readWorkerLaunchesForRun } from './repositories/worker-launches.js';
 import { readWorkspaceGenerationsForRun } from './repositories/workspace-generations.js';
 import { readCheckpoint, readRun, readSession, readSessionPrincipalId, ZERO_BUDGET } from './rows.js';
 import { assertDeliveryPublicationExecution, assertDeliveryPublicationMaintenanceExecution, type DeliveryPublicationMaintenanceTask,
-  type DeliveryPublicationTask, type RunExecutionWorkerIdentity } from './run-execution.js';
+  type DeliveryPublicationTask, type RunExecutionWorkerIdentity, type RunPublicationPhase } from './run-execution.js';
 import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
 import { assertActiveStateOwner, readStateOwner, type StateOwnerContext } from './state-owner.js';
 import { supervisorInspectorIdentity } from './supervisor-inspector.js';
@@ -251,11 +251,15 @@ async function physicalInput(driver: SqliteDriver, artifacts: ArtifactCatalog, p
   return { ...common, kind: 'replace' as const, expected: expected(operation.expected), desired: desired(operation.desired),
     stagingName: operation.stagingName, quarantineName: operation.quarantineName };
 }
+type PublicationPreparationPhase = Extract<RunPublicationPhase, `publication_prepare_${string}`>;
 /** Sole forward preparation. Handles and task brands are checked before any
- * SQLite/CAS/native I/O; no caller chooses a request, grant, dispatch or proof. */
+ * SQLite/CAS/native I/O; no caller chooses a request, grant, dispatch or proof.
+ * Fixed observation is separate from the closed authority input. */
 export async function preparePublicationInvocation(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
   input: { execution: unknown; task: DeliveryPublicationTask; worker: RunExecutionWorkerIdentity; workspaceRoot: HeldWorkspaceRoot;
-    expectedRunRevision: number; signal?: AbortSignal }): Promise<PublicationInvocationOwner> {
+    expectedRunRevision: number; signal?: AbortSignal },
+  onPreparationPhase?: (phase: PublicationPreparationPhase) => void): Promise<PublicationInvocationOwner> {
+  const preparationPhase = (phase: PublicationPreparationPhase) => { try { onPreparationPhase?.(phase); } catch { /* Diagnosis cannot decide preparation. */ } };
   closedInput(input);
   assertDeliveryPublicationExecution(driver, owner, input.execution, input.worker, input.task);
   assertHeldWorkspaceRoot(input.workspaceRoot);
@@ -264,6 +268,7 @@ export async function preparePublicationInvocation(driver: SqliteDriver, artifac
   const worker = immutableSnapshot(input.worker), root = input.workspaceRoot;
   input = Object.freeze({ ...input, worker });
   const reads = input.signal ? artifacts.withReadSignal(input.signal) : artifacts;
+  preparationPhase('publication_prepare_read');
   const cut = await readRecoveryClosure(driver, reads, worker.runId), prefix = await readPublicationPrefix(driver, reads, cut);
   const authorization = prefix.authorization;
   if (!authorization?.grant || !authorization.grantRef || authorization.decision.decision !== 'allow' || authorization.workspace.kind !== 'live')
@@ -278,9 +283,11 @@ export async function preparePublicationInvocation(driver: SqliteDriver, artifac
   if (heldWorkspaceRootPath(root) !== authorization.workspace.canonicalRootPath) invalid('publication root differs from its original approved workspace');
   requireEqual(root.identity, authorization.workspace.rootIdentity, 'publication original root identity');
   const issuedAt = sampleCanonicalNow();
+  preparationPhase('publication_prepare_grant');
   const derived = derivePublicationGrant({ context: { ...authorization.context, frontierRef: cut.run.frontierRef },
     parent: authorization.grant, parentRef: authorization.grantRef, decision: authorization.decision, sequence: 'forward', operationIndex: index, issuedAt });
   const snapshot = sqlCut(driver, cut.run.id, authorization.verified.admission.source.run.id), fingerprint = canonicalSha256(snapshot);
+  preparationPhase('publication_prepare_cut');
   await assertPublicationReadCut(driver, reads, cut);
   const assertCut = (connection: SqliteConnection) => {
     assertActiveStateOwner(connection, owner);
@@ -291,7 +298,9 @@ export async function preparePublicationInvocation(driver: SqliteDriver, artifac
   const metadata = await joinResourceOperations([artifacts.publishCanonical(derived.request, derived.request.format), artifacts.publishCanonical(derived.target, derived.target.format),
     artifacts.publishCanonical(derived.grant, derived.grant.format)]);
   const dispatchId = sha256Bytes(randomBytes(32));
+  preparationPhase('publication_prepare_physical');
   const nativeInput = await physicalInput(driver, reads, prefix, operation, publicationArenaId(cut.run.id, operation.operationId, derived.request.opId, 0, dispatchId));
+  preparationPhase('publication_prepare_admit');
   const prepared = await prepareValidatedInvocation(driver, artifacts, owner, { runId: cut.run.id, expectedRunRevision: cut.run.revision,
     leaseEpoch: worker.leaseEpoch, opId: derived.request.opId, opKind: 'publish', target: derived.request.targetRef,
     requestRef: canonicalSha256(derived.request), grantRef: canonicalSha256(derived.grant), replayClass: 'reconcile', reservation: { ...ZERO_BUDGET, toolCalls: 1 } },

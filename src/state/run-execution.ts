@@ -395,7 +395,8 @@ export type RunRetirementPhase = 'history' | 'quarantine_closure' | 'native_reti
   'workspace_observation' | 'retirement_commit' | 'resource_join';
 /** Fixed current work labels only, never publication or retirement evidence. */
 export type RunPublicationPhase = 'publication_select' | 'publication_worker_activate' | 'publication_roots_open' |
-  'publication_prepare' | 'publication_dispatch' | 'publication_settlement';
+  'publication_prepare' | 'publication_prepare_read' | 'publication_prepare_grant' | 'publication_prepare_cut' |
+  'publication_prepare_physical' | 'publication_prepare_admit' | 'publication_dispatch' | 'publication_settlement';
 /** Deep internal resource owner. Opening validates only; process creation is lazy.
  * Durable lifecycle, retry and budgets remain exclusively in the existing reducers. */
 export async function loadRunExecution(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
@@ -1586,7 +1587,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         publicationPhase('publication_prepare');
         const original = await publication.preparePublicationInvocation(driver, artifacts, owner, {
           execution, task, worker: identity, workspaceRoot: roots.workspaceRoot,
-          expectedRunRevision: readRun(driver, runId).revision, signal });
+          expectedRunRevision: readRun(driver, runId).revision, signal }, publicationPhase);
         publicationOwners.add(original);
         // The preparation can finish after Stop. Register its original owner
         // before inspecting the signal, so all close paths retain its join.

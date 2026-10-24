@@ -197,6 +197,7 @@ export async function replaySubmittedSource(driver: SqliteDriver, artifacts: Art
   bootstrap: SourceInspectionOwnerBootstrap, request: NormalizedSourceRequest,
   identity: AuthenticatedControlIdentity, signal?: AbortSignal): Promise<SourceInspectionAttemptV1 | undefined> {
   signal?.throwIfAborted();
+  const reads = signal ? artifacts.withReadSignal(signal) : artifacts;
   const key = { principalId: identity.principalId, method: request.method, admissionKey: request.admissionKey,
     admissionIntentDigest: sourceInspectionIntentDigest(identity.principalId, request) };
   assertSourceInspectionRequestId(driver, identity.principalId, request);
@@ -210,22 +211,22 @@ export async function replaySubmittedSource(driver: SqliteDriver, artifacts: Art
     return;
   }
   const originalIndex = readSourceInspectionOriginalRequest(driver, retained.inspectionId);
-  const { target } = await readRetainedSourceInspectionTarget(artifacts, retained, originalIndex, bootstrap, { driver, signal });
+  const { target } = await readRetainedSourceInspectionTarget(reads, retained, originalIndex, bootstrap, { driver, signal });
   if (retained.phase !== 'retired') throw new KernelStorageError('RECOVERY_REQUIRED', 'source inspection still owns unretired capture resources');
-  await readSourceInspectionRetirement(driver, artifacts, retained, target);
+  await readSourceInspectionRetirement(driver, reads, retained, target);
   const metadata: PublishedArtifact[] = [];
   if (retained.outcome.kind === 'captured') {
-    const source = decodeSourceManifest(await readCanonicalArtifact(artifacts, retained.outcome.sourceManifestRef));
+    const source = decodeSourceManifest(await readCanonicalArtifact(reads, retained.outcome.sourceManifestRef));
     if (source.role !== 'base' || source.manifestDigest !== retained.outcome.sourceManifestDigest ||
         source.workspaceIdentityDigest !== retained.workspaceIdentityDigest)
       throw new KernelStorageError('RECOVERY_REQUIRED', 'retained source outcome differs from its exact capture');
-    if (retained.method === 'run.apply') await readDeliveryCaptureTopology(artifacts, retained, target);
+    if (retained.method === 'run.apply') await readDeliveryCaptureTopology(reads, retained, target);
   } else {
     const errorResponseRef = retained.outcome.errorResponseRef;
-    const error = await readCanonicalArtifact(artifacts, errorResponseRef); assertErrorResponse(error, retained.inspectionId, retained.method);
+    const error = await readCanonicalArtifact(reads, errorResponseRef); assertErrorResponse(error, retained.inspectionId, retained.method);
     if ((retained.outcome.kind === 'cancelled') !== (error.error.code === 'CANCEL_REQUESTED'))
       throw new KernelStorageError('RECOVERY_REQUIRED', 'source outcome differs from its retained error class');
-    const channel = await validateControlChannelClosure(artifacts, owner, identity); metadata.push(...channel.metadata);
+    const channel = await validateControlChannelClosure(reads, owner, identity); metadata.push(...channel.metadata);
     driver.transaction(connection => {
       assertActiveStateOwner(connection, owner); assertSourceInspectionRequestId(connection, identity.principalId, request, retained.inspectionId);
       const current = readSourceInspectionAttempt(connection, key);
@@ -241,7 +242,7 @@ export async function replaySubmittedSource(driver: SqliteDriver, artifacts: Art
         channelIdentityDigest: identity.channelIdentityDigest, responseRef: errorResponseRef, committedAt: now });
     });
   }
-  await validateControlChannelClosure(artifacts, owner, identity); assertActiveStateOwner(driver, owner);
+  await validateControlChannelClosure(reads, owner, identity); assertActiveStateOwner(driver, owner);
   return retained;
 }
 
@@ -343,14 +344,15 @@ export async function captureSubmittedSource(driver: SqliteDriver, artifacts: Ar
   selectedRuntime?: HeldInstalledRuntime):
 Promise<SourceInspectionAttemptV1> {
   const normalized = normalizeSourceInspectionRequest(input.request), wire = normalized.request, identity = immutableSnapshot(input.identity);
-  signal?.throwIfAborted(); await validateControlChannelClosure(artifacts, owner, identity); assertActiveStateOwner(driver, owner);
+  const reads = signal ? artifacts.withReadSignal(signal) : artifacts;
+  signal?.throwIfAborted(); await validateControlChannelClosure(reads, owner, identity); assertActiveStateOwner(driver, owner);
   const retained = await replaySubmittedSource(driver, artifacts, owner, bootstrap, wire, identity, signal);
   if (retained) return retained;
   signal?.throwIfAborted();
-  const deliverySource = wire.method === 'run.apply' ? input.deliverySource ?? await readVerifiedDeliverySource(driver, artifacts, owner,
+  const deliverySource = wire.method === 'run.apply' ? input.deliverySource ?? await readVerifiedDeliverySource(driver, reads, owner,
     { principalId: identity.principalId, sourceRunId: wire.sourceRunId, expectedRunResultRef: wire.expectedRunResultRef, signal }) : undefined;
   const request: SourceCaptureSelection = wire.method === 'run.apply'
-    ? await resolveDeliverySourceCapture(driver, artifacts, owner, wire, identity.principalId, deliverySource!, signal) : wire;
+    ? await resolveDeliverySourceCapture(driver, reads, owner, wire, identity.principalId, deliverySource!, signal) : wire;
   if (deliverySource && (deliverySource.assembly.runtime.runtimeBundleRef !== canonicalSha256(bootstrap.bundle) ||
       deliverySource.assembly.runtime.runtimeBundleManifestDigest !== bootstrap.bundle.manifestDigest ||
       deliverySource.spec.sandboxProfileRef !== canonicalSha256(bootstrap.sandboxProfile)))

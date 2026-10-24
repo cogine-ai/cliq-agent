@@ -1907,3 +1907,75 @@ sixteen-line/4-KiB bounds and successful original-join requirements. New labels
 and verifier substages are diagnostics, not evidence that any failed cut passed.
 Full follow-up local and immutable Linux validation remain required; no complete
 PR or broader qualification claim follows from these partial results.
+
+The next immutable candidate, commit
+`91bdadafebdf7984e38cb7296ac329065d911da7`, passes the original local build
+and full `npm test`: 2,654 passes and one original conditional
+cross-filesystem skip, without failures, cancellations or todos. Its complete
+local validation SHA-256 is
+`47b14a31865306e61e1dd573ee6a0ad94ec7bbc24b16e1b3d5698e6207ba3699`.
+[Linux run 40125125116](https://github.com/cogine-ai/cliq-agent/actions/runs/40125125116),
+attempt 1, finishes with seventeen successful and five failed jobs. All four
+Linux/macOS Node 22.13/24 jobs and the entire real Linux Run execution/recovery
+job pass, including the original retirement-uncertainty regression and the
+unpaused live-task cancellation campaign. Twenty-three categories and 105
+original JSON reports (495,430 bytes) are retained and independently verified,
+with no pending, incomplete or rejected categories. Final capture SHA-256:
+`cc68ce4ce69d65b7401f47469572db07378b593d0f79ede89dfd9192c33b52af`.
+
+Five installed-journey qualifications remain false, for distinct reasons:
+
+- Normal Delivery exceeds its original ninety-second terminal deadline, but
+  its original two-second Stop and writer/daemon joins now pass. Its first
+  publication arrival labels reach `publication_prepare`, not dispatch or
+  settlement. The joined Store's first scheduler failure is in that phase,
+  before Stop, classified `other / none`. This classification is not evidence
+  of an ordinary TypeError and does not identify the rejecting internal step.
+- The full delayed-volume journey fails five-second authentication READY
+  before Run admission. The client receives hello near the deadline after
+  thirteen complete image revalidations, but final-current verification is
+  not observed. Missing that marker does not prove those checks never began.
+  The separate hello interval has no additional client revalidation, but
+  cannot yet be attributed to a particular server operation.
+- Late-result and original-stop journeys authenticate, then exceed the first
+  original `run.submit` thirty-second request. Their complete fixed call
+  prefix identifies the method, not its pending internal await. Both original
+  writer/daemon joins pass; neither intended physical publication cut is hit.
+- The maximum-image verifier emits only the false-qualification secret-scan
+  fallback. Before its corpus scan, 675 independent streams and 2,435,649
+  bytes have been scanned. The original cumulative 4,096-stream limit is
+  reached and all streams close, with no match. The fallback does not retain
+  the original verifier outcome and cannot qualify repair or retirement.
+
+The following coherent cancellation correction scopes pre-admission,
+source-replay and inspection reads to the original signal, while retaining
+the original raw artifact catalog for resource birth, publication, branded
+identity and settlement. Admission's referenced-metadata group joins every
+actual read even when one rejects, retaining the original error and recovery
+uncertainty priority. Genuine CAS/descriptor return-gate regressions cover
+cancellation, ordinary failure, late uncertainty and raw publication after an
+aborted read view. These local results do not explain or qualify the pending
+installed `run.submit` await.
+
+Five fixed preparation subphases refine only the existing joined exit-summary
+vocabulary: read, grant, cut, physical input and invocation admission. The
+closed authority input, operations, error identity, timing and checks remain
+unchanged. The six live first-arrival labels and their 512-byte budget do not
+expand. The original sixteen-row, 4-KiB summary and eight-phase Stop bounds
+remain unchanged; literal decoding and real child-pipe tests are diagnostic
+regressions, not Supervisor-origin or physical-cut evidence.
+
+The unchanged secret scanner also gains a separate failure-progress projection
+bound privately to its original thrown error. It exposes only fixed source
+buckets and already-observed/attempted counts after the actual corpus catch
+and cleanup, never names, paths, content, error text or a successful scan
+claim. The old four-field failure projection remains unchanged. Real copied
+SQLite tests preserve the actual 4,096-stream refusal and original error;
+Linux-only CAS/descriptor cases remain pending their Linux execution. No
+streams are merged, skipped, reset or relabeled and no capacity limit changes.
+
+This combined follow-up still requires its own complete local validation and
+fresh immutable Linux evidence. Authentication, first submission, publication,
+maximum-image repair and the approved delayed-storage cuts remain open. No
+complete PR, full I1, provider, macOS, reboot, I2-I4 or final Kernel-Cut claim
+follows from diagnostics, local regressions or the passing Run/recovery job.

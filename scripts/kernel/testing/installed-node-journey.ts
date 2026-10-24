@@ -25,7 +25,8 @@ import { decodeRunResult, decodeWorkspaceDiff } from '../../../src/state/result-
 import { buildInstalledSupervisorPackage } from './installed-supervisor-package.js';
 import { CredentialSecretScanError, createCredentialSecretScanner, copyCredentialSecretScanFailureDiagnostic,
   type CredentialSecretScanCode, type CredentialSecretScanFailureDiagnostic, type CredentialSecretScanFailureStage } from './credential-secret-scan.js';
-import { CredentialSecretCorpusError, scanCredentialSecretCorpus } from './credential-secret-corpus.js';
+import { CredentialSecretCorpusError, scanCredentialSecretCorpus, readCredentialSecretCorpusScanProgress,
+  type CredentialSecretCorpusScanProgress } from './credential-secret-corpus.js';
 import { inspectInstalledWorkerIdentity, inspectInstalledWorkerRetirement, inspectInstalledWorkerRetirementHistory, inspectInstalledWorkerLaunchIds, type InstalledWorkerIdentityInspection, type InstalledWorkerRetirementBinding } from './installed-worker-lease.js';
 import { inspectInstalledOwnerHistory, waitForInstalledOwnerHistory } from './installed-read-control.js';
 import { assertInstalledVerifierOutcome, InstalledVerifierOutcomeError } from './installed-verifier-result.js';
@@ -176,6 +177,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
   const secret = Buffer.from(randomBytes(32).toString('hex')), password = Buffer.from(randomBytes(32).toString('hex'));
   let scanStage: CredentialSecretScanFailureStage = 'runtime', firstFailureStage: CredentialSecretScanFailureStage | null = null;
   let beforeCorpus: CredentialSecretScanFailureDiagnostic['beforeCorpus'] = null, corpusScanFailureCode: CredentialSecretScanCode | null = null;
+  let secretCorpusScanProgress: CredentialSecretCorpusScanProgress | undefined;
   const scanner = createCredentialSecretScanner([secret, password], { maxBytes: 512 * 1024 * 1024, maxStreams: 4096 }, () => {
     firstFailureStage ??= scanStage;
   });
@@ -1591,6 +1593,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
           if (error.corpusFailure) report.secretCorpusFailure = error.corpusFailure;
         } else if (error instanceof CredentialSecretScanError) {
           report.secretCorpusScanFailure = { code: error.code }; corpusScanFailureCode = error.code;
+          secretCorpusScanProgress = readCredentialSecretCorpusScanProgress(error);
+          if (secretCorpusScanProgress) report.secretCorpusScanProgress = secretCorpusScanProgress;
         }
         primary = error;
       }
@@ -1643,7 +1647,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         firstFailureStage, beforeCorpus, corpusScanFailureCode }); }
       catch { /* Diagnosis cannot replace or expose the original failed report. */ }
       publication = Buffer.from(JSON.stringify({ diagnosticOnly: true, qualified: false, phase: 'secret_scan_or_report_failure',
-        secretOutputScan: scanner.stats(), ...(secretScanFailure ? { secretScanFailure } : {}) }) + '\n');
+        secretOutputScan: scanner.stats(), ...(secretScanFailure ? { secretScanFailure } : {}),
+        ...(secretCorpusScanProgress ? { secretCorpusScanProgress } : {}) }) + '\n');
     }
     secret.fill(0); password.fill(0);
     try { await writeFile(recipe.reportFile, publication, { flag: 'wx', mode: 0o644 }); } finally { publication.fill(0); }

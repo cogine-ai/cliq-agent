@@ -23,6 +23,39 @@ test('publication progress writes each first-seen phase immediately in actual ar
     'CLIQ_STORE_DIAG_V1:stop:0:0:0:0:0\nCLIQ_STORE_DIAG_V1:end\n');
 });
 
+test('preparation details round-trip only through the original bounded exit summary, not live arrival markers', async () => {
+  const { INSTALLED_STORE_DIAGNOSTIC_BANNER } = await import('./installed-store-diagnostic-banner.js');
+  const { readInstalledStoreDiagnosticJournal } = await import('./installed-store-diagnostic-journal.js');
+  const phases = ['publication_prepare_read', 'publication_prepare_grant', 'publication_prepare_cut',
+    'publication_prepare_physical', 'publication_prepare_admit'];
+  const child = spawnSync(process.execPath, ['--input-type=commonjs', '--eval', INSTALLED_STORE_DIAGNOSTIC_BANNER + `
+    const d=require('node:diagnostics_channel').channel('cliq.installed.run.failures.v1');
+    d.publish({kind:'publication_phase',phase:'publication_prepare'});
+    for(const phase of ${JSON.stringify(phases)}) {
+      d.publish({kind:'publication_phase',phase});
+      d.publish({kind:'scheduler_failure',origin:'drive',phase,closing:false,errorClass:'other',code:'none',sqliteCode:null});
+    }
+    d.publish({kind:'store_stop',driverTasks:5,agentLoads:0,admissions:0,retainedFailures:0,globalFailure:false,
+      phases:Object.fromEntries(${JSON.stringify(phases)}.map(phase=>[phase,1]))});
+  `], { encoding: 'utf8', timeout: 5000, maxBuffer: 65536 });
+  assert.equal(child.error, undefined); assert.equal(child.signal, null); assert.equal(child.status, 0);
+  const rows = child.stderr.trimEnd().split('\n');
+  assert.deepEqual(rows.filter(row => row.startsWith('CLIQ_PUBLICATION_STAGE_V1:')),
+    ['CLIQ_PUBLICATION_STAGE_V1:1:publication_prepare']);
+  const summaryRows = rows.filter(row => row.startsWith('CLIQ_STORE_DIAG_V1:'));
+  assert(summaryRows.length <= 16); assert(Buffer.byteLength(summaryRows.join('\n')) <= 4096);
+  assert(summaryRows.every(row => Buffer.byteLength(row) <= 255));
+  const sender = { uid: 1000, pid: 2000, invocationId: 'a'.repeat(32) };
+  const journal = summaryRows.map(MESSAGE => JSON.stringify({ _UID: '1000', _PID: '2000', _TRANSPORT: 'stdout',
+    _SYSTEMD_INVOCATION_ID: sender.invocationId, MESSAGE })).join('\n');
+  const summary = readInstalledStoreDiagnosticJournal(journal, sender)!;
+  assert.equal(summary.schedulerFailures, 5); assert.equal(summary.schedulerFailuresBeforeStop, 5);
+  assert.equal(summary.firstSchedulerFailure!.phase, phases[0]);
+  assert.equal(summary.lastSchedulerFailure!.phase, phases.at(-1));
+  assert.deepEqual(summary.stop.phases, Object.fromEntries(phases.map(phase => [phase, 1])));
+  assert.equal(Object.hasOwn(summary, 'qualified'), false);
+});
+
 test('malformed identifiable progress data cannot invoke getters or poison an original valid summary', async () => {
   const { INSTALLED_STORE_DIAGNOSTIC_BANNER } = await import('./installed-store-diagnostic-banner.js');
   const child = spawnSync(process.execPath, ['--input-type=commonjs', '--eval', INSTALLED_STORE_DIAGNOSTIC_BANNER + `

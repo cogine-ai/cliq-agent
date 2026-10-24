@@ -2,12 +2,15 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { promises as fs } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
+import * as corpus from './credential-secret-corpus.js';
 import { CredentialSecretCorpusError, scanCopiedCredentialDatabase, scanCredentialSecretCorpus } from './credential-secret-corpus.js';
-import { createCredentialSecretScanner, type CredentialSecretScanStats } from './credential-secret-scan.js';
+import { CredentialSecretScanError, createCredentialSecretScanner, type CredentialSecretScanStats } from './credential-secret-scan.js';
 
 // Actual disposable SQLite/filesystem fixtures test the byte diagnostic only.
 // They are not credential rows, retained process proof or installed evidence.
@@ -28,11 +31,89 @@ test('whole corpus refusal exposes only the fixed stage and bounded progress, ne
     });
   } finally { scanner.close(); }
 });
-async function copyFixture(work: (filename: string) => Promise<void>) {
+async function copyFixture(work: (filename: string) => Promise<void>, leaf: 'authority.sqlite' | 'kernel.sqlite3' = 'authority.sqlite') {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'cliq-credential-corpus-'));
-  try { await chmod(directory, 0o700); await work(path.join(directory, 'authority.sqlite')); }
+  try { await chmod(directory, 0o700); await work(path.join(directory, leaf)); }
   finally { await rm(directory, { recursive: true, force: true }); }
 }
+
+function failureProgress(error: unknown): unknown {
+  const read = (corpus as unknown as { readCredentialSecretCorpusScanProgress?: (error: unknown) => unknown }).readCredentialSecretCorpusScanProgress;
+  assert.equal(typeof read, 'function', 'the actual error owns a fixed diagnostic accessor');
+  return read!(error);
+}
+
+for (const [maxStreams, before] of [[8, 3], [4096, 675]] as const)
+  test(`real copied SQLite keeps its original ${maxStreams}-stream refusal and partial observed counters`, async () => {
+    await copyFixture(async filename => {
+      const value = 'ordinary diagnostic bytes';
+      await createDatabase(filename, database => {
+        database.exec('CREATE TABLE items(value TEXT) STRICT; BEGIN');
+        const insert = database.prepare('INSERT INTO items VALUES (?)');
+        for (let index = 0; index < 4095; index++) insert.run(value);
+        database.exec('COMMIT');
+      });
+      const bytes = await readFile(filename);
+      let observed: unknown;
+      const scanner = createCredentialSecretScanner([secret()], { maxBytes: 512 * 1024 * 1024, maxStreams }, error => { observed = error; });
+      try {
+        for (let index = 0; index < before; index++) scanner.openStream().close();
+        let original: unknown;
+        assert.throws(() => scanCopiedCredentialDatabase(filename, scanner), error => {
+          original = error; assert.equal(error, observed); assert.equal((error as { code?: unknown }).code, 'LIMIT_EXCEEDED'); return true;
+        });
+        const rows = maxStreams - before - 1;
+        const progress = failureProgress(original);
+        assert.deepEqual(progress, { diagnosticOnly: true, source: { kind: 'database_logical', database: 'authority',
+          tableBucket: 'items', part: 'cell', logicalRowsObserved: rows, logicalValuesAttempted: rows + 2,
+          logicalBytesObserved: Buffer.byteLength('items') + Buffer.byteLength('CREATE TABLE items(value TEXT) STRICT') + rows * Buffer.byteLength(value) } });
+        assert.equal(Object.isFrozen(progress), true); assert.equal(Object.isFrozen((progress as { source: object }).source), true);
+        assert.equal(scanner.stats().streamsOpened, maxStreams); assert.equal(scanner.stats().streamsClosed, maxStreams);
+        assert.equal(scanner.stats().closed, true); assert.equal(scanner.stats().limitExceeded, true);
+        assert.deepEqual(await readFile(filename), bytes); assert(!JSON.stringify(progress).includes(filename));
+        assert.equal(Object.hasOwn(original as object, 'cause'), false); assert.equal(Object.hasOwn(original as object, 'corpusProgress'), false);
+      } finally { scanner.close(); }
+    });
+  });
+
+for (const [table, bucket] of [['artifacts', 'artifacts'], ['control_requests', 'control'], ['run_events', 'events'],
+  ['items', 'items'], ['checkpoints', 'checkpoints'], ['run_journal', 'journal'], ['private_unknown_table', 'other']] as const)
+  test(`copied SQLite failure projects only the fixed ${bucket} bucket`, async () => {
+    await copyFixture(async filename => {
+      await createDatabase(filename, database => {
+        database.exec(`CREATE TABLE ${table}(value TEXT) STRICT; INSERT INTO ${table} VALUES ('ordinary bytes')`);
+      });
+      const scanner = createCredentialSecretScanner([secret()], { maxBytes: 1024 * 1024, maxStreams: 2 });
+      try {
+        let original: unknown;
+        assert.throws(() => scanCopiedCredentialDatabase(filename, scanner), error => { original = error; return (error as { code?: unknown }).code === 'LIMIT_EXCEEDED'; });
+        const progress = failureProgress(original) as { source: { database: string; tableBucket: string; part: string } };
+        assert.equal(progress.source.database, 'kernel'); assert.equal(progress.source.tableBucket, bucket); assert.equal(progress.source.part, 'cell');
+        assert(!JSON.stringify(progress).includes(filename)); if (bucket === 'other') assert(!JSON.stringify(progress).includes(table));
+      } finally { scanner.close(); }
+    }, 'kernel.sqlite3');
+  });
+
+test('corpus failure accessor ignores foreign objects, functions, accessors and proxies without evaluating them', () => {
+  let invoked = 0;
+  const poisoned = Object.defineProperty({}, 'source', { get() { invoked++; throw new Error('private error body'); } });
+  const traps: ProxyHandler<object> = {};
+  for (const name of ['get', 'getPrototypeOf', 'ownKeys', 'getOwnPropertyDescriptor'] as const)
+    traps[name] = (() => { invoked++; throw new Error('private error body'); }) as never;
+  for (const input of [undefined, null, 1, 'private error body', Symbol('foreign'), () => { invoked++; }, poisoned,
+    new Proxy({}, traps), new Proxy(() => { invoked++; }, traps), new Error('private error body'), new CredentialSecretScanError('LIMIT_EXCEEDED'),
+    { diagnosticOnly: true, source: { kind: 'cas', part: 'file_bytes' } }]) assert.equal(failureProgress(input), undefined);
+  assert.equal(invoked, 0);
+});
+
+test('corpus progress is obtained after the real await catch and stays outside the unchanged four-field scan fallback', async () => {
+  const source = await readFile(new URL('./installed-node-journey.ts', import.meta.url), 'utf8');
+  assert.match(source, /secretCorpusScanProgress = readCredentialSecretCorpusScanProgress\(error\)/u);
+  assert.match(source, /copyCredentialSecretScanFailureDiagnostic\(\{ diagnosticOnly: true,\s*firstFailureStage, beforeCorpus, corpusScanFailureCode \}\)/u);
+  assert.match(source, /\.\.\.\(secretCorpusScanProgress \? \{ secretCorpusScanProgress \} : \{\}\)/u);
+  const observer = source.slice(source.indexOf('  const scanner = createCredentialSecretScanner('), source.indexOf('  const scanBytes ='));
+  assert.doesNotMatch(observer, /readCredentialSecretCorpusScanProgress/u, 'the error map does not exist before the scanner throws through corpus');
+});
 async function createDatabase(filename: string, configure: (database: DatabaseSync) => void) {
   const database = new DatabaseSync(filename);
   try { configure(database); } finally { database.close(); }
@@ -298,6 +379,42 @@ async function actualFixture(layout: typeof stateLayouts[number], work: (stateRo
     await work(stateRoot, cas);
   } finally { await rm(fixture, { recursive: true, force: true }); }
 }
+
+for (const part of ['entry_name', 'file_bytes'] as const)
+  test(`actual Linux CAS ${part} refusal keeps the original 4096 streams and joins real file descriptors`, linux, async t => {
+    await actualFixture('home/.cliq/kernel-v1', async (stateRoot, cas) => {
+      const filename = path.join(cas, 'c'.repeat(64)), payload = Buffer.from('ordinary immutable diagnostic bytes');
+      await writeFile(filename, payload, { flag: 'wx', mode: 0o400 });
+      let observed: unknown;
+      const scanner = createCredentialSecretScanner([secret()], { maxBytes: 512 * 1024 * 1024, maxStreams: 4096 }, error => { observed = error; });
+      // Each existing fixture database has one raw-file stream and its three
+      // original schema/value streams. No stream is omitted or joined to another.
+      for (let index = 0; index < (part === 'entry_name' ? 4088 : 4087); index++) scanner.openStream().close();
+      const active = new Set<object>(), actualOpen = fs.open; let opened = 0;
+      t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
+        const handle = await actualOpen(...args), close = handle.close.bind(handle); active.add(handle); opened++;
+        t.mock.method(handle, 'close', async () => { await close(); assert.equal(active.delete(handle), true); });
+        return handle;
+      });
+      syncBuiltinESMExports();
+      try {
+        let original: unknown;
+        await assert.rejects(scanCredentialSecretCorpus({ stateRoot, uid: process.geteuid!(), evidenceDirs: [], scanner }), error => {
+          original = error; assert.equal(error, observed); assert.equal((error as { code?: unknown }).code, 'LIMIT_EXCEEDED'); return true;
+        });
+        assert(opened > 0, 'the original corpus uses the observed real descriptor opens');
+        assert.equal(active.size, 0, 'the original corpus finally closes every genuine opened descriptor before observation');
+        const progress = failureProgress(original) as { source: object; corpusCounters: Record<string, number> };
+        assert.deepEqual(progress.source, { kind: 'cas', part });
+        assert.equal(progress.corpusCounters.filesScanned, 2); assert.equal(progress.corpusCounters.sqliteDatabasesScanned, 2);
+        assert.equal(progress.corpusCounters.logicalRowsScanned, 2); assert.equal(progress.corpusCounters.logicalValuesScanned, 6);
+        assert.equal(progress.corpusCounters.inventoryEntriesObserved, 1); assert.equal(progress.corpusCounters.evidenceDirectoriesScanned, 0);
+        assert(progress.corpusCounters.fileBytesScanned! > 0); assert.equal(Object.isFrozen(progress.corpusCounters), true);
+        assert.equal(scanner.stats().streamsOpened, 4096); assert.equal(scanner.stats().streamsClosed, 4096);
+        assert(!JSON.stringify(progress).includes(filename)); assert.deepEqual(await readFile(filename), payload);
+      } finally { scanner.close(); t.mock.restoreAll(); syncBuiltinESMExports(); }
+    });
+  });
 
 test('actual Linux over-breadth corpus reports the unchanged 1024-entry guard before reading or omitting any CAS object', linux, async () => {
   await actualFixture('home/.cliq/kernel-v1', async (stateRoot, cas) => {

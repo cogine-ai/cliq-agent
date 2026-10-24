@@ -5,6 +5,27 @@ import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { KernelStorageError } from './errors.js';
 
+test('preparation detail stays in the original joined summary without spending the six arrival-marker budget', async () => {
+  const module = await import('./installed-run-diagnostics.js');
+  const records: unknown[] = [], diagnostic = channel(module.INSTALLED_RUN_FAILURE_CHANNEL);
+  const receive = (record: unknown) => { records.push(record); };
+  diagnostic.subscribe(receive);
+  try {
+    for (const suffix of ['read', 'grant', 'cut', 'physical', 'admit']) {
+      const phase = `publication_prepare_${suffix}`;
+      assert(module.INSTALLED_SCHEDULER_DIAGNOSTIC_PHASES.some(value => value === phase));
+      module.noteInstalledPublicationPhase(phase);
+      const observer = module.beginInstalledSchedulerDiagnostic('drive')!;
+      observer.phase(phase); observer.failure(new Error('owned unavailable operation'), false);
+    }
+    assert.equal(records.length, 5);
+    assert.deepEqual(records.map(record => (record as { kind: string; phase: string }).kind), Array(5).fill('scheduler_failure'));
+    assert.deepEqual(records.map(record => (record as { phase: string }).phase),
+      ['read', 'grant', 'cut', 'physical', 'admit'].map(value => `publication_prepare_${value}`));
+    assert.equal(module.INSTALLED_PUBLICATION_DIAGNOSTIC_PHASES.length, 6);
+  } finally { diagnostic.unsubscribe(receive); }
+});
+
 test('publication progress emits only fixed primitive phase data without inspecting hostile inputs', async () => {
   const module = await import('./installed-run-diagnostics.js') as Record<string, any>;
   assert.equal(typeof module.noteInstalledPublicationPhase, 'function');
@@ -98,7 +119,8 @@ test('publication phases remain closed primitive data in actual scheduler failur
   const { beginInstalledSchedulerDiagnostic, noteInstalledStoreStop, INSTALLED_SCHEDULER_DIAGNOSTIC_PHASES } =
     await import('./installed-run-diagnostics.js');
   const publication = ['publication_select', 'publication_worker_activate', 'publication_roots_open',
-    'publication_prepare', 'publication_dispatch', 'publication_settlement'];
+    'publication_prepare', 'publication_dispatch', 'publication_settlement', 'publication_prepare_read',
+    'publication_prepare_grant', 'publication_prepare_cut', 'publication_prepare_physical', 'publication_prepare_admit'];
   assert.deepEqual(INSTALLED_SCHEDULER_DIAGNOSTIC_PHASES.filter(phase => phase.startsWith('publication_')), publication);
   const records: any[] = [], diagnostic = channel('cliq.installed.run.failures.v1');
   const receive = (record: unknown) => { try { records.push(record); } catch {} };
@@ -108,7 +130,7 @@ test('publication phases remain closed primitive data in actual scheduler failur
     for (const phase of publication) { observer.phase(phase); observer.failure(new Error('private'), false); }
     assert.deepEqual(records.map(row => row.phase), publication);
     records.length = 0;
-    noteInstalledStoreStop({ driverTasks: 6, agentLoads: 0, admissions: 0, retainedFailures: 0, globalFailure: false, phases: publication });
+    noteInstalledStoreStop({ driverTasks: 6, agentLoads: 0, admissions: 0, retainedFailures: 0, globalFailure: false, phases: publication.slice(0, 6) });
     assert.deepEqual(records[0].phases, { publication_dispatch: 1, publication_prepare: 1, publication_roots_open: 1,
       publication_select: 1, publication_settlement: 1, publication_worker_activate: 1 });
     let accesses = 0; const bad = () => { accesses++; throw new Error('must not inspect'); };
