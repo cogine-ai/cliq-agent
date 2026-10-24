@@ -8,7 +8,9 @@ import { INSTALLED_APPLY_DIAGNOSTIC_STAGES, INSTALLED_AUTHORIZATION_DIAGNOSTIC_S
  * observation. One bounded synchronous write at real exit is included in the
  * unchanged stop deadline; no timer, await, flush retry or keepalive exists.
  * Separately write each of six first-seen publication phases immediately;
- * these fixed progress markers cannot establish completion or resource join. */
+ * these fixed progress markers cannot establish completion or resource join.
+ * An accepted single-driver Stop entry adds one independent current work label,
+ * never a failure, Run attribution, completion or joined result. */
 export const INSTALLED_STORE_DIAGNOSTIC_BANNER = `;(() => { try {
   const diagnostic = require('node:diagnostics_channel').channel(${JSON.stringify(INSTALLED_RUN_FAILURE_CHANNEL)});
   const write = require('node:fs').writeSync, isProxy = require('node:util').types.isProxy;
@@ -83,6 +85,9 @@ export const INSTALLED_STORE_DIAGNOSTIC_BANNER = `;(() => { try {
       if (sum > row.driverTasks || sum > 1000) { invalid = true; return; }
       schedulerFailuresBeforeStop = schedulerFailures;
       stop = {...row, phases: Object.fromEntries(keys.sort().map(key => [key, fields[key].value]))};
+      if (row.driverTasks === 1 && keys.length === 1 && fields[keys[0]].value === 1) {
+        try { write(2, 'CLIQ_STORE_STOP_PHASE_V1:' + keys[0] + '\\n'); } catch {}
+      }
     } else invalid = true;
   } catch { invalid = true; } });
   process.once('exit', () => { try {

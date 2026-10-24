@@ -5,6 +5,36 @@ import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { KernelStorageError } from './errors.js';
 
+test('submit stages use the historical admission failure envelope without claiming an apply or publication', async () => {
+  const module = await import('./installed-run-diagnostics.js') as Record<string, any>;
+  assert.equal(typeof module.beginInstalledSubmitDiagnostic, 'function');
+  const stages = ['submit_request', 'submit_preflight_authority', 'submit_source_capture', 'submit_assembly',
+    'submit_final_admission', 'submit_postcommit_load'];
+  assert.deepEqual(module.INSTALLED_APPLY_DIAGNOSTIC_STAGES, ['request', 'replay', 'capture_source', 'capture',
+    'source', 'prepare', 'admit', 'postcommit_load', ...stages]);
+  const records: any[] = [], diagnostic = channel(module.INSTALLED_RUN_FAILURE_CHANNEL);
+  const receive = (record: unknown) => { records.push(record); };
+  diagnostic.subscribe(receive);
+  try {
+    const observer = module.beginInstalledSubmitDiagnostic(); assert(observer);
+    const original = new KernelStorageError('LEASE_FENCED', 'owned diagnostic input');
+    observer.failure(original, false);
+    for (const stage of stages.slice(1)) { observer.stage(stage); observer.failure(original, true); }
+    assert.deepEqual(records, stages.map((stage, index) => ({ kind: 'apply_failure', stage, closing: index !== 0,
+      errorClass: 'kernel', code: 'LEASE_FENCED', sqliteCode: null })));
+    assert(records.every(row => Object.isFrozen(row)));
+    let accesses = 0; const bad = () => { accesses++; throw new Error('must not inspect'); };
+    for (const stage of [null, undefined, 'submit_unknown', 'postcommit_load_submit', new String('submit_request'),
+      new Proxy({}, { get: bad, ownKeys: bad, getPrototypeOf: bad }), Object.defineProperty({}, 'toString', { get: bad })])
+      observer.stage(stage);
+    observer.failure(new Proxy(original, { get: bad, ownKeys: bad, getPrototypeOf: bad }), true);
+    assert.deepEqual(records.at(-1), { kind: 'apply_failure', stage: 'submit_postcommit_load', closing: true,
+      errorClass: 'other', code: 'none', sqliteCode: null });
+    for (const stage of stages) module.noteInstalledPublicationPhase(stage);
+    assert.equal(accesses, 0); assert.equal(records.length, 7);
+  } finally { diagnostic.unsubscribe(receive); }
+});
+
 test('preparation detail stays in the original joined summary without spending the six arrival-marker budget', async () => {
   const module = await import('./installed-run-diagnostics.js');
   const records: unknown[] = [], diagnostic = channel(module.INSTALLED_RUN_FAILURE_CHANNEL);
@@ -159,7 +189,7 @@ test('the pre-revocation snapshot copies only current counts and fixed phase mul
 });
 
 test('unsubscribed diagnostics allocate no tracker and do not inspect hostile input or sample clocks', async () => {
-  const { beginInstalledApplyDiagnostic, beginInstalledAuthorizationDiagnostic, beginInstalledSchedulerDiagnostic, noteInstalledStoreStop,
+  const { beginInstalledApplyDiagnostic, beginInstalledSubmitDiagnostic, beginInstalledAuthorizationDiagnostic, beginInstalledSchedulerDiagnostic, noteInstalledStoreStop,
     installedRunDiagnosticsSubscribed, noteInstalledPublicationPhase } = await import('./installed-run-diagnostics.js');
   assert.equal(installedRunDiagnosticsSubscribed(), false);
   let accesses = 0;
@@ -170,6 +200,7 @@ test('unsubscribed diagnostics allocate no tracker and do not inspect hostile in
     process.hrtime.bigint = () => { accesses++; throw new Error('clock must not be sampled'); };
     Date.now = () => { accesses++; throw new Error('clock must not be sampled'); };
     assert.equal(beginInstalledApplyDiagnostic(), undefined);
+    assert.equal(beginInstalledSubmitDiagnostic(), undefined);
     assert.equal(beginInstalledAuthorizationDiagnostic(), undefined);
     assert.equal(beginInstalledSchedulerDiagnostic('drive'), undefined);
     noteInstalledStoreStop(hostile);

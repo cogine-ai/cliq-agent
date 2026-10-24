@@ -1979,3 +1979,66 @@ fresh immutable Linux evidence. Authentication, first submission, publication,
 maximum-image repair and the approved delayed-storage cuts remain open. No
 complete PR, full I1, provider, macOS, reboot, I2-I4 or final Kernel-Cut claim
 follows from diagnostics, local regressions or the passing Run/recovery job.
+
+The combined cancellation candidate, commit
+`f059522ca7f9645e57a1a89b5480fba602a7c76c`, passes the original local build
+and full `npm test`: 2,664 passes and one original conditional cross-filesystem
+skip. The complete validation SHA-256 is
+`ab0cc51de6684d5549d841382940d56d95c80a95d3f7bdcc9b125aee45be9060`.
+Focused script regressions pass 197 cases with fifteen original Linux-only
+skips on macOS; all 98 workflow portable tests and actual-dependency strict
+checks, including library checking, pass. Those skips are not physical proof.
+[Linux run 40129396452](https://github.com/cogine-ai/cliq-agent/actions/runs/40129396452),
+attempt 1, finishes with seventeen successful and five failed jobs. All four
+TypeScript jobs, real Run execution/recovery, namespace/cgroup and the secret
+scan preflight pass. All 23 categories and 105 original JSON reports (497,221
+bytes) are retained, without pending, incomplete or rejected categories.
+Twenty-one cleanup reports contain no errors and every before/after runner
+baseline matches. Final capture SHA-256:
+`9a4086c89292de252eeb5ac1d5c9eadabb88bd758a296c877255ca29ad0a2891`.
+
+| Qualification | Actual remaining failure |
+| --- | --- |
+| Normal Delivery | Ninety-second terminal bound; original two-second Stop also fails. Arrival labels stop at preparation; unjoined exit-summary data remains unavailable. |
+| Delayed volume | Five-second READY passes in this run; first original `run.submit` exceeds thirty seconds, and Stop fails. This does not resolve the prior authentication failure. |
+| Original-stop / late-result | Same first-submission timeout; original writer joins pass, but neither intended physical publication cut is reached. |
+| Maximum-image verifier | Original cumulative stream limit is reached in a kernel database logical cell, not CAS-file scanning; the fallback still cannot qualify the verifier outcome. |
+
+The verifier's original failure now retains 798 observed logical rows, 3,421
+attempted logical values and 217,220 observed logical bytes in the fixed
+`other` table bucket. Before the corpus call, 675 streams were consumed; the
+original scanner closes all 4,096 streams with no match. The failed database
+is correctly not counted as a successfully scanned database. This locates
+the exhaustion but not the producer responsible for the rows. Known public
+schema tables therefore receive exhaustive fixed classifications in the next
+diagnostic follow-up; unknown names remain `other`, with no raw name, SQL,
+path or content passthrough and no additional query or scan.
+
+The next coherent follow-up also preserves the server's existing bounded
+authentication journal when hello returned but final-current verification
+did not. It records `run.submit`'s actual await stage in the existing admission
+failure envelope. The historical `applyFailures` / `firstApplyFailure` names
+then cover both admissions: explicit `submit_*` labels identify submission;
+the process-wide count is not a Run's `run.apply` outcome or physical proof.
+The original first-error semantics, output rows and bounds remain unchanged.
+
+When original Stop fails, its joined exit summary must still be refused.
+Only the accepted single-driver work label at the original Stop entry may be
+emitted separately by the qualification image. The existing six arrival
+markers plus that one fixed label fit within the same 512-byte budget. The
+label is read only in the same pre-bound original-process/invocation window,
+after actual PID absence, using the same bounded secret-scanned journal call.
+It cannot establish failure, Run attribution, completed Stop or resource join,
+and cannot unlock the old exit-summary parser or set writer-join flags.
+
+One further correction joins every issued publication-authorization item read
+before returning any rejection. The original `Promise.all` could reject while
+another real CAS descriptor remained open, also hiding later retirement
+uncertainty. Reusing the existing resource-join helper preserves the actual
+read results and original error objects, with recovery uncertainty priority.
+Real CAS/root-descriptor and return-gate regressions are not evidence that
+this defect caused the installed ninety-second or thirty-second timeouts.
+
+The remaining qualifications are still open. These refinements do not relax
+the five-, thirty-, ninety-second or two-second bounds, scanner limits or
+integrity checks. No complete PR or full I1/I2-I4/Kernel-Cut claim follows.

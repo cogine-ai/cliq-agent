@@ -3,8 +3,11 @@ import { types } from 'node:util';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
 
 export const INSTALLED_RUN_FAILURE_CHANNEL = 'cliq.installed.run.failures.v1';
+/** Historical admission envelope: apply_failure/applyFailures/firstApplyFailure
+ * also carry prefixed submit_* stages, not counts or evidence of run.apply. */
 export const INSTALLED_APPLY_DIAGNOSTIC_STAGES = Object.freeze(['request', 'replay', 'capture_source', 'capture',
-  'source', 'prepare', 'admit', 'postcommit_load'] as const);
+  'source', 'prepare', 'admit', 'postcommit_load', 'submit_request', 'submit_preflight_authority',
+  'submit_source_capture', 'submit_assembly', 'submit_final_admission', 'submit_postcommit_load'] as const);
 export type InstalledApplyDiagnosticStage = typeof INSTALLED_APPLY_DIAGNOSTIC_STAGES[number];
 const applyStages: ReadonlySet<string> = new Set(INSTALLED_APPLY_DIAGNOSTIC_STAGES);
 const diagnostic = channel(INSTALLED_RUN_FAILURE_CHANNEL);
@@ -77,6 +80,12 @@ export function beginInstalledApplyDiagnostic() {
   });
 }
 export type InstalledApplyDiagnostic = NonNullable<ReturnType<typeof beginInstalledApplyDiagnostic>>;
+
+export function beginInstalledSubmitDiagnostic() {
+  const diagnosis = beginInstalledApplyDiagnostic();
+  diagnosis?.stage('submit_request');
+  return diagnosis;
+}
 
 export const INSTALLED_AUTHORIZATION_DIAGNOSTIC_STAGES = Object.freeze(['request', 'current_channel', 'replay', 'selected_toolchain',
   'publish_request', 'publish_response', 'channel_recheck', 'transaction'] as const);

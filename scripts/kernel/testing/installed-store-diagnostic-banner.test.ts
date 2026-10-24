@@ -3,6 +3,168 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 
+test('one accepted original Stop entry emits a fixed single-driver phase without changing its exit summary', async () => {
+  const { INSTALLED_STORE_DIAGNOSTIC_BANNER } = await import('./installed-store-diagnostic-banner.js');
+  const child = spawnSync(process.execPath, ['--input-type=commonjs', '--eval', INSTALLED_STORE_DIAGNOSTIC_BANNER + `
+    require('node:diagnostics_channel').channel('cliq.installed.run.failures.v1').publish({kind:'store_stop',
+      driverTasks:1,agentLoads:0,admissions:0,retainedFailures:0,globalFailure:false,phases:{publication_prepare_physical:1}});
+  `], { encoding: 'utf8', timeout: 5000, maxBuffer: 65536 });
+  assert.equal(child.error, undefined); assert.equal(child.signal, null); assert.equal(child.status, 0);
+  assert.equal(child.stderr, 'CLIQ_STORE_STOP_PHASE_V1:publication_prepare_physical\n' +
+    'CLIQ_STORE_DIAG_V1:begin:0:0\nCLIQ_STORE_DIAG_V1:scheduler_window:0\nCLIQ_STORE_DIAG_V1:stop:1:0:0:0:0\n' +
+    'CLIQ_STORE_DIAG_V1:phase:publication_prepare_physical:1\nCLIQ_STORE_DIAG_V1:end\n',
+    'only the accepted original Stop entry can add its independent fixed phase marker');
+});
+
+test('a live single-driver Stop snapshot exposes each preparation label before exit but never a joined result', async () => {
+  const { INSTALLED_STORE_DIAGNOSTIC_BANNER } = await import('./installed-store-diagnostic-banner.js');
+  const { readInstalledStoreStopPhaseJournal, readInstalledStoreDiagnosticJournal } = await import('./installed-store-diagnostic-journal.js');
+  const phases = ['publication_prepare_read', 'publication_prepare_grant', 'publication_prepare_cut',
+    'publication_prepare_physical', 'publication_prepare_admit'];
+  const sender = { uid: 1000, pid: 2000, invocationId: 'a'.repeat(32) };
+  const journal = (rows: string[]) => rows.map(MESSAGE => JSON.stringify({ _UID: '1000', _PID: '2000',
+    _TRANSPORT: 'stdout', _SYSTEMD_INVOCATION_ID: sender.invocationId, MESSAGE })).join('\n');
+  for (const phase of phases) {
+    const child = spawn(process.execPath, ['--input-type=commonjs', '--eval', INSTALLED_STORE_DIAGNOSTIC_BANNER + `
+      require('node:diagnostics_channel').channel('cliq.installed.run.failures.v1').publish({kind:'store_stop',
+        driverTasks:1,agentLoads:0,admissions:0,retainedFailures:0,globalFailure:false,phases:{[${JSON.stringify(phase)}]:1}});
+      process.stdin.resume(); require('node:fs').writeSync(1,'ready\\n');
+    `], { stdio: ['pipe', 'pipe', 'pipe'] });
+    const marker = `CLIQ_STORE_STOP_PHASE_V1:${phase}\n`;
+    let stdout = '', stderr = '', readyResolve!: () => void;
+    const ready = new Promise<void>(resolve => { readyResolve = resolve; });
+    const observe = () => { if (stdout === 'ready\n' && stderr === marker) readyResolve(); };
+    child.stdout.on('data', bytes => { stdout += bytes.toString(); observe(); });
+    child.stderr.on('data', bytes => { stderr += bytes.toString(); observe(); });
+    const joined = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
+      child.once('error', reject); child.once('close', (code, signal) => resolve({ code, signal }));
+    });
+    const timeout = AbortSignal.timeout(5000);
+    const expired = new Promise<never>((_, reject) => timeout.addEventListener('abort',
+      () => reject(new Error('owned Stop-phase child did not join')), { once: true }));
+    try {
+      await Promise.race([ready, joined.then(() => { throw new Error('owned child exited before original Stop-phase observation'); }), expired]);
+      assert.equal(child.exitCode, null); assert.equal(child.signalCode, null); assert.equal(stderr, marker);
+      const rows = [marker.trimEnd()];
+      assert.deepEqual(readInstalledStoreStopPhaseJournal(journal(rows), sender), { phase });
+      assert.equal(readInstalledStoreDiagnosticJournal(journal(rows), sender), undefined, 'a live Stop entry cannot manufacture an exit summary');
+      child.stdin.end();
+      assert.deepEqual(await Promise.race([joined, expired]), { code: 0, signal: null });
+      const finalRows = stderr.trimEnd().split('\n');
+      assert.equal(finalRows.filter(row => row.startsWith('CLIQ_STORE_STOP_PHASE')).length, 1);
+      assert.deepEqual(readInstalledStoreDiagnosticJournal(journal(finalRows), sender)!.stop.phases, { [phase]: 1 });
+      assert.deepEqual(readInstalledStoreStopPhaseJournal(journal(finalRows), sender), { phase });
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+      await joined;
+    }
+  }
+});
+
+test('the original six live arrivals and one maximal Stop label remain below their existing combined byte budget', async () => {
+  const { INSTALLED_STORE_DIAGNOSTIC_BANNER } = await import('./installed-store-diagnostic-banner.js');
+  const { INSTALLED_PUBLICATION_DIAGNOSTIC_PHASES, INSTALLED_SCHEDULER_DIAGNOSTIC_PHASES } = await import('../../../src/state/installed-run-diagnostics.js');
+  const longest = [...INSTALLED_SCHEDULER_DIAGNOSTIC_PHASES].sort((left, right) => right.length - left.length)[0]!;
+  const child = spawnSync(process.execPath, ['--input-type=commonjs', '--eval', INSTALLED_STORE_DIAGNOSTIC_BANNER + `
+    const d=require('node:diagnostics_channel').channel('cliq.installed.run.failures.v1');
+    for(const phase of ${JSON.stringify(INSTALLED_PUBLICATION_DIAGNOSTIC_PHASES)})d.publish({kind:'publication_phase',phase});
+    d.publish({kind:'store_stop',driverTasks:1,agentLoads:0,admissions:0,retainedFailures:0,globalFailure:false,phases:{[${JSON.stringify(longest)}]:1}});
+  `], { encoding: 'utf8', timeout: 5000, maxBuffer: 65536 });
+  assert.equal(child.error, undefined); assert.equal(child.signal, null); assert.equal(child.status, 0);
+  const rows = child.stderr.trimEnd().split('\n');
+  const arrival = rows.filter(row => row.startsWith('CLIQ_PUBLICATION_STAGE_V1:'));
+  const stop = rows.filter(row => row.startsWith('CLIQ_STORE_STOP_PHASE_V1:'));
+  assert.equal(arrival.length, 6); assert.deepEqual(stop, [`CLIQ_STORE_STOP_PHASE_V1:${longest}`]);
+  assert(Buffer.byteLength(stop[0]! + '\n') <= 96, 'the independent fixed Stop label retains its original per-marker bound');
+  assert(Buffer.byteLength([...arrival, ...stop].join('\n') + '\n') < 512, 'all seven possible live records fit the unchanged combined 512-byte budget');
+  const summary = rows.filter(row => row.startsWith('CLIQ_STORE_DIAG_V1:'));
+  assert(summary.length <= 16 && Buffer.byteLength(summary.join('\n') + '\n') <= 4096 && summary.every(row => row.length <= 255));
+});
+
+test('ambiguous or invalid Stop data cannot invent a single-driver label or invoke hostile fields', async () => {
+  const { INSTALLED_STORE_DIAGNOSTIC_BANNER } = await import('./installed-store-diagnostic-banner.js');
+  const values = [
+    `{...row,driverTasks:0,phases:{}}`, `{...row,driverTasks:1,phases:{}}`, `{...row,driverTasks:2}`,
+    `{...row,driverTasks:2,phases:{publication_prepare_read:1,publication_prepare_cut:1}}`,
+    `{...row,phases:{publication_prepare_read:2}}`, `{...row,driverTasks:'1'}`, `{...row,phases:{unknown:1}}`,
+    ...['submit_request', 'submit_preflight_authority', 'submit_source_capture', 'submit_assembly', 'submit_final_admission',
+      'submit_postcommit_load'].map(phase => `{...row,phases:{${phase}:1}}`),
+    `Object.defineProperty({...row},'driverTasks',{get:bad})`,
+    `{...row,phases:Object.defineProperty({},'publication_prepare_read',{enumerable:true,get:bad})}`,
+    `{...row,phases:new Proxy(row.phases,{get:bad,ownKeys:bad,getPrototypeOf:bad,getOwnPropertyDescriptor:bad})}`,
+    `new Proxy(row,{get:bad,ownKeys:bad,getPrototypeOf:bad,getOwnPropertyDescriptor:bad})`, `{...row,path:'inert forbidden field'}`
+  ];
+  for (const value of values) {
+    const child = spawnSync(process.execPath, ['--input-type=commonjs', '--eval', INSTALLED_STORE_DIAGNOSTIC_BANNER + `
+      let accesses=0; const bad=()=>{accesses++;throw Error('inert private input')};
+      const row={kind:'store_stop',driverTasks:1,agentLoads:0,admissions:0,retainedFailures:0,globalFailure:false,
+        phases:{publication_prepare_read:1}};
+      require('node:diagnostics_channel').channel('cliq.installed.run.failures.v1').publish(${value});
+      require('node:fs').writeSync(1,'accesses:'+accesses);
+    `], { encoding: 'utf8', timeout: 5000, maxBuffer: 65536 });
+    assert.equal(child.error, undefined); assert.equal(child.signal, null); assert.equal(child.status, 0);
+    assert.equal(child.stdout, 'accesses:0');
+    assert.equal(child.stderr.includes('CLIQ_STORE_STOP_PHASE'), false, 'only one unambiguous accepted original Stop may emit the phase');
+  }
+});
+
+test('a failed Stop sink is not retried, repeated Stop cannot add a second label, and original error and live progress survive', async () => {
+  const { INSTALLED_STORE_DIAGNOSTIC_BANNER } = await import('./installed-store-diagnostic-banner.js');
+  const child = spawnSync(process.execPath, ['--input-type=commonjs', '--eval', `
+    const fs=require('node:fs'), write=fs.writeSync;let attempts=0;
+    fs.writeSync=(fd,text,...args)=>{if(fd===2&&String(text).startsWith('CLIQ_STORE_STOP_PHASE_V1:')){
+      attempts++;throw Error('inert unavailable Stop sink');}return write(fd,text,...args)};
+  ` + INSTALLED_STORE_DIAGNOSTIC_BANNER + `
+    const d=require('node:diagnostics_channel').channel('cliq.installed.run.failures.v1');
+    const original=Error('inert original operation failure');let same=false;
+    const stop={kind:'store_stop',driverTasks:1,agentLoads:0,admissions:0,retainedFailures:0,globalFailure:false,phases:{publication_prepare_read:1}};
+    try{try{throw original}catch(error){d.publish(stop);throw error}}catch(error){same=error===original}
+    d.publish(stop);d.publish({kind:'publication_phase',phase:'publication_prepare'});
+    fs.writeSync(1,'original:'+same+';attempts:'+attempts);
+  `], { encoding: 'utf8', timeout: 5000, maxBuffer: 65536 });
+  assert.equal(child.error, undefined); assert.equal(child.signal, null); assert.equal(child.status, 0);
+  assert.equal(child.stdout, 'original:true;attempts:1');
+  assert.equal(child.stderr, 'CLIQ_PUBLICATION_STAGE_V1:1:publication_prepare\nCLIQ_STORE_DIAG_V1:truncated\n');
+  const repeated = spawnSync(process.execPath, ['--input-type=commonjs', '--eval', INSTALLED_STORE_DIAGNOSTIC_BANNER + `
+    const d=require('node:diagnostics_channel').channel('cliq.installed.run.failures.v1');
+    for(let index=0;index<2;index++)d.publish({kind:'store_stop',driverTasks:1,agentLoads:0,admissions:0,retainedFailures:0,
+      globalFailure:false,phases:{publication_prepare_read:1}});
+  `], { encoding: 'utf8', timeout: 5000, maxBuffer: 65536 });
+  assert.equal(repeated.error, undefined); assert.equal(repeated.signal, null); assert.equal(repeated.status, 0);
+  assert.equal(repeated.stderr, 'CLIQ_STORE_STOP_PHASE_V1:publication_prepare_read\nCLIQ_STORE_DIAG_V1:truncated\n',
+    'the first real accepted Stop observation remains, but duplicate input can never emit a second snapshot or valid summary');
+});
+
+test('every submit await stage round-trips through the unchanged admission envelope but never publication markers', async () => {
+  const { INSTALLED_STORE_DIAGNOSTIC_BANNER } = await import('./installed-store-diagnostic-banner.js');
+  const { readInstalledStoreDiagnosticJournal, readInstalledPublicationStageJournal } = await import('./installed-store-diagnostic-journal.js');
+  const stages = ['submit_request', 'submit_preflight_authority', 'submit_source_capture', 'submit_assembly',
+    'submit_final_admission', 'submit_postcommit_load'];
+  const sender = { uid: 1000, pid: 2000, invocationId: 'a'.repeat(32) };
+  const journal = (messages: string[]) => messages.map(MESSAGE => JSON.stringify({ _UID: '1000', _PID: '2000',
+    _TRANSPORT: 'stdout', _SYSTEMD_INVOCATION_ID: sender.invocationId, MESSAGE })).join('\n');
+  for (const stage of stages) {
+    const child = spawnSync(process.execPath, ['--input-type=commonjs', '--eval', INSTALLED_STORE_DIAGNOSTIC_BANNER + `
+      const d=require('node:diagnostics_channel').channel('cliq.installed.run.failures.v1');
+      d.publish({kind:'publication_phase',phase:${JSON.stringify(stage)}});
+      d.publish({kind:'apply_failure',stage:${JSON.stringify(stage)},closing:true,errorClass:'kernel',code:'LEASE_FENCED',sqliteCode:null});
+      d.publish({kind:'store_stop',driverTasks:0,agentLoads:0,admissions:1,retainedFailures:0,globalFailure:false,phases:{}});
+    `], { encoding: 'utf8', timeout: 5000, maxBuffer: 65536 });
+    assert.equal(child.error, undefined); assert.equal(child.signal, null); assert.equal(child.status, 0);
+    assert.equal(child.stderr, 'CLIQ_STORE_DIAG_V1:begin:1:0\n' +
+      `CLIQ_STORE_DIAG_V1:apply:${stage}:1:kernel:LEASE_FENCED:-\n` +
+      'CLIQ_STORE_DIAG_V1:scheduler_window:0\nCLIQ_STORE_DIAG_V1:stop:0:0:1:0:0\nCLIQ_STORE_DIAG_V1:end\n');
+    const rows = child.stderr.trimEnd().split('\n');
+    assert(rows.length <= 16 && Buffer.byteLength(child.stderr) <= 4096 && rows.every(row => row.length <= 255));
+    const summary = readInstalledStoreDiagnosticJournal(journal(rows), sender)!;
+    assert.equal(summary.applyFailures, 1);
+    assert.deepEqual(summary.firstApplyFailure, { stage, closing: true, errorClass: 'kernel', code: 'LEASE_FENCED', sqliteCode: null });
+    assert.equal(readInstalledPublicationStageJournal(journal(rows), sender), undefined);
+    assert.throws(() => readInstalledPublicationStageJournal(journal([`CLIQ_PUBLICATION_STAGE_V1:1:${stage}`]), sender));
+    assert.throws(() => readInstalledStoreDiagnosticJournal(journal(rows.map(row => row.replace(stage, stage + '_unknown'))), sender));
+  }
+});
+
 test('publication progress writes each first-seen phase immediately in actual arrival order without changing the exit summary', async () => {
   const { INSTALLED_STORE_DIAGNOSTIC_BANNER } = await import('./installed-store-diagnostic-banner.js');
   const phases = ['publication_prepare', 'publication_select', 'publication_worker_activate',
@@ -129,7 +291,7 @@ test('the trusted exit banner retains the last original scheduler failure and th
   `], { encoding: 'utf8', timeout: 5000, maxBuffer: 65536 });
   assert.equal(child.error, undefined); assert.equal(child.signal, null); assert.equal(child.status, 0);
   assert.equal(child.stdout, 'operation unchanged\n');
-  assert.equal(child.stderr, 'CLIQ_STORE_DIAG_V1:begin:0:2\n' +
+  assert.equal(child.stderr, 'CLIQ_STORE_STOP_PHASE_V1:publication_prepare\nCLIQ_STORE_DIAG_V1:begin:0:2\n' +
     'CLIQ_STORE_DIAG_V1:scheduler:drive:drive_verify:0:other:none:-\n' +
     'CLIQ_STORE_DIAG_V1:scheduler_window:1\n' +
     'CLIQ_STORE_DIAG_V1:scheduler_last:drive:publication_prepare:1:other:none:-\n' +
@@ -146,7 +308,7 @@ test('a real failure after the stop snapshot does not disappear when its pre-sto
     d.publish(failure); failure.phase='private'; failure.closing=false;
   `], { encoding: 'utf8', timeout: 5000, maxBuffer: 65536 });
   assert.equal(child.error, undefined); assert.equal(child.signal, null); assert.equal(child.status, 0);
-  assert.equal(child.stderr, 'CLIQ_STORE_DIAG_V1:begin:0:1\n' +
+  assert.equal(child.stderr, 'CLIQ_STORE_STOP_PHASE_V1:publication_select\nCLIQ_STORE_DIAG_V1:begin:0:1\n' +
     'CLIQ_STORE_DIAG_V1:scheduler:drive:publication_select:1:other:none:-\n' +
     'CLIQ_STORE_DIAG_V1:scheduler_window:0\n' +
     'CLIQ_STORE_DIAG_V1:scheduler_last:drive:publication_select:1:other:none:-\n' +
@@ -196,7 +358,7 @@ test('the trusted banner emits its bounded fixed summary only as the real child 
   `], { encoding: 'utf8', timeout: 5000, maxBuffer: 65536 });
   assert.equal(child.error, undefined); assert.equal(child.signal, null); assert.equal(child.status, 0);
   assert.equal(child.stdout, 'operation unchanged\n');
-  assert.equal(child.stderr, 'CLIQ_STORE_DIAG_V1:begin:1:1\n' +
+  assert.equal(child.stderr, 'CLIQ_STORE_STOP_PHASE_V1:drive_agent\nCLIQ_STORE_DIAG_V1:begin:1:1\n' +
     'CLIQ_STORE_DIAG_V1:apply:postcommit_load:0:sqlite:ERR_SQLITE_ERROR:1\n' +
     'CLIQ_STORE_DIAG_V1:scheduler:drive:drive_agent:0:kernel:RECOVERY_REQUIRED:-\n' +
     'CLIQ_STORE_DIAG_V1:scheduler_window:1\n' +

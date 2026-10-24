@@ -20,7 +20,7 @@ import { readHistoricalControlChannel, validateControlChannelClosure } from './c
 import { decodeContextManifest, decodeWorkspaceIdentity } from './decoders.js';
 import { deliveryApprovalCheckpointId, deliveryApprovalDecision, deliveryDecisionCheckpointId,
   loadDeliveryPolicy, planDeliveryRequest } from './delivery-policy.js';
-import { KernelStorageError, RunTerminalError, stateOperation } from './errors.js';
+import { joinResourceOperations, KernelStorageError, RunTerminalError, stateOperation } from './errors.js';
 import { addBudget, isZeroBudget } from './invariants.js';
 import { readRecoveryClosure } from './recovery-closure.js';
 import { readInvocationJournal } from './repositories/journal.js';
@@ -194,7 +194,7 @@ async function readUndecidedDeliveryWait(driver: SqliteDriver, artifacts: Artifa
 
 export async function readDeliveryAuthorization(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1) {
   if (cut.runSpec.operation !== 'delivery') throw new TypeError('Agent Run cannot own delivery authorization');
-  const decoded = await Promise.all(cut.items.map(async row => ({ row, item: await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef) })));
+  const decoded = await joinResourceOperations(cut.items.map(async row => ({ row, item: await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef) })));
   const decisions = decoded.filter(({ item }) => item.kind === 'delivery_decision');
   const policies = decoded.filter(({ item }) => item.kind === 'policy_decision' && item.subjectKind === 'delivery_plan');
   const currentFrontier = cut.run.frontierRef ? await readCanonicalArtifact<RunFrontier>(artifacts, cut.run.frontierRef) : undefined;

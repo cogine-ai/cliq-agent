@@ -8,6 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
+import { KERNEL_AUTHORITY_TABLES } from '../../../src/state/schema.js';
 import * as corpus from './credential-secret-corpus.js';
 import { CredentialSecretCorpusError, scanCopiedCredentialDatabase, scanCredentialSecretCorpus } from './credential-secret-corpus.js';
 import { CredentialSecretScanError, createCredentialSecretScanner, type CredentialSecretScanStats } from './credential-secret-scan.js';
@@ -76,19 +77,38 @@ for (const [maxStreams, before] of [[8, 3], [4096, 675]] as const)
     });
   });
 
-for (const [table, bucket] of [['artifacts', 'artifacts'], ['control_requests', 'control'], ['run_events', 'events'],
-  ['items', 'items'], ['checkpoints', 'checkpoints'], ['run_journal', 'journal'], ['private_unknown_table', 'other']] as const)
+const kernelTableBuckets = [['artifacts', 'artifacts'], ['control_requests', 'control'], ['run_events', 'events'],
+  ['items', 'items'], ['checkpoints', 'checkpoints'], ['run_journal', 'journal'],
+  ['canonical_time_fence', 'canonical_time_fence'], ['state_owners', 'state_owners'], ['sessions', 'sessions'],
+  ['runs', 'runs'], ['worker_launches', 'worker_launches'], ['workspace_generations', 'workspace_generations'],
+  ['local_inference_activation_cycles', 'local_inference_activation_cycles'], ['local_inference_launches', 'local_inference_launches'],
+  ['list_read_cuts', 'list_read_cuts'], ['list_read_cut_entries', 'list_read_cut_entries'], ['child_allocations', 'child_allocations'],
+  ['authorization_grants', 'authorization_grants'], ['source_inspection_attempts', 'source_inspection_attempts'],
+  ['mcp_registrations', 'mcp_registrations'], ['admin_operations', 'admin_operations']] as const;
+
+test('fixed diagnostic table buckets exhaust the independent canonical kernel inventory without changing six original aliases', () => {
+  assert.equal(kernelTableBuckets.length, 21);
+  assert.deepEqual(kernelTableBuckets.map(([table]) => table).sort(), [...KERNEL_AUTHORITY_TABLES].sort());
+  assert.deepEqual(kernelTableBuckets.slice(0, 6), [['artifacts', 'artifacts'], ['control_requests', 'control'], ['run_events', 'events'],
+    ['items', 'items'], ['checkpoints', 'checkpoints'], ['run_journal', 'journal']]);
+  assert(kernelTableBuckets.every(([, bucket]) => /^[a-z_]+$/u.test(bucket) && bucket.length < 96));
+});
+
+for (const [table, bucket] of [...kernelTableBuckets, ['private_unknown_table', 'other'], ['source_inspection_attempts_private', 'other']] as const)
   test(`copied SQLite failure projects only the fixed ${bucket} bucket`, async () => {
     await copyFixture(async filename => {
       await createDatabase(filename, database => {
         database.exec(`CREATE TABLE ${table}(value TEXT) STRICT; INSERT INTO ${table} VALUES ('ordinary bytes')`);
       });
-      const scanner = createCredentialSecretScanner([secret()], { maxBytes: 1024 * 1024, maxStreams: 2 });
+      let observed: unknown;
+      const scanner = createCredentialSecretScanner([secret()], { maxBytes: 1024 * 1024, maxStreams: 2 }, error => { observed = error; });
       try {
         let original: unknown;
-        assert.throws(() => scanCopiedCredentialDatabase(filename, scanner), error => { original = error; return (error as { code?: unknown }).code === 'LIMIT_EXCEEDED'; });
+        assert.throws(() => scanCopiedCredentialDatabase(filename, scanner), error => { original = error;
+          assert.equal(error, observed); return (error as { code?: unknown }).code === 'LIMIT_EXCEEDED'; });
         const progress = failureProgress(original) as { source: { database: string; tableBucket: string; part: string } };
         assert.equal(progress.source.database, 'kernel'); assert.equal(progress.source.tableBucket, bucket); assert.equal(progress.source.part, 'cell');
+        assert.equal(scanner.stats().streamsOpened, 2); assert.equal(scanner.stats().streamsClosed, 2);
         assert(!JSON.stringify(progress).includes(filename)); if (bucket === 'other') assert(!JSON.stringify(progress).includes(table));
       } finally { scanner.close(); }
     }, 'kernel.sqlite3');

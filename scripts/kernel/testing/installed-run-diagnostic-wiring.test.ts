@@ -8,6 +8,38 @@ import { transformSync } from 'esbuild';
 const source = await readFile(new URL('../../../src/state/store.ts', import.meta.url), 'utf8');
 const between = (start: string, end: string) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
 
+test('submit diagnosis preserves the registered producer, actual admission resolution and untouched catch error', async () => {
+  // Execute the real inert catch only, never a substitute Store or authority.
+  const body = between('private async submitInstalledRunOwned(', '/** One bounded production lane,');
+  assert.match(body, /const diagnosis = beginInstalledSubmitDiagnostic\(\);\s*try \{/u);
+  for (const [stage, operation] of [['submit_preflight_authority', 'await validateControlChannelClosure'],
+    ['submit_source_capture', 'const source = await this.captureSubmittedSource'],
+    ['submit_assembly', 'const assembled = await assembleInstalledRun'],
+    ['submit_final_admission', 'const admission = withCredentialAuthorityLock']])
+    assert(body.includes(`diagnosis?.stage('${stage}');\n      ${operation}`), stage);
+  assert.match(body, /if \(\['queued', 'running', 'waiting'\]\.includes\(readRun\(this.driver, replay.run.id\).status\)\) \{\s*diagnosis\?\.stage\('submit_postcommit_load'\);\s*await this.retainInstalledAgent\(replay.run.id\);/u);
+  assert.match(body, /const agentLoad = this.retainInstalledAgent\(runId, assembled.material, admission\);\s*const result = await admission;\s*diagnosis\?\.stage\('submit_postcommit_load'\);/u);
+  assert.match(body, /captureSubmittedSource\(\{ request, identity \}\)/u);
+  const publicBody = between('async submitInstalledRun(', 'async applyInstalledRun(');
+  assert.match(publicBody, /request = immutableSnapshot\(request\);\s*return this.ownInstalledAdmission\(signal => this.submitInstalledRunOwned\(request, identity, signal\)\);/u);
+  const caught = body.match(/catch \(error\) \{\s*diagnosis\?\.failure\(error, this.closeRequested\);\s*throw error;\s*\}/u)?.[0];
+  assert(caught);
+  const { beginInstalledSubmitDiagnostic } = await import('../../../src/state/installed-run-diagnostics.js');
+  const { channel } = await import('node:diagnostics_channel');
+  const diagnostic = channel('cliq.installed.run.failures.v1'), records: unknown[] = [];
+  const receive = (record: unknown) => { records.push(record); }; diagnostic.subscribe(receive);
+  try {
+    const diagnosis = beginInstalledSubmitDiagnostic()!; diagnosis.stage('submit_final_admission');
+    const original = new Error('owned original failure');
+    const compiled = transformSync(`globalThis.invoke = function() { try { throw original; } ${caught} };`, { loader: 'ts' }).code;
+    const context = { diagnosis, original, closeRequested: true, invoke: undefined as any };
+    new Script(compiled).runInNewContext(context);
+    assert.throws(() => context.invoke(), error => error === original);
+    assert.deepEqual(records, [{ kind: 'apply_failure', stage: 'submit_final_admission', closing: true,
+      errorClass: 'other', code: 'none', sqliteCode: null }]);
+  } finally { diagnostic.unsubscribe(receive); }
+});
+
 test('publication preparation diagnosis preserves the closed authority input and every original await boundary', async () => {
   // Source wiring only: no execution, native task or authority is constructed.
   const publication = await readFile(new URL('../../../src/state/publication-invocation.ts', import.meta.url), 'utf8');
@@ -187,11 +219,19 @@ test('arrival diagnostics can observe an abnormal original exit without satisfyi
   const body = journey.slice(originalThrow, joined);
   assert.match(body, /finally \{[\s\S]*storeFailureDiagnostics && \(primary \|\| originalStopFailed\)/u);
   assert.match(body, /String\(storeFailureBinding.pid\) === before\[0\]!.MainPID &&\s*storeFailureBinding.invocationId === before\[0\]!.InvocationID/u);
-  assert(body.includes("'--grep=^CLIQ_PUBLICATION_STAGE_V1:'"));
+  assert(body.includes("'--grep=^(CLIQ_PUBLICATION_STAGE_V1:|CLIQ_STORE_STOP_PHASE_V1:)'"));
   assert(body.includes('timeout: 5000, killSignal: \'SIGKILL\', maxBuffer: 256 * 1024'));
   assert(body.includes('scanBytes(log.stdout); scanBytes(log.stderr);'));
   assert(body.includes("source: 'actual_absent_original_supervisor_journal'"));
   assert(body.includes('originalPidObservedAbsent: true, phases: observation.phases'));
+  const stopPhaseRead = body.indexOf('const stopPhase = readInstalledStoreStopPhaseJournal(text,');
+  assert(stopPhaseRead > body.indexOf('const observation = readInstalledPublicationStageJournal(text,'));
+  assert(body.includes('originalPidObservedAbsent: true, phase: stopPhase.phase'));
+  assert.equal(body.match(/spawnSync\('\/usr\/bin\/journalctl'/gu)?.length, 1, 'both diagnostics reuse the same original bounded journal command');
+  assert.equal(body.match(/scanBytes\(log\.stdout\); scanBytes\(log\.stderr\);/gu)?.length, 1);
+  assert.equal(body.match(/new TextDecoder\('utf-8', \{ fatal: true \}\)\.decode\(log\.stdout\)/gu)?.length, 1);
+  assert.equal(body.match(/Date\.now\(\)/gu)?.length, 2, 'the original window sample and original deadline check remain the only clocks');
+  assert(!/report\.installedWritersJoined\s*=|scanner\.openStream\(/u.test(body), 'a phase is not resource-join evidence and creates no new scanner stream');
   assert(!/originalServerJoined: true|qualified: true|report\.storeFailureDiagnostics =/u.test(body), 'arrival data never upgrades exit-summary or outcome proof');
 });
 

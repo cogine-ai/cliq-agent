@@ -62,7 +62,7 @@ import { decodeSecretServiceObservation, decodeRetainedSecretServiceObservation,
   type NativeCredentialInspection, type NativeCredentialPlatformBinding } from './credential-platform.js';
 import { ensureInstalledCredentialSupervisor, type CredentialFinalizeRequest } from './installed-credential-client.js';
 import { noteInstalledCredentialPhase } from './installed-diagnostics.js';
-import { beginInstalledApplyDiagnostic, beginInstalledSchedulerDiagnostic, installedRunDiagnosticsSubscribed,
+import { beginInstalledApplyDiagnostic, beginInstalledSubmitDiagnostic, beginInstalledSchedulerDiagnostic, installedRunDiagnosticsSubscribed,
   noteInstalledStoreStop, noteInstalledPublicationPhase, type InstalledApplyDiagnostic } from './installed-run-diagnostics.js';
 import { ContentAddressedStore } from './cas.js';
 import { openLocalControlListener, type AuthenticatedControlIdentity, type LocalControlConnection, type LocalControlListener } from './control-channel.js';
@@ -1831,100 +1831,114 @@ export class StateStore {
   }
 
   private async submitInstalledRunOwned(request: unknown, identity: AuthenticatedControlIdentity, signal: AbortSignal) {
-    signal.throwIfAborted();
-    const reads = this.artifacts.withReadSignal(signal);
-    if (!this.installedRuntime || !this.runtimeAuthority?.sourceInspection)
-      throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'installed Run composition is not ready');
-    const normalized = normalizeRunSubmitRequest(request);
-    await validateControlChannelClosure(reads, this.owner, identity);
-    signal.throwIfAborted();
-    const { replayInstalledRunAdmission, admitInstalledRun } = await import('./reducers/admission.js');
-    const replay = await replayInstalledRunAdmission(this.driver, this.artifacts, this.owner, normalized, identity, this.runtimeAuthority, signal);
-    if (replay) {
-      if ('run' in replay) {
-        if (['queued', 'running', 'waiting'].includes(readRun(this.driver, replay.run.id).status)) await this.retainInstalledAgent(replay.run.id);
-        this.scheduleInstalledRun(replay.run.id);
+    const diagnosis = beginInstalledSubmitDiagnostic();
+    try {
+      signal.throwIfAborted();
+      const reads = this.artifacts.withReadSignal(signal);
+      if (!this.installedRuntime || !this.runtimeAuthority?.sourceInspection)
+        throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'installed Run composition is not ready');
+      const normalized = normalizeRunSubmitRequest(request);
+      diagnosis?.stage('submit_preflight_authority');
+      await validateControlChannelClosure(reads, this.owner, identity);
+      signal.throwIfAborted();
+      const { replayInstalledRunAdmission, admitInstalledRun } = await import('./reducers/admission.js');
+      const replay = await replayInstalledRunAdmission(this.driver, this.artifacts, this.owner, normalized, identity, this.runtimeAuthority, signal);
+      if (replay) {
+        if ('run' in replay) {
+          if (['queued', 'running', 'waiting'].includes(readRun(this.driver, replay.run.id).status)) {
+            diagnosis?.stage('submit_postcommit_load');
+            await this.retainInstalledAgent(replay.run.id);
+          }
+          this.scheduleInstalledRun(replay.run.id);
+        }
+        return replay;
       }
-      return replay;
-    }
-    const { readSourceInspectionAttempt } = await import('./source-inspection.js');
-    const sourceKey = { principalId: identity.principalId, admissionKey: normalized.request.admissionKey,
-      admissionIntentDigest: runSubmitIntentDigest(identity.principalId, normalized.request) };
-    const retainedSource = readSourceInspectionAttempt(this.driver, sourceKey);
-    if (retainedSource?.phase === 'retired' && retainedSource.outcome.kind !== 'captured') {
-      // Return only an inert historical refusal before new admission preflight.
-      // The retained-only producer validates its full historical closure and
-      // binds a fresh request id; it can never fall back to recapture.
-      const { replaySubmittedSource, readSourceInspectionErrorResponse } = await import('./source-inspection-owner.js');
-      assertCurrentControlFrame(this.owner, identity); assertActiveStateOwner(this.driver, this.owner);
-      const source = await replaySubmittedSource(this.driver, reads, this.owner,
-        { bundle: this.runtimeAuthority.bundle, releaseKeys: this.runtimeAuthority.releaseKeys,
-          ...this.runtimeAuthority.sourceInspection, sandboxProfile: installedSandboxProfile(normalized.request.sandboxResources) },
-        normalized.request, identity);
-      if (!source || canonicalSha256(source) !== canonicalSha256(retainedSource))
-        throw new KernelStorageError('RECOVERY_REQUIRED', 'installed Run source refusal changed during retained replay');
-      const response = await readSourceInspectionErrorResponse(reads, source);
-      await validateControlChannelClosure(reads, this.owner, identity);
-      assertCurrentControlFrame(this.owner, identity); assertActiveStateOwner(this.driver, this.owner);
-      const currentSource = readSourceInspectionAttempt(this.driver, sourceKey);
-      if (!currentSource || canonicalSha256(currentSource) !== canonicalSha256(retainedSource))
-        throw new KernelStorageError('RECOVERY_REQUIRED', 'installed Run source refusal changed before replay response');
-      return { response };
-    }
-    const { assembleInstalledRun, assertInstalledRunRecipe, InstalledRunAuthorityError } = await import('./installed-run.js');
-    if (!this.installedModelAdmissionReady) throw new InstalledRunAuthorityError('MODEL_CAPABILITY_UNKNOWN');
-    const assertRecipe: typeof assertInstalledRunRecipe = assertInstalledRunRecipe;
-    assertRecipe(normalized.request);
-    const model = normalized.request.model;
-    if (model.provider !== 'openai-compatible') throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'installed Run requires its fixed signed model recipe');
-    const selected = this.installedRuntime, controlledHome = this.runtimeAuthority.sourceInspection.controlledHome;
-    // Refuse invalid credential intent before publishing source or assembly
-    // CAS objects. This read is not the final admission or release authority.
-    const authority = await withCredentialAuthorityLock(selected, async token => {
+      const { readSourceInspectionAttempt } = await import('./source-inspection.js');
+      const sourceKey = { principalId: identity.principalId, admissionKey: normalized.request.admissionKey,
+        admissionIntentDigest: runSubmitIntentDigest(identity.principalId, normalized.request) };
+      const retainedSource = readSourceInspectionAttempt(this.driver, sourceKey);
+      if (retainedSource?.phase === 'retired' && retainedSource.outcome.kind !== 'captured') {
+        // Return only an inert historical refusal before new admission preflight.
+        // The retained-only producer validates its full historical closure and
+        // binds a fresh request id; it can never fall back to recapture.
+        const { replaySubmittedSource, readSourceInspectionErrorResponse } = await import('./source-inspection-owner.js');
+        assertCurrentControlFrame(this.owner, identity); assertActiveStateOwner(this.driver, this.owner);
+        const source = await replaySubmittedSource(this.driver, reads, this.owner,
+          { bundle: this.runtimeAuthority.bundle, releaseKeys: this.runtimeAuthority.releaseKeys,
+            ...this.runtimeAuthority.sourceInspection, sandboxProfile: installedSandboxProfile(normalized.request.sandboxResources) },
+          normalized.request, identity);
+        if (!source || canonicalSha256(source) !== canonicalSha256(retainedSource))
+          throw new KernelStorageError('RECOVERY_REQUIRED', 'installed Run source refusal changed during retained replay');
+        const response = await readSourceInspectionErrorResponse(reads, source);
+        await validateControlChannelClosure(reads, this.owner, identity);
+        assertCurrentControlFrame(this.owner, identity); assertActiveStateOwner(this.driver, this.owner);
+        const currentSource = readSourceInspectionAttempt(this.driver, sourceKey);
+        if (!currentSource || canonicalSha256(currentSource) !== canonicalSha256(retainedSource))
+          throw new KernelStorageError('RECOVERY_REQUIRED', 'installed Run source refusal changed before replay response');
+        return { response };
+      }
+      const { assembleInstalledRun, assertInstalledRunRecipe, InstalledRunAuthorityError } = await import('./installed-run.js');
+      if (!this.installedModelAdmissionReady) throw new InstalledRunAuthorityError('MODEL_CAPABILITY_UNKNOWN');
+      const assertRecipe: typeof assertInstalledRunRecipe = assertInstalledRunRecipe;
+      assertRecipe(normalized.request);
+      const model = normalized.request.model;
+      if (model.provider !== 'openai-compatible') throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'installed Run requires its fixed signed model recipe');
+      const selected = this.installedRuntime, controlledHome = this.runtimeAuthority.sourceInspection.controlledHome;
+      // Refuse invalid credential intent before publishing source or assembly
+      // CAS objects. This read is not the final admission or release authority.
+      const authority = await withCredentialAuthorityLock(selected, async token => {
+        signal.throwIfAborted();
+        const held = checkedCredentialToken(token);
+        const authority = currentModelAuthority(held, identity.principalId, model.endpoint.endpointRegistrationId,
+          model.modelCredentialGrantIds, sampleCanonicalNow());
+        return immutableSnapshot({ endpoint: authority.endpoint, bindings: authority.bindings });
+      });
       signal.throwIfAborted();
-      const held = checkedCredentialToken(token);
-      const authority = currentModelAuthority(held, identity.principalId, model.endpoint.endpointRegistrationId,
-        model.modelCredentialGrantIds, sampleCanonicalNow());
-      return immutableSnapshot({ endpoint: authority.endpoint, bindings: authority.bindings });
-    });
-    signal.throwIfAborted();
-    assertRecipe(normalized.request, authority.endpoint);
-    const source = await this.captureSubmittedSource({ request, identity });
-    if (source.phase !== 'retired') throw new KernelStorageError('RECOVERY_REQUIRED', 'Run source inspection has not completely retired');
-    if (source.outcome.kind !== 'captured') {
-      const { readSourceInspectionErrorResponse } = await import('./source-inspection-owner.js');
-      const response = await readSourceInspectionErrorResponse(reads, source);
-      await validateControlChannelClosure(reads, this.owner, identity);
-      assertCurrentControlFrame(this.owner, identity); assertActiveStateOwner(this.driver, this.owner);
-      return { response };
+      assertRecipe(normalized.request, authority.endpoint);
+      diagnosis?.stage('submit_source_capture');
+      const source = await this.captureSubmittedSource({ request, identity });
+      if (source.phase !== 'retired') throw new KernelStorageError('RECOVERY_REQUIRED', 'Run source inspection has not completely retired');
+      if (source.outcome.kind !== 'captured') {
+        const { readSourceInspectionErrorResponse } = await import('./source-inspection-owner.js');
+        const response = await readSourceInspectionErrorResponse(reads, source);
+        await validateControlChannelClosure(reads, this.owner, identity);
+        assertCurrentControlFrame(this.owner, identity); assertActiveStateOwner(this.driver, this.owner);
+        return { response };
+      }
+      // Installation borrows and the credential pager share an intentionally
+      // non-reentrant physical queue. Prepare immutable data outside its lock;
+      // reacquire and check the exact current revisions for the final admission.
+      diagnosis?.stage('submit_assembly');
+      const assembled = await assembleInstalledRun({ selected, driver: this.driver, owner: this.owner,
+        artifacts: this.artifacts, identity, request: normalized.request, originalRequest: normalized.originalRequest, source,
+        endpoint: authority.endpoint, credentialBindings: authority.bindings, controlledHome }, signal);
+      diagnosis?.stage('submit_final_admission');
+      const admission = withCredentialAuthorityLock(selected, async token => {
+        signal.throwIfAborted();
+        const held = checkedCredentialToken(token);
+        currentModelAuthority(held, identity.principalId, model.endpoint.endpointRegistrationId,
+          model.modelCredentialGrantIds, sampleCanonicalNow(), authority);
+        if (authority.bindings.some(binding => binding.expiresAt !== undefined && binding.expiresAt < assembled.deadlineAt))
+          throw new InstalledModelAuthorizationError();
+        assertCurrentControlFrame(this.owner, identity); token.assertHeld();
+        return admitInstalledRun(this.driver, this.artifacts, this.owner, assembled, identity, this.runtimeAuthority, signal);
+      });
+      const runId = identityHash('cliq-run-id-v1', identity.principalId, 'run.submit', normalized.request.admissionKey);
+      // Register before that asynchronous producer can commit a visible Run.
+      // Maintenance joins the same load, never waiting on its own credential
+      // queue or misclassifying an in-flight admission as corrupt state.
+      const agentLoad = this.retainInstalledAgent(runId, assembled.material, admission);
+      const result = await admission;
+      diagnosis?.stage('submit_postcommit_load');
+      // Deadline control must exist before productive scheduling, including for
+      // a Run accepted behind a slow native broker or a retained worker slot.
+      await agentLoad;
+      this.scheduleInstalledRun(result.run.id);
+      return result;
+    } catch (error) {
+      diagnosis?.failure(error, this.closeRequested);
+      throw error;
     }
-    // Installation borrows and the credential pager share an intentionally
-    // non-reentrant physical queue. Prepare immutable data outside its lock;
-    // reacquire and check the exact current revisions for the final admission.
-    const assembled = await assembleInstalledRun({ selected, driver: this.driver, owner: this.owner,
-      artifacts: this.artifacts, identity, request: normalized.request, originalRequest: normalized.originalRequest, source,
-      endpoint: authority.endpoint, credentialBindings: authority.bindings, controlledHome }, signal);
-    const admission = withCredentialAuthorityLock(selected, async token => {
-      signal.throwIfAborted();
-      const held = checkedCredentialToken(token);
-      currentModelAuthority(held, identity.principalId, model.endpoint.endpointRegistrationId,
-        model.modelCredentialGrantIds, sampleCanonicalNow(), authority);
-      if (authority.bindings.some(binding => binding.expiresAt !== undefined && binding.expiresAt < assembled.deadlineAt))
-        throw new InstalledModelAuthorizationError();
-      assertCurrentControlFrame(this.owner, identity); token.assertHeld();
-      return admitInstalledRun(this.driver, this.artifacts, this.owner, assembled, identity, this.runtimeAuthority, signal);
-    });
-    const runId = identityHash('cliq-run-id-v1', identity.principalId, 'run.submit', normalized.request.admissionKey);
-    // Register before that asynchronous producer can commit a visible Run.
-    // Maintenance joins the same load, never waiting on its own credential
-    // queue or misclassifying an in-flight admission as corrupt state.
-    const agentLoad = this.retainInstalledAgent(runId, assembled.material, admission);
-    const result = await admission;
-    // Deadline control must exist before productive scheduling, including for
-    // a Run accepted behind a slow native broker or a retained worker slot.
-    await agentLoad;
-    this.scheduleInstalledRun(result.run.id);
-    return result;
   }
 
   /** One bounded production lane, reconstructing retained Runs rather than

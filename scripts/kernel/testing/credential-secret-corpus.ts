@@ -32,7 +32,10 @@ const directoryIdentity = (info: BigIntStats) => [info.dev, info.ino, info.uid, 
 type Directory = { handle: FileHandle; physicalPath: string; info: BigIntStats };
 type Stats = { filesScanned: number; fileBytesScanned: number; sqliteDatabasesScanned: number;
   logicalRowsScanned: number; logicalValuesScanned: number; logicalBytesScanned: number; evidenceDirectoriesScanned: number };
-type TableBucket = 'artifacts' | 'control' | 'events' | 'items' | 'checkpoints' | 'journal' | 'other';
+type TableBucket = 'artifacts' | 'control' | 'events' | 'items' | 'checkpoints' | 'journal' | 'other'
+  | 'canonical_time_fence' | 'state_owners' | 'sessions' | 'runs' | 'worker_launches' | 'workspace_generations'
+  | 'local_inference_activation_cycles' | 'local_inference_launches' | 'list_read_cuts' | 'list_read_cut_entries'
+  | 'child_allocations' | 'authorization_grants' | 'source_inspection_attempts' | 'mcp_registrations' | 'admin_operations';
 type ScanSource = Readonly<{
   kind: 'database_logical'; database: 'kernel' | 'authority'; tableBucket: TableBucket;
   part: 'table_name' | 'table_sql' | 'cell';
@@ -58,6 +61,21 @@ function tableBucket(name: string): TableBucket {
     case 'items': return 'items';
     case 'checkpoints': return 'checkpoints';
     case 'run_journal': return 'journal';
+    case 'canonical_time_fence': return 'canonical_time_fence';
+    case 'state_owners': return 'state_owners';
+    case 'sessions': return 'sessions';
+    case 'runs': return 'runs';
+    case 'worker_launches': return 'worker_launches';
+    case 'workspace_generations': return 'workspace_generations';
+    case 'local_inference_activation_cycles': return 'local_inference_activation_cycles';
+    case 'local_inference_launches': return 'local_inference_launches';
+    case 'list_read_cuts': return 'list_read_cuts';
+    case 'list_read_cut_entries': return 'list_read_cut_entries';
+    case 'child_allocations': return 'child_allocations';
+    case 'authorization_grants': return 'authorization_grants';
+    case 'source_inspection_attempts': return 'source_inspection_attempts';
+    case 'mcp_registrations': return 'mcp_registrations';
+    case 'admin_operations': return 'admin_operations';
     default: return 'other';
   }
 }

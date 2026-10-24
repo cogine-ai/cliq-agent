@@ -46,7 +46,7 @@ import { publicationClaimRetirementDiagnosticKey } from '../../../src/state/publ
 import { publicationEnvelopeLocations } from '../../../src/state/delivery-publication-progress.js';
 import type { InstalledPublicationStopResult } from './installed-publication-stop-result.js';
 import { projectInstalledRunProgress } from './installed-run-progress.js';
-import { readInstalledPublicationStageJournal, readInstalledStoreDiagnosticJournal } from './installed-store-diagnostic-journal.js';
+import { readInstalledPublicationStageJournal, readInstalledStoreDiagnosticJournal, readInstalledStoreStopPhaseJournal } from './installed-store-diagnostic-journal.js';
 
 type Recipe = { buildFixture: string; packageRoot: string; installerEntry: string; stateRoot: string; releaseKeysFile: string;
   controlDirectory: string; observer: string; storeFixture: string; publicationObserver: string; workspace: string; reportFile: string };
@@ -728,7 +728,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     catch (original) {
       if (options.publicationRetirementDiagnostics && original instanceof InstalledClientConsumerDeadlineError &&
           original.diagnostic.stage === 'ready' && original.diagnostic.lastObservedDriverStage === 'authentication' &&
-          original.diagnostic.authentication?.at(-1)?.stage === 'hello_exchange_started') {
+          (original.diagnostic.authentication?.at(-1)?.stage === 'hello_exchange_started' ||
+           original.diagnostic.authentication?.at(-1)?.stage === 'hello_received')) {
         serverAuthenticationFailure = true;
         report.serverAuthentication = { diagnosticOnly: true, kind: 'unavailable',
           reason: serverAuthenticationBinding ? 'original_join_missing' : 'preexisting_binding_missing' };
@@ -1517,27 +1518,36 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
             if (storeFailureDiagnostics && (primary || originalStopFailed)) {
               report.publicationStageDiagnostics = { diagnosticOnly: true, kind: 'unavailable',
                 reason: storeFailureBinding ? 'original_lifetime_missing' : 'preexisting_binding_missing' };
+              report.originalStopPhaseDiagnostic = { diagnosticOnly: true, kind: 'unavailable',
+                reason: storeFailureBinding ? 'original_lifetime_missing' : 'preexisting_binding_missing' };
               if (storeFailureBinding && String(storeFailureBinding.pid) === before[0]!.MainPID &&
                   storeFailureBinding.invocationId === before[0]!.InvocationID) try {
                 assertRetained();
                 await assert.rejects(lstat('/proc/' + storeFailureBinding.pid), { code: 'ENOENT' });
                 report.publicationStageDiagnostics = { diagnosticOnly: true, kind: 'unavailable', reason: 'journal_unavailable' };
+                report.originalStopPhaseDiagnostic = { diagnosticOnly: true, kind: 'unavailable', reason: 'journal_unavailable' };
                 const until = Date.now(), logBy = until + 5000;
                 const timestamp = (value: number) => '@' + Math.floor(value / 1000) + '.' + String(value % 1000).padStart(3, '0');
                 const log = spawnSync('/usr/bin/journalctl', ['--no-pager', '--all', '--no-tail', '--output=json', '--boot=0',
-                  '--grep=^CLIQ_PUBLICATION_STAGE_V1:',
+                  '--grep=^(CLIQ_PUBLICATION_STAGE_V1:|CLIQ_STORE_STOP_PHASE_V1:)',
                   `--since=${timestamp(storeFailureBinding.windowOpenedAt)}`, `--until=${timestamp(until)}`,
                   `_UID=${ledger.uid}`, `_PID=${storeFailureBinding.pid}`, '_TRANSPORT=stdout',
                   `_SYSTEMD_INVOCATION_ID=${storeFailureBinding.invocationId}`],
                 { env: environment, timeout: 5000, killSignal: 'SIGKILL', maxBuffer: 256 * 1024 });
                 assert(Buffer.isBuffer(log.stdout) && Buffer.isBuffer(log.stderr)); scanBytes(log.stdout); scanBytes(log.stderr);
                 assert.equal(log.error, undefined); assert.equal(log.signal, null); assert.equal(log.status, 0);
-                const observation = readInstalledPublicationStageJournal(new TextDecoder('utf-8', { fatal: true }).decode(log.stdout),
+                const text = new TextDecoder('utf-8', { fatal: true }).decode(log.stdout);
+                const observation = readInstalledPublicationStageJournal(text,
+                  { uid: ledger.uid, pid: storeFailureBinding.pid, invocationId: storeFailureBinding.invocationId });
+                const stopPhase = readInstalledStoreStopPhaseJournal(text,
                   { uid: ledger.uid, pid: storeFailureBinding.pid, invocationId: storeFailureBinding.invocationId });
                 assert(Date.now() < logBy, 'actual publication-stage journal exceeded five seconds'); assertRetained();
                 if (observation) report.publicationStageDiagnostics = { diagnosticOnly: true, kind: 'observed',
                   source: 'actual_absent_original_supervisor_journal', preexistingProcessStartAndFullImageBound: true,
                   originalInvocationBound: true, originalPidObservedAbsent: true, phases: observation.phases };
+                if (stopPhase) report.originalStopPhaseDiagnostic = { diagnosticOnly: true, kind: 'observed',
+                  source: 'actual_absent_original_supervisor_journal', preexistingProcessStartAndFullImageBound: true,
+                  originalInvocationBound: true, originalPidObservedAbsent: true, phase: stopPhase.phase };
               } catch { /* Preserve every original failure; a marker is never resource-join evidence. */ }
             }
           }

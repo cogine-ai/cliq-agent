@@ -134,3 +134,16 @@ export function readInstalledPublicationStageJournal(text: string, expected: Ori
   }
   return Object.freeze({ phases: Object.freeze(phases) });
 }
+
+/** One current driver phase at the original Stop entry, never a Run
+ * attribution, completed task, original resource join or stop proof. */
+export function readInstalledStoreStopPhaseJournal(text: string, expected: OriginalJournalIdentity) {
+  const rows = originalJournalMessages(text, expected).filter(message => message.startsWith('CLIQ_STORE_STOP_PHASE'));
+  if (!rows.length) return;
+  need(rows.length === 1);
+  const row = rows[0]!;
+  need(Buffer.byteLength(row, 'utf8') + 1 <= 96 && /^[\x20-\x7e]+$/u.test(row));
+  const fields = row.split(':');
+  need(fields.length === 2 && fields[0] === 'CLIQ_STORE_STOP_PHASE_V1' && phases.has(fields[1]!));
+  return Object.freeze({ phase: fields[1]! });
+}

@@ -138,6 +138,90 @@ function admissionMetadata(): (input: Record<string, unknown>, sourceManifest: {
   return (input, manifest, reads) => decode(input, manifest, reads, reads, joinResourceOperations) as Promise<unknown>;
 }
 
+// Execute only the original delivery item-read expression. These plain CAS
+// payloads are not a RecoveryClosure, delivery authority or native evidence.
+function deliveryAuthorizationItems(): (items: { payloadRef: string }[], artifacts: ArtifactCatalog) => Promise<unknown> {
+  const body = between(source('./delivery-approval.ts'), 'export async function readDeliveryAuthorization(', 'export async function readDeliveryPolicyDenial(');
+  const parsed = ts.createSourceFile('delivery-authorization-read-data.ts', body, ts.ScriptTarget.Latest, true);
+  const expressions: ts.Expression[] = [];
+  const visit = (node: ts.Node) => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === 'decoded' && node.initializer)
+      expressions.push(node.initializer);
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed); assert.equal(expressions.length, 1);
+  const output = ts.transpileModule(`return (async () => ${expressions[0]!.getText(parsed)})();`,
+    { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText;
+  const read = new Function('cut', 'artifacts', 'readCanonicalArtifact', 'joinResourceOperations', output);
+  return (items, artifacts) => read({ items }, artifacts, readCanonicalArtifact, joinResourceOperations) as Promise<unknown>;
+}
+
+for (const fault of ['ordinary', 'cancel', 'retirement'] as const)
+  test(`delivery authorization item reads join real pending descriptors and preserve ${fault}`, async t => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), 'cliq-delivery-read-join-'));
+    t.after(() => fs.rm(home, { recursive: true, force: true }));
+    const root = path.join(home, 'objects'); await fs.mkdir(root, { mode: 0o700 });
+    const cas = new ContentAddressedStore(root), catalog = new ArtifactCatalog(cas), refs: string[] = [];
+    for (let index = 0; index < 3; index++) refs.push((await catalog.publishCanonical({ diagnosticOnly: true, index }, 'cliq-read-join-data-v1')).ref);
+    const owner = new AbortController(), reason = new Error('the original delivery read owner closed');
+    const ordinaryFailure = new Error('the original first delivery item read failed');
+    const closeFailure = new Error('the second actual root close reported retirement uncertainty');
+    const call = new AsyncLocalStorage<string>(), active = new Set<object>(), open = fs.open, read = cas.read.bind(cas);
+    const gate = () => { let release!: () => void; return { promise: new Promise<void>(resolve => { release = resolve; }), release }; };
+    const firstReturned = gate(), thirdReturned = gate(), secondClosing = gate(), closeGate = gate();
+    const returns = [gate(), gate(), gate()], producers: Promise<Buffer>[] = [], failures = new Map<string, unknown>();
+    let opened = 0, closed = 0, outerJoined = false, actualRootCloseFailure = false;
+    t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
+      const handle = await open(...args), ref = call.getStore(); active.add(handle); opened++;
+      const close = handle.close.bind(handle);
+      t.mock.method(handle, 'close', async () => {
+        if (ref === refs[1] && args[0] === root) { secondClosing.release(); await closeGate.promise; }
+        await close(); assert.equal(active.delete(handle), true); closed++;
+        if (fault === 'retirement' && ref === refs[1] && args[0] === root) {
+          actualRootCloseFailure = true; throw closeFailure;
+        }
+      });
+      return handle;
+    });
+    t.mock.method(cas, 'read', (...args: Parameters<typeof cas.read>) => {
+      const operation = call.run(args[0], async () => {
+        let bytes: Buffer | undefined, failed: { error: unknown } | undefined;
+        try { bytes = await read(...args); } catch (error) { failed = { error }; failures.set(args[0], error); }
+        const index = refs.indexOf(args[0]);
+        if (index === 0) firstReturned.release(); if (index === 2) thirdReturned.release();
+        await returns[index]!.promise;
+        if (failed) throw failed.error;
+        if (fault === 'ordinary' && index === 0) throw ordinaryFailure;
+        return bytes!;
+      });
+      producers.push(operation); return operation;
+    });
+    const work = deliveryAuthorizationItems()(refs.map(payloadRef => ({ payloadRef })), catalog.withReadSignal(owner.signal));
+    void work.then(() => { outerJoined = true; }, () => { outerJoined = true; });
+    try {
+      await Promise.race([Promise.all([firstReturned.promise, secondClosing.promise, thirdReturned.promise]),
+        work.then(() => { throw new Error('the original three CAS reads bypassed their genuine descriptor/return gates'); })]);
+      assert.equal(producers.length, 3); assert.equal(opened, 6); assert.equal(closed, 5); assert.equal(active.size, 1);
+      if (fault !== 'ordinary') owner.abort(reason);
+      returns[0]!.release(); await setImmediate();
+      assert.equal(outerJoined, false, 'the first failure cannot release the owner with another actual root descriptor still open');
+      assert.equal(active.size, 1);
+      closeGate.release(); returns[1]!.release();
+      await Promise.allSettled(producers.slice(0, 2)); await setImmediate();
+      assert.equal(active.size, 0); assert.equal(closed, 6);
+      assert.equal(outerJoined, false, 'the final original CAS return still belongs to the same read group');
+      returns[2]!.release();
+      await assert.rejects(work, error => fault === 'retirement'
+        ? error === failures.get(refs[1]!) && error instanceof ResourceRetirementError && error.cause === closeFailure
+        : error === (fault === 'ordinary' ? ordinaryFailure : reason));
+      assert.equal(actualRootCloseFailure, fault === 'retirement');
+      assert.equal(active.size, 0); await setImmediate();
+    } finally {
+      closeGate.release(); returns.forEach(value => value.release());
+      await Promise.allSettled([work, ...producers]); assert.equal(active.size, 0); t.mock.restoreAll();
+    }
+  });
+
 for (const fault of ['cancel', 'ordinary', 'retirement'] as const)
   test(`admission metadata reads join every original CAS sibling before exposing ${fault}`, async t => {
     const home = await fs.mkdtemp(path.join(os.tmpdir(), 'cliq-admission-read-join-'));

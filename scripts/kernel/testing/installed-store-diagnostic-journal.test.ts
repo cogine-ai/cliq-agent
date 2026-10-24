@@ -10,6 +10,137 @@ const lines = ['CLIQ_STORE_DIAG_V1:begin:1:1',
 const journal = (messages = lines) => messages.map(MESSAGE => JSON.stringify({ _UID: '1000', _PID: '2000',
   _TRANSPORT: 'stdout', _SYSTEMD_INVOCATION_ID: sender.invocationId, MESSAGE })).join('\n') + '\n';
 
+test('one fixed original Stop phase is inert immutable retained data, not a completed task', async () => {
+  const { readInstalledStoreStopPhaseJournal } = await import('./installed-store-diagnostic-journal.js');
+  const observed = readInstalledStoreStopPhaseJournal(journal(['CLIQ_STORE_STOP_PHASE_V1:drive_agent']), sender);
+  assert.deepEqual(observed, { phase: 'drive_agent' }, 'only the original fixed phase is retained');
+  assert.equal(Object.isFrozen(observed), true, 'the retained phase is immutable');
+  assert.equal(Object.hasOwn(observed!, 'qualified'), false, 'a phase cannot establish qualification');
+  assert.equal(Object.hasOwn(observed!, 'originalServerJoined'), false, 'a phase cannot establish original join');
+  assert.equal(readInstalledStoreStopPhaseJournal(journal(), sender), undefined, 'a summary is not a Stop phase marker');
+  assert.equal(readInstalledStoreStopPhaseJournal('', sender), undefined, 'an empty valid window has no marker');
+  assert.equal(readInstalledStoreStopPhaseJournal(journal(['unrelated CLIQ_STORE_STOP_PHASE mention']), sender), undefined,
+    'unrelated prose is not a marker');
+  assert.deepEqual(readInstalledStoreStopPhaseJournal(journal(['CLIQ_STORE_STOP_PHASE_V1:drive_agent']),
+    Object.assign(Object.create(null), sender)), { phase: 'drive_agent' }, 'plain null-prototype identities remain valid');
+});
+
+test('Stop phase markers reject malformed versions, fields, phases, duplicate rows and non-ASCII bytes', async () => {
+  const { readInstalledStoreStopPhaseJournal } = await import('./installed-store-diagnostic-journal.js');
+  const marker = 'CLIQ_STORE_STOP_PHASE_V1:drive_agent';
+  const malformed = [
+    'CLIQ_STORE_STOP_PHASE', 'CLIQ_STORE_STOP_PHASE_V', 'CLIQ_STORE_STOP_PHASE_V1', 'CLIQ_STORE_STOP_PHASE_V1:',
+    'CLIQ_STORE_STOP_PHASE_V2:drive_agent', 'CLIQ_STORE_STOP_PHASE_V01:drive_agent',
+    'CLIQ_STORE_STOP_PHASE_V1_extra:drive_agent', 'CLIQ_STORE_STOP_PHASEV1:drive_agent',
+    'CLIQ_STORE_STOP_PHASE_V1:1:drive_agent', 'CLIQ_STORE_STOP_PHASE_V1:drive_agent:1',
+    'CLIQ_STORE_STOP_PHASE_V1:unavailable', 'CLIQ_STORE_STOP_PHASE_V1:unknown',
+    'CLIQ_STORE_STOP_PHASE_V1:drive_agent ', 'CLIQ_STORE_STOP_PHASE_V1: drive_agent',
+    marker + ':extra', marker + '\n', marker + '\r', marker + '\t', marker + '\u0000', marker + '\u007f', marker + 'é',
+    'CLIQ_STORE_STOP_PHASE_V1:' + 'x'.repeat(73)
+  ];
+  for (const row of malformed)
+    assert.throws(() => readInstalledStoreStopPhaseJournal(journal([row]), sender), 'a malformed Stop marker must be rejected');
+  for (const messages of [[marker, marker], [marker, 'CLIQ_STORE_STOP_PHASE_V1:scheduled'],
+    [marker, 'CLIQ_STORE_STOP_PHASE_V2:drive_agent'], [marker, 'CLIQ_STORE_STOP_PHASE_V1']])
+    assert.throws(() => readInstalledStoreStopPhaseJournal(journal(messages), sender), 'one original Stop observation permits only one marker');
+});
+
+test('Stop observations use only closed scheduler phases, including preparation details, never submit stages', async () => {
+  const { readInstalledStoreStopPhaseJournal, readInstalledStoreDiagnosticJournal,
+    readInstalledPublicationStageJournal } = await import('./installed-store-diagnostic-journal.js');
+  const preparation = ['publication_prepare_read', 'publication_prepare_grant', 'publication_prepare_cut',
+    'publication_prepare_physical', 'publication_prepare_admit'];
+  for (const phase of ['scheduled', 'drive_retirement_quarantine_closure', 'result_recovery_history_candidate', ...preparation]) {
+    assert.deepEqual(readInstalledStoreStopPhaseJournal(journal([`CLIQ_STORE_STOP_PHASE_V1:${phase}`]), sender), { phase },
+      'a current closed scheduler phase is retained');
+    const summary = readInstalledStoreDiagnosticJournal(journal(['CLIQ_STORE_DIAG_V1:begin:0:1',
+      `CLIQ_STORE_DIAG_V1:scheduler:drive:${phase}:0:other:none:-`, 'CLIQ_STORE_DIAG_V1:stop:1:0:0:0:0',
+      `CLIQ_STORE_DIAG_V1:phase:${phase}:1`, 'CLIQ_STORE_DIAG_V1:end']), sender)!;
+    assert.equal(summary.firstSchedulerFailure!.phase, phase, 'the original summary still accepts the same scheduler phase');
+    assert.deepEqual(summary.stop.phases, { [phase]: 1 }, 'the original summary preserves phase multiplicity');
+  }
+  for (const phase of preparation)
+    assert.throws(() => readInstalledPublicationStageJournal(journal([`CLIQ_PUBLICATION_STAGE_V1:1:${phase}`]), sender),
+      'preparation details do not become live publication arrivals');
+  for (const stage of ['submit_request', 'submit_preflight_authority', 'submit_source_capture',
+    'submit_assembly', 'submit_final_admission', 'submit_postcommit_load']) {
+    assert.throws(() => readInstalledStoreStopPhaseJournal(journal([`CLIQ_STORE_STOP_PHASE_V1:${stage}`]), sender),
+      'submit stages are not scheduler phases');
+    const messages = lines.map(row => row.replace('apply:postcommit_load:', `apply:${stage}:`));
+    assert.equal(readInstalledStoreDiagnosticJournal(journal(messages), sender)!.firstApplyFailure!.stage, stage,
+      'submit stages remain in the original admission summary only');
+    assert.throws(() => readInstalledStoreDiagnosticJournal(journal(lines.map(row => row.replace('phase:drive_agent:', `phase:${stage}:`))), sender),
+      'submit stages cannot become summary scheduler phases');
+    assert.throws(() => readInstalledPublicationStageJournal(journal([`CLIQ_PUBLICATION_STAGE_V1:1:${stage}`]), sender),
+      'submit stages cannot become live publication arrivals');
+  }
+});
+
+test('Stop decoding preserves the original whole-window sender, transport, invocation and fixed row/byte guards', async () => {
+  const { readInstalledStoreStopPhaseJournal } = await import('./installed-store-diagnostic-journal.js');
+  const marker = 'CLIQ_STORE_STOP_PHASE_V1:drive_agent';
+  const original = { _UID: '1000', _PID: '2000', _TRANSPORT: 'stdout', _SYSTEMD_INVOCATION_ID: sender.invocationId, MESSAGE: marker };
+  for (const mutation of [{ _UID: '1001' }, { _PID: '2001' }, { _TRANSPORT: 'syslog' },
+    { _SYSTEMD_INVOCATION_ID: 'b'.repeat(32) }, { _UID: 1000 }, { _PID: 2000 },
+    { _SYSTEMD_INVOCATION_ID: undefined }, { MESSAGE: null }, { MESSAGE: [marker] }]) {
+    const foreign = JSON.stringify({ ...original, ...mutation });
+    assert.throws(() => readInstalledStoreStopPhaseJournal(foreign, sender), 'a marker requires the original complete sender binding');
+    assert.throws(() => readInstalledStoreStopPhaseJournal(journal([marker]) + foreign + '\n', sender),
+      'the complete window, not only selected marker rows, is bound to the original sender');
+  }
+  for (const text of [JSON.stringify(original).slice(0, -1), 'null', '[]',
+    JSON.stringify(original).replace('"_UID":"1000"', '"_UID":"1000","_UID":"1000"'),
+    journal([marker, ...Array(80).fill('unrelated diagnostic text')]), ' '.repeat(256 * 1024 + 1)])
+    assert.throws(() => readInstalledStoreStopPhaseJournal(text, sender), 'malformed or over-budget whole windows must be refused');
+  assert.deepEqual(readInstalledStoreStopPhaseJournal(journal([marker, ...Array(79).fill('unrelated diagnostic text')]), sender),
+    { phase: 'drive_agent' }, 'the original eighty-row boundary remains accepted');
+  const exactBytes = journal([marker]);
+  assert.deepEqual(readInstalledStoreStopPhaseJournal(exactBytes + ' '.repeat(256 * 1024 - Buffer.byteLength(exactBytes)), sender),
+    { phase: 'drive_agent' }, 'the original whole-window byte boundary remains accepted');
+});
+
+test('Stop decoding rejects hostile expected identities without invoking accessors, proxy traps or coercions', async () => {
+  const { readInstalledStoreStopPhaseJournal } = await import('./installed-store-diagnostic-journal.js');
+  let traps = 0; const bad = () => { traps++; throw new Error('must not be observed'); };
+  const revoked = Proxy.revocable(sender, {}); revoked.revoke();
+  for (const expected of [null, [], Object.create(sender), Object.defineProperty({ ...sender }, 'uid', { get: bad }),
+    Object.defineProperty({ ...sender }, 'pid', { get: bad }), Object.defineProperty({ ...sender }, 'invocationId', { get: bad }),
+    Object.defineProperty({ ...sender }, 'uid', { value: 1000, enumerable: false }),
+    { ...sender, extra: 1 }, { ...sender, [Symbol('extra')]: 1 }, new Proxy(sender, { ownKeys: bad, getPrototypeOf: bad, get: bad }),
+    revoked.proxy, { ...sender, uid: 0 }, { ...sender, uid: 1.5 }, { ...sender, uid: Number.MAX_SAFE_INTEGER + 1 },
+    { ...sender, pid: 0 }, { ...sender, pid: -1 }, { ...sender, pid: 1.5 }, { ...sender, uid: { valueOf: bad } },
+    { ...sender, invocationId: sender.invocationId + '\n' }, { ...sender, invocationId: 'A'.repeat(32) },
+    { ...sender, invocationId: { toString: bad } }])
+    assert.throws(() => readInstalledStoreStopPhaseJournal(journal(['CLIQ_STORE_STOP_PHASE_V1:drive_agent']), expected as never),
+      'expected identity must be exact inert plain data');
+  for (const text of [null, 1, Symbol('text'), { toString: bad }, new Proxy({}, { get: bad })])
+    assert.throws(() => readInstalledStoreStopPhaseJournal(text as never, sender), 'journal text must not be coerced');
+  assert.equal(traps, 0, 'decoding must not invoke hostile input behavior');
+});
+
+test('the independent Stop marker cannot change original summary or publication reader acceptance', async () => {
+  const { readInstalledStoreStopPhaseJournal, readInstalledStoreDiagnosticJournal,
+    readInstalledPublicationStageJournal } = await import('./installed-store-diagnostic-journal.js');
+  const marker = 'CLIQ_STORE_STOP_PHASE_V1:publication_prepare_read';
+  const arrivals = ['CLIQ_PUBLICATION_STAGE_V1:1:publication_select', 'CLIQ_PUBLICATION_STAGE_V1:2:publication_prepare'];
+  const complete = journal([...arrivals, marker, ...lines]);
+  assert.deepEqual(readInstalledStoreDiagnosticJournal(complete, sender), readInstalledStoreDiagnosticJournal(journal(), sender),
+    'the original complete summary is unaffected by an independent Stop marker');
+  assert.deepEqual(readInstalledPublicationStageJournal(complete, sender), { phases: ['publication_select', 'publication_prepare'] },
+    'the original publication arrivals are unaffected by an independent Stop marker');
+  assert.deepEqual(readInstalledStoreStopPhaseJournal(complete, sender), { phase: 'publication_prepare_read' },
+    'the independent Stop observation remains available beside both old protocols');
+  const malformedMarker = 'CLIQ_STORE_STOP_PHASE_V1:drive_agent:private';
+  assert.deepEqual(readInstalledStoreDiagnosticJournal(journal([...lines, malformedMarker]), sender),
+    readInstalledStoreDiagnosticJournal(journal(), sender), 'the old summary does not acquire new Stop protocol validation');
+  assert.deepEqual(readInstalledPublicationStageJournal(journal([...arrivals, malformedMarker]), sender),
+    { phases: ['publication_select', 'publication_prepare'] }, 'the old arrival reader does not acquire new Stop protocol validation');
+  assert.throws(() => readInstalledStoreDiagnosticJournal(journal([...lines.slice(0, -1), marker]), sender),
+    'a Stop marker cannot complete a truncated original summary');
+  assert.throws(() => readInstalledPublicationStageJournal(journal([arrivals[0]!, 'CLIQ_PUBLICATION_STAGE_V1:3:publication_prepare', marker]), sender),
+    'a Stop marker cannot repair an original publication ordinal gap');
+});
+
 test('publication arrival markers retain only distinct original first arrivals, not a completion or joined result', async () => {
   const { readInstalledPublicationStageJournal, readInstalledStoreDiagnosticJournal } = await import('./installed-store-diagnostic-journal.js');
   const phases = ['publication_select', 'publication_worker_activate', 'publication_roots_open', 'publication_prepare'];

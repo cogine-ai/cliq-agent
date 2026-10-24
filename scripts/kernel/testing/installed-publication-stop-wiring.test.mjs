@@ -5,8 +5,69 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import ts from 'typescript';
 
 const source = name => readFileSync(new URL(name, import.meta.url), 'utf8');
+
+test('the actual initial-client catch retains only the two original incomplete hello stages and rethrows the same error', () => {
+  const owner = source('./installed-node-journey.ts');
+  const parsed = ts.createSourceFile('installed-node-journey.ts', owner, ts.ScriptTarget.Latest, true);
+  const catches = [];
+  const visit = node => {
+    if (ts.isTryStatement(node) && node.catchClause && node.tryBlock.statements.length === 2 &&
+        node.tryBlock.statements.every(ts.isExpressionStatement) &&
+        node.tryBlock.getText(parsed).includes('client = await persistentClient(); inspectionClient = await persistentClient();'))
+      catches.push(node.catchClause.block);
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed); assert.equal(catches.length, 1, 'use the actual initial public-client catch, never enrollment or a reconstructed predicate');
+  const caught = catches[0];
+  assert.equal(caught.statements.length, 2, 'the catch only selects inert diagnosis and throws the original error');
+  assert(ts.isIfStatement(caught.statements[0]) && ts.isThrowStatement(caught.statements[1]), 'preserve the original catch control flow');
+  assert.equal(caught.statements[1].expression.getText(parsed), 'original', 'the deadline error identity must be preserved');
+  assert(!/await |setTimeout|Date\.now|performance\.now/u.test(caught.getText(parsed)), 'diagnosis adds no await, timer or clock sample');
+  const program = `
+    import assert from 'node:assert/strict';
+    import { InstalledClientConsumerDeadlineError, InstalledClientDriverError } from ${JSON.stringify(new URL('./installed-client-consumer.ts', import.meta.url).href)};
+    const actualCatch = new Function('options', 'original', 'InstalledClientConsumerDeadlineError', 'serverAuthenticationBinding',
+      'let serverAuthenticationFailure = false; const report = {}; try ' + ${JSON.stringify(caught.getText(parsed))} +
+      ' catch (caught) { return { caught, matched: serverAuthenticationFailure, report }; } throw new Error("original catch must rethrow");');
+    const stages = ['manager_observer_loaded', 'initial_current_observed', 'native_connected', 'pre_hello_current_verified',
+      'hello_exchange_started', 'hello_received', 'final_current_verified'];
+    const prefix = count => stages.slice(0, count).map((stage, index) => ({ stage, elapsedMs: index, observedElapsedMs: index }));
+    const deadline = (count, stage = 'ready', driver = 'authentication') => new InstalledClientConsumerDeadlineError(
+      stage, 5000, performance.now() - 5001, 0, driver, prefix(count));
+    let accepted = 0, rejected = 0;
+    const check = (original, expected, enabled = true, bound = false) => {
+      const result = actualCatch({ publicationRetirementDiagnostics: enabled }, original,
+        InstalledClientConsumerDeadlineError, bound ? Object.freeze({ diagnosticOnly: true }) : undefined);
+      assert.equal(result.caught, original, 'the actual catch must rethrow the exact original error');
+      assert.equal(result.matched, expected, 'only the two incomplete hello stages may select server diagnosis');
+      assert.deepEqual(result.report, expected ? { serverAuthentication: { diagnosticOnly: true, kind: 'unavailable',
+        reason: bound ? 'original_join_missing' : 'preexisting_binding_missing' } } : {}, 'the catch must not fabricate a bound journal or other fields');
+      if (expected) accepted++; else rejected++;
+    };
+    // Complete literal prefixes are accepted; a detached received marker is not
+    // used to manufacture the original consumer's observed history.
+    for (let count = 0; count <= stages.length; count++) check(deadline(count), count === 5 || count === 6);
+    for (const count of [5, 6]) { check(deadline(count), true, true, true); check(deadline(count), false, false); }
+    for (const stage of ['request', 'close']) check(deadline(6, stage), false);
+    for (const driver of [undefined, 'platform', 'composition', 'selection', 'request', 'output', 'retirement'])
+      check(new InstalledClientConsumerDeadlineError('ready', 5000, performance.now() - 5001, 0, driver, prefix(6)), false);
+    const received = deadline(6);
+    check({ diagnostic: received.diagnostic }, false);
+    check(Object.assign(new Error('inert foreign failure'), { diagnostic: received.diagnostic }), false);
+    check(new InstalledClientDriverError('authentication'), false);
+    console.log(JSON.stringify({ accepted, rejected }));
+  `;
+  const child = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', program], {
+    cwd: fileURLToPath(new URL('../../../', import.meta.url)), env: process.env, timeout: 10000, maxBuffer: 64 * 1024
+  });
+  assert.equal(child.error, undefined, 'the actual-class catch regression child must join');
+  assert.equal(child.signal, null, 'the actual-class catch regression child must not time out');
+  assert.equal(child.status, 0, child.stderr.toString('utf8'));
+  assert.deepEqual(JSON.parse(child.stdout.toString('utf8')), { accepted: 4, rejected: 20 });
+});
 
 test('fixed server timing is opt-in and cannot defer the original service stop or replace its deadline error', () => {
   const owner = source('./installed-node-journey.ts');
