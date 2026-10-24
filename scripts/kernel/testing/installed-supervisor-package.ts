@@ -23,8 +23,8 @@ import { validateGuestToolchainMetadata } from '../../../src/state/guest-toolcha
  * they do not qualify admission, execution, release signing or complete I1. */
 export async function buildInstalledSupervisorPackage(fixture: string,
   variant: 'complete' | 'retirement-native-missing' = 'complete', modelFixture?: InstalledModelPackageFixture,
-  options: Readonly<{ guestToolchain?: 'node-test-v1'; guestImageProfile?: 'qualification_max'; publicationRetirementDiagnostics?: true; credentialPhaseDiagnostics?: true; serverAuthenticationDiagnostics?: true }> = {}) {
-  assert(Object.keys(options).every(key => key === 'guestToolchain' || key === 'guestImageProfile' || key === 'publicationRetirementDiagnostics' || key === 'credentialPhaseDiagnostics' || key === 'serverAuthenticationDiagnostics'));
+  options: Readonly<{ guestToolchain?: 'node-test-v1'; guestImageProfile?: 'qualification_max'; publicationRetirementDiagnostics?: true; credentialPhaseDiagnostics?: true; serverAuthenticationDiagnostics?: true; storeFailureDiagnostics?: true }> = {}) {
+  assert(Object.keys(options).every(key => key === 'guestToolchain' || key === 'guestImageProfile' || key === 'publicationRetirementDiagnostics' || key === 'credentialPhaseDiagnostics' || key === 'serverAuthenticationDiagnostics' || key === 'storeFailureDiagnostics'));
   assert(options.guestToolchain === undefined || options.guestToolchain === 'node-test-v1');
   // Publisher construction only: keep the original maximum-load qualifier
   // separate from the default official compact image. No runtime flag exists.
@@ -33,6 +33,7 @@ export async function buildInstalledSupervisorPackage(fixture: string,
   assert(options.publicationRetirementDiagnostics === undefined || options.publicationRetirementDiagnostics === true);
   assert(options.credentialPhaseDiagnostics === undefined || options.credentialPhaseDiagnostics === true);
   assert(options.serverAuthenticationDiagnostics === undefined || options.serverAuthenticationDiagnostics === true);
+  assert(options.storeFailureDiagnostics === undefined || options.storeFailureDiagnostics === true);
   if (options.serverAuthenticationDiagnostics) assert(options.publicationRetirementDiagnostics === true,
     'fixed server observations belong only to the explicit delayed delivery qualification image');
   if (options.publicationRetirementDiagnostics) assert(options.guestToolchain === 'node-test-v1',
@@ -55,6 +56,7 @@ export async function buildInstalledSupervisorPackage(fixture: string,
     ...(options.guestToolchain === 'node-test-v1' || options.credentialPhaseDiagnostics ? { credentialPhaseDiagnostics: true as const } : {}),
     ...(options.publicationRetirementDiagnostics ? { publicationRetirementDiagnostics: true as const } : {}),
     ...(options.serverAuthenticationDiagnostics ? { serverAuthenticationDiagnostics: true as const } : {}),
+    ...(options.storeFailureDiagnostics ? { storeFailureDiagnostics: true as const } : {}),
     assets: { 'release-trust-roots.json': rootAsset } });
   const helper = path.join(packageRoot, STATE_OWNER_NATIVE_RELATIVE_PATH);
   await mkdir(path.dirname(helper), { recursive: true, mode: 0o700 });

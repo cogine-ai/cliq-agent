@@ -9,15 +9,23 @@ import { build } from 'esbuild';
 import { CREDENTIAL_PHASE_DIAGNOSTIC_BANNER, INSTALLED_WORK_DIAGNOSTIC_BANNER,
   prepareSupervisorSeaCarrier, SUPERVISOR_SEA_NODE_VERSION } from './supervisor-sea-builder.js';
 
-test('the signed server diagnostic banner writes only fixed ordinal/phase/elapsed spans and joins its producer', async () => {
+test('the signed server diagnostic banner preserves actual concurrent completion order and joins every producer', async () => {
   const builder = await import('./supervisor-sea-builder.js') as Record<string, unknown>;
   assert.equal(typeof builder.SERVER_AUTHENTICATION_DIAGNOSTIC_BANNER, 'string');
   const bundled = await build({ stdin: { contents: `
     (async()=>{
       const {beginInstalledServerAuthentication} = require('./src/state/installed-diagnostics.ts');
       const observe = beginInstalledServerAuthentication();
-      for (const phase of ['image_hash','process_cas','principal_cas','peer_cas','channel_cas'])
-        await observe(phase,async()=> 'private-original-value');
+      await observe('image_hash',async()=> 'private-original-value');
+      const finish=[], phases=['process_cas','principal_cas','peer_cas','channel_cas'];
+      const tasks=phases.map((phase,index)=>observe(phase,()=>new Promise((resolve,reject)=>{
+        finish[index]=()=>index===0?reject(Error('private-original-error')):resolve('private-original-value');
+      })));
+      const joined=Promise.allSettled(tasks);
+      for(const index of [2,0,3,1]) { finish[index](); await new Promise(resolve=>setImmediate(resolve)); }
+      const results=await joined;
+      if(results.length!==4 || results[0].status!=='rejected' || results.slice(1).some(row=>row.status!=='fulfilled'))
+        throw Error('original producer did not join');
       process.stdout.write('original-publisher-complete');
     })();
   `, resolveDir: fileURLToPath(new URL('../../..', import.meta.url)) }, bundle: true, write: false,
@@ -27,8 +35,9 @@ test('the signed server diagnostic banner writes only fixed ordinal/phase/elapse
   assert.equal(child.stdout, 'original-publisher-complete');
   const rows = child.stderr.trim().split('\n');
   assert.equal(rows.length, 6); assert.equal(rows[0], 'CLIQ_SERVER_AUTH_V1:1:publish_started:0');
-  for (const [index, phase] of ['image_hash','process_cas','principal_cas','peer_cas','channel_cas'].entries())
-    assert.match(rows[index + 1]!, new RegExp('^CLIQ_SERVER_AUTH_V1:1:' + phase + '_completed:(0|[1-9][0-9]*)$'));
+  for (const [index, phase] of ['image_hash_completed','peer_cas_completed','process_cas_failed',
+    'channel_cas_completed','principal_cas_completed'].entries())
+    assert.match(rows[index + 1]!, new RegExp('^CLIQ_SERVER_AUTH_V1:1:' + phase + ':(0|[1-9][0-9]*)$'));
   assert(rows.every(row => Buffer.byteLength(row + '\n') <= 128));
 });
 

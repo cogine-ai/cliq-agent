@@ -1585,3 +1585,72 @@ subscribe to fixed server authentication spans. Their bounded original-server
 journal is read after the unchanged stop and joins, never before them. These
 are JS-await diagnostics, not native fsync timing, authentication authority or
 evidence that any previously failed deadline or physical cut now passes.
+
+The follow-up commit `687df3b38564c4944e84abfc18a126f81885a6dc` passes
+the unchanged local build and full test command: 2,580 passes, one original
+conditional cross-filesystem skip, no failures or cancellations. Its complete
+local validation SHA-256 is
+`f660d0091e63d85b97363eaf4b008ffa32fdb15735f4d610b93fad211bcf4b0f`.
+[Linux run 40019768969](https://github.com/cogine-ai/cliq-agent/actions/runs/40019768969),
+attempt 1, is terminal with seventeen successful and five failed jobs; all four
+TypeScript matrices pass. All twenty-three report categories are retained,
+without pending or rejected categories. Final capture SHA-256:
+`cb99a2a2e00bea4f05ec0ac0457a473a0c65690538bd007f97b20c83455c2b33`.
+
+Received-tool shutdown and successor completion now pass the unchanged
+two-second stop and thirty-second recovery assertions, reaching the original
+terminal result in 27,354 ms with one tool claim/charge and one publication.
+This observed improvement does not establish a single performance cause.
+Normal Delivery still refuses its first `run.apply` with `INTERNAL`; this
+does not establish whether admission committed before continuation loading.
+Maximum-image repair still exceeds ninety seconds. Its last complete public
+cut is queued/agent, without an active worker or wait, and has seven claimed
+and completed operations with no failed/unknown operation. This is neither
+proof of a deadlock nor proof that the scheduler has no retained error.
+
+All three delayed-volume jobs still fail their original first five-second
+ready bound. Each has a joined-original-server authentication observation:
+native image hashing spans 88--110 ms; the four CAS awaits total about
+3.69--3.81 seconds. These are independent complete JS-await spans, not single
+fsync durations or evidence of completion before the client deadline. None
+enters the publication cut, so physical original-stop and late-result
+qualification remain open. The next local shutdown follow-up adds only the
+existing native-current checks between those original serial operations;
+its eight real-peer logical-return cuts and three Node-version neighbor
+suites pass, but do not qualify in-flight fsync or physical two-second stop.
+On 2026-10-24, option A explicitly approves four bounded concurrent original
+artifact publications, with every artifact durably published, fully verified
+and joined before the final native-current check and channel activation. The
+canonical RFC, accepted control-peer clarification and WP04/WP06 now share
+that contract. Precomputed full-byte refs are expected values only, not
+authority or substitutes for actual publication. The implementation and its
+complete local/Linux/storage validation remain a follow-up, not evidence from
+the preceding run. The first-apply refusal and maximum-image repair failure
+also remain open pending minimal original-failure diagnostics. No complete
+Delivery or I1/release claim follows from this run.
+
+The approved authentication implementation freezes and closed-decodes the four
+canonical artifacts, then joins their four original complete CAS publications
+and checks every actual returned ref/length/media type/schema kind before the
+final native-current check. Independent development regressions on Node
+22/24/26 each pass 77 neighboring tests without skips or cancellations,
+including connection/Store closure, mismatched real return metadata, real
+written-byte corruption and resource-retirement-error precedence. Actual
+delivered CAS handle ownership peaks at eight (two per operation) and all
+observed handles close; this is not a full-Supervisor descriptor measurement.
+These checks do not qualify the original Linux five-second authentication,
+two-second physical stop or delayed-storage/late-result cuts. The combined
+candidate still requires full local validation and immutable Linux evidence
+before a complete PR.
+
+The normal Delivery and maximum-verifier test images additionally opt into a
+fixed original-Store failure summary: the first actual apply/scheduler error's
+closed stage/class/code, event counts and pre-revocation task/phase counts.
+Original errors and scheduler behavior are retained; no message, stack, path,
+request, credential, Run id or new time sample enters the summary. Ordinary
+images create no diagnostic tracker. The trusted test image emits at most
+sixteen lines/four KiB at actual process exit, within the unchanged stop bound;
+the whole original-sender/invocation journal is read only after the real stop
+and join. Missing, overflowing or unbound observations stay unavailable. This
+is diagnosis, not a new status API, retry permission, recovery evidence or
+substitute for the still-missing Linux acceptance results.

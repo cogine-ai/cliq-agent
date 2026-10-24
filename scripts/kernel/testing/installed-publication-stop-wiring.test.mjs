@@ -28,22 +28,34 @@ test('fixed server timing is opt-in and cannot defer the original service stop o
   assert(packageSource.includes('if (options.serverAuthenticationDiagnostics) assert(options.publicationRetirementDiagnostics === true'));
 });
 
-test('server observations leave all five original identity operations serial and register authority only afterward', () => {
+test('server authentication joins its fixed four complete publications before validating returns and registering authority', () => {
   const control = source('../../../src/state/control-channel.ts');
   const publish = control.slice(control.indexOf('    const publish = async () => {'), control.indexOf('    const connection: LocalControlConnection'));
   assert.equal(publish.match(/beginInstalledServerAuthentication\(\)/gu)?.length, 1);
-  let previous = -1;
-  for (const phase of ['image_hash', 'process_cas', 'principal_cas', 'peer_cas', 'channel_cas']) {
-    const needle = `await observe('${phase}',`;
-    assert.equal(publish.split(needle).length, 2);
-    const at = publish.indexOf(needle); assert(at > previous); previous = at;
-  }
-  for (const operation of ['hashNativeImage(peer, capture)',
-    'artifacts.publishCanonical(processIdentity, processIdentity.format)', 'artifacts.publishCanonical(principal, principal.format)',
-    'artifacts.publishCanonical(observation, observation.format)', 'artifacts.publishCanonical(channel, channel.format)'])
-    assert(publish.includes(': await ' + operation));
-  const current = publish.indexOf('assertCurrent();'), register = publish.indexOf('channels.set(');
-  assert(current > previous && register > current);
+  const hash = publish.indexOf("await observe('image_hash',"), firstGuard = publish.indexOf('assertCurrent();');
+  const group = publish.indexOf('const publishedArtifacts = await joinResourceOperations([');
+  const joined = publish.indexOf('      ]);', group);
+  assert(hash >= 0 && firstGuard > hash && group > firstGuard && joined > group);
+  assert(publish.includes(': await hashNativeImage(peer, capture)'));
+  const tasks = publish.slice(group, joined);
+  for (const [name, phase] of [['processPublication', 'process_cas'], ['principalPublication', 'principal_cas'],
+    ['peerPublication', 'peer_cas'], ['channelPublication', 'channel_cas']])
+    assert.equal(tasks.split(`publishArtifact(${name}, '${phase}')`).length, 2);
+  assert.equal(tasks.match(/publishArtifact\(/gu)?.length, 4);
+  assert(publish.includes('const data = immutableSnapshot(value), bytes = canonicalJsonBytes(data);'));
+  assert(publish.includes('ref: sha256Bytes(bytes)'));
+  for (const decoder of ['decodePlatformProcessIdentity(processIdentity)', 'decodeLocalPrincipalIdentity(principal)',
+    'decodeLocalSocketPeerObservation(observation)', 'decodeControlChannel(channel)'])
+    assert(publish.indexOf(`prepare(${decoder})`) < group);
+  const task = publish.slice(publish.indexOf('const publishArtifact = async'), group);
+  assert(task.indexOf('assertCurrent();') < task.indexOf('return observe ? observe(phase,'));
+  assert.equal(task.match(/artifacts.publishCanonical\(publication.data, publication.expected.schemaKind\)/gu)?.length, 2);
+  const validation = publish.indexOf('for (const [index, artifact] of publishedArtifacts.entries())');
+  assert(validation > joined);
+  for (const field of ['ref', 'byteLength', 'mediaType', 'schemaKind'])
+    assert(publish.includes(`artifact.${field} !== expected.${field}`));
+  const current = publish.lastIndexOf('assertCurrent();'), register = publish.indexOf('channels.set(');
+  assert(current > validation && register > current);
   assert(!/Promise\.all|sync:\s*false|\.catch\(/u.test(publish));
 });
 

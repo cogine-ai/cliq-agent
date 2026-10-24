@@ -98,7 +98,8 @@ export function readInstalledServerAuthenticationJournal(text: string,
   need(typeof invocationId === 'string' && /^[0-9a-f]{32}$/u.test(invocationId));
   need(Buffer.byteLength(text, 'utf8') <= 256 * 1024);
   const lines = text.trim().split('\n').filter(Boolean); need(lines.length <= 80);
-  const observations: InstalledServerAuthenticationObservation[] = [], stages = new Map<number, number>();
+  const observations: InstalledServerAuthenticationObservation[] = [];
+  const stages = new Map<number, { image: 'pending' | 'completed' | 'failed'; cas: Set<string> }>();
   let previousOrdinal: number | undefined;
   for (const line of lines) {
     const record = parseJsonStrict(line) as Record<string, unknown>;
@@ -114,12 +115,21 @@ export function readInstalledServerAuthenticationJournal(text: string,
     if (phase === 'publish_started') {
       need(elapsedNs === 0 && !stages.has(ordinal));
       need(previousOrdinal === undefined || ordinal === previousOrdinal + 1);
-      previousOrdinal = ordinal; stages.set(ordinal, 0);
+      previousOrdinal = ordinal; stages.set(ordinal, { image: 'pending', cas: new Set() });
     } else {
       const stage = stages.get(ordinal);
-      need(stage !== undefined && stage >= 0 && stage < SERVER_AUTH_STAGES.length);
-      need(phase === `${SERVER_AUTH_STAGES[stage]}_completed` || phase === `${SERVER_AUTH_STAGES[stage]}_failed`);
-      stages.set(ordinal, phase.endsWith('_failed') ? -1 : stage + 1);
+      need(stage !== undefined);
+      const name = phase.slice(0, phase.lastIndexOf('_'));
+      if (name === 'image_hash') {
+        need(stage.image === 'pending');
+        stage.image = phase.endsWith('_failed') ? 'failed' : 'completed';
+      } else {
+        // These four complete CAS awaits are concurrent after the image hash.
+        // Keep their real completion order, including siblings after failure;
+        // no prefix or completion tuple establishes the producer's join.
+        need(stage.image === 'completed' && !stage.cas.has(name));
+        stage.cas.add(name);
+      }
     }
     observations.push(Object.freeze({ ordinal, phase, elapsedNs }));
   }

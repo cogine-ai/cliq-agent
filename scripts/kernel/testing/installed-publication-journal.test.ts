@@ -106,6 +106,15 @@ test('server authentication journal decodes only exact independent await spans a
   for (const item of actual!) assert(Object.isFrozen(item));
 });
 
+test('server authentication preserves actual concurrent CAS completion order, including siblings after a failure', () => {
+  const phases = ['publish_started', 'image_hash_completed', 'peer_cas_completed',
+    'process_cas_failed', 'channel_cas_failed', 'principal_cas_completed'];
+  const spans = [0, 9, 7, 4, 12, 2];
+  const result = journalReaders.readInstalledServerAuthenticationJournal(journal(phases.map((phase, index) =>
+    authenticationFrame(7, phase, spans[index]))), authenticationSender);
+  assert.deepEqual(result, phases.map((phase, index) => ({ ordinal: 7, phase, elapsedNs: spans[index] })));
+});
+
 test('server authentication prefixes and interleaved ordinals never invent completion or span ordering', () => {
   const read = journalReaders.readInstalledServerAuthenticationJournal;
   assert.equal(read('', authenticationSender), undefined);
@@ -126,9 +135,29 @@ test('server authentication prefixes and interleaved ordinals never invent compl
     messages.push(authenticationFrame(1, failed, 12));
     assert.equal(read(journal(messages), authenticationSender)!.at(-1)!.phase, failed);
     for (const extra of [authenticationFrame(1, 'publish_started'), authenticationFrame(1, failed),
-      authenticationFrame(1, authenticationPhases[Math.min(stage + 1, 5)]!)])
+      authenticationFrame(1, failed.replace('_failed', '_completed'))])
       assert.throws(() => read(journal([...messages, extra]), authenticationSender));
+    if (stage === 1) for (const phase of authenticationPhases.slice(2))
+      assert.throws(() => read(journal([...messages, authenticationFrame(1, phase)]), authenticationSender));
   }
+});
+
+test('server authentication permits every concurrent CAS completion order and rejects duplicate outcomes', () => {
+  const read = journalReaders.readInstalledServerAuthenticationJournal;
+  const prefix = [authenticationFrame(1, 'publish_started'), authenticationFrame(1, 'image_hash_completed', 9)];
+  const names = ['process_cas', 'principal_cas', 'peer_cas', 'channel_cas'];
+  const orders = names.flatMap(a => names.filter(b => b !== a).flatMap(b => names.filter(c => c !== a && c !== b)
+    .map(c => [a, b, c, names.find(d => d !== a && d !== b && d !== c)!])));
+  assert.equal(orders.length, 24);
+  for (const order of orders) for (let failed = 0; failed < 16; failed++) {
+    const phases = order.map((name, index) => `${name}_${failed & (1 << index) ? 'failed' : 'completed'}`);
+    const messages = [...prefix, ...phases.map((phase, index) => authenticationFrame(1, phase, 4 - index))];
+    const result = read(journal(messages), authenticationSender)!;
+    assert.deepEqual(result.map(item => item.phase), ['publish_started', 'image_hash_completed', ...phases]);
+  }
+  for (const name of names) for (const first of ['completed', 'failed']) for (const second of ['completed', 'failed'])
+    assert.throws(() => read(journal([...prefix, authenticationFrame(1, name + '_' + first),
+      authenticationFrame(1, name + '_' + second)]), authenticationSender));
 });
 
 test('server authentication starts cannot go backwards or omit a captured ordinal', () => {

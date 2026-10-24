@@ -11,6 +11,7 @@ import { INSTALLED_CREDENTIAL_PHASE_CHANNEL, INSTALLED_CREDENTIAL_PHASES,
   INSTALLED_SERVER_AUTHENTICATION_CHANNEL, INSTALLED_SERVER_AUTHENTICATION_PHASES } from '../../../src/state/installed-diagnostics.js';
 import { INSTALLED_WORK_CHANNEL } from '../../../src/state/installed-work-diagnostics.js';
 import { PUBLICATION_RETIREMENT_CHANNEL } from '../../../src/state/publication-retirement-diagnostics.js';
+import { INSTALLED_STORE_DIAGNOSTIC_BANNER } from './installed-store-diagnostic-banner.js';
 
 export const SUPERVISOR_SEA_NODE_VERSION = '24.21.0';
 export const SUPERVISOR_SEA_CARRIER_CHECKSUMS: Readonly<Record<string, string>> = {
@@ -173,13 +174,16 @@ export async function buildSupervisorSeaImage(input: {
   credentialPhaseDiagnostics?: true;
   publicationRetirementDiagnostics?: true;
   serverAuthenticationDiagnostics?: true;
+  storeFailureDiagnostics?: true;
 }): Promise<string> {
   assert(input.credentialPhaseDiagnostics === undefined || input.credentialPhaseDiagnostics === true);
   assert(input.publicationRetirementDiagnostics === undefined || input.publicationRetirementDiagnostics === true);
   assert(input.serverAuthenticationDiagnostics === undefined || input.serverAuthenticationDiagnostics === true);
+  assert(input.storeFailureDiagnostics === undefined || input.storeFailureDiagnostics === true);
   const banner = (input.credentialPhaseDiagnostics ? CREDENTIAL_PHASE_DIAGNOSTIC_BANNER + INSTALLED_WORK_DIAGNOSTIC_BANNER : '') +
     (input.publicationRetirementDiagnostics ? PUBLICATION_RETIREMENT_DIAGNOSTIC_BANNER : '') +
-    (input.serverAuthenticationDiagnostics ? SERVER_AUTHENTICATION_DIAGNOSTIC_BANNER : '');
+    (input.serverAuthenticationDiagnostics ? SERVER_AUTHENTICATION_DIAGNOSTIC_BANNER : '') +
+    (input.storeFailureDiagnostics ? INSTALLED_STORE_DIAGNOSTIC_BANNER : '');
   const main = path.join(input.fixture, `${input.variant}.cjs`);
   const result = await build({ entryPoints: [input.entryPoint], outfile: main,
     bundle: true, platform: 'node', format: 'cjs', target: 'node24.21', metafile: true,

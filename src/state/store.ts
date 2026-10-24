@@ -62,6 +62,8 @@ import { decodeSecretServiceObservation, decodeRetainedSecretServiceObservation,
   type NativeCredentialInspection, type NativeCredentialPlatformBinding } from './credential-platform.js';
 import { ensureInstalledCredentialSupervisor, type CredentialFinalizeRequest } from './installed-credential-client.js';
 import { noteInstalledCredentialPhase } from './installed-diagnostics.js';
+import { beginInstalledApplyDiagnostic, beginInstalledSchedulerDiagnostic, installedRunDiagnosticsSubscribed,
+  noteInstalledStoreStop, type InstalledApplyDiagnostic } from './installed-run-diagnostics.js';
 import { ContentAddressedStore } from './cas.js';
 import { openLocalControlListener, type AuthenticatedControlIdentity, type LocalControlConnection, type LocalControlListener } from './control-channel.js';
 import { readControl, type ReadControlRequest } from './control-read.js';
@@ -1749,6 +1751,9 @@ export class StateStore {
       // Store shutdown; this observer reports failures, not cleanup evidence.
       void result.completion.then(() => this.scheduleInstalledRun(value.runId), error => {
         this.installedRunFailures.set(value.runId, error);
+        const diagnosis = beginInstalledSchedulerDiagnostic('publication_recovery');
+        diagnosis?.phase(this.installedRunPhases.get(value.runId));
+        diagnosis?.failure(error, this.closeRequested);
         if (error instanceof ResourceRetirementError) this.schedulerFailure ??= error;
         else this.scheduleInstalledRun(value.runId);
       });
@@ -1757,33 +1762,49 @@ export class StateStore {
   }
 
   private async applyInstalledRunOwned(request: unknown, identity: AuthenticatedControlIdentity, signal: AbortSignal) {
-    signal.throwIfAborted();
-    const normalized = normalizeRunApplyRequest(request);
-    await validateControlChannelClosure(this.artifacts, this.owner, identity);
-    const replay = await replayInstalledDeliveryAdmission(this.driver, this.artifacts.withReadSignal(signal), this.owner, normalized, identity, signal);
-    if (replay) {
-      if (['queued', 'running', 'waiting'].includes(readRun(this.driver, replay.run.id).status)) await this.retainInstalledAgent(replay.run.id);
-      this.scheduleInstalledRun(replay.run.id); return replay;
-    }
-    const capture = await this.captureSubmittedSource({ request, identity });
-    if (capture.phase !== 'retired') throw new KernelStorageError('RECOVERY_REQUIRED', 'delivery source inspection has not completely retired');
-    if (capture.outcome.kind !== 'captured') {
-      const { readSourceInspectionErrorResponse } = await import('./source-inspection-owner.js');
-      const response = await readSourceInspectionErrorResponse(this.artifacts.withReadSignal(signal), capture);
+    const diagnosis = beginInstalledApplyDiagnostic();
+    try {
+      signal.throwIfAborted();
+      const normalized = normalizeRunApplyRequest(request);
       await validateControlChannelClosure(this.artifacts, this.owner, identity);
-      signal.throwIfAborted(); assertCurrentControlFrame(this.owner, identity); assertActiveStateOwner(this.driver, this.owner);
-      return { response };
+      diagnosis?.stage('replay');
+      const replay = await replayInstalledDeliveryAdmission(this.driver, this.artifacts.withReadSignal(signal), this.owner, normalized, identity, signal);
+      if (replay) {
+        if (['queued', 'running', 'waiting'].includes(readRun(this.driver, replay.run.id).status)) {
+          diagnosis?.stage('postcommit_load');
+          await this.retainInstalledAgent(replay.run.id);
+        }
+        this.scheduleInstalledRun(replay.run.id); return replay;
+      }
+      diagnosis?.stage('capture_source');
+      const capture = await this.captureSubmittedSource({ request, identity }, diagnosis);
+      if (capture.phase !== 'retired') throw new KernelStorageError('RECOVERY_REQUIRED', 'delivery source inspection has not completely retired');
+      if (capture.outcome.kind !== 'captured') {
+        const { readSourceInspectionErrorResponse } = await import('./source-inspection-owner.js');
+        const response = await readSourceInspectionErrorResponse(this.artifacts.withReadSignal(signal), capture);
+        await validateControlChannelClosure(this.artifacts, this.owner, identity);
+        signal.throwIfAborted(); assertCurrentControlFrame(this.owner, identity); assertActiveStateOwner(this.driver, this.owner);
+        return { response };
+      }
+      diagnosis?.stage('source');
+      const source = await readVerifiedDeliverySource(this.driver, this.artifacts.withReadSignal(signal), this.owner, {
+        principalId: identity.principalId, sourceRunId: normalized.request.sourceRunId,
+        expectedRunResultRef: normalized.request.expectedRunResultRef, signal });
+      diagnosis?.stage('prepare');
+      const prepared = await prepareInstalledDelivery({ driver: this.driver, artifacts: this.artifacts, owner: this.owner,
+        selected: this.installedRuntime!, request, identity, source, capture }, signal);
+      diagnosis?.stage('admit');
+      const admission = admitInstalledDelivery(this.driver, this.artifacts, this.owner, prepared, identity, signal);
+      const runId = identityHash('cliq-run-id-v1', identity.principalId, 'run.apply', normalized.request.admissionKey);
+      const loaded = this.retainInstalledAgent(runId, undefined, admission);
+      const result = await admission;
+      diagnosis?.stage('postcommit_load');
+      await loaded;
+      this.scheduleInstalledRun(result.run.id); return result;
+    } catch (error) {
+      diagnosis?.failure(error, this.closeRequested);
+      throw error;
     }
-    const source = await readVerifiedDeliverySource(this.driver, this.artifacts.withReadSignal(signal), this.owner, {
-      principalId: identity.principalId, sourceRunId: normalized.request.sourceRunId,
-      expectedRunResultRef: normalized.request.expectedRunResultRef, signal });
-    const prepared = await prepareInstalledDelivery({ driver: this.driver, artifacts: this.artifacts, owner: this.owner,
-      selected: this.installedRuntime!, request, identity, source, capture }, signal);
-    const admission = admitInstalledDelivery(this.driver, this.artifacts, this.owner, prepared, identity, signal);
-    const runId = identityHash('cliq-run-id-v1', identity.principalId, 'run.apply', normalized.request.admissionKey);
-    const loaded = this.retainInstalledAgent(runId, undefined, admission);
-    const result = await admission; await loaded;
-    this.scheduleInstalledRun(result.run.id); return result;
   }
 
   private ownInstalledAdmission<T>(operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
@@ -1982,6 +2003,7 @@ export class StateStore {
         this.installedMaintenance = undefined; this.armInstalledMaintenance();
       }, error => {
         this.schedulerFailure ??= error;
+        beginInstalledSchedulerDiagnostic('maintenance_global')?.failure(error, this.closeRequested);
         if (!(error instanceof ResourceRetirementError)) this.installedMaintenance = undefined;
       });
     }, 1000);
@@ -2057,6 +2079,9 @@ export class StateStore {
         // A changing Run cut is not permission to weaken the native gate or
         // renew an expired lease. Preserve the refusal for health diagnostics.
         this.installedRunFailures.set(id, error);
+        const diagnosis = beginInstalledSchedulerDiagnostic('maintenance');
+        diagnosis?.phase(this.installedRunPhases.get(id));
+        diagnosis?.failure(error, this.closeRequested);
       }
     }
   }
@@ -2112,6 +2137,9 @@ export class StateStore {
   private requestInstalledRunStop(runId: string): void {
     const failed = (error: unknown) => {
       this.installedRunFailures.set(runId, error);
+      const diagnosis = beginInstalledSchedulerDiagnostic('stop');
+      diagnosis?.phase(this.installedRunPhases.get(runId));
+      diagnosis?.failure(error, this.closeRequested);
       if (error instanceof ResourceRetirementError) this.schedulerFailure ??= error;
     };
     // Enter each already-loaded native owner synchronously after StopIntent.
@@ -2127,17 +2155,22 @@ export class StateStore {
 
   private scheduleInstalledRun(runId: string): void {
     if (!this.supportsInstalledRuns() || this.installedRunTasks.has(runId)) return;
+    const diagnosis = beginInstalledSchedulerDiagnostic('drive');
     this.installedRunPhases.set(runId, 'scheduled');
     const task = this.installedQueue.then(async () => {
       try { await this.driveInstalledRun(runId); }
       finally {
         try { await this.retireInstalledTerminalRun(runId); }
-        finally { this.installedRunPhases.delete(runId); }
+        finally {
+          diagnosis?.phase(this.installedRunPhases.get(runId));
+          this.installedRunPhases.delete(runId);
+        }
       }
     });
     this.installedRunTasks.set(runId, task);
     this.installedQueue = task.catch(error => {
       this.installedRunFailures.set(runId, error);
+      diagnosis?.failure(error, this.closeRequested);
       // One Run's ordinary provider refusal is not a failed physical lane.
       // Uncertain native retirement is process-wide and must stop admission.
       if (error instanceof ResourceRetirementError) this.schedulerFailure ??= error;
@@ -3127,7 +3160,7 @@ export class StateStore {
   /** Internal source producer, not a public wire method or accepted Run.
    * The whole factory, including validation/replay reads, is Store-owned before
    * its first asynchronous action; shutdown cancels and joins every operation. */
-  async captureSubmittedSource(input: CaptureSubmittedSourceInput): Promise<SourceInspectionAttemptV1> {
+  async captureSubmittedSource(input: CaptureSubmittedSourceInput, diagnosis?: InstalledApplyDiagnostic): Promise<SourceInspectionAttemptV1> {
     if (this.closed || this.closeRequested || this.released) throw new KernelStorageError('LEASE_FENCED', 'StateStore is closing or closed');
     if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length !== 2 ||
         !Object.hasOwn(input, 'request') || !Object.hasOwn(input, 'identity')) {
@@ -3193,6 +3226,7 @@ export class StateStore {
       const sandboxProfile = deliverySource
         ? decodeSandboxProfile(await this.artifacts.withReadSignal(abort.signal).readCanonical(deliverySource.spec.sandboxProfileRef))
         : normalized.request.method === 'run.submit' && this.installedRuntime ? installedSandboxProfile(normalized.request.sandboxResources) : undefined;
+      diagnosis?.stage('capture');
       return captureSubmittedSource(this.driver, this.artifacts, this.owner,
         { bundle: bootstrap.bundle, releaseKeys: bootstrap.releaseKeys, ...bootstrap.sourceInspection,
           ...(sandboxProfile ? { sandboxProfile } : {}) },
@@ -3305,6 +3339,11 @@ export class StateStore {
    * This is not a join, worker fence or permission to release StateOwner. */
   beginClose(): void {
     if (this.closed) return;
+    if (!this.closeRequested && this.installedRuntime && installedRunDiagnosticsSubscribed()) {
+      noteInstalledStoreStop({ driverTasks: this.installedRunTasks.size, agentLoads: this.installedAgentLoads.size,
+        admissions: this.installedAdmissionTasks.size, retainedFailures: this.installedRunFailures.size,
+        globalFailure: this.schedulerFailure !== undefined, phases: [...this.installedRunPhases.values()] });
+    }
     if (!this.closeRequested && this.installedRuntime && this.installedRunTasks.size) {
       // A single fixed, secret-free observation at the actual stop boundary.
       // It neither extends the stop deadline nor supplies recovery evidence.

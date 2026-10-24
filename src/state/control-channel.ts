@@ -21,6 +21,7 @@ import { sampleCanonicalNow } from './canonical-time.js';
 import type { HeldControlListener, HeldControlPeer, NativePeerObservation } from './native-owner.js';
 import { hashHeldProcessImage } from './process-image.js';
 import { immutableSnapshot } from '../model/immutable.js';
+import { canonicalJsonBytes } from '../kernel/canonical.js';
 import { beginInstalledServerAuthentication } from './installed-diagnostics.js';
 
 export type AuthenticatedControlIdentity = Readonly<{
@@ -87,9 +88,16 @@ export function openLocalControlListener(artifacts: ArtifactCatalog, owner: Stat
         pid: capture.pid, ownerUid: capture.uid, processStartToken: capture.processStartToken,
         executableImageDigest: observe ? await observe('image_hash', () => hashNativeImage(peer, capture!)) : await hashNativeImage(peer, capture), observedAt, identityDigest: ''
       };
+      assertCurrent();
       processIdentity.identityDigest = digestOmitting(processIdentity, 'identityDigest');
-      const processArtifact = observe ? await observe('process_cas', () => artifacts.publishCanonical(processIdentity, processIdentity.format))
-        : await artifacts.publishCanonical(processIdentity, processIdentity.format);
+      // References identify the complete immutable bytes, not an already
+      // published peer or any permission to activate this channel.
+      const prepare = <T extends { format: string }>(value: T) => {
+        const data = immutableSnapshot(value), bytes = canonicalJsonBytes(data);
+        return Object.freeze({ data, expected: Object.freeze({ ref: sha256Bytes(bytes),
+          byteLength: bytes.byteLength, mediaType: 'application/json', schemaKind: data.format }) });
+      };
+      const processPublication = prepare(decodePlatformProcessIdentity(processIdentity));
       const principal: LocalPrincipalIdentityV1 = {
         schemaVersion: 1, format: 'cliq-local-principal-identity-v1', platform: processIdentity.platform,
         stateRootIdentityRef: owner.stateRootIdentityRef, stateRootIdentityDigest: owner.stateRootIdentityDigest,
@@ -97,8 +105,7 @@ export function openLocalControlListener(artifacts: ArtifactCatalog, owner: Stat
         principalId: identityHash('cliq-local-principal-v1', owner.stateRootIdentityDigest, processIdentity.platform, capture.uid), identityDigest: ''
       };
       principal.identityDigest = digestOmitting(principal, 'identityDigest');
-      const principalArtifact = observe ? await observe('principal_cas', () => artifacts.publishCanonical(principal, principal.format))
-        : await artifacts.publishCanonical(principal, principal.format);
+      const principalPublication = prepare(decodeLocalPrincipalIdentity(principal));
       const observation: LocalSocketPeerObservationV1 = {
         schemaVersion: 1, format: 'cliq-local-socket-peer-observation-v1', platform: processIdentity.platform,
         stateRootIdentityRef: owner.stateRootIdentityRef, stateRootIdentityDigest: owner.stateRootIdentityDigest,
@@ -107,29 +114,43 @@ export function openLocalControlListener(artifacts: ArtifactCatalog, owner: Stat
         acceptedSocket: { socketType: 'SOCK_STREAM', deviceId: capture.acceptedSocket.deviceId, fileId: capture.acceptedSocket.fileId },
         credentialApi: processIdentity.platform === 'linux' ? 'linux_so_peercred' : 'macos_getpeereid_local_peerpid',
         peerUid: capture.uid, peerGid: capture.gid, peerPid: capture.pid,
-        peerProcessIdentityRef: processArtifact.ref, peerProcessIdentityDigest: processIdentity.identityDigest,
+        peerProcessIdentityRef: processPublication.expected.ref, peerProcessIdentityDigest: processIdentity.identityDigest,
         observedAt, observationDigest: ''
       };
       observation.observationDigest = digestOmitting(observation, 'observationDigest');
-      const peerArtifact = observe ? await observe('peer_cas', () => artifacts.publishCanonical(observation, observation.format))
-        : await artifacts.publishCanonical(observation, observation.format);
+      const peerPublication = prepare(decodeLocalSocketPeerObservation(observation));
       const channel: LocalControlChannelIdentityV1 = {
         schemaVersion: 1, format: 'cliq-local-control-channel-identity-v1', client: 'rpc',
-        principalIdentityRef: principalArtifact.ref, principalIdentityDigest: principal.identityDigest, principalId: principal.principalId,
-        transport: { kind: 'uds_peer', peerObservationRef: peerArtifact.ref, peerObservationDigest: observation.observationDigest },
+        principalIdentityRef: principalPublication.expected.ref, principalIdentityDigest: principal.identityDigest, principalId: principal.principalId,
+        transport: { kind: 'uds_peer', peerObservationRef: peerPublication.expected.ref, peerObservationDigest: observation.observationDigest },
         openedAt: sampleCanonicalNow(), channelNonceDigest: sha256Bytes(randomBytes(32)), channelIdentityDigest: ''
       };
       channel.channelIdentityDigest = digestOmitting(channel, 'channelIdentityDigest');
-      decodeLocalPrincipalIdentity(principal);
-      decodeLocalSocketPeerObservation(observation);
-      decodeControlChannel(channel);
-      const channelArtifact = observe ? await observe('channel_cas', () => artifacts.publishCanonical(channel, channel.format))
-        : await artifacts.publishCanonical(channel, channel.format);
+      const channelPublication = prepare(decodeControlChannel(channel));
+      const publications = Object.freeze([processPublication, principalPublication, peerPublication, channelPublication]);
+      const publishArtifact = async (publication: typeof publications[number],
+        phase: 'process_cas' | 'principal_cas' | 'peer_cas' | 'channel_cas') => {
+        assertCurrent();
+        return observe ? observe(phase, () => artifacts.publishCanonical(publication.data, publication.expected.schemaKind))
+          : artifacts.publishCanonical(publication.data, publication.expected.schemaKind);
+      };
+      // These four fixed tasks retain every original sync/hash/close. Join
+      // all started work, including after failure or close, before authority.
+      const publishedArtifacts = await joinResourceOperations([
+        publishArtifact(processPublication, 'process_cas'), publishArtifact(principalPublication, 'principal_cas'),
+        publishArtifact(peerPublication, 'peer_cas'), publishArtifact(channelPublication, 'channel_cas')
+      ]);
+      for (const [index, artifact] of publishedArtifacts.entries()) {
+        const expected = publications[index]!.expected;
+        if (artifact.ref !== expected.ref || artifact.byteLength !== expected.byteLength ||
+            artifact.mediaType !== expected.mediaType || artifact.schemaKind !== expected.schemaKind)
+          throw new KernelStorageError('ARTIFACT_MISMATCH', 'control authentication publication does not match its complete canonical bytes');
+      }
       assertCurrent();
-      identity = Object.freeze({ principalId: principal.principalId, channelIdentityRef: channelArtifact.ref,
+      identity = Object.freeze({ principalId: principal.principalId, channelIdentityRef: channelPublication.expected.ref,
         channelIdentityDigest: channel.channelIdentityDigest });
       channels.set(identity.channelIdentityRef, { digest: identity.channelIdentityDigest, assertCurrent,
-        processIdentity: immutableSnapshot(processIdentity), channel: immutableSnapshot(channel) });
+        processIdentity: processPublication.data, channel: channelPublication.data });
       return identity;
     };
     const connection: LocalControlConnection = Object.freeze({

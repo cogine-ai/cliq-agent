@@ -48,6 +48,38 @@ test('server spans finish only with their original promise and never inspect an 
   } finally { diagnostic.unsubscribe(subscriber); }
 });
 
+test('concurrent server spans emit each actual promise settlement immediately, even after a sibling fails', async () => {
+  const { beginInstalledServerAuthentication } = await import('./installed-diagnostics.js');
+  const records: Array<{ ordinal: number; phase: string; elapsedNs: number }> = [];
+  const diagnostic = channel('cliq.installed.server.authentication.v1');
+  const subscriber = (record: unknown) => { try { records.push(record as typeof records[number]); } catch {} };
+  diagnostic.subscribe(subscriber);
+  try {
+    const observe = beginInstalledServerAuthentication()!;
+    assert.equal(await observe('image_hash', async () => 42), 42);
+    const resolve: Array<(value: number) => void> = [], reject: Array<(error: Error) => void> = [];
+    const phases = ['process_cas', 'principal_cas', 'peer_cas', 'channel_cas'] as const;
+    const tasks = phases.map((phase, index) => observe(phase, () => new Promise<number>((yes, no) => {
+      resolve[index] = yes; reject[index] = no;
+    })));
+    const joined = Promise.allSettled(tasks), original = new Error('not diagnostic content');
+    resolve[2]!(3); await new Promise<void>(yes => setImmediate(yes));
+    assert.deepEqual(records.map(record => record.phase), ['publish_started', 'image_hash_completed', 'peer_cas_completed']);
+    reject[0]!(original); await new Promise<void>(yes => setImmediate(yes));
+    assert.equal(records.at(-1)!.phase, 'process_cas_failed');
+    resolve[3]!(4); await new Promise<void>(yes => setImmediate(yes));
+    assert.equal(records.at(-1)!.phase, 'channel_cas_completed');
+    resolve[1]!(2);
+    assert.deepEqual(await joined, [{ status: 'rejected', reason: original }, { status: 'fulfilled', value: 2 },
+      { status: 'fulfilled', value: 3 }, { status: 'fulfilled', value: 4 }]);
+    assert.deepEqual(records.map(record => record.phase), ['publish_started', 'image_hash_completed', 'peer_cas_completed',
+      'process_cas_failed', 'channel_cas_completed', 'principal_cas_completed']);
+    assert(records.every(record => record.ordinal === records[0]!.ordinal && Object.isFrozen(record) &&
+      Number.isSafeInteger(record.elapsedNs) && record.elapsedNs >= 0));
+    assert.equal(JSON.stringify(records).includes('not diagnostic content'), false);
+  } finally { diagnostic.unsubscribe(subscriber); }
+});
+
 test('unsubscribed server diagnostics do not sample clocks or consume an ordinal; missing clocks cannot fail an operation', () => {
   const moduleUrl = new URL('./installed-diagnostics.ts', import.meta.url).href;
   const child = spawnSync(process.execPath, ['--no-warnings', '--import', 'tsx', '--input-type=module', '-e', `

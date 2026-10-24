@@ -44,6 +44,7 @@ import { publicationClaimRetirementDiagnosticKey } from '../../../src/state/publ
 import { publicationEnvelopeLocations } from '../../../src/state/delivery-publication-progress.js';
 import type { InstalledPublicationStopResult } from './installed-publication-stop-result.js';
 import { projectInstalledRunProgress } from './installed-run-progress.js';
+import { readInstalledStoreDiagnosticJournal } from './installed-store-diagnostic-journal.js';
 
 type Recipe = { buildFixture: string; packageRoot: string; installerEntry: string; stateRoot: string; releaseKeysFile: string;
   controlDirectory: string; observer: string; storeFixture: string; publicationObserver: string; workspace: string; reportFile: string };
@@ -147,6 +148,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
   if (options.publicationRetirementLate) assert.equal(options.publicationRetirementDiagnostics, true);
   assert(!options.publicationRetirementStop || !options.publicationRetirementLate);
   if (options.publicationRetirementDiagnostics) assert.equal(journeyKind, 'delivery');
+  const storeFailureDiagnostics = options.publicationRetirementDiagnostics !== true;
   assert.equal(process.geteuid!(), 0);
   const ledger = await readLedger(filename), recipe = ledger.runJourney;
   const installedClientDriver = path.join(recipe.buildFixture, 'installed-control-client-driver.mjs');
@@ -342,6 +344,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
   let services: { supervisorUnit: string; keeperUnit: string } | undefined;
   let serverAuthenticationBinding: Readonly<{ pid: number; processStartToken: string; invocationId: string; windowOpenedAt: number }> | undefined;
   let serverAuthenticationFailure = false;
+  let storeFailureBinding: typeof serverAuthenticationBinding;
   let client: Awaited<ReturnType<typeof persistentClient>> | undefined, inspectionClient: Awaited<ReturnType<typeof persistentClient>> | undefined;
   let primary: unknown, responderFailure = false, acceptedTcp = 0, acceptedTls = 0, postCount = 0;
   const responderErrors: unknown[] = [];
@@ -540,6 +543,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       validFrom: new Date(Date.now() - 60000).toISOString(), validThrough: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString() },
     { guestToolchain: 'node-test-v1', publicationRetirementDiagnostics: options.publicationRetirementDiagnostics,
       serverAuthenticationDiagnostics: options.publicationRetirementDiagnostics,
+      ...(storeFailureDiagnostics ? { storeFailureDiagnostics: true as const } : {}),
       ...(journeyKind === 'verifier' ? { guestImageProfile: 'qualification_max' as const } : {}) });
     assert(signed.guestToolchain && signed.modelAuthority);
     const installer = await build({ entryPoints: [fileURLToPath(new URL('./installed-runtime-installer.ts', import.meta.url))],
@@ -691,7 +695,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       assert.equal(await readlink('/proc/' + shown.MainPID + '/exe'), installedImage);
     }
     const keeperReady = await readFile(path.join(recipe.stateRoot, 'runtime/keeper.ready'));
-    if (options.publicationRetirementDiagnostics) {
+    if (options.publicationRetirementDiagnostics || storeFailureDiagnostics) {
       // Actual live binding before the first public-client attempt. A missing
       // observation stays unavailable; never reconstruct it after a failure.
       try {
@@ -705,8 +709,10 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         assert.equal('linux-proc-start-ticks:' + await fixtureProcess(pid, ledger.uid), actual.processStartToken);
         const same = show(services.supervisorUnit);
         assert.equal(same.MainPID, supervisorBefore.MainPID); assert.equal(same.InvocationID, supervisorBefore.InvocationID);
-        serverAuthenticationBinding = Object.freeze({ pid, processStartToken: actual.processStartToken,
+        const binding = Object.freeze({ pid, processStartToken: actual.processStartToken,
           invocationId: supervisorBefore.InvocationID!, windowOpenedAt: Date.now() });
+        if (options.publicationRetirementDiagnostics) serverAuthenticationBinding = Object.freeze(binding);
+        if (storeFailureDiagnostics) storeFailureBinding = binding;
       } catch { /* Optional binding failure cannot defer or decide authentication. */ }
     }
     try { client = await persistentClient(); inspectionClient = await persistentClient(); }
@@ -1422,6 +1428,9 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         const units = [services.supervisorUnit, services.keeperUnit] as const;
         const before = units.map(unit => show(unit));
         let serverAuthenticationObservation: Record<string, unknown> | undefined;
+        let storeFailureObservation: Record<string, unknown> | undefined;
+        if (storeFailureDiagnostics && primary) report.storeFailureDiagnostics = { diagnosticOnly: true, kind: 'unavailable',
+          reason: storeFailureBinding ? 'original_join_missing' : 'preexisting_binding_missing' };
         await withRetainedUnitHistory(units, async assertRetained => {
           assertRetained();
           assert.equal(command('/usr/bin/systemctl', ['--user', 'stop', ...units]).status, 0);
@@ -1461,9 +1470,33 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
                 originalInvocationBound: true, originalServerJoined: true, records };
             } catch { /* Diagnosis never replaces the original failure or invents a missing observation. */ }
           }
+          if (storeFailureDiagnostics && primary && storeFailureBinding &&
+              String(storeFailureBinding.pid) === before[0]!.MainPID && storeFailureBinding.invocationId === before[0]!.InvocationID) {
+            report.storeFailureDiagnostics = { diagnosticOnly: true, kind: 'unavailable', reason: 'journal_unavailable' };
+            try {
+              assertRetained();
+              const until = Date.now(), logBy = until + 5000;
+              const timestamp = (value: number) => '@' + Math.floor(value / 1000) + '.' + String(value % 1000).padStart(3, '0');
+              const log = spawnSync('/usr/bin/journalctl', ['--no-pager', '--all', '--no-tail', '--output=json', '--boot=0',
+                `--since=${timestamp(storeFailureBinding.windowOpenedAt)}`, `--until=${timestamp(until)}`,
+                `_UID=${ledger.uid}`, `_PID=${storeFailureBinding.pid}`, '_TRANSPORT=stdout',
+                `_SYSTEMD_INVOCATION_ID=${storeFailureBinding.invocationId}`],
+              { env: environment, timeout: 5000, killSignal: 'SIGKILL', maxBuffer: 256 * 1024 });
+              assert(Buffer.isBuffer(log.stdout) && Buffer.isBuffer(log.stderr)); scanBytes(log.stdout); scanBytes(log.stderr);
+              assert.equal(log.error, undefined, 'actual Store diagnostic journal command must join');
+              assert.equal(log.signal, null); assert.equal(log.status, 0);
+              const summary = readInstalledStoreDiagnosticJournal(new TextDecoder('utf-8', { fatal: true }).decode(log.stdout),
+                { uid: ledger.uid, pid: storeFailureBinding.pid, invocationId: storeFailureBinding.invocationId });
+              assert(Date.now() < logBy, 'actual Store diagnostic journal exceeded five seconds'); assertRetained();
+              if (summary) storeFailureObservation = { diagnosticOnly: true, kind: 'observed',
+                source: 'actual_joined_original_supervisor_journal', preexistingProcessStartAndFullImageBound: true,
+                originalInvocationBound: true, originalServerJoined: true, summary };
+            } catch { /* Preserve the original failure, stop deadline and missing-diagnosis classification. */ }
+          }
         });
         report.installedWritersJoined = true;
         if (serverAuthenticationObservation) report.serverAuthentication = serverAuthenticationObservation;
+        if (storeFailureObservation) report.storeFailureDiagnostics = storeFailureObservation;
       }
     } catch (error) { cleanup.push(error); }
     try {
