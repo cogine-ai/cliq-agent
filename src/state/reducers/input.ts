@@ -30,8 +30,10 @@ type Response = Extract<ControlApplicationResponseV1, { ok: true }> & { result: 
 export async function loadInputContinuation(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, authority: {
   run: Run; spec: RunSpec; assembly: RunAssemblyV1; principalId: string; resolveToolInput: ResolveToolInput;
   contracts: readonly ToolInputAuthority[];
-  assertAuthority: () => Promise<void>;
-}, reobserve?: NativeWorkerRetirement) {
+  assertAuthority: (readSignal?: AbortSignal) => Promise<void>;
+}, reobserve?: NativeWorkerRetirement, openingSignal?: AbortSignal) {
+  const openingReads = openingSignal ? artifacts.withReadSignal(openingSignal) : artifacts;
+  openingReads.assertReadActive();
   const { run: admitted, spec, assembly, principalId, resolveToolInput } = authority;
   const runId = admitted.id;
   const contract = authority.contracts.find((entry) => entry.name === 'request_input' && entry.access === 'control' && entry.execution.kind === 'builtin');
@@ -45,17 +47,17 @@ export async function loadInputContinuation(driver: SqliteDriver, artifacts: Art
     if (revision !== undefined && selected.run.revision !== revision) throw new KernelStorageError('REVISION_CONFLICT', 'input Run revision changed');
     return selected;
   };
-  const recover = async () => {
+  const recover = async (reads = artifacts) => {
     // The public closure also works after the tool batch has advanced to an agent frontier.
-    const closure = await readRecoveryClosure(driver, artifacts, runId);
+    const closure = await readRecoveryClosure(driver, reads, runId);
     const items = new Map(await joinResourceOperations(closure.items.map(async (row) => [row.itemId,
-      await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef)] as const)));
+      await readCanonicalArtifact<ContinuationItem>(reads, row.payloadRef)] as const)));
     const checkpoints = driver.prepare('SELECT id FROM checkpoints WHERE run_id = ? ORDER BY based_on_run_revision, created_at, id')
       .all<{ id: string }>(runId).map(({ id }) => readCheckpoint(driver, id));
-    return validateUserInputRecovery({ artifacts, run: closure.run, spec, items, journal: closure.journal, checkpoints });
+    return validateUserInputRecovery({ artifacts: reads, run: closure.run, spec, items, journal: closure.journal, checkpoints });
   };
-  async function verifyReply(itemRef: string, recovered?: Awaited<ReturnType<typeof recover>>) {
-    recovered ??= await recover();
+  async function verifyReply(itemRef: string, recovered?: Awaited<ReturnType<typeof recover>>, reads = artifacts) {
+    recovered ??= await recover(reads);
     const value = recovered.find(({ reply }) => reply?.itemRef === itemRef);
     if (!value?.reply) throw new TypeError('input response has no committed input owner');
     const { reply, proof } = value;
@@ -65,8 +67,8 @@ export async function loadInputContinuation(driver: SqliteDriver, artifacts: Art
       .get<{ request_digest: string; channel_identity_ref: string; channel_identity_digest: string; response_ref: string; committed_at: string }>(principalId, command.requestId);
     if (!row || row.request_digest !== reply.payload.requestDigest || row.channel_identity_ref !== command.channelIdentityRef ||
         row.channel_identity_digest !== command.channelIdentityDigest || row.committed_at !== reply.item.createdAt) throw new TypeError('input reply has no exact authenticated control-row owner');
-    await readRetainedControlChannelClosure(artifacts, owner, command);
-    const response = await readCanonicalArtifact<Response>(artifacts, row.response_ref);
+    await readRetainedControlChannelClosure(reads, owner, command);
+    const response = await readCanonicalArtifact<Response>(reads, row.response_ref);
     const snapshot = response.result.snapshot;
     if (response.protocolVersion !== 1 || response.ok !== true || response.result.method !== 'run.input' || response.result.inputItemRef !== itemRef ||
         snapshot.schemaVersion !== 1 || snapshot.operation !== 'agent' || snapshot.latestRunItemSeq !== reply.checkpoint.runItemSeq ||
@@ -74,7 +76,7 @@ export async function loadInputContinuation(driver: SqliteDriver, artifacts: Art
         snapshot.run.latestCheckpointId !== reply.checkpointId || snapshot.run.updatedAt !== reply.item.createdAt ||
         snapshot.run.revision !== command.expectedRunRevision + 1 || snapshot.run.status !== 'queued' || snapshot.run.waitingOnRef !== undefined ||
         snapshot.run.activeWorkerLaunchId !== undefined) throw new TypeError('input response substitutes its committed snapshot');
-    const frontier = await readCanonicalArtifact<Extract<RunFrontier, { kind: 'tool' }>>(artifacts, proof.wait.frontierRef);
+    const frontier = await readCanonicalArtifact<Extract<RunFrontier, { kind: 'tool' }>>(reads, proof.wait.frontierRef);
     if (snapshot.run.frontierRef !== canonicalSha256(nextFrontier(frontier, reply.item, snapshot.latestRunItemSeq))) throw new TypeError('input response substitutes its continuation');
     return response;
   }
@@ -96,9 +98,9 @@ export async function loadInputContinuation(driver: SqliteDriver, artifacts: Art
     return run;
   }
   if (driver.prepare("SELECT 1 FROM items WHERE run_id = ? AND kind = 'input_request' LIMIT 1").get(runId) || admitted.waitingReason === 'input') {
-    await authority.assertAuthority();
-    const recovered = await recover();
-    for (const { reply } of recovered) if (reply) await verifyReply(reply.itemRef, recovered);
+    await authority.assertAuthority(openingSignal);
+    const recovered = await recover(openingReads);
+    for (const { reply } of recovered) if (reply) await verifyReply(reply.itemRef, recovered, openingReads);
   }
   return {
     async plan(selected: ToolCut) {

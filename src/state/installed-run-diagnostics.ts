@@ -71,6 +71,27 @@ export function beginInstalledApplyDiagnostic() {
 }
 export type InstalledApplyDiagnostic = NonNullable<ReturnType<typeof beginInstalledApplyDiagnostic>>;
 
+export const INSTALLED_AUTHORIZATION_DIAGNOSTIC_STAGES = Object.freeze(['request', 'current_channel', 'replay', 'selected_toolchain',
+  'publish_request', 'publish_response', 'channel_recheck', 'transaction'] as const);
+type AuthorizationDiagnosticStage = typeof INSTALLED_AUTHORIZATION_DIAGNOSTIC_STAGES[number];
+const authorizationStages: ReadonlySet<string> = new Set(INSTALLED_AUTHORIZATION_DIAGNOSTIC_STAGES);
+
+/** Original authorization failure data only. This module cannot observe the
+ * Store's close gate, so it supplies no inferred closing or commit claim. */
+export function beginInstalledAuthorizationDiagnostic() {
+  if (!diagnostic.hasSubscribers) return;
+  let current: AuthorizationDiagnosticStage = 'request';
+  return Object.freeze({
+    stage(value: AuthorizationDiagnosticStage): void {
+      if (typeof value === 'string' && authorizationStages.has(value)) current = value;
+    },
+    failure(error: unknown): void {
+      try { diagnostic.publish(Object.freeze({ kind: 'authorization_failure', stage: current, ...projectError(error) })); }
+      catch { /* A diagnostic cannot decide or replace the original failure. */ }
+    }
+  });
+}
+
 export function beginInstalledSchedulerDiagnostic(origin: SchedulerOrigin) {
   if (!diagnostic.hasSubscribers || typeof origin !== 'string' || !origins.has(origin)) return;
   let current = 'unavailable';

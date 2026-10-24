@@ -4,6 +4,26 @@ import { channel } from 'node:diagnostics_channel';
 import { test } from 'node:test';
 import { KernelStorageError } from './errors.js';
 
+test('authorization failures retain the actual fixed phase and original error without inventing closing state', async () => {
+  const module = await import('./installed-run-diagnostics.js') as Record<string, any>;
+  assert.equal(typeof module.beginInstalledAuthorizationDiagnostic, 'function');
+  const records: unknown[] = [], diagnostic = channel('cliq.installed.run.failures.v1');
+  const receive = (record: unknown) => { try { records.push(record); } catch {} };
+  diagnostic.subscribe(receive);
+  try {
+    const observer = module.beginInstalledAuthorizationDiagnostic(); assert(observer);
+    observer.stage('transaction');
+    const original = new KernelStorageError('REVISION_CONFLICT', 'private original error');
+    await assert.rejects((async () => {
+      try { throw original; } catch (error) { observer.failure(error); throw error; }
+    })(), error => error === original);
+    assert.deepEqual(records, [{ kind: 'authorization_failure', stage: 'transaction',
+      errorClass: 'kernel', code: 'REVISION_CONFLICT', sqliteCode: null }]);
+    assert(Object.isFrozen(records[0])); assert.equal(Object.hasOwn(records[0] as object, 'closing'), false);
+    assert.equal(JSON.stringify(records).includes('private'), false);
+  } finally { diagnostic.unsubscribe(receive); }
+});
+
 test('an apply diagnostic preserves the original rejection and emits only its fixed failure projection', async () => {
   const { beginInstalledApplyDiagnostic } = await import('./installed-run-diagnostics.js');
   const records: unknown[] = [], diagnostic = channel('cliq.installed.run.failures.v1');
@@ -61,7 +81,7 @@ test('the pre-revocation snapshot copies only current counts and fixed phase mul
 });
 
 test('unsubscribed diagnostics allocate no tracker and do not inspect hostile input or sample clocks', async () => {
-  const { beginInstalledApplyDiagnostic, beginInstalledSchedulerDiagnostic, noteInstalledStoreStop,
+  const { beginInstalledApplyDiagnostic, beginInstalledAuthorizationDiagnostic, beginInstalledSchedulerDiagnostic, noteInstalledStoreStop,
     installedRunDiagnosticsSubscribed } = await import('./installed-run-diagnostics.js');
   assert.equal(installedRunDiagnosticsSubscribed(), false);
   let accesses = 0;
@@ -71,10 +91,40 @@ test('unsubscribed diagnostics allocate no tracker and do not inspect hostile in
   try {
     process.hrtime.bigint = () => { accesses++; throw new Error('clock must not be sampled'); };
     assert.equal(beginInstalledApplyDiagnostic(), undefined);
+    assert.equal(beginInstalledAuthorizationDiagnostic(), undefined);
     assert.equal(beginInstalledSchedulerDiagnostic('drive'), undefined);
     noteInstalledStoreStop(hostile);
     assert.equal(accesses, 0);
   } finally { process.hrtime.bigint = originalClock; }
+});
+
+test('authorization stages are closed primitive data and error getters or proxies are never inspected', async () => {
+  const { beginInstalledAuthorizationDiagnostic, INSTALLED_AUTHORIZATION_DIAGNOSTIC_STAGES } = await import('./installed-run-diagnostics.js');
+  assert.deepEqual(INSTALLED_AUTHORIZATION_DIAGNOSTIC_STAGES, ['request', 'current_channel', 'replay', 'selected_toolchain',
+    'publish_request', 'publish_response', 'channel_recheck', 'transaction']);
+  assert(Object.isFrozen(INSTALLED_AUTHORIZATION_DIAGNOSTIC_STAGES));
+  const records: any[] = [], diagnostic = channel('cliq.installed.run.failures.v1');
+  const receive = (record: unknown) => { try { records.push(record); } catch {} };
+  diagnostic.subscribe(receive);
+  try {
+    let accesses = 0; const bad = () => { accesses++; throw new Error('must not read private data'); };
+    const observer = beginInstalledAuthorizationDiagnostic()!;
+    for (const stage of INSTALLED_AUTHORIZATION_DIAGNOSTIC_STAGES) {
+      observer.stage(stage); observer.failure(new KernelStorageError('REVISION_CONFLICT', 'private'));
+    }
+    assert.deepEqual(records.map(record => record.stage), [...INSTALLED_AUTHORIZATION_DIAGNOSTIC_STAGES]);
+    records.length = 0;
+    const original = new Error();
+    for (const key of ['code', 'errcode', 'message', 'stack', 'path', 'cause']) Object.defineProperty(original, key, { get: bad });
+    for (const value of [null, undefined, 'unknown', new String('request'), Object.defineProperty({}, 'toString', { get: bad }),
+      new Proxy({}, { get: bad, ownKeys: bad, getPrototypeOf: bad })]) observer.stage(value as never);
+    observer.failure(original);
+    observer.failure(new Proxy(original, { get: bad, ownKeys: bad, getPrototypeOf: bad, getOwnPropertyDescriptor: bad }));
+    observer.failure({ get code() { return bad(); } });
+    assert.equal(accesses, 0);
+    assert.deepEqual(records, Array.from({ length: 3 }, () => ({ kind: 'authorization_failure', stage: 'transaction',
+      errorClass: 'other', code: 'none', sqliteCode: null })));
+  } finally { diagnostic.unsubscribe(receive); }
 });
 
 test('error projection never invokes getters, proxy traps or stringification', async () => {
@@ -100,7 +150,7 @@ test('error projection never invokes getters, proxy traps or stringification', a
 
 test('a real in-memory SQLite error contributes only its closed native code and integer', async () => {
   const { DatabaseSync } = await import('node:sqlite');
-  const { beginInstalledApplyDiagnostic } = await import('./installed-run-diagnostics.js');
+  const { beginInstalledApplyDiagnostic, beginInstalledAuthorizationDiagnostic } = await import('./installed-run-diagnostics.js');
   const records: unknown[] = [], diagnostic = channel('cliq.installed.run.failures.v1');
   const receive = (record: unknown) => { try { records.push(record); } catch {} };
   const database = new DatabaseSync(':memory:');
@@ -112,6 +162,9 @@ test('a real in-memory SQLite error contributes only its closed native code and 
     const observer = beginInstalledApplyDiagnostic()!; observer.stage('admit'); observer.failure(original, false);
     assert.deepEqual(records, [{ kind: 'apply_failure', stage: 'admit', closing: false,
       errorClass: 'sqlite', code: 'ERR_SQLITE_ERROR', sqliteCode: 1 }]);
+    const authorization = beginInstalledAuthorizationDiagnostic()!; authorization.stage('transaction'); authorization.failure(original);
+    assert.deepEqual(records[1], { kind: 'authorization_failure', stage: 'transaction',
+      errorClass: 'sqlite', code: 'ERR_SQLITE_ERROR', sqliteCode: 1 });
   } finally { diagnostic.unsubscribe(receive); database.close(); }
 });
 

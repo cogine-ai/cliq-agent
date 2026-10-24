@@ -3,6 +3,22 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 
+test('the exit banner appends only the first actual authorization failure and count without changing old frames', async () => {
+  const { INSTALLED_STORE_DIAGNOSTIC_BANNER } = await import('./installed-store-diagnostic-banner.js');
+  const child = spawnSync(process.execPath, ['--input-type=commonjs', '--eval', INSTALLED_STORE_DIAGNOSTIC_BANNER + `
+    const d = require('node:diagnostics_channel').channel('cliq.installed.run.failures.v1');
+    d.publish({kind:'authorization_failure',stage:'transaction',errorClass:'kernel',code:'REVISION_CONFLICT',sqliteCode:null});
+    d.publish({kind:'authorization_failure',stage:'publish_response',errorClass:'sqlite',code:'ERR_SQLITE_ERROR',sqliteCode:1});
+    d.publish({kind:'store_stop',driverTasks:0,agentLoads:0,admissions:0,retainedFailures:0,globalFailure:false,phases:{}});
+    require('node:fs').writeSync(1, 'operation unchanged\\n');
+  `], { encoding: 'utf8', timeout: 5000, maxBuffer: 65536 });
+  assert.equal(child.error, undefined); assert.equal(child.signal, null); assert.equal(child.status, 0);
+  assert.equal(child.stdout, 'operation unchanged\n');
+  assert.equal(child.stderr, 'CLIQ_STORE_DIAG_V1:begin:0:0\n' +
+    'CLIQ_STORE_DIAG_V1:authorization:2:transaction:kernel:REVISION_CONFLICT:-\n' +
+    'CLIQ_STORE_DIAG_V1:stop:0:0:0:0:0\nCLIQ_STORE_DIAG_V1:end\n');
+});
+
 test('the trusted banner emits its bounded fixed summary only as the real child exits', async () => {
   const { INSTALLED_STORE_DIAGNOSTIC_BANNER } = await import('./installed-store-diagnostic-banner.js');
   const child = spawnSync(process.execPath, ['--input-type=commonjs', '--eval', INSTALLED_STORE_DIAGNOSTIC_BANNER + `
@@ -56,6 +72,13 @@ test('invalid diagnostic tuples yield only the fixed unavailable marker without 
     `{kind:'apply_failure',stage:['prepare'],closing:false,errorClass:'kernel',code:'RECOVERY_REQUIRED',sqliteCode:null}`,
     `{kind:'apply_failure',stage:'prepare',closing:false,errorClass:'kernel',code:'ERR_SQLITE_ERROR',sqliteCode:1}`,
     `{kind:'apply_failure',stage:'prepare',closing:false,errorClass:'other',code:'private',sqliteCode:null}`,
+    `{kind:'authorization_failure',stage:'transaction',errorClass:'kernel',code:'REVISION_CONFLICT'}`,
+    `{kind:'authorization_failure',stage:'unknown',errorClass:'kernel',code:'REVISION_CONFLICT',sqliteCode:null}`,
+    `{kind:'authorization_failure',stage:['transaction'],errorClass:'kernel',code:'REVISION_CONFLICT',sqliteCode:null}`,
+    `{kind:'authorization_failure',stage:'transaction',errorClass:'kernel',code:'REVISION_CONFLICT',sqliteCode:null,closing:false}`,
+    `{kind:'authorization_failure',stage:'transaction',errorClass:'kernel',code:'REVISION_CONFLICT',sqliteCode:null,path:'private'}`,
+    `{kind:'authorization_failure',stage:'transaction',errorClass:'kernel',code:'ERR_SQLITE_ERROR',sqliteCode:1}`,
+    `{kind:'authorization_failure',stage:'transaction',errorClass:'other',code:'private',sqliteCode:null}`,
     `{kind:'store_stop',driverTasks:0,agentLoads:0,admissions:0,retainedFailures:0,globalFailure:false,phases:{scheduled:1}}`,
     `{kind:'store_stop',driverTasks:1,agentLoads:0,admissions:0,retainedFailures:0,globalFailure:false,phases:Object.defineProperty({},'scheduled',{enumerable:true,get(){throw new Error('private')}})}`,
     `{kind:'store_stop',driverTasks:9,agentLoads:0,admissions:0,retainedFailures:0,globalFailure:false,phases:{scheduled:1,drive_material:1,drive_agent:1,drive_retirement:1,drive_verify:1,drive_finalize:1,terminal_retirement:1,result_recovery:1,result_basis:1}}`
@@ -66,6 +89,25 @@ test('invalid diagnostic tuples yield only the fixed unavailable marker without 
     `], { encoding: 'utf8', timeout: 5000, maxBuffer: 65536 });
     assert.equal(child.error, undefined); assert.equal(child.signal, null); assert.equal(child.status, 0);
     assert.equal(child.stdout, ''); assert.equal(child.stderr, 'CLIQ_STORE_DIAG_V1:truncated\n');
+  }
+});
+
+test('authorization tuple accessors and Proxy traps never run and cannot reveal private fields', async () => {
+  const { INSTALLED_STORE_DIAGNOSTIC_BANNER } = await import('./installed-store-diagnostic-banner.js');
+  const variants = [
+    `Object.defineProperty({...row},'stage',{get:bad})`, `Object.defineProperty({...row},'code',{get:bad})`,
+    `Object.defineProperty({...row},'sqliteCode',{get:bad})`, `{...row,[Symbol('private')]:1}`,
+    `new Proxy(row,{get:bad,ownKeys:bad,getPrototypeOf:bad,getOwnPropertyDescriptor:bad})`,
+  ];
+  for (const value of variants) {
+    const child = spawnSync(process.execPath, ['--input-type=commonjs', '--eval', INSTALLED_STORE_DIAGNOSTIC_BANNER + `
+      let reads=0; const bad=()=>{reads++;throw Error('private')};
+      const row={kind:'authorization_failure',stage:'transaction',errorClass:'kernel',code:'REVISION_CONFLICT',sqliteCode:null};
+      require('node:diagnostics_channel').channel('cliq.installed.run.failures.v1').publish(${value});
+      require('node:fs').writeSync(1,'accesses:'+reads);
+    `], { encoding: 'utf8', timeout: 5000, maxBuffer: 65536 });
+    assert.equal(child.error, undefined); assert.equal(child.signal, null); assert.equal(child.status, 0);
+    assert.equal(child.stdout, 'accesses:0'); assert.equal(child.stderr, 'CLIQ_STORE_DIAG_V1:truncated\n');
   }
 });
 

@@ -148,7 +148,9 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
   if (options.publicationRetirementLate) assert.equal(options.publicationRetirementDiagnostics, true);
   assert(!options.publicationRetirementStop || !options.publicationRetirementLate);
   if (options.publicationRetirementDiagnostics) assert.equal(journeyKind, 'delivery');
-  const storeFailureDiagnostics = options.publicationRetirementDiagnostics !== true;
+  // Trusted disposable qualification composition only, including the three
+  // owned delayed-volume campaigns. No runtime or public-wire option exists.
+  const storeFailureDiagnostics = true;
   assert.equal(process.geteuid!(), 0);
   const ledger = await readLedger(filename), recipe = ledger.runJourney;
   const installedClientDriver = path.join(recipe.buildFixture, 'installed-control-client-driver.mjs');

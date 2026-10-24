@@ -25,19 +25,20 @@ export const readRunAuthority = stateOperation('RECOVERY_REQUIRED', async functi
   input: { runId: string; operation: 'agent' | 'delivery'; releaseKeys?: readonly ReleaseTrustKey[] }, signal?: AbortSignal
 ) {
   signal?.throwIfAborted(); assertActiveStateOwner(driver, owner);
+  const openingReads = signal ? artifacts.withReadSignal(signal) : artifacts;
   const releaseKeys = input.releaseKeys === undefined ? undefined : immutableSnapshot(input.releaseKeys);
-  const recovered = await readRecoveryClosure(driver, artifacts, input.runId), run = recovered.run;
-  const spec = immutableSnapshot(decodeRunSpec(await readCanonicalArtifact(artifacts, run.specRef)));
+  const recovered = await readRecoveryClosure(driver, openingReads, input.runId), run = recovered.run;
+  const spec = immutableSnapshot(decodeRunSpec(await readCanonicalArtifact(openingReads, run.specRef)));
   if (spec.operation !== input.operation) throw new TypeError(input.operation === 'agent'
     ? 'delivery Runs cannot load a model' : 'an Agent Run cannot load a delivery continuation');
   if (spec.operation === 'delivery') assertDeliveryModelFreeCut(recovered);
-  const assembly = immutableSnapshot(decodeRetainedRunAssembly(await readCanonicalArtifact(artifacts, spec.assemblyRef)));
-  if (decodeVerifierSpec(await readCanonicalArtifact(artifacts, spec.verifierSpecRef)).verifiers.length) {
+  const assembly = immutableSnapshot(decodeRetainedRunAssembly(await readCanonicalArtifact(openingReads, spec.assemblyRef)));
+  if (decodeVerifierSpec(await readCanonicalArtifact(openingReads, spec.verifierSpecRef)).verifiers.length) {
     if (!releaseKeys) throw new TypeError('verifier authority requires the original trusted Supervisor release roots');
-    const bundle = await readCanonicalArtifact<RuntimeBundleManifest>(artifacts, assembly.runtime.runtimeBundleRef);
-    await validateVerifierRunAdmission(driver, artifacts, owner, { bundle, releaseKeys }, run.id, signal);
+    const bundle = await readCanonicalArtifact<RuntimeBundleManifest>(openingReads, assembly.runtime.runtimeBundleRef);
+    await validateVerifierRunAdmission(driver, openingReads, owner, { bundle, releaseKeys }, run.id, signal);
   }
-  const manifest = await readCanonicalArtifact<ToolContractManifestV1>(artifacts, assembly.tools.manifestRef);
+  const manifest = await readCanonicalArtifact<ToolContractManifestV1>(openingReads, assembly.tools.manifestRef);
   const exactKeys = (value: object, keys: string[]) => Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
   if (manifest.schemaVersion !== 1 || manifest.format !== 'cliq-tool-contracts-v1' ||
       !exactKeys(manifest, ['schemaVersion', 'format', 'entries', 'manifestDigest']) ||
@@ -62,31 +63,33 @@ export const readRunAuthority = stateOperation('RECOVERY_REQUIRED', async functi
             server.manifestDigest === execution.registryManifestDigest)) throw new TypeError('tool contract differs from the frozen MCP registration');
       assertArtifactRef(execution.toolContractDigest);
     } else throw new TypeError('unknown tool execution contract');
-    const schema = await readCanonicalArtifact(artifacts, entry.inputSchemaRef);
+    const schema = await readCanonicalArtifact(openingReads, entry.inputSchemaRef);
     if (canonicalSha256(schema) !== entry.inputSchemaDigest) throw new TypeError('tool input schema digest mismatch');
-    if (output && canonicalSha256(await readCanonicalArtifact(artifacts, entry.outputSchemaRef!)) !== entry.outputSchemaDigest)
+    if (output && canonicalSha256(await readCanonicalArtifact(openingReads, entry.outputSchemaRef!)) !== entry.outputSchemaDigest)
       throw new TypeError('tool output schema digest mismatch');
     return { ...entry, inputSchema: schema };
   })));
   const session = readSession(driver, run.sessionId), principalId = readSessionPrincipalId(driver, run.sessionId);
   const toolContracts = loadToolContracts(contracts);
-  const assertAuthority = async () => {
+  const assertAuthority = async (readSignal?: AbortSignal) => {
+    const reads = readSignal ? artifacts.withReadSignal(readSignal) : artifacts;
+    reads.assertReadActive();
     assertActiveStateOwner(driver, owner);
     if (!releaseKeys) throw new KernelStorageError('RECOVERY_REQUIRED', 'tool authority requires the trusted release key set and canonical policy/profile closure');
     const current = readRun(driver, run.id);
     if (current.specRef !== run.specRef || current.createdAt !== run.createdAt || current.deadlineAt !== run.deadlineAt)
       throw new TypeError('loaded execution authority no longer belongs to this Run');
-    const workspace = decodeWorkspaceIdentity(await readCanonicalArtifact(artifacts, session.workspaceIdentityRef));
+    const workspace = decodeWorkspaceIdentity(await readCanonicalArtifact(reads, session.workspaceIdentityRef));
     if (principalId !== workspace.ownerPrincipalId || driver.prepare('SELECT principal_id FROM runs WHERE id = ?')
       .get<{ principal_id: string }>(run.id)?.principal_id !== principalId) throw new TypeError('Run, Session and workspace do not share one principal');
-    const policy = await readCanonicalArtifact<RunPolicySnapshotV1>(artifacts, spec.policyRef);
+    const policy = await readCanonicalArtifact<RunPolicySnapshotV1>(reads, spec.policyRef);
     assertRunPolicySnapshot({ policy, policyRef: spec.policyRef, assembly, principalId, workspaceIdentityDigest: workspace.identityDigest });
-    const bundle = await readCanonicalArtifact<RuntimeBundleManifest>(artifacts, assembly.runtime.runtimeBundleRef);
-    const profile = await readCanonicalArtifact<PolicyEngineProfileV1>(artifacts, policy.engine.profileRef);
+    const bundle = await readCanonicalArtifact<RuntimeBundleManifest>(reads, assembly.runtime.runtimeBundleRef);
+    const profile = await readCanonicalArtifact<PolicyEngineProfileV1>(reads, policy.engine.profileRef);
     verifyToolRuntimeAuthority({ assembly, policy, bundle, profile, tools: contracts.map(({ inputSchema: _schema, ...entry }) => entry), releaseKeys });
     for (const ref of new Set([spec.policyRef, assembly.runtime.runtimeBundleRef, policy.engine.profileRef,
-      ...policy.decisionRules.flatMap(rule => rule.sourceRef ? [rule.sourceRef] : [])])) await artifacts.readBytes(ref);
-    signal?.throwIfAborted(); assertActiveStateOwner(driver, owner);
+      ...policy.decisionRules.flatMap(rule => rule.sourceRef ? [rule.sourceRef] : [])])) await reads.readBytes(ref);
+    readSignal?.throwIfAborted(); assertActiveStateOwner(driver, owner);
   };
   signal?.throwIfAborted(); assertActiveStateOwner(driver, owner);
   return { recovered, run, spec, assembly, releaseKeys, contracts, toolContracts,

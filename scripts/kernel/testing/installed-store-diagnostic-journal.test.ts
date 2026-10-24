@@ -10,6 +10,38 @@ const lines = ['CLIQ_STORE_DIAG_V1:begin:1:1',
 const journal = (messages = lines) => messages.map(MESSAGE => JSON.stringify({ _UID: '1000', _PID: '2000',
   _TRANSPORT: 'stdout', _SYSTEMD_INVOCATION_ID: sender.invocationId, MESSAGE })).join('\n') + '\n';
 
+test('an optional authorization row adds its count and first fixed failure together while old summaries stay unchanged', async () => {
+  const { readInstalledStoreDiagnosticJournal } = await import('./installed-store-diagnostic-journal.js');
+  const original = readInstalledStoreDiagnosticJournal(journal(), sender)!;
+  assert.equal(Object.hasOwn(original, 'authorizationFailures'), false);
+  assert.equal(Object.hasOwn(original, 'firstAuthorizationFailure'), false);
+  const summary = readInstalledStoreDiagnosticJournal(journal([...lines.slice(0, 3),
+    'CLIQ_STORE_DIAG_V1:authorization:2:transaction:kernel:REVISION_CONFLICT:-', ...lines.slice(3)]), sender)!;
+  assert.deepEqual(summary, { ...original, authorizationFailures: 2,
+    firstAuthorizationFailure: { stage: 'transaction', errorClass: 'kernel', code: 'REVISION_CONFLICT', sqliteCode: null } });
+  assert(Object.isFrozen(summary) && Object.isFrozen(summary.firstAuthorizationFailure));
+  assert.equal(Object.hasOwn(summary.firstAuthorizationFailure!, 'closing'), false);
+});
+
+test('authorization diagnostics reject half records, invalid phases, extra metadata and malformed error classifications', async () => {
+  const { readInstalledStoreDiagnosticJournal } = await import('./installed-store-diagnostic-journal.js');
+  const authorization = 'CLIQ_STORE_DIAG_V1:authorization:1:transaction:kernel:REVISION_CONFLICT:-';
+  for (const row of [
+    'CLIQ_STORE_DIAG_V1:authorization:1', 'CLIQ_STORE_DIAG_V1:authorization:transaction:kernel:REVISION_CONFLICT:-',
+    authorization + ':extra', authorization + '\n', authorization.replace(':transaction:', ':unknown:'),
+    authorization.replace(':1:', ':0:'), authorization.replace(':1:', ':01:'),
+    authorization.replace(':1:', ':9007199254740992:'), authorization.replace(':kernel:', ':unknown:'),
+    authorization.replace(':REVISION_CONFLICT:', ':private:'), authorization.replace('kernel:REVISION_CONFLICT:-', 'kernel:ERR_SQLITE_ERROR:1'),
+    authorization.replace('kernel:REVISION_CONFLICT:-', 'sqlite:RECOVERY_REQUIRED:1'),
+    authorization.replace('kernel:REVISION_CONFLICT:-', 'sqlite:ERR_SQLITE_ERROR:2147483648'),
+    authorization.replace('kernel:REVISION_CONFLICT:-', 'kernel:REVISION_CONFLICT:1')])
+    assert.throws(() => readInstalledStoreDiagnosticJournal(journal([...lines.slice(0, 3), row, ...lines.slice(3)]), sender),
+      'a partial or malformed authorization diagnostic cannot produce either member of the optional pair');
+  for (const messages of [[authorization, ...lines], [...lines, authorization],
+    [...lines.slice(0, 3), authorization, authorization, ...lines.slice(3)]])
+    assert.throws(() => readInstalledStoreDiagnosticJournal(journal(messages), sender), 'one optional row has one exact position');
+});
+
 test('one complete fixed summary decodes only its immutable error, phase and stop data', async () => {
   const { readInstalledStoreDiagnosticJournal } = await import('./installed-store-diagnostic-journal.js');
   const summary = readInstalledStoreDiagnosticJournal(journal(), sender);

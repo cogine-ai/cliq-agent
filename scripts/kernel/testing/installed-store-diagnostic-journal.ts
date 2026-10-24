@@ -2,10 +2,12 @@
 import assert from 'node:assert/strict';
 import { types } from 'node:util';
 import { parseJsonStrict } from '../../../src/kernel/json.js';
-import { INSTALLED_APPLY_DIAGNOSTIC_STAGES, INSTALLED_RUN_DIAGNOSTIC_ERROR_CLASSES, INSTALLED_RUN_DIAGNOSTIC_ERROR_CODES,
+import { INSTALLED_APPLY_DIAGNOSTIC_STAGES, INSTALLED_AUTHORIZATION_DIAGNOSTIC_STAGES,
+  INSTALLED_RUN_DIAGNOSTIC_ERROR_CLASSES, INSTALLED_RUN_DIAGNOSTIC_ERROR_CODES,
   INSTALLED_SCHEDULER_DIAGNOSTIC_ORIGINS, INSTALLED_SCHEDULER_DIAGNOSTIC_PHASES } from '../../../src/state/installed-run-diagnostics.js';
 
 const stages: ReadonlySet<string> = new Set(INSTALLED_APPLY_DIAGNOSTIC_STAGES);
+const authorizationStages: ReadonlySet<string> = new Set(INSTALLED_AUTHORIZATION_DIAGNOSTIC_STAGES);
 const phases: ReadonlySet<string> = new Set(INSTALLED_SCHEDULER_DIAGNOSTIC_PHASES);
 const origins: ReadonlySet<string> = new Set(INSTALLED_SCHEDULER_DIAGNOSTIC_ORIGINS);
 const classes: ReadonlySet<string> = new Set(INSTALLED_RUN_DIAGNOSTIC_ERROR_CLASSES);
@@ -16,12 +18,15 @@ function count(value: string): number {
   const result = Number(value); need(Number.isSafeInteger(result)); return result;
 }
 function bit(value: string): boolean { need(value === '0' || value === '1'); return value === '1'; }
-function failure(closing: string, errorClass: string, code: string, sqlite: string) {
+function errorFields(errorClass: string, code: string, sqlite: string) {
   need(classes.has(errorClass) && codes.has(code));
   const sqliteCode = sqlite === '-' ? null : count(sqlite);
   need(code === 'ERR_SQLITE_ERROR' ? errorClass === 'sqlite' && (sqliteCode === null || sqliteCode <= 2147483647)
     : errorClass !== 'sqlite' && sqliteCode === null);
-  return { closing: bit(closing), errorClass, code, sqliteCode };
+  return { errorClass, code, sqliteCode };
+}
+function failure(closing: string, errorClass: string, code: string, sqlite: string) {
+  return { closing: bit(closing), ...errorFields(errorClass, code, sqlite) };
 }
 
 /** The caller must independently bind the live original image/start and later
@@ -66,6 +71,13 @@ export function readInstalledStoreDiagnosticJournal(text: string,
     need(row[3] === 'unavailable' || phases.has(row[3]!));
     firstSchedulerFailure = Object.freeze({ origin: row[2]!, phase: row[3]!, ...failure(row[4]!, row[5]!, row[6]!, row[7]!) });
   }
+  let authorizationFailures: number | undefined;
+  let firstAuthorizationFailure: Readonly<ReturnType<typeof errorFields> & { stage: string }> | undefined;
+  if (rows[cursor]?.[1] === 'authorization') {
+    const row = rows[cursor++]!; need(row.length === 7 && authorizationStages.has(row[3]!));
+    authorizationFailures = count(row[2]!); need(authorizationFailures > 0);
+    firstAuthorizationFailure = Object.freeze({ stage: row[3]!, ...errorFields(row[4]!, row[5]!, row[6]!) });
+  }
   const stopped = rows[cursor++]; need(stopped && stopped.length === 7 && stopped[1] === 'stop');
   const [driverTasks, agentLoads, admissions, retainedFailures] = stopped.slice(2, 6).map(count) as [number, number, number, number];
   const globalFailure = bit(stopped[6]!);
@@ -79,6 +91,7 @@ export function readInstalledStoreDiagnosticJournal(text: string,
   need(total <= driverTasks && total <= 1000);
   need(rows[cursor]?.length === 2 && rows[cursor]![1] === 'end' && cursor === rows.length - 1);
   return Object.freeze({ applyFailures, schedulerFailures, firstApplyFailure, firstSchedulerFailure,
-    stop: Object.freeze({ driverTasks, agentLoads, admissions, retainedFailures, globalFailure, phases: Object.freeze(phaseCounts) }) });
+    stop: Object.freeze({ driverTasks, agentLoads, admissions, retainedFailures, globalFailure, phases: Object.freeze(phaseCounts) }),
+    ...(firstAuthorizationFailure ? { authorizationFailures: authorizationFailures!, firstAuthorizationFailure } : {}) });
 }
 export type InstalledStoreDiagnosticSummary = NonNullable<ReturnType<typeof readInstalledStoreDiagnosticJournal>>;

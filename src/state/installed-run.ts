@@ -342,12 +342,13 @@ async function materialFor(installed: InstalledRuntimeBorrow, artifacts: Artifac
 
 export async function loadInstalledRunMaterial(input: { selected: HeldInstalledRuntime; artifacts: ArtifactCatalog; assemblyRef: string; signal?: AbortSignal }) {
   input.signal?.throwIfAborted();
+  const artifacts = input.signal ? input.artifacts.withReadSignal(input.signal) : input.artifacts;
   return withHeldInstalledRuntime(input.selected, async installed => {
     await installed.revalidate(input.signal);
-    const assembly = decodeRetainedRunAssembly(await readCanonicalArtifact(input.artifacts, input.assemblyRef));
+    const assembly = decodeRetainedRunAssembly(await readCanonicalArtifact(artifacts, input.assemblyRef));
     if (assembly.runtime.runtimeBundleRef !== installed.bundleDigest || assembly.runtime.runtimeBundleManifestDigest !== installed.bundle.manifestDigest)
       mismatch('retained Run requires a different installed runtime');
-    const material = await materialFor(installed, input.artifacts, assembly, input.signal); await installed.revalidate(input.signal);
+    const material = await materialFor(installed, artifacts, assembly, input.signal); await installed.revalidate(input.signal);
     input.signal?.throwIfAborted(); return material;
   }, input.signal);
 }

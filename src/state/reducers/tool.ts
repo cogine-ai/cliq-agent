@@ -87,11 +87,13 @@ function nextFrontier(cut: ToolCut, addedItems: number): RunFrontier {
 export async function loadToolContinuation(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, input: {
   run: Run; spec: RunSpec; assembly: RunAssemblyV1; contracts: ToolInputAuthority[];
   resolveToolInput: ResolveToolInput; releaseKeys?: readonly ReleaseTrustKey[]; recoveredItems: readonly RunItemReferenceV1[];
-}, reobserve?: NativeWorkerRetirement) {
+}, reobserve?: NativeWorkerRetirement, openingSignal?: AbortSignal) {
+  const openingReads = openingSignal ? artifacts.withReadSignal(openingSignal) : artifacts;
+  openingReads.assertReadActive();
   const { run: admittedRun, spec, assembly, contracts, resolveToolInput } = input;
   const runId = admittedRun.id;
   const session = readSession(driver, admittedRun.sessionId);
-  const workspace = decodeWorkspaceIdentity(await readCanonicalArtifact(artifacts, session.workspaceIdentityRef));
+  const workspace = decodeWorkspaceIdentity(await readCanonicalArtifact(openingReads, session.workspaceIdentityRef));
   if (readSessionPrincipalId(driver, session.id) !== workspace.ownerPrincipalId ||
       driver.prepare('SELECT principal_id FROM runs WHERE id = ?').get<{ principal_id: string }>(runId)?.principal_id !== workspace.ownerPrincipalId) {
     throw new TypeError('Run, Session and workspace do not share one principal');
@@ -99,13 +101,13 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
   let policy: ReturnType<typeof loadToolPolicy> | undefined;
   let policyArtifactRefs: readonly string[] = [];
   if (input.releaseKeys !== undefined) {
-    const snapshot = await readCanonicalArtifact<RunPolicySnapshotV1>(artifacts, spec.policyRef);
-    const bundle = await readCanonicalArtifact<RuntimeBundleManifest>(artifacts, assembly.runtime.runtimeBundleRef);
-    const profile = await readCanonicalArtifact<PolicyEngineProfileV1>(artifacts, snapshot.engine.profileRef);
+    const snapshot = await readCanonicalArtifact<RunPolicySnapshotV1>(openingReads, spec.policyRef);
+    const bundle = await readCanonicalArtifact<RuntimeBundleManifest>(openingReads, assembly.runtime.runtimeBundleRef);
+    const profile = await readCanonicalArtifact<PolicyEngineProfileV1>(openingReads, snapshot.engine.profileRef);
     verifyToolRuntimeAuthority({ assembly, policy: snapshot, bundle, profile, tools: contracts.map(({ inputSchema: _schema, ...entry }) => entry), releaseKeys: input.releaseKeys });
     policyArtifactRefs = [...new Set([spec.policyRef, assembly.runtime.runtimeBundleRef, snapshot.engine.profileRef,
       ...snapshot.decisionRules.flatMap((rule) => rule.sourceRef ? [rule.sourceRef] : [])])];
-    for (const ref of policyArtifactRefs) await artifacts.readBytes(ref);
+    for (const ref of policyArtifactRefs) await openingReads.readBytes(ref);
     policy = loadToolPolicy({ policy: snapshot, policyRef: spec.policyRef, assembly, assemblyRef: spec.assemblyRef,
       principalId: workspace.ownerPrincipalId, workspaceIdentityRef: session.workspaceIdentityRef, workspaceIdentityDigest: workspace.identityDigest, contracts });
   }
@@ -115,9 +117,10 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
   };
   const compiled = loadToolContracts(contracts);
   const outputSchemas = new Map(await joinResourceOperations(contracts.filter((entry) => entry.outputSchemaRef !== undefined).map(async (entry) =>
-    [entry.name, compileOutputSchema(await readCanonicalArtifact(artifacts, entry.outputSchemaRef!))] as const)));
-  const cut = async (revision?: number) => {
-    const selected = await readToolCut(driver, artifacts, runId, resolveToolInput);
+    [entry.name, compileOutputSchema(await readCanonicalArtifact(openingReads, entry.outputSchemaRef!))] as const)));
+  const cut = async (revision?: number, reads = artifacts) => {
+    reads.assertReadActive();
+    const selected = await readToolCut(driver, reads, runId, resolveToolInput);
     if (selected.run.specRef !== admittedRun.specRef || selected.run.deadlineAt !== admittedRun.deadlineAt || selected.run.createdAt !== admittedRun.createdAt) {
       throw new TypeError('loaded tool authority no longer belongs to this Run');
     }
@@ -137,21 +140,21 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
       assemblyRef: spec.assemblyRef, assembly, workspaceIdentityRef: session.workspaceIdentityRef,
       workspaceIdentityDigest: workspace.identityDigest, entry, call });
   }
-  async function verifyGrant(grantRef: string) {
+  async function verifyGrant(grantRef: string, reads = artifacts) {
     const evaluator = requirePolicy();
-    const grant = await readCanonicalArtifact<ToolOperationGrantV1>(artifacts, grantRef);
-    const request = await readCanonicalArtifact<ToolRequestV1>(artifacts, grant.requestRef);
-    const target = await readCanonicalArtifact<ToolTargetV1>(artifacts, request.targetRef);
-    const call = await readCanonicalArtifact<ToolCallInputV1>(artifacts, request.inputRef);
-    const evidence = await readCanonicalArtifact<ToolPolicyChannelEvidenceV1>(artifacts, grant.provenance.channelEvidenceRef);
-    requireEqual(grant, grant.provenance.kind === 'user_approval' ? (await verifyApproval(grant.provenance.decisionRef)).grant
+    const grant = await readCanonicalArtifact<ToolOperationGrantV1>(reads, grantRef);
+    const request = await readCanonicalArtifact<ToolRequestV1>(reads, grant.requestRef);
+    const target = await readCanonicalArtifact<ToolTargetV1>(reads, request.targetRef);
+    const call = await readCanonicalArtifact<ToolCallInputV1>(reads, request.inputRef);
+    const evidence = await readCanonicalArtifact<ToolPolicyChannelEvidenceV1>(reads, grant.provenance.channelEvidenceRef);
+    requireEqual(grant, grant.provenance.kind === 'user_approval' ? (await verifyApproval(grant.provenance.decisionRef, reads)).grant
       : evaluator.grant(request, target, call, evidence, grant.issuedAt, grant.expiresAt), 'operation grant');
     if (grant.runId !== runId || grant.expiresAt > admittedRun.deadlineAt || grant.issuedAt < admittedRun.createdAt) throw new TypeError('tool grant exceeds Run authority lifetime');
     return { grant, request, target, call, evidence };
   }
 
   async function editLaunch(selected: ToolCut, prepared: ToolCut['journal'][number],
-    proof: Awaited<ReturnType<typeof verifyGrant>>, claim: Omit<ClaimInvocationDispatchInput, 'runId'>) {
+    proof: Awaited<ReturnType<typeof verifyGrant>>, claim: Omit<ClaimInvocationDispatchInput, 'runId'>, reads = artifacts) {
     if (proof.request.toolName !== 'edit') {
       if (claim.sandboxLaunchSpecRef !== undefined) {
         throw new KernelStorageError('INVALID_REQUEST', 'this tool has no supported native launch recipe');
@@ -164,13 +167,13 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
     const activeOwner = assertActiveStateOwner(driver, owner);
     const live = assertLiveDispatchState(driver, owner, runId, claim.expectedRunRevision, claim.leaseEpoch, sampleCanonicalNow());
     requireEqual(live.run, selected.run, 'edit launch Run cut');
-    const closure = await readBuiltinEditLaunchClosure(artifacts, activeOwner, { ...live, prepared, ...proof,
+    const closure = await readBuiltinEditLaunchClosure(reads, activeOwner, { ...live, prepared, ...proof,
       dispatchId: claim.dispatchId, sandboxLaunchSpecRef: claim.sandboxLaunchSpecRef });
     return Object.freeze({ closure, generationState: immutableSnapshot(live.generation) });
   }
 
-  const waitProof = (ref: string) => readToolApprovalWait(artifacts, admittedRun, requirePolicy(), ref);
-  const verifyApproval = (ref: string) => readToolApproval(driver, artifacts, admittedRun, requirePolicy(), ref);
+  const waitProof = (ref: string, reads = artifacts) => readToolApprovalWait(reads, admittedRun, requirePolicy(), ref);
+  const verifyApproval = (ref: string, reads = artifacts) => readToolApproval(driver, reads, admittedRun, requirePolicy(), ref);
 
   function assertApprovalCut(connection: SqliteConnection, current: Run, selected: ToolCut): void {
     assertCut(connection, current, selected);
@@ -181,21 +184,21 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
       .get(runId, current.activeWorkerLaunchId ?? '')) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'approval must not retain another pending worker launch');
   }
 
-  async function approvedGrant(selected: ToolCut, request: ToolRequestV1) {
+  async function approvedGrant(selected: ToolCut, request: ToolRequestV1, reads = artifacts) {
     const item = selected.items.map(({ item }) => item).filter((item) => item.kind === 'policy_decision' && item.opId === request.opId).at(-1);
     if (item?.kind !== 'policy_decision' || item.decisionSource !== 'interactive_approval' || item.decision !== 'allow') return undefined;
-    const proof = await verifyGrant(item.grantRef);
+    const proof = await verifyGrant(item.grantRef, reads);
     requireEqual(proof.request, request, 'approved current tool request');
     return { ...proof, grantRef: item.grantRef };
   }
 
-  async function retryAfterExpiry(request: ToolRequestV1): Promise<boolean> {
+  async function retryAfterExpiry(request: ToolRequestV1, reads = artifacts): Promise<boolean> {
     const prepared = readHighestPreparedAttempt(driver, runId, request.opId);
     if (!prepared) return false;
     const entries = readInvocationAttempt(driver, runId, request.opId, prepared.attempt);
     const failed = entries.at(-1);
     if (entries.length !== 2 || failed?.phase !== 'failed' || !failed.errorRef) return false;
-    const expiry = await readCanonicalArtifact<ToolGrantExpiryV1>(artifacts, failed.errorRef);
+    const expiry = await readCanonicalArtifact<ToolGrantExpiryV1>(reads, failed.errorRef);
     return expiry.format === 'cliq-tool-grant-expiry-v1' && expiry.grantRef === prepared.grantRef &&
       expiry.preparedJournalSeq === prepared.seq && expiry.waitingSubjectRef !== undefined;
   }
@@ -209,37 +212,39 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
       row.payload_ref !== original.payloadRef || row.created_at !== original.createdAt;
   })) throw new KernelStorageError('REVISION_CONFLICT', 'retained policy recovery cut changed');
   for (const row of retained.filter(row => row.kind === 'policy_decision')) {
-    const item = await readCanonicalArtifact<ContinuationItem>(artifacts, row.payload_ref);
+    const item = await readCanonicalArtifact<ContinuationItem>(openingReads, row.payload_ref);
     if (item.kind !== 'policy_decision') throw new TypeError('retained policy item differs from its owner row');
     // The sole caller first runs readRunAuthority/full recovery, including the
     // verifier's complete subject-owned history. Its request is not a tool
     // request and has no inputRef; never reinterpret it as tool authority.
     if (item.subjectKind === 'verifier_launch') continue;
     if (item.subjectKind !== 'tool_call') throw new TypeError('retained tool policy item has an unsupported subject');
-    const evidence = await readCanonicalArtifact<ToolPolicyChannelEvidenceV1>(artifacts, item.policyChannelEvidenceRef);
-    const request = await readCanonicalArtifact<ToolRequestV1>(artifacts, evidence.requestRef);
-    const target = await readCanonicalArtifact<ToolTargetV1>(artifacts, evidence.targetRef);
-    const call = await readCanonicalArtifact<ToolCallInputV1>(artifacts, request.inputRef);
+    const evidence = await readCanonicalArtifact<ToolPolicyChannelEvidenceV1>(openingReads, item.policyChannelEvidenceRef);
+    const request = await readCanonicalArtifact<ToolRequestV1>(openingReads, evidence.requestRef);
+    const target = await readCanonicalArtifact<ToolTargetV1>(openingReads, evidence.targetRef);
+    const call = await readCanonicalArtifact<ToolCallInputV1>(openingReads, request.inputRef);
     requireEqual(evidence, requirePolicy().evaluate(request, target, call, evidence.evaluatedAt), 'retained policy decision');
-    if (item.decision === 'allow') await verifyGrant(item.grantRef);
-    const approval = item.decisionSource === 'interactive_approval' ? (await verifyApproval(item.decisionRef)).decision : undefined;
+    if (item.decision === 'allow') await verifyGrant(item.grantRef, openingReads);
+    const approval = item.decisionSource === 'interactive_approval' ? (await verifyApproval(item.decisionRef, openingReads)).decision : undefined;
     requireEqual(item, policyItem(evidence, item.decision === 'allow' ? { grantRef: item.grantRef } : { outcomeItemRef: item.denialOutcome.outcomeItemRef }, approval), 'policy item');
     if (item.decision !== (approval?.decision ?? evidence.effectiveDisposition)) throw new TypeError('policy item disposition mismatch');
   }
   if (admittedRun.waitingReason === 'approval' && admittedRun.waitingOnRef) {
-    const selected = await cut();
-    const proof = await waitProof(admittedRun.waitingOnRef);
+    const selected = await cut(undefined, openingReads);
+    const proof = await waitProof(admittedRun.waitingOnRef, openingReads);
     requireEqual(proof.request, requestFor(selected).request, 'waiting current tool request');
   }
 
   const controlAuthority = {
     run: admittedRun, spec, assembly, principalId: workspace.ownerPrincipalId, resolveToolInput,
-    async assertAuthority() {
+    async assertAuthority(readSignal?: AbortSignal) {
+      const reads = readSignal ? artifacts.withReadSignal(readSignal) : artifacts;
+      reads.assertReadActive();
       requirePolicy();
-      for (const ref of policyArtifactRefs) await artifacts.readBytes(ref);
+      for (const ref of policyArtifactRefs) await reads.readBytes(ref);
     }
   };
-  const inputContinuation = await loadInputContinuation(driver, artifacts, owner, { ...controlAuthority, contracts }, reobserve);
+  const inputContinuation = await loadInputContinuation(driver, artifacts, owner, { ...controlAuthority, contracts }, reobserve, openingSignal);
 
   function completionOwner(original: ToolCompletionInput) {
     const readItems = (connection: SqliteConnection) => connection.prepare(
@@ -434,32 +439,36 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
     controlAuthority,
     waitForInput: inputContinuation.waitForInput,
     submitInput: inputContinuation.submitInput,
-    prepareTool: stateOperation('RECOVERY_REQUIRED', async (input: { expectedRunRevision: number; leaseEpoch: number }) => {
+    prepareTool: stateOperation('RECOVERY_REQUIRED', async (input: { expectedRunRevision: number; leaseEpoch: number }, readSignal?: AbortSignal) => {
+      const reads = readSignal ? artifacts.withReadSignal(readSignal) : artifacts;
+      reads.assertReadActive();
       const { expectedRunRevision, leaseEpoch } = input;
       const evaluator = requirePolicy();
       // Before the first decision there is no retained policy item for recovery to walk yet.
       // Static in-memory authority must not hide loss of its durable policy/profile/source bytes.
-      for (const ref of policyArtifactRefs) await artifacts.readBytes(ref);
-      const selected = await cut(expectedRunRevision);
+      for (const ref of policyArtifactRefs) await reads.readBytes(ref);
+      const selected = await cut(expectedRunRevision, reads);
       if (selected.run.status !== 'queued') assertLiveDispatchState(driver, owner, runId, expectedRunRevision, leaseEpoch, sampleCanonicalNow());
       else if (selected.run.activeWorkerLaunchId || selected.run.leaseEpoch !== leaseEpoch || selected.run.cancelRequested ||
           selected.run.stopIntentRef || sampleCanonicalNow() >= selected.run.deadlineAt) throw new KernelStorageError('LEASE_FENCED', 'queued approval selection is stale');
       const { request, target, entry } = requestFor(selected);
       if (entry.access === 'control') return inputContinuation.plan(selected);
-      const approved = await approvedGrant(selected, request);
+      const approved = await approvedGrant(selected, request, reads);
       const prior = readHighestPreparedAttempt(driver, runId, request.opId);
       const canRenew = approved && approved.grant.expiresAt <= sampleCanonicalNow() && prior?.grantRef === approved.grantRef &&
         readInvocationAttempt(driver, runId, request.opId, prior.attempt).length === 1;
-      if (prior && !canRenew && !await retryAfterExpiry(request)) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'tool attempt already exists; retry/reconciliation requires its owning recovery reducer');
+      if (prior && !canRenew && !await retryAfterExpiry(request, reads)) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'tool attempt already exists; retry/reconciliation requires its owning recovery reducer');
       const evaluatedAt = sampleCanonicalNow();
       const evidence = evaluator.evaluate(request, target, selected.call, evaluatedAt);
       const requestPlan = planCanonicalArtifact(request, request.format), targetPlan = planCanonicalArtifact(target, target.format);
-      await artifacts.publishCanonical(request, request.format);
-      await artifacts.publishCanonical(target, target.format);
-      const evidenceArtifact = await artifacts.publishCanonical(evidence, evidence.format);
+      await reads.publishCanonical(request, request.format);
+      await reads.publishCanonical(target, target.format);
+      const evidenceArtifact = await reads.publishCanonical(evidence, evidence.format);
+      reads.assertReadActive();
       if (evidence.effectiveDisposition === 'ask' && (!approved || approved.grant.expiresAt <= evaluatedAt)) {
         const wait = evaluator.approvalWait(request, target, evidence, selected.run.revision);
-        const waiting = await artifacts.publishCanonical(wait, 'cliq-waiting-subject-v1');
+        const waiting = await reads.publishCanonical(wait, 'cliq-waiting-subject-v1');
+        reads.assertReadActive();
         return immutableSnapshot({ disposition: 'approval_required' as const, run: selected.run, evidenceRef: evidenceArtifact.ref, evidence,
           waitingOnRef: waiting.ref, checkpointId: toolApprovalCheckpointId(waiting.ref) });
       }
@@ -467,9 +476,10 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
         const result = resultPlan(request, evaluatedAt, { outcome: 'denied', code: 'TOOL_CALL_DENIED',
           denial: { source: 'policy', policyRef: spec.policyRef, decisionDigest: evidence.evidenceDigest } }, { code: 'TOOL_CALL_DENIED' });
         const decision = policyItem(evidence, { outcomeItemRef: canonicalSha256(result.item) });
-        const plan = await prepareContinuationCommit(artifacts, { context: selected.context, existingItems: selected.items,
+        const plan = await prepareContinuationCommit(reads, { context: selected.context, existingItems: selected.items,
           items: [decision, result.item], frontier: nextFrontier(selected, 2), checkpointId: identityHash('cliq-tool-denial-checkpoint-v1', runId, request.opId),
           workspaceStateRef: selected.checkpoint.workspaceStateRef, artifacts: [...result.artifacts, requestPlan, targetPlan] });
+        reads.assertReadActive();
         let outcome: TimeFenceAdvance | undefined, updated!: Run;
         driver.transaction((connection) => {
           assertActiveStateOwner(connection, owner);
@@ -491,11 +501,11 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
       const grant = approved?.grant ?? evaluator.grant(request, target, selected.call, evidence, evaluatedAt, selected.run.deadlineAt);
       const grantPlan = planCanonicalArtifact(grant, grant.format);
       const decision = policyItem(evidence, { grantRef: grantPlan.ref });
-      const plan = await prepareContinuationCommit(artifacts, { context: selected.context, existingItems: selected.items,
+      const plan = await prepareContinuationCommit(reads, { context: selected.context, existingItems: selected.items,
         items: approved ? [] : [decision], frontier: selected.frontier,
         checkpointId: identityHash('cliq-tool-admission-checkpoint-v1', grantPlan.ref),
         workspaceStateRef: selected.checkpoint.workspaceStateRef, artifacts: [requestPlan, targetPlan, grantPlan] });
-      const prepared = await prepareValidatedInvocation(driver, artifacts, owner, { runId, expectedRunRevision, leaseEpoch,
+      const prepared = await prepareValidatedInvocation(driver, reads, owner, { runId, expectedRunRevision, leaseEpoch,
         opId: request.opId, opKind: entry.execution.kind === 'mcp' ? 'mcp' : 'tool', target: request.targetRef,
         requestRef: requestPlan.ref, replayClass: entry.replayClass, grantRef: grantPlan.ref,
         ...(request.idempotencyKey === undefined ? {} : { idempotencyKey: request.idempotencyKey }), reservation: TOOL_BUDGET
@@ -655,20 +665,23 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
       }
       throw new KernelStorageError('REVISION_CONFLICT', 'approval control cut kept changing');
     }),
-    claimTool: stateOperation('RECOVERY_REQUIRED', async (input: Omit<ClaimInvocationDispatchInput, 'runId'>) => {
+    claimTool: stateOperation('RECOVERY_REQUIRED', async (input: Omit<ClaimInvocationDispatchInput, 'runId'>, readSignal?: AbortSignal) => {
+      const reads = readSignal ? artifacts.withReadSignal(readSignal) : artifacts;
+      reads.assertReadActive();
       input = { ...input };
-      const selected = await cut(input.expectedRunRevision);
+      const selected = await cut(input.expectedRunRevision, reads);
       const expected = requestFor(selected);
       const prepared = readHighestPreparedAttempt(driver, runId, input.opId);
       if (!prepared?.grantRef || prepared.requestRef !== canonicalSha256(expected.request) || prepared.attempt !== input.attempt) {
         throw new KernelStorageError('STATE_TRANSITION_INVALID', 'tool claim is not the current prepared call');
       }
-      const proof = await verifyGrant(prepared.grantRef);
+      const proof = await verifyGrant(prepared.grantRef, reads);
       requireEqual(proof.request, expected.request, 'current tool request');
-      const execution = await editLaunch(selected, prepared, proof, input);
-      const planMetadata = execution && await artifacts.describe(execution.closure.spec.containmentPlanRef,
+      const execution = await editLaunch(selected, prepared, proof, input, reads);
+      const planMetadata = execution && await reads.describe(execution.closure.spec.containmentPlanRef,
         'application/json', 'cliq-process-containment-plan-v1');
-      const claimed = await claimValidatedInvocation(driver, artifacts, owner, { ...input, runId }, (connection, run, current, now) => {
+      reads.assertReadActive();
+      const claimed = await claimValidatedInvocation(driver, reads, owner, { ...input, runId }, (connection, run, current, now) => {
         assertCut(connection, run, selected);
         requireEqual(current, prepared, 'prepared tool claim');
         if (execution) {

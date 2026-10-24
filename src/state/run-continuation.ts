@@ -42,7 +42,7 @@ export const loadDeliveryContinuation = stateOperation('RECOVERY_REQUIRED', asyn
   reobserve?: NativeWorkerRetirement, installedRuntime?: HeldInstalledRuntime, signal?: AbortSignal
 ) {
   const authority = await readRunAuthority(driver, artifacts, owner, { ...input, operation: 'delivery' }, signal);
-  await authority.controlAuthority.assertAuthority();
+  await authority.controlAuthority.assertAuthority(signal);
   const { shared } = await loadRunContinuation(driver, artifacts, owner, authority, reobserve, installedRuntime);
   signal?.throwIfAborted();
   const merge = loadDeliveryMerge(driver, artifacts, owner, authority);

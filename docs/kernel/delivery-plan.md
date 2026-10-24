@@ -1654,3 +1654,42 @@ the whole original-sender/invocation journal is read only after the real stop
 and join. Missing, overflowing or unbound observations stay unavailable. This
 is diagnosis, not a new status API, retry permission, recovery evidence or
 substitute for the still-missing Linux acceptance results.
+
+The approved four-publication candidate, commit
+`659ec343d96d92a88fc1dd8eca9139a86bed8814`, passes its original local build
+and full `npm test`: 2,605 passes and one original conditional cross-filesystem
+skip, with no failures, cancellations or todos. Immutable Linux run
+`40100034278`, attempt 1, finishes with seventeen successful and five failed
+jobs. The three delayed-volume campaigns now pass the original first
+five-second ready/authentication bound, but each fails its first
+`authorization.create` with `INTERNAL`, before source Run admission. None
+therefore reaches its physical publication cut. This is progress past the
+authentication blocker, not delayed-storage, original-stop or late-result
+qualification.
+
+The normal Delivery's bound, joined original-Store summary locates its
+`RECOVERY_REQUIRED` at `postcommit_load`, after admission returned. Its
+inherited installed-broker assembly was incorrectly interpreted by an
+Agent-only model-history recipe. The follow-up routes Delivery through the
+existing complete model-free invariant, including its actual child-allocation
+cut, before excluding that Agent-only reader. Agent recipe, original claim,
+token and process-domain-death checks remain unchanged. Pure-data routing
+regressions do not qualify the corrected installed `run.apply` path.
+
+The maximum-image verifier still fails its original ninety-second repair
+window in reconciliation after seven completed invocation settlements. Its
+original two-second stop also fails, so its Store summary correctly remains
+unavailable with `original_join_missing`. The follow-up gives preparation and
+read-only projection/recovery their owning cancellation signals while keeping
+received-result settlement on its original independent catalog and resource
+owners. Cancellation is not a join receipt. The physical stop and repair
+claims remain open until a fresh immutable Linux run passes unchanged limits.
+
+Authorization failure diagnosis is extended only within the existing trusted
+qualification composition: one optional fixed first-error/count pair records
+the original authorization phase and closed error classification. It adds no
+closing guess, timestamp, grant, retry or wire method; original authorization
+guards and operations are unchanged. The delayed images use the same prior
+live image/start/invocation binding and original-stop/join gates as the normal
+images. `INTERNAL` alone does not establish a canonical-time-fence race, and
+the time-fence contract is not relaxed on that hypothesis.

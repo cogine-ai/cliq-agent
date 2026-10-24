@@ -18,6 +18,7 @@ import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
 import { assertActiveStateOwner, readStateOwner, type StateOwnerContext } from './state-owner.js';
 import { requireHealthyFence } from './reducers/invocation.js';
 import { decodeRunSpec, decodeVerifierSpec } from './decoders.js';
+import { beginInstalledAuthorizationDiagnostic } from './installed-run-diagnostics.js';
 
 export type AuthorizationRuntime = { bundle: RuntimeBundleManifest; releaseKeys: readonly ReleaseTrustKey[] };
 const same = (left: unknown, right: unknown) => canonicalJsonBytes(left).equals(canonicalJsonBytes(right));
@@ -133,64 +134,78 @@ export async function validateAuthorizationHistory(driver: SqliteDriver, artifac
 }
 export const createAuthorization = stateOperation('INVALID_REQUEST', async (driver: SqliteDriver, artifacts: ArtifactCatalog,
   owner: StateOwnerContext, runtime: AuthorizationRuntime | undefined, value: unknown, identity: AuthenticatedControlIdentity, signal?: AbortSignal) => {
-  signal?.throwIfAborted();
-  const request = immutableSnapshot(decodeVerifierIdentityCreateRequest(value));
-  const channel = await validateControlChannelClosure(artifacts, owner, identity);
-  const replay = async () => {
-    const existing = readControlRequest(driver, identity.principalId, 'authorization.create', request.requestId);
-    if (!existing) return undefined;
-    if (existing.requestDigest !== request.requestDigest) throw new KernelStorageError('REQUEST_ID_CONFLICT', 'authorization request id names other bytes');
-    const grant = readAuthorizationGrant(driver, authorizationGrantId(identity.principalId, request.requestId, request.requestDigest));
-    if (!grant || !runtime) throw new KernelStorageError('RECOVERY_REQUIRED', 'authorization replay has no original grant');
-    await readAuthorizationHistory(driver, artifacts, owner, grant, runtime.releaseKeys, signal);
-    return immutableSnapshot({ replayed: true, response: createResponse(grant) });
-  };
-  const retained = await replay(); if (retained) return retained;
-  if (!runtime || !runtime.bundle.structuredArtifacts.some(root => root.kind === 'guest_toolchain' && root.artifactId === request.decision.target.guestToolchainManifestId))
-    throw new VerifierAuthorizationError('UNSUPPORTED_EXECUTION_IDENTITY');
-  const active = assertActiveStateOwner(driver, owner);
-  if (active.runtimeBundleRef !== canonicalSha256(runtime.bundle) || active.runtimeBundleManifestDigest !== runtime.bundle.manifestDigest)
-    throw new TypeError('authorization runtime differs from the current signed StateOwner');
-  const selected = await readRetainedVerifierToolchain(artifacts, { ...runtime, guestToolchainManifestId: request.decision.target.guestToolchainManifestId, signal });
-  signal?.throwIfAborted();
-  const node = selected.manifest.node;
-  if (node.logicalName !== request.decision.target.toolId) throw new VerifierAuthorizationError('UNSUPPORTED_EXECUTION_IDENTITY');
-  const target = { kind: 'execution_identity_read' as const, purpose: 'verifier' as const, identity: { kind: 'guest_toolchain' as const,
-    guestToolchainManifestRef: selected.manifestRef, manifestDigest: selected.manifest.manifestDigest,
-    toolId: node.logicalName, executionPath: node.canonicalGuestPath, executableDigest: node.digest } };
-  const createdAt = sampleCanonicalNow(), base = { schemaVersion: 1 as const,
-    grantId: authorizationGrantId(identity.principalId, request.requestId, request.requestDigest), ownerPrincipalId: identity.principalId,
-    channelIdentityRef: identity.channelIdentityRef, channelIdentityDigest: identity.channelIdentityDigest,
-    sourceRequestId: request.requestId, sourceRequestDigest: request.requestDigest, target, targetDigest: canonicalSha256(target),
-    maxUses: 1 as const, createdAt, expiresAt: addCanonicalDuration(createdAt, request.ttlMs ?? 3_600_000) };
-  const grant: AuthorizationGrantV1 = { ...base, rowVersion: 1, grantCoreDigest: canonicalSha256(base), state: 'active', useCount: 0, rowDigest: '' };
-  grant.rowDigest = digestOmitting(grant, 'rowDigest');
-  const { requestDigest: _digest, ...requestCore } = request;
-  const requestArtifact = await artifacts.publishCanonical(requestCore, 'cliq-authorization-create-request-v1');
-  const response = createResponse(grant), published = await artifacts.publishCanonical(response, 'cliq-control-response-v1');
-  await validateControlChannelClosure(artifacts, owner, identity);
-  let outcome: ReturnType<typeof advanceTimeFence> | undefined, committed = false;
-  driver.transaction(connection => {
+  const diagnosis = beginInstalledAuthorizationDiagnostic();
+  try {
     signal?.throwIfAborted();
-    assertActiveStateOwner(connection, owner);
-    if (channel.channel.transport.kind === 'uds_peer') assertCurrentControlFrame(owner, identity);
-    if (readControlRequest(connection, identity.principalId, 'authorization.create', request.requestId)) return;
-    const now = sampleCanonicalNow(), fence = readTimeFence(connection);
-    if (!fence) throw new KernelStorageError('RECOVERY_REQUIRED', 'authorization time fence is missing');
-    if (now >= createdAt && fence.state === 'healthy' && fence.lastAcceptedAt > createdAt)
-      throw new KernelStorageError('REVISION_CONFLICT', 'authorization creation timestamp lost its exact control cut');
-    outcome = advanceTimeFence(connection, owner.ownerEpoch, now < createdAt ? now : createdAt);
-    if (outcome !== 'healthy') return;
-    if (now < createdAt || now >= grant.expiresAt || channel.channel.openedAt > createdAt) throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');
-    for (const metadata of [...channel.metadata, requestArtifact, published]) insertArtifactMetadata(connection, metadata, createdAt);
-    insertAuthorizationGrant(connection, grant);
-    insertControlRequest(connection, { ...identity, method: 'authorization.create', requestId: request.requestId,
-      requestDigest: request.requestDigest, responseRef: published.ref, committedAt: createdAt }); committed = true;
-  });
-  requireHealthyFence(outcome);
-  if (committed) return immutableSnapshot({ replayed: false, response });
-  const raced = await replay(); if (raced) return raced;
-  throw new KernelStorageError('REVISION_CONFLICT', 'authorization creation lost its transaction cut');
+    const request = immutableSnapshot(decodeVerifierIdentityCreateRequest(value));
+    diagnosis?.stage('current_channel');
+    const channel = await validateControlChannelClosure(artifacts, owner, identity);
+    const replay = async () => {
+      const existing = readControlRequest(driver, identity.principalId, 'authorization.create', request.requestId);
+      if (!existing) return undefined;
+      if (existing.requestDigest !== request.requestDigest) throw new KernelStorageError('REQUEST_ID_CONFLICT', 'authorization request id names other bytes');
+      const grant = readAuthorizationGrant(driver, authorizationGrantId(identity.principalId, request.requestId, request.requestDigest));
+      if (!grant || !runtime) throw new KernelStorageError('RECOVERY_REQUIRED', 'authorization replay has no original grant');
+      await readAuthorizationHistory(driver, artifacts, owner, grant, runtime.releaseKeys, signal);
+      return immutableSnapshot({ replayed: true, response: createResponse(grant) });
+    };
+    diagnosis?.stage('replay');
+    const retained = await replay(); if (retained) return retained;
+    if (!runtime || !runtime.bundle.structuredArtifacts.some(root => root.kind === 'guest_toolchain' && root.artifactId === request.decision.target.guestToolchainManifestId))
+      throw new VerifierAuthorizationError('UNSUPPORTED_EXECUTION_IDENTITY');
+    const active = assertActiveStateOwner(driver, owner);
+    if (active.runtimeBundleRef !== canonicalSha256(runtime.bundle) || active.runtimeBundleManifestDigest !== runtime.bundle.manifestDigest)
+      throw new TypeError('authorization runtime differs from the current signed StateOwner');
+    diagnosis?.stage('selected_toolchain');
+    const selected = await readRetainedVerifierToolchain(artifacts, { ...runtime, guestToolchainManifestId: request.decision.target.guestToolchainManifestId, signal });
+    signal?.throwIfAborted();
+    const node = selected.manifest.node;
+    if (node.logicalName !== request.decision.target.toolId) throw new VerifierAuthorizationError('UNSUPPORTED_EXECUTION_IDENTITY');
+    const target = { kind: 'execution_identity_read' as const, purpose: 'verifier' as const, identity: { kind: 'guest_toolchain' as const,
+      guestToolchainManifestRef: selected.manifestRef, manifestDigest: selected.manifest.manifestDigest,
+      toolId: node.logicalName, executionPath: node.canonicalGuestPath, executableDigest: node.digest } };
+    const createdAt = sampleCanonicalNow(), base = { schemaVersion: 1 as const,
+      grantId: authorizationGrantId(identity.principalId, request.requestId, request.requestDigest), ownerPrincipalId: identity.principalId,
+      channelIdentityRef: identity.channelIdentityRef, channelIdentityDigest: identity.channelIdentityDigest,
+      sourceRequestId: request.requestId, sourceRequestDigest: request.requestDigest, target, targetDigest: canonicalSha256(target),
+      maxUses: 1 as const, createdAt, expiresAt: addCanonicalDuration(createdAt, request.ttlMs ?? 3_600_000) };
+    const grant: AuthorizationGrantV1 = { ...base, rowVersion: 1, grantCoreDigest: canonicalSha256(base), state: 'active', useCount: 0, rowDigest: '' };
+    grant.rowDigest = digestOmitting(grant, 'rowDigest');
+    const { requestDigest: _digest, ...requestCore } = request;
+    diagnosis?.stage('publish_request');
+    const requestArtifact = await artifacts.publishCanonical(requestCore, 'cliq-authorization-create-request-v1');
+    diagnosis?.stage('publish_response');
+    const response = createResponse(grant), published = await artifacts.publishCanonical(response, 'cliq-control-response-v1');
+    diagnosis?.stage('channel_recheck');
+    await validateControlChannelClosure(artifacts, owner, identity);
+    let outcome: ReturnType<typeof advanceTimeFence> | undefined, committed = false;
+    diagnosis?.stage('transaction');
+    driver.transaction(connection => {
+      signal?.throwIfAborted();
+      assertActiveStateOwner(connection, owner);
+      if (channel.channel.transport.kind === 'uds_peer') assertCurrentControlFrame(owner, identity);
+      if (readControlRequest(connection, identity.principalId, 'authorization.create', request.requestId)) return;
+      const now = sampleCanonicalNow(), fence = readTimeFence(connection);
+      if (!fence) throw new KernelStorageError('RECOVERY_REQUIRED', 'authorization time fence is missing');
+      if (now >= createdAt && fence.state === 'healthy' && fence.lastAcceptedAt > createdAt)
+        throw new KernelStorageError('REVISION_CONFLICT', 'authorization creation timestamp lost its exact control cut');
+      outcome = advanceTimeFence(connection, owner.ownerEpoch, now < createdAt ? now : createdAt);
+      if (outcome !== 'healthy') return;
+      if (now < createdAt || now >= grant.expiresAt || channel.channel.openedAt > createdAt) throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');
+      for (const metadata of [...channel.metadata, requestArtifact, published]) insertArtifactMetadata(connection, metadata, createdAt);
+      insertAuthorizationGrant(connection, grant);
+      insertControlRequest(connection, { ...identity, method: 'authorization.create', requestId: request.requestId,
+        requestDigest: request.requestDigest, responseRef: published.ref, committedAt: createdAt }); committed = true;
+    });
+    requireHealthyFence(outcome);
+    if (committed) return immutableSnapshot({ replayed: false, response });
+    diagnosis?.stage('replay');
+    const raced = await replay(); if (raced) return raced;
+    throw new KernelStorageError('REVISION_CONFLICT', 'authorization creation lost its transaction cut');
+  } catch (error) {
+    diagnosis?.failure(error);
+    throw error;
+  }
 });
 export const revokeAuthorization = stateOperation('INVALID_REQUEST', async (driver: SqliteDriver, artifacts: ArtifactCatalog,
   owner: StateOwnerContext, runtime: AuthorizationRuntime | undefined, value: unknown, identity: AuthenticatedControlIdentity, signal?: AbortSignal) => {

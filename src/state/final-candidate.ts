@@ -58,9 +58,11 @@ export function loadFinalCandidate(driver: SqliteDriver, artifacts: ArtifactCata
         connection.prepare('SELECT 1 FROM runs WHERE parent_run_id = ? LIMIT 1').get(runId))
       throw new KernelStorageError('STATE_TRANSITION_INVALID', 'candidate requires child finalize settlement');
   }
-  async function begin(expectedRunRevision: number): Promise<FinalCandidateOwner> {
+  async function begin(expectedRunRevision: number, signal?: AbortSignal): Promise<FinalCandidateOwner> {
+    const reads = signal ? artifacts.withReadSignal(signal) : artifacts;
+    reads.assertReadActive();
     assertActiveStateOwner(driver, owner);
-    const selected = await readRecoveryClosure(driver, artifacts, runId), { run } = selected;
+    const selected = await readRecoveryClosure(driver, reads, runId), { run } = selected;
     const launches = readWorkerLaunchesForRun(driver, runId), generations = readWorkspaceGenerationsForRun(driver, runId), originalItems = itemRows(driver);
     if (run.revision !== expectedRunRevision) throw new KernelStorageError('REVISION_CONFLICT', 'candidate Run revision changed');
     if (run.specRef !== admitted.specRef || run.createdAt !== admitted.createdAt || run.deadlineAt !== admitted.deadlineAt)
@@ -76,7 +78,7 @@ export function loadFinalCandidate(driver: SqliteDriver, artifacts: ArtifactCata
     if (launch.phase !== 'activated' || launch.generationWriteState !== 'active' || !generation || generation.phase !== 'active' ||
         generation.activeWorkerLaunchId !== launch.launchId || generation.leaseEpoch !== run.leaseEpoch)
       throw new KernelStorageError('LEASE_FENCED', 'candidate must begin before its original worker quiesces');
-    const frontier = await readCanonicalArtifact<RunFrontier>(artifacts, run.frontierRef);
+    const frontier = await readCanonicalArtifact<RunFrontier>(reads, run.frontierRef);
     if (frontier.kind !== 'agent' || frontier.phase !== 'model_turn' || frontier.compactionPlanRef !== undefined)
       throw new KernelStorageError('STATE_TRANSITION_INVALID', 'candidate requires a normal final model frontier');
     const opId = modelOperationId(runId, frontier), prepared = readHighestPreparedAttempt(driver, runId, opId);
@@ -85,11 +87,11 @@ export function loadFinalCandidate(driver: SqliteDriver, artifacts: ArtifactCata
     if (!prepared || prepared.opKind !== 'model' || !completion?.resultRef ||
         [...lastByOperation.values()].some(entry => entry.phase !== 'completed' && entry.phase !== 'failed'))
       throw new KernelStorageError('STATE_TRANSITION_INVALID', 'candidate requires settled invocations and the highest completed model attempt');
-    const request = await readCanonicalArtifact<ModelRequestV1>(artifacts, prepared.requestRef);
-    const material = await readModelTurnMaterial(artifacts, completion.resultRef);
+    const request = await readCanonicalArtifact<ModelRequestV1>(reads, prepared.requestRef);
+    const material = await readModelTurnMaterial(reads, completion.resultRef);
     validateModelTurn(request, material, resolveToolInput);
     const producerId = identityHash('cliq-model-turn-item-v1', runId, opId, String(prepared.attempt));
-    const producerRow = selected.items.at(-1), producer = producerRow && await readCanonicalArtifact<ContinuationItem>(artifacts, producerRow.payloadRef);
+    const producerRow = selected.items.at(-1), producer = producerRow && await readCanonicalArtifact<ContinuationItem>(reads, producerRow.payloadRef);
     if (request.kind !== 'normal' || request.opId !== opId || request.attempt !== prepared.attempt || request.runId !== runId ||
         material.turn.stopReason !== 'end' || material.turn.toolCalls.length || !material.text.utf8.trim() ||
         producer?.kind !== 'model_turn' || producer.itemId !== producerId || producer.modelOpId !== opId ||
@@ -305,12 +307,12 @@ export function loadFinalCandidate(driver: SqliteDriver, artifacts: ArtifactCata
     });
     return Object.freeze({ checkpointId, complete });
   }
-  return { beginFinalCandidate: stateOperation('INVALID_REQUEST', async (input: { expectedRunRevision: number }) => {
+  return { beginFinalCandidate: stateOperation('INVALID_REQUEST', async (input: { expectedRunRevision: number }, readSignal?: AbortSignal) => {
     input = immutableSnapshot(input);
     if (!exactKeys(input, ['expectedRunRevision']) || !Number.isSafeInteger(input.expectedRunRevision) || input.expectedRunRevision < 1)
       throw new TypeError('candidate beginning requires one exact revision');
     if (retained || beginning) throw new KernelStorageError('REVISION_CONFLICT', 'this agent already retains its final-turn owner');
-    beginning = begin(input.expectedRunRevision);
+    beginning = begin(input.expectedRunRevision, readSignal);
     try { return retained = await beginning; } finally { beginning = undefined; }
   }) };
 }

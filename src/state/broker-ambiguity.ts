@@ -160,7 +160,14 @@ export async function prepareInstalledBrokerAmbiguity(driver: SqliteDriver, arti
 /** Historical unknowns bind their original grant/frontier and claiming owner,
  * not the current continuation or whichever Supervisor later opens the Run. */
 export async function validateInstalledBrokerAmbiguityHistory(input: { driver: SqliteDriver; artifacts: ArtifactCatalog;
-  run: Run; spec: RunSpec; assembly: RunAssemblyV1; journal: readonly InvocationJournalEntry[]; principalId: string }): Promise<void> {
+  run: Run; spec: RunSpec; assembly: RunAssemblyV1; journal: InvocationJournalEntry[];
+  childAllocations: RecoveryClosureV1['childAllocations']; principalId: string }): Promise<void> {
+  // Delivery inherits the original assembly, not its Agent model authority.
+  // Require the complete model-free cut before excluding Agent-only history.
+  if (input.spec.operation === 'delivery') {
+    assertDeliveryModelFreeCut({ run: input.run, runSpec: input.spec, journal: input.journal, childAllocations: input.childAllocations });
+    return;
+  }
   if (!isInstalledBroker(input.assembly)) return;
   await retainedRecipe(input.artifacts, input.run, input.spec, input.assembly);
   for (const unknown of input.journal.filter(entry => entry.opKind === 'model' && entry.phase === 'unknown')) {

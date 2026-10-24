@@ -729,7 +729,7 @@ export async function readRecoveryClosure(
       if (assembly.format === 'cliq-run-assembly-v1') {
         phase('history_broker');
         await validateInstalledBrokerAmbiguityHistory({ driver, artifacts,
-          run, spec: runSpec, assembly, journal, principalId: databaseCut.principalId });
+          run, spec: runSpec, assembly, journal, childAllocations, principalId: databaseCut.principalId });
       }
     } catch (error) {
       recoveryFailure(`typed agent recovery closure is invalid: ${(error as Error).message}`, error);

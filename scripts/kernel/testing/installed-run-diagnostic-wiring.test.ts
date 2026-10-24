@@ -6,6 +6,26 @@ import { test } from 'node:test';
 const source = await readFile(new URL('../../../src/state/store.ts', import.meta.url), 'utf8');
 const between = (start: string, end: string) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
 
+test('authorization diagnosis records only existing await boundaries and rethrows the untouched original failure', async () => {
+  const authorization = await readFile(new URL('../../../src/state/authorization.ts', import.meta.url), 'utf8');
+  const start = authorization.indexOf('export const createAuthorization = stateOperation(');
+  const end = authorization.indexOf('export const revokeAuthorization = stateOperation(', start);
+  assert(start >= 0 && end > start);
+  const body = authorization.slice(start, end);
+  assert.match(body, /const diagnosis = beginInstalledAuthorizationDiagnostic\(\);/u);
+  for (const [phase, operation] of [['current_channel', 'const channel = await validateControlChannelClosure'],
+    ['replay', 'const retained = await replay()'], ['selected_toolchain', 'const selected = await readRetainedVerifierToolchain'],
+    ['publish_request', 'const requestArtifact = await artifacts.publishCanonical'],
+    ['publish_response', 'const response = createResponse(grant)'], ['channel_recheck', 'await validateControlChannelClosure'],
+    ['transaction', 'driver.transaction(connection =>']])
+    assert(body.includes(`diagnosis?.stage('${phase}');\n    ${operation}`));
+  assert.match(body, /catch \(error\) \{\s*diagnosis\?\.failure\(error\);\s*throw error;/u);
+  const transaction = body.slice(body.indexOf('driver.transaction(connection =>'), body.indexOf('    requireHealthyFence(outcome);'));
+  assert(!transaction.includes('diagnosis'), 'no subscriber callback runs inside the original authoritative transaction');
+  assert(body.includes("throw new KernelStorageError('REVISION_CONFLICT', 'authorization creation timestamp lost its exact control cut');"));
+  assert.equal((body.match(/sampleCanonicalNow\(\)/gu) ?? []).length, 2, 'the original two real samples stay unchanged');
+});
+
 test('apply diagnostics distinguish the original admission await from postcommit loading without replacing the error', () => {
   const body = between('private async applyInstalledRunOwned(', 'private ownInstalledAdmission<');
   assert.match(body, /beginInstalledApplyDiagnostic\(\)/u);
@@ -28,13 +48,13 @@ test('the single pre-close snapshot is subscription gated and precedes the origi
   assert.match(body, /phases: \[\.\.\.this.installedRunPhases.values\(\)\]/u);
 });
 
-test('only the normal and verifier qualification images opt in to the fixed Store exit subscriber', async () => {
+test('only fixed qualification composition opts into Store diagnostics, including the three owned delayed campaigns', async () => {
   const builder = await readFile(new URL('./supervisor-sea-builder.ts', import.meta.url), 'utf8');
   const packaging = await readFile(new URL('./installed-supervisor-package.ts', import.meta.url), 'utf8');
   const journey = await readFile(new URL('./installed-node-journey.ts', import.meta.url), 'utf8');
   assert.match(builder, /input.storeFailureDiagnostics \? INSTALLED_STORE_DIAGNOSTIC_BANNER : ''/u);
   assert.match(packaging, /options.storeFailureDiagnostics \? \{ storeFailureDiagnostics: true as const \} : \{\}/u);
-  assert.match(journey, /const storeFailureDiagnostics = options.publicationRetirementDiagnostics !== true;/u);
+  assert(journey.includes('const storeFailureDiagnostics = true;'), 'each fixed qualification composition enables its trusted subscriber');
   assert.match(journey, /\.\.\.\(storeFailureDiagnostics \? \{ storeFailureDiagnostics: true as const \} : \{\}\)/u);
 });
 

@@ -121,13 +121,16 @@ test('Run execution reserves one resource owner during load and releases it when
   } finally { await disposeFixture(fixture); }
 });
 
-test('StateStore shutdown joins a refused resource-free execution opening and permits a successor', async () => {
+test('StateStore shutdown cancels and joins a resource-free execution opening and permits a successor', async () => {
   const fixture = await createAgentFixture('execution-refused-shutdown', undefined, { tools: ['edit'], mode: 'accept-edits' });
   try {
     const before = await fixture.store.readRecoveryClosure(fixture.runId);
+    // Close cancels the original read before opening reaches platform checks.
+    // The neighboring no-close cases still require the exact platform refusal.
     const refused = assert.rejects(fixture.store.loadRunExecution({ runId: fixture.runId, material: fixture.authority.material }),
-      { code: process.platform === 'linux' ? 'UNSUPPORTED_EXECUTION_IDENTITY' : 'UNSUPPORTED_PLATFORM' });
+      (error: unknown) => error instanceof KernelStorageError && error.code === 'LEASE_FENCED' && error.retryable === false);
     const closing = fixture.store.close();
+    assert.equal(fixture.store.close(), closing);
     await refused;
     await closing;
     fixture.store = await openStateStore(fixture.stateRoot, fixture.runtimeAuthority);

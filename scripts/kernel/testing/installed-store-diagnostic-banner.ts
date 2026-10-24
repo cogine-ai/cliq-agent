@@ -1,5 +1,6 @@
 // Qualification-only trusted composition. No runtime option or authority.
-import { INSTALLED_APPLY_DIAGNOSTIC_STAGES, INSTALLED_RUN_DIAGNOSTIC_ERROR_CLASSES, INSTALLED_RUN_DIAGNOSTIC_ERROR_CODES,
+import { INSTALLED_APPLY_DIAGNOSTIC_STAGES, INSTALLED_AUTHORIZATION_DIAGNOSTIC_STAGES,
+  INSTALLED_RUN_DIAGNOSTIC_ERROR_CLASSES, INSTALLED_RUN_DIAGNOSTIC_ERROR_CODES,
   INSTALLED_RUN_FAILURE_CHANNEL, INSTALLED_SCHEDULER_DIAGNOSTIC_ORIGINS,
   INSTALLED_SCHEDULER_DIAGNOSTIC_PHASES } from '../../../src/state/installed-run-diagnostics.js';
 
@@ -10,11 +11,12 @@ export const INSTALLED_STORE_DIAGNOSTIC_BANNER = `;(() => { try {
   const diagnostic = require('node:diagnostics_channel').channel(${JSON.stringify(INSTALLED_RUN_FAILURE_CHANNEL)});
   const write = require('node:fs').writeSync, isProxy = require('node:util').types.isProxy;
   const stages = new Set(${JSON.stringify(INSTALLED_APPLY_DIAGNOSTIC_STAGES)});
+  const authorizationStages = new Set(${JSON.stringify(INSTALLED_AUTHORIZATION_DIAGNOSTIC_STAGES)});
   const phases = new Set(${JSON.stringify(INSTALLED_SCHEDULER_DIAGNOSTIC_PHASES)});
   const origins = new Set(${JSON.stringify(INSTALLED_SCHEDULER_DIAGNOSTIC_ORIGINS)});
   const classes = new Set(${JSON.stringify(INSTALLED_RUN_DIAGNOSTIC_ERROR_CLASSES)}), codes = new Set(${JSON.stringify(INSTALLED_RUN_DIAGNOSTIC_ERROR_CODES)});
   const prefix = 'CLIQ_STORE_DIAG_V1:';
-  let applyFailures = 0, schedulerFailures = 0, apply, scheduler, stop, invalid = false;
+  let applyFailures = 0, schedulerFailures = 0, authorizationFailures = 0, apply, scheduler, authorization, stop, invalid = false;
   const count = value => Number.isSafeInteger(value) && value >= 0;
   const own = (value, keys) => {
     if (!value || typeof value !== 'object' || isProxy(value) || Array.isArray(value) ||
@@ -24,8 +26,8 @@ export const INSTALLED_STORE_DIAGNOSTIC_BANNER = `;(() => { try {
         !Object.hasOwn(fields[key], 'value') || !fields[key].enumerable)) return;
     return Object.fromEntries(keys.map(key => [key, fields[key].value]));
   };
-  const failure = row => {
-    if (typeof row.closing !== 'boolean' || typeof row.errorClass !== 'string' || !classes.has(row.errorClass) ||
+  const failure = (row, hasClosing = true) => {
+    if (hasClosing && typeof row.closing !== 'boolean' || typeof row.errorClass !== 'string' || !classes.has(row.errorClass) ||
         typeof row.code !== 'string' || !codes.has(row.code)) return false;
     if (row.code === 'ERR_SQLITE_ERROR') return row.errorClass === 'sqlite' && (row.sqliteCode === null ||
       count(row.sqliteCode) && row.sqliteCode <= 2147483647);
@@ -47,6 +49,11 @@ export const INSTALLED_STORE_DIAGNOSTIC_BANNER = `;(() => { try {
           row.phase !== 'unavailable' && !phases.has(row.phase) || !failure(row) ||
           !count(schedulerFailures + 1)) { invalid = true; return; }
       schedulerFailures++; if (!scheduler) scheduler = row;
+    } else if (kind.value === 'authorization_failure') {
+      const row = own(value, ['kind', 'stage', 'errorClass', 'code', 'sqliteCode']);
+      if (!row || typeof row.stage !== 'string' || !authorizationStages.has(row.stage) || !failure(row, false) ||
+          !count(authorizationFailures + 1)) { invalid = true; return; }
+      authorizationFailures++; if (!authorization) authorization = row;
     } else if (kind.value === 'store_stop') {
       const row = own(value, ['kind', 'driverTasks', 'agentLoads', 'admissions', 'retainedFailures', 'globalFailure', 'phases']);
       if (!row || stop || !['driverTasks', 'agentLoads', 'admissions', 'retainedFailures'].every(key => count(row[key])) ||
@@ -62,12 +69,14 @@ export const INSTALLED_STORE_DIAGNOSTIC_BANNER = `;(() => { try {
     } else invalid = true;
   } catch { invalid = true; } });
   process.once('exit', () => { try {
-    if (!invalid && !stop && !applyFailures && !schedulerFailures) return;
+    if (!invalid && !stop && !applyFailures && !schedulerFailures && !authorizationFailures) return;
     if (invalid || !stop) { try { write(2, prefix + 'truncated\\n'); } catch {} return; }
     const tuple = row => (row.closing ? '1' : '0') + ':' + row.errorClass + ':' + row.code + ':' + (row.sqliteCode === null ? '-' : row.sqliteCode);
     const rows = [prefix + 'begin:' + applyFailures + ':' + schedulerFailures];
     if (apply) rows.push(prefix + 'apply:' + apply.stage + ':' + tuple(apply));
     if (scheduler) rows.push(prefix + 'scheduler:' + scheduler.origin + ':' + scheduler.phase + ':' + tuple(scheduler));
+    if (authorization) rows.push(prefix + 'authorization:' + authorizationFailures + ':' + authorization.stage + ':' +
+      authorization.errorClass + ':' + authorization.code + ':' + (authorization.sqliteCode === null ? '-' : authorization.sqliteCode));
     rows.push(prefix + 'stop:' + stop.driverTasks + ':' + stop.agentLoads + ':' + stop.admissions + ':' + stop.retainedFailures + ':' + (stop.globalFailure ? '1' : '0'));
     for (const [phase, count] of Object.entries(stop.phases)) rows.push(prefix + 'phase:' + phase + ':' + count);
     rows.push(prefix + 'end');

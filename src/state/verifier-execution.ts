@@ -11,7 +11,7 @@ import { readCanonicalArtifact } from './agent-context.js';
 import { insertArtifactMetadata, type ArtifactCatalog } from './artifacts.js';
 import { sampleCanonicalNow, advanceTimeFence, type TimeFenceAdvance } from './canonical-time.js';
 import { decodeContextManifest, decodeWorkspaceIdentity } from './decoders.js';
-import { KernelStorageError, stateOperation } from './errors.js';
+import { joinResourceOperations, KernelStorageError, stateOperation } from './errors.js';
 import { readVerifierLaunchClosure } from './execution-closure.js';
 import { prepareContinuationCommit } from './continuation-commit.js';
 import { readRecoveryClosure } from './recovery-closure.js';
@@ -42,23 +42,24 @@ export async function loadVerifierContinuation(driver: SqliteDriver, artifacts: 
   authority: { run: Run; spec: RunSpec; assembly: RunAssemblyV1; releaseKeys?: readonly ReleaseTrustKey[] }) {
   const { run: admitted, spec, assembly } = authority, runId = admitted.id;
   async function cut(expected?: number, signal?: AbortSignal) {
+    const reads = signal ? artifacts.withReadSignal(signal) : artifacts;
     signal?.throwIfAborted();
     assertActiveStateOwner(driver, owner);
     if (!authority.releaseKeys) throw new KernelStorageError('RECOVERY_REQUIRED', 'verifier authority requires retained trusted release roots');
-    const selected = await readRecoveryClosure(driver, artifacts, runId), { run } = selected;
+    const selected = await readRecoveryClosure(driver, reads, runId), { run } = selected;
     if (spec.operation === 'delivery') {
       assertDeliveryModelFreeCut(selected);
       // Scheduler routing is not a release gate. Preparation and permanent
       // claim both re-enter this cut, before reserving or releasing anything.
-      assertLocalDeliveryVerifierSelection(await readDeliveryVerificationMode(driver, artifacts, selected));
+      assertLocalDeliveryVerifierSelection(await readDeliveryVerificationMode(driver, reads, selected));
     }
     if (run.specRef !== admitted.specRef || run.createdAt !== admitted.createdAt || run.deadlineAt !== admitted.deadlineAt)
       throw new TypeError('verifier authority no longer belongs to its original Run');
     if (expected !== undefined && run.revision !== expected) throw new KernelStorageError('REVISION_CONFLICT', 'verifier revision changed');
     if (run.nextStep !== 'verify' || !run.frontierRef || run.parentRunId || spec.dependencyPolicyRef !== undefined)
       throw new KernelStorageError('STATE_TRANSITION_INVALID', 'verifier requires its root Run frontier');
-    const frontier = await readCanonicalArtifact<RunFrontier>(artifacts, run.frontierRef);
-    const progress = await readVerifierProgress(driver, artifacts, selected);
+    const frontier = await readCanonicalArtifact<RunFrontier>(reads, run.frontierRef);
+    const progress = await readVerifierProgress(driver, reads, selected);
     if (frontier.kind !== 'verify' || frontier.phase !== 'verifiers' ||
         frontier.afterPass !== (spec.operation === 'agent' ? 'finalize' : 'delivery_approval') ||
         frontier.nextVerifierIndex !== progress.nextVerifierIndex || frontier.verifierPlanRef !== progress.planRef || progress.complete)
@@ -66,16 +67,16 @@ export async function loadVerifierContinuation(driver: SqliteDriver, artifacts: 
     if (progress.entries.slice(0, frontier.nextVerifierIndex).some(entry => !entry.disposition))
       throw new KernelStorageError('STATE_TRANSITION_INVALID', 'a prior required failure must repair or stop before another verifier');
     const entry = progress.spec.verifiers[frontier.nextVerifierIndex]!;
-    const command = decodeVerifierCommand(await readCanonicalArtifact(artifacts, entry.commandRef));
-    const environment = decodeVerifierEnvironment(await readCanonicalArtifact(artifacts, entry.environmentRef));
+    const command = decodeVerifierCommand(await readCanonicalArtifact(reads, entry.commandRef));
+    const environment = decodeVerifierEnvironment(await readCanonicalArtifact(reads, entry.environmentRef));
     const context = { runId, frontierRef: run.frontierRef, assemblyRef: spec.assemblyRef,
       candidateItemId: progress.candidate.itemId, resultSourceRef: progress.candidate.resultSourceRef, sourceDigest: progress.candidate.sourceDigest,
       verifierPlanRef: progress.planRef, plan: progress.plan, verifierSpecRef: spec.verifierSpecRef, verifierSpec: progress.spec,
       verifierIndex: frontier.nextVerifierIndex, command, environment };
     const { request, target } = planVerifierRequest(context);
     const session = readSession(driver, run.sessionId), principalId = readSessionPrincipalId(driver, run.sessionId);
-    const workspace = decodeWorkspaceIdentity(await readCanonicalArtifact(artifacts, session.workspaceIdentityRef));
-    const policy = await readCanonicalArtifact<RunPolicySnapshotV1>(artifacts, spec.policyRef);
+    const workspace = decodeWorkspaceIdentity(await readCanonicalArtifact(reads, session.workspaceIdentityRef));
+    const policy = await readCanonicalArtifact<RunPolicySnapshotV1>(reads, spec.policyRef);
     const evaluator = loadVerifierPolicy({ policy, policyRef: spec.policyRef, assembly, assemblyRef: spec.assemblyRef,
       principalId, workspaceIdentityDigest: workspace.identityDigest, context });
     signal?.throwIfAborted();
@@ -94,19 +95,21 @@ export async function loadVerifierContinuation(driver: SqliteDriver, artifacts: 
           ({ itemId, itemSeq, payloadRef, createdAt }))))
       throw new KernelStorageError('REVISION_CONFLICT', 'verifier original frontier, context or Journal cut changed');
   }
-  async function grantFor(selected: Cut, grantRef: string) {
-    const grant = await readCanonicalArtifact<VerifierOperationGrantV1>(artifacts, grantRef);
-    const evidence = await readCanonicalArtifact<VerifierPolicyChannelEvidenceV1>(artifacts, grant.provenance.channelEvidenceRef);
+  async function grantFor(selected: Cut, grantRef: string, reads = artifacts) {
+    const grant = await readCanonicalArtifact<VerifierOperationGrantV1>(reads, grantRef);
+    const evidence = await readCanonicalArtifact<VerifierPolicyChannelEvidenceV1>(reads, grant.provenance.channelEvidenceRef);
     requireEqual(grant, selected.evaluator.grant(selected.request, selected.target, evidence, grant.issuedAt, grant.expiresAt), 'verifier execution grant');
     if (grant.issuedAt < selected.progress.candidate.createdAt || grant.expiresAt > admitted.deadlineAt)
       throw new KernelStorageError('LEASE_FENCED', 'verifier grant exceeds its exact candidate lifetime');
     return { grant, evidence };
   }
   return Object.freeze({
-    prepareVerifier: stateOperation('RECOVERY_REQUIRED', async (input: { expectedRunRevision: number; leaseEpoch: number }) => {
+    prepareVerifier: stateOperation('RECOVERY_REQUIRED', async (input: { expectedRunRevision: number; leaseEpoch: number }, readSignal?: AbortSignal) => {
+      const reads = readSignal ? artifacts.withReadSignal(readSignal) : artifacts;
+      reads.assertReadActive();
       input = immutableSnapshot(input);
       if (!exactKeys(input, ['expectedRunRevision', 'leaseEpoch'])) throw new TypeError('unknown verifier preparation fields');
-      const selected = await cut(input.expectedRunRevision);
+      const selected = await cut(input.expectedRunRevision, readSignal);
       assertLiveDispatchState(driver, owner, runId, input.expectedRunRevision, input.leaseEpoch, sampleCanonicalNow());
       const prior = readHighestPreparedAttempt(driver, runId, selected.request.opId);
       const previous = prior && readInvocationAttempt(driver, runId, prior.opId, prior.attempt);
@@ -116,10 +119,10 @@ export async function loadVerifierContinuation(driver: SqliteDriver, artifacts: 
         throw new KernelStorageError('STATE_TRANSITION_INVALID', 'verifier attempt is already prepared, claimed or not retryable');
       const uses = selected.journal.filter(row => row.opId === selected.request.opId && row.phase === 'dispatch_claimed').length;
       if (uses >= selected.target.maxAttempts) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'verifier frozen attempt count is exhausted');
-      const now = sampleCanonicalNow(), evidence = prior?.grantRef ? (await grantFor(selected, prior.grantRef)).evidence
+      const now = sampleCanonicalNow(), evidence = prior?.grantRef ? (await grantFor(selected, prior.grantRef, reads)).evidence
         : selected.evaluator.evaluate(selected.request, selected.target, now);
       if (evidence.effectiveDisposition !== 'allow') return immutableSnapshot({ disposition: 'policy_refused' as const, run: selected.run });
-      const grant = prior?.grantRef ? (await grantFor(selected, prior.grantRef)).grant
+      const grant = prior?.grantRef ? (await grantFor(selected, prior.grantRef, reads)).grant
         : selected.evaluator.grant(selected.request, selected.target, evidence, now, selected.run.deadlineAt);
       const requestPlan = planCanonicalArtifact(selected.request, selected.request.format), targetPlan = planCanonicalArtifact(selected.target, selected.target.format);
       const grantPlan = planCanonicalArtifact(grant, grant.format), evidencePlan = planCanonicalArtifact(evidence, evidence.format);
@@ -127,13 +130,13 @@ export async function loadVerifierContinuation(driver: SqliteDriver, artifacts: 
         itemId: identityHash('cliq-verifier-policy-item-v1', runId, selected.request.opId, evidencePlan.ref), runId,
         opId: selected.request.opId, principalId: selected.principalId, decisionRef: evidencePlan.ref, policyChannelEvidenceRef: evidencePlan.ref,
         policyChannelEvidenceDigest: evidence.evidenceDigest, createdAt: evidence.evaluatedAt, decisionSource: 'direct_policy', decision: 'allow', grantRef: grantPlan.ref };
-      const context = decodeContextManifest(await readCanonicalArtifact(artifacts, selected.latestCheckpoint.contextManifestRef));
-      const existingItems = await Promise.all(selected.items.map(async row => ({ itemSeq: row.itemSeq, itemRef: row.payloadRef,
-        item: await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef) })));
-      const graph = await prepareContinuationCommit(artifacts, { context, existingItems, items: prior ? [] : [decision], frontier: selected.frontier,
+      const context = decodeContextManifest(await readCanonicalArtifact(reads, selected.latestCheckpoint.contextManifestRef));
+      const existingItems = await joinResourceOperations(selected.items.map(async row => ({ itemSeq: row.itemSeq, itemRef: row.payloadRef,
+        item: await readCanonicalArtifact<ContinuationItem>(reads, row.payloadRef) })));
+      const graph = await prepareContinuationCommit(reads, { context, existingItems, items: prior ? [] : [decision], frontier: selected.frontier,
         checkpointId: identityHash('cliq-verifier-admission-checkpoint-v1', runId, selected.request.opId, String(prior ? prior.attempt + 1 : 0)),
         workspaceStateRef: selected.latestCheckpoint.workspaceStateRef, artifacts: [requestPlan, targetPlan, grantPlan, evidencePlan] });
-      const prepared = await prepareValidatedInvocation(driver, artifacts, owner, { runId, expectedRunRevision: selected.run.revision,
+      const prepared = await prepareValidatedInvocation(driver, reads, owner, { runId, expectedRunRevision: selected.run.revision,
         leaseEpoch: input.leaseEpoch, opId: selected.request.opId, opKind: 'verifier', target: selected.request.targetRef,
         requestRef: requestPlan.ref, grantRef: grantPlan.ref, replayClass: 'retry', reservation: VERIFIER_BUDGET }, {
         metadata: graph.metadata,
@@ -174,21 +177,22 @@ export async function loadVerifierContinuation(driver: SqliteDriver, artifacts: 
         }));
     }),
     claimVerifier: stateOperation('RECOVERY_REQUIRED', async (input: Omit<ClaimInvocationDispatchInput, 'runId'>, signal?: AbortSignal) => {
+      const reads = signal ? artifacts.withReadSignal(signal) : artifacts;
       input = immutableSnapshot(input);
       const selected = await cut(input.expectedRunRevision, signal), prepared = readHighestPreparedAttempt(driver, runId, input.opId);
       if (!prepared?.grantRef || prepared.opKind !== 'verifier' || prepared.attempt !== input.attempt || input.opId !== selected.request.opId ||
           prepared.requestRef !== canonicalSha256(selected.request) || !input.sandboxLaunchSpecRef || input.brokerFenceTokenDigest !== undefined)
         throw new KernelStorageError('STATE_TRANSITION_INVALID', 'verifier claim does not select its exact prepared launch');
-      const proof = await grantFor(selected, prepared.grantRef);
+      const proof = await grantFor(selected, prepared.grantRef, reads);
       const live = assertLiveDispatchState(driver, owner, runId, input.expectedRunRevision, input.leaseEpoch, sampleCanonicalNow());
-      const closure = await readVerifierLaunchClosure(artifacts, assertActiveStateOwner(driver, owner), { ...live, prepared,
+      const closure = await readVerifierLaunchClosure(reads, assertActiveStateOwner(driver, owner), { ...live, prepared,
         request: selected.request, target: selected.target, ...proof, dispatchId: input.dispatchId,
         sandboxLaunchSpecRef: input.sandboxLaunchSpecRef }, authority.releaseKeys!, signal);
-      const planMetadata = await artifacts.describe(closure.spec.containmentPlanRef, 'application/json', 'cliq-process-containment-plan-v1');
+      const planMetadata = await reads.describe(closure.spec.containmentPlanRef, 'application/json', 'cliq-process-containment-plan-v1');
       const uses = (connection: SqliteConnection) => readInvocationJournal(connection, runId)
         .filter(row => row.opId === input.opId && row.phase === 'dispatch_claimed').length;
       signal?.throwIfAborted();
-      const claimed = await claimValidatedInvocation(driver, artifacts, owner, { ...input, runId }, (connection, run, current, now) => {
+      const claimed = await claimValidatedInvocation(driver, reads, owner, { ...input, runId }, (connection, run, current, now) => {
         assertCut(connection, selected, run); requireEqual(current, prepared, 'claimed verifier preparation');
         const actual = assertLiveDispatchState(connection, owner, runId, input.expectedRunRevision, input.leaseEpoch, now);
         requireEqual(actual.launch, live.launch, 'claimed verifier original parent'); requireEqual(actual.generation, live.generation, 'claimed verifier generation');
