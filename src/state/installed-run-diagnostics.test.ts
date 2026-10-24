@@ -1,8 +1,37 @@
 // Fixed data only: these tests create no StateOwner, Run or native evidence.
 import assert from 'node:assert/strict';
 import { channel } from 'node:diagnostics_channel';
+import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { KernelStorageError } from './errors.js';
+
+test('publication progress emits only fixed primitive phase data without inspecting hostile inputs', async () => {
+  const module = await import('./installed-run-diagnostics.js') as Record<string, any>;
+  assert.equal(typeof module.noteInstalledPublicationPhase, 'function');
+  const phases = ['publication_select', 'publication_worker_activate', 'publication_roots_open',
+    'publication_prepare', 'publication_dispatch', 'publication_settlement'];
+  assert.deepEqual(module.INSTALLED_PUBLICATION_DIAGNOSTIC_PHASES, phases);
+  assert(Object.isFrozen(module.INSTALLED_PUBLICATION_DIAGNOSTIC_PHASES));
+  const records: unknown[] = [], diagnostic = channel('cliq.installed.run.failures.v1');
+  const receive = (record: unknown) => { try { records.push(record); } catch {} };
+  diagnostic.subscribe(receive);
+  try {
+    for (const phase of phases) module.noteInstalledPublicationPhase(phase);
+    assert.deepEqual(records, phases.map(phase => ({ kind: 'publication_phase', phase })));
+    assert(records.every(record => Object.isFrozen(record)));
+    let reads = 0; const bad = () => { reads++; throw new Error('private'); };
+    for (const value of [null, undefined, 'publication_unknown', new String('publication_select'),
+      Object.defineProperty({}, 'phase', { get: bad }), new Proxy({}, { get: bad, ownKeys: bad,
+        getPrototypeOf: bad, getOwnPropertyDescriptor: bad })]) module.noteInstalledPublicationPhase(value);
+    assert.equal(reads, 0); assert.equal(records.length, phases.length);
+  } finally { diagnostic.unsubscribe(receive); }
+});
+
+test('actual Store progress wiring remains subscribed and updates the original map before its fixed notification', async () => {
+  // Source wiring only, not a Run, native process or physical observation.
+  const source = await readFile(new URL('./store.ts', import.meta.url), 'utf8');
+  assert.match(source, /installedRunDiagnosticsSubscribed\(\) \? phase => \{\s*if \(this\.installedRunPhases\.has\(runId\)\) this\.installedRunPhases\.set\(runId, phase\);\s*noteInstalledPublicationPhase\(phase\);\s*\} : undefined/u);
+});
 
 test('authorization failures retain the actual fixed phase and original error without inventing closing state', async () => {
   const module = await import('./installed-run-diagnostics.js') as Record<string, any>;
@@ -109,20 +138,23 @@ test('the pre-revocation snapshot copies only current counts and fixed phase mul
 
 test('unsubscribed diagnostics allocate no tracker and do not inspect hostile input or sample clocks', async () => {
   const { beginInstalledApplyDiagnostic, beginInstalledAuthorizationDiagnostic, beginInstalledSchedulerDiagnostic, noteInstalledStoreStop,
-    installedRunDiagnosticsSubscribed } = await import('./installed-run-diagnostics.js');
+    installedRunDiagnosticsSubscribed, noteInstalledPublicationPhase } = await import('./installed-run-diagnostics.js');
   assert.equal(installedRunDiagnosticsSubscribed(), false);
   let accesses = 0;
   const hostile = new Proxy({}, { get() { accesses++; throw 0; }, ownKeys() { accesses++; throw 0; },
     getPrototypeOf() { accesses++; throw 0; }, getOwnPropertyDescriptor() { accesses++; throw 0; } });
-  const originalClock = process.hrtime.bigint;
+  const originalClock = process.hrtime.bigint, originalNow = Date.now;
   try {
     process.hrtime.bigint = () => { accesses++; throw new Error('clock must not be sampled'); };
+    Date.now = () => { accesses++; throw new Error('clock must not be sampled'); };
     assert.equal(beginInstalledApplyDiagnostic(), undefined);
     assert.equal(beginInstalledAuthorizationDiagnostic(), undefined);
     assert.equal(beginInstalledSchedulerDiagnostic('drive'), undefined);
     noteInstalledStoreStop(hostile);
+    noteInstalledPublicationPhase(hostile);
+    noteInstalledPublicationPhase('publication_select');
     assert.equal(accesses, 0);
-  } finally { process.hrtime.bigint = originalClock; }
+  } finally { process.hrtime.bigint = originalClock; Date.now = originalNow; }
 });
 
 test('authorization stages are closed primitive data and error getters or proxies are never inspected', async () => {

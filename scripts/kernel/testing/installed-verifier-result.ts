@@ -31,7 +31,8 @@ type CaseKind = 'required_pass' | 'required_repair' | 'advisory_failure' | 'requ
 type ProcessIdentity = { role: 'namespace_init' | 'monitor' | 'subreaper'; pid: number; startTicks: string };
 export type InstalledVerifierDiagnosticStage = 'public_cut' | 'frozen_inputs' | 'source_and_candidate' | 'candidate_producer' |
   'candidate_source' | 'verifier_request' | 'verifier_policy_and_attempt' | 'verifier_settlement' | 'verifier_receipt' |
-  'verifier_retirement' | 'reverse_history_and_repair' | 'terminal_result' | 'session_publication';
+  'verifier_retirement' | 'verifier_retirement_state' | 'verifier_retirement_context' | 'verifier_retirement_item_seq' |
+  'reverse_history_and_repair' | 'terminal_result' | 'session_publication';
 export class InstalledVerifierOutcomeError extends Error {
   readonly code = 'INSTALLED_VERIFIER_OUTCOME_REFUSED';
   constructor(readonly diagnosticStage: InstalledVerifierDiagnosticStage) {
@@ -307,7 +308,11 @@ export async function assertInstalledVerifierOutcome(input: {
             measurement: { retirementRef: receipt.containmentEvidenceRef, endedAt: receipt.endedAt, stdoutRef: receipt.stdoutRef, stderrRef: receipt.stderrRef },
             readRetainedArtifact: bytes, readOwnerHistory: input.readOwnerHistory });
           const cp = physical.checkpoint;
-          await state(cp, source.entriesRef); await context(cp);
+          stage = 'verifier_retirement_state';
+          await state(cp, source.entriesRef);
+          stage = 'verifier_retirement_context';
+          await context(cp);
+          stage = 'verifier_retirement_item_seq';
           check(cp.runItemSeq === resultRow.itemSeq);
           retirementIdentities.push(physical.identity);
           previous = { terminal, receipt, claimed: true, checkpointAt: cp.createdAt };

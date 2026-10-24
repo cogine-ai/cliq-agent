@@ -1114,6 +1114,9 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         if (shutdown) return current;
         throw new KernelStorageError('REVISION_CONFLICT', 'worker inspection completed before cancellation');
       }
+      // An earlier uncertain retirement still owns this wait and StateOwner.
+      // A later joined task cannot erase that uncertainty by closing its nonce.
+      if (cleanupFailure !== undefined) throw cleanupFailure;
       // A real shutdown closes this same cancelled-and-joined nonce, not its
       // unelapsed deadline. The reducer persists the distinct closure before
       // this original receipt/owner may be released; failures retain both.

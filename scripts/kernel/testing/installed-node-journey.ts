@@ -45,7 +45,7 @@ import { publicationClaimRetirementDiagnosticKey } from '../../../src/state/publ
 import { publicationEnvelopeLocations } from '../../../src/state/delivery-publication-progress.js';
 import type { InstalledPublicationStopResult } from './installed-publication-stop-result.js';
 import { projectInstalledRunProgress } from './installed-run-progress.js';
-import { readInstalledStoreDiagnosticJournal } from './installed-store-diagnostic-journal.js';
+import { readInstalledPublicationStageJournal, readInstalledStoreDiagnosticJournal } from './installed-store-diagnostic-journal.js';
 
 type Recipe = { buildFixture: string; packageRoot: string; installerEntry: string; stateRoot: string; releaseKeysFile: string;
   controlDirectory: string; observer: string; storeFixture: string; publicationObserver: string; workspace: string; reportFile: string };
@@ -1444,66 +1444,100 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         if (storeFailureDiagnostics && primary) report.storeFailureDiagnostics = { diagnosticOnly: true, kind: 'unavailable',
           reason: storeFailureBinding ? 'original_join_missing' : 'preexisting_binding_missing' };
         await withRetainedUnitHistory(units, async assertRetained => {
-          assertRetained();
-          assert.equal(command('/usr/bin/systemctl', ['--user', 'stop', ...units]).status, 0);
-          const after = units.map(unit => show(unit));
-          for (let index = 0; index < units.length; index++) {
-            const stopped = after[index]!;
-            assert.equal(stopped.ActiveState, 'inactive'); assert.equal(stopped.MainPID, '0');
-            assert.equal(stopped.TimeoutStopUSec, '2s'); assert.equal(stopped.Result, 'success');
-            assert.equal(stopped.ExecMainCode, '1'); assert.equal(stopped.ExecMainStatus, '0');
-            if (/^[1-9][0-9]*$/u.test(before[index]!.MainPID!)) await assert.rejects(lstat('/proc/' + before[index]!.MainPID), { code: 'ENOENT' });
-          }
-          // The original service stop, terminal status and actual PID absence
-          // above must finish first. No new image/journal await can hide a
-          // missed original stop boundary. Retain the exact old unit until the
-          // bounded whole-window read completes; never use a PID fallback.
-          if (serverAuthenticationFailure && serverAuthenticationBinding &&
-              String(serverAuthenticationBinding.pid) === before[0]!.MainPID &&
-              serverAuthenticationBinding.invocationId === before[0]!.InvocationID) {
-            report.serverAuthentication = { diagnosticOnly: true, kind: 'unavailable', reason: 'journal_unavailable' };
-            try {
-              assertRetained();
-              const until = Date.now(), logBy = until + 5000;
-              const timestamp = (value: number) => '@' + Math.floor(value / 1000) + '.' + String(value % 1000).padStart(3, '0');
-              const log = spawnSync('/usr/bin/journalctl', ['--no-pager', '--all', '--no-tail', '--output=json', '--boot=0',
-                `--since=${timestamp(serverAuthenticationBinding.windowOpenedAt)}`, `--until=${timestamp(until)}`,
-                `_UID=${ledger.uid}`, `_PID=${serverAuthenticationBinding.pid}`, '_TRANSPORT=stdout',
-                `_SYSTEMD_INVOCATION_ID=${serverAuthenticationBinding.invocationId}`],
-              { env: environment, timeout: 5000, killSignal: 'SIGKILL', maxBuffer: 256 * 1024 });
-              assert(Buffer.isBuffer(log.stdout) && Buffer.isBuffer(log.stderr)); scanBytes(log.stdout); scanBytes(log.stderr);
-              assert.equal(log.error, undefined, 'actual server diagnostic journal command must join');
-              assert.equal(log.signal, null); assert.equal(log.status, 0);
-              const records = readInstalledServerAuthenticationJournal(new TextDecoder('utf-8', { fatal: true }).decode(log.stdout),
-                { uid: ledger.uid, pid: serverAuthenticationBinding.pid, invocationId: serverAuthenticationBinding.invocationId });
-              assert(Date.now() < logBy, 'actual server diagnostic journal exceeded five seconds'); assertRetained();
-              if (records) serverAuthenticationObservation = { diagnosticOnly: true, kind: 'observed',
-                source: 'actual_joined_original_supervisor_journal', preexistingProcessStartAndFullImageBound: true,
-                originalInvocationBound: true, originalServerJoined: true, records };
-            } catch { /* Diagnosis never replaces the original failure or invents a missing observation. */ }
-          }
-          if (storeFailureDiagnostics && primary && storeFailureBinding &&
-              String(storeFailureBinding.pid) === before[0]!.MainPID && storeFailureBinding.invocationId === before[0]!.InvocationID) {
-            report.storeFailureDiagnostics = { diagnosticOnly: true, kind: 'unavailable', reason: 'journal_unavailable' };
-            try {
-              assertRetained();
-              const until = Date.now(), logBy = until + 5000;
-              const timestamp = (value: number) => '@' + Math.floor(value / 1000) + '.' + String(value % 1000).padStart(3, '0');
-              const log = spawnSync('/usr/bin/journalctl', ['--no-pager', '--all', '--no-tail', '--output=json', '--boot=0',
-                `--since=${timestamp(storeFailureBinding.windowOpenedAt)}`, `--until=${timestamp(until)}`,
-                `_UID=${ledger.uid}`, `_PID=${storeFailureBinding.pid}`, '_TRANSPORT=stdout',
-                `_SYSTEMD_INVOCATION_ID=${storeFailureBinding.invocationId}`],
-              { env: environment, timeout: 5000, killSignal: 'SIGKILL', maxBuffer: 256 * 1024 });
-              assert(Buffer.isBuffer(log.stdout) && Buffer.isBuffer(log.stderr)); scanBytes(log.stdout); scanBytes(log.stderr);
-              assert.equal(log.error, undefined, 'actual Store diagnostic journal command must join');
-              assert.equal(log.signal, null); assert.equal(log.status, 0);
-              const summary = readInstalledStoreDiagnosticJournal(new TextDecoder('utf-8', { fatal: true }).decode(log.stdout),
-                { uid: ledger.uid, pid: storeFailureBinding.pid, invocationId: storeFailureBinding.invocationId });
-              assert(Date.now() < logBy, 'actual Store diagnostic journal exceeded five seconds'); assertRetained();
-              if (summary) storeFailureObservation = { diagnosticOnly: true, kind: 'observed',
-                source: 'actual_joined_original_supervisor_journal', preexistingProcessStartAndFullImageBound: true,
-                originalInvocationBound: true, originalServerJoined: true, summary };
-            } catch { /* Preserve the original failure, stop deadline and missing-diagnosis classification. */ }
+          let originalStopFailed = false;
+          try {
+            assertRetained();
+            assert.equal(command('/usr/bin/systemctl', ['--user', 'stop', ...units]).status, 0);
+            const after = units.map(unit => show(unit));
+            for (let index = 0; index < units.length; index++) {
+              const stopped = after[index]!;
+              assert.equal(stopped.ActiveState, 'inactive'); assert.equal(stopped.MainPID, '0');
+              assert.equal(stopped.TimeoutStopUSec, '2s'); assert.equal(stopped.Result, 'success');
+              assert.equal(stopped.ExecMainCode, '1'); assert.equal(stopped.ExecMainStatus, '0');
+              if (/^[1-9][0-9]*$/u.test(before[index]!.MainPID!)) await assert.rejects(lstat('/proc/' + before[index]!.MainPID), { code: 'ENOENT' });
+            }
+            // The original service stop, terminal status and actual PID absence
+            // above must finish first. No new image/journal await can hide a
+            // missed original stop boundary. Retain the exact old unit until the
+            // bounded whole-window read completes; never use a PID fallback.
+            if (serverAuthenticationFailure && serverAuthenticationBinding &&
+                String(serverAuthenticationBinding.pid) === before[0]!.MainPID &&
+                serverAuthenticationBinding.invocationId === before[0]!.InvocationID) {
+              report.serverAuthentication = { diagnosticOnly: true, kind: 'unavailable', reason: 'journal_unavailable' };
+              try {
+                assertRetained();
+                const until = Date.now(), logBy = until + 5000;
+                const timestamp = (value: number) => '@' + Math.floor(value / 1000) + '.' + String(value % 1000).padStart(3, '0');
+                const log = spawnSync('/usr/bin/journalctl', ['--no-pager', '--all', '--no-tail', '--output=json', '--boot=0',
+                  `--since=${timestamp(serverAuthenticationBinding.windowOpenedAt)}`, `--until=${timestamp(until)}`,
+                  `_UID=${ledger.uid}`, `_PID=${serverAuthenticationBinding.pid}`, '_TRANSPORT=stdout',
+                  `_SYSTEMD_INVOCATION_ID=${serverAuthenticationBinding.invocationId}`],
+                { env: environment, timeout: 5000, killSignal: 'SIGKILL', maxBuffer: 256 * 1024 });
+                assert(Buffer.isBuffer(log.stdout) && Buffer.isBuffer(log.stderr)); scanBytes(log.stdout); scanBytes(log.stderr);
+                assert.equal(log.error, undefined, 'actual server diagnostic journal command must join');
+                assert.equal(log.signal, null); assert.equal(log.status, 0);
+                const records = readInstalledServerAuthenticationJournal(new TextDecoder('utf-8', { fatal: true }).decode(log.stdout),
+                  { uid: ledger.uid, pid: serverAuthenticationBinding.pid, invocationId: serverAuthenticationBinding.invocationId });
+                assert(Date.now() < logBy, 'actual server diagnostic journal exceeded five seconds'); assertRetained();
+                if (records) serverAuthenticationObservation = { diagnosticOnly: true, kind: 'observed',
+                  source: 'actual_joined_original_supervisor_journal', preexistingProcessStartAndFullImageBound: true,
+                  originalInvocationBound: true, originalServerJoined: true, records };
+              } catch { /* Diagnosis never replaces the original failure or invents a missing observation. */ }
+            }
+            if (storeFailureDiagnostics && primary && storeFailureBinding &&
+                String(storeFailureBinding.pid) === before[0]!.MainPID && storeFailureBinding.invocationId === before[0]!.InvocationID) {
+              report.storeFailureDiagnostics = { diagnosticOnly: true, kind: 'unavailable', reason: 'journal_unavailable' };
+              try {
+                assertRetained();
+                const until = Date.now(), logBy = until + 5000;
+                const timestamp = (value: number) => '@' + Math.floor(value / 1000) + '.' + String(value % 1000).padStart(3, '0');
+                const log = spawnSync('/usr/bin/journalctl', ['--no-pager', '--all', '--no-tail', '--output=json', '--boot=0',
+                  `--since=${timestamp(storeFailureBinding.windowOpenedAt)}`, `--until=${timestamp(until)}`,
+                  `_UID=${ledger.uid}`, `_PID=${storeFailureBinding.pid}`, '_TRANSPORT=stdout',
+                  `_SYSTEMD_INVOCATION_ID=${storeFailureBinding.invocationId}`],
+                { env: environment, timeout: 5000, killSignal: 'SIGKILL', maxBuffer: 256 * 1024 });
+                assert(Buffer.isBuffer(log.stdout) && Buffer.isBuffer(log.stderr)); scanBytes(log.stdout); scanBytes(log.stderr);
+                assert.equal(log.error, undefined, 'actual Store diagnostic journal command must join');
+                assert.equal(log.signal, null); assert.equal(log.status, 0);
+                const summary = readInstalledStoreDiagnosticJournal(new TextDecoder('utf-8', { fatal: true }).decode(log.stdout),
+                  { uid: ledger.uid, pid: storeFailureBinding.pid, invocationId: storeFailureBinding.invocationId });
+                assert(Date.now() < logBy, 'actual Store diagnostic journal exceeded five seconds'); assertRetained();
+                if (summary) storeFailureObservation = { diagnosticOnly: true, kind: 'observed',
+                  source: 'actual_joined_original_supervisor_journal', preexistingProcessStartAndFullImageBound: true,
+                  originalInvocationBound: true, originalServerJoined: true, summary };
+              } catch { /* Preserve the original failure, stop deadline and missing-diagnosis classification. */ }
+            }
+          } catch (error) { originalStopFailed = true; throw error; }
+          finally {
+            // Independent fixed arrival data survives an abnormal original
+            // exit. It cannot satisfy the successful Stop/join assertions
+            // above, nor manufacture a Store exit summary or Run attribution.
+            if (storeFailureDiagnostics && (primary || originalStopFailed)) {
+              report.publicationStageDiagnostics = { diagnosticOnly: true, kind: 'unavailable',
+                reason: storeFailureBinding ? 'original_lifetime_missing' : 'preexisting_binding_missing' };
+              if (storeFailureBinding && String(storeFailureBinding.pid) === before[0]!.MainPID &&
+                  storeFailureBinding.invocationId === before[0]!.InvocationID) try {
+                assertRetained();
+                await assert.rejects(lstat('/proc/' + storeFailureBinding.pid), { code: 'ENOENT' });
+                report.publicationStageDiagnostics = { diagnosticOnly: true, kind: 'unavailable', reason: 'journal_unavailable' };
+                const until = Date.now(), logBy = until + 5000;
+                const timestamp = (value: number) => '@' + Math.floor(value / 1000) + '.' + String(value % 1000).padStart(3, '0');
+                const log = spawnSync('/usr/bin/journalctl', ['--no-pager', '--all', '--no-tail', '--output=json', '--boot=0',
+                  '--grep=^CLIQ_PUBLICATION_STAGE_V1:',
+                  `--since=${timestamp(storeFailureBinding.windowOpenedAt)}`, `--until=${timestamp(until)}`,
+                  `_UID=${ledger.uid}`, `_PID=${storeFailureBinding.pid}`, '_TRANSPORT=stdout',
+                  `_SYSTEMD_INVOCATION_ID=${storeFailureBinding.invocationId}`],
+                { env: environment, timeout: 5000, killSignal: 'SIGKILL', maxBuffer: 256 * 1024 });
+                assert(Buffer.isBuffer(log.stdout) && Buffer.isBuffer(log.stderr)); scanBytes(log.stdout); scanBytes(log.stderr);
+                assert.equal(log.error, undefined); assert.equal(log.signal, null); assert.equal(log.status, 0);
+                const observation = readInstalledPublicationStageJournal(new TextDecoder('utf-8', { fatal: true }).decode(log.stdout),
+                  { uid: ledger.uid, pid: storeFailureBinding.pid, invocationId: storeFailureBinding.invocationId });
+                assert(Date.now() < logBy, 'actual publication-stage journal exceeded five seconds'); assertRetained();
+                if (observation) report.publicationStageDiagnostics = { diagnosticOnly: true, kind: 'observed',
+                  source: 'actual_absent_original_supervisor_journal', preexistingProcessStartAndFullImageBound: true,
+                  originalInvocationBound: true, originalPidObservedAbsent: true, phases: observation.phases };
+              } catch { /* Preserve every original failure; a marker is never resource-join evidence. */ }
+            }
           }
         });
         report.installedWritersJoined = true;

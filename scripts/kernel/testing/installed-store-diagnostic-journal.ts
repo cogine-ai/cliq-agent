@@ -4,7 +4,8 @@ import { types } from 'node:util';
 import { parseJsonStrict } from '../../../src/kernel/json.js';
 import { INSTALLED_APPLY_DIAGNOSTIC_STAGES, INSTALLED_AUTHORIZATION_DIAGNOSTIC_STAGES,
   INSTALLED_RUN_DIAGNOSTIC_ERROR_CLASSES, INSTALLED_RUN_DIAGNOSTIC_ERROR_CODES,
-  INSTALLED_SCHEDULER_DIAGNOSTIC_ORIGINS, INSTALLED_SCHEDULER_DIAGNOSTIC_PHASES } from '../../../src/state/installed-run-diagnostics.js';
+  INSTALLED_SCHEDULER_DIAGNOSTIC_ORIGINS, INSTALLED_SCHEDULER_DIAGNOSTIC_PHASES,
+  INSTALLED_PUBLICATION_DIAGNOSTIC_PHASES } from '../../../src/state/installed-run-diagnostics.js';
 
 const stages: ReadonlySet<string> = new Set(INSTALLED_APPLY_DIAGNOSTIC_STAGES);
 const authorizationStages: ReadonlySet<string> = new Set(INSTALLED_AUTHORIZATION_DIAGNOSTIC_STAGES);
@@ -29,10 +30,8 @@ function failure(closing: string, errorClass: string, code: string, sqlite: stri
   return { closing: bit(closing), ...errorFields(errorClass, code, sqlite) };
 }
 
-/** The caller must independently bind the live original image/start and later
- * establish its real stop/join before this one whole-window read. */
-export function readInstalledStoreDiagnosticJournal(text: string,
-  expected: Readonly<{ uid: number; pid: number; invocationId: string }>) {
+type OriginalJournalIdentity = Readonly<{ uid: number; pid: number; invocationId: string }>;
+function originalJournalMessages(text: string, expected: OriginalJournalIdentity) {
   need(typeof text === 'string' && Buffer.byteLength(text, 'utf8') <= 256 * 1024);
   need(expected && typeof expected === 'object' && !types.isProxy(expected) && !Array.isArray(expected) &&
     [Object.prototype, null].includes(Object.getPrototypeOf(expected)));
@@ -43,16 +42,24 @@ export function readInstalledStoreDiagnosticJournal(text: string,
   need(Number.isSafeInteger(uid) && uid > 0 && Number.isSafeInteger(pid) && pid > 0);
   need(typeof invocationId === 'string' && invocationId.length === 32 && /^[0-9a-f]{32}$/u.test(invocationId));
   const lines = text.trim().split('\n').filter(Boolean); need(lines.length <= 80);
-  const rows: string[][] = [];
-  for (const line of lines) {
+  return lines.map(line => {
     const record = parseJsonStrict(line) as Record<string, unknown>;
     need(record && typeof record === 'object' && !Array.isArray(record));
     need(record._UID === String(uid) && record._PID === String(pid));
     need(record._TRANSPORT === 'stdout' && record._SYSTEMD_INVOCATION_ID === invocationId);
     need(typeof record.MESSAGE === 'string');
-    if (!record.MESSAGE.startsWith('CLIQ_STORE_DIAG_V1')) continue;
-    need(record.MESSAGE.length <= 255 && /^[\x20-\x7e]+$/u.test(record.MESSAGE));
-    rows.push(record.MESSAGE.split(':'));
+    return record.MESSAGE;
+  });
+}
+
+/** The caller must independently bind the live original image/start and later
+ * establish its real stop/join before this one whole-window read. */
+export function readInstalledStoreDiagnosticJournal(text: string, expected: OriginalJournalIdentity) {
+  const rows: string[][] = [];
+  for (const message of originalJournalMessages(text, expected)) {
+    if (!message.startsWith('CLIQ_STORE_DIAG_V1')) continue;
+    need(message.length <= 255 && /^[\x20-\x7e]+$/u.test(message));
+    rows.push(message.split(':'));
   }
   if (!rows.length) return undefined;
   need(rows.length <= 16 && rows.reduce((bytes, row) => bytes + row.join(':').length + 1, 0) <= 4096);
@@ -108,3 +115,22 @@ export function readInstalledStoreDiagnosticJournal(text: string,
     ...(firstAuthorizationFailure ? { authorizationFailures: authorizationFailures!, firstAuthorizationFailure } : {}) });
 }
 export type InstalledStoreDiagnosticSummary = NonNullable<ReturnType<typeof readInstalledStoreDiagnosticJournal>>;
+
+/** First arrival of each fixed phase, not a Run attribution, latest phase,
+ * completed task, original resource join or physical publication proof. The
+ * caller independently binds the original live image/start and later PID
+ * absence; an abnormal exit is allowed only for this inert observation. */
+export function readInstalledPublicationStageJournal(text: string, expected: OriginalJournalIdentity) {
+  const rows = originalJournalMessages(text, expected).filter(message => message.startsWith('CLIQ_PUBLICATION_STAGE_V1'));
+  if (!rows.length) return;
+  need(rows.length <= 6 && rows.reduce((bytes, row) => bytes + row.length + 1, 0) <= 512);
+  const vocabulary: ReadonlySet<string> = new Set(INSTALLED_PUBLICATION_DIAGNOSTIC_PHASES);
+  const phases: string[] = [];
+  for (const [index, row] of rows.entries()) {
+    need(row.length <= 96 && /^[\x20-\x7e]+$/u.test(row));
+    const fields = row.split(':');
+    need(fields.length === 3 && fields[0] === 'CLIQ_PUBLICATION_STAGE_V1' && fields[1] === String(index + 1));
+    need(vocabulary.has(fields[2]!) && !phases.includes(fields[2]!)); phases.push(fields[2]!);
+  }
+  return Object.freeze({ phases: Object.freeze(phases) });
+}

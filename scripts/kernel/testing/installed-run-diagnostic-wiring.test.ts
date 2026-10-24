@@ -46,7 +46,7 @@ test('publication diagnosis follows the original execution boundaries without ch
   assert.match(body, /if \(queued\) publicationPhase\('publication_worker_activate'\);\s*const current = queued \? await activateWorker\(selected, signal\) : activeWorker!;/u);
   assert.match(execution, /async function finishReceivedPublication\(\) \{\s*publicationPhase\('publication_settlement'\);/u);
   const opening = between('async loadRunExecution(input:', '/** Internal source producer,');
-  assert.match(opening, /phase => \{ if \(this.installedRunPhases.has\(runId\)\) this.installedRunPhases.set\(runId, `drive_retirement_\$\{phase\}`\); \},\s*installedRunDiagnosticsSubscribed\(\) \? phase => \{ if \(this.installedRunPhases.has\(runId\)\) this.installedRunPhases.set\(runId, phase\); \} : undefined/u);
+  assert.match(opening, /phase => \{ if \(this.installedRunPhases.has\(runId\)\) this.installedRunPhases.set\(runId, `drive_retirement_\$\{phase\}`\); \},\s*installedRunDiagnosticsSubscribed\(\) \? phase => \{\s*if \(this.installedRunPhases.has\(runId\)\) this.installedRunPhases.set\(runId, phase\);\s*noteInstalledPublicationPhase\(phase\);\s*\} : undefined/u);
 });
 
 test('the actual fixed publication callback body cannot propagate subscriber failure or sample an absent subscriber', async () => {
@@ -138,6 +138,27 @@ test('failure journal reads follow the original stop and actual PID absence, and
   assert(stop > start && absent > stop && reading > absent && joined > reading && published > joined,
     'only the post-stop original-window read may produce an observation after all writers have joined');
   assert.match(journey, /_SYSTEMD_INVOCATION_ID=\$\{storeFailureBinding.invocationId\}/u);
+});
+
+test('arrival diagnostics can observe an abnormal original exit without satisfying any successful Stop or writer-join gate', async () => {
+  const journey = await readFile(new URL('./installed-node-journey.ts', import.meta.url), 'utf8');
+  const start = journey.indexOf('let originalStopFailed = false;');
+  const stop = journey.indexOf("assert.equal(command('/usr/bin/systemctl', ['--user', 'stop', ...units]).status, 0);", start);
+  const originalSummary = journey.indexOf('const summary = readInstalledStoreDiagnosticJournal(', stop);
+  const originalThrow = journey.indexOf('} catch (error) { originalStopFailed = true; throw error; }', originalSummary);
+  const absent = journey.indexOf("await assert.rejects(lstat('/proc/' + storeFailureBinding.pid), { code: 'ENOENT' });", originalThrow);
+  const read = journey.indexOf('const observation = readInstalledPublicationStageJournal(', absent);
+  const joined = journey.indexOf('report.installedWritersJoined = true;', read);
+  assert(start >= 0 && stop > start && originalSummary > stop && originalThrow > originalSummary && absent > originalThrow && read > absent && joined > read);
+  const body = journey.slice(originalThrow, joined);
+  assert.match(body, /finally \{[\s\S]*storeFailureDiagnostics && \(primary \|\| originalStopFailed\)/u);
+  assert.match(body, /String\(storeFailureBinding.pid\) === before\[0\]!.MainPID &&\s*storeFailureBinding.invocationId === before\[0\]!.InvocationID/u);
+  assert(body.includes("'--grep=^CLIQ_PUBLICATION_STAGE_V1:'"));
+  assert(body.includes('timeout: 5000, killSignal: \'SIGKILL\', maxBuffer: 256 * 1024'));
+  assert(body.includes('scanBytes(log.stdout); scanBytes(log.stderr);'));
+  assert(body.includes("source: 'actual_absent_original_supervisor_journal'"));
+  assert(body.includes('originalPidObservedAbsent: true, phases: observation.phases'));
+  assert(!/originalServerJoined: true|qualified: true|report\.storeFailureDiagnostics =/u.test(body), 'arrival data never upgrades exit-summary or outcome proof');
 });
 
 test('safe scanner failure diagnosis is sticky and snapshots only original counts after writers join', async () => {

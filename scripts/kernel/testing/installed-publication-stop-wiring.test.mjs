@@ -33,23 +33,40 @@ test('server authentication joins its fixed four complete publications before va
   const publish = control.slice(control.indexOf('    const publish = async () => {'), control.indexOf('    const connection: LocalControlConnection'));
   assert.equal(publish.match(/beginInstalledServerAuthentication\(\)/gu)?.length, 1);
   const hash = publish.indexOf("await observe('image_hash',"), firstGuard = publish.indexOf('assertCurrent();');
+  const batch = publish.indexOf('const batch = artifacts.publishCanonicalFour([');
+  const batchEnd = publish.indexOf('      ]);', batch);
   const group = publish.indexOf('const publishedArtifacts = await joinResourceOperations([');
   const joined = publish.indexOf('      ]);', group);
-  assert(hash >= 0 && firstGuard > hash && group > firstGuard && joined > group);
+  assert(hash >= 0 && firstGuard > hash && batch > firstGuard && batchEnd > batch && group > batchEnd && joined > group);
   assert(publish.includes(': await hashNativeImage(peer, capture)'));
+  assert.equal(publish.match(/artifacts\.publishCanonicalFour\(/gu)?.length, 1);
+  assert(!/artifacts\.publishCanonical\(/u.test(publish), 'authentication must not fall back to four independent persistence lifecycles');
+  const values = publish.slice(batch, batchEnd);
+  const names = ['processPublication', 'principalPublication', 'peerPublication', 'channelPublication'];
+  for (const name of names)
+    assert.equal(values.split(`{ value: ${name}.data, schemaKind: ${name}.expected.schemaKind }`).length, 2);
+  assert.equal(values.match(/\{ value:/gu)?.length, 4);
+  assert(publish.includes(`const publications = Object.freeze([${names.join(', ')}]);`));
+  const beforeBatch = publish.slice(0, batch);
+  assert(beforeBatch.lastIndexOf('assertCurrent();') > beforeBatch.indexOf('const channelPublication = prepare('));
   const tasks = publish.slice(group, joined);
-  for (const [name, phase] of [['processPublication', 'process_cas'], ['principalPublication', 'principal_cas'],
-    ['peerPublication', 'peer_cas'], ['channelPublication', 'channel_cas']])
-    assert.equal(tasks.split(`publishArtifact(${name}, '${phase}')`).length, 2);
-  assert.equal(tasks.match(/publishArtifact\(/gu)?.length, 4);
+  for (const [index, phase] of ['process_cas', 'principal_cas', 'peer_cas', 'channel_cas'].entries())
+    assert.equal(tasks.split(`published(${index}, '${phase}')`).length, 2);
+  assert.equal(tasks.match(/published\(/gu)?.length, 4);
   assert(publish.includes('const data = immutableSnapshot(value), bytes = canonicalJsonBytes(data);'));
   assert(publish.includes('ref: sha256Bytes(bytes)'));
   for (const decoder of ['decodePlatformProcessIdentity(processIdentity)', 'decodeLocalPrincipalIdentity(principal)',
-    'decodeLocalSocketPeerObservation(observation)', 'decodeControlChannel(channel)'])
-    assert(publish.indexOf(`prepare(${decoder})`) < group);
-  const task = publish.slice(publish.indexOf('const publishArtifact = async'), group);
-  assert(task.indexOf('assertCurrent();') < task.indexOf('return observe ? observe(phase,'));
-  assert.equal(task.match(/artifacts.publishCanonical\(publication.data, publication.expected.schemaKind\)/gu)?.length, 2);
+    'decodeLocalSocketPeerObservation(observation)', 'decodeControlChannel(channel)']) {
+    const prepared = publish.indexOf(`prepare(${decoder})`);
+    assert(prepared >= 0 && prepared < batch);
+  }
+  const derived = publish.indexOf('const published = (index: number, phase:');
+  const derivedEnd = publish.indexOf('\n      };', derived);
+  assert(derived > batchEnd && derivedEnd > derived && derivedEnd < group);
+  const task = publish.slice(derived, derivedEnd);
+  assert(task.includes('const result = () => batch.then(artifacts => artifacts[index]!);'));
+  assert(task.includes('return observe ? observe(phase, result) : result();'));
+  assert(!/await |publishCanonical|\.catch\(/u.test(task), 'diagnostic awaits only derive the same complete real group result');
   const validation = publish.indexOf('for (const [index, artifact] of publishedArtifacts.entries())');
   assert(validation > joined);
   for (const field of ['ref', 'byteLength', 'mediaType', 'schemaKind'])

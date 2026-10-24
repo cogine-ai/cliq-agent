@@ -3,6 +3,88 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 
+test('publication progress writes each first-seen phase immediately in actual arrival order without changing the exit summary', async () => {
+  const { INSTALLED_STORE_DIAGNOSTIC_BANNER } = await import('./installed-store-diagnostic-banner.js');
+  const phases = ['publication_prepare', 'publication_select', 'publication_worker_activate',
+    'publication_roots_open', 'publication_dispatch', 'publication_settlement'];
+  const child = spawnSync(process.execPath, ['--input-type=commonjs', '--eval', INSTALLED_STORE_DIAGNOSTIC_BANNER + `
+    const d = require('node:diagnostics_channel').channel('cliq.installed.run.failures.v1');
+    for (const phase of ${JSON.stringify(phases)}) {
+      d.publish({kind:'publication_phase',phase}); d.publish({kind:'publication_phase',phase});
+    }
+    d.publish({kind:'store_stop',driverTasks:0,agentLoads:0,admissions:0,retainedFailures:0,globalFailure:false,phases:{}});
+    require('node:fs').writeSync(1,'operation unchanged\\n');
+  `], { encoding: 'utf8', timeout: 5000, maxBuffer: 65536 });
+  assert.equal(child.error, undefined); assert.equal(child.signal, null); assert.equal(child.status, 0);
+  assert.equal(child.stdout, 'operation unchanged\n');
+  const progress = phases.map((phase, index) => `CLIQ_PUBLICATION_STAGE_V1:${index + 1}:${phase}\n`).join('');
+  assert(progress.length < 512);
+  assert.equal(child.stderr, progress + 'CLIQ_STORE_DIAG_V1:begin:0:0\nCLIQ_STORE_DIAG_V1:scheduler_window:0\n' +
+    'CLIQ_STORE_DIAG_V1:stop:0:0:0:0:0\nCLIQ_STORE_DIAG_V1:end\n');
+});
+
+test('malformed identifiable progress data cannot invoke getters or poison an original valid summary', async () => {
+  const { INSTALLED_STORE_DIAGNOSTIC_BANNER } = await import('./installed-store-diagnostic-banner.js');
+  const child = spawnSync(process.execPath, ['--input-type=commonjs', '--eval', INSTALLED_STORE_DIAGNOSTIC_BANNER + `
+    const d = require('node:diagnostics_channel').channel('cliq.installed.run.failures.v1');
+    let reads=0; const bad=()=>{reads++;throw Error('private')};
+    const row={kind:'publication_phase',phase:'publication_select'};
+    for(const value of [Object.defineProperty({...row},'phase',{get:bad}), {...row,phase:new Proxy({},{get:bad})},
+      {...row,phase:'publication_unknown'}, {...row,phase:['publication_select']}, {...row,path:'private'},
+      {...row,[Symbol('private')]:1}, Object.defineProperty({...row},'phase',{value:'publication_select',enumerable:false})]) d.publish(value);
+    d.publish({kind:'store_stop',driverTasks:0,agentLoads:0,admissions:0,retainedFailures:0,globalFailure:false,phases:{}});
+    require('node:fs').writeSync(1,'accesses:'+reads);
+  `], { encoding: 'utf8', timeout: 5000, maxBuffer: 65536 });
+  assert.equal(child.error, undefined); assert.equal(child.signal, null); assert.equal(child.status, 0);
+  assert.equal(child.stdout, 'accesses:0');
+  assert.equal(child.stderr, 'CLIQ_STORE_DIAG_V1:begin:0:0\nCLIQ_STORE_DIAG_V1:scheduler_window:0\n' +
+    'CLIQ_STORE_DIAG_V1:stop:0:0:0:0:0\nCLIQ_STORE_DIAG_V1:end\n');
+});
+
+test('failed progress sinks are contained and never retry an already observed phase', async () => {
+  const { INSTALLED_STORE_DIAGNOSTIC_BANNER } = await import('./installed-store-diagnostic-banner.js');
+  const child = spawnSync(process.execPath, ['--input-type=commonjs', '--eval', `
+    const fs=require('node:fs'), originalWrite=fs.writeSync; let attempts=0;
+    fs.writeSync=(fd,...args)=>{if(fd===2){attempts++;throw Error('private sink failure')};return originalWrite(fd,...args)};
+  ` + INSTALLED_STORE_DIAGNOSTIC_BANNER + `
+    const d=require('node:diagnostics_channel').channel('cliq.installed.run.failures.v1');
+    for(let index=0;index<100;index++)d.publish({kind:'publication_phase',phase:'publication_select'});
+    fs.writeSync(1,'operation unchanged:'+attempts);
+  `], { encoding: 'utf8', timeout: 5000, maxBuffer: 65536 });
+  assert.equal(child.error, undefined); assert.equal(child.signal, null); assert.equal(child.status, 0);
+  assert.equal(child.stdout, 'operation unchanged:1'); assert.equal(child.stderr, '');
+});
+
+test('a real live child writes progress before exit without claiming a joined result', async () => {
+  const { INSTALLED_STORE_DIAGNOSTIC_BANNER } = await import('./installed-store-diagnostic-banner.js');
+  const child = spawn(process.execPath, ['--input-type=commonjs', '--eval', INSTALLED_STORE_DIAGNOSTIC_BANNER + `
+    const d=require('node:diagnostics_channel').channel('cliq.installed.run.failures.v1');
+    d.publish({kind:'publication_phase',phase:'publication_prepare'});
+    process.stdin.resume(); require('node:fs').writeSync(1,'ready\\n');
+  `], { stdio: ['pipe', 'pipe', 'pipe'] });
+  const marker = 'CLIQ_PUBLICATION_STAGE_V1:1:publication_prepare\n';
+  let stdout = '', stderr = '', readyResolve!: () => void;
+  const ready = new Promise<void>(resolve => { readyResolve = resolve; });
+  const observe = () => { if (stdout === 'ready\n' && stderr === marker) readyResolve(); };
+  child.stdout.on('data', bytes => { stdout += bytes.toString(); observe(); });
+  child.stderr.on('data', bytes => { stderr += bytes.toString(); observe(); });
+  const joined = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
+    child.once('error', reject); child.once('close', (code, signal) => resolve({ code, signal }));
+  });
+  const timeout = AbortSignal.timeout(5000);
+  const expired = new Promise<never>((_, reject) => timeout.addEventListener('abort', () => reject(new Error('owned progress child did not join')), { once: true }));
+  try {
+    await Promise.race([ready, joined.then(() => { throw new Error('owned child exited before live progress observation'); }), expired]);
+    assert.equal(child.exitCode, null); assert.equal(child.signalCode, null); assert.equal(stderr, marker);
+    child.stdin.end();
+    assert.deepEqual(await Promise.race([joined, expired]), { code: 0, signal: null });
+    assert.equal(stderr, marker, 'progress has no fabricated exit summary, completion or join marker');
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    await joined;
+  }
+});
+
 test('the trusted exit banner retains the last original scheduler failure and the actual pre-stop count', async () => {
   const { INSTALLED_STORE_DIAGNOSTIC_BANNER } = await import('./installed-store-diagnostic-banner.js');
   const child = spawnSync(process.execPath, ['--input-type=commonjs', '--eval', INSTALLED_STORE_DIAGNOSTIC_BANNER + `

@@ -1,18 +1,21 @@
 // Qualification-only trusted composition. No runtime option or authority.
 import { INSTALLED_APPLY_DIAGNOSTIC_STAGES, INSTALLED_AUTHORIZATION_DIAGNOSTIC_STAGES,
   INSTALLED_RUN_DIAGNOSTIC_ERROR_CLASSES, INSTALLED_RUN_DIAGNOSTIC_ERROR_CODES,
-  INSTALLED_RUN_FAILURE_CHANNEL, INSTALLED_SCHEDULER_DIAGNOSTIC_ORIGINS,
+  INSTALLED_RUN_FAILURE_CHANNEL, INSTALLED_PUBLICATION_DIAGNOSTIC_PHASES, INSTALLED_SCHEDULER_DIAGNOSTIC_ORIGINS,
   INSTALLED_SCHEDULER_DIAGNOSTIC_PHASES } from '../../../src/state/installed-run-diagnostics.js';
 
 /** Buffer the first failures, last scheduler failure and original stop
  * observation. One bounded synchronous write at real exit is included in the
- * unchanged stop deadline; no timer, await, flush retry or keepalive exists. */
+ * unchanged stop deadline; no timer, await, flush retry or keepalive exists.
+ * Separately write each of six first-seen publication phases immediately;
+ * these fixed progress markers cannot establish completion or resource join. */
 export const INSTALLED_STORE_DIAGNOSTIC_BANNER = `;(() => { try {
   const diagnostic = require('node:diagnostics_channel').channel(${JSON.stringify(INSTALLED_RUN_FAILURE_CHANNEL)});
   const write = require('node:fs').writeSync, isProxy = require('node:util').types.isProxy;
   const stages = new Set(${JSON.stringify(INSTALLED_APPLY_DIAGNOSTIC_STAGES)});
   const authorizationStages = new Set(${JSON.stringify(INSTALLED_AUTHORIZATION_DIAGNOSTIC_STAGES)});
   const phases = new Set(${JSON.stringify(INSTALLED_SCHEDULER_DIAGNOSTIC_PHASES)});
+  const publicationPhases = new Set(${JSON.stringify(INSTALLED_PUBLICATION_DIAGNOSTIC_PHASES)}), publicationSeen = new Set();
   const origins = new Set(${JSON.stringify(INSTALLED_SCHEDULER_DIAGNOSTIC_ORIGINS)});
   const classes = new Set(${JSON.stringify(INSTALLED_RUN_DIAGNOSTIC_ERROR_CLASSES)}), codes = new Set(${JSON.stringify(INSTALLED_RUN_DIAGNOSTIC_ERROR_CODES)});
   const prefix = 'CLIQ_STORE_DIAG_V1:';
@@ -35,6 +38,18 @@ export const INSTALLED_STORE_DIAGNOSTIC_BANNER = `;(() => { try {
     return row.errorClass !== 'sqlite' && row.sqliteCode === null;
   };
   diagnostic.subscribe(value => { try {
+    // Recognizable progress is independent of the original exit summary.
+    // An opaque Proxy cannot identify its kind and keeps the old refusal.
+    if (value && typeof value === 'object' && !isProxy(value)) {
+      const kind = Object.getOwnPropertyDescriptor(value, 'kind');
+      if (kind && Object.hasOwn(kind, 'value') && kind.value === 'publication_phase') {
+        const row = own(value, ['kind', 'phase']);
+        if (!row || typeof row.phase !== 'string' || !publicationPhases.has(row.phase) || publicationSeen.has(row.phase)) return;
+        publicationSeen.add(row.phase);
+        try { write(2, 'CLIQ_PUBLICATION_STAGE_V1:' + publicationSeen.size + ':' + row.phase + '\\n'); } catch {}
+        return;
+      }
+    }
     if (invalid) return;
     if (!value || typeof value !== 'object' || isProxy(value)) { invalid = true; return; }
     const kind = Object.getOwnPropertyDescriptor(value, 'kind');

@@ -1849,3 +1849,61 @@ still pending. Normal Delivery, maximum-image repair, controlled-storage,
 original-stop and late-result qualification remain incomplete. No complete PR,
 full I1, provider, macOS, reboot, I2-I4 or final Kernel-Cut claim follows from
 these contract approvals or local component tests.
+
+The approved combined candidate, commit
+`0be8c22fe945ef7529bba25b64705e372a4d40cb`, passes the original local build
+and full `npm test`: 2,651 passes and one original conditional
+cross-filesystem skip, without failures, cancellations or todos. Its complete
+local validation SHA-256 is
+`869981d205ba388a6de211bb76f57c5a0989b5c2f4c5fd6a98f62ccc2ea19ce7`.
+[Linux run 40121392186](https://github.com/cogine-ai/cliq-agent/actions/runs/40121392186),
+attempt 1, finishes with sixteen successful and six failed jobs. All four
+Linux/macOS Node 22.13/24 test jobs pass. Twenty-two report categories and 100
+original JSON reports (484,691 bytes) are retained and independently verified;
+the original-stop job fails its portable source-wiring preflight and produces
+no physical-cut report. Missing reports are not counted as passing. Final
+terminal capture SHA-256:
+`f81b761e9ad165154bead617467a9e0d6af23a64aad87d9ec655ecfa40425235`.
+
+The unpaused worker campaign reaches the original live task, genuinely joins
+Store.close in 61.136 ms, durably closes the same nonce before its original
+deadline, then independently completes successor physical recovery. The whole
+native job nevertheless fails a later existing retirement-uncertainty
+regression: an earlier uncertain resource close remains sticky, but shutdown
+could close its wait before ultimately rejecting that same uncertainty. The
+minimal correction checks the retained original cleanup failure after genuine
+task join and before durable nonce closure. It does not change the existing
+Linux assertion, mint a task receipt or discard an uncertain resource owner.
+The later real regression must pass before this correction is qualified.
+
+The original-stop preflight still expected four independent CAS publishers.
+Its correction checks the approved single fixed-four batch, complete canonical
+bytes and metadata, full join and final native revalidation before channel
+registration. All eleven workflow portable MJS suites pass locally (98 tests);
+that is not a replacement for the previously skipped installed Stop campaign.
+
+The verifier repair now fails the original strict retirement proof rather than
+the terminal deadline. The report does not retain enough data to identify
+which of its state, context or item-sequence checks rejects, so those three
+existing checks gain fixed diagnostic substage labels only. Their operations,
+order and original error are unchanged. Normal Delivery still exceeds ninety
+seconds and fails its original two-second Stop. Both delayed-volume campaigns
+pass five-second READY and proceed beyond the former authorization transaction
+refusal, but later exceed a thirty-second request and fail Stop; their precise
+internal admission blocker remains unknown. Cross-checking the complete fixed
+first-source call prefix, the same client's response-count semantics and empty
+completed-case list identifies the pending original `run.submit`; response
+counts alone would not establish that method or its internal stuck operation.
+
+Publication diagnosis now emits at most six distinct fixed first-arrival
+labels, less than 512 bytes in total, immediately in the already subscribed
+qualification image. They contain no Run identity, clock, result, latest-stage
+or join claim. After an abnormal Stop, the harness may read only these labels
+from the previously bound original process/invocation window, after actual PID
+absence and within the existing bounded, independently secret-scanned journal
+read. This does not satisfy successful Stop or writer join, replace its original
+error, or unlock the old exit-summary parser; the latter retains its original
+sixteen-line/4-KiB bounds and successful original-join requirements. New labels
+and verifier substages are diagnostics, not evidence that any failed cut passed.
+Full follow-up local and immutable Linux validation remain required; no complete
+PR or broader qualification claim follows from these partial results.

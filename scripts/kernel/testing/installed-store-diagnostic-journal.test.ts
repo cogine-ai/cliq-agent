@@ -10,6 +10,40 @@ const lines = ['CLIQ_STORE_DIAG_V1:begin:1:1',
 const journal = (messages = lines) => messages.map(MESSAGE => JSON.stringify({ _UID: '1000', _PID: '2000',
   _TRANSPORT: 'stdout', _SYSTEMD_INVOCATION_ID: sender.invocationId, MESSAGE })).join('\n') + '\n';
 
+test('publication arrival markers retain only distinct original first arrivals, not a completion or joined result', async () => {
+  const { readInstalledPublicationStageJournal, readInstalledStoreDiagnosticJournal } = await import('./installed-store-diagnostic-journal.js');
+  const phases = ['publication_select', 'publication_worker_activate', 'publication_roots_open', 'publication_prepare'];
+  const messages = phases.map((phase, index) => `CLIQ_PUBLICATION_STAGE_V1:${index + 1}:${phase}`);
+  const observed = readInstalledPublicationStageJournal(journal(messages), sender)!;
+  assert.deepEqual(observed, { phases }); assert(Object.isFrozen(observed) && Object.isFrozen(observed.phases));
+  assert.equal(Object.hasOwn(observed, 'qualified'), false); assert.equal(Object.hasOwn(observed, 'originalServerJoined'), false);
+  assert.equal(readInstalledStoreDiagnosticJournal(journal(messages), sender), undefined, 'arrival markers cannot manufacture an exit summary');
+  assert.deepEqual(readInstalledStoreDiagnosticJournal(journal([...messages, ...lines]), sender), readInstalledStoreDiagnosticJournal(journal(), sender));
+  assert.deepEqual(readInstalledPublicationStageJournal(journal(['CLIQ_PUBLICATION_STAGE_V1:1:publication_settlement']), sender),
+    { phases: ['publication_settlement'] }, 'first-seen order is not a claimed complete execution order');
+  assert.equal(readInstalledPublicationStageJournal(journal(), sender), undefined);
+});
+
+test('publication markers refuse gaps, duplication, unknown fields, excess rows and a foreign original process', async () => {
+  const { readInstalledPublicationStageJournal } = await import('./installed-store-diagnostic-journal.js');
+  const marker = 'CLIQ_PUBLICATION_STAGE_V1:1:publication_select';
+  for (const messages of [[marker + ':private'], [marker.replace(':1:', ':01:')], [marker.replace(':1:', ':0:')],
+    [marker.replace(':1:', ':2:')], [marker.replace('publication_select', 'private')], [marker + '\u0000'],
+    [marker, marker.replace(':1:', ':2:')], [marker, 'CLIQ_PUBLICATION_STAGE_V1:3:publication_prepare'],
+    Array.from({ length: 7 }, (_, index) => marker.replace(':1:', `:${index + 1}:`))])
+    assert.throws(() => readInstalledPublicationStageJournal(journal(messages), sender));
+  for (const mutation of [{ _UID: '1001' }, { _PID: '2001' }, { _TRANSPORT: 'syslog' }, { _SYSTEMD_INVOCATION_ID: 'b'.repeat(32) }]) {
+    const record = { _UID: '1000', _PID: '2000', _TRANSPORT: 'stdout', _SYSTEMD_INVOCATION_ID: sender.invocationId,
+      MESSAGE: marker, ...mutation };
+    assert.throws(() => readInstalledPublicationStageJournal(JSON.stringify(record), sender));
+  }
+  let accessed = false;
+  const getter = Object.defineProperty({ ...sender }, 'pid', { enumerable: true, get() { accessed = true; throw 0; } });
+  assert.throws(() => readInstalledPublicationStageJournal(journal([marker]), getter));
+  assert.throws(() => readInstalledPublicationStageJournal(journal([marker]), new Proxy(sender, { ownKeys() { accessed = true; throw 0; } })));
+  assert.equal(accessed, false);
+});
+
 test('an optional scheduler window preserves the first failure and the last actual tuple across the original stop', async () => {
   const { readInstalledStoreDiagnosticJournal } = await import('./installed-store-diagnostic-journal.js');
   const original = readInstalledStoreDiagnosticJournal(journal(), sender)!;

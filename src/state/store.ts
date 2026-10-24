@@ -63,7 +63,7 @@ import { decodeSecretServiceObservation, decodeRetainedSecretServiceObservation,
 import { ensureInstalledCredentialSupervisor, type CredentialFinalizeRequest } from './installed-credential-client.js';
 import { noteInstalledCredentialPhase } from './installed-diagnostics.js';
 import { beginInstalledApplyDiagnostic, beginInstalledSchedulerDiagnostic, installedRunDiagnosticsSubscribed,
-  noteInstalledStoreStop, type InstalledApplyDiagnostic } from './installed-run-diagnostics.js';
+  noteInstalledStoreStop, noteInstalledPublicationPhase, type InstalledApplyDiagnostic } from './installed-run-diagnostics.js';
 import { ContentAddressedStore } from './cas.js';
 import { openLocalControlListener, type AuthenticatedControlIdentity, type LocalControlConnection, type LocalControlListener } from './control-channel.js';
 import { readControl, type ReadControlRequest } from './control-read.js';
@@ -3140,7 +3140,10 @@ export class StateStore {
     const opening = this.ownInstalledAdmission(signal => loadRunExecution(this.driver, this.artifacts, this.owner, this.runtimeAuthority, input,
       () => this.closed || this.closeRequested || this.released, this.installedRuntime, this.installedAnchor, this, signal,
       phase => { if (this.installedRunPhases.has(runId)) this.installedRunPhases.set(runId, `drive_retirement_${phase}`); },
-      installedRunDiagnosticsSubscribed() ? phase => { if (this.installedRunPhases.has(runId)) this.installedRunPhases.set(runId, phase); } : undefined));
+      installedRunDiagnosticsSubscribed() ? phase => {
+        if (this.installedRunPhases.has(runId)) this.installedRunPhases.set(runId, phase);
+        noteInstalledPublicationPhase(phase);
+      } : undefined));
     this.executions.set(runId, opening);
     let scope: Awaited<typeof opening> | undefined;
     try {

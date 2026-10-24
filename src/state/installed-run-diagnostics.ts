@@ -8,6 +8,9 @@ export const INSTALLED_APPLY_DIAGNOSTIC_STAGES = Object.freeze(['request', 'repl
 export type InstalledApplyDiagnosticStage = typeof INSTALLED_APPLY_DIAGNOSTIC_STAGES[number];
 const applyStages: ReadonlySet<string> = new Set(INSTALLED_APPLY_DIAGNOSTIC_STAGES);
 const diagnostic = channel(INSTALLED_RUN_FAILURE_CHANNEL);
+export const INSTALLED_PUBLICATION_DIAGNOSTIC_PHASES = Object.freeze(['publication_select', 'publication_worker_activate',
+  'publication_roots_open', 'publication_prepare', 'publication_dispatch', 'publication_settlement'] as const);
+const publicationPhases: ReadonlySet<string> = new Set(INSTALLED_PUBLICATION_DIAGNOSTIC_PHASES);
 export const INSTALLED_SCHEDULER_DIAGNOSTIC_PHASES = Object.freeze(['scheduled', 'drive_material', 'drive_agent', 'drive_retirement',
   'drive_retirement_history', 'drive_retirement_quarantine_closure', 'drive_retirement_native_retirement',
   'drive_retirement_workspace_observation', 'drive_retirement_retirement_commit', 'drive_retirement_resource_join',
@@ -111,6 +114,15 @@ export function beginInstalledSchedulerDiagnostic(origin: SchedulerOrigin) {
 }
 
 export function installedRunDiagnosticsSubscribed(): boolean { return diagnostic.hasSubscribers; }
+
+/** Live progress only, not a result, resource join or authority observation.
+ * Ordinary images do not inspect input or sample a clock. The trusted image
+ * subscriber owns the fixed per-process first-seen output bound. */
+export function noteInstalledPublicationPhase(phase: unknown): void {
+  if (!diagnostic.hasSubscribers || typeof phase !== 'string' || !publicationPhases.has(phase)) return;
+  try { diagnostic.publish(Object.freeze({ kind: 'publication_phase', phase })); }
+  catch { /* Diagnosis cannot decide or change the original operation. */ }
+}
 
 /** Called before the existing close gate/revocation. These are a current
  * process-local observation, not a Run status, failure proof or joined result. */
