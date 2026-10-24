@@ -8,6 +8,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { rootCertificates } from 'node:tls';
 import { Worker } from 'node:worker_threads';
+import ts from 'typescript';
 
 import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME, KERNEL_STATE_SCHEMA_VERSION } from '../config.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
@@ -115,6 +116,102 @@ async function writeInstallerOnlyPackage(packageRoot: string, unclosedPromptRole
   await writeFile(path.join(packageRoot, 'manifest.json'), canonicalJsonBytes(bundle), { flag: 'wx', mode: 0o400 });
   return { bundle, releaseKeys, profile, rootRecipe, contents };
 }
+
+async function platformRevalidationExpressions() {
+  const source = await readFile(new URL('./installed-runtime.ts', import.meta.url), 'utf8');
+  const parsed = ts.createSourceFile('installed-platform-read-data.ts', source, ts.ScriptTarget.Latest, true);
+  const loaders: ts.MethodDeclaration[] = [];
+  const visit = (node: ts.Node) => {
+    if (ts.isMethodDeclaration(node) && node.name.getText(parsed) === 'loadCredentialPlatform') loaders.push(node);
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed); assert.equal(loaders.length, 1);
+  const calls: ts.CallExpression[] = [];
+  const reads = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && node.expression.getText(parsed) === 'checkedRevalidate') calls.push(node);
+    ts.forEachChild(node, reads);
+  };
+  reads(loaders[0]!); assert.equal(calls.length, 2, 'keep both original full-image revalidations');
+  return calls.map(call => {
+    const output = ts.transpileModule(`return ${call.getText(parsed)};`,
+      { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText;
+    return new Function('checkedRevalidate', 'signal', output) as
+      (revalidate: (signal?: AbortSignal) => Promise<void>, signal: AbortSignal) => Promise<void>;
+  });
+}
+
+test('assembly forwards its read cancellation through the fixed platform bridge to both original complete revalidations', async () => {
+  // Source wiring only; this never passes or impersonates the Linux SEA gate.
+  const source = await readFile(new URL('./installed-runtime.ts', import.meta.url), 'utf8');
+  const assembly = await readFile(new URL('./installed-run.ts', import.meta.url), 'utf8');
+  assert.match(assembly, /loadInstalledCredentialPlatform\(selected, signal\)/u);
+  assert.match(source, /loadCredentialPlatform\(signal\?: AbortSignal\): Promise<NativeCredentialPlatformBinding>/u);
+  assert.match(source, /export function loadInstalledCredentialPlatform\(selected: HeldInstalledRuntime, signal\?: AbortSignal\)/u);
+  assert.match(source, /return managerObservationBinding\(selected\).loadCredentialPlatform\(signal\);/u);
+  const start = source.indexOf('          loadCredentialPlatform(signal) {'), end = source.indexOf('          loadManagerObserver()', start);
+  assert(start >= 0 && end > start);
+  const loader = source.slice(start, end);
+  assert.equal(loader.match(/await checkedRevalidate\(signal\)/gu)?.length, 2);
+  assert.match(loader, /!isMainThread \|\| !isSea\(\) \|\| process.platform !== 'linux' \|\| process.arch !== 'x64' \|\| process.versions.node !== '24.21.0'/u);
+  assert.equal((await platformRevalidationExpressions()).length, 2);
+});
+
+for (const index of [0, 1] as const) test(`platform loader complete revalidation ${index + 1} cancels and joins its genuine signed image read`,
+  { skip: process.platform !== 'linux' }, async () => {
+  // Actual installer-only R/FD fixture plus the original read expression only.
+  // Opaque signed images are never loaded; this is not platform/SEA execution.
+  const fixture = await realpath(await mkdtemp(path.join(os.tmpdir(), 'cliq-platform-image-read-join-')));
+  const packageRoot = path.join(fixture, 'package'), stateRoot = path.join(fixture, 'state');
+  let selected: HeldInstalledRuntime | undefined, checking: Promise<void> | undefined, closing: Promise<void> | undefined;
+  let prototype: object | undefined, readDescriptor: PropertyDescriptor | undefined, captured: FileHandle | undefined, closeDescriptor: PropertyDescriptor | undefined;
+  let release!: () => void, entered!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; }), delivered = new Promise<void>(resolve => { entered = resolve; });
+  const abort = new AbortController(), reason = new Error('the original platform image read was revoked');
+  let armed = false, intercepted = false, settled = false, closeSettled = false, closeAttempts = 0;
+  const restore = () => {
+    if (prototype && readDescriptor) Object.defineProperty(prototype, 'read', readDescriptor);
+    if (captured && closeDescriptor) Object.defineProperty(captured, 'close', closeDescriptor);
+  };
+  try {
+    const image = Buffer.alloc(3 * 1_048_576 + 17, 0x61); image[image.length - 1] = 0x7a;
+    const signed = await writeInstallerOnlyPackage(packageRoot, undefined, image);
+    const runtime = createInstalledRuntime({ releaseKeys: signed.releaseKeys });
+    const installed = await runtime.installInitial({ packageRoot, stateRoot }); selected = await runtime.openSelected(stateRoot);
+    const filename = path.join(stateRoot, 'runtime/bundles', installed.bundleDigest, 'supervisor');
+    const expected = await lstat(filename, { bigint: true }), probe = await open(filename, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try { prototype = Object.getPrototypeOf(probe); } finally { await probe.close(); }
+    readDescriptor = Object.getOwnPropertyDescriptor(prototype!, 'read')!;
+    const read = readDescriptor.value as FileHandle['read'];
+    Object.defineProperty(prototype!, 'read', { ...readDescriptor, value: function (this: FileHandle, ...args: unknown[]) {
+      const actual = fstatSync(this.fd, { bigint: true });
+      if (!armed || intercepted || actual.dev !== expected.dev || actual.ino !== expected.ino) return Reflect.apply(read, this, args);
+      intercepted = true; captured = this; closeDescriptor = Object.getOwnPropertyDescriptor(this, 'close')!;
+      assert(closeDescriptor?.configurable && typeof closeDescriptor.value === 'function');
+      const close = closeDescriptor.value as FileHandle['close'];
+      Object.defineProperty(this, 'close', { ...closeDescriptor, value: function (this: FileHandle, ...values: unknown[]) {
+        closeAttempts++; return Reflect.apply(close, this, values);
+      } });
+      const original = Reflect.apply(read, this, args) as ReturnType<FileHandle['read']>;
+      return original.then(async result => { entered(); await gate; return result; });
+    } });
+    const expressions = await platformRevalidationExpressions();
+    checking = withHeldInstalledRuntime(selected, async installed => {
+      armed = true;
+      return expressions[index]!(installed.revalidate.bind(installed), abort.signal);
+    });
+    void checking.then(() => { settled = true; }, () => { settled = true; });
+    await Promise.race([delivered, checking.then(() => { throw new Error('the genuine selected-image read did not reach its original delivery gate'); })]);
+    abort.abort(reason); closing = selected.close();
+    void closing.then(() => { closeSettled = true; }, () => { closeSettled = true; });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(settled, false); assert.equal(closeSettled, false); assert.equal(closeAttempts, 0);
+    release(); await assert.rejects(checking, error => error === reason); await closing;
+    assert.equal(closeAttempts, 1, 'the original descriptor closes once only after its real pending read returns');
+  } finally {
+    release(); await Promise.allSettled([checking, closing]); restore();
+    await selected?.close(); await rm(fixture, { recursive: true, force: true });
+  }
+});
 
 test('installed read-only manager observation rejects structural selections before inspecting caller properties', () => {
   let inspected = false;

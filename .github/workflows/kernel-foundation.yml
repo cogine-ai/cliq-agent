@@ -42,6 +42,8 @@ jobs:
           scripts/kernel/testing/installed-store-diagnostic-banner.test.ts
           scripts/kernel/testing/installed-store-diagnostic-journal.test.ts
           scripts/kernel/testing/installed-run-diagnostic-wiring.test.ts
+          scripts/kernel/testing/installed-verifier-evidence.test.ts
+          scripts/kernel/testing/installed-verifier-result.test.ts
       - run: npm run build
       - run: npm test
 

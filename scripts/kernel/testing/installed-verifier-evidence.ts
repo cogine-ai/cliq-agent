@@ -20,6 +20,9 @@ import { supervisorInspectorIdentity } from '../../../src/state/supervisor-inspe
 export type InstalledVerifierProcessIdentity = { role: 'namespace_init' | 'monitor' | 'subreaper'; pid: number; startTicks: string };
 export type InstalledVerifierRetirementIdentity = { opId: string; attempt: number; containmentRef: string; deathEvidenceRef: string;
   namespaceInitStartToken: string; subreaperStartToken: string; processes: InstalledVerifierProcessIdentity[] };
+export type InstalledVerifierRetirementPhase = 'verifier_retirement_request' | 'verifier_retirement_source' | 'verifier_retirement_projection' |
+  'verifier_retirement_launch' | 'verifier_retirement_child' | 'verifier_retirement_parent' | 'verifier_retirement_inspector' |
+  'verifier_retirement_processes' | 'verifier_retirement_output';
 type Reader = (ref: string) => Promise<Buffer>;
 const check = (value: unknown): void => { if (!value) throw new Error('installed verifier evidence differs'); };
 const same = (left: unknown, right: unknown) => check(canonicalSha256(left) === canonicalSha256(right));
@@ -67,8 +70,10 @@ export async function assertInstalledVerifierRetirement(input: {
   prepared: Record<string, any>; claim: Record<string, any>; terminal: Record<string, any>;
   requestContext: any; measurement: Record<string, any>; readRetainedArtifact: Reader;
   readOwnerHistory: () => Promise<readonly StateOwnerRecordV1[]>;
-}) {
+}, observe?: (phase: InstalledVerifierRetirementPhase) => void) {
+  const phase = (value: InstalledVerifierRetirementPhase) => { try { observe?.(value); } catch { /* Optional fixed-data diagnosis only. */ } };
   try {
+    phase('verifier_retirement_request');
     const { run, prepared, claim, terminal, requestContext, measurement } = input, opId = prepared.opId, attempt = prepared.attempt;
     check(prepared.phase === 'prepared' && claim.phase === 'dispatch_claimed' && ['completed', 'failed'].includes(terminal.phase) &&
       prepared.runId === run.id && claim.runId === run.id && terminal.runId === run.id && prepared.opKind === 'verifier' &&
@@ -76,8 +81,10 @@ export async function assertInstalledVerifierRetirement(input: {
       claim.attempt === attempt && terminal.attempt === attempt && prepared.seq < claim.seq && claim.seq < terminal.seq && claim.sandboxLaunchSpecRef);
     const { bytes, object } = retained(input.readRetainedArtifact), planned = planVerifierRequest(requestContext);
     same(await object(prepared.requestRef), planned.request); same(await object(prepared.target), planned.target);
+    phase('verifier_retirement_source');
     const source = decodeSourceManifest(await object(requestContext.resultSourceRef)), entries = decodeWorkspaceEntries(await object(source.entriesRef));
     check(source.manifestDigest === requestContext.sourceDigest && entries.treeDigest === source.treeDigest);
+    phase('verifier_retirement_projection');
     const retirement = await object(measurement.retirementRef);
     check(exactKeys(retirement, ['schemaVersion', 'format', 'runId', 'opId', 'attempt', 'dispatchId', 'leaseEpoch', 'containmentRef', 'deathEvidenceRef',
       'checkpointId', 'workspaceStateRef', 'snapshotEvidenceRef', 'parentRetirementEvidenceRef', 'sourceAfterRef', 'sourceAfterDigest', 'evidenceDigest']) &&
@@ -91,6 +98,7 @@ export async function assertInstalledVerifierRetirement(input: {
       snapshot.purpose === 'sealed_to_checkpoint' && snapshot.checkpointId === cp.id && snapshot.workspaceStateRef === cp.workspaceStateRef && snapshot.runId === run.id &&
       snapshot.workspaceStateDigest === workspaceState.stateDigest && snapshot.entriesRef === workspaceState.entriesRef && workspaceState.entriesRef === source.entriesRef && snapshot.treeDigest === entries.treeDigest &&
       snapshot.observedAt <= cp.createdAt && snapshot.observedAt >= measurement.endedAt);
+    phase('verifier_retirement_launch');
     const launch = decodeVerifierSandboxLaunchSpec(await object(claim.sandboxLaunchSpecRef));
     // This existing decoder is the pure closed run_invocation data decoder;
     // its edit-oriented name supplies no native closure or launch authority.
@@ -103,6 +111,7 @@ export async function assertInstalledVerifierRetirement(input: {
     same(childPlan.owner, launch.owner); same(childPlan.filesystemBinding, { kind: 'run-generation', generationRef: snapshot.generationRef });
     check(childPlan.planDigest === launch.containmentPlanDigest && childPlan.parentContainmentRef === launch.parentWorkerContainmentRef);
     if (childPlan.backend.kind !== 'linux') throw new Error('unsupported verifier containment plan');
+    phase('verifier_retirement_child');
     const containment = await object(retirement.containmentRef), death = await object(retirement.deathEvidenceRef), parentDeath = await object(retirement.parentRetirementEvidenceRef);
     check(exactKeys(containment, ['schemaVersion', 'planRef', 'sandboxLaunchSpecRef', 'sandboxLaunchSpecDigest', 'owner', 'filesystemBinding', 'parentContainmentRef', 'launchNonceDigest', 'backend', 'createdAt']) &&
       containment.schemaVersion === 1 && containment.planRef === launch.containmentPlanRef && containment.sandboxLaunchSpecRef === claim.sandboxLaunchSpecRef && containment.sandboxLaunchSpecDigest === launch.launchSpecDigest &&
@@ -121,12 +130,14 @@ export async function assertInstalledVerifierRetirement(input: {
       death.sandboxLaunchSpecDigest === containment.sandboxLaunchSpecDigest && death.launchNonceDigest === containment.launchNonceDigest &&
       death.inspectorSupervisorInstanceId === claim.supervisorInstanceId && death.observedAt >= measurement.endedAt && death.observedAt <= snapshot.observedAt);
     same(death.owner, launch.owner); same(death.backend, { ...containment.backend, cgroupPopulated: 0, namespaceInitDeadAndReaped: true, remainingTrackedDescendants: 0 });
+    phase('verifier_retirement_parent');
     check(parentDeath.kind === 'containment_all_descendants_dead' && parentDeath.containmentRef === launch.parentWorkerContainmentRef &&
       parentDeath.evidenceDigest === digestOmitting(parentDeath, 'evidenceDigest') && parentDeath.observedAt >= death.observedAt && parentDeath.observedAt <= cp.createdAt);
     check(parentDeath.schemaVersion === 1 && parentDeath.backend.kind === 'linux' && parentDeath.backend.cgroupPopulated === 0 &&
       parentDeath.backend.namespaceInitDeadAndReaped === true && parentDeath.backend.remainingTrackedDescendants === 0);
     same(parentDeath.owner, { kind: 'worker_activation', runId: run.id, intendedLeaseEpoch: claim.leaseEpoch, workerLaunchId: launch.owner.workerLaunchId });
     validateMatchingWorkerDeath(await object(snapshot.quiescenceEvidenceRef!), parentDeath, 'installed verifier parent retirement');
+    phase('verifier_retirement_inspector');
     const assembly = decodeRetainedRunAssembly(await object(requestContext.assemblyRef)), bundle = await object(assembly.runtime.runtimeBundleRef);
     check(bundle.manifestDigest === assembly.runtime.runtimeBundleManifestDigest && Array.isArray(bundle.entries));
     const supervisors = bundle.entries.filter((entry: any) => entry.role === 'supervisor'); check(supervisors.length === 1);
@@ -151,6 +162,7 @@ export async function assertInstalledVerifierRetirement(input: {
       for (const field of ['ownerEpoch', 'supervisorInstanceId', 'runtimeBundleRef', 'runtimeBundleManifestDigest', 'processIdentityRef',
         'processIdentityDigest', 'stateLockIdentityRef', 'stateLockIdentityDigest', 'instanceNonceDigest', 'acquiredAt'] as const) check(acquired[field] === owner[field]);
     }
+    phase('verifier_retirement_processes');
     const init = /^linux-namespace-init:([1-9][0-9]*):([0-9]+):monitor:([1-9][0-9]*):([0-9]+)$/u.exec(containment.backend.namespaceInitStartToken);
     const subreaper = /^linux-subreaper:([1-9][0-9]*):linux-proc-start-ticks:([0-9]+)$/u.exec(containment.backend.subreaperStartToken);
     check(init && subreaper);
@@ -159,6 +171,7 @@ export async function assertInstalledVerifierRetirement(input: {
     check(processes.every(process => Number.isSafeInteger(process.pid) && process.pid > 0));
     const identity: InstalledVerifierRetirementIdentity = { opId, attempt, containmentRef: retirement.containmentRef, deathEvidenceRef: retirement.deathEvidenceRef,
       namespaceInitStartToken: containment.backend.namespaceInitStartToken, subreaperStartToken: containment.backend.subreaperStartToken, processes };
+    phase('verifier_retirement_output');
     const limit = requestContext.verifierSpec.verifiers[requestContext.verifierIndex].outputLimitBytes;
     check((await bytes(measurement.stdoutRef, limit)).length + (await bytes(measurement.stderrRef, limit)).length <= limit);
     return { checkpoint: cp, snapshot, workspaceState, launch, identity };

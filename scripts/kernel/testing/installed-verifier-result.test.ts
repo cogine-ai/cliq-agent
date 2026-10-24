@@ -7,6 +7,8 @@ import { InstalledVerifierOutcomeError } from './installed-verifier-result.js';
 
 const stages = ['public_cut', 'frozen_inputs', 'source_and_candidate', 'candidate_producer', 'candidate_source',
   'verifier_request', 'verifier_policy_and_attempt', 'verifier_settlement', 'verifier_receipt', 'verifier_retirement',
+  'verifier_retirement_request', 'verifier_retirement_source', 'verifier_retirement_projection', 'verifier_retirement_launch',
+  'verifier_retirement_child', 'verifier_retirement_parent', 'verifier_retirement_inspector', 'verifier_retirement_processes', 'verifier_retirement_output',
   'verifier_retirement_state', 'verifier_retirement_context', 'verifier_retirement_item_seq',
   'reverse_history_and_repair', 'terminal_result', 'session_publication'] as const;
 
@@ -51,4 +53,13 @@ test('retirement stage labels preserve the exact original proof, state, context 
     contextStage > state && context > contextStage && itemStage > context && item > itemStage && retained > item,
   'each fixed label must precede its unchanged original assertion, without skipping the original retirement graph');
   assert(source.includes('throw new InstalledVerifierOutcomeError(stage);'));
+});
+
+test('the shared retirement observer updates only the existing fixed outer error stage', () => {
+  const source = readFileSync(new URL('./installed-verifier-result.ts', import.meta.url), 'utf8');
+  const start = source.indexOf('const physical = await assertInstalledVerifierRetirement(');
+  const end = source.indexOf('const cp = physical.checkpoint;', start);
+  assert(start >= 0 && end > start, 'the complete shared retirement read must remain awaited');
+  assert(source.slice(start, end).includes('readRetainedArtifact: bytes, readOwnerHistory: input.readOwnerHistory }, value => { stage = value; });'),
+    'only the fixed observer phase may update the existing outer diagnostic stage');
 });

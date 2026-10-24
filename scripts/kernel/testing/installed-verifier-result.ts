@@ -25,11 +25,11 @@ import { decodeVerifierSpec } from '../../../src/state/verifier-artifacts.js';
 import { loadVerifierPolicy, planVerifierRequest, verifierOperationId } from '../../../src/state/verifier-policy.js';
 import { verifierCheckpointId, verifierResultItemId, type VerifierProgress } from '../../../src/state/verifier-recovery.js';
 import { planVerifierRepair } from '../../../src/state/verifier-repair.js';
-import { assertInstalledVerifierRetirement, readInstalledVerifierInputs } from './installed-verifier-evidence.js';
+import { assertInstalledVerifierRetirement, readInstalledVerifierInputs, type InstalledVerifierRetirementPhase } from './installed-verifier-evidence.js';
 
 type CaseKind = 'required_pass' | 'required_repair' | 'advisory_failure' | 'required_timeout';
 type ProcessIdentity = { role: 'namespace_init' | 'monitor' | 'subreaper'; pid: number; startTicks: string };
-export type InstalledVerifierDiagnosticStage = 'public_cut' | 'frozen_inputs' | 'source_and_candidate' | 'candidate_producer' |
+export type InstalledVerifierDiagnosticStage = InstalledVerifierRetirementPhase | 'public_cut' | 'frozen_inputs' | 'source_and_candidate' | 'candidate_producer' |
   'candidate_source' | 'verifier_request' | 'verifier_policy_and_attempt' | 'verifier_settlement' | 'verifier_receipt' |
   'verifier_retirement' | 'verifier_retirement_state' | 'verifier_retirement_context' | 'verifier_retirement_item_seq' |
   'reverse_history_and_repair' | 'terminal_result' | 'session_publication';
@@ -306,7 +306,7 @@ export async function assertInstalledVerifierOutcome(input: {
           stage = 'verifier_retirement';
           const physical = await assertInstalledVerifierRetirement({ run, checkpoints, prepared, claim, terminal, requestContext,
             measurement: { retirementRef: receipt.containmentEvidenceRef, endedAt: receipt.endedAt, stdoutRef: receipt.stdoutRef, stderrRef: receipt.stderrRef },
-            readRetainedArtifact: bytes, readOwnerHistory: input.readOwnerHistory });
+            readRetainedArtifact: bytes, readOwnerHistory: input.readOwnerHistory }, value => { stage = value; });
           const cp = physical.checkpoint;
           stage = 'verifier_retirement_state';
           await state(cp, source.entriesRef);

@@ -344,11 +344,11 @@ export async function prepareOwnedPublicationReceivedResult(driver: SqliteDriver
 }
 
 function originalReceived(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
-  execution: unknown, token: OwnedPublicationReceivedResult) {
+  execution: unknown, token: OwnedPublicationReceivedResult, connection: SqliteConnection = driver) {
   const value = token !== null && typeof token === 'object' ? receivedResults.get(token) : undefined;
   if (!value || value.driver !== driver || value.artifacts !== artifacts || value.owner !== owner || value.execution !== execution)
     throw new TypeError('a genuine same-execution received publication result is required');
-  const resources = assertDeliveryPublicationReceivedExecution(driver, owner, execution, value.task, artifacts);
+  const resources = assertDeliveryPublicationReceivedExecution(driver, owner, execution, value.task, artifacts, connection);
   if (resources.workspaceRoot !== value.resources.workspaceRoot || resources.controlledHome !== value.resources.controlledHome)
     invalid('received publication result lost its actual original read-only roots');
   resources.signal.throwIfAborted();
@@ -368,8 +368,8 @@ function receivedMaterial(value: ReceivedBinding): ReceivedMaterial {
 /** Read-only same-execution friend. Its data cannot arm, commit, reconcile or
  * clean an operation; the durable original claim is never reconstructed. */
 export function readOwnedPublicationReceivedResult(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
-  execution: unknown, token: OwnedPublicationReceivedResult) {
-  const { value, resources } = originalReceived(driver, artifacts, owner, execution, token);
+  execution: unknown, token: OwnedPublicationReceivedResult, connection: SqliteConnection = driver) {
+  const { value, resources } = originalReceived(driver, artifacts, owner, execution, token, connection);
   // The friend exposes copied readonly data, never the WeakMap's mutable
   // retained graph. The full source/prefix graph remains private; an adapter
   // still obtains its own complete fresh selection rather than copying it.
@@ -421,13 +421,13 @@ export async function prepareOwnedPublicationGenerationSeal(driver: SqliteDriver
   return { resources, retired, seal, cut, prefix };
 }
 
-function original(driver: SqliteDriver, owner: StateOwnerContext, token: unknown): Binding {
+function original(driver: SqliteDriver, owner: StateOwnerContext, token: unknown, connection: SqliteConnection = driver): Binding {
   const value = token !== null && typeof token === 'object' ? finalizations.get(token) : undefined;
   if (!value || value.driver !== driver || value.owner !== owner)
     throw new TypeError('a genuine original publication finalization is required');
   if (value.retirementFailure) throw value.retirementFailure;
   if (value.closed) invalid('publication projection descriptors are already joined');
-  originalReceived(driver, value.artifacts, owner, value.execution, value.receivedResult);
+  originalReceived(driver, value.artifacts, owner, value.execution, value.receivedResult, connection);
   return value;
 }
 function sqlCut(connection: SqliteConnection, runId: string, sourceRunId: string) {
@@ -825,7 +825,7 @@ export function readOwnedPublicationFinalizationMetadata(driver: SqliteDriver, o
 }
 export function validateOwnedPublicationFinalization(driver: SqliteDriver, owner: StateOwnerContext, token: OwnedPublicationFinalization,
   connection: SqliteConnection, run: Run, committedAt?: string): void {
-  const value = original(driver, owner, token);
+  const value = original(driver, owner, token, connection);
   assertActiveStateOwner(connection, owner); requireEqual(run, value.cut.run, 'publication finalization original Run');
   if (canonicalSha256(sqlCut(connection, run.id, value.prefix.admission.source.run.id)) !== value.sqlDigest)
     throw new KernelStorageError('REVISION_CONFLICT', 'publication finalization original Run, Stop, source or owned SQL cut changed');
@@ -844,7 +844,7 @@ export function validateOwnedPublicationFinalization(driver: SqliteDriver, owner
  * original terminal Journal row in the same transaction. */
 export function commitOwnedPublicationFinalization(driver: SqliteDriver, owner: StateOwnerContext, token: OwnedPublicationFinalization,
   connection: SqliteConnection, run: Run, journal: InvocationJournalEntry, committedAt: string): Run {
-  const value = original(driver, owner, token), { settlement, completion, cut, resolvedUnknown } = value;
+  const value = original(driver, owner, token, connection), { settlement, completion, cut, resolvedUnknown } = value;
   assertActiveStateOwner(connection, owner); requireEqual(run, cut.run, 'publication original preappend Run');
   requireEqual(readInvocationJournal(connection, run.id), [...cut.journal, journal], 'publication exact original Journal plus actual settlement row');
   const terminalSequence = resolvedUnknown ? cut.journal.length + 1 : settlement.terminalJournalSeq;
@@ -888,7 +888,7 @@ export function commitOwnedPublicationFinalization(driver: SqliteDriver, owner: 
  * future RecoveryClosure, async CAS read or caller callback is accepted. */
 export function assertOwnedPublicationTerminalSql(driver: SqliteDriver, owner: StateOwnerContext, token: OwnedPublicationFinalization,
   connection: SqliteConnection, committedAt: string): void {
-  const value = original(driver, owner, token), installed = value.installed;
+  const value = original(driver, owner, token, connection), installed = value.installed;
   if (!installed || installed.committedAt !== committedAt) invalid('publication result has no actual same-transaction finalize installation');
   requireEqual(sqlCut(connection, value.cut.run.id, value.prefix.admission.source.run.id), installed.sql,
     'publication complete actual installed finalize SQL cut');

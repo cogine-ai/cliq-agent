@@ -2042,3 +2042,69 @@ this defect caused the installed ninety-second or thirty-second timeouts.
 The remaining qualifications are still open. These refinements do not relax
 the five-, thirty-, ninety-second or two-second bounds, scanner limits or
 integrity checks. No complete PR or full I1/I2-I4/Kernel-Cut claim follows.
+
+Latest pushed source `7da5dc4936e3a2939ba29eebbe56a1cfd018904f`, tree
+`11d655b5e449942f9dc1e52100f81ecd010f84db`, completed
+[run 40133006653](https://github.com/cogine-ai/cliq-agent/actions/runs/40133006653).
+Its exact immutable 973-source archive passed the original build and full
+test command: 2,668 passing, zero failures, one pre-existing cross-filesystem
+skip; script tests pass 227 with fifteen original Linux-only skips, and all
+99 portable workflow tests pass. All seven validation commands, actual strict
+dependency checking and their process/pipe joins completed. Local validation
+record SHA-256:
+`0847fa0244c7da4d0645f4d35e38018ddd4f551fc850bb0031a39af045eee298`.
+
+The actual run has seventeen successful jobs and five failed jobs; all four
+Linux/macOS TypeScript combinations pass. The whole real Linux Run execution
+and recovery job and namespace/cgroup job pass. Original reports still refuse
+complete installed Delivery/storage/verifier qualification:
+
+- Normal Delivery again misses the original ninety-second terminal bound
+  at running/delivery revision nine, with four items, four Checkpoints and no
+  Journal entry. This time original Stop joins. Its separately retained Stop
+  phase and joined failure summary both identify `publication_prepare_admit`;
+  the first failure is before Stop, class `other`, code `none`. They supply no
+  error message or proof of one unique cause. Independent code inspection
+  confirms that the transaction's worker assertion reads the outer SQLite
+  driver, which the original transaction guard correctly refuses. The same
+  receiver mistake must be fixed through the original publication lifecycle,
+  not by making the outer driver usable or omitting a worker/owner check.
+- The ordinary delayed-volume journey misses the original five-second READY
+  bound at 5,002 ms. `hello_received` is observed at 4,552 ms; no final-current
+  completion marker is present. This does not establish whether the final
+  three revalidations started. The original joined server observation measures
+  image hashing at about 105 ms and the four overlapping CAS awaits at about
+  1.390 seconds each, not four additive durations.
+- Original-stop and late-result storage journeys miss the initial thirty-second
+  `run.submit` bound and the original two-second Stop. Neither the requested
+  physical cut nor the original joined Store summary is available. The single
+  driver phase marker cannot label an admission or manufacture that summary.
+- Required-pass and required-repair verifier cases complete their full proofs,
+  original-process absence and replay/source checks. Advisory failure rejects
+  inside the shared verifier-retirement assertion; required-timeout is not
+  executed. This run's scanner closes normally at 280 streams; it neither
+  reproduces nor erases the earlier 4,096-stream corpus failure.
+
+All 23 categories retain 105 original JSON files / 514,075 bytes, eighteen
+qualified reports and five false reports, with no pending/incomplete/rejected
+categories, zero cleanup errors and 21 byte-identical runner-baseline pairs.
+Final append-only capture SHA-256:
+`497ab63e9cdc1818ff2aec9ae00ec4cae2ef686b019c18c18c21f56f3037908a`.
+Independent closeout record SHA-256:
+`23415f3f5e01792234a76a992c4e645b398e30d7ca3c5f5a7bfe39e11601a60e`.
+No raw logs, ZIPs, StateRoot, WAL or credential material are retained. The
+following combined fixes still require their own full local gate and actual
+Linux qualification; this older passing local gate cannot qualify new code.
+
+The combined candidate passes the genuine transaction connection through
+publication preparation, claim, reconciliation, received-result validation and
+the unique terminal transaction. Resource brands still bind the original
+driver. An internal issuer check accepts only that driver's exact live SQL
+scope; issuing and revoking the association remain inside the driver, not a
+reflectively constructed or caller-overridden scope method. The original
+outer-driver, rollback, read-only and resource checks remain intact.
+Three existing read-only preparation paths also receive their original
+cancellation signal, without cancelling raw publication or physical retirement.
+Verifier retirement adds nine fixed diagnostic stages only; all original
+assertions remain. Component regressions do not qualify installed execution,
+the delayed-volume deadlines or the still-unreached physical storage cuts.

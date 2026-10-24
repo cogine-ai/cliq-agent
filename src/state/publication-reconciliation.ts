@@ -289,7 +289,7 @@ export const preparePublicationReconciliation = stateOperation('RECOVERY_REQUIRE
   const accept = bindCut(driver, owner, cut, prefix.admission.source), artifact = await artifacts.publishCanonical(wait, 'cliq-waiting-subject-v1');
   let outcome: TimeFenceAdvance | undefined, run!: Run;
   driver.transaction(connection => {
-    resources.signal.throwIfAborted(); assertDeliveryPublicationReconciliationExecution(driver, owner, input.execution, input.task, artifacts);
+    resources.signal.throwIfAborted(); assertDeliveryPublicationReconciliationExecution(driver, owner, input.execution, input.task, artifacts, connection);
     accept(connection); const now = sampleCanonicalNow(); outcome = advanceTimeFence(connection, owner.ownerEpoch, now);
     if (outcome !== 'healthy') return;
     if (now < createdAt) fail('publication wait commit has a regressed time');
@@ -404,7 +404,7 @@ export const beginPublicationReconciliationProbe = stateOperation('RECOVERY_REQU
       assertCurrentControlFrame(owner, mutation.identity);
       if (readControlRequest(connection, mutation.identity.principalId, 'run.reconcile', mutation.request.requestId)) return;
     }
-    resources.signal.throwIfAborted(); assertDeliveryPublicationReconciliationExecution(driver, owner, input.execution, input.task, artifacts);
+    resources.signal.throwIfAborted(); assertDeliveryPublicationReconciliationExecution(driver, owner, input.execution, input.task, artifacts, connection);
     accept(connection); const now = sampleCanonicalNow(); outcome = advanceTimeFence(connection, owner.ownerEpoch, now);
     if (outcome !== 'healthy') return;
     if (now < at || now >= dispatch.probeDeadlineAt) fail('publication probe expired or regressed before dispatch commit');

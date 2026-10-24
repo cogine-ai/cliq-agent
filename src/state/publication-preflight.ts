@@ -21,7 +21,7 @@ import { readWorkspaceGenerationsForRun } from './repositories/workspace-generat
 import { assertDeliveryExecution, assertDeliveryPublicationExecution,
   type DeliveryPublicationTask, type RunExecutionWorkerIdentity } from './run-execution.js';
 import { readCheckpoint, readRun, readSession, readSessionPrincipalId } from './rows.js';
-import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
+import { assertSqliteConnectionOwnedBy, type SqliteConnection, type SqliteDriver } from './sqlite-driver.js';
 import { assertActiveStateOwner, assertFenceHealthy, type StateOwnerContext } from './state-owner.js';
 
 type PhysicalIdentity = HeldWorkspaceRoot['identity'] & { mode: number };
@@ -174,7 +174,7 @@ type PreflightProjection = Readonly<{
   workspaceIdentityRef: string; workspaceIdentityDigest: string; worker: RunExecutionWorkerIdentity;
   observedAt: string; arenaParent: ArenaParent;
 }>;
-type PreflightBinding = { driver: SqliteDriver; owner: StateOwnerContext; projection: PreflightProjection; assertCurrent(): void };
+type PreflightBinding = { driver: SqliteDriver; owner: StateOwnerContext; projection: PreflightProjection; assertCurrent(connection?: SqliteConnection): void };
 const preflights = new WeakMap<object, PreflightBinding>();
 
 const sessionIdentity = (session: ReturnType<typeof readSession>) => ({ id: session.id,
@@ -201,8 +201,8 @@ export async function preparePublicationPreflight(driver: SqliteDriver, artifact
   // reach SQL/CAS or become a physical publication permit.
   const worker = immutableSnapshot(input.worker), { workspaceRoot: root, execution, signal, runId } = input;
   const task = input.task;
-  const assertExecution = () => task === undefined ? assertDeliveryExecution(driver, owner, execution, worker)
-    : assertDeliveryPublicationExecution(driver, owner, execution, worker, task);
+  const assertExecution = (connection: SqliteConnection = driver) => task === undefined ? assertDeliveryExecution(driver, owner, execution, worker)
+    : assertDeliveryPublicationExecution(driver, owner, execution, worker, task, connection);
   assertExecution();
   assertHeldWorkspaceRoot(root);
   if (worker.runId !== runId || !Number.isSafeInteger(input.expectedRunRevision) || input.expectedRunRevision < 1)
@@ -254,15 +254,15 @@ export async function preparePublicationPreflight(driver: SqliteDriver, artifact
     requireEqual(root.identity, authorization.workspace.rootIdentity, 'publication original approved root');
     const source = authorization.verified.admission.source;
     const sourceDigest = canonicalSha256({ run: source.run, session: sessionIdentity(source.session), principalId: before.principalId });
-    const assertCut = () => {
-      assertActiveStateOwner(driver, owner);
-      if (canonicalSha256(publicationCut(driver, runId)) !== beforeDigest ||
-          canonicalSha256({ run: readRun(driver, source.run.id), session: sessionIdentity(readSession(driver, source.session.id)),
-            principalId: readSessionPrincipalId(driver, source.session.id) }) !== sourceDigest ||
-          driver.prepare('SELECT 1 FROM child_allocations WHERE parent_run_id=? OR child_run_id=? LIMIT 1').get(runId, runId) ||
-          driver.prepare('SELECT 1 FROM runs WHERE parent_run_id=? LIMIT 1').get(runId))
+    const assertCut = (connection: SqliteConnection = driver) => {
+      assertActiveStateOwner(connection, owner);
+      if (canonicalSha256(publicationCut(connection, runId)) !== beforeDigest ||
+          canonicalSha256({ run: readRun(connection, source.run.id), session: sessionIdentity(readSession(connection, source.session.id)),
+            principalId: readSessionPrincipalId(connection, source.session.id) }) !== sourceDigest ||
+          connection.prepare('SELECT 1 FROM child_allocations WHERE parent_run_id=? OR child_run_id=? LIMIT 1').get(runId, runId) ||
+          connection.prepare('SELECT 1 FROM runs WHERE parent_run_id=? LIMIT 1').get(runId))
         throw new KernelStorageError('REVISION_CONFLICT', 'publication preflight original cut changed');
-      assertExecution();
+      assertExecution(connection);
     };
     assertCut();
     physical = await inspectPublicationPlan(owner.filesystem, root, plan, topology, signal);
@@ -272,11 +272,11 @@ export async function preparePublicationPreflight(driver: SqliteDriver, artifact
       frontierRef: cut.run.frontierRef, leaseEpoch: cut.run.leaseEpoch, workspaceIdentityRef: authorization.context.workspaceIdentityRef,
       workspaceIdentityDigest: authorization.context.workspaceIdentityDigest, worker, observedAt, arenaParent: physical.arenaParent });
     const held = physical;
-    const assertCurrent = () => {
+    const assertCurrent = (connection: SqliteConnection = driver) => {
       // Preserve a sticky descriptor-retirement failure over cancellation or
       // a later SQL conflict; neither can turn an uncertain join into success.
-      held.assertHeld(); signal?.throwIfAborted(); assertCut();
-      const fence = assertFenceHealthy(readTimeFence(driver)), now = sampleCanonicalNow(), nowMs = parseCanonicalTime(now);
+      held.assertHeld(); signal?.throwIfAborted(); assertCut(connection);
+      const fence = assertFenceHealthy(readTimeFence(connection)), now = sampleCanonicalNow(), nowMs = parseCanonicalTime(now);
       if (fence.stateOwnerEpoch !== owner.ownerEpoch || now < fence.lastAcceptedAt || nowMs < observedMs ||
           nowMs - observedMs > 5_000 || now < authorization.grant!.issuedAt || now >= cut.run.deadlineAt || now >= authorization.grant!.expiresAt)
         throw new KernelStorageError('LEASE_FENCED', 'publication preflight is no longer fresh within its original lifetime');
@@ -295,10 +295,11 @@ export async function preparePublicationPreflight(driver: SqliteDriver, artifact
 
 /** Friend for the original Store only. Data, another Store's observation or a
  * closed/stale preflight cannot authorize the first publication claim. */
-export function assertPublicationPreflight(driver: SqliteDriver, owner: StateOwnerContext, value: unknown): PreflightProjection {
+export function assertPublicationPreflight(driver: SqliteDriver, owner: StateOwnerContext, value: unknown,
+  connection: SqliteConnection = driver): PreflightProjection {
   const binding = value !== null && typeof value === 'object' ? preflights.get(value) : undefined;
   if (!binding || binding.driver !== driver || binding.owner !== owner)
     throw new TypeError('publication requires its genuine same-owner publication preflight');
-  binding.assertCurrent();
+  assertSqliteConnectionOwnedBy(driver, connection); binding.assertCurrent(connection);
   return binding.projection;
 }

@@ -27,7 +27,7 @@ import { sealWorkerGeneration } from './reducers/worker-launch.js';
 import { recordWorkspaceGenerationPreactivated } from './reducers/workspace-transition.js';
 import { readRecoveryClosure } from './recovery-closure.js';
 import { readRun } from './rows.js';
-import { isRolledBackSqliteTransactionFailure, type SqliteDriver } from './sqlite-driver.js';
+import { assertSqliteConnectionOwnedBy, isRolledBackSqliteTransactionFailure, type SqliteConnection, type SqliteDriver } from './sqlite-driver.js';
 import { assertActiveStateOwner, type StateOwnerContext } from './state-owner.js';
 import { startWorkerRecoveryTask, type WorkerRecoveryTask } from './worker-recovery-task.js';
 import { toolCheckpointId } from './tool-checkpoint.js';
@@ -104,7 +104,7 @@ type DeliveryMaintenanceResources = DeliveryRootResources & Readonly<{
 }>;
 type DeliveryRootTaskBinding<R extends DeliveryRootResources = DeliveryRootResources> = {
   driver: SqliteDriver; owner: StateOwnerContext; execution: RunExecution; artifacts: ArtifactCatalog;
-  assertOwned(): void; resources(): R;
+  assertOwned(): void; resources(connection?: SqliteConnection): R;
 };
 const noOpTasks = new WeakMap<object, DeliveryRootTaskBinding>();
 const publicationMaintenanceTasks = new WeakMap<object, DeliveryRootTaskBinding<DeliveryMaintenanceResources>>();
@@ -123,7 +123,7 @@ type PublicationExecutionResources = Readonly<{
   reobserveRetirement: import('./tool-checkpoint.js').NativeWorkerRetirement;
 }>;
 const publicationTasks = new WeakMap<object, { driver: SqliteDriver; owner: StateOwnerContext;
-  execution: RunExecution; worker: RunExecutionWorkerIdentity; assertCurrent(): void; resources(): PublicationExecutionResources }>();
+  execution: RunExecution; worker: RunExecutionWorkerIdentity; assertCurrent(connection?: SqliteConnection): void; resources(): PublicationExecutionResources }>();
 
 function rootTaskBinding<R extends DeliveryRootResources>(tasks: WeakMap<object, DeliveryRootTaskBinding<R>>, driver: SqliteDriver, owner: StateOwnerContext,
   execution: unknown, task: unknown, artifacts: ArtifactCatalog): DeliveryRootTaskBinding<R> {
@@ -158,23 +158,26 @@ export async function readOwnedNoOpDeliveryExecutionResources(driver: SqliteDriv
  * The maintenance producer still proves the complete Stop/prefix/creator graph
  * and its exact zero-budget SQL transition before any cleanup release. */
 export function assertDeliveryPublicationMaintenanceExecution(driver: SqliteDriver, owner: StateOwnerContext,
-  execution: unknown, task: DeliveryPublicationMaintenanceTask, artifacts: ArtifactCatalog): DeliveryMaintenanceResources {
-  return ownedRootTask(publicationMaintenanceTasks, driver, owner, execution, task, artifacts).resources();
+  execution: unknown, task: DeliveryPublicationMaintenanceTask, artifacts: ArtifactCatalog, connection: SqliteConnection = driver): DeliveryMaintenanceResources {
+  const original = ownedRootTask(publicationMaintenanceTasks, driver, owner, execution, task, artifacts);
+  assertSqliteConnectionOwnedBy(driver, connection); return original.resources(connection);
 }
 
 /** A known result can repeat only read-only final validation. This genuine
  * execution task contains no worker, release gate, native owner or retry. */
 export function assertDeliveryPublicationReceivedExecution(driver: SqliteDriver, owner: StateOwnerContext,
-  execution: unknown, task: DeliveryPublicationReceivedTask, artifacts: ArtifactCatalog): DeliveryRootResources {
-  return ownedRootTask(publicationReceivedTasks, driver, owner, execution, task, artifacts).resources();
+  execution: unknown, task: DeliveryPublicationReceivedTask, artifacts: ArtifactCatalog, connection: SqliteConnection = driver): DeliveryRootResources {
+  const original = ownedRootTask(publicationReceivedTasks, driver, owner, execution, task, artifacts);
+  assertSqliteConnectionOwnedBy(driver, connection); return original.resources(connection);
 }
 
 /** Owns only the actual roots and previously issued publication handles. It
  * contains no worker activation, semantic release or replacement M authority.
  * The producer must still validate the committed exact inspection dispatch. */
 export function assertDeliveryPublicationReconciliationExecution(driver: SqliteDriver, owner: StateOwnerContext,
-  execution: unknown, task: DeliveryPublicationReconciliationTask, artifacts: ArtifactCatalog): PublicationReconciliationResources {
-  return ownedRootTask(publicationReconciliationTasks, driver, owner, execution, task, artifacts).resources();
+  execution: unknown, task: DeliveryPublicationReconciliationTask, artifacts: ArtifactCatalog, connection: SqliteConnection = driver): PublicationReconciliationResources {
+  const original = ownedRootTask(publicationReconciliationTasks, driver, owner, execution, task, artifacts);
+  assertSqliteConnectionOwnedBy(driver, connection); return original.resources(connection);
 }
 
 /** Registration/closure only, including when shutdown won immediately after
@@ -200,14 +203,14 @@ export function assertDeliveryExecution(driver: SqliteDriver, owner: StateOwnerC
  * held worker. Ordinary callers still cannot release while any task is pending;
  * a callback, retained artifact or another execution cannot waive that gate. */
 export function assertDeliveryPublicationExecution(driver: SqliteDriver, owner: StateOwnerContext, execution: unknown,
-  worker: RunExecutionWorkerIdentity, task: DeliveryPublicationTask): void {
+  worker: RunExecutionWorkerIdentity, task: DeliveryPublicationTask, connection: SqliteConnection = driver): void {
   const held = execution !== null && typeof execution === 'object' ? deliveryExecutions.get(execution) : undefined;
   const original = task !== null && typeof task === 'object' ? publicationTasks.get(task) : undefined;
   if (!held || !original || held.driver !== driver || held.owner !== owner || original.driver !== driver ||
       original.owner !== owner || original.execution !== execution || held.runId !== original.worker.runId)
     throw new TypeError('publication requires its genuine same-owner in-flight execution task');
   requireEqual(worker, original.worker, 'publication original in-flight worker identity');
-  original.assertCurrent();
+  assertSqliteConnectionOwnedBy(driver, connection); original.assertCurrent(connection);
 }
 
 /** The real task supplies its continuously held roots and original worker's
@@ -664,7 +667,8 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
     assertActiveStateOwner(driver, owner);
     return value.expectedRunRevision;
   };
-  function assertCurrentWorker(value: RunExecutionWorkerIdentity, nextStep: 'agent' | 'delivery', task?: DeliveryPublicationTask) {
+  function assertCurrentWorker(value: RunExecutionWorkerIdentity, nextStep: 'agent' | 'delivery', task?: DeliveryPublicationTask,
+    connection: SqliteConnection = driver) {
     const action = nextStep === 'agent' ? 'model' : 'delivery';
     const originalPublication = nextStep === 'delivery' && task !== undefined && publicationTask === task && pending !== undefined &&
       publicationTasks.get(task)?.execution === execution;
@@ -676,8 +680,8 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         value.generationRef !== activeWorker.authority.generationRef || value.workerIdentityDigest !== activeWorker.activated.launch.workerIdentityDigest) {
       throw new KernelStorageError('LEASE_FENCED', `${action} release does not name this execution owner's original physical worker`);
     }
-    const run = readRun(driver, runId);
-    const live = assertLiveDispatchState(driver, owner, runId, run.revision, value.leaseEpoch, sampleCanonicalNow());
+    const run = readRun(connection, runId);
+    const live = assertLiveDispatchState(connection, owner, runId, run.revision, value.leaseEpoch, sampleCanonicalNow());
     if (run.nextStep !== nextStep || live.launch.launchId !== value.launchId || live.launch.workerIdentityDigest !== value.workerIdentityDigest ||
         live.launch.workspaceGenerationRef !== value.generationRef || live.launch.processContainmentRef !== activeWorker.processContainmentRef) {
       throw new KernelStorageError('LEASE_FENCED', `${action} release durable worker identity changed`);
@@ -686,7 +690,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
     worker.assertHeld();
     // The native worker already retains the original generation borrow;
     // its assertion verifies that descriptor, mount, quota identity and owner.
-    assertActiveStateOwner(driver, owner);
+    assertActiveStateOwner(connection, owner);
   }
   /** One actual birth spine for productive Run frontiers. Success retains the
    * original resources; the existing operation owner joins them on failure. */
@@ -874,8 +878,8 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       signal.throwIfAborted();
     };
     publicationMaintenanceTasks.set(task, { driver, owner, execution, artifacts, assertOwned,
-      resources() {
-        assertOwned(); assertActiveStateOwner(driver, owner);
+      resources(connection = driver) {
+        assertOwned(); assertActiveStateOwner(connection, owner);
         if (publicationRoots !== roots) throw new KernelStorageError('RECOVERY_REQUIRED', 'publication maintenance lost its original held roots');
         roots.workspaceRoot.assertHeld(); roots.controlledHome.assertHeld();
         return Object.freeze({ runId, expectedRunRevision, ...roots, signal,
@@ -929,8 +933,8 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       signal.throwIfAborted();
     };
     publicationReconciliationTasks.set(task, { driver, owner, execution, artifacts, assertOwned, assertRegistered,
-      resources() {
-        assertOwned(); assertActiveStateOwner(driver, owner);
+      resources(connection = driver) {
+        assertOwned(); assertActiveStateOwner(connection, owner);
         roots.workspaceRoot.assertHeld(); roots.controlledHome.assertHeld();
         return Object.freeze({ runId, expectedRunRevision, ...roots, signal, publicationOwners: Object.freeze([...publicationOwners]) });
       } });
@@ -964,8 +968,8 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       signal.throwIfAborted();
     };
     publicationReceivedTasks.set(task, { driver, artifacts, owner, execution, assertOwned,
-      resources() {
-        assertOwned(); assertActiveStateOwner(driver, owner);
+      resources(connection = driver) {
+        assertOwned(); assertActiveStateOwner(connection, owner);
         roots.workspaceRoot.assertHeld(); roots.controlledHome.assertHeld();
         return Object.freeze({ runId, expectedRunRevision: selected.run.revision, ...roots, signal });
       } });
@@ -1574,7 +1578,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         const roots = await holdPublicationRoots(authorization.workspace.canonicalRootPath, signal);
         const retire = publicationCheckpointRetirement(current, authorization.context.planRef);
         publicationTasks.set(task, { driver, owner, execution, worker: identity,
-          assertCurrent: () => assertCurrentWorker(identity, 'delivery', task),
+          assertCurrent: (connection = driver) => assertCurrentWorker(identity, 'delivery', task, connection),
           resources() {
             if (activeWorker !== current || worker !== currentWorker || publicationRoots !== roots ||
                 ownedLaunchId !== identity.launchId || cleanupFailure !== undefined)

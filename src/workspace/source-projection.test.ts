@@ -5,6 +5,8 @@ import { createServer } from 'node:net';
 import path from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { setImmediate as scheduleImmediate } from 'node:timers';
+import { setImmediate } from 'node:timers/promises';
+import ts from 'typescript';
 import type { FrozenIgnoreRulesV1, SourceManifest, SourceProjectionSpec, WorkspaceEntryManifest } from '../kernel/types.js';
 import { digestOmitting, identityHash, sha256Bytes } from '../kernel/identity.js';
 import { ArtifactCatalog } from '../state/artifacts.js';
@@ -12,6 +14,79 @@ import { ContentAddressedStore } from '../state/cas.js';
 import { loadNativeStateOwner } from '../state/native-owner.js';
 import { captureFrozenSourceProjection, publishNonGitSourceProjection } from './source-projection.js';
 import { decodeDeliveryCaptureTopology, publicationDirectoryIdentityDigest } from '../kernel/publication.js';
+import { ResourceRetirementError } from '../state/errors.js';
+
+// Execute only the actual entries reread expression against inert CAS bytes.
+// No native source capture, Run, StateOwner or entries authority is created.
+async function entriesReread() {
+  const source = await readFile(new URL('./source-projection.ts', import.meta.url), 'utf8');
+  const parsed = ts.createSourceFile('source-projection-read-data.ts', source, ts.ScriptTarget.Latest, true);
+  const expressions: ts.CallExpression[] = [];
+  const visit = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) &&
+        node.expression.name.text === 'readCanonical' && node.arguments[0]?.getText(parsed) === 'entriesArtifact.ref') expressions.push(node);
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed); assert.equal(expressions.length, 1);
+  const output = ts.transpileModule(`return ${expressions[0]!.getText(parsed)};`,
+    { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText;
+  const read = new Function('artifacts', 'reads', 'entriesArtifact', output);
+  return (artifacts: ArtifactCatalog, signal: AbortSignal, ref: string) =>
+    read(artifacts, artifacts.withReadSignal(signal), { ref }) as Promise<unknown>;
+}
+
+for (const fault of ['cancel', 'ordinary', 'retirement'] as const)
+  test(`initial source entries reread joins its actual CAS descriptors and preserves ${fault}`, async t => {
+    const directory = await mkdtemp(path.join(process.cwd(), '.cliq-source-reread-'));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const objects = path.join(directory, 'objects'); await mkdir(objects, { mode: 0o700 });
+    const cas = new ContentAddressedStore(objects), artifacts = new ArtifactCatalog(cas);
+    const { ref } = await artifacts.publishCanonical({ diagnosticOnly: true, value: 'x'.repeat(3 * 1024 * 1024) }, 'cliq-read-join-data-v1');
+    const owner = new AbortController(), reason = new Error('the original source reread was cancelled');
+    const ordinary = new Error('the original bounded CAS read failed'), closeFailure = new Error('actual CAS root close report is uncertain');
+    let enter!: () => void, release!: () => void, reads = 0, opened = 0, closed = 0, settled = false, originalFailure: unknown;
+    const entered = new Promise<void>(resolve => { enter = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+    const active = new Set<object>(), open = fs.open, originalRead = cas.read.bind(cas);
+    t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
+      const handle = await open(...args); active.add(handle); opened++;
+      const close = handle.close.bind(handle), read = handle.read.bind(handle);
+      if (args[0] === path.join(objects, ref)) t.mock.method(handle, 'read', async (...values: Parameters<typeof handle.read>) => {
+        const result = await read(...values); reads++;
+        if (reads === 1) { if (fault === 'ordinary') throw ordinary; owner.abort(reason); }
+        return result;
+      });
+      t.mock.method(handle, 'close', async () => {
+        if (args[0] === objects) { enter(); await gate; }
+        await close(); assert.equal(active.delete(handle), true); closed++;
+        if (fault === 'retirement' && args[0] === objects) throw closeFailure;
+      });
+      return handle;
+    });
+    t.mock.method(cas, 'read', async (...args: Parameters<typeof cas.read>) => {
+      try { return await originalRead(...args); } catch (error) { originalFailure = error; throw error; }
+    });
+    const reread = await entriesReread(), work = reread(artifacts, owner.signal, ref);
+    void work.then(() => { settled = true; }, () => { settled = true; });
+    try {
+      await Promise.race([entered, work.then(() => { throw new Error('the actual root close gate was bypassed'); })]);
+      assert.equal(reads, 1, 'the original signal stops after the first real bounded read, not after the whole object');
+      assert.equal(opened, 2); assert.equal(closed, 1); assert.equal(active.size, 1); assert.equal(settled, false);
+      release();
+      await assert.rejects(work, error => error === originalFailure && (fault === 'retirement'
+        ? error instanceof ResourceRetirementError && error.cause === closeFailure : error === (fault === 'ordinary' ? ordinary : reason)));
+      assert.equal(closed, 2); assert.equal(active.size, 0);
+    } finally { release(); await Promise.allSettled([work]); assert.equal(active.size, 0); t.mock.restoreAll(); }
+  });
+
+test('initial source reread cancellation leaves capture publications and retirement on the original catalog', async () => {
+  const source = await readFile(new URL('./source-projection.ts', import.meta.url), 'utf8');
+  const body = source.slice(source.indexOf('async function captureSourceProjection('));
+  assert.match(body, /const reads = signal \? artifacts.withReadSignal\(signal\) : artifacts;/u);
+  assert.match(body, /decodeWorkspaceEntries\(await reads.readCanonical\(entriesArtifact.ref\)\)/u);
+  assert.match(body, /captureWorkspaceEntries\(workspaceRoot, artifacts,/u);
+  assert.doesNotMatch(body, /reads.publish|artifacts =/u);
+  assert.match(body, /finally \{ retire\(\[\.\.\.cursors, \.\.\.observed.map\(item => item.entry\)\], operationError\); \}/u);
+});
 
 async function fixture(t: TestContext) {
   const directory = await mkdtemp(path.join(process.cwd(), '.cliq-source-projection-'));

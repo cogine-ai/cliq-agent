@@ -25,7 +25,7 @@ import { readInvocationJournal } from './repositories/journal.js';
 import { readWorkerLaunchesForRun } from './repositories/worker-launches.js';
 import { readWorkspaceGenerationsForRun } from './repositories/workspace-generations.js';
 import { readCheckpoint, readRun, readSession, ZERO_BUDGET } from './rows.js';
-import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
+import { assertSqliteConnectionOwnedBy, type SqliteConnection, type SqliteDriver } from './sqlite-driver.js';
 import { assertActiveStateOwner, type StateOwnerContext } from './state-owner.js';
 import { readAgentStop } from './stop-recovery.js';
 import { decodeRunResult } from './result-artifacts.js';
@@ -315,15 +315,16 @@ export async function preparePublicationInitialAmbiguitySettlement(driver: Sqlit
 /** Fixed ZERO writer friend. The key was registered only after the genuine
  * received task/native result and its complete original UNKNOWN graph. */
 export function assertPublicationReconciliationSettlementForInvocation(driver: SqliteDriver, owner: StateOwnerContext,
-  key: OwnedPublicationReconciliationResult | OwnedPublicationReceivedResult): Resolution {
+  key: OwnedPublicationReconciliationResult | OwnedPublicationReceivedResult, connection: SqliteConnection = driver): Resolution {
   const binding = bindings.get(key);
   if (!binding || binding.driver !== driver || binding.owner !== owner ||
       (binding.kind !== 'reconciliation' && binding.kind !== 'received'))
     throw new TypeError('publication resolution requires its exact original registered reconciliation owner');
   if (!binding.resolution || binding.kind === 'received' && !binding.resolvedUnknown)
     throw new TypeError('publication resolution requires its exact original registered reconciliation owner');
-  if (binding.kind === 'reconciliation') { binding.sql(driver); return binding.resolution; }
-  originalReceived(binding); return binding.resolution;
+  assertSqliteConnectionOwnedBy(driver, connection);
+  if (binding.kind === 'reconciliation') { binding.sql(connection); return binding.resolution; }
+  originalReceived(binding, connection); return binding.resolution;
 }
 
 /** The actual descriptor-only inspection fixes every outcome/ref here. The
@@ -569,8 +570,8 @@ export async function preparePublicationSettlement(driver: SqliteDriver, artifac
   return binding.facade;
 }
 
-function originalReceived(binding: ReceivedBinding) {
-  const actual = readOwnedPublicationReceivedResult(binding.driver, binding.artifacts, binding.owner, binding.execution, binding.receivedResult);
+function originalReceived(binding: ReceivedBinding, connection: SqliteConnection = binding.driver) {
+  const actual = readOwnedPublicationReceivedResult(binding.driver, binding.artifacts, binding.owner, binding.execution, binding.receivedResult, connection);
   requireEqual(actual.completion, binding.completion, 'publication same original durable received result');
   const handoff = actual.entry.receivedHandoff;
   if (!handoff || actual.entry.result && actual.entry.result.item.outcome !== 'unknown' || actual.entry.sequence !== 'forward' ||
@@ -617,7 +618,7 @@ async function selectReceived(binding: ReceivedBinding): Promise<Selection> {
     assertActiveStateOwner(connection, binding.owner);
     if (canonicalSha256(sqlCut(connection, binding, prefix.admission.source.run.id)) !== fingerprint)
       throw new KernelStorageError('REVISION_CONFLICT', 'received publication result lost its exact Run, Stop, Session or handoff cut');
-    originalReceived(binding);
+    originalReceived(binding, connection);
   } };
 }
 

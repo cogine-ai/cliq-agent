@@ -604,7 +604,7 @@ export function preparePublicationReconciliationInvocationSettlement(driver: Sql
     const plan = await original.continuation({ run, prepared: original.prepared, settlement: original.settlement });
     let result!: { run: Run; entry: InvocationJournalEntry; settlement: BudgetSettlementV1 }, outcome: TimeFenceAdvance | undefined;
     driver.transaction(connection => {
-      const bound = assertPublicationReconciliationSettlementForInvocation(driver, owner, key);
+      const bound = assertPublicationReconciliationSettlementForInvocation(driver, owner, key, connection);
       if (bound !== original) throw new KernelStorageError('ARTIFACT_MISMATCH', 'publication resolution owner changed during preparation');
       assertActiveStateOwner(connection, owner);
       const current = readRun(connection, run.id), entries = readInvocationAttempt(connection, run.id, original.prepared.opId, original.prepared.attempt);

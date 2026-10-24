@@ -20,6 +20,103 @@ function between(text: string, start: string, end: string): string {
   return text.slice(first, last);
 }
 
+test('publication admission scopes its three final reads but preserves original joined publications and owner binding', () => {
+  const body = between(source('./publication-invocation.ts'), 'export async function preparePublicationInvocation(', 'type MaintenanceInput =');
+  assert.match(body, /prepareValidatedInvocation\(driver, reads, owner,/u,
+    'the original final invocation preflight must receive the existing read cancellation view');
+  assert.match(body, /const metadata = await joinResourceOperations\(\[artifacts\.publishCanonical/u);
+  assert.equal(body.match(/artifacts\.publishCanonical\(/gu)?.length, 3, 'all three original durable publications remain on the raw catalog');
+  assert.doesNotMatch(body, /reads\.publishCanonical/u);
+  assert.match(body, /const held: Binding = \{ mode: 'forward', driver, artifacts, reads, owner,/u,
+    'the genuine retained owner must keep its original raw catalog');
+  assert.match(body, /root\.assertHeld\(\); input\.signal\?\.throwIfAborted\(\);/u);
+  assert.match(body, /validate\(connection, run, attempt, now\) \{\s*assertCut\(connection\);/u,
+    'the original transaction still validates the actual owner cut and cancellation');
+});
+
+// Bind only the caller's actual catalog argument and each of the reducer's
+// original three read expressions. The plain ref holders below are not a Run,
+// StateOwner, invocation input, SQL transaction or native authority.
+function publicationAdmissionRead(stage: 'request' | 'grant' | 'spec'):
+  (artifacts: ArtifactCatalog, reads: ArtifactCatalog, ref: string) => Promise<unknown> {
+  const forward = between(source('./publication-invocation.ts'), 'export async function preparePublicationInvocation(', 'type MaintenanceInput =');
+  const caller = ts.createSourceFile('publication-admission-catalog-data.ts', forward, ts.ScriptTarget.Latest, true);
+  const invocations: ts.CallExpression[] = [];
+  const findCall = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && node.expression.getText(caller) === 'prepareValidatedInvocation') invocations.push(node);
+    ts.forEachChild(node, findCall);
+  };
+  findCall(caller); assert.equal(invocations.length, 1, 'use only the original forward publication admission call');
+  const argument = invocations[0]!.arguments[1]!;
+  assert(ts.isIdentifier(argument) && ['artifacts', 'reads'].includes(argument.text), 'the actual catalog argument must remain a fixed local binding');
+  const choose = new Function('artifacts', 'reads', `return ${argument.getText(caller)};`);
+  const reducer = ts.createSourceFile('invocation-read-data.ts', source('./reducers/invocation.ts'), ts.ScriptTarget.Latest, true);
+  const body = reducer.statements.find((node): node is ts.FunctionDeclaration => ts.isFunctionDeclaration(node) && node.name?.text === 'prepareValidatedInvocation')?.body;
+  assert(body, 'the original reducer body must exist');
+  const signatures = { request: 'artifacts.readBytes(input.requestRef)', grant: 'artifacts.readBytes(input.grantRef)',
+    spec: 'artifacts.readCanonical(initialRun.specRef)' };
+  const expressions: ts.CallExpression[] = [];
+  const findRead = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && node.getText(reducer) === signatures[stage]) expressions.push(node);
+    ts.forEachChild(node, findRead);
+  };
+  findRead(body); assert.equal(expressions.length, 1, 'execute one original read expression, never the reducer or its authority checks');
+  const output = ts.transpileModule(`return ${expressions[0]!.getText(reducer)};`,
+    { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText;
+  const read = new Function('artifacts', 'input', 'initialRun', output);
+  return (artifacts, reads, ref) => read(choose(artifacts, reads), { requestRef: ref, grantRef: ref }, { specRef: ref }) as Promise<unknown>;
+}
+
+for (const stage of ['request', 'grant', 'spec'] as const) for (const fault of ['cancel', 'retirement'] as const)
+  test(`publication admission ${stage} read joins its genuine FD and original return before exposing ${fault}`, async t => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), 'cliq-publication-admission-read-'));
+    t.after(() => fs.rm(home, { recursive: true, force: true }));
+    const root = path.join(home, 'objects'); await fs.mkdir(root, { mode: 0o700 });
+    const cas = new ContentAddressedStore(root), catalog = new ArtifactCatalog(cas);
+    const { ref } = await catalog.publishCanonical({ diagnosticOnly: true, stage, value: 'inert complete CAS bytes, never authority' }, 'cliq-read-join-data-v1');
+    const owner = new AbortController(), reason = new Error('the original publication preflight was revoked');
+    const closeFailure = new Error('the actual publication preflight root closed but its report is uncertain');
+    const gate = () => { let release!: () => void; return { promise: new Promise<void>(resolve => { release = resolve; }), release }; };
+    const closing = gate(), closeGate = gate(), returned = gate(), returnGate = gate();
+    const active = new Set<object>(), open = fs.open, originalRead = cas.read.bind(cas);
+    let opened = 0, closed = 0, settled = false, actualCloseFailure = false, originalReadFailure: unknown;
+    t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
+      const handle = await open(...args); active.add(handle); opened++;
+      const close = handle.close.bind(handle);
+      t.mock.method(handle, 'close', async () => {
+        if (args[0] === root) { closing.release(); await closeGate.promise; }
+        await close(); assert.equal(active.delete(handle), true); closed++;
+        if (fault === 'retirement' && args[0] === root) { actualCloseFailure = true; throw closeFailure; }
+      });
+      return handle;
+    });
+    t.mock.method(cas, 'read', async (...args: Parameters<typeof cas.read>) => {
+      let bytes: Buffer | undefined, failed: { error: unknown } | undefined;
+      try { bytes = await originalRead(...args); } catch (error) { originalReadFailure = error; failed = { error }; }
+      assert.equal(active.size, 0); returned.release(); await returnGate.promise;
+      if (failed) throw failed.error; return bytes!;
+    });
+    const work = publicationAdmissionRead(stage)(catalog, catalog.withReadSignal(owner.signal), ref);
+    void work.then(() => { settled = true; }, () => { settled = true; });
+    try {
+      await Promise.race([closing.promise, work.then(() => { throw new Error('the actual preflight root close gate was bypassed'); })]);
+      assert.equal(opened, 2); assert.equal(closed, 1); assert.equal(active.size, 1, 'the actual original root descriptor remains open');
+      owner.abort(reason); await setImmediate();
+      assert.equal(settled, false, 'cancellation must not detach the original descriptor');
+      closeGate.release(); await returned.promise;
+      assert.equal(opened, 2); assert.equal(closed, 2); assert.equal(active.size, 0);
+      assert.equal(settled, false, 'the original completed CAS return still belongs to the same preflight');
+      returnGate.release();
+      await assert.rejects(work, error => fault === 'cancel' ? error === reason
+        : error === originalReadFailure && error instanceof ResourceRetirementError && error.cause === closeFailure,
+      'the original cancellation reason or higher-priority real CAS retirement failure must survive');
+      assert.equal(actualCloseFailure, fault === 'retirement'); assert.equal(active.size, 0);
+    } finally {
+      closeGate.release(); returnGate.release(); await Promise.allSettled([work]);
+      assert.equal(active.size, 0); t.mock.restoreAll();
+    }
+  });
+
 test('installed admission scopes only its read-only CAS work and retains original publication and transaction boundaries', () => {
   const submit = between(source('./store.ts'), 'private async submitInstalledRunOwned(', '/** One bounded production lane,');
   assert.match(submit, /const reads = this\.artifacts\.withReadSignal\(signal\)/u);

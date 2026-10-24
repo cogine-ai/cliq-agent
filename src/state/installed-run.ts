@@ -398,7 +398,7 @@ export async function assembleInstalledRun(input: {
       { bundle: installed.bundle, releaseKeys: installed.releaseKeys, sandboxProfile: decodeSandboxProfile(await readCanonicalArtifact(reads, target.sandboxProfileRef)) });
     const native = await installed.loadStateOwner(signal); await installed.revalidate(signal); return native;
   }, signal);
-  const platform = await loadInstalledCredentialPlatform(selected), user = platform.currentUser();
+  const platform = await loadInstalledCredentialPlatform(selected, signal), user = platform.currentUser();
   if (path.join(user.home, '.cliq') !== controlledHome) mismatch('installed instruction home is not the actual platform controlled home');
   const resources: Array<{ close(): void }> = []; let failure: unknown;
   let instructions: Awaited<ReturnType<typeof captureInstalledWorkspaceInstructions>>;

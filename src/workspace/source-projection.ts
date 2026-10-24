@@ -251,7 +251,8 @@ async function captureSourceProjection(input: SourceProjectionCaptureInput, mode
     const entriesArtifact = await captureWorkspaceEntries(workspaceRoot, artifacts,
       { selectedPaths: selected, maxEntries, maxBytes, maxSingleFileBytes, signal });
     assertCurrent();
-    const entries = decodeWorkspaceEntries(await artifacts.readCanonical(entriesArtifact.ref));
+    const reads = signal ? artifacts.withReadSignal(signal) : artifacts;
+    const entries = decodeWorkspaceEntries(await reads.readCanonical(entriesArtifact.ref));
     checkHardExcludedLinks(entries, hardRoots); assertCurrent();
     const rules: FrozenIgnoreRulesV1 = mode.kind === 'frozen' ? mode.rules : { schemaVersion: 1,
       format: 'cliq-frozen-ignore-rules-v1', matcherVersion: 'cliq-git-wildmatch-v1', sources: [], rules: [], rulesDigest: '' };

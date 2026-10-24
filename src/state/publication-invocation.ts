@@ -42,7 +42,7 @@ import { supervisorInspectorIdentity } from './supervisor-inspector.js';
 import { insertArtifactMetadata } from './artifacts.js';
 import { planContinuationCommit } from './continuation-commit.js';
 import { isJoinedCasPublicationFailure } from './cas.js';
-import { isRolledBackSqliteTransactionFailure } from './sqlite-driver.js';
+import { assertSqliteConnectionOwnedBy, isRolledBackSqliteTransactionFailure } from './sqlite-driver.js';
 import { readAgentStop, readRetainedAgentStop } from './stop-recovery.js';
 import { preserveActualEmptyPublicationDirectory } from './publication-actual-preimage.js';
 import { selectAgentStop, type AgentStopIntent } from '../runtime/stop.js';
@@ -154,16 +154,16 @@ export function assertOwnedPublicationArtifacts(driver: SqliteDriver, owner: Sta
   if (held.execution !== execution || held.artifacts !== artifacts)
     throw new TypeError('publication requires its exact original execution and artifact catalog');
 }
-function assertCurrent(held: Binding) {
+function assertCurrent(held: Binding, connection: SqliteConnection = held.driver) {
   if (held.retirementFailure) throw held.retirementFailure;
   if (held.closed || held.revoked) throw new KernelStorageError('LEASE_FENCED', 'original publication owner is closed or revoked');
   held.signal?.throwIfAborted();
-  if (held.mode === 'forward') assertDeliveryPublicationExecution(held.driver, held.owner, held.execution, held.worker, held.task);
+  if (held.mode === 'forward') assertDeliveryPublicationExecution(held.driver, held.owner, held.execution, held.worker, held.task, connection);
   else {
-    const resources = assertDeliveryPublicationMaintenanceExecution(held.driver, held.owner, held.execution, held.task, held.artifacts);
+    const resources = assertDeliveryPublicationMaintenanceExecution(held.driver, held.owner, held.execution, held.task, held.artifacts, connection);
     if (resources.workspaceRoot !== held.root || resources.runId !== held.run.id) throw new TypeError('maintenance changed its genuine original root');
   }
-  assertHeldWorkspaceRoot(held.root); assertActiveStateOwner(held.driver, held.owner);
+  assertHeldWorkspaceRoot(held.root); assertActiveStateOwner(connection, held.owner);
 }
 function sessionIdentity(connection: SqliteConnection, id: string) {
   return immutableSessionIdentity(readSession(connection, id));
@@ -290,10 +290,11 @@ export async function preparePublicationInvocation(driver: SqliteDriver, artifac
   preparationPhase('publication_prepare_cut');
   await assertPublicationReadCut(driver, reads, cut);
   const assertCut = (connection: SqliteConnection) => {
+    assertSqliteConnectionOwnedBy(driver, connection);
     assertActiveStateOwner(connection, owner);
     if (canonicalSha256(sqlCut(connection, cut.run.id, authorization.verified.admission.source.run.id)) !== fingerprint)
       throw new KernelStorageError('REVISION_CONFLICT', 'publication original source, Run, worker or prefix cut changed');
-    assertDeliveryPublicationExecution(driver, owner, input.execution, worker, input.task); root.assertHeld(); input.signal?.throwIfAborted();
+    assertDeliveryPublicationExecution(driver, owner, input.execution, worker, input.task, connection); root.assertHeld(); input.signal?.throwIfAborted();
   };
   const metadata = await joinResourceOperations([artifacts.publishCanonical(derived.request, derived.request.format), artifacts.publishCanonical(derived.target, derived.target.format),
     artifacts.publishCanonical(derived.grant, derived.grant.format)]);
@@ -301,7 +302,7 @@ export async function preparePublicationInvocation(driver: SqliteDriver, artifac
   preparationPhase('publication_prepare_physical');
   const nativeInput = await physicalInput(driver, reads, prefix, operation, publicationArenaId(cut.run.id, operation.operationId, derived.request.opId, 0, dispatchId));
   preparationPhase('publication_prepare_admit');
-  const prepared = await prepareValidatedInvocation(driver, artifacts, owner, { runId: cut.run.id, expectedRunRevision: cut.run.revision,
+  const prepared = await prepareValidatedInvocation(driver, reads, owner, { runId: cut.run.id, expectedRunRevision: cut.run.revision,
     leaseEpoch: worker.leaseEpoch, opId: derived.request.opId, opKind: 'publish', target: derived.request.targetRef,
     requestRef: canonicalSha256(derived.request), grantRef: canonicalSha256(derived.grant), replayClass: 'reconcile', reservation: { ...ZERO_BUDGET, toolCalls: 1 } },
   { metadata, validate(connection, run, attempt, now) {
@@ -379,8 +380,9 @@ export async function preparePublicationMaintenance(driver: SqliteDriver, artifa
     'maintenance original settled forward-to-abort cut');
   const fingerprint = canonicalSha256(sqlCut(driver, cut.run.id, prefix.admission.source.run.id));
   const assertCut = (connection: SqliteConnection) => {
+    assertSqliteConnectionOwnedBy(driver, connection);
     assertActiveStateOwner(connection, owner);
-    const actual = assertDeliveryPublicationMaintenanceExecution(driver, owner, input.execution, input.task, artifacts);
+    const actual = assertDeliveryPublicationMaintenanceExecution(driver, owner, input.execution, input.task, artifacts, connection);
     if (actual.workspaceRoot !== root || actual.runId !== cut.run.id) throw new TypeError('maintenance changed its owning task');
     signal.throwIfAborted(); root.assertHeld();
     if (canonicalSha256(sqlCut(connection, cut.run.id, prefix.admission.source.run.id)) !== fingerprint)
@@ -596,7 +598,7 @@ export function assertPublicationClaimForInvocation(driver: SqliteDriver, owner:
     throw new TypeError('publication claim requires its exact original unarmed native birth');
   return { metadata: immutableSnapshot(held.metadata), evidenceRef: held.birthRef, evidenceDigest: held.birth.birthDigest,
     validate(connection: SqliteConnection, run: Run, prepared: InvocationJournalEntry, now: string) {
-      assertCurrent(held); held.assertCut(connection); held.preflight && assertPublicationPreflight(driver, owner, held.preflight);
+      assertCurrent(held, connection); held.assertCut(connection); held.preflight && assertPublicationPreflight(driver, owner, held.preflight, connection);
       requireEqual(run, held.run, 'publication original prepared Run'); requireEqual(prepared, held.prepared, 'publication original prepared invocation');
       requireEqual(readInvocationAttempt(connection, run.id, prepared.opId, 0), [held.prepared], 'publication unique original preparation');
       requireEqual(readHeldPublicationBirth(owner.filesystem, held.native!), { arenaId: held.birth!.arenaId, arenaIdentity: held.birth!.arenaIdentity,

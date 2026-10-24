@@ -169,7 +169,7 @@ type InstalledRuntimeBinding = {
   initializeKeeper(): Promise<HeldInstalledKeeper>;
   acquireAnchor(): Promise<HeldInstalledAnchor>;
   loadWorkerNative(signal?: AbortSignal): Promise<NativeWorkerBinding>;
-  loadCredentialPlatform(): Promise<NativeCredentialPlatformBinding>;
+  loadCredentialPlatform(signal?: AbortSignal): Promise<NativeCredentialPlatformBinding>;
   loadManagerObserver(): Promise<InstalledManagerObserver>;
   assertManagerObservationAvailable(): void;
   loadModelBroker(): Promise<NativeModelBrokerBinding>;
@@ -203,8 +203,8 @@ export function loadInstalledWorkerNative(selected: HeldInstalledRuntime, signal
 }
 /** These two fixed friends carry no StateOwner/credential lock. The selected
  * producer supplies and retains the actual signed image/root descriptors. */
-export function loadInstalledCredentialPlatform(selected: HeldInstalledRuntime): Promise<NativeCredentialPlatformBinding> {
-  return managerObservationBinding(selected).loadCredentialPlatform();
+export function loadInstalledCredentialPlatform(selected: HeldInstalledRuntime, signal?: AbortSignal): Promise<NativeCredentialPlatformBinding> {
+  return managerObservationBinding(selected).loadCredentialPlatform(signal);
 }
 function managerObservationBinding(selected: HeldInstalledRuntime): InstalledRuntimeBinding {
   const binding = heldInstalledRuntimes.get(selected);
@@ -1420,11 +1420,11 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
               return workerNative;
             });
           },
-          loadCredentialPlatform() {
+          loadCredentialPlatform(signal) {
             return enqueue(async () => {
               if (!isMainThread || !isSea() || process.platform !== 'linux' || process.arch !== 'x64' || process.versions.node !== '24.21.0')
                 throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'credential platform requires the fixed signed Linux backend');
-              await checkedRevalidate();
+              await checkedRevalidate(signal);
               if (!credentialPlatform) {
                 const native = loadCredentialPlatformNative();
                 const refused = refusePlatformOperation, track = trackPlatformOperation;
@@ -1487,7 +1487,7 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
                     }
                   } });
               }
-              await checkedRevalidate();
+              await checkedRevalidate(signal);
               return credentialPlatform;
             });
           },
