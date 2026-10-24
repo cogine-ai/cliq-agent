@@ -87,6 +87,27 @@ authentication/stop deadlines remain unchanged. Real descriptor ownership
 and Linux timing/storage qualification must still be measured; this approval
 and logical completion-gate regressions do not supply physical cut evidence.
 
+### Approved fixed-four durability batch, 2026-10-25
+
+The four artifacts may share one held CAS directory and one phase barrier
+per original durability boundary: complete temporary-file writes and per-file
+sync/close, recovery-temporary publication, no-replace final links, then exact
+owned-temporary retirement. Every phase first joins all its actual mutations,
+including mutations whose syscall reports an error after taking effect, and
+then syncs that same identity-checked directory. No later barrier covers an
+omitted earlier one. The single-object publisher and fixed-four publisher use
+the same bounded recovery rules; concurrent independent publishers remain
+supported. Partial failure durably cleans only owned temporary objects and
+joins every file/root descriptor, preserving retirement uncertainty over an
+ordinary failure. Already valid final CAS orphans are not deleted.
+
+Only the fully joined group returns its fixed four descriptors. Each original
+full byte/hash/metadata verification and the final native-current channel
+gate remain mandatory. Diagnostic spans cover the same complete group, not
+four independent fsync timings. The original five-second authentication and
+two-second shutdown limits are unchanged; real Linux and delayed-storage
+qualification are separate evidence, not consequences of this approval.
+
 ## Acceptance and integration
 
 On real macOS and Linux, exercise cross-process connections, repeated native

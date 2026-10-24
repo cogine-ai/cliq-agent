@@ -1,5 +1,7 @@
 // Test-private byte qualification only: no filesystem, hashing, persistence,
 // process evidence or authority decisions. Callers retain ownership of input.
+import { types } from 'node:util';
+
 export type CredentialSecretScanCode = 'INVALID_INPUT' | 'LIMIT_EXCEEDED' | 'SECRET_DETECTED' | 'CLOSED';
 const messages: Record<CredentialSecretScanCode, string> = {
   INVALID_INPUT: 'credential secret scan input is invalid',
@@ -22,6 +24,43 @@ export type CredentialSecretScanStream = Readonly<{ scan(bytes: Uint8Array): voi
 export type CredentialSecretScanner = Readonly<{
   openStream(): CredentialSecretScanStream; stats(): CredentialSecretScanStats; close(): void;
 }>;
+export type CredentialSecretScanFailureStage = 'runtime' | 'corpus' | 'report';
+export type CredentialSecretScanFailureDiagnostic = Readonly<{
+  diagnosticOnly: true; firstFailureStage: CredentialSecretScanFailureStage | null;
+  beforeCorpus: Readonly<{ streamsOpened: number; bytesScanned: number }> | null;
+  corpusScanFailureCode: CredentialSecretScanCode | null;
+}>;
+
+/** Fixed fallback data only. It cannot expose an original report, phase,
+ * error or input bytes, or turn a failed scan into qualification. */
+export function copyCredentialSecretScanFailureDiagnostic(input: unknown): CredentialSecretScanFailureDiagnostic {
+  function invalid(): never { throw new TypeError('invalid credential secret scan failure diagnostic'); }
+  const fields = (value: unknown, keys: readonly string[]): Record<string, PropertyDescriptor> => {
+    if (typeof value !== 'object' || value === null || Array.isArray(value) || types.isProxy(value)) invalid();
+    if (![Object.prototype, null].includes(Object.getPrototypeOf(value))) invalid();
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    const names = Reflect.ownKeys(descriptors);
+    if (names.length !== keys.length || !names.every(key => typeof key === 'string' && keys.includes(key))) invalid();
+    for (const key of keys) if (!Object.hasOwn(descriptors[key]!, 'value') || !descriptors[key]!.enumerable) invalid();
+    return descriptors;
+  };
+  const value = fields(input, ['diagnosticOnly', 'firstFailureStage', 'beforeCorpus', 'corpusScanFailureCode']);
+  if (value.diagnosticOnly!.value !== true) invalid();
+  const stage: unknown = value.firstFailureStage!.value, code: unknown = value.corpusScanFailureCode!.value;
+  if (stage !== null && (typeof stage !== 'string' || !['runtime', 'corpus', 'report'].includes(stage))) invalid();
+  if (code !== null && (typeof code !== 'string' || !Object.hasOwn(messages, code))) invalid();
+  let beforeCorpus: CredentialSecretScanFailureDiagnostic['beforeCorpus'] = null;
+  if (value.beforeCorpus!.value !== null) {
+    const before = fields(value.beforeCorpus!.value, ['streamsOpened', 'bytesScanned']);
+    const streams: unknown = before.streamsOpened!.value, bytes: unknown = before.bytesScanned!.value;
+    if (typeof streams !== 'number' || !Number.isSafeInteger(streams) || streams < 0 || streams > 4096 ||
+        typeof bytes !== 'number' || !Number.isSafeInteger(bytes) || bytes < 0 || bytes > 512 * 1024 * 1024) invalid();
+    beforeCorpus = Object.freeze({ streamsOpened: streams, bytesScanned: bytes });
+  }
+  if ((stage === 'corpus' || code !== null) && beforeCorpus === null) invalid();
+  return Object.freeze({ diagnosticOnly: true, firstFailureStage: stage as CredentialSecretScanFailureStage | null,
+    beforeCorpus, corpusScanFailureCode: code as CredentialSecretScanCode | null });
+}
 const maxSecretBytes = 65536, maxSecretCount = 32, maxChunkBytes = 8 * 1024 * 1024;
 function invalid(): never { throw new CredentialSecretScanError('INVALID_INPUT'); }
 function bytesInput(input: unknown): Uint8Array {
@@ -63,7 +102,8 @@ function appendNeedles(needles: Buffer[], input: Uint8Array): void {
  * pretty printing; this is not a promise about arbitrary secret encodings.
  * Failure retires all copied needles/tails. Only counts/booleans escape.
  * Buffer wiping cannot promise erasure of VM/native copies owned elsewhere. */
-export function createCredentialSecretScanner(secrets: readonly Uint8Array[], inputLimits: CredentialSecretScanLimits): CredentialSecretScanner {
+export function createCredentialSecretScanner(secrets: readonly Uint8Array[], inputLimits: CredentialSecretScanLimits,
+  onFailure?: (error: CredentialSecretScanError) => void): CredentialSecretScanner {
   const limits = checkedLimits(inputLimits);
   const needles: Buffer[] = [];
   try {
@@ -100,7 +140,12 @@ export function createCredentialSecretScanner(secrets: readonly Uint8Array[], in
   const fail = (code: CredentialSecretScanCode): never => {
     if (code === 'SECRET_DETECTED') matched = true;
     if (code === 'LIMIT_EXCEEDED') limitExceeded = true;
-    close(); throw new CredentialSecretScanError(code);
+    close();
+    const error = new CredentialSecretScanError(code);
+    // Test-private observation cannot change the original failure or run
+    // before actual stream/needle retirement. Successful scans do no work here.
+    try { onFailure?.(error); } catch { /* Preserve the original scanner error. */ }
+    throw error;
   };
   const stats = (): CredentialSecretScanStats => Object.freeze({ bytesScanned, chunksScanned, streamsOpened, streamsClosed,
     needleCount, retainedNeedleBytes: needles.reduce((sum, needle) => sum + needle.length, 0),

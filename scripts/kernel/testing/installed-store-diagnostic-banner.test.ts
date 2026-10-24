@@ -3,6 +3,56 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 
+test('the trusted exit banner retains the last original scheduler failure and the actual pre-stop count', async () => {
+  const { INSTALLED_STORE_DIAGNOSTIC_BANNER } = await import('./installed-store-diagnostic-banner.js');
+  const child = spawnSync(process.execPath, ['--input-type=commonjs', '--eval', INSTALLED_STORE_DIAGNOSTIC_BANNER + `
+    const d = require('node:diagnostics_channel').channel('cliq.installed.run.failures.v1');
+    d.publish({kind:'scheduler_failure',origin:'drive',phase:'drive_verify',closing:false,errorClass:'other',code:'none',sqliteCode:null});
+    d.publish({kind:'store_stop',driverTasks:1,agentLoads:0,admissions:0,retainedFailures:1,globalFailure:false,phases:{publication_prepare:1}});
+    d.publish({kind:'scheduler_failure',origin:'drive',phase:'publication_prepare',closing:true,errorClass:'other',code:'none',sqliteCode:null});
+    require('node:fs').writeSync(1, 'operation unchanged\\n');
+  `], { encoding: 'utf8', timeout: 5000, maxBuffer: 65536 });
+  assert.equal(child.error, undefined); assert.equal(child.signal, null); assert.equal(child.status, 0);
+  assert.equal(child.stdout, 'operation unchanged\n');
+  assert.equal(child.stderr, 'CLIQ_STORE_DIAG_V1:begin:0:2\n' +
+    'CLIQ_STORE_DIAG_V1:scheduler:drive:drive_verify:0:other:none:-\n' +
+    'CLIQ_STORE_DIAG_V1:scheduler_window:1\n' +
+    'CLIQ_STORE_DIAG_V1:scheduler_last:drive:publication_prepare:1:other:none:-\n' +
+    'CLIQ_STORE_DIAG_V1:stop:1:0:0:1:0\n' +
+    'CLIQ_STORE_DIAG_V1:phase:publication_prepare:1\nCLIQ_STORE_DIAG_V1:end\n');
+});
+
+test('a real failure after the stop snapshot does not disappear when its pre-stop count was zero', async () => {
+  const { INSTALLED_STORE_DIAGNOSTIC_BANNER } = await import('./installed-store-diagnostic-banner.js');
+  const child = spawnSync(process.execPath, ['--input-type=commonjs', '--eval', INSTALLED_STORE_DIAGNOSTIC_BANNER + `
+    const d = require('node:diagnostics_channel').channel('cliq.installed.run.failures.v1');
+    d.publish({kind:'store_stop',driverTasks:1,agentLoads:0,admissions:0,retainedFailures:0,globalFailure:false,phases:{publication_select:1}});
+    const failure = {kind:'scheduler_failure',origin:'drive',phase:'publication_select',closing:true,errorClass:'other',code:'none',sqliteCode:null};
+    d.publish(failure); failure.phase='private'; failure.closing=false;
+  `], { encoding: 'utf8', timeout: 5000, maxBuffer: 65536 });
+  assert.equal(child.error, undefined); assert.equal(child.signal, null); assert.equal(child.status, 0);
+  assert.equal(child.stderr, 'CLIQ_STORE_DIAG_V1:begin:0:1\n' +
+    'CLIQ_STORE_DIAG_V1:scheduler:drive:publication_select:1:other:none:-\n' +
+    'CLIQ_STORE_DIAG_V1:scheduler_window:0\n' +
+    'CLIQ_STORE_DIAG_V1:scheduler_last:drive:publication_select:1:other:none:-\n' +
+    'CLIQ_STORE_DIAG_V1:stop:1:0:0:0:0\n' +
+    'CLIQ_STORE_DIAG_V1:phase:publication_select:1\nCLIQ_STORE_DIAG_V1:end\n');
+});
+
+test('a failed diagnostic exit write does not replace the real child operation or keep it alive', async () => {
+  const { INSTALLED_STORE_DIAGNOSTIC_BANNER } = await import('./installed-store-diagnostic-banner.js');
+  const child = spawnSync(process.execPath, ['--input-type=commonjs', '--eval', `
+    const fs = require('node:fs'), originalWrite = fs.writeSync;
+    fs.writeSync = (fd, ...args) => { if (fd === 2) throw Error('diagnostic output unavailable'); return originalWrite(fd, ...args); };
+  ` + INSTALLED_STORE_DIAGNOSTIC_BANNER + `
+    const d = require('node:diagnostics_channel').channel('cliq.installed.run.failures.v1');
+    d.publish({kind:'store_stop',driverTasks:0,agentLoads:0,admissions:0,retainedFailures:0,globalFailure:false,phases:{}});
+    fs.writeSync(1,'operation unchanged\\n');
+  `], { encoding: 'utf8', timeout: 5000, maxBuffer: 65536 });
+  assert.equal(child.error, undefined); assert.equal(child.signal, null); assert.equal(child.status, 0);
+  assert.equal(child.stdout, 'operation unchanged\n'); assert.equal(child.stderr, '');
+});
+
 test('the exit banner appends only the first actual authorization failure and count without changing old frames', async () => {
   const { INSTALLED_STORE_DIAGNOSTIC_BANNER } = await import('./installed-store-diagnostic-banner.js');
   const child = spawnSync(process.execPath, ['--input-type=commonjs', '--eval', INSTALLED_STORE_DIAGNOSTIC_BANNER + `
@@ -15,6 +65,7 @@ test('the exit banner appends only the first actual authorization failure and co
   assert.equal(child.error, undefined); assert.equal(child.signal, null); assert.equal(child.status, 0);
   assert.equal(child.stdout, 'operation unchanged\n');
   assert.equal(child.stderr, 'CLIQ_STORE_DIAG_V1:begin:0:0\n' +
+    'CLIQ_STORE_DIAG_V1:scheduler_window:0\n' +
     'CLIQ_STORE_DIAG_V1:authorization:2:transaction:kernel:REVISION_CONFLICT:-\n' +
     'CLIQ_STORE_DIAG_V1:stop:0:0:0:0:0\nCLIQ_STORE_DIAG_V1:end\n');
 });
@@ -33,6 +84,8 @@ test('the trusted banner emits its bounded fixed summary only as the real child 
   assert.equal(child.stderr, 'CLIQ_STORE_DIAG_V1:begin:1:1\n' +
     'CLIQ_STORE_DIAG_V1:apply:postcommit_load:0:sqlite:ERR_SQLITE_ERROR:1\n' +
     'CLIQ_STORE_DIAG_V1:scheduler:drive:drive_agent:0:kernel:RECOVERY_REQUIRED:-\n' +
+    'CLIQ_STORE_DIAG_V1:scheduler_window:1\n' +
+    'CLIQ_STORE_DIAG_V1:scheduler_last:drive:drive_agent:0:kernel:RECOVERY_REQUIRED:-\n' +
     'CLIQ_STORE_DIAG_V1:stop:1:0:0:1:0\n' +
     'CLIQ_STORE_DIAG_V1:phase:drive_agent:1\nCLIQ_STORE_DIAG_V1:end\n');
 });
@@ -57,7 +110,7 @@ test('a real live child emits no summary before its stdin ends and every owned p
     child.stdin.end();
     const actual = await Promise.race([joined, new Promise<never>((_, reject) => timeout.addEventListener('abort', () => reject(new Error('owned child pipes did not join')), { once: true }))]);
     assert.deepEqual(actual, { code: 0, signal: null });
-    assert.equal(stderr, 'CLIQ_STORE_DIAG_V1:begin:0:0\nCLIQ_STORE_DIAG_V1:stop:0:0:0:0:0\nCLIQ_STORE_DIAG_V1:end\n');
+    assert.equal(stderr, 'CLIQ_STORE_DIAG_V1:begin:0:0\nCLIQ_STORE_DIAG_V1:scheduler_window:0\nCLIQ_STORE_DIAG_V1:stop:0:0:0:0:0\nCLIQ_STORE_DIAG_V1:end\n');
   } finally {
     if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
     await joined;
@@ -103,6 +156,23 @@ test('authorization tuple accessors and Proxy traps never run and cannot reveal 
     const child = spawnSync(process.execPath, ['--input-type=commonjs', '--eval', INSTALLED_STORE_DIAGNOSTIC_BANNER + `
       let reads=0; const bad=()=>{reads++;throw Error('private')};
       const row={kind:'authorization_failure',stage:'transaction',errorClass:'kernel',code:'REVISION_CONFLICT',sqliteCode:null};
+      require('node:diagnostics_channel').channel('cliq.installed.run.failures.v1').publish(${value});
+      require('node:fs').writeSync(1,'accesses:'+reads);
+    `], { encoding: 'utf8', timeout: 5000, maxBuffer: 65536 });
+    assert.equal(child.error, undefined); assert.equal(child.signal, null); assert.equal(child.status, 0);
+    assert.equal(child.stdout, 'accesses:0'); assert.equal(child.stderr, 'CLIQ_STORE_DIAG_V1:truncated\n');
+  }
+});
+
+test('scheduler tuple accessors, proxies and unknown publication phases remain unavailable without inspecting them', async () => {
+  const { INSTALLED_STORE_DIAGNOSTIC_BANNER } = await import('./installed-store-diagnostic-banner.js');
+  const variants = [`Object.defineProperty({...row},'phase',{get:bad})`, `Object.defineProperty({...row},'closing',{get:bad})`,
+    `new Proxy(row,{get:bad,ownKeys:bad,getPrototypeOf:bad,getOwnPropertyDescriptor:bad})`,
+    `{...row,phase:'publication_unknown'}`, `{...row,path:'private'}`, `{...row,[Symbol('private')]:1}`];
+  for (const value of variants) {
+    const child = spawnSync(process.execPath, ['--input-type=commonjs', '--eval', INSTALLED_STORE_DIAGNOSTIC_BANNER + `
+      let reads=0; const bad=()=>{reads++;throw Error('private')};
+      const row={kind:'scheduler_failure',origin:'drive',phase:'publication_prepare',closing:true,errorClass:'other',code:'none',sqliteCode:null};
       require('node:diagnostics_channel').channel('cliq.installed.run.failures.v1').publish(${value});
       require('node:fs').writeSync(1,'accesses:'+reads);
     `], { encoding: 'utf8', timeout: 5000, maxBuffer: 65536 });

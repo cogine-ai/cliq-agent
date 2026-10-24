@@ -1,6 +1,6 @@
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import type { AuthorizationGrantV1, AuthorizationResponse } from '../kernel/authorization.js';
-import { addCanonicalDuration, digestOmitting } from '../kernel/identity.js';
+import { addCanonicalDuration, digestOmitting, parseCanonicalTime } from '../kernel/identity.js';
 import { immutableSnapshot } from '../model/immutable.js';
 import { type ReleaseTrustKey, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { readCanonicalArtifact } from './agent-context.js';
@@ -12,7 +12,7 @@ import { readRetainedControlChannelClosure, validateControlChannelClosure, type 
 import { assertCurrentControlFrame } from './control-channel.js';
 import { KernelStorageError, stateOperation } from './errors.js';
 import { readRetainedVerifierToolchain } from './guest-toolchain.js';
-import { readAuthorizationGrant, insertAuthorizationGrant, consumeOrRevokeAuthorization } from './repositories/authorization-grants.js';
+import { readAuthorizationGrant, readAuthorizationCreationControl, insertAuthorizationGrant, consumeOrRevokeAuthorization } from './repositories/authorization-grants.js';
 import { readControlRequest, insertControlRequest, readRun } from './rows.js';
 import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
 import { assertActiveStateOwner, readStateOwner, type StateOwnerContext } from './state-owner.js';
@@ -30,17 +30,24 @@ function initialGrant(grant: AuthorizationGrantV1): Extract<AuthorizationGrantV1
 function createResponse(grant: AuthorizationGrantV1): AuthorizationResponse {
   return { protocolVersion: 1, ok: true, result: { method: 'authorization.create', grant: authorizationSummary(initialGrant(grant)) } };
 }
+function* authorizationOwnersDuring(driver: SqliteDriver, preparedAt: string, committedAt: string) {
+  const rows = driver.prepare('SELECT owner_epoch FROM state_owners ORDER BY owner_epoch').all<{ owner_epoch: bigint }>();
+  for (const { owner_epoch } of rows) {
+    const historical = readStateOwner(driver, Number(owner_epoch));
+    if (historical && historical.acquiredAt <= preparedAt &&
+        (historical.state !== 'terminal' || historical.releasedAt >= committedAt)) yield historical;
+  }
+}
 /** Historical audit only; it cannot authenticate input or reopen an executable. */
 export async function readAuthorizationHistory(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
   grant: AuthorizationGrantV1, releaseKeys: readonly ReleaseTrustKey[], signal?: AbortSignal) {
   signal?.throwIfAborted();
-  const row = readControlRequest(driver, grant.ownerPrincipalId, 'authorization.create', grant.sourceRequestId);
+  const row = readAuthorizationCreationControl(driver, grant);
   const { channel } = await readRetainedControlChannelClosure(artifacts, owner, { principalId: grant.ownerPrincipalId,
     channelIdentityRef: grant.channelIdentityRef, channelIdentityDigest: grant.channelIdentityDigest });
   const core = await readCanonicalArtifact<Record<string, unknown>>(artifacts, grant.sourceRequestDigest);
   const request = decodeVerifierIdentityCreateRequest({ ...core, requestDigest: grant.sourceRequestDigest });
-  if (!row || request.requestId !== grant.sourceRequestId || row.requestDigest !== grant.sourceRequestDigest || row.channelIdentityRef !== grant.channelIdentityRef ||
-      row.channelIdentityDigest !== grant.channelIdentityDigest || row.committedAt !== grant.createdAt || channel.openedAt > grant.createdAt ||
+  if (request.requestId !== grant.sourceRequestId || channel.openedAt > grant.createdAt ||
       grant.expiresAt !== addCanonicalDuration(grant.createdAt, request.ttlMs ?? 3_600_000) ||
       !same(await readCanonicalArtifact(artifacts, row.responseRef), createResponse(grant)))
     throw new KernelStorageError('RECOVERY_REQUIRED', 'authorization has no exact original authenticated creation');
@@ -50,11 +57,8 @@ export async function readAuthorizationHistory(driver: SqliteDriver, artifacts: 
   const executionIdentity = target.identity;
   // The creating owner and its selected signed bundle remain historical
   // authority after upgrade. Do not resolve an old public id against today.
-  const ownerRows = driver.prepare('SELECT owner_epoch FROM state_owners ORDER BY owner_epoch').all<{ owner_epoch: bigint }>();
   let originalBundle: RuntimeBundleManifest | undefined;
-  for (const { owner_epoch } of ownerRows) {
-    const historical = readStateOwner(driver, Number(owner_epoch));
-    if (!historical || historical.acquiredAt > grant.createdAt || (historical.state === 'terminal' && historical.releasedAt < grant.createdAt)) continue;
+  for (const historical of authorizationOwnersDuring(driver, grant.createdAt, row.committedAt)) {
     const bundle = await readCanonicalArtifact<RuntimeBundleManifest>(artifacts, historical.runtimeBundleRef);
     if (bundle.manifestDigest !== historical.runtimeBundleManifestDigest) throw new TypeError('authorization historical bundle differs from its owner');
     if (bundle.structuredArtifacts.some(root => root.kind === 'guest_toolchain' && root.artifactId === request.decision.target.guestToolchainManifestId &&
@@ -71,7 +75,7 @@ export async function readAuthorizationHistory(driver: SqliteDriver, artifacts: 
   if (grant.state === 'consumed') {
     const receipt = decodeAuthorizationConsumptionReceipt(await readCanonicalArtifact(artifacts, grant.consumptionReceiptRef));
     if (receipt.consumer.kind !== 'run_admission' || receipt.grantId !== grant.grantId || receipt.ownerPrincipalId !== grant.ownerPrincipalId ||
-        receipt.targetDigest !== grant.targetDigest || receipt.consumedAt !== grant.consumedAt)
+        receipt.targetDigest !== grant.targetDigest || receipt.consumedAt !== grant.consumedAt || receipt.consumedAt < row.committedAt)
       throw new TypeError('authorization consumption does not match its immutable receipt');
     const run = readRun(driver, receipt.consumer.runId);
     const admission = driver.prepare('SELECT principal_id, admission_intent_digest FROM runs WHERE id = ?')
@@ -81,15 +85,17 @@ export async function readAuthorizationHistory(driver: SqliteDriver, artifacts: 
   }
   if (grant.state === 'revoked') {
     const revoked = readControlRequest(driver, grant.ownerPrincipalId, 'authorization.revoke', grant.revokedByRequestId);
-    if (!revoked || revoked.committedAt !== grant.revokedAt) throw new TypeError('revoked authorization has no original revoke request');
-    await verifyRevokeResponse(driver, artifacts, owner, grant, grant.revokedByRequestId);
+    if (!revoked || grant.revokedAt < row.committedAt || revoked.committedAt < grant.revokedAt)
+      throw new TypeError('revoked authorization has no original revoke request');
+    await verifyRevokeResponse(driver, artifacts, owner, grant, grant.revokedByRequestId, row.committedAt);
   }
-  return { request, selected };
+  return { request, selected, committedAt: row.committedAt };
 }
 async function verifyRevokeResponse(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
-  grant: AuthorizationGrantV1, requestId: string) {
+  grant: AuthorizationGrantV1, requestId: string, creationCommittedAt: string) {
   const row = readControlRequest(driver, grant.ownerPrincipalId, 'authorization.revoke', requestId);
   if (!row) throw new TypeError('authorization revoke response has no owner');
+  parseCanonicalTime(row.committedAt);
   const core = await readCanonicalArtifact<Record<string, unknown>>(artifacts, row.requestDigest);
   const request = decodeAuthorizationRevokeRequest({ ...core, requestDigest: row.requestDigest });
   const { channel } = await readRetainedControlChannelClosure(artifacts, owner, { principalId: grant.ownerPrincipalId,
@@ -98,8 +104,17 @@ async function verifyRevokeResponse(driver: SqliteDriver, artifacts: ArtifactCat
   const expected: AuthorizationResponse = { protocolVersion: 1, ok: true, result: { method: 'authorization.revoke',
     grant: authorizationSummary(grant), disposition: grant.state === 'consumed' ? 'already_consumed' : grant.state === 'revoked' &&
       grant.revokedByRequestId === requestId ? 'revoked' : 'already_revoked' } };
-  if (channel.openedAt > row.committedAt || request.grantId !== grant.grantId || request.requestId !== requestId ||
-      !same(response, expected) || row.committedAt < grant.createdAt ||
+  const originalRevocation = grant.state === 'revoked' && grant.revokedByRequestId === requestId;
+  // A no-op response has no new immutable decision timestamp. Audit its real
+  // commit point, rather than inventing a retained preparation timestamp.
+  const ownerIntervalStart = originalRevocation ? grant.revokedAt : row.committedAt;
+  const originalRevoke = grant.state === 'revoked' ? readControlRequest(driver, grant.ownerPrincipalId, 'authorization.revoke', grant.revokedByRequestId) : undefined;
+  const fence = readTimeFence(driver);
+  if (channel.openedAt > ownerIntervalStart || request.grantId !== grant.grantId || request.requestId !== requestId ||
+      !same(response, expected) || row.committedAt < ownerIntervalStart || ownerIntervalStart < creationCommittedAt ||
+      !fence || row.committedAt > fence.lastAcceptedAt ||
+      authorizationOwnersDuring(driver, ownerIntervalStart, row.committedAt).next().done ||
+      (grant.state === 'revoked' && (!originalRevoke || row.committedAt < originalRevoke.committedAt)) ||
       (grant.state === 'consumed' && row.committedAt < grant.consumedAt)) throw new TypeError('authorization revoke response differs from its exact historical outcome');
   return response;
 }
@@ -164,6 +179,8 @@ export const createAuthorization = stateOperation('INVALID_REQUEST', async (driv
     const target = { kind: 'execution_identity_read' as const, purpose: 'verifier' as const, identity: { kind: 'guest_toolchain' as const,
       guestToolchainManifestRef: selected.manifestRef, manifestDigest: selected.manifest.manifestDigest,
       toolId: node.logicalName, executionPath: node.canonicalGuestPath, executableDigest: node.digest } };
+    // Preparation fixes the original response bytes and TTL. Only the later
+    // transaction's fresh sample may register that grant and advance its fence.
     const createdAt = sampleCanonicalNow(), base = { schemaVersion: 1 as const,
       grantId: authorizationGrantId(identity.principalId, request.requestId, request.requestDigest), ownerPrincipalId: identity.principalId,
       channelIdentityRef: identity.channelIdentityRef, channelIdentityDigest: identity.channelIdentityDigest,
@@ -182,20 +199,18 @@ export const createAuthorization = stateOperation('INVALID_REQUEST', async (driv
     diagnosis?.stage('transaction');
     driver.transaction(connection => {
       signal?.throwIfAborted();
-      assertActiveStateOwner(connection, owner);
+      const currentOwner = assertActiveStateOwner(connection, owner);
       if (channel.channel.transport.kind === 'uds_peer') assertCurrentControlFrame(owner, identity);
       if (readControlRequest(connection, identity.principalId, 'authorization.create', request.requestId)) return;
-      const now = sampleCanonicalNow(), fence = readTimeFence(connection);
-      if (!fence) throw new KernelStorageError('RECOVERY_REQUIRED', 'authorization time fence is missing');
-      if (now >= createdAt && fence.state === 'healthy' && fence.lastAcceptedAt > createdAt)
-        throw new KernelStorageError('REVISION_CONFLICT', 'authorization creation timestamp lost its exact control cut');
-      outcome = advanceTimeFence(connection, owner.ownerEpoch, now < createdAt ? now : createdAt);
+      const now = sampleCanonicalNow();
+      outcome = advanceTimeFence(connection, owner.ownerEpoch, now);
       if (outcome !== 'healthy') return;
-      if (now < createdAt || now >= grant.expiresAt || channel.channel.openedAt > createdAt) throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');
-      for (const metadata of [...channel.metadata, requestArtifact, published]) insertArtifactMetadata(connection, metadata, createdAt);
+      if (now < createdAt || now >= grant.expiresAt || currentOwner.acquiredAt > createdAt || channel.channel.openedAt > createdAt)
+        throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');
+      for (const metadata of [...channel.metadata, requestArtifact, published]) insertArtifactMetadata(connection, metadata, now);
       insertAuthorizationGrant(connection, grant);
       insertControlRequest(connection, { ...identity, method: 'authorization.create', requestId: request.requestId,
-        requestDigest: request.requestDigest, responseRef: published.ref, committedAt: createdAt }); committed = true;
+        requestDigest: request.requestDigest, responseRef: published.ref, committedAt: now }); committed = true;
     });
     requireHealthyFence(outcome);
     if (committed) return immutableSnapshot({ replayed: false, response });
@@ -218,11 +233,16 @@ export const revokeAuthorization = stateOperation('INVALID_REQUEST', async (driv
   const prior = readAuthorizationGrant(driver, request.grantId);
   if (!prior || prior.ownerPrincipalId !== identity.principalId) throw new KernelStorageError('NOT_FOUND', 'authorization does not belong to this principal');
   if (!runtime) throw new KernelStorageError('RECOVERY_REQUIRED', 'authorization revocation has no release roots');
-  await readAuthorizationHistory(driver, artifacts, owner, prior, runtime.releaseKeys, signal);
+  const history = await readAuthorizationHistory(driver, artifacts, owner, prior, runtime.releaseKeys, signal);
   if (replay) {
-    return immutableSnapshot({ replayed: true, response: await verifyRevokeResponse(driver, artifacts, owner, prior, request.requestId) });
+    return immutableSnapshot({ replayed: true, response: await verifyRevokeResponse(driver, artifacts, owner, prior, request.requestId, history.committedAt) });
   }
+  // Revocation keeps this original decision time; its control row records the
+  // actual later commit. An expired active grant may still be restricted.
   const createdAt = sampleCanonicalNow();
+  const priorCommittedAt = prior.state === 'revoked'
+    ? readControlRequest(driver, prior.ownerPrincipalId, 'authorization.revoke', prior.revokedByRequestId)!.committedAt
+    : prior.state === 'consumed' ? prior.consumedAt : history.committedAt;
   let next = prior;
   if (prior.state === 'active') {
     next = { ...authorizationGrantCore(prior), rowVersion: 2, grantCoreDigest: prior.grantCoreDigest, state: 'revoked', useCount: 0,
@@ -238,20 +258,18 @@ export const revokeAuthorization = stateOperation('INVALID_REQUEST', async (driv
   let outcome: ReturnType<typeof advanceTimeFence> | undefined, committed = false;
   driver.transaction((connection: SqliteConnection) => {
     signal?.throwIfAborted();
-    assertActiveStateOwner(connection, owner);
+    const currentOwner = assertActiveStateOwner(connection, owner);
     if (channel.channel.transport.kind === 'uds_peer') assertCurrentControlFrame(owner, identity);
     if (readControlRequest(connection, identity.principalId, 'authorization.revoke', request.requestId)) return;
     if (!same(readAuthorizationGrant(connection, prior.grantId), prior)) throw new KernelStorageError('REVISION_CONFLICT', 'authorization changed before revocation');
-    const now = sampleCanonicalNow(), fence = readTimeFence(connection);
-    if (!fence) throw new KernelStorageError('RECOVERY_REQUIRED', 'authorization time fence is missing');
-    if (now >= createdAt && fence.state === 'healthy' && fence.lastAcceptedAt > createdAt)
-      throw new KernelStorageError('REVISION_CONFLICT', 'authorization revocation timestamp lost its exact control cut');
-    outcome = advanceTimeFence(connection, owner.ownerEpoch, now < createdAt ? now : createdAt); if (outcome !== 'healthy') return;
-    if (now < createdAt || createdAt < prior.createdAt || channel.channel.openedAt > createdAt) throw new TypeError('authorization revocation is noncausal');
-    for (const metadata of [...channel.metadata, requestArtifact, published]) insertArtifactMetadata(connection, metadata, createdAt);
+    const now = sampleCanonicalNow();
+    outcome = advanceTimeFence(connection, owner.ownerEpoch, now); if (outcome !== 'healthy') return;
+    if (now < createdAt || createdAt < history.committedAt || createdAt < priorCommittedAt || currentOwner.acquiredAt > createdAt ||
+        channel.channel.openedAt > createdAt) throw new TypeError('authorization revocation is noncausal');
+    for (const metadata of [...channel.metadata, requestArtifact, published]) insertArtifactMetadata(connection, metadata, now);
     if (prior.state === 'active') consumeOrRevokeAuthorization(connection, prior, next);
     insertControlRequest(connection, { ...identity, method: 'authorization.revoke', requestId: request.requestId,
-      requestDigest: request.requestDigest, responseRef: published.ref, committedAt: createdAt });
+      requestDigest: request.requestDigest, responseRef: published.ref, committedAt: now });
     committed = true;
   });
   requireHealthyFence(outcome);
@@ -261,5 +279,5 @@ export const revokeAuthorization = stateOperation('INVALID_REQUEST', async (driv
     throw new KernelStorageError('REQUEST_ID_CONFLICT', 'authorization revoke raced another request');
   const current = readAuthorizationGrant(driver, request.grantId);
   if (!current) throw new KernelStorageError('RECOVERY_REQUIRED', 'authorization revoke replay lost its immutable grant');
-  return immutableSnapshot({ replayed: true, response: await verifyRevokeResponse(driver, artifacts, owner, current, request.requestId) });
+  return immutableSnapshot({ replayed: true, response: await verifyRevokeResponse(driver, artifacts, owner, current, request.requestId, history.committedAt) });
 });

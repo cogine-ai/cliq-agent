@@ -504,7 +504,8 @@ export const closePublicationReconciliationProbe = stateOperation('RECOVERY_REQU
     probeDeadlineAt: dispatch.probeDeadlineAt, inspectorIdentityRef: inspectorArtifact.ref, inspectorIdentityDigest: inspector.identityDigest,
     closedAt, closureDigest: '', subjectKind: 'publication' as const, deliveryPlanRef: selected.wait.subject.deliveryPlanRef,
     pathOperationId: selected.wait.subject.pathOperationId, attempt: selected.wait.subject.attempt, inspectorTaskId: dispatch.inspectorTaskId };
-  const closure: ReconciliationProbeCancellationClosureV1 | Extract<ReconciliationProbeTimeoutClosureV1, { subjectKind: 'publication' }> = kind === 'shutdown'
+  const closure: Extract<ReconciliationProbeCancellationClosureV1, { subjectKind: 'publication' }> |
+    Extract<ReconciliationProbeTimeoutClosureV1, { subjectKind: 'publication' }> = kind === 'shutdown'
     ? { ...common, format: 'cliq-reconciliation-probe-cancellation-closure-v1', reason: 'owning_supervisor_shutdown',
       taskClosure: taskClosure as Extract<typeof taskClosure, { closureKind: 'cancelled_and_joined' }> }
     : { ...common, format: 'cliq-reconciliation-probe-timeout-closure-v1', taskClosure };

@@ -19,6 +19,9 @@ test('public Store.close refuses an unjoined same-owner worker probe and retains
   t.after(async () => { await store?.close(); await rm(container, { recursive: true, force: true }); });
   const started = await child.request('acquire');
   assert.equal(started.state, 'held', started.message);
+  const early = await child.probe('close-probe', started.runId!, started.runRevision!, Date.now());
+  assert.equal(early.state, 'error'); assert.equal(early.code, 'STATE_TRANSITION_INVALID',
+    'the public timeout path cannot borrow the distinct owning shutdown closure before its original deadline');
   const refused = await child.probe('close-and-begin-probe', started.runId!, started.runRevision!, Date.now());
   assert.equal(refused.state, 'close-and-probe');
   assert.equal(refused.closeCode, 'RECOVERY_REQUIRED');

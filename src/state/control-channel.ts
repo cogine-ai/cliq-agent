@@ -128,17 +128,23 @@ export function openLocalControlListener(artifacts: ArtifactCatalog, owner: Stat
       channel.channelIdentityDigest = digestOmitting(channel, 'channelIdentityDigest');
       const channelPublication = prepare(decodeControlChannel(channel));
       const publications = Object.freeze([processPublication, principalPublication, peerPublication, channelPublication]);
-      const publishArtifact = async (publication: typeof publications[number],
-        phase: 'process_cas' | 'principal_cas' | 'peer_cas' | 'channel_cas') => {
-        assertCurrent();
-        return observe ? observe(phase, () => artifacts.publishCanonical(publication.data, publication.expected.schemaKind))
-          : artifacts.publishCanonical(publication.data, publication.expected.schemaKind);
+      assertCurrent();
+      const batch = artifacts.publishCanonicalFour([
+        { value: processPublication.data, schemaKind: processPublication.expected.schemaKind },
+        { value: principalPublication.data, schemaKind: principalPublication.expected.schemaKind },
+        { value: peerPublication.data, schemaKind: peerPublication.expected.schemaKind },
+        { value: channelPublication.data, schemaKind: channelPublication.expected.schemaKind }
+      ]);
+      const published = (index: number, phase: 'process_cas' | 'principal_cas' | 'peer_cas' | 'channel_cas') => {
+        const result = () => batch.then(artifacts => artifacts[index]!);
+        return observe ? observe(phase, result) : result();
       };
-      // These four fixed tasks retain every original sync/hash/close. Join
-      // all started work, including after failure or close, before authority.
+      // Each diagnostic await covers the same fully joined fixed group, not
+      // an independent syscall. No positive result precedes all four durable
+      // stages, full file verification, and the original root's actual close.
       const publishedArtifacts = await joinResourceOperations([
-        publishArtifact(processPublication, 'process_cas'), publishArtifact(principalPublication, 'principal_cas'),
-        publishArtifact(peerPublication, 'peer_cas'), publishArtifact(channelPublication, 'channel_cas')
+        published(0, 'process_cas'), published(1, 'principal_cas'),
+        published(2, 'peer_cas'), published(3, 'channel_cas')
       ]);
       for (const [index, artifact] of publishedArtifacts.entries()) {
         const expected = publications[index]!.expected;

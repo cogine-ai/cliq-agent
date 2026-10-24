@@ -1661,6 +1661,22 @@ Required sequence:
 4. Run generation/build/unit, protocol, fault, sandbox, MCP, bundle-upgrade, retention, migration, end-to-end, 24-hour, and 50-repository gates.
 5. Create validated legacy backups, switch every surface/service selection/document to the new kernel in one release transaction, remove the old runtime/toggle and all dual write, and publish one Kernel Cut.
 
+The 2026-10-25 canonical control clarification permits only a fixed-four
+authentication CAS phase batch: preserve all four original durability/crash
+boundaries, per-file sync/full verification, same held-directory phase joins
+and durable exact-object cleanup. All four descriptors and final native-current
+validation precede channel activation. Shared timing spans do not represent
+independent syscalls. READY/authentication stays five seconds and Stop stays
+two seconds; real Linux/delayed-storage evidence remains mandatory.
+
+Generated authorization clients supply neither preparation nor commit time.
+The Supervisor freezes P/TTL/response before CAS and samples C only in the
+final owner-fenced transaction; history and consumption validate P<=C<expiry
+and original signed-source/channel provenance. Revocation uses its original
+prepared decision with a fresh fenced commit and unchanged active-row CAS;
+terminal no-ops preserve the original grant/receipt. Replay, TTL and budgets
+are not reset. No client retry or compatibility fallback is introduced.
+
 Rollback (only for hard-to-reverse changes):
 
 - Before default cutover, switch off the internal test-only path; no legacy state has been mutated except disposable migration fixtures.

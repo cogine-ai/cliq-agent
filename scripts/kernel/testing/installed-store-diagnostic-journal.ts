@@ -71,6 +71,18 @@ export function readInstalledStoreDiagnosticJournal(text: string,
     need(row[3] === 'unavailable' || phases.has(row[3]!));
     firstSchedulerFailure = Object.freeze({ origin: row[2]!, phase: row[3]!, ...failure(row[4]!, row[5]!, row[6]!, row[7]!) });
   }
+  let schedulerFailuresBeforeStop: number | undefined;
+  let lastSchedulerFailure: typeof firstSchedulerFailure = null;
+  if (rows[cursor]?.[1] === 'scheduler_window') {
+    const window = rows[cursor++]!; need(window.length === 3);
+    schedulerFailuresBeforeStop = count(window[2]!); need(schedulerFailuresBeforeStop <= schedulerFailures);
+    if (schedulerFailures > 0) {
+      const row = rows[cursor++]; need(row && row.length === 8 && row[1] === 'scheduler_last' && origins.has(row[2]!));
+      need(row[3] === 'unavailable' || phases.has(row[3]!));
+      lastSchedulerFailure = Object.freeze({ origin: row[2]!, phase: row[3]!, ...failure(row[4]!, row[5]!, row[6]!, row[7]!) });
+      if (schedulerFailures === 1) need(JSON.stringify(lastSchedulerFailure) === JSON.stringify(firstSchedulerFailure));
+    }
+  }
   let authorizationFailures: number | undefined;
   let firstAuthorizationFailure: Readonly<ReturnType<typeof errorFields> & { stage: string }> | undefined;
   if (rows[cursor]?.[1] === 'authorization') {
@@ -92,6 +104,7 @@ export function readInstalledStoreDiagnosticJournal(text: string,
   need(rows[cursor]?.length === 2 && rows[cursor]![1] === 'end' && cursor === rows.length - 1);
   return Object.freeze({ applyFailures, schedulerFailures, firstApplyFailure, firstSchedulerFailure,
     stop: Object.freeze({ driverTasks, agentLoads, admissions, retainedFailures, globalFailure, phases: Object.freeze(phaseCounts) }),
+    ...(schedulerFailuresBeforeStop === undefined ? {} : { schedulerFailuresBeforeStop, lastSchedulerFailure }),
     ...(firstAuthorizationFailure ? { authorizationFailures: authorizationFailures!, firstAuthorizationFailure } : {}) });
 }
 export type InstalledStoreDiagnosticSummary = NonNullable<ReturnType<typeof readInstalledStoreDiagnosticJournal>>;

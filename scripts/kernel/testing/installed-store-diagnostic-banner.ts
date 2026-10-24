@@ -4,7 +4,7 @@ import { INSTALLED_APPLY_DIAGNOSTIC_STAGES, INSTALLED_AUTHORIZATION_DIAGNOSTIC_S
   INSTALLED_RUN_FAILURE_CHANNEL, INSTALLED_SCHEDULER_DIAGNOSTIC_ORIGINS,
   INSTALLED_SCHEDULER_DIAGNOSTIC_PHASES } from '../../../src/state/installed-run-diagnostics.js';
 
-/** Buffer only the first actual failure of each kind and the original stop
+/** Buffer the first failures, last scheduler failure and original stop
  * observation. One bounded synchronous write at real exit is included in the
  * unchanged stop deadline; no timer, await, flush retry or keepalive exists. */
 export const INSTALLED_STORE_DIAGNOSTIC_BANNER = `;(() => { try {
@@ -16,7 +16,8 @@ export const INSTALLED_STORE_DIAGNOSTIC_BANNER = `;(() => { try {
   const origins = new Set(${JSON.stringify(INSTALLED_SCHEDULER_DIAGNOSTIC_ORIGINS)});
   const classes = new Set(${JSON.stringify(INSTALLED_RUN_DIAGNOSTIC_ERROR_CLASSES)}), codes = new Set(${JSON.stringify(INSTALLED_RUN_DIAGNOSTIC_ERROR_CODES)});
   const prefix = 'CLIQ_STORE_DIAG_V1:';
-  let applyFailures = 0, schedulerFailures = 0, authorizationFailures = 0, apply, scheduler, authorization, stop, invalid = false;
+  let applyFailures = 0, schedulerFailures = 0, authorizationFailures = 0, apply, scheduler, schedulerLast,
+    schedulerFailuresBeforeStop, authorization, stop, invalid = false;
   const count = value => Number.isSafeInteger(value) && value >= 0;
   const own = (value, keys) => {
     if (!value || typeof value !== 'object' || isProxy(value) || Array.isArray(value) ||
@@ -48,7 +49,7 @@ export const INSTALLED_STORE_DIAGNOSTIC_BANNER = `;(() => { try {
       if (!row || typeof row.origin !== 'string' || !origins.has(row.origin) || typeof row.phase !== 'string' ||
           row.phase !== 'unavailable' && !phases.has(row.phase) || !failure(row) ||
           !count(schedulerFailures + 1)) { invalid = true; return; }
-      schedulerFailures++; if (!scheduler) scheduler = row;
+      schedulerFailures++; if (!scheduler) scheduler = row; schedulerLast = row;
     } else if (kind.value === 'authorization_failure') {
       const row = own(value, ['kind', 'stage', 'errorClass', 'code', 'sqliteCode']);
       if (!row || typeof row.stage !== 'string' || !authorizationStages.has(row.stage) || !failure(row, false) ||
@@ -65,6 +66,7 @@ export const INSTALLED_STORE_DIAGNOSTIC_BANNER = `;(() => { try {
           fields[key].value > 1000)) { invalid = true; return; }
       const sum = keys.reduce((total, key) => total + fields[key].value, 0);
       if (sum > row.driverTasks || sum > 1000) { invalid = true; return; }
+      schedulerFailuresBeforeStop = schedulerFailures;
       stop = {...row, phases: Object.fromEntries(keys.sort().map(key => [key, fields[key].value]))};
     } else invalid = true;
   } catch { invalid = true; } });
@@ -75,6 +77,8 @@ export const INSTALLED_STORE_DIAGNOSTIC_BANNER = `;(() => { try {
     const rows = [prefix + 'begin:' + applyFailures + ':' + schedulerFailures];
     if (apply) rows.push(prefix + 'apply:' + apply.stage + ':' + tuple(apply));
     if (scheduler) rows.push(prefix + 'scheduler:' + scheduler.origin + ':' + scheduler.phase + ':' + tuple(scheduler));
+    rows.push(prefix + 'scheduler_window:' + schedulerFailuresBeforeStop);
+    if (schedulerLast) rows.push(prefix + 'scheduler_last:' + schedulerLast.origin + ':' + schedulerLast.phase + ':' + tuple(schedulerLast));
     if (authorization) rows.push(prefix + 'authorization:' + authorizationFailures + ':' + authorization.stage + ':' +
       authorization.errorClass + ':' + authorization.code + ':' + (authorization.sqliteCode === null ? '-' : authorization.sqliteCode));
     rows.push(prefix + 'stop:' + stop.driverTasks + ':' + stop.agentLoads + ':' + stop.admissions + ':' + stop.retainedFailures + ':' + (stop.globalFailure ? '1' : '0'));

@@ -923,3 +923,32 @@ no response, claim or network request is manufactured by a settlement retry.
 These are implementation contracts, not qualification evidence. The exact-SHA
 Linux reports must independently pass; unexecuted cuts and full I1 remain
 explicitly unqualified.
+
+## Approved control and shutdown closure, 2026-10-25
+
+Authentication may use the canonical RFC's fixed-four CAS phase batch, joining
+every actual mutation before each original directory barrier and retaining
+per-file sync, complete byte/hash/metadata checks and partial-failure resource
+join. Only the fully joined four descriptors plus final native-current check
+enable a channel. Five-second READY/authentication and two-second Stop are
+unchanged; shared diagnostic spans are not individual fsync measurements.
+
+Authorization preparation P freezes the original grant/TTL/response; actual
+final-transaction C alone advances the existing time fence with P<=C<expiry.
+Keep the same owner/frame/channel guards and existing committed control row.
+History closes original signed-source/owner P-to-C coverage and consumption
+not before C. Revocation similarly separates immutable R from actual C2 under
+the original row CAS; it cannot overwrite a concurrent consumption. Terminal
+no-ops and replay retain the exact original response/receipt. No clock clamp,
+TTL extension, automatic retry, maintenance suspension or wire time is added.
+
+During genuine shutdown, the original worker inspector cancel-and-join receipt
+may durably close only its same-owner automatic nonce as `probe_cancelled`,
+with the closed worker-recovery subject fields. A completed real observation
+wins; cancellation cannot be called timeout or worker death. Keep original
+waiting subject, generation/Checkpoint, count and accounting, and schedule
+from max(original deadline, actual close) plus the original backoff. Storage
+or join failure retains resources/owner; StateOwner's in-flight release guard
+is unchanged. Public pre-deadline timeout remains invalid. Real unpaused native
+task closure and installed Supervisor SIGTERM are independent qualification
+targets; neither source wiring nor a decoder regression supplies that proof.

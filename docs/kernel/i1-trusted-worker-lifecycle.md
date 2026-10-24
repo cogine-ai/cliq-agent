@@ -822,3 +822,21 @@ reproduces acceptance after a 5,001 ms late-publication clock advance. The
 existing five-second gate without adding a retry lifecycle or pretending to
 refresh native evidence. Its delivery requires new build/full-test and real
 Linux evidence; #516's qualification cannot be reused for it.
+
+### Original worker-inspector shutdown cancellation, 2026-10-25
+
+The newly approved contract supersedes the historical cancelled-recovery
+timeout test above. The original same-owner inspector must actually cancel
+and join; its opaque receipt may durably close only that original nonce as
+`probe_cancelled`, not timeout or worker death. Keep the original wait,
+generation/Checkpoint, accounting and count, with the next backoff measured
+from max(original deadline, actual close). Failed persistence retains the
+original receipt and owner; a real result committed first wins unchanged.
+
+The replacement campaign only observes the genuine live signed controller;
+it does not pause or trace it. Missing that live cut fails qualification.
+Actual Store.close plus all resource joins must finish within two seconds,
+before the original thirty-second deadline, then the successor independently
+observes the original backoff and proves physical recovery. Source wiring and
+data-decoder regressions cannot supply this Linux evidence or installed
+Supervisor SIGTERM qualification. All unexecuted cuts remain unverified.

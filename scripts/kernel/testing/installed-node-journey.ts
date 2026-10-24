@@ -23,7 +23,8 @@ import { decodeDeliveryPlan, type PublicationArenaBirthV1 } from '../../../src/k
 import type { ArtifactDescriptorV1 } from '../../../src/kernel/types.js';
 import { decodeRunResult, decodeWorkspaceDiff } from '../../../src/state/result-artifacts.js';
 import { buildInstalledSupervisorPackage } from './installed-supervisor-package.js';
-import { CredentialSecretScanError, createCredentialSecretScanner } from './credential-secret-scan.js';
+import { CredentialSecretScanError, createCredentialSecretScanner, copyCredentialSecretScanFailureDiagnostic,
+  type CredentialSecretScanCode, type CredentialSecretScanFailureDiagnostic, type CredentialSecretScanFailureStage } from './credential-secret-scan.js';
 import { CredentialSecretCorpusError, scanCredentialSecretCorpus } from './credential-secret-corpus.js';
 import { inspectInstalledWorkerIdentity, inspectInstalledWorkerRetirement, inspectInstalledWorkerRetirementHistory, inspectInstalledWorkerLaunchIds, type InstalledWorkerIdentityInspection, type InstalledWorkerRetirementBinding } from './installed-worker-lease.js';
 import { inspectInstalledOwnerHistory, waitForInstalledOwnerHistory } from './installed-read-control.js';
@@ -173,7 +174,11 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
   if (options.publicationRetirementLate) report.scope =
     'actual signed Linux complete Delivery core and original UNKNOWN first-late audit/fresh-nonce recovery on the fixed delayed volume; not late-fsync SIGTERM, paid provider, macOS, reboot or complete I1 qualification';
   const secret = Buffer.from(randomBytes(32).toString('hex')), password = Buffer.from(randomBytes(32).toString('hex'));
-  const scanner = createCredentialSecretScanner([secret, password], { maxBytes: 512 * 1024 * 1024, maxStreams: 4096 });
+  let scanStage: CredentialSecretScanFailureStage = 'runtime', firstFailureStage: CredentialSecretScanFailureStage | null = null;
+  let beforeCorpus: CredentialSecretScanFailureDiagnostic['beforeCorpus'] = null, corpusScanFailureCode: CredentialSecretScanCode | null = null;
+  const scanner = createCredentialSecretScanner([secret, password], { maxBytes: 512 * 1024 * 1024, maxStreams: 4096 }, () => {
+    firstFailureStage ??= scanStage;
+  });
   const scanBytes = (bytes: Uint8Array) => { const stream = scanner.openStream(); try { stream.scan(bytes); } finally { stream.close(); } };
   const mark = (phase: string) => { report.phase = phase; console.log('Installed verifier journey phase ' + phase); };
   const prefix = ['--user', ledger.username, '--', '/usr/bin/env', '-i', 'HOME=' + ledger.home, 'PATH=/usr/bin:/bin', 'LANG=C', 'LC_ALL=C',
@@ -1521,6 +1526,9 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       try {
         mark('complete_retained_secret_corpus');
         assert.equal(report.installedWritersJoined, true); assert.equal(report.httpsJoined, true); assert.equal(report.daemonJoined, true);
+        const before = scanner.stats();
+        beforeCorpus = Object.freeze({ streamsOpened: before.streamsOpened, bytesScanned: before.bytesScanned });
+        scanStage = 'corpus';
         report.secretCorpus = await scanCredentialSecretCorpus({ stateRoot: recipe.stateRoot, uid: ledger.uid, evidenceDirs: [], scanner });
         assert.equal(report.secretCorpus.sqliteDatabasesScanned, 2); assert.equal(report.secretCorpus.evidenceDirectoriesScanned, 0);
         if (options.publicationRetirementStop) {
@@ -1547,7 +1555,9 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         if (error instanceof CredentialSecretCorpusError) {
           if (error.databaseFailure) report.secretCorpusDatabaseFailure = error.databaseFailure;
           if (error.corpusFailure) report.secretCorpusFailure = error.corpusFailure;
-        } else if (error instanceof CredentialSecretScanError) report.secretCorpusScanFailure = { code: error.code };
+        } else if (error instanceof CredentialSecretScanError) {
+          report.secretCorpusScanFailure = { code: error.code }; corpusScanFailureCode = error.code;
+        }
         primary = error;
       }
     }
@@ -1589,11 +1599,17 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     }
     let publication: Buffer;
     try {
+      scanStage = 'report';
       const bytes = Buffer.from(JSON.stringify(report, null, 2) + '\n'); scanBytes(bytes); bytes.fill(0); scanner.close();
       report.secretOutputScan = scanner.stats(); publication = Buffer.from(JSON.stringify(report, null, 2) + '\n');
     } catch {
       scanner.close(); report.qualified = false; primary ??= new Error('credential secret scan refused');
-      publication = Buffer.from(JSON.stringify({ diagnosticOnly: true, qualified: false, phase: 'secret_scan_or_report_failure', secretOutputScan: scanner.stats() }) + '\n');
+      let secretScanFailure: CredentialSecretScanFailureDiagnostic | undefined;
+      try { secretScanFailure = copyCredentialSecretScanFailureDiagnostic({ diagnosticOnly: true,
+        firstFailureStage, beforeCorpus, corpusScanFailureCode }); }
+      catch { /* Diagnosis cannot replace or expose the original failed report. */ }
+      publication = Buffer.from(JSON.stringify({ diagnosticOnly: true, qualified: false, phase: 'secret_scan_or_report_failure',
+        secretOutputScan: scanner.stats(), ...(secretScanFailure ? { secretScanFailure } : {}) }) + '\n');
     }
     secret.fill(0); password.fill(0);
     try { await writeFile(recipe.reportFile, publication, { flag: 'wx', mode: 0o644 }); } finally { publication.fill(0); }

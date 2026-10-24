@@ -101,17 +101,19 @@ export type ReconciliationProbeTimeoutClosureV1 = {
   | { subjectKind: 'worker_recovery'; oldWorkerLaunchId: string; processContainmentRef: ArtifactRef; inspectorTaskId: string; taskClosure: ReconciliationInspectorTaskClosureV1 }
 );
 
-/** A real owning process joined its descriptor-only publication probe during
- * shutdown. This is neither a deadline timeout nor a path outcome. */
+/** A real owning process cancelled and joined its original inspection during
+ * shutdown. This is neither a deadline timeout nor a subject outcome. */
 export type ReconciliationProbeCancellationClosureV1 = {
   schemaVersion: 1; format: 'cliq-reconciliation-probe-cancellation-closure-v1'; runId: string;
   waitingSubjectRef: ArtifactRef; probeKind: 'automatic' | 'user_requested'; probeOrdinal: number;
   probeNonceDigest: string; probeDispatchDigest: string; probeDeadlineAt: string;
   inspectorIdentityRef: ArtifactRef; inspectorIdentityDigest: string; closedAt: string; closureDigest: string;
-  reason: 'owning_supervisor_shutdown'; subjectKind: 'publication'; deliveryPlanRef: ArtifactRef;
-  pathOperationId: string; attempt: number; inspectorTaskId: string;
+  reason: 'owning_supervisor_shutdown';
   taskClosure: Extract<ReconciliationInspectorTaskClosureV1, { closureKind: 'cancelled_and_joined' }>;
-};
+} & (
+  | { subjectKind: 'publication'; deliveryPlanRef: ArtifactRef; pathOperationId: string; attempt: number; inspectorTaskId: string }
+  | { subjectKind: 'worker_recovery'; oldWorkerLaunchId: string; processContainmentRef: ArtifactRef; inspectorTaskId: string }
+);
 
 export type ReconciliationProbeEvidenceV1 = {
   schemaVersion: 1;

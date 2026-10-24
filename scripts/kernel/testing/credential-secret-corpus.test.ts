@@ -7,7 +7,7 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { CredentialSecretCorpusError, scanCopiedCredentialDatabase, scanCredentialSecretCorpus } from './credential-secret-corpus.js';
-import { createCredentialSecretScanner } from './credential-secret-scan.js';
+import { createCredentialSecretScanner, type CredentialSecretScanStats } from './credential-secret-scan.js';
 
 // Actual disposable SQLite/filesystem fixtures test the byte diagnostic only.
 // They are not credential rows, retained process proof or installed evidence.
@@ -52,6 +52,50 @@ test('copied read-only diagnostics scan TEXT/BLOB cells and leave original bytes
       assert(result.logicalBytesScanned > 0); assert.equal(scanner.stats().matched, false);
       assert.deepEqual(await readFile(filename), before);
       assert.deepEqual(Object.keys(result).sort(), ['logicalBytesScanned', 'logicalRowsScanned', 'logicalValuesScanned']);
+    } finally { scanner.close(); }
+  });
+});
+
+test('a real copied SQLite stream-limit refusal retains its first corpus failure and original bytes', async () => {
+  await copyFixture(async filename => {
+    await createDatabase(filename, database => {
+      database.exec('CREATE TABLE ordinary(value TEXT) STRICT; BEGIN');
+      const insert = database.prepare('INSERT INTO ordinary VALUES (?)');
+      for (let index = 0; index < 4095; index++) insert.run('ordinary diagnostic bytes');
+      database.exec('COMMIT');
+    });
+    const before = await readFile(filename);
+    let stage: 'runtime' | 'corpus' | 'report' = 'runtime';
+    let firstFailureStage: 'runtime' | 'corpus' | 'report' | null = null, observed: unknown;
+    const observations: CredentialSecretScanStats[] = [];
+    const scanner = createCredentialSecretScanner([secret()], { maxBytes: 512 * 1024 * 1024, maxStreams: 4096 }, error => {
+      observed = error; firstFailureStage ??= stage;
+      observations.push(scanner.stats());
+    });
+    try {
+      const originalCounts = scanner.stats();
+      const beforeCorpus = Object.freeze({ streamsOpened: originalCounts.streamsOpened, bytesScanned: originalCounts.bytesScanned });
+      stage = 'corpus';
+      // The schema name/SQL plus 4095 actual independent values exceed the
+      // unchanged total 4096-stream budget, not the row, byte or file guards.
+      assert.throws(() => scanCopiedCredentialDatabase(filename, scanner), error => {
+        assert.equal(error, observed, 'the caller receives the exact observed original scanner error');
+        assert.equal((error as { code?: unknown }).code, 'LIMIT_EXCEEDED', 'the original stream guard still refuses');
+        return true;
+      });
+      assert.equal(observations.length, 1, 'the real copied database refusal is observed once');
+      assert.equal(observations[0]!.closed, true, 'the real scanner retires before corpus failure observation');
+      assert.equal(observations[0]!.streamsOpened, observations[0]!.streamsClosed,
+        'all original stream owners have closed at observation');
+      stage = 'report';
+      assert.throws(() => scanner.openStream(), { code: 'CLOSED' });
+      assert.equal(firstFailureStage, 'corpus', 'later report masking cannot replace the first corpus failure');
+      assert.deepEqual(beforeCorpus, { streamsOpened: 0, bytesScanned: 0 });
+      const stats = scanner.stats();
+      assert.equal(stats.streamsOpened, 4096, 'all original independent streams remain counted');
+      assert.equal(stats.streamsClosed, 4096, 'all original independent streams close');
+      assert.equal(stats.limitExceeded, true, 'the diagnostic cannot qualify exhaustion');
+      assert.deepEqual(await readFile(filename), before, 'diagnosis never rewrites the actual copied SQLite input');
     } finally { scanner.close(); }
   });
 });

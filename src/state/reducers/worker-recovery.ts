@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { canonicalSha256 } from '../../kernel/canonical.js';
 import { addCanonicalDuration, digestOmitting, identityHash, sha256Bytes } from '../../kernel/identity.js';
+import type { ReconciliationProbeCancellationClosureV1 } from '../../kernel/reconciliation.js';
 import type { ProcessContainmentDeathEvidenceV1, ReconciliationProbeEvidenceV1, ReconciliationProbeTimeoutClosureV1, Run, SupervisorInspectorIdentityV1,
   WorkerDeathWait, WorkerRecoveryEvidenceV1, WorkspaceGenerationQuarantineEvidenceV1, WorkspaceGenerationStateV1 } from '../../kernel/types.js';
 import { immutableSnapshot } from '../../model/immutable.js';
@@ -30,11 +31,12 @@ export type BeginWorkerRecoveryInput = { runId: string; expectedRunRevision: num
 
 export const closeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', async (
   driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, input: BeginWorkerRecoveryInput,
-  joinedTask?: WorkerRecoveryTaskReceipt
+  joinedTask?: WorkerRecoveryTaskReceipt, closureKind: 'deadline' | 'shutdown' = 'deadline'
 ): Promise<Run> => {
   input = immutableSnapshot(input);
   if (!exactKeys(input, ['runId', 'expectedRunRevision']) || typeof input.runId !== 'string' || !input.runId ||
-      !Number.isSafeInteger(input.expectedRunRevision) || input.expectedRunRevision < 1) {
+      !Number.isSafeInteger(input.expectedRunRevision) || input.expectedRunRevision < 1 ||
+      !['deadline', 'shutdown'].includes(closureKind)) {
     throw new KernelStorageError('INVALID_REQUEST', 'worker timeout requires a Run id and expected revision only');
   }
   const inspectingOwner = assertActiveStateOwner(driver, owner);
@@ -50,12 +52,14 @@ export const closeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', asyn
   }
   const dispatch = wait.probeState.dispatch;
   const closedAt = sampleCanonicalNow();
-  if (closedAt < dispatch.probeDeadlineAt) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'worker inspection deadline has not elapsed');
+  if (closureKind === 'deadline' && closedAt < dispatch.probeDeadlineAt)
+    throw new KernelStorageError('STATE_TRANSITION_INVALID', 'worker inspection deadline has not elapsed');
   let taskClosure;
   if (dispatch.owningSupervisorInstanceId === inspectingOwner.supervisorInstanceId) {
     assertWorkerRecoveryTaskReceipt(joinedTask, { run, wait, owner }, closedAt);
     taskClosure = { closureKind: 'cancelled_and_joined' as const, inspectorTaskCancelledAndJoined: true as const };
   } else {
+    if (closureKind === 'shutdown') throw new KernelStorageError('RECOVERY_REQUIRED', 'shutdown cannot adopt another owner worker inspection');
     if (joinedTask !== undefined) throw new KernelStorageError('RECOVERY_REQUIRED', 'successor cannot substitute a task receipt for observed owner death');
     taskClosure = await readWorkerProbeOwnerDeath(artifacts, driver, dispatch);
   }
@@ -70,26 +74,33 @@ export const closeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', asyn
   inspector.identityDigest = digestOmitting(inspector, 'identityDigest');
   const inspectorArtifact = await artifacts.publishCanonical(inspector, inspector.format);
   const inspectorPair = { inspectorIdentityRef: inspectorArtifact.ref, inspectorIdentityDigest: inspector.identityDigest };
-  const timeout: ReconciliationProbeTimeoutClosureV1 = { schemaVersion: 1, format: 'cliq-reconciliation-probe-timeout-closure-v1',
-    runId: run.id, waitingSubjectRef: run.waitingOnRef, probeKind: 'automatic', probeOrdinal: dispatch.probeOrdinal,
+  const common = { schemaVersion: 1 as const, runId: run.id, waitingSubjectRef: run.waitingOnRef, probeKind: 'automatic' as const, probeOrdinal: dispatch.probeOrdinal,
     probeNonceDigest: dispatch.probeNonceDigest, probeDispatchDigest: dispatch.dispatchDigest, probeDeadlineAt: dispatch.probeDeadlineAt,
-    ...inspectorPair, closedAt, closureDigest: '', subjectKind: 'worker_recovery', oldWorkerLaunchId: wait.subject.oldWorkerLaunchId,
-    processContainmentRef: wait.subject.processContainmentRef, inspectorTaskId: dispatch.inspectorTaskId, taskClosure };
-  timeout.closureDigest = digestOmitting(timeout, 'closureDigest');
-  const timeoutArtifact = await artifacts.publishCanonical(timeout, timeout.format);
+    ...inspectorPair, closedAt, closureDigest: '', subjectKind: 'worker_recovery' as const, oldWorkerLaunchId: wait.subject.oldWorkerLaunchId,
+    processContainmentRef: wait.subject.processContainmentRef, inspectorTaskId: dispatch.inspectorTaskId };
+  const closure: Extract<ReconciliationProbeCancellationClosureV1 | ReconciliationProbeTimeoutClosureV1, { subjectKind: 'worker_recovery' }> =
+    closureKind === 'shutdown' ? { ...common, format: 'cliq-reconciliation-probe-cancellation-closure-v1', reason: 'owning_supervisor_shutdown',
+      taskClosure: taskClosure as Extract<typeof taskClosure, { closureKind: 'cancelled_and_joined' }> }
+      : { ...common, format: 'cliq-reconciliation-probe-timeout-closure-v1', taskClosure };
+  closure.closureDigest = digestOmitting(closure, 'closureDigest');
+  const closureArtifact = await artifacts.publishCanonical(closure, closure.format);
   const wrapper: ReconciliationProbeEvidenceV1 = { schemaVersion: 1, format: 'cliq-reconciliation-probe-evidence-v1', runId: run.id,
     waitingSubjectRef: run.waitingOnRef, waitingSubjectDigest: run.waitingOnRef, probeKind: 'automatic', probeOrdinal: dispatch.probeOrdinal,
     probeNonceDigest: dispatch.probeNonceDigest, probeDispatchDigest: dispatch.dispatchDigest, probeStartedAt: dispatch.probeStartedAt,
-    probeDeadlineAt: dispatch.probeDeadlineAt, ...inspectorPair, observedAt: closedAt, evidenceDigest: '', outcome: 'probe_timeout',
-    timeoutReason: 'no_authoritative_observation_before_deadline', timeoutClosureRef: timeoutArtifact.ref, timeoutClosureDigest: timeout.closureDigest };
+    probeDeadlineAt: dispatch.probeDeadlineAt, ...inspectorPair, observedAt: closedAt, evidenceDigest: '', ...(closureKind === 'shutdown'
+      ? { outcome: 'probe_cancelled' as const, cancellationReason: 'owning_supervisor_shutdown' as const,
+        cancellationClosureRef: closureArtifact.ref, cancellationClosureDigest: closure.closureDigest }
+      : { outcome: 'probe_timeout' as const, timeoutReason: 'no_authoritative_observation_before_deadline' as const,
+        timeoutClosureRef: closureArtifact.ref, timeoutClosureDigest: closure.closureDigest }) };
   wrapper.evidenceDigest = digestOmitting(wrapper, 'evidenceDigest');
   const wrapperArtifact = await artifacts.publishCanonical(wrapper, wrapper.format);
   const evidence = { lastProbeEvidenceRef: wrapperArtifact.ref, lastProbeEvidenceDigest: wrapper.evidenceDigest };
   const count = wait.probeState.automaticProbeCount;
+  const backoffFrom = closedAt < dispatch.probeDeadlineAt ? dispatch.probeDeadlineAt : closedAt;
   const nextWait: WorkerDeathWait = { ...wait, probeState: count === 8
     ? { phase: 'automatic_exhausted', automaticProbeCount: 8, userProbeCount: 0, ...evidence }
     : { phase: 'automatic_pending', automaticProbeCount: count, userProbeCount: 0,
-      nextProbeAt: addCanonicalDuration(closedAt, WORKER_PROBE_BACKOFF_MS[count - 1]!), ...evidence } };
+      nextProbeAt: addCanonicalDuration(backoffFrom, WORKER_PROBE_BACKOFF_MS[count - 1]!), ...evidence } };
   const nextWaitArtifact = await artifacts.publishCanonical(nextWait, 'cliq-waiting-subject-v1');
   const launch = cut.workerLaunches[0]!;
   const generation = cut.workspaceGenerations.find(value => value.generationRef === wait.subject.workspaceGenerationRef)!;
@@ -107,7 +118,7 @@ export const closeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', asyn
     outcome = advanceTimeFence(connection, owner.ownerEpoch, now);
     if (outcome !== 'healthy') return;
     if (now < closedAt) throw new KernelStorageError('RECOVERY_REQUIRED', 'worker timeout commit precedes its task closure');
-    for (const artifact of [inspectorArtifact, timeoutArtifact, wrapperArtifact, nextWaitArtifact]) insertArtifactMetadata(connection, artifact, now);
+    for (const artifact of [inspectorArtifact, closureArtifact, wrapperArtifact, nextWaitArtifact]) insertArtifactMetadata(connection, artifact, now);
     updateWorkspaceGeneration(connection, generation, { ...generation, rowVersion: generation.rowVersion + 1,
       updatedAt: now, waitingSubjectRef: nextWaitArtifact.ref, waitingSubjectDigest: nextWaitArtifact.ref });
     connection.prepare('UPDATE runs SET waiting_on_ref=?, revision=revision+1, updated_at=? WHERE id=?')

@@ -19,6 +19,7 @@ import { isJoinedCasPublicationFailure } from './cas.js';
 import { createQueuedFixture, disposeFixture, uuidv7 } from './testing/fixtures.js';
 import { publishInProcessChannel } from './store.js';
 import { signedVerifierAuthority } from './testing/verifier-authority.js';
+import { advanceTimeFence, readTimeFence } from './canonical-time.js';
 
 test('verifier identity authorization is retained, replayable, and explicitly revocable without executing a Run', async () => {
   const signed = await signedVerifierAuthority();
@@ -245,6 +246,75 @@ test('Run admission consumes a real identity authorization once and freezes the 
     const successor = await publishInProcessChannel(fixture.store);
     assert.deepEqual((await fixture.store.admitRun({ ...input, ...successor })).response, admitted.response);
     assert.deepEqual((await fixture.store.admitRun({ ...advisoryInput, ...successor })).response, advisory.response);
+    await t.test('a concurrent revoke wins against an unpublished receipt without admitting or consuming a Run', async () => {
+      const raceCore = { ...core, requestId: uuidv7() };
+      const raceGrant = await fixture.store.createAuthorization({ ...raceCore, requestDigest: canonicalSha256(raceCore) }, successor);
+      const key = admissionKey('revoked-during-receipt');
+      const runId = identityHash('cliq-run-id-v1', successor.principalId, 'run.submit', key);
+      const raceInput = { ...input, ...successor, requestId: uuidv7(), admissionKey: key,
+        verifierRequests: [{ ...verifier, identityReadGrantId: raceGrant.response.result.grant.grantId }] };
+      const sample = await open(path.join(fixture.stateRoot, KERNEL_CAS_DIRECTORY, commandArtifact.ref), 'r');
+      const prototype = Object.getPrototypeOf(sample) as { writeFile: FileHandle['writeFile'] }, originalWrite = prototype.writeFile;
+      await sample.close();
+      let entered!: () => void, release!: () => void;
+      const enteredReceipt = new Promise<void>(resolve => { entered = resolve; });
+      const releaseReceipt = new Promise<void>(resolve => { release = resolve; });
+      let receiptWrites = 0;
+      const writer = t.mock.method(prototype, 'writeFile', async function(this: FileHandle, ...args: unknown[]) {
+        await Reflect.apply(originalWrite, this, args);
+        if (Buffer.isBuffer(args[0]) && args[0].includes(Buffer.from('"kind":"run_admission"')) &&
+            args[0].includes(Buffer.from(`"runId":"${runId}"`))) {
+          receiptWrites++; entered(); await releaseReceipt;
+        }
+      });
+      const pending = fixture.store.admitRun(raceInput);
+      try {
+        await Promise.race([enteredReceipt, pending.then(() => assert.fail('receipt did not reach its real CAS gate'))]);
+        const revokeCore = { protocolVersion: 1, method: 'authorization.revoke', requestId: uuidv7(), grantId: raceGrant.response.result.grant.grantId };
+        const revoked = await fixture.store.revokeAuthorization({ ...revokeCore, requestDigest: canonicalSha256(revokeCore) }, successor);
+        assert.equal(revoked.response.result.grant.state, 'revoked');
+        release();
+        await assert.rejects(pending, (error: unknown) => error instanceof Error && 'refusalCode' in error && error.refusalCode === 'AUTHORIZATION_REQUIRED');
+        assert.equal(receiptWrites, 1);
+        assert.throws(() => fixture.store.getRun(runId), { code: 'NOT_FOUND' });
+        assert.deepEqual((await fixture.store.createAuthorization({ ...raceCore, requestDigest: canonicalSha256(raceCore) }, successor)).response, raceGrant.response);
+      } finally {
+        release(); await Promise.allSettled([pending]); writer.mock.restore();
+      }
+    });
+    await t.test('a fresh healthy admission cannot consume authority before its actual create commit', async () => {
+      const current = await publishInProcessChannel(fixture.store);
+      const lateCore = { ...core, requestId: uuidv7(), ttlMs: 1000 };
+      const key = admissionKey('before-authority-commit');
+      const runId = identityHash('cliq-run-id-v1', current.principalId, 'run.submit', key);
+      const sample = await open(path.join(fixture.stateRoot, KERNEL_CAS_DIRECTORY, commandArtifact.ref), 'r');
+      const prototype = Object.getPrototypeOf(sample) as { writeFile: FileHandle['writeFile'] }, originalWrite = prototype.writeFile;
+      await sample.close();
+      t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+      const preparedMs = Date.now(); let createWrites = 0, receiptWrites = 0;
+      const writer = t.mock.method(prototype, 'writeFile', async function(this: FileHandle, ...args: unknown[]) {
+        await Reflect.apply(originalWrite, this, args);
+        if (!Buffer.isBuffer(args[0])) return;
+        if (args[0].includes(Buffer.from('"method":"authorization.create"')) && args[0].includes(Buffer.from('"ok":true')) && !createWrites++)
+          t.mock.timers.tick(200);
+        if (args[0].includes(Buffer.from('"kind":"run_admission"')) && args[0].includes(Buffer.from(`"runId":"${runId}"`))) {
+          receiptWrites++; t.mock.timers.setTime(preparedMs + 300);
+        }
+      });
+      try {
+        const late = await fixture.store.createAuthorization({ ...lateCore, requestDigest: canonicalSha256(lateCore) }, current);
+        assert.equal(createWrites, 1); assert.equal(Date.now(), preparedMs + 200);
+        t.mock.timers.setTime(preparedMs + 100);
+        await assert.rejects(fixture.store.admitRun({ ...input, ...current, requestId: uuidv7(), admissionKey: key,
+          verifierRequests: [{ ...verifier, identityReadGrantId: late.response.result.grant.grantId }] }),
+          (error: unknown) => error instanceof Error && 'refusalCode' in error && error.refusalCode === 'AUTHORIZATION_REQUIRED');
+        assert.equal(receiptWrites, 0, 'premature consumption is refused before publishing any receipt');
+        assert.throws(() => fixture.store.getRun(runId), { code: 'NOT_FOUND' });
+      } finally {
+        writer.mock.restore(); t.mock.timers.setTime(preparedMs + 300);
+        await fixture.store.close(); t.mock.timers.reset();
+      }
+    });
     await fixture.store.close();
     const history = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
     try {
@@ -269,4 +339,212 @@ test('identity authorization refuses an unavailable signed toolchain before publ
       (error: unknown) => error instanceof Error && 'refusalCode' in error && error.refusalCode === 'UNSUPPORTED_EXECUTION_IDENTITY');
     assert.equal((await fixture.store.readRecoveryClosure(fixture.runId)).run.revision, 1);
   } finally { await disposeFixture(fixture); }
+});
+
+test('authorization commits at the actual healthy cut after a real publication while preserving prepared TTL bytes', async t => {
+  const signed = await signedVerifierAuthority();
+  const fixture = await createQueuedFixture('authorization-prepared-commit-cut', {
+    runtimeAuthority: { bundle: signed.bundle, releaseKeys: signed.releaseKeys }, assembly: async store => {
+      for (const object of signed.objects) await store.artifacts.publishBytes(object.bytes, 'application/octet-stream', 'offline-verifier-object');
+      const { assembly } = testFixture();
+      return (await store.artifacts.publishCanonical(assembly, assembly.format)).ref;
+    } });
+  const history = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+  const identity = await publishInProcessChannel(fixture.store);
+  const core = { protocolVersion: 1, method: 'authorization.create', requestId: uuidv7(), ttlMs: 1000,
+    decision: { kind: 'execution_identity_read', purpose: 'verifier',
+      target: { kind: 'guest_toolchain', guestToolchainManifestId: signed.manifestId, toolId: 'node' } } };
+  const sample = await open(path.join(fixture.stateRoot, KERNEL_CAS_DIRECTORY, signed.manifestRef), 'r');
+  const prototype = Object.getPrototypeOf(sample) as { writeFile: FileHandle['writeFile'] }, originalWrite = prototype.writeFile;
+  await sample.close();
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  const preparedAt = new Date().toISOString(); let advanced = 0;
+  const writer = t.mock.method(prototype, 'writeFile', async function(this: FileHandle, ...args: unknown[]) {
+    await Reflect.apply(originalWrite, this, args);
+    if (Buffer.isBuffer(args[0]) && args[0].includes(Buffer.from('"method":"authorization.create"')) &&
+        args[0].includes(Buffer.from('"ok":true')) && !advanced++) {
+      t.mock.timers.tick(100);
+      history.transaction(connection => assert.equal(advanceTimeFence(connection, fixture.store.ownerEpoch), 'healthy'));
+      t.mock.timers.tick(100);
+    }
+  });
+  try {
+    const created = await fixture.store.createAuthorization({ ...core, requestDigest: canonicalSha256(core) }, identity);
+    assert.equal(advanced, 1);
+    assert.equal(created.response.result.grant.createdAt, preparedAt);
+    assert.equal(created.response.result.grant.expiresAt, new Date(Date.parse(preparedAt) + 1000).toISOString());
+    const row = history.prepare('SELECT committed_at, response_ref FROM control_requests WHERE principal_id = ? AND method = ? AND request_id = ?')
+      .get<{ committed_at: string; response_ref: string }>(identity.principalId, 'authorization.create', core.requestId)!;
+    assert.equal(row.committed_at, new Date().toISOString());
+    assert(row.committed_at > preparedAt);
+    assert.deepEqual(await fixture.store.artifacts.readCanonical(row.response_ref), created.response);
+    assert.equal(readTimeFence(history)?.lastAcceptedAt, row.committed_at);
+    assert.equal(readTimeFence(history)?.state, 'healthy');
+    assert.deepEqual((await fixture.store.createAuthorization({ ...core, requestDigest: canonicalSha256(core) }, identity)).response, created.response);
+    for (const invalid of [new Date(Date.parse(preparedAt) + 300).toISOString(),
+      new Date(Date.parse(preparedAt) - 1).toISOString(), created.response.result.grant.expiresAt, row.committed_at + '\n']) {
+      history.prepare('UPDATE control_requests SET committed_at = ? WHERE principal_id = ? AND method = ? AND request_id = ?')
+        .run(invalid, identity.principalId, 'authorization.create', core.requestId);
+      try {
+        await assert.rejects(fixture.store.createAuthorization({ ...core, requestDigest: canonicalSha256(core) }, identity), { code: 'RECOVERY_REQUIRED' });
+      } finally {
+        history.prepare('UPDATE control_requests SET committed_at = ? WHERE principal_id = ? AND method = ? AND request_id = ?')
+          .run(row.committed_at, identity.principalId, 'authorization.create', core.requestId);
+      }
+    }
+    await fixture.store.close();
+    t.mock.timers.tick(100);
+    fixture.store = await openStateStore(fixture.stateRoot, fixture.runtimeAuthority);
+    const successor = await publishInProcessChannel(fixture.store);
+    const ownerGap = new Date(Date.parse(preparedAt) + 250).toISOString();
+    history.prepare('UPDATE control_requests SET committed_at = ? WHERE principal_id = ? AND method = ? AND request_id = ?')
+      .run(ownerGap, identity.principalId, 'authorization.create', core.requestId);
+    try {
+      await assert.rejects(fixture.store.createAuthorization({ ...core, requestDigest: canonicalSha256(core) }, successor),
+        /no creating signed toolchain selection/);
+    } finally {
+      history.prepare('UPDATE control_requests SET committed_at = ? WHERE principal_id = ? AND method = ? AND request_id = ?')
+        .run(row.committed_at, identity.principalId, 'authorization.create', core.requestId);
+    }
+    assert.deepEqual((await fixture.store.createAuthorization({ ...core, requestDigest: canonicalSha256(core) }, successor)).response, created.response);
+  } finally {
+    writer.mock.restore(); history.close(); await disposeFixture(fixture); t.mock.timers.reset();
+  }
+});
+
+test('expired authorization revocation retains its prepared result and commits at the later healthy cut', async t => {
+  const signed = await signedVerifierAuthority();
+  const fixture = await createQueuedFixture('authorization-revoke-commit-cut', {
+    runtimeAuthority: { bundle: signed.bundle, releaseKeys: signed.releaseKeys }, assembly: async store => {
+      for (const object of signed.objects) await store.artifacts.publishBytes(object.bytes, 'application/octet-stream', 'offline-verifier-object');
+      const { assembly } = testFixture();
+      return (await store.artifacts.publishCanonical(assembly, assembly.format)).ref;
+    } });
+  const identity = await publishInProcessChannel(fixture.store);
+  const core = { protocolVersion: 1, method: 'authorization.create', requestId: uuidv7(), ttlMs: 1000,
+    decision: { kind: 'execution_identity_read', purpose: 'verifier',
+      target: { kind: 'guest_toolchain', guestToolchainManifestId: signed.manifestId, toolId: 'node' } } };
+  const create = { ...core, requestDigest: canonicalSha256(core) };
+  const created = await fixture.store.createAuthorization(create, identity);
+  const revokeCore = { protocolVersion: 1, method: 'authorization.revoke', requestId: uuidv7(), grantId: created.response.result.grant.grantId };
+  const revoke = { ...revokeCore, requestDigest: canonicalSha256(revokeCore) };
+  const history = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+  const sample = await open(path.join(fixture.stateRoot, KERNEL_CAS_DIRECTORY, signed.manifestRef), 'r');
+  const prototype = Object.getPrototypeOf(sample) as { writeFile: FileHandle['writeFile'] }, originalWrite = prototype.writeFile;
+  await sample.close();
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse(created.response.result.grant.expiresAt) + 100 });
+  const preparedAt = new Date().toISOString(); let advanced = 0;
+  const writer = t.mock.method(prototype, 'writeFile', async function(this: FileHandle, ...args: unknown[]) {
+    await Reflect.apply(originalWrite, this, args);
+    if (Buffer.isBuffer(args[0]) && args[0].includes(Buffer.from('"method":"authorization.revoke"')) &&
+        args[0].includes(Buffer.from('"ok":true')) && !advanced++) {
+      t.mock.timers.tick(100);
+      history.transaction(connection => assert.equal(advanceTimeFence(connection, fixture.store.ownerEpoch), 'healthy'));
+      t.mock.timers.tick(100);
+    }
+  });
+  try {
+    const revoked = await fixture.store.revokeAuthorization(revoke, identity);
+    assert.equal(advanced, 1);
+    assert.equal(revoked.response.result.method, 'authorization.revoke');
+    if (revoked.response.result.method !== 'authorization.revoke') assert.fail('revoke result');
+    assert.equal(revoked.response.result.disposition, 'revoked');
+    assert.equal(revoked.response.result.grant.revokedAt, preparedAt);
+    assert.equal(revoked.response.result.grant.expiresAt, created.response.result.grant.expiresAt);
+    const row = history.prepare('SELECT committed_at, response_ref FROM control_requests WHERE principal_id = ? AND method = ? AND request_id = ?')
+      .get<{ committed_at: string; response_ref: string }>(identity.principalId, 'authorization.revoke', revoke.requestId)!;
+    assert.equal(row.committed_at, new Date().toISOString()); assert(row.committed_at > preparedAt);
+    assert.deepEqual(await fixture.store.artifacts.readCanonical(row.response_ref), revoked.response);
+    assert.equal(readTimeFence(history)?.lastAcceptedAt, row.committed_at);
+    assert.equal(readTimeFence(history)?.state, 'healthy');
+    assert.deepEqual((await fixture.store.revokeAuthorization(revoke, identity)).response, revoked.response);
+    assert.deepEqual((await fixture.store.createAuthorization(create, identity)).response, created.response);
+    for (const [invalid, reason] of [[new Date(Date.parse(row.committed_at) + 1).toISOString(), /exact historical outcome/],
+      [new Date(Date.parse(preparedAt) - 1).toISOString(), /no original revoke request/]] as const) {
+      history.prepare('UPDATE control_requests SET committed_at = ? WHERE principal_id = ? AND method = ? AND request_id = ?')
+        .run(invalid, identity.principalId, 'authorization.revoke', revoke.requestId);
+      try { await assert.rejects(fixture.store.revokeAuthorization(revoke, identity), reason); }
+      finally {
+        history.prepare('UPDATE control_requests SET committed_at = ? WHERE principal_id = ? AND method = ? AND request_id = ?')
+          .run(row.committed_at, identity.principalId, 'authorization.revoke', revoke.requestId);
+      }
+    }
+    await fixture.store.close();
+    fixture.store = await openStateStore(fixture.stateRoot, fixture.runtimeAuthority);
+    const successor = await publishInProcessChannel(fixture.store);
+    assert.deepEqual((await fixture.store.revokeAuthorization(revoke, successor)).response, revoked.response);
+  } finally {
+    writer.mock.restore(); history.close(); await disposeFixture(fixture); t.mock.timers.reset();
+  }
+});
+
+test('authorization never clamps a commit clock or extends its prepared lifetime', async t => {
+  for (const scenario of ['create_clock_regressed', 'revoke_clock_regressed', 'create_expired', 'create_before_preparation',
+    'create_publication_failed', 'revoke_publication_failed']) {
+    await t.test(scenario, async child => {
+      const signed = await signedVerifierAuthority();
+      const fixture = await createQueuedFixture('authorization-' + scenario, {
+        runtimeAuthority: { bundle: signed.bundle, releaseKeys: signed.releaseKeys }, assembly: async store => {
+          for (const object of signed.objects) await store.artifacts.publishBytes(object.bytes, 'application/octet-stream', 'offline-verifier-object');
+          const { assembly } = testFixture();
+          return (await store.artifacts.publishCanonical(assembly, assembly.format)).ref;
+        } });
+      const identity = await publishInProcessChannel(fixture.store);
+      const core = { protocolVersion: 1, method: 'authorization.create', requestId: uuidv7(), ttlMs: 1000,
+        decision: { kind: 'execution_identity_read', purpose: 'verifier',
+          target: { kind: 'guest_toolchain', guestToolchainManifestId: signed.manifestId, toolId: 'node' } } };
+      const create = { ...core, requestDigest: canonicalSha256(core) };
+      const prior = scenario.startsWith('revoke') ? await fixture.store.createAuthorization(create, identity) : undefined;
+      const revokeCore = prior && { protocolVersion: 1, method: 'authorization.revoke', requestId: uuidv7(), grantId: prior.response.result.grant.grantId };
+      const method = revokeCore ? 'authorization.revoke' : 'authorization.create', requestId = revokeCore?.requestId ?? core.requestId;
+      const history = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+      const originalFence = readTimeFence(history)!;
+      const sample = await open(path.join(fixture.stateRoot, KERNEL_CAS_DIRECTORY, signed.manifestRef), 'r');
+      const prototype = Object.getPrototypeOf(sample) as { writeFile: FileHandle['writeFile'] }, originalWrite = prototype.writeFile;
+      await sample.close();
+      child.mock.timers.enable({ apis: ['Date'], now: Math.max(Date.now(), Date.parse(originalFence.lastAcceptedAt)) + 1000 });
+      const preparedMs = Date.now(); let writes = 0;
+      const publicationFailure = Object.assign(new Error('authorization test CAS publication failure'), { code: 'ENOSPC' });
+      const writer = child.mock.method(prototype, 'writeFile', async function(this: FileHandle, ...args: unknown[]) {
+        await Reflect.apply(originalWrite, this, args);
+        if (!Buffer.isBuffer(args[0]) || !args[0].includes(Buffer.from(`"method":"${method}"`)) ||
+            !args[0].includes(Buffer.from('"ok":true')) || writes++) return;
+        if (scenario.endsWith('publication_failed')) throw publicationFailure;
+        if (scenario.endsWith('clock_regressed')) {
+          child.mock.timers.tick(200);
+          history.transaction(connection => assert.equal(advanceTimeFence(connection, fixture.store.ownerEpoch), 'healthy'));
+          child.mock.timers.setTime(preparedMs + 100);
+        } else if (scenario === 'create_expired') child.mock.timers.tick(1000);
+        else child.mock.timers.setTime(preparedMs - 1);
+      });
+      try {
+        const pending = revokeCore ? fixture.store.revokeAuthorization({ ...revokeCore, requestDigest: canonicalSha256(revokeCore) }, identity)
+          : fixture.store.createAuthorization(create, identity);
+        if (scenario.endsWith('publication_failed')) {
+          await assert.rejects(pending, error => error === publicationFailure);
+          assert(isJoinedCasPublicationFailure(publicationFailure));
+          assert.deepEqual(readTimeFence(history), originalFence);
+        } else if (scenario.endsWith('clock_regressed')) {
+          await assert.rejects(pending, { code: 'RECOVERY_REQUIRED' });
+          const fence = readTimeFence(history)!;
+          assert.equal(fence.state, 'clock_regressed');
+          assert.equal(fence.lastAcceptedAt, new Date(preparedMs + 200).toISOString());
+          assert.equal(fence.observedWallClockAt, new Date(preparedMs + 100).toISOString());
+        } else {
+          await assert.rejects(pending, (error: unknown) => error instanceof Error && 'refusalCode' in error && error.refusalCode === 'AUTHORIZATION_REQUIRED');
+          assert.deepEqual(readTimeFence(history), originalFence, 'failed lifetime checks roll back the whole transaction');
+        }
+        assert.equal(writes, 1, 'a rejected attempt never automatically republishes or retries');
+        assert.equal(history.prepare('SELECT count(*) AS count FROM control_requests WHERE principal_id = ? AND method = ? AND request_id = ?')
+          .get<{ count: bigint }>(identity.principalId, method, requestId)!.count, 0n);
+        assert.equal(history.prepare('SELECT count(*) AS count FROM authorization_grants').get<{ count: bigint }>()!.count, prior ? 1n : 0n);
+        if (prior) assert.equal(history.prepare('SELECT state FROM authorization_grants WHERE grant_id = ?')
+          .get<{ state: string }>(prior.response.result.grant.grantId)!.state, 'active');
+      } finally {
+        writer.mock.restore(); child.mock.timers.setTime(preparedMs + 1000);
+        assert.equal(fixture.store.recoverCanonicalTime(), 'healthy');
+        history.close(); await disposeFixture(fixture); child.mock.timers.reset();
+      }
+    });
+  }
 });

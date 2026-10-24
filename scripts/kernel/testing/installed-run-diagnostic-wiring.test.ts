@@ -2,9 +2,71 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
+import { Script } from 'node:vm';
+import { transformSync } from 'esbuild';
 
 const source = await readFile(new URL('../../../src/state/store.ts', import.meta.url), 'utf8');
 const between = (start: string, end: string) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
+
+test('worker cancellation campaign observes an unpaused original producer and requires real two-second join before successor recovery', async () => {
+  // Wiring only. Only the real Linux execution can qualify this live cut.
+  const campaign = await readFile(new URL('../run-linux-worker-campaign.ts', import.meta.url), 'utf8');
+  const start = campaign.indexOf('async function closeActualInspection(');
+  const end = campaign.indexOf('async function noOpenInvocationRecovery(', start);
+  assert(start >= 0 && end > start);
+  const body = campaign.slice(start, end);
+  assert(!/SIGSTOP|SIGCONT|ptrace|45_000/u.test(body), 'this shutdown check must not hold a process or sleep until its deadline');
+  assert.match(body, /assert\.equal\(recoverySettled, false/u);
+  assert.match(body, /const closing = fixture.store.close\(\);/u);
+  assert.match(body, /try \{ await bounded\(closing, 2000\); \}\s*finally \{ await closing; \}/u);
+  const elapsed = body.indexOf('const closeElapsedMs = performance.now() - closingAt;');
+  const reopen = body.indexOf('const store = await openStateStore(');
+  const backoff = body.indexOf('await delay(Math.max(0, Date.parse(wait.probeState.nextProbeAt) - Date.now()));');
+  assert(elapsed > 0 && reopen > elapsed && backoff > reopen, 'restart/backoff time cannot be mislabeled as original shutdown duration');
+  assert.match(body, /assert\.equal\(wrapper.outcome, 'probe_cancelled'\)/u);
+  assert.match(body, /assert\.ok\(closure.closedAt < dispatch.probeDeadlineAt/u);
+  assert.match(body, /Date\.parse\(dispatch.probeDeadlineAt\) \+ 1000/u);
+  assert.match(body, /assert\.deepEqual\(directChildren\(\), baseline/u);
+  assert.match(body, /not installed Supervisor SIGTERM qualification/u);
+});
+
+test('publication diagnosis follows the original execution boundaries without changing work or retirement callbacks', async () => {
+  const execution = await readFile(new URL('../../../src/state/run-execution.ts', import.meta.url), 'utf8');
+  assert.match(execution, /onRetirementPhase\?: \(phase: RunRetirementPhase\) => void,\s*onPublicationPhase\?: \(phase: RunPublicationPhase\) => void/u);
+  assert.match(execution, /const publicationPhase = \(phase: RunPublicationPhase\) => \{ try \{ onPublicationPhase\?\.\(phase\); \} catch \{ \/\* Diagnosis cannot decide publication\. \*\/ \} \};/u);
+  const start = execution.indexOf('executeCurrentPublication: async value =>');
+  const end = execution.indexOf('finishCurrentFinalTurn: async value =>', start);
+  const body = execution.slice(start, end);
+  for (const [phase, operation] of [['publication_select', 'const selected = await readRecoveryClosure'],
+    ['publication_roots_open', 'const roots = await holdPublicationRoots'],
+    ['publication_prepare', 'const original = await publication.preparePublicationInvocation'],
+    ['publication_dispatch', 'if (activeWorker !== current'],
+    ['publication_settlement', 'const completed = publication.readOwnedPublicationCompletion']])
+    assert(body.includes(`publicationPhase('${phase}');\n        ${phase === 'publication_dispatch' || phase === 'publication_settlement' ? '  ' : ''}${operation}`));
+  assert.match(body, /if \(queued\) publicationPhase\('publication_worker_activate'\);\s*const current = queued \? await activateWorker\(selected, signal\) : activeWorker!;/u);
+  assert.match(execution, /async function finishReceivedPublication\(\) \{\s*publicationPhase\('publication_settlement'\);/u);
+  const opening = between('async loadRunExecution(input:', '/** Internal source producer,');
+  assert.match(opening, /phase => \{ if \(this.installedRunPhases.has\(runId\)\) this.installedRunPhases.set\(runId, `drive_retirement_\$\{phase\}`\); \},\s*installedRunDiagnosticsSubscribed\(\) \? phase => \{ if \(this.installedRunPhases.has\(runId\)\) this.installedRunPhases.set\(runId, phase\); \} : undefined/u);
+});
+
+test('the actual fixed publication callback body cannot propagate subscriber failure or sample an absent subscriber', async () => {
+  // Execute only the original inert callback declaration, not an execution
+  // owner or a surrogate Run. This remains the existing source-wiring seam.
+  const execution = await readFile(new URL('../../../src/state/run-execution.ts', import.meta.url), 'utf8');
+  const declaration = execution.match(/const publicationPhase = \(phase: RunPublicationPhase\) => \{[^\n]+/u)?.[0];
+  assert(declaration);
+  const compiled = transformSync(`${declaration}\nglobalThis.invoke = publicationPhase;`, { loader: 'ts' }).code;
+  const phases: string[] = [], original = new Error('subscriber unavailable');
+  const throwing = { onPublicationPhase(phase: string) { phases.push(phase); throw original; }, invoke: undefined as any };
+  new Script(compiled).runInNewContext(throwing);
+  assert.doesNotThrow(() => throwing.invoke('publication_prepare'));
+  assert.deepEqual(phases, ['publication_prepare']);
+  let sampled = 0;
+  const absent = { onPublicationPhase: undefined, invoke: undefined as any,
+    Date: { now() { sampled++; throw 0; } }, process: { hrtime() { sampled++; throw 0; } } };
+  new Script(compiled).runInNewContext(absent);
+  assert.doesNotThrow(() => absent.invoke('publication_select')); assert.equal(sampled, 0);
+});
 
 test('authorization diagnosis records only existing await boundaries and rethrows the untouched original failure', async () => {
   const authorization = await readFile(new URL('../../../src/state/authorization.ts', import.meta.url), 'utf8');
@@ -22,8 +84,12 @@ test('authorization diagnosis records only existing await boundaries and rethrow
   assert.match(body, /catch \(error\) \{\s*diagnosis\?\.failure\(error\);\s*throw error;/u);
   const transaction = body.slice(body.indexOf('driver.transaction(connection =>'), body.indexOf('    requireHealthyFence(outcome);'));
   assert(!transaction.includes('diagnosis'), 'no subscriber callback runs inside the original authoritative transaction');
-  assert(body.includes("throw new KernelStorageError('REVISION_CONFLICT', 'authorization creation timestamp lost its exact control cut');"));
-  assert.equal((body.match(/sampleCanonicalNow\(\)/gu) ?? []).length, 2, 'the original two real samples stay unchanged');
+  assert.match(transaction, /const currentOwner = assertActiveStateOwner\(connection, owner\);/u);
+  assert.match(transaction, /if \(channel.channel.transport.kind === 'uds_peer'\) assertCurrentControlFrame\(owner, identity\);/u);
+  assert.match(transaction, /const now = sampleCanonicalNow\(\);\s*outcome = advanceTimeFence\(connection, owner.ownerEpoch, now\);\s*if \(outcome !== 'healthy'\) return;/u);
+  assert.match(transaction, /if \(now < createdAt \|\| now >= grant.expiresAt \|\| currentOwner.acquiredAt > createdAt \|\| channel.channel.openedAt > createdAt\)/u);
+  assert.match(transaction, /responseRef: published.ref, committedAt: now/u);
+  assert.equal((body.match(/sampleCanonicalNow\(\)/gu) ?? []).length, 2, 'preparation and actual final-transaction commit remain two distinct samples');
 });
 
 test('apply diagnostics distinguish the original admission await from postcommit loading without replacing the error', () => {
@@ -72,4 +138,28 @@ test('failure journal reads follow the original stop and actual PID absence, and
   assert(stop > start && absent > stop && reading > absent && joined > reading && published > joined,
     'only the post-stop original-window read may produce an observation after all writers have joined');
   assert.match(journey, /_SYSTEMD_INVOCATION_ID=\$\{storeFailureBinding.invocationId\}/u);
+});
+
+test('safe scanner failure diagnosis is sticky and snapshots only original counts after writers join', async () => {
+  const journey = await readFile(new URL('./installed-node-journey.ts', import.meta.url), 'utf8');
+  assert(journey.includes('firstFailureStage ??= scanStage;'), 'only the first actual scanner failure owns the fixed stage');
+  assert.match(journey, /maxBytes: 512 \* 1024 \* 1024, maxStreams: 4096/u);
+  const joined = journey.indexOf("assert.equal(report.installedWritersJoined, true); assert.equal(report.httpsJoined, true); assert.equal(report.daemonJoined, true);");
+  const snapshot = journey.indexOf('beforeCorpus = Object.freeze({ streamsOpened: before.streamsOpened, bytesScanned: before.bytesScanned });', joined);
+  const corpus = journey.indexOf("scanStage = 'corpus';", snapshot);
+  const scanned = journey.indexOf('report.secretCorpus = await scanCredentialSecretCorpus(', corpus);
+  const report = journey.indexOf("scanStage = 'report';", scanned);
+  const originalReportScan = journey.indexOf('scanBytes(bytes); bytes.fill(0); scanner.close();', report);
+  assert(joined >= 0 && snapshot > joined && corpus > snapshot && scanned > corpus && report > scanned && originalReportScan > report,
+    'only original post-join counts precede the unchanged corpus and final report scans');
+  assert(!journey.slice(joined, scanned).includes('await'), 'diagnosis adds no await before the original corpus operation');
+  assert(journey.includes('corpusScanFailureCode = error.code;'), 'only the existing caught scanner class supplies the corpus code');
+  const fallback = journey.slice(journey.indexOf('let secretScanFailure: CredentialSecretScanFailureDiagnostic | undefined;'),
+    journey.indexOf('secret.fill(0); password.fill(0);'));
+  assert(fallback.includes('copyCredentialSecretScanFailureDiagnostic({ diagnosticOnly: true,'), 'the fixed projection gates new fallback data');
+  assert(fallback.includes("phase: 'secret_scan_or_report_failure'"), 'fallback cannot publish the original arbitrary phase');
+  assert(!/\bawait\b|Date\.|performance\.|report\.phase|error\.message|error\.stack/u.test(fallback),
+    'fallback adds no clock, I/O, raw phase or error text');
+  assert(fallback.includes('...(secretScanFailure ? { secretScanFailure } : {})'),
+    'a rejected diagnostic is omitted without replacing the original safe fallback');
 });

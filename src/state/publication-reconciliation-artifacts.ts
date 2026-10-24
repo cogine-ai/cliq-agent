@@ -153,7 +153,7 @@ export function decodePublicationProbeEvidence(value: unknown): ReconciliationPr
 }
 
 export function decodePublicationProbeClosure(value: unknown): Extract<ReconciliationProbeTimeoutClosureV1,
-  { subjectKind: 'publication' }> | ReconciliationProbeCancellationClosureV1 {
+  { subjectKind: 'publication' }> | Extract<ReconciliationProbeCancellationClosureV1, { subjectKind: 'publication' }> {
   if (!value || typeof value !== 'object') throw new TypeError('invalid publication probe closure');
   const cancellation = Object.getOwnPropertyDescriptor(value, 'format')?.value === 'cliq-reconciliation-probe-cancellation-closure-v1';
   const data = closed(value, ['schemaVersion', 'format', 'runId', 'waitingSubjectRef', 'probeKind', 'probeOrdinal',

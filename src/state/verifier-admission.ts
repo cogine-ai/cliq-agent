@@ -90,7 +90,8 @@ export async function readVerifierRequestIdentities(driver: SqliteDriver, artifa
       throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');
     const checkedAt = historical?.admittedAt ?? sampleCanonicalNow();
     if (checkedAt < grant.createdAt || checkedAt >= grant.expiresAt) throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');
-    await readAuthorizationHistory(driver, artifacts, owner, grant, runtime.releaseKeys, signal);
+    const history = await readAuthorizationHistory(driver, artifacts, owner, grant, runtime.releaseKeys, signal);
+    if (checkedAt < history.committedAt) throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');
     const target = grant.target;
     if (target.kind !== 'execution_identity_read' || target.purpose !== 'verifier' || target.identity.kind !== 'guest_toolchain' ||
         request.executable.kind !== 'toolchain' || request.executable.toolId !== target.identity.toolId)
@@ -106,7 +107,7 @@ export async function readVerifierRequestIdentities(driver: SqliteDriver, artifa
       if (!same(receipt.consumer, { kind: 'run_admission', runId: historical.runId, admissionIntentDigest: historical.admissionIntentDigest }) ||
           receipt.consumedAt !== historical.admittedAt) throw new TypeError('verifier identity was consumed by another admission');
     }
-    resolved.push({ request, grant, selected });
+    resolved.push({ request, grant, selected, creationCommittedAt: history.committedAt });
   }
   if (new Set(resolved.map(({ selected }) => selected.manifestRef)).size > 1)
     throw new VerifierAuthorizationError('UNSUPPORTED_EXECUTION_IDENTITY');
@@ -191,8 +192,8 @@ export async function prepareVerifierSpec(driver: SqliteDriver, artifacts: Artif
 export async function prepareVerifierConsumption(artifacts: ArtifactCatalog, prepared: Awaited<ReturnType<typeof prepareVerifierSpec>>,
   input: { runId: string; admissionIntentDigest: string; admittedAt: string }) {
   const transitions: Array<{ prior: AuthorizationGrantV1; next: AuthorizationGrantV1; artifact: PublishedArtifact }> = [];
-  for (const { grant } of prepared.resolved) {
-    if (grant.state !== 'active' || input.admittedAt < grant.createdAt || input.admittedAt >= grant.expiresAt)
+  for (const { grant, creationCommittedAt } of prepared.resolved) {
+    if (grant.state !== 'active' || input.admittedAt < creationCommittedAt || input.admittedAt >= grant.expiresAt)
       throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');
     const receipt: AuthorizationConsumptionReceiptV1 = { schemaVersion: 1, grantId: grant.grantId, ownerPrincipalId: grant.ownerPrincipalId,
       targetDigest: grant.targetDigest, consumer: { kind: 'run_admission', runId: input.runId, admissionIntentDigest: input.admissionIntentDigest },

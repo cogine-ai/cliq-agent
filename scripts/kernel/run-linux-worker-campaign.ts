@@ -15,7 +15,7 @@ import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME } from '../../src/config
 import { canonicalJsonBytes, canonicalSha256 } from '../../src/kernel/canonical.js';
 import { digestOmitting, identityHash } from '../../src/kernel/identity.js';
 import type { ProcessContainment, ProcessContainmentDeathEvidenceV1, ProcessContainmentNoSpawnEvidenceV1, ProcessContainmentPlanV1, SandboxLaunchSpecV1 } from '../../src/kernel/execution.js';
-import type { ReconciliationProbeEvidenceV1, ReconciliationProbeTimeoutClosureV1 } from '../../src/kernel/reconciliation.js';
+import type { ReconciliationProbeCancellationClosureV1, ReconciliationProbeEvidenceV1, ReconciliationProbeTimeoutClosureV1 } from '../../src/kernel/reconciliation.js';
 import type { WorkerDeathWait, WorkerIdentity, WorkspaceEntryManifest, WorkspaceGenerationIdentityV1,
   WorkspaceGenerationQuarantineEvidenceV1, WorkspaceGenerationStateV1, WorkspaceStateManifest, PlatformProcessIdentityV1,
   WorkspaceGenerationRetirementEvidenceV1, SupervisorInspectorIdentityV1, Run, WorkerLaunch, BudgetSettlementV1,
@@ -3321,14 +3321,17 @@ async function closeActualInspection(fixture: Awaited<ReturnType<typeof createLi
   const controllerImage = fixture.signed.bundle.entries.find(entry => entry.entryId === 'linux_worker_controller')!;
   assert.ok(controllerImage.executable && controllerImage.role === 'platform_helper');
   const recovery = execution.recoverWorker({ expectedRunRevision: failed.revision });
+  let recoverySettled = false;
+  void recovery.then(() => { recoverySettled = true; }, () => { recoverySettled = true; });
   const rejected = assert.rejects(recovery);
   void rejected.catch(() => {}); // Also awaited after the real close below.
-  let stopped: { pid: number; token: string; wait: WorkerDeathWait } | undefined;
+  let observed: { pid: number; token: string; wait: WorkerDeathWait } | undefined;
   const discoveryDeadline = performance.now() + 5000;
   // This fault target is a new direct child of this otherwise sequential
   // fixture, pinned to the installed signed controller bytes and token. It is
-  // only an OS test selection, never production authority or a receipt seam.
-  while (!stopped && performance.now() < discoveryDeadline) {
+  // only a read-only observation, never production authority or a receipt
+  // seam. Do not stop, trace or otherwise hold this genuine inspector open.
+  while (!observed && performance.now() < discoveryDeadline) {
     const run = fixture.store.getRun(fixture.runId);
     const wait = frozenArtifact<WorkerDeathWait>(fixture.stateRoot, run.waitingOnRef!);
     const children = [...directChildren()].filter(pid => !baseline.has(pid));
@@ -3348,50 +3351,59 @@ async function closeActualInspection(fixture: Awaited<ReturnType<typeof createLi
           assert.equal(after.mtimeNs, before.mtimeNs); assert.equal(after.ctimeNs, before.ctimeNs);
           assert.equal(processToken(pid), token);
           assert.ok(directChildren().has(pid), 'controller remains an actual direct child');
-          process.kill(pid, 'SIGSTOP');
-          stopped = { pid, token, wait };
+          const current = fixture.store.getRun(fixture.runId);
+          assert.equal(current.waitingOnRef, run.waitingOnRef, 'the original inspection must still own its exact in-flight nonce');
+          assert.equal(recoverySettled, false, 'a completed operation cannot stand in for an actual in-flight inspector');
+          observed = { pid, token, wait };
         }
       } finally { fs.closeSync(fd); }
     }
-    if (!stopped) await delay(1);
+    if (!observed) await delay(1);
   }
-  assert.ok(stopped, 'actual in-flight controller must be pinned and stopped; missing coverage fails the campaign');
-  const stopDeadline = performance.now() + 1000;
-  for (;;) {
-    const line = fs.readFileSync(`/proc/${stopped.pid}/stat`, 'utf8');
-    const state = line.slice(line.lastIndexOf(')') + 2).split(' ')[0];
-    assert.equal(processToken(stopped.pid), stopped.token);
-    if (state === 'T') break;
-    assert.ok(performance.now() < stopDeadline, 'SIGSTOP must be an actual kernel-observed state');
-    await delay(1);
-  }
-  assert.equal(stopped.wait.probeState.phase, 'automatic_in_flight');
-  if (stopped.wait.probeState.phase !== 'automatic_in_flight') throw new Error('fault did not freeze its inspection dispatch');
-  const dispatch = stopped.wait.probeState.dispatch;
+  assert.ok(observed, 'actual unpaused in-flight controller must be pinned; missing coverage fails the campaign');
+  assert.equal(observed.wait.probeState.phase, 'automatic_in_flight');
+  if (observed.wait.probeState.phase !== 'automatic_in_flight') throw new Error('observation did not select its original inspection dispatch');
+  const dispatch = observed.wait.probeState.dispatch;
   if (dispatch.subjectKind !== 'worker_recovery') throw new Error('fault did not select the worker inspector');
-  const oldWorker = decodeWorkerIdentity(frozenArtifact<WorkerIdentity>(fixture.stateRoot, stopped.wait.subject.oldWorkerIdentity));
+  const oldWorker = decodeWorkerIdentity(frozenArtifact<WorkerIdentity>(fixture.stateRoot, observed.wait.subject.oldWorkerIdentity));
   assert.equal(dispatch.owningSupervisorInstanceId, oldWorker.supervisorInstanceId, 'this is the original live-owner inspection');
+  assert.equal(processToken(observed.pid), observed.token);
+  assert.ok(directChildren().has(observed.pid));
+  assert.equal(recoverySettled, false);
+  assert.ok(sampleCanonicalNow() < dispatch.probeDeadlineAt, 'shutdown must begin before the original deadline');
   const closingAt = performance.now();
-  await bounded(fixture.store.close(), 45_000);
+  const closing = fixture.store.close();
+  // The bound is an assertion, not a replacement for the actual resource join.
+  // A failed bound still awaits the original close before propagating failure.
+  try { await bounded(closing, 2000); }
+  finally { await closing; }
+  const closeElapsedMs = performance.now() - closingAt;
+  assert.ok(closeElapsedMs <= 2000, 'the original Store close must genuinely complete within two seconds');
   await rejected;
-  await assert.rejects(access(`/proc/${stopped.pid}`), { code: 'ENOENT' });
+  await assert.rejects(access(`/proc/${observed.pid}`), { code: 'ENOENT' });
+  assert.deepEqual(directChildren(), baseline, 'the original close joins every actual inspector child');
   const store = await openStateStore(fixture.stateRoot, fixture.runtimeAuthority);
   try {
     const cut = await store.readRecoveryClosure(fixture.runId);
     const wait = await store.artifacts.readCanonical<WorkerDeathWait>(cut.run.waitingOnRef!);
     assert.equal(wait.probeState.phase, 'automatic_pending'); assert.equal(wait.probeState.automaticProbeCount, 1);
     if (wait.probeState.phase !== 'automatic_pending' || wait.probeState.automaticProbeCount !== 1) {
-      throw new Error('same-owner cancellation did not close one exact deadline/nonce');
+      throw new Error('same-owner cancellation did not close one exact original nonce');
     }
     const wrapper = await store.artifacts.readCanonical<ReconciliationProbeEvidenceV1>(wait.probeState.lastProbeEvidenceRef);
-    assert.equal(wrapper.outcome, 'probe_timeout');
-    if (wrapper.outcome !== 'probe_timeout') throw new Error('cancelled inspection installed a late subject proof');
-    const closure = await store.artifacts.readCanonical<ReconciliationProbeTimeoutClosureV1>(wrapper.timeoutClosureRef);
-    if (closure.subjectKind !== 'worker_recovery') throw new Error('timeout belongs to another subject');
+    assert.equal(wrapper.outcome, 'probe_cancelled');
+    if (wrapper.outcome !== 'probe_cancelled') throw new Error('cancelled inspection installed a timeout or late subject proof');
+    assert.equal(wrapper.cancellationReason, 'owning_supervisor_shutdown');
+    const closure = await store.artifacts.readCanonical<ReconciliationProbeCancellationClosureV1>(wrapper.cancellationClosureRef);
+    if (closure.subjectKind !== 'worker_recovery') throw new Error('cancellation belongs to another subject');
+    assert.equal(closure.reason, 'owning_supervisor_shutdown');
     assert.equal(closure.taskClosure.closureKind, 'cancelled_and_joined');
-    assert.equal(closure.waitingSubjectRef, canonicalSha256(stopped.wait));
+    assert.equal(closure.waitingSubjectRef, canonicalSha256(observed.wait));
     assert.equal(closure.probeNonceDigest, dispatch.probeNonceDigest); assert.equal(closure.probeDispatchDigest, dispatch.dispatchDigest);
-    assert.equal(closure.inspectorTaskId, dispatch.inspectorTaskId); assert.ok(closure.closedAt >= dispatch.probeDeadlineAt);
+    assert.equal(closure.inspectorTaskId, dispatch.inspectorTaskId);
+    assert.ok(closure.closedAt < dispatch.probeDeadlineAt, 'a real shutdown closure must not wait for or pretend to expire the original deadline');
+    assert.equal(wait.probeState.nextProbeAt, new Date(Date.parse(dispatch.probeDeadlineAt) + 1000).toISOString(),
+      'cancellation preserves the original deadline and first backoff rather than making an early retry eligible');
     assert.equal(cut.run.latestCheckpointId, failed.latestCheckpointId); assert.equal(cut.run.budgetReserved.toolCalls, 0);
     assert.equal(cut.journal.filter(entry => entry.opKind === 'tool').length, 0);
     const generation = cut.workspaceGenerations.find(row => row.generationRef === wait.subject.workspaceGenerationRef)!;
@@ -3401,10 +3413,10 @@ async function closeActualInspection(fixture: Awaited<ReturnType<typeof createLi
     assert.equal(store.getRun(fixture.runId).revision, revision); assert.equal(store.getRun(fixture.runId).waitingOnRef, waitingOnRef);
     await delay(Math.max(0, Date.parse(wait.probeState.nextProbeAt) - Date.now()));
     const replacement = await store.loadRunExecution({ runId: fixture.runId, material: fixture.authority.material });
-    console.log(JSON.stringify({ scenario: 'actual-inspection-cancelled-and-joined', pid: stopped.pid, processStartToken: stopped.token,
-      probeNonceDigest: dispatch.probeNonceDigest, timeoutClosureRef: wrapper.timeoutClosureRef,
-      closeElapsedMs: performance.now() - closingAt, nextProbeAt: wait.probeState.nextProbeAt,
-      note: 'real SIGSTOP, public Store.close abort plus native join, actual wall-clock persisted deadline; no late proof' }));
+    console.log(JSON.stringify({ scenario: 'actual-inspection-cancelled-and-joined', pid: observed.pid, processStartToken: observed.token,
+      probeNonceDigest: dispatch.probeNonceDigest, cancellationClosureRef: wrapper.cancellationClosureRef,
+      closeElapsedMs, nextProbeAt: wait.probeState.nextProbeAt,
+      note: 'unpaused actual controller, public Store.close abort plus native join within two seconds and genuine pre-deadline cancellation; not installed Supervisor SIGTERM qualification' }));
     return { store, execution: replacement };
   } catch (error) { await store.close(); throw error; }
 }

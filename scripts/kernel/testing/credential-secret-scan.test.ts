@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { CredentialSecretScanError, createCredentialSecretScanner } from './credential-secret-scan.js';
+import { CredentialSecretScanError, createCredentialSecretScanner,
+  copyCredentialSecretScanFailureDiagnostic, type CredentialSecretScanStats } from './credential-secret-scan.js';
 
 // Pure scanner contracts only; these fixed bytes are not installed evidence.
 const limits = { maxBytes: 4096, maxStreams: 8 };
@@ -84,6 +85,114 @@ test('stream-count and single-chunk bounds cannot be bypassed', () => {
   const chunkScan = createCredentialSecretScanner([input()], { maxBytes: 16 * 1024 * 1024, maxStreams: 1 });
   assert.throws(() => chunkScan.openStream().scan(new Uint8Array(8 * 1024 * 1024 + 1)), { code: 'LIMIT_EXCEEDED' });
   assert.equal(chunkScan.stats().bytesScanned, 0); assert.equal(chunkScan.stats().closed, true);
+});
+
+test('failure observation happens after real scanner closure and cannot replace its original error', () => {
+  let observed: CredentialSecretScanError | undefined;
+  const observations: CredentialSecretScanStats[] = [];
+  const observerFailure = new Error('observer failure must remain private');
+  const scanner = createCredentialSecretScanner([input()], { maxBytes: 16, maxStreams: 1 }, error => {
+    observed = error;
+    observations.push(scanner.stats());
+    throw observerFailure;
+  });
+  scanner.openStream().close();
+  assert.throws(() => scanner.openStream(), error => {
+    assert.equal(error, observed, 'observation sees the exact original thrown scanner error');
+    assert.notEqual(error, observerFailure, 'observer exception cannot replace the original error');
+    assert(error instanceof CredentialSecretScanError, 'the original scanner class is retained');
+    assert.equal(error.code, 'LIMIT_EXCEEDED', 'the original limit remains enforced');
+    return true;
+  });
+  assert.equal(observations.length, 1, 'the failure is observed exactly once');
+  const stats = observations[0]!;
+  assert.equal(stats.closed, true, 'scanner closes before observation');
+  assert.equal(stats.streamsOpened, stats.streamsClosed, 'all real stream owners retire before observation');
+  assert.equal(stats.retainedNeedleBytes, 0, 'needles retire before observation');
+  assert.equal(stats.retainedTailBytes, 0, 'tails retire before observation');
+  const first = observed;
+  assert.throws(() => scanner.openStream(), { code: 'CLOSED' });
+  assert.equal(observed, first, 'subsequent CLOSED cannot overwrite the first failure');
+});
+
+test('fixed failure projection emits only closed copied data and never claims qualification', () => {
+  const source = { diagnosticOnly: true, firstFailureStage: 'corpus',
+    beforeCorpus: { streamsOpened: 4, bytesScanned: 300 }, corpusScanFailureCode: 'LIMIT_EXCEEDED' };
+  const actual = copyCredentialSecretScanFailureDiagnostic(source);
+  assert.deepEqual(actual, { diagnosticOnly: true, firstFailureStage: 'corpus',
+    beforeCorpus: { streamsOpened: 4, bytesScanned: 300 }, corpusScanFailureCode: 'LIMIT_EXCEEDED' });
+  source.beforeCorpus.bytesScanned = 400;
+  assert.equal(actual.beforeCorpus!.bytesScanned, 300, 'the earlier actual snapshot remains immutable');
+  assert.equal(Object.isFrozen(actual), true, 'the diagnostic is immutable data');
+  assert.equal(Object.isFrozen(actual.beforeCorpus), true, 'the count snapshot is immutable data');
+  assert.equal(Object.hasOwn(actual, 'qualified'), false, 'diagnosis never qualifies a phase');
+});
+
+test('closed failure data handles runtime, corpus, report and unavailable without retaining raw text', () => {
+  for (const firstFailureStage of ['runtime', 'corpus', 'report', null] as const) {
+    const value = copyCredentialSecretScanFailureDiagnostic({ diagnosticOnly: true, firstFailureStage,
+      beforeCorpus: firstFailureStage === 'corpus' ? { streamsOpened: 4096, bytesScanned: 512 * 1024 * 1024 } : null,
+      corpusScanFailureCode: null });
+    assert.equal(value.firstFailureStage, firstFailureStage, 'the original fixed stage is retained without qualification');
+    assert.equal(Object.hasOwn(value, 'qualified'), false, 'even unavailable is diagnosis, not success');
+  }
+  for (const corpusScanFailureCode of ['INVALID_INPUT', 'LIMIT_EXCEEDED', 'SECRET_DETECTED', 'CLOSED'] as const) {
+    const actual = copyCredentialSecretScanFailureDiagnostic({ diagnosticOnly: true, firstFailureStage: 'runtime',
+      beforeCorpus: { streamsOpened: 4096, bytesScanned: 3 }, corpusScanFailureCode });
+    assert.equal(actual.corpusScanFailureCode, corpusScanFailureCode, 'only the original closed corpus code escapes');
+  }
+});
+
+test('failure projection refuses malicious objects without invoking getters, Proxy traps or toJSON', () => {
+  const valid = () => ({ diagnosticOnly: true, firstFailureStage: 'runtime', beforeCorpus: null, corpusScanFailureCode: null });
+  let invoked = 0;
+  const getter = Object.defineProperty(valid(), 'firstFailureStage', { enumerable: true, get() { invoked++; throw new Error('private raw text'); } });
+  const traps: ProxyHandler<object> = {};
+  for (const key of ['get', 'getPrototypeOf', 'ownKeys', 'getOwnPropertyDescriptor'] as const)
+    traps[key] = (() => { invoked++; throw new Error('private raw text'); }) as never;
+  const proxy = new Proxy(valid(), traps);
+  const nestedProxy = { ...valid(), beforeCorpus: new Proxy({ streamsOpened: 0, bytesScanned: 0 }, traps) };
+  for (const value of [getter, proxy, nestedProxy, { ...valid(), toJSON() { invoked++; throw new Error('private raw text'); } }]) {
+    assert.throws(() => copyCredentialSecretScanFailureDiagnostic(value),
+      { name: 'TypeError', message: 'invalid credential secret scan failure diagnostic' });
+  }
+  assert.equal(invoked, 0, 'no untrusted accessor or trap is invoked');
+  const invalid: unknown[] = [null, [], 1, 'private raw text', { ...valid(), diagnosticOnly: false },
+    { ...valid(), firstFailureStage: ['runtime'] }, { ...valid(), firstFailureStage: 'private raw text' },
+    { ...valid(), firstFailureStage: new String('runtime') }, { ...valid(), corpusScanFailureCode: ['CLOSED'] },
+    { ...valid(), corpusScanFailureCode: 'private raw text' }, { ...valid(), corpusScanFailureCode: 'CLOSED' },
+    { ...valid(), firstFailureStage: 'corpus' }, { ...valid(), message: 'private raw text' },
+    { ...valid(), phase: 'private raw text' }, { ...valid(), qualified: true },
+    Object.assign(Object.create({ inherited: true }), valid())];
+  for (const key of ['diagnosticOnly', 'firstFailureStage', 'beforeCorpus', 'corpusScanFailureCode']) {
+    const value: Record<string, unknown> = valid(); delete value[key]; invalid.push(value);
+  }
+  for (const key of ['streamsOpened', 'bytesScanned']) {
+    for (const bad of [-1, 1.5, NaN, Infinity, true, '1', null, Number.MAX_SAFE_INTEGER + 1])
+      invalid.push({ ...valid(), beforeCorpus: { streamsOpened: 0, bytesScanned: 0, [key]: bad } });
+  }
+  invalid.push({ ...valid(), beforeCorpus: { streamsOpened: 4097, bytesScanned: 0 } },
+    { ...valid(), beforeCorpus: { streamsOpened: 0, bytesScanned: 512 * 1024 * 1024 + 1 } },
+    { ...valid(), beforeCorpus: { streamsOpened: 0, bytesScanned: 0, raw: 'private raw text' } });
+  for (const value of invalid) {
+    assert.throws(() => copyCredentialSecretScanFailureDiagnostic(value), error => {
+      assert(error instanceof TypeError, 'only the fixed diagnostic TypeError escapes');
+      assert.equal(error.message, 'invalid credential secret scan failure diagnostic', 'no raw data enters an error message');
+      assert.equal(JSON.stringify(error).includes('private raw text'), false, 'no raw data is retained on errors');
+      return true;
+    });
+  }
+});
+
+test('successful observed scanners do not notify or alter independent streams', () => {
+  let observed = 0;
+  const scanner = createCredentialSecretScanner([input()], limits, () => { observed++; });
+  const first = scanner.openStream(), second = scanner.openStream();
+  first.scan(Buffer.from([251, 255])); second.scan(Buffer.from([0, 1]));
+  first.close(); second.close(); scanner.close();
+  assert.equal(observed, 0, 'successful scans and explicit close do not notify');
+  assert.equal(scanner.stats().matched, false, 'independent stream tails remain separate');
+  assert.equal(scanner.stats().streamsOpened, 2, 'both independent streams remain counted');
 });
 
 test('invalid creation boundaries give only a fixed error and never retain caller data', () => {

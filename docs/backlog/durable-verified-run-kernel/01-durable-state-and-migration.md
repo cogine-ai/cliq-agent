@@ -3609,3 +3609,34 @@ closed booleans and transport disappearance grant no refund.
 These are implementation contracts, not qualification evidence. The exact-SHA
 Linux reports must independently pass; unexecuted cuts and full I1 remain
 explicitly unqualified.
+
+## Approved storage closure contracts, 2026-10-25
+
+The canonical RFC's fixed-four authentication CAS batch preserves all four
+original durability/crash boundaries, per-file sync/full independent readback,
+the same bounded recovery and independent-publisher behavior. Each phase
+joins all actual mutations before syncing the same held directory. Partial
+failure durably cleans only owned temporary objects and joins every resource;
+no descriptor or valid final orphan is silently discarded. No channel becomes
+active before the complete verified group and final native-current check.
+
+Authorization freezes preparation time P and its original TTL/response before
+CAS, but only actual final-transaction time C enters the existing time fence.
+Require P<=C<expiry, the same current owner and original authenticated frame;
+retain C in the existing control row. History validates original owner and
+signed-source coverage of both times, complete request/response/channel bytes,
+and consumption not before C. Active revocation freezes R but commits at actual
+C2 with createC<=R<=C2 and the original active-row CAS. Expired grants remain
+revocable; consumed/revoked no-ops preserve their original terminal row/receipt.
+No old-time/clamped fence, TTL extension, new ledger or implicit retry is added.
+
+Worker shutdown may close its original automatic in-flight nonce only through
+the RFC's worker-recovery branch of `ReconciliationProbeCancellationClosureV1`
+and the original same-owner, genuinely cancelled-and-joined task receipt.
+It is not timeout, worker death, quarantine or outcome evidence. The exact
+subject/Checkpoint/generation, counts, reservations and accounting remain;
+the next backoff starts at max(original deadline, actual close), with ordinal
+eight still exhausted. Closure must be durable before owner release; failed
+join/storage retains the original owner and receipt. Public early timeout and
+successor receipt substitution remain refused. These contracts do not replace
+the real Linux two-second close or later physical recovery evidence.

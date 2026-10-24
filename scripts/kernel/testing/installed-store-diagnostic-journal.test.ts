@@ -10,6 +10,77 @@ const lines = ['CLIQ_STORE_DIAG_V1:begin:1:1',
 const journal = (messages = lines) => messages.map(MESSAGE => JSON.stringify({ _UID: '1000', _PID: '2000',
   _TRANSPORT: 'stdout', _SYSTEMD_INVOCATION_ID: sender.invocationId, MESSAGE })).join('\n') + '\n';
 
+test('an optional scheduler window preserves the first failure and the last actual tuple across the original stop', async () => {
+  const { readInstalledStoreDiagnosticJournal } = await import('./installed-store-diagnostic-journal.js');
+  const original = readInstalledStoreDiagnosticJournal(journal(), sender)!;
+  assert.equal(Object.hasOwn(original, 'schedulerFailuresBeforeStop'), false);
+  assert.equal(Object.hasOwn(original, 'lastSchedulerFailure'), false);
+  const messages = [...lines.slice(0, 3), 'CLIQ_STORE_DIAG_V1:scheduler_window:1',
+    'CLIQ_STORE_DIAG_V1:scheduler_last:drive:publication_prepare:1:other:none:-', ...lines.slice(3)];
+  messages[0] = 'CLIQ_STORE_DIAG_V1:begin:1:2';
+  const summary = readInstalledStoreDiagnosticJournal(journal(messages), sender)!;
+  assert.deepEqual(summary, { ...original, schedulerFailures: 2, schedulerFailuresBeforeStop: 1,
+    lastSchedulerFailure: { origin: 'drive', phase: 'publication_prepare', closing: true,
+      errorClass: 'other', code: 'none', sqliteCode: null } });
+  assert(Object.isFrozen(summary) && Object.isFrozen(summary.lastSchedulerFailure));
+  const zero = readInstalledStoreDiagnosticJournal(journal(['CLIQ_STORE_DIAG_V1:begin:0:0',
+    'CLIQ_STORE_DIAG_V1:scheduler_window:0', 'CLIQ_STORE_DIAG_V1:stop:1:0:0:0:0',
+    'CLIQ_STORE_DIAG_V1:phase:publication_roots_open:1', 'CLIQ_STORE_DIAG_V1:end']), sender)!;
+  assert.equal(zero.schedulerFailuresBeforeStop, 0); assert.equal(zero.lastSchedulerFailure, null);
+});
+
+test('a failure first observed after stop is retained as both first and last without inventing a pre-stop failure', async () => {
+  const { readInstalledStoreDiagnosticJournal } = await import('./installed-store-diagnostic-journal.js');
+  const summary = readInstalledStoreDiagnosticJournal(journal(['CLIQ_STORE_DIAG_V1:begin:0:1',
+    'CLIQ_STORE_DIAG_V1:scheduler:drive:publication_select:1:other:none:-',
+    'CLIQ_STORE_DIAG_V1:scheduler_window:0',
+    'CLIQ_STORE_DIAG_V1:scheduler_last:drive:publication_select:1:other:none:-',
+    'CLIQ_STORE_DIAG_V1:stop:1:0:0:0:0', 'CLIQ_STORE_DIAG_V1:phase:publication_select:1', 'CLIQ_STORE_DIAG_V1:end']), sender)!;
+  assert.equal(summary.schedulerFailuresBeforeStop, 0);
+  assert.deepEqual(summary.lastSchedulerFailure, summary.firstSchedulerFailure);
+  assert.equal(summary.lastSchedulerFailure!.closing, true);
+});
+
+test('scheduler windows reject incomplete, reordered, foreign or contradictory fixed rows', async () => {
+  const { readInstalledStoreDiagnosticJournal } = await import('./installed-store-diagnostic-journal.js');
+  const window = 'CLIQ_STORE_DIAG_V1:scheduler_window:1';
+  const last = 'CLIQ_STORE_DIAG_V1:scheduler_last:drive:drive_agent:0:kernel:RECOVERY_REQUIRED:-';
+  const insert = (rows: string[]) => [...lines.slice(0, 3), ...rows, ...lines.slice(3)];
+  const malformed = [[window], [last], [window, last, window], [window, last, last],
+    ['CLIQ_STORE_DIAG_V1:scheduler_window:'], [window + ':extra', last],
+    [window.replace(':1', ':2'), last], [window.replace(':1', ':-1'), last], [window.replace(':1', ':01'), last],
+    [window.replace(':1', ':9007199254740992'), last],
+    [window, last + ':extra'], [window, last.replace(':drive:', ':private:')],
+    [window, last.replace(':drive_agent:', ':publication_unknown:')], [window, last.replace(':0:', ':2:')],
+    [window, last.replace(':kernel:', ':private:')], [window, last.replace(':RECOVERY_REQUIRED:', ':private:')],
+    [window, last.replace('kernel:RECOVERY_REQUIRED:-', 'kernel:ERR_SQLITE_ERROR:1')],
+    [window, last.replace('kernel:RECOVERY_REQUIRED:-', 'sqlite:ERR_SQLITE_ERROR:2147483648')],
+    [window, last.replace('kernel:RECOVERY_REQUIRED:-', 'kernel:RECOVERY_REQUIRED:1')],
+    [window, last.replace(':drive_agent:', ':publication_prepare:')]];
+  for (const rows of malformed) assert.throws(() => readInstalledStoreDiagnosticJournal(journal(insert(rows)), sender));
+  for (const messages of [[window, last, ...lines], [...lines, window, last],
+    [...lines.slice(0, 3), 'CLIQ_STORE_DIAG_V1:authorization:1:transaction:kernel:REVISION_CONFLICT:-', window, last, ...lines.slice(3)],
+    ['CLIQ_STORE_DIAG_V1:begin:0:0', 'CLIQ_STORE_DIAG_V1:scheduler_window:0', last,
+      'CLIQ_STORE_DIAG_V1:stop:0:0:0:0:0', 'CLIQ_STORE_DIAG_V1:end']])
+    assert.throws(() => readInstalledStoreDiagnosticJournal(journal(messages), sender));
+});
+
+test('the maximal scheduler window and authorization summary still fits the original sixteen rows', async () => {
+  const { readInstalledStoreDiagnosticJournal } = await import('./installed-store-diagnostic-journal.js');
+  const names = ['drive_agent', 'drive_finalize', 'drive_material', 'drive_retirement', 'drive_verify',
+    'publication_prepare', 'publication_select', 'scheduled'];
+  const messages = [...lines.slice(0, 3), 'CLIQ_STORE_DIAG_V1:scheduler_window:1',
+    'CLIQ_STORE_DIAG_V1:scheduler_last:drive:drive_agent:0:kernel:RECOVERY_REQUIRED:-',
+    'CLIQ_STORE_DIAG_V1:authorization:1:transaction:kernel:REVISION_CONFLICT:-',
+    'CLIQ_STORE_DIAG_V1:stop:8:0:0:1:0', ...names.map(phase => `CLIQ_STORE_DIAG_V1:phase:${phase}:1`), 'CLIQ_STORE_DIAG_V1:end'];
+  assert.equal(messages.length, 16);
+  const summary = readInstalledStoreDiagnosticJournal(journal(messages), sender)!;
+  assert.equal(summary.schedulerFailuresBeforeStop, 1); assert.equal(summary.authorizationFailures, 1);
+  assert.equal(Object.keys(summary.stop.phases).length, 8);
+  assert.throws(() => readInstalledStoreDiagnosticJournal(journal([...messages.slice(0, -1),
+    'CLIQ_STORE_DIAG_V1:phase:terminal_retirement:1', messages.at(-1)!]), sender));
+});
+
 test('an optional authorization row adds its count and first fixed failure together while old summaries stay unchanged', async () => {
   const { readInstalledStoreDiagnosticJournal } = await import('./installed-store-diagnostic-journal.js');
   const original = readInstalledStoreDiagnosticJournal(journal(), sender)!;

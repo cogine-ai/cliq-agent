@@ -9,6 +9,47 @@ import { ARTIFACT_CHUNK_BYTES, ContentAddressedStore, isJoinedCasPublicationFail
 import { ArtifactCatalog } from './artifacts.js';
 import { ResourceRetirementError } from './errors.js';
 
+test('canonical fixed-four catalog publications expose only fully joined real CAS results', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'cliq-cas-canonical-four-'));
+  try {
+    await chmod(root, 0o700);
+    const catalog = new ArtifactCatalog(new ContentAddressedStore(root));
+    const values = [{ value: { n: 1 }, schemaKind: 'first' }, { value: { n: 2 }, schemaKind: 'second' },
+      { value: { n: 1 }, schemaKind: 'same-bytes' }, { value: { n: 4 }, schemaKind: 'fourth' }] as const;
+    const results = await catalog.publishCanonicalFour(values);
+    assert.equal(results[0]!.ref, results[2]!.ref, 'type labels never redefine the raw content identity');
+    for (const [index, result] of results.entries()) {
+      assert.deepEqual(await catalog.readCanonical(result.ref), values[index]!.value);
+      assert.equal(result.schemaKind, values[index]!.schemaKind);
+      assert.equal(result.mediaType, 'application/json');
+      assert.equal(result.byteLength, 7);
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('a joined fixed-four write failure cannot mint single-publication retry provenance', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'cliq-cas-four-enospc-'));
+  const open = fs.open.bind(fs), failure = Object.assign(new Error('real grouped CAS write failed'), { code: 'ENOSPC' });
+  let writes = 0, active = 0;
+  try {
+    await chmod(root, 0o700);
+    t.mock.method(fs, 'open', async (...args: Parameters<typeof open>) => {
+      const handle = await open(...args); active++;
+      const close = handle.close.bind(handle), write = handle.writeFile.bind(handle);
+      t.mock.method(handle, 'close', async () => { await close(); active--; });
+      if (String(args[0]).includes('/.tmp-stream-')) t.mock.method(handle, 'writeFile', async (...values: Parameters<typeof write>) => {
+        await write(...values); if (++writes === 1) throw failure;
+      });
+      return handle;
+    });
+    await assert.rejects(new ContentAddressedStore(root).publishFour([Buffer.from('1'), Buffer.from('2'), Buffer.from('3'), Buffer.from('4')]),
+      error => error === failure);
+    assert.equal(writes, 4, 'all four started actual file writes join despite the first failure');
+    assert.equal(active, 0); assert.deepEqual(await readdir(root), []);
+    assert.equal(isJoinedCasPublicationFailure(failure), false, 'a group does not substitute for one original publication provenance');
+  } finally { t.mock.restoreAll(); await rm(root, { recursive: true, force: true }); }
+});
+
 for (const code of ['ENOSPC', 'EIO']) {
   test('only joined direct CAS write ENOSPC is classified, not source reuse: ' + code, async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'cliq-cas-joined-write-'));

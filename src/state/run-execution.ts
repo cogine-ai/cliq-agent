@@ -1,6 +1,5 @@
 import { randomBytes } from 'node:crypto';
 import path from 'node:path';
-import { setTimeout as delay } from 'node:timers/promises';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting, identityHash, parseCanonicalTime, sha256Bytes } from '../kernel/identity.js';
 import type { ProcessContainmentPlanV1, SandboxLaunchSpecV1, SandboxRuntimeBindingV1 } from '../kernel/execution.js';
@@ -16,7 +15,7 @@ import { borrowRunWorkspaceForExecution, createRunWorkspaceMaterialization, obse
   type RunWorkspaceGeneration, type RunWorkspaceMaterialization, type RunWorkspaceBirth } from '../workspace/run-workspace/generation.js';
 import type { ArtifactCatalog } from './artifacts.js';
 import { isJoinedCasPublicationFailure } from './cas.js';
-import { readTimeFence, sampleCanonicalNow } from './canonical-time.js';
+import { sampleCanonicalNow } from './canonical-time.js';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
 import { decodeSandboxProfile, readBuiltinEditLaunchClosure, readWorkerLaunchClosure, readRetainedWorkerLaunchClosure, readQuarantinedWorkerLaunchClosure, decodeWorkerProcessContainment, readVerifierLaunchClosure, type WorkerLaunchClosure } from './execution-closure.js';
 import { loadAgentRun } from './reducers/agent.js';
@@ -29,7 +28,7 @@ import { recordWorkspaceGenerationPreactivated } from './reducers/workspace-tran
 import { readRecoveryClosure } from './recovery-closure.js';
 import { readRun } from './rows.js';
 import { isRolledBackSqliteTransactionFailure, type SqliteDriver } from './sqlite-driver.js';
-import { assertActiveStateOwner, assertFenceHealthy, type StateOwnerContext } from './state-owner.js';
+import { assertActiveStateOwner, type StateOwnerContext } from './state-owner.js';
 import { startWorkerRecoveryTask, type WorkerRecoveryTask } from './worker-recovery-task.js';
 import { toolCheckpointId } from './tool-checkpoint.js';
 import { readToolCut } from './tool-cut.js';
@@ -394,6 +393,9 @@ async function publishVerifierRecipe(artifacts: ArtifactCatalog, workerSpec: Wor
 /** Inert installed shutdown diagnosis, never retirement evidence or authority. */
 export type RunRetirementPhase = 'history' | 'quarantine_closure' | 'native_retirement' |
   'workspace_observation' | 'retirement_commit' | 'resource_join';
+/** Fixed current work labels only, never publication or retirement evidence. */
+export type RunPublicationPhase = 'publication_select' | 'publication_worker_activate' | 'publication_roots_open' |
+  'publication_prepare' | 'publication_dispatch' | 'publication_settlement';
 /** Deep internal resource owner. Opening validates only; process creation is lazy.
  * Durable lifecycle, retry and budgets remain exclusively in the existing reducers. */
 export async function loadRunExecution(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
@@ -401,13 +403,15 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
     sourceInspection?: { controlledHome: string } } | undefined,
   input: LoadRunExecutionInput, isClosing: () => boolean = () => false,
   selectedRuntime?: HeldInstalledRuntime, installedAnchor?: HeldInstalledAnchor, executionStore?: StateStore, openingSignal?: AbortSignal,
-  onRetirementPhase?: (phase: RunRetirementPhase) => void
+  onRetirementPhase?: (phase: RunRetirementPhase) => void,
+  onPublicationPhase?: (phase: RunPublicationPhase) => void
 ): Promise<{ execution: RunExecution; closeWorkerRecoveryProbe(input: { runId: string; expectedRunRevision: number }): Promise<Run>;
   beginClose(): Promise<void>; close(): Promise<void> }> {
   openingSignal?.throwIfAborted();
   const openingReads = openingSignal ? artifacts.withReadSignal(openingSignal) : artifacts;
   const runId = input.runId;
   const retirementPhase = (phase: RunRetirementPhase) => { try { onRetirementPhase?.(phase); } catch { /* Diagnosis cannot decide retirement. */ } };
+  const publicationPhase = (phase: RunPublicationPhase) => { try { onPublicationPhase?.(phase); } catch { /* Diagnosis cannot decide publication. */ } };
   // Delivery never reads or validates live model material. Agent resolvers
   // retain their original trusted functions and snapshot BEFORE the first
   // asynchronous read. The explicit selector is checked against retained State,
@@ -574,14 +578,15 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
     // revocation. Do not abort that result's Checkpoint/settlement path.
     if (operationPhase !== 'claimed' && operationPhase !== 'received') operationAbort?.abort();
     const joins: Promise<unknown>[] = [];
+    // Idle model workers remain physically held until StateStore has joined
+    // their original broker settlement. Pending executions enter actual
+    // revocation before inspector cancellation, including BIND/READY polls
+    // that do not consume the abort signal.
+    try { if (pending || receivedCompletion) joins.push(revokeOriginalWorker()); }
+    catch (error) { cleanupFailure ??= error; }
     try { if (probe) joins.push(probe.task.cancelAndJoin()); }
     catch (error) { cleanupFailure ??= error; }
     try { if (publicationProbe) joins.push(publicationProbe.task.cancelAndJoin()); }
-    catch (error) { cleanupFailure ??= error; }
-    // Idle model workers remain physically held until StateStore has joined
-    // their original broker settlement. Pending executions must be revoked
-    // now, including BIND/READY polls that do not consume the abort signal.
-    try { if (pending || receivedCompletion) joins.push(revokeOriginalWorker()); }
     catch (error) { cleanupFailure ??= error; }
     revoking = Promise.allSettled(joins).then(results => {
       const failed = results.find(result => result.status === 'rejected');
@@ -931,6 +936,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
     return task;
   }
   async function finishReceivedPublication() {
+    publicationPhase('publication_settlement');
     // Joined CAS/rolled-back SQL retries keep the same genuine result token
     // and fixed once-only BudgetSettlement. A new task must not reset it.
     if (settleReceivedPublication) return settleReceivedPublication(readRun(driver, runId).revision);
@@ -1080,7 +1086,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
     const work = publication ? Promise.resolve().then(() => original.finish()) : original.finish();
     return ownOperation(work, abort, publication);
   }
-  async function closeProbe(input: { runId: string; expectedRunRevision: number }, waitForDeadline = false): Promise<Run> {
+  async function closeProbe(input: { runId: string; expectedRunRevision: number }, shutdown = false): Promise<Run> {
     input = immutableSnapshot(input);
     if (!exactKeys(input, ['runId', 'expectedRunRevision']) || input.runId !== runId ||
         !Number.isSafeInteger(input.expectedRunRevision) || input.expectedRunRevision < 1) {
@@ -1095,7 +1101,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
     }
     if (retained.wait.probeState.phase !== 'automatic_in_flight') throw new KernelStorageError('RECOVERY_REQUIRED', 'registered worker task has no dispatch');
     const deadline = retained.wait.probeState.dispatch.probeDeadlineAt;
-    if (!waitForDeadline && sampleCanonicalNow() < deadline) {
+    if (!shutdown && sampleCanonicalNow() < deadline) {
       throw new KernelStorageError('STATE_TRANSITION_INVALID', 'worker inspection deadline has not elapsed');
     }
     if (retained.closure) return retained.closure;
@@ -1105,21 +1111,14 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       // then release normally; a public stale-revision closure cannot.
       let current = readRun(driver, runId);
       if (current.waitingOnRef !== retained.run.waitingOnRef) {
-        if (waitForDeadline) return current;
+        if (shutdown) return current;
         throw new KernelStorageError('REVISION_CONFLICT', 'worker inspection completed before cancellation');
       }
-      const boundedUntil = performance.now() + 31_000;
-      while (sampleCanonicalNow() < deadline) {
-        const fence = assertFenceHealthy(readTimeFence(driver));
-        const now = sampleCanonicalNow();
-        if (now < fence.lastAcceptedAt || performance.now() >= boundedUntil) {
-          throw new KernelStorageError('RECOVERY_REQUIRED', 'worker shutdown cannot advance its stored deadline under a regressed clock');
-        }
-        await delay(Math.min(1000, Math.max(1, Date.parse(deadline) - Date.parse(now))));
-      }
-      current = readRun(driver, runId);
+      // A real shutdown closes this same cancelled-and-joined nonce, not its
+      // unelapsed deadline. The reducer persists the distinct closure before
+      // this original receipt/owner may be released; failures retain both.
       const result = await closeWorkerRecoveryProbe(driver, artifacts, owner,
-        { runId, expectedRunRevision: waitForDeadline ? current.revision : input.expectedRunRevision }, receipt);
+        { runId, expectedRunRevision: shutdown ? current.revision : input.expectedRunRevision }, receipt, shutdown ? 'shutdown' : 'deadline');
       if (probe === retained) probe = undefined;
       return result;
     })();
@@ -1530,6 +1529,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         const publication = await import('./publication-invocation.js');
         const { preparePublicationSettlement } = await import('./publication-settlement.js');
         const { readPublicationPrefix } = await import('./delivery-publication-progress.js');
+        publicationPhase('publication_select');
         const selected = await readRecoveryClosure(driver, reads, runId);
         const prefix = await readPublicationPrefix(driver, reads, selected);
         signal.throwIfAborted();
@@ -1556,6 +1556,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           throw new KernelStorageError('STATE_TRANSITION_INVALID', 'publication has no remaining approved forward operation');
         requireEqual(await reads.readCanonical(selected.run.frontierRef!), { ...authorization.frontier,
           phase: 'publish', nextPathOperationIndex: operationIndex }, 'publication execution exact current frontier');
+        if (queued) publicationPhase('publication_worker_activate');
         const current = queued ? await activateWorker(selected, signal) : activeWorker!;
         if (!worker || !generation || !controller || !reservation || ownedLaunchId !== current.activated.launch.launchId)
           throw new KernelStorageError('RECOVERY_REQUIRED', 'publication lost its original physical worker');
@@ -1565,6 +1566,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           workerIdentityDigest: current.activated.launch.workerIdentityDigest! });
         const task: DeliveryPublicationTask = Object.freeze({ [publicationTaskBrand]: true as const });
         publicationTask = task;
+        publicationPhase('publication_roots_open');
         const roots = await holdPublicationRoots(authorization.workspace.canonicalRootPath, signal);
         const retire = publicationCheckpointRetirement(current, authorization.context.planRef);
         publicationTasks.set(task, { driver, owner, execution, worker: identity,
@@ -1578,6 +1580,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
               reobserveRetirement });
           } });
         assertCurrentWorker(identity, 'delivery', task);
+        publicationPhase('publication_prepare');
         const original = await publication.preparePublicationInvocation(driver, artifacts, owner, {
           execution, task, worker: identity, workspaceRoot: roots.workspaceRoot,
           expectedRunRevision: readRun(driver, runId).revision, signal });
@@ -1592,6 +1595,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         // Joined I/O/rolled-back SQL errors preserve this exact owner, including
         // commitAttempted, rather than opening or dispatching another arena.
         receivedCompletion = { kind: 'publication', worker: currentWorker, activeWorker: current, finish: async () => {
+          publicationPhase('publication_dispatch');
           if (activeWorker !== current || worker !== currentWorker || ownedLaunchId !== identity.launchId)
             throw new KernelStorageError('RECOVERY_REQUIRED', 'publication completion lost its original worker');
           if (!claimed) {
@@ -1612,6 +1616,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           operationPhase = 'claimed';
           await publication.advancePublicationPath(driver, owner, execution, original);
           operationPhase = 'received';
+          publicationPhase('publication_settlement');
           const completed = publication.readOwnedPublicationCompletion(driver, owner, execution, original);
           if (completed.disposition === 'received' && completed.isLastForwardPath) {
             const { handoffOwnedPublicationResult } = await import('./publication-finalization.js');
@@ -2275,6 +2280,12 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         // A failed join/write keeps the StateOwner; it is never a fake timeout.
         await closePublicationProbe(readRun(driver, runId).revision, 'shutdown');
       }
+      const run = readRun(driver, runId);
+      if (probe && run.waitingOnRef === probe.run.waitingOnRef) {
+        // Retain the original receipt and image owner until the actual
+        // cancelled task has a durable, distinct closure for this nonce.
+        await closeProbe({ runId, expectedRunRevision: run.revision }, true);
+      }
       // Installation image release must not invalidate the execution's actual
       // retirement observation, and is still attempted after a failed join.
       closePublications();
@@ -2284,10 +2295,6 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       try { await launcher.close(); }
       catch (error) { cleanupFailure ??= error; }
       if (cleanupFailure !== undefined) throw cleanupFailure;
-      const run = readRun(driver, runId);
-      if (probe && run.waitingOnRef === probe.run.waitingOnRef) {
-        await closeProbe({ runId, expectedRunRevision: run.revision }, true);
-      }
     })();
     closing = attempt.catch(error => { closing = undefined; throw error; });
     return closing;

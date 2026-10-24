@@ -65,6 +65,33 @@ test('scheduler failures retain the last actual phase and distinguish closing fr
   } finally { diagnostic.unsubscribe(receive); }
 });
 
+test('publication phases remain closed primitive data in actual scheduler failures and pre-stop observations', async () => {
+  const { beginInstalledSchedulerDiagnostic, noteInstalledStoreStop, INSTALLED_SCHEDULER_DIAGNOSTIC_PHASES } =
+    await import('./installed-run-diagnostics.js');
+  const publication = ['publication_select', 'publication_worker_activate', 'publication_roots_open',
+    'publication_prepare', 'publication_dispatch', 'publication_settlement'];
+  assert.deepEqual(INSTALLED_SCHEDULER_DIAGNOSTIC_PHASES.filter(phase => phase.startsWith('publication_')), publication);
+  const records: any[] = [], diagnostic = channel('cliq.installed.run.failures.v1');
+  const receive = (record: unknown) => { try { records.push(record); } catch {} };
+  diagnostic.subscribe(receive);
+  try {
+    const observer = beginInstalledSchedulerDiagnostic('drive')!;
+    for (const phase of publication) { observer.phase(phase); observer.failure(new Error('private'), false); }
+    assert.deepEqual(records.map(row => row.phase), publication);
+    records.length = 0;
+    noteInstalledStoreStop({ driverTasks: 6, agentLoads: 0, admissions: 0, retainedFailures: 0, globalFailure: false, phases: publication });
+    assert.deepEqual(records[0].phases, { publication_dispatch: 1, publication_prepare: 1, publication_roots_open: 1,
+      publication_select: 1, publication_settlement: 1, publication_worker_activate: 1 });
+    let accesses = 0; const bad = () => { accesses++; throw new Error('must not inspect'); };
+    const original = new Error(); Object.defineProperty(original, 'message', { get: bad });
+    for (const phase of [null, undefined, ['publication_select'], 'publication_unknown', new String('publication_select'),
+      new Proxy({}, { get: bad, ownKeys: bad, getPrototypeOf: bad })]) {
+      observer.phase(phase); observer.failure(original, true);
+    }
+    assert.equal(accesses, 0); assert(records.slice(1).every(row => row.phase === 'unavailable' && row.closing === true));
+  } finally { diagnostic.unsubscribe(receive); }
+});
+
 test('the pre-revocation snapshot copies only current counts and fixed phase multiplicities', async () => {
   const { noteInstalledStoreStop } = await import('./installed-run-diagnostics.js');
   const records: unknown[] = [], diagnostic = channel('cliq.installed.run.failures.v1');

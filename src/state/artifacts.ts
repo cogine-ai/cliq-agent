@@ -12,6 +12,8 @@ export type PublishedArtifact = {
   byteLength: number;
 };
 
+type CanonicalPublication = Readonly<{ value: unknown; schemaKind: string }>;
+
 export class ArtifactCatalog {
   constructor(private readonly cas: ContentAddressedStore, private readonly readSignal?: AbortSignal) {}
 
@@ -38,6 +40,19 @@ export class ArtifactCatalog {
 
   async publishCanonical(value: unknown, schemaKind: string): Promise<PublishedArtifact> {
     return this.publishBytes(canonicalJsonBytes(value), 'application/json', schemaKind);
+  }
+
+  /** Fixed four-object durability group. Every result waits for the complete
+   * group's file verification and descriptor retirement, including failures. */
+  async publishCanonicalFour(values: readonly [CanonicalPublication, CanonicalPublication, CanonicalPublication, CanonicalPublication]):
+    Promise<readonly [PublishedArtifact, PublishedArtifact, PublishedArtifact, PublishedArtifact]> {
+    if (!Array.isArray(values) || values.length !== 4) throw new TypeError('artifact publication requires exactly four objects');
+    const bytes = values.map(value => canonicalJsonBytes(value.value));
+    const kinds = values.map(value => value.schemaKind);
+    const published = await this.cas.publishFour([bytes[0]!, bytes[1]!, bytes[2]!, bytes[3]!]);
+    const result = (index: number): PublishedArtifact => ({ ...published[index]!,
+      mediaType: 'application/json', schemaKind: kinds[index]! });
+    return [result(0), result(1), result(2), result(3)];
   }
 
   async publishChunks(chunks: AsyncIterable<Uint8Array>, mediaType: string, schemaKind: string,

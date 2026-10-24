@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
 import { once } from 'node:events';
 import fs from 'node:fs';
@@ -216,17 +215,30 @@ test('closing a native connection while authentication yields stops image reads 
 
 const authenticationPublications = ['cliq-platform-process-identity-v1', 'cliq-local-principal-identity-v1',
   'cliq-local-socket-peer-observation-v1', 'cliq-local-control-channel-identity-v1'] as const;
-test('native authentication starts its four immutable CAS publications together and enables authority only after all real returns join', async t => {
+test('native authentication publishes exactly one fixed four-object durability group', async t => {
+  const f = await fixture(t), { connection, child, exited } = await f.connect();
+  const catalog = f.store.artifacts, publish = catalog.publishCanonicalFour.bind(catalog);
+  let groups = 0;
+  catalog.publishCanonicalFour = async values => { groups++; return publish(values); };
+  try {
+    await bounded(connection.dispatch(async identity => identity));
+    assert.equal(groups, 1, 'authentication must use one shared phase group, not four independent lifecycles');
+  } finally {
+    catalog.publishCanonicalFour = publish;
+    if (child.connected) child.disconnect(); await bounded(exited);
+  }
+});
+test('native authentication enables authority only after its complete real CAS group return joins', async t => {
   const f = await fixture(t);
   const { connection, child, exited } = await f.connect();
   const firstCompleted = deferred<void>(), release = deferred<void>();
-  const catalog = f.store.artifacts, publish = catalog.publishCanonical.bind(catalog);
+  const catalog = f.store.artifacts, publish = catalog.publishCanonicalFour.bind(catalog);
   const values = new Map<string, unknown>(), results = new Map<string, PublishedArtifact>();
   let operationEntered = false, dispatchJoined = false;
-  catalog.publishCanonical = async (value, schemaKind) => {
-    values.set(schemaKind, value);
-    const result = await publish(value, schemaKind); // All original fsync/hash/close work is real.
-    results.set(schemaKind, result); firstCompleted.resolve();
+  catalog.publishCanonicalFour = async entries => {
+    for (const entry of entries) values.set(entry.schemaKind, entry.value);
+    const result = await publish(entries); // All original fsync/hash/close work is real.
+    result.forEach(artifact => results.set(artifact.schemaKind, artifact)); firstCompleted.resolve();
     await release.promise; // Only the already-joined real return value is delayed.
     return result;
   };
@@ -235,7 +247,7 @@ test('native authentication starts its four immutable CAS publications together 
   try {
     await bounded(firstCompleted.promise);
     assert.deepEqual([...values.keys()], authenticationPublications,
-      'all four bounded publications start without waiting for an earlier CAS return');
+      'the group contains exactly the four original complete canonical objects');
     assert.equal(operationEntered, false); assert.equal(dispatchJoined, false);
     for (const value of values.values()) {
       assert.equal(Object.isFrozen(value), true, 'precomputed identity bytes cannot change while siblings publish');
@@ -255,38 +267,37 @@ test('native authentication starts its four immutable CAS publications together 
     assert.equal(operationEntered, true); assert.equal(dispatchJoined, true);
     assert.deepEqual(f.errors, []);
   } finally {
-    release.resolve(); await bounded(Promise.allSettled([dispatch])); catalog.publishCanonical = publish;
+    release.resolve(); await bounded(Promise.allSettled([dispatch])); catalog.publishCanonicalFour = publish;
     if (child.connected) child.disconnect(); await bounded(exited);
   }
 });
 
-for (const closeKind of ['connection', 'store'] as const) for (const kind of authenticationPublications) {
-  test(`closing ${closeKind} while the real authentication ${kind} return is pending joins all four publications without authority`, async t => {
+for (const closeKind of ['connection', 'store'] as const) for (const stage of [1, 2, 3, 4]) {
+  test(`closing ${closeKind} at authentication namespace stage ${stage} joins the whole real group without authority`, async t => {
     const f = await fixture(t);
     const { connection, child, exited } = await f.connect();
     const entered = deferred<void>(), release = deferred<void>();
-    const catalog = f.store.artifacts, publish = catalog.publishCanonical.bind(catalog);
-    const started: string[] = [], completed: string[] = [];
-    let gated = false, operationEntered = false, closeJoined = false, dispatchJoined = false;
-    // The exact original CAS publication, including all fsync/hash/close work,
-    // completes first. This gate delays only delivery of its real return value.
-    // It is not an in-flight syscall or physical two-second-stop qualification.
-    catalog.publishCanonical = async (value, schemaKind) => {
-      const authentication = authenticationPublications.includes(schemaKind as typeof authenticationPublications[number]);
-      if (authentication) started.push(schemaKind);
-      const artifact = await publish(value, schemaKind);
-      if (authentication) { completed.push(schemaKind); if (completed.length === 4) entered.resolve(); }
-      if (!gated && schemaKind === kind) {
-        gated = true; await release.promise;
-      }
-      return artifact;
-    };
+    const open = fs.promises.open.bind(fs.promises), casRoot = path.join(f.stateRoot, KERNEL_CAS_DIRECTORY);
+    let rootSyncs = 0, active = 0, operationEntered = false, closeJoined = false, dispatchJoined = false;
+    // The actual directory sync completes first; only its JS await return is
+    // gated. This tests ownership/join, not physical in-flight fsync or 2s stop.
+    t.mock.method(fs.promises, 'open', async (...args: Parameters<typeof open>) => {
+      const handle = await open(...args);
+      if (args[0] !== casRoot && !String(args[0]).startsWith(`${casRoot}/`)) return handle;
+      active++;
+      const close = handle.close.bind(handle), sync = handle.sync.bind(handle);
+      t.mock.method(handle, 'close', async () => { await close(); active--; });
+      if (args[0] === casRoot) t.mock.method(handle, 'sync', async () => {
+        await sync(); if (++rootSyncs === stage) { entered.resolve(); await release.promise; }
+      });
+      return handle;
+    });
     const dispatch = connection.dispatch(async () => { operationEntered = true; });
     void dispatch.then(() => { dispatchJoined = true; }, () => { dispatchJoined = true; });
     let closing: Promise<void> | undefined;
     try {
       await bounded(entered.promise);
-      assert.deepEqual([...completed].sort(), [...authenticationPublications].sort());
+      assert.equal(rootSyncs, stage);
       if (closeKind === 'connection') connection.close();
       else {
         closing = f.store.close().then(() => { closeJoined = true; });
@@ -301,8 +312,8 @@ for (const closeKind of ['connection', 'store'] as const) for (const kind of aut
       await assert.rejects(bounded(dispatch), { code: 'ARTIFACT_MISMATCH' });
       assert.equal(dispatchJoined, true);
       assert.equal(operationEntered, false, 'closed authentication never mints an authenticated operation scope');
-      assert.deepEqual(started, authenticationPublications, 'the fixed group contains exactly the original four publications');
-      assert.deepEqual([...completed].sort(), [...started].sort(), 'every started real CAS publication fully joins');
+      assert.equal(rootSyncs, 4, 'all four actual namespace stages finish despite cancellation');
+      assert.equal(active, 0, 'every actual original file and root descriptor joins');
       assert.deepEqual(f.errors, []);
       // Connection-only cancellation is checked while its original listener
       // and Store remain open. Only afterward release durable ownership.
@@ -312,7 +323,7 @@ for (const closeKind of ['connection', 'store'] as const) for (const kind of aut
     } finally {
       release.resolve();
       await bounded(Promise.allSettled([dispatch, ...(closing ? [closing] : [])]));
-      catalog.publishCanonical = publish;
+      t.mock.restoreAll();
       if (child.connected) child.disconnect();
       await bounded(exited);
     }
@@ -323,18 +334,17 @@ for (const field of ['ref', 'byteLength', 'mediaType', 'schemaKind', 'failure'] 
   test(`authentication joins every real CAS return and rejects an inconsistent ${field} without activating authority`, async t => {
     const f = await fixture(t);
     const { connection, child, exited } = await f.connect();
-    const catalog = f.store.artifacts, publish = catalog.publishCanonical.bind(catalog);
+    const catalog = f.store.artifacts, publish = catalog.publishCanonicalFour.bind(catalog);
     const alternate = await catalog.publishBytes(Buffer.from('real alternative bytes'), 'text/plain', 'real-alternative');
     const firstCompleted = deferred<void>(), release = deferred<void>();
     const failure = new Error('logical return-value delivery failed after real CAS close');
     let operationEntered = false, dispatchJoined = false, completed = 0;
-    catalog.publishCanonical = async (value, schemaKind) => {
-      const result = await publish(value, schemaKind);
-      if (++completed === 1) firstCompleted.resolve();
-      if (schemaKind === authenticationPublications[3]) await release.promise;
-      if (schemaKind !== authenticationPublications[0]) return result;
+    catalog.publishCanonicalFour = async values => {
+      const result = await publish(values);
+      completed = result.length; firstCompleted.resolve();
+      await release.promise;
       if (field === 'failure') throw failure;
-      return { ...result, [field]: alternate[field] };
+      return [{ ...result[0], [field]: alternate[field] }, result[1], result[2], result[3]];
     };
     const dispatch = connection.dispatch(async () => { operationEntered = true; });
     void dispatch.then(() => { dispatchJoined = true; }, () => { dispatchJoined = true; });
@@ -353,7 +363,7 @@ for (const field of ['ref', 'byteLength', 'mediaType', 'schemaKind', 'failure'] 
       assert.equal(f.reader.prepare('SELECT count(*) AS n FROM control_requests').get<{ n: bigint }>()!.n, 0n);
       assert.deepEqual(f.errors, []);
     } finally {
-      release.resolve(); await bounded(Promise.allSettled([dispatch])); catalog.publishCanonical = publish;
+      release.resolve(); await bounded(Promise.allSettled([dispatch])); catalog.publishCanonicalFour = publish;
       if (child.connected) child.disconnect(); await bounded(exited);
     }
   });
@@ -363,50 +373,40 @@ for (const fault of ['none', 'root_close', 'bytes'] as const) {
   test(`real authentication CAS descriptors fully join with bounded delivered ownership under ${fault}`, async t => {
     const f = await fixture(t);
     const { connection, child, exited } = await f.connect();
-    const catalog = f.store.artifacts, publish = catalog.publishCanonical.bind(catalog);
-    const publication = new AsyncLocalStorage<string>();
+    const catalog = f.store.artifacts, publish = catalog.publishCanonicalFour.bind(catalog);
     const open = fs.promises.open.bind(fs.promises), casRoot = path.join(f.stateRoot, KERNEL_CAS_DIRECTORY);
-    const active = new Map<Awaited<ReturnType<typeof open>>, string>();
-    const counts = new Map<string, number>(), peaks = new Map<string, number>();
-    const syncs = new Map<string, number>();
+    const active = new Set<Awaited<ReturnType<typeof open>>>();
     const closeFailure = new Error('actual CAS root close returned an error after closing its real descriptor');
     const operationFailure = new Error('ordinary return-value failure after real CAS close');
     const gate = deferred<void>(), entered = deferred<void>();
-    let peak = 0, opened = 0, closed = 0, changedBytes = false, rootCloseFailed = false;
-    let operationEntered = false, dispatchJoined = false, settled = 0, realSettled = 0;
+    let peak = 0, opened = 0, closed = 0, fileSyncs = 0, rootSyncs = 0, changedBytes = false, rootCloseFailed = false;
+    let operationEntered = false, dispatchJoined = false, settled = 0, writeFailed = false;
     t.mock.method(fs.promises, 'open', async (...args: Parameters<typeof open>) => {
-      const handle = await open(...args), kind = publication.getStore();
-      if (!kind) return handle;
-      active.set(handle, kind); opened++;
-      counts.set(kind, (counts.get(kind) ?? 0) + 1);
-      peaks.set(kind, Math.max(peaks.get(kind) ?? 0, counts.get(kind)!)); peak = Math.max(peak, active.size);
+      const handle = await open(...args);
+      if (args[0] !== casRoot && !String(args[0]).startsWith(`${casRoot}/`)) return handle;
+      active.add(handle); opened++; peak = Math.max(peak, active.size);
       const close = handle.close.bind(handle), sync = handle.sync.bind(handle), writeFile = handle.writeFile.bind(handle);
-      t.mock.method(handle, 'sync', async () => { await sync(); syncs.set(kind, (syncs.get(kind) ?? 0) + 1); });
+      t.mock.method(handle, 'sync', async () => { await sync(); if (args[0] === casRoot) rootSyncs++; else fileSyncs++; });
       t.mock.method(handle, 'close', async () => {
         await close(); // Never report a fabricated close or recycle an unclosed descriptor.
-        assert.equal(active.delete(handle), true); counts.set(kind, counts.get(kind)! - 1); closed++;
-        if (fault === 'root_close' && kind === authenticationPublications[0] && args[0] === casRoot && !rootCloseFailed) {
+        assert.equal(active.delete(handle), true); closed++;
+        if (fault === 'root_close' && args[0] === casRoot && !rootCloseFailed) {
           rootCloseFailed = true; throw closeFailure;
         }
       });
-      if (fault === 'bytes' && kind === authenticationPublications[0] && String(args[0]).includes('/.tmp-stream-')) {
+      if (String(args[0]).includes('/.tmp-stream-')) {
         t.mock.method(handle, 'writeFile', async (...writeArgs: Parameters<typeof writeFile>) => {
           await writeFile(...writeArgs);
-          if (!changedBytes) { changedBytes = true; await handle.write(Buffer.from('!'), 0, 1, 0); }
+          if (fault === 'bytes' && !changedBytes) { changedBytes = true; await handle.write(Buffer.from('!'), 0, 1, 0); }
+          if (fault === 'root_close' && !writeFailed) { writeFailed = true; throw operationFailure; }
         });
       }
       return handle;
     });
-    catalog.publishCanonical = (value, schemaKind) => publication.run(schemaKind, async () => {
-      try {
-        let result: PublishedArtifact;
-        try { result = await publish(value, schemaKind); }
-        finally { if (++realSettled === 4) entered.resolve(); }
-        if (schemaKind === authenticationPublications[3]) await gate.promise;
-        if (fault === 'root_close' && schemaKind === authenticationPublications[1]) throw operationFailure;
-        return result;
-      } finally { settled++; }
-    });
+    catalog.publishCanonicalFour = async values => {
+      try { return await publish(values); }
+      finally { entered.resolve(); await gate.promise; settled++; }
+    };
     const dispatch = connection.dispatch(async () => { operationEntered = true; });
     void dispatch.then(() => { dispatchJoined = true; }, () => { dispatchJoined = true; });
     try {
@@ -418,21 +418,18 @@ for (const fault of ['none', 'root_close', 'bytes'] as const) {
       else if (fault === 'root_close') await assert.rejects(bounded(dispatch), error =>
         error instanceof ResourceRetirementError && error.cause === closeFailure && error !== operationFailure);
       else await assert.rejects(bounded(dispatch), error => error instanceof Error && /^artifact [0-9a-f]{64} is corrupt$/u.test(error.message));
-      assert.equal(settled, 4); assert.equal(active.size, 0); assert.equal(opened, closed);
+      assert.equal(settled, 1); assert.equal(active.size, 0); assert.equal(opened, closed);
       assert.equal(operationEntered, fault === 'none');
-      assert.ok(peak > 2 && peak <= 8, 'this measures delivered CAS ownership, not all Supervisor OS descriptors');
-      for (const kind of authenticationPublications) {
-        assert.ok((peaks.get(kind) ?? 0) <= 2, 'one actual CAS publication owns at most its root and one file');
-        assert.ok((syncs.get(kind) ?? 0) >= 1, 'every actual publication retains synchronization');
-      }
+      assert.ok(peak > 2 && peak <= 5, 'one shared root plus four files bounds delivered CAS ownership, not all Supervisor OS descriptors');
+      assert.equal(rootSyncs, fault === 'root_close' ? 2 : 4, 'failed prefix and cleanup, or all four original namespace barriers, actually synchronize');
+      assert.equal(fileSyncs, fault === 'root_close' ? 3 : 4, 'every successfully written original file actually synchronizes');
       assert.equal(changedBytes, fault === 'bytes'); assert.equal(rootCloseFailed, fault === 'root_close');
       t.diagnostic(JSON.stringify({ diagnosticOnly: true, scope: 'delivered_authentication_cas_handles', fault,
-        peak, perOperationPeaks: authenticationPublications.map(kind => peaks.get(kind) ?? 0), opened, closed,
-        syncs: authenticationPublications.map(kind => syncs.get(kind) ?? 0), allJoined: active.size === 0,
+        peak, opened, closed, rootSyncs, fileSyncs, allJoined: active.size === 0,
         physicalStopQualified: false, fullSupervisorDescriptorPeakQualified: false }));
       assert.deepEqual(f.errors, []);
     } finally {
-      gate.resolve(); await bounded(Promise.allSettled([dispatch])); catalog.publishCanonical = publish;
+      gate.resolve(); await bounded(Promise.allSettled([dispatch])); catalog.publishCanonicalFour = publish;
       t.mock.restoreAll();
       if (child.connected) child.disconnect(); await bounded(exited);
     }

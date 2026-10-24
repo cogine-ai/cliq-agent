@@ -1761,3 +1761,91 @@ StateOwner guards and per-object CAS semantics remain unchanged until those
 choices are resolved. Neither the full Linux Delivery/repair goal nor the
 controlled delayed-storage, original-stop or late-result cuts is complete;
 no complete PR or release claim follows from this run.
+
+The next immutable candidate, commit
+`8a94bffab3fc709f5e73368d0372c1517665d4a6`, passes the original local build
+and full `npm test`: 2,622 passes and one original conditional
+cross-filesystem skip, with no failures, cancellations or todos. Its complete
+local validation SHA-256 is
+`c06a2e346aa35ff69dac030243ab693597dd029e24c7fdaa73ea65f64ba6ea6e`.
+[Linux run 40112630205](https://github.com/cogine-ai/cliq-agent/actions/runs/40112630205),
+attempt 1, is terminal with seventeen successful and five failed jobs. All
+twenty-three categories and 105 original JSON reports (478,072 bytes) are
+retained; their lengths and hashes independently match the final capture.
+There are no pending, incomplete or rejected report categories. Final capture
+SHA-256:
+`fbdaddc7f31fe9a47092240bd6fd95bf7f53bfe8317eb83f22abbe8dc5dbf1ac`.
+
+The actual normal Delivery still exceeds ninety seconds. Its last complete
+public cut is running/delivery, revision nine, with an active worker, four
+items, four Checkpoints and no Journal entry or wait. This time its original
+two-second stop and all writer joins succeed. The joined Store summary has
+two scheduler errors, but its first `drive_verify` error is process-wide and
+cannot be attributed to this Delivery; the second may have occurred during
+Stop. Neither the cut nor that summary proves a new execution defect or a
+deadlock. More precise fixed publication-stage and error-window diagnosis is
+needed before changing the production path.
+
+All three delayed-volume campaigns pass the original five-second READY bound,
+then fail their first authorization before source admission. Each joined
+original-Store summary identifies `transaction / kernel / REVISION_CONFLICT`.
+On the actual create path this uniquely identifies the guard requiring the
+time fence not to advance beyond the immutable pre-publication grant time.
+It does not identify the advancing transaction or exclude a later real clock
+regression. Separating preparation time from actual commit time requires an
+explicit creation/revocation/history contract decision; it is not permission
+to remove the guard, reuse an old fence timestamp, extend TTL or retry effects.
+The additional four-object CAS stage batch is not needed to explain this
+observed blocker and remains unimplemented; original per-object durability
+boundaries are retained.
+
+The maximum-image verifier report is only a false-qualification fallback:
+the unchanged scanner reaches its cumulative 4,096-stream bound, closes all
+4,096 streams and reports no secret match. It retains no original execution
+phase, so it cannot establish that repair, terminal completion or Stop passed.
+The final copied-SQLite scan opens a separate stream for each logical value,
+but this code fact alone does not locate the actual exhaustion. Fixed failure
+stage and pre-corpus counters are needed; no stream may be merged, omitted or
+relabeled to evade the original budget. Normal Delivery, verifier repair,
+controlled-storage, original-stop and late-result qualification remain open.
+No complete PR has been opened.
+
+The next local diagnostic follow-up preserves the actual execution path and
+adds six closed publication work labels only in subscribed qualification
+images. Its original bounded exit summary also retains the actual failure
+count at Stop entry and the final scheduler error, without replacing the
+first error or attributing any error to a Run. Scanner refusal retains only
+its first fixed failure stage, the original pre-corpus byte/stream counts and
+the existing closed corpus error code. Every scan, independent stream, limit,
+original error and close/join requirement remains in force. Component build,
+strict checks and focused regressions pass; a deliberately reversed scanner
+close/observer order fails the corrected regression. These diagnostics do
+not establish a production root cause or complete local/Linux qualification.
+Creation/revocation preparation-versus-commit time and genuine worker-probe
+shutdown cancellation still require their separate contract decisions.
+
+### Approved complete closure follow-up, 2026-10-25
+
+The owner has now approved all three contracts together: genuine original
+worker-probe shutdown cancellation with unchanged original deadline/backoff;
+the fixed-four CAS stage batch preserving every durability/crash boundary;
+and immutable authorization preparation P versus actual fenced commit C.
+The canonical RFC, control-peer clarification and WP01/WP04/WP06 specify those
+same rules. Local genuine Store/CAS/SQLite regressions, real file-operation
+failure prefixes and pure-data closure decoders validate their respective
+layers; controlled Date samples are not real Linux wall-clock evidence.
+
+The old cancelled-recovery campaign paused a controller and waited for the
+thirty-second timeout. Its replacement observes the original signed unpaused
+controller, then requires actual Store.close/resource join within two seconds
+and a genuine pre-deadline cancellation closure for the same nonce. Missing
+the live cut fails qualification rather than accepting an idle close. The
+later fresh-probe recovery still observes the original deadline/backoff and
+independently proves physical retirement. This is not installed Supervisor
+SIGTERM evidence. No blocked pause scheme is retried by this replacement.
+
+At this point the combined full build/test and new immutable Linux run are
+still pending. Normal Delivery, maximum-image repair, controlled-storage,
+original-stop and late-result qualification remain incomplete. No complete PR,
+full I1, provider, macOS, reboot, I2-I4 or final Kernel-Cut claim follows from
+these contract approvals or local component tests.
