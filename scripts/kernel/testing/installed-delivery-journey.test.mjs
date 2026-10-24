@@ -7,6 +7,80 @@ import ts from 'typescript';
 
 const source = name => readFileSync(new URL(name, import.meta.url), 'utf8');
 
+// Execute only the existing private poller's pure control flow. These inert
+// public-cut values are not a Run, StateOwner, resource or native proof.
+function terminalPoller(get, context, clock, delay, check = assert) {
+  const text = source('./installed-delivery-journey.ts');
+  const file = ts.createSourceFile('installed-delivery-journey.ts', text, ts.ScriptTarget.Latest, true);
+  let initializer;
+  const visit = node => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === 'terminal') {
+      assert.equal(initializer, undefined); initializer = node.initializer;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(file); assert(initializer && ts.isArrowFunction(initializer));
+  const compiled = ts.transpileModule(`const terminal = ${initializer.getText(file)};`,
+    { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText;
+  return Function('get', 'context', 'Date', 'delay', 'assert', `${compiled}\nreturn terminal;`)(get, context, clock, delay, check);
+}
+
+test('actual Delivery deadline diagnosis uses only its already obtained cut and preserves the original assertion', async () => {
+  const cut = { snapshot: { operation: 'delivery', run: { status: 'queued' } } };
+  let gets = 0, samples = 0, delays = 0, calls = 0, original;
+  const diagnosisFailure = new Error('an optional data projection cannot replace the deadline failure');
+  const terminal = terminalPoller(async () => { gets++; return cut; }, {
+    onTerminalDeadline(caseKind, value) {
+      calls++; assert.equal(caseKind, 'delivery_publish'); assert.equal(value, cut); throw diagnosisFailure;
+    },
+  }, { now() { samples++; return Date.now(); } }, async () => { delays++; }, (...args) => {
+    try { assert(...args); } catch (error) { original = error; throw error; }
+  });
+  await assert.rejects(terminal('inert-run-id', 0, 'delivery_publish'), error => error === original && error !== diagnosisFailure &&
+    error.code === 'ERR_ASSERTION' && error.message === 'actual explicit Delivery did not reach terminal within its fixed 90-second qualification window');
+  assert.deepEqual({ gets, samples, delays, calls }, { gets: 1, samples: 1, delays: 0, calls: 1 });
+});
+
+test('actual terminal success never invokes failure diagnosis or adds a clock sample or query', async () => {
+  const cut = { snapshot: { operation: 'delivery', run: { status: 'succeeded' } } };
+  let gets = 0;
+  const terminal = terminalPoller(async () => { gets++; return cut; }, {
+    onTerminalDeadline() { throw new Error('terminal success has no failure diagnosis'); },
+  }, { now() { throw new Error('no deadline clock is needed for an already terminal cut'); } }, async () => { throw 0; });
+  assert.equal(await terminal('inert-run-id', Number.MAX_SAFE_INTEGER, 'delivery_publish'), cut);
+  assert.equal(gets, 1);
+});
+
+test('owner history readiness shares the original status and restart absolute budgets without changing SQLite blocking policy', () => {
+  const shared = source('./installed-node-journey.ts'), reader = source('./installed-read-control.ts');
+  assert(shared.includes('const readinessBy = Date.now() + 5000, statusRemaining = readinessBy - Date.now();'));
+  assert(shared.includes("assert(statusRemaining > 0, 'public control readiness exceeded the original five-second budget');"));
+  assert(shared.includes("await send({ protocolVersion: 1, method: 'supervisor.status' }, 'supervisor.status', statusRemaining)"));
+  assert(shared.includes('const originalOwner = await waitForInstalledOwnerHistory(recipe.stateRoot, readinessBy);'));
+  const restart = shared.slice(shared.indexOf('restart: async () => {'), shared.indexOf('originalStop: async (source, operation) => {'));
+  assert(restart.includes('by = Date.now() + 30000;'));
+  assert(restart.includes('await selectedSupervisor(services!.supervisorUnit, after, installedImage, by);'));
+  assert(restart.includes('const owners = await waitForInstalledOwnerHistory(recipe.stateRoot, by);'));
+  const wait = reader.slice(reader.indexOf('export async function waitForInstalledOwnerHistory('), reader.indexOf('/** One readiness observation'));
+  assert(!/Date\.now\(\)\s*\+|5000|30000/u.test(wait), 'the caller deadline is never restarted within the reader');
+  assert(wait.includes('const history = observeInstalledOwnerHistory(stateRoot);'));
+  assert(wait.includes('if (history !== undefined)'));
+  assert.equal((wait.match(/Date\.now\(\) < by/gu) ?? []).length, 2, 'a completed read cannot be accepted after the original budget');
+  assert(!/busy_timeout|timeout\s*:|setBusyTimeout/u.test(reader));
+  assert(reader.includes('{ readOnly: true, allowExtension: false }'));
+});
+
+test('the optional actual Delivery deadline projection is synchronous and remains separate from Run authority and shutdown', () => {
+  const shared = source('./installed-node-journey.ts'), delivery = source('./installed-delivery-journey.ts');
+  const callback = shared.slice(shared.indexOf('onTerminalDeadline: (caseKind, cut) => {'), shared.indexOf('send: async (body, timeout = 5000) => {'));
+  assert(callback.includes('report.runProgressAtTerminalDeadline = projectInstalledRunProgress({ caseKind, cut, postCount });'));
+  assert(!/\bawait\b|Date\.|readCas|\.send\(|\.close\(|setTimeout/u.test(callback));
+  assert(delivery.includes("kind === 'merge' ? 'delivery_merge' : 'delivery_publish'"));
+  assert(delivery.includes("terminal(cancellationAdmission.runId, undefined, 'delivery_cancel')"));
+  assert.equal((delivery.match(/assert\(Date\.now\(\) < by, 'actual explicit Delivery did not reach terminal within its fixed 90-second qualification window'\)/gu) ?? []).length, 1);
+  assert(delivery.includes('try { context.onTerminalDeadline?.(caseKind, cut); }'));
+});
+
 test('every installed Run driver accepts exactly the emitted fixed recipe and verifies the one root-owned publication helper', () => {
   const expected = ['buildFixture', 'controlDirectory', 'installerEntry', 'observer', 'packageRoot', 'publicationObserver',
     'releaseKeysFile', 'reportFile', 'stateRoot', 'storeFixture', 'workspace'].sort();

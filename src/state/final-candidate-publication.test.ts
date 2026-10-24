@@ -10,6 +10,7 @@ import { digestOmitting } from '../kernel/identity.js';
 import type { WorkspaceGenerationSnapshotEvidenceV1 } from '../kernel/types.js';
 import { sampleCanonicalNow } from './canonical-time.js';
 import { isJoinedCasPublicationFailure } from './cas.js';
+import { ResourceRetirementError } from './errors.js';
 import { createAgentFixture } from './testing/agent-fixtures.js';
 import { disposeFixture, uuidv7 } from './testing/fixtures.js';
 import { quiescedToolCheckpoint } from './testing/tool-effects.js';
@@ -54,6 +55,7 @@ for (const priorDeadline of [false, true]) test(`a final-turn owner survives joi
     const request = { expectedRunRevision: completed.run.revision, checkpoint: proof.checkpoint };
     await assert.rejects(owner.complete(request), error => error === failure);
     assert(injected); assert(isJoinedCasPublicationFailure(failure));
+    await assert.rejects(fixture.agent.beginFinalCandidate({ expectedRunRevision: completed.run.revision }), { code: 'REVISION_CONFLICT' });
     assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
     writer.mock.restore();
     if (priorDeadline) {
@@ -140,6 +142,7 @@ test('a rolled-back final checkpoint preserves its original candidate bytes, rej
     fault.exec("CREATE TRIGGER fail_candidate_checkpoint BEFORE INSERT ON checkpoints BEGIN SELECT RAISE(ABORT, 'injected final checkpoint rollback'); END");
     const request = { expectedRunRevision: completed.run.revision, checkpoint: proof.checkpoint };
     await assert.rejects(owner.complete(request), /injected final checkpoint rollback/);
+    await assert.rejects(fixture.agent.beginFinalCandidate({ expectedRunRevision: completed.run.revision }), { code: 'REVISION_CONFLICT' });
     assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
     assert.equal(writes.length, 1);
     fault.exec('DROP TRIGGER fail_candidate_checkpoint');
@@ -157,6 +160,33 @@ test('a rolled-back final checkpoint preserves its original candidate bytes, rej
     assert.equal(after.latestCheckpoint.id, owner.checkpointId);
     assert.deepEqual(await owner.complete(request), result);
   } finally { fault.close(); await disposeFixture(fixture); }
+});
+
+test('uncertain candidate publication retirement retains its original final-turn owner', async t => {
+  const fixture = await createAgentFixture('candidate-owner-retirement', undefined, { mode: 'plan' });
+  try {
+    const completed = await finalTurn(fixture);
+    const owner = await fixture.agent.beginFinalCandidate({ expectedRunRevision: completed.run.revision });
+    const proof = await quiescedToolCheckpoint(fixture, owner.checkpointId);
+    const before = await fixture.store.readRecoveryClosure(fixture.runId);
+    const sample = await fs.open(path.join(fixture.stateRoot, KERNEL_CAS_DIRECTORY, proof.workspaceStateRef), 'r');
+    const prototype = Object.getPrototypeOf(sample) as { writeFile: FileHandle['writeFile'] };
+    const original = prototype.writeFile; await sample.close();
+    const failure = new ResourceRetirementError('injected publication retirement uncertainty', undefined);
+    let injected = false;
+    const writer = t.mock.method(prototype, 'writeFile', async function(this: FileHandle, ...args: unknown[]) {
+      await Reflect.apply(original, this, args);
+      if (!injected && Buffer.isBuffer(args[0]) && args[0].toString('utf8').includes('"kind":"final_candidate"')) {
+        injected = true; throw failure;
+      }
+    });
+    const request = { expectedRunRevision: completed.run.revision, checkpoint: proof.checkpoint };
+    await assert.rejects(owner.complete(request), error => error === failure);
+    writer.mock.restore(); assert(injected);
+    await assert.rejects(fixture.agent.beginFinalCandidate({ expectedRunRevision: completed.run.revision }), { code: 'REVISION_CONFLICT' });
+    await assert.rejects(owner.complete(request), error => error === failure);
+    assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
+  } finally { await disposeFixture(fixture); }
 });
 
 test('a stopped final-turn owner cannot seal unaccounted workspace changes and a cold stopped caller cannot begin one', async () => {

@@ -1693,3 +1693,71 @@ guards and operations are unchanged. The delayed images use the same prior
 live image/start/invocation binding and original-stop/join gates as the normal
 images. `INTERNAL` alone does not establish a canonical-time-fence race, and
 the time-fence contract is not relaxed on that hypothesis.
+
+The next immutable follow-up, commit
+`eef99ccc7be6be1c213929b9da26df8fcadb8787`, passes the original local build
+and full `npm test`: 2,620 passes and one original conditional
+cross-filesystem skip, without failures, cancellations or todos. An earlier
+full run's single failure is retained: shutdown now correctly cancels the
+original spec read with non-retryable `LEASE_FENCED`, rather than reaching
+the old platform-refusal assertion. The corrected regression requires that
+exact typed refusal, the original memoized close, unchanged recovery closure
+and a genuine successor owner; neighboring no-close platform checks remain.
+
+[Linux run 40108486097](https://github.com/cogine-ai/cliq-agent/actions/runs/40108486097),
+attempt 1, finishes with seventeen successful and five failed jobs. All
+twenty-three categories and 105 original JSON reports are retained, with no
+pending or rejected categories. Final terminal capture SHA-256:
+`9ad62e3bcc881a7fc585c91be2ba65148ec4c70e3ee605d60dca4506428df474`.
+The normal Delivery source Agent completes, but the actual accepted Delivery
+still exceeds its original ninety-second terminal window and fails its
+two-second stop. No last-public-cut diagnosis was retained for that Delivery
+loop, and the unjoined original-Store summary remains unavailable. The first
+post-admission loader refusal is no longer the observed blocker; complete
+publication is not yet qualified.
+
+The maximum-image repair still exceeds ninety seconds, but its original
+two-second stop and writer joins now succeed. Its actual joined-Store summary
+records `drive_agent / REVISION_CONFLICT`; the last complete public cut has
+seven completed invocations, no active worker and reconciliation waiting.
+Code inspection identifies a separate deterministic defect: the cached Agent
+retains its first final-candidate owner for the whole Run, so a verifier repair
+cannot establish its second candidate. The minimal follow-up releases only
+the exact current owner after its original completion succeeds. Incomplete,
+CAS/SQL failure and retirement-uncertain attempts retain their owner; the
+original completion transaction and replay checks remain unchanged. Local
+reducer tests cannot substitute for the real Linux two-candidate repair.
+
+The delayed-volume report instead stops before source admission: a strict
+read-only owner-history observation encounters SQLite `BUSY`. The
+original-stop and late-result reports reach the original five-second READY
+deadline before any source Run or authorization request. Their observed
+original servers do join; these are not successful publication cut attempts.
+The four original CAS operations remain concurrent, fully synchronized,
+verified and joined; their JS-await spans are not individual fsync timings.
+These failures do not confirm the earlier authorization/time-fence hypothesis
+and do not authorize an integrity cache, longer deadline or removed barrier.
+
+The harness follow-up treats only a real SQLite primary `BUSY` as an
+unfinished read-only observation; each attempt still closes its complete
+transaction and every other error propagates. Initial status and full history
+share the original five-second absolute budget, and restart history uses its
+existing thirty-second deadline. It adds no database busy timeout. Actual
+Delivery terminal failure now synchronously projects its already obtained
+public cut, including the closed `agent`/`delivery` operation discriminator;
+the same original assertion is rethrown with no additional query, clock,
+timer, CAS read or pre-stop wait. Such data is not a native task/join proof.
+The candidate-owner and harness components respectively pass 51 and 57
+neighboring tests on each of Node 22/24/26, with strict real-dependency checks.
+Those component runs are not the combined full build/test or fresh installed
+Linux acceptance required before another push or complete PR.
+
+Two additional contract choices remain pending, not implemented: a genuine
+worker-probe shutdown cancellation must durably close only its original joined
+task without impersonating timeout or worker death; a fixed four-object CAS
+stage batch would need to preserve each original durability/crash boundary,
+partial-failure cleanup and independent-publisher recovery. Existing in-flight
+StateOwner guards and per-object CAS semantics remain unchanged until those
+choices are resolved. Neither the full Linux Delivery/repair goal nor the
+controlled delayed-storage, original-stop or late-result cuts is complete;
+no complete PR or release claim follows from this run.

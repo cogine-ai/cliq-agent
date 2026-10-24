@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { setTimeout as delay } from 'node:timers/promises';
 import { KERNEL_DATABASE_FILENAME, KERNEL_STATE_SCHEMA_VERSION } from '../../../src/config.js';
 import { canonicalJsonBytes } from '../../../src/kernel/canonical.js';
 import { digestOmitting, parseCanonicalTime } from '../../../src/kernel/identity.js';
@@ -57,17 +58,36 @@ export function inspectInstalledOwnerHistory(stateRoot: string) {
   } finally { database.close(); }
 }
 
+export function observeInstalledOwnerHistory(stateRoot: string) {
+  try { return inspectInstalledOwnerHistory(stateRoot); }
+  catch (error) {
+    const sqlite = error as Error & { code?: unknown; errcode?: unknown };
+    if (error instanceof Error && sqlite.code === 'ERR_SQLITE_ERROR' && typeof sqlite.errcode === 'number' &&
+        Number.isSafeInteger(sqlite.errcode) && sqlite.errcode >= 0 && sqlite.errcode % 256 === 5) return undefined;
+    throw error;
+  }
+}
+
+/** Only the caller's original absolute readiness budget permits waiting.
+ * Every attempt closes its actual read transaction before yielding. */
+export async function waitForInstalledOwnerHistory(stateRoot: string, by: number) {
+  assert(Number.isSafeInteger(by) && by >= 0);
+  for (;;) {
+    assert(Date.now() < by, 'installed owner history exceeded the original readiness budget');
+    const history = observeInstalledOwnerHistory(stateRoot);
+    if (history !== undefined) {
+      assert(Date.now() < by, 'installed owner history exceeded the original readiness budget');
+      return history;
+    }
+    await delay(20);
+  }
+}
+
 /** One readiness observation, not a successful owner/death/recovery proof.
  * A live startup writer may briefly hold the rollback-journal schema lock;
  * the caller's existing deadline/poll loop owns waiting, never this reader. */
 export function inspectInstalledOwner(stateRoot: string): StateOwnerRecordV1 | undefined {
-  try { return inspectInstalledOwnerHistory(stateRoot).owners.at(-1); }
-  catch (error) {
-    const sqlite = error as Error & { code?: unknown; errcode?: unknown };
-    if (error instanceof Error && sqlite.code === 'ERR_SQLITE_ERROR' && typeof sqlite.errcode === 'number'
-      && (sqlite.errcode & 0xff) === 5) return undefined;
-    throw error;
-  }
+  return observeInstalledOwnerHistory(stateRoot)?.owners.at(-1);
 }
 
 export function assertInstalledReadExchanges(stdout: string, owner: StateOwnerRecordV1, bundle: RuntimeBundleManifest): void {

@@ -305,7 +305,15 @@ export function loadFinalCandidate(driver: SqliteDriver, artifacts: ArtifactCata
       completing = operation; completingInput = input;
       try { return await operation; } finally { completing = undefined; completingInput = undefined; }
     });
-    return Object.freeze({ checkpointId, complete });
+    const candidateOwner: FinalCandidateOwner = Object.freeze({ checkpointId,
+      async complete(input: { expectedRunRevision: number; checkpoint: ToolCheckpointProof }) {
+        const result = await complete(input);
+        // Only this producer's genuinely completed transaction releases its
+        // slot. Failures retain it, and an old replay cannot clear a new owner.
+        if (retained === candidateOwner) retained = undefined;
+        return result;
+      } });
+    return candidateOwner;
   }
   return { beginFinalCandidate: stateOperation('INVALID_REQUEST', async (input: { expectedRunRevision: number }, readSignal?: AbortSignal) => {
     input = immutableSnapshot(input);

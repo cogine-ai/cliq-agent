@@ -5,11 +5,13 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
 import { KERNEL_DATABASE_FILENAME, KERNEL_STATE_SCHEMA_VERSION } from '../../../src/config.js';
 import { digestOmitting } from '../../../src/kernel/identity.js';
 import type { CanonicalTimeFenceV1, StateOwnerRecordV1 } from '../../../src/kernel/types.js';
-import { inspectInstalledOwner, inspectInstalledOwnerHistory } from './installed-read-control.js';
+import { inspectInstalledOwner, inspectInstalledOwnerHistory, observeInstalledOwnerHistory,
+  waitForInstalledOwnerHistory } from './installed-read-control.js';
 
 async function fixture() {
   const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-installed-read-control-'));
@@ -39,7 +41,7 @@ async function fixture() {
   return { stateRoot, filename, owner, close: () => rm(stateRoot, { recursive: true, force: true }) };
 }
 
-async function withExclusiveWriter(filename: string, operation: () => void) {
+async function withExclusiveWriter(filename: string, operation: (release: () => void) => void | Promise<void>) {
   const child = spawn(process.execPath, ['--input-type=module', '-e', `
     import assert from 'node:assert/strict';
     import { DatabaseSync } from 'node:sqlite';
@@ -68,9 +70,13 @@ async function withExclusiveWriter(filename: string, operation: () => void) {
   // This fixed child has no descendants. Kill and join that exact owned child
   // on a missing barrier; never leave a real SQLite writer behind on RED.
   const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); failReady(new Error('writer barrier timed out')); }, 5000);
-  try { await ready; operation(); }
+  let released = false;
+  const release = () => {
+    if (!released && child.exitCode === null && child.signalCode === null) { released = true; child.stdin.end('release\n'); }
+  };
+  try { await ready; await operation(release); }
   finally {
-    if (child.exitCode === null && child.signalCode === null) child.stdin.end('release\n');
+    release();
     await joined; clearTimeout(timer);
     assert.equal(spawnError, undefined); assert.equal(stdinError, undefined); assert.equal(timedOut, false);
     assert.equal(child.signalCode, null); assert.equal(child.exitCode, 0, stderr);
@@ -86,6 +92,47 @@ test('readiness remains pending during a real exclusive writer and sees the reta
       assert.equal(inspectInstalledOwner(retained.stateRoot), undefined);
     });
     assert.deepEqual(structuredClone(inspectInstalledOwner(retained.stateRoot)), retained.owner);
+  } finally { await retained.close(); }
+});
+
+test('a full-history readiness observation is pending, never successful, during a real exclusive writer', { timeout: 10000 }, async () => {
+  const retained = await fixture();
+  try {
+    const before = inspectInstalledOwnerHistory(retained.stateRoot);
+    await withExclusiveWriter(retained.filename, () => {
+      assert.throws(() => inspectInstalledOwnerHistory(retained.stateRoot), { code: 'ERR_SQLITE_ERROR', errcode: 5 });
+      assert.equal(observeInstalledOwnerHistory(retained.stateRoot), undefined);
+    });
+    assert.deepEqual(observeInstalledOwnerHistory(retained.stateRoot), before);
+  } finally { await retained.close(); }
+});
+
+test('full-history readiness joins each real observation and returns the complete snapshot only after writer release', { timeout: 10000 }, async () => {
+  const retained = await fixture();
+  try {
+    const before = inspectInstalledOwnerHistory(retained.stateRoot);
+    await withExclusiveWriter(retained.filename, async release => {
+      let returned = false;
+      const waiting = waitForInstalledOwnerHistory(retained.stateRoot, Date.now() + 5000).then(value => { returned = true; return value; });
+      void waiting.catch(() => {}); // A failing implementation still releases and joins the real writer before rethrowing.
+      await delay(30); assert.equal(returned, false, 'BUSY cannot be returned as a successful history');
+      release();
+      assert.deepEqual(await waiting, before);
+    });
+  } finally { await retained.close(); }
+});
+
+test('a persistent real writer exhausts the caller original absolute readiness budget without restarting it', { timeout: 10000 }, async () => {
+  const retained = await fixture();
+  try {
+    await withExclusiveWriter(retained.filename, async () => {
+      const started = performance.now(), by = Date.now() + 100;
+      await assert.rejects(waitForInstalledOwnerHistory(retained.stateRoot, by),
+        { code: 'ERR_ASSERTION', message: 'installed owner history exceeded the original readiness budget' });
+      assert(performance.now() - started < 1000, 'BUSY must not replace the caller deadline with a fresh wait');
+      assert.equal(observeInstalledOwnerHistory(retained.stateRoot), undefined);
+    });
+    assert.equal(observeInstalledOwnerHistory(retained.stateRoot)?.owners.length, 1);
   } finally { await retained.close(); }
 });
 
@@ -107,6 +154,8 @@ test('readiness propagates a damaged database instead of calling it pending', as
   try {
     await writeFile(retained.filename, 'not a SQLite database');
     assert.throws(() => inspectInstalledOwner(retained.stateRoot), { code: 'ERR_SQLITE_ERROR', errcode: 26 });
+    assert.throws(() => observeInstalledOwnerHistory(retained.stateRoot), { code: 'ERR_SQLITE_ERROR', errcode: 26 });
+    await assert.rejects(waitForInstalledOwnerHistory(retained.stateRoot, Date.now() + 5000), { code: 'ERR_SQLITE_ERROR', errcode: 26 });
   } finally { await retained.close(); }
 });
 
@@ -116,8 +165,12 @@ test('readiness propagates non-BUSY SQLite errors and invalid owner metadata', a
     const db = new DatabaseSync(retained.filename);
     try { db.exec("UPDATE state_owners SET row_digest='corrupt'"); } finally { db.close(); }
     assert.throws(() => inspectInstalledOwner(retained.stateRoot), { code: 'ERR_ASSERTION' });
+    assert.throws(() => observeInstalledOwnerHistory(retained.stateRoot), { code: 'ERR_ASSERTION' });
+    await assert.rejects(waitForInstalledOwnerHistory(retained.stateRoot, Date.now() + 5000), { code: 'ERR_ASSERTION' });
     const missing = new DatabaseSync(retained.filename);
     try { missing.exec('DROP TABLE state_owners'); } finally { missing.close(); }
     assert.throws(() => inspectInstalledOwner(retained.stateRoot), { code: 'ERR_SQLITE_ERROR', errcode: 1 });
+    assert.throws(() => observeInstalledOwnerHistory(retained.stateRoot), { code: 'ERR_SQLITE_ERROR', errcode: 1 });
+    await assert.rejects(waitForInstalledOwnerHistory(retained.stateRoot, Date.now() + 5000), { code: 'ERR_SQLITE_ERROR', errcode: 1 });
   } finally { await retained.close(); }
 });

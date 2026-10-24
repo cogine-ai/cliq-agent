@@ -26,7 +26,7 @@ import { buildInstalledSupervisorPackage } from './installed-supervisor-package.
 import { CredentialSecretScanError, createCredentialSecretScanner } from './credential-secret-scan.js';
 import { CredentialSecretCorpusError, scanCredentialSecretCorpus } from './credential-secret-corpus.js';
 import { inspectInstalledWorkerIdentity, inspectInstalledWorkerRetirement, inspectInstalledWorkerRetirementHistory, inspectInstalledWorkerLaunchIds, type InstalledWorkerIdentityInspection, type InstalledWorkerRetirementBinding } from './installed-worker-lease.js';
-import { inspectInstalledOwnerHistory } from './installed-read-control.js';
+import { inspectInstalledOwnerHistory, waitForInstalledOwnerHistory } from './installed-read-control.js';
 import { assertInstalledVerifierOutcome, InstalledVerifierOutcomeError } from './installed-verifier-result.js';
 import { runInstalledDeliveryCases } from './installed-delivery-journey.js';
 import { InstalledDeliveryOutcomeError } from './installed-delivery-result.js';
@@ -728,8 +728,10 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       }
       throw original; // Preserve the original consumer deadline and its timing.
     }
-    assert.equal((await send({ protocolVersion: 1, method: 'supervisor.status' }, 'supervisor.status')).health, 'ready');
-    const originalOwner = inspectInstalledOwnerHistory(recipe.stateRoot); assert.equal(originalOwner.owners.length, 1);
+    const readinessBy = Date.now() + 5000, statusRemaining = readinessBy - Date.now();
+    assert(statusRemaining > 0, 'public control readiness exceeded the original five-second budget');
+    assert.equal((await send({ protocolVersion: 1, method: 'supervisor.status' }, 'supervisor.status', statusRemaining)).health, 'ready');
+    const originalOwner = await waitForInstalledOwnerHistory(recipe.stateRoot, readinessBy); assert.equal(originalOwner.owners.length, 1);
     assert.equal(originalOwner.owners[0]!.state, 'active'); assert.equal(originalOwner.owners[0]!.runtimeBundleRef, bundleDigest);
     const initialOwnerImage = parseJsonStrict((await readCas(originalOwner.owners[0]!.processIdentityRef)).toString('utf8')) as Record<string, any>;
     assert.equal(initialOwnerImage.pid, Number(supervisorBefore.MainPID));
@@ -931,6 +933,9 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       report.delivery = { ...report.delivery, attemptStarted: true, reason: 'in_progress' };
       report.delivery = await runInstalledDeliveryCases({
         createSource: kind => createSource(`delivery_${kind}`),
+        onTerminalDeadline: (caseKind, cut) => {
+          report.runProgressAtTerminalDeadline = projectInstalledRunProgress({ caseKind, cut, postCount });
+        },
         send: async (body, timeout = 5000) => {
           assert(client); const response = await client.send(body, timeout);
           recordRefusal(response, body.method as string); return response;
@@ -957,7 +962,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
           assert.notEqual(after.InvocationID, supervisorBefore.InvocationID); assert.notEqual(after.MainPID, supervisorBefore.MainPID);
           await selectedSupervisor(services!.supervisorUnit, after, installedImage, by);
           client = await persistentClient();
-          const owners = inspectInstalledOwnerHistory(recipe.stateRoot);
+          const owners = await waitForInstalledOwnerHistory(recipe.stateRoot, by);
           assert.equal(owners.owners.length, 2); assert.equal(owners.owners[0]!.terminalReason, 'graceful_release');
           assert.equal(owners.owners[1]!.state, 'active'); assert.equal(owners.owners[1]!.runtimeBundleRef, bundleDigest);
           assert.equal(show(services!.keeperUnit).MainPID, keeperBefore.MainPID);

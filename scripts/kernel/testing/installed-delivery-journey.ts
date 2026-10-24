@@ -22,6 +22,7 @@ type Response = { protocolVersion: 1; ok: boolean; method?: string; result?: Rec
 type Source = { cut: Record<string, any>; submit: Record<string, unknown>; admission: Response;
   files: readonly { path: string; before: string; after: string }[]; workspace: string };
 type Admission = { core: Record<string, unknown> & { requestDigest: string }; response: Response; runId: string };
+type DeliveryProgressCase = 'delivery_publish' | 'delivery_merge' | 'delivery_cancel';
 type Context = {
   createSource(kind: 'publish' | 'merge' | 'cancel'): Promise<Source>;
   send(request: Record<string, unknown>, timeout?: number): Promise<Response>;
@@ -31,6 +32,7 @@ type Context = {
   assertRunWorkersRetired(runId: string, observedLaunchIds: readonly string[], publicationRetirement?: InstalledWorkerRetirementBinding | null): Promise<number>;
   assertVerifierProcessesAbsent(retirement: InstalledVerifierRetirementIdentity): Promise<void>;
   mark(phase: string): void; reconnect(): Promise<void>; restart(): Promise<void>;
+  onTerminalDeadline?(caseKind: DeliveryProgressCase, cut: Record<string, any>): void;
   cleanupCrash(source: Source): Promise<void>;
   originalStop?(source: Source, operation: {
     apply(): Promise<Admission>; capture(runId: string): Promise<Record<string, any>>;
@@ -68,11 +70,17 @@ export async function runInstalledDeliveryCases(context: Context, options: Reado
     const launches = observedLaunches.get(runId) ?? [];
     return context.assertRunWorkersRetired(runId, [...launches], publicationRetirement);
   };
-  const terminal = async (runId: string, by = Date.now() + 90000) => {
+  const terminal = async (runId: string, by = Date.now() + 90000, caseKind: DeliveryProgressCase = 'delivery_publish') => {
     for (;;) {
       const cut = await get(runId);
       if (['succeeded', 'completed_unverified', 'failed', 'cancelled'].includes(cut.snapshot.run.status)) return cut;
-      assert(Date.now() < by, 'actual explicit Delivery did not reach terminal within its fixed 90-second qualification window');
+      try {
+        assert(Date.now() < by, 'actual explicit Delivery did not reach terminal within its fixed 90-second qualification window');
+      } catch (original) {
+        try { context.onTerminalDeadline?.(caseKind, cut); }
+        catch { /* Optional synchronous data projection cannot replace the original deadline failure. */ }
+        throw original;
+      }
       await delay(50);
     }
   };
@@ -144,7 +152,8 @@ export async function runInstalledDeliveryCases(context: Context, options: Reado
     return replies;
   };
   const finish = async (source: Source, admitted: Admission, kind: Completed['kind'], expected: Completed['expected'], terminalBy?: number) => {
-    const cut = await terminal(admitted.runId, terminalBy), sessionCut = await send({ protocolVersion: 1, method: 'session.get', sessionId: cut.snapshot.run.sessionId });
+    const cut = await terminal(admitted.runId, terminalBy, kind === 'merge' ? 'delivery_merge' : 'delivery_publish'),
+      sessionCut = await send({ protocolVersion: 1, method: 'session.get', sessionId: cut.snapshot.run.sessionId });
     const proof = await assertInstalledDeliveryOutcome({ cut, sessionCut, sourceCut: source.cut, sourceResultRef: source.cut.snapshot.run.resultRef,
       expectedFiles: expected, kind, readRetainedArtifact: context.readRetainedArtifact, readOwnerHistory: context.readOwnerHistory });
     for (const identity of proof.verifierRetirementIdentities) await context.assertVerifierProcessesAbsent(identity);
@@ -194,7 +203,7 @@ export async function runInstalledDeliveryCases(context: Context, options: Reado
   const cancellation = request({ protocolVersion: 1, method: 'run.cancel', requestId: context.nextId(),
     runId: cancellationAdmission.runId, expectedRevision: claimedCut.snapshot.run.revision });
   const cancellationResponse = await context.send(cancellation); accepted(cancellationResponse, 'run.cancel');
-  const cancelled = await terminal(cancellationAdmission.runId), stoppedRun = cancelled.snapshot.run;
+  const cancelled = await terminal(cancellationAdmission.runId, undefined, 'delivery_cancel'), stoppedRun = cancelled.snapshot.run;
   assert.equal(stoppedRun.status, 'cancelled'); assert.equal(stoppedRun.terminalReason, 'cancelled_by_user'); assert(!stoppedRun.resultRef);
   assert(!cancelled.journal.some((row: any) => row.opKind === 'model' || row.opKind === 'tool' || row.opKind === 'publish'));
   assert.equal(cancelled.journal.filter((row: any) => row.phase === 'dispatch_claimed').length, 1);

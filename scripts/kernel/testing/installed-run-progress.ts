@@ -9,7 +9,7 @@ const CASES = ['required_pass', 'required_repair', 'advisory_failure', 'required
   'delivery_publish', 'delivery_merge', 'delivery_cancel'] as const;
 type CaseKind = typeof CASES[number];
 export type InstalledRunProgress = Readonly<{
-  diagnosticOnly: true; source: 'actual_public_run_get'; caseKind: CaseKind; postCount: number;
+  diagnosticOnly: true; source: 'actual_public_run_get'; operation: 'agent' | 'delivery'; caseKind: CaseKind; postCount: number;
   status: RunStatus; nextStep: RunNextStep; revision: number; activeWorkerRecorded: boolean;
   waitingRecorded: boolean; waitingReason: WaitingReason | null; cancelRequested: boolean; completeCut: boolean;
   counts: Readonly<{ items: number; journal: number; checkpoints: number; highWaterItemSeq: number;
@@ -85,7 +85,8 @@ export function projectInstalledRunProgress(input: unknown): InstalledRunProgres
     if (!Number.isSafeInteger(elapsed) || elapsed < 0) invalid();
     return elapsed;
   };
-  return Object.freeze({ diagnosticOnly: true, source: 'actual_public_run_get', caseKind: data.caseKind as CaseKind, postCount,
+  return Object.freeze({ diagnosticOnly: true, source: 'actual_public_run_get', operation: cut.snapshot.operation,
+    caseKind: data.caseKind as CaseKind, postCount,
     status: run.status, nextStep: run.nextStep, revision: run.revision, activeWorkerRecorded: run.activeWorkerLaunchId !== undefined,
     waitingRecorded: run.waitingOnRef !== undefined, waitingReason: run.waitingReason ?? null, cancelRequested: run.cancelRequested,
     completeCut: cut.nextItemSeq === cut.highWaterItemSeq && cut.nextJournalSeq === cut.highWaterJournalSeq &&

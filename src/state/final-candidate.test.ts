@@ -49,3 +49,40 @@ test('a complete final turn becomes one exact-source candidate only after its ow
     assert.equal(cut.journal.length, completed.entry.seq);
   } finally { await disposeFixture(fixture); }
 });
+
+test('a completed final-turn owner releases its Agent slot without bypassing the next frontier or its original replay', async () => {
+  const fixture = await createAgentFixture('final-candidate-owner-lifetime');
+  try {
+    const agent = fixture.agent;
+    const prepared = await agent.prepareModel({ expectedRunRevision: fixture.store.getRun(fixture.runId).revision,
+      leaseEpoch: fixture.leaseEpoch });
+    await fixture.store.claimInvocationDispatch({ runId: fixture.runId, expectedRunRevision: prepared.run.revision,
+      leaseEpoch: fixture.leaseEpoch, opId: prepared.entry.opId, attempt: prepared.entry.attempt, dispatchId: 'candidate-owner-lifetime' });
+    const reader = agent.model.start(prepared.prepared, { status: 200, mediaType: 'application/json' });
+    reader.push(Buffer.from(JSON.stringify({ id: 'owner-lifetime-response', object: 'response', status: 'completed', model: 'model-1',
+      output: [{ type: 'message', id: 'owner-lifetime-message', role: 'assistant', status: 'completed',
+        content: [{ type: 'output_text', text: 'Ready for the declared verifier.', annotations: [] }] }] })));
+    const completed = await agent.completeModel({ opId: prepared.entry.opId, attempt: prepared.entry.attempt,
+      expectedRunRevision: prepared.run.revision, result: reader.finish(sampleCanonicalNow(), agent.resolveToolInput) });
+    assert.equal(completed.disposition, 'candidate_required');
+    const owner = await agent.beginFinalCandidate({ expectedRunRevision: completed.run.revision });
+    await assert.rejects(agent.beginFinalCandidate({ expectedRunRevision: completed.run.revision }), { code: 'REVISION_CONFLICT' });
+    const proof = await quiescedToolCheckpoint(fixture, owner.checkpointId);
+    const request = { expectedRunRevision: completed.run.revision, checkpoint: proof.checkpoint };
+    const result = await owner.complete(request);
+    assert.equal(result.disposition, 'candidate'); assert.equal(result.run.nextStep, 'verify');
+    assert.deepEqual(await owner.complete(request), result);
+    const cut = await fixture.store.readRecoveryClosure(fixture.runId);
+    // The same Agent must reach the real current-frontier check. A completed
+    // owner is not a Run-wide lock, but neither completion nor a new begin is
+    // permission to invent repair, another model turn or a second candidate.
+    await assert.rejects(agent.beginFinalCandidate({ expectedRunRevision: result.run.revision }), { code: 'STATE_TRANSITION_INVALID' });
+    await assert.rejects(owner.complete({ ...request, checkpoint: { ...request.checkpoint, snapshotEvidenceRef: 'a'.repeat(64) } }),
+      { code: 'REVISION_CONFLICT' });
+    assert.deepEqual(await owner.complete(request), result);
+    assert.equal(fixture.agent, agent);
+    assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), cut);
+    assert.deepEqual(cut.journal.map(entry => entry.phase), ['prepared', 'dispatch_claimed', 'completed']);
+    assert.equal(cut.items.length, 2);
+  } finally { await disposeFixture(fixture); }
+});

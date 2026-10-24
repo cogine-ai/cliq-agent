@@ -24,7 +24,7 @@ function input(): any {
 
 test('an actual public run.get cut projects only closed progress counts, not authority or retained content', () => {
   assert.deepEqual(projectInstalledRunProgress(input()), {
-    diagnosticOnly: true, source: 'actual_public_run_get', caseKind: 'required_repair', postCount: 6,
+    diagnosticOnly: true, source: 'actual_public_run_get', operation: 'agent', caseKind: 'required_repair', postCount: 6,
     status: 'running', nextStep: 'verify', revision: 2, activeWorkerRecorded: true, waitingRecorded: false, waitingReason: null,
     cancelRequested: false, completeCut: true,
     counts: { items: 2, journal: 1, checkpoints: 1, highWaterItemSeq: 2, highWaterJournalSeq: 1, nextItemSeq: 2, nextJournalSeq: 1 },
@@ -32,6 +32,18 @@ test('an actual public run.get cut projects only closed progress counts, not aut
     lastJournal: { opKind: 'verifier', phase: 'prepared', attempt: 0 },
     recordedElapsed: { latestRunUpdateMs: 0, lastJournalMs: 0 },
   });
+});
+
+test('the same named source case cannot be confused with its actual Delivery public cut', () => {
+  const source = input(), delivery = input();
+  source.caseKind = delivery.caseKind = 'delivery_publish';
+  delivery.cut.snapshot.operation = 'delivery';
+  assert.equal(projectInstalledRunProgress(source).operation, 'agent');
+  assert.equal(projectInstalledRunProgress(delivery).operation, 'delivery');
+  for (const operation of ['unknown', ['delivery'], null]) {
+    const value = input(); value.cut.snapshot.operation = operation;
+    assert.throws(() => projectInstalledRunProgress(value));
+  }
 });
 
 test('valid item, journal and checkpoint prefixes never claim a complete cut', () => {
