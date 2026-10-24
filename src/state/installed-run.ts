@@ -42,6 +42,7 @@ import { assertSupportedVerifierRequests, prepareVerifierSpec, readVerifierReque
 import type { AdmitRunInput } from './reducers/admission.js';
 import { readRetainedVerifierToolchain } from './guest-toolchain.js';
 import { VerifierAuthorizationError } from './authorization-artifacts.js';
+import type { InstalledApplyDiagnosticStage } from './installed-run-diagnostics.js';
 
 type RetiredSource = Extract<SourceInspectionAttemptV1, { phase: 'retired' }>;
 type InstructionEntry = { canonicalRootRelativePath: string; directoryDepth: number;
@@ -353,11 +354,17 @@ export async function loadInstalledRunMaterial(input: { selected: HeldInstalledR
   }, input.signal);
 }
 
+type InstalledRunAssemblyPhase = Extract<InstalledApplyDiagnosticStage, `submit_assembly_${string}`>;
+/** Fixed admission diagnosis only; the observer supplies no assembly authority. */
+function reportInstalledRunAssemblyPhase(observer: ((phase: InstalledRunAssemblyPhase) => void) | undefined, phase: InstalledRunAssemblyPhase): void {
+  try { observer?.(phase); } catch { /* Diagnosis cannot decide or replace the original operation. */ }
+}
+
 export async function assembleInstalledRun(input: {
   selected: HeldInstalledRuntime; driver: SqliteDriver; owner: StateOwnerContext; artifacts: ArtifactCatalog;
   identity: AuthenticatedControlIdentity; request: NormalizedRunSubmitRequest; originalRequest: object; source: RetiredSource;
   endpoint: EndpointRegistrationV1; credentialBindings: readonly EndpointCredentialGrantBinding[]; controlledHome: string;
-}, signal?: AbortSignal): Promise<AssembledInstalledRun> {
+}, signal?: AbortSignal, onAssemblyPhase?: (phase: InstalledRunAssemblyPhase) => void): Promise<AssembledInstalledRun> {
   const { selected, driver, owner, artifacts, controlledHome } = input;
   const reads = signal ? artifacts.withReadSignal(signal) : artifacts;
   const currentOriginal = normalizeRunSubmitRequest(input.originalRequest);
@@ -369,10 +376,12 @@ export async function assembleInstalledRun(input: {
   if (request.verifiers.length) {
     // Native loading uses the installed queue itself; never invoke it from a
     // held-runtime borrow that would wait behind its own queued operation.
+    reportInstalledRunAssemblyPhase(onAssemblyPhase, 'submit_assembly_native');
     const native = await loadInstalledWorkerNative(selected, signal);
     if (native.verifierInterfaceVersion !== 1) throw new VerifierAuthorizationError('UNSUPPORTED_EXECUTION_IDENTITY');
   }
   const remote = request.model;
+  reportInstalledRunAssemblyPhase(onAssemblyPhase, 'submit_assembly_source');
   await validateControlChannelClosure(reads, owner, identity); assertActiveStateOwner(driver, owner); signal?.throwIfAborted();
   const session = readSession(driver, request.sessionId), workspace = decodeWorkspaceIdentity(await readCanonicalArtifact(reads, session.workspaceIdentityRef));
   if (readSessionPrincipalId(driver, session.id) !== identity.principalId || session.contextRevision !== request.expectedContextRevision ||
@@ -398,6 +407,7 @@ export async function assembleInstalledRun(input: {
       { bundle: installed.bundle, releaseKeys: installed.releaseKeys, sandboxProfile: decodeSandboxProfile(await readCanonicalArtifact(reads, target.sandboxProfileRef)) });
     const native = await installed.loadStateOwner(signal); await installed.revalidate(signal); return native;
   }, signal);
+  reportInstalledRunAssemblyPhase(onAssemblyPhase, 'submit_assembly_platform');
   const platform = await loadInstalledCredentialPlatform(selected, signal), user = platform.currentUser();
   if (path.join(user.home, '.cliq') !== controlledHome) mismatch('installed instruction home is not the actual platform controlled home');
   const resources: Array<{ close(): void }> = []; let failure: unknown;
@@ -411,6 +421,7 @@ export async function assembleInstalledRun(input: {
     assertWorkspaceSourceTrust(trust, request.workspacePath);
   } catch (error) { failure = error; throw error; } finally { closeOwned(resources, failure); }
   const admittedAt = sampleCanonicalNow(), deadlineAt = addCanonicalDuration(admittedAt, request.budgets.wallTimeMs);
+  reportInstalledRunAssemblyPhase(onAssemblyPhase, 'submit_assembly_material');
   return withHeldInstalledRuntime(selected, async installed => {
     await installed.revalidate(signal); await validateControlChannelClosure(reads, owner, identity); assertActiveStateOwner(driver, owner);
     const model = selectedModel(installed, remote.provider, remote.model, endpoint), catalog = model.catalog.value;
@@ -489,6 +500,7 @@ export async function assembleInstalledRun(input: {
       decisionRules: [...BUILTIN_POLICY_RULES], repositoryRequestRefs: [], createdAt: admittedAt, policyDigest: '' };
     policy.policyDigest = digestOmitting(policy, 'policyDigest');
     verifyToolRuntimeAuthority({ assembly, policy, bundle: installed.bundle, profile, tools: tools.entries, releaseKeys: installed.releaseKeys });
+    reportInstalledRunAssemblyPhase(onAssemblyPhase, 'submit_assembly_publish');
     const sandbox = installedSandboxProfile(request.sandboxResources);
     const sandboxProfileRef = (await artifacts.publishCanonical(sandbox, sandbox.format)).ref;
     const verifier = await prepareVerifierSpec(driver, reads, owner, { bundle: installed.bundle, releaseKeys: installed.releaseKeys },

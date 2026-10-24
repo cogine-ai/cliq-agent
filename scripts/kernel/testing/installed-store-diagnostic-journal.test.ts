@@ -63,7 +63,8 @@ test('Stop observations use only closed scheduler phases, including preparation 
     assert.throws(() => readInstalledPublicationStageJournal(journal([`CLIQ_PUBLICATION_STAGE_V1:1:${phase}`]), sender),
       'preparation details do not become live publication arrivals');
   for (const stage of ['submit_request', 'submit_preflight_authority', 'submit_source_capture',
-    'submit_assembly', 'submit_final_admission', 'submit_postcommit_load']) {
+    'submit_assembly', 'submit_assembly_native', 'submit_assembly_source', 'submit_assembly_platform', 'submit_assembly_material',
+    'submit_assembly_publish', 'submit_final_admission', 'submit_postcommit_load']) {
     assert.throws(() => readInstalledStoreStopPhaseJournal(journal([`CLIQ_STORE_STOP_PHASE_V1:${stage}`]), sender),
       'submit stages are not scheduler phases');
     const messages = lines.map(row => row.replace('apply:postcommit_load:', `apply:${stage}:`));

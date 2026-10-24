@@ -71,13 +71,13 @@ test('publication preparation, claim attachment and original path friend reject 
       workspaceRoot: hostile as never, expectedRunRevision: 1, ...extra } as never), /closed original task input/);
   for (const token of [{}, Object.defineProperty({}, 'native', { get() { assert.fail('must not read a forged native handle'); } })]) {
     await assert.rejects(retirePublicationPreparation(driver, owner, {}, token as never), /exact original invocation owner/);
-    assert.throws(() => readOwnedPublicationPreparationClosure(driver, owner, {}, token as never), /exact original invocation owner/);
+    assert.throws(() => readOwnedPublicationPreparationClosure(driver, owner, {}, token as never, driver), /exact original invocation owner/);
     assert.throws(() => readOwnedPublicationDispatchState(driver, owner, {}, token), /exact original invocation owner/);
     assert.throws(() => assertOwnedPublicationArtifacts(driver, owner, {}, token as never, artifacts), /exact original invocation owner/);
-    assert.throws(() => assertOwnedPublicationPath(driver, owner, {}, token), /exact original invocation owner/);
+    assert.throws(() => assertOwnedPublicationPath(driver, owner, {}, token, driver), /exact original invocation owner/);
     assert.throws(() => claimPublicationInvocation(driver, owner, token as never), /exact original invocation owner/);
     assert.throws(() => advancePublicationPath(driver, owner, {}, token as never), /exact original invocation owner/);
-    assert.throws(() => readOwnedPublicationCompletion(driver, owner, {}, token), /exact original invocation owner/);
+    assert.throws(() => readOwnedPublicationCompletion(driver, owner, {}, token, driver), /exact original invocation owner/);
     await assert.rejects(claimValidatedInvocation(driver, artifacts, owner, { runId: 'data-only', expectedRunRevision: 1,
       leaseEpoch: 1, opId: 'data-only', attempt: 0, dispatchId: 'data-only' }, undefined, token as never), /exact original invocation owner/);
   }

@@ -44,13 +44,13 @@ const plans = new WeakMap<object, Binding>();
 const failures = new WeakMap<object, ResourceRetirementError>();
 const compare = (a: string, b: string) => Buffer.compare(Buffer.from(a), Buffer.from(b));
 function invalid(message: string): never { throw new KernelStorageError('RECOVERY_REQUIRED', message); }
-function original(driver: SqliteDriver, owner: StateOwnerContext, token: unknown): Binding {
+function original(driver: SqliteDriver, owner: StateOwnerContext, token: unknown, connection: SqliteConnection): Binding {
   const value = token !== null && typeof token === 'object' ? plans.get(token) : undefined;
   if (!value || value.driver !== driver || value.owner !== owner)
     throw new TypeError('a genuine original publication abort finalization is required');
   const failure = failures.get(value.task); if (failure) throw failure;
   if (value.closed) invalid('publication abort projection descriptors are already joined');
-  assertDeliveryPublicationMaintenanceExecution(driver, owner, value.execution, value.task, value.artifacts);
+  assertDeliveryPublicationMaintenanceExecution(driver, owner, value.execution, value.task, value.artifacts, connection);
   value.resources.signal.throwIfAborted(); return value;
 }
 function close(value: Binding) {
@@ -90,7 +90,7 @@ export async function prepareOwnedPublicationAbortFinalization(driver: SqliteDri
     if (!entry || seen.has(token.opId)) invalid('publication abort substituted or duplicated an original physical owner');
     seen.add(token.opId);
     if (entry.preparationClosure) {
-      const actual = readOwnedPublicationPreparationClosure(driver, owner, execution, token);
+      const actual = readOwnedPublicationPreparationClosure(driver, owner, execution, token, driver);
       requireEqual(actual.prepared, entry.prepared, 'abort original closed preparation');
       requireEqual(actual.operation, entry.operation, 'abort original closed preparation operation');
       requireEqual(actual.closure, entry.preparationClosure.closure, 'abort original closed preparation retirement');
@@ -99,7 +99,7 @@ export async function prepareOwnedPublicationAbortFinalization(driver: SqliteDri
       originalMetadata.push(...actual.metadata); continue;
     }
     if (!entry.claim) invalid('publication abort retains an unclosed original physical preparation');
-    const originalCompletion = readOwnedPublicationCompletion(driver, owner, execution, token);
+    const originalCompletion = readOwnedPublicationCompletion(driver, owner, execution, token, driver);
     const completion = originalCompletion.disposition === 'unknown'
       ? readOwnedPublicationReconciledRetirement(driver, artifacts, owner, execution, token, entry) : originalCompletion;
     if (originals.has(completion.prepared.opId))
@@ -281,18 +281,20 @@ export async function prepareOwnedPublicationAbortFinalization(driver: SqliteDri
  * cannot supply this plan; every returned action reasserts its real issuer. */
 export function readOwnedPublicationAbortFinalization(driver: SqliteDriver, owner: StateOwnerContext,
   token: OwnedPublicationAbortFinalization, runId: string) {
-  const value = original(driver, owner, token);
+  const value = original(driver, owner, token, driver);
   if (value.cut.run.id !== runId) throw new TypeError('publication abort finalization belongs to another Run');
   return { cut: value.cut, evidenceRef: value.evidenceRef, observedAt: value.evidence.observedAt,
     publicationResultItemRefs: [...value.evidence.forwardResultItemRefs, ...value.evidence.abortResultItemRefs],
     closedJournalSeqs: new Set([...value.prefix.entries.values()].filter(entry => entry.preparationClosure ||
       entry.result && entry.result.item.outcome !== 'unknown' && ['completed', 'failed'].includes(entry.history.at(-1)!.phase))
       .map(entry => entry.history.at(-1)!.seq)),
-    get metadata(): readonly PublishedArtifact[] { original(driver, owner, token); return [...value.metadata, ...(value.seal?.metadata ?? [])]; },
+    metadata(connection: SqliteConnection): readonly PublishedArtifact[] {
+      original(driver, owner, token, connection); return [...value.metadata, ...(value.seal?.metadata ?? [])];
+    },
     seal: value.seal,
-    async refresh() { original(driver, owner, token); await value.seal?.refresh(); },
+    async refresh() { original(driver, owner, token, driver); await value.seal?.refresh(); },
     validate(connection: SqliteConnection, run: Run, committedAt?: string) {
-      original(driver, owner, token); assertActiveStateOwner(connection, owner); requireEqual(run, value.cut.run, 'abort exact original Run');
+      original(driver, owner, token, connection); assertActiveStateOwner(connection, owner); requireEqual(run, value.cut.run, 'abort exact original Run');
       requireEqual(readDeliveryTerminalSqlCut(connection, run.id, value.sql.source.id), value.sql, 'abort exact original full SQL cut');
       value.gate.assertHeld();
       if (committedAt) {
@@ -302,15 +304,15 @@ export function readOwnedPublicationAbortFinalization(driver: SqliteDriver, owne
           invalid('abort actual root projection is outside its original freshness cut');
       }
     },
-    assertFresh(committedAt: string) {
-      original(driver, owner, token); value.gate.assertHeld();
+    assertFresh(committedAt: string, connection: SqliteConnection) {
+      original(driver, owner, token, connection); value.gate.assertHeld();
       const now = sampleCanonicalNow();
       if (committedAt < value.evidence.observedAt || now < committedAt ||
           parseCanonicalTime(now) - parseCanonicalTime(value.evidence.observedAt) > 5000)
         invalid('abort actual root projection is outside its original freshness cut');
     },
     commit(connection: SqliteConnection, run: Run, committedAt: string) {
-      original(driver, owner, token); value.gate.assertHeld();
+      original(driver, owner, token, connection); value.gate.assertHeld();
       connection.prepare(`INSERT INTO checkpoints (id,schema_version,run_id,based_on_run_revision,run_item_seq,
         context_manifest_ref,journal_seq,workspace_state_ref,created_at,reason) VALUES (?,1,?,?,?,?,?,?,?,'auto')`)
         .run(value.prefix.forward.at(-1)?.receivedHandoff

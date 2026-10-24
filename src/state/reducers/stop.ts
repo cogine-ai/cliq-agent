@@ -470,7 +470,7 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
             if (rollback) resolvePrivateRollbackInvocation(connection, driver, owner, recovery!, runId, now);
             if (connection.prepare("SELECT 1 FROM worker_launches WHERE run_id = ? AND phase != 'retired' AND launch_id != ? LIMIT 1")
               .get(runId, run.activeWorkerLaunchId ?? '')) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'stop cannot retain a pending worker launch');
-            for (const artifact of [...continuation.metadata, ...(seal?.metadata ?? []), ...(publication?.metadata ?? []),
+            for (const artifact of [...continuation.metadata, ...(seal?.metadata ?? []), ...(publication?.metadata(connection) ?? []),
               ...brokerClosure.metadata, terminalArtifact, projectionArtifact]) insertArtifactMetadata(connection, artifact, committedAt);
             publication?.validate(connection, run, committedAt);
             if (publication && canonicalSha256(readSession(connection, session.id)) !== canonicalSha256(session))
@@ -492,7 +492,7 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
             connection.prepare('UPDATE sessions SET latest_item_seq = ?, context_revision = context_revision + 1, context_projection_ref = ?, updated_at = ? WHERE id = ?')
               .run(BigInt(seq), projectionArtifact.ref, committedAt, session.id);
             updated = readRun(connection, runId);
-            publication?.assertFresh(committedAt);
+            publication?.assertFresh(committedAt, connection);
             if (publicationFinalization) closeOwnedPublicationAbortFinalization(driver, owner, publicationFinalization);
             appendRunStateEvent(connection, updated, committedAt);
           });

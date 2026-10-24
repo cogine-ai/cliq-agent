@@ -9,6 +9,7 @@ test('submit stages use the historical admission failure envelope without claimi
   const module = await import('./installed-run-diagnostics.js') as Record<string, any>;
   assert.equal(typeof module.beginInstalledSubmitDiagnostic, 'function');
   const stages = ['submit_request', 'submit_preflight_authority', 'submit_source_capture', 'submit_assembly',
+    'submit_assembly_native', 'submit_assembly_source', 'submit_assembly_platform', 'submit_assembly_material', 'submit_assembly_publish',
     'submit_final_admission', 'submit_postcommit_load'];
   assert.deepEqual(module.INSTALLED_APPLY_DIAGNOSTIC_STAGES, ['request', 'replay', 'capture_source', 'capture',
     'source', 'prepare', 'admit', 'postcommit_load', ...stages]);
@@ -31,7 +32,7 @@ test('submit stages use the historical admission failure envelope without claimi
     assert.deepEqual(records.at(-1), { kind: 'apply_failure', stage: 'submit_postcommit_load', closing: true,
       errorClass: 'other', code: 'none', sqliteCode: null });
     for (const stage of stages) module.noteInstalledPublicationPhase(stage);
-    assert.equal(accesses, 0); assert.equal(records.length, 7);
+    assert.equal(accesses, 0); assert.equal(records.length, stages.length + 1);
   } finally { diagnostic.unsubscribe(receive); }
 });
 

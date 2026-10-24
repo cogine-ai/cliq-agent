@@ -405,7 +405,7 @@ export async function preparePublicationMaintenance(driver: SqliteDriver, artifa
           retained.observation.location.path !== operation.path || creator.progress)
         invalid('maintenance creator has no original stopped-before-effect observation');
       if (originals.length) {
-        const actual = readOwnedPublicationCompletion(driver, owner, input.execution, originals[0]!);
+        const actual = readOwnedPublicationCompletion(driver, owner, input.execution, originals[0]!, driver);
         if (actual.disposition !== 'stopped_before_effect' || actual.birth.sequence !== 'forward' ||
             actual.operation.operationId !== operation.createdByOperationId || actual.evidence.kind !== 'path_observation' ||
             actual.evidenceRef !== creator.result.item.evidenceRef || actual.receiptRef !== undefined || actual.progressCommitted)
@@ -685,11 +685,12 @@ export function claimPublicationInvocation(driver: SqliteDriver, owner: StateOwn
 
 /** Only the same actual execution can continue into physical progress. The
  * returned original descriptors are never reconstructed from retained refs. */
-export function assertOwnedPublicationPath(driver: SqliteDriver, owner: StateOwnerContext, execution: unknown, token: unknown) {
-  const held = claimedBinding(driver, owner, execution, token);
+export function assertOwnedPublicationPath(driver: SqliteDriver, owner: StateOwnerContext, execution: unknown, token: unknown,
+  connection: SqliteConnection) {
+  const held = claimedBinding(driver, owner, execution, token, connection);
   // An already claimed result/cleanup is still owned after Stop or expiry.
   // This friend supplies original facts, never a fresh semantic release.
-  assertActiveStateOwner(driver, owner);
+  assertActiveStateOwner(connection, owner);
   if (held.closed) physical(held, () => readRetiredPublicationArena(owner.filesystem, held.native));
   else physical(held, () => held.native.assertHeld());
   return Object.freeze({ operation: held.operation, plan: held.authorization.context.plan, planRef: held.authorization.context.planRef,
@@ -706,13 +707,14 @@ export function readOwnedPublicationDispatchState(driver: SqliteDriver, owner: S
   if (held.execution !== execution) throw new TypeError('publication dispatch state requires its original execution');
   assertActiveStateOwner(driver, owner);
   if (!held.claim) return Object.freeze({ phase: 'prepared' });
-  claimedBinding(driver, owner, execution, token);
+  claimedBinding(driver, owner, execution, token, driver);
   return Object.freeze({ phase: 'claimed', armed: held.armed });
 }
 
-function assertUnclaimedPreparation(held: Binding) {
-  assertActiveStateOwner(held.driver, held.owner);
-  const history = readInvocationAttempt(held.driver, held.run.id, held.prepared.opId, 0);
+function assertUnclaimedPreparation(held: Binding, connection: SqliteConnection) {
+  assertSqliteConnectionOwnedBy(held.driver, connection);
+  assertActiveStateOwner(connection, held.owner);
+  const history = readInvocationAttempt(connection, held.run.id, held.prepared.opId, 0);
   requireEqual(history[0], held.prepared, 'publication original unclaimed preparation');
   if (held.claim || held.armed || held.commitAttempted || history.some(entry => entry.phase === 'dispatch_claimed') ||
       history.length !== 1 && !(history.length === 2 && history[1]!.phase === 'failed' && held.preparationClosureRef &&
@@ -725,10 +727,10 @@ function assertUnclaimedPreparation(held: Binding) {
 /** Original producer facts only. This does not recreate a native owner or
  * permit any workspace operation after an undispatched preparation closed. */
 export function readOwnedPublicationPreparationClosure(driver: SqliteDriver, owner: StateOwnerContext, execution: unknown,
-  token: PublicationInvocationOwner) {
+  token: PublicationInvocationOwner, connection: SqliteConnection) {
   const held = binding(driver, owner, token);
   if (held.execution !== execution) throw new TypeError('preparation closure requires its exact original execution');
-  assertUnclaimedPreparation(held);
+  assertUnclaimedPreparation(held, connection);
   if (!held.revoked || !held.closed || !held.preparationClosure || !held.preparationClosureRef)
     invalid('publication original preparation has not actually retired and joined');
   if (held.preparationClosure.retirement.kind === 'retired') {
@@ -759,7 +761,7 @@ export async function retirePublicationPreparation(driver: SqliteDriver, owner: 
     const pending = held.pending;
     if (pending) try { await pending; }
     catch (error) { if (error instanceof ResourceRetirementError) throw held.retirementFailure ??= error; }
-    assertUnclaimedPreparation(held);
+    assertUnclaimedPreparation(held, driver);
     try { held.preflight?.close(); held.preflight = undefined; }
     catch (cause) { throw held.retirementFailure = new ResourceRetirementError('publication preparation preflight did not join', cause); }
     if (!held.preparationClosure) {
@@ -794,14 +796,15 @@ export async function retirePublicationPreparation(driver: SqliteDriver, owner: 
       held.preparationClosure = decodePublicationPreparationClosure(closure);
     }
     held.preparationClosureRef ??= (await publishFixed(held, held.preparationClosure, held.preparationClosure.format)).ref;
-    readOwnedPublicationPreparationClosure(driver, owner, execution, token);
+    readOwnedPublicationPreparationClosure(driver, owner, execution, token, driver);
     const { preparePublicationPreparationSettlement } = await import('./publication-settlement.js');
     const settlement = await preparePublicationPreparationSettlement(driver, held.artifacts, owner, { execution, publicationOwner: token });
     return (await settlement.settle({ expectedRunRevision: readRun(driver, held.run.id).revision })).run;
   })().finally(() => { held.preparationRetiring = undefined; });
   return held.preparationRetiring;
 }
-function claimedBinding(driver: SqliteDriver, owner: StateOwnerContext, execution: unknown, token: unknown): Binding & {
+function claimedBinding(driver: SqliteDriver, owner: StateOwnerContext, execution: unknown, token: unknown,
+  connection: SqliteConnection): Binding & {
   claim: InvocationJournalEntry; native: HeldPublicationOperation; birth: PublicationArenaBirthV1; birthRef: string;
 } {
   const held = binding(driver, owner, token);
@@ -810,8 +813,9 @@ function claimedBinding(driver: SqliteDriver, owner: StateOwnerContext, executio
   // The only assignment of this native reference is the genuine issuer above.
   // Reading a recorded negative fact does not invoke assertHeld, nor claim
   // that this original native owner can still observe, clean up or release.
-  assertActiveStateOwner(driver, owner);
-  const retained = readInvocationAttempt(driver, held.run.id, held.prepared.opId, 0);
+  assertSqliteConnectionOwnedBy(driver, connection);
+  assertActiveStateOwner(connection, owner);
+  const retained = readInvocationAttempt(connection, held.run.id, held.prepared.opId, 0);
   requireEqual(retained.slice(0, 2), [held.prepared, held.claim], 'publication exact original permanent claim');
   return held as Binding & { claim: InvocationJournalEntry; native: HeldPublicationOperation; birth: PublicationArenaBirthV1; birthRef: string };
 }
@@ -1188,18 +1192,18 @@ async function inspectMaintenanceContents(held: Binding): Promise<PublicationPat
  * invocation token. A caller cannot supply bytes, progress refs or callbacks. */
 export function advancePublicationPath(driver: SqliteDriver, owner: StateOwnerContext, execution: unknown,
   token: PublicationInvocationOwner): Promise<PublicationPathDisposition> {
-  const held = claimedBinding(driver, owner, execution, token);
+  const held = claimedBinding(driver, owner, execution, token, driver);
   if (held.advancing) return held.advancing;
   // A previously recorded ambiguity can be read, not healed into a positive
   // hold by a later assertHeld or reused as a fresh semantic release.
   if (held.disposition?.disposition === 'unknown') return Promise.resolve(held.disposition);
   if (held.disposition) {
-    assertOwnedPublicationPath(driver, owner, execution, token);
+    assertOwnedPublicationPath(driver, owner, execution, token, driver);
     return Promise.resolve(held.disposition);
   }
   if (held.failure) return Promise.reject(held.failure);
   held.advancing = (async () => {
-    assertOwnedPublicationPath(driver, owner, execution, token);
+    assertOwnedPublicationPath(driver, owner, execution, token, driver);
     await completionCut(held);
     if (held.ambiguity) return retainUnknown(held);
     if (!held.commitAttempted) {
@@ -1255,15 +1259,16 @@ export function advancePublicationPath(driver: SqliteDriver, owner: StateOwnerCo
 
 /** Native facts from this exact owner only. This prepares no settlement and
  * cannot commit a last-path result/Checkpoint ahead of the terminal Run SQL. */
-export function readOwnedPublicationCompletion(driver: SqliteDriver, owner: StateOwnerContext, execution: unknown, token: unknown) {
-  const held = claimedBinding(driver, owner, execution, token);
+export function readOwnedPublicationCompletion(driver: SqliteDriver, owner: StateOwnerContext, execution: unknown, token: unknown,
+  connection: SqliteConnection) {
+  const held = claimedBinding(driver, owner, execution, token, connection);
   if (!held.disposition || !held.completion) invalid('publication original physical completion is not available');
   if (held.disposition.disposition === 'unknown') return Object.freeze({
     disposition: 'unknown' as const, operation: held.operation, plan: held.authorization.context.plan, planRef: held.authorization.context.planRef,
     run: held.run, prepared: held.prepared, claim: held.claim, birth: immutableSnapshot(held.birth), birthRef: held.birthRef,
     ...immutableSnapshot(held.completion), progressItem: held.progress?.item, progressCommitted: held.progressCommitted === true,
     isLastForwardPath: held.mode === 'forward' && held.operation.index === held.authorization.context.plan.forwardOperations.length - 1 });
-  const original = assertOwnedPublicationPath(driver, owner, execution, token);
+  const original = assertOwnedPublicationPath(driver, owner, execution, token, connection);
   return Object.freeze({ ...original, disposition: held.disposition.disposition, ...immutableSnapshot(held.completion),
     progressItem: held.progress?.item, progressCommitted: held.progressCommitted === true,
     slotObservationRefs: Object.freeze([...(held.slotObservationRefs ?? [])]), arenaRetirementRef: held.arenaRetirementRef,
@@ -1305,7 +1310,7 @@ export function readOwnedPublicationReconciledRetirement(driver: SqliteDriver, a
   const held = binding(driver, owner, token);
   if (held.execution !== execution || held.artifacts !== artifacts)
     throw new TypeError('publication retirement requires its exact original execution and artifact catalog');
-  claimedBinding(driver, owner, execution, token);
+  claimedBinding(driver, owner, execution, token, driver);
   const retired = reconciledRetirements.get(held);
   if (!retired || held.disposition?.disposition !== 'unknown' || !held.completion || !held.closed || !held.arenaRetired)
     invalid('publication original UNKNOWN has no genuinely joined resolved retirement');
@@ -2213,13 +2218,14 @@ type InitialAmbiguityBinding = {
   { kind: 'closed_maintenance'; execution: unknown; task: DeliveryPublicationReconciliationTask });
 const initialAmbiguities = new WeakMap<object, InitialAmbiguityBinding>();
 function originalInitialAmbiguity(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
-  token: OwnedPublicationInitialAmbiguity) {
+  token: OwnedPublicationInitialAmbiguity, connection: SqliteConnection) {
   const value = token !== null && typeof token === 'object' ? initialAmbiguities.get(token) : undefined;
   if (!value || value.driver !== driver || value.artifacts !== artifacts || value.owner !== owner)
     throw new TypeError('a genuine same-owner publication initial ambiguity is required');
+  assertSqliteConnectionOwnedBy(driver, connection);
   if (value.kind === 'worker_death') assertNativeContainmentDeath(value.death);
   else assertOwnedPublicationReconciliationTask(driver, owner, value.execution, value.task, artifacts);
-  assertActiveStateOwner(driver, owner); return value;
+  assertActiveStateOwner(connection, owner); return value;
 }
 
 async function prepareInitialAmbiguityGraph(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
@@ -2332,7 +2338,7 @@ export async function prepareOwnedPublicationMaintenanceAmbiguity(driver: Sqlite
 }
 export async function readOwnedPublicationInitialAmbiguity(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
   token: OwnedPublicationInitialAmbiguity) {
-  const value = originalInitialAmbiguity(driver, artifacts, owner, token), refreshed = await reselectPublicationStop(driver, artifacts, owner,
+  const value = originalInitialAmbiguity(driver, artifacts, owner, token, driver), refreshed = await reselectPublicationStop(driver, artifacts, owner,
     value.cut, value.prefix.admission.source.run.id, value.snapshot, value.stop);
   value.cut = refreshed.cut; value.snapshot = refreshed.snapshot; value.stop = refreshed.stop;
   assertOwnedPublicationInitialAmbiguitySql(driver, artifacts, owner, token, driver);
@@ -2345,7 +2351,7 @@ export async function readOwnedPublicationInitialAmbiguity(driver: SqliteDriver,
 }
 export function assertOwnedPublicationInitialAmbiguitySql(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
   token: OwnedPublicationInitialAmbiguity, connection: SqliteConnection): void {
-  const value = originalInitialAmbiguity(driver, artifacts, owner, token);
+  const value = originalInitialAmbiguity(driver, artifacts, owner, token, connection);
   assertActiveStateOwner(connection, owner);
   value.originHistory?.assertUnchanged(connection);
   const now = sampleCanonicalNow();

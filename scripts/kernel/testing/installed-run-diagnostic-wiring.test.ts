@@ -1,12 +1,131 @@
-// Source wiring only, not a StateOwner, Run, SQLite or physical qualification.
+// Source wiring and inert CAS resource lifetimes only. No StateOwner, Run,
+// SQLite authority, native proof or installed physical qualification is made.
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { promises as fs } from 'node:fs';
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import path from 'node:path';
 import { test } from 'node:test';
 import { Script } from 'node:vm';
 import { transformSync } from 'esbuild';
+import ts from 'typescript';
+import { ArtifactCatalog } from '../../../src/state/artifacts.js';
+import { ContentAddressedStore } from '../../../src/state/cas.js';
+import { readCanonicalArtifact } from '../../../src/state/agent-context.js';
+import { ResourceRetirementError } from '../../../src/state/errors.js';
 
 const source = await readFile(new URL('../../../src/state/store.ts', import.meta.url), 'utf8');
 const between = (start: string, end: string) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
+
+const assemblyStages = ['submit_assembly_native', 'submit_assembly_source', 'submit_assembly_platform',
+  'submit_assembly_material', 'submit_assembly_publish'] as const;
+async function assemblyObservation() {
+  const code = await readFile(new URL('../../../src/state/installed-run.ts', import.meta.url), 'utf8');
+  const parsed = ts.createSourceFile('installed-assembly-observation.ts', code, ts.ScriptTarget.Latest, true);
+  let declaration: ts.FunctionDeclaration | undefined, assembly: ts.FunctionDeclaration | undefined;
+  const visit = (node: ts.Node) => {
+    if (ts.isFunctionDeclaration(node) && node.name?.text === 'reportInstalledRunAssemblyPhase') declaration = node;
+    if (ts.isFunctionDeclaration(node) && node.name?.text === 'assembleInstalledRun') assembly = node;
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed); assert(declaration && assembly, 'only the real production observer and assembly are selected');
+  const context = { invoke: undefined as any };
+  new Script(transformSync(`${declaration.getText(parsed)}; globalThis.invoke = reportInstalledRunAssemblyPhase;`,
+    { loader: 'ts' }).code).runInNewContext(context);
+  return { code, parsed, declaration, assembly, invoke: context.invoke as (observer: unknown, phase: string) => void };
+}
+
+test('assembly fixed observations remain outside authority input and precede only the original await groups', async () => {
+  const { code, declaration, assembly } = await assemblyObservation();
+  assert.match(assembly.getText(), /signal\?: AbortSignal, onAssemblyPhase\?: \(phase: InstalledRunAssemblyPhase\) => void/u);
+  assert(!/\bawait\b|Date\.|performance\.|setTimeout/u.test(declaration.getText()), 'observation adds no I/O, timer or clock');
+  for (const [stage, operation] of [['native', 'const native = await loadInstalledWorkerNative'],
+    ['source', 'await validateControlChannelClosure'], ['platform', 'const platform = await loadInstalledCredentialPlatform'],
+    ['material', 'return withHeldInstalledRuntime'], ['publish', 'const sandbox = installedSandboxProfile']])
+    assert(assembly.getText().includes(`reportInstalledRunAssemblyPhase(onAssemblyPhase, 'submit_assembly_${stage}');\n` +
+      (stage === 'native' ? '    ' : stage === 'publish' ? '    ' : '  ') + operation), stage);
+  assert.equal((assembly.getText().match(/reportInstalledRunAssemblyPhase\(/gu) ?? []).length, assemblyStages.length);
+  assert.match(code, /type InstalledRunAssemblyPhase = Extract<InstalledApplyDiagnosticStage, `submit_assembly_\$\{string\}`>;/u);
+  const submit = between('private async submitInstalledRunOwned(', '/** One bounded production lane,');
+  assert.match(submit, /credentialBindings: authority.bindings, controlledHome \}, signal, diagnosis\?\.stage\);/u);
+  assert.match(submit, /catch \(error\) \{\s*diagnosis\?\.failure\(error, this.closeRequested\);\s*throw error;/u);
+});
+
+test('the actual assembly observer contains sink errors and ignores absent observers without inspecting thrown values', async () => {
+  const { invoke } = await assemblyObservation();
+  let touched = 0;
+  const bad = () => { touched++; throw new Error('private observer field'); };
+  const rejected = Object.defineProperties({}, { message: { get: bad }, cause: { get: bad }, stack: { get: bad } });
+  const phases: string[] = [];
+  for (const phase of assemblyStages) {
+    assert.doesNotThrow(() => invoke(undefined, phase));
+    assert.doesNotThrow(() => invoke((value: string) => { phases.push(value); throw rejected; }, phase));
+    assert.doesNotThrow(() => invoke(Object.defineProperty({}, 'call', { get: bad }), phase));
+    assert.doesNotThrow(() => invoke(new Proxy({}, { get: bad, ownKeys: bad, getPrototypeOf: bad }), phase));
+  }
+  assert.deepEqual(phases, [...assemblyStages]); assert.equal(touched, 0);
+});
+
+for (const fault of ['cancel', 'ordinary', 'retirement'] as const)
+  test(`assembly diagnosis cannot bypass the original real CAS read join or replace its ${fault}`, async t => {
+    // Actual source read expression and observer only, over inert CAS data.
+    // No installed selection, Session/Run/StateOwner or native proof is made.
+    const { parsed, assembly, invoke } = await assemblyObservation();
+    const reads: ts.CallExpression[] = [], phases: ts.CallExpression[] = [];
+    const visit = (node: ts.Node) => {
+      if (ts.isCallExpression(node) && node.expression.getText(parsed) === 'readCanonicalArtifact' &&
+          node.arguments[1]?.getText(parsed) === 'session.workspaceIdentityRef') reads.push(node);
+      if (ts.isCallExpression(node) && node.expression.getText(parsed) === 'reportInstalledRunAssemblyPhase' &&
+          node.arguments[1]?.getText(parsed) === "'submit_assembly_source'") phases.push(node);
+      ts.forEachChild(node, visit);
+    };
+    visit(assembly); assert.equal(reads.length, 1); assert.equal(phases.length, 1);
+    const context = { reportInstalledRunAssemblyPhase: invoke, readCanonicalArtifact, read: undefined as any };
+    new Script(transformSync(`globalThis.read = async function(onAssemblyPhase, reads, session) {
+      ${phases[0]!.getText(parsed)}; return ${reads[0]!.getText(parsed)}; };`, { loader: 'ts' }).code).runInNewContext(context);
+    const directory = await mkdtemp(path.join(process.cwd(), '.cliq-assembly-diagnosis-read-'));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const objects = path.join(directory, 'objects'); await mkdir(objects, { mode: 0o700 });
+    const cas = new ContentAddressedStore(objects), artifacts = new ArtifactCatalog(cas);
+    const { ref } = await artifacts.publishCanonical({ inertOnly: true, bytes: 'x'.repeat(3 * 1024 * 1024) }, 'cliq-observer-read-data-v1');
+    const owner = new AbortController(), reason = new Error('the original read was cancelled'), ordinary = new Error('the original real read failed');
+    const retirement = new Error('the real root close report is uncertain'), privateFailure = Object.defineProperty({}, 'message', { get() {
+      throw new Error('diagnosis must not inspect thrown observer fields');
+    } });
+    const active = new Set<object>(), opened = fs.open, read = cas.read.bind(cas);
+    let release!: () => void, enter!: () => void, closed = 0, settled = false, originalFailure: unknown;
+    const gate = new Promise<void>(resolve => { release = resolve; }), entered = new Promise<void>(resolve => { enter = resolve; });
+    t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
+      const handle = await opened(...args); active.add(handle);
+      const close = handle.close.bind(handle), actualRead = handle.read.bind(handle);
+      if (args[0] === path.join(objects, ref)) t.mock.method(handle, 'read', async (...values: Parameters<typeof handle.read>) => {
+        const result = await actualRead(...values);
+        if (fault === 'ordinary') throw ordinary;
+        owner.abort(reason); return result;
+      });
+      t.mock.method(handle, 'close', async () => {
+        if (args[0] === objects) { enter(); await gate; }
+        await close(); assert(active.delete(handle)); closed++;
+        if (fault === 'retirement' && args[0] === objects) throw retirement;
+      });
+      return handle;
+    });
+    t.mock.method(cas, 'read', async (...args: Parameters<typeof cas.read>) => {
+      try { return await read(...args); } catch (error) { originalFailure = error; throw error; }
+    });
+    const observed: string[] = [];
+    const pending: Promise<unknown> = context.read((phase: string) => { observed.push(phase); throw privateFailure; },
+      artifacts.withReadSignal(owner.signal), { workspaceIdentityRef: ref });
+    void pending.then(() => { settled = true; }, () => { settled = true; });
+    try {
+      await Promise.race([entered, pending.then(() => { throw new Error('the actual read/close gate was bypassed'); })]);
+      assert.deepEqual(observed, ['submit_assembly_source']);
+      assert.equal(active.size, 1); assert.equal(closed, 1); assert.equal(settled, false);
+      release();
+      await assert.rejects(pending, error => error === originalFailure && (fault === 'retirement'
+        ? error instanceof ResourceRetirementError && error.cause === retirement : error === (fault === 'ordinary' ? ordinary : reason)));
+      assert.equal(active.size, 0); assert.equal(closed, 2);
+    } finally { release(); await Promise.allSettled([pending]); assert.equal(active.size, 0); t.mock.restoreAll(); }
+  });
 
 test('submit diagnosis preserves the registered producer, actual admission resolution and untouched catch error', async () => {
   // Execute the real inert catch only, never a substitute Store or authority.

@@ -223,7 +223,7 @@ export async function readOwnedPublicationExecutionResources(driver: SqliteDrive
   if (!held || held.driver !== driver || held.owner !== owner)
     throw new TypeError('publication retirement requires its genuine same-owner execution');
   const { assertOwnedPublicationPath } = await import('./publication-invocation.js');
-  const path = assertOwnedPublicationPath(driver, owner, execution, publicationOwner);
+  const path = assertOwnedPublicationPath(driver, owner, execution, publicationOwner, driver);
   const original = publicationTasks.get(path.task);
   if (!original || original.driver !== driver || original.owner !== owner || original.execution !== execution ||
       held.runId !== original.worker.runId)
@@ -1625,7 +1625,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           await publication.advancePublicationPath(driver, owner, execution, original);
           operationPhase = 'received';
           publicationPhase('publication_settlement');
-          const completed = publication.readOwnedPublicationCompletion(driver, owner, execution, original);
+          const completed = publication.readOwnedPublicationCompletion(driver, owner, execution, original, driver);
           if (completed.disposition === 'received' && completed.isLastForwardPath) {
             const { handoffOwnedPublicationResult } = await import('./publication-finalization.js');
             await handoffOwnedPublicationResult(driver, artifacts, owner, execution, original);

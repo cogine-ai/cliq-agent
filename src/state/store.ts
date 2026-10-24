@@ -1911,7 +1911,7 @@ export class StateStore {
       diagnosis?.stage('submit_assembly');
       const assembled = await assembleInstalledRun({ selected, driver: this.driver, owner: this.owner,
         artifacts: this.artifacts, identity, request: normalized.request, originalRequest: normalized.originalRequest, source,
-        endpoint: authority.endpoint, credentialBindings: authority.bindings, controlledHome }, signal);
+        endpoint: authority.endpoint, credentialBindings: authority.bindings, controlledHome }, signal, diagnosis?.stage);
       diagnosis?.stage('submit_final_admission');
       const admission = withCredentialAuthorityLock(selected, async token => {
         signal.throwIfAborted();

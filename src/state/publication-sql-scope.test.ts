@@ -79,6 +79,35 @@ test('publication worker SQL receivers remain usable in the genuine owning trans
   } finally { driver.close(); await rm(directory, { recursive: true, force: true }); }
 });
 
+test('claimed publication and preparation history receivers stay inside the genuine owning transaction', async () => {
+  const root = await source('./publication-invocation.ts');
+  const reads = [
+    ...calls(namedFunction(root, 'claimedBinding'), 'assertActiveStateOwner'),
+    ...calls(namedFunction(root, 'claimedBinding'), 'readInvocationAttempt'),
+    ...calls(namedFunction(root, 'assertUnclaimedPreparation'), 'assertActiveStateOwner'),
+    ...calls(namedFunction(root, 'assertUnclaimedPreparation'), 'readInvocationAttempt'),
+    ...calls(namedFunction(root, 'originalInitialAmbiguity'), 'assertActiveStateOwner')
+  ];
+  assert.equal(reads.length, 5, 'all original owner and retained-history reads remain present');
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'cliq-publication-completion-sql-'));
+  const driver = openSqliteDriver(path.join(directory, 'state.sqlite'));
+  try {
+    driver.exec('CREATE TABLE scope_records(value INTEGER) STRICT; INSERT INTO scope_records VALUES(31)');
+    driver.transaction(connection => {
+      for (const call of reads) {
+        // Execute the actual production receiver expression, not fabricated
+        // publication, StateOwner, Run or native authority.
+        const receiver = call.arguments[0]!.getText();
+        const actual = receiver === 'connection' ? connection : receiver === 'driver' || receiver === 'held.driver' ? driver :
+          assert.fail('publication SQL reads use only their fixed original driver or explicit scope');
+        assert.equal(actual.prepare('SELECT value FROM scope_records').get<{ value: bigint }>()!.value, 31n,
+          'original completion reads must not re-enter the unavailable outer connection');
+      }
+      assert.throws(() => driver.prepare('SELECT value FROM scope_records'), /outer SQLite connection is unavailable/u);
+    });
+  } finally { driver.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
 test('SQL connection provenance accepts only the exact live issuing scope and leaves rollback and outer guards intact', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'cliq-sql-issuer-'));
   const driver = openSqliteDriver(path.join(directory, 'state.sqlite'));
@@ -267,4 +296,68 @@ test('publication reconciliation and received-result terminal writers propagate 
   const claims = calls(reducer, 'assertPublicationReconciliationSettlementForInvocation');
   assert.equal(claims.length, 2, 'the original binding is checked before preparation and again inside the real transaction');
   assert.equal(claims[0]!.arguments.length, 3); assert.equal(claims[1]!.arguments[3]?.getText(), 'connection');
+});
+
+test('original publication handoff and both settlement branches pass their commit scope through completion history', async () => {
+  const invocation = await source('./publication-invocation.ts'), finalization = await source('./publication-finalization.ts');
+  scopedCalls(namedFunction(invocation, 'readOwnedPublicationCompletion'), 'claimedBinding', 4, 1);
+  scopedCalls(namedFunction(invocation, 'readOwnedPublicationCompletion'), 'assertOwnedPublicationPath', 4, 1);
+  scopedCalls(namedFunction(invocation, 'assertOwnedPublicationPath'), 'claimedBinding', 4, 1);
+  scopedCalls(namedFunction(invocation, 'assertOwnedPublicationPath'), 'assertActiveStateOwner', 0, 1);
+  scopedCalls(namedFunction(invocation, 'claimedBinding'), 'assertSqliteConnectionOwnedBy', 1, 1);
+  scopedCalls(namedFunction(invocation, 'readOwnedPublicationPreparationClosure'), 'assertUnclaimedPreparation', 1, 1);
+  scopedCalls(namedFunction(invocation, 'assertUnclaimedPreparation'), 'assertSqliteConnectionOwnedBy', 1, 1);
+  const handoff = namedFunction(finalization, 'handoffOwnedPublicationResult');
+  const completions = calls(handoff, 'readOwnedPublicationCompletion');
+  assert.equal(completions.length, 2, 'the original is read before I/O and revalidated inside the actual commit');
+  assert.equal(completions[0]!.arguments[4]?.getText(), 'driver', 'the original nontransactional read explicitly uses its driver');
+  assert.equal(completions[1]!.arguments[4]?.getText(), 'connection', 'the committed handoff reuses its actual transaction');
+  const settlement = await source('./publication-settlement.ts');
+  scopedCalls(namedFunction(settlement, 'original'), 'readOwnedPublicationCompletion', 4, 1);
+  scopedCalls(namedVariable(namedFunction(settlement, 'select'), 'assertCut'), 'original', 1, 1);
+  scopedCalls(namedFunction(settlement, 'originalPreparation'), 'readOwnedPublicationPreparationClosure', 4, 1);
+  scopedCalls(namedMethod(namedFunction(settlement, 'selectPreparation'), 'assertCut'), 'originalPreparation', 1, 1);
+});
+
+test('initial ambiguity and abort terminal callbacks preserve the same scope through every original resource check', async () => {
+  const invocation = await source('./publication-invocation.ts');
+  scopedCalls(namedFunction(invocation, 'originalInitialAmbiguity'), 'assertSqliteConnectionOwnedBy', 1, 1);
+  scopedCalls(namedFunction(invocation, 'assertOwnedPublicationInitialAmbiguitySql'), 'originalInitialAmbiguity', 4, 1);
+  const abort = await source('./publication-abort-finalization.ts');
+  scopedCalls(namedFunction(abort, 'original'), 'assertDeliveryPublicationMaintenanceExecution', 5, 1);
+  for (const name of ['metadata', 'validate', 'commit', 'assertFresh'])
+    scopedCalls(namedMethod(namedFunction(abort, 'readOwnedPublicationAbortFinalization'), name), 'original', 3, 1);
+  const stop = await source('./reducers/stop.ts');
+  const members: ts.CallExpression[] = [];
+  const visit = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) &&
+        node.expression.expression.getText() === 'publication' && ['metadata', 'assertFresh'].includes(node.expression.name.text)) members.push(node);
+    ts.forEachChild(node, visit);
+  };
+  visit(stop); assert.equal(members.length, 2, 'both original late terminal callbacks retain explicit scope');
+  for (const member of members) assert.equal(member.arguments.at(-1)?.getText(), 'connection',
+    'the original Stop transaction, not an outer driver or structural callback, owns the SQL scope');
+});
+
+test('completion SQL helpers cannot silently fall back to an outer driver at a new call site', async () => {
+  const specifications = [
+    ['./publication-invocation.ts', ['claimedBinding', 'assertUnclaimedPreparation', 'assertOwnedPublicationPath',
+      'readOwnedPublicationCompletion', 'readOwnedPublicationPreparationClosure', 'originalInitialAmbiguity']],
+    ['./publication-settlement.ts', ['original', 'originalPreparation']],
+    ['./publication-abort-finalization.ts', ['original']]
+  ] as const;
+  for (const [file, helpers] of specifications) {
+    const root = await source(file);
+    for (const name of helpers) {
+      const helper = namedFunction(root, name), parameter = helper.parameters.at(-1)!;
+      assert.equal(parameter.name.getText(), 'connection', 'each SQL-capable helper makes its receiver explicit');
+      assert.equal(parameter.initializer, undefined, 'no implicit outer-driver fallback is permitted');
+      assert.equal(parameter.questionToken, undefined, 'the owning scope is mandatory');
+      for (const call of calls(root, name)) {
+        assert.equal(call.arguments.length, helper.parameters.length, 'every real in-module caller chooses its receiver');
+        assert(['driver', 'binding.driver', 'connection'].includes(call.arguments.at(-1)!.getText()),
+          'a SQL receiver is the genuine driver or scoped connection, not a caller callback');
+      }
+    }
+  }
 });

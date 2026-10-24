@@ -130,7 +130,7 @@ export async function handoffOwnedPublicationResult(driver: SqliteDriver, artifa
   if (held?.committed) return readRun(driver, held.item.runId);
   if (held?.pending) return held.pending;
   if (!held) {
-    const completion = readOwnedPublicationCompletion(driver, owner, execution, publicationOwner);
+    const completion = readOwnedPublicationCompletion(driver, owner, execution, publicationOwner, driver);
     if (completion.disposition !== 'received' || !completion.isLastForwardPath || !completion.progressCommitted || !completion.birth ||
         completion.evidence.kind !== 'terminal_receipt' || completion.receiptRef !== completion.evidenceRef || !completion.arenaRetirementRef)
       invalid('received handoff requires its genuine last receipt and complete original retirement');
@@ -190,7 +190,7 @@ export async function handoffOwnedPublicationResult(driver: SqliteDriver, artifa
           if (outcome !== 'healthy') return;
           if (now < binding.item.createdAt || now < cut.run.updatedAt)
             invalid('received handoff has a noncausal commit time');
-          const actual = readOwnedPublicationCompletion(driver, owner, execution, publicationOwner);
+          const actual = readOwnedPublicationCompletion(driver, owner, execution, publicationOwner, connection);
           if (actual.disposition !== 'received' || actual.evidenceRef !== binding.item.receiptRef)
             invalid('received handoff lost its genuine original joined producer before commit');
           requireEqual(actual.evidence, binding.completion.evidence, 'received handoff original actual receipt at SQL cut');
@@ -386,7 +386,7 @@ export function readOwnedPublicationReceivedResult(driver: SqliteDriver, artifac
 export async function prepareOwnedPublicationGenerationSeal(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
   execution: unknown, publicationOwner: PublicationInvocationOwner, task?: DeliveryPublicationMaintenanceTask) {
   assertOwnedPublicationArtifacts(driver, owner, execution, publicationOwner, artifacts);
-  const completion = readOwnedPublicationCompletion(driver, owner, execution, publicationOwner);
+  const completion = readOwnedPublicationCompletion(driver, owner, execution, publicationOwner, driver);
   const before = readRun(driver, completion.run.id);
   if (!before.stopIntentRef && (completion.disposition !== 'received' || !completion.isLastForwardPath))
     invalid('publication M seal requires its genuine last completion or stopped original owner');

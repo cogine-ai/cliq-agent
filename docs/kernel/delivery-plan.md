@@ -2108,3 +2108,51 @@ cancellation signal, without cancelling raw publication or physical retirement.
 Verifier retirement adds nine fixed diagnostic stages only; all original
 assertions remain. Component regressions do not qualify installed execution,
 the delayed-volume deadlines or the still-unreached physical storage cuts.
+
+Source `71f874cb026e61a4594540ccc233f5172ae02727`, tree
+`c05b35269fcba6d1aced1e6056278bc14166c47b`, completed
+[run 40137340913](https://github.com/cogine-ai/cliq-agent/actions/runs/40137340913)
+with seventeen successful jobs and five failed jobs. All four TypeScript jobs
+pass. Its immutable 974-source local gate passes the original build and test
+commands: 2,687 passing tests, zero failures, one original cross-filesystem skip
+and two Linux-only skips. Script tests pass 232 with fifteen Linux-only skips;
+all 99 portable workflow tests and actual strict dependency checks pass.
+Local validation SHA-256:
+`aac1f60c52d24d04cadfade0f8058345e97341115e6042d4eee923593db611dc`.
+
+The new actual results narrow, but do not close, the remaining qualifications:
+
+- Normal Delivery reaches all six publication markers, including dispatch and
+  settlement, rather than stopping before admission. Its source Agent is
+  qualified. Delivery still misses ninety seconds at waiting/reconciliation,
+  revision nine, with five items, five Checkpoints and only prepared plus
+  dispatch-claimed Journal entries. Original Stop also fails its two-second
+  bound; the Store join summary is unavailable. A separately observed phase
+  cannot replace that missing join. Inspection confirms further outer-driver
+  reads below the claimed-completion handoff and settlement helpers; all
+  affected transaction paths need explicit genuine connections.
+- The ordinary delayed-volume journey still misses five-second READY at
+  5,002 ms, after thirteen completed client revalidations. No final-current
+  completion is recorded. Neither the deadline nor integrity checks change.
+- Original-stop and late-result journeys still miss initial `run.submit` at
+  thirty seconds, before either requested physical cut. Both now complete
+  the original writer join. The retained admission failure is specifically
+  `submit_assembly`, `LEASE_FENCED`, after closing began; it proves cancellation
+  completed, not the cause of the preceding thirty-second wait.
+- Verifier qualification reaches the original final corpus scan but exhausts
+  4,096 cumulative independent streams. The precise last source is a kernel
+  `workspace_generations` cell, with cumulative counts 798 rows / 3,421 value
+  attempts / 217,220 logical bytes. These are not per-table counts. The closed
+  fallback retains the refusal, not the per-case evidence. Its control-flow
+  preconditions do not substitute for a safely published complete qualification.
+  All streams close; no limit, source or empty-stream accounting is relaxed.
+
+All 23 categories retain 105 original JSON files / 498,653 bytes, eighteen
+qualified reports and five false reports. There are no pending, incomplete or
+rejected categories, cleanup errors or changed runner-baseline pairs. Final
+capture SHA-256:
+`36dccc757ef047520c25340493545b236ba70f6cc656b689153dd8cf7a42a033`.
+Independent closeout SHA-256:
+`c9405473f73fd149d231c96fcdf54a78cef4ff3a70bd6739f3b6f7262f0a5eb9`.
+The original evidence, failed conclusions and remaining physical cuts stay
+open; this is not a complete I1 or complete-PR qualification.

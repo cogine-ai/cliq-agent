@@ -138,8 +138,8 @@ function closed(value: unknown, keys: readonly string[], message: string) {
   if (Reflect.ownKeys(fields).length !== keys.length || keys.some(key => !Object.hasOwn(fields, key)) ||
       Object.values(fields).some(field => !field.enumerable || !Object.hasOwn(field, 'value') || field.value === undefined)) throw new TypeError(message);
 }
-function original(binding: Binding) {
-  const completion = readOwnedPublicationCompletion(binding.driver, binding.owner, binding.execution, binding.publicationOwner);
+function original(binding: Binding, connection: SqliteConnection) {
+  const completion = readOwnedPublicationCompletion(binding.driver, binding.owner, binding.execution, binding.publicationOwner, connection);
   if (completion.disposition !== binding.completion.disposition || completion.evidenceRef !== binding.completion.evidenceRef ||
       completion.planRef !== binding.completion.planRef || completion.prepared.opId !== binding.input.opId ||
       completion.claim.dispatchId !== binding.completion.claim.dispatchId)
@@ -164,7 +164,7 @@ function sqlCut(connection: SqliteConnection, binding: Pick<Binding, 'input'>, s
       !!connection.prepare('SELECT 1 FROM runs WHERE parent_run_id=? LIMIT 1').get(run.id) };
 }
 async function select(binding: Binding): Promise<Selection> {
-  const completion = original(binding), { driver, artifacts } = binding;
+  const completion = original(binding, binding.driver), { driver, artifacts } = binding;
   const cut = await readRecoveryClosure(driver, artifacts, binding.input.runId), prefix = await readPublicationPrefix(driver, artifacts, cut);
   const entry = prefix.entries.get(binding.input.opId), authorization = prefix.authorization;
   if (!entry?.claim || !entry.birth || !authorization || entry.sequence !== completion.birth.sequence ||
@@ -193,7 +193,7 @@ async function select(binding: Binding): Promise<Selection> {
     assertActiveStateOwner(connection, binding.owner);
     if (canonicalSha256(sqlCut(connection, binding, prefix.admission.source.run.id)) !== fingerprint)
       throw new KernelStorageError('REVISION_CONFLICT', 'publication result lost its original current Run, Stop or dispatch cut');
-    original(binding);
+    original(binding, connection);
   };
   return { cut, prefix, assertCut, ...(stop ? { stop } : {}) };
 }
@@ -213,9 +213,9 @@ export function assertPublicationSettlementForInvocation(driver: SqliteDriver, o
     return { kind: binding.kind, input: binding.input, terminal: binding.terminal, continuation: binding.continuation,
       validateSnapshot: binding.validateSnapshot, artifacts: binding.artifacts, readArtifacts: binding.artifacts };
   }
-  if (binding.kind === 'path') original(binding);
+  if (binding.kind === 'path') original(binding, driver);
   else if (binding.kind === 'received') originalReceived(binding);
-  else originalPreparation(binding);
+  else originalPreparation(binding, driver);
   return { kind: binding.kind, input: binding.input, terminal: binding.terminal, continuation: binding.continuation, validateSnapshot: binding.validateSnapshot,
     artifacts: binding.artifacts, readArtifacts: binding.kind === 'received' ? binding.reads : binding.artifacts };
 }
@@ -462,12 +462,12 @@ export async function preparePublicationSettlement(driver: SqliteDriver, artifac
   input: Input): Promise<Binding['facade']> {
   closed(input, ['execution', 'publicationOwner'], 'settlement requires one closed original publication input');
   assertOwnedPublicationArtifacts(driver, owner, input.execution, input.publicationOwner, artifacts);
-  const completion = readOwnedPublicationCompletion(driver, owner, input.execution, input.publicationOwner);
+  const completion = readOwnedPublicationCompletion(driver, owner, input.execution, input.publicationOwner, driver);
   const prior = bindings.get(input.publicationOwner);
   if (prior) {
     if (prior.kind !== 'path' || prior.driver !== driver || prior.owner !== owner || prior.artifacts !== artifacts || prior.execution !== input.execution)
       throw new TypeError('publication settlement cannot transfer its original completion owner');
-    original(prior); return prior.facade;
+    original(prior, driver); return prior.facade;
   }
   const binding: Binding = { kind: 'path', driver, artifacts, owner, execution: input.execution, publicationOwner: input.publicationOwner, completion,
     terminal: terminal(completion), input: { runId: completion.run.id, opId: completion.prepared.opId, attempt: completion.prepared.attempt },
@@ -760,8 +760,8 @@ export async function preparePublicationReceivedSettlement(driver: SqliteDriver,
   bindings.set(input.receivedResult, binding); return binding.facade;
 }
 
-function originalPreparation(binding: PreparationBinding) {
-  const actual = readOwnedPublicationPreparationClosure(binding.driver, binding.owner, binding.execution, binding.publicationOwner);
+function originalPreparation(binding: PreparationBinding, connection: SqliteConnection) {
+  const actual = readOwnedPublicationPreparationClosure(binding.driver, binding.owner, binding.execution, binding.publicationOwner, connection);
   requireEqual(actual.closure, binding.completion.closure, 'publication same original preparation retirement closure');
   requireEqual(actual.prepared, binding.completion.prepared, 'publication same original undispatched preparation');
   if (actual.closureRef !== binding.completion.closureRef || actual.planRef !== binding.completion.planRef)
@@ -769,7 +769,7 @@ function originalPreparation(binding: PreparationBinding) {
   return actual;
 }
 async function selectPreparation(binding: PreparationBinding): Promise<Selection> {
-  const actual = originalPreparation(binding), { driver, artifacts } = binding;
+  const actual = originalPreparation(binding, binding.driver), { driver, artifacts } = binding;
   const cut = await readRecoveryClosure(driver, artifacts, binding.input.runId), prefix = await readPublicationPrefix(driver, artifacts, cut);
   const entry = prefix.entries.get(binding.input.opId);
   if (!entry || entry.claim || entry.planRef !== actual.planRef || entry.operation.operationId !== actual.operation.operationId ||
@@ -789,7 +789,7 @@ async function selectPreparation(binding: PreparationBinding): Promise<Selection
     assertActiveStateOwner(connection, binding.owner);
     if (canonicalSha256(sqlCut(connection, binding, prefix.admission.source.run.id)) !== fingerprint)
       throw new KernelStorageError('REVISION_CONFLICT', 'publication preparation retirement cut changed');
-    originalPreparation(binding);
+    originalPreparation(binding, connection);
   } };
 }
 
@@ -799,12 +799,12 @@ export async function preparePublicationPreparationSettlement(driver: SqliteDriv
   input: Input): Promise<Binding['facade']> {
   closed(input, ['execution', 'publicationOwner'], 'preparation settlement requires one closed original publication input');
   assertOwnedPublicationArtifacts(driver, owner, input.execution, input.publicationOwner, artifacts);
-  const completion = readOwnedPublicationPreparationClosure(driver, owner, input.execution, input.publicationOwner);
+  const completion = readOwnedPublicationPreparationClosure(driver, owner, input.execution, input.publicationOwner, driver);
   const prior = bindings.get(input.publicationOwner);
   if (prior) {
     if (prior.kind !== 'preparation' || prior.driver !== driver || prior.owner !== owner || prior.execution !== input.execution || prior.artifacts !== artifacts)
       throw new TypeError('preparation settlement cannot transfer its original owner');
-    originalPreparation(prior); return prior.facade;
+    originalPreparation(prior, driver); return prior.facade;
   }
   const binding: PreparationBinding = { kind: 'preparation', driver, artifacts, owner, execution: input.execution, publicationOwner: input.publicationOwner,
     completion, input: { runId: completion.prepared.runId, opId: completion.prepared.opId, attempt: 0 },
@@ -815,7 +815,7 @@ export async function preparePublicationPreparationSettlement(driver: SqliteDriv
       requireEqual(run, binding.selection.cut.run, 'publication preparation retirement exact Run'); binding.selection.assertCut(connection);
     },
     async continuation({ run, prepared, settlement }) {
-      originalPreparation(binding);
+      originalPreparation(binding, driver);
       requireEqual(prepared, completion.prepared, 'publication preparation original zero-settlement preparation');
       if (settlement.terminalPhase !== 'failed' || settlement.settledAt < completion.closure.observedAt)
         invalid('publication preparation settlement predates its actual joined retirement');
