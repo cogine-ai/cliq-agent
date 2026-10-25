@@ -1,25 +1,28 @@
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { addCanonicalDuration, assertArtifactRef, digestOmitting, identityHash, parseCanonicalTime } from '../kernel/identity.js';
 import type { PreparingWorkerLaunch, RetiredWorkerPreparation, Run, RunAssemblyV1, RunFrontier, WorkerLaunch,
-  WorkspaceGenerationQuarantineEvidenceV1, WorkspaceGenerationRetirementEvidenceV1, WorkspaceGenerationStateV1 } from '../kernel/types.js';
+  WorkspaceGenerationQuarantineEvidenceV1, WorkspaceGenerationRetirementEvidenceV1, WorkspaceGenerationStateV1, RecoveryClosureV1 } from '../kernel/types.js';
 import { immutableSnapshot } from '../model/immutable.js';
 import { exactKeys, requireEqual } from '../policy/runtime-authority.js';
 import { readNativeControllerPreparationBirth, readNativeControllerPreparationRetirement, readNativeWorkerReservationBinding,
+  readNativeRetainedPreparingGitRetirement, assertLinuxWorkerController,
+  type NativePreparingGitRecipe, type NativeRetainedPreparingGitRetirement, type LinuxWorkerController,
   type NativeControllerPreparationBirth, type NativeControllerPreparationRetirement, type NativeWorkerReservationBinding } from '../sandbox/linux-worker.js';
-import { publishRunWorkspaceBirthIdentity, readRunWorkspaceBirth, readRunWorkspaceBirthRetirement,
+import { publishRunWorkspaceBirthIdentity, readRunWorkspaceBirth, readRunWorkspaceBirthRetirement, readRunWorkspacePreparingGit,
   readUnallocatedRunWorkspaceRetirement, type RunWorkspaceBirth, type RunWorkspaceMaterialization,
   type UnallocatedRunWorkspaceRetirement } from '../workspace/run-workspace/generation.js';
 import { readCanonicalArtifact } from './agent-context.js';
 import { insertArtifactMetadata, type ArtifactCatalog } from './artifacts.js';
 import { advanceTimeFence, sampleCanonicalNow } from './canonical-time.js';
 import { decodeRunSpec, decodeWorkspaceEntries, decodeWorkspaceGenerationIdentity, decodeWorkspaceGenerationSnapshotEvidence,
-  decodeWorkspaceState } from './decoders.js';
-import { KernelStorageError } from './errors.js';
+  decodeWorkspaceState, decodeStateOwnerRecord, decodePlatformProcessIdentity } from './decoders.js';
+import { KernelStorageError, ResourceRetirementError } from './errors.js';
 import { readPublicationPrefix } from './delivery-publication-progress.js';
 import { decodeWorkerLaunch, decodeWorkspaceGenerationState } from './invariants.js';
 import { borrowWorkerReservationForExecution, readWorkerReservationRetirement, type GenerationQuarantineMove,
-  type HeldWorkerReservation } from './native-owner.js';
-import { readRecoveryClosure } from './recovery-closure.js';
+  type HeldWorkerReservation, type HeldRetainedPreparingGitInput, stateRootIdentityForLock,
+  openRetainedPreparingGitInput, assertRetainedPreparingGitInputOwner } from './native-owner.js';
+import { readRecoveryClosure, readPreparingCleanupClosure } from './recovery-closure.js';
 import { readChildAllocationsForRun } from './repositories/child-allocations.js';
 import { readInvocationJournal } from './repositories/journal.js';
 import { insertWorkerLaunch, readRequiredWorkerLaunch, readWorkerLaunchesForRun, updateWorkerLaunch } from './repositories/worker-launches.js';
@@ -32,6 +35,12 @@ import { assertInstalledBrokerQuiescence, type InstalledBrokerQuiescence } from 
 import { readSupervisorInspector, supervisorInspectorIdentity } from './supervisor-inspector.js';
 import { readVerifierProgress } from './verifier-recovery.js';
 import { stopInvocationHistory } from '../runtime/stop.js';
+import { readPrivateGitData, privateGitInspectionOutput } from '../workspace/private-git-data.js';
+import { decodeSandboxProfile } from './execution-closure.js';
+import { decodeSourceManifest } from './decoders.js';
+import { readStateOwnerDeath } from './state-owner-death.js';
+import { observeRetainedPreparingGeneration, readRetainedPreparingGenerationRetirement,
+  type RetainedPreparingGenerationRetirementData } from '../workspace/run-workspace/preparation-retirement.js';
 
 type ControllerBirth = Readonly<{ schemaVersion: 1; format: 'cliq-controller-preparation-birth-v1';
   identity: ReturnType<typeof readNativeControllerPreparationBirth>['identity']; birthDigest: string }>;
@@ -49,9 +58,117 @@ type BornPreparationRetirement = Readonly<{ schemaVersion: 1; format: 'cliq-work
 type UnallocatedPreparationRetirement = Readonly<{ schemaVersion: 1; format: 'cliq-worker-preparation-retirement-evidence-v1'; kind: 'unallocated';
   launch: PreparingWorkerLaunch; workspaceRetirement: UnallocatedRunWorkspaceRetirement;
   inspectorIdentityRef: string; inspectorIdentityDigest: string; observedAt: string; evidenceDigest: string }>;
-type PreparationRetirement = BornPreparationRetirement | UnallocatedPreparationRetirement;
+type PreparingNativeRetirementData = Readonly<{
+  observation: ReturnType<typeof readNativeRetainedPreparingGitRetirement>['observation'];
+  input: HeldRetainedPreparingGitInput['identity']; recipe: NativePreparingGitRecipe;
+  checker: ReturnType<typeof readNativeRetainedPreparingGitRetirement>['checker']; checkerBirth: ControllerBirth;
+}>;
+type CurrentCheckerPreparationRetirement = Omit<BornPreparationRetirement,
+  'kind' | 'workspaceRetirementObservedAt' | 'controllerRetirement' | 'reservationRetirement'> & Readonly<{
+  kind: 'born_current_checker'; workspaceRetirement: RetainedPreparingGenerationRetirementData;
+  nativeRetirement: PreparingNativeRetirementData; reservationRetirement: HeldWorkerReservation['identity'];
+  ownerDeathAcquisitionEvidenceRef: string; ownerDeathAcquisitionEvidenceDigest: string;
+}>;
+type PreparationRetirement = BornPreparationRetirement | CurrentCheckerPreparationRetirement | UnallocatedPreparationRetirement;
 const preparationOwners = new WeakMap<PreparingWorkerLaunch, { driver: SqliteDriver; owner: StateOwnerContext }>();
 function fail(message: string): never { throw new KernelStorageError('RECOVERY_REQUIRED', message); }
+
+/** A read-only exception for one dead preparation owner. This never adopts a
+ * producer, activates a generation, or supplies retirement authority. */
+declare const workerPreparationCleanupContextBrand: unique symbol;
+export type WorkerPreparationCleanupContext = Readonly<{ [workerPreparationCleanupContextBrand]: true }>;
+type PreparationOwnerDeath = Awaited<ReturnType<typeof readStateOwnerDeath>>;
+const cleanupContexts = new WeakMap<WorkerPreparationCleanupContext, {
+  driver: SqliteDriver; owner: StateOwnerContext; launch: PreparingWorkerLaunch;
+  death: PreparationOwnerDeath; originalStateOwnerRowDigest: string;
+  ownerIdentity: ReturnType<typeof cleanupOwnerIdentity>; filesystem: StateOwnerContext['filesystem'];
+  cut?: RecoveryClosureV1; generation?: PreparationGeneration; identity?: ReturnType<typeof decodeWorkspaceGenerationIdentity>;
+  originalController?: ControllerBirth; recipe?: NativePreparingGitRecipe; retirementStarted?: boolean;
+}>();
+
+function cleanupOwnerIdentity(owner: StateOwnerContext) {
+  const { filesystem: _filesystem, ...identity } = owner; return immutableSnapshot(identity);
+}
+function cleanupOwner(driver: SqliteDriver, owner: StateOwnerContext): void {
+  // An arbitrary structural assertHeld callback cannot create this context.
+  const root = stateRootIdentityForLock(owner.filesystem);
+  if (canonicalSha256(root) !== owner.stateRootIdentityRef || root.identityDigest !== owner.stateRootIdentityDigest)
+    fail('preparation cleanup substitutes its genuine StateRoot owner');
+  assertActiveStateOwner(driver, owner);
+}
+
+export function assertWorkerPreparationCleanupContext(driver: SqliteDriver, context: WorkerPreparationCleanupContext, runId: string): void {
+  const held = cleanupContexts.get(context);
+  if (!held || held.driver !== driver || held.launch.runId !== runId) throw new TypeError('preparation cleanup requires its genuine read-only inspection context');
+  if (held.owner.filesystem !== held.filesystem) fail('preparation cleanup substitutes its physical owner');
+  requireEqual(cleanupOwnerIdentity(held.owner), held.ownerIdentity, 'preparation cleanup inspecting StateOwner');
+  cleanupOwner(driver, held.owner);
+  requireEqual(readRequiredWorkerLaunch(driver, held.launch.launchId), held.launch, 'preparation cleanup exact original lifecycle');
+  requireEqual(readStateOwner(driver, held.death.priorOwner.ownerEpoch), held.death.priorOwner, 'preparation cleanup original dead StateOwner');
+  const run = bindableRun(driver, held.launch);
+  if (run.id !== runId || held.owner.ownerEpoch < held.death.successorOwner.ownerEpoch)
+    fail('preparation cleanup lacks its current successor owner');
+}
+
+export async function openWorkerPreparationCleanupContext(driver: SqliteDriver, artifacts: ArtifactCatalog,
+  owner: StateOwnerContext, launchId: string): Promise<WorkerPreparationCleanupContext> {
+  cleanupOwner(driver, owner);
+  const ownerIdentity = cleanupOwnerIdentity(owner), filesystem = owner.filesystem;
+  const launch = readRequiredWorkerLaunch(driver, launchId);
+  if (launch.phase !== 'preparing' || launch.supervisorInstanceId === owner.supervisorInstanceId ||
+      launch.preparation.stateOwnerEpoch >= owner.ownerEpoch) fail('preparation cleanup requires an exact earlier nonexecuting owner');
+  bindableRun(driver, launch);
+  const death = await readStateOwnerDeath(artifacts, driver, { supervisorInstanceId: launch.supervisorInstanceId, ownedAt: launch.createdAt });
+  if (death.priorOwner.ownerEpoch !== launch.preparation.stateOwnerEpoch || owner.ownerEpoch < death.successorOwner.ownerEpoch)
+    fail('preparation cleanup death closure names another original owner');
+  // Terminalization only appends these exact fields to the immutable active
+  // row. Reconstruct its canonical digest as inert native-prefix data; never
+  // create a StateOwnerContext or write an active row for this dead process.
+  const { releasedAt: _released, terminalReason: _reason, transitionEvidenceRef: _transition,
+    transitionEvidenceDigest: _transitionDigest, ...base } = death.priorOwner;
+  const prior = { ...base, state: 'active' as const, rowVersion: 1 as const, rowDigest: '' };
+  prior.rowDigest = digestOmitting(prior, 'rowDigest'); decodeStateOwnerRecord(prior);
+  const context = Object.freeze({}) as WorkerPreparationCleanupContext;
+  cleanupContexts.set(context, { driver, owner, launch: immutableSnapshot(launch), death: immutableSnapshot(death),
+    originalStateOwnerRowDigest: prior.rowDigest, ownerIdentity, filesystem });
+  assertWorkerPreparationCleanupContext(driver, context, launch.runId);
+  // Retain the one complete read cut for this same retirement operation. This
+  // is neither cached image verification nor permission to repeat an attempt.
+  const cut = await readPreparingCleanupClosure(driver, artifacts, launch.runId, context);
+  requireEqual(bindableRun(driver, launch), cut.run, 'preparation cleanup inspected Run');
+  const held = cleanupContexts.get(context)!; held.cut = immutableSnapshot(cut);
+  if (launch.preparation.generation) {
+    const generation = readRequiredWorkspaceGeneration(driver, launch.preparation.generationId);
+    if (generation.phase !== 'materializing' && generation.phase !== 'preactivated_readonly') fail('preparation cleanup generation became executable');
+    held.generation = immutableSnapshot(generation);
+    held.identity = decodeWorkspaceGenerationIdentity(await readCanonicalArtifact(artifacts, generation.generationRef));
+  }
+  if (launch.preparation.controller)
+    held.originalController = controllerBirth(await readCanonicalArtifact(artifacts, launch.preparation.controller.birthIdentityRef));
+  if (launch.preparation.controller?.privateGitInputRef) {
+    const state = decodeWorkspaceState(await readCanonicalArtifact(artifacts, launch.preparation.sourceWorkspaceStateRef));
+    const baseSource = decodeSourceManifest(await readCanonicalArtifact(artifacts, state.baseWorkspaceManifestRef));
+    const profile = decodeSandboxProfile(await readCanonicalArtifact(artifacts, cut.runSpec.sandboxProfileRef));
+    if (!baseSource.git || !state.privateGitStateRef) fail('preparing cleanup lost its frozen Git source');
+    held.recipe = immutableSnapshot({ ...profile.resources, stateOwnerEpoch: launch.preparation.stateOwnerEpoch,
+      supervisorInstanceId: launch.supervisorInstanceId, stateOwnerRowDigest: held.originalStateOwnerRowDigest,
+      sessionId: cut.run.sessionId, sourceCheckpointId: launch.preparation.sourceCheckpointId,
+      sourceWorkspaceStateRef: launch.preparation.sourceWorkspaceStateRef, repositoryIdentityDigest: baseSource.git.repositoryIdentityDigest });
+  }
+  assertWorkerPreparationCleanupContext(driver, context, launch.runId); return context;
+}
+
+/** Closed data from the genuine inspection, not an original producer or a
+ * successor execution/retirement token. */
+export function readWorkerPreparationCleanupTarget(driver: SqliteDriver, owner: StateOwnerContext,
+  context: WorkerPreparationCleanupContext) {
+  const held = cleanupContexts.get(context);
+  if (!held || held.owner !== owner) throw new TypeError('preparation cleanup inspection belongs to another physical owner');
+  assertWorkerPreparationCleanupContext(driver, context, held.launch.runId);
+  if (!held.cut) fail('preparation cleanup complete retained read has not joined');
+  return Object.freeze({ launch: held.launch, death: held.death, originalStateOwnerRowDigest: held.originalStateOwnerRowDigest,
+    cut: held.cut, generation: held.generation, identity: held.identity, originalController: held.originalController, recipe: held.recipe });
+}
 
 function preparing(connection: SqliteConnection | SqliteDriver, owner: StateOwnerContext, launchId: string): PreparingWorkerLaunch {
   assertActiveStateOwner(connection, owner);
@@ -67,6 +184,22 @@ function bindableRun(connection: SqliteConnection | SqliteDriver, launch: Prepar
       run.latestCheckpointId !== launch.preparation.sourceCheckpointId)
     fail('worker preparation no longer owns its original lease-free source Checkpoint');
   return run;
+}
+/** Fresh original-owner cut before each preparation authority increase. A
+ * regressed clock remains committed even though no native action is allowed. */
+export function assertWorkerPreparationRelease(driver: SqliteDriver, owner: StateOwnerContext, launchId: string): PreparingWorkerLaunch {
+  let result: PreparingWorkerLaunch | undefined;
+  driver.transaction(connection => {
+    const launch = preparing(connection, owner, launchId), run = bindableRun(connection, launch), now = sampleCanonicalNow();
+    if (advanceTimeFence(connection, owner.ownerEpoch, now) !== 'healthy') return;
+    if (run.cancelRequested || run.stopIntentRef || now >= run.deadlineAt || now >= launch.activationDeadlineAt)
+      fail('worker preparation cannot release after cancellation or its original deadline');
+    if (!launch.preparation.generation || !launch.preparation.controller || !launch.preparation.reservation)
+      fail('worker preparation release requires all original registered resource births');
+    result = launch;
+  });
+  if (!result) fail('worker preparation canonical time fence refused release');
+  return result;
 }
 
 // This is only a same-transaction SQL snapshot. It does not replace the full
@@ -198,7 +331,8 @@ export async function recordWorkerPreparationGeneration(driver: SqliteDriver, ar
 }
 
 export async function recordWorkerPreparationController(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
-  input: { launchId: string; birth: NativeControllerPreparationBirth; reservation: HeldWorkerReservation }): Promise<PreparingWorkerLaunch> {
+  input: { launchId: string; birth: NativeControllerPreparationBirth; reservation: HeldWorkerReservation;
+    workspaceBirth?: RunWorkspaceBirth }): Promise<PreparingWorkerLaunch> {
   let observed = readNativeControllerPreparationBirth(input.birth);
   const before = preparing(driver, owner, input.launchId);
   const borrowed = borrowWorkerReservationForExecution(input.reservation, before.launchId, before.spawnNonceDigest);
@@ -206,11 +340,23 @@ export async function recordWorkerPreparationController(driver: SqliteDriver, ar
   const birth: ControllerBirth = { schemaVersion: 1, format: 'cliq-controller-preparation-birth-v1',
     identity: observed.identity, birthDigest: observed.controllerBirthDigest };
   const artifact = await artifacts.publishCanonical(birth, birth.format);
+  const git = input.workspaceBirth && readRunWorkspacePreparingGit(owner.filesystem, input.workspaceBirth);
+  const gitArtifact = git ? await artifacts.describe(git.metadataRef, 'application/json', 'cliq-source-git-inspection-output-v1') : undefined;
+  if (git) {
+    const bytes = await artifacts.readBoundedBytes(git.metadataRef, git.metadata.byteLength);
+    if (!bytes.equals(git.metadata)) fail('worker preparation metadata differs from its original fully read Checkpoint');
+  }
   let result: PreparingWorkerLaunch | undefined;
   driver.transaction(connection => {
     const current = preparing(connection, owner, input.launchId);
     requireEqual(current, before, 'worker preparation controller registration');
     bindableRun(connection, current); input.reservation.assertHeld();
+    if (input.workspaceBirth) {
+      const original = readRunWorkspaceBirth(owner.filesystem, input.workspaceBirth);
+      if (original.runId !== current.runId || original.generationId !== current.preparation.generationId ||
+          original.sourceWorkspaceStateRef !== current.preparation.sourceWorkspaceStateRef ||
+          original.sourceCheckpointId !== current.preparation.sourceCheckpointId) fail('worker preparation Git input substitutes its original directory birth');
+    }
     observed = readNativeControllerPreparationBirth(input.birth);
     requireEqual(observed.identity, birth.identity, 'worker preparation original controller birth');
     if (!current.preparation.generation || current.preparation.controller || current.preparation.reservation ||
@@ -222,8 +368,10 @@ export async function recordWorkerPreparationController(driver: SqliteDriver, ar
     if (observed.observedAt > now || parseCanonicalTime(now) - parseCanonicalTime(observed.observedAt) > 5000)
       fail('worker preparation controller registration requires its fresh original native observation');
     insertArtifactMetadata(connection, artifact, now);
+    if (gitArtifact) insertArtifactMetadata(connection, gitArtifact, now);
     result = { ...current, preparation: { ...current.preparation,
-      controller: { birthIdentityRef: artifact.ref, birthIdentityDigest: birth.birthDigest },
+      controller: { birthIdentityRef: artifact.ref, birthIdentityDigest: birth.birthDigest,
+        ...(git ? { privateGitInputRef: git.metadataRef } : {}) },
       reservation: { ...input.reservation.identity } } };
     updateWorkerLaunch(connection, current, result);
   });
@@ -279,7 +427,8 @@ function controllerBirth(value: ControllerBirth): ControllerBirth {
 /** Retained birth data only. A live preparation must still belong to its
  * original active owner; owner loss never turns missing births into absence. */
 export async function validateWorkerPreparationHistory(driver: SqliteDriver, artifacts: ArtifactCatalog,
-  input: { run: Run; launches: WorkerLaunch[]; generations: WorkspaceGenerationStateV1[] }): Promise<void> {
+  input: { run: Run; launches: WorkerLaunch[]; generations: WorkspaceGenerationStateV1[] },
+  cleanupContext?: WorkerPreparationCleanupContext): Promise<void> {
   for (const generation of input.generations) {
     if (generation.phase !== 'quarantined') continue;
     // The producer commits both monotone transitions in one transaction. Only
@@ -301,9 +450,16 @@ export async function validateWorkerPreparationHistory(driver: SqliteDriver, art
     if (checkpoint.runId !== launch.runId || checkpoint.workspaceStateRef !== preparation.sourceWorkspaceStateRef ||
         checkpoint.basedOnRunRevision >= launch.plannedRunRevision || checkpoint.createdAt > launch.createdAt)
       fail('worker preparation substitutes its original ready Checkpoint');
-    if (launch.phase === 'preparing' && (owner.state !== 'active' || input.run.status !== 'queued' ||
-        input.run.activeWorkerLaunchId || input.run.latestCheckpointId !== preparation.sourceCheckpointId))
-      fail('incomplete worker preparation requires its original live owner, not reconstructed birth facts');
+    if (launch.phase === 'preparing') {
+      if (input.run.status !== 'queued' || input.run.activeWorkerLaunchId || input.run.latestCheckpointId !== preparation.sourceCheckpointId)
+        fail('incomplete worker preparation lost its original nonexecuting Run/Checkpoint');
+      if (owner.state !== 'active') {
+        if (!cleanupContext) fail('incomplete worker preparation requires its original live owner, not reconstructed birth facts');
+        assertWorkerPreparationCleanupContext(driver, cleanupContext, input.run.id);
+        const original = cleanupContexts.get(cleanupContext)!;
+        requireEqual(original.launch, launch, 'preparation read-only cleanup exact dead original');
+      }
+    }
     if (preparation.generation) {
       const identity = decodeWorkspaceGenerationIdentity(await readCanonicalArtifact(artifacts, preparation.generation.generationRef));
       const generation = input.generations.find(value => value.generationId === preparation.generationId);
@@ -311,7 +467,8 @@ export async function validateWorkerPreparationHistory(driver: SqliteDriver, art
           identity.identityDigest !== preparation.generation.generationIdentityDigest ||
           generation.generationRef !== preparation.generation.generationRef || generation.generationIdentityDigest !== identity.identityDigest ||
           identity.sourceCheckpointId !== preparation.sourceCheckpointId || identity.sourceWorkspaceStateRef !== preparation.sourceWorkspaceStateRef ||
-          identity.creationNonceDigest !== preparation.generationCreationNonceDigest || identity.createdAt < launch.createdAt)
+          identity.creationNonceDigest !== preparation.generationCreationNonceDigest || identity.createdAt < launch.createdAt ||
+          owner.state === 'terminal' && identity.createdAt > owner.releasedAt)
         fail('worker preparation generation provenance is incomplete or substituted');
       if (launch.phase === 'preparing' && generation.phase !== 'materializing' && generation.phase !== 'preactivated_readonly')
         fail('preparing worker cannot own an executable or already retired generation');
@@ -321,7 +478,26 @@ export async function validateWorkerPreparationHistory(driver: SqliteDriver, art
     if (preparation.controller) {
       const birth = controllerBirth(await readCanonicalArtifact(artifacts, preparation.controller.birthIdentityRef));
       if (!preparation.generation || birth.birthDigest !== preparation.controller.birthIdentityDigest ||
-          birth.identity.readyObservedAt < launch.createdAt) fail('worker preparation controller birth differs');
+          birth.identity.readyObservedAt < launch.createdAt || owner.state === 'terminal' && birth.identity.readyObservedAt > owner.releasedAt)
+        fail('worker preparation controller birth differs');
+      const state = decodeWorkspaceState(await readCanonicalArtifact(artifacts, preparation.sourceWorkspaceStateRef));
+      const base = decodeSourceManifest(await readCanonicalArtifact(artifacts, state.baseWorkspaceManifestRef));
+      if (preparation.controller.privateGitInputRef) {
+        if (!state.privateGitStateRef || !base.git) fail('worker preparation Git leaf has no original frozen Git Checkpoint');
+        const spec = decodeRunSpec(await readCanonicalArtifact(artifacts, input.run.specRef));
+        const profile = decodeSandboxProfile(await readCanonicalArtifact(artifacts, spec.sandboxProfileRef));
+        const data = await readPrivateGitData(artifacts, state.privateGitStateRef,
+          { repositoryIdentityDigest: base.git.repositoryIdentityDigest, resources: profile.resources });
+        const metadata = await artifacts.readBoundedBytes(preparation.controller.privateGitInputRef,
+          Math.min(profile.resources.maxInvocationOutputBytes, profile.resources.maxSingleFileBytes));
+        if (canonicalSha256(privateGitInspectionOutput(data)) !== preparation.controller.privateGitInputRef ||
+            canonicalSha256(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(metadata))) !== preparation.controller.privateGitInputRef)
+          fail('worker preparation Git leaf differs from its complete original CAS closure');
+      } else if (state.privateGitStateRef) {
+        const manifest = await readCanonicalArtifact<{ objectClosureRef: string }>(artifacts, state.privateGitStateRef);
+        const closure = await readCanonicalArtifact<{ packs: unknown[] }>(artifacts, manifest.objectClosureRef);
+        if (!Array.isArray(closure.packs) || closure.packs.length) fail('nonempty Git preparation lost its original input metadata registration');
+      }
       if (launch.phase !== 'preparing' && launch.retirementKind !== 'preparation') {
         const { decodeWorkerContainmentPlan } = await import('./execution-closure.js');
         const plan = decodeWorkerContainmentPlan(await readCanonicalArtifact(artifacts, launch.containmentPlanRef));
@@ -393,8 +569,106 @@ export async function retireWorkerPreparation(driver: SqliteDriver, artifacts: A
       reservation = readWorkerReservationRetirement(owner.filesystem, input.reservation, launch.launchId, launch.spawnNonceDigest);
       requireEqual(reservation, launch.preparation.reservation, 'preparation retirement exact reservation birth');
     } else if (input.reservation) fail('preparation retirement reservation has no registered actual birth');
-    return { workspace, controller, reservation };
+    return { kind: 'original_owner' as const, workspace, controller, reservation };
   };
+  return publishPreparationRetirement(driver, artifacts, owner, launch, run, generation, identity, readResources);
+}
+
+/** Own one powerless successor cleanup. The context was created only after its
+ * complete original graph joined; all physical results stay genuine and the
+ * shared publisher below remains the sole terminal transaction. */
+export async function retireRetainedWorkerPreparation(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
+  context: WorkerPreparationCleanupContext, controller: LinuxWorkerController,
+  brokerQuiescence: InstalledBrokerQuiescence, signal?: AbortSignal): Promise<RetiredWorkerPreparation> {
+  assertLinuxWorkerController(controller);
+  let reservation: HeldWorkerReservation | undefined, input: HeldRetainedPreparingGitInput | undefined;
+  let primary: { error: unknown } | undefined;
+  try {
+    const target = readWorkerPreparationCleanupTarget(driver, owner, context), held = cleanupContexts.get(context)!;
+    const { launch, generation, identity, originalController, recipe } = target;
+    if (held.retirementStarted) fail('preparation cleanup inspection cannot start another physical attempt');
+    held.retirementStarted = true;
+    if (!generation || !identity || !originalController || !recipe || identity.locator.kind !== 'linux_directory' ||
+        !launch.preparation.reservation || !launch.preparation.controller?.privateGitInputRef)
+      fail('preparation cleanup still lacks complete original generation/controller/reservation/input births');
+    requireEqual(bindableRun(driver, launch), target.cut.run, 'preparation cleanup complete inspected Run');
+    const checker = readNativeControllerPreparationBirth(controller.preparationBirth);
+    const checkerBirth: ControllerBirth = { schemaVersion: 1, format: 'cliq-controller-preparation-birth-v1',
+      identity: checker.identity, birthDigest: checker.controllerBirthDigest };
+    const process = decodePlatformProcessIdentity(await readCanonicalArtifact(artifacts, target.death.priorOwner.processIdentityRef));
+    if (process.platform !== 'linux' || process.identityDigest !== target.death.priorOwner.processIdentityDigest)
+      fail('preparation cleanup has no exact original Linux Supervisor identity');
+    assertWorkerPreparationCleanupContext(driver, context, launch.runId);
+    assertInstalledBrokerQuiescence(brokerQuiescence, driver, owner, launch.runId);
+    reservation = owner.filesystem.openWorkerReservation(launch.launchId, launch.spawnNonceDigest, launch.preparation.reservation);
+    input = openRetainedPreparingGitInput(owner.filesystem, reservation, { runId: launch.runId,
+      generationId: launch.preparation.generationId, launchId: launch.launchId, spawnNonceDigest: launch.spawnNonceDigest,
+      activationNonceDigest: launch.activationNonceDigest, generationCreationNonceDigest: launch.preparation.generationCreationNonceDigest,
+      generationRef: generation.generationRef, inputIntentRef: launch.preparation.controller.privateGitInputRef },
+    { deviceId: identity.locator.deviceId, fileId: identity.locator.directoryFileId, ownerUid: identity.locator.ownerUid },
+    { pid: process.pid, processStartToken: process.processStartToken });
+    const receipt = await controller.cleanupRetainedPreparingGit({ input, recipe, signal });
+    // The genuine wrapper joins the current checker before returning. Its
+    // input/reservation readers must also actually close before tree retirement.
+    input.close(); reservation.close();
+    const workspace = observeRetainedPreparingGeneration(owner.filesystem, identity, generation.rowVersion, receipt);
+    const observed = readNativeRetainedPreparingGitRetirement(receipt);
+    const nativeRetirement: PreparingNativeRetirementData = immutableSnapshot({ observation: observed.observation,
+      input: observed.input.identity, recipe: observed.recipe, checker: observed.checker, checkerBirth });
+    const readResources = (connection: SqliteConnection | SqliteDriver = driver): CurrentPreparingRetirementResources => {
+      assertActiveStateOwner(connection, owner); assertWorkerPreparationCleanupContext(driver, context, launch.runId);
+      assertInstalledBrokerQuiescence(brokerQuiescence, driver, owner, launch.runId);
+      const current = readNativeRetainedPreparingGitRetirement(receipt);
+      assertRetainedPreparingGitInputOwner(owner.filesystem, current.input);
+      if (current.input !== input) fail('preparation cleanup substitutes its original closed input');
+      requireEqual({ observation: current.observation, input: current.input.identity, recipe: current.recipe,
+        checker: current.checker, checkerBirth }, nativeRetirement, 'preparation cleanup original genuine native result');
+      requireEqual(current.recipe, recipe, 'preparation cleanup original closed recipe');
+      requireEqual(current.input.identity.reservation, launch.preparation.reservation, 'preparation cleanup original reservation input');
+      if (current.observation.origin !== 'original_birth_current_checker' || current.observation.completed !== 0 ||
+          ![0, 2, 4, 5, 6, 7, 8, 9, 10].includes(current.observation.lastBirthPhase) ||
+          current.observation.originalControllerPid !== originalController.identity.pid ||
+          current.observation.originalControllerStartToken !== originalController.identity.processStartToken ||
+          current.observation.originalSupervisorPid !== process.pid || current.observation.originalSupervisorStartToken !== process.processStartToken ||
+          current.checker.controllerBirthDigest !== checkerBirth.birthDigest || current.checker.pid !== checkerBirth.identity.pid ||
+          current.checker.processStartToken !== checkerBirth.identity.processStartToken || current.checker.joined !== true)
+        fail('preparation cleanup has no whole original prefix and real current-checker join');
+      const reservationRetirement = readWorkerReservationRetirement(owner.filesystem, reservation!, launch.launchId, launch.spawnNonceDigest);
+      requireEqual(reservationRetirement, launch.preparation.reservation, 'preparation cleanup actual reservation reader join');
+      const closedWorkspace = readRetainedPreparingGenerationRetirement(owner.filesystem, workspace, receipt);
+      if (closedWorkspace.generationRef !== generation.generationRef || closedWorkspace.generationIdentityDigest !== generation.generationIdentityDigest ||
+          closedWorkspace.sourceRowVersion !== generation.rowVersion) fail('preparation cleanup substitutes its actual registered directory');
+      return { kind: 'current_checker', workspace: closedWorkspace,
+        controller: { observedAt: new Date(current.observation.observedAtMs).toISOString() }, reservation: reservationRetirement, nativeRetirement,
+        ownerDeathAcquisitionEvidenceRef: target.death.acquisitionEvidenceRef,
+        ownerDeathAcquisitionEvidenceDigest: target.death.acquisitionEvidenceDigest };
+    };
+    return await publishPreparationRetirement(driver, artifacts, owner, launch, target.cut.run, generation, identity, readResources);
+  } catch (error) { primary = { error }; throw error; }
+  finally {
+    const failures: unknown[] = [];
+    // Construction may have claimed its input before a scope escaped. Preserve
+    // the same cancel/whole-controller join, then consume only original FDs.
+    try { await controller.close(); } catch (error) { failures.push(error); }
+    try { input?.close(); } catch (error) { failures.push(error); }
+    try { reservation?.close(); } catch (error) { failures.push(error); }
+    if (failures.length) throw new ResourceRetirementError('preparation current checker resources did not completely join',
+      new AggregateError([...(primary ? [primary.error] : []), ...failures]));
+  }
+}
+
+type OriginalPreparingRetirementResources = { kind: 'original_owner'; workspace: ReturnType<typeof readRunWorkspaceBirthRetirement>;
+  controller: ReturnType<typeof readNativeControllerPreparationRetirement> | undefined; reservation: HeldWorkerReservation['identity'] | undefined };
+type CurrentPreparingRetirementResources = { kind: 'current_checker'; workspace: RetainedPreparingGenerationRetirementData;
+  controller: { observedAt: string }; reservation: HeldWorkerReservation['identity']; nativeRetirement: PreparingNativeRetirementData;
+  ownerDeathAcquisitionEvidenceRef: string; ownerDeathAcquisitionEvidenceDigest: string };
+type PreparingRetirementResources = OriginalPreparingRetirementResources | CurrentPreparingRetirementResources;
+/** One physical quarantine and terminal transaction for every preparation
+ * inspector. Resource readers retain their genuine original native brands. */
+async function publishPreparationRetirement(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
+  launch: PreparingWorkerLaunch, run: Run, generation: PreparationGeneration,
+  identity: ReturnType<typeof decodeWorkspaceGenerationIdentity>,
+  readResources: (connection?: SqliteConnection | SqliteDriver) => PreparingRetirementResources): Promise<RetiredWorkerPreparation> {
   readResources();
   const move = owner.filesystem.quarantineGeneration(identity, generation.rowVersion);
   const resources = readResources(), observedAt = sampleCanonicalNow();
@@ -404,11 +678,17 @@ export async function retireWorkerPreparation(driver: SqliteDriver, artifacts: A
   }
   const inspector = supervisorInspectorIdentity(assertActiveStateOwner(driver, owner));
   const inspectorArtifact = await artifacts.publishCanonical(inspector, inspector.format);
-  const evidence: BornPreparationRetirement = { schemaVersion: 1, format: 'cliq-worker-preparation-retirement-evidence-v1', kind: 'born',
-    launch, sourceGeneration: generation, workspaceRetirementObservedAt: resources.workspace.observedAt,
-    ...(resources.controller ? { controllerRetirement: resources.controller } : {}),
-    ...(resources.reservation ? { reservationRetirement: resources.reservation } : {}), quarantineMove: move,
-    inspectorIdentityRef: inspectorArtifact.ref, inspectorIdentityDigest: inspector.identityDigest, observedAt, evidenceDigest: '' };
+  const baseEvidence = { schemaVersion: 1 as const, format: 'cliq-worker-preparation-retirement-evidence-v1' as const,
+    launch, sourceGeneration: generation, quarantineMove: move, inspectorIdentityRef: inspectorArtifact.ref,
+    inspectorIdentityDigest: inspector.identityDigest, observedAt, evidenceDigest: '' };
+  const evidence: BornPreparationRetirement | CurrentCheckerPreparationRetirement = resources.kind === 'original_owner'
+    ? { ...baseEvidence, kind: 'born', workspaceRetirementObservedAt: resources.workspace.observedAt,
+      ...(resources.controller ? { controllerRetirement: resources.controller } : {}),
+      ...(resources.reservation ? { reservationRetirement: resources.reservation } : {}) }
+    : { ...baseEvidence, kind: 'born_current_checker', workspaceRetirement: resources.workspace,
+      nativeRetirement: resources.nativeRetirement, reservationRetirement: resources.reservation,
+      ownerDeathAcquisitionEvidenceRef: resources.ownerDeathAcquisitionEvidenceRef,
+      ownerDeathAcquisitionEvidenceDigest: resources.ownerDeathAcquisitionEvidenceDigest };
   const closedEvidence = { ...evidence, evidenceDigest: digestOmitting(evidence, 'evidenceDigest') };
   const proof = await artifacts.publishCanonical(closedEvidence, evidence.format);
   const quarantine: PreparationQuarantine = { schemaVersion: 1, format: 'cliq-workspace-generation-quarantine-evidence-v1',
@@ -429,12 +709,14 @@ export async function retireWorkerPreparation(driver: SqliteDriver, artifacts: A
   const retirementArtifact = await artifacts.publishCanonical(retirement, retirement.format);
   let result: RetiredWorkerPreparation | undefined;
   driver.transaction(connection => {
-    requireEqual(preparing(connection, owner, launch.launchId), launch, 'preparation retirement original lifecycle');
+    const fresh = readResources(connection);
+    requireEqual(fresh.kind === 'original_owner' ? preparing(connection, owner, launch.launchId) : readRequiredWorkerLaunch(connection, launch.launchId),
+      launch, 'preparation retirement original lifecycle');
     requireEqual(bindableRun(connection, launch), run, 'preparation retirement current Run');
     requireEqual(readRequiredWorkspaceGeneration(connection, generation.generationId), generation, 'preparation retirement original generation');
-    const fresh = readResources(connection), now = sampleCanonicalNow();
     const moved = owner.filesystem.quarantineGeneration(identity, generation.rowVersion);
     requireEqual(moved, move, 'preparation retirement exact native quarantine');
+    const now = sampleCanonicalNow();
     if (advanceTimeFence(connection, owner.ownerEpoch, now) !== 'healthy') return;
     if (now < observedAt || parseCanonicalTime(now) - parseCanonicalTime(observedAt) > 5000 ||
         fresh.workspace.observedAt > now || fresh.controller && fresh.controller.observedAt > now)
@@ -537,11 +819,13 @@ export async function validateWorkerPreparationRetirement(driver: SqliteDriver, 
   launch: RetiredWorkerPreparation, run: Run, generations: WorkspaceGenerationStateV1[]): Promise<PreparationRetirement> {
   const value = await readCanonicalArtifact<PreparationRetirement>(artifacts, launch.retirementEvidenceRef);
   if (value.kind === 'unallocated') return validateUnallocatedPreparation(driver, artifacts, launch, run, generations, value);
-  const proof = value;
-  const fields = ['schemaVersion', 'format', 'kind', 'launch', 'sourceGeneration', 'workspaceRetirementObservedAt', 'quarantineMove',
+  const proof = value, currentChecker = value.kind === 'born_current_checker';
+  const fields = ['schemaVersion', 'format', 'kind', 'launch', 'sourceGeneration', 'quarantineMove',
     'inspectorIdentityRef', 'inspectorIdentityDigest', 'observedAt', 'evidenceDigest',
-    ...(launch.preparation.controller ? ['controllerRetirement'] : []), ...(launch.preparation.reservation ? ['reservationRetirement'] : [])];
-  if (!exactKeys(proof, fields) || proof.schemaVersion !== 1 || proof.kind !== 'born' || proof.format !== 'cliq-worker-preparation-retirement-evidence-v1' ||
+    ...(currentChecker ? ['workspaceRetirement', 'nativeRetirement', 'reservationRetirement', 'ownerDeathAcquisitionEvidenceRef', 'ownerDeathAcquisitionEvidenceDigest']
+      : ['workspaceRetirementObservedAt', ...(launch.preparation.controller ? ['controllerRetirement'] : []),
+        ...(launch.preparation.reservation ? ['reservationRetirement'] : [])])];
+  if (!exactKeys(proof, fields) || proof.schemaVersion !== 1 || (!currentChecker && proof.kind !== 'born') || proof.format !== 'cliq-worker-preparation-retirement-evidence-v1' ||
       proof.evidenceDigest !== digestOmitting(proof, 'evidenceDigest')) fail('preparation retirement proof is not a complete closed original');
   const original = decodeWorkerLaunch(proof.launch);
   if (original.phase !== 'preparing') fail('preparation retirement substitutes an executable worker phase');
@@ -557,13 +841,18 @@ export async function validateWorkerPreparationRetirement(driver: SqliteDriver, 
       generation.rowVersion !== source.rowVersion + 2 || generation.updatedAt !== retiredAt || proof.observedAt > retiredAt ||
       parseCanonicalTime(retiredAt) - parseCanonicalTime(proof.observedAt) > 5000)
     fail('preparation retirement substitutes its exact generation or committed cut');
-  const owner = readStateOwner(driver, launch.preparation.stateOwnerEpoch);
-  if (!owner || owner.supervisorInstanceId !== launch.supervisorInstanceId || owner.acquiredAt > proof.observedAt ||
-      owner.state === 'terminal' && owner.releasedAt < retiredAt) fail('preparation retirement has no owning original StateOwner');
+  const originalOwner = readStateOwner(driver, launch.preparation.stateOwnerEpoch);
+  if (!originalOwner || originalOwner.supervisorInstanceId !== launch.supervisorInstanceId)
+    fail('preparation retirement has no original StateOwner');
+  const inspectorHeader = currentChecker ? await readCanonicalArtifact<{ stateOwnerEpoch: number }>(artifacts, proof.inspectorIdentityRef) : undefined;
+  const owner = currentChecker ? readStateOwner(driver, inspectorHeader!.stateOwnerEpoch) : originalOwner;
+  if (!owner || owner.acquiredAt > proof.observedAt || owner.state === 'terminal' && owner.releasedAt < retiredAt ||
+      currentChecker && owner.ownerEpoch <= originalOwner.ownerEpoch) fail('preparation retirement has no owning inspector lifetime');
   const spec = decodeRunSpec(await readCanonicalArtifact(artifacts, run.specRef));
   const assembly = await readCanonicalArtifact<RunAssemblyV1>(artifacts, spec.assemblyRef);
   const inspector = await readSupervisorInspector(artifacts, owner, assembly, proof);
-  if (inspector.stateOwnerEpoch !== launch.preparation.stateOwnerEpoch) fail('preparation retirement substitutes its original inspector');
+  if (inspector.stateOwnerEpoch !== owner.ownerEpoch || !currentChecker && inspector.stateOwnerEpoch !== launch.preparation.stateOwnerEpoch)
+    fail('preparation retirement substitutes its actual inspector');
   const identity = decodeWorkspaceGenerationIdentity(await readCanonicalArtifact(artifacts, source.generationRef));
   if (identity.locator.kind !== 'linux_directory') fail('preparation retirement requires its implemented Linux directory source');
   if (identity.generationId !== original.preparation.generationId || identity.runId !== original.runId ||
@@ -580,11 +869,14 @@ export async function validateWorkerPreparationRetirement(driver: SqliteDriver, 
     `quarantine/workspace-generations/${identityHash(source.generationId, String(source.rowVersion))}`,
     quarantineDeviceId: identity.locator.deviceId, quarantineFileId: identity.locator.directoryFileId,
     originalLocatorAbsent: true, renameNoReplace: true, directoryFsyncComplete: true }, 'preparation retirement exact quarantine anchor');
-  for (const observed of [proof.workspaceRetirementObservedAt, ...(proof.controllerRetirement ? [proof.controllerRetirement.observedAt] : [])]) {
+  const workspaceObservedAt = proof.kind === 'born_current_checker' ? proof.workspaceRetirement.observedAt : proof.workspaceRetirementObservedAt;
+  const controllerObservedAt = proof.kind === 'born_current_checker' ? new Date(proof.nativeRetirement.observation.observedAtMs).toISOString() : proof.controllerRetirement?.observedAt;
+  for (const observed of [workspaceObservedAt, ...(controllerObservedAt ? [controllerObservedAt] : [])]) {
     if (observed < original.createdAt || observed > proof.observedAt || parseCanonicalTime(proof.observedAt) - parseCanonicalTime(observed) > 5000)
       fail('preparation retirement retained native observations are not causal and fresh');
   }
-  if (original.preparation.controller) {
+  if (proof.kind === 'born_current_checker') await validateCurrentPreparingRetirement(driver, artifacts, proof, original, identity, owner, spec);
+  else if (original.preparation.controller) {
     const birth = controllerBirth(await readCanonicalArtifact(artifacts, original.preparation.controller.birthIdentityRef));
     const native = proof.controllerRetirement!;
     requireEqual(native, { pid: birth.identity.pid, processStartToken: birth.identity.processStartToken,
@@ -627,4 +919,70 @@ export async function validateWorkerPreparationRetirement(driver: SqliteDriver, 
   requireEqual(quarantine, expected, 'preparation retirement exact closed quarantine');
   if (quarantine.evidenceDigest !== digestOmitting(quarantine, 'evidenceDigest')) fail('preparation quarantine digest differs');
   return immutableSnapshot(proof);
+}
+
+/** Independent retained-data checks. These data never mint a native receipt or
+ * restore an old input, nonce, worker binding or generation seal. */
+async function validateCurrentPreparingRetirement(driver: SqliteDriver, artifacts: ArtifactCatalog,
+  proof: CurrentCheckerPreparationRetirement, original: PreparingWorkerLaunch,
+  identity: ReturnType<typeof decodeWorkspaceGenerationIdentity>, inspectorOwner: NonNullable<ReturnType<typeof readStateOwner>>,
+  spec: ReturnType<typeof decodeRunSpec>): Promise<void> {
+  const preparation = original.preparation;
+  if (!preparation.generation || !preparation.controller?.privateGitInputRef || !preparation.reservation || identity.locator.kind !== 'linux_directory')
+    fail('current preparation checker lost its complete original registered births');
+  const death = await readStateOwnerDeath(artifacts, driver, { supervisorInstanceId: original.supervisorInstanceId, ownedAt: original.createdAt });
+  if (death.priorOwner.ownerEpoch !== preparation.stateOwnerEpoch || inspectorOwner.ownerEpoch < death.successorOwner.ownerEpoch ||
+      proof.ownerDeathAcquisitionEvidenceRef !== death.acquisitionEvidenceRef || proof.ownerDeathAcquisitionEvidenceDigest !== death.acquisitionEvidenceDigest)
+    fail('current preparation checker substitutes its original owner death acquisition');
+  const process = decodePlatformProcessIdentity(await readCanonicalArtifact(artifacts, death.priorOwner.processIdentityRef));
+  if (process.platform !== 'linux' || process.identityDigest !== death.priorOwner.processIdentityDigest || identity.createdAt > death.priorOwner.releasedAt)
+    fail('current preparation checker has no original Linux process and causal directory birth');
+  const oldBirth = controllerBirth(await readCanonicalArtifact(artifacts, preparation.controller.birthIdentityRef));
+  if (oldBirth.birthDigest !== preparation.controller.birthIdentityDigest || oldBirth.identity.readyObservedAt > death.priorOwner.releasedAt)
+    fail('current preparation checker substitutes its original controller birth');
+  const native = proof.nativeRetirement;
+  if (!exactKeys(native, ['observation', 'input', 'recipe', 'checker', 'checkerBirth'])) fail('current preparation native observation is not closed');
+  const born = controllerBirth(native.checkerBirth), observed = native.observation;
+  if (!Number.isSafeInteger(observed.observedAtMs) || observed.observedAtMs < 1 ||
+      ![0, 2, 4, 5, 6, 7, 8, 9, 10].includes(observed.lastBirthPhase)) fail('current preparation checker has a missing/half original prefix');
+  const observedAt = new Date(observed.observedAtMs).toISOString(); parseCanonicalTime(observedAt);
+  requireEqual(observed, { origin: 'original_birth_current_checker', observedAtMs: observed.observedAtMs, completed: 0,
+    lastBirthPhase: observed.lastBirthPhase, runId: original.runId, generationId: preparation.generationId,
+    launchId: original.launchId, spawnNonceDigest: original.spawnNonceDigest, activationNonceDigest: original.activationNonceDigest,
+    generationCreationNonceDigest: preparation.generationCreationNonceDigest, generationRef: preparation.generation.generationRef,
+    inputIntentRef: preparation.controller.privateGitInputRef, originalControllerPid: oldBirth.identity.pid,
+    originalControllerStartToken: oldBirth.identity.processStartToken, originalSupervisorPid: process.pid,
+    originalSupervisorStartToken: process.processStartToken }, 'current preparation checker complete original nonproductive observation');
+  requireEqual(native.input, { runId: original.runId, generationId: preparation.generationId, launchId: original.launchId,
+    spawnNonceDigest: original.spawnNonceDigest, activationNonceDigest: original.activationNonceDigest,
+    generationCreationNonceDigest: preparation.generationCreationNonceDigest, generationRef: preparation.generation.generationRef,
+    inputIntentRef: preparation.controller.privateGitInputRef, reservation: preparation.reservation,
+    generation: { deviceId: identity.locator.deviceId, fileId: identity.locator.directoryFileId, ownerUid: identity.locator.ownerUid },
+    originalSupervisorPid: process.pid, originalSupervisorStartToken: process.processStartToken }, 'current preparation checker exact original input identity');
+  requireEqual(native.checker, { pid: born.identity.pid, processStartToken: born.identity.processStartToken,
+    controllerBirthDigest: born.birthDigest, joined: true }, 'current preparation checker actual joined controller birth');
+  if (born.identity.readyObservedAt < inspectorOwner.acquiredAt || born.identity.readyObservedAt > observedAt ||
+      observedAt < death.priorOwner.releasedAt || observedAt < inspectorOwner.acquiredAt || observedAt > proof.workspaceRetirement.observedAt ||
+      born.identity.pid === oldBirth.identity.pid && born.identity.processStartToken === oldBirth.identity.processStartToken ||
+      born.identity.pid === process.pid && born.identity.processStartToken === process.processStartToken)
+    fail('current preparation checker substitutes or adopts an earlier process lifetime');
+  const { releasedAt: _released, terminalReason: _reason, transitionEvidenceRef: _transition,
+    transitionEvidenceDigest: _transitionDigest, ...base } = death.priorOwner;
+  const active = { ...base, state: 'active' as const, rowVersion: 1 as const, rowDigest: '' };
+  active.rowDigest = digestOmitting(active, 'rowDigest'); decodeStateOwnerRecord(active);
+  const profile = decodeSandboxProfile(await readCanonicalArtifact(artifacts, spec.sandboxProfileRef));
+  const state = decodeWorkspaceState(await readCanonicalArtifact(artifacts, preparation.sourceWorkspaceStateRef));
+  const source = decodeSourceManifest(await readCanonicalArtifact(artifacts, state.baseWorkspaceManifestRef));
+  if (!source.git || !state.privateGitStateRef) fail('current preparation checker lost its original complete Git Checkpoint');
+  requireEqual(native.recipe, { ...profile.resources, stateOwnerEpoch: preparation.stateOwnerEpoch,
+    supervisorInstanceId: original.supervisorInstanceId, stateOwnerRowDigest: active.rowDigest, sessionId: readRun(driver, original.runId).sessionId, sourceCheckpointId: preparation.sourceCheckpointId,
+    sourceWorkspaceStateRef: preparation.sourceWorkspaceStateRef, repositoryIdentityDigest: source.git.repositoryIdentityDigest },
+  'current preparation checker complete original fixed recipe');
+  const workspace = proof.workspaceRetirement;
+  requireEqual(workspace, { generationRef: proof.sourceGeneration.generationRef, generationIdentityDigest: identity.identityDigest,
+    runId: original.runId, generationId: preparation.generationId, sourceRowVersion: proof.sourceGeneration.rowVersion,
+    directoryIdentity: { deviceId: identity.locator.deviceId, fileId: identity.locator.directoryFileId, ownerUid: identity.locator.ownerUid },
+    observedState: { kind: 'unverified_preparation' }, observedAt: workspace.observedAt }, 'current preparation checker actual closed original directory');
+  if (workspace.observedAt < inspectorOwner.acquiredAt) fail('current preparation directory observation predates its actual inspector');
+  requireEqual(proof.reservationRetirement, preparation.reservation, 'current preparation checker complete original reservation join');
 }

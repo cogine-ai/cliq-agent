@@ -13,7 +13,79 @@ Linux execution/restart and cancellation foundations are real, but a final
 model turn still stops at `candidate_required`. No work package or complete I1
 is declared finished by the 32 passing checks.
 
-Latest completed exact-head result (2026-10-25): `bcab05e`
+Latest completed exact-head result (2026-10-25): `b2b3215`
+[run 478](https://github.com/cogine-ai/cliq-agent/actions/runs/40230975104)
+has sixteen successful and six failed jobs; all four TypeScript jobs pass.
+The complete collector retains 105 original reports / 525,316 bytes across
+23 categories, with no missing, incomplete or rejected report. All 21 cleanup
+reports have zero errors and all 21 runner-baseline pairs are byte-identical.
+The original collector, poller, wrapper and scoped awake guard actually join.
+Final capture SHA-256:
+`88ad585d715703f9ca01b0b2b8e886ac74f335af4512825fa0be8aa84e6f1db9`;
+independent full-schema/integrity closeout SHA-256:
+`451f3a4f8af796c30b0b922ec8067189c157cbf0d2772cc902c2df2c8f9d9d2b`.
+
+The normal signed Run and schema3 JSONL/RPC campaign passes. Normal Delivery
+passes its three sources / six model requests and proceeds beyond the old
+replacement-unit comparison: the real third owner is active, the original
+epoch is superseded, all three owner links and the same keeper pass, and the
+cleanup observer joins. Its successor's first persistent client then reports
+the fixed `authentication` failure marker. The current marker does not retain
+the already parsed authentication observations, so its precise failing stage
+is not established. A later service-stop assertion is not the original cause.
+The new closed diagnostic retains those existing observations and projects
+the two already observed unit-stop results; it adds no command or authority.
+
+The original-stop and late-result owned-storage campaigns pass READY but time
+out on their first source request in `submit_final_admission`, before any
+target physical cut. The delayed-storage campaign instead misses READY at
+5,002 ms. None is qualified. The next candidate groups two fixed admission
+quartets through the approved four-stage publication contract and removes
+three redundant reads immediately repeated by a complete `describe` in the
+same read cut. Full byte checks, original credential/material validation,
+sole admission transaction and all deadlines remain unchanged; actual Linux
+latency improvement is not yet verified. The verifier still exhausts its
+original cumulative 4,096 independent-stream limit before completing coverage.
+
+The user-manager diagnostic fails while reading a process's cgroup namespace
+with `EACCES`; that snapshot does not establish its process state. A separate
+real Linux regression reproduces namespace `EACCES` for both live private
+processes and unreaped private zombies. The corrected probe preserves a
+same-identity zombie as present with unavailable namespace information, while
+live-process failures still throw; absence requires a genuinely absent
+original process locator. The original systemd campaign must pass independently.
+
+The combined candidate now includes ordinary Git preparation and cleanup,
+Session fork/compact/list/handoff/resume, fixed Git-index observation and the
+preparing successor's cleanup-only lifecycle. Their focused regressions do not
+qualify the new installed Git/Session branches or physical successor cuts.
+Complete I1–I4, the remaining installed tools and ecosystem, real-provider,
+macOS, reboot, scale and default CLI/TUI Kernel Cut obligations remain open.
+No complete work package or release is declared finished; no PR is opened.
+
+The first combined local run (tree
+`5497d67a026108449639817efd189f7f74bc47e2`) builds and executes all 3,010
+source tests: 3,006 pass, three existing tests skip, and one stale native-error
+assertion fails. A real descriptor retirement failure correctly stays sticky;
+the test now requires its exact resource-retirement error code instead of an
+ordinary identity/closed message. A separate 382-test script preflight finds
+three stale boundary/workflow expectations; their correction retains the
+original phase ordering and workflow fingerprint, allowing only the exact two
+new regression commands. Missing, repeated or commented commands still fail.
+The failed outputs remain retained; this is not a passing combined gate.
+
+A follow-up actual schema-only Store experiment creates and closes v6, records
+the genuine rejection by the uncorrected v7 reader, then opens/closes the same
+database using the corrected v7 reader. Its original v6 genesis bytes remain
+unchanged. Known historical DDL, version and empty-database identities are now
+bound to the first owner's original schema runtime. Self-consistent birth
+substitution is separately rejected for schema-only and signed runtime sources.
+Signed historical births without an exact original signed schema source remain
+unsupported; this component experiment does not qualify signed runtime upgrade,
+installed Linux upgrade, activation or rollback. The next complete local gate
+and real Linux campaigns remain required before submission.
+
+Previous completed exact-head result (2026-10-25): `bcab05e`
 [run 477](https://github.com/cogine-ai/cliq-agent/actions/runs/40216567031)
 has seventeen successful and five failed jobs; all four TypeScript jobs pass.
 The complete collector retains 105 original reports / 522,055 bytes across
@@ -264,6 +336,36 @@ paid model experiment, public release, final default switch or PR merge is
 authorized by an implementation status label.
 
 ## Current implementation boundary (2026-10-19)
+
+The subsequent ordinary-Git implementation connects the original source
+inspection owner, retained private Git graph, and the same preparing
+WorkerLaunch/reservation to a fresh signed CAS-only trusted-Git scope before
+generation completion. It also connects Git candidate/result, A admission,
+B/S/A/M planning and publication readers. Classification always uses the
+original `SourceProjectionSpec.classificationIndexRef` and complete frozen
+ignore-rule bytes; A and private metadata indices do not redefine it.
+Publication requires the original approval/claim plus a fixed native complete
+`.git/index` read and actual close/join, followed by canonical equality to A.
+Its explicit absence branch accepts only A's exact verified empty v2 index,
+and never claims an old file descriptor or an unlink that did not occur.
+
+The existing installed verifier journey now includes an ordinary Git Run.
+The existing Delivery journey includes two independent Git sources covering
+publication/no-op and a true A-only merge, full retained private/index data checks, unchanged
+Git/ignored inode and byte assertions, authenticated replay, reconnect and
+actual Supervisor restart. Five source Runs require exactly ten controlled
+model posts; Delivery itself still requires none. These are executable
+development consumers, not successful Linux results. The same original
+90-second terminal, 30-second request/restart, five-second readiness/freshness
+and two-second shutdown limits remain. The combined native/TS installation
+and successor preparation cleanup must pass real Linux validation before
+any corresponding qualification is claimed. Exact unexecuted crash cuts,
+cross-filesystem publication, real-provider, macOS and release/default-cutover
+qualification remain independently unverified.
+The initial diagnostic-only `ordinaryGitFixtureProfile` selects an exact
+closed evidence shape even when an early case fails. It cannot authorize a
+Run or replace any physical proof; cumulative secret scanning retains its
+original 4,096-stream, 512 MiB and 60-second limits for every independent cell.
 
 The StateStore path derives the exact non-Git candidate from its original
 sealed worker and supports an explicitly consented, empty-verifier
@@ -2647,3 +2749,28 @@ two storage campaigns pass READY but miss the initial 30-second request.
 The cumulative verifier secret scan is still incomplete at 4,096 streams.
 No required cut, complete I1/I2, provider or release qualification is inferred
 from these failures or the new local regressions. All original limits remain.
+
+### Retaining the actual successor authentication failure, 2026-10-26
+
+Run `40230975104`, source `b2b32153e684cf64c66a9396d7b83775e05c54c1`,
+completed the original three normal Delivery source cases and six controlled
+HTTPS requests. Its cleanup crash observer joined after confirming the original
+receipt was uncommitted and cleanup progress durable. The successor's first
+client then emitted the fixed authentication-failure marker. This was neither a
+READY nor a request deadline. The report retained only the driver stage; its
+secondary stop assertion retained neither the unit role nor the actual manager
+values. Neither fact establishes the underlying refusal or successful recovery.
+
+Qualification diagnosis now preserves the already scanned, closed seven-phase
+authentication prefix on a driver error when nonempty, with the existing
+bounded work/process counters and immutable copies. Empty prefixes retain the
+old shape. After the original two manager `show` results and before the original
+stop assertions, one optional `unitStopObservation` records fixed supervisor and
+keeper roles, finite states/results, bounded exit code/status and boolean PID/
+invocation relationships. Missing or malformed projection produces only the
+fixed unavailable variant. It performs no manager operation, wait or retry and
+copies no raw message, path, unit name, process id or credential. The original
+assertions, authentication, connection behavior, READY, restart and stop bounds
+remain unchanged; a diagnostic record is not physical join or qualification.
+The corresponding strict evidence consumer must accept only these additive
+closed variants while preserving every original report and secret-scan bound.

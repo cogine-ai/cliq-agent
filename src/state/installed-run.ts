@@ -6,9 +6,9 @@ import { canonicalJsonBytes, canonicalSha256, normalizeCanonicalText } from '../
 import type { NormalizedRunSubmitRequest } from '../kernel/control-submit.js';
 import { decodeEndpointCredentialGrantBinding, decodeEndpointRegistration,
   type EndpointCredentialGrantBinding, type EndpointRegistrationV1 } from '../kernel/credential-authority.js';
-import type { SourceInspectionAttemptV1 } from '../kernel/execution.js';
+import type { SandboxResourceSpec, SourceInspectionAttemptV1, SourceInspectionTarget } from '../kernel/execution.js';
 import { addCanonicalDuration, assertArtifactRef, digestOmitting, normalizeBoundedText, parseCanonicalTime, sha256Bytes } from '../kernel/identity.js';
-import type { RunAssemblyV1, ToolContractManifestV1, VerifierSpec, WorkspaceIdentityV1 } from '../kernel/types.js';
+import type { RunAssemblyV1, ToolContractManifestV1, VerifierSpec, WorkspaceIdentityV1, RepositoryIdentity } from '../kernel/types.js';
 import type { ModelCapabilityEvidenceV1 } from '../model/capabilities.js';
 import { immutableSnapshot } from '../model/immutable.js';
 import { verifyRetainedModelAuthorityPair, type SignedModelCatalogEntryV1 } from '../model/installed-authority.js';
@@ -33,6 +33,7 @@ import { loadInstalledCredentialPlatform, loadInstalledWorkerNative, withHeldIns
 import { installedSandboxProfile } from './installed-sandbox-profile.js';
 import { assertHeldWorkspaceRoot, heldWorkspaceRootPath, type HeldWorkspaceCursor, type HeldWorkspaceEntry, type HeldWorkspaceRoot, type NativeStateOwner } from './native-owner.js';
 import { readSession, readSessionPrincipalId } from './rows.js';
+import { decodeRepositoryIdentity } from './repository-identity.js';
 import { readSourceInspectionAttempt, readSourceInspectionOriginalRequest } from './source-inspection.js';
 import { normalizeRunSubmitRequest, readRetainedSourceInspectionTarget, runSubmitIntentDigest } from './source-target.js';
 import { assertWorkspaceSourceTrust, holdWorkspaceSourceTrust } from './source-trust.js';
@@ -63,6 +64,7 @@ export type AssembledInstalledRun = Readonly<{
 type AdmissionBinding = { driver: SqliteDriver; owner: StateOwnerContext; selected: HeldInstalledRuntime;
   identity: AuthenticatedControlIdentity; normalized: ReturnType<typeof normalizeRunSubmitRequest>; source: RetiredSource;
   native: NativeStateOwner; workspace: Extract<WorkspaceIdentityV1, { kind: 'live' }>;
+  repository?: RepositoryIdentity;
   input: AdmitRunInput; admittedAt: string; deadlineAt: string; signal?: AbortSignal };
 const admissions = new WeakMap<AssembledInstalledRun, AdmissionBinding>();
 /** Fixed refusal projection, not authority or a caller-selectable error code. */
@@ -251,12 +253,12 @@ async function readInstructions(artifacts: ArtifactCatalog, assembly: RunAssembl
   return immutableSnapshot(manifest);
 }
 
-/** Publication of already selected inert model data, never admission or grant
- * authority. Only one credential has a closed three-object dependency graph. */
+/** Only one credential has this exact four-object inert data closure. The
+ * sandbox grants no authority before the original complete material checks. */
 async function publishInstalledModelMaterial(input: {
   artifacts: ArtifactCatalog; endpoint: EndpointRegistrationV1; credentialBindings: readonly EndpointCredentialGrantBinding[];
   remote: { modelCredentialGrantIds: readonly string[] }; identity: { principalId: string };
-  admittedAt: string; deadlineAt: string; capability: ModelCapabilityEvidenceV1;
+  admittedAt: string; deadlineAt: string; capability: ModelCapabilityEvidenceV1; sandboxResources: SandboxResourceSpec; signal?: AbortSignal;
 }) {
   const { artifacts, endpoint, credentialBindings, remote, identity, admittedAt, deadlineAt, capability } = input;
   const checkBinding = (binding: EndpointCredentialGrantBinding, endpointRef: string) => {
@@ -269,12 +271,25 @@ async function publishInstalledModelMaterial(input: {
   if (credentialBindings.length === 1) {
     const binding = credentialBindings[0]!;
     checkBinding(binding, canonicalSha256(endpoint));
-    const [endpointArtifact, bindingArtifact, capabilityArtifact] = await artifacts.publishCanonicalTriple([
+    const sandbox = installedSandboxProfile(input.sandboxResources);
+    const values = [endpoint, binding, capability, sandbox], kinds = [endpoint.format,
+      'cliq-endpoint-credential-grant-binding-v1', capability.format, sandbox.format];
+    const expected = values.map((value, index) => ({ ref: canonicalSha256(value), byteLength: canonicalJsonBytes(value).length,
+      mediaType: 'application/json', schemaKind: kinds[index] }));
+    input.signal?.throwIfAborted();
+    const published = await artifacts.publishCanonicalFour([
       { value: endpoint, schemaKind: endpoint.format },
       { value: binding, schemaKind: 'cliq-endpoint-credential-grant-binding-v1' },
-      { value: capability, schemaKind: capability.format }
+      { value: capability, schemaKind: capability.format }, { value: sandbox, schemaKind: sandbox.format }
     ]);
-    return { endpointArtifact, credentialGrantRefs: [bindingArtifact.ref], capabilityArtifact };
+    if (published.length !== 4 || expected.some((wanted, index) => {
+      const actual = published[index];
+      return !actual || actual.ref !== wanted.ref || actual.byteLength !== wanted.byteLength ||
+        actual.mediaType !== wanted.mediaType || actual.schemaKind !== wanted.schemaKind;
+    })) mismatch('installed model material differs from its complete four-object closure');
+    input.signal?.throwIfAborted();
+    const [endpointArtifact, bindingArtifact, capabilityArtifact, sandboxArtifact] = published;
+    return { endpointArtifact, credentialGrantRefs: [bindingArtifact.ref], capabilityArtifact, sandboxProfileRef: sandboxArtifact.ref };
   }
   const endpointArtifact = await artifacts.publishCanonical(endpoint, endpoint.format), credentialGrantRefs: string[] = [];
   for (const binding of credentialBindings) {
@@ -283,7 +298,7 @@ async function publishInstalledModelMaterial(input: {
   }
   credentialGrantRefs.sort();
   const capabilityArtifact = await artifacts.publishCanonical(capability, capability.format);
-  return { endpointArtifact, credentialGrantRefs, capabilityArtifact };
+  return { endpointArtifact, credentialGrantRefs, capabilityArtifact, sandboxProfileRef: undefined };
 }
 
 async function materialFor(installed: InstalledRuntimeBorrow, artifacts: ArtifactCatalog, assembly: RunAssemblyV1, signal?: AbortSignal): Promise<RunAssemblyValidationMaterial> {
@@ -427,19 +442,23 @@ export async function assembleInstalledRun(input: {
   if (!retained || retained.phase !== 'retired' || retained.outcome.kind !== 'captured' || !same(retained, source) || source.outcome.kind !== 'captured')
     mismatch('installed admission requires the exact committed captured and retired source');
   const capturedSourceRef = source.outcome.sourceManifestRef;
-  const target = await readCanonicalArtifact<import('../kernel/execution.js').SourceInspectionTargetV1>(reads, source.targetRef);
+  const target = await readCanonicalArtifact<SourceInspectionTarget>(reads, source.targetRef);
   const original = normalizeRunSubmitRequest(await readCanonicalArtifact(reads, target.originalRequestRef));
   if (runSubmitIntentDigest(identity.principalId, original.request) !== key.admissionIntentDigest || original.originalRequestDigest !== target.originalRequestDigest)
     mismatch('installed assembly substituted the original inline request domain');
   const sourceManifest = decodeSourceManifest(await readCanonicalArtifact(reads, capturedSourceRef));
-  if (sourceManifest.workspaceIdentityDigest !== workspace.identityDigest || sourceManifest.manifestDigest !== source.outcome.sourceManifestDigest || sourceManifest.git)
-    mismatch('installed source closure differs from the authenticated non-Git capture');
+  if (sourceManifest.workspaceIdentityDigest !== workspace.identityDigest || sourceManifest.manifestDigest !== source.outcome.sourceManifestDigest ||
+      !!sourceManifest.git !== !!source.outcome.privateGitStateRef || !!sourceManifest.git !== !!workspace.repositoryIdentityRef ||
+      sourceManifest.git && sourceManifest.git.repositoryIdentityDigest !== workspace.repositoryIdentityDigest)
+    mismatch('installed source closure differs from the authenticated original capture');
+  const repository = workspace.repositoryIdentityRef ? decodeRepositoryIdentity(await readCanonicalArtifact(reads, workspace.repositoryIdentityRef)) : undefined;
   const held = await withHeldInstalledRuntime(selected, async installed => {
     await installed.revalidate(signal); const active = assertActiveStateOwner(driver, owner);
     if (active.runtimeBundleRef !== installed.bundleDigest || target.runtimeBundleRef !== installed.bundleDigest ||
         active.runtimeBundleManifestDigest !== installed.bundle.manifestDigest) mismatch('installed assembly and capture have another runtime owner');
     await readRetainedSourceInspectionTarget(reads, source, readSourceInspectionOriginalRequest(driver, source.inspectionId),
-      { bundle: installed.bundle, releaseKeys: installed.releaseKeys, sandboxProfile: decodeSandboxProfile(await readCanonicalArtifact(reads, target.sandboxProfileRef)) });
+      { bundle: installed.bundle, releaseKeys: installed.releaseKeys, sandboxProfile: decodeSandboxProfile(await readCanonicalArtifact(reads, target.sandboxProfileRef)) },
+      { driver, owner, signal });
     const native = await installed.loadStateOwner(signal); await installed.revalidate(signal); return native;
   }, signal);
   reportInstalledRunAssemblyPhase(onAssemblyPhase, 'submit_assembly_platform');
@@ -478,8 +497,9 @@ export async function assembleInstalledRun(input: {
       source: { kind: 'signed_catalog', runtimeBundleRef: installed.bundleDigest, catalogEntryRef: model.catalog.ref, catalogEntryDigest: catalog.catalogEntryDigest },
       ...catalog.claims, observedAt: admittedAt, validThrough: catalog.validThrough, evidenceDigest: '' };
     capability.evidenceDigest = digestOmitting(capability, 'evidenceDigest');
-    const { endpointArtifact, credentialGrantRefs, capabilityArtifact } = await publishInstalledModelMaterial({
-      artifacts, endpoint, credentialBindings, remote, identity, admittedAt, deadlineAt, capability
+    const { endpointArtifact, credentialGrantRefs, capabilityArtifact, sandboxProfileRef: publishedSandboxRef } = await publishInstalledModelMaterial({
+      artifacts, endpoint, credentialBindings, remote, identity, admittedAt, deadlineAt, capability,
+      sandboxResources: request.sandboxResources, signal
     });
     const toolCandidates = installed.bundle.entries.filter(entry => entry.role === 'schema' && !entry.executable).map(entry => {
       const bytes = installed.objects.get(entry.digest); return bytes && JSON.parse(bytes.toString('utf8')) as { format?: string };
@@ -530,8 +550,8 @@ export async function assembleInstalledRun(input: {
     policy.policyDigest = digestOmitting(policy, 'policyDigest');
     verifyToolRuntimeAuthority({ assembly, policy, bundle: installed.bundle, profile, tools: tools.entries, releaseKeys: installed.releaseKeys });
     reportInstalledRunAssemblyPhase(onAssemblyPhase, 'submit_assembly_publish');
-    const sandbox = installedSandboxProfile(request.sandboxResources);
-    const sandboxProfileRef = (await artifacts.publishCanonical(sandbox, sandbox.format)).ref;
+    const sandboxProfileRef = publishedSandboxRef ?? (await artifacts.publishCanonical(
+      installedSandboxProfile(request.sandboxResources), 'cliq-sandbox-profile-v1')).ref;
     reportInstalledRunAssemblyPhase(onAssemblyPhase, 'submit_assembly_verifier');
     const verifier = await prepareInstalledVerifierAssembly(driver, reads, owner, { bundle: installed.bundle, releaseKeys: installed.releaseKeys },
       { principalId: identity.principalId, requests: request.verifiers, policyMode: request.policyMode, assembly,
@@ -545,7 +565,7 @@ export async function assembleInstalledRun(input: {
     const result: AssembledInstalledRun = Object.freeze({ assemblyRef, assembly: immutableSnapshot(assembly), policyRef, sandboxProfileRef, verifierSpecRef,
       credentialGrantRefs: Object.freeze(credentialGrantRefs), sourceProjectionRef: sourceManifest.sourceProjectionRef,
       frozenIgnoreRulesRef: sourceManifest.frozenIgnoreRulesRef, baseWorkspaceManifestRef: capturedSourceRef, material, admittedAt, deadlineAt });
-    admissions.set(result, { driver, owner, selected, identity, normalized: currentOriginal, source, native: held, workspace, signal,
+    admissions.set(result, { driver, owner, selected, identity, normalized: currentOriginal, source, native: held, workspace, repository, signal,
       input: immutableSnapshot({ ...identity, requestId: request.requestId, admissionKey: request.admissionKey, sessionId: request.sessionId,
         expectedContextRevision: request.expectedContextRevision, workspacePath: request.workspacePath, objective: request.objective,
         assemblyRef, policyRef, sandboxProfileRef, verifierSpecRef,
@@ -588,7 +608,9 @@ export function recheckInstalledRunWorkspace(prepared: AssembledInstalledRun, dr
   const root = binding.native.openWorkspaceRoot(binding.workspace.canonicalRootPath); let failure: unknown;
   try {
     assertHeldWorkspaceRoot(root);
-    if (!same(root.identity, binding.workspace.rootIdentity) || heldWorkspaceRootPath(root) !== binding.workspace.canonicalRootPath || root.repositoryDirectory)
+    if (!same(root.identity, binding.workspace.rootIdentity) || heldWorkspaceRootPath(root) !== binding.workspace.canonicalRootPath ||
+        (root.repositoryDirectory === undefined) !== (binding.repository === undefined) ||
+        binding.repository && !same(root.repositoryDirectory, binding.repository.gitDirectoryIdentity))
       mismatch('installed admission workspace root changed after trusted capture');
     root.assertHeld();
   } catch (error) { failure = error; throw error; } finally { closeOwned([root], failure); }

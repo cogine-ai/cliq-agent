@@ -78,13 +78,15 @@ function authMarker(bytes: Buffer): Omit<InstalledClientAuthenticationObservatio
   return Object.freeze({ stage, elapsedMs, work: copyInstalledClientAuthenticationWork({ package: row(0), revalidate: row(4), createCompare: row(8) }), ...usage });
 }
 function copyAuthentication(value: readonly InstalledClientAuthenticationObservation[]): readonly InstalledClientAuthenticationObservation[] {
-  assert(Array.isArray(value) && value.length <= INSTALLED_CLIENT_PHASES.length);
+  assert(Array.isArray(value) && !types.isProxy(value) && value.length <= INSTALLED_CLIENT_PHASES.length);
+  assert(Reflect.ownKeys(value).length === value.length + 1, 'authentication array must have only its original entries');
   let previous = -1, elapsed = -1, observed = -1;
   let previousWork: InstalledWorkSnapshot | undefined;
   let previousProcess: InstalledClientAuthenticationProcess | undefined;
   const result: InstalledClientAuthenticationObservation[] = [];
   for (let index = 0; index < value.length; index++) {
-    const descriptor = Object.getOwnPropertyDescriptor(value, String(index)); assert(descriptor && 'value' in descriptor);
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index)); assert(descriptor && descriptor.enumerable && 'value' in descriptor);
+    assert(descriptor.value && typeof descriptor.value === 'object' && !types.isProxy(descriptor.value));
     const keys = Reflect.ownKeys(descriptor.value as object); assert(keys.every(key => typeof key === 'string'));
     const row = fields(descriptor.value, ['stage', 'elapsedMs', 'observedElapsedMs', ...(keys.includes('work') ? ['work'] : []),
       ...(keys.includes('process') ? ['process'] : [])]);
@@ -117,11 +119,14 @@ const driverMarkers = driverStages.flatMap(stage => [
 ]);
 
 export class InstalledClientDriverError extends Error {
-  readonly diagnostic: Readonly<{ kind: 'installed_client_driver'; stage: InstalledClientDriverStage }>;
-  constructor(stage: InstalledClientDriverStage) {
+  readonly diagnostic: Readonly<{ kind: 'installed_client_driver'; stage: InstalledClientDriverStage;
+    authentication?: readonly InstalledClientAuthenticationObservation[] }>;
+  constructor(stage: InstalledClientDriverStage, authentication: readonly InstalledClientAuthenticationObservation[] = []) {
     super('original installed client driver failed');
     assert(typeof stage === 'string' && driverStages.includes(stage));
-    this.diagnostic = Object.freeze({ kind: 'installed_client_driver', stage });
+    const observed = copyAuthentication(authentication);
+    this.diagnostic = Object.freeze({ kind: 'installed_client_driver', stage,
+      ...(observed.length ? { authentication: observed } : {}) });
   }
 }
 
@@ -284,7 +289,7 @@ export async function openInstalledClientConsumer(input: Input) {
           copyAuthentication([...authentication, observation]); authentication.push(Object.freeze(observation)); markerBytes += line.length; continue;
         }
         markerBytes += line.length;
-        if (marker.failure) refuse(new InstalledClientDriverError(marker.stage));
+        if (marker.failure) refuse(new InstalledClientDriverError(marker.stage, authentication));
         else {
           assert(!observedStages.has(marker.stage), 'duplicate installed client progress');
           observedStages.add(marker.stage); lastObservedDriverStage = marker.stage;

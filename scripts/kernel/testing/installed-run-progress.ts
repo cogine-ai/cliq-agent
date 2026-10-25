@@ -6,7 +6,7 @@ import { MAX_JSON_CONTAINER_ENTRIES, MAX_JSON_DEPTH } from '../../../src/kernel/
 import type { InvocationJournalEntry, InvocationPhase, RunNextStep, RunStatus, WaitingReason } from '../../../src/kernel/types.js';
 
 const CASES = ['required_pass', 'required_repair', 'advisory_failure', 'required_timeout',
-  'delivery_publish', 'delivery_merge', 'delivery_cancel'] as const;
+  'ordinary_git', 'delivery_publish', 'delivery_merge', 'delivery_cancel', 'delivery_git', 'delivery_git_merge'] as const;
 type CaseKind = typeof CASES[number];
 export type InstalledRunProgress = Readonly<{
   diagnosticOnly: true; source: 'actual_public_run_get'; operation: 'agent' | 'delivery'; caseKind: CaseKind; postCount: number;

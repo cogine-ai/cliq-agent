@@ -34,6 +34,7 @@ import { qualifyInstalledOwnerLinks } from './testing/installed-owner-history.js
 import { projectInstalledRunProgress, projectInstalledServiceExit, projectInstalledSupervisorStatus } from '../../src/sandbox/testing/installed-run-progress.js';
 import { decodeFinalCandidateItem, decodeRunResult, decodeVerificationClosure, decodeVerifierPlan, decodeWorkspaceDiff } from '../../src/state/result-artifacts.js';
 import { decodeSourceManifest, decodeWorkspaceEntries, decodeWorkspaceState } from '../../src/state/decoders.js';
+import { qualifyInstalledSessionContinuity, installedSessionResumeObjective } from './testing/installed-session-continuity.js';
 
 type Recipe = { buildFixture: string; packageRoot: string; installerEntry: string; stateRoot: string; releaseKeysFile: string;
   controlDirectory: string; observer: string; storeFixture: string; publicationObserver: string; workspace: string; reportFile: string };
@@ -628,6 +629,7 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
   let retryPlatform: ReturnType<typeof observe> | undefined, aliasRestoreCollection: string | undefined;
   let server: Server | undefined;
   let primary: unknown, providerFailure = false, requestsReceived = 0, reflectionEnabled = false, shortRunEnabled = false;
+  let sessionResumeExpected: Readonly<{ summaryUtf8: string; retainedUtf8: string }> | undefined;
   let busySubmit: (Record<string, unknown> & { admissionKey: string }) | undefined;
   let busyFinalize: CredentialFinalizeRequest | undefined;
   let storageClient: Awaited<ReturnType<typeof persistentClient>> | undefined;
@@ -937,6 +939,20 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
         assert(Array.isArray(body.messages) && Array.isArray(body.tools));
         assert.deepEqual(body.tools.map((tool: any) => tool.function.name), ['edit']);
         const ordinal = ++requestsReceived;
+        if (sessionResumeExpected) {
+          assert.equal(mode, '--campaign'); assert.equal(ordinal, 5, 'the new resumed Run owns exactly one additional model request');
+          for (const content of [sessionResumeExpected.summaryUtf8, sessionResumeExpected.retainedUtf8, installedSessionResumeObjective])
+            assert(body.messages.some((message: any) => message.role === 'user' && message.content === content));
+          assert(!body.messages.some((message: any) => message.role === 'tool'));
+          assert(captureResponseWorker); await captureResponseWorker(body);
+          const bytes = Buffer.from(JSON.stringify({ id: 'owned-session-resume-turn', object: 'chat.completion', model,
+            choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: 'The preserved Session context is complete.' } }],
+            usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 } })); scanBytes(bytes);
+          outgoing.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': String(bytes.length), Connection: 'close' }); outgoing.end(bytes);
+          report.providerRequests = { received: ordinal, method: 'POST', requestPath: '/v1/chat/completions', tls13: true,
+            exactCredentialMatched: true, latestBodyDigest: sha256Bytes(bodyBytes), latestBodyBytes: bodyBytes.length };
+          return;
+        }
         if (storageOnly || shutdownPendingModelOnly) {
           assert.equal(ordinal, 1, 'the retained original failure must never redispatch provider I/O');
           assert.equal(storagePost, undefined);
@@ -4609,6 +4625,18 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       terminalHistoryReopenedAfterActualSupervisorRestart: true };
     }
     }
+    }
+    if (mode === '--campaign') {
+      mark('session_context_continuity_then_new_run');
+      report.sessionContinuity = await qualifyInstalledSessionContinuity({ send: sendGenuine, readCas, closeClient: closeGenuineClient,
+        parentSessionId: session.id, submission: { protocolVersion: 1, method: 'run.submit', workspacePath: recipe.workspace,
+          model: { provider: 'openai-compatible', model, endpoint: { kind: 'registered', endpointRegistrationId: registration.endpointRegistrationId },
+            modelCredentialGrantIds: [enrollment.credentialGrantId] }, policyMode: 'accept-edits',
+          budgets: { wallTimeMs: 300000, modelTokens: 2000000, costMicros: 10000000, toolCalls: 1000, repairAttempts: 0, childDepth: 0, childConcurrency: 1 },
+          verifiers: [], dependency: { mode: 'none' }, sourceIncludes: [], sourceExcludes: [], registeredMcpServerIds: [], skillIds: [], allowUnverified: true },
+        registerSubmission, counts: () => [requestsReceived, acceptedTcpConnections, acceptedTlsConnections], providerHealthy: () => !providerFailure,
+        enableResume: (summaryUtf8, retainedUtf8) => { assert.equal(sessionResumeExpected, undefined); sessionResumeExpected = { summaryUtf8, retainedUtf8 }; },
+        verifyResult: (cut, target) => assertUnverifiedResult(cut, target, { exampleText: hostBefore }) });
     }
     report.qualified = true; mark('run_assertions_complete');
   } catch (error) {

@@ -5,7 +5,7 @@ import {
   KERNEL_SQLITE_BUSY_TIMEOUT_MS,
   KERNEL_STATE_SCHEMA_VERSION
 } from '../config.js';
-import { requiredSafeInteger } from '../kernel/identity.js';
+import { requiredSafeInteger, sha256Bytes } from '../kernel/identity.js';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { KernelStorageError } from './errors.js';
 import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
@@ -617,7 +617,50 @@ INSERT INTO source_inspection_attempts SELECT * FROM source_inspection_attempts_
 DROP TABLE source_inspection_attempts_v5;
 ${sourceInspectionSchema.slice(sourceInspectionIndexes)}
 `;
-export const KERNEL_SCHEMA_SQL = `${KERNEL_SCHEMA_V1_SQL}\n${KERNEL_SCHEMA_V2_SQL}\n${KERNEL_SCHEMA_V3_SQL}\n${KERNEL_SCHEMA_V4_SQL}\n${KERNEL_SCHEMA_V5_SQL}\n${KERNEL_SCHEMA_V6_SQL}`;
+// Same row and phase spine. A once-only handoff can be installed while the
+// original phase is unchanged; afterwards only cancellation/retirement remain.
+// Derive from our fixed historical DDL, never from database-supplied SQL.
+const sourceInspectionUpdate = sourceInspectionSchema.slice(sourceInspectionSchema.indexOf('CREATE TRIGGER source_inspections_validate_update'),
+  sourceInspectionSchema.indexOf('CREATE TRIGGER source_inspections_immutable_delete'));
+const sourceInspectionHandoffUpdate = sourceInspectionUpdate
+  .replaceAll("'$.retiredAt', '$.outcome')", "'$.retiredAt', '$.outcome', '$.retirementHandoffRef')")
+  .replaceAll("'$.updatedAt', '$.cancelRequested')", "'$.updatedAt', '$.cancelRequested', '$.retirementHandoffRef')")
+  .replace("    WHEN OLD.phase IN ('prepared', 'active') AND (", `    WHEN json_type(NEW.row_json, '$.retirementHandoffRef') IS NOT NULL AND (
+      json_type(NEW.row_json, '$.retirementHandoffRef') IS NOT 'text' OR
+      length(json_extract(NEW.row_json, '$.retirementHandoffRef')) != 64 OR
+      json_extract(NEW.row_json, '$.retirementHandoffRef') GLOB '*[^0-9a-f]*' OR
+      (json_type(OLD.row_json, '$.retirementHandoffRef') IS NULL AND NEW.phase IS NOT OLD.phase)
+    ) THEN RAISE(ABORT, 'source inspection handoff must be installed once at its original phase')
+    WHEN json_type(OLD.row_json, '$.retirementHandoffRef') IS NOT NULL AND (
+      json_extract(NEW.row_json, '$.retirementHandoffRef') IS NOT json_extract(OLD.row_json, '$.retirementHandoffRef') OR
+      (NEW.phase IS NOT OLD.phase AND NEW.phase != 'retired')
+    ) THEN RAISE(ABORT, 'source inspection handoff permits cleanup only')
+    WHEN json_type(OLD.row_json, '$.inputRef') IS NOT NULL AND (
+      json_extract(NEW.row_json, '$.inputRef') IS NOT json_extract(OLD.row_json, '$.inputRef') OR
+      json_extract(NEW.row_json, '$.inputDigest') IS NOT json_extract(OLD.row_json, '$.inputDigest')
+    ) THEN RAISE(ABORT, 'source inspection first input is immutable')
+    WHEN OLD.phase IN ('prepared', 'active') AND (`);
+export const KERNEL_SCHEMA_V7_SQL = `
+DROP TRIGGER source_inspections_validate_update;
+${sourceInspectionHandoffUpdate}
+`;
+const pristineSchemaV6 = [KERNEL_SCHEMA_V1_SQL, KERNEL_SCHEMA_V2_SQL, KERNEL_SCHEMA_V3_SQL,
+  KERNEL_SCHEMA_V4_SQL, KERNEL_SCHEMA_V5_SQL, KERNEL_SCHEMA_V6_SQL].join('\n');
+const pristineSchemaV7 = `${pristineSchemaV6}\n${KERNEL_SCHEMA_V7_SQL}`;
+export const KERNEL_SCHEMA_SQL = pristineSchemaV7;
+
+/** Historical birth data only. Upgrading a database cannot rewrite the
+ * original generation's version, DDL digest or empty-database identity.
+ * These two actual birth recipes both had exactly 21 authority tables;
+ * today's table inventory must never change their retained identities. */
+export function kernelSchemaBirthRecipe(version: unknown): Readonly<{
+  userVersion: number; schemaDigest: string; emptyDatabaseContentDigest: string;
+}> {
+  if (version !== 6 && version !== 7) throw new KernelStorageError('RECOVERY_REQUIRED', 'unsupported retained kernel schema birth recipe');
+  const sql = version === 6 ? pristineSchemaV6 : pristineSchemaV7;
+  return Object.freeze({ userVersion: version, schemaDigest: sha256Bytes(Buffer.from(sql, 'utf8')),
+    emptyDatabaseContentDigest: canonicalSha256({ applicationId: KERNEL_SQLITE_APPLICATION_ID, userVersion: version, tables: 21 }) });
+}
 
 /** One table inventory for pristine bootstrap and its retained birth recipe. */
 export const KERNEL_AUTHORITY_TABLES = Object.freeze([
@@ -654,7 +697,7 @@ function pragmaScalar(driver: SqliteConnection, name: string): unknown {
 export function applyKernelSchema(driver: SqliteDriver): void {
   const userVersion = requiredSafeInteger(pragmaScalar(driver, 'user_version'), 'user_version');
   const applicationId = requiredSafeInteger(pragmaScalar(driver, 'application_id'), 'application_id');
-  if (![0, 1, 2, 3, 4, 5, KERNEL_STATE_SCHEMA_VERSION].includes(userVersion)) {
+  if (![0, 1, 2, 3, 4, 5, 6, KERNEL_STATE_SCHEMA_VERSION].includes(userVersion)) {
     throw new Error(`unsupported kernel schema version ${userVersion}`);
   }
   if (applicationId !== 0 && applicationId !== KERNEL_SQLITE_APPLICATION_ID) {
@@ -684,6 +727,7 @@ export function applyKernelSchema(driver: SqliteDriver): void {
       if (userVersion < 4) connection.exec(KERNEL_SCHEMA_V4_SQL);
       if (userVersion < 5) connection.exec(KERNEL_SCHEMA_V5_SQL);
       if (userVersion < 6) connection.exec(KERNEL_SCHEMA_V6_SQL);
+      if (userVersion < 7) connection.exec(KERNEL_SCHEMA_V7_SQL);
       connection.exec(`PRAGMA user_version=${KERNEL_STATE_SCHEMA_VERSION}`);
     });
   }

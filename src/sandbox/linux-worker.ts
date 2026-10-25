@@ -6,6 +6,7 @@ import { open, type FileHandle } from 'node:fs/promises';
 import { Module } from 'node:module';
 import { constants as osConstants } from 'node:os';
 import path from 'node:path';
+import { types as utilTypes } from 'node:util';
 import { setImmediate, setTimeout as delay } from 'node:timers/promises';
 import { assertArtifactRef, normalizeAbsolutePath } from '../kernel/identity.js';
 import type { ProcessContainment, SanitizedSandboxEnvironmentV1 } from '../kernel/execution.js';
@@ -15,12 +16,18 @@ import { verifyRuntimeBundle, type ReleaseTrustKey, type RuntimeBundleManifest }
 import { sampleCanonicalNow } from '../state/canonical-time.js';
 import { assertBuiltinEditLaunchClosure, assertWorkerLaunchClosure, assertVerifierLaunchClosure,
   type BuiltinEditLaunchClosure, type WorkerLaunchClosure, type VerifierLaunchClosure } from '../state/execution-closure.js';
-import { borrowWorkerReservationForExecution, type BorrowedGenerationForExecution, type HeldWorkerReservation } from '../state/native-owner.js';
+import { borrowWorkerReservationForExecution, borrowSourceGitInputForExecution, borrowRetainedSourceGitInputForCleanup,
+  borrowRegisteredAbsentSourceGitInputForCleanup,
+  borrowPreparingGitInputForExecution,
+  borrowRetainedPreparingGitInputForCleanup,
+  type BorrowedGenerationForExecution, type HeldWorkerReservation, type HeldSourceGitInput,
+  type HeldRetainedSourceGitInput, type HeldRegisteredAbsentSourceGitInput, type HeldPreparingGitInput, type HeldRetainedPreparingGitInput } from '../state/native-owner.js';
 import { borrowRunWorkspaceForExecution, type RunWorkspaceGeneration } from '../workspace/run-workspace/generation.js';
 import { loadInstalledWorkerNative, sealInstalledWorkerImage, withInstalledWorkerRoot, startInstalledGuestToolchain, closeInstalledGuestToolchain,
+  sealInstalledSourceGitInspector, startInstalledSourceGitToolchain, closeInstalledSourceGitToolchain,
   type HeldInstalledAnchor, type HeldInstalledRuntime } from '../state/installed-runtime.js';
 import { GUEST_EXTRACTOR_RECIPE, LINUX_VERIFIER_RESOURCE_MINIMUMS, type NativeGuestExtractorBinding, type NativeGuestToolchain,
-  type NativeGuestExtractionInput } from './guest-toolchain.js';
+  type NativeGuestExtractionInput, type NativeSourceGitToolchain } from './guest-toolchain.js';
 import { guestToolchainExecutables, type RetainedVerifierToolchain } from '../state/guest-toolchain.js';
 
 export class LinuxExecutionIdentityError extends Error {
@@ -129,6 +136,10 @@ export type LinuxWorkerController = Readonly<{
   processStartToken: string;
   subreaperStartToken: string;
   preparationBirth: NativeControllerPreparationBirth;
+  openPreparingGit(input: { input: HeldPreparingGitInput; recipe: NativePreparingGitRecipe; toolchain: RetainedVerifierToolchain;
+    signal?: AbortSignal }): Promise<HeldPreparingGitScope>;
+  cleanupRetainedPreparingGit(input: { input: HeldRetainedPreparingGitInput; recipe: NativePreparingGitRecipe;
+    signal?: AbortSignal }): Promise<NativeRetainedPreparingGitRetirement>;
   bindWorkerReservation(input: { closure: WorkerLaunchClosure; reservation: HeldWorkerReservation; activationNonceDigest: string }): Promise<NativeWorkerReservationBinding>;
   inspectPreactivation(input: { closure: WorkerLaunchClosure; reservation: HeldWorkerReservation; activationNonceDigest: string;
     containment?: ProcessContainment; workerIdentity?: WorkerIdentity }): Promise<NativePreactivationObservation>;
@@ -140,6 +151,13 @@ export type LinuxWorkerController = Readonly<{
   closePreparation(): Promise<NativeControllerPreparationRetirement>;
   close(): Promise<void>;
 }>;
+const linuxWorkerControllers = new WeakSet<LinuxWorkerController>();
+/** Structural wrappers and borrowed birth data do not own this native
+ * controller's productive channel or preparing lifecycle. */
+export function assertLinuxWorkerController(controller: LinuxWorkerController): void {
+  if (!controller || typeof controller !== 'object' || !linuxWorkerControllers.has(controller))
+    throw new TypeError('worker controller requires its original real native owner');
+}
 export type LinuxWorkerLauncher = Readonly<{ startController(options?: { signal?: AbortSignal }): Promise<LinuxWorkerController>; close(): Promise<void> }>;
 export type LinuxWorkerInstallation = {
   installationRoot: string;
@@ -153,6 +171,119 @@ type NativeObservation = {
   remainingTrackedDescendants: number; observedAtMs: number; imageFd: number; imageByteCount: number; executableRealpath: string;
 };
 export type NativeWorkerImage = { descriptor(): number; close(): void };
+/** Only the fixed same-bundle data script producer can mint this native tag.
+ * It is neither an executable selector nor a numerical descriptor export. */
+export type NativeSourceGitInspectorImage = Readonly<{
+  identity: Readonly<{ sha256: string; byteCount: number }>;
+  close(): void;
+}>;
+/** Raw observations from the fixed source-only native family. None of these
+ * data projections is a launch/SQL authority or a caller-selected descriptor. */
+export type NativeSourceGitReservationObservation = Readonly<{
+  cgroupPath: string; deviceId: string; fileId: string; cgroupId: string; ownerUid: number;
+  observedAtMs: number; pidNamespaceReservationId: string; subreaperStartToken: string;
+}>;
+export type NativeSourceGitContainmentObservation = Readonly<{
+  pid: number; namespaceInitPid: number; processStartToken: string; namespaceInitStartToken: string;
+  cgroupId: string; pidNamespaceId: string; cgroupPopulated: number; remainingTrackedDescendants: number;
+  namespaceInitDeadAndReaped: number; observedAtMs: number;
+}>;
+export type NativeSourceGitSnapshotObservation = Readonly<{
+  snapshotDigest: string; byteCount: number; entryCount: number; shardCount: number;
+}>;
+export type NativeSourceGitOutputReader = Readonly<{
+  identity: Readonly<{ sha256: string; byteCount: number }>;
+  assertHeld(): void; readChunk(): Buffer | undefined; close(): void;
+}>;
+export type NativeSourceGitResult = Readonly<{
+  death: NativeSourceGitContainmentObservation;
+  files: Readonly<{ inspection: NativeSourceGitOutputReader; index: NativeSourceGitOutputReader;
+    pack: NativeSourceGitOutputReader; packIndex: NativeSourceGitOutputReader }>;
+  /** Independently authorized .git/info/exclude only; never Git/helper input.
+   * null includes absence. This reader also joins before scope removal. */
+  excludeRule: NativeSourceGitOutputReader | null;
+}>;
+export type NativeSourceGitRetirementObservation = Readonly<{
+  observedAtMs: number; inspectionId: string; stagingNonceDigest: string; targetRef: string; inputIntentRef: string;
+  reserved: 0 | 1; blocked: 0 | 1; released: 0 | 1; continued: 0 | 1;
+  origin: 'original_owner_joined' | 'original_birth_current_checker' | 'original_birth_registered_absent_checker'; lastBirthKind: 0 | 2 | 4 | 5 | 6 | 7 | 8 | 9 | 11 | 12;
+  originalControllerPid: number; originalControllerStartToken: string;
+  cgroupDeviceId: string | null; cgroupId: string | null; launchNonceDigest: string | null;
+  containmentPlanRef: string | null; sandboxLaunchRef: string | null; sandboxLaunchDigest: string | null;
+  containment: NativeSourceGitContainmentObservation | null;
+}> & (Readonly<{ snapshotDigest?: never; byteCount?: never; entryCount?: never; shardCount?: never }> |
+  NativeSourceGitSnapshotObservation);
+export type NativeRetainedSourceGitRetirementObservation = NativeSourceGitRetirementObservation & Readonly<{
+  origin: 'original_birth_current_checker';
+}>;
+type NativeRetainedSourceGitScope = Readonly<{
+  pollCleaned(): true | undefined;
+  pollRetired(): NativeSourceGitRetirementObservation | undefined;
+  pollLifecycleSnapshot(): Buffer | undefined;
+  close(): void;
+}>;
+export type NativeSourceGitScope = Readonly<{
+  pollReserved(): NativeSourceGitReservationObservation | undefined;
+  createBlocked(planRef: string, sandboxLaunchRef: string, sandboxLaunchDigest: string): void;
+  pollReady(): NativeSourceGitContainmentObservation | undefined;
+  releaseCapture(): void; pollSealed(): NativeSourceGitSnapshotObservation | undefined;
+  continueFixedGit(): void; pollResult(): NativeSourceGitResult | undefined;
+  /** Revokes the original controller immediately. The poll is positive only
+   * after its actual death, all reader closes and resource removal join. */
+  stop(): void; pollStopped(): NativeSourceGitRetirementObservation | undefined;
+  retire(): void; pollRetired(): NativeSourceGitRetirementObservation | undefined;
+  pollLifecycleSnapshot(): Buffer | undefined;
+}>;
+export type NativeSourceGitRecipe = Readonly<import('../kernel/types.js').SandboxResourceSpec & {
+  launchNonceDigest: string; repositoryIdentityDigest: string;
+  /** Only the exact already-consumed read_scope grant for .git/info/exclude.
+   * This value is data; the original SourceInspection SQL fence grants access. */
+  excludeGrantDigest: string | null;
+}>;
+export type NativePreparingGitRecipe = Readonly<import('../kernel/types.js').SandboxResourceSpec & {
+  stateOwnerEpoch: number; supervisorInstanceId: string; stateOwnerRowDigest: string; sessionId: string;
+  sourceCheckpointId: string; sourceWorkspaceStateRef: string; repositoryIdentityDigest: string;
+}>;
+export type NativePreparingGitRetirementObservation = Readonly<{
+  origin: 'original_owner_joined' | 'original_birth_current_checker'; observedAtMs: number; completed: 0 | 1; lastBirthPhase: number;
+  runId: string; generationId: string; launchId: string; spawnNonceDigest: string; activationNonceDigest: string;
+  generationCreationNonceDigest: string; generationRef: string; inputIntentRef: string;
+  originalControllerPid: number; originalControllerStartToken: string;
+  originalSupervisorPid: number; originalSupervisorStartToken: string;
+}>;
+export type NativePreparingGitScope = Readonly<{
+  pollReserved(): NativeSourceGitReservationObservation | undefined;
+  createBlocked(): void; pollReady(): NativeSourceGitContainmentObservation | undefined;
+  releaseCapture(): void; declareInput(role: number, sha256: string, byteCount: number): boolean;
+  writeInput(chunk: Buffer): boolean; endInput(): boolean; finishInput(): boolean;
+  pollSealed(): NativeSourceGitSnapshotObservation | undefined; continueFixedGit(): void;
+  pollResult(): NativeSourceGitResult | undefined;
+  stop(): void; pollStopped(): NativePreparingGitRetirementObservation | undefined;
+  retire(): void; pollRetired(): NativePreparingGitRetirementObservation | undefined;
+}>;
+export type HeldPreparingGitScope = Readonly<{
+  signal: AbortSignal;
+  recipe: NativePreparingGitRecipe;
+  reserve(): NativePreparingGitScope;
+  constructionRetirement(): Readonly<{ pollRetired(): NativePreparingGitRetirementObservation | undefined }> | undefined;
+  /** Revoke first, then join actual input/read/CAS owners. This callback
+   * supplies no proof; the native scope still proves its original closure. */
+  registerStop(stop: (deadline: number) => Promise<void>): () => void;
+  closeRuntime(): Promise<void>;
+}>;
+type NativeRetainedPreparingGitScope = Readonly<{
+  pollCleaned(): true | undefined; pollRetired(): NativePreparingGitRetirementObservation | undefined; close(): void;
+}>;
+declare const retainedPreparingGitRetirementBrand: unique symbol;
+export type NativeRetainedPreparingGitRetirement = Readonly<{ [retainedPreparingGitRetirementBrand]: true }>;
+const retainedPreparingGitRetirements = new WeakMap<NativeRetainedPreparingGitRetirement,
+  Readonly<{ observation: NativePreparingGitRetirementObservation; input: HeldRetainedPreparingGitInput; recipe: NativePreparingGitRecipe;
+    checker: Readonly<{ pid: number; processStartToken: string; controllerBirthDigest: string; joined: true }> }>>();
+export function readNativeRetainedPreparingGitRetirement(receipt: NativeRetainedPreparingGitRetirement) {
+  const held = retainedPreparingGitRetirements.get(receipt);
+  if (!held) throw new TypeError('retained preparing retirement requires its genuine joined checker');
+  return Object.freeze({ observation: held.observation, input: held.input, recipe: held.recipe, checker: held.checker });
+}
 type NativeImage = NativeWorkerImage;
 type NativeVerifierOutcome = Readonly<{ termination: number; exitCode: number; signal: number; nativeErrorCode: number;
   startedAtMs: number; endedAtMs: number; durationMs: number; stdout: Buffer; stderr: Buffer; stdoutTruncated: number; stderrTruncated: number;
@@ -177,6 +308,16 @@ type NativeController = { pid: number; processStartToken: string;
   createWorker(generation: number, cgroup: number, helper: NativeImage, worker: NativeImage, bwrap: NativeImage, config: object): NativeScope;
   createInvocation(generation: number, parent: NativeScope, helper: NativeImage, adapter: NativeImage, bwrap: NativeImage, input: NativeImage, config: object): NativeScope;
   createVerifier(generation: number, parent: NativeScope, helper: NativeImage, bwrap: NativeImage, guest: NativeGuestToolchain, config: object): NativeScope;
+  reserveSourceGit(input: object, helper: NativeImage, bwrap: NativeImage, guest: NativeSourceGitToolchain,
+    inspector: NativeSourceGitInspectorImage, recipe: NativeSourceGitRecipe): NativeSourceGitScope;
+  reservePreparationGit(input: object, helper: NativeImage, bwrap: NativeImage, guest: NativeSourceGitToolchain,
+    inspector: NativeSourceGitInspectorImage, recipe: NativePreparingGitRecipe): NativePreparingGitScope;
+  preparationGitConstructionRetirement(input: object): Readonly<{ pollRetired(): NativePreparingGitRetirementObservation | undefined }> | undefined;
+  cleanupRetainedPreparingGit(input: object, recipe: NativePreparingGitRecipe): NativeRetainedPreparingGitScope;
+  sourceGitConstructionRetirement(input: object): Readonly<{ pollRetired(): NativeSourceGitRetirementObservation | undefined;
+    pollLifecycleSnapshot(): Buffer | undefined }> | undefined;
+  cleanupRetainedSourceGit(input: object): NativeRetainedSourceGitScope;
+  cleanupRegisteredAbsentSourceGit(input: object): NativeRetainedSourceGitScope;
   terminateRetained(cgroup: number, config: object): void;
   pollRetained(): NativeObservation | undefined;
   assertRetainedRetired(cgroupRootFd: number): number;
@@ -186,10 +327,36 @@ type NativeController = { pid: number; processStartToken: string;
   close(): Promise<void>;
 };
 export type NativeWorkerBinding = { interfaceVersion: 3; readonly verifierInterfaceVersion?: 1;
+  readonly sourceInterfaceVersion: 1;
+  readonly preparationInterfaceVersion: 1;
+  sealSourceGitInspector(fd: number): NativeSourceGitInspectorImage;
   sealImage(fd: number): NativeImage; sealImageBuffer(input: Buffer): NativeImage;
   openController(helper: NativeImage, cgroupRootFd: number): NativeController };
 type NativeBinding = NativeWorkerBinding;
 type HeldGuestPreparation = Readonly<{ job: NativeGuestToolchain; close(): Promise<void> }>;
+type HeldPreparingGitRuntime = Readonly<{ guest: NativeSourceGitToolchain; inspector: NativeSourceGitInspectorImage; close(): Promise<void> }>;
+function preparingRecipe(value: NativePreparingGitRecipe): NativePreparingGitRecipe {
+  const keys = ['maxProcesses', 'memoryBytes', 'cpuQuotaMicrosPerSecond', 'maxOpenFiles', 'maxSingleFileBytes', 'maxGenerationBytes',
+    'maxInvocationOutputBytes', 'maxIpcFrameBytes', 'maxQueuedIpcBytes', 'stateOwnerEpoch', 'supervisorInstanceId', 'stateOwnerRowDigest',
+    'sessionId', 'sourceCheckpointId', 'sourceWorkspaceStateRef', 'repositoryIdentityDigest'];
+  if (!value || typeof value !== 'object' || Array.isArray(value) || utilTypes.isProxy(value) || Reflect.ownKeys(value).length !== keys.length)
+    throw new TypeError('preparing Git recipe must contain only its fixed own data fields');
+  const copy: Record<string, unknown> = {};
+  for (const key of keys) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor || !Object.hasOwn(descriptor, 'value')) throw new TypeError('preparing Git recipe cannot contain accessors');
+    copy[key] = descriptor.value;
+  }
+  for (const key of ['stateOwnerRowDigest', 'sourceWorkspaceStateRef', 'repositoryIdentityDigest']) {
+    if (typeof copy[key] !== 'string') throw new TypeError('preparing artifact identity is invalid');
+    assertArtifactRef(copy[key]);
+  }
+  for (const key of ['supervisorInstanceId', 'sessionId', 'sourceCheckpointId'])
+    if (typeof copy[key] !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/u.test(copy[key])) throw new TypeError('preparing owner identity is invalid');
+  for (const key of keys.slice(0, 10)) if (!Number.isSafeInteger(copy[key]) || (copy[key] as number) < 1)
+    throw new TypeError('preparing resource or owner epoch is invalid');
+  return Object.freeze(copy) as NativePreparingGitRecipe;
+}
 
 function controllerPreparationBirthIdentity(observed: NativeControllerPreparationBirthObservation) {
   if (!Number.isSafeInteger(observed.readyObservedAtMs) || observed.readyObservedAtMs < 1 ||
@@ -336,8 +503,150 @@ export async function openInstalledLinuxWorkerLauncher(selected: HeldInstalledRu
       const job = await startInstalledGuestToolchain(selected, toolchain, { ...(signal ? { signal } : {}) });
       return Object.freeze({ job, close: () => closeInstalledGuestToolchain(selected, job) });
     },
+    async preparing(toolchain, signal) {
+      let inspector: NativeSourceGitInspectorImage | undefined, guest: NativeSourceGitToolchain | undefined;
+      let closing: Promise<void> | undefined;
+      const close = () => closing ??= (async () => {
+        const failures: unknown[] = [];
+        if (guest) try { await closeInstalledSourceGitToolchain(selected, guest); } catch (error) { failures.push(error); }
+        if (inspector) try { inspector.close(); } catch (error) { failures.push(error); }
+        if (failures.length) throw retirementError('preparing fixed runtime did not join', new AggregateError(failures));
+      })();
+      try {
+        inspector = await sealInstalledSourceGitInspector(selected, signal);
+        guest = await startInstalledSourceGitToolchain(selected, toolchain, { ...(signal ? { signal } : {}) });
+        signal?.throwIfAborted();
+        return Object.freeze({ guest, inspector, close });
+      } catch (error) {
+        try { await close(); } catch (cleanup) { throw retirementError('preparing runtime construction and join failed', new AggregateError([error, cleanup])); }
+        throw error;
+      }
+    },
     async close() {},
   });
+}
+
+/** Same held signed composition as the resident-worker launcher, but a
+ * separate native family: there is no Run/generation parent or image selector
+ * supplied by its caller. The source owner retains the SQL/consent gates. */
+export async function openInstalledSourceGitController(selected: HeldInstalledRuntime, anchor: HeldInstalledAnchor,
+  toolchain: RetainedVerifierToolchain, options: { signal?: AbortSignal } = {}): Promise<Readonly<{
+    pid: number; processStartToken: string;
+    reserve(input: HeldSourceGitInput, recipe: NativeSourceGitRecipe): NativeSourceGitScope;
+    constructionRetirement(): Readonly<{ pollRetired(): NativeSourceGitRetirementObservation | undefined;
+      pollLifecycleSnapshot(): Buffer | undefined }> | undefined;
+    close(): Promise<void>;
+  }>> {
+  withInstalledWorkerRoot(selected, anchor, () => {});
+  const signal = options.signal;
+  signal?.throwIfAborted();
+  let helper: NativeImage | undefined, bwrap: NativeImage | undefined, inspector: NativeSourceGitInspectorImage | undefined;
+  let guest: NativeSourceGitToolchain | undefined, controller: NativeController | undefined, closePromise: Promise<void> | undefined;
+  let reserved = false, closed = false, reservedInput: object | undefined;
+  const close = () => {
+    closed = true;
+    return closePromise ??= (async () => {
+      const failures: unknown[] = [];
+      // Native close revokes synchronously before the first await. The source
+      // domain and every borrowed output must join before runtime producers.
+      if (controller) try { await joinController(controller); } catch (error) { failures.push(error); }
+      if (guest) try { await closeInstalledSourceGitToolchain(selected, guest); } catch (error) { failures.push(error); }
+      for (const image of [inspector, bwrap, helper]) if (image) try { image.close(); } catch (error) { failures.push(error); }
+      if (failures.length) throw failures.find(error => error instanceof ResourceRetirementError) ??
+        retirementError('source controller and signed runtime resources did not retire', new AggregateError(failures));
+    })();
+  };
+  try {
+    const binding = await loadInstalledWorkerNative(selected, signal);
+    if (binding.sourceInterfaceVersion !== 1) throw new LinuxExecutionIdentityError('installed native source recipe is unavailable');
+    helper = await sealInstalledWorkerImage(selected, LINUX_WORKER_RECIPE.launcherId); signal?.throwIfAborted();
+    bwrap = await sealInstalledWorkerImage(selected, LINUX_WORKER_RECIPE.bubblewrapId); signal?.throwIfAborted();
+    inspector = await sealInstalledSourceGitInspector(selected, signal);
+    guest = await startInstalledSourceGitToolchain(selected, toolchain, options);
+    const description = guest.describe(), manifest = toolchain.manifest;
+    if (description.imageDigest !== manifest.guestImageDigest || description.nodePath !== '/usr/bin/node' ||
+        description.nodeDigest !== manifest.node.digest || description.gitPath !== '/usr/bin/git' ||
+        description.gitDigest !== manifest.git.digest || description.files.length < 2 || description.files.length > GUEST_EXTRACTOR_RECIPE.maxMappedFiles)
+      mismatch('fixed source mappings differ from their exact retained signed toolchain');
+    withInstalledWorkerRoot(selected, anchor, fd => { controller = binding.openController(helper!, fd); });
+    await awaitNative(() => controller!.pollReady() ? true : undefined, close, signal);
+    return Object.freeze({
+      pid: controller!.pid, processStartToken: controller!.processStartToken,
+      reserve(input: HeldSourceGitInput, recipe: NativeSourceGitRecipe) {
+        if (closed || reserved) throw new KernelStorageError('RECOVERY_REQUIRED', 'source controller reservation was closed or consumed');
+        withInstalledWorkerRoot(selected, anchor, () => {});
+        const native = borrowSourceGitInputForExecution(input);
+        signal?.throwIfAborted();
+        // A failed dispatch is not retryable as a new source release.
+        reserved = true;
+        reservedInput = native;
+        return controller!.reserveSourceGit(native, helper!, bwrap!, guest!, inspector!, recipe);
+      },
+      constructionRetirement() { return reservedInput ? controller!.sourceGitConstructionRetirement(reservedInput) : undefined; },
+      close,
+    });
+  } catch (error) {
+    try { await close(); } catch (failure) {
+      if (failure instanceof ResourceRetirementError) throw failure;
+      throw retirementError('source construction failed and resources did not retire', new AggregateError([error, failure]));
+    }
+    throw error;
+  }
+}
+
+/** Cleanup only. The original birth is reopened by the current StateOwner;
+ * no source/toolchain images, recipe, payload root or execution are accepted.
+ * Failure preserves uncertainty; this never resumes an old source attempt. */
+export async function closeInstalledRetainedSourceGit(selected: HeldInstalledRuntime, anchor: HeldInstalledAnchor,
+  input: HeldRetainedSourceGitInput, options: { signal?: AbortSignal } = {}): Promise<NativeJoinedSourceGitRetirement> {
+  return closeInstalledSourceGitCleanup(selected, anchor, input, options, false);
+}
+export async function closeInstalledRegisteredAbsentSourceGit(selected: HeldInstalledRuntime, anchor: HeldInstalledAnchor,
+  input: HeldRegisteredAbsentSourceGitInput, options: { signal?: AbortSignal } = {}): Promise<NativeJoinedSourceGitRetirement> {
+  return closeInstalledSourceGitCleanup(selected, anchor, input, options, true);
+}
+export type NativeJoinedSourceGitRetirement = Readonly<{
+  observation: NativeSourceGitRetirementObservation; lifecycleSnapshot: Buffer;
+}>;
+async function closeInstalledSourceGitCleanup(selected: HeldInstalledRuntime, anchor: HeldInstalledAnchor,
+  input: HeldRetainedSourceGitInput | HeldRegisteredAbsentSourceGitInput, options: { signal?: AbortSignal }, registeredAbsent: boolean): Promise<NativeJoinedSourceGitRetirement> {
+  withInstalledWorkerRoot(selected, anchor, () => {});
+  const original = registeredAbsent ? borrowRegisteredAbsentSourceGitInputForCleanup(input as HeldRegisteredAbsentSourceGitInput)
+    : borrowRetainedSourceGitInputForCleanup(input as HeldRetainedSourceGitInput);
+  const signal = options.signal; signal?.throwIfAborted();
+  let helper: NativeImage | undefined, controller: NativeController | undefined;
+  let closing: Promise<void> | undefined;
+  const close = () => closing ??= (async () => {
+    const failures: unknown[] = [];
+    if (controller) try { await joinController(controller); } catch (error) { failures.push(error); }
+    if (helper) try { helper.close(); } catch (error) { failures.push(error); }
+    if (failures.length) throw failures.find(error => error instanceof ResourceRetirementError) ??
+      retirementError('retained source checker resources did not retire', new AggregateError(failures));
+  })();
+  try {
+    const binding = await loadInstalledWorkerNative(selected, signal);
+    if (binding.sourceInterfaceVersion !== 1) throw new LinuxExecutionIdentityError('installed source cleanup is unavailable');
+    helper = await sealInstalledWorkerImage(selected, LINUX_WORKER_RECIPE.launcherId); signal?.throwIfAborted();
+    withInstalledWorkerRoot(selected, anchor, fd => { controller = binding.openController(helper!, fd); });
+    await awaitNative(() => controller!.pollReady() ? true : undefined, close, signal);
+    const scope = registeredAbsent ? controller!.cleanupRegisteredAbsentSourceGit(original) : controller!.cleanupRetainedSourceGit(original);
+    await awaitNative(() => scope.pollCleaned(), close, signal);
+    await close();
+    const observation = scope.pollRetired();
+    const lifecycleSnapshot = scope.pollLifecycleSnapshot();
+    if (!observation || observation.origin !== (registeredAbsent ? 'original_birth_registered_absent_checker' : 'original_birth_current_checker') ||
+        observation.inspectionId !== input.identity.inspectionId || observation.stagingNonceDigest !== input.identity.stagingNonceDigest ||
+        observation.targetRef !== input.identity.targetRef || observation.inputIntentRef !== input.identity.inputIntentRef ||
+        !Buffer.isBuffer(lifecycleSnapshot) || lifecycleSnapshot.length < 1 || lifecycleSnapshot.length > 1_048_576)
+      mismatch('retained source checker lost its original birth binding');
+    return Object.freeze({ observation: immutableSnapshot(observation), lifecycleSnapshot: Buffer.from(lifecycleSnapshot) });
+  } catch (error) {
+    try { await close(); } catch (join) {
+      if (join instanceof ResourceRetirementError) throw join;
+      throw retirementError('retained source cleanup and current checker did not join', new AggregateError([error, join]));
+    }
+    throw error;
+  }
 }
 
 export type LinuxInvocationClaim = Readonly<{
@@ -475,7 +784,7 @@ function guestInput(toolchain: RetainedVerifierToolchain): NativeGuestExtraction
     pinnedExecutables: guestToolchainExecutables(manifest).map(entry => ({ path: entry.canonicalGuestPath, digest: entry.digest })) };
 }
 
-function assertGuestDescription(owner: NativeGuestToolchain, toolchain: RetainedVerifierToolchain): void {
+function assertGuestDescription(owner: Pick<NativeGuestToolchain, 'describe'>, toolchain: RetainedVerifierToolchain): void {
   const description = owner.describe(), manifest = toolchain.manifest;
   if (description.imageDigest !== manifest.guestImageDigest || description.nodePath !== manifest.node.canonicalGuestPath ||
       description.nodeDigest !== manifest.node.digest || description.files.length < 2 || description.files.length > GUEST_EXTRACTOR_RECIPE.maxMappedFiles ||
@@ -665,6 +974,52 @@ export async function openLinuxWorkerLauncher(options?: LinuxWorkerInstallation)
     catch (cleanup) { throw retirementError('cgroup lookup and installation retirement failed', new AggregateError([error, cleanup])); }
     throw error;
   }
+  let loadedBinding: NativeBinding | undefined;
+  async function startSignedGuest(toolchain: RetainedVerifierToolchain, signal: AbortSignal | undefined, sourceGit: false): Promise<HeldGuestPreparation>;
+  async function startSignedGuest(toolchain: RetainedVerifierToolchain, signal: AbortSignal | undefined, sourceGit: true): Promise<Readonly<{ job: NativeSourceGitToolchain; close(): Promise<void> }>>;
+  async function startSignedGuest(toolchain: RetainedVerifierToolchain, signal: AbortSignal | undefined, sourceGit: boolean) {
+    const entry = bundle.entries.find(value => value.entryId === GUEST_EXTRACTOR_RECIPE.entryId);
+    const imageEntry = bundle.entries.find(value => value.digest === toolchain.manifest.guestImageRef);
+    if (!entry || entry.role !== 'platform_helper' || !entry.executable || entry.version !== '1' ||
+        !imageEntry || imageEntry.executable || imageEntry.role !== 'bundle_object' ||
+        imageEntry.byteCount !== toolchain.manifest.guestImageByteCount) mismatch('signed guest helper/image closure is missing');
+    const handles: FileHandle[] = []; let job: NativeGuestToolchain | NativeSourceGitToolchain | undefined;
+    try {
+      const addon = await openInstalledFile(installation, entry.relativePath); handles.push(addon);
+      const image = await openInstalledFile(installation, imageEntry.relativePath); handles.push(image);
+      const metadata = await addon.stat();
+      if (!metadata.isFile() || metadata.mode & 0o022 || (metadata.uid !== process.geteuid!() && metadata.uid !== 0) || metadata.size !== entry.byteCount ||
+          await hashHeld(addon.fd, entry.byteCount, () => signal?.throwIfAborted()) !== entry.digest)
+        mismatch('native guest extractor is not the exact signed image');
+      const loaded = new Module('cliq-linux-guest-extractor'); process.dlopen(loaded, `/proc/self/fd/${addon.fd}`);
+      const extractor = loaded.exports as NativeGuestExtractorBinding;
+      if (extractor.interfaceVersion !== 1 || (sourceGit ? typeof extractor.beginSourceGit !== 'function' : typeof extractor.begin !== 'function'))
+        mismatch('unsupported signed guest extractor interface');
+      job = sourceGit ? extractor.beginSourceGit!(image.fd, guestInput(toolchain)) : extractor.begin(image.fd, guestInput(toolchain));
+      const original = job;
+      await awaitNative(() => original.pollReady() ? true : undefined, () => original.close(), signal, 15_000);
+      assertGuestDescription(original, toolchain);
+      if (sourceGit) {
+        const source = (original as NativeSourceGitToolchain).describe();
+        if (toolchain.manifest.git.canonicalGuestPath !== '/usr/bin/git' || source.gitPath !== '/usr/bin/git' ||
+            source.gitDigest !== toolchain.manifest.git.digest || !source.files.some(file => file.path === '/usr/bin/git' && file.digest === source.gitDigest))
+          mismatch('actual frozen Git mapping differs from its retained signed guest toolchain');
+      }
+      return Object.freeze({ job: original, close: () => original.close() });
+    } catch (error) {
+      if (job) try { await job.close(); }
+      catch (cleanup) { throw retirementError('signed guest construction and original extraction did not join', new AggregateError([error, cleanup])); }
+      throw error;
+    }
+    finally {
+      try { await retireFiles(handles); }
+      catch (error) {
+        if (job) try { await job.close(); }
+        catch (cleanup) { throw retirementError('guest source and original extraction did not retire', new AggregateError([error, cleanup])); }
+        throw error;
+      }
+    }
+  }
   return openWorkerLauncher(bundle, options.cgroupParent, {
     assertHeld() {},
     withRoot(operation) { operation(cgroup.fd); },
@@ -679,7 +1034,7 @@ export async function openLinuxWorkerLauncher(options?: LinuxWorkerInstallation)
             await hashHeld(addon.fd, metadata.size, recheck) !== addonEntry.digest) mismatch('installed native worker module is not signed');
         const loaded = new Module('cliq-linux-worker-native');
         process.dlopen(loaded, `/proc/self/fd/${addon.fd}`);
-        return loaded.exports as NativeBinding;
+        loadedBinding = loaded.exports as NativeBinding; return loadedBinding;
       } finally { await retireFiles([addon]); }
     },
     async image(entryId, binding) {
@@ -697,39 +1052,42 @@ export async function openLinuxWorkerLauncher(options?: LinuxWorkerInstallation)
       return sealed!;
     },
     async guest(toolchain, signal) {
-      const entry = bundle.entries.find(value => value.entryId === GUEST_EXTRACTOR_RECIPE.entryId);
-      const imageEntry = bundle.entries.find(value => value.digest === toolchain.manifest.guestImageRef);
-      if (!entry || entry.role !== 'platform_helper' || !entry.executable || entry.version !== '1' ||
-          !imageEntry || imageEntry.executable || imageEntry.role !== 'bundle_object' ||
-          imageEntry.byteCount !== toolchain.manifest.guestImageByteCount) mismatch('signed guest helper/image closure is missing');
-      const handles: FileHandle[] = [];
-      let job: NativeGuestToolchain | undefined;
+      return startSignedGuest(toolchain, signal, false);
+    },
+    async preparing(toolchain, signal) {
+      const entry = bundle.entries.find(value => value.entryId === 'source_git_inspector');
+      if (!loadedBinding || loadedBinding.sourceInterfaceVersion !== 1 || !entry || entry.role !== 'platform_helper' || entry.executable ||
+          entry.version !== '1' || entry.relativePath !== 'helpers/source-git-inspector.mjs' || entry.byteCount < 1 || entry.byteCount > 1_048_576)
+        throw new LinuxExecutionIdentityError('the fixed signed preparing Git inspector is unavailable');
+      let inspector: NativeSourceGitInspectorImage | undefined, guest: Awaited<ReturnType<typeof startSignedGuest>> | undefined;
+      let closing: Promise<void> | undefined;
+      const close = () => closing ??= (async () => {
+        const failures: unknown[] = [];
+        if (guest) try { await guest.close(); } catch (error) { failures.push(error); }
+        if (inspector) try { inspector.close(); } catch (error) { failures.push(error); }
+        if (failures.length) throw retirementError('signed preparing Git runtime did not join', new AggregateError(failures));
+      })();
       try {
-        const addon = await openInstalledFile(installation, entry.relativePath); handles.push(addon);
-        const image = await openInstalledFile(installation, imageEntry.relativePath); handles.push(image);
-        const metadata = await addon.stat();
-        if (!metadata.isFile() || metadata.mode & 0o022 || (metadata.uid !== process.geteuid!() && metadata.uid !== 0) || metadata.size !== entry.byteCount ||
-            await hashHeld(addon.fd, entry.byteCount, () => signal?.throwIfAborted()) !== entry.digest)
-          mismatch('native guest extractor is not the exact signed image');
-        const loaded = new Module('cliq-linux-guest-extractor');
-        process.dlopen(loaded, `/proc/self/fd/${addon.fd}`);
-        const extractor = loaded.exports as NativeGuestExtractorBinding;
-        if (extractor.interfaceVersion !== 1 || typeof extractor.begin !== 'function') mismatch('unsupported signed guest extractor interface');
-        job = extractor.begin(image.fd, guestInput(toolchain));
-        const original = job;
-        await awaitNative(() => original.pollReady() ? true : undefined, () => original.close(), signal, 15_000);
-        assertGuestDescription(original, toolchain);
-        return Object.freeze({ job: original, close: () => original.close() });
+        const source = await openInstalledFile(installation, entry.relativePath);
+        let sealingFailure: { error: unknown } | undefined;
+        try {
+          const metadata = await source.stat();
+          if (!metadata.isFile() || metadata.mode & 0o022 || (metadata.uid !== process.geteuid!() && metadata.uid !== 0) || metadata.size !== entry.byteCount ||
+              await hashHeld(source.fd, entry.byteCount, () => signal?.throwIfAborted()) !== entry.digest)
+            mismatch('preparing inspector is not the exact signed image');
+          inspector = loadedBinding.sealSourceGitInspector(source.fd);
+          if (inspector.identity.sha256 !== entry.digest || inspector.identity.byteCount !== entry.byteCount)
+            mismatch('preparing inspector differs from its signed bytes');
+        } catch (error) { sealingFailure = { error }; }
+        try { await retireFiles([source]); }
+        catch (error) { throw retirementError('preparing inspector source did not join', new AggregateError([...(sealingFailure ? [sealingFailure.error] : []), error])); }
+        if (sealingFailure) throw sealingFailure.error;
+        guest = await startSignedGuest(toolchain, signal, true); signal?.throwIfAborted();
+        return Object.freeze({ guest: guest.job, inspector: inspector!, close });
       } catch (error) {
-        if (job) await job.close();
+        try { await close(); }
+        catch (cleanup) { throw retirementError('signed preparing Git construction and join failed', new AggregateError([error, cleanup])); }
         throw error;
-      } finally {
-        try { await retireFiles(handles); }
-        catch (error) {
-          if (job) try { await job.close(); }
-          catch (cleanup) { throw retirementError('guest source and original extraction did not retire', new AggregateError([error, cleanup])); }
-          throw error;
-        }
       }
     },
     close: () => retireFiles([cgroup, installation]),
@@ -744,6 +1102,7 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
   loadNative(recheck: () => void): Promise<NativeBinding>;
   image(entryId: string, binding: NativeBinding): Promise<NativeImage>;
   guest(toolchain: RetainedVerifierToolchain, signal?: AbortSignal): Promise<HeldGuestPreparation>;
+  preparing?(toolchain: RetainedVerifierToolchain, signal?: AbortSignal): Promise<HeldPreparingGitRuntime>;
   close(): Promise<void>;
 }): Promise<LinuxWorkerLauncher> {
   const controllers = new Set<NativeController>(); let closed = false, closing: Promise<void> | undefined;
@@ -816,6 +1175,8 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
         let controllerClosed = false, controllerClosing: Promise<void> | undefined;
         const controllerAbort = new AbortController();
         const controllerGuestOpenings = new Set<Promise<HeldGuestPreparation>>(), controllerGuests = new Set<HeldGuestPreparation>();
+        const preparingOpenings = new Set<Promise<HeldPreparingGitRuntime>>(), preparingRuntimes = new Set<HeldPreparingGitRuntime>();
+        let preparingOpened = false;
         const controllerVerifierStops = new Set<(deadline: number) => Promise<void>>();
         let retainedDeath: NativeContainmentDeathObservation | undefined;
         let retired: NativeRetainedWorkerRetirement | undefined;
@@ -851,6 +1212,12 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
                 catch (error) { failure ??= error; }
               }
               controllerGuests.clear();
+              for (const opening of preparingOpenings) {
+                try { preparingRuntimes.add(await opening); }
+                catch (error) { if (error instanceof ResourceRetirementError) failure ??= error; }
+              }
+              for (const runtime of preparingRuntimes) try { await runtime.close(); } catch (error) { failure ??= error; }
+              preparingRuntimes.clear();
               if (failure !== undefined) throw retirementError('worker controller or guest extraction did not join', failure);
             })();
           }
@@ -885,6 +1252,86 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
           const subreaperStartToken = `linux-subreaper:${native.pid}:${native.processStartToken}`;
           const controller: LinuxWorkerController = Object.freeze({
             pid: native.pid, processStartToken: native.processStartToken, subreaperStartToken, preparationBirth,
+            async openPreparingGit({ input, recipe, toolchain, signal: operationSignal }) {
+              if (this !== controller) throw new TypeError('invalid worker controller'); controllerReceiver();
+              if (preparingOpened || !source.preparing || binding.preparationInterfaceVersion !== 1)
+                throw new LinuxExecutionIdentityError('same-controller fixed Git preparation is unavailable or consumed');
+              const fixed = preparingRecipe(recipe), original = borrowPreparingGitInputForExecution(input);
+              const preparingSignal = AbortSignal.any([controllerAbort.signal, ...(operationSignal ? [operationSignal] : [])]);
+              preparingSignal.throwIfAborted(); preparingOpened = true;
+              const opening = source.preparing(toolchain, preparingSignal); preparingOpenings.add(opening);
+              let runtime: HeldPreparingGitRuntime;
+              try { runtime = await opening; preparingRuntimes.add(runtime); preparingOpenings.delete(opening); }
+              catch (error) { if (!(error instanceof ResourceRetirementError)) preparingOpenings.delete(opening); throw error; }
+              try { controllerReceiver(); preparingSignal.throwIfAborted(); }
+              catch (error) {
+                try { await runtime.close(); preparingRuntimes.delete(runtime); }
+                catch (cleanup) { throw retirementError('preparing runtime was revoked before reserve and failed to join', new AggregateError([error, cleanup])); }
+                throw error;
+              }
+              let reserved = false, registered = false;
+              let runtimeClosing: Promise<void> | undefined;
+              const held: HeldPreparingGitScope = Object.freeze({
+                signal: preparingSignal,
+                recipe: fixed,
+                reserve() {
+                  if (this !== held || reserved) throw new TypeError('invalid or consumed preparing Git receiver');
+                  controllerReceiver(); preparingSignal.throwIfAborted(); input.assertHeld();
+                  reserved = true;
+                  return native.reservePreparationGit(original, helper, bwrap, runtime.guest, runtime.inspector, fixed);
+                },
+                constructionRetirement() {
+                  if (this !== held) throw new TypeError('invalid preparing construction receiver');
+                  return reserved ? native.preparationGitConstructionRetirement(original) : undefined;
+                },
+                registerStop(stop: (deadline: number) => Promise<void>) {
+                  if (this !== held || registered || typeof stop !== 'function') throw new TypeError('preparing stop owner is invalid or consumed');
+                  controllerReceiver(); registered = true; controllerVerifierStops.add(stop);
+                  return () => { controllerVerifierStops.delete(stop); };
+                },
+                closeRuntime() {
+                  if (this !== held) throw new TypeError('invalid preparing runtime receiver');
+                  return runtimeClosing ??= runtime.close().then(() => { preparingRuntimes.delete(runtime); });
+                },
+              });
+              return held;
+            },
+            async cleanupRetainedPreparingGit({ input, recipe, signal: operationSignal }) {
+              if (this !== controller) throw new TypeError('invalid preparing cleanup controller'); controllerReceiver();
+              if (preparingOpened || binding.preparationInterfaceVersion !== 1)
+                throw new LinuxExecutionIdentityError('cleanup-only preparing checker is unavailable or consumed');
+              const fixed = preparingRecipe(recipe), original = borrowRetainedPreparingGitInputForCleanup(input);
+              const cleanupSignal = AbortSignal.any([controllerAbort.signal, ...(operationSignal ? [operationSignal] : [])]);
+              cleanupSignal.throwIfAborted(); preparingOpened = true;
+              let scope: NativeRetainedPreparingGitScope | undefined;
+              try {
+                scope = native.cleanupRetainedPreparingGit(original, fixed);
+                const actual = scope;
+                await awaitNative(() => actual.pollCleaned(), closeController, cleanupSignal, 2000);
+                await closeController();
+                const observed = actual.pollRetired();
+                if (!observed || observed.origin !== 'original_birth_current_checker' || observed.completed !== 0 ||
+                    ![0, 2, 4, 5, 6, 7, 8, 9, 10].includes(observed.lastBirthPhase) ||
+                    !Number.isSafeInteger(observed.observedAtMs) || observed.observedAtMs < 1)
+                  throw new ResourceRetirementError('preparing cleanup has no complete original prefix and real joined checker', undefined);
+                for (const key of ['runId', 'generationId', 'launchId', 'spawnNonceDigest', 'activationNonceDigest',
+                  'generationCreationNonceDigest', 'generationRef', 'inputIntentRef', 'originalSupervisorPid', 'originalSupervisorStartToken'] as const)
+                  if (observed[key] !== input.identity[key]) throw new ResourceRetirementError('preparing cleanup substitutes its original input', undefined);
+                const receipt = Object.freeze({}) as NativeRetainedPreparingGitRetirement;
+                retainedPreparingGitRetirements.set(receipt, { observation: immutableSnapshot(observed), input, recipe: fixed,
+                  checker: Object.freeze({ pid: native.pid, processStartToken: native.processStartToken, controllerBirthDigest, joined: true }) });
+                return receipt;
+              } catch (error) {
+                const construction = !scope ? native.preparationGitConstructionRetirement(original) : undefined;
+                try { await closeController(); }
+                catch (cleanup) { throw retirementError('preparing cleanup and original checker join failed', new AggregateError([error, cleanup])); }
+                if (construction) {
+                  try { if (!construction.pollRetired()) throw new ResourceRetirementError('preparing construction closure is incomplete', undefined); }
+                  catch (cleanup) { throw retirementError('preparing cleanup construction did not retire', new AggregateError([error, cleanup])); }
+                }
+                throw error;
+              }
+            },
             async bindWorkerReservation({ closure, reservation, activationNonceDigest }) {
               if (this !== controller) throw new TypeError('invalid worker controller'); controllerReceiver();
               same(closure.bundle, bundle, 'reservation bundle');
@@ -1261,6 +1708,7 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
             },
             async close() { if (this !== controller) throw new TypeError('invalid worker controller'); await closeController(); controllers.delete(native); }
           });
+          linuxWorkerControllers.add(controller);
           return controller;
         } catch (error) {
           // Native ownership already exists. Getter/wrapper construction

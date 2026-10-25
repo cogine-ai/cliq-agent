@@ -12,6 +12,8 @@ export type RunApplyRequest = {
   sourceRunId: string; expectedRunResultRef: string;
   budgets?: { wallTimeMs?: number; toolCalls?: number };
   verifierExecutionGrantIds?: string[];
+  sourceInspectionGrantId?: string;
+  ignoreReadGrantIds?: string[];
 };
 export type NormalizedRunApplyRequest = Omit<RunApplyRequest, 'budgets' | 'verifierExecutionGrantIds'> & {
   budgets: { wallTimeMs: number; toolCalls: number }; verifierExecutionGrantIds: string[];
@@ -30,7 +32,7 @@ export function normalizeRunApplyRequest(value: unknown): {
   try {
     assertControlWireJson(value);
     const data = controlWireRecord(value, ['protocolVersion', 'method', 'requestId', 'requestDigest',
-      'admissionKey', 'sourceRunId', 'expectedRunResultRef'], ['budgets', 'verifierExecutionGrantIds']);
+      'admissionKey', 'sourceRunId', 'expectedRunResultRef'], ['budgets', 'verifierExecutionGrantIds', 'sourceInspectionGrantId', 'ignoreReadGrantIds']);
     if (data.protocolVersion !== 1 || data.method !== 'run.apply') throw new TypeError('expected protocol-v1 run.apply');
     const requestId = text(data.requestId), admissionKey = text(data.admissionKey), requestDigest = text(data.requestDigest);
     assertRequestId(requestId); assertAdmissionKey(admissionKey); assertArtifactRef(requestDigest);
@@ -41,12 +43,18 @@ export function normalizeRunApplyRequest(value: unknown): {
     if (!Array.isArray(suppliedGrants) || suppliedGrants.length > 32) throw new TypeError('delivery verifier grants exceed their bounded array');
     const verifierExecutionGrantIds = suppliedGrants.map(text);
     if (new Set(verifierExecutionGrantIds).size !== verifierExecutionGrantIds.length) throw new TypeError('delivery verifier grants must be unique');
+    const ignoreGrants = Object.hasOwn(data, 'ignoreReadGrantIds') ? data.ignoreReadGrantIds : [];
+    if (!Array.isArray(ignoreGrants) || ignoreGrants.length > 128) throw new TypeError('delivery ignore grants exceed their bounded array');
+    const ignoreReadGrantIds = ignoreGrants.map(text);
+    if (new Set(ignoreReadGrantIds).size !== ignoreReadGrantIds.length) throw new TypeError('delivery ignore grants must be unique');
     const { requestDigest: _digest, ...originalCore } = data;
     const originalRequest = { ...originalCore, requestDigest };
     if (canonicalJsonBytes(originalRequest).length > 1048576 || canonicalSha256(originalCore) !== requestDigest)
       throw new TypeError('delivery request digest or byte bound differs');
     return immutableSnapshot({ request: { protocolVersion: 1, method: 'run.apply', requestId, requestDigest, admissionKey,
       sourceRunId: text(data.sourceRunId), expectedRunResultRef,
+      ...(Object.hasOwn(data, 'sourceInspectionGrantId') ? { sourceInspectionGrantId: text(data.sourceInspectionGrantId) } : {}),
+      ...(Object.hasOwn(data, 'ignoreReadGrantIds') ? { ignoreReadGrantIds } : {}),
       budgets: { wallTimeMs: normalizedBudgets.wallTimeMs, toolCalls: normalizedBudgets.toolCalls }, verifierExecutionGrantIds },
       originalRequest, originalRequestDigest: requestDigest });
   } catch (cause) {

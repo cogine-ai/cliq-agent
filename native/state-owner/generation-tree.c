@@ -17,6 +17,7 @@ struct generation_tree {
     generation_borrow *borrows;
     generation_cursor *cursors;
     generation_stream *streams;
+    preparation_git_input *preparation_inputs;
     generation_tree *next;
 };
 struct generation_borrow {
@@ -36,7 +37,9 @@ static napi_value generation_retirement_error(napi_env env, generation_tree *tre
     napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "private generation resource retirement remains uncertain"); return NULL;
 }
 
-static void close_tree(generation_tree *tree) {
+static int close_tree(generation_tree *tree) {
+    int preparation = close_tree_preparation_inputs(tree);
+    if (preparation) return preparation;
     close_tree_streams(tree);
     for (generation_borrow *borrow = tree->borrows; borrow; borrow = borrow->next) {
         retire_generation_fd(tree, &borrow->fd);
@@ -46,6 +49,7 @@ static void close_tree(generation_tree *tree) {
     for (int i = 4; i >= 0; i--) {
         retire_generation_fd(tree, &tree->parents[i]);
     }
+    return tree->retirement_failed || tree->lock->generation_retirement_error;
 }
 static void close_lock_trees(state_lock *lock) {
     for (generation_tree *tree = lock->trees; tree; tree = tree->next) close_tree(tree);
@@ -53,7 +57,7 @@ static void close_lock_trees(state_lock *lock) {
 static void free_tree_if_done(napi_env env, generation_tree *tree) {
     /* Strong JS references do not order environment finalizers. Raw parents
      * remain alive until every native child has unlinked from its list. */
-    if (!tree->finalized || tree->streams || tree->cursors || tree->borrows) return;
+    if (!tree->finalized || tree->streams || tree->cursors || tree->borrows || tree->preparation_inputs) return;
     state_lock *lock = tree->lock;
     napi_ref lock_ref = tree->lock_ref;
     generation_tree **link = &tree->lock->trees;
@@ -66,7 +70,7 @@ static void free_tree_if_done(napi_env env, generation_tree *tree) {
 static void finalize_tree(napi_env env, void *data, void *hint) {
     (void)hint;
     generation_tree *tree = data;
-    close_tree(tree);
+    (void)close_tree(tree);
     tree->finalized = 1;
     free_tree_if_done(env, tree);
 }
@@ -121,7 +125,9 @@ static napi_value tree_assert(napi_env env, napi_callback_info info) {
 static napi_value tree_close(napi_env env, napi_callback_info info) {
     generation_tree *tree = unwrap_tree(env, info);
     if (!tree) return NULL;
-    close_tree(tree);
+    if (close_tree(tree)) {
+        napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "preparing Git resources did not join; generation remains held"); return NULL;
+    }
     if (tree->retirement_failed || tree->lock->generation_retirement_error) return generation_retirement_error(env, tree);
     napi_value value;
     return napi_get_undefined(env, &value) == napi_ok ? value : NULL;
@@ -356,6 +362,7 @@ struct generation_stream {
 static const napi_type_tag cursor_tag = {0xa60ae5f30d39d96eULL, 0xa998f2ef4779fd9aULL};
 static const napi_type_tag stream_tag = {0xf9f6ca627d87c0b8ULL, 0x96f42b3d97f9311eULL};
 static int generation_children_retired(generation_tree *tree) {
+    if (!tree_preparation_inputs_retired(tree)) return 0;
     for (generation_cursor *cursor = tree->cursors; cursor; cursor = cursor->next)
         if (!cursor->closed || cursor->frames || cursor->active_file || cursor->depth) return 0;
     for (generation_stream *stream = tree->streams; stream; stream = stream->next)

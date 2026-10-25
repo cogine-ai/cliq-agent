@@ -2,22 +2,23 @@
  * ownership. Hold every ancestor: a later pathname lookup grants no authority. */
 typedef struct source_cursor source_cursor;
 typedef struct {
-    int *fds, git_fd, config_fd;
-    struct stat *ids, git_id, config_id;
+    int *fds, git_fd;
+    struct stat *ids, git_id;
     char **names, *path;
     size_t count;
-    off_t config_offset;
     source_cursor *cursors;
+    publication_git_reader *publication_git_readers;
     int finalized, retirement_error;
 } source_root;
 static const napi_type_tag source_root_tag = {0x6aa7d22ed5f2eec2ULL, 0x96f4193bc7fb4e09ULL};
 static int source_close_cursors(source_root *root);
+static int close_root_publication_git_readers(source_root *root);
 
 static int source_close_fds(source_root *root) {
     int failure = source_close_cursors(root);
-    const int config = root->config_fd, git = root->git_fd;
-    root->config_fd = root->git_fd = -1;
-    if (config >= 0 && close(config) < 0 && !failure) failure = errno;
+    if (close_root_publication_git_readers(root) && !failure) failure = root->retirement_error;
+    const int git = root->git_fd;
+    root->git_fd = -1;
     if (git >= 0 && close(git) < 0 && !failure) failure = errno;
     for (size_t i = root->count; i > 0; i--) {
         const int fd = root->fds[i - 1]; root->fds[i - 1] = -1;
@@ -30,23 +31,12 @@ static void source_free(source_root *root) {
     free(root->fds); free(root->ids); free(root->names); free(root->path); free(root);
 }
 static void source_free_if_done(source_root *root) {
-    if (root->finalized && !root->cursors) source_free(root);
+    if (root->finalized && !root->cursors && !root->publication_git_readers) source_free(root);
 }
 static void finalize_source_root(napi_env env, void *data, void *hint) {
     (void)env; (void)hint;
     source_root *root = data;
     source_close_fds(root); root->finalized = 1; source_free_if_done(root);
-}
-static int source_config_same(const struct stat *left, const struct stat *right) {
-    if (!S_ISREG(right->st_mode) || !same_inode(left, right) || left->st_size != right->st_size ||
-        left->st_uid != right->st_uid || left->st_mode != right->st_mode || left->st_nlink != right->st_nlink) return 0;
-#ifdef __APPLE__
-    return left->st_mtimespec.tv_sec == right->st_mtimespec.tv_sec && left->st_mtimespec.tv_nsec == right->st_mtimespec.tv_nsec &&
-        left->st_ctimespec.tv_sec == right->st_ctimespec.tv_sec && left->st_ctimespec.tv_nsec == right->st_ctimespec.tv_nsec;
-#else
-    return left->st_mtim.tv_sec == right->st_mtim.tv_sec && left->st_mtim.tv_nsec == right->st_mtim.tv_nsec &&
-        left->st_ctim.tv_sec == right->st_ctim.tv_sec && left->st_ctim.tv_nsec == right->st_ctim.tv_nsec;
-#endif
 }
 static int source_held(source_root *root) {
     struct stat opened, named;
@@ -63,9 +53,9 @@ static int source_held(source_root *root) {
         opened.st_dev != root->ids[root->count - 1].st_dev ||
         opened.st_uid != root->git_id.st_uid || fstatat(root_fd, ".git", &named, AT_SYMLINK_NOFOLLOW) < 0 ||
         !S_ISDIR(named.st_mode) || !same_inode(&opened, &named)) return 0;
-    if (root->config_fd < 0) return fstatat(root->git_fd, "config", &named, AT_SYMLINK_NOFOLLOW) < 0 && errno == ENOENT;
-    return fstat(root->config_fd, &opened) == 0 && source_config_same(&root->config_id, &opened) &&
-        fstatat(root->git_fd, "config", &named, AT_SYMLINK_NOFOLLOW) == 0 && source_config_same(&opened, &named);
+    /* Identity acquisition deliberately does not even stat config or objects.
+     * A source-only original attempt owns all later payload access. */
+    return 1;
 }
 static source_root *unwrap_source_root(napi_env env, napi_callback_info info) {
     napi_value self; bool tagged = false; source_root *root = NULL;
@@ -79,6 +69,9 @@ static source_root *unwrap_source_root(napi_env env, napi_callback_info info) {
 static napi_value source_assert(napi_env env, napi_callback_info info) {
     source_root *root = unwrap_source_root(env, info);
     if (!root) return NULL;
+    if (root->retirement_error) {
+        napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "source workspace descriptor retirement failed"); return NULL;
+    }
     if (!source_held(root)) return native_error(env, "source workspace descriptor identity changed or closed");
     napi_value value; return napi_get_undefined(env, &value) == napi_ok ? value : NULL;
 }
@@ -110,17 +103,10 @@ static napi_value source_config_chunk(napi_env env, napi_callback_info info) {
     source_root *root = unwrap_source_root(env, info);
     if (!root) return NULL;
     if (!source_held(root)) return native_error(env, "source workspace descriptor identity changed or closed");
-    if (root->config_fd < 0 || root->config_offset == root->config_id.st_size) {
+    if (root->git_fd < 0) {
         napi_value value; return napi_get_null(env, &value) == napi_ok ? value : NULL;
     }
-    unsigned char bytes[65536];
-    const off_t remaining = root->config_id.st_size - root->config_offset;
-    const size_t length = remaining < (off_t)sizeof(bytes) ? (size_t)remaining : sizeof(bytes);
-    ssize_t count;
-    do { count = pread(root->config_fd, bytes, length, root->config_offset); } while (count < 0 && errno == EINTR);
-    if (count <= 0 || !source_held(root)) return native_error(env, "source Git config changed or became unreadable");
-    root->config_offset += count;
-    napi_value value; return napi_create_buffer_copy(env, (size_t)count, bytes, NULL, &value) == napi_ok ? value : NULL;
+    return native_error(env, "Git payload requires the owning authorized source inspection");
 }
 #include "source-walk.c"
 static napi_value open_workspace_root(napi_env env, napi_callback_info info) {
@@ -130,7 +116,7 @@ static napi_value open_workspace_root(napi_env env, napi_callback_info info) {
         return native_error(env, "invalid source workspace path");
     source_root *root = calloc(1, sizeof(*root));
     if (!root) return native_error(env, "source workspace allocation failed");
-    root->git_fd = root->config_fd = -1;
+    root->git_fd = -1;
     root->path = malloc(length + 1);
     const char *error = "cannot open source workspace without following symlinks";
     if (!root->path || napi_get_value_string_utf8(env, argument, root->path, length + 1, &length) != napi_ok ||
@@ -162,11 +148,6 @@ static napi_value open_workspace_root(napi_env env, napi_callback_info info) {
     if (root->git_fd < 0) { if (errno != ENOENT) goto fail; }
     else {
         if (fstat(root->git_fd, &root->git_id) < 0 || root->git_id.st_uid != identity->st_uid || root->git_id.st_dev != identity->st_dev) goto fail;
-        error = "workspace .git/config must be a bounded regular file, not a symlink or special file";
-        root->config_fd = openat(root->git_fd, "config", O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
-        if (root->config_fd < 0) { if (errno != ENOENT) goto fail; }
-        else if (fstat(root->config_fd, &root->config_id) < 0 || !S_ISREG(root->config_id.st_mode) ||
-            root->config_id.st_dev != identity->st_dev || root->config_id.st_size < 0 || root->config_id.st_size > 1048576) goto fail;
     }
     error = "source workspace descriptor identity changed or closed";
     if (!source_held(root)) goto fail;

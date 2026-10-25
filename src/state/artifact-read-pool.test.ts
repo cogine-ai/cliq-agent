@@ -56,6 +56,13 @@ test('a production item read joins every issued real CAS close and preserves a l
     t.mock.method(handle, 'close', async () => {
       await close(); assert(active.delete(handle)); closed++;
       if (args[0] === path.join(root, refs[1]!)) { entered.release(); await release.promise; throw retirement; }
+      if (args[0] === path.join(root, refs[2]!) || args[0] === path.join(root, refs[3]!)) {
+        // Keep these real issued sibling returns pending until the original
+        // I/O failure has propagated to the production pool. A fast success
+        // before that failure is known may legitimately dispatch another row.
+        await ordinaryJoined.promise;
+        await new Promise<void>(resolve => setImmediate(resolve));
+      }
     });
     return handle;
   });

@@ -24,6 +24,9 @@ import { publicationEnvelopeLocations, publicationProgressCheckpointId, publicat
 import { decodeRunResult, decodeVerificationClosure } from '../../../src/state/result-artifacts.js';
 import { verificationCheckpointId } from '../../../src/state/run-result-recovery.js';
 import { supervisorInspectorIdentity } from '../../../src/state/supervisor-inspector.js';
+import { decodeSandboxProfile } from '../../../src/state/execution-closure.js';
+import { readPublicationGitIndexClosure } from '../../../src/state/publication-git-index.js';
+import { assertInstalledGitState, installedGitDataReader } from './installed-git-data.js';
 
 const ZERO = { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 };
 const ONE = { ...ZERO, toolCalls: 1 };
@@ -34,6 +37,7 @@ function same(left: unknown, right: unknown): void { check(canonicalSha256(left)
 
 export type InstalledDeliveryPublicationInput = {
   cut: Record<string, any>;
+  expectedGit?: true;
   readRetainedArtifact: (ref: string) => Promise<Buffer>;
   /** Actual readonly SQL history from this same fixture, not owners inferred
    * from an inspector's self-asserted epoch or a caller-chosen CAS pathname. */
@@ -121,7 +125,10 @@ async function inspect(input: InstalledDeliveryPublicationInput): Promise<Instal
   for (const [index, entry] of capturedFiles.entries()) check(((topology.fileModes[index]!.mode & 0o111) ? 0o755 : 0o644) === entry.mode);
   const observedSource = decodeSourceManifest(await object(plan.desiredSourceRef));
   const observedEntries = decodeWorkspaceEntries(await object(observedSource.entriesRef));
-  check(observedSource.treeDigest === observedEntries.treeDigest && observedSource.role === 'result' && observedSource.git === undefined);
+  check(observedSource.treeDigest === observedEntries.treeDigest && observedSource.role === 'result' &&
+    !!observedSource.git === !!input.expectedGit && !!captured.git === !!input.expectedGit &&
+    !!workspace.repositoryIdentityRef === !!input.expectedGit);
+  same(observedSource.git ?? null, captured.git ?? null);
   for (const key of ['workspaceIdentityDigest', 'sourceProjectionRef', 'sourceProjectionDigest', 'frozenIgnoreRulesRef', 'frozenIgnoreRulesDigest'] as const)
     check(observedSource[key] === captured[key]);
   for (const entry of observedEntries.entries) if (entry.kind === 'file') {
@@ -179,6 +186,9 @@ async function inspect(input: InstalledDeliveryPublicationInput): Promise<Instal
     publicationCP.reason === 'auto' && publicationCP.runItemSeq === items.length && publicationCP.journalSeq === cut.journal.length &&
     publicationCP.createdAt >= projection.observedAt && publicationCP.createdAt < run.deadlineAt &&
     parseCanonicalTime(publicationCP.createdAt) - parseCanonicalTime(projection.observedAt) <= 5000);
+  if (input.expectedGit) await assertInstalledGitState(installedGitDataReader(bytes), captured, state,
+    decodeSandboxProfile(await object(spec.sandboxProfileRef)).resources, true);
+  else check(!state.privateGitStateRef);
   const closure = decodeVerificationClosure(await object(result.verificationClosureRef));
   check(closure.runId === run.id && closure.resultSourceRef === result.resultSourceRef);
   const expectedFrontier = { schemaVersion: 1, kind: 'delivery', sourceRunResultRef: merged.sourceRunResultRef,
@@ -297,7 +307,7 @@ async function inspect(input: InstalledDeliveryPublicationInput): Promise<Instal
       snapshot.generationRef === sealed.generationRef && snapshot.checkpointId === resourceCP.id &&
       snapshot.workspaceStateRef === resourceCP.workspaceStateRef && snapshot.workspaceStateDigest === state.stateDigest &&
       snapshot.entriesRef === observedSource.entriesRef && snapshot.treeDigest === observedSource.treeDigest &&
-      snapshot.privateGitStateRef === undefined && snapshot.observedAt >= claim.timestamp && snapshot.observedAt <= handoff.createdAt);
+      snapshot.privateGitStateRef === state.privateGitStateRef && snapshot.observedAt >= claim.timestamp && snapshot.observedAt <= handoff.createdAt);
     publicationWorkerRetirement = Object.freeze({ launchId: sealed.workerLaunchId,
       supervisorInstanceId: claim.supervisorInstanceId!, leaseEpoch: claim.leaseEpoch,
       workspaceGenerationRef: snapshot.generationRef, snapshotEvidenceRef: sealed.snapshotEvidenceRef,
@@ -373,6 +383,9 @@ async function inspect(input: InstalledDeliveryPublicationInput): Promise<Instal
   const absence = await proof(projection.transientAbsenceEvidenceRef), closed = await proof(projection.projectionClosureEvidenceRef), git = await proof(projection.gitIndexUnchangedEvidenceRef);
   check(absence.kind === 'transient_absence' && closed.kind === 'projection_closure' && git.kind === 'git_index_unchanged' &&
     closed.observedAt === projection.observedAt && absence.observedAt <= projection.observedAt && git.observedAt <= projection.observedAt);
+  if (input.expectedGit) await readPublicationGitIndexClosure(installedGitDataReader(bytes), git,
+    { workspace, capturedSourceRef: plan.capturedWorkspaceRef, resources: decodeSandboxProfile(await object(spec.sandboxProfileRef)).resources });
+  else check(git.repositoryKind === 'non_git');
   for (const value of [absence, git]) check(value.inspectorIdentityRef === closed.inspectorIdentityRef && value.inspectorIdentityDigest === closed.inspectorIdentityDigest);
   const terminalOwner = await inspector(closed);
   check(publicationCP.createdAt >= terminalOwner.owner.acquiredAt &&

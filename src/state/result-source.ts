@@ -7,7 +7,10 @@ import { readCanonicalArtifact } from './agent-context.js';
 import type { ArtifactCatalog, PublishedArtifact } from './artifacts.js';
 import { decodeFrozenIgnoreRules, decodeSourceManifest, decodeSourceProjection, decodeWorkspaceEntries, decodeWorkspaceState } from './decoders.js';
 import { KernelStorageError } from './errors.js';
-import { checkedPath, checkEntries, checkProjection, checkNonGitSourceManifest } from './source-validation.js';
+import { checkedPath, checkEntries, checkProjection, checkSourceManifest } from './source-validation.js';
+import { readSourceProjectionData, type SourceProjectionReader } from './source-projection-data.js';
+import { loadFrozenPrivateGit } from '../workspace/run-workspace/private-git.js';
+import { decodeSandboxProfile } from './execution-closure.js';
 
 /** A reproducible data limit, not a StopIntent or proof of physical retirement. */
 export class CandidateSourceLimitError extends KernelStorageError {
@@ -25,7 +28,10 @@ type CandidateSourceGraph = {
   source: SourceManifest; sourceRef: string; diff: WorkspaceDiffV1; diffRef: string; metadata: PublishedArtifact[];
 };
 type CandidateSourceLimit = { reason: 'changed_paths' | 'changed_bytes'; observed: number; limit: number };
-export type CandidateSourceReader = Pick<ArtifactCatalog, 'readCanonical' | 'readChunks'>;
+export type CandidateSourceReader = Pick<ArtifactCatalog, 'readCanonical' | 'readChunks'> & Partial<SourceProjectionReader>;
+function completeReader(value: CandidateSourceReader): value is SourceProjectionReader {
+  return typeof value.readBoundedBytes === 'function' && typeof value.withReadSignal === 'function' && typeof value.assertReadActive === 'function';
+}
 
 async function planCandidateSource(artifacts: CandidateSourceReader, spec: RunSpec, workspaceStateRef: string, signal?: AbortSignal): Promise<
   | { kind: 'ready'; graph: CandidateSourceGraph; publications: Array<{ value: unknown; artifact: PublishedArtifact }> }
@@ -56,32 +62,39 @@ async function planCandidateSource(artifacts: CandidateSourceReader, spec: RunSp
   };
   const workspace = decodeWorkspaceState(await read(workspaceStateRef, 'cliq-workspace-state-v1'));
   const base = decodeSourceManifest(await read(spec.baseWorkspaceManifestRef, 'cliq-source-manifest-v1'));
-  if (base.git !== undefined || workspace.privateGitStateRef !== undefined)
-    throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'candidate source Git projection requires its implemented index and object closure');
   if (!exactKeys(base, ['schemaVersion', 'format', 'role', 'workspaceIdentityDigest', 'entriesRef', 'sourceProjectionRef',
-    'sourceProjectionDigest', 'frozenIgnoreRulesRef', 'frozenIgnoreRulesDigest', 'treeDigest', 'manifestDigest']) || base.role !== 'base' ||
+    'sourceProjectionDigest', 'frozenIgnoreRulesRef', 'frozenIgnoreRulesDigest', 'treeDigest', 'manifestDigest', ...(base.git ? ['git'] : [])]) || base.role !== 'base' ||
       workspace.baseWorkspaceManifestRef !== spec.baseWorkspaceManifestRef || base.sourceProjectionRef !== spec.sourceProjectionRef ||
       workspace.sourceProjectionDigest !== base.sourceProjectionDigest)
     mismatch('candidate source does not preserve its admitted base and projection');
-  checkNonGitSourceManifest(base);
+  checkSourceManifest(base);
   const projection = decodeSourceProjection(await read(spec.sourceProjectionRef, 'cliq-source-projection-v1'));
   checkProjection(projection);
+  if (!base.git && projection.classificationIndexRef !== undefined) mismatch('non-Git candidate carries a Git classification index');
   const rules = decodeFrozenIgnoreRules(await read(base.frozenIgnoreRulesRef, 'cliq-frozen-ignore-rules-v1'));
   if (projection.projectionDigest !== base.sourceProjectionDigest || projection.frozenIgnoreRulesRef !== base.frozenIgnoreRulesRef ||
       projection.frozenIgnoreRulesDigest !== base.frozenIgnoreRulesDigest || rules.rulesDigest !== base.frozenIgnoreRulesDigest)
     mismatch('candidate source frozen projection and ignore identities differ');
-  if (!exactKeys(rules, ['schemaVersion', 'format', 'matcherVersion', 'sources', 'rules', 'rulesDigest']) ||
+  if (!exactKeys(rules, ['schemaVersion', 'format', 'matcherVersion', 'sources', 'rules', 'rulesDigest', ...(base.git ? ['repositoryIdentityDigest'] : [])]) ||
       rules.matcherVersion !== 'cliq-git-wildmatch-v1' || !Array.isArray(rules.sources) || !Array.isArray(rules.rules))
-    mismatch('candidate source non-Git ignore manifest has invalid fields');
-  if (rules.sources.length || rules.rules.length)
-    throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'candidate source nonempty ignore rules require their implemented matcher');
+    mismatch('candidate source ignore manifest has invalid fields');
+  let selectedByFrozenSource: ((entry: import('../kernel/types.js').WorkspaceEntry) => boolean) | undefined;
+  if (base.git || rules.sources.length || rules.rules.length || workspace.privateGitStateRef) {
+    if (!completeReader(artifacts)) mismatch('candidate Git source requires complete bounded cancellable CAS reads');
+    const profile = decodeSandboxProfile(await read(spec.sandboxProfileRef, 'cliq-sandbox-profile-v1'));
+    const classification = await readSourceProjectionData(artifacts, base, projection, profile.resources, signal);
+    selectedByFrozenSource = classification.includes;
+    if (!base.git || !workspace.privateGitStateRef) mismatch('candidate Git source lost its original Checkpoint graph');
+    const current = await loadFrozenPrivateGit(artifacts, base, workspace, classification.rules, signal, profile.resources);
+    if (!current || current.index.objectFormat !== classification.index!.objectFormat) mismatch('candidate private Git format differs from its admitted source');
+  }
   const baseEntries = decodeWorkspaceEntries(await read(base.entriesRef, 'cliq-workspace-entries-v1'));
   const currentEntries = decodeWorkspaceEntries(await read(workspace.entriesRef, 'cliq-workspace-entries-v1'));
   if (base.treeDigest !== baseEntries.treeDigest) mismatch('candidate source base tree digest differs');
   checkEntries(baseEntries); checkEntries(currentEntries);
   const excluded = (path: string) => projection.explicitExcludes.some(selector =>
     path === selector.path || selector.scope === 'subtree' && covers(selector.path, path));
-  if (baseEntries.entries.some(entry => excluded(entry.path)))
+  if (baseEntries.entries.some(entry => selectedByFrozenSource ? !selectedByFrozenSource(entry) : excluded(entry.path)))
     mismatch('candidate source admitted base includes a frozen excluded path');
   let priorInvalidated: string | undefined;
   for (const path of workspace.invalidatedEphemeralPaths) {
@@ -105,7 +118,7 @@ async function planCandidateSource(artifacts: CandidateSourceReader, spec: RunSp
     for await (const _chunk of artifacts.readChunks(ref, byteLength)) { signal?.throwIfAborted(); }
     remember({ ref, byteLength, mediaType: 'application/octet-stream', schemaKind: 'cliq-workspace-file-v1' });
   }
-  const selected = currentEntries.entries.filter(entry => !excluded(entry.path));
+  const selected = currentEntries.entries.filter(entry => selectedByFrozenSource ? selectedByFrozenSource(entry) : !excluded(entry.path));
   const entries: WorkspaceEntryManifest = { ...currentEntries, entries: selected, entryCount: selected.length,
     byteCount: selected.reduce((sum, entry) => sum + (entry.kind === 'file' ? entry.size :
       entry.kind === 'symlink' ? Buffer.byteLength(entry.target) : 0), 0),

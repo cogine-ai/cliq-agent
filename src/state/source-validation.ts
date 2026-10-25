@@ -67,12 +67,14 @@ export function checkEntries(manifest: WorkspaceEntryManifest): void {
 
 export function checkProjection(projection: SourceProjectionSpec): void {
   if (!exactKeys(projection, ['schemaVersion', 'matcherVersion', 'frozenIgnoreRulesRef', 'frozenIgnoreRulesDigest',
-    'explicitIncludes', 'explicitExcludes', 'maxChangedPaths', 'maxChangedBytes', 'projectionDigest']) ||
+    'explicitIncludes', 'explicitExcludes', 'maxChangedPaths', 'maxChangedBytes', 'projectionDigest',
+    ...(projection.classificationIndexRef !== undefined ? ['classificationIndexRef'] : [])]) ||
       !Array.isArray(projection.explicitIncludes) || !Array.isArray(projection.explicitExcludes) ||
       projection.explicitExcludes.length > 128 || !Number.isSafeInteger(projection.maxChangedPaths) ||
       projection.maxChangedPaths < 0 || projection.maxChangedPaths > 100_000 ||
       !Number.isSafeInteger(projection.maxChangedBytes) || projection.maxChangedBytes < 0 || projection.maxChangedBytes > 4 * 1024 ** 3)
     mismatch('candidate source projection has invalid fields or limits');
+  if (projection.classificationIndexRef !== undefined) assertArtifactRef(projection.classificationIndexRef);
   if (projection.explicitIncludes.length)
     throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'candidate source includes require their implemented authorization closure');
   const seen = new Set<string>();
@@ -94,4 +96,25 @@ export function checkNonGitSourceManifest(source: SourceManifest): void {
       digestOmitting(source, 'manifestDigest') !== source.manifestDigest) mismatch('candidate source manifest has invalid fields');
   for (const ref of [source.workspaceIdentityDigest, source.entriesRef, source.sourceProjectionRef, source.sourceProjectionDigest,
     source.frozenIgnoreRulesRef, source.frozenIgnoreRulesDigest, source.treeDigest, source.manifestDigest]) assertArtifactRef(ref);
+}
+
+/** Exact source schema. Git identity is independently closed against its
+ * canonical admitted index; it is never inferred from a current private index. */
+export function checkSourceManifest(source: SourceManifest): void {
+  if (!source.git) return checkNonGitSourceManifest(source);
+  const { git, ...ordinary } = source;
+  checkNonGitSourceManifest({ ...ordinary, manifestDigest: digestOmitting(ordinary, 'manifestDigest') });
+  if (!exactKeys(git, ['repositoryIdentityDigest', 'head', 'indexRef', 'indexTreeObjectId'])) mismatch('source Git identity has extra fields');
+  assertArtifactRef(git.repositoryIdentityDigest); assertArtifactRef(git.indexRef);
+  const head = git.head;
+  const objectId = (value: unknown) => typeof value === 'string' && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(value);
+  const name = (value: unknown) => typeof value === 'string' && value.length > 0 && Buffer.byteLength(value) <= 4096 &&
+    value !== '@' && Buffer.from(value).toString('utf8') === value && value === value.normalize('NFC') && !/[\x00-\x20\x7f~^:?*\[\\]/u.test(value) && !value.includes('..') && !value.includes('@{') &&
+    !value.startsWith('-') && !value.endsWith('.') && value.split('/').every(part => !!part && !part.startsWith('.') && !part.endsWith('.lock'));
+  if (!head || (head.kind === 'unborn' ? !exactKeys(head, ['kind', 'branch']) || !name(head.branch) :
+      head.kind === 'detached' ? !exactKeys(head, ['kind', 'objectId']) || !objectId(head.objectId) :
+      head.kind === 'symbolic' ? !exactKeys(head, ['kind', 'ref', 'objectId']) || !name(head.ref) || !head.ref.startsWith('refs/') || !objectId(head.objectId) : true) ||
+      !objectId(git.indexTreeObjectId)) mismatch('source Git HEAD or index tree is invalid');
+  // ordinary's digest still covers the original complete source, including Git.
+  if (digestOmitting(source, 'manifestDigest') !== source.manifestDigest) mismatch('source Git digest differs');
 }

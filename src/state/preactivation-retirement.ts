@@ -208,7 +208,7 @@ export const retirePreactivationLaunch = stateOperation('RECOVERY_REQUIRED', asy
     // Reobserve afterwards: a large legal tree must not refresh a cached timestamp.
     const observation = readRetainedWorkspaceObservation(await observeRetainedRunWorkspace({
       filesystem: owner.filesystem, artifacts, identity: closure.generation,
-      sourceRowVersion: cut.generation.rowVersion
+      sourceRowVersion: cut.generation.rowVersion, gitResources: closure.spec.resources
     }));
     if (observation.generationRef !== cut.generation.generationRef ||
         observation.generationIdentityDigest !== cut.generation.generationIdentityDigest) {

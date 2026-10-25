@@ -24,9 +24,9 @@ import { decodeInstalledModelAuthorityClosure, verifyInstalledModelAuthority,
 import { MODEL_BROKER_ENTRY_ID, MODEL_BROKER_RELATIVE_PATH, InstalledModelBrokerRefusalError,
   type ModelBrokerBinding, type NativeModelBrokerBinding, type NativeModelTransport, type NativeModelNoReleaseFence } from './model-broker-native.js';
 import { runInstalledCredentialAuthority, type HeldCredentialAuthorityLock } from './store.js';
-import type { NativeWorkerBinding, NativeWorkerImage } from '../sandbox/linux-worker.js';
+import type { NativeWorkerBinding, NativeWorkerImage, NativeSourceGitInspectorImage } from '../sandbox/linux-worker.js';
 import type { CredentialPlatformUser, NativeCredentialInspection, NativeCredentialPlatformBinding, NativeSecretServiceInput } from './credential-platform.js';
-import { GUEST_EXTRACTOR_RECIPE, type NativeGuestExtractorBinding, type NativeGuestToolchain } from '../sandbox/guest-toolchain.js';
+import { GUEST_EXTRACTOR_RECIPE, type NativeGuestExtractorBinding, type NativeGuestToolchain, type NativeSourceGitToolchain } from '../sandbox/guest-toolchain.js';
 import { decodeGuestToolchainManifest, guestToolchainExecutables, guestToolchainRoots, validateGuestToolchainMetadata,
   type RetainedVerifierToolchain } from './guest-toolchain.js';
 import { acquireHeldInstalledAnchor, executeHeldInstalledImage, initializeHeldInstalledKeeper, loadHeldStateOwnerImage,
@@ -175,7 +175,9 @@ type InstalledRuntimeBinding = {
   loadModelBroker(): Promise<NativeModelBrokerBinding>;
   openControlClient(): Promise<HeldInstalledControlClient>;
   sealWorkerImage(entryId: string): Promise<NativeWorkerImage>;
+  sealSourceGitInspector(signal?: AbortSignal): Promise<NativeSourceGitInspectorImage>;
   startGuestToolchain(toolchain: RetainedVerifierToolchain, options: { signal?: AbortSignal }): Promise<NativeGuestToolchain>;
+  startSourceGitToolchain(toolchain: RetainedVerifierToolchain, options: { signal?: AbortSignal }): Promise<NativeSourceGitToolchain>;
   closeGuestToolchain(job: NativeGuestToolchain): Promise<void>;
   credentialScope<T>(operation: (token: HeldCredentialAuthorityLock) => Promise<T>): Promise<T>;
 };
@@ -248,6 +250,13 @@ export function sealInstalledWorkerImage(selected: HeldInstalledRuntime, entryId
   if (!binding) mismatch('installed runtime is not a verified held selection');
   return binding.sealWorkerImage(entryId);
 }
+/** Fixed non-executable signed script friend. The native seal has a separate
+ * type tag, no descriptor getter, and is not a caller-selected program. */
+export function sealInstalledSourceGitInspector(selected: HeldInstalledRuntime, signal?: AbortSignal): Promise<NativeSourceGitInspectorImage> {
+  const binding = heldInstalledRuntimes.get(selected);
+  if (!binding) mismatch('source inspection requires a genuine held installed selection');
+  return binding.sealSourceGitInspector(signal);
+}
 
 /** Private fixed extractor bridge. The original imported CAS image remains
  * descriptor-held; native begin owns its asynchronous copy/hash/seal and join. */
@@ -262,6 +271,19 @@ export function startInstalledGuestToolchain(selected: HeldInstalledRuntime, too
 export function closeInstalledGuestToolchain(selected: HeldInstalledRuntime, job: NativeGuestToolchain): Promise<void> {
   const binding = heldInstalledRuntimes.get(selected);
   if (!binding) mismatch('guest retirement requires a genuine held installed selection');
+  return binding.closeGuestToolchain(job);
+}
+/** Fixed same-image Node + Git producer. This cannot reuse a Node-only native
+ * tag or let the caller select another executable, path, argv or library. */
+export function startInstalledSourceGitToolchain(selected: HeldInstalledRuntime, toolchain: RetainedVerifierToolchain,
+  options: { signal?: AbortSignal } = {}): Promise<NativeSourceGitToolchain> {
+  const binding = heldInstalledRuntimes.get(selected);
+  if (!binding) mismatch('source Git extraction requires a genuine held installed selection');
+  return binding.startSourceGitToolchain(toolchain, options);
+}
+export function closeInstalledSourceGitToolchain(selected: HeldInstalledRuntime, job: NativeSourceGitToolchain): Promise<void> {
+  const binding = heldInstalledRuntimes.get(selected);
+  if (!binding) mismatch('source Git retirement requires a genuine held installed selection');
   return binding.closeGuestToolchain(job);
 }
 
@@ -1706,6 +1728,32 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
               }
             });
           },
+          sealSourceGitInspector(signal) {
+            return enqueue(async () => {
+              await checkedRevalidate(signal);
+              const entry = signed.bundle.entries.find(value => value.entryId === 'source_git_inspector');
+              const file = signed.entries.get('source_git_inspector');
+              if (!workerNative || workerNative.sourceInterfaceVersion !== 1 || !entry || !file ||
+                  entry.role !== 'platform_helper' || entry.version !== '1' || entry.executable !== false ||
+                  entry.relativePath !== 'helpers/source-git-inspector.mjs' || entry.byteCount < 1 || entry.byteCount > 1024 * 1024)
+                throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'the fixed signed source inspector is not installed');
+              signal?.throwIfAborted();
+              const sealed = workerNative.sealSourceGitInspector(file.handle.fd);
+              try {
+                if (sealed.identity.sha256 !== entry.digest || sealed.identity.byteCount !== entry.byteCount)
+                  mismatch('sealed source inspector differs from its exact signed bytes');
+                await checkedRevalidate(signal); return sealed;
+              }
+              catch (error) {
+                try { sealed.close(); }
+                catch (failure) {
+                  const retirement = new ResourceRetirementError('installed source inspector seal did not retire', new AggregateError([error, failure]));
+                  rememberRetirement(retirement); throw retirement;
+                }
+                throw error;
+              }
+            });
+          },
           startGuestToolchain(toolchain, options) {
             return enqueue(async () => {
               const signal = options.signal ? AbortSignal.any([options.signal, guestShutdown.signal]) : guestShutdown.signal;
@@ -1756,6 +1804,64 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
                 if (description.imageDigest !== manifest.guestImageRef || description.nodePath !== manifest.node.canonicalGuestPath ||
                     description.nodeDigest !== manifest.node.digest || description.files.length < 1 || description.files.length > GUEST_EXTRACTOR_RECIPE.maxMappedFiles)
                   mismatch('native guest extraction differs from the retained manifest');
+                await checkedRevalidate(signal); current(); return job;
+              } catch (error) { await closeGuestToolchain(job); throw error; }
+            });
+          },
+          startSourceGitToolchain(toolchain, options) {
+            return enqueue(async () => {
+              const signal = options.signal ? AbortSignal.any([options.signal, guestShutdown.signal]) : guestShutdown.signal;
+              const current = () => {
+                signal.throwIfAborted(); healthy();
+                if (closed) throw new KernelStorageError('RECOVERY_REQUIRED', 'installed source Git extraction is closing');
+                assertSelection();
+              };
+              current();
+              if (!isMainThread || !isSea() || process.platform !== 'linux' || process.arch !== 'x64' || process.versions.node !== '24.21.0')
+                throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'source Git extraction requires the fixed signed Linux backend');
+              await checkedRevalidate(signal); current();
+              const bytes = signed.roots.get(toolchain.manifestRef);
+              if (!bytes) mismatch('source Git extraction is not in the selected signed closure');
+              const manifest = decodeGuestToolchainManifest(checkCanonicalBytes(bytes));
+              const signature = signed.roots.get(manifest.signatureRef);
+              if (!signature) mismatch('source Git extraction has no retained signature');
+              const expected = validateGuestToolchainMetadata(signed.bundle, toolchain.manifestRef, bytes, signature, releaseKeys);
+              if (canonicalSha256(expected) !== canonicalSha256(toolchain) || manifest.architecture !== 'x86_64' ||
+                  manifest.node.canonicalGuestPath !== '/usr/bin/node' || manifest.git.canonicalGuestPath !== '/usr/bin/git' ||
+                  manifest.guestImageByteCount > GUEST_EXTRACTOR_RECIPE.maxImageBytes)
+                mismatch('source Git extraction substitutes the pinned fixed recipe');
+              const image = casFiles.find(file => file.digest === manifest.guestImageRef);
+              if (!image) mismatch('source Git extraction lacks its original imported CAS image');
+              if (!guestExtractor) {
+                const entry = signed.bundle.entries.find(value => value.entryId === GUEST_EXTRACTOR_RECIPE.entryId);
+                const file = signed.entries.get(GUEST_EXTRACTOR_RECIPE.entryId);
+                if (!entry || !file || entry.role !== 'platform_helper' || !entry.executable || entry.version !== GUEST_EXTRACTOR_RECIPE.version ||
+                    entry.relativePath !== GUEST_EXTRACTOR_RECIPE.relativePath || entry.byteCount < 1 || entry.byteCount > TRUST_BYTES)
+                  mismatch('fixed signed guest extractor is missing');
+                const loaded = new Module('cliq-installed-linux-guest-extractor');
+                process.dlopen(loaded, `/proc/self/fd/${file.handle.fd}`);
+                const native = loaded.exports as NativeGuestExtractorBinding;
+                if (native.interfaceVersion !== 1 || typeof native.begin !== 'function') mismatch('unsupported installed guest extractor interface');
+                guestExtractor = native;
+              }
+              if (typeof guestExtractor.beginSourceGit !== 'function')
+                throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'fixed signed source Git extractor is unavailable');
+              current();
+              const job = guestExtractor.beginSourceGit(image.handle.fd, { imageDigest: manifest.guestImageDigest, imageByteCount: manifest.guestImageByteCount,
+                architecture: 'x86_64', nodePath: manifest.node.canonicalGuestPath, nodeDigest: manifest.node.digest,
+                pinnedExecutables: guestToolchainExecutables(manifest).map(entry => ({ path: entry.canonicalGuestPath, digest: entry.digest })) });
+              guestJobs.add(job);
+              try {
+                current();
+                while (!job.pollReady()) { current(); await yieldImmediate(); }
+                current();
+                const description = job.describe();
+                if (description.imageDigest !== manifest.guestImageRef || description.nodePath !== manifest.node.canonicalGuestPath ||
+                    description.nodeDigest !== manifest.node.digest || description.gitPath !== manifest.git.canonicalGuestPath ||
+                    description.gitDigest !== manifest.git.digest || description.files.length < 2 || description.files.length > GUEST_EXTRACTOR_RECIPE.maxMappedFiles ||
+                    !description.files.some(file => file.path === description.nodePath && file.digest === description.nodeDigest) ||
+                    !description.files.some(file => file.path === description.gitPath && file.digest === description.gitDigest))
+                  mismatch('native source Git extraction differs from both retained executable roots');
                 await checkedRevalidate(signal); current(); return job;
               } catch (error) { await closeGuestToolchain(job); throw error; }
             });

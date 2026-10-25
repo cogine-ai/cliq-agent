@@ -1,7 +1,7 @@
 import { canonicalSha256 } from '../../kernel/canonical.js';
 import { normalizeRunApplyRequest, runApplyIntentDigest } from '../../kernel/control-apply.js';
 import { decodeInstalledControlEnvelope } from '../../kernel/control-wire.js';
-import type { SourceInspectionAttemptV1, SourceInspectionTargetV1 } from '../../kernel/execution.js';
+import type { SourceInspectionAttemptV1, SourceInspectionTarget } from '../../kernel/execution.js';
 import { addCanonicalDuration, digestOmitting, identityHash } from '../../kernel/identity.js';
 import type { AdmittedContextManifest, ContextManifest, ControlResultV1, Run, RunEvent, RunFrontier, RunSpec,
   Session, WorkspaceStateManifest } from '../../kernel/types.js';
@@ -26,6 +26,8 @@ import { insertControlRequest, insertRunEvent, readAdmissionReplay, readCheckpoi
 import { readSourceInspectionAttempt, readSourceInspectionOriginalRequest } from '../source-inspection.js';
 import { readDeliveryCaptureTopology, readSourceInspectionRetirement } from '../source-inspection-owner.js';
 import { readSourceInspectionTargetData, resolveDeliverySourceCapture } from '../source-target.js';
+import { readRetainedSourceInspectionTarget } from '../source-target.js';
+import { decodeRepositoryIdentity } from '../repository-identity.js';
 import type { SqliteConnection, SqliteDriver } from '../sqlite-driver.js';
 import { assertActiveStateOwner, type StateOwnerContext } from '../state-owner.js';
 
@@ -38,7 +40,8 @@ type Binding = {
   driver: SqliteDriver; artifacts: ArtifactCatalog; owner: StateOwnerContext; identity: AuthenticatedControlIdentity;
   native: NativeStateOwner; normalized: Normalized; source: VerifiedDeliverySource; capture: Capture;
   workspace: Extract<import('../../kernel/types.js').WorkspaceIdentityV1, { kind: 'live' }>;
-  target: SourceInspectionTargetV1; session: Session; run: Run; spec: RunSpec; workspaceState: WorkspaceStateManifest;
+  repository?: import('../../kernel/types.js').RepositoryIdentity;
+  target: SourceInspectionTarget; session: Session; run: Run; spec: RunSpec; workspaceState: WorkspaceStateManifest;
   contextManifest: ContextManifest; response: ApplyResponse; responseRef: string; admittedRequestDigest: string;
   metadata: PublishedArtifact[]; signal?: AbortSignal;
 };
@@ -124,6 +127,8 @@ export async function prepareInstalledDelivery(input: {
     if (installed.bundleDigest !== source.assembly.runtime.runtimeBundleRef || installed.bundleDigest !== target.runtimeBundleRef ||
         installed.bundle.manifestDigest !== source.assembly.runtime.runtimeBundleManifestDigest)
       invalid('delivery requires its unchanged signed installed source runtime');
+    await readRetainedSourceInspectionTarget(artifacts, capture, readSourceInspectionOriginalRequest(driver, capture.inspectionId),
+      { bundle: installed.bundle, releaseKeys: installed.releaseKeys, sandboxProfile: profile }, { driver, owner, signal });
     const native = await installed.loadStateOwner(signal); await installed.revalidate(signal); return native;
   }, signal);
   await readSourceInspectionRetirement(driver, artifacts, capture, target);
@@ -132,6 +137,7 @@ export async function prepareInstalledDelivery(input: {
   const workspace = decodeWorkspaceIdentity(await readCanonicalArtifact(artifacts, session.workspaceIdentityRef));
   if (workspace.kind !== 'live' || workspace.ownerPrincipalId !== identity.principalId || workspace.identityDigest !== target.workspaceIdentityDigest)
     invalid('delivery requires its unchanged live Session workspace identity');
+  const repository = workspace.repositoryIdentityRef ? decodeRepositoryIdentity(await readCanonicalArtifact(artifacts, workspace.repositoryIdentityRef)) : undefined;
   const sessionProjection = decodeSessionProjection(await readCanonicalArtifact(artifacts, session.contextProjectionRef));
   if (sessionProjection.sessionId !== session.id || sessionProjection.contextRevision !== session.contextRevision ||
       sessionProjection.throughItemSeq !== session.latestItemSeq) invalid('delivery Session projection differs from its captured cursor');
@@ -140,11 +146,14 @@ export async function prepareInstalledDelivery(input: {
       !same(selection.sandboxResources, profile.resources)) invalid('delivery capture no longer owns its original Session cut');
   const base = decodeSourceManifest(await readCanonicalArtifact(artifacts, capture.outcome.sourceManifestRef));
   if (base.role !== 'base' || base.manifestDigest !== capture.outcome.sourceManifestDigest ||
-      base.sourceProjectionRef !== source.spec.sourceProjectionRef || base.workspaceIdentityDigest !== target.workspaceIdentityDigest)
+      base.sourceProjectionRef !== source.spec.sourceProjectionRef || base.workspaceIdentityDigest !== target.workspaceIdentityDigest ||
+      !!base.git !== !!capture.outcome.privateGitStateRef || !!base.git !== !!repository ||
+      base.git && base.git.repositoryIdentityDigest !== repository?.repositoryIdentityDigest)
     invalid('delivery A differs from its retained capture and inherited projection');
   const runId = identityHash('cliq-run-id-v1', identity.principalId, 'run.apply', normalized.request.admissionKey);
   const workspaceState: WorkspaceStateManifest = { schemaVersion: 1, format: 'cliq-workspace-state-v1', runId,
     baseWorkspaceManifestRef: capture.outcome.sourceManifestRef, entriesRef: base.entriesRef, invalidatedEphemeralPaths: [],
+    ...(capture.outcome.privateGitStateRef ? { privateGitStateRef: capture.outcome.privateGitStateRef } : {}),
     sourceProjectionDigest: base.sourceProjectionDigest, stateDigest: '' };
   workspaceState.stateDigest = digestOmitting(workspaceState, 'stateDigest'); decodeWorkspaceState(workspaceState);
   const stateArtifact = await artifacts.publishCanonical(workspaceState, workspaceState.format);
@@ -194,7 +203,8 @@ export async function prepareInstalledDelivery(input: {
     ...recoveryImage.metadata.filter(entry => entry.ref !== recoveryImage.sourceRef && entry.ref !== recoveryImage.diffRef)];
   const prepared: PreparedInstalledDelivery = Object.freeze({ kind: 'prepared_installed_delivery' });
   preparedDeliveries.set(prepared, { driver, artifacts, owner, identity, native: stateOwnerNative, normalized, source,
-    capture, target, workspace: immutableSnapshot(workspace), session: immutableSnapshot(session), run: immutableSnapshot(run), spec: immutableSnapshot(spec),
+    capture, target, workspace: immutableSnapshot(workspace), ...(repository ? { repository } : {}),
+    session: immutableSnapshot(session), run: immutableSnapshot(run), spec: immutableSnapshot(spec),
     workspaceState: immutableSnapshot(workspaceState), contextManifest: immutableSnapshot(contextManifest), response: immutableSnapshot(response),
     responseRef: responseArtifact.ref, admittedRequestDigest, metadata, signal });
   return prepared;
@@ -222,7 +232,9 @@ export async function admitInstalledDelivery(driver: SqliteDriver, artifacts: Ar
     const root = value.native.openWorkspaceRoot(value.workspace.canonicalRootPath); let failure: unknown;
     try {
       assertHeldWorkspaceRoot(root);
-      if (!same(root.identity, value.workspace.rootIdentity) || heldWorkspaceRootPath(root) !== value.workspace.canonicalRootPath || root.repositoryDirectory)
+      if (!same(root.identity, value.workspace.rootIdentity) || heldWorkspaceRootPath(root) !== value.workspace.canonicalRootPath ||
+          (root.repositoryDirectory === undefined) !== (value.repository === undefined) ||
+          value.repository && !same(root.repositoryDirectory, value.repository.gitDirectoryIdentity))
         invalid('delivery real workspace root changed after its original descriptor capture');
       root.assertHeld();
     } catch (error) { failure = error; throw error; }
@@ -329,7 +341,8 @@ export const readDeliveryRunAdmission = stateOperation('RECOVERY_REQUIRED', asyn
       contextManifest.admittedContextRef !== spec.admittedContextRef || contextManifest.assemblyRef !== spec.assemblyRef || contextManifest.segments.length)
     invalid('delivery initial recovery image/context differs from its committed snapshot');
   const recovered = await readCandidateSource(artifacts, spec, checkpoint.workspaceStateRef, signal);
-  if (recovered.diff.operations.length || workspaceState.invalidatedEphemeralPaths.length || workspaceState.privateGitStateRef !== undefined)
+  if (inspection.outcome.kind !== 'captured' || recovered.diff.operations.length || workspaceState.invalidatedEphemeralPaths.length ||
+      workspaceState.privateGitStateRef !== inspection.outcome.privateGitStateRef)
     invalid('delivery W_A is not its exact complete captured source');
   const digest = admittedDigest({ intent, sourceRunId: source.run.id, sourceRunResultRef: request.expectedRunResultRef, spec, specRef: run.specRef,
     workspaceIdentityRef: target.workspaceIdentityRef, workspaceIdentityDigest: target.workspaceIdentityDigest,

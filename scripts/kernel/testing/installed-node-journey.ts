@@ -13,6 +13,8 @@ import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 import { InstalledClientConsumerDeadlineError, InstalledClientDriverError, openInstalledClientConsumer } from './installed-client-consumer.js';
 import { fixtureCommandJoinDiagnostic } from './fixture-command-diagnostic.js';
+import { preparingGitNativeInputData } from './preparing-git-native.js';
+import { DEFAULT_SANDBOX_RESOURCES } from '../../../src/kernel/control-submit.js';
 import { runOwnedEnrollDiagnostic, type InstalledEnrollDiagnostic } from './installed-enroll-diagnostic.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../../../src/kernel/canonical.js';
 import type { AuthorizationGrantSummaryV1, VerifierIdentityCreateRequest } from '../../../src/kernel/authorization.js';
@@ -48,6 +50,7 @@ import { publicationClaimRetirementDiagnosticKey } from '../../../src/state/publ
 import { publicationEnvelopeLocations } from '../../../src/state/delivery-publication-progress.js';
 import type { InstalledPublicationStopResult } from './installed-publication-stop-result.js';
 import { projectInstalledRunProgress } from './installed-run-progress.js';
+import { projectInstalledUnitStopObservation } from './installed-unit-stop-observation.js';
 import { readInstalledAssemblyWorkJournal, readInstalledPublicationStageJournal, readInstalledStoreDiagnosticJournal, readInstalledStoreStopPhaseJournal } from './installed-store-diagnostic-journal.js';
 
 type Recipe = { buildFixture: string; packageRoot: string; installerEntry: string; stateRoot: string; releaseKeysFile: string;
@@ -56,9 +59,9 @@ type Ledger = { diagnosticOnly: true; fixture: string; fixtureIdentity: string; 
   uid: number; gid: number; runnerUid: number; home: string; runJourney: Recipe };
 type Response = { protocolVersion: 1; ok: boolean; method?: string; result?: Record<string, any>; error?: Record<string, unknown> };
 type CaseKind = 'required_pass' | 'required_repair' | 'advisory_failure' | 'required_timeout';
-type SourceCaseKind = CaseKind | 'delivery_publish' | 'delivery_merge' | 'delivery_cancel';
+type SourceCaseKind = CaseKind | 'ordinary_git' | 'delivery_publish' | 'delivery_merge' | 'delivery_cancel' | 'delivery_git' | 'delivery_git_merge';
 const sourceBehavior = (kind: SourceCaseKind): CaseKind =>
-  kind === 'delivery_publish' || kind === 'delivery_merge' || kind === 'delivery_cancel' ? 'required_pass' : kind;
+  kind === 'ordinary_git' || kind === 'delivery_publish' || kind === 'delivery_merge' || kind === 'delivery_cancel' || kind === 'delivery_git' || kind === 'delivery_git_merge' ? 'required_pass' : kind;
 const environment = { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C', LC_ALL: 'C' };
 const model = 'installed-node-verifier-fixture';
 const imageFields = ['dev', 'ino', 'size', 'uid', 'gid', 'mode', 'nlink', 'mtimeNs', 'ctimeNs'] as const;
@@ -66,8 +69,8 @@ const sourceMetadata = (info: BigIntStats) => Object.fromEntries(imageFields.map
 const beforeText = "before the private edit\n";
 const afterText = "after the private edit\n";
 const fixedText = "fixed after the verifier feedback\n";
-const cases: readonly CaseKind[] = ['required_pass', 'required_repair', 'advisory_failure', 'required_timeout'];
-const deliverySources = ['delivery_publish', 'delivery_merge', 'delivery_cancel'] as const;
+const cases: readonly SourceCaseKind[] = ['required_pass', 'required_repair', 'advisory_failure', 'required_timeout', 'ordinary_git'];
+const deliverySources = ['delivery_publish', 'delivery_merge', 'delivery_cancel', 'delivery_git', 'delivery_git_merge'] as const;
 
 async function bounded<T>(pending: Promise<T>, milliseconds: number, label: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -159,6 +162,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
   const ledger = await readLedger(filename), recipe = ledger.runJourney;
   const installedClientDriver = path.join(recipe.buildFixture, 'installed-control-client-driver.mjs');
   const report: Record<string, any> = { diagnosticOnly: true, qualified: false, phase: 'installation',
+    ordinaryGitFixtureProfile: journeyKind === 'verifier' ? 'verifier_four_plus_ordinary_git_v1' : 'delivery_three_plus_two_git_v1',
     scope: 'actual signed Linux installed Node required/advisory verifier, repair and exhausted timeout using public v1 UDS and owned HTTPS; not actual provider, release, default/ask policy or complete I2/I1 fault qualification',
     actualProviderQualified: false, actualProviderBillingQualified: false, completeI1Qualified: false, completeI2Qualified: false,
     beforeVerifierReleaseStopCutQualified: false, allCrashCutsQualified: false, macosQualified: false, rebootQualified: false };
@@ -371,7 +375,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
   const activeCases = new Map<SourceCaseKind, { runId: string; posts: number; identities: InstalledWorkerIdentityInspection[] }>();
   const completed: Array<{ kind: CaseKind; cut: Record<string, any>; sessionCut: Record<string, any>; submit: Record<string, unknown>;
     admission: Response; resultQueries: Response[]; files: readonly { path: string; before: string; after: string }[];
-    workspace: string; sourceIdentity: Map<string, Record<string, string>> }> = [];
+    workspace: string; sourceIdentity: Map<string, Record<string, string>>; expectedGit?: true;
+    gitFiles?: ReadonlyMap<string, Readonly<{ bytes: Buffer; identity: Record<string, string> }>> }> = [];
   const send = async (body: Record<string, unknown>, method: string, timeout = 5000) => {
     assert(client); return accepted(await client.send(body, timeout), method);
   };
@@ -417,7 +422,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     const bytes = await readPublicArtifact(artifact.ref, artifact); assert(bytes.equals(expected));
     const original = originalPublicResultBytes.get(artifact.ref);
     if (original) assert(bytes.equals(original), 'reconnect/restart must preserve the exact original downloaded bytes');
-    else { originalPublicResultBytes.set(artifact.ref, Buffer.from(bytes)); assert(originalPublicResultBytes.size <= 6); }
+    else { originalPublicResultBytes.set(artifact.ref, Buffer.from(bytes)); assert(originalPublicResultBytes.size <= (journeyKind === 'delivery' ? 10 : 8)); }
     return bytes;
   };
   const resultQueries = async (cut: Record<string, any>): Promise<Response[]> => {
@@ -776,6 +781,24 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       if (sourceKind === 'delivery_cancel') check += "import {existsSync} from 'node:fs';\n" +
         "test('owned delivery cancellation trigger',async()=>{if(existsSync(new URL('./cancel.flag',import.meta.url)))await new Promise(resolve=>setTimeout(resolve,60000));});\n";
       const files = [{ path: 'check.test.mjs', before: check, after: check }, { path: 'example.txt', before: beforeText, after: expected }];
+      const gitFiles = new Map<string, Readonly<{ bytes: Buffer; identity: Record<string, string> }>>();
+      const expectedGit = sourceKind === 'ordinary_git' || sourceKind === 'delivery_git' || sourceKind === 'delivery_git_merge';
+      if (expectedGit) {
+        files.push({ path: 'a', before: 'before\n', after: 'before\n' }, { path: '.gitignore', before: 'a\n*.ignored\n', after: 'a\n*.ignored\n' });
+        const data = preparingGitNativeInputData('a'.repeat(64), DEFAULT_SANDBOX_RESOURCES);
+        const packHash = data[2].subarray(-20).toString('hex');
+        for (const name of ['.git', '.git/objects', '.git/objects/pack', '.git/refs', '.git/refs/heads']) {
+          const directory = path.join(workspace, name); await mkdir(directory, { mode: 0o700 }); await chown(directory, ledger.uid, ledger.gid);
+        }
+        const entries = new Map([['.git/HEAD', Buffer.from('ref: refs/heads/main\n')],
+          ['.git/config', Buffer.from('[core]\nrepositoryformatversion = 0\nfilemode = true\nbare = false\n')],
+          ['.git/index', data[1]], [`.git/objects/pack/pack-${packHash}.pack`, data[2]], [`.git/objects/pack/pack-${packHash}.idx`, data[3]],
+          ['hidden.ignored', Buffer.from('owned ignored source bytes must never enter SourceManifest\n')]]);
+        for (const [name, bytes] of entries) {
+          const filename = path.join(workspace, name); await writeFile(filename, bytes, { flag: 'wx', mode: 0o600 }); await chown(filename, ledger.uid, ledger.gid);
+          gitFiles.set(name, Object.freeze({ bytes, identity: sourceMetadata(await lstat(filename, { bigint: true })) }));
+        }
+      }
       const sourceIdentity = new Map<string, Record<string, string>>();
       for (const entry of files) {
         const filename = path.join(workspace, entry.path); await writeFile(filename, entry.before, { flag: 'wx', mode: 0o644 });
@@ -790,6 +813,20 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       const session = (await send(request({ protocolVersion: 1, method: 'session.create', requestId: nextId(),
         admissionKey: randomBytes(32).toString('base64url'), workspacePath: workspace, name: 'Installed ' + kind }), 'session.create', 30000)).snapshot.session;
       assert.equal(session.contextRevision, 1); assert.equal(session.latestItemSeq, 0);
+      let inspectionGrantId: string | undefined, ignoreGrantId: string | undefined;
+      if (expectedGit) {
+        const workspaceIdentity = parseJsonStrict((await readCas(session.workspaceIdentityRef)).toString('utf8')) as Record<string, any>;
+        assert(workspaceIdentity.repositoryIdentityRef); assert(workspaceIdentity.repositoryIdentityDigest);
+        const inspection = await send(request({ protocolVersion: 1, method: 'authorization.create', requestId: nextId(), decision: {
+          kind: 'source_git_inspection', purpose: 'source_inspection', target: { sessionId: session.id,
+            expectedWorkspaceIdentityDigest: workspaceIdentity.identityDigest, scope: 'in_root_git_metadata_and_objects',
+            recipe: 'cliq-source-git-inspection-v1', retention: 'ephemeral_raw_reachable_only', resourceCeiling: DEFAULT_SANDBOX_RESOURCES } } }), 'authorization.create', 30000);
+        assert.equal(inspection.grant.state, 'active'); assert.equal(inspection.grant.targetKind, 'source_git_inspection'); inspectionGrantId = inspection.grant.grantId;
+        const ignore = await send(request({ protocolVersion: 1, method: 'authorization.create', requestId: nextId(), decision: {
+          kind: 'read_scope', purpose: 'source', target: { sessionId: session.id, expectedWorkspaceIdentityDigest: workspaceIdentity.identityDigest,
+            path: '.gitignore', scope: 'entry' } } }), 'authorization.create', 30000);
+        assert.equal(ignore.grant.state, 'active'); assert.equal(ignore.grant.targetKind, 'read_scope'); ignoreGrantId = ignore.grant.grantId;
+      }
       const authorization: VerifierIdentityCreateRequest = request({ protocolVersion: 1, method: 'authorization.create', requestId: nextId(), decision: {
         kind: 'execution_identity_read', purpose: 'verifier', target: { kind: 'guest_toolchain',
           guestToolchainManifestId: signed.guestToolchain.manifestId, toolId: 'node' } } });
@@ -809,6 +846,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
           cwd: '.', env: {}, writableEphemeralPaths: [], identityReadGrantId: grant.grantId,
           timeoutMs: kind === 'required_timeout' ? 1000 : 10000, retries: kind === 'required_timeout' ? 1 : 0, outputLimitBytes: 65536 }],
         dependency: { mode: 'none' }, sourceIncludes: [], sourceExcludes: [], registeredMcpServerIds: [], skillIds: [],
+        ...(inspectionGrantId ? { sourceInspectionGrantId: inspectionGrantId, ignoreReadGrantIds: [ignoreGrantId!] } : {}),
         allowUnverified: kind === 'advisory_failure' });
       const admission: Response = await client.send(submit, 30000);
       const admitted: Record<string, any> = accepted(admission, 'run.submit').snapshot.run;
@@ -830,6 +868,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       }
       const sessionCut = await send({ protocolVersion: 1, method: 'session.get', sessionId: session.id }, 'session.get');
       const proof = await assertInstalledVerifierOutcome({ cut, sessionCut, readCas, caseKind: kind, expectedFiles: files, principalId: principal,
+        ...(expectedGit ? { expectedGit: true as const } : {}),
         readOwnerHistory: async () => inspectInstalledOwnerHistory(recipe.stateRoot).owners });
       const queries = await resultQueries(cut);
       assert.equal(proof.retirementIdentities.length, kind === 'required_repair' || kind === 'required_timeout' ? 2 : 1);
@@ -868,7 +907,12 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         assert.deepEqual(sourceMetadata(await lstat(path.join(workspace, file.path), { bigint: true })), sourceIdentity.get(file.path));
         assert.equal(await readFile(path.join(workspace, file.path), 'utf8'), file.before);
       }
-      const completedSource = { kind, cut, sessionCut, submit, admission, resultQueries: queries, files, workspace, sourceIdentity };
+      for (const [name, original] of gitFiles) {
+        assert.deepEqual(sourceMetadata(await lstat(path.join(workspace, name), { bigint: true })), original.identity);
+        assert.deepEqual(await readFile(path.join(workspace, name)), original.bytes);
+      }
+      const completedSource = { kind, cut, sessionCut, submit, admission, resultQueries: queries, files, workspace, sourceIdentity,
+        ...(expectedGit ? { expectedGit: true as const, gitFiles } : {}) };
       completed.push(completedSource);
       report.cases.push({ kind: sourceKind, qualified: true, runId: admitted.id, resultRef: cut.snapshot.run.resultRef ?? null,
         posts: active.posts, actualOriginalWorkersRetired: retirements.length,
@@ -877,8 +921,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     };
     if (journeyKind === 'verifier') {
     for (const kind of cases) await createSource(kind);
-    assert.equal(postCount, 8); assert.equal(acceptedTcp, postCount); assert.equal(acceptedTls, postCount); assert(!responderFailure);
-    assert.equal(originalPublicResultBytes.size, 6, 'all three successful Runs must download their own result and diff');
+    assert.equal(postCount, 10); assert.equal(acceptedTcp, postCount); assert.equal(acceptedTls, postCount); assert(!responderFailure);
+    assert.equal(originalPublicResultBytes.size, 8, 'all four successful Runs must download their own result and diff');
     mark('fresh_client_reconnect_and_actual_restart');
     await client.close(); client = await persistentClient();
     for (const entry of completed) {
@@ -899,10 +943,15 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       assert.deepEqual(await client.send(entry.submit, 30000), entry.admission);
       assert.deepEqual(await resultQueries(cut), entry.resultQueries);
       await assertInstalledVerifierOutcome({ cut, sessionCut, readCas, caseKind: entry.kind, expectedFiles: entry.files, principalId: principal,
+        ...(entry.expectedGit ? { expectedGit: true as const } : {}),
         readOwnerHistory: async () => inspectInstalledOwnerHistory(recipe.stateRoot).owners });
       for (const file of entry.files) {
         assert.deepEqual(sourceMetadata(await lstat(path.join(entry.workspace, file.path), { bigint: true })), entry.sourceIdentity.get(file.path));
         assert.equal(await readFile(path.join(entry.workspace, file.path), 'utf8'), file.before);
+      }
+      for (const [name, original] of entry.gitFiles ?? []) {
+        assert.deepEqual(sourceMetadata(await lstat(path.join(entry.workspace, name), { bigint: true })), original.identity);
+        assert.deepEqual(await readFile(path.join(entry.workspace, name)), original.bytes);
       }
     }
     const ownerHistory = inspectInstalledOwnerHistory(recipe.stateRoot);
@@ -911,7 +960,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     assert.equal(ownerHistory.owners[1]!.runtimeBundleRef, bundleDigest);
     assert.equal(show(services.keeperUnit).MainPID, keeperBefore.MainPID);
     assert.deepEqual(await readFile(path.join(recipe.stateRoot, 'runtime/keeper.ready')), keeperReady);
-    assert.equal(postCount, 8); assert.equal(acceptedTcp, postCount); assert.equal(acceptedTls, postCount); assert(!responderFailure);
+    assert.equal(postCount, 10); assert.equal(acceptedTcp, postCount); assert.equal(acceptedTls, postCount); assert(!responderFailure);
     report.reconnectAndRestart = { qualified: true, sameKeeper: true, sameTerminalRunAndSession: true, noRedispatch: true,
       exactOriginalAdmissionReplay: true, sourceFilesAndIdentitiesUnchanged: true, gracefulOriginalOwnerReleased: true,
       committedResultAndDiffDescriptorsPreserved: true, liveAndFailedNeverExposeCandidateAsResult: true };
@@ -1146,7 +1195,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
                 }
                 await delay(Math.min(50, Math.max(0, logBy - Date.now())));
               }
-              assert.equal(postCount, 6); assert.equal(acceptedTcp, postCount); assert.equal(acceptedTls, postCount); assert(!responderFailure);
+              assert.equal(postCount, 10); assert.equal(acceptedTcp, postCount); assert.equal(acceptedTls, postCount); assert(!responderFailure);
               Object.assign(diagnostic, { stage: 'closure_verified', originalReceiptHandoffAndCasClosureVerified: true,
                 originalWorkerPidStartIndependentlyAbsent: true, originalArenaAndSlotsIndependentlyAbsent: true,
                 historicalSealedMAndRecoverableCheckpointVerified: true, redispatchCount: 0, additionalModelPosts: 0 });
@@ -1448,8 +1497,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
           }
         },
       }, options.publicationRetirementStop ? { faultCase: 'original_stop' } : options.publicationRetirementLate ? { faultCase: 'late_result' } : {});
-      assert.equal(postCount, 6); assert.equal(acceptedTcp, postCount); assert.equal(acceptedTls, postCount); assert(!responderFailure);
-      assert.equal(originalPublicResultBytes.size, 6);
+      assert.equal(postCount, 10); assert.equal(acceptedTcp, postCount); assert.equal(acceptedTls, postCount); assert(!responderFailure);
+      assert.equal(originalPublicResultBytes.size, 10);
     }
     report.qualified = true;
   } catch (error) { primary = error; }
@@ -1481,6 +1530,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
             assertRetained();
             assert.equal(command('/usr/bin/systemctl', ['--user', 'stop', ...units]).status, 0);
             const after = units.map(unit => show(unit));
+            report.unitStopObservation = projectInstalledUnitStopObservation(before, after);
             for (let index = 0; index < units.length; index++) {
               const stopped = after[index]!;
               assert.equal(stopped.ActiveState, 'inactive'); assert.equal(stopped.MainPID, '0');

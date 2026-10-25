@@ -10,9 +10,11 @@
 #if defined(__linux__)
 #include "worker-common.h"
 #include "worker-reservation.h"
+#include "preparation-git-protocol.h"
 #include "guest-toolchain.h"
 #include "verifier-protocol.h"
 #include "verifier-setup.h"
+#include "worker-sha256.h"
 #include <linux/magic.h>
 #include <linux/sched.h>
 #include <poll.h>
@@ -27,13 +29,22 @@
 static const napi_type_tag IMAGE_TAG = { UINT64_C(0x671ca1bc736f4411), UINT64_C(0xa1d7e8ec9f001820) };
 static const napi_type_tag CONTROLLER_TAG = { UINT64_C(0x875a7b5a31bc4112), UINT64_C(0xbf12ad50275ed149) };
 static const napi_type_tag SCOPE_TAG = { UINT64_C(0x00d75ac01fa14d87), UINT64_C(0x9b1c5a0256e81d29) };
+static const napi_type_tag SOURCE_INSPECTOR_IMAGE_TAG = { UINT64_C(0x8c67dfb833d0495c), UINT64_C(0x9be2f2fa2fb9d634) };
 
 /* The fixed loaded native image owns this uncertainty across controllers and
  * N-API environments. A new receiver cannot erase an unjoined resource. */
 static atomic_bool native_retirement_failed;
 
-struct image { int fd; };
+struct image { int fd; uint64_t byte_count; char digest[65]; };
 struct native_scope;
+struct controller;
+struct source_native_scope;
+static void source_native_revoke(struct controller *controller);
+static void source_native_joined(struct controller *controller);
+static void source_native_complete(napi_env env, struct controller *controller);
+static void preparation_native_joined(struct controller *controller);
+static void preparation_native_complete(napi_env env, struct controller *controller);
+static napi_value preparation_native_retirement(napi_env env, struct source_native_scope *scope);
 struct controller { int socket, stdout_fd, stderr_fd; pid_t pid; bool closed, ready, cleanup_queued, env_closing, reaped, cleanup_done;
     int anchor_root, controller_parent, controller_leaf, input_fd, child_socket, transfer[4];
     struct stat root_identity, parent_identity, leaf_identity;
@@ -43,6 +54,9 @@ struct controller { int socket, stdout_fd, stderr_fd; pid_t pid; bool closed, re
     double ready_observed_at_ms;
     unsigned int next_scope, pending; char token[CLIQ_WORKER_TOKEN_BYTES]; unsigned int references;
     struct native_scope *scopes, *pending_scope;
+    struct source_native_scope *source;
+    bool source_requested;
+    bool preparation_started, preparation_finished, preparation_joined;
     struct cliq_worker_packet retained, reservation, reservation_inspection, inspected_reservation;
     bool reservation_bound, inspection_only, retained_observed, reservation_observed;
     napi_env env; napi_async_work cleanup_work; napi_async_cleanup_hook_handle cleanup_hook;
@@ -300,6 +314,7 @@ static void scope_release_memory(struct native_scope *scope) {
 static void revoke_controller(struct controller *controller) {
     if (controller->closed) return;
     controller->closed = true;
+    source_native_revoke(controller);
     if (controller->socket >= 0 && shutdown(controller->socket, SHUT_RDWR) != 0 && errno != ENOTCONN)
         controller->retirement_failed = true;
     if (!retire_descriptor(&controller->socket)) controller->retirement_failed = true;
@@ -330,6 +345,7 @@ static void reap_controller(napi_env env, void *data) {
         reaped = result == controller->pid || (result < 0 && errno == ECHILD);
     }
     controller->reaped = reaped;
+    if (reaped) source_native_joined(controller);
     if (reaped) retire_controller_leaf(controller);
 }
 
@@ -369,6 +385,7 @@ static void cleanup_complete(napi_env env, napi_status status, void *data) {
     /* Only this main-thread completion publishes fully joined resources.
      * The worker's reaped result must not be read before this callback. */
     controller->cleanup_done = true;
+    source_native_complete(env, controller);
     if (!controller->reaped || controller->retirement_failed) atomic_store(&native_retirement_failed, true);
     settle_controller_close(env, controller);
     controller_release(controller);
@@ -481,6 +498,80 @@ static napi_value image_close(napi_env env, napi_callback_info info) {
     if (!tagged(env, self, &IMAGE_TAG, (void **)&image)) return failure(env, "invalid held runtime image");
     if (image->fd >= 0) { close(image->fd); image->fd = -1; }
     return undefined(env);
+}
+
+static napi_value source_inspector_close(napi_env env, napi_callback_info info) {
+    size_t argc = 0; napi_value self; struct image *image;
+    napi_get_cb_info(env, info, &argc, NULL, &self, NULL);
+    if (!tagged(env, self, &SOURCE_INSPECTOR_IMAGE_TAG, (void **)&image)) return failure(env, "invalid fixed source inspector image");
+    if (!retire_descriptor(&image->fd)) {
+        napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "source inspector image descriptor did not retire"); return NULL;
+    }
+    return undefined(env);
+}
+
+/* The TS held-bundle friend selects exactly one signed data entry before
+ * this operation. This distinct native tag cannot be obtained by supplying
+ * an ordinary sealed image/Buffer to the source controller. */
+static napi_value seal_source_inspector(napi_env env, napi_callback_info info) {
+    size_t argc = 1; napi_value args[1]; uint64_t source;
+    napi_get_cb_info(env, info, &argc, args, NULL, NULL);
+    if (argc != 1 || !number(env, args[0], &source) || source > INT32_MAX) return failure(env, "fixed source inspector requires its held signed file");
+    struct stat before, after;
+    if (fstat((int)source, &before) != 0 || !S_ISREG(before.st_mode) || before.st_nlink != 1 ||
+        before.st_size <= 0 || before.st_size > 1048576 || (before.st_mode & 0022) != 0 ||
+        (before.st_uid != geteuid() && before.st_uid != 0)) return failure(env, "unsafe fixed source inspector image");
+    int sealed = memfd_create("cliq-source-git-inspector", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    if (sealed < 0) return failure(env, "fixed source inspector sealing is unavailable");
+    unsigned char buffer[65536]; off_t offset = 0; bool copied = true;
+    struct sha256_context hash; sha256_init(&hash);
+    while (offset < before.st_size) {
+        size_t wanted = (uint64_t)(before.st_size - offset) < sizeof(buffer) ? (size_t)(before.st_size - offset) : sizeof(buffer);
+        ssize_t count;
+        do { count = pread((int)source, buffer, wanted, offset); } while (count < 0 && errno == EINTR);
+        if (count <= 0) { copied = false; break; }
+        size_t written = 0;
+        while (written < (size_t)count) {
+            ssize_t bytes = write(sealed, buffer + written, (size_t)count - written);
+            if (bytes < 0 && errno == EINTR) continue;
+            if (bytes <= 0) { copied = false; break; }
+            written += (size_t)bytes;
+        }
+        if (!copied) break;
+        sha256_update(&hash, buffer, (size_t)count);
+        offset += count;
+    }
+    bool valid = copied && offset == before.st_size && fstat((int)source, &after) == 0 &&
+        before.st_dev == after.st_dev && before.st_ino == after.st_ino && before.st_uid == after.st_uid &&
+        before.st_mode == after.st_mode && before.st_nlink == after.st_nlink && before.st_size == after.st_size &&
+        before.st_mtim.tv_sec == after.st_mtim.tv_sec && before.st_mtim.tv_nsec == after.st_mtim.tv_nsec &&
+        before.st_ctim.tv_sec == after.st_ctim.tv_sec && before.st_ctim.tv_nsec == after.st_ctim.tv_nsec &&
+        fchmod(sealed, 0400) == 0 && fcntl(sealed, F_ADD_SEALS, F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL) == 0;
+    if (!valid) {
+        if (!retire_descriptor(&sealed)) { napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "source inspector seal did not close"); return NULL; }
+        return failure(env, "fixed source inspector changed or could not be sealed");
+    }
+    struct image *image = calloc(1, sizeof(*image));
+    if (!image) {
+        if (!retire_descriptor(&sealed)) { napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "source inspector allocation did not close"); return NULL; }
+        return failure(env, "fixed source inspector allocation unavailable");
+    }
+    image->fd = sealed; image->byte_count = (uint64_t)before.st_size;
+    unsigned char digest[32]; static const char alphabet[] = "0123456789abcdef";
+    sha256_final(&hash, digest);
+    for (size_t i = 0; i < 32; i++) { image->digest[i * 2] = alphabet[digest[i] >> 4]; image->digest[i * 2 + 1] = alphabet[digest[i] & 15]; }
+    image->digest[64] = '\0'; napi_value result, identity;
+    napi_property_descriptor properties[] = { { "close", NULL, source_inspector_close, NULL, NULL, NULL, napi_default, NULL } };
+    if (napi_create_object(env, &result) != napi_ok || napi_create_object(env, &identity) != napi_ok) {
+        (void)retire_descriptor(&image->fd); free(image); return failure(env, "fixed source inspector receiver unavailable");
+    }
+    set_string(env, identity, "sha256", image->digest); set_number(env, identity, "byteCount", (double)image->byte_count);
+    if (napi_object_freeze(env, identity) != napi_ok || napi_set_named_property(env, result, "identity", identity) != napi_ok ||
+        napi_type_tag_object(env, result, &SOURCE_INSPECTOR_IMAGE_TAG) != napi_ok ||
+        napi_define_properties(env, result, 1, properties) != napi_ok || napi_wrap(env, result, image, finalize_image, NULL, NULL) != napi_ok) {
+        (void)retire_descriptor(&image->fd); free(image); return failure(env, "fixed source inspector receiver unavailable");
+    }
+    napi_object_freeze(env, result); return result;
 }
 
 static napi_value seal_image(napi_env env, napi_callback_info info) {
@@ -913,7 +1004,8 @@ static napi_value create_scope(napi_env env, napi_callback_info info, bool invoc
     size_t expected = invocation ? 7 : 6;
     size_t argc = expected; napi_value args[7], self; struct controller *controller;
     napi_get_cb_info(env, info, &argc, args, &self, NULL);
-    if (argc != expected || !tagged(env, self, &CONTROLLER_TAG, (void **)&controller) || controller->closed || !controller->ready || controller->pending != 0 ||
+    if (argc != expected || !tagged(env, self, &CONTROLLER_TAG, (void **)&controller) || controller->closed ||
+        (controller->source_requested && !controller->preparation_finished) || !controller->ready || controller->pending != 0 ||
         controller->next_scope >= CLIQ_WORKER_MAX_SCOPES || controller->inspection_only ||
         (!invocation && !controller->reservation_bound)) return failure(env, "invalid held Linux controller");
     uint64_t generation, cgroup = 0; struct image *helper, *worker, *bwrap, *input = NULL; struct native_scope *parent = NULL;
@@ -1008,7 +1100,7 @@ static napi_value create_verifier(napi_env env, napi_callback_info info) {
     struct native_scope *parent; struct image *helper, *bwrap; struct cliq_guest_toolchain *guest; uint64_t generation;
     napi_get_cb_info(env, info, &argc, arguments, &self, NULL);
     if (atomic_load(&native_retirement_failed) || argc != 6 || !tagged(env, self, &CONTROLLER_TAG, (void **)&controller) ||
-        controller->closed || !controller->ready || controller->pending || controller->next_scope >= CLIQ_WORKER_MAX_SCOPES ||
+        controller->closed || (controller->source_requested && !controller->preparation_finished) || !controller->ready || controller->pending || controller->next_scope >= CLIQ_WORKER_MAX_SCOPES ||
         !number(env, arguments[0], &generation) || generation > INT32_MAX ||
         !tagged(env, arguments[1], &SCOPE_TAG, (void **)&parent) || parent->controller != controller || parent->invocation ||
         parent->stopped || !parent->activated || !tagged(env, arguments[2], &IMAGE_TAG, (void **)&helper) ||
@@ -1127,7 +1219,8 @@ static bool reservation_projection(napi_env env, napi_value value, struct cliq_w
 static napi_value controller_bind_reservation(napi_env env, napi_callback_info info) {
     size_t argc = 2; napi_value args[2], self; struct controller *controller; uint64_t descriptor;
     napi_get_cb_info(env, info, &argc, args, &self, NULL);
-    if (argc != 2 || !tagged(env, self, &CONTROLLER_TAG, (void **)&controller) || controller->closed || !controller->ready ||
+    if (argc != 2 || !tagged(env, self, &CONTROLLER_TAG, (void **)&controller) || controller->closed ||
+        (controller->source_requested && !controller->preparation_finished) || !controller->ready ||
         controller->pending != 0 || controller->reservation_bound || controller->inspection_only || controller->scopes ||
         !number(env, args[0], &descriptor) || descriptor > INT32_MAX) return failure(env, "invalid native worker reservation binding");
     struct cliq_worker_packet request = cliq_packet(CLIQ_BIND_RESERVATION); char token[CLIQ_WORKER_TOKEN_BYTES];
@@ -1135,8 +1228,8 @@ static napi_value controller_bind_reservation(napi_env env, napi_callback_info i
         strcmp(request.subreaper_start_token, controller->token) != 0 ||
         !cliq_process_token(controller->pid, token) || strcmp(token, controller->token) != 0)
         return failure(env, "reservation selects another native controller");
-    controller->reservation = request; int held = (int)descriptor;
-    if (!begin_request(controller, NULL, &request, &held, 1)) return failure(env, "native reservation could not be bound");
+    controller->reservation = request; int held[] = { (int)descriptor, controller->anchor_root };
+    if (!begin_request(controller, NULL, &request, held, controller->preparation_finished ? 2 : 1)) return failure(env, "native reservation could not be bound");
     return undefined(env);
 }
 static napi_value controller_poll_bound(napi_env env, napi_callback_info info) {
@@ -1156,7 +1249,7 @@ static napi_value controller_poll_bound(napi_env env, napi_callback_info info) {
 static napi_value controller_inspect_reservation(napi_env env, napi_callback_info info) {
     size_t argc = 3; napi_value args[3], self; struct controller *controller; uint64_t cgroup, reservation;
     napi_get_cb_info(env, info, &argc, args, &self, NULL);
-    if (argc != 3 || !tagged(env, self, &CONTROLLER_TAG, (void **)&controller) || controller->closed || !controller->ready ||
+    if (argc != 3 || !tagged(env, self, &CONTROLLER_TAG, (void **)&controller) || controller->closed || controller->source_requested || !controller->ready ||
         controller->pending != 0 || controller->reservation_bound || controller->scopes ||
         !number(env, args[0], &cgroup) || cgroup > INT32_MAX ||
         !number(env, args[1], &reservation) || reservation > INT32_MAX) return failure(env, "invalid native reservation inspector");
@@ -1223,7 +1316,7 @@ static napi_value assert_preactivation_retired(napi_env env, napi_callback_info 
     unsigned char expected_birth[CLIQ_RESERVATION_BODY], actual_birth[CLIQ_RESERVATION_BODY];
     reservation_encode(expected_birth, expected);
     if (valid) {
-        valid = reservation_read(held, expected, &attempted, &actual);
+        valid = reservation_read_complete(held, expected, &attempted, &actual);
         if (valid) { reservation_encode(actual_birth, &actual); valid = memcmp(expected_birth, actual_birth, sizeof(expected_birth)) == 0; }
     }
     const bool no_spawn = expected->reservation_observation == 1 && reservation_birth_empty(expected);
@@ -1258,7 +1351,7 @@ static napi_value assert_preactivation_retired(napi_env env, napi_callback_info 
     if (valid) {
         bool current_attempted;
         valid = private_cgroup((int)root, &current) && same_directory(&controller->root_identity, &current) &&
-            reservation_file((int)reservation, expected, &current) && reservation_read(held, expected, &current_attempted, &actual) &&
+            reservation_file((int)reservation, expected, &current) && reservation_read_complete(held, expected, &current_attempted, &actual) &&
             current_attempted == attempted;
         if (valid) { reservation_encode(actual_birth, &actual); valid = memcmp(expected_birth, actual_birth, sizeof(expected_birth)) == 0; }
     }
@@ -1278,7 +1371,7 @@ static napi_value assert_preactivation_retired(napi_env env, napi_callback_info 
 static napi_value terminate_retained(napi_env env, napi_callback_info info) {
     size_t argc = 2; napi_value args[2], self; struct controller *controller; uint64_t cgroup, pid;
     napi_get_cb_info(env, info, &argc, args, &self, NULL);
-    if (argc != 2 || !tagged(env, self, &CONTROLLER_TAG, (void **)&controller) || controller->closed ||
+    if (argc != 2 || !tagged(env, self, &CONTROLLER_TAG, (void **)&controller) || controller->closed || controller->source_requested ||
         !number(env, args[0], &cgroup) || cgroup > INT32_MAX) return failure(env, "invalid retained inspection controller");
     struct cliq_worker_packet request = cliq_packet(CLIQ_TERMINATE_RETAINED);
     char subreaper[CLIQ_WORKER_TOKEN_BYTES];
@@ -1370,7 +1463,8 @@ static napi_value assert_preparation_retired(napi_env env, napi_callback_info in
     }
     if (!controller->closed || !controller->cleanup_done || !controller->reaped || !controller->ready ||
         controller->constructor_failed || !controller->leaf_initialized || !controller->controller_leaf_retired ||
-        controller->worker_creation_requested || controller->inspection_only || controller->retained_requested ||
+        controller->worker_creation_requested || (controller->source_requested &&
+          (!controller->preparation_started || !controller->preparation_joined)) || controller->inspection_only || controller->retained_requested ||
         controller->pending != 0 || controller->pid <= 0 || !*controller->token)
         return failure(env, "original ordinary controller preparation is not positively closed");
     struct stat current, named; int parent = -1;
@@ -1435,7 +1529,7 @@ static napi_value observe_preparation_birth(napi_env env, napi_callback_info inf
         napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "controller preparation birth resources did not retire"); return NULL;
     }
     if (!controller->ready || controller->constructor_failed || !controller->leaf_initialized ||
-        controller->worker_creation_requested || controller->inspection_only || controller->retained_requested ||
+        controller->worker_creation_requested || (controller->source_requested && !controller->preparation_finished) || controller->inspection_only || controller->retained_requested ||
         controller->pending != 0 || controller->pid <= 0 || !*controller->token || controller->ready_observed_at_ms <= 0)
         return failure(env, "original ordinary controller preparation birth is not ready");
     struct stat current;
@@ -1590,6 +1684,9 @@ static bool prepare_controller_io(struct controller *controller) {
     return flags >= 0 && fcntl(controller->socket, F_SETFL, flags | O_NONBLOCK) == 0;
 }
 
+#include "source-git-native.h"
+#include "preparation-git-native.h"
+
 static napi_value open_controller(napi_env env, napi_callback_info info) {
     if (atomic_load(&native_retirement_failed)) return failure(env, "native resource retirement remains uncertain");
     size_t argc = 2; napi_value args[2]; struct image *helper; uint64_t root;
@@ -1616,6 +1713,13 @@ static napi_value open_controller(napi_env env, napi_callback_info info) {
         { "createWorker", NULL, create_worker, NULL, NULL, NULL, napi_default, NULL },
         { "createInvocation", NULL, create_invocation, NULL, NULL, NULL, napi_default, NULL },
         { "createVerifier", NULL, create_verifier, NULL, NULL, NULL, napi_default, NULL },
+        { "reserveSourceGit", NULL, reserve_source_git, NULL, NULL, NULL, napi_default, NULL },
+        { "reservePreparationGit", NULL, reserve_preparation_git, NULL, NULL, NULL, napi_default, NULL },
+        { "preparationGitConstructionRetirement", NULL, preparation_native_construction_retirement, NULL, NULL, NULL, napi_default, NULL },
+        { "cleanupRetainedPreparingGit", NULL, cleanup_retained_preparation_git, NULL, NULL, NULL, napi_default, NULL },
+        { "sourceGitConstructionRetirement", NULL, source_native_construction_retirement, NULL, NULL, NULL, napi_default, NULL },
+        { "cleanupRetainedSourceGit", NULL, cleanup_retained_source_git, NULL, NULL, NULL, napi_default, NULL },
+        { "cleanupRegisteredAbsentSourceGit", NULL, cleanup_registered_absent_source_git, NULL, NULL, NULL, napi_default, NULL },
         { "terminateRetained", NULL, terminate_retained, NULL, NULL, NULL, napi_default, NULL },
         { "pollRetained", NULL, poll_retained, NULL, NULL, NULL, napi_default, NULL },
         { "assertRetainedRetired", NULL, assert_retained_retired, NULL, NULL, NULL, napi_default, NULL },
@@ -1675,11 +1779,13 @@ static napi_value initialize(napi_env env, napi_value exports) {
     napi_property_descriptor properties[] = {
         { "sealImage", NULL, seal_image, NULL, NULL, NULL, napi_default, NULL },
         { "sealImageBuffer", NULL, seal_input, NULL, NULL, NULL, napi_default, NULL },
+        { "sealSourceGitInspector", NULL, seal_source_inspector, NULL, NULL, NULL, napi_default, NULL },
         { "openController", NULL, open_controller, NULL, NULL, NULL, napi_default, NULL },
         { "verifierInterfaceVersion", NULL, NULL, NULL, NULL, verifier_version, napi_default, NULL }
     };
-    if (napi_define_properties(env, exports, 4, properties) != napi_ok) return NULL;
-    set_number(env, exports, "interfaceVersion", 3); return exports;
+    if (napi_define_properties(env, exports, sizeof(properties) / sizeof(properties[0]), properties) != napi_ok) return NULL;
+    set_number(env, exports, "interfaceVersion", 3); set_number(env, exports, "sourceInterfaceVersion", 1);
+    set_number(env, exports, "preparationInterfaceVersion", 1); return exports;
 }
 #else
 static napi_value unsupported(napi_env env, napi_callback_info info) {

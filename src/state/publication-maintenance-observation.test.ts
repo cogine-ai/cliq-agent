@@ -217,7 +217,8 @@ test('a real descriptor close failure outranks cancellation and remains sticky o
   const stopping = setImmediate().then(() => controller.abort(reason));
   await assert.rejects(observePublicationMaintenancePath(root, { path: 'file', workspaceIdentityDigest: identity,
     completedDescendants: [], ...limits, signal: controller.signal }), error => error instanceof ResourceRetirementError && error !== reason);
-  await stopping; assert.throws(() => root.assertHeld(), /identity|closed/);
+  await stopping;
+  assert.throws(() => root.assertHeld(), { code: 'ERR_CLIQ_RESOURCE_RETIREMENT' });
 });
 
 test('structural roots are rejected before input getters and closed descendant data cannot supply callbacks', async t => {

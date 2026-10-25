@@ -7,7 +7,7 @@
 #include <stdint.h>
 
 #define CLIQ_WORKER_MAGIC UINT32_C(0x43575131)
-#define CLIQ_WORKER_VERSION UINT32_C(4)
+#define CLIQ_WORKER_VERSION UINT32_C(6)
 #define CLIQ_WORKER_MAX_SCOPES 16
 #define CLIQ_WORKER_MAX_FDS 40
 #define CLIQ_WORKER_TOKEN_BYTES 192
@@ -32,7 +32,23 @@ enum cliq_worker_command {
     CLIQ_RELEASE_VERIFIER = 15,
     CLIQ_POLL_VERIFIER = 16,
     CLIQ_VERIFIER_RESULT = 17,
-    CLIQ_VERIFIER_SETUP = 18
+    CLIQ_VERIFIER_SETUP = 18,
+    CLIQ_SOURCE_RESERVE = 19,
+    CLIQ_SOURCE_CREATE_BLOCKED = 20,
+    CLIQ_SOURCE_RELEASE_CAPTURE = 21,
+    CLIQ_SOURCE_POLL_SEALED = 22,
+    CLIQ_SOURCE_SEALED = 23,
+    CLIQ_SOURCE_CONTINUE_GIT = 24,
+    CLIQ_SOURCE_POLL_RESULT = 25,
+    CLIQ_SOURCE_RESULT = 26,
+    CLIQ_SOURCE_STOP = 27,
+    CLIQ_SOURCE_RETIRE = 28,
+    CLIQ_SOURCE_CLEANUP_RETAINED = 29,
+    CLIQ_PREPARATION_RESERVE = 30,
+    CLIQ_PREPARATION_CLEANUP_RETAINED = 31,
+    CLIQ_PREPARATION_FINISH = 32,
+    CLIQ_PREPARATION_CANCEL = 33,
+    CLIQ_SOURCE_CHECK_REGISTERED_ABSENT = 40
 };
 
 /* Private pre-READY diagnosis only. Never process, release, time or death
@@ -95,6 +111,20 @@ struct cliq_worker_packet {
     char sandbox_launch_digest[65];
     char generation_ref[65];
     char pid_namespace_reservation[CLIQ_WORKER_TOKEN_BYTES];
+    /* Closed source-attempt family. These are never Run/generation fields. */
+    char source_inspection_id[44];
+    char source_target_ref[65];
+    char source_input_intent_ref[65];
+    char source_exclude_grant_digest[65];
+    uint32_t source_rule_present;
+    uint64_t source_rule_bytes;
+    char source_rule_digest[65];
+    char source_snapshot_digest[65];
+    uint64_t source_byte_count, source_entry_count, source_shard_count;
+    uint64_t source_output_bytes[4];
+    char source_output_digests[4][65];
+    /* Disjoint preparing-owner family, never a source grant or active Run. */
+    char preparation_input_intent_ref[65];
 };
 
 #endif

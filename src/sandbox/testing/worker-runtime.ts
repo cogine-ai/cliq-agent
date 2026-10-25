@@ -35,6 +35,8 @@ async function actualFileDigest(filename: string, expectedBytes: number) {
 export async function signedLinuxWorkerTestRuntime(input: {
   installationRoot: string; assembly: RunAssemblyV1; tools: ToolContractManifestV1['entries']; sandboxProfile: SandboxProfileV1;
   guestImageRoot?: string;
+  sourceGitInspector?: Readonly<{ entryId: 'source_git_inspector'; role: 'platform_helper'; version: '1';
+    relativePath: 'helpers/source-git-inspector.mjs'; executable: false; digest: string; byteCount: number; bytes: Buffer }>;
 }) {
   if (process.platform !== 'linux') throw new Error('actual Linux worker image fixtures require Linux');
   if (input.tools.length !== 1 || input.tools[0]?.name !== 'edit' || input.tools[0].execution.kind !== 'builtin') {
@@ -52,6 +54,19 @@ export async function signedLinuxWorkerTestRuntime(input: {
     [LINUX_WORKER_RECIPE.workerId, 'worker', 'cliq-linux-worker'],
     [LINUX_WORKER_RECIPE.editId, 'tool_adapter', 'cliq-linux-edit']
   ] as const) fromBytes(id, role, filename, await readFile(path.join(input.installationRoot, filename)), true);
+  if (input.sourceGitInspector) {
+    if (!input.guestImageRoot) throw new Error('fixed source Git campaign requires the actual signed guest image');
+    const asset = input.sourceGitInspector;
+    if (asset.entryId !== 'source_git_inspector' || asset.role !== 'platform_helper' || asset.version !== '1' ||
+        asset.relativePath !== 'helpers/source-git-inspector.mjs' || asset.executable !== false || asset.byteCount < 1 || asset.byteCount > 1_048_576 ||
+        asset.byteCount !== asset.bytes.length || asset.digest !== sha256Bytes(asset.bytes)) throw new Error('campaign inspector is not its fixed complete asset');
+    const destination = path.join(input.installationRoot, asset.relativePath);
+    await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
+    try { await writeFile(destination, asset.bytes, { flag: 'wx', mode: 0o400 }); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+    if (await actualFileDigest(destination, asset.byteCount) !== asset.digest) throw new Error('campaign inspector differs from its signed complete bytes');
+    const { bytes: _bytes, ...entry } = asset; entries.push(entry);
+  }
   fromBytes('supervisor-test', 'supervisor', 'test/supervisor', await readFile(process.execPath), true);
   fromBytes(STATE_OWNER_NATIVE_ENTRY_ID, 'platform_helper', STATE_OWNER_NATIVE_RELATIVE_PATH, await readFile(STATE_OWNER_NATIVE_PATH), true);
   const profile = policyProfile(), profileRef = canonicalSha256(profile);

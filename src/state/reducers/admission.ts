@@ -30,6 +30,7 @@ import type { ArtifactCatalog, PublishedArtifact } from '../artifacts.js';
 import { insertArtifactMetadata } from '../artifacts.js';
 import { advanceTimeFence, sampleCanonicalNow, type TimeFenceAdvance } from '../canonical-time.js';
 import { assertCurrentControlFrame, readRetainedControlChannelClosure, validateControlChannelClosure, type AuthenticatedControlIdentity } from '../control-channel.js';
+import { readSessionContextCut, assertSessionContextCut } from '../session-context.js';
 import {
   decodeAdmittedContext,
   decodeContextManifest,
@@ -68,10 +69,14 @@ import {
 } from '../rows.js';
 import type { SqliteDriver } from '../sqlite-driver.js';
 import { recaptureLiveWorkspaceIdentity } from '../workspace-identity.js';
-import type { SourceInspectionTargetV1 } from '../../kernel/execution.js';
+import type { SourceInspectionTarget } from '../../kernel/execution.js';
+import { readRetainedSourceInspectionTarget } from '../source-target.js';
+import { decodeSandboxProfile } from '../execution-closure.js';
+import { readSourceProjectionData } from '../source-projection-data.js';
+import { loadFrozenPrivateGit } from '../../workspace/run-workspace/private-git.js';
 import type { VerifierRequest } from '../../kernel/control-submit.js';
 import type { AuthorizationRuntime } from '../authorization.js';
-import { assertVerifierRequestData, prepareVerifierSpec, prepareVerifierConsumption, validateVerifierRunAdmission } from '../verifier-admission.js';
+import { assertVerifierRequestData, prepareInstalledVerifierAdmission, prepareVerifierSpec, prepareVerifierConsumption, validateVerifierRunAdmission } from '../verifier-admission.js';
 import { VerifierAuthorizationError } from '../authorization-artifacts.js';
 
 export type AdmitRunInput = {
@@ -295,13 +300,14 @@ export async function replayInstalledRunAdmission(
   const source = readSourceInspectionAttempt(driver, { principalId, admissionKey: request.admissionKey, admissionIntentDigest: intent });
   if (!source || source.phase !== 'retired' || source.outcome.kind !== 'captured')
     throw new KernelStorageError('RECOVERY_REQUIRED', 'installed Run original source is not captured and retired');
-  const target = await readCanonicalArtifact<SourceInspectionTargetV1>(reads, source.targetRef);
+  const target = await readCanonicalArtifact<SourceInspectionTarget>(reads, source.targetRef);
   const sourceOriginal = normalizeRunSubmitRequest(await readCanonicalArtifact(reads, target.originalRequestRef));
   const sourceIndex = readSourceInspectionOriginalRequest(driver, source.inspectionId);
   if (!exactKeys(target, ['schemaVersion', 'format', 'principalId', 'method', 'admissionKey', 'admissionIntentDigest',
       'originalRequestRef', 'originalRequestDigest', 'sessionId', 'expectedContextRevision', 'workspaceIdentityRef', 'workspaceIdentityDigest',
-      'sourceReadGrantRefs', 'runtimeBundleRef', 'runtimeBundleManifestDigest', 'sandboxProfileRef', 'sandboxProfileDigest', 'targetDigest']) ||
-      target.schemaVersion !== 1 || target.format !== 'cliq-source-inspection-target-v1' || target.method !== 'run.submit' ||
+      'sourceReadGrantRefs', 'runtimeBundleRef', 'runtimeBundleManifestDigest', 'sandboxProfileRef', 'sandboxProfileDigest', 'targetDigest',
+      ...(target.schemaVersion === 2 ? ['inspectionGrantId', 'inspectionReceiptRef', 'inspectionReceiptDigest', 'ignoreReadConsents'] : [])]) ||
+      !(target.schemaVersion === 1 && target.format === 'cliq-source-inspection-target-v1' || target.schemaVersion === 2 && target.format === 'cliq-source-inspection-target-v2') || target.method !== 'run.submit' ||
       target.workspaceIdentityDigest !== source.workspaceIdentityDigest || target.sessionId !== request.sessionId ||
       target.expectedContextRevision !== request.expectedContextRevision || !Array.isArray(target.sourceReadGrantRefs) || target.sourceReadGrantRefs.length !== 0 ||
       target.targetDigest !== source.targetDigest || target.targetDigest !== digestOmitting(target, 'targetDigest') ||
@@ -309,6 +315,11 @@ export async function replayInstalledRunAdmission(
       target.originalRequestDigest !== sourceOriginal.originalRequestDigest || sourceIndex.originalRequestId !== sourceOriginal.request.requestId ||
       sourceIndex.originalRequestDigest !== sourceOriginal.originalRequestDigest || runSubmitIntentDigest(principalId, sourceOriginal.request) !== intent)
     throw new KernelStorageError('RECOVERY_REQUIRED', 'installed Run source original request closure changed');
+  if (target.schemaVersion === 2) {
+    if (!runtime) throw new KernelStorageError('RECOVERY_REQUIRED', 'Git admission replay requires its retained signed authorization roots');
+    await readRetainedSourceInspectionTarget(reads, source, sourceIndex, { ...runtime,
+      sandboxProfile: decodeSandboxProfile(await readCanonicalArtifact(reads, target.sandboxProfileRef)) }, { driver, owner, signal });
+  }
   await readSourceInspectionRetirement(driver, reads, source, target);
 
   const response = await readPublishedResponse(reads, originalControl.responseRef), run = response.result.snapshot.run;
@@ -349,6 +360,7 @@ export async function replayInstalledRunAdmission(
       assembly.runtime.runtimeBundleRef !== target.runtimeBundleRef || assembly.runtime.runtimeBundleManifestDigest !== target.runtimeBundleManifestDigest ||
       state.runId !== actual.id || state.baseWorkspaceManifestRef !== spec.baseWorkspaceManifestRef ||
       state.entriesRef !== manifest.entriesRef || state.sourceProjectionDigest !== manifest.sourceProjectionDigest || state.invalidatedEphemeralPaths.length !== 0 ||
+      state.privateGitStateRef !== source.outcome.privateGitStateRef ||
       initialContext.runId !== actual.id || initialContext.throughItemSeq !== 0 || initialContext.assemblyRef !== spec.assemblyRef ||
       initialContext.admittedContextRef !== spec.admittedContextRef || initialContext.segments.length !== 0)
     throw new KernelStorageError('RECOVERY_REQUIRED', 'installed Run frozen objective/context/source closure changed');
@@ -484,7 +496,8 @@ async function admitRunInternal(
   const channelClosure = await validateControlChannelClosure(reads, owner, input);
   const channel = channelClosure.channel;
 
-  const session = readSession(driver, input.sessionId);
+  const sessionContext = await readSessionContextCut(driver, reads, input.principalId, input.sessionId, input.expectedContextRevision);
+  const session = sessionContext.cut.session;
   if (readSessionPrincipalId(driver, input.sessionId) !== input.principalId) {
     throw new KernelStorageError('INVALID_REQUEST', 'session does not belong to the calling principal');
   }
@@ -521,6 +534,11 @@ async function admitRunInternal(
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'source projection is not bound to the frozen ignore rules');
   }
   const sourceManifest = decodeSourceManifest(await reads.readCanonical(input.baseWorkspaceManifestRef));
+  const runId = identityHash('cliq-run-id-v1', input.principalId, 'run.submit', input.admissionKey);
+  const privateGitStateRef = installed?.data.source.phase === 'retired' && installed.data.source.outcome.kind === 'captured'
+    ? installed.data.source.outcome.privateGitStateRef : undefined;
+  if (!!sourceManifest.git !== !!privateGitStateRef)
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'Git admission requires its original genuine captured private graph');
   if (
     sourceManifest.role !== 'base' ||
     sourceManifest.sourceProjectionRef !== input.sourceProjectionRef ||
@@ -532,6 +550,13 @@ async function admitRunInternal(
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'base SourceManifest is not bound to the admitted Session workspace');
   }
   decodeWorkspaceEntries(await reads.readCanonical(sourceManifest.entriesRef));
+  if (privateGitStateRef) {
+    const sourceProfile = decodeSandboxProfile(await reads.readCanonical(input.sandboxProfileRef));
+    const sourceData = await readSourceProjectionData(reads, sourceManifest, sourceProjection, sourceProfile.resources, signal);
+    await loadFrozenPrivateGit(reads, sourceManifest, { schemaVersion: 1, format: 'cliq-workspace-state-v1',
+      runId, baseWorkspaceManifestRef: input.baseWorkspaceManifestRef, entriesRef: sourceManifest.entriesRef,
+      sourceProjectionDigest: sourceProjection.projectionDigest, invalidatedEphemeralPaths: [], privateGitStateRef, stateDigest: '' }, sourceData.rules, signal, sourceProfile.resources);
+  }
   if ((sourceManifest.git === undefined) !== (workspaceIdentity.repositoryIdentityDigest === undefined)) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'SourceManifest git identity does not match the live workspace');
   }
@@ -552,19 +577,23 @@ async function admitRunInternal(
   }
   const verifierRequests = installed?.data.normalized.request.verifiers ?? input.verifierRequests ?? [];
   let verifierPreparation: Awaited<ReturnType<typeof prepareVerifierSpec>> | undefined;
+  let verifierConsumption: Awaited<ReturnType<typeof prepareVerifierConsumption>> | undefined;
   if (verifierSpec.verifiers.length || verifierRequests.length) {
     if (!runtime || !verifierRequests.length) throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');
     const policy = await readCanonicalArtifact<{ mode: string }>(reads, input.policyRef);
-    verifierPreparation = await prepareVerifierSpec(driver, reads, owner, runtime, { principalId: input.principalId,
+    const verifierInput = { principalId: input.principalId,
       requests: verifierRequests, policyMode: policy.mode, assembly: decodeRetainedRunAssembly(await readCanonicalArtifact(reads, input.assemblyRef)),
-      sourceProjectionRef: input.sourceProjectionRef, sandboxProfileRef: input.sandboxProfileRef }, undefined, signal);
+      sourceProjectionRef: input.sourceProjectionRef, sandboxProfileRef: input.sandboxProfileRef };
+    if (installed && verifierRequests.length === 1) {
+      const published = await prepareInstalledVerifierAdmission(driver, reads, owner, runtime, verifierInput,
+        { runId, admissionIntentDigest, admittedAt: installed.data.admittedAt }, input.verifierSpecRef, signal);
+      verifierPreparation = published.preparation; verifierConsumption = published.consumption;
+    } else verifierPreparation = await prepareVerifierSpec(driver, reads, owner, runtime, verifierInput, undefined, signal);
     if (verifierPreparation.specRef !== input.verifierSpecRef) throw new KernelStorageError('ARTIFACT_MISMATCH', 'verifier spec differs from the authorized public command and environment');
   }
 
-  await reads.readBytes(input.assemblyRef);
-  await reads.readBytes(input.policyRef);
-  await reads.readBytes(input.sandboxProfileRef);
-
+  // describe performs each complete hash/length/identity-checked CAS read on
+  // this same signal; a preceding discarded raw read adds no data to this cut.
   const referencedMetadata = await reads.mapReads([
     [input.assemblyRef, 'cliq-run-assembly-v1'],
     [input.policyRef, 'cliq-run-policy-v1'],
@@ -578,8 +607,7 @@ async function admitRunInternal(
   ] as const, ([ref, schemaKind]) => reads.describe(ref, 'application/json', schemaKind));
 
   const now = installed?.data.admittedAt ?? sampleCanonicalNow();
-  const runId = identityHash('cliq-run-id-v1', input.principalId, 'run.submit', input.admissionKey);
-  const verifierConsumption = verifierPreparation && await prepareVerifierConsumption(artifacts, verifierPreparation,
+  if (!verifierConsumption && verifierPreparation) verifierConsumption = await prepareVerifierConsumption(artifacts, verifierPreparation,
     { runId, admissionIntentDigest, admittedAt: now }, signal);
   // Revocation stops the next independent publication, never an already
   // started write/fsync/cleanup. A storage or retirement failure keeps priority.
@@ -637,6 +665,7 @@ async function admitRunInternal(
     runId,
     baseWorkspaceManifestRef: input.baseWorkspaceManifestRef,
     entriesRef: sourceManifest.entriesRef,
+    ...(privateGitStateRef ? { privateGitStateRef } : {}),
     invalidatedEphemeralPaths: [] as string[],
     sourceProjectionDigest: sourceProjection.projectionDigest,
     stateDigest: ''
@@ -831,6 +860,7 @@ async function admitRunInternal(
     }
 
     const lockedSession = readSession(connection, input.sessionId);
+    assertSessionContextCut(connection, sessionContext.cut);
     if (readSessionPrincipalId(connection, input.sessionId) !== input.principalId) {
       throw new KernelStorageError('INVALID_REQUEST', 'session does not belong to the calling principal');
     }

@@ -373,7 +373,7 @@ export const completeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', a
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'native worker death does not observe this persisted inspection');
   }
   const workspaceRetirement = await observeRetainedRunWorkspace({ filesystem: owner.filesystem, artifacts,
-    identity: closure.generation, sourceRowVersion: intent.sourceRowVersion, signal });
+    identity: closure.generation, sourceRowVersion: intent.sourceRowVersion, signal, gitResources: closure.spec.resources });
   const observation = readRetainedWorkspaceObservation(workspaceRetirement);
   signal?.throwIfAborted();
   if (observation.generationRef !== generation.generationRef || observation.generationIdentityDigest !== generation.generationIdentityDigest ||

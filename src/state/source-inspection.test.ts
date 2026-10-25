@@ -26,6 +26,7 @@ test('source capture retains submit and apply under their distinct original meth
         stateOwnerEpoch: 1, supervisorInstanceId: 'supervisor', stagingNonceDigest: 'e'.repeat(64),
         stagingIdentity: { deviceId: observed.dev.toString(), fileId: observed.ino.toString(), ownerUid: Number(observed.uid), mode: 448 },
         cancelRequested: false, phase: 'capturing', rowVersion: 1,
+        ...(method === 'run.submit' ? { inputRef: '1'.repeat(64), inputDigest: '2'.repeat(64) } : {}),
         createdAt: '2026-10-08T00:00:00.000Z', deadlineAt: '2026-10-08T00:01:00.000Z', updatedAt: '2026-10-08T00:00:00.000Z', rowDigest: '' };
       row.rowDigest = digestOmitting(row, 'rowDigest');
       driver.prepare(`INSERT INTO source_inspection_attempts
@@ -34,6 +35,9 @@ test('source capture retains submit and apply under their distinct original meth
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'capturing', 1, ?)`).run(row.inspectionId, row.principalId, method, row.admissionKey,
         row.admissionIntentDigest, '0199b011-1111-7111-8111-111111111111', 'f'.repeat(64), row.workspaceIdentityDigest, canonicalJsonBytes(row).toString());
       assert.equal(readSourceInspectionAttempt(driver, { ...key, method })?.method, method);
+      const observedIntent = readSourceInspectionAttempt(driver, { ...key, method });
+      assert.equal(observedIntent?.phase, 'capturing');
+      assert.equal(observedIntent?.inputRef, method === 'run.submit' ? '1'.repeat(64) : undefined);
       assert.throws(() => readSourceInspectionAttempt(driver, { ...key, method, admissionIntentDigest: 'f'.repeat(64) }),
         error => error instanceof Error && 'code' in error && error.code === 'ADMISSION_KEY_CONFLICT');
     }

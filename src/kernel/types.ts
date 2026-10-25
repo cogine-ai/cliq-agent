@@ -469,6 +469,50 @@ export type RepositoryIdentityV1 = {
   repositoryIdentityDigest: string;
 };
 
+/** Descriptor identity only. No configuration, HEAD, index or object byte has
+ * been read or authorized by this artifact. V1 retains its historical meaning. */
+export type RepositoryIdentityV2 = Omit<RepositoryIdentityV1, 'schemaVersion' | 'format' | 'objectFormat'> & {
+  schemaVersion: 2;
+  format: 'cliq-repository-identity-v2';
+};
+export type RepositoryIdentity = RepositoryIdentityV1 | RepositoryIdentityV2;
+
+export type SanitizedGitConfigV1 = {
+  schemaVersion: 1;
+  format: 'cliq-sanitized-git-config-v1';
+  core: { repositoryFormatVersion: 0 | 1; fileMode: boolean; bare: false;
+    logAllRefUpdates?: boolean; ignoreCase?: boolean; precomposeUnicode?: boolean };
+  extensions?: { objectFormat: 'sha1' | 'sha256' };
+  configDigest: string;
+};
+
+export type GitIndexSnapshotV1 = {
+  schemaVersion: 1; format: 'cliq-git-index-snapshot-v1'; repositoryIdentityDigest: string;
+  objectFormat: 'sha1' | 'sha256'; canonicalIndexVersion: 2;
+  entries: Array<{ canonicalRootRelativePath: string; stage: 0; mode: 33188 | 33261 | 40960;
+    objectId: string; assumeValid: boolean; skipWorktree: false }>;
+  canonicalIndexBytesRef: ArtifactRef; canonicalIndexBytesDigest: string; canonicalIndexByteCount: number;
+  indexTreeObjectId: string; snapshotDigest: string;
+};
+export type GitObjectPackV1 = {
+  schemaVersion: 1; format: 'cliq-git-object-pack-v1'; objectFormat: 'sha1' | 'sha256';
+  packBytesRef: ArtifactRef; packBytesDigest: string; packByteCount: number; packTrailerObjectHash: string;
+  packIndexBytesRef: ArtifactRef; packIndexBytesDigest: string; packIndexByteCount: number;
+  packIndexVersion: 2; objectCount: number; objectIds: string[]; packDigest: string;
+};
+export type GitObjectClosureV1 = {
+  schemaVersion: 1; format: 'cliq-git-object-closure-v1'; repositoryIdentityDigest: string; objectFormat: 'sha1' | 'sha256';
+  packs: Array<{ packRef: ArtifactRef; packDigest: string; packTrailerObjectHash: string }>;
+  reachableObjectIds: string[]; closureDigest: string;
+};
+export type PrivateGitStateManifest = {
+  schemaVersion: 1; format: 'cliq-private-git-v1';
+  head: { kind: 'unborn'; branch: string } | { kind: 'symbolic'; ref: string } | { kind: 'detached'; objectId: string };
+  indexRef: ArtifactRef; refs: Array<{ name: string; objectId: string }>;
+  objectClosureRef: ArtifactRef; objectClosureDigest: string; sanitizedConfigRef: ArtifactRef; sanitizedConfigDigest: string;
+  manifestDigest: string;
+};
+
 export type WorkspaceIdentityV1 = {
   schemaVersion: 1;
   format: 'cliq-workspace-identity-v1';
@@ -657,6 +701,8 @@ export type FrozenIgnoreRulesV1 = {
 };
 
 export type SourceProjectionSpec = {
+  /** Original admitted tracked-path classification, independent of A/current metadata. */
+  classificationIndexRef?: ArtifactRef;
   schemaVersion: 1;
   matcherVersion: 'cliq-exact-path-v1';
   frozenIgnoreRulesRef: ArtifactRef;
@@ -1403,7 +1449,7 @@ export type WorkerPreparation = {
   generationCreationNonceDigest: string;
   generationId: string;
   generation?: { generationRef: ArtifactRef; generationIdentityDigest: string };
-  controller?: { birthIdentityRef: ArtifactRef; birthIdentityDigest: string };
+  controller?: { birthIdentityRef: ArtifactRef; birthIdentityDigest: string; privateGitInputRef?: ArtifactRef };
   reservation?: { deviceId: string; fileId: string; ownerUid: number };
 };
 

@@ -237,7 +237,18 @@ function assertCarrierExperimentWorkflow(workflow: string): void {
   assert.equal(workflow.split(parentEvidenceTest).length, 2, 'the new parent-domain regression must run exactly once in the existing four-job TypeScript matrix');
   assert(workflow.includes('          scripts/kernel/testing/installed-verifier-result.test.ts\n' + parentEvidenceTest + '      - run: npm run build\n'),
     'the added regression must remain in the original test command, not in a disabled or independent step');
-  const projected = workflow.replace(experiment, '').replace(retain, '').replace(parentEvidenceTest, '');
+  const sessionRegression = ' scripts/kernel/testing/installed-session-continuity.test.ts';
+  assert.equal(workflow.split(sessionRegression).length, 2, 'the installed Session regression runs exactly once');
+  assert(workflow.includes('      - run: node --test --import tsx scripts/kernel/testing/installed-worker-lease.test.ts ' +
+    'scripts/kernel/testing/installed-client-consumer.test.ts scripts/kernel/testing/installed-control-client-driver.test.ts' + sessionRegression + '\n'),
+  'Session conformance remains in the original installed-Run preflight command');
+  const processRegression = '          node --test scripts/kernel/testing/systemd-process-fact.test.mjs\n';
+  assert.equal(workflow.split(processRegression).length, 2, 'the real process-lifecycle regression runs exactly once');
+  assert(workflow.includes('        run: |\n' + processRegression + '          probe_node=$(realpath "$(command -v node)")\n' +
+    '          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh "$probe_node" "$RUNNER_TEMP/cliq-systemd-user"\n'),
+  'the lifecycle regression precedes the unchanged actual systemd campaign in its original step');
+  const projected = workflow.replace(experiment, '').replace(retain, '').replace(parentEvidenceTest, '')
+    .replace(sessionRegression, '').replace(processRegression, '');
   assert.equal(createHash('sha256').update(projected).digest('hex'), '346af80a56060feace86c309b316c67560f68c512207d6cd3c95ab965cb225f5',
     'all original CT jobs, runner groups, timeouts, qualifiers and conditions must remain byte-identical');
   assert.equal(workflow.split('qualify-supervisor-carrier-size.ts').length, 2, 'no production job may select the experimental carrier');
@@ -250,11 +261,18 @@ test('carrier experiments are isolated beside the original image qualifier and r
 test('the additive parent-domain regression cannot hide workflow removals, disabled tests or changed runner and time budgets', async () => {
   const workflow = await readFile(new URL('../../../.github/workflows/kernel-foundation.yml', import.meta.url), 'utf8');
   const parentEvidenceTest = '          scripts/kernel/testing/installed-verifier-parent-evidence.test.ts\n';
+  const sessionRegression = ' scripts/kernel/testing/installed-session-continuity.test.ts';
+  const processRegression = '          node --test scripts/kernel/testing/systemd-process-fact.test.mjs\n';
   const mutations = [
     workflow.replace(parentEvidenceTest, ''),
     workflow.replace(parentEvidenceTest, parentEvidenceTest.repeat(2)),
     workflow.replace(parentEvidenceTest, '          # scripts/kernel/testing/installed-verifier-parent-evidence.test.ts\n'),
     workflow.replace(parentEvidenceTest + '      - run: npm run build\n', '      - run: npm run build\n' + parentEvidenceTest),
+    workflow.replace(sessionRegression, ''),
+    workflow.replace(sessionRegression, sessionRegression.repeat(2)),
+    workflow.replace(processRegression, ''),
+    workflow.replace(processRegression, processRegression.repeat(2)),
+    workflow.replace(processRegression, processRegression.replace('node --test', '# node --test')),
     workflow.replace('        node: [22.13.0, 24.x]', '        node: [24.x]'),
     workflow.replace('    runs-on: ubuntu-22.04', '    runs-on: ubuntu-22.04-8core'),
     workflow.replace('    timeout-minutes: 20', '    timeout-minutes: 21'),

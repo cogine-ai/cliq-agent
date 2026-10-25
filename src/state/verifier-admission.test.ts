@@ -192,11 +192,11 @@ test('installed assembly uses the shared full verifier resolution before publica
   assert.match(ordinary, /await resolveVerifierSpec\(driver, artifacts, owner, runtime, input, historical, signal\)/u);
   assert.match(ordinary, /await publishVerifierArtifacts\(artifacts, composed, historical, signal\)/u);
   assert(!ordinary.includes('publishVerifierAssembly'), 'the original historical reader never enters the current-only publisher');
-  const start = installedSource.indexOf('const sandbox = installedSandboxProfile(request.sandboxResources);');
+  const start = installedSource.indexOf('const sandboxProfileRef = publishedSandboxRef ??');
   const end = installedSource.indexOf('admissions.set(result,', start);
   assert(start >= 0 && end > start);
   const publication = installedSource.slice(start, end);
-  const stages = ['await artifacts.publishCanonical(sandbox, sandbox.format)', 'await prepareInstalledVerifierAssembly(',
+  const stages = ['await artifacts.publishCanonical(', 'installedSandboxProfile(request.sandboxResources)', 'await prepareInstalledVerifierAssembly(',
     'await artifacts.publishCanonical(policy, policy.format)', 'await installed.revalidate(signal)',
     'await validateControlChannelClosure(reads, owner, identity)', 'assertActiveStateOwner(driver, owner)'];
   let previous = -1;

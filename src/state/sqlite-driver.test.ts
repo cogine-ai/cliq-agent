@@ -94,6 +94,22 @@ test('executes caller-owned schema and prepared statements against a file databa
   }
 });
 
+test('scoped real SQLite streaming resets on break and rejects reads after its original snapshot closes', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'cliq-scoped-stream-')), driver = openSqliteDriver(path.join(directory, 'state.sqlite'));
+  try {
+    driver.exec('CREATE TABLE records(id INTEGER) STRICT; INSERT INTO records VALUES(1),(2),(3)');
+    let escaped: IterableIterator<{ id: bigint }> | undefined;
+    driver.readSnapshot(connection => {
+      const statement = connection.prepare('SELECT id FROM records ORDER BY id');
+      for (const row of statement.iterate<{ id: bigint }>()) { assert.equal(row.id, 1n); break; }
+      assert.deepEqual([...statement.iterate<{ id: bigint }>()].map(row => row.id), [1n, 2n, 3n]);
+      escaped = statement.iterate<{ id: bigint }>(); assert.equal(escaped.next().value!.id, 1n);
+    });
+    assert.throws(() => escaped!.next(), /scope is no longer active/);
+    assert.doesNotThrow(() => driver.exec('DROP TABLE records'), 'the expired iterator must return and join its original native read');
+  } finally { driver.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
 test('BEGIN IMMEDIATE transaction rolls back every write when the callback fails', async () => {
   const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-sqlite-rollback-'));
   const databasePath = path.join(stateRoot, 'kernel.sqlite3');

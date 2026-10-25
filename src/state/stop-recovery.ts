@@ -10,6 +10,7 @@ import { readHistoricalControlChannel } from './control-channel.js';
 import { decodeAdmittedContext, decodeRunSpec, decodeSessionProjection } from './decoders.js';
 import { isZeroBudget } from './invariants.js';
 import { readCheckpoint, readControlRequest, readSession, readSessionPrincipalId } from './rows.js';
+import { assertSessionTerminalProjection } from './session-context.js';
 import type { SqliteDriver } from './sqlite-driver.js';
 import { readResourceStopCause } from './resource-stop.js';
 import { validateModelFailureStop } from './model-failure.js';
@@ -281,11 +282,5 @@ async function validateStopRecoveryData(driver: SqliteDriver, artifacts: Artifac
   if (!row || row.session_id !== run.sessionId || row.run_id !== null || row.kind !== 'run_terminal' || row.created_at !== run.updatedAt ||
       row.payload_ref !== canonicalSha256(expected)) throw new TypeError('terminal Run has no atomic Session item');
   requireEqual(await readCanonicalArtifact(artifacts, row.payload_ref), expected, 'Session terminal payload');
-  const session = readSession(driver, run.sessionId);
-  const projection = decodeSessionProjection(await readCanonicalArtifact(artifacts, session.contextProjectionRef));
-  if (projection.sessionId !== session.id || projection.contextRevision !== session.contextRevision || projection.throughItemSeq !== session.latestItemSeq) throw new TypeError('terminal Session projection differs from its owner');
-  const segment = projection.segments.find((segment) => segment.fromItemSeq <= Number(row.item_seq) && segment.throughItemSeq >= Number(row.item_seq));
-  if (!segment || segment.kind !== 'raw') throw new TypeError('terminal Session item is absent from its projection');
-  requireEqual(segment, { kind: 'raw', fromItemSeq: Number(row.item_seq), throughItemSeq: Number(row.item_seq),
-    items: [{ sourceSessionId: session.id, itemSeq: Number(row.item_seq), itemId, kind: 'run_terminal', payloadRef: row.payload_ref }] }, 'one-item Session terminal segment');
+  await assertSessionTerminalProjection(driver, artifacts, run.sessionId, { itemSeq: Number(row.item_seq), itemId, payloadRef: row.payload_ref });
 }

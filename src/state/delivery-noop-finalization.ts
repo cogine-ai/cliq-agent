@@ -5,6 +5,7 @@ import { decodeDeliveryCaptureTopology, decodeDeliveryTerminalProjectionEvidence
 import type { RecoveryClosureV1, Run, RunFrontier } from '../kernel/types.js';
 import { requireEqual } from '../policy/runtime-authority.js';
 import { captureFrozenSourceProjection, MAX_SOURCE_PROJECTION_ENTRIES } from '../workspace/source-projection.js';
+import { observePublicationGitIndex, readPublicationGitIndexObservation } from './publication-git-index.js';
 import { readCanonicalArtifact } from './agent-context.js';
 import { insertArtifactMetadata, type ArtifactCatalog, type PublishedArtifact } from './artifacts.js';
 import { advanceTimeFence, sampleCanonicalNow, type TimeFenceAdvance } from './canonical-time.js';
@@ -106,9 +107,14 @@ async function prepare(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: 
       stateOwnerLock: owner.filesystem, workspaceIdentityDigest: workspace.identityDigest, artifacts: reads,
       sourceProjectionRef: cut.runSpec.sourceProjectionRef, sourceProjectionDigest: desired.sourceProjectionDigest,
       maxEntries: MAX_SOURCE_PROJECTION_ENTRIES, maxBytes: profile.resources.maxGenerationBytes,
+      ...(desired.git ? { git: { capturedSourceRef: delivery.merged.plan.capturedWorkspaceRef,
+        classificationSourceRef: delivery.merged.plan.sourceBaseRef, resources: profile.resources } } : {}),
       maxSingleFileBytes: profile.resources.maxSingleFileBytes, signal: resources.signal });
     if (captured.resultWorkspaceManifestRef !== verification.basis.candidate.resultSourceRef)
       invalid('no-op actual complete root projection differs from its role-normalized desired source');
+    gate.assertHeld();
+    const gitIndex = await observePublicationGitIndex(owner.filesystem, resources.workspaceRoot, reads,
+      { workspace, capturedSourceRef: delivery.merged.plan.capturedWorkspaceRef, resources: profile.resources }, resources.signal);
     gate.assertHeld();
     const observedAt = sampleCanonicalNow();
     if (observedAt < verification.closure.createdAt || observedAt < cut.run.updatedAt)
@@ -128,7 +134,7 @@ async function prepare(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: 
     const projectionClosureEvidenceRef = await publish({ kind: 'projection_closure', selectedBranch: 'forward_finalize',
       observedSourceRef: captured.resultWorkspaceManifestRef, observedPathEvidenceRefs: [], forwardResultItemRefs: [],
       unstartedForwardOperationIds: [], abortResultItemRefs: [] });
-    const gitIndexUnchangedEvidenceRef = await publish({ kind: 'git_index_unchanged', repositoryKind: 'non_git' });
+    const gitIndexUnchangedEvidenceRef = await publish(readPublicationGitIndexObservation(gitIndex));
     const core = { schemaVersion: 1 as const, deliveryRunId: cut.run.id, deliveryPlanRef: delivery.merged.planRef, selectedBranch: 'forward_finalize',
       observedSourceRef: captured.resultWorkspaceManifestRef, observedPathStates: [], forwardResultItemRefs: [], unstartedForwardOperationIds: [],
       abortResultItemRefs: [], transientAbsenceEvidenceRef, projectionClosureEvidenceRef, gitIndexUnchangedEvidenceRef, observedAt };

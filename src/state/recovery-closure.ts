@@ -8,6 +8,8 @@ import type {
   RunAssemblyV1,
   RunItemReferenceV1,
   RunSpec,
+  SourceManifest,
+  FrozenIgnoreRulesV1,
   WorkerLaunch,
   WorkspaceEntryManifest,
   WorkspaceGenerationStateV1,
@@ -46,9 +48,17 @@ import { validateRetainedWorkerSeal } from './tool-checkpoint.js';
 import { readRetiredGenerationSource } from './generation-retirement.js';
 import { validateInstalledBrokerAmbiguityHistory } from './broker-ambiguity.js';
 import { validateInstalledModelNoReleaseHistory } from './broker-no-release.js';
-import { validateWorkerPreparationHistory } from './worker-preparation.js';
+import { assertWorkerPreparationCleanupContext, validateWorkerPreparationHistory, type WorkerPreparationCleanupContext } from './worker-preparation.js';
 import { validateRunResultRecovery, validateRunResultRecoveryInDeliveryEpoch } from './run-result-recovery.js';
 import { assertDeliveryModelFreeCut } from './run-model-free.js';
+import type { SandboxResourceSpec } from '../kernel/execution.js';
+import { readFrozenIgnoreRules } from '../workspace/frozen-ignore.js';
+import { loadFrozenPrivateGit } from '../workspace/run-workspace/private-git.js';
+import { readSourceProjectionData } from './source-projection-data.js';
+import { decodeSandboxProfile } from './execution-closure.js';
+import { checkSourceManifest } from './source-validation.js';
+
+type FrozenSourceContext = Readonly<{ baseRef: string; source: SourceManifest; rules: FrozenIgnoreRulesV1; resources?: SandboxResourceSpec }>;
 
 const ZERO_BUDGET: BudgetUsage = {
   modelTokens: 0,
@@ -102,16 +112,20 @@ async function requireRecoveryArtifacts(
 async function validateWorkspaceStateArtifacts(
   artifacts: ArtifactCatalog,
   workspaceStateRef: string,
-  label: string
+  label: string,
+  frozen: FrozenSourceContext
 ): Promise<{ state: WorkspaceStateManifest; entries: WorkspaceEntryManifest }> {
   await requireRecoveryArtifacts(artifacts, [[label, workspaceStateRef]]);
   const state = decodeWorkspaceState(await artifacts.readCanonical(workspaceStateRef));
+  if (state.baseWorkspaceManifestRef !== frozen.baseRef || state.sourceProjectionDigest !== frozen.source.sourceProjectionDigest)
+    recoveryFailure('workspace state substitutes its original admitted base or projection');
   await requireRecoveryArtifacts(artifacts, [
     [`${label}.baseWorkspaceManifestRef`, state.baseWorkspaceManifestRef],
     [`${label}.entriesRef`, state.entriesRef],
     [`${label}.privateGitStateRef`, state.privateGitStateRef]
   ]);
   const entries = decodeWorkspaceEntries(await artifacts.readCanonical(state.entriesRef));
+  await loadFrozenPrivateGit(artifacts, frozen.source, state, frozen.rules, undefined, frozen.resources);
   await requireRecoveryArtifacts(
     artifacts,
     entries.entries
@@ -124,7 +138,7 @@ async function validateWorkspaceStateArtifacts(
 async function validateRunSpecArtifacts(
   artifacts: ArtifactCatalog,
   runSpec: RunSpec
-): Promise<void> {
+): Promise<FrozenSourceContext> {
   await requireRecoveryArtifacts(artifacts, [
     ['RunSpec.objectiveRef', runSpec.objectiveRef],
     ['RunSpec.admittedContextRef', runSpec.admittedContextRef],
@@ -159,21 +173,24 @@ async function validateRunSpecArtifacts(
   const source = decodeSourceManifest(
     await artifacts.readCanonical(runSpec.baseWorkspaceManifestRef)
   );
+  checkSourceManifest(source);
   const projection = decodeSourceProjection(
     await artifacts.readCanonical(runSpec.sourceProjectionRef)
   );
+  if (!source.git && projection.classificationIndexRef !== undefined) recoveryFailure('non-Git Run has a Git classification index');
   await requireRecoveryArtifacts(artifacts, [
     ['SourceManifest.entriesRef', source.entriesRef],
     ['SourceManifest.sourceProjectionRef', source.sourceProjectionRef],
     ['SourceManifest.frozenIgnoreRulesRef', source.frozenIgnoreRulesRef],
     ['SourceManifest.git.indexRef', source.git?.indexRef],
+    ['SourceProjection.classificationIndexRef', projection.classificationIndexRef],
     ...projection.explicitIncludes.map((include, index) =>
       [`SourceProjection.explicitIncludes[${index}].authorizationRef`, include.authorizationRef] as const
     )
   ]);
-  const rules = decodeFrozenIgnoreRules(
-    await artifacts.readCanonical(source.frozenIgnoreRulesRef)
-  );
+  const resources = source.git ? decodeSandboxProfile(await artifacts.readCanonical(runSpec.sandboxProfileRef)).resources : undefined;
+  const classification = resources ? await readSourceProjectionData(artifacts, source, projection, resources) : undefined;
+  const rules = classification?.rules ?? await readFrozenIgnoreRules(artifacts, source.frozenIgnoreRulesRef);
   await requireRecoveryArtifacts(
     artifacts,
     rules.sources.map((ruleSource, index) =>
@@ -196,6 +213,7 @@ async function validateRunSpecArtifacts(
       .filter((entry) => entry.kind === 'file')
       .map((entry, index) => [`SourceManifest.entries[${index}].blobRef`, entry.blobRef] as const)
   );
+  return { baseRef: runSpec.baseWorkspaceManifestRef, source, rules, ...(resources ? { resources } : {}) };
 }
 
 async function validateContextArtifacts(
@@ -446,7 +464,8 @@ function budgetEqual(left: BudgetUsage, right: BudgetUsage): boolean {
 
 async function validateGenerationArtifacts(
   artifacts: ArtifactCatalog,
-  generations: WorkspaceGenerationStateV1[]
+  generations: WorkspaceGenerationStateV1[],
+  frozen: FrozenSourceContext
 ): Promise<void> {
   for (const generation of generations) {
     await requireRecoveryArtifacts(artifacts, [
@@ -466,7 +485,7 @@ async function validateGenerationArtifacts(
     const sourceWorkspace = await validateWorkspaceStateArtifacts(
       artifacts,
       identity.sourceWorkspaceStateRef,
-      'WorkspaceGenerationIdentity.sourceWorkspaceStateRef'
+      'WorkspaceGenerationIdentity.sourceWorkspaceStateRef', frozen
     );
     if (
       identity.generationId !== generation.generationId ||
@@ -485,7 +504,7 @@ async function validateGenerationArtifacts(
       const evidenceWorkspace = await validateWorkspaceStateArtifacts(
         artifacts,
         evidence.workspaceStateRef,
-        'WorkspaceGenerationSnapshotEvidence.workspaceStateRef'
+        'WorkspaceGenerationSnapshotEvidence.workspaceStateRef', frozen
       );
       if (
         evidence.evidenceDigest !== generation.snapshotEvidenceDigest ||
@@ -587,6 +606,16 @@ export async function readRecoveryClosure(
   return (await readRecoveryProjection(driver, artifacts, runId, onPhase)).cut;
 }
 
+/** One exact dead preparation may be inspected by its genuine successor.
+ * This does not resume the original producer or grant execution/retirement. */
+export async function readPreparingCleanupClosure(driver: SqliteDriver, artifacts: ArtifactCatalog,
+  runId: string, context: WorkerPreparationCleanupContext): Promise<RecoveryClosureV1> {
+  assertWorkerPreparationCleanupContext(driver, context, runId);
+  const result = await readRecoveryProjection(driver, artifacts, runId, undefined, context);
+  assertWorkerPreparationCleanupContext(driver, context, runId);
+  return result.cut;
+}
+
 /** One complete fresh recovery traversal and its publication projection.
  * Returned data grants no task, dispatch, settlement or terminal authority. */
 export async function readDeliveryPublicationClosure(
@@ -605,7 +634,8 @@ async function readRecoveryProjection(
   driver: SqliteDriver,
   artifacts: ArtifactCatalog,
   runId: string,
-  onPhase?: (phase: RecoveryClosurePhase) => void
+  onPhase?: (phase: RecoveryClosurePhase) => void,
+  preparationCleanup?: WorkerPreparationCleanupContext
 ): Promise<{ cut: RecoveryClosureV1; prefix?: PublicationPrefix }> {
   const phase = (value: RecoveryClosurePhase) => { try { onPhase?.(value); } catch { /* Diagnosis cannot decide recovery. */ } };
   const databaseCut = driver.transaction((connection) => {
@@ -647,7 +677,7 @@ async function readRecoveryProjection(
   } = databaseCut;
   try {
     await validateWorkerPreparationHistory(driver, artifacts, { run, launches: databaseCut.allWorkerLaunches,
-      generations: workspaceGenerations });
+      generations: workspaceGenerations }, preparationCleanup);
   } catch (error) { recoveryFailure(`worker preparation history is invalid: ${(error as Error).message}`, error); }
   phase('spec');
   requireRecoveryArtifactRef(run.specRef, 'Run.specRef');
@@ -703,7 +733,7 @@ async function readRecoveryProjection(
 
   const runSpec = decodeRunSpec(await artifacts.readCanonical(run.specRef));
   if (runSpec.operation === 'delivery') assertDeliveryModelFreeCut({ run, runSpec, journal, childAllocations });
-  await validateRunSpecArtifacts(artifacts, runSpec);
+  const frozenSource = await validateRunSpecArtifacts(artifacts, runSpec);
   phase('context');
   const context = decodeContextManifest(await artifacts.readCanonical(latestCheckpoint.contextManifestRef));
   if (context.runId !== run.id || context.throughItemSeq !== latestCheckpoint.runItemSeq) {
@@ -713,7 +743,7 @@ async function readRecoveryProjection(
   const latestWorkspace = await validateWorkspaceStateArtifacts(
     artifacts,
     latestCheckpoint.workspaceStateRef,
-    'Checkpoint.workspaceStateRef'
+    'Checkpoint.workspaceStateRef', frozenSource
   );
   if (
     latestWorkspace.state.runId !== run.id ||
@@ -739,7 +769,7 @@ async function readRecoveryProjection(
         ? (await readRetiredGenerationSource(driver, artifacts, { run, spec: runSpec, assembly, generation })).source : generation);
     } catch (error) { recoveryFailure(`generation retirement history is invalid: ${(error as Error).message}`, error); }
   } else generationProofs.push(...workspaceGenerations);
-  await validateGenerationArtifacts(artifacts, generationProofs);
+  await validateGenerationArtifacts(artifacts, generationProofs, frozenSource);
   const closure: RecoveryClosureV1 = { runSpec, run, latestCheckpoint, items, journal, workerLaunches, workspaceGenerations, childAllocations };
   const delivery = runSpec.operation === 'delivery' ? createDeliveryReadData(driver, artifacts, closure) : undefined;
   phase('history');

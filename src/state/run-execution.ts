@@ -12,10 +12,12 @@ import { assertNativeContainmentDeath, assertNativePreactivationObservation, LIN
   openInstalledLinuxWorkerLauncher, openLinuxWorkerLauncher, type LinuxBlockedWorker, type LinuxWorkerController,
   type LinuxWorkerInstallation, type NativePreactivationRetirement, type NativeRetainedWorkerRetirement } from '../sandbox/linux-worker.js';
 import { borrowRunWorkspaceForExecution, createRunWorkspaceMaterialization, observeRetainedRunWorkspace,
+  readRunWorkspacePreparingGit, openRunWorkspacePreparingGitInput,
   type RunWorkspaceGeneration, type RunWorkspaceMaterialization, type RunWorkspaceBirth } from '../workspace/run-workspace/generation.js';
 import type { ArtifactCatalog } from './artifacts.js';
 import { isJoinedCasPublicationFailure } from './cas.js';
 import { sampleCanonicalNow } from './canonical-time.js';
+import { openInstalledPreparingGit, type InstalledPreparingGit, type PreparingGitCompletion } from '../sandbox/preparation-git.js';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
 import { decodeSandboxProfile, readBuiltinEditLaunchClosure, readWorkerLaunchClosure, readRetainedWorkerLaunchClosure, readQuarantinedWorkerLaunchClosure, decodeWorkerProcessContainment, readVerifierLaunchClosure, type WorkerLaunchClosure } from './execution-closure.js';
 import { loadAgentRun } from './reducers/agent.js';
@@ -34,7 +36,7 @@ import { toolCheckpointId } from './tool-checkpoint.js';
 import { readToolCut } from './tool-cut.js';
 import { decodeRunSpec, decodeWorkerIdentity, decodeWorkspaceGenerationIdentity, decodeWorkspaceIdentity } from './decoders.js';
 import { retirePreactivationLaunch } from './preactivation-retirement.js';
-import { loadNativeStateOwner, type HeldWorkerReservation, type HeldWorkspaceRoot } from './native-owner.js';
+import { loadNativeStateOwner, type HeldWorkerReservation, type HeldWorkspaceRoot, type HeldPreparingGitInput } from './native-owner.js';
 import { withHeldInstalledRuntime, withInstalledWorkerRoot, type HeldInstalledAnchor, type HeldInstalledRuntime } from './installed-runtime.js';
 import { stopCheckpointId, stopInvocationHistory } from '../runtime/stop.js';
 import { retireQuarantinedGeneration } from './generation-retirement.js';
@@ -42,10 +44,11 @@ import { observeInstalledBrokerQuiescence, type StateStore } from './store.js';
 import { readRequiredWorkerLaunch, readWorkerLaunchesForRun } from './repositories/worker-launches.js';
 import { hasOnlySettledInstalledModelUnknowns } from './worker-recovery.js';
 import { readInvocationAttempt } from './repositories/journal.js';
-import { beginWorkerPreparation, recordWorkerPreparationGeneration, recordWorkerPreparationController, retireWorkerPreparation } from './worker-preparation.js';
+import { beginWorkerPreparation, recordWorkerPreparationGeneration, recordWorkerPreparationController, retireWorkerPreparation,
+  assertWorkerPreparationRelease } from './worker-preparation.js';
 import { validateInstalledModelNoReleaseHistory } from './broker-no-release.js';
 import { readVerifierProgress } from './verifier-recovery.js';
-import { decodeGuestToolchainManifest } from './guest-toolchain.js';
+import { decodeGuestToolchainManifest, guestToolchainRoots, readRetainedVerifierToolchain } from './guest-toolchain.js';
 import { decodeVerifierCommand } from './verifier-artifacts.js';
 import { validateVerifierStoppedHistory } from './verifier-stop-history.js';
 import type { PublicationInvocationOwner } from './publication-invocation.js';
@@ -494,6 +497,8 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
   let retirementController: LinuxWorkerController | undefined;
   let preparation: PreparingWorkerLaunch | undefined, materialization: RunWorkspaceMaterialization | undefined;
   let workspaceBirth: RunWorkspaceBirth | undefined;
+  let preparingGit: InstalledPreparingGit | undefined;
+  let preparingGitInput: HeldPreparingGitInput | undefined;
   const publicationOwners = new Set<PublicationInvocationOwner>();
   let publicationTask: DeliveryPublicationTask | undefined;
   let noOpTask: DeliveryNoOpTask | undefined;
@@ -642,13 +647,20 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
     }
     const retainedPublicationRetirement = publicationRetirement;
     worker = undefined; ownedLaunchId = undefined; activeWorker = undefined; publicationRetirement = undefined;
+    // Original controller revokes and joins preparation before the tree or
+    // reservation can close. Claimed native inputs deliberately reject early
+    // descriptor release; construction failures require this real close first.
+    try { await retainedController?.close(); }
+    catch (failure) { cleanupFailure ??= failure; }
+    try { await preparingGit?.close(); }
+    catch (failure) { cleanupFailure ??= failure; }
+    try { preparingGitInput?.close(); }
+    catch (failure) { cleanupFailure ??= failure; }
     try { retainedGeneration?.close(); }
     catch (failure) { cleanupFailure ??= failure; }
     try { await retainedMaterialization?.close(); }
     catch (failure) { cleanupFailure ??= failure; }
-    // One failed release must not bypass the independent process join.
-    try { await retainedController?.close(); }
-    catch (failure) { cleanupFailure ??= failure; }
+    if (!retainedPreparation) { preparingGit = undefined; preparingGitInput = undefined; }
     try { await retainedRetirement?.close(); }
     catch (failure) { cleanupFailure ??= failure; }
     try { retainedReservation?.close(); }
@@ -718,12 +730,49 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
     const spawnNonceDigest = nonce(), activationNonceDigest = nonce(), generationCreationNonceDigest = nonce();
     preparation = await beginWorkerPreparation(driver, reads, owner, { runId, expectedRunRevision: run.revision,
       launchId, spawnNonceDigest, activationNonceDigest, generationCreationNonceDigest });
+    const profile = decodeSandboxProfile(await reads.readCanonical(selected.runSpec.sandboxProfileRef));
     materialization = createRunWorkspaceMaterialization({ filesystem: owner.filesystem, artifacts: reads,
-      checkpoint: selected.latestCheckpoint, generationCreationNonceDigest, signal });
+      checkpoint: selected.latestCheckpoint, generationCreationNonceDigest, signal, gitResources: profile.resources });
     workspaceBirth = await materialization.birth();
     const born = await recordWorkerPreparationGeneration(driver, artifacts, owner, { launchId, birth: workspaceBirth });
     signal.throwIfAborted();
-    generation = await materialization.finish();
+    const git = readRunWorkspacePreparingGit(owner.filesystem, workspaceBirth);
+    let gitCompletion: PreparingGitCompletion | undefined;
+    if (git) {
+      // Publish and join the original inert metadata before acquiring runtime
+      // processes. The same controller registration transaction roots this ref.
+      const metadata = await reads.publishBytes(git.metadata, 'application/json', 'cliq-source-git-inspection-output-v1');
+      if (metadata.ref !== git.metadataRef) throw new KernelStorageError('ARTIFACT_MISMATCH', 'preparing Git metadata publication differs');
+      if (!bootstrap) throw new KernelStorageError('ARTIFACT_MISMATCH', 'preparing Git has no trusted bootstrap');
+      const roots = guestToolchainRoots(bootstrap.bundle);
+      if (roots.length !== 1) throw new KernelStorageError('ARTIFACT_MISMATCH', 'preparing Git requires its unique signed toolchain');
+      const toolchain = await readRetainedVerifierToolchain(reads, { bundle: bootstrap.bundle, releaseKeys: bootstrap.releaseKeys,
+        guestToolchainManifestRef: roots[0]!.artifactRef, signal });
+      controller = await launcher.startController({ signal });
+      reservation = owner.filesystem.createWorkerReservation(launchId, spawnNonceDigest);
+      await recordWorkerPreparationController(driver, artifacts, owner,
+        { launchId, birth: controller.preparationBirth, reservation, workspaceBirth });
+      signal.throwIfAborted();
+      const originalOwner = assertActiveStateOwner(driver, owner);
+      assertWorkerPreparationRelease(driver, owner, launchId);
+      const input = preparingGitInput = openRunWorkspacePreparingGitInput(owner.filesystem, workspaceBirth, reservation, {
+        runId, generationId: born.generation.generationId, launchId, spawnNonceDigest, activationNonceDigest,
+        generationCreationNonceDigest, generationRef: born.generationRef, inputIntentRef: git.metadataRef });
+      preparingGit = await openInstalledPreparingGit(controller, input, reads, { privateGitStateRef: git.privateGitStateRef, toolchain,
+        recipe: { ...profile.resources, stateOwnerEpoch: owner.ownerEpoch, supervisorInstanceId: owner.supervisorInstanceId,
+          stateOwnerRowDigest: originalOwner.rowDigest, sessionId: run.sessionId, sourceCheckpointId: selected.latestCheckpoint.id,
+          sourceWorkspaceStateRef: selected.latestCheckpoint.workspaceStateRef, repositoryIdentityDigest: git.repositoryIdentityDigest } }, signal);
+      assertWorkerPreparationRelease(driver, owner, launchId);
+      await preparingGit.reservation(); signal.throwIfAborted();
+      assertWorkerPreparationRelease(driver, owner, launchId); preparingGit.createBlocked();
+      await preparingGit.ready(); signal.throwIfAborted();
+      assertWorkerPreparationRelease(driver, owner, launchId); preparingGit.releaseCapture();
+      await preparingGit.transferInput(); signal.throwIfAborted();
+      assertWorkerPreparationRelease(driver, owner, launchId); preparingGit.continueFixedGit();
+      gitCompletion = await preparingGit.complete(); signal.throwIfAborted();
+      assertWorkerPreparationRelease(driver, owner, launchId);
+    }
+    generation = await materialization.finish(gitCompletion ? { gitPreparation: gitCompletion } : undefined);
     const authority = await generation.publishMaterializedAuthority();
     if (authority.generationRef !== born.generationRef || authority.generationIdentityDigest !== born.generationIdentityDigest)
       throw new KernelStorageError('ARTIFACT_MISMATCH', 'ready generation differs from its original registered directory birth');
@@ -731,12 +780,15 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       expectedRowVersion: born.generation.rowVersion, snapshotEvidenceRef: authority.snapshotEvidenceRef, snapshotEvidenceDigest: authority.snapshotEvidenceDigest });
     // Keep the existing two-write readonly pair intact across cancellation.
     signal.throwIfAborted();
-    const profile = decodeSandboxProfile(await reads.readCanonical(selected.runSpec.sandboxProfileRef));
     const borrowed = borrowRunWorkspaceForExecution(generation);
     try { borrowed.assertQuota(profile.resources.maxGenerationBytes); } finally { borrowed.close(); }
-    controller = await launcher.startController({ signal });
-    reservation = owner.filesystem.createWorkerReservation(launchId, spawnNonceDigest);
-    await recordWorkerPreparationController(driver, artifacts, owner, { launchId, birth: controller.preparationBirth, reservation });
+    if (!controller) {
+      controller = await launcher.startController({ signal });
+      reservation = owner.filesystem.createWorkerReservation(launchId, spawnNonceDigest);
+      await recordWorkerPreparationController(driver, artifacts, owner,
+        { launchId, birth: controller.preparationBirth, reservation, workspaceBirth });
+    }
+    if (!reservation) throw new KernelStorageError('RECOVERY_REQUIRED', 'worker activation lost its original reservation');
     const recipe = await publishWorkerRecipe(reads, controller, installation!, selected, authority.generationRef,
       reservation, launchId, spawnNonceDigest, activationNonceDigest);
     const closure = await readWorkerLaunchClosure(reads, assertActiveStateOwner(driver, owner), { ...recipe.input, run });
@@ -1026,8 +1078,10 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           // preparation retirement has committed. Descriptor close alone is
           // not a durable proof of either tree or controller retirement.
           const original = preparation, birth = workspaceBirth;
-          await materialization?.close();
           const controllerRetirement = controller ? await controller.closePreparation() : undefined;
+          await preparingGit?.close();
+          preparingGitInput?.close();
+          await materialization?.close();
           reservation?.close();
           if ((!birth && !materialization) || !executionStore) throw new ResourceRetirementError('worker preparation has no complete original birth/retirement closure', error);
           await retireWorkerPreparation(driver, artifacts, owner, { preparation: original,
@@ -2090,7 +2144,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           }
           retirementPhase('workspace_observation');
           const workspaceRetirement = await observeRetainedRunWorkspace({ filesystem: owner.filesystem, artifacts: reads,
-            identity: closure.generation, sourceRowVersion: quarantine.sourceRowVersion, signal });
+            identity: closure.generation, sourceRowVersion: quarantine.sourceRowVersion, signal, gitResources: closure.spec.resources });
           signal.throwIfAborted();
           const brokerQuiescence = observeInstalledBrokerQuiescence(executionStore, runId);
           retirementPhase('retirement_commit');

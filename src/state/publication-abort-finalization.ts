@@ -6,6 +6,7 @@ import { decodeDeliveryCaptureTopology, decodeDeliveryTerminalProjectionEvidence
 import type { RecoveryClosureV1, Run } from '../kernel/types.js';
 import { requireEqual } from '../policy/runtime-authority.js';
 import { captureFrozenSourceProjection, MAX_SOURCE_PROJECTION_ENTRIES } from '../workspace/source-projection.js';
+import { observePublicationGitIndex, readPublicationGitIndexObservation } from './publication-git-index.js';
 import { readCanonicalArtifact } from './agent-context.js';
 import type { ArtifactCatalog, PublishedArtifact } from './artifacts.js';
 import { sampleCanonicalNow } from './canonical-time.js';
@@ -208,6 +209,7 @@ export async function prepareOwnedPublicationAbortFinalization(driver: SqliteDri
     stateOwnerLock: owner.filesystem, workspaceIdentityDigest: workspace.identityDigest, artifacts: reads,
     sourceProjectionRef: cut.runSpec.sourceProjectionRef, sourceProjectionDigest: desired.sourceProjectionDigest,
     maxEntries: MAX_SOURCE_PROJECTION_ENTRIES, maxBytes: profile.resources.maxGenerationBytes,
+    ...(desired.git ? { git: { capturedSourceRef: plan.capturedWorkspaceRef, classificationSourceRef: plan.sourceBaseRef, resources: profile.resources } } : {}),
     maxSingleFileBytes: profile.resources.maxSingleFileBytes, signal: resources.signal });
   const candidate = await capture(), source = decodeSourceManifest(await readCanonicalArtifact(reads, candidate.resultWorkspaceManifestRef));
   const entries = decodeWorkspaceEntries(await readCanonicalArtifact(reads, source.entriesRef));
@@ -220,6 +222,9 @@ export async function prepareOwnedPublicationAbortFinalization(driver: SqliteDri
     gate.assertOriginalObservations(topology, latest, workspace.identityDigest);
     const actual = await capture();
     if (actual.resultWorkspaceManifestRef !== candidate.resultWorkspaceManifestRef) invalid('abort actual partial root projection changed during capture');
+    gate.assertHeld();
+    const gitIndex = await observePublicationGitIndex(owner.filesystem, resources.workspaceRoot, reads,
+      { workspace, capturedSourceRef: plan.capturedWorkspaceRef, resources: profile.resources }, resources.signal);
     gate.assertHeld();
     const observedAt = sampleCanonicalNow();
     if (observedAt < latestObservedAt || observedAt < cut.run.updatedAt) invalid('abort actual projection predates its original stopped resource closure');
@@ -255,7 +260,7 @@ export async function prepareOwnedPublicationAbortFinalization(driver: SqliteDri
     const projectionClosureEvidenceRef = await publish({ kind: 'projection_closure', selectedBranch: 'abort',
       observedSourceRef: actual.resultWorkspaceManifestRef, observedPathEvidenceRefs: observedPathStates.map(value => value.evidenceRef),
       forwardResultItemRefs, unstartedForwardOperationIds, abortResultItemRefs });
-    const gitIndexUnchangedEvidenceRef = await publish({ kind: 'git_index_unchanged', repositoryKind: 'non_git' });
+    const gitIndexUnchangedEvidenceRef = await publish(readPublicationGitIndexObservation(gitIndex));
     const core = { schemaVersion: 1 as const, deliveryRunId: cut.run.id, deliveryPlanRef: planRef, selectedBranch: 'abort',
       observedSourceRef: actual.resultWorkspaceManifestRef, observedPathStates, forwardResultItemRefs, unstartedForwardOperationIds,
       abortResultItemRefs, transientAbsenceEvidenceRef, projectionClosureEvidenceRef, gitIndexUnchangedEvidenceRef, observedAt };

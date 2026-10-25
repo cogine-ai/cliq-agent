@@ -209,12 +209,12 @@ test('complete role, workspace, entry, projection and ignore identities are chec
   assert.equal(plan.kind, 'ready'); assert.equal(plan.input.sourceDesiredRef, desired.ref);
 });
 
-test('Git, includes and nonempty ignore behavior is explicitly unsupported rather than silently projected away', async t => {
+test('forged Git identity and unproven ignore data are rejected, while unimplemented includes remain explicit', async t => {
   const f = await fixture(t), entry = await f.file('a', 'data'), base = await f.source('base', [entry]);
   const git = await f.source('result', [entry], { git: { repositoryIdentityDigest: '1'.repeat(64),
     head: { kind: 'unborn', branch: 'main' }, indexRef: '2'.repeat(64), indexTreeObjectId: '3'.repeat(40) } });
   await assert.rejects(f.plan({ sourceBaseRef: base.ref, sourceDesiredRef: git.ref, capturedWorkspaceRef: base.ref }),
-    error => error instanceof KernelStorageError && error.code === 'UNSUPPORTED_PLATFORM');
+    error => error instanceof KernelStorageError && error.code === 'ARTIFACT_MISMATCH');
   for (const unsupported of ['includes', 'ignore'] as const) {
     const rules = { ...f.rules, ...(unsupported === 'ignore' ? { rules: [{ order: 0, sourceIndex: 0, sourceLine: 1,
       baseDirectory: '', negated: false, directoryOnly: false, anchored: false, pattern: 'ignored' }] } : {}), rulesDigest: '' };
@@ -228,7 +228,7 @@ test('Git, includes and nonempty ignore behavior is explicitly unsupported rathe
       frozenIgnoreRulesRef: rulesRef, frozenIgnoreRulesDigest: rules.rulesDigest };
     const b = await f.source('base', [entry], changes), s = await f.source('result', [entry], changes);
     await assert.rejects(f.plan({ sourceBaseRef: b.ref, sourceDesiredRef: s.ref, capturedWorkspaceRef: b.ref }),
-      error => error instanceof KernelStorageError && error.code === 'UNSUPPORTED_PLATFORM');
+      error => error instanceof KernelStorageError && error.code === (unsupported === 'includes' ? 'UNSUPPORTED_PLATFORM' : 'ARTIFACT_MISMATCH'));
   }
 });
 

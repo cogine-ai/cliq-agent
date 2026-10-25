@@ -17,6 +17,7 @@ import { buildSupervisorSeaImage, prepareInstalledSupervisorSeaCarrier } from '.
 import { installedModelPackageEntries, writeInstalledModelAuthority, type InstalledModelPackageFixture } from './installed-model-package.js';
 import { writeInstalledGuestToolchain } from './installed-guest-package.js';
 import { validateGuestToolchainMetadata } from '../../../src/state/guest-toolchain.js';
+import { buildSourceGitInspectorAsset } from './source-git-inspector-package.js';
 
 /** Construct the same actual SEA/helper package for independent Linux startup
  * and user-manager qualifiers. Real worker images are installed, not launched:
@@ -116,6 +117,7 @@ export async function buildInstalledSupervisorPackage(fixture: string,
       extractorPath: path.join(workerRoot, 'linux-guest-extractor.node'), publisherKeyId: releaseKeys[0]!.keyId, privateKey: keys.privateKey });
   }
   const profile = policyProfile();
+  const sourceInspector = guest ? await buildSourceGitInspectorAsset(repository) : undefined;
   const rootCore = { schemaVersion: 1, format: 'cliq-sandbox-root-profile-v1', protocol: 'cliq-fresh-empty-root-v1',
     filesystemKind: 'fresh_ephemeral_tmpfs', fixedDirectories: ['/home/cliq', '/tmp', '/work'], persistent: false, networkConfiguration: 'none' };
   const contents = [
@@ -131,6 +133,8 @@ export async function buildInstalledSupervisorPackage(fixture: string,
     { entryId: 'installed-empty-root', role: 'sandbox_root_profile', relativePath: 'profiles/empty-root.json', executable: false,
       bytes: canonicalJsonBytes({ ...rootCore, profileDigest: canonicalSha256(rootCore) }) },
     ...(modelMaterial?.entries ?? []),
+    ...(sourceInspector ? [{ entryId: sourceInspector.entryId, role: sourceInspector.role, relativePath: sourceInspector.relativePath,
+      executable: sourceInspector.executable, bytes: sourceInspector.bytes }] : []),
   ];
   for (const entry of contents.slice(2)) {
     const filename = path.join(packageRoot, entry.relativePath);

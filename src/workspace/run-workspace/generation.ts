@@ -1,6 +1,13 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { setImmediate } from 'node:timers/promises';
-import { canonicalSha256 } from '../../kernel/canonical.js';
+import { types } from 'node:util';
+import { canonicalJsonBytes, canonicalSha256 } from '../../kernel/canonical.js';
+import type { SandboxResourceSpec } from '../../kernel/execution.js';
+import { readPreparingGitCompletion, type PreparingGitCompletion } from '../../sandbox/preparation-git.js';
+import { privateGitInspectionOutput } from '../private-git-data.js';
+import { readFrozenIgnoreRules } from '../frozen-ignore.js';
+import { readSourceProjectionData } from '../../state/source-projection-data.js';
+import { checkProjection } from '../../state/source-validation.js';
 import { assertArtifactRef, digestOmitting, identityHash, parseCanonicalTime, sha256Bytes } from '../../kernel/identity.js';
 import type { Checkpoint, WorkspaceEntry, WorkspaceEntryManifest, WorkspaceGenerationIdentityV1,
   WorkspaceGenerationSnapshotEvidenceV1, WorkspaceGenerationQuarantineEvidenceV1, WorkspaceStateManifest } from '../../kernel/types.js';
@@ -9,6 +16,7 @@ import { decodeFrozenIgnoreRules, decodeSourceManifest, decodeSourceProjection, 
   decodeWorkspaceGenerationIdentity, decodeWorkspaceState } from '../../state/decoders.js';
 import { KernelStorageError, ResourceRetirementError } from '../../state/errors.js';
 import { assertRetiredGenerationTree, borrowGenerationForExecution, openGenerationFileWriter, openGenerationSnapshot, stateRootIdentityForLock, writeGenerationEntry,
+  openPreparingGitInput, type PreparingGitInputBinding, type HeldPreparingGitInput, type HeldWorkerReservation,
   type BorrowedGenerationForExecution, type HeldGenerationTree, type HeldStateOwnerLock } from '../../state/native-owner.js';
 import { loadFrozenPrivateGit, observedPrivateGit, type FrozenPrivateGit } from './private-git.js';
 
@@ -53,7 +61,7 @@ export type RunWorkspaceBirthData = Readonly<{
 }>;
 export type RunWorkspaceMaterialization = Readonly<{
   birth(): Promise<RunWorkspaceBirth>;
-  finish(): Promise<RunWorkspaceGeneration>;
+  finish(options?: { gitPreparation?: PreparingGitCompletion }): Promise<RunWorkspaceGeneration>;
   close(): Promise<void>;
 }>;
 export type UnallocatedRunWorkspaceRetirement = Readonly<{ runId: string; generationId: string;
@@ -64,7 +72,8 @@ const unallocatedMaterializations = new WeakMap<RunWorkspaceMaterialization,
 type WorkspaceOperations = { pending: Set<Promise<unknown>>; retirementFailure?: ResourceRetirementError };
 const workspaceBirths = new WeakMap<RunWorkspaceBirth,
   { filesystem: HeldStateOwnerLock; tree: HeldGenerationTree; data: RunWorkspaceBirthData;
-    operations: WorkspaceOperations; joined: boolean }>();
+    operations: WorkspaceOperations; joined: boolean; privateGit?: FrozenPrivateGit; gitResources?: SandboxResourceSpec;
+    preparingGitInput?: HeldPreparingGitInput }>();
 
 function trackWorkspaceOperation<T>(operations: WorkspaceOperations | undefined, pending: Promise<T>): Promise<T> {
   if (operations) {
@@ -99,10 +108,7 @@ export function readUnallocatedRunWorkspaceRetirement(filesystem: HeldStateOwner
 }
 /** Bind the actual empty directory before payload I/O. This identity is not a
  * materialization snapshot, a mount grant or permission to execute the tree. */
-export async function publishRunWorkspaceBirthIdentity(filesystem: HeldStateOwnerLock, artifacts: ArtifactCatalog,
-  birth: RunWorkspaceBirth): Promise<Pick<MaterializedGenerationAuthority, 'generationRef' | 'generationIdentityDigest'>> {
-  const data = readRunWorkspaceBirth(filesystem, birth);
-  if (process.platform !== 'linux') throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'preparation requires its implemented Linux directory birth');
+function workspaceBirthIdentity(data: RunWorkspaceBirthData): WorkspaceGenerationIdentityV1 {
   const identity: WorkspaceGenerationIdentityV1 = { schemaVersion: 1, format: 'cliq-workspace-generation-identity-v1',
     generationId: data.generationId, runId: data.runId, workspaceIdentityDigest: data.workspaceIdentityDigest,
     sourceCheckpointId: data.sourceCheckpointId, sourceWorkspaceStateRef: data.sourceWorkspaceStateRef,
@@ -114,9 +120,53 @@ export async function publishRunWorkspaceBirthIdentity(filesystem: HeldStateOwne
       deviceId: data.directoryIdentity.deviceId, directoryFileId: data.directoryIdentity.fileId,
       ownerUid: data.directoryIdentity.ownerUid, mode: 448 }, identityDigest: '' };
   identity.identityDigest = digestOmitting(identity, 'identityDigest');
+  return identity;
+}
+export async function publishRunWorkspaceBirthIdentity(filesystem: HeldStateOwnerLock, artifacts: ArtifactCatalog,
+  birth: RunWorkspaceBirth): Promise<Pick<MaterializedGenerationAuthority, 'generationRef' | 'generationIdentityDigest'>> {
+  const data = readRunWorkspaceBirth(filesystem, birth);
+  if (process.platform !== 'linux') throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'preparation requires its implemented Linux directory birth');
+  const identity = workspaceBirthIdentity(data);
   const artifact = await artifacts.publishCanonical(identity, identity.format);
   readRunWorkspaceBirth(filesystem, birth);
   return Object.freeze({ generationRef: artifact.ref, generationIdentityDigest: identity.identityDigest });
+}
+
+/** Original actual birth friend only. This grants no Git result, worker or
+ * materialization authority. The same native lock independently checks the
+ * genuine reservation/tree C tags; no numerical FD or locator is accepted. */
+export function openRunWorkspacePreparingGitInput(filesystem: HeldStateOwnerLock, birth: RunWorkspaceBirth,
+  reservation: HeldWorkerReservation, input: PreparingGitInputBinding): HeldPreparingGitInput {
+  const held = workspaceBirths.get(birth);
+  if (!held || held.filesystem !== filesystem) throw new KernelStorageError('ARTIFACT_MISMATCH', 'preparing Git requires its original actual workspace birth');
+  const data = readRunWorkspaceBirth(filesystem, birth);
+  if (held.joined || held.preparingGitInput) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'workspace birth already owns its preparation input or has joined');
+  if (!input || typeof input !== 'object' || types.isProxy(input) || ![Object.prototype, null].includes(Object.getPrototypeOf(input)))
+    throw new TypeError('preparing Git requires closed original binding data');
+  const keys = ['runId', 'generationId', 'launchId', 'spawnNonceDigest', 'activationNonceDigest', 'generationCreationNonceDigest', 'generationRef', 'inputIntentRef'];
+  const fields = Object.getOwnPropertyDescriptors(input);
+  if (Reflect.ownKeys(fields).length !== keys.length || keys.some(key => !fields[key] || !fields[key]!.enumerable ||
+      !Object.hasOwn(fields[key]!, 'value') || typeof fields[key]!.value !== 'string')) throw new TypeError('preparing Git requires closed original binding data');
+  const binding = Object.fromEntries(keys.map(key => [key, fields[key]!.value])) as PreparingGitInputBinding;
+  if (binding.runId !== data.runId || binding.generationId !== data.generationId ||
+      binding.generationCreationNonceDigest !== data.creationNonceDigest || binding.generationRef !== canonicalSha256(workspaceBirthIdentity(data)) ||
+      !held.privateGit?.data || binding.inputIntentRef !== canonicalSha256(privateGitInspectionOutput(held.privateGit.data)))
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'preparing Git binding substitutes its original physical generation identity');
+  const native = openPreparingGitInput(filesystem, reservation, held.tree, binding);
+  held.preparingGitInput = native; return native;
+}
+/** Only original, fully read CAS data held by this genuine birth. The leaf is
+ * not a Git verification result and grants no execution authority. */
+export function readRunWorkspacePreparingGit(filesystem: HeldStateOwnerLock, birth: RunWorkspaceBirth):
+  Readonly<{ privateGitStateRef: string; repositoryIdentityDigest: string; metadataRef: string; metadata: Buffer }> | undefined {
+  readRunWorkspaceBirth(filesystem, birth);
+  const held = workspaceBirths.get(birth)!;
+  if (!held.privateGit?.requiresPreparation) return undefined;
+  const data = held.privateGit.data;
+  if (!data) mismatch('nonempty private Git lacks its complete retained input');
+  const metadata = canonicalJsonBytes(privateGitInspectionOutput(data));
+  return Object.freeze({ privateGitStateRef: data.manifestRef, repositoryIdentityDigest: data.index.repositoryIdentityDigest,
+    metadataRef: sha256Bytes(metadata), metadata });
 }
 /** Physical resource retirement only. Directory quarantine, containment death
  * and a committed lifecycle transition require their separate producers. */
@@ -274,7 +324,7 @@ function entriesManifest(entries: WorkspaceEntry[]): WorkspaceEntryManifest {
     treeDigest: canonicalSha256({ schemaVersion: 1, format: 'cliq-workspace-entries-v1', entries }) };
 }
 
-async function readFrozenWorkspace(artifacts: ArtifactCatalog, stateRef: string, signal?: AbortSignal) {
+async function readFrozenWorkspace(artifacts: ArtifactCatalog, stateRef: string, signal?: AbortSignal, gitResources?: SandboxResourceSpec) {
   signal?.throwIfAborted();
   const sourceState = decodeWorkspaceState(await artifacts.readCanonical(stateRef));
   signal?.throwIfAborted();
@@ -285,8 +335,12 @@ async function readFrozenWorkspace(artifacts: ArtifactCatalog, stateRef: string,
   const entries = decodeWorkspaceEntries(await artifacts.readCanonical(sourceState.entriesRef));
   signal?.throwIfAborted();
   const projection = decodeSourceProjection(await artifacts.readCanonical(source.sourceProjectionRef));
+  checkProjection(projection);
+  if ((!source.git && projection.classificationIndexRef !== undefined) || source.git && !projection.classificationIndexRef)
+    mismatch('workspace projection lost its exact original Git classification');
   signal?.throwIfAborted();
-  const rules = decodeFrozenIgnoreRules(await artifacts.readCanonical(source.frozenIgnoreRulesRef));
+  const classification = source.git && gitResources ? await readSourceProjectionData(artifacts, source, projection, gitResources, signal) : undefined;
+  const rules = classification?.rules ?? await readFrozenIgnoreRules(artifacts, source.frozenIgnoreRulesRef, source.git?.repositoryIdentityDigest, signal);
   signal?.throwIfAborted();
   if (source.role !== 'base' || sourceState.sourceProjectionDigest !== source.sourceProjectionDigest ||
       projection.projectionDigest !== source.sourceProjectionDigest || source.treeDigest !== sourceEntries.treeDigest ||
@@ -294,7 +348,9 @@ async function readFrozenWorkspace(artifacts: ArtifactCatalog, stateRef: string,
       projection.frozenIgnoreRulesDigest !== source.frozenIgnoreRulesDigest || rules.rulesDigest !== source.frozenIgnoreRulesDigest) {
     mismatch('ready Checkpoint workspace/source/projection closure differs');
   }
-  const privateGit = await loadFrozenPrivateGit(artifacts, source, sourceState, rules, signal);
+  const privateGit = await loadFrozenPrivateGit(artifacts, source, sourceState, rules, signal, gitResources);
+  if (source.git && !gitResources && (privateGit?.requiresPreparation || projection.classificationIndexRef !== source.git.indexRef))
+    mismatch('Git classification beyond a genuine empty graph requires its frozen resource profile');
   signal?.throwIfAborted();
   checkedEntries(sourceEntries); checkedEntries(entries);
   let priorInvalidated: string | undefined;
@@ -314,7 +370,7 @@ async function observeTree(tree: HeldGenerationTree, artifacts: ArtifactCatalog,
   signal?.throwIfAborted();
   const snapshot = openGenerationSnapshot(tree);
   const observedEntries: WorkspaceEntry[] = [];
-  const gitDirectories = new Set<string>(), gitFiles = new Map<string, Buffer>();
+  const gitDirectories = new Set<string>(), gitFiles = new Map<string, { sha256: string; byteCount: number }>();
   try {
     for (;;) {
       signal?.throwIfAborted();
@@ -328,18 +384,19 @@ async function observeTree(tree: HeldGenerationTree, artifacts: ArtifactCatalog,
         } else if (entry.kind === 'file') {
           try {
             const expected = privateGit.files.get(entry.path);
-            if (entry.mode !== 0o600 || !expected || entry.byteCount !== expected.length) mismatch('private Git file closure differs');
-            const chunks: Buffer[] = [];
+            if (entry.mode !== 0o600 || !expected || entry.byteCount !== expected.byteCount) mismatch('private Git file closure differs');
+            const hash = createHash('sha256'); let byteCount = 0;
             for (;;) {
               signal?.throwIfAborted();
               const chunk = entry.file.readChunk();
               if (chunk === null) break;
-              chunks.push(chunk);
+              hash.update(chunk); byteCount += chunk.length;
+              if (!Number.isSafeInteger(byteCount) || byteCount > expected.byteCount) mismatch('private Git file grew during observation');
               await setImmediate();
               signal?.throwIfAborted();
               entry.file.assertHeld();
             }
-            gitFiles.set(entry.path, Buffer.concat(chunks));
+            gitFiles.set(entry.path, { sha256: hash.digest('hex'), byteCount });
           } finally { closeWorkspaceDescriptor(entry.file); }
         } else mismatch('private Git metadata may not contain symlinks');
         await setImmediate();
@@ -400,7 +457,7 @@ async function observeTree(tree: HeldGenerationTree, artifacts: ArtifactCatalog,
  * actual complete rewalk or a closed physical-entry validation failure is
  * minted; unknown source/identity/IO/retirement failures still block recovery. */
 export async function observeRetainedRunWorkspace(input: { filesystem: HeldStateOwnerLock; artifacts: ArtifactCatalog;
-  identity: WorkspaceGenerationIdentityV1; sourceRowVersion: number; signal?: AbortSignal }): Promise<RetainedWorkspaceObservation> {
+  identity: WorkspaceGenerationIdentityV1; sourceRowVersion: number; signal?: AbortSignal; gitResources?: SandboxResourceSpec }): Promise<RetainedWorkspaceObservation> {
   const { filesystem, artifacts, signal } = input;
   signal?.throwIfAborted();
   filesystem.assertHeld();
@@ -408,7 +465,7 @@ export async function observeRetainedRunWorkspace(input: { filesystem: HeldState
     mismatch('retained generation observation requires its fixed positive source version');
   }
   const identity = decodeWorkspaceGenerationIdentity(structuredClone(input.identity));
-  const { sourceState, source, entries, privateGit } = await readFrozenWorkspace(artifacts, identity.sourceWorkspaceStateRef, signal);
+  const { sourceState, source, entries, privateGit } = await readFrozenWorkspace(artifacts, identity.sourceWorkspaceStateRef, signal, input.gitResources);
   signal?.throwIfAborted();
   if (sourceState.runId !== identity.runId || sourceState.stateDigest !== identity.sourceWorkspaceStateDigest ||
       entries.treeDigest !== identity.sourceTreeDigest || source.workspaceIdentityDigest !== identity.workspaceIdentityDigest) {
@@ -499,7 +556,7 @@ async function mintRunWorkspace(tree: HeldGenerationTree, filesystem: HeldStateO
  * factory supplies the sole retained preactivated row and its owning ready
  * cut; exact identity plus a fresh complete rewalk must agree before minting. */
 export async function reopenRunWorkspace(input: { filesystem: HeldStateOwnerLock; artifacts: ArtifactCatalog;
-  identity: WorkspaceGenerationIdentityV1; checkpoint: Checkpoint; signal?: AbortSignal }): Promise<RunWorkspaceGeneration> {
+  identity: WorkspaceGenerationIdentityV1; checkpoint: Checkpoint; signal?: AbortSignal; gitResources?: SandboxResourceSpec }): Promise<RunWorkspaceGeneration> {
   const { filesystem, artifacts, signal } = input;
   signal?.throwIfAborted();
   filesystem.assertHeld();
@@ -508,7 +565,7 @@ export async function reopenRunWorkspace(input: { filesystem: HeldStateOwnerLock
   const checkpoint = structuredClone(input.checkpoint);
   if (checkpoint.schemaVersion !== 1 || checkpoint.runId !== identity.runId || checkpoint.id !== identity.sourceCheckpointId ||
       checkpoint.workspaceStateRef !== identity.sourceWorkspaceStateRef) mismatch('reopened generation requires its exact owning ready Checkpoint');
-  const frozen = await readFrozenWorkspace(artifacts, checkpoint.workspaceStateRef, signal);
+  const frozen = await readFrozenWorkspace(artifacts, checkpoint.workspaceStateRef, signal, input.gitResources);
   signal?.throwIfAborted();
   if (frozen.sourceState.runId !== identity.runId || frozen.sourceState.stateDigest !== identity.sourceWorkspaceStateDigest ||
       frozen.entries.treeDigest !== identity.sourceTreeDigest || frozen.source.workspaceIdentityDigest !== identity.workspaceIdentityDigest) {
@@ -549,12 +606,15 @@ async function populateGenerationTree(tree: HeldGenerationTree, artifacts: Artif
       await setImmediate();
       signal.throwIfAborted();
     }
-    for (const [path, bytes] of frozen.privateGit.files) {
+    for (const [path, file] of frozen.privateGit.files) {
       signal.throwIfAborted();
-      const writer = openGenerationFileWriter(tree, path, 0o600, bytes.length);
+      const writer = openGenerationFileWriter(tree, path, 0o600, file.byteCount);
       try {
-        for (let offset = 0; offset < bytes.length; offset += 65_536) {
-          writer.writeChunk(bytes.subarray(offset, offset + 65_536));
+        const chunks = file.kind === 'cas' ? artifacts.readChunks(file.ref, file.byteCount) : (async function* () {
+          for (let offset = 0; offset < file.bytes.length; offset += 65_536) yield file.bytes.subarray(offset, offset + 65_536);
+        })();
+        for await (const chunk of chunks) {
+          signal.throwIfAborted(); writer.assertHeld(); writer.writeChunk(chunk);
           await setImmediate();
           signal.throwIfAborted();
           writer.assertHeld();
@@ -570,7 +630,7 @@ async function populateGenerationTree(tree: HeldGenerationTree, artifacts: Artif
  * binding belongs to that composition, never an injected persistence callback. */
 export function createRunWorkspaceMaterialization(input: {
   filesystem: HeldStateOwnerLock; artifacts: ArtifactCatalog; checkpoint: Checkpoint;
-  generationCreationNonceDigest?: string; signal?: AbortSignal;
+  generationCreationNonceDigest?: string; signal?: AbortSignal; gitResources?: SandboxResourceSpec;
 }): RunWorkspaceMaterialization {
   const { filesystem, artifacts } = input;
   const checkpoint = structuredClone(input.checkpoint);
@@ -598,7 +658,7 @@ export function createRunWorkspaceMaterialization(input: {
       if (closed) return Promise.reject(new KernelStorageError('LEASE_FENCED', 'workspace materialization is closed'));
       return opening ??= Promise.resolve().then(async () => {
         signal.throwIfAborted();
-        frozen = await readFrozenWorkspace(artifacts, checkpoint.workspaceStateRef, signal);
+        frozen = await readFrozenWorkspace(artifacts, checkpoint.workspaceStateRef, signal, input.gitResources);
         signal.throwIfAborted();
         if (frozen.sourceState.runId !== checkpoint.runId) mismatch('ready Checkpoint belongs to a different Run');
         // Never reset this latch, even if the native creator throws before it
@@ -610,7 +670,8 @@ export function createRunWorkspaceMaterialization(input: {
         // intent timestamp or a claim of native CLOCK_REALTIME evidence.
         const createdAt = new Date().toISOString();
         const birth = Object.freeze({}) as RunWorkspaceBirth;
-        workspaceBirths.set(birth, { filesystem, tree, operations, joined: false, data: Object.freeze({ generationId, runId: checkpoint.runId,
+        workspaceBirths.set(birth, { filesystem, tree, operations, joined: false, privateGit: frozen.privateGit,
+          ...(input.gitResources ? { gitResources: Object.freeze({ ...input.gitResources }) } : {}), data: Object.freeze({ generationId, runId: checkpoint.runId,
           workspaceIdentityDigest: frozen.source.workspaceIdentityDigest, sourceCheckpointId: checkpoint.id,
           sourceWorkspaceStateRef: checkpoint.workspaceStateRef, sourceWorkspaceStateDigest: frozen.sourceState.stateDigest,
           sourceTreeDigest: frozen.entries.treeDigest, creationNonceDigest: nonce, createdAt,
@@ -620,11 +681,23 @@ export function createRunWorkspaceMaterialization(input: {
         born = birth; return birth;
       });
     },
-    finish() {
+    finish(options) {
       if (this !== materialization) throw new TypeError('invalid workspace materialization owner');
       if (closed) return Promise.reject(new KernelStorageError('LEASE_FENCED', 'workspace materialization is closed'));
       if (!born || !tree || !frozen) return Promise.reject(new TypeError('materialization requires its actual completed birth'));
       const currentTree = tree, currentFrozen = frozen, birth = born;
+      if (currentFrozen.privateGit?.requiresPreparation) {
+        const input = workspaceBirths.get(birth)!.preparingGitInput;
+        if (!input || !options?.gitPreparation) return Promise.reject(new KernelStorageError('RECOVERY_REQUIRED', 'nonempty private Git requires its original native preparation completion'));
+        const completed = readPreparingGitCompletion(options.gitPreparation, input);
+        const expected = readRunWorkspacePreparingGit(filesystem, birth)!;
+        const held = workspaceBirths.get(birth)!;
+        if (completed.privateGit.manifestRef !== expected.privateGitStateRef || completed.metadataRef !== expected.metadataRef ||
+            completed.recipe.sourceCheckpointId !== held.data.sourceCheckpointId ||
+            completed.recipe.sourceWorkspaceStateRef !== held.data.sourceWorkspaceStateRef || !held.gitResources ||
+            Object.entries(held.gitResources).some(([key, value]) => completed.recipe[key as keyof SandboxResourceSpec] !== value))
+          return Promise.reject(new KernelStorageError('ARTIFACT_MISMATCH', 'Git completion substitutes the original frozen generation'));
+      } else if (options?.gitPreparation) return Promise.reject(new KernelStorageError('ARTIFACT_MISMATCH', 'unexpected Git completion on a generation without Git preparation'));
       return finishing ??= Promise.resolve().then(async () => {
         try {
           signal.throwIfAborted();

@@ -6,15 +6,16 @@ import type { SupervisorInspectorIdentityV1 } from '../kernel/types.js';
 import { immutableSnapshot } from '../model/immutable.js';
 import { decodeDeliveryCaptureTopology } from '../kernel/publication.js';
 import { exactKeys } from '../policy/runtime-authority.js';
-import { publishNonGitSourceProjection, type PublishedNonGitSourceProjection } from '../workspace/source-projection.js';
+import { publishGitSourceProjection, publishNonGitSourceProjection, type PublishedNonGitSourceProjection } from '../workspace/source-projection.js';
 import { readCanonicalArtifact } from './agent-context.js';
 import { insertArtifactMetadata, type ArtifactCatalog, type PublishedArtifact } from './artifacts.js';
 import { advanceTimeFence, readTimeFence, sampleCanonicalNow } from './canonical-time.js';
 import { validateControlChannelClosure, type AuthenticatedControlIdentity } from './control-channel.js';
 import { decodeSourceManifest, decodeWorkspaceEntries, decodeWorkspaceIdentity } from './decoders.js';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
-import { withHeldInstalledRuntime, type HeldInstalledRuntime } from './installed-runtime.js';
+import { withHeldInstalledRuntime, type HeldInstalledAnchor, type HeldInstalledRuntime } from './installed-runtime.js';
 import { loadNativeStateOwner, readSourceInspectionStagingRetirement, retireSourceInspectionStaging,
+  openRetainedSourceGitInput, openRegisteredAbsentSourceGitInput, readSourceInspectionStagingPresence,
   type HeldSourceInspectionStaging, type HeldWorkspaceRoot, type SourceInspectionStagingRetirement } from './native-owner.js';
 import { insertControlRequest, readAdmissionReplay, readControlRequest, readSession, readSessionPrincipalId } from './rows.js';
 import { readNextUnretiredSourceInspection, readSourceInspectionAttempt, readSourceInspectionOriginalRequest, readSourceInspectionRequest,
@@ -28,10 +29,18 @@ import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
 import { assertActiveStateOwner, readStateOwner, type StateOwnerContext } from './state-owner.js';
 import { readStateOwnerDeath } from './state-owner-death.js';
 import { readSupervisorInspector } from './supervisor-inspector.js';
+import { createInstalledSourceGitCapture, readInstalledSourceGitCapture, type InstalledSourceGitCapture } from './source-git-owner.js';
+import { captureSourceGitRules } from './source-git-rules.js';
+import { readSourceGitRetirementClosure } from './source-git-retirement.js';
+import { retireInstalledRetainedSourceGit, readRecoveredSourceGitRetirement, readSourceGitNativeLifecycle,
+  retireInstalledRegisteredAbsentSourceGit, readRegisteredAbsentSourceGitRetirement } from '../sandbox/source-git-native.js';
+import { readSourceGitInputIntent } from './source-git-input.js';
+import { installSourceInspectionRetirementHandoff, readSourceInspectionRetirementHandoff } from './source-inspection-handoff.js';
 
 export type SourceInspectionOwnerBootstrap = SourceInspectionBootstrap & Readonly<{ controlledHome: string }>;
 type Capturing = Extract<SourceInspectionAttemptV1, { phase: 'capturing' }>;
 type Retired = Extract<SourceInspectionAttemptV1, { phase: 'retired' }>;
+type Unretired = Exclude<SourceInspectionAttemptV1, { phase: 'retired' }>;
 type ErrorResponse = { protocolVersion: 1; ok: false; method: 'run.submit' | 'run.apply'; error:
   | { schemaVersion: 1; messageCode: string; code: 'INVALID_REQUEST'; retryable: false; issues: Array<{ path: string; issueCode: string }> }
   | { schemaVersion: 1; messageCode: string; code: 'INTERNAL'; retryable: false; errorId: string }
@@ -108,7 +117,7 @@ export async function readSourceInspectionErrorResponse(artifacts: ArtifactCatal
 /** Original capture provenance, not a writer or an observation made today.
  * The caller also validates the owning target and genuine retirement. */
 export async function readDeliveryCaptureTopology(artifacts: ArtifactCatalog,
-  row: SourceInspectionAttemptV1, target: import('../kernel/execution.js').SourceInspectionTargetV1) {
+  row: SourceInspectionAttemptV1, target: import('../kernel/execution.js').SourceInspectionTarget) {
   if (row.phase !== 'retired' || row.method !== 'run.apply' || row.outcome.kind !== 'captured')
     throw new KernelStorageError('RECOVERY_REQUIRED', 'delivery requires its original captured topology');
   const topology = decodeDeliveryCaptureTopology(await readCanonicalArtifact(artifacts, row.outcome.captureTopologyRef));
@@ -152,11 +161,10 @@ export async function readSourceInspectionRetirement(driver: SqliteDriver, artif
         evidence.inspectionId !== row.inspectionId || evidence.targetRef !== row.targetRef || evidence.stagingNonceDigest !== row.stagingNonceDigest ||
         typeof evidence.inspectorIdentityRef !== 'string' || !/^[0-9a-f]{64}$/.test(evidence.inspectorIdentityRef) ||
         typeof evidence.inspectorIdentityDigest !== 'string' || !/^[0-9a-f]{64}$/.test(evidence.inspectorIdentityDigest) ||
-        evidence.evidenceDigest !== digestOmitting(evidence, 'evidenceDigest') || evidence.stagingObservation !== 'exact_reserved_root_absent' ||
-        !exactKeys(evidence.processClosure, ['kind']) || evidence.processClosure.kind !== 'not_planned' ||
-        Object.hasOwn(row, 'inputRef') || Object.hasOwn(row, 'plan') || Object.hasOwn(row, 'processContainmentRef') ||
-        (row.outcome.kind === 'captured' && Object.hasOwn(row.outcome, 'privateGitStateRef')) || typeof evidence.observedAt !== 'string')
-      throw new TypeError('source retirement does not bind its exact no-process capture prefix');
+        evidence.evidenceDigest !== digestOmitting(evidence, 'evidenceDigest') ||
+        !['exact_reserved_root_absent', 'registered_reserved_root_absent'].includes(evidence.stagingObservation) ||
+        typeof evidence.observedAt !== 'string')
+      throw new TypeError('source retirement does not bind its exact original capture');
     const observedAt = parseCanonicalTime(evidence.observedAt), retiredAt = parseCanonicalTime(row.retiredAt);
     const inspector = await readCanonicalArtifact<SupervisorInspectorIdentityV1>(artifacts, evidence.inspectorIdentityRef);
     if (!Number.isSafeInteger(inspector.stateOwnerEpoch) || inspector.stateOwnerEpoch < 1)
@@ -184,6 +192,8 @@ export async function readSourceInspectionRetirement(driver: SqliteDriver, artif
         throw new TypeError('source retirement substitutes its exact predecessor death acquisition');
     } else throw new TypeError('source retirement has no closed capture-owner proof');
     await readSupervisorInspector(artifacts, inspectingOwner, { runtime }, evidence);
+    if (row.retirementHandoffRef) await readSourceInspectionRetirementHandoff(driver, artifacts, row, runtime);
+    await readSourceGitRetirementClosure(driver, artifacts, row, evidence, runtime);
   } catch (cause) {
     if (cause instanceof ResourceRetirementError) throw cause;
     throw new KernelStorageError('RECOVERY_REQUIRED', 'source inspection retained retirement is invalid', { cause });
@@ -211,7 +221,7 @@ export async function replaySubmittedSource(driver: SqliteDriver, artifacts: Art
     return;
   }
   const originalIndex = readSourceInspectionOriginalRequest(driver, retained.inspectionId);
-  const { target } = await readRetainedSourceInspectionTarget(reads, retained, originalIndex, bootstrap, { driver, signal });
+  const { target } = await readRetainedSourceInspectionTarget(reads, retained, originalIndex, bootstrap, { driver, owner, signal });
   if (retained.phase !== 'retired') throw new KernelStorageError('RECOVERY_REQUIRED', 'source inspection still owns unretired capture resources');
   await readSourceInspectionRetirement(driver, reads, retained, target);
   const metadata: PublishedArtifact[] = [];
@@ -227,6 +237,7 @@ export async function replaySubmittedSource(driver: SqliteDriver, artifacts: Art
     if ((retained.outcome.kind === 'cancelled') !== (error.error.code === 'CANCEL_REQUESTED'))
       throw new KernelStorageError('RECOVERY_REQUIRED', 'source outcome differs from its retained error class');
     const channel = await validateControlChannelClosure(reads, owner, identity); metadata.push(...channel.metadata);
+    let clockRejected = false;
     driver.transaction(connection => {
       assertActiveStateOwner(connection, owner); assertSourceInspectionRequestId(connection, identity.principalId, request, retained.inspectionId);
       const current = readSourceInspectionAttempt(connection, key);
@@ -234,21 +245,23 @@ export async function replaySubmittedSource(driver: SqliteDriver, artifacts: Art
       const prior = readControlRequest(connection, identity.principalId, request.method, request.requestId);
       if (prior && prior.responseRef !== errorResponseRef) throw new KernelStorageError('RECOVERY_REQUIRED', 'source request has a different first response');
       if (prior) return;
-      if (advanceTimeFence(connection, owner.ownerEpoch) !== 'healthy') throw new KernelStorageError('RECOVERY_REQUIRED', 'source replay requires canonical time');
+      if (advanceTimeFence(connection, owner.ownerEpoch) !== 'healthy') { clockRejected = true; return; }
       const now = readTimeFence(connection)!.lastAcceptedAt;
       for (const entry of metadata) insertArtifactMetadata(connection, entry, now);
       insertControlRequest(connection, { principalId: identity.principalId, method: request.method, requestId: request.requestId,
         requestDigest: request.requestDigest, channelIdentityRef: identity.channelIdentityRef,
         channelIdentityDigest: identity.channelIdentityDigest, responseRef: errorResponseRef, committedAt: now });
     });
+    if (clockRejected) throw new KernelStorageError('RECOVERY_REQUIRED', 'source replay requires canonical time');
   }
   await validateControlChannelClosure(reads, owner, identity); assertActiveStateOwner(driver, owner);
   return retained;
 }
 
 async function publishSourceRetirement(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
-  row: Capturing, physical: SourceInspectionStagingRetirement,
-  captureOwnerClosure: SourceInspectionRetirementEvidenceV1['captureOwnerClosure']) {
+  row: Unretired, physical: SourceInspectionStagingRetirement,
+  captureOwnerClosure: SourceInspectionRetirementEvidenceV1['captureOwnerClosure'],
+  processClosure: SourceInspectionRetirementEvidenceV1['processClosure'] = { kind: 'not_planned' }) {
   const inspectingOwner = assertActiveStateOwner(driver, owner), observedAt = sampleCanonicalNow();
   const receipt = readSourceInspectionStagingRetirement(owner.filesystem, physical);
   if (receipt.inspectionId !== row.inspectionId || receipt.stagingNonceDigest !== row.stagingNonceDigest ||
@@ -267,7 +280,7 @@ async function publishSourceRetirement(driver: SqliteDriver, artifacts: Artifact
   const evidence: SourceInspectionRetirementEvidenceV1 = { schemaVersion: 1, format: 'cliq-source-inspection-retirement-v1',
     inspectionId: row.inspectionId, targetRef: row.targetRef, stagingNonceDigest: row.stagingNonceDigest,
     inspectorIdentityRef: inspectorRef, inspectorIdentityDigest: inspector.identityDigest,
-    captureOwnerClosure, stagingObservation: 'exact_reserved_root_absent', processClosure: { kind: 'not_planned' }, observedAt, evidenceDigest: '' };
+    captureOwnerClosure, stagingObservation: receipt.stagingObservation, processClosure, observedAt, evidenceDigest: '' };
   evidence.evidenceDigest = digestOmitting(evidence, 'evidenceDigest');
   const [inspectorArtifact, evidenceArtifact] = await artifacts.publishCanonicalPair([
     { value: inspector, schemaKind: inspector.format }, { value: evidence, schemaKind: evidence.format }
@@ -279,24 +292,27 @@ async function publishSourceRetirement(driver: SqliteDriver, artifacts: Artifact
  * No client, source path, read capability or reusable process token exists in
  * this branch. Prepared/active recipes await their actual containment closer. */
 export async function retireAbandonedSourceInspections(driver: SqliteDriver, artifacts: ArtifactCatalog,
-  owner: StateOwnerContext, bootstrap: SourceInspectionBootstrap | undefined): Promise<void> {
+  owner: StateOwnerContext, bootstrap: SourceInspectionBootstrap | undefined,
+  installation?: { runtime: HeldInstalledRuntime; anchor: HeldInstalledAnchor }): Promise<void> {
   let afterInspectionId = '';
   for (;;) {
-    const row = readNextUnretiredSourceInspection(driver, afterInspectionId);
+    let row = readNextUnretiredSourceInspection(driver, afterInspectionId);
     if (!row) return;
     if (!bootstrap) throw new KernelStorageError('RECOVERY_REQUIRED', 'source recovery requires its trusted signed runtime');
-    if (row.phase !== 'capturing' || row.stateOwnerEpoch >= owner.ownerEpoch || row.supervisorInstanceId === owner.supervisorInstanceId)
-      throw new KernelStorageError('RECOVERY_REQUIRED', 'source recovery requires a dead predecessor and a supported no-process prefix');
+    if (row.phase === 'retired' || row.stateOwnerEpoch >= owner.ownerEpoch || row.supervisorInstanceId === owner.supervisorInstanceId)
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'source recovery requires its exact dead predecessor');
     const active = assertActiveStateOwner(driver, owner);
-    const { target } = await readRetainedSourceInspectionTarget(artifacts, row,
-      readSourceInspectionOriginalRequest(driver, row.inspectionId), bootstrap, { driver });
+    const handoff = row.retirementHandoffRef && await readSourceInspectionRetirementHandoff(driver, artifacts, row, active);
+    const original = handoff ? handoff.original : row;
+    const { target } = await readRetainedSourceInspectionTarget(artifacts, original,
+      readSourceInspectionOriginalRequest(driver, row.inspectionId), bootstrap, { driver, owner });
     if (active.runtimeBundleRef !== target.runtimeBundleRef || active.runtimeBundleManifestDigest !== target.runtimeBundleManifestDigest)
       throw new KernelStorageError('RECOVERY_REQUIRED', 'source recovery cannot substitute its frozen signed runtime');
     let death: Awaited<ReturnType<typeof readStateOwnerDeath>>;
     try {
       death = await readStateOwnerDeath(artifacts, driver, { supervisorInstanceId: row.supervisorInstanceId, ownedAt: row.createdAt });
       if (death.priorOwner.ownerEpoch !== row.stateOwnerEpoch || death.successorOwner.ownerEpoch > owner.ownerEpoch ||
-          row.updatedAt > death.priorOwner.releasedAt)
+          original.updatedAt > death.priorOwner.releasedAt)
         throw new TypeError('source recovery substitutes its original owning lifetime');
     } catch (cause) {
       if (cause instanceof ResourceRetirementError) throw cause;
@@ -304,20 +320,87 @@ export async function retireAbandonedSourceInspections(driver: SqliteDriver, art
     }
     assertActiveStateOwner(driver, owner);
     const staging = owner.filesystem.openSourceInspectionStaging(row.inspectionId, row.stagingNonceDigest, row.stagingIdentity);
-    const physical = await retireSourceInspectionStaging(owner.filesystem, staging);
+    let processClosure: SourceInspectionRetirementEvidenceV1['processClosure'] = { kind: 'not_planned' };
+    let lifecycleBytes: Buffer | undefined, lifecycleArtifact: PublishedArtifact | undefined;
+    if (handoff && handoff.handoff.processClosure.kind !== 'source_native_retired') {
+      // Exact original program-owned no-input/no-native-attempt closure is
+      // already durable. The successor does no capture or reconstruction.
+      processClosure = handoff.handoff.processClosure;
+    } else if (row.inputRef) {
+      if (target.schemaVersion !== 2 || !installation) throw new KernelStorageError('RECOVERY_REQUIRED', 'source recovery requires its genuine installed cleanup-only native owner');
+      const input = await readSourceGitInputIntent(artifacts, row.inputRef);
+      if (input.inspectionId !== row.inspectionId || input.inputDigest !== row.inputDigest ||
+          input.targetRef !== row.targetRef || input.targetDigest !== row.targetDigest)
+        throw new KernelStorageError('RECOVERY_REQUIRED', 'source recovery input differs from its first original capture transaction');
+      const presence = readSourceInspectionStagingPresence(owner.filesystem, staging);
+      if (presence === 'absent') {
+        const prior = handoff ? handoff.handoff.processClosure : undefined;
+        if (!handoff || !prior || prior.kind !== 'source_native_retired' || !handoff.handoff.nativeLifecycleRef)
+          throw new KernelStorageError('RECOVERY_REQUIRED', 'absent source staging has no registered complete original native handoff');
+        const snapshot = await artifacts.readBoundedBytes(handoff.handoff.nativeLifecycleRef, 1_048_576);
+        if (sha256Bytes(snapshot) !== handoff.handoff.nativeLifecycleRef)
+          throw new KernelStorageError('RECOVERY_REQUIRED', 'registered source lifecycle bytes differ');
+        const absent = openRegisteredAbsentSourceGitInput(owner.filesystem, staging,
+          { targetRef: row.targetRef, inputIntentRef: row.inputRef }, snapshot);
+        let failure: unknown;
+        try {
+          const receipt = await retireInstalledRegisteredAbsentSourceGit(installation.runtime, installation.anchor, absent);
+          const observation = readRegisteredAbsentSourceGitRetirement(receipt, absent);
+          lifecycleBytes = readSourceGitNativeLifecycle(receipt, absent);
+          if (sha256Bytes(lifecycleBytes) !== handoff.handoff.nativeLifecycleRef || !lifecycleBytes.equals(snapshot))
+            throw new KernelStorageError('RECOVERY_REQUIRED', 'current source checker substituted its exact registered original lifecycle');
+          processClosure = { kind: 'source_native_retired', inputRef: row.inputRef, inputDigest: row.inputDigest!,
+            nativeBirthIdentity: prior.nativeBirthIdentity, observation };
+        } catch (error) { failure = error; }
+        try { absent.close(); } catch (error) { throw new ResourceRetirementError('registered absent source reader did not retire',
+          failure === undefined ? error : new AggregateError([failure, error])); }
+        if (failure !== undefined) throw failure;
+      } else {
+        // This distinct native tag contains no live workspace/payload root and
+        // cannot reserve/capture/continue. Every constructor rechecks the exact
+        // observed locator; drift never falls through to the other branch.
+        const retained = openRetainedSourceGitInput(owner.filesystem, staging, { targetRef: row.targetRef, inputIntentRef: row.inputRef });
+        let failure: unknown;
+        try {
+          const prior = handoff && handoff.handoff.processClosure;
+          if (prior && (prior.kind !== 'source_native_retired' ||
+              canonicalSha256(prior.nativeBirthIdentity) !== canonicalSha256(retained.identity.birthIdentity)))
+            throw new KernelStorageError('RECOVERY_REQUIRED', 'source recovery native birth was replaced after handoff');
+          const receipt = await retireInstalledRetainedSourceGit(installation.runtime, installation.anchor, retained);
+          const observation = readRecoveredSourceGitRetirement(receipt, retained);
+          lifecycleBytes = readSourceGitNativeLifecycle(receipt, retained);
+          if (handoff && sha256Bytes(lifecycleBytes) !== handoff.handoff.nativeLifecycleRef)
+            throw new KernelStorageError('RECOVERY_REQUIRED', 'source cleanup differs from its registered original full lifecycle');
+          processClosure = { kind: 'source_native_retired', inputRef: row.inputRef, inputDigest: row.inputDigest!,
+            nativeBirthIdentity: retained.identity.birthIdentity, observation };
+        } catch (error) { failure = error; }
+        try { retained.close(); } catch (error) { throw new ResourceRetirementError('source recovery birth reader did not retire',
+          failure === undefined ? error : new AggregateError([failure, error])); }
+        if (failure !== undefined) throw failure;
+      }
+    } else if (row.phase !== 'capturing') throw new KernelStorageError('RECOVERY_REQUIRED', 'planned source recovery lacks its original fixed input intent');
     const response = await artifacts.publishCanonical(errorResponse(new Error('source capture owner died'), row.inspectionId,
       row.cancelRequested, row.method), 'cliq-control-response-v1');
+    if (!handoff && lifecycleBytes) lifecycleArtifact = await artifacts.publishBytes(lifecycleBytes,
+      'application/octet-stream', 'cliq-source-native-lifecycle-v2');
+    if (!row.retirementHandoffRef) row = await installSourceInspectionRetirementHandoff(driver, artifacts, owner, row, staging, {
+      captureOwnerClosure: { kind: 'owning_process_dead', stateOwnerAcquisitionEvidenceRef: death.acquisitionEvidenceRef },
+      processClosure, outcome: { kind: row.cancelRequested ? 'cancelled' : 'failed', errorResponseRef: response.ref },
+      ...(lifecycleArtifact ? { nativeLifecycleRef: lifecycleArtifact.ref } : {})
+    }, [response, ...(lifecycleArtifact ? [lifecycleArtifact] : [])]);
+    await readSourceInspectionRetirementHandoff(driver, artifacts, row, active);
+    const physical = await retireSourceInspectionStaging(owner.filesystem, staging);
     const { inspectorArtifact, evidenceArtifact, observedAt } = await publishSourceRetirement(driver, artifacts, owner, row, physical,
-      { kind: 'owning_process_dead', stateOwnerAcquisitionEvidenceRef: death.acquisitionEvidenceRef });
+      { kind: 'owning_process_dead', stateOwnerAcquisitionEvidenceRef: death.acquisitionEvidenceRef }, processClosure);
     const key = { principalId: row.principalId, method: row.method, admissionKey: row.admissionKey, admissionIntentDigest: row.admissionIntentDigest };
+    let clockRejected = false;
     driver.transaction(connection => {
       assertActiveStateOwner(connection, owner);
       const current = readSourceInspectionAttempt(connection, key);
-      if (!current || current.phase !== 'capturing' || current.rowDigest !== row.rowDigest)
+      if (!current || current.phase !== row.phase || current.rowDigest !== row.rowDigest)
         throw new KernelStorageError('REVISION_CONFLICT', 'source recovery lost its exact original reservation');
       readSourceInspectionStagingRetirement(owner.filesystem, physical);
-      if (advanceTimeFence(connection, owner.ownerEpoch) !== 'healthy')
-        throw new KernelStorageError('RECOVERY_REQUIRED', 'source recovery requires canonical time');
+      if (advanceTimeFence(connection, owner.ownerEpoch) !== 'healthy') { clockRejected = true; return; }
       const now = readTimeFence(connection)!.lastAcceptedAt;
       if (now < observedAt || now < death.successorOwner.acquiredAt || parseCanonicalTime(now) - parseCanonicalTime(observedAt) > 5000)
         throw new KernelStorageError('RECOVERY_REQUIRED', 'source recovery observation is outside the current owner freshness window');
@@ -327,13 +410,14 @@ export async function retireAbandonedSourceInspections(driver: SqliteDriver, art
       retired.rowDigest = digestOmitting(retired, 'rowDigest');
       for (const metadata of [response, inspectorArtifact, evidenceArtifact]) insertArtifactMetadata(connection, metadata, now);
       const updated = connection.prepare(`UPDATE source_inspection_attempts SET phase = 'retired', row_version = ?, row_json = ?
-        WHERE inspection_id = ? AND phase = 'capturing' AND row_version = ? AND row_json = ?`)
-        .run(retired.rowVersion, canonicalJsonBytes(retired).toString(), row.inspectionId, row.rowVersion, canonicalJsonBytes(row).toString());
+        WHERE inspection_id = ? AND phase = ? AND row_version = ? AND row_json = ?`)
+        .run(retired.rowVersion, canonicalJsonBytes(retired).toString(), row.inspectionId, row.phase, row.rowVersion, canonicalJsonBytes(row).toString());
       if (updated.changes !== 1n) throw new KernelStorageError('REVISION_CONFLICT', 'source recovery CAS lost its exact original reservation');
       // This is internal cleanup, not a request from a live peer. The owning
       // outcome/index now retain its first error; authenticated replay alone
       // may associate that same error with an actual channel/request record.
     });
+    if (clockRejected) throw new KernelStorageError('RECOVERY_REQUIRED', 'source recovery requires canonical time');
     afterInspectionId = row.inspectionId;
   }
 }
@@ -343,7 +427,7 @@ export async function retireAbandonedSourceInspections(driver: SqliteDriver, art
  * durable capturing row and prevents another capture of that workspace. */
 export async function captureSubmittedSource(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
   bootstrap: SourceInspectionOwnerBootstrap, input: { request: unknown; identity: AuthenticatedControlIdentity; deliverySource?: VerifiedDeliverySource }, signal?: AbortSignal,
-  selectedRuntime?: HeldInstalledRuntime):
+  selectedRuntime?: HeldInstalledRuntime, selectedAnchor?: HeldInstalledAnchor):
 Promise<SourceInspectionAttemptV1> {
   const normalized = normalizeSourceInspectionRequest(input.request), wire = normalized.request, identity = immutableSnapshot(input.identity);
   const reads = signal ? artifacts.withReadSignal(signal) : artifacts;
@@ -361,8 +445,13 @@ Promise<SourceInspectionAttemptV1> {
     throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'delivery capture requires its unchanged source runtime and sandbox profile');
   const resources: Array<{ close(): void }> = [];
   let home: HeldWorkspaceRoot | undefined, workspaceRoot: HeldWorkspaceRoot | undefined, trust: HeldWorkspaceSourceTrust | undefined;
-  let target: VerifiedSourceInspectionTarget | undefined, stage: HeldSourceInspectionStaging | undefined, row: Capturing | undefined;
+  let target: VerifiedSourceInspectionTarget | undefined, stage: HeldSourceInspectionStaging | undefined, row: Unretired | undefined;
   let graph: PublishedNonGitSourceProjection | undefined, failure: unknown, deadlineTimer: NodeJS.Timeout | undefined;
+  let handoffResponse: PublishedArtifact | undefined;
+  let nativeLifecycle: Buffer | undefined;
+  let gitCapture: InstalledSourceGitCapture | undefined;
+  let gitResult: Awaited<ReturnType<InstalledSourceGitCapture['run']>> | undefined;
+  let processClosure: SourceInspectionRetirementEvidenceV1['processClosure'] | undefined = { kind: 'not_planned' };
   let retirementFailure: unknown;
   const deadline = new AbortController();
   const captureSignal = signal ? AbortSignal.any([signal, deadline.signal]) : deadline.signal;
@@ -378,11 +467,12 @@ Promise<SourceInspectionAttemptV1> {
     trust = await holdWorkspaceSourceTrust(home, request.workspacePath, captureSignal); resources.push(trust);
     captureSignal.throwIfAborted(); workspaceRoot = native.openWorkspaceRoot(request.workspacePath); resources.push(workspaceRoot);
     target = await createVerifiedSourceInspectionTarget({ driver, artifacts, owner, bootstrap, workspaceRoot, trust,
-      selectedRuntime, signal: captureSignal }, normalized.originalRequest, identity, deliverySource);
+      selectedRuntime, signal: captureSignal }, normalized.originalRequest, input.identity, deliverySource);
     captureSignal.throwIfAborted();
     const held = readVerifiedSourceInspectionTarget(owner, target);
     stage = owner.filesystem.createSourceInspectionStaging(held.inspectionId, sha256Bytes(randomBytes(32)));
     row = await reserveSourceInspectionAttempt(driver, artifacts, owner, target, stage);
+    if (row.inputRef) processClosure = { kind: 'input_not_started', inputRef: row.inputRef, inputDigest: row.inputDigest! };
     let remaining = Math.max(1, parseCanonicalTime(row.deadlineAt) - Date.now());
     const armDeadline = () => {
       const interval = Math.min(remaining, 2_147_483_647); remaining -= interval;
@@ -392,15 +482,27 @@ Promise<SourceInspectionAttemptV1> {
       }, interval); deadlineTimer.unref();
     };
     armDeadline(); captureSignal.throwIfAborted();
-    // Git needs a genuine reserved fixed-recipe inspector; a valid target or
-    // directory staging observation cannot stand in for its sealed result.
-    if (workspaceRoot.repositoryDirectory) throw new KernelStorageError('INVALID_REQUEST', 'Git source inspection is not yet implemented');
-    graph = await publishNonGitSourceProjection({ workspaceRoot, controlledHome: home, stateOwnerLock: owner.filesystem,
+    const projectionInput = { workspaceRoot, controlledHome: home, stateOwnerLock: owner.filesystem,
       workspaceIdentityDigest: held.workspace.identityDigest, artifacts, sourceIncludes: request.sourceIncludes, sourceExcludes: request.sourceExcludes,
       maxChangedPaths: request.maxChangedPaths, maxChangedBytes: request.maxChangedBytes, maxEntries: 100_000,
       maxBytes: request.sandboxResources.maxGenerationBytes, maxSingleFileBytes: request.sandboxResources.maxSingleFileBytes, signal: captureSignal,
       ...(wire.method === 'run.apply' ? { deliveryCapture: { inspectionId: row.inspectionId,
-        workspaceIdentityRef: held.target.workspaceIdentityRef, capturedAt: sampleCanonicalNow() } } : {}) });
+        workspaceIdentityRef: held.target.workspaceIdentityRef, capturedAt: sampleCanonicalNow() } } : {}) };
+    if (workspaceRoot.repositoryDirectory) {
+      if (!selectedRuntime || !selectedAnchor) throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'Git source inspection requires its genuine installed native owner');
+      gitCapture = createInstalledSourceGitCapture(driver, artifacts, owner, bootstrap,
+        { row, target, staging: stage, installed: selectedRuntime, anchor: selectedAnchor, signal: captureSignal });
+      processClosure = undefined;
+      gitResult = await gitCapture.run(); await gitCapture.close();
+      const joined = readInstalledSourceGitCapture(owner, gitCapture); row = joined.row;
+      const rules = request.frozenProjection ? undefined : await captureSourceGitRules(driver, artifacts, owner, target, home,
+        { index: gitResult.index, exclude: gitResult.exclude, signal: captureSignal });
+      const projected = await publishGitSourceProjection({ ...projectionInput, git: {
+        privateGitStateRef: gitResult.privateGitStateRef, repositoryIdentityDigest: gitResult.index.repositoryIdentityDigest,
+        resources: request.sandboxResources, frozenIgnoreRulesRef: request.frozenProjection?.frozenIgnoreRulesRef ?? rules!.rulesArtifact.ref,
+        ...(request.frozenProjection ? { inheritedSourceRef: request.frozenProjection.admittedSourceRef } : {}) } });
+      graph = { ...projected, metadata: [...gitResult.metadata, ...(rules?.metadata ?? []), ...projected.metadata] };
+    } else graph = await publishNonGitSourceProjection(projectionInput);
     if (request.frozenProjection && (graph.sourceProjectionRef !== request.frozenProjection.sourceProjectionRef ||
         graph.frozenIgnoreRulesRef !== request.frozenProjection.frozenIgnoreRulesRef))
       throw new KernelStorageError('ARTIFACT_MISMATCH', 'delivery capture changed its inherited frozen projection');
@@ -409,7 +511,54 @@ Promise<SourceInspectionAttemptV1> {
   } catch (error) { failure = error; }
   finally {
     if (deadlineTimer) clearTimeout(deadlineTimer);
+    if (gitCapture) {
+      try {
+        await gitCapture.close();
+        const joined = readInstalledSourceGitCapture(owner, gitCapture); row = joined.row;
+        nativeLifecycle = joined.nativeLifecycle;
+        processClosure = joined.nativeAttempted
+          ? { kind: 'source_native_retired', inputRef: joined.row.inputRef!, inputDigest: joined.row.inputDigest!,
+            nativeBirthIdentity: joined.nativeBirthIdentity!, observation: joined.observation!,
+            ...(gitResult ? { output: { inspectionOutputRef: gitResult.inspectionOutputRef, privateGitStateRef: gitResult.privateGitStateRef } } : {}) }
+          : { kind: 'input_not_started', inputRef: joined.row.inputRef!, inputDigest: joined.row.inputDigest! };
+      } catch (error) { retirementFailure = error instanceof ResourceRetirementError ? error :
+        new ResourceRetirementError('source native capture has no complete original closure', error); }
+    }
     try { closeResources(resources, failure); } catch (error) { retirementFailure = error; }
+  }
+  // Preserve the original private birth on any uncertain native/consumer join.
+  // Removing staging first would destroy the only genuine cleanup provenance.
+  if (retirementFailure !== undefined) throw retirementFailure;
+  if (!processClosure) throw new ResourceRetirementError('source capture has no complete original process closure', failure);
+  if (row && stage && target) {
+    let outcome: Retired['outcome'];
+    let refusal: PublishedArtifact | undefined;
+    if (failure === undefined && graph) {
+      if (wire.method === 'run.apply' && (!graph.captureTopologyRef || !graph.captureTopologyDigest))
+        throw new KernelStorageError('ARTIFACT_MISMATCH', 'delivery capture has no original topology closure');
+      const captured = { kind: 'captured' as const, sourceManifestRef: graph.baseWorkspaceManifestRef, sourceManifestDigest: graph.manifestDigest,
+        ...(graph.privateGitStateRef ? { privateGitStateRef: graph.privateGitStateRef } : {}) };
+      outcome = wire.method === 'run.apply'
+        ? { ...captured, captureTopologyRef: graph.captureTopologyRef!, captureTopologyDigest: graph.captureTopologyDigest! } : captured;
+    } else {
+      if (failure === undefined) throw new KernelStorageError('RECOVERY_REQUIRED', 'source capture has no original complete result');
+      let cancelled = signal?.aborted === true;
+      refusal = await artifacts.publishCanonical(errorResponse(failure, row.inspectionId, cancelled, row.method), 'cliq-control-response-v1');
+      if (!cancelled && signal?.aborted) {
+        cancelled = true;
+        refusal = await artifacts.publishCanonical(errorResponse(failure, row.inspectionId, true, row.method), 'cliq-control-response-v1');
+      }
+      outcome = { kind: cancelled ? 'cancelled' : 'failed', errorResponseRef: refusal.ref };
+      handoffResponse = refusal;
+    }
+    // Persist the original joined result and ownership before removing the
+    // only physical birth. A native closure additionally needs its genuine
+    // lifecycle snapshot; a missing snapshot refuses without deleting stage.
+    const lifecycle = nativeLifecycle && await artifacts.publishBytes(nativeLifecycle, 'application/octet-stream', 'cliq-source-native-lifecycle-v2');
+    row = await installSourceInspectionRetirementHandoff(driver, artifacts, owner, row, stage, {
+      captureOwnerClosure: { kind: 'local_resources_joined', stateOwnerEpoch: owner.ownerEpoch, supervisorInstanceId: owner.supervisorInstanceId },
+      processClosure, outcome, ...(lifecycle ? { nativeLifecycleRef: lifecycle.ref } : {})
+    }, [...(graph?.metadata ?? []), ...(refusal ? [refusal] : []), ...(lifecycle ? [lifecycle] : [])]);
   }
   let physical: SourceInspectionStagingRetirement | undefined;
   try { if (stage) physical = await retireSourceInspectionStaging(owner.filesystem, stage); }
@@ -423,21 +572,22 @@ Promise<SourceInspectionAttemptV1> {
     if (failure !== undefined) throw failure;
     throw new KernelStorageError('RECOVERY_REQUIRED', 'source inspection did not commit its exact reservation');
   }
-  const heldTarget = await readCanonicalArtifact<import('../kernel/execution.js').SourceInspectionTargetV1>(artifacts, row.targetRef);
+  const heldTarget = await readCanonicalArtifact<import('../kernel/execution.js').SourceInspectionTarget>(artifacts, row.targetRef);
   const { inspectorArtifact, evidenceArtifact, observedAt } = await publishSourceRetirement(driver, artifacts, owner, row, physical,
-    { kind: 'local_resources_joined', stateOwnerEpoch: owner.ownerEpoch, supervisorInstanceId: owner.supervisorInstanceId });
+    { kind: 'local_resources_joined', stateOwnerEpoch: owner.ownerEpoch, supervisorInstanceId: owner.supervisorInstanceId }, processClosure);
   if (failure === undefined) {
     try { await validateControlChannelClosure(artifacts, owner, identity); }
     catch (error) { if (error instanceof ResourceRetirementError) throw error; failure = error; }
   }
-  let response: PublishedArtifact | undefined, result: Retired | undefined;
+  let response: PublishedArtifact | undefined = handoffResponse, result: Retired | undefined;
   const key = { principalId: row.principalId, method: row.method, admissionKey: row.admissionKey, admissionIntentDigest: row.admissionIntentDigest };
   // At most one final-cut downgrade, never a new capture/retry or new nonce.
   for (let cut = 0; cut < 2; cut++) {
     let cancelled = signal?.aborted === true;
     if (cancelled && failure === undefined) failure = signal!.reason;
     if (failure !== undefined) {
-      response = await artifacts.publishCanonical(errorResponse(failure, row.inspectionId, cancelled, row.method), 'cliq-control-response-v1');
+      const refusal = errorResponse(failure, row.inspectionId, cancelled, row.method);
+      if (response?.ref !== canonicalSha256(refusal)) response = await artifacts.publishCanonical(refusal, 'cliq-control-response-v1');
       // Cancellation is monotonic but can arrive during the actual CAS write.
       // Freeze the response/outcome pair at the same final cut; an obsolete
       // ordinary error may remain orphan bytes, never the cancelled result.
@@ -446,14 +596,14 @@ Promise<SourceInspectionAttemptV1> {
         response = await artifacts.publishCanonical(errorResponse(failure, row.inspectionId, true, row.method), 'cliq-control-response-v1');
       }
     }
-    let downgrade: unknown;
+    let downgrade: unknown, clockRejected = false;
     driver.transaction(connection => {
       assertActiveStateOwner(connection, owner); assertSourceInspectionRequestId(connection, row!.principalId, request, row!.inspectionId);
       const current = readSourceInspectionAttempt(connection, key);
-      if (!current || current.phase !== 'capturing' || current.rowDigest !== row!.rowDigest)
+      if (!current || current.phase !== row!.phase || current.rowDigest !== row!.rowDigest)
         throw new KernelStorageError('REVISION_CONFLICT', 'source reservation changed before retirement');
       readSourceInspectionStagingRetirement(owner.filesystem, physical!);
-      if (advanceTimeFence(connection, owner.ownerEpoch) !== 'healthy') throw new KernelStorageError('RECOVERY_REQUIRED', 'source retirement requires canonical time');
+      if (advanceTimeFence(connection, owner.ownerEpoch) !== 'healthy') { clockRejected = true; return; }
       const now = readTimeFence(connection)!.lastAcceptedAt;
       if (now < observedAt || parseCanonicalTime(now) - parseCanonicalTime(observedAt) > 5000)
         throw new KernelStorageError('RECOVERY_REQUIRED', 'source retirement observation is outside the current owner freshness window');
@@ -471,9 +621,10 @@ Promise<SourceInspectionAttemptV1> {
       const branch = failure === undefined && graph
         ? wire.method === 'run.apply'
           ? { method: 'run.apply' as const, outcome: { kind: 'captured' as const, sourceManifestRef: graph.baseWorkspaceManifestRef,
-            sourceManifestDigest: graph.manifestDigest, captureTopologyRef: graph.captureTopologyRef!, captureTopologyDigest: graph.captureTopologyDigest! } }
+            sourceManifestDigest: graph.manifestDigest, ...(graph.privateGitStateRef ? { privateGitStateRef: graph.privateGitStateRef } : {}),
+            captureTopologyRef: graph.captureTopologyRef!, captureTopologyDigest: graph.captureTopologyDigest! } }
           : { method: 'run.submit' as const, outcome: { kind: 'captured' as const, sourceManifestRef: graph.baseWorkspaceManifestRef,
-            sourceManifestDigest: graph.manifestDigest } }
+            sourceManifestDigest: graph.manifestDigest, ...(graph.privateGitStateRef ? { privateGitStateRef: graph.privateGitStateRef } : {}) } }
         : { outcome: { kind: cancelled ? 'cancelled' as const : 'failed' as const, errorResponseRef: response!.ref } };
       const retired: Retired = { ...row!, rowVersion: row!.rowVersion + 1, phase: 'retired', updatedAt: now,
         cancelRequested: row!.cancelRequested || branch.outcome.kind === 'cancelled',
@@ -482,14 +633,15 @@ Promise<SourceInspectionAttemptV1> {
       for (const metadata of [...(graph?.metadata ?? []), inspectorArtifact, evidenceArtifact, ...(response ? [response] : [])])
         insertArtifactMetadata(connection, metadata, now);
       const updated = connection.prepare(`UPDATE source_inspection_attempts SET phase = 'retired', row_version = ?, row_json = ?
-        WHERE inspection_id = ? AND phase = 'capturing' AND row_version = ? AND row_json = ?`).run(retired.rowVersion,
-          canonicalJsonBytes(retired).toString(), row!.inspectionId, row!.rowVersion, canonicalJsonBytes(row!).toString());
+        WHERE inspection_id = ? AND phase = ? AND row_version = ? AND row_json = ?`).run(retired.rowVersion,
+          canonicalJsonBytes(retired).toString(), row!.inspectionId, row!.phase, row!.rowVersion, canonicalJsonBytes(row!).toString());
       if (updated.changes !== 1n) throw new KernelStorageError('REVISION_CONFLICT', 'source retirement CAS lost its exact reservation');
       if (response) insertControlRequest(connection, { principalId: row!.principalId, method: row!.method, requestId: request.requestId,
         requestDigest: request.requestDigest, channelIdentityRef: identity.channelIdentityRef,
         channelIdentityDigest: identity.channelIdentityDigest, responseRef: response.ref, committedAt: now });
       result = immutableSnapshot(retired);
     });
+    if (clockRejected) throw new KernelStorageError('RECOVERY_REQUIRED', 'source retirement requires canonical time');
     if (result) return result;
     failure = downgrade;
   }

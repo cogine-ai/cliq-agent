@@ -37,6 +37,7 @@ import type {
   WorkspaceStateManifest
 } from '../kernel/types.js';
 import { KernelStorageError } from './errors.js';
+import { validateFrozenIgnoreRules } from '../workspace/frozen-ignore.js';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -674,14 +675,8 @@ export function decodeContextManifest(value: unknown): ContextManifest {
 }
 
 export function decodeFrozenIgnoreRules(value: unknown): FrozenIgnoreRulesV1 {
-  if (!isRecord(value) || value.format !== 'cliq-frozen-ignore-rules-v1' || value.schemaVersion !== 1) {
-    throw new KernelStorageError('ARTIFACT_MISMATCH', 'frozen ignore rules have the wrong schema');
-  }
-  const rules = value as FrozenIgnoreRulesV1;
-  if (digestOmitting(rules, 'rulesDigest') !== rules.rulesDigest) {
-    throw new KernelStorageError('ARTIFACT_MISMATCH', 'frozen ignore rules digest does not rehash');
-  }
-  return rules;
+  try { return validateFrozenIgnoreRules(value); }
+  catch (cause) { throw new KernelStorageError('ARTIFACT_MISMATCH', 'frozen ignore rules have invalid fields or digest', { cause }); }
 }
 
 export function decodeSourceProjection(value: unknown): SourceProjectionSpec {

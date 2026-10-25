@@ -20,7 +20,9 @@ export type PreparedDeliveryMergePlan = Readonly<{
  * transaction still creates the candidate, merge item and ready Checkpoint.
  * The owner separately bounds retained planned-blob memory and joins close. */
 export async function prepareDeliveryMergePlan(artifacts: ArtifactCatalog, selected: Extract<DeliverySourcePlan, { kind: 'ready' }>,
-  input: Readonly<{ deliveryRunId: string; sourceRunResultRef: string; captureTopologyRef: string }>, signal?: AbortSignal): Promise<PreparedDeliveryMergePlan> {
+  input: Readonly<{ deliveryRunId: string; sourceRunResultRef: string; captureTopologyRef: string; sandboxProfileRef?: string;
+    privateGitStateRef?: string }>, signal?: AbortSignal): Promise<PreparedDeliveryMergePlan> {
+  input = immutableSnapshot(input);
   signal?.throwIfAborted();
   // PlannedArtifact deliberately owns a byte-copy getter: recursively cloning
   // or freezing it would materialize and retain every blob on the heap. Freeze
@@ -49,7 +51,9 @@ export async function prepareDeliveryMergePlan(artifacts: ArtifactCatalog, selec
       throw new KernelStorageError('ARTIFACT_MISMATCH', 'delivery merge CAS publication substituted its planned bytes');
     metadata.set(published.ref, published);
   }
-  const planned = await planDeliveryPublication(artifacts, { ...input, ...source.input, desiredSourceRef: source.sourceRef, diffRef: source.diffRef }, signal);
+  if (!!source.source.git !== !!input.privateGitStateRef) throw new KernelStorageError('ARTIFACT_MISMATCH', 'delivery merge lost captured A private Git state');
+  const planned = await planDeliveryPublication(artifacts, { deliveryRunId: input.deliveryRunId, sourceRunResultRef: input.sourceRunResultRef,
+    captureTopologyRef: input.captureTopologyRef, ...source.input, desiredSourceRef: source.sourceRef, diffRef: source.diffRef }, signal, input.sandboxProfileRef);
   for (const artifact of planned.publications) {
     signal?.throwIfAborted(); const published = await artifacts.publishBytes(artifact.bytes, artifact.mediaType, artifact.schemaKind);
     signal?.throwIfAborted();
@@ -59,7 +63,8 @@ export async function prepareDeliveryMergePlan(artifacts: ArtifactCatalog, selec
   const workspaceState: WorkspaceStateManifest = {
     schemaVersion: 1, format: 'cliq-workspace-state-v1', runId: input.deliveryRunId,
     baseWorkspaceManifestRef: source.input.capturedWorkspaceRef, entriesRef: source.source.entriesRef,
-    invalidatedEphemeralPaths: [], sourceProjectionDigest: source.source.sourceProjectionDigest, stateDigest: ''
+    invalidatedEphemeralPaths: [], sourceProjectionDigest: source.source.sourceProjectionDigest,
+    ...(input.privateGitStateRef ? { privateGitStateRef: input.privateGitStateRef } : {}), stateDigest: ''
   };
   workspaceState.stateDigest = digestOmitting(workspaceState, 'stateDigest');
   signal?.throwIfAborted(); const workspace = await artifacts.publishCanonical(workspaceState, workspaceState.format); signal?.throwIfAborted();

@@ -5,14 +5,17 @@ import type { Checkpoint, RunFrontier, SourceManifest, WorkspaceEntry } from '..
 import { requireEqual } from '../policy/runtime-authority.js';
 import { readCanonicalArtifact } from './agent-context.js';
 import type { ArtifactCatalog } from './artifacts.js';
-import { decodeSourceManifest, decodeWorkspaceEntries } from './decoders.js';
+import { decodeSourceManifest, decodeWorkspaceEntries, decodeWorkspaceIdentity } from './decoders.js';
 import { assertPublicationReadCut, deliveryPublicationCheckpointId, deliveryPublicationTerminalCheckpointId, publicationEnvelopeLocations, readOwnedPublicationProof,
   readPublicationInspector, readPublicationPathCheckpoint, readPublicationPathRetirement, readPublicationPrefix } from './delivery-publication-progress.js';
 import { assertRetiredGenerationCut } from './generation-retirement.js';
 import { decodeRunResult } from './result-artifacts.js';
 import { readDeliveryVerification } from './run-result-recovery.js';
 import { readCheckpoint } from './rows.js';
-import { checkEntries, checkNonGitSourceManifest } from './source-validation.js';
+import { checkEntries, checkSourceManifest } from './source-validation.js';
+import { sameSourceGit } from './source-projection-data.js';
+import { readPublicationGitIndexClosure } from './publication-git-index.js';
+import { decodeSandboxProfile } from './execution-closure.js';
 import type { SqliteDriver } from './sqlite-driver.js';
 import type { RecoveryClosureV1 } from '../kernel/types.js';
 
@@ -85,11 +88,12 @@ export function validatePublicationTerminalPathState(value: unknown, ancestor?: 
 }
 
 async function readObservedSource(artifacts: ArtifactCatalog, cut: RecoveryClosureV1, ref: string, desired: SourceManifest) {
-  const source = decodeSourceManifest(await readCanonicalArtifact(artifacts, ref)); checkNonGitSourceManifest(source);
+  const source = decodeSourceManifest(await readCanonicalArtifact(artifacts, ref)); checkSourceManifest(source);
   if (source.role !== 'result' || source.sourceProjectionRef !== cut.runSpec.sourceProjectionRef)
     throw new TypeError('publication terminal source changed its frozen role or projection');
   for (const key of ['workspaceIdentityDigest', 'sourceProjectionRef', 'sourceProjectionDigest', 'frozenIgnoreRulesRef', 'frozenIgnoreRulesDigest'] as const)
     if (source[key] !== desired[key]) throw new TypeError('publication terminal source changed its original workspace/ignore identity');
+  if (!sameSourceGit(source, desired)) throw new TypeError('publication terminal source changed captured A Git metadata');
   const entries = decodeWorkspaceEntries(await readCanonicalArtifact(artifacts, source.entriesRef)); checkEntries(entries);
   if (entries.treeDigest !== source.treeDigest) throw new TypeError('publication terminal source tree differs from its original complete entries');
   for (const entry of entries.entries) if (entry.kind === 'file')
@@ -243,8 +247,10 @@ export async function readDeliveryTerminalProjectionData(driver: SqliteDriver, a
   requireEqual(projection.observedPathEvidenceRefs, evidence.observedPathStates.map(entry => entry.evidenceRef), 'publication exact terminal path refs');
   for (const field of ['forwardResultItemRefs', 'unstartedForwardOperationIds', 'abortResultItemRefs'] as const)
     requireEqual(projection[field], evidence[field], 'publication exact terminal result projection');
-  if (index.repositoryKind !== 'non_git' || observed.source.git !== undefined)
-    throw new TypeError('publication requires its implemented non-Git index closure');
+  const workspace = decodeWorkspaceIdentity(await readCanonicalArtifact(artifacts, prefix.admission.target.workspaceIdentityRef));
+  if (workspace.kind !== 'live') throw new TypeError('publication Git index lost its original live workspace');
+  const profile = decodeSandboxProfile(await readCanonicalArtifact(artifacts, cut.runSpec.sandboxProfileRef));
+  await readPublicationGitIndexClosure(artifacts, index, { workspace, capturedSourceRef: plan.capturedWorkspaceRef, resources: profile.resources });
   await assertPublicationReadCut(driver, artifacts, cut);
   return { evidence, evidenceRef: ref, checkpoint, closedPublicationJournalSeqs: new Set([...prefix.entries.values()]
     .filter(entry => entry.preparationClosure || entry.result && entry.result.item.outcome !== 'unknown' &&

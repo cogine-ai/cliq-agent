@@ -1,6 +1,8 @@
 // Read-only assertions for the actual installed journey. Retained data is not
 // active process observation, a release signature check or execution authority.
 import { canonicalJsonBytes, canonicalSha256 } from '../../../src/kernel/canonical.js';
+import { readPrivateGitData, readGitIndexData, privateGitSourceHead, type PrivateGitReader } from '../../../src/workspace/private-git-data.js';
+import { decodeSandboxProfile } from '../../../src/state/execution-closure.js';
 import { digestOmitting, identityHash, parseCanonicalTime, sha256Bytes } from '../../../src/kernel/identity.js';
 import { parseJsonStrict } from '../../../src/kernel/json.js';
 import type { Checkpoint, ContinuationItem, InvocationJournalEntry, Run, StateOwnerRecordV1, WorkspaceEntry } from '../../../src/kernel/types.js';
@@ -65,10 +67,12 @@ export async function assertInstalledVerifierOutcome(input: {
   cut: Record<string, any>; sessionCut: Record<string, any>; readCas: (ref: string) => Promise<Buffer>;
   readOwnerHistory: () => Promise<readonly StateOwnerRecordV1[]>;
   caseKind: CaseKind; expectedFiles: readonly { path: string; before: string; after: string }[]; principalId: string;
+  expectedGit?: true;
 }): Promise<InstalledVerifierOutcome> {
   let stage: InstalledVerifierDiagnosticStage = 'public_cut';
   try {
     const { cut, sessionCut, caseKind } = input;
+    check(input.expectedGit === undefined || input.expectedGit === true);
     check(['required_pass', 'required_repair', 'advisory_failure', 'required_timeout'].includes(caseKind));
     const run = cut.snapshot?.run as Run;
     check(cut.method === 'run.get' && cut.snapshot.schemaVersion === 1 && cut.snapshot.operation === 'agent');
@@ -167,7 +171,7 @@ export async function assertInstalledVerifierOutcome(input: {
     const expectedBase = fixedEntries('before'), expectedAfter = fixedEntries('after');
     const base = decodeSourceManifest(await object(spec.baseWorkspaceManifestRef));
     const baseEntries = decodeWorkspaceEntries(await object(base.entriesRef));
-    check(base.role === 'base' && base.git === undefined && base.sourceProjectionRef === spec.sourceProjectionRef &&
+    check(base.role === 'base' && !!base.git === !!input.expectedGit && workspace.kind === 'live' && !!workspace.repositoryIdentityRef === !!input.expectedGit && base.sourceProjectionRef === spec.sourceProjectionRef &&
       base.workspaceIdentityDigest === workspace.identityDigest && base.treeDigest === baseEntries.treeDigest);
     same(baseEntries.entries, expectedBase);
     for (const fixed of input.expectedFiles) check((await bytes(sha256Bytes(Buffer.from(fixed.before)))).equals(Buffer.from(fixed.before)));
@@ -176,10 +180,29 @@ export async function assertInstalledVerifierOutcome(input: {
     const progresses: VerifierProgress[] = [], seenVerifierJournal = new Set<number>(), seenVerifierItems = new Set<string>();
     const retirementIdentities: InstalledVerifierOutcome['retirementIdentities'] = [];
     let verifierAttemptCount = 0;
+    let originalPrivateGitRef: string | undefined;
+    const gitReader = (signal?: AbortSignal): PrivateGitReader => ({
+      async readBoundedBytes(ref, maximum) { signal?.throwIfAborted(); const value = await bytes(ref, Math.min(maximum, MAX_JSON_BYTES)); signal?.throwIfAborted(); return value; },
+      async *readChunks(ref, expectedSize) { signal?.throwIfAborted(); const value = await bytes(ref, Math.min(expectedSize ?? MAX_JSON_BYTES, MAX_JSON_BYTES));
+        check(expectedSize === undefined || value.length === expectedSize); signal?.throwIfAborted(); yield value; },
+      withReadSignal: selected => gitReader(signal ? AbortSignal.any([signal, selected]) : selected)
+    });
     async function state(cp: Checkpoint, sourceEntriesRef: string) {
       const value = decodeWorkspaceState(await object(cp.workspaceStateRef));
       check(value.runId === run.id && value.baseWorkspaceManifestRef === spec.baseWorkspaceManifestRef &&
-        value.sourceProjectionDigest === base.sourceProjectionDigest && value.entriesRef === sourceEntriesRef && !value.privateGitStateRef);
+        value.sourceProjectionDigest === base.sourceProjectionDigest && value.entriesRef === sourceEntriesRef && !!value.privateGitStateRef === !!input.expectedGit);
+      if (input.expectedGit) {
+        check(base.git && value.privateGitStateRef);
+        const profile = decodeSandboxProfile(await object(spec.sandboxProfileRef));
+        const expected = { repositoryIdentityDigest: base.git!.repositoryIdentityDigest, resources: profile.resources };
+        const privateGit = await readPrivateGitData(gitReader(), value.privateGitStateRef!, expected);
+        const admitted = await readGitIndexData(gitReader(), base.git!.indexRef, expected);
+        same(privateGitSourceHead(privateGit), base.git!.head);
+        check(admitted.indexTreeObjectId === base.git!.indexTreeObjectId && admitted.objectFormat === privateGit.index.objectFormat);
+        originalPrivateGitRef ??= value.privateGitStateRef;
+        // Ordinary edit and verifier preserve the exact original private graph.
+        check(value.privateGitStateRef === originalPrivateGitRef);
+      }
       check(value.invalidatedEphemeralPaths.length === 0); return value;
     }
     for (const [candidateIndex, candidate] of candidates.entries()) {

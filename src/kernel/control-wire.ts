@@ -6,9 +6,11 @@ import { decodeCredentialAuthorityOperation, type CredentialAuthorityOperationV1
 import { assertBoundedJsonValue, parseJsonStrict } from './json.js';
 import { decodeWireRun, decodeWireSession, decodeWireCheckpoint, decodeWireEvent, decodeWireJournal,
   decodeWireArtifactDescriptor, decodeWireGrantSummary, decodeWireRuntimeBundleSummary, decodeWireRunItemReference, decodeWireSessionItem } from './control-wire-data.js';
-import type { AuthorizationRevokeRequest, VerifierIdentityCreateRequest } from './authorization.js';
-import { normalizeRunSubmitRequest, type RunSubmitRequest } from './control-submit.js';
+import type { AuthorizationCreateRequest, AuthorizationRevokeRequest, SourceGitInspectionCreateRequest, SourceReadScopeCreateRequest, VerifierIdentityCreateRequest } from './authorization.js';
+import { normalizeSourceReadScopePath } from './source-read-scope.js';
+import { decodeSandboxResourceOptions, normalizeRunSubmitRequest, type RunSubmitRequest } from './control-submit.js';
 import { normalizeRunApplyRequest, type RunApplyRequest } from './control-apply.js';
+import { decodeSessionContinuityRequest, decodeSessionSummary, type SessionContinuityRequestV1, type SessionContinuityResultV1 } from './session-continuity.js';
 import { assertControlWireJson as json, controlWireRecord, controlWireText, controlWireInteger, controlWireRef, decodeControlRange } from './control-wire-data.js';
 export { controlWireRecord, controlWireText, controlWireInteger, controlWireRef, decodeControlRange } from './control-wire-data.js';
 
@@ -32,8 +34,8 @@ export type RunReconcileRequestV1 = Readonly<{ protocolVersion: 1; method: 'run.
 /** A continuation of an existing operation, deliberately not MutationBase. */
 export type CredentialFinalizeRequest = Readonly<{ protocolVersion: 1; method: 'credential.finalize';
   requestId: string; operationId: string; attempt: 1 | 2 | 3; commandDigest: string }>;
-export type InstalledControlRequestV1 = ReadControlRequest | ControlHelloRequestV1 | SessionCreateRequestV1 | RunSubmitRequest |
-  RunApplyRequest | RunCancelRequestV1 | RunApproveRequestV1 | RunReconcileRequestV1 | VerifierIdentityCreateRequest | AuthorizationRevokeRequest | CredentialFinalizeRequest |
+export type InstalledControlRequestV1 = ReadControlRequest | ControlHelloRequestV1 | SessionCreateRequestV1 | SessionContinuityRequestV1 | RunSubmitRequest |
+  RunApplyRequest | RunCancelRequestV1 | RunApproveRequestV1 | RunReconcileRequestV1 | AuthorizationCreateRequest | AuthorizationRevokeRequest | CredentialFinalizeRequest |
   Readonly<{ protocolVersion: 1; method: 'supervisor.status' }>;
 
 export type RuntimeBundlePublicSummaryV1 = Readonly<{
@@ -66,7 +68,7 @@ export const CONTROL_METHODS_V1 = Object.freeze(['control.hello', 'session.creat
   'authorization.create', 'authorization.list', 'authorization.revoke', 'mcp.register',
   'mcp.refresh', 'mcp.list', 'artifact.get', 'supervisor.status', 'credential.finalize'] as const);
 export type ControlMethodV1 = typeof CONTROL_METHODS_V1[number];
-export type InstalledControlResultV1 = Extract<ControlResultV1, { method: 'session.get' | 'run.get' | 'run.attach' | 'run.result' | 'run.diff' | 'artifact.get' }> | Extract<ControlResultV1, { method: 'session.create' | 'run.submit' | 'run.apply' | 'run.approve' | 'run.cancel' | 'run.reconcile' }> |
+export type InstalledControlResultV1 = SessionContinuityResultV1 | Extract<ControlResultV1, { method: 'session.get' | 'run.get' | 'run.attach' | 'run.result' | 'run.diff' | 'artifact.get' }> | Extract<ControlResultV1, { method: 'session.create' | 'run.submit' | 'run.apply' | 'run.approve' | 'run.cancel' | 'run.reconcile' }> |
   import('../kernel/authorization.js').AuthorizationResponse['result'] |
   SupervisorStatusV1 | { method: 'credential.finalize'; operation: CredentialAuthorityOperationV1 } | (SupervisorHelloV1 & {
   method: 'control.hello'; protocolVersion: 1; serverBuild: string;
@@ -77,7 +79,7 @@ type InvalidError = ErrorBase & { code: 'INVALID_REQUEST'; retryable: false;
   issues: Array<{ path: string; issueCode: string }> };
 export type InstalledControlErrorV1 = InvalidError
   | import('../kernel/types.js').ResultUnavailableControlErrorV1
-  | (ErrorBase & { code: 'RESOURCE_EXHAUSTED'; retryable: true; resourceKind: 'run_queue'; retryAfterMs: 1000 })
+  | (ErrorBase & { code: 'RESOURCE_EXHAUSTED'; retryable: true; resourceKind: 'run_queue' | 'state_storage'; retryAfterMs: 1000 })
   | (ErrorBase & { code: 'RATE_LIMITED'; retryable: true; retryAfterMs: 1000 })
   | (ErrorBase & { code: 'INCOMPATIBLE_PROTOCOL'; retryable: false;
       supportedControlRange: { min: 1; max: 1 }; supportedHeadlessRange: ControlRangeV1;
@@ -98,7 +100,7 @@ export type InstalledControlResponseV1 =
 
 /** Connected composition ceiling; a hello still intersects this with the actual installed Store. */
 export const INSTALLED_CONTROL_FEATURES = Object.freeze(['session.get', 'run.get', 'run.attach', 'supervisor.status', 'credential.finalize',
-  'session.create', 'run.submit', 'run.cancel', 'authorization.create', 'authorization.revoke', 'run.result', 'run.diff', 'artifact.get', 'run.apply', 'run.approve', 'run.reconcile'] as const);
+  'session.create', 'session.list', 'session.fork', 'session.compact', 'session.handoff.create', 'run.submit', 'run.cancel', 'authorization.create', 'authorization.revoke', 'run.result', 'run.diff', 'artifact.get', 'run.apply', 'run.approve', 'run.reconcile'] as const);
 export type InstalledControlFeature = typeof INSTALLED_CONTROL_FEATURES[number];
 export type InstalledControlMethod = InstalledControlRequestV1['method'];
 export type InstalledControlResultFor<M extends InstalledControlMethod> = Extract<InstalledControlResultV1, { method: M }>;
@@ -184,6 +186,39 @@ export function decodeSessionCreatePublicRequest(value: unknown): { core: Omit<S
   return immutableSnapshot({ core: core as Omit<SessionCreateRequestV1, 'requestDigest'>, requestDigest });
 }
 export class UnsupportedExecutionIdentityRequestError extends TypeError {}
+export function decodeAuthorizationCreateRequest(value: unknown): AuthorizationCreateRequest {
+  json(value);
+  const data = controlWireRecord(value, ['protocolVersion', 'method', 'requestId', 'requestDigest', 'decision'], ['ttlMs']);
+  const decision = controlWireRecord(data.decision, ['kind', 'purpose', 'target']);
+  if (decision.kind === 'read_scope') {
+    if (data.protocolVersion !== 1 || data.method !== 'authorization.create' || decision.purpose !== 'source')
+      throw new TypeError('invalid source read authorization');
+    assertRequestId(data.requestId as string); controlWireRef(data.requestDigest);
+    const { requestDigest, ...core } = data;
+    if (canonicalSha256(core) !== requestDigest) throw new TypeError('authorization request digest does not rehash');
+    const target = controlWireRecord(decision.target, ['sessionId', 'expectedWorkspaceIdentityDigest', 'path', 'scope'], ['expectedDigest']);
+    controlWireText(target.sessionId); controlWireRef(target.expectedWorkspaceIdentityDigest);
+    normalizeSourceReadScopePath(target.path, target.scope);
+    if (Object.hasOwn(target, 'expectedDigest')) controlWireRef(target.expectedDigest);
+    if (Object.hasOwn(data, 'ttlMs')) controlWireInteger(data.ttlMs, 1, 86_400_000);
+    return immutableSnapshot(data) as SourceReadScopeCreateRequest;
+  }
+  if (decision.kind !== 'source_git_inspection') return decodeVerifierIdentityCreateRequest(value);
+  if (data.protocolVersion !== 1 || data.method !== 'authorization.create' || decision.purpose !== 'source_inspection')
+    throw new TypeError('invalid source inspection authorization');
+  assertRequestId(data.requestId as string); controlWireRef(data.requestDigest);
+  const { requestDigest, ...core } = data;
+  if (canonicalSha256(core) !== requestDigest) throw new TypeError('authorization request digest does not rehash');
+  const target = controlWireRecord(decision.target, ['sessionId', 'expectedWorkspaceIdentityDigest', 'scope', 'recipe', 'retention', 'resourceCeiling']);
+  controlWireText(target.sessionId); controlWireRef(target.expectedWorkspaceIdentityDigest);
+  if (target.scope !== 'in_root_git_metadata_and_objects' || target.recipe !== 'cliq-source-git-inspection-v1' ||
+      target.retention !== 'ephemeral_raw_reachable_only') throw new TypeError('source inspection authorization has another scope or retention');
+  // Consent fixes every resource; defaults are not inferred at this boundary.
+  const resources = decodeSandboxResourceOptions(target.resourceCeiling);
+  controlWireRecord(target.resourceCeiling, Object.keys(resources));
+  if (Object.hasOwn(data, 'ttlMs')) controlWireInteger(data.ttlMs, 1, 86_400_000);
+  return immutableSnapshot(data) as SourceGitInspectionCreateRequest;
+}
 export function decodeVerifierIdentityCreateRequest(value: unknown): VerifierIdentityCreateRequest {
   json(value);
   const data = controlWireRecord(value, ['protocolVersion', 'method', 'requestId', 'requestDigest', 'decision'], ['ttlMs']);
@@ -233,6 +268,7 @@ export function decodeInstalledControlRequest(value: unknown): InstalledControlR
   if (source?.method === 'session.create') {
     const { core, requestDigest } = decodeSessionCreatePublicRequest(source); return immutableSnapshot({ ...core, requestDigest });
   }
+  if (['session.list', 'session.fork', 'session.compact', 'session.handoff.create'].includes(source?.method as string)) return decodeSessionContinuityRequest(source);
   if (source?.method === 'run.submit') return normalizeRunSubmitRequest(source).originalRequest as RunSubmitRequest;
   if (source?.method === 'run.apply') return normalizeRunApplyRequest(source).originalRequest as RunApplyRequest;
   if (source?.method === 'run.reconcile') {
@@ -264,7 +300,7 @@ export function decodeInstalledControlRequest(value: unknown): InstalledControlR
     if (canonicalSha256(core) !== requestDigest) throw new TypeError('run.cancel request digest differs');
     return immutableSnapshot(source) as RunCancelRequestV1;
   }
-  if (source?.method === 'authorization.create') return decodeVerifierIdentityCreateRequest(source);
+  if (source?.method === 'authorization.create') return decodeAuthorizationCreateRequest(source);
   if (source?.method === 'authorization.revoke') return decodeAuthorizationRevokeRequest(source);
   if (source?.method === 'credential.finalize') return decodeCredentialFinalizeRequest(source);
   return immutableSnapshot(decodeReadControlRequest(source));
@@ -302,8 +338,20 @@ function result(value: unknown, method: InstalledControlMethod): InstalledContro
   } else if (method === 'credential.finalize') {
     controlWireRecord(data, ['method', 'operation']);
     if (decodeCredentialAuthorityOperation(data.operation).phase !== 'committed') throw new TypeError('credential finalization is not committed');
-  } else if (method === 'session.create') {
+  } else if (method === 'session.create' || method === 'session.fork' || method === 'session.compact') {
     controlWireRecord(data, ['method', 'snapshot']); sessionSnapshot(data.snapshot);
+  } else if (method === 'session.list') {
+    controlWireRecord(data, ['method', 'sessions'], ['nextCursor']);
+    const sessions = array(data.sessions).map(decodeSessionSummary);
+    if (sessions.length > 100 || new Set(sessions.map(session => session.id)).size !== sessions.length) throw new TypeError('Session list contains too many or repeated entries');
+    for (let index = 1; index < sessions.length; index++) {
+      const before = sessions[index - 1]!, after = sessions[index]!;
+      if (before.createdAt > after.createdAt || before.createdAt === after.createdAt && Buffer.compare(Buffer.from(before.id), Buffer.from(after.id)) >= 0) throw new TypeError('Session list order differs');
+    }
+    if (Object.hasOwn(data, 'nextCursor')) controlWireText(data.nextCursor, 512);
+  } else if (method === 'session.handoff.create') {
+    controlWireRecord(data, ['method', 'json', 'markdown']);
+    decodeWireArtifactDescriptor(data.json); decodeWireArtifactDescriptor(data.markdown);
   } else if (method === 'authorization.create' || method === 'authorization.revoke') {
     controlWireRecord(data, ['method', 'grant', ...(method === 'authorization.revoke' ? ['disposition'] : [])]); decodeWireGrantSummary(data.grant);
     if (method === 'authorization.revoke' && !['revoked', 'already_revoked', 'already_consumed'].includes(data.disposition as string))
@@ -414,7 +462,7 @@ export function decodeInstalledControlResponse<M extends InstalledControlMethod>
       throw new TypeError('expired cursor refusal differs from requested interval');
     if (error.code === 'REVISION_CONFLICT') {
       const conflict = error.conflict;
-      if (request.method === 'run.submit' && conflict.resourceKind === 'session') {
+      if ((request.method === 'run.submit' || request.method === 'session.fork' || request.method === 'session.compact' || request.method === 'session.handoff.create') && conflict.resourceKind === 'session') {
         if (conflict.currentSnapshot.session.id !== request.sessionId) throw new TypeError('revision conflict differs from requested Session');
       } else if ((request.method === 'run.cancel' || request.method === 'run.approve' || request.method === 'run.reconcile') && conflict.resourceKind === 'run') {
         if (conflict.currentSnapshot.run.id !== request.runId) throw new TypeError('revision conflict differs from requested Run');
@@ -436,6 +484,15 @@ export function decodeInstalledControlResponse<M extends InstalledControlMethod>
   } else if (request.method === 'credential.finalize' && data.method === request.method) {
     if (data.operation.operationId !== request.operationId || data.operation.requestId !== request.requestId || data.operation.attempt !== request.attempt || data.operation.requestDigest !== request.commandDigest)
       throw new TypeError('credential finalization differs from original operation');
+  } else if (request.method === 'session.fork' && data.method === request.method) {
+    if (data.snapshot.session.parentSessionId !== request.sessionId || data.snapshot.session.forkedThroughItemSeq !== request.throughItemSeq ||
+        data.snapshot.session.contextRevision !== 1 || data.snapshot.session.latestItemSeq !== request.throughItemSeq || data.snapshot.session.id === request.sessionId)
+      throw new TypeError('forked Session differs from its original source prefix');
+  } else if (request.method === 'session.compact' && data.method === request.method) {
+    if (data.snapshot.session.id !== request.sessionId || data.snapshot.session.contextRevision !== request.expectedContextRevision + 1 || data.snapshot.session.latestItemSeq <= request.throughItemSeq)
+      throw new TypeError('compacted Session differs from its original revision');
+  } else if (request.method === 'session.list' && data.method === request.method) {
+    if (data.sessions.length > (request.limit ?? 50) || data.nextCursor !== undefined && data.sessions.length !== (request.limit ?? 50)) throw new TypeError('Session list exceeds requested page');
   } else if (request.method === 'run.submit' && data.method === request.method) {
     if (data.snapshot.operation !== 'agent' || data.snapshot.run.sessionId !== request.sessionId) throw new TypeError('submitted Run differs from Session');
   } else if (request.method === 'run.apply' && data.method === request.method) {
@@ -492,9 +549,9 @@ function decodeInstalledControlError(value: unknown, method: InstalledControlMet
   if (error.schemaVersion !== 1) throw new TypeError('invalid control error schema');
   controlWireText(error.messageCode);
   if (code === 'REVISION_CONFLICT') {
-    if (error.retryable !== true || (method !== 'run.submit' && method !== 'run.cancel' && method !== 'run.approve' && method !== 'run.reconcile')) throw new TypeError('unexpected revision conflict');
+    if (error.retryable !== true || !['run.submit', 'run.cancel', 'run.approve', 'run.reconcile', 'session.fork', 'session.compact', 'session.handoff.create'].includes(method)) throw new TypeError('unexpected revision conflict');
     const conflict = controlWireRecord(error.conflict, ['resourceKind', 'currentSnapshot']), revision = controlWireInteger(error.currentRevision, 1);
-    if (conflict.resourceKind === 'session' && method === 'run.submit') {
+    if (conflict.resourceKind === 'session' && ['run.submit', 'session.fork', 'session.compact', 'session.handoff.create'].includes(method)) {
       if (sessionSnapshot(conflict.currentSnapshot).session.contextRevision !== revision) throw new TypeError('Session conflict revision differs');
     } else if (conflict.resourceKind === 'run' && (method === 'run.cancel' || method === 'run.approve' || method === 'run.reconcile')) {
       if (runSnapshot(conflict.currentSnapshot).run.revision !== revision) throw new TypeError('Run conflict revision differs');
@@ -509,7 +566,11 @@ function decodeInstalledControlError(value: unknown, method: InstalledControlMet
     else if (error.retryable === false && ['failed', 'cancelled'].includes(error.status as string)) controlWireRef(error.terminalDetailRef);
     else throw new TypeError('invalid result refusal lifecycle');
   } else if (code === 'RATE_LIMITED' || code === 'RESOURCE_EXHAUSTED') {
-    if (error.retryable !== true || error.retryAfterMs !== 1000 || (method !== 'run.submit' &&
+    if (method === 'session.list' && code === 'RATE_LIMITED') {
+      if (error.retryable !== true || error.retryAfterMs !== 1000 || error.messageCode !== 'control.list_cut_busy') throw new TypeError('invalid list preparation backpressure');
+    } else if (method === 'session.list' && code === 'RESOURCE_EXHAUSTED') {
+      if (error.retryable !== true || error.retryAfterMs !== 1000 || error.resourceKind !== 'state_storage' || error.messageCode !== 'control.list_cut_capacity') throw new TypeError('invalid list cut capacity refusal');
+    } else if (error.retryable !== true || error.retryAfterMs !== 1000 || (method !== 'run.submit' &&
         !(method === 'run.apply' && code === 'RESOURCE_EXHAUSTED') && (code !== 'RATE_LIMITED' || method !== 'credential.finalize')) ||
         (code === 'RATE_LIMITED' ? error.messageCode !== 'run.credential_scope_busy' : error.messageCode !== 'run.queue_capacity' || error.resourceKind !== 'run_queue'))
       throw new TypeError('invalid fixed capacity refusal');

@@ -8,6 +8,7 @@ struct worker_reservation {
     struct stat parent, identity;
     char name[44];
     worker_reservation_borrow *borrows;
+    preparation_git_input *preparation_inputs;
     worker_reservation *next;
 };
 struct worker_reservation_borrow {
@@ -22,24 +23,28 @@ static void reservation_close_descriptor(state_lock *lock, int *slot) {
     int fd = *slot; *slot = -1;
     if (fd >= 0 && close(fd) < 0) lock->worker_reservation_error = errno;
 }
-static void close_worker_reservation(worker_reservation *reservation) {
+static int close_worker_reservation(worker_reservation *reservation) {
+    int preparation = close_reservation_preparation_inputs(reservation);
+    if (preparation) return preparation;
     reservation->closed = 1;
     for (worker_reservation_borrow *borrow = reservation->borrows; borrow; borrow = borrow->next)
         reservation_close_descriptor(reservation->lock, &borrow->fd);
     reservation_close_descriptor(reservation->lock, &reservation->fd);
     reservation_close_descriptor(reservation->lock, &reservation->parent_fd);
+    return reservation->lock->worker_reservation_error;
 }
 static int close_lock_worker_reservations(state_lock *lock) {
+    int failed = 0;
     for (worker_reservation *reservation = lock->worker_reservations; reservation; reservation = reservation->next)
-        close_worker_reservation(reservation);
-    return lock->worker_reservation_error;
+        if (close_worker_reservation(reservation)) failed = 1;
+    return failed || lock->worker_reservation_error;
 }
 static napi_value reservation_retirement_failure(napi_env env) {
     napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "worker reservation descriptors did not retire; StateOwner remains held");
     return NULL;
 }
 static void free_worker_reservation(napi_env env, worker_reservation *reservation) {
-    if (!reservation->finalized || reservation->borrows) return;
+    if (!reservation->finalized || reservation->borrows || reservation->preparation_inputs) return;
     state_lock *lock = reservation->lock; napi_ref ref = reservation->lock_ref;
     worker_reservation **link = &lock->worker_reservations;
     while (*link && *link != reservation) link = &(*link)->next;
@@ -83,8 +88,7 @@ static napi_value worker_reservation_assert(napi_env env, napi_callback_info inf
 static napi_value worker_reservation_close(napi_env env, napi_callback_info info) {
     worker_reservation *reservation = unwrap_worker_reservation(env, info); napi_value result;
     if (!reservation) return NULL;
-    close_worker_reservation(reservation);
-    if (reservation->lock->worker_reservation_error) return reservation_retirement_failure(env);
+    if (close_worker_reservation(reservation)) return reservation_retirement_failure(env);
     return napi_get_undefined(env, &result) == napi_ok ? result : NULL;
 }
 static worker_reservation_borrow *unwrap_worker_reservation_borrow(napi_env env, napi_callback_info info) {
@@ -211,6 +215,8 @@ static napi_value worker_reservation_open(napi_env env, napi_callback_info info,
     const napi_property_descriptor methods[] = {
         {"assertHeld", NULL, worker_reservation_assert, NULL, NULL, NULL, napi_default, NULL},
         {"borrow", NULL, worker_reservation_borrow_handle, NULL, NULL, NULL, napi_default, NULL},
+        {"borrowPreparingGit", NULL, worker_reservation_preparation_input, NULL, NULL, NULL, napi_default, NULL},
+        {"borrowPreparingGitCleanup", NULL, worker_reservation_retained_preparation_input, NULL, NULL, NULL, napi_default, NULL},
         {"close", NULL, worker_reservation_close, NULL, NULL, NULL, napi_default, NULL}
     };
     error = "cannot mint worker reservation";

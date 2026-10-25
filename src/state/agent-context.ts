@@ -15,6 +15,7 @@ import { decodeAdmittedContext, decodeRunObjective, decodeSessionProjection } fr
 import { KernelStorageError } from './errors.js';
 import { decodeRepairDiagnosticItem, decodeVerificationReceipt, decodeVerifierRepairDiagnostic,
   decodeVerifierRepairModelContent, verifierRepairModelContent } from './verifier-artifacts.js';
+import { decodeSessionContext, readSessionContextEntries, type SessionCompactionIndex } from './session-context.js';
 
 export async function readCanonicalArtifact<T>(artifacts: Pick<ArtifactCatalog, 'readCanonical'>, ref: string): Promise<T> {
   const value = await artifacts.readCanonical<T>(ref);
@@ -81,6 +82,7 @@ export async function loadInstructionText(artifacts: ArtifactCatalog, assembly: 
 type ContextProjectionInput = {
   artifacts: ArtifactCatalog; run: Run; spec: RunSpec; assembly: RunAssemblyV1;
   context: ContextManifest; systemInstruction: string; tools: RunAssemblyToolAuthority[];
+  sessionCompactionIndex?: (projection: SessionContextProjection) => SessionCompactionIndex;
 };
 
 /** Model-visible context, shared by request projection and resource-stop recovery. */
@@ -95,25 +97,12 @@ export async function readModelContext(input: ContextProjectionInput): Promise<P
   };
   messages.push({ index: 0, role: 'system', sourceKind: 'assembly_instructions', sourceId: spec.assemblyRef, contentUtf8: input.systemInstruction });
   const admitted = decodeAdmittedContext(await readCanonicalArtifact(artifacts, spec.admittedContextRef));
-  const session: SessionContextProjection = decodeSessionProjection(await readCanonicalArtifact(artifacts, admitted.sessionProjectionRef));
+  const session = decodeSessionContext(await readCanonicalArtifact(artifacts, admitted.sessionProjectionRef));
   if (session.sessionId !== admitted.sessionId || session.contextRevision !== admitted.sessionContextRevision ||
-      session.throughItemSeq !== admitted.throughSessionItemSeq) throw new TypeError('admitted Session context mismatch');
-  for (const segment of session.segments) {
-    if (segment.kind === 'summary') user('session_summary', segment.compactionItemId,
-      (await readText(artifacts, segment.summaryRef, segment.summaryDigest)).utf8);
-    else if (segment.kind === 'raw') for (const item of segment.items) {
-      if (item.kind !== 'run_terminal') throw new TypeError('legacy Session items cannot enter the model context');
-      const terminal = await readCanonicalArtifact<{
-        format: string; kind: string; runId: string; operation: string; status: string; terminalReason: string;
-        resultRef?: string; summaryRef?: string;
-      }>(artifacts, item.payloadRef);
-      if (terminal.format !== 'cliq-session-run-terminal-v1' || terminal.kind !== 'run_terminal') throw new TypeError('invalid terminal Session item');
-      user('session_terminal', item.itemId, canonicalJsonBytes({ kind: terminal.kind, runId: terminal.runId,
-        operation: terminal.operation, status: terminal.status, terminalReason: terminal.terminalReason,
-        ...(terminal.resultRef === undefined ? {} : { resultRef: terminal.resultRef }),
-        ...(terminal.summaryRef === undefined ? {} : { summaryRef: terminal.summaryRef }) }).toString('utf8'));
-    }
-  }
+      session.throughItemSeq !== admitted.throughSessionItemSeq || session.sessionId !== run.sessionId) throw new TypeError('admitted Session context mismatch');
+  const index = session.segments.some(segment => segment.kind === 'summary') ? input.sessionCompactionIndex?.(session) : undefined;
+  for (const entry of await readSessionContextEntries(artifacts, session, index))
+    user(entry.sourceKind === 'summary' ? 'session_summary' : 'session_terminal', entry.sourceItemId, entry.contentUtf8);
   for (const ref of admitted.parentContextRefs) user('parent_context', ref, (await readText(artifacts, ref)).utf8);
   for (const ref of admitted.additionalArtifactRefs) user('additional_context', ref, (await readText(artifacts, ref)).utf8);
   user('run_objective', spec.objectiveRef, decodeRunObjective(await readCanonicalArtifact(artifacts, spec.objectiveRef)).utf8);

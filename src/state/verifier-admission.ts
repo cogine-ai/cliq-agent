@@ -318,25 +318,22 @@ export async function prepareInstalledVerifierAssembly(driver: SqliteDriver, art
   const metadata = await publishVerifierAssembly(artifacts, composed, input.assembly, signal);
   return { spec: composed.spec, specRef: composed.specRef, metadata, resolved };
 }
-export async function prepareVerifierConsumption(artifacts: ArtifactCatalog, prepared: Awaited<ReturnType<typeof prepareVerifierSpec>>,
-  input: { runId: string; admissionIntentDigest: string; admittedAt: string }, signal?: AbortSignal) {
-  signal?.throwIfAborted();
-  const transitions: Array<{ prior: AuthorizationGrantV1; next: AuthorizationGrantV1; artifact: PublishedArtifact }> = [];
-  for (const { grant, creationCommittedAt } of prepared.resolved) {
-    signal?.throwIfAborted();
-    if (grant.state !== 'active' || input.admittedAt < creationCommittedAt || input.admittedAt >= grant.expiresAt)
-      throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');
-    const receipt: AuthorizationConsumptionReceiptV1 = { schemaVersion: 1, grantId: grant.grantId, ownerPrincipalId: grant.ownerPrincipalId,
-      targetDigest: grant.targetDigest, consumer: { kind: 'run_admission', runId: input.runId, admissionIntentDigest: input.admissionIntentDigest },
-      consumedAt: input.admittedAt, receiptDigest: '' };
-    receipt.receiptDigest = digestOmitting(receipt, 'receiptDigest'); decodeAuthorizationConsumptionReceipt(receipt);
-    const artifact = await artifacts.publishCanonical(receipt, 'cliq-authorization-consumption-receipt-v1');
-    signal?.throwIfAborted();
-    const next: AuthorizationGrantV1 = { ...authorizationGrantCore(grant), grantCoreDigest: grant.grantCoreDigest, rowVersion: 2,
-      state: 'consumed', useCount: 1, consumptionReceiptRef: artifact.ref, consumedAt: input.admittedAt, rowDigest: '' };
-    next.rowDigest = digestOmitting(next, 'rowDigest'); decodeAuthorizationGrant(next);
-    transitions.push({ prior: grant, next, artifact });
-  }
+type VerifierConsumer = { runId: string; admissionIntentDigest: string; admittedAt: string };
+function composeVerifierConsumption({ grant, creationCommittedAt }: Awaited<ReturnType<typeof resolveVerifierSpec>>['resolved'][number],
+  input: VerifierConsumer) {
+  if (grant.state !== 'active' || input.admittedAt < creationCommittedAt || input.admittedAt >= grant.expiresAt)
+    throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');
+  const receipt: AuthorizationConsumptionReceiptV1 = { schemaVersion: 1, grantId: grant.grantId, ownerPrincipalId: grant.ownerPrincipalId,
+    targetDigest: grant.targetDigest, consumer: { kind: 'run_admission', runId: input.runId, admissionIntentDigest: input.admissionIntentDigest },
+    consumedAt: input.admittedAt, receiptDigest: '' };
+  receipt.receiptDigest = digestOmitting(receipt, 'receiptDigest'); decodeAuthorizationConsumptionReceipt(receipt);
+  const next: AuthorizationGrantV1 = { ...authorizationGrantCore(grant), grantCoreDigest: grant.grantCoreDigest, rowVersion: 2,
+    state: 'consumed', useCount: 1, consumptionReceiptRef: canonicalSha256(receipt), consumedAt: input.admittedAt, rowDigest: '' };
+  next.rowDigest = digestOmitting(next, 'rowDigest'); decodeAuthorizationGrant(next);
+  return { prior: grant, next, receipt };
+}
+function verifierConsumptionResult(transitions: Array<ReturnType<typeof composeVerifierConsumption> & { artifact: PublishedArtifact }>,
+  input: VerifierConsumer) {
   return { metadata: transitions.map(transition => transition.artifact), refs: transitions.map(transition => transition.artifact.ref),
     commit(connection: SqliteConnection, now: string) {
       for (const { prior, next } of transitions) {
@@ -345,6 +342,56 @@ export async function prepareVerifierConsumption(artifacts: ArtifactCatalog, pre
         consumeOrRevokeAuthorization(connection, prior, next);
       }
     } };
+}
+
+export async function prepareVerifierConsumption(artifacts: ArtifactCatalog, prepared: Awaited<ReturnType<typeof prepareVerifierSpec>>,
+  input: VerifierConsumer, signal?: AbortSignal) {
+  signal?.throwIfAborted();
+  const transitions = [];
+  for (const resolved of prepared.resolved) {
+    signal?.throwIfAborted();
+    const transition = composeVerifierConsumption(resolved, input);
+    const artifact = await artifacts.publishCanonical(transition.receipt, 'cliq-authorization-consumption-receipt-v1');
+    signal?.throwIfAborted();
+    transitions.push({ ...transition, artifact });
+  }
+  return verifierConsumptionResult(transitions, input);
+}
+
+/** Data publication after the fresh resolver, never authorization by an
+ * earlier assembly. The original SQL consumer remains the only transition. */
+async function publishInstalledVerifierAdmission(artifacts: ArtifactCatalog, resolution: Awaited<ReturnType<typeof resolveVerifierSpec>>,
+  consumer: VerifierConsumer, expectedSpecRef: string, signal?: AbortSignal) {
+  const { composed, resolved } = resolution;
+  signal?.throwIfAborted();
+  if (composed.specRef !== expectedSpecRef)
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'verifier spec differs from the authorized public command and environment');
+  if (composed.spec.verifiers.length !== 1 || composed.artifacts.length !== 3 || resolved.length !== 1)
+    throw new TypeError('one verifier requires three artifacts and one original grant');
+  const transition = composeVerifierConsumption(resolved[0]!, consumer), [command, environment, spec] = composed.artifacts;
+  const publications = [command!, environment!, spec!, { value: transition.receipt, format: 'cliq-authorization-consumption-receipt-v1' }];
+  const expected = publications.map(({ value, format }) => ({ ref: canonicalSha256(value), byteLength: canonicalJsonBytes(value).length,
+    mediaType: 'application/json', schemaKind: format }));
+  const published = await artifacts.publishCanonicalFour([
+    { value: command!.value, schemaKind: command!.format }, { value: environment!.value, schemaKind: environment!.format },
+    { value: spec!.value, schemaKind: spec!.format }, { value: transition.receipt, schemaKind: 'cliq-authorization-consumption-receipt-v1' }
+  ]);
+  if (published.length !== 4 || expected.some((wanted, index) => {
+    const actual = published[index];
+    return !actual || actual.ref !== wanted.ref || actual.byteLength !== wanted.byteLength ||
+      actual.mediaType !== wanted.mediaType || actual.schemaKind !== wanted.schemaKind;
+  })) throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed verifier and consumption differ from their original complete bytes');
+  signal?.throwIfAborted();
+  return { preparation: { spec: composed.spec, specRef: composed.specRef, metadata: published.slice(0, 3), resolved },
+    consumption: verifierConsumptionResult([{ ...transition, artifact: published[3] }], consumer) };
+}
+
+/** Installed current admission has its original frozen preparation time.
+ * Generic admission and historical validation retain their original paths. */
+export async function prepareInstalledVerifierAdmission(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
+  runtime: AuthorizationRuntime, input: VerifierPreparationInput, consumer: VerifierConsumer, expectedSpecRef: string, signal?: AbortSignal) {
+  const resolution = await resolveVerifierSpec(driver, artifacts, owner, runtime, input, undefined, signal);
+  return publishInstalledVerifierAdmission(artifacts, resolution, consumer, expectedSpecRef, signal);
 }
 
 /** Reproduce the original frozen admission, never reconstruct lost commands or

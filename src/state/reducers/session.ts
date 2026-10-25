@@ -321,7 +321,7 @@ async function createSessionWithin(
     if (captured.repository !== undefined) {
       const repositoryArtifact = await artifacts.publishCanonical(
         captured.repository,
-        'cliq-repository-identity-v1'
+        captured.repository.format
       );
       published.push(repositoryArtifact);
       workspaceIdentity = {

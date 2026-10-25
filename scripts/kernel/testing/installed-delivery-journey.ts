@@ -7,6 +7,7 @@ import { chown, lstat, readFile, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { canonicalJsonBytes, canonicalSha256 } from '../../../src/kernel/canonical.js';
+import { DEFAULT_SANDBOX_RESOURCES } from '../../../src/kernel/control-submit.js';
 import { sha256Bytes } from '../../../src/kernel/identity.js';
 import { parseJsonStrict } from '../../../src/kernel/json.js';
 import type { StateOwnerRecordV1 } from '../../../src/kernel/types.js';
@@ -20,11 +21,12 @@ import { assertInstalledPublicationStopResult, type InstalledPublicationStopResu
 
 type Response = { protocolVersion: 1; ok: boolean; method?: string; result?: Record<string, any>; error?: Record<string, unknown> };
 type Source = { cut: Record<string, any>; submit: Record<string, unknown>; admission: Response;
-  files: readonly { path: string; before: string; after: string }[]; workspace: string };
+  files: readonly { path: string; before: string; after: string }[]; workspace: string; expectedGit?: true;
+  gitFiles?: ReadonlyMap<string, Readonly<{ bytes: Buffer; identity: Record<string, string> }>> };
 type Admission = { core: Record<string, unknown> & { requestDigest: string }; response: Response; runId: string };
-type DeliveryProgressCase = 'delivery_publish' | 'delivery_merge' | 'delivery_cancel';
+type DeliveryProgressCase = 'delivery_publish' | 'delivery_merge' | 'delivery_cancel' | 'delivery_git';
 type Context = {
-  createSource(kind: 'publish' | 'merge' | 'cancel'): Promise<Source>;
+  createSource(kind: 'publish' | 'merge' | 'cancel' | 'git' | 'git_merge'): Promise<Source>;
   send(request: Record<string, unknown>, timeout?: number): Promise<Response>;
   readRetainedArtifact(ref: string): Promise<Buffer>; downloadPublicArtifact(ref: string): Promise<Buffer>;
   readOwnerHistory(): Promise<readonly StateOwnerRecordV1[]>;
@@ -93,9 +95,22 @@ export async function runInstalledDeliveryCases(context: Context, options: Reado
     assert(canonicalJsonBytes(value).equals(bytes)); return value;
   };
   const apply = async (source: Source) => {
+    let sourceInspectionGrantId: string | undefined;
+    if (source.expectedGit) {
+      const session = await send({ protocolVersion: 1, method: 'session.get', sessionId: source.cut.snapshot.run.sessionId });
+      const workspace = await object(session.snapshot.session.workspaceIdentityRef);
+      assert(workspace.repositoryIdentityRef && workspace.repositoryIdentityDigest);
+      const authorization = await send(request({ protocolVersion: 1, method: 'authorization.create', requestId: context.nextId(), decision: {
+        kind: 'source_git_inspection', purpose: 'source_inspection', target: { sessionId: source.cut.snapshot.run.sessionId,
+          expectedWorkspaceIdentityDigest: workspace.identityDigest, scope: 'in_root_git_metadata_and_objects',
+          recipe: 'cliq-source-git-inspection-v1', retention: 'ephemeral_raw_reachable_only', resourceCeiling: DEFAULT_SANDBOX_RESOURCES } } }), 30000);
+      assert.equal(authorization.grant.state, 'active'); assert.equal(authorization.grant.useCount, 0);
+      assert.equal(authorization.grant.targetKind, 'source_git_inspection'); sourceInspectionGrantId = authorization.grant.grantId;
+    }
     const core = request({ protocolVersion: 1, method: 'run.apply', requestId: context.nextId(),
       admissionKey: randomBytes(32).toString('base64url'), sourceRunId: source.cut.snapshot.run.id,
-      expectedRunResultRef: source.cut.snapshot.run.resultRef, budgets: { wallTimeMs: 300000, toolCalls: 1000 } });
+      expectedRunResultRef: source.cut.snapshot.run.resultRef, budgets: { wallTimeMs: 300000, toolCalls: 1000 },
+      ...(sourceInspectionGrantId ? { sourceInspectionGrantId } : {}) });
     const response = await context.send(core, 30000), result = accepted(response, 'run.apply');
     assert.equal(result.snapshot.operation, 'delivery'); assert.equal(result.snapshot.run.revision, 1);
     assert.notEqual(result.snapshot.run.id, source.cut.snapshot.run.id);
@@ -111,7 +126,7 @@ export async function runInstalledDeliveryCases(context: Context, options: Reado
     ...source.files.map(file => ({ path: file.path, text: file.after })), ...(extra ? [{ path: extra.path, text: extra.text }] : []),
   ];
   const inspect = async (source: Source, expected: readonly { path: string; text: string }[]) => {
-    assert.deepEqual((await readdir(source.workspace)).sort(), expected.map(file => file.path).sort(),
+    assert.deepEqual((await readdir(source.workspace)).sort(), [...expected.map(file => file.path), ...(source.expectedGit ? ['.git', 'hidden.ignored'] : [])].sort(),
       'the actual workspace must contain the complete expected projection, not only the edited known path');
     for (const file of expected) {
       const target = path.join(source.workspace, file.path), info = await lstat(target);
@@ -119,6 +134,16 @@ export async function runInstalledDeliveryCases(context: Context, options: Reado
         info.nlink === 1 && (info.mode & 0o7777) === 0o644);
       assert.equal(await readFile(target, 'utf8'), file.text);
     }
+    if (source.expectedGit) {
+      assert(source.gitFiles && source.gitFiles.size === 6);
+      for (const [name, original] of source.gitFiles) {
+        assert.deepEqual(await readFile(path.join(source.workspace, name)), original.bytes);
+        const current = await lstat(path.join(source.workspace, name), { bigint: true });
+        assert(current.isFile() && !current.isSymbolicLink() && current.nlink === 1n);
+        for (const field of ['dev', 'ino', 'size', 'uid', 'gid', 'mode', 'nlink', 'mtimeNs', 'ctimeNs'] as const)
+          assert.equal(current[field].toString(), original.identity[field], 'Git metadata and ignored bytes must preserve their original inode and content');
+      }
+    } else assert.equal(source.gitFiles, undefined);
   };
   type Completed = { source: Source; admitted: Awaited<ReturnType<typeof apply>>; cut: Record<string, any>;
     sessionCut: Record<string, any>; kind: 'publish' | 'no_op' | 'merge'; expected: ReturnType<typeof files>;
@@ -155,10 +180,11 @@ export async function runInstalledDeliveryCases(context: Context, options: Reado
     return replies;
   };
   const finish = async (source: Source, admitted: Admission, kind: Completed['kind'], expected: Completed['expected'], terminalBy?: number) => {
-    const cut = await terminal(admitted.runId, terminalBy, kind === 'merge' ? 'delivery_merge' : 'delivery_publish'),
+    const cut = await terminal(admitted.runId, terminalBy, source.expectedGit ? 'delivery_git' : kind === 'merge' ? 'delivery_merge' : 'delivery_publish'),
       sessionCut = await send({ protocolVersion: 1, method: 'session.get', sessionId: cut.snapshot.run.sessionId });
     const proof = await assertInstalledDeliveryOutcome({ cut, sessionCut, sourceCut: source.cut, sourceResultRef: source.cut.snapshot.run.resultRef,
-      expectedFiles: expected, kind, readRetainedArtifact: context.readRetainedArtifact, readOwnerHistory: context.readOwnerHistory });
+      expectedFiles: expected, kind, readRetainedArtifact: context.readRetainedArtifact, readOwnerHistory: context.readOwnerHistory,
+      ...(source.expectedGit ? { expectedGit: true as const } : {}) });
     for (const identity of proof.verifierRetirementIdentities) await context.assertVerifierProcessesAbsent(identity);
     const workerCount = await retirements(admitted.runId, proof.publicationWorkerRetirement);
     if (kind === 'no_op') assert.equal(workerCount, 0, 'this inherited noOp must have no recorded WorkerLaunch');
@@ -190,6 +216,17 @@ export async function runInstalledDeliveryCases(context: Context, options: Reado
   const merged = await context.createSource('merge'), note = await addOwnerFile(merged, 'owner-note.txt', 'owned A-only nonconflicting content\n');
   await finish(merged, await apply(merged), 'merge', files(merged, note));
   assert.deepEqual(await metadata(path.join(merged.workspace, note.path)), note.original, 'A-only original inode must be preserved');
+
+  context.mark('delivery_ordinary_git_publish_noop_and_merge');
+  const git = await context.createSource('git'); assert.equal(git.expectedGit, true);
+  await finish(git, await apply(git), 'publish', files(git));
+  const gitNoOpInodes = await Promise.all(files(git).map(file => metadata(path.join(git.workspace, file.path))));
+  await finish(git, await apply(git), 'no_op', files(git));
+  assert.deepEqual(await Promise.all(files(git).map(file => metadata(path.join(git.workspace, file.path)))), gitNoOpInodes);
+  const gitMerge = await context.createSource('git_merge'); assert.equal(gitMerge.expectedGit, true);
+  const gitNote = await addOwnerFile(gitMerge, 'owner-note.txt', 'owned Git A-only nonconflicting content\n');
+  await finish(gitMerge, await apply(gitMerge), 'merge', files(gitMerge, gitNote));
+  assert.deepEqual(await metadata(path.join(gitMerge.workspace, gitNote.path)), gitNote.original);
 
   context.mark('delivery_cancel_after_observed_verifier_claim');
   const cancelledSource = await context.createSource('cancel'), flag = await addOwnerFile(cancelledSource, 'cancel.flag', 'owned cancellation trigger\n');
@@ -235,7 +272,8 @@ export async function runInstalledDeliveryCases(context: Context, options: Reado
       assert.deepEqual(await reads(entry.cut), entry.queries);
       const sessionCut = await send({ protocolVersion: 1, method: 'session.get', sessionId: entry.cut.snapshot.run.sessionId });
       const proof = await assertInstalledDeliveryOutcome({ cut: entry.cut, sessionCut, sourceCut: entry.source.cut, sourceResultRef: entry.source.cut.snapshot.run.resultRef,
-        expectedFiles: entry.expected, kind: entry.kind, readRetainedArtifact: context.readRetainedArtifact, readOwnerHistory: context.readOwnerHistory });
+      expectedFiles: entry.expected, kind: entry.kind, readRetainedArtifact: context.readRetainedArtifact, readOwnerHistory: context.readOwnerHistory,
+        ...(entry.source.expectedGit ? { expectedGit: true as const } : {}) });
       for (const identity of proof.verifierRetirementIdentities) await context.assertVerifierProcessesAbsent(identity);
       await inspect(entry.source, entry.expected);
       await retirements(entry.admitted.runId, proof.publicationWorkerRetirement);
@@ -262,8 +300,8 @@ export async function runInstalledDeliveryCases(context: Context, options: Reado
     const proof = await prove(); await stopped.verify(proof);
     await context.reconnect();
     // Recheck both the extra case and every original core outcome after the
-    // actual owner-2 stop/owner-3 start. Do not turn this into a fourth source
-    // or change the default three successful cases' report cardinality.
+    // actual owner-2 stop/owner-3 start. This extra physical cut reuses its
+    // original source without adding model calls or changing core cases.
     completed.push(entry);
     try { await revalidate(); await stopped.verify(await prove()); }
     finally { assert.equal(completed.pop(), entry); }
@@ -279,7 +317,7 @@ export async function runInstalledDeliveryCases(context: Context, options: Reado
     const { verifierRetirementIdentities, publicationWorkerRetirement, ...proof } = entry.proof;
     return { ...proof, verifierRetirementCount: verifierRetirementIdentities.length };
   }),
-    sourceRunsQualifiedByOriginalFullVerifierReader: 3, actualModelPostsOnlyForSource: 6,
+    sourceRunsQualifiedByOriginalFullVerifierReader: 5, actualModelPostsOnlyForSource: 10,
     nonwaitingApproveRefusedWithoutMutation: true, noOpOriginalInodesUnchanged: true, aOnlyInodePreserved: true,
     cancelledAfterObservedVerifierClaim: true, cancelledWithoutPublication: true, cancellationSettledExactlyOnce: true,
     verifierReleaseBeforeCancelObserved: false, preciseInFlightVerifierCancelQualified: false,

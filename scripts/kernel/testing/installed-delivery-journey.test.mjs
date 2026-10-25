@@ -292,7 +292,7 @@ test('source and Delivery reuse one complete verifier-retirement graph and indep
   const shared = source('./installed-verifier-evidence.ts'), fixture = source('./installed-node-journey.ts');
   assert(sourceVerifier.includes('await assertInstalledVerifierRetirement('));
   assert(delivery.includes('await assertInstalledVerifierRetirement('));
-  assert(delivery.includes('await assertInstalledDeliveryPublication({ cut, readRetainedArtifact: bytes, readOwnerHistory: input.readOwnerHistory })'));
+  assert(delivery.includes('await assertInstalledDeliveryPublication({ cut, readRetainedArtifact: bytes, readOwnerHistory: input.readOwnerHistory,'));
   for (const edge of ['launch.parentWorkerContainmentRef', 'retirement.snapshotEvidenceRef', 'retirement.parentRetirementEvidenceRef',
     'retirement.deathEvidenceRef', 'retirement.containmentRef', 'snapshot.quiescenceEvidenceRef', 'validateMatchingWorkerDeath',
     "role: 'namespace_init'", "role: 'monitor'", "role: 'subreaper'"]) assert(shared.includes(edge));
@@ -311,12 +311,12 @@ test('Delivery connects the actual handoff seal to readonly SQL retirement and i
   assert(fixture.includes('selected.launchIds.includes(publicationRetirement.launchId)'));
 });
 
-test('the cleanup crash is an additional strict physical subcase, never a fourth source or a timing pause', () => {
+test('the cleanup crash is an additional strict physical subcase, never another source or a timing pause', () => {
   const fixture = source('./installed-node-journey.ts'), delivery = source('./installed-delivery-journey.ts'),
     observer = source('./publication-cleanup-crash-observer.c'), shell = source('../qualify-systemd-user.sh');
   assert(delivery.includes('await context.cleanupCrash(first)'));
-  assert.equal((delivery.match(/await context.createSource\(/gu) ?? []).length, 3);
-  assert(fixture.includes('assert.equal(postCount, 6)')); assert(fixture.includes('assert.equal(originalPublicResultBytes.size, 6)'));
+  assert.equal((delivery.match(/await context.createSource\(/gu) ?? []).length, 5);
+  assert(fixture.includes('assert.equal(postCount, 10)')); assert(fixture.includes('assert.equal(originalPublicResultBytes.size, 10)'));
   assert(fixture.includes('assert.equal(crash.originalReceiptCommitted, false'));
   assert(fixture.includes('assert.deepEqual(crash.journal.slice(0, 2), claimed.journal)'));
   assert(fixture.includes('joinedAt <= proof.probeStartedAt'));

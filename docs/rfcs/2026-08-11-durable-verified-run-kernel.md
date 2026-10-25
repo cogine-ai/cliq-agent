@@ -250,8 +250,9 @@ registers a partial channel. No authentication or shutdown deadline changes.
 Installed admission with exactly one verifier may reuse that same fixed-four
 CAS phase batch for its command, environment, verifier specification and Run
 assembly, in that order. Their canonical references are composition data,
-not evidence of completed publication. The sandbox profile is still published
-first. Its complete independent read and all original toolchain, identity,
+not evidence of completed publication. The sandbox profile is fully published
+first, either individually or in the exact model-material quartet below.
+Its complete independent read and all original toolchain, identity,
 authorization and resource checks retain their original relative order and
 must finish before the batch; the policy is still published afterward.
 Zero or multiple verifiers retain their ordinary publication path, without
@@ -271,13 +272,35 @@ The same four-stage CAS mechanism may also publish only these fixed admission
 data closures: `[original control request, source sandbox profile, source
 inspection target]`, `[retirement inspector identity, source retirement
 evidence]`, and, iff there is exactly one model credential binding,
-`[registered endpoint, credential binding, model capability evidence]`.
-The fresh final-admission single-verifier path may likewise publish the fixed
-`[command, environment, verifier specification]` triple. It retains its fresh
-original resolver, final transaction and grant consumption; all three members
-are published and completely verified again even when their refs already
-exist. Earlier assembly data is not reusable authorization, and historical
-reconstruction never publishes this group.
+`[registered endpoint, credential binding, model capability evidence, installed
+sandbox profile]`. The fourth member is the closed fixed recipe over the
+already-normalized resource request, not a permission or execution decision.
+The original endpoint/binding/catalog checks precede that quartet; all four
+files are durable, independently rehashed and joined before `materialFor`,
+complete RunAssembly validation and tool-runtime authority verification.
+The later complete profile read, fresh verifier resolution, policy publication
+and final runtime/channel/owner checks retain their relative order. Zero or
+multiple bindings keep their original ordinary publication and later sandbox
+publication, without padding.
+The fresh final-admission single-verifier path retains its original
+`[command, environment, verifier specification]` triple outside installed
+admission. Installed admission may instead publish exactly `[command,
+environment, verifier specification, original authorization consumption
+receipt]` after its complete fresh resolver and exact expected-spec check.
+The receipt binds the original grant, already determined Run id and admission
+intent, and installed preparation time; its publication consumes no authority.
+The sole final admission transaction still rereads the exact active grant and
+checks its original creation/expiry interval against actual fresh commit time,
+alongside the original owner, Session and authenticated-frame checks, before
+consuming it. Ordinary admission does not move its canonical-time sample, and
+zero/multiple verifiers keep their original path. All original bytes are
+published and completely verified again even when their refs already exist.
+Earlier assembly data is not reusable authorization; historical reconstruction
+never publishes these groups. Each quartet preserves the same four durability
+stages, every file sync and complete readback, exact slot descriptors, durable
+failure cleanup, all-issued join and retirement-failure precedence. This allows
+additional valid data-only orphans, not serial-order equivalence, an atomic
+namespace transaction, a dummy fourth member or a wider acceptance deadline.
 Installed final Run admission may also publish these two fixed four-member
 data groups: `[original public request core, Run objective, admitted context,
 initial workspace state]`, then `[Run specification, initial context manifest,
@@ -479,6 +502,10 @@ The canonical root path is a locator, not authority: every capture, authorizatio
 Legacy import attempts the same descriptor-held construction. If the recorded root is absent, moved, on an unsupported platform, or cannot prove identity, the importer creates only `kind='legacy_unavailable'`; its digest uses the same omission rule and its path is retained solely for display/audit. That Session remains readable, compactable, exportable, and forkable for context, but neither it nor its forks may admit a Run or `run.apply`; the user creates a new live Session to execute. Import never fabricates device, repository, or executable identity and does not fail unrelated Session migration merely because an old root disappeared.
 
 The logical Session stream is immutable and contiguous by sequence; a physical child Session may inherit its prefix rather than copy rows. Only context projection/revision/name/timestamps are mutable; fork lineage and workspace identity never change. `contextProjectionRef` resolves to the exact versioned shape above and must match Session id/revision/latest sequence. Segments are ordered, nonoverlapping, and cover every sequence `1..throughItemSeq`: a raw segment contains exactly one source-Session identity/payload tuple for every sequence in its range; a summary binds the source range digest and immutable `SessionCompactionItem`/summary; an excluded-control segment binds non-model-visible history without projecting it. Retained ids exist in the covered source range and are projected after the summary in stable item-sequence order. Every item id/kind/payload ref is checked against either this Session's row or the exact immutable ancestor lineage reachable through `parentSessionId/forkedThroughItemSeq`; an inherited entry's sequence may not exceed any lineage fork cursor. `sourceItemsDigest` is over ordered logical `{itemSeq,kind,payloadRef}` tuples, deliberately independent of physical owner/item id, so a forked view preserves it. `projectionDigest` is SHA-256 over the RFC 8785/JCS object with that member omitted.
+
+A fork ending at a summary may exclude the later compaction control item from its logical stream. That summary still resolves its exact `compactionItemId` through the original committed immutable item index and immutable Session lineage/workspace association. This metadata is justification only: it cannot enter the child's raw/model stream or extend its cursor. Verification reads the full original `previousProjectionRef`, exact source range and source Session/item tuples, summary and retained ids; equal payload bytes from an unrelated Session cannot substitute. An admitted Run reads its original frozen projection and this original immutable graph plus committed immutable index. It never substitutes today's Session projection, revision or permission. Empty/raw-only admitted projections continue to require only their retained CAS graph.
+
+Session first-response replay independently audits the original retained channel and current owner/frame/lifetime. Fork responses bind the original admission intent/control link, deterministic child id, immutable lineage/workspace/creation fields, revision one and complete frozen prefix. Compaction responses bind the exact original request, deterministic immutable compaction row, normalized summary/retained range, previous projection and deterministically reconstructed replacement projection. A different valid same-method response is not interchangeable. Later compaction also cannot make a terminal Run's history unreadable: the atomic terminal item and original exact one-item raw segment remain provable through the full immutable compaction graph even when current model visibility is a summary.
 
 Kernel Cut deliberately rejects ambiguous projection surgery. `session.compact` requires `fromItemSeq` and `throughItemSeq` to equal whole current segment boundaries, requires every selected segment to be `raw`, and requires retained ids to be unique logical source items inside that exact range; any summary, `excluded_control`, straddling, nested, or recompaction range returns `INVALID_REQUEST`. The public `summaryMarkdown` is normalized to NFC, rejects NUL/unpaired surrogates, and publishes exact `ModelTextV1` with UTF-8 bytes in `1..262144`; `summaryRef` names it and `summaryDigest` equals its `textDigest` in both the item and projection segment. It publishes summary/item/new-projection artifacts first and atomically appends one child-owned `SessionCompactionItem` at `latestItemSeq+1`, replaces the projection, increments `contextRevision`, and updates `latestItemSeq`. The new compaction item itself is always represented by an exact one-item `excluded_control` segment whose source digest binds its `{itemSeq,kind,payloadRef}` tuple; it is never model-visible or ambiguously raw. `session.fork throughItemSeq` must be zero or the `throughItemSeq` of a current segment; a cursor inside a summary/raw/control segment is rejected rather than re-expanded. One idempotent transaction creates the child with `parentSessionId`, `forkedThroughItemSeq`, `contextRevision=1`, and `latestItemSeq=throughItemSeq`, plus a new projection whose prefix entries keep exact source Session/item ids; it clones no item rows. The child's first local append uses `throughItemSeq+1`. Subsequent lookup validates the immutable ancestor chain, and a parent later append/compaction cannot enter the frozen child prefix. Legacy item kinds are retained for inspect/export only and must occur exclusively in `excluded_control` segments; they are never decoded as model context. A later RFC may add deterministic re-expansion/recompaction. Session contains no status, lease, wait, budget, worker, Journal, workspace generation, or Run frontier field.
 
@@ -4509,7 +4536,7 @@ Workspace entries use `cliq-exact-path-v1`, are strictly byte-sorted and unique,
 
 Every Git `indexRef|gitIndexRef|capturedIndexRef|observedIndexRef` in this RFC decodes only exact `GitIndexSnapshotV1`; a raw `.git/index` blob is never directly used as an authority ref. `snapshotDigest = SHA-256(JCS(snapshot with snapshotDigest omitted))`; `canonicalIndexBytesDigest === canonicalIndexBytesRef` is SHA-256 of the exact canonical Git-index bytes and `canonicalIndexByteCount` is their positive safe-integer length. Descriptor-held input accepts Git index version 2, 3, or 4 only after verifying the object-format checksum and complete parse. It rejects unmerged stages, gitlinks, intent-to-add, any skip-worktree bit, split/sparse index, unknown mandatory extensions, path escape/duplicate/non-NFC/NUL, invalid mode/object id, or missing referenced objects. Optional accelerator extensions are discarded. Fixed `cliq-git-index-normalize-v1` writes one version-2 index containing exactly the byte-sorted stage-0 entries shown, with every `skipWorktree` literal false, no extended flags, zeroed stat fields, the v2 NUL-terminated path and 8-byte entry padding rules, the declared object-format checksum, and no extension; reparsing those bytes must reproduce the artifact. Version-4 prefix compression/varint encoding is accepted only by the input parser and is never emitted by the canonical v2 writer. `indexTreeObjectId` is the fixed Git tree-object construction over those entries and nested directories. Thus host Git version, stat cache, fsmonitor/untracked cache, extension order, and source raw bytes cannot change tracked classification or recovery.
 
-SourceManifest and SourceInclude classification index refs rehash the same admitted snapshot, their repository identity and `indexTreeObjectId|gitIndexTreeObjectId` equal its members, and tracked classification is an all-and-only lookup in its entries. `PrivateGitStateManifest.indexRef` names the snapshot whose canonical bytes are written to its independent `.git/index`; its HEAD/refs and object format agree. `PublicationProofV1(kind='git_index_unchanged')` is a closed repository XOR: non-Git forbids all four refs/digests, while Git requires both snapshots, each digest equals the decoded `snapshotDigest`, and success requires identical snapshot refs/digests. A changed semantic entry or tree is not “unchanged” merely because a raw index file happened to retain an inode or timestamp.
+The original SourceManifest B, SourceProjection.classificationIndexRef and SourceInclude classification refs rehash the same admitted snapshot, their repository identity and original `indexTreeObjectId|gitIndexTreeObjectId` equal its members, and tracked classification is an all-and-only lookup in its entries. A later private Checkpoint and delivery A retain their own current metadata index without replacing that original projection index. `PrivateGitStateManifest.indexRef` names the snapshot whose canonical bytes are written to its independent `.git/index`; its HEAD/refs and object format agree. `PublicationProofV1(kind='git_index_unchanged')` is a closed repository XOR: non-Git forbids all four refs/digests, while Git requires both snapshots, each digest equals the decoded `snapshotDigest`, and success requires identical snapshot refs/digests. A changed semantic entry or tree is not “unchanged” merely because a raw index file happened to retain an inode or timestamp.
 
 Git object storage is equally closed. Every `GitObjectPackV1` raw pack/index ref is declared respectively as complete Git pack and pack-index-v2 bytes; the SHA-256 digest equals its ArtifactRef, byte counts are exact, the pack trailer uses the declared Git object format, and fixed trusted `index-pack` validation recomputes the trailer, object count, unique byte-sorted object-id list, per-object content hash, delta closure, and exact deterministic v2 index bytes. `packDigest` omits itself. `GitObjectClosureV1.closureDigest` omits itself; pack tuples are unique and byte-sorted by trailer hash, rehash every pack artifact, and `reachableObjectIds` is the unique byte-sorted all-and-only graph walk from private HEAD, refs, and index entries through commits/trees/tags/blobs. The disjoint union of every decoded pack's `objectIds` equals `reachableObjectIds` exactly: every reachable object occurs in exactly one retained pack, and no unreachable, deleted, or otherwise extra object is retained. A Git `PrivateGitStateManifest` uses that one closure ref/digest instead of an untyped pack list. `SanitizedGitConfigV1.configDigest` and `PrivateGitStateManifest.manifestDigest` each omit themselves under JCS; the manifest's config and object-closure pairs rehash their exact artifacts. The config is a closed allowlist containing only the displayed non-executable repository/object-format booleans/literals. Every other Git key is absent, including hooks, remotes, credentials, includes, helpers, aliases, pagers, filters, attributes drivers, diff/merge drivers, `core.fsmonitor`, `core.sshCommand`, worktree paths, and environment-driven config. Fixed trusted startup code supplies private-generation paths and disables system/global/environment config; it never copies repository/user config. A non-Git state forbids the private-Git manifest.
 
@@ -4925,7 +4952,10 @@ no file can be required to contain its own complete-byte digest.
 `run.submit` may need trusted Git inspection before a Run or its initial
 Checkpoint exists. This work has the closed `source_inspection` owner below,
 not a fictional Run, an MCP admin probe, or a general process executor. The
-public request/response schemas and admission-key semantics are unchanged.
+original response and admission-key semantics are unchanged. Fresh Git input
+adds only the closed optional `sourceInspectionGrantId` and
+`ignoreReadGrantIds` request selections; no internal ref or native flag is wire
+input.
 One internal `source_inspection_attempts` table owns the whole capture,
 including partial input, the Git process if needed, and final worktree capture:
 
@@ -4975,6 +5005,31 @@ type SourceInspectionInputV1 = {
   inputDigest: string
 }
 
+type SourceInspectionTargetV2 = Omit<SourceInspectionTargetV1, 'schemaVersion' | 'format'> & {
+  schemaVersion: 2
+  format: 'cliq-source-inspection-target-v2'
+  inspectionGrantId: string
+  inspectionReceiptRef: ArtifactRef
+  inspectionReceiptDigest: string
+  ignoreReadConsents: Array<{ grantId: string; receiptRef: ArtifactRef; receiptDigest: string }>
+}
+
+type SourceInspectionInputV2 = {
+  schemaVersion: 2
+  format: 'cliq-source-inspection-input-v2'
+  inspectionId: string
+  targetRef: ArtifactRef
+  targetDigest: string
+  repositoryIdentityDigest: string
+  inspectionGrantId: string
+  inspectionReceiptRef: ArtifactRef
+  inspectionReceiptDigest: string
+  recipe: 'cliq-source-git-inspection-v1'
+  snapshotPolicy: 'ephemeral_native_sealed_shards'
+  resources: SandboxResourceSpec
+  inputDigest: string
+}
+
 type SourceInspectionPlanV1 = {
   launchNonceDigest: string
   containmentPlanRef: ArtifactRef
@@ -5002,6 +5057,22 @@ type SourceInspectionPlanV1 = {
       }
 }
 
+type SourceInspectionProcessIdentityV1 = Readonly<{
+  pid: number; namespaceInitPid: number; processStartToken: string; namespaceInitStartToken: string;
+  cgroupId: string; pidNamespaceId: string; cgroupPopulated: number; remainingTrackedDescendants: number;
+  namespaceInitDeadAndReaped: number; observedAtMs: number;
+}>;
+type SourceInspectionNativeRetirementV1 = Readonly<{
+  observedAtMs: number; inspectionId: string; stagingNonceDigest: string; targetRef: string; inputIntentRef: string;
+  reserved: 0 | 1; blocked: 0 | 1; released: 0 | 1; continued: 0 | 1;
+  origin: 'original_owner_joined' | 'original_birth_current_checker' | 'original_birth_registered_absent_checker'; lastBirthKind: 0 | 2 | 4 | 5 | 6 | 7 | 8 | 9 | 11 | 12;
+  originalControllerPid: number; originalControllerStartToken: string;
+  cgroupDeviceId: string | null; cgroupId: string | null; launchNonceDigest: string | null;
+  containmentPlanRef: string | null; sandboxLaunchRef: string | null; sandboxLaunchDigest: string | null;
+  containment: SourceInspectionProcessIdentityV1 | null;
+}> & (Readonly<{ snapshotDigest?: never; byteCount?: never; entryCount?: never; shardCount?: never }> |
+  Readonly<{ snapshotDigest: string; byteCount: number; entryCount: number; shardCount: number }>);
+
 type SourceInspectionRetirementEvidenceV1 = {
   schemaVersion: 1
   format: 'cliq-source-inspection-retirement-v1'
@@ -5013,13 +5084,32 @@ type SourceInspectionRetirementEvidenceV1 = {
   captureOwnerClosure:
     | { kind: 'local_resources_joined'; stateOwnerEpoch: number; supervisorInstanceId: string }
     | { kind: 'owning_process_dead'; stateOwnerAcquisitionEvidenceRef: ArtifactRef }
-  stagingObservation: 'exact_reserved_root_absent'
+  stagingObservation: 'exact_reserved_root_absent' | 'registered_reserved_root_absent'
   processClosure:
     | { kind: 'not_planned' }
+    | { kind: 'input_not_started'; inputRef: ArtifactRef; inputDigest: string }
+    | { kind: 'source_native_retired'; inputRef: ArtifactRef; inputDigest: string;
+        nativeBirthIdentity: { deviceId: string; fileId: string; ownerUid: number };
+        observation: SourceInspectionNativeRetirementV1;
+        output?: { inspectionOutputRef: ArtifactRef; privateGitStateRef: ArtifactRef } }
     | { kind: 'plan_quiescent'; noSpawnEvidenceRef: ArtifactRef }
     | { kind: 'all_descendants_dead'; processContainmentRef: ArtifactRef; deathEvidenceRef: ArtifactRef }
   observedAt: string
   evidenceDigest: string
+}
+
+type SourceInspectionRetirementHandoffV1 = {
+  schemaVersion: 1
+  format: 'cliq-source-inspection-retirement-handoff-v1'
+  originalAttemptRef: ArtifactRef
+  inspectorIdentityRef: ArtifactRef
+  inspectorIdentityDigest: string
+  captureOwnerClosure: SourceInspectionRetirementEvidenceV1['captureOwnerClosure']
+  processClosure: SourceInspectionRetirementEvidenceV1['processClosure']
+  outcome: Extract<SourceInspectionAttemptV1, { phase: 'retired' }>['outcome']
+  nativeLifecycleRef?: ArtifactRef
+  observedAt: string
+  handoffDigest: string
 }
 
 type SourceInspectionAttemptBaseV1 = {
@@ -5027,7 +5117,7 @@ type SourceInspectionAttemptBaseV1 = {
   inspectionId: string
   attempt: 1
   principalId: string
-  method: 'run.submit'
+  method: 'run.submit' | 'run.apply'
   admissionKey: string
   admissionIntentDigest: string
   targetRef: ArtifactRef
@@ -5042,20 +5132,19 @@ type SourceInspectionAttemptBaseV1 = {
   createdAt: string
   deadlineAt: string
   updatedAt: string
+  retirementHandoffRef?: ArtifactRef
   rowDigest: string
 }
 
 type SourceInspectionAttemptV1 = SourceInspectionAttemptBaseV1 & (
-  | {
+  | ({
       phase: 'capturing'
-      inputRef?: never
-      inputDigest?: never
       plan?: never
       processContainmentRef?: never
       retirementEvidenceRef?: never
       retiredAt?: never
       outcome?: never
-    }
+    } & ({ inputRef?: never; inputDigest?: never } | { inputRef: ArtifactRef; inputDigest: string }))
   | {
       phase: 'prepared'
       inputRef: ArtifactRef
@@ -5085,6 +5174,7 @@ type SourceInspectionAttemptV1 = SourceInspectionAttemptBaseV1 & (
         | { kind: 'failed' | 'cancelled'; errorResponseRef: ArtifactRef }
     } & (
       | { inputRef?: never; inputDigest?: never; plan?: never; processContainmentRef?: never }
+      | { inputRef: ArtifactRef; inputDigest: string; plan?: never; processContainmentRef?: never }
       | { inputRef: ArtifactRef; inputDigest: string; plan: SourceInspectionPlanV1; processContainmentRef?: never }
       | { inputRef: ArtifactRef; inputDigest: string; plan: SourceInspectionPlanV1; processContainmentRef: ArtifactRef }
     ))
@@ -5092,7 +5182,7 @@ type SourceInspectionAttemptV1 = SourceInspectionAttemptBaseV1 & (
 ```
 
 The table contains one exact row of this union per
-`(principalId,method='run.submit',admissionKey)`: `inspection_id` is its primary
+`(principalId,method,admissionKey)`, with method `run.submit|run.apply`: `inspection_id` is its primary
 key; `principal_id`, `method`, `admission_key`, `admission_intent_digest`,
 `original_request_id`, `original_request_digest`, `workspace_identity_digest`,
 `phase`, `row_version`, and canonical `row_json` are the other ten columns. It
@@ -5101,7 +5191,7 @@ non-retired row per workspace identity. Indexed columns equal the decoded row,
 including the target's workspace identity; the two immutable original-request
 columns instead equal the target's canonical retained original-request bytes,
 which replay must verify before adoption. No second lifecycle table exists.
-`inspectionId = H('cliq-source-inspection-v1',principalId,'run.submit',admissionKey,admissionIntentDigest)`.
+`inspectionId = H('cliq-source-inspection-v1',principalId,method,admissionKey,admissionIntentDigest)`.
 `attempt` is literally one: there is no automatic retry, new nonce, backoff,
 attempt counter, or reset after failure. Row CAS increments `rowVersion` by
 one; identity/target, original owner, staging reservation, creation/deadline,
@@ -5133,6 +5223,16 @@ and it cannot begin while an older possibly live inspection for that exact
 workspace remains unretired. No accepted Run exists before the ordinary
 initial-Checkpoint/admission transaction.
 
+Fresh ordinary Git Sessions retain the existing `Session.schemaVersion=1` and
+SQL fields. Their `repositoryIdentityRef` instead names exact
+`RepositoryIdentityV2`: it has `schemaVersion=2`,
+`format='cliq-repository-identity-v2'`, and all V1 descriptor fields but **no**
+`objectFormat`. The root and literal in-root `.git` directory are held and
+identity-checked without opening, statting, or reading config, HEAD, index,
+refs, or objects. Historical V1 identities still require their original
+object-format member and exact schema; a missing V1 member is not V2. No
+Session version column, parallel Session, or second lifecycle ledger is added.
+
 The Supervisor authenticates the principal, decides Workspace Trust, validates
 the original normalized request and exact Session/workspace identity, then
 checks the existing source-read authorization before reserving this row. The
@@ -5146,8 +5246,43 @@ reserved against competing admissions while this attempt is live, remains
 revocable, and is consumed only by the existing final `run_admission` receipt
 transaction, never by Git inspection itself. Ordinary projection reads have
 the same descriptor-proven tracked/nonignored rule as section 15.
+Git metadata inspection additionally requires the explicit default-deny
+`authorization.create` decision `source_git_inspection`, purpose
+`source_inspection`. Its target binds the principal's exact Session,
+workspace/repository descriptor refs and digests, fixed scope
+`in_root_git_metadata_and_objects`, fixed recipe
+`cliq-source-git-inspection-v1`, retention
+`ephemeral_raw_reachable_only`, all nine original resource ceilings, and the
+same signed RuntimeBundle's exact `source_git_inspector` entry identity. It
+does not grant a Run tool, workspace include/read scope, Git execution of a
+caller program, network, or credential access. Its one use and receipt
+consumer `{kind:'source_inspection',inspectionId,admissionIntentDigest}` commit
+atomically with the original `capturing` row. Rollback leaves both unused; a
+consumed grant cannot authorize another capture. Original create/revoke
+request replay and P/C time-fence semantics remain unchanged. Revocation only
+affects unused consent; a consumed receipt is immutable history, not a still
+active or renewable grant. The original attempt's cancellation/deadline and
+fresh fences continue to govern capture. Independent ignored/include read
+grants retain their original final-admission consumption rules above.
+Rule-source capture is distinct from an ignored workspace include. Optional
+`ignoreReadGrantIds` selects at most 128 unique independent `read_scope/source`
+grants for exact `entry` paths `.git/info/exclude` or an in-root `.gitignore`.
+Each must name the same principal, Session and workspace digest. It authorizes
+only freezing that rule file into `FrozenIgnoreRulesV1`, not the files a rule
+matches, Git input, a tool read, or a model include. Their byte-sorted exact
+grant/receipt/digest tuples belong to TargetV2; their ordinary
+`source_inspection` receipts commit once in the same `capturing` transaction.
+The transaction rechecks every original grant row and expiry; rollback
+consumes none. The attempt deadline also cannot exceed any selected rule-read
+grant expiry. The optional target `expectedDigest` is checked against the
+actual held rule bytes before publishing the frozen rules. Missing permission
+never permits a rule-source read, duplicate path scopes and unnecessary grants
+fail, and consumption cannot be reused for final `run_admission` or a later
+capture. Tracked rule sources may use only the independently validated retained
+Git index's ordinary tracked-source permission. Final ignored includes retain
+their separate unchanged `run_admission` receipt and atomic commit rule.
 `deadlineAt` is the earlier of `createdAt + normalized Run budgets.wallTimeMs`
-and every read grant expiry used by this attempt; it is finite and never
+and every inspection/read grant expiry used by this attempt; it is finite and never
 extended. The later admitted Run still uses its ordinary admission clock.
 
 An empty, same-user `0700` staging directory is natively reserved under the
@@ -5162,16 +5297,124 @@ and file/tree/parent fsync are mandatory. No callback, numeric caller FD,
 handcrafted manifest, boolean, or schema-valid artifact substitutes for these
 observations.
 
-For Git, capture first freezes only the authorized raw Git metadata/object
-bytes and ignore-source bytes into `SourceInspectionInputV1.entriesRef`, an
-exact `WorkspaceEntryManifest`. Its tree digest uses the existing entries
-formula, with complete byte/count closure. Paths form only the fixed input
-projection needed by the recipe; config includes, hooks, helpers, alternates,
-shared directories, reflogs, credentials, and unrelated worktree payload are
-not interpreter input. Safe synthesized config is only the existing
-`SanitizedGitConfigV1` allowlist. Do not copy the whole worktree first and
+Historical `SourceInspectionInputV1` keeps its exact old raw-CAS meaning;
+fresh Git captures never reinterpret it. New `SourceInspectionInputV2`
+(`format='cliq-source-inspection-input-v2'`) freezes only the authorized intent:
+inspection id, target ref/digest, repository identity digest, inspection grant
+id and receipt ref/digest, fixed recipe, all nine original resources,
+`snapshotPolicy='ephemeral_native_sealed_shards'`, and its omission
+`inputDigest`. Its exact `inputRef/inputDigest` pair is published as inert
+data and enters the **first capturing transaction** with the original one-use
+consent. Native input borrowing/reservation cannot precede that commit. This
+needs no same-phase update, additional table or source bytes before consent.
+Prepared preserves the exact first pair and adds its real plan. It has no
+completed snapshot, object format, entriesRef,
+treeDigest, raw path/OID list, or invented content ref. Raw Git metadata and
+objects are copied only after active release into the original native-owned
+execution domain's bounded, streaming, deterministic memfd shards. Each shard
+obeys the original per-file, aggregate storage/memory, and FD ceilings; all
+writers close and WRITE/GROW/SHRINK/SEAL are actually obtained. Allocation and
+first-touch are charged to that domain, not to Supervisor memory disguised by
+a byte cap. No raw config, inert remote/user/branch value, unreachable object,
+or per-object raw input listing enters durable CAS. Only the expressly scoped
+aggregate snapshot digest/counts and real original lifecycle identities may
+be retained. The original staging birth/plan/containment remains durable;
+ephemeral snapshot payload is intentionally not crash-durable. Restart is
+cleanup-only and cannot reconstruct, resume, or release this old input.
+
+Source retirement preserves the original native birth and its closed progress
+projection in `source_native_retired`, including original controller PID/start,
+exact cgroup device/id and plan/spec/nonce when present, actual namespace/init
+whole-domain death when created, original sealed-snapshot counts and the real
+all-reader/CAS join. The fixed `SourceInspectionNativeRetirementV1` fields are
+the source native interface's complete original birth projection: origin is
+`original_owner_joined|original_birth_current_checker|original_birth_registered_absent_checker`; local completion has
+only fully joined birth kind `0|12`, while a successor may describe only a
+complete validated original prefix. Snapshot requires released capture;
+continued Git requires the same sealed snapshot. Current-checker observations
+never claim possession or closing of old descriptors. Captured outcomes also
+bind the original four-file inspection output to the exact private-Git graph;
+retained readers fully validate every schema and binary leaf again.
+
+Whenever the attempt retains a plan, that audit reads the complete original
+containment-plan and SandboxLaunchSpec CAS bytes even if the native cleanup
+prefix predates blocked creation and therefore carries no plan/spec strings.
+It recomputes both semantic digests and compares the entire fixed source
+recipe: original owner/target/input/nonces, reserved backend, isolated root,
+signed runtime and selected complete toolchain/helper closure, mounts,
+environment, profile and resource limits. Original plan/spec creation times
+are causal and remain within the capture deadline. A row digest or matching
+reference string cannot substitute for missing or corrupt launch artifacts.
+The inspector is bound to its historical trusted StateOwner before this data
+audit; the reader cannot establish a new trust key or execution capability.
+
+Before staging removal, that same attempt installs exactly one
+`retirementHandoffRef`. It names the canonical closed handoff above and retains
+the complete original pre-handoff attempt, actual joined closure and candidate
+capture/refusal, original target/input/plan/containment, and actual joining
+inspector. A native closure also requires `nativeLifecycleRef`: the complete
+bounded original v2 native birth/header/controller/progress chain, exported
+only after the original producer or actual successor checker joins. This
+contains fixed lifecycle facts, never raw config, URLs or per-object input
+lists. Full native decoding rehashes every byte/record and binds original
+Supervisor PID/start, StateRoot/runtime/source-parent/staging, workspace and
+Git descriptor identities, original birth-file device/inode, controller,
+namespace/process/CG/nonce/plan identities, progress and sealed-input counts.
+Present native birth must still be the original inode, including after a
+byte-identical file replacement. Only a separate sealed anonymous snapshot is
+used for an already-absent stage; it cannot claim to hold the old birth FD.
+
+The handoff and all original metadata commit before any stage deletion. Schema
+7 changes only the existing update trigger: a first same-phase handoff is
+once-only, input pairs remain immutable from the first capturing transaction,
+and a handed-off attempt permits only monotone cancellation, cleanup and its
+sole retired transition. It cannot resume, capture, continue, acquire another
+nonce, or replace its candidate with a second execution. Original final-cut
+checks may still downgrade capture to a refusal; a successor always retires
+an interrupted capture as failed/cancelled and never adopts capture success.
+
+After a crash, a true no-input/no-native-attempt handoff plus exact original
+StateOwner death permits ordinary current staging cleanup. Native staging
+presence is observed only to select its fixed cleanup branch; each constructor
+independently rechecks original identity, and drift refuses. A present stage
+uses only its original full birth. An absent stage requires the previously
+registered complete handoff and exact snapshot bytes, true original
+Supervisor/controller/descendant death, original cgroup and controller-locator
+absence, and actual current parent fsync and checker join. Its distinct origin
+and `registered_reserved_root_absent` repeat the same original birth/progress
+and never claim an old unlink or old descriptor close. Returned snapshot bytes
+must hash to the original registered ref again before the sole terminal CAS.
+Missing, partial, replaced, unregistered or mismatched evidence stays waiting;
+path absence and isolated CAS content never authorize retirement or execution.
+
+`input_not_started` is legal only for the original program-owned task after it
+has revoked further work and actually joined without ever requesting a native
+input. It repeats the first input pair, has no plan/containment and cannot
+assert capture success. A successor cannot infer it from an absent directory,
+owner death, missing native birth, partial record or an already removed stage.
+Such uncertainty remains recovery-required. Staging is removed only after all
+native producers and actual consumers join; uncertain retirement preserves
+the original birth instead of deleting its recovery provenance.
+
+Paths form only the fixed input projection needed by the recipe; config
+includes, hooks, helpers, alternates, shared directories, reflogs, credentials,
+and unrelated worktree payload are not interpreter input. After original
+source cursors and writable snapshot aliases close, the same signed fixed
+Node helper alone parses the bounded raw config in that contained domain.
+Exactly inert `remote.<name>.url|pushurl|fetch`, `branch.<name>.remote|merge`,
+and `user.name|email` may be parsed and discarded in memory; they are never
+passed to Git, returned, or persisted. Safety keys retain their strict closed
+values; unknown/dangerous keys and inherited property names are refused.
+Git receives only fresh synthesized `SanitizedGitConfigV1` allowlist bytes,
+never the original config FD, strings, source directory, or Supervisor heap.
+Ignore/include classification and its separate authorization are not supplied
+by this metadata grant. Do not copy the whole worktree first and
 authorize it retrospectively: the verified canonical index and frozen ignore
 classification determine which exact worktree bytes may then be captured.
+An existing `.git/info/exclude` without its separately consumed rule-read
+scope fails during the first metadata-only walk, before opening or reading
+the file. A successful null rule output means actual absence; it never means
+that an existing rule was silently ignored.
 The final native capture rechecks the held live workspace/repository and
 input/source identities; drift, expiry, revoked authority, partial reads, or
 unsupported Git forms fail this single attempt without silently restarting.
@@ -5182,7 +5425,7 @@ no Git process, has no input/plan/actual-containment fields, and advances
 Git's process path is exactly `capturing -> prepared -> active -> retired`;
 failure/cancellation may retire any prefix only with its corresponding proof.
 Before `prepared` commits, native code creates and observes the **actual empty
-reserved backend** and retains that identity together with the frozen input,
+reserved backend** and retains that identity together with the frozen input intent,
 exact containment plan, launch spec, nonce, and signed runtime/profile. On
 Linux this is the held exact cgroup directory/id and namespace reservation
 under the observed original subreaper token; on macOS it is the exact reserved
@@ -5196,12 +5439,29 @@ before one-use native release, the Supervisor rechecks current StateOwner,
 exact row/nonce/plan/input/target, Trust/read authority, deadline and no cancel;
 release exposes only this fixed read-only inspection, never a broker or Run
 effect. Replay and successor startup cannot release an old attempt.
+Capture first reports actual sealed-ready aggregate identity on the same
+blocked owner. Before its one-use no-argument fixed-Git continuation, the
+Supervisor repeats the same current owner/authenticated frame/Session/Trust,
+exact active row/input/plan/receipt, held-root currentness, cancellation, and
+original absolute-deadline fence. No second grant, retry, new timer, or new
+deadline is created; five seconds is the existing observation-freshness rule,
+not a replacement Git execution budget.
 
-The fixed `cliq-source-git-inspection-v1` launch has `isolated_empty_root`, no
-parent containment, and exactly one `source_inspection_input` mount at
-`/input`. Only digest-verified signed runtime/toolchain executable closures
-are additional read-only mounts. `/output`, `/tmp`, and `/home/cliq` are new
-quota-bounded private ephemeral writable mounts; source, shared `.git`, host
+The fixed `cliq-source-git-inspection-v1` launch has `isolated_empty_root` and
+no parent containment. Historical InputV1 has exactly the original read-only
+`source_inspection_input` mount at `/input`. Fresh InputV2 instead has exactly
+one distinct `source_git_inspection_input` mount at `/scratch/input`, bound to
+its consent-bearing immutable input intent and the same native sealed shards;
+the two mount kinds and paths are not interchangeable. Its one fresh private
+`/scratch` aggregate contains only the fixed input, writable repository,
+output, home and tmp subtrees, with input independently mounted read-only.
+That exact source-only parent/child pair is the sole exception to the general
+nonoverlapping-mount rule; it does not allow arbitrary nested mounts. Mount
+metadata remains unique and byte-sorted. Only the same signed fixed
+non-executable helper at `/runtime/cliq-source-git-inspector.mjs` and the
+digest-verified signed Node/Git/toolchain closure are additional read-only
+inputs. Historical InputV1 keeps its original `/output`, `/tmp`, and
+`/home/cliq` private mounts, not a fallback for InputV2. Source, shared `.git`, host
 home, StateRoot, ambient PATH/environment, secrets, sockets, and network are
 unreachable. Input is immutable and descriptor-held; output is never read as
 authoritative before complete descendant death. The selected RuntimeBundle
@@ -5228,6 +5488,16 @@ IPC/invocation-output ceilings. Input, target, plan, actual containment,
 retirement, errors and captured result closures are GC roots while the attempt
 or its retained response/audit exists; an accepted Run retains its ordinary
 source roots independently.
+
+The fixed four output files are artifacts, not control/inline JSON or native
+IPC frames. `inspection.json` is exact canonical JSON bounded by the smaller
+of the original `maxInvocationOutputBytes` and `maxSingleFileBytes`; its
+purpose-specific closed graph schema also enforces the original 100,000-entry
+inventory ceiling and fixed nesting. Duplicate keys or noncanonical spellings
+fail exact byte comparison. This does not widen the control/inline 1 MiB,
+depth-32 or 10,000-container-entry limits. All downstream artifact readers must
+accept and fully validate the same declared supported graph or reject capture
+before admission; a larger metadata decoder alone is not repository support.
 
 Retirement is the only point that permits result/error publication and frees
 the source reservation. Local completion/cancellation first revokes release,
@@ -5581,6 +5851,14 @@ type SandboxMountV1 =
       inputRef: ArtifactRef
       inputDigest: string
       targetPath: '/input'
+      access: 'read_only'
+      purpose: 'input'
+    }
+  | {
+      kind: 'source_git_inspection_input'
+      inputRef: ArtifactRef
+      inputDigest: string
+      targetPath: '/scratch/input'
       access: 'read_only'
       purpose: 'input'
     }
@@ -6010,7 +6288,7 @@ type WorkerPreparation = {
   generationCreationNonceDigest: string;
   generationId: string;
   generation?: { generationRef: ArtifactRef; generationIdentityDigest: string };
-  controller?: { birthIdentityRef: ArtifactRef; birthIdentityDigest: string };
+  controller?: { birthIdentityRef: ArtifactRef; birthIdentityDigest: string; privateGitInputRef?: ArtifactRef };
   reservation?: { deviceId: string; fileId: string; ownerUid: number };
 };
 
@@ -6090,10 +6368,44 @@ type WorkerLaunch = PreparingWorkerLaunch | RetiredWorkerPreparation | BoundWork
 physical allocation. It contains only logical ownership and fixed locators;
 it has no worker, lease, launch spec, broker release or private-write authority.
 The original owner registers the actual generation identity and materializing
-row before copying, then the actual controller and reservation births. Only a
+row before copying. It registers the original controller and reservation births
+before any native Git preparation, and otherwise before worker launch. Only a
 complete readonly snapshot, reproduced plan/spec and genuine original BIND
 allow promotion to `reserved`, without resetting the preparation deadline.
 An interrupted or substituted birth is recovery-required, never backfilled.
+
+For an ordinary Git Checkpoint, the same controller registration transaction
+also retains `preparation.controller.privateGitInputRef`, the canonical existing
+`cliq-source-git-inspection-output-v1` data reconstructed from that original
+Checkpoint's completely read private Git closure. It is not an old inspection
+proof. The admitted SourceManifest classification index is independently
+retained and may differ from the current private Checkpoint index. The original
+generation birth and original WorkerReservation descriptors bind the native
+preparation input to Run/Session/Checkpoint, generation identity/creation nonce,
+launch/spawn/activation nonces, original StateOwner row and actual Supervisor
+PID/start identity, repository identity, and exact resource profile.
+
+The versioned preparation prelude lives in that same reservation before its
+existing final binding and five worker frames. It first registers ownership,
+then records real containment/fork/READY progress, transfers exactly four
+fully hashed CAS leaves (metadata, canonical index, normalized reachable pack,
+pack index), seals all four, and releases only the fixed signed CAS-only Git
+recipe. The recipe has no live-source, config, rule, host-Git, command or network
+input. Fresh index-pack/fsck/type/reachability/all-and-only checks must pass;
+its outputs retain the original four byte identities rather than assuming a
+new repack is byte-identical. Original readers, CAS streams, runtime resources,
+processes and containment all actually join before native normal completion.
+Only that exact original opaque completion can authorize copying those bytes
+into the original generation. A schema-valid manifest, checksum, old source
+receipt, successor cleanup receipt, caller boolean or callback cannot do so.
+The completed generation is fully descriptor-rewalked with exact directory
+and file identities, modes, all bytes and no extra private Git entries before
+the existing readonly snapshot and final BIND. Any partial or half-written
+prelude, lost original input, substituted birth, aborted task or incomplete join
+retains recovery waiting; it never becomes not-attempted, reconstructed final
+binding, sealed generation or permission to execute. Shutdown revokes and joins
+the same controller's preparation before closing generation/reservation
+resources, under the unchanged two-second deadline.
 
 Preparation retirement uses the closed `cliq-worker-preparation-retirement-evidence-v1`
 union. Its `born` branch binds the original preparing row, generation birth,
@@ -6107,6 +6419,39 @@ branch accepts only the still-held original materialization owner's joined
 receipt whose allocation-request latch was never entered. A failed native
 allocation attempt, absent path, row count or owner loss cannot mint that
 receipt. Neither branch is worker no-spawn, preactivation failure or sealing.
+
+The `born_current_checker` branch is the same preparing retirement inspected
+by a strictly later StateOwner; it never adopts the original producer. Its
+read-only context first fully validates the original Run/Checkpoint, registered
+generation, controller/reservation and four-leaf private Git closure, and the
+retained StateOwner death/acquisition chain. The original immutable active-row
+digest is reproduced only as inert prelude comparison data. Productive recovery
+and original preparation release still reject that dead owner.
+
+A genuine same-lock retained input accepts only the complete original native
+reservation prefix and exact generation birth/nonces, original fixed recipe,
+and independently absent original Supervisor and controller PID/start
+identities. The fresh checker may stop and join only the resources registered
+by that prefix, remove their exact empty containment and join itself. It cannot
+append or resume the prelude, produce normal completion, bind a worker, read
+payloads or seal the generation. Missing, half-written (including phases one
+and three), replaced or final-worker-bound reservations remain recovery-required;
+absence alone is not not-attempted. Cancellation or storage failure preserves
+waiting and never fabricates a cleanup result.
+
+The proof retains the actual `original_birth_current_checker` observation,
+original input and fixed recipe, original owner-death acquisition reference,
+and the fresh checker's exact birth and actual join. After the original input
+and reservation descriptors actually close, a genuine same-owner observer
+opens and closes only the registered directory identity, explicitly yielding
+`unverified_preparation`, without claiming a complete tree or Git state. The
+existing no-replace quarantine and sole preparing/generation retirement
+transaction then commit this branch under the current inspector and unchanged
+freshness/time fence. Startup runs this bounded cleanup under the existing
+cancellable admission owner before productive loading, with the original
+one-thousand-active-Run bound, two-second native stop, five-second READY and
+thirty-second preparation constraints unchanged. This does not reset the Run,
+Checkpoint, accounting, attempt, original deadline or lease epoch.
 
 The immutable identity binds PID/start token/spawn/activation nonce **and** an immutable `ProcessContainmentRef` whose backend identity covers every descendant for the lifetime of the activation. The containment owner is a closed union: a worker identity must reference `worker_activation` matching its Run/epoch/launch; an invocation containment must reference `run_invocation` matching the exact durable claim and a parent containment in the same Run activation; an admin row must reference `admin_probe` matching its operation/attempt/principal/method/request/target/Supervisor and may not contain Run/lease/worker fields; a local-inference launch must reference `local_inference_service` matching the exact service/launch/principal/spec/Supervisor row and may not contain Run, Journal, or admin fields; a source inspection must reference `source_inspection` matching its sole attempt/principal/target/original Supervisor and has no Run, worker, Journal, admin or service fields. Worker activations use `run-generation`; admin probes, local inference and source inspection use `isolated-empty-root`; invocation bindings follow the frozen tool contract. A top-level worker, admin, local-inference or source-inspection containment has no parent, while a run invocation's parent chain must terminate at its exact worker activation.
 
@@ -6154,6 +6499,15 @@ extra or changed seed objects, a replaced/closed installation or a different hel
 StateRoot fail closed. Ordinary `fresh_empty` still requires an empty CAS; later
 clean acquisition never reinterprets a grown namespace as a new installed seed.
 This source adds no ledger, Run authority or execution permission.
+
+Retained genesis is evaluated against its original, explicitly supported birth
+schema, including the complete original DDL digest, schema-manifest version and
+empty-database content identity. A later database migration cannot substitute
+the current schema or table count for those original facts. Unknown historical
+recipes and mismatched version/digest pairs fail closed. This historical data
+validation grants no upgrade or execution authority: fresh bootstrap still
+requires the exact opened current schema, and runtime activation must separately
+prove compatibility with every retained nonterminal Run and pinned bundle.
 
 `fresh_installed.modelAuthoritySource` records the original optional companion
 as the closed union `{kind:'none'}` or
@@ -6737,6 +7091,7 @@ type SourceIncludeAuthorizationV1 = {
 
 type SourceProjectionSpec = {
   schemaVersion: 1
+  classificationIndexRef?: ArtifactRef // required for Git; forbidden for non-Git
   matcherVersion: 'cliq-exact-path-v1'
   frozenIgnoreRulesRef: ArtifactRef
   frozenIgnoreRulesDigest: string
@@ -6755,9 +7110,19 @@ type SourceProjectionSpec = {
 }
 ```
 
-`SourceProjectionSpec.projectionDigest = SHA-256(JCS(spec with projectionDigest omitted))`; every SourceManifest `sourceProjectionRef` decodes that exact artifact and `sourceProjectionDigest` equals its member, while every WorkspaceStateManifest copies the same value. `frozenIgnoreRulesRef` decodes only to `FrozenIgnoreRulesV1`; `rulesDigest = SHA-256(JCS(manifest with rulesDigest omitted))`. A Git manifest's optional repository digest is required/equal to the live identity; non-Git forbids it and uses the canonical empty sources/rules arrays. Sources are descriptor-held regular files: `.git/info/exclude` first when present, then every admitted `.gitignore` ordered by `(directoryDepth,canonicalRootRelativePath)` from root to deep; indices are contiguous. Content refs/digests rehash exact UTF-8 bytes. Trusted parsing implements the fixed `cliq-git-wildmatch-v1` profile (Git 2.45 `gitignore` pattern semantics with `/` separators and case-sensitive matching), rejects invalid UTF-8/NUL, and emits contiguous rules in source/line order with normalized base directory, negation, directory-only, anchoring, and pattern fields. For one path, only ancestor-base rules apply and the last matching rule wins; later/deeper sources therefore override earlier sources. SourceManifest and SourceProjection frozen-ignore ref/digest pairs must be identical. Recovery/result construction uses only this parsed artifact, never mutable Git config/files or an ambient Git version.
+`SourceProjectionSpec.projectionDigest = SHA-256(JCS(spec with projectionDigest omitted))`; every SourceManifest `sourceProjectionRef` decodes that exact artifact and `sourceProjectionDigest` equals its member, while every WorkspaceStateManifest copies the same value. `frozenIgnoreRulesRef` decodes only to `FrozenIgnoreRulesV1`; `rulesDigest = SHA-256(JCS(manifest with rulesDigest omitted))`. A Git manifest's optional repository digest is required/equal to the live identity; non-Git forbids it and uses the canonical empty sources/rules arrays. Sources are descriptor-held regular files: `.git/info/exclude` first when present, then every admitted `.gitignore` ordered by `(directoryDepth,canonicalRootRelativePath)` from root to deep; indices are contiguous. Content refs/digests rehash exact UTF-8 bytes. Trusted parsing implements the fixed `cliq-git-wildmatch-v1` profile (Git 2.45 `gitignore` pattern semantics with `/` separators and case-sensitive matching), rejects invalid UTF-8/NUL, and emits contiguous rules in source/line order with normalized base directory, negation, directory-only, anchoring, and pattern fields. The fixed parser permits at most 4096 rule sources, 1 MiB per source, 16 MiB total source bytes and 65536 parsed rules; the original capture/resource ceilings apply independently and can only tighten those limits. A retained consumer completely reads every declared content ref and recomputes this exact parse; a rehashed invented rule array is not accepted. For one path, only ancestor-base rules apply and the last matching rule wins; later/deeper sources therefore override earlier sources. An excluded directory must itself be re-included before any descendant can be re-included; a deeper rule cannot bypass that parent boundary. SourceManifest and SourceProjection frozen-ignore ref/digest pairs must be identical. Recovery/result construction uses only this parsed artifact, never mutable Git config/files or an ambient Git version.
 
-Every include's `authorizationRef` decodes only to `SourceIncludeAuthorizationV1`; `selectorDigest = SHA-256(JCS(selector))` and `authorizationDigest = SHA-256(JCS(authorization with authorizationDigest omitted))`. Principal/Run/Session/live workspace ref+digest, selector bytes, and admission-intent digest equal the admitted request/projection. For an ordinary tracked/non-ignored in-root selector, the Supervisor first publishes exact `SourceIncludeClassificationEvidenceV1`, then publishes `builtin_nonignored` with the identical evidence ref/digest and frozen-ignore pair. `evidenceDigest = SHA-256(JCS(evidence with evidenceDigest omitted))`; its entries are nonempty, unique, byte-sorted paths and exactly cover the descriptor-walked entries selected for capture. Each `workspaceEntryDigest` equals `SHA-256(JCS(the exact captured WorkspaceEntry))`, the later SourceManifest entry set contains the same entries, and device/file/link-count observations come from the same no-follow descriptors. `tracked_in_git_index` is legal only when both Git-index fields are present, the ref equals the later SourceManifest Git index, and fixed canonical Git-index parsing proves that path tracked; any such entry requires the fields. `nonignored_in_root` re-evaluates under the exact frozen rules and requires a non-ignored result. If no entry is tracked, Git-index fields may be absent; if either Git-index field is present both are required. An ignored in-root selector requires `consumed_user_read_grant`: the supplied `readGrantId` resolves an active principal/workspace/path/scope-exact `AuthorizationGrantV1(read_scope)`, and the admission transaction consumes it once. The artifact's target and receipt digests must match; `AuthorizationConsumptionReceiptV1.consumer` is exactly `{kind:'run_admission',runId,admissionIntentDigest}`. The receipt never names the final admitted digest. Grant consumption, final admitted-digest computation, Run/Checkpoint/projection/control response, and receipt/ref installation commit atomically. A missing optional wire grant selects only the builtin branch and therefore cannot include ignored bytes; an unnecessary/mismatched grant is rejected rather than ignored. Outside-root/external selectors are rejected. A repository can request a selector but cannot manufacture either authorization form or reuse one across a Run/workspace/selector.
+For Git, `classificationIndexRef` is the complete canonical snapshot emitted by
+the original source capture B and equals that original SourceManifest Git index.
+Every retained matcher rereads its exact snapshot, canonical bytes, tree and
+repository/object-format identities before using the tracked-path set. A later
+private Checkpoint index or live delivery capture A index may differ; neither
+replaces this frozen classification ref. Delivery A and its result M retain
+A's own HEAD/index metadata while inheriting B's exact projection/rules and
+classification index. Non-Git forbids this field. Neither a today's index nor a
+historical source payload grants new include/read permission.
+
+Every include's `authorizationRef` decodes only to `SourceIncludeAuthorizationV1`; `selectorDigest = SHA-256(JCS(selector))` and `authorizationDigest = SHA-256(JCS(authorization with authorizationDigest omitted))`. Principal/Run/Session/live workspace ref+digest, selector bytes, and admission-intent digest equal the admitted request/projection. For an ordinary tracked/non-ignored in-root selector, the Supervisor first publishes exact `SourceIncludeClassificationEvidenceV1`, then publishes `builtin_nonignored` with the identical evidence ref/digest and frozen-ignore pair. `evidenceDigest = SHA-256(JCS(evidence with evidenceDigest omitted))`; its entries are nonempty, unique, byte-sorted paths and exactly cover the descriptor-walked entries selected for capture. Each `workspaceEntryDigest` equals `SHA-256(JCS(the exact captured WorkspaceEntry))`, the later SourceManifest entry set contains the same entries, and device/file/link-count observations come from the same no-follow descriptors. `tracked_in_git_index` is legal only when both Git-index fields are present, the ref equals the frozen SourceProjection.classificationIndexRef (the initial admitted SourceManifest B Git index), and fixed canonical Git-index parsing proves that path tracked; any such entry requires the fields. `nonignored_in_root` re-evaluates under the exact frozen rules and requires a non-ignored result. If no entry is tracked, Git-index fields may be absent; if either Git-index field is present both are required. An ignored in-root selector requires `consumed_user_read_grant`: the supplied `readGrantId` resolves an active principal/workspace/path/scope-exact `AuthorizationGrantV1(read_scope)`, and the admission transaction consumes it once. The artifact's target and receipt digests must match; `AuthorizationConsumptionReceiptV1.consumer` is exactly `{kind:'run_admission',runId,admissionIntentDigest}`. The receipt never names the final admitted digest. Grant consumption, final admitted-digest computation, Run/Checkpoint/projection/control response, and receipt/ref installation commit atomically. A missing optional wire grant selects only the builtin branch and therefore cannot include ignored bytes; an unnecessary/mismatched grant is rejected rather than ignored. Outside-root/external selectors are rejected. A repository can request a selector but cannot manufacture either authorization form or reuse one across a Run/workspace/selector.
 
 Normalization defaults to 10,000 changed paths and 512 MiB of changed/new file content; accepted maxima are 100,000 paths and 4 GiB. Equality is allowed; strictly exceeding either fails result construction with `runtime_failed(result_source_limit_exceeded)` rather than truncating the result. Count the complete byte-sorted projected diff: add/delete/modify each contributes one changed path, including mode-only changes; changed bytes sum the full new file size only for additions or modifications whose size/blob differs. Deletes, directories, symlinks and mode-only file changes contribute no changed file bytes. If both limits are exceeded, `changed_paths` wins deterministically.
 
@@ -8594,6 +8959,19 @@ type PublicationProofV1 = PublicationProofBaseV1 & (
           capturedIndexDigest: string
           observedIndexRef: ArtifactRef
           observedIndexDigest: string
+          repositoryIdentityRef: ArtifactRef
+          repositoryIdentityDigest: string
+          capturedSourceRef: ArtifactRef
+          objectFormat: 'sha1' | 'sha256'
+          canonicalIndexBytesRef: ArtifactRef
+          canonicalIndexByteCount: number
+          indexTreeObjectId: string
+          observedIndex:
+            | { kind: 'present'; deviceId: string; fileId: string; ownerUid: number;
+                rawByteCount: number; rawBytesDigest: string }
+            | { kind: 'absent'; rawByteCount: 0 }
+          descriptorReadComplete: true
+          readerJoined: true
         }
     ))
 )
@@ -9014,6 +9392,33 @@ suffix. `git_index_unchanged` is the canonical all-absent four-field form for a
 non-Git workspace; Git requires all four fields, both refs rehash their digest
 members, captured fields equal A, and observed digest/ref are byte-identical.
 No adapter receipt, unhashed boolean or alternate proof shape grants progress.
+
+The Git branch is produced only after the existing publication task has
+validated its original approval/claim/current cut and complete captured A.
+Its fixed native reader accepts the genuine original StateOwner/held workspace
+and V2 repository directory identity, and opens only `.git/index`: same device,
+no-follow, same uid, single-link regular file, original profile byte ceiling,
+actual EOF, complete before/after descriptor/name metadata checks, and actual
+close/join. It never broadens the source cursor or borrows source inspection or
+ignore-read consent. The producer then applies the same fixed canonical index
+normalizer to the complete actual bytes and compares all canonical bytes,
+entries and tree to A's full CAS snapshot. The observed snapshot is therefore
+the identical existing snapshot ref/digest; no raw-byte hash, inode or timestamp
+substitutes for canonical equality, and no duplicate snapshot publication is
+required. The explicit `present` observation retains only its real file
+identity, exact raw length and raw-byte SHA-256 as additional audit data.
+
+Actual native ENOENT uses the separate `absent` observation, never an index FD,
+old inode, unlink action or guessed empty file. It must still reach the real
+native EOF/complete checks and close/join. It is canonically equivalent only
+when A's completely verified snapshot has no entries and its complete bytes
+equal the exact empty version-2 header and declared object-format checksum,
+with the corresponding empty tree. Missing index with a nonempty A snapshot,
+symlink/directory/hardlink, replaced repository/file, incomplete read, changed
+canonical entry, half identity or uncertain close is rejected. A retirement
+failure keeps the genuine native owner fenced. This supplies no write, retry,
+execution or new authorization, and the original static-workspace/concurrent
+directory-move boundary remains unchanged.
 
 `DeliveryTerminalProjectionEvidence.evidenceDigest = SHA-256(JCS(evidence with evidenceDigest omitted))`.
 Workspace paths are canonical, unique, byte-sorted and exactly cover the
@@ -10054,6 +10459,8 @@ The exact initial method names are `control.hello`; `session.create|list|get|for
 
 Session continuity remains first-class but non-executing. The exact public methods are `session.create`, `session.list`, `session.get`, `session.fork`, `session.compact`, and `session.handoff.create`. There is deliberately no public `session.append`, `session.items`, handoff import, bookmark mutation, global active-Session setter, Session lease, or Run-Checkpoint mutation. `session.get` is the bounded item read; root Run terminal publication is the only internal Session append path. `cliq resume` is client composition of `session.get` plus a new `run.submit`, never resumption of an old Session execution. Imported legacy bookmarks/handoffs appear as typed legacy Session items/artifact refs through `session.get` plus `artifact.get`; `session.fork` may use their preserved cursor, but no hidden compatibility mutation method exists. No CLI/TUI/RPC adapter writes SQLite or legacy JSON directly.
 
+The shared installed client exposes this composition as `prepareResume`: an explicit new Run intent supplies its new request/admission identities, `session.get` captures the current context revision, and the helper returns the complete immutable `run.submit` request and canonical digest before dispatch. The caller then submits and retains those exact bytes across an explicit reconnect. A transport failure or revision refusal never causes an automatic replacement request; no new `session.resume` wire method, execution authority or default legacy-CLI switch is introduced.
+
 Implementation boundary: an internal StateStore bounded-read integration for `session.get`, `run.get` and `run.attach` is not public wire routing or installed qualification. It must preserve the canonical cuts and native authentication without claiming that generated client routing, `control.hello`, signed installed composition or Linux qualification is complete. A public server still requires compatibility and native peer authorization before any state query.
 
 The v1 wire contract is generated from one canonical TypeScript/JSON-Schema package. The minimum request contract is closed:
@@ -10856,11 +11263,15 @@ type ControlApplicationResponseV1 =
 
 Every success carries exactly one method-discriminated result above and unknown fields fail validation. `run.result|run.diff` may return their success variants only when the Run has `resultRef`, hence only for `succeeded|completed_unverified`; a nonterminal Run returns the retryable `RESULT_UNAVAILABLE` variant, while `failed|cancelled` returns its nonretryable variant and exact terminal detail. No query selects an arbitrary failed candidate. `SessionItem`, Journal, Checkpoint, and Run-item metadata are returned only to the same local principal and contain refs/digests rather than artifact bytes; clients fetch bytes through `artifact.get`. Authorization summaries omit paths, executable names, argv, and receipt bodies; MCP summaries omit endpoint, credential, and argv bytes. `authorization.revoke` maps active to `revoked`, immutable revoked replay to `already_revoked`, and immutable consumed no-op to `already_consumed`; its summary state must be `revoked|revoked|consumed` respectively. `ControlErrorV1` is a strict discriminated union: its literal retryability and required metadata are part of the schema, unlisted members are forbidden, issue lists are at most 64 entries, issue path/code and message/error ids use the ordinary string bounds, and event/resource/rate integers are safe and range-checked. `currentRevision` occurs only for revision/wait conflicts and retryable `RESULT_UNAVAILABLE`; `retryAfterMs` occurs only for resource/rate errors. A method that parsed as a known discriminator uses the known-method error variant; an unknown/removed method uses only `rejectedMethodDigest = SHA-256(NFC UTF-8 method bytes)` plus the `INVALID_REQUEST` parse variant, so it can be rejected without echoing or pretending the method is known. Any `detailRef` is a same-principal bounded artifact. No error carries arbitrary stack text, raw rejected value, or adapter-local metadata. Transport adapters preserve their own request correlation id outside this application object but may not alter the result/error payload.
 
-The four list methods use one exact materialized-cut protocol; they never keyset-page a changing live filter. Normalize omitted filters to their displayed absent values, `run.list.statuses` to its required unique byte-sorted sequence, and limit to the method default. Then `normalizedFilterDigest = SHA-256(JCS({ownerPrincipalId,method,workspacePath-or-null,sessionId-or-null,operation-or-null,statuses-or-empty,targetKind-or-null,state-or-null,normalizedLimit}))`, retaining only fields applicable to that method. A request without `cursor` performs one StateOwner-gated SQLite transaction: it captures current authoritative rows, applies owner and normalized filters, constructs each exact typed public summary, orders matches by canonical timestamp then bytewise NFC `stableId`, materializes ordinals `1..entryCount` into `list_read_cut_entries`, and inserts one `list_read_cuts` row. Stable ids are Session id, Run id, grant id, and registration id respectively. Session/Run fields are captured at that revision; authorization captures the current immutable grant row; MCP captures exactly the current registry head for each registration, never old revisions. Later state, status, revision, or registration changes cannot change membership/order/value in this cut. A fresh cursorless request creates a new cut and sees later state.
+The four list methods use one exact materialized-cut protocol; they never keyset-page a changing live filter. Normalize omitted filters to their displayed absent values, `run.list.statuses` to its required unique byte-sorted sequence, and limit to the method default. Then `normalizedFilterDigest = SHA-256(JCS({ownerPrincipalId,method,workspacePath-or-null,sessionId-or-null,operation-or-null,statuses-or-empty,targetKind-or-null,state-or-null,normalizedLimit}))`, retaining only fields applicable to that method. A request without `cursor` captures a complete current SQL source cut, applies owner and normalized filters, constructs each exact typed public summary, and orders matches by canonical timestamp then bytewise NFC `stableId`. One final StateOwner-gated SQLite transaction proves the complete source membership and values still match, materializes ordinals `1..entryCount` into `list_read_cut_entries`, and inserts one `list_read_cuts` row atomically. Stable ids are Session id, Run id, grant id, and registration id respectively. Session/Run fields are captured at that revision; authorization captures the current immutable grant row; MCP captures exactly the current registry head for each registration, never old revisions. Later state, status, revision, or registration changes cannot change membership/order/value in this cut. A fresh cursorless request creates a new cut and sees later state.
 
 The cut id and cursor secret are independent CSPRNG 256-bit unpadded-base64url values. `createdAt` is the transaction's canonical time and `expiresAt=createdAt+15 minutes` using checked arithmetic. `ListReadCutEntryV1.rowDigest` omits itself; `entriesDigest=SHA-256(JCS(the complete rowDigest sequence in ordinal order))`; and `cutDigest=SHA-256(JCS(cut with cursorSecretBase64url and cutDigest omitted))`. The cache allows at most 100,000 matching rows and 64 MiB encoded typed summaries per cut; exceeding either returns `RESOURCE_EXHAUSTED(resourceKind='state_storage')` and publishes no partial cut. `list_read_cuts` and entries are non-authoritative query cache, cannot influence reducers/admission/recovery, and root their referenced artifacts only until expiry. Deletion is allowed only after expiry; corruption fails the request and deletes nothing authoritative.
 
 Every issued cursor is unpadded base64url of the exact UTF-8 JCS `ListCursorPayloadV1`. Its `macBase64url = HMAC-SHA-256(cursorSecret, ASCII('cliq-list-cursor-v1\0') || JCS({schemaVersion:1,cutId,afterOrdinal}))`, rendered as unpadded base64url. `afterOrdinal` is zero only internally for the first page and otherwise the last ordinal returned by the page that issued this cursor. The server decodes canonical bytes, looks up the cut, authenticates the MAC in constant time, and requires current principal, method, normalized filter digest, normalized limit, unexpired canonical time fence, cut/entry digests, and exact ordinal range to match. Malformed base64/JCS, unknown/deleted/expired cut, noncanonical encoding, bad MAC, changed filter/limit/principal/method, or an unissued/out-of-range ordinal returns `INVALID_REQUEST` with a stable non-echoing list-cursor issue code. The cursor contains no trusted unsigned state and survives Supervisor restart because the cut and secret are SQLite rows.
+
+List materialization, page-expiry checks and expired-cache deletion share the sole canonical time fence and original owner/current authenticated frame. A clock-regression observation must commit its sticky fence before refusal is thrown outside the transaction. An expired-page refusal likewise commits its real accepted high-water without modifying cache membership; otherwise a later wall-clock rollback could revive the expired cut. Replays neither renew the original fifteen-minute TTL nor change stored values, and cache GC deletes only rows expired at the accepted fence. No second clock, expiry ledger or issued-ordinal ledger is introduced: with the fixed normalized page size, only exact nonfinal page-end ordinals can carry valid issued cursors.
+
+Large-cut preparation may capture one complete bounded SQL source snapshot, perform all closed decoding/JCS/hash work in cancellable yielded batches outside a transaction, and use connection-private temporary source/entry scratch. One process-wide preparation permit bounds concurrent scratch; another authenticated list request receives only fixed `RATE_LIMITED`, retryable with `retryAfterMs=1000` and `messageCode='control.list_cut_busy'`. This is backpressure, not execution or network retry permission. No transaction/iterator escapes across a yield and no partial scratch is a public cut. The final current-owner/frame/time-fence transaction must prove exact full membership and every original value still match, then publish the cut and all original verified entries atomically. Unique keys plus exact cardinality and null-safe full-byte/integer equality of every original tuple prove both directions; a changed source is recaptured rather than mixed. Old pages validate the complete original cut/entry graph outside SQL and recheck its full exact values at the final expiry fence, without reevaluating today's Sessions. Temporary scratch is dropped and joined before releasing the permit; uncertain cleanup is a retirement failure. GC performs bounded deletions of already-expired entries and then empty expired cut rows, rather than an unbounded cascade in one synchronous stop-critical section. These steps retain the original 100000/64 MiB caps; supported-runtime measurements and genuine installed Stop qualification remain separate evidence.
 
 A page returns the next `normalizedLimit` rows with `ordinal>afterOrdinal`, preserving the materialized order. Reusing the same valid cursor returns byte-identical summaries and next cursor. `nextCursor` is omitted exactly when the last returned ordinal equals `entryCount` or the cut is empty; otherwise it is the deterministic authenticated cursor for that last ordinal. There is no empty middle page, next-unread interpretation, live-row re-evaluation, duplicate, or skip. Equal `createdAt` values are harmless because the full membership and bytewise id tie-break are materialized before page one. Golden tests cover empty/one/exact-limit/multi-page lists, equal timestamps, all filters, MCP refresh and Run/auth status changes between pages, concurrent inserts before/after the cut, repeat/restart, changed limit/filter/principal/method, malformed/forged/future/end/expired cursors, capacity refusal, and cut GC.
 

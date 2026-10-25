@@ -1659,6 +1659,26 @@ export class StateStore {
   supportsCredentialFinalization(): boolean { return installedCredentialFinalizers.has(this); }
   supportsInstalledRuns(): boolean { return this.schedulerStarted && this.schedulerFailure === undefined && !this.closeRequested && !this.closed; }
   supportsInstalledDelivery(): boolean { return INSTALLED_DELIVERY_COMPOSITION_COMPLETE && this.supportsInstalledRuns(); }
+  supportsSessionContinuity(): boolean { return !this.closed && !this.closeRequested && !this.released; }
+
+  sessionContinuity(request: unknown, identity: AuthenticatedControlIdentity) {
+    if (!this.supportsSessionContinuity()) return Promise.reject(new KernelStorageError('LEASE_FENCED', 'StateStore is closing or closed'));
+    request = immutableSnapshot(request);
+    return this.ownInstalledAdmission(async signal => {
+      const { decodeSessionContinuityRequest } = await import('../kernel/session-continuity.js');
+      const decoded = decodeSessionContinuityRequest(request), scoped = this.artifacts.withReadSignal(signal);
+      signal.throwIfAborted();
+      if (decoded.method === 'session.list') {
+        const { readSessionList } = await import('./list-read-cut.js');
+        return { protocolVersion: 1 as const, ok: true as const, result: await readSessionList(this.driver, scoped, this.owner, decoded, identity, signal) };
+      }
+      const { mutateSessionContext, createSessionHandoff } = await import('./session-continuity.js');
+      signal.throwIfAborted();
+      if (decoded.method === 'session.handoff.create') return { protocolVersion: 1 as const, ok: true as const,
+        result: await createSessionHandoff(this.driver, scoped, this.owner, decoded, identity, signal) };
+      return mutateSessionContext(this.driver, scoped, this.owner, decoded, identity, signal);
+    });
+  }
 
   createAuthorization(request: unknown, identity: AuthenticatedControlIdentity) {
     if (this.closed || this.closeRequested || this.released) throw new KernelStorageError('LEASE_FENCED', 'StateStore is closing or closed');
@@ -1946,6 +1966,12 @@ export class StateStore {
     if (this.schedulerStarted) throw new TypeError('installed scheduler is already started');
     if (!this.installedRuntime || !this.installedAnchor || !this.runtimeAuthority?.sourceInspection) return;
     const isClosing = () => this.closeRequested || this.closed || this.released;
+    if (isClosing()) return;
+    await this.ownInstalledAdmission(async signal => {
+      const { retireAbandonedWorkerPreparations } = await import('./preparing-successor.js');
+      await retireAbandonedWorkerPreparations(this.driver, this.artifacts.withReadSignal(signal), this.owner,
+        { store: this, selected: this.installedRuntime, anchor: this.installedAnchor, signal });
+    });
     if (isClosing()) return;
     const recipe = await withHeldInstalledRuntime(this.installedRuntime, async installed => {
       await installed.revalidate();
@@ -2824,7 +2850,8 @@ export class StateStore {
       const { retireAbandonedSourceInspections } = await import('./source-inspection-owner.js');
       await retireAbandonedSourceInspections(driver, artifacts, ownerContext,
         runtimeAuthority?.sourceInspection && { bundle: runtimeAuthority.bundle,
-          releaseKeys: runtimeAuthority.releaseKeys, sandboxProfile: runtimeAuthority.sourceInspection.sandboxProfile });
+          releaseKeys: runtimeAuthority.releaseKeys, sandboxProfile: runtimeAuthority.sourceInspection.sandboxProfile },
+        installedRuntime && installedAnchor ? { runtime: installedRuntime, anchor: installedAnchor } : undefined);
       const { validateAuthorizationHistory } = await import('./authorization.js');
       await validateAuthorizationHistory(driver, artifacts, ownerContext, runtimeAuthority);
       return new StateStore(stateRoot, driver, artifacts, ownerContext, runtimeAuthority, installedRuntime, installedAnchor);
@@ -3261,7 +3288,7 @@ export class StateStore {
       return captureSubmittedSource(this.driver, this.artifacts, this.owner,
         { bundle: bootstrap.bundle, releaseKeys: bootstrap.releaseKeys, ...bootstrap.sourceInspection,
           ...(sandboxProfile ? { sandboxProfile } : {}) },
-        { ...input, ...(deliverySource ? { deliverySource } : {}) }, abort.signal, this.installedRuntime);
+        { ...input, identity: frameIdentity, ...(deliverySource ? { deliverySource } : {}) }, abort.signal, this.installedRuntime, this.installedAnchor);
     });
     const task: SourceInspectionTask = { abort, promise };
     this.sourceInspectionTasks.add(task);

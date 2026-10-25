@@ -77,7 +77,7 @@ test('assembly fixed observations remain outside authority input and precede onl
   assert(!/\bawait\b|Date\.|performance\.|setTimeout/u.test(declaration.getText()), 'observation adds no I/O, timer or clock');
   for (const [stage, operation] of [['native', 'const native = await loadInstalledWorkerNative'],
     ['source', 'await validateControlChannelClosure'], ['platform', 'const platform = await loadInstalledCredentialPlatform'],
-    ['material', 'return withHeldInstalledRuntime'], ['publish', 'const sandbox = installedSandboxProfile'],
+    ['material', 'return withHeldInstalledRuntime'], ['publish', 'const sandboxProfileRef = publishedSandboxRef ??'],
     ['verifier', 'const verifier = await prepareInstalledVerifierAssembly'], ['policy', 'const policyRef ='],
     ['final_check', 'await installed.revalidate(signal); await validateControlChannelClosure']])
     assert(assembly.getText().includes(`reportInstalledRunAssemblyPhase(onAssemblyPhase, 'submit_assembly_${stage}');\n` +
@@ -379,11 +379,19 @@ test('authorization diagnosis records only existing await boundaries and rethrow
   const body = authorization.slice(start, end);
   assert.match(body, /const diagnosis = beginInstalledAuthorizationDiagnostic\(\);/u);
   for (const [phase, operation] of [['current_channel', 'const channel = await validateControlChannelClosure'],
-    ['replay', 'const retained = await replay()'], ['selected_toolchain', 'const selected = await readRetainedVerifierToolchain'],
+    ['replay', 'const retained = await replay()'],
     ['publish_request', 'const requestArtifact = await artifacts.publishCanonical'],
     ['publish_response', 'const response = createResponse(grant)'], ['channel_recheck', 'await validateControlChannelClosure'],
     ['transaction', 'driver.transaction(connection =>']])
     assert(body.includes(`diagnosis?.stage('${phase}');\n    ${operation}`));
+  const selectedPhase = "if (decision.kind === 'execution_identity_read') diagnosis?.stage('selected_toolchain');";
+  assert.equal(body.split(selectedPhase).length, 2, 'only the original execution-identity branch records toolchain selection');
+  const selectedStart = body.indexOf(selectedPhase), selectedAwait = body.indexOf('const selected = await readRetainedVerifierToolchain');
+  assert(selectedStart >= 0 && selectedAwait > selectedStart && selectedAwait < body.indexOf("diagnosis?.stage('publish_request');"));
+  assert(body.includes("const target = decision.kind === 'read_scope' ? readScope!.target : decision.kind === 'source_git_inspection'\n" +
+    "      ? await selectSourceInspectionTarget(driver, artifacts, runtime, identity.principalId, request as SourceGitInspectionCreateRequest, signal)\n" +
+    '      : await (async () => {\n        const selected = await readRetainedVerifierToolchain'),
+  'the unchanged verifier selection remains inside its execution-only branch, after source-specific selection');
   assert.match(body, /catch \(error\) \{\s*diagnosis\?\.failure\(error\);\s*throw error;/u);
   const transaction = body.slice(body.indexOf('driver.transaction(connection =>'), body.indexOf('    requireHealthyFence(outcome);'));
   assert(!transaction.includes('diagnosis'), 'no subscriber callback runs inside the original authoritative transaction');

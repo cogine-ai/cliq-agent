@@ -4,6 +4,8 @@ import { Module } from 'node:module';
 import path from 'node:path';
 import { isSea } from 'node:sea';
 import { fileURLToPath } from 'node:url';
+import { types } from 'node:util';
+import { immutableSnapshot } from '../model/immutable.js';
 import { setImmediate } from 'node:timers/promises';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -27,7 +29,12 @@ export const STATE_OWNER_NATIVE_PATH = isSea()
 type DescriptorIdentity = Readonly<{ deviceId: string; fileId: string; ownerUid: number }>;
 /** Physical birth witness only. It grants neither activation nor death proof. */
 export type HeldWorkerReservation = Readonly<{ identity: DescriptorIdentity; assertHeld(): void; close(): void }>;
-type NativeWorkerReservation = HeldWorkerReservation & { borrow(): Readonly<{ fd: number; identity: DescriptorIdentity; assertHeld(): void; close(): void }> };
+type NativeWorkerReservation = HeldWorkerReservation & { borrow(): Readonly<{ fd: number; identity: DescriptorIdentity; assertHeld(): void; close(): void }>;
+  borrowPreparingGit(tree: object, launchId: string, spawnNonceDigest: string, activationNonceDigest: string,
+    creationNonceDigest: string, generationRef: string, inputIntentRef: string): HeldPreparingGitInput;
+  borrowPreparingGitCleanup(runId: string, generationId: string, launchId: string, spawnNonceDigest: string, activationNonceDigest: string,
+    creationNonceDigest: string, generationRef: string, inputIntentRef: string, generationDeviceId: string, generationFileId: string,
+    originalSupervisorPid: number, originalSupervisorStartToken: string): HeldRetainedPreparingGitInput };
 const workerReservations = new WeakMap<HeldWorkerReservation,
   { lock: HeldStateOwnerLock; native: NativeWorkerReservation; launchId: string; spawnNonceDigest: string; closed: boolean }>();
 function checkedWorkerReservation(launchId: string, spawnNonceDigest: string): string {
@@ -79,6 +86,119 @@ export function readWorkerReservationRetirement(lock: HeldStateOwnerLock, reserv
   if (!held.closed) throw new KernelStorageError('RECOVERY_REQUIRED', 'original worker reservation descriptors are not joined');
   return reservation.identity;
 }
+export type PreparingGitInputBinding = Readonly<{ runId: string; generationId: string; launchId: string;
+  spawnNonceDigest: string; activationNonceDigest: string; generationCreationNonceDigest: string; generationRef: string; inputIntentRef: string }>;
+export type HeldPreparingGitInput = Readonly<{ identity: PreparingGitInputBinding & Readonly<{ reservation: DescriptorIdentity; generation: DescriptorIdentity;
+  originalSupervisorPid: number; originalSupervisorStartToken: string }>;
+  assertHeld(): void; close(): void }>;
+const preparingGitInputs = new WeakMap<HeldPreparingGitInput, { lock: HeldStateOwnerLock; native: HeldPreparingGitInput }>();
+export type HeldRetainedPreparingGitInput = HeldPreparingGitInput;
+const retainedPreparingGitInputs = new WeakMap<HeldRetainedPreparingGitInput, { lock: HeldStateOwnerLock; native: HeldRetainedPreparingGitInput }>();
+/** Physical same-lock friend only. The StateStore's original preparing cut
+ * owns business authority; a client cannot mint or substitute this handle. */
+export function openPreparingGitInput(lock: HeldStateOwnerLock, reservation: HeldWorkerReservation, tree: HeldGenerationTree,
+  input: PreparingGitInputBinding): HeldPreparingGitInput {
+  const held = workerReservations.get(reservation), nativeTree = nativeTrees.get(tree);
+  if (!held || held.lock !== lock || !nativeTree) throw new KernelStorageError('ARTIFACT_MISMATCH', 'original preparing Git reservation and generation are required');
+  if (!input || typeof input !== 'object' || types.isProxy(input)) throw new TypeError('invalid preparing Git input binding');
+  const keys = ['runId', 'generationId', 'launchId', 'spawnNonceDigest', 'activationNonceDigest', 'generationCreationNonceDigest', 'generationRef', 'inputIntentRef'];
+  const fields = Object.getOwnPropertyDescriptors(input);
+  if (Reflect.ownKeys(fields).length !== keys.length || keys.some(key => !Object.hasOwn(fields, key) ||
+      !fields[key]!.enumerable || !Object.hasOwn(fields[key]!, 'value') || typeof fields[key]!.value !== 'string'))
+    throw new TypeError('invalid preparing Git input binding');
+  const binding = Object.fromEntries(keys.map(key => [key, fields[key]!.value])) as PreparingGitInputBinding;
+  if (!/^[A-Za-z0-9_-]{1,128}$/u.test(binding.runId) || !/^[A-Za-z0-9_-]{43}$/u.test(binding.generationId) ||
+      binding.launchId !== held.launchId || binding.spawnNonceDigest !== held.spawnNonceDigest)
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'original preparing Git reservation differs from its selected launch');
+  for (const key of ['activationNonceDigest', 'generationCreationNonceDigest', 'generationRef', 'inputIntentRef'] as const)
+    if (!/^[0-9a-f]{64}$/u.test(binding[key])) throw new TypeError('invalid preparing Git input digest');
+  lock.assertHeld(); reservation.assertHeld(); tree.assertHeld();
+  let native: HeldPreparingGitInput;
+  try { native = held.native.borrowPreparingGit(nativeTree, binding.launchId, binding.spawnNonceDigest, binding.activationNonceDigest,
+    binding.generationCreationNonceDigest, binding.generationRef, binding.inputIntentRef); }
+  catch (cause) { throw new KernelStorageError('RECOVERY_REQUIRED', 'original preparing Git input was not acquired', { cause }); }
+  const identity = Object.freeze({ ...native.identity, reservation: Object.freeze({ ...native.identity.reservation }), generation: Object.freeze({ ...native.identity.generation }) });
+  if (keys.some(key => identity[key as keyof PreparingGitInputBinding] !== binding[key as keyof PreparingGitInputBinding])) {
+    try { native.close(); } catch (cause) { throw new ResourceRetirementError('mismatched preparing Git input did not retire', cause); }
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'original preparing Git input differs from its physical generation');
+  }
+  const handle: HeldPreparingGitInput = Object.freeze({ identity,
+    assertHeld() {
+      if (this !== handle) throw new TypeError('invalid original preparing Git input');
+      lock.assertHeld();
+      try { native.assertHeld(); } catch (cause) { throw new KernelStorageError('RECOVERY_REQUIRED', 'original preparing Git input is not held', { cause }); }
+    },
+    close() {
+      if (this !== handle) throw new TypeError('invalid original preparing Git input');
+      try { native.close(); } catch (cause) { throw new ResourceRetirementError('original preparing Git input did not retire', cause); }
+    }
+  });
+  preparingGitInputs.set(handle, { lock, native }); return handle;
+}
+/** Only the separately loaded signed native receiver can consume its C tag.
+ * No numerical descriptor or caller-selected execution operation is exposed. */
+export function borrowPreparingGitInputForExecution(input: HeldPreparingGitInput): object {
+  const binding = preparingGitInputs.get(input);
+  if (!binding) throw new TypeError('invalid original preparing Git input');
+  input.assertHeld(); return binding.native;
+}
+/** The caller's original preparing graph supplies expected inert identities;
+ * only the separately tagged native checker can close the physical prefix. */
+export function openRetainedPreparingGitInput(lock: HeldStateOwnerLock, reservation: HeldWorkerReservation,
+  input: PreparingGitInputBinding, generation: DescriptorIdentity, supervisor: Readonly<{ pid: number; processStartToken: string }>): HeldRetainedPreparingGitInput {
+  const held = workerReservations.get(reservation);
+  if (!held || held.lock !== lock || !input || types.isProxy(input) || !generation || types.isProxy(generation) || !supervisor || types.isProxy(supervisor))
+    throw new TypeError('retained preparing cleanup requires its original reservation and closed data');
+  const keys = ['runId', 'generationId', 'launchId', 'spawnNonceDigest', 'activationNonceDigest', 'generationCreationNonceDigest', 'generationRef', 'inputIntentRef'];
+  const descriptors = Object.getOwnPropertyDescriptors(input);
+  if (Reflect.ownKeys(descriptors).length !== keys.length || keys.some(key => !Object.hasOwn(descriptors, key) ||
+      !Object.hasOwn(descriptors[key]!, 'value') || typeof descriptors[key]!.value !== 'string')) throw new TypeError('invalid retained preparing binding');
+  const binding = Object.fromEntries(keys.map(key => [key, descriptors[key]!.value])) as PreparingGitInputBinding;
+  const inert = (value: object, expected: readonly string[]) => {
+    const fields = Object.getOwnPropertyDescriptors(value);
+    if (Reflect.ownKeys(fields).length !== expected.length || expected.some(key => !Object.hasOwn(fields, key) || !Object.hasOwn(fields[key]!, 'value')))
+      throw new TypeError('retained preparing identities require closed own data');
+    return Object.fromEntries(expected.map(key => [key, fields[key]!.value]));
+  };
+  const physical = inert(generation, ['deviceId', 'fileId', 'ownerUid']), process = inert(supervisor, ['pid', 'processStartToken']);
+  if (!/^[A-Za-z0-9_-]{1,128}$/u.test(binding.runId) || !/^[A-Za-z0-9_-]{43}$/u.test(binding.generationId) ||
+      binding.launchId !== held.launchId || binding.spawnNonceDigest !== held.spawnNonceDigest ||
+      typeof physical.deviceId !== 'string' || !/^[1-9][0-9]*$/u.test(physical.deviceId) || typeof physical.fileId !== 'string' || !/^[1-9][0-9]*$/u.test(physical.fileId) ||
+      physical.ownerUid !== reservation.identity.ownerUid || !Number.isSafeInteger(process.pid) || process.pid < 1 || process.pid > 2_147_483_647 ||
+      typeof process.processStartToken !== 'string' || process.processStartToken.length < 1 || process.processStartToken.length > 127)
+    throw new TypeError('invalid original retained preparing identities');
+  for (const key of ['activationNonceDigest', 'generationCreationNonceDigest', 'generationRef', 'inputIntentRef'] as const)
+    if (!/^[0-9a-f]{64}$/u.test(binding[key])) throw new TypeError('invalid retained preparing digest');
+  lock.assertHeld(); reservation.assertHeld();
+  let native: HeldRetainedPreparingGitInput;
+  try { native = held.native.borrowPreparingGitCleanup(binding.runId, binding.generationId, binding.launchId, binding.spawnNonceDigest,
+    binding.activationNonceDigest, binding.generationCreationNonceDigest, binding.generationRef, binding.inputIntentRef,
+    physical.deviceId, physical.fileId, process.pid, process.processStartToken); }
+  catch (cause) {
+    if ((cause as NodeJS.ErrnoException | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT')
+      throw new ResourceRetirementError('retained preparing input construction did not retire', cause);
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'retained preparing input was not acquired', { cause });
+  }
+  const identity = Object.freeze({ ...native.identity, reservation: Object.freeze({ ...native.identity.reservation }), generation: Object.freeze({ ...native.identity.generation }) });
+  const handle: HeldRetainedPreparingGitInput = Object.freeze({ identity,
+    assertHeld() { if (this !== handle) throw new TypeError('invalid retained preparing input'); lock.assertHeld(); native.assertHeld(); },
+    close() { if (this !== handle) throw new TypeError('invalid retained preparing input');
+      try { native.close(); } catch (cause) { throw new ResourceRetirementError('retained preparing input did not retire', cause); } }
+  });
+  retainedPreparingGitInputs.set(handle, { lock, native }); return handle;
+}
+/** Closed-input provenance only. Cleanup joins consume the native input before
+ * the final transaction; its original owning lock must still be the same one. */
+export function assertRetainedPreparingGitInputOwner(lock: HeldStateOwnerLock, input: HeldRetainedPreparingGitInput): void {
+  const held = retainedPreparingGitInputs.get(input);
+  if (!held || held.lock !== lock) throw new TypeError('retained preparing receipt belongs to another physical StateOwner');
+  lock.assertHeld();
+}
+
+export function borrowRetainedPreparingGitInputForCleanup(input: HeldRetainedPreparingGitInput): object {
+  const held = retainedPreparingGitInputs.get(input);
+  if (!held) throw new TypeError('invalid cleanup-only preparing input'); input.assertHeld(); return held.native;
+}
 export type SourceInspectionStagingIdentity = DescriptorIdentity & Readonly<{ mode: 448 }>;
 /** Physical source-inspection reservation only, never a Run or execution FD. */
 export type HeldSourceInspectionStaging = Readonly<{
@@ -98,10 +218,69 @@ type SourceInspectionStagingBinding = Readonly<{
 type NativeSourceInspectionStaging = Readonly<{
   identity: DescriptorIdentity;
   assertHeld(): void;
+  readPresence(): 'present' | 'absent';
   close(): void;
   retireStep(): boolean;
   assertRetired(): void;
+  borrowGitInput(root: HeldWorkspaceRoot, inspectionId: string, stagingNonceDigest: string,
+    targetRef: string, inputIntentRef: string): NativeSourceGitInput;
+  openGitInput(inspectionId: string, stagingNonceDigest: string, targetRef: string, inputIntentRef: string): NativeSourceGitInput;
+  openAbsentGitInput(lifecycle: Buffer, inspectionId: string, stagingNonceDigest: string,
+    targetRef: string, inputIntentRef: string): NativeRegisteredAbsentSourceGitInput;
 }>;
+export type SourceGitInputIdentity = Readonly<{
+  inspectionId: string;
+  stagingNonceDigest: string;
+  targetRef: string;
+  inputIntentRef: string;
+  birthIdentity: DescriptorIdentity;
+}>;
+/** Same-attempt physical descriptors and a durable native birth bookmark.
+ * This is neither source permission nor a release/continuation capability. */
+export type HeldSourceGitInput = Readonly<{
+  identity: SourceGitInputIdentity;
+  assertHeld(): void;
+  close(): void;
+}>;
+declare const retainedSourceGitInputBrand: unique symbol;
+/** Physical cleanup input only. No workspace/root payload or execution borrow
+ * exists on this distinct native tag, including when the old root moved. */
+export type HeldRetainedSourceGitInput = HeldSourceGitInput & Readonly<{ [retainedSourceGitInputBrand]: true }>;
+type NativeSourceGitInput = HeldSourceGitInput;
+export type SourceGitNativeLifecycleV2 = Readonly<{
+  format: 'cliq-source-native-lifecycle-v2'; lifecycleDigest: string; byteCount: number;
+  birthIdentity: DescriptorIdentity;
+  inspectionId: string; stagingNonceDigest: string; targetRef: string; inputIntentRef: string;
+  stateRoot: DescriptorIdentity & { ownerGid: number; mode: 448 };
+  runtime: DescriptorIdentity & { ownerGid: number; mode: 448 };
+  sourceParent: DescriptorIdentity & { ownerGid: number; mode: 448 };
+  staging: DescriptorIdentity & { ownerGid: number; mode: 448 };
+  workspaceDeviceId: string; workspaceFileId: string; gitDeviceId: string; gitFileId: string;
+  pidNamespaceId: string | null;
+  originalSupervisorPid: number; originalSupervisorStartToken: string;
+  controllerRoot: DescriptorIdentity & { ownerGid: number; mode: 448 };
+  controllerParent: DescriptorIdentity & { ownerGid: number; mode: 448 };
+  controllerLeaf: DescriptorIdentity & { ownerGid: number; mode: 448 };
+  controllerLeafName: string; originalControllerPid: number; originalControllerStartToken: string;
+  recordCount: number; lastBirthKind: number; reserved: 0 | 1; blocked: 0 | 1; released: 0 | 1; continued: 0 | 1;
+  cgroupDeviceId: string | null; cgroupId: string | null; launchNonceDigest: string | null;
+  containmentPlanRef: string | null; sandboxLaunchRef: string | null; sandboxLaunchDigest: string | null;
+  processes: readonly Readonly<{ role: 'monitor' | 'worker' | 'namespace_init'; pid: number; processStartToken: string }>[];
+  snapshotDigest?: string; sourceByteCount?: number; entryCount?: number; shardCount?: number;
+}>;
+declare const registeredAbsentSourceGitInputBrand: unique symbol;
+export type HeldRegisteredAbsentSourceGitInput = Readonly<{
+  identity: Omit<SourceGitInputIdentity, 'birthIdentity'> & { snapshotIdentity: DescriptorIdentity };
+  assertHeld(): void; close(): void; readonly [registeredAbsentSourceGitInputBrand]: true;
+}>;
+type NativeRegisteredAbsentSourceGitInput = Omit<HeldRegisteredAbsentSourceGitInput, typeof registeredAbsentSourceGitInputBrand>;
+const sourceGitInputs = new WeakMap<HeldSourceGitInput,
+  Readonly<{ lock: HeldStateOwnerLock; native: NativeSourceGitInput }>>();
+const retainedSourceGitInputs = new WeakMap<HeldRetainedSourceGitInput,
+  Readonly<{ lock: HeldStateOwnerLock; native: NativeSourceGitInput }>>();
+const registeredAbsentSourceGitInputs = new WeakMap<HeldRegisteredAbsentSourceGitInput,
+  Readonly<{ lock: HeldStateOwnerLock; native: NativeRegisteredAbsentSourceGitInput }>>();
+const registeredAbsentSourceStagings = new WeakSet<SourceInspectionStagingBinding>();
 const sourceStagings = new WeakMap<HeldSourceInspectionStaging, SourceInspectionStagingBinding>();
 const sourceRetirements = new WeakMap<SourceInspectionStagingRetirement, SourceInspectionStagingBinding>();
 const sourceRetirementTasks = new WeakMap<HeldSourceInspectionStaging, Promise<SourceInspectionStagingRetirement>>();
@@ -142,6 +321,155 @@ function sourceStagingBinding(lock: HeldStateOwnerLock, staging: HeldSourceInspe
   lock.assertHeld();
   return binding;
 }
+/** Internal native-to-native descriptor friend. It never exports a numerical
+ * FD or accepts a replacement workspace, staging, command, or authority. */
+export function openHeldSourceGitInput(lock: HeldStateOwnerLock, root: HeldWorkspaceRoot,
+  staging: HeldSourceInspectionStaging, input: Readonly<{ targetRef: string; inputIntentRef: string }>): HeldSourceGitInput {
+  assertHeldWorkspaceRoot(root);
+  const binding = sourceStagingBinding(lock, staging);
+  if (!binding.created) throw new KernelStorageError('ARTIFACT_MISMATCH', 'source Git input requires its original new staging');
+  staging.assertHeld();
+  const refs = sourceGitReferences(input);
+  let native: NativeSourceGitInput;
+  try { native = binding.native.borrowGitInput(root, binding.inspectionId, binding.stagingNonceDigest, refs.targetRef, refs.inputIntentRef); }
+  catch (error) { sourceStagingError(error); }
+  const handle = wrapSourceGitInput(lock, native);
+  sourceGitInputs.set(handle, Object.freeze({ lock, native }));
+  return handle;
+}
+function sourceGitReferences(input: Readonly<{ targetRef: string; inputIntentRef: string }>) {
+  if (input === null || typeof input !== 'object' || types.isProxy(input)) throw new TypeError('invalid source Git input references');
+  const fields = Object.getOwnPropertyDescriptors(input), keys = Reflect.ownKeys(fields);
+  if (keys.length !== 2 || !Object.hasOwn(fields, 'targetRef') || !Object.hasOwn(fields, 'inputIntentRef') ||
+      keys.some(key => typeof key !== 'string') ||
+      !['targetRef', 'inputIntentRef'].every(key => Object.hasOwn(fields[key]!, 'value') &&
+        typeof fields[key]!.value === 'string' && /^[0-9a-f]{64}$/u.test(fields[key]!.value)))
+    throw new TypeError('invalid source Git input references');
+  return { targetRef: fields.targetRef!.value as string, inputIntentRef: fields.inputIntentRef!.value as string };
+}
+function wrapSourceGitInput(lock: HeldStateOwnerLock, native: NativeSourceGitInput): HeldSourceGitInput {
+  const identity = Object.freeze({ ...native.identity, birthIdentity: Object.freeze({ ...native.identity.birthIdentity }) });
+  const handle: HeldSourceGitInput = Object.freeze({ identity,
+    assertHeld() {
+      if (this !== handle) throw new TypeError('invalid source Git input');
+      try { lock.assertHeld(); native.assertHeld(); }
+      catch (error) {
+        if (error instanceof ResourceRetirementError) throw error;
+        if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT')
+          throw new ResourceRetirementError('source Git input did not retire', error);
+        throw new KernelStorageError('RECOVERY_REQUIRED', 'original source Git input is not held');
+      }
+    },
+    close() {
+      if (this !== handle) throw new TypeError('invalid source Git input');
+      try { native.close(); } catch (error) {
+        throw new ResourceRetirementError('source Git input did not retire', error);
+      }
+    }
+  });
+  return handle;
+}
+export function openRetainedSourceGitInput(lock: HeldStateOwnerLock, staging: HeldSourceInspectionStaging,
+  input: Readonly<{ targetRef: string; inputIntentRef: string }>): HeldRetainedSourceGitInput {
+  const binding = sourceStagingBinding(lock, staging);
+  if (binding.created) throw new KernelStorageError('ARTIFACT_MISMATCH', 'retained source cleanup requires reopened original staging');
+  staging.assertHeld(); const refs = sourceGitReferences(input);
+  let native: NativeSourceGitInput;
+  try { native = binding.native.openGitInput(binding.inspectionId, binding.stagingNonceDigest, refs.targetRef, refs.inputIntentRef); }
+  catch (error) { sourceStagingError(error); }
+  const handle = wrapSourceGitInput(lock, native) as HeldRetainedSourceGitInput;
+  retainedSourceGitInputs.set(handle, Object.freeze({ lock, native })); return handle;
+}
+/** Cleanup-only native friend. It cannot be passed to reserveSourceGit: the
+ * independently loaded native receiver requires the distinct retained tag. */
+export function borrowRetainedSourceGitInputForCleanup(input: HeldRetainedSourceGitInput): NativeSourceGitInput {
+  const binding = retainedSourceGitInputs.get(input);
+  if (!binding) throw new TypeError('invalid retained source Git input');
+  input.assertHeld(); return binding.native;
+}
+/** A complete registered birth is data only. This reader independently runs
+ * the native closed decoder, including every original progress checksum. */
+function sourceLifecycleBytes(value: Uint8Array): Buffer {
+  if (!value || typeof value !== 'object' || types.isProxy(value) || !types.isUint8Array(value))
+    throw new TypeError('source lifecycle requires bounded complete bytes');
+  const prototype = Object.getPrototypeOf(Uint8Array.prototype);
+  const read = (key: string) => Object.getOwnPropertyDescriptor(prototype, key)!.get!.call(value);
+  const length: number = read('byteLength');
+  if (length < 1 || length > 1_048_576) throw new TypeError('source lifecycle requires bounded complete bytes');
+  return Buffer.from(new Uint8Array(read('buffer') as ArrayBuffer, read('byteOffset') as number, length));
+}
+export function decodeSourceGitNativeLifecycle(snapshot: Uint8Array): SourceGitNativeLifecycleV2 {
+  // Reuse only the already genuinely loaded fixed helper. This data audit
+  // opens no image, StateRoot, lock or process and establishes no new trust.
+  const binding = loaded && nativeBindings.get(loaded.implementation);
+  if (!binding?.decodeSourceGitLifecycle)
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'the loaded fixed native source decoder is unavailable');
+  const bytes = sourceLifecycleBytes(snapshot), data = binding.decodeSourceGitLifecycle(bytes);
+  if (data.lifecycleDigest !== sha256Bytes(bytes) || data.byteCount !== bytes.length ||
+      data.format !== 'cliq-source-native-lifecycle-v2') throw new KernelStorageError('ARTIFACT_MISMATCH', 'source lifecycle native projection differs');
+  return immutableSnapshot(data);
+}
+export function openRegisteredAbsentSourceGitInput(lock: HeldStateOwnerLock, staging: HeldSourceInspectionStaging,
+  refs: Readonly<{ targetRef: string; inputIntentRef: string }>, lifecycle: Uint8Array): HeldRegisteredAbsentSourceGitInput {
+  const binding = sourceStagingBinding(lock, staging);
+  if (binding.created) throw new TypeError('registered absent cleanup requires the original retained staging');
+  const snapshot = sourceLifecycleBytes(lifecycle);
+  const checked = sourceGitReferences(refs), data = decodeSourceGitNativeLifecycle(snapshot);
+  if (data.inspectionId !== binding.inspectionId || data.stagingNonceDigest !== binding.stagingNonceDigest ||
+      data.targetRef !== checked.targetRef || data.inputIntentRef !== checked.inputIntentRef ||
+      data.staging.deviceId !== binding.stagingIdentity.deviceId || data.staging.fileId !== binding.stagingIdentity.fileId ||
+      data.staging.ownerUid !== binding.stagingIdentity.ownerUid || data.staging.mode !== 448)
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'registered absent lifecycle differs from its retained staging');
+  let native: NativeRegisteredAbsentSourceGitInput;
+  try { native = binding.native.openAbsentGitInput(snapshot, binding.inspectionId, binding.stagingNonceDigest,
+    checked.targetRef, checked.inputIntentRef); } catch (error) { sourceStagingError(error); }
+  const identity = Object.freeze({ ...native.identity, snapshotIdentity: Object.freeze({ ...native.identity.snapshotIdentity }) });
+  const handle: NativeRegisteredAbsentSourceGitInput = Object.freeze({ identity,
+    assertHeld() { if (this !== handle) throw new TypeError('invalid registered absent source input');
+      try { lock.assertHeld(); native.assertHeld(); } catch (error) { sourceStagingError(error); } },
+    close() { if (this !== handle) throw new TypeError('invalid registered absent source input');
+      try { native.close(); } catch (error) { sourceStagingError(error); } }
+  });
+  const branded = handle as HeldRegisteredAbsentSourceGitInput;
+  registeredAbsentSourceGitInputs.set(branded, Object.freeze({ lock, native }));
+  registeredAbsentSourceStagings.add(binding); return branded;
+}
+/** Distinct cleanup-only native tag; fresh reserve() independently refuses it. */
+export function borrowRegisteredAbsentSourceGitInputForCleanup(input: HeldRegisteredAbsentSourceGitInput): NativeRegisteredAbsentSourceGitInput {
+  const binding = registeredAbsentSourceGitInputs.get(input);
+  if (!binding) throw new TypeError('invalid registered absent source input');
+  input.assertHeld(); return binding.native;
+}
+/** Private installed-composition bridge. A matching plain object cannot issue
+ * a native scope; the receiver independently checks the C type tag and ABI. */
+export function borrowSourceGitInputForExecution(input: HeldSourceGitInput): NativeSourceGitInput {
+  const binding = sourceGitInputs.get(input);
+  if (!binding) throw new TypeError('invalid source Git input');
+  input.assertHeld();
+  return binding.native;
+}
+/** Current same-lock observation only. Retained staging remains cleanup-only;
+ * this does not satisfy the distinct created-only admission friend below. */
+export function readHeldSourceInspectionStaging(lock: HeldStateOwnerLock, staging: HeldSourceInspectionStaging):
+  Readonly<{ inspectionId: string; stagingNonceDigest: string; stagingIdentity: SourceInspectionStagingIdentity }> {
+  const binding = sourceStagingBinding(lock, staging);
+  staging.assertHeld();
+  return Object.freeze({ inspectionId: binding.inspectionId, stagingNonceDigest: binding.stagingNonceDigest,
+    stagingIdentity: binding.stagingIdentity });
+}
+/** A current native locator observation for cleanup branch selection only.
+ * It is no execution, recovery or retirement proof. Both cleanup constructors
+ * must independently recheck their original identity after this read. */
+export function readSourceInspectionStagingPresence(lock: HeldStateOwnerLock,
+  staging: HeldSourceInspectionStaging): 'present' | 'absent' {
+  const binding = sourceStagingBinding(lock, staging);
+  let observed: 'present' | 'absent';
+  try { observed = binding.native.readPresence(); } catch (error) { sourceStagingError(error); }
+  if (observed !== 'present' && observed !== 'absent')
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'source staging presence was not observed');
+  return observed;
+}
+
 /** Only a newly created actual reservation can authorize a capturing row. */
 export function readSourceInspectionStaging(lock: HeldStateOwnerLock, staging: HeldSourceInspectionStaging):
   Readonly<{ inspectionId: string; stagingNonceDigest: string; stagingIdentity: SourceInspectionStagingIdentity }> {
@@ -186,14 +514,15 @@ export function retireSourceInspectionStaging(lock: HeldStateOwnerLock, staging:
 }
 export function readSourceInspectionStagingRetirement(lock: HeldStateOwnerLock, receipt: SourceInspectionStagingRetirement):
   Readonly<{ inspectionId: string; stagingNonceDigest: string; stagingIdentity: SourceInspectionStagingIdentity;
-    stagingObservation: 'exact_reserved_root_absent'; directoryFsyncComplete: true }> {
+    stagingObservation: 'exact_reserved_root_absent' | 'registered_reserved_root_absent'; directoryFsyncComplete: true }> {
   const binding = sourceRetirements.get(receipt);
   if (!binding || binding.lock !== lock) throw new KernelStorageError('ARTIFACT_MISMATCH', 'source staging retirement was not minted by this exact StateOwner');
   lock.assertHeld();
   // A later replacement at the same locator must not reuse a stale receipt.
   try { binding.native.assertRetired(); } catch (error) { sourceStagingError(error); }
   return Object.freeze({ inspectionId: binding.inspectionId, stagingNonceDigest: binding.stagingNonceDigest,
-    stagingIdentity: binding.stagingIdentity, stagingObservation: 'exact_reserved_root_absent', directoryFsyncComplete: true });
+    stagingIdentity: binding.stagingIdentity, stagingObservation: registeredAbsentSourceStagings.has(binding)
+      ? 'registered_reserved_root_absent' : 'exact_reserved_root_absent', directoryFsyncComplete: true });
 }
 /** Trusted composition-only staging handle. It is not a Linux/VM locator. */
 export type HeldGenerationTree = Readonly<{
@@ -426,6 +755,7 @@ type NativeLock = Omit<HeldStateOwnerLock, 'quarantineGeneration' | 'createGener
   openSourceInspectionStaging(stagingId: string, deviceId: string, fileId: string): NativeSourceInspectionStaging;
   createWorkerReservation(reservationId: string): NativeWorkerReservation;
   openWorkerReservation(reservationId: string, deviceId: string, fileId: string, ownerUid: number): NativeWorkerReservation;
+  openPublicationGitIndex(root: HeldWorkspaceRoot, deviceId: string, fileId: string, ownerUid: number, maxBytes: number): HeldPublicationGitIndex;
   openPublicationOperation(root: HeldWorkspaceRoot, operation: NativePublicationOperationInput): NativePublicationOperation;
   openPublicationNamespaceObserver(root: HeldWorkspaceRoot, input: NativePublicationNamespaceInput): NativePublicationNamespaceObserver;
 };
@@ -529,6 +859,55 @@ export function readRetiredPublicationArena(lock: HeldStateOwnerLock, operation:
   lock.assertHeld();
   if (!binding.closed || !binding.retirement) throw new KernelStorageError('RECOVERY_REQUIRED', 'publication arena retirement and descriptor join are incomplete');
   operation.assertArenaRetired(); binding.postJoinObserved = true; return binding.retirement;
+}
+export type HeldPublicationGitIndex = Readonly<{ present: boolean; byteCount: number; identity?: DescriptorIdentity;
+  readChunk(): Buffer | null; assertHeld(): void; assertComplete(): void; close(): void }>;
+const publicationGitIndexes = new WeakMap<HeldPublicationGitIndex, { lock: HeldStateOwnerLock; root: HeldWorkspaceRoot }>();
+export function openHeldPublicationGitIndex(lock: HeldStateOwnerLock, root: HeldWorkspaceRoot,
+  input: Readonly<{ repositoryDirectory: DescriptorIdentity; maxBytes: number }>): HeldPublicationGitIndex {
+  const native = publicationLocks.get(lock);
+  if (!native || !workspaceRoots.has(root)) throw new TypeError('publication Git index requires actual StateOwner and workspace handles');
+  const closed = (value: unknown, names: readonly string[]) => {
+    if (!value || typeof value !== 'object' || types.isProxy(value)) return false;
+    const fields = Object.getOwnPropertyDescriptors(value), keys = Reflect.ownKeys(fields);
+    return keys.length === names.length && keys.every(key => typeof key === 'string' && names.includes(key) &&
+      fields[key]!.enumerable && Object.hasOwn(fields[key]!, 'value') && fields[key]!.value !== undefined);
+  };
+  if (!closed(input, ['repositoryDirectory', 'maxBytes']) || !closed(input.repositoryDirectory, ['deviceId', 'fileId', 'ownerUid']) ||
+      typeof input.repositoryDirectory.deviceId !== 'string' || !/^(0|[1-9]\d*)$/u.test(input.repositoryDirectory.deviceId) ||
+      typeof input.repositoryDirectory.fileId !== 'string' || !/^[1-9]\d*$/u.test(input.repositoryDirectory.fileId) ||
+      !Number.isSafeInteger(input.repositoryDirectory.ownerUid) || input.repositoryDirectory.ownerUid < 0 || input.repositoryDirectory.ownerUid > 0xffffffff ||
+      !Number.isSafeInteger(input.maxBytes) || input.maxBytes < 1 || input.maxBytes > 268_435_456)
+    throw new TypeError('publication Git index requires its original repository identity and fixed byte bound');
+  const selected = immutableSnapshot(input);
+  const fail = (error: unknown): never => {
+    if (error instanceof ResourceRetirementError || error instanceof KernelStorageError) throw error;
+    if ((error as NodeJS.ErrnoException | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT')
+      throw new ResourceRetirementError('publication Git index descriptor did not retire', error);
+    try { native.assertHeld(); } catch (retirement) {
+      if ((retirement as NodeJS.ErrnoException | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT')
+        throw new ResourceRetirementError('publication Git index descriptor did not retire', new AggregateError([error, retirement]));
+    }
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'publication Git index has no complete unchanged physical observation', { cause: error });
+  };
+  let owned: HeldPublicationGitIndex;
+  try {
+    lock.assertHeld(); root.assertHeld();
+    const expected = selected.repositoryDirectory;
+    owned = native.openPublicationGitIndex(root, expected.deviceId, expected.fileId, expected.ownerUid, selected.maxBytes);
+  } catch (error) { return fail(error); }
+  const receiver = (value: unknown) => {
+    const binding = publicationGitIndexes.get(value as HeldPublicationGitIndex);
+    if (value !== handle || binding?.lock !== lock || binding.root !== root) throw new TypeError('invalid publication Git index handle');
+  };
+  const handle: HeldPublicationGitIndex = Object.freeze({ present: owned.present, byteCount: owned.byteCount,
+    ...(owned.identity ? { identity: Object.freeze({ ...owned.identity }) } : {}),
+    assertHeld() { receiver(this); try { owned.assertHeld(); } catch (error) { fail(error); } },
+    assertComplete() { receiver(this); try { owned.assertComplete(); } catch (error) { fail(error); } },
+    readChunk() { receiver(this); try { return owned.readChunk(); } catch (error) { return fail(error); } },
+    close() { receiver(this); try { owned.close(); } catch (error) { fail(error); } }
+  });
+  publicationGitIndexes.set(handle, { lock, root }); return handle;
 }
 /** Composition-only bridge. Reject structural stand-ins before reading any
  * caller properties; C independently checks both actual native type brands. */
@@ -747,6 +1126,7 @@ type NativeInstalledAnchor = Readonly<{ assertHeld(): void;
 type NativeCredentialScope = Readonly<{ generation: string; assertHeld(): void; close(): void;
   observeProducerLifetime(pid: number, ownerUid: number, processStartToken: string): 'present' | 'dead' }>;
 type NativeBinding = { acquireLock(stateRoot: string, createLayout: boolean): NativeLock; processStartToken(): string;
+  decodeSourceGitLifecycle?(bytes: Buffer): SourceGitNativeLifecycleV2;
   captureCurrentProcess(): NativeCurrentProcess;
   openWorkspaceRoot(workspacePath: string): HeldWorkspaceRoot;
   acquireCredentialScope?(rootFd: number, stateRoot: string, root: readonly bigint[]): NativeCredentialScope;

@@ -9,6 +9,39 @@ import { decodePublicationDirectoryPreimage, decodeDeliveryTerminalProjectionEvi
 import { decodePublicationArenaBirth, publicationArenaId } from './publication.js';
 import { decodePublicationActualPreimage, decodePublicationPreparationClosure, decodePublicationLateObservationItem } from './publication.js';
 
+test('canonical Git index proof separates a present file from actual absence without inventing a descriptor', () => {
+  const ref = 'a'.repeat(64);
+  const base = { schemaVersion: 1, format: 'cliq-publication-proof-v1', kind: 'git_index_unchanged', repositoryKind: 'git',
+    deliveryRunId: 'data-only-index', deliveryPlanRef: ref, workspaceIdentityRef: ref, workspaceIdentityDigest: ref,
+    inspectorIdentityRef: ref, inspectorIdentityDigest: ref, observedAt: '2026-10-19T00:00:01.000Z', proofDigest: '',
+    repositoryIdentityRef: ref, repositoryIdentityDigest: ref, capturedSourceRef: ref, capturedIndexRef: ref, capturedIndexDigest: ref,
+    observedIndexRef: ref, observedIndexDigest: ref,
+    objectFormat: 'sha1', canonicalIndexBytesRef: ref, canonicalIndexByteCount: 32, indexTreeObjectId: 'b'.repeat(40),
+    descriptorReadComplete: true, readerJoined: true };
+  for (const observedIndex of [{ kind: 'present', deviceId: '1', fileId: '2', ownerUid: 501, rawByteCount: 32, rawBytesDigest: ref },
+    { kind: 'absent', rawByteCount: 0 }]) {
+    const value = { ...base, observedIndex }; value.proofDigest = digestOmitting(value, 'proofDigest');
+    assert.deepEqual(decodePublicationProof(value), value);
+  }
+  for (const observedIndex of [{ kind: 'absent', rawByteCount: 1 }, { kind: 'absent', rawByteCount: 0, fileId: '2' },
+    { kind: 'present', deviceId: '1', fileId: '2', ownerUid: 501, rawByteCount: 1, rawBytesDigest: ref },
+    { kind: 'unknown', rawByteCount: 0 }]) {
+    const value = { ...base, observedIndex }; value.proofDigest = digestOmitting(value, 'proofDigest');
+    assert.throws(() => decodePublicationProof(value), TypeError);
+  }
+  let observed = 0;
+  const accessor = { ...base, observedIndex: { kind: 'absent', rawByteCount: 0 } };
+  Object.defineProperty(accessor, 'repositoryKind', { enumerable: true, get() { observed++; throw new Error('caller getter executed'); } });
+  assert.throws(() => decodePublicationProof(accessor), TypeError);
+  const nested = { ...base, observedIndex: { rawByteCount: 0 } };
+  Object.defineProperty(nested.observedIndex, 'kind', { enumerable: true, get() { observed++; throw new Error('caller getter executed'); } });
+  assert.throws(() => decodePublicationProof(nested), TypeError);
+  const proxy = new Proxy({}, { getOwnPropertyDescriptor() { observed++; throw new Error('caller proxy executed'); } });
+  assert.throws(() => decodePublicationProof(proxy), TypeError);
+  assert.throws(() => decodePublicationProof({ ...base, observedIndex: proxy }), TypeError);
+  assert.equal(observed, 0);
+});
+
 test('current namespace absence is closed fresh evidence, never an old arena descriptor unlink', () => {
   const ref = 'a'.repeat(64), arenaId = identityHash('namespace-data-arena');
   const value = { schemaVersion: 1, format: 'cliq-publication-proof-v1', kind: 'arena_namespace_absence',

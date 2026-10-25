@@ -721,6 +721,19 @@ type PublicationProofV1 = PublicationProofBaseV1 & (
           capturedIndexDigest: string
           observedIndexRef: ArtifactRef
           observedIndexDigest: string
+          repositoryIdentityRef: ArtifactRef
+          repositoryIdentityDigest: string
+          capturedSourceRef: ArtifactRef
+          objectFormat: 'sha1' | 'sha256'
+          canonicalIndexBytesRef: ArtifactRef
+          canonicalIndexByteCount: number
+          indexTreeObjectId: string
+          observedIndex:
+            | { kind: 'present'; deviceId: string; fileId: string; ownerUid: number;
+                rawByteCount: number; rawBytesDigest: string }
+            | { kind: 'absent'; rawByteCount: 0 }
+          descriptorReadComplete: true
+          readerJoined: true
         }
     ))
 )

@@ -54,24 +54,49 @@ function properties(output) {
 function processFact(pid) {
   if (!Number.isSafeInteger(pid) || pid < 1) return { present: false };
   try {
-    const text = readFileSync(`/proc/${pid}/stat`, 'utf8');
-    const fields = text.slice(text.lastIndexOf(') ') + 2).trim().split(/\s+/);
-    assert(fields.length >= 20, 'incomplete /proc process stat');
+    const readStat = () => {
+      const text = readFileSync(`/proc/${pid}/stat`, 'utf8');
+      assert(text.startsWith(`${pid} (`), 'process stat belongs to another PID');
+      const fields = text.slice(text.lastIndexOf(') ') + 2).trim().split(/\s+/);
+      assert(fields.length >= 20, 'incomplete /proc process stat');
+      return fields;
+    };
+    let fields = readStat(), uid;
     const memberships = readFileSync(`/proc/${pid}/cgroup`, 'utf8').trim().split('\n');
     const unified = memberships.filter((line) => line.startsWith('0::'));
     assert.equal(unified.length, 1, 'one unified cgroup membership is required');
     let cgroupNamespace = null;
     try { cgroupNamespace = readlinkSync(`/proc/${pid}/ns/cgroup`); }
     catch (error) {
-      // A zombie can retain its PID/start while nsproxy is already gone. A
-      // missing namespace link must never relabel that process as absent.
-      if (error.code !== 'ENOENT' && error.code !== 'ESRCH') throw error;
+      if (!['ENOENT', 'ESRCH', 'EACCES'].includes(error.code)) throw error;
+      // An inaccessible namespace is not death evidence. Only two actual
+      // observations of this same original PID/start in Z state allow the
+      // fixed exited observation below. It remains present until real reap;
+      // a still-live permission failure continues to fail the diagnostic.
+      const exited = readStat(), exitedUid = statSync(`/proc/${pid}`).uid;
+      const confirmed = readStat(), confirmedUid = statSync(`/proc/${pid}`).uid;
+      if (exited[0] !== 'Z' || confirmed[0] !== 'Z' || fields[19] !== exited[19] ||
+          exited[19] !== confirmed[19] || exitedUid !== confirmedUid) {
+        error.message += `; procNamespaceObservation=${JSON.stringify({ pid, originalStartTimeTicks: fields[19],
+          first: { state: exited[0], startTimeTicks: exited[19], uid: exitedUid },
+          second: { state: confirmed[0], startTimeTicks: confirmed[19], uid: confirmedUid } })}`;
+        throw error;
+      }
+      fields = confirmed; uid = confirmedUid;
     }
-    return { present: true, pid, uid: statSync(`/proc/${pid}`).uid,
+    return { present: true, pid, uid: uid ?? statSync(`/proc/${pid}`).uid,
       state: fields[0], startTimeTicks: fields[19], bootId,
       cgroupPath: unified[0].slice(3), cgroupNamespace };
   } catch (error) {
-    if (error.code === 'ENOENT' || error.code === 'ESRCH') return { present: false, pid };
+    if (error.code === 'ENOENT' || error.code === 'ESRCH') {
+      // Namespace unavailability alone must never report an extant process as
+      // absent. Confirm disappearance through its actual proc stat locator.
+      try { readFileSync(`/proc/${pid}/stat`, 'utf8'); }
+      catch (missing) {
+        if (missing.code === 'ENOENT' || missing.code === 'ESRCH') return { present: false, pid };
+        throw missing;
+      }
+    }
     throw error;
   }
 }

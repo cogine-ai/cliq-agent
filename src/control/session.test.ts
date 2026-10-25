@@ -5,6 +5,7 @@ import type { InstalledSupervisorClient } from '../state/installed-control-clien
 import { createInstalledControlSession } from './session.js';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { ResourceRetirementError } from '../state/errors.js';
+import type { SessionResumeInput } from './session.js';
 
 const hello = { method: 'control.hello' as const, protocolVersion: 1 as const, serverBuild: 'inert-protocol-fixture',
   controlSchemaRange: { min: 1 as const, max: 1 as const }, headlessSchemaRange: { min: 3, max: 3 },
@@ -59,6 +60,27 @@ function snapshot() {
     budgetConsumed: { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 }, repairCount: 0,
     cancelRequested: false, createdAt: at, updatedAt: at, deadlineAt: '2026-10-25T01:00:00.000Z' } };
 }
+
+test('resume reads current Session context and returns one exact new admission before any dispatch', async () => {
+  const calls: string[] = [];
+  const client = { hello: { ...hello, enabledFeatureIds: ['session.get', 'run.submit'] }, close: async () => {},
+    'session.get': async () => { calls.push('session.get'); return { protocolVersion: 1, ok: true, result: { method: 'session.get',
+      snapshot: { schemaVersion: 1, session: { schemaVersion: 1, id: 'session', workspaceIdentityRef: ref, contextRevision: 7,
+        latestItemSeq: 0, contextProjectionRef: ref, createdAt: at, updatedAt: at } }, items: [], highWaterItemSeq: 0, nextItemSeq: 0 } }; },
+    'run.submit': async () => { calls.push('run.submit'); return { protocolVersion: 1, ok: true, result: { method: 'run.submit', snapshot: snapshot() } }; }
+  } as unknown as InstalledSupervisorClient;
+  const session = createInstalledControlSession(client);
+  const intent: SessionResumeInput = { protocolVersion: 1, method: 'run.submit', requestId: '019a0012-0000-7000-8000-000000000901',
+    admissionKey: Buffer.alloc(16, 1).toString('base64url'), sessionId: 'session', workspacePath: '/workspace', objective: 'Continue the retained context.',
+    model: { provider: 'ollama', model: 'fixture' }, policyMode: 'plan', verifiers: [], dependency: { mode: 'none' },
+    sourceIncludes: [], sourceExcludes: [], registeredMcpServerIds: [], skillIds: [], allowUnverified: true };
+  const prepared = await session.prepareResume(intent);
+  assert.deepEqual(calls, ['session.get']); assert.equal(prepared.expectedContextRevision, 7); assert.equal(prepared.requestId, intent.requestId);
+  const { requestDigest, ...core } = prepared; assert.equal(requestDigest, canonicalSha256(core)); assert(Object.isFrozen(prepared));
+  assert((await session.request(prepared)).ok); assert.deepEqual(calls, ['session.get', 'run.submit']);
+  await assert.rejects(session.prepareResume({ ...intent, expectedContextRevision: 1 } as SessionResumeInput));
+  assert.deepEqual(calls, ['session.get', 'run.submit']); await session.close();
+});
 
 test('attach drains the captured high-water with backpressure from its exact retained cursor', async () => {
   const cursors: number[] = [];

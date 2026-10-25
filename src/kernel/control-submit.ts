@@ -82,6 +82,8 @@ export type RunSubmitRequest = {
   sourceIncludes: SourceSelectorRequest[]; sourceExcludes: Array<Omit<SourceSelectorRequest, 'readGrantId'>>;
   maxChangedPaths?: number; maxChangedBytes?: number;
   registeredMcpServerIds: string[]; skillIds: string[]; allowUnverified: boolean;
+  sourceInspectionGrantId?: string;
+  ignoreReadGrantIds?: string[];
 };
 export type NormalizedRunSubmitRequest = Omit<RunSubmitRequest,
   'budgets' | 'sandboxResources' | 'maxChangedPaths' | 'maxChangedBytes'> & {
@@ -200,7 +202,7 @@ const RESOURCE_RANGES: Record<keyof SandboxResourceSpec, readonly [number, numbe
   maxProcesses: [1, 1024], memoryBytes: [256 * 1024 ** 2, 32 * 1024 ** 3], cpuQuotaMicrosPerSecond: [10_000, 1_600_000],
   maxOpenFiles: [64, 8192], maxSingleFileBytes: [1024 ** 2, 16 * 1024 ** 3], maxGenerationBytes: [256 * 1024 ** 2, 100 * 1024 ** 3],
   maxInvocationOutputBytes: [64 * 1024, 64 * 1024 ** 2], maxIpcFrameBytes: [16 * 1024 ** 2, 16 * 1024 ** 2], maxQueuedIpcBytes: [64 * 1024 ** 2, 64 * 1024 ** 2] };
-function resourceOptions(value: unknown): SandboxResourceSpec {
+export function decodeSandboxResourceOptions(value: unknown): SandboxResourceSpec {
   const data = value === undefined ? {} : object(value, [], Object.keys(RESOURCE_DEFAULTS));
   const result = { ...RESOURCE_DEFAULTS };
   for (const key of Object.keys(result) as Array<keyof SandboxResourceSpec>) {
@@ -239,7 +241,7 @@ export function normalizeRunSubmitRequest(value: unknown): {
     const data = object(value, ['protocolVersion', 'requestId', 'requestDigest', 'method', 'admissionKey', 'sessionId',
       'expectedContextRevision', 'workspacePath', 'objective', 'model', 'policyMode', 'verifiers', 'dependency',
       'sourceIncludes', 'sourceExcludes', 'registeredMcpServerIds', 'skillIds', 'allowUnverified'],
-    ['budgets', 'sandboxResources', 'maxChangedPaths', 'maxChangedBytes']);
+    ['budgets', 'sandboxResources', 'maxChangedPaths', 'maxChangedBytes', 'sourceInspectionGrantId', 'ignoreReadGrantIds']);
     if (data.protocolVersion !== 1 || data.method !== 'run.submit') invalid('expected protocol-v1 run.submit');
     const requestId = text(data.requestId), admissionKey = text(data.admissionKey), requestDigest = text(data.requestDigest, 64);
     assertRequestId(requestId); assertAdmissionKey(admissionKey); assertArtifactRef(requestDigest);
@@ -254,6 +256,8 @@ export function normalizeRunSubmitRequest(value: unknown): {
       verifiers, dependency: dependency(data.dependency), sourceIncludes: array(data.sourceIncludes, 128, item => selector(item, true)),
       sourceExcludes: array(data.sourceExcludes, 128, item => selector(item, false)), registeredMcpServerIds: ids(data.registeredMcpServerIds, 128),
       skillIds: ids(data.skillIds, 64), allowUnverified,
+      ...(Object.hasOwn(data, 'sourceInspectionGrantId') ? { sourceInspectionGrantId: text(data.sourceInspectionGrantId) } : {}),
+      ...(Object.hasOwn(data, 'ignoreReadGrantIds') ? { ignoreReadGrantIds: ids(data.ignoreReadGrantIds, 128) } : {}),
       ...(budgets === undefined ? {} : { budgets: Object.fromEntries(Object.keys(budgets).map(key => [key, integer(budgets[key], 0)])) }),
       ...(data.sandboxResources === undefined ? {} : { sandboxResources: object(data.sandboxResources, [], Object.keys(RESOURCE_DEFAULTS)) }),
       ...(data.maxChangedPaths === undefined ? {} : { maxChangedPaths: integer(data.maxChangedPaths, 0, 100_000) }),
@@ -264,7 +268,7 @@ export function normalizeRunSubmitRequest(value: unknown): {
     if (canonicalSha256(originalCore) !== requestDigest) invalid('inline requestDigest does not match canonical request bytes');
     const request = { ...core, requestDigest, budgets: (() => { try { return mergeBudgets(budgets); } catch (cause) {
       if (cause instanceof TypeError) throw new InvalidRunSubmitRequestError(cause.message); throw cause;
-    } })(), sandboxResources: resourceOptions(data.sandboxResources),
+    } })(), sandboxResources: decodeSandboxResourceOptions(data.sandboxResources),
       maxChangedPaths: core.maxChangedPaths ?? 10_000, maxChangedBytes: core.maxChangedBytes ?? 512 * 1024 ** 2 };
     return immutableSnapshot({ request, originalRequest, originalRequestDigest: requestDigest });
   } catch (cause) {

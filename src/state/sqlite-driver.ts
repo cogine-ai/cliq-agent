@@ -26,6 +26,7 @@ export interface SqliteStatement {
   run(...parameters: SqliteInputValue[]): SqliteRunResult;
   get<Row = SqliteRow>(...parameters: SqliteInputValue[]): Row | undefined;
   all<Row = SqliteRow>(...parameters: SqliteInputValue[]): Row[];
+  iterate<Row = SqliteRow>(...parameters: SqliteInputValue[]): IterableIterator<Row>;
 }
 
 export interface SqliteConnection {
@@ -94,6 +95,13 @@ class NodeSqliteStatement implements SqliteStatement {
     this.requireUsable();
     return this.statement.all(...parameters) as Row[];
   }
+  *iterate<Row = SqliteRow>(...parameters: SqliteInputValue[]): IterableIterator<Row> {
+    this.requireUsable();
+    for (const row of iterateNodeSqliteStatement(this.statement, ...parameters)) {
+      this.requireUsable(); yield row as Row;
+    }
+    this.requireUsable();
+  }
 }
 
 class TransactionScopedStatement implements SqliteStatement {
@@ -115,6 +123,13 @@ class TransactionScopedStatement implements SqliteStatement {
   all<Row = SqliteRow>(...parameters: SqliteInputValue[]): Row[] {
     this.requireActive();
     return this.statement.all<Row>(...parameters);
+  }
+  *iterate<Row = SqliteRow>(...parameters: SqliteInputValue[]): IterableIterator<Row> {
+    this.requireActive();
+    for (const row of this.statement.iterate<Row>(...parameters)) {
+      this.requireActive(); yield row;
+    }
+    this.requireActive();
   }
 }
 

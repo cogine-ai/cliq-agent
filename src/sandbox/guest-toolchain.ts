@@ -33,10 +33,20 @@ export type NativeGuestToolchain = Readonly<{
   describe(): GuestToolchainDescription;
   close(): Promise<void>;
 }>;
+declare const sourceGitToolchainBrand: unique symbol;
+/** Separate N-API tag. An ordinary Node-only extraction is not this owner. */
+export type NativeSourceGitToolchain = Readonly<{
+  readonly [sourceGitToolchainBrand]: true;
+  pollReady(): boolean;
+  describe(): GuestToolchainDescription & Readonly<{ gitPath: string; gitDigest: string }>;
+  close(): Promise<void>;
+}>;
 
 export type NativeGuestExtractorBinding = Readonly<{
   interfaceVersion: 1;
   /** Acquires its own descriptor synchronously; bounded copy/hash/seal and
    * parsing run inside this same cancellable, joinable native owner. */
   begin(imageFd: number, input: NativeGuestExtractionInput): NativeGuestToolchain;
+  /** Fixed Node + /usr/bin/git dual-root extraction, with the same bounds. */
+  beginSourceGit?(imageFd: number, input: NativeGuestExtractionInput): NativeSourceGitToolchain;
 }>;

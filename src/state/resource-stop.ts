@@ -25,6 +25,7 @@ import { readDeliveryVerificationMode } from './run-result-recovery.js';
 import { readVerifierPendingPolicy } from './verifier-stop-history.js';
 import { readDeliveryAuthorization } from './delivery-approval.js';
 import { readDeliveryMergeLimitCause } from './delivery-recovery.js';
+import { frozenSessionCompactionIndex } from './session-context.js';
 
 type WithoutIdentity<T> = T extends ResourceStopIntent ? Omit<T, 'schemaVersion' | 'runId' | 'createdAt'> : never;
 type ResourceCause = WithoutIdentity<ResourceStopIntent>;
@@ -115,7 +116,8 @@ export const readResourceStopCause = stateOperation('RECOVERY_REQUIRED', async f
   const systemInstruction = await loadInstructionText(artifacts, assembly);
   const tools = contracts.map((entry) => ({ name: entry.name, description: entry.description, inputSchemaRef: entry.inputSchemaRef,
     inputSchemaDigest: entry.inputSchemaDigest, inputSchema: entry.inputSchema, replayClass: entry.replayClass }));
-  const project = (value: ContextManifest) => readModelContext({ artifacts, run, spec, assembly, context: value, systemInstruction, tools });
+  const project = (value: ContextManifest) => readModelContext({ artifacts, run, spec, assembly, context: value, systemInstruction, tools,
+    sessionCompactionIndex: projection => frozenSessionCompactionIndex(driver, run.sessionId, projection.throughItemSeq) });
   const projection = await project(context);
   const envelopeRef = assembly.context.compactionPromptEnvelopeRef;
   const envelope = await readCanonicalArtifact<CompactionPromptEnvelopeV1>(artifacts, envelopeRef);

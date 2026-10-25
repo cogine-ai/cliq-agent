@@ -12,6 +12,7 @@ import {
   KERNEL_SCHEMA_V3_SQL,
   KERNEL_SCHEMA_V4_SQL,
   KERNEL_SCHEMA_V5_SQL,
+  KERNEL_SCHEMA_V6_SQL,
   readSchemaUserVersion
 } from './schema.js';
 import { openSqliteDriver } from './sqlite-driver.js';
@@ -41,7 +42,9 @@ test('schema v5 retains exact source history while adding only the apply method 
     assert.deepEqual(driver.prepare('SELECT * FROM source_inspection_attempts').all(), original);
     const expected = before.map(entry => ({ ...entry, sql: entry.name === 'source_inspection_attempts'
       ? entry.sql!.replace("method = 'run.submit'", "method IN ('run.submit', 'run.apply')") : entry.sql }));
-    assert.deepEqual(catalog().map(entry => ({ ...entry })), expected, 'no other table, trigger, index or retained history may change');
+    const exceptHandoff = (entries: typeof expected) => entries.filter(entry => entry.name !== 'source_inspections_validate_update').map(entry => ({ ...entry }));
+    assert.deepEqual(exceptHandoff(catalog()), exceptHandoff(expected), 'no unrelated table, trigger, index or retained history may change');
+    assert.match(catalog().find(entry => entry.name === 'source_inspections_validate_update')!.sql!, /source inspection handoff permits cleanup only/u);
     insert('run.apply', 'fresh-apply', 'other-workspace');
     assert.throws(() => insert('run.other', 'not-allowed', 'third-workspace'), /CHECK constraint failed/);
     assert.throws(() => driver.prepare('DELETE FROM source_inspection_attempts WHERE inspection_id=?').run('original'), /history is retained/);
@@ -212,10 +215,12 @@ test('schema v4 migration adds preparing to the same WorkerLaunch spine without 
     for (const trigger of [insert, update]) assert.ok(trigger.includes("WHEN (NEW.phase = 'retired') != (NEW.retired_at IS NOT NULL)"));
     assert.ok(update.includes('WHEN NEW.launch_id != OLD.launch_id OR NEW.run_id != OLD.run_id'));
     assert.equal(readSchemaUserVersion(driver), KERNEL_STATE_SCHEMA_VERSION);
-    const unchanged = (rows: ReturnType<typeof readCatalog>) => rows.filter(row => row.name !== insertName && row.name !== updateName)
+    const unchanged = (rows: ReturnType<typeof readCatalog>) => rows.filter(row => row.name !== insertName && row.name !== updateName &&
+      row.name !== 'source_inspections_validate_update')
       .map(row => ({ ...row, sql: row.name === 'source_inspection_attempts'
         ? row.sql!.replace("method = 'run.submit'", "method IN ('run.submit', 'run.apply')") : row.sql }));
-    assert.deepEqual(unchanged(after), unchanged(before), 'every table, index and other trigger must remain unchanged');
+    assert.deepEqual(unchanged(after), unchanged(before), 'every table, index and unrelated trigger must remain unchanged');
+    assert.match(after.find(row => row.name === 'source_inspections_validate_update')!.sql!, /source inspection handoff permits cleanup only/u);
     const unretiredIndex = after.find(row => row.name === 'worker_launches_one_unretired_per_run');
     assert.equal(unretiredIndex?.type, 'index');
     assert.match(unretiredIndex!.sql!, /CREATE UNIQUE INDEX worker_launches_one_unretired_per_run\s+ON worker_launches\(run_id\) WHERE retired_at IS NULL/u);
@@ -227,6 +232,62 @@ test('schema v4 migration adds preparing to the same WorkerLaunch spine without 
     driver.close();
     await rm(stateRoot, { recursive: true, force: true });
   }
+});
+
+test('schema v7 preserves original source rows and makes a once-only handoff cleanup-only at every prefix', async () => {
+  const directory = await mkdtemp(path.join(process.cwd(), '.cliq-source-handoff-schema-'));
+  const driver = openSqliteDriver(path.join(directory, 'kernel.sqlite3'));
+  try {
+    driver.transaction(connection => {
+      connection.exec(`PRAGMA application_id=${KERNEL_SQLITE_APPLICATION_ID}`);
+      connection.exec(`${KERNEL_SCHEMA_V1_SQL}\n${KERNEL_SCHEMA_V2_SQL}\n${KERNEL_SCHEMA_V3_SQL}\n${KERNEL_SCHEMA_V4_SQL}\n${KERNEL_SCHEMA_V5_SQL}\n${KERNEL_SCHEMA_V6_SQL}`);
+      connection.exec('PRAGMA user_version=6');
+    });
+    const catalog = () => driver.prepare('SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name').all();
+    const before = catalog();
+    // These are actual SQLite invariant fixtures only. They are not decoded
+    // native source inputs, a signed handoff, or retirement evidence.
+    for (const phase of ['capturing', 'prepared', 'active'] as const) {
+      const base = { inspectionId: `inspection-${phase}`, principalId: 'principal', method: 'run.submit',
+        admissionKey: `admission-${phase}`, admissionIntentDigest: 'a'.repeat(64), workspaceIdentityDigest: `workspace-${phase}`,
+        phase: 'capturing', rowVersion: 1, cancelRequested: false, inputRef: '1'.repeat(64), inputDigest: '2'.repeat(64) };
+      driver.prepare(`INSERT INTO source_inspection_attempts VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(base.inspectionId,
+        base.principalId, base.method, base.admissionKey, base.admissionIntentDigest,
+        `request-${phase}`, '3'.repeat(64), base.workspaceIdentityDigest, base.phase, base.rowVersion, JSON.stringify(base));
+    }
+    const original = driver.prepare('SELECT row_json FROM source_inspection_attempts ORDER BY inspection_id').all();
+    applyKernelSchema(driver);
+    assert.equal(readSchemaUserVersion(driver), 7);
+    assert.deepEqual(driver.prepare('SELECT row_json FROM source_inspection_attempts ORDER BY inspection_id').all(), original);
+    const exceptUpdate = (values: typeof before) => values.filter(value => value.name !== 'source_inspections_validate_update');
+    assert.deepEqual(exceptUpdate(catalog()), exceptUpdate(before), 'the existing table, rows, indexes and unrelated triggers are unchanged');
+    for (const phase of ['capturing', 'prepared', 'active'] as const) {
+      let row = JSON.parse(driver.prepare('SELECT row_json FROM source_inspection_attempts WHERE inspection_id=?')
+        .get<{ row_json: string }>(`inspection-${phase}`)!.row_json) as Record<string, unknown>;
+      const update = (next: Record<string, unknown>) => driver.prepare(`UPDATE source_inspection_attempts
+        SET phase=?,row_version=?,row_json=? WHERE inspection_id=?`).run(next.phase as string, next.rowVersion as number,
+        JSON.stringify(next), row.inspectionId as string);
+      assert.throws(() => update({ ...row, inputRef: '9'.repeat(64), phase: 'prepared', plan: {}, rowVersion: 2 }),
+        /first input is immutable/u);
+      if (phase !== 'capturing') {
+        row = { ...row, phase: 'prepared', plan: { fixture: 'data-only' }, rowVersion: 2 }; update(row);
+      }
+      if (phase === 'active') { row = { ...row, phase: 'active', processContainmentRef: '4'.repeat(64), rowVersion: 3 }; update(row); }
+      assert.throws(() => update({ ...row, retirementHandoffRef: 'A'.repeat(64), rowVersion: Number(row.rowVersion) + 1 }), /handoff must be installed once/u);
+      const handed = { ...row, retirementHandoffRef: '5'.repeat(64), rowVersion: Number(row.rowVersion) + 1 };
+      update(handed); row = handed;
+      for (const edit of [{ retirementHandoffRef: '6'.repeat(64) }, { retirementHandoffRef: null }, { inputRef: '6'.repeat(64) },
+        ...(phase === 'capturing' ? [{ phase: 'prepared', plan: {} }] : phase === 'prepared' ? [{ phase: 'active', processContainmentRef: '6'.repeat(64) }] : [])])
+        assert.throws(() => update({ ...row, ...edit, rowVersion: Number(row.rowVersion) + 1 }));
+      const cancelled = { ...row, cancelRequested: true, rowVersion: Number(row.rowVersion) + 1 };
+      update(cancelled); row = cancelled;
+      const retired = { ...row, phase: 'retired', rowVersion: Number(row.rowVersion) + 1,
+        retirementEvidenceRef: '7'.repeat(64), retiredAt: '2026-10-25T16:00:00.000Z', outcome: { kind: 'cancelled', errorResponseRef: '8'.repeat(64) } };
+      update(retired); row = retired;
+      assert.throws(() => update({ ...row, rowVersion: Number(row.rowVersion) + 1 }), /phase transition is invalid/u);
+    }
+    const migrated = catalog(); applyKernelSchema(driver); assert.deepEqual(catalog(), migrated);
+  } finally { driver.close(); await rm(directory, { recursive: true, force: true }); }
 });
 
 test('SQLite fences source inspection phase, admission key and workspace reservations', async () => {

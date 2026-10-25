@@ -30,11 +30,12 @@ test('generated schemas are the original executable codecs, not lossy inferred v
   assert.equal(generated.decodeHeadlessControlResponse, canonical.decodeHeadlessControlResponse);
   assert.equal(generated.headlessControlHello, canonical.headlessControlHello);
   assert.equal(generated.headlessRunEvent, canonical.headlessRunEvent);
-  assert(!generated.CONTROL_V1_CONNECTED_METHOD_METADATA.some(method => String(method) === 'session.list'));
+  assert(generated.CONTROL_V1_CONNECTED_METHOD_METADATA.some(method => String(method) === 'session.list'));
   for (const name of ['src/kernel/types.ts', 'src/kernel/authorization.ts', 'src/kernel/execution.ts',
-    'src/kernel/control-wire.ts', 'src/kernel/control-wire-data.ts', 'src/kernel/control-submit.ts', 'src/kernel/control-apply.ts'])
+    'src/kernel/control-wire.ts', 'src/kernel/control-wire-data.ts', 'src/kernel/control-submit.ts', 'src/kernel/control-apply.ts', 'src/kernel/session-continuity.ts'])
     assert(Object.hasOwn(generated.CONTROL_V1_SOURCE_MANIFEST.sources, name));
   assert(Object.isFrozen(generated.CONTROL_V1_SOURCE_MANIFEST.sources));
   assert(Object.isFrozen(generated.CONTROL_V1_SOURCE_MANIFEST.externalImports));
-  assert.throws(() => generated.decodeInstalledControlRequest({ protocolVersion: 1, method: 'session.list' }));
+  assert.deepEqual(generated.decodeInstalledControlRequest({ protocolVersion: 1, method: 'session.list' }), { protocolVersion: 1, method: 'session.list' });
+  assert.throws(() => generated.decodeInstalledControlRequest({ protocolVersion: 1, method: 'session.append' }));
 });

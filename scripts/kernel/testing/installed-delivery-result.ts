@@ -8,7 +8,10 @@ import type { StateOwnerRecordV1 } from '../../../src/kernel/types.js';
 import { decodeDeliveryCaptureTopology, decodeDeliveryPlan, decodeDeliveryTerminalProjectionEvidence,
   decodePublicationProof } from '../../../src/kernel/publication.js';
 import { decodeRetainedRunAssembly } from '../../../src/model/run-assembly.js';
-import { decodeAdmittedContext, decodeBudgetSettlement, decodeContextManifest, decodeRunSpec, decodeSessionProjection, decodeSourceManifest, decodeWorkspaceEntries, decodeWorkspaceState } from '../../../src/state/decoders.js';
+import { decodeAdmittedContext, decodeBudgetSettlement, decodeContextManifest, decodeRunSpec, decodeSessionProjection, decodeSourceManifest, decodeSourceProjection, decodeWorkspaceEntries, decodeWorkspaceState } from '../../../src/state/decoders.js';
+import { decodeSandboxProfile } from '../../../src/state/execution-closure.js';
+import { readSourceProjectionData } from '../../../src/state/source-projection-data.js';
+import { assertInstalledGitState, installedGitDataReader } from './installed-git-data.js';
 import { loadDeliveryPolicy, planDeliveryRequest } from '../../../src/state/delivery-policy.js';
 import { deliveryPublicationCheckpointId, deliveryPublicationTerminalCheckpointId } from '../../../src/state/delivery-publication-progress.js';
 import { decodeFinalCandidateItem, decodeInheritedVerificationProvenance, decodeRunResult, decodeVerificationClosure, decodeVerifierPlan, decodeWorkspaceDiff } from '../../../src/state/result-artifacts.js';
@@ -108,6 +111,7 @@ type InstalledDeliveryVerifierInput = {
   cut: Record<string, any>; sourceCut: Record<string, any>; outcome: 'passed' | 'stopped';
   readRetainedArtifact: (ref: string) => Promise<Buffer>;
   readOwnerHistory: () => Promise<readonly StateOwnerRecordV1[]>;
+  expectedGit?: true;
   cancellation?: { request: Record<string, any>; response: Record<string, any> };
   readParentRetirement?: (binding: InstalledVerifierParentRetirementBinding) => ReturnType<typeof inspectInstalledVerifierParentRetirement>;
 };
@@ -273,7 +277,12 @@ export async function assertInstalledDeliveryVerifier(input: InstalledDeliveryVe
     const state = decodeWorkspaceState(await object(physical.checkpoint.workspaceStateRef));
     check(state.baseWorkspaceManifestRef === spec.baseWorkspaceManifestRef && state.runId === run.id &&
       state.entriesRef === source.entriesRef && state.sourceProjectionDigest === source.sourceProjectionDigest &&
-      !state.privateGitStateRef && state.invalidatedEphemeralPaths.length === 0);
+      state.invalidatedEphemeralPaths.length === 0);
+    const base = decodeSourceManifest(await object(spec.baseWorkspaceManifestRef));
+    same(source.git ?? null, base.git ?? null);
+    if (input.expectedGit) await assertInstalledGitState(installedGitDataReader(bytes), base, state,
+      decodeSandboxProfile(await object(spec.sandboxProfileRef)).resources, true);
+    else check(!base.git && !state.privateGitStateRef);
     stage = 'verification_context';
     for (const checkpoint of cut.checkpoints.filter((cp: any) => cp.runItemSeq >= candidateRow.itemSeq)) {
       const context = decodeContextManifest(await object(checkpoint.contextManifestRef));
@@ -291,6 +300,7 @@ export async function assertInstalledDeliveryVerifier(input: InstalledDeliveryVe
 export async function assertInstalledDeliveryOutcome(input: {
   cut: Record<string, any>; sessionCut: Record<string, any>; sourceCut: Record<string, any>; sourceResultRef: string;
   expectedFiles: readonly { path: string; text: string }[]; kind: 'publish' | 'no_op' | 'merge';
+  expectedGit?: true;
   readRetainedArtifact: (ref: string) => Promise<Buffer>;
   readOwnerHistory: () => Promise<readonly StateOwnerRecordV1[]>;
 }) {
@@ -339,6 +349,14 @@ export async function assertInstalledDeliveryOutcome(input: {
     const source = decodeSourceManifest(await object(result.resultSourceRef)), entries = decodeWorkspaceEntries(await object(source.entriesRef));
     check(source.role === 'result' && source.sourceProjectionRef === spec.sourceProjectionRef && source.treeDigest === entries.treeDigest);
     const originalDesired = decodeSourceManifest(await object(original.resultSourceRef));
+    const captured = decodeSourceManifest(await object(spec.baseWorkspaceManifestRef));
+    check(!!source.git === !!input.expectedGit && !!captured.git === !!input.expectedGit && !!originalDesired.git === !!input.expectedGit);
+    same(source.git ?? null, captured.git ?? null); same(source.git ?? null, originalDesired.git ?? null);
+    if (input.expectedGit) {
+      const profile = decodeSandboxProfile(await object(spec.sandboxProfileRef));
+      const gitReader = installedGitDataReader(bytes), projectionSpec = decodeSourceProjection(await object(spec.sourceProjectionRef));
+      await readSourceProjectionData(gitReader, captured, projectionSpec, profile.resources);
+    }
     for (const key of ['workspaceIdentityDigest', 'sourceProjectionRef', 'sourceProjectionDigest', 'frozenIgnoreRulesRef', 'frozenIgnoreRulesDigest'] as const)
       check(source[key] === originalDesired[key]);
     const expectedFiles = [...input.expectedFiles].sort((a, b) => Buffer.compare(Buffer.from(a.path), Buffer.from(b.path)));
@@ -393,7 +411,7 @@ export async function assertInstalledDeliveryOutcome(input: {
     const verifierRetirementIdentities: InstalledVerifierRetirementIdentity[] = [];
     if (kind === 'merge') {
       verifierRetirementIdentities.push(await assertInstalledDeliveryVerifier({ cut, sourceCut, outcome: 'passed', readRetainedArtifact: bytes,
-        readOwnerHistory: input.readOwnerHistory }));
+        readOwnerHistory: input.readOwnerHistory, ...(input.expectedGit ? { expectedGit: true as const } : {}) }));
     } else {
       check(closure.verification.kind === 'inherited_verified');
       const inherited = closure.verification; if (inherited.kind !== 'inherited_verified') throw new Error('wrong inherited verification');
@@ -406,7 +424,8 @@ export async function assertInstalledDeliveryOutcome(input: {
 
     stage = 'publication_receipts';
     const results = items.filter(value => value.item.kind === 'publication_path_result');
-    const publication = await assertInstalledDeliveryPublication({ cut, readRetainedArtifact: bytes, readOwnerHistory: input.readOwnerHistory });
+    const publication = await assertInstalledDeliveryPublication({ cut, readRetainedArtifact: bytes, readOwnerHistory: input.readOwnerHistory,
+      ...(input.expectedGit ? { expectedGit: true as const } : {}) });
     check(results.length === plan.forwardOperations.length && publication.planRef === merged.deliveryPlanRef &&
       publication.projectionRef === result.deliveryTerminalProjectionEvidenceRef && publication.publishClaims === counts.publishClaims &&
       publication.progressCount === results.length && publication.receiptCount === results.length &&

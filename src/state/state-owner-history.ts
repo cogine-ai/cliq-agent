@@ -2,7 +2,7 @@
 // supplies authority for a live observation. Owning callers retain those gates.
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { KERNEL_CAS_DIRECTORY, KERNEL_SQLITE_APPLICATION_ID, KERNEL_STATE_SCHEMA_VERSION } from '../config.js';
-import { assertArtifactRef, digestOmitting, identityHash, normalizeAbsolutePath, requiredSafeInteger, sha256Bytes } from '../kernel/identity.js';
+import { assertArtifactRef, digestOmitting, identityHash, normalizeAbsolutePath, requiredSafeInteger } from '../kernel/identity.js';
 import type { PlatformProcessIdentityV1, StateOwnerAcquisitionEvidenceV1,
   StateOwnerRecordV1, StateOwnerTransitionEvidenceV1, StateLockIdentityV1, StateRootIdentityV1, KernelGenerationIdentityV1 } from '../kernel/types.js';
 import { immutableSnapshot } from '../model/immutable.js';
@@ -15,7 +15,7 @@ import { decodePlatformProcessIdentity, decodeStateLockIdentity, decodeStateRoot
 import { KernelStorageError } from './errors.js';
 import { decodeSandboxRootProfile } from './execution-closure.js';
 import { checkCanonicalBytes, validateInstalledStructuredArtifacts, validateTrustStore } from './installed-artifacts.js';
-import { KERNEL_AUTHORITY_TABLES, KERNEL_SCHEMA_SQL } from './schema.js';
+import { kernelSchemaBirthRecipe } from './schema.js';
 import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
 import { readStateOwner } from './state-owner.js';
 import { decodeGuestToolchainManifest, guestToolchainMembers, guestToolchainRoots } from './guest-toolchain.js';
@@ -122,13 +122,24 @@ async function readInstalledSeed(artifacts: ArtifactCatalog, first: Entry,
   // opening/owning installation gate independently authenticates trusted keys.
 }
 
-/** Only the two actually implemented current-schema birth recipes. This is
+/** Only the two actually implemented birth origins and exact known schemas. This is
  * historical rehashing, not another pristine-namespace or migration bootstrap. */
-async function readGenesis(artifacts: ArtifactCatalog, first: Entry, lock: StateLockIdentityV1): Promise<void> {
+async function readGenesis(artifacts: ArtifactCatalog, first: Entry, lock: StateLockIdentityV1,
+  runtimeKind: 'schema' | 'signed'): Promise<void> {
   if (first.acquisition.kind !== 'genesis') invalid('StateOwner history has no exact genesis');
   const acquisition = first.acquisition;
   const generation = await readCanonicalArtifact<KernelGenerationIdentityV1>(artifacts, acquisition.kernelGenerationIdentityRef);
   if (generation.origin !== 'fresh_empty' && generation.origin !== 'fresh_installed') invalid('unsupported retained StateOwner genesis origin');
+  const recipe = kernelSchemaBirthRecipe(generation.stateSchemaVersion);
+  if (runtimeKind === 'schema') {
+    if (generation.origin !== 'fresh_empty' || generation.pristineSchemaManifestRef !== first.owner.runtimeBundleRef ||
+        generation.pristineSchemaManifestDigest !== first.owner.runtimeBundleManifestDigest)
+      invalid('retained schema-only genesis differs from its original runtime schema');
+  } else if (generation.stateSchemaVersion !== KERNEL_STATE_SCHEMA_VERSION) {
+    // Existing signed births have no exact historical signed-schema source.
+    // A supported DDL recipe or broad compatibility range cannot supply it.
+    invalid('retained signed schema upgrade requires its original schema authority');
+  }
   if (!exactKeys(generation, ['schemaVersion', 'format', 'generationId', 'stateRootIdentityRef', 'stateRootIdentityDigest',
     'databaseImageRef', 'databaseImageDigest', 'databaseIdentityDigest', 'databaseContentDigest', 'casNamespaceManifestRef',
     'casNamespaceManifestDigest', 'casNamespaceId', 'casRootDigest', 'stateSchemaVersion', 'generationDigest', 'origin',
@@ -138,8 +149,7 @@ async function readGenesis(artifacts: ArtifactCatalog, first: Entry, lock: State
       generation.generationDigest !== acquisition.kernelGenerationIdentityDigest ||
       generation.generationDigest !== digestOmitting(generation, 'generationDigest') ||
       generation.stateRootIdentityRef !== lock.stateRootIdentityRef || generation.stateRootIdentityDigest !== lock.stateRootIdentityDigest ||
-      generation.stateSchemaVersion !== KERNEL_STATE_SCHEMA_VERSION ||
-      generation.pristineSchemaDigest !== sha256Bytes(Buffer.from(KERNEL_SCHEMA_SQL, 'utf8')))
+      generation.pristineSchemaDigest !== recipe.schemaDigest)
     invalid('retained StateOwner genesis is outside the implemented birth recipe');
   for (const key of ['databaseImageRef', 'databaseImageDigest', 'databaseIdentityDigest', 'databaseContentDigest',
     'casNamespaceManifestRef', 'casNamespaceManifestDigest', 'casRootDigest', 'pristineSchemaManifestRef',
@@ -153,16 +163,14 @@ async function readGenesis(artifacts: ArtifactCatalog, first: Entry, lock: State
   const schema = await readCanonicalArtifact<Record<string, unknown>>(artifacts, generation.pristineSchemaManifestRef);
   if (!exactKeys(schema, ['schemaVersion', 'format', 'applicationId', 'userVersion', 'schemaDigest', 'manifestDigest']) ||
       schema.schemaVersion !== 1 || schema.format !== 'cliq-kernel-schema-manifest-v1' ||
-      schema.applicationId !== KERNEL_SQLITE_APPLICATION_ID || schema.userVersion !== KERNEL_STATE_SCHEMA_VERSION ||
+      schema.applicationId !== KERNEL_SQLITE_APPLICATION_ID || schema.userVersion !== recipe.userVersion ||
       schema.schemaDigest !== generation.pristineSchemaDigest || schema.manifestDigest !== generation.pristineSchemaManifestDigest ||
       schema.manifestDigest !== digestOmitting(schema, 'manifestDigest')) invalid('retained StateOwner pristine schema does not match');
   const database = await readCanonicalArtifact<Record<string, unknown>>(artifacts, generation.databaseImageRef);
-  const expectedContent = canonicalSha256({ applicationId: KERNEL_SQLITE_APPLICATION_ID,
-    userVersion: KERNEL_STATE_SCHEMA_VERSION, tables: KERNEL_AUTHORITY_TABLES.length });
   if (!exactKeys(database, ['schemaVersion', 'format', 'applicationId', 'userVersion', 'contentDigest']) ||
       database.schemaVersion !== 1 || database.format !== 'cliq-kernel-empty-database-v1' ||
-      database.applicationId !== KERNEL_SQLITE_APPLICATION_ID || database.userVersion !== KERNEL_STATE_SCHEMA_VERSION ||
-      database.contentDigest !== expectedContent || database.contentDigest !== generation.databaseContentDigest ||
+      database.applicationId !== KERNEL_SQLITE_APPLICATION_ID || database.userVersion !== recipe.userVersion ||
+      database.contentDigest !== recipe.emptyDatabaseContentDigest || database.contentDigest !== generation.databaseContentDigest ||
       generation.databaseImageDigest !== generation.databaseImageRef || generation.databaseIdentityDigest !== generation.databaseImageRef)
     invalid('retained StateOwner empty database birth does not match');
   const namespace = await readCanonicalArtifact<Record<string, unknown>>(artifacts, generation.casNamespaceManifestRef);
@@ -196,10 +204,10 @@ async function readGenesis(artifacts: ArtifactCatalog, first: Entry, lock: State
 async function readRuntime(artifacts: ArtifactCatalog, owner: StateOwnerRecordV1): Promise<'schema' | 'signed'> {
   const value = await readCanonicalArtifact<RuntimeBundleManifest & { format?: string }>(artifacts, owner.runtimeBundleRef);
   if (value.format === 'cliq-kernel-schema-manifest-v1') {
+    const recipe = kernelSchemaBirthRecipe(Reflect.get(value, 'userVersion'));
     if (!exactKeys(value, ['schemaVersion', 'format', 'applicationId', 'userVersion', 'schemaDigest', 'manifestDigest']) ||
         value.schemaVersion !== 1 || Reflect.get(value, 'applicationId') !== KERNEL_SQLITE_APPLICATION_ID ||
-        Reflect.get(value, 'userVersion') !== KERNEL_STATE_SCHEMA_VERSION ||
-        Reflect.get(value, 'schemaDigest') !== sha256Bytes(Buffer.from(KERNEL_SCHEMA_SQL, 'utf8')) ||
+        Reflect.get(value, 'schemaDigest') !== recipe.schemaDigest ||
         value.manifestDigest !== owner.runtimeBundleManifestDigest ||
         value.manifestDigest !== digestOmitting(value, 'manifestDigest') || owner.supervisorEntryId !== 'state-store' ||
         owner.supervisorEntryVersion !== 'm2') invalid('retained schema-only StateOwner runtime does not match');
@@ -310,8 +318,8 @@ async function readHistory(driver: SqliteDriver, artifacts: ArtifactCatalog,
       rootIdentity.canonicalAbsolutePath !== normalizeAbsolutePath(rootIdentity.canonicalAbsolutePath) ||
       rootIdentity.ownerUid !== entries[0]!.process.ownerUid || rootIdentity.platform !== entries[0]!.process.platform ||
       lockIdentity.ownerUid !== rootIdentity.ownerUid) invalid('retained StateOwner root/lock does not match');
-  await readGenesis(artifacts, entries[0]!, lockIdentity);
   const runtimeKind = await readRuntime(artifacts, first);
+  await readGenesis(artifacts, entries[0]!, lockIdentity, runtimeKind);
   for (const [index, entry] of entries.entries()) {
     if (entry.owner.stateLockIdentityRef !== first.stateLockIdentityRef || entry.owner.stateLockIdentityDigest !== first.stateLockIdentityDigest ||
         entry.owner.runtimeBundleRef !== first.runtimeBundleRef || entry.owner.runtimeBundleManifestDigest !== first.runtimeBundleManifestDigest ||

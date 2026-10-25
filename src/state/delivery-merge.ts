@@ -98,7 +98,8 @@ export function loadDeliveryMerge(driver: SqliteDriver, artifacts: ArtifactCatal
         const inspection = state.source.admission.inspection;
         if (inspection.outcome.kind !== 'captured') throw new TypeError('delivery merge lost its original capture topology');
         state.prepared ??= await prepareDeliveryMergePlan(artifacts, original, { deliveryRunId: runId, sourceRunResultRef,
-          captureTopologyRef: inspection.outcome.captureTopologyRef }, signal);
+          captureTopologyRef: inspection.outcome.captureTopologyRef, sandboxProfileRef: spec.sandboxProfileRef,
+          ...(state.source.admission.workspaceState.privateGitStateRef ? { privateGitStateRef: state.source.admission.workspaceState.privateGitStateRef } : {}) }, signal);
         state.metadata = state.prepared.metadata;
         const item: DeliveryMergeItem = { schemaVersion: 1, itemId: deliveryMergeItemId(runId, sourceRunResultRef, spec.baseWorkspaceManifestRef),
           runId, kind: 'delivery_merge', sourceRunResultRef, ...original.input, resultSourceRef: original.sourceRef, diffRef: original.diffRef,

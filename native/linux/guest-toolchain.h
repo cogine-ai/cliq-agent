@@ -17,6 +17,9 @@
 static const napi_type_tag CLIQ_GUEST_TOOLCHAIN_TAG = {
     UINT64_C(0x4df929b45fc4476c), UINT64_C(0x9a8f3167d867ec21)
 };
+static const napi_type_tag CLIQ_SOURCE_GUEST_TOOLCHAIN_TAG = {
+    UINT64_C(0x387029d85bb64033), UINT64_C(0x84a9872ed5990839)
+};
 
 struct cliq_guest_file {
     int fd;
@@ -37,6 +40,11 @@ struct cliq_guest_toolchain {
     char node_path[CLIQ_GUEST_PATH_BYTES];
     char node_digest[65];
     struct cliq_guest_file files[CLIQ_GUEST_MAX_FILES];
+    /* Read only after the distinct source tag has authenticated this longer
+     * object. An older ordinary Node-only ABI object cannot enter that path. */
+    uint32_t source_recipe_version;
+    char git_path[CLIQ_GUEST_PATH_BYTES];
+    char git_digest[65];
 };
 
 #endif

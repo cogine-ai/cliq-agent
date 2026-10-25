@@ -194,6 +194,38 @@ test('the genuine-driver consumer retains only the fixed driver failure stage an
   assert.equal(closed, 2); assert.equal(joined, false);
 });
 
+for (const withProcess of [false, true]) test(`a real failed child retains its scanned authentication prefix${withProcess ? ' with whole-process counters' : ''} without replacing failure or claiming readiness`, async () => {
+  const work = { package: { started: 1, completed: 1, bytesRead: 10, spanElapsedMs: 2 },
+    revalidate: { started: 2, completed: 2, bytesRead: 20, spanElapsedMs: 3 },
+    createCompare: { started: 0, completed: 0, bytesRead: 0, spanElapsedMs: 0 } };
+  const own = { userCPUTime: 100, systemCPUTime: 20, fsRead: 3, fsWrite: 4 };
+  const markers = Buffer.concat([installedClientAuthenticationMarker('manager_observer_loaded', 1, work, withProcess ? own : undefined),
+    installedClientAuthenticationMarker('initial_current_observed', 2, work, withProcess ? own : undefined)]);
+  const scanned: Buffer[] = []; let opened = 0, closed = 0, joined = false;
+  await assert.rejects(openInstalledClientConsumer({ executable: process.execPath,
+    args: ['--input-type=module', '-e', `process.stderr.write('installed control client driver progress phase=authentication\\n');
+      const bytes=Buffer.from(${JSON.stringify(markers.toString('base64'))},'base64');process.stderr.write(bytes.subarray(0,19));
+      await new Promise(r=>setImmediate(r));process.stderr.write(bytes.subarray(19));
+      process.stderr.write('installed control client driver failed phase=authentication\\n');process.exitCode=1;`],
+    cwd: process.cwd(), env: process.env,
+    openScan() { opened++; return { scan(bytes) { scanned.push(Buffer.from(bytes)); }, close() { closed++; } }; },
+    onJoined() { joined = true; }
+  }), error => {
+    assert(error instanceof InstalledClientDriverError);
+    assert.equal(error.diagnostic.kind, 'installed_client_driver'); assert.equal(error.diagnostic.stage, 'authentication');
+    const rows = error.diagnostic.authentication; assert.equal(rows?.length, 2); assert(rows);
+    assert.deepEqual(rows.map(({ stage, elapsedMs, work: actualWork, process }) => ({ stage, elapsedMs, work: actualWork, process })),
+      ['manager_observer_loaded', 'initial_current_observed'].map((stage, index) => ({ stage, elapsedMs: index + 1, work,
+        process: withProcess ? own : undefined })));
+    assert(rows.every(row => Number.isSafeInteger(row.observedElapsedMs) && row.observedElapsedMs >= 0));
+    assert(Object.isFrozen(rows) && rows.every(row => Object.isFrozen(row) && Object.isFrozen(row.work)));
+    assert(!Object.hasOwn(error.diagnostic, 'qualified') && !Object.hasOwn(error.diagnostic, 'frames'));
+    return true;
+  });
+  assert.equal(opened, 2); assert.equal(closed, 2); assert.equal(joined, false);
+  assert(Buffer.concat(scanned).includes(markers), 'all original split marker bytes were scanned before diagnosis');
+});
+
 test('the original ready deadline retains the last scanned split progress marker without extending its budget', async () => {
   const scanned: Buffer[] = []; let closed = 0, joined = false;
   const started = performance.now();
@@ -265,6 +297,27 @@ test('authentication data never invokes supplied accessors or serializes unknown
   Object.defineProperty(rows, '0', { get() { accessed = true; throw 0; } });
   assert.throws(() => new InstalledClientConsumerDeadlineError('ready', 5000, performance.now(), 0, undefined, rows), assert.AssertionError);
   assert.equal(accessed, false);
+});
+
+test('driver failure copies only a closed immutable authentication prefix and refuses malformed data without traps', () => {
+  const row = { stage: 'manager_observer_loaded' as const, elapsedMs: 1, observedElapsedMs: 2 };
+  const input = [row], failure = new InstalledClientDriverError('authentication', input);
+  row.elapsedMs = 10;
+  assert.equal(failure.diagnostic.authentication?.[0]?.elapsedMs, 1);
+  assert(Object.isFrozen(failure.diagnostic) && Object.isFrozen(failure.diagnostic.authentication) && Object.isFrozen(failure.diagnostic.authentication?.[0]));
+  let traps = 0;
+  const getter = Object.defineProperty({}, 'stage', { enumerable: true, get() { traps++; throw 0; } });
+  const arrayGetter = Object.defineProperty([row], '0', { enumerable: true, get() { traps++; throw 0; } });
+  const proxy = new Proxy(row, { ownKeys() { traps++; throw 0; }, get() { traps++; throw 0; } });
+  const arrayProxy = new Proxy(input, { ownKeys() { traps++; throw 0; }, get() { traps++; throw 0; } });
+  const extra = [row]; Object.defineProperty(extra, 'extra', { value: 'not retained' });
+  const hidden = Object.defineProperty([row], '0', { value: row, enumerable: false });
+  for (const data of [null, [getter], arrayGetter, arrayProxy, [proxy], extra, hidden, Array(1), [row, row],
+    [{ ...row, extra: true }], [{ ...row, stage: 'private stage' }], [{ ...row, elapsedMs: -1 }],
+    [{ ...row, observedElapsedMs: Number.MAX_SAFE_INTEGER + 1 }]])
+    assert.throws(() => new InstalledClientDriverError('authentication', data as never), assert.AssertionError);
+  assert.equal(traps, 0);
+  assert.deepEqual(new InstalledClientDriverError('authentication', []).diagnostic, { kind: 'installed_client_driver', stage: 'authentication' });
 });
 
 test('V2 labels only explicitly supplied self whole-process cumulative counters and keeps V1 bytes unchanged', () => {

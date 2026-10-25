@@ -1,4 +1,5 @@
 import { canonicalSha256 } from './canonical.js';
+import { types } from 'node:util';
 import { assertArtifactRef, digestOmitting, identityHash, normalizeBoundedText, parseCanonicalTime, sha256Bytes } from './identity.js';
 import { immutableSnapshot } from '../model/immutable.js';
 
@@ -94,6 +95,13 @@ export type PublicationProofV1 = ProofBase & (
   | { kind: 'projection_closure'; selectedBranch: 'forward_finalize' | 'abort'; observedSourceRef: string;
       observedPathEvidenceRefs: string[]; forwardResultItemRefs: string[]; unstartedForwardOperationIds: string[]; abortResultItemRefs: string[] }
   | { kind: 'git_index_unchanged'; repositoryKind: 'non_git' }
+  | { kind: 'git_index_unchanged'; repositoryKind: 'git'; repositoryIdentityRef: string; repositoryIdentityDigest: string;
+      capturedSourceRef: string; capturedIndexRef: string; capturedIndexDigest: string; observedIndexRef: string; observedIndexDigest: string;
+      objectFormat: 'sha1' | 'sha256';
+      canonicalIndexBytesRef: string; canonicalIndexByteCount: number; indexTreeObjectId: string;
+      observedIndex: { kind: 'present'; deviceId: string; fileId: string; ownerUid: number; rawByteCount: number; rawBytesDigest: string }
+        | { kind: 'absent'; rawByteCount: 0 };
+      descriptorReadComplete: true; readerJoined: true }
 );
 export type PublicationDirectoryPreimageV1 = {
   schemaVersion: 1; format: 'cliq-publication-directory-preimage-v1'; deliveryRunId: string; deliveryPlanRef: string;
@@ -582,7 +590,7 @@ function observation(value: unknown): PublicationPathObservationV1 {
 const proofFields = ['schemaVersion', 'format', 'kind', 'deliveryRunId', 'deliveryPlanRef', 'workspaceIdentityRef', 'workspaceIdentityDigest',
   'inspectorIdentityRef', 'inspectorIdentityDigest', 'observedAt', 'proofDigest'] as const;
 export function decodePublicationProof(value: unknown): PublicationProofV1 {
-  if (!value || typeof value !== 'object') throw new TypeError('publication proof must be a record');
+  if (!value || typeof value !== 'object' || types.isProxy(value)) throw new TypeError('publication proof must be a record');
   const kind = Object.getOwnPropertyDescriptor(value, 'kind')?.value;
   const operationFields = ['sequence', 'operationIndex', 'operationId', 'opId', 'attempt'];
   let fields: string[], optional: string[] = [];
@@ -604,7 +612,9 @@ export function decodePublicationProof(value: unknown): PublicationProofV1 {
   else if (kind === 'transient_absence') fields = ['transientLocations', ...(Object.hasOwn(value, 'envelopeRetirements')
     ? ['envelopeRetirements'] : ['observationRefs', 'arenaRetirementRefs'])];
   else if (kind === 'projection_closure') fields = ['selectedBranch', 'observedSourceRef', 'observedPathEvidenceRefs', 'forwardResultItemRefs', 'unstartedForwardOperationIds', 'abortResultItemRefs'];
-  else if (kind === 'git_index_unchanged') fields = ['repositoryKind'];
+  else if (kind === 'git_index_unchanged') fields = ['repositoryKind', ...(Object.getOwnPropertyDescriptor(value, 'repositoryKind')?.value === 'git'
+    ? ['repositoryIdentityRef', 'repositoryIdentityDigest', 'capturedSourceRef', 'capturedIndexRef', 'capturedIndexDigest', 'observedIndexRef', 'observedIndexDigest', 'objectFormat',
+      'canonicalIndexBytesRef', 'canonicalIndexByteCount', 'indexTreeObjectId', 'observedIndex', 'descriptorReadComplete', 'readerJoined'] : [])];
   else throw new TypeError('unknown publication proof kind');
   if (['path_observation', 'terminal_receipt', 'path_ambiguity', 'arena_retirement'].includes(kind))
     optional.push('recoveryOriginRef', 'recoveryOriginDigest');
@@ -706,7 +716,31 @@ export function decodePublicationProof(value: unknown): PublicationProofV1 {
     if (data.selectedBranch !== 'forward_finalize' && data.selectedBranch !== 'abort') throw new TypeError('invalid publication projection branch');
     reference(data.observedSourceRef); references(data.observedPathEvidenceRefs); references(data.forwardResultItemRefs);
     operationIds(data.unstartedForwardOperationIds); references(data.abortResultItemRefs);
-  } else if (data.repositoryKind !== 'non_git') throw new TypeError('Git publication proof is not implemented');
+  } else if (data.repositoryKind === 'git') {
+    for (const key of ['repositoryIdentityRef', 'repositoryIdentityDigest', 'capturedSourceRef', 'capturedIndexRef', 'capturedIndexDigest',
+      'observedIndexRef', 'observedIndexDigest', 'canonicalIndexBytesRef']) reference(data[key]);
+    if (data.capturedIndexRef !== data.observedIndexRef || data.capturedIndexDigest !== data.observedIndexDigest)
+      throw new TypeError('publication Git index snapshots differ');
+    if ((data.objectFormat !== 'sha1' && data.objectFormat !== 'sha256') || typeof data.indexTreeObjectId !== 'string' ||
+        !new RegExp(data.objectFormat === 'sha1' ? '^[0-9a-f]{40}$' : '^[0-9a-f]{64}$', 'u').test(data.indexTreeObjectId) ||
+        data.descriptorReadComplete !== true || data.readerJoined !== true) throw new TypeError('invalid complete Git index proof');
+    if (!data.observedIndex || typeof data.observedIndex !== 'object' || types.isProxy(data.observedIndex)) throw new TypeError('invalid fixed Git index observation');
+    const observed = closed(data.observedIndex, Object.getOwnPropertyDescriptor(data.observedIndex, 'kind')?.value === 'absent'
+      ? ['kind', 'rawByteCount'] : ['kind', 'deviceId', 'fileId', 'ownerUid', 'rawByteCount', 'rawBytesDigest']);
+    if (!Number.isSafeInteger(data.canonicalIndexByteCount) || (data.canonicalIndexByteCount as number) < 1 || (data.canonicalIndexByteCount as number) > 268_435_456)
+      throw new TypeError('invalid canonical Git index proof byte bound');
+    if (observed.kind === 'absent') {
+      if (observed.rawByteCount !== 0) throw new TypeError('absent Git index cannot carry bytes or an old descriptor identity');
+    } else {
+      if (observed.kind !== 'present') throw new TypeError('unknown Git index observation branch');
+      for (const key of ['deviceId', 'fileId']) if (typeof observed[key] !== 'string' || !/^(0|[1-9][0-9]*)$/u.test(observed[key] as string))
+        throw new TypeError('invalid Git index descriptor identity');
+      if (observed.fileId === '0' || !Number.isSafeInteger(observed.ownerUid) || (observed.ownerUid as number) < 0 || (observed.ownerUid as number) > 0xffffffff ||
+          !Number.isSafeInteger(observed.rawByteCount) || (observed.rawByteCount as number) < 12 + (data.objectFormat === 'sha1' ? 20 : 32) ||
+          (observed.rawByteCount as number) > 268_435_456) throw new TypeError('invalid present Git index proof byte bounds');
+      reference(observed.rawBytesDigest);
+    }
+  } else if (data.repositoryKind !== 'non_git') throw new TypeError('unknown Git publication proof kind');
   if (digestOmitting(data, 'proofDigest') !== data.proofDigest) throw new TypeError('publication proof digest differs');
   return immutableSnapshot(data) as PublicationProofV1;
 }

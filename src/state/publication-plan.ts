@@ -12,7 +12,10 @@ import { decodeFrozenIgnoreRules, decodeSourceManifest, decodeSourceProjection, 
 import { KernelStorageError } from './errors.js';
 import { exactKeys } from '../policy/runtime-authority.js';
 import { CandidateSourceLimitError } from './result-source.js';
-import { checkEntries, checkNonGitSourceManifest, checkProjection } from './source-validation.js';
+import { checkEntries, checkSourceManifest, checkProjection } from './source-validation.js';
+import { readSourceProjectionData, sameSourceGit } from './source-projection-data.js';
+import { decodeSandboxProfile } from './execution-closure.js';
+import { decodeRepositoryIdentity } from './repository-identity.js';
 
 export type DeliveryPublicationPlanInput = Readonly<Pick<DeliveryPlan, 'deliveryRunId' | 'sourceRunResultRef' | 'sourceBaseRef' |
   'sourceDesiredRef' | 'capturedWorkspaceRef' | 'captureTopologyRef' | 'desiredSourceRef' | 'diffRef'>>;
@@ -23,7 +26,7 @@ function mismatch(message: string): never { throw new KernelStorageError('ARTIFA
 /** Immutable data planning, not source-inspection provenance, approval, claim,
  * a live target check or native proof. Those consumers independently bind this
  * exact plan and its original topology to the current owning StateOwner cut. */
-export async function planDeliveryPublication(artifacts: ArtifactCatalog, input: DeliveryPublicationPlanInput, signal?: AbortSignal):
+export async function planDeliveryPublication(artifacts: ArtifactCatalog, input: DeliveryPublicationPlanInput, signal?: AbortSignal, sandboxProfileRef?: string):
   Promise<Readonly<{ plan: DeliveryPlan; planRef: string; metadata: PublishedArtifact[]; publications: PlannedArtifact[] }>> {
   signal?.throwIfAborted();
   if (typeof input.deliveryRunId !== 'string' || !input.deliveryRunId || input.deliveryRunId.length > 128 ||
@@ -37,38 +40,46 @@ export async function planDeliveryPublication(artifacts: ArtifactCatalog, input:
   const sources = [];
   for (const [ref, role] of [[input.capturedWorkspaceRef, 'base'], [input.desiredSourceRef, 'result']] as const) {
     const source = decodeSourceManifest(await read(ref, 'cliq-source-manifest-v1'));
-    if (source.git !== undefined) throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'publication requires the implemented non-Git closure');
-    checkNonGitSourceManifest(source);
+    checkSourceManifest(source);
     if (source.role !== role) mismatch('publication source has a different base/result role');
     const entries = decodeWorkspaceEntries(await read(source.entriesRef, 'cliq-workspace-entries-v1')); checkEntries(entries);
     if (entries.treeDigest !== source.treeDigest) mismatch('publication source tree differs from its entries');
     sources.push({ source, entries });
   }
   const [captured, desired] = sources;
+  if (!sameSourceGit(captured.source, desired.source)) mismatch('publication desired source changed captured A Git identity');
   for (const key of ['workspaceIdentityDigest', 'sourceProjectionRef', 'sourceProjectionDigest', 'frozenIgnoreRulesRef', 'frozenIgnoreRulesDigest'] as const)
     if (captured.source[key] !== desired.source[key]) mismatch('publication source projection, ignore or workspace identity differs');
   const projection = decodeSourceProjection(await read(captured.source.sourceProjectionRef, 'cliq-source-projection-v1')); checkProjection(projection);
   const rules = decodeFrozenIgnoreRules(await read(captured.source.frozenIgnoreRulesRef, 'cliq-frozen-ignore-rules-v1'));
-  if (!exactKeys(rules, ['schemaVersion', 'format', 'matcherVersion', 'sources', 'rules', 'rulesDigest']) ||
+  if (!exactKeys(rules, ['schemaVersion', 'format', 'matcherVersion', 'sources', 'rules', 'rulesDigest', ...(captured.source.git ? ['repositoryIdentityDigest'] : [])]) ||
       rules.matcherVersion !== 'cliq-git-wildmatch-v1' || !Array.isArray(rules.sources) || !Array.isArray(rules.rules))
     mismatch('publication frozen ignore rules have invalid fields');
   if (projection.projectionDigest !== captured.source.sourceProjectionDigest || projection.frozenIgnoreRulesRef !== captured.source.frozenIgnoreRulesRef ||
       projection.frozenIgnoreRulesDigest !== captured.source.frozenIgnoreRulesDigest || rules.rulesDigest !== captured.source.frozenIgnoreRulesDigest)
     mismatch('publication source projection or frozen ignore closure differs');
-  if (rules.sources.length || rules.rules.length) throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'publication nonempty ignore matching is not implemented');
+  const profile = captured.source.git && sandboxProfileRef ? decodeSandboxProfile(await read(sandboxProfileRef, 'cliq-sandbox-profile-v1')) : undefined;
+  if (captured.source.git && !profile) mismatch('Git publication lost its frozen resource profile');
+  const classification = profile ? await readSourceProjectionData(artifacts, captured.source, projection, profile.resources, signal) : undefined;
+  if (!profile && (rules.sources.length || rules.rules.length || projection.classificationIndexRef)) mismatch('non-Git publication carries unproven classification');
   const topology = decodeDeliveryCaptureTopology(await read(input.captureTopologyRef, 'cliq-delivery-capture-topology-v1'));
   const identity = decodeWorkspaceIdentity(await read(topology.workspaceIdentityRef, 'cliq-workspace-identity-v1'));
-  if (identity.kind !== 'live' || identity.repositoryIdentityRef !== undefined || identity.identityDigest !== topology.workspaceIdentityDigest ||
+  if (identity.kind !== 'live' || !!identity.repositoryIdentityRef !== !!captured.source.git || identity.identityDigest !== topology.workspaceIdentityDigest ||
       topology.capturedWorkspaceRef !== input.capturedWorkspaceRef || topology.workspaceIdentityDigest !== captured.source.workspaceIdentityDigest ||
       identity.rootIdentity.deviceId !== topology.rootIdentity.deviceId || identity.rootIdentity.fileId !== topology.rootIdentity.fileId ||
       identity.rootIdentity.ownerUid !== topology.rootIdentity.ownerUid) mismatch('publication topology does not close its captured workspace and original root');
+  if (identity.repositoryIdentityRef) {
+    const repository = decodeRepositoryIdentity(await read(identity.repositoryIdentityRef, 'cliq-repository-identity-v2'));
+    if (repository.schemaVersion !== 2 || repository.repositoryIdentityDigest !== captured.source.git!.repositoryIdentityDigest ||
+        repository.repositoryIdentityDigest !== identity.repositoryIdentityDigest) mismatch('publication repository differs from captured A');
+  }
   const before = new Map(captured.entries.entries.map(entry => [entry.path, entry])), after = new Map(desired.entries.entries.map(entry => [entry.path, entry]));
   const directories = new Map(topology.directories.map(entry => [entry.path, entry])), modes = new Map(topology.fileModes.map(entry => [entry.path, entry.mode]));
   if (directories.size !== captured.entries.entries.filter(entry => entry.kind === 'directory').length ||
       modes.size !== captured.entries.entries.filter(entry => entry.kind === 'file').length) mismatch('publication topology does not cover exactly the captured graph');
   const files = new Map<string, number>();
   for (const { entries } of sources) for (const entry of entries.entries) {
-    if (projection.explicitExcludes.some(selector => entry.path === selector.path || selector.scope === 'subtree' && entry.path.startsWith(`${selector.path}/`)))
+    if (classification ? !classification.includes(entry) : projection.explicitExcludes.some(selector => entry.path === selector.path || selector.scope === 'subtree' && entry.path.startsWith(`${selector.path}/`)))
       mismatch('publication source includes a frozen excluded path');
     if (entry.kind === 'file') {
       const size = files.get(entry.blobRef);

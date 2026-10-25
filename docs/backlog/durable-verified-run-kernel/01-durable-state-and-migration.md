@@ -434,12 +434,24 @@ with epoch one. Generation retains the pristine schema fields plus required
 `runtimeBundleRef` and `runtimeBundleManifestDigest`, equal to the installation
 and acquisition; the other origins forbid these installed fields. Its
 `stateSchemaVersion` is a positive safe integer equal to the actual opened
-schema (currently 4), not the literal artifact `schemaVersion=1`. A caller list,
+schema, not the literal artifact `schemaVersion=1`. A caller list,
 path, boolean or structural lookalike cannot substitute for the still-held
 installation. Extra/missing/changed seed objects or root replacement fail closed;
 `fresh_empty` still rejects every nonempty CAS. Existing successors use the
 original acquisition rules, never this seed exception again. No new ledger,
 execution permission or migration/cutover claim follows from this source.
+
+Historical genesis uses that original birth schema's exact supported DDL digest,
+schema-manifest version and empty-database content identity. Migration must not
+rewrite those fields or compare them with today's schema/table inventory.
+Unknown recipes or inconsistent original version/digest pairs fail closed.
+Fresh bootstrap still requires the exact opened current schema; historical
+reading is not runtime activation, upgrade compatibility or execution authority.
+The implemented schema-only v6/v7 recipes require the pristine schema ref and
+semantic digest to equal the first owner's original schema runtime. Existing
+signed births retain the current-version boundary until their exact original
+signed schema source and upgrade transition are implemented; a compatibility
+range or a known DDL digest does not supply that missing source.
 
 The same first transaction records `modelAuthoritySource` from that genuine
 held installation: exactly `{kind:'none'}` or
@@ -3643,7 +3655,8 @@ active before the complete verified group and final native-current check.
 
 The same fixed-four phase semantics also cover the installed single-verifier
 group `[command, environment, verifier specification, Run assembly]`. The
-sandbox remains an earlier individually durable publication. Its complete
+sandbox remains an earlier fully durable publication, individually or in the
+exact single-credential model quartet below. Its complete
 profile read and all original toolchain/authorization/resource checks retain
 their original relative order and finish before the batch; policy remains a
 later individual publication. Zero/multiple verifiers use the original path
@@ -3657,11 +3670,26 @@ durability boundary, request limit or shutdown deadline is removed or enlarged.
 Four more fixed data closures may use that same four-stage core: source
 `[original request, sandbox profile, target]`, source-retirement
 `[inspector, evidence]`, exactly-one-credential model material
-`[endpoint, binding, capability]`, and the fresh final-admission single-verifier
-`[command, environment, verifier specification]`. The last group retains the
-fresh original resolver and final transaction/grant consumption; it republishes
-all complete bytes even when already present, never borrows earlier assembly
-authorization, and never runs in historical reconstruction.
+`[endpoint, binding, capability, installed sandbox profile]`, and the fresh
+final-admission single-verifier `[command, environment, verifier specification]`
+outside installed admission. The model quartet uses only the already-normalized
+resource recipe and original selected model data; original endpoint/binding/
+catalog checks precede it. Its four real files completely sync, rehash and join
+before `materialFor`, complete assembly validation and tool-runtime authority
+verification. The later complete profile read, verifier resolution, policy and
+final currentness checks retain their relative order; zero/multiple bindings
+keep their original ordinary path and later individual sandbox publication.
+Installed final admission instead permits the exact quartet `[command,
+environment, verifier specification, original authorization consumption receipt]`
+after complete fresh resolution and exact expected-spec comparison. Receipt
+bytes bind the original grant and already determined Run id, admission intent
+and installed preparation time; publication consumes no grant. Actual
+consumption remains in the sole original final transaction, with exact prior-row
+CAS, original creation/expiry and fresh commit-time checks plus current owner,
+Session and authenticated frame. Ordinary admission's time sample and
+zero/multiple-verifier paths do not move. Both groups republish all complete
+bytes even when already present, never borrow earlier assembly authorization
+and never run in historical reconstruction.
 Exact pair/triple APIs expose only their
 fully joined result; each file still syncs and independently rehashes. Keep
 source reservation/retirement SQL, real capture/staging retirement, entries

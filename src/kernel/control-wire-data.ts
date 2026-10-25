@@ -1,10 +1,12 @@
 import { assertArtifactRef, normalizeBoundedText, parseCanonicalTime, requiredSafeInteger } from './identity.js';
 import type { ArtifactDescriptorV1, BudgetUsage, Checkpoint, InvocationJournalEntry, Run, RunEvent, RunItemReferenceV1, RunSnapshotV1, Session, SessionItem } from './types.js';
 import type { AuthorizationGrantSummaryV1 } from './authorization.js';
+import { types } from 'node:util';
 
 /** Data validation only. None of these values is a StateOwner, native proof,
  * artifact registration, authorization grant or permission to mutate state. */
 export function assertControlWireJson(value: unknown, depth = 0): void {
+  if (value !== null && typeof value === 'object' && types.isProxy(value)) throw new TypeError('control data must be plain JSON');
   if (depth > 32) throw new TypeError('control data exceeds its depth bound');
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return;
   if (typeof value === 'number' && Number.isFinite(value)) return;
@@ -235,7 +237,8 @@ export function decodeWireGrantSummary(value: unknown): AuthorizationGrantSummar
   const { state, targetKind, purpose } = data;
   const validPurpose = targetKind === 'read_scope' ? purpose === 'source' : targetKind === 'execution_identity_read'
     ? purpose === 'verifier' || purpose === 'mcp_stdio' : targetKind === 'verifier_execution' ? purpose === 'verifier'
-      : targetKind === 'dependency_install_scripts' && purpose === 'dependency_install_scripts';
+      : targetKind === 'source_git_inspection' ? purpose === 'source_inspection'
+        : targetKind === 'dependency_install_scripts' && purpose === 'dependency_install_scripts';
   if (data.schemaVersion !== 1 || !['active', 'consumed', 'revoked'].includes(state as string) || !validPurpose ||
       data.useCount !== (state === 'consumed' ? 1 : 0) || data.rowVersion !== (state === 'active' ? 1 : 2) ||
       Object.hasOwn(data, 'consumedAt') !== (state === 'consumed') || Object.hasOwn(data, 'revokedAt') !== (state === 'revoked'))

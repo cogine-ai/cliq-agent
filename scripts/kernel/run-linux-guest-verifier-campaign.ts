@@ -11,6 +11,7 @@ import { prepareSupervisorSeaCarrier } from './testing/supervisor-sea-builder.js
 import { joinGuestExtractionChild } from './testing/guest-campaign-child.js';
 import { readGuestVerifierBoundaryFailure, readGuestVerifierOutputFailure, readGuestVerifierPreReadyFailure,
   readGuestVerifierCancellationFailure } from './testing/guest-verifier-diagnostics.js';
+import { qualifyPreparingGitNativeCampaign } from './testing/preparing-git-native.js';
 
 // The guest raw image is never mounted. CI's separately disposable ext4
 // StateRoot volume is a fixture, not a runtime guest-image loader/authority.
@@ -33,7 +34,7 @@ if (mode === '--prepare') {
     imageByteCount: metadata.guestImageByteCount, nodeDigest: metadata.node.digest,
     source: 'existing checksum-pinned actual SEA Node carrier, not host Node fallback', qualified: false }));
 } else {
-  assert(mode === '--run' || mode === '--extract'); assert.equal(arguments_.length, 1);
+  assert(mode === '--run' || mode === '--extract' || mode === '--preparing'); assert.equal(arguments_.length, 1);
   assert.notEqual(process.getuid!(), 0, 'the actual verifier campaign must exercise non-root delegation');
   const reportRoot = arguments_[0]!; assert.ok(path.isAbsolute(reportRoot));
   if (mode === '--run') await mkdir(reportRoot, { mode: 0o700 });
@@ -49,6 +50,11 @@ if (mode === '--prepare') {
       const extraction = await qualifyGuestToolchainExtraction(input);
       await writeFile(path.join(reportRoot, 'guest-extractor-report.json'), JSON.stringify({ schemaVersion: 1,
         format: 'cliq-real-guest-extractor-report-v1', ...identity, ...extraction }), { flag: 'wx', mode: 0o600 });
+    } else if (mode === '--preparing') {
+      phase = 'preparing_git';
+      const preparation = await qualifyPreparingGitNativeCampaign(input);
+      await writeFile(path.join(reportRoot, 'guest-preparing-git-report.json'), JSON.stringify({ schemaVersion: 1,
+        format: 'cliq-real-preparing-git-component-report-v1', ...identity, ...preparation }), { flag: 'wx', mode: 0o600 });
     } else {
       // Keep the real native stages separate so closed /proc/self/fd/N load
       // names are never reused for different addons in one campaign process.
@@ -56,10 +62,13 @@ if (mode === '--prepare') {
       const stop = () => controller.abort();
       process.once('SIGTERM', stop); process.once('SIGINT', stop);
       try {
-        const child = spawn(process.execPath, [...process.execArgv, fileURLToPath(import.meta.url), '--extract', reportRoot],
-          { env: process.env, cwd: process.cwd(), stdio: 'inherit' });
-        await joinGuestExtractionChild(child, controller.signal);
-        assert(!controller.signal.aborted, 'original extractor stage was interrupted');
+        for (const stage of ['--extract', '--preparing'] as const) {
+          phase = stage === '--extract' ? 'guest_extraction' : 'preparing_git';
+          const child = spawn(process.execPath, [...process.execArgv, fileURLToPath(import.meta.url), stage, reportRoot],
+            { env: process.env, cwd: process.cwd(), stdio: 'inherit' });
+          await joinGuestExtractionChild(child, controller.signal);
+          assert(!controller.signal.aborted, 'original native campaign stage was interrupted');
+        }
       } finally { process.removeListener('SIGTERM', stop); process.removeListener('SIGINT', stop); }
     }
     if (mode === '--run') {

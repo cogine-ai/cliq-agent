@@ -13,7 +13,8 @@ import type { ArtifactCatalog, PublishedArtifact } from './artifacts.js';
 import { decodeFrozenIgnoreRules, decodeSourceManifest, decodeSourceProjection, decodeWorkspaceEntries } from './decoders.js';
 import { KernelStorageError } from './errors.js';
 import { decodeSandboxProfile } from './execution-closure.js';
-import { checkEntries, checkNonGitSourceManifest, checkProjection } from './source-validation.js';
+import { checkEntries, checkSourceManifest, checkProjection } from './source-validation.js';
+import { readSourceProjectionData, sameSourceGit } from './source-projection-data.js';
 import { MAX_SOURCE_PROJECTION_ENTRIES } from '../workspace/source-projection.js';
 
 export type DeliverySourceInput = Readonly<{ sourceBaseRef: string; sourceDesiredRef: string; capturedWorkspaceRef: string }>;
@@ -41,7 +42,7 @@ const canMergeText = (base?: WorkspaceEntry, current?: WorkspaceEntry, desired?:
   base?.kind === 'file' && current?.kind === 'file' && desired?.kind === 'file' && base.mode === current.mode && base.mode === desired.mode;
 
 /**
- * Read and plan immutable non-Git B/S/A/M data. Nothing is published here.
+ * Read and plan immutable B/S/A/M data. Nothing is published here.
  * The consumer still owns admission, source-result provenance, permissions,
  * physical resources, private materialization, verification and publication.
  * Only complete deterministic output-limit measurements are produced here.
@@ -78,14 +79,16 @@ export async function planDeliverySource(artifacts: ArtifactCatalog, selected: D
   const profile = decodeSandboxProfile(await read(sandboxProfileRef, 'cliq-sandbox-profile-v1'));
   for (const [ref, role] of [[input.sourceBaseRef, 'base'], [input.sourceDesiredRef, 'result'], [input.capturedWorkspaceRef, 'base']] as const) {
     const source = decodeSourceManifest(await read(ref, 'cliq-source-manifest-v1'));
-    if (source.git !== undefined) throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'delivery Git merging requires its implemented index and object closure');
-    checkNonGitSourceManifest(source);
+    checkSourceManifest(source);
     if (source.role !== role) mismatch('delivery source manifest has the wrong base/result role');
     const entries = decodeWorkspaceEntries(await read(source.entriesRef, 'cliq-workspace-entries-v1'));
     if (entries.treeDigest !== source.treeDigest) mismatch('delivery source tree digest differs from its entries');
     checkEntries(entries); sources.push({ ref, source, entries });
   }
   const [base, desired, captured] = sources;
+  if (!sameSourceGit(base.source, desired.source) || !!captured.source.git !== !!base.source.git ||
+      base.source.git && captured.source.git?.repositoryIdentityDigest !== base.source.git.repositoryIdentityDigest)
+    mismatch('delivery source result changed its admitted Git identity or captured another repository');
   for (const { source } of [desired, captured]) for (const key of ['workspaceIdentityDigest', 'sourceProjectionRef',
     'sourceProjectionDigest', 'frozenIgnoreRulesRef', 'frozenIgnoreRulesDigest'] as const)
     if (source[key] !== base.source[key]) mismatch('delivery source workspace, projection or ignore identity differs');
@@ -95,12 +98,12 @@ export async function planDeliverySource(artifacts: ArtifactCatalog, selected: D
   if (projection.projectionDigest !== base.source.sourceProjectionDigest || projection.frozenIgnoreRulesRef !== base.source.frozenIgnoreRulesRef ||
       projection.frozenIgnoreRulesDigest !== base.source.frozenIgnoreRulesDigest || rules.rulesDigest !== base.source.frozenIgnoreRulesDigest)
     mismatch('delivery source projection and ignore references do not close');
-  if (!exactKeys(rules, ['schemaVersion', 'format', 'matcherVersion', 'sources', 'rules', 'rulesDigest']) ||
+  if (!exactKeys(rules, ['schemaVersion', 'format', 'matcherVersion', 'sources', 'rules', 'rulesDigest', ...(base.source.git ? ['repositoryIdentityDigest'] : [])]) ||
       rules.matcherVersion !== 'cliq-git-wildmatch-v1' || !Array.isArray(rules.sources) || !Array.isArray(rules.rules))
-    mismatch('delivery source non-Git ignore manifest has invalid fields');
-  if (rules.sources.length || rules.rules.length)
-    throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'delivery nonempty ignore rules require their implemented matcher');
-  for (const source of sources) if (source.entries.entries.some(entry => excluded(projection, entry.path)))
+    mismatch('delivery source ignore manifest has invalid fields');
+  const classification = await readSourceProjectionData(artifacts, base.source, projection, profile.resources, signal);
+  if (captured.source.git) await readSourceProjectionData(artifacts, captured.source, projection, profile.resources, signal);
+  for (const source of sources) if (source.entries.entries.some(entry => !classification.includes(entry)))
     mismatch('delivery source includes a frozen excluded path');
   const maps = sources.map(source => new Map(source.entries.entries.map(entry => [entry.path, entry])));
   const [before, wanted, current] = maps;

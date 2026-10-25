@@ -243,7 +243,8 @@ test('a rolled-back resource seal retains its original source Checkpoint and com
   const fault = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
   try {
     const { completed, owner, checkpointId } = await completeFinalTurn(fixture);
-    const proof = await quiescedToolCheckpoint(fixture, checkpointId), before = await fixture.store.readRecoveryClosure(fixture.runId);
+    const before = await fixture.store.readRecoveryClosure(fixture.runId);
+    const proof = await quiescedToolCheckpoint(fixture, checkpointId);
     fault.exec("CREATE TRIGGER fail_result_resource_checkpoint BEFORE INSERT ON checkpoints BEGIN SELECT RAISE(ABORT, 'injected resource seal rollback'); END");
     const request = { expectedRunRevision: completed.run.revision, checkpoint: proof.checkpoint };
     await assert.rejects(owner.complete(request), /injected resource seal rollback/);

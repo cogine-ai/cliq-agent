@@ -98,7 +98,15 @@ static inline bool cliq_receive_flags(int socket, struct cliq_worker_packet *pac
         packet->sandbox_launch_ref[sizeof(packet->sandbox_launch_ref) - 1] == '\0' &&
         packet->sandbox_launch_digest[sizeof(packet->sandbox_launch_digest) - 1] == '\0' &&
         packet->generation_ref[sizeof(packet->generation_ref) - 1] == '\0' &&
-        packet->pid_namespace_reservation[sizeof(packet->pid_namespace_reservation) - 1] == '\0';
+        packet->pid_namespace_reservation[sizeof(packet->pid_namespace_reservation) - 1] == '\0' &&
+        packet->source_inspection_id[sizeof(packet->source_inspection_id) - 1] == '\0' &&
+        packet->source_target_ref[sizeof(packet->source_target_ref) - 1] == '\0' &&
+        packet->source_input_intent_ref[sizeof(packet->source_input_intent_ref) - 1] == '\0' &&
+        packet->source_exclude_grant_digest[sizeof(packet->source_exclude_grant_digest) - 1] == '\0' &&
+        packet->source_rule_digest[sizeof(packet->source_rule_digest) - 1] == '\0' &&
+        packet->source_snapshot_digest[sizeof(packet->source_snapshot_digest) - 1] == '\0' &&
+        packet->preparation_input_intent_ref[sizeof(packet->preparation_input_intent_ref) - 1] == '\0';
+    for (size_t i = 0; valid && i < 4; i++) if (packet->source_output_digests[i][64] != '\0') valid = false;
     if (!valid) { for (size_t i = 0; i < *count; i++) close(fds[i]); *count = 0; errno = received == 0 ? EPIPE : EPROTO; }
     return valid;
 }

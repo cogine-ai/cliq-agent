@@ -16,6 +16,7 @@ import { assertRetiredGenerationCut } from './generation-retirement.js';
 import { isZeroBudget } from './invariants.js';
 import { decodeInheritedVerificationProvenance, decodeRunResult, decodeVerificationClosure } from './result-artifacts.js';
 import { readCheckpoint, readControlRequest, readRun, readSession, readSessionPrincipalId, ZERO_BUDGET } from './rows.js';
+import { assertSessionTerminalProjection } from './session-context.js';
 import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
 import { readVerifierProgress, verifierCheckpointId } from './verifier-recovery.js';
 import { validateDeliveryRecoveryData, type RetainedDeliveryMerge } from './delivery-recovery.js';
@@ -487,12 +488,5 @@ async function validateRunResultRecoveryData(driver: SqliteDriver, artifacts: Ar
   if (!row || row.session_id !== run.sessionId || row.run_id !== null || row.kind !== 'run_terminal' || row.created_at !== run.updatedAt ||
       row.payload_ref !== canonicalSha256(terminal)) throw new TypeError('terminal result has no atomic root Session item');
   requireEqual(await readCanonicalArtifact(artifacts, row.payload_ref), terminal, 'terminal result Session payload');
-  const session = readSession(driver, run.sessionId);
-  const projection = decodeSessionProjection(await readCanonicalArtifact(artifacts, session.contextProjectionRef));
-  if (projection.sessionId !== session.id || projection.contextRevision !== session.contextRevision || projection.throughItemSeq !== session.latestItemSeq)
-    throw new TypeError('terminal result Session projection differs from its owner');
-  const segment = projection.segments.find(segment => segment.fromItemSeq <= Number(row.item_seq) && segment.throughItemSeq >= Number(row.item_seq));
-  requireEqual(segment, { kind: 'raw', fromItemSeq: Number(row.item_seq), throughItemSeq: Number(row.item_seq),
-    items: [{ sourceSessionId: session.id, itemSeq: Number(row.item_seq), itemId, kind: 'run_terminal', payloadRef: row.payload_ref }] },
-  'terminal result one-item Session segment');
+  await assertSessionTerminalProjection(driver, artifacts, run.sessionId, { itemSeq: Number(row.item_seq), itemId, payloadRef: row.payload_ref });
 }

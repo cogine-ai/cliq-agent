@@ -57,7 +57,9 @@ typedef struct control_listener control_listener;
 typedef struct generation_tree generation_tree;
 typedef struct source_staging source_staging;
 typedef struct worker_reservation worker_reservation;
+typedef struct preparation_git_input preparation_git_input;
 typedef struct publication_operation publication_operation;
+typedef struct publication_git_reader publication_git_reader;
 
 typedef struct {
     int root_fd, runtime_fd, lock_fd;
@@ -68,6 +70,7 @@ typedef struct {
     source_staging *source_stagings;
     worker_reservation *worker_reservations;
     publication_operation *publication_operations;
+    publication_git_reader *publication_git_readers;
     int source_retirement_error, worker_reservation_error, generation_retirement_error;
     int process_observation_retirement_error;
     int publication_retirement_error;
@@ -88,16 +91,25 @@ static napi_value open_generation_tree(napi_env env, napi_callback_info info);
 static int close_lock_source_stagings(state_lock *lock);
 static napi_value create_source_staging(napi_env env, napi_callback_info info);
 static napi_value open_source_staging(napi_env env, napi_callback_info info);
+static napi_value decode_source_git_lifecycle(napi_env env, napi_callback_info info);
 static int close_lock_worker_reservations(state_lock *lock);
+static int close_tree_preparation_inputs(generation_tree *tree);
+static int tree_preparation_inputs_retired(generation_tree *tree);
+static int close_reservation_preparation_inputs(worker_reservation *reservation);
+static napi_value worker_reservation_preparation_input(napi_env env, napi_callback_info info);
+static napi_value worker_reservation_retained_preparation_input(napi_env env, napi_callback_info info);
 static napi_value create_worker_reservation(napi_env env, napi_callback_info info);
 static napi_value open_worker_reservation(napi_env env, napi_callback_info info);
 static int close_lock_publication_operations(state_lock *lock);
+static int close_lock_publication_git_readers(state_lock *lock);
+static napi_value open_publication_git_index(napi_env env, napi_callback_info info);
 static napi_value open_publication_operation(napi_env env, napi_callback_info info);
 static napi_value open_publication_namespace_observer(napi_env env, napi_callback_info info);
 
 /* Reopening a path is only a locator check. Authority stays on these held
  * descriptors, and flock is released solely by closing the lock descriptor. */
 static void close_lock(state_lock *lock) {
+    if (close_lock_publication_git_readers(lock)) return;
     close_lock_listeners(lock);
     close_lock_trees(lock);
     close_lock_source_stagings(lock);
@@ -110,7 +122,7 @@ static void close_lock(state_lock *lock) {
 }
 
 static void free_lock_if_done(state_lock *lock) {
-    if (!lock->finalized || lock->trees || lock->listeners || lock->source_stagings || lock->worker_reservations || lock->publication_operations) return;
+    if (!lock->finalized || lock->trees || lock->listeners || lock->source_stagings || lock->worker_reservations || lock->publication_operations || lock->publication_git_readers) return;
     free(lock->path);
     free(lock);
 }
@@ -225,6 +237,7 @@ static napi_value release_lock(napi_env env, napi_callback_info info) {
     int source_failed = close_lock_source_stagings(lock);
     int reservation_failed = close_lock_worker_reservations(lock);
     int publication_failed = close_lock_publication_operations(lock);
+    if (close_lock_publication_git_readers(lock)) publication_failed = 1;
     close_lock_trees(lock);
     if (source_failed) {
         napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "source staging descriptors did not retire; StateOwner remains held"); return NULL;
@@ -317,6 +330,7 @@ static napi_value acquire_lock(napi_env env, napi_callback_info info) {
         {"openWorkerReservation", NULL, open_worker_reservation, NULL, NULL, NULL, napi_default, NULL},
         {"openPublicationOperation", NULL, open_publication_operation, NULL, NULL, NULL, napi_default, NULL},
         {"openPublicationNamespaceObserver", NULL, open_publication_namespace_observer, NULL, NULL, NULL, napi_default, NULL},
+        {"openPublicationGitIndex", NULL, open_publication_git_index, NULL, NULL, NULL, napi_default, NULL},
         {"close", NULL, release_lock, NULL, NULL, NULL, napi_default, NULL}
     };
     error = "StateOwner lock handle creation failed";
@@ -558,8 +572,12 @@ static int observe_process(pid_t pid, char token[128]) {
 #include "generation-tree.c"
 #include "source-staging.c"
 #include "worker-reservation.c"
+#include "preparation-git-input.c"
 #include "source-root.c"
+#include "source-git-input.c"
+#include "source-git-lifecycle.c"
 #include "publication.c"
+#include "publication-git-index.c"
 #include "credential-authority.c"
 
 static napi_value process_start_token(napi_env env, napi_callback_info info) {
@@ -643,6 +661,7 @@ static napi_value initialize(napi_env env, napi_value exports) {
         {"acquireLock", NULL, acquire_lock, NULL, NULL, NULL, napi_default, NULL},
         {"acquireCredentialScope", NULL, acquire_credential_scope, NULL, NULL, NULL, napi_default, NULL},
         {"processStartToken", NULL, process_start_token, NULL, NULL, NULL, napi_default, NULL},
+        {"decodeSourceGitLifecycle", NULL, decode_source_git_lifecycle, NULL, NULL, NULL, napi_default, NULL},
         {"captureCurrentProcess", NULL, capture_current_process, NULL, NULL, NULL, napi_default, NULL},
         {"connectInstalledControl", NULL, connect_installed_control, NULL, NULL, NULL, napi_default, NULL},
         {"executeInstalledImage", NULL, execute_installed_image, NULL, NULL, NULL, napi_default, NULL},

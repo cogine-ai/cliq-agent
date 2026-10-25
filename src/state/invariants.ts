@@ -200,9 +200,10 @@ function decodeWorkerPreparation(record: Record<string, unknown>): WorkerPrepara
   }
   if (has(preparation, 'controller')) {
     const controller = requireRecord(preparation.controller, 'WorkerLaunch.preparation.controller');
-    rejectUnknownKeys(controller, ['birthIdentityRef', 'birthIdentityDigest'], 'WorkerLaunch.preparation.controller');
+    rejectUnknownKeys(controller, ['birthIdentityRef', 'birthIdentityDigest', 'privateGitInputRef'], 'WorkerLaunch.preparation.controller');
     requireArtifactRef(controller.birthIdentityRef, 'WorkerLaunch.preparation.controller.birthIdentityRef');
     requireDigest(controller.birthIdentityDigest, 'WorkerLaunch.preparation.controller.birthIdentityDigest');
+    if (has(controller, 'privateGitInputRef')) requireArtifactRef(controller.privateGitInputRef, 'WorkerLaunch.preparation.controller.privateGitInputRef');
   }
   if (has(preparation, 'reservation')) {
     const reservation = requireRecord(preparation.reservation, 'WorkerLaunch.preparation.reservation');

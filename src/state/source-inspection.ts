@@ -12,6 +12,8 @@ import { assertVerifiedSourceInspectionTargetCut, readVerifiedSourceInspectionTa
   recheckVerifiedSourceInspectionTarget, type VerifiedSourceInspectionTarget } from './source-target.js';
 import type { StateOwnerContext } from './state-owner.js';
 import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
+import { consumeSourceGitConsent, sourceGitConsentData } from './source-git-consent.js';
+import { decodeSourceGitInputIntent } from './source-git-input.js';
 
 export type SourceInspectionReplayKey = Readonly<{
   principalId: string;
@@ -29,7 +31,7 @@ type SqlRow = {
 const BASE = ['schemaVersion', 'inspectionId', 'attempt', 'principalId', 'method', 'admissionKey',
   'admissionIntentDigest', 'targetRef', 'targetDigest', 'workspaceIdentityDigest', 'stateOwnerEpoch',
   'supervisorInstanceId', 'stagingNonceDigest', 'stagingIdentity', 'cancelRequested', 'rowVersion',
-  'createdAt', 'deadlineAt', 'updatedAt', 'rowDigest'];
+  'createdAt', 'deadlineAt', 'updatedAt', 'retirementHandoffRef', 'rowDigest'];
 const SELECT = `SELECT inspection_id, principal_id, method, admission_key, admission_intent_digest, original_request_id, original_request_digest,
   workspace_identity_digest, phase, row_version,
   CASE WHEN length(CAST(row_json AS BLOB)) <= 1048576 THEN row_json ELSE NULL END AS row_json
@@ -106,11 +108,20 @@ function decode(value: unknown): SourceInspectionAttemptV1 {
     invalid('source inspection id does not bind its exact admission key/intent');
   integer(data.stateOwnerEpoch, 'source inspection owner epoch', 1);
   const version = integer(data.rowVersion, 'source inspection row version', 1);
+  if (Object.hasOwn(data, 'retirementHandoffRef')) {
+    digest(data.retirementHandoffRef, 'source retirement handoff ref');
+    if (version < 2) invalid('source retirement handoff precedes its original attempt');
+  }
   descriptor(data.stagingIdentity, 448, 'source inspection staging identity');
   if (typeof data.cancelRequested !== 'boolean') invalid('source inspection cancellation must be boolean');
   const created = time(data.createdAt, 'source inspection createdAt'), updated = time(data.updatedAt, 'source inspection updatedAt');
   if (updated < created || time(data.deadlineAt, 'source inspection deadline') <= created) invalid('source inspection times are inconsistent');
-  if (data.phase === 'capturing') record(data, [...BASE, 'phase'], 'capturing source inspection');
+  if (data.phase === 'capturing') {
+    record(data, [...BASE, 'phase', 'inputRef', 'inputDigest'], 'capturing source inspection');
+    if (Object.hasOwn(data, 'inputRef') || Object.hasOwn(data, 'inputDigest')) {
+      digest(data.inputRef, 'inspection input ref'); digest(data.inputDigest, 'inspection input digest');
+    }
+  }
   else if (data.phase === 'prepared' || data.phase === 'active') {
     record(data, [...BASE, 'phase', 'inputRef', 'inputDigest', 'plan', ...(data.phase === 'active' ? ['processContainmentRef'] : [])], `${data.phase} source inspection`);
     if (version < (data.phase === 'active' ? 3 : 2)) invalid('source inspection phase precedes its reservation');
@@ -121,12 +132,15 @@ function decode(value: unknown): SourceInspectionAttemptV1 {
       invalid('source inspection retirement cut is invalid');
     digest(data.retirementEvidenceRef, 'inspection retirement evidence');
     if (Object.hasOwn(data, 'inputRef') || Object.hasOwn(data, 'inputDigest') || Object.hasOwn(data, 'plan')) {
-      digest(data.inputRef, 'inspection input ref'); digest(data.inputDigest, 'inspection input digest'); plan(data.plan);
+      digest(data.inputRef, 'inspection input ref'); digest(data.inputDigest, 'inspection input digest');
+      if (Object.hasOwn(data, 'plan')) plan(data.plan);
       if (Object.hasOwn(data, 'processContainmentRef')) digest(data.processContainmentRef, 'inspection actual containment');
+      if (!Object.hasOwn(data, 'plan') && Object.hasOwn(data, 'processContainmentRef')) invalid('retired source containment lacks its original plan');
     } else if (Object.hasOwn(data, 'processContainmentRef')) invalid('retired inspection actual containment lacks its input/plan');
     const result = record(data.outcome, ['kind', 'sourceManifestRef', 'sourceManifestDigest', 'privateGitStateRef', 'errorResponseRef',
       'captureTopologyRef', 'captureTopologyDigest'], 'inspection outcome');
     if (result.kind === 'captured') {
+      if (Object.hasOwn(data, 'inputRef') && !Object.hasOwn(data, 'processContainmentRef')) invalid('captured Git source lacks its original active containment');
       record(result, ['kind', 'sourceManifestRef', 'sourceManifestDigest', 'privateGitStateRef',
         ...(data.method === 'run.apply' ? ['captureTopologyRef', 'captureTopologyDigest'] : [])], 'captured inspection outcome');
       digest(result.sourceManifestRef, 'source manifest ref'); digest(result.sourceManifestDigest, 'source manifest digest');
@@ -141,6 +155,10 @@ function decode(value: unknown): SourceInspectionAttemptV1 {
   if (digestOmitting(data, 'rowDigest') !== data.rowDigest) invalid('source inspection row digest differs');
   return immutableSnapshot(data as SourceInspectionAttemptV1);
 }
+
+/** Closed historical data only. This cannot create or borrow a native source
+ * input, consume consent, install a handoff, or mint retirement evidence. */
+export const decodeSourceInspectionAttempt = decode;
 function fromRow(row: SqlRow): SourceInspectionAttemptV1 {
   let decoded: SourceInspectionAttemptV1;
   try {
@@ -207,11 +225,28 @@ export function readSourceInspectionOriginalRequest(connection: SqliteConnection
 /** The only fresh owning-row producer: native staging and a live verified
  * target must agree before the first byte can be captured. This cannot plan
  * or activate a process and accepts no generic phase/authority setter. */
-export async function reserveSourceInspectionAttempt(driver: SqliteDriver, _artifacts: ArtifactCatalog,
+export async function reserveSourceInspectionAttempt(driver: SqliteDriver, artifacts: ArtifactCatalog,
   owner: StateOwnerContext, target: VerifiedSourceInspectionTarget, staging: HeldSourceInspectionStaging):
 Promise<Extract<SourceInspectionAttemptV1, { phase: 'capturing' }>> {
-  await recheckVerifiedSourceInspectionTarget(owner, target);
   const held = readVerifiedSourceInspectionTarget(owner, target);
+  let intent: Awaited<ReturnType<ArtifactCatalog['publishCanonical']>> | undefined;
+  let intentDigest: string | undefined;
+  if (held.target.schemaVersion === 2) {
+    if (!held.workspace.repositoryIdentityDigest) invalid('Git source input lacks its original descriptor repository identity');
+    const input = { schemaVersion: 2 as const, format: 'cliq-source-inspection-input-v2' as const,
+      inspectionId: held.inspectionId, targetRef: held.targetRef, targetDigest: held.target.targetDigest,
+      repositoryIdentityDigest: held.workspace.repositoryIdentityDigest,
+      inspectionGrantId: held.target.inspectionGrantId, inspectionReceiptRef: held.target.inspectionReceiptRef,
+      inspectionReceiptDigest: held.target.inspectionReceiptDigest, recipe: 'cliq-source-git-inspection-v1' as const,
+      snapshotPolicy: 'ephemeral_native_sealed_shards' as const, resources: held.request.sandboxResources, inputDigest: '' };
+    input.inputDigest = digestOmitting(input, 'inputDigest');
+    const decoded = decodeSourceGitInputIntent(input);
+    intent = await artifacts.publishCanonical(decoded, decoded.format); intentDigest = decoded.inputDigest;
+  }
+  // Publishing inert intent never grants payload access. The original
+  // authenticated frame/Trust/Session cut is checked again after publication,
+  // and intent plus one-use consent enter this single first capturing commit.
+  await recheckVerifiedSourceInspectionTarget(owner, target);
   const key = { principalId: held.target.principalId, method: held.target.method, admissionKey: held.target.admissionKey,
     admissionIntentDigest: held.target.admissionIntentDigest };
   let result: Extract<SourceInspectionAttemptV1, { phase: 'capturing' }> | undefined;
@@ -239,16 +274,26 @@ Promise<Extract<SourceInspectionAttemptV1, { phase: 'capturing' }>> {
     // Persist clock-regression detection even when no reservation is admitted.
     if (advanceTimeFence(connection, owner.ownerEpoch) !== 'healthy') { clockRejected = true; return; }
     const now = readTimeFence(connection)!.lastAcceptedAt;
-    const row: Extract<SourceInspectionAttemptV1, { phase: 'capturing' }> = {
+    const consent = held.inspectionConsent && sourceGitConsentData(owner, held.inspectionConsent);
+    if (held.target.schemaVersion === 2 && !held.inspectionConsent)
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'Git capture has no original prepared inspection consent');
+    if (held.inspectionConsent) consumeSourceGitConsent(connection, owner, held.inspectionConsent, {
+      inspectionId: held.inspectionId, admissionIntentDigest: held.target.admissionIntentDigest, workspaceIdentityDigest: held.workspace.identityDigest
+    }, now);
+    const base = {
       schemaVersion: 1, inspectionId: held.inspectionId, attempt: 1, ...key,
       targetRef: held.targetRef, targetDigest: held.target.targetDigest, workspaceIdentityDigest: held.workspace.identityDigest,
       stateOwnerEpoch: owner.ownerEpoch, supervisorInstanceId: owner.supervisorInstanceId,
       stagingNonceDigest: physical.stagingNonceDigest, stagingIdentity: physical.stagingIdentity,
-      phase: 'capturing', cancelRequested: false, rowVersion: 1,
-      createdAt: now, deadlineAt: addCanonicalDuration(now, held.request.budgets.wallTimeMs), updatedAt: now, rowDigest: '' };
+      phase: 'capturing' as const, cancelRequested: false, rowVersion: 1,
+      createdAt: now, deadlineAt: consent && consent.expiresAt < addCanonicalDuration(now, held.request.budgets.wallTimeMs)
+        ? consent.expiresAt : addCanonicalDuration(now, held.request.budgets.wallTimeMs), updatedAt: now, rowDigest: '' };
+    const row: Extract<SourceInspectionAttemptV1, { phase: 'capturing' }> = intent
+      ? { ...base, schemaVersion: 1, attempt: 1, inputRef: intent.ref, inputDigest: intentDigest! }
+      : { ...base, schemaVersion: 1, attempt: 1 };
     row.rowDigest = digestOmitting(row, 'rowDigest');
     decode(row);
-    for (const metadata of held.metadata) insertArtifactMetadata(connection, metadata, now);
+    for (const metadata of [...held.metadata, ...(intent ? [intent] : [])]) insertArtifactMetadata(connection, metadata, now);
     connection.prepare(`INSERT INTO source_inspection_attempts
       (inspection_id, principal_id, method, admission_key, admission_intent_digest, original_request_id, original_request_digest,
        workspace_identity_digest, phase, row_version, row_json)

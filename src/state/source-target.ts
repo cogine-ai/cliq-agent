@@ -2,7 +2,7 @@ import { canonicalSha256 } from '../kernel/canonical.js';
 import { normalizeRunSubmitRequest as decodeRunSubmitRequest, InvalidRunSubmitRequestError } from '../kernel/control-submit.js';
 import type { NormalizedRunSubmitRequest } from '../kernel/control-submit.js';
 import { normalizeRunApplyRequest, runApplyIntentDigest, type NormalizedRunApplyRequest } from '../kernel/control-apply.js';
-import type { SandboxProfileV1, SourceInspectionTargetV1 } from '../kernel/execution.js';
+import type { SandboxProfileV1, SourceInspectionTarget, SourceInspectionTargetV1 } from '../kernel/execution.js';
 import { assertArtifactRef, digestOmitting, identityHash, normalizeBoundedText } from '../kernel/identity.js';
 import type { SourceInspectionAttemptV1 } from '../kernel/execution.js';
 import type { WorkspaceIdentityV1 } from '../kernel/types.js';
@@ -10,7 +10,7 @@ import { immutableSnapshot } from '../model/immutable.js';
 import { verifyRuntimeBundle, type ReleaseTrustKey, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import type { ArtifactCatalog, PublishedArtifact } from './artifacts.js';
 import { readCanonicalArtifact } from './agent-context.js';
-import { validateControlChannelClosure, type AuthenticatedControlIdentity } from './control-channel.js';
+import { assertCurrentControlFrame, validateControlChannelClosure, type AuthenticatedControlIdentity } from './control-channel.js';
 import { decodeFrozenIgnoreRules, decodeSourceProjection, decodeWorkspaceIdentity } from './decoders.js';
 import { assertVerifiedDeliverySource, readRetainedVerifiedDeliverySource, type VerifiedDeliverySource } from './delivery-source-authority.js';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
@@ -24,6 +24,9 @@ import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
 import { assertActiveStateOwner, type StateOwnerContext } from './state-owner.js';
 import { hostPlatform, recaptureLiveWorkspaceIdentity } from './workspace-identity.js';
 import { assertSupportedVerifierRequests, readVerifierRequestIdentities } from './verifier-admission.js';
+import { prepareSourceGitConsent, sourceGitConsentData, type PreparedSourceGitConsent } from './source-git-consent.js';
+import { decodeAuthorizationConsumptionReceipt, VerifierAuthorizationError } from './authorization-artifacts.js';
+import { readFrozenIgnoreRules } from '../workspace/frozen-ignore.js';
 
 function invalid(message: string): never { throw new KernelStorageError('INVALID_REQUEST', message); }
 function object(value: unknown, required: readonly string[], optional: readonly string[] = []): Record<string, unknown> {
@@ -54,10 +57,10 @@ export type NormalizedSourceRequest = NormalizedRunSubmitRequest | NormalizedRun
 /** The original wire request remains distinct from this Supervisor-resolved
  * capture selection. These fields are never accepted from run.apply callers. */
 export type SourceCaptureSelection = Pick<NormalizedRunSubmitRequest, 'sessionId' | 'expectedContextRevision' | 'workspacePath' |
-  'sourceIncludes' | 'sourceExcludes' | 'maxChangedPaths' | 'maxChangedBytes' | 'sandboxResources'> & {
+  'sourceIncludes' | 'sourceExcludes' | 'maxChangedPaths' | 'maxChangedBytes' | 'sandboxResources' | 'sourceInspectionGrantId' | 'ignoreReadGrantIds'> & {
     method: 'run.submit' | 'run.apply'; requestId: string; requestDigest: string; admissionKey: string;
     budgets: { wallTimeMs: number };
-    frozenProjection?: { sourceProjectionRef: string; frozenIgnoreRulesRef: string };
+    frozenProjection?: { sourceProjectionRef: string; frozenIgnoreRulesRef: string; admittedSourceRef: string };
   };
 export function normalizeSourceInspectionRequest(value: unknown) {
   return value && typeof value === 'object' && Object.getOwnPropertyDescriptor(value, 'method')?.value === 'run.apply'
@@ -81,7 +84,7 @@ export async function resolveDeliverySourceCapture(driver: SqliteDriver, artifac
   if (workspace.kind !== 'live' || workspace.ownerPrincipalId !== principalId) invalid('delivery requires its original live Session identity');
   // An old consumed admission read grant cannot authorize a new live capture.
   // Only the connected ordinary builtin projection is currently implemented.
-  if (projection.explicitIncludes.length || rules.sources.length || rules.rules.length || projection.frozenIgnoreRulesDigest !== rules.rulesDigest)
+  if (projection.explicitIncludes.length || projection.frozenIgnoreRulesDigest !== rules.rulesDigest)
     throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'delivery capture of granted/ignored source is not implemented');
   if (source.spec.dependencyPolicyRef !== undefined || request.verifierExecutionGrantIds.length)
     throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'delivery dependency/template admission is not implemented');
@@ -89,7 +92,10 @@ export async function resolveDeliverySourceCapture(driver: SqliteDriver, artifac
     admissionKey: request.admissionKey, budgets: request.budgets, sessionId: session.id, expectedContextRevision: session.contextRevision,
     workspacePath: workspace.canonicalRootPath, sourceIncludes: [], sourceExcludes: projection.explicitExcludes,
     maxChangedPaths: projection.maxChangedPaths, maxChangedBytes: projection.maxChangedBytes, sandboxResources: profile.resources,
-    frozenProjection: { sourceProjectionRef: source.spec.sourceProjectionRef, frozenIgnoreRulesRef: projection.frozenIgnoreRulesRef } });
+    ...(request.sourceInspectionGrantId === undefined ? {} : { sourceInspectionGrantId: request.sourceInspectionGrantId }),
+    ...(request.ignoreReadGrantIds === undefined ? {} : { ignoreReadGrantIds: request.ignoreReadGrantIds }),
+    frozenProjection: { sourceProjectionRef: source.spec.sourceProjectionRef, frozenIgnoreRulesRef: projection.frozenIgnoreRulesRef,
+      admittedSourceRef: source.spec.baseWorkspaceManifestRef } });
 }
 
 /** Only trusted Supervisor composition selects this policy and release root.
@@ -102,9 +108,11 @@ export type VerifiedSourceInspectionTarget = Readonly<{ kind: 'verified_source_i
 type TargetBinding = {
   driver: SqliteDriver; artifacts: ArtifactCatalog; owner: StateOwnerContext;
   workspaceRoot: HeldWorkspaceRoot; trust: HeldWorkspaceSourceTrust; identity: AuthenticatedControlIdentity;
-  request: SourceCaptureSelection; originalRequest: object; target: SourceInspectionTargetV1;
+  frameIdentity?: AuthenticatedControlIdentity;
+  request: SourceCaptureSelection; originalRequest: object; target: SourceInspectionTarget;
   targetRef: string; inspectionId: string; workspace: Extract<WorkspaceIdentityV1, { kind: 'live' }>;
   metadata: readonly PublishedArtifact[];
+  inspectionConsent?: PreparedSourceGitConsent;
 };
 const verifiedTargets = new WeakMap<VerifiedSourceInspectionTarget, TargetBinding>();
 
@@ -127,6 +135,7 @@ export function assertVerifiedSourceInspectionTargetCut(connection: SqliteConnec
   owner: StateOwnerContext, target: VerifiedSourceInspectionTarget): void {
   const held = binding(owner, target);
   assertActiveStateOwner(connection, owner); assertPhysicalTarget(held);
+  if (held.frameIdentity) assertCurrentControlFrame(owner, held.frameIdentity);
   const session = readSession(connection, held.request.sessionId);
   if (readSessionPrincipalId(connection, session.id) !== held.identity.principalId) throw new KernelStorageError('NOT_FOUND', 'Session does not belong to this principal');
   if (session.contextRevision !== held.request.expectedContextRevision) throw new KernelStorageError('REVISION_CONFLICT', 'Session context changed before source capture');
@@ -138,7 +147,7 @@ export function readVerifiedSourceInspectionTarget(owner: StateOwnerContext, tar
   const held = binding(owner, target); assertActiveStateOwner(held.driver, owner); assertPhysicalTarget(held);
   return Object.freeze({ request: held.request, originalRequest: held.originalRequest, target: held.target,
     targetRef: held.targetRef, inspectionId: held.inspectionId, workspace: held.workspace,
-    workspaceRoot: held.workspaceRoot, metadata: held.metadata });
+    workspaceRoot: held.workspaceRoot, metadata: held.metadata, inspectionConsent: held.inspectionConsent });
 }
 export async function recheckVerifiedSourceInspectionTarget(owner: StateOwnerContext,
   target: VerifiedSourceInspectionTarget): Promise<void> {
@@ -158,6 +167,7 @@ export async function createVerifiedSourceInspectionTarget(context: {
 }, inlineRequest: unknown, identity: AuthenticatedControlIdentity,
 deliverySource?: VerifiedDeliverySource): Promise<VerifiedSourceInspectionTarget> {
   const normalized = normalizeSourceInspectionRequest(inlineRequest), wire = normalized.request;
+  const frameIdentity = identity;
   identity = immutableSnapshot(identity);
   const bootstrap = immutableSnapshot(context.bootstrap), { driver, artifacts, owner, workspaceRoot, trust } = context;
   const reads = context.signal ? artifacts.withReadSignal(context.signal) : artifacts;
@@ -213,16 +223,31 @@ deliverySource?: VerifiedDeliverySource): Promise<VerifiedSourceInspectionTarget
   const profile = decodeSandboxProfile(bootstrap.sandboxProfile);
   if (!profile.allowedOwners.includes('source_inspection') || canonicalSha256(profile.resources) !== canonicalSha256(request.sandboxResources))
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'trusted source inspection profile differs from the requested frozen resources');
+  const inspectionId = identityHash('cliq-source-inspection-v1', identity.principalId, wire.method, request.admissionKey, admissionIntentDigest);
+  let inspectionConsent: PreparedSourceGitConsent | undefined;
+  if (workspace.repositoryIdentityRef !== undefined) {
+    if (!request.sourceInspectionGrantId || !workspace.repositoryIdentityDigest) throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');
+    inspectionConsent = await prepareSourceGitConsent(driver, reads, owner, bootstrap, request.sourceInspectionGrantId, {
+      principalId: identity.principalId, sessionId: session.id, workspaceIdentityRef: session.workspaceIdentityRef,
+      workspaceIdentityDigest: workspace.identityDigest, repositoryIdentityRef: workspace.repositoryIdentityRef,
+      repositoryIdentityDigest: workspace.repositoryIdentityDigest, inspectionId, admissionIntentDigest, resources: profile.resources
+    }, context.signal, request.ignoreReadGrantIds);
+  } else if (request.sourceInspectionGrantId !== undefined || request.ignoreReadGrantIds?.length)
+    invalid('non-Git capture cannot consume Git inspection or ignore-rule grants');
   // Composition refs alone are not durable data or target authority. All three
   // actual publications join before the original physical/SQL target recheck.
   const originalRef = canonicalSha256(normalized.originalRequest), selectedProfileRef = canonicalSha256(profile);
-  const target: SourceInspectionTargetV1 = { schemaVersion: 1, format: 'cliq-source-inspection-target-v1', principalId: identity.principalId,
+  const base: SourceInspectionTargetV1 = { schemaVersion: 1, format: 'cliq-source-inspection-target-v1', principalId: identity.principalId,
     method: wire.method, admissionKey: request.admissionKey, admissionIntentDigest,
     originalRequestRef: originalRef, originalRequestDigest: normalized.originalRequestDigest,
     sessionId: request.sessionId, expectedContextRevision: request.expectedContextRevision,
     workspaceIdentityRef: session.workspaceIdentityRef, workspaceIdentityDigest: workspace.identityDigest, sourceReadGrantRefs: [],
     runtimeBundleRef, runtimeBundleManifestDigest: bootstrap.bundle.manifestDigest,
     sandboxProfileRef: selectedProfileRef, sandboxProfileDigest: profile.profileDigest, targetDigest: '' };
+  const consent = inspectionConsent && sourceGitConsentData(owner, inspectionConsent);
+  const target: SourceInspectionTarget = consent ? { ...base, schemaVersion: 2, format: 'cliq-source-inspection-target-v2',
+    inspectionGrantId: consent.grantId, inspectionReceiptRef: consent.receiptRef, inspectionReceiptDigest: consent.receiptDigest,
+    ignoreReadConsents: consent.ignoreReadConsents } : base;
   target.targetDigest = digestOmitting(target, 'targetDigest');
   const [original, selectedProfile, published] = await artifacts.publishCanonicalTriple([
     { value: normalized.originalRequest, schemaKind: 'cliq-control-request-v1' },
@@ -230,9 +255,11 @@ deliverySource?: VerifiedDeliverySource): Promise<VerifiedSourceInspectionTarget
   ]);
   const result: VerifiedSourceInspectionTarget = Object.freeze({ kind: 'verified_source_inspection_target' });
   verifiedTargets.set(result, { driver, artifacts, owner, workspaceRoot, trust, identity, request,
+    ...(channel.channel.transport.kind === 'uds_peer' ? { frameIdentity } : {}),
     originalRequest: normalized.originalRequest, target: immutableSnapshot(target), targetRef: published.ref,
-    inspectionId: identityHash('cliq-source-inspection-v1', identity.principalId, wire.method, request.admissionKey, admissionIntentDigest),
-    workspace: immutableSnapshot(workspace), metadata: immutableSnapshot([...channel.metadata, original, selectedProfile, published]) });
+    inspectionId, inspectionConsent,
+    workspace: immutableSnapshot(workspace), metadata: immutableSnapshot([...channel.metadata, original, selectedProfile, published,
+      ...(consent ? consent.metadata : [])]) });
   await recheckVerifiedSourceInspectionTarget(owner, result);
   return result;
 }
@@ -242,14 +269,17 @@ deliverySource?: VerifiedDeliverySource): Promise<VerifiedSourceInspectionTarget
 export async function readSourceInspectionTargetData(artifacts: ArtifactCatalog, attempt: SourceInspectionAttemptV1,
   originalIndex: { originalRequestId: string; originalRequestDigest: string }) {
   try {
-    const targetData = object(await readCanonicalArtifact(artifacts, attempt.targetRef), ['schemaVersion', 'format', 'principalId', 'method',
+    const raw = await readCanonicalArtifact<Record<string, unknown>>(artifacts, attempt.targetRef);
+    const git = raw.schemaVersion === 2;
+    const targetData = object(raw, ['schemaVersion', 'format', 'principalId', 'method',
       'admissionKey', 'admissionIntentDigest', 'originalRequestRef', 'originalRequestDigest', 'sessionId', 'expectedContextRevision',
       'workspaceIdentityRef', 'workspaceIdentityDigest', 'sourceReadGrantRefs', 'runtimeBundleRef', 'runtimeBundleManifestDigest',
-      'sandboxProfileRef', 'sandboxProfileDigest', 'targetDigest']);
+      'sandboxProfileRef', 'sandboxProfileDigest', 'targetDigest',
+      ...(git ? ['inspectionGrantId', 'inspectionReceiptRef', 'inspectionReceiptDigest', 'ignoreReadConsents'] : [])]);
     for (const key of ['admissionIntentDigest', 'originalRequestRef', 'originalRequestDigest', 'workspaceIdentityRef',
       'workspaceIdentityDigest', 'runtimeBundleRef', 'runtimeBundleManifestDigest', 'sandboxProfileRef', 'sandboxProfileDigest', 'targetDigest'])
       assertArtifactRef(text(targetData[key], 64));
-    if (targetData.schemaVersion !== 1 || targetData.format !== 'cliq-source-inspection-target-v1' || targetData.method !== attempt.method ||
+    if ((git ? targetData.format !== 'cliq-source-inspection-target-v2' : targetData.schemaVersion !== 1 || targetData.format !== 'cliq-source-inspection-target-v1') || targetData.method !== attempt.method ||
         targetData.targetDigest !== digestOmitting(targetData, 'targetDigest') || targetData.targetDigest !== attempt.targetDigest ||
         targetData.principalId !== attempt.principalId || targetData.admissionKey !== attempt.admissionKey ||
         targetData.admissionIntentDigest !== attempt.admissionIntentDigest || targetData.workspaceIdentityDigest !== attempt.workspaceIdentityDigest ||
@@ -262,7 +292,32 @@ export async function readSourceInspectionTargetData(artifacts: ArtifactCatalog,
         original.originalRequestDigest !== targetData.originalRequestDigest || original.request.method !== attempt.method ||
         sourceInspectionIntentDigest(attempt.principalId, original.request) !== attempt.admissionIntentDigest)
       invalid('retained target original request or derived index differs');
-    return { target: immutableSnapshot(targetData as SourceInspectionTargetV1), original: original.request };
+    if (git) {
+      text(targetData.inspectionGrantId); assertArtifactRef(text(targetData.inspectionReceiptRef, 64)); assertArtifactRef(text(targetData.inspectionReceiptDigest, 64));
+      const receipt = decodeAuthorizationConsumptionReceipt(await readCanonicalArtifact(artifacts, targetData.inspectionReceiptRef as string));
+      if (original.request.sourceInspectionGrantId !== targetData.inspectionGrantId || receipt.grantId !== targetData.inspectionGrantId ||
+          receipt.receiptDigest !== targetData.inspectionReceiptDigest || receipt.ownerPrincipalId !== attempt.principalId ||
+          receipt.consumer.kind !== 'source_inspection' || receipt.consumer.inspectionId !== attempt.inspectionId ||
+          receipt.consumer.admissionIntentDigest !== attempt.admissionIntentDigest || receipt.consumedAt > attempt.createdAt)
+        invalid('retained Git capture target differs from its inspection consumption');
+      const ignored = targetData.ignoreReadConsents;
+      if (!Array.isArray(ignored) || ignored.length > 128) invalid('retained ignore consent count differs');
+      let previous = '';
+      for (const item of ignored) {
+        const value = object(item, ['grantId', 'receiptRef', 'receiptDigest']);
+        const grantId = text(value.grantId); assertArtifactRef(text(value.receiptRef, 64)); assertArtifactRef(text(value.receiptDigest, 64));
+        if (grantId <= previous) invalid('retained ignore consents must be unique and sorted'); previous = grantId;
+        const readReceipt = decodeAuthorizationConsumptionReceipt(await readCanonicalArtifact(artifacts, value.receiptRef as string));
+        if (readReceipt.grantId !== grantId || readReceipt.receiptDigest !== value.receiptDigest || readReceipt.ownerPrincipalId !== attempt.principalId ||
+            readReceipt.consumer.kind !== 'source_inspection' || readReceipt.consumer.inspectionId !== attempt.inspectionId ||
+            readReceipt.consumer.admissionIntentDigest !== attempt.admissionIntentDigest || readReceipt.consumedAt > attempt.createdAt)
+          invalid('retained ignore read differs from its own capture consumption');
+      }
+      if (canonicalSha256(ignored.map(value => (value as { grantId: string }).grantId)) !== canonicalSha256([...(original.request.ignoreReadGrantIds ?? [])].sort()))
+        invalid('retained ignore consent selection differs from the original request');
+    } else if (original.request.sourceInspectionGrantId !== undefined || original.request.ignoreReadGrantIds?.length)
+      invalid('historical target cannot borrow an inspection or ignore-rule grant');
+    return { target: immutableSnapshot(targetData as SourceInspectionTarget), original: original.request };
   } catch (cause) {
     if (cause instanceof ResourceRetirementError) throw cause;
     throw new KernelStorageError('RECOVERY_REQUIRED', 'source inspection retained target is invalid', { cause });
@@ -273,13 +328,29 @@ export async function readSourceInspectionTargetData(artifacts: ArtifactCatalog,
  * This returns no native/read capability and cannot authorize fresh capture. */
 export async function readRetainedSourceInspectionTarget(artifacts: ArtifactCatalog, attempt: SourceInspectionAttemptV1,
   originalIndex: { originalRequestId: string; originalRequestDigest: string }, bootstrap: SourceInspectionBootstrap,
-  retained?: { driver: SqliteDriver; signal?: AbortSignal }) {
+  retained?: { driver: SqliteDriver; owner?: StateOwnerContext; signal?: AbortSignal }) {
   try {
     const { target: targetData, original } = await readSourceInspectionTargetData(artifacts, attempt, originalIndex);
     const workspace = decodeWorkspaceIdentity(await readCanonicalArtifact(artifacts, targetData.workspaceIdentityRef));
     if (workspace.kind !== 'live' || workspace.identityDigest !== targetData.workspaceIdentityDigest ||
-        workspace.ownerPrincipalId !== attempt.principalId)
+        workspace.ownerPrincipalId !== attempt.principalId || targetData.schemaVersion === 2 && workspace.repositoryIdentityRef === undefined)
       invalid('retained target workspace differs from its original request');
+    if (targetData.schemaVersion === 2) {
+      if (!retained?.owner) invalid('Git capture history requires its original retained consent recovery context');
+      const { readAuthorizationGrant } = await import('./repositories/authorization-grants.js');
+      const { readSourceGitAuthorizationHistory } = await import('./authorization.js');
+      const grant = readAuthorizationGrant(retained.driver, targetData.inspectionGrantId);
+      if (!grant || grant.state !== 'consumed' || grant.consumptionReceiptRef !== targetData.inspectionReceiptRef)
+        invalid('Git capture lost its original consumed inspection consent');
+      await readSourceGitAuthorizationHistory(retained.driver, artifacts, retained.owner, grant, bootstrap.releaseKeys, retained.signal);
+      const { readSourceReadAuthorizationHistory } = await import('./authorization.js');
+      for (const consent of targetData.ignoreReadConsents) {
+        const readGrant = readAuthorizationGrant(retained.driver, consent.grantId);
+        if (!readGrant || readGrant.state !== 'consumed' || readGrant.consumptionReceiptRef !== consent.receiptRef)
+          invalid('ignore-rule capture lost its original consumed read consent');
+        await readSourceReadAuthorizationHistory(retained.driver, artifacts, retained.owner, readGrant, bootstrap.releaseKeys, retained.signal);
+      }
+    }
     const bundle = await readCanonicalArtifact<RuntimeBundleManifest>(artifacts, text(targetData.runtimeBundleRef, 64));
     verifyRuntimeBundle(bundle, bootstrap.releaseKeys);
     if (bundle.manifestDigest !== targetData.runtimeBundleManifestDigest) invalid('retained target signed runtime differs');
@@ -295,12 +366,12 @@ export async function readRetainedSourceInspectionTarget(artifacts: ArtifactCata
       const source = await readRetainedVerifiedDeliverySource(retained.driver, artifacts, { principalId: attempt.principalId,
         sourceRunId: original.sourceRunId, expectedRunResultRef: original.expectedRunResultRef, signal: retained.signal });
       const projection = decodeSourceProjection(await readCanonicalArtifact(artifacts, source.spec.sourceProjectionRef));
-      const rules = decodeFrozenIgnoreRules(await readCanonicalArtifact(artifacts, projection.frozenIgnoreRulesRef));
+      const rules = await readFrozenIgnoreRules(artifacts, projection.frozenIgnoreRulesRef, workspace.repositoryIdentityDigest, retained.signal);
       if (source.run.sessionId !== targetData.sessionId || source.session.workspaceIdentityRef !== targetData.workspaceIdentityRef ||
           !Number.isSafeInteger(targetData.expectedContextRevision) || (targetData.expectedContextRevision as number) < 1 ||
           (targetData.expectedContextRevision as number) > source.session.contextRevision ||
           source.spec.sandboxProfileRef !== targetData.sandboxProfileRef || source.assembly.runtime.runtimeBundleRef !== targetData.runtimeBundleRef ||
-          projection.explicitIncludes.length || rules.sources.length || rules.rules.length || source.spec.dependencyPolicyRef !== undefined ||
+          projection.explicitIncludes.length || projection.frozenIgnoreRulesDigest !== rules.rulesDigest || source.spec.dependencyPolicyRef !== undefined ||
           original.verifierExecutionGrantIds.length)
         invalid('retained delivery capture selection differs from its exact original source');
     }

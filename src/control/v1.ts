@@ -7,38 +7,40 @@ export { CONTROL_FRAME_BYTES, CONTROL_METHODS_V1, INSTALLED_CONTROL_FEATURES, CO
 export type { InstalledControlFeature, InstalledControlMethod, InstalledControlRequestV1,
   InstalledControlResponseFor, InstalledControlResultFor, HeadlessControlRequestV3, HeadlessControlResponseV3, HeadlessRunEventV3, HeadlessControlRecordV3 } from '../kernel/control-wire.js';
 
-export const CONTROL_V1_SOURCE_DIGEST = "47688aec4d196d641ad983212680418d1c4bdea974a55a4cbe922c4b9d810a9b";
+export const CONTROL_V1_SOURCE_DIGEST = "bd1bdaa1c4589956ce6acd87ef28134e663a8c73d38fe8411b1af72cfcde29d2";
 export const CONTROL_V1_SOURCE_MANIFEST = Object.freeze({
   entry: "src/kernel/control-wire.ts",
   scope: "static_local_typescript_dependency_closure_including_types",
   sources: Object.freeze({
-  "src/kernel/authorization.ts": "85e315e1c56bb50514ac529a5f5f2f55e75e46b3ac2e85a64d249318e54d54d6",
+  "src/kernel/authorization.ts": "3349c9179589f4324457e9d5b7efd1e3ed1721ee80750e3c1a56a994bb53f842",
   "src/kernel/broker-process-domain-death.ts": "e87fda8c5c2dd41f4405dda718cf0cd1af1425089656df43d5cf66a632df581a",
   "src/kernel/canonical.ts": "1da8e712e84191808e03fdee254d04473dd874d360e05c2bf6215ea1f9e129ba",
   "src/kernel/continuation.ts": "b6f2c661c4080855a62e4a487ecf49357208a5b2ba9473dceb56519b080fa40a",
-  "src/kernel/control-apply.ts": "a37c7abf36a95e74163385a9398bef94350c08e5d51d200e3d116985cb096a34",
-  "src/kernel/control-submit.ts": "a87da36e1aea7490dfb7799687c12055fe1aef890fa7bb4a217e51e3e54f6063",
-  "src/kernel/control-wire-data.ts": "acdcb67872e83425c32f195d674928fd4ffe6cd0715f71749a7bd9d4f785df83",
-  "src/kernel/control-wire.ts": "9f56c2bbaac56be8a10d74bbf4c422c448d4581c55d08e8c00ea9d4175c6dc66",
+  "src/kernel/control-apply.ts": "141295473f3220d390d466fc8a668106b914cfccf12a72458ca1198b3deb0581",
+  "src/kernel/control-submit.ts": "c9d6ec30110293419c1b47797e2a6561b10e0651d13bcc9cc85ee4371b8014e9",
+  "src/kernel/control-wire-data.ts": "243f2dfd0e3491d546f64e9c1b6cf3b3211a75447c76a0480d605ee53b3d30e5",
+  "src/kernel/control-wire.ts": "e18e88cf0a3e246577c00b2e292b7d73720719ce2d840c05ed7db22e2e45fd92",
   "src/kernel/credential-authority.ts": "9f859359d7ef7e6471a57f8d2be6a2244c3fc6894ce73ebce343c545b71a83ea",
   "src/kernel/delivery-invocation.ts": "6a0fe0225ce62aa11aa3ddbed7d8e4e58f2fcf2034291aaf46af846fa2016263",
   "src/kernel/delivery.ts": "0a83da75cc71220fea91e85fc2e5722faafb59364b41a37b8bbd295dba490734",
-  "src/kernel/execution.ts": "556ffcef5cad0596314e264371a5fd4c7446e55f358f9fc8e92e36303cc9b9e5",
+  "src/kernel/execution.ts": "4de456f560327f6e657f6c206cc68c2ec6a2ffb37711f7bb9360a764fae2c3df",
   "src/kernel/identity.ts": "3cb63214f293bdbe6ce909746e608529d838dae92d6b8f512d4bdff492cad6de",
   "src/kernel/json.ts": "f6644f711556489fda53dbb11969e5b20f5d34c01e37fbfeeea3294dc7bdc6a2",
-  "src/kernel/publication.ts": "17d57e5603a6406709f900eee72de26eda61d087bce0b929aeebb43ff40403a5",
+  "src/kernel/publication.ts": "c0190e639d19743c4e1cdf59441c74241f7fe423d2f912db1e27841f007c652a",
   "src/kernel/reconciliation.ts": "904c5bf2eb9775270b700735a8e99160ccc846a3918e5f2d00e80f18c57bd0fc",
   "src/kernel/result.ts": "4ce5e2e822f9fd4af27f4ada16b0727896d2083fe2d6039c57faeff5d3bd293e",
+  "src/kernel/session-continuity.ts": "79c74f5ae89083c25caa42ec9def7db3b36522683ad6192108b5d84689944fe3",
+  "src/kernel/source-read-scope.ts": "18cd25f1e2992e2634c90e51acb6cae2ea11f1f7745831b3061ac52d76e07655",
   "src/kernel/stop.ts": "cb09b2d92b9c346fdf334f6268cdbddbd26971b3ab59895d42492b91a1de2215",
   "src/kernel/tool-authorization.ts": "2db8db918e289ff9ed1658b03d5af590dc57c1fafdb8e995f097bc5408345c61",
-  "src/kernel/types.ts": "1b6d3919b336d5c050cae07b244d82e75e6335bad16e9efe43e178fe9deb6085",
+  "src/kernel/types.ts": "d4f4fa54adf38bc0416b8b60d51d3050247d65afa5dd84453cabb58ba1920fed",
   "src/kernel/user-input.ts": "010bd6ca988106cddf40aaa238930670a653deb567e347178ffc11851e291e89",
   "src/kernel/verifier-invocation.ts": "30f35a66fda07b7d85543e44c5c409449f895d090a51f980151a571ad55e6206",
   "src/kernel/verifier.ts": "d70004abb58b9b08e0a2c5681688db8dd9a98f490dee6dbfd3c10ee90b5e7247",
   "src/model/immutable.ts": "e9c476c73e33d2edda489764bc403a6e2aae4c59191e67fc8c708ed376abbb0a",
   "src/protocol/agent-ir.ts": "028fb3e10b6571169bab406bcdc2fa8a7466f3cae8361ab1cbdea2835366cd4a"
 }),
-  externalImports: Object.freeze(["node:crypto","node:url"])
+  externalImports: Object.freeze(["node:crypto","node:url","node:util"])
 });
 export { CONTROL_METHODS_V1 as CONTROL_V1_DECLARED_METHOD_METADATA,
   INSTALLED_CONTROL_FEATURES as CONTROL_V1_CONNECTED_METHOD_METADATA } from '../kernel/control-wire.js';

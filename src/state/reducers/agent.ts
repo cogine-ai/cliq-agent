@@ -20,6 +20,7 @@ import { sampleCanonicalNow } from '../canonical-time.js';
 import { readHighestPreparedAttempt, readInvocationAttempt, readOperationJournal } from '../repositories/journal.js';
 import { readRecoveryClosure } from '../recovery-closure.js';
 import { readCheckpoint, readRun, readSessionPrincipalId, ZERO_BUDGET } from '../rows.js';
+import { frozenSessionCompactionIndex } from '../session-context.js';
 import type { SqliteConnection, SqliteDriver } from '../sqlite-driver.js';
 import type { StateOwnerContext } from '../state-owner.js';
 import { prepareValidatedInvocation, readModelRetryHistory, settleValidatedInvocation, type SettleInvocationInput } from './invocation.js';
@@ -146,14 +147,16 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
   const { model } = validated;
   const systemInstruction = await loadInstructionText(openingReads, assembly);
   const { resolveToolInput } = toolContracts;
+  const sessionCompactionIndex = (projection: import('../../kernel/types.js').SessionContextProjection) => frozenSessionCompactionIndex(driver,
+    admittedRun.sessionId, projection.throughItemSeq);
   const project = (run: Run, context: ContextManifest, contextRef: string, reads = artifacts) => projectNormalContext({
-    artifacts: reads, run, spec, assembly, context, contextRef, systemInstruction, tools
+    artifacts: reads, run, spec, assembly, context, contextRef, systemInstruction, tools, sessionCompactionIndex
   });
   const compactionSource = stateOperation('RECOVERY_REQUIRED', async (run: Run, planRef: string, reads: ArtifactCatalog = artifacts) => {
     const plan = await readCanonicalArtifact<RunContextCompactionPlan>(reads, planRef);
     const context = decodeContextManifest(await readCanonicalArtifact(reads, plan.sourceContextManifestRef));
     const items = await readContextItems(driver, reads, runId, context.throughItemSeq);
-    const projection = await readModelContext({ artifacts: reads, run, spec, assembly, context, systemInstruction, tools });
+    const projection = await readModelContext({ artifacts: reads, run, spec, assembly, context, systemInstruction, tools, sessionCompactionIndex });
     const reproduced = planContextCompaction({ context, contextRef: plan.sourceContextManifestRef, items, projection,
       policy: assembly.context, provider: assembly.provider, compactionEnvelope: material.compactionEnvelope, createdAt: plan.createdAt });
     if (reproduced.kind !== 'compact' || canonicalSha256(reproduced.plan) !== planRef) {

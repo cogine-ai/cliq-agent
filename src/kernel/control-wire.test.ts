@@ -8,9 +8,31 @@ import { digestOmitting, identityHash } from './identity.js';
 // Pure wire conformance: no installed selection, peer, grant or execution proof.
 test('connected composition ceiling is immutable while the actual Supervisor selects enabled capabilities', () => {
   assert.deepEqual(INSTALLED_CONTROL_FEATURES, ['session.get', 'run.get', 'run.attach', 'supervisor.status', 'credential.finalize',
-    'session.create', 'run.submit', 'run.cancel', 'authorization.create', 'authorization.revoke', 'run.result', 'run.diff', 'artifact.get', 'run.apply', 'run.approve', 'run.reconcile']);
+    'session.create', 'session.list', 'session.fork', 'session.compact', 'session.handoff.create', 'run.submit', 'run.cancel', 'authorization.create', 'authorization.revoke', 'run.result', 'run.diff', 'artifact.get', 'run.apply', 'run.approve', 'run.reconcile']);
   assert.throws(() => Reflect.apply(Array.prototype.push, INSTALLED_CONTROL_FEATURES, ['unexpected.method']));
   assert.throws(() => Reflect.apply(Array.prototype.push, CONTROL_METHODS_V1, ['unexpected.method']));
+});
+
+test('Session continuity has one closed wire contract and no Session execution or hidden append authority', () => {
+  const compactCore = { protocolVersion: 1, method: 'session.compact', requestId: '019a0012-0000-7000-8000-000000000900', sessionId: 'session',
+    expectedContextRevision: 2, fromItemSeq: 1, throughItemSeq: 1, summaryMarkdown: 'e\u0301\r\nsummary', retainedItemIds: ['item'] };
+  const compact = { ...compactCore, requestDigest: canonicalSha256(compactCore) };
+  assert.deepEqual(decodeInstalledControlRequest(compact), compact, 'wire digest binds original spelling before summary normalization');
+  for (const extra of [{ requestId: compact.requestId }, { leaseEpoch: 1 }, { checkpointId: 'not-authority' }, { importRef: 'a'.repeat(64) }])
+    assert.throws(() => decodeInstalledControlRequest({ protocolVersion: 1, method: 'session.handoff.create', sessionId: 'session', expectedContextRevision: 2, ...extra }));
+  const tooMany = { ...compactCore, retainedItemIds: Array.from({ length: 257 }, (_, index) => `item-${index}`) };
+  assert.throws(() => decodeInstalledControlRequest({ ...tooMany, requestDigest: canonicalSha256(tooMany) }));
+  for (const method of ['session.append', 'session.resume', 'session.items', 'session.handoff.import'])
+    assert.throws(() => decodeInstalledControlRequest({ protocolVersion: 1, method, sessionId: 'session' }));
+  const list = { protocolVersion: 1, method: 'session.list', limit: 1 } as const;
+  const capacity = { protocolVersion: 1, ok: false, method: 'session.list', error: { schemaVersion: 1, code: 'RESOURCE_EXHAUSTED',
+    retryable: true, resourceKind: 'state_storage', retryAfterMs: 1000, messageCode: 'control.list_cut_capacity' } };
+  assert.deepEqual(decodeInstalledControlResponse(capacity, list), capacity);
+  assert.throws(() => decodeInstalledControlResponse({ ...capacity, error: { ...capacity.error, resourceKind: 'run_queue' } }, list));
+  const busy = { protocolVersion: 1, ok: false, method: 'session.list', error: { schemaVersion: 1, code: 'RATE_LIMITED',
+    retryable: true, retryAfterMs: 1000, messageCode: 'control.list_cut_busy' } };
+  assert.deepEqual(decodeInstalledControlResponse(busy, list), busy);
+  assert.throws(() => decodeInstalledControlResponse({ ...busy, error: { ...busy.error, messageCode: 'run.credential_scope_busy' } }, list));
 });
 
 test('control wire owns read defaults and closes request fields before retention', () => {

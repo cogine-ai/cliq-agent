@@ -7,12 +7,13 @@ import { test } from 'node:test';
 import ts from 'typescript';
 import { KERNEL_CAS_DIRECTORY } from '../config.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
-import { digestOmitting } from '../kernel/identity.js';
-import type { SourceInspectionRetirementEvidenceV1, SourceInspectionTargetV1 } from '../kernel/execution.js';
+import { digestOmitting, sha256Bytes } from '../kernel/identity.js';
+import type { SourceInspectionRetirementEvidenceV1, SourceInspectionRetirementHandoffV1, SourceInspectionTargetV1 } from '../kernel/execution.js';
 import { createSourceInspectionFixture } from './testing/source-inspection-fixtures.js';
 import { ArtifactCatalog } from './artifacts.js';
 import { ContentAddressedStore } from './cas.js';
-import { KernelStorageError } from './errors.js';
+import { KernelStorageError, ResourceRetirementError } from './errors.js';
+import { installedSandboxProfile } from './installed-sandbox-profile.js';
 import { openStateStore } from './store.js';
 
 test('real source capture durably joins its target triple and retirement pair without moving capture or replay', async t => {
@@ -20,12 +21,18 @@ test('real source capture durably joins its target triple and retirement pair wi
   await writeFile(path.join(fixture.workspace, 'one.txt'), 'one complete source file\n');
   await writeFile(path.join(fixture.workspace, 'two.txt'), 'two complete source file\n');
   const casRoot = path.join(fixture.stateRoot, KERNEL_CAS_DIRECTORY), open = fs.open.bind(fs);
-  const active = new Set<object>(); let fileSyncs = 0, rootSyncs = 0;
+  const active = new Set<object>(), fileSyncRefs: string[] = []; let fileSyncs = 0, rootSyncs = 0;
   t.mock.method(fs, 'open', async (...args: Parameters<typeof open>) => {
     const handle = await open(...args); active.add(handle);
-    const close = handle.close.bind(handle), sync = handle.sync.bind(handle);
+    const close = handle.close.bind(handle), sync = handle.sync.bind(handle), write = handle.writeFile.bind(handle), chunks: Buffer[] = [];
+    if (String(args[0]).includes('/.tmp-stream-')) t.mock.method(handle, 'writeFile', async (...values: Parameters<typeof write>) => {
+      await write(...values); assert(values[0] instanceof Uint8Array); chunks.push(Buffer.from(values[0]));
+    });
     t.mock.method(handle, 'close', async () => { await close(); active.delete(handle); });
-    t.mock.method(handle, 'sync', async () => { await sync(); if (args[0] === casRoot) rootSyncs++; else fileSyncs++; });
+    t.mock.method(handle, 'sync', async () => {
+      await sync(); if (args[0] === casRoot) rootSyncs++;
+      else { assert(String(args[0]).includes('/.tmp-stream-')); fileSyncs++; fileSyncRefs.push(sha256Bytes(Buffer.concat(chunks))); }
+    });
     return handle;
   });
   try {
@@ -33,8 +40,8 @@ test('real source capture durably joins its target triple and retirement pair wi
     assert.equal(retired.phase, 'retired');
     assert.equal(retired.outcome.kind, 'captured');
     assert.equal(active.size, 0, 'the original CAS descriptors close before capture can return');
-    assert.equal(fileSyncs, 11, 'all eleven original files still receive their own real data fsync');
-    assert.equal(rootSyncs, 32, 'target3 and retirement2 share only their own four namespace boundaries');
+    assert.equal(fileSyncs, 11 + 3, 'all eleven original files and the original-attempt/inspector/handoff closure receive their real data fsync');
+    assert.equal(rootSyncs, 32 + 8, 'target3 and retirement2 retain their boundaries; original-attempt single and handoff pair add four each');
     const target = await fixture.store.artifacts.readCanonical<SourceInspectionTargetV1>(retired.targetRef);
     assert.equal(target.originalRequestRef, canonicalSha256(fixture.request));
     assert.deepEqual(await fixture.store.artifacts.readCanonical(target.originalRequestRef), fixture.request);
@@ -42,6 +49,17 @@ test('real source capture durably joins its target triple and retirement pair wi
     assert.equal(evidence.targetRef, retired.targetRef);
     assert.equal(evidence.captureOwnerClosure.kind, 'local_resources_joined');
     assert.equal(evidence.stagingObservation, 'exact_reserved_root_absent');
+    assert(retired.retirementHandoffRef);
+    const handoff = await fixture.store.artifacts.readCanonical<SourceInspectionRetirementHandoffV1>(retired.retirementHandoffRef);
+    const source = await fixture.store.artifacts.readCanonical<{ entriesRef: string; sourceProjectionRef: string; frozenIgnoreRulesRef: string }>(retired.outcome.sourceManifestRef);
+    const entries = await fixture.store.artifacts.readCanonical<{ entries: Array<{ kind: string; blobRef?: string }> }>(source.entriesRef);
+    const expected = [target.originalRequestRef, target.sandboxProfileRef, retired.targetRef,
+      ...entries.entries.filter(entry => entry.kind === 'file').map(entry => entry.blobRef!), source.entriesRef,
+      source.frozenIgnoreRulesRef, source.sourceProjectionRef, retired.outcome.sourceManifestRef,
+      handoff.originalAttemptRef, handoff.inspectorIdentityRef, retired.retirementHandoffRef,
+      evidence.inspectorIdentityRef, retired.retirementEvidenceRef];
+    assert.equal(expected.length, 14);
+    assert.deepEqual(fileSyncRefs.sort(), expected.sort(), 'every original ref syncs independently, including both actual inspector publications');
     assert.deepEqual(await readdir(path.join(fixture.stateRoot, 'runtime/source-inspections')), []);
     const before = await readdir(casRoot), synced = rootSyncs;
     assert.deepEqual(await fixture.store.captureSubmittedSource({ request: fixture.request, identity: fixture.identity }), retired);
@@ -71,9 +89,9 @@ async function modelMaterialPublisher() {
     }; return publishInstalledModelMaterial;`;
   }
   const output = ts.transpileModule(body, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText;
-  return new Function('canonicalSha256', 'digestOmitting', 'mismatch', output)(canonicalSha256, digestOmitting,
+  return new Function('canonicalSha256', 'canonicalJsonBytes', 'digestOmitting', 'installedSandboxProfile', 'mismatch', output)(canonicalSha256, canonicalJsonBytes, digestOmitting, installedSandboxProfile,
     (message: string): never => { throw new KernelStorageError('ARTIFACT_MISMATCH', message); }) as
-    (input: Record<string, unknown>) => Promise<{ endpointArtifact: { ref: string }; credentialGrantRefs: string[]; capabilityArtifact: { ref: string } }>;
+    (input: Record<string, unknown>) => Promise<{ endpointArtifact: { ref: string }; credentialGrantRefs: string[]; capabilityArtifact: { ref: string }; sandboxProfileRef?: string }>;
 }
 
 function inertMaterial(artifacts: ArtifactCatalog, count = 1) {
@@ -91,12 +109,12 @@ function inertMaterial(artifacts: ArtifactCatalog, count = 1) {
     source: { kind: 'signed_catalog', runtimeBundleRef: 'b'.repeat(64), catalogEntryRef: 'd'.repeat(64), catalogEntryDigest: catalog.catalogEntryDigest },
     ...catalog.claims, observedAt: admittedAt, validThrough: deadlineAt, evidenceDigest: '' };
   capability.evidenceDigest = digestOmitting(capability, 'evidenceDigest');
-  return { artifacts, endpoint, credentialBindings, capability,
+  return { artifacts, endpoint, credentialBindings, capability, sandboxResources: installedSandboxProfile().resources,
     remote: { modelCredentialGrantIds: credentialBindings.map(binding => binding.credentialGrantId) },
     identity: { principalId: 'inert-principal' }, admittedAt, deadlineAt, catalog, installed: { bundleDigest: 'b'.repeat(64) } };
 }
 
-test('one credential model material preserves its bytes and joins one real four-stage triple', async t => {
+test('one credential model material and normalized sandbox preserve their bytes and join four real files in one four-stage group', async t => {
   const publish = await modelMaterialPublisher();
   const root = await mkdtemp(path.join(os.tmpdir(), 'cliq-admission-material-')); await fs.chmod(root, 0o700);
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -110,21 +128,23 @@ test('one credential model material preserves its bytes and joins one real four-
   });
   try {
     const result = await publish(input);
-    assert.equal(roots, 4, 'the three model material objects share four namespace boundaries, not twelve');
-    assert.equal(files, 3); assert.equal(active.size, 0);
+    assert.equal(roots, 4, 'all four original objects share the four real namespace boundaries');
+    assert.equal(files, 4); assert.equal(active.size, 0);
     assert.equal(result.endpointArtifact.ref, canonicalSha256(input.endpoint));
     assert.deepEqual(result.credentialGrantRefs, [canonicalSha256(input.credentialBindings[0])]);
     assert.equal(result.capabilityArtifact.ref, canonicalSha256(input.capability));
-    for (const value of [input.endpoint, ...input.credentialBindings, input.capability])
+    const sandbox = installedSandboxProfile(input.sandboxResources);
+    assert.equal(result.sandboxProfileRef, canonicalSha256(sandbox));
+    for (const value of [input.endpoint, ...input.credentialBindings, input.capability, sandbox])
       assert.deepEqual(await artifacts.readBytes(canonicalSha256(value)), canonicalJsonBytes(value));
     assert.equal(active.size, 0);
   } finally { t.mock.restoreAll(); }
 });
 
-test('non-single credential inert publication keeps the original ordinary path without dummy members', async t => {
+for (const count of [0, 2]) test(`non-single ${count}-credential inert publication keeps the original ordinary path without dummy members`, async t => {
   const publish = await modelMaterialPublisher(), root = await mkdtemp(path.join(os.tmpdir(), 'cliq-material-ordinary-'));
   await fs.chmod(root, 0o700); t.after(() => rm(root, { recursive: true, force: true }));
-  const artifacts = new ArtifactCatalog(new ContentAddressedStore(root)), input = inertMaterial(artifacts, 2);
+  const artifacts = new ArtifactCatalog(new ContentAddressedStore(root)), input = inertMaterial(artifacts, count);
   const open = fs.open.bind(fs); let roots = 0, files = 0;
   t.mock.method(fs, 'open', async (...args: Parameters<typeof open>) => {
     const handle = await open(...args), sync = handle.sync.bind(handle);
@@ -132,9 +152,10 @@ test('non-single credential inert publication keeps the original ordinary path w
     return handle;
   });
   const result = await publish(input);
-  assert.equal(roots, 16); assert.equal(files, 4);
+  assert.equal(roots, 4 * (count + 2)); assert.equal(files, count + 2);
   assert.deepEqual(result.credentialGrantRefs, input.credentialBindings.map(canonicalSha256).sort());
-  assert.equal((await readdir(root)).length, 4);
+  assert.equal((await readdir(root)).length, count + 2);
+  assert.equal(result.sandboxProfileRef, undefined, 'other counts retain the later ordinary sandbox publication');
   // This publisher cannot change the installed recipe's existing one-bearer
   // refusal. No multi-credential Run or installed capability is constructed.
 });
@@ -185,8 +206,8 @@ test('installed model material remains inside the original full admission and ca
   const source = await readFile(new URL('./installed-run.ts', import.meta.url), 'utf8');
   const start = source.indexOf('export async function assembleInstalledRun('), end = source.indexOf('admissions.set(result,', start);
   assert(start >= 0 && end > start);
-  const assembly = source.slice(start, end), phases = ['publishInstalledModelMaterial({', 'await materialFor(installed, reads, assembly, signal)',
-    'verifyToolRuntimeAuthority(', 'await artifacts.publishCanonical(sandbox, sandbox.format)', 'await prepareInstalledVerifierAssembly(',
+  const assembly = source.slice(start, end), phases = ['await publishInstalledModelMaterial({', 'await materialFor(installed, reads, assembly, signal)',
+    'validateRunAssembly(', 'verifyToolRuntimeAuthority(', 'const sandboxProfileRef = publishedSandboxRef ??', 'await prepareInstalledVerifierAssembly(',
     'await artifacts.publishCanonical(policy, policy.format)', 'await installed.revalidate(signal)',
     'await validateControlChannelClosure(reads, owner, identity)', 'assertActiveStateOwner(driver, owner)'];
   let previous = assembly.indexOf(phases[0]!); assert(previous >= 0);
@@ -196,4 +217,54 @@ test('installed model material remains inside the original full admission and ca
   assert(material?.body);
   assert(material.body.getText(parsed).includes('await readRetainedVerifierToolchain(artifacts,'));
   assert(material.body.getText(parsed).includes('signal?.throwIfAborted();'));
+  assert(assembly.includes('sandboxResources: request.sandboxResources, signal'));
+});
+
+for (const fault of ['cancel', 'write', 'retirement'] as const)
+  test(`model quartet completes actual descriptor join before ${fault} and cannot expose productive material`, async t => {
+    const publish = await modelMaterialPublisher(), root = await mkdtemp(path.join(os.tmpdir(), 'cliq-model-quartet-'));
+    await fs.chmod(root, 0o700); t.after(() => rm(root, { recursive: true, force: true }));
+    const catalog = new ArtifactCatalog(new ContentAddressedStore(root)), owner = new AbortController();
+    const reason = new Error('original model preparation cancelled'), writeFailure = new Error('actual write failed after effect'), closeFailure = new Error('actual root close failed');
+    const open = fs.open.bind(fs), active = new Set<object>();
+    let enter!: () => void, release!: () => void, settled = false, productive = false, writes = 0;
+    const entered = new Promise<void>(resolve => { enter = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+    t.mock.method(fs, 'open', async (...args: Parameters<typeof open>) => {
+      const handle = await open(...args); active.add(handle);
+      const close = handle.close.bind(handle), write = handle.writeFile.bind(handle);
+      if (String(args[0]).includes('/.tmp-stream-')) t.mock.method(handle, 'writeFile', async (...values: Parameters<typeof write>) => {
+        await write(...values); if (++writes === 1 && fault !== 'cancel') throw writeFailure;
+      });
+      t.mock.method(handle, 'close', async () => {
+        await close(); assert(active.delete(handle));
+        if (args[0] === root) { enter(); await gate; if (fault === 'retirement') throw closeFailure; }
+      }); return handle;
+    });
+    const pending = publish({ ...inertMaterial(catalog), signal: owner.signal }).then(value => { productive = true; return value; });
+    void pending.then(() => { settled = true; }, () => { settled = true; });
+    try {
+      await Promise.race([entered, pending.then(() => { throw new Error('original root join bypassed'); })]);
+      assert.equal(writes, 4); assert.equal(active.size, 0); assert.equal(productive, false);
+      owner.abort(reason); await new Promise<void>(resolve => setImmediate(resolve)); assert.equal(settled, false); release();
+      await assert.rejects(pending, error => fault === 'cancel' ? error === reason : fault === 'write' ? error === writeFailure :
+        error instanceof ResourceRetirementError && error.cause === closeFailure);
+      assert.equal(productive, false); assert.equal(active.size, 0);
+      assert((await readdir(root)).every(name => /^[a-f0-9]{64}$/u.test(name)));
+    } finally { release(); await Promise.allSettled([pending]); }
+  });
+
+test('model quartet rejects every substituted full-byte descriptor including its sandbox slot', async t => {
+  const publish = await modelMaterialPublisher(), root = await mkdtemp(path.join(os.tmpdir(), 'cliq-model-descriptors-'));
+  await fs.chmod(root, 0o700); t.after(() => rm(root, { recursive: true, force: true }));
+  const catalog = new ArtifactCatalog(new ContentAddressedStore(root)), original = catalog.publishCanonicalFour.bind(catalog);
+  const other = await catalog.publishBytes(Buffer.from('x'), 'text/plain', 'other-real-data');
+  for (const slot of [0, 1, 2, 3]) for (const field of ['ref', 'byteLength', 'mediaType', 'schemaKind', 'missing'] as const) {
+    const replacement = t.mock.method(catalog, 'publishCanonicalFour', async (...args: Parameters<typeof original>) => {
+      const actual = await original(...args), changed = [...actual];
+      if (field === 'missing') delete changed[slot]; else changed[slot] = { ...actual[slot]!, [field]: other[field] };
+      return changed as unknown as typeof actual;
+    });
+    try { await assert.rejects(publish(inertMaterial(catalog)), { code: 'ARTIFACT_MISMATCH' }, `${slot}:${field}`); }
+    finally { replacement.mock.restore(); }
+  }
 });

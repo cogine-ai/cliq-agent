@@ -120,6 +120,24 @@ export class ArtifactCatalog {
     this.readSignal?.throwIfAborted(); return bytes;
   }
 
+  /** Small retained inputs need a ceiling before any whole-object allocation.
+   * The existing full verification supplies an exact held size; the subsequent
+   * exact-size stream independently verifies the entire object again. Neither
+   * a stat nor the first walk replaces that consumer read or its real closes. */
+  async readBoundedBytes(ref: ArtifactRef, maxByteCount: number): Promise<Buffer> {
+    assertArtifactRef(ref);
+    if (!Number.isSafeInteger(maxByteCount) || maxByteCount < 0) throw new TypeError('bounded artifact read requires a nonnegative safe ceiling');
+    this.readSignal?.throwIfAborted();
+    const verified = await this.cas.verify(ref, this.readSignal);
+    this.readSignal?.throwIfAborted();
+    if (verified.byteLength > maxByteCount) throw new KernelStorageError('ARTIFACT_MISMATCH', 'artifact exceeds its bounded consumer ceiling');
+    const chunks: Buffer[] = [];
+    for await (const chunk of this.readChunks(ref, verified.byteLength)) {
+      this.readSignal?.throwIfAborted(); chunks.push(chunk);
+    }
+    this.readSignal?.throwIfAborted(); return Buffer.concat(chunks, verified.byteLength);
+  }
+
   /** Complete original-byte verification without retaining an object buffer. */
   async verifyBytes(ref: ArtifactRef): Promise<void> {
     assertArtifactRef(ref);

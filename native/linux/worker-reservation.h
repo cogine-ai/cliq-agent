@@ -13,7 +13,7 @@ enum cliq_reservation_fact { CLIQ_RESERVATION_BINDING = 1, CLIQ_RESERVATION_INTE
 struct cliq_reservation {
     int fd;
     struct cliq_worker_packet binding;
-    size_t bytes;
+    size_t bytes, binding_offset;
 };
 static inline void reservation_u64(unsigned char **cursor, uint64_t value) {
     for (unsigned int i = 0; i < 8; i++) *(*cursor)++ = (unsigned char)(value >> (i * 8));
@@ -168,16 +168,16 @@ static inline bool reservation_frame(int fd, size_t *offset, uint64_t fact, unsi
     if (memcmp(footer, expected, sizeof(footer)) != 0) return false;
     *offset = end; return true;
 }
-static inline bool reservation_read(int fd, const struct cliq_worker_packet *expected,
-                                   bool *attempted, struct cliq_worker_packet *actual) {
-    struct stat before, after; size_t offset = 0; unsigned char body[CLIQ_RESERVATION_BODY];
+static inline bool reservation_read_at(int fd, const struct cliq_worker_packet *expected, size_t binding_offset,
+                                      bool *attempted, struct cliq_worker_packet *actual) {
+    struct stat before, after; size_t offset = binding_offset; unsigned char body[CLIQ_RESERVATION_BODY];
     if (!reservation_file(fd, expected, &before) ||
-        (before.st_size != (off_t)CLIQ_RESERVATION_HEADER_END && before.st_size != (off_t)CLIQ_RESERVATION_FULL_END) ||
+        (before.st_size != (off_t)(binding_offset + CLIQ_RESERVATION_HEADER_END) && before.st_size != (off_t)(binding_offset + CLIQ_RESERVATION_FULL_END)) ||
         !reservation_frame(fd, &offset, CLIQ_RESERVATION_BINDING, body, sizeof(body))) return false;
     struct cliq_worker_packet binding;
     if (!reservation_decode(body, &binding) || !reservation_same_binding(&binding, expected) ||
         !reservation_birth_empty(&binding)) return false;
-    *attempted = before.st_size == (off_t)CLIQ_RESERVATION_FULL_END; *actual = binding;
+    *attempted = before.st_size == (off_t)(binding_offset + CLIQ_RESERVATION_FULL_END); *actual = binding;
     if (*attempted) {
         if (!reservation_frame(fd, &offset, CLIQ_RESERVATION_INTENT, body, 32)) return false;
         unsigned char intent[32] = {0}; memcpy(intent, "CREATE1", 7);
@@ -206,5 +206,8 @@ static inline bool reservation_read(int fd, const struct cliq_worker_packet *exp
     return offset == (size_t)before.st_size && reservation_file(fd, expected, &after) && before.st_size == after.st_size &&
         before.st_mtim.tv_sec == after.st_mtim.tv_sec && before.st_mtim.tv_nsec == after.st_mtim.tv_nsec &&
         before.st_ctim.tv_sec == after.st_ctim.tv_sec && before.st_ctim.tv_nsec == after.st_ctim.tv_nsec;
+}
+static inline bool reservation_read(int fd, const struct cliq_worker_packet *expected, bool *attempted, struct cliq_worker_packet *actual) {
+    return reservation_read_at(fd, expected, 0, attempted, actual);
 }
 #endif

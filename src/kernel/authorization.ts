@@ -1,6 +1,20 @@
 import type { ArtifactRef } from './types.js';
+import type { SandboxResourceSpec } from './execution.js';
+
+/** Explicit inspection-only consent. Neither Workspace Trust nor ordinary
+ * source/tool permission supplies this temporary raw Git metadata scope. */
+export type SourceGitInspectionTargetV1 = {
+  kind: 'source_git_inspection'; purpose: 'source_inspection';
+  sessionId: string; workspaceIdentityRef: ArtifactRef; workspaceIdentityDigest: string;
+  repositoryIdentityRef: ArtifactRef; repositoryIdentityDigest: string;
+  scope: 'in_root_git_metadata_and_objects'; recipe: 'cliq-source-git-inspection-v1';
+  retention: 'ephemeral_raw_reachable_only'; resourceCeiling: SandboxResourceSpec;
+  inspector: { runtimeBundleRef: ArtifactRef; runtimeBundleManifestDigest: string;
+    entryId: 'source_git_inspector'; entryVersion: '1'; entryDigest: string };
+};
 
 export type AuthorizationGrantTargetV1 =
+  | SourceGitInspectionTargetV1
   | { kind: 'read_scope'; purpose: 'source'; workspaceIdentityDigest: string;
       canonicalRootRelativePath: string; scope: 'entry' | 'subtree'; expectedDigest?: string }
   | { kind: 'execution_identity_read'; purpose: 'verifier'; identity:
@@ -39,13 +53,14 @@ export type AuthorizationConsumptionReceiptV1 = {
   consumer:
     | { kind: 'run_admission'; runId: string; admissionIntentDigest: string }
     | { kind: 'mcp_registration'; registrationId: string; registryRevision: number }
-    | { kind: 'authorization_derivation'; derivedGrantId: string };
+    | { kind: 'authorization_derivation'; derivedGrantId: string }
+    | { kind: 'source_inspection'; inspectionId: string; admissionIntentDigest: string };
   consumedAt: string; receiptDigest: string;
 };
 export type AuthorizationGrantSummaryV1 = {
   schemaVersion: 1; grantId: string; state: AuthorizationGrantV1['state'];
   targetKind: AuthorizationGrantTargetV1['kind'];
-  purpose: 'source' | 'verifier' | 'mcp_stdio' | 'dependency_install_scripts';
+  purpose: 'source' | 'source_inspection' | 'verifier' | 'mcp_stdio' | 'dependency_install_scripts';
   targetDigest: string; useCount: 0 | 1; rowVersion: number; createdAt: string; expiresAt: string;
   consumedAt?: string; revokedAt?: string;
 };
@@ -57,6 +72,21 @@ export type VerifierIdentityCreateRequest = {
   decision: { kind: 'execution_identity_read'; purpose: 'verifier';
     target: { kind: 'guest_toolchain'; guestToolchainManifestId: string; toolId: string } };
 };
+export type SourceGitInspectionCreateRequest = {
+  protocolVersion: 1; method: 'authorization.create'; requestId: string; requestDigest: string; ttlMs?: number;
+  decision: { kind: 'source_git_inspection'; purpose: 'source_inspection'; target: {
+    sessionId: string; expectedWorkspaceIdentityDigest: string;
+    scope: 'in_root_git_metadata_and_objects'; recipe: 'cliq-source-git-inspection-v1';
+    retention: 'ephemeral_raw_reachable_only'; resourceCeiling: SandboxResourceSpec;
+  } };
+};
+export type SourceReadScopeCreateRequest = {
+  protocolVersion: 1; method: 'authorization.create'; requestId: string; requestDigest: string; ttlMs?: number;
+  decision: { kind: 'read_scope'; purpose: 'source'; target: {
+    sessionId: string; expectedWorkspaceIdentityDigest: string; path: string; scope: 'entry' | 'subtree'; expectedDigest?: string;
+  } };
+};
+export type AuthorizationCreateRequest = VerifierIdentityCreateRequest | SourceGitInspectionCreateRequest | SourceReadScopeCreateRequest;
 export type AuthorizationRevokeRequest = {
   protocolVersion: 1; method: 'authorization.revoke'; requestId: string; requestDigest: string; grantId: string;
 };

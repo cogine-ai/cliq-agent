@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "worker-common.h"
 #include "worker-reservation.h"
+#include "preparation-git-protocol.h"
 #include "verifier-setup.h"
 #include <dirent.h>
 #include <poll.h>
@@ -51,6 +52,9 @@ struct scope {
 static struct scope scopes[CLIQ_WORKER_MAX_SCOPES];
 static struct cliq_reservation worker_reservation = { .fd = -1 };
 static bool worker_creation_attempted;
+static bool preparation_birth_step(uint32_t kind, const struct cliq_worker_packet *packet);
+static bool preparation_record_result(const struct cliq_worker_packet *packet);
+static bool worker_preparation_final_binding(const struct cliq_worker_packet *request, int passed[CLIQ_WORKER_MAX_FDS], size_t count);
 static volatile sig_atomic_t shutdown_requested;
 
 static void request_shutdown(int signal_number) {
@@ -191,6 +195,7 @@ static int independent_image_fd(int source, int minimum) {
 static bool close_above_channel(void) { return cliq_close_range(4, UINT_MAX); }
 
 #include "verifier-init.h"
+#include "source-git-init.h"
 
 /* Same installed controller image, executed as PID 1 by --as-pid-1. No user
  * source is loaded until all host generation/cgroup/runtime FDs are closed. */
@@ -200,9 +205,12 @@ static int namespace_init(void) {
     struct cliq_worker_packet request;
     int passed[CLIQ_WORKER_MAX_FDS]; size_t count;
     if (!cliq_receive(3, &request, passed, sizeof(passed) / sizeof(passed[0]), &count) ||
-        (request.command != CLIQ_CREATE_WORKER && request.command != CLIQ_CREATE_WRITE && request.command != CLIQ_CREATE_VERIFIER) ||
-        count != (request.command == CLIQ_CREATE_WORKER ? 0U : 1U)) return 70;
+        (request.command != CLIQ_CREATE_WORKER && request.command != CLIQ_CREATE_WRITE && request.command != CLIQ_CREATE_VERIFIER &&
+            request.command != CLIQ_SOURCE_CREATE_BLOCKED) ||
+        count != (request.command == CLIQ_CREATE_WORKER ? 0U : request.command == CLIQ_SOURCE_CREATE_BLOCKED ?
+            (request.preparation_input_intent_ref[0] ? 2U : 3U) : 1U)) return 70;
     if (request.command == CLIQ_CREATE_VERIFIER) return verifier_namespace(request, passed[0]);
+    if (request.command == CLIQ_SOURCE_CREATE_BLOCKED) return source_namespace(request, passed);
     bool invocation = request.command == CLIQ_CREATE_WRITE;
     int input = invocation ? passed[0] : -1;
     int channel[2];
@@ -281,6 +289,7 @@ static bool inspect_processes(struct scope *scope, const struct cliq_worker_pack
 }
 
 static bool bind_worker_reservation(const struct cliq_worker_packet *request, int passed[CLIQ_WORKER_MAX_FDS], size_t count) {
+    if (worker_reservation.fd >= 0) return worker_preparation_final_binding(request, passed, count);
     char token[CLIQ_WORKER_TOKEN_BYTES]; struct stat file;
     if (count != 1 || request->scope != 0 || worker_reservation.fd >= 0 || !reservation_binding_valid(request) ||
         request->subreaper_pid != getpid() || !cliq_process_token(getpid(), token) ||
@@ -295,7 +304,7 @@ static bool bind_worker_reservation(const struct cliq_worker_packet *request, in
 static bool worker_request_matches_reservation(const struct cliq_worker_packet *request) {
     const struct cliq_worker_packet *binding = &worker_reservation.binding;
     return worker_reservation.fd >= 0 && !worker_creation_attempted &&
-        worker_reservation.bytes == CLIQ_RESERVATION_HEADER_END &&
+        worker_reservation.bytes == worker_reservation.binding_offset + CLIQ_RESERVATION_HEADER_END &&
         request->parent == 0 && request->generation_device == binding->generation_device &&
         request->generation_inode == binding->generation_inode &&
         strcmp(request->cgroup_name, binding->cgroup_name) == 0 &&
@@ -904,10 +913,12 @@ static bool inspect_worker_reservation(struct cliq_worker_packet *request, int p
     int64_t deadline = start + OBSERVATION_TIMEOUT_MS;
     if (count != 2 || request->scope != 0 || !native_cgroup(passed[0]) ||
         !reservation_binding_valid(request)) return false;
-    struct stat file; unsigned char body[CLIQ_RESERVATION_BODY]; size_t offset = 0;
+    struct stat file; unsigned char body[CLIQ_RESERVATION_BODY]; size_t offset = 0, binding_offset = 0;
     struct cliq_worker_packet binding;
-    if (!reservation_file(passed[1], request, &file) || file.st_size < (off_t)CLIQ_RESERVATION_HEADER_END ||
-        file.st_size > (off_t)CLIQ_RESERVATION_FULL_END ||
+    if (!reservation_file(passed[1], request, &file) || !reservation_complete_binding_offset(passed[1], request, &binding_offset) ||
+        file.st_size < (off_t)(binding_offset + CLIQ_RESERVATION_HEADER_END) || file.st_size > (off_t)(binding_offset + CLIQ_RESERVATION_FULL_END)) return false;
+    offset = binding_offset;
+    if (
         !reservation_frame(passed[1], &offset, CLIQ_RESERVATION_BINDING, body, sizeof(body)) ||
         !reservation_decode(body, &binding) || !reservation_same_binding(&binding, request) ||
         !reservation_birth_empty(&binding)) return false;
@@ -930,7 +941,7 @@ static bool inspect_worker_reservation(struct cliq_worker_packet *request, int p
     int held = reservation_independent(passed[1], request, false);
     if (held < 0) return false;
     bool attempted; struct cliq_worker_packet actual;
-    bool valid = reservation_read(held, request, &attempted, &actual);
+    bool valid = reservation_read_complete(held, request, &attempted, &actual);
     if (valid && !attempted) {
         /* An empty same-named cgroup is not evidence it belongs to this file. */
         struct stat named;
@@ -955,11 +966,17 @@ static bool inspect_worker_reservation(struct cliq_worker_packet *request, int p
     return valid;
 }
 
+#include "source-git-controller.h"
+#include "preparation-git-controller.h"
+#include "source-git-recovery.h"
+#include "preparation-git-recovery.h"
+
 static void stop_everything(void) {
     /* Kill all populated roots first; cleanup is not serial productive work. */
     for (unsigned int id = 1; id < CLIQ_WORKER_MAX_SCOPES; id++) {
         if (scopes[id].created) (void)write_control(scopes[id].cgroup, "cgroup.kill", "1");
     }
+    if (source_scope.created && !source_scope.retired) (void)write_control(source_scope.cgroup, "cgroup.kill", "1");
     for (unsigned int id = 1; id < CLIQ_WORKER_MAX_SCOPES; id++) {
         if (scopes[id].created) {
             struct cliq_worker_packet ignored;
@@ -968,12 +985,17 @@ static void stop_everything(void) {
              * reaped its monitor. A stale numeric PID is not signal authority. */
         }
     }
+    if (source_scope.attempted && !source_scope.retired) {
+        struct cliq_worker_packet ignored;
+        (void)source_retire(&ignored);
+    }
     while (waitpid(-1, NULL, WNOHANG) > 0) {}
     if (worker_reservation.fd >= 0) { close(worker_reservation.fd); worker_reservation.fd = -1; }
 }
 
 static int controller(void) {
     umask(0077);
+    source_controller_init();
     for (size_t i = 0; i < CLIQ_WORKER_MAX_SCOPES; i++) {
         scopes[i].cgroup = -1; scopes[i].process_group = -1; scopes[i].channel = -1;
         scopes[i].stdout_fd = -1; scopes[i].stderr_fd = -1;
@@ -988,19 +1010,33 @@ static int controller(void) {
     if (!cliq_process_token(getpid(), hello.start_token) || !cliq_send(3, &hello, NULL, 0)) return 70;
     while (!shutdown_requested) {
         if (!pump_verifiers()) break;
+        if (!source_pump()) break;
         bool verifier_running = false;
         for (size_t i = 1; i < CLIQ_WORKER_MAX_SCOPES; i++)
             if (scopes[i].verifier && scopes[i].released && !scopes[i].stopped) verifier_running = true;
         struct pollfd control = { .fd = 3, .events = POLLIN };
-        int available = poll(&control, 1, verifier_running ? 10 : -1);
+        bool source_running = source_scope.blocked && !source_scope.dead && !source_scope.failed;
+        int available = poll(&control, 1, verifier_running || source_running ? 10 : -1);
         if (available < 0 && errno == EINTR) continue;
         if (available < 0 || (available > 0 && !(control.revents & POLLIN))) break;
         if (available == 0) continue;
         struct cliq_worker_packet request, response; int passed[CLIQ_WORKER_MAX_FDS]; size_t count;
         if (!cliq_receive(3, &request, passed, sizeof(passed) / sizeof(passed[0]), &count)) break;
         response = cliq_packet(request.command); response.scope = request.scope;
-        bool ok = false; int outputs[2]; size_t output_count = 0;
-        if (request.command == CLIQ_BIND_RESERVATION) ok = bind_worker_reservation(&request, passed, count);
+        bool ok = false; int outputs[CLIQ_SOURCE_TRANSFER_OUTPUTS]; size_t output_count = 0;
+        if (request.command == CLIQ_PREPARATION_RESERVE) {
+            ok = preparation_reserve(&request, passed, count, &response);
+            if (ok) { outputs[0] = source_scope.cgroup; output_count = 1; }
+        } else if (request.command == CLIQ_PREPARATION_FINISH || request.command == CLIQ_PREPARATION_CANCEL) {
+            ok = count == 0 && preparation_finish(&request, &response, request.command == CLIQ_PREPARATION_FINISH);
+        } else if (request.command == CLIQ_SOURCE_CLEANUP_RETAINED) ok = source_cleanup_retained(&request, passed, count, &response);
+        else if (request.command == CLIQ_PREPARATION_CLEANUP_RETAINED) ok = preparation_cleanup_retained(&request, passed, count, &response);
+        else if (request.command == CLIQ_SOURCE_CHECK_REGISTERED_ABSENT) ok = source_check_registered_absent(&request, passed, count, &response);
+        else if (request.command >= CLIQ_SOURCE_RESERVE && request.command <= CLIQ_SOURCE_RETIRE)
+            ok = source_command(&request, passed, count, &response, outputs, &output_count);
+        else if (source_scope.attempted && !(source_scope.preparation && source_scope.retired && source_scope.preparation_completed) &&
+            request.command != CLIQ_STOP_CONTROLLER) ok = false;
+        else if (request.command == CLIQ_BIND_RESERVATION) ok = bind_worker_reservation(&request, passed, count);
         else if (request.command == CLIQ_INSPECT_RESERVATION) ok = inspect_worker_reservation(&request, passed, count, &response);
         else if (request.command == CLIQ_CREATE_WORKER || request.command == CLIQ_CREATE_WRITE || request.command == CLIQ_CREATE_VERIFIER)
             ok = spawn_worker(&request, passed, count, &response);
@@ -1057,7 +1093,11 @@ static int controller(void) {
             for (size_t i = 0; i < count; i++) close(passed[i]);
             stop_everything(); return 0;
         }
-        for (size_t i = 0; i < count; i++) close(passed[i]);
+        for (size_t i = 0; i < count; i++) if (passed[i] >= 0) close(passed[i]);
+        if (!ok && source_scope.created && !source_scope.retired && request.command >= CLIQ_SOURCE_RESERVE) {
+            source_scope.failed = true;
+            struct cliq_worker_packet ignored; (void)source_stop(&ignored);
+        }
         if (!ok && request.scope > 0 && request.scope < CLIQ_WORKER_MAX_SCOPES && scopes[request.scope].created) {
             struct cliq_worker_packet ignored; (void)stop_scope(request.scope, &ignored);
         }
@@ -1070,7 +1110,8 @@ static int controller(void) {
 }
 
 int main(int argc, char **argv) {
-    (void)argv;
+    if (argc == 2 && strcmp(argv[1], "--source-producer") == 0) return source_producer();
+    if (argc == 2 && strcmp(argv[1], "--preparation-producer") == 0) return preparation_producer();
     if (argc != 1) return 64;
     return getpid() == 1 ? namespace_init() : controller();
 }

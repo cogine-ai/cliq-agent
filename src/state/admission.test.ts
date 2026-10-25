@@ -950,27 +950,28 @@ test('same admission key with different budgets is ADMISSION_KEY_CONFLICT', asyn
   }
 });
 
-test('session.create rejects a symlinked .git/config', async () => {
+test('session.create records the Git directory identity without following even a dangling config symlink', async () => {
   const stateRoot = await makePrivateDir('.cliq-m1-gitcfg-');
   const workspace = await makePrivateDir('.cliq-m1-ws-');
   const outside = await makePrivateDir('.cliq-m1-gitcfg-target-');
   await mkdir(path.join(workspace, '.git'), { mode: 0o700 });
-  await writeFile(path.join(outside, 'config'), '[core]\n\trepositoryformatversion = 0\n', { mode: 0o600 });
   await symlink(path.join(outside, 'config'), path.join(workspace, '.git', 'config'));
   const store = await openStateStore(stateRoot);
   try {
     const { principalId, ...channel } = await publishInProcessChannel(store);
-    await assert.rejects(
-      () =>
-        store.createSession({
+    const created = await store.createSession({
           principalId,
           requestId: uuidv7(),
           admissionKey: admissionKey('session-gitcfg'),
           workspacePath: workspace,
           ...channel
-        }),
-      (error: unknown) => error instanceof KernelStorageError && error.code === 'INVALID_REQUEST'
-    );
+        });
+    const identity = await store.artifacts.readCanonical<import('../kernel/types.js').WorkspaceIdentityV1>(created.session.workspaceIdentityRef);
+    assert.equal(identity.kind, 'live');
+    assert(identity.kind === 'live' && identity.repositoryIdentityRef);
+    const repository = await store.artifacts.readCanonical<import('../kernel/types.js').RepositoryIdentity>(identity.repositoryIdentityRef);
+    assert.equal(repository.schemaVersion, 2);
+    assert.equal(repository.gitDirectoryRelativePath, '.git');
   } finally {
     await store.close();
     await rm(stateRoot, { recursive: true, force: true });

@@ -151,7 +151,7 @@ export async function validateDeliveryRecoveryData(driver: SqliteDriver, artifac
   const planned = await planDeliveryPublication(artifacts, { deliveryRunId: input.run.id,
     sourceRunResultRef: admission.request.expectedRunResultRef, ...source.input,
     captureTopologyRef: admission.inspection.outcome.kind === 'captured' ? admission.inspection.outcome.captureTopologyRef : '',
-    desiredSourceRef: source.sourceRef, diffRef: source.diffRef });
+    desiredSourceRef: source.sourceRef, diffRef: source.diffRef }, undefined, input.runSpec.sandboxProfileRef);
   if (planned.planRef !== merge.deliveryPlanRef) throw new TypeError('delivery merge names a different complete publication Plan');
   requireEqual(await readCanonicalArtifact(artifacts, planned.planRef), planned.plan, 'delivery original complete publication Plan');
   const candidateRow = input.items[1], candidate = candidateRow && input.decodedItems.get(candidateRow.itemId);
@@ -166,7 +166,8 @@ export async function validateDeliveryRecoveryData(driver: SqliteDriver, artifac
   const checkpoint = originalCheckpoint(input, finalCandidateCheckpointId(input.run.id, merge.itemId), 2, merge.createdAt);
   const workspace: WorkspaceStateManifest = { schemaVersion: 1, format: 'cliq-workspace-state-v1', runId: input.run.id,
     baseWorkspaceManifestRef: input.runSpec.baseWorkspaceManifestRef, entriesRef: source.source.entriesRef,
-    invalidatedEphemeralPaths: [], sourceProjectionDigest: source.source.sourceProjectionDigest, stateDigest: '' };
+    invalidatedEphemeralPaths: [], sourceProjectionDigest: source.source.sourceProjectionDigest,
+    ...(admission.workspaceState.privateGitStateRef ? { privateGitStateRef: admission.workspaceState.privateGitStateRef } : {}), stateDigest: '' };
   workspace.stateDigest = digestOmitting(workspace, 'stateDigest');
   if (checkpoint.workspaceStateRef !== canonicalSha256(workspace)) throw new TypeError('delivery merge Checkpoint substituted its W_M');
   requireEqual(decodeWorkspaceState(await readCanonicalArtifact(artifacts, checkpoint.workspaceStateRef)), workspace, 'delivery original restorable W_M');

@@ -1,9 +1,14 @@
 import { createHash } from 'node:crypto';
 import { canonicalSha256 } from '../../kernel/canonical.js';
-import { assertArtifactRef, digestOmitting } from '../../kernel/identity.js';
-import type { FrozenIgnoreRulesV1, SourceManifest, WorkspaceStateManifest } from '../../kernel/types.js';
+import { assertArtifactRef, digestOmitting, sha256Bytes } from '../../kernel/identity.js';
+import type { SandboxResourceSpec } from '../../kernel/execution.js';
+import type { FrozenIgnoreRulesV1, SourceManifest, WorkspaceStateManifest, PrivateGitStateManifest,
+  GitIndexSnapshotV1, GitObjectClosureV1, SanitizedGitConfigV1 } from '../../kernel/types.js';
 import type { ArtifactCatalog } from '../../state/artifacts.js';
 import { KernelStorageError } from '../../state/errors.js';
+import { readGitIndexData, readPrivateGitData, type PrivateGitData, type PrivateGitReader } from '../private-git-data.js';
+import { sanitizedGitConfigText } from '../source-git-config.js';
+import { canonicalJsonBytes } from '../../kernel/canonical.js';
 
 type RecordValue = Record<string, unknown>;
 type GitConfig = { schemaVersion: 1; format: 'cliq-sanitized-git-config-v1'; core: {
@@ -19,8 +24,26 @@ type EmptyClosure = { schemaVersion: 1; format: 'cliq-git-object-closure-v1'; re
 type UnbornManifest = { schemaVersion: 1; format: 'cliq-private-git-v1'; head: { kind: 'unborn'; branch: string };
   indexRef: string; refs: []; objectClosureRef: string; objectClosureDigest: string;
   sanitizedConfigRef: string; sanitizedConfigDigest: string; manifestDigest: string };
-export type FrozenPrivateGit = Readonly<{ manifestRef: string; manifest: UnbornManifest; index: EmptyIndex;
-  closure: EmptyClosure; config: GitConfig; directories: readonly string[]; files: ReadonlyMap<string, Buffer> }>;
+export type PrivateGitFile = Readonly<{ sha256: string; byteCount: number }> &
+  (Readonly<{ kind: 'inline'; bytes: Buffer }> | Readonly<{ kind: 'cas'; ref: string }>);
+export type FrozenPrivateGit = Readonly<{ manifestRef: string; manifest: PrivateGitStateManifest; index: GitIndexSnapshotV1;
+  closure: GitObjectClosureV1; config: SanitizedGitConfigV1; requiresPreparation: boolean; data?: PrivateGitData;
+  directories: readonly string[]; files: ReadonlyMap<string, PrivateGitFile> }>;
+const directories = ['.git', '.git/objects', '.git/objects/info', '.git/objects/pack', '.git/refs', '.git/refs/heads'];
+function inline(bytes: Buffer): PrivateGitFile { return { kind: 'inline', bytes, sha256: sha256Bytes(bytes), byteCount: bytes.length }; }
+function cas(ref: string, byteCount: number): PrivateGitFile { return { kind: 'cas', ref, sha256: ref, byteCount }; }
+function ordinary(data: PrivateGitData): FrozenPrivateGit {
+  if (!data.pack) return unsupported();
+  const head = data.manifest.head;
+  const headText = head.kind === 'detached' ? `${head.objectId}\n` : `ref: ${head.kind === 'unborn' ? `refs/heads/${head.branch}` : head.ref}\n`;
+  const files = new Map<string, PrivateGitFile>([['.git/HEAD', inline(Buffer.from(headText))],
+    ['.git/config', inline(Buffer.from(sanitizedGitConfigText(data.config)))],
+    ['.git/index', cas(data.index.canonicalIndexBytesRef, data.index.canonicalIndexByteCount)],
+    ['.git/packed-refs', inline(Buffer.from('# pack-refs with: sorted\n' + data.manifest.refs.map(ref => `${ref.objectId} ${ref.name}\n`).join('')))],
+    [`.git/objects/pack/pack-${data.pack.packTrailerObjectHash}.pack`, cas(data.pack.packBytesRef, data.pack.packByteCount)],
+    [`.git/objects/pack/pack-${data.pack.packTrailerObjectHash}.idx`, cas(data.pack.packIndexBytesRef, data.pack.packIndexByteCount)]]);
+  return { ...data, requiresPreparation: true, data, directories, files };
+}
 
 function invalid(message: string): never { throw new KernelStorageError('ARTIFACT_MISMATCH', message); }
 function unsupported(): never {
@@ -40,13 +63,14 @@ function digest(value: unknown): string {
   if (typeof value !== 'string' || !/^[0-9a-f]{64}$/.test(value)) invalid('frozen Git digest must be SHA-256');
   return value;
 }
-async function artifact(artifacts: ArtifactCatalog, input: unknown, format: string, keys: readonly string[], digestKey: string,
-  signal?: AbortSignal): Promise<RecordValue> {
+async function artifact(artifacts: PrivateGitReader, input: unknown, format: string, keys: readonly string[], digestKey: string,
+  signal?: AbortSignal, maximum = 1_048_576): Promise<RecordValue> {
   signal?.throwIfAborted();
   const artifactRef = ref(input);
-  const value = record(await artifacts.readCanonical(artifactRef), keys, format);
+  const bytes = await artifacts.readBoundedBytes(artifactRef, maximum);
+  const value = record(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)), keys, format);
   signal?.throwIfAborted();
-  if (value.schemaVersion !== 1 || value.format !== format || canonicalSha256(value) !== artifactRef ||
+  if (value.schemaVersion !== 1 || value.format !== format || !canonicalJsonBytes(value).equals(bytes) || canonicalSha256(value) !== artifactRef ||
       digestOmitting(value, digestKey) !== digest(value[digestKey])) invalid(`${format} frozen bytes/digest differ`);
   return value;
 }
@@ -73,10 +97,10 @@ function emptyTree(objectFormat: 'sha1' | 'sha256'): string {
   return createHash(objectFormat).update(Buffer.from('tree 0\0')).digest('hex');
 }
 
-/** This reader handles only the genuinely empty reachable Git graph. A pack
- * is never accepted without the retained trusted index-pack verifier. */
-export async function loadFrozenPrivateGit(artifacts: ArtifactCatalog, source: SourceManifest,
-  state: WorkspaceStateManifest, rules: FrozenIgnoreRulesV1, signal?: AbortSignal): Promise<FrozenPrivateGit | undefined> {
+/** Retained bytes are data only. A nonempty graph additionally requires a
+ * fresh native preparation completion before any generation payload write. */
+export async function loadFrozenPrivateGit(artifacts: PrivateGitReader, source: SourceManifest,
+  state: WorkspaceStateManifest, rules: FrozenIgnoreRulesV1, signal?: AbortSignal, resources?: SandboxResourceSpec): Promise<FrozenPrivateGit | undefined> {
   signal?.throwIfAborted();
   if (source.git === undefined) {
     if (state.privateGitStateRef !== undefined || rules.repositoryIdentityDigest !== undefined || rules.sources.length || rules.rules.length) {
@@ -88,7 +112,21 @@ export async function loadFrozenPrivateGit(artifacts: ArtifactCatalog, source: S
   const repository = digest(sourceGit.repositoryIdentityDigest);
   if (rules.repositoryIdentityDigest !== repository || state.privateGitStateRef === undefined) invalid('Git workspace/source/ignore identity differs');
   const manifest = await artifact(artifacts, state.privateGitStateRef, 'cliq-private-git-v1', ['schemaVersion', 'format', 'head',
-    'indexRef', 'refs', 'objectClosureRef', 'objectClosureDigest', 'sanitizedConfigRef', 'sanitizedConfigDigest', 'manifestDigest'], 'manifestDigest', signal);
+    'indexRef', 'refs', 'objectClosureRef', 'objectClosureDigest', 'sanitizedConfigRef', 'sanitizedConfigDigest', 'manifestDigest'], 'manifestDigest', signal,
+  resources ? Math.min(resources.maxSingleFileBytes, resources.maxInvocationOutputBytes) : 1_048_576);
+  const closureData = await artifact(artifacts, manifest.objectClosureRef, 'cliq-git-object-closure-v1', ['schemaVersion', 'format',
+    'repositoryIdentityDigest', 'objectFormat', 'packs', 'reachableObjectIds', 'closureDigest'], 'closureDigest', signal,
+  resources ? Math.min(resources.maxSingleFileBytes, resources.maxInvocationOutputBytes) : 1_048_576);
+  if (!Array.isArray(closureData.packs)) invalid('frozen Git object closure is not an array');
+  if (closureData.packs.length) {
+    if (!resources) return unsupported();
+    const expected = { repositoryIdentityDigest: repository, resources };
+    const data = await readPrivateGitData(artifacts, state.privateGitStateRef, expected, signal);
+    const admitted = await readGitIndexData(artifacts, ref(sourceGit.indexRef), expected, signal);
+    if (sourceGit.indexTreeObjectId !== admitted.indexTreeObjectId || admitted.objectFormat !== data.index.objectFormat)
+      invalid('private Git object format differs from its independently retained admitted index');
+    return ordinary(data);
+  }
   const head = record(manifest.head, ['kind', 'branch', 'ref', 'objectId'], 'PrivateGitStateManifest.head');
   const sourceHead = record(sourceGit.head, ['kind', 'branch', 'ref', 'objectId'], 'SourceManifest.git.head');
   if (head.kind !== 'unborn' || sourceHead.kind !== 'unborn') unsupported();
@@ -134,41 +172,21 @@ export async function loadFrozenPrivateGit(artifacts: ArtifactCatalog, source: S
   const configValue = config as unknown as GitConfig;
   return { manifestRef: state.privateGitStateRef, manifest: manifest as unknown as UnbornManifest,
     index: index as unknown as EmptyIndex, closure: closure as unknown as EmptyClosure, config: configValue,
-    directories: ['.git', '.git/objects', '.git/objects/info', '.git/objects/pack', '.git/refs', '.git/refs/heads'],
-    files: new Map([['.git/HEAD', Buffer.from(`ref: refs/heads/${name}\n`)], ['.git/index', indexBytes], ['.git/config', configBytes(configValue)]]) };
+    requiresPreparation: false, directories,
+    files: new Map([['.git/HEAD', inline(Buffer.from(`ref: refs/heads/${name}\n`))], ['.git/index', inline(indexBytes)],
+      ['.git/config', inline(configBytes(configValue))]]) };
 }
 
-/** Complete all-and-only physical metadata observation proves the empty
- * reachable graph; no mutable repository or ambient Git participates. */
-export async function observedPrivateGit(artifacts: ArtifactCatalog, frozen: FrozenPrivateGit,
-  directories: Set<string>, files: Map<string, Buffer>, signal?: AbortSignal): Promise<string> {
+/** Actual all-and-only streamed file observations retain the original graph.
+ * A mutable config, extra object, or changed index cannot become trusted CAS. */
+export async function observedPrivateGit(_artifacts: ArtifactCatalog, frozen: FrozenPrivateGit,
+  directories: Set<string>, files: Map<string, Readonly<{ sha256: string; byteCount: number }>>, signal?: AbortSignal): Promise<string> {
   signal?.throwIfAborted();
   if (directories.size !== frozen.directories.length || frozen.directories.some(path => !directories.has(path)) ||
-      files.size !== frozen.files.size || [...frozen.files].some(([path, bytes]) => !files.get(path)?.equals(bytes))) {
+      files.size !== frozen.files.size || [...frozen.files].some(([path, expected]) => {
+        const actual = files.get(path); return !actual || actual.sha256 !== expected.sha256 || actual.byteCount !== expected.byteCount;
+      })) {
     invalid('physical private Git index/HEAD/config/object closure differs');
   }
-  const bytes = files.get('.git/index')!;
-  const blob = await artifacts.publishBytes(bytes, 'application/octet-stream', 'cliq-git-index-bytes-v1');
-  signal?.throwIfAborted();
-  const index = { ...frozen.index, canonicalIndexBytesRef: blob.ref, canonicalIndexBytesDigest: blob.ref,
-    canonicalIndexByteCount: bytes.length, indexTreeObjectId: emptyTree(frozen.index.objectFormat), snapshotDigest: '' };
-  index.snapshotDigest = digestOmitting(index, 'snapshotDigest');
-  const indexRef = (await artifacts.publishCanonical(index, index.format)).ref;
-  signal?.throwIfAborted();
-  const closure = { ...frozen.closure, packs: [], reachableObjectIds: [], closureDigest: '' };
-  closure.closureDigest = digestOmitting(closure, 'closureDigest');
-  const objectClosureRef = (await artifacts.publishCanonical(closure, closure.format)).ref;
-  signal?.throwIfAborted();
-  const config = { ...frozen.config, configDigest: '' };
-  config.configDigest = digestOmitting(config, 'configDigest');
-  const sanitizedConfigRef = (await artifacts.publishCanonical(config, config.format)).ref;
-  signal?.throwIfAborted();
-  const head = { kind: 'unborn' as const, branch: files.get('.git/HEAD')!.toString('utf8').slice('ref: refs/heads/'.length, -1) };
-  const manifest = { ...frozen.manifest, head, indexRef, objectClosureRef, objectClosureDigest: closure.closureDigest,
-    sanitizedConfigRef, sanitizedConfigDigest: config.configDigest, manifestDigest: '' };
-  manifest.manifestDigest = digestOmitting(manifest, 'manifestDigest');
-  const observedRef = (await artifacts.publishCanonical(manifest, manifest.format)).ref;
-  signal?.throwIfAborted();
-  if (observedRef !== frozen.manifestRef) invalid('observed private Git semantic digest differs');
-  return observedRef;
+  return frozen.manifestRef;
 }

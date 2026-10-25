@@ -105,7 +105,9 @@ test('the full original Delivery core remains mandatory and late metadata does n
   const journey = source('./installed-delivery-journey.ts');
   assert(journey.includes("faultCase?: 'original_stop' | 'late_result'"));
   assert(journey.includes('} else await context.cleanupCrash(first);'));
-  assert(journey.includes('sourceRunsQualifiedByOriginalFullVerifierReader: 3, actualModelPostsOnlyForSource: 6'));
+  assert.deepEqual([...journey.matchAll(/await context\.createSource\('([^']+)'\)/gu)].map(match => match[1]),
+    ['publish', 'merge', 'git', 'git_merge', 'cancel'], 'the original three sources and both additional Git sources remain mandatory');
+  assert(journey.includes('sourceRunsQualifiedByOriginalFullVerifierReader: 5, actualModelPostsOnlyForSource: 10'));
   assert(journey.includes('cleanupCrashQualified: originalPublicationStopCase === undefined'));
   assert(journey.includes("options.faultCase === 'late_result' ? { latePublicationResultQualified: false"));
 });

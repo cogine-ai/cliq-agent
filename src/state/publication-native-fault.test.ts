@@ -753,3 +753,28 @@ test('a lost delete acknowledgment cannot be reinterpreted as unpublished privat
   assert.equal(observed.status, 0, observed.stderr);
   assert.deepEqual(JSON.parse(observed.stdout), { commitFailed: true, discardRefused: true, preserved: 'old' });
 });
+
+test('uncertain closure of a fixed publication index really consumes its FD and retains the original StateOwner', async t => {
+  const { binary, state, workspace } = await faultFixture(t);
+  const observed = spawnSync(process.execPath, ['--input-type=module', '-e', `
+    import assert from 'node:assert/strict';import {Module} from 'node:module';
+    import {writeFileSync,mkdirSync,readdirSync,fstatSync,lstatSync} from 'node:fs';import path from 'node:path';
+    const [binary,state,workspace]=process.argv.slice(1),git=path.join(workspace,'.git'),index=path.join(git,'index');
+    mkdirSync(git,{mode:448});writeFileSync(index,'physical index bytes',{mode:384});
+    const module=new Module(binary);process.dlopen(module,binary);const native=module.exports;
+    const lock=native.acquireLock(state,true),root=native.openWorkspaceRoot(workspace),expected=root.repositoryDirectory;
+    const reader=lock.openPublicationGitIndex(root,expected.deviceId,expected.fileId,expected.ownerUid,262144);
+    while(reader.readChunk()!==null){}reader.assertComplete();
+    const actual=lstatSync(index,{bigint:true}),fds=readdirSync(process.platform==='linux'?'/proc/self/fd':'/dev/fd').flatMap(name=>{
+      try{const info=fstatSync(Number(name),{bigint:true});return info.dev===actual.dev&&info.ino===actual.ino?[Number(name)]:[]}catch{return[]}});
+    assert.equal(fds.length,1);native.setFault('close',1,()=>5);let readerCode,rootCode,ownerCode,held=false;
+    try{reader.close()}catch(error){readerCode=error.code}try{root.assertHeld()}catch(error){rootCode=error.code}
+    for(const fd of fds)assert.throws(()=>fstatSync(fd),{code:'EBADF'});
+    try{lock.close()}catch(error){ownerCode=error.code}try{native.acquireLock(state,false).close()}catch{held=true}
+    console.log(JSON.stringify({readerCode,rootCode,ownerCode,held,actualFdConsumed:true}));process.exit(0);
+  `, binary, state, workspace], { encoding: 'utf8', timeout: 10000 });
+  assert.equal(observed.status, 0, observed.stderr);
+  assert.deepEqual(JSON.parse(observed.stdout), { readerCode: 'ERR_CLIQ_RESOURCE_RETIREMENT', rootCode: 'ERR_CLIQ_RESOURCE_RETIREMENT',
+    ownerCode: 'ERR_CLIQ_RESOURCE_RETIREMENT', held: true, actualFdConsumed: true });
+  const successor = (await loadNativeStateOwner()).acquireLock(state, false); successor.close();
+});

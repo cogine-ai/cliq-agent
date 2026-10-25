@@ -8,6 +8,7 @@ import type { BudgetSettlementV1, ContinuationItem, InvocationJournalEntry, Reco
 import { immutableSnapshot } from '../model/immutable.js';
 import { requireEqual } from '../policy/runtime-authority.js';
 import { captureFrozenSourceProjection, MAX_SOURCE_PROJECTION_ENTRIES } from '../workspace/source-projection.js';
+import { observePublicationGitIndex, readPublicationGitIndexObservation } from './publication-git-index.js';
 import { readCanonicalArtifact, readText } from './agent-context.js';
 import { insertArtifactMetadata, type ArtifactCatalog, type PublishedArtifact } from './artifacts.js';
 import { advanceTimeFence, sampleCanonicalNow, type TimeFenceAdvance } from './canonical-time.js';
@@ -725,9 +726,14 @@ export async function prepareOwnedPublicationFinalization(driver: SqliteDriver, 
       stateOwnerLock: owner.filesystem, workspaceIdentityDigest: authorization.context.workspaceIdentityDigest, artifacts: reads,
       sourceProjectionRef: cut.runSpec.sourceProjectionRef, sourceProjectionDigest: desired.sourceProjectionDigest,
       maxEntries: MAX_SOURCE_PROJECTION_ENTRIES, maxBytes: profile.resources.maxGenerationBytes, maxSingleFileBytes: profile.resources.maxSingleFileBytes,
+      ...(desired.git ? { git: { capturedSourceRef: completion.plan.capturedWorkspaceRef,
+        classificationSourceRef: completion.plan.sourceBaseRef, resources: profile.resources } } : {}),
       signal: resources.signal });
     if (captured.resultWorkspaceManifestRef !== completion.plan.desiredSourceRef)
       invalid('publication fresh complete root projection differs from the verified desired source');
+    gate.assertHeld();
+    const gitIndex = await observePublicationGitIndex(owner.filesystem, resources.workspaceRoot, reads,
+      { workspace: authorization.workspace, capturedSourceRef: completion.plan.capturedWorkspaceRef, resources: profile.resources }, resources.signal);
     gate.assertHeld();
     const metadata: PublishedArtifact[] = [inspectorArtifact, ...captured.metadata];
     const item = decodePublicationPathResultItem({ schemaVersion: 1, kind: 'publication_path_result',
@@ -770,7 +776,7 @@ export async function prepareOwnedPublicationFinalization(driver: SqliteDriver, 
     const projectionClosureEvidenceRef = await publish({ kind: 'projection_closure', selectedBranch: 'forward_finalize',
       observedSourceRef: captured.resultWorkspaceManifestRef, observedPathEvidenceRefs: observedPathStates.map(value => value.evidenceRef),
       forwardResultItemRefs, unstartedForwardOperationIds: [], abortResultItemRefs: [] });
-    const gitIndexUnchangedEvidenceRef = await publish({ kind: 'git_index_unchanged', repositoryKind: 'non_git' });
+    const gitIndexUnchangedEvidenceRef = await publish(readPublicationGitIndexObservation(gitIndex));
     const evidenceCore = { schemaVersion: 1 as const, deliveryRunId: cut.run.id,
       deliveryPlanRef: completion.planRef, selectedBranch: 'forward_finalize', observedSourceRef: captured.resultWorkspaceManifestRef,
       observedPathStates, forwardResultItemRefs, unstartedForwardOperationIds: [], abortResultItemRefs: [], transientAbsenceEvidenceRef,

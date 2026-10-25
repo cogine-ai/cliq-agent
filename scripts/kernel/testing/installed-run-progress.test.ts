@@ -160,7 +160,7 @@ test('a closed case, counters and the production public discriminators are manda
   for (const postCount of [-1, 11, 0.5, Number.MAX_SAFE_INTEGER + 1, NaN, Infinity, '6']) {
     assert.throws(() => projectInstalledRunProgress({ ...input(), postCount }));
   }
-  for (const caseKind of ['required_pass', 'required_repair', 'advisory_failure', 'required_timeout', 'delivery_publish', 'delivery_merge', 'delivery_cancel']) {
+  for (const caseKind of ['required_pass', 'required_repair', 'advisory_failure', 'required_timeout', 'ordinary_git', 'delivery_publish', 'delivery_merge', 'delivery_cancel', 'delivery_git', 'delivery_git_merge']) {
     assert.equal(projectInstalledRunProgress({ ...input(), caseKind, postCount: 10 }).caseKind, caseKind);
   }
 });

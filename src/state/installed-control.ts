@@ -15,6 +15,7 @@ import { InstalledRunAuthorityError } from './installed-run.js';
 import { InstalledRunCapacityError } from './installed-run-capacity.js';
 import { CredentialScopeBusyError } from './installed-runtime.js';
 import { VerifierAuthorizationError } from './authorization-artifacts.js';
+import { ListCursorError, ListCutCapacityError, ListCutBusyError } from './list-read-cut.js';
 
 export type InstalledControlService = Readonly<{ close(): Promise<void> }>;
 type InvalidError = Extract<InstalledControlErrorV1, { code: 'INVALID_REQUEST' }>;
@@ -25,6 +26,7 @@ const BUFFER_BYTES = (MAX_OUTSTANDING + 1) * FRAME_BYTES;
 const FEATURES: readonly string[] = INSTALLED_CONTROL_FEATURES;
 const RUN_FEATURES = ['session.create', 'run.submit', 'run.cancel'];
 const DELIVERY_FEATURES = ['run.apply', 'run.approve', 'run.reconcile'];
+const SESSION_FEATURES = ['session.list', 'session.fork', 'session.compact', 'session.handoff.create'];
 const record = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 function text(value: unknown): string {
@@ -88,6 +90,7 @@ export function openInstalledControl(store: StateStore,
     }
   };
   const errorResult = (error: unknown, credential = false): InstalledControlErrorV1 => {
+    if (error instanceof ListCursorError || error instanceof ListCutCapacityError || error instanceof ListCutBusyError) return error.controlError;
     if (error instanceof ResultUnavailableError) return error.controlError;
     if (error instanceof ResourceRetirementError) {
       retirementFailure ??= error;
@@ -149,6 +152,7 @@ export function openInstalledControl(store: StateStore,
           return { protocolVersion: 1, ok: true, result: { ...observed, method: 'control.hello', protocolVersion: 1,
             serverBuild, controlSchemaRange: { min: 1, max: 1 }, enabledFeatureIds: candidate.requestedFeatureIds.filter(feature =>
               FEATURES.includes(feature) && (feature !== 'credential.finalize' || store.supportsCredentialFinalization()) &&
+              (!SESSION_FEATURES.includes(feature) || store.supportsSessionContinuity()) &&
               (!DELIVERY_FEATURES.includes(feature) || store.supportsInstalledDelivery()) &&
               (!RUN_FEATURES.includes(feature) || store.supportsInstalledRuns())) }
           } satisfies InstalledControlResponseV1;
@@ -156,11 +160,14 @@ export function openInstalledControl(store: StateStore,
         if (!connection.handshaken) return { protocolVersion: 1, ok: false, method: knownMethod,
           error: { schemaVersion: 1, code: 'AUTHORIZATION_REQUIRED', retryable: false, messageCode: 'control.hello_required' } } satisfies InstalledControlResponseV1;
         if (request.protocolVersion !== 1) throw new TypeError('protocol version must be 1');
+        if (SESSION_FEATURES.includes(method) && !store.supportsSessionContinuity()) return { protocolVersion: 1, ok: false, method: knownMethod,
+          error: { schemaVersion: 1, code: 'AUTHORIZATION_REQUIRED', retryable: false, messageCode: 'control.method_not_enabled' } } satisfies InstalledControlResponseV1;
         if (RUN_FEATURES.includes(method) && !store.supportsInstalledRuns()) return { protocolVersion: 1, ok: false, method: knownMethod,
           error: { schemaVersion: 1, code: 'AUTHORIZATION_REQUIRED', retryable: false, messageCode: 'control.method_not_enabled' } } satisfies InstalledControlResponseV1;
         if (DELIVERY_FEATURES.includes(method) && !store.supportsInstalledDelivery()) return { protocolVersion: 1, ok: false, method: knownMethod,
           error: { schemaVersion: 1, code: 'AUTHORIZATION_REQUIRED', retryable: false, messageCode: 'control.method_not_enabled' } } satisfies InstalledControlResponseV1;
         if (method === 'session.create') return (await store.createInstalledSession(request, identity)).response;
+        if (SESSION_FEATURES.includes(method)) return store.sessionContinuity(request, identity);
         if (method === 'run.submit') return (await store.submitInstalledRun(request, identity)).response;
         if (method === 'run.apply') return (await store.applyInstalledRun(request, identity)).response;
         if (method === 'run.approve') return (await store.approveInstalledRun(request, identity)).response;
@@ -188,7 +195,7 @@ export function openInstalledControl(store: StateStore,
           // Read a fresh authenticated authoritative snapshot, not the stale
           // producer cut or a fabricated metadata-only conflict response.
           try {
-            const observed = method === 'run.submit'
+            const observed = method === 'run.submit' || ['session.fork', 'session.compact', 'session.handoff.create'].includes(method)
               ? await store.readControl({ protocolVersion: 1, method: 'session.get', sessionId: request.sessionId as string }, identity)
               : method === 'run.cancel' || method === 'run.approve' || method === 'run.reconcile'
                 ? await store.readControl({ protocolVersion: 1, method: 'run.get', runId: request.runId as string }, identity) : undefined;

@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import type { ArtifactDescriptorV1 } from '../kernel/types.js';
+import type { RunSubmitRequest } from '../kernel/control-submit.js';
 import { immutableSnapshot } from '../model/immutable.js';
 import { openInstalledSupervisorClient, type InstalledSupervisorClient } from '../state/installed-control-client.js';
 import type { HeldInstalledRuntime } from '../state/installed-runtime.js';
@@ -12,6 +13,7 @@ import { INSTALLED_CONTROL_FEATURES, decodeInstalledControlEnvelope, decodeInsta
 
 type Attach = Extract<InstalledControlRequestV1, { method: 'run.attach' }>;
 type AttachResult = Extract<InstalledControlResponseFor<'run.attach'>, { ok: true }>['result'];
+export type SessionResumeInput = Omit<RunSubmitRequest, 'requestDigest' | 'expectedContextRevision'>;
 export class ControlRefusal extends Error {
   constructor(readonly response: Extract<InstalledControlResponseFor<InstalledControlFeature>, { ok: false }>) {
     super('installed Supervisor refused the request'); this.name = 'ControlRefusal';
@@ -21,6 +23,7 @@ export type InstalledControlSession = Readonly<{
   readonly hello: InstalledSupervisorClient['hello'];
   request(value: unknown): Promise<InstalledControlResponseFor<InstalledControlFeature>>;
   cancel(runId: string, expectedRevision: number): Promise<InstalledControlResponseFor<InstalledControlFeature>>;
+  prepareResume(request: SessionResumeInput, signal?: AbortSignal): Promise<RunSubmitRequest>;
   attach(request: Attach, signal?: AbortSignal): AsyncGenerator<Readonly<{
     request: Attach; response: InstalledControlResponseFor<'run.attach'>; events: readonly HeadlessRunEventV3[] }>>;
   artifact(digest: string, options: Readonly<{ maxBytes: number; signal?: AbortSignal }>): Promise<Buffer>;
@@ -70,6 +73,23 @@ export function createInstalledControlSession(initial: InstalledSupervisorClient
   };
   const session: InstalledControlSession = Object.freeze({
     get hello() { return immutableSnapshot(client.hello); }, request,
+    async prepareResume(supplied: SessionResumeInput, signal?: AbortSignal) {
+      // Return the complete new admission before dispatch. Callers can retain
+      // these exact bytes across an explicit reconnect; no old Run is resumed
+      // and neither an uncertain send nor a revision refusal is auto-retried.
+      if (Object.hasOwn(supplied, 'requestDigest') || Object.hasOwn(supplied, 'expectedContextRevision')) throw new TypeError('resume takes new Run intent without a stale Session revision');
+      const validate = { ...supplied, expectedContextRevision: 1 };
+      const checked = decodeInstalledControlRequest({ ...validate, requestDigest: canonicalSha256(validate) });
+      if (checked.method !== 'run.submit') throw new TypeError('resume requires a new run.submit intent');
+      signal?.throwIfAborted();
+      const observed = await request({ protocolVersion: 1, method: 'session.get', sessionId: checked.sessionId });
+      signal?.throwIfAborted();
+      if (!observed.ok) throw new ControlRefusal(observed);
+      if (observed.result.method !== 'session.get') throw new TypeError('resume Session response differs');
+      const { requestDigest: _digest, ...core } = checked;
+      const current = { ...core, expectedContextRevision: observed.result.snapshot.session.contextRevision };
+      return decodeInstalledControlRequest({ ...current, requestDigest: canonicalSha256(current) }) as RunSubmitRequest;
+    },
     cancel(runId: string, expectedRevision: number) {
       // This timestamp is only UUIDv7 request identity data, never a server
       // time/authority observation. Only this explicit user action creates it.
