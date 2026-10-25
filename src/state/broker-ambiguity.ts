@@ -379,10 +379,10 @@ export async function validateInstalledBrokerTerminalHistory(driver: SqliteDrive
   const frames = await terminalFrames(driver, artifacts, cut);
   if (!Array.isArray(detail.abandonedRetryInvocations) || detail.abandonedRetryInvocations.length !== frames.length) terminalFailure();
   if (!frames.length) return [];
-  const closures = await Promise.all(detail.abandonedRetryInvocations.map(async entry =>
-    decodeBrokerProcessDomainDeathDispatchClosure(await readCanonicalArtifact(artifacts, entry.dispatchFenceOrDeathEvidenceRef))));
-  const deaths = await Promise.all(closures.map(async closure =>
-    decodeBrokerProcessDomainDeath(await readCanonicalArtifact(artifacts, closure.closure.brokerProcessDeathEvidenceRef))));
+  const closures = await artifacts.mapReads(detail.abandonedRetryInvocations, async entry =>
+    decodeBrokerProcessDomainDeathDispatchClosure(await readCanonicalArtifact(artifacts, entry.dispatchFenceOrDeathEvidenceRef)));
+  const deaths = await artifacts.mapReads(closures, async closure =>
+    decodeBrokerProcessDomainDeath(await readCanonicalArtifact(artifacts, closure.closure.brokerProcessDeathEvidenceRef)));
   const epoch = deaths[0]!.inspectorStateOwnerEpoch;
   if (deaths.some(evidence => evidence.inspectorStateOwnerEpoch !== epoch)) terminalFailure();
   const history = await readRetainedStateOwnerHistory(driver, artifacts, epoch);

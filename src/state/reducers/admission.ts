@@ -45,7 +45,7 @@ import {
   decodeWorkspaceIdentity,
   decodeWorkspaceState
 } from '../decoders.js';
-import { joinResourceOperations, KernelStorageError } from '../errors.js';
+import { KernelStorageError } from '../errors.js';
 import { readCanonicalArtifact } from '../agent-context.js';
 import { readInstalledRunAdmission, recheckInstalledRunWorkspace, type AssembledInstalledRun } from '../installed-run.js';
 import { assertInstalledRunAdmissionCapacity } from '../installed-run-capacity.js';
@@ -563,19 +563,17 @@ async function admitRunInternal(
   await reads.readBytes(input.policyRef);
   await reads.readBytes(input.sandboxProfileRef);
 
-  const referencedMetadata = await joinResourceOperations([
-    reads.describe(input.assemblyRef, 'application/json', 'cliq-run-assembly-v1'),
-    reads.describe(input.policyRef, 'application/json', 'cliq-run-policy-v1'),
-    reads.describe(input.sandboxProfileRef, 'application/json', 'cliq-sandbox-profile-v1'),
-    reads.describe(input.verifierSpecRef, 'application/json', 'cliq-verifier-spec-v1'),
-    reads.describe(input.sourceProjectionRef, 'application/json', 'cliq-source-projection-v1'),
-    reads.describe(input.frozenIgnoreRulesRef, 'application/json', 'cliq-frozen-ignore-rules-v1'),
-    reads.describe(input.baseWorkspaceManifestRef, 'application/json', 'cliq-source-manifest-v1'),
-    reads.describe(sourceManifest.entriesRef, 'application/json', 'cliq-workspace-entries-v1'),
-    ...(input.credentialGrantRefs ?? []).map((ref) =>
-      reads.describe(ref, 'application/json', 'cliq-endpoint-credential-grant-binding-v1')
-    )
-  ]);
+  const referencedMetadata = await reads.mapReads([
+    [input.assemblyRef, 'cliq-run-assembly-v1'],
+    [input.policyRef, 'cliq-run-policy-v1'],
+    [input.sandboxProfileRef, 'cliq-sandbox-profile-v1'],
+    [input.verifierSpecRef, 'cliq-verifier-spec-v1'],
+    [input.sourceProjectionRef, 'cliq-source-projection-v1'],
+    [input.frozenIgnoreRulesRef, 'cliq-frozen-ignore-rules-v1'],
+    [input.baseWorkspaceManifestRef, 'cliq-source-manifest-v1'],
+    [sourceManifest.entriesRef, 'cliq-workspace-entries-v1'],
+    ...(input.credentialGrantRefs ?? []).map((ref) => [ref, 'cliq-endpoint-credential-grant-binding-v1'] as const)
+  ] as const, ([ref, schemaKind]) => reads.describe(ref, 'application/json', schemaKind));
 
   const now = installed?.data.admittedAt ?? sampleCanonicalNow();
   const runId = identityHash('cliq-run-id-v1', input.principalId, 'run.submit', input.admissionKey);

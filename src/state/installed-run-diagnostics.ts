@@ -8,7 +8,8 @@ export const INSTALLED_RUN_FAILURE_CHANNEL = 'cliq.installed.run.failures.v1';
 export const INSTALLED_APPLY_DIAGNOSTIC_STAGES = Object.freeze(['request', 'replay', 'capture_source', 'capture',
   'source', 'prepare', 'admit', 'postcommit_load', 'submit_request', 'submit_preflight_authority',
   'submit_source_capture', 'submit_assembly', 'submit_assembly_native', 'submit_assembly_source', 'submit_assembly_platform',
-  'submit_assembly_material', 'submit_assembly_publish', 'submit_final_admission', 'submit_postcommit_load'] as const);
+  'submit_assembly_material', 'submit_assembly_publish', 'submit_assembly_verifier', 'submit_assembly_policy',
+  'submit_assembly_final_check', 'submit_final_admission', 'submit_postcommit_load'] as const);
 export type InstalledApplyDiagnosticStage = typeof INSTALLED_APPLY_DIAGNOSTIC_STAGES[number];
 const applyStages: ReadonlySet<string> = new Set(INSTALLED_APPLY_DIAGNOSTIC_STAGES);
 const diagnostic = channel(INSTALLED_RUN_FAILURE_CHANNEL);
@@ -22,6 +23,7 @@ export const INSTALLED_SCHEDULER_DIAGNOSTIC_PHASES = Object.freeze(['scheduled',
   'publication_prepare', 'publication_dispatch', 'publication_settlement',
   'publication_prepare_read', 'publication_prepare_grant', 'publication_prepare_cut',
   'publication_prepare_physical', 'publication_prepare_admit',
+  'publication_received_retirement', 'publication_received_read', 'publication_received_proof', 'publication_received_settle',
   'terminal_retirement', 'result_recovery', 'result_basis', 'result_finalization',
   'result_publication', 'result_session', 'result_commit', 'result_recovery_spec', 'result_recovery_context',
   'result_recovery_journal', 'result_recovery_generations', 'result_recovery_history', 'result_recovery_history_model',

@@ -49,7 +49,7 @@ export type LoadAgentRunInput = {
 export type AgentRunState = Awaited<ReturnType<typeof loadAgentRun>>;
 
 async function publishPlans(artifacts: ArtifactCatalog, plans: readonly PlannedArtifact[]): Promise<PublishedArtifact[]> {
-  return Promise.all(plans.map(async (plan) => {
+  return joinResourceOperations(plans.map(async (plan) => {
     const bytes = plan.bytes;
     if (sha256Bytes(bytes) !== plan.ref) throw new TypeError('planned artifact bytes do not rehash');
     return artifacts.publishBytes(bytes, plan.mediaType, plan.schemaKind);
@@ -86,11 +86,11 @@ const agentCut = stateOperation('RECOVERY_REQUIRED', async (driver: SqliteDriver
 async function readContextItems(driver: SqliteDriver, artifacts: ArtifactCatalog, runId: string, through: number): Promise<ContextItem[]> {
   const rows = driver.prepare('SELECT item_seq, item_id, kind, payload_ref FROM items WHERE run_id = ? AND item_seq <= ? ORDER BY item_seq')
     .all<{ item_seq: unknown; item_id: string; kind: string; payload_ref: string }>(runId, BigInt(through));
-  return joinResourceOperations(rows.map(async (row) => {
+  return artifacts.mapReads(rows, async (row) => {
     const item = await readCanonicalArtifact<ContinuationItem>(artifacts, row.payload_ref);
     if (item.itemId !== row.item_id || item.kind !== row.kind) throw new TypeError('context item does not match its owner row');
     return { itemSeq: Number(row.item_seq), itemRef: row.payload_ref, item };
-  }));
+  });
 }
 
 export class AgentContextExhaustedError extends KernelStorageError {

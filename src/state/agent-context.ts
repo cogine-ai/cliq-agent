@@ -12,7 +12,7 @@ import type { RunAssemblyToolAuthority } from '../model/run-assembly.js';
 import type { ModelTurnMaterial } from '../runtime/continuation.js';
 import type { ArtifactCatalog } from './artifacts.js';
 import { decodeAdmittedContext, decodeRunObjective, decodeSessionProjection } from './decoders.js';
-import { joinResourceOperations, KernelStorageError } from './errors.js';
+import { KernelStorageError } from './errors.js';
 import { decodeRepairDiagnosticItem, decodeVerificationReceipt, decodeVerifierRepairDiagnostic,
   decodeVerifierRepairModelContent, verifierRepairModelContent } from './verifier-artifacts.js';
 
@@ -31,12 +31,12 @@ export async function readText(artifacts: ArtifactCatalog, ref: string, digest?:
 
 export async function readModelTurnMaterial(artifacts: ArtifactCatalog, ref: string): Promise<ModelTurnMaterial> {
   const turn = await readCanonicalArtifact<AgentModelTurn>(artifacts, ref);
-  return { turn, text: await readText(artifacts, turn.textRef), inputs: await joinResourceOperations(turn.toolCalls.map(async (call) => {
+  return { turn, text: await readText(artifacts, turn.textRef), inputs: await artifacts.mapReads(turn.toolCalls, async (call) => {
     const value = await readCanonicalArtifact<ToolCallInputV1>(artifacts, call.inputRef);
     const observed = await readCanonicalArtifact<ObservedToolCallInputV1>(artifacts, value.observedInputRef);
     if (value.diagnosticRef !== undefined) await artifacts.readBytes(value.diagnosticRef);
     return { value, observed };
-  })) };
+  }) };
 }
 
 /** Static, post-Trust instruction projection. Reads retained CAS only, never live repository files. */
@@ -54,11 +54,11 @@ export async function loadInstructionText(artifacts: ArtifactCatalog, assembly: 
       workspace.manifestDigest !== instructions.workspaceInstructionsDigest ||
       digestOmitting(workspace, 'manifestDigest') !== workspace.manifestDigest) throw new TypeError('workspace instructions mismatch');
   if (workspace.entries.length > 0) {
-    const entries = await joinResourceOperations(workspace.entries.map(async (entry, index) => {
+    const entries = await artifacts.mapReads(workspace.entries, async (entry, index) => {
       if (entry.order !== index || entry.appliesToSubtree !== true) throw new TypeError('workspace instruction scope mismatch');
       return { order: entry.order, canonicalRootRelativePath: entry.canonicalRootRelativePath, appliesToSubtree: true,
         instructionUtf8: (await readText(artifacts, entry.contentRef, entry.contentDigest)).utf8 };
-    }));
+    });
     pieces.push(canonicalJsonBytes({ format: 'cliq-workspace-instruction-prompt-v1', entries }).toString('utf8'));
   }
   for (const selected of instructions.skills) {

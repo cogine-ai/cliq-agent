@@ -234,8 +234,8 @@ export function loadFinalCandidate(driver: SqliteDriver, artifacts: ArtifactCata
                   const nextFrontier: RunFrontier = { schemaVersion: 1, kind: 'verify', phase: 'verifiers', candidateItemId: candidate.itemId,
                     resultSourceRef: candidate.resultSourceRef, verifierPlanRef: plan.ref, nextVerifierIndex: 0, afterPass: 'finalize' };
                   const context = decodeContextManifest(await readCanonicalArtifact(artifacts, selected.latestCheckpoint.contextManifestRef));
-                  const existingItems = await Promise.all(selected.items.map(async row => ({ itemSeq: row.itemSeq, itemRef: row.payloadRef,
-                    item: await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef) })));
+                  const existingItems = await artifacts.mapReads(selected.items, async row => ({ itemSeq: row.itemSeq, itemRef: row.payloadRef,
+                    item: await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef) }));
                   graph = planContinuationCommit(artifacts, { context, existingItems, items: [candidate], frontier: nextFrontier,
                     checkpointId, workspaceStateRef: input.checkpoint.workspaceStateRef, artifacts: [plan] });
                 }

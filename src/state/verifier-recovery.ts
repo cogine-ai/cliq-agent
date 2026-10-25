@@ -83,8 +83,8 @@ export async function readVerifierRetirement(driver: SqliteDriver, artifacts: Ar
       checkpoint.createdAt < terminal.timestamp)
     throw new TypeError('verifier retirement has no exact atomic parent Checkpoint');
   const assembly = decodeRetainedRunAssembly(await readCanonicalArtifact(artifacts, cut.runSpec.assemblyRef));
-  const generationProofs = await Promise.all(cut.workspaceGenerations.map(async generation => generation.phase === 'retired'
-    ? (await readRetiredGenerationSource(driver, artifacts, { run: cut.run, spec: cut.runSpec, assembly, generation })).source : generation));
+  const generationProofs = await artifacts.mapReads(cut.workspaceGenerations, async generation => generation.phase === 'retired'
+    ? (await readRetiredGenerationSource(driver, artifacts, { run: cut.run, spec: cut.runSpec, assembly, generation })).source : generation);
   const generation = generationProofs.filter(row => row.phase === 'sealed' && row.generationRef === snapshot.generationRef &&
     row.snapshotEvidenceRef === proof.snapshotEvidenceRef);
   if (generation.length !== 1) throw new TypeError('verifier retirement has no unique original sealed generation');

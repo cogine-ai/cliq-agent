@@ -332,7 +332,7 @@ for (const fault of ['ordinary', 'cancel', 'retirement'] as const)
   });
 
 for (const fault of ['cancel', 'ordinary', 'retirement'] as const)
-  test(`admission metadata reads join every original CAS sibling before exposing ${fault}`, async t => {
+  test(`admission metadata reads stop queued work and join every issued original CAS sibling before exposing ${fault}`, async t => {
     const home = await fs.mkdtemp(path.join(os.tmpdir(), 'cliq-admission-read-join-'));
     t.after(() => fs.rm(home, { recursive: true, force: true }));
     const root = path.join(home, 'objects'); await fs.mkdir(root, { mode: 0o700 });
@@ -361,7 +361,7 @@ for (const fault of ['cancel', 'ordinary', 'retirement'] as const)
     t.mock.method(cas, 'read', (...args: Parameters<typeof cas.read>) => call.run(args[0], async () => {
       let bytes: Buffer | undefined, failed: { error: unknown } | undefined;
       try { bytes = await read(...args); } catch (error) { failed = { error }; }
-      if (++returned === refs.length) enter();
+      if (++returned === 4) enter();
       await gates[refs.indexOf(args[0])]!.promise;
       if (failed) throw failed.error;
       if (fault === 'ordinary' && args[0] === refs[0]) throw ordinaryFailure;
@@ -370,16 +370,18 @@ for (const fault of ['cancel', 'ordinary', 'retirement'] as const)
     const work = admissionMetadata()(input, { entriesRef: refs[7]! }, catalog.withReadSignal(owner.signal));
     void work.then(() => { outerJoined = true; }, () => { outerJoined = true; });
     try {
-      await Promise.race([entered, work.then(() => { throw new Error('the original nine CAS return gates were bypassed'); })]);
+      await Promise.race([entered, work.then(() => { throw new Error('the original first four CAS return gates were bypassed'); })]);
+      assert.equal(returned, 4, 'later metadata reads must remain queued behind the original four issued callbacks');
       assert.equal(active.size, 0, 'all actual CAS descriptors join before the original return gates release');
       if (fault !== 'ordinary') owner.abort(reason);
       gates[0]!.release(); await setImmediate();
-      assert.equal(outerJoined, false, 'the first failure cannot detach eight pending original metadata reads');
+      assert.equal(outerJoined, false, 'the first failure cannot detach three pending original metadata reads');
       gates.slice(1).forEach(gate => gate.release());
       await assert.rejects(work, error => fault === 'retirement'
         ? error instanceof ResourceRetirementError && error.cause === closeFailure
         : error === (fault === 'ordinary' ? ordinaryFailure : reason));
       assert.equal(actualRootCloseFailure, fault === 'retirement'); assert.equal(active.size, 0);
+      assert.equal(returned, 4, 'failure or cancellation must not dispatch the remaining five original metadata refs');
     } finally { gates.forEach(gate => gate.release()); await Promise.allSettled([work]); t.mock.restoreAll(); }
   });
 

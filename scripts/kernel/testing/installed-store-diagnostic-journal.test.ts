@@ -48,9 +48,10 @@ test('Stop phase markers reject malformed versions, fields, phases, duplicate ro
 test('Stop observations use only closed scheduler phases, including preparation details, never submit stages', async () => {
   const { readInstalledStoreStopPhaseJournal, readInstalledStoreDiagnosticJournal,
     readInstalledPublicationStageJournal } = await import('./installed-store-diagnostic-journal.js');
-  const preparation = ['publication_prepare_read', 'publication_prepare_grant', 'publication_prepare_cut',
-    'publication_prepare_physical', 'publication_prepare_admit'];
-  for (const phase of ['scheduled', 'drive_retirement_quarantine_closure', 'result_recovery_history_candidate', ...preparation]) {
+  const details = ['publication_prepare_read', 'publication_prepare_grant', 'publication_prepare_cut',
+    'publication_prepare_physical', 'publication_prepare_admit', 'publication_received_retirement',
+    'publication_received_read', 'publication_received_proof', 'publication_received_settle'];
+  for (const phase of ['scheduled', 'drive_retirement_quarantine_closure', 'result_recovery_history_candidate', ...details]) {
     assert.deepEqual(readInstalledStoreStopPhaseJournal(journal([`CLIQ_STORE_STOP_PHASE_V1:${phase}`]), sender), { phase },
       'a current closed scheduler phase is retained');
     const summary = readInstalledStoreDiagnosticJournal(journal(['CLIQ_STORE_DIAG_V1:begin:0:1',
@@ -59,12 +60,13 @@ test('Stop observations use only closed scheduler phases, including preparation 
     assert.equal(summary.firstSchedulerFailure!.phase, phase, 'the original summary still accepts the same scheduler phase');
     assert.deepEqual(summary.stop.phases, { [phase]: 1 }, 'the original summary preserves phase multiplicity');
   }
-  for (const phase of preparation)
+  for (const phase of details)
     assert.throws(() => readInstalledPublicationStageJournal(journal([`CLIQ_PUBLICATION_STAGE_V1:1:${phase}`]), sender),
       'preparation details do not become live publication arrivals');
   for (const stage of ['submit_request', 'submit_preflight_authority', 'submit_source_capture',
     'submit_assembly', 'submit_assembly_native', 'submit_assembly_source', 'submit_assembly_platform', 'submit_assembly_material',
-    'submit_assembly_publish', 'submit_final_admission', 'submit_postcommit_load']) {
+    'submit_assembly_publish', 'submit_assembly_verifier', 'submit_assembly_policy', 'submit_assembly_final_check',
+    'submit_final_admission', 'submit_postcommit_load']) {
     assert.throws(() => readInstalledStoreStopPhaseJournal(journal([`CLIQ_STORE_STOP_PHASE_V1:${stage}`]), sender),
       'submit stages are not scheduler phases');
     const messages = lines.map(row => row.replace('apply:postcommit_load:', `apply:${stage}:`));

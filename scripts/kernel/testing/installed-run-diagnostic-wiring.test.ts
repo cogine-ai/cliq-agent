@@ -17,7 +17,8 @@ const source = await readFile(new URL('../../../src/state/store.ts', import.meta
 const between = (start: string, end: string) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
 
 const assemblyStages = ['submit_assembly_native', 'submit_assembly_source', 'submit_assembly_platform',
-  'submit_assembly_material', 'submit_assembly_publish'] as const;
+  'submit_assembly_material', 'submit_assembly_publish', 'submit_assembly_verifier', 'submit_assembly_policy',
+  'submit_assembly_final_check'] as const;
 async function assemblyObservation() {
   const code = await readFile(new URL('../../../src/state/installed-run.ts', import.meta.url), 'utf8');
   const parsed = ts.createSourceFile('installed-assembly-observation.ts', code, ts.ScriptTarget.Latest, true);
@@ -40,9 +41,11 @@ test('assembly fixed observations remain outside authority input and precede onl
   assert(!/\bawait\b|Date\.|performance\.|setTimeout/u.test(declaration.getText()), 'observation adds no I/O, timer or clock');
   for (const [stage, operation] of [['native', 'const native = await loadInstalledWorkerNative'],
     ['source', 'await validateControlChannelClosure'], ['platform', 'const platform = await loadInstalledCredentialPlatform'],
-    ['material', 'return withHeldInstalledRuntime'], ['publish', 'const sandbox = installedSandboxProfile']])
+    ['material', 'return withHeldInstalledRuntime'], ['publish', 'const sandbox = installedSandboxProfile'],
+    ['verifier', 'const verifier = await prepareInstalledVerifierAssembly'], ['policy', 'const policyRef ='],
+    ['final_check', 'await installed.revalidate(signal); await validateControlChannelClosure']])
     assert(assembly.getText().includes(`reportInstalledRunAssemblyPhase(onAssemblyPhase, 'submit_assembly_${stage}');\n` +
-      (stage === 'native' ? '    ' : stage === 'publish' ? '    ' : '  ') + operation), stage);
+      (['native', 'publish', 'verifier', 'policy', 'final_check'].includes(stage) ? '    ' : '  ') + operation), stage);
   assert.equal((assembly.getText().match(/reportInstalledRunAssemblyPhase\(/gu) ?? []).length, assemblyStages.length);
   assert.match(code, /type InstalledRunAssemblyPhase = Extract<InstalledApplyDiagnosticStage, `submit_assembly_\$\{string\}`>;/u);
   const submit = between('private async submitInstalledRunOwned(', '/** One bounded production lane,');
@@ -232,6 +235,26 @@ test('publication diagnosis follows the original execution boundaries without ch
   assert.match(execution, /async function finishReceivedPublication\(\) \{\s*publicationPhase\('publication_settlement'\);/u);
   const opening = between('async loadRunExecution(input:', '/** Internal source producer,');
   assert.match(opening, /phase => \{ if \(this.installedRunPhases.has\(runId\)\) this.installedRunPhases.set\(runId, `drive_retirement_\$\{phase\}`\); \},\s*installedRunDiagnosticsSubscribed\(\) \? phase => \{\s*if \(this.installedRunPhases.has\(runId\)\) this.installedRunPhases.set\(runId, phase\);\s*noteInstalledPublicationPhase\(phase\);\s*\} : undefined/u);
+});
+
+test('received publication detail tracks only the original retirement, read, proof and settlement awaits including cached reentry', async () => {
+  // Source wiring only. A phase cannot prove the awaited operation completed.
+  const execution = await readFile(new URL('../../../src/state/run-execution.ts', import.meta.url), 'utf8');
+  const handoff = execution.slice(execution.indexOf('await handoffOwnedPublicationResult('),
+    execution.indexOf('const settlement = await preparePublicationSettlement(', execution.indexOf('await handoffOwnedPublicationResult(')));
+  const order = ['await handoffOwnedPublicationResult(', "receivedCompletion = { kind: 'publication_received', finish: finishReceivedPublication };",
+    "publicationPhase('publication_received_retirement');", 'await retireWorkerResources();', 'return receivedCompletion.finish();'];
+  let preceding = -1;
+  for (const value of order) { const next = handoff.indexOf(value); assert(next > preceding, value); preceding = next; }
+  const start = execution.indexOf('async function finishReceivedPublication()');
+  const received = execution.slice(start, execution.indexOf('  function ownOperation(', start));
+  assert.match(received, /if \(settleReceivedPublication\) return settleReceivedPublication\(readRun\(driver, runId\)\.revision\);\s*publicationPhase\('publication_received_read'\);/u,
+    'only a noncached reconstruction enters the original read phase');
+  assert.match(received, /publicationPhase\('publication_received_proof'\);\s*const receivedResult = await prepareOwnedPublicationReceivedResult\(/u);
+  assert.match(received, /settleReceivedPublication = async expected => \{\s*publicationPhase\('publication_received_settle'\);\s*return \(await settlement\.settle\(\{ expectedRunRevision: expected \}\)\)\.run;\s*\};/u,
+    'cached and first settlement call the same original closure and await');
+  assert.doesNotMatch(received, /publication_received_(?:completed|terminal|committed)|Date\.|performance\.|setTimeout/u,
+    'these labels neither sample time nor pretend settlement is already a terminal transaction');
 });
 
 test('the actual fixed publication callback body cannot propagate subscriber failure or sample an absent subscriber', async () => {

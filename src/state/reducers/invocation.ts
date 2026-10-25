@@ -16,7 +16,7 @@ import type {
 import type { ArtifactCatalog, PublishedArtifact } from '../artifacts.js';
 import { insertArtifactMetadata } from '../artifacts.js';
 import { advanceTimeFence, readTimeFence, sampleCanonicalNow, type TimeFenceAdvance } from '../canonical-time.js';
-import { KernelStorageError, stateOperation } from '../errors.js';
+import { joinResourceOperations, KernelStorageError, stateOperation } from '../errors.js';
 import {
   addBudget,
   assertBudgetWithin,
@@ -228,7 +228,7 @@ export async function prepareValidatedInvocation(
   }
   await artifacts.readBytes(input.requestRef);
   if (input.grantRef !== undefined) await artifacts.readBytes(input.grantRef);
-  const invocationMetadata = typed?.metadata ?? await Promise.all([
+  const invocationMetadata = typed?.metadata ?? await joinResourceOperations([
     artifacts.describe(input.requestRef, 'application/json', 'cliq-invocation-request-v1'),
     ...(input.grantRef === undefined
       ? []
@@ -659,11 +659,10 @@ async function settleInitialInvocation(
     : terminal.phase === 'failed'
       ? [terminal.errorRef, terminal.evidenceRef]
       : [terminal.evidenceRef];
-  await Promise.all(artifactRefs.filter((ref): ref is string => ref !== undefined).map((ref) => artifacts.readBytes(ref)));
-  const terminalMetadata = continuation === undefined ? await Promise.all(
-    artifactRefs
-      .filter((ref): ref is string => ref !== undefined)
-      .map((ref, index) => artifacts.describe(
+  await artifacts.mapReads(artifactRefs.filter((ref): ref is string => ref !== undefined), (ref) => artifacts.readBytes(ref));
+  const terminalMetadata = continuation === undefined ? await artifacts.mapReads(
+    artifactRefs.filter((ref): ref is string => ref !== undefined),
+    (ref, index) => artifacts.describe(
         ref,
         'application/json',
         terminal.phase === 'completed'
@@ -675,7 +674,7 @@ async function settleInitialInvocation(
               ? 'cliq-invocation-error-v1'
               : 'cliq-post-claim-no-release-evidence-v1'
             : 'cliq-invocation-ambiguity-evidence-v1'
-      ))
+      )
   ) : [];
 
   for (let retry = 0; retry < SETTLEMENT_RETRY_LIMIT; retry += 1) {

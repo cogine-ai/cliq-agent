@@ -10,7 +10,7 @@ import { decodeRetainedRunAssembly } from '../model/run-assembly.js';
 import { exactKeys, requireEqual } from '../policy/runtime-authority.js';
 import type { ArtifactCatalog } from './artifacts.js';
 import { readCanonicalArtifact } from './agent-context.js';
-import { joinResourceOperations, KernelStorageError } from './errors.js';
+import { KernelStorageError } from './errors.js';
 import type { SqliteDriver } from './sqlite-driver.js';
 import { readStateOwner } from './state-owner.js';
 import { readStateOwnerDeath } from './state-owner-death.js';
@@ -474,10 +474,10 @@ export async function validateWorkerRecoveryWait(artifacts: ArtifactCatalog, cut
   const open = openWorkerInvocations(cut.journal.slice(0, generation.fencedJournalSeq));
   const refs = open.map(canonicalSha256);
   requireEqual(wait.subject?.openInvocationRefs, refs, 'worker recovery open invocation witnesses');
-  await joinResourceOperations(open.map(async entry => {
+  await artifacts.mapReads(open, async entry => {
     if (entry.timestamp > generation.updatedAt) throw new TypeError('worker recovery witness is not a prior prepared invocation');
     requireEqual(await readCanonicalArtifact(artifacts, canonicalSha256(entry)), entry, 'open invocation Journal witness');
-  }));
+  });
   const expected: WorkerDeathWait = {
     schemaVersion: 1, kind: 'reconciliation', runId: run.id, createdFromRevision: wait.createdFromRevision,
     createdAt: wait.createdAt, frontierRef: run.frontierRef,

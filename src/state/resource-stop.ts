@@ -62,13 +62,13 @@ export const readResourceStopCause = stateOperation('RECOVERY_REQUIRED', async f
   if (assembly.mcpServers.length) return undefined;
   const manifest = await readCanonicalArtifact<ToolContractManifestV1>(artifacts, assembly.tools.manifestRef);
   if (manifest.manifestDigest !== assembly.tools.manifestDigest || digestOmitting(manifest, 'manifestDigest') !== manifest.manifestDigest) throw new TypeError('resource tool manifest mismatch');
-  const contracts = await joinResourceOperations(manifest.entries.map(async (entry) => {
+  const contracts = await artifacts.mapReads(manifest.entries, async (entry) => {
     const inputSchema = await readCanonicalArtifact(artifacts, entry.inputSchemaRef);
     if (canonicalSha256(inputSchema) !== entry.inputSchemaDigest) throw new TypeError('resource tool schema mismatch');
     return { ...entry, inputSchema };
-  }));
-  const allItems: ContextItem[] = await joinResourceOperations(cut.items.map(async (row) => ({ itemSeq: row.itemSeq, itemRef: row.payloadRef,
-    item: await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef) })));
+  });
+  const allItems: ContextItem[] = await artifacts.mapReads(cut.items, async (row) => ({ itemSeq: row.itemSeq, itemRef: row.payloadRef,
+    item: await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef) }));
   // Terminal drain adds only an undispatched suffix. Reconstruct the pre-drain call cut for its stop proof.
   const items = allItems.filter(({ item }) => item.kind !== 'tool_result' || item.outcome !== 'cancelled');
   const pending = openStopBatch(items.map(({ item }) => item));
@@ -186,8 +186,8 @@ export const readResourceStopCause = stateOperation('RECOVERY_REQUIRED', async f
 async function readDeliveryPendingReservation(driver: SqliteDriver, artifacts: ArtifactCatalog,
   cut: RecoveryClosureV1, observedAt: string): Promise<BudgetUsage | undefined> {
   assertDeliveryModelFreeCut(cut);
-  const candidates = await joinResourceOperations(cut.items.map(async row => ({ row,
-    item: await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef) })));
+  const candidates = await artifacts.mapReads(cut.items, async row => ({ row,
+    item: await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef) }));
   if (candidates.filter(({ item }) => item.kind === 'final_candidate').length !== 1) return undefined;
   // Publication requires its full ordered progress/physical closure. Until
   // that reader owns the cut, an approval or raw path result is deliberately

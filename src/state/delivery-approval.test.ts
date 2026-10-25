@@ -1,7 +1,12 @@
 // Existing real StateStore and pure counterfeit-refusal seams. No verified
 // source, delivery approval, native worker or publication evidence is injected.
 import assert from 'node:assert/strict';
-import test from 'node:test';
+import { mkdtemp, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import test, { type TestContext } from 'node:test';
+import { ArtifactCatalog } from './artifacts.js';
+import { ContentAddressedStore } from './cas.js';
 import { loadDeliveryApproval, readDeliveryAuthorization } from './delivery-approval.js';
 import type { RecoveryClosureV1 } from '../kernel/types.js';
 import type { SqliteDriver } from './sqlite-driver.js';
@@ -12,6 +17,12 @@ import { readSessionPrincipalId } from './rows.js';
 import { publishInProcessChannel } from './store.js';
 import { uuidv7 } from './testing/fixtures.js';
 
+async function emptyArtifacts(t: TestContext): Promise<ArtifactCatalog> {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'cliq-delivery-refusal-cas-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  return new ArtifactCatalog(new ContentAddressedStore(root));
+}
+
 test('delivery approval refuses caller-selected plan or grant fields before touching storage', async () => {
   const approval = loadDeliveryApproval(undefined as unknown as SqliteDriver, undefined as never,
     undefined as unknown as StateOwnerContext, { run: { id: 'closed-request' }, spec: {} } as never);
@@ -19,16 +30,16 @@ test('delivery approval refuses caller-selected plan or grant fields before touc
   await assert.rejects(approval.prepareDeliveryApproval({ expectedRunRevision: 0 }), { code: 'INVALID_REQUEST' });
 });
 
-test('publication history cannot survive without its original atomic delivery allow', async () => {
+test('publication history cannot survive without its original atomic delivery allow', async t => {
   // Inert rejected data, never installed as Run/Journal/native authority.
   const cut = { runSpec: { operation: 'delivery' }, run: {}, items: [], journal: [{ opKind: 'publish' }] } as unknown as RecoveryClosureV1;
-  await assert.rejects(readDeliveryAuthorization(undefined as unknown as SqliteDriver, undefined as never, cut), /original.*allow/);
+  await assert.rejects(readDeliveryAuthorization(undefined as unknown as SqliteDriver, await emptyArtifacts(t), cut), /original.*allow/);
 });
 
-test('an undecided delivery ask cannot skip its original approval frontier', async () => {
+test('an undecided delivery ask cannot skip its original approval frontier', async t => {
   const cut = { runSpec: { operation: 'delivery' }, run: { status: 'waiting', waitingReason: 'approval',
     waitingOnRef: 'a'.repeat(64) }, items: [], journal: [] } as unknown as RecoveryClosureV1;
-  await assert.rejects(readDeliveryAuthorization(undefined as unknown as SqliteDriver, undefined as never, cut), /original approval frontier/);
+  await assert.rejects(readDeliveryAuthorization(undefined as unknown as SqliteDriver, await emptyArtifacts(t), cut), /original approval frontier/);
 });
 
 test('delivery approval cannot reinterpret a genuinely admitted Agent Run', async () => {

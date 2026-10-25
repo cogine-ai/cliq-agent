@@ -10,6 +10,7 @@ test('submit stages use the historical admission failure envelope without claimi
   assert.equal(typeof module.beginInstalledSubmitDiagnostic, 'function');
   const stages = ['submit_request', 'submit_preflight_authority', 'submit_source_capture', 'submit_assembly',
     'submit_assembly_native', 'submit_assembly_source', 'submit_assembly_platform', 'submit_assembly_material', 'submit_assembly_publish',
+    'submit_assembly_verifier', 'submit_assembly_policy', 'submit_assembly_final_check',
     'submit_final_admission', 'submit_postcommit_load'];
   assert.deepEqual(module.INSTALLED_APPLY_DIAGNOSTIC_STAGES, ['request', 'replay', 'capture_source', 'capture',
     'source', 'prepare', 'admit', 'postcommit_load', ...stages]);
@@ -36,23 +37,24 @@ test('submit stages use the historical admission failure envelope without claimi
   } finally { diagnostic.unsubscribe(receive); }
 });
 
-test('preparation detail stays in the original joined summary without spending the six arrival-marker budget', async () => {
+test('preparation and received detail stay in the original joined summary without spending the six arrival-marker budget', async () => {
   const module = await import('./installed-run-diagnostics.js');
   const records: unknown[] = [], diagnostic = channel(module.INSTALLED_RUN_FAILURE_CHANNEL);
   const receive = (record: unknown) => { records.push(record); };
   diagnostic.subscribe(receive);
   try {
-    for (const suffix of ['read', 'grant', 'cut', 'physical', 'admit']) {
-      const phase = `publication_prepare_${suffix}`;
+    const details = ['publication_prepare_read', 'publication_prepare_grant', 'publication_prepare_cut',
+      'publication_prepare_physical', 'publication_prepare_admit', 'publication_received_retirement',
+      'publication_received_read', 'publication_received_proof', 'publication_received_settle'];
+    for (const phase of details) {
       assert(module.INSTALLED_SCHEDULER_DIAGNOSTIC_PHASES.some(value => value === phase));
       module.noteInstalledPublicationPhase(phase);
       const observer = module.beginInstalledSchedulerDiagnostic('drive')!;
       observer.phase(phase); observer.failure(new Error('owned unavailable operation'), false);
     }
-    assert.equal(records.length, 5);
-    assert.deepEqual(records.map(record => (record as { kind: string; phase: string }).kind), Array(5).fill('scheduler_failure'));
-    assert.deepEqual(records.map(record => (record as { phase: string }).phase),
-      ['read', 'grant', 'cut', 'physical', 'admit'].map(value => `publication_prepare_${value}`));
+    assert.equal(records.length, details.length);
+    assert.deepEqual(records.map(record => (record as { kind: string; phase: string }).kind), Array(details.length).fill('scheduler_failure'));
+    assert.deepEqual(records.map(record => (record as { phase: string }).phase), details);
     assert.equal(module.INSTALLED_PUBLICATION_DIAGNOSTIC_PHASES.length, 6);
   } finally { diagnostic.unsubscribe(receive); }
 });
@@ -151,7 +153,8 @@ test('publication phases remain closed primitive data in actual scheduler failur
     await import('./installed-run-diagnostics.js');
   const publication = ['publication_select', 'publication_worker_activate', 'publication_roots_open',
     'publication_prepare', 'publication_dispatch', 'publication_settlement', 'publication_prepare_read',
-    'publication_prepare_grant', 'publication_prepare_cut', 'publication_prepare_physical', 'publication_prepare_admit'];
+    'publication_prepare_grant', 'publication_prepare_cut', 'publication_prepare_physical', 'publication_prepare_admit',
+    'publication_received_retirement', 'publication_received_read', 'publication_received_proof', 'publication_received_settle'];
   assert.deepEqual(INSTALLED_SCHEDULER_DIAGNOSTIC_PHASES.filter(phase => phase.startsWith('publication_')), publication);
   const records: any[] = [], diagnostic = channel('cliq.installed.run.failures.v1');
   const receive = (record: unknown) => { try { records.push(record); } catch {} };

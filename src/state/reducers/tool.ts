@@ -116,8 +116,8 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
     return policy;
   };
   const compiled = loadToolContracts(contracts);
-  const outputSchemas = new Map(await joinResourceOperations(contracts.filter((entry) => entry.outputSchemaRef !== undefined).map(async (entry) =>
-    [entry.name, compileOutputSchema(await readCanonicalArtifact(openingReads, entry.outputSchemaRef!))] as const)));
+  const outputSchemas = new Map(await openingReads.mapReads(contracts.filter((entry) => entry.outputSchemaRef !== undefined), async (entry) =>
+    [entry.name, compileOutputSchema(await readCanonicalArtifact(openingReads, entry.outputSchemaRef!))] as const));
   const cut = async (revision?: number, reads = artifacts) => {
     reads.assertReadActive();
     const selected = await readToolCut(driver, reads, runId, resolveToolInput);

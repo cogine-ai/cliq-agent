@@ -106,8 +106,8 @@ export async function beginVerifierCompletion(driver: SqliteDriver, artifacts: A
     return checkedRun;
   }
   const context = decodeContextManifest(await readCanonicalArtifact(artifacts, selected.latestCheckpoint.contextManifestRef));
-  const existingItems = await Promise.all(selected.items.map(async row => ({ itemSeq: row.itemSeq, itemRef: row.payloadRef,
-    item: await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef) })));
+  const existingItems = await artifacts.mapReads(selected.items, async row => ({ itemSeq: row.itemSeq, itemRef: row.payloadRef,
+    item: await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef) }));
   let proofInput: ToolCheckpointProof | undefined, seal: Awaited<ReturnType<typeof prepareToolCheckpoint>> | undefined;
   let outputMetadata: PublishedArtifact[] | undefined, retirementMetadata: PublishedArtifact[] | undefined;
   let sourceAfter: Awaited<ReturnType<typeof prepareCandidateSource>>['graph'] | undefined;

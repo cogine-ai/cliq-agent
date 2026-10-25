@@ -16,11 +16,12 @@ test('one accepted original Stop entry emits a fixed single-driver phase without
     'only the accepted original Stop entry can add its independent fixed phase marker');
 });
 
-test('a live single-driver Stop snapshot exposes each preparation label before exit but never a joined result', async () => {
+test('a live single-driver Stop snapshot exposes each preparation or received label before exit but never a joined result', async () => {
   const { INSTALLED_STORE_DIAGNOSTIC_BANNER } = await import('./installed-store-diagnostic-banner.js');
   const { readInstalledStoreStopPhaseJournal, readInstalledStoreDiagnosticJournal } = await import('./installed-store-diagnostic-journal.js');
   const phases = ['publication_prepare_read', 'publication_prepare_grant', 'publication_prepare_cut',
-    'publication_prepare_physical', 'publication_prepare_admit'];
+    'publication_prepare_physical', 'publication_prepare_admit', 'publication_received_retirement',
+    'publication_received_read', 'publication_received_proof', 'publication_received_settle'];
   const sender = { uid: 1000, pid: 2000, invocationId: 'a'.repeat(32) };
   const journal = (rows: string[]) => rows.map(MESSAGE => JSON.stringify({ _UID: '1000', _PID: '2000',
     _TRANSPORT: 'stdout', _SYSTEMD_INVOCATION_ID: sender.invocationId, MESSAGE })).join('\n');
@@ -88,7 +89,8 @@ test('ambiguous or invalid Stop data cannot invent a single-driver label or invo
     `{...row,driverTasks:2,phases:{publication_prepare_read:1,publication_prepare_cut:1}}`,
     `{...row,phases:{publication_prepare_read:2}}`, `{...row,driverTasks:'1'}`, `{...row,phases:{unknown:1}}`,
     ...['submit_request', 'submit_preflight_authority', 'submit_source_capture', 'submit_assembly',
-      'submit_assembly_native', 'submit_assembly_source', 'submit_assembly_platform', 'submit_assembly_material', 'submit_assembly_publish', 'submit_final_admission',
+      'submit_assembly_native', 'submit_assembly_source', 'submit_assembly_platform', 'submit_assembly_material', 'submit_assembly_publish',
+      'submit_assembly_verifier', 'submit_assembly_policy', 'submit_assembly_final_check', 'submit_final_admission',
       'submit_postcommit_load'].map(phase => `{...row,phases:{${phase}:1}}`),
     `Object.defineProperty({...row},'driverTasks',{get:bad})`,
     `{...row,phases:Object.defineProperty({},'publication_prepare_read',{enumerable:true,get:bad})}`,
@@ -141,6 +143,7 @@ test('every submit await stage round-trips through the unchanged admission envel
   const { readInstalledStoreDiagnosticJournal, readInstalledPublicationStageJournal } = await import('./installed-store-diagnostic-journal.js');
   const stages = ['submit_request', 'submit_preflight_authority', 'submit_source_capture', 'submit_assembly',
     'submit_assembly_native', 'submit_assembly_source', 'submit_assembly_platform', 'submit_assembly_material', 'submit_assembly_publish',
+    'submit_assembly_verifier', 'submit_assembly_policy', 'submit_assembly_final_check',
     'submit_final_admission', 'submit_postcommit_load'];
   const sender = { uid: 1000, pid: 2000, invocationId: 'a'.repeat(32) };
   const journal = (messages: string[]) => messages.map(MESSAGE => JSON.stringify({ _UID: '1000', _PID: '2000',

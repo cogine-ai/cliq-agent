@@ -32,7 +32,7 @@ import {
   decodeWorkspaceGenerationSnapshotEvidence,
   decodeWorkspaceState
 } from './decoders.js';
-import { joinResourceOperations, KernelStorageError, ResourceRetirementError } from './errors.js';
+import { KernelStorageError, ResourceRetirementError } from './errors.js';
 import { validateWorkerRecoveryWait } from './worker-recovery.js';
 import { addBudget, decodeBudgetUsage, isZeroBudget } from './invariants.js';
 import { readChildAllocationsForRun } from './repositories/child-allocations.js';
@@ -87,14 +87,14 @@ async function requireRecoveryArtifacts(
     requireRecoveryArtifactRef(ref, label);
     if (!unique.has(ref)) unique.set(ref, label);
   }
-  await joinResourceOperations(
-    [...unique].map(async ([ref, label]) => {
+  await artifacts.mapReads(
+    [...unique], async ([ref, label]) => {
       try {
         await artifacts.verifyBytes(ref);
       } catch (error) {
         recoveryFailure(`${label} is not readable from CAS: ${(error as Error).message}`, error);
       }
-    })
+    }
   );
 }
 

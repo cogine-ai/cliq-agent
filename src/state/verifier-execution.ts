@@ -11,7 +11,7 @@ import { readCanonicalArtifact } from './agent-context.js';
 import { insertArtifactMetadata, type ArtifactCatalog } from './artifacts.js';
 import { sampleCanonicalNow, advanceTimeFence, type TimeFenceAdvance } from './canonical-time.js';
 import { decodeContextManifest, decodeWorkspaceIdentity } from './decoders.js';
-import { joinResourceOperations, KernelStorageError, stateOperation } from './errors.js';
+import { KernelStorageError, stateOperation } from './errors.js';
 import { readVerifierLaunchClosure } from './execution-closure.js';
 import { prepareContinuationCommit } from './continuation-commit.js';
 import { readRecoveryClosure } from './recovery-closure.js';
@@ -131,8 +131,8 @@ export async function loadVerifierContinuation(driver: SqliteDriver, artifacts: 
         opId: selected.request.opId, principalId: selected.principalId, decisionRef: evidencePlan.ref, policyChannelEvidenceRef: evidencePlan.ref,
         policyChannelEvidenceDigest: evidence.evidenceDigest, createdAt: evidence.evaluatedAt, decisionSource: 'direct_policy', decision: 'allow', grantRef: grantPlan.ref };
       const context = decodeContextManifest(await readCanonicalArtifact(reads, selected.latestCheckpoint.contextManifestRef));
-      const existingItems = await joinResourceOperations(selected.items.map(async row => ({ itemSeq: row.itemSeq, itemRef: row.payloadRef,
-        item: await readCanonicalArtifact<ContinuationItem>(reads, row.payloadRef) })));
+      const existingItems = await reads.mapReads(selected.items, async row => ({ itemSeq: row.itemSeq, itemRef: row.payloadRef,
+        item: await readCanonicalArtifact<ContinuationItem>(reads, row.payloadRef) }));
       const graph = await prepareContinuationCommit(reads, { context, existingItems, items: prior ? [] : [decision], frontier: selected.frontier,
         checkpointId: identityHash('cliq-verifier-admission-checkpoint-v1', runId, selected.request.opId, String(prior ? prior.attempt + 1 : 0)),
         workspaceStateRef: selected.latestCheckpoint.workspaceStateRef, artifacts: [requestPlan, targetPlan, grantPlan, evidencePlan] });

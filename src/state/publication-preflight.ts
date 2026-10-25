@@ -222,8 +222,8 @@ export async function preparePublicationPreflight(driver: SqliteDriver, artifact
     requireEqual(cut.run, before.run, 'publication preflight original Run');
     requireEqual(cut.journal, before.journal, 'publication preflight original Journal');
     requireEqual(cut.latestCheckpoint, before.checkpoint, 'publication preflight original Checkpoint');
-    const decoded = await Promise.all(cut.items.map(async row => ({ ...row,
-      item: await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef) })));
+    const decoded = await artifacts.mapReads(cut.items, async row => ({ ...row,
+      item: await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef) }));
     requireEqual(before.items, decoded.map(row => ({ item_id: row.itemId, session_id: null, run_id: runId,
       item_seq: row.itemSeq, kind: row.item.kind, payload_ref: row.payloadRef, created_at: row.createdAt })), 'publication preflight original owned items');
     if (decoded.some(({ item }) => item.kind === 'publication_path_progress' || item.kind === 'publication_path_result'))

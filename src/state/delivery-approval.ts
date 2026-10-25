@@ -20,7 +20,7 @@ import { readHistoricalControlChannel, validateControlChannelClosure } from './c
 import { decodeContextManifest, decodeWorkspaceIdentity } from './decoders.js';
 import { deliveryApprovalCheckpointId, deliveryApprovalDecision, deliveryDecisionCheckpointId,
   loadDeliveryPolicy, planDeliveryRequest } from './delivery-policy.js';
-import { joinResourceOperations, KernelStorageError, RunTerminalError, stateOperation } from './errors.js';
+import { KernelStorageError, RunTerminalError, stateOperation } from './errors.js';
 import { addBudget, isZeroBudget } from './invariants.js';
 import { readRecoveryClosure } from './recovery-closure.js';
 import { readInvocationJournal } from './repositories/journal.js';
@@ -194,7 +194,7 @@ async function readUndecidedDeliveryWait(driver: SqliteDriver, artifacts: Artifa
 
 export async function readDeliveryAuthorization(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1) {
   if (cut.runSpec.operation !== 'delivery') throw new TypeError('Agent Run cannot own delivery authorization');
-  const decoded = await joinResourceOperations(cut.items.map(async row => ({ row, item: await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef) })));
+  const decoded = await artifacts.mapReads(cut.items, async row => ({ row, item: await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef) }));
   const decisions = decoded.filter(({ item }) => item.kind === 'delivery_decision');
   const policies = decoded.filter(({ item }) => item.kind === 'policy_decision' && item.subjectKind === 'delivery_plan');
   const currentFrontier = cut.run.frontierRef ? await readCanonicalArtifact<RunFrontier>(artifacts, cut.run.frontierRef) : undefined;
@@ -313,8 +313,8 @@ export function loadDeliveryApproval(driver: SqliteDriver, artifacts: ArtifactCa
       throw new KernelStorageError('STATE_TRANSITION_INVALID', 'delivery approval requires the owning principal and a nonempty plan');
     // Never turn same-count row replacement or phase-only resource drift
     // during the asynchronous retained-source walk into the accepted cut.
-    const decoded = await Promise.all(cut.items.map(async row => ({ ...row,
-      item: await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef) })));
+    const decoded = await artifacts.mapReads(cut.items, async row => ({ ...row,
+      item: await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef) }));
     requireEqual(ownedRows, decoded.map(row => ({ item_id: row.itemId, session_id: null, run_id: runId,
       item_seq: row.itemSeq, kind: row.item.kind, payload_ref: row.payloadRef, created_at: row.createdAt })), 'delivery approval original item rows');
     const binding = immutableSnapshot({ ownedRows, launches, generations,
@@ -348,8 +348,8 @@ export function loadDeliveryApproval(driver: SqliteDriver, artifacts: ArtifactCa
   async function graph(cut: RecoveryClosureV1, items: ContinuationItem[], frontier: RunFrontier, checkpointId: string,
     additional: Parameters<typeof prepareContinuationCommit>[1]['artifacts']) {
     return prepareContinuationCommit(artifacts, { context: decodeContextManifest(await readCanonicalArtifact(artifacts, cut.latestCheckpoint.contextManifestRef)),
-      existingItems: await Promise.all(cut.items.map(async row => ({ itemSeq: row.itemSeq, itemRef: row.payloadRef,
-        item: await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef) }))), items, frontier, checkpointId,
+      existingItems: await artifacts.mapReads(cut.items, async row => ({ itemSeq: row.itemSeq, itemRef: row.payloadRef,
+        item: await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef) })), items, frontier, checkpointId,
       workspaceStateRef: cut.latestCheckpoint.workspaceStateRef, artifacts: additional });
   }
   return {

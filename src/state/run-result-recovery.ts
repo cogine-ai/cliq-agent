@@ -160,7 +160,7 @@ export async function readResultBasis(driver: SqliteDriver, artifacts: ArtifactC
   const assembly = decodeRetainedRunAssembly(await readCanonicalArtifact(artifacts, spec.assemblyRef));
   if (assembly.mcpServers.length) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'result requires its implemented MCP containment closure');
   if (spec.operation === 'delivery') return readDeliveryResultBasis(driver, artifacts, cut);
-  const items = await Promise.all(cut.items.map(row => readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef)));
+  const items = await artifacts.mapReads(cut.items, row => readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef));
   if (openStopBatch(items)) throw new TypeError('result retains an open tool batch');
   const progress = await readVerifierProgress(driver, artifacts, cut), { candidate, spec: frozen, plan, planRef } = progress;
   if (candidate.operation !== 'agent' || candidate.runId !== run.id || candidate.baseSourceRef !== spec.baseWorkspaceManifestRef)

@@ -2969,8 +2969,8 @@ export class StateStore {
         attempt.prepared.outbound.requestPath !== '/chat/completions')
       throw new KernelStorageError('ARTIFACT_MISMATCH', 'model request does not select the exact installed broker recipe');
     const target = initial.authority.target;
-    const frozen = await Promise.all(initial.assembly.provider.credentialGrantRefs.map(async ref =>
-      decodeEndpointCredentialGrantBinding(await this.artifacts.readCanonical(ref))));
+    const frozen = await this.artifacts.mapReads(initial.assembly.provider.credentialGrantRefs, async ref =>
+      decodeEndpointCredentialGrantBinding(await this.artifacts.readCanonical(ref)));
     const trustStoreBytes = await this.artifacts.readBytes(target.tls.trustStoreRef);
     const failPreparation = async (retryError?: KernelStorageError | CredentialScopeBusyError, retainedErrorRef?: string) => {
       const input = { runId, opId: prepared.opId, attempt: prepared.attempt, expectedRunRevision: readRun(this.driver, runId).revision };

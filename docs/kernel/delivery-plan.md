@@ -2216,3 +2216,71 @@ batch for single-verifier artifacts and assembly, with the normative timing
 and data-only-orphan distinction above. It is not yet implemented or measured
 in this evidence and does not qualify thirty seconds, READY, complete I1,
 real-provider billing, macOS execution, reboot, I2-I4 or Kernel Cut.
+
+### Verifier assembly batching and joined retained reads, 2026-10-25
+
+Source `15f25d718d712cbe6b5dede4a27ed88a021e4f47`, tree
+`53de001df279989f04f5c948cffece267c40d2ce`, completed
+[run 40146452150](https://github.com/cogine-ai/cliq-agent/actions/runs/40146452150)
+with seventeen successful jobs and five failed jobs; all four TypeScript jobs
+pass. The exact immutable source passed the original build and full test:
+2,701 passing tests, zero failures and three original platform skips. Script
+tests pass 237 with fifteen original Linux-only skips; all 99 portable tests
+and actual strict dependency checks pass. Local validation SHA-256:
+`c32983c88cd99bde633dde6033434129c5aa69061123179e3b7313e397164a7f`.
+
+The fixed four-object verifier publication is implemented, but does not close
+installed qualification. All three delayed-volume journeys now complete READY
+within the unchanged five seconds; their final-current observations are 4,184,
+4,079 and 3,468 ms. All three subsequently miss the original thirty-second
+submission deadline before their requested storage cuts. The original-stop
+journey reaches `submit_final_admission`; the other two last identify the wider
+`submit_assembly_publish` await group. Neither a label nor a count proves a
+successful admission or a physical cut.
+
+Normal Delivery again commits its received-result handoff but misses ninety
+seconds at queued/delivery revision eight, six items and six Checkpoints, no
+active worker, and no terminal Journal entry. Original Store and writer joins
+complete. Its sole scheduler failure is recorded after Stop starts, so it is
+not evidence of the preceding wait's cause. Verifier qualification still
+refuses at the unchanged cumulative 4,096 independent-stream limit; the
+observed required prefix alone needs 4,097 streams. No source or scan is omitted.
+
+All 23 categories retain 105 original JSON files / 499,484 bytes: eighteen
+qualified and five false reports. No category is pending, rejected or
+incomplete; 21 cleanup reports have zero errors and 21 runner-baseline pairs
+are byte-identical. Final capture SHA-256:
+`bf4ba52bbd335247ead6205fc158d74aa4af80dd339f9f91bba1db370d888fc4`.
+Independent closeout, also replayed by the primary agent, SHA-256:
+`9cf2c93143af0474bc7c438911586019d5648aceb8dbfaf3c1d053eb5ff934be`.
+
+The next combined candidate adds only fixed observational labels around the
+existing assembly and received-result awaits. It also unifies variable-length
+retained CAS reads through the catalog's joined group, including recovery,
+admission, tools, input, candidates, verification, publication and Stop. At
+most four callbacks in each group are dispatched
+lazily, failure or cancellation stops further dispatch, and every issued
+callback joins before returning, preserving original resource-retirement
+errors. This is not a global four-descriptor budget. A real CAS regression
+reproduces the previous early return with twelve descriptors still owned;
+the corrected group waits for the actual closes and retains the late original
+retirement failure. Original metadata labels, consumer decoders, full byte
+checks and business ordering remain intact. Fixed invocation metadata reads
+and Agent planned publications also join every issued operation before an
+error returns; read cancellation does not revoke their durable writes. A
+separate nine-ref metadata success regression verifies complete original order,
+while failure regressions prove queued reads are not dispatched. These
+regressions and diagnostics neither prove the
+cause of the installed timeouts nor qualify their physical cuts. This new
+candidate still needs its own combined local gate and real Linux evidence;
+complete I1, I2-I4, real-provider, macOS, reboot and Kernel Cut remain open.
+
+The first combined local gate (tree
+`70c0f20bde8ee2d69794954e108ed1d0dbc31e96`) passes the original build but
+fails two of 2,721 tests: two empty-read refusal tests supplied an undefined
+catalog and therefore failed before their original business assertions. The
+failed run is retained (full-test stdout SHA-256
+`9873cd6069e8fa67eba7e737553ec4fd96d90da74d98a4f37c0df9ca00a942d5`).
+The correction supplies a real empty private CAS to those tests and preserves
+both original refusal assertions; no production guard is changed. A new full
+gate is required, and the failed candidate is not submitted for qualification.

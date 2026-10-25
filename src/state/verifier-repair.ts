@@ -90,8 +90,8 @@ export function loadVerifierRepair(driver: SqliteDriver, artifacts: ArtifactCata
         resultSourceRef: progress.candidate.resultSourceRef, verifierPlanRef: progress.planRef,
         nextVerifierIndex: progress.nextVerifierIndex, afterPass: 'finalize' };
       requireEqual(await readCanonicalArtifact(artifacts, run.frontierRef), frontier, 'repair exact original verifier frontier');
-      const existingItems = await Promise.all(cut.items.map(async row => ({ itemSeq: row.itemSeq, itemRef: row.payloadRef,
-        item: await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef) })));
+      const existingItems = await artifacts.mapReads(cut.items, async row => ({ itemSeq: row.itemSeq, itemRef: row.payloadRef,
+        item: await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef) }));
       const latest = new Map<string, (typeof cut.journal)[number]>();
       for (const entry of cut.journal) latest.set(`${entry.opId}\0${entry.attempt}`, entry);
       if ([...latest.values()].some(entry => !['completed', 'failed'].includes(entry.phase)) ||

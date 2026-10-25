@@ -101,9 +101,9 @@ export async function validateFinalCandidateRecovery(input: {
       entry.opId === producer.modelOpId && entry.phase === 'prepared').at(-1);
     if (!highest || highest.attempt !== producer.modelAttempt)
       throw new TypeError('candidate recovery producer is not its highest prepared attempt');
-    const sealed = await Promise.all(input.workspaceGenerations.filter(generation => generation.phase === 'sealed')
-      .map(async generation => ({ generation, snapshot: decodeWorkspaceGenerationSnapshotEvidence(
-        await readCanonicalArtifact(artifacts, generation.snapshotEvidenceRef)) })));
+    const sealed = await artifacts.mapReads(input.workspaceGenerations.filter(generation => generation.phase === 'sealed'),
+      async generation => ({ generation, snapshot: decodeWorkspaceGenerationSnapshotEvidence(
+        await readCanonicalArtifact(artifacts, generation.snapshotEvidenceRef)) }));
     const owners = sealed.filter(({ snapshot }) => snapshot.checkpointId === checkpoint.id);
     if (owners.length !== 1 || owners[0]!.snapshot.purpose !== 'sealed_to_checkpoint' ||
         owners[0]!.snapshot.runId !== run.id || owners[0]!.snapshot.workspaceStateRef !== checkpoint.workspaceStateRef ||

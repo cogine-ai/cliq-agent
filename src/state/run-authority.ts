@@ -10,7 +10,7 @@ import { loadToolContracts } from '../tools/input-contract.js';
 import { readCanonicalArtifact } from './agent-context.js';
 import type { ArtifactCatalog } from './artifacts.js';
 import { decodeRunSpec, decodeVerifierSpec, decodeWorkspaceIdentity } from './decoders.js';
-import { joinResourceOperations, KernelStorageError, stateOperation } from './errors.js';
+import { KernelStorageError, stateOperation } from './errors.js';
 import { readRecoveryClosure } from './recovery-closure.js';
 import { readRun, readSession, readSessionPrincipalId } from './rows.js';
 import type { SqliteDriver } from './sqlite-driver.js';
@@ -45,7 +45,7 @@ export const readRunAuthority = stateOperation('RECOVERY_REQUIRED', async functi
       manifest.manifestDigest !== assembly.tools.manifestDigest || digestOmitting(manifest, 'manifestDigest') !== manifest.manifestDigest ||
       new Set(manifest.entries.map(entry => entry.name)).size !== manifest.entries.length)
     throw new TypeError('Run tool manifest does not match its retained assembly');
-  const contracts = immutableSnapshot(await joinResourceOperations(manifest.entries.map(async entry => {
+  const contracts = immutableSnapshot(await openingReads.mapReads(manifest.entries, async entry => {
     const output = entry.outputSchemaRef !== undefined;
     if (!exactKeys(entry, ['name', 'version', 'description', 'access', 'inputSchemaRef', 'inputSchemaDigest', 'replayClass', 'execution',
       ...(output ? ['outputSchemaRef', 'outputSchemaDigest'] : [])]) || typeof entry.version !== 'string' || !entry.version ||
@@ -68,7 +68,7 @@ export const readRunAuthority = stateOperation('RECOVERY_REQUIRED', async functi
     if (output && canonicalSha256(await readCanonicalArtifact(openingReads, entry.outputSchemaRef!)) !== entry.outputSchemaDigest)
       throw new TypeError('tool output schema digest mismatch');
     return { ...entry, inputSchema: schema };
-  })));
+  }));
   const session = readSession(driver, run.sessionId), principalId = readSessionPrincipalId(driver, run.sessionId);
   const toolContracts = loadToolContracts(contracts);
   const assertAuthority = async (readSignal?: AbortSignal) => {

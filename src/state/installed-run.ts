@@ -503,11 +503,14 @@ export async function assembleInstalledRun(input: {
     reportInstalledRunAssemblyPhase(onAssemblyPhase, 'submit_assembly_publish');
     const sandbox = installedSandboxProfile(request.sandboxResources);
     const sandboxProfileRef = (await artifacts.publishCanonical(sandbox, sandbox.format)).ref;
+    reportInstalledRunAssemblyPhase(onAssemblyPhase, 'submit_assembly_verifier');
     const verifier = await prepareInstalledVerifierAssembly(driver, reads, owner, { bundle: installed.bundle, releaseKeys: installed.releaseKeys },
       { principalId: identity.principalId, requests: request.verifiers, policyMode: request.policyMode, assembly,
         sourceProjectionRef: sourceManifest.sourceProjectionRef, sandboxProfileRef }, signal);
+    reportInstalledRunAssemblyPhase(onAssemblyPhase, 'submit_assembly_policy');
     const policyRef = (await artifacts.publishCanonical(policy, policy.format)).ref;
     const verifierSpecRef = verifier.specRef;
+    reportInstalledRunAssemblyPhase(onAssemblyPhase, 'submit_assembly_final_check');
     await installed.revalidate(signal); await validateControlChannelClosure(reads, owner, identity); assertActiveStateOwner(driver, owner);
     const result: AssembledInstalledRun = Object.freeze({ assemblyRef, assembly: immutableSnapshot(assembly), policyRef, sandboxProfileRef, verifierSpecRef,
       credentialGrantRefs: Object.freeze(credentialGrantRefs), sourceProjectionRef: sourceManifest.sourceProjectionRef,

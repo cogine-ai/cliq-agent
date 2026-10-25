@@ -399,7 +399,8 @@ export type RunRetirementPhase = 'history' | 'quarantine_closure' | 'native_reti
 /** Fixed current work labels only, never publication or retirement evidence. */
 export type RunPublicationPhase = 'publication_select' | 'publication_worker_activate' | 'publication_roots_open' |
   'publication_prepare' | 'publication_prepare_read' | 'publication_prepare_grant' | 'publication_prepare_cut' |
-  'publication_prepare_physical' | 'publication_prepare_admit' | 'publication_dispatch' | 'publication_settlement';
+  'publication_prepare_physical' | 'publication_prepare_admit' | 'publication_dispatch' | 'publication_settlement' |
+  'publication_received_retirement' | 'publication_received_read' | 'publication_received_proof' | 'publication_received_settle';
 /** Deep internal resource owner. Opening validates only; process creation is lazy.
  * Durable lifecycle, retry and budgets remain exclusively in the existing reducers. */
 export async function loadRunExecution(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
@@ -945,6 +946,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
     // Joined CAS/rolled-back SQL retries keep the same genuine result token
     // and fixed once-only BudgetSettlement. A new task must not reset it.
     if (settleReceivedPublication) return settleReceivedPublication(readRun(driver, runId).revision);
+    publicationPhase('publication_received_read');
     const abort = new AbortController(); publicationProjectionAbort = abort;
     if (closed || isClosing()) abort.abort(new KernelStorageError('LEASE_FENCED', 'publication read-only projection scope is closing'));
     const signal = abort.signal, reads = artifacts.withReadSignal(signal);
@@ -973,9 +975,13 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         roots.workspaceRoot.assertHeld(); roots.controlledHome.assertHeld();
         return Object.freeze({ runId, expectedRunRevision: selected.run.revision, ...roots, signal });
       } });
+    publicationPhase('publication_received_proof');
     const receivedResult = await prepareOwnedPublicationReceivedResult(driver, artifacts, owner, execution, task);
     const settlement = await preparePublicationReceivedSettlement(driver, artifacts, owner, { execution, receivedResult });
-    settleReceivedPublication = async expected => (await settlement.settle({ expectedRunRevision: expected })).run;
+    settleReceivedPublication = async expected => {
+      publicationPhase('publication_received_settle');
+      return (await settlement.settle({ expectedRunRevision: expected })).run;
+    };
     return settleReceivedPublication(readRun(driver, runId).revision);
   }
   function ownOperation(work: Promise<Run>, abort: AbortController, retainWorker = false): Promise<Run> {
@@ -1632,6 +1638,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
             // Only the committed handoff permits cancellation of subsequent
             // read-only work. First join the already-retired original resources.
             receivedCompletion = { kind: 'publication_received', finish: finishReceivedPublication };
+            publicationPhase('publication_received_retirement');
             await retireWorkerResources();
             return receivedCompletion.finish();
           }

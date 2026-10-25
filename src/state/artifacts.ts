@@ -2,7 +2,7 @@ import { canonicalJsonBytes } from '../kernel/canonical.js';
 import { assertArtifactRef, sha256Bytes } from '../kernel/identity.js';
 import type { ArtifactRef } from '../kernel/types.js';
 import { ContentAddressedStore } from './cas.js';
-import { KernelStorageError } from './errors.js';
+import { joinResourceOperations, KernelStorageError } from './errors.js';
 import type { SqliteConnection } from './sqlite-driver.js';
 
 export type PublishedArtifact = {
@@ -27,6 +27,28 @@ export class ArtifactCatalog {
    * only a cancellation checkpoint, not a new scope or execution authority. */
   assertReadActive(): void {
     this.readSignal?.throwIfAborted();
+  }
+
+  /** One lazy, fixed-width read group, not a global I/O or descriptor budget.
+   * Stop dispatch on failure/cancellation, but join every issued operation so
+   * a later resource-retirement failure still reaches the original owner. */
+  async mapReads<T, Result>(values: readonly T[], read: (value: T, index: number) => Result | Promise<Result>): Promise<Result[]> {
+    this.assertReadActive();
+    const length = values.length, results = new Array<Result>(length);
+    let next = 0, stopped = false;
+    const run = async () => {
+      while (!stopped && next < length) {
+        try {
+          this.assertReadActive();
+          const index = next++;
+          results[index] = await read(values[index]!, index);
+          this.assertReadActive();
+        } catch (error) { stopped = true; throw error; }
+      }
+    };
+    await joinResourceOperations(Array.from({ length: Math.min(4, length) }, () => run()));
+    this.assertReadActive();
+    return results;
   }
 
   async publishBytes(

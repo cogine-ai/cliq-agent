@@ -288,8 +288,8 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
         const checkpointId = identityHash('cliq-verifier-denial-checkpoint-v1', runId, intent.opId, evidence.ref);
         const graph = await prepareContinuationCommit(artifacts, {
           context: decodeContextManifest(await readCanonicalArtifact(artifacts, selected.latestCheckpoint.contextManifestRef)),
-          existingItems: await Promise.all(selected.items.map(async row => ({ itemSeq: row.itemSeq, itemRef: row.payloadRef,
-            item: await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef) }))),
+          existingItems: await artifacts.mapReads(selected.items, async row => ({ itemSeq: row.itemSeq, itemRef: row.payloadRef,
+            item: await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef) })),
           items: [item], frontier: cause.frontier, checkpointId, workspaceStateRef: selected.latestCheckpoint.workspaceStateRef,
           artifacts: [planCanonicalArtifact(cause.planned.request, cause.planned.request.format), planCanonicalArtifact(cause.planned.target, cause.planned.target.format)]
         });
@@ -333,8 +333,8 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
         throw new KernelStorageError('STATE_TRANSITION_INVALID', 'terminal stop requires the higher-priority retained verifier integrity intent');
       const checkpointId = stopCheckpointId(runId, run.stopIntentRef);
       const frontier = await readCanonicalArtifact<RunFrontier>(artifacts, run.frontierRef!);
-      const items = await Promise.all(selected.items.map(async (row) => ({ itemSeq: row.itemSeq, itemRef: row.payloadRef,
-        item: await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef) })));
+      const items = await artifacts.mapReads(selected.items, async (row) => ({ itemSeq: row.itemSeq, itemRef: row.payloadRef,
+        item: await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef) }));
       const pending = openStopBatch(items.map(({ item }) => item));
       if (frontier.kind !== run.nextStep || (pending !== undefined) !== (frontier.kind === 'tool')) throw new TypeError('stop frontier differs from its open batch');
       if (frontier.kind === 'tool') await readToolCut(driver, artifacts, runId, authority.resolveToolInput);

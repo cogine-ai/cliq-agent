@@ -18,8 +18,8 @@ import { decodeVerifierCommand, decodeVerifierEnvironment, decodeVerifierResultI
 import { loadVerifierPolicy, planVerifierRequest, verifierOperationId } from './verifier-policy.js';
 import { readVerifierProgress, readVerifierRetirement, verifierCheckpointId, type VerifierRecoveryCut } from './verifier-recovery.js';
 
-const readItems = (artifacts: ArtifactCatalog, cut: VerifierRecoveryCut) => Promise.all(cut.items.map(async row =>
-  ({ row, item: await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef) })));
+const readItems = (artifacts: ArtifactCatalog, cut: VerifierRecoveryCut) => artifacts.mapReads(cut.items, async row =>
+  ({ row, item: await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef) }));
 
 /** Retained stopped attempts are not receipts and never grant another attempt.
  * Every accepted sequence follows the original claim, stop and physical seal. */
@@ -165,7 +165,7 @@ export async function readVerifierIntegrityCause(driver: SqliteDriver, artifacts
         after.manifestDigest !== evidence.sourceAfterDigest) throw new TypeError('verifier integrity source manifest digest differs');
     requireEqual({ ...after, entriesRef: before.entriesRef, treeDigest: before.treeDigest, manifestDigest: before.manifestDigest }, before,
       'verifier integrity frozen projection and source identity');
-    const manifests = await Promise.all([before, after].map(async source => {
+    const manifests = await artifacts.mapReads([before, after], async source => {
       const entries = decodeWorkspaceEntries(await readCanonicalArtifact(artifacts, source.entriesRef));
       if (entries.treeDigest !== source.treeDigest) throw new TypeError('verifier integrity source tree does not rehash');
       for (const entry of entries.entries) {
@@ -178,7 +178,7 @@ export async function readVerifierIntegrityCause(driver: SqliteDriver, artifacts
         }
       }
       return new Map(entries.entries.map(entry => [entry.path, entry]));
-    }));
+    });
     const changed = new Set<string>();
     const digest = (entry: WorkspaceEntry | undefined) => entry && canonicalSha256(entry);
     for (const path of new Set([...manifests[0]!.keys(), ...manifests[1]!.keys()])) {
