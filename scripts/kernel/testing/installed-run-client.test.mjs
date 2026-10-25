@@ -458,7 +458,7 @@ test('ordinary mutating requests are sent once and never replayed after a connec
   assert.equal(value.connections, 1); assert.deepEqual(value.requests, [hello, mutation]);
   // Test the actual caller gate as well: no mutating request may enter the
   // special connect-retry branch, even before its first Socket is created.
-  const from = source.indexOf('  const exchange = ('), through = source.indexOf('\n  const accepted =', from);
+  const from = source.indexOf('  const exchangeFrames = ('), through = source.indexOf('\n  const accepted =', from);
   assert(from >= 0 && through > from);
   const exchange = ts.transpileModule(source.slice(from, through) + '\nglobalThis.exchangeUnderTest = exchange;',
     { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
@@ -566,7 +566,7 @@ test('an explicitly closed idle public peer retains the separate shutdown-client
 test('response-time worker diagnostics use the same public hello, not queued installed inventory', () => {
   // Actual caller code, serialized replies only. This does not mint a native
   // identity; Linux independently observes the original worker and retirement.
-  const start = source.indexOf('  const exchange = ('), end = source.indexOf('\n  const accepted =', start);
+  const start = source.indexOf('  const exchangeFrames = ('), end = source.indexOf('\n  const accepted =', start);
   assert(start >= 0 && end > start);
   const script = ts.transpileModule(source.slice(start, end) + '\nglobalThis.exchangeUnderTest = exchange;',
     { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;

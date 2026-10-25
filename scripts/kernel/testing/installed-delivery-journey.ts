@@ -215,8 +215,8 @@ export async function runInstalledDeliveryCases(context: Context, options: Reado
     readParentRetirement: context.readParentRetirement,
     cancellation: { request: cancellation, response: cancellationResponse } });
   await context.assertVerifierProcessesAbsent(stoppedIdentity);
-  assert.deepEqual(stoppedRun.budgetConsumed, { ...ZERO, toolCalls: 1 });
-  assert.deepEqual(stoppedRun.budgetReserved, ZERO); assert(!stoppedRun.activeWorkerLaunchId);
+  assert(canonicalJsonBytes(stoppedRun.budgetConsumed).equals(canonicalJsonBytes({ ...ZERO, toolCalls: 1 })));
+  assert(canonicalJsonBytes(stoppedRun.budgetReserved).equals(canonicalJsonBytes(ZERO))); assert(!stoppedRun.activeWorkerLaunchId);
   const parentRetirement = 'kind' in stoppedIdentity ? stoppedIdentity.recovery : undefined;
   assert(await retirements(stoppedRun.id, undefined, parentRetirement) > 0);
   await inspect(cancelledSource, [...cancelledSource.files.map(file => ({ path: file.path, text: file.before })), flag]);

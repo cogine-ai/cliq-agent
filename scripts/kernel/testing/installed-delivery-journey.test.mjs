@@ -7,6 +7,49 @@ import ts from 'typescript';
 
 const source = name => readFileSync(new URL(name, import.meta.url), 'utf8');
 
+test('Delivery cancellation compares every budget dimension from actual strict-parser bytes', async () => {
+  const load = async name => {
+    const compiled = ts.transpileModule(source(name), {
+      compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 },
+    }).outputText;
+    return import('data:text/javascript;base64,' + Buffer.from(compiled).toString('base64'));
+  };
+  const [{ parseJsonStrict }, { canonicalJsonBytes }] = await Promise.all([
+    load('../../../src/kernel/json.ts'), load('../../../src/kernel/canonical.ts'),
+  ]);
+  const text = source('./installed-delivery-journey.ts');
+  const file = ts.createSourceFile('installed-delivery-journey.ts', text, ts.ScriptTarget.Latest, true);
+  const checks = [];
+  const visit = node => {
+    if (ts.isExpressionStatement(node) && ts.isCallExpression(node.expression) &&
+        /^assert(?:\.\w+)?$/u.test(node.expression.expression.getText(file)) &&
+        /stoppedRun\.budget(?:Consumed|Reserved)\b/u.test(node.getText(file))) checks.push(node);
+    ts.forEachChild(node, visit);
+  };
+  visit(file); assert.equal(checks.length, 2);
+  const verify = Function('stoppedRun', 'canonicalJsonBytes', 'assert', 'ZERO', checks.map(node => node.getText(file)).join('\n'));
+  const zero = { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 };
+  const original = { budgetConsumed: { ...zero, toolCalls: 1 }, budgetReserved: zero };
+  const parsed = value => parseJsonStrict(canonicalJsonBytes(value).toString('utf8'));
+  const actual = parsed(original);
+  assert.equal(Object.getPrototypeOf(actual.budgetConsumed), null);
+  assert.equal(Object.getPrototypeOf(actual.budgetReserved), null);
+  assert.doesNotThrow(() => verify(actual, canonicalJsonBytes, assert, zero));
+  for (const field of ['budgetConsumed', 'budgetReserved']) {
+    for (const dimension of Object.keys(zero)) {
+      const changed = structuredClone(original); changed[field][dimension]++;
+      assert.throws(() => verify(parsed(changed), canonicalJsonBytes, assert, zero), dimension);
+    }
+    for (const fault of ['missing', 'extra', 'text']) {
+      const changed = structuredClone(original);
+      if (fault === 'missing') delete changed[field].modelTokens;
+      else if (fault === 'extra') changed[field].authority = true;
+      else changed[field].toolCalls = String(changed[field].toolCalls);
+      assert.throws(() => verify(parsed(changed), canonicalJsonBytes, assert, zero), fault);
+    }
+  }
+});
+
 // Execute only the existing private poller's pure control flow. These inert
 // public-cut values are not a Run, StateOwner, resource or native proof.
 function terminalPoller(get, context, clock, delay, check = assert) {

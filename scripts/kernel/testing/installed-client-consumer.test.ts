@@ -6,6 +6,47 @@ import { InstalledClientConsumerDeadlineError, InstalledClientDriverError, openI
   copyInstalledClientAuthenticationWork, copyInstalledClientAuthenticationProcess,
   installedClientAuthenticationMarker } from './installed-client-consumer.js';
 
+for (const mode of ['jsonl', 'rpc'] as const) test(`schema3 ${mode} actual adapter and scanned child consumer drain all pages and records before response join`, async () => {
+  const sessionUrl = new URL('../../../src/control/session.ts', import.meta.url).href;
+  const adapterUrl = new URL('../../../src/headless/installed.ts', import.meta.url).href;
+  const source = `import assert from 'node:assert/strict';
+    import {createInstalledControlSession} from ${JSON.stringify(sessionUrl)};
+    import {runInstalledHeadlessJsonl,runInstalledHeadlessRpc} from ${JSON.stringify(adapterUrl)};
+    const at='2026-10-25T00:00:00.000Z',ref='a'.repeat(64),cursors=[];
+    const snapshot={schemaVersion:1,operation:'agent',latestRunItemSeq:0,run:{id:'run',sessionId:'session',specRef:ref,
+      status:'queued',nextStep:'agent',frontierRef:ref,revision:1,leaseEpoch:0,latestCheckpointId:'checkpoint',
+      budgetReserved:{modelTokens:0,costMicros:0,toolCalls:0,repairAttempts:0},budgetConsumed:{modelTokens:0,costMicros:0,toolCalls:0,repairAttempts:0},
+      repairCount:0,cancelRequested:false,createdAt:at,updatedAt:at,deadlineAt:'2026-10-25T01:00:00.000Z'}};
+    let closes=0;const session=createInstalledControlSession({hello:{method:'control.hello',protocolVersion:1,serverBuild:'inert',
+      controlSchemaRange:{min:1,max:1},headlessSchemaRange:{min:3,max:3},enabledFeatureIds:['run.attach'],supervisorInstanceId:'inert',
+      activeRuntimeBundle:{schemaVersion:1,runtimeBundleRef:ref,bundleDigest:ref,bundleVersion:'1'}},
+      close:async()=>{closes++},'run.attach':async request=>{cursors.push(request.afterEventSeq);assert(cursors.length<=3);const n=request.afterEventSeq+1,high=cursors.length===1?3:99;
+        return {protocolVersion:1,ok:true,result:{method:'run.attach',snapshot,earliestRetainedEventSeq:1,latestRetainedEventSeq:high,
+          highWaterEventSeq:high,nextEventSeq:n,events:[{schemaVersion:1,kind:'progress',runId:'run',eventSeq:n,
+            observedRunRevision:1,phase:'agent',occurredAt:at}]}}}});
+    await ${mode === 'rpc' ? 'runInstalledHeadlessRpc' : 'runInstalledHeadlessJsonl'}(session,process.stdin,bytes=>new Promise((resolve,reject)=>process.stdout.write(bytes,e=>e?reject(e):resolve())));
+    await session.close();assert.equal(closes,1);assert.deepEqual(cursors,[0,1,2]);`;
+  const scans: Buffer[] = []; let closed = 0, joined = 0;
+  const client = await openInstalledClientConsumer({ executable: process.execPath,
+    args: ['--import', 'tsx', '--input-type=module', '-e', source], cwd: process.cwd(),
+    // Suppress only this source-loader fixture's unrelated Node26 warning;
+    // genuine installed driver argv/env and strict stderr rules stay unchanged.
+    env: { ...process.env, NODE_NO_WARNINGS: '1' }, headlessSchemaVersion: 3,
+    ...(mode === 'rpc' ? { headlessTransport: 'rpc' as const } : {}),
+    openScan: () => ({ scan(bytes) { scans.push(Buffer.from(bytes)); }, close() { closed++; } }), onJoined() { joined++; } });
+  const response = await client.send({ protocolVersion: 1, method: 'run.attach', runId: 'run', afterEventSeq: 0, limit: 1 });
+  assert.equal(response.result?.nextEventSeq, 3); await client.close();
+  assert.equal(joined, 1); assert.equal(closed, 2);
+  const output = Buffer.concat(scans).toString('utf8').trim().split('\n').map(text => JSON.parse(text));
+  assert.equal(output.length, mode === 'rpc' ? 8 : 7);
+  const records = mode === 'rpc' ? output.filter(value => value.method === 'control.record').map(value => {
+    assert.equal(value.params.id, 1); return value.params.record;
+  }) : output;
+  assert.deepEqual(records.filter(record => record.type === 'progress').map(record => record.eventSeq), [1, 2, 3]);
+  assert.equal(response.result?.highWaterEventSeq, 99, 'the later page retains its actual newer high-water without chasing it');
+  if (mode === 'rpc') assert.equal(output.filter(value => value.id === 1).length, 1);
+});
+
 const protocol = `import {createInterface} from 'node:readline';
 const emit=v=>process.stdout.write(JSON.stringify(v)+'\\n');
 emit({ok:true,protocolVersion:1,result:{method:'control.hello',supervisorInstanceId:'owned-framing-fixture'}});
@@ -16,6 +57,29 @@ if(request.invalid)process.stdout.write('{"protocolVersion":1,"ok":true}\\n');
 else emit({ok:true,protocolVersion:1,result:{count,method:request.method}});
 }
 await new Promise(r=>setTimeout(r,20));`;
+
+for (const mode of ['wrong_id', 'missing_attach_records'] as const) test(`schema3 RPC scanned consumer rejects ${mode} and still joins both original pipes`, async () => {
+  const hello = { method: 'control.hello', protocolVersion: 1, serverBuild: 'inert', controlSchemaRange: { min: 1, max: 1 },
+    headlessSchemaRange: { min: 3, max: 3 }, enabledFeatureIds: ['supervisor.status', 'run.attach'], supervisorInstanceId: 'inert',
+    activeRuntimeBundle: { schemaVersion: 1, runtimeBundleRef: 'a'.repeat(64), bundleDigest: 'a'.repeat(64), bundleVersion: '1' } };
+  const source = `import {createInterface} from 'node:readline';
+    const canonical=v=>v===null||typeof v!=='object'?JSON.stringify(v):Array.isArray(v)?'['+v.map(canonical).join(',')+']':
+      '{'+Object.keys(v).sort().map(k=>JSON.stringify(k)+':'+canonical(v[k])).join(',')+'}';
+    const emit=(id,response)=>process.stdout.write(canonical({jsonrpc:'2.0',id,result:{schemaVersion:3,protocolVersion:1,type:'response',response}})+'\\n');
+    let count=0;for await(const line of createInterface({input:process.stdin,crlfDelay:Infinity})){
+      const request=JSON.parse(line);if(++count===1)emit(0,{protocolVersion:1,ok:true,result:${JSON.stringify(hello)}});
+      else emit(${mode === 'wrong_id' ? 'request.id+1' : 'request.id'},{protocolVersion:1,ok:false,method:request.method,
+        error:{schemaVersion:1,code:'AUTHORIZATION_REQUIRED',retryable:false,messageCode:'inert'}});
+    }`;
+  let closed = 0, joined = 0;
+  const client = await openInstalledClientConsumer({ executable: process.execPath,
+    args: ['--input-type=module', '-e', source], cwd: process.cwd(), env: process.env,
+    headlessSchemaVersion: 3, headlessTransport: 'rpc',
+    openScan: () => ({ scan() {}, close() { closed++; } }), onJoined() { joined++; } });
+  await assert.rejects(client.send(mode === 'wrong_id' ? { protocolVersion: 1, method: 'supervisor.status' }
+    : { protocolVersion: 1, method: 'run.attach', runId: 'run', afterEventSeq: 0 }));
+  await assert.rejects(client.close()); assert.equal(closed, 2); assert.equal(joined, 0);
+});
 
 async function fixture(progress = false) {
   const scans: Buffer[] = []; let opened = 0, closed = 0, joined = 0;
@@ -43,6 +107,32 @@ test('the genuine-driver consumer joins real EOF, pipes and process after indepe
   assert.deepEqual(counts(), { opened: 2, closed: 2, joined: 1 });
   assert(Buffer.concat(scans).includes(Buffer.from('control.hello')));
   await assert.rejects(client.send({ protocolVersion: 1, method: 'run.get' }));
+});
+
+test('schema3 consumer scans and decodes the real JSONL wrapper without weakening original process join', async () => {
+  const hello = { method: 'control.hello', protocolVersion: 1, serverBuild: 'inert', controlSchemaRange: { min: 1, max: 1 },
+    headlessSchemaRange: { min: 3, max: 3 }, enabledFeatureIds: ['supervisor.status'], supervisorInstanceId: 'inert',
+    activeRuntimeBundle: { schemaVersion: 1, runtimeBundleRef: 'a'.repeat(64), bundleDigest: 'a'.repeat(64), bundleVersion: '1' } };
+  const scans: Buffer[] = []; let closed = 0, joined = 0;
+  const script = `import assert from 'node:assert/strict';import {createInterface} from 'node:readline';
+    const j=v=>JSON.stringify(v,Object.keys(v).sort());
+    const canonical=v=>v===null||typeof v!=='object'?JSON.stringify(v):Array.isArray(v)?'['+v.map(canonical).join(',')+']':
+      '{'+Object.keys(v).sort().map(k=>JSON.stringify(k)+':'+canonical(v[k])).join(',')+'}';
+    const emit=response=>process.stdout.write(canonical({schemaVersion:3,protocolVersion:1,type:'response',response})+'\\n');
+    emit({protocolVersion:1,ok:true,result:${JSON.stringify(hello)}});
+    for await(const line of createInterface({input:process.stdin,crlfDelay:Infinity})){
+      const outer=JSON.parse(line);assert.deepEqual(Object.keys(outer).sort(),['request','schemaVersion']);assert.equal(outer.schemaVersion,3);
+      assert.deepEqual(outer.request,{protocolVersion:1,method:'supervisor.status'});
+      emit({protocolVersion:1,ok:false,method:'supervisor.status',error:{schemaVersion:1,code:'AUTHORIZATION_REQUIRED',retryable:false,messageCode:'inert'}});
+    }`;
+  const client = await openInstalledClientConsumer({ executable: process.execPath,
+    args: ['--input-type=module', '-e', script], cwd: process.cwd(), env: process.env, headlessSchemaVersion: 3,
+    openScan: () => ({ scan(bytes) { scans.push(Buffer.from(bytes)); }, close() { closed++; } }), onJoined() { joined++; } });
+  assert.equal(client.hello.headlessSchemaRange.min, 3);
+  const response = await client.send({ protocolVersion: 1, method: 'supervisor.status' });
+  assert.equal(response.ok, false); assert.equal(response.error?.code, 'AUTHORIZATION_REQUIRED');
+  await client.close(); assert.equal(joined, 1); assert.equal(closed, 2);
+  assert(Buffer.concat(scans).includes(Buffer.from('"schemaVersion":3')));
 });
 
 test('the genuine-driver consumer counts automatic hello and never sends frame 1025', async () => {

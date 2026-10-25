@@ -85,8 +85,10 @@ async function peerBinding(native: HeldInstalledControlClient, observation: Inst
 
 
 export async function openInstalledControlTransport(selected: HeldInstalledRuntime,
-  purpose: 'control' | 'credential'): Promise<InstalledControlTransport> {
+  purpose: 'control' | 'credential', headlessSchemaVersion?: 1 | 3): Promise<InstalledControlTransport> {
   if (purpose !== 'control' && purpose !== 'credential') throw new TypeError('invalid installed control purpose');
+  if (headlessSchemaVersion !== undefined && headlessSchemaVersion !== 1 && headlessSchemaVersion !== 3)
+    throw new TypeError('invalid installed control schema');
   if (retirementFailure) throw retirementFailure;
   // The fixed friend authenticates the selection before any caller property.
   const observer = await loadInstalledSupervisorObserver(selected, purpose);
@@ -140,6 +142,11 @@ export async function openInstalledControlTransport(selected: HeldInstalledRunti
   invocation(observed);
   const selection = await withHeldInstalledRuntime(selected, async installed => immutableSnapshot({
     bundleDigest: installed.bundleDigest, bundleVersion: installed.bundle.bundleVersion, headlessSchemaRange: installed.bundle.headlessSchemaRange }));
+  // Credential finalization remains the same native v1 application method.
+  // Its private client follows the verified bundle's declared frontend range;
+  // public clients choose their version explicitly and never downgrade.
+  headlessSchemaVersion ??= purpose === 'credential' && selection.headlessSchemaRange.min <= 3 &&
+    selection.headlessSchemaRange.max >= 3 ? 3 : 1;
   const native = await openInstalledControlClient(selected);
   let socket: Socket;
   let fd: number | undefined;
@@ -226,7 +233,7 @@ export async function openInstalledControlTransport(selected: HeldInstalledRunti
     const requestedFeatureIds = purpose === 'credential' ? ['credential.finalize'] : [...INSTALLED_CONTROL_FEATURES];
     const request = decodeInstalledControlRequest({ protocolVersion: 1, method: 'control.hello',
       clientBuild: purpose === 'credential' ? 'cliq-installed-credential-v1' : 'cliq-installed-client-v1',
-      controlSchemaRange: { min: 1, max: 1 }, headlessSchemaRange: { min: 1, max: 1 }, requestedFeatureIds });
+      controlSchemaRange: { min: 1, max: 1 }, headlessSchemaRange: { min: headlessSchemaVersion, max: headlessSchemaVersion }, requestedFeatureIds });
     if (request.method !== 'control.hello') throw new TypeError('invalid fixed installed handshake');
     return request;
   };
@@ -290,7 +297,10 @@ export async function openInstalledControlTransport(selected: HeldInstalledRunti
     noteInstalledClientPhase('hello_exchange_started');
     const response = decodeInstalledControlResponse(await exchange(request), request) as InstalledControlResponseFor<'control.hello'>;
     noteInstalledClientPhase('hello_received');
-    if (!response.ok) refuse('installed Supervisor refused the authenticated control handshake');
+    if (!response.ok) {
+      if (headlessSchemaVersion === 3) throw new InstalledControlHandshakeRefusal(response);
+      refuse('installed Supervisor refused the authenticated control handshake');
+    }
     const hello = response.result, bundle = hello.activeRuntimeBundle;
     if (hello.serverBuild !== 'cliq-installed-v1' || !same(hello.controlSchemaRange, { min: 1, max: 1 }) ||
         !same(hello.headlessSchemaRange, selection.headlessSchemaRange) ||
@@ -303,5 +313,19 @@ export async function openInstalledControlTransport(selected: HeldInstalledRunti
     const reason = error instanceof KernelStorageError || error instanceof ResourceRetirementError ? error
       : new KernelStorageError('RECOVERY_REQUIRED', 'installed control hello response is invalid');
     fail(reason); await retire(); throw reason;
+  }
+}
+
+/** The already closed authenticated refusal, suitable for a thin adapter.
+ * This is diagnostic data, never a replacement for native currentness. */
+export class InstalledControlHandshakeRefusal extends KernelStorageError {
+  readonly response: Extract<InstalledControlResponseFor<'control.hello'>, { ok: false }>;
+  constructor(value: unknown) {
+    super('RECOVERY_REQUIRED', 'installed Supervisor refused the authenticated control handshake');
+    const response = decodeInstalledControlResponse(value, { protocolVersion: 1, method: 'control.hello',
+      clientBuild: 'cliq-headless-v3', controlSchemaRange: { min: 1, max: 1 },
+      headlessSchemaRange: { min: 3, max: 3 }, requestedFeatureIds: [] });
+    if (response.ok) throw new TypeError('handshake refusal requires its closed refusal');
+    this.response = response;
   }
 }

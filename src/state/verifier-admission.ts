@@ -272,7 +272,9 @@ export async function publishVerifierAssembly(artifacts: ArtifactCatalog, compos
   assembly: RunAssemblyV1, signal?: AbortSignal): Promise<PublishedArtifact[]> {
   if (composed.spec.verifiers.length !== 1) {
     const metadata = await publishVerifierArtifacts(artifacts, composed, undefined, signal);
+    signal?.throwIfAborted();
     await artifacts.publishCanonical(assembly, assembly.format);
+    signal?.throwIfAborted();
     return metadata;
   }
   if (composed.artifacts.length !== 3) throw new TypeError('one verifier requires its command, environment and spec');
@@ -317,9 +319,11 @@ export async function prepareInstalledVerifierAssembly(driver: SqliteDriver, art
   return { spec: composed.spec, specRef: composed.specRef, metadata, resolved };
 }
 export async function prepareVerifierConsumption(artifacts: ArtifactCatalog, prepared: Awaited<ReturnType<typeof prepareVerifierSpec>>,
-  input: { runId: string; admissionIntentDigest: string; admittedAt: string }) {
+  input: { runId: string; admissionIntentDigest: string; admittedAt: string }, signal?: AbortSignal) {
+  signal?.throwIfAborted();
   const transitions: Array<{ prior: AuthorizationGrantV1; next: AuthorizationGrantV1; artifact: PublishedArtifact }> = [];
   for (const { grant, creationCommittedAt } of prepared.resolved) {
+    signal?.throwIfAborted();
     if (grant.state !== 'active' || input.admittedAt < creationCommittedAt || input.admittedAt >= grant.expiresAt)
       throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');
     const receipt: AuthorizationConsumptionReceiptV1 = { schemaVersion: 1, grantId: grant.grantId, ownerPrincipalId: grant.ownerPrincipalId,
@@ -327,6 +331,7 @@ export async function prepareVerifierConsumption(artifacts: ArtifactCatalog, pre
       consumedAt: input.admittedAt, receiptDigest: '' };
     receipt.receiptDigest = digestOmitting(receipt, 'receiptDigest'); decodeAuthorizationConsumptionReceipt(receipt);
     const artifact = await artifacts.publishCanonical(receipt, 'cliq-authorization-consumption-receipt-v1');
+    signal?.throwIfAborted();
     const next: AuthorizationGrantV1 = { ...authorizationGrantCore(grant), grantCoreDigest: grant.grantCoreDigest, rowVersion: 2,
       state: 'consumed', useCount: 1, consumptionReceiptRef: artifact.ref, consumedAt: input.admittedAt, rowDigest: '' };
     next.rowDigest = digestOmitting(next, 'rowDigest'); decodeAuthorizationGrant(next);

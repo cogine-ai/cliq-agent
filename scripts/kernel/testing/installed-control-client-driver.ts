@@ -7,6 +7,8 @@ import { lstat, open, type FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import { CONTROL_FRAME_BYTES as bound, decodeControlFrame } from '../../../src/control/v1.js';
 import { runInstalledControlJsonl } from '../../../src/control/installed-jsonl.js';
+import { runInstalledHeadlessJsonl, runInstalledHeadlessRpc } from '../../../src/headless/installed.js';
+import { createInstalledControlSession, type InstalledControlSession } from '../../../src/control/session.js';
 import { parseJsonStrict } from '../../../src/kernel/json.js';
 import type { ReleaseTrustKey } from '../../../src/policy/runtime-authority.js';
 import { ResourceRetirementError } from '../../../src/state/errors.js';
@@ -140,16 +142,18 @@ async function main(): Promise<void> {
   setPhase('platform');
   assert.equal(process.platform, 'linux'); assert.equal(process.arch, 'x64');
   assert(process.geteuid!() > 0 && process.getegid!() > 0);
-  const [filename, ...extra] = process.argv.slice(2); assert(filename && extra.length === 0);
+  const [filename, schema, ...extra] = process.argv.slice(2);
+  assert(filename && (schema === undefined || schema === '--schema3' || schema === '--schema3-rpc') && extra.length === 0);
   setPhase('composition');
   const composition = await fixtureComposition(filename);
   const closeAuthentication = observeAuthentication();
   let selected: HeldInstalledRuntime | undefined, client: InstalledSupervisorClient | undefined, failure: unknown;
+  let session: InstalledControlSession | undefined;
   let stopping: Promise<void> | undefined, stopRequested = false;
   const stop = () => {
     stopRequested = true;
     process.stdin.destroy();
-    if (client) { stopping ??= client.close(); void stopping.catch(() => {}); }
+    if (client) { stopping ??= session ? session.close() : client.close(); void stopping.catch(() => {}); }
   };
   process.once('SIGTERM', stop); process.once('SIGINT', stop); process.stdout.on('error', stop);
   try {
@@ -157,12 +161,16 @@ async function main(): Promise<void> {
     selected = await createInstalledRuntime({ releaseKeys: composition.releaseKeys }).openSelected(composition.stateRoot);
     assert(!stopRequested, 'installed client driver is stopping');
     setPhase('authentication');
-    client = await openInstalledSupervisorClient(selected);
+    client = await openInstalledSupervisorClient(selected, schema === undefined ? 1 : 3);
     assert(!stopRequested, 'installed client driver is stopping');
     setPhase('output');
-    await runInstalledControlJsonl(client, requests(), async bytes => {
+    const write = async (bytes: Buffer) => {
       setPhase('output'); await output(bytes); setPhase('request');
-    });
+    };
+    if (schema !== undefined) {
+      session = createInstalledControlSession(client);
+      await (schema === '--schema3-rpc' ? runInstalledHeadlessRpc : runInstalledHeadlessJsonl)(session, requests(), write);
+    } else await runInstalledControlJsonl(client, requests(), write);
     assert(!stopRequested, 'installed client driver stopped before EOF');
   } catch (error) { failure = error; failedPhase = phase; }
   finally {
@@ -171,7 +179,7 @@ async function main(): Promise<void> {
       // Never close the selected original images under an uncertain native
       // client. The nonzero process exit, not a claimed join, is the fallback.
       if (failure instanceof ResourceRetirementError) throw failure;
-      if (client) await client.close();
+      if (session) await session.close(); else if (client) await client.close();
       if (selected) await selected.close();
     } catch (error) {
       failedPhase = phase; throw error;

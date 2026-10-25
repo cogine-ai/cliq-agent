@@ -5,6 +5,8 @@ import { spawn } from 'node:child_process';
 import { types } from 'node:util';
 import { canonicalJsonBytes } from '../../../src/kernel/canonical.js';
 import { parseJsonStrict } from '../../../src/kernel/json.js';
+import { decodeHeadlessControlRequest, decodeHeadlessControlRecord, decodeInstalledControlResponse, headlessRunEvent,
+  INSTALLED_CONTROL_FEATURES, type InstalledControlRequestV1, type HeadlessRunEventV3 } from '../../../src/control/v1.js';
 import { INSTALLED_CLIENT_PHASES, type InstalledClientPhase } from '../../../src/state/installed-diagnostics.js';
 import type { InstalledWorkSnapshot } from '../../../src/state/installed-work-diagnostics.js';
 
@@ -106,7 +108,7 @@ type Scan = { scan(bytes: Uint8Array): void; close(): void };
 type Response = { protocolVersion: 1; ok: boolean; method?: string;
   result?: Record<string, any>; error?: Record<string, unknown> };
 type Input = { executable: string; args: readonly string[]; cwd: string; env: NodeJS.ProcessEnv;
-  openScan(): Scan; onJoined(): void; timeout?: number };
+  openScan(): Scan; onJoined(): void; timeout?: number; headlessSchemaVersion?: 3; headlessTransport?: 'rpc' };
 export type InstalledClientDriverStage = 'platform' | 'composition' | 'selection' | 'authentication' | 'request' | 'output' | 'retirement';
 const driverStages = ['platform', 'composition', 'selection', 'authentication', 'request', 'output', 'retirement'] as const;
 const driverMarkers = driverStages.flatMap(stage => [
@@ -153,6 +155,8 @@ async function bounded<T>(operation: Promise<T>, milliseconds: number,
 }
 
 export async function openInstalledClientConsumer(input: Input) {
+  assert(input.headlessSchemaVersion === undefined || input.headlessSchemaVersion === 3);
+  assert(input.headlessTransport === undefined || input.headlessSchemaVersion === 3 && input.headlessTransport === 'rpc');
   const timeout = input.timeout ?? 5000;
   assert(Number.isSafeInteger(timeout) && timeout > 0 && timeout <= 5000);
   const by = performance.now() + timeout;
@@ -165,29 +169,91 @@ export async function openInstalledClientConsumer(input: Input) {
   let errorTail = Buffer.alloc(0), markerBytes = 0, lastObservedDriverStage: InstalledClientDriverStage | undefined;
   const observedStages = new Set<InstalledClientDriverStage>(), lastObservedStage = () => lastObservedDriverStage;
   const authentication: InstalledClientAuthenticationObservation[] = [];
-  let pending: { method: string; resolve(value: Response): void; reject(error: unknown): void } | undefined;
+  let pending: { method: string; request?: InstalledControlRequestV1; page?: Response; events?: HeadlessRunEventV3[];
+    attachTarget?: number; attachLimit?: number; rpcId?: number; rpcDrained?: boolean; rpcLast?: Response;
+    resolve(value: Response): void; reject(error: unknown): void } | undefined;
   let readyResolve!: (value: Response) => void, readyReject!: (error: unknown) => void;
   const ready = new Promise<Response>((resolve, reject) => { readyResolve = resolve; readyReject = reject; });
   const refuse = (error: unknown) => { failure ??= error; readyReject(error); pending?.reject(error); };
+  const finishPage = () => {
+    assert(pending?.page && !pending.events?.length);
+    const response = pending.page, original = pending;
+    if (pending.method === 'run.attach' && pending.request?.method === 'run.attach') {
+      if (response.ok) {
+        pending.attachTarget ??= response.result!.highWaterEventSeq;
+        pending.attachLimit ??= pending.request.limit;
+        assert(response.result!.nextEventSeq <= pending.attachTarget!);
+        if (response.result!.nextEventSeq < pending.attachTarget!) {
+          assert(response.result!.nextEventSeq > pending.request.afterEventSeq);
+          pending.request = { ...pending.request, afterEventSeq: response.result!.nextEventSeq,
+            limit: Math.min(pending.attachLimit!, pending.attachTarget! - response.result!.nextEventSeq) };
+          pending.page = undefined; return;
+        }
+      }
+    }
+    if (input.headlessTransport === 'rpc') {
+      pending.rpcLast = response; pending.rpcDrained = true; pending.page = undefined; return;
+    }
+    pending = undefined; original.resolve(response);
+  };
   child.stdout.on('data', (bytes: Buffer) => {
     try {
       outScan.scan(bytes); output = Buffer.concat([output, bytes]); assert(output.length <= 2 * 1048580);
       for (;;) {
         const at = output.indexOf(10); if (at < 0) { assert(output.length <= 1048576); break; }
         assert(at > 0 && at <= 1048576); const line = output.subarray(0, at); output = output.subarray(at + 1);
-        const response = parseJsonStrict(new TextDecoder('utf-8', { fatal: true }).decode(line)) as Response;
-        assert(canonicalJsonBytes(response).equals(line)); assert(++frames <= 1024);
+        const decoded = parseJsonStrict(new TextDecoder('utf-8', { fatal: true }).decode(line));
+        assert(canonicalJsonBytes(decoded).equals(line)); assert(++frames <= 1024);
+        let application = decoded, rpcFinal = false;
+        if (input.headlessTransport === 'rpc') {
+          const rpc = decoded as Record<string, any>; assert.equal(rpc?.jsonrpc, '2.0');
+          if (rpc.method === 'control.record') {
+            assert.deepEqual(Object.keys(rpc).sort(), ['jsonrpc', 'method', 'params']);
+            assert.deepEqual(Object.keys(rpc.params).sort(), ['id', 'record']);
+            assert(pending?.method === 'run.attach' && rpc.params.id === pending.rpcId && !pending.rpcDrained);
+            application = rpc.params.record;
+          } else {
+            assert.deepEqual(Object.keys(rpc).sort(), ['id', 'jsonrpc', 'result']);
+            assert.equal(rpc.id, frames === 1 ? 0 : pending?.rpcId); rpcFinal = true; application = rpc.result;
+          }
+        }
+        let response: Response;
+        if (input.headlessSchemaVersion === 3) {
+          const record = decodeHeadlessControlRecord(application);
+          if (record.type !== 'response') {
+            assert(!rpcFinal, 'a final RPC result must contain its authoritative response');
+            assert(pending?.method === 'run.attach' && pending.events?.length, 'unexpected schema3 display record');
+            assert(canonicalJsonBytes(record).equals(canonicalJsonBytes(pending.events.shift())), 'display event differs from its original committed page');
+            if (!pending.events.length) finishPage();
+            continue;
+          }
+          response = record.response as Response;
+        } else response = decoded as Response;
         assert.equal(response.protocolVersion, 1); assert.equal(typeof response.ok, 'boolean');
         if (frames === 1) {
           assert.deepEqual(Object.keys(response).sort(), ['ok', 'protocolVersion', 'result']);
           assert.equal(response.ok, true); assert.equal(response.result?.method, 'control.hello');
           assert.equal(typeof response.result.supervisorInstanceId, 'string');
+          if (input.headlessSchemaVersion === 3) assert(response.result.headlessSchemaRange.min <= 3 && response.result.headlessSchemaRange.max >= 3);
           readyResolve(response); continue;
         }
         assert(pending, 'installed client driver emitted an unsolicited response');
+        if (rpcFinal && pending.rpcDrained) {
+          assert(canonicalJsonBytes(response).equals(canonicalJsonBytes(pending.rpcLast)));
+          const original = pending; pending = undefined; original.resolve(response); continue;
+        }
         if (response.ok) assert.equal(response.result?.method, pending.method);
         else assert.equal(response.method, pending.method);
-        const original = pending; pending = undefined; original.resolve(response);
+        if (input.headlessSchemaVersion === 3) {
+          assert(pending.request && !pending.page && !pending.events?.length, 'overlapping schema3 pages');
+          decodeInstalledControlResponse(response, pending.request);
+          pending.page = response;
+          pending.events = response.ok && response.result!.method === 'run.attach' ? response.result!.events.map(headlessRunEvent) : [];
+          if (rpcFinal) {
+            assert(pending.method !== 'run.attach', 'RPC attach must retain every page/display notification before its final result');
+            const original = pending; pending = undefined; original.resolve(response);
+          } else if (!pending.events!.length) finishPage();
+        } else { const original = pending; pending = undefined; original.resolve(response); }
       }
     } catch (error) { refuse(error); }
   });
@@ -248,17 +314,30 @@ export async function openInstalledClientConsumer(input: Input) {
     assert.equal(exit.code, 0); assert.equal(exit.signal, null); assert.equal(failure, undefined);
     assert.equal(output.length, 0); assert.equal(errorBytes, markerBytes); input.onJoined();
   })();
+  let correlation = 0;
   const send = async (value: Record<string, unknown>, milliseconds = 5000): Promise<Response> => {
     assert(!pending && !failure && !closing && frames >= 1 && frames < 1024);
     assert(Number.isSafeInteger(milliseconds) && milliseconds > 0 && milliseconds <= 30000);
     const by = performance.now() + milliseconds;
     assert.equal(typeof value.method, 'string'); assert.notEqual(value.method, 'control.hello');
-    const bytes = canonicalJsonBytes(value); assert(bytes.length > 0 && bytes.length <= 1048576);
-    const reply = new Promise<Response>((resolve, reject) => { pending = { method: value.method as string, resolve, reject }; });
+    const wrapped = input.headlessSchemaVersion === 3 ? decodeHeadlessControlRequest({ schemaVersion: 3, request: value }) : undefined;
+    const rpcId = input.headlessTransport === 'rpc' ? ++correlation : undefined;
+    const bytes = canonicalJsonBytes(rpcId === undefined ? wrapped ?? value
+      : { jsonrpc: '2.0', id: rpcId, method: value.method, params: wrapped });
+    assert(bytes.length > 0 && bytes.length <= 1048576);
+    const reply = new Promise<Response>((resolve, reject) => { pending = { method: value.method as string,
+      ...(wrapped ? { request: wrapped.request } : {}), ...(rpcId === undefined ? {} : { rpcId }), resolve, reject }; });
     child.stdin.write(Buffer.concat([bytes, Buffer.from('\n')]));
     try { const response = await bounded(reply, milliseconds, 'request', () => frames, lastObservedStage, milliseconds, performance.now(), () => authentication); assert(performance.now() < by); return response; }
     catch (error) { refuse(error); throw error; }
   };
+  if (input.headlessTransport === 'rpc') {
+    const params = decodeHeadlessControlRequest({ schemaVersion: 3, request: { protocolVersion: 1, method: 'control.hello',
+      clientBuild: 'cliq-installed-rpc-v3', controlSchemaRange: { min: 1, max: 1 }, headlessSchemaRange: { min: 3, max: 3 },
+      requestedFeatureIds: [...INSTALLED_CONTROL_FEATURES] } });
+    const bytes = canonicalJsonBytes({ jsonrpc: '2.0', id: 0, method: 'control.hello', params });
+    assert(bytes.length > 0 && bytes.length <= 1048576); child.stdin.write(Buffer.concat([bytes, Buffer.from('\n')]));
+  }
   try {
     const remaining = by - performance.now(); assert(remaining > 0);
     const greeting = await bounded(Promise.race([ready, closed.then(() => {

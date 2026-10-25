@@ -12,6 +12,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 import { canonicalJsonBytes, canonicalSha256 } from '../../src/kernel/canonical.js';
+import { decodeInstalledControlResponse } from '../../src/control/v1.js';
 import { decodeBrokerProcessDomainDeath, decodeBrokerProcessDomainDeathDispatchClosure } from '../../src/kernel/broker-process-domain-death.js';
 import { decodeCredentialAuthorityOperation, decodeCredentialAuthorityRevokeOperation,
   decodeEndpointAuthorityOperation, type EndpointRegistrationV1 } from '../../src/kernel/credential-authority.js';
@@ -182,6 +183,10 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
   assert.equal(process.geteuid!(), 0);
   const ledger = await readLedger(filename), recipe = ledger.runJourney;
   const installedClientDriver = path.join(recipe.buildFixture, 'installed-control-client-driver.mjs');
+  const headlessSchemaVersion = mode === '--campaign' ? 3 : 1;
+  // This one complete normal journey exercises the production schema3
+  // consumer. Independent Node/verifier/Delivery and negative campaigns keep
+  // their original v1 adapters and exact qualification assertions.
   const failureOnly = mode === '--failure-campaign';
   const sourceLimitsOnly = mode === '--final-source-limits-campaign';
   const retryOnly = mode === '--retry-campaign';
@@ -273,7 +278,7 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
       ? 'independent signed installed Linux Run, real default-alias drift and exact restoration on the same Secret Service lifetime, free pre-dispatch failure and one subsequent owned model response, consent-backed unverified result and immutable terminal-cancel refusal; not daemon restart, locked-store recovery, post-claim retry, full I1, real provider/billing, verified I2 or macOS'
       : failureOnly
       ? 'independent signed installed Linux Run, one positively received owned HTTP429 response, exact model-failure stop and physical terminal drain, Session publication and reconnect, then durable source-refusal replay after real credential revocation; not transport retry, cancellation, deadline expiry, full I1, real provider/billing, I2 or macOS'
-      : 'signed installed Linux Run admission, native credential HTTPS transport, real private edit, Checkpoint and consent-backed unverified result, idle UNKNOWN worker lease renewal across the old expiry, capacity-blocked queued deadline, client reconnect, Supervisor restart and strict UNKNOWN cancellation; not received-before-candidate cancellation, live-worker deadline, full I1, real provider/billing, verified I2 or macOS',
+      : 'signed installed Linux schema3 JSONL Run admission and RPC reconnect/result/diff/artifact/replay on the same Run, native credential HTTPS transport, real private edit, Checkpoint and consent-backed unverified result, idle UNKNOWN worker lease renewal across the old expiry, capacity-blocked queued deadline, Supervisor restart and strict UNKNOWN cancellation; not default CLI/TUI qualification, received-before-candidate cancellation, live-worker deadline, full I1, real provider/billing, verified I2 or macOS',
     completeI1Qualified: false, actualProviderQualified: false, actualProviderCapabilityQualified: false,
     actualProviderBillingQualified: false, artifactGetPublicUxQualified: false, exactFinalizerTimeCutsQualified: false,
     retiredScopeLiveProducerABAQualified: false, fullCrashMatrixQualified: false, macosQualified: false,
@@ -304,13 +309,11 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
   const request = <T extends Record<string, unknown>>(body: T): T & { requestDigest: string } =>
     ({ ...body, requestDigest: canonicalSha256(body) });
   const hello = { protocolVersion: 1, method: 'control.hello', clientBuild: 'installed-run-journey',
-    controlSchemaRange: { min: 1, max: 1 }, headlessSchemaRange: { min: 1, max: 1 },
-    requestedFeatureIds: ['session.create', 'session.get', 'run.submit', 'run.get', 'run.attach', 'run.cancel', 'supervisor.status', 'credential.finalize'] };
-  const exchange = (requests: Record<string, unknown>[], connectBy = 0, timeout = 30000,
-    onHello?: (result: Record<string, any>) => void): Response[] => {
-    assert(connectBy === 0 || requests.length === 0, 'startup connection retry is hello-only, never a request replay');
+    controlSchemaRange: { min: 1, max: 1 }, headlessSchemaRange: { min: headlessSchemaVersion, max: headlessSchemaVersion },
+    requestedFeatureIds: ['session.create', 'session.get', 'run.submit', 'run.get', 'run.attach', 'run.cancel', 'supervisor.status', 'credential.finalize'] } as const;
+  const exchangeFrames = (requests: Record<string, unknown>[], connectBy = 0, timeout = 30000): Response[] => {
     assert(Number.isSafeInteger(timeout) && timeout > 0 && timeout <= 30000);
-    const entries = [hello, ...requests].map(value => canonicalJsonBytes(value).toString('base64url'));
+    const entries = requests.map(value => canonicalJsonBytes(value).toString('base64url'));
     const bytes = Buffer.from(JSON.stringify(entries)).toString('base64url'); assert(bytes.length < 65536);
     const remaining = connectBy ? connectBy - Date.now() : 30000;
     assert(remaining > 0, 'startup control readiness exhausted the existing recovery budget');
@@ -319,6 +322,12 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
     assert.equal(result.status, 0, 'ordinary authenticated v1 client did not join');
     const replies = parseJsonStrict(result.stdout.trim()) as string[]; assert.equal(replies.length, entries.length);
     const parsed = replies.map(text => { const value = parseJsonStrict(text) as Response; assert.equal(text, canonicalJsonBytes(value).toString('utf8')); return value; });
+    return parsed;
+  };
+  const exchange = (requests: Record<string, unknown>[], connectBy = 0, timeout = 30000,
+    onHello?: (result: Record<string, any>) => void): Response[] => {
+    assert(connectBy === 0 || requests.length === 0, 'startup connection retry is hello-only, never a request replay');
+    const parsed = exchangeFrames([hello, ...requests], connectBy, timeout);
     assert.equal(parsed[0]!.ok, true, 'real compatible hello refused'); assert.equal(parsed[0]!.result!.method, 'control.hello');
     onHello?.(parsed[0]!.result!);
     return parsed.slice(1);
@@ -422,6 +431,7 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
   };
   const openRunObserverClient = (timeout: number) => persistentClient(timeout, true);
   let genuineClient: Awaited<ReturnType<typeof openInstalledClientConsumer>> | undefined, genuineClientFailure: unknown;
+  let genuineTransport: 'jsonl' | 'rpc' = 'jsonl';
   const closeGenuineClient = async () => {
     try { await genuineClient?.close(); genuineClient = undefined; }
     catch (error) { genuineClientFailure ??= error; throw error; }
@@ -433,7 +443,10 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
     const remaining = () => { const left = by - performance.now(); assert(left > 0); return Math.ceil(left); };
     try {
       genuineClient ??= await openInstalledClientConsumer({ executable: '/usr/sbin/runuser',
-        args: [...prefix, process.execPath, '--disable-warning=ExperimentalWarning', installedClientDriver, filename], cwd: ledger.home, env: environment,
+        args: [...prefix, process.execPath, '--disable-warning=ExperimentalWarning', installedClientDriver, filename,
+          genuineTransport === 'rpc' ? '--schema3-rpc' : '--schema3'], cwd: ledger.home, env: environment,
+        headlessSchemaVersion: 3,
+        ...(genuineTransport === 'rpc' ? { headlessTransport: 'rpc' as const } : {}),
         openScan: () => scanner.openStream(), onJoined: () => { report.originalPublicClientJoined = true; },
         timeout: Math.min(5000, remaining()) });
       const response = await genuineClient.send(value, remaining()); remaining(); return response;
@@ -1050,7 +1063,8 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       claims: { nativeToolCalling: true, streaming: false, trustedUsageEvidence: false,
         contextLimitTokens: requestResource?.contextLimit ?? 32768, maxOutputTokens: requestResource?.outputLimit ?? 4096 },
       requestTokenCeiling: requestResource?.requestTokenCeiling ?? requestTokenCeiling,
-      validFrom: new Date(Date.now() - 60000).toISOString(), validThrough: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString() });
+      validFrom: new Date(Date.now() - 60000).toISOString(), validThrough: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString() },
+    mode === '--campaign' ? { headlessSchemaVersion: 3 } : {});
     const staged = await build({ entryPoints: [fileURLToPath(new URL('./testing/installed-runtime-installer.ts', import.meta.url))],
       outfile: recipe.installerEntry, bundle: true, platform: 'node', format: 'esm', target: 'node22.13', metafile: true, write: false });
     assert(Object.values(staged.metafile!.outputs).flatMap(value => value.imports).every(value => value.external && value.path.startsWith('node:')));
@@ -1133,6 +1147,15 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       assert.equal(await readlink(`/proc/${state.MainPID}/exe`), path.join(recipe.stateRoot, 'runtime/bundles', bundleDigest, 'supervisor'));
     }
     const keeperReady = await readFile(path.join(recipe.stateRoot, 'runtime/keeper.ready'));
+    if (mode === '--campaign') {
+      mark('schema3_refuses_old_headless_range');
+      const oldHello = { ...hello, headlessSchemaRange: { min: 1, max: 1 } };
+      const refusal = decodeInstalledControlResponse(exchangeFrames([oldHello])[0], oldHello);
+      assert.deepEqual(refusal, { protocolVersion: 1, ok: false, method: 'control.hello', error: {
+        schemaVersion: 1, code: 'INCOMPATIBLE_PROTOCOL', retryable: false, messageCode: 'control.incompatible_protocol',
+        supportedControlRange: { min: 1, max: 1 }, supportedHeadlessRange: { min: 3, max: 3 }, upgradeAction: 'upgrade_client' } });
+      report.oldHeadlessRangeRefused = true;
+    }
     mark('public_session_create');
     await mkdir(recipe.workspace, { mode: 0o700 }); await chown(recipe.workspace, ledger.uid, ledger.gid);
     const source = path.join(recipe.workspace, 'example.txt'); await writeFile(source, hostBefore, { flag: 'wx', mode: 0o644 }); await chown(source, ledger.uid, ledger.gid);
@@ -3938,6 +3961,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
     // Deliberate complete client retirement, then one explicitly new genuine
     // installed connection. No failed request is retried by this lifecycle.
     await closeGenuineClient();
+    genuineTransport = 'rpc';
     assert.deepEqual(accepted(await sendGenuine({ protocolVersion: 1, method: 'run.get', runId: admitted.id }), 'run.get'), cut);
     assert.deepEqual(await sendGenuine(sessionRequest), sessionReply);
     assert.deepEqual(await sendGenuine(submit), submitReply);

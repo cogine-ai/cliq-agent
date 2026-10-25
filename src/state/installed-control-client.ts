@@ -15,8 +15,9 @@ export type InstalledSupervisorClient = Readonly<{
 /** Observe/connect only. Unlike the explicit credential ensure path this does
  * not start, install, reload or recover the Supervisor. One request at a time;
  * a failed transport is never reconnected or replayed by this client. */
-export async function openInstalledSupervisorClient(selected: HeldInstalledRuntime): Promise<InstalledSupervisorClient> {
-  const transport = await openInstalledControlTransport(selected, 'control');
+export async function openInstalledSupervisorClient(selected: HeldInstalledRuntime,
+  headlessSchemaVersion: 1 | 3 = 1): Promise<InstalledSupervisorClient> {
+  const transport = await openInstalledControlTransport(selected, 'control', headlessSchemaVersion);
   const methods = Object.fromEntries(INSTALLED_CONTROL_FEATURES.map(method => [method,
     function(this: InstalledSupervisorClient, request: InstalledControlRequestV1) {
       if (this !== client) return Promise.reject(new TypeError('invalid installed control method receiver'));

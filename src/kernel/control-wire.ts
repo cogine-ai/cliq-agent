@@ -1,7 +1,7 @@
 import { canonicalJsonBytes, canonicalSha256, normalizeCanonicalText } from './canonical.js';
 import { assertAdmissionKey, assertRequestId, normalizeAbsolutePath, normalizeBoundedText, parseCanonicalTime } from './identity.js';
 import { immutableSnapshot } from '../model/immutable.js';
-import type { ControlResultV1, RunSnapshotV1, SessionSnapshotV1 } from './types.js';
+import type { ControlResultV1, RunEvent, RunSnapshotV1, SessionSnapshotV1 } from './types.js';
 import { decodeCredentialAuthorityOperation, type CredentialAuthorityOperationV1 } from './credential-authority.js';
 import { assertBoundedJsonValue, parseJsonStrict } from './json.js';
 import { decodeWireRun, decodeWireSession, decodeWireCheckpoint, decodeWireEvent, decodeWireJournal,
@@ -13,6 +13,8 @@ import { assertControlWireJson as json, controlWireRecord, controlWireText, cont
 export { controlWireRecord, controlWireText, controlWireInteger, controlWireRef, decodeControlRange } from './control-wire-data.js';
 
 export const CONTROL_FRAME_BYTES = 1024 * 1024;
+export const CONTROL_PROTOCOL_VERSION = 1;
+export const HEADLESS_SCHEMA_VERSION = 3;
 
 export type ControlRangeV1 = Readonly<{ min: number; max: number }>;
 export type ControlHelloRequestV1 = Readonly<{ protocolVersion: 1; method: 'control.hello'; clientBuild: string;
@@ -530,4 +532,92 @@ function decodeInstalledControlError(value: unknown, method: InstalledControlMet
       throw new TypeError('unknown installed control refusal');
   }
   return error as InstalledControlErrorV1;
+}
+
+/** Schema 3 wraps the original closed application object. It never supplies
+ * identity, time, execution or a second Run lifecycle. */
+export type HeadlessControlRequestV3 = Readonly<{ schemaVersion: 3; request: InstalledControlRequestV1 }>;
+export type HeadlessControlResponseV3 = Readonly<{ schemaVersion: 3; protocolVersion: 1;
+  type: 'response'; response: InstalledControlResponseV1 }>;
+export type HeadlessRunEventV3 = RunEvent extends infer E ? E extends RunEvent ? Readonly<{
+  schemaVersion: 3; protocolVersion: 1; type: E['kind']; runId: string; eventSeq: number; timestamp: string;
+  payload: Omit<E, 'schemaVersion' | 'kind' | 'runId' | 'eventSeq' | 'occurredAt'>
+}> : never : never;
+export type HeadlessControlRecordV3 = HeadlessControlResponseV3 | HeadlessRunEventV3;
+
+export function decodeHeadlessControlRequest(value: unknown): HeadlessControlRequestV3 {
+  json(value); assertBoundedJsonValue(value, 'headless request');
+  const data = controlWireRecord(value, ['schemaVersion', 'request']);
+  if (data.schemaVersion !== HEADLESS_SCHEMA_VERSION || canonicalJsonBytes(data).length > CONTROL_FRAME_BYTES)
+    throw new TypeError('headless request requires bounded schema 3');
+  return immutableSnapshot({ schemaVersion: 3, request: decodeInstalledControlRequest(data.request) });
+}
+
+export function headlessControlResponse<M extends InstalledControlMethod>(value: unknown,
+  request: Extract<InstalledControlRequestV1, { method: M }>): HeadlessControlResponseV3 {
+  const response = decodeInstalledControlResponse(value, request);
+  const record = { schemaVersion: 3 as const, protocolVersion: 1 as const, type: 'response' as const, response };
+  assertBoundedJsonValue(record, 'headless response');
+  if (canonicalJsonBytes(record).length > CONTROL_FRAME_BYTES) throw new TypeError('headless response exceeds its bound');
+  return immutableSnapshot(record);
+}
+
+export function decodeHeadlessControlResponse(value: unknown): HeadlessControlResponseV3 {
+  json(value); assertBoundedJsonValue(value, 'headless response');
+  const data = controlWireRecord(value, ['schemaVersion', 'protocolVersion', 'type', 'response']);
+  if (data.schemaVersion !== 3 || data.protocolVersion !== 1 || data.type !== 'response' ||
+      canonicalJsonBytes(data).length > CONTROL_FRAME_BYTES) throw new TypeError('headless response requires bounded schema 3');
+  const response = data.response as Record<string, any> | null;
+  const method = response?.ok === true ? response.result?.method : response?.method;
+  if (!CONTROL_METHODS_V1.includes(method)) throw new TypeError('unknown headless response method');
+  return immutableSnapshot({ schemaVersion: 3, protocolVersion: 1, type: 'response',
+    response: decodeInstalledControlEnvelope(response, method) });
+}
+
+/** Frontend negotiation is a projection of the already authenticated hello,
+ * never another peer observation or permission grant. */
+export function headlessControlHello(supplied: ControlHelloRequestV1,
+  actual: InstalledControlResultFor<'control.hello'>): HeadlessControlResponseV3 {
+  const request = decodeControlHelloRequest(supplied);
+  const response = decodeInstalledControlEnvelope({ protocolVersion: 1, ok: true, result: actual }, 'control.hello');
+  if (!response.ok) throw new TypeError('headless hello requires the authenticated result');
+  const available = response.result;
+  if (!rangeOverlap(request.controlSchemaRange, available.controlSchemaRange) ||
+      !rangeOverlap(request.headlessSchemaRange, { min: 3, max: 3 }) ||
+      !rangeOverlap(available.headlessSchemaRange, { min: 3, max: 3 }))
+    return headlessControlResponse({ protocolVersion: 1, ok: false, method: 'control.hello', error: {
+      schemaVersion: 1, code: 'INCOMPATIBLE_PROTOCOL', retryable: false, messageCode: 'control.incompatible_protocol',
+      supportedControlRange: available.controlSchemaRange,
+      supportedHeadlessRange: rangeOverlap(available.headlessSchemaRange, { min: 3, max: 3 })
+        ? { min: 3, max: 3 } : available.headlessSchemaRange,
+      upgradeAction: request.headlessSchemaRange.max < 3 ? 'upgrade_client' : 'upgrade_supervisor'
+    } }, request);
+  return headlessControlResponse({ protocolVersion: 1, ok: true, result: { ...available,
+    headlessSchemaRange: { min: 3, max: 3 },
+    enabledFeatureIds: request.requestedFeatureIds.filter(feature => available.enabledFeatureIds.includes(feature)) } }, request);
+}
+
+/** Exact presentation of one decoded committed event, never a Run snapshot. */
+export function headlessRunEvent(value: unknown): HeadlessRunEventV3 {
+  json(value); assertBoundedJsonValue(value, 'headless event');
+  const event = decodeWireEvent(value);
+  const { schemaVersion: _schema, kind, runId, eventSeq, occurredAt, ...payload } = event;
+  const record = { schemaVersion: 3 as const, protocolVersion: 1 as const, type: kind, runId, eventSeq,
+    timestamp: occurredAt, payload };
+  if (canonicalJsonBytes(record).length > CONTROL_FRAME_BYTES) throw new TypeError('headless event exceeds its bound');
+  return immutableSnapshot(record) as HeadlessRunEventV3;
+}
+
+export function decodeHeadlessControlRecord(value: unknown): HeadlessControlRecordV3 {
+  json(value); assertBoundedJsonValue(value, 'headless record');
+  if ((value as { type?: unknown } | null)?.type === 'response') return decodeHeadlessControlResponse(value);
+  const data = controlWireRecord(value, ['schemaVersion', 'protocolVersion', 'type', 'runId', 'eventSeq', 'timestamp', 'payload']);
+  if (data.schemaVersion !== 3 || data.protocolVersion !== 1 || !['state_changed', 'progress'].includes(data.type as string))
+    throw new TypeError('invalid schema3 event record');
+  const payload = data.payload;
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new TypeError('invalid schema3 event payload');
+  if (Object.keys(payload).some(key => ['schemaVersion', 'kind', 'runId', 'eventSeq', 'occurredAt'].includes(key)))
+    throw new TypeError('event payload cannot substitute its envelope');
+  return headlessRunEvent({ ...payload, schemaVersion: 1, kind: data.type, runId: data.runId,
+    eventSeq: data.eventSeq, occurredAt: data.timestamp });
 }

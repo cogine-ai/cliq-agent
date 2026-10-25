@@ -135,6 +135,10 @@ test('installed client driver bundles as one ordinary Node consumer with no exte
     'the real installed driver must consume the production JSONL adapter');
   assert(inputs.some(name => name.endsWith('src/control/v1.ts')),
     'the real installed driver and client must consume the same generated contract');
+  assert(inputs.some(name => name.endsWith('src/headless/installed.ts')),
+    'the schema3 installed driver must consume the production headless adapter');
+  assert(inputs.some(name => name.endsWith('src/control/session.ts')),
+    'the schema3 installed driver must consume the shared control session');
 });
 
 test('the campaign wrapper alone retains the original 1024 frames including automatic hello', async () => {

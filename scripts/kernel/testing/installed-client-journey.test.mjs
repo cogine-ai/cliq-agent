@@ -14,7 +14,7 @@ test('the complete ordinary installed journey sends initial admission and termin
   matches(journey, /const submitReply = mode === '--campaign' \? await sendGenuine\(submit\)/u);
   matches(journey, /const events = accepted\(await sendGenuine\(\{ protocolVersion: 1, method: 'run\.attach'/u);
   matches(journey, /await assertGenuineResult\(cut\)/u);
-  matches(journey, /await closeGenuineClient\(\);\s*assert\.deepEqual\(accepted\(await sendGenuine/u);
+  matches(journey, /await closeGenuineClient\(\);\s*genuineTransport = 'rpc';\s*assert\.deepEqual\(accepted\(await sendGenuine/u);
   matches(journey, /actual_supervisor_restart_after_result[\s\S]*await closeGenuineClient\(\);[\s\S]*selectedSupervisor[\s\S]*await assertGenuineResult\(cut, recoverBy - Date\.now\(\)\)/u);
   const download = journey.slice(journey.indexOf('    const assertGenuineResult = '), journey.indexOf('    const assertTerminalCancelRefused = '));
   const deadline = download.indexOf('by = performance.now() + timeout');
@@ -24,9 +24,20 @@ test('the complete ordinary installed journey sends initial admission and termin
 });
 
 test('both real installed workloads bundle the production driver and join its scanned child before corpus qualification', () => {
-  for (const text of [journey, verifier]) {
+  for (const [text, schema3] of [[journey, true], [verifier, false]]) {
     matches(text, /new URL\('\.\/(?:testing\/)?installed-control-client-driver\.ts', import\.meta\.url\)/u);
-    matches(text, /args: \[\.\.\.prefix, process\.execPath, '--disable-warning=ExperimentalWarning', installedClientDriver, filename\]/u);
+    matches(text, schema3
+      ? /args: \[\.\.\.prefix, process\.execPath, '--disable-warning=ExperimentalWarning', installedClientDriver, filename,\s*genuineTransport === 'rpc' \? '--schema3-rpc' : '--schema3'\]/u
+      : /args: \[\.\.\.prefix, process\.execPath, '--disable-warning=ExperimentalWarning', installedClientDriver, filename\]/u);
+    if (schema3) {
+      matches(text, /headlessSchemaVersion: 3/u);
+      matches(text, /mode === '--campaign' \? \{ headlessSchemaVersion: 3 \} : \{\}/u);
+      matches(text, /await closeGenuineClient\(\);\s*genuineTransport = 'rpc';\s*assert\.deepEqual\(accepted\(await sendGenuine/u);
+      matches(text, /genuineTransport === 'rpc' \? \{ headlessTransport: 'rpc' as const \} : \{\}/u);
+      matches(text, /decodeInstalledControlResponse\(exchangeFrames\(\[oldHello\]\)\[0\], oldHello\)/u);
+      matches(text, /supportedHeadlessRange: \{ min: 3, max: 3 \}, upgradeAction: 'upgrade_client'/u);
+      matches(text, /report\.oldHeadlessRangeRefused = true/u);
+    }
     assert(!/--no-warnings|NODE_NO_WARNINGS/u.test(text), 'never silence arbitrary warnings or stderr');
     matches(text, /openScan: \(\) => scanner\.openStream\(\)/u);
     matches(text, /metafile: true, write: false/u);

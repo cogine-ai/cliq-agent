@@ -264,6 +264,19 @@ export async function prepareInstalledSupervisorSeaCarrier(fixture: string, cach
   return { ...original, supervisorCarrier };
 }
 
+/** A new build output must be writable by its owner for postject, even when
+ * the verified carrier is read-only. The source image is never chmod'ed. */
+export async function copyWritableSupervisorSeaImage(carrier: string, executable: string): Promise<void> {
+  await copyFile(carrier, executable, constants.COPYFILE_EXCL);
+  const image = await open(executable, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const metadata = await image.stat();
+    assert(metadata.isFile() && metadata.nlink === 1, 'SEA output must be a new single-link regular image');
+    await image.chown(process.geteuid!(), process.getegid!());
+    await image.chmod(0o700);
+  } finally { await image.close(); }
+}
+
 export async function buildSupervisorSeaImage(input: {
   fixture: string; carrier: string; entryPoint: string; executable: string;
   variant: string; assets: Record<string, string>; defines?: Record<string, string>;
@@ -298,16 +311,10 @@ export async function buildSupervisorSeaImage(input: {
     execArgv: ['--disable-sigusr1'], execArgvExtension: 'none', disableExperimentalSEAWarning: true, assets: input.assets }),
   { flag: 'wx', mode: 0o600 });
   run(input.fixture, input.carrier, ['--experimental-sea-config', configuration]);
-  await copyFile(input.carrier, input.executable, constants.COPYFILE_EXCL);
   // Keep explicit ownership on this newly created copy independently of the
   // carrier extraction policy and platform copyFile metadata behavior;
   // never relax the fresh-package transfer oracle or chown the carrier tree.
-  const image = await open(input.executable, constants.O_RDONLY | constants.O_NOFOLLOW);
-  try {
-    const metadata = await image.stat();
-    assert(metadata.isFile() && metadata.nlink === 1, 'SEA output must be a new single-link regular image');
-    await image.chown(process.geteuid!(), process.getegid!());
-  } finally { await image.close(); }
+  await copyWritableSupervisorSeaImage(input.carrier, input.executable);
   if (process.platform === 'darwin') run(input.fixture, 'codesign', ['--remove-signature', input.executable]);
   await inject(input.executable, 'NODE_SEA_BLOB', await readFile(blob),
     { sentinelFuse: 'NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2', machoSegmentName: 'NODE_SEA' });

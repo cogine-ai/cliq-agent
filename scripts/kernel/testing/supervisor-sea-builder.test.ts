@@ -1,13 +1,38 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { access, chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 import { CREDENTIAL_PHASE_DIAGNOSTIC_BANNER, INSTALLED_WORK_DIAGNOSTIC_BANNER,
-  prepareSupervisorSeaCarrier, SUPERVISOR_SEA_NODE_VERSION } from './supervisor-sea-builder.js';
+  copyWritableSupervisorSeaImage, prepareSupervisorSeaCarrier, SUPERVISOR_SEA_NODE_VERSION } from './supervisor-sea-builder.js';
+
+test('a read-only carrier creates a fresh owner-writable SEA output without changing its source', async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), 'cliq-sea-writable-copy-'));
+  try {
+    const source = path.join(fixture, 'carrier'), output = path.join(fixture, 'supervisor');
+    const bytes = Buffer.from('complete original image fixture\n');
+    await writeFile(source, bytes, { flag: 'wx', mode: 0o500 });
+    const before = await lstat(source, { bigint: true });
+    await copyWritableSupervisorSeaImage(source, output);
+    const copied = await lstat(output, { bigint: true });
+    assert(copied.isFile()); assert.equal(copied.nlink, 1n);
+    assert.equal(copied.uid, BigInt(process.geteuid!())); assert.equal(copied.gid, BigInt(process.getegid!()));
+    assert.equal(copied.mode & 0o777n, 0o700n); assert.notEqual(copied.ino, before.ino);
+    await access(output, constants.R_OK | constants.W_OK);
+    assert.deepEqual(await readFile(output), bytes);
+    const after = await lstat(source, { bigint: true });
+    for (const key of ['dev', 'ino', 'uid', 'gid', 'mode', 'nlink', 'size', 'mtimeNs', 'ctimeNs'] as const)
+      assert.equal(after[key], before[key]);
+    assert.deepEqual(await readFile(source), bytes);
+    const originalOutput = await lstat(output, { bigint: true });
+    await assert.rejects(copyWritableSupervisorSeaImage(source, output), { code: 'EEXIST' });
+    assert.deepEqual(await lstat(output, { bigint: true }), originalOutput);
+  } finally { await rm(fixture, { recursive: true, force: true }); }
+});
 
 test('the signed server diagnostic banner preserves actual concurrent completion order and joins every producer', async () => {
   const builder = await import('./supervisor-sea-builder.js') as Record<string, unknown>;

@@ -106,7 +106,7 @@ Out:
 
 Likely files/modules:
 
-- Consume and complete the `src/control/*` client/contract modules created by work package 04. Add `src/control/v1/source.ts`, `generate.ts`, generated TypeScript validators/JSON Schemas under `src/control/v1/generated/`, golden fixtures, and surface conformance tests; do not hand-maintain parallel adapter types.
+- Consume and complete the `src/control/*` client/contract modules created by work package 04. Extend the canonical `src/kernel/control-wire.ts` codecs and deterministic `scripts/kernel/generate-control-v1.ts` exports in `src/control/v1.ts`, golden fixtures, and surface conformance tests; do not hand-maintain parallel adapter types.
 - Refactor `src/cli.ts` command parsing/dispatch and add CLI integration tests for every Run and public Session/handoff command, detach semantics, request-id replay, bounded pagination, and typed errors.
 - Refactor `src/tui/app.tsx`, `src/tui/store.ts`, `src/tui/approval-bridge.ts`, transcript/status components, and integration tests into control clients.
 - Replace the process-owned contracts in `src/headless/contract.ts`, `events.ts`, `jsonl.ts`, `rpc.ts`, and `run.ts` with schema-v3 adapters; preserve artifact/event formatting concepts.
@@ -125,7 +125,7 @@ Likely files/modules:
 
 Implementation notes:
 
-1. `src/control/v1/source.ts` is the sole authored protocol source. It defines `CONTROL_PROTOCOL_VERSION = 1`, `HEADLESS_SCHEMA_VERSION = 3`, method names, request/result/event discriminators, bounds, and the error union. `generate.ts` deterministically emits the server validators, client types, JSON Schemas, adapter codecs, and golden fixtures into `src/control/v1/generated/`; generated files carry a source digest and are never hand-edited. `npm run generate:control` regenerates them, and `npm run check:control-generated` fails CI on any diff.
+1. `src/kernel/control-wire.ts` is the sole authored wire protocol source. It defines `CONTROL_PROTOCOL_VERSION = 1`, `HEADLESS_SCHEMA_VERSION = 3`, method names, request/result/event discriminators, bounds, and the error union. `scripts/kernel/generate-control-v1.ts` deterministically exports the canonical validators, client types and adapter codecs in `src/control/v1.ts`; generated files carry a source digest and are never hand-edited. Its `--write` mode regenerates exports and `--check` mode fails on drift. Surface golden fixtures must consume that same source; remaining complete JSON Schema and method qualification gates are not satisfied merely by generating TypeScript exports.
 2. `control.hello` is the only pre-handshake method. Its request is `{protocolVersion: 1, clientBuild, controlSchemaRange, headlessSchemaRange, requestedFeatureIds}` with at most 64 feature ids; the response returns server build, both supported schema ranges, capabilities, Supervisor instance, and active RuntimeBundle identity. No Session, Run, artifact, or state query occurs before compatibility and same-user peer authorization pass. Incompatible ranges return `INCOMPATIBLE_PROTOCOL` with both supported ranges and an upgrade action.
    An internal StateStore bounded-read integration for `session.get`, `run.get`
    and `run.attach` does not satisfy this public handshake/routing requirement
@@ -1487,6 +1487,29 @@ same client operations. The example must retain request/admission identity,
 replay a lost submit response, drain one attach high-water, recover expired
 cursors from the inline snapshot, and read result availability from Run state.
 It must not reconstruct mutable authority from event text or open SQLite.
+
+The connected implementation now uses the existing canonical
+`src/kernel/control-wire.ts` codecs and generated `src/control/v1.ts` exports
+for a schema3 session and both serial JSONL/RPC adapters. The exact envelopes,
+RPC correlation, event presentation and detach semantics are specified in RFC
+section 15. The shared consumer provides complete bounded artifact verification,
+high-water draining and expired-cursor snapshots, explicit authenticated
+reconnection without automatic request replay, and explicit revisioned cancel.
+Transport loss, stdin EOF and output failure cannot create a cancellation.
+Every original native peer/service/selected-image check remains in the genuine
+installed client; protocol-data regression fixtures do not establish it.
+
+The normal installed Run campaign selects a signed range3 fixture and its real
+schema3 JSONL client/adapter, then reconnects through the actual RPC subprocess
+consumer to the same Run, original request replay, result/diff/artifact bytes,
+finite attach cut and subsequent Supervisor restart. It also requires an exact
+typed refusal for a range1 hello. The separate existing range1 campaigns retain
+their original v1 path. Credential finalization follows the verified bundle's range
+without changing its v1 application method or authority checks. A range1 hello
+is not accepted by the schema3 frontend. These source changes still require
+fresh exact-head Linux qualification. They do not complete unconnected methods,
+default CLI/TUI conversion, public release trust-root composition, all four
+frontend qualification or the Kernel Cut. No new public CLI command is claimed.
 
 **Qualify the first useful journey.** Use the
 [developer journey and TTHW target](../../kernel/2026-09-26-design-review.md#8-developer-journey-and-release-decisions)

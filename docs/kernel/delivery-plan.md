@@ -13,7 +13,46 @@ Linux execution/restart and cancellation foundations are real, but a final
 model turn still stops at `candidate_required`. No work package or complete I1
 is declared finished by the 32 passing checks.
 
-Latest completed exact-head result (2026-10-25): `fc0790e`
+Latest completed exact-head result (2026-10-25): `7f563bb`
+[run 475](https://github.com/cogine-ai/cliq-agent/actions/runs/40206820780)
+has sixteen successful and six failed jobs; all four TypeScript jobs pass.
+The complete collector retains 105 original reports / 509,742 bytes across
+23 categories, with no missing, incomplete or rejected report. All 21 cleanup
+reports have zero errors and all 21 runner-baseline pairs are byte-identical.
+The original collector, poller, wrapper and scoped awake guard actually join;
+independent full-schema/integrity closeout SHA-256:
+`4149fa6e0df8f7634793d50f6fa7527bf1a6584041f6c851a5a0f05011e8b08d`.
+
+Normal Delivery now passes the verifier-parent retirement consumer, then fails
+its cancellation budget assertion: strict JSON objects have null prototypes,
+so strict object-prototype equality incorrectly rejects identical budgets.
+Compare the complete canonical bytes of both budgets instead, preserving all
+four dimensions, exact types and closed fields; changed, absent or extra fields
+still fail. This local regression does not qualify the remaining journey.
+
+The non-root image preflight fails because its fresh output inherits the
+derived carrier's 0500 mode, which prevents SEA injection. Only that new,
+single-link, owner-held output is made 0700 during construction and returns
+to 0500 after injection/signing; the original carrier is never chmod'ed.
+Separately, admission cancellation now stops before each next independent
+artifact publication and after the current publisher fully joins. It does
+not interrupt physical writes or mask storage/retirement failure. Original
+grant consumption and the sole final admission transaction remain intact.
+
+All three storage campaigns pass preflight but time out on their first
+source `run.submit`, before any publication-stop or late-audit cut. Their
+four observed protocol frames do not prove admission or the target cut
+completed. The verifier's cumulative 4096-stream secret scan remains
+incomplete. These bounds and all physical deadlines remain unchanged.
+
+The shared schema3 JSONL/RPC client package passes an independent review and
+its complete local gate; it still requires real installed Linux validation.
+Default CLI/TUI, full v1/Session/MCP surfaces, release bootstrap, provider,
+macOS, reboot and scale qualifications remain separate delivery obligations.
+No complete work package, I1–I4 qualification or release is declared finished,
+and no PR is opened for the incomplete delivery.
+
+Previous completed exact-head result: `fc0790e`
 [run 474](https://github.com/cogine-ai/cliq-agent/actions/runs/40191567432)
 has fourteen successful and eight failed jobs. The installed normal Run,
 Checkpoint, reconnect/restart and multiple real ordinary-stop campaigns pass.

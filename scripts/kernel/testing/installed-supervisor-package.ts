@@ -23,8 +23,9 @@ import { validateGuestToolchainMetadata } from '../../../src/state/guest-toolcha
  * they do not qualify admission, execution, release signing or complete I1. */
 export async function buildInstalledSupervisorPackage(fixture: string,
   variant: 'complete' | 'retirement-native-missing' = 'complete', modelFixture?: InstalledModelPackageFixture,
-  options: Readonly<{ guestToolchain?: 'node-test-v1'; guestImageProfile?: 'qualification_max'; publicationRetirementDiagnostics?: true; credentialPhaseDiagnostics?: true; serverAuthenticationDiagnostics?: true; storeFailureDiagnostics?: true }> = {}) {
-  assert(Object.keys(options).every(key => key === 'guestToolchain' || key === 'guestImageProfile' || key === 'publicationRetirementDiagnostics' || key === 'credentialPhaseDiagnostics' || key === 'serverAuthenticationDiagnostics' || key === 'storeFailureDiagnostics'));
+  options: Readonly<{ headlessSchemaVersion?: 3; guestToolchain?: 'node-test-v1'; guestImageProfile?: 'qualification_max'; publicationRetirementDiagnostics?: true; credentialPhaseDiagnostics?: true; serverAuthenticationDiagnostics?: true; storeFailureDiagnostics?: true }> = {}) {
+  assert(Object.keys(options).every(key => key === 'headlessSchemaVersion' || key === 'guestToolchain' || key === 'guestImageProfile' || key === 'publicationRetirementDiagnostics' || key === 'credentialPhaseDiagnostics' || key === 'serverAuthenticationDiagnostics' || key === 'storeFailureDiagnostics'));
+  assert(options.headlessSchemaVersion === undefined || options.headlessSchemaVersion === 3);
   assert(options.guestToolchain === undefined || options.guestToolchain === 'node-test-v1');
   // Publisher construction only: keep the original maximum-load qualifier
   // separate from the default official compact image. No runtime flag exists.
@@ -139,7 +140,7 @@ export async function buildInstalledSupervisorPackage(fixture: string,
   const bundle: RuntimeBundleManifest = {
     schemaVersion: 1, bundleVersion: guest ? 'installed-sea-verifier-fixture-v1'
       : modelFixture ? 'installed-sea-run-fixture-v1' : 'installed-sea-read-qualification-v1',
-    controlProtocolRange: { min: 1, max: 1 }, headlessSchemaRange: { min: 1, max: 1 },
+    controlProtocolRange: { min: 1, max: 1 }, headlessSchemaRange: { min: options.headlessSchemaVersion ?? 1, max: options.headlessSchemaVersion ?? 1 },
     stateSchemaRange: { min: 1, max: KERNEL_STATE_SCHEMA_VERSION }, workerProtocolRange: { min: 1, max: 1 },
     entries: [...contents.map(({ bytes, ...entry }) => ({ ...entry, version: '1', digest: sha256Bytes(bytes), byteCount: bytes.byteLength })),
       ...(guest?.entries ?? [])],

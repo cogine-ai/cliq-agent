@@ -385,7 +385,9 @@ export async function replayInstalledRunAdmission(
 
   if (!control) {
     const { requestDigest: _digest, ...core } = normalized.originalRequest as Record<string, unknown>;
+    signal?.throwIfAborted();
     const requestArtifact = await artifacts.publishCanonical(core, 'cliq-run-submit-request-core-v1');
+    signal?.throwIfAborted();
     if (requestArtifact.ref !== requestDigest) throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed replay public core digest changed');
     let fenceOutcome: TimeFenceAdvance | undefined;
     driver.transaction(connection => {
@@ -578,7 +580,15 @@ async function admitRunInternal(
   const now = installed?.data.admittedAt ?? sampleCanonicalNow();
   const runId = identityHash('cliq-run-id-v1', input.principalId, 'run.submit', input.admissionKey);
   const verifierConsumption = verifierPreparation && await prepareVerifierConsumption(artifacts, verifierPreparation,
-    { runId, admissionIntentDigest, admittedAt: now });
+    { runId, admissionIntentDigest, admittedAt: now }, signal);
+  // Revocation stops the next independent publication, never an already
+  // started write/fsync/cleanup. A storage or retirement failure keeps priority.
+  const publish = async (value: unknown, schemaKind: string): Promise<PublishedArtifact> => {
+    signal?.throwIfAborted();
+    const artifact = await artifacts.publishCanonical(value, schemaKind);
+    signal?.throwIfAborted();
+    return artifact;
+  };
   const checkpointId = identityHash('cliq-checkpoint-id-v1', runId, 'initial', 0);
   const turnId = identityHash('cliq-turn-id-v1', runId, 'initial');
 
@@ -594,15 +604,15 @@ async function admitRunInternal(
   if (verifierPreparation && verifierConsumption) published.push(...verifierPreparation.metadata, ...verifierConsumption.metadata);
   if (installed) {
     const { requestDigest: _digest, ...core } = installed.data.normalized.originalRequest as Record<string, unknown>;
-    const requestArtifact = await artifacts.publishCanonical(core, 'cliq-run-submit-request-core-v1');
+    const requestArtifact = await publish(core, 'cliq-run-submit-request-core-v1');
     if (requestArtifact.ref !== requestDigest) throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed original public core digest changed');
     published.push(requestArtifact);
   } else if (verifierPreparation) {
-    const requestArtifact = await artifacts.publishCanonical(admitRequestCore(input, workspacePath, objectiveText, budgets), 'cliq-run-submit-internal-request-core-v1');
+    const requestArtifact = await publish(admitRequestCore(input, workspacePath, objectiveText, budgets), 'cliq-run-submit-internal-request-core-v1');
     if (requestArtifact.ref !== requestDigest) throw new TypeError('internal verifier admission request identity changed');
     published.push(requestArtifact);
   }
-  const objectiveArtifact = await artifacts.publishCanonical(objective, 'cliq-run-objective-v1');
+  const objectiveArtifact = await publish(objective, 'cliq-run-objective-v1');
   published.push(objectiveArtifact);
   decodeRunObjective(objective);
 
@@ -618,7 +628,7 @@ async function admitRunInternal(
     contextDigest: ''
   };
   admittedContext.contextDigest = digestOmitting(admittedContext, 'contextDigest');
-  const admittedContextArtifact = await artifacts.publishCanonical(admittedContext, 'cliq-admitted-context-v1');
+  const admittedContextArtifact = await publish(admittedContext, 'cliq-admitted-context-v1');
   published.push(admittedContextArtifact);
   decodeAdmittedContext(admittedContext);
 
@@ -633,7 +643,7 @@ async function admitRunInternal(
     stateDigest: ''
   };
   workspaceState.stateDigest = digestOmitting(workspaceState, 'stateDigest');
-  const workspaceStateArtifact = await artifacts.publishCanonical(workspaceState, 'cliq-workspace-state-v1');
+  const workspaceStateArtifact = await publish(workspaceState, 'cliq-workspace-state-v1');
   published.push(workspaceStateArtifact);
   decodeWorkspaceState(workspaceState);
 
@@ -668,12 +678,12 @@ async function admitRunInternal(
       consentDigest: ''
     };
     consent.consentDigest = digestOmitting(consent, 'consentDigest');
-    const consentArtifact = await artifacts.publishCanonical(consent, 'cliq-direct-unverified-consent-v1');
+    const consentArtifact = await publish(consent, 'cliq-direct-unverified-consent-v1');
     published.push(consentArtifact);
     decodeUnverifiedConsent(consent);
     runSpec = { ...runSpecCore, unverifiedConsentRef: consentArtifact.ref };
   }
-  const specArtifact = await artifacts.publishCanonical(runSpec, 'cliq-run-spec-v1');
+  const specArtifact = await publish(runSpec, 'cliq-run-spec-v1');
   published.push(specArtifact);
   decodeRunSpec(runSpec);
 
@@ -688,7 +698,7 @@ async function admitRunInternal(
     projectionDigest: ''
   };
   contextManifest.projectionDigest = digestOmitting(contextManifest, 'projectionDigest');
-  const contextManifestArtifact = await artifacts.publishCanonical(contextManifest, 'cliq-context-manifest-v1');
+  const contextManifestArtifact = await publish(contextManifest, 'cliq-context-manifest-v1');
   published.push(contextManifestArtifact);
   decodeContextManifest(contextManifest);
 
@@ -700,7 +710,7 @@ async function admitRunInternal(
     contextItemSeq: 0,
     cause: 'initial'
   };
-  const frontierArtifact = await artifacts.publishCanonical(frontier, 'cliq-run-frontier-v1');
+  const frontierArtifact = await publish(frontier, 'cliq-run-frontier-v1');
   published.push(frontierArtifact);
 
   const deadlineAt = installed?.data.deadlineAt ?? addCanonicalDuration(now, budgets.wallTimeMs);
@@ -747,7 +757,7 @@ async function admitRunInternal(
     ok: true,
     result: { method: 'run.submit', snapshot }
   };
-  const responseArtifact = await artifacts.publishCanonical(response, 'cliq-control-response-v1');
+  const responseArtifact = await publish(response, 'cliq-control-response-v1');
   published.push(responseArtifact);
 
   const admittedRequestDigest = canonicalSha256({

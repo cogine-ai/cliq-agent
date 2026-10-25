@@ -9953,6 +9953,69 @@ The source resource branch owns only the original worker-free merge cut: no Run 
 
 The kernel exposes one versioned local control protocol used by CLI, TUI, JSONL, and RPC adapters.
 
+The connected frontend's headless schema 3 is authored with the original
+control codecs in `src/kernel/control-wire.ts` and exported by the deterministic
+`src/control/v1.ts` generator. It does not redefine the application protocol.
+A JSONL request is exactly `{schemaVersion:3,request:<ControlRequestV1>}`;
+a response is exactly `{schemaVersion:3,protocolVersion:1,type:'response',
+response:<ControlResponseV1>}`. The entire outer JSON object, not just its
+application payload, remains within the original 1 MiB frame and strict JSON
+depth/entry bounds. JSONL emits its already authenticated hello first, then
+awaits each response write before reading or dispatching another request.
+Stdio JSON-RPC uses exactly `jsonrpc:'2.0'`, a bounded string or safe-integer
+`id`, the same application `method`, and `params` equal to the JSONL request
+envelope. Its `result` is the identical response envelope. A first explicit
+`control.hello` is required; incompatible ranges produce the closed application
+refusal. Notifications cannot invoke state methods. RPC correlation and fixed
+JSON-RPC parse/parameter errors remain outside application results; raw causes
+or rejected source bytes are never emitted.
+
+An explicit schema3 `run.attach` is a finite catch-up consumer of the same
+bounded native pages. JSONL emits each closed page response followed by that
+page's canonical event presentation records, awaiting every write before
+requesting another page. It fixes the first successful page's high-water as
+the target, limits later native requests to the remaining original interval,
+and stops at that target even if newer pages report a growing high-water. It
+does not subscribe for future events. RPC emits these same records through fixed
+`control.record` display notifications with exactly `params:{id,record}`,
+where `id` is the original RPC request id; it then returns exactly one result
+for that id containing the last authoritative page response. That final
+confirmation is not an additional event. Every page is validated against the
+actual readonly request/cursor sent for that page, rather than against the
+first request's cursor. No mutation is
+created or retried by this finite display drain.
+
+An attached consumer drains the exact returned cursor/high-water pages. On
+`EVENT_CURSOR_EXPIRED` it exposes that authoritative inline snapshot and ends
+the original cut; a later explicit attach may read from `earliestEventSeq-1`.
+It never chases a moving retention window or invents omitted display events.
+Committed event presentation is exactly `{schemaVersion:3,protocolVersion:1,
+runId,eventSeq,timestamp,type,payload}`: `timestamp` is the original
+`occurredAt`, `type` is `state_changed|progress`, and `payload` contains only
+the original event's remaining fields after omitting its schema/kind/identity/
+sequence/time envelope. Event presentation cannot update authoritative Run
+truth; the original page snapshot owns that truth. This is an explicit
+`run.attach` page consumer, not server push or a new control method.
+
+Reconnection is explicit, joins the old client before authenticating a fresh
+one, and never resends an operation automatically. An explicitly replayed
+request retains its original request id/digest/admission key. A new explicit
+user action may generate its own UUIDv7 request id and canonical digest; the
+UUID's timestamp is client identity data, not canonical-time authority.
+EOF, a failed output, closing an adapter or losing a client process detaches
+only. Cancellation requires a separate explicit revisioned `run.cancel`.
+Whole-artifact consumers follow returned offsets, bind an unchanged descriptor,
+check complete size, ref, digest and EOF, and expose bytes only after the
+complete hash passes their explicit bounded allocation ceiling. The buffered
+consumer ceiling of 64 MiB is not a change to `artifact.get`'s chunk protocol
+or permission to truncate a larger artifact.
+
+The current connected-client implementation does not make unconnected methods
+available. Schema 3 requires a genuine compatible hello; it cannot silently
+downgrade to the old installed range 1. Legacy default CLI/TUI and schema 2
+composition remain until their complete migration/release gate, and controlled
+signed installation fixtures do not substitute for public release trust roots.
+
 The exact initial method names are `control.hello`; `session.create|list|get|fork|compact|handoff.create`; `run.submit|list|get|attach|cancel|approve|input|reconcile|diff|result|apply`; `authorization.create|list|revoke`; `mcp.register|refresh|list`; `artifact.get`; and `supervisor.status`. Authorization and MCP registry methods are Supervisor-owned user administration, not adapter-specific Run lifecycle methods.
 
 Session continuity remains first-class but non-executing. The exact public methods are `session.create`, `session.list`, `session.get`, `session.fork`, `session.compact`, and `session.handoff.create`. There is deliberately no public `session.append`, `session.items`, handoff import, bookmark mutation, global active-Session setter, Session lease, or Run-Checkpoint mutation. `session.get` is the bounded item read; root Run terminal publication is the only internal Session append path. `cliq resume` is client composition of `session.get` plus a new `run.submit`, never resumption of an old Session execution. Imported legacy bookmarks/handoffs appear as typed legacy Session items/artifact refs through `session.get` plus `artifact.get`; `session.fork` may use their preserved cursor, but no hidden compatibility mutation method exists. No CLI/TUI/RPC adapter writes SQLite or legacy JSON directly.
