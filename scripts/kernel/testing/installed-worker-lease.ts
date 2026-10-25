@@ -198,10 +198,21 @@ function inspectRecoveredWorkerRetirement(stateRoot: string, uid: number, expect
       closedValue(retired, ['schemaVersion', 'format', 'runId', 'generationRef', 'generationIdentityDigest', 'inspectorIdentityRef', 'inspectorIdentityDigest',
         'observedAt', 'evidenceDigest', 'fromPhase', 'quarantineEvidenceRef', 'quarantineEvidenceDigest', 'sourceQuarantinedRowVersion',
         'activeRunPointerCount', 'nonretiredWorkerLaunchCount', 'liveContainmentCount', 'activeMountCount', 'releasableBrokerClaimCount']);
+      // prepareWorkerRecoveryTerminalPlan observes retirement before its sole
+      // terminal transaction retires all three rows. Ordinary recovery still
+      // requires an already-retired launch; only the exact verifier closure
+      // may use the fresh, atomic terminal commit branch.
+      const atomicVerifierCommit = verifierEvidence !== undefined && retired.observedAt < launch.retiredAt;
+      if (atomicVerifierCommit) {
+        const commits = database.prepare('SELECT updated_at FROM runs WHERE id=? LIMIT 2').all(expected.runId);
+        requireValue(commits.length === 1 && commits[0]!.updated_at === launch.retiredAt && row.lease_epoch === launch.leaseEpoch &&
+          launch.retiredAt === generation.updatedAt &&
+          parseCanonicalTime(generation.updatedAt) - parseCanonicalTime(retired.observedAt) <= 5000);
+      }
       requireValue(retired.format === 'cliq-workspace-generation-retirement-evidence-v1' && retired.fromPhase === 'quarantined' &&
         retired.runId === expected.runId && retired.generationRef === generation.generationRef && retired.generationIdentityDigest === generation.generationIdentityDigest &&
         retired.quarantineEvidenceRef === resources.quarantineEvidenceRef && retired.sourceQuarantinedRowVersion === generation.rowVersion - 1 &&
-        retired.observedAt >= launch.retiredAt && retired.observedAt <= generation.updatedAt &&
+        (atomicVerifierCommit || retired.observedAt >= launch.retiredAt) && retired.observedAt <= generation.updatedAt &&
         ['activeRunPointerCount', 'nonretiredWorkerLaunchCount', 'liveContainmentCount', 'activeMountCount', 'releasableBrokerClaimCount'].every(key => retired[key] === 0));
       const quarantine = evidence(resources.quarantineEvidenceRef, retired.quarantineEvidenceDigest);
       closedValue(quarantine, ['schemaVersion', 'format', 'runId', 'generationRef', 'generationIdentityDigest', 'sourceRowVersion', 'observedState',
@@ -267,7 +278,7 @@ function inspectRecoveredWorkerRetirement(stateRoot: string, uid: number, expect
         wrapper.probeKind === 'automatic' && wrapper.probeOrdinal === dispatch.probeOrdinal && wrapper.probeNonceDigest === dispatch.probeNonceDigest &&
         wrapper.probeDispatchDigest === dispatch.dispatchDigest && wrapper.probeStartedAt === dispatch.probeStartedAt && wrapper.probeDeadlineAt === dispatch.probeDeadlineAt &&
         death.observedAt >= dispatch.probeStartedAt && death.observedAt <= recovery.observedAt && recovery.observedAt <= dispatch.probeDeadlineAt &&
-        quarantine.observedAt < dispatch.probeDeadlineAt);
+        quarantine.observedAt < dispatch.probeDeadlineAt && (!atomicVerifierCommit || launch.retiredAt < dispatch.probeDeadlineAt));
       const anchor = decodeWorkspaceGenerationState(readCas(dispatch.inspectionTargetDigest)); requireValue(anchor.phase === 'fenced_reconciling');
       requireValue(anchor.generationRef === generation.generationRef && anchor.generationIdentityDigest === generation.generationIdentityDigest &&
         anchor.activeWorkerLaunchId === launch.launchId && anchor.leaseEpoch === launch.leaseEpoch &&

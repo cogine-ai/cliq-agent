@@ -13,7 +13,37 @@ Linux execution/restart and cancellation foundations are real, but a final
 model turn still stops at `candidate_required`. No work package or complete I1
 is declared finished by the 32 passing checks.
 
-Latest exact-head result (2026-10-25): `57645ef`
+Latest completed exact-head result (2026-10-25): `fc0790e`
+[run 474](https://github.com/cogine-ai/cliq-agent/actions/runs/40191567432)
+has fourteen successful and eight failed jobs. The installed normal Run,
+Checkpoint, reconnect/restart and multiple real ordinary-stop campaigns pass.
+Four jobs fail their script-test preflight; a new filesystem test samples its
+metadata before its own directory read changes Linux atime. Moving that read
+before the baseline retains the complete metadata equality assertion. The
+component regression is not installed qualification.
+
+Normal Delivery reaches `verification_parent_retirement` before failing its
+read-only consumer. The producer prepares retirement evidence at P and commits
+the worker, generation and terminal Run together at C; the consumer incorrectly
+requires the ordinary, already-retired-worker order. The correction accepts
+only the existing verifier-parent atomic branch, with the original epoch,
+three identical committed times, P-to-C freshness of at most five seconds and
+commit before the original thirty-second probe deadline;
+ordinary retirement keeps its original order and all original resource checks.
+Its real SQLite data regression is separate from the pending installed rerun.
+The owned-volume original-stop campaign still times out on its initial request,
+and the installed verifier still cannot complete the bounded secret scan.
+Delayed-volume and late-result campaigns do not reach installation because
+their preflight fails. None of these cuts is qualified.
+
+The unchanged collector retains 95 original reports / 461,066 bytes in 21
+categories; two campaign categories are absent. The final collection process
+joined, but the preceding poller was interrupted without a final wrapper join
+receipt. Preserve its original captures; a complete uninterrupted collection
+and independent closeout remain pending. Evidence retention is not a passing
+installation or release claim.
+
+Previous exact-head result: `57645ef`
 [run 473](https://github.com/cogine-ai/cliq-agent/actions/runs/40188023616)
 has six successful and sixteen failed jobs; all four TypeScript jobs pass.
 The installed campaigns fail during signed-package construction, before their

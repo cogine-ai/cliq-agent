@@ -232,13 +232,13 @@ test('carrier derivation creates a fresh private child in either private or read
       const before = await lstat(original, { bigint: true });
       const directory = await create(fixture);
       assert.equal(directory, path.join(fixture, 'supervisor-carrier-build'));
+      assert.deepEqual(await readdir(directory), []);
       const child = await lstat(directory, { bigint: true });
       assert(child.isDirectory()); assert.equal(child.mode & 0o777n, 0o700n);
       assert.equal(child.uid, BigInt(process.geteuid!()));
       assert.equal((await lstat(fixture)).mode & 0o777, mode);
       assert.deepEqual(await lstat(original, { bigint: true }), before);
       assert.equal(await readFile(original, 'utf8'), 'unchanged original carrier fixture\n');
-      assert.deepEqual(await readdir(directory), []);
       await assert.rejects(create(fixture), { code: 'EEXIST' });
       assert.deepEqual(await lstat(directory, { bigint: true }), child);
     } finally { await rm(fixture, { recursive: true, force: true }); }

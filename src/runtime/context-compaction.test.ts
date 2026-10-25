@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting } from '../kernel/identity.js';
 import type { ContextManifest, ContinuationItem, ToolBatchItem } from '../kernel/types.js';
-import type { NormalPromptMessageV1, NormalPromptProjectionV1 } from '../model/request.js';
+import { buildModelRequestWire, projectModelVisiblePrompt, type NormalPromptMessageV1, type NormalPromptProjectionV1 } from '../model/request.js';
 import { ref, testFixture } from '../model/testing/fixtures.js';
 import { contextSourceDigest, planContextCompaction, validateContextItems, type ContextItem } from './context-compaction.js';
 
@@ -76,6 +76,35 @@ test('compaction selects the greatest closed prefix and excludes fixed instructi
   assert.ok(selected.sourceContextUtf8.includes('b'.repeat(20_000)));
   assert.equal(selected.sourceContextUtf8.includes('c'.repeat(28_000)), false);
   assert.deepEqual(planContextCompaction(input), selected);
+});
+
+test('compaction keeps compatible reasoning inside its whole source turn and preserves the recent continuation', () => {
+  // Existing inert planning data: no admitted Run or provider/native execution.
+  const input = history(['a'.repeat(20_000), 'b'.repeat(20_000), 'c'.repeat(28_000)]);
+  input.provider.name = 'openai-compatible';
+  for (const message of input.projection.messages) if (message.role === 'assistant')
+    message.continuation = { provider: 'openai-compatible', model: input.provider.model,
+      items: [{ type: 'reasoning_content', reasoning_content: `trace-${message.sourceItemId}\r\n🧠` }] };
+  input.projection.projectionDigest = digestOmitting(input.projection, 'projectionDigest');
+  const before = structuredClone(input.projection);
+  const selected = planContextCompaction(input);
+  assert.equal(selected.kind, 'compact'); if (selected.kind !== 'compact') return;
+  assert.equal(selected.plan.compactThroughItemSeq, 6);
+  const source = JSON.parse(selected.sourceContextUtf8) as NormalPromptMessageV1[];
+  assert.deepEqual(source.filter(message => message.role === 'assistant').map(message => message.continuation),
+    before.messages.filter(message => message.role === 'assistant').slice(0, 2).map(message => message.continuation));
+  assert.equal(selected.sourceContextUtf8.includes('trace-turn-2'), false);
+  assert.deepEqual(input.projection, before);
+  const recent = before.messages.filter(message => message.role === 'assistant').at(-1)!;
+  const nextProjection = { ...before, messages: [before.messages[0]!, { index: 1, role: 'user' as const,
+    sourceKind: 'run_summary' as const, sourceId: 'summary', contentUtf8: 'Summary of the closed prefix.' },
+    { ...recent, index: 2 }, { ...before.messages.at(-1)!, index: 3 }] };
+  const wire = buildModelRequestWire({ provider: input.provider.name, model: input.provider.model,
+    streaming: false, contextLimitTokens: input.policy.contextLimitTokens },
+    projectModelVisiblePrompt(nextProjection, 'native-tools'), input.policy.reservedOutputTokens, 'native-tools');
+  const body = JSON.parse(Buffer.from(wire.bodyBytes).toString('utf8'));
+  assert.equal(body.messages[2].reasoning_content, 'trace-turn-2\r\n🧠');
+  assert.equal(body.messages[3].tool_call_id, 'call-2');
 });
 
 test('small prompts do not compact; an oversized indivisible prefix or protected suffix fails closed', () => {

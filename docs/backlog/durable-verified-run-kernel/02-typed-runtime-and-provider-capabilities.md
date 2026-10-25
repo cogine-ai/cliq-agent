@@ -167,6 +167,27 @@ and Zhipu use their explicit Chat Completions mappings; Ollama uses Chat.
 OpenAI reasoning items and Anthropic thinking/signature/redacted blocks survive
 observation, durable turns and the next request, bound to provider/model.
 
+The OpenAI-compatible Chat adapter also retains an explicitly present
+`reasoning_content` as exactly one closed continuation item
+`{type:'reasoning_content', reasoning_content:string|null}`. Empty and null are
+distinct from absence; text is not normalized. SSE string fragments concatenate
+in wire order; null does not erase earlier string fragments. Only a complete
+turn retains this item. Every surviving historical assistant turn replays the
+field, including turns without tool calls. The existing provider/model binding,
+strict JSON depth/entry limits and 1 MiB request/response bounds still apply;
+opaque continuation grants no tool, credential or settlement authority.
+Compaction retains the complete selected source messages and preserves recent
+turns with their continuation; it does not mutate retained turns.
+
+This mapping follows the [DeepSeek thinking-mode guide](https://api-docs.deepseek.com/zh-cn/guides/thinking_mode/)
+and [Chat API contract](https://api-docs.deepseek.com/zh-cn/api/create-chat-completion/).
+As checked on 2026-10-25, the [published model table](https://api-docs.deepseek.com/zh-cn/quick_start/pricing/)
+maps `deepseek-flash` to DeepSeek-V4.1-Flash-1017. This is external adapter-design
+context, not verified capability, pricing authority or a replacement model id.
+Offline JSON/SSE, retained-CAS and planning regressions make no live-provider,
+billing, installed-runtime or Linux qualification claim; no billable request is
+made and the existing spend ceiling is unchanged.
+
 The canonical endpoint and credential rules remain unchanged. Only exact
 Kernel-managed Ollama service/model/no-egress provenance permits credential-free
 zero cost. A raw local URL is insufficient. Every billable endpoint, including

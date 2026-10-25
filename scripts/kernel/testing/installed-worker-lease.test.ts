@@ -185,6 +185,52 @@ test('the verifier-parent wrapper reuses the complete strict SQL/CAS recovery gr
   changed.evidenceDigest = digestOmitting(changed, 'evidenceDigest'); assert.throws(() => inspect(changed));
   assert.throws(() => inspectInstalledVerifierParentRetirement(value.stateRoot, process.getuid!(), { ...expected, evidence, extra: true } as never));
   assert.deepEqual(await readFile(value.filename), before); assert.deepEqual(await readdir(value.cas), names);
+
+  // The genuine stopped-recovery producer prepares retirement at P, then
+  // atomically commits the launch, generation and terminal Run at C >= P.
+  // These are inert retained rows; no native retirement is manufactured here.
+  update(value.filename, database => database.exec('ALTER TABLE runs ADD COLUMN updated_at TEXT'));
+  const commitAt = addCanonicalDuration(value.retired.observedAt, 100);
+  const commit = (launchAt: string, generationAt: string, runAt: string) => update(value.filename, database => {
+    const launch = JSON.parse(database.prepare('SELECT row_json FROM worker_launches').get()!.row_json as string);
+    const generation = JSON.parse(database.prepare('SELECT row_json FROM workspace_generations').get()!.row_json as string);
+    database.prepare('UPDATE worker_launches SET retired_at=?,row_json=?').run(launchAt, JSON.stringify({ ...launch, retiredAt: launchAt }));
+    database.prepare('UPDATE workspace_generations SET row_json=?').run(JSON.stringify({ ...generation, updatedAt: generationAt }));
+    database.prepare('UPDATE runs SET updated_at=?').run(runAt);
+  });
+  commit(commitAt, commitAt, commitAt);
+  const atomicBefore = await readFile(value.filename), atomic = inspect();
+  assert.equal(atomic.retiredAt, commitAt); assert.equal(atomic.graph.retired.observedAt, value.retired.observedAt);
+  assert.deepEqual(await readFile(value.filename), atomicBefore); assert.deepEqual(await readdir(value.cas), names);
+  update(value.filename, database => database.exec('UPDATE runs SET lease_epoch=2'));
+  assert.throws(() => inspect(), 'the atomic terminal Run must retain the original worker epoch');
+  update(value.filename, database => database.exec('UPDATE runs SET lease_epoch=1'));
+  assert.throws(() => inspectInstalledRecoveredWorkerRetirement(value.stateRoot, process.getuid!(), value.expected),
+    'the ordinary retirement branch cannot borrow an atomic verifier closure');
+  const later = addCanonicalDuration(commitAt, 1);
+  for (const times of [[commitAt, later, commitAt], [later, commitAt, commitAt], [commitAt, commitAt, later]]) {
+    commit(times[0]!, times[1]!, times[2]!); assert.throws(() => inspect(), 'all three committed rows must share the original cut');
+  }
+  const lastFresh = addCanonicalDuration(value.retired.observedAt, 5000);
+  commit(lastFresh, lastFresh, lastFresh); assert.equal(inspect().retiredAt, lastFresh);
+  const stale = addCanonicalDuration(lastFresh, 1);
+  commit(stale, stale, stale); assert.throws(() => inspect(), 'retirement remains bounded by the original five-second freshness');
+
+  const wait = await read(recovery.waitingSubjectRef), deadline = wait.probeState.dispatch.probeDeadlineAt;
+  const nearDeadline = { ...value.retired, observedAt: new Date(Date.parse(deadline) - 100).toISOString() };
+  nearDeadline.evidenceDigest = digestOmitting(nearDeadline, 'evidenceDigest');
+  const nearRef = await value.put(nearDeadline), lateEvidence = { ...evidence, observedAt: nearDeadline.observedAt,
+    closure: { ...evidence.closure, retirementEvidenceRef: nearRef, retirementEvidenceDigest: nearDeadline.evidenceDigest } };
+  lateEvidence.evidenceDigest = digestOmitting(lateEvidence, 'evidenceDigest');
+  update(value.filename, database => {
+    const generation = JSON.parse(database.prepare('SELECT row_json FROM workspace_generations').get()!.row_json as string);
+    database.prepare('UPDATE workspace_generations SET row_json=?').run(JSON.stringify({ ...generation,
+      retirementEvidenceRef: nearRef, retirementEvidenceDigest: nearDeadline.evidenceDigest }));
+  });
+  const within = new Date(Date.parse(deadline) - 1).toISOString();
+  commit(within, within, within); assert.equal(inspect(lateEvidence).retiredAt, within);
+  commit(deadline, deadline, deadline);
+  assert.throws(() => inspect(lateEvidence), 'the atomic commit cannot outlive its original thirty-second probe');
 });
 
 async function fixture(t: TestContext) {

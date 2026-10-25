@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import { parseJsonStrict } from '../kernel/json.js';
 import { planCanonicalArtifact } from '../kernel/artifact-plan.js';
@@ -13,6 +16,10 @@ import { observeProviderResponse } from './provider-observation.js';
 import { buildModelRequestWire, estimatePromptTokens, MODEL_REQUEST_BODY_LIMIT_BYTES, MISSING_TOOL_NAME,
   type ModelVisiblePromptV1, type NormalPromptProjectionV1 } from './request.js';
 import { normalInput, ref, reseal, testFixture } from './testing/fixtures.js';
+import { readModelTurnMaterial } from '../state/agent-context.js';
+import { ArtifactCatalog } from '../state/artifacts.js';
+import { ContentAddressedStore } from '../state/cas.js';
+import { validateModelTurn } from '../runtime/continuation.js';
 
 const AT = '2026-09-05T00:00:02.000Z';
 const SCHEMA_REF = normalInput(testFixture()).projection.tools[0]!.inputSchemaRef;
@@ -765,4 +772,122 @@ test('Anthropic thinking signatures and redacted blocks survive streamed observa
     { type: 'redacted_thinking', data: 'ciphertext' },
     { type: 'text', text: 'Done.' }
   ]);
+});
+
+for (const reasoning of ['Think with tools.\n保留原字节。', '', null]) {
+  test(`compatible Chat reasoning survives the complete turn and next tool request (${reasoning === null ? 'null' : reasoning ? 'text' : 'empty'})`, () => {
+    const input = testFixture('openai-compatible'), model = load(input);
+    const reader = model.start(model.prepare(normalInput(input)), { status: 200, mediaType: 'application/json' });
+    reader.push(encode({ id: 'chat-1', model: 'model-1', choices: [{ index: 0, finish_reason: 'tool_calls', message: {
+      role: 'assistant', content: '', reasoning_content: reasoning,
+      tool_calls: [{ id: 'call-1', type: 'function', function: { name: 'read_file', arguments: '{"path":"one.ts"}' } }]
+    } }], usage: { prompt_tokens: 10, completion_tokens: 10 } }));
+    const result = reader.finish(AT, resolveToolInput); assert.equal(result.kind, 'usable');
+    if (result.kind !== 'usable') return;
+    assert.deepEqual(result.turn.continuation, { provider: 'openai-compatible', model: 'model-1',
+      items: [{ type: 'reasoning_content', reasoning_content: reasoning }] });
+    const call = result.turn.toolCalls[0]!;
+    const second = model.prepare(normalInput(input, [
+      { index: 2, role: 'assistant', sourceItemId: 'turn-1', contentUtf8: '', continuation: result.turn.continuation,
+        toolCalls: [{ ...call, arguments: { encoding: 'jcs_json', value: { path: 'one.ts' } } }] },
+      { index: 3, role: 'tool', sourceItemId: 'tool-1', toolCallId: call.callId, contentUtf8: 'file result' }
+    ]));
+    assert.deepEqual(body(second).messages[2], { role: 'assistant', content: '', reasoning_content: reasoning,
+      tool_calls: [{ id: 'call-1', type: 'function', function: { name: 'read_file', arguments: '{"path":"one.ts"}' } }] });
+    assert.equal(body(second).messages[3].tool_call_id, 'call-1');
+  });
+}
+
+test('compatible reasoning from a no-tool historical turn is replayed with the next tools request', () => {
+  const input = testFixture('openai-compatible'), model = load(input), prompt = normalInput(input);
+  const reader = model.start(model.prepare(prompt), { status: 200, mediaType: 'application/json' });
+  reader.push(encode({ model: 'model-1', choices: [{ index: 0, finish_reason: 'stop',
+    message: { content: 'done', reasoning_content: 'raw\r\ne\u0301🧠' } }] }));
+  const result = reader.finish(AT, resolveToolInput);
+  assert.equal(result.kind, 'usable'); if (result.kind !== 'usable') return;
+  const second = model.prepare(normalInput(input, [
+    { index: 2, role: 'assistant', sourceItemId: 'turn-1', contentUtf8: 'done', toolCalls: [], continuation: result.turn.continuation },
+    { index: 3, role: 'user', sourceKind: 'user_input', sourceId: 'input-2', contentUtf8: 'Continue.' }
+  ]));
+  assert.equal(body(second).messages[2].reasoning_content, 'raw\r\ne\u0301🧠');
+  assert.equal(body(second).tools.length, 1);
+  assert.equal(Object.hasOwn(body(second).messages[2], 'tool_calls'), false);
+});
+
+test('compatible retained CAS turn reopens without losing multi-call reasoning or result association', async () => {
+  // Real retained bytes and the existing pure compiler/validator only: no Run,
+  // StateOwner, native observation, provider call or execution permission.
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'cliq-compatible-turn-'));
+  try {
+    const root = path.join(directory, 'objects'); await mkdir(root, { mode: 0o700 });
+    const artifacts = new ArtifactCatalog(new ContentAddressedStore(root));
+    const input = testFixture('openai-compatible'), model = load(input), prepared = model.prepare(normalInput(input));
+    const reader = model.start(prepared, { status: 200, mediaType: 'application/json' });
+    reader.push(encode({ model: 'model-1', choices: [{ index: 0, finish_reason: 'tool_calls', message: {
+      content: '', reasoning_content: 'trace\r\n🧠', tool_calls: ['one', 'two'].map(id =>
+        ({ id, type: 'function', function: { name: 'read_file', arguments: JSON.stringify({ path: `${id}.ts` }) } }))
+    } }] }));
+    const result = reader.finish(AT, resolveToolInput);
+    assert.equal(result.kind, 'usable'); if (result.kind !== 'usable') return;
+    for (const artifact of result.artifacts) {
+      const published = await artifacts.publishBytes(artifact.bytes, artifact.mediaType, artifact.schemaKind);
+      assert.equal(published.ref, artifact.ref);
+    }
+    const reopened = new ArtifactCatalog(new ContentAddressedStore(root));
+    const material = await readModelTurnMaterial(reopened, result.turnRef);
+    validateModelTurn(prepared.request, material, resolveToolInput);
+    assert.deepEqual(material.turn, result.turn);
+    const second = model.prepare(normalInput(input, [
+      { index: 2, role: 'assistant', sourceItemId: 'turn-1', contentUtf8: material.text.utf8,
+        continuation: material.turn.continuation,
+        toolCalls: material.turn.toolCalls.map((call, index) => {
+          const observed = material.inputs[index]!.observed;
+          return { ...call, arguments: observed.encoding === 'jcs_json'
+            ? { encoding: 'jcs_json' as const, value: observed.value }
+            : { encoding: 'utf8_json_fragment' as const, utf8: observed.utf8 } };
+        }) },
+      ...material.turn.toolCalls.map((call, index) => ({ index: index + 3, role: 'tool' as const,
+        sourceItemId: `result-${index}`, toolCallId: call.callId, contentUtf8: `${call.callId} result` }))
+    ]));
+    assert.equal(body(second).messages[2].reasoning_content, 'trace\r\n🧠');
+    assert.deepEqual(body(second).messages[2].tool_calls.map((call: { id: string }) => call.id), ['one', 'two']);
+    assert.deepEqual(body(second).messages.slice(3).map((message: { tool_call_id: string; content: string }) =>
+      [message.tool_call_id, message.content]), [['one', 'one result'], ['two', 'two result']]);
+    const tampered = structuredClone(material);
+    tampered.turn.continuation!.items[0] = { type: 'reasoning_content', reasoning_content: 'substitution' };
+    assert.throws(() => validateModelTurn(prepared.request, tampered, resolveToolInput), /does not match its prepared request/);
+    assert.throws(() => validateModelTurn({ ...prepared.request, model: 'another-model' }, material, resolveToolInput), /does not match/);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('compatible continuation rejects wrong identity, count, types and open shapes before request release', () => {
+  const input = testFixture('openai-compatible'), model = load(input);
+  const good = { provider: 'openai-compatible' as const, model: 'model-1', items: [{ type: 'reasoning_content', reasoning_content: 'trace' }] };
+  const values: unknown[] = [
+    { ...good, provider: 'openrouter' }, { ...good, model: 'another-model' }, { ...good, extra: true },
+    { ...good, items: [] }, { ...good, items: [...good.items, ...good.items] },
+    ...[{}, { type: 'reasoning_content' }, { type: 'reasoning', reasoning_content: 'trace' },
+      { ...good.items[0], extra: true }, { type: 'reasoning_content', reasoning_content: {} },
+      { type: 'reasoning_content', reasoning_content: undefined }].map(item => ({ ...good, items: [item] }))
+  ];
+  for (const continuation of values) {
+    assert.throws(() => {
+      const prompt = normalInput(input, [{ index: 2, role: 'assistant', sourceItemId: 'turn-1', contentUtf8: 'done', toolCalls: [],
+        continuation: continuation as typeof good }]);
+      resealProjection(prompt); model.prepare(prompt);
+    });
+  }
+});
+
+test('compatible reasoning uses the original exact 1 MiB outbound body cap including escaping', () => {
+  const input = testFixture('openai-compatible', true, 1_048_576), model = load(input);
+  const prepare = (reasoning_content: string) => model.prepare(normalInput(input, [{ index: 2, role: 'assistant',
+    sourceItemId: 'turn-1', contentUtf8: 'done', toolCalls: [], continuation: { provider: 'openai-compatible', model: 'model-1',
+      items: [{ type: 'reasoning_content', reasoning_content }] } }]));
+  const available = MODEL_REQUEST_BODY_LIMIT_BYTES - prepare('').outbound.bodyBytes.byteLength;
+  const reasoning = '"'.repeat(Math.floor(available / 2)) + 'a'.repeat(available % 2);
+  const exact = prepare(reasoning);
+  assert.equal(exact.outbound.bodyBytes.byteLength, MODEL_REQUEST_BODY_LIMIT_BYTES);
+  assert.equal(body(exact).messages[2].reasoning_content, reasoning);
+  assert.throws(() => prepare(reasoning + 'a'), { name: 'RangeError', message: 'native request body exceeds 1 MiB' });
 });

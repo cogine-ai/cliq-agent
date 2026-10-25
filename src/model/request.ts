@@ -348,7 +348,19 @@ function validateNormalMessageSequence(messages: readonly ModelVisibleMessage[])
   }
 }
 
-function openAiMessages(messages: readonly ModelVisibleMessage[]): unknown[] {
+function compatibleReasoningFields(continuation: ProviderContinuation | undefined, provider: ProviderName, model: string):
+  { reasoning_content?: string | null } {
+  if (continuation === undefined) return {};
+  if (provider !== 'openai-compatible' || continuation.provider !== provider || continuation.model !== model ||
+      continuation.items.length !== 1) throw new TypeError('compatible reasoning continuation identity or count differs');
+  const item = continuation.items[0];
+  if (!isRecord(item) || !hasExactKeys(item, ['type', 'reasoning_content']) || item.type !== 'reasoning_content' ||
+      item.reasoning_content !== null && typeof item.reasoning_content !== 'string')
+    throw new TypeError('compatible reasoning continuation has an invalid closed shape');
+  return { reasoning_content: item.reasoning_content };
+}
+
+function openAiMessages(messages: readonly ModelVisibleMessage[], provider: ProviderName, model: string): unknown[] {
   return messages.map((message) => {
     if (message.role === 'system' || message.role === 'user') {
       return { role: message.role, content: message.contentUtf8 };
@@ -360,6 +372,7 @@ function openAiMessages(messages: readonly ModelVisibleMessage[]): unknown[] {
     return {
       role: 'assistant',
       content: message.contentUtf8,
+      ...compatibleReasoningFields(message.continuation, provider, model),
       ...(message.toolCalls.length === 0
         ? {}
         : {
@@ -587,7 +600,7 @@ export function buildModelRequestWire(
     requestPath = '/chat/completions';
     body = {
       model,
-      messages: openAiMessages(prompt.messages),
+      messages: openAiMessages(prompt.messages, provider, model),
       stream,
       ...(provider === 'openrouter' ? { max_completion_tokens: output } : { max_tokens: output }),
       ...(stream ? { stream_options: { include_usage: true } } : {}),
@@ -679,7 +692,9 @@ function validateProjection(input: PrepareNormalModelAttemptInput): void {
         )
           throw new TypeError('continuation identity mismatch');
         assertBoundedJsonValue(continuation.items, 'provider continuation');
-        if (
+        if (input.authority.provider === 'openai-compatible') {
+          compatibleReasoningFields(continuation, input.authority.provider, input.authority.model);
+        } else if (
           continuation.items.some(
             (item: unknown) =>
               !isRecord(item) ||
