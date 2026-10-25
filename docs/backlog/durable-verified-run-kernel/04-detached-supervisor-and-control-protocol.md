@@ -963,6 +963,15 @@ carrier, archive and tool remain unchanged. Guest Node images and ordinary
 component recipes continue to consume the original carrier, not this derived
 Supervisor input. Darwin retains its existing preparation and signing path.
 
+The publisher's original fixture can remain read-only-traversable by the
+installed test principal, but must be owned by the builder and not writable by
+group or others. Derivation creates a fixed, exclusive, never-adopted 0700 child
+inside it; it never chmods the existing fixture or moves the original carrier.
+The original private-directory identity and fsync checks apply to that child,
+and creating it also syncs and rechecks the held original parent. Existing
+children, symlink parents, changed identities and writable parents are refused.
+Only the same builder uid consumes the derived carrier during SEA construction.
+
 Before executing the derived carrier, completely read/hash both images and
 compare every original program header and runtime extent, including LOAD,
 interpreter, notes and dynamic bytes. Only ELF section-table location/count/name

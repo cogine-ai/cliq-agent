@@ -13,7 +13,20 @@ Linux execution/restart and cancellation foundations are real, but a final
 model turn still stops at `candidate_required`. No work package or complete I1
 is declared finished by the 32 passing checks.
 
-Current installed boundary (2026-10-25): the exact `fd7f6d8` Linux
+Latest exact-head result (2026-10-25): `57645ef`
+[run 473](https://github.com/cogine-ai/cliq-agent/actions/runs/40188023616)
+has six successful and sixteen failed jobs; all four TypeScript jobs pass.
+The installed campaigns fail during signed-package construction, before their
+business cuts. The new derivation requires a private directory, whereas the
+existing shared publisher fixture is deliberately read-only-traversable. The
+correction creates an exclusive 0700 derivation child, preserving the original
+carrier and all full-byte, identity, directory-sync and signing checks. Local
+real-filesystem regressions are not Linux installation qualification. All 105
+original reports / 84,789 bytes and 21 unchanged-baseline, zero-error cleanups
+are retained; independent closeout SHA-256:
+`0a1203d2a01dcd5f3724ff5da7b5df03691ef1d1d800bf748ba6adb49cfa95ba`.
+
+Deepest preceding installed boundary: the exact `fd7f6d8` Linux
 [run 472](https://github.com/cogine-ai/cliq-agent/actions/runs/40183283874)
 completed with 17 successful and five failed jobs; all four TypeScript jobs
 passed. Normal publication, no-op and merge assertions pass, and cancellation

@@ -3654,10 +3654,15 @@ Cancellation/failure may leave more valid data-only orphans than the former
 serial order, never a partial admission or execution authority. No guard,
 durability boundary, request limit or shutdown deadline is removed or enlarged.
 
-Three more fixed data closures may use that same four-stage core: source
+Four more fixed data closures may use that same four-stage core: source
 `[original request, sandbox profile, target]`, source-retirement
-`[inspector, evidence]`, and exactly-one-credential model material
-`[endpoint, binding, capability]`. Exact pair/triple APIs expose only their
+`[inspector, evidence]`, exactly-one-credential model material
+`[endpoint, binding, capability]`, and the fresh final-admission single-verifier
+`[command, environment, verifier specification]`. The last group retains the
+fresh original resolver and final transaction/grant consumption; it republishes
+all complete bytes even when already present, never borrows earlier assembly
+authorization, and never runs in historical reconstruction.
+Exact pair/triple APIs expose only their
 fully joined result; each file still syncs and independently rehashes. Keep
 source reservation/retirement SQL, real capture/staging retirement, entries
 readback, every held/currentness check, full material/guest-image reads and

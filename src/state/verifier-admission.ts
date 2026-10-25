@@ -229,6 +229,29 @@ async function resolveVerifierSpec(driver: SqliteDriver, artifacts: ArtifactCata
 
 async function publishVerifierArtifacts(artifacts: ArtifactCatalog, composed: ReturnType<typeof composeVerifierSpec>,
   historical?: VerifierPreparationHistory, signal?: AbortSignal) {
+  // Fresh final resolution still republishes every complete object. Only its
+  // one-verifier command/environment/spec share the existing four barriers;
+  // history never enters this branch or repairs a missing retained object.
+  if (!historical && composed.spec.verifiers.length === 1) {
+    if (composed.artifacts.length !== 3) throw new TypeError('one verifier requires its command, environment and spec');
+    signal?.throwIfAborted();
+    const [command, environment, spec] = composed.artifacts;
+    const expected = composed.artifacts.map(({ value, format }) => {
+      const bytes = canonicalJsonBytes(value);
+      return { ref: sha256Bytes(bytes), byteLength: bytes.byteLength, mediaType: 'application/json', schemaKind: format };
+    });
+    const published = await artifacts.publishCanonicalTriple([
+      { value: command!.value, schemaKind: command!.format }, { value: environment!.value, schemaKind: environment!.format },
+      { value: spec!.value, schemaKind: spec!.format }
+    ]);
+    if (published.length !== 3 || expected.some((wanted, index) => {
+      const actual = published[index];
+      return !actual || actual.ref !== wanted.ref || actual.byteLength !== wanted.byteLength ||
+        actual.mediaType !== wanted.mediaType || actual.schemaKind !== wanted.schemaKind;
+    })) throw new KernelStorageError('ARTIFACT_MISMATCH', 'final verifier publication differs from its complete canonical bytes');
+    signal?.throwIfAborted();
+    return [...published];
+  }
   const metadata: PublishedArtifact[] = [];
   for (const { value, format, ref } of composed.artifacts) {
     signal?.throwIfAborted();

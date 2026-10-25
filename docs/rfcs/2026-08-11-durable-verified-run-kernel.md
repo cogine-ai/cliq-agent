@@ -262,6 +262,12 @@ data closures: `[original control request, source sandbox profile, source
 inspection target]`, `[retirement inspector identity, source retirement
 evidence]`, and, iff there is exactly one model credential binding,
 `[registered endpoint, credential binding, model capability evidence]`.
+The fresh final-admission single-verifier path may likewise publish the fixed
+`[command, environment, verifier specification]` triple. It retains its fresh
+original resolver, final transaction and grant consumption; all three members
+are published and completely verified again even when their refs already
+exist. Earlier assembly data is not reusable authorization, and historical
+reconstruction never publishes this group.
 These are exact two/three-member tuples, not a general queued batch or a
 deferred-durability API. Precomputed canonical refs compose data only. Every
 member retains its own file sync and complete final byte/hash/length/metadata

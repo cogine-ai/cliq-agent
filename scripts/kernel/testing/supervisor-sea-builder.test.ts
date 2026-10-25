@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -217,6 +217,68 @@ test('installed publisher preparation preserves the original fresh-root refusal 
     assert.equal(await readFile(sentinel, 'utf8'), 'not a publisher input\n');
     assert.deepEqual(await readdir(fixture), [name]);
   } finally { await rm(fixture, { recursive: true, force: true }); }
+});
+
+test('carrier derivation creates a fresh private child in either private or read-only-traversable publisher fixtures', async () => {
+  const builder = await import('./supervisor-sea-builder.js') as Record<string, unknown>;
+  assert.equal(typeof builder.createSupervisorCarrierDerivationDirectory, 'function');
+  const create = builder.createSupervisorCarrierDerivationDirectory as (fixture: string) => Promise<string>;
+  for (const mode of [0o700, 0o755]) {
+    const fixture = await mkdtemp(path.join(os.tmpdir(), 'cliq-carrier-parent-'));
+    try {
+      await chmod(fixture, mode);
+      const original = path.join(fixture, 'original-carrier');
+      await writeFile(original, 'unchanged original carrier fixture\n', { flag: 'wx', mode: 0o500 });
+      const before = await lstat(original, { bigint: true });
+      const directory = await create(fixture);
+      assert.equal(directory, path.join(fixture, 'supervisor-carrier-build'));
+      const child = await lstat(directory, { bigint: true });
+      assert(child.isDirectory()); assert.equal(child.mode & 0o777n, 0o700n);
+      assert.equal(child.uid, BigInt(process.geteuid!()));
+      assert.equal((await lstat(fixture)).mode & 0o777, mode);
+      assert.deepEqual(await lstat(original, { bigint: true }), before);
+      assert.equal(await readFile(original, 'utf8'), 'unchanged original carrier fixture\n');
+      assert.deepEqual(await readdir(directory), []);
+      await assert.rejects(create(fixture), { code: 'EEXIST' });
+      assert.deepEqual(await lstat(directory, { bigint: true }), child);
+    } finally { await rm(fixture, { recursive: true, force: true }); }
+  }
+});
+
+test('carrier derivation refuses writable publisher fixtures before creating any child', async () => {
+  const builder = await import('./supervisor-sea-builder.js') as Record<string, unknown>;
+  assert.equal(typeof builder.createSupervisorCarrierDerivationDirectory, 'function');
+  const create = builder.createSupervisorCarrierDerivationDirectory as (fixture: string) => Promise<string>;
+  for (const mode of [0o720, 0o702, 0o777]) {
+    const fixture = await mkdtemp(path.join(os.tmpdir(), 'cliq-carrier-writable-'));
+    try {
+      await chmod(fixture, mode);
+      await assert.rejects(create(fixture), /protected publisher fixture/);
+      assert.deepEqual(await readdir(fixture), []);
+      assert.equal((await lstat(fixture)).mode & 0o777, mode);
+    } finally { await rm(fixture, { recursive: true, force: true }); }
+  }
+});
+
+test('carrier derivation never adopts a pre-existing file or symlink and refuses a symlinked parent', async () => {
+  const { createSupervisorCarrierDerivationDirectory: create } = await import('./supervisor-sea-builder.js');
+  for (const kind of ['file', 'symlink'] as const) {
+    const fixture = await mkdtemp(path.join(os.tmpdir(), 'cliq-carrier-existing-'));
+    try {
+      const target = path.join(fixture, 'existing-target'); await mkdir(target, { mode: 0o700 });
+      const sentinel = path.join(target, 'sentinel'); await writeFile(sentinel, 'original\n', { flag: 'wx', mode: 0o400 });
+      const child = path.join(fixture, 'supervisor-carrier-build');
+      if (kind === 'file') await writeFile(child, 'not a directory\n', { flag: 'wx', mode: 0o400 });
+      else await symlink(target, child);
+      const before = await lstat(child, { bigint: true });
+      await assert.rejects(create(fixture), { code: 'EEXIST' });
+      assert.deepEqual(await lstat(child, { bigint: true }), before);
+      const alias = path.join(fixture, 'parent-alias'); await symlink(target, alias);
+      await assert.rejects(create(alias));
+      assert.deepEqual(await readdir(target), ['sentinel']);
+      assert.equal(await readFile(sentinel, 'utf8'), 'original\n');
+    } finally { await rm(fixture, { recursive: true, force: true }); }
+  }
 });
 
 // Actual diagnostic code generation and Node channel execution only. This does

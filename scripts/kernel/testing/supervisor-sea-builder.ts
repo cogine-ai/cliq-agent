@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
-import { chmod, copyFile, lstat, open, readFile, realpath, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, lstat, mkdir, open, readFile, realpath, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { build } from 'esbuild';
 import { inject } from 'postject';
@@ -171,6 +171,30 @@ export async function prepareSupervisorSeaCarrier(fixture: string, cachedArchive
   return { nodeRoot, carrier };
 }
 
+/** Qualification fixture construction only, not authority or a loader. The
+ * existing publisher root can be traversable by the installed test principal;
+ * derived bytes are created only in a new, never-adopted private child. */
+export async function createSupervisorCarrierDerivationDirectory(fixture: string): Promise<string> {
+  const parent = await open(fixture, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  try {
+    const before = await parent.stat({ bigint: true });
+    assert(before.isDirectory() && before.uid === BigInt(process.geteuid!()) && (before.mode & 0o022n) === 0n,
+      'carrier derivation requires a protected publisher fixture');
+    const stable = async () => {
+      for (const after of [await parent.stat({ bigint: true }), await lstat(fixture, { bigint: true })])
+        for (const key of ['dev', 'ino', 'uid', 'gid', 'mode'] as const) assert.equal(after[key], before[key]);
+    };
+    await stable();
+    const directory = path.join(fixture, 'supervisor-carrier-build');
+    await mkdir(directory, { mode: 0o700 });
+    const child = await lstat(directory, { bigint: true });
+    assert(child.isDirectory() && child.uid === before.uid && (child.mode & 0o777n) === 0o700n,
+      'carrier derivation directory must be private');
+    await stable(); await parent.sync(); await stable();
+    return directory;
+  } finally { await parent.close(); }
+}
+
 /** Fixed publisher derivation, never a runtime option or loader shortcut.
  * The original carrier remains the input to guest/component recipes. Only
  * the Supervisor's new signed SEA image uses the smaller derived carrier;
@@ -179,7 +203,8 @@ export async function prepareInstalledSupervisorSeaCarrier(fixture: string, cach
   const original = await prepareSupervisorSeaCarrier(fixture, cachedArchive);
   if (process.platform !== 'linux') return { ...original, supervisorCarrier: original.carrier };
   assert.equal(process.arch, 'x64', 'only the fixed Linux x64 carrier has a metadata derivation');
-  const directory = await lstat(fixture, { bigint: true });
+  const derivation = await createSupervisorCarrierDerivationDirectory(fixture);
+  const directory = await lstat(derivation, { bigint: true });
   assert(directory.isDirectory() && directory.uid === BigInt(process.geteuid!()) && (directory.mode & 0o077n) === 0n,
     'carrier derivation requires the publisher private fixture');
   const fields = ['dev', 'ino', 'uid', 'gid', 'mode', 'nlink', 'size', 'mtimeNs', 'ctimeNs'] as const;
@@ -200,7 +225,7 @@ export async function prepareInstalledSupervisorSeaCarrier(fixture: string, cach
     for (const key of fields) assert.equal(after.identity[key], before.identity[key], 'publisher input identity changed');
   };
   const execute = (executable: string, args: string[], expected?: string) => {
-    const child = spawnSync(executable, args, { cwd: fixture, encoding: 'utf8', timeout: 60_000, maxBuffer: 65_536,
+    const child = spawnSync(executable, args, { cwd: derivation, encoding: 'utf8', timeout: 60_000, maxBuffer: 65_536,
       env: { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C' } });
     assert.equal(child.error, undefined, 'publisher derivation process did not join');
     assert.equal(child.signal, null); assert.equal(child.status, 0, 'publisher derivation failed');
@@ -214,7 +239,7 @@ export async function prepareInstalledSupervisorSeaCarrier(fixture: string, cach
   const strip = await realpath('/usr/bin/strip'), tool = await held(strip, 16_777_216);
   assert.equal(tool.identity.uid, 0n); assert.equal(tool.identity.mode & 0o022n, 0n);
   assert(/^GNU strip \([\x20-\x7e]{1,96}\) [0-9][\x20-\x7e]{0,48}$/u.test(execute(strip, ['--version']).split('\n')[0]!));
-  const supervisorCarrier = path.join(fixture, 'supervisor-carrier-static');
+  const supervisorCarrier = path.join(derivation, 'supervisor-carrier-static');
   await copyFile(original.carrier, supervisorCarrier, constants.COPYFILE_EXCL);
   execute(strip, ['--strip-all', '--no-merge-notes', '--', supervisorCarrier]);
   await chmod(supervisorCarrier, 0o500);
@@ -229,7 +254,7 @@ export async function prepareInstalledSupervisorSeaCarrier(fixture: string, cach
     for (const key of fields) assert.equal(current[key], selected.identity[key]);
     await file.sync();
   } finally { await file.close(); }
-  const parent = await open(fixture, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  const parent = await open(derivation, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
   try {
     const current = await parent.stat({ bigint: true });
     for (const key of ['dev', 'ino', 'uid', 'gid', 'mode'] as const) assert.equal(current[key], directory[key]);
