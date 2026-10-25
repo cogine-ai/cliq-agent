@@ -2464,3 +2464,41 @@ logical counter is cumulative across tables, not a count of generations;
 independent actual storage locations cannot be deduplicated merely because
 their bytes match. None of these failures qualifies the missing cut, complete
 I1/I2 or the release. No PR is opened for this incomplete delivery.
+
+The diagnostic commit `2404cac45509024ddf684dd33ce8b5e34a2c96ae`
+(tree `619dd513df8fc06eb9958bf2863cb684c1133241`) passes the complete local
+gate, including 2,760 full tests with three existing skips, 263 script tests
+with 15 existing platform skips and 99 portable tests. Its natural
+[workflow 40165854624](https://github.com/cogine-ai/cliq-agent/actions/runs/40165854624),
+attempt 1 / run 469, again has 17 successful jobs and five failures, with all
+four TypeScript jobs successful. Nine independently pinned captures retain
+105 original JSON reports / 499,065 bytes across 23 categories. Complete
+closed-schema revalidation preserves 18 true and five false qualification
+reports, 21 zero-error cleanups and 21 byte-identical baseline pairs; every
+collector, pipe and scoped awake guard joins. Closeout SHA-256:
+`b5a1fb49f69f6fbf2a41600f49bb914fb4193e87d140b732d32fee416c194823`.
+
+Normal Delivery's refusal is now located in `result_recovery_terminal`.
+The retained last-forward result reader compares absent reconciliation data
+`{}` against an object containing two `undefined` members. The unchanged
+canonical serializer correctly rejects that object. The correction constructs
+the absent or complete pair consistently with the original strict decoders;
+it preserves exact reference/digest matching, UNKNOWN provenance, receipts,
+retirement, Journal, Checkpoints and all native checks. Data regressions
+reproduce the original refusal; they do not qualify installed publication.
+
+Installed assembly's initial verifier lookup now selects only a signed
+release's inert manifest ref/digest. It retains the real grant-row decoder,
+principal, active state, current TTL, supported request and unique-root checks;
+it reads no target CAS or workspace and grants no authority. `materialFor`,
+the later complete historical/current identity and image reads, and the final
+admission/transactional grant consumption remain unchanged. This removes
+only the redundant first full traversal, not a release or integrity gate.
+Errors in multiple invalid inputs may be discovered in a different order.
+The combined correction still needs its own complete local and Linux gates.
+
+The delayed-volume campaign misses five-second READY in this run; the other
+two storage campaigns pass READY but miss the initial 30-second request.
+The cumulative verifier secret scan is still incomplete at 4,096 streams.
+No required cut, complete I1/I2, provider or release qualification is inferred
+from these failures or the new local regressions. All original limits remain.

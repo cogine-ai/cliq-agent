@@ -799,7 +799,8 @@ export async function readPublicationPrefixData(driver: SqliteDriver, artifacts:
         'publication result exact original handoff retirement');
       if (entry.receivedHandoff) requireEqual(
         paired,
-        { ref: entry.receivedHandoff.item.reconciliationEvidenceRef, digest: entry.receivedHandoff.item.reconciliationEvidenceDigest },
+        'reconciliationEvidenceRef' in entry.receivedHandoff.item ?
+          { ref: entry.receivedHandoff.item.reconciliationEvidenceRef, digest: entry.receivedHandoff.item.reconciliationEvidenceDigest } : {},
         'publication result exact original received probe association');
       const terminal = entry.history.find(value => value.phase === (item.outcome === 'completed' ? 'completed' : item.outcome === 'unknown' ? 'unknown' : 'failed') &&
         value.evidenceRef === item.evidenceRef);

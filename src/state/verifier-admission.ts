@@ -9,13 +9,13 @@ import type { ArtifactCatalog, PublishedArtifact } from './artifacts.js';
 import { readAuthorizationHistory, type AuthorizationRuntime } from './authorization.js';
 import { authorizationGrantCore, decodeAuthorizationConsumptionReceipt, decodeAuthorizationGrant, VerifierAuthorizationError } from './authorization-artifacts.js';
 import { KernelStorageError } from './errors.js';
-import { readRetainedVerifierToolchain, type RetainedVerifierToolchain } from './guest-toolchain.js';
+import { guestToolchainRoots, readRetainedVerifierToolchain, type RetainedVerifierToolchain } from './guest-toolchain.js';
 import { consumeOrRevokeAuthorization, readAuthorizationGrant } from './repositories/authorization-grants.js';
 import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
 import type { StateOwnerContext } from './state-owner.js';
 import { decodeVerifierCommand, decodeVerifierEnvironment, decodeVerifierSpec } from './verifier-artifacts.js';
 import { sampleCanonicalNow } from './canonical-time.js';
-import { exactKeys, verifyRuntimeBundle } from '../policy/runtime-authority.js';
+import { exactKeys, verifyRuntimeBundle, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { decodeRetainedRunAssembly } from '../model/run-assembly.js';
 import { readCheckpoint, readControlRequest, readRun } from './rows.js';
 import { readRetainedControlChannelClosure } from './control-channel.js';
@@ -83,6 +83,42 @@ export function assertSupportedVerifierRequests(requests: readonly VerifierReque
     if (!Number.isSafeInteger(timeout) || timeout < 1000 || timeout > 3_600_000 || !Number.isSafeInteger(retries) || retries < 0 || retries > 3 ||
         !Number.isSafeInteger(output) || output < 65_536 || output > 16_777_216) throw new TypeError('verifier resource request is outside its fixed bounds');
   }
+}
+
+/** Reference selection inside an already verified installed borrow only.
+ * This reads no target/history CAS and returns neither authorization nor a
+ * verified toolchain. Full history, signature/image, executable and profile
+ * validation still precedes Run admission and exact final grant consumption. */
+export function selectVerifierReleaseReference(driver: SqliteDriver, bundle: RuntimeBundleManifest,
+  principalId: string, requests: readonly VerifierRequest[], policyMode: string, signal?: AbortSignal):
+Readonly<{ manifestRef: string; manifestDigest: string }> | undefined {
+  signal?.throwIfAborted();
+  assertSupportedVerifierRequests(requests, policyMode);
+  if (!requests.length) return undefined;
+  const roots = guestToolchainRoots(bundle);
+  let selected: Readonly<{ manifestRef: string; manifestDigest: string }> | undefined;
+  for (const request of requests) {
+    signal?.throwIfAborted();
+    const grant = readAuthorizationGrant(driver, request.identityReadGrantId);
+    if (!grant || grant.ownerPrincipalId !== principalId || grant.state !== 'active')
+      throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');
+    const checkedAt = sampleCanonicalNow();
+    if (checkedAt < grant.createdAt || checkedAt >= grant.expiresAt) throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');
+    const target = grant.target;
+    if (target.kind !== 'execution_identity_read' || target.purpose !== 'verifier' || target.identity.kind !== 'guest_toolchain' ||
+        request.executable.kind !== 'toolchain' || request.executable.toolId !== target.identity.toolId)
+      throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');
+    const identity = target.identity;
+    const matches = roots.filter(root => root.artifactRef === identity.guestToolchainManifestRef &&
+      root.semanticDigest === identity.manifestDigest);
+    if (matches.length !== 1) throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');
+    const root = matches[0]!;
+    if (selected && (selected.manifestRef !== root.artifactRef || selected.manifestDigest !== root.semanticDigest))
+      throw new VerifierAuthorizationError('UNSUPPORTED_EXECUTION_IDENTITY');
+    selected = Object.freeze({ manifestRef: root.artifactRef, manifestDigest: root.semanticDigest });
+  }
+  signal?.throwIfAborted();
+  return selected;
 }
 
 export async function readVerifierRequestIdentities(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,

@@ -140,8 +140,8 @@ test('installed verifier preparation diagnosis follows the actual history, curre
   assert(!ordinary.includes('onPreparationPhase'), 'ordinary and historical callers keep the original observer-free path');
   const { assembly } = await assemblyObservation();
   assert.match(assembly.getText(), /sandboxProfileRef \}, signal, onAssemblyPhase\s*\? phase => reportInstalledRunAssemblyPhase\(onAssemblyPhase, phase\) : undefined\)/u);
-  assert.match(assembly.getText(), /identity\.principalId, request\.verifiers, undefined, signal\) : \[\]/u,
-    'the earlier identity lookup does not acquire an unrelated observer');
+  assert.match(assembly.getText(), /selectVerifierReleaseReference\(driver, installed\.bundle,\s*identity\.principalId, request\.verifiers, request\.policyMode, signal\)/u,
+    'the earlier reference-only lookup does not acquire an unrelated observer');
   const input = functions.get('prepareInstalledVerifierAssembly')!.parameters.find(parameter => parameter.name.getText() === 'input')!;
   assert(!input.type!.getText().includes('Phase'), 'observation is separate from the original closed authority input');
 });

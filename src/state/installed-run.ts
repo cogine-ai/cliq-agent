@@ -38,7 +38,7 @@ import { normalizeRunSubmitRequest, readRetainedSourceInspectionTarget, runSubmi
 import { assertWorkspaceSourceTrust, holdWorkspaceSourceTrust } from './source-trust.js';
 import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
 import { assertActiveStateOwner, type StateOwnerContext } from './state-owner.js';
-import { assertSupportedVerifierRequests, prepareInstalledVerifierAssembly, readVerifierRequestIdentities } from './verifier-admission.js';
+import { assertSupportedVerifierRequests, prepareInstalledVerifierAssembly, selectVerifierReleaseReference } from './verifier-admission.js';
 import type { AdmitRunInput } from './reducers/admission.js';
 import { readRetainedVerifierToolchain } from './guest-toolchain.js';
 import { VerifierAuthorizationError } from './authorization-artifacts.js';
@@ -461,9 +461,8 @@ export async function assembleInstalledRun(input: {
     const worker = installed.bundle.entries.find(entry => entry.entryId === LINUX_WORKER_RECIPE.workerId);
     if (!system || !compaction || !worker || worker.role !== 'worker' || !worker.executable) mismatch('installed Run lacks its exact signed prompt or worker recipe');
     const c = catalog.claims.contextLimitTokens, o = Math.min(catalog.claims.maxOutputTokens, Math.floor(c / 4));
-    const verifierIdentities = request.verifiers.length ? await readVerifierRequestIdentities(driver, reads, owner,
-      { bundle: installed.bundle, releaseKeys: installed.releaseKeys }, identity.principalId, request.verifiers, undefined, signal) : [];
-    const verifierToolchain = verifierIdentities[0]?.selected;
+    const verifierToolchain = selectVerifierReleaseReference(driver, installed.bundle,
+      identity.principalId, request.verifiers, request.policyMode, signal);
     const h = c - o, s = Math.min(8192, Math.floor(c / 8)), k = compactionEnvelopeEstimate(compaction.material);
     const assembly: RunAssemblyV1 = { schemaVersion: 1, format: 'cliq-run-assembly-v1', provider: { name: catalog.provider, model: catalog.model,
       endpoint: { kind: 'registered', registrationKind: endpoint.registrationKind, endpointRegistrationRef: endpointArtifact.ref,
@@ -479,7 +478,7 @@ export async function assembleInstalledRun(input: {
       runtime: { runtimeBundleRef: installed.bundleDigest, runtimeBundleManifestDigest: installed.bundle.manifestDigest,
         workerExecutableId: worker.entryId, workerExecutableDigest: worker.digest, sandboxBackend: 'linux_namespace',
         ...(verifierToolchain ? { guestToolchainManifestRef: verifierToolchain.manifestRef,
-          guestToolchainManifestDigest: verifierToolchain.manifest.manifestDigest } : {}) },
+          guestToolchainManifestDigest: verifierToolchain.manifestDigest } : {}) },
       retry: { model: { maxDispatchedAttempts: 3, maxZeroByteTransportRetriesPerAttempt: 0, postAttemptDelaysMs: [500, 2000] },
         tools: tools.entries.map(entry => ({ toolName: entry.name, replayClass: 'manual', maxDispatchedAttempts: 1, postAttemptDelaysMs: [] })) },
       context: { compactionPromptEnvelopeRef: compaction.material.ref, compactionPromptEnvelopeDigest: compaction.material.value.envelopeDigest,
