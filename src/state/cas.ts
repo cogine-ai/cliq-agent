@@ -2,6 +2,8 @@ import crypto from 'node:crypto';
 import { constants, promises as fs } from 'node:fs';
 import type { Stats } from 'node:fs';
 import type { FileHandle } from 'node:fs/promises';
+import { beginInstalledAssemblyWork, noteInstalledAssemblyRead, settleInstalledAssemblyWork,
+  type InstalledAssemblyWorkSpan } from './installed-work-diagnostics.js';
 import path from 'node:path';
 
 import type { ArtifactRef } from '../kernel/types.js';
@@ -154,7 +156,9 @@ async function assertRootPathStable(root: string, opened: RootHandle): Promise<v
 
 async function syncRoot(root: string, opened: RootHandle): Promise<void> {
   await assertRootPathStable(root, opened);
-  await opened.handle.sync();
+  const work = beginInstalledAssemblyWork('rootSync');
+  try { await opened.handle.sync(); }
+  finally { if (work) settleInstalledAssemblyWork(work); }
   await assertRootPathStable(root, opened);
 }
 
@@ -193,11 +197,12 @@ async function readAndVerifyOpened(
   ref: ArtifactRef,
   opened: OpenedArtifact,
   expectedLinkCount = 1,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  work?: InstalledAssemblyWorkSpan
 ): Promise<Buffer> {
   signal?.throwIfAborted();
   const bytes = Buffer.allocUnsafe(opened.info.size); let offset = 0;
-  for await (const chunk of verifiedChunks(ref, opened, opened.info.size, expectedLinkCount, signal)) {
+  for await (const chunk of verifiedChunks(ref, opened, opened.info.size, expectedLinkCount, signal, work)) {
     chunk.copy(bytes, offset); offset += chunk.length;
   }
   signal?.throwIfAborted();
@@ -205,7 +210,7 @@ async function readAndVerifyOpened(
 }
 
 async function* verifiedChunks(ref: ArtifactRef, opened: OpenedArtifact, expectedByteLength: number,
-  expectedLinkCount: number | null = 1, signal?: AbortSignal): AsyncGenerator<Buffer> {
+  expectedLinkCount: number | null = 1, signal?: AbortSignal, work?: InstalledAssemblyWorkSpan): AsyncGenerator<Buffer> {
   signal?.throwIfAborted();
   assertOwnedImmutableFile(`artifact ${ref}`, opened.info);
   if (expectedLinkCount !== null && opened.info.nlink !== expectedLinkCount) throw new Error(`artifact ${ref} has an invalid link count`);
@@ -216,6 +221,7 @@ async function* verifiedChunks(ref: ArtifactRef, opened: OpenedArtifact, expecte
     signal?.throwIfAborted();
     const chunk = Buffer.allocUnsafe(Math.min(ARTIFACT_CHUNK_BYTES, expectedByteLength - offset));
     const { bytesRead } = await opened.handle.read(chunk, 0, chunk.length, offset);
+    if (work) noteInstalledAssemblyRead(work, bytesRead);
     signal?.throwIfAborted();
     if (bytesRead === 0) throw new Error(`artifact ${ref} ended before its declared byte count`);
     const bytes = chunk.subarray(0, bytesRead);
@@ -235,9 +241,10 @@ async function* verifiedChunks(ref: ArtifactRef, opened: OpenedArtifact, expecte
   if (hash.digest('hex') !== ref) throw new Error(`artifact ${ref} is corrupt`);
 }
 
-async function verifyOpened(ref: ArtifactRef, opened: OpenedArtifact, signal?: AbortSignal): Promise<ArtifactStat> {
+async function verifyOpened(ref: ArtifactRef, opened: OpenedArtifact, signal?: AbortSignal,
+  work?: InstalledAssemblyWorkSpan): Promise<ArtifactStat> {
   signal?.throwIfAborted();
-  for await (const _chunk of verifiedChunks(ref, opened, opened.info.size, 1, signal)) { /* Exhaustion verifies the whole digest. */ }
+  for await (const _chunk of verifiedChunks(ref, opened, opened.info.size, 1, signal, work)) { /* Exhaustion verifies the whole digest. */ }
   signal?.throwIfAborted();
   return { ref, byteLength: opened.info.size };
 }
@@ -439,7 +446,9 @@ async function writeTemporary(root: string, openedRoot: RootHandle, publication:
     }
     publication.ref = hash.digest('hex');
     await handle.chmod(FILE_MODE);
-    await handle.sync();
+    const work = beginInstalledAssemblyWork('fileSync');
+    try { await handle.sync(); }
+    finally { if (work) settleInstalledAssemblyWork(work); }
     publication.temporaryInfo = await handle.stat();
     assertOwnedImmutableFile(`artifact temporary ${name}`, publication.temporaryInfo);
     if (publication.temporaryInfo.nlink !== 1)
@@ -552,15 +561,18 @@ export class ContentAddressedStore {
    * namespace transaction: failure may leave valid, unreferenced final objects. */
   async publishFour(sources: readonly [Uint8Array, Uint8Array, Uint8Array, Uint8Array]):
     Promise<readonly [ArtifactStat, ArtifactStat, ArtifactStat, ArtifactStat]> {
-    if (!Array.isArray(sources) || sources.length !== 4 ||
-        [0, 1, 2, 3].some(index => !(sources[index] instanceof Uint8Array)))
-      throw new TypeError('CAS requires exactly four byte objects');
-    const inputs = sources.map(source => {
-      const bytes = Buffer.from(source);
-      return { source: byteChunks(bytes), maxByteLength: bytes.length };
-    });
-    const results = await this.publishSources(inputs);
-    return [results[0]!, results[1]!, results[2]!, results[3]!];
+    const work = beginInstalledAssemblyWork('publishFour');
+    try {
+      if (!Array.isArray(sources) || sources.length !== 4 ||
+          [0, 1, 2, 3].some(index => !(sources[index] instanceof Uint8Array)))
+        throw new TypeError('CAS requires exactly four byte objects');
+      const inputs = sources.map(source => {
+        const bytes = Buffer.from(source);
+        return { source: byteChunks(bytes), maxByteLength: bytes.length };
+      });
+      const results = await this.publishSources(inputs);
+      return [results[0]!, results[1]!, results[2]!, results[3]!];
+    } finally { if (work) settleInstalledAssemblyWork(work); }
   }
 
   /** The producer supplies observed chunks, not a caller-selected final digest.
@@ -628,41 +640,47 @@ export class ContentAddressedStore {
   /** Chunks are staging bytes until the iterator is exhausted and its hash,
    * byte count and held-file metadata pass. Early return closes both handles. */
   async *readChunks(ref: ArtifactRef, expectedByteLength: number, signal?: AbortSignal): AsyncGenerator<Buffer> {
-    assertArtifactRef(ref);
-    if (!Number.isSafeInteger(expectedByteLength) || expectedByteLength < 0) throw new TypeError('artifact stream requires an exact nonnegative safe byte count');
-    signal?.throwIfAborted();
-    const root = await openRoot(this.root);
+    const work = beginInstalledAssemblyWork('casRead');
     try {
+      assertArtifactRef(ref);
+      if (!Number.isSafeInteger(expectedByteLength) || expectedByteLength < 0) throw new TypeError('artifact stream requires an exact nonnegative safe byte count');
       signal?.throwIfAborted();
-      const opened = await openPublishedFile(this.root, root, ref);
+      const root = await openRoot(this.root);
       try {
-        for await (const chunk of verifiedChunks(ref, opened, expectedByteLength, 1, signal)) {
+        signal?.throwIfAborted();
+        const opened = await openPublishedFile(this.root, root, ref);
+        try {
+          for await (const chunk of verifiedChunks(ref, opened, expectedByteLength, 1, signal, work)) {
+            await assertRootPathStable(this.root, root);
+            signal?.throwIfAborted();
+            yield chunk;
+          }
           await assertRootPathStable(this.root, root);
           signal?.throwIfAborted();
-          yield chunk;
-        }
-        await assertRootPathStable(this.root, root);
-        signal?.throwIfAborted();
-      } finally { await closeCasHandle(opened.handle); }
-    } finally { await closeCasHandle(root.handle); }
-    signal?.throwIfAborted();
+        } finally { await closeCasHandle(opened.handle); }
+      } finally { await closeCasHandle(root.handle); }
+      signal?.throwIfAborted();
+    } finally { if (work) settleInstalledAssemblyWork(work); }
   }
 
   async read(ref: ArtifactRef, signal?: AbortSignal): Promise<Buffer> {
-    assertArtifactRef(ref);
-    signal?.throwIfAborted();
-    const bytes = await this.withRoot(async (openedRoot) => {
+    const work = beginInstalledAssemblyWork('casRead');
+    try {
+      assertArtifactRef(ref);
       signal?.throwIfAborted();
-      const opened = await openPublishedFile(this.root, openedRoot, ref);
-      try {
-        const bytes = await readAndVerifyOpened(ref, opened, 1, signal);
-        await assertRootPathStable(this.root, openedRoot); signal?.throwIfAborted();
-        return bytes;
-      } finally {
-        await closeCasHandle(opened.handle);
-      }
-    });
-    signal?.throwIfAborted(); return bytes;
+      const bytes = await this.withRoot(async (openedRoot) => {
+        signal?.throwIfAborted();
+        const opened = await openPublishedFile(this.root, openedRoot, ref);
+        try {
+          const bytes = await readAndVerifyOpened(ref, opened, 1, signal, work);
+          await assertRootPathStable(this.root, openedRoot); signal?.throwIfAborted();
+          return bytes;
+        } finally {
+          await closeCasHandle(opened.handle);
+        }
+      });
+      signal?.throwIfAborted(); return bytes;
+    } finally { if (work) settleInstalledAssemblyWork(work); }
   }
 
   async stat(ref: ArtifactRef): Promise<ArtifactStat> {
@@ -678,17 +696,20 @@ export class ContentAddressedStore {
   }
 
   async verify(ref: ArtifactRef, signal?: AbortSignal): Promise<ArtifactStat> {
-    assertArtifactRef(ref);
-    signal?.throwIfAborted();
-    const result = await this.withRoot(async root => {
+    const work = beginInstalledAssemblyWork('casRead');
+    try {
+      assertArtifactRef(ref);
       signal?.throwIfAborted();
-      const opened = await openPublishedFile(this.root, root, ref);
-      try {
-        const result = await verifyOpened(ref, opened, signal);
-        await assertRootPathStable(this.root, root); signal?.throwIfAborted();
-        return result;
-      } finally { await closeCasHandle(opened.handle); }
-    });
-    signal?.throwIfAborted(); return result;
+      const result = await this.withRoot(async root => {
+        signal?.throwIfAborted();
+        const opened = await openPublishedFile(this.root, root, ref);
+        try {
+          const result = await verifyOpened(ref, opened, signal, work);
+          await assertRootPathStable(this.root, root); signal?.throwIfAborted();
+          return result;
+        } finally { await closeCasHandle(opened.handle); }
+      });
+      signal?.throwIfAborted(); return result;
+    } finally { if (work) settleInstalledAssemblyWork(work); }
   }
 }

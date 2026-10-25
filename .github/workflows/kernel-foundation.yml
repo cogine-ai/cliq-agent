@@ -550,6 +550,20 @@ jobs:
       - name: Qualify complete application image binding
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: node --import tsx scripts/kernel/qualify-supervisor-image.ts "$RUNNER_TEMP/cliq-supervisor-image"
+      - name: Measure fixed carrier metadata reduction without selecting it
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: >-
+          node --import tsx scripts/kernel/qualify-supervisor-carrier-size.ts
+          "$RUNNER_TEMP/cliq-supervisor-carrier-size"
+          "$RUNNER_TEMP/cliq-supervisor-image/node-v24.21.0-linux-x64.tar.xz"
+      - name: Retain bounded carrier experiment metadata only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: supervisor-carrier-size-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cliq-supervisor-carrier-size/carrier-size-experiment.json
+          if-no-files-found: warn
+          retention-days: 7
       - name: Observe real systemd-user delegation and restart identities
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash

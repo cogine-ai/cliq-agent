@@ -26,6 +26,7 @@ import { assertInstalledBrokerQuiescence, type InstalledBrokerQuiescence } from 
 import { appendRunStateEvent, requireHealthyFence } from './invocation.js';
 import { prepareWorkerRecoveryTerminalPlan, type WorkerRecoveryTerminalPlan } from '../worker-recovery-terminal.js';
 import { hasOnlySettledPrivateToolUnknowns } from '../private-tool-rollback.js';
+import { hasOnlySettledVerifierUnknowns } from '../verifier-unknown-retirement.js';
 
 export type BeginWorkerRecoveryInput = { runId: string; expectedRunRevision: number };
 
@@ -347,7 +348,8 @@ export const completeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', a
     const publication = cut.runSpec.operation === 'delivery' && open.some(entry => entry.opKind === 'publish')
       ? await (await import('../publication-worker-retirement.js')).readUnresolvedPublicationWorkerCut(driver, artifacts, cut) : undefined;
     publicationUnknown = publication;
-    if ((!hasOnlySettledInstalledModelUnknowns(assembly!, cut.journal) && !privateRollback && !undispatched && !publication) || !brokerQuiescence) {
+    if ((!hasOnlySettledInstalledModelUnknowns(assembly!, cut.journal) &&
+        !(run.stopIntentRef && hasOnlySettledVerifierUnknowns(cut.journal)) && !privateRollback && !undispatched && !publication) || !brokerQuiescence) {
       throw new KernelStorageError('RECOVERY_REQUIRED', 'open worker invocations require their typed settlement or explicit manual-risk wait before quarantine');
     }
     assertInstalledBrokerQuiescence(brokerQuiescence, driver, owner, run.id);

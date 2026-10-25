@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import { types } from 'node:util';
 import { parseJsonStrict } from '../../../src/kernel/json.js';
+import { INSTALLED_ASSEMBLY_WORK_PHASES, type InstalledAssemblyWorkSnapshot } from '../../../src/state/installed-work-diagnostics.js';
 import { INSTALLED_APPLY_DIAGNOSTIC_STAGES, INSTALLED_AUTHORIZATION_DIAGNOSTIC_STAGES,
   INSTALLED_RUN_DIAGNOSTIC_ERROR_CLASSES, INSTALLED_RUN_DIAGNOSTIC_ERROR_CODES,
   INSTALLED_SCHEDULER_DIAGNOSTIC_ORIGINS, INSTALLED_SCHEDULER_DIAGNOSTIC_PHASES,
@@ -146,4 +147,46 @@ export function readInstalledStoreStopPhaseJournal(text: string, expected: Origi
   const fields = row.split(':');
   need(fields.length === 2 && fields[0] === 'CLIQ_STORE_STOP_PHASE_V1' && phases.has(fields[1]!));
   return Object.freeze({ phase: fields[1]! });
+}
+
+type AssemblyCut = InstalledAssemblyWorkSnapshot & Readonly<{ ordinal: number;
+  process: Readonly<{ userCPUTime: number; systemCPUTime: number }> | null }>;
+
+/** Inert cumulative, overlapping spans from the original joined Supervisor.
+ * A valid short prefix is not a completed request, join, timing proof or
+ * physical cut. The caller must retain the original image/start binding and
+ * complete its original Stop/writer join before this whole-window read. */
+export function readInstalledAssemblyWorkJournal(text: string, expected: OriginalJournalIdentity) {
+  const rows = originalJournalMessages(text, expected).filter(message => message.startsWith('CLIQ_ASSEMBLY_WORK'));
+  if (!rows.length) return;
+  need(rows.length <= 9 && rows.reduce((bytes, row) => bytes + row.length + 1, 0) <= 4096);
+  const cuts: AssemblyCut[] = [];
+  let previousPhase = -1, previousElapsed = 0, previous: number[] | undefined, previousCPU: number[] | undefined;
+  for (const [index, row] of rows.entries()) {
+    need(row.length + 1 <= 512 && !/[^\x20-\x7e]/u.test(row));
+    const fields = row.split(':'); need(fields.length === 31 && fields[0] === 'CLIQ_ASSEMBLY_WORK_V1');
+    need(fields[1] === String(index + 1));
+    const phaseIndex = (INSTALLED_ASSEMBLY_WORK_PHASES as readonly string[]).indexOf(fields[2]!);
+    need(phaseIndex > previousPhase && (index > 0 || phaseIndex === 0));
+    const elapsedMs = count(fields[3]!); need(elapsedMs >= previousElapsed && (index > 0 || elapsedMs === 0));
+    const numbers = fields.slice(4, 29).map(count);
+    need(!previous || numbers.every((value, column) => value >= previous![column]!));
+    for (const start of [0, 4, 8, 12, 16, 19, 22]) need(numbers[start + 1]! <= numbers[start]!);
+    need(numbers[10] === 0);
+    const runtime = (offset: number) => Object.freeze({ started: numbers[offset]!, completed: numbers[offset + 1]!,
+      bytesRead: numbers[offset + 2]!, spanElapsedMs: numbers[offset + 3]! });
+    const span = (offset: number) => Object.freeze({ started: numbers[offset]!, settled: numbers[offset + 1]!, spanElapsedMs: numbers[offset + 2]! });
+    let process: AssemblyCut['process'] = null;
+    if (fields[29] !== '-' || fields[30] !== '-') {
+      const cpu = [count(fields[29]!), count(fields[30]!)];
+      need(!previousCPU || cpu.every((value, column) => value >= previousCPU![column]!));
+      process = Object.freeze({ userCPUTime: cpu[0]!, systemCPUTime: cpu[1]! }); previousCPU = cpu;
+    }
+    cuts.push(Object.freeze({ ordinal: index + 1, phase: INSTALLED_ASSEMBLY_WORK_PHASES[phaseIndex]!, elapsedMs,
+      runtime: Object.freeze({ package: runtime(0), revalidate: runtime(4), createCompare: runtime(8) }),
+      casRead: Object.freeze({ started: numbers[12]!, settled: numbers[13]!, bytesRead: numbers[14]!, spanElapsedMs: numbers[15]! }),
+      publishFour: span(16), fileSync: span(19), rootSync: span(22), process }));
+    previousPhase = phaseIndex; previousElapsed = elapsedMs; previous = numbers;
+  }
+  return Object.freeze({ cuts: Object.freeze(cuts) });
 }

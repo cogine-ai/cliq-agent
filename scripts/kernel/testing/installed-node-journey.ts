@@ -46,7 +46,7 @@ import { publicationClaimRetirementDiagnosticKey } from '../../../src/state/publ
 import { publicationEnvelopeLocations } from '../../../src/state/delivery-publication-progress.js';
 import type { InstalledPublicationStopResult } from './installed-publication-stop-result.js';
 import { projectInstalledRunProgress } from './installed-run-progress.js';
-import { readInstalledPublicationStageJournal, readInstalledStoreDiagnosticJournal, readInstalledStoreStopPhaseJournal } from './installed-store-diagnostic-journal.js';
+import { readInstalledAssemblyWorkJournal, readInstalledPublicationStageJournal, readInstalledStoreDiagnosticJournal, readInstalledStoreStopPhaseJournal } from './installed-store-diagnostic-journal.js';
 
 type Recipe = { buildFixture: string; packageRoot: string; installerEntry: string; stateRoot: string; releaseKeysFile: string;
   controlDirectory: string; observer: string; storeFixture: string; publicationObserver: string; workspace: string; reportFile: string };
@@ -1444,7 +1444,10 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         const before = units.map(unit => show(unit));
         let serverAuthenticationObservation: Record<string, unknown> | undefined;
         let storeFailureObservation: Record<string, unknown> | undefined;
+        let assemblyWorkObservation: Record<string, unknown> | undefined;
         if (storeFailureDiagnostics && primary) report.storeFailureDiagnostics = { diagnosticOnly: true, kind: 'unavailable',
+          reason: storeFailureBinding ? 'original_join_missing' : 'preexisting_binding_missing' };
+        if (storeFailureDiagnostics && primary) report.assemblyWorkDiagnostics = { diagnosticOnly: true, kind: 'unavailable',
           reason: storeFailureBinding ? 'original_join_missing' : 'preexisting_binding_missing' };
         await withRetainedUnitHistory(units, async assertRetained => {
           let originalStopFailed = false;
@@ -1490,6 +1493,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
             if (storeFailureDiagnostics && primary && storeFailureBinding &&
                 String(storeFailureBinding.pid) === before[0]!.MainPID && storeFailureBinding.invocationId === before[0]!.InvocationID) {
               report.storeFailureDiagnostics = { diagnosticOnly: true, kind: 'unavailable', reason: 'journal_unavailable' };
+              report.assemblyWorkDiagnostics = { diagnosticOnly: true, kind: 'unavailable', reason: 'journal_unavailable' };
               try {
                 assertRetained();
                 const until = Date.now(), logBy = until + 5000;
@@ -1502,12 +1506,22 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
                 assert(Buffer.isBuffer(log.stdout) && Buffer.isBuffer(log.stderr)); scanBytes(log.stdout); scanBytes(log.stderr);
                 assert.equal(log.error, undefined, 'actual Store diagnostic journal command must join');
                 assert.equal(log.signal, null); assert.equal(log.status, 0);
-                const summary = readInstalledStoreDiagnosticJournal(new TextDecoder('utf-8', { fatal: true }).decode(log.stdout),
+                const text = new TextDecoder('utf-8', { fatal: true }).decode(log.stdout);
+                const summary = readInstalledStoreDiagnosticJournal(text,
                   { uid: ledger.uid, pid: storeFailureBinding.pid, invocationId: storeFailureBinding.invocationId });
                 assert(Date.now() < logBy, 'actual Store diagnostic journal exceeded five seconds'); assertRetained();
                 if (summary) storeFailureObservation = { diagnosticOnly: true, kind: 'observed',
                   source: 'actual_joined_original_supervisor_journal', preexistingProcessStartAndFullImageBound: true,
                   originalInvocationBound: true, originalServerJoined: true, summary };
+                try {
+                  const work = readInstalledAssemblyWorkJournal(text,
+                    { uid: ledger.uid, pid: storeFailureBinding.pid, invocationId: storeFailureBinding.invocationId });
+                  assert(Date.now() < logBy, 'actual assembly work journal exceeded five seconds');
+                  assertRetained();
+                  if (work) assemblyWorkObservation = { diagnosticOnly: true, kind: 'observed',
+                    source: 'actual_joined_original_supervisor_journal', preexistingProcessStartAndFullImageBound: true,
+                    originalInvocationBound: true, originalServerJoined: true, cuts: work.cuts };
+                } catch { /* A missing numeric cut cannot change the original summary or failure. */ }
               } catch { /* Preserve the original failure, stop deadline and missing-diagnosis classification. */ }
             }
           } catch (error) { originalStopFailed = true; throw error; }
@@ -1555,6 +1569,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         report.installedWritersJoined = true;
         if (serverAuthenticationObservation) report.serverAuthentication = serverAuthenticationObservation;
         if (storeFailureObservation) report.storeFailureDiagnostics = storeFailureObservation;
+        if (assemblyWorkObservation) report.assemblyWorkDiagnostics = assemblyWorkObservation;
       }
     } catch (error) { cleanup.push(error); }
     try {

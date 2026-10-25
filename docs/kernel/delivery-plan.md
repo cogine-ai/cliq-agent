@@ -13,6 +13,15 @@ Linux execution/restart and cancellation foundations are real, but a final
 model turn still stops at `candidate_required`. No work package or complete I1
 is declared finished by the 32 passing checks.
 
+Current installed boundary (2026-10-25): the exact `a6baa9c` Linux
+[run 470](https://github.com/cogine-ai/cliq-agent/actions/runs/40168318132)
+passes normal publication, no-op and merge assertions, then fails verifier
+cancellation retirement. Three owned delayed-storage campaigns still miss
+initial admission's 30-second limit, and the verifier secret scan is incomplete.
+Package A is therefore not complete. Ordinary Git/tool integration (B), thin
+clients and the release transition (C) remain implementation work, not just
+missing tests. The historical evidence below does not change these boundaries.
+
 | Owner | Implemented foundation | Remaining delivery obligation |
 | --- | --- | --- |
 | WP01 | SQLite/CAS, StateOwner, admission/replay, Journal/budgets, recovery | Result/verification/delivery transactions; business descriptor I/O; import/rollback; scale/integrity qualification |

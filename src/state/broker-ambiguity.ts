@@ -377,9 +377,12 @@ export async function withInstalledBrokerTerminalClosure<T>(driver: SqliteDriver
 export async function validateInstalledBrokerTerminalHistory(driver: SqliteDriver, artifacts: ArtifactCatalog,
   cut: RecoveryClosureV1, detail: TerminalDetail): Promise<Abandonments> {
   const frames = await terminalFrames(driver, artifacts, cut);
-  if (!Array.isArray(detail.abandonedRetryInvocations) || detail.abandonedRetryInvocations.length !== frames.length) terminalFailure();
+  if (!Array.isArray(detail.abandonedRetryInvocations)) terminalFailure();
+  const sequences = new Set(frames.map(frame => frame.unknown.seq));
+  const abandoned = detail.abandonedRetryInvocations.filter(entry => sequences.has(entry.unknownJournalSeq));
+  if (abandoned.length !== frames.length) terminalFailure();
   if (!frames.length) return [];
-  const closures = await artifacts.mapReads(detail.abandonedRetryInvocations, async entry =>
+  const closures = await artifacts.mapReads(abandoned, async entry =>
     decodeBrokerProcessDomainDeathDispatchClosure(await readCanonicalArtifact(artifacts, entry.dispatchFenceOrDeathEvidenceRef)));
   const deaths = await artifacts.mapReads(closures, async closure =>
     decodeBrokerProcessDomainDeath(await readCanonicalArtifact(artifacts, closure.closure.brokerProcessDeathEvidenceRef)));
@@ -406,8 +409,8 @@ export async function validateInstalledBrokerTerminalHistory(driver: SqliteDrive
         (inspecting.owner.state === 'terminal' && cut.run.updatedAt > inspecting.owner.releasedAt)) terminalFailure();
     const inspector = await readSupervisorInspector(artifacts, inspecting.owner, frame.assembly, evidence);
     if (!same(inspector, supervisorInspectorIdentity(inspecting.owner))) terminalFailure();
-    const entry = abandonment(frame, detail.abandonedRetryInvocations[index]!.dispatchFenceOrDeathEvidenceRef);
-    if (!same(entry, detail.abandonedRetryInvocations[index])) terminalFailure();
+    const entry = abandonment(frame, abandoned[index]!.dispatchFenceOrDeathEvidenceRef);
+    if (!same(entry, abandoned[index])) terminalFailure();
     expected.push(entry);
   }
   return expected;

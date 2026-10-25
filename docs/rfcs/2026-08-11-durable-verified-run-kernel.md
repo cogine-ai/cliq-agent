@@ -7567,6 +7567,27 @@ type InvocationDispatchClosureEvidenceV1 = {
         brokerProcessDeathEvidenceRef: ArtifactRef
         brokerProcessDeathEvidenceDigest: string
       }
+    | {
+        kind: 'verifier_parent_domain_dead'
+        claimJournalSeq: number
+        claimingSupervisorInstanceId: string
+        claimingStateOwnerEpoch: number
+        requestRef: ArtifactRef
+        targetRef: ArtifactRef
+        grantRef: ArtifactRef
+        sandboxLaunchSpecRef: ArtifactRef
+        workerLaunchId: string
+        leaseEpoch: number
+        generationRef: ArtifactRef
+        parentContainmentRef: ArtifactRef
+        parentDeathEvidenceRef: ArtifactRef
+        parentDeathEvidenceDigest: string
+        quarantineEvidenceRef: ArtifactRef
+        quarantineEvidenceDigest: string
+        retirementEvidenceRef: ArtifactRef
+        retirementEvidenceDigest: string
+        controllerLifetime: 'original_subreaper_absent_and_inspector_joined'
+      }
   observedAt: string
   evidenceDigest: string
 }
@@ -9407,6 +9428,38 @@ Repair diagnostics have one closed audit-to-model projection. `VerifierRepairDia
 If required assertions still fail when the frozen repair budget is exhausted, the Run terminates as `failed` with reason `verification_failed`. Candidate source, diff, diagnostics, and failed receipts remain inspectable, but they are not a verified `RunResult` and cannot enter the safe delivery path. `completed_unverified` means only that the RunSpec declared no required verifier.
 
 The fixed Linux Node recipe may retain `controller_stop` only when the original controller actually observed RELEASE, then irreversibly stopped that same containment and joined every output stream. Its measured interval is RELEASE-to-quiescence, not an assertion that Node exec succeeded. A previously received real wait result takes precedence. `controller_stop` has no exit code, signal or guessed native error; it can appear only in typed verifier-stop evidence tied to an already durable cancellation/deadline, or in a fatal `source_mutation` receipt backed by the independent exact trusted rehash. It is forbidden in pass, assertion-failure and infrastructure receipts, grants no retry/repair, and cannot by itself stop a Run. Before RELEASE, or without the complete original death/output proof, the claim remains unknown and fully charged; no measurement is fabricated.
+
+For this fixed Linux recipe only, a stopped Run may leave that original verifier
+`unknown` and unused at terminal through the separate closed dispatch-closure
+branch `verifier_parent_domain_dead`. This is not `containment_death` for an
+unobserved child, a no-spawn claim, an infrastructure receipt, or an
+`unknown -> failed` resolution. Its exact original claim/request/grant/child
+SandboxLaunch/plan, claiming StateOwner epoch, parent worker containment,
+lease and generation must reproduce the frozen verifier policy and candidate.
+The child plan must be directly nested under that exact parent cgroup and
+select the same sole native controller/subreaper lifetime. The existing parent
+worker recovery task must positively prove all descendants dead, the original
+subreaper process absent or its start token changed, and the inspecting native
+controller fully joined with no retained scopes/mounts. The same genuine native
+retirement owner is reasserted at the final transaction; an empty parent cgroup
+while its spawning controller remains live is insufficient. The complete
+private source must be unchanged under the trusted rehash, then quarantined
+and retired, never represented as a sealed verifier Checkpoint.
+
+This uses only the existing physical `worker_death` wait and its original
+30-second inspection dispatch, not a verifier ReconciliationSubject, target
+query, public verifier probe, new execution, or retry. The dispatch closure
+retains the exact parent death, quarantine and generation-retirement ref/digest
+pairs and literal `controllerLifetime='original_subreaper_absent_and_inspector_joined'`.
+The sole existing terminal Stop transaction retains the original UNKNOWN and
+full settlement unchanged in `abandonedRetryInvocations`; no non-call result
+item, refund or additional charge is created. It independently rechecks the
+current owner, full SQL/Journal cut, time fence and original five-second native
+freshness. Historical recovery rewalks both original child policy/claim and
+the complete parent death/retirement graph. Any positively received native
+result still takes its original completion path and cannot be abandoned by
+this branch. Missing, ambiguous, changed, stale or unjoined proof remains
+recovery-required; elapsed timeout or absence of a child result proves nothing.
 
 For trusted source drift, union the canonical paths from the exact before/after WorkspaceEntry manifests. For every unequal entry pair, include each existing side's SHA-256(JCS(WorkspaceEntry)); deduplicate those digests and sort by UTF-8 bytes. An added or removed entry contributes only its existing side. The resulting nonempty list is `changedEntryDigests`, never an implementation-chosen sample.
 

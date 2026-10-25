@@ -18,7 +18,7 @@ test('submission, invocation, approval and continuation consumers dispatch retai
     ['reducers/agent.ts', ['artifacts:rows']],
     ['reducers/input.ts', ['reads:closure.items']],
     ['reducers/tool.ts', ['openingReads:contracts.filter((entry) => entry.outputSchemaRef !== undefined)']],
-    ['broker-ambiguity.ts', ['artifacts:detail.abandonedRetryInvocations', 'artifacts:closures']],
+    ['broker-ambiguity.ts', ['artifacts:abandoned', 'artifacts:closures']],
     ['publication-preflight.ts', ['artifacts:cut.items']],
     ['delivery-approval.ts', ['artifacts:cut.items', 'artifacts:cut.items', 'artifacts:cut.items']],
     ['final-candidate.ts', ['artifacts:selected.items']],

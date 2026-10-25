@@ -25,6 +25,7 @@ import { readDeliveryMergeConflictCause } from './delivery-recovery.js';
 import { readDeliveryPolicyDenial } from './delivery-approval.js';
 import { readDeliveryTerminalProjection, readUnclaimedPublicationStopHistory } from './delivery-publication-recovery.js';
 import type { DeliveryReadData } from './delivery-read-data.js';
+import { validateVerifierUnknownTerminalHistory } from './verifier-unknown-retirement.js';
 
 export type CancelResponse = Extract<ControlApplicationResponseV1, { ok: true }> & { result: Extract<ControlResultV1, { method: 'run.cancel' }> };
 
@@ -220,7 +221,10 @@ async function validateStopRecoveryData(driver: SqliteDriver, artifacts: Artifac
   const preparedAt = detail.createdAt;
   parseCanonicalTime(preparedAt);
   if (preparedAt < intent.createdAt || preparedAt > run.updatedAt) throw new TypeError('terminal preparation time is outside its intent and committed Checkpoint');
-  const abandoned = await validateInstalledBrokerTerminalHistory(driver, artifacts, closure, detail);
+  const abandoned = [...await validateInstalledBrokerTerminalHistory(driver, artifacts, closure, detail),
+    ...await validateVerifierUnknownTerminalHistory(driver, artifacts, closure, detail)]
+    .sort((left, right) => left.unknownJournalSeq - right.unknownJournalSeq ||
+      Buffer.compare(Buffer.from(left.opId), Buffer.from(right.opId)) || left.attempt - right.attempt);
   const hasPublicationClaim = journal.some(entry => entry.opKind === 'publish' && entry.phase === 'dispatch_claimed');
   const publication = hasPublicationClaim && spec.operation === 'delivery' && detail.deliveryTerminalProjectionEvidenceRef
     ? data ? await data.terminalProjection(detail.deliveryTerminalProjectionEvidenceRef)
@@ -248,7 +252,7 @@ async function validateStopRecoveryData(driver: SqliteDriver, artifacts: Artifac
     ? data ? await data.unclaimedStopHistory() : await readUnclaimedPublicationStopHistory(driver, artifacts, closure) : new Set<number>();
   for (const { entry, hasClaim } of stopInvocationHistory(journal).values()) {
     if (entry.opKind === 'publish' && (publication?.closedPublicationJournalSeqs.has(entry.seq) || unclaimedPublications.has(entry.seq))) continue;
-    if (entry.opKind === 'model' && entry.replayClass === 'retry' && entry.phase === 'unknown' && abandoned.some(closed =>
+    if (['model', 'verifier'].includes(entry.opKind) && entry.replayClass === 'retry' && entry.phase === 'unknown' && abandoned.some(closed =>
       closed.opId === entry.opId && closed.attempt === entry.attempt && closed.unknownJournalSeq === entry.seq &&
       closed.budgetSettlementRef === entry.budgetSettlementRef)) continue;
     if (entry.phase === 'failed' && (entry.opKind === 'model' && modelNoRelease.has(entry.seq) ||

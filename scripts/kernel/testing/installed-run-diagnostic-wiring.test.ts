@@ -419,10 +419,79 @@ test('only fixed qualification composition opts into Store diagnostics, includin
   const builder = await readFile(new URL('./supervisor-sea-builder.ts', import.meta.url), 'utf8');
   const packaging = await readFile(new URL('./installed-supervisor-package.ts', import.meta.url), 'utf8');
   const journey = await readFile(new URL('./installed-node-journey.ts', import.meta.url), 'utf8');
-  assert.match(builder, /input.storeFailureDiagnostics \? INSTALLED_STORE_DIAGNOSTIC_BANNER : ''/u);
+  assert.match(builder, /input.storeFailureDiagnostics \? INSTALLED_STORE_DIAGNOSTIC_BANNER \+ INSTALLED_ASSEMBLY_WORK_DIAGNOSTIC_BANNER : ''/u);
   assert.match(packaging, /options.storeFailureDiagnostics \? \{ storeFailureDiagnostics: true as const \} : \{\}/u);
   assert(journey.includes('const storeFailureDiagnostics = true;'), 'each fixed qualification composition enables its trusted subscriber');
   assert.match(journey, /\.\.\.\(storeFailureDiagnostics \? \{ storeFailureDiagnostics: true as const \} : \{\}\)/u);
+});
+
+test('assembly work reuses only the original joined whole journal after the unchanged Stop and writer join', async () => {
+  // Source wiring only, never a substitute Supervisor identity, join or timing proof.
+  const journey = await readFile(new URL('./installed-node-journey.ts', import.meta.url), 'utf8');
+  const stop = journey.indexOf("assert.equal(command('/usr/bin/systemctl', ['--user', 'stop', ...units]).status, 0);");
+  const original = journey.indexOf('if (storeFailureDiagnostics && primary && storeFailureBinding &&', stop);
+  const finish = journey.indexOf('} catch (error) { originalStopFailed = true; throw error; }', original);
+  const body = journey.slice(original, finish);
+  assert(stop >= 0 && original > stop && finish > original);
+  assert.equal(body.match(/spawnSync\('\/usr\/bin\/journalctl'/gu)?.length, 1);
+  assert.equal(body.match(/scanBytes\(log\.stdout\); scanBytes\(log\.stderr\);/gu)?.length, 1);
+  assert.equal(body.match(/new TextDecoder\('utf-8', \{ fatal: true \}\)\.decode\(log\.stdout\)/gu)?.length, 1);
+  assert(!body.includes('--grep='), 'measurement consumes the same original whole unfiltered window');
+  assert(body.includes("timeout: 5000, killSignal: 'SIGKILL', maxBuffer: 256 * 1024"));
+  assert(body.includes('const work = readInstalledAssemblyWorkJournal(text,'));
+  assert(body.indexOf('assertRetained();', body.indexOf('const summary =')) < body.indexOf('const work ='));
+  assert(body.includes("source: 'actual_joined_original_supervisor_journal'"));
+  assert(body.includes('originalInvocationBound: true, originalServerJoined: true, cuts: work.cuts'));
+  const joined = journey.indexOf('report.installedWritersJoined = true;', finish);
+  const assign = journey.indexOf('if (assemblyWorkObservation) report.assemblyWorkDiagnostics = assemblyWorkObservation;', joined);
+  assert(joined > finish && assign > joined, 'the observation cannot be published before the original writer join');
+  assert(!/\/proc\/|setTimeout|\.message|\.stack|\.cause/u.test(body), 'no new process sample or private error is required');
+  const beforeStop = journey.slice(journey.indexOf('let originalStopFailed = false;'), stop);
+  assert(!beforeStop.includes('readInstalledAssemblyWorkJournal'), 'no diagnostic await can delay the original Stop');
+});
+
+test('new assembly work decoding cannot outlive the original journal window or retained-input check', async () => {
+  // Execute only the actual diagnostic inner try and real pure-data decoder.
+  // Controlled clock/currentness refusals are not a Supervisor/native proof.
+  const journey = await readFile(new URL('./installed-node-journey.ts', import.meta.url), 'utf8');
+  const parsed = ts.createSourceFile('installed-node-journey.ts', journey, ts.ScriptTarget.Latest, true);
+  const matches: ts.TryStatement[] = [];
+  const visit = (node: ts.Node) => {
+    if (ts.isTryStatement(node) && node.tryBlock.statements.some(statement => ts.isVariableStatement(statement) &&
+        statement.declarationList.declarations.some(declaration => declaration.name.getText(parsed) === 'work' &&
+          declaration.initializer && ts.isCallExpression(declaration.initializer) &&
+          declaration.initializer.expression.getText(parsed) === 'readInstalledAssemblyWorkJournal'))) matches.push(node);
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed); assert.equal(matches.length, 1);
+  const body = matches[0]!.getText(parsed);
+  assert(!/\bawait\b|setTimeout|spawn|\.message|\.cause|\.stack/u.test(body));
+  const { readInstalledAssemblyWorkJournal } = await import('./installed-store-diagnostic-journal.js');
+  const sender = { uid: 1000, pid: 2000, invocationId: 'a'.repeat(32) };
+  const message = 'CLIQ_ASSEMBLY_WORK_V1:1:submit_request:0:' + Array<number>(25).fill(0).join(':') + ':-:-';
+  const text = JSON.stringify({ _UID: '1000', _PID: '2000', _TRANSPORT: 'stdout',
+    _SYSTEMD_INVOCATION_ID: sender.invocationId, MESSAGE: message });
+  for (const [afterDecode, retained, accepted] of [[5000, true, false], [4999, false, false], [4999, true, true]] as const) {
+    let reads = 0, clocks = 0, retainedChecks = 0;
+    const oldSummary = Object.freeze({ diagnosticOnly: true, kind: 'original-summary' }), original = Error('inert original failure');
+    const context = { assert, text, ledger: { uid: sender.uid }, storeFailureBinding: sender, logBy: 5000,
+      assemblyWorkObservation: undefined as Record<string, unknown> | undefined,
+      storeFailureObservation: oldSummary, primary: original,
+      Date: { now() { clocks++; return afterDecode; } },
+      assertRetained() { retainedChecks++; assert(retained, 'inert retained input no longer current'); },
+      readInstalledAssemblyWorkJournal(input: string, expected: typeof sender) {
+        reads++;
+        // Copy only the literal VM argument's primitive fields into this real
+        // decoder realm; foreign Object prototypes are intentionally rejected.
+        return readInstalledAssemblyWorkJournal(input,
+          { uid: expected.uid, pid: expected.pid, invocationId: expected.invocationId });
+      } };
+    new Script(transformSync(body, { loader: 'ts' }).code).runInNewContext(context);
+    assert.equal(Boolean(context.assemblyWorkObservation), accepted,
+      'only a still-current decoded cut within the original absolute deadline can be observed');
+    assert.equal(reads, 1); assert.equal(clocks, 1); assert.equal(retainedChecks, afterDecode < 5000 ? 1 : 0);
+    assert.equal(context.storeFailureObservation, oldSummary); assert.equal(context.primary, original);
+  }
 });
 
 test('failure journal reads follow the original stop and actual PID absence, and publication follows writers join', async () => {

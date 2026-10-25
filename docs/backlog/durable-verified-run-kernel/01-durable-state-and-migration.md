@@ -393,6 +393,27 @@ type InvocationDispatchClosureEvidenceV1 = {
         brokerProcessDeathEvidenceRef: ArtifactRef
         brokerProcessDeathEvidenceDigest: string
       }
+    | {
+        kind: 'verifier_parent_domain_dead'
+        claimJournalSeq: number
+        claimingSupervisorInstanceId: string
+        claimingStateOwnerEpoch: number
+        requestRef: ArtifactRef
+        targetRef: ArtifactRef
+        grantRef: ArtifactRef
+        sandboxLaunchSpecRef: ArtifactRef
+        workerLaunchId: string
+        leaseEpoch: number
+        generationRef: ArtifactRef
+        parentContainmentRef: ArtifactRef
+        parentDeathEvidenceRef: ArtifactRef
+        parentDeathEvidenceDigest: string
+        quarantineEvidenceRef: ArtifactRef
+        quarantineEvidenceDigest: string
+        retirementEvidenceRef: ArtifactRef
+        retirementEvidenceDigest: string
+        controllerLifetime: 'original_subreaper_absent_and_inspector_joined'
+      }
   observedAt: string
   evidenceDigest: string
 }

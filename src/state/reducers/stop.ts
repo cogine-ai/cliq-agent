@@ -358,14 +358,20 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
           unknowns.push(entry);
           continue;
         }
+        if (entry.opKind === 'verifier' && entry.replayClass === 'retry' && entry.phase === 'unknown' &&
+            workerRecovery?.verifierAbandoned.some(closed => closed.opId === entry.opId && closed.attempt === entry.attempt &&
+              closed.unknownJournalSeq === entry.seq && closed.budgetSettlementRef === entry.budgetSettlementRef)) {
+          unknowns.push(entry);
+          continue;
+        }
         if (!['model', 'tool', 'verifier'].includes(entry.opKind) || (!['prepared', 'completed'].includes(entry.phase) &&
             (entry.phase !== 'failed' || hasClaim && !(entry.opKind === 'model' && noRelease.has(entry.seq) ||
               entry.opKind === 'verifier' && verifierStops.has(entry.seq)))))
           throw new KernelStorageError('STATE_TRANSITION_INVALID', 'terminal stop awaits exact dispatch/reconciliation closure');
         if (entry.phase === 'prepared') prepared.push(entry);
       }
-      // This installed closure path is worker-free. An unresolved model
-      // must not begin sealing a live worker before its dispatch is closed.
+      // Terminal abandonment is worker-free. A still-unknown model/verifier
+      // cannot begin sealing a live worker before its dispatch is closed.
       if (unknowns.length && run.activeWorkerLaunchId) {
         throw new KernelStorageError('STATE_TRANSITION_INVALID', 'terminal stop awaits exact dispatch/reconciliation closure');
       }
@@ -388,7 +394,9 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
       return withInstalledBrokerTerminalClosure(driver, artifacts, owner, installedRuntime, selected, async (brokerClosure) => {
         // The owning plan proves every exact model/retry unknown, never a
         // generic unknown phase or an already dispatched tool cancellation.
-        const abandoned = brokerClosure.abandonedRetryInvocations;
+        const abandoned = [...brokerClosure.abandonedRetryInvocations, ...(workerRecovery?.verifierAbandoned ?? [])]
+          .sort((left, right) => left.unknownJournalSeq - right.unknownJournalSeq ||
+            Buffer.compare(Buffer.from(left.opId), Buffer.from(right.opId)) || left.attempt - right.attempt);
         if (abandoned.length !== unknowns.length || unknowns.some(entry => abandoned.filter(closed =>
           closed.opId === entry.opId && closed.attempt === entry.attempt && closed.unknownJournalSeq === entry.seq &&
           closed.budgetSettlementRef === entry.budgetSettlementRef).length !== 1)) {

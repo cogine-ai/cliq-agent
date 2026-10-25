@@ -18,6 +18,7 @@ import { hasOnlySettledPrivateToolUnknowns, readPrivateRollbackClaim, type Priva
 import type { ToolRequestV1 } from '../kernel/tool-authorization.js';
 import { decodeWorkspaceGenerationIdentity } from './decoders.js';
 import { immutableSnapshot } from '../model/immutable.js';
+import { prepareVerifierUnknownParentClosure } from './verifier-unknown-retirement.js';
 
 declare const terminalRecoveryBrand: unique symbol;
 /** Internal original-owner closure. A data/ref or a stopped row cannot mint it. */
@@ -26,6 +27,7 @@ type RetiredGeneration = Extract<WorkspaceGenerationStateV1, { phase: 'retired' 
 type Plan = {
   driver: SqliteDriver; owner: StateOwnerContext; cut: RecoveryClosureV1;
   metadata: PublishedArtifact[]; quarantineMetadata: PublishedArtifact[]; generation: RetiredGeneration;
+  verifierAbandoned: import('../kernel/types.js').TerminalDetail['abandonedRetryInvocations'];
   rollback?: { prepared: InvocationJournalEntry; claim: InvocationJournalEntry; unknown: InvocationJournalEntry;
     evidence: PrivateToolRollbackV1; artifact: PublishedArtifact; request: ToolRequestV1 };
   reobserve(connection: SqliteConnection): void;
@@ -98,6 +100,8 @@ export async function prepareWorkerRecoveryTerminalPlan(driver: SqliteDriver, ar
     activeMountCount: 0, releasableBrokerClaimCount: 0 };
   retirement.evidenceDigest = digestOmitting(retirement, 'evidenceDigest');
   const artifact = await artifacts.publishCanonical(retirement, retirement.format);
+  const verifier = await prepareVerifierUnknownParentClosure(driver, artifacts, cut, { launch, generation,
+    quarantine, quarantineRef: input.quarantineArtifact.ref, retirement, retirementRef: artifact.ref });
   let rollback: Plan['rollback'];
   if (hasOnlySettledPrivateToolUnknowns(cut.journal)) {
     const unknown = [...cut.journal].reverse().find(entry => entry.phase === 'unknown' && entry.opKind === 'tool')!;
@@ -172,9 +176,9 @@ export async function prepareWorkerRecoveryTerminalPlan(driver: SqliteDriver, ar
       retirementEvidenceRef: input.wrapperArtifact.ref });
   }
   const token = Object.freeze({}) as WorkerRecoveryTerminalPlan;
-  plans.set(token, { driver, owner, cut, metadata: [...input.metadata, artifact, ...(rollback ? [rollback.artifact] : [])],
+  plans.set(token, { driver, owner, cut, metadata: [...input.metadata, artifact, ...verifier.metadata, ...(rollback ? [rollback.artifact] : [])],
     quarantineMetadata: [...input.metadata],
-    generation: retired, rollback,
+    generation: retired, rollback, verifierAbandoned: verifier.abandoned,
     reobserve(connection) {
       // Each real native assertion produces a new physical observation time.
       // Finish all of them before the transaction's sole clock sample. Never

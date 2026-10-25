@@ -1,6 +1,7 @@
 import { channel } from 'node:diagnostics_channel';
 import { types } from 'node:util';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
+import { beginInstalledAssemblySubmit, noteInstalledAssemblyStop } from './installed-work-diagnostics.js';
 
 export const INSTALLED_RUN_FAILURE_CHANNEL = 'cliq.installed.run.failures.v1';
 /** Historical admission envelope: apply_failure/applyFailures/firstApplyFailure
@@ -86,8 +87,13 @@ export function beginInstalledApplyDiagnostic() {
 export type InstalledApplyDiagnostic = NonNullable<ReturnType<typeof beginInstalledApplyDiagnostic>>;
 
 export function beginInstalledSubmitDiagnostic() {
+  const assembly = beginInstalledAssemblySubmit();
   const diagnosis = beginInstalledApplyDiagnostic();
   diagnosis?.stage('submit_request');
+  if (assembly) return Object.freeze({
+    stage(value: InstalledApplyDiagnosticStage): void { diagnosis?.stage(value); assembly.stage(value); },
+    failure(error: unknown, closing: boolean): void { diagnosis?.failure(error, closing); }
+  });
   return diagnosis;
 }
 
@@ -142,6 +148,7 @@ export function noteInstalledPublicationPhase(phase: unknown): void {
 /** Called before the existing close gate/revocation. These are a current
  * process-local observation, not a Run status, failure proof or joined result. */
 export function noteInstalledStoreStop(input: unknown): void {
+  noteInstalledAssemblyStop();
   if (!diagnostic.hasSubscribers) return;
   try {
     if (!input || typeof input !== 'object' || types.isProxy(input) || Array.isArray(input) ||

@@ -12,6 +12,8 @@ import { INSTALLED_CREDENTIAL_PHASE_CHANNEL, INSTALLED_CREDENTIAL_PHASES,
 import { INSTALLED_WORK_CHANNEL } from '../../../src/state/installed-work-diagnostics.js';
 import { PUBLICATION_RETIREMENT_CHANNEL } from '../../../src/state/publication-retirement-diagnostics.js';
 import { INSTALLED_STORE_DIAGNOSTIC_BANNER } from './installed-store-diagnostic-banner.js';
+import { INSTALLED_ASSEMBLY_WORK_DIAGNOSTIC_BANNER } from './installed-assembly-work-banner.js';
+export { INSTALLED_ASSEMBLY_WORK_DIAGNOSTIC_BANNER } from './installed-assembly-work-banner.js';
 
 export const SUPERVISOR_SEA_NODE_VERSION = '24.21.0';
 export const SUPERVISOR_SEA_CARRIER_CHECKSUMS: Readonly<Record<string, string>> = {
@@ -183,7 +185,7 @@ export async function buildSupervisorSeaImage(input: {
   const banner = (input.credentialPhaseDiagnostics ? CREDENTIAL_PHASE_DIAGNOSTIC_BANNER + INSTALLED_WORK_DIAGNOSTIC_BANNER : '') +
     (input.publicationRetirementDiagnostics ? PUBLICATION_RETIREMENT_DIAGNOSTIC_BANNER : '') +
     (input.serverAuthenticationDiagnostics ? SERVER_AUTHENTICATION_DIAGNOSTIC_BANNER : '') +
-    (input.storeFailureDiagnostics ? INSTALLED_STORE_DIAGNOSTIC_BANNER : '');
+    (input.storeFailureDiagnostics ? INSTALLED_STORE_DIAGNOSTIC_BANNER + INSTALLED_ASSEMBLY_WORK_DIAGNOSTIC_BANNER : '');
   const main = path.join(input.fixture, `${input.variant}.cjs`);
   const result = await build({ entryPoints: [input.entryPoint], outfile: main,
     bundle: true, platform: 'node', format: 'cjs', target: 'node24.21', metafile: true,
