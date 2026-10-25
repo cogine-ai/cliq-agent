@@ -125,7 +125,19 @@ test('installed admission scopes only its read-only CAS work and retains origina
   assert.match(assembly, /const reads = signal \? artifacts\.withReadSignal\(signal\) : artifacts/u);
   assert.doesNotMatch(assembly, /readCanonicalArtifact(?:<[^\n]+?>)?\(artifacts|validateControlChannelClosure\(artifacts|materialFor\(installed, artifacts/u);
   assert.match(assembly, /captureInstalledWorkspaceInstructions\(root, artifacts,/u);
-  assert.match(assembly, /await artifacts\.publishCanonical\(assembly, assembly\.format\)/u);
+  assert.match(assembly, /await prepareInstalledVerifierAssembly\(driver, reads, owner,/u);
+  const verifier = source('./verifier-admission.ts');
+  const preparation = between(verifier, 'export async function prepareInstalledVerifierAssembly(', 'export async function prepareVerifierConsumption(');
+  assert.match(preparation, /await resolveVerifierSpec\(driver, artifacts, owner, runtime, input, undefined, signal\)/u);
+  assert.match(preparation, /await publishVerifierAssembly\(artifacts, composed, input\.assembly, signal\)/u);
+  const publication = between(verifier, 'export async function publishVerifierAssembly(', '/** Deterministic command/environment construction,');
+  assert.match(publication, /await artifacts\.publishCanonical\(assembly, assembly\.format\)/u);
+  assert.match(publication, /await artifacts\.publishCanonicalFour\(\[/u);
+  const catalog = source('./artifacts.ts');
+  const group = between(catalog, '  async publishCanonicalFour(', '  async publishChunks(');
+  assert.match(group, /await this\.cas\.publishFour\(/u);
+  assert.doesNotMatch(group, /this\.readSignal|throwIfAborted/u,
+    'the temporary read view cannot cancel or abandon the actual publication group');
   const admission = source('./reducers/admission.ts');
   const replay = between(admission, 'export async function replayInstalledRunAdmission(', 'type InstalledAdmission =');
   const internal = admission.slice(admission.indexOf('async function admitRunInternal('));

@@ -38,7 +38,7 @@ import { normalizeRunSubmitRequest, readRetainedSourceInspectionTarget, runSubmi
 import { assertWorkspaceSourceTrust, holdWorkspaceSourceTrust } from './source-trust.js';
 import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
 import { assertActiveStateOwner, type StateOwnerContext } from './state-owner.js';
-import { assertSupportedVerifierRequests, prepareVerifierSpec, readVerifierRequestIdentities } from './verifier-admission.js';
+import { assertSupportedVerifierRequests, prepareInstalledVerifierAssembly, readVerifierRequestIdentities } from './verifier-admission.js';
 import type { AdmitRunInput } from './reducers/admission.js';
 import { readRetainedVerifierToolchain } from './guest-toolchain.js';
 import { VerifierAuthorizationError } from './authorization-artifacts.js';
@@ -503,10 +503,9 @@ export async function assembleInstalledRun(input: {
     reportInstalledRunAssemblyPhase(onAssemblyPhase, 'submit_assembly_publish');
     const sandbox = installedSandboxProfile(request.sandboxResources);
     const sandboxProfileRef = (await artifacts.publishCanonical(sandbox, sandbox.format)).ref;
-    const verifier = await prepareVerifierSpec(driver, reads, owner, { bundle: installed.bundle, releaseKeys: installed.releaseKeys },
+    const verifier = await prepareInstalledVerifierAssembly(driver, reads, owner, { bundle: installed.bundle, releaseKeys: installed.releaseKeys },
       { principalId: identity.principalId, requests: request.verifiers, policyMode: request.policyMode, assembly,
-        sourceProjectionRef: sourceManifest.sourceProjectionRef, sandboxProfileRef }, undefined, signal);
-    await artifacts.publishCanonical(assembly, assembly.format);
+        sourceProjectionRef: sourceManifest.sourceProjectionRef, sandboxProfileRef }, signal);
     const policyRef = (await artifacts.publishCanonical(policy, policy.format)).ref;
     const verifierSpecRef = verifier.specRef;
     await installed.revalidate(signal); await validateControlChannelClosure(reads, owner, identity); assertActiveStateOwner(driver, owner);

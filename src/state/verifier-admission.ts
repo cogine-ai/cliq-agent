@@ -1,7 +1,7 @@
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import type { AuthorizationConsumptionReceiptV1, AuthorizationGrantV1 } from '../kernel/authorization.js';
 import type { VerifierRequest } from '../kernel/control-submit.js';
-import { digestOmitting } from '../kernel/identity.js';
+import { digestOmitting, sha256Bytes } from '../kernel/identity.js';
 import type { RunAssemblyV1, RunSpec, VerifierSpec } from '../kernel/types.js';
 import type { VerifierCommandV1, VerifierEnvironmentV1 } from '../kernel/verifier.js';
 import { readCanonicalArtifact } from './agent-context.js';
@@ -154,13 +154,12 @@ export function composeVerifierSpec(input: { requests: readonly VerifierRequest[
   return { spec, specRef: canonicalSha256(spec), artifacts: values.map(value => ({ value, format: value.format, ref: canonicalSha256(value) })) };
 }
 
-/** Deterministic command/environment construction, shared by installed and
- * internal admission; caller refs are never accepted as identity authority. */
-export async function prepareVerifierSpec(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
-  runtime: AuthorizationRuntime, input: { principalId: string; requests: readonly VerifierRequest[];
-    policyMode: string; assembly: RunAssemblyV1; sourceProjectionRef: string; sandboxProfileRef: string }, historical?: {
-      runId: string; admissionIntentDigest: string; admittedAt: string;
-    }, signal?: AbortSignal) {
+type VerifierPreparationInput = { principalId: string; requests: readonly VerifierRequest[];
+  policyMode: string; assembly: RunAssemblyV1; sourceProjectionRef: string; sandboxProfileRef: string };
+type VerifierPreparationHistory = { runId: string; admissionIntentDigest: string; admittedAt: string };
+
+async function resolveVerifierSpec(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
+  runtime: AuthorizationRuntime, input: VerifierPreparationInput, historical?: VerifierPreparationHistory, signal?: AbortSignal) {
   assertSupportedVerifierRequests(input.requests, input.policyMode);
   const resolved = await readVerifierRequestIdentities(driver, artifacts, owner, runtime, input.principalId, input.requests, historical, signal);
   const profile = resolved.length ? decodeSandboxProfile(await readCanonicalArtifact(artifacts, input.sandboxProfileRef)) : undefined;
@@ -178,7 +177,12 @@ export async function prepareVerifierSpec(driver: SqliteDriver, artifacts: Artif
         profile!.resources.maxProcesses < LINUX_VERIFIER_RESOURCE_MINIMUMS.maxProcesses)
       throw new VerifierAuthorizationError('UNSUPPORTED_EXECUTION_IDENTITY');
   }
-  const composed = composeVerifierSpec({ ...input, toolchain: resolved[0]?.selected }), metadata: PublishedArtifact[] = [];
+  return { composed: composeVerifierSpec({ ...input, toolchain: resolved[0]?.selected }), resolved };
+}
+
+async function publishVerifierArtifacts(artifacts: ArtifactCatalog, composed: ReturnType<typeof composeVerifierSpec>,
+  historical?: VerifierPreparationHistory, signal?: AbortSignal) {
+  const metadata: PublishedArtifact[] = [];
   for (const { value, format, ref } of composed.artifacts) {
     signal?.throwIfAborted();
     if (!historical) metadata.push(await artifacts.publishCanonical(value, format));
@@ -187,6 +191,57 @@ export async function prepareVerifierSpec(driver: SqliteDriver, artifacts: Artif
       metadata.push(await artifacts.describe(ref, 'application/json', format));
     }
   }
+  return metadata;
+}
+
+/** Internal inert-data publication seam, not authorization or admission. Only
+ * one verifier has exactly the three original objects plus the assembly; all
+ * other counts retain the ordinary publisher without padding or republishing.
+ * The fixed group's cancellation boundary is after its real complete join. */
+export async function publishVerifierAssembly(artifacts: ArtifactCatalog, composed: ReturnType<typeof composeVerifierSpec>,
+  assembly: RunAssemblyV1, signal?: AbortSignal): Promise<PublishedArtifact[]> {
+  if (composed.spec.verifiers.length !== 1) {
+    const metadata = await publishVerifierArtifacts(artifacts, composed, undefined, signal);
+    await artifacts.publishCanonical(assembly, assembly.format);
+    return metadata;
+  }
+  if (composed.artifacts.length !== 3) throw new TypeError('one verifier requires its command, environment and spec');
+  const [command, environment, spec] = composed.artifacts;
+  const publications = [command!, environment!, spec!, { value: assembly, format: assembly.format }];
+  const expected = publications.map(({ value, format }) => {
+    const bytes = canonicalJsonBytes(value);
+    return { ref: sha256Bytes(bytes), byteLength: bytes.byteLength, mediaType: 'application/json', schemaKind: format };
+  });
+  signal?.throwIfAborted();
+  const published = await artifacts.publishCanonicalFour([
+    { value: command!.value, schemaKind: command!.format }, { value: environment!.value, schemaKind: environment!.format },
+    { value: spec!.value, schemaKind: spec!.format }, { value: assembly, schemaKind: assembly.format }
+  ]);
+  if (published.length !== 4 || expected.some((wanted, index) => {
+    const artifact = published[index];
+    return !artifact || artifact.ref !== wanted.ref || artifact.byteLength !== wanted.byteLength ||
+      artifact.mediaType !== wanted.mediaType || artifact.schemaKind !== wanted.schemaKind;
+  })) throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed verifier publication does not match its complete canonical bytes');
+  signal?.throwIfAborted();
+  return published.slice(0, 3);
+}
+
+/** Deterministic command/environment construction, shared by installed and
+ * internal admission; caller refs are never accepted as identity authority. */
+export async function prepareVerifierSpec(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
+  runtime: AuthorizationRuntime, input: VerifierPreparationInput, historical?: VerifierPreparationHistory, signal?: AbortSignal) {
+  const { composed, resolved } = await resolveVerifierSpec(driver, artifacts, owner, runtime, input, historical, signal);
+  const metadata = await publishVerifierArtifacts(artifacts, composed, historical, signal);
+  return { spec: composed.spec, specRef: composed.specRef, metadata, resolved };
+}
+
+/** Current installed admission only. Resolve the same complete original
+ * authority before publishing data; historical validation keeps the ordinary
+ * read-only path above and never creates or repairs missing objects. */
+export async function prepareInstalledVerifierAssembly(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
+  runtime: AuthorizationRuntime, input: VerifierPreparationInput, signal?: AbortSignal) {
+  const { composed, resolved } = await resolveVerifierSpec(driver, artifacts, owner, runtime, input, undefined, signal);
+  const metadata = await publishVerifierAssembly(artifacts, composed, input.assembly, signal);
   return { spec: composed.spec, specRef: composed.specRef, metadata, resolved };
 }
 export async function prepareVerifierConsumption(artifacts: ArtifactCatalog, prepared: Awaited<ReturnType<typeof prepareVerifierSpec>>,

@@ -3620,6 +3620,19 @@ failure durably cleans only owned temporary objects and joins every resource;
 no descriptor or valid final orphan is silently discarded. No channel becomes
 active before the complete verified group and final native-current check.
 
+The same fixed-four phase semantics also cover the installed single-verifier
+group `[command, environment, verifier specification, Run assembly]`. The
+sandbox remains an earlier individually durable publication. Its complete
+profile read and all original toolchain/authorization/resource checks retain
+their original relative order and finish before the batch; policy remains a
+later individual publication. Zero/multiple verifiers use the original path
+without padding; historical reconstruction publishes nothing. Actual returned
+descriptors, full readback and every issued sibling's join must succeed before
+the original final runtime/channel/owner checks and admission can complete.
+Cancellation/failure may leave more valid data-only orphans than the former
+serial order, never a partial admission or execution authority. No guard,
+durability boundary, request limit or shutdown deadline is removed or enlarged.
+
 Authorization freezes preparation time P and its original TTL/response before
 CAS, but only actual final-transaction time C enters the existing time fence.
 Require P<=C<expiry, the same current owner and original authenticated frame;

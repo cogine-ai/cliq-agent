@@ -2156,3 +2156,63 @@ Independent closeout SHA-256:
 `c9405473f73fd149d231c96fcdf54a78cef4ff3a70bd6739f3b6f7262f0a5eb9`.
 The original evidence, failed conclusions and remaining physical cuts stay
 open; this is not a complete I1 or complete-PR qualification.
+
+### Result handoff SQL closure and exact-head Linux evidence, 2026-10-25
+
+Source `dd33b769cdccdd17f153f3ddeffe2be27e0c38bb`, tree
+`cd50ad1413ed64e7b86c585ecb1a5b2c86af960e`, completed
+[run 40140981818](https://github.com/cogine-ai/cliq-agent/actions/runs/40140981818)
+with seventeen successful jobs and five failed jobs; all four TypeScript jobs
+pass. The remaining original-owner publication helpers now require their
+actual SQL connection explicitly, including handoff, preparation retirement,
+settlement, initial ambiguity and abort terminal paths. The original driver
+still binds resource identity and the private live-scope issuer; no outer-driver
+guard or ownership assertion is relaxed. Independent transitive review found
+no further necessary SQL-scope or self-join fix, not proof of runtime completion.
+
+The immutable local source gate passes the original build and full test:
+2,691 passing tests, zero failures and three original platform skips. The nine
+script suites pass 237 with fifteen original Linux-only skips; all 99 portable
+tests and strict actual dependency checks pass. Local validation SHA-256:
+`c622b7bc0e7b8117bfffb29810741c1fb5a19291403242a105af7fad9a1e8f33`.
+
+Actual qualification remains incomplete:
+
+- Normal Delivery commits the real received-result handoff: queued/delivery,
+  revision eight, six items and six Checkpoints, with no active worker. It
+  still misses ninety seconds before terminal accounting. The original Store
+  and writer join are now observed; the only recorded scheduler failure is
+  after shutdown begins. That closing failure is not the preceding timeout's
+  cause. The recorded latest-update offset is not a live age or proof of a
+  deadlock, and this does not qualify the complete publication lifecycle.
+- Ordinary delayed storage and original-stop finish authentication but miss
+  the original thirty-second `run.submit`. Five fixed assembly labels locate
+  their closing admission failure in `submit_assembly_publish`; this does not
+  identify the specific await or establish its duration. Original joins finish.
+  The late-result journey instead misses five-second READY. Neither requested
+  physical storage cut is reached or qualified.
+- The verifier corpus still refuses at 4,096 independent cumulative streams.
+  Its first unscanned value is nonempty. The observed prefix alone requires
+  `675 + 1 + 3421 = 4097` streams; authority/CAS coverage is not yet complete.
+  Independent review found no duplicate stream counting or demonstrated
+  redundant production history. Preserving this exact source set and the
+  original independent-stream semantics cannot fit that budget. The scan,
+  resource limit and complete verifier qualification all remain unpassed;
+  sources are not skipped, merged, reset, or inferred from the fallback.
+
+All 23 categories retain 105 original JSON files / 499,395 bytes: eighteen
+qualified reports and five false reports, with no pending, rejected or
+incomplete categories. All 21 cleanup reports have zero errors and all 21
+runner-baseline pairs are byte-identical. Final capture SHA-256:
+`a0fff516a688d47617051d52355eac14f63dce88433f85e12254212a933de41a`.
+Independent closeout SHA-256:
+`550e7d9e4cbd6a6d89f69522de7e684c832086c2fd991cc6c45cf043efb297ad`.
+The first local closeout attempt's Python 3.9 canonical-UTC parsing refusal is
+retained separately; the succeeding revision only parses the same strictly
+validated Node timestamp equivalently. No original report or conclusion changed.
+
+The next bounded performance candidate reuses the existing four-phase CAS
+batch for single-verifier artifacts and assembly, with the normative timing
+and data-only-orphan distinction above. It is not yet implemented or measured
+in this evidence and does not qualify thirty seconds, READY, complete I1,
+real-provider billing, macOS execution, reboot, I2-I4 or Kernel Cut.

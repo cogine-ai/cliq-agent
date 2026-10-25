@@ -237,6 +237,26 @@ taking precedence. Valid immutable final objects may remain as data-only
 orphans after failure; the batch neither deletes them for atomicity nor
 registers a partial channel. No authentication or shutdown deadline changes.
 
+Installed admission with exactly one verifier may reuse that same fixed-four
+CAS phase batch for its command, environment, verifier specification and Run
+assembly, in that order. Their canonical references are composition data,
+not evidence of completed publication. The sandbox profile is still published
+first. Its complete independent read and all original toolchain, identity,
+authorization and resource checks retain their original relative order and
+must finish before the batch; the policy is still published afterward.
+Zero or multiple verifiers retain their ordinary publication path, without
+dummy objects. Historical reconstruction remains read-only. Every issued
+member must fully settle, verify its actual descriptor and join before an
+admission handle can escape. A partial, cancelled or failed group is not
+admission or execution authority.
+All original final runtime, authenticated-frame, channel and StateOwner checks
+remain required. Like the authentication batch, cancellation or failure may
+leave additional valid data-only CAS orphans relative to the former serial
+order; this is not serial-order equivalence or an atomic publication. The four
+durability boundaries, per-file sync and full readback, recovery rules and
+retirement-failure precedence above are unchanged. This does not extend the
+thirty-second request or any authentication, shutdown or qualification limit.
+
 ## 4. Semantic Ownership
 
 | Object | Answers | Mutable? | Must not contain |
