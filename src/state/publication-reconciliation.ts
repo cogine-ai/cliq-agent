@@ -24,7 +24,7 @@ import { readOwnedPublicationReconciliationProgress, type OwnedPublicationReconc
 import { projectPublicationProbeProgress } from './publication-reconciliation-progress.js';
 import { projectPublicationLateObservation } from './publication-late-observation.js';
 import { planContinuationCommit } from './continuation-commit.js';
-import { readRecoveryClosure } from './recovery-closure.js';
+import { readDeliveryPublicationClosure, readRecoveryClosure } from './recovery-closure.js';
 import { appendRunStateEvent, requireHealthyFence } from './reducers/invocation.js';
 import { readChildAllocationsForRun } from './repositories/child-allocations.js';
 import { readInvocationJournal } from './repositories/journal.js';
@@ -317,7 +317,7 @@ export const replayPublicationReconciliationProbe = stateOperation('RECOVERY_REQ
   const selected = readRun(driver, request.runId);
   if (readSessionPrincipalId(driver, selected.sessionId) !== input.identity.principalId)
     throw new KernelStorageError('NOT_FOUND', 'publication Run is unavailable');
-  const cut = await readRecoveryClosure(driver, artifacts, request.runId), prefix = await readPublicationPrefix(driver, artifacts, cut);
+  const { cut, prefix } = await readDeliveryPublicationClosure(driver, artifacts, request.runId);
   const response = decodeInstalledControlEnvelope(await readCanonicalArtifact(artifacts, row.responseRef), 'run.reconcile');
   if (!response.ok || response.result.method !== 'run.reconcile' || !response.result.snapshot.run.waitingOnRef)
     return fail('publication probe replay lost its original durable response');

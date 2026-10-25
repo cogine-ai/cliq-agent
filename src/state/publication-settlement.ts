@@ -18,7 +18,7 @@ import { assertOwnedPublicationArtifacts, readOwnedPublicationCompletion, readOw
 import { closeOwnedPublicationFinalization, commitOwnedPublicationFinalization, isOwnedPublicationSessionConflict,
   prepareOwnedPublicationFinalization, readOwnedPublicationFinalizationMetadata, validateOwnedPublicationFinalization,
   readOwnedPublicationReceivedResult, type OwnedPublicationFinalization, type OwnedPublicationReceivedResult } from './publication-finalization.js';
-import { readRecoveryClosure } from './recovery-closure.js';
+import { readDeliveryPublicationClosure } from './recovery-closure.js';
 import { appendRunStateEvent, preparePublicationInvocationSettlement, preparePublicationReconciliationInvocationSettlement,
   requireHealthyFence, type SettlementContinuation } from './reducers/invocation.js';
 import { readInvocationJournal } from './repositories/journal.js';
@@ -165,7 +165,7 @@ function sqlCut(connection: SqliteConnection, binding: Pick<Binding, 'input'>, s
 }
 async function select(binding: Binding): Promise<Selection> {
   const completion = original(binding, binding.driver), { driver, artifacts } = binding;
-  const cut = await readRecoveryClosure(driver, artifacts, binding.input.runId), prefix = await readPublicationPrefix(driver, artifacts, cut);
+  const { cut, prefix } = await readDeliveryPublicationClosure(driver, artifacts, binding.input.runId);
   const entry = prefix.entries.get(binding.input.opId), authorization = prefix.authorization;
   if (!entry?.claim || !entry.birth || !authorization || entry.sequence !== completion.birth.sequence ||
       entry.operation.operationId !== completion.operation.operationId || entry.planRef !== completion.planRef)
@@ -588,8 +588,7 @@ function originalReceived(binding: ReceivedBinding, connection: SqliteConnection
 
 async function selectReceived(binding: ReceivedBinding): Promise<Selection> {
   const actual = originalReceived(binding), completion = actual.completion;
-  const cut = await readRecoveryClosure(binding.driver, binding.reads, binding.input.runId);
-  const prefix = await readPublicationPrefix(binding.driver, binding.reads, cut);
+  const { cut, prefix } = await readDeliveryPublicationClosure(binding.driver, binding.reads, binding.input.runId);
   const entry = prefix.entries.get(binding.input.opId), authorization = prefix.authorization;
   if (!entry?.claim || !entry.birth || !entry.receivedHandoff || !authorization || entry.sequence !== 'forward' ||
       entry.operation.operationId !== completion.operation.operationId || entry.planRef !== completion.planRef ||
@@ -770,7 +769,7 @@ function originalPreparation(binding: PreparationBinding, connection: SqliteConn
 }
 async function selectPreparation(binding: PreparationBinding): Promise<Selection> {
   const actual = originalPreparation(binding, binding.driver), { driver, artifacts } = binding;
-  const cut = await readRecoveryClosure(driver, artifacts, binding.input.runId), prefix = await readPublicationPrefix(driver, artifacts, cut);
+  const { cut, prefix } = await readDeliveryPublicationClosure(driver, artifacts, binding.input.runId);
   const entry = prefix.entries.get(binding.input.opId);
   if (!entry || entry.claim || entry.planRef !== actual.planRef || entry.operation.operationId !== actual.operation.operationId ||
       entry.sequence !== actual.sequence || entry.history.length > 2 || entry.history.some(row => !['prepared', 'failed'].includes(row.phase)))

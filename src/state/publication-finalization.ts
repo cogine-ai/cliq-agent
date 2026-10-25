@@ -21,7 +21,7 @@ import { assertHeldWorkspaceRoot, heldWorkspaceRootPath, type HeldWorkspaceCurso
   type HeldWorkspaceRoot } from './native-owner.js';
 import { assertOwnedPublicationArtifacts, readOwnedPublicationCompletion, type PublicationInvocationOwner } from './publication-invocation.js';
 import type { OwnedPublicationReconciliationResult } from './publication-invocation.js';
-import { readRecoveryClosure } from './recovery-closure.js';
+import { readDeliveryPublicationClosure } from './recovery-closure.js';
 import { readInvocationJournal } from './repositories/journal.js';
 import { readWorkerLaunchesForRun } from './repositories/worker-launches.js';
 import { readWorkspaceGenerationsForRun } from './repositories/workspace-generations.js';
@@ -165,7 +165,7 @@ export async function handoffOwnedPublicationResult(driver: SqliteDriver, artifa
   const work = (async () => {
     const graph = await binding.graph.publish();
     for (let attempt = 0; attempt < 8; attempt++) {
-      const cut = await readRecoveryClosure(driver, artifacts, binding.item.runId), prefix = await readPublicationPrefix(driver, artifacts, cut);
+      const { cut, prefix } = await readDeliveryPublicationClosure(driver, artifacts, binding.item.runId);
       const entry = prefix.entries.get(binding.item.opId);
       if (entry?.receivedHandoff) {
         requireEqual(entry.receivedHandoff.item, binding.item, 'same original received handoff after committed SQL');
@@ -327,8 +327,8 @@ export async function handoffOwnedReconciledPublicationResult(driver: SqliteDriv
 export async function prepareOwnedPublicationReceivedResult(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
   execution: unknown, task: DeliveryPublicationReceivedTask): Promise<OwnedPublicationReceivedResult> {
   const resources = assertDeliveryPublicationReceivedExecution(driver, owner, execution, task, artifacts);
-  const reads = artifacts.withReadSignal(resources.signal), cut = await readRecoveryClosure(driver, reads, resources.runId);
-  const prefix = await readPublicationPrefix(driver, reads, cut), entry = prefix.forward.at(-1);
+  const reads = artifacts.withReadSignal(resources.signal);
+  const { cut, prefix } = await readDeliveryPublicationClosure(driver, reads, resources.runId), entry = prefix.forward.at(-1);
   if (cut.run.revision !== resources.expectedRunRevision || cut.run.status !== 'queued' || cut.run.nextStep !== 'delivery' ||
       cut.run.activeWorkerLaunchId || cut.workerLaunches.length || !entry?.receivedHandoff || !entry.pendingReceivedHandoff || !entry.claim || !entry.birth ||
       entry.operation.index !== entry.plan.forwardOperations.length - 1 || prefix.abortResults.length ||
@@ -400,8 +400,8 @@ export async function prepareOwnedPublicationGenerationSeal(driver: SqliteDriver
       retained.runId !== completion.run.id || retained.planRef !== completion.planRef))
     throw new TypeError('publication cannot transfer its original M seal owner');
   const retired = retained?.retired ?? await resources.retire();
-  const reads = artifacts.withReadSignal(resources.signal), cut = await readRecoveryClosure(driver, reads, completion.run.id);
-  const prefix = await readPublicationPrefix(driver, reads, cut), authorization = prefix.authorization;
+  const reads = artifacts.withReadSignal(resources.signal);
+  const { cut, prefix } = await readDeliveryPublicationClosure(driver, reads, completion.run.id), authorization = prefix.authorization;
   if (!authorization || authorization.context.planRef !== completion.planRef ||
       retired.snapshot.checkpointId !== deliveryPublicationCheckpointId(cut.run.id, completion.planRef) ||
       retired.postEffect.workspaceStateRef !== cut.latestCheckpoint.workspaceStateRef ||

@@ -20,7 +20,7 @@ import { assertHeldWorkspaceRoot, heldWorkspaceRootPath, stateRootIdentityForLoc
 import { assertOwnedPublicationArtifacts, readOwnedPublicationCompletion, readOwnedPublicationPreparationClosure,
   readOwnedPublicationReconciledRetirement, type PublicationInvocationOwner } from './publication-invocation.js';
 import { openPublicationProjectionGate, prepareOwnedPublicationGenerationSeal, readDeliveryTerminalSqlCut } from './publication-finalization.js';
-import { readRecoveryClosure } from './recovery-closure.js';
+import { readDeliveryPublicationClosure } from './recovery-closure.js';
 import { assertDeliveryPublicationMaintenanceExecution, type DeliveryPublicationMaintenanceTask } from './run-execution.js';
 import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
 import { assertActiveStateOwner, type StateOwnerContext } from './state-owner.js';
@@ -78,7 +78,7 @@ export async function prepareOwnedPublicationAbortFinalization(driver: SqliteDri
   let resources = assertDeliveryPublicationMaintenanceExecution(driver, owner, execution, task, artifacts);
   const failure = failures.get(task); if (failure) throw failure;
   const reads = artifacts.withReadSignal(resources.signal);
-  let cut = await readRecoveryClosure(driver, reads, resources.runId), prefix = await readPublicationPrefix(driver, reads, cut);
+  let { cut, prefix } = await readDeliveryPublicationClosure(driver, reads, resources.runId);
   if (cut.run.revision !== resources.expectedRunRevision) throw new KernelStorageError('REVISION_CONFLICT', 'publication abort task revision changed');
   assertReady(cut, prefix);
   const originals = new Map<string, Completion>();

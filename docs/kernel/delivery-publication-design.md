@@ -643,3 +643,43 @@ proofs retain the same original owner and observation time; chains, directory
 anchors and arena anchors are refused. Twenty-two kernel/retained-data cases
 and the original structural-root refusal pass, but these data cases cannot
 mint a native observation or substitute for an installed delivery Run.
+
+## Single fresh validation DAG — candidate validation pending
+
+WP01's within-validation reference deduplication applies to one complete
+relational cut and its entire CAS closure, not to the lifetime of a received
+result. The current helper graph repeatedly expands admission, original source
+recovery, verification and authorization inside that same traversal. Its
+static expansion count is not a required security check count or a measured
+timeout cause.
+
+The candidate assembles those dependencies once per fresh traversal
+using internal immutable data flow. Every semantic role still performs its own
+closed decoding, identity, digest and graph-association checks. Every required
+object is completely read and byte-verified in that traversal; old metadata,
+path existence, a prior successful traversal or caller-supplied material is
+never fresh integrity evidence. No execution permission, native proof, global
+cache, additional persistent record or callback-selected bypass is introduced.
+
+Received-result reading, genuine received-result construction, settlement
+construction and each actual settlement retain their independent fresh
+traversals. The separate pre-handoff generation-seal check and each handoff
+CAS/SQL attempt also retain their own fresh traversals; the four received-result
+stages are not an exhaustive count of acceptance boundaries. Retries, rollback,
+reentry and successor ownership cannot inherit another traversal's validated
+nodes. Keep the original source/Session and
+full SQL-cut comparisons at their logical acceptance points; source Delivery
+chains retain each Run's actual cut and reject ancestor cycles before reuse.
+Independent historical and prefix entry points remain fresh. In particular,
+prefix validation must not recursively start a new full recovery walk from a
+Stop/recovery edge.
+
+Current frame/StateOwner checks, all installed-image revalidations, permanent
+claim and UNKNOWN accounting, real task/root identity, Stop/time fencing,
+fresh complete workspace projection and its five-second gate remain outside
+this data-flow optimization at their existing boundaries. Final storage
+revalidation and the sole Journal/Checkpoint/RunResult/Session transaction are
+not replaced by a previous graph. Failure and cancellation still join every
+issued read; original resource-retirement uncertainty takes precedence.
+Data regressions cannot qualify physical publication, restart or the unchanged
+two-, five-, thirty- and ninety-second installed acceptance gates.

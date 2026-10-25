@@ -28,7 +28,7 @@ import { assertHeldWorkspaceRoot, heldWorkspaceRootPath, openHeldPublicationOper
   type HeldPublicationNamespaceObserver, type HeldPublicationOperation, type HeldWorkspaceRoot, type NativePublicationObservation, type NativePublicationOperationInput } from './native-owner.js';
 import { assertPublicationPreflight, preparePublicationPreflight, type PublicationPreflight } from './publication-preflight.js';
 import { noteJoinedPublicationRetirement, publicationRetirementDiagnosticKey } from './publication-retirement-diagnostics.js';
-import { readRecoveryClosure } from './recovery-closure.js';
+import { readDeliveryPublicationClosure, readRecoveryClosure } from './recovery-closure.js';
 import { appendRunStateEvent, assertLiveDispatchState, claimValidatedInvocation, prepareValidatedInvocation, requireHealthyFence, type ClaimInvocationDispatchInput } from './reducers/invocation.js';
 import { appendInvocationJournalEntry, nextJournalSequence, readInvocationAttempt, readInvocationJournal } from './repositories/journal.js';
 import { readWorkerLaunchesForRun } from './repositories/worker-launches.js';
@@ -269,7 +269,7 @@ export async function preparePublicationInvocation(driver: SqliteDriver, artifac
   input = Object.freeze({ ...input, worker });
   const reads = input.signal ? artifacts.withReadSignal(input.signal) : artifacts;
   preparationPhase('publication_prepare_read');
-  const cut = await readRecoveryClosure(driver, reads, worker.runId), prefix = await readPublicationPrefix(driver, reads, cut);
+  const { cut, prefix } = await readDeliveryPublicationClosure(driver, reads, worker.runId);
   const authorization = prefix.authorization;
   if (!authorization?.grant || !authorization.grantRef || authorization.decision.decision !== 'allow' || authorization.workspace.kind !== 'live')
     invalid('publication requires the complete original delivery allow');
@@ -357,7 +357,7 @@ export async function preparePublicationMaintenance(driver: SqliteDriver, artifa
   input = Object.freeze({ ...input });
   const root = resources.workspaceRoot, signal = resources.signal, reads = artifacts.withReadSignal(signal);
   signal.throwIfAborted(); assertHeldWorkspaceRoot(root);
-  const cut = await readRecoveryClosure(driver, reads, resources.runId), prefix = await readPublicationPrefix(driver, reads, cut);
+  const { cut, prefix } = await readDeliveryPublicationClosure(driver, reads, resources.runId);
   const authorization = prefix.authorization;
   if (!authorization?.grant || !authorization.grantRef || authorization.decision.decision !== 'allow' || authorization.workspace.kind !== 'live')
     invalid('maintenance requires its complete original approved Plan');
@@ -620,7 +620,7 @@ export function claimPublicationInvocation(driver: SqliteDriver, owner: StateOwn
       if (!held.armed) throw new KernelStorageError('RECOVERY_REQUIRED', 'publication original claim did not release its native operation');
       return { run: readRun(driver, held.run.id), claim: immutableSnapshot(held.claim) };
     }
-    const cut = await readRecoveryClosure(driver, held.reads, held.run.id), prefix = await readPublicationPrefix(driver, held.reads, cut);
+    const { cut, prefix } = await readDeliveryPublicationClosure(driver, held.reads, held.run.id);
     if (held.mode === 'abort' && canonicalSha256(cut.run) !== canonicalSha256(held.run)) {
       const previous = held.preparedSnapshot!;
       const current = sqlCut(driver, cut.run.id, prefix.admission.source.run.id);

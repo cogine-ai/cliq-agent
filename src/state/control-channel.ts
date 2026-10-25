@@ -295,10 +295,10 @@ export async function readRetainedControlChannelClosure(
   ) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'control channel identity does not match the caller');
   }
-  const principal = decodeLocalPrincipalIdentity(
-    await artifacts.readCanonical(channel.principalIdentityRef)
-  );
-  const root = decodeStateRootIdentity(await artifacts.readCanonical(owner.stateRootIdentityRef));
+  const [principal, root] = await joinResourceOperations([
+    artifacts.readCanonical(channel.principalIdentityRef).then(decodeLocalPrincipalIdentity),
+    artifacts.readCanonical(owner.stateRootIdentityRef).then(decodeStateRootIdentity)
+  ]);
   if (
     root.identityDigest !== owner.stateRootIdentityDigest ||
     root.ownerUid !== owner.filesystem.root.ownerUid ||
@@ -311,43 +311,45 @@ export async function readRetainedControlChannelClosure(
   ) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'control channel principal identity is not current');
   }
-  const metadata = await joinResourceOperations([
+  // These three branches only re-read retained CAS. Principal/root validation
+  // above still precedes transport, and every issued branch joins before any
+  // result escapes; metadata failures retain their original input priority.
+  const [channelMetadata, principalMetadata, transportMetadata] = await joinResourceOperations([
     artifacts.describe(input.channelIdentityRef, 'application/json', 'cliq-local-control-channel-identity-v1'),
-    artifacts.describe(channel.principalIdentityRef, 'application/json', 'cliq-local-principal-identity-v1')
+    artifacts.describe(channel.principalIdentityRef, 'application/json', 'cliq-local-principal-identity-v1'),
+    (async () => {
+      if (channel.transport.kind === 'in_process') {
+        const processIdentity = decodePlatformProcessIdentity(await artifacts.readCanonical(channel.transport.processIdentityRef));
+        if (
+          processIdentity.identityDigest !== channel.transport.processIdentityDigest ||
+          processIdentity.ownerUid !== owner.filesystem.root.ownerUid ||
+          processIdentity.platform !== principal.platform ||
+          processIdentity.observedAt !== channel.openedAt
+        ) {
+          throw new KernelStorageError('ARTIFACT_MISMATCH', 'control channel process identity does not match');
+        }
+        return [{ ref: channel.transport.processIdentityRef, schemaKind: 'cliq-platform-process-identity-v1' }];
+      }
+      const peer = decodeLocalSocketPeerObservation(await artifacts.readCanonical(channel.transport.peerObservationRef));
+      const processIdentity = decodePlatformProcessIdentity(await artifacts.readCanonical(peer.peerProcessIdentityRef));
+      if (peer.observationDigest !== channel.transport.peerObservationDigest ||
+          peer.stateRootIdentityRef !== principal.stateRootIdentityRef ||
+          peer.stateRootIdentityDigest !== principal.stateRootIdentityDigest || peer.platform !== principal.platform ||
+          peer.peerUid !== principal.effectiveUid || processIdentity.identityDigest !== peer.peerProcessIdentityDigest ||
+          processIdentity.platform !== peer.platform || processIdentity.pid !== peer.peerPid ||
+          processIdentity.ownerUid !== peer.peerUid || processIdentity.observedAt !== peer.observedAt ||
+          parseCanonicalTime(channel.openedAt) < parseCanonicalTime(peer.observedAt)) {
+        throw new KernelStorageError('ARTIFACT_MISMATCH', 'retained control peer closure does not match');
+      }
+      return [
+        { ref: channel.transport.peerObservationRef, schemaKind: 'cliq-local-socket-peer-observation-v1' },
+        { ref: peer.peerProcessIdentityRef, schemaKind: 'cliq-platform-process-identity-v1' }
+      ];
+    })()
   ]);
-  if (channel.transport.kind === 'in_process') {
-    const processIdentity = decodePlatformProcessIdentity(await artifacts.readCanonical(channel.transport.processIdentityRef));
-    if (
-      processIdentity.identityDigest !== channel.transport.processIdentityDigest ||
-      processIdentity.ownerUid !== owner.filesystem.root.ownerUid ||
-      processIdentity.platform !== principal.platform ||
-      processIdentity.observedAt !== channel.openedAt
-    ) {
-      throw new KernelStorageError('ARTIFACT_MISMATCH', 'control channel process identity does not match');
-    }
-    metadata.push(
-      await artifacts.describe(
-        channel.transport.processIdentityRef,
-        'application/json',
-        'cliq-platform-process-identity-v1'
-      )
-    );
-  } else {
-    const peer = decodeLocalSocketPeerObservation(await artifacts.readCanonical(channel.transport.peerObservationRef));
-    const processIdentity = decodePlatformProcessIdentity(await artifacts.readCanonical(peer.peerProcessIdentityRef));
-    if (peer.observationDigest !== channel.transport.peerObservationDigest ||
-        peer.stateRootIdentityRef !== principal.stateRootIdentityRef ||
-        peer.stateRootIdentityDigest !== principal.stateRootIdentityDigest || peer.platform !== principal.platform ||
-        peer.peerUid !== principal.effectiveUid || processIdentity.identityDigest !== peer.peerProcessIdentityDigest ||
-        processIdentity.platform !== peer.platform || processIdentity.pid !== peer.peerPid ||
-        processIdentity.ownerUid !== peer.peerUid || processIdentity.observedAt !== peer.observedAt ||
-        parseCanonicalTime(channel.openedAt) < parseCanonicalTime(peer.observedAt)) {
-      throw new KernelStorageError('ARTIFACT_MISMATCH', 'retained control peer closure does not match');
-    }
-    metadata.push(
-      await artifacts.describe(channel.transport.peerObservationRef, 'application/json', 'cliq-local-socket-peer-observation-v1'),
-      await artifacts.describe(peer.peerProcessIdentityRef, 'application/json', 'cliq-platform-process-identity-v1')
-    );
-  }
+  const metadata = [channelMetadata, principalMetadata];
+  // The validated transport contributes exactly one or two original refs.
+  metadata.push(...await joinResourceOperations(transportMetadata.map(({ ref, schemaKind }) =>
+    artifacts.describe(ref, 'application/json', schemaKind))));
   return { channel, metadata };
 }

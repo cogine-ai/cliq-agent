@@ -45,10 +45,17 @@ const policyItemId = (runId: string, opId: string, decisionRef: string) => ident
  * permit, and this reader never recursively reads its own RecoveryClosure. */
 export async function readDeliveryApprovalContext(driver: SqliteDriver, artifacts: ArtifactCatalog,
   cut: RecoveryClosureV1, frontierRef: string) {
+  return readDeliveryApprovalContextData(driver, artifacts, cut, frontierRef,
+    ref => readDeliveryVerification(driver, artifacts, cut, ref));
+}
+
+async function readDeliveryApprovalContextData(driver: SqliteDriver, artifacts: ArtifactCatalog,
+  cut: RecoveryClosureV1, frontierRef: string,
+  verification: (ref: string) => ReturnType<typeof readDeliveryVerification>) {
   if (cut.runSpec.operation !== 'delivery') throw new TypeError('only delivery can own plan approval');
   const frontier = await readCanonicalArtifact<ApprovalFrontier>(artifacts, frontierRef);
   if (frontier.kind !== 'delivery' || frontier.phase !== 'approval') throw new TypeError('approval requires its original delivery frontier');
-  const verified = await readDeliveryVerification(driver, artifacts, cut, frontier.verificationClosureRef);
+  const verified = await verification(frontier.verificationClosureRef);
   if (!verified.deliveryPlan.forwardOperations.length)
     throw new TypeError('no-op delivery cannot acquire a plan approval or publication grant');
   requireEqual(frontier, { schemaVersion: 1, kind: 'delivery', phase: 'approval',
@@ -129,7 +136,8 @@ async function readWait(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: R
  * authorization history. Cancellation locators come only from the real
  * authenticated run.cancel response; no path or CAS enumeration recovers one. */
 async function readUndecidedDeliveryWait(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1,
-  currentFrontier: RunFrontier | undefined) {
+  currentFrontier: RunFrontier | undefined,
+  approval: (ref: string) => ReturnType<typeof readDeliveryApprovalContext>) {
   const pending = cut.run.waitingReason === 'approval';
   if (pending && (cut.run.status !== 'waiting' || !cut.run.waitingOnRef || !cut.run.frontierRef ||
       currentFrontier?.kind !== 'delivery' || currentFrontier.phase !== 'approval'))
@@ -137,7 +145,7 @@ async function readUndecidedDeliveryWait(driver: SqliteDriver, artifacts: Artifa
   async function snapshot(actual: Run) {
     if (actual.status !== 'waiting' || actual.waitingReason !== 'approval' || !actual.waitingOnRef || !actual.frontierRef)
       throw new TypeError('delivery ask has no original waiting Run snapshot');
-    const selected = await readDeliveryApprovalContext(driver, artifacts, cut, actual.frontierRef);
+    const selected = await approval(actual.frontierRef);
     const proof = await readWait(driver, artifacts, cut, selected, actual.waitingOnRef);
     const expected: Run = { ...proof.original, status: 'waiting', waitingReason: 'approval', waitingOnRef: actual.waitingOnRef,
       revision: proof.original.revision + 1, latestCheckpointId: proof.checkpoint.id, updatedAt: proof.wait.createdAt };
@@ -193,6 +201,13 @@ async function readUndecidedDeliveryWait(driver: SqliteDriver, artifacts: Artifa
 }
 
 export async function readDeliveryAuthorization(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1) {
+  return readDeliveryAuthorizationData(driver, artifacts, cut, ref => readDeliveryVerification(driver, artifacts, cut, ref));
+}
+
+/** Internal data-only DAG node. Public authorization always builds fresh data. */
+export async function readDeliveryAuthorizationData(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1,
+  verification: (ref: string) => ReturnType<typeof readDeliveryVerification>) {
+  const approval = (ref: string) => readDeliveryApprovalContextData(driver, artifacts, cut, ref, verification);
   if (cut.runSpec.operation !== 'delivery') throw new TypeError('Agent Run cannot own delivery authorization');
   const decoded = await artifacts.mapReads(cut.items, async row => ({ row, item: await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef) }));
   const decisions = decoded.filter(({ item }) => item.kind === 'delivery_decision');
@@ -203,13 +218,13 @@ export async function readDeliveryAuthorization(driver: SqliteDriver, artifacts:
     currentFrontier?.kind === 'delivery' && ['publish', 'abort_cleanup'].includes(currentFrontier.phase);
   if (decisions.length === 0 && policies.length === 0) {
     if (requiresAllow) throw new TypeError('publication lost its original complete delivery allow');
-    await readUndecidedDeliveryWait(driver, artifacts, cut, currentFrontier);
+    await readUndecidedDeliveryWait(driver, artifacts, cut, currentFrontier, approval);
     return undefined;
   }
   if (decisions.length !== 1 || policies.length !== 1) throw new TypeError('delivery plan requires its unique atomic policy and delivery decision');
   const policy = policies[0]!.item as DeliveryPolicyDecisionItem, delivery = decisions[0]!.item as DeliveryDecisionItem;
   const evidence = await readCanonicalArtifact<DeliveryPolicyChannelEvidenceV1>(artifacts, policy.policyChannelEvidenceRef);
-  const selected = await readDeliveryApprovalContext(driver, artifacts, cut, evidence.frontierRef);
+  const selected = await approval(evidence.frontierRef);
   requireEqual(evidence, selected.evaluator.evaluate(selected.request, selected.target, evidence.evaluatedAt), 'delivery retained named-action evidence');
   requireEqual(await readCanonicalArtifact(artifacts, canonicalSha256(selected.request)), selected.request, 'delivery original approval request');
   requireEqual(await readCanonicalArtifact(artifacts, canonicalSha256(selected.target)), selected.target, 'delivery original approval target');

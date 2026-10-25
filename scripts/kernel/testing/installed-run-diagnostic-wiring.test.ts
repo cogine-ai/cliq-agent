@@ -171,7 +171,7 @@ test('publication preparation diagnosis preserves the closed authority input and
   const body = publication.slice(start, end);
   assert.match(body, /onPreparationPhase\?: \(phase: PublicationPreparationPhase\) => void/u);
   assert.match(body, /const preparationPhase = \(phase: PublicationPreparationPhase\) => \{ try \{ onPreparationPhase\?\.\(phase\); \} catch \{ \/\* Diagnosis cannot decide preparation\. \*\/ \} \};/u);
-  for (const [phase, operation] of [['read', 'const cut = await readRecoveryClosure'],
+  for (const [phase, operation] of [['read', 'const { cut, prefix } = await readDeliveryPublicationClosure'],
     ['grant', 'const derived = derivePublicationGrant'], ['cut', 'await assertPublicationReadCut'],
     ['physical', 'const nativeInput = await physicalInput'], ['admit', 'const prepared = await prepareValidatedInvocation']])
     assert(body.includes(`preparationPhase('publication_prepare_${phase}');\n  ${operation}`));
@@ -225,7 +225,7 @@ test('publication diagnosis follows the original execution boundaries without ch
   const start = execution.indexOf('executeCurrentPublication: async value =>');
   const end = execution.indexOf('finishCurrentFinalTurn: async value =>', start);
   const body = execution.slice(start, end);
-  for (const [phase, operation] of [['publication_select', 'const selected = await readRecoveryClosure'],
+  for (const [phase, operation] of [['publication_select', 'const { cut: selected, prefix } = await readDeliveryPublicationClosure'],
     ['publication_roots_open', 'const roots = await holdPublicationRoots'],
     ['publication_prepare', 'const original = await publication.preparePublicationInvocation'],
     ['publication_dispatch', 'if (activeWorker !== current'],

@@ -44,10 +44,15 @@ export function validatePublicationAbortCheckpoint(checkpoint: Checkpoint, previ
  * worker retirement or fresh publication projection. The ordinary Stop path
  * may consume these exact terminal seqs only when no publication dispatched. */
 export async function readUnclaimedPublicationStopHistory(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1): Promise<ReadonlySet<number>> {
+  return readUnclaimedPublicationStopHistoryData(driver, artifacts, cut, () => readPublicationPrefix(driver, artifacts, cut));
+}
+
+export async function readUnclaimedPublicationStopHistoryData(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1,
+  readPrefix: () => ReturnType<typeof readPublicationPrefix>): Promise<ReadonlySet<number>> {
   if (cut.runSpec.operation !== 'delivery' || !cut.run.stopIntentRef ||
       cut.journal.some(entry => entry.opKind === 'publish' && entry.phase === 'dispatch_claimed'))
     throw new TypeError('only undispatched stopping delivery preparations have unclaimed closure');
-  const prefix = await readPublicationPrefix(driver, artifacts, cut), entries = [...prefix.entries.values()];
+  const prefix = await readPrefix(), entries = [...prefix.entries.values()];
   if (prefix.forward.length || prefix.abort.length || prefix.abortResults.length || prefix.resultRefs.size || entries.some(entry =>
     entry.claim || !entry.preparationClosure || entry.history.at(-1)?.seq !== entry.preparationClosure.terminal.seq ||
     entry.preparationClosure.terminal.phase !== 'failed'))
@@ -96,10 +101,19 @@ async function readObservedSource(artifacts: ArtifactCatalog, cut: RecoveryClosu
  * cleanup brand. Only the owning actual native producer can atomically publish
  * these item/claim/Checkpoint edges; a loose CAS proof never supplies them. */
 export async function readDeliveryTerminalProjection(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1, ref: string) {
+  return readDeliveryTerminalProjectionData(driver, artifacts, cut, ref, {
+    prefix: () => readPublicationPrefix(driver, artifacts, cut),
+    verification: closureRef => readDeliveryVerification(driver, artifacts, cut, closureRef)
+  });
+}
+
+/** Reader-family data only, never a physical projection owner. */
+export async function readDeliveryTerminalProjectionData(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1, ref: string,
+  data: { prefix(): ReturnType<typeof readPublicationPrefix>; verification(ref: string): ReturnType<typeof readDeliveryVerification> }) {
   await assertPublicationReadCut(driver, artifacts, cut); assertArtifactRef(ref);
   const evidence = decodeDeliveryTerminalProjectionEvidence(await readCanonicalArtifact(artifacts, ref));
   if (evidence.deliveryRunId !== cut.run.id) throw new TypeError('publication terminal projection belongs to another Run');
-  const prefix = await readPublicationPrefix(driver, artifacts, cut);
+  const prefix = await data.prefix();
   let verified = prefix.authorization?.verified;
   if (!verified) {
     let closureRef: string | undefined;
@@ -112,7 +126,7 @@ export async function readDeliveryTerminalProjection(driver: SqliteDriver, artif
       if (result.deliveryTerminalProjectionEvidenceRef === ref) closureRef = result.verificationClosureRef;
     }
     if (!closureRef) throw new TypeError('no-op projection has no original committed verification/finalize edge');
-    verified = await readDeliveryVerification(driver, artifacts, cut, closureRef);
+    verified = await data.verification(closureRef);
   }
   const { deliveryPlan: plan, deliveryPlanRef: planRef } = verified;
   if (evidence.deliveryPlanRef !== planRef) throw new TypeError('publication terminal projection substituted its original complete Plan');

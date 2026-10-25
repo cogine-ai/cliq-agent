@@ -126,7 +126,7 @@ import {
   type RecordWorkspaceGenerationPreactivatedInput,
   type RegisterWorkspaceGenerationInput
 } from './reducers/workspace-transition.js';
-import { readRecoveryClosure } from './recovery-closure.js';
+import { readDeliveryPublicationClosure, readRecoveryClosure } from './recovery-closure.js';
 import { readVerifierProgress } from './verifier-recovery.js';
 import { verifierOperationId } from './verifier-policy.js';
 import type { RunResultPhase } from './run-result.js';
@@ -2140,10 +2140,9 @@ export class StateStore {
       return Promise.reject(new KernelStorageError('LEASE_FENCED', 'StateStore is closing or closed'));
     return this.ownInstalledAdmission(async signal => {
       const reads = this.artifacts.withReadSignal(signal);
-      const cut = await readRecoveryClosure(this.driver, reads, runId);
-      const { readPublicationPrefix } = await import('./delivery-publication-progress.js');
+      const { cut, prefix: publication } = await readDeliveryPublicationClosure(this.driver, reads, runId);
       const prefix = cut.journal.some(entry => entry.opKind === 'publish' && entry.phase === 'dispatch_claimed')
-        ? await readPublicationPrefix(this.driver, reads, cut) : undefined;
+        ? publication : undefined;
       signal.throwIfAborted();
       return { cut, prefix };
     });

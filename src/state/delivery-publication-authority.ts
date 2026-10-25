@@ -153,6 +153,12 @@ export async function readPublicationClaimHistory(driver: SqliteDriver, artifact
  * (which this reader itself consumes). No recursive own-R walk and no effect
  * or live authority is inferred from validating the original Journal graph. */
 export async function validatePublicationInvocationHistory(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1) {
+  return validatePublicationInvocationHistoryData(driver, artifacts, cut, () => readDeliveryAuthorization(driver, artifacts, cut));
+}
+
+/** Same original aggregate checks, with only this fresh traversal's data. */
+export async function validatePublicationInvocationHistoryData(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1,
+  readAuthorization: () => ReturnType<typeof readDeliveryAuthorization>) {
   if (cut.runSpec.operation !== 'delivery') throw new TypeError('publication history requires a delivery Run');
   const operations = new Set(cut.journal.filter(entry => entry.opKind === 'publish').map(entry => entry.opId));
   const result = new Map<string, Awaited<ReturnType<typeof readPublicationPreparationHistory>>>();
@@ -162,7 +168,7 @@ export async function validatePublicationInvocationHistory(driver: SqliteDriver,
       throw new TypeError('publication history has no unique original preparation');
   }
   requireEqual(readInvocationJournal(driver, cut.run.id), cut.journal, 'publication aggregate original Journal cut');
-  const authorization = await readDeliveryAuthorization(driver, artifacts, cut);
+  const authorization = await readAuthorization();
   for (const opId of operations) {
     const prepared = cut.journal.find(entry => entry.opId === opId)!;
     result.set(opId, await readPreparation(driver, artifacts, cut, selection(cut, { opId, attempt: prepared.attempt }), authorization));

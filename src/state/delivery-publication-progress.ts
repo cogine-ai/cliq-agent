@@ -14,6 +14,7 @@ import { decodeBudgetSettlement, decodeContextManifest, decodeRunSpec, decodeSta
 import { readDeliveryAuthorization } from './delivery-approval.js';
 import { validatePublicationInvocationHistory } from './delivery-publication-authority.js';
 import { readDeliveryRunAdmission } from './reducers/delivery-admission.js';
+import { createDeliveryReadData } from './delivery-read-data.js';
 import { readInvocationJournal } from './repositories/journal.js';
 import { readWorkerLaunchesForRun } from './repositories/worker-launches.js';
 import { readWorkspaceGenerationsForRun } from './repositories/workspace-generations.js';
@@ -610,11 +611,22 @@ async function readReceivedHandoff(driver: SqliteDriver, artifacts: ArtifactCata
 /** Full retained prefix only, never native release/cleanup authority. Every
  * claim first closes its actual durable birth and historical owner graph. */
 export async function readPublicationPrefix(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1) {
+  return createDeliveryReadData(driver, artifacts, cut).prefix();
+}
+
+/** Internal data flow only. The standalone reader above never accepts it. */
+export async function readPublicationPrefixData(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1,
+  data: {
+    admission(): ReturnType<typeof readDeliveryRunAdmission>;
+    authorization(): ReturnType<typeof readDeliveryAuthorization>;
+    histories(): ReturnType<typeof validatePublicationInvocationHistory>;
+    stop(ref?: string): ReturnType<typeof import('./stop-recovery.js')['readAgentStop']>;
+  }) {
   await assertPublicationReadCut(driver, artifacts, cut);
-  const admission = await readDeliveryRunAdmission(driver, artifacts, cut.run.id);
+  const admission = await data.admission();
   requireEqual(admission.run, cut.run, 'publication original delivery admission cut');
-  const authorization = await readDeliveryAuthorization(driver, artifacts, cut);
-  const histories = await validatePublicationInvocationHistory(driver, artifacts, cut);
+  const authorization = await data.authorization();
+  const histories = await data.histories();
   const entries = new Map<string, RetainedPublicationOperation>();
   for (const [opId, history] of histories) {
     const phases = history.history.map(value => value.phase).join(',');
@@ -627,8 +639,7 @@ export async function readPublicationPrefix(driver: SqliteDriver, artifacts: Art
     if (history.sequence === 'abort') {
       if (history.grant.format !== 'cliq-publication-maintenance-authority-v1')
         throw new TypeError('abort prefix has no exact original maintenance authority');
-      const { readRetainedAgentStop } = await import('./stop-recovery.js');
-      await readRetainedAgentStop(driver, artifacts, cut, history.grant.subject.stopIntentRef);
+      await data.stop(history.grant.subject.stopIntentRef);
     }
     entries.set(opId, { ...history, birth: await readBirth(driver, artifacts, admission, history), results: [], lateObservations: [], pendingReceivedHandoff: false,
       ...(!history.claim && phases === 'prepared,failed'
@@ -689,8 +700,7 @@ export async function readPublicationPrefix(driver: SqliteDriver, artifacts: Art
           ? creator.history.at(-1) : undefined);
       if (creator && (!creatorTerminal || creatorTerminal.phase !== 'failed' || creatorTerminal.timestamp > proof.observedAt))
         throw new TypeError('publication not-created observation overlaps an unresolved original creator');
-      const { readAgentStop } = await import('./stop-recovery.js');
-      await readAgentStop(driver, artifacts, cut);
+      await data.stop();
       const checkpoint = readCheckpoint(driver, publicationResultCheckpointId(cut.run.id, item.opId, 0, item.evidenceRef));
       if (checkpoint.journalSeq < previous.journalSeq || checkpoint.journalSeq > cut.journal.length ||
           creatorTerminal && creatorTerminal.seq > checkpoint.journalSeq ||
@@ -851,8 +861,7 @@ export async function readPublicationPrefix(driver: SqliteDriver, artifacts: Art
       }
       if (item.abortStopIntentRef) {
         if (!cut.run.stopIntentRef || cut.run.resultRef) throw new TypeError('publication abort handoff has no monotonic stopping branch');
-        const { readRetainedAgentStop } = await import('./stop-recovery.js');
-        const originalStop = await readRetainedAgentStop(driver, artifacts, cut, item.abortStopIntentRef);
+        const originalStop = await data.stop(item.abortStopIntentRef);
         if (originalStop.createdAt > item.createdAt) throw new TypeError('publication result predates its explicitly selected original StopIntent');
       } else if (isLastForward && driver.prepare('SELECT 1 FROM checkpoints WHERE id=? AND run_id=?').get(resultCheckpointId, cut.run.id)) {
         throw new TypeError('publication last-path result Checkpoint lost its explicit original abort StopIntent');

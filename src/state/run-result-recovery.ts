@@ -18,13 +18,14 @@ import { decodeInheritedVerificationProvenance, decodeRunResult, decodeVerificat
 import { readCheckpoint, readControlRequest, readRun, readSession, readSessionPrincipalId, ZERO_BUDGET } from './rows.js';
 import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
 import { readVerifierProgress, verifierCheckpointId } from './verifier-recovery.js';
-import { validateDeliveryRecovery } from './delivery-recovery.js';
+import { validateDeliveryRecoveryData, type RetainedDeliveryMerge } from './delivery-recovery.js';
 import { readDeliveryRunAdmission } from './reducers/delivery-admission.js';
 import { assertDeliveryModelFreeCut } from './run-model-free.js';
 import { decodeVerificationReceipt } from './verifier-artifacts.js';
 import { readInvocationJournal } from './repositories/journal.js';
 import { readWorkerLaunchesForRun } from './repositories/worker-launches.js';
 import { readWorkspaceGenerationsForRun } from './repositories/workspace-generations.js';
+import type { DeliveryReadData } from './delivery-read-data.js';
 
 function assertDeliveryReadCut(driver: SqliteConnection | SqliteDriver, cut: RecoveryClosureV1) {
   const rows = driver.prepare('SELECT item_id,item_seq,payload_ref,created_at FROM items WHERE run_id=? ORDER BY item_seq')
@@ -46,12 +47,19 @@ async function readDeliveryCandidateMaterial(driver: SqliteDriver, artifacts: Ar
   assertDeliveryModelFreeCut(cut);
   assertDeliveryReadCut(driver, cut);
   const admission = await readDeliveryRunAdmission(driver, artifacts, cut.run.id);
+  return readDeliveryCandidateMaterialData(driver, artifacts, cut, admission);
+}
+
+async function readDeliveryCandidateMaterialData(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1,
+  admission: Awaited<ReturnType<typeof readDeliveryRunAdmission>>, retainedMerges?: ReadonlyMap<string, RetainedDeliveryMerge>) {
+  assertDeliveryModelFreeCut(cut);
+  assertDeliveryReadCut(driver, cut);
   requireEqual(admission.run, cut.run, 'delivery verification owning Run cut');
   const decodedItems = new Map<string, ContinuationItem>();
   for (const row of cut.items) decodedItems.set(row.itemId, await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef));
   const checkpoints = driver.prepare('SELECT id FROM checkpoints WHERE run_id=? ORDER BY rowid').all<{ id: string }>(cut.run.id)
     .map(row => readCheckpoint(driver, row.id));
-  const merges = await validateDeliveryRecovery(driver, artifacts, { ...cut, checkpoints, decodedItems });
+  const merges = retainedMerges ?? await validateDeliveryRecoveryData(driver, artifacts, { ...cut, checkpoints, decodedItems }, admission);
   const merged = [...merges.values()][0];
   if (merges.size !== 1 || !merged || cut.runSpec.dependencyPolicyRef !== undefined)
     throw new KernelStorageError('STATE_TRANSITION_INVALID', 'delivery verification requires its one complete no-dependency merge');
@@ -84,8 +92,13 @@ export async function readDeliveryVerificationMode(driver: SqliteDriver, artifac
 }
 
 async function readDeliveryResultBasis(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1) {
+  return readDeliveryResultBasisData(driver, artifacts, cut, await readDeliveryCandidateMaterial(driver, artifacts, cut));
+}
+
+async function readDeliveryResultBasisData(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1,
+  material: Awaited<ReturnType<typeof readDeliveryCandidateMaterial>>) {
   const { admission, decodedItems, merged, progress, candidate, plan, planRef, summary, principalId, row, original, identical } =
-    await readDeliveryCandidateMaterial(driver, artifacts, cut);
+    material;
   let verification: Extract<VerificationClosureV1['verification'], { kind: 'local' }> | undefined;
   let inheritance: Omit<InheritedVerificationProvenanceV1, 'createdAt' | 'provenanceDigest'> | undefined;
   let verificationReceiptRefs: string[], completionCheckpoint = merged.checkpoint;
@@ -147,6 +160,13 @@ export function assertRunResultPreparationTime(operation: 'agent' | 'delivery', 
  * recovery verifier. The enclosing recovery walk already proves the candidate's
  * producer/source graph and every retained physical seal. No native proof is minted. */
 export async function readResultBasis(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1) {
+  await assertResultBasisCut(driver, artifacts, cut);
+  const { run, runSpec: spec } = cut;
+  if (spec.operation === 'delivery') return readDeliveryResultBasis(driver, artifacts, cut);
+  return readAgentResultBasis(driver, artifacts, cut);
+}
+
+async function assertResultBasisCut(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1) {
   const { run, runSpec: spec } = cut;
   if (run.parentRunId || spec.dependencyPolicyRef !== undefined ||
       cut.childAllocations.length || driver.prepare('SELECT 1 FROM runs WHERE parent_run_id = ? LIMIT 1').get(run.id) ||
@@ -159,7 +179,10 @@ export async function readResultBasis(driver: SqliteDriver, artifacts: ArtifactC
   assertRetiredGenerationCut(driver, run, cut.workspaceGenerations);
   const assembly = decodeRetainedRunAssembly(await readCanonicalArtifact(artifacts, spec.assemblyRef));
   if (assembly.mcpServers.length) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'result requires its implemented MCP containment closure');
-  if (spec.operation === 'delivery') return readDeliveryResultBasis(driver, artifacts, cut);
+}
+
+async function readAgentResultBasis(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1) {
+  const { run, runSpec: spec } = cut;
   const items = await artifacts.mapReads(cut.items, row => readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef));
   if (openStopBatch(items)) throw new TypeError('result retains an open tool batch');
   const progress = await readVerifierProgress(driver, artifacts, cut), { candidate, spec: frozen, plan, planRef } = progress;
@@ -308,6 +331,18 @@ export async function prepareDeliveryNoOpVerification(driver: SqliteDriver, arti
 export async function readDeliveryVerification(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1, closureRef: string) {
   if (cut.runSpec.operation !== 'delivery') throw new TypeError('delivery verification cannot reinterpret an Agent Run');
   const basis = await readDeliveryResultBasis(driver, artifacts, cut);
+  return readDeliveryVerificationBasis(driver, artifacts, cut, closureRef, basis);
+}
+
+/** Internal data-only node of one actual fresh recovery traversal. */
+export async function readDeliveryResultData(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1,
+  admission: Awaited<ReturnType<typeof readDeliveryRunAdmission>>, merges: ReadonlyMap<string, RetainedDeliveryMerge>) {
+  const material = await readDeliveryCandidateMaterialData(driver, artifacts, cut, admission, merges);
+  return readDeliveryResultBasisData(driver, artifacts, cut, material);
+}
+
+export async function readDeliveryVerificationBasis(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1, closureRef: string,
+  basis: Awaited<ReturnType<typeof readDeliveryResultBasis>>) {
   const closure = decodeVerificationClosure(await readCanonicalArtifact(artifacts, closureRef));
   requireEqual(closure, expectedVerificationClosure(basis, closure.createdAt), 'delivery exact local or inherited verification closure');
   const provenance = expectedInheritedVerificationProvenance(basis, closure.createdAt);
@@ -342,13 +377,18 @@ export async function readDeliveryVerification(driver: SqliteDriver, artifacts: 
  * closure artifact without its uniquely derived Checkpoint is insufficient. */
 export async function readFinalization(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1,
   basis: Awaited<ReturnType<typeof readResultBasis>>, closureRef: string, projectionRef?: string) {
+  return readFinalizationData(driver, artifacts, cut, basis, closureRef, projectionRef);
+}
+
+async function readFinalizationData(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1,
+  basis: Awaited<ReturnType<typeof readResultBasis>>, closureRef: string, projectionRef?: string, delivery?: DeliveryReadData) {
   if (cut.runSpec.operation === 'delivery') {
     if (!projectionRef) throw new TypeError('delivery finalization requires the exact retained terminal projection');
-    const verified = await readDeliveryVerification(driver, artifacts, cut, closureRef);
+    const verified = delivery ? await delivery.verification(closureRef) : await readDeliveryVerification(driver, artifacts, cut, closureRef);
     // The actual owner supplies this reader. A data-valid projection object is
     // never substituted for native publication/root-observation provenance.
     const { readDeliveryTerminalProjection } = await import('./delivery-publication-recovery.js');
-    const physical = await readDeliveryTerminalProjection(driver, artifacts, cut, projectionRef);
+    const physical = delivery ? await delivery.terminalProjection(projectionRef) : await readDeliveryTerminalProjection(driver, artifacts, cut, projectionRef);
     if (physical.evidenceRef !== projectionRef || physical.evidence.selectedBranch !== 'forward_finalize' ||
         physical.evidence.observedSourceRef !== basis.candidate.resultSourceRef || physical.evidence.deliveryPlanRef !== verified.deliveryPlanRef ||
         physical.checkpoint.id !== identityHash('cliq-delivery-publication-checkpoint-v1', cut.run.id, verified.deliveryPlanRef) ||
@@ -381,20 +421,32 @@ export async function readFinalization(driver: SqliteDriver, artifacts: Artifact
 /** Invoked only inside the complete recovery walk; never opens a new StateOwner
  * or substitutes today's process/clock for the original retained seal. */
 export async function validateRunResultRecovery(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1): Promise<void> {
+  return validateRunResultRecoveryData(driver, artifacts, cut);
+}
+
+export async function validateRunResultRecoveryInDeliveryEpoch(driver: SqliteDriver, artifacts: ArtifactCatalog,
+  cut: RecoveryClosureV1, delivery: DeliveryReadData): Promise<void> {
+  return validateRunResultRecoveryData(driver, artifacts, cut, delivery);
+}
+
+async function validateRunResultRecoveryData(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1,
+  delivery?: DeliveryReadData): Promise<void> {
   const { run } = cut;
   if (cut.runSpec.operation === 'delivery' && run.frontierRef && run.nextStep === 'delivery') {
     const frontier = await readCanonicalArtifact<RunFrontier>(artifacts, run.frontierRef);
     if (frontier.kind === 'delivery' && frontier.phase !== 'merge')
-      await readDeliveryVerification(driver, artifacts, cut, frontier.verificationClosureRef);
+      if (delivery) await delivery.verification(frontier.verificationClosureRef);
+      else await readDeliveryVerification(driver, artifacts, cut, frontier.verificationClosureRef);
   }
   if (run.nextStep !== 'finalize' && run.resultRef === undefined && !['succeeded', 'completed_unverified'].includes(run.status)) return;
-  const basis = await readResultBasis(driver, artifacts, cut);
+  if (delivery) await assertResultBasisCut(driver, artifacts, cut);
+  const basis = delivery ? await delivery.basis() : await readResultBasis(driver, artifacts, cut);
   if (run.nextStep === 'finalize') {
     const frontier = await readCanonicalArtifact<RunFrontier>(artifacts, run.frontierRef!);
     if (frontier.kind !== 'finalize' || frontier.operation !== cut.runSpec.operation || run.status !== 'queued' || run.resultRef || run.terminalReason || run.terminalDetailRef)
       throw new TypeError('result has an unsupported finalize cut');
-    const historical = await readFinalization(driver, artifacts, cut, basis, frontier.verificationClosureRef,
-      frontier.operation === 'delivery' ? frontier.deliveryTerminalProjectionEvidenceRef : undefined);
+    const historical = await readFinalizationData(driver, artifacts, cut, basis, frontier.verificationClosureRef,
+      frontier.operation === 'delivery' ? frontier.deliveryTerminalProjectionEvidenceRef : undefined, delivery);
     requireEqual(frontier, historical.frontier, 'current result finalize frontier');
     requireEqual(cut.latestCheckpoint, historical.checkpoint, 'current result finalize Checkpoint');
     if (!run.stopIntentRef && (run.updatedAt !== historical.checkpoint.createdAt || run.revision !== historical.checkpoint.basedOnRunRevision + 1))
@@ -405,7 +457,7 @@ export async function validateRunResultRecovery(driver: SqliteDriver, artifacts:
       run.stopIntentRef || run.cancelRequested || run.terminalDetailRef || run.nextStep !== null || run.frontierRef)
     throw new TypeError('result terminal status, reason or authority fields are inconsistent');
   const result = decodeRunResult(await readCanonicalArtifact(artifacts, run.resultRef));
-  const historical = await readFinalization(driver, artifacts, cut, basis, result.verificationClosureRef, result.deliveryTerminalProjectionEvidenceRef);
+  const historical = await readFinalizationData(driver, artifacts, cut, basis, result.verificationClosureRef, result.deliveryTerminalProjectionEvidenceRef, delivery);
   const expected: RunResult = { schemaVersion: 1, runId: run.id, baseSourceRef: basis.candidate.baseSourceRef,
     resultSourceRef: basis.candidate.resultSourceRef, diffRef: basis.candidate.diffRef,
     verificationClosureRef: result.verificationClosureRef, verificationReceiptRefs: basis.verificationReceiptRefs, summaryRef: basis.candidate.summaryRef, createdAt: result.createdAt,

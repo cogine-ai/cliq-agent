@@ -8,7 +8,7 @@ import { advanceTimeFence, sampleCanonicalNow, type TimeFenceAdvance } from './c
 import { readPublicationPrefix } from './delivery-publication-progress.js';
 import { KernelStorageError } from './errors.js';
 import { isZeroBudget } from './invariants.js';
-import { readRecoveryClosure } from './recovery-closure.js';
+import { readDeliveryPublicationClosure } from './recovery-closure.js';
 import { appendRunStateEvent, requireHealthyFence } from './reducers/invocation.js';
 import { readChildAllocationsForRun } from './repositories/child-allocations.js';
 import { readInvocationJournal } from './repositories/journal.js';
@@ -113,7 +113,7 @@ async function commitPublicationWorkerRetirement(driver: SqliteDriver, artifacts
   requireEqual(before.generations, original.workspaceGenerations, 'publication retirement original fenced generations');
   requireEqual(before.launches.filter(launch => launch.phase !== 'retired'), original.workerLaunches,
     'publication retirement original bound worker');
-  const cut = await readRecoveryClosure(driver, artifacts, runId), prefix = await readPublicationPrefix(driver, artifacts, cut);
+  const { cut, prefix } = await readDeliveryPublicationClosure(driver, artifacts, runId);
   requireEqual(cut.run, original.run, 'publication retirement full original worker wait');
   requireEqual(cut.latestCheckpoint, original.latestCheckpoint, 'publication retirement unchanged source Checkpoint');
   const wait = await readCanonicalArtifact<WorkerDeathWait>(artifacts, cut.run.waitingOnRef!);

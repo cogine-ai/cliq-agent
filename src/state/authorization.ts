@@ -10,7 +10,7 @@ import { authorizationGrantCore, authorizationGrantId, authorizationSummary, dec
 import { advanceTimeFence, readTimeFence, sampleCanonicalNow } from './canonical-time.js';
 import { readRetainedControlChannelClosure, validateControlChannelClosure, type AuthenticatedControlIdentity } from './control-channel.js';
 import { assertCurrentControlFrame } from './control-channel.js';
-import { KernelStorageError, stateOperation } from './errors.js';
+import { joinResourceOperations, KernelStorageError, stateOperation } from './errors.js';
 import { readRetainedVerifierToolchain } from './guest-toolchain.js';
 import { readAuthorizationGrant, readAuthorizationCreationControl, insertAuthorizationGrant, consumeOrRevokeAuthorization } from './repositories/authorization-grants.js';
 import { readControlRequest, insertControlRequest, readRun } from './rows.js';
@@ -43,9 +43,11 @@ export async function readAuthorizationHistory(driver: SqliteDriver, artifacts: 
   grant: AuthorizationGrantV1, releaseKeys: readonly ReleaseTrustKey[], signal?: AbortSignal) {
   signal?.throwIfAborted();
   const row = readAuthorizationCreationControl(driver, grant);
-  const { channel } = await readRetainedControlChannelClosure(artifacts, owner, { principalId: grant.ownerPrincipalId,
-    channelIdentityRef: grant.channelIdentityRef, channelIdentityDigest: grant.channelIdentityDigest });
-  const core = await readCanonicalArtifact<Record<string, unknown>>(artifacts, grant.sourceRequestDigest);
+  const [{ channel }, core] = await joinResourceOperations([
+    readRetainedControlChannelClosure(artifacts, owner, { principalId: grant.ownerPrincipalId,
+      channelIdentityRef: grant.channelIdentityRef, channelIdentityDigest: grant.channelIdentityDigest }),
+    readCanonicalArtifact<Record<string, unknown>>(artifacts, grant.sourceRequestDigest)
+  ] as const);
   const request = decodeVerifierIdentityCreateRequest({ ...core, requestDigest: grant.sourceRequestDigest });
   if (request.requestId !== grant.sourceRequestId || channel.openedAt > grant.createdAt ||
       grant.expiresAt !== addCanonicalDuration(grant.createdAt, request.ttlMs ?? 3_600_000) ||

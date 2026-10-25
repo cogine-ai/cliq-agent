@@ -2284,3 +2284,62 @@ failed run is retained (full-test stdout SHA-256
 The correction supplies a real empty private CAS to those tests and preserves
 both original refusal assertions; no production guard is changed. A new full
 gate is required, and the failed candidate is not submitted for qualification.
+
+The corrected read-join candidate (`9ee676373d02e26571e19d647bf9994eecfed7df`,
+tree `bdfc72c8988b667fea5f2871abea07c534d3b39f`) passes all seven local
+commands with every process and pipe joined: dependency install; original build; 2,718 passing
+tests / zero failures / three existing skips; 238 passing script tests / 15
+existing platform skips; 99 passing portable tests; design guard; and strict
+actual-dependency checking. Validation SHA-256:
+`bc8cbb407742ab02f84a6a0459545e5708825c93409c636a0d63047bfe488cf4`.
+The nine focused files also pass 126 tests without skips on each of Node
+22.13.0 and 24.21.0; these do not replace the Linux campaigns.
+
+Its natural Linux workflow `40151605888`, attempt 1 / run 466, finishes with
+17 successful jobs and five failures; all four TypeScript jobs succeed.
+Eleven independently pinned captures retain 105 original JSON files /
+498,487 bytes across all 23 categories, with 18 true and five false
+qualification reports. No category is pending, incomplete or rejected.
+All collector processes, pipes and scoped awake guard genuinely join; 21
+cleanup reports have zero errors and 21 baseline pairs are byte-identical.
+Final capture SHA-256:
+`f5fffe1ff00335ec7756fd7ad585d8b968cbc7dc117ad26b450e30985eafdd98`.
+Independent closeout, also replayed by the primary agent, SHA-256:
+`0214e345e0dd3009dbf5966531f5561290702325175248b70fad6e497e9cb656`.
+
+The new fixed observations narrow the normal Delivery timeout to
+`publication_received_proof`, before the settlement call; its first and last
+scheduler errors occur only after Stop, not before it. This is not evidence
+of deadlock or of a specific slow helper. Two delayed-volume campaigns
+complete all 16 authentication revalidations but then reach the unchanged
+30-second request deadline in `submit_assembly_verifier`, before their
+physical cuts. The late-result campaign instead misses its unchanged
+five-second READY deadline after observing only 13 revalidations; its final
+three are not verified. The verifier campaign again exhausts the original
+cumulative 4,096-stream secret-scan budget before complete coverage. None of
+these false reports, or the unexecuted cuts, is converted into qualification
+by successful collection or local tests.
+
+The next combined candidate uses one internal Delivery validation DAG per
+complete fresh recovery traversal. It shares immutable admission, merge,
+verification, authorization and publication-history data inside that traversal,
+while retaining every independent seal, handoff, received-result and settlement
+acceptance point, including fresh selection on the original bounded retries.
+Stop and terminal projections use the same reader-family data without starting
+a recursive full recovery walk. Standalone readers remain fresh; no writer or
+native issuer accepts this internal data as authority. The same candidate joins
+independent retained-channel and authorization reads without changing their
+bytes, decoders, refusal priority or resource-retirement checks. Its new data,
+real-CAS and Agent-refusal regressions do not qualify a successful installed
+Delivery. The full combined local gate and this candidate's actual Linux
+campaigns are still pending; the existing READY and complete secret-scan
+coverage gaps remain open.
+
+The first DAG snapshot (tree `8b844856e678de1b4e5f7db689e2a82688f85d5f`)
+passes the original build and all 2,758 tests (2,755 pass, three existing skips),
+but its script gate fails two of 253 tests. Both source-wiring assertions still
+name the replaced standalone recovery call rather than the fresh paired
+recovery/publication reader. The correction updates only those two expected
+call spellings, retaining the same phase-before-read checks and every other
+assertion. The failed snapshot and outputs remain retained; it is not a
+qualified combined gate. The corrected snapshot requires a new complete gate.

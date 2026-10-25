@@ -85,6 +85,13 @@ export async function validateDeliveryRecovery(driver: SqliteDriver, artifacts: 
     return new Map();
   }
   const admission = await readDeliveryRunAdmission(driver, artifacts, input.run.id);
+  return validateDeliveryRecoveryData(driver, artifacts, input, admission);
+}
+
+/** Internal fresh-epoch data flow. It conveys no owner or execution proof. */
+export async function validateDeliveryRecoveryData(driver: SqliteDriver, artifacts: ArtifactCatalog,
+  input: DeliveryRecoveryCut, admission: Awaited<ReturnType<typeof readDeliveryRunAdmission>>): Promise<ReadonlyMap<string, RetainedDeliveryMerge>> {
+  const merges = input.items.filter(row => ['delivery_merge', 'delivery_merge_conflict'].includes(input.decodedItems.get(row.itemId)?.kind ?? ''));
   requireEqual(admission.run, input.run, 'delivery recovery original Run cut');
   requireEqual(admission.spec, input.runSpec, 'delivery recovery original RunSpec');
   const result = new Map<string, RetainedDeliveryMerge>();

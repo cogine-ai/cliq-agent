@@ -25,6 +25,7 @@ import type { SqliteDriver } from './sqlite-driver.js';
 import { readVerifierProgress, type VerifierProgress } from './verifier-recovery.js';
 import { validateVerifierHistory } from './verifier-history.js';
 import { validateDeliveryRecovery } from './delivery-recovery.js';
+import type { DeliveryReadData } from './delivery-read-data.js';
 
 /** Data restriction only. Each permitted subject still requires its complete
  * subject-specific retained policy/control/Journal history below. */
@@ -39,13 +40,23 @@ export function assertRunPolicyDecisionSubject(operation: RunSpec['operation'], 
 export type AgentRecoveryPhase = 'model' | 'items' | 'candidate' | 'verifier' | 'tool' | 'input';
 
 /** Recovery checks retained reachability/identity; loading the agent additionally reproduces native requests and validates schemas. */
-export async function validateAgentRecovery(input: {
+type AgentRecoveryInput = {
   driver?: SqliteDriver;
   artifacts: ArtifactCatalog; run: Run; spec: RunSpec; items: RunItemReferenceV1[];
   journal: InvocationJournalEntry[]; context: ContextManifest;
   checkpoints: Checkpoint[]; workspaceGenerations: WorkspaceGenerationStateV1[];
   principalId: string; workspaceIdentityRef: string;
-}, onPhase?: (phase: AgentRecoveryPhase) => void): Promise<{ repairAttempts: number }> {
+};
+export async function validateAgentRecovery(input: AgentRecoveryInput, onPhase?: (phase: AgentRecoveryPhase) => void): Promise<{ repairAttempts: number }> {
+  return validateAgentRecoveryData(input, onPhase);
+}
+/** Reader-family data only; the public independent reader stays fresh. */
+export async function validateAgentRecoveryInDeliveryEpoch(input: AgentRecoveryInput, data: DeliveryReadData,
+  onPhase?: (phase: AgentRecoveryPhase) => void): Promise<{ repairAttempts: number }> {
+  return validateAgentRecoveryData(input, onPhase, data);
+}
+async function validateAgentRecoveryData(input: AgentRecoveryInput, onPhase?: (phase: AgentRecoveryPhase) => void,
+  delivery?: DeliveryReadData): Promise<{ repairAttempts: number }> {
   const phase = (value: AgentRecoveryPhase) => { try { onPhase?.(value); } catch { /* Diagnosis cannot decide recovery. */ } };
   const { artifacts, run, spec, journal } = input;
   const workspace = decodeWorkspaceIdentity(await readCanonicalArtifact(artifacts, input.workspaceIdentityRef));
@@ -190,7 +201,7 @@ export async function validateAgentRecovery(input: {
     }
   }
   if (spec.operation === 'delivery' && !input.driver) throw new TypeError('delivery history requires its owning retained SQLite cut');
-  const deliveryMerges = input.driver ? await validateDeliveryRecovery(input.driver, artifacts, {
+  const deliveryMerges = delivery ? await delivery.merges() : input.driver ? await validateDeliveryRecovery(input.driver, artifacts, {
     run, runSpec: spec, items: input.items, journal, checkpoints: input.checkpoints, decodedItems: items
   }) : undefined;
   phase('candidate');

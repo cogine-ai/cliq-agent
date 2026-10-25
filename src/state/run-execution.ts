@@ -25,7 +25,7 @@ import { beginWorkerRecovery, beginWorkerRecoveryProbe, closeWorkerRecoveryProbe
 import { activateWorkerLeaseWithinDeadline, beginGenerationCheckpoint, beginGenerationRevocation, recordWorkerPreactivated, renewWorkerLease, reserveWorkerLaunch } from './reducers/worker-launch.js';
 import { sealWorkerGeneration } from './reducers/worker-launch.js';
 import { recordWorkspaceGenerationPreactivated } from './reducers/workspace-transition.js';
-import { readRecoveryClosure } from './recovery-closure.js';
+import { readDeliveryPublicationClosure, readRecoveryClosure } from './recovery-closure.js';
 import { readRun } from './rows.js';
 import { assertSqliteConnectionOwnedBy, isRolledBackSqliteTransactionFailure, type SqliteConnection, type SqliteDriver } from './sqlite-driver.js';
 import { assertActiveStateOwner, type StateOwnerContext } from './state-owner.js';
@@ -954,7 +954,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
     const { readPublicationPrefix } = await import('./delivery-publication-progress.js');
     const { prepareOwnedPublicationReceivedResult } = await import('./publication-finalization.js');
     const { preparePublicationReceivedSettlement } = await import('./publication-settlement.js');
-    const selected = await readRecoveryClosure(driver, reads, runId), prefix = await readPublicationPrefix(driver, reads, selected);
+    const { cut: selected, prefix } = await readDeliveryPublicationClosure(driver, reads, runId);
     const entry = prefix.forward.at(-1), workspace = prefix.authorization?.workspace;
     if (!entry?.pendingReceivedHandoff || !workspace || workspace.kind !== 'live' ||
         selected.run.status !== 'queued' || selected.run.nextStep !== 'delivery' || selected.run.activeWorkerLaunchId ||
@@ -1544,8 +1544,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         const { preparePublicationSettlement } = await import('./publication-settlement.js');
         const { readPublicationPrefix } = await import('./delivery-publication-progress.js');
         publicationPhase('publication_select');
-        const selected = await readRecoveryClosure(driver, reads, runId);
-        const prefix = await readPublicationPrefix(driver, reads, selected);
+        const { cut: selected, prefix } = await readDeliveryPublicationClosure(driver, reads, runId);
         signal.throwIfAborted();
         if (prefix.forward.at(-1)?.pendingReceivedHandoff) {
           if (selected.run.revision !== expectedRunRevision)

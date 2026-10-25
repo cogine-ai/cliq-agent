@@ -14,8 +14,9 @@ import type {
   WorkspaceStateManifest
 } from '../kernel/types.js';
 import type { ArtifactCatalog } from './artifacts.js';
-import { validateAgentRecovery } from './agent-recovery.js';
-import { validateStopRecovery } from './stop-recovery.js';
+import { validateAgentRecovery, validateAgentRecoveryInDeliveryEpoch } from './agent-recovery.js';
+import { createDeliveryReadData } from './delivery-read-data.js';
+import { validateStopRecovery, validateStopRecoveryInDeliveryEpoch } from './stop-recovery.js';
 import {
   decodeAdmittedContext,
   decodeBudgetSettlement,
@@ -46,7 +47,7 @@ import { readRetiredGenerationSource } from './generation-retirement.js';
 import { validateInstalledBrokerAmbiguityHistory } from './broker-ambiguity.js';
 import { validateInstalledModelNoReleaseHistory } from './broker-no-release.js';
 import { validateWorkerPreparationHistory } from './worker-preparation.js';
-import { validateRunResultRecovery } from './run-result-recovery.js';
+import { validateRunResultRecovery, validateRunResultRecoveryInDeliveryEpoch } from './run-result-recovery.js';
 import { assertDeliveryModelFreeCut } from './run-model-free.js';
 
 const ZERO_BUDGET: BudgetUsage = {
@@ -575,12 +576,37 @@ async function validateLaunchGraph(
 export type RecoveryClosurePhase = 'spec' | 'context' | 'journal' | 'generations' | 'history' |
   `history_${import('./agent-recovery.js').AgentRecoveryPhase}` | 'history_broker' | 'seals' | 'terminal';
 
+type PublicationPrefix = Awaited<ReturnType<typeof import('./delivery-publication-progress.js')['readPublicationPrefix']>>;
+
 export async function readRecoveryClosure(
   driver: SqliteDriver,
   artifacts: ArtifactCatalog,
   runId: string,
   onPhase?: (phase: RecoveryClosurePhase) => void
 ): Promise<RecoveryClosureV1> {
+  return (await readRecoveryProjection(driver, artifacts, runId, onPhase)).cut;
+}
+
+/** One complete fresh recovery traversal and its publication projection.
+ * Returned data grants no task, dispatch, settlement or terminal authority. */
+export async function readDeliveryPublicationClosure(
+  driver: SqliteDriver,
+  artifacts: ArtifactCatalog,
+  runId: string,
+  onPhase?: (phase: RecoveryClosurePhase) => void
+): Promise<{ cut: RecoveryClosureV1; prefix: PublicationPrefix }> {
+  const result = await readRecoveryProjection(driver, artifacts, runId, onPhase);
+  if (result.cut.runSpec.operation !== 'delivery' || !result.prefix)
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'publication closure requires a delivery Run');
+  return { cut: result.cut, prefix: result.prefix };
+}
+
+async function readRecoveryProjection(
+  driver: SqliteDriver,
+  artifacts: ArtifactCatalog,
+  runId: string,
+  onPhase?: (phase: RecoveryClosurePhase) => void
+): Promise<{ cut: RecoveryClosureV1; prefix?: PublicationPrefix }> {
   const phase = (value: RecoveryClosurePhase) => { try { onPhase?.(value); } catch { /* Diagnosis cannot decide recovery. */ } };
   const databaseCut = driver.transaction((connection) => {
     const run = readRun(connection, runId);
@@ -714,15 +740,19 @@ export async function readRecoveryClosure(
     } catch (error) { recoveryFailure(`generation retirement history is invalid: ${(error as Error).message}`, error); }
   } else generationProofs.push(...workspaceGenerations);
   await validateGenerationArtifacts(artifacts, generationProofs);
+  const closure: RecoveryClosureV1 = { runSpec, run, latestCheckpoint, items, journal, workerLaunches, workspaceGenerations, childAllocations };
+  const delivery = runSpec.operation === 'delivery' ? createDeliveryReadData(driver, artifacts, closure) : undefined;
   phase('history');
   if (journal.some((entry) => entry.opKind === 'model' || entry.opKind === 'verifier') || run.repairCount !== 0 ||
       runSpec.operation === 'agent' && items.length > 0 || runSpec.operation === 'delivery') {
     try {
-      const history = await validateAgentRecovery({ driver, artifacts, run, spec: runSpec, items, journal,
+      const input = { driver, artifacts, run, spec: runSpec, items, journal,
         principalId: databaseCut.principalId, workspaceIdentityRef: databaseCut.workspaceIdentityRef,
         checkpoints: databaseCut.checkpoints, workspaceGenerations: generationProofs,
-        context: decodeContextManifest(await artifacts.readCanonical(latestCheckpoint.contextManifestRef)) },
-      value => phase(`history_${value}`));
+        context: decodeContextManifest(await artifacts.readCanonical(latestCheckpoint.contextManifestRef)) };
+      const history = delivery
+        ? await validateAgentRecoveryInDeliveryEpoch(input, delivery, value => phase(`history_${value}`))
+        : await validateAgentRecovery(input, value => phase(`history_${value}`));
       journalBudgets.consumed = addBudget(journalBudgets.consumed,
         { ...ZERO_BUDGET, repairAttempts: history.repairAttempts }, 'recovery authorized repair budget');
       const assembly = await artifacts.readCanonical<RunAssemblyV1>(runSpec.assemblyRef);
@@ -774,29 +804,22 @@ export async function readRecoveryClosure(
   await validateChildAllocationArtifacts(artifacts, childAllocations);
 
   phase('terminal');
-  const closure: RecoveryClosureV1 = {
-    runSpec,
-    run,
-    latestCheckpoint,
-    items,
-    journal,
-    workerLaunches,
-    workspaceGenerations,
-    childAllocations
-  };
+  let publicationPrefix: PublicationPrefix | undefined;
   try {
     if (runSpec.operation === 'delivery') {
       // Use the complete actual cut, not a filled-in verifier/agent subset.
       // Reverse coverage requires the unique policy + delivery decision and
       // their original wait/control/Checkpoint graph even if a later stop
       // outranks the decision. No pure decoder result grants publication.
-      const { readPublicationPrefix } = await import('./delivery-publication-progress.js');
-      await readPublicationPrefix(driver, artifacts, closure);
+      publicationPrefix = await delivery!.prefix();
     }
     await validateInstalledModelNoReleaseHistory(driver, artifacts, closure);
-    await validateStopRecovery(driver, artifacts, closure);
-    await validateRunResultRecovery(driver, artifacts, closure);
+    if (delivery) await validateStopRecoveryInDeliveryEpoch(driver, artifacts, closure, delivery);
+    else await validateStopRecovery(driver, artifacts, closure);
+    if (delivery) await validateRunResultRecoveryInDeliveryEpoch(driver, artifacts, closure, delivery);
+    else await validateRunResultRecovery(driver, artifacts, closure);
+    if (delivery) await delivery.prefix();
   }
   catch (error) { recoveryFailure(`stop recovery closure is invalid: ${(error as Error).message}`, error); }
-  return closure;
+  return { cut: closure, ...(publicationPrefix ? { prefix: publicationPrefix } : {}) };
 }

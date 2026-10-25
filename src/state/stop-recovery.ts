@@ -1,7 +1,7 @@
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { identityHash, parseCanonicalTime } from '../kernel/identity.js';
 import type { ControlApplicationResponseV1, ControlResultV1, ContinuationItem, RecoveryClosureV1, Run, RunAssemblyV1, SessionRunTerminalItem, TerminalDetail } from '../kernel/types.js';
-import { cancelledCall, agentStopDetail, decodeAgentStop, openStopBatch, selectAgentStop, stopCheckpointId, stopInvocationHistory } from '../runtime/stop.js';
+import { cancelledCall, agentStopDetail, decodeAgentStop, openStopBatch, selectAgentStop, stopCheckpointId, stopInvocationHistory, type AgentStopIntent } from '../runtime/stop.js';
 import { toolOperationId } from '../policy/tool-policy.js';
 import { requireEqual } from '../policy/runtime-authority.js';
 import { readCanonicalArtifact } from './agent-context.js';
@@ -24,6 +24,7 @@ import { assertDeliveryModelFreeCut } from './run-model-free.js';
 import { readDeliveryMergeConflictCause } from './delivery-recovery.js';
 import { readDeliveryPolicyDenial } from './delivery-approval.js';
 import { readDeliveryTerminalProjection, readUnclaimedPublicationStopHistory } from './delivery-publication-recovery.js';
+import type { DeliveryReadData } from './delivery-read-data.js';
 
 export type CancelResponse = Extract<ControlApplicationResponseV1, { ok: true }> & { result: Extract<ControlResultV1, { method: 'run.cancel' }> };
 
@@ -60,24 +61,39 @@ export async function readAgentStop(driver: SqliteDriver, artifacts: ArtifactCat
   return readStopReference(driver, artifacts, closure, closure.run.stopIntentRef!, true);
 }
 
+export async function readAgentStopInDeliveryEpoch(driver: SqliteDriver, artifacts: ArtifactCatalog,
+  closure: RecoveryClosureV1, data: DeliveryReadData) {
+  return readStopReference(driver, artifacts, closure, closure.run.stopIntentRef!, true, data);
+}
+
 /** An explicit historical edge in the actual retained graph. The original
  * Stop is validated without replacing the Run/current cut with a fabricated
  * snapshot, then must remain the winner or a valid monotonic predecessor. */
 export async function readRetainedAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, closure: RecoveryClosureV1, ref: string) {
-  const current = await readAgentStop(driver, artifacts, closure);
+  return readRetainedAgentStopData(driver, artifacts, closure, ref);
+}
+
+export async function readRetainedAgentStopInDeliveryEpoch(driver: SqliteDriver, artifacts: ArtifactCatalog,
+  closure: RecoveryClosureV1, ref: string, data: DeliveryReadData): Promise<AgentStopIntent> {
+  return readRetainedAgentStopData(driver, artifacts, closure, ref, data);
+}
+
+async function readRetainedAgentStopData(driver: SqliteDriver, artifacts: ArtifactCatalog, closure: RecoveryClosureV1,
+  ref: string, data?: DeliveryReadData): Promise<AgentStopIntent> {
+  const current = data ? await data.stop() : await readAgentStop(driver, artifacts, closure);
   if (ref === closure.run.stopIntentRef) return current;
-  const original = await readStopReference(driver, artifacts, closure, ref, false);
+  const original = await readStopReference(driver, artifacts, closure, ref, false, data);
   if (selectAgentStop(original, current) !== current) throw new TypeError('historical StopIntent is not a monotonic predecessor of the current winner');
   return original;
 }
 
 async function readStopReference(driver: SqliteDriver, artifacts: ArtifactCatalog, closure: RecoveryClosureV1,
-  ref: string, requireCurrentFence: boolean) {
+  ref: string, requireCurrentFence: boolean, data?: DeliveryReadData): Promise<AgentStopIntent> {
   if (closure.runSpec.operation === 'delivery') assertDeliveryModelFreeCut(closure);
   const { run } = closure;
   const intent = decodeAgentStop(await readCanonicalArtifact(artifacts, ref), run);
   const deliveryDenial = closure.runSpec.operation === 'delivery'
-    ? await readDeliveryPolicyDenial(driver, artifacts, closure) : undefined;
+    ? data ? (await data.authorization())?.stop : await readDeliveryPolicyDenial(driver, artifacts, closure) : undefined;
   if (intent.origin === 'user_cancel') {
     if (!run.cancelRequested) throw new TypeError('cancellation lost its monotonic dispatch fence');
     if (deliveryDenial?.origin === 'user_cancel' && canonicalSha256(deliveryDenial) === ref) {
@@ -171,13 +187,23 @@ export async function validateVerifierPolicyDenialHistory(driver: SqliteDriver, 
 }
 
 export async function validateStopRecovery(driver: SqliteDriver, artifacts: ArtifactCatalog, closure: RecoveryClosureV1) {
+  return validateStopRecoveryData(driver, artifacts, closure);
+}
+
+export async function validateStopRecoveryInDeliveryEpoch(driver: SqliteDriver, artifacts: ArtifactCatalog,
+  closure: RecoveryClosureV1, data: DeliveryReadData) {
+  return validateStopRecoveryData(driver, artifacts, closure, data);
+}
+
+async function validateStopRecoveryData(driver: SqliteDriver, artifacts: ArtifactCatalog, closure: RecoveryClosureV1,
+  data?: DeliveryReadData) {
   const { run, runSpec: spec, latestCheckpoint: checkpoint, journal } = closure;
   const terminal = run.status === 'failed' || run.status === 'cancelled';
   if (!run.stopIntentRef) {
     if (terminal) throw new TypeError('terminal stop has no winning StopIntent');
     return;
   }
-  const intent = await readAgentStop(driver, artifacts, closure);
+  const intent = data ? await data.stop() : await readAgentStop(driver, artifacts, closure);
   if (!terminal) {
     if (!['queued', 'running', 'waiting'].includes(run.status) || run.terminalReason || run.terminalDetailRef || run.resultRef) throw new TypeError('nonterminal stop has terminal fields');
     return;
@@ -197,7 +223,8 @@ export async function validateStopRecovery(driver: SqliteDriver, artifacts: Arti
   const abandoned = await validateInstalledBrokerTerminalHistory(driver, artifacts, closure, detail);
   const hasPublicationClaim = journal.some(entry => entry.opKind === 'publish' && entry.phase === 'dispatch_claimed');
   const publication = hasPublicationClaim && spec.operation === 'delivery' && detail.deliveryTerminalProjectionEvidenceRef
-    ? await readDeliveryTerminalProjection(driver, artifacts, closure, detail.deliveryTerminalProjectionEvidenceRef) : undefined;
+    ? data ? await data.terminalProjection(detail.deliveryTerminalProjectionEvidenceRef)
+      : await readDeliveryTerminalProjection(driver, artifacts, closure, detail.deliveryTerminalProjectionEvidenceRef) : undefined;
   if (hasPublicationClaim && (!publication || publication.evidence.selectedBranch !== 'abort') ||
       !hasPublicationClaim && detail.deliveryTerminalProjectionEvidenceRef !== undefined)
     throw new TypeError('terminal stop lacks its exact original aborted publication projection');
@@ -218,7 +245,7 @@ export async function validateStopRecovery(driver: SqliteDriver, artifacts: Arti
   const privateRollbacks = await validatePrivateToolRollbackHistory(driver, artifacts, closure);
   const verifierStops = await validateVerifierStoppedHistory(driver, artifacts, closure);
   const unclaimedPublications = !hasPublicationClaim && spec.operation === 'delivery' && journal.some(entry => entry.opKind === 'publish')
-    ? await readUnclaimedPublicationStopHistory(driver, artifacts, closure) : new Set<number>();
+    ? data ? await data.unclaimedStopHistory() : await readUnclaimedPublicationStopHistory(driver, artifacts, closure) : new Set<number>();
   for (const { entry, hasClaim } of stopInvocationHistory(journal).values()) {
     if (entry.opKind === 'publish' && (publication?.closedPublicationJournalSeqs.has(entry.seq) || unclaimedPublications.has(entry.seq))) continue;
     if (entry.opKind === 'model' && entry.replayClass === 'retry' && entry.phase === 'unknown' && abandoned.some(closed =>
