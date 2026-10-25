@@ -268,7 +268,21 @@ original resolver, final transaction and grant consumption; all three members
 are published and completely verified again even when their refs already
 exist. Earlier assembly data is not reusable authorization, and historical
 reconstruction never publishes this group.
-These are exact two/three-member tuples, not a general queued batch or a
+Installed final Run admission may also publish these two fixed four-member
+data groups: `[original public request core, Run objective, admitted context,
+initial workspace state]`, then `[Run specification, initial context manifest,
+initial frontier, original control response]`. Any required direct-unverified
+consent remains its own complete publication between the groups. Pure typed
+values may use precomputed full-byte refs to compose dependent values; these
+are not publication receipts. Both groups must complete all physical writes,
+full-byte and exact slot metadata checks and descriptor joins before the sole
+final admission transaction can consume a grant, create the Run/Checkpoint or
+expose the response. Cancellation stops the next group and waits for any
+issued group to join; corruption and retirement failure retain precedence.
+The original final read/currentness/owner/frame checks are unchanged. Other
+admission paths retain their individual publisher; neither historical replay
+nor an earlier assembly substitutes for any fresh final check.
+These are exact two/three/declared-four-member tuples, not a general queued batch or a
 deferred-durability API. Precomputed canonical refs compose data only. Every
 member retains its own file sync and complete final byte/hash/length/metadata
 verification, and one promise joins the entire group and all descriptors

@@ -227,7 +227,10 @@ export async function openInstalledClientConsumer(input: Input) {
             if (!pending.events.length) finishPage();
             continue;
           }
-          response = record.response as Response;
+          // Validation copies/freezes data for production consumers. This
+          // campaign must retain the original strict-parsed wire value so
+          // raw v1 and schema3 replay comparisons see the same representation.
+          response = (application as { response: Response }).response;
         } else response = decoded as Response;
         assert.equal(response.protocolVersion, 1); assert.equal(typeof response.ok, 'boolean');
         if (frames === 1) {

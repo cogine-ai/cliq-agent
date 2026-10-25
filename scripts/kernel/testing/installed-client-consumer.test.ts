@@ -2,6 +2,7 @@
 // an installed Supervisor or qualify native authentication/execution.
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { parseJsonStrict } from '../../../src/kernel/json.js';
 import { InstalledClientConsumerDeadlineError, InstalledClientDriverError, openInstalledClientConsumer,
   copyInstalledClientAuthenticationWork, copyInstalledClientAuthenticationProcess,
   installedClientAuthenticationMarker } from './installed-client-consumer.js';
@@ -37,6 +38,12 @@ for (const mode of ['jsonl', 'rpc'] as const) test(`schema3 ${mode} actual adapt
   const response = await client.send({ protocolVersion: 1, method: 'run.attach', runId: 'run', afterEventSeq: 0, limit: 1 });
   assert.equal(response.result?.nextEventSeq, 3); await client.close();
   assert.equal(joined, 1); assert.equal(closed, 2);
+  const wire = Buffer.concat(scans).toString('utf8').trim().split('\n').map(text => parseJsonStrict(text)) as Record<string, any>[];
+  const original = mode === 'rpc' ? wire.at(-1)!.result.response
+    : wire.filter(record => record.type === 'response').at(-1)!.response;
+  assert.equal(Object.getPrototypeOf(client.hello), null, 'hello retains its original strict-parser representation');
+  assert.equal(Object.getPrototypeOf(response), null, 'a validated response retains its original wire object');
+  assert.deepEqual(response, original, 'cross-transport replay compares the complete original wire data');
   const output = Buffer.concat(scans).toString('utf8').trim().split('\n').map(text => JSON.parse(text));
   assert.equal(output.length, mode === 'rpc' ? 8 : 7);
   const records = mode === 'rpc' ? output.filter(value => value.method === 'control.record').map(value => {

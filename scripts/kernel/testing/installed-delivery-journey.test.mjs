@@ -7,6 +7,33 @@ import ts from 'typescript';
 
 const source = name => readFileSync(new URL(name, import.meta.url), 'utf8');
 
+test('successor readiness waits for the original third-owner commit under the unchanged restart deadline', async () => {
+  const text = source('./installed-node-journey.ts');
+  const parsed = ts.createSourceFile('installed-node-journey.ts', text, ts.ScriptTarget.Latest, true);
+  const declarations = [];
+  const visit = node => {
+    if (ts.isVariableDeclaration(node) && node.name.getText(parsed) === 'waitForSuccessorOwnerHistory') declarations.push(node);
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed); assert.equal(declarations.length, 1); assert(declarations[0].initializer);
+  const body = ts.transpileModule('return ' + declarations[0].initializer.getText(parsed), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
+  }).outputText;
+  const bind = (read, pause) => Function('waitForInstalledOwnerHistory', 'recipe', 'assert', 'delay', body)
+    (read, { stateRoot: 'inert-readiness-input' }, assert, pause);
+  const reads = [], sleeps = [], final = [1, 2, 3]; let calls = 0;
+  const wait = bind(async (...args) => { reads.push(args); return { owners: ++calls < 3 ? [1, 2] : final }; },
+    async milliseconds => { sleeps.push(milliseconds); });
+  assert.equal(await wait(123), final); assert.deepEqual(sleeps, [20, 20]);
+  assert.deepEqual(reads, Array(3).fill(['inert-readiness-input', 123]));
+  for (const owners of [[], [1], [1, 2, 3, 4]])
+    await assert.rejects(bind(async () => ({ owners }), async () => assert.fail('invalid history cannot retry'))(123));
+  const failure = new Error('original absolute deadline exhausted');
+  await assert.rejects(bind(async () => { throw failure; }, async () => assert.fail())(123), error => error === failure);
+  assert.equal(text.match(/const history = await waitForSuccessorOwnerHistory\(restartBy\)/gu)?.length, 2);
+  assert(text.includes('const observed = await waitForSuccessorOwnerHistory(restartBy);'));
+});
+
 test('Delivery cancellation compares every budget dimension from actual strict-parser bytes', async () => {
   const load = async name => {
     const compiled = ts.transpileModule(source(name), {

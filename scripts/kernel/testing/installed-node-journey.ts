@@ -476,6 +476,16 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     assert.equal(await fixtureProcess(pid, ledger.uid), start); assert.equal(await readlink('/proc/' + pid + '/exe'), image);
     return start;
   };
+  const waitForSuccessorOwnerHistory = async (by: number) => {
+    for (;;) {
+      const history = (await waitForInstalledOwnerHistory(recipe.stateRoot, by)).owners;
+      // The old socket can survive SIGKILL. Image/socket presence alone does
+      // not prove the third owner's original StateOwner transaction committed.
+      assert(history.length === 2 || history.length === 3, 'successor history changed its original owner count');
+      if (history.length === 3) return history;
+      await delay(20);
+    }
+  };
 
   try {
     mark('owned_https_and_signed_guest_package');
@@ -1100,7 +1110,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
             const successorUnit = show(services!.supervisorUnit);
             assert.notEqual(successorUnit.MainPID, '0'); assert.notEqual(successorUnit.InvocationID, invocationId);
             await selectedSupervisor(services!.supervisorUnit, successorUnit, installedImage, restartBy);
-            const history = inspectInstalledOwnerHistory(recipe.stateRoot).owners;
+            const history = await waitForSuccessorOwnerHistory(restartBy);
             assert.equal(history.length, 3); assert.equal(history[1]!.state, 'terminal'); assert.equal(history[1]!.terminalReason, 'graceful_release');
             assert.equal(history[2]!.state, 'active'); assert.equal(history[2]!.runtimeBundleRef, bundleDigest);
             await qualifyInstalledOwnerLinks({ stateRoot: recipe.stateRoot, uid: ledger.uid, bundle: signed.bundle, imageDigest: supervisorDigest, report: {} });
@@ -1228,7 +1238,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
               // Bind the actual successor before opening the journal window,
               // not merely when its eventual historical query starts.
               for (;;) {
-                const observed = inspectInstalledOwnerHistory(recipe.stateRoot).owners;
+                const observed = await waitForSuccessorOwnerHistory(restartBy);
                 if (observed.length === 3 && observed[2]!.state === 'active') {
                   const process = await qualifyInstalledOwnerProcess({ stateRoot: recipe.stateRoot, uid: ledger.uid,
                     pid: Number(successorUnit.MainPID), selectedImage: installedImage, imageDigest: supervisorDigest }, observed[2]!, {});
@@ -1242,7 +1252,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
             }
             const successorStart = await selectedSupervisor(services!.supervisorUnit, successorUnit, installedImage, restartBy);
             if (lateDiagnostic) assert.equal(successorStart, boundStart);
-            const history = inspectInstalledOwnerHistory(recipe.stateRoot).owners;
+            const history = await waitForSuccessorOwnerHistory(restartBy);
             assert.equal(history.length, 3); assert.equal(history[1]!.terminalReason, 'superseded_after_owner_death');
             assert.equal(history[2]!.state, 'active');
             await qualifyInstalledOwnerLinks({ stateRoot: recipe.stateRoot, uid: ledger.uid, bundle: signed.bundle, imageDigest: supervisorDigest, report: {} });

@@ -1,4 +1,4 @@
-import { canonicalSha256 } from '../../kernel/canonical.js';
+import { canonicalJsonBytes, canonicalSha256 } from '../../kernel/canonical.js';
 import { immutableSnapshot } from '../../model/immutable.js';
 import { decodeRetainedRunAssembly } from '../../model/run-assembly.js';
 import { exactKeys } from '../../policy/runtime-authority.js';
@@ -589,6 +589,19 @@ async function admitRunInternal(
     signal?.throwIfAborted();
     return artifact;
   };
+  const publishFour = async (values: Parameters<ArtifactCatalog['publishCanonicalFour']>[0]) => {
+    signal?.throwIfAborted();
+    const expected = values.map(({ value, schemaKind }) => ({ ref: canonicalSha256(value),
+      byteLength: canonicalJsonBytes(value).length, mediaType: 'application/json', schemaKind }));
+    const result = await artifacts.publishCanonicalFour(values);
+    if (result.length !== 4 || expected.some((wanted, index) => {
+      const actual = result[index];
+      return !actual || actual.ref !== wanted.ref || actual.byteLength !== wanted.byteLength ||
+        actual.mediaType !== wanted.mediaType || actual.schemaKind !== wanted.schemaKind;
+    })) throw new KernelStorageError('ARTIFACT_MISMATCH', 'Run admission group differs from its complete original bytes');
+    signal?.throwIfAborted();
+    return result;
+  };
   const checkpointId = identityHash('cliq-checkpoint-id-v1', runId, 'initial', 0);
   const turnId = identityHash('cliq-turn-id-v1', runId, 'initial');
 
@@ -602,18 +615,6 @@ async function admitRunInternal(
   objective.objectiveDigest = digestOmitting(objective, 'objectiveDigest');
   const published: PublishedArtifact[] = [...channelClosure.metadata, ...referencedMetadata];
   if (verifierPreparation && verifierConsumption) published.push(...verifierPreparation.metadata, ...verifierConsumption.metadata);
-  if (installed) {
-    const { requestDigest: _digest, ...core } = installed.data.normalized.originalRequest as Record<string, unknown>;
-    const requestArtifact = await publish(core, 'cliq-run-submit-request-core-v1');
-    if (requestArtifact.ref !== requestDigest) throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed original public core digest changed');
-    published.push(requestArtifact);
-  } else if (verifierPreparation) {
-    const requestArtifact = await publish(admitRequestCore(input, workspacePath, objectiveText, budgets), 'cliq-run-submit-internal-request-core-v1');
-    if (requestArtifact.ref !== requestDigest) throw new TypeError('internal verifier admission request identity changed');
-    published.push(requestArtifact);
-  }
-  const objectiveArtifact = await publish(objective, 'cliq-run-objective-v1');
-  published.push(objectiveArtifact);
   decodeRunObjective(objective);
 
   const admittedContext: AdmittedContextManifest = {
@@ -628,8 +629,6 @@ async function admitRunInternal(
     contextDigest: ''
   };
   admittedContext.contextDigest = digestOmitting(admittedContext, 'contextDigest');
-  const admittedContextArtifact = await publish(admittedContext, 'cliq-admitted-context-v1');
-  published.push(admittedContextArtifact);
   decodeAdmittedContext(admittedContext);
 
   const workspaceState = {
@@ -643,9 +642,32 @@ async function admitRunInternal(
     stateDigest: ''
   };
   workspaceState.stateDigest = digestOmitting(workspaceState, 'stateDigest');
-  const workspaceStateArtifact = await publish(workspaceState, 'cliq-workspace-state-v1');
-  published.push(workspaceStateArtifact);
   decodeWorkspaceState(workspaceState);
+
+  let objectiveArtifact: PublishedArtifact, admittedContextArtifact: PublishedArtifact, workspaceStateArtifact: PublishedArtifact;
+  if (installed) {
+    const { requestDigest: _digest, ...core } = installed.data.normalized.originalRequest as Record<string, unknown>;
+    if (canonicalSha256(core) !== requestDigest)
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed original public core digest changed');
+    const [requestArtifact, objectiveValue, contextValue, workspaceValue] = await publishFour([
+      { value: core, schemaKind: 'cliq-run-submit-request-core-v1' },
+      { value: objective, schemaKind: 'cliq-run-objective-v1' },
+      { value: admittedContext, schemaKind: 'cliq-admitted-context-v1' },
+      { value: workspaceState, schemaKind: 'cliq-workspace-state-v1' }
+    ]);
+    published.push(requestArtifact); objectiveArtifact = objectiveValue;
+    admittedContextArtifact = contextValue; workspaceStateArtifact = workspaceValue;
+  } else {
+    if (verifierPreparation) {
+      const requestArtifact = await publish(admitRequestCore(input, workspacePath, objectiveText, budgets), 'cliq-run-submit-internal-request-core-v1');
+      if (requestArtifact.ref !== requestDigest) throw new TypeError('internal verifier admission request identity changed');
+      published.push(requestArtifact);
+    }
+    objectiveArtifact = await publish(objective, 'cliq-run-objective-v1');
+    admittedContextArtifact = await publish(admittedContext, 'cliq-admitted-context-v1');
+    workspaceStateArtifact = await publish(workspaceState, 'cliq-workspace-state-v1');
+  }
+  published.push(objectiveArtifact, admittedContextArtifact, workspaceStateArtifact);
 
   const runSpecCore: RunSpec = {
     schemaVersion: 1,
@@ -683,9 +705,10 @@ async function admitRunInternal(
     decodeUnverifiedConsent(consent);
     runSpec = { ...runSpecCore, unverifiedConsentRef: consentArtifact.ref };
   }
-  const specArtifact = await publish(runSpec, 'cliq-run-spec-v1');
-  published.push(specArtifact);
   decodeRunSpec(runSpec);
+  // These hashes only assemble inert dependent values. No PublishedArtifact,
+  // row, grant consumption or response is accepted before the real tail joins.
+  const specRef = canonicalSha256(runSpec);
 
   const contextManifest: ContextManifest = {
     schemaVersion: 1,
@@ -698,8 +721,6 @@ async function admitRunInternal(
     projectionDigest: ''
   };
   contextManifest.projectionDigest = digestOmitting(contextManifest, 'projectionDigest');
-  const contextManifestArtifact = await publish(contextManifest, 'cliq-context-manifest-v1');
-  published.push(contextManifestArtifact);
   decodeContextManifest(contextManifest);
 
   const frontier: Extract<RunFrontier, { kind: 'agent' }> = {
@@ -710,8 +731,7 @@ async function admitRunInternal(
     contextItemSeq: 0,
     cause: 'initial'
   };
-  const frontierArtifact = await publish(frontier, 'cliq-run-frontier-v1');
-  published.push(frontierArtifact);
+  const frontierRef = canonicalSha256(frontier);
 
   const deadlineAt = installed?.data.deadlineAt ?? addCanonicalDuration(now, budgets.wallTimeMs);
   if (deadlineAt !== addCanonicalDuration(now, budgets.wallTimeMs))
@@ -719,10 +739,10 @@ async function admitRunInternal(
   const run: Run = {
     id: runId,
     sessionId: session.id,
-    specRef: specArtifact.ref,
+    specRef,
     status: 'queued',
     nextStep: 'agent',
-    frontierRef: frontierArtifact.ref,
+    frontierRef,
     revision: 1,
     leaseEpoch: 0,
     latestCheckpointId: checkpointId,
@@ -748,7 +768,7 @@ async function admitRunInternal(
     runRevision: 1,
     status: 'queued',
     nextStep: 'agent',
-    frontierRef: frontierArtifact.ref,
+    frontierRef,
     latestRunItemSeq: 0,
     occurredAt: now
   };
@@ -757,8 +777,16 @@ async function admitRunInternal(
     ok: true,
     result: { method: 'run.submit', snapshot }
   };
-  const responseArtifact = await publish(response, 'cliq-control-response-v1');
-  published.push(responseArtifact);
+  const [specArtifact, contextManifestArtifact, frontierArtifact, responseArtifact] = installed ? await publishFour([
+    { value: runSpec, schemaKind: 'cliq-run-spec-v1' },
+    { value: contextManifest, schemaKind: 'cliq-context-manifest-v1' },
+    { value: frontier, schemaKind: 'cliq-run-frontier-v1' },
+    { value: response, schemaKind: 'cliq-control-response-v1' }
+  ]) : [await publish(runSpec, 'cliq-run-spec-v1'), await publish(contextManifest, 'cliq-context-manifest-v1'),
+    await publish(frontier, 'cliq-run-frontier-v1'), await publish(response, 'cliq-control-response-v1')];
+  if (specArtifact.ref !== specRef || frontierArtifact.ref !== frontierRef)
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'Run admission dependent values differ from their real publications');
+  published.push(specArtifact, contextManifestArtifact, frontierArtifact, responseArtifact);
 
   const admittedRequestDigest = canonicalSha256({
     admissionIntentDigest,

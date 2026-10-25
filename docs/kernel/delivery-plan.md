@@ -13,44 +13,65 @@ Linux execution/restart and cancellation foundations are real, but a final
 model turn still stops at `candidate_required`. No work package or complete I1
 is declared finished by the 32 passing checks.
 
-Latest completed exact-head result (2026-10-25): `7f563bb`
-[run 475](https://github.com/cogine-ai/cliq-agent/actions/runs/40206820780)
+Latest completed exact-head result (2026-10-25): `3d16c87`
+[run 476](https://github.com/cogine-ai/cliq-agent/actions/runs/40211644448)
 has sixteen successful and six failed jobs; all four TypeScript jobs pass.
-The complete collector retains 105 original reports / 509,742 bytes across
+The complete collector retains 105 original reports / 477,229 bytes across
 23 categories, with no missing, incomplete or rejected report. All 21 cleanup
 reports have zero errors and all 21 runner-baseline pairs are byte-identical.
 The original collector, poller, wrapper and scoped awake guard actually join;
 independent full-schema/integrity closeout SHA-256:
-`4149fa6e0df8f7634793d50f6fa7527bf1a6584041f6c851a5a0f05011e8b08d`.
+`191ba9c3935682c5b2f6f726e982a38f277684bfb8163fe76ea0bf7a74a4e29f`.
 
-Normal Delivery now passes the verifier-parent retirement consumer, then fails
-its cancellation budget assertion: strict JSON objects have null prototypes,
-so strict object-prototype equality incorrectly rejects identical budgets.
-Compare the complete canonical bytes of both budgets instead, preserving all
-four dimensions, exact types and closed fields; changed, absent or extra fields
-still fail. This local regression does not qualify the remaining journey.
+Normal Delivery passes the verifier-parent retirement and complete cancellation
+budget checks, then reaches the real cleanup-crash successor. The harness reads
+owner history as soon as the replacement image and socket path exist; the old
+socket can survive SIGKILL, so this does not establish that the third owner's
+transaction committed. Wait only for that original third row under the same
+absolute restart deadline; extra owners, wrong terminal reasons and all original
+process, image, keeper and receipt checks remain strict. The local control-flow
+regression does not qualify the remaining installed recovery journey.
 
-The non-root image preflight fails because its fresh output inherits the
-derived carrier's 0500 mode, which prevents SEA injection. Only that new,
-single-link, owner-held output is made 0700 during construction and returns
-to 0500 after injection/signing; the original carrier is never chmod'ed.
-Separately, admission cancellation now stops before each next independent
-artifact publication and after the current publisher fully joins. It does
-not interrupt physical writes or mask storage/retirement failure. Original
-grant consumption and the sole final admission transaction remain intact.
+Non-root image construction now passes its original preflight. The normal
+schema3 client campaign gets through authenticated refusal and credential
+enrollment, then incorrectly compares a normalized response object with the
+strict parser's null-prototype original. The campaign consumer now returns the
+original parsed wire object after the same complete closed decoder checks;
+actual JSONL/RPC child-process regressions compare the whole replay response.
+Production immutable client results and protocol validation are unchanged.
 
-All three storage campaigns pass preflight but time out on their first
-source `run.submit`, before any publication-stop or late-audit cut. Their
-four observed protocol frames do not prove admission or the target cut
-completed. The verifier's cumulative 4096-stream secret scan remains
-incomplete. These bounds and all physical deadlines remain unchanged.
+The delayed and late-audit storage campaigns still time out on their first
+source `run.submit`, before either target cut. In the late-audit case the
+original Supervisor genuinely joins; its closed diagnostics locate the delay
+after final assembly, during admission publication. Installed admission now
+uses two declared fixed four-object groups through the existing complete CAS
+stage publisher, with consent separate and all actual returned metadata checked.
+Predicted content references only construct inert dependent data; only fully
+joined publication and the original final transaction accept the Run. The real
+CAS regressions retain every file sync, four persistence boundaries, full-byte
+readback and cancellation/storage-failure checks. This still needs installed
+Linux verification. The original-stop fixture instead misses authenticated
+client READY at five seconds. The verifier's cumulative 4096-stream secret scan
+also remains incomplete. No bound, full-image revalidation, safety check or
+physical deadline is relaxed, and none of these missing cuts is qualified.
 
 The shared schema3 JSONL/RPC client package passes an independent review and
-its complete local gate; it still requires real installed Linux validation.
+its complete local gate; its corrected campaign still requires a real installed
+Linux rerun. Ordinary Git preparation, source handoff and their native retirement
+are being integrated into the same existing lifecycle and hosted campaign.
 Default CLI/TUI, full v1/Session/MCP surfaces, release bootstrap, provider,
 macOS, reboot and scale qualifications remain separate delivery obligations.
 No complete work package, I1–I4 qualification or release is declared finished,
 and no PR is opened for the incomplete delivery.
+
+Previous completed exact-head result: `7f563bb`
+[run 475](https://github.com/cogine-ai/cliq-agent/actions/runs/40206820780)
+has sixteen successful and six failed jobs; all four TypeScript jobs pass.
+Its complete 105-report / 509,742-byte archive passes independent closeout
+`4149fa6e0df8f7634793d50f6fa7527bf1a6584041f6c851a5a0f05011e8b08d`.
+The cancellation budget's strict-parser representation mismatch and the fresh
+SEA output's missing construction write permission are corrected in run 476;
+the original objects and complete equality/integrity checks remain intact.
 
 Previous completed exact-head result: `fc0790e`
 [run 474](https://github.com/cogine-ai/cliq-agent/actions/runs/40191567432)
