@@ -1230,7 +1230,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
             let successorUnit: Record<string, string>;
             for (;;) {
               successorUnit = show(services!.supervisorUnit);
-              if (successorUnit.MainPID !== '0' && successorUnit.MainPID !== shown.MainPID && successorUnit.InvocationID !== shown.InvocationID) break;
+              if (successorUnit.MainPID !== '0' && successorUnit.MainPID !== shown.MainPID && successorUnit.InvocationID !== shown.InvocationID &&
+                  successorUnit.ExecMainPID === successorUnit.MainPID && successorUnit.ActiveState === 'active' && successorUnit.SubState === 'running') break;
               assert(Date.now() < restartBy, 'actual cleanup crash restart exceeded the original 30-second budget'); await delay(50);
             }
             let windowStart: string | undefined, boundStart: string | undefined;

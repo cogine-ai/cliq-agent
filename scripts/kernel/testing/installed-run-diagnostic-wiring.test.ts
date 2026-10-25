@@ -232,8 +232,10 @@ test('submit diagnosis preserves the registered producer, actual admission resol
     ['submit_assembly', 'const assembled = await assembleInstalledRun'],
     ['submit_final_admission', 'const admission = withCredentialAuthorityLock']])
     assert(body.includes(`diagnosis?.stage('${stage}');\n      ${operation}`), stage);
-  assert.match(body, /if \(\['queued', 'running', 'waiting'\]\.includes\(readRun\(this.driver, replay.run.id\).status\)\) \{\s*diagnosis\?\.stage\('submit_postcommit_load'\);\s*await this.retainInstalledAgent\(replay.run.id\);/u);
-  assert.match(body, /const agentLoad = this.retainInstalledAgent\(runId, assembled.material, admission\);\s*const result = await admission;\s*diagnosis\?\.stage\('submit_postcommit_load'\);/u);
+  assert.match(body, /if \(\['queued', 'running', 'waiting'\]\.includes\(readRun\(this.driver, replay.run.id\).status\)\) \{\s*diagnosis\?\.stage\('submit_postcommit_load'\);\s*this.retainInstalledAgent\(replay.run.id\);/u);
+  assert.match(body, /this.retainInstalledAgent\(runId, assembled.material, admission\);\s*const result = await admission;\s*diagnosis\?\.stage\('submit_postcommit_load'\);/u);
+  assert.doesNotMatch(body, /await (?:this\.retainInstalledAgent|agentLoad)/u,
+    'diagnosis cannot make durable acknowledgement wait for the driver-owned load');
   assert.match(body, /captureSubmittedSource\(\{ request, identity \}\)/u);
   const publicBody = between('async submitInstalledRun(', 'async applyInstalledRun(');
   assert.match(publicBody, /request = immutableSnapshot\(request\);\s*return this.ownInstalledAdmission\(signal => this.submitInstalledRunOwned\(request, identity, signal\)\);/u);
@@ -393,11 +395,14 @@ test('authorization diagnosis records only existing await boundaries and rethrow
   assert.equal((body.match(/sampleCanonicalNow\(\)/gu) ?? []).length, 2, 'preparation and actual final-transaction commit remain two distinct samples');
 });
 
-test('apply diagnostics distinguish the original admission await from postcommit loading without replacing the error', () => {
+test('apply diagnostics preserve durable admission and independently owned loading without replacing the error', () => {
   const body = between('private async applyInstalledRunOwned(', 'private ownInstalledAdmission<');
   assert.match(body, /beginInstalledApplyDiagnostic\(\)/u);
   assert.match(body, /diagnosis\?\.stage\('admit'\);\s*const admission = admitInstalledDelivery/u);
-  assert.match(body, /const result = await admission;\s*diagnosis\?\.stage\('postcommit_load'\);\s*await loaded;/u);
+  assert.match(body, /this.retainInstalledAgent\(runId, undefined, admission\);\s*const result = await admission;\s*diagnosis\?\.stage\('postcommit_load'\);\s*this.scheduleInstalledRun\(result.run.id\); return result;/u);
+  assert.match(body, /if \(\['queued', 'running', 'waiting'\]\.includes\(readRun\(this.driver, replay.run.id\).status\)\) \{\s*diagnosis\?\.stage\('postcommit_load'\);\s*this.retainInstalledAgent\(replay.run.id\);/u);
+  assert.doesNotMatch(body, /await (?:this\.retainInstalledAgent|loaded)/u,
+    'diagnosis cannot make durable acknowledgement wait for the driver-owned load');
   assert.match(body, /catch \(error\) \{\s*diagnosis\?\.failure\(error, this.closeRequested\);\s*throw error;/u);
 });
 

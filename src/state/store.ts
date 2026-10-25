@@ -1772,7 +1772,7 @@ export class StateStore {
       if (replay) {
         if (['queued', 'running', 'waiting'].includes(readRun(this.driver, replay.run.id).status)) {
           diagnosis?.stage('postcommit_load');
-          await this.retainInstalledAgent(replay.run.id);
+          this.retainInstalledAgent(replay.run.id);
         }
         this.scheduleInstalledRun(replay.run.id); return replay;
       }
@@ -1796,10 +1796,9 @@ export class StateStore {
       diagnosis?.stage('admit');
       const admission = admitInstalledDelivery(this.driver, this.artifacts, this.owner, prepared, identity, signal);
       const runId = identityHash('cliq-run-id-v1', identity.principalId, 'run.apply', normalized.request.admissionKey);
-      const loaded = this.retainInstalledAgent(runId, undefined, admission);
+      this.retainInstalledAgent(runId, undefined, admission);
       const result = await admission;
       diagnosis?.stage('postcommit_load');
-      await loaded;
       this.scheduleInstalledRun(result.run.id); return result;
     } catch (error) {
       diagnosis?.failure(error, this.closeRequested);
@@ -1847,7 +1846,7 @@ export class StateStore {
         if ('run' in replay) {
           if (['queued', 'running', 'waiting'].includes(readRun(this.driver, replay.run.id).status)) {
             diagnosis?.stage('submit_postcommit_load');
-            await this.retainInstalledAgent(replay.run.id);
+            this.retainInstalledAgent(replay.run.id);
           }
           this.scheduleInstalledRun(replay.run.id);
         }
@@ -1927,12 +1926,12 @@ export class StateStore {
       // Register before that asynchronous producer can commit a visible Run.
       // Maintenance joins the same load, never waiting on its own credential
       // queue or misclassifying an in-flight admission as corrupt state.
-      const agentLoad = this.retainInstalledAgent(runId, assembled.material, admission);
+      this.retainInstalledAgent(runId, assembled.material, admission);
       const result = await admission;
       diagnosis?.stage('submit_postcommit_load');
-      // Deadline control must exist before productive scheduling, including for
-      // a Run accepted behind a slow native broker or a retained worker slot.
-      await agentLoad;
+      // The Run and original response are durable. Its independently owned
+      // load is joined by the existing driver before any productive action;
+      // attachment does not own that load or delay durable acknowledgement.
       this.scheduleInstalledRun(result.run.id);
       return result;
     } catch (error) {
@@ -2223,7 +2222,15 @@ export class StateStore {
   private async driveInstalledRun(runId: string): Promise<void> {
     if (!this.supportsInstalledRuns()) return;
     const { loadInstalledRunMaterial } = await import('./installed-run.js');
-    const run = readRun(this.driver, runId);
+    let run = readRun(this.driver, runId);
+    if (!['queued', 'running', 'waiting'].includes(run.status)) return;
+    this.installedRunPhases.set(runId, 'drive_agent');
+    // Join the exact pre-registered load inside the one driver queue. This
+    // observes its original failures even when the worker-slot gate will wait.
+    // Deadline control precedes material/native/productive work.
+    const agent = await this.retainInstalledAgent(runId);
+    if (!this.supportsInstalledRuns()) return;
+    run = readRun(this.driver, runId);
     if (!['queued', 'running', 'waiting'].includes(run.status)) return;
     // A fresh productive Run does not own a launcher while another original
     // launch retains the slot. Any resource history, cached owner or stop must
@@ -2246,7 +2253,6 @@ export class StateStore {
     const nativeExecution = async () => execution ??= await this.loadRunExecution(spec.operation === 'delivery'
       ? { runId, operation: 'delivery' } : { runId, material: material! });
     this.installedRunPhases.set(runId, 'drive_agent');
-    const agent = await this.retainInstalledAgent(runId, material);
     let predecessorWorker = !opening && run.status === 'running' && run.activeWorkerLaunchId !== undefined;
     for (;;) {
       if (!this.supportsInstalledRuns()) return;

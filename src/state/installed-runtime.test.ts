@@ -339,7 +339,7 @@ if (process.platform === 'linux') test('successive installed borrows re-read eve
   const subscriber = (value: unknown) => { if (value && typeof value === 'object') observed.push(value as InstalledWorkSnapshot); };
   const descriptor = Object.getOwnPropertyDescriptor(Worker.prototype, 'postMessage')!;
   const workers = new Set<Worker>(), exited = new Set<Worker>(), ids = new Set<number>();
-  let selected: HeldInstalledRuntime | undefined, other: HeldInstalledRuntime | undefined, armed = false;
+  let selected: HeldInstalledRuntime | undefined, other: HeldInstalledRuntime | undefined, armed = false, smallJobs = 0;
   try {
     const packageRoot = path.join(fixture, 'package'), stateRoot = path.join(fixture, 'state');
     const image = Buffer.alloc(8 * 1_048_576 + 17, 0x61);
@@ -347,10 +347,11 @@ if (process.platform === 'linux') test('successive installed borrows re-read eve
     const runtime = createInstalledRuntime({ releaseKeys: signed.releaseKeys });
     await runtime.installInitial({ packageRoot, stateRoot });
     Object.defineProperty(Worker.prototype, 'postMessage', { ...descriptor, value: function (this: Worker, ...args: unknown[]) {
-      const message = args[0] as { fd?: number; id?: number } | undefined;
+      const message = args[0] as { fd?: number; id?: number; byteCount?: number } | undefined;
       if (armed && typeof message?.fd === 'number') {
         if (!workers.has(this)) { workers.add(this); this.once('exit', () => exited.add(this)); }
         assert(Number.isSafeInteger(message.id)); assert(!ids.has(message.id!)); ids.add(message.id!);
+        if (message.byteCount! < 8_388_608) smallJobs++;
       }
       return Reflect.apply(descriptor.value, this, args);
     } });
@@ -366,15 +367,17 @@ if (process.platform === 'linux') test('successive installed borrows re-read eve
       assert.equal(workers.size, 2, 'threads, not results or observations, may be retained');
       assert.equal(exited.size, 0);
     }
+    const originalSmallJobs = smallJobs;
     other = await runtime.openSelected(stateRoot);
-    assert.equal(workers.size, 4, 'fresh package verification retires the old pool before its standalone scratch');
-    assert.equal(exited.size, 2);
+    assert(smallJobs > originalSmallJobs, 'fresh package standalone reads use the original idle pool');
+    assert.equal(workers.size, 2, 'fresh package verification reuses healthy threads, never FD or hash results');
+    assert.equal(exited.size, 0);
     await selected.assertHeld();
-    assert.equal(workers.size, 4, 'two live original Scopes share only the current idle executor');
+    assert.equal(workers.size, 2, 'two live original Scopes share only the current idle executor');
     await selected.close(); selected = undefined;
     assert.equal(exited.size, workers.size, 'idle threads are genuine resources owned until selected close');
     await other.assertHeld();
-    assert.equal(workers.size, 6, 'a still-live Scope starts fresh threads after the shared close barrier');
+    assert.equal(workers.size, 4, 'a still-live Scope starts fresh threads after the shared close barrier');
     await other.close(); other = undefined;
     assert.equal(exited.size, workers.size);
   } finally {

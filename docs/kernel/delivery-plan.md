@@ -13,56 +13,69 @@ Linux execution/restart and cancellation foundations are real, but a final
 model turn still stops at `candidate_required`. No work package or complete I1
 is declared finished by the 32 passing checks.
 
-Latest completed exact-head result (2026-10-25): `3d16c87`
-[run 476](https://github.com/cogine-ai/cliq-agent/actions/runs/40211644448)
-has sixteen successful and six failed jobs; all four TypeScript jobs pass.
-The complete collector retains 105 original reports / 477,229 bytes across
+Latest completed exact-head result (2026-10-25): `bcab05e`
+[run 477](https://github.com/cogine-ai/cliq-agent/actions/runs/40216567031)
+has seventeen successful and five failed jobs; all four TypeScript jobs pass.
+The complete collector retains 105 original reports / 522,055 bytes across
 23 categories, with no missing, incomplete or rejected report. All 21 cleanup
 reports have zero errors and all 21 runner-baseline pairs are byte-identical.
 The original collector, poller, wrapper and scoped awake guard actually join;
 independent full-schema/integrity closeout SHA-256:
-`191ba9c3935682c5b2f6f726e982a38f277684bfb8163fe76ea0bf7a74a4e29f`.
+`d28c6bd5177746f49797137fe34b38917ddf80f43b9c53b45f3f6aa38d31370e`.
 
 Normal Delivery passes the verifier-parent retirement and complete cancellation
-budget checks, then reaches the real cleanup-crash successor. The harness reads
-owner history as soon as the replacement image and socket path exist; the old
-socket can survive SIGKILL, so this does not establish that the third owner's
-transaction committed. Wait only for that original third row under the same
-absolute restart deadline; extra owners, wrong terminal reasons and all original
-process, image, keeper and receipt checks remain strict. The local control-flow
-regression does not qualify the remaining installed recovery journey.
+budget checks, then reaches the real cleanup-crash successor. This run fails
+the replacement unit's original strict identity comparison before its owner
+history check. The automatic selection loop is tightened to wait for a new
+active/running invocation whose MainPID equals ExecMainPID; all subsequent
+original strict identity, image, keeper, three-owner and thirty-second checks
+remain intact. The earlier owner-commit readiness correction also remains.
+The remaining installed recovery journey is not qualified.
 
-Non-root image construction now passes its original preflight. The normal
-schema3 client campaign gets through authenticated refusal and credential
-enrollment, then incorrectly compares a normalized response object with the
-strict parser's null-prototype original. The campaign consumer now returns the
-original parsed wire object after the same complete closed decoder checks;
-actual JSONL/RPC child-process regressions compare the whole replay response.
-Production immutable client results and protocol validation are unchanged.
+The normal signed installation and schema3 JSONL/RPC campaign now passes,
+including original-response replay and reconnect/restart. Its actual child
+consumer retains strict-parsed wire objects after the same closed validation;
+production immutable client results remain unchanged. This controlled endpoint
+result does not qualify a real provider or default CLI/TUI transition.
 
-The delayed and late-audit storage campaigns still time out on their first
-source `run.submit`, before either target cut. In the late-audit case the
-original Supervisor genuinely joins; its closed diagnostics locate the delay
-after final assembly, during admission publication. Installed admission now
-uses two declared fixed four-object groups through the existing complete CAS
-stage publisher, with consent separate and all actual returned metadata checked.
-Predicted content references only construct inert dependent data; only fully
-joined publication and the original final transaction accept the Run. The real
-CAS regressions retain every file sync, four persistence boundaries, full-byte
-readback and cancellation/storage-failure checks. This still needs installed
-Linux verification. The original-stop fixture instead misses authenticated
-client READY at five seconds. The verifier's cumulative 4096-stream secret scan
-also remains incomplete. No bound, full-image revalidation, safety check or
-physical deadline is relaxed, and none of these missing cuts is qualified.
+All three owned-storage campaigns pass initial client READY in this run, then
+time out on their first source `run.submit`, before the target physical cuts.
+The joined late-audit Supervisor's closed diagnostics now reach
+`submit_postcommit_load`: the sole admission transaction has returned, but its
+handler still waits for nonproductive continuation reconstruction. The new
+correction acknowledges only the original durable response and joins that same
+pre-registered load in the existing driver queue before any productive work.
+Actual core Store/SQLite/CAS regressions preserve read ownership, cancellation,
+original FD join, queued state, Checkpoint and original response after a real
+owner close/reopen. Installed Linux verification remains pending.
+
+Controlled full-byte component measurements also find repeated healthy hash
+executor retirement/recreation between original checks. Reusing the existing
+idle executor for standalone/small reads preserves sixteen complete reads,
+every EOF/metadata check, one-MiB scratch, four-lane ceiling and close/failure
+join. All seven baseline/candidate timing pairs are retained, including the
+first slower pair; the additional four interleaved pairs improve while reading
+the same 8,992,711,632 bytes and 3,360 named stats, with 64 versus four actual
+thread lifetimes. These Linux arm64 Node 20 component results are not supported
+Node or x64 installation qualification. The verifier's cumulative 4096-stream
+secret scan remains incomplete. No acceptance bound or safety check is relaxed.
 
 The shared schema3 JSONL/RPC client package passes an independent review and
-its complete local gate; its corrected campaign still requires a real installed
-Linux rerun. Ordinary Git preparation, source handoff and their native retirement
-are being integrated into the same existing lifecycle and hosted campaign.
+its complete local gate and the normal installed Linux campaign. Ordinary Git
+preparation, source handoff and their native retirement are being integrated
+into the same existing lifecycle and hosted campaign. The full Session
+continuity package is implemented in an independent candidate and still awaits
+combined integration and its new real installed branch.
 Default CLI/TUI, full v1/Session/MCP surfaces, release bootstrap, provider,
 macOS, reboot and scale qualifications remain separate delivery obligations.
 No complete work package, I1–I4 qualification or release is declared finished,
 and no PR is opened for the incomplete delivery.
+
+Previous completed exact-head result: `3d16c87`
+[run 476](https://github.com/cogine-ai/cliq-agent/actions/runs/40211644448)
+has sixteen successful and six failed jobs. Its complete 105-report /
+477,229-byte archive passes independent closeout
+`191ba9c3935682c5b2f6f726e982a38f277684bfb8163fe76ea0bf7a74a4e29f`.
 
 Previous completed exact-head result: `7f563bb`
 [run 475](https://github.com/cogine-ai/cliq-agent/actions/runs/40206820780)

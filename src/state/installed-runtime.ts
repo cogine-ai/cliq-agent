@@ -753,18 +753,22 @@ async function verifyDiscardFiles(files: readonly InstalledFile[], signal?: Abor
   const release = await discardPermit(signal);
   try {
     const large = files.filter(file => file.info.size >= 8_388_608n);
-    if (large.length < 2) {
-      await retireDiscardPoolLocked();
+    if (large.length < 2 && !discardPool) {
       for (const file of files) await verifyBytesPipeline(file, signal);
       return;
     }
-    const laneCount = large.length >= 4 ? 4 : 2;
     try {
-      if (discardPool && discardPool.laneCount !== laneCount) await retireDiscardPoolLocked();
-      if (!discardPool) { discardPool = new DiscardPool(laneCount); discardPool.start(); }
-      // Small files use the same scratch too: an idle pool plus a parent
-      // pipeline would exceed one MiB. Large-first scheduling balances lanes.
-      await discardPool.verify([...large, ...files.filter(file => file.info.size < 8_388_608n)], signal);
+      if (large.length >= 2) {
+        const laneCount = large.length >= 4 ? 4 : 2;
+        if (discardPool && discardPool.laneCount !== laneCount) await retireDiscardPoolLocked();
+        if (!discardPool) { discardPool = new DiscardPool(laneCount); discardPool.start(); }
+      }
+      // An existing idle pool also owns standalone/small reads. Starting a
+      // parent pipeline beside its scratch would exceed one MiB; retiring and
+      // recreating healthy threads between full checks is unnecessary. Without
+      // a pool, small batches keep the original pipeline. Large-first work
+      // balances lanes, and every job still reads/EOF/stats its original FD.
+      await discardPool!.verify([...large, ...files.filter(file => file.info.size < 8_388_608n)], signal);
     } catch (error) {
       // A concurrent real executor/retirement failure cannot disappear under
       // the caller's cancellation, including a literally undefined failure.
@@ -775,9 +779,7 @@ async function verifyDiscardFiles(files: readonly InstalledFile[], signal?: Abor
   } finally { release(); }
 }
 async function verifyBytes(file: InstalledFile, signal?: AbortSignal): Promise<void> {
-  if (!isMainThread) return verifyBytesPipeline(file, signal);
-  const release = await discardPermit(signal);
-  try { await retireDiscardPoolLocked(); await verifyBytesPipeline(file, signal); } finally { release(); }
+  await verifyDiscardFiles([file], signal);
 }
 async function verifyBytesPipeline(file: InstalledFile, signal?: AbortSignal): Promise<void> {
   signal?.throwIfAborted();

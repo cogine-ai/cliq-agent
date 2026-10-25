@@ -7,6 +7,27 @@ import ts from 'typescript';
 
 const source = name => readFileSync(new URL(name, import.meta.url), 'utf8');
 
+test('automatic successor selection waits for the same running Type=exec invocation before its strict identity checks', () => {
+  const text = source('./installed-node-journey.ts');
+  const parsed = ts.createSourceFile('installed-node-journey.ts', text, ts.ScriptTarget.Latest, true);
+  const conditions = [];
+  const visit = node => {
+    if (ts.isIfStatement(node) && node.thenStatement.kind === ts.SyntaxKind.BreakStatement &&
+        node.expression.getText(parsed).includes('successorUnit.InvocationID')) conditions.push(node.expression.getText(parsed));
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed); assert.equal(conditions.length, 1);
+  const ready = Function('successorUnit', 'shown', 'return ' + conditions[0]);
+  const old = { MainPID: '10', InvocationID: 'old' };
+  const running = { MainPID: '20', ExecMainPID: '20', InvocationID: 'new', ActiveState: 'active', SubState: 'running' };
+  assert.equal(ready(running, old), true);
+  for (const changed of [{ MainPID: '0' }, { MainPID: '10' }, { ExecMainPID: '10' }, { InvocationID: 'old' },
+    { ActiveState: 'activating' }, { ActiveState: 'failed' }, { SubState: 'start' }, { SubState: 'dead' }])
+    assert.equal(ready({ ...running, ...changed }, old), false);
+  assert(text.includes("for (const field of ['MainPID', 'ExecMainPID', 'InvocationID', 'ActiveState']) assert.equal(confirmed[field], shown[field]);"));
+  assert(text.includes("assert(Date.now() < restartBy, 'actual cleanup crash restart exceeded the original 30-second budget');"));
+});
+
 test('successor readiness waits for the original third-owner commit under the unchanged restart deadline', async () => {
   const text = source('./installed-node-journey.ts');
   const parsed = ts.createSourceFile('installed-node-journey.ts', text, ts.ScriptTarget.Latest, true);

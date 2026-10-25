@@ -61,6 +61,16 @@ Client attachment is not Run state. Closing the CLI or TUI cannot cancel, pause,
 4. the queued Run row;
 5. Supervisor ownership of the admission.
 
+The original stored admission response acknowledges those durable facts. The
+Supervisor registers any nonproductive continuation reconstruction before the
+Run becomes visible and retains its complete read/join independently of the
+client. Its existing driver queue must join that exact load and recheck current
+Run/owner/deadline gates before material, native or productive work; completion
+of reconstruction is not an additional acknowledgement prerequisite. Failed
+loads retain the existing failure/retirement fences, and shutdown still cancels
+and joins them before releasing StateOwner. No acknowledgement authorizes a
+retry, changes an execution result or makes client detachment a cancellation.
+
 Process death, Supervisor restart, and machine reboot must either resume the same Run from a consistent state or leave it in an explicit waiting/recovery state. Cliq must never silently lose it.
 
 ### 2.3 Verified Work
@@ -4887,6 +4897,16 @@ It owns:
 - retention and garbage collection.
 
 It does not own a workflow graph, role scheduler, distributed queue, or cloud worker registry.
+
+Integrity-read executors may retain healthy idle threads and their original
+bounded scratch across completed reads, including standalone or small reads.
+They retain no borrowed FD, hash, observation or result between jobs. Every
+original full-byte read, exact EOF, held/named metadata and currentness check
+still runs; total discard scratch remains one MiB and there are at most four
+lanes. A small read without an existing executor keeps the original pipeline.
+Failure/cancellation retires the original executor with full join and unchanged
+retirement-error precedence; selection close keeps its original join barrier.
+This changes neither the sixteen-read authentication path nor any deadline.
 
 ### 9.1 Lease, Activation, And Process Containment
 
