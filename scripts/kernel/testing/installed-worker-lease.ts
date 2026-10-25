@@ -13,6 +13,8 @@ import { decodeWorkerLaunch, decodeWorkspaceGenerationState } from '../../../src
 import { decodePublicationArenaBirth, decodePublicationPathProgressItem } from '../../../src/kernel/publication.js';
 import { journalEntryFromRow, type JournalSqlRow } from '../../../src/state/repositories/journal.js';
 import type { PublicationGenerationResourcesV1 } from '../../../src/kernel/publication.js';
+import type { VerifierParentDomainDispatchClosureV1 } from '../../../src/state/verifier-unknown-retirement.js';
+import { decodeVerifierParentDomainDispatchClosure as decodeVerifierParentEvidence } from '../../../src/state/verifier-unknown-retirement.js';
 
 export type InstalledWorkerLeaseExpected = { uid: number; runId: string; launchId: string; leaseEpoch: number;
   runRevision: number; supervisorInstanceId: string; deadlineAt: string };
@@ -131,27 +133,57 @@ export function inspectInstalledPublicationClaim(stateRoot: string, uid: number,
 
 /** Strict recovery branch only. Retained data cannot replace the owning
  * campaign's independent observation of the actual PID/start lifetime. */
-export function inspectInstalledRecoveredWorkerRetirement(stateRoot: string, uid: number, expected: {
+type RecoveredWorkerExpected = {
   runId: string; supervisorInstanceId: string; leaseEpoch: number;
   inspectorIdentityRef: string; inspectorIdentityDigest: string;
   resources: Extract<PublicationGenerationResourcesV1, { kind: 'genuinely_retired_from_verified_checkpoint' }>;
-}) {
+};
+export type InstalledVerifierParentRetirementBinding = Omit<RecoveredWorkerExpected, 'resources'> & {
+  evidence: VerifierParentDomainDispatchClosureV1;
+};
+
+export function inspectInstalledRecoveredWorkerRetirement(stateRoot: string, uid: number, expected: RecoveredWorkerExpected) {
+  const { graph: _graph, ...projection } = inspectRecoveredWorkerRetirement(stateRoot, uid, expected);
+  return Object.freeze(projection);
+}
+
+/** Same strict recovery reader, not a publication receipt or a child death.
+ * Its actual worker lifetime still needs the campaign's independent /proc cut. */
+export function inspectInstalledVerifierParentRetirement(stateRoot: string, uid: number, expected: InstalledVerifierParentRetirementBinding) {
+  closedRecord(expected, ['runId', 'supervisorInstanceId', 'leaseEpoch', 'inspectorIdentityRef', 'inspectorIdentityDigest', 'evidence']);
+  const evidence = decodeVerifierParentEvidence(expected.evidence), closure = evidence.closure;
+  requireValue(evidence.runId === expected.runId && closure.claimingSupervisorInstanceId === expected.supervisorInstanceId &&
+    closure.leaseEpoch === expected.leaseEpoch);
+  return inspectRecoveredWorkerRetirement(stateRoot, uid, {
+    runId: expected.runId, supervisorInstanceId: expected.supervisorInstanceId, leaseEpoch: expected.leaseEpoch,
+    inspectorIdentityRef: expected.inspectorIdentityRef, inspectorIdentityDigest: expected.inspectorIdentityDigest,
+    resources: { kind: 'verifier_parent_domain', workerLaunchId: closure.workerLaunchId, generationRef: closure.generationRef,
+      quarantineEvidenceRef: closure.quarantineEvidenceRef, retirementEvidenceRef: closure.retirementEvidenceRef },
+  }, evidence);
+}
+
+function inspectRecoveredWorkerRetirement(stateRoot: string, uid: number, expected: Omit<RecoveredWorkerExpected, 'resources'> & {
+  resources: RecoveredWorkerExpected['resources'] | { kind: 'verifier_parent_domain'; workerLaunchId: string; generationRef: string;
+    quarantineEvidenceRef: string; retirementEvidenceRef: string };
+}, verifierEvidence?: VerifierParentDomainDispatchClosureV1) {
   const closedValue = (value: object, keys: readonly string[]) => { closedRecord(value, keys); };
   try {
     closedRecord(expected, ['runId', 'supervisorInstanceId', 'leaseEpoch', 'inspectorIdentityRef', 'inspectorIdentityDigest', 'resources']);
-    closedRecord(expected.resources, ['kind', 'workerLaunchId', 'generationRef', 'sourceCheckpointId', 'quarantineEvidenceRef', 'retirementEvidenceRef']);
+    closedRecord(expected.resources, ['kind', 'workerLaunchId', 'generationRef',
+      ...(expected.resources.kind === 'verifier_parent_domain' ? [] : ['sourceCheckpointId']), 'quarantineEvidenceRef', 'retirementEvidenceRef']);
     requireValue(boundedString(expected.runId) && boundedString(expected.supervisorInstanceId) && Number.isSafeInteger(expected.leaseEpoch) && expected.leaseEpoch > 0 &&
       digest(expected.inspectorIdentityRef) && digest(expected.inspectorIdentityDigest));
     const resources = expected.resources;
-    requireValue(resources.kind === 'genuinely_retired_from_verified_checkpoint' && boundedString(resources.workerLaunchId) &&
-      boundedString(resources.sourceCheckpointId) && [resources.generationRef, resources.quarantineEvidenceRef, resources.retirementEvidenceRef].every(digest));
+    requireValue((resources.kind === 'genuinely_retired_from_verified_checkpoint' && !verifierEvidence && boundedString(resources.sourceCheckpointId) ||
+      resources.kind === 'verifier_parent_domain' && verifierEvidence) && boundedString(resources.workerLaunchId) &&
+      [resources.generationRef, resources.quarantineEvidenceRef, resources.retirementEvidenceRef].every(digest));
     return readWorkerDiagnostic(stateRoot, uid, (database, databaseIdentity, readCas) => {
       database.exec('BEGIN');
       const { row, launch, generation } = readWorkerRows(database, expected.runId, resources.workerLaunchId);
       requireValue(launch.phase === 'retired' && launch.generationWriteState === 'fenced_reconciling' && launch.retiredAt && launch.retirementEvidenceRef &&
         launch.supervisorInstanceId === expected.supervisorInstanceId && launch.leaseEpoch === expected.leaseEpoch &&
         generation.phase === 'retired' && generation.generationRef === resources.generationRef &&
-        generation.sourceCheckpointId === resources.sourceCheckpointId && generation.retirementEvidenceRef === resources.retirementEvidenceRef &&
+        (resources.kind === 'verifier_parent_domain' || generation.sourceCheckpointId === resources.sourceCheckpointId) && generation.retirementEvidenceRef === resources.retirementEvidenceRef &&
         row.active_worker_launch_id === null);
       requireValue(!database.prepare("SELECT 1 FROM worker_launches WHERE phase!='retired' AND json_extract(row_json,'$.workspaceGenerationRef')=? LIMIT 1")
         .get(generation.generationRef));
@@ -255,12 +287,21 @@ export function inspectInstalledRecoveredWorkerRetirement(stateRoot: string, uid
         cgroupPopulated: 0, namespaceInitDeadAndReaped: true, remainingTrackedDescendants: 0 }));
       for (const fact of [retired, quarantine, recovery, death, wrapper]) requireValue(fact.inspectorIdentityRef === expected.inspectorIdentityRef &&
         fact.inspectorIdentityDigest === expected.inspectorIdentityDigest);
+      if (verifierEvidence) {
+        const closure = verifierEvidence.closure;
+        requireValue(closure.parentContainmentRef === launch.processContainmentRef && closure.parentDeathEvidenceRef === recovery.containmentDeathEvidenceRef &&
+          closure.parentDeathEvidenceDigest === death.evidenceDigest && closure.quarantineEvidenceDigest === quarantine.evidenceDigest &&
+          closure.retirementEvidenceDigest === retired.evidenceDigest && verifierEvidence.observedAt === retired.observedAt &&
+          quarantine.observedState.kind === 'complete_tree' && quarantine.observedState.treeDigest === generation.lastVerifiedTreeDigest);
+        requireValue(row.status === 'cancelled' && row.cancel_requested === 1 && digest(row.stop_intent_ref));
+      }
       const current = workerProjection(databaseIdentity, launch, generation, readCas);
       database.exec('COMMIT');
       return Object.freeze({ ...current, generationPhase: 'retired' as const, generationWriteState: 'fenced_reconciling' as const,
         retiredAt: launch.retiredAt, retirementEvidenceRef: resources.retirementEvidenceRef,
         quarantineEvidenceRef: resources.quarantineEvidenceRef, containmentDeathEvidenceRef: recovery.containmentDeathEvidenceRef,
-        deathObservedAt: death.observedAt as string, quarantinePath: quarantine.quarantineCanonicalRootRelativePath as string });
+        deathObservedAt: death.observedAt as string, quarantinePath: quarantine.quarantineCanonicalRootRelativePath as string,
+        graph: { launch, generation, retired, quarantine, recovery, death, containment, runRow: row } });
     });
   } catch { throw new Error('installed recovered worker retirement inspection refused'); }
 }

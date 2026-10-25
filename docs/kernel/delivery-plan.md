@@ -13,11 +13,19 @@ Linux execution/restart and cancellation foundations are real, but a final
 model turn still stops at `candidate_required`. No work package or complete I1
 is declared finished by the 32 passing checks.
 
-Current installed boundary (2026-10-25): the exact `a6baa9c` Linux
-[run 470](https://github.com/cogine-ai/cliq-agent/actions/runs/40168318132)
-passes normal publication, no-op and merge assertions, then fails verifier
-cancellation retirement. Three owned delayed-storage campaigns still miss
-initial admission's 30-second limit, and the verifier secret scan is incomplete.
+Current installed boundary (2026-10-25): the exact `aea2410` Linux
+[run 471](https://github.com/cogine-ai/cliq-agent/actions/runs/40175803188)
+completed with 16 successful and six failed jobs; all four TypeScript jobs
+passed. Normal publication, no-op and merge assertions pass, and cancellation
+now reaches its terminal Run before failing the complete retirement consumer.
+Three owned delayed-storage campaigns still miss initial admission's unchanged
+30-second limit. The verifier secret scan exhausts its unchanged cumulative
+4096-stream limit while reading logical SQLite cells, before completing the
+retained corpus; it is not a secret-free qualification. The sixth job failure
+is the diagnostic-only carrier-size experiment, not permission to select a
+different production image. All 105 original reports and 21 successful cleanup
+records were retained and independently revalidated; evidence integrity does
+not turn the failed campaigns into passing qualification.
 Package A is therefore not complete. Ordinary Git/tool integration (B), thin
 clients and the release transition (C) remain implementation work, not just
 missing tests. The historical evidence below does not change these boundaries.

@@ -12,7 +12,8 @@ import { digestOmitting, sha256Bytes } from '../../../src/kernel/identity.js';
 import type { WorkerIdentity, WorkerLaunch, WorkspaceGenerationStateV1 } from '../../../src/kernel/types.js';
 import { assertInstalledWorkerLeaseRenewed, inspectInstalledWorkerIdentity, inspectInstalledWorkerLease,
   inspectInstalledWorkerRetirement, inspectInstalledWorkerRetirementHistory, inspectInstalledWorkerLaunchIds } from './installed-worker-lease.js';
-import { inspectInstalledPublicationClaim, inspectInstalledRecoveredWorkerRetirement } from './installed-worker-lease.js';
+import { inspectInstalledPublicationClaim, inspectInstalledRecoveredWorkerRetirement, inspectInstalledVerifierParentRetirement } from './installed-worker-lease.js';
+import type { VerifierParentDomainDispatchClosureV1 } from '../../../src/state/verifier-unknown-retirement.js';
 import { publicationArenaId } from '../../../src/kernel/publication.js';
 import { addCanonicalDuration, identityHash } from '../../../src/kernel/identity.js';
 
@@ -148,6 +149,42 @@ test('actual readonly SQL recovery diagnostics require the complete original qua
     ...value.expected, inspectorIdentityDigest: 'b'.repeat(64) }));
   assert.throws(() => inspectInstalledRecoveredWorkerRetirement(value.stateRoot, process.getuid!(), {
     ...value.expected, resources: { ...value.expected.resources, sourceCheckpointId: 'another-checkpoint' } }));
+});
+
+test('the verifier-parent wrapper reuses the complete strict SQL/CAS recovery graph without inventing a publication or child receipt', async t => {
+  // Serialized test-owned rows and CAS data only. This does not mint native
+  // death/retirement, StateOwner, an admitted Run or a genuine positive fixture.
+  const value = await recoveredFixture(t), prior = inspectInstalledRecoveredWorkerRetirement(value.stateRoot, process.getuid!(), value.expected);
+  const read = async (ref: string) => JSON.parse(await readFile(path.join(value.cas, ref), 'utf8'));
+  const quarantine = await read(value.expected.resources.quarantineEvidenceRef), recovery = await read(quarantine.workerRecoveryEvidenceRef);
+  const evidence: VerifierParentDomainDispatchClosureV1 = { schemaVersion: 1, format: 'cliq-invocation-dispatch-closure-evidence-v1',
+    runId: value.expected.runId, opId: 'inert-verifier', attempt: 0, dispatchId: 'inert-dispatch', unknownJournalSeq: 3,
+    closure: { kind: 'verifier_parent_domain_dead', claimJournalSeq: 2, claimingSupervisorInstanceId: value.expected.supervisorInstanceId,
+      claimingStateOwnerEpoch: 1, requestRef: 'a'.repeat(64), targetRef: 'b'.repeat(64), grantRef: 'c'.repeat(64), sandboxLaunchSpecRef: 'd'.repeat(64),
+      workerLaunchId: value.expected.resources.workerLaunchId, leaseEpoch: 1, generationRef: value.expected.resources.generationRef,
+      parentContainmentRef: value.launch.processContainmentRef!, parentDeathEvidenceRef: recovery.containmentDeathEvidenceRef,
+      parentDeathEvidenceDigest: recovery.containmentDeathEvidenceDigest, quarantineEvidenceRef: value.expected.resources.quarantineEvidenceRef,
+      quarantineEvidenceDigest: quarantine.evidenceDigest, retirementEvidenceRef: value.retiredRef, retirementEvidenceDigest: value.retired.evidenceDigest,
+      controllerLifetime: 'original_subreaper_absent_and_inspector_joined' }, observedAt: value.retired.observedAt, evidenceDigest: '' };
+  evidence.evidenceDigest = digestOmitting(evidence, 'evidenceDigest');
+  const { resources: _resources, ...expected } = value.expected;
+  const inspect = (selected = evidence) => inspectInstalledVerifierParentRetirement(value.stateRoot, process.getuid!(), { ...expected, evidence: selected });
+  assert.throws(() => inspect(), 'a merely succeeded recovery row is not the cancelled UNKNOWN branch');
+  update(value.filename, database => database.prepare('UPDATE runs SET status=?,cancel_requested=1,stop_intent_ref=?').run('cancelled', 'f'.repeat(64)));
+  const before = await readFile(value.filename), names = await readdir(value.cas), observed = inspect();
+  assert.equal(observed.pid, prior.pid); assert.equal(observed.processStartToken, prior.processStartToken);
+  assert.equal(observed.graph.generation.sourceCheckpointId, value.expected.resources.sourceCheckpointId);
+  assert.equal(observed.graph.death.evidenceDigest, evidence.closure.parentDeathEvidenceDigest);
+  assert.equal(Object.hasOwn(observed, 'qualified'), false);
+  for (const member of ['workerLaunchId', 'generationRef', 'parentContainmentRef', 'parentDeathEvidenceRef', 'parentDeathEvidenceDigest',
+    'quarantineEvidenceRef', 'quarantineEvidenceDigest', 'retirementEvidenceRef', 'retirementEvidenceDigest'] as const) {
+    const changed = structuredClone(evidence); changed.closure[member] = 'e'.repeat(64); changed.evidenceDigest = digestOmitting(changed, 'evidenceDigest');
+    assert.throws(() => inspect(changed), member);
+  }
+  const changed = structuredClone(evidence); changed.observedAt = addCanonicalDuration(changed.observedAt, 1);
+  changed.evidenceDigest = digestOmitting(changed, 'evidenceDigest'); assert.throws(() => inspect(changed));
+  assert.throws(() => inspectInstalledVerifierParentRetirement(value.stateRoot, process.getuid!(), { ...expected, evidence, extra: true } as never));
+  assert.deepEqual(await readFile(value.filename), before); assert.deepEqual(await readdir(value.cas), names);
 });
 
 async function fixture(t: TestContext) {

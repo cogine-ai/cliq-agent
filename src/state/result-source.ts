@@ -25,8 +25,9 @@ type CandidateSourceGraph = {
   source: SourceManifest; sourceRef: string; diff: WorkspaceDiffV1; diffRef: string; metadata: PublishedArtifact[];
 };
 type CandidateSourceLimit = { reason: 'changed_paths' | 'changed_bytes'; observed: number; limit: number };
+export type CandidateSourceReader = Pick<ArtifactCatalog, 'readCanonical' | 'readChunks'>;
 
-async function planCandidateSource(artifacts: ArtifactCatalog, spec: RunSpec, workspaceStateRef: string, signal?: AbortSignal): Promise<
+async function planCandidateSource(artifacts: CandidateSourceReader, spec: RunSpec, workspaceStateRef: string, signal?: AbortSignal): Promise<
   | { kind: 'ready'; graph: CandidateSourceGraph; publications: Array<{ value: unknown; artifact: PublishedArtifact }> }
   | { kind: 'limited'; limit: CandidateSourceLimit }
 > {
@@ -154,7 +155,7 @@ function requireReady(plan: Awaited<ReturnType<typeof planCandidateSource>>) {
 
 /** Pure retained-data reconstruction for historical recovery. No CAS object,
  * SQL row, execution permission or physical proof is created by this read. */
-export async function readCandidateSource(artifacts: ArtifactCatalog, spec: RunSpec, workspaceStateRef: string, signal?: AbortSignal): Promise<CandidateSourceGraph> {
+export async function readCandidateSource(artifacts: CandidateSourceReader, spec: RunSpec, workspaceStateRef: string, signal?: AbortSignal): Promise<CandidateSourceGraph> {
   return requireReady(await planCandidateSource(artifacts, spec, workspaceStateRef, signal)).graph;
 }
 

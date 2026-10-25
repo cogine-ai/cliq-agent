@@ -8,6 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import ts from 'typescript';
 
 async function compare(original: Buffer, candidate: Buffer, mode: 'debug' | 'static' = 'static') {
   const module = await import('./supervisor-carrier-layout.js').catch(() => undefined);
@@ -61,6 +62,96 @@ test('a smaller experimental carrier preserves all LOAD, notes, dynamic bytes an
   assert.equal(result.structureOnly, true);
   assert.deepEqual(result.removedSections, ['.debug_info', '.symtab', '.strtab']);
   assert(Object.isFrozen(result) && Object.isFrozen(result.removedSections));
+});
+
+test('fixed structural failure stages preserve rejection and cannot be replaced by a throwing observer', async () => {
+  const { compareSupervisorCarrierLayout } = await import('./supervisor-carrier-layout.js');
+  const original = fixture(false), candidate = fixture(true);
+  candidate[384] = candidate[384]! ^ 1;
+  const stages: string[] = [], observerFailure = new Error('observer is not a structural result');
+  let caught: unknown;
+  try {
+    compareSupervisorCarrierLayout(original, candidate, 'static', stage => {
+      stages.push(stage); throw observerFailure;
+    });
+  } catch (error) { caught = error; }
+  assert(caught instanceof assert.AssertionError, 'the unchanged structural assertion must still reject');
+  assert.notEqual(caught, observerFailure, 'observer failure may not replace the original structural rejection');
+  assert.equal(caught.message, 'carrier LOAD, interpreter, notes or dynamic extent changed');
+  assert.equal(stages.at(-1), 'runtime_extent', 'the failure must retain only a fixed structural stage');
+});
+
+test('a throwing stage observer cannot alter a successful structural result or the closed stage vocabulary', async () => {
+  const { compareSupervisorCarrierLayout } = await import('./supervisor-carrier-layout.js');
+  const original = fixture(false), candidate = fixture(true), observed: string[] = [];
+  const expected = compareSupervisorCarrierLayout(original, candidate, 'static');
+  const actual = compareSupervisorCarrierLayout(original, candidate, 'static', stage => {
+    observed.push(stage); throw new Error('untrusted observer details must not become a result');
+  });
+  assert.deepEqual(actual, expected, 'all original result fields must remain identical');
+  assert.deepEqual([...new Set(observed)], ['original_format', 'candidate_format', 'size_reduction',
+    'runtime_headers', 'runtime_extent', 'retained_section_shape', 'retained_section_size',
+    'retained_section_bytes', 'removable_metadata', 'section_set', 'debug_removal', 'static_removal']);
+  assert(Object.isFrozen(actual) && Object.isFrozen(actual.removedSections), 'the original immutable result remains unchanged');
+});
+
+// Execute only the actual experiment's pure comparison/catch or argv AST. No
+// strip process, executable or installation authority is manufactured here.
+async function experimentLoop() {
+  const source = await readFile(new URL('../qualify-supervisor-carrier-size.ts', import.meta.url), 'utf8');
+  const parsed = ts.createSourceFile('experiment.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  let loop: ts.ForOfStatement | undefined;
+  const visit = (node: ts.Node) => {
+    if (ts.isForOfStatement(node) && node.expression.getText(parsed) === "[['debug', '--strip-debug'], ['static', '--strip-all']] as const") loop = node;
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed);
+  assert(loop && ts.isBlock(loop.statement), 'the two fixed experiment modes must remain explicit');
+  return { parsed, body: loop.statement };
+}
+
+test('only a failed static row retains a fixed structural stage and rethrows the identical assertion', async () => {
+  const { parsed, body } = await experimentLoop();
+  const index = body.statements.findIndex(statement => ts.isTryStatement(statement) && statement.tryBlock.getText(parsed).includes('compareSupervisorCarrierLayout('));
+  assert(index > 0, 'the original comparison needs a contained failure-only diagnostic catch');
+  const variable = body.statements[index - 1]!, block = body.statements[index]!;
+  assert(ts.isVariableStatement(variable) && ts.isTryStatement(block), 'only comparison-local stage state may enter this seam');
+  const emitted = ts.transpileModule(variable.getText(parsed) + '\n' + block.getText(parsed),
+    { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText;
+  const execute = new Function('compareSupervisorCarrierLayout', 'row', 'original', 'selected', 'mode', emitted);
+  const { compareSupervisorCarrierLayout: realCompare } = await import('./supervisor-carrier-layout.js');
+  for (const mode of ['debug', 'static'] as const) {
+    const broken = fixture(true); broken[384] = broken[384]! ^ 1;
+    const row: Record<string, unknown> = { structureVerified: false }, original = { bytes: fixture(false) };
+    let originalError: unknown, calls = 0;
+    const observed: typeof realCompare = (...args) => {
+      calls++;
+      try { return realCompare(...args); } catch (error) { originalError = error; throw error; }
+    };
+    assert.throws(() => execute(observed, row, original, { bytes: broken }, mode), error => error === originalError,
+      'the failure-only report must rethrow the original comparison object');
+    assert.equal(calls, 1, 'diagnostics may not rerun comparison');
+    assert.deepEqual(Object.keys(row).sort(), mode === 'static' ? ['structureFailureStage', 'structureVerified'] : ['structureVerified']);
+    assert.equal(row.structureFailureStage, mode === 'static' ? 'runtime_extent' : undefined);
+    assert.equal(row.structureVerified, false, 'diagnostics cannot mark failure as verified');
+    const success: Record<string, unknown> = { structureVerified: false };
+    execute(realCompare, success, original, { bytes: fixture(true) }, mode);
+    assert.equal(success.structureVerified, true);
+    assert.equal(Object.hasOwn(success, 'structureFailureStage'), false, 'success rows retain their original closed shape');
+  }
+});
+
+test('both fixed GNU strip modes explicitly preserve all original notes rather than merging them', async () => {
+  const { parsed, body } = await experimentLoop();
+  const calls = body.statements.filter(ts.isExpressionStatement).map(statement => statement.expression)
+    .filter((expression): expression is ts.CallExpression => ts.isCallExpression(expression) && expression.expression.getText(parsed) === 'run' && expression.arguments[0]?.getText(parsed) === 'strip');
+  assert.equal(calls.length, 1, 'the existing single strip invocation must remain the only producer');
+  const args = calls[0]!.arguments[1]!;
+  assert(ts.isArrayLiteralExpression(args), 'the experiment uses only a fixed argv literal');
+  const actualArgs = new Function('option', 'candidate', 'return (' + args.getText(parsed) + ');');
+  for (const option of ['--strip-debug', '--strip-all'])
+    assert.deepEqual(actualArgs(option, '/owned/never-executed-copy'),
+      [option, '--no-merge-notes', '--', '/owned/never-executed-copy'], 'primary mode must not rewrite retained SHT_NOTE bytes');
 });
 
 test('unchanged copies and every runtime byte or runtime header mutation fail before execution', async () => {
@@ -117,8 +208,7 @@ test('the actual experimental entry rejects invalid provisioning before creating
 
 // Source wiring, not GNU strip/SEA execution or installed qualification. The
 // immutable CT projection preserves every original job, condition and budget.
-test('carrier experiments are isolated beside the original image qualifier and retain only their bounded report', async () => {
-  const workflow = await readFile(new URL('../../../.github/workflows/kernel-foundation.yml', import.meta.url), 'utf8');
+function assertCarrierExperimentWorkflow(workflow: string): void {
   const experiment = [
     '      - name: Measure fixed carrier metadata reduction without selecting it',
     "        if: ${{ !cancelled() && steps.build.outcome == 'success' }}",
@@ -143,8 +233,37 @@ test('carrier experiments are isolated beside the original image qualifier and r
   assert.equal(workflow.split(retain).length, 2, 'exactly one metadata-only artifact must exist');
   const adjacent = '        run: node --import tsx scripts/kernel/qualify-supervisor-image.ts "$RUNNER_TEMP/cliq-supervisor-image"\n' + experiment + retain;
   assert(workflow.includes(adjacent), 'the independent experiment belongs immediately after the original complete-image qualifier');
-  const projected = workflow.replace(experiment, '').replace(retain, '');
+  const parentEvidenceTest = '          scripts/kernel/testing/installed-verifier-parent-evidence.test.ts\n';
+  assert.equal(workflow.split(parentEvidenceTest).length, 2, 'the new parent-domain regression must run exactly once in the existing four-job TypeScript matrix');
+  assert(workflow.includes('          scripts/kernel/testing/installed-verifier-result.test.ts\n' + parentEvidenceTest + '      - run: npm run build\n'),
+    'the added regression must remain in the original test command, not in a disabled or independent step');
+  const projected = workflow.replace(experiment, '').replace(retain, '').replace(parentEvidenceTest, '');
   assert.equal(createHash('sha256').update(projected).digest('hex'), '346af80a56060feace86c309b316c67560f68c512207d6cd3c95ab965cb225f5',
     'all original CT jobs, runner groups, timeouts, qualifiers and conditions must remain byte-identical');
   assert.equal(workflow.split('qualify-supervisor-carrier-size.ts').length, 2, 'no production job may select the experimental carrier');
+}
+
+test('carrier experiments are isolated beside the original image qualifier and retain only their bounded report', async () => {
+  assertCarrierExperimentWorkflow(await readFile(new URL('../../../.github/workflows/kernel-foundation.yml', import.meta.url), 'utf8'));
+});
+
+test('the additive parent-domain regression cannot hide workflow removals, disabled tests or changed runner and time budgets', async () => {
+  const workflow = await readFile(new URL('../../../.github/workflows/kernel-foundation.yml', import.meta.url), 'utf8');
+  const parentEvidenceTest = '          scripts/kernel/testing/installed-verifier-parent-evidence.test.ts\n';
+  const mutations = [
+    workflow.replace(parentEvidenceTest, ''),
+    workflow.replace(parentEvidenceTest, parentEvidenceTest.repeat(2)),
+    workflow.replace(parentEvidenceTest, '          # scripts/kernel/testing/installed-verifier-parent-evidence.test.ts\n'),
+    workflow.replace(parentEvidenceTest + '      - run: npm run build\n', '      - run: npm run build\n' + parentEvidenceTest),
+    workflow.replace('        node: [22.13.0, 24.x]', '        node: [24.x]'),
+    workflow.replace('    runs-on: ubuntu-22.04', '    runs-on: ubuntu-22.04-8core'),
+    workflow.replace('    timeout-minutes: 20', '    timeout-minutes: 21'),
+    workflow.replace('    timeout-minutes: 15', '    timeout-minutes: 16'),
+    workflow.replace("        if: ${{ !cancelled() && steps.build.outcome == 'success' }}", '        if: false'),
+    workflow.replace('      - run: npm test\n', ''),
+  ];
+  for (const mutated of mutations) {
+    assert.notEqual(mutated, workflow, 'each negative case must exercise a real workflow mutation');
+    assert.throws(() => assertCarrierExperimentWorkflow(mutated), { name: 'AssertionError' });
+  }
 });

@@ -129,8 +129,51 @@ async function sourceFunction(fileName: string, name: string) {
   assert(declaration?.body); return { parsed, declaration };
 }
 
-test('the actual original-child predicate rejects a changed request, grant, child plan, parent, generation or controller lifetime', async () => {
+test('production UNKNOWN acceptance still acquires the actual SQL owner and complete progress before the shared data validator', async () => {
   const { parsed, declaration } = await sourceFunction('./verifier-unknown-retirement.ts', 'originalClaim');
+  const calls: string[] = [];
+  const visit = (node: ts.Node) => { if (ts.isCallExpression(node)) calls.push(node.expression.getText(parsed)); ts.forEachChild(node, visit); };
+  visit(declaration);
+  assert(calls.includes('readStateOwner') && calls.includes('readVerifierProgress') && calls.includes('validateVerifierUnknownOriginalClaim'));
+  const returned = declaration.body!.statements.find((node): node is ts.ReturnStatement => ts.isReturnStatement(node)); assert(returned?.expression);
+  let actual: unknown[] = [];
+  const invoke = new Function('validateVerifierUnknownOriginalClaim', 'artifacts', 'cut', 'generation', 'launch', 'issuer', 'progress',
+    ts.transpile(`return ${returned.expression.getText(parsed)};`, { target: ts.ScriptTarget.ES2022 }));
+  const values = Array.from({ length: 6 }, (_, index) => ({ inertData: index }));
+  invoke((...args: unknown[]) => { actual = args; }, ...values); assert.deepEqual(actual, values);
+});
+
+test('the actual private entry selects this UNKNOWN owner and real CAS target after older settled verifier attempts', async t => {
+  // Only entry selection executes. The terminal validator deliberately throws
+  // before any successful Run/native validation; callbacks record data only.
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'cliq-verifier-original-selection-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const artifacts = new ArtifactCatalog(new ContentAddressedStore(directory));
+  const oldTarget = (await artifacts.publishCanonical({ candidateItemId: 'inert-older-candidate' }, 'inert-target')).ref;
+  const selectedTarget = (await artifacts.publishCanonical({ candidateItemId: 'inert-current-candidate' }, 'inert-target')).ref;
+  const { declaration } = await sourceFunction('./verifier-unknown-retirement.ts', 'originalClaim');
+  const execute = new Function('hasOnlySettledVerifierUnknowns', 'readStateOwner', 'readCanonicalArtifact', 'readVerifierProgress', 'validateVerifierUnknownOriginalClaim',
+    ts.transpile(`return (${declaration.getText()});`, { target: ts.ScriptTarget.ES2022 }));
+  for (const phase of ['completed', 'failed'] as const) for (const sameOperation of [false, true]) {
+    const older = journal().map(row => ({ ...row, target: oldTarget })); older[2]!.phase = phase;
+    const selected = journal().map(row => ({ ...row, seq: row.seq + 3, target: selectedTarget, stateOwnerEpoch: 2,
+      opId: sameOperation ? row.opId : 'inert-later-verifier', attempt: sameOperation ? 1 : 0 }));
+    const cut = { journal: [...older, ...selected] }; assert.equal(hasOnlySettledVerifierUnknowns(cut.journal), true);
+    const observed: Array<unknown[]> = [], sentinel = new Error('data-only validation boundary');
+    const entry = execute(hasOnlySettledVerifierUnknowns,
+      (driver: unknown, epoch: number) => { observed.push(['owner', epoch]); return { inertEpoch: epoch }; },
+      (catalog: ArtifactCatalog, ref: string) => catalog.readCanonical(ref),
+      async (driver: unknown, catalog: ArtifactCatalog, actualCut: unknown, candidateItemId: string) => {
+        assert.equal(actualCut, cut); observed.push(['progress', candidateItemId]); return { inertProgress: candidateItemId };
+      }, (...args: unknown[]) => { observed.push(['validator', args[4], args[5]]); throw sentinel; });
+    await assert.rejects(entry(undefined, artifacts, cut, {}, {}), error => error === sentinel);
+    assert.deepEqual(observed, [['owner', 2], ['progress', 'inert-current-candidate'],
+      ['validator', { inertEpoch: 2 }, { inertProgress: 'inert-current-candidate' }]], `${phase}/${sameOperation}`);
+  }
+});
+
+test('the actual original-child predicate rejects a changed request, grant, child plan, parent, generation or controller lifetime', async () => {
+  const { parsed, declaration } = await sourceFunction('./verifier-unknown-retirement.ts', 'validateVerifierUnknownOriginalClaim');
   const condition = declaration.body!.statements.find((node): node is ts.IfStatement => ts.isIfStatement(node) &&
     node.thenStatement.getText(parsed).includes('verifier UNKNOWN is not confined to its exact retired parent domain'));
   assert(condition);
@@ -168,7 +211,7 @@ test('the actual original-child predicate rejects a changed request, grant, chil
 });
 
 test('the actual child and parent owner comparisons reject replaced claim, dispatch, lease or worker identities', async () => {
-  const { parsed, declaration } = await sourceFunction('./verifier-unknown-retirement.ts', 'originalClaim');
+  const { parsed, declaration } = await sourceFunction('./verifier-unknown-retirement.ts', 'validateVerifierUnknownOriginalClaim');
   const owner = declaration.body!.statements.find(node => ts.isVariableStatement(node) && node.declarationList.declarations
     .some(entry => entry.name.getText(parsed) === 'owner'));
   const comparisons = declaration.body!.statements.filter(node => ts.isExpressionStatement(node) &&
@@ -194,7 +237,7 @@ test('the actual child and parent owner comparisons reject replaced claim, dispa
 });
 
 test('the actual original claiming-epoch predicate rejects unknown, foreign, future and already-released issuers', async () => {
-  const { parsed, declaration } = await sourceFunction('./verifier-unknown-retirement.ts', 'originalClaim');
+  const { parsed, declaration } = await sourceFunction('./verifier-unknown-retirement.ts', 'validateVerifierUnknownOriginalClaim');
   const condition = declaration.body!.statements.find((node): node is ts.IfStatement => ts.isIfStatement(node) &&
     node.thenStatement.getText(parsed).includes('verifier UNKNOWN has a foreign claiming owner'));
   assert(condition);
@@ -283,7 +326,7 @@ test('retained parent-domain acceptance independently rewalks the physical quara
  * With the VC1 omission this is the empty data fragment and a substituted
  * candidate is not refused. No missing guard is supplied by this test. */
 async function generationSourceBinding() {
-  const { parsed, declaration } = await sourceFunction('./verifier-unknown-retirement.ts', 'originalClaim');
+  const { parsed, declaration } = await sourceFunction('./verifier-unknown-retirement.ts', 'validateVerifierUnknownOriginalClaim');
   const reads = declaration.body!.statements.filter(node => ts.isVariableStatement(node) &&
     node.declarationList.declarations.some(entry => ['resultSource', 'state', 'projected'].includes(entry.name.getText(parsed))));
   const predicates = declaration.body!.statements.filter(node => ts.isIfStatement(node) &&

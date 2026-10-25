@@ -683,3 +683,17 @@ not replaced by a previous graph. Failure and cancellation still join every
 issued read; original resource-retirement uncertainty takes precedence.
 Data regressions cannot qualify physical publication, restart or the unchanged
 two-, five-, thirty- and ninety-second installed acceptance gates.
+
+### Installed cancellation evidence consumers
+
+The campaign distinguishes a received child Stop (the original child receipt,
+three recorded child lifetimes and independent `/proc` observations) from an
+original settled UNKNOWN closed by `verifier_parent_domain_dead`. The latter
+rewalks the original claim and generation source, exact full charge, atomic Stop
+Checkpoint, owner history and complete recovered-parent retirement graph. Its
+independent process observations cover the recorded parent lifetimes and actual
+worker, not an unrecorded child PID or a fabricated child Stop receipt. The
+closed cancellation summary records that distinction; a parent-domain success
+cannot claim the precise in-flight child cut. Reconnect/restart repeat both the
+retained graph and actual process checks. Data regressions do not qualify Linux;
+the original run471 cancellation report remains failed pending a new real run.

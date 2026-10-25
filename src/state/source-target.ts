@@ -213,17 +213,21 @@ deliverySource?: VerifiedDeliverySource): Promise<VerifiedSourceInspectionTarget
   const profile = decodeSandboxProfile(bootstrap.sandboxProfile);
   if (!profile.allowedOwners.includes('source_inspection') || canonicalSha256(profile.resources) !== canonicalSha256(request.sandboxResources))
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'trusted source inspection profile differs from the requested frozen resources');
-  const original = await artifacts.publishCanonical(normalized.originalRequest, 'cliq-control-request-v1');
-  const selectedProfile = await artifacts.publishCanonical(profile, profile.format);
+  // Composition refs alone are not durable data or target authority. All three
+  // actual publications join before the original physical/SQL target recheck.
+  const originalRef = canonicalSha256(normalized.originalRequest), selectedProfileRef = canonicalSha256(profile);
   const target: SourceInspectionTargetV1 = { schemaVersion: 1, format: 'cliq-source-inspection-target-v1', principalId: identity.principalId,
     method: wire.method, admissionKey: request.admissionKey, admissionIntentDigest,
-    originalRequestRef: original.ref, originalRequestDigest: normalized.originalRequestDigest,
+    originalRequestRef: originalRef, originalRequestDigest: normalized.originalRequestDigest,
     sessionId: request.sessionId, expectedContextRevision: request.expectedContextRevision,
     workspaceIdentityRef: session.workspaceIdentityRef, workspaceIdentityDigest: workspace.identityDigest, sourceReadGrantRefs: [],
     runtimeBundleRef, runtimeBundleManifestDigest: bootstrap.bundle.manifestDigest,
-    sandboxProfileRef: selectedProfile.ref, sandboxProfileDigest: profile.profileDigest, targetDigest: '' };
+    sandboxProfileRef: selectedProfileRef, sandboxProfileDigest: profile.profileDigest, targetDigest: '' };
   target.targetDigest = digestOmitting(target, 'targetDigest');
-  const published = await artifacts.publishCanonical(target, target.format);
+  const [original, selectedProfile, published] = await artifacts.publishCanonicalTriple([
+    { value: normalized.originalRequest, schemaKind: 'cliq-control-request-v1' },
+    { value: profile, schemaKind: profile.format }, { value: target, schemaKind: target.format }
+  ]);
   const result: VerifiedSourceInspectionTarget = Object.freeze({ kind: 'verified_source_inspection_target' });
   verifiedTargets.set(result, { driver, artifacts, owner, workspaceRoot, trust, identity, request,
     originalRequest: normalized.originalRequest, target: immutableSnapshot(target), targetRef: published.ref,

@@ -3654,6 +3654,20 @@ Cancellation/failure may leave more valid data-only orphans than the former
 serial order, never a partial admission or execution authority. No guard,
 durability boundary, request limit or shutdown deadline is removed or enlarged.
 
+Three more fixed data closures may use that same four-stage core: source
+`[original request, sandbox profile, target]`, source-retirement
+`[inspector, evidence]`, and exactly-one-credential model material
+`[endpoint, binding, capability]`. Exact pair/triple APIs expose only their
+fully joined result; each file still syncs and independently rehashes. Keep
+source reservation/retirement SQL, real capture/staging retirement, entries
+readback, every held/currentness check, full material/guest-image reads and
+runtime revalidation at their original acceptance boundaries. Projection and
+instructions retain their individual currentness observations. Other counts
+keep the ordinary path or earlier recipe refusal, never padding. All existing
+failure cleanup, repeated refs/independent publishers and retirement-priority
+rules apply; grouped failures cannot borrow single-write ENOSPC provenance.
+Additional valid orphans remain inert data, not authority or an atomic batch.
+
 Authorization freezes preparation time P and its original TTL/response before
 CAS, but only actual final-transaction time C enters the existing time fence.
 Require P<=C<expiry, the same current owner and original authenticated frame;

@@ -257,6 +257,32 @@ durability boundaries, per-file sync and full readback, recovery rules and
 retirement-failure precedence above are unchanged. This does not extend the
 thirty-second request or any authentication, shutdown or qualification limit.
 
+The same four-stage CAS mechanism may also publish only these fixed admission
+data closures: `[original control request, source sandbox profile, source
+inspection target]`, `[retirement inspector identity, source retirement
+evidence]`, and, iff there is exactly one model credential binding,
+`[registered endpoint, credential binding, model capability evidence]`.
+These are exact two/three-member tuples, not a general queued batch or a
+deferred-durability API. Precomputed canonical refs compose data only. Every
+member retains its own file sync and complete final byte/hash/length/metadata
+verification, and one promise joins the entire group and all descriptors
+before any member's result escapes. The original four namespace boundaries,
+partial-mutation cleanup, independent/repeated-ref publishers and retirement
+failure precedence above remain required. A multi-member failure cannot mint
+single-publication ENOSPC retry provenance.
+
+No group crosses a source reservation or retirement transaction, live capture,
+staging retirement, complete entries readback, held-root/currentness check or
+final runtime/channel/StateOwner acceptance point. In particular, source
+projection and workspace-instruction publications retain their existing
+individual currentness observations. Every original complete material and
+guest-image read and runtime revalidation remains required. Other credential
+counts keep the original publisher (or earlier recipe refusal), without dummy
+members. Sandbox, verifier, policy and final authority checks keep their
+original relative order. Like the fixed-four batches, cancellation or failure
+may leave additional valid data-only CAS orphans but cannot admit partial
+state or execute work; clocks, limits and deadlines are unchanged.
+
 ## 4. Semantic Ownership
 
 | Object | Answers | Mutable? | Must not contain |

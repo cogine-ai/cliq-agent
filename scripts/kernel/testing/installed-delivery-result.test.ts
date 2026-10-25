@@ -2,7 +2,7 @@
 // observation or permission. The Linux campaign supplies actual public cuts.
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { assertInstalledDeliveryClaims, assertInstalledDeliveryOutcome, assertInstalledDeliverySettlement, assertInstalledDeliveryVerifier, InstalledDeliveryOutcomeError } from './installed-delivery-result.js';
+import { assertInstalledDeliveryClaims, assertInstalledDeliveryOutcome, assertInstalledDeliverySettlement, assertInstalledDeliveryUnknownSettlement, assertInstalledDeliveryVerifier, InstalledDeliveryOutcomeError } from './installed-delivery-result.js';
 import { canonicalSha256 } from '../../../src/kernel/canonical.js';
 import { digestOmitting } from '../../../src/kernel/identity.js';
 
@@ -53,6 +53,34 @@ test('real completed and claimed-cancel settlement data release the entire origi
     data.value.settlementDigest = digestOmitting(data.value, 'settlementDigest');
     data.terminal.budgetSettlementRef = canonicalSha256(data.value);
     assert.throws(() => assertInstalledDeliverySettlement(data.prepared, data.claim, data.terminal, data.value, 0));
+  }
+});
+
+test('parent-domain UNKNOWN retains its original full charge without becoming a known child result', () => {
+  const make = () => {
+    const data = settlement('failed');
+    data.prepared.opKind = data.claim.opKind = data.terminal.opKind = 'verifier';
+    data.prepared.replayClass = data.claim.replayClass = data.terminal.replayClass = 'retry';
+    const terminal = { ...data.terminal, phase: 'unknown' };
+    const value = { ...data.value, terminalPhase: 'unknown' };
+    value.settlementDigest = digestOmitting(value, 'settlementDigest'); terminal.budgetSettlementRef = canonicalSha256(value);
+    return { ...data, terminal, value };
+  };
+  const data = make();
+  assert.deepEqual(assertInstalledDeliveryUnknownSettlement(data.prepared, data.claim, data.terminal, data.value), data.value);
+  assert.throws(() => assertInstalledDeliverySettlement(data.prepared, data.claim, data.terminal, data.value, 0));
+  const mutations: Array<(data: ReturnType<typeof make>) => void> = [
+    data => { data.terminal.phase = 'failed'; },
+    data => { data.terminal.opKind = 'publish'; },
+    data => { data.value.consumed.toolCalls = 0; data.value.budgetConsumedAfter.toolCalls = 0; },
+    data => { data.value.released.toolCalls = 0; },
+    data => { data.value.terminalJournalSeq++; },
+    data => { data.claim.opId = 'other-original-claim'; },
+  ];
+  for (const mutate of mutations) {
+    const value = make(); mutate(value);
+    value.value.settlementDigest = digestOmitting(value.value, 'settlementDigest'); value.terminal.budgetSettlementRef = canonicalSha256(value.value);
+    assert.throws(() => assertInstalledDeliveryUnknownSettlement(value.prepared, value.claim, value.terminal, value.value));
   }
 });
 test('Delivery assertions require one original complete claim and settlement, never model/tool execution', () => {

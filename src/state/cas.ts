@@ -556,6 +556,32 @@ export class ContentAddressedStore {
     return result.ref;
   }
 
+  /** Fixed admission data pairs retain the same four durable stages. */
+  async publishPair(sources: readonly [Uint8Array, Uint8Array]): Promise<readonly [ArtifactStat, ArtifactStat]> {
+    if (!Array.isArray(sources) || sources.length !== 2 ||
+        [0, 1].some(index => !(sources[index] instanceof Uint8Array)))
+      throw new TypeError('CAS requires exactly two byte objects');
+    const inputs = sources.map(source => {
+      const bytes = Buffer.from(source);
+      return { source: byteChunks(bytes), maxByteLength: bytes.length };
+    });
+    const results = await this.publishSources(inputs);
+    return [results[0]!, results[1]!];
+  }
+
+  /** Fixed admission data triples never expose one member before full join. */
+  async publishTriple(sources: readonly [Uint8Array, Uint8Array, Uint8Array]): Promise<readonly [ArtifactStat, ArtifactStat, ArtifactStat]> {
+    if (!Array.isArray(sources) || sources.length !== 3 ||
+        [0, 1, 2].some(index => !(sources[index] instanceof Uint8Array)))
+      throw new TypeError('CAS requires exactly three byte objects');
+    const inputs = sources.map(source => {
+      const bytes = Buffer.from(source);
+      return { source: byteChunks(bytes), maxByteLength: bytes.length };
+    });
+    const results = await this.publishSources(inputs);
+    return [results[0]!, results[1]!, results[2]!];
+  }
+
   /** Exactly four immutable objects share each of the original four directory
    * barriers, not their file syncs or full verification. This is not an atomic
    * namespace transaction: failure may leave valid, unreferenced final objects. */

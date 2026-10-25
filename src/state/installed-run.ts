@@ -251,6 +251,41 @@ async function readInstructions(artifacts: ArtifactCatalog, assembly: RunAssembl
   return immutableSnapshot(manifest);
 }
 
+/** Publication of already selected inert model data, never admission or grant
+ * authority. Only one credential has a closed three-object dependency graph. */
+async function publishInstalledModelMaterial(input: {
+  artifacts: ArtifactCatalog; endpoint: EndpointRegistrationV1; credentialBindings: readonly EndpointCredentialGrantBinding[];
+  remote: { modelCredentialGrantIds: readonly string[] }; identity: { principalId: string };
+  admittedAt: string; deadlineAt: string; capability: ModelCapabilityEvidenceV1;
+}) {
+  const { artifacts, endpoint, credentialBindings, remote, identity, admittedAt, deadlineAt, capability } = input;
+  const checkBinding = (binding: EndpointCredentialGrantBinding, endpointRef: string) => {
+    if (!remote.modelCredentialGrantIds.includes(binding.credentialGrantId) || binding.ownerPrincipalId !== identity.principalId ||
+        binding.purpose !== 'model_endpoint' || binding.endpointRegistrationRef !== endpointRef ||
+        binding.endpointIdentityDigest !== endpoint.endpointIdentityDigest || binding.tlsPolicyDigest !== endpoint.tlsPolicyDigest ||
+        binding.createdAt > admittedAt || (binding.expiresAt && binding.expiresAt < deadlineAt))
+      mismatch('installed credential binding cannot authorize the complete Run interval');
+  };
+  if (credentialBindings.length === 1) {
+    const binding = credentialBindings[0]!;
+    checkBinding(binding, canonicalSha256(endpoint));
+    const [endpointArtifact, bindingArtifact, capabilityArtifact] = await artifacts.publishCanonicalTriple([
+      { value: endpoint, schemaKind: endpoint.format },
+      { value: binding, schemaKind: 'cliq-endpoint-credential-grant-binding-v1' },
+      { value: capability, schemaKind: capability.format }
+    ]);
+    return { endpointArtifact, credentialGrantRefs: [bindingArtifact.ref], capabilityArtifact };
+  }
+  const endpointArtifact = await artifacts.publishCanonical(endpoint, endpoint.format), credentialGrantRefs: string[] = [];
+  for (const binding of credentialBindings) {
+    checkBinding(binding, endpointArtifact.ref);
+    credentialGrantRefs.push((await artifacts.publishCanonical(binding, 'cliq-endpoint-credential-grant-binding-v1')).ref);
+  }
+  credentialGrantRefs.sort();
+  const capabilityArtifact = await artifacts.publishCanonical(capability, capability.format);
+  return { endpointArtifact, credentialGrantRefs, capabilityArtifact };
+}
+
 async function materialFor(installed: InstalledRuntimeBorrow, artifacts: ArtifactCatalog, assembly: RunAssemblyV1, signal?: AbortSignal): Promise<RunAssemblyValidationMaterial> {
   signal?.throwIfAborted();
   if (assembly.provider.name !== 'openai-compatible' || assembly.provider.endpoint.kind !== 'registered' ||
@@ -436,21 +471,16 @@ export async function assembleInstalledRun(input: {
     if (!credentialBindings.length || credentialBindings.length !== remote.modelCredentialGrantIds.length ||
         new Set(credentialBindings.map(binding => binding.credentialGrantId)).size !== credentialBindings.length)
       mismatch('installed credential ids and frozen model bindings differ');
-    const endpointArtifact = await artifacts.publishCanonical(endpoint, endpoint.format), credentialGrantRefs: string[] = [];
-    for (const binding of credentialBindings) {
-      if (!remote.modelCredentialGrantIds.includes(binding.credentialGrantId) || binding.ownerPrincipalId !== identity.principalId ||
-          binding.purpose !== 'model_endpoint' || binding.endpointRegistrationRef !== endpointArtifact.ref ||
-          binding.endpointIdentityDigest !== endpoint.endpointIdentityDigest || binding.tlsPolicyDigest !== endpoint.tlsPolicyDigest ||
-          binding.createdAt > admittedAt || (binding.expiresAt && binding.expiresAt < deadlineAt)) mismatch('installed credential binding cannot authorize the complete Run interval');
-      credentialGrantRefs.push((await artifacts.publishCanonical(binding, 'cliq-endpoint-credential-grant-binding-v1')).ref);
-    }
-    credentialGrantRefs.sort();
+    // Capability construction is inert. Complete materialFor reads and all
+    // original runtime/channel/owner checks still follow durable publication.
     const capability: ModelCapabilityEvidenceV1 = { schemaVersion: 1, format: 'cliq-model-capability-evidence-v1',
       provider: catalog.provider, model: catalog.model, endpointIdentityDigest: catalog.endpointIdentityDigest, adapter: catalog.adapter,
       source: { kind: 'signed_catalog', runtimeBundleRef: installed.bundleDigest, catalogEntryRef: model.catalog.ref, catalogEntryDigest: catalog.catalogEntryDigest },
       ...catalog.claims, observedAt: admittedAt, validThrough: catalog.validThrough, evidenceDigest: '' };
     capability.evidenceDigest = digestOmitting(capability, 'evidenceDigest');
-    const capabilityArtifact = await artifacts.publishCanonical(capability, capability.format);
+    const { endpointArtifact, credentialGrantRefs, capabilityArtifact } = await publishInstalledModelMaterial({
+      artifacts, endpoint, credentialBindings, remote, identity, admittedAt, deadlineAt, capability
+    });
     const toolCandidates = installed.bundle.entries.filter(entry => entry.role === 'schema' && !entry.executable).map(entry => {
       const bytes = installed.objects.get(entry.digest); return bytes && JSON.parse(bytes.toString('utf8')) as { format?: string };
     }).filter((value): value is ToolContractManifestV1 => value?.format === 'cliq-tool-contracts-v1');

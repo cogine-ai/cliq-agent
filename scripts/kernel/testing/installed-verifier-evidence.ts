@@ -62,6 +62,44 @@ export async function readInstalledVerifierInputs(spec: RunSpec, reader: Reader)
   return { frozen, assembly, commands, environments };
 }
 
+/** Complete historical inspector/owner relationships; data cannot replace the
+ * independent /proc cut or issue any native inspection/terminal capability. */
+export async function assertInstalledVerifierInspectors(input: {
+  assemblyRef: string; readCanonical<T>(ref: string): Promise<T>; owners: readonly StateOwnerRecordV1[];
+  observations: readonly Record<string, any>[]; claimingOwnerEpoch: number;
+}) {
+  const object = input.readCanonical<any>, assembly = decodeRetainedRunAssembly(await object(input.assemblyRef));
+  const bundle = await object(assembly.runtime.runtimeBundleRef);
+  check(bundle.manifestDigest === assembly.runtime.runtimeBundleManifestDigest && Array.isArray(bundle.entries));
+  const supervisors = bundle.entries.filter((entry: any) => entry.role === 'supervisor'); check(supervisors.length === 1);
+  check(Array.isArray(input.owners) && input.owners.length > 0 && input.owners.length <= 1000);
+  const owners = input.owners.map(value => decodeStateOwnerRecord(value));
+  owners.forEach((owner, index) => check(owner.ownerEpoch === index + 1 && (index === owners.length - 1 || owner.state === 'terminal')));
+  const validateOwner = async (owner: StateOwnerRecordV1) => {
+    check(owner.runtimeBundleRef === assembly.runtime.runtimeBundleRef && owner.runtimeBundleManifestDigest === assembly.runtime.runtimeBundleManifestDigest &&
+      owner.supervisorEntryId === supervisors[0].entryId && owner.supervisorEntryVersion === supervisors[0].version &&
+      owner.supervisorExecutableDigest === supervisors[0].digest && supervisors[0].executable === true);
+    const process = decodePlatformProcessIdentity(await object(owner.processIdentityRef)), lock = decodeStateLockIdentity(await object(owner.stateLockIdentityRef));
+    const root = decodeStateRootIdentity(await object(lock.stateRootIdentityRef)), acquired = decodeStateOwnerAcquisitionEvidence(await object(owner.acquisitionEvidenceRef));
+    check(process.identityDigest === owner.processIdentityDigest && process.executableImageDigest === owner.supervisorExecutableDigest &&
+      lock.identityDigest === owner.stateLockIdentityDigest && lock.stateRootIdentityDigest === root.identityDigest &&
+      process.ownerUid === root.ownerUid && lock.ownerUid === root.ownerUid && lock.deviceId === root.deviceId && acquired.evidenceDigest === owner.acquisitionEvidenceDigest);
+    for (const field of ['ownerEpoch', 'supervisorInstanceId', 'runtimeBundleRef', 'runtimeBundleManifestDigest', 'processIdentityRef',
+      'processIdentityDigest', 'stateLockIdentityRef', 'stateLockIdentityDigest', 'instanceNonceDigest', 'acquiredAt'] as const) check(acquired[field] === owner[field]);
+  };
+  for (const observation of input.observations) {
+    const inspector = await object(observation.inspectorIdentityRef), owner = owners.find(value => value.ownerEpoch === inspector.stateOwnerEpoch);
+    check(owner); if (!owner) throw new Error('missing original verifier inspector owner');
+    same(inspector, supervisorInspectorIdentity(owner));
+    check(inspector.identityDigest === observation.inspectorIdentityDigest && owner.supervisorInstanceId === observation.inspectorSupervisorInstanceId &&
+      owner.acquiredAt <= observation.observedAt && (owner.state !== 'terminal' || owner.releasedAt >= observation.observedAt));
+    await validateOwner(owner);
+  }
+  const issuer = owners.find(owner => owner.ownerEpoch === input.claimingOwnerEpoch); check(issuer);
+  if (!issuer) throw new Error('missing original claiming owner');
+  await validateOwner(issuer);
+}
+
 /** Callers separately validate the complete candidate/context and exact result
  * or Stop item. This function owns the shared claim→native launch→child death→
  * M snapshot→parent death graph; the returned lifetimes still require /proc. */

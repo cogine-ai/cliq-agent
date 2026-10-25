@@ -44,6 +44,7 @@ jobs:
           scripts/kernel/testing/installed-run-diagnostic-wiring.test.ts
           scripts/kernel/testing/installed-verifier-evidence.test.ts
           scripts/kernel/testing/installed-verifier-result.test.ts
+          scripts/kernel/testing/installed-verifier-parent-evidence.test.ts
       - run: npm run build
       - run: npm test
 

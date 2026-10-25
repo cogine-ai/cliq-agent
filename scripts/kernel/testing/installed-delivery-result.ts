@@ -19,6 +19,8 @@ import { decodeAgentStop } from '../../../src/runtime/stop.js';
 import { loadVerifierPolicy, planVerifierRequest, verifierOperationId } from '../../../src/state/verifier-policy.js';
 import { assertInstalledVerifierRetirement, readInstalledVerifierInputs, type InstalledVerifierRetirementIdentity } from './installed-verifier-evidence.js';
 import { assertInstalledDeliveryPublication } from './installed-delivery-publication-result.js';
+import { assertInstalledVerifierParentRetirement, type InstalledVerifierParentRetirementIdentity } from './installed-verifier-parent-evidence.js';
+import type { InstalledVerifierParentRetirementBinding, inspectInstalledVerifierParentRetirement } from './installed-worker-lease.js';
 
 const ZERO = { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 };
 const ONE_TOOL = { ...ZERO, toolCalls: 1 };
@@ -62,7 +64,22 @@ export function assertInstalledDeliveryClaims(cut: Record<string, any>, expected
 export function assertInstalledDeliverySettlement(prepared: Record<string, any>, claim: Record<string, any>,
   terminal: Record<string, any>, value: unknown, toolCallsBefore: number) {
   check(prepared.phase === 'prepared' && claim.phase === 'dispatch_claimed' &&
-    ['completed', 'failed'].includes(terminal.phase) && ['publish', 'verifier'].includes(prepared.opKind) &&
+    ['completed', 'failed'].includes(terminal.phase));
+  return assertSettlementData(prepared, claim, terminal, value, toolCallsBefore);
+}
+
+/** UNKNOWN stays UNKNOWN; it is neither a received child result nor a refund. */
+export function assertInstalledDeliveryUnknownSettlement(prepared: Record<string, any>, claim: Record<string, any>,
+  terminal: Record<string, any>, value: unknown) {
+  check(prepared.phase === 'prepared' && claim.phase === 'dispatch_claimed' && terminal.phase === 'unknown' &&
+    prepared.opKind === 'verifier' && prepared.replayClass === 'retry' && prepared.attempt === 0 &&
+    terminal.receiptRef === undefined && terminal.resultRef === undefined);
+  return assertSettlementData(prepared, claim, terminal, value, 0);
+}
+
+function assertSettlementData(prepared: Record<string, any>, claim: Record<string, any>,
+  terminal: Record<string, any>, value: unknown, toolCallsBefore: number) {
+  check(['publish', 'verifier'].includes(prepared.opKind) &&
     prepared.seq < claim.seq && claim.seq < terminal.seq && Number.isSafeInteger(toolCallsBefore) &&
     toolCallsBefore >= 0 && toolCallsBefore < Number.MAX_SAFE_INTEGER);
   for (const field of ['runId', 'opId', 'opKind', 'attempt', 'leaseEpoch', 'target', 'requestRef', 'grantRef', 'replayClass'])
@@ -85,12 +102,18 @@ export function assertInstalledDeliverySettlement(prepared: Record<string, any>,
 
 /** Exactly the fixed campaign's one new verifier attempt. Inherited evidence
  * never enters this function, and a Stop measurement is never a pass receipt. */
-export async function assertInstalledDeliveryVerifier(input: {
+type InstalledDeliveryVerifierInput = {
   cut: Record<string, any>; sourceCut: Record<string, any>; outcome: 'passed' | 'stopped';
   readRetainedArtifact: (ref: string) => Promise<Buffer>;
   readOwnerHistory: () => Promise<readonly StateOwnerRecordV1[]>;
   cancellation?: { request: Record<string, any>; response: Record<string, any> };
-}): Promise<InstalledVerifierRetirementIdentity> {
+  readParentRetirement?: (binding: InstalledVerifierParentRetirementBinding) => ReturnType<typeof inspectInstalledVerifierParentRetirement>;
+};
+export type InstalledDeliveryVerifierRetirementIdentity = InstalledVerifierRetirementIdentity | InstalledVerifierParentRetirementIdentity;
+export function assertInstalledDeliveryVerifier(input: InstalledDeliveryVerifierInput & { outcome: 'passed' }): Promise<InstalledVerifierRetirementIdentity>;
+export function assertInstalledDeliveryVerifier(input: InstalledDeliveryVerifierInput & { outcome: 'stopped' }): Promise<InstalledDeliveryVerifierRetirementIdentity>;
+export function assertInstalledDeliveryVerifier(input: InstalledDeliveryVerifierInput): Promise<InstalledDeliveryVerifierRetirementIdentity>;
+export async function assertInstalledDeliveryVerifier(input: InstalledDeliveryVerifierInput): Promise<InstalledDeliveryVerifierRetirementIdentity> {
   try {
     const { cut, sourceCut, outcome } = input, run = cut.snapshot?.run;
     check(cut.method === 'run.get' && cut.snapshot.operation === 'delivery' && sourceCut.snapshot?.operation === 'agent' &&
@@ -143,7 +166,8 @@ export async function assertInstalledDeliveryVerifier(input: {
       command: commands[0]!, environment: environments[0]! };
     const planned = planVerifierRequest(requestContext), opId = verifierOperationId(run.id, candidate.itemId, planRef, 0);
     const operation = cut.journal.filter((row: any) => row.opKind === 'verifier');
-    same(operation.map((row: any) => row.phase), ['prepared', 'dispatch_claimed', outcome === 'passed' ? 'completed' : 'failed']);
+    const unknownParent = outcome === 'stopped' && operation.at(-1)?.phase === 'unknown';
+    same(operation.map((row: any) => row.phase), ['prepared', 'dispatch_claimed', unknownParent ? 'unknown' : outcome === 'passed' ? 'completed' : 'failed']);
     const [prepared, claim, terminal] = operation;
     check(operation.every((row: any) => row.runId === run.id && row.opId === opId && row.attempt === 0 && row.replayClass === 'retry' &&
       row.requestRef === canonicalSha256(planned.request) && row.target === planned.request.targetRef && row.grantRef === prepared.grantRef));
@@ -162,10 +186,12 @@ export async function assertInstalledDeliveryVerifier(input: {
       principalId: policy.principalId, decisionRef: grant.provenance.channelEvidenceRef, policyChannelEvidenceRef: grant.provenance.channelEvidenceRef,
       policyChannelEvidenceDigest: channel.evidenceDigest, createdAt: channel.evaluatedAt, decisionSource: 'direct_policy', decision: 'allow', grantRef: prepared.grantRef });
     check(policyRows[0]!.row.itemSeq > candidateRow.itemSeq && policyRows[0]!.row.createdAt <= prepared.timestamp);
-    assertInstalledDeliverySettlement(prepared, claim, terminal, await object(terminal.budgetSettlementRef), 0);
-    const verifierItems = items.filter(value => value.item.kind === 'verifier_result' || value.item.kind === 'verifier_stop'); check(verifierItems.length === 1);
-    const row = verifierItems[0]!.row, specEntry = frozen.verifiers[0]!;
-    let measurement: { retirementRef: string; endedAt: string; stdoutRef: string; stderrRef: string };
+    if (unknownParent) assertInstalledDeliveryUnknownSettlement(prepared, claim, terminal, await object(terminal.budgetSettlementRef));
+    else assertInstalledDeliverySettlement(prepared, claim, terminal, await object(terminal.budgetSettlementRef), 0);
+    const verifierItems = items.filter(value => value.item.kind === 'verifier_result' || value.item.kind === 'verifier_stop');
+    check(verifierItems.length === (unknownParent ? 0 : 1));
+    const specEntry = frozen.verifiers[0]!;
+    let measurement: { retirementRef: string; endedAt: string; stdoutRef: string; stderrRef: string } | undefined;
     if (outcome === 'passed') {
       check(run.status === 'succeeded' && terminal.receiptRef && terminal.resultRef === terminal.receiptRef);
       const receipt = decodeVerificationReceipt(await object(terminal.receiptRef));
@@ -188,6 +214,7 @@ export async function assertInstalledDeliveryVerifier(input: {
       measurement = { retirementRef: receipt.containmentEvidenceRef, endedAt: receipt.endedAt, stdoutRef: receipt.stdoutRef, stderrRef: receipt.stderrRef };
     } else {
       check(run.status === 'cancelled' && run.terminalReason === 'cancelled_by_user' && run.cancelRequested && !run.resultRef && input.cancellation);
+      if (!unknownParent) {
       const item = decodeVerifierStopItem(verifierItems[0]!.item), evidence = decodeVerifierStopEvidence(await object(item.containmentEvidenceRef));
       check(item.itemId === identityHash('cliq-verifier-stop-item-v1', run.id, opId, '0') && item.runId === run.id && item.opId === opId &&
         item.attempt === 0 && item.candidateItemId === candidate.itemId && item.verifierPlanRef === planRef && item.verifierIndex === 0 &&
@@ -199,6 +226,8 @@ export async function assertInstalledDeliveryVerifier(input: {
         evidence.commandRef === specEntry.commandRef && evidence.commandDigest === specEntry.commandDigest &&
         evidence.environmentRef === specEntry.environmentRef && evidence.environmentDigest === specEntry.environmentDigest &&
         evidence.stopIntentRef === run.stopIntentRef && evidence.startedAt >= claim.timestamp && evidence.endedAt <= terminal.timestamp && evidence.terminationReason === 'controller_stop');
+      measurement = { retirementRef: evidence.retirementRef, endedAt: evidence.endedAt, stdoutRef: evidence.stdoutRef, stderrRef: evidence.stderrRef };
+      }
       const stop = decodeAgentStop(await object(run.stopIntentRef), run), control = input.cancellation!;
       check(stop.origin === 'user_cancel'); if (stop.origin !== 'user_cancel') throw new Error('wrong Delivery Stop');
       const { requestDigest: _digest, ...requestCore } = control.request;
@@ -212,11 +241,22 @@ export async function assertInstalledDeliveryVerifier(input: {
         cancelledSnapshot.run.cancelRequested && cancelledSnapshot.run.revision === control.request.expectedRevision + 1 &&
         cancelledSnapshot.run.revision <= run.revision && cancelledSnapshot.run.updatedAt === stop.createdAt);
       same(await object(canonicalSha256(control.response)), control.response);
-      measurement = { retirementRef: evidence.retirementRef, endedAt: evidence.endedAt, stdoutRef: evidence.stdoutRef, stderrRef: evidence.stderrRef };
     }
-    const physical = await assertInstalledVerifierRetirement({ run, checkpoints: cut.checkpoints, prepared, claim, terminal,
-      requestContext, measurement, readRetainedArtifact: bytes, readOwnerHistory: input.readOwnerHistory });
-    check(physical.checkpoint.runItemSeq === row.itemSeq && row.itemSeq > policyRows[0]!.row.itemSeq);
+    let physical: { checkpoint: any; identity: InstalledDeliveryVerifierRetirementIdentity };
+    if (unknownParent) {
+      check(input.readParentRetirement);
+      physical = await assertInstalledVerifierParentRetirement({ cut, spec, candidate, planRef, prepared, claim, terminal,
+        reader: { readCanonical: object, async *readChunks(ref, byteLength) {
+          const value = await bytes(ref); check(value.byteLength === byteLength); yield value;
+        } }, readOwnerHistory: input.readOwnerHistory, readParentRetirement: input.readParentRetirement! });
+      check(physical.checkpoint.runItemSeq === cut.items.length && physical.checkpoint.runItemSeq >= policyRows[0]!.row.itemSeq);
+    } else {
+      check(measurement);
+      physical = await assertInstalledVerifierRetirement({ run, checkpoints: cut.checkpoints, prepared, claim, terminal,
+        requestContext, measurement: measurement!, readRetainedArtifact: bytes, readOwnerHistory: input.readOwnerHistory });
+      const row = verifierItems[0]!.row;
+      check(physical.checkpoint.runItemSeq === row.itemSeq && row.itemSeq > policyRows[0]!.row.itemSeq);
+    }
     const state = decodeWorkspaceState(await object(physical.checkpoint.workspaceStateRef));
     check(state.baseWorkspaceManifestRef === spec.baseWorkspaceManifestRef && state.runId === run.id &&
       state.entriesRef === source.entriesRef && state.sourceProjectionDigest === source.sourceProjectionDigest &&

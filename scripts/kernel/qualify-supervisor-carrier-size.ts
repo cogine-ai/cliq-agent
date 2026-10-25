@@ -89,11 +89,21 @@ process.stdout.write('cliq-carrier-sea-probe-v1\\n');\n`, { flag: 'wx', mode: 0o
       seaExecutionVerified: false, guestExecutionVerified: false };
     report.cases.push(row);
     await copyFile(carrier, candidate, constants.COPYFILE_EXCL);
-    run(strip, [option, '--', candidate]);
+    // GNU strip otherwise merges SHT_NOTE records in strip-all mode. The
+    // structural gate requires every retained note byte to remain unchanged.
+    run(strip, [option, '--no-merge-notes', '--', candidate]);
     row.stripProcessAndPipesJoined = true; await unchanged(strip, tool);
     const selected = await heldBytes(candidate);
     row.candidate = { byteCount: selected.byteCount, sha256: selected.sha256 };
-    row.layout = compareSupervisorCarrierLayout(original.bytes, selected.bytes, mode); row.structureVerified = true;
+    let structureStage: string | undefined;
+    try {
+      row.layout = compareSupervisorCarrierLayout(original.bytes, selected.bytes, mode,
+        mode === 'static' ? value => { structureStage = value; } : undefined);
+      row.structureVerified = true;
+    } catch (error) {
+      if (mode === 'static' && structureStage !== undefined) row.structureFailureStage = structureStage;
+      throw error;
+    }
     run(candidate, ['--version'], `v${SUPERVISOR_SEA_NODE_VERSION}\n`); row.nodeVersionExecutionVerified = true;
     const executable = path.join(output, `sea-${mode}`);
     await buildSupervisorSeaImage({ fixture: output, carrier: candidate, entryPoint: probe, executable,

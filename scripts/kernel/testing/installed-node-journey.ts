@@ -32,6 +32,7 @@ import { inspectInstalledOwnerHistory, waitForInstalledOwnerHistory } from './in
 import { assertInstalledVerifierOutcome, InstalledVerifierOutcomeError } from './installed-verifier-result.js';
 import { runInstalledDeliveryCases } from './installed-delivery-journey.js';
 import { InstalledDeliveryOutcomeError } from './installed-delivery-result.js';
+import type { InstalledDeliveryVerifierRetirementIdentity } from './installed-delivery-result.js';
 import type { InstalledVerifierRetirementIdentity } from './installed-verifier-evidence.js';
 import { qualifyInstalledOwnerLinks, qualifyInstalledOwnerProcess } from './installed-owner-history.js';
 import { startPublicationCrashObserver, startPublicationRetirementStopObserver } from './installed-publication-crash-observer.js';
@@ -41,6 +42,7 @@ import { readInstalledNamespaceRetirementJournal, readInstalledOriginalRetiremen
   readInstalledServerAuthenticationJournal } from './installed-publication-journal.js';
 import { assessInstalledPublicationLateInterval, assertInstalledPublicationLateCausalOrder, readInstalledLatePublicationRetirementWindow, type InstalledPublicationLateDiagnostic } from './installed-publication-late-result.js';
 import { inspectInstalledPublicationClaim, inspectInstalledRecoveredWorkerRetirement } from './installed-worker-lease.js';
+import { inspectInstalledVerifierParentRetirement, type InstalledVerifierParentRetirementBinding } from './installed-worker-lease.js';
 import { isOriginalPublicationFirstParentSignalBracket, isPublicationSignalActorJoinedWithinStop } from './installed-publication-retirement.js';
 import { publicationClaimRetirementDiagnosticKey } from '../../../src/state/publication-retirement-diagnostics.js';
 import { publicationEnvelopeLocations } from '../../../src/state/delivery-publication-progress.js';
@@ -316,8 +318,12 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     const fields = text.slice(text.lastIndexOf(')') + 2).trim().split(/\s+/u); assert(!['Z', 'X', 'x'].includes(fields[0]!));
     assert.match(fields[19]!, /^[1-9][0-9]*$/u); return fields[19]!;
   };
-  const assertVerifierProcessesAbsent = async (retirement: InstalledVerifierRetirementIdentity) => {
+  const assertVerifierProcessesAbsent = async (retirement: InstalledDeliveryVerifierRetirementIdentity) => {
     assert.equal(retirement.processes.length, 3);
+    assert.deepEqual(retirement.processes.map(process => process.role), ['namespace_init', 'monitor', 'subreaper']);
+    if ('kind' in retirement) {
+      assert.equal(retirement.kind, 'unknown_parent_domain'); assert.equal(retirement.childIdentityRecorded, false);
+    }
     for (const identity of retirement.processes) {
       // A retained native death object does not itself observe /proc.
       // Independently reject this exact process lifetime if still live.
@@ -905,9 +911,15 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         reason: supported ? 'not_yet_executed' : 'production_composition_not_advertised' };
       assert(supported,
         'the genuine production composition must advertise explicit Delivery before this campaign can run');
-      const assertWorkerRetired = async (runId: string, launchId: string, publicationRetirement?: InstalledWorkerRetirementBinding) => {
-        const retired = inspectInstalledWorkerRetirementHistory(recipe.stateRoot, ledger.uid,
-          { runId, launchId, ...(publicationRetirement ? { retirement: publicationRetirement } : {}) });
+      const assertWorkerRetired = async (runId: string, launchId: string, publicationRetirement?: InstalledWorkerRetirementBinding,
+        verifierParentRetirement?: InstalledVerifierParentRetirementBinding) => {
+        assert(!(publicationRetirement && verifierParentRetirement));
+        if (verifierParentRetirement) {
+          assert.equal(verifierParentRetirement.runId, runId); assert.equal(verifierParentRetirement.evidence.closure.workerLaunchId, launchId);
+        }
+        const retired = verifierParentRetirement ? inspectInstalledVerifierParentRetirement(recipe.stateRoot, ledger.uid, verifierParentRetirement) :
+          inspectInstalledWorkerRetirementHistory(recipe.stateRoot, ledger.uid,
+            { runId, launchId, ...(publicationRetirement ? { retirement: publicationRetirement } : {}) });
         try { assert.notEqual('linux-proc-start-ticks:' + await processStart(retired.pid), retired.processStartToken); }
         catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
       };
@@ -950,14 +962,17 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         },
         nextId, readRetainedArtifact: readCas, downloadPublicArtifact: readPublicArtifact, uid: ledger.uid, gid: ledger.gid, mark,
         readOwnerHistory: async () => inspectInstalledOwnerHistory(recipe.stateRoot).owners,
+        readParentRetirement: binding => inspectInstalledVerifierParentRetirement(recipe.stateRoot, ledger.uid, binding),
         assertVerifierProcessesAbsent,
-        assertRunWorkersRetired: async (runId, observedLaunchIds, publicationRetirement) => {
+        assertRunWorkersRetired: async (runId, observedLaunchIds, publicationRetirement, verifierParentRetirement) => {
           const selected = inspectInstalledWorkerLaunchIds(recipe.stateRoot, ledger.uid, runId);
           assert(observedLaunchIds.every(id => selected.launchIds.includes(id)));
           if (publicationRetirement === null) assert.equal(selected.launchIds.length, 0);
           else if (publicationRetirement) assert(selected.launchIds.includes(publicationRetirement.launchId));
+          if (verifierParentRetirement) assert(selected.launchIds.includes(verifierParentRetirement.evidence.closure.workerLaunchId));
           for (const launchId of selected.launchIds) await assertWorkerRetired(runId, launchId,
-            publicationRetirement?.launchId === launchId ? publicationRetirement : undefined);
+            publicationRetirement?.launchId === launchId ? publicationRetirement : undefined,
+            verifierParentRetirement?.evidence.closure.workerLaunchId === launchId ? verifierParentRetirement : undefined);
           const after = inspectInstalledWorkerLaunchIds(recipe.stateRoot, ledger.uid, runId);
           assert.equal(after.databaseIdentity, selected.databaseIdentity); assert.deepEqual(after.launchIds, selected.launchIds);
           return selected.launchIds.length;

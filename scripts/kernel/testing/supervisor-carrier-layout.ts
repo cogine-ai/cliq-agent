@@ -59,6 +59,9 @@ function layout(bytes: Buffer): Layout {
   return { bytes, header, programs, programBytes, sections };
 }
 const removable = (name: string) => name.startsWith('.debug_') || name === '.symtab' || name === '.strtab';
+type StructureStage = 'original_format' | 'candidate_format' | 'size_reduction' | 'runtime_headers' | 'runtime_extent'
+  | 'removable_metadata' | 'retained_section_shape' | 'retained_section_size' | 'retained_section_bytes'
+  | 'section_set' | 'debug_removal' | 'static_removal';
 function normalizedExtent(input: Layout, program: Program): Buffer {
   const value = Buffer.from(input.bytes.subarray(program.offset, program.offset + program.size));
   for (const [start, end] of [[40, 48], [60, 64]]) {
@@ -70,36 +73,54 @@ function normalizedExtent(input: Layout, program: Program): Buffer {
 
 /** Only a smaller, structurally preserved experiment may be executed. This
  * does not verify signatures, Node behavior, SEA injection or guest loading. */
-export function compareSupervisorCarrierLayout(original: Buffer, candidate: Buffer, mode: 'debug' | 'static') {
+export function compareSupervisorCarrierLayout(original: Buffer, candidate: Buffer, mode: 'debug' | 'static',
+  onStage?: (value: StructureStage) => void) {
   assert(mode === 'debug' || mode === 'static', 'unknown fixed carrier experiment');
-  const before = layout(original), after = layout(candidate);
+  const stage = (value: StructureStage) => { try { onStage?.(value); } catch { /* Diagnostic-only observer. */ } };
+  stage('original_format'); const before = layout(original);
+  stage('candidate_format'); const after = layout(candidate);
+  stage('size_reduction');
   assert(candidate.length < original.length, 'strip must actually reduce the carrier, not silently copy an unsupported input');
+  stage('runtime_headers');
   assert(before.header.equals(after.header) && before.programBytes.equals(after.programBytes), 'carrier runtime header or program headers changed');
-  for (const program of before.programs)
+  for (const program of before.programs) {
+    stage('runtime_extent');
     assert(normalizedExtent(before, program).equals(normalizedExtent(after, program)), 'carrier LOAD, interpreter, notes or dynamic extent changed');
+  }
   const removedSections: string[] = [];
   for (const section of before.sections) {
     const current = after.sections.find(value => value.name === section.name);
     if (removable(section.name)) {
+      stage('removable_metadata');
       assert(!(section.flags & 2n) && !before.programs.some(program => program.size && section.size &&
         section.offset < program.offset + program.size && program.offset < section.offset + section.size),
       'removable carrier metadata intersects a runtime extent');
       if (!current) removedSections.push(section.name);
       continue;
     }
+    stage('retained_section_shape');
     assert(current && current.type === section.type && current.flags === section.flags && current.address === section.address,
       'strip removed or changed a retained carrier section');
     if (section.name !== '.shstrtab') {
+      stage('retained_section_size');
       assert(current.size === section.size, 'strip resized a retained carrier section');
-      if (section.type !== 8) assert(before.bytes.subarray(section.offset, section.offset + section.size).equals(
-        after.bytes.subarray(current.offset, current.offset + current.size)), 'strip changed retained section bytes');
+      if (section.type !== 8) {
+        stage('retained_section_bytes');
+        assert(before.bytes.subarray(section.offset, section.offset + section.size).equals(
+          after.bytes.subarray(current.offset, current.offset + current.size)), 'strip changed retained section bytes');
+      }
     }
   }
+  stage('section_set');
   assert(after.sections.every(section => before.sections.some(value => value.name === section.name)), 'strip added an unexpected section');
+  stage('debug_removal');
   assert(before.sections.some(section => section.name.startsWith('.debug_')) && !after.sections.some(section => section.name.startsWith('.debug_')),
     'strip-debug did not remove all original debug sections');
-  if (mode === 'static') assert(!after.sections.some(section => section.name === '.symtab' || section.name === '.strtab'),
-    'strip-all did not remove the static symbol and string tables');
+  if (mode === 'static') {
+    stage('static_removal');
+    assert(!after.sections.some(section => section.name === '.symtab' || section.name === '.strtab'),
+      'strip-all did not remove the static symbol and string tables');
+  }
   return Object.freeze({ structureOnly: true as const, originalByteCount: original.length, candidateByteCount: candidate.length,
     savedBytes: original.length - candidate.length, unchangedLoadBytes: before.programs.filter(program => program.type === 1).reduce((sum, program) => sum + program.size, 0),
     programHeaders: before.programs.length, removedSections: Object.freeze(removedSections),

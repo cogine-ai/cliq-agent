@@ -14,8 +14,8 @@ import { decodeSourceManifest, decodeWorkspaceEntries } from '../../../src/state
 import { decodeDeliveryTerminalProjectionEvidence } from '../../../src/kernel/publication.js';
 import { decodeRunResult } from '../../../src/state/result-artifacts.js';
 import { assertInstalledDeliveryOutcome, assertInstalledDeliveryVerifier } from './installed-delivery-result.js';
-import type { InstalledVerifierRetirementIdentity } from './installed-verifier-evidence.js';
-import type { InstalledWorkerRetirementBinding } from './installed-worker-lease.js';
+import type { InstalledDeliveryVerifierRetirementIdentity } from './installed-delivery-result.js';
+import type { InstalledWorkerRetirementBinding, InstalledVerifierParentRetirementBinding, inspectInstalledVerifierParentRetirement } from './installed-worker-lease.js';
 import { assertInstalledPublicationStopResult, type InstalledPublicationStopResult } from './installed-publication-stop-result.js';
 
 type Response = { protocolVersion: 1; ok: boolean; method?: string; result?: Record<string, any>; error?: Record<string, unknown> };
@@ -29,8 +29,10 @@ type Context = {
   readRetainedArtifact(ref: string): Promise<Buffer>; downloadPublicArtifact(ref: string): Promise<Buffer>;
   readOwnerHistory(): Promise<readonly StateOwnerRecordV1[]>;
   nextId(): string; uid: number; gid: number;
-  assertRunWorkersRetired(runId: string, observedLaunchIds: readonly string[], publicationRetirement?: InstalledWorkerRetirementBinding | null): Promise<number>;
-  assertVerifierProcessesAbsent(retirement: InstalledVerifierRetirementIdentity): Promise<void>;
+  assertRunWorkersRetired(runId: string, observedLaunchIds: readonly string[], publicationRetirement?: InstalledWorkerRetirementBinding | null,
+    verifierParentRetirement?: InstalledVerifierParentRetirementBinding): Promise<number>;
+  readParentRetirement(binding: InstalledVerifierParentRetirementBinding): ReturnType<typeof inspectInstalledVerifierParentRetirement>;
+  assertVerifierProcessesAbsent(retirement: InstalledDeliveryVerifierRetirementIdentity): Promise<void>;
   mark(phase: string): void; reconnect(): Promise<void>; restart(): Promise<void>;
   onTerminalDeadline?(caseKind: DeliveryProgressCase, cut: Record<string, any>): void;
   cleanupCrash(source: Source): Promise<void>;
@@ -66,9 +68,10 @@ export async function runInstalledDeliveryCases(context: Context, options: Reado
     }
     return cut;
   };
-  const retirements = async (runId: string, publicationRetirement?: InstalledWorkerRetirementBinding | null) => {
+  const retirements = async (runId: string, publicationRetirement?: InstalledWorkerRetirementBinding | null,
+    verifierParentRetirement?: InstalledVerifierParentRetirementBinding) => {
     const launches = observedLaunches.get(runId) ?? [];
-    return context.assertRunWorkersRetired(runId, [...launches], publicationRetirement);
+    return context.assertRunWorkersRetired(runId, [...launches], publicationRetirement, verifierParentRetirement);
   };
   const terminal = async (runId: string, by = Date.now() + 90000, caseKind: DeliveryProgressCase = 'delivery_publish') => {
     for (;;) {
@@ -209,11 +212,13 @@ export async function runInstalledDeliveryCases(context: Context, options: Reado
   assert.equal(cancelled.journal.filter((row: any) => row.phase === 'dispatch_claimed').length, 1);
   const stoppedIdentity = await assertInstalledDeliveryVerifier({ cut: cancelled, sourceCut: cancelledSource.cut, outcome: 'stopped',
     readRetainedArtifact: context.readRetainedArtifact, readOwnerHistory: context.readOwnerHistory,
+    readParentRetirement: context.readParentRetirement,
     cancellation: { request: cancellation, response: cancellationResponse } });
   await context.assertVerifierProcessesAbsent(stoppedIdentity);
   assert.deepEqual(stoppedRun.budgetConsumed, { ...ZERO, toolCalls: 1 });
   assert.deepEqual(stoppedRun.budgetReserved, ZERO); assert(!stoppedRun.activeWorkerLaunchId);
-  assert(await retirements(stoppedRun.id) > 0);
+  const parentRetirement = 'kind' in stoppedIdentity ? stoppedIdentity.recovery : undefined;
+  assert(await retirements(stoppedRun.id, undefined, parentRetirement) > 0);
   await inspect(cancelledSource, [...cancelledSource.files.map(file => ({ path: file.path, text: file.before })), flag]);
   assert.deepEqual(await metadata(path.join(cancelledSource.workspace, flag.path)), flag.original);
   for (const method of ['run.result', 'run.diff']) {
@@ -240,8 +245,10 @@ export async function runInstalledDeliveryCases(context: Context, options: Reado
     assert.deepEqual(await context.send(cancellation), cancellationResponse);
     const identity = await assertInstalledDeliveryVerifier({ cut: cancelled, sourceCut: cancelledSource.cut, outcome: 'stopped',
       readRetainedArtifact: context.readRetainedArtifact, readOwnerHistory: context.readOwnerHistory,
+      readParentRetirement: context.readParentRetirement,
       cancellation: { request: cancellation, response: cancellationResponse } });
-    await context.assertVerifierProcessesAbsent(identity); await retirements(stoppedRun.id);
+    await context.assertVerifierProcessesAbsent(identity);
+    await retirements(stoppedRun.id, undefined, 'kind' in identity ? identity.recovery : undefined);
   };
   for (const action of [context.reconnect, context.restart]) { await action(); await revalidate(); }
   let originalPublicationStopCase: Record<string, unknown> | undefined;
@@ -276,7 +283,10 @@ export async function runInstalledDeliveryCases(context: Context, options: Reado
     nonwaitingApproveRefusedWithoutMutation: true, noOpOriginalInodesUnchanged: true, aOnlyInodePreserved: true,
     cancelledAfterObservedVerifierClaim: true, cancelledWithoutPublication: true, cancellationSettledExactlyOnce: true,
     verifierReleaseBeforeCancelObserved: false, preciseInFlightVerifierCancelQualified: false,
-    exactVerifierProcessLifetimesIndependentlyAbsent: true,
+    exactVerifierProcessLifetimesIndependentlyAbsent: !parentRetirement,
+    cancellationRetirement: parentRetirement ? { kind: 'unknown_parent_domain' as const,
+      childIdentityRecorded: false, parentProcessLifetimesIndependentlyAbsent: true, originalControllerRetirementVerified: true } :
+      { kind: 'known_child_stop' as const, childProcessLifetimesIndependentlyAbsent: true },
     actualInspectionMatched: true, sameOriginalApplyReplayAfterReconnectAndRestart: true,
     directPolicyQualified: true, interactiveApprovalQualified: false, actualProviderQualified: false,
     allRecordedDeliveryWorkersPositivelyRetired: true, inheritedNoOpRecordedWorkerLaunches: 0,

@@ -263,13 +263,15 @@ async function publishSourceRetirement(driver: SqliteDriver, artifacts: Artifact
     stateLockIdentityDigest: inspectingOwner.stateLockIdentityDigest, instanceNonceDigest: inspectingOwner.instanceNonceDigest,
     activatedAt: inspectingOwner.acquiredAt, identityDigest: '' };
   inspector.identityDigest = digestOmitting(inspector, 'identityDigest');
-  const inspectorArtifact = await artifacts.publishCanonical(inspector, inspector.format);
+  const inspectorRef = canonicalSha256(inspector);
   const evidence: SourceInspectionRetirementEvidenceV1 = { schemaVersion: 1, format: 'cliq-source-inspection-retirement-v1',
     inspectionId: row.inspectionId, targetRef: row.targetRef, stagingNonceDigest: row.stagingNonceDigest,
-    inspectorIdentityRef: inspectorArtifact.ref, inspectorIdentityDigest: inspector.identityDigest,
+    inspectorIdentityRef: inspectorRef, inspectorIdentityDigest: inspector.identityDigest,
     captureOwnerClosure, stagingObservation: 'exact_reserved_root_absent', processClosure: { kind: 'not_planned' }, observedAt, evidenceDigest: '' };
   evidence.evidenceDigest = digestOmitting(evidence, 'evidenceDigest');
-  const evidenceArtifact = await artifacts.publishCanonical(evidence, evidence.format);
+  const [inspectorArtifact, evidenceArtifact] = await artifacts.publishCanonicalPair([
+    { value: inspector, schemaKind: inspector.format }, { value: evidence, schemaKind: evidence.format }
+  ]);
   return { inspectorArtifact, evidenceArtifact, observedAt };
 }
 

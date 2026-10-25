@@ -64,6 +64,30 @@ export class ArtifactCatalog {
     return this.publishBytes(canonicalJsonBytes(value), 'application/json', schemaKind);
   }
 
+  /** Inert admission data only; no partial result or deferred durability. */
+  async publishCanonicalPair(values: readonly [CanonicalPublication, CanonicalPublication]):
+    Promise<readonly [PublishedArtifact, PublishedArtifact]> {
+    if (!Array.isArray(values) || values.length !== 2) throw new TypeError('artifact publication requires exactly two objects');
+    const bytes = values.map(value => canonicalJsonBytes(value.value)), kinds = values.map(value => value.schemaKind);
+    const published = await this.cas.publishPair([bytes[0]!, bytes[1]!]);
+    if (published.length !== 2 || published.some((item, index) => item.ref !== sha256Bytes(bytes[index]!) || item.byteLength !== bytes[index]!.length))
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'admission pair differs from its complete canonical bytes');
+    const result = (index: number): PublishedArtifact => ({ ...published[index]!, mediaType: 'application/json', schemaKind: kinds[index]! });
+    return [result(0), result(1)];
+  }
+
+  /** Exactly three data objects share the existing four CAS boundaries. */
+  async publishCanonicalTriple(values: readonly [CanonicalPublication, CanonicalPublication, CanonicalPublication]):
+    Promise<readonly [PublishedArtifact, PublishedArtifact, PublishedArtifact]> {
+    if (!Array.isArray(values) || values.length !== 3) throw new TypeError('artifact publication requires exactly three objects');
+    const bytes = values.map(value => canonicalJsonBytes(value.value)), kinds = values.map(value => value.schemaKind);
+    const published = await this.cas.publishTriple([bytes[0]!, bytes[1]!, bytes[2]!]);
+    if (published.length !== 3 || published.some((item, index) => item.ref !== sha256Bytes(bytes[index]!) || item.byteLength !== bytes[index]!.length))
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'admission triple differs from its complete canonical bytes');
+    const result = (index: number): PublishedArtifact => ({ ...published[index]!, mediaType: 'application/json', schemaKind: kinds[index]! });
+    return [result(0), result(1), result(2)];
+  }
+
   /** Fixed four-object durability group. Every result waits for the complete
    * group's file verification and descriptor retirement, including failures. */
   async publishCanonicalFour(values: readonly [CanonicalPublication, CanonicalPublication, CanonicalPublication, CanonicalPublication]):

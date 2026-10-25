@@ -16,7 +16,7 @@ import { KernelStorageError } from './errors.js';
 import { decodeRepairDiagnosticItem, decodeVerificationReceipt, decodeVerifierRepairDiagnostic,
   decodeVerifierRepairModelContent, verifierRepairModelContent } from './verifier-artifacts.js';
 
-export async function readCanonicalArtifact<T>(artifacts: ArtifactCatalog, ref: string): Promise<T> {
+export async function readCanonicalArtifact<T>(artifacts: Pick<ArtifactCatalog, 'readCanonical'>, ref: string): Promise<T> {
   const value = await artifacts.readCanonical<T>(ref);
   if (canonicalSha256(value) !== ref) throw new KernelStorageError('ARTIFACT_MISMATCH', 'artifact bytes are not canonical JSON');
   return value;

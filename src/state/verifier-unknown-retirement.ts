@@ -3,7 +3,7 @@ import { canonicalSha256 } from '../kernel/canonical.js';
 import { assertArtifactRef, digestOmitting, identityHash, parseCanonicalTime } from '../kernel/identity.js';
 import type { BoundWorkerLaunch, InvocationJournalEntry, RecoveryClosureV1, TerminalDetail,
   WorkspaceGenerationQuarantineEvidenceV1, WorkspaceGenerationRetirementEvidenceV1, WorkspaceGenerationStateV1,
-  WorkerRecoveryEvidenceV1 } from '../kernel/types.js';
+  WorkerRecoveryEvidenceV1, StateOwnerRecordV1 } from '../kernel/types.js';
 import type { VerifierRequestV1, VerifierTargetV1 } from '../kernel/verifier-invocation.js';
 import { decodeRetainedRunAssembly } from '../model/run-assembly.js';
 import { exactKeys, requireEqual } from '../policy/runtime-authority.js';
@@ -22,7 +22,7 @@ import { readVerifierProgress } from './verifier-recovery.js';
 import { decodeVerifierCommand } from './verifier-artifacts.js';
 import { verifierOperationId } from './verifier-policy.js';
 import { validateRetainedWorkerQuarantines } from './worker-recovery.js';
-import { readCandidateSource } from './result-source.js';
+import { readCandidateSource, type CandidateSourceReader } from './result-source.js';
 
 type Abandonment = TerminalDetail['abandonedRetryInvocations'][number];
 /** Retained data only. This is neither a child death/no-spawn observation nor
@@ -85,6 +85,22 @@ async function originalClaim(driver: SqliteDriver, artifacts: ArtifactCatalog, c
   generation: WorkspaceGenerationStateV1, launch: BoundWorkerLaunch) {
   if (!hasOnlySettledVerifierUnknowns(cut.journal)) throw new TypeError('parent-domain retirement requires one original settled verifier UNKNOWN');
   const unknown = cut.journal.filter(entry => entry.opKind === 'verifier' && entry.phase === 'unknown').at(-1)!;
+  const claim = cut.journal.find(entry => entry.opId === unknown.opId && entry.attempt === unknown.attempt && entry.phase === 'dispatch_claimed')!;
+  const issuer = claim.stateOwnerEpoch ? readStateOwner(driver, claim.stateOwnerEpoch) : undefined;
+  const target = await readCanonicalArtifact<VerifierTargetV1>(artifacts, claim.target);
+  const progress = await readVerifierProgress(driver, artifacts, cut, target.candidateItemId);
+  return validateVerifierUnknownOriginalClaim(artifacts, cut, generation, launch, issuer, progress);
+}
+
+/** Read-only relationships, not a claim, native receipt or permission issuer.
+ * The private production entry above always obtains fresh SQL owner/progress;
+ * callers cannot supply this data to any execution or terminal writer. */
+export async function validateVerifierUnknownOriginalClaim(artifacts: CandidateSourceReader,
+  cut: Pick<RecoveryClosureV1, 'run' | 'runSpec' | 'journal'>, generation: WorkspaceGenerationStateV1,
+  launch: BoundWorkerLaunch, issuer: StateOwnerRecordV1 | undefined,
+  progress: Pick<Awaited<ReturnType<typeof readVerifierProgress>>, 'candidate' | 'planRef'>) {
+  if (!hasOnlySettledVerifierUnknowns(cut.journal)) throw new TypeError('parent-domain retirement requires one original settled verifier UNKNOWN');
+  const unknown = cut.journal.filter(entry => entry.opKind === 'verifier' && entry.phase === 'unknown').at(-1)!;
   const attempt = cut.journal.filter(entry => entry.opId === unknown.opId && entry.attempt === unknown.attempt);
   const [prepared, claim] = attempt as [InvocationJournalEntry, InvocationJournalEntry, InvocationJournalEntry];
   for (const key of ['runId', 'opId', 'opKind', 'attempt', 'leaseEpoch', 'requestRef', 'target', 'grantRef', 'replayClass'] as const)
@@ -97,7 +113,6 @@ async function originalClaim(driver: SqliteDriver, artifacts: ArtifactCatalog, c
       generation.phase === 'active' && launch.launchId !== generation.activeWorkerLaunchId || launch.workspaceGenerationRef !== generation.generationRef ||
       launch.leaseEpoch !== claim.leaseEpoch || launch.supervisorInstanceId !== claim.supervisorInstanceId)
     throw new TypeError('verifier UNKNOWN substitutes its original parent activation');
-  const issuer = readStateOwner(driver, claim.stateOwnerEpoch);
   if (!issuer || issuer.supervisorInstanceId !== claim.supervisorInstanceId || issuer.acquiredAt > claim.timestamp ||
       issuer.state === 'terminal' && issuer.releasedAt < claim.timestamp) throw new TypeError('verifier UNKNOWN has a foreign claiming owner');
   requireEqual(await readCanonicalArtifact(artifacts, unknown.evidenceRef!), { schemaVersion: 1, format: 'cliq-verifier-ambiguity-v1',
@@ -116,7 +131,6 @@ async function originalClaim(driver: SqliteDriver, artifacts: ArtifactCatalog, c
   const request = await readCanonicalArtifact<VerifierRequestV1>(artifacts, prepared.requestRef);
   // Reproduce the complete candidate/plan/request/grant/policy/settlement graph,
   // including when a terminal Run no longer has a frontier.
-  const progress = await readVerifierProgress(driver, artifacts, cut, target.candidateItemId);
   if (prepared.opId !== verifierOperationId(cut.run.id, target.candidateItemId, progress.planRef, target.verifierIndex) ||
       target.runId !== cut.run.id || request.runId !== cut.run.id || request.opId !== prepared.opId ||
       request.candidateItemId !== progress.candidate.itemId || request.verifierIndex !== target.verifierIndex ||
