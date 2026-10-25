@@ -16,6 +16,42 @@ import { ResourceRetirementError } from '../../../src/state/errors.js';
 const source = await readFile(new URL('../../../src/state/store.ts', import.meta.url), 'utf8');
 const between = (start: string, end: string) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
 
+test('terminal retirement forwards only the existing complete recovery reader phases', async () => {
+  // Execute only the real inert observer, never a Store, Run or recovery cut.
+  const parsed = ts.createSourceFile('store.ts', source, ts.ScriptTarget.Latest, true);
+  let method: ts.MethodDeclaration | undefined;
+  const visit = (node: ts.Node) => {
+    if (ts.isMethodDeclaration(node) && node.name.getText(parsed) === 'retireInstalledTerminalRun') method = node;
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed); assert(method?.body);
+  const calls: ts.CallExpression[] = [];
+  const find = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && node.expression.getText(parsed) === 'readRecoveryClosure') calls.push(node);
+    ts.forEachChild(node, find);
+  };
+  find(method); assert.equal(calls.length, 1);
+  const call = calls[0]!, observer = call.arguments[3];
+  assert(observer && ts.isArrowFunction(observer), 'the original complete reader must receive its fixed phase observer');
+  assert.deepEqual(call.arguments.slice(0, 3).map(node => node.getText(parsed)),
+    ['this.driver', 'this.artifacts.withReadSignal(signal)', 'runId']);
+  assert(!/\bawait\b|Date\.|performance\.|setTimeout|\.message|\.cause|\.stack/u.test(observer.getText(parsed)));
+  const context = { runId: 'inert-run', invoke: undefined as any };
+  new Script(transformSync(`globalThis.invoke = function() { return ${observer.getText(parsed)}; };`,
+    { loader: 'ts' }).code).runInNewContext(context);
+  const installedRunPhases = new Map<string, string>([['inert-run', 'terminal_retirement']]);
+  const observe = context.invoke.call({ installedRunPhases }) as (phase: string) => void;
+  for (const phase of ['spec', 'context', 'journal', 'generations', 'history_candidate', 'seals', 'terminal']) {
+    observe(phase); assert.equal(installedRunPhases.get('inert-run'), `result_recovery_${phase}`);
+  }
+  installedRunPhases.delete('inert-run'); observe('terminal');
+  assert.equal(installedRunPhases.size, 0, 'late diagnosis cannot recreate a retired tracking entry');
+  const recovery = await readFile(new URL('../../../src/state/recovery-closure.ts', import.meta.url), 'utf8');
+  assert.match(recovery, /const phase = \(value: RecoveryClosurePhase\) => \{ try \{ onPhase\?\.\(value\); \} catch \{/u);
+  assert(method.getText(parsed).indexOf('await this.ownInstalledAdmission') < method.getText(parsed).indexOf('const opening ='),
+    'full recovery still completes before any original execution owner can close');
+});
+
 const assemblyStages = ['submit_assembly_native', 'submit_assembly_source', 'submit_assembly_platform',
   'submit_assembly_material', 'submit_assembly_publish', 'submit_assembly_verifier', 'submit_assembly_policy',
   'submit_assembly_final_check'] as const;

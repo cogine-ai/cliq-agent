@@ -54,6 +54,16 @@ legacy Transaction/validator/shell path for trusted execution.
 
 ### B. Complete agent behavior and ecosystem (I3)
 
+First connect ordinary Git capture, frozen projection, private Git and exact
+Checkpoint restore to the same complete result/Delivery path. Safe projection
+of source Git configuration, nonempty object closures and fresh include-read
+authorization remain explicit contract/implementation work; opening existing
+guards is not their implementation. Start the single generated v1 protocol and
+first real thin-client round trip alongside this consumer path, not after
+building four independent frontends. At least one installed real-model and
+repair-utility qualification, plus installed Run-context compaction, must not
+be deferred to the final all-provider release campaign.
+
 Connect the existing ordinary tool approval/input reducers and all necessary
 read/search/edit/bash capabilities. Complete ordinary child Runs with bounded
 allocation and exactly-once settlement, dependency setup, stateless MCP,
@@ -2419,3 +2429,38 @@ that snapshot is not a passing combined gate. The final bundle includes this
 test correction, strict Checkpoint-role repair, Owner observation repair and
 four fixed diagnosis labels, and must pass a new complete gate and the real
 Linux campaigns without altering the outstanding limits or qualification gaps.
+
+The combined commit `eb69d3e35f37c03b7a60188553cb242941703fd9`
+(tree `6ab2944ecbf097bcc8bd83b75664e34a4df3bd7e`) passes the seven local
+gates: 2,760 full tests pass with three existing skips, 262 script tests pass
+with 15 existing platform skips, and 99 portable tests pass. Its natural
+[Linux workflow 40162859452](https://github.com/cogine-ai/cliq-agent/actions/runs/40162859452),
+attempt 1 / run 468, has 17 successful jobs and five failures; all four
+TypeScript jobs succeed. Thirteen independently pinned captures retain all
+105 original JSON reports / 498,508 bytes across 23 categories, with no pending,
+incomplete or rejected artifact. There are 18 true and five false qualification
+reports, 21 zero-error cleanups and 21 byte-identical runner-baseline pairs.
+All collector/poller/wrapper processes, pipes and scoped awake guard actually
+join. Independent closed-schema closeout SHA-256:
+`880bafa50db333abae88fd721335f136a500f29d6137431b4d0dbffc2f7559a0`.
+
+Preparation SIGTERM now passes its unchanged two-second stop, original physical
+retirement, genuine successor cancellation, history and replay checks. The
+strict Checkpoint-role correction does not resolve every terminal reader
+refusal: normal Delivery still rejects nonwaiting approval with `INTERNAL`
+after its first publication's complete assertions. The remaining cause is
+not established; preserve the full recovery path and original negative
+assertion. Its terminal-retirement call now forwards the existing closed
+recovery phases solely to identify the actual refusal, with no new schema,
+authority, clock, error-field inspection or cleanup claim.
+
+All three owned delayed-volume campaigns pass READY, but miss the unchanged
+30-second initial submission deadline before any target physical cut. Two
+stop in `submit_assembly_verifier_current`, one in
+`submit_assembly_verifier_history`; these observations do not establish a
+specific slow syscall or justify removing image/root checks. The verifier
+campaign still cannot complete its cumulative 4,096-stream secret scan. Its
+logical counter is cumulative across tables, not a count of generations;
+independent actual storage locations cannot be deduplicated merely because
+their bytes match. None of these failures qualifies the missing cut, complete
+I1/I2 or the release. No PR is opened for this incomplete delivery.

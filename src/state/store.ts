@@ -2202,7 +2202,10 @@ export class StateStore {
     // releasing its original installation/launcher image owners; failures keep
     // both the cache and StateOwner, never masquerading as positive cleanup.
     this.installedRunPhases.set(runId, 'terminal_retirement');
-    await this.ownInstalledAdmission(signal => readRecoveryClosure(this.driver, this.artifacts.withReadSignal(signal), runId));
+    await this.ownInstalledAdmission(signal => readRecoveryClosure(this.driver, this.artifacts.withReadSignal(signal), runId,
+      phase => {
+        if (this.installedRunPhases.has(runId)) this.installedRunPhases.set(runId, `result_recovery_${phase}`);
+      }));
     const opening = this.executions.get(runId);
     if (opening) {
       try { await (await opening).close(); }
