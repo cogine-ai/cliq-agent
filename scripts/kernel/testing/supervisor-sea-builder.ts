@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
-import { chmod, copyFile, lstat, open, readFile, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, lstat, open, readFile, realpath, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { build } from 'esbuild';
 import { inject } from 'postject';
@@ -13,6 +13,7 @@ import { INSTALLED_WORK_CHANNEL } from '../../../src/state/installed-work-diagno
 import { PUBLICATION_RETIREMENT_CHANNEL } from '../../../src/state/publication-retirement-diagnostics.js';
 import { INSTALLED_STORE_DIAGNOSTIC_BANNER } from './installed-store-diagnostic-banner.js';
 import { INSTALLED_ASSEMBLY_WORK_DIAGNOSTIC_BANNER } from './installed-assembly-work-banner.js';
+import { compareSupervisorCarrierLayout } from './supervisor-carrier-layout.js';
 export { INSTALLED_ASSEMBLY_WORK_DIAGNOSTIC_BANNER } from './installed-assembly-work-banner.js';
 
 export const SUPERVISOR_SEA_NODE_VERSION = '24.21.0';
@@ -168,6 +169,74 @@ export async function prepareSupervisorSeaCarrier(fixture: string, cachedArchive
   const carrier = path.join(nodeRoot, 'bin/node');
   assert.equal(run(fixture, carrier, ['--version']).stdout.trim(), `v${SUPERVISOR_SEA_NODE_VERSION}`);
   return { nodeRoot, carrier };
+}
+
+/** Fixed publisher derivation, never a runtime option or loader shortcut.
+ * The original carrier remains the input to guest/component recipes. Only
+ * the Supervisor's new signed SEA image uses the smaller derived carrier;
+ * complete installed, guest and READY qualification remains independent. */
+export async function prepareInstalledSupervisorSeaCarrier(fixture: string, cachedArchive?: string) {
+  const original = await prepareSupervisorSeaCarrier(fixture, cachedArchive);
+  if (process.platform !== 'linux') return { ...original, supervisorCarrier: original.carrier };
+  assert.equal(process.arch, 'x64', 'only the fixed Linux x64 carrier has a metadata derivation');
+  const directory = await lstat(fixture, { bigint: true });
+  assert(directory.isDirectory() && directory.uid === BigInt(process.geteuid!()) && (directory.mode & 0o077n) === 0n,
+    'carrier derivation requires the publisher private fixture');
+  const fields = ['dev', 'ino', 'uid', 'gid', 'mode', 'nlink', 'size', 'mtimeNs', 'ctimeNs'] as const;
+  const held = async (filename: string, maxBytes = 268_435_456) => {
+    const fd = await open(filename, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      const before = await fd.stat({ bigint: true });
+      assert(before.isFile() && before.nlink === 1n && before.size > 0n && before.size <= BigInt(maxBytes),
+        'carrier derivation requires a bounded single-link regular input');
+      const bytes = await fd.readFile(); assert.equal(BigInt(bytes.length), before.size);
+      for (const after of [await fd.stat({ bigint: true }), await lstat(filename, { bigint: true })])
+        for (const key of fields) assert.equal(after[key], before[key], 'carrier derivation input changed');
+      return { bytes, identity: before, sha256: createHash('sha256').update(bytes).digest('hex') };
+    } finally { await fd.close(); }
+  };
+  const unchanged = async (filename: string, before: Awaited<ReturnType<typeof held>>) => {
+    const after = await held(filename, before.bytes.length); assert.equal(after.sha256, before.sha256);
+    for (const key of fields) assert.equal(after.identity[key], before.identity[key], 'publisher input identity changed');
+  };
+  const execute = (executable: string, args: string[], expected?: string) => {
+    const child = spawnSync(executable, args, { cwd: fixture, encoding: 'utf8', timeout: 60_000, maxBuffer: 65_536,
+      env: { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C' } });
+    assert.equal(child.error, undefined, 'publisher derivation process did not join');
+    assert.equal(child.signal, null); assert.equal(child.status, 0, 'publisher derivation failed');
+    assert.equal(child.stderr, ''); if (expected !== undefined) assert.equal(child.stdout, expected);
+    return child.stdout;
+  };
+  const input = await held(original.carrier);
+  assert.equal(input.identity.uid, BigInt(process.geteuid!()));
+  assert.equal(input.sha256, '7fde7b8afa198da66257f42ee2001d874c7355631e6d1579a5fb5ef1f246df4c',
+    'derivation accepts only the complete fixed official Node image');
+  const strip = await realpath('/usr/bin/strip'), tool = await held(strip, 16_777_216);
+  assert.equal(tool.identity.uid, 0n); assert.equal(tool.identity.mode & 0o022n, 0n);
+  assert(/^GNU strip \([\x20-\x7e]{1,96}\) [0-9][\x20-\x7e]{0,48}$/u.test(execute(strip, ['--version']).split('\n')[0]!));
+  const supervisorCarrier = path.join(fixture, 'supervisor-carrier-static');
+  await copyFile(original.carrier, supervisorCarrier, constants.COPYFILE_EXCL);
+  execute(strip, ['--strip-all', '--no-merge-notes', '--', supervisorCarrier]);
+  await chmod(supervisorCarrier, 0o500);
+  const selected = await held(supervisorCarrier);
+  assert.equal(selected.identity.uid, BigInt(process.geteuid!()));
+  compareSupervisorCarrierLayout(input.bytes, selected.bytes, 'static');
+  execute(supervisorCarrier, ['--version'], `v${SUPERVISOR_SEA_NODE_VERSION}\n`);
+  await unchanged(original.carrier, input); await unchanged(strip, tool); await unchanged(supervisorCarrier, selected);
+  const file = await open(supervisorCarrier, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const current = await file.stat({ bigint: true });
+    for (const key of fields) assert.equal(current[key], selected.identity[key]);
+    await file.sync();
+  } finally { await file.close(); }
+  const parent = await open(fixture, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  try {
+    const current = await parent.stat({ bigint: true });
+    for (const key of ['dev', 'ino', 'uid', 'gid', 'mode'] as const) assert.equal(current[key], directory[key]);
+    await parent.sync();
+  } finally { await parent.close(); }
+  await unchanged(supervisorCarrier, selected);
+  return { ...original, supervisorCarrier };
 }
 
 export async function buildSupervisorSeaImage(input: {

@@ -13,17 +13,22 @@ Linux execution/restart and cancellation foundations are real, but a final
 model turn still stops at `candidate_required`. No work package or complete I1
 is declared finished by the 32 passing checks.
 
-Current installed boundary (2026-10-25): the exact `aea2410` Linux
-[run 471](https://github.com/cogine-ai/cliq-agent/actions/runs/40175803188)
-completed with 16 successful and six failed jobs; all four TypeScript jobs
+Current installed boundary (2026-10-25): the exact `fd7f6d8` Linux
+[run 472](https://github.com/cogine-ai/cliq-agent/actions/runs/40183283874)
+completed with 17 successful and five failed jobs; all four TypeScript jobs
 passed. Normal publication, no-op and merge assertions pass, and cancellation
 now reaches its terminal Run before failing the complete retirement consumer.
-Three owned delayed-storage campaigns still miss initial admission's unchanged
-30-second limit. The verifier secret scan exhausts its unchanged cumulative
+One owned delayed-storage campaign misses five-second READY; the other two
+pass READY but time out on the initial thirty-second business request, with
+empty `cases`. Their preset `delivery_publish` phase is not evidence that
+admission or a later physical publication cut completed. The verifier secret
+scan exhausts its unchanged cumulative
 4096-stream limit while reading logical SQLite cells, before completing the
-retained corpus; it is not a secret-free qualification. The sixth job failure
-is the diagnostic-only carrier-size experiment, not permission to select a
-different production image. All 105 original reports and 21 successful cleanup
+retained corpus; it is not a secret-free qualification. The independent carrier
+experiment now preserves runtime bytes and passes actual Node/SEA probes while
+removing 18,064,768 bytes of non-runtime metadata; it does not qualify a guest,
+installation, sixteen-read authentication or five-second READY. All 105 original
+reports and 21 successful cleanup
 records were retained and independently revalidated; evidence integrity does
 not turn the failed campaigns into passing qualification.
 Package A is therefore not complete. Ordinary Git/tool integration (B), thin
@@ -80,6 +85,13 @@ first real thin-client round trip alongside this consumer path, not after
 building four independent frontends. At least one installed real-model and
 repair-utility qualification, plus installed Run-context compaction, must not
 be deferred to the final all-provider release campaign.
+
+The first client implementation now delegates executable schemas and method
+metadata to the canonical control-v1 source, checks its transitive source digest
+in normal `npm test`, and routes the existing installed JSONL driver through
+the production serial adapter. It retains caller-owned close, backpressure and
+EOF-without-cancel semantics. This is not implementation of the unconnected v1
+methods, headless schema 3, four frontend qualification or the Kernel Cut.
 
 Connect the existing ordinary tool approval/input reducers and all necessary
 read/search/edit/bash capabilities. Complete ordinary child Runs with bounded

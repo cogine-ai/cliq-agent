@@ -201,6 +201,24 @@ test('carrier preparation refuses an existing extraction directory without adopt
   } finally { await rm(fixture, { recursive: true, force: true }); }
 });
 
+test('installed publisher preparation preserves the original fresh-root refusal before any derivation', async () => {
+  const builder = await import('./supervisor-sea-builder.js') as Record<string, unknown>;
+  assert.equal(typeof builder.prepareInstalledSupervisorSeaCarrier, 'function');
+  const prepare = builder.prepareInstalledSupervisorSeaCarrier as typeof prepareSupervisorSeaCarrier;
+  const fixture = await mkdtemp(path.join(os.tmpdir(), 'cliq-installed-carrier-'));
+  try {
+    const name = `node-v${SUPERVISOR_SEA_NODE_VERSION}-${process.platform}-${process.arch}`;
+    const nodeRoot = path.join(fixture, name); await mkdir(nodeRoot, { mode: 0o700 });
+    const sentinel = path.join(nodeRoot, 'existing-data');
+    await writeFile(sentinel, 'not a publisher input\n', { flag: 'wx', mode: 0o400 });
+    const before = await lstat(sentinel, { bigint: true });
+    await assert.rejects(prepare(fixture, fileURLToPath(import.meta.url)), /carrier extraction directory must not already exist/);
+    assert.deepEqual(await lstat(sentinel, { bigint: true }), before);
+    assert.equal(await readFile(sentinel, 'utf8'), 'not a publisher input\n');
+    assert.deepEqual(await readdir(fixture), [name]);
+  } finally { await rm(fixture, { recursive: true, force: true }); }
+});
+
 // Actual diagnostic code generation and Node channel execution only. This does
 // not replace the installed image's credential, manager or native qualification.
 test('the fixed fixture banner writes only known credential phase markers and contains its own output errors', async () => {

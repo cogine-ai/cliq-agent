@@ -27,7 +27,9 @@ const ONE_TOOL = { ...ZERO, toolCalls: 1 };
 const check = (condition: unknown): void => { if (!condition) throw new Error('installed Delivery data assertion failed'); };
 const same = (left: unknown, right: unknown): void => check(canonicalSha256(left) === canonicalSha256(right));
 export type InstalledDeliveryDiagnosticStage = 'public_cut' | 'source_and_merge' | 'direct_policy' | 'settlements' |
-  'verification' | 'publication_receipts' | 'terminal_projection' | 'session_publication';
+  'verification' | 'verification_inputs' | 'verification_plan' | 'verification_grant' | 'verification_settlement' |
+  'verification_cancel' | 'verification_parent_retirement' | 'verification_child_retirement' |
+  'verification_workspace' | 'verification_context' | 'publication_receipts' | 'terminal_projection' | 'session_publication';
 export class InstalledDeliveryOutcomeError extends Error {
   readonly code = 'INSTALLED_DELIVERY_OUTCOME_REFUSED';
   constructor(readonly diagnosticStage: InstalledDeliveryDiagnosticStage) {
@@ -114,6 +116,9 @@ export function assertInstalledDeliveryVerifier(input: InstalledDeliveryVerifier
 export function assertInstalledDeliveryVerifier(input: InstalledDeliveryVerifierInput & { outcome: 'stopped' }): Promise<InstalledDeliveryVerifierRetirementIdentity>;
 export function assertInstalledDeliveryVerifier(input: InstalledDeliveryVerifierInput): Promise<InstalledDeliveryVerifierRetirementIdentity>;
 export async function assertInstalledDeliveryVerifier(input: InstalledDeliveryVerifierInput): Promise<InstalledDeliveryVerifierRetirementIdentity> {
+  // Fixed diagnostics only: never inspect the rejected error, serialize a
+  // retained object, or treat a phase marker as evidence that it completed.
+  let stage: InstalledDeliveryDiagnosticStage = 'verification';
   try {
     const { cut, sourceCut, outcome } = input, run = cut.snapshot?.run;
     check(cut.method === 'run.get' && cut.snapshot.operation === 'delivery' && sourceCut.snapshot?.operation === 'agent' &&
@@ -130,6 +135,7 @@ export async function assertInstalledDeliveryVerifier(input: InstalledDeliveryVe
       const value = await bytes(ref), data = parseJsonStrict(new TextDecoder('utf-8', { fatal: true }).decode(value));
       check(canonicalJsonBytes(data).equals(value)); return data;
     };
+    stage = 'verification_inputs';
     const spec = decodeRunSpec(await object(run.specRef)), originalSpec = decodeRunSpec(await object(sourceCut.snapshot.run.specRef));
     check(spec.operation === 'delivery' && spec.credentialGrantRefs.length === 0);
     for (const key of ['objectiveRef', 'sourceProjectionRef', 'assemblyRef', 'policyRef', 'sandboxProfileRef', 'verifierSpecRef'] as const) check(spec[key] === originalSpec[key]);
@@ -147,6 +153,7 @@ export async function assertInstalledDeliveryVerifier(input: InstalledDeliveryVe
       candidate.resultSourceRef === merged.resultSourceRef && candidate.diffRef === merged.diffRef && candidate.summaryRef === merged.summaryRef);
     const source = decodeSourceManifest(await object(candidate.resultSourceRef));
     check(source.role === 'result' && source.manifestDigest === candidate.sourceDigest && source.sourceProjectionRef === spec.sourceProjectionRef);
+    stage = 'verification_plan';
     const { frozen, assembly, commands, environments } = await readInstalledVerifierInputs(spec, bytes);
     check(frozen.verifiers.length === 1 && frozen.verifiers[0]!.gate === 'required');
     const policy = await object(spec.policyRef);
@@ -172,6 +179,7 @@ export async function assertInstalledDeliveryVerifier(input: InstalledDeliveryVe
     check(operation.every((row: any) => row.runId === run.id && row.opId === opId && row.attempt === 0 && row.replayClass === 'retry' &&
       row.requestRef === canonicalSha256(planned.request) && row.target === planned.request.targetRef && row.grantRef === prepared.grantRef));
     same(await object(prepared.requestRef), planned.request); same(await object(prepared.target), planned.target);
+    stage = 'verification_grant';
     const grant = await object(prepared.grantRef); check(grant.provenance.kind === 'policy_snapshot');
     const channel = await object(grant.provenance.channelEvidenceRef);
     const evaluator = loadVerifierPolicy({ policy, policyRef: spec.policyRef, assembly, assemblyRef: spec.assemblyRef,
@@ -186,6 +194,7 @@ export async function assertInstalledDeliveryVerifier(input: InstalledDeliveryVe
       principalId: policy.principalId, decisionRef: grant.provenance.channelEvidenceRef, policyChannelEvidenceRef: grant.provenance.channelEvidenceRef,
       policyChannelEvidenceDigest: channel.evidenceDigest, createdAt: channel.evaluatedAt, decisionSource: 'direct_policy', decision: 'allow', grantRef: prepared.grantRef });
     check(policyRows[0]!.row.itemSeq > candidateRow.itemSeq && policyRows[0]!.row.createdAt <= prepared.timestamp);
+    stage = 'verification_settlement';
     if (unknownParent) assertInstalledDeliveryUnknownSettlement(prepared, claim, terminal, await object(terminal.budgetSettlementRef));
     else assertInstalledDeliverySettlement(prepared, claim, terminal, await object(terminal.budgetSettlementRef), 0);
     const verifierItems = items.filter(value => value.item.kind === 'verifier_result' || value.item.kind === 'verifier_stop');
@@ -213,6 +222,7 @@ export async function assertInstalledDeliveryVerifier(input: InstalledDeliveryVe
       same(result.verificationReceiptRefs, [terminal.receiptRef]);
       measurement = { retirementRef: receipt.containmentEvidenceRef, endedAt: receipt.endedAt, stdoutRef: receipt.stdoutRef, stderrRef: receipt.stderrRef };
     } else {
+      stage = 'verification_cancel';
       check(run.status === 'cancelled' && run.terminalReason === 'cancelled_by_user' && run.cancelRequested && !run.resultRef && input.cancellation);
       if (!unknownParent) {
       const item = decodeVerifierStopItem(verifierItems[0]!.item), evidence = decodeVerifierStopEvidence(await object(item.containmentEvidenceRef));
@@ -244,6 +254,7 @@ export async function assertInstalledDeliveryVerifier(input: InstalledDeliveryVe
     }
     let physical: { checkpoint: any; identity: InstalledDeliveryVerifierRetirementIdentity };
     if (unknownParent) {
+      stage = 'verification_parent_retirement';
       check(input.readParentRetirement);
       physical = await assertInstalledVerifierParentRetirement({ cut, spec, candidate, planRef, prepared, claim, terminal,
         reader: { readCanonical: object, async *readChunks(ref, byteLength) {
@@ -251,23 +262,26 @@ export async function assertInstalledDeliveryVerifier(input: InstalledDeliveryVe
         } }, readOwnerHistory: input.readOwnerHistory, readParentRetirement: input.readParentRetirement! });
       check(physical.checkpoint.runItemSeq === cut.items.length && physical.checkpoint.runItemSeq >= policyRows[0]!.row.itemSeq);
     } else {
+      stage = 'verification_child_retirement';
       check(measurement);
       physical = await assertInstalledVerifierRetirement({ run, checkpoints: cut.checkpoints, prepared, claim, terminal,
         requestContext, measurement: measurement!, readRetainedArtifact: bytes, readOwnerHistory: input.readOwnerHistory });
       const row = verifierItems[0]!.row;
       check(physical.checkpoint.runItemSeq === row.itemSeq && row.itemSeq > policyRows[0]!.row.itemSeq);
     }
+    stage = 'verification_workspace';
     const state = decodeWorkspaceState(await object(physical.checkpoint.workspaceStateRef));
     check(state.baseWorkspaceManifestRef === spec.baseWorkspaceManifestRef && state.runId === run.id &&
       state.entriesRef === source.entriesRef && state.sourceProjectionDigest === source.sourceProjectionDigest &&
       !state.privateGitStateRef && state.invalidatedEphemeralPaths.length === 0);
+    stage = 'verification_context';
     for (const checkpoint of cut.checkpoints.filter((cp: any) => cp.runItemSeq >= candidateRow.itemSeq)) {
       const context = decodeContextManifest(await object(checkpoint.contextManifestRef));
       check(context.runId === run.id && context.assemblyRef === spec.assemblyRef && context.admittedContextRef === spec.admittedContextRef && context.throughItemSeq === checkpoint.runItemSeq);
       validateContextItems(context, items.slice(0, checkpoint.runItemSeq).map(value => ({ itemSeq: value.row.itemSeq, itemRef: value.row.payloadRef, item: value.item })));
     }
     return physical.identity;
-  } catch { throw new InstalledDeliveryOutcomeError('verification'); }
+  } catch { throw new InstalledDeliveryOutcomeError(stage); }
 }
 
 /** Source qualification is independently performed by the original full

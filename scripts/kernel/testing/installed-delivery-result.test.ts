@@ -129,3 +129,20 @@ test('new Delivery verifier refuses foreign/unexecuted cuts without creating ret
   }
   assert.equal(reads, 0);
 });
+
+test('a retained-input refusal reports its fixed verification phase without inspecting private errors', async () => {
+  let reads = 0, detailReads = 0;
+  const privateFailure = Object.defineProperties(new Error(), Object.fromEntries(['message', 'stack', 'cause'].map(key =>
+    [key, { get() { detailReads++; throw new Error('private diagnostic data must not be read'); } }])));
+  // Protocol data reaches only the first retained read. It creates no Run,
+  // StateOwner, native identity, grant or positive retirement evidence.
+  await assert.rejects(assertInstalledDeliveryVerifier({ outcome: 'stopped',
+    cut: { method: 'run.get', snapshot: { operation: 'delivery', run: { specRef: 'a'.repeat(64) } },
+      nextItemSeq: 0, highWaterItemSeq: 0, items: [], nextJournalSeq: 0, highWaterJournalSeq: 0, journal: [],
+      nextCheckpointCursor: 0, highWaterCheckpointCursor: 0 },
+    sourceCut: { snapshot: { operation: 'agent', run: { status: 'succeeded', specRef: 'b'.repeat(64) } } },
+    readRetainedArtifact: async () => { reads++; throw privateFailure; },
+    readOwnerHistory: async () => { throw new Error('owner history must not be reached'); } }),
+  error => error instanceof InstalledDeliveryOutcomeError && error.diagnosticStage === 'verification_inputs');
+  assert.equal(reads, 1); assert.equal(detailReads, 0);
+});

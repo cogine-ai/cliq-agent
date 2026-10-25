@@ -5,9 +5,8 @@ import assert from 'node:assert/strict';
 import { constants, writeSync, type BigIntStats } from 'node:fs';
 import { lstat, open, type FileHandle } from 'node:fs/promises';
 import path from 'node:path';
-import { canonicalJsonBytes } from '../../../src/kernel/canonical.js';
-import { CONTROL_FRAME_BYTES as bound, decodeControlFrame, decodeInstalledControlRequest, INSTALLED_CONTROL_FEATURES,
-  type InstalledControlFeature } from '../../../src/kernel/control-wire.js';
+import { CONTROL_FRAME_BYTES as bound, decodeControlFrame } from '../../../src/control/v1.js';
+import { runInstalledControlJsonl } from '../../../src/control/installed-jsonl.js';
 import { parseJsonStrict } from '../../../src/kernel/json.js';
 import type { ReleaseTrustKey } from '../../../src/policy/runtime-authority.js';
 import { ResourceRetirementError } from '../../../src/state/errors.js';
@@ -121,25 +120,19 @@ async function* requests(): AsyncGenerator<Buffer> {
   // Preserve the original harness budget: its automatic real hello is the
   // first of 1024 frames, leaving at most 1023 business requests. This is not
   // a production protocol or transport connection limit.
-  let pending = Buffer.alloc(0), count = 1;
+  let count = 1;
   for await (const chunk of process.stdin) {
     assert(Buffer.isBuffer(chunk)); let offset = 0;
     while (offset < chunk.length) {
-      const newline = chunk.indexOf(10, offset), end = newline < 0 ? chunk.length : newline;
-      const piece = chunk.subarray(offset, end);
-      assert(pending.length + piece.length <= bound);
-      pending = pending.length ? Buffer.concat([pending, piece]) : Buffer.from(piece);
-      offset = end + (newline < 0 ? 0 : 1);
-      if (newline >= 0) {
-        assert(++count <= 1024 && pending.length > 0);
-        const complete = pending; pending = Buffer.alloc(0); yield complete;
-      }
+      const newline = chunk.indexOf(10, offset);
+      if (newline < 0) { yield chunk.subarray(offset); break; }
+      assert(++count <= 1024, 'installed client frame budget exceeded');
+      yield chunk.subarray(offset, newline + 1); offset = newline + 1;
     }
   }
-  assert.equal(pending.length, 0, 'truncated installed client JSONL input');
 }
-async function output(value: unknown): Promise<void> {
-  const bytes = Buffer.concat([canonicalJsonBytes(value), Buffer.from('\n')]);
+async function output(bytes: Buffer): Promise<void> {
+  assert(Buffer.isBuffer(bytes));
   assert(bytes.length <= bound + 1);
   await new Promise<void>((resolve, reject) => process.stdout.write(bytes, error => error ? reject(new Error('installed client output failed')) : resolve()));
 }
@@ -167,17 +160,9 @@ async function main(): Promise<void> {
     client = await openInstalledSupervisorClient(selected);
     assert(!stopRequested, 'installed client driver is stopping');
     setPhase('output');
-    await output({ protocolVersion: 1, ok: true, result: client.hello });
-    setPhase('request');
-    for await (const bytes of requests()) {
-      setPhase('request');
-      const request = decodeInstalledControlRequest(decodeControlFrame(bytes));
-      assert(INSTALLED_CONTROL_FEATURES.includes(request.method as InstalledControlFeature), 'only connected installed methods may be sent');
-      // The canonical table supplies the dynamic JSONL adapter; each generated
-      // method and the common transport independently enforce its exact method.
-      const response = await Reflect.apply(client[request.method as InstalledControlFeature], client, [request]);
-      setPhase('output'); await output(response); setPhase('request');
-    }
+    await runInstalledControlJsonl(client, requests(), async bytes => {
+      setPhase('output'); await output(bytes); setPhase('request');
+    });
     assert(!stopRequested, 'installed client driver stopped before EOF');
   } catch (error) { failure = error; failedPhase = phase; }
   finally {

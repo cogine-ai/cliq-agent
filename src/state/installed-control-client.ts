@@ -1,5 +1,5 @@
 import { INSTALLED_CONTROL_FEATURES, decodeInstalledControlRequest, type InstalledControlFeature, type InstalledControlRequestV1,
-  type InstalledControlResponseFor, type InstalledControlResultFor } from '../kernel/control-wire.js';
+  type InstalledControlResponseFor, type InstalledControlResultFor } from '../control/v1.js';
 import type { HeldInstalledRuntime } from './installed-runtime.js';
 import { openInstalledControlTransport } from './installed-control-transport.js';
 

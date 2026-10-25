@@ -13,7 +13,7 @@ import { canonicalJsonBytes, canonicalSha256 } from '../../../src/kernel/canonic
 import { sha256Bytes } from '../../../src/kernel/identity.js';
 import { policyProfile, verifyRuntimeBundle, type RuntimeBundleManifest } from '../../../src/policy/runtime-authority.js';
 import { STATE_OWNER_NATIVE_ENTRY_ID, STATE_OWNER_NATIVE_RELATIVE_PATH } from '../../../src/state/native-owner.js';
-import { buildSupervisorSeaImage, prepareSupervisorSeaCarrier } from './supervisor-sea-builder.js';
+import { buildSupervisorSeaImage, prepareInstalledSupervisorSeaCarrier } from './supervisor-sea-builder.js';
 import { installedModelPackageEntries, writeInstalledModelAuthority, type InstalledModelPackageFixture } from './installed-model-package.js';
 import { writeInstalledGuestToolchain } from './installed-guest-package.js';
 import { validateGuestToolchainMetadata } from '../../../src/state/guest-toolchain.js';
@@ -40,7 +40,7 @@ export async function buildInstalledSupervisorPackage(fixture: string,
     'fixed publication observations belong only to the installed delivery qualification image');
   if (options.guestToolchain) assert(variant === 'complete' && modelFixture, 'installed verifier requires the complete model and native package');
   const repository = fileURLToPath(new URL('../../..', import.meta.url));
-  const { nodeRoot, carrier } = await prepareSupervisorSeaCarrier(fixture);
+  const { nodeRoot, carrier, supervisorCarrier } = await prepareInstalledSupervisorSeaCarrier(fixture);
   const keys = generateKeyPairSync('ed25519');
   const releaseKeys = [{ keyId: 'explicit-installed-startup-test-root',
     publicKeyPem: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString() }];
@@ -48,7 +48,7 @@ export async function buildInstalledSupervisorPackage(fixture: string,
   await writeFile(rootAsset, canonicalJsonBytes(releaseKeys), { flag: 'wx', mode: 0o400 });
   const packageRoot = path.join(fixture, 'package');
   await mkdir(packageRoot, { mode: 0o700 });
-  const supervisorFile = await buildSupervisorSeaImage({ fixture, carrier,
+  const supervisorFile = await buildSupervisorSeaImage({ fixture, carrier: supervisorCarrier,
     entryPoint: path.join(repository, 'src/state/installed-entry.ts'),
     executable: path.join(packageRoot, 'supervisor'), variant: 'installed-supervisor',
     // Fixed observations belong only to explicitly selected qualifiers.

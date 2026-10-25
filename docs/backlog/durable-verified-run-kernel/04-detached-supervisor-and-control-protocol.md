@@ -952,3 +952,30 @@ or join failure retains resources/owner; StateOwner's in-flight release guard
 is unchanged. Public pre-deadline timeout remains invalid. Real unpaused native
 task closure and installed Supervisor SIGTERM are independent qualification
 targets; neither source wiring nor a decoder regression supplies that proof.
+
+## Fixed Supervisor publisher derivation
+
+The Linux x64 qualification publisher may derive its Supervisor carrier from
+the checksum-pinned official Node 24.21.0 archive before SEA injection and
+signing. It uses a new private, single-link copy and the protected system GNU
+strip with exactly `--strip-all --no-merge-notes -- <copy>`. The original
+carrier, archive and tool remain unchanged. Guest Node images and ordinary
+component recipes continue to consume the original carrier, not this derived
+Supervisor input. Darwin retains its existing preparation and signing path.
+
+Before executing the derived carrier, completely read/hash both images and
+compare every original program header and runtime extent, including LOAD,
+interpreter, notes and dynamic bytes. Only ELF section-table location/count/name
+index fields may differ in loaded headers. Removed debug/static-symbol/string
+sections must be outside all runtime extents; all retained section identities,
+types, flags, addresses, lengths and bytes remain exact, except the section-name
+table's rewritten representation. Preserve the original unique SEA fuse.
+Require an actual matching Node version, joined commands, stable full-byte and
+held/named identity rereads, and durable file/parent publication. There is no
+runtime selection flag, unverified fallback or integrity-result cache.
+
+The derived complete SEA image is signed and verified under the existing
+bundle contract. Full native image checks, all sixteen authentication reads,
+five-second READY and two-second Stop remain unchanged. Structural comparison
+and Node/SEA probes do not qualify guest execution, installation, reconnect,
+restart or a deadline. Those require their original exact-image Linux campaigns.

@@ -72,19 +72,23 @@ test('a real diagnostic sink failure cannot skip original retirement or replace 
       const {copyInstalledClientAuthenticationWork,installedClientAuthenticationMarker}=await import(${JSON.stringify(new URL('./installed-client-consumer.ts', import.meta.url).href)});
       const {INSTALLED_CLIENT_PHASE_CHANNEL,INSTALLED_CLIENT_PHASES}=await import(${JSON.stringify(new URL('../../../src/state/installed-diagnostics.ts', import.meta.url).href)});
       const {INSTALLED_WORK_CHANNEL}=await import(${JSON.stringify(new URL('../../../src/state/installed-work-diagnostics.ts', import.meta.url).href)});
+      const {runInstalledControlJsonl}=await import(${JSON.stringify(new URL('../../../src/control/installed-jsonl.ts', import.meta.url).href)});
       const mode=${JSON.stringify(mode)},events=[],clientFd=openSync('/dev/null','r'),selectedFd=openSync('/dev/null','r');
       const business=new Error('original business failure'),retirement=new Error('original retirement failure');
       const joined=fd=>{try{fstatSync(fd);return false}catch(error){assert.equal(error.code,'EBADF');return true}};
       let originalFailure='none',exitCode=0,escaped=false;
       const context={assert,writeSync,performance,channel,INSTALLED_CLIENT_PHASE_CHANNEL,INSTALLED_CLIENT_PHASES,
-        INSTALLED_WORK_CHANNEL,copyInstalledClientAuthenticationWork,installedClientAuthenticationMarker,ResourceRetirementError:class extends Error{},
+        INSTALLED_WORK_CHANNEL,copyInstalledClientAuthenticationWork,installedClientAuthenticationMarker,runInstalledControlJsonl,ResourceRetirementError:class extends Error{},
         observeFailure(error){originalFailure=error===business?'business':error===retirement?'retirement':'other'},
         process:{platform:'linux',arch:'x64',geteuid:()=>1001,getegid:()=>1001,argv:['node','driver','data-only'],
           once(){},removeListener(){events.push('remove-listener')},stdin:{destroy(){}},stdout:{on(){},removeListener(){events.push('remove-listener')}},
           stderr:{write(bytes){writeSync(2,bytes);return true}},set exitCode(value){exitCode=value}},
         fixtureComposition:async()=>({stateRoot:'data-only',releaseKeys:[]}),
         createInstalledRuntime:()=>({openSelected:async()=>({close:async()=>{events.push('selected-close');closeSync(selectedFd)}})}),
-        openInstalledSupervisorClient:async()=>({hello:{},close:async()=>{events.push('client-close');closeSync(clientFd);if(mode==='retirement_failure')throw retirement}}),
+        openInstalledSupervisorClient:async()=>({hello:{method:'control.hello',protocolVersion:1,serverBuild:'data-only',
+          controlSchemaRange:{min:1,max:1},headlessSchemaRange:{min:1,max:1},enabledFeatureIds:[],supervisorInstanceId:'data-only',
+          activeRuntimeBundle:{schemaVersion:1,runtimeBundleRef:'a'.repeat(64),bundleDigest:'a'.repeat(64),bundleVersion:'1'}},
+          close:async()=>{events.push('client-close');closeSync(clientFd);if(mode==='retirement_failure')throw retirement}}),
         output:async()=>{},requests:async function*(){closeSync(2);
           channel(INSTALLED_WORK_CHANNEL).publish(Object.defineProperty({},'package',{get(){throw new Error('diagnostic getter')}}));
           channel(INSTALLED_CLIENT_PHASE_CHANNEL).publish('final_current_verified');
@@ -126,4 +130,27 @@ test('installed client driver bundles as one ordinary Node consumer with no exte
   assert.equal(result.outputFiles?.length, 1);
   assert(result.outputFiles[0]!.contents.length > 0 && result.outputFiles[0]!.contents.length <= 16 * 1024 * 1024);
   assert(Object.values(result.metafile!.outputs).flatMap(output => output.imports).every(item => item.external && item.path.startsWith('node:')));
+  const inputs = Object.keys(result.metafile!.inputs);
+  assert(inputs.some(name => name.endsWith('src/control/installed-jsonl.ts')),
+    'the real installed driver must consume the production JSONL adapter');
+  assert(inputs.some(name => name.endsWith('src/control/v1.ts')),
+    'the real installed driver and client must consume the same generated contract');
+});
+
+test('the campaign wrapper alone retains the original 1024 frames including automatic hello', async () => {
+  const source = readFileSync(new URL('./installed-control-client-driver.ts', import.meta.url), 'utf8');
+  const parsed = ts.createSourceFile('driver.ts', source, ts.ScriptTarget.Latest, true);
+  const declaration = parsed.statements.find(statement => ts.isFunctionDeclaration(statement) && statement.name?.text === 'requests');
+  assert(declaration && ts.isFunctionDeclaration(declaration));
+  const emitted = ts.transpileModule(declaration.getText(parsed), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  const frame = Buffer.from('{"method":"supervisor.status","protocolVersion":1}\n');
+  for (const count of [1023, 1024]) {
+    const input = async function* () { yield Buffer.concat(Array.from({ length: count }, () => frame)); };
+    const requests = new Function('process', 'assert', emitted + ';return requests;')({ stdin: input() }, assert) as () => AsyncIterable<Buffer>;
+    let frames = 0;
+    const collect = async () => { for await (const bytes of requests()) { frames++; assert(bytes.equals(frame)); } };
+    if (count === 1023) await collect();
+    else await assert.rejects(collect(), { name: 'AssertionError' });
+    assert.equal(frames, 1023, 'a wrapper failure may not dispatch the 1024th business request');
+  }
 });
