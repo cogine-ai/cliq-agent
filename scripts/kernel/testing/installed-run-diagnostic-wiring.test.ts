@@ -46,7 +46,8 @@ test('assembly fixed observations remain outside authority input and precede onl
     ['final_check', 'await installed.revalidate(signal); await validateControlChannelClosure']])
     assert(assembly.getText().includes(`reportInstalledRunAssemblyPhase(onAssemblyPhase, 'submit_assembly_${stage}');\n` +
       (['native', 'publish', 'verifier', 'policy', 'final_check'].includes(stage) ? '    ' : '  ') + operation), stage);
-  assert.equal((assembly.getText().match(/reportInstalledRunAssemblyPhase\(/gu) ?? []).length, assemblyStages.length);
+  assert.equal((assembly.getText().match(/reportInstalledRunAssemblyPhase\(/gu) ?? []).length, assemblyStages.length + 1,
+    'only the eight original boundaries and the contained verifier observer forwarding are present');
   assert.match(code, /type InstalledRunAssemblyPhase = Extract<InstalledApplyDiagnosticStage, `submit_assembly_\$\{string\}`>;/u);
   const submit = between('private async submitInstalledRunOwned(', '/** One bounded production lane,');
   assert.match(submit, /credentialBindings: authority.bindings, controlledHome \}, signal, diagnosis\?\.stage\);/u);
@@ -66,6 +67,62 @@ test('the actual assembly observer contains sink errors and ignores absent obser
     assert.doesNotThrow(() => invoke(new Proxy({}, { get: bad, ownKeys: bad, getPrototypeOf: bad }), phase));
   }
   assert.deepEqual(phases, [...assemblyStages]); assert.equal(touched, 0);
+});
+
+const verifierPreparationStages = ['submit_assembly_verifier_history', 'submit_assembly_verifier_current',
+  'submit_assembly_verifier_compose', 'submit_assembly_verifier_publish'] as const;
+async function verifierPreparationObservation() {
+  const code = await readFile(new URL('../../../src/state/verifier-admission.ts', import.meta.url), 'utf8');
+  const parsed = ts.createSourceFile('verifier-admission.ts', code, ts.ScriptTarget.Latest, true);
+  const functions = new Map(parsed.statements.filter(ts.isFunctionDeclaration).map(node => [node.name?.text, node]));
+  const observer = functions.get('reportInstalledVerifierPreparationPhase');
+  assert(observer?.body, 'the real verifier observer must contain each optional callback');
+  const context = { invoke: undefined as any };
+  new Script(transformSync(`${observer.getText(parsed)}; globalThis.invoke = reportInstalledVerifierPreparationPhase;`,
+    { loader: 'ts' }).code).runInNewContext(context);
+  return { functions, observer, invoke: context.invoke as (observer: unknown, phase: string) => void };
+}
+
+test('installed verifier preparation diagnosis follows the actual history, current image, compose and publication boundaries only', async () => {
+  // Wiring only. No grant, owner, installed identity or alternate reader exists here.
+  const { functions, observer } = await verifierPreparationObservation();
+  assert(!/\bawait\b|Date\.|performance\.|setTimeout/u.test(observer.getText()), 'diagnosis adds no I/O, timer or clock');
+  const identities = functions.get('readVerifierRequestIdentities')!.getText();
+  const resolve = functions.get('resolveVerifierSpec')!.getText();
+  const installed = functions.get('prepareInstalledVerifierAssembly')!.getText();
+  const ordinary = functions.get('prepareVerifierSpec')!.getText();
+  for (const [body, stage, operation] of [
+    [identities, verifierPreparationStages[0], 'const history = await readAuthorizationHistory'],
+    [identities, verifierPreparationStages[1], 'const selected = await readRetainedVerifierToolchain'],
+    [resolve, verifierPreparationStages[2], 'const profile ='],
+    [installed, verifierPreparationStages[3], 'const metadata = await publishVerifierAssembly']
+  ]) assert(body.includes(`reportInstalledVerifierPreparationPhase(onPreparationPhase, '${stage}');\n` +
+    (body === identities ? '    ' : '  ') + operation), 'a fixed phase must immediately precede its original operation');
+  assert.match(resolve, /input\.requests, historical, signal, onPreparationPhase\)/u);
+  assert.match(installed, /input, undefined, signal, onPreparationPhase\)/u);
+  assert.match(ordinary, /input, historical, signal\)/u);
+  assert(!ordinary.includes('onPreparationPhase'), 'ordinary and historical callers keep the original observer-free path');
+  const { assembly } = await assemblyObservation();
+  assert.match(assembly.getText(), /sandboxProfileRef \}, signal, onAssemblyPhase\s*\? phase => reportInstalledRunAssemblyPhase\(onAssemblyPhase, phase\) : undefined\)/u);
+  assert.match(assembly.getText(), /identity\.principalId, request\.verifiers, undefined, signal\) : \[\]/u,
+    'the earlier identity lookup does not acquire an unrelated observer');
+  const input = functions.get('prepareInstalledVerifierAssembly')!.parameters.find(parameter => parameter.name.getText() === 'input')!;
+  assert(!input.type!.getText().includes('Phase'), 'observation is separate from the original closed authority input');
+});
+
+test('installed verifier preparation observations contain throwing sinks without reading their private errors', async () => {
+  const { invoke } = await verifierPreparationObservation();
+  let accesses = 0;
+  const bad = () => { accesses++; throw new Error('must not inspect a diagnostic input'); };
+  const original = Object.defineProperties({}, { message: { get: bad }, stack: { get: bad }, cause: { get: bad } });
+  const observed: string[] = [];
+  for (const stage of verifierPreparationStages) {
+    assert.doesNotThrow(() => invoke(undefined, stage));
+    assert.doesNotThrow(() => invoke((phase: string) => { observed.push(phase); throw original; }, stage));
+    assert.doesNotThrow(() => invoke(Object.defineProperty({}, 'call', { get: bad }), stage));
+    assert.doesNotThrow(() => invoke(new Proxy({}, { get: bad, ownKeys: bad, getPrototypeOf: bad }), stage));
+  }
+  assert.deepEqual(observed, [...verifierPreparationStages]); assert.equal(accesses, 0);
 });
 
 for (const fault of ['cancel', 'ordinary', 'retirement'] as const)

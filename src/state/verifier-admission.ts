@@ -23,8 +23,15 @@ import { identityHash } from '../kernel/identity.js';
 import { decodeAdmittedContext, decodeRunObjective, decodeUnverifiedConsent } from './decoders.js';
 import { decodeSandboxProfile } from './execution-closure.js';
 import { GUEST_EXTRACTOR_RECIPE, LINUX_VERIFIER_RESOURCE_MINIMUMS } from '../sandbox/guest-toolchain.js';
+import type { InstalledApplyDiagnosticStage } from './installed-run-diagnostics.js';
 
 const same = (left: unknown, right: unknown) => canonicalJsonBytes(left).equals(canonicalJsonBytes(right));
+type InstalledVerifierPreparationPhase = Extract<InstalledApplyDiagnosticStage, `submit_assembly_verifier_${string}`>;
+/** Fixed data diagnosis only; a sink cannot replace the original operation. */
+function reportInstalledVerifierPreparationPhase(observer: ((phase: InstalledVerifierPreparationPhase) => void) | undefined,
+  phase: InstalledVerifierPreparationPhase): void {
+  try { observer?.(phase); } catch { /* Diagnosis cannot decide verifier preparation. */ }
+}
 /** Validate data properties before traversing arrays or cloning requests. */
 export function assertVerifierRequestData(value: unknown): void {
   const ancestors = new Set<object>(); let members = 0;
@@ -81,7 +88,7 @@ export function assertSupportedVerifierRequests(requests: readonly VerifierReque
 export async function readVerifierRequestIdentities(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
   runtime: AuthorizationRuntime, principalId: string, requests: readonly VerifierRequest[], historical?: {
     runId: string; admissionIntentDigest: string; admittedAt: string;
-  }, signal?: AbortSignal) {
+  }, signal?: AbortSignal, onPreparationPhase?: (phase: InstalledVerifierPreparationPhase) => void) {
   const resolved = [];
   for (const request of requests) {
     signal?.throwIfAborted();
@@ -90,12 +97,14 @@ export async function readVerifierRequestIdentities(driver: SqliteDriver, artifa
       throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');
     const checkedAt = historical?.admittedAt ?? sampleCanonicalNow();
     if (checkedAt < grant.createdAt || checkedAt >= grant.expiresAt) throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');
+    reportInstalledVerifierPreparationPhase(onPreparationPhase, 'submit_assembly_verifier_history');
     const history = await readAuthorizationHistory(driver, artifacts, owner, grant, runtime.releaseKeys, signal);
     if (checkedAt < history.committedAt) throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');
     const target = grant.target;
     if (target.kind !== 'execution_identity_read' || target.purpose !== 'verifier' || target.identity.kind !== 'guest_toolchain' ||
         request.executable.kind !== 'toolchain' || request.executable.toolId !== target.identity.toolId)
       throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');
+    reportInstalledVerifierPreparationPhase(onPreparationPhase, 'submit_assembly_verifier_current');
     const selected = await readRetainedVerifierToolchain(artifacts, { ...runtime,
       guestToolchainManifestRef: target.identity.guestToolchainManifestRef, signal });
     if (selected.manifest.manifestDigest !== target.identity.manifestDigest || selected.manifest.node.logicalName !== target.identity.toolId ||
@@ -159,9 +168,11 @@ type VerifierPreparationInput = { principalId: string; requests: readonly Verifi
 type VerifierPreparationHistory = { runId: string; admissionIntentDigest: string; admittedAt: string };
 
 async function resolveVerifierSpec(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
-  runtime: AuthorizationRuntime, input: VerifierPreparationInput, historical?: VerifierPreparationHistory, signal?: AbortSignal) {
+  runtime: AuthorizationRuntime, input: VerifierPreparationInput, historical?: VerifierPreparationHistory, signal?: AbortSignal,
+  onPreparationPhase?: (phase: InstalledVerifierPreparationPhase) => void) {
   assertSupportedVerifierRequests(input.requests, input.policyMode);
-  const resolved = await readVerifierRequestIdentities(driver, artifacts, owner, runtime, input.principalId, input.requests, historical, signal);
+  const resolved = await readVerifierRequestIdentities(driver, artifacts, owner, runtime, input.principalId, input.requests, historical, signal, onPreparationPhase);
+  reportInstalledVerifierPreparationPhase(onPreparationPhase, 'submit_assembly_verifier_compose');
   const profile = resolved.length ? decodeSandboxProfile(await readCanonicalArtifact(artifacts, input.sandboxProfileRef)) : undefined;
   for (const { selected } of resolved) {
     if (input.assembly.runtime.runtimeBundleRef !== canonicalSha256(runtime.bundle) ||
@@ -239,8 +250,10 @@ export async function prepareVerifierSpec(driver: SqliteDriver, artifacts: Artif
  * authority before publishing data; historical validation keeps the ordinary
  * read-only path above and never creates or repairs missing objects. */
 export async function prepareInstalledVerifierAssembly(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
-  runtime: AuthorizationRuntime, input: VerifierPreparationInput, signal?: AbortSignal) {
-  const { composed, resolved } = await resolveVerifierSpec(driver, artifacts, owner, runtime, input, undefined, signal);
+  runtime: AuthorizationRuntime, input: VerifierPreparationInput, signal?: AbortSignal,
+  onPreparationPhase?: (phase: InstalledVerifierPreparationPhase) => void) {
+  const { composed, resolved } = await resolveVerifierSpec(driver, artifacts, owner, runtime, input, undefined, signal, onPreparationPhase);
+  reportInstalledVerifierPreparationPhase(onPreparationPhase, 'submit_assembly_verifier_publish');
   const metadata = await publishVerifierAssembly(artifacts, composed, input.assembly, signal);
   return { spec: composed.spec, specRef: composed.specRef, metadata, resolved };
 }

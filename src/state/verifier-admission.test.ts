@@ -90,7 +90,7 @@ test('installed assembly uses the shared full verifier resolution before publica
   const installed = functions.get('prepareInstalledVerifierAssembly');
   assert(installed?.body, 'installed assembly must have an explicit current-only wrapper, not a historical feature flag');
   const body = installed.body.getText(parsed);
-  assert.match(body, /await resolveVerifierSpec\(driver, artifacts, owner, runtime, input, undefined, signal\)/u);
+  assert.match(body, /await resolveVerifierSpec\(driver, artifacts, owner, runtime, input, undefined, signal, onPreparationPhase\)/u);
   assert.match(body, /await publishVerifierAssembly\(artifacts, composed, input\.assembly, signal\)/u);
   assert(body.indexOf('await resolveVerifierSpec') < body.indexOf('await publishVerifierAssembly'));
   assert(!installed.parameters.some(parameter => parameter.name.getText(parsed) === 'historical'));

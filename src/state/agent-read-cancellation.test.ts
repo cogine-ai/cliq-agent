@@ -128,7 +128,7 @@ test('installed admission scopes only its read-only CAS work and retains origina
   assert.match(assembly, /await prepareInstalledVerifierAssembly\(driver, reads, owner,/u);
   const verifier = source('./verifier-admission.ts');
   const preparation = between(verifier, 'export async function prepareInstalledVerifierAssembly(', 'export async function prepareVerifierConsumption(');
-  assert.match(preparation, /await resolveVerifierSpec\(driver, artifacts, owner, runtime, input, undefined, signal\)/u);
+  assert.match(preparation, /await resolveVerifierSpec\(driver, artifacts, owner, runtime, input, undefined, signal, onPreparationPhase\)/u);
   assert.match(preparation, /await publishVerifierAssembly\(artifacts, composed, input\.assembly, signal\)/u);
   const publication = between(verifier, 'export async function publishVerifierAssembly(', '/** Deterministic command/environment construction,');
   assert.match(publication, /await artifacts\.publishCanonical\(assembly, assembly\.format\)/u);

@@ -2343,3 +2343,79 @@ recovery/publication reader. The correction updates only those two expected
 call spellings, retaining the same phase-before-read checks and every other
 assertion. The failed snapshot and outputs remain retained; it is not a
 qualified combined gate. The corrected snapshot requires a new complete gate.
+
+The corrected DAG commit `cc16b4f124c7f1f129d9581220c86f7a52b56296`
+(tree `0195b06197408a1c3f177cca3e85718d95f6e27e`) passes all seven local
+commands: 2,755 tests pass with three existing skips, 238 script tests pass
+with 15 existing platform skips, and all 99 portable tests pass. Build,
+design guard and strict actual-dependency checking succeed; all processes,
+pipes and the scoped awake guard join. Validation SHA-256:
+`1ae2bb09c43d6522c27c25f13f67dbc299ade9189d959c20f2b9ef1c0ffbee13`.
+
+Its actual workflow `40158809941`, attempt 1 / run 467, finishes naturally
+with 16 successful jobs and six failures; all four TypeScript jobs succeed.
+The original collector retains 100 JSON reports across 22 categories. The
+explicit-Delivery artifact is rejected by its closed `lastRefusal.method`
+enumeration; it is not silently accepted or counted as verified. All eleven
+captures and the rejection remain unchanged, with final capture SHA-256
+`48f058ac0b4c74d65a8c6c6a0828751e1f9ed0f93339fb801cfe01544d2ae853`.
+The collector, pipes and awake guard genuinely join. This incomplete report
+set is not a complete evidence closeout or Linux qualification.
+
+The preparation-stop campaign proves its original physical retirement and
+ordinary two-second stop, then fails the asynchronous owner-history tail
+comparison. That comparison incorrectly requires the same active owner's
+canonical time fence to remain unchanged. The next correction retains exact
+equality of every Owner row and all original CAS/lineage checks, re-inspects
+the complete final SQL cut, and requires the same fence epoch and non-regressing
+accepted/update times. Its SQLite regressions are not native Owner evidence.
+Four fixed verifier-preparation diagnosis stages distinguish history, current
+toolchain, composition and publication without changing their operations,
+authority, order, output bounds or deadlines. This combined correction still
+requires its own full local gate and actual Linux validation.
+
+The two delayed submission campaigns still miss 30 seconds before any physical
+cut; the late-result campaign still misses five-second READY with its final
+three revalidations unverified. Complete verifier secret-scan coverage again
+exceeds 4,096 independent streams (677 already opened before the corpus).
+None of these limits is increased, reset or bypassed. The delivery, storage
+and cancellation/recovery package remains the first complete deliverable;
+ordinary Git/tools and then CLI/TUI/JSONL/local-RPC consumption remain real
+implementation work, not merely qualification. Provider, macOS, reboot,
+cross-filesystem publication, scale and final Kernel Cut gaps remain open.
+
+Supplemental retention of the same explicit-Delivery artifact preserves the
+original rejection and capture. A separately tested closed schema revision
+adds only its already-supported `run.approve` / `run.cancel` method literals;
+no wire rule, code set, parser, field or byte/scan bound changes. The five
+original JSON files pass complete validation without normalization; their
+manifest SHA-256 is
+`21065d381b4194b8e0154a40caa671b5e3f86b2ac3f36a67826171098464bb6a`.
+The report remains false: execution reaches the nonwaiting-approval check,
+where a terminal Delivery incorrectly returns `INTERNAL`. Its prior complete
+publication checks have returned, but no-op, merge, cancellation, reconnect and
+restart are not thereby qualified.
+
+The production finalization reader incorrectly requires the old M seal
+Checkpoint even after the complete physical reader has verified a nonempty
+forward publication's received handoff and distinct terminal Checkpoint.
+The correction selects exactly that terminal role for this validated success
+branch and the original seal role for no-op; it does not accept either id by
+fallback, infer a handoff from Plan shape, change error mapping, or skip the
+original approval replay/full-recovery path. Pure predicate regressions cover
+role swaps and the original identity, projection, branch and time refusals;
+the two original timing tests remain intact. They are not installed/native
+qualification.
+
+The first combined owner/diagnosis snapshot (tree
+`b2d91ea645df25671f63ecac302f86b9cd1be7b3`) passes the original build but
+fails one of 2,758 tests: an existing cancellation-wiring assertion still
+expects the verifier resolver without its new observational argument.
+The correction changes only that exact call expectation, retaining its signal,
+authority and publication checks. The failed full-test stdout is retained
+with SHA-256
+`ab8259c33a52401153970fd322e307b6456a2854a7c1ace699d8e3fa61787d14`;
+that snapshot is not a passing combined gate. The final bundle includes this
+test correction, strict Checkpoint-role repair, Owner observation repair and
+four fixed diagnosis labels, and must pass a new complete gate and the real
+Linux campaigns without altering the outstanding limits or qualification gaps.

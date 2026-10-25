@@ -10,7 +10,8 @@ test('submit stages use the historical admission failure envelope without claimi
   assert.equal(typeof module.beginInstalledSubmitDiagnostic, 'function');
   const stages = ['submit_request', 'submit_preflight_authority', 'submit_source_capture', 'submit_assembly',
     'submit_assembly_native', 'submit_assembly_source', 'submit_assembly_platform', 'submit_assembly_material', 'submit_assembly_publish',
-    'submit_assembly_verifier', 'submit_assembly_policy', 'submit_assembly_final_check',
+    'submit_assembly_verifier', 'submit_assembly_verifier_history', 'submit_assembly_verifier_current',
+    'submit_assembly_verifier_compose', 'submit_assembly_verifier_publish', 'submit_assembly_policy', 'submit_assembly_final_check',
     'submit_final_admission', 'submit_postcommit_load'];
   assert.deepEqual(module.INSTALLED_APPLY_DIAGNOSTIC_STAGES, ['request', 'replay', 'capture_source', 'capture',
     'source', 'prepare', 'admit', 'postcommit_load', ...stages]);

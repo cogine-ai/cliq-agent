@@ -389,9 +389,12 @@ async function readFinalizationData(driver: SqliteDriver, artifacts: ArtifactCat
     // never substituted for native publication/root-observation provenance.
     const { readDeliveryTerminalProjection } = await import('./delivery-publication-recovery.js');
     const physical = delivery ? await delivery.terminalProjection(projectionRef) : await readDeliveryTerminalProjection(driver, artifacts, cut, projectionRef);
+    // The complete physical reader already requires a handoff for nonempty
+    // forward finalization; Plan shape alone never proves that resource edge.
     if (physical.evidenceRef !== projectionRef || physical.evidence.selectedBranch !== 'forward_finalize' ||
         physical.evidence.observedSourceRef !== basis.candidate.resultSourceRef || physical.evidence.deliveryPlanRef !== verified.deliveryPlanRef ||
-        physical.checkpoint.id !== identityHash('cliq-delivery-publication-checkpoint-v1', cut.run.id, verified.deliveryPlanRef) ||
+        physical.checkpoint.id !== identityHash(verified.deliveryPlan.forwardOperations.length
+          ? 'cliq-delivery-publication-terminal-checkpoint-v1' : 'cliq-delivery-publication-checkpoint-v1', cut.run.id, verified.deliveryPlanRef) ||
         physical.checkpoint.createdAt < verified.checkpoint.createdAt)
       throw new TypeError('delivery terminal projection differs from its carried verified merge');
     const frontier: Extract<RunFrontier, { kind: 'finalize'; operation: 'delivery' }> = { schemaVersion: 1, kind: 'finalize', operation: 'delivery',

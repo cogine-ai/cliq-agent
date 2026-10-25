@@ -58,6 +58,25 @@ export function inspectInstalledOwnerHistory(stateRoot: string) {
   } finally { database.close(); }
 }
 
+/** Re-observe the complete SQL cut after an asynchronous retained-evidence walk.
+ * Owner lineage must remain byte-for-byte current, but its time fence may have
+ * advanced through ordinary transactions by that same owner. This read-only
+ * qualification check creates no ownership or execution authority. */
+export function assertInstalledOwnerHistoryCurrent(stateRoot: string, expected: ReturnType<typeof inspectInstalledOwnerHistory>): void {
+  const current = inspectInstalledOwnerHistory(stateRoot);
+  assert.deepEqual(current.owners, expected.owners);
+  if (expected.fence === undefined) {
+    assert.equal(current.fence, undefined);
+    return;
+  }
+  assert(current.fence);
+  assert.equal(current.fence.stateOwnerEpoch, expected.fence.stateOwnerEpoch);
+  assert(parseCanonicalTime(current.fence.lastAcceptedAt) >= parseCanonicalTime(expected.fence.lastAcceptedAt),
+    'the same owner canonical accepted time must not regress');
+  assert(parseCanonicalTime(current.fence.updatedAt) >= parseCanonicalTime(expected.fence.updatedAt),
+    'the same owner canonical fence update must not regress');
+}
+
 export function observeInstalledOwnerHistory(stateRoot: string) {
   try { return inspectInstalledOwnerHistory(stateRoot); }
   catch (error) {

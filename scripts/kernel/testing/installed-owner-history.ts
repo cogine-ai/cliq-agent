@@ -10,7 +10,7 @@ import { parseJsonStrict } from '../../../src/kernel/json.js';
 import type { PlatformProcessIdentityV1, StateLockIdentityV1, StateOwnerAcquisitionEvidenceV1,
   StateOwnerRecordV1, StateOwnerTransitionEvidenceV1, StateRootIdentityV1 } from '../../../src/kernel/types.js';
 import type { RuntimeBundleManifest } from '../../../src/policy/runtime-authority.js';
-import { inspectInstalledOwnerHistory } from './installed-read-control.js';
+import { assertInstalledOwnerHistoryCurrent, inspectInstalledOwnerHistory } from './installed-read-control.js';
 
 type RootInput = { stateRoot: string; uid: number };
 const imageFields = ['dev', 'ino', 'uid', 'gid', 'mode', 'nlink', 'size', 'mtimeNs', 'ctimeNs'] as const;
@@ -156,7 +156,7 @@ export async function qualifyInstalledOwnerLinks(input: RootInput & {
     openedNoFollow: true, layoutVersion: 1, identityDigest: root.identityDigest });
   assert.equal(rootInfo.uid, BigInt(input.uid)); assert.equal(rootInfo.mode & 0o7777n, 0o700n);
   assert.equal(root.identityDigest, digestOmitting(root, 'identityDigest'));
-  assert.deepEqual(inspectInstalledOwnerHistory(input.stateRoot), history);
+  assertInstalledOwnerHistoryCurrent(input.stateRoot, history);
   input.report.qualified = true;
   return history;
 }

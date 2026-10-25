@@ -506,7 +506,8 @@ export async function assembleInstalledRun(input: {
     reportInstalledRunAssemblyPhase(onAssemblyPhase, 'submit_assembly_verifier');
     const verifier = await prepareInstalledVerifierAssembly(driver, reads, owner, { bundle: installed.bundle, releaseKeys: installed.releaseKeys },
       { principalId: identity.principalId, requests: request.verifiers, policyMode: request.policyMode, assembly,
-        sourceProjectionRef: sourceManifest.sourceProjectionRef, sandboxProfileRef }, signal);
+        sourceProjectionRef: sourceManifest.sourceProjectionRef, sandboxProfileRef }, signal, onAssemblyPhase
+        ? phase => reportInstalledRunAssemblyPhase(onAssemblyPhase, phase) : undefined);
     reportInstalledRunAssemblyPhase(onAssemblyPhase, 'submit_assembly_policy');
     const policyRef = (await artifacts.publishCanonical(policy, policy.format)).ref;
     const verifierSpecRef = verifier.specRef;
