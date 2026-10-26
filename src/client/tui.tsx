@@ -144,6 +144,7 @@ export function ClientTui({ app, io, initialRunId, profile }: Readonly<{
       void act(() => app.execute({ kind: 'request', request })); return;
     }
     if (key.return) {
+      if (operation.current) return;
       const value = input;
       if (!value && !(!inspection && snapshot?.run.status === 'waiting' && snapshot.run.waitingReason === 'input' && detail?.responseKind === 'text' &&
           detail.waitingOnRef === snapshot.run.waitingOnRef)) return;

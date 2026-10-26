@@ -74,23 +74,31 @@ static bool source_bind_runtime(const struct cliq_source_config *config, const c
     if (!source_close_fd(&usr)) valid = false;
     return valid;
 }
-static bool source_confinement(const struct cliq_source_config *config) {
-    if (!source_bind_runtime(config, "node") || !source_bind_runtime(config, "git") ||
-        mount("/scratch/input", "/scratch/input", NULL, MS_BIND | MS_REC, NULL) != 0 ||
-        !verifier_mount_attributes("/", AT_RECURSIVE, MOUNT_ATTR_NOEXEC | MOUNT_ATTR_NOSUID, 0) ||
-        !verifier_mount_attributes("/", 0, MOUNT_ATTR_RDONLY | MOUNT_ATTR_NODEV, 0) ||
-        !verifier_mount_attributes("/scratch/input", AT_RECURSIVE, MOUNT_ATTR_RDONLY | MOUNT_ATTR_NOEXEC | MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV, 0) ||
-        !verifier_mount_attributes("/scratch", 0, MOUNT_ATTR_NOEXEC | MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV, 0) ||
-        !verifier_mount_attributes("/proc", AT_RECURSIVE, MOUNT_ATTR_RDONLY | MOUNT_ATTR_NOEXEC | MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV, 0)) return false;
+static bool source_confinement(const struct cliq_source_config *config, uint32_t *stage) {
+#define SOURCE_CONFINEMENT_STAGE(number) do { if (stage) *stage = (number); } while (0)
+    SOURCE_CONFINEMENT_STAGE(2); if (!source_bind_runtime(config, "node")) return false;
+    SOURCE_CONFINEMENT_STAGE(3); if (!source_bind_runtime(config, "git")) return false;
+    SOURCE_CONFINEMENT_STAGE(4); if (mount("/scratch/input", "/scratch/input", NULL, MS_BIND | MS_REC, NULL) != 0) return false;
+    SOURCE_CONFINEMENT_STAGE(5); if (!verifier_mount_attributes("/", AT_RECURSIVE, MOUNT_ATTR_NOEXEC | MOUNT_ATTR_NOSUID, 0)) return false;
+    SOURCE_CONFINEMENT_STAGE(6); if (!verifier_mount_attributes("/", 0, MOUNT_ATTR_RDONLY | MOUNT_ATTR_NODEV, 0)) return false;
+    SOURCE_CONFINEMENT_STAGE(7); if (!verifier_mount_attributes("/scratch/input", AT_RECURSIVE, MOUNT_ATTR_RDONLY | MOUNT_ATTR_NOEXEC | MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV, 0)) return false;
+    SOURCE_CONFINEMENT_STAGE(8); if (!verifier_mount_attributes("/scratch", 0, MOUNT_ATTR_NOEXEC | MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV, 0)) return false;
+    SOURCE_CONFINEMENT_STAGE(9); if (!verifier_mount_attributes("/proc", AT_RECURSIVE, MOUNT_ATTR_RDONLY | MOUNT_ATTR_NOEXEC | MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV, 0)) return false;
+    SOURCE_CONFINEMENT_STAGE(10);
     for (uint32_t i = 0; i < config->file_count; i++)
-        if (!verifier_mount_attributes(config->files[i].path, 0,
-            MOUNT_ATTR_RDONLY | MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV, MOUNT_ATTR_NOEXEC)) return false;
-    if (!verifier_mount_observed("/", true, false, false) || !verifier_mount_observed("/scratch", false, false, false) ||
-        !verifier_mount_observed("/scratch/input", true, false, false) || !verifier_mount_observed("/proc", true, false, false) ||
-        !verifier_mount_observed("/dev", false, false, true)) return false;
+        if (!verifier_mount_attributes(config->files[i].path, 0, MOUNT_ATTR_RDONLY | MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV, MOUNT_ATTR_NOEXEC)) return false;
+    SOURCE_CONFINEMENT_STAGE(11); if (!verifier_mount_observed("/", true, false, false)) return false;
+    SOURCE_CONFINEMENT_STAGE(12); if (!verifier_mount_observed("/scratch", false, false, false)) return false;
+    SOURCE_CONFINEMENT_STAGE(13); if (!verifier_mount_observed("/scratch/input", true, false, false)) return false;
+    SOURCE_CONFINEMENT_STAGE(14); if (!verifier_mount_observed("/proc", true, false, false)) return false;
+    SOURCE_CONFINEMENT_STAGE(15); if (!verifier_mount_observed("/dev", false, false, true)) return false;
+    SOURCE_CONFINEMENT_STAGE(16);
     for (uint32_t i = 0; i < config->file_count; i++) if (!verifier_mount_observed(config->files[i].path, true, true, false)) return false;
-    return verifier_drop_capabilities() && verifier_filter();
+    SOURCE_CONFINEMENT_STAGE(17); if (!verifier_drop_capabilities()) return false;
+    SOURCE_CONFINEMENT_STAGE(18); return verifier_filter();
+#undef SOURCE_CONFINEMENT_STAGE
 }
+
 static int fixed_git_intent(const struct cliq_worker_packet *request, const struct cliq_source_config *config, bool preparation) {
     char json[4096];
     int bytes = cliq_fixed_git_intent_json(json, sizeof(json), request, config, preparation);
@@ -144,7 +152,7 @@ static bool source_bound_logs(const struct cliq_worker_packet *request) {
     }
     return true;
 }
-static bool fixed_git_run_helper(int raw_config, int intent, int exclude, const struct cliq_source_config *config, bool preparation) {
+static bool fixed_git_run_helper(int raw_config, int intent, int exclude, const struct cliq_source_config *config, bool preparation, uint32_t *diagnosis) {
     int execution[2];
     if (pipe2(execution, O_CLOEXEC) != 0) { source_close_fd(&raw_config); source_close_fd(&intent); return false; }
     pid_t child = fork();
@@ -154,27 +162,42 @@ static bool fixed_git_run_helper(int raw_config, int intent, int exclude, const 
         /* An independently granted rule is not a helper/Git input, even as
          * an inherited alias. The trusted non-dumpable producer alone holds
          * it while the fixed helper runs. */
-        if (!source_close_fd(&exclude) || !source_confinement(config)) _exit(70);
+        uint32_t stage = 1;
+        if (!source_close_fd(&exclude) || !source_confinement(config, &stage)) {
+            if (!cliq_write_exec_diagnostic(execution[1], -(int)stage)) { _exit(70); }
+            _exit(70);
+        }
         int raw = fcntl(raw_config, F_DUPFD_CLOEXEC, 10), fixed = fcntl(intent, F_DUPFD_CLOEXEC, 11), error = fcntl(execution[1], F_DUPFD_CLOEXEC, 12);
-        if (raw < 0 || fixed < 0 || error < 0 || dup2(raw, 3) < 0 || dup2(fixed, 4) < 0 || dup3(error, 5, O_CLOEXEC) < 0 ||
-            !cliq_close_range(6, UINT_MAX) || chdir("/scratch/input") != 0) _exit(70);
+        if (raw < 0 || fixed < 0 || error < 0) {
+            if (!cliq_write_exec_diagnostic(execution[1], -19)) { _exit(70); }
+            _exit(70);
+        }
+        if (dup2(raw, 3) < 0 || dup2(fixed, 4) < 0 || dup3(error, 5, O_CLOEXEC) < 0) {
+            if (!cliq_write_exec_diagnostic(error, -19)) { _exit(70); }
+            _exit(70);
+        }
+        if (!cliq_close_range(6, UINT_MAX) || chdir("/scratch/input") != 0) {
+            if (!cliq_write_exec_diagnostic(5, -19)) { _exit(70); }
+            _exit(70);
+        }
         char *const argv[] = { "/usr/bin/node", "/runtime/cliq-source-git-inspector.mjs", preparation ? "--prepare-private-git" : NULL, NULL };
         char *const environment[] = { "LANG=C", "LC_ALL=C", "HOME=/scratch/home", "TMPDIR=/scratch/tmp", "PATH=/usr/bin", NULL };
         execve(argv[0], argv, environment);
-        int failed = errno; (void)write(5, &failed, sizeof(failed)); _exit(70);
+        int failed = errno; if (!cliq_write_exec_diagnostic(5, failed)) _exit(70); _exit(70);
     }
     bool joined = source_close_fd(&execution[1]);
     if (!source_close_fd(&raw_config)) joined = false;
     if (!source_close_fd(&intent)) joined = false;
-    int status; pid_t done;
+    int status = 0; pid_t done;
     do { done = waitpid(child, &status, 0); } while (done < 0 && errno == EINTR);
-    int error; ssize_t bytes;
+    int error = 0; ssize_t bytes;
     do { bytes = read(execution[0], &error, sizeof(error)); } while (bytes < 0 && errno == EINTR);
     if (!source_close_fd(&execution[0])) joined = false;
+    if (diagnosis) *diagnosis = cliq_source_helper_failure(joined && done == child, status, bytes, error);
     return joined && done == child && bytes == 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 static bool source_run_helper(int raw_config, int intent, int exclude, const struct cliq_source_config *config) {
-    return fixed_git_run_helper(raw_config, intent, exclude, config, false);
+    return fixed_git_run_helper(raw_config, intent, exclude, config, false, NULL);
 }
 static bool source_output_files(const struct cliq_worker_packet *request, uint64_t reserve,
     int outputs[CLIQ_SOURCE_OUTPUTS], struct cliq_worker_packet *result) {

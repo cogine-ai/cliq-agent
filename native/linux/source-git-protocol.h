@@ -6,7 +6,8 @@
 #include "worker-sha256.h"
 #include <stdbool.h>
 #include <stddef.h>
-#include <stdio.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -39,6 +40,36 @@ struct cliq_source_config {
         char digest[65];
     } files[CLIQ_SOURCE_MAX_FILES];
 };
+/* Post-READY failures on the original fixed channel are diagnostics only.
+ * These finite values never admit a result/FD, death, time or permission.
+ * 2101..2355 and 2401..2464 require a truly joined helper wait status;
+ * 2501..2519 additionally require its actual exit70 and fixed exec-pipe int. */
+enum cliq_source_postready_failure {
+    CLIQ_SOURCE_FAIL_INPUT = 2001, CLIQ_SOURCE_FAIL_INPUT_CLOSE = 2002,
+    CLIQ_SOURCE_FAIL_SEAL_SEND = 2003, CLIQ_SOURCE_FAIL_CONTINUATION = 2004,
+    CLIQ_SOURCE_FAIL_STORAGE = 2005, CLIQ_SOURCE_FAIL_DIRECTORIES = 2006,
+    CLIQ_SOURCE_FAIL_MATERIALIZE = 2007, CLIQ_SOURCE_FAIL_METADATA_STORAGE = 2008,
+    CLIQ_SOURCE_FAIL_INTENT = 2009, CLIQ_SOURCE_FAIL_HELPER = 2010,
+    CLIQ_SOURCE_FAIL_OUTPUTS = 2011, CLIQ_SOURCE_FAIL_OUTPUT_BINDING = 2012,
+    CLIQ_SOURCE_FAIL_RESULT_SEND = 2013, CLIQ_SOURCE_FAIL_INPUT_RETIREMENT = 2014,
+    CLIQ_SOURCE_FAIL_MONITOR_JOIN = 2015, CLIQ_SOURCE_FAIL_MONITOR_EXIT = 2016,
+    CLIQ_SOURCE_FAIL_EXEC = 2090, CLIQ_SOURCE_FAIL_HELPER_JOIN = 2091
+};
+static inline bool cliq_source_postready_failure_valid(uint32_t status) {
+    return (status >= CLIQ_SOURCE_FAIL_INPUT && status <= CLIQ_SOURCE_FAIL_MONITOR_EXIT) ||
+        status == CLIQ_SOURCE_FAIL_EXEC || status == CLIQ_SOURCE_FAIL_HELPER_JOIN ||
+        (status >= 2101 && status <= 2355) || (status >= 2401 && status <= 2464) || (status >= 2501 && status <= 2519);
+}
+static inline uint32_t cliq_source_helper_failure(bool joined, int status, ssize_t bytes, int diagnostic) {
+    if (!joined) return CLIQ_SOURCE_FAIL_HELPER_JOIN;
+    if (bytes == (ssize_t)sizeof(diagnostic) && diagnostic >= -19 && diagnostic <= -1 &&
+        WIFEXITED(status) && WEXITSTATUS(status) == 70) return (uint32_t)(2500 - diagnostic);
+    if (bytes != 0) return CLIQ_SOURCE_FAIL_EXEC;
+    if (WIFSIGNALED(status) && WTERMSIG(status) >= 1 && WTERMSIG(status) <= 64) return (uint32_t)(2400 + WTERMSIG(status));
+    if (WIFEXITED(status)) return WEXITSTATUS(status) == 0 ? 0 : (uint32_t)(2100 + WEXITSTATUS(status));
+    return CLIQ_SOURCE_FAIL_HELPER_JOIN;
+}
+
 /* Exact JCS literals accepted by the measured helper. All interpolated data
  * are already closed unsigned resource integers or a SHA-256 digest. */
 static inline int cliq_fixed_git_intent_json(char *json, size_t capacity, const struct cliq_worker_packet *request,

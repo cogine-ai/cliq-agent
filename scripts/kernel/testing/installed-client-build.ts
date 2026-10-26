@@ -4,7 +4,7 @@ import { constants, openSync, closeSync, fstatSync, lstatSync, readSync, realpat
 import { isBuiltin } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { Plugin, BuildOptions } from 'esbuild';
+import { build, type Plugin, type BuildOptions } from 'esbuild';
 import { sha256Bytes } from '../../../src/kernel/identity.js';
 const sourcePins = Object.freeze({
   'reconciler.js': { digest: '856e28cd8dbfe4d7ca89203cbd6b73f39aa91562c3447d1f444b2b7015cde84a', size: 10368, conditions: 2 },
@@ -53,4 +53,17 @@ export function installedClientBuildOptions(): Pick<BuildOptions, 'plugins' | 'b
     });
   } };
   return { plugins: [plugin], banner: { js: "import { createRequire as cliqClientCreateRequire } from 'node:module';\nconst require = cliqClientCreateRequire(import.meta.url);" } };
+}
+
+/** The installed journey stages this exact real consumer. Keep its locked
+ * Ink compilation and complete Node-only/size closure in one build contract. */
+export async function buildInstalledClientDriver(outfile: string): Promise<Uint8Array> {
+  const result = await build({ entryPoints: [fileURLToPath(new URL('./installed-control-client-driver.ts', import.meta.url))],
+    outfile, bundle: true, platform: 'node', format: 'esm', target: 'node22.13', metafile: true, write: false,
+    ...installedClientBuildOptions() });
+  assert(Object.values(result.metafile!.outputs).flatMap(value => value.imports).every(value => value.external && value.path.startsWith('node:')));
+  assert.equal(result.outputFiles!.length, 1);
+  const bytes = result.outputFiles![0]!.contents;
+  assert(bytes.length > 0 && bytes.length <= 16 * 1024 * 1024);
+  return bytes;
 }

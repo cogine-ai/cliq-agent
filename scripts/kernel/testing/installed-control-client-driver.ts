@@ -9,6 +9,7 @@ import { CONTROL_FRAME_BYTES as bound, decodeControlFrame, headlessControlHello 
 import { runInstalledControlJsonl } from '../../../src/control/installed-jsonl.js';
 import { parseClientInvocation } from '../../../src/client/commands.js';
 import { runClientInvocation } from '../../../src/client/entry.js';
+import { openInstalledClientStdio } from '../../../src/client/stdio.js';
 import { canonicalJsonBytes } from '../../../src/kernel/canonical.js';
 import { runInstalledHeadlessJsonl, runInstalledHeadlessRpc } from '../../../src/headless/installed.js';
 import { createInstalledControlSession, type InstalledControlSession } from '../../../src/control/session.js';
@@ -184,13 +185,19 @@ async function main(): Promise<void> {
           controlSchemaRange: { min: 1, max: 1 }, headlessSchemaRange: { min: 3, max: 3 },
           requestedFeatureIds: [...client.hello.enabledFeatureIds] }, client.hello);
         await write(Buffer.concat([canonicalJsonBytes(greeting), Buffer.from('\n')]));
-        const code = await runClientInvocation(session, parseClientInvocation(extra, process.cwd()), { input: process.stdin,
+        const stdio = await openInstalledClientStdio(selected, { input: process.stdin,
           output: process.stdout, diagnostic: process.stderr, workspacePath: process.cwd(), signal: surface.signal });
+        let code: number;
+        try { code = await runClientInvocation(session, parseClientInvocation(extra, process.cwd()), stdio.io); }
+        finally { await stdio.close(); }
         assert.equal(code, 0, 'installed client entry did not finish its original action');
       } else if (schema === '--client-jsonl' || schema === '--client-rpc') {
         surface = new AbortController();
-        const code = await runClientInvocation(session, { kind: schema === '--client-rpc' ? 'rpc' : 'jsonl' }, { input: process.stdin,
+        const stdio = await openInstalledClientStdio(selected, { input: process.stdin,
           output: process.stdout, diagnostic: process.stderr, workspacePath: process.cwd(), signal: surface.signal });
+        let code: number;
+        try { code = await runClientInvocation(session, { kind: schema === '--client-rpc' ? 'rpc' : 'jsonl' }, stdio.io); }
+        finally { await stdio.close(); }
         assert.equal(code, 0, 'installed application adapter did not join');
       } else await (schema === '--schema3-rpc' ? runInstalledHeadlessRpc : runInstalledHeadlessJsonl)(session, requests(), write);
     } else await runInstalledControlJsonl(client, requests(), write);

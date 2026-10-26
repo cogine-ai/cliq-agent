@@ -242,7 +242,7 @@ static int verifier_namespace(struct cliq_worker_packet request, int input) {
         for (uint32_t i = 0; i < config->environment_count; i++) environment[i] = config->strings + config->environment[i];
         environment[config->environment_count] = NULL;
         if (chdir(config->cwd) == 0) execve(config->executable, arguments, environment);
-        int error = errno; (void)write(4, &error, sizeof(error)); _exit(70);
+        int error = errno; if (!cliq_write_exec_diagnostic(4, error)) _exit(70); _exit(70);
     }
     close(barrier[0]); close(execution[1]);
     struct cliq_worker_packet ready = request; ready.command = CLIQ_WORKER_READY;

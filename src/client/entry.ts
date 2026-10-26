@@ -11,13 +11,19 @@ import { parseClientInvocation, type ClientInvocation } from './commands.js';
 import { humanResponse, sessionContextLines, terminalText } from './view.js';
 import { presentControlArtifacts, artifactText, type ClientDetail } from './details.js';
 import { executeClientAction, ClientRefusal } from './actions.js';
+import { openInstalledClientStdio } from './stdio.js';
 
 export type ClientIO = Readonly<{ input: Readable; output: Writable & { isTTY?: boolean }; diagnostic: Writable;
   workspacePath: string; signal?: AbortSignal; confirmUnverified?: () => Promise<boolean> }>;
 type Response = InstalledControlResponseFor<InstalledControlFeature>;
 export function clientWriter(stream: Writable) {
   let tail: Promise<void> = Promise.resolve(), failure: unknown, cancellation: Error | undefined, closeWait: Promise<void> | undefined;
-  const failed = (error: Error) => { if (failure === undefined || failure === cancellation && error !== cancellation) failure = error; };
+  let destroying = false;
+  const cancelledWrite = (error: Error) => destroying && cancellation !== undefined && stream.destroyed &&
+    (error as NodeJS.ErrnoException).code === 'ECANCELED' && (error as NodeJS.ErrnoException).syscall === 'write';
+  const failed = (error: Error) => {
+    if (!cancelledWrite(error) && (failure === undefined || failure === cancellation && error !== cancellation)) failure = error;
+  };
   stream.on('error', failed);
   return { write(bytes: Buffer) {
     if (bytes.length > 1_048_576) return Promise.reject(new TypeError('one client output record exceeds its bound'));
@@ -25,14 +31,18 @@ export function clientWriter(stream: Writable) {
       if (failure !== undefined) { reject(failure); return; }
       if (cancellation) { reject(cancellation); return; }
       if (stream.destroyed || !stream.writable) { const error = new Error('client output is closed'); failed(error); reject(error); return; }
-      stream.write(bytes, error => { if (error) { failed(error); reject(error); } else resolve(); });
+      stream.write(bytes, error => {
+        if (error) { failed(error); reject(cancelledWrite(error) ? cancellation : error); }
+        else if (cancellation) reject(cancellation);
+        else resolve();
+      });
     }));
     tail = pending; return pending;
   }, cancel(reason: unknown) {
     cancellation ??= reason instanceof Error ? reason : new Error('client output was cancelled');
     if (!closeWait) {
       closeWait = stream.closed ? Promise.resolve() : new Promise<void>(resolve => { stream.once('close', resolve); });
-      if (!stream.destroyed) stream.destroy(cancellation);
+      if (!stream.destroyed) { destroying = true; stream.destroy(cancellation); }
     }
   }, async join() {
     // Cancellation must finish the real pending write callbacks and stream
@@ -54,10 +64,13 @@ inspect <runId> [--after-item <n>] [--after-journal <n>] [--checkpoint-cursor <c
  * Official release-root/discovery composition is an explicit I4 dependency;
  * importing this function does not select it as the default CLI. */
 export async function runInstalledClient(selected: HeldInstalledRuntime, argv: readonly string[], io: ClientIO): Promise<number> {
-  const invocation = parseClientInvocation(argv, io.workspacePath);
-  if (invocation.kind === 'help') { const output = clientWriter(io.output); await output.write(Buffer.from(help)); await output.join(); return 0; }
-  const session = await openInstalledControlSession(selected);
-  return runClientInvocation(session, invocation, io);
+  const owned = await openInstalledClientStdio(selected, io);
+  try {
+    const invocation = parseClientInvocation(argv, io.workspacePath);
+    if (invocation.kind === 'help') { const output = clientWriter(owned.io.output); await output.write(Buffer.from(help)); await output.join(); return 0; }
+    const session = await openInstalledControlSession(selected);
+    return await runClientInvocation(session, invocation, owned.io);
+  } finally { await owned.close(); }
 }
 
 /** Real installed entry and pure protocol/stdio regressions use this exact

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import path from 'node:path';
-import { canonicalSha256 } from '../kernel/canonical.js';
+import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting } from '../kernel/identity.js';
 import { KERNEL_DATABASE_FILENAME } from '../config.js';
 import type { ContextManifest, ContinuationItem, RunFrontier, RunSpec } from '../kernel/types.js';
@@ -97,6 +97,49 @@ test('input survives restart and idempotent reply, then continues the same nativ
     assert.deepEqual(replay.response, reply.response);
     assert.equal(fixture.store.getRun(fixture.runId).budgetConsumed.toolCalls, 1);
   } finally { await disposeFixture(fixture); }
+});
+
+test('a Store-loaded input replay refuses another genuine response from the same Run and preserves its first answer', async () => {
+  const fixture = await createAgentFixture('input-same-run-response-substitution', undefined, { mode: 'plan', tools: ['request_input'] });
+  const writer = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+  try {
+    await batch(fixture, [{ name: 'request_input', input: question }, { name: 'request_input', input: question }]);
+    await waitForInput(fixture);
+    const firstCommand = await command(fixture, { kind: 'text', value: 'first answer' });
+    const first = await fixture.agent.submitInput(firstCommand);
+    await waitForInput(fixture);
+    const secondCommand = await command(fixture, { kind: 'text', value: 'second answer' });
+    const second = await fixture.agent.submitInput(secondCommand);
+    assert.notEqual(firstCommand.requestId, secondCommand.requestId);
+    assert.notEqual(first.response.result.inputItemRef, second.response.result.inputItemRef);
+    assert.equal(first.run.id, second.run.id);
+    fixture.agent = await fixture.store.loadAgentRun({ runId: fixture.runId,
+      material: fixture.authority.material, releaseKeys: fixture.signed.releaseKeys });
+    const before = canonicalJsonBytes(await fixture.store.readRecoveryClosure(fixture.runId));
+    const read = (requestId: string) => writer.prepare("SELECT response_ref FROM control_requests WHERE principal_id=? AND method='run.input' AND request_id=?")
+      .get<{ response_ref: string }>(firstCommand.principalId, requestId)!;
+    const original = read(firstCommand.requestId), other = read(secondCommand.requestId);
+    assert.equal(original.response_ref, canonicalSha256(first.response));
+    assert.equal(other.response_ref, canonicalSha256(second.response));
+    assert.notEqual(original.response_ref, other.response_ref);
+    try {
+      // Both original input items and responses are genuine. Corruption only
+      // substitutes an existing response locator for the first control row.
+      writer.prepare("UPDATE control_requests SET response_ref=? WHERE principal_id=? AND method='run.input' AND request_id=?")
+        .run(other.response_ref, firstCommand.principalId, firstCommand.requestId);
+      await assert.rejects(fixture.agent.submitInput({ ...firstCommand, ...await publishInProcessChannel(fixture.store) }),
+        { code: 'RECOVERY_REQUIRED' });
+      assert.equal(read(firstCommand.requestId).response_ref, other.response_ref);
+    } finally {
+      writer.prepare("UPDATE control_requests SET response_ref=? WHERE principal_id=? AND method='run.input' AND request_id=?")
+        .run(original.response_ref, firstCommand.principalId, firstCommand.requestId);
+    }
+    const replay = await fixture.agent.submitInput({ ...firstCommand, ...await publishInProcessChannel(fixture.store) });
+    assert.equal(replay.replayed, true);
+    assert.deepEqual(canonicalJsonBytes(replay.response), canonicalJsonBytes(first.response));
+    assert.deepEqual(canonicalJsonBytes(await fixture.store.readRecoveryClosure(fixture.runId)), before);
+    assert.equal(fixture.store.getRun(fixture.runId).budgetConsumed.toolCalls, 0);
+  } finally { writer.close(); await disposeFixture(fixture); }
 });
 
 test('successive text and schema-bound JSON answers can wait worker-free and resume with cause input', async () => {

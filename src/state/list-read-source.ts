@@ -43,7 +43,7 @@ function projection(columns: readonly Column[]): string {
   return columns.map(column => column.kind === 'TEXT'
     ? `CASE WHEN length(CAST(${column.expression} AS BLOB))<=${column.bytes} THEN ${column.expression} END AS ${column.name}`
     : `CASE WHEN ${column.numericType} IN ('integer','real') THEN ${column.expression} END AS ${column.name}`).join(',') + ',(' + columns.filter(column => column.kind === 'TEXT')
-    .map(column => `((${column.expression}) IS NOT NULL AND length(CAST(${column.expression} AS BLOB))>${column.bytes})`).join(' OR ') + ') AS overlong';
+    .map(column => `coalesce(length(CAST(${column.expression} AS BLOB))>${column.bytes},0)`).join(' OR ') + ') AS overlong';
 }
 function sameSource(connection: SqliteConnection, table: string, columns: readonly Column[], where: string, values: readonly SqliteInputValue[]): boolean {
   const live = connection.prepare(`SELECT count(*) AS n FROM (SELECT 1 FROM ${table} s WHERE ${where} LIMIT 100001)`).get<{ n: bigint }>(...values)!;
@@ -115,8 +115,10 @@ export function createExtraListSource(driver: SqliteDriver, artifacts: ArtifactC
         .get<{ n: bigint }>(...values)!.n;
       if (count > 100_000n) throw new ListCutCapacityError();
       const names = columns.map(column => column.name).join(',');
-      connection.prepare('INSERT INTO temp.cliq_list_source(ordinal,' + names + ',overlong) ' +
-        'SELECT row_number() OVER(ORDER BY created_at COLLATE BINARY,id COLLATE BINARY),' + names + ',overlong FROM (' +
+      // The fresh private INTEGER PRIMARY KEY assigns contiguous ordinals in
+      // this explicit source order, without a second full-row window pass.
+      connection.prepare('INSERT INTO temp.cliq_list_source(' + names + ',overlong) ' +
+        'SELECT ' + names + ',overlong FROM (' +
         `SELECT ${projection(columns)} FROM ${table} s WHERE ${where} LIMIT 100001) ORDER BY created_at COLLATE BINARY,id COLLATE BINARY`).run(...values);
       if (connection.prepare('SELECT count(*) AS n FROM temp.cliq_list_source').get<{ n: bigint }>()!.n !== count) return corrupt();
       return Number(count);

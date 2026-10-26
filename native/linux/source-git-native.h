@@ -44,7 +44,7 @@ struct source_native_scope {
     struct cliq_preparation_origin preparation_origin;
     struct cliq_preparation_history preparation_history;
     int preparation_writer;
-    uint32_t ready_failure_status, ready_failure_boundary;
+    uint32_t ready_failure_status, ready_failure_boundary, postready_failure_status;
     bool ready_diagnostic_observed;
     struct cliq_source_ready_diagnostic ready_diagnostic;
 };
@@ -273,6 +273,8 @@ static int source_native_reply(struct source_native_scope *scope, uint32_t comma
         (!scope->starting || cliq_fixed_git_same_prepared(&scope->identity, response));
     bool valid = response->status == 0 && same_attempt;
     if (!valid) {
+        if (scope->preparation && same_attempt && (command == CLIQ_SOURCE_POLL_SEALED || command == CLIQ_SOURCE_POLL_RESULT))
+            scope->postready_failure_status = cliq_preparation_failure_status(&scope->identity, response, command, *count);
         if (scope->preparation && command == CLIQ_SOURCE_CREATE_BLOCKED) scope->ready_failure_boundary = same_attempt ? SOURCE_READY_AUTHENTICATED_FAILURE : SOURCE_READY_UNAUTHENTICATED_REPLY;
         if (scope->preparation && command == CLIQ_SOURCE_CREATE_BLOCKED && same_attempt && *count == 0 && response->status >= 1001 && response->status <= 1014) {
             scope->ready_failure_status = response->status;
@@ -383,6 +385,14 @@ static bool source_native_ack(struct source_native_scope *scope, uint32_t comman
     if (!valid) { (void)close_controller(scope->controller); return false; }
     return status == 1;
 }
+static napi_value source_native_postready_failure(napi_env env, struct source_native_scope *scope,
+    bool result, uint32_t guard) {
+    const char *message = result ? "source result lacks its complete original output and whole-domain death" : "source seal observation is invalid";
+    if (!scope->preparation) return failure(env, message);
+    char diagnostic[192];
+    int length = snprintf(diagnostic, sizeof(diagnostic), "%s: status=%u guard=%u", message, scope->postready_failure_status, guard);
+    return failure(env, length > 0 && (size_t)length < sizeof(diagnostic) ? diagnostic : message);
+}
 static napi_value source_native_poll_sealed(napi_env env, napi_callback_info info) {
     size_t argc = 0; struct source_native_scope *scope = source_native_receiver(env, info, &argc, NULL, false);
     if (!scope) return NULL;
@@ -396,7 +406,7 @@ static napi_value source_native_poll_sealed(napi_env env, napi_callback_info inf
         if (status == 0) return undefined(env);
         bool valid = status == 1 && count == 0 && response.exit_status <= 1;
         for (size_t i = 0; i < count; i++) if (!retire_descriptor(&files[i])) valid = false;
-        if (!valid) { (void)close_controller(scope->controller); return failure(env, "source seal observation is invalid"); }
+        if (!valid) { (void)close_controller(scope->controller); return source_native_postready_failure(env, scope, false, status == 1 ? 4001 : 0); }
         if (response.exit_status == 0) return undefined(env);
         if (!cliq_source_digest(response.source_snapshot_digest) || response.source_byte_count == 0 ||
             response.source_byte_count > scope->identity.max_generation_bytes || response.source_entry_count == 0 ||
@@ -522,7 +532,9 @@ static napi_value source_native_poll_result(napi_env env, napi_callback_info inf
     int status = source_native_reply(scope, CLIQ_SOURCE_POLL_RESULT, &response, files, &count);
     if (status == 0) return undefined(env);
     bool valid = status == 1 && response.exit_status <= 1;
+    uint32_t guard = status == 1 ? 4001 : 0;
     if (valid && response.exit_status == 0 && count == 0) return undefined(env);
+    if (valid) guard = 4002;
     valid = valid && response.exit_status == 1 && cliq_source_rule_result_valid(&response) &&
         count == CLIQ_SOURCE_OUTPUTS + response.source_rule_present && response.init_reaped == 1 && response.populated == 0 &&
         response.remaining_descendants == 0 && source_native_time(&response) && response.pid == scope->identity.pid &&
@@ -534,12 +546,14 @@ static napi_value source_native_poll_result(napi_env env, napi_callback_info inf
         response.source_byte_count == scope->snapshot.source_byte_count && response.source_entry_count == scope->snapshot.source_entry_count &&
         response.source_shard_count == scope->snapshot.source_shard_count;
     for (size_t i = 0; valid && i < CLIQ_SOURCE_OUTPUTS; i++) {
+        guard = 4003;
         struct stat file;
         valid = fstat(files[i], &file) == 0 && S_ISREG(file.st_mode) && file.st_size >= 0 && (uint64_t)file.st_size == response.source_output_bytes[i] &&
             (uint64_t)file.st_size <= scope->identity.max_file_bytes && (i != 0 || (uint64_t)file.st_size <= scope->identity.max_output_bytes) &&
             cliq_source_digest(response.source_output_digests[i]) && fcntl(files[i], F_GET_SEALS) == (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL);
     }
     if (valid && response.source_rule_present) {
+        guard = 4004;
         struct stat rule;
         valid = fstat(files[4], &rule) == 0 && S_ISREG(rule.st_mode) && rule.st_nlink == 0 && rule.st_size >= 0 &&
             (uint64_t)rule.st_size == response.source_rule_bytes &&
@@ -547,7 +561,7 @@ static napi_value source_native_poll_result(napi_env env, napi_callback_info inf
     }
     if (!valid) {
         for (size_t i = 0; i < count; i++) if (!retire_descriptor(&files[i])) scope->controller->retirement_failed = true;
-        (void)close_controller(scope->controller); return failure(env, "source result lacks its complete original output and whole-domain death");
+        (void)close_controller(scope->controller); return source_native_postready_failure(env, scope, true, guard);
     }
     for (size_t i = 0; i < count; i++) scope->output[i] = files[i];
     scope->result = response; scope->received = true;

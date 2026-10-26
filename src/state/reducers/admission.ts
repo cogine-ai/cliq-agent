@@ -197,12 +197,8 @@ async function replayAdmitRun(
   requestDigest: string
 ): Promise<AdmitRunResult | undefined> {
   const existingControl = readControlRequest(driver, input.principalId, 'run.submit', input.requestId);
-  if (existingControl !== undefined) {
-    if (existingControl.requestDigest !== requestDigest) {
-      throw new KernelStorageError('REQUEST_ID_CONFLICT', 'run.submit requestId was reused with different bytes');
-    }
-    const response = await readPublishedResponse(artifacts, existingControl.responseRef);
-    return { replayed: true, run: response.result.snapshot.run, response };
+  if (existingControl !== undefined && existingControl.requestDigest !== requestDigest) {
+    throw new KernelStorageError('REQUEST_ID_CONFLICT', 'run.submit requestId was reused with different bytes');
   }
 
   const existingAdmission = readAdmissionReplay(driver, 'runs', input.principalId, 'run.submit', input.admissionKey);
@@ -211,7 +207,17 @@ async function replayAdmitRun(
       throw new KernelStorageError('ADMISSION_KEY_CONFLICT', 'run.submit admissionKey was reused with a different intent');
     }
     if (existingAdmission.admissionRequestId === null) {
-      throw new KernelStorageError('RECOVERY_REQUIRED', 'Run admission has no original control request');
+      // Pre-link history can replay an already registered exact request,
+      // but cannot manufacture an admission-key alias or borrow another row.
+      if (existingControl === undefined) {
+        throw new KernelStorageError('RECOVERY_REQUIRED', 'Run admission has no original control request');
+      }
+      const response = await readPublishedResponse(artifacts, existingControl.responseRef);
+      const run = response.result.snapshot.run;
+      if (run.id !== existingAdmission.id) {
+        throw new KernelStorageError('RECOVERY_REQUIRED', 'Run retained request response names another admission');
+      }
+      return { replayed: true, run, response };
     }
     const originalRequestId = existingAdmission.admissionRequestId;
     const original = readControlRequest(driver, input.principalId, 'run.submit', originalRequestId);
@@ -223,6 +229,12 @@ async function replayAdmitRun(
     const run = response.result.snapshot.run;
     if (run.id !== existingAdmission.id) {
       throw new KernelStorageError('RECOVERY_REQUIRED', 'Run admission original response names another Run');
+    }
+    if (existingControl !== undefined) {
+      if (existingControl.responseRef !== original.responseRef) {
+        throw new KernelStorageError('RECOVERY_REQUIRED', 'Run replay substitutes its original admission response');
+      }
+      return { replayed: true, run, response };
     }
     const channel = await validateControlChannelClosure(artifacts, owner, input);
     let fenceOutcome: TimeFenceAdvance | undefined;
@@ -253,6 +265,9 @@ async function replayAdmitRun(
       throw new KernelStorageError('INVALID_REQUEST', 'canonical clock has regressed; admission replay binding is paused');
     }
     return { replayed: true, run, response };
+  }
+  if (existingControl !== undefined) {
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'Run replay has no exact original admission');
   }
   return undefined;
 }

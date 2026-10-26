@@ -567,6 +567,7 @@ static int observe_process(pid_t pid, char token[128]) {
 
 #include "control-socket.c"
 #include "control-client.c"
+#include "client-stdio.c"
 #include "installed-exec.c"
 #include "installed-anchor.c"
 #include "generation-tree.c"
@@ -663,6 +664,8 @@ static napi_value initialize(napi_env env, napi_value exports) {
         {"processStartToken", NULL, process_start_token, NULL, NULL, NULL, napi_default, NULL},
         {"decodeSourceGitLifecycle", NULL, decode_source_git_lifecycle, NULL, NULL, NULL, napi_default, NULL},
         {"captureCurrentProcess", NULL, capture_current_process, NULL, NULL, NULL, napi_default, NULL},
+        {"duplicateClientStdout", NULL, duplicate_client_stdio, NULL, NULL, NULL, napi_default, (void *)1},
+        {"duplicateClientStderr", NULL, duplicate_client_stdio, NULL, NULL, NULL, napi_default, (void *)2},
         {"connectInstalledControl", NULL, connect_installed_control, NULL, NULL, NULL, napi_default, NULL},
         {"executeInstalledImage", NULL, execute_installed_image, NULL, NULL, NULL, napi_default, NULL},
         {"initializeInstalledKeeper", NULL, initialize_installed_keeper, NULL, NULL, NULL, napi_default, NULL},

@@ -167,7 +167,7 @@ static int builtin_namespace(struct cliq_worker_packet request, int passed[CLIQ_
         for (uint32_t i = 0; i < config->environment_count; i++) environment[i] = config->strings + config->environment[i];
         environment[config->environment_count] = NULL;
         if (chdir(config->cwd) == 0) execve(config->executable, arguments, environment);
-        int error = errno; (void)write(5, &error, sizeof(error)); _exit(70);
+        int error = errno; if (!cliq_write_exec_diagnostic(5, error)) _exit(70); _exit(70);
     }
     close(barrier[0]); close(execution[1]);
     if (close(passed[1]) != 0 || (bash && close(passed[2]) != 0)) { free(config); return 70; }

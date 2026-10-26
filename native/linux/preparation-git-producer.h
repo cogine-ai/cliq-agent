@@ -44,7 +44,7 @@ static int preparation_producer(void) {
     struct cliq_worker_packet request; int files[2] = { -1, -1 }, intent = -1, outputs[CLIQ_SOURCE_OUTPUTS] = { -1, -1, -1, -1 }; size_t count;
     struct cliq_preparation_capture input; preparation_capture_init(&input);
     struct cliq_source_config *config = calloc(1, sizeof(*config)); bool valid = false;
-    uint32_t diagnostic_stage = 0;
+    uint32_t diagnostic_stage = 0, result_failure_status = 0;
     if (!config || !cliq_receive(3, &request, files, 2, &count)) goto failed;
     diagnostic_stage = 2;
     if (request.command != CLIQ_SOURCE_CREATE_BLOCKED || count != 2) goto failed;
@@ -68,42 +68,64 @@ static int preparation_producer(void) {
     if (!cliq_send(3, &ready, NULL, 0)) goto failed;
     diagnostic_stage = 0; /* No payload/helper failure is eligible for this pre-READY marker. */
     struct cliq_worker_packet release;
+    result_failure_status = CLIQ_SOURCE_FAIL_INPUT;
     if (!cliq_receive(3, &release, NULL, 0, &count) || release.command != CLIQ_SOURCE_RELEASE_CAPTURE ||
         !cliq_preparation_namespace_same_attempt(&request, &release) ||
         !preparation_capture_input(files[1], &request, request.preparation_input_intent_ref, reserve, &input)) goto failed;
+    result_failure_status = CLIQ_SOURCE_FAIL_INPUT_CLOSE;
     if (!source_close_fd(&files[1])) goto failed;
     struct cliq_worker_packet sealed = request; sealed.command = CLIQ_SOURCE_SEALED;
     preparation_capture_hex(input.digest, sealed.source_snapshot_digest);
     sealed.source_byte_count = input.total; sealed.source_entry_count = CLIQ_PREPARATION_INPUT_FILES; sealed.source_shard_count = CLIQ_PREPARATION_INPUT_FILES;
+    result_failure_status = CLIQ_SOURCE_FAIL_SEAL_SEND;
     if (!cliq_send(3, &sealed, NULL, 0)) goto failed;
     struct cliq_worker_packet continuation;
+    result_failure_status = CLIQ_SOURCE_FAIL_CONTINUATION;
     if (!cliq_receive(3, &continuation, NULL, 0, &count) || continuation.command != CLIQ_SOURCE_CONTINUE_GIT ||
         !cliq_preparation_namespace_same_attempt(&request, &continuation) || strcmp(continuation.source_snapshot_digest, sealed.source_snapshot_digest) != 0) goto failed;
     /* Both the original sealed bytes and their private nlink-one copies fit
      * the unchanged envelope before any helper executes. No memfd mount can
      * bypass the measured helper's ordinary-file guard. */
+    result_failure_status = CLIQ_SOURCE_FAIL_STORAGE;
     if (reserve >= request.max_generation_bytes || input.pages > (request.max_generation_bytes - reserve) / 2 ||
-        !source_scratch_limit(request.max_generation_bytes - reserve - input.pages) || mkdir("/scratch/input", 0700) != 0 ||
-        mkdir("/scratch/tmp", 0700) != 0 || mkdir("/scratch/home", 0700) != 0 || !preparation_materialize_files(&input)) goto failed;
+        !source_scratch_limit(request.max_generation_bytes - reserve - input.pages)) goto failed;
+    result_failure_status = CLIQ_SOURCE_FAIL_DIRECTORIES;
+    if (mkdir("/scratch/input", 0700) != 0 || mkdir("/scratch/tmp", 0700) != 0 || mkdir("/scratch/home", 0700) != 0) goto failed;
+    result_failure_status = CLIQ_SOURCE_FAIL_MATERIALIZE;
+    if (!preparation_materialize_files(&input)) goto failed;
     uint64_t metadata_pages = 0;
+    result_failure_status = CLIQ_SOURCE_FAIL_METADATA_STORAGE;
     if (!cliq_source_page_add(&metadata_pages, input.bytes[0], request.max_generation_bytes) || reserve >= request.max_generation_bytes - metadata_pages ||
         !source_scratch_limit(request.max_generation_bytes - reserve - metadata_pages)) goto failed;
+    result_failure_status = CLIQ_SOURCE_FAIL_INTENT;
     intent = fixed_git_intent(&request, config, true);
     if (intent < 0) goto failed;
-    valid = fixed_git_run_helper(input.files[0], intent, -1, config, true);
+    result_failure_status = CLIQ_SOURCE_FAIL_HELPER;
+    valid = fixed_git_run_helper(input.files[0], intent, -1, config, true, &result_failure_status);
     input.files[0] = intent = -1;
     struct cliq_worker_packet result = sealed; result.command = CLIQ_SOURCE_RESULT;
     /* Actual fixed-helper close/join releases its metadata pages before the
      * original bounded output copy phase, never before an assumed JS close. */
-    if (!valid || !source_output_files(&request, reserve, outputs, &result)) goto failed;
+    if (!valid) goto failed;
+    result_failure_status = CLIQ_SOURCE_FAIL_OUTPUTS;
+    if (!source_output_files(&request, reserve, outputs, &result)) goto failed;
+    result_failure_status = CLIQ_SOURCE_FAIL_OUTPUT_BINDING;
     for (size_t i = 0; i < CLIQ_SOURCE_OUTPUTS; i++) if (result.source_output_bytes[i] != input.bytes[i] ||
         strcmp(result.source_output_digests[i], input.digests[i]) != 0) goto failed;
+    result_failure_status = CLIQ_SOURCE_FAIL_RESULT_SEND;
     valid = cliq_send(3, &result, outputs, CLIQ_SOURCE_OUTPUTS);
     for (size_t i = 0; i < CLIQ_SOURCE_OUTPUTS; i++) if (!source_close_fd(&outputs[i])) valid = false;
     if (!preparation_capture_close(&input)) valid = false;
     free(config); return valid ? 0 : 70;
 failed:
     if (diagnostic_stage) source_ready_diagnostic_write(2, &request, diagnostic_stage);
+    else if (cliq_source_postready_failure_valid(result_failure_status)) {
+        struct cliq_worker_packet diagnostic = request;
+        diagnostic.command = CLIQ_SOURCE_RESULT; diagnostic.status = result_failure_status;
+        // An authenticated failure carries no output or successful fact.
+        // A closed peer can discard this optional observation; exit stays70.
+        if (!cliq_send(3, &diagnostic, NULL, 0)) valid = false;
+    }
     for (size_t i = 0; i < 2; i++) source_close_fd(&files[i]);
     for (size_t i = 0; i < CLIQ_SOURCE_OUTPUTS; i++) source_close_fd(&outputs[i]);
     source_close_fd(&intent); preparation_capture_close(&input); free(config); return 70;

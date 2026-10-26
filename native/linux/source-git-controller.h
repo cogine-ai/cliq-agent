@@ -19,7 +19,7 @@ struct source_controller_scope {
     struct cliq_source_config config;
     struct cliq_worker_packet identity, sealed_packet, result_packet;
     struct scope process;
-    uint32_t birth_step;
+    uint32_t birth_step, result_failure_status;
     unsigned char birth_digest[32];
     bool preparation, preparation_completed;
     int preparation_stream;
@@ -356,10 +356,10 @@ static bool source_result_joined(void) {
         int status; pid_t joined;
         do { joined = waitpid(process->monitor, &status, WNOHANG); } while (joined < 0 && errno == EINTR);
         if (joined == 0) return false;
-        if (joined != process->monitor) { source_scope.failed = true; return false; }
+        if (joined != process->monitor) { source_scope.result_failure_status = CLIQ_SOURCE_FAIL_MONITOR_JOIN; source_scope.failed = true; return false; }
         source_scope.monitor_joined = true; source_scope.monitor_success = WIFEXITED(status) && WEXITSTATUS(status) == 0;
     }
-    if (!source_scope.monitor_success) { source_scope.failed = true; return false; }
+    if (!source_scope.monitor_success) { source_scope.result_failure_status = CLIQ_SOURCE_FAIL_MONITOR_EXIT; source_scope.failed = true; return false; }
     while (waitpid(-1, NULL, WNOHANG) > 0) {}
     if (!held_scope_dead(process)) return false;
     source_scope.dead = true; return true;
@@ -374,6 +374,11 @@ static bool source_pump(void) {
     struct cliq_worker_packet packet; int files[CLIQ_SOURCE_TRANSFER_OUTPUTS] = {-1, -1, -1, -1, -1}; size_t count;
     bool valid = cliq_receive(source_scope.channel, &packet, files, CLIQ_SOURCE_TRANSFER_OUTPUTS, &count) &&
         cliq_fixed_git_same_prepared(&source_scope.identity, &packet);
+    uint32_t failure_status = valid && source_scope.preparation
+        ? cliq_preparation_failure_status(&source_scope.identity, &packet, CLIQ_SOURCE_RESULT, count) : 0;
+    if (failure_status) {
+        source_scope.result_failure_status = failure_status; source_scope.failed = true; return true;
+    }
     if (valid && packet.command == CLIQ_SOURCE_SEALED && source_scope.released && !source_scope.sealed && !source_scope.continued && count == 0 &&
         cliq_source_digest(packet.source_snapshot_digest) && packet.source_shard_count > 0 && packet.source_shard_count <= CLIQ_SOURCE_MAX_SHARDS &&
         packet.source_entry_count > 0 && packet.source_entry_count <= CLIQ_SOURCE_MAX_ENTRIES && packet.source_byte_count > 0 &&
@@ -461,6 +466,11 @@ static bool source_command(struct cliq_worker_packet *request, int *passed, size
         }
         return valid;
     }
+    if (source_scope.preparation && source_scope.failed && cliq_source_postready_failure_valid(source_scope.result_failure_status) &&
+        (request->command == CLIQ_SOURCE_POLL_SEALED || request->command == CLIQ_SOURCE_POLL_RESULT)) {
+        *response = source_scope.identity; response->command = request->command;
+        response->status = source_scope.result_failure_status; return false;
+    }
     if (request->command == CLIQ_SOURCE_RELEASE_CAPTURE) {
         if (source_scope.released || source_scope.failed || !source_process_current() || !source_birth_step(6, request) ||
             !cliq_send(source_scope.channel, request, NULL, 0)) return false;
@@ -480,7 +490,11 @@ static bool source_command(struct cliq_worker_packet *request, int *passed, size
     if (request->command == CLIQ_SOURCE_POLL_RESULT) {
         if (!source_scope.continued || source_scope.failed) return false;
         *response = source_scope.identity; response->command = CLIQ_SOURCE_POLL_RESULT;
-        if (!source_scope.result || !source_result_joined()) return !source_scope.failed;
+        if (!source_scope.result || !source_result_joined()) {
+            if (source_scope.preparation && source_scope.failed && cliq_source_postready_failure_valid(source_scope.result_failure_status))
+                response->status = source_scope.result_failure_status;
+            return !source_scope.failed;
+        }
         struct cliq_worker_packet death;
         if (!source_stop(&death)) return false;
         *response = source_scope.result_packet; response->command = CLIQ_SOURCE_POLL_RESULT; response->exit_status = 1;

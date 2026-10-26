@@ -3209,11 +3209,13 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
         sameAuthenticatedConnection: true, noNewCasObjects: true, noRun: true, sessionUnchanged: true, noProductiveRequest: true };
     } finally { await recipeClient.close(); }
     const defaultPolicy = exchange([request({ ...resourceCore, requestId: '019a0012-0000-7000-8000-000000000124',
-      policyMode: 'default' })])[0]!;
+      policyMode: 'default', allowUnverified: false, verifiers: [{ id: 'policy-preflight', version: '1', required: true,
+        executable: { kind: 'toolchain', toolId: 'node' }, argv: [{ kind: 'non_secret_literal', value: '--test' },
+          { kind: 'non_secret_literal', value: '--test-concurrency=1' }, { kind: 'non_secret_literal', value: 'policy-preflight.mjs' }],
+        cwd: '.', env: {}, writableEphemeralPaths: [], identityReadGrantId: 'policy-preflight-ungranted' }] })])[0]!;
     assert.equal(canonicalSha256(defaultPolicy), canonicalSha256({ protocolVersion: 1, ok: false, method: 'run.submit',
-      error: { schemaVersion: 1, code: 'INVALID_REQUEST', retryable: false, messageCode: 'control.invalid_request',
-        issues: [{ path: 'request', issueCode: 'invalid_request' }] } }),
-    'the fixed installed recipe must reject unsupported approval rather than auto-allow tools');
+      error: { schemaVersion: 1, code: 'AUTHORIZATION_REQUIRED', retryable: false, messageCode: 'authorization.verifier_identity_refused' } }),
+    'default tool interaction must not infer independent required-verifier authorization');
     assert.equal(requestsReceived, 0); assert.deepEqual(currentSession(), session);
     const oversized = exchange([request({ ...resourceCore, requestId: '019a0012-0000-7000-8000-000000000113',
       sandboxResources: { maxSingleFileBytes: 2_147_483_648 } })])[0]!;

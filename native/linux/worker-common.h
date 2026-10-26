@@ -15,6 +15,20 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
+/* A fixed private exec-error pipe carries one native int only. A failed
+ * optional diagnostic still exits unsuccessfully; partial writes cannot be
+ * mistaken for a complete errno or stage, and EINTR never loses its tail. */
+static inline bool cliq_write_exec_diagnostic(int descriptor, int value) {
+    const unsigned char *bytes = (const unsigned char *)&value; size_t offset = 0;
+    while (offset < sizeof(value)) {
+        ssize_t written = write(descriptor, bytes + offset, sizeof(value) - offset);
+        if (written < 0 && errno == EINTR) continue;
+        if (written <= 0) return false;
+        offset += (size_t)written;
+    }
+    return true;
+}
+
 static inline bool cliq_hex_digest(const char *value) {
     if (strnlen(value, 65) != 64) return false;
     for (size_t i = 0; i < 64; i++) {

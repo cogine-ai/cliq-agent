@@ -5,6 +5,7 @@ import { canonicalJsonBytes } from '../kernel/canonical.js';
 import { parseClientInvocation } from './commands.js';
 import { clientWriter, runClientInvocation } from './entry.js';
 import { hello, protocolClient, outputStream, runSnapshot } from './testing/protocol.js';
+import { buildBlockedOutputFixture } from './testing/blocked-output-build.js';
 const turn = () => new Promise<void>(resolve => setImmediate(resolve));
 const line = (value: unknown) => Buffer.concat([canonicalJsonBytes(value), Buffer.from('\n')]);
 const io = (input: Readable, output = outputStream(), diagnostic = outputStream()) => ({ input, output: output.stream,
@@ -77,6 +78,26 @@ test('client stdout backpressure is real and a failed Writable callback/error em
   assert.equal(broken.listenerCount('error'), 0);
 });
 
+test('only this writer\'s actual cancellation absorbs write ECANCELED; prior and other I/O failures remain failures', async () => {
+  for (const code of ['ECANCELED', 'EPIPE', 'success'] as const) {
+    const error = Object.assign(new Error('owned write outcome'), { code, syscall: 'write' });
+    let complete!: (error?: Error | null) => void;
+    const stream = new Writable({ write(_bytes, _encoding, callback) { complete = callback; },
+      destroy(reason, callback) { complete(code === 'success' ? undefined : error); callback(reason); } });
+    const writer = clientWriter(stream), pending = writer.write(Buffer.from('one'));
+    void pending.catch(() => {}); await turn();
+    const cancellation = new Error('owned cancellation'); writer.cancel(cancellation);
+    await assert.rejects(pending, actual => actual === (code === 'EPIPE' ? error : cancellation));
+    if (code === 'EPIPE') await assert.rejects(writer.join(), actual => actual === error); else await writer.join();
+    assert.equal(stream.closed, true);
+  }
+  const earlier = Object.assign(new Error('earlier owned write failure'), { code: 'ECANCELED', syscall: 'write' });
+  const stream = new Writable({ write(_bytes, _encoding, callback) { callback(earlier); } }), writer = clientWriter(stream);
+  await assert.rejects(writer.write(Buffer.from('one')), actual => actual === earlier);
+  writer.cancel(new Error('later cancellation'));
+  await assert.rejects(writer.join(), actual => actual === earlier);
+});
+
 test('text attach reports an authoritative refusal as failure without retrying or cancelling', async () => {
   for (const code of ['NOT_FOUND', 'EVENT_CURSOR_EXPIRED'] as const) {
     const f = protocolClient({ 'run.attach': async () => ({ protocolVersion: 1, ok: false, method: 'run.attach', error: {
@@ -123,16 +144,20 @@ test('human inspection exposes independent exact cursors and Session raw-page op
   assert.equal(session.command.request.afterItemSeq, 10); assert.equal(session.command.request.limit, 50);
 });
 
-test('explicit detach cancels a genuinely blocked stdout pipe and joins its original writer and client without a mutation', async () => {
-  const { spawn } = await import('node:child_process'), { fileURLToPath } = await import('node:url');
-  const child = spawn(process.execPath, ['--import', 'tsx', fileURLToPath(new URL('./testing/blocked-output.ts', import.meta.url))],
+test('explicit detach cancels a genuinely blocked stdout pipe and joins its original writer and client without a mutation', async t => {
+  const { spawn } = await import('node:child_process');
+  const fixture = await buildBlockedOutputFixture(); t.after(fixture.close);
+  const child = spawn(process.execPath, [fixture.entry],
     { env: { ...process.env, NODE_NO_WARNINGS: '1' }, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
-  let returned: Record<string, unknown> | undefined, ready!: () => void, returnReady!: () => void, stderrBytes = 0;
+  let returned: Record<string, unknown> | undefined, cut: Record<string, unknown> | undefined, startupCode: string | undefined,
+    ready!: () => void, returnReady!: () => void, stderrBytes = 0;
   const pending = new Promise<void>(resolve => { ready = resolve; }), stopped = new Promise<void>(resolve => { returnReady = resolve; });
   child.on('message', value => {
     const message = value as Record<string, unknown>;
     if (message.kind === 'actual_pending_output') ready();
+    else if (message.kind === 'actual_output_cut') cut = message;
     else if (message.kind === 'returned') { returned = message; returnReady(); }
+    else if (message.kind === 'startup_refused' && message.stage === 'owned_stdio' && typeof message.code === 'string' && /^[A-Z_]{1,64}$/u.test(message.code)) startupCode = message.code;
   });
   child.stderr!.on('data', (bytes: Buffer) => { stderrBytes += bytes.length; assert(stderrBytes <= 65536); });
   const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
@@ -145,11 +170,18 @@ test('explicit detach cancels a genuinely blocked stdout pipe and joins its orig
   };
   let primary: unknown;
   try {
-    await bounded(Promise.race([pending, closed.then(() => { throw new Error('owned child exited before actual backpressure'); })]), 10000);
+    await bounded(Promise.race([pending, closed.then(() => { throw new Error(`owned child exited before actual backpressure: ${startupCode ?? (returned?.code === 0 ? 'entry_completed' : 'entry_failed')}`); })]), 10000);
     const start = performance.now(); child.send('abort');
     await bounded(stopped, 2000);
     assert(performance.now() - start < 2000);
     assert.deepEqual(returned, { kind: 'returned', code: 1, failed: false, closed: 1, mutations: 0 });
+    assert(cut); assert.deepEqual(Object.keys(cut).sort(), ['kind', 'enteredAt', 'abortObservedAt', 'callbackJoinedAt', 'entryReturnedAt'].sort());
+    const times = ['enteredAt', 'abortObservedAt', 'callbackJoinedAt', 'entryReturnedAt'].map(key => {
+      const value = cut![key]; assert(typeof value === 'number' && Number.isFinite(value) && value >= 0); return value;
+    });
+    assert(times.every((value, index) => index === 0 || value >= times[index - 1]!));
+    assert(times[3]! - times[1]! < 2000);
+    console.log(JSON.stringify({ ...cut, kind: 'client_output_actual_cut', installedQualified: false }));
     assert.equal(stderrBytes, 0);
   } catch (error) { primary = error; throw error; }
   finally {

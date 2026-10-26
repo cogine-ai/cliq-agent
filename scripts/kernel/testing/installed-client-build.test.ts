@@ -6,7 +6,7 @@ import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
-import { fixedInstalledInkSource, installedClientBuildOptions } from './installed-client-build.js';
+import { buildInstalledClientDriver, fixedInstalledInkSource, installedClientBuildOptions } from './installed-client-build.js';
 
 test('fixed locked Ink source rejects changed hashes, condition counts and unknown module identities', async () => {
   const directory = path.dirname(path.dirname(fileURLToPath(import.meta.resolve('ink'))));
@@ -23,11 +23,8 @@ test('fixed locked Ink source rejects changed hashes, condition counts and unkno
 test('actual standalone client bundle keeps its Node-only dependencies, original size bound and live Ink rendering', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-client-bundle-'));
   try {
-    const driver = await build({ entryPoints: [fileURLToPath(new URL('./installed-control-client-driver.ts', import.meta.url))],
-      outfile: path.join(home, 'driver.mjs'), bundle: true, platform: 'node', format: 'esm', target: 'node22.13', metafile: true, write: false,
-      ...installedClientBuildOptions() });
-    assert(Object.values(driver.metafile!.outputs).flatMap(output => output.imports).every(value => value.external && value.path.startsWith('node:')));
-    assert.equal(driver.outputFiles!.length, 1); assert(driver.outputFiles![0]!.contents.length <= 16 * 1024 * 1024);
+    const driver = await buildInstalledClientDriver(path.join(home, 'driver.mjs'));
+    assert(driver.length > 0 && driver.length <= 16 * 1024 * 1024);
     const input = `import {render} from 'ink-testing-library';import React from 'react';
       import {ClientTui} from ${JSON.stringify(fileURLToPath(new URL('../../../src/client/tui.tsx', import.meta.url)))};
       import {createClientApplication} from ${JSON.stringify(fileURLToPath(new URL('../../../src/client/application.ts', import.meta.url)))};

@@ -63,12 +63,11 @@ export async function loadInputContinuation(driver: SqliteDriver, artifacts: Art
     const { reply, proof } = value;
     const command = reply.command;
     if (command.principalId !== principalId) throw new TypeError('input reply principal does not own this Run');
-    const row = driver.prepare("SELECT request_digest, channel_identity_ref, channel_identity_digest, response_ref, committed_at FROM control_requests WHERE principal_id = ? AND method = 'run.input' AND request_id = ?")
-      .get<{ request_digest: string; channel_identity_ref: string; channel_identity_digest: string; response_ref: string; committed_at: string }>(principalId, command.requestId);
-    if (!row || row.request_digest !== reply.payload.requestDigest || row.channel_identity_ref !== command.channelIdentityRef ||
-        row.channel_identity_digest !== command.channelIdentityDigest || row.committed_at !== reply.item.createdAt) throw new TypeError('input reply has no exact authenticated control-row owner');
+    const row = readControlRequest(driver, principalId, 'run.input', command.requestId);
+    if (!row || row.requestDigest !== reply.payload.requestDigest || row.channelIdentityRef !== command.channelIdentityRef ||
+        row.channelIdentityDigest !== command.channelIdentityDigest || row.committedAt !== reply.item.createdAt) throw new TypeError('input reply has no exact authenticated control-row owner');
     await readRetainedControlChannelClosure(reads, owner, command);
-    const response = await readCanonicalArtifact<Response>(reads, row.response_ref);
+    const response = await readCanonicalArtifact<Response>(reads, row.responseRef);
     const snapshot = response.result.snapshot;
     if (response.protocolVersion !== 1 || response.ok !== true || response.result.method !== 'run.input' || response.result.inputItemRef !== itemRef ||
         snapshot.schemaVersion !== 1 || snapshot.operation !== 'agent' || snapshot.latestRunItemSeq !== reply.checkpoint.runItemSeq ||
@@ -78,7 +77,7 @@ export async function loadInputContinuation(driver: SqliteDriver, artifacts: Art
         snapshot.run.activeWorkerLaunchId !== undefined) throw new TypeError('input response substitutes its committed snapshot');
     const frontier = await readCanonicalArtifact<Extract<RunFrontier, { kind: 'tool' }>>(reads, proof.wait.frontierRef);
     if (snapshot.run.frontierRef !== canonicalSha256(nextFrontier(frontier, reply.item, snapshot.latestRunItemSeq))) throw new TypeError('input response substitutes its continuation');
-    return response;
+    return { response, command, requestDigest: reply.payload.requestDigest, control: row };
   }
   function nextFrontier(frontier: Extract<RunFrontier, { kind: 'tool' }>, item: UserInputItem, itemSeq: number): RunFrontier {
     return frontier.nextCallIndex + 1 < frontier.orderedCallIds.length ? { ...frontier, nextCallIndex: frontier.nextCallIndex + 1 }
@@ -162,7 +161,12 @@ export async function loadInputContinuation(driver: SqliteDriver, artifacts: Art
         if (!row) return undefined;
         if (row.requestDigest !== digest) throw new KernelStorageError('REQUEST_ID_CONFLICT', 'run.input requestId was reused with different bytes');
         const response = await readCanonicalArtifact<Response>(artifacts, row.responseRef);
-        requireEqual(response, await verifyReply(response.result.inputItemRef), 'replayed input response');
+        const verified = await verifyReply(response.result.inputItemRef);
+        if (verified.command.principalId !== principalId || verified.command.requestId !== input.requestId ||
+            verified.requestDigest !== digest || canonicalSha256(verified.control) !== canonicalSha256(row)) {
+          throw new KernelStorageError('RECOVERY_REQUIRED', 'input replay substitutes its original authenticated control request');
+        }
+        requireEqual(response, verified.response, 'replayed input response');
         return immutableSnapshot({ replayed: true, run: response.result.snapshot.run, response });
       };
       const existing = await replay();

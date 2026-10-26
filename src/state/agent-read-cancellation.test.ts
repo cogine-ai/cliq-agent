@@ -542,11 +542,12 @@ test('retained input-history construction uses the opening lifetime while future
   const input = source('./reducers/input.ts'), tool = source('./reducers/tool.ts');
   assert.match(input, /openingSignal\?: AbortSignal/u);
   assert.match(input, /const openingReads = openingSignal \? artifacts\.withReadSignal\(openingSignal\) : artifacts/u);
-  const opening = between(input, '  if (driver.prepare("SELECT 1 FROM items', '  return {');
+  const operations = '  return {\n    async plan(';
+  const opening = between(input, '  if (driver.prepare("SELECT 1 FROM items', operations);
   assert.match(opening, /authority\.assertAuthority\(openingSignal\)/u);
   assert.match(opening, /recover\(openingReads\)/u);
   assert.match(opening, /verifyReply\(reply\.itemRef, recovered, openingReads\)/u);
-  const retained = input.slice(input.indexOf('  return {'));
+  const retained = input.slice(input.indexOf(operations));
   assert.doesNotMatch(retained, /openingReads|openingSignal/u);
   assert.match(retained, /await authority\.assertAuthority\(\)/u);
   assert.match(tool, /loadInputContinuation\(driver, artifacts, owner, \{ \.\.\.controlAuthority, contracts \}, reobserve, openingSignal\)/u);

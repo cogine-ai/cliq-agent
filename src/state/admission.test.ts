@@ -7,7 +7,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 
 import { KERNEL_DATABASE_FILENAME } from '../config.js';
-import { canonicalSha256 } from '../kernel/canonical.js';
+import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting } from '../kernel/identity.js';
 import type {
   FrozenIgnoreRulesV1,
@@ -331,6 +331,44 @@ test('new request ids replay the accepted admission snapshots after progress and
   }
 });
 
+test('Run admission replay rejects another genuine Run response for the original request and preserves its first snapshot', async () => {
+  const fixture = await createAgentFixture('run-admission-response-substitution', undefined, { mode: 'plan' });
+  const writer = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+  try {
+    const channel = await publishInProcessChannel(fixture.store);
+    const created = await fixture.store.createSession({ ...channel, requestId: uuidv7(),
+      admissionKey: admissionKey('run-response-owner'), workspacePath: fixture.workspace });
+    const { runSpec } = await fixture.store.readRecoveryClosure(fixture.runId);
+    const projection = await fixture.store.artifacts.readCanonical<SourceProjectionSpec>(runSpec.sourceProjectionRef);
+    const input = { ...channel, requestId: uuidv7(), admissionKey: admissionKey('run-response-original'),
+      sessionId: created.session.id, expectedContextRevision: 1, workspacePath: fixture.workspace,
+      objective: 'retain the first Run admission response', allowUnverified: true,
+      assemblyRef: runSpec.assemblyRef, policyRef: runSpec.policyRef, sandboxProfileRef: runSpec.sandboxProfileRef,
+      verifierSpecRef: runSpec.verifierSpecRef, credentialGrantRefs: runSpec.credentialGrantRefs,
+      budgets: runSpec.budgets, sourceProjectionRef: runSpec.sourceProjectionRef,
+      frozenIgnoreRulesRef: projection.frozenIgnoreRulesRef, baseWorkspaceManifestRef: runSpec.baseWorkspaceManifestRef };
+    const original = await fixture.store.admitRun(input);
+    const other = await fixture.store.admitRun({ ...input, requestId: uuidv7(), admissionKey: admissionKey('run-response-other'),
+      expectedContextRevision: fixture.store.getSession(created.session.id).contextRevision });
+    assert.notEqual(other.run.id, original.run.id);
+    const before = fixture.store.getRun(original.run.id), sessionBefore = fixture.store.getSession(created.session.id);
+    try {
+      writer.prepare("UPDATE control_requests SET response_ref=? WHERE principal_id=? AND method='run.submit' AND request_id=?")
+        .run(canonicalSha256(other.response), channel.principalId, input.requestId);
+      await assert.rejects(fixture.store.admitRun({ ...input, ...await publishInProcessChannel(fixture.store) }),
+        { code: 'RECOVERY_REQUIRED' });
+    } finally {
+      writer.prepare("UPDATE control_requests SET response_ref=? WHERE principal_id=? AND method='run.submit' AND request_id=?")
+        .run(canonicalSha256(original.response), channel.principalId, input.requestId);
+    }
+    const replay = await fixture.store.admitRun({ ...input, ...await publishInProcessChannel(fixture.store) });
+    assert.equal(replay.replayed, true);
+    assert.deepEqual(canonicalJsonBytes(replay.response), canonicalJsonBytes(original.response));
+    assert.deepEqual(fixture.store.getRun(original.run.id), before);
+    assert.deepEqual(fixture.store.getSession(created.session.id), sessionBefore);
+  } finally { writer.close(); await disposeFixture(fixture); }
+});
+
 test('admission replay rejects a corrupted original response link without claiming its new request id', async () => {
   const stateRoot = await makePrivateDir('.cliq-admission-response-corruption-');
   const workspace = await makePrivateDir('.cliq-admission-response-ws-');
@@ -344,9 +382,16 @@ test('admission replay rejects a corrupted original response link without claimi
     const newRequestId = uuidv7();
     fault.prepare('UPDATE control_requests SET response_ref = ? WHERE principal_id = ? AND method = ? AND request_id = ?')
       .run(canonicalSha256(other.response), channel.principalId, 'session.create', input.requestId);
-    await assert.rejects(store.createSession({ ...input, requestId: newRequestId }), { code: 'RECOVERY_REQUIRED' });
-    fault.prepare('UPDATE control_requests SET response_ref = ? WHERE principal_id = ? AND method = ? AND request_id = ?')
-      .run(canonicalSha256(original.response), channel.principalId, 'session.create', input.requestId);
+    try {
+      await assert.rejects(store.createSession({ ...input, ...await publishInProcessChannel(store) }), { code: 'RECOVERY_REQUIRED' });
+      await assert.rejects(store.createSession({ ...input, requestId: newRequestId }), { code: 'RECOVERY_REQUIRED' });
+    } finally {
+      fault.prepare('UPDATE control_requests SET response_ref = ? WHERE principal_id = ? AND method = ? AND request_id = ?')
+        .run(canonicalSha256(original.response), channel.principalId, 'session.create', input.requestId);
+    }
+    const replay = await store.createSession({ ...input, ...await publishInProcessChannel(store) });
+    assert.equal(replay.replayed, true);
+    assert.deepEqual(canonicalJsonBytes(replay.response), canonicalJsonBytes(original.response));
     const different = await store.createSession({ ...input, requestId: newRequestId, admissionKey: admissionKey('new-after-corruption') });
     assert.equal(different.replayed, false);
     assert.notEqual(different.session.id, original.session.id);
@@ -428,6 +473,9 @@ test('schema v3 admissions without original links stay recoverable but cannot in
       sessionId: created.session.id, expectedContextRevision: 1, workspacePath: workspace,
       objective: 'retain admitted work across the storage upgrade', allowUnverified: true };
     const admitted = await store.admitRun(runInput);
+    const otherSession = await store.createSession({ ...sessionInput, requestId: uuidv7(), admissionKey: admissionKey('v3-other-session') });
+    const otherRun = await store.admitRun({ ...runInput, requestId: uuidv7(), admissionKey: admissionKey('v3-other-run'),
+      expectedContextRevision: store.getSession(created.session.id).contextRevision });
     await store.close();
     // Recreate the exact pre-link v3 SQL layout around real accepted artifacts
     // and owner history; migration must not guess a response from these rows.
@@ -446,6 +494,25 @@ test('schema v3 admissions without original links stay recoverable but cannot in
     assert.deepEqual((await store.readRecoveryClosure(admitted.run.id)).run, admitted.run);
     assert.deepEqual((await store.createSession({ ...sessionInput, ...freshChannel })).response, created.response);
     assert.deepEqual((await store.admitRun({ ...runInput, ...freshChannel })).response, admitted.response);
+    const responseFault = openSqliteDriver(path.join(stateRoot, KERNEL_DATABASE_FILENAME));
+    try {
+      for (const [method, requestId, original, other, replay] of [
+        ['session.create', sessionInput.requestId, created.response, otherSession.response,
+          () => store.createSession({ ...sessionInput, ...freshChannel })],
+        ['run.submit', runInput.requestId, admitted.response, otherRun.response,
+          () => store.admitRun({ ...runInput, ...freshChannel })]
+      ] as const) {
+        try {
+          responseFault.prepare('UPDATE control_requests SET response_ref=? WHERE principal_id=? AND method=? AND request_id=?')
+            .run(canonicalSha256(other), freshChannel.principalId, method, requestId);
+          await assert.rejects(replay(), { code: 'RECOVERY_REQUIRED' });
+        } finally {
+          responseFault.prepare('UPDATE control_requests SET response_ref=? WHERE principal_id=? AND method=? AND request_id=?')
+            .run(canonicalSha256(original), freshChannel.principalId, method, requestId);
+        }
+        assert.deepEqual(canonicalJsonBytes((await replay()).response), canonicalJsonBytes(original));
+      }
+    } finally { responseFault.close(); }
     await assert.rejects(store.createSession({ ...sessionInput, ...freshChannel, requestId: uuidv7() }), { code: 'RECOVERY_REQUIRED' });
     await assert.rejects(store.admitRun({ ...runInput, ...freshChannel, requestId: uuidv7() }), { code: 'RECOVERY_REQUIRED' });
     inspectKernel(stateRoot, driver => {

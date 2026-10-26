@@ -157,6 +157,25 @@ test('a pending prompt display read never consumes the explicit cancel command s
 });
 
 
+test('Enter while a command is pending preserves the typed next command without sending it', async () => {
+  let enter!: () => void, release!: () => void;
+  const entered = new Promise<void>(resolve => { enter = resolve; }), wait = new Promise<void>(resolve => { release = resolve; });
+  const f = fixture('approval', { enter, wait }), ui = render(<ClientTui app={f.app} io={f.io} initialRunId="run" />);
+  try {
+    await until(() => ui.lastFrame()?.includes('y: allow this exact action') === true);
+    ui.stdin.write(':status run'); await new Promise(resolve => setTimeout(resolve, 20)); ui.stdin.write('\r');
+    await entered;
+    ui.stdin.write(':status run'); await until(() => ui.lastFrame()?.includes('Working…:status run') === true);
+    ui.stdin.write('\r'); await new Promise(resolve => setTimeout(resolve, 20));
+    assert.match(ui.lastFrame()!, /Working…:status run/u, 'a busy Enter must not discard the unsent text');
+    assert.equal(f.calls.filter(call => call.method === 'run.get').length, 2);
+    release(); await until(() => ui.lastFrame()?.includes('> :status run') === true);
+    assert.equal(f.calls.filter(call => call.method === 'run.get').length, 2, 'completion cannot auto-submit the buffered command');
+    ui.stdin.write('\r'); await until(() => f.calls.filter(call => call.method === 'run.get').length === 3);
+    assert.equal(f.calls.some(call => ['run.submit', 'run.input', 'run.approve', 'run.cancel'].includes(call.method)), false);
+  } finally { release(); ui.unmount(); await f.app.close(); }
+});
+
 test('an explicit reattach can reread refused immutable prompt data without reissuing a mutation', async () => {
   const f = fixture('input', { enter() {}, wait: Promise.resolve(), failFirstArtifact: true });
   const ui = render(<ClientTui app={f.app} io={f.io} initialRunId="run" />);

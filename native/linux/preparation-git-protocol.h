@@ -91,6 +91,14 @@ static inline bool cliq_fixed_git_same_prepared(const struct cliq_worker_packet 
     return left->preparation_input_intent_ref[0] || right->preparation_input_intent_ref[0]
         ? cliq_preparation_same_attempt(left, right) : cliq_source_same_prepared(left, right);
 }
+/* Failure-only projection: an unknown, foreign, FD-bearing or productive
+ * response cannot contribute diagnostic data, let alone a result fact. */
+static inline uint32_t cliq_preparation_failure_status(const struct cliq_worker_packet *expected,
+    const struct cliq_worker_packet *response, uint32_t command, size_t count) {
+    return expected->preparation_input_intent_ref[0] && count == 0 && response->command == command &&
+        cliq_preparation_same_attempt(expected, response) && cliq_source_postready_failure_valid(response->status)
+        ? response->status : 0;
+}
 static inline bool preparation_origin_matches_worker(const struct cliq_preparation_origin *origin, const struct cliq_worker_packet *binding) {
     return origin->reservation_device == binding->reservation_device && origin->reservation_inode == binding->reservation_inode &&
         origin->reservation_uid == binding->reservation_uid && origin->generation_device == binding->generation_device &&

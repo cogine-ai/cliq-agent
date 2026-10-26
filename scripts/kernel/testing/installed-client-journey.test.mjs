@@ -6,6 +6,7 @@ import test from 'node:test';
 
 const journey = readFileSync(new URL('../qualify-installed-run-journey.ts', import.meta.url), 'utf8');
 const verifier = readFileSync(new URL('./installed-node-journey.ts', import.meta.url), 'utf8');
+const clientBuild = readFileSync(new URL('./installed-client-build.ts', import.meta.url), 'utf8');
 const matches = (text, pattern) => assert(pattern.test(text), 'fixed genuine installed consumer wiring missing: ' + pattern.source);
 
 test('the complete ordinary installed journey sends initial admission and terminal delivery through the genuine client', () => {
@@ -25,7 +26,16 @@ test('the complete ordinary installed journey sends initial admission and termin
 
 test('both real installed workloads bundle the production driver and join its scanned child before corpus qualification', () => {
   for (const [text, schema3] of [[journey, true], [verifier, false]]) {
-    matches(text, /new URL\('\.\/(?:testing\/)?installed-control-client-driver\.ts', import\.meta\.url\)/u);
+    if (schema3) {
+      matches(text, /new URL\('\.\/testing\/installed-control-client-driver\.ts', import\.meta\.url\)/u);
+      matches(text, /\.\.\.installedClientBuildOptions\(\)/u);
+    } else {
+      matches(text, /import \{ buildInstalledClientDriver \} from '\.\/installed-client-build\.js'/u);
+      matches(text, /await writeFile\(installedClientDriver, await buildInstalledClientDriver\(installedClientDriver\), \{ flag: 'wx', mode: 0o444 \}\)/u);
+      matches(clientBuild, /new URL\('\.\/installed-control-client-driver\.ts', import\.meta\.url\)/u);
+      matches(clientBuild, /\.\.\.installedClientBuildOptions\(\)/u);
+      matches(clientBuild, /assert\(bytes\.length > 0 && bytes\.length <= 16 \* 1024 \* 1024\)/u);
+    }
     matches(text, schema3
       ? /args: \[\.\.\.prefix, process\.execPath, '--disable-warning=ExperimentalWarning', installedClientDriver, filename,\s*genuineTransport === 'rpc' \? '--schema3-rpc' : '--schema3'\]/u
       : /args: \[\.\.\.prefix, process\.execPath, '--disable-warning=ExperimentalWarning', installedClientDriver, filename\]/u);
@@ -43,6 +53,7 @@ test('both real installed workloads bundle the production driver and join its sc
     matches(text, /metafile: true, write: false/u);
     matches(text, /external && value\.path\.startsWith\('node:'\)/u);
   }
+  matches(clientBuild, /external && value\.path\.startsWith\('node:'\)/u);
   const cleanup = journey.slice(journey.indexOf('  } catch (error) {', journey.indexOf('report.closedBrokerProcessDomainDeath')));
   assert(cleanup.indexOf('await closeGenuineClient()') >= 0);
   assert(cleanup.indexOf('await closeGenuineClient()') < cleanup.indexOf('scanCredentialSecretCorpus'));

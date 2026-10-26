@@ -142,12 +142,8 @@ async function replayCreateSession(
   installed?: InstalledSessionRequest
 ): Promise<CreateSessionResult | undefined> {
   const existingControl = readControlRequest(driver, input.principalId, 'session.create', input.requestId);
-  if (existingControl !== undefined) {
-    if (existingControl.requestDigest !== requestDigest) {
-      throw new KernelStorageError('REQUEST_ID_CONFLICT', 'session.create requestId was reused with different bytes');
-    }
-    const response = await readPublishedResponse(artifacts, existingControl.responseRef);
-    return { replayed: true, session: response.result.snapshot.session, response };
+  if (existingControl !== undefined && existingControl.requestDigest !== requestDigest) {
+    throw new KernelStorageError('REQUEST_ID_CONFLICT', 'session.create requestId was reused with different bytes');
   }
 
   const existingAdmission = readAdmissionReplay(
@@ -165,7 +161,17 @@ async function replayCreateSession(
       );
     }
     if (existingAdmission.admissionRequestId === null) {
-      throw new KernelStorageError('RECOVERY_REQUIRED', 'session admission has no original control request');
+      // Pre-link history can replay an already registered exact request,
+      // but cannot manufacture an admission-key alias or borrow another row.
+      if (existingControl === undefined) {
+        throw new KernelStorageError('RECOVERY_REQUIRED', 'session admission has no original control request');
+      }
+      const response = await readPublishedResponse(artifacts, existingControl.responseRef);
+      const session = response.result.snapshot.session;
+      if (session.id !== existingAdmission.id) {
+        throw new KernelStorageError('RECOVERY_REQUIRED', 'session retained request response names another admission');
+      }
+      return { replayed: true, session, response };
     }
     const originalRequestId = existingAdmission.admissionRequestId;
     const original = readControlRequest(driver, input.principalId, 'session.create', originalRequestId);
@@ -186,6 +192,12 @@ async function replayCreateSession(
     const session = response.result.snapshot.session;
     if (session.id !== existingAdmission.id) {
       throw new KernelStorageError('RECOVERY_REQUIRED', 'session admission original response names another Session');
+    }
+    if (existingControl !== undefined) {
+      if (existingControl.responseRef !== original.responseRef) {
+        throw new KernelStorageError('RECOVERY_REQUIRED', 'session replay substitutes its original admission response');
+      }
+      return { replayed: true, session, response };
     }
     const channel = await validateControlChannelClosure(artifacts, owner, input);
     const requestArtifact = installed ? await publishSessionCreatePublicCore(artifacts, installed) : undefined;
@@ -224,6 +236,9 @@ async function replayCreateSession(
       throw new KernelStorageError('INVALID_REQUEST', 'canonical clock has regressed; admission replay binding is paused');
     }
     return { replayed: true, session, response };
+  }
+  if (existingControl !== undefined) {
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'session replay has no exact original admission');
   }
   return undefined;
 }

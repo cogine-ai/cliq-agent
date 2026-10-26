@@ -1126,6 +1126,8 @@ type NativeInstalledAnchor = Readonly<{ assertHeld(): void;
 type NativeCredentialScope = Readonly<{ generation: string; assertHeld(): void; close(): void;
   observeProducerLifetime(pid: number, ownerUid: number, processStartToken: string): 'present' | 'dead' }>;
 type NativeBinding = { acquireLock(stateRoot: string, createLayout: boolean): NativeLock; processStartToken(): string;
+  duplicateClientStdout?(): number;
+  duplicateClientStderr?(): number;
   decodeSourceGitLifecycle?(bytes: Buffer): SourceGitNativeLifecycleV2;
   captureCurrentProcess(): NativeCurrentProcess;
   openWorkspaceRoot(workspacePath: string): HeldWorkspaceRoot;
@@ -1139,6 +1141,16 @@ type NativeBinding = { acquireLock(stateRoot: string, createLayout: boolean): Na
   executeInstalledImage?(fd: number, image: readonly bigint[], bootstrap: readonly bigint[], root: readonly bigint[],
     stateRoot: string, bundleDigest: string, relativePath: string, role: 'keeper' | 'supervisor' | 'endpoint' | 'credential', command?: string): never };
 const nativeBindings = new WeakMap<NativeStateOwner, NativeBinding>();
+
+/** Fixed stdio-only bridge, available solely on the original loaded image.
+ * The caller immediately transfers the duplicate to its own Socket owner. */
+export function duplicateClientStdio(native: NativeStateOwner, role: 'stdout' | 'stderr'): number {
+  if (role !== 'stdout' && role !== 'stderr') throw new TypeError('invalid client stdio role');
+  const binding = nativeBindings.get(native), duplicate = role === 'stdout' ? binding?.duplicateClientStdout : binding?.duplicateClientStderr;
+  if (!binding || typeof duplicate !== 'function')
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed helper lacks owned client stdio');
+  return Reflect.apply(duplicate, binding, []);
+}
 // Byte-identical copies may dlopen as different images with different static
 // VFS state. Credential bootstrap must use the actual first loaded image.
 const loadedImageIdentities = new WeakMap<NativeStateOwner, BigIntStats>();

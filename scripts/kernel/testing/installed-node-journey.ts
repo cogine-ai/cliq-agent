@@ -11,6 +11,7 @@ import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
+import { buildInstalledClientDriver } from './installed-client-build.js';
 import { InstalledClientConsumerDeadlineError, InstalledClientDriverError, openInstalledClientConsumer } from './installed-client-consumer.js';
 import { fixtureCommandJoinDiagnostic } from './fixture-command-diagnostic.js';
 import { preparingGitNativeInputData } from './preparing-git-native.js';
@@ -624,11 +625,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     assert(Object.values(installer.metafile!.outputs).flatMap(value => value.imports).every(value => value.external && value.path.startsWith('node:')));
     assert.equal(installer.outputFiles!.length, 1);
     await writeFile(recipe.installerEntry, installer.outputFiles![0]!.contents, { flag: 'wx', mode: 0o444 });
-    const consumer = await build({ entryPoints: [fileURLToPath(new URL('./installed-control-client-driver.ts', import.meta.url))],
-      outfile: installedClientDriver, bundle: true, platform: 'node', format: 'esm', target: 'node22.13', metafile: true, write: false });
-    assert(Object.values(consumer.metafile!.outputs).flatMap(value => value.imports).every(value => value.external && value.path.startsWith('node:')));
-    assert.equal(consumer.outputFiles!.length, 1); assert(consumer.outputFiles![0]!.contents.length <= 16 * 1024 * 1024);
-    await writeFile(installedClientDriver, consumer.outputFiles![0]!.contents, { flag: 'wx', mode: 0o444 });
+    await writeFile(installedClientDriver, await buildInstalledClientDriver(installedClientDriver), { flag: 'wx', mode: 0o444 });
     await writeFile(recipe.releaseKeysFile, canonicalJsonBytes(signed.releaseKeys), { flag: 'wx', mode: 0o444 });
     await transferPackage(recipe.packageRoot, ledger.uid, ledger.gid);
     const cliqHome = path.join(ledger.home, '.cliq'); await mkdir(cliqHome, { mode: 0o700 }); await chown(cliqHome, ledger.uid, ledger.gid);
