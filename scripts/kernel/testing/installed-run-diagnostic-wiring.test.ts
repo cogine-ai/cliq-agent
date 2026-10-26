@@ -1,3 +1,5 @@
+// Keep the fixed installer data regressions in the original CI diagnostics suite.
+import './installed-install-diagnostics.test.js';
 // Source wiring and inert CAS resource lifetimes only. No StateOwner, Run,
 // SQLite authority, native proof or installed physical qualification is made.
 import assert from 'node:assert/strict';

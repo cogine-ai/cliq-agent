@@ -40,6 +40,25 @@ struct cliq_source_config {
         char digest[65];
     } files[CLIQ_SOURCE_MAX_FILES];
 };
+/* Local receive outcomes only, never packet/wire status or peer authority.
+ * Distinguish transport refusals without exposing unauthenticated reply data. */
+enum cliq_source_reply_outcome {
+    CLIQ_SOURCE_REPLY_AUTHENTICATED_FAILURE = -1,
+    CLIQ_SOURCE_REPLY_REQUEST_STATE = -2,
+    CLIQ_SOURCE_REPLY_RECEIVE_FAILURE = -3,
+    CLIQ_SOURCE_REPLY_FOREIGN = -4,
+    CLIQ_SOURCE_REPLY_GENERIC_REFUSAL = -5
+};
+static inline uint32_t cliq_source_reply_failure_guard(int outcome) {
+    switch (outcome) {
+        case CLIQ_SOURCE_REPLY_REQUEST_STATE: return 4005;
+        case CLIQ_SOURCE_REPLY_RECEIVE_FAILURE: return 4006;
+        case CLIQ_SOURCE_REPLY_FOREIGN: return 4007;
+        case CLIQ_SOURCE_REPLY_GENERIC_REFUSAL: return 4008;
+        default: return 0;
+    }
+}
+
 /* Post-READY failures on the original fixed channel are diagnostics only.
  * These finite values never admit a result/FD, death, time or permission.
  * 2101..2355 and 2401..2464 require a truly joined helper wait status;

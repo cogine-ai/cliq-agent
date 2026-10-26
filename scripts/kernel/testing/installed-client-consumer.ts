@@ -6,9 +6,12 @@ import { types } from 'node:util';
 import { canonicalJsonBytes } from '../../../src/kernel/canonical.js';
 import { parseJsonStrict } from '../../../src/kernel/json.js';
 import { decodeHeadlessControlRequest, decodeHeadlessControlRecord, decodeInstalledControlResponse, headlessRunEvent,
-  INSTALLED_CONTROL_FEATURES, type InstalledControlRequestV1, type HeadlessRunEventV3 } from '../../../src/control/v1.js';
+  CONTROL_METHODS_V1, INSTALLED_CONTROL_FEATURES, type InstalledControlRequestV1, type HeadlessRunEventV3 } from '../../../src/control/v1.js';
 import { INSTALLED_CLIENT_PHASES, type InstalledClientPhase } from '../../../src/state/installed-diagnostics.js';
 import type { InstalledWorkSnapshot } from '../../../src/state/installed-work-diagnostics.js';
+import { writeSync } from 'node:fs';
+import { decodeInstalledRequestFailureMarker, installedRequestFailureMarker,
+  INSTALLED_REQUEST_FAILURE_PREFIX } from './installed-client-request-failure.js';
 
 export type InstalledClientAuthenticationObservation = Readonly<{ stage: InstalledClientPhase; elapsedMs: number;
   observedElapsedMs: number; work?: InstalledWorkSnapshot; process?: InstalledClientAuthenticationProcess }>;
@@ -20,6 +23,11 @@ export type InstalledClientAuthenticationProcess = Readonly<{
 }>;
 const authPrefix = 'CLIQ_INSTALLED_CLIENT_AUTH_V1:';
 const authProcessPrefix = 'CLIQ_INSTALLED_CLIENT_AUTH_V2:self_whole_process_cumulative:';
+/** Fixed diagnostic only: never serialize a request, identifier, path or error. */
+export function installedClientRequestFailureMarker(method: unknown): string {
+  const name = typeof method === 'string' && (CONTROL_METHODS_V1 as readonly string[]).includes(method) ? method : 'unknown';
+  return 'CLIQ_INSTALLED_REQUEST_FAILED_V1:' + name;
+}
 const counterKeys = ['started', 'completed', 'bytesRead', 'spanElapsedMs'] as const;
 const workKeys = ['package', 'revalidate', 'createCompare'] as const;
 const processKeys = ['userCPUTime', 'systemCPUTime', 'fsRead', 'fsWrite'] as const;
@@ -176,6 +184,7 @@ export async function openInstalledClientConsumer(input: Input) {
   let errorTail = Buffer.alloc(0), markerBytes = 0, lastObservedDriverStage: InstalledClientDriverStage | undefined;
   const observedStages = new Set<InstalledClientDriverStage>(), lastObservedStage = () => lastObservedDriverStage;
   const authentication: InstalledClientAuthenticationObservation[] = [];
+  let requestFailureObserved = false;
   let pending: { method: string; request?: InstalledControlRequestV1; page?: Response; events?: HeadlessRunEventV3[];
     attachTarget?: number; attachLimit?: number; rpcId?: number; rpcDrained?: boolean; rpcLast?: Response;
     resolve(value: Response): void; reject(error: unknown): void } | undefined;
@@ -287,13 +296,22 @@ export async function openInstalledClientConsumer(input: Input) {
           const authText = errorTail.toString('ascii');
           assert(driverMarkers.some(marker => errorTail.length < marker.bytes.length &&
             marker.bytes.subarray(0, errorTail.length).equals(errorTail)) || errorTail.length <= 512 &&
-            errorTail.every(byte => byte < 128) && [authPrefix, authProcessPrefix].some(prefix =>
+            errorTail.every(byte => byte < 128) && [authPrefix, authProcessPrefix, INSTALLED_REQUEST_FAILURE_PREFIX].some(prefix =>
               prefix.startsWith(authText) || authText.startsWith(prefix)), 'unknown installed client stderr');
           break;
         }
         const line = errorTail.subarray(0, at + 1), marker = driverMarkers.find(value => value.bytes.equals(line));
         errorTail = errorTail.subarray(at + 1);
         if (!marker) {
+          if (line.subarray(0, INSTALLED_REQUEST_FAILURE_PREFIX.length).toString('ascii') === INSTALLED_REQUEST_FAILURE_PREFIX) {
+            assert(!requestFailureObserved, 'duplicate fixed request failure');
+            const observation = decodeInstalledRequestFailureMarker(line);
+            requestFailureObserved = true; markerBytes += line.length;
+            // errorScan already scanned every original byte above. Log only
+            // the closed canonical projection; never the original exception.
+            try { writeSync(2, installedRequestFailureMarker(observation)); } catch { /* Diagnosis cannot replace the original failure. */ }
+            continue;
+          }
           const auth = authMarker(line);
           const observation = { ...auth, observedElapsedMs: Math.floor(performance.now() - (by - timeout)) };
           copyAuthentication([...authentication, observation]); authentication.push(Object.freeze(observation)); markerBytes += line.length; continue;
@@ -338,17 +356,25 @@ export async function openInstalledClientConsumer(input: Input) {
     assert(!pending && !failure && !closing && frames >= 1 && frames < 1024);
     assert(Number.isSafeInteger(milliseconds) && milliseconds > 0 && milliseconds <= 30000);
     const by = performance.now() + milliseconds;
-    assert.equal(typeof value.method, 'string'); assert.notEqual(value.method, 'control.hello');
+    const method = value.method;
+    assert.equal(typeof method, 'string'); assert.notEqual(method, 'control.hello');
     const wrapped = input.headlessSchemaVersion === 3 ? decodeHeadlessControlRequest({ schemaVersion: 3, request: value }) : undefined;
     const rpcId = input.headlessTransport === 'rpc' ? ++correlation : undefined;
     const bytes = canonicalJsonBytes(rpcId === undefined ? wrapped ?? value
-      : { jsonrpc: '2.0', id: rpcId, method: value.method, params: wrapped });
+      : { jsonrpc: '2.0', id: rpcId, method, params: wrapped });
     assert(bytes.length > 0 && bytes.length <= 1048576);
-    const reply = new Promise<Response>((resolve, reject) => { pending = { method: value.method as string,
+    const reply = new Promise<Response>((resolve, reject) => { pending = { method: method as string,
       ...(wrapped ? { request: wrapped.request } : {}), ...(rpcId === undefined ? {} : { rpcId }), resolve, reject }; });
     child.stdin.write(Buffer.concat([bytes, Buffer.from('\n')]));
     try { const response = await bounded(reply, milliseconds, 'request', () => frames, lastObservedStage, milliseconds, performance.now(), () => authentication); assert(performance.now() < by); return response; }
-    catch (error) { refuse(error); throw error; }
+    catch (error) {
+      try {
+        const marker = installedClientRequestFailureMarker(method), scan = input.openScan();
+        try { scan.scan(Buffer.from(marker + '\n')); } finally { scan.close(); }
+        console.error(marker);
+      } catch { /* Preserve the original failure and never emit an unscanned marker. */ }
+      refuse(error); throw error;
+    }
   };
   if (input.headlessTransport === 'rpc') {
     const params = decodeHeadlessControlRequest({ schemaVersion: 3, request: { protocolVersion: 1, method: 'control.hello',

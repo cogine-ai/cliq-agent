@@ -8,6 +8,7 @@ import { KERNEL_DATABASE_FILENAME } from '../../../src/config.js';
 import { parseJsonStrict } from '../../../src/kernel/json.js';
 import type { ReleaseTrustKey } from '../../../src/policy/runtime-authority.js';
 import { createInstalledRuntime } from '../../../src/state/installed-runtime.js';
+import { observeInstalledInstallerDiagnostics } from './installed-install-diagnostics.js';
 
 assert.equal(process.platform, 'linux', 'installed fixture requires a real Linux runner');
 assert.equal(process.arch, 'x64', 'no installed fixture qualified for this architecture');
@@ -17,7 +18,9 @@ assert(packageRoot && stateRoot && releaseKeysFile && extra.length === 0,
   'expected exactly PACKAGE STATE_ROOT RELEASE_KEYS');
 assert([packageRoot, stateRoot, releaseKeysFile].every(filename => path.isAbsolute(filename)));
 const releaseKeys = parseJsonStrict(await readFile(releaseKeysFile, 'utf8')) as ReleaseTrustKey[];
-const selected = await createInstalledRuntime({ releaseKeys }).installInitial({ packageRoot, stateRoot });
+const installerRuntime = createInstalledRuntime({ releaseKeys });
+const stopDiagnostics = observeInstalledInstallerDiagnostics();
+const selected = await installerRuntime.installInitial({ packageRoot, stateRoot }).finally(stopDiagnostics);
 for (const relative of [KERNEL_DATABASE_FILENAME, `${KERNEL_DATABASE_FILENAME}-wal`, `${KERNEL_DATABASE_FILENAME}-shm`,
   'runtime/state-owner.lock', 'runtime/control-v1.sock']) {
   const absent = await lstat(path.join(stateRoot, relative)).then(() => false, (error: NodeJS.ErrnoException) => {

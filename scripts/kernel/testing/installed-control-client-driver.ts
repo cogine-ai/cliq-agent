@@ -24,9 +24,21 @@ import { INSTALLED_WORK_CHANNEL, type InstalledWorkSnapshot } from '../../../src
 import { copyInstalledClientAuthenticationWork, copyInstalledClientAuthenticationProcess,
   installedClientAuthenticationMarker } from './installed-client-consumer.js';
 import type { InstalledClientAuthenticationProcess, InstalledClientDriverStage } from './installed-client-consumer.js';
+import { classifyInstalledRequestError, observeInstalledRequestFailures } from '../../../src/state/installed-request-diagnostics.js';
+import { installedRequestFailureMarker } from './installed-client-request-failure.js';
 
 let phase: InstalledClientDriverStage = 'platform';
 let failedPhase: InstalledClientDriverStage | undefined;
+let requestFailureObserved = false;
+function observeRequestFailures(): () => void {
+  return observeInstalledRequestFailures(observation => {
+    try {
+      if (requestFailureObserved) return;
+      requestFailureObserved = true;
+      writeSync(2, installedRequestFailureMarker(observation));
+    } catch { /* Missing diagnostics cannot alter or replace a request failure. */ }
+  });
+}
 const observedPhases = new Set<InstalledClientDriverStage>();
 function writeMarker(kind: 'progress' | 'failed', stage: InstalledClientDriverStage): void {
   try { writeSync(2, `installed control client driver ${kind} phase=${stage}\n`); }
@@ -153,6 +165,7 @@ async function main(): Promise<void> {
   setPhase('composition');
   const composition = await fixtureComposition(filename);
   const closeAuthentication = observeAuthentication();
+  const closeRequestFailures = observeRequestFailures();
   let selected: HeldInstalledRuntime | undefined, client: InstalledSupervisorClient | undefined, failure: unknown;
   let session: InstalledControlSession | undefined, surface: AbortController | undefined;
   let stopping: Promise<void> | undefined, stopRequested = false;
@@ -202,7 +215,13 @@ async function main(): Promise<void> {
       } else await (schema === '--schema3-rpc' ? runInstalledHeadlessRpc : runInstalledHeadlessJsonl)(session, requests(), write);
     } else await runInstalledControlJsonl(client, requests(), write);
     assert(!stopRequested, 'installed client driver stopped before EOF');
-  } catch (error) { failure = error; failedPhase = phase; }
+  } catch (error) {
+    failure = error; failedPhase = phase;
+    if (phase === 'request' && !requestFailureObserved) try {
+      requestFailureObserved = true;
+      writeSync(2, installedRequestFailureMarker({ method: 'unrecognized', boundary: 'unobserved', ...classifyInstalledRequestError(error) }));
+    } catch { /* The original adapter exception and join remain unchanged. */ }
+  }
   finally {
     setPhase('retirement');
     try {
@@ -215,6 +234,7 @@ async function main(): Promise<void> {
       failedPhase = phase; throw error;
     } finally {
       closeAuthentication();
+      closeRequestFailures();
       process.removeListener('SIGTERM', stop); process.removeListener('SIGINT', stop); process.stdout.removeListener('error', stop);
     }
   }

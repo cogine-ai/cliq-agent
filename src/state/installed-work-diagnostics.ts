@@ -3,6 +3,23 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { channel } from 'node:diagnostics_channel';
 
 export const INSTALLED_WORK_CHANNEL = 'cliq.installed.work.v1';
+export const INSTALLED_INSTALL_PHASE_CHANNEL = 'cliq.installed.install.phase.v1';
+export const INSTALLED_INSTALL_PHASES = Object.freeze(['source_verify', 'destination_layout', 'signed_entries_copy',
+  'manifest_bootstrap_copy', 'cas_roots_publish', 'cas_streams_publish', 'destination_verify', 'bootstrap_verify',
+  'source_final_verify', 'cas_final_verify', 'directory_sync', 'source_join', 'bundle_publish',
+  'selection_publish', 'destination_join', 'complete_joined'] as const);
+export type InstalledInstallPhase = typeof INSTALLED_INSTALL_PHASES[number];
+const installPhase = channel(INSTALLED_INSTALL_PHASE_CHANNEL);
+/** Fixed data boundaries only. No subscriber means no clock, task or I/O.
+ * Trusted qualification subscribers contain their own observation failures. */
+export function noteInstalledInstallPhase(phase: InstalledInstallPhase, items = 0): void {
+  if (!installPhase.hasSubscribers) return;
+  const code = INSTALLED_INSTALL_PHASES.indexOf(phase);
+  if (code < 0 || !Number.isSafeInteger(items) || items < 0 || items > 1_048_576) return;
+  try { installPhase.publish(Object.freeze({ phase: code + 1, items })); }
+  catch { /* Measurement is never an installation decision. */ }
+}
+
 export const INSTALLED_ASSEMBLY_WORK_CHANNEL = 'cliq.installed.assembly.work.v1';
 export const INSTALLED_ASSEMBLY_WORK_PHASES = Object.freeze(['submit_request', 'submit_assembly_material',
   'submit_assembly_verifier_history', 'submit_assembly_verifier_current', 'submit_assembly_verifier_compose',

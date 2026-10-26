@@ -14,6 +14,7 @@ import { assertInstalledManagerObservationAvailable, openInstalledControlClient,
 import type { HeldInstalledControlClient } from './native-owner.js';
 import { loadInstalledSupervisorObserver, type InstalledCredentialSupervisorObservation } from './installed-services.js';
 import { noteInstalledClientPhase } from './installed-diagnostics.js';
+import { beginInstalledRequestDiagnostic } from './installed-request-diagnostics.js';
 
 /** Internal common transport: only genuine held installed selections can open
  * it. The fixed credential purpose is the existing explicit ensure-start path;
@@ -265,18 +266,30 @@ export async function openInstalledControlTransport(selected: HeldInstalledRunti
       if (this !== client) return Promise.reject(new TypeError('invalid installed control client'));
       if (running || closing || stopped) return Promise.reject(new KernelStorageError('RECOVERY_REQUIRED', 'installed control client is closed or busy'));
       let candidate: InstalledControlRequestV1;
+      let diagnosis: ReturnType<typeof beginInstalledRequestDiagnostic>;
       try {
         candidate = decodeInstalledControlRequest(request);
+        diagnosis = beginInstalledRequestDiagnostic(candidate.method);
+        diagnosis?.at('request_validation');
         if (candidate.method === 'control.hello' || !helloResult.enabledFeatureIds.includes(candidate.method))
           throw new TypeError('installed control method was not enabled by this hello');
         if (purpose === 'credential' && candidate.method !== 'credential.finalize') throw new TypeError('credential connection accepts only its original continuation');
-      } catch (cause) { return Promise.reject(new KernelStorageError('INVALID_REQUEST', 'invalid installed control request', { cause })); }
+      } catch (cause) {
+        (diagnosis ?? beginInstalledRequestDiagnostic('unrecognized'))?.failure(cause);
+        return Promise.reject(new KernelStorageError('INVALID_REQUEST', 'invalid installed control request', { cause }));
+      }
       const pending = (async () => {
         try {
+          diagnosis?.at('pre_current');
           await checkCurrent();
-          const response = decodeInstalledControlResponse(await exchange(candidate), candidate);
+          diagnosis?.at('exchange');
+          const value = await exchange(candidate);
+          diagnosis?.at('response_decode');
+          const response = decodeInstalledControlResponse(value, candidate);
+          diagnosis?.at('post_current');
           await checkCurrent(); return response as InstalledControlResponseFor<M>;
         } catch (error) {
+          diagnosis?.failure(error);
           const reason = error instanceof KernelStorageError || error instanceof ResourceRetirementError ? error
             : new KernelStorageError('RECOVERY_REQUIRED', 'installed control response is invalid');
           fail(reason); await retire(); throw reason;

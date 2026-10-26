@@ -120,7 +120,7 @@ static int preparation_producer(void) {
 failed:
     if (diagnostic_stage) source_ready_diagnostic_write(2, &request, diagnostic_stage);
     else if (cliq_source_postready_failure_valid(result_failure_status)) {
-        struct cliq_worker_packet diagnostic = request;
+        struct cliq_worker_packet diagnostic; memcpy(&diagnostic, &request, sizeof(diagnostic));
         diagnostic.command = CLIQ_SOURCE_RESULT; diagnostic.status = result_failure_status;
         // An authenticated failure carries no output or successful fact.
         // A closed peer can discard this optional observation; exit stays70.

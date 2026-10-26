@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, sign } from 'node:crypto';
 import { channel } from 'node:diagnostics_channel';
-import { constants, fstatSync } from 'node:fs';
+import { constants, fstatSync, promises as installFixtureFs } from 'node:fs';
 import { chmod, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rm, writeFile, type FileHandle } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -23,7 +23,7 @@ import { KernelStorageError } from './errors.js';
 import { GUEST_EXTRACTOR_RECIPE } from '../sandbox/guest-toolchain.js';
 import { validateBundle } from './installed-artifacts.js';
 import { observeInstalledCredentialSupervisor } from './installed-services.js';
-import { INSTALLED_WORK_CHANNEL, type InstalledWorkSnapshot } from './installed-work-diagnostics.js';
+import { INSTALLED_INSTALL_PHASE_CHANNEL, INSTALLED_INSTALL_PHASES, INSTALLED_WORK_CHANNEL, type InstalledWorkSnapshot } from './installed-work-diagnostics.js';
 
 /** Real signed files for installer/CAS semantics only. The opaque executable
  * entries are deliberately not running Supervisor/worker/addon images and are
@@ -1083,3 +1083,33 @@ if (process.platform === 'linux') for (const role of ['system_prompt', 'compacti
     } finally { await rm(fixture, { recursive: true, force: true }); }
   });
 }
+
+
+if (process.platform === 'linux') test('fixed initial-install stages complete only after the original real descriptor owners close', async t => {
+  // Actual signed files/install/CAS only. Opaque executable fixtures never run
+  // or create StateOwner/Run authority; this is not installed qualification.
+  const root = await mkdtemp(path.join(await realpath(os.tmpdir()), 'cliq-initial-install-stages-'));
+  const phaseChannel = channel(INSTALLED_INSTALL_PHASE_CHANNEL), phases: Array<{ phase: number; items: number }> = [];
+  const active = new Set<FileHandle>(); let openCount = 0, closedAtComplete = false;
+  const observer = (value: unknown) => {
+    const phase = value as { phase: number; items: number }; phases.push(phase);
+    if (phase.phase === 16) closedAtComplete = active.size === 0;
+  };
+  try {
+    const signed = await writeInstallerOnlyPackage(path.join(root, 'package'));
+    const actualOpen = installFixtureFs.open;
+    const mock = t.mock.method(installFixtureFs, 'open', async (...args: Parameters<typeof installFixtureFs.open>) => {
+      const handle = await actualOpen(...args), actualClose = handle.close.bind(handle); active.add(handle); openCount++;
+      t.mock.method(handle, 'close', async () => { await actualClose(); assert(active.delete(handle)); }); return handle;
+    });
+    (await import('node:module')).syncBuiltinESMExports(); phaseChannel.subscribe(observer);
+    try {
+      const installed = await createInstalledRuntime({ releaseKeys: signed.releaseKeys }).installInitial({
+        packageRoot: path.join(root, 'package'), stateRoot: path.join(root, 'state') });
+      assert.equal(installed.bundleDigest, canonicalSha256(signed.bundle));
+      assert.deepEqual([...new Set(phases.map(value => value.phase))], INSTALLED_INSTALL_PHASES.map((_, index) => index + 1));
+      assert.equal(phases.at(-1)!.phase, 16); assert(openCount > 0); assert.equal(active.size, 0); assert.equal(closedAtComplete, true);
+      const entryPhase = phases.filter(value => value.phase === 3).at(-1)!; assert.equal(entryPhase.items, signed.bundle.entries.length);
+    } finally { phaseChannel.unsubscribe(observer); mock.mock.restore(); (await import('node:module')).syncBuiltinESMExports(); }
+  } finally { phaseChannel.unsubscribe(observer); await rm(root, { recursive: true, force: true }); }
+});

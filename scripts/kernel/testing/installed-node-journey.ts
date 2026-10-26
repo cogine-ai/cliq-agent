@@ -26,6 +26,7 @@ import { decodeDeliveryPlan, type PublicationArenaBirthV1 } from '../../../src/k
 import type { ArtifactDescriptorV1 } from '../../../src/kernel/types.js';
 import { decodeRunResult, decodeWorkspaceDiff } from '../../../src/state/result-artifacts.js';
 import { buildInstalledSupervisorPackage } from './installed-supervisor-package.js';
+import { decodeInstalledInstallerDiagnostics, encodeInstalledInstallerDiagnostic } from './installed-install-diagnostics.js';
 import { CredentialSecretScanError, createCredentialSecretScanner, copyCredentialSecretScanFailureDiagnostic,
   type CredentialSecretScanCode, type CredentialSecretScanFailureDiagnostic, type CredentialSecretScanFailureStage } from './credential-secret-scan.js';
 import { CredentialSecretCorpusError, scanCredentialSecretCorpus, readCredentialSecretCorpusScanProgress,
@@ -205,6 +206,12 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     scanBytes(result.stdout); scanBytes(result.stderr);
     const failure = fixtureCommandJoinDiagnostic(result, timeout, started);
     if (failure) report.commandJoinFailure ??= failure;
+    if (executable === process.execPath && args.length === 4 && args[0] === recipe.installerEntry) {
+      try {
+        for (const diagnostic of decodeInstalledInstallerDiagnostics(result.stderr))
+          console.log(encodeInstalledInstallerDiagnostic(diagnostic));
+      } catch { /* Sanitized fixed counters cannot replace the original command result. */ }
+    }
     assert.equal(result.error, undefined, 'actual fixture command must join'); assert.equal(result.signal, null);
     return { status: result.status, stdout: result.stdout.toString('utf8'), stderr: result.stderr.toString('utf8') };
   };

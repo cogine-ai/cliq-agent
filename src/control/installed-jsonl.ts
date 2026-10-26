@@ -5,6 +5,7 @@ import { CONTROL_FRAME_BYTES, INSTALLED_CONTROL_FEATURES, decodeControlFrame,
   decodeInstalledControlRequest, decodeInstalledControlEnvelope, decodeInstalledControlResponse,
   type InstalledControlFeature } from './v1.js';
 import { readControlLines } from './lines.js';
+import { beginInstalledRequestDiagnostic } from '../state/installed-request-diagnostics.js';
 
 /** A serial byte adapter over the existing client, not an owner or transport.
  * The caller acquires/closes that genuine client in its original finally.
@@ -19,10 +20,19 @@ export async function runInstalledControlJsonl(client: InstalledSupervisorClient
   };
   await output(decodeInstalledControlEnvelope({ protocolVersion: 1, ok: true, result: client.hello }, 'control.hello'));
   for await (const line of readControlLines(input)) {
+    let diagnosis = beginInstalledRequestDiagnostic('unrecognized');
+    try {
       const request = decodeInstalledControlRequest(decodeControlFrame(line));
+      diagnosis = beginInstalledRequestDiagnostic(request.method);
+      diagnosis?.at('request_validation');
       if (!INSTALLED_CONTROL_FEATURES.includes(request.method as InstalledControlFeature))
         throw new TypeError('unsupported installed JSONL method');
+      diagnosis?.at('adapter_dispatch');
       const response = await Reflect.apply(client[request.method as InstalledControlFeature], client, [request]);
-      await output(decodeInstalledControlResponse(response, request));
+      diagnosis?.at('response_decode');
+      const checked = decodeInstalledControlResponse(response, request);
+      diagnosis?.at('adapter_output');
+      await output(checked);
+    } catch (error) { diagnosis?.failure(error); throw error; }
   }
 }

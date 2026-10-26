@@ -3,9 +3,20 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { parseJsonStrict } from '../../../src/kernel/json.js';
+import { createCredentialSecretScanner, type CredentialSecretScanner } from './credential-secret-scan.js';
 import { InstalledClientConsumerDeadlineError, InstalledClientDriverError, openInstalledClientConsumer,
   copyInstalledClientAuthenticationWork, copyInstalledClientAuthenticationProcess,
-  installedClientAuthenticationMarker } from './installed-client-consumer.js';
+  installedClientAuthenticationMarker, installedClientRequestFailureMarker } from './installed-client-consumer.js';
+import { installedRequestFailureMarker } from './installed-client-request-failure.js';
+
+test('request failure markers contain only a closed method and never inspect or echo supplied data', () => {
+  assert.equal(installedClientRequestFailureMarker('run.get'), 'CLIQ_INSTALLED_REQUEST_FAILED_V1:run.get');
+  assert.equal(installedClientRequestFailureMarker('run.submit'), 'CLIQ_INSTALLED_REQUEST_FAILED_V1:run.submit');
+  const hostile = new Proxy({}, { get() { throw new Error('diagnostic must not inspect unknown objects'); } });
+  const revoked = Proxy.revocable({}, {}); revoked.revoke();
+  for (const value of ['private-request-text', 'run.get\nprivate-request-text', hostile, revoked.proxy, null, undefined, 1, Symbol('private')])
+    assert.equal(installedClientRequestFailureMarker(value), 'CLIQ_INSTALLED_REQUEST_FAILED_V1:unknown');
+});
 
 for (const mode of ['jsonl', 'rpc'] as const) test(`schema3 ${mode} actual adapter and scanned child consumer drain all pages and records before response join`, async () => {
   const sessionUrl = new URL('../../../src/control/session.ts', import.meta.url).href;
@@ -85,10 +96,10 @@ for (const mode of ['wrong_id', 'missing_attach_records'] as const) test(`schema
     openScan: () => ({ scan() {}, close() { closed++; } }), onJoined() { joined++; } });
   await assert.rejects(client.send(mode === 'wrong_id' ? { protocolVersion: 1, method: 'supervisor.status' }
     : { protocolVersion: 1, method: 'run.attach', runId: 'run', afterEventSeq: 0 }));
-  await assert.rejects(client.close()); assert.equal(closed, 2); assert.equal(joined, 0);
+  await assert.rejects(client.close()); assert.equal(closed, 3, 'both original pipes and the fixed diagnostic stream close'); assert.equal(joined, 0);
 });
 
-async function fixture(progress = false) {
+async function fixture(progress = false, scanner?: CredentialSecretScanner) {
   const scans: Buffer[] = []; let opened = 0, closed = 0, joined = 0;
   const authentication = ['manager_observer_loaded', 'initial_current_observed', 'native_connected', 'pre_hello_current_verified',
     'hello_exchange_started', 'hello_received', 'final_current_verified']
@@ -97,9 +108,9 @@ async function fixture(progress = false) {
     args: ['--input-type=module', '-e', progress ? `process.stderr.write('installed control client driver progress phase=authentication\\n');
       process.stderr.write(${JSON.stringify(authentication)});\n${protocol}\nprocess.stderr.write('installed control client driver progress phase=retirement\\n');` : protocol],
     cwd: process.cwd(), env: process.env,
-    openScan() { opened++; let retired = false; return {
-      scan(bytes) { assert(!retired); scans.push(Buffer.from(bytes)); },
-      close() { assert(!retired); retired = true; closed++; }
+    openScan() { opened++; let retired = false; const actual = scanner?.openStream(); return {
+      scan(bytes) { assert(!retired); actual?.scan(bytes); scans.push(Buffer.from(bytes)); },
+      close() { assert(!retired); retired = true; actual?.close(); closed++; }
     }; }, onJoined() { joined++; } });
   return { client, counts: () => ({ opened, closed, joined }), scans };
 }
@@ -165,7 +176,9 @@ test('the genuine-driver consumer rejects overlapping sends and makes a malforme
   await assert.rejects(client.close());
 });
 
-test('the genuine-driver consumer never retries after its original request deadline', async () => {
+test('the genuine-driver consumer never retries after its original request deadline', async t => {
+  const messages: unknown[][] = [];
+  t.mock.method(console, 'error', (...args: unknown[]) => { messages.push(args); });
   const { client, counts } = await fixture();
   await assert.rejects(client.send({ protocolVersion: 1, method: 'run.submit', delay: 40 }, 5), error => {
     assert(error instanceof InstalledClientConsumerDeadlineError);
@@ -177,7 +190,26 @@ test('the genuine-driver consumer never retries after its original request deadl
   });
   await assert.rejects(client.send({ protocolVersion: 1, method: 'run.submit' }));
   await assert.rejects(client.close());
-  assert.deepEqual(counts(), { opened: 2, closed: 2, joined: 0 });
+  assert.deepEqual(counts(), { opened: 3, closed: 3, joined: 0 });
+  assert.deepEqual(messages, [['CLIQ_INSTALLED_REQUEST_FAILED_V1:run.submit']]);
+});
+
+test('the original secret scanner may refuse a fixed request marker before it is emitted', async t => {
+  const messages: unknown[][] = [];
+  t.mock.method(console, 'error', (...args: unknown[]) => { messages.push(args); });
+  const scanner = createCredentialSecretScanner([Buffer.from('CLIQ_INSTALLED_REQUEST_FAILED_V1:run.submit')],
+    { maxBytes: 1048576, maxStreams: 4096 });
+  try {
+    const { client, counts } = await fixture(false, scanner);
+    await assert.rejects(client.send({ protocolVersion: 1, method: 'run.submit', delay: 40 }, 5), error => {
+      assert(error instanceof InstalledClientConsumerDeadlineError);
+      assert.equal(error.diagnostic.originalDeadlineMs, 5); return true;
+    });
+    await assert.rejects(client.close());
+    assert.deepEqual(messages, []);
+    assert.equal(scanner.stats().matched, true);
+    assert.deepEqual(counts(), { opened: 3, closed: 3, joined: 0 });
+  } finally { scanner.close(); }
 });
 
 test('the genuine-driver consumer retains only the fixed driver failure stage and still joins its child', async () => {
@@ -520,7 +552,7 @@ test('a fixed failure marker remains fatal after progress and hello without rese
     assert.deepEqual(error.diagnostic, { kind: 'installed_client_driver', stage: 'request' }); return true;
   });
   await assert.rejects(client.send({ protocolVersion: 1, method: 'run.submit' }));
-  await assert.rejects(client.close()); assert.equal(closed, 2); assert.equal(joined, false);
+  await assert.rejects(client.close()); assert.equal(closed, 3, 'both original pipes and the fixed diagnostic stream close'); assert.equal(joined, false);
 });
 
 test('the original secret scanner may refuse a fixed progress marker before it enters diagnostics', async () => {
@@ -555,4 +587,48 @@ test('a real one-shot CLI child keeps its strict original request response even 
   assert.equal(response?.result?.snapshot.run.id, 'run');
   await client.close(); assert.equal(streams, 2); assert.equal(joins, 1);
   await assert.rejects(client.send({ protocolVersion: 1, method: 'run.get', runId: 'run' }));
+});
+
+test('a real child fixed request cause is scanned and logged without changing its original fatal error or resending', async () => {
+  const marker = installedRequestFailureMarker({ method: 'authorization.create', boundary: 'response_decode', kind: 'type_error', code: null });
+  const scanned: Buffer[] = []; let closed = 0, joined = false;
+  const client = await openInstalledClientConsumer({ executable: process.execPath,
+    args: ['--input-type=module', '-e', `import {createInterface} from 'node:readline';
+      process.stdout.write('{"ok":true,"protocolVersion":1,"result":{"method":"control.hello","supervisorInstanceId":"owned-framing-fixture"}}\\n');
+      let count=0;for await(const _ of createInterface({input:process.stdin,crlfDelay:Infinity})) {
+        if(++count!==1)process.exitCode=2;
+        process.stderr.write(Buffer.from('${marker.toString('base64')}', 'base64'));
+        process.stderr.write('installed control client driver failed phase=request\\n');
+      }`], cwd: process.cwd(), env: process.env,
+    openScan: () => ({ scan(bytes) { scanned.push(Buffer.from(bytes)); }, close() { closed++; } }), onJoined() { joined = true; }
+  });
+  try {
+    await assert.rejects(client.send({ protocolVersion: 1, method: 'authorization.create' }), error => {
+      assert(error instanceof InstalledClientDriverError);
+      assert.deepEqual(error.diagnostic, { kind: 'installed_client_driver', stage: 'request' }); return true;
+    });
+    await assert.rejects(client.send({ protocolVersion: 1, method: 'authorization.create' }));
+  } finally { await assert.rejects(client.close()); }
+  assert(Buffer.concat(scanned).includes(marker)); assert.equal(closed, 3); assert.equal(joined, false);
+});
+
+test('malformed, duplicate or unscanned request causes cannot become accepted error diagnostics', async () => {
+  const marker = installedRequestFailureMarker({ method: 'run.get', boundary: 'exchange', kind: 'kernel_storage', code: 'RECOVERY_REQUIRED' });
+  for (const bytes of [Buffer.from(marker.toString().replace('"code":', '"extra":true,"code":')), Buffer.concat([marker, marker])]) {
+    let closed = 0;
+    await assert.rejects(openInstalledClientConsumer({ executable: process.execPath,
+      args: ['--input-type=module', '-e', `process.stderr.write(Buffer.from('${bytes.toString('base64')}', 'base64'));`],
+      cwd: process.cwd(), env: process.env,
+      openScan: () => ({ scan() {}, close() { closed++; } }), onJoined() { assert.fail('invalid cause is not a joined client'); }
+    }));
+    assert.equal(closed, 2);
+  }
+  const blocked = new Error('owned scanner refusal'); let opened = 0, closed = 0;
+  await assert.rejects(openInstalledClientConsumer({ executable: process.execPath,
+    args: ['--input-type=module', '-e', `process.stderr.write(Buffer.from('${marker.toString('base64')}', 'base64'));for await(const _ of process.stdin){}`],
+    cwd: process.cwd(), env: process.env,
+    openScan: () => { const stderr = ++opened === 2; return { scan() { if (stderr) throw blocked; }, close() { closed++; } }; },
+    onJoined() { assert.fail('a scanner refusal cannot become a joined client'); }
+  }), error => error === blocked);
+  assert.equal(opened, 2); assert.equal(closed, 2);
 });

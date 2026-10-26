@@ -36,7 +36,7 @@ import { acquireHeldInstalledAnchor, executeHeldInstalledImage, initializeHeldIn
   stateRootIdentityFromDescriptor, withHeldCredentialNativeScope, STATE_OWNER_NATIVE_ENTRY_ID, STATE_OWNER_NATIVE_RELATIVE_PATH,
   type NativeStateOwner } from './native-owner.js';
 import { openHeldInstalledControlClient, type HeldInstalledControlClient } from './native-owner.js';
-import { noteInstalledWorkRead, observeInstalledWork } from './installed-work-diagnostics.js';
+import { noteInstalledWorkRead, observeInstalledWork, noteInstalledInstallPhase } from './installed-work-diagnostics.js';
 
 export type HeldInstalledRuntime = Readonly<{
   bundle: RuntimeBundleManifest;
@@ -1064,30 +1064,45 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
       const { packageRoot, stateRoot } = target;
       const sourceScope = new Scope();
       const destination = new Scope();
-      return finish(destination, async () => {
+      const installed = await finish(destination, async () => {
         let signed: VerifiedPackage;
         try {
+          noteInstalledInstallPhase('source_verify');
           const sourceRoot = await sourceScope.root(packageRoot);
           signed = await verifyPackage(sourceScope, sourceRoot, releaseKeys, undefined, true);
+          noteInstalledInstallPhase('destination_layout');
           const state = await destination.root(stateRoot, true);
           const root = await destination.directory(state, 'runtime', true);
           const casRoot = await destination.directory(state, KERNEL_CAS_DIRECTORY, true);
           const bundles = await destination.directory(root, 'bundles', true);
           const stage = await destination.directory(bundles, `.stage-${randomBytes(16).toString('hex')}`, true);
-          for (const entry of signed.bundle.entries) await writeChunks(destination, stage, entry.relativePath, chunks(signed.entries.get(entry.entryId)!), entry.executable ? 0o500 : 0o400);
+          noteInstalledInstallPhase('signed_entries_copy');
+          let copiedEntries = 0;
+          for (const entry of signed.bundle.entries) {
+            await writeChunks(destination, stage, entry.relativePath, chunks(signed.entries.get(entry.entryId)!), entry.executable ? 0o500 : 0o400);
+            noteInstalledInstallPhase('signed_entries_copy', ++copiedEntries);
+          }
+          noteInstalledInstallPhase('manifest_bootstrap_copy');
           await writeChunks(destination, stage, 'manifest.json', bytesSource(signed.manifestBytes), 0o400);
+          noteInstalledInstallPhase('manifest_bootstrap_copy', 1);
           const supervisor = signed.bundle.entries.find(entry => entry.role === 'supervisor')!;
           await writeChunks(destination, root, 'bootstrap', chunks(signed.entries.get(supervisor.entryId)!), 0o500);
+          noteInstalledInstallPhase('manifest_bootstrap_copy', 2);
           // Existing CAS publication owns its durability protocol; all supported
           // complete roots precede durable selection, with no second ledger.
           const cas = new ContentAddressedStore(childPath(casRoot, '.'));
           const casFiles: InstalledFile[] = [];
+          noteInstalledInstallPhase('cas_roots_publish');
+          let publishedRoots = 0;
           for (const [ref, bytes] of signed.roots) {
             await destination.assertDirectories();
             if (await cas.publish(bytes) !== ref) mismatch('installed runtime CAS publication changed its complete root identity');
             await destination.assertDirectories();
             casFiles.push(await destination.file(casRoot, ref, 0o400, bytes.length, ref));
+            noteInstalledInstallPhase('cas_roots_publish', ++publishedRoots);
           }
+          noteInstalledInstallPhase('cas_streams_publish');
+          let publishedStreams = 0;
           for (const [ref, file] of signed.streamedRoots) {
             await destination.assertDirectories();
             const result = await cas.publishChunks(artifactChunks(file), Number(file.info.size));
@@ -1095,33 +1110,52 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
               mismatch('installed guest image CAS publication changed its complete identity');
             await destination.assertDirectories();
             casFiles.push(await destination.file(casRoot, ref, 0o400, result.byteLength, ref));
+            noteInstalledInstallPhase('cas_streams_publish', ++publishedStreams);
           }
+          noteInstalledInstallPhase('destination_verify');
           await verifyPackage(destination, stage, releaseKeys, signed.bundleDigest);
+          noteInstalledInstallPhase('bootstrap_verify');
           await verifyBytes(await destination.file(root, 'bootstrap', 0o500, supervisor.byteCount, supervisor.digest));
+          noteInstalledInstallPhase('source_final_verify');
           await checkPackageGraph(sourceScope, sourceRoot, signed.bundle, signed.modelAuthority);
           await sourceScope.assertDirectories();
-          for (const file of [signed.manifest, ...signed.entries.values(), ...signed.companionFiles]) await verifyBytes(file);
-          for (const file of casFiles) await verifyBytes(file);
+          let sourceFilesVerified = 0;
+          for (const file of [signed.manifest, ...signed.entries.values(), ...signed.companionFiles]) {
+            await verifyBytes(file); noteInstalledInstallPhase('source_final_verify', ++sourceFilesVerified);
+          }
+          noteInstalledInstallPhase('cas_final_verify');
+          let casFilesVerified = 0;
+          for (const file of casFiles) {
+            await verifyBytes(file); noteInstalledInstallPhase('cas_final_verify', ++casFilesVerified);
+          }
+          noteInstalledInstallPhase('directory_sync');
           await syncDirectories(destination);
+          noteInstalledInstallPhase('directory_sync', destination.directories.length);
           // Retire source authority before publishing a selection. Source
           // deletion after this point cannot change installed identity.
+          noteInstalledInstallPhase('source_join');
           await sourceScope.close(); healthy();
+          noteInstalledInstallPhase('bundle_publish');
           await absent(bundles, signed.bundleDigest);
           await rename(childPath(bundles, stage.name), childPath(bundles, signed.bundleDigest));
           stage.name = signed.bundleDigest;
           await bundles.handle.sync(); await destination.assertDirectories();
+          noteInstalledInstallPhase('selection_publish');
           await absent(root, 'active.json');
           const temporary = `.tmp-active-${randomBytes(16).toString('hex')}`;
           await writeChunks(destination, root, temporary, bytesSource(canonicalJsonBytes({ schemaVersion: 1,
             bundleDigest: signed.bundleDigest, ...(signed.modelAuthority ? { modelAuthorityRef: signed.modelAuthority.closureRef } : {}) })), 0o600);
           healthy(); await rename(childPath(root, temporary), childPath(root, 'active.json'));
           await root.handle.sync(); await destination.assertDirectories();
+          noteInstalledInstallPhase('destination_join');
           return { bundleDigest: signed.bundleDigest, manifestDigest: signed.bundle.manifestDigest };
         } catch (error) {
           rememberRetirement(error);
           await sourceScope.close(); throw error;
         }
       });
+      noteInstalledInstallPhase('complete_joined');
+      return installed;
     },
     async openSelected(this: InstalledRuntime, stateRoot: string): Promise<HeldInstalledRuntime> {
       supportedPlatform();

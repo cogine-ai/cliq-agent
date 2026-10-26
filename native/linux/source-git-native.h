@@ -261,12 +261,12 @@ static int source_native_reply(struct source_native_scope *scope, uint32_t comma
     struct controller *controller = scope->controller;
     if (controller->closed || controller->pending != command || controller->pending_scope != NULL) {
         if (scope->preparation && command == CLIQ_SOURCE_CREATE_BLOCKED) scope->ready_failure_boundary = SOURCE_READY_REQUEST_STATE;
-        return -1;
+        return CLIQ_SOURCE_REPLY_REQUEST_STATE;
     }
     if (!cliq_receive_flags(controller->socket, response, files, CLIQ_WORKER_MAX_FDS, count, MSG_DONTWAIT)) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
         if (scope->preparation && command == CLIQ_SOURCE_CREATE_BLOCKED) scope->ready_failure_boundary = SOURCE_READY_RECEIVE;
-        (void)close_controller(controller); return -1;
+        (void)close_controller(controller); return CLIQ_SOURCE_REPLY_RECEIVE_FAILURE;
     }
     bool same_attempt = response->command == command && cliq_fixed_git_same_attempt(&scope->identity, response) &&
         strcmp(scope->identity.cgroup_name, response->cgroup_name) == 0 &&
@@ -289,7 +289,9 @@ static int source_native_reply(struct source_native_scope *scope, uint32_t comma
             }
         }
         for (size_t i = 0; i < *count; i++) if (!retire_descriptor(&files[i])) controller->retirement_failed = true;
-        *count = 0; (void)close_controller(controller); return -1;
+        *count = 0; (void)close_controller(controller);
+        return !same_attempt ? CLIQ_SOURCE_REPLY_FOREIGN : scope->postready_failure_status
+            ? CLIQ_SOURCE_REPLY_AUTHENTICATED_FAILURE : CLIQ_SOURCE_REPLY_GENERIC_REFUSAL;
     }
     controller->pending = 0; return 1;
 }
@@ -406,7 +408,7 @@ static napi_value source_native_poll_sealed(napi_env env, napi_callback_info inf
         if (status == 0) return undefined(env);
         bool valid = status == 1 && count == 0 && response.exit_status <= 1;
         for (size_t i = 0; i < count; i++) if (!retire_descriptor(&files[i])) valid = false;
-        if (!valid) { (void)close_controller(scope->controller); return source_native_postready_failure(env, scope, false, status == 1 ? 4001 : 0); }
+        if (!valid) { (void)close_controller(scope->controller); return source_native_postready_failure(env, scope, false, status == 1 ? 4001 : cliq_source_reply_failure_guard(status)); }
         if (response.exit_status == 0) return undefined(env);
         if (!cliq_source_digest(response.source_snapshot_digest) || response.source_byte_count == 0 ||
             response.source_byte_count > scope->identity.max_generation_bytes || response.source_entry_count == 0 ||
@@ -532,7 +534,7 @@ static napi_value source_native_poll_result(napi_env env, napi_callback_info inf
     int status = source_native_reply(scope, CLIQ_SOURCE_POLL_RESULT, &response, files, &count);
     if (status == 0) return undefined(env);
     bool valid = status == 1 && response.exit_status <= 1;
-    uint32_t guard = status == 1 ? 4001 : 0;
+    uint32_t guard = status == 1 ? 4001 : cliq_source_reply_failure_guard(status);
     if (valid && response.exit_status == 0 && count == 0) return undefined(env);
     if (valid) guard = 4002;
     valid = valid && response.exit_status == 1 && cliq_source_rule_result_valid(&response) &&

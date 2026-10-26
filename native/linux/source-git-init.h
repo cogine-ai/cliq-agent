@@ -3,6 +3,7 @@
 
 #include "source-git-materialize.h"
 #include "preparation-git-protocol.h"
+#include "preparation-failure-relay.h"
 #include "source-storage.h"
 #include <sys/statvfs.h>
 
@@ -397,7 +398,15 @@ static int source_namespace(struct cliq_worker_packet request, int passed[3]) {
             struct cliq_worker_packet response; int outputs[CLIQ_SOURCE_TRANSFER_OUTPUTS] = {-1, -1, -1, -1, -1}; size_t count;
             if (!(fds[1].revents & POLLIN) || !cliq_receive(channel[0], &response, outputs, CLIQ_SOURCE_TRANSFER_OUTPUTS, &count) ||
                 !cliq_fixed_git_namespace_same_prepared(&request, &response)) break;
-            valid = !result && ((response.command == CLIQ_WORKER_READY && !released && count == 0) ||
+            uint64_t original_uid = 0;
+            if (preparation && released && !result && preparation_namespace_origin_uid(&original_uid) &&
+                cliq_preparation_failure_packet_for_uid(&request, &response, count, original_uid)) {
+                // Keep this a failure: join the real original exit70, then
+                // forward only its exact zero-FD diagnosis on the same channel.
+                valid = cliq_preparation_forward_joined_failure(child, &channel[0], 3, &request, &response, count, original_uid);
+                break;
+            }
+            valid = response.status == 0 && !result && ((response.command == CLIQ_WORKER_READY && !released && count == 0) ||
                 (response.command == CLIQ_SOURCE_SEALED && released && !continued && count == 0) ||
                 (response.command == CLIQ_SOURCE_RESULT && continued && cliq_source_rule_result_valid(&response) &&
                     count == CLIQ_SOURCE_OUTPUTS + response.source_rule_present));

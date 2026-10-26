@@ -74,12 +74,15 @@ test('a real diagnostic sink failure cannot skip original retirement or replace 
       const {INSTALLED_CLIENT_PHASE_CHANNEL,INSTALLED_CLIENT_PHASES}=await import(${JSON.stringify(new URL('../../../src/state/installed-diagnostics.ts', import.meta.url).href)});
       const {INSTALLED_WORK_CHANNEL}=await import(${JSON.stringify(new URL('../../../src/state/installed-work-diagnostics.ts', import.meta.url).href)});
       const {runInstalledControlJsonl}=await import(${JSON.stringify(new URL('../../../src/control/installed-jsonl.ts', import.meta.url).href)});
+       const {classifyInstalledRequestError,observeInstalledRequestFailures}=await import(${JSON.stringify(new URL('../../../src/state/installed-request-diagnostics.ts', import.meta.url).href)});
+       const {installedRequestFailureMarker}=await import(${JSON.stringify(new URL('./installed-client-request-failure.ts', import.meta.url).href)});
       const mode=${JSON.stringify(mode)},events=[],clientFd=openSync('/dev/null','r'),selectedFd=openSync('/dev/null','r');
       const business=new Error('original business failure'),retirement=new Error('original retirement failure');
       const joined=fd=>{try{fstatSync(fd);return false}catch(error){assert.equal(error.code,'EBADF');return true}};
       let originalFailure='none',exitCode=0,escaped=false;
       const context={assert,writeSync,performance,channel,INSTALLED_CLIENT_PHASE_CHANNEL,INSTALLED_CLIENT_PHASES,
         INSTALLED_WORK_CHANNEL,copyInstalledClientAuthenticationWork,installedClientAuthenticationMarker,runInstalledControlJsonl,ResourceRetirementError:class extends Error{},
+         classifyInstalledRequestError,observeInstalledRequestFailures,installedRequestFailureMarker,
         observeFailure(error){originalFailure=error===business?'business':error===retirement?'retirement':'other'},
         process:{platform:'linux',arch:'x64',geteuid:()=>1001,getegid:()=>1001,argv:['node','driver','data-only'],
           once(){},removeListener(){events.push('remove-listener')},stdin:{destroy(){}},stdout:{on(){},removeListener(){events.push('remove-listener')}},

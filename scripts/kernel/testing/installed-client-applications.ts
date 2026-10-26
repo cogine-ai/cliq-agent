@@ -14,6 +14,14 @@ type Input = { executable: string; args: readonly string[]; cwd: string; env: No
 const accepted = (value: Data, method: string): Data => { assert(value.ok === true && value.protocolVersion === 1 && value.result.method === method); return value.result; };
 const equal = (actual: unknown, expected: unknown) => assert.deepEqual(canonicalJsonBytes(actual), canonicalJsonBytes(expected));
 
+// Data comparison only; callers still obtain both replies from authenticated clients.
+export function assertSameAuthorizationListing(expected: Data, actual: Data): void {
+  const { nextCursor: expectedCursor, ...expectedPage } = accepted(expected, 'authorization.list');
+  const { nextCursor: actualCursor, ...actualPage } = accepted(actual, 'authorization.list');
+  equal(actualPage, expectedPage);
+  assert.equal(typeof actualCursor, typeof expectedCursor);
+}
+
 export async function qualifyInstalledClientApplications(input: Input) {
   const counts = input.counts(); assert.deepEqual(counts, [5, 5, 5]); assert(input.providerHealthy());
   const runGet = { protocolVersion: 1 as const, method: 'run.get' as const, runId: input.runId };
@@ -21,6 +29,8 @@ export async function qualifyInstalledClientApplications(input: Input) {
   const beforeRun = await input.send(runGet), beforeSession = await input.send(sessionGet);
   const first = accepted(beforeRun, 'run.get'); assert.equal(first.snapshot.run.id, input.runId);
   assert.equal(first.snapshot.run.sessionId, input.sessionId); assert.equal(first.snapshot.run.status, 'completed_unverified');
+  const authorizationList = { protocolVersion: 1, method: 'authorization.list', limit: 100 };
+  const expectedAuthorizations = await input.send(authorizationList);
   const open = (suffix: string[], mode?: 'rpc', initialRequest?: InstalledControlRequestV1) => openInstalledClientConsumer({
     executable: input.executable, args: [...input.args, ...suffix], cwd: input.cwd, env: input.env, headlessSchemaVersion: 3,
     ...(mode ? { headlessTransport: mode } : {}), ...(initialRequest ? { initialRequest } : {}),
@@ -40,8 +50,7 @@ export async function qualifyInstalledClientApplications(input: Input) {
     const page = accepted(await client.send(list), 'run.list');
     assert.equal(page.runs.length, 1); assert.equal(page.runs[0].run.id, input.runId); assert.equal(typeof page.nextCursor, 'string'); cursor = page.nextCursor;
     next = await client.send({ ...list, cursor }); accepted(next, 'run.list');
-    const grants = accepted(await client.send({ protocolVersion: 1, method: 'authorization.list', limit: 100 }), 'authorization.list');
-    assert(grants.grants.length > 0);
+    assertSameAuthorizationListing(expectedAuthorizations, await client.send(authorizationList));
   } finally { await client.close(); }
   // A newly authenticated RPC client consumes the exact already-materialized
   // list page, independent of current list source/connection ordering.

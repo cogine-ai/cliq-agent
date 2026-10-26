@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { InstalledSupervisorClient } from '../state/installed-control-client.js';
 import { canonicalJsonBytes } from '../kernel/canonical.js';
+import { observeInstalledRequestFailures, type InstalledRequestFailure } from '../state/installed-request-diagnostics.js';
 
 // Ordinary protocol data at the client I/O seam, never an installed/native
 // selection, StateOwner, Run, grant or positive execution fixture.
@@ -104,5 +105,33 @@ test('response method/association failures and output failures do not replay a d
     catch (error) { caught = error; }
     assert(caught); if (mode !== 'response') assert.equal(caught, original);
     assert.equal(calls, 1);
+  }
+});
+
+test('actual JSONL request/response/output failures project their executed boundary and preserve the original failure and iterator join', async () => {
+  const { runInstalledControlJsonl } = await import('./installed-jsonl.js');
+  for (const mode of ['validation', 'response', 'write', 'request', 'refusal'] as const) {
+    const observed: InstalledRequestFailure[] = [], close = observeInstalledRequestFailures(value => { observed.push(value); });
+    let calls = 0, writes = 0, joined = false, caught: unknown;
+    const original = new Error('ordinary data-only I/O failure');
+    const client = { hello, 'supervisor.status': async () => {
+      calls++; if (mode === 'request') throw original;
+      return mode === 'response' ? { ...refusal, method: 'run.get' } : refusal;
+    } } as unknown as InstalledSupervisorClient;
+    async function* input() {
+      try { yield mode === 'validation' ? Buffer.from('{"protocolVersion":1,"method":"supervisor.status","foreign":true}\n') : request; }
+      finally { joined = true; }
+    }
+    try {
+      await runInstalledControlJsonl(client, input(), async () => { if (++writes === 2 && mode === 'write') throw original; });
+    } catch (error) { caught = error; }
+    finally { close(); }
+    assert.equal(joined, true); assert.equal(calls, mode === 'validation' ? 0 : 1);
+    if (mode === 'refusal') { assert.equal(caught, undefined); assert.deepEqual(observed, []); continue; }
+    assert(caught); assert.equal(observed.length, 1);
+    assert.equal(observed[0]!.boundary, mode === 'validation' ? 'request_validation' : mode === 'response' ? 'response_decode'
+      : mode === 'write' ? 'adapter_output' : 'adapter_dispatch');
+    assert.equal(observed[0]!.method, mode === 'validation' ? 'unrecognized' : 'supervisor.status');
+    if (mode === 'write' || mode === 'request') assert.equal(caught, original);
   }
 });
