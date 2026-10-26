@@ -4,6 +4,7 @@
 #include "preparation-git-protocol.h"
 #include "verifier-setup.h"
 #include "builtin-tool-protocol.h"
+#include "builtin-result-ack.h"
 #include "builtin-tool-git.h"
 #include <dirent.h>
 #include <poll.h>
@@ -42,7 +43,7 @@ enum spawn_rejection {
 struct scope {
     bool created, active, released, stopped, invocation, verifier, verifier_finished;
     unsigned int parent;
-    bool builtin;
+    bool builtin, result_acknowledged;
     int builtin_git_fd;
     struct cliq_builtin_config *builtin_config;
     int cgroup, process_group, channel, stdout_fd, stderr_fd;
@@ -835,6 +836,21 @@ static bool observe_verifier_wait(struct scope *scope, bool stopping) {
     return true;
 }
 
+/* Data retirement only, after the same completed invocation's raw result
+ * has been durably settled by the owner. Never releases or reuses a scope. */
+static bool acknowledge_builtin_result(const struct cliq_worker_packet *request) {
+    if (!cliq_builtin_result_ack_valid(request)) return false;
+    struct scope *scope = &scopes[request->scope];
+    if (!scope->created || !scope->invocation || !scope->verifier || !scope->builtin || !scope->released ||
+        !scope->verifier_finished || scope->result_acknowledged || scope->verifier_result.verifier_reason == CLIQ_VERIFIER_PENDING ||
+        !cliq_builtin_result_ack_same(request, request->scope, scope->parent, scope->identity.nonce,
+          scope->verifier_result.observed_at_ms) || !held_scope_dead(scope)) return false;
+    // Irreversible even on a partial close: no later POLL can resend these
+    // original descriptors, and an uncertain close requires controller join.
+    scope->result_acknowledged = true;
+    return cliq_builtin_result_retire_outputs(&scope->stdout_fd, &scope->stderr_fd);
+}
+
 static bool stop_scope(unsigned int id, struct cliq_worker_packet *response) {
     if (id == 0 || id >= CLIQ_WORKER_MAX_SCOPES || !scopes[id].created) return false;
     struct scope *scope = &scopes[id];
@@ -1128,13 +1144,16 @@ static int controller(void) {
             }
         } else if ((request.command == CLIQ_POLL_VERIFIER || request.command == CLIQ_POLL_BUILTIN) && count == 0 && request.scope > 0 && request.scope < CLIQ_WORKER_MAX_SCOPES) {
             struct scope *scope = &scopes[request.scope];
-            if (scope->created && scope->verifier && scope->builtin == (request.command == CLIQ_POLL_BUILTIN) && scope->released) {
+            if (scope->created && scope->verifier && scope->builtin == (request.command == CLIQ_POLL_BUILTIN) && scope->released &&
+                !scope->result_acknowledged) {
                 response = scope->verifier_result; response.command = request.command;
                 ok = true;
                 if (scope->verifier_finished && response.verifier_reason != CLIQ_VERIFIER_PENDING) {
                     outputs[0] = scope->stdout_fd; outputs[1] = scope->stderr_fd; output_count = 2;
                 } else response.verifier_reason = CLIQ_VERIFIER_PENDING;
             }
+        } else if (request.command == CLIQ_ACK_BUILTIN_RESULT && count == 0) {
+            ok = acknowledge_builtin_result(&request); response = request;
         } else if (request.command == CLIQ_STOP_SCOPE && count == 0) ok = stop_scope(request.scope, &response);
         else if (request.command == CLIQ_STOP_CONTROLLER && count == 0) {
             for (size_t i = 0; i < count; i++) close(passed[i]);

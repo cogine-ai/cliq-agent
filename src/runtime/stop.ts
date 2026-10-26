@@ -11,7 +11,7 @@ export type VerifierStopIntent = Extract<StopIntent, { origin: 'verification' } 
   { origin: 'policy_deny'; subjectKind: 'verifier' }>;
 export type DeliveryMergeStopIntent = Extract<StopIntent, { runtimeSubtype: 'delivery_merge_conflict' }>;
 export type DeliveryPolicyStopIntent = Extract<StopIntent, { origin: 'policy_deny' }> & { subjectKind: 'delivery'; reason: 'runtime_failed' };
-export type AgentStopIntent = Extract<StopIntent, { origin: 'user_cancel' | 'deadline' }> | ResourceStopIntent | ModelFailureStopIntent | VerifierStopIntent | DeliveryMergeStopIntent | DeliveryPolicyStopIntent;
+export type AgentStopIntent = Extract<StopIntent, { origin: 'user_cancel' | 'parent_cancel' | 'deadline' }> | ResourceStopIntent | ModelFailureStopIntent | VerifierStopIntent | DeliveryMergeStopIntent | DeliveryPolicyStopIntent;
 export const stopCheckpointId = (runId: string, stopIntentRef: string) => identityHash('cliq-stop-checkpoint-v1', runId, stopIntentRef);
 
 export function cancelRequestDigest(runId: string, input: RunCancel): string {
@@ -32,6 +32,12 @@ export function decodeAgentStop(value: unknown, run: Run): AgentStopIntent {
     fields.push('requestId', 'principalId');
     assertRequestId(intent.requestId);
     if (intent.targetStatus !== 'cancelled' || intent.reason !== 'cancelled_by_user' || !intent.principalId) throw new TypeError('invalid user cancellation');
+  } else if (intent.origin === 'parent_cancel') {
+    fields.push('sourceRunId', 'sourceStopIntentRef');
+    if (intent.targetStatus !== 'cancelled' || intent.reason !== 'parent_cancelled' ||
+        !identifier(intent.sourceRunId) || intent.sourceRunId !== run.parentRunId || intent.sourceRunId === run.id)
+      throw new TypeError('parent cancellation differs from its immutable direct parent');
+    assertArtifactRef(intent.sourceStopIntentRef);
   } else if (intent.origin === 'deadline') {
     fields.push('deadlineAt');
     if (intent.targetStatus !== 'failed' || intent.reason !== 'budget_exhausted' || intent.deadlineAt !== run.deadlineAt || intent.createdAt < run.deadlineAt) throw new TypeError('deadline stop precedes the immutable deadline');
@@ -102,6 +108,12 @@ export function decodeAgentStop(value: unknown, run: Run): AgentStopIntent {
       if (typeof intent.failingOpId !== 'string' || !intent.failingOpId) throw new TypeError('invalid failing operation');
     } else throw new TypeError('stop branch requires its owning evidence reducer');
   } else throw new TypeError('stop branch requires its owning evidence reducer');
+  if (intent.registeredCheckpointId !== undefined || intent.registeredRunRevision !== undefined || intent.registeredJournalSeq !== undefined) {
+    fields.push('registeredCheckpointId', 'registeredRunRevision', 'registeredJournalSeq');
+    if (!identifier(intent.registeredCheckpointId) || !Number.isSafeInteger(intent.registeredRunRevision) || intent.registeredRunRevision! < 1 || intent.registeredRunRevision! >= run.revision || !Number.isSafeInteger(intent.registeredJournalSeq) || intent.registeredJournalSeq! < 0)
+      throw new TypeError('invalid original Stop Checkpoint and revision');
+  }
+  if (intent.supersedesStopIntentRef !== undefined) { fields.push('supersedesStopIntentRef'); assertArtifactRef(intent.supersedesStopIntentRef); }
   parseCanonicalTime(intent.createdAt);
   if (!exactKeys(intent, fields) || intent.schemaVersion !== 1 || intent.runId !== run.id || intent.createdAt < run.createdAt || intent.createdAt > run.updatedAt) throw new TypeError('StopIntent differs from its Run');
   return intent;
@@ -117,7 +129,8 @@ export function agentStopDetail(intent: AgentStopIntent, stopIntentRef: string, 
       ? { kind: 'policy_denied', subjectKind: intent.subjectKind, opId: intent.opId,
           policyChannelEvidenceRef: intent.policyChannelEvidenceRef, policyChannelEvidenceDigest: intent.policyChannelEvidenceDigest }
     : intent.origin !== 'runtime'
-    ? { kind: intent.origin === 'user_cancel' ? 'cancelled' : 'budget_exhausted', stopIntentRef }
+    ? { kind: intent.origin === 'user_cancel' || intent.origin === 'parent_cancel' ? 'cancelled' : 'budget_exhausted',
+        stopIntentRef: intent.origin === 'parent_cancel' ? intent.sourceStopIntentRef : stopIntentRef }
     : intent.runtimeSubtype === 'runtime'
       ? { kind: 'runtime', failingOpId: intent.failingOpId, runtimeFailureRef: intent.runtimeFailureRef, runtimeFailureDigest: intent.runtimeFailureDigest }
     : intent.runtimeSubtype === 'delivery_merge_conflict'
@@ -137,7 +150,7 @@ export function agentStopDetail(intent: AgentStopIntent, stopIntentRef: string, 
       : contextExhaustionDetail(intent, stopIntentRef);
   return { schemaVersion: 1, runId: intent.runId, reason: intent.reason,
     reasonDetail,
-    primaryEvidenceRef: intent.origin === 'kernel_integrity' ? intent.integrityEvidenceRef : intent.origin === 'policy_deny'
+    primaryEvidenceRef: intent.origin === 'parent_cancel' ? intent.sourceStopIntentRef : intent.origin === 'kernel_integrity' ? intent.integrityEvidenceRef : intent.origin === 'policy_deny'
       ? intent.policyChannelEvidenceRef : intent.origin === 'runtime' && intent.runtimeSubtype === 'runtime' ? intent.runtimeFailureRef
       : stopIntentRef,
     publicationResultItemRefs: [], abandonedRetryInvocations: [], createdAt };
@@ -154,10 +167,31 @@ function contextExhaustionDetail(intent: Extract<AgentStopIntent, { runtimeSubty
 
 /** Integrity wins even after cancellation; the separate dispatch fence remains
  * monotonic. Equal precedence retains the first already committed fact. */
-export function selectAgentStop(prior: AgentStopIntent | undefined, proposed: AgentStopIntent): AgentStopIntent {
-  const priority = (intent: AgentStopIntent) => intent.origin === 'kernel_integrity' ? 7 : intent.origin === 'user_cancel' ? 6
+export function agentStopPriority(intent: AgentStopIntent): number {
+  return intent.origin === 'kernel_integrity' ? 7 : intent.origin === 'user_cancel' ? 6 : intent.origin === 'parent_cancel' ? 5
     : intent.reason === 'budget_exhausted' ? 4 : intent.reason === 'verification_failed' ? 3 : intent.reason === 'verifier_infrastructure_failed' ? 2 : 1;
-  return prior && priority(prior) >= priority(proposed) ? prior : proposed;
+}
+export function selectAgentStop(prior: AgentStopIntent | undefined, proposed: AgentStopIntent): AgentStopIntent {
+  return prior && agentStopPriority(prior) >= agentStopPriority(proposed) ? prior : proposed;
+}
+
+/** Only the producer recording a new winner binds the actual preceding SQL
+ * reference. Historical selection remains a pure precedence comparison. */
+export function recordAgentStopPredecessor(intent: AgentStopIntent, priorRef: string | undefined, sourceCheckpointId?: string, sourceRunRevision?: number, registeredJournalSeq?: number): AgentStopIntent {
+  if ((sourceCheckpointId === undefined) !== (sourceRunRevision === undefined) || (sourceCheckpointId === undefined) !== (registeredJournalSeq === undefined) ||
+      registeredJournalSeq !== undefined && (!Number.isSafeInteger(registeredJournalSeq) || registeredJournalSeq < 0) || sourceRunRevision !== undefined &&
+      (!Number.isSafeInteger(sourceRunRevision) || sourceRunRevision < 1)) throw new TypeError('Stop registration requires its exact Checkpoint/revision pair');
+  if (intent.supersedesStopIntentRef !== undefined && intent.supersedesStopIntentRef !== priorRef)
+    throw new TypeError('StopIntent replaced its exact original predecessor');
+  if (intent.registeredCheckpointId !== undefined && intent.registeredCheckpointId !== sourceCheckpointId) throw new TypeError('StopIntent replaced its original Checkpoint');
+  if (intent.registeredRunRevision !== undefined && intent.registeredRunRevision !== sourceRunRevision) throw new TypeError('StopIntent replaced its original Run revision');
+  if (intent.registeredJournalSeq !== undefined && intent.registeredJournalSeq !== registeredJournalSeq) throw new TypeError('StopIntent replaced its original Journal high cut');
+  return { ...intent, ...(priorRef === undefined ? {} : { supersedesStopIntentRef: priorRef }), ...(sourceCheckpointId === undefined ? {} : { registeredCheckpointId: sourceCheckpointId, registeredRunRevision: sourceRunRevision, registeredJournalSeq }) };
+}
+
+export function agentStopCause<T extends AgentStopIntent>(intent: T): Omit<T, 'supersedesStopIntentRef' | 'registeredCheckpointId' | 'registeredRunRevision' | 'registeredJournalSeq'> {
+  const { supersedesStopIntentRef: _predecessor, registeredCheckpointId: _source, registeredRunRevision: _revision, registeredJournalSeq: _journal, ...cause } = intent;
+  return cause;
 }
 
 export function stopInvocationHistory(journal: readonly InvocationJournalEntry[]) {
@@ -189,6 +223,13 @@ export function openStopBatch(items: readonly ContinuationItem[]): { batch: Tool
     } else if (item.kind === 'final_candidate' || item.kind === 'verifier_result' || item.kind === 'verifier_stop' || item.kind === 'repair_diagnostic' ||
         item.kind === 'delivery_merge' || item.kind === 'delivery_merge_conflict' || item.kind === 'delivery_decision') {
       if (pending || model) throw new TypeError('candidate or verifier evidence overtakes an open batch');
+    } else if (item.kind === 'child_handle') {
+      if (!pending || pending.batch.itemId !== item.delegateBatchItemId || pending.next !== item.delegateCallIndex ||
+          pending.batch.calls[pending.next]?.callId !== item.delegateCallId || pending.batch.calls[pending.next]?.toolName !== 'delegate')
+        throw new TypeError('child handle overtakes its owning unresolved delegate call');
+    } else if (item.kind === 'child_result' || item.kind === 'child_merge_batch' || item.kind === 'child_merge_result') {
+      // Complete child history was independently validated by the owning
+      // recovery cut. Audit records neither answer nor open a provider call.
     } else if (item.kind !== 'policy_decision' && item.kind !== 'context_compaction') throw new TypeError('unsupported stop transcript item');
   }
   if (model) throw new TypeError('model turn is missing its batch');

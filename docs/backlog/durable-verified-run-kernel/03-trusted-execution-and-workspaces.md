@@ -1662,9 +1662,17 @@ Preserve / do not touch:
 
 ### Implementation refinement — 2026-09-26
 
-Initial non-Git rules/projection/source metadata may use the RFC's fixed
-triple, adding only its same-held-scan delivery topology for the fixed quartet.
-Raw source files and entries remain earlier durable publications. Instruction
+Initial ordinary non-Git entries/rules/projection/source metadata uses the RFC's
+fixed quartet; raw streams remain earlier independent publications. The internal
+publisher sees only immutable native-read manifest data, and original capture
+resources stay held through actual group completion, full signal-bound entries
+reread, metadata recheck and close/join. Delivery keeps its earlier entries and
+same-held-scan rules/projection/source/topology quartet. Original source attempt,
+retirement inspector and handoff similarly share one fixed triple, before any
+handoff SQL or staging cleanup. Fresh real observation time and the unchanged
+same-transaction owner/staging/row/fence/five-second checks remain mandatory.
+No planned hash, callback or isolated CAS artifact grants source or cleanup
+authority; failure joins every issued operation. Instruction
 capture similarly retains every original raw file/text/source/manifest, with
 at-most-four text groups and a final zero/one/two-text plus source/manifest
 closure. Planning refs establishes no durability. Full file sync/readback,

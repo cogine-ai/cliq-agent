@@ -18,6 +18,7 @@ probe_run_driver_mode=--campaign
 probe_credential_driver_mode=--campaign
 probe_finalizer_shutdown=0
 probe_volume_mode=loop
+probe_upgrade_source=
 if [[ ${1:-} = --delay-volume ]]; then probe_volume_mode=delay-50ms; shift; fi
 case ${1:-} in
   --installed) probe_campaign_kind=installed; shift ;;
@@ -27,6 +28,11 @@ case ${1:-} in
   --credentials-model-input) probe_campaign_kind=credentials; probe_credential_driver_mode=--model-input-campaign; shift ;;
   --credential-finalizer-shutdown) probe_campaign_kind=credentials; probe_finalizer_shutdown=1; shift ;;
   --run-journey) probe_campaign_kind=run-journey; shift ;;
+  --runtime-upgrade-journey)
+    [[ $# -ge 2 && "$2" = /* && -d "$2" && ! -L "$2" ]] || {
+      printf 'upgrade qualification requires the exact original source directory\n' >&2; exit 2;
+    }
+    probe_campaign_kind=run-journey; probe_run_driver_mode=--runtime-upgrade-campaign; probe_upgrade_source=$2; shift 2 ;;
   --run-final-source-limits-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--final-source-limits-campaign; shift ;;
   --run-verifier-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--verifier-campaign; shift ;;
   --run-delivery-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--delivery-campaign; shift ;;
@@ -45,7 +51,7 @@ case ${1:-} in
   --run-shutdown-pending-model-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--shutdown-pending-model-campaign; shift ;;
   --run-shutdown-startup-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--shutdown-startup-campaign; shift ;;
 esac
-readonly probe_campaign_kind probe_run_driver_mode probe_credential_driver_mode probe_finalizer_shutdown probe_volume_mode
+readonly probe_campaign_kind probe_run_driver_mode probe_credential_driver_mode probe_finalizer_shutdown probe_volume_mode probe_upgrade_source
 # After the optional fixed volume and one campaign, only positional paths are
 # allowed. Reject mixed/duplicate modes before even inspecting host identities.
 for probe_argument in "$@"; do
@@ -55,6 +61,9 @@ for probe_argument in "$@"; do
 done
 [[ "$probe_volume_mode" = loop || "$probe_campaign_kind" = run-journey ]] || {
   printf 'the fixed delayed volume is only supported by the installed Run campaign\n' >&2; exit 2;
+}
+[[ "$probe_run_driver_mode" != --runtime-upgrade-campaign || "$probe_volume_mode" = loop ]] || {
+  printf 'the fixed upgrade scope requires its original owned non-delayed volume\n' >&2; exit 2;
 }
 [[ "$probe_run_driver_mode" != --delivery-delay-campaign || "$probe_volume_mode" = delay-50ms ]] || {
   printf 'the fixed delayed Delivery campaign requires its owned delayed volume\n' >&2; exit 2;
@@ -66,7 +75,7 @@ done
   printf 'the fixed publication-late campaign requires its owned delayed volume\n' >&2; exit 2;
 }
 if [[ $(id -u) != 0 || $# -lt 1 || $# -gt 2 ]]; then
-  printf 'usage: sudo bash %s [--delay-volume] [--installed|--installed-retirement-refusal|--secrets|--credentials|--credentials-model-input|--credential-finalizer-shutdown|--run-journey|--run-final-source-limits-journey|--run-verifier-journey|--run-delivery-journey|--run-delivery-delay-journey|--run-delivery-stop-journey|--run-delivery-late-journey|--run-failure-journey|--run-retry-journey|--run-authority-failure-journey|--run-storage-failure-journey|--run-request-resource-journey|--run-shutdown-admission-journey|--run-shutdown-session-journey|--run-shutdown-preparation-journey|--run-shutdown-received-tool-journey|--run-shutdown-pending-model-journey|--run-shutdown-startup-journey] ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' "$0" >&2
+  printf 'usage: sudo bash %s [--delay-volume] [--installed|--installed-retirement-refusal|--secrets|--credentials|--credentials-model-input|--credential-finalizer-shutdown|--runtime-upgrade-journey ORIGINAL_SOURCE_ROOT|--run-journey|--run-final-source-limits-journey|--run-verifier-journey|--run-delivery-journey|--run-delivery-delay-journey|--run-delivery-stop-journey|--run-delivery-late-journey|--run-failure-journey|--run-retry-journey|--run-authority-failure-journey|--run-storage-failure-journey|--run-request-resource-journey|--run-shutdown-admission-journey|--run-shutdown-session-journey|--run-shutdown-preparation-journey|--run-shutdown-received-tool-journey|--run-shutdown-pending-model-journey|--run-shutdown-startup-journey] ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' "$0" >&2
   exit 2
 fi
 readonly probe_node=$1
@@ -99,7 +108,9 @@ readonly probe_credential_source="$probe_source_dir/testing/credential-journey-o
 readonly probe_credential_store_source="$probe_source_dir/testing/credential-store-fixture.c"
 readonly probe_publication_observer_source="$probe_source_dir/testing/publication-cleanup-crash-observer.c"
 readonly probe_finalizer_source="$probe_source_dir/testing/credential-finalizer-service.c"
-if [[ "$probe_run_driver_mode" = --verifier-campaign ]]; then
+if [[ "$probe_run_driver_mode" = --runtime-upgrade-campaign ]]; then
+  readonly probe_run_driver="$probe_source_dir/qualify-installed-runtime-upgrade.ts"
+elif [[ "$probe_run_driver_mode" = --verifier-campaign ]]; then
   readonly probe_run_driver="$probe_source_dir/qualify-installed-verifier-journey.ts"
 elif [[ "$probe_run_driver_mode" = --delivery-campaign || "$probe_run_driver_mode" = --delivery-delay-campaign || "$probe_run_driver_mode" = --delivery-late-campaign || "$probe_run_driver_mode" = --delivery-stop-campaign ]]; then
   readonly probe_run_driver="$probe_source_dir/qualify-installed-delivery-journey.ts"
@@ -979,7 +990,11 @@ elif [[ "$probe_campaign_kind" = credentials ]]; then
 elif [[ "$probe_campaign_kind" = run-journey ]]; then
   # Fixed driver, exact fresh UID and the same frozen ledger/baseline/cleanup.
   # No arbitrary driver, production pause flag or manager-policy override.
-  "$probe_node" --import "$probe_installed_loader" "$probe_run_driver" "$probe_run_driver_mode" "$probe_ledger"
+  if [[ "$probe_run_driver_mode" = --runtime-upgrade-campaign ]]; then
+    "$probe_node" --import "$probe_installed_loader" "$probe_run_driver" "$probe_run_driver_mode" "$probe_ledger" "$probe_upgrade_source"
+  else
+    "$probe_node" --import "$probe_installed_loader" "$probe_run_driver" "$probe_run_driver_mode" "$probe_ledger"
+  fi
 else
   "$probe_node" --import "$probe_installed_loader" "$probe_secret_driver" --campaign "$probe_ledger"
   "$probe_node" --import "$probe_installed_loader" "$probe_sqlite_driver" --campaign "$probe_ledger"

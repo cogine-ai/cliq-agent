@@ -3,7 +3,7 @@ import { chmod, mkdtemp, realpath, rename, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME } from '../config.js';
+import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME, KERNEL_STATE_SCHEMA_VERSION } from '../config.js';
 import { digestOmitting } from '../kernel/identity.js';
 import { testFixture } from '../model/testing/fixtures.js';
 import { readRetainedStateOwnerHistory } from './state-owner-history.js';
@@ -340,7 +340,8 @@ for (const runtimeKind of ['schema-only', 'signed'] as const)
       const generation = await store.artifacts.readCanonical<KernelGenerationIdentityV1>(acquisition.kernelGenerationIdentityRef);
       assert.equal(generation.origin, 'fresh_empty');
       const prior = kernelSchemaBirthRecipe(6);
-      assert.equal(generation.stateSchemaVersion, prior.userVersion + 1);
+      assert.equal(generation.stateSchemaVersion, KERNEL_STATE_SCHEMA_VERSION);
+      assert(prior.userVersion < generation.stateSchemaVersion);
       const originalSchema = await store.artifacts.readCanonical<{ userVersion: number; schemaDigest: string; manifestDigest: string }>(
         generation.pristineSchemaManifestRef);
       const schema = { ...originalSchema, userVersion: prior.userVersion, schemaDigest: prior.schemaDigest, manifestDigest: '' };

@@ -29,7 +29,8 @@ test('a complete 100-entry maximum-width Run or grant page fits the unchanged wi
     run: { id: id(index), sessionId: id(200), parentRunId: id(300), specRef: ref, status: 'waiting', nextStep: 'tool',
       frontierRef: ref, waitingReason: 'reconciliation', waitingOnRef: ref, revision: Number.MAX_SAFE_INTEGER,
       leaseEpoch: Number.MAX_SAFE_INTEGER, latestCheckpointId: id(400), budgetReserved: budget, budgetConsumed: budget,
-      repairCount: Number.MAX_SAFE_INTEGER, cancelRequested: true, stopIntentRef: ref, createdAt: at, updatedAt: at, deadlineAt: later } }));
+      repairCount: Number.MAX_SAFE_INTEGER, cancelRequested: true, stopIntentRef: ref, parentCancellationRef: ref,
+      createdAt: at, updatedAt: at, deadlineAt: later } }));
   const grants = Array.from({ length: 100 }, (_, index) => ({ schemaVersion: 1, grantId: id(index), state: 'consumed',
     targetKind: 'dependency_install_scripts', purpose: 'dependency_install_scripts', targetDigest: ref, useCount: 1, rowVersion: 2,
     createdAt: at, expiresAt: later, consumedAt: at }));

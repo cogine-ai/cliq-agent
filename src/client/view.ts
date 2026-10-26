@@ -34,6 +34,7 @@ export function humanResponse(request: InstalledControlRequestV1, response: Inst
   if ('snapshot' in value) {
     if ('run' in value.snapshot) {
       const run = value.snapshot.run, lines = [run.id, runHeadline(value.snapshot)];
+      if (run.parentRunId !== undefined) lines.push(`Child of ${JSON.stringify(run.parentRunId)}`);
       if (value.method === 'run.get') lines.push(`Revision ${run.revision} · next ${run.nextStep} · Session ${run.sessionId}`,
         `Consumed ${JSON.stringify(run.budgetConsumed)} · reserved ${JSON.stringify(run.budgetReserved)}`,
         ...value.items.map(item => `Item ${item.itemSeq} · ${item.itemId} · ${item.payloadRef}`),
@@ -47,7 +48,8 @@ export function humanResponse(request: InstalledControlRequestV1, response: Inst
       ...(value.method === 'session.get' ? [...value.items.map(item => `Item ${item.itemSeq} · ${item.kind} · ${item.itemId} · ${item.payloadRef}`),
         `Items through ${value.nextItemSeq}/${value.highWaterItemSeq}`] : [])];
   }
-  if (value.method === 'run.list') return value.runs.map(snapshot => `${snapshot.run.id}  ${runHeadline(snapshot)}`)
+  if (value.method === 'run.list') return value.runs.map(snapshot => `${snapshot.run.id}  ${runHeadline(snapshot)}` +
+    (snapshot.run.parentRunId === undefined ? '' : ` · child of ${JSON.stringify(snapshot.run.parentRunId)}`))
     .concat(value.nextCursor ? [`Next cursor: ${value.nextCursor}`] : []);
   if (value.method === 'session.list') return value.sessions.map(session => `${session.id}  ${terminalText(session.name ?? '')}  context ${session.contextRevision}`)
     .concat(value.nextCursor ? [`Next cursor: ${value.nextCursor}`] : []);

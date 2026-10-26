@@ -14,10 +14,14 @@ import { readCandidateSource } from './result-source.js';
 import { isZeroBudget } from './invariants.js';
 import type { VerifierProgress } from './verifier-recovery.js';
 import type { RetainedDeliveryMerge } from './delivery-recovery.js';
+import { readChildAdmission } from './child-admission.js';
+import { readChildAllocationsForRun } from './repositories/child-allocations.js';
+import type { SqliteDriver } from './sqlite-driver.js';
 
 /** Retained provenance only. The enclosing recovery walk validates the actual
  * sealed generation and original worker proof; this function mints neither. */
 export async function validateFinalCandidateRecovery(input: {
+  driver?: SqliteDriver;
   artifacts: ArtifactCatalog; run: Run; spec: RunSpec; items: RunItemReferenceV1[];
   journal: InvocationJournalEntry[]; checkpoints: Checkpoint[]; workspaceGenerations: WorkspaceGenerationStateV1[];
   decodedItems: Map<string, ContinuationItem>;
@@ -51,9 +55,17 @@ export async function validateFinalCandidateRecovery(input: {
       verifierFrontiers.set(candidate.itemId, initialFrontier);
       continue;
     }
-    if (candidate.operation !== 'agent' || spec.operation !== 'agent' || run.parentRunId !== undefined ||
-        [...decodedItems.values()].some(item => ['child_handle', 'child_result'].includes(item.kind)))
+    if (candidate.operation !== 'agent' || spec.operation !== 'agent')
       throw new TypeError('candidate recovery has no implemented delivery or child lifecycle');
+    if (run.parentRunId || [...decodedItems.values()].some(item => ['child_handle', 'child_result'].includes(item.kind))) {
+      if (!input.driver) throw new TypeError('child candidate requires its actual retained SQL origin');
+      if (run.parentRunId) await readChildAdmission(input.driver, artifacts, run.id);
+      for (const allocation of readChildAllocationsForRun(input.driver, run.id)) {
+        if (allocation.parentRunId === run.id && allocation.createdAt <= candidate.createdAt &&
+            (allocation.state !== 'settled' || allocation.settledAt > candidate.createdAt))
+          throw new TypeError('candidate overtook an originally unsettled direct child');
+      }
+    }
     const position = items.indexOf(row), producerRow = items[position - 1];
     const producer = producerRow && decodedItems.get(producerRow.itemId);
     if (!producer || producer.kind !== 'model_turn' || producer.stopReason !== 'end' ||

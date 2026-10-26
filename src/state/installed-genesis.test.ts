@@ -84,8 +84,8 @@ for (const modelAuthority of [false, true]) if (process.platform === 'linux') te
     const cas = new ContentAddressedStore(path.join(stateRoot, KERNEL_CAS_DIRECTORY));
     const expectedEntries = signed.seedObjects.map(({ artifactRef, bytes }) => ({ artifactRef, byteCount: bytes.byteLength }))
       .sort((left, right) => left.artifactRef < right.artifactRef ? -1 : left.artifactRef > right.artifactRef ? 1 : 0);
-    assert.equal(expectedEntries.length, modelAuthority ? 9 : 4,
-      'base seed is manifest/policy/PEM/root; a present companion adds its root, catalog, price and two detached signatures');
+    assert.equal(expectedEntries.length, modelAuthority ? 10 : 5,
+      'base seed is manifest/policy/PEM/root/exact signed schema; a present companion adds its root, catalog, price and two detached signatures');
     assert.deepEqual((await readdir(path.join(stateRoot, KERNEL_CAS_DIRECTORY))).sort(), expectedEntries.map(entry => entry.artifactRef));
     for (const object of signed.seedObjects) assert.deepEqual(await cas.read(object.artifactRef), object.bytes);
 

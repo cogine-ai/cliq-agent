@@ -45,7 +45,7 @@
 #define MANAGER_PATH "/org/freedesktop/systemd1"
 #define MANAGER_INTERFACE "org.freedesktop.systemd1.Manager"
 
-enum operation { CREATE_COMPARE, INSPECT_SECRET, DELETE_KNOWN, RELOAD_MANAGER, START_UNIT, INSPECT_UNIT };
+enum operation { CREATE_COMPARE, INSPECT_SECRET, DELETE_KNOWN, RELOAD_MANAGER, START_UNIT, INSPECT_UNIT, STOP_INSTALLED_UPGRADE };
 struct selector {
   char item_id[SELECTOR_TEXT_CAP], principal[SELECTOR_TEXT_CAP], root[65], operation[SELECTOR_TEXT_CAP], grant[SELECTOR_TEXT_CAP], target[65];
   uint64_t generation;
@@ -69,6 +69,7 @@ struct inspection_owner {
 struct task {
   napi_env env; napi_async_work work; napi_deferred deferred; napi_async_cleanup_hook_handle cleanup_hook;
   enum operation operation; uid_t uid; gid_t gid; char home[PATH_MAX], unit[256], job[TEXT_CAP];
+  uint32_t upgrade_pid; uint64_t upgrade_ticks; unsigned char upgrade_invocation[16];
   struct selector selector; struct platform_observation expected, observed;
   unsigned char *secret; size_t secret_size;
   struct timespec deadline; pthread_t watchdog; pthread_mutex_t mutex; pthread_cond_t condition;
@@ -87,7 +88,7 @@ struct task {
 static atomic_bool retirement_failed;
 static atomic_bool job_in_flight;
 static struct task *unretired_tasks;
-static const napi_type_tag inspection_tag = { UINT64_C(0x6dbc324eb14e4978), UINT64_C(0x84eb6af70c82d539) };
+static const napi_type_tag inspection_tag = { UINT64_C(0x7145d66c9a4a4718), UINT64_C(0x8d01e244ace23b91) };
 static bool manager_shape(struct task *task);
 
 static void wipe(void *memory, size_t count) { volatile unsigned char *bytes = memory; while (count--) *bytes++ = 0; }
@@ -383,6 +384,28 @@ static GVariant *get_all(struct task *task, const char *path, const char *interf
   if (g_variant_n_children(value) > 1024) { g_variant_unref(value); fail(task, "platform_inventory_bound"); return NULL; }
   return value;
 }
+static bool manager_read_unit(struct task *task, bool allow_load) {
+  GVariant *reply = call(task, task->observed.service.unique, MANAGER_PATH, MANAGER_INTERFACE,
+    allow_load ? "LoadUnit" : "GetUnit", g_variant_new("(s)", task->unit), "(o)");
+  if (!reply) return false;
+  const char *unit; g_variant_get(reply, "(&o)", &unit); char locator[TEXT_CAP];
+  bool valid = copy_text(locator, sizeof(locator), unit); g_variant_unref(reply);
+  if (!valid) return fail(task, "platform_shape_mismatch");
+  task->unit_properties = get_all(task, locator, "org.freedesktop.systemd1.Unit");
+  task->service_properties = get_all(task, locator, "org.freedesktop.systemd1.Service");
+  return task->unit_properties && task->service_properties && manager_shape(task);
+}
+static bool manager_original_upgrade_process(struct task *task) {
+  uint32_t pid = 0; uint64_t ticks = 0;
+  GVariant *invocation = g_variant_lookup_value(task->unit_properties, "InvocationID", G_VARIANT_TYPE("ay"));
+  if (!invocation) return fail(task, "platform_shape_mismatch");
+  gsize count = 0; const unsigned char *bytes = g_variant_get_fixed_array(invocation, &count, 1);
+  bool valid = count == 16 && !memcmp(bytes, task->upgrade_invocation, 16) &&
+    g_variant_lookup(task->service_properties, "MainPID", "u", &pid) && pid == task->upgrade_pid &&
+    process_ticks(task, (pid_t)pid, task->uid, &ticks) && ticks == task->upgrade_ticks;
+  g_variant_unref(invocation);
+  return valid || fail(task, "platform_observation_changed");
+}
 static bool manager_operation(struct task *task) {
   if (!observe_owner(task, MANAGER_NAME, &task->observed.service)) return false;
   const char *destination = task->observed.service.unique;
@@ -391,23 +414,39 @@ static bool manager_operation(struct task *task) {
     if (!reply) return false;
     g_variant_unref(reply);
   } else {
-    if (task->operation == START_UNIT) {
-      GVariant *reply = call(task, destination, MANAGER_PATH, MANAGER_INTERFACE, "StartUnit", g_variant_new("(ss)", task->unit, "fail"), "(o)");
+    if (task->operation == STOP_INSTALLED_UPGRADE) {
+      // Administrative Stop of this installation's two fixed units only.
+      // The captured invocation and real same-user PID/start are preconditions,
+      // not an atomic StopUnit selector: systemd may restart between calls.
+      // The caller independently requires its exact original owner/death cut.
+      if (!manager_read_unit(task, false) || !manager_original_upgrade_process(task)) return false;
+      g_variant_unref(task->unit_properties); task->unit_properties = NULL;
+      g_variant_unref(task->service_properties); task->service_properties = NULL;
+    }
+    if (task->operation == START_UNIT || task->operation == STOP_INSTALLED_UPGRADE) {
+      GVariant *reply = call(task, destination, MANAGER_PATH, MANAGER_INTERFACE,
+        task->operation == START_UNIT ? "StartUnit" : "StopUnit", g_variant_new("(ss)", task->unit, "fail"), "(o)");
       if (!reply) return false;
       const char *job; g_variant_get(reply, "(&o)", &job); bool valid = copy_text(task->job, sizeof(task->job), job); g_variant_unref(reply);
       if (!valid) return fail(task, "platform_shape_mismatch");
     }
-    /* LoadUnit only loads an existing fixed profile into the manager. It does
-     * not start it; GetUnit alone rejects a valid inactive newly installed
-     * profile, before the client can inspect that profile safely. */
-    GVariant *reply = call(task, destination, MANAGER_PATH, MANAGER_INTERFACE,
-      task->operation == INSPECT_UNIT ? "LoadUnit" : "GetUnit", g_variant_new("(s)", task->unit), "(o)");
-    if (!reply) return false;
-    const char *unit; g_variant_get(reply, "(&o)", &unit); char locator[TEXT_CAP]; bool valid = copy_text(locator, sizeof(locator), unit); g_variant_unref(reply);
-    if (!valid) return fail(task, "platform_shape_mismatch");
-    task->unit_properties = get_all(task, locator, "org.freedesktop.systemd1.Unit");
-    task->service_properties = get_all(task, locator, "org.freedesktop.systemd1.Service");
-    if (!task->unit_properties || !task->service_properties || !manager_shape(task)) return false;
+    // LoadUnit never starts the original inspector's fixed service profile.
+    if (!manager_read_unit(task, task->operation == INSPECT_UNIT)) return false;
+    if (task->operation == STOP_INSTALLED_UPGRADE) {
+      for (;;) {
+        const char *active = NULL, *sub = NULL; uint32_t main_pid = UINT32_MAX, control_pid = UINT32_MAX;
+        if (!g_variant_lookup(task->unit_properties, "ActiveState", "&s", &active) ||
+            !g_variant_lookup(task->unit_properties, "SubState", "&s", &sub) ||
+            !g_variant_lookup(task->service_properties, "MainPID", "u", &main_pid) ||
+            !g_variant_lookup(task->service_properties, "ControlPID", "u", &control_pid)) return fail(task, "platform_shape_mismatch");
+        if (!strcmp(active, "inactive") && !strcmp(sub, "dead") && !main_pid && !control_pid) break;
+        if (!remaining(task)) return fail(task, "platform_timeout");
+        g_variant_unref(task->unit_properties); task->unit_properties = NULL;
+        g_variant_unref(task->service_properties); task->service_properties = NULL;
+        g_usleep(10000);
+        if (!manager_read_unit(task, false)) return false;
+      }
+    }
   }
   return observe_owner(task, MANAGER_NAME, &task->observed.service) && bus_current(task);
 }
@@ -688,11 +727,11 @@ static napi_value result_value(napi_env env, struct task *task) {
     set_string(env, result, "collectionPath", task->observed.collection);
     if (task->observed.item[0]) set_string(env, result, "itemPath", task->observed.item);
   } else {
-    set_string(env, result, "kind", task->operation == RELOAD_MANAGER ? "reload" : task->operation == START_UNIT ? "start" : "inspect");
+    set_string(env, result, "kind", task->operation == RELOAD_MANAGER ? "reload" : task->operation == START_UNIT ? "start" : task->operation == STOP_INSTALLED_UPGRADE ? "stop_installed_upgrade" : "inspect");
     set_number(env, result, "uid", task->uid); set_number(env, result, "gid", task->gid); set_string(env, result, "home", task->home);
     napi_set_named_property(env, result, "manager", service_value(env, task->observed.service));
     if (task->operation != RELOAD_MANAGER) napi_set_named_property(env, result, "unit", manager_unit_value(env, task));
-    if (task->operation == START_UNIT) set_string(env, result, "jobPath", task->job);
+    if (task->operation == START_UNIT || task->operation == STOP_INSTALLED_UPGRADE) set_string(env, result, "jobPath", task->job);
   }
   return result;
 }
@@ -893,7 +932,7 @@ static bool own_inspection(struct task *task, napi_value promise) {
   const napi_property_descriptor method = {"cancelAndJoin", NULL, cancel_inspection, NULL, NULL, NULL, napi_default, NULL};
   return napi_define_properties(task->env, promise, 1, &method) == napi_ok;
 }
-static napi_value submit(napi_env env, napi_callback_info info, bool manager) {
+static napi_value submit(napi_env env, napi_callback_info info, bool manager, bool upgrade) {
   if (atomic_load(&retirement_failed)) { napi_throw(env, error_value(env, true, "resource_retirement")); return NULL; }
   if (syscall(SYS_gettid) != getpid()) { napi_throw(env, error_value(env, false, "platform_main_thread_required")); return NULL; }
   size_t argc = 2; napi_value args[2];
@@ -903,8 +942,26 @@ static napi_value submit(napi_env env, napi_callback_info info, bool manager) {
   struct task *task = calloc(1, sizeof(*task));
   if (!task) { napi_throw(env, error_value(env, false, "platform_worker_unavailable")); return NULL; }
   task->env = env; task->runtime_fd = -1; char kind[32];
-  bool valid = current_user(&task->uid, &task->gid, task->home) && field_text(env, args[0], "kind", kind, sizeof(kind));
-  if (valid && manager) {
+  bool valid = current_user(&task->uid, &task->gid, task->home);
+  if (valid && upgrade) {
+    const char *keys[] = {"rootIdentityDigest", "role", "pid", "processStartToken", "invocationId"};
+    char root[65], role[16], invocation[33];
+    valid = fields(env, args[0], keys, 5) && field_text(env, args[0], "rootIdentityDigest", root, sizeof(root)) &&
+      strlen(root) == 64 && strspn(root, "0123456789abcdef") == 64 &&
+      field_text(env, args[0], "role", role, sizeof(role)) && (!strcmp(role, "supervisor") || !strcmp(role, "keeper")) &&
+      field_u32(env, args[0], "pid", &task->upgrade_pid) && task->upgrade_pid > 0 && task->upgrade_pid <= INT_MAX &&
+      field_ticks(env, args[0], &task->upgrade_ticks) && field_text(env, args[0], "invocationId", invocation, sizeof(invocation)) &&
+      strlen(invocation) == 32 && strspn(invocation, "0123456789abcdef") == 32;
+    bool nonzero = false;
+    if (valid) for (size_t i = 0; i < 16; i++) {
+      unsigned int byte = 0; if (sscanf(invocation + i * 2, "%2x", &byte) != 1) valid = false;
+      task->upgrade_invocation[i] = (unsigned char)byte; nonzero |= byte != 0;
+    }
+    valid = valid && nonzero;
+    if (valid) valid = snprintf(task->unit, sizeof(task->unit), "cliq-%s-%s.service", root, role) > 0;
+    task->operation = STOP_INSTALLED_UPGRADE;
+  } else if (valid && !field_text(env, args[0], "kind", kind, sizeof(kind))) valid = false;
+  if (valid && !upgrade && manager) {
     if (!strcmp(kind, "reload")) { const char *keys[] = {"kind"}; valid = fields(env, args[0], keys, 1); task->operation = RELOAD_MANAGER; }
     else if (!strcmp(kind, "start") || !strcmp(kind, "inspect")) {
       const char *keys[] = {"kind", "unit"}; valid = fields(env, args[0], keys, 2) && field_text(env, args[0], "unit", task->unit, sizeof(task->unit));
@@ -914,7 +971,7 @@ static napi_value submit(napi_env env, napi_callback_info info, bool manager) {
         !strcmp(task->unit + length - 8, ".service");
       task->operation = !strcmp(kind, "start") ? START_UNIT : INSPECT_UNIT;
     } else valid = false;
-  } else if (valid) {
+  } else if (valid && !upgrade) {
     napi_value selector;
     valid = member(env, args[0], "selector", &selector) && parse_selector(env, selector, &task->selector);
     if (!strcmp(kind, "create_compare")) {
@@ -936,7 +993,11 @@ static napi_value submit(napi_env env, napi_callback_info info, bool manager) {
   }
   napi_value promise = NULL, resource;
   if (clock_gettime(CLOCK_MONOTONIC, &task->deadline)) goto failed;
-  task->deadline.tv_sec += DEADLINE_SECONDS;
+  task->deadline.tv_sec += upgrade ? 1 : DEADLINE_SECONDS;
+  if (upgrade) {
+    task->deadline.tv_nsec += 750000000;
+    if (task->deadline.tv_nsec >= 1000000000) { task->deadline.tv_sec++; task->deadline.tv_nsec -= 1000000000; }
+  }
   task->cancel = g_cancellable_new();
   if (pthread_mutex_init(&task->mutex, NULL)) goto failed;
   task->mutex_ready = true;
@@ -948,7 +1009,7 @@ static napi_value submit(napi_env env, napi_callback_info info, bool manager) {
   if (condition) goto failed;
   task->condition_ready = true;
   if (napi_create_promise(env, &task->deferred, &promise) != napi_ok ||
-      (task->operation == INSPECT_SECRET && !own_inspection(task, promise)) ||
+      ((task->operation == INSPECT_SECRET || task->operation == STOP_INSTALLED_UPGRADE) && !own_inspection(task, promise)) ||
       napi_create_string_utf8(env, "cliq-linux-credential-platform", NAPI_AUTO_LENGTH, &resource) != napi_ok ||
       napi_create_async_work(env, NULL, resource, execute, complete, task, &task->work) != napi_ok ||
       napi_add_async_cleanup_hook(env, cleanup_task, task, &task->cleanup_hook) != napi_ok) goto failed;
@@ -971,8 +1032,9 @@ failed:
   atomic_store(&job_in_flight, false); release_task(task);
   napi_throw(env, error_value(env, unsafe, unsafe ? "resource_retirement" : "platform_worker_unavailable")); return NULL;
 }
-static napi_value secret_service(napi_env env, napi_callback_info info) { return submit(env, info, false); }
-static napi_value user_manager(napi_env env, napi_callback_info info) { return submit(env, info, true); }
+static napi_value secret_service(napi_env env, napi_callback_info info) { return submit(env, info, false, false); }
+static napi_value user_manager(napi_env env, napi_callback_info info) { return submit(env, info, true, false); }
+static napi_value stop_installed_upgrade(napi_env env, napi_callback_info info) { return submit(env, info, true, true); }
 static napi_value user(napi_env env, napi_callback_info info) {
   (void)info; uid_t uid; gid_t gid; char home[PATH_MAX];
   if (atomic_load(&retirement_failed) || syscall(SYS_gettid) != getpid() || !current_user(&uid, &gid, home)) {
@@ -986,9 +1048,10 @@ static napi_value initialize(napi_env env, napi_value exports) {
     {"currentUser", NULL, user, NULL, NULL, NULL, napi_default, NULL},
     {"secretService", NULL, secret_service, NULL, NULL, NULL, napi_default, NULL},
     {"userManager", NULL, user_manager, NULL, NULL, NULL, napi_default, NULL},
+    {"stopInstalledUpgradeUnit", NULL, stop_installed_upgrade, NULL, NULL, NULL, napi_default, NULL},
   };
   if (napi_define_properties(env, exports, sizeof(methods) / sizeof(*methods), methods) != napi_ok) return NULL;
-  set_number(env, exports, "interfaceVersion", 2); return exports;
+  set_number(env, exports, "interfaceVersion", 2); set_number(env, exports, "installedUpgradeInterfaceVersion", 1); return exports;
 }
 NAPI_MODULE(cliq_linux_credential_platform, initialize)
 #else
@@ -1041,8 +1104,11 @@ struct broker {
   _Atomic(const char *) error;
   struct broker *unretired_next;
 };
-static const napi_type_tag broker_tag = { UINT64_C(0x59689d0f2ac42b76), UINT64_C(0xac3d70697537de41) };
-static const napi_type_tag broker_fence_tag = { UINT64_C(0x385c79f2d1954ea6), UINT64_C(0xa3e8d76b24c1095f) };
+/* struct task is embedded in broker. Its upgrade fields change the private
+ * native layout, so old-image owners/fences cannot borrow this image's methods.
+ * Public transport semantics and retained evidence formats are unchanged. */
+static const napi_type_tag broker_tag = { UINT64_C(0x613929b5e6bd4b03), UINT64_C(0xaac5c25e66e15d24) };
+static const napi_type_tag broker_fence_tag = { UINT64_C(0x935ea37257e14d06), UINT64_C(0x89351effd851e41b) };
 struct broker_fence {
   struct broker *broker; napi_env env; napi_ref original; struct broker_binding binding; pid_t creator_pid; bool active;
 };

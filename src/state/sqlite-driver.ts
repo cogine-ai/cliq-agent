@@ -268,9 +268,10 @@ class NodeSqliteDriver implements SqliteDriver {
   private transactionActive = false;
   private poisoned = false;
 
-  constructor(databasePath: string) {
+  constructor(databasePath: string, readOnly = false) {
     this.database = new DatabaseSync(databasePath, {
       allowExtension: false,
+      readOnly,
       enableDoubleQuotedStringLiterals: false,
       enableForeignKeyConstraints: true
     });
@@ -476,7 +477,7 @@ function precreatePrivateDatabase(databasePath: string, effectiveUid: number): v
   }
 }
 
-function prepareDatabasePath(databasePath: string): void {
+function prepareDatabasePath(databasePath: string, allowCreate = true): void {
   const effectiveUid = requireEffectiveUid();
   const databaseExists = validateExistingPrivateFile(
     databasePath,
@@ -493,6 +494,7 @@ function prepareDatabasePath(databasePath: string): void {
   }
 
   if (!databaseExists) {
+    if (!allowCreate) throw new Error('read-only kernel database is missing');
     precreatePrivateDatabase(databasePath, effectiveUid);
   }
 }
@@ -503,4 +505,13 @@ export function openSqliteDriver(databasePath: string): SqliteDriver {
   }
   prepareDatabasePath(databasePath);
   return new NodeSqliteDriver(databasePath);
+}
+
+/** Data-only installed selection/history cut. It cannot create a missing DB or
+ * mutate the original database even if a caller submits a writing statement. */
+export function openReadOnlySqliteDriver(databasePath: string): SqliteDriver {
+  if (!path.isAbsolute(databasePath) || path.normalize(databasePath) !== databasePath)
+    throw new TypeError('SQLite reader requires a normalized absolute file-backed database path');
+  prepareDatabasePath(databasePath, false);
+  return new NodeSqliteDriver(databasePath, true);
 }

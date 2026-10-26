@@ -9,12 +9,34 @@ import { DatabaseSync } from 'node:sqlite';
 
 import {
   openSqliteDriver,
+  openReadOnlySqliteDriver,
   iterateNodeSqliteStatement,
   isRolledBackSqliteTransactionFailure,
   type SqliteConnection,
   type SqliteDriver,
   type SqliteStatement
 } from './sqlite-driver.js';
+
+test('retained upgrade reads cannot create a missing database or write its original main database', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'cliq-upgrade-sqlite-reader-'));
+  const file = path.join(directory, 'kernel.sqlite3');
+  try {
+    assert.throws(() => openReadOnlySqliteDriver(file), /missing/);
+    await assert.rejects(lstat(file), { code: 'ENOENT' });
+    const writer = openSqliteDriver(file);
+    try { writer.exec("CREATE TABLE retained(id INTEGER PRIMARY KEY,value TEXT) STRICT; INSERT INTO retained VALUES(1,'original')"); }
+    finally { writer.close(); }
+    const reader = openReadOnlySqliteDriver(file);
+    try {
+      assert.equal(reader.readSnapshot(connection => connection.prepare('SELECT value FROM retained WHERE id=1').get()?.value), 'original');
+      assert.throws(() => reader.prepare("UPDATE retained SET value='changed'").run(), /readonly database/);
+      assert.throws(() => reader.exec('CREATE TABLE replacement(id INTEGER) STRICT'), /readonly database/);
+    } finally { reader.close(); }
+    const actual = openSqliteDriver(file);
+    try { assert.equal(actual.prepare('SELECT value FROM retained WHERE id=1').get()?.value, 'original'); }
+    finally { actual.close(); }
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
 
 test('owned native SQLite iteration retains a temporary statement through GC and returns every row', () => {
   // A real default-engine read, matching the production caller's temporary

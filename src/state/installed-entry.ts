@@ -1,12 +1,12 @@
 import path from 'node:path';
 import { getAsset, isSea } from 'node:sea';
 import { assertArtifactRef, assertRequestId, normalizeAbsolutePath } from '../kernel/identity.js';
-import { canonicalJsonBytes, normalizeCanonicalText } from '../kernel/canonical.js';
+import { canonicalJsonBytes, canonicalSha256, normalizeCanonicalText } from '../kernel/canonical.js';
 import { decodeEndpointAuthorityCommandCore, type EndpointAuthorityCommandCoreV1 } from '../kernel/credential-authority.js';
 import { parseJsonStrict } from '../kernel/json.js';
 import type { ReleaseTrustKey } from '../policy/runtime-authority.js';
 import { openInstalledControl, type InstalledControlService } from './installed-control.js';
-import { acquireInstalledAnchor, createInstalledRuntime, initializeInstalledKeeper, withHeldInstalledRuntime,
+import { acquireInstalledAnchor, createInstalledRuntime, upgradeInstalledRuntime, initializeInstalledKeeper, withHeldInstalledRuntime,
   commitEndpointAuthority, readEndpointAuthority, readCredentialAuthority, withCredentialAuthorityLock,
   type HeldInstalledAnchor, type HeldInstalledKeeper, type HeldInstalledRuntime } from './installed-runtime.js';
 import { joinResourceOperations, KernelStorageError } from './errors.js';
@@ -139,6 +139,46 @@ async function start(): Promise<void> {
     .decode(getAsset('release-trust-roots.json'))) as ReleaseTrustKey[];
   const runtime = createInstalledRuntime({ releaseKeys });
   const mode = process.argv[2];
+  if (mode === '--installed-client') {
+    if (process.argv.length < 5) throw new Error('expected a client StateRoot locator and command');
+    const stop = new AbortController(), stopping = () => { stop.abort(); };
+    process.once('SIGTERM', stopping); process.once('SIGINT', stopping);
+    try {
+      const { runInstalledClientRole } = await import('../client/installed-role.js');
+      process.exitCode = await runInstalledClientRole(runtime, process.argv[3]!, process.argv.slice(4), {
+        input: process.stdin, output: process.stdout, diagnostic: process.stderr,
+        workspacePath: process.cwd(), signal: stop.signal });
+    } finally { process.removeListener('SIGTERM', stopping); process.removeListener('SIGINT', stopping); }
+    return;
+  }
+  if (mode === '--upgrade-runtime') {
+    if (process.argv.length !== 5) throw new Error('expected only the original StateRoot and signed target package');
+    const stateRoot = normalizeAbsolutePath(process.argv[3]!), packageRoot = normalizeAbsolutePath(process.argv[4]!);
+    if (stateRoot !== process.argv[3] || packageRoot !== process.argv[4]) throw new Error('expected canonical upgrade locators');
+    const stop = new AbortController();
+    const cancel = () => stop.abort(new Error('runtime upgrade was cancelled'));
+    process.once('SIGTERM', cancel);
+    try {
+      const receipt = await upgradeInstalledRuntime(runtime, stateRoot, packageRoot, stop.signal);
+      const selected = await runtime.openSelected(stateRoot);
+      try {
+        const { openInstalledClientStdio } = await import('../client/stdio.js');
+        const { clientWriter } = await import('../client/entry.js');
+        const io = await openInstalledClientStdio(selected, { input: process.stdin, output: process.stdout,
+          diagnostic: process.stderr, workspacePath: stateRoot, signal: stop.signal });
+        const writer = clientWriter(io.io.output), cancelOutput = () => writer.cancel(stop.signal.reason);
+        stop.signal.addEventListener('abort', cancelOutput, { once: true });
+        try {
+          stop.signal.throwIfAborted();
+          await writer.write(Buffer.concat([canonicalJsonBytes({ schemaVersion: 1, format: 'cliq-runtime-upgrade-complete-v1',
+            runtimeBundleRef: receipt.targetRuntimeBundleRef, upgradeReceiptRef: canonicalSha256(receipt),
+            providerBindingPolicy: 'explicit_new_runtime_authorization_required' }), Buffer.from('\n')]));
+        } finally { stop.signal.removeEventListener('abort', cancelOutput); await joinResourceOperations([writer.join(), io.close()]); }
+      } finally { await selected.close(); }
+    } finally { process.removeListener('SIGTERM', cancel); }
+    return;
+  }
+
   credentialRole = mode === '--bootstrap-credential' || mode === '--installed-credential';
   if (mode === '--bootstrap-supervisor' || mode === '--bootstrap-keeper' || mode === '--bootstrap-endpoint' || mode === '--bootstrap-credential') {
     const runtimeRoot = path.dirname(executable);

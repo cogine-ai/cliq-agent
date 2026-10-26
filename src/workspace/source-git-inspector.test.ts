@@ -61,7 +61,10 @@ test('actual private fixed-Git transport produces and verifies a nonempty reacha
     const reached = (await git(['rev-list', '--objects', '--no-object-names', '--stdin'], DEFAULT_SANDBOX_RESOURCES, roots)).toString();
     assert.equal(reached, `${reachable}\n`);
     await git(['pack-objects', '--stdout', '--revs', '--delta-base-offset', '--threads=1', '--window=0'], DEFAULT_SANDBOX_RESOURCES, roots, 'reachable.pack');
-    await git(['index-pack', '--strict', '--index-version=2', '-o', `${OUTPUT}/reachable.idx`, `${OUTPUT}/reachable.pack`], DEFAULT_SANDBOX_RESOURCES);
+    await git(['config', 'pack.writeReverseIndex', 'true'], DEFAULT_SANDBOX_RESOURCES);
+    await git(['index-pack', '--strict', '--index-version=2', '--no-rev-index', '-o', `${OUTPUT}/reachable.idx`, `${OUTPUT}/reachable.pack`], DEFAULT_SANDBOX_RESOURCES);
+    assert.deepEqual((await readdir(OUTPUT)).sort(), ['reachable.idx', 'reachable.pack'],
+      'the fixed index-pack flag must override a true reverse-index default without deleting any output');
     await git(['verify-pack', `${OUTPUT}/reachable.idx`], DEFAULT_SANDBOX_RESOURCES);
     const index = await readFile(`${OUTPUT}/reachable.idx`), count = index.readUInt32BE(8 + 255 * 4);
     assert.equal(count, 1); assert.equal(index.subarray(8 + 1024, 8 + 1024 + 20).toString('hex'), reachable);
@@ -156,6 +159,8 @@ test('actual helper algorithm consumes own packed/ref/index data and emits only 
       finally { await Promise.all([config.close(), intent.close()]); }
       assert.equal(result.exit, 0, `complete helper algorithm must accept its supported own immutable data fixture ${result.stderr.toString()}`);
       assert.equal(result.stdout.length, 0); assert.equal(result.stderr.length, 0);
+      assert.deepEqual((await readdir(output)).sort(), ['canonical.index', 'inspection.json', 'reachable.idx', 'reachable.pack'],
+        'the actual source helper must leave all and only the four fixed collector outputs after every child joins');
       const metadata = await readFile(path.join(output, 'inspection.json'));
       const decoded = decodeSourceGitInspectionOutput(metadata, { repositoryIdentityDigest: 'a'.repeat(64), resources: DEFAULT_SANDBOX_RESOURCES });
       assert.deepEqual(decoded.head, { kind: 'symbolic', ref: 'refs/heads/main' });
@@ -207,6 +212,8 @@ test('actual helper algorithm consumes own packed/ref/index data and emits only 
       const prepared = await prepare('preparation-data', decoded, await readFile(path.join(output, 'reachable.idx')));
       assert.equal(prepared.exit, 0, `same measured helper must accept its fixed CAS-only preparation ${prepared.stderr.toString()}`);
       assert.equal(prepared.stdout.length, 0); assert.equal(prepared.stderr.length, 0);
+      assert.deepEqual((await readdir(prepared.output)).sort(), ['canonical.index', 'inspection.json', 'reachable.idx', 'reachable.pack'],
+        'fresh actual preparation index validation must leave no reverse index or temporary output after every child joins');
       const preparedData = decodeSourceGitInspectionOutput(await readFile(path.join(prepared.output, 'inspection.json')),
         { repositoryIdentityDigest: 'a'.repeat(64), resources: DEFAULT_SANDBOX_RESOURCES });
       assert.deepEqual(preparedData, decoded);

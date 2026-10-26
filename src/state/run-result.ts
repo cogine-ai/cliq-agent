@@ -24,6 +24,9 @@ import type { OwnedNoOpDeliveryFinalization } from './delivery-noop-finalization
 import type { DeliveryNoOpTask } from './run-execution.js';
 import { assertActiveStateOwner, type StateOwnerContext } from './state-owner.js';
 import { appendRunStateEvent, requireHealthyFence } from './reducers/invocation.js';
+import { readChildAllocationsForRun } from './repositories/child-allocations.js';
+import { prepareChildTerminalAllocation } from './child-terminal-publication.js';
+import { assertChildAncestryRelease } from './child-ancestry.js';
 
 /** Fixed, inert progress labels for the installed owner's shutdown diagnosis.
  * They carry no result data, permission, time fence or recovery evidence. */
@@ -86,8 +89,13 @@ export function loadRunResult(driver: SqliteDriver, artifacts: ArtifactCatalog, 
     .map(row => ({ ...row, item_seq: Number(row.item_seq) }));
   function capture(cut: RecoveryClosureV1, basis: Awaited<ReturnType<typeof readResultBasis>>) {
     const launches = readWorkerLaunchesForRun(driver, runId), generations = readWorkspaceGenerationsForRun(driver, runId), items = itemRows(driver);
+    const allocations = readChildAllocationsForRun(driver, runId);
     return (connection: SqliteConnection) => {
       assertActiveStateOwner(connection, owner);
+      if ('childAdmission' in basis && basis.childAdmission) {
+        for (const edge of [basis.childAdmission, ...basis.childAdmission.ancestors]) edge.assertUnchanged(connection);
+        basis.childAdmission.rootOrigin.assertUnchanged(connection);
+      }
       const admission = connection.prepare(`SELECT principal_id, admission_method, admission_key, admission_intent_digest,
         admission_request_id FROM runs WHERE id = ?`).get(runId);
       if (canonicalSha256(readRun(connection, runId)) !== canonicalSha256(cut.run) ||
@@ -96,10 +104,9 @@ export function loadRunResult(driver: SqliteDriver, artifacts: ArtifactCatalog, 
           canonicalSha256(readWorkerLaunchesForRun(connection, runId)) !== canonicalSha256(launches) ||
           canonicalSha256(readWorkspaceGenerationsForRun(connection, runId)) !== canonicalSha256(generations) ||
           canonicalSha256(itemRows(connection)) !== canonicalSha256(items) || canonicalSha256(admission) !== canonicalSha256(basis.admission) ||
-          canonicalSha256(readControlRequest(connection, principalId, spec.operation === 'agent' ? 'run.submit' : 'run.apply',
-            basis.admission.admission_request_id!)) !== canonicalSha256(basis.original) ||
-          connection.prepare('SELECT 1 FROM child_allocations WHERE parent_run_id = ? OR child_run_id = ? LIMIT 1').get(runId, runId) ||
-          connection.prepare('SELECT 1 FROM runs WHERE parent_run_id = ? LIMIT 1').get(runId))
+          (!cut.run.parentRunId && canonicalSha256(readControlRequest(connection, principalId, spec.operation === 'agent' ? 'run.submit' : 'run.apply',
+            basis.admission.admission_request_id!)) !== canonicalSha256(basis.original)) ||
+          canonicalSha256(readChildAllocationsForRun(connection, runId)) !== canonicalSha256(allocations))
         throw new KernelStorageError('REVISION_CONFLICT', 'result candidate, dispatch, generation or admission cut changed');
       if (basis.delivery && (canonicalSha256(readRun(connection, basis.delivery.admission.source.run.id)) !==
           canonicalSha256(basis.delivery.admission.source.run) || readSession(connection, cut.run.sessionId).workspaceIdentityRef !==
@@ -137,11 +144,12 @@ export function loadRunResult(driver: SqliteDriver, artifacts: ArtifactCatalog, 
       itemKey: `run-terminal:${runId}`, runId, operation: spec.operation, admittedSessionItemSeq: admittedContext.throughSessionItemSeq,
       status: basis.status, terminalReason: basis.terminalReason, resultRef: resultArtifact.ref,
       summaryRef: result.summaryRef, summaryDigest: basis.summaryDigest };
-    const terminalArtifact = await artifacts.publishCanonical(terminal, terminal.format);
+    const terminalArtifact = run.parentRunId ? undefined : await artifacts.publishCanonical(terminal, terminal.format);
     return { createdAt, resultArtifact, terminalArtifact, itemId: identityHash('cliq-session-run-terminal-item-v1', run.sessionId, runId),
       checkpointId: runResultCheckpointId(runId, basis.candidate.itemId, resultArtifact.ref) };
   }
   async function prepareTerminalSession(run: Run, prepared: Awaited<ReturnType<typeof prepareTerminal>>, reads = artifacts) {
+    if (!prepared.terminalArtifact || run.parentRunId) throw new TypeError('only a root result may prepare a Session terminal');
     phase('result_session');
     const session = readSession(driver, run.sessionId);
     const projection = decodeSessionProjection(await readCanonicalArtifact(reads, session.contextProjectionRef));
@@ -159,6 +167,7 @@ export function loadRunResult(driver: SqliteDriver, artifacts: ArtifactCatalog, 
   function writeTerminal(connection: SqliteConnection, cut: TerminalSqlCut, basis: Pick<TerminalMaterial, 'status' | 'terminalReason'>,
     prepared: Awaited<ReturnType<typeof prepareTerminal>>, sessionPlan: Awaited<ReturnType<typeof prepareTerminalSession>>, acceptedAt?: string) {
     const { session, seq, projectionArtifact } = sessionPlan, { resultArtifact, terminalArtifact, itemId, checkpointId } = prepared;
+    if (!terminalArtifact || cut.run.parentRunId) throw new TypeError('only a root result may append a Session terminal');
     if (canonicalSha256(readSession(connection, session.id)) !== canonicalSha256(session))
       throw new KernelStorageError('REVISION_CONFLICT', 'result Session changed during artifact registration');
     const final = time(connection, prepared.createdAt, cut.run);
@@ -195,7 +204,7 @@ export function loadRunResult(driver: SqliteDriver, artifacts: ArtifactCatalog, 
     signal?.throwIfAborted();
     const token = Object.freeze({ [publicationResultBrand]: true as const });
     publicationResultPlans.set(token, { driver, owner,
-      metadata: immutableSnapshot([prepared.resultArtifact, prepared.terminalArtifact, sessionPlan.projectionArtifact]),
+      metadata: immutableSnapshot([prepared.resultArtifact, ...(prepared.terminalArtifact ? [prepared.terminalArtifact] : []), sessionPlan.projectionArtifact]),
       sessionMatches(connection) {
         return canonicalSha256(readSession(connection, sessionPlan.session.id)) === canonicalSha256(sessionPlan.session);
       },
@@ -304,6 +313,27 @@ export function loadRunResult(driver: SqliteDriver, artifacts: ArtifactCatalog, 
       requireEqual(frontier, historical.frontier, 'result current finalize frontier');
       const assertCut = capture(cut, basis), prepared = await prepareTerminal(cut.run,
         { ...basis, summaryDigest: basis.summary.textDigest, closure: historical.closure }, frontier);
+      if (cut.run.parentRunId) {
+        const allocation = await prepareChildTerminalAllocation(driver, artifacts, owner,
+          { run: cut.run, status: basis.status, resultRef: prepared.resultArtifact.ref });
+        let outcome: TimeFenceAdvance | undefined, updated: Run | undefined;
+        driver.transaction(connection => {
+          assertCut(connection);
+          const final = time(connection, prepared.createdAt, cut.run); outcome = final.outcome; if (outcome !== 'healthy') return;
+          for (const artifact of [prepared.resultArtifact, ...allocation.metadata]) insertArtifactMetadata(connection, artifact, final.committedAt);
+          const accepted = time(connection, prepared.createdAt, cut.run); outcome = accepted.outcome; if (outcome !== 'healthy') return;
+          assertCut(connection); assertChildAncestryRelease(connection, runId, accepted.committedAt);
+          checkpoint(connection, terminalSqlCut(cut), prepared.checkpointId, accepted.committedAt);
+          connection.prepare(`UPDATE runs SET status=?,next_step=NULL,frontier_ref=NULL,result_ref=?,terminal_reason=?,
+            latest_checkpoint_id=?,revision=revision+1,updated_at=? WHERE id=?`)
+            .run(basis.status, prepared.resultArtifact.ref, basis.terminalReason, prepared.checkpointId, accepted.committedAt, runId);
+          allocation.commit(connection, accepted.committedAt);
+          updated = readRun(connection, runId); appendRunStateEvent(connection, updated, accepted.committedAt);
+        });
+        requireHealthyFence(outcome);
+        if (!updated) throw new KernelStorageError('RECOVERY_REQUIRED', 'child result did not commit under its original time fence');
+        return immutableSnapshot({ run: updated, resultRef: prepared.resultArtifact.ref });
+      }
       for (let attempt = 0; attempt < 8; attempt++) {
         const sessionPlan = await prepareTerminalSession(cut.run, prepared), { session, projectionArtifact } = sessionPlan;
         let outcome: TimeFenceAdvance | undefined, updated: Run | undefined;
@@ -313,6 +343,7 @@ export function loadRunResult(driver: SqliteDriver, artifacts: ArtifactCatalog, 
             assertCut(connection);
             if (canonicalSha256(readSession(connection, session.id)) !== canonicalSha256(session)) throw new ResultSessionChanged();
             const accepted = time(connection, prepared.createdAt, cut.run); outcome = accepted.outcome; if (outcome !== 'healthy') return;
+            if (!prepared.terminalArtifact) throw new TypeError('root result lost its Session terminal');
             for (const artifact of [prepared.resultArtifact, prepared.terminalArtifact, projectionArtifact]) insertArtifactMetadata(connection, artifact, accepted.committedAt);
             assertCut(connection); updated = writeTerminal(connection, terminalSqlCut(cut), basis, prepared, sessionPlan);
             appendRunStateEvent(connection, updated, updated.updatedAt);

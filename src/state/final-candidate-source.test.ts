@@ -146,6 +146,8 @@ test('an accounted result exceeding its frozen path limit seals the original fin
     assert.deepEqual(intent, { schemaVersion: 1, runId: fixture.runId, createdAt: intent.createdAt, origin: 'runtime',
       targetStatus: 'failed', reason: 'runtime_failed', runtimeSubtype: 'result_source_limit_exceeded',
       sourceCheckpointId: before.latestCheckpoint.id, workspaceStateRef: before.latestCheckpoint.workspaceStateRef,
+      registeredCheckpointId: before.latestCheckpoint.id, registeredRunRevision: before.run.revision,
+      registeredJournalSeq: before.journal.length,
       producingItemId: before.items.at(-1)!.itemId, modelOpId: before.journal.at(-1)!.opId,
       attempt: before.journal.at(-1)!.attempt, limitKind: 'changed_paths', observed: 1, limit: 0 });
     const terminal = await fixture.agent.commitTerminalStop({ expectedRunRevision: cut.run.revision });

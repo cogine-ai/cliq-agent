@@ -1,7 +1,11 @@
+import { readChildAdmission } from './child-admission.js';
+import { readRegisteredAgentStop, readRegisteredAgentStopChain } from './stop-registration.js';
+import { readParentStopRevocation } from './parent-stop-revocation.js';
+import { readParentCancellationObservation } from './parent-cancellation-observation.js';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { identityHash, parseCanonicalTime } from '../kernel/identity.js';
 import type { ControlApplicationResponseV1, ControlResultV1, ContinuationItem, RecoveryClosureV1, Run, RunAssemblyV1, SessionRunTerminalItem, TerminalDetail } from '../kernel/types.js';
-import { cancelledCall, agentStopDetail, decodeAgentStop, openStopBatch, selectAgentStop, stopCheckpointId, stopInvocationHistory, type AgentStopIntent } from '../runtime/stop.js';
+import { cancelledCall, agentStopDetail, decodeAgentStop, agentStopCause, openStopBatch, selectAgentStop, stopCheckpointId, stopInvocationHistory, type AgentStopIntent } from '../runtime/stop.js';
 import { toolOperationId } from '../policy/tool-policy.js';
 import { requireEqual } from '../policy/runtime-authority.js';
 import { readCanonicalArtifact } from './agent-context.js';
@@ -80,12 +84,21 @@ export async function readRetainedAgentStopInDeliveryEpoch(driver: SqliteDriver,
   return readRetainedAgentStopData(driver, artifacts, closure, ref, data);
 }
 
+function requireOriginalStopSource(intent: AgentStopIntent): void {
+  if (intent.registeredCheckpointId === undefined || intent.registeredRunRevision === undefined || intent.registeredJournalSeq === undefined)
+    throw new TypeError('historical derived Stop lost its original registration cut');
+}
+
 async function readRetainedAgentStopData(driver: SqliteDriver, artifacts: ArtifactCatalog, closure: RecoveryClosureV1,
   ref: string, data?: DeliveryReadData): Promise<AgentStopIntent> {
   const current = data ? await data.stop() : await readAgentStop(driver, artifacts, closure);
   if (ref === closure.run.stopIntentRef) return current;
   const original = await readStopReference(driver, artifacts, closure, ref, false, data);
   if (selectAgentStop(original, current) !== current) throw new TypeError('historical StopIntent is not a monotonic predecessor of the current winner');
+  // The user-cancel branch above independently proves its exact registered
+  // control response (including delivery approval cancellation). Other old
+  // causes are not evidence that an otherwise valid orphan was ever current.
+  if (original.origin !== 'user_cancel') await readRegisteredAgentStop(artifacts, closure.run, ref);
   return original;
 }
 
@@ -94,6 +107,8 @@ async function readStopReference(driver: SqliteDriver, artifacts: ArtifactCatalo
   if (closure.runSpec.operation === 'delivery') assertDeliveryModelFreeCut(closure);
   const { run } = closure;
   const intent = decodeAgentStop(await readCanonicalArtifact(artifacts, ref), run);
+  if (requireCurrentFence) await readRegisteredAgentStop(artifacts, run, ref);
+  const parentObservation = requireCurrentFence ? await readParentCancellationObservation(driver, artifacts, closure) : undefined;
   const deliveryDenial = closure.runSpec.operation === 'delivery'
     ? data ? (await data.authorization())?.stop : await readDeliveryPolicyDenial(driver, artifacts, closure) : undefined;
   if (intent.origin === 'user_cancel') {
@@ -106,37 +121,52 @@ async function readStopReference(driver: SqliteDriver, artifacts: ArtifactCatalo
       const { response, row } = await readCancelResponse(driver, artifacts, run, intent.principalId, intent.requestId);
       if (response.result.snapshot.run.stopIntentRef !== ref || row.committedAt !== intent.createdAt) throw new TypeError('cancellation has no exact control-row owner');
     }
+  } else if (intent.origin === 'parent_cancel') {
+    if (!run.cancelRequested || requireCurrentFence && parentObservation?.ref !== ref) throw new TypeError('parent cancellation lost its original registered dispatch observation');
   } else if (requireCurrentFence && run.cancelRequested) {
     if (intent.origin !== 'kernel_integrity') throw new TypeError('resource/deadline stop cannot override user cancellation');
     const principalId = readSessionPrincipalId(driver, run.sessionId);
-    let owned = deliveryDenial?.origin === 'user_cancel';
+    let owned = deliveryDenial?.origin === 'user_cancel' || parentObservation !== undefined;
     for (const row of driver.prepare("SELECT request_id, response_ref FROM control_requests WHERE principal_id = ? AND method = 'run.cancel'")
       .all<{ request_id: string; response_ref: string }>(principalId)) {
       const response = await readCanonicalArtifact<CancelResponse>(artifacts, row.response_ref);
       if (response.result?.snapshot?.run.id !== run.id) continue;
       await readCancelResponse(driver, artifacts, run, principalId, row.request_id); owned = true;
     }
+    if (!owned && run.parentRunId) for (const prior of await readRegisteredAgentStopChain(artifacts, run)) {
+      if (prior.intent.origin !== 'parent_cancel') continue;
+      const source = await readParentStopRevocation(driver, artifacts, run.id, prior.intent.sourceStopIntentRef);
+      if (source.parent.id !== prior.intent.sourceRunId || source.intent.createdAt > prior.intent.createdAt)
+        throw new TypeError('integrity Stop lost its original registered parent cancellation');
+      owned = true;
+    }
     if (!owned) throw new TypeError('integrity stop lost the original monotonic cancellation owner');
   }
-  if (intent.origin === 'runtime' && intent.runtimeSubtype === 'runtime') {
+  if (intent.origin === 'parent_cancel') {
+    const source = await readParentStopRevocation(driver, artifacts, run.id, intent.sourceStopIntentRef);
+    if (source.parent.id !== intent.sourceRunId || source.intent.createdAt > intent.createdAt)
+      throw new TypeError('parent cancellation precedes its registered direct-parent revocation');
+  } else if (intent.origin === 'runtime' && intent.runtimeSubtype === 'runtime') {
+    requireOriginalStopSource(intent);
     await validateModelFailureStop(driver, artifacts, closure, intent);
   } else if (intent.origin === 'runtime' && intent.runtimeSubtype === 'delivery_merge_conflict') {
-    requireEqual(intent, await readDeliveryMergeConflictCause(driver, artifacts, closure), 'delivery merge conflict cause');
+    requireEqual(agentStopCause(intent), await readDeliveryMergeConflictCause(driver, artifacts, closure), 'delivery merge conflict cause');
   } else if (intent.origin === 'budget' || intent.origin === 'runtime') {
-    const cause = await readResourceStopCause(driver, artifacts, closure, intent.createdAt);
+    requireOriginalStopSource(intent);
+    const cause = await readResourceStopCause(driver, artifacts, closure, intent.createdAt, intent.registeredCheckpointId, intent.registeredRunRevision, intent.registeredJournalSeq);
     if (!cause) throw new TypeError('resource stop has no reproducible failure');
-    requireEqual(intent, { schemaVersion: 1, runId: run.id, createdAt: intent.createdAt, ...cause }, 'resource stop cause');
+    requireEqual(agentStopCause(intent), { schemaVersion: 1, runId: run.id, createdAt: intent.createdAt, ...cause }, 'resource stop cause');
   } else if (intent.origin === 'verification') {
     const cause = await readVerifierFailureCause(driver, artifacts, closure, intent.createdAt, intent.candidateItemId);
     if (!cause) throw new TypeError('verification stop has no reproducible exhausted required failure');
-    requireEqual(intent, cause, 'verification stop cause');
+    requireEqual(agentStopCause(intent), cause, 'verification stop cause');
   } else if (intent.origin === 'kernel_integrity') {
     const cause = await readVerifierIntegrityCause(driver, artifacts, closure, intent.createdAt);
     if (!cause) throw new TypeError('verifier integrity stop has no exact typed mutation evidence');
-    requireEqual(intent, cause, 'verifier integrity stop cause');
+    requireEqual(agentStopCause(intent), cause, 'verifier integrity stop cause');
   } else if (intent.origin === 'policy_deny' && intent.subjectKind === 'delivery') {
     if (!deliveryDenial) throw new TypeError('delivery policy stop has no original decision');
-    requireEqual(intent, deliveryDenial, 'winning delivery direct-policy denial');
+    requireEqual(agentStopCause(intent), deliveryDenial, 'winning delivery direct-policy denial');
   }
   await validateVerifierPolicyDenialHistory(driver, artifacts, closure);
   await validateVerifierStoppedHistory(driver, artifacts, closure);
@@ -211,7 +241,7 @@ async function validateStopRecoveryData(driver: SqliteDriver, artifacts: Artifac
     return;
   }
   if (spec.operation === 'delivery') assertDeliveryModelFreeCut(closure);
-  if (run.parentRunId || closure.childAllocations.length || !isZeroBudget(run.budgetReserved) ||
+  if (closure.childAllocations.some(row => row.parentRunId === run.id && row.state !== 'settled') || !isZeroBudget(run.budgetReserved) ||
       run.status !== intent.targetStatus || run.terminalReason !== intent.reason || !run.terminalDetailRef || run.resultRef ||
       run.nextStep !== null || run.frontierRef || run.activeWorkerLaunchId || run.waitingOnRef || run.waitingReason ||
       closure.workerLaunches.some((launch) => launch.phase !== 'retired') ||
@@ -258,7 +288,7 @@ async function validateStopRecoveryData(driver: SqliteDriver, artifacts: Artifac
       closed.budgetSettlementRef === entry.budgetSettlementRef)) continue;
     if (entry.phase === 'failed' && (entry.opKind === 'model' && modelNoRelease.has(entry.seq) ||
         entry.opKind === 'tool' && privateRollbacks.has(entry.seq) || entry.opKind === 'verifier' && verifierStops.has(entry.seq))) continue;
-    if (!['model', 'tool', 'verifier'].includes(entry.opKind) || (entry.phase !== 'completed' &&
+    if (!['model', 'tool', 'verifier', 'child_admission', 'child_merge', 'child_await'].includes(entry.opKind) || (entry.phase !== 'completed' &&
         (entry.phase !== 'failed' || hasClaim))) throw new TypeError('terminal stop retains unresolved dispatch evidence');
     if (entry.phase === 'failed' && entry.errorRef === run.stopIntentRef && entry.timestamp !== preparedAt) throw new TypeError('stop refund has no atomic terminal owner');
   }
@@ -271,6 +301,17 @@ async function validateStopRecoveryData(driver: SqliteDriver, artifacts: Artifac
     const plan = cancelledCall(batch, item.index, run.stopIntentRef, preparedAt);
     requireEqual(item, plan.item, 'ordered stop result');
     for (const artifact of plan.artifacts) if (!(await artifacts.readBytes(artifact.ref)).equals(Buffer.from(artifact.bytes))) throw new TypeError('stop result artifact substitution');
+  }
+  if (run.parentRunId) {
+    const admitted = await readChildAdmission(driver, artifacts, run.id), allocation = admitted.allocation;
+    if (allocation.state === 'reserved' || allocation.terminalAt !== run.updatedAt ||
+        allocation.terminal.status !== run.status || !('terminalDetailRef' in allocation.terminal) ||
+        allocation.terminal.terminalDetailRef !== run.terminalDetailRef ||
+        canonicalSha256(allocation.inclusiveBudgetUsage) !== canonicalSha256(run.budgetConsumed))
+      throw new TypeError('child stop has no same-transaction original incoming terminal allocation');
+    if (driver.prepare('SELECT 1 FROM items WHERE item_id=?').get(identityHash('cliq-session-run-terminal-item-v1', run.sessionId, run.id)))
+      throw new TypeError('child stop cannot append a root Session outcome');
+    admitted.assertUnchanged(driver); return;
   }
   const admitted = decodeAdmittedContext(await readCanonicalArtifact(artifacts, spec.admittedContextRef));
   const expected: SessionRunTerminalItem = { schemaVersion: 1, format: 'cliq-session-run-terminal-v1', kind: 'run_terminal',

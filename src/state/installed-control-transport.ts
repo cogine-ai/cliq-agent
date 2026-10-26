@@ -15,6 +15,7 @@ import type { HeldInstalledControlClient } from './native-owner.js';
 import { loadInstalledSupervisorObserver, type InstalledCredentialSupervisorObservation } from './installed-services.js';
 import { noteInstalledClientPhase } from './installed-diagnostics.js';
 import { beginInstalledRequestDiagnostic } from './installed-request-diagnostics.js';
+import { installedControlCloseError } from './installed-control-close-error.js';
 
 /** Internal common transport: only genuine held installed selections can open
  * it. The fixed credential purpose is the existing explicit ensure-start path;
@@ -299,7 +300,7 @@ export async function openInstalledControlTransport(selected: HeldInstalledRunti
     },
     close() {
       if (this !== client) return Promise.reject(new TypeError('invalid installed control client'));
-      return closing ??= (async () => { fail(new KernelStorageError('RECOVERY_REQUIRED', 'installed control client is closing'));
+      return closing ??= (async () => { fail(installedControlCloseError());
         await Promise.allSettled(running ? [running] : []); await retire(); })();
     }
   });

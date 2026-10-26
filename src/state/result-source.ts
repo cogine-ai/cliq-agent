@@ -1,3 +1,4 @@
+import { planCanonicalArtifact } from '../kernel/artifact-plan.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting } from '../kernel/identity.js';
 import type { WorkspaceDiffOperationV1, WorkspaceDiffV1 } from '../kernel/result.js';
@@ -185,4 +186,18 @@ export async function prepareCandidateSource(artifacts: ArtifactCatalog, spec: R
     }
     return graph;
   } };
+}
+
+/** Complete immutable fork data. It carries neither source-read permission
+ * nor a generation birth; the ordinary new child preparing path owns both
+ * materialization and its independent physical verification. */
+export async function planChildForkSource(artifacts: ArtifactCatalog, spec: RunSpec, workspaceStateRef: string, signal?: AbortSignal) {
+  const { graph, publications } = requireReady(await planCandidateSource(artifacts, spec, workspaceStateRef, signal));
+  const source: SourceManifest = { ...graph.source, role: 'base', manifestDigest: '' };
+  source.manifestDigest = digestOmitting(source, 'manifestDigest');
+  const plan = planCanonicalArtifact(source, source.format);
+  const retained = graph.metadata.filter(metadata => metadata.ref !== graph.sourceRef && metadata.ref !== graph.diffRef);
+  return { source, sourceRef: plan.ref, metadata: retained,
+    plans: [...publications.filter(value => value.artifact.ref !== graph.sourceRef && value.artifact.ref !== graph.diffRef)
+      .map(value => planCanonicalArtifact(value.value, value.artifact.schemaKind)), plan] };
 }

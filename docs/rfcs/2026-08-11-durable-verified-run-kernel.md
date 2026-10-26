@@ -271,7 +271,8 @@ thirty-second request or any authentication, shutdown or qualification limit.
 The same four-stage CAS mechanism may also publish only these fixed admission
 data closures: `[original control request, source sandbox profile, source
 inspection target]`, `[retirement inspector identity, source retirement
-evidence]`, and, iff there is exactly one model credential binding,
+evidence]`, `[original source attempt, retirement inspector identity, source
+retirement handoff]`, and, iff there is exactly one model credential binding,
 `[registered endpoint, credential binding, model capability evidence, installed
 sandbox profile]`. The fourth member is the closed fixed recipe over the
 already-normalized resource request, not a permission or execution decision.
@@ -282,13 +283,22 @@ The later complete profile read, fresh verifier resolution, policy publication
 and final runtime/channel/owner checks retain their relative order. Zero or
 multiple bindings keep their original ordinary publication and later sandbox
 publication, without padding.
-Initial non-Git capture may publish the exact `[frozen ignore rules, source
-projection, source manifest]` triple, or that same tuple plus its same-held-scan
-delivery topology. Raw source files and the complete entries manifest remain
-earlier independent durable publications. Planned canonical refs are inert;
-every original descriptor/currentness check remains, and the complete capture
-is rechecked after the group joins. Git and frozen-result publication paths
-retain their existing ordering.
+Initial ordinary non-Git capture may publish the exact `[entries manifest,
+frozen ignore rules, source projection, source manifest]` quartet. Raw source
+streams remain earlier independent durable publications. The internal manifest
+publisher receives an immutable copy, and all original capture resources remain
+held through the group's full durability/readback/join, the original signal-bound
+full entries reread and complete native metadata recheck. No structural callback
+result or precomputed ref is a capture/Run authority. Same-scan delivery retains
+its earlier entries manifest and exact `[frozen ignore rules, source projection,
+source manifest, delivery topology]` quartet. Git and frozen-result paths retain
+their existing ordering. The handoff triple plans the original attempt ref from
+its complete in-memory bytes, samples a fresh real observation time and joins
+all three artifacts before the original sole transaction rechecks actual staging,
+owner, unchanged attempt, healthy time fence and the unchanged five-second
+freshness bound. It grants no cleanup before registration and never substitutes
+CAS presence for the physical joined lifecycle. A failed group can leave inert
+orphans; every issued mutation, cleanup, reader and close must join before refusal.
 Instruction capture retains every independent raw-file publication, canonical
 text, original source entry and final manifest. Its at-most-64 texts / aggregate
 one-MiB input bound is unchanged. Prefix texts may publish in groups of at most
@@ -3743,6 +3753,11 @@ type StopIntentBase = {
   schemaVersion: 1
   runId: string
   createdAt: string
+  // The three registration fields are present together on new commits.
+  registeredCheckpointId?: string
+  registeredRunRevision?: number
+  registeredJournalSeq?: number
+  supersedesStopIntentRef?: ArtifactRef
 }
 
 type KernelIntegrityEvidenceV1 = {
@@ -4060,6 +4075,7 @@ type Run = {
   terminalReason?: RunTerminalReason
   terminalDetailRef?: ArtifactRef
   stopIntentRef?: ArtifactRef
+  parentCancellationRef?: ArtifactRef
   cancelRequested: boolean
   createdAt: string
   deadlineAt: string
@@ -4072,6 +4088,8 @@ Every nonterminal Run carries a non-null `nextStep` and a `frontierRef` whose ve
 The status/reason mapping is exact: `succeeded -> verified`; `completed_unverified -> no_required_verifier`; `failed -> verification_failed | verifier_infrastructure_failed | verifier_mutated_source | budget_exhausted | runtime_failed`; and `cancelled -> cancelled_by_user | parent_cancelled`. Nonterminal Runs have no terminal fields. New terminal meanings require a schema/RFC change rather than an untyped error string.
 
 `stopIntentRef` is the authoritative target while quiescence work delays terminal commit. The store validates the artifact and chooses the winning intent by fixed precedence: any `origin='kernel_integrity'` > `cancelled_by_user` > `parent_cancelled` > `budget_exhausted` > `verification_failed` > `verifier_infrastructure_failed` > ordinary `runtime_failed`; equal-precedence intents retain the earliest committed one, with artifact digest as the deterministic tie-break inside one transaction. A later higher-precedence fact may replace the pointer, but a lower/equal one cannot. `origin='budget'` is required for additive token/cost/tool/repair exhaustion and proves `consumed + reserved + required > ceiling`; wall expiry uses only `origin='deadline'`. `cancelRequested` is a monotonic dispatch index set by any user/parent cancellation intent even if later integrity evidence wins; it is not terminal-reason truth. Every productive dispatch requires no stop intent. `commitTerminalStop` validates and retains the current winning artifact after terminal quiescence and derives status/reason/detail from it; recovery never guesses from events or the last error. Failed/cancelled terminal Runs retain that ref, while succeeded/unverified Runs require it absent.
+
+`parentCancellationRef` registers the first actual proposed direct-parent cancellation on a nonterminal child in that same fence transaction. It is absent at birth and immutable after its first set. The artifact binds the child's original Checkpoint, Run revision and complete Journal prefix, and the parent's genuinely registered Stop replacement chain. If that proposal wins it equals the new winner; if it loses to a higher winner it has no `supersedesStopIntentRef` and leaves the winner and terminal cause unchanged. Both branches set the child's cancellation index. This field proves only that the child observed this actual revocation: it is not a winning Stop, parent quiescence, child death or execution permission. A terminal child cannot acquire a retrospective observation. Missing metadata/source or an orphan/substituted artifact is recovery waiting, never repaired from today's parent. Schema 8 enforces the first-set/immutable child fence; historical readers independently validate its full original graph. The real birth transaction's revision-1 initial Checkpoint is a valid source for a freshly cancelled child, without inventing a revision-0 Checkpoint.
 
 Stop-to-**reason-detail** derivation is total and one-to-one; `StopIntentBase` deliberately has no generic evidence ref. The terminal primary-evidence matrix is exact and acyclic: verifier/dependency integrity use `integrityEvidenceRef`; parent cancellation uses `sourceStopIntentRef`; local-inference failure uses `failureDetailRef`; direct verifier/delivery/dependency policy denial uses `policyChannelEvidenceRef`; generic runtime uses `runtimeFailureRef`; manual abandon uses `attestationRef`; every user cancellation, deadline/budget, verification, context-compaction/window/result-source, delivery-merge, or delivery-publication branch uses the winning `stopIntentRef` itself after that immutable artifact has been published. The corresponding `TerminalReasonDetail` copies the exact branch fields; its `stopIntentRef|evidenceRef` where present equals that same selected primary ref. Each `origin='runtime'` variant maps only to the detail with identical `runtimeSubtype`; generic runtime requires its exact `RuntimeFailureEvidenceV1` ref/digest and matching `failingOpId`. Storage rejects a subtype/detail mismatch, missing field, alternate primary ref, or caller-selected reason projection. This post-publication pointer creates no content hash cycle because the StopIntent contains no self ref. The surrounding publication/manual/retry closure fields are a separate deterministic projection of authoritative Journal/items at terminal quiescence; they may close facts learned after the winning intent without changing its reason. Candidate, diagnostic, verifier-receipt, and child-result facts remain in their already ordered typed Run-item/Journal graph and are not copied into implementation-selected TerminalDetail lists.
 
@@ -4865,7 +4883,7 @@ Attempts are contiguous from zero and at most one attempt per `opId` is current.
 
 Before any model, tool, MCP, verifier, or semantic publication attempt, the transaction that appends `prepared` checks the frozen ceiling and moves a conservative upper bound from available budget into `Run.budgetReserved`. Immediately before I/O, the trusted DispatchArbiter appends the unique `dispatch_claimed` fact only through `claimDispatch`; only `releaseClaimedDispatch` may then release bytes/capability. The sole exception is the zero-budget abort-directory maintenance attempt governed by both recovery-maintenance checks above. A completed or positively failed attempt settles evidence-backed usage into `budgetConsumed` and releases the reservation. If usage is unknowable after timeout, disconnect, or death, Cliq charges the full reservation before any policy-authorized retry; crash recovery never refunds or resets it. Outstanding child allocations are also reservations on the parent, so concurrent child admission cannot oversubscribe a ceiling.
 
-Budget mapping is exact. A claimed `model` attempt consumes its measured or conservatively reserved `modelTokens` and `costMicros` but no `toolCalls`. Every claimed non-model **productive** attempt—`tool`, `mcp-server`, `mcp`, `verifier`, and each semantic `mkdir|create|replace|delete` publication envelope—consumes exactly one `toolCalls`; verifier retries and MCP relaunches are new attempts and count again. Exact cleanup inside an already-claimed publication envelope and an abort-only removal of a delivery-created empty directory are pre-reserved recovery maintenance, not another productive attempt, and add zero `toolCalls`. Kernel child admission/await/merge actions execute as built-in `tool` operations and therefore count through their claims rather than through a hidden counter. `repairAttempts` increments only at the repair-authorization transaction. Supervisor-only no-new-effect recovery inspection is not a productive invocation and does not consume Run tool budget.
+Budget mapping is exact. A claimed `model` attempt consumes its measured or conservatively reserved `modelTokens` and `costMicros` but no `toolCalls`. Every claimed non-model **productive** attempt—`tool`, `mcp-server`, `mcp`, `verifier`, and each semantic `mkdir|create|replace|delete` publication envelope—consumes exactly one `toolCalls`; verifier retries and MCP relaunches are new attempts and count again. Exact cleanup inside an already-claimed publication envelope and an abort-only removal of a delivery-created empty directory are pre-reserved recovery maintenance, not another productive attempt, and add zero `toolCalls`. Kernel child admission and merge use the closed `child_admission`/`child_merge` local Journal branches; one explicit await registration uses the distinct no-grant `child_await` control accounting branch. Each committed triplet consumes exactly one tool call through its local claim and settlement, never a hidden counter or a physical execution grant. Waking an already registered wait, Stop cleanup and finalize settlement add no new await charge; a new explicit re-await is a new real call and registers once. `repairAttempts` increments only at the repair-authorization transaction. Supervisor-only no-new-effect recovery inspection is not a productive invocation and does not consume Run tool budget.
 
 Reconciliation probing has no hidden infinite loop. The wait stores the exact `ReconciliationProbeStateV1` XOR. A manual invocation uses only `manual_only`. Every inspectable subject starts `automatic_pending(automaticProbeCount=0,userProbeCount=0,nextProbeAt=createdAt)` with no evidence pair. At its due time, one revision CAS enters `automatic_in_flight`, increments the automatic count, and persists one complete `ReconciliationProbeDispatchV1` before any query or inspection: `probeOrdinal=automaticProbeCount`, one unique nonce, fixed `probeDeadlineAt=probeStartedAt+30s`, current owning Supervisor, and the subject-specific broker dispatch or inspector-task identity. No prior evidence ref is carried into an in-flight state. An unresolved response at ordinal `n<8` enters `automatic_pending` with `nextProbeAt=observedAt+[1s,5s,30s,2m,10m,30m,1h][n-1]`; ordinal 8 enters `automatic_exhausted`. Every post-probe pending or exhausted state requires the exact last-evidence ref/digest pair; neither branch permits an absent or half-present pair. Counts, dispatch, and evidence survive reboot. Only the owning live Supervisor may resume the exact same dispatch/nonce without incrementing a counter; a successor first fence-closes the predecessor dispatch and follows the unresolved edge.
 
@@ -5048,7 +5066,7 @@ No general `EffectPlan` is introduced.
 
 ### 8.4 Workspace Transition Commit Invariant
 
-No transition may make changed generation bytes part of the authoritative Run frontier until the matching post-transition workspace state is recoverable. This applies to every successful `workspace-rollback-retry` tool and every kernel-owned workspace transition whose later agent frontier depends on that mutable generation, including serial application of a mutating child result. Kernel-owned transitions use a stable `opId`, a Journal invocation identity, and `ReplayClass='workspace-rollback-retry'`; they do not bypass the effect contract merely because their code is trusted. The protocol is:
+No transition may make changed generation bytes part of the authoritative Run frontier until the matching post-transition workspace state is recoverable. This applies to every successful `workspace-rollback-retry` tool and every kernel-owned transition whose later agent frontier depends on that mutable generation. The section 12 closed CAS-only `child_merge` is a distinct logical ready-Checkpoint source after real retirement of the old generation; it never adopts changed mutable generation bytes, never mints physical post-effect evidence, and must pass ordinary fresh preparation before execution. Other kernel-owned mutable transitions use a stable `opId`, a Journal invocation identity, and `ReplayClass='workspace-rollback-retry'`; they do not bypass the effect contract merely because their code is trusted. The protocol is:
 
 1. publish a ready pre-effect Checkpoint;
 2. append `prepared` and reserve budget;
@@ -7586,6 +7604,26 @@ read joins before settlement; joined persistence failure retains this one
 result and its original fence, never another dispatch. Recovery rereads all raw
 bytes and original signed script/guest closure and verifies the claiming
 StateOwner's process/lock/image inspector and invocation reservation.
+Only after both original raw outputs and the canonical capture quartet are
+durable, every original reader/publication has joined, and the unique
+`completeTool` transaction has committed may that builtin producer acknowledge
+its exact native result. The fixed scope/parent/nonce acknowledgement closes
+both original controller capture memfds before dropping the exact NAPI value
+and producer-owned raw/result caches. Borrowed buffers and physical RSS are not
+claimed to disappear. Persistence failure, UNKNOWN, and any unsettled operation
+retain the original result and fence. After a committed completion, a failed
+acknowledgement can retry only the original data release; it cannot repeat
+settlement, charge, or dispatch. Socket revocation alone is insufficient for
+local data release: only the original controller's actual cleanup, reap and
+successful resource join permit it. Shutdown retains the existing two-second
+cancel-and-join requirement. No acknowledgement reclaims a scope number,
+resets a lease/budget, or supplies worker-death or execution authority.
+The installed builtin capability is version 2 and the live private descriptor
+packet is version 7; public worker semantics remain version 1. Retained source
+history explicitly decodes closed version-6 or version-7 data with one version
+throughout its original hash chain; productive version-6 traffic remains
+rejected. These data-history branches provide no successor execution permission
+and do not define an installation or signed-runtime upgrade transition.
 Read/search exit-zero output must decode as the exact fixed structured frame
 for the original normalized input; a cut/malformed frame is a retained protocol
 error. Bash and other genuine termination outcomes retain their actual exit
@@ -8781,6 +8819,7 @@ type ChildWaitSet = {
     | {
         kind: 'stop_settlement'
         stopIntentRef: ArtifactRef
+        interruptedWaitRef?: ArtifactRef
         awaitOrigin?: { batchItemId: string; callId: string; callIndex: number }
       }
   childRunIds: string[]
@@ -8803,6 +8842,25 @@ type ChildMergeBatchItem = {
     admittedForkBaseRef: ArtifactRef
   }>
   createdAt: string
+}
+
+type ChildMergeResultItem = {
+  schemaVersion: 1
+  kind: 'child_merge_result'
+  itemId: string
+  runId: string
+  createdAt: string
+  mergeBatchItemId: string
+  callId: string
+  callIndex: number
+  opId: string
+  requestRef: ArtifactRef
+  policyDecisionItemRef: ArtifactRef
+  resultRef: ArtifactRef
+  outcome: 'merged' | 'conflict' | 'resource_limit' | 'denied'
+  // Present together only for the final finalize-settlement presentation.
+  modelContentRef?: ArtifactRef
+  modelContentDigest?: string
 }
 
 type VerifierStopItem = {
@@ -9880,8 +9938,18 @@ type DelegateResult = {
 
 type AwaitChildrenResult = {
   schemaVersion: 1
-  waitSetRef: ArtifactRef
-  childResultItemIds: string[]
+  results: Array<{ childRunId: string; mode: 'read_only' | 'mutating' } & ChildResultModelContentV1['content']>
+  merge?: ChildMergeModelDiagnostic
+}
+
+type ChildMergeModelDiagnostic = {
+  outcome: 'merged' | 'conflict' | 'resource_limit' | 'denied'
+  processedCalls: number
+  chargedCalls: number
+  appliedCalls: number
+  unattemptedCalls: number
+  conflicts?: { total: number; truncated: boolean; paths: Array<{ path?: string; reason: string }> }
+  limit?: { kind: string; observed: number; limit: number }
 }
 
 type ChildPatchManifest = {
@@ -10059,15 +10127,41 @@ Child assembly/policy derivation is an equation, not an adapter choice. The chil
 
 Verifier/dependency derivation is equally closed. `inherit_parent` sets `childVerifierSpecRef` to the exact parent verifier spec and `childDependencyPolicyRef` to the exact parent policy when present; `none` uses the canonical empty VerifierSpec, requires `childDependencyPolicyRef` absent, and requires the derived consent. `childCredentialGrantRefs` is the byte-sorted unique union recomputed from the child provider, filtered MCP revisions, and inherited dependency policy, contains no other ref, and is a subset of the parent's frozen union. `ChildCapabilityGrantV1` binds all those refs plus parent refs, full delegate identity, granted set, child assembly/tool/policy refs, verifier mode, budgets, and deadline. `grantCoreDigest` hashes JCS with both digest fields and `derivedUnverifiedConsentRef` omitted; `grantDigest` omits only itself. The child RunSpec must name the exact assembly/policy/verifier/dependency/credential/consent refs, and storage validates parent request + operation grant + capability grant + child allocation + child admission atomically. A child never inherits a broader parent manifest merely because the parent could use it.
 
+`delegate` is a closed signed-Supervisor `supervisor_operation`; `await_children` is a signed-Supervisor `supervisor_control`. Neither is a disguised executable adapter. Successful child admission uses `opKind='child_admission'` with exactly three local phases `prepared → dispatch_claimed → completed` in the same effect transaction. Local Journal rows bind original P and true final C, the full original normalized request/grant/capability/parent Checkpoint, and the actual Supervisor owner. `leaseEpoch=0` means no execution lease; attempt is zero, replay is local `retry`, and all sandbox/broker/native/receipt/unknown fields are forbidden. Prepared and completed each record the same one-tool-call cost and the intermediate claim records zero; the unique budget settlement consumes that one call once. No half-triplet is an execution or recovery permission. All referenced CAS must be durable, completely verified and joined before the sole transaction rechecks the exact parent/Journal/allocation cut, grant, original frozen credential expiries, ancestry Stop, direct-child concurrency, global Run capacity, and fresh C within every original deadline. No raw secret or today's rotated binding substitutes for the admitted credential refs.
+
 Admission atomically reserves the direct parent's allocation, creates the child/spec/context/base fork, appends `ChildHandleItem`, and resolves the delegate call. `read_only` removes mutation/publish capabilities. `mutating` receives a private fork of the parent's current ready workspace state. `inherit_parent` freezes the applicable parent verifier set; `none` is legal only through the exact derived consent rule and its result cannot be delivered directly.
 
+An explicit child additive ceiling is either accepted unchanged or refused; admission does not silently reduce it to today's available remainder. The original transaction preserves a **single shared** parent continuation floor: the complete frozen normal `CostEnvelope` plus the complete frozen maximum compaction `CostEnvelope`, one explicit await registration, and one merge call for each unsettled mutating child including the proposed child. The normal and compaction envelopes use the same original signed `requestTokenCeiling` and pricing algorithm (or their respective output caps with local zero-cost provenance), not a previous smaller prompt estimate. Existing sibling ceilings are already reserved and are not reserved again. This floor is a deterministic admission constraint, not a second budget row, execution permission or automatic await. It funds one possible compression followed by one normal continuation; it does not guarantee arbitrary future output fits the token/serialized-byte limit, succeeds in one compression, or funds unlimited later turns. All actual model requests retain their complete original token, byte, compaction, credential, claim and budget gates. Wall time, depth and direct-child concurrency still use their original bounded intersections and absolute deadlines.
+
+The distinct `child_await` operation means only “register this exact explicit await once”. Its closed request binds the real assistant batch/call/index and normalized input, original ready Checkpoint/Run snapshot, ordered owned child handles, wait set and the actual signed Supervisor control identity. Its unique original transaction commits the registration effect and the `prepared → dispatch_claimed → completed` accounting triplet at preparation Q and final sampled C. It has attempt/lease zero, local retry and one/zero/one tool-call deltas, but **forbids** `grantRef`, native/broker/containment fields, UNKNOWN and external execution. Prepared/claim/completed have exactly 14/17/19 fields; the original grant-bearing local operations retain their own 15/18/20-field guards. The completed receipt proves registration, not that the children finished or a native domain died. A blocking registration and an already-satisfied registration each charge once; its later wake, original-wait replay, Stop conversion and finalize cleanup do not. A new explicit re-await call registers and charges once even when it reads old owned results. CAS artifacts fully publish/verify/join first; any failed final transaction leaves no wait, Journal, charge or cursor. The final C rechecks the exact original parent/Checkpoint/Journal/children, owner, time fence, no Stop, ancestry and deadline. Recovery independently reconstructs its original control source, accounting and original owner through C rather than trusting a receipt's shape.
+
+An authorized delegate that cannot fit its explicit ceiling and the continuation floor may complete as `not_admitted` through the same one-call `child_admission` local transaction. Only a genuine fully validated original refusal is accepted; a caught error string or structural object is not a permit. Its closed request/receipt and ordinary ToolResult preserve the exact original batch, grant, source and budget failure. It creates no child Run, allocation, capability or handle. CAS/SQL failure leaves no charge, result or frontier change. If even this real local call cannot fit, it follows the original reproducible resource Stop instead of a free response.
+
+The actual await model content contains the supplied ordered child handles, modes and full original bounded summaries or terminal reasons, plus the ref-free merge diagnostic. Audit wait-set/CAS/item refs remain only in the retained payload. Await-delivered child summaries do not also append duplicate user messages. The existing single-summary, 64-child, complete one-MiB request and token/compaction limits remain authoritative; summaries are never truncated or replaced with refs to pass admission.
+
 `await_children` accepts only unique direct child handles owned by this parent, in supplied deterministic order. It freezes that order plus the owning batch id/call id/call index into an `await_tool` child subject; provider call id alone is never identity. An empty list is invalid. If every child is already terminal, the same reducer runs without entering waiting. Otherwise it releases the parent lease. When the set becomes satisfied, one transaction settles allocations and appends exactly one wait-set/identity-matched `ChildResultItem` per child in order, then computes `successfulMutatingChildren` as precisely those items with `mode='mutating'` and `status='succeeded|completed_unverified'`. If that list is empty, an `await_tool` subject appends the normalized await `ToolResultItem` containing **all** ordered child results—including failed/cancelled mutating children—and advances the exact original batch; a `finalize_settlement` subject installs the `child_results` agent frontier with the same ordered results. Declared mutating mode alone never forces an empty merge frontier.
+
+Re-awaiting an already settled owned child is an explicit read-only branch: it re-reads the original result and complete original provenance, and the current await ToolResult refers to those original owned result items in this request's supplied order. It never settles again, appends another ChildResultItem, or reapplies a patch. A mixed set waits/settles/first-merges only its previously unsettled children. An earlier failed merge is not a retry authorization. The ordinary call's existing charge rules are unchanged.
+
+The child summary projected to the parent includes its exact `childRunId` beside its ref-free summary or reason. The id is the owned handle identity required by `await_children`; audit CAS refs, policy JSON, receipt JSON and raw planner summaries are not model instructions.
+
+Each internal `child_merge` has its own closed request, B/S/A target, exact changed-path set and signed Supervisor handler identity. Policy evaluates `fs-write/write` for every changed path using the frozen parent rules; aggregate precedence is deny, then ask, then allow. An empty changed-path set uses the write mode fallback and invents no path. Delegate approval never grants merge permission. Ask uses the existing authenticated `run.approve` channel/frame with an explicit `child_merge` subject. Approval checkpoints do not change A: the request permanently binds the first registered source Checkpoint and full B/S/A closure. Replays route from the original control row and response/decision identity even after the parent leaves waiting. An expired unused interactive allow may create a new wait only after proving the original grant expired, never after a deny or a local claim; the original request/source and old grant expiry remain unchanged.
+
+Grant issue time P, actual current-owner merge preparation Q and the sole final transaction time C are distinct: `P ≤ Q ≤ C < original expiry` and the original parent deadline. The three local Journal rows carry Q and the same C; their actual owner must span Q through C. The final transaction resamples C and rechecks the original source/current cut, owner, time fence, ancestry, approval and conservative sibling reservations. A granted merge consumes exactly one tool call; a policy-denied merge has no local Journal or charge. Earlier genuine UNKNOWN operations remain charged and block this cut. The stable operation id cannot be used twice.
+
+Every merge appends one `ChildMergeResultItem` bound to its original policy item, request, B/S/A receipt and logical Checkpoint. It is kernel audit, with no provider tool-call/result pair. A conflict, resource failure or deny ends this synthetic batch without attempting later children. The final **real** await ToolResult carries all ordered original child results plus a closed, ref-free diagnostic: outcome, processed/charged/applied/unattempted counts, at most 32 conflict paths with truthful truncation, or the exact resource limit. Finalize settlement uses a kernel user presentation instead of inventing a tool result. Neither path copies the planner's audit summary into model context. History reconstructs the complete receipt and logical Checkpoint from original data, all-and-only local Journal triplets, the exact serial prefix and original owner provenance before accepting this presentation.
+
+If a pending allowed merge cannot pay its one call after later ordinary parent/child consumption, it uses the original resource Stop. A narrow data reader reconstructs its registered original source Checkpoint/revision/Journal, B/S/A, full child result/wait/merge prefix and either the original unused unexpired approval or the frozen policy's exact reproducible per-path allow. It mints no grant. Deny, unresolved ask, expired approval or an already used operation cannot prove a chargeable merge. The final Stop transaction rechecks that complete source and the ordinary budget inequality before registering the intent; drain/terminal retain it without creating a local claim, charge, merge effect or second child settlement.
+
+New Stop winners persist `registeredCheckpointId`, `registeredRunRevision` and `registeredJournalSeq` together in the same transaction as the real `Run.stopIntentRef`. A higher-priority replacement additionally binds `supersedesStopIntentRef`; priorities strictly increase along the finite registered chain. The registered Journal sequence includes an actual in-flight producer after the Checkpoint and fixes the complete original prefix; equal timestamps never identify a source cut. Display events are not Stop authority. A retained noncurrent reference must belong to this actual registered winner chain or have its independent original authenticated-control registration. Missing registration bytes are not reconstructed from today's state or an orphan CAS object.
+
+Parent cancellation uses a one-way reader of the actual parent Run's registered Stop chain and complete immutable child admission. It proves only the registered observation/revocation source, not the parent's full Stop cause, quiescence or terminal state. The child's own termination still requires its genuine resource retirement, UNKNOWN reconciliation, conservative child settlement and unique terminal transaction. The final child transaction rechecks the exact current parent fields and source edges. No child reader calls the parent's full recovery, avoiding a parent/child recovery cycle.
 
 A model cannot finalize around live delegated work. If a positively complete no-tool model turn arrives while any direct child allocation is nonterminal or terminal-but-unsettled, storage durably keeps its `ModelTurnItem` but creates **no** `FinalCandidateItem`. Instead it freezes every outstanding direct child in Run-id order into a `finalize_settlement` child subject tied to that model turn and releases the lease. Once settled (and after any required serial patch merges), the premature final text remains excluded from the next context manifest, normalized `ChildResultItem`s enter context, and the reducer returns to an agent frontier with cause `child_results`. The model must produce a new complete final turn against those results. Thus child completion can neither be silently ignored nor force unverifiable text into finalization.
 
 If a StopIntent arrives while any direct child allocation is nonterminal—even when the model never called `await_children`—the stop reducer creates a `stop_settlement` child subject over every outstanding direct child in deterministic Run-id order and cascades the stop. When replacing an active await subject it carries the exact await origin. Child terminal commits append audit-only `ChildResultItem`s bound to that StopIntent and settle allocations; they never return child-success payload to the model. After the last settlement, an await origin receives exactly one identity-matched `ToolResultItem(outcome='cancelled')` with a typed stop notice; a no-await stop creates no ToolResult. In either case the reducer closes the remaining batch suffix and evaluates terminal quiescence without resuming the model.
 
-If `successfulMutatingChildren.length > 0`, that transaction instead installs a `ChildMergeBatchItem`/tool frontier containing synthetic stable merge call ids for only those successful patch-bearing children, preserving their relative wait-set order, and its exact resume kind (`await_tool` or `finalize_settlement`). Failed/cancelled and read-only `ChildResultItem`s remain in the ordered final await result/context but never create merge calls. Each merge is a separately claimed `workspace-rollback-retry` built-in tool and uses the atomic post-effect Checkpoint contract. A conflict appends a structured merge error and returns diagnostics plus every already known child result to the agent without applying later children. Otherwise the final merge either appends the await ToolResult containing all ordered child results and resumes the original batch, or installs the child-results agent frontier for finalize settlement. Cancellation/deadline skips undispatched merges and evaluates terminal quiescence. No child item, merge, or wake is inferred from Session text.
+If `successfulMutatingChildren.length > 0`, that transaction instead installs a `ChildMergeBatchItem`/tool frontier containing synthetic stable merge call ids for only those successful patch-bearing children, preserving their relative wait-set order, and its exact resume kind (`await_tool` or `finalize_settlement`). Failed/cancelled and read-only `ChildResultItem`s remain in the ordered final await result/context but never create merge calls. Each merge is a separately authorized, closed `child_merge` local Supervisor operation. The parent first truly retires and seals its old worker/generation to the unchanged old Checkpoint and joins every original operation. The merge then reads only complete immutable B (the child's admitted fork), S (its unique terminal result), and A (the parent's current ready workspace), uses the existing `cliq-diff3-v1` planner, and commits its three local Journal phases, one-tool-call settlement, merge outcome, logical ready Checkpoint, frontier, revision, and event in one SQLite transaction. No native/broker grant, synthetic lease, physical post-effect proof or newly sealed generation is created. The parent WorkspaceState retains the parent RunSpec's original base; A is only this merge's input source. The new logical workspace is explicitly not yet materialized. The next ordinary preparing lifecycle must completely validate, create, materialize, fsync and re-read it before execution authority. The existing physical tool post-effect contract is unchanged. CAS failure leaves only orphans and a failed SQL transaction has no merge effect; recovery re-reads the same stable local identity, never manufactures UNKNOWN or retries an earlier genuine UNKNOWN. A conflict appends a structured merge error and returns diagnostics plus every already known child result to the agent without applying later children. Otherwise the final merge either appends the await ToolResult containing all ordered child results and resumes the original batch, or installs the child-results agent frontier for finalize settlement. Cancellation/deadline skips undispatched merges and evaluates terminal quiescence. No child item, merge, or wake is inferred from Session text.
 
 Rules:
 
@@ -11547,7 +11641,22 @@ The initial Supervisor transport is a local Unix-domain socket protected with pe
 
 Long Runs survive package upgrades. Before admitting a Run, Cliq publishes a read-only, digest-addressed runtime bundle containing the exact Supervisor-compatible worker, provider/tool adapters, schemas, and platform helpers referenced by `assemblyRef`; guest image/toolchain manifests are retained by digest too. The user-service definition points to a stable state-root bootstrap and an atomically selected versioned Supervisor bundle, never directly to a replaceable global npm path. Bundles referenced by any nonterminal Run or retained audit/result cannot be garbage-collected.
 
-An update stages and self-tests a new bundle. It may activate a new Supervisor only when that Supervisor declares compatibility with every nonterminal Run schema/assembly and can launch their pinned worker bundles; otherwise the current Supervisor remains active across reboot and the update reports `drain_required`. It is never killed or replaced under active incompatible Runs. After drain, the bootstrap atomically switches bundles with rollback-on-startup-failure. Thus an external reinstall can replace the client package without deleting the executable needed to recover an accepted Run.
+An update stages and self-tests a new bundle. It may activate a new Supervisor only when that Supervisor declares compatibility with every nonterminal Run schema/assembly and can launch their pinned worker bundles; otherwise the current Supervisor remains active across reboot and the update reports `drain_required`. It is never killed or replaced under active incompatible Runs. A same-schema selection may roll back on startup failure only while the original runtime remains permitted to write that schema. A committed schema transition instead completes its registered target selection; it cannot reactivate an incompatible old writer. Thus an external reinstall can replace the client package without deleting the executable needed to recover an accepted Run.
+
+The first explicit signed schema transition is the fully retired 7-to-8 recipe
+specified in [Signed runtime and schema upgrade](../kernel/i4-signed-runtime-upgrade.md).
+It uses the existing `schema` bundle role for complete fixed schema bytes and
+the exact conversion profile, original generated schema 7 provenance and the
+same actual publisher public key. Fresh signed 8 genesis registers its schema
+source in the original first owner transaction. Upgrade holds the original
+StateRoot/flock, verifies all original retirement and actual Supervisor/keeper
+death, then uses one fixed DDL/StateOwner transaction and a registered receipt
+for selector recovery. Before that transaction the old selection is retained;
+after it old 7 is never a writer, including when publication or startup fails.
+Original source records and response bytes are not rewritten. Runtime-bound
+endpoint/credential authorization does not transfer implicitly. The official
+release roots, actual installed/crash qualification and default Kernel Cut
+remain separate release gates.
 
 The Kernel Cut includes:
 

@@ -9,7 +9,7 @@ import type { WorkspaceEntryManifest } from '../kernel/types.js';
 import { ArtifactCatalog } from '../state/artifacts.js';
 import { ContentAddressedStore } from '../state/cas.js';
 import { loadNativeStateOwner, STATE_OWNER_NATIVE_PATH, type HeldWorkspaceRoot } from '../state/native-owner.js';
-import { captureWorkspaceEntries } from './source-capture.js';
+import { captureWorkspaceEntries, captureWorkspaceEntriesWithManifestPublication } from './source-capture.js';
 
 async function captureFixture(t: TestContext) {
   const container = await mkdtemp(path.join(process.cwd(), '.cliq-source-capture-'));
@@ -26,6 +26,22 @@ async function captureFixture(t: TestContext) {
     async excludeDirectory(directory: string) { unreadableDirectories.push(directory); await chmod(directory, 0); },
     openRoot() { const root = native.openWorkspaceRoot(workspace); roots.push(root); return root; } };
 }
+
+test('the internal manifest publisher receives immutable native data and cannot substitute its artifact', async t => {
+  const { workspace, artifacts, openRoot } = await captureFixture(t), root = openRoot();
+  await writeFile(path.join(workspace, 'selected'), 'original source');
+  const selection = { selectedPaths: ['selected'], maxEntries: 10, maxBytes: 100 };
+  await assert.rejects(captureWorkspaceEntriesWithManifestPublication(root, artifacts, selection, async manifest => {
+    assert(Object.isFrozen(manifest) && Object.isFrozen(manifest.entries) && Object.isFrozen(manifest.entries[0]));
+    assert.throws(() => { manifest.entries.splice(0); }, TypeError);
+    const result = await artifacts.publishCanonical(manifest, 'cliq-workspace-entries-v1');
+    return { ...result, byteLength: result.byteLength + 1 };
+  }), /publication differs from its native-read bytes/);
+  root.assertHeld();
+  const result = await captureWorkspaceEntries(root, artifacts, selection);
+  const manifest = await artifacts.readCanonical<WorkspaceEntryManifest>(result.ref);
+  assert.equal(manifest.entries.length, 1); assert.equal(manifest.byteCount, Buffer.byteLength('original source'));
+});
 
 test('source enumeration is metadata-only and a selected hardlink streams real bytes independently', async t => {
   const container = await mkdtemp(path.join(process.cwd(), '.cliq-source-capture-'));

@@ -6,7 +6,7 @@ import { KERNEL_DATABASE_FILENAME, KERNEL_STATE_SCHEMA_VERSION } from '../config
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { addCanonicalDuration, digestOmitting, identityHash } from '../kernel/identity.js';
 import type { ReconciliationProbeEvidenceV1, ReconciliationProbeTimeoutClosureV1, SupervisorInspectorIdentityV1, WorkerDeathWait } from '../kernel/types.js';
-import { KERNEL_SCHEMA_V2_SQL, KERNEL_SCHEMA_V3_SQL, readSchemaUserVersion } from './schema.js';
+import { KERNEL_SCHEMA_V3_SQL, readSchemaUserVersion } from './schema.js';
 import { openSqliteDriver } from './sqlite-driver.js';
 import { openStateStore, type StateStore } from './store.js';
 import { createActiveFixture, disposeFixture, makePrivateDir } from './testing/fixtures.js';
@@ -38,7 +38,7 @@ test('public Store.close refuses an unjoined same-owner worker probe and retains
   assert.equal(retained.run.waitingOnRef, started.waitingOnRef);
 });
 
-test('a real v2 database reopens and persists one exact worker inspection before I/O', async t => {
+test('a current signed database refuses a relabelled v2 version and persists one exact worker inspection before I/O', async t => {
   const fixture = await createActiveFixture('worker-probe-v2');
   let child: Awaited<ReturnType<typeof childFor>> | undefined;
   t.after(async () => {
@@ -50,23 +50,37 @@ test('a real v2 database reopens and persists one exact worker inspection before
     expectedRunRevision: fixture.store.getRun(fixture.runId).revision });
   const before = await fixture.store.readRecoveryClosure(fixture.runId);
   await fixture.store.close();
-  const legacy = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+  const databasePath = path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME);
+  const originalDatabase = openSqliteDriver(databasePath);
+  const originalRows = {
+    owners: originalDatabase.prepare('SELECT * FROM state_owners ORDER BY owner_epoch').all(),
+    artifacts: originalDatabase.prepare('SELECT * FROM artifacts ORDER BY ref').all(),
+    schema: originalDatabase.prepare('SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name').all()
+  };
   try {
-    // Recreate V2 around real retained work, rather than relabel a V4 layout.
-    // Upgrade must install its missing schema; no existing V4 authority is
-    // accepted or backfilled as if it had belonged to the older database.
-    legacy.transaction(connection => {
-      connection.exec('DROP TRIGGER sessions_admission_identity_immutable');
-      connection.exec('DROP TRIGGER runs_admission_identity_immutable');
-      connection.exec('ALTER TABLE sessions DROP COLUMN admission_request_id');
-      connection.exec('ALTER TABLE runs DROP COLUMN admission_request_id');
-      connection.exec('DROP TABLE source_inspection_attempts');
-      const start = KERNEL_SCHEMA_V2_SQL.indexOf('CREATE TRIGGER workspace_generations_validate_update');
-      const end = KERNEL_SCHEMA_V2_SQL.indexOf('CREATE TRIGGER workspace_generations_immutable_delete', start);
-      connection.exec(`DROP TRIGGER workspace_generations_validate_update; ${KERNEL_SCHEMA_V2_SQL.slice(start, end)}`);
-      connection.exec('PRAGMA user_version=2');
-    });
-  } finally { legacy.close(); }
+    assert.equal(readSchemaUserVersion(originalDatabase), KERNEL_STATE_SCHEMA_VERSION);
+    // This fixture genuinely originated under its signed current schema. A
+    // changed version pragma cannot make that history an authorized V2 birth,
+    // nor can it request an automatic signed schema transition with live work.
+    originalDatabase.exec('PRAGMA user_version=2');
+  } finally { originalDatabase.close(); }
+  try {
+    await assert.rejects(openStateStore(fixture.stateRoot, fixture.runtimeAuthority), { code: 'RECOVERY_REQUIRED' });
+    const refused = openSqliteDriver(databasePath);
+    try {
+      assert.equal(readSchemaUserVersion(refused), 2);
+      assert.deepEqual(refused.prepare('SELECT * FROM state_owners ORDER BY owner_epoch').all(), originalRows.owners,
+        'the refused reopen cannot register a successor or rewrite the original owner/birth references');
+      assert.deepEqual(refused.prepare('SELECT * FROM artifacts ORDER BY ref').all(), originalRows.artifacts);
+      assert.deepEqual(refused.prepare('SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name').all(), originalRows.schema);
+    } finally { refused.close(); }
+  } finally {
+    // Restore only the deliberately corrupted input before the real current
+    // signed Store/child lifetime resumes. This is no legacy upgrade proof.
+    const restore = openSqliteDriver(databasePath);
+    try { restore.exec(`PRAGMA user_version=${KERNEL_STATE_SCHEMA_VERSION}`); }
+    finally { restore.close(); }
+  }
   child = await childFor(t, fixture.stateRoot);
   const acquired = await child.request('acquire', fixture.runtimeAuthority);
   assert.equal(acquired.state, 'held', acquired.message);

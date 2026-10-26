@@ -11,9 +11,10 @@ test('the hidden installed entry refuses ordinary Node before reading roots or c
   try {
     const entry = fileURLToPath(new URL('./installed-entry.ts', import.meta.url));
     const loader = fileURLToPath(import.meta.resolve('tsx'));
-    for (const role of ['keeper', 'supervisor']) {
-      for (const args of [[`--bootstrap-${role}`], [`--installed-${role}`,
-        path.join(fixture, 'state'), 'a'.repeat(64), `0:1:${process.geteuid!()}`]]) {
+    const roles = ['keeper', 'supervisor'].flatMap(role => [[`--bootstrap-${role}`], [`--installed-${role}`,
+      path.join(fixture, 'state'), 'a'.repeat(64), `0:1:${process.geteuid!()}`]]);
+    roles.push(['--installed-client', path.join(fixture, 'state'), 'supervisor', 'status', '--json']);
+    for (const args of roles) {
         const result = spawnSync(process.execPath, ['--import', loader, entry, ...args], {
           cwd: fixture, env: { PATH: process.env.PATH }, encoding: 'utf8',
           timeout: 30_000, maxBuffer: 128 * 1024,
@@ -24,7 +25,6 @@ test('the hidden installed entry refuses ordinary Node before reading roots or c
         const diagnostics = result.stderr.trim().split('\n').filter(line => line.startsWith('{')).map(line => JSON.parse(line));
         assert(diagnostics.some(value => value.scope === 'installed-read-startup' && value.message === 'expected the installed Linux SEA'));
         assert.deepEqual(await readdir(fixture), [], 'untrusted role locators must not create even an installation or StateRoot');
-      }
     }
   } finally { await rm(fixture, { recursive: true, force: true }); }
 });

@@ -125,7 +125,9 @@ test('an unadmitted initial delivery cut cannot turn zero model budgets into a r
   const data = fixture(), ref = 'a'.repeat(64);
   const cut: RecoveryClosureV1 = { ...data, items: [], workerLaunches: [], workspaceGenerations: [],
     latestCheckpoint: { schemaVersion: 1, id: data.run.latestCheckpointId, runId: data.run.id,
-      basedOnRunRevision: 1, runItemSeq: 0, contextManifestRef: ref, journalSeq: 0,
+      // Root Delivery admission really creates its initial Checkpoint at 0.
+      // This remains inert unadmitted data, not a fabricated owning cut.
+      basedOnRunRevision: 0, runItemSeq: 0, contextManifestRef: ref, journalSeq: 0,
       workspaceStateRef: ref, createdAt: data.run.createdAt, reason: 'initial' } };
   await assert.rejects(readResourceStopCause(undefined as unknown as SqliteDriver,
     undefined as unknown as ArtifactCatalog, cut, cut.run.createdAt), { code: 'RECOVERY_REQUIRED' });

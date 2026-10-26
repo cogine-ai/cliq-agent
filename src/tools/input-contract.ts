@@ -22,17 +22,18 @@ export function loadToolContracts(tools: readonly ToolInputAuthority[]) {
     }
     const execution = decodeToolExecutionIdentity(entry.execution);
     let parseInput: (value: unknown) => ParsedInput | undefined;
-    if (execution.kind === 'builtin' || execution.kind === 'builtin_script' || execution.kind === 'supervisor_control') {
+    if (execution.kind === 'builtin' || execution.kind === 'builtin_script' || execution.kind === 'supervisor_control' || execution.kind === 'supervisor_operation') {
       const name = execution.kind === 'builtin' ? execution.adapterId : entry.name;
       const builtin = Object.hasOwn(builtinInputContracts, name)
         ? builtinInputContracts[name as keyof typeof builtinInputContracts] : undefined;
       const script = execution.kind === 'builtin_script';
       const control = execution.kind === 'supervisor_control';
       if (!builtin || entry.name !== builtin.name || entry.version !== builtin.version ||
-          (execution.kind !== 'supervisor_control' && execution.adapterVersion !== builtin.version) ||
+          ('adapterVersion' in execution && execution.adapterVersion !== builtin.version) ||
           entry.access !== builtin.access || entry.replayClass !== builtin.replayClass || canonicalSha256(builtin.inputSchema) !== entry.inputSchemaDigest ||
           (script && !BUILTIN_SCRIPT_TOOL_NAMES.some(name => name === entry.name)) ||
-          (entry.access === 'control') !== control || (control && (entry.name !== 'request_input' ||
+          (entry.access === 'control') !== control || (execution.kind === 'supervisor_operation' && (entry.name !== 'delegate' || execution.handlerId !== 'delegate')) ||
+          (control && (entry.name !== execution.handlerId || !['request_input', 'await_children'].includes(entry.name) ||
             Object.hasOwn(entry, 'outputSchemaRef') || Object.hasOwn(entry, 'outputSchemaDigest')))) {
         throw new TypeError('builtin contract differs from the compiled input semantics');
       }

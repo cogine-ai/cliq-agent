@@ -519,7 +519,7 @@ export function decodeStateOwnerAcquisitionEvidence(
     if (value.ownerTableObservation !== 'empty') {
       throw new KernelStorageError('ARTIFACT_MISMATCH', 'genesis owner table observation is invalid');
     }
-  } else if (value.kind === 'acquire_after_graceful_release' || value.kind === 'takeover_after_owner_death') {
+  } else if (value.kind === 'acquire_after_graceful_release' || value.kind === 'takeover_after_owner_death' || value.kind === 'runtime_upgrade') {
     rejectUnknownKeys(
       value,
       [
@@ -528,7 +528,8 @@ export function decodeStateOwnerAcquisitionEvidence(
         'priorTerminalRowDigest',
         'priorTransitionEvidenceRef',
         'priorTransitionEvidenceDigest',
-        'priorTerminalReason'
+        'priorTerminalReason',
+        ...(value.kind === 'runtime_upgrade' ? ['upgradeReceiptRef', 'upgradeReceiptDigest'] : [])
       ],
       'StateOwnerAcquisitionEvidence(successor)'
     );
@@ -536,7 +537,11 @@ export function decodeStateOwnerAcquisitionEvidence(
     requireDigest(value.priorTerminalRowDigest, 'StateOwnerAcquisitionEvidence.priorTerminalRowDigest');
     requireArtifactRef(value.priorTransitionEvidenceRef, 'StateOwnerAcquisitionEvidence.priorTransitionEvidenceRef');
     requireDigest(value.priorTransitionEvidenceDigest, 'StateOwnerAcquisitionEvidence.priorTransitionEvidenceDigest');
-    const expectedReason = value.kind === 'acquire_after_graceful_release'
+    if (value.kind === 'runtime_upgrade') {
+      requireArtifactRef(value.upgradeReceiptRef, 'StateOwnerAcquisitionEvidence.upgradeReceiptRef');
+      requireDigest(value.upgradeReceiptDigest, 'StateOwnerAcquisitionEvidence.upgradeReceiptDigest');
+    }
+    const expectedReason = value.kind !== 'takeover_after_owner_death'
       ? 'graceful_release'
       : 'superseded_after_owner_death';
     if (value.priorTerminalReason !== expectedReason) {

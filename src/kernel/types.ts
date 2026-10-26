@@ -24,6 +24,9 @@ export type {
   RunContextCompactionItem, ContinuationItem
 } from './continuation.js';
 
+export type { ChildCapabilityGrantV1, DelegateRequest, AwaitChildrenRequest, ChildHandleItem, DelegateResult, AwaitChildrenResult,
+  ChildPatchManifest, ChildResultModelContentV1, ChildWaitSet, ChildResultItem, ChildMergeBatchItem, ChildMergeResultItem } from './children.js';
+
 export type ProviderName =
   | 'openrouter'
   | 'anthropic'
@@ -314,6 +317,7 @@ export type Run = {
   terminalReason?: RunTerminalReason;
   terminalDetailRef?: ArtifactRef;
   stopIntentRef?: ArtifactRef;
+  parentCancellationRef?: ArtifactRef;
   cancelRequested: boolean;
   createdAt: string;
   deadlineAt: string;
@@ -1276,6 +1280,19 @@ export type StateOwnerAcquisitionEvidenceV1 = {
       ownerTableObservation?: never;
     }
   | {
+      kind: 'runtime_upgrade';
+      priorOwnerEpoch: number;
+      priorTerminalRowDigest: string;
+      priorTransitionEvidenceRef: ArtifactRef;
+      priorTransitionEvidenceDigest: string;
+      priorTerminalReason: 'graceful_release';
+      upgradeReceiptRef: ArtifactRef;
+      upgradeReceiptDigest: string;
+      kernelGenerationIdentityRef?: never;
+      kernelGenerationIdentityDigest?: never;
+      ownerTableObservation?: never;
+    }
+  | {
       kind: 'takeover_after_owner_death';
       priorOwnerEpoch: number;
       priorTerminalRowDigest: string;
@@ -1362,7 +1379,7 @@ export type InvocationJournalEntry = {
   seq: number;
   runId: string;
   opId: string;
-  opKind: 'model' | 'tool' | 'mcp-server' | 'mcp' | 'verifier' | 'publish';
+  opKind: 'model' | 'tool' | 'mcp-server' | 'mcp' | 'verifier' | 'publish' | 'child_admission' | 'child_merge' | 'child_await';
   attempt: number;
   leaseEpoch: number;
   phase: InvocationPhase;
@@ -1385,6 +1402,8 @@ export type InvocationJournalEntry = {
   budgetDelta: BudgetUsage;
   budgetSettlementRef?: ArtifactRef;
   timestamp: string;
+  /** Local atomic operations only: actual final commit sample, never a lease. */
+  localCommittedAt?: string;
 };
 
 export type BudgetSettlementV1 = {

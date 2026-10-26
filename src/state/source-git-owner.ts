@@ -1,3 +1,5 @@
+import { noteInstalledResourceBoundary } from './installed-resource-diagnostics.js';
+import { withInstalledWorkerRoot as borrowInstalledResourceRoot } from './installed-runtime.js';
 import { randomBytes } from 'node:crypto';
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import type { ProcessContainment, SourceInspectionAttemptV1 } from '../kernel/execution.js';
@@ -178,13 +180,21 @@ export function createInstalledSourceGitCapture(driver: SqliteDriver, artifacts:
           createdAt: new Date(actual.observedAtMs).toISOString() };
         const physical = await artifacts.publishCanonical(containment, 'cliq-process-containment-v1');
         await refresh(); transition({ ...state.row, phase: 'active', processContainmentRef: physical.ref } as Active, [physical]);
+        if (!signal.aborted) noteInstalledResourceBoundary('active', operation => borrowInstalledResourceRoot(installed, anchor, operation), [{
+          role: 'source', pid: actual.pid, start: actual.processStartToken, device: reservation.deviceId, inode: actual.cgroupId,
+          relative: reservation.cgroupPath.split('/').at(-1)! }]);
         cut(() => scope!.releaseCapture()); await scope.sealed();
         await refresh(); cut(() => scope!.continueFixedGit());
         const result = await scope.result();
-        return await publishInstalledSourceGitResult(artifacts, state.input, result, {
+        if (!signal.aborted) noteInstalledResourceBoundary('result_received', operation => borrowInstalledResourceRoot(installed, anchor, operation), [{
+          role: 'source', device: reservation.deviceId, inode: reservation.cgroupId, relative: reservation.cgroupPath.split('/').at(-1)! }]);
+        const published = await publishInstalledSourceGitResult(artifacts, state.input, result, {
           repositoryIdentityDigest: input.repositoryIdentityDigest, resources: input.resources,
           exclude: exclude ? { grantCoreDigest: excludeRow!.grantCoreDigest,
             ...(exclude.expectedDigest === undefined ? {} : { expectedDigest: exclude.expectedDigest }) } : null }, signal);
+        if (!signal.aborted) noteInstalledResourceBoundary('capture_durable', operation => borrowInstalledResourceRoot(installed, anchor, operation), [{
+          role: 'source', device: reservation.deviceId, inode: reservation.cgroupId, relative: reservation.cgroupPath.split('/').at(-1)! }]);
+        return published;
       })();
     },
     close() {
@@ -199,6 +209,8 @@ export function createInstalledSourceGitCapture(driver: SqliteDriver, artifacts:
         const failed = result.find(item => item.status === 'rejected' && item.reason instanceof ResourceRetirementError);
         if (failed?.status === 'rejected') throw failed.reason;
         state.joined = true;
+        // Do not insert measurement into a cancelled/Stop2 drain.
+        if (!context.signal.aborted) noteInstalledResourceBoundary('source_joined', operation => borrowInstalledResourceRoot(context.installed, anchor, operation));
       })();
     },
   });

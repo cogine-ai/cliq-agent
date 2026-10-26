@@ -7,7 +7,7 @@
 #include <stdint.h>
 
 #define CLIQ_WORKER_MAGIC UINT32_C(0x43575131)
-#define CLIQ_WORKER_VERSION UINT32_C(6)
+#define CLIQ_WORKER_VERSION UINT32_C(7)
 #define CLIQ_WORKER_MAX_SCOPES 16
 #define CLIQ_WORKER_MAX_FDS 40
 #define CLIQ_WORKER_TOKEN_BYTES 192
@@ -52,7 +52,8 @@ enum cliq_worker_command {
     CLIQ_CREATE_BUILTIN_READ = 41,
     CLIQ_CREATE_BUILTIN_BASH = 42,
     CLIQ_RELEASE_BUILTIN = 43,
-    CLIQ_POLL_BUILTIN = 44
+    CLIQ_POLL_BUILTIN = 44,
+    CLIQ_ACK_BUILTIN_RESULT = 45
 };
 
 /* Private pre-READY diagnosis only. Never process, release, time or death

@@ -26,6 +26,7 @@ const runColumns: readonly Column[] = [text('id', 128), text('session_id', 128),
   text('active_worker_launch_id', 128, true), text('latest_checkpoint_id', 128), text('budget_reserved_json', 4096),
   text('budget_consumed_json', 4096), integer('repair_count'), text('result_ref', 64, true),
   text('terminal_reason', 128, true), text('terminal_detail_ref', 64, true), text('stop_intent_ref', 64, true),
+  text('parent_cancellation_ref', 64, true),
   integer('cancel_requested'), text('created_at', 24), text('deadline_at', 24), text('updated_at', 24),
   integer('latest_run_item_seq', '(SELECT coalesce(max(item_seq),0) FROM items WHERE run_id=s.id)')];
 const grantField = (field: string) => `json_extract(s.row_json,'$.${field}')`;
@@ -117,9 +118,15 @@ export function createExtraListSource(driver: SqliteDriver, artifacts: ArtifactC
       const names = columns.map(column => column.name).join(',');
       // The fresh private INTEGER PRIMARY KEY assigns contiguous ordinals in
       // this explicit source order, without a second full-row window pass.
+      // Valid grant times have the same byte order as their bounded captured
+      // values. Ordering by their original expression permits the fixed schema
+      // index; overlong/invalid fields still refuse the complete cut below.
+      const selected = run ? 'SELECT ' + names + ',overlong FROM (' +
+        `SELECT ${projection(columns)} FROM ${table} s WHERE ${where} LIMIT 100001) ORDER BY created_at COLLATE BINARY,id COLLATE BINARY`
+        : `SELECT ${projection(columns)} FROM ${table} s WHERE ${where} ` +
+          `ORDER BY ${grantField('createdAt')} COLLATE BINARY,s.grant_id COLLATE BINARY LIMIT 100001`;
       connection.prepare('INSERT INTO temp.cliq_list_source(' + names + ',overlong) ' +
-        'SELECT ' + names + ',overlong FROM (' +
-        `SELECT ${projection(columns)} FROM ${table} s WHERE ${where} LIMIT 100001) ORDER BY created_at COLLATE BINARY,id COLLATE BINARY`).run(...values);
+        selected).run(...values);
       if (connection.prepare('SELECT count(*) AS n FROM temp.cliq_list_source').get<{ n: bigint }>()!.n !== count) return corrupt();
       return Number(count);
     },

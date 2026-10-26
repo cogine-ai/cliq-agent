@@ -51,6 +51,21 @@ const canMergeText = (base?: WorkspaceEntry, current?: WorkspaceEntry, desired?:
  */
 export async function planDeliverySource(artifacts: ArtifactCatalog, selected: DeliverySourceInput & { sandboxProfileRef: string },
   computation: Diff3ComputationV1 = {}): Promise<DeliverySourcePlan> {
+  return planImmutableSourceMerge(artifacts, selected, computation, 'base');
+}
+
+/** Fixed parent/child CAS-only variant. A is a completely verified current
+ * result source, rather than Delivery's captured real-workspace base. The
+ * public Delivery recipe retains its original role checks unchanged. */
+export async function planChildMergeSource(artifacts: ArtifactCatalog, selected: DeliverySourceInput & { sandboxProfileRef: string; capturedSource: SourceManifest },
+  computation: Diff3ComputationV1 = {}): Promise<DeliverySourcePlan> {
+  if (canonicalSha256(selected.capturedSource) !== selected.capturedWorkspaceRef || selected.capturedSource.role !== 'result')
+    mismatch('child merge captured source differs from its complete planned parent result');
+  return planImmutableSourceMerge(artifacts, selected, computation, 'result', selected.capturedSource);
+}
+
+async function planImmutableSourceMerge(artifacts: ArtifactCatalog, selected: DeliverySourceInput & { sandboxProfileRef: string },
+  computation: Diff3ComputationV1, capturedRole: 'base' | 'result', plannedCaptured?: SourceManifest): Promise<DeliverySourcePlan> {
   const input = Object.freeze({ sourceBaseRef: selected.sourceBaseRef, sourceDesiredRef: selected.sourceDesiredRef,
     capturedWorkspaceRef: selected.capturedWorkspaceRef });
   for (const ref of Object.values(input)) assertArtifactRef(ref);
@@ -69,7 +84,10 @@ export async function planDeliverySource(artifacts: ArtifactCatalog, selected: D
     checkpoint();
     let value = canonicalReads.get(ref);
     if (!canonicalReads.has(ref)) {
-      value = await readCanonicalArtifact(artifacts, ref); canonicalReads.set(ref, value);
+      // Child A is freshly reconstructed complete CAS data. Its source
+      // wrapper is planned, never described as already durable or physical.
+      value = plannedCaptured && ref === input.capturedWorkspaceRef ? plannedCaptured : await readCanonicalArtifact(artifacts, ref);
+      canonicalReads.set(ref, value);
     }
     checkpoint();
     remember({ ref, schemaKind, mediaType: 'application/json', byteLength: canonicalJsonBytes(value).byteLength });
@@ -77,7 +95,7 @@ export async function planDeliverySource(artifacts: ArtifactCatalog, selected: D
   };
   const sources: Array<{ ref: string; source: SourceManifest; entries: WorkspaceEntryManifest }> = [];
   const profile = decodeSandboxProfile(await read(sandboxProfileRef, 'cliq-sandbox-profile-v1'));
-  for (const [ref, role] of [[input.sourceBaseRef, 'base'], [input.sourceDesiredRef, 'result'], [input.capturedWorkspaceRef, 'base']] as const) {
+  for (const [ref, role] of [[input.sourceBaseRef, 'base'], [input.sourceDesiredRef, 'result'], [input.capturedWorkspaceRef, capturedRole]] as const) {
     const source = decodeSourceManifest(await read(ref, 'cliq-source-manifest-v1'));
     checkSourceManifest(source);
     if (source.role !== role) mismatch('delivery source manifest has the wrong base/result role');

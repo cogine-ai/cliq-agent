@@ -9,7 +9,8 @@ import { compileOutputSchema } from '../tools/input-schema.js';
 import { requireEqual } from '../policy/runtime-authority.js';
 import { builtinToolInputBytes, decodeBuiltinReadOutput, decodeBuiltinToolInput, isBuiltinScriptTool,
   BUILTIN_SCRIPT_RECIPE, type BuiltinScriptTool, type BuiltinToolInput } from '../sandbox/builtin-tool-data.js';
-import { assertNativeContainmentDeath, captureNativeBuiltinToolResult, type NativeBuiltinToolResult } from '../sandbox/linux-worker.js';
+import { observeNativeBuiltinCaptureDurable, acknowledgeNativeBuiltinToolResult, assertNativeContainmentDeath, captureNativeBuiltinToolResult,
+  type LinuxBlockedInvocation, type NativeBuiltinToolResult } from '../sandbox/linux-worker.js';
 import { readCanonicalArtifact } from './agent-context.js';
 import type { ArtifactCatalog, PublishedArtifact } from './artifacts.js';
 import { decodeBuiltinProcessContainment, decodeBuiltinScriptSandboxLaunchSpec } from './execution-closure.js';
@@ -85,7 +86,7 @@ export function retainBuiltinCapturePublication(artifacts: ArtifactCatalog, owne
   prepared: InvocationJournalEntry, claim: InvocationJournalEntry, result: NativeBuiltinToolResult, capsule: BuiltinToolInput) {
   // The only input is the genuine original token. Private raw buffers never
   // leave this retained producer or become mutable caller-owned views.
-  const native = captureNativeBuiltinToolResult(result);
+  let native: NativeBuiltinToolResult | undefined = captureNativeBuiltinToolResult(result);
   assertNativeContainmentDeath(native.death);
   const containment = native.death.containment;
   const subject = containment.owner;
@@ -104,7 +105,9 @@ export function retainBuiltinCapturePublication(artifacts: ArtifactCatalog, owne
   let outputs: PublishedArtifact[] | undefined, captured: PublishedArtifact | undefined;
   const publish = async (): Promise<PublishedArtifact> => {
     if (captured) return captured;
-    outputs ??= await joinResourceOperations([native.stdout, native.stderr].map(bytes =>
+    const original = native;
+    if (!original) throw new TypeError('builtin capture has already acknowledged its original bytes');
+    outputs ??= await joinResourceOperations([original.stdout, original.stderr].map(bytes =>
       artifacts.publishBytes(bytes, 'application/octet-stream', 'cliq-builtin-tool-output-v1')));
     const inspector = supervisorInspectorIdentity(owner), inspectorRef = canonicalSha256(inspector), containmentRef = canonicalSha256(containment);
     const death: ProcessContainmentDeathEvidenceV1 = { schemaVersion: 1, kind: 'containment_all_descendants_dead',
@@ -112,15 +115,15 @@ export function retainBuiltinCapturePublication(artifacts: ArtifactCatalog, owne
       sandboxLaunchSpecDigest: containment.sandboxLaunchSpecDigest, owner: containment.owner, launchNonceDigest: containment.launchNonceDigest,
       inspectorSupervisorInstanceId: owner.supervisorInstanceId, inspectorIdentityRef: inspectorRef, inspectorIdentityDigest: inspector.identityDigest,
       backend: { ...backend, cgroupPopulated: 0, namespaceInitDeadAndReaped: true, remainingTrackedDescendants: 0 },
-      observedAt: native.death.observedAt, evidenceDigest: '' };
+      observedAt: original.death.observedAt, evidenceDigest: '' };
     death.evidenceDigest = digestOmitting(death, 'evidenceDigest');
     const deathRef = canonicalSha256(death);
     const capture: BuiltinToolCaptureV1 = { schemaVersion: 1, format: 'cliq-builtin-tool-capture-v1', runId: prepared.runId,
-      opId: prepared.opId, attempt: prepared.attempt, dispatchId: claim.dispatchId!, leaseEpoch: claim.leaseEpoch, tool: native.tool,
+      opId: prepared.opId, attempt: prepared.attempt, dispatchId: claim.dispatchId!, leaseEpoch: claim.leaseEpoch, tool: original.tool,
       requestRef: prepared.requestRef, targetRef: prepared.target, grantRef: prepared.grantRef!, sandboxLaunchSpecRef: claim.sandboxLaunchSpecRef!,
-      startedAt: native.startedAt, endedAt: native.endedAt, durationMs: native.durationMs, ...terminationData(native),
-      stdoutRef: outputs[0]!.ref, stdoutByteCount: native.stdout.byteLength, stderrRef: outputs[1]!.ref, stderrByteCount: native.stderr.byteLength,
-      stdoutTruncated: native.stdoutTruncated, stderrTruncated: native.stderrTruncated,
+      startedAt: original.startedAt, endedAt: original.endedAt, durationMs: original.durationMs, ...terminationData(original),
+      stdoutRef: outputs[0]!.ref, stdoutByteCount: original.stdout.byteLength, stderrRef: outputs[1]!.ref, stderrByteCount: original.stderr.byteLength,
+      stdoutTruncated: original.stdoutTruncated, stderrTruncated: original.stderrTruncated,
       containmentRef, deathEvidenceRef: deathRef, captureDigest: '' };
     capture.captureDigest = digestOmitting(capture, 'captureDigest'); decodeBuiltinToolCapture(capture);
     // This exact four-object graph has no intermediate authority, clock or
@@ -134,9 +137,25 @@ export function retainBuiltinCapturePublication(artifacts: ArtifactCatalog, owne
         value.byteLength !== canonicalJsonBytes(values[index]!.value).length || value.mediaType !== 'application/json' ||
         value.schemaKind !== values[index]!.schemaKind))
       throw new KernelStorageError('ARTIFACT_MISMATCH', 'builtin capture group differs from its complete original native bytes');
-    captured = published[3]; return captured;
+    captured = published[3];
+    observeNativeBuiltinCaptureDurable(originalResult!);
+    return captured;
   };
-  return Object.freeze({ tool: native.tool, model, publish });
+  const tool = native.tool;
+  let originalResult: NativeBuiltinToolResult | undefined = result;
+  let acknowledged: Readonly<{ producer: LinuxBlockedInvocation; observed: Awaited<ReturnType<typeof acknowledgeNativeBuiltinToolResult>> }> | undefined;
+  return Object.freeze({ tool, model, publish, async acknowledge(producer: LinuxBlockedInvocation) {
+    if (acknowledged) {
+      if (acknowledged.producer !== producer) throw new TypeError('builtin data release changed its original invocation');
+      return acknowledged.observed;
+    }
+    if (!captured || !outputs || !originalResult) throw new TypeError('builtin data release requires its complete joined original capture publication');
+    const observed = await acknowledgeNativeBuiltinToolResult(producer, originalResult);
+    // Publication is complete and cached. Drop only producer-owned references;
+    // borrowed Buffers and physical RSS are not asserted to have disappeared.
+    native = undefined; originalResult = undefined; acknowledged = Object.freeze({ producer, observed });
+    return observed;
+  } });
 }
 
 /** Output projection is reproducible data, independent of native output

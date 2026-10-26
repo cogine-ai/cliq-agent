@@ -64,7 +64,7 @@ export async function beginVerifierCompletion(driver: SqliteDriver, artifacts: A
       native.death.observedAt < native.endedAt || native.stdout.byteLength + native.stderr.byteLength > current.specEntry.outputLimitBytes)
     throw new KernelStorageError('LEASE_FENCED', 'verifier result does not belong to its exact original permanent claim');
   const checkpointId = verifierCheckpointId(runId, input.opId, input.attempt);
-  const stable = ({ revision: _revision, updatedAt: _time, cancelRequested: _cancel, stopIntentRef: _stop, ...value }: Run) => value;
+  const stable = ({ revision: _revision, updatedAt: _time, cancelRequested: _cancel, stopIntentRef: _stop, parentCancellationRef: _parentCancellation, ...value }: Run) => value;
   let checkedRun = run, checkedStop = run.stopIntentRef ? decodeAgentStop(await readCanonicalArtifact(artifacts, run.stopIntentRef), run) : undefined;
   const originalStop = checkedStop;
   if (originalStop && !['cancelled_by_user', 'parent_cancelled', 'budget_exhausted'].includes(originalStop.reason))

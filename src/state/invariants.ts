@@ -15,8 +15,9 @@ import type {
   WorkspaceGenerationStateV1
 } from '../kernel/types.js';
 import { KernelStorageError } from './errors.js';
+import { types } from 'node:util';
 
-import { BUDGET_FIELDS, decodeWireBudget, decodeWireJournal } from '../kernel/control-wire-data.js';
+import { assertControlWireJson, BUDGET_FIELDS, decodeWireBudget, decodeWireJournal } from '../kernel/control-wire-data.js';
 const ZERO_BUDGET: BudgetUsage = {
   modelTokens: 0,
   costMicros: 0,
@@ -157,7 +158,28 @@ export function assertBudgetWithin(
 }
 
 export function decodeInvocationJournalEntry(value: unknown): InvocationJournalEntry {
-  try { return decodeWireJournal(value); }
+  try {
+    // Retained storage historically accepts safe bigint counters. Normalize
+    // only those closed numeric positions for the common data validator;
+    // public JSON/wire callers still reject bigint before this seam.
+    const copy = (input: unknown, integers: readonly string[]): unknown => {
+      if (!input || typeof input !== 'object' || Array.isArray(input) || types.isProxy(input) ||
+          ![Object.prototype, null].includes(Object.getPrototypeOf(input))) return input;
+      const descriptors = Object.getOwnPropertyDescriptors(input);
+      if (Reflect.ownKeys(descriptors).some(key => typeof key !== 'string') ||
+          Object.values(descriptors).some(field => !field.enumerable || !Object.hasOwn(field, 'value')))
+        throw new TypeError('Journal retained data must contain only own data fields');
+      return Object.fromEntries(Object.entries(descriptors).map(([key, field]) => [key,
+        typeof field.value === 'bigint' && integers.includes(key) ? requiredSafeInteger(field.value, `Journal.${key}`) : field.value]));
+    };
+    const normalized = copy(value, ['seq', 'attempt', 'leaseEpoch', 'stateOwnerEpoch']);
+    if (normalized && typeof normalized === 'object' && !Array.isArray(normalized) && !types.isProxy(normalized) &&
+        [Object.prototype, null].includes(Object.getPrototypeOf(normalized))) {
+      const fields = normalized as Record<string, unknown>;
+      if (Object.hasOwn(fields, 'budgetDelta')) fields.budgetDelta = copy(fields.budgetDelta, BUDGET_FIELDS);
+    }
+    decodeWireJournal(normalized); return value as InvocationJournalEntry;
+  }
   catch (error) { if (error instanceof TypeError) invalid(error.message); throw error; }
 }
 
@@ -453,6 +475,8 @@ function decodeChildTerminal(value: unknown, expectedMode: 'read_only' | 'mutati
 }
 
 export function decodeChildAllocation(value: unknown): ChildAllocationV1 {
+  try { assertControlWireJson(value); }
+  catch { invalid('ChildAllocation must be closed JSON data'); }
   const record = requireRecord(value, 'ChildAllocation');
   requireLiteral(record.schemaVersion, 1, 'ChildAllocation.schemaVersion');
   requireString(record.parentRunId, 'ChildAllocation.parentRunId');
@@ -466,11 +490,12 @@ export function decodeChildAllocation(value: unknown): ChildAllocationV1 {
   requireArtifactRef(record.delegateOperationGrantRef, 'ChildAllocation.delegateOperationGrantRef');
   requireArtifactRef(record.capabilityGrantRef, 'ChildAllocation.capabilityGrantRef');
   if (record.mode !== 'read_only' && record.mode !== 'mutating') invalid('ChildAllocation.mode is invalid');
-  decodeBudgetUsage(record.grantedAdditiveCeilings, 'ChildAllocation.grantedAdditiveCeilings');
+  const granted = decodeBudgetUsage(record.grantedAdditiveCeilings, 'ChildAllocation.grantedAdditiveCeilings');
   requireSafeInteger(record.grantedChildDepth, 'ChildAllocation.grantedChildDepth');
   requireSafeInteger(record.grantedChildConcurrency, 'ChildAllocation.grantedChildConcurrency', 1);
   requireCanonicalTime(record.childDeadlineAt, 'ChildAllocation.childDeadlineAt');
   requireCanonicalTime(record.createdAt, 'ChildAllocation.createdAt');
+  if ((record.childDeadlineAt as string) <= (record.createdAt as string)) invalid('ChildAllocation deadline must follow its original creation');
 
   if (record.state === 'reserved') {
     rejectUnknownKeys(record, CHILD_BASE_KEYS, 'ChildAllocation(reserved)');
@@ -481,7 +506,6 @@ export function decodeChildAllocation(value: unknown): ChildAllocationV1 {
       'ChildAllocation(child_terminal)'
     );
     decodeChildTerminal(record.terminal, record.mode);
-    decodeBudgetUsage(record.inclusiveBudgetUsage, 'ChildAllocation.inclusiveBudgetUsage');
     requireCanonicalTime(record.terminalAt, 'ChildAllocation.terminalAt');
   } else if (record.state === 'settled') {
     rejectUnknownKeys(
@@ -499,14 +523,45 @@ export function decodeChildAllocation(value: unknown): ChildAllocationV1 {
       'ChildAllocation(settled)'
     );
     decodeChildTerminal(record.terminal, record.mode);
-    decodeBudgetUsage(record.inclusiveBudgetUsage, 'ChildAllocation.inclusiveBudgetUsage');
     requireCanonicalTime(record.terminalAt, 'ChildAllocation.terminalAt');
     requireString(record.childResultItemId, 'ChildAllocation.childResultItemId');
     requireSafeInteger(record.parentSettlementRevision, 'ChildAllocation.parentSettlementRevision', 1);
-    decodeBudgetUsage(record.releasedUnusedBudget, 'ChildAllocation.releasedUnusedBudget');
     requireCanonicalTime(record.settledAt, 'ChildAllocation.settledAt');
   } else {
     invalid('ChildAllocation.state is invalid');
   }
+  if (record.state === 'child_terminal' || record.state === 'settled') {
+    const usage = decodeBudgetUsage(record.inclusiveBudgetUsage, 'ChildAllocation.inclusiveBudgetUsage');
+    if (BUDGET_FIELDS.some(field => usage[field] > granted[field])) invalid('ChildAllocation inclusive usage exceeds its original granted ceiling');
+    if ((record.terminalAt as string) < (record.createdAt as string)) invalid('ChildAllocation terminal time precedes its original creation');
+    if (record.state === 'settled') {
+      const unused = decodeBudgetUsage(record.releasedUnusedBudget, 'ChildAllocation.releasedUnusedBudget');
+      if (BUDGET_FIELDS.some(field => unused[field] !== granted[field] - usage[field])) invalid('ChildAllocation unused budget differs from its exact original grant minus usage');
+      if ((record.settledAt as string) < (record.terminalAt as string)) invalid('ChildAllocation settlement precedes its original terminal outcome');
+    }
+  }
   return record as ChildAllocationV1;
+}
+
+/** Budget data only. Incoming reservations belong to the parent, and inclusive
+ * settled child use already contains its descendants; neither is added twice. */
+export function childAllocationBudgetFacts(runId: string, allocations: readonly ChildAllocationV1[]): {
+  reserved: BudgetUsage; consumed: BudgetUsage; nonterminalDirectChildren: number;
+} {
+  let reserved = { ...ZERO_BUDGET }, consumed = { ...ZERO_BUDGET }, nonterminalDirectChildren = 0;
+  const children = new Set<string>();
+  let incoming = false;
+  for (const value of allocations) {
+    const row = decodeChildAllocation(value);
+    if (row.parentRunId !== runId) {
+      if (row.childRunId !== runId || incoming) invalid('child budget cut has a foreign or duplicate incoming allocation');
+      incoming = true; continue;
+    }
+    if (children.has(row.childRunId)) invalid('child budget cut duplicates an outgoing allocation');
+    children.add(row.childRunId);
+    if (row.state === 'settled') consumed = addBudget(consumed, row.inclusiveBudgetUsage, 'inclusive child consumed budget');
+    else reserved = addBudget(reserved, row.grantedAdditiveCeilings, 'conservative child reserved budget');
+    if (row.state === 'reserved') nonterminalDirectChildren++;
+  }
+  return { reserved, consumed, nonterminalDirectChildren };
 }

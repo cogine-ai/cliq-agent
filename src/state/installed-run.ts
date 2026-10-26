@@ -25,6 +25,8 @@ import { buildInstalledToolContracts } from '../tools/installed-contracts.js';
 import { assertBuiltinScriptResources } from './tool-runtime-authority.js';
 import { loadToolContracts } from '../tools/input-contract.js';
 import { readCanonicalArtifact } from './agent-context.js';
+import { readChildAdmission, type ChildAdmissionData } from './child-admission.js';
+import { readRun } from './rows.js';
 import type { ArtifactCatalog } from './artifacts.js';
 import { sampleCanonicalNow } from './canonical-time.js';
 import { validateControlChannelClosure, type AuthenticatedControlIdentity } from './control-channel.js';
@@ -320,7 +322,8 @@ async function publishInstalledModelMaterial(input: {
   return { endpointArtifact, credentialGrantRefs, capabilityArtifact, sandboxProfileRef: undefined };
 }
 
-async function materialFor(installed: InstalledRuntimeBorrow, artifacts: ArtifactCatalog, assembly: RunAssemblyV1, signal?: AbortSignal): Promise<RunAssemblyValidationMaterial & { retainedToolchain?: RetainedVerifierToolchain }> {
+async function materialFor(installed: InstalledRuntimeBorrow, artifacts: ArtifactCatalog, assembly: RunAssemblyV1, signal?: AbortSignal,
+  childOrigin?: ChildAdmissionData): Promise<RunAssemblyValidationMaterial & { retainedToolchain?: RetainedVerifierToolchain }> {
   signal?.throwIfAborted();
   if (assembly.provider.name !== 'openai-compatible' || assembly.provider.endpoint.kind !== 'registered' ||
       assembly.provider.negotiation.streaming || assembly.mcpServers.length || assembly.instructions.skills.length)
@@ -349,9 +352,10 @@ async function materialFor(installed: InstalledRuntimeBorrow, artifacts: Artifac
   requireEqual(assembly.provider.adapter, catalog.adapter, 'installed provider adapter');
   const tools = await readCanonicalArtifact<ToolContractManifestV1>(artifacts, assembly.tools.manifestRef);
   const toolEntry = installed.bundle.entries.find(entry => entry.digest === assembly.tools.manifestRef);
-  if (!toolEntry || toolEntry.role !== 'schema' || toolEntry.executable || tools.format !== 'cliq-tool-contracts-v1' ||
+  if ((!childOrigin && (!toolEntry || toolEntry.role !== 'schema' || toolEntry.executable || toolEntry.byteCount !== canonicalJsonBytes(tools).length)) ||
+      tools.format !== 'cliq-tool-contracts-v1' ||
       tools.schemaVersion !== 1 || !exactKeys(tools, ['schemaVersion', 'format', 'entries', 'manifestDigest']) ||
-      digestOmitting(tools, 'manifestDigest') !== tools.manifestDigest || toolEntry.byteCount !== canonicalJsonBytes(tools).length)
+      digestOmitting(tools, 'manifestDigest') !== tools.manifestDigest)
     mismatch('installed tool manifest is not the exact signed builtin contract');
   const edit = installed.bundle.entries.find(entry => entry.entryId === LINUX_WORKER_RECIPE.editId);
   if (!edit) mismatch('installed tool manifest has no original edit adapter');
@@ -399,7 +403,18 @@ async function materialFor(installed: InstalledRuntimeBorrow, artifacts: Artifac
   if (script && (!supervisor || !retainedToolchain)) mismatch('installed scripts lack their complete guest and Supervisor closure');
   const expected = buildInstalledToolContracts({ edit, ...(script ? { scripts: { entry: script,
     supervisor: supervisor!, guest: retainedToolchain! } } : {}) });
-  requireEqual(tools, expected.manifest, 'complete installed compiled tool manifest');
+  if (childOrigin) {
+    requireEqual(assembly, await readCanonicalArtifact(artifacts, childOrigin.spec.assemblyRef), 'child exact admitted assembly');
+    const rootAssembly = childOrigin.rootOrigin.spec.assemblyRef;
+    const original = decodeRetainedRunAssembly(await readCanonicalArtifact(artifacts, rootAssembly));
+    const originalTools = await readCanonicalArtifact<ToolContractManifestV1>(artifacts, original.tools.manifestRef);
+    requireEqual(originalTools, expected.manifest, 'child original signed compiled tool manifest');
+    for (const entry of tools.entries) {
+      const rootEntry = originalTools.entries.find(candidate => candidate.name === entry.name);
+      if (!rootEntry) mismatch('child tool is outside its original signed root manifest');
+      requireEqual(entry, rootEntry, 'child exact signed root tool member');
+    }
+  } else requireEqual(tools, expected.manifest, 'complete installed compiled tool manifest');
   if (script) for await (const _chunk of artifacts.readChunks(script.digest, script.byteCount)) signal?.throwIfAborted();
   signal?.throwIfAborted();
   return Object.freeze({ capabilityEvidence: immutableSnapshot({ ref: assembly.provider.negotiation.capabilityEvidenceRef, value: capability }),
@@ -420,7 +435,8 @@ async function materialFor(installed: InstalledRuntimeBorrow, artifacts: Artifac
   } satisfies RunAssemblyValidationMaterial);
 }
 
-export async function loadInstalledRunMaterial(input: { selected: HeldInstalledRuntime; artifacts: ArtifactCatalog; assemblyRef: string; signal?: AbortSignal }) {
+export async function loadInstalledRunMaterial(input: { selected: HeldInstalledRuntime; artifacts: ArtifactCatalog; assemblyRef: string;
+  driver?: SqliteDriver; runId?: string; signal?: AbortSignal }) {
   input.signal?.throwIfAborted();
   const artifacts = input.signal ? input.artifacts.withReadSignal(input.signal) : input.artifacts;
   return withHeldInstalledRuntime(input.selected, async installed => {
@@ -428,7 +444,17 @@ export async function loadInstalledRunMaterial(input: { selected: HeldInstalledR
     const assembly = decodeRetainedRunAssembly(await readCanonicalArtifact(artifacts, input.assemblyRef));
     if (assembly.runtime.runtimeBundleRef !== installed.bundleDigest || assembly.runtime.runtimeBundleManifestDigest !== installed.bundle.manifestDigest)
       mismatch('retained Run requires a different installed runtime');
-    const material = await materialFor(installed, artifacts, assembly, input.signal); await installed.revalidate(input.signal);
+    if ((input.driver === undefined) !== (input.runId === undefined)) mismatch('retained child material requires its exact SQL Run source');
+    const run = input.driver && input.runId ? readRun(input.driver, input.runId) : undefined;
+    if (run && run.specRef && canonicalSha256(assembly) !== input.assemblyRef) mismatch('retained Run assembly changed');
+    const childOrigin = run?.parentRunId ? await readChildAdmission(input.driver!, artifacts, run.id, { signal: input.signal }) : undefined;
+    if (childOrigin) {
+      if (childOrigin.spec.assemblyRef !== input.assemblyRef) mismatch('child material does not belong to the exact admitted Run');
+      const rootAssembly = decodeRetainedRunAssembly(await readCanonicalArtifact(artifacts, childOrigin.rootOrigin.spec.assemblyRef));
+      await materialFor(installed, artifacts, rootAssembly, input.signal);
+    }
+    const material = await materialFor(installed, artifacts, assembly, input.signal, childOrigin); await installed.revalidate(input.signal);
+    childOrigin?.rootOrigin.assertUnchanged(input.driver!);
     input.signal?.throwIfAborted(); return material;
   }, input.signal);
 }

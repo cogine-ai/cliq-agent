@@ -27,6 +27,6 @@ test('current birth still requires the complete current DDL and exact table-coun
 });
 
 test('a version value cannot select an unknown, coerced or future retained birth recipe', () => {
-  for (const version of [undefined, null, '6', '7', 0, 1, 5, 8, -1, 6.5, NaN, Infinity, {}, []])
+  for (const version of [undefined, null, '6', '7', '8', 0, 1, 5, 9, -1, 6.5, NaN, Infinity, {}, []])
     assert.throws(() => kernelSchemaBirthRecipe(version), { code: 'RECOVERY_REQUIRED' });
 });

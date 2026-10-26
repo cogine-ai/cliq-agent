@@ -49,6 +49,40 @@ cliq run --jsonl "inspect this repo"
 
 `cliq "prompt"` still works as a shorthand, but scripts should prefer `cliq run`.
 
+## Installed client SDK (qualification preview)
+
+The ESM package exports `openCliqClient` and its TypeScript declarations from
+`@cogineai/cliq`, and the canonical control types from
+`@cogineai/cliq/control/v1`. A trusted installed host must supply its genuine,
+already held installation handle from the same package instance. A path, key,
+socket callback or lookalike object cannot create that handle through this API.
+
+```ts
+import { openCliqClient } from '@cogineai/cliq';
+
+// `installation` is borrowed from the trusted installed host.
+const client = await openCliqClient(installation, update => {
+  if (update.kind === 'response') console.log(update.response);
+});
+try {
+  await client.execute({ kind: 'request', request: {
+    protocolVersion: 1, method: 'run.get', runId
+  } });
+} finally {
+  await client.close(); // Detaches and joins the client; does not cancel the Run.
+}
+```
+
+The host retains its installation until client close completes. The output
+callback is borrowed and awaited. A lost mutation response remains in
+`client.pendingRequest`; reconnect does not resend it. Explicit `client.replay()`
+uses the original request, rather than submitting a replacement.
+
+The signed Linux application also has a client-only entry assembled from its
+embedded release roots. This preview does not change the default `cliq` command
+or claim complete installed/Linux, upgrade, ecosystem or release qualification.
+The full release gate remains required before default cutover.
+
 ## Model Setup
 
 Cliq is local-first. If you do not configure a model, Cliq tries local Ollama first.

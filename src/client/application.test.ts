@@ -10,6 +10,8 @@ import type { RunSnapshotV1 } from '../kernel/types.js';
 import { createClientApplication, ClientBusyError, ClientDisconnectedError, type ClientUpdate } from './application.js';
 import { clientMutation, parseClientInvocation } from './commands.js';
 import { initialClientView, reduceClientView, runHeadline, terminalText } from './view.js';
+import { installedControlCloseError, isInstalledControlCloseError } from '../state/installed-control-close-error.js';
+import { ResourceRetirementError } from '../state/errors.js';
 
 // Protocol data only. No actual installation, Store, Run or native receipt is
 // created by this consumer fixture; those have independent genuine tests.
@@ -25,6 +27,34 @@ const hello = { method: 'control.hello' as const, protocolVersion: 1 as const, s
   activeRuntimeBundle: { schemaVersion: 1 as const, runtimeBundleRef: ref, bundleDigest: ref, bundleVersion: 'inert' },
   enabledFeatureIds: ['run.get', 'run.attach', 'run.cancel'] };
 const get = { protocolVersion: 1 as const, method: 'run.get' as const, runId: 'run' };
+
+test('explicit detach joins an in-flight read and retains its exact own-close rejection for the read caller', async () => {
+  let entered!: () => void, reject!: (error: unknown) => void, closeCount = 0, cancels = 0;
+  const ready = new Promise<void>(resolve => { entered = resolve; });
+  const closed = installedControlCloseError();
+  const session = client({ close: async () => { closeCount++; reject(closed); },
+    'run.attach': async () => { entered(); return new Promise((_resolve, no) => { reject = no; }); },
+    'run.cancel': async () => { cancels++; throw new Error('detach must not cancel'); } });
+  const app = createClientApplication(session, () => {});
+  const following = app.follow('run');
+  const observed = assert.rejects(following, error => error === closed); void observed.catch(() => {});
+  await ready; await assert.doesNotReject(app.close()); await observed;
+  assert.equal(closeCount, 1); assert.equal(cancels, 0); await app.close(); assert.equal(closeCount, 1);
+});
+
+test('detach never swallows a prior protocol error or any actual retirement uncertainty', async () => {
+  for (const failure of [new Error('the original protocol failed before close'), new ResourceRetirementError('original retirement is uncertain', new Error('inert cause'))]) {
+    let entered!: () => void, reject!: (error: unknown) => void;
+    const ready = new Promise<void>(resolve => { entered = resolve; });
+    const session = client({ close: async () => { reject(failure); },
+      'run.attach': async () => { entered(); return new Promise((_resolve, no) => { reject = no; }); } });
+    const app = createClientApplication(session, () => {}), following = app.follow('run');
+    const observed = assert.rejects(following, error => error === failure); void observed.catch(() => {});
+    await ready; reject(failure); await assert.rejects(app.close(), error => error === failure); await observed;
+  }
+  assert.equal(isInstalledControlCloseError(new Error('installed control client is closing')), false);
+  assert.equal(isInstalledControlCloseError({ code: 'RECOVERY_REQUIRED', message: 'installed control client is closing' }), false);
+});
 function client(overrides: Record<string, unknown> = {}) {
   return createInstalledControlSession({ hello, close: async () => {},
     'run.get': async () => ({ protocolVersion: 1, ok: true, result: { method: 'run.get', snapshot: snapshot(), items: [], journal: [], checkpoints: [],

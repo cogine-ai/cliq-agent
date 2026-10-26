@@ -1,3 +1,5 @@
+import { readChildAdmission } from './child-admission.js';
+import { decodeDerivedChildUnverifiedConsent } from '../kernel/child-verifier.js';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { assertArtifactRef, digestOmitting, identityHash, parseCanonicalTime } from '../kernel/identity.js';
 import type { InheritedVerificationProvenanceV1, RunResult, VerificationClosureV1 } from '../kernel/result.js';
@@ -169,12 +171,12 @@ export async function readResultBasis(driver: SqliteDriver, artifacts: ArtifactC
 
 async function assertResultBasisCut(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1) {
   const { run, runSpec: spec } = cut;
-  if (run.parentRunId || spec.dependencyPolicyRef !== undefined ||
-      cut.childAllocations.length || driver.prepare('SELECT 1 FROM runs WHERE parent_run_id = ? LIMIT 1').get(run.id) ||
+  if (spec.dependencyPolicyRef !== undefined ||
+      cut.childAllocations.some(row => row.parentRunId === run.id && row.state !== 'settled') ||
       !isZeroBudget(run.budgetReserved) || cut.workerLaunches.length || run.activeWorkerLaunchId || run.waitingOnRef || run.waitingReason ||
       cut.workspaceGenerations.some(generation => generation.phase !== 'sealed' && generation.phase !== 'retired') ||
       [...stopInvocationHistory(cut.journal).values()].some(({ entry }) =>
-        !(spec.operation === 'delivery' ? ['verifier', 'publish'] : ['model', 'tool', 'verifier']).includes(entry.opKind) ||
+        !(spec.operation === 'delivery' ? ['verifier', 'publish'] : ['model', 'tool', 'verifier', 'child_admission', 'child_merge', 'child_await']).includes(entry.opKind) ||
         !['completed', 'failed'].includes(entry.phase)))
     throw new KernelStorageError('STATE_TRANSITION_INVALID', 'result requires the complete worker-free root candidate closure');
   assertRetiredGenerationCut(driver, run, cut.workspaceGenerations);
@@ -195,12 +197,15 @@ async function readAgentResultBasis(driver: SqliteDriver, artifacts: ArtifactCat
     candidateItemId: candidate.itemId, resultSourceRef: candidate.resultSourceRef });
   requireEqual(plan, expectedPlan, 'result frozen verifier plan');
   const required = frozen.verifiers.some(entry => entry.gate === 'required');
-  const consent = required ? undefined : decodeUnverifiedConsent(await readCanonicalArtifact(artifacts, spec.unverifiedConsentRef!));
+  const childAdmission = run.parentRunId ? await readChildAdmission(driver, artifacts, run.id) : undefined;
+  const consent = required ? undefined : childAdmission
+    ? decodeDerivedChildUnverifiedConsent(await readCanonicalArtifact(artifacts, spec.unverifiedConsentRef!))
+    : decodeUnverifiedConsent(await readCanonicalArtifact(artifacts, spec.unverifiedConsentRef!));
   if (required && spec.unverifiedConsentRef !== undefined) throw new TypeError('verified result cannot carry unverified consent');
-  if (consent && !exactKeys(consent, ['schemaVersion', 'kind', 'principalId', 'client', 'channelIdentityRef', 'channelIdentityDigest',
+  if (consent && consent.kind === 'direct_unverified_consent' && !exactKeys(consent, ['schemaVersion', 'kind', 'principalId', 'client', 'channelIdentityRef', 'channelIdentityDigest',
     'admissionIntentDigest', 'runSpecCoreDigest', 'allowUnverified', 'createdAt', 'consentDigest']))
     throw new TypeError('result consent has unknown or missing fields');
-  if (consent) {
+  if (consent && consent.kind !== 'derived_child_unverified_consent') {
     for (const ref of [consent.channelIdentityRef, consent.channelIdentityDigest, consent.admissionIntentDigest,
       consent.runSpecCoreDigest, consent.consentDigest]) assertArtifactRef(ref);
     parseCanonicalTime(consent.createdAt);
@@ -209,7 +214,9 @@ async function readAgentResultBasis(driver: SqliteDriver, artifacts: ArtifactCat
     admission_request_id FROM runs WHERE id = ?`).get<{ principal_id: string; admission_method: string; admission_key: string;
       admission_intent_digest: string; admission_request_id: string | null }>(run.id);
   const principalId = readSessionPrincipalId(driver, run.sessionId);
-  const original = admission?.admission_request_id && readControlRequest(driver, principalId, 'run.submit', admission.admission_request_id);
+  const original = !childAdmission && admission?.admission_request_id && readControlRequest(driver, principalId, 'run.submit', admission.admission_request_id);
+  if (!childAdmission) {
+  if (consent?.kind === 'derived_child_unverified_consent') throw new TypeError('root result cannot borrow child consent');
   const { unverifiedConsentRef: _consent, ...specCore } = spec;
   if (!admission || admission.principal_id !== principalId || admission.admission_method !== 'run.submit' || !original ||
       run.id !== identityHash('cliq-run-id-v1', principalId, 'run.submit', admission.admission_key) ||
@@ -236,6 +243,12 @@ async function readAgentResultBasis(driver: SqliteDriver, artifacts: ArtifactCat
     channelIdentityRef: original.channelIdentityRef, channelIdentityDigest: original.channelIdentityDigest });
   if (channel.principalId !== principalId || consent && channel.client !== consent.client || channel.openedAt > original.committedAt)
     throw new TypeError('result consent does not close its original principal and client');
+  } else {
+    requireEqual(childAdmission.spec, spec, 'child result exact admitted spec');
+    if (!admission || admission.principal_id !== principalId || admission.admission_method !== 'delegate')
+      throw new TypeError('child result has no exact original delegate source');
+    childAdmission.assertUnchanged(driver);
+  }
   const summary = await readText(artifacts, candidate.summaryRef);
   if (!summary.utf8.trim()) throw new TypeError('result summary is empty');
   const entries = progress.entries.map(entry => ({ verifierIndex: entry.planEntry.index, verifierId: entry.planEntry.verifierId,
@@ -251,7 +264,7 @@ async function readAgentResultBasis(driver: SqliteDriver, artifacts: ArtifactCat
     : readCheckpoint(driver, finalCandidateCheckpointId(run.id, candidate.producingItemId));
   if (cut.run.nextStep === 'verify' && cut.latestCheckpoint.id !== completionCheckpoint.id)
     throw new TypeError('verification completion does not retain its exact final producer Checkpoint');
-  return { candidate, plan, planRef, consent, summary, principalId, admission, original, progress, verification, verificationReceiptRefs,
+  return { candidate, plan, planRef, consent, summary, principalId, admission, original: original || undefined, childAdmission, progress, verification, verificationReceiptRefs,
     completionCheckpoint, status: required ? 'succeeded' as const : 'completed_unverified' as const,
     terminalReason: required ? 'verified' as const : 'no_required_verifier' as const, delivery: undefined };
 }
@@ -477,6 +490,16 @@ async function validateRunResultRecoveryData(driver: SqliteDriver, artifacts: Ar
       checkpoint.contextManifestRef !== historical.checkpoint.contextManifestRef || checkpoint.workspaceStateRef !== historical.checkpoint.workspaceStateRef ||
       checkpoint.createdAt !== run.updatedAt || run.updatedAt >= run.deadlineAt)
     throw new TypeError('terminal RunResult has no exact atomic Checkpoint');
+  if (run.parentRunId) {
+    const child = await readChildAdmission(driver, artifacts, run.id), allocation = child.allocation;
+    if (allocation.state === 'reserved' || allocation.terminalAt !== run.updatedAt ||
+        allocation.terminal.status !== run.status || !('resultRef' in allocation.terminal) ||
+        allocation.terminal.resultRef !== run.resultRef || canonicalSha256(allocation.inclusiveBudgetUsage) !== canonicalSha256(run.budgetConsumed))
+      throw new TypeError('terminal child result has no same-transaction incoming allocation effect');
+    if (driver.prepare('SELECT 1 FROM items WHERE item_id = ?').get(identityHash('cliq-session-run-terminal-item-v1', run.sessionId, run.id)))
+      throw new TypeError('child result cannot append a root Session terminal');
+    return;
+  }
   const admitted = decodeAdmittedContext(await readCanonicalArtifact(artifacts, cut.runSpec.admittedContextRef));
   const terminal: SessionRunTerminalItem = { schemaVersion: 1, format: 'cliq-session-run-terminal-v1', kind: 'run_terminal',
     itemKey: `run-terminal:${run.id}`, runId: run.id, operation: cut.runSpec.operation, admittedSessionItemSeq: admitted.throughSessionItemSeq,

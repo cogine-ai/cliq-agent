@@ -517,12 +517,13 @@ test('installed journey failures retain only fixed classifications from actual e
   const classification = ts.transpileModule(source.slice(from, through),
     { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
   const classify = primary => {
-    primary.stack = 'Error: private diagnostic must not survive\n at inspect (installed-read-control.ts:24:21)\n at secret-source.ts:99:2';
+    primary.stack = 'Error: private diagnostic must not survive\n at inspect (installed-read-control.ts:24:21)\n at known (installed-client-applications.ts:41:11)\n at known (installed-ink-consumer.ts:35:9)\n at secret-source.ts:99:2';
     const context = { primary, report: {}, Error, AggregateError, Number,
       InstalledClientConsumerDeadlineError, InstalledClientDriverError };
     vm.createContext(context); vm.runInContext(classification, context);
     const result = JSON.parse(JSON.stringify(context.report.error));
-    assert.deepEqual(result.sourceFrames, [{ file: 'installed-read-control.ts', line: 24, column: 21 }]);
+    assert.deepEqual(result.sourceFrames, [{ file: 'installed-read-control.ts', line: 24, column: 21 },
+      { file: 'installed-client-applications.ts', line: 41, column: 11 }, { file: 'installed-ink-consumer.ts', line: 35, column: 9 }]);
     assert(!JSON.stringify(result).includes('private')); assert(!JSON.stringify(result).includes('unrecognized-sensitive-code'));
     assert.deepEqual(Object.keys(result).sort(), ['diagnosticOnly', 'failureKinds', 'kind', 'sourceFrames']);
     assert.equal(result.diagnosticOnly, true); assert.equal(result.kind, 'installed_run_journey_failed');

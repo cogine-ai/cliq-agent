@@ -257,9 +257,10 @@ async function prepareSnapshot(metadata: SourceGitInspectionOutputV1, resources:
   await writeFile(`${REPOSITORY}/config`, sanitizedGitConfigText(metadata.sanitizedConfig), { flag: 'wx', mode: 0o600 });
   // This fresh actual index-pack checks the original supplied pack, CRCs,
   // offsets and all object bodies. A stored parser/old source result is not
-  // substituted for this process. The only temporary filename is fixed.
+  // substituted for this process. The only temporary filename is fixed;
+  // optional reverse-index defaults must not create another output file.
   const verifiedIndex = `${OUTPUT}/input.verified.idx`;
-  await git(['index-pack', '--strict', '--index-version=2', '-o', verifiedIndex, `${REPOSITORY}/objects/pack/${name}.pack`], resources);
+  await git(['index-pack', '--strict', '--index-version=2', '--no-rev-index', '-o', verifiedIndex, `${REPOSITORY}/objects/pack/${name}.pack`], resources);
   const verifiedBytes = await boundedFile(verifiedIndex, resources.maxSingleFileBytes);
   if (!verifiedBytes.equals(packIndexBytes)) refused();
   const hashSize = metadata.objectFormat === 'sha1' ? 20 : 32;
@@ -344,7 +345,7 @@ async function inspect(): Promise<void> {
     return;
   }
   await git(['pack-objects', '--stdout', '--revs', '--delta-base-offset', '--threads=1', '--window=0'], resources, rootBytes, 'reachable.pack');
-  await git(['index-pack', '--strict', '--index-version=2', '-o', `${OUTPUT}/reachable.idx`, `${OUTPUT}/reachable.pack`], resources);
+  await git(['index-pack', '--strict', '--index-version=2', '--no-rev-index', '-o', `${OUTPUT}/reachable.idx`, `${OUTPUT}/reachable.pack`], resources);
   await git(['verify-pack', `${OUTPUT}/reachable.idx`], resources);
   const index = await boundedFile(`${OUTPUT}/reachable.idx`, resources.maxSingleFileBytes);
   const hashSize = safe.objectFormat === 'sha1' ? 20 : 32;

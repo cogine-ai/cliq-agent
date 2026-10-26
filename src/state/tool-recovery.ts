@@ -1,9 +1,11 @@
+import type { ToolCallInputV1 } from '../protocol/agent-ir.js';
+import { decodeDelegateRequest } from '../tools/child-inputs.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting, identityHash, parseCanonicalTime } from '../kernel/identity.js';
 import type { Checkpoint, ContinuationItem, InvocationJournalEntry, Run, RunFrontier, RunSpec, TerminalDetail, ToolContractManifestV1, ToolResultPayloadV1, ToolResultModelContentV1, WorkspaceGenerationStateV1 } from '../kernel/types.js';
 import type { RunPolicySnapshotV1, ToolObservationV1, ToolOperationGrantV1, ToolPolicyChannelEvidenceV1, ToolPolicyDecisionItem,
   ToolRequestV1, ToolTargetV1, ToolApprovalWait, ToolApprovalDecisionV1, ToolGrantExpiryV1 } from '../kernel/tool-authorization.js';
-import { toolOperationId } from '../policy/tool-policy.js';
+import { toolOperationId, childDelegateOperationId } from '../policy/tool-policy.js';
 import { toolApprovalCheckpointId, toolApprovalDecision } from '../policy/tool-approval.js';
 import { exactKeys, requireEqual } from '../policy/runtime-authority.js';
 import { readCanonicalArtifact } from './agent-context.js';
@@ -37,7 +39,9 @@ export async function validateToolRecovery(input: {
     if (digestOmitting(evidence, 'evidenceDigest') !== evidence.evidenceDigest || evidence.runId !== run.id || evidence.policyRef !== spec.policyRef ||
         request.format !== 'cliq-tool-request-v1' || request.requestDigest !== evidence.requestDigest ||
         digestOmitting(request, 'requestDigest') !== request.requestDigest || request.runId !== run.id || request.assemblyRef !== spec.assemblyRef ||
-        request.opId !== evidence.opId || request.opId !== toolOperationId(run.id, request.batchItemId, request.callId) ||
+        request.opId !== evidence.opId || request.opId !== (target.execution.kind === 'supervisor_operation'
+          ? childDelegateOperationId(run.id, request.batchItemId, request.callId, request.callIndex, request.inputDigest)
+          : toolOperationId(run.id, request.batchItemId, request.callId)) ||
         request.frontierRef !== evidence.frontierRef || request.targetRef !== evidence.targetRef || request.targetDigest !== evidence.targetDigest ||
         target.targetDigest !== request.targetDigest || digestOmitting(target, 'targetDigest') !== target.targetDigest ||
         target.runId !== run.id || target.toolName !== request.toolName || !call || call.callId !== request.callId || call.toolName !== request.toolName ||
@@ -65,13 +69,18 @@ export async function validateToolRecovery(input: {
   async function approvalWait(waitingRef: string) {
     const wait = await readCanonicalArtifact<ToolApprovalWait>(artifacts, waitingRef);
     const proof = await policyRequest(wait.subject.policyChannelEvidenceRef);
-    const { evidence, request, target, contract } = proof;
+    const { evidence, request, target, contract, call } = proof;
     if (!exactKeys(wait, ['schemaVersion', 'kind', 'runId', 'createdFromRevision', 'createdAt', 'frontierRef', 'subject']) ||
         wait.schemaVersion !== 1 || wait.kind !== 'approval' || wait.runId !== run.id || wait.frontierRef !== request.frontierRef ||
         !Number.isSafeInteger(wait.createdFromRevision) || wait.createdFromRevision < 1 || wait.createdAt !== evidence.evaluatedAt ||
         wait.createdAt < run.createdAt || wait.createdAt >= run.deadlineAt || evidence.effectiveDisposition !== 'ask') throw new TypeError('invalid retained tool approval wait');
     parseCanonicalTime(wait.createdAt);
-    requireEqual(wait.subject, { kind: 'tool_call', policySubjectKind: 'ordinary_tool', batchItemId: request.batchItemId,
+    const localInput = contract.execution.kind === 'supervisor_operation'
+      ? await readCanonicalArtifact<ToolCallInputV1>(artifacts, request.inputRef) : undefined;
+    if (localInput && (localInput.disposition !== 'resolved' || localInput.inputDigest !== request.inputDigest ||
+        digestOmitting(localInput, 'inputDigest') !== localInput.inputDigest)) throw new TypeError('child approval lost its original normalized input');
+    requireEqual(wait.subject, { kind: 'tool_call', ...(localInput
+      ? { policySubjectKind: 'child_delegate', mode: decodeDelegateRequest(localInput.value).mode } : { policySubjectKind: 'ordinary_tool' }), batchItemId: request.batchItemId,
       callId: request.callId, callIndex: request.callIndex, opId: request.opId, target: request.targetRef, toolName: request.toolName,
       toolContractDigest: target.toolContractDigest, replayClass: contract.replayClass,
       policyChannelEvidenceRef: canonicalSha256(evidence), policyChannelEvidenceDigest: evidence.evidenceDigest }, 'retained approval subject');
@@ -85,13 +94,22 @@ export async function validateToolRecovery(input: {
   // Worker-death reconciliation is validated against the full Run/launch/
   // generation/Journal cut by readRecoveryClosure, not as a tool approval.
   if (run.waitingReason === 'approval' || (run.status === 'waiting' && run.nextStep === 'tool' &&
-      run.waitingReason !== 'input' && run.waitingReason !== 'reconciliation')) {
+      run.waitingReason !== 'input' && run.waitingReason !== 'reconciliation' && run.waitingReason !== 'child')) {
     if (run.status !== 'waiting' || run.waitingReason !== 'approval' || !run.waitingOnRef || run.activeWorkerLaunchId || run.nextStep !== 'tool') {
       throw new TypeError('approval wait retains an execution worker or lacks its exact subject');
     }
+    const subject = await readCanonicalArtifact<{ subject?: { kind?: string } }>(artifacts, run.waitingOnRef);
+    if (subject.subject?.kind === 'child_merge') {
+      if (!input.driver) throw new TypeError('child merge approval requires its actual retained SQLite source');
+      const history = await import('./child-merge-authorization.js');
+      const original = await history.readChildMergeApprovalWait(input.driver, artifacts, run.id, run.waitingOnRef);
+      history.assertChildMergeApprovalWaitingRun(original.waitingRun, run);
+      original.source.assertUnchanged(input.driver);
+    } else {
     const { wait, checkpoint } = await approvalWait(run.waitingOnRef);
     if ((run.stopIntentRef ? run.revision < wait.createdFromRevision + 1 : run.revision !== wait.createdFromRevision + 1) || run.frontierRef !== wait.frontierRef || run.latestCheckpointId !== checkpoint.id) {
       throw new TypeError('waiting Run substitutes its revision, frontier or Checkpoint');
+    }
     }
   }
   const approvedWaits = new Set<string>();

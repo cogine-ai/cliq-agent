@@ -98,10 +98,14 @@ int main(void) {
     request.max_file_bytes = 1048576; request.max_generation_bytes = 86015;
     output_check(!source_output_inventory(directory, &request, &pages, &failure) && failure == CLIQ_SOURCE_OUTPUT_CAPACITY, "rounded simultaneous copy capacity retains original bound");
     request.max_generation_bytes = 268435456;
-    int unexpected = openat(directory, "extra", O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC, 0600);
-    output_check(unexpected >= 0 && source_close_fd(&unexpected), "actual unexpected object fixture");
-    output_check(!source_output_inventory(directory, &request, &pages, &failure) && failure == CLIQ_SOURCE_OUTPUT_NAME, "extra namespace entry remains rejected");
-    output_check(unlinkat(directory, "extra", 0) == 0 && unlinkat(directory, "reachable.idx", 0) == 0, "actual entry removal");
+    const char *unexpected_names[] = { "extra", "reachable.rev", "input.verified.rev", "canonical.index.lock", "tmp_pack_owned" };
+    for (size_t i = 0; i < sizeof(unexpected_names) / sizeof(unexpected_names[0]); i++) {
+        int unexpected = openat(directory, unexpected_names[i], O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC, 0600);
+        output_check(unexpected >= 0 && source_close_fd(&unexpected), "actual unexpected object fixture");
+        output_check(!source_output_inventory(directory, &request, &pages, &failure) && failure == CLIQ_SOURCE_OUTPUT_NAME, "every extra namespace entry remains rejected");
+        output_check(unlinkat(directory, unexpected_names[i], 0) == 0, "actual rejected extra fixture cleanup");
+    }
+    output_check(unlinkat(directory, "reachable.idx", 0) == 0, "actual entry removal");
     output_check(!source_output_inventory(directory, &request, &pages, &failure) && failure == CLIQ_SOURCE_OUTPUT_COMPLETE_NAMES, "missing role remains rejected");
     output_check(symlinkat("canonical.index", directory, "reachable.idx") == 0, "actual symlink fixture");
     output_check(!source_output_inventory(directory, &request, &pages, &failure) && failure == CLIQ_SOURCE_OUTPUT_CAPACITY_FILE, "fixed named no-follow regular-file guard retained");

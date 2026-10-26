@@ -5,7 +5,7 @@ import type { RunPolicySnapshotV1 } from '../kernel/tool-authorization.js';
 import type { ToolCallInputV1, ModelUnusableResponseV1, ModelTextV1 } from '../protocol/agent-ir.js';
 import { createModelRequestReservation, priceTableDigest, type ModelPriceTableV1, type LocalZeroCostProvenanceV1 } from '../model/pricing.js';
 import { estimatePromptTokens, projectModelVisiblePrompt, type CompactionPromptEnvelopeV1, type ModelRequestV1, type NormalPromptProjectionV1 } from '../model/request.js';
-import { loadToolPolicy, planToolRequest, toolOperationId } from '../policy/tool-policy.js';
+import { loadToolPolicy, planToolRequest } from '../policy/tool-policy.js';
 import { exactKeys, requireEqual } from '../policy/runtime-authority.js';
 import { planContextCompaction, replaceCompactedPrefix, validateContextItems, type ContextItem } from '../runtime/context-compaction.js';
 import { planModelContinuation, validateModelTurn, validateUnusableModelResponse } from '../runtime/continuation.js';
@@ -13,9 +13,9 @@ import { openStopBatch, stopInvocationHistory, type ResourceStopIntent } from '.
 import { loadInstructionText, readCanonicalArtifact, readModelContext, readModelTurnMaterial } from './agent-context.js';
 import type { ArtifactCatalog } from './artifacts.js';
 import { decodeContextManifest, decodeWorkspaceIdentity } from './decoders.js';
-import { isZeroBudget } from './invariants.js';
+import { childAllocationBudgetFacts, addBudget, subtractBudget, isZeroBudget } from './invariants.js';
 import { readCheckpoint, readSession } from './rows.js';
-import type { SqliteDriver } from './sqlite-driver.js';
+import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
 import { readToolApproval } from './tool-approval-recovery.js';
 import { joinResourceOperations, stateOperation } from './errors.js';
 import { readHighestPreparedAttempt } from './repositories/journal.js';
@@ -25,24 +25,49 @@ import { readDeliveryVerificationMode } from './run-result-recovery.js';
 import { readVerifierPendingPolicy } from './verifier-stop-history.js';
 import { readDeliveryAuthorization } from './delivery-approval.js';
 import { readDeliveryMergeLimitCause } from './delivery-recovery.js';
+import { readStopSourceData } from './stop-source.js';
 import { frozenSessionCompactionIndex } from './session-context.js';
 
 type WithoutIdentity<T> = T extends ResourceStopIntent ? Omit<T, 'schemaVersion' | 'runId' | 'createdAt'> : never;
 type ResourceCause = WithoutIdentity<ResourceStopIntent>;
+// Only the full original data reader can associate this callback with its
+// returned cause. It rechecks retained SQL data; it grants no permission.
+const resourceSourceChecks = new WeakMap<ResourceCause, (connection: SqliteConnection) => void>();
+
+export async function prepareResourceStopCause(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1, observedAt: string) {
+  const cause = await readResourceStopCause(driver, artifacts, cut, observedAt);
+  if (!cause) return undefined;
+  return { cause, commit: resourceSourceChecks.get(cause) };
+}
 
 /** Reproduce deterministic resource failure from retained facts, not a caught error or caller reason. */
 export const readResourceStopCause = stateOperation('RECOVERY_REQUIRED', async function readResourceStopCause(driver: SqliteDriver, artifacts: ArtifactCatalog,
-  cut: RecoveryClosureV1, observedAt: string
+  cut: RecoveryClosureV1, observedAt: string, sourceCheckpointId?: string, sourceRunRevision?: number, registeredJournalSeq?: number
 ): Promise<ResourceCause | undefined> {
-  const { run, runSpec: spec, latestCheckpoint: checkpoint, journal } = cut;
-  if (run.waitingReason || !isZeroBudget(run.budgetReserved)) return undefined;
+  const { run, runSpec: spec } = cut;
+  const { checkpoint, journal, items: sourceItems } = readStopSourceData(driver, cut, observedAt, sourceCheckpointId, sourceRunRevision, registeredJournalSeq);
+  const children = cut.childAllocations.filter(row => row.parentRunId === run.id);
+  const currentChildren = childAllocationBudgetFacts(run.id, children);
+  if (run.waitingReason && sourceCheckpointId === undefined || !isZeroBudget(subtractBudget(run.budgetReserved, currentChildren.reserved))) return undefined;
+  // A child's later one-time settlement cannot erase an already registered
+  // resource failure. Reproduce only the original counters at observedAt;
+  // this is a data projection, never a fabricated current Run/SQL authority.
+  let childConsumed = { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 };
+  let childReserved = { ...childConsumed };
+  for (const child of children) if (journal.some(entry => entry.opKind === 'child_admission' && entry.phase === 'prepared' &&
+      entry.opId === child.delegateOpId && entry.seq <= checkpoint.journalSeq)) {
+    if (child.state === 'settled' && child.parentSettlementRevision <= (sourceRunRevision ?? run.revision)) childConsumed = addBudget(childConsumed, child.inclusiveBudgetUsage);
+    else childReserved = addBudget(childReserved, child.grantedAdditiveCeilings);
+  }
+  const consumedAtObservation = addBudget(subtractBudget(run.budgetConsumed, currentChildren.consumed), childConsumed);
+  const reservedAtObservation = addBudget(subtractBudget(run.budgetReserved, currentChildren.reserved), childReserved);
   const history = [...stopInvocationHistory(journal).values()];
   // A resource proof must remain true during drain. Unresolved external results can still change the
   // continuation/consumption; their owning reconciliation reducer must settle them first.
   if (history.some(({ entry, hasClaim }) => entry.phase !== 'completed' && (entry.phase !== 'failed' || hasClaim))) return undefined;
   const budgetCause = (required: BudgetUsage): ResourceCause | undefined => {
     for (const counter of ['modelTokens', 'costMicros', 'toolCalls'] as const) {
-      const ceiling = spec.budgets[counter], consumed = run.budgetConsumed[counter], reserved = run.budgetReserved[counter];
+      const ceiling = spec.budgets[counter], consumed = consumedAtObservation[counter], reserved = reservedAtObservation[counter];
       if (BigInt(consumed) + BigInt(reserved) + BigInt(required[counter]) > BigInt(ceiling)) {
         return { origin: 'budget', targetStatus: 'failed', reason: 'budget_exhausted', counter, ceiling, consumed, reserved, required: required[counter] };
       }
@@ -68,8 +93,30 @@ export const readResourceStopCause = stateOperation('RECOVERY_REQUIRED', async f
     if (canonicalSha256(inputSchema) !== entry.inputSchemaDigest) throw new TypeError('resource tool schema mismatch');
     return { ...entry, inputSchema };
   });
-  const allItems: ContextItem[] = await artifacts.mapReads(cut.items, async (row) => ({ itemSeq: row.itemSeq, itemRef: row.payloadRef,
+  const allItems: ContextItem[] = await artifacts.mapReads(sourceItems, async (row) => ({ itemSeq: row.itemSeq, itemRef: row.payloadRef,
     item: await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef) }));
+  const synthetic = allItems.filter(row => row.item.kind === 'child_merge_batch').at(-1)?.item;
+  if (synthetic?.kind === 'child_merge_batch') {
+    const outcomes = allItems.filter(row => row.item.kind === 'child_merge_result' && row.item.mergeBatchItemId === synthetic.itemId);
+    // This selector cannot prove a chargeable operation. The original B/S/A,
+    // registered permission or reproducible frozen allow and complete history
+    // are independently read below before producing a budget cause.
+    const lastOutcome = outcomes.at(-1)?.item;
+    const pending = outcomes.length < synthetic.calls.length && (!outcomes.length ||
+      lastOutcome?.kind === 'child_merge_result' && lastOutcome.outcome === 'merged');
+    if (pending) {
+      const { readChildMergePendingBudgetData } = await import('./child-merge-authorization.js');
+      const source = await readChildMergePendingBudgetData(driver, artifacts, { runId: run.id, sourceCheckpointId: checkpoint.id,
+        sourceRunRevision: sourceRunRevision ?? run.revision, sourceJournalSeq: registeredJournalSeq ?? journal.length, observedAt });
+      if (!source) return undefined;
+      const cause = budgetCause({ modelTokens: 0, costMicros: 0, toolCalls: source.required, repairAttempts: 0 });
+      if (cause) {
+        source.assertUnchanged(driver);
+        resourceSourceChecks.set(cause, source.assertUnchanged);
+      }
+      return cause;
+    }
+  }
   // Terminal drain adds only an undispatched suffix. Reconstruct the pre-drain call cut for its stop proof.
   const items = allItems.filter(({ item }) => item.kind !== 'tool_result' || item.outcome !== 'cancelled');
   const pending = openStopBatch(items.map(({ item }) => item));
@@ -77,16 +124,27 @@ export const readResourceStopCause = stateOperation('RECOVERY_REQUIRED', async f
   if (lastItem?.kind === 'model_turn' && lastItem.stopReason === 'end') {
     // A completed final response requires no next model reservation or context
     // compaction. Its result limits are a separate immutable resource fact.
-    return readFinalSourceLimit(driver, artifacts, cut, assembly, items, observedAt);
+    return readFinalSourceLimit(driver, artifacts, { ...cut, latestCheckpoint: checkpoint, items: sourceItems, journal }, assembly, items, observedAt);
   }
   if (pending) {
     const callIdentity = pending.batch.calls[pending.next]!;
-    const opId = toolOperationId(run.id, pending.batch.itemId, callIdentity.callId);
-    // Refunding a pre-claim attempt restores this call's full capacity; it is not budget exhaustion.
-    if (history.some(({ entry }) => entry.opId === opId)) return undefined;
     const call = await readCanonicalArtifact<ToolCallInputV1>(artifacts, callIdentity.inputRef);
     const entry = contracts.find((entry) => entry.name === call.toolName);
-    if (!entry || entry.access === 'control' || call.disposition !== 'resolved') return undefined;
+    if (!entry || call.disposition !== 'resolved') return undefined;
+    if (entry.access === 'control') {
+      if (entry.name !== 'await_children' || entry.execution.kind !== 'supervisor_control' || entry.execution.handlerId !== 'await_children') return undefined;
+      const { decodeAwaitChildrenRequest } = await import('../tools/child-inputs.js'),
+        { readChildAdmission } = await import('./child-admission.js'), ids = decodeAwaitChildrenRequest(call.value).childRunIds;
+      for (const id of ids) {
+        const admitted = await readChildAdmission(driver, artifacts, id);
+        if (admitted.parent.id !== run.id || !items.some(row => row.item.kind === 'child_handle' && row.item.childRunId === id &&
+            row.itemRef === admitted.receipt.childHandleItemRef)) throw new TypeError('await resource cause has no owned direct handle');
+        admitted.assertUnchanged(driver);
+      }
+      const { childAwaitOpId } = await import('./child-await-artifacts.js');
+      if (history.some(({ entry }) => entry.opId === childAwaitOpId(run.id, pending.batch.itemId, call.callId, call.index, call.inputDigest))) return undefined;
+      return budgetCause({ modelTokens: 0, costMicros: 0, toolCalls: 1, repairAttempts: 0 });
+    }
     const session = readSession(driver, run.sessionId);
     const workspace = decodeWorkspaceIdentity(await readCanonicalArtifact(artifacts, session.workspaceIdentityRef));
     const policy = await readCanonicalArtifact<RunPolicySnapshotV1>(artifacts, spec.policyRef);
@@ -95,6 +153,10 @@ export const readResourceStopCause = stateOperation('RECOVERY_REQUIRED', async f
     const { request, target } = planToolRequest({ runId: run.id, frontierRef, batchItemId: pending.batch.itemId,
       assemblyRef: spec.assemblyRef, assembly, workspaceIdentityRef: session.workspaceIdentityRef,
       workspaceIdentityDigest: workspace.identityDigest, entry, call });
+    const opId = request.opId;
+    // Include the delegate's actual closed op identity. A refunded original
+    // attempt restores this call, rather than proving a new budget failure.
+    if (history.some(({ entry }) => entry.opId === opId)) return undefined;
     const evaluator = loadToolPolicy({ policy, policyRef: spec.policyRef, assembly, assemblyRef: spec.assemblyRef,
       principalId: workspace.ownerPrincipalId, workspaceIdentityRef: session.workspaceIdentityRef,
       workspaceIdentityDigest: workspace.identityDigest, contracts });
@@ -215,7 +277,8 @@ async function readFinalSourceLimit(driver: SqliteDriver, artifacts: ArtifactCat
   assembly: RunAssemblyV1, items: ContextItem[], observedAt: string): Promise<ResourceCause | undefined> {
   const { run, runSpec: spec, journal, latestCheckpoint: latest } = cut;
   const row = cut.items.at(-1)!, producer = items.at(-1)!.item, completed = journal.at(-1);
-  if (spec.operation !== 'agent' || run.parentRunId || producer.kind !== 'model_turn' || producer.stopReason !== 'end' ||
+  if (run.parentRunId) await (await import('./child-admission.js')).readChildAdmission(driver, artifacts, run.id);
+  if (spec.operation !== 'agent' || producer.kind !== 'model_turn' || producer.stopReason !== 'end' ||
       !exactKeys(producer, ['schemaVersion', 'itemId', 'runId', 'kind', 'modelOpId', 'modelAttempt', 'modelTurnRef', 'stopReason', 'textRef', 'createdAt']) ||
       !completed || completed.opKind !== 'model' || completed.phase !== 'completed' || !completed.resultRef || completed.receiptRef ||
       completed.opId !== producer.modelOpId || completed.attempt !== producer.modelAttempt || completed.resultRef !== producer.modelTurnRef ||

@@ -51,6 +51,9 @@ static inline bool cliq_source_retirement_project(const struct cliq_source_histo
     result->snapshot = result->sealed ? &history->sealed : NULL;
     return true;
 }
+/* Historical raw wire6 and current wire7 retain their exact original bytes.
+ * This reader serves data/cleanup only; live cliq_receive remains wire7-only.
+ * A chain cannot mix versions or carry a new builtin acknowledgement. */
 static inline bool cliq_source_history_packet(const struct cliq_worker_packet *packet) {
     /* Only fixed source fields can enter the retained binary snapshot. This
      * also rejects nonzero struct padding and hidden bytes after string NULs. */
@@ -93,7 +96,8 @@ static inline bool cliq_source_history_packet(const struct cliq_worker_packet *p
     const char *digests[] = { packet->plan_ref, packet->sandbox_launch_ref, packet->sandbox_launch_digest,
         packet->source_snapshot_digest, packet->source_rule_digest };
     for (size_t i = 0; i < sizeof(digests) / sizeof(digests[0]); i++) if (*digests[i] && !cliq_source_digest(digests[i])) return false;
-    if (packet->magic != CLIQ_WORKER_MAGIC || packet->version != CLIQ_WORKER_VERSION || packet->status != 0 ||
+    if (packet->magic != CLIQ_WORKER_MAGIC || (packet->version != UINT32_C(6) && packet->version != UINT32_C(7)) || packet->status != 0 ||
+        packet->command < CLIQ_SOURCE_RESERVE || packet->command > CLIQ_SOURCE_RETIRE ||
         packet->scope == 0 || packet->scope >= CLIQ_WORKER_MAX_SCOPES || !cliq_source_request_valid(packet) ||
         strnlen(packet->cgroup_name, sizeof(packet->cgroup_name)) != 76 || strncmp(packet->cgroup_name, "cliq-source-", 12) != 0 ||
         strcmp(packet->cgroup_name + 12, packet->nonce) != 0 ||
@@ -151,7 +155,7 @@ static inline bool cliq_source_history_decode(const unsigned char *bytes, size_t
         if (record.kind == 9 ? !cliq_source_rule_result_valid(&record.packet) :
             record.packet.source_rule_present || record.packet.source_rule_bytes || record.packet.source_rule_digest[0]) return false;
         if (i == 0) history->first = record.packet;
-        else if (!cliq_source_same_attempt(&history->first, &record.packet)) return false;
+        else if (record.packet.version != history->first.version || !cliq_source_same_attempt(&history->first, &record.packet)) return false;
         if (record.kind == 2) history->born = record.packet;
         if (record.kind >= 2 && (record.packet.cgroup_device == 0 || record.packet.cgroup_inode == 0 ||
             record.packet.cgroup_device != history->born.cgroup_device || record.packet.cgroup_inode != history->born.cgroup_inode)) return false;

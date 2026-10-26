@@ -22,19 +22,31 @@ const guest: { manifestRef: string; manifest: GuestToolchainManifest } = { manif
 test('installed contracts retain old edit bytes and expose the complete distinct script/control identities', () => {
   const old = buildInstalledToolContracts({ edit: entry }), all = buildInstalledToolContracts({ edit: entry, scripts: { entry: script, supervisor, guest } });
   assert.deepEqual(old.manifest.entries.map(item => item.name), ['edit']);
-  assert.deepEqual(all.manifest.entries.map(item => item.name), ['bash', 'edit', 'find', 'grep', 'ls', 'read', 'request_input']);
+  assert.deepEqual(all.manifest.entries.map(item => item.name), ['await_children', 'bash', 'delegate', 'edit', 'find', 'grep', 'ls', 'read', 'request_input']);
   assert.deepEqual(all.manifest.entries.find(item => item.name === 'edit'), old.manifest.entries[0]);
   const control = all.manifest.entries.find(item => item.name === 'request_input')!;
   assert.equal(control.execution.kind, 'supervisor_control');
   if (control.execution.kind !== 'supervisor_control') throw new Error('wrong inert identity');
   assert.equal(control.execution.supervisorEntryVersion, 'release-9'); assert.equal(control.access, 'control');
-  const bash = all.manifest.entries[0]!; assert.equal(bash.execution.kind, 'builtin_script');
+  const operation = all.manifest.entries.find(item => item.name === 'delegate')!, waiting = all.manifest.entries.find(item => item.name === 'await_children')!;
+  assert.equal(operation.execution.kind, 'supervisor_operation'); assert.equal(operation.access, 'exec'); assert.equal(operation.replayClass, 'retry');
+  assert.equal(waiting.execution.kind, 'supervisor_control'); assert.equal(waiting.access, 'control'); assert.equal(waiting.replayClass, 'manual');
+  for (const value of [operation, waiting]) {
+    if (value.execution.kind !== 'supervisor_operation' && value.execution.kind !== 'supervisor_control') throw new Error('wrong closed Supervisor identity');
+    assert.equal(value.execution.handlerId, value.name); assert.equal(value.execution.supervisorEntryVersion, supervisor.version);
+    assert.equal(value.execution.supervisorExecutableDigest, supervisor.digest);
+    assert.equal(Object.hasOwn(value.execution, 'adapterCodeDigest'), false);
+  }
+  const bash = all.manifest.entries.find(item => item.name === 'bash')!; assert.equal(bash.execution.kind, 'builtin_script');
   assert(bash.description.includes('/usr/bin/node')); assert(bash.description.includes('/usr/bin/git')); assert(bash.description.includes('/bin/bash'));
   assert(bash.description.includes('Other external commands are not provided')); assert(bash.description.includes('Network is disabled'));
   const resolver = loadToolContracts(all.manifest.entries.map(item => ({ ...item, inputSchema: all.schemas.find(schema => schema.name === item.name)!.schema })));
   assert.equal(resolver.projectInvocation({ callId: 'read', index: 0, toolName: 'read', input: { path: 'a' } }).kind, 'tool');
   assert.equal(resolver.projectInvocation({ callId: 'input', index: 1, toolName: 'request_input',
     input: { prompt: 'Question?', responseKind: 'text', maximumResponseBytes: 64 } }).kind, 'input');
+  const awaitInvocation = resolver.projectInvocation({ callId: 'await', index: 2, toolName: 'await_children', input: { childRunIds: ['owned-child'] } });
+  assert.equal(awaitInvocation.kind, 'input');
+  assert.equal(awaitInvocation.execution.kind === 'supervisor_control' && awaitInvocation.execution.handlerId, 'await_children');
 });
 
 test('a Node-only discovery root and executable script disguise cannot advertise the fixed complete toolset', () => {

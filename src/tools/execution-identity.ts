@@ -39,9 +39,10 @@ export function decodeToolExecutionIdentity(value: unknown): ToolExecutionIdenti
       'guestToolchainManifestDigest', 'toolId', 'executionPath', 'executableDigest']);
     if (data.adapterId !== 'builtin_tools' || data.adapterVersion !== '1' || data.toolId !== 'node' || data.executionPath !== '/usr/bin/node') invalid();
     refs('adapterCodeDigest', 'guestToolchainManifestRef', 'guestToolchainManifestDigest', 'executableDigest');
-  } else if (data.kind === 'supervisor_control') {
+  } else if (data.kind === 'supervisor_control' || data.kind === 'supervisor_operation') {
     exact(['kind', 'handlerId', 'supervisorEntryId', 'supervisorEntryVersion', 'supervisorExecutableDigest']);
-    if (data.handlerId !== 'request_input') invalid();
+    if (data.kind === 'supervisor_control' ? !['request_input', 'await_children'].includes(data.handlerId)
+      : !['delegate', 'child_merge'].includes(data.handlerId)) invalid();
     text('supervisorEntryId'); text('supervisorEntryVersion'); refs('supervisorExecutableDigest');
   } else if (data.kind === 'mcp') {
     exact(['kind', 'registrationId', 'registryRevisionRef', 'registryManifestDigest', 'serverToolName', 'toolContractDigest']);

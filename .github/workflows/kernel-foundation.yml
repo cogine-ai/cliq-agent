@@ -14,6 +14,55 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  installed-runtime-upgrade:
+    name: Actual installed signed schema7 to schema8 upgrade
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+      - run: npm ci
+      - name: Check complete source and controlled publisher components
+        run: node --test --import tsx scripts/kernel/testing/qualification-source.test.ts src/state/testing/qualification-publisher.test.ts
+      - name: Obtain the actual original product source without build artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          old_commit=25130cfec913bddaff4d0a8c7ff4aac7ef2db932
+          old_tree=2bce7193ce7f7dd9d073e6badfb2093fb912d9e7
+          git fetch --no-tags --depth=1 origin "$old_commit"
+          test "$(git rev-parse "$old_commit^{commit}")" = "$old_commit"
+          test "$(git rev-parse "$old_commit^{tree}")" = "$old_tree"
+          mkdir -m 0700 "$RUNNER_TEMP/cliq-upgrade-source7"
+          git archive --format=tar "$old_commit" | tar -xf - -C "$RUNNER_TEMP/cliq-upgrade-source7"
+          # The driver independently checks all1178 logical modes/fullSHA256,
+          # ordered JCS inventory SHA256, count and byte total before copying.
+      - run: npm run build
+        id: build
+      - name: Install the unchanged actual systemd, credential and native build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap libcap-dev libselinux1-dev meson ninja-build e2fsprogs libext2fs-dev pkg-config
+      - name: Exercise the formal upgrade entry and explicit new runtime authorization
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          test "$RUNNER_ARCH" = X64
+          probe_node=$(realpath "$(command -v node)")
+          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --runtime-upgrade-journey "$RUNNER_TEMP/cliq-upgrade-source7" "$probe_node" "$RUNNER_TEMP/cliq-installed-runtime-upgrade"
+      - name: Retain bounded independent upgrade scope and original cleanup evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installed-runtime-upgrade-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cliq-installed-runtime-upgrade/*.json
+          if-no-files-found: warn
+          retention-days: 7
   # Public-repository qualification stays on free standard GitHub-hosted
   # runners. Do not switch these jobs to larger/paid runner labels.
   typescript:

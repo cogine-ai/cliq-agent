@@ -3,6 +3,7 @@ import { canonicalSha256 } from '../kernel/canonical.js';
 import { planCanonicalArtifact } from '../kernel/artifact-plan.js';
 import { assertArtifactRef, digestOmitting, parseCanonicalTime } from '../kernel/identity.js';
 import type { ArtifactRef, ModelPricingBound as KernelModelPricingBound, ProviderName } from '../kernel/types.js';
+import { assertControlWireJson } from '../kernel/control-wire-data.js';
 
 export type ModelTokenComponents = {
   inputTokens: number;
@@ -317,6 +318,23 @@ function validLocalProvenanceSchema(value: unknown): value is LocalZeroCostProve
     isNonemptyString(value.createdAt) &&
     isNonemptyString(value.validThrough)
   );
+}
+
+/** Pure retained-data decoders. These do not verify a signing key, local
+ * endpoint or grant and cannot replace validateModelPricing at dispatch. */
+export function decodeModelPriceTableData(value: unknown): Readonly<ModelPriceTableV1> {
+  assertControlWireJson(value);
+  if (!validPriceTableSchema(value) || priceTableDigest(value) !== value.tableDigest ||
+      parseCanonicalTime(value.validFrom) > parseCanonicalTime(value.validThrough)) throw new TypeError('invalid retained price table data');
+  return immutableSnapshot(value);
+}
+
+export function decodeLocalZeroCostProvenanceData(value: unknown): Readonly<LocalZeroCostProvenanceV1> {
+  assertControlWireJson(value);
+  if (!validLocalProvenanceSchema(value) || digestOmitting(value, 'provenanceDigest') !== value.provenanceDigest ||
+      value.endpointIdentityDigest !== canonicalSha256(value.endpoint) ||
+      parseCanonicalTime(value.createdAt) > parseCanonicalTime(value.validThrough)) throw new TypeError('invalid retained zero-cost data');
+  return immutableSnapshot(value);
 }
 
 function validBound(bound: unknown): bound is ModelPricingBound {

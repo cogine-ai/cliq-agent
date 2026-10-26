@@ -14,6 +14,7 @@
 #include "guest-toolchain.h"
 #include "verifier-protocol.h"
 #include "builtin-tool-protocol.h"
+#include "builtin-result-ack.h"
 #include "builtin-tool-git.h"
 #include "verifier-setup.h"
 #include "worker-sha256.h"
@@ -29,8 +30,10 @@
 #include <time.h>
 
 static const napi_type_tag IMAGE_TAG = { UINT64_C(0x671ca1bc736f4411), UINT64_C(0xa1d7e8ec9f001820) };
-static const napi_type_tag CONTROLLER_TAG = { UINT64_C(0x875a7b5a31bc4112), UINT64_C(0xbf12ad50275ed149) };
-static const napi_type_tag SCOPE_TAG = { UINT64_C(0x00d75ac01fa14d87), UINT64_C(0x9b1c5a0256e81d29) };
+/* Private wire7/ACK scope layouts never unwrap an older loaded module's
+ * controller or scope object, even when both live images share one Node VM. */
+static const napi_type_tag CONTROLLER_TAG = { UINT64_C(0xd13cd526ca3347b7), UINT64_C(0xb59a769ace284f51) };
+static const napi_type_tag SCOPE_TAG = { UINT64_C(0x2b72bf53e4524e35), UINT64_C(0xa9861bd0d5e1c47f) };
 static const napi_type_tag SOURCE_INSPECTOR_IMAGE_TAG = { UINT64_C(0x8c67dfb833d0495c), UINT64_C(0x9be2f2fa2fb9d634) };
 
 static const napi_type_tag BUILTIN_SCRIPT_IMAGE_TAG = { UINT64_C(0x9e40eb5c22474091), UINT64_C(0xa6b77c06b6f9b74f) };
@@ -67,7 +70,8 @@ struct controller { int socket, stdout_fd, stderr_fd; pid_t pid; bool closed, re
     napi_deferred close_deferred; napi_ref close_promise;
 };
 struct native_scope { struct controller *controller; struct native_scope *next, *parent; unsigned int id, references;
-    bool ready, released, activated, stopped, invocation, result_received, verifier, builtin, stop_requested, stop_queued; int image_fd;
+    bool ready, released, activated, stopped, invocation, result_received, verifier, builtin, stop_requested, stop_queued;
+    bool result_ack_started, result_ack_outputs_joined, result_acknowledged; int image_fd;
     uint64_t output_limit;
     uint32_t builtin_tool;
     napi_ref verifier_value;
@@ -892,12 +896,95 @@ static napi_value scope_verifier_result(napi_env env, struct native_scope *scope
     return value;
 }
 
+/* Acknowledgement retires already-settled builtin output data only. The
+ * original result reader must be fully joined before entering this fixed
+ * receiver; no ACK can dispatch an operation, recycle an arena ID, fabricate
+ * death, or manufacture a durable SQL settlement. */
+static napi_value result_data_retired(napi_env env) {
+    napi_throw_error(env, "ERR_CLIQ_CAPTURE_RETIRED", "native builtin result data was acknowledged"); return NULL;
+}
+static bool scope_ack_controller_joined(const struct native_scope *scope) {
+    const struct controller *controller = scope->controller;
+    return controller->cleanup_done && controller->reaped && !controller->retirement_failed;
+}
+static bool scope_drop_acknowledged_result(napi_env env, struct native_scope *scope) {
+    if (scope->result_acknowledged) return true;
+    if (!scope->result_ack_outputs_joined || !scope->verifier_value ||
+        napi_delete_reference(env, scope->verifier_value) != napi_ok) return false;
+    scope->verifier_value = NULL; scope->result_acknowledged = true; return true;
+}
+static napi_value scope_begin_acknowledge_result(napi_env env, napi_callback_info info) {
+    size_t argc = 1; napi_value args[1], self, original; struct native_scope *scope; bool exact = false;
+    if (napi_get_cb_info(env, info, &argc, args, &self, NULL) != napi_ok || argc != 1 ||
+        !tagged(env, self, &SCOPE_TAG, (void **)&scope) || !scope->builtin || !scope->verifier ||
+        !scope->invocation || !scope->released || !scope->result_received)
+        return failure(env, "builtin data acknowledgement requires its original completed native scope");
+    if (scope->result_acknowledged) return result_data_retired(env);
+    if (!scope->verifier_value || napi_get_reference_value(env, scope->verifier_value, &original) != napi_ok ||
+        napi_strict_equals(env, original, args[0], &exact) != napi_ok || !exact)
+        return failure(env, "builtin data acknowledgement requires its exact original native result");
+    struct controller *controller = scope->controller;
+    if (controller->retirement_failed)
+        return failure(env, "builtin data acknowledgement retains uncertain original resources");
+    if (scope->result_ack_started) return undefined(env); /* Never retransmit a possibly consumed ACK. */
+    scope->result_ack_started = true;
+    if (scope_ack_controller_joined(scope)) {
+        scope->result_ack_outputs_joined = true; return undefined(env);
+    }
+    if (controller->closed) return undefined(env); /* Only actual completion can permit local data drop. */
+    if (!scope->parent || controller->pending != 0) {
+        (void)close_controller(controller); return failure(env, "builtin data acknowledgement requires its joined original result reader");
+    }
+    struct cliq_worker_packet request = cliq_packet(CLIQ_ACK_BUILTIN_RESULT);
+    request.scope = scope->id; request.parent = scope->parent->id;
+    memcpy(request.nonce, scope->identity.nonce, sizeof(request.nonce)); request.observed_at_ms = scope->result.observed_at_ms;
+    if (!cliq_builtin_result_ack_valid(&request) || !begin_request(controller, scope, &request, NULL, 0)) {
+        (void)close_controller(controller); return failure(env, "builtin original output acknowledgement could not be sent");
+    }
+    return undefined(env);
+}
+static napi_value scope_poll_result_acknowledged(napi_env env, napi_callback_info info) {
+    size_t argc = 0; napi_value self, result; struct native_scope *scope;
+    if (napi_get_cb_info(env, info, &argc, NULL, &self, NULL) != napi_ok ||
+        !tagged(env, self, &SCOPE_TAG, (void **)&scope) || !scope->builtin || !scope->result_received || !scope->result_ack_started)
+        return failure(env, "builtin data acknowledgement has no original native result owner");
+    struct controller *controller = scope->controller;
+    if (!scope->result_acknowledged && !scope->result_ack_outputs_joined) {
+        if (scope_ack_controller_joined(scope)) scope->result_ack_outputs_joined = true;
+        else if (controller->cleanup_done || controller->retirement_failed)
+            return failure(env, "builtin original output resources did not join");
+        else if (!controller->closed) {
+            if (controller->pending != CLIQ_ACK_BUILTIN_RESULT || controller->pending_scope != scope)
+                return failure(env, "builtin original output acknowledgement lost its fixed channel");
+            struct cliq_worker_packet response;
+            int observed = poll_response(controller, scope, CLIQ_ACK_BUILTIN_RESULT, &response);
+            if (observed < 0) return failure(env, "builtin original output acknowledgement is indeterminate");
+            if (observed == 1) {
+                if (!scope->parent || !cliq_builtin_result_ack_same(&response, scope->id, scope->parent->id,
+                    scope->identity.nonce, scope->result.observed_at_ms)) {
+                    (void)close_controller(controller); return failure(env, "builtin data acknowledgement belongs to another original result");
+                }
+                scope->result_ack_outputs_joined = true;
+            }
+        }
+    }
+    if (scope->result_ack_outputs_joined && !scope_drop_acknowledged_result(env, scope)) {
+        controller->retirement_failed = true; atomic_store(&native_retirement_failed, true);
+        (void)close_controller(controller);
+        napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "builtin native result reference did not retire"); return NULL;
+    }
+    if (napi_get_boolean(env, scope->result_acknowledged, &result) != napi_ok)
+        return failure(env, "builtin data acknowledgement observation is unavailable");
+    return result;
+}
+
 static napi_value scope_result(napi_env env, napi_callback_info info) {
     size_t argc = 0; napi_value self; struct native_scope *scope;
     napi_get_cb_info(env, info, &argc, NULL, &self, NULL);
     if (!tagged(env, self, &SCOPE_TAG, (void **)&scope) || !scope->invocation || !scope->released ||
         (scope->controller->closed && !scope->result_received))
         return failure(env, "native invocation outcome is indeterminate");
+    if (scope->result_acknowledged) return result_data_retired(env);
     if (scope->verifier) return scope_verifier_result(env, scope);
     if (!scope->result_received) {
         int observed = poll_response(scope->controller, scope, CLIQ_WRITE_RESULT, &scope->result);
@@ -1282,9 +1369,11 @@ static napi_value create_builtin_tool(napi_env env, napi_callback_info info) {
         { "result", NULL, scope_result, NULL, NULL, NULL, napi_default, NULL },
         { "stop", NULL, scope_stop, NULL, NULL, NULL, napi_default, NULL },
         { "pollStopped", NULL, scope_poll_stopped, NULL, NULL, NULL, napi_default, NULL },
+        { "beginAcknowledgeResult", NULL, scope_begin_acknowledge_result, NULL, NULL, NULL, napi_default, NULL },
+        { "pollResultAcknowledged", NULL, scope_poll_result_acknowledged, NULL, NULL, NULL, napi_default, NULL },
     };
     if (napi_create_object(env, &result) != napi_ok || napi_type_tag_object(env, result, &SCOPE_TAG) != napi_ok ||
-        napi_define_properties(env, result, 6, properties) != napi_ok || napi_wrap(env, result, scope, finalize_scope, NULL, NULL) != napi_ok) {
+        napi_define_properties(env, result, 8, properties) != napi_ok || napi_wrap(env, result, scope, finalize_scope, NULL, NULL) != napi_ok) {
         (void)retire_descriptor(&input); free(scope); return failure(env, "builtin tool native receiver allocation unavailable");
     }
     scope->next = controller->scopes; controller->scopes = scope; controller->references++; controller->next_scope++;
@@ -1929,7 +2018,7 @@ static napi_value initialize(napi_env env, napi_value exports) {
     };
     if (napi_define_properties(env, exports, sizeof(properties) / sizeof(properties[0]), properties) != napi_ok) return NULL;
     set_number(env, exports, "interfaceVersion", 3); set_number(env, exports, "sourceInterfaceVersion", 1);
-    set_number(env, exports, "preparationInterfaceVersion", 1); set_number(env, exports, "builtinToolInterfaceVersion", 1); return exports;
+    set_number(env, exports, "preparationInterfaceVersion", 1); set_number(env, exports, "builtinToolInterfaceVersion", 2); return exports;
 }
 #else
 static napi_value unsupported(napi_env env, napi_callback_info info) {

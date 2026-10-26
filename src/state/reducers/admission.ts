@@ -702,11 +702,9 @@ async function admitRunInternal(
     published.push(requestArtifact); objectiveArtifact = objectiveValue;
     admittedContextArtifact = contextValue; workspaceStateArtifact = workspaceValue;
   } else {
-    if (verifierPreparation) {
-      const requestArtifact = await publish(admitRequestCore(input, workspacePath, objectiveText, budgets), 'cliq-run-submit-internal-request-core-v1');
-      if (requestArtifact.ref !== requestDigest) throw new TypeError('internal verifier admission request identity changed');
-      published.push(requestArtifact);
-    }
+    const requestArtifact = await publish(admitRequestCore(input, workspacePath, objectiveText, budgets), 'cliq-run-submit-internal-request-core-v1');
+    if (requestArtifact.ref !== requestDigest) throw new TypeError('internal admission request identity changed');
+    published.push(requestArtifact);
     objectiveArtifact = await publish(objective, 'cliq-run-objective-v1');
     admittedContextArtifact = await publish(admittedContext, 'cliq-admitted-context-v1');
     workspaceStateArtifact = await publish(workspaceState, 'cliq-workspace-state-v1');

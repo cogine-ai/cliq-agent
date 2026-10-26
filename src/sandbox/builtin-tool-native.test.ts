@@ -35,7 +35,7 @@ test('actual native script receiver owns immutable bytes and a distinct non-exec
     assert.equal(compiled.status, 0, compiled.stderr);
     const loaded = new Module('cliq-owned-builtin-seal-component'); process.dlopen(loaded, binary);
     const native = loaded.exports as NativeWorkerBinding;
-    assert.equal(native.builtinToolInterfaceVersion, 1);
+    assert.equal(native.builtinToolInterfaceVersion, 2);
     const bytes = Buffer.from('opaque owned script fixture; not a signed tool or authority');
     const filename = path.join(dir, 'owned-data'); await writeFile(filename, bytes, { flag: 'wx', mode: 0o400 });
     const file = await open(filename, 'r');

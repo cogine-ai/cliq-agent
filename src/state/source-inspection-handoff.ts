@@ -161,16 +161,21 @@ export async function installSourceInspectionRetirementHandoff(driver: SqliteDri
   const active = assertActiveStateOwner(driver, owner);
   if (input.captureOwnerClosure.kind === 'local_resources_joined' &&
       (active.ownerEpoch !== row.stateOwnerEpoch || active.supervisorInstanceId !== row.supervisorInstanceId)) return invalid();
-  const original = await artifacts.publishCanonical(row, 'cliq-source-inspection-attempt-v1');
+  const originalRef = canonicalSha256(row);
   const inspector = supervisorInspectorIdentity(active), observedAt = sampleCanonicalNow();
   const data: SourceInspectionRetirementHandoffV1 = { schemaVersion: 1, format: 'cliq-source-inspection-retirement-handoff-v1',
-    originalAttemptRef: original.ref, inspectorIdentityRef: canonicalSha256(inspector), inspectorIdentityDigest: inspector.identityDigest,
+    originalAttemptRef: originalRef, inspectorIdentityRef: canonicalSha256(inspector), inspectorIdentityDigest: inspector.identityDigest,
     captureOwnerClosure: input.captureOwnerClosure, processClosure: input.processClosure, outcome: input.outcome, observedAt,
     ...(input.nativeLifecycleRef ? { nativeLifecycleRef: input.nativeLifecycleRef } : {}), handoffDigest: '' };
   data.handoffDigest = digestOmitting(data, 'handoffDigest');
-  const [inspectorArtifact, handoffArtifact] = await artifacts.publishCanonicalPair([
+  // The original attempt, inspector and handoff are one inert stage. The
+  // original physical staging/currentness and fresh five-second SQL gate below
+  // still run only after every member is durable, fully reread and joined.
+  const [original, inspectorArtifact, handoffArtifact] = await artifacts.publishCanonicalTriple([
+    { value: row, schemaKind: 'cliq-source-inspection-attempt-v1' },
     { value: inspector, schemaKind: inspector.format }, { value: data, schemaKind: data.format }
   ]);
+  if (original.ref !== originalRef || inspectorArtifact.ref !== data.inspectorIdentityRef || handoffArtifact.ref !== canonicalSha256(data)) return invalid();
   let installed: Unretired | undefined, clockRejected = false;
   driver.transaction(connection => {
     assertActiveStateOwner(connection, owner); readHeldSourceInspectionStaging(owner.filesystem, staging);

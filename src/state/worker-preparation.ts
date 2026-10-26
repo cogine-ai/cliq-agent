@@ -1,3 +1,4 @@
+import { assertChildAncestryRelease } from './child-ancestry.js';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { addCanonicalDuration, assertArtifactRef, digestOmitting, identityHash, parseCanonicalTime } from '../kernel/identity.js';
 import type { PreparingWorkerLaunch, RetiredWorkerPreparation, Run, RunAssemblyV1, RunFrontier, WorkerLaunch,
@@ -192,6 +193,7 @@ export function assertWorkerPreparationRelease(driver: SqliteDriver, owner: Stat
   driver.transaction(connection => {
     const launch = preparing(connection, owner, launchId), run = bindableRun(connection, launch), now = sampleCanonicalNow();
     if (advanceTimeFence(connection, owner.ownerEpoch, now) !== 'healthy') return;
+    assertChildAncestryRelease(connection, run.id, now);
     if (run.cancelRequested || run.stopIntentRef || now >= run.deadlineAt || now >= launch.activationDeadlineAt)
       fail('worker preparation cannot release after cancellation or its original deadline');
     if (!launch.preparation.generation || !launch.preparation.controller || !launch.preparation.reservation)

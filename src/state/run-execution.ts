@@ -11,7 +11,7 @@ import { decodeRetainedRunAssembly, type RunAssemblyValidationMaterial } from '.
 import { immutableSnapshot } from '../model/immutable.js';
 import { exactKeys, requireEqual, type RuntimeBundleManifest, type ReleaseTrustKey } from '../policy/runtime-authority.js';
 import { assertNativeContainmentDeath, assertNativePreactivationObservation, LINUX_WORKER_RECIPE, LINUX_VERIFIER_RECIPE,
-  openInstalledLinuxWorkerLauncher, openLinuxWorkerLauncher, type LinuxBlockedWorker, type LinuxWorkerController,
+  observeInstalledPreparingResources, openInstalledLinuxWorkerLauncher, openLinuxWorkerLauncher, type LinuxBlockedWorker, type LinuxWorkerController,
   type LinuxWorkerInstallation, type NativePreactivationRetirement, type NativeRetainedWorkerRetirement } from '../sandbox/linux-worker.js';
 import { borrowRunWorkspaceForExecution, createRunWorkspaceMaterialization, observeRetainedRunWorkspace,
   readRunWorkspacePreparingGit, openRunWorkspacePreparingGitInput,
@@ -254,7 +254,7 @@ type ActiveWorker = {
 type ReceivedCompletion = ({ kind: 'tool' | 'final_turn' | 'verifier' | 'publication'; worker: LinuxBlockedWorker;
   activeWorker: ActiveWorker } | { kind: 'publication_maintenance' | 'publication_received' | 'publication_reconciliation';
     worker?: LinuxBlockedWorker; activeWorker?: ActiveWorker }) & {
-  finish(): Promise<Run>; failure?: unknown; retainsWorker?: boolean };
+  finish(): Promise<Run>; failure?: unknown; retainsWorker?: boolean; toolCompletionCommitted?: boolean };
 
 /** Pure retry classification only. The caller must already own the genuine
  * received producer; its fixed completion still validates the entire Stop
@@ -450,6 +450,8 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
   const selectedSpec = decodeRunSpec(await openingReads.readCanonical(readRun(driver, runId).specRef));
   if (selectedSpec.operation !== (input.operation ?? 'agent'))
     throw new KernelStorageError('INVALID_REQUEST', 'execution selector does not match its retained Run operation');
+  const originalChild = readRun(driver, runId).parentRunId === undefined ? undefined
+    : await (await import('./child-admission.js')).readChildAdmission(driver, openingReads, runId, { signal: openingSignal });
   const installed = selectedRuntime !== undefined || installedAnchor !== undefined;
   let installation: Pick<RunExecutionInstallation, 'cgroupParent'> | undefined;
   if (installed) {
@@ -484,7 +486,11 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           reobserveRetirement, selectedRuntime, openingSignal);
     openingSignal?.throwIfAborted();
     const run = readRun(driver, runId);
-    if (run.parentRunId !== undefined) throw new KernelStorageError('INVALID_REQUEST', 'this installed execution recipe does not support child Runs');
+    if (originalChild) {
+      requireEqual(originalChild.run, run, 'execution exact ordinary child admission cut');
+      for (const edge of [originalChild, ...originalChild.ancestors]) edge.assertUnchanged(driver);
+      originalChild.rootOrigin.assertUnchanged(driver);
+    } else if (run.parentRunId !== undefined) throw new KernelStorageError('RECOVERY_REQUIRED', 'child execution lost its complete original admission closure');
     const runSpec = decodeRunSpec(await openingReads.readCanonical(run.specRef));
     const assembly = decodeRetainedRunAssembly(await openingReads.readCanonical(runSpec.assemblyRef));
     const profile = decodeSandboxProfile(await openingReads.readCanonical(runSpec.sandboxProfileRef));
@@ -785,9 +791,11 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           stateOwnerRowDigest: originalOwner.rowDigest, sessionId: run.sessionId, sourceCheckpointId: selected.latestCheckpoint.id,
           sourceWorkspaceStateRef: selected.latestCheckpoint.workspaceStateRef, repositoryIdentityDigest: git.repositoryIdentityDigest } }, signal);
       assertWorkerPreparationRelease(driver, owner, launchId);
-      await preparingGit.reservation(); signal.throwIfAborted();
+      const preparationResources = await preparingGit.reservation(); signal.throwIfAborted();
       assertWorkerPreparationRelease(driver, owner, launchId); preparingGit.createBlocked();
-      await preparingGit.ready(); signal.throwIfAborted();
+      const preparationDomain = await preparingGit.ready(); signal.throwIfAborted();
+      // READY has actually returned before any optional observation.
+      observeInstalledPreparingResources(controller, preparationResources, preparationDomain);
       assertWorkerPreparationRelease(driver, owner, launchId); preparingGit.releaseCapture();
       await preparingGit.transferInput(); signal.throwIfAborted();
       assertWorkerPreparationRelease(driver, owner, launchId); preparingGit.continueFixedGit();
@@ -1076,6 +1084,15 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           // adapter must still fully validate the new original Stop graph.
           receivedCompletion.failure = error; retainedCompletion = true;
         }
+        throw error;
+      }
+      if (receivedCompletion?.kind === 'tool' && receivedCompletion.toolCompletionCommitted === true &&
+          receivedCompletion.worker === worker && receivedCompletion.activeWorker === activeWorker) {
+        // The unique effect/charge is already durable. Keep only its original
+        // data-release continuation; retry cannot complete or dispatch again.
+        if (error instanceof ResourceRetirementError) cleanupFailure ??= error;
+        receivedCompletion.failure = error;
+        retainedCompletion = true;
         throw error;
       }
       if (receivedCompletion && cleanupFailure === undefined && receivedCompletion.worker === worker && receivedCompletion.activeWorker === activeWorker &&
@@ -1747,9 +1764,12 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         const current = activeWorker, currentWorker = worker;
         // Fix the completed producer before the first quiescence or immutable
         // publication. This is not permission to request another model turn.
-        const candidate = await currentAgent.beginFinalCandidate({ expectedRunRevision }, signal);
+        const childSelection = await currentAgent.planFinalChildren({ expectedRunRevision }, signal);
+        const candidate = childSelection.disposition === 'candidate'
+          ? await currentAgent.beginFinalCandidate({ expectedRunRevision }, signal) : undefined;
         signal.throwIfAborted();
-        const retire = checkpointRetirement(current, candidate.checkpointId, signal);
+        const checkpointId = childSelection.disposition === 'child_final_required' ? childSelection.checkpointId : candidate!.checkpointId;
+        const retire = checkpointRetirement(current, checkpointId, signal);
         let proof: Awaited<ReturnType<typeof retire>> | undefined;
         operationPhase = 'received';
         receivedCompletion = { kind: 'final_turn', worker: currentWorker, activeWorker: current, finish: async () => {
@@ -1760,11 +1780,16 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           proof ??= await retire();
           for (let completion = 0; ; completion++) {
             const selected = readRun(driver, runId);
+            if (!selected.stopIntentRef && sampleCanonicalNow() >= selected.deadlineAt) {
+              await currentAgent.expireRun({ expectedRunRevision: selected.revision });
+              continue;
+            }
             if (selected.activeWorkerLaunchId !== ownedLaunchId || selected.leaseEpoch !== current.activated.launch.leaseEpoch) {
               throw new KernelStorageError('LEASE_FENCED', 'final turn no longer belongs to its original active worker');
             }
             try {
-              return (await candidate.complete({ expectedRunRevision: selected.revision, checkpoint: proof.postEffect })).run;
+              return candidate ? (await candidate.complete({ expectedRunRevision: selected.revision, checkpoint: proof.postEffect })).run
+                : (await currentAgent.waitForFinalChildren({ expectedRunRevision: selected.revision, checkpoint: proof.postEffect }, signal)).run;
             } catch (error) {
               if (!(error instanceof KernelStorageError) || error.code !== 'REVISION_CONFLICT' || completion >= 7 ||
                   readRun(driver, runId).revision === selected.revision) throw error;
@@ -1953,6 +1978,11 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           await currentAgent.waitForInput({ expectedRunRevision: prepared.run.revision, waitingOnRef: prepared.waitingOnRef });
           return readRun(driver, runId);
         }
+        if (prepared.disposition === 'child_admission_required') return prepared.run;
+        if (prepared.disposition === 'children_required') {
+          await currentAgent.waitForChildren({ expectedRunRevision: prepared.run.revision }, signal);
+          return readRun(driver, runId);
+        }
         if (prepared.disposition === 'denied') {
           if (activeWorker) {
             const current = activeWorker;
@@ -2005,6 +2035,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         await claimed.release(invocation);
         toolReleased = script;
         const result = await invocation.result();
+        const editSucceeded = result === 'ok';
         // The native friend copies the original private bytes synchronously,
         // before any caller view or post-effect/persistence await can mutate them.
         const captured = typeof result === 'string' ? undefined : retainBuiltinCapturePublication(artifacts,
@@ -2024,50 +2055,66 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         let diagnostic: Awaited<ReturnType<ArtifactCatalog['publishCanonical']>> | undefined;
         let observation: ToolObservationV1 | undefined;
         let observationRef: string | undefined;
-        receivedCompletion = { kind: 'tool', worker: currentWorker, activeWorker: current, retainsWorker: retainReadWorker, finish: async () => {
+        const completion: ReceivedCompletion = { kind: 'tool', worker: currentWorker, activeWorker: current, retainsWorker: retainReadWorker, finish: async () => {
           if (activeWorker !== current || worker !== currentWorker || ownedLaunchId !== activated.launch.launchId) {
             throw new KernelStorageError('LEASE_FENCED', 'received tool completion lost its original physical owner');
           }
           assertActiveStateOwner(driver, owner);
-          if (persistCapture) capture ??= await persistCapture();
-          if (retire) proof ??= await retire();
-          const base = { schemaVersion: 1 as const, format: 'cliq-tool-observation-v1' as const, runId, opId: claimed.entry.opId,
-            attempt: claimed.entry.attempt, requestRef: claimed.entry.requestRef, targetRef: claimed.entry.target,
-            grantRef: claimed.entry.grantRef!, dispatchId, observedAt,
-            ...(proof ? { postEffect: proof.postEffect } : {}),
-            ...(capture ? { captureRef: capture.ref,
-              captureDigest: (await artifacts.readCanonical<import('./builtin-tool-capture.js').BuiltinToolCaptureV1>(capture.ref)).captureDigest } : {}) };
-          if (!observation) {
-            if (nativeModel?.outcome === 'executed') observation = { ...base, ...nativeModel, observationDigest: '' };
-            else if (!nativeModel && result === 'ok') observation = { ...base, outcome: 'executed', content: { ok: true }, observationDigest: '' };
-            else {
-              const code = nativeModel?.code ?? 'TOOL_EXECUTION_FAILED';
-              diagnostic ??= await artifacts.publishCanonical({ schemaVersion: 1, format: 'cliq-tool-output-diagnostic-v1', code }, 'cliq-tool-output-diagnostic-v1');
-              observation = { ...base, outcome: 'error', code, diagnosticRef: diagnostic.ref, diagnosticDigest: diagnostic.ref, observationDigest: '' };
+          if (!completion.toolCompletionCommitted) {
+            if (persistCapture) capture ??= await persistCapture();
+            if (retire) proof ??= await retire();
+            const base = { schemaVersion: 1 as const, format: 'cliq-tool-observation-v1' as const, runId, opId: claimed.entry.opId,
+              attempt: claimed.entry.attempt, requestRef: claimed.entry.requestRef, targetRef: claimed.entry.target,
+              grantRef: claimed.entry.grantRef!, dispatchId, observedAt,
+              ...(proof ? { postEffect: proof.postEffect } : {}),
+              ...(capture ? { captureRef: capture.ref,
+                captureDigest: (await artifacts.readCanonical<import('./builtin-tool-capture.js').BuiltinToolCaptureV1>(capture.ref)).captureDigest } : {}) };
+            if (!observation) {
+              if (nativeModel?.outcome === 'executed') observation = { ...base, ...nativeModel, observationDigest: '' };
+              else if (!nativeModel && editSucceeded) observation = { ...base, outcome: 'executed', content: { ok: true }, observationDigest: '' };
+              else {
+                const code = nativeModel?.code ?? 'TOOL_EXECUTION_FAILED';
+                diagnostic ??= await artifacts.publishCanonical({ schemaVersion: 1, format: 'cliq-tool-output-diagnostic-v1', code }, 'cliq-tool-output-diagnostic-v1');
+                observation = { ...base, outcome: 'error', code, diagnosticRef: diagnostic.ref, diagnosticDigest: diagnostic.ref, observationDigest: '' };
+              }
+              observation.observationDigest = digestOmitting(observation, 'observationDigest');
             }
-            observation.observationDigest = digestOmitting(observation, 'observationDigest');
+            observationRef ??= (await artifacts.publishCanonical(observation, observation.format)).ref;
+            // A user stop changes Run revision, not this original producer's
+            // genuinely observed outcome. Retain the immutable result while the
+            // owning reducer revalidates the current cut; never replay the tool.
+            // That reducer still rejects a changed frontier, claim or lease.
+            for (let retry = 0; ; retry++) {
+              const current = readRun(driver, runId);
+              if (current.leaseEpoch !== claimed.entry.leaseEpoch || current.activeWorkerLaunchId !== ownedLaunchId) {
+                throw new KernelStorageError('LEASE_FENCED', 'tool result no longer belongs to its original active worker');
+              }
+              try {
+                await currentAgent.completeTool({ opId: claimed.entry.opId, attempt: claimed.entry.attempt,
+                  expectedRunRevision: current.revision, observationRef });
+                if (captured) completion.toolCompletionCommitted = true;
+                break;
+              } catch (error) {
+                if (!(error instanceof KernelStorageError) || error.code !== 'REVISION_CONFLICT' || retry >= 7 ||
+                    readRun(driver, runId).revision === current.revision) throw error;
+              }
+            }
           }
-          observationRef ??= (await artifacts.publishCanonical(observation, observation.format)).ref;
-          // A user stop changes Run revision, not this original producer's
-          // genuinely observed outcome. Retain the immutable result while the
-          // owning reducer revalidates the current cut; never replay the tool.
-          // That reducer still rejects a changed frontier, claim or lease.
-          for (let completion = 0; ; completion++) {
-            const current = readRun(driver, runId);
-            if (current.leaseEpoch !== claimed.entry.leaseEpoch || current.activeWorkerLaunchId !== ownedLaunchId) {
-              throw new KernelStorageError('LEASE_FENCED', 'tool result no longer belongs to its original active worker');
-            }
-            try {
-              await currentAgent.completeTool({ opId: claimed.entry.opId, attempt: claimed.entry.attempt,
-                expectedRunRevision: current.revision, observationRef });
-              break;
-            } catch (error) {
-              if (!(error instanceof KernelStorageError) || error.code !== 'REVISION_CONFLICT' || completion >= 7 ||
-                  readRun(driver, runId).revision === current.revision) throw error;
+          if (captured) {
+            const acknowledged = await captured.acknowledge(invocation);
+            if (acknowledged.kind === 'controller_joined') {
+              // Data release after an actual controller join cannot pretend
+              // the original read-only parent is still executable. Reuse its
+              // ordinary recovery fence; no new death/retirement is asserted.
+              const latest = readRun(driver, runId);
+              if (latest.activeWorkerLaunchId === ownedLaunchId)
+                await beginWorkerRecovery(driver, artifacts, owner, { runId, expectedRunRevision: latest.revision });
+              completion.retainsWorker = false;
             }
           }
           return readRun(driver, runId);
         } };
+        receivedCompletion = completion;
         if (closingCompletion?.worker === currentWorker && closingCompletion.activeWorker === current) closingCompletion.completion = receivedCompletion;
         return receivedCompletion.finish();
       })().catch(async error => {
@@ -2101,6 +2148,9 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       if (selected.run.revision !== expectedRunRevision) throw new KernelStorageError('REVISION_CONFLICT', 'stop drain revision changed');
       const stopIntentRef = selected.run.stopIntentRef;
       if (!stopIntentRef) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'stop drain requires the persisted StopIntent');
+      const childStop = continuation.operation === 'agent' ? await continuation.planStoppedChildren({ expectedRunRevision }, preflightAbort.signal) : undefined;
+      revision({ expectedRunRevision });
+      if (childStop?.disposition === 'child_stop_waiting') return childStop.run;
       if (continuation.operation === 'delivery' && selected.journal.some(entry => entry.opKind === 'publish' && entry.phase === 'dispatch_claimed')) {
         const { readPublicationPrefix } = await import('./delivery-publication-progress.js');
         const prefix = await readPublicationPrefix(driver, preflightReads, selected);
@@ -2139,7 +2189,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           // exact terminal seq. A failed phase or refunded budget alone never
           // substitutes for native retirement, and M still retires below.
           if (entry.opKind === 'publish' && !hasClaim && stoppedPreparations.has(entry.seq)) continue;
-          if (!['model', 'tool', 'verifier'].includes(entry.opKind) || (!['prepared', 'completed'].includes(entry.phase) &&
+          if (!['model', 'tool', 'verifier', 'child_admission', 'child_merge', 'child_await'].includes(entry.opKind) || (!['prepared', 'completed'].includes(entry.phase) &&
               (entry.phase !== 'failed' || hasClaim && !(entry.opKind === 'model' && noRelease.has(entry.seq)) &&
                 !(entry.opKind === 'verifier' && stoppedVerifiers.has(entry.seq))))) {
             throw new KernelStorageError('STATE_TRANSITION_INVALID', 'terminal stop awaits exact dispatch/reconciliation closure');
@@ -2157,17 +2207,25 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           }
           // The reducer requires every original generation sealed or backed
           // by retirement evidence; this branch supplies no new authority.
+          if (childStop?.disposition === 'child_stop_required') {
+            if (continuation.operation !== 'agent') throw new TypeError('Delivery cannot own child Stop settlement');
+            return (await continuation.waitForStoppedChildren({ expectedRunRevision }, signal)).run;
+          }
           return (await continuation.commitTerminalStop({ expectedRunRevision })).run;
         }
         if (!activeWorker || !worker || !generation || !controller || !reservation ||
             selected.run.activeWorkerLaunchId !== ownedLaunchId || selected.run.activeWorkerLaunchId !== activeWorker.activated.launch.launchId) {
           throw new KernelStorageError('RECOVERY_REQUIRED', 'stop drain cannot adopt another worker\'s retirement authority');
         }
-        const proof = await retireToCheckpoint(activeWorker, stopCheckpointId(runId, stopIntentRef), signal);
+        const proof = await retireToCheckpoint(activeWorker, childStop?.disposition === 'child_stop_required' ? childStop.checkpointId : stopCheckpointId(runId, stopIntentRef), signal);
         signal.throwIfAborted();
         // commitTerminalStop checks exact settled invocation history, the
         // currently accounted workspace, and refreshes actual native death
         // before its one atomic Checkpoint/Session/terminal transition.
+        if (childStop?.disposition === 'child_stop_required') {
+          if (continuation.operation !== 'agent') throw new TypeError('Delivery cannot own child Stop settlement');
+          return (await continuation.waitForStoppedChildren({ expectedRunRevision, checkpoint: proof.postEffect }, signal)).run;
+        }
         return (await continuation.commitTerminalStop({ expectedRunRevision, checkpoint: proof.postEffect })).run;
       })();
       return ownOperation(work, abort);
@@ -2257,7 +2315,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       let registered: WorkerRecoveryTask | undefined;
       const sameInspectionStopCut = (previous: Run, current: Run): boolean => {
         if (canonicalSha256(previous) === canonicalSha256(current)) return true;
-        const stable = ({ revision: _revision, updatedAt: _time, stopIntentRef: _intent, cancelRequested: _cancel, ...data }: Run) => data;
+        const stable = ({ revision: _revision, updatedAt: _time, stopIntentRef: _intent, cancelRequested: _cancel, parentCancellationRef: _parentCancellation, ...data }: Run) => data;
         return current.revision > previous.revision && current.updatedAt >= previous.updatedAt &&
           !!current.stopIntentRef && (!previous.cancelRequested || current.cancelRequested) &&
           canonicalSha256(stable(current)) === canonicalSha256(stable(previous));

@@ -1,3 +1,5 @@
+import { installedResourcesObserved, noteInstalledResourceBoundary, type OriginalResourceSubject } from '../state/installed-resource-diagnostics.js';
+import type { ResourceBoundary } from '../state/installed-resource-kernel.js';
 import { KernelStorageError, ResourceRetirementError } from '../state/errors.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import { createHash } from 'node:crypto';
@@ -79,14 +81,50 @@ export type NativeVerifierResult = NativeCapturedInvocationResult;
 /** Shared physical data shape; a tool result has its own genuine producer
  * registry and can never be substituted by the verifier's runtime brand. */
 export type NativeBuiltinToolResult = NativeCapturedInvocationResult & Readonly<{ tool: BuiltinScriptTool }>;
-const builtinToolResults = new WeakMap<object, Readonly<{ stdout: Buffer; stderr: Buffer }>>();
+export type NativeBuiltinResultAcknowledgement = Readonly<{ kind: 'outputs_acknowledged' | 'controller_joined' }>;
+type BuiltinResultOwnership = {
+  producer: LinuxBlockedInvocation;
+  retained?: Readonly<{ stdout: Buffer; stderr: Buffer; acknowledge(): Promise<NativeBuiltinResultAcknowledgement> }>;
+  pending?: Promise<NativeBuiltinResultAcknowledgement>;
+  acknowledged?: NativeBuiltinResultAcknowledgement;
+  observeCaptureDurable?(): void;
+};
+const builtinToolResults = new WeakMap<object, BuiltinResultOwnership>();
 export function assertNativeBuiltinToolResult(value: unknown): asserts value is NativeBuiltinToolResult {
   if (!value || typeof value !== 'object' || !builtinToolResults.has(value)) throw new TypeError('builtin result requires its original real native producer');
 }
 /** Pure retained copy of one original actual result, not another native brand. */
 export function captureNativeBuiltinToolResult(value: unknown): NativeBuiltinToolResult {
-  assertNativeBuiltinToolResult(value); const bytes = builtinToolResults.get(value)!;
+  assertNativeBuiltinToolResult(value); const binding = builtinToolResults.get(value)!;
+  if (!binding.retained || binding.pending) throw new TypeError('builtin result data is already being acknowledged or retired');
+  const bytes = binding.retained;
   return Object.freeze({ ...value, stdout: Buffer.from(bytes.stdout), stderr: Buffer.from(bytes.stderr) });
+}
+
+/** Passive measurement after the original joined durable publication only. */
+export function observeNativeBuiltinCaptureDurable(result: NativeBuiltinToolResult): void {
+  assertNativeBuiltinToolResult(result); builtinToolResults.get(result)!.observeCaptureDurable?.();
+}
+
+/** Data retirement only. The sole completion owner calls this after its
+ * durable result/Journal commit. A copied observation or another invocation
+ * cannot acknowledge these original bytes or authorize any execution. */
+export async function acknowledgeNativeBuiltinToolResult(producer: LinuxBlockedInvocation, result: NativeBuiltinToolResult):
+  Promise<NativeBuiltinResultAcknowledgement> {
+  assertNativeBuiltinToolResult(result);
+  const owned = builtinToolResults.get(result)!;
+  if (owned.producer !== producer || !invocations.has(producer)) throw new TypeError('builtin acknowledgement requires its exact original invocation');
+  if (owned.acknowledged) return owned.acknowledged;
+  if (owned.pending) return owned.pending;
+  const retained = owned.retained;
+  if (!retained) throw new TypeError('builtin acknowledgement lost its original retained data');
+  const pending = retained.acknowledge().then(observed => {
+    owned.acknowledged = observed;
+    owned.retained = undefined;
+    return observed;
+  }).finally(() => { if (owned.pending === pending) owned.pending = undefined; });
+  owned.pending = pending;
+  return pending;
 }
 
 export type LinuxBlockedVerifier = Readonly<{
@@ -208,6 +246,20 @@ export type NativeSourceGitReservationObservation = Readonly<{
   cgroupPath: string; deviceId: string; fileId: string; cgroupId: string; ownerUid: number;
   observedAtMs: number; pidNamespaceReservationId: string; subreaperStartToken: string;
 }>;
+const preparingResourceNotes = new WeakMap<LinuxWorkerController, (subject: OriginalResourceSubject) => void>();
+/** Read-only original preparing-domain observation after READY has returned.
+ * The genuine original controller and native same-attempt observations supply
+ * this locator; it supplies neither preparation completion nor execution. */
+export function observeInstalledPreparingResources(controller: LinuxWorkerController,
+  reservation: NativeSourceGitReservationObservation, ready: NativeSourceGitContainmentObservation): void {
+  assertLinuxWorkerController(controller);
+  if (!installedResourcesObserved()) return;
+  if (reservation.subreaperStartToken !== controller.subreaperStartToken || reservation.fileId !== reservation.cgroupId ||
+      ready.cgroupId !== reservation.cgroupId || ready.cgroupPopulated !== 1 || ready.namespaceInitDeadAndReaped !== 0)
+    throw new TypeError('preparing resource observation changed its original controller/domain');
+  preparingResourceNotes.get(controller)?.({ role: 'run', pid: ready.pid, start: ready.processStartToken,
+    device: reservation.deviceId, inode: ready.cgroupId, relative: path.posix.basename(reservation.cgroupPath) });
+}
 export type NativeSourceGitContainmentObservation = Readonly<{
   pid: number; namespaceInitPid: number; processStartToken: string; namespaceInitStartToken: string;
   cgroupId: string; pidNamespaceId: string; cgroupPopulated: number; remainingTrackedDescendants: number;
@@ -314,7 +366,8 @@ type NativeVerifierOutcome = Readonly<{ termination: number; exitCode: number; s
   startedAtMs: number; endedAtMs: number; durationMs: number; stdout: Buffer; stderr: Buffer; stdoutTruncated: number; stderrTruncated: number;
   death: NativeObservation }>;
 type NativeScope = { pollReady(): boolean; observe(): NativeObservation; activate(nonce: string): void; pollActivated(): boolean;
-  release(): void; result(): number | NativeVerifierOutcome | undefined; stop(): void; pollStopped(): NativeObservation | undefined };
+  release(): void; result(): number | NativeVerifierOutcome | undefined; stop(): void; pollStopped(): NativeObservation | undefined;
+  beginAcknowledgeResult?(raw: NativeVerifierOutcome): void; pollResultAcknowledged?(): boolean };
 type ControllerPreparationDirectoryIdentity = Readonly<{
   deviceId: string; fileId: string; ownerUid: number; ownerGid: number; mode: number;
 }>;
@@ -355,7 +408,7 @@ type NativeController = { pid: number; processStartToken: string;
   observePreparationBirth(cgroupRootFd: number): NativeControllerPreparationBirthObservation;
   close(): Promise<void>;
 };
-export type NativeWorkerBinding = { interfaceVersion: 3; readonly builtinToolInterfaceVersion?: 1; readonly verifierInterfaceVersion?: 1;
+export type NativeWorkerBinding = { interfaceVersion: 3; readonly builtinToolInterfaceVersion?: 2; readonly verifierInterfaceVersion?: 1;
   readonly sourceInterfaceVersion: 1;
   readonly preparationInterfaceVersion: 1;
   sealBuiltinToolScript(fd: number): NativeBuiltinToolScriptImage;
@@ -528,6 +581,7 @@ export async function openInstalledLinuxWorkerLauncher(selected: HeldInstalledRu
   return openWorkerLauncher(selected.bundle, cgroupParent, {
     assertHeld() { withInstalledWorkerRoot(selected, anchor, () => {}); },
     withRoot(operation) { withInstalledWorkerRoot(selected, anchor, fd => operation(fd)); },
+    noteResources(boundary, subjects) { noteInstalledResourceBoundary(boundary, operation => withInstalledWorkerRoot(selected, anchor, operation), subjects); },
     loadNative: () => loadInstalledWorkerNative(selected, options.signal),
     image: entryId => sealInstalledWorkerImage(selected, entryId),
     async guest(toolchain, signal) {
@@ -620,6 +674,13 @@ export async function openInstalledSourceGitController(selected: HeldInstalledRu
       mismatch('fixed source mappings differ from their exact retained signed toolchain');
     withInstalledWorkerRoot(selected, anchor, fd => { controller = binding.openController(helper!, fd); });
     await awaitNative(() => controller!.pollReady() ? true : undefined, close, signal);
+    if (installedResourcesObserved()) {
+      let original!: NativeControllerPreparationBirthObservation;
+      withInstalledWorkerRoot(selected, anchor, fd => { original = controller!.observePreparationBirth(fd); });
+      noteInstalledResourceBoundary('controller_ready', operation => withInstalledWorkerRoot(selected, anchor, operation), [{ role: 'controller',
+        pid: original.pid, start: original.processStartToken, device: original.leaf.deviceId, inode: original.leaf.fileId,
+        relative: 'controllers/' + original.leafName }]);
+    }
     return Object.freeze({
       pid: controller!.pid, processStartToken: controller!.processStartToken,
       reserve(input: HeldSourceGitInput, recipe: NativeSourceGitRecipe) {
@@ -962,9 +1023,11 @@ function verifierOutcome(raw: NativeVerifierOutcome, containment: ProcessContain
   const result = capturedOutcome(raw, containment);
   verifierResults.set(result, Object.freeze({ stdout: Buffer.from(raw.stdout), stderr: Buffer.from(raw.stderr) })); return result;
 }
-function builtinToolOutcome(raw: NativeVerifierOutcome, containment: ProcessContainment, tool: BuiltinScriptTool): NativeBuiltinToolResult {
+function builtinToolOutcome(raw: NativeVerifierOutcome, containment: ProcessContainment, tool: BuiltinScriptTool,
+  producer: LinuxBlockedInvocation, acknowledge: () => Promise<NativeBuiltinResultAcknowledgement>, observeCaptureDurable?: () => void): NativeBuiltinToolResult {
   const result = Object.freeze({ ...capturedOutcome(raw, containment), tool });
-  builtinToolResults.set(result, Object.freeze({ stdout: Buffer.from(raw.stdout), stderr: Buffer.from(raw.stderr) })); return result;
+  builtinToolResults.set(result, { producer, observeCaptureDurable, retained: Object.freeze({ stdout: Buffer.from(raw.stdout), stderr: Buffer.from(raw.stderr), acknowledge }) });
+  return result;
 }
 
 function actualContainment(closure: WorkerLaunchClosure | BuiltinToolLaunchClosure | VerifierLaunchClosure, observed: NativeObservation,
@@ -1181,7 +1244,7 @@ export async function openLinuxWorkerLauncher(options?: LinuxWorkerInstallation)
     },
     async builtin(toolchain, bash, signal) {
       const entry = bundle.entries.find(value => value.entryId === BUILTIN_SCRIPT_RECIPE.entryId);
-      if (!loadedBinding || loadedBinding.builtinToolInterfaceVersion !== 1 || !entry || entry.role !== 'tool_adapter' || entry.executable ||
+      if (!loadedBinding || loadedBinding.builtinToolInterfaceVersion !== 2 || !entry || entry.role !== 'tool_adapter' || entry.executable ||
           entry.version !== '1' || entry.relativePath !== BUILTIN_SCRIPT_RECIPE.relativePath || entry.byteCount < 1 || entry.byteCount > 1_048_576)
         throw new LinuxExecutionIdentityError('the fixed signed preparing Git inspector is unavailable');
       let inspector: NativeBuiltinToolScriptImage | undefined, guest: Readonly<{ job: NativeGuestToolchain | NativeBuiltinBashToolchain; close(): Promise<void> }> | undefined;
@@ -1230,6 +1293,7 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
   builtin?(toolchain: RetainedVerifierToolchain, bash: boolean, signal?: AbortSignal): Promise<HeldBuiltinToolRuntime>;
   preparing?(toolchain: RetainedVerifierToolchain, signal?: AbortSignal): Promise<HeldPreparingGitRuntime>;
   close(): Promise<void>;
+  noteResources?(boundary: ResourceBoundary, subjects?: readonly OriginalResourceSubject[]): void;
 }): Promise<LinuxWorkerLauncher> {
   const controllers = new Set<NativeController>(); let closed = false, closing: Promise<void> | undefined;
   const installed = new Map<string, Promise<NativeImage>>();
@@ -1371,6 +1435,14 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
             return observed;
           };
           const observedBirth = observeBirth(), birthIdentity = controllerPreparationBirthIdentity(observedBirth);
+          const noteResources = (boundary: ResourceBoundary, subjects: readonly OriginalResourceSubject[] = []) => {
+            // A normal completed boundary only. Never perform measurement I/O
+            // in controlled STOP output collection or any original Stop2 join.
+            if (controllerClosed || controllerAbort.signal.aborted || installationAbort.signal.aborted || signal?.aborted) return;
+            source.noteResources?.(boundary, [{ role: 'controller', pid: birthIdentity.pid, start: birthIdentity.processStartToken,
+              device: birthIdentity.leaf.deviceId, inode: birthIdentity.leaf.fileId, relative: 'controllers/' + birthIdentity.leafName }, ...subjects]);
+          };
+          noteResources('controller_ready');
           const controllerBirthDigest = canonicalSha256(birthIdentity);
           const preparationBirth = Object.freeze({}) as NativeControllerPreparationBirth;
           controllerPreparationBirths.set(preparationBirth, { identity: birthIdentity, controllerBirthDigest,
@@ -1575,6 +1647,11 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
                         launch.generationWriteState !== 'active') throw new KernelStorageError('LEASE_FENCED', 'worker activation does not match the committed launch');
                     active = true; created.activate(activationNonceDigest);
                     await awaitNative(() => created.pollActivated() ? true : undefined, closeController); receiver(); borrowed.assertHeld();
+                    if (installedResourcesObserved()) {
+                      const actual = created.observe();
+                      noteResources('active', [{ role: 'run', pid: actual.pid, start: actual.processStartToken,
+                        device: birthIdentity.root.deviceId, inode: actual.cgroupId, relative: path.posix.basename(backend.cgroupPath) }]);
+                    }
                   },
                   async createInvocation(invocationClosure) {
                     if (this !== worker || !active) throw new KernelStorageError('LEASE_FENCED', 'invocation requires the actual active parent worker');
@@ -1587,7 +1664,7 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
                       if (builtinBackend.kind !== 'linux' || invocationClosure.plan.parentContainmentRef !== canonicalSha256(containment) ||
                           invocationClosure.spec.parentWorkerContainmentRef !== canonicalSha256(containment) ||
                           invocationClosure.spec.filesystem.kind !== 'run_generation' || invocationClosure.spec.filesystem.generationRef !== closure.workspaceGenerationRef ||
-                          path.posix.dirname(builtinBackend.cgroupPath) !== backend.cgroupPath || binding.builtinToolInterfaceVersion !== 1 || typeof source.builtin !== 'function' ||
+                          path.posix.dirname(builtinBackend.cgroupPath) !== backend.cgroupPath || binding.builtinToolInterfaceVersion !== 2 || typeof source.builtin !== 'function' ||
                           typeof native.createBuiltinTool !== 'function')
                         mismatch('builtin does not select the exact actual parent, generation and fixed native recipe');
                       const signal = AbortSignal.any([installationAbort.signal, controllerAbort.signal]);
@@ -1629,6 +1706,8 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
                         if (failures.length) throw retirementError('builtin fixed input descriptors did not join',
                           new AggregateError([...(primary ? [primary.error] : []), ...failures]));
                         if (primary) throw primary.error;
+                        if (typeof createdTool.beginAcknowledgeResult !== 'function' || typeof createdTool.pollResultAcknowledged !== 'function')
+                          mismatch('builtin scope lacks its fixed data acknowledgement lifecycle');
                         // The authenticated SCM_RIGHTS send gave the original
                         // controller its own sealed descriptors. Retire the
                         // extraction producer, not the controller's copies.
@@ -1648,14 +1727,56 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
                           targetDigest: invocationClosure.spec.targetDigest, operationGrantRef: invocationClosure.spec.operationGrantRef,
                           parentWorkerContainmentRef: invocationClosure.spec.parentWorkerContainmentRef });
                         let result: NativeBuiltinToolResult | undefined, resultPending: Promise<NativeBuiltinToolResult> | undefined;
+                        let receivedDeath: NativeContainmentDeathObservation | undefined, resultDataRetired = false, resultAcknowledging = false;
                         let stopping: Promise<NativeContainmentDeathObservation> | undefined;
                         let controlledStop: Promise<void> | undefined;
                         const readResult = () => {
+                          if (resultDataRetired || resultAcknowledging) throw new TypeError('native builtin result data is retired or being acknowledged');
                           if (result) return result;
                           const raw = createdTool.result();
                           if (raw === undefined) return undefined;
                           if (typeof raw !== 'object') mismatch('native builtin returned an edit acknowledgement');
-                          result = builtinToolOutcome(raw, invocationContainment, tool);
+                          let retainedRaw: NativeVerifierOutcome | undefined = raw, nativeAcknowledgementStarted = false;
+                          result = builtinToolOutcome(raw, invocationContainment, tool, handle, async () => {
+                            resultAcknowledging = true;
+                            try {
+                              const original = result, originalRaw = retainedRaw;
+                              if (!original || !originalRaw || resultPending && await resultPending !== original)
+                                mismatch('builtin acknowledgement lost its original joined result reader');
+                              try {
+                                if (!nativeAcknowledgementStarted) {
+                                  createdTool.beginAcknowledgeResult!(originalRaw); nativeAcknowledgementStarted = true;
+                                }
+                                await awaitNative(() => createdTool.pollResultAcknowledged!() ? true : undefined,
+                                  closeController, controllerAbort.signal, 2000);
+                              } catch (error) {
+                                // Revocation is not retirement. Only this original
+                                // controller's actual close/join permits local drop.
+                                try { await closeController(); }
+                                catch (failure) { throw retirementError('builtin data acknowledgement and original controller join failed', new AggregateError([error, failure])); }
+                                try {
+                                  if (!nativeAcknowledgementStarted) {
+                                    createdTool.beginAcknowledgeResult!(originalRaw); nativeAcknowledgementStarted = true;
+                                  }
+                                  if (!createdTool.pollResultAcknowledged!()) throw new Error('joined controller retained builtin output ownership');
+                                } catch (failure) {
+                                  throw retirementError('builtin original output acknowledgement did not finish after controller join', new AggregateError([error, failure]));
+                                }
+                              }
+                              if (controllerClosed) {
+                                if (!controllerClosing) throw retirementError('builtin data acknowledgement lost its original controller join', new Error('missing controller close owner'));
+                                await controllerClosing;
+                              }
+                              // Readers have joined and native release succeeded.
+                              // Keep only the original small death observation;
+                              // no producer cache can return or repoll these bytes.
+                              retainedRaw = undefined; result = undefined; resultPending = undefined; resultDataRetired = true;
+                              noteResources('acknowledgement_joined');
+                              return Object.freeze({ kind: controllerClosed ? 'controller_joined' as const : 'outputs_acknowledged' as const });
+                            } finally { resultAcknowledging = false; }
+                          }, () => noteResources('capture_durable'));
+                          noteResources('result_received');
+                          receivedDeath = result.death;
                           controllerVerifierStops.delete(stopForControllerClose);
                           return result;
                         };
@@ -1683,6 +1804,7 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
                           },
                           async result() {
                             if (this !== handle) throw new TypeError('invalid blocked builtin tool');
+                            if (resultDataRetired || resultAcknowledging) throw new TypeError('native builtin result data is retired or being acknowledged');
                             if (result) return result;
                             if (!resultPending) resultPending = awaitNative(readResult, closeController, signal, entry.timeoutMs + 10_000, 10).catch(error => {
                               // A real reply consumed during irreversible close
@@ -1695,7 +1817,7 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
                           },
                           async stop() {
                             if (this !== handle) throw new TypeError('invalid blocked builtin tool');
-                            if (controllerClosed && result) return result.death;
+                            if (controllerClosed && receivedDeath) return receivedDeath;
                             if (!stopping) stopping = death(createdTool, invocationContainment, native, retirementReceiver)
                               .finally(() => { stopping = undefined; });
                             return stopping;
@@ -1975,6 +2097,7 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
             async close() { if (this !== controller) throw new TypeError('invalid worker controller'); await closeController(); controllers.delete(native); }
           });
           linuxWorkerControllers.add(controller);
+          preparingResourceNotes.set(controller, subject => noteResources('preparation_ready', [subject]));
           return controller;
         } catch (error) {
           // Native ownership already exists. Getter/wrapper construction

@@ -353,7 +353,7 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
       if (originalRun.revision !== expectedRunRevision) throw new KernelStorageError('REVISION_CONFLICT', 'model completion started at a stale Run revision');
       const originalJournal = readInvocationAttempt(driver, runId, opId, attempt);
       const completionSubject = (run: Run) => {
-        const { revision: _revision, updatedAt: _updatedAt, stopIntentRef: _stopIntentRef, cancelRequested: _cancelRequested, ...subject } = run;
+        const { revision: _revision, updatedAt: _updatedAt, stopIntentRef: _stopIntentRef, cancelRequested: _cancelRequested, parentCancellationRef: _parentCancellationRef, ...subject } = run;
         return canonicalSha256(subject);
       };
       for (let retry = 0; retry < 8; retry++) {

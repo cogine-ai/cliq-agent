@@ -137,9 +137,14 @@ export function verifyToolRuntimeAuthority(input: {
         throw new TypeError('builtin script differs from its signed data and complete guest Node identity');
       assertBuiltinScriptGuest(guest.manifest, [tool.name]);
     } else if (execution.kind === 'supervisor_control') {
-      if (tool.name !== 'request_input' || tool.access !== 'control' || tool.replayClass !== 'manual' ||
+      if (tool.name !== execution.handlerId || !['request_input', 'await_children'].includes(tool.name) || tool.access !== 'control' || tool.replayClass !== 'manual' ||
           tool.outputSchemaRef !== undefined || tool.outputSchemaDigest !== undefined)
         throw new TypeError('unsupported compiled Supervisor control handler');
+      executable(execution.supervisorEntryId, execution.supervisorExecutableDigest, 'supervisor', execution.supervisorEntryVersion);
+    } else if (execution.kind === 'supervisor_operation') {
+      if (tool.name !== 'delegate' || execution.handlerId !== 'delegate' || tool.access !== 'exec' || tool.replayClass !== 'retry' ||
+          tool.outputSchemaRef !== undefined || tool.outputSchemaDigest !== undefined)
+        throw new TypeError('unsupported signed Supervisor local operation');
       executable(execution.supervisorEntryId, execution.supervisorExecutableDigest, 'supervisor', execution.supervisorEntryVersion);
     }
   }

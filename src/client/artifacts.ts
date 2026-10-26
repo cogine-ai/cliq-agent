@@ -1,4 +1,6 @@
 import { canonicalJsonBytes } from '../kernel/canonical.js';
+import { readChildMergeWaitingPresentation } from './child-merge-presentation.js';
+import { readChildWaitingPresentation } from './child-wait-presentation.js';
 import { digestOmitting } from '../kernel/identity.js';
 import { parseJsonStrict } from '../kernel/json.js';
 import { controlWireInteger, controlWireRecord, controlWireRef } from '../kernel/control-wire-data.js';
@@ -31,6 +33,7 @@ export async function readWaitingPresentation(app: PresentationClient, snapshot:
   const run = snapshot.run;
   if (run.status !== 'waiting' || !run.waitingOnRef) throw new TypeError('there is no captured wait to present');
   const value = await readClientJson(app, run.waitingOnRef, signal);
+  if (run.waitingReason === 'child') return readChildWaitingPresentation(app, snapshot, value, signal);
   if (run.waitingReason !== 'input') {
     if (run.waitingReason === 'approval') {
       const wait = controlWireRecord(value, ['schemaVersion', 'kind', 'runId', 'createdFromRevision', 'createdAt', 'frontierRef', 'subject']);
@@ -38,6 +41,8 @@ export async function readWaitingPresentation(app: PresentationClient, snapshot:
         throw new TypeError('approval presentation differs from its captured Run');
       controlWireInteger(wait.createdFromRevision, 1, run.revision - 1);
       const subject = wait.subject as Record<string, unknown>;
+      if (subject && typeof subject === 'object' && subject.kind === 'child_merge')
+        return readChildMergeWaitingPresentation(app, snapshot, value, signal);
       let text = canonicalJsonBytes(subject).toString('utf8');
       if (subject && typeof subject === 'object' && typeof subject.policyChannelEvidenceRef === 'string') {
         const evidence = await readClientJson(app, subject.policyChannelEvidenceRef, signal) as Record<string, unknown>;

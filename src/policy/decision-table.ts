@@ -214,6 +214,8 @@ function matchesRule(rule: PermissionRule, channel: AccessChannel): boolean {
  */
 export function accessChannelPrimaryKey(channel: AccessChannel): string {
   switch (channel.kind) {
+    case 'named-action':
+      return channel.action;
     case 'fs-read':
       return channel.path;
     case 'fs-write':

@@ -38,6 +38,8 @@ import { loadInputContinuation } from './input.js';
 import { assertSupervisorControlIdentity, readToolRuntimeAuthority } from '../tool-runtime-authority.js';
 import { decodeAgentStop, selectAgentStop, type AgentStopIntent } from '../../runtime/stop.js';
 import { readBuiltinToolCapture, assertBuiltinCaptureObservation } from '../builtin-tool-capture.js';
+import { childAdmissionKey } from '../child-admission.js';
+import { loadChildWaitContinuation } from '../child-wait.js';
 
 const TOOL_BUDGET = Object.freeze({ modelTokens: 0, costMicros: 0, toolCalls: 1, repairAttempts: 0 });
 type ResultFields<T = Exclude<ToolResultPayloadV1, { source: 'user_input' }>> = T extends ToolResultPayloadV1
@@ -222,7 +224,7 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
     return expiry.format === 'cliq-tool-grant-expiry-v1' && expiry.grantRef === prepared.grantRef &&
       expiry.preparedJournalSeq === prepared.seq && (expiry.waitingSubjectRef !== undefined || expiry.selectionCheckpointId !== undefined);
   }
-  const selectionCheckpointId = (selected: ToolCut, reason: 'input' | 'approval') =>
+  const selectionCheckpointId = (selected: ToolCut, reason: 'input' | 'children' | 'approval' | 'child_admission') =>
     identityHash('cliq-tool-selection-checkpoint-v1', runId, selected.run.frontierRef!, String(selected.run.revision), reason);
 
   // Recovery independently reproduces committed decisions, including deny, before exposing a usable handle.
@@ -239,7 +241,7 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
     // The sole caller first runs readRunAuthority/full recovery, including the
     // verifier's complete subject-owned history. Its request is not a tool
     // request and has no inputRef; never reinterpret it as tool authority.
-    if (item.subjectKind === 'verifier_launch') continue;
+    if (item.subjectKind === 'verifier_launch' || item.subjectKind === 'child_merge') continue; // Each owns a complete independent recovery history.
     if (item.subjectKind !== 'tool_call') throw new TypeError('retained tool policy item has an unsupported subject');
     const evidence = await readCanonicalArtifact<ToolPolicyChannelEvidenceV1>(openingReads, item.policyChannelEvidenceRef);
     const request = await readCanonicalArtifact<ToolRequestV1>(openingReads, evidence.requestRef);
@@ -268,6 +270,7 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
     }
   };
   const inputContinuation = await loadInputContinuation(driver, artifacts, owner, { ...controlAuthority, contracts }, reobserve, openingSignal);
+  const childContinuation = loadChildWaitContinuation(driver, artifacts, owner, controlAuthority, reobserve);
 
   function completionOwner(original: ToolCompletionInput) {
     const readItems = (connection: SqliteConnection) => connection.prepare(
@@ -288,7 +291,7 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
     function validateOriginalCut(connection: SqliteConnection, current: Run) {
       if (!selection) throw new KernelStorageError('RECOVERY_REQUIRED', 'tool completion has no original selected cut');
       const { selected, items } = selection;
-      const stable = ({ revision: _revision, updatedAt: _time, stopIntentRef: _intent, cancelRequested: _cancel, ...data }: Run) => data;
+      const stable = ({ revision: _revision, updatedAt: _time, stopIntentRef: _intent, cancelRequested: _cancel, parentCancellationRef: _parentCancellation, ...data }: Run) => data;
       const unchanged = canonicalSha256(current) === canonicalSha256(selected.run);
       if ((!unchanged && (current.revision <= selected.run.revision || current.updatedAt < selected.run.updatedAt ||
           !current.stopIntentRef || selected.run.cancelRequested && !current.cancelRequested ||
@@ -473,6 +476,12 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
 
   return {
     controlAuthority,
+    waitForChildren: childContinuation.waitForChildren,
+    waitForStoppedChildren: childContinuation.waitForStoppedChildren,
+    planStoppedChildren: childContinuation.planStoppedChildren,
+    settleChildren: childContinuation.settleChildren,
+    planFinalChildren: childContinuation.planFinalChildren,
+    waitForFinalChildren: childContinuation.waitForFinalChildren,
     waitForInput: inputContinuation.waitForInput,
     submitInput: inputContinuation.submitInput,
     prepareTool: stateOperation('RECOVERY_REQUIRED', async (input: { expectedRunRevision: number; leaseEpoch: number }, readSignal?: AbortSignal) => {
@@ -491,10 +500,13 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
       const contract = contracts.find(entry => entry.name === selected.call.toolName);
       if (!contract) throw new TypeError('tool selection has no frozen contract');
       if (contract.access === 'control') {
+        const reason = contract.execution.kind === 'supervisor_control' && contract.execution.handlerId === 'await_children'
+          ? 'children' as const : 'input' as const;
         if (selected.run.activeWorkerLaunchId) return immutableSnapshot({ disposition: 'retirement_required' as const,
-          reason: 'input' as const, run: selected.run,
-          checkpointId: selectionCheckpointId(selected, 'input') });
-        return inputContinuation.plan(selected);
+          reason, run: selected.run,
+          checkpointId: selectionCheckpointId(selected, reason) });
+        return contract.execution.kind === 'supervisor_control' && contract.execution.handlerId === 'await_children'
+          ? childContinuation.plan(selected) : inputContinuation.plan(selected);
       }
       const { request, target, entry } = requestFor(selected);
       const approved = await approvedGrant(selected, request, reads);
@@ -508,6 +520,15 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
       if (ask && selected.run.activeWorkerLaunchId) return immutableSnapshot({ disposition: 'retirement_required' as const,
         reason: 'approval' as const, run: selected.run,
         checkpointId: selectionCheckpointId(selected, 'approval') });
+      if (!ask && evidence.effectiveDisposition !== 'deny' && contract.execution.kind === 'supervisor_operation' &&
+          contract.execution.handlerId === 'delegate') {
+        if (selected.run.activeWorkerLaunchId) return immutableSnapshot({ disposition: 'retirement_required' as const,
+          reason: 'child_admission' as const, run: selected.run,
+          checkpointId: selectionCheckpointId(selected, 'child_admission') });
+        return immutableSnapshot({ disposition: 'child_admission_required' as const, run: selected.run,
+          childRunId: identityHash('cliq-run-id-v1', workspace.ownerPrincipalId, 'delegate', childAdmissionKey(runId,
+            selected.batch.itemId, selected.call.callId, selected.call.index, selected.call.inputDigest)) });
+      }
       if (!ask && evidence.effectiveDisposition !== 'deny' && selected.run.status === 'queued')
         return immutableSnapshot({ disposition: 'worker_required' as const, run: selected.run });
       const requestPlan = planCanonicalArtifact(request, request.format), targetPlan = planCanonicalArtifact(target, target.format);
@@ -583,9 +604,19 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
       const contract = contracts.find(entry => entry.name === selected.call.toolName)!;
       let pending: ToolCut['journal'][number] | undefined;
       let expiringGrant: ToolOperationGrantV1 | undefined;
-      let reason: 'input' | 'approval';
+      let reason: 'input' | 'children' | 'approval' | 'child_admission';
       const observedAt = sampleCanonicalNow();
-      if (contract.access === 'control') reason = 'input';
+      if (contract.access === 'control') reason = contract.execution.kind === 'supervisor_control' && contract.execution.handlerId === 'await_children' ? 'children' : 'input';
+      else if (contract.execution.kind === 'supervisor_operation' && contract.execution.handlerId === 'delegate') {
+        const { request, target } = requestFor(selected);
+        const approved = await approvedGrant(selected, request);
+        const evidence = requirePolicy().evaluate(request, target, selected.call, observedAt);
+        if (evidence.effectiveDisposition === 'deny') throw new TypeError('child admission cannot retire through a denied selection');
+        reason = evidence.effectiveDisposition === 'ask' && (!approved || approved.grant.expiresAt <= observedAt)
+          ? 'approval' : 'child_admission';
+        if (readHighestPreparedAttempt(driver, runId, request.opId))
+          throw new TypeError('local child selection cannot overtake a retained invocation');
+      }
       else {
         reason = 'approval';
         const { request, target } = requestFor(selected);

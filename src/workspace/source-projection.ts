@@ -9,7 +9,7 @@ import { decodeFrozenIgnoreRules, decodeSourceManifest, decodeSourceProjection, 
 import { KernelStorageError, ResourceRetirementError } from '../state/errors.js';
 import { assertHeldWorkspaceRoot, heldWorkspaceRootPath, stateRootIdentityForLock,
   type HeldStateOwnerLock, type HeldWorkspaceCursor, type HeldWorkspaceEntry, type HeldWorkspaceRoot } from '../state/native-owner.js';
-import { captureWorkspaceEntries } from './source-capture.js';
+import { captureWorkspaceEntries, captureWorkspaceEntriesWithManifestPublication } from './source-capture.js';
 import { decodeDeliveryCaptureTopology, publicationDirectoryIdentityDigest,
   type DeliveryCaptureTopologyV1 } from '../kernel/publication.js';
 import { checkProjection } from '../state/source-validation.js';
@@ -313,11 +313,58 @@ async function captureSourceProjection(input: SourceProjectionCaptureInput, mode
     for (const directory of directoryEntryExcludes) if (selected.some(value => covered(value, directory)))
       invalid('entry-only exclusion of a required directory ancestor is unsupported; use subtree');
     assertCurrent();
+    const reads = signal ? artifacts.withReadSignal(signal) : artifacts;
+    const rereadEntries = async (entriesArtifact: PublishedArtifact) => decodeWorkspaceEntries(await reads.readCanonical(entriesArtifact.ref));
+    if (mode.kind === 'initial' && !git && !mode.deliveryCapture) {
+      // One natural inert graph. Native capture resources stay held through
+      // the complete fixed group and the original full manifest reread.
+      let completed: PublishedSourceProjectionCapture | undefined;
+      await captureWorkspaceEntriesWithManifestPublication(workspaceRoot, artifacts,
+        { selectedPaths: selected, maxEntries, maxBytes, maxSingleFileBytes, signal }, async entries => {
+          checkHardExcludedLinks(entries, hardRoots); assertCurrent();
+          const rules: FrozenIgnoreRulesV1 = { schemaVersion: 1, format: 'cliq-frozen-ignore-rules-v1',
+            matcherVersion: 'cliq-git-wildmatch-v1', sources: [], rules: [], rulesDigest: '' };
+          rules.rulesDigest = digestOmitting(rules, 'rulesDigest');
+          const rulesRef = canonicalSha256(rules);
+          const projection: SourceProjectionSpec = { schemaVersion: 1, matcherVersion: 'cliq-exact-path-v1',
+            frozenIgnoreRulesRef: rulesRef, frozenIgnoreRulesDigest: rules.rulesDigest, explicitIncludes: [], explicitExcludes: excludes,
+            maxChangedPaths, maxChangedBytes, projectionDigest: '' };
+          projection.projectionDigest = digestOmitting(projection, 'projectionDigest');
+          const projectionRef = canonicalSha256(projection);
+          const source: SourceManifest = { schemaVersion: 1, format: 'cliq-source-manifest-v1', role: 'base', workspaceIdentityDigest,
+            entriesRef: canonicalSha256(entries), sourceProjectionRef: projectionRef, sourceProjectionDigest: projection.projectionDigest,
+            frozenIgnoreRulesRef: rulesRef, frozenIgnoreRulesDigest: rules.rulesDigest, treeDigest: entries.treeDigest, manifestDigest: '' };
+          source.manifestDigest = digestOmitting(source, 'manifestDigest');
+          const values = [{ value: entries, schemaKind: 'cliq-workspace-entries-v1' }, { value: rules, schemaKind: rules.format },
+            { value: projection, schemaKind: 'cliq-source-projection-v1' }, { value: source, schemaKind: source.format }] as const;
+          const expected = values.map(({ value, schemaKind }) => ({ ref: canonicalSha256(value), byteLength: canonicalJsonBytes(value).length,
+            mediaType: 'application/json', schemaKind }));
+          const group = await artifacts.publishCanonicalFour(values);
+          assertCurrent();
+          if (group.length !== 4 || group.some((artifact, index) => canonicalSha256(artifact) !== canonicalSha256(expected[index])))
+            invalid('source graph differs from its complete original four objects');
+          const [entriesArtifact, rulesArtifact, projectionArtifact, sourceArtifact] = group;
+          const verifiedEntries = await rereadEntries(entriesArtifact);
+          if (canonicalSha256(verifiedEntries) !== canonicalSha256(entries)) invalid('source entries reread differs from the native-read manifest');
+          checkHardExcludedLinks(verifiedEntries, hardRoots); assertCurrent();
+          const metadata = new Map<string, PublishedArtifact>();
+          for (const entry of entries.entries) if (entry.kind === 'file') metadata.set(entry.blobRef, Object.freeze({ ref: entry.blobRef,
+            byteLength: entry.size, mediaType: 'application/octet-stream', schemaKind: 'cliq-workspace-file-v1' }));
+          for (const artifact of group) metadata.set(artifact.ref, Object.freeze({ ...artifact }));
+          completed = Object.freeze({ sourceManifestRef: sourceArtifact.ref, manifestDigest: source.manifestDigest,
+            entriesRef: entriesArtifact.ref, treeDigest: entries.treeDigest, entryCount: entries.entryCount, byteCount: entries.byteCount,
+            sourceProjectionRef: projectionArtifact.ref, sourceProjectionDigest: projection.projectionDigest,
+            frozenIgnoreRulesRef: rulesArtifact.ref, frozenIgnoreRulesDigest: rules.rulesDigest, metadata: Object.freeze([...metadata.values()]) });
+          return entriesArtifact;
+        });
+      assertCurrent();
+      if (!completed) invalid('source graph did not complete its original native capture');
+      return completed;
+    }
     const entriesArtifact = await captureWorkspaceEntries(workspaceRoot, artifacts,
       { selectedPaths: selected, maxEntries, maxBytes, maxSingleFileBytes, signal });
     assertCurrent();
-    const reads = signal ? artifacts.withReadSignal(signal) : artifacts;
-    const entries = decodeWorkspaceEntries(await reads.readCanonical(entriesArtifact.ref));
+    const entries = await rereadEntries(entriesArtifact);
     checkHardExcludedLinks(entries, hardRoots); assertCurrent();
     const rules: FrozenIgnoreRulesV1 = mode.kind === 'frozen' ? mode.rules : git?.rules ?? { schemaVersion: 1,
       format: 'cliq-frozen-ignore-rules-v1', matcherVersion: 'cliq-git-wildmatch-v1', sources: [], rules: [], rulesDigest: '' };

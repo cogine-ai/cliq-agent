@@ -13,7 +13,54 @@ Linux execution/restart and cancellation foundations are real, but a final
 model turn still stops at `candidate_required`. No work package or complete I1
 is declared finished by the 32 passing checks.
 
-Latest exact-head result (2026-10-26): `d84d5b2da7a9b8078dea99bab877686c553ef9e0`
+Latest completed exact-head result (2026-10-26):
+`410c8193ea516b0b9f8e6a746c4376003e67b5a4`,
+[run 485](https://github.com/cogine-ai/cliq-agent/actions/runs/40387747812),
+has fourteen successful jobs and eight failures. All three hosted TypeScript
+jobs pass. Its independent clean local archive passes all seven gates:
+3,145 source tests with thirteen platform skips, 402 script tests with fifteen
+platform skips, and 105 portable tests with three platform skips. A separate
+earlier archive was invalidated after concurrent dependency installation;
+its green result was not used to promote this commit. The clean validation
+SHA-256 is `b225520c7299b8e10edb94aa196faaa2e0d0cf1604e06cc0b4e9c12c7df85774`.
+
+The complete collection retains 99 original reports / 504,614 bytes across
+21 categories. Original processes, pipes and the scoped awake guard join;
+independent frozen-schema/integrity revalidation passes, with SHA-256
+`587a2e89f67e9b348b0310ca22804e1b3b016fc15e7b95c1f62459b103279fed`.
+It preserves `collectionComplete=false`: installed-status-regression and
+installed-verifier are pending, and the native preparation and verifier
+reports are missing. Integrity is not successful qualification.
+
+This run identifies the native Git failure as an unexpected output name.
+Real Git helper reproduction finds generated reverse-index files; the current
+development correction asks `index-pack` not to create them, preserving the
+collector's closed four-output inventory. A verifier preflight instead times
+out while loading a third isolated TypeScript child; its correction bundles
+the same pure production probe once and keeps the original ten-second child
+bound and resource-usage assertions. The installed Ink consumer also fails;
+a real PTY regression now preserves local detach while propagating substantive
+operation and close failures. These corrections still require combined Linux
+verification.
+
+The fixed install groups complete the fifty-millisecond owned-volume
+installation in about 18.35 seconds, but the Run still misses its original
+ninety-second terminal bound. The late-publication campaign still misses
+five-second initial authentication before its intended cut. Neither target
+storage cut is qualified. The uninterrupted verifier secret corpus also
+remains blocked by the original cumulative 4,096-stream limit; no stream,
+empty value, historical object or assertion is dropped to obtain a pass.
+
+The current combined development source connects ordinary tools, children,
+result/Delivery recovery, shared CLI/JSONL/RPC/Ink/SDK applications and a signed
+schema7-to-schema8 upgrade. Component tests do not qualify that combination.
+Dependency execution is being completed as one consumer-connected package;
+MCP, remaining provider/local-service and skill paths, graph migration,
+retention, supported macOS, reboot/scale and the final default Kernel Cut
+remain implementation or real-environment obligations. No full WP, I1–I4,
+release or complete-PR claim follows from this progress.
+
+Previous exact-head result (2026-10-26): `d84d5b2da7a9b8078dea99bab877686c553ef9e0`
 [run 481](https://github.com/cogine-ai/cliq-agent/actions/runs/40257603231)
 has sixteen successful jobs and six failures. All four hosted TypeScript jobs
 pass, including the original two-second large-Session-list SIGTERM assertion.
@@ -221,14 +268,14 @@ Package A is therefore not complete. Ordinary Git/tool integration (B), thin
 clients and the release transition (C) remain implementation work, not just
 missing tests. The historical evidence below does not change these boundaries.
 
-| Owner | Implemented foundation | Remaining delivery obligation |
+| Owner | Consumer implementation and foundation | Remaining delivery obligation |
 | --- | --- | --- |
-| WP01 | SQLite/CAS, StateOwner, admission/replay, Journal/budgets, recovery | Result/verification/delivery transactions; business descriptor I/O; import/rollback; scale/integrity qualification |
-| WP02 | Typed model/tool continuation, retry, compaction, approval/input reducers | Candidate/verification/repair/child continuation; installed full tool/provider integration; real capability and billing evidence |
-| WP03 | Signed Linux worker/edit/broker, private generations, containment retirement | Verifier/publication and remaining execution recipes; dependencies/MCP/local service; supported macOS backend; remaining physical fault evidence |
-| WP04 | Installed Supervisor, authenticated UDS, queue, cancellation/restart | Full application services, waits/children/reconciliation, service/reboot qualification and bounded read/retention operations |
-| WP05 | Normative contracts and reusable legacy algorithms | Candidate → required verifier → immutable result → explicit delivery, plus bounded repair and child result integration |
-| WP06 | Signed Linux installation, credential authority, restricted control path | Generated thin clients, ecosystem/Session surfaces, upgrade/migration, all-platform release qualification and one cutover |
+| WP01 | SQLite/CAS, StateOwner, admission/replay, Journal/budgets, result/verification/Delivery transactions and recovery | Combined physical recovery evidence; complete graph import/rollback and retention; scale/integrity qualification |
+| WP02 | Typed model/tool continuation, compaction, approval/input, candidate/verification/repair and bounded children | Complete dependency/MCP/skills and provider consumers; real capability/billing evidence; combined installed qualification |
+| WP03 | Signed Linux worker/broker, ordinary tools, private generations, verifier/publication and containment retirement | Dependency and remaining execution recipes; MCP/local service; supported macOS backend; missing physical fault evidence |
+| WP04 | Installed Supervisor, authenticated UDS, queue, waits/children, cancellation/restart and Session services | Combined timing/recovery qualification; service/reboot and scale; complete bounded retention operations |
+| WP05 | Candidate → required verifier → immutable result → explicit Delivery, bounded repair and child-result integration | Complete installed result/publication/recovery campaigns and cumulative secret scan; remaining physical cut evidence |
+| WP06 | Signed installation, credential authority, generated shared clients/SDK, Session continuity and signed upgrade implementation | Real upgrade and client qualification; ecosystem/graph migration and retention; all-platform release evidence and one default cutover |
 
 ## Delivery order
 
@@ -278,6 +325,18 @@ in normal `npm test`, and routes the existing installed JSONL driver through
 the production serial adapter. It retains caller-owned close, backpressure and
 EOF-without-cancel semantics. This is not implementation of the unconnected v1
 methods, headless schema 3, four frontend qualification or the Kernel Cut.
+
+The shared installed-client adapter now composes the existing application from
+one genuine selected-runtime host, including a public ESM SDK and exact public
+declarations. The signed client-only entry reuses the original embedded release
+roots; it cannot supply roots through argv/environment or acquire Store/Run
+authority. The normal installed client campaign retains its original CLI,
+JSONL, RPC, Ink, five POSTs, full snapshot and frozen-cursor assertions and adds
+one SDK read/detach of the same Run. The new closed fixture profile and package
+component checks are documented in `installed-client-cutover-adapter.md` and
+`installed-client-applications.md`. Actual combined Linux/SEA proof, migration,
+all ecosystem backends and final default cutover remain open; the default
+legacy entry is unchanged.
 
 Connect the existing ordinary tool approval/input reducers and all necessary
 read/search/edit/bash capabilities. Complete ordinary child Runs with bounded

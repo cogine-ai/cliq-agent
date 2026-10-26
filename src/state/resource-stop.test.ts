@@ -47,6 +47,21 @@ async function longContext(fixture: Fixture, texts = ['a', 'b', 'c'].map((text) 
   for (const text of texts) assert.equal((await modelTurn(fixture, text, 'unknown')).completed.disposition, 'batch_rejected');
 }
 
+test('a historical resource Stop cannot replace its missing registration cut with today latest Checkpoint even when the same budget still fails', async () => {
+  const f = await createAgentFixture('resource-original-registration-required', { modelTokens: 40_959 }, { mode: 'plan' });
+  try {
+    const stopped = await stop(f), before = await f.store.readRecoveryClosure(f.runId);
+    const original = await f.store.artifacts.readCanonical<StopIntent>(stopped.run.stopIntentRef!);
+    const { registeredCheckpointId: _checkpoint, registeredRunRevision: _revision, registeredJournalSeq: _journal, ...missing } = original;
+    const replacement = await f.store.artifacts.publishCanonical(missing, 'cliq-stop-intent-v1');
+    const driver = Reflect.get(f.store, 'driver') as import('./sqlite-driver.js').SqliteDriver;
+    driver.prepare('UPDATE runs SET stop_intent_ref=? WHERE id=?').run(replacement.ref, f.runId);
+    try { await assert.rejects(f.store.readRecoveryClosure(f.runId), /original registration cut/); }
+    finally { driver.prepare('UPDATE runs SET stop_intent_ref=? WHERE id=?').run(stopped.run.stopIntentRef!, f.runId); }
+    assert.deepEqual(await f.store.readRecoveryClosure(f.runId), before);
+  } finally { await disposeFixture(f); }
+});
+
 for (const [counter, required] of [['modelTokens', 40_960], ['costMicros', 114_688]] as const) {
   test(`${counter} exhaustion derives the exact next reservation and publishes one recoverable terminal Session item`, async () => {
     const fixture = await createAgentFixture(`resource-${counter}`, { [counter]: required - 1 }, { mode: 'plan' });
@@ -63,7 +78,8 @@ for (const [counter, required] of [['modelTokens', 40_960], ['costMicros', 114_6
       const stopped = winner.value;
       assert.deepEqual(await fixture.store.artifacts.readCanonical<StopIntent>(stopped.run.stopIntentRef!), {
         schemaVersion: 1, runId: fixture.runId, createdAt: stopped.run.updatedAt, origin: 'budget', targetStatus: 'failed',
-        reason: 'budget_exhausted', counter, ceiling: required - 1, consumed: 0, reserved: 0, required
+        reason: 'budget_exhausted', counter, ceiling: required - 1, consumed: 0, reserved: 0, required,
+        registeredCheckpointId: before.latestCheckpoint.id, registeredRunRevision: before.run.revision, registeredJournalSeq: before.journal.length
       });
       assert.equal((await stop(fixture)).run.stopIntentRef, stopped.run.stopIntentRef);
       await reopen(fixture);

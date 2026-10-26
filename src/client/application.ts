@@ -6,29 +6,14 @@ import { decodeInstalledControlRequest, type InstalledControlRequestV1, type Ins
 import { ControlRefusal, readInstalledSessionContext, type InstalledControlSession, type SessionResumeInput } from '../control/session.js';
 import type { Session, SessionContextProjection } from '../kernel/types.js';
 import { ResourceRetirementError } from '../state/errors.js';
+import { isInstalledControlCloseError } from '../state/installed-control-close-error.js';
 import { readRunItemPresentation } from './artifacts.js';
+import type { ClientCommand, ClientUpdate } from './types.js';
+import { ClientBusyError, ClientDisconnectedError, ClientPendingRequestError } from './errors.js';
+export type { ClientCommand, ClientUpdate } from './types.js';
+export { ClientBusyError, ClientDisconnectedError, ClientPendingRequestError } from './errors.js';
 
 type Response = InstalledControlResponseFor<InstalledControlFeature>;
-export type ClientCommand =
-  | Readonly<{ kind: 'request'; request: InstalledControlRequestV1 }>
-  | Readonly<{ kind: 'resume'; intent: SessionResumeInput }>
-  | Readonly<{ kind: 'reconnect' }>;
-export type ClientUpdate =
-  | Readonly<{ kind: 'response'; origin: 'command' | 'follow' | 'presentation'; request: InstalledControlRequestV1; response: Response }>
-  | Readonly<{ kind: 'event'; event: HeadlessRunEventV3 }>
-  | Readonly<{ kind: 'context'; session: Session; projection: SessionContextProjection }>
-  | Readonly<{ kind: 'transcript'; runId: string; itemId: string; itemSeq: number; text: string }>
-  | Readonly<{ kind: 'connection'; state: 'connected' | 'disconnected' | 'closed' }>
-  | Readonly<{ kind: 'pending'; method: string; requestId: string; admissionKey?: string }>;
-export class ClientBusyError extends Error {
-  constructor() { super('another explicit client command is still pending'); this.name = 'ClientBusyError'; }
-}
-export class ClientDisconnectedError extends Error {
-  constructor() { super('the client is disconnected; reconnect explicitly without resending a request'); this.name = 'ClientDisconnectedError'; }
-}
-export class ClientPendingRequestError extends Error {
-  constructor() { super('inspect or explicitly replay the original unresolved request before sending a different mutation'); this.name = 'ClientPendingRequestError'; }
-}
 
 /** A connection and presentation lifetime, never a Run lifetime. One bounded
  * user command may follow one read. A transport failure prevents queued sends;
@@ -236,13 +221,23 @@ export function createClientApplication(session: InstalledControlSession,
     close(): Promise<void> {
       closed = true; local.abort();
       return closing ??= (async () => {
-        const result = await Promise.allSettled([session.close(), tail, ...(following ? [following] : [])]);
+        const originalFollow = following;
+        const result = await Promise.allSettled([session.close(), tail, ...(originalFollow ? [originalFollow] : [])]);
         let outputFailure: unknown;
         try { await emit({ kind: 'connection', state: 'closed' }); } catch (error) { outputFailure = error; }
         listeners.clear();
         unresolved = undefined;
-        const failures = result.filter((value): value is PromiseRejectedResult => value.status === 'rejected').map(value => value.reason)
-          .filter(error => !(error instanceof Error && error.name === 'AbortError'));
+        const failures = result.flatMap((value, index) => {
+          if (value.status !== 'rejected') return [];
+          const error = value.reason;
+          if (error instanceof ResourceRetirementError) return [error];
+          if (error instanceof Error && error.name === 'AbortError') return [];
+          // Only the exact deliberate transport-close rejection belongs to
+          // detach. The original read caller retains that same rejection;
+          // protocol/peer failures and connection/output join failures remain.
+          if (index === 2 && isInstalledControlCloseError(error)) return [];
+          return [error];
+        });
         if (outputFailure !== undefined) failures.push(outputFailure);
         const retirement = failures.find(error => error instanceof ResourceRetirementError);
         if (retirement) throw retirement;

@@ -1,3 +1,4 @@
+import { signedKernelSchemaProfile } from '../signed-schema.js';
 import { generateKeyPairSync, sign, type KeyObject } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -27,6 +28,7 @@ export async function writeInstalledControlPackage(packageRoot: string,
   };
   const rootRecipe = { ...rootCore, profileDigest: canonicalSha256(rootCore) };
   const contents = [
+    { entryId: 'kernel_schema', role: 'schema', relativePath: 'schema/kernel-v8.json', executable: false, bytes: canonicalJsonBytes(signedKernelSchemaProfile()) },
     { entryId: 'native-control-supervisor', role: 'supervisor', relativePath: 'supervisor', executable: true,
       bytes: await readFile(process.execPath) },
     { entryId: 'unused-control-worker', role: 'worker', relativePath: 'workers/worker', executable: true,
@@ -51,7 +53,7 @@ export async function writeInstalledControlPackage(packageRoot: string,
     const filename = path.join(packageRoot, entry.relativePath);
     await mkdir(path.dirname(filename), { recursive: true, mode: 0o700 });
     await writeFile(filename, bytes, { flag: 'wx', mode: entry.executable ? 0o500 : 0o400 });
-    entries.push({ ...entry, version: '1', digest: sha256Bytes(bytes), byteCount: bytes.byteLength });
+    entries.push({ ...entry, version: entry.entryId === 'kernel_schema' ? '8' : '1', digest: sha256Bytes(bytes), byteCount: bytes.byteLength });
   }
   const keys = generateKeyPairSync('ed25519');
   const bundle: RuntimeBundleManifest = {
@@ -77,7 +79,7 @@ export async function writeInstalledControlPackage(packageRoot: string,
   // Independent expected payloads from the signed source package. These are
   // audit values only, never an allowlist or authority passed to StateStore.
   const seedObjects = [manifestBytes, ...contents.filter(entry =>
-    ['policy_engine', 'trust_store', 'sandbox_root_profile'].includes(entry.role)).map(entry => entry.bytes)]
+    ['policy_engine', 'trust_store', 'sandbox_root_profile', 'schema'].includes(entry.role)).map(entry => entry.bytes)]
     .map(bytes => ({ artifactRef: sha256Bytes(bytes), bytes }));
   const modelAuthority = options.modelAuthority ? await writeControlCompanion(packageRoot, bundle, keys.privateKey) : undefined;
   if (modelAuthority) {

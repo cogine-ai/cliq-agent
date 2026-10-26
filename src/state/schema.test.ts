@@ -17,6 +17,18 @@ import {
 } from './schema.js';
 import { openSqliteDriver } from './sqlite-driver.js';
 
+const childV8Changes = new Set(['authorization_grants_list_order_v1', 'child_allocations_one_parent', 'child_allocations_one_admission',
+  'child_allocations_one_delegate', 'child_allocations_one_call_index', 'child_allocations_one_call_id',
+  'child_allocations_validate_insert', 'child_allocations_validate_update', 'child_allocations_immutable_delete',
+  'run_journal_validate_insert', 'runs_parent_cancellation_unseeded', 'runs_parent_cancellation_immutable',
+  'runs_parent_cancellation_register', 'runs_parent_cancellation_fenced']);
+const parentCancellationColumn = ", parent_cancellation_ref TEXT\n  CHECK(parent_cancellation_ref IS NULL OR (typeof(parent_cancellation_ref)='text' AND length(parent_cancellation_ref)=64 AND parent_cancellation_ref NOT GLOB '*[^0-9a-f]*'))";
+function originalRunColumns<T extends Record<string, unknown>>(row: T): T {
+  if (row.name !== 'runs' || typeof row.sql !== 'string' || !row.sql.includes('parent_cancellation_ref')) return { ...row };
+  assert.equal(row.sql.split(parentCancellationColumn).length, 2, 'only the exact schema-8 registered-parent column may be projected out');
+  return { ...row, sql: row.sql.replace(parentCancellationColumn, '') };
+}
+
 test('schema v5 retains exact source history while adding only the apply method to its owning table', async () => {
   const stateRoot = await mkdtemp(path.join(process.cwd(), '.cliq-delivery-schema-upgrade-'));
   const driver = openSqliteDriver(path.join(stateRoot, 'kernel.sqlite3'));
@@ -42,7 +54,7 @@ test('schema v5 retains exact source history while adding only the apply method 
     assert.deepEqual(driver.prepare('SELECT * FROM source_inspection_attempts').all(), original);
     const expected = before.map(entry => ({ ...entry, sql: entry.name === 'source_inspection_attempts'
       ? entry.sql!.replace("method = 'run.submit'", "method IN ('run.submit', 'run.apply')") : entry.sql }));
-    const exceptHandoff = (entries: typeof expected) => entries.filter(entry => entry.name !== 'source_inspections_validate_update').map(entry => ({ ...entry }));
+    const exceptHandoff = (entries: typeof expected) => entries.filter(entry => entry.name !== 'source_inspections_validate_update' && !childV8Changes.has(entry.name)).map(originalRunColumns);
     assert.deepEqual(exceptHandoff(catalog()), exceptHandoff(expected), 'no unrelated table, trigger, index or retained history may change');
     assert.match(catalog().find(entry => entry.name === 'source_inspections_validate_update')!.sql!, /source inspection handoff permits cleanup only/u);
     insert('run.apply', 'fresh-apply', 'other-workspace');
@@ -173,7 +185,7 @@ test('schema v1 upgrades atomically to the M2 invariant layer', async () => {
       driver
         .prepare(`SELECT count(*) AS count FROM sqlite_schema WHERE type = 'trigger'`)
         .get<{ count: unknown }>()?.count,
-      21n
+      28n
     );
     applyKernelSchema(driver);
     assert.equal(readSchemaUserVersion(driver), KERNEL_STATE_SCHEMA_VERSION);
@@ -215,16 +227,16 @@ test('schema v4 migration adds preparing to the same WorkerLaunch spine without 
     for (const trigger of [insert, update]) assert.ok(trigger.includes("WHEN (NEW.phase = 'retired') != (NEW.retired_at IS NOT NULL)"));
     assert.ok(update.includes('WHEN NEW.launch_id != OLD.launch_id OR NEW.run_id != OLD.run_id'));
     assert.equal(readSchemaUserVersion(driver), KERNEL_STATE_SCHEMA_VERSION);
-    const unchanged = (rows: ReturnType<typeof readCatalog>) => rows.filter(row => row.name !== insertName && row.name !== updateName &&
+    const unchanged = (rows: ReturnType<typeof readCatalog>) => rows.filter(row => !childV8Changes.has(row.name) && row.name !== insertName && row.name !== updateName &&
       row.name !== 'source_inspections_validate_update')
-      .map(row => ({ ...row, sql: row.name === 'source_inspection_attempts'
+      .map(row => originalRunColumns({ ...row, sql: row.name === 'source_inspection_attempts'
         ? row.sql!.replace("method = 'run.submit'", "method IN ('run.submit', 'run.apply')") : row.sql }));
     assert.deepEqual(unchanged(after), unchanged(before), 'every table, index and unrelated trigger must remain unchanged');
     assert.match(after.find(row => row.name === 'source_inspections_validate_update')!.sql!, /source inspection handoff permits cleanup only/u);
     const unretiredIndex = after.find(row => row.name === 'worker_launches_one_unretired_per_run');
     assert.equal(unretiredIndex?.type, 'index');
     assert.match(unretiredIndex!.sql!, /CREATE UNIQUE INDEX worker_launches_one_unretired_per_run\s+ON worker_launches\(run_id\) WHERE retired_at IS NULL/u);
-    assert.equal(after.filter(row => row.type === 'trigger').length, 21);
+    assert.equal(after.filter(row => row.type === 'trigger').length, 28);
     applyKernelSchema(driver);
     assert.deepEqual(readCatalog(), after, 'schema v5 application is idempotent');
     assert.equal(readSchemaUserVersion(driver), KERNEL_STATE_SCHEMA_VERSION);
@@ -257,9 +269,10 @@ test('schema v7 preserves original source rows and makes a once-only handoff cle
     }
     const original = driver.prepare('SELECT row_json FROM source_inspection_attempts ORDER BY inspection_id').all();
     applyKernelSchema(driver);
-    assert.equal(readSchemaUserVersion(driver), 7);
+    assert.equal(readSchemaUserVersion(driver), KERNEL_STATE_SCHEMA_VERSION);
     assert.deepEqual(driver.prepare('SELECT row_json FROM source_inspection_attempts ORDER BY inspection_id').all(), original);
-    const exceptUpdate = (values: typeof before) => values.filter(value => value.name !== 'source_inspections_validate_update');
+    const exceptUpdate = (values: typeof before) => values.filter(value => value.name !== 'source_inspections_validate_update' &&
+      !(typeof value.name === 'string' && childV8Changes.has(value.name))).map(originalRunColumns);
     assert.deepEqual(exceptUpdate(catalog()), exceptUpdate(before), 'the existing table, rows, indexes and unrelated triggers are unchanged');
     for (const phase of ['capturing', 'prepared', 'active'] as const) {
       let row = JSON.parse(driver.prepare('SELECT row_json FROM source_inspection_attempts WHERE inspection_id=?')

@@ -28,7 +28,7 @@ test('delivery merge rejects caller-selected fields and revisions before accessi
     await assert.rejects(merge.mergeDelivery(input), { code: 'INVALID_REQUEST' });
 });
 
-test('a schema-valid delivery limit cannot reinterpret an actual Agent or its current workspace as resource-stop authority', async () => {
+test('an unregistered schema-valid delivery limit cannot reinterpret an actual Agent or its current workspace as resource-stop authority', async () => {
   const fixture = await createAgentFixture('delivery-limit-refuses-agent', undefined, { mode: 'plan' });
   try {
     const held = fixture.store as unknown as { driver: SqliteDriver; owner: StateOwnerContext };
@@ -44,7 +44,8 @@ test('a schema-valid delivery limit cannot reinterpret an actual Agent or its cu
     // Deliberately corrupted retained data, never a positive Delivery admission
     // or a fabricated StateOwner/native proof. The actual reader must refuse.
     await assert.rejects(readAgentStop(held.driver, fixture.store.artifacts,
-      { ...before, run: { ...before.run, stopIntentRef: artifact.ref } }), /resource stop has no reproducible failure|resource .*mismatch/u);
+      { ...before, run: { ...before.run, stopIntentRef: artifact.ref } }),
+      /^TypeError: historical derived Stop lost its original registration cut$/u);
     assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
   } finally { await disposeFixture(fixture); }
 });

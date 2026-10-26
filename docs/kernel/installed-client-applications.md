@@ -109,8 +109,32 @@ connection-private scratch without an entire JS array. Every field is bounded
 before sorting or retention. Fixed batches retain original BLOB bytes, require
 fatal UTF-8 with BOM preservation and exact re-encoding, and perform every original
 canonical decoder, byte count and final source/cut equality. No SQL scope or
-statement iterator survives a yield. Its new Run/auth 100,000-row and 64-MiB Stop qualification
-has not been executed; existing Session measurements do not qualify those paths.
+statement iterator survives a yield. The original capacity component refuses
+100001 rows before data reads and refuses 100000 Run rows when their complete
+payload exceeds 64 MiB; its exact-byte cases retain 50000 Run rows and 100000
+authorization summaries at exactly 64 MiB.
+
+Authorization capture orders the original `json_extract(row_json,'$.createdAt')`
+and grant id with binary collation inside the same capture transaction. The
+single fixed schema8 index starts with owner principal and these exact ordering
+expressions. This avoids a synchronous sort of all bounded projected payloads;
+Run capture and its `parent_cancellation_ref` projection remain unchanged.
+The original count-first 100001 refusal, all field lengths, complete 64-MiB
+materialization, fatal UTF-8/BOM-preserving decoding and all-and-only source
+comparison remain mandatory. Malformed or overlong times cannot be accepted
+merely because their raw index order differs from the bounded projection.
+The index changes only the unpublished fixed8 recipe; it does not rewrite
+signed schema7 or authorize an unsigned upgrade. Timing or query-plan component
+measurements alone are not the original real SIGTERM/Stop2 qualification.
+
+The unchanged component's real capture/prepare/final SIGTERM cuts passed on
+macOS with Node 24.21.0 and the minimum Node 22.13.0, including original owner
+terminal state, zero active owners, full cut cardinality/bytes and actual
+process/pipe join. Authorization signal-to-join measurements were respectively
+639.4/46.3/519.5 ms and 677.6/46.0/575.7 ms, under the unchanged strict 2000 ms
+bound. All three original Run-list cuts passed too. These are actual local
+component observations, not signed installed-Supervisor or Linux qualification;
+the combined installed campaigns remain necessary.
 
 ## Installed validation and evidence boundary
 
@@ -121,6 +145,8 @@ journey assertions before adding the client campaign. The additional campaign:
 
 - Reads the original Run and Session, then explicitly replays the exact original
   admission through natural CLI; it cannot create a new Run.
+- Opens the public embedded SDK with the same genuine installation, reads that
+  original Run exactly, and joins its client, process and pipes before continuing.
 - Reads materialized Run and authorization lists through JSONL and replays the
   exact frozen next page over a fresh authenticated RPC connection.
 - Waits for the actual authenticated Run to be visibly rendered by Ink, sends Esc
@@ -136,6 +162,23 @@ The PTY campaign and the combined tool approval/input/new-admission journey stil
 require actual Linux execution after source integration. Public release roots,
 macOS qualification, all provider/MCP rows, migration/retention and default Kernel
 Cut remain separate incomplete gates.
+
+The new fixed `fixtureProfile: cli_sdk_shared_host_v1` additionally requires
+`embeddedSdkReadAndDetach: true`. Both fields are published only after that
+actual SDK response and close, all original four application assertions and
+the unchanged five POSTs/full snapshot comparisons have passed. The historical
+report without these fields remains a distinct older contract. A strict
+consumer must select the new complete shape by this profile and source binding;
+an optional true field cannot upgrade the old evidence. The existing next-page
+cursor must really exist and replay exactly; no new Run or grant is created to
+obtain one. Whole-stage failure remains false and has no success report.
+
+CI484's final application assertion retained no application-local frame. The
+source-owned diagnostic allowlist now also contains only the two exact files
+`installed-client-applications.ts` and `installed-ink-consumer.ts`, under the
+original eight-error/eight-frame bounds. This preserves an actual failing line
+without serializing messages, arbitrary source paths or request data; it does
+not infer the cause of that historical run or change its failed qualification.
 
 The fixed installed test-client bundle includes normal Ink 7.0.2 code and compiles
 only its three pinned optional DevTools conditions to false in memory. Package and

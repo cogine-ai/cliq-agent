@@ -1,3 +1,4 @@
+import type { ChildHandleItem, ChildResultItem, ChildMergeBatchItem, ChildMergeResultItem } from './children.js';
 import type { AgentToolCall } from '../protocol/agent-ir.js';
 import type { ArtifactRef, ReplayClass } from './types.js';
 import type { ToolPolicyDecisionItem } from './tool-authorization.js';
@@ -15,7 +16,12 @@ export type BuiltinScriptExecutionV1 = {
   toolId: 'node'; executionPath: '/usr/bin/node'; executableDigest: string;
 };
 export type SupervisorControlExecutionV1 = {
-  kind: 'supervisor_control'; handlerId: 'request_input'; supervisorEntryId: string;
+  kind: 'supervisor_control'; handlerId: 'request_input' | 'await_children'; supervisorEntryId: string;
+  supervisorEntryVersion: string; supervisorExecutableDigest: string;
+};
+
+export type SupervisorOperationExecutionV1 = {
+  kind: 'supervisor_operation'; handlerId: 'delegate' | 'child_merge'; supervisorEntryId: string;
   supervisorEntryVersion: string; supervisorExecutableDigest: string;
 };
 
@@ -36,6 +42,7 @@ export type ToolContractManifestV1 = {
         kind: 'builtin'; adapterId: string; adapterVersion: string; adapterCodeDigest: string;
       } | BuiltinScriptExecutionV1 }
     | { replayClass: 'manual'; execution: SupervisorControlExecutionV1 }
+    | { replayClass: 'retry'; execution: SupervisorOperationExecutionV1 }
     | { replayClass: ReplayClass; execution: {
         kind: 'mcp'; registrationId: string; registryRevisionRef: ArtifactRef;
         registryManifestDigest: string; serverToolName: string; toolContractDigest: string;
@@ -101,6 +108,9 @@ export type ToolResultPayloadV1 = {
   | { outcome: 'executed'; source: 'invocation'; opId: string; attempt: number; journalResultRef: ArtifactRef;
       journalResultDigest: string; outputSchemaRef?: ArtifactRef; outputSchemaDigest?: string }
   | { outcome: 'executed'; source: 'user_input'; inputItemRef: ArtifactRef; inputRef: ArtifactRef; inputDigest: string }
+  | { outcome: 'executed'; source: 'child_admission'; opId: string; journalResultRef: ArtifactRef; journalResultDigest: string; childHandleItemRef: ArtifactRef }
+  | { outcome: 'executed'; source: 'child_admission_refusal'; opId: string; journalResultRef: ArtifactRef; journalResultDigest: string }
+  | { outcome: 'executed'; source: 'child_results'; waitSetRef: ArtifactRef; childResultItemRefs: ArtifactRef[]; mergeResultItemRefs?: ArtifactRef[] }
   | { outcome: 'denied'; code: 'TOOL_CALL_DENIED'; denial:
       | { source: 'policy'; policyRef: ArtifactRef; decisionDigest: string }
       | { source: 'user'; approvalDecisionRef: ArtifactRef; approvalDecisionDigest: string } }
@@ -148,6 +158,6 @@ export type RunContextCompactionItem = ItemIdentity & {
   sourceItemsDigest: string;
 };
 
-export type ContinuationItem = ModelTurnItem | ToolBatchItem | ToolResultItem | RunContextCompactionItem | ToolPolicyDecisionItem | InputRequestItem | UserInputItem | FinalCandidateItem |
+export type ContinuationItem = import('./child-merge.js').ChildMergePolicyDecisionItem | ChildHandleItem | ChildResultItem | ChildMergeBatchItem | ChildMergeResultItem | ModelTurnItem | ToolBatchItem | ToolResultItem | RunContextCompactionItem | ToolPolicyDecisionItem | InputRequestItem | UserInputItem | FinalCandidateItem |
   VerifierPolicyDecisionItem | VerifierResultItem | RepairDiagnosticItem | VerifierStopItem |
   DeliveryMergeItem | DeliveryMergeConflictItem | DeliveryDecisionItem | DeliveryPolicyDecisionItem | PublicationPathProgressItem | PublicationPathResultItem | PublicationLateObservationItem;

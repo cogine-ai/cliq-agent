@@ -12,6 +12,7 @@ import { builtinCaptureModelContent, decodeBuiltinToolCapture, retainBuiltinCapt
   assertBuiltinCaptureObservation, type BuiltinToolCaptureV1 } from './builtin-tool-capture.js';
 import { ArtifactCatalog } from './artifacts.js';
 import { ContentAddressedStore } from './cas.js';
+import { acknowledgeNativeBuiltinToolResult, type LinuxBlockedInvocation, type NativeBuiltinToolResult } from '../sandbox/linux-worker.js';
 import type { ToolObservationV1 } from '../kernel/tool-authorization.js';
 
 function capture(stdout: Uint8Array, stderr = Buffer.alloc(0)): BuiltinToolCaptureV1 {
@@ -76,6 +77,16 @@ test('an inert death object cannot start builtin result publication', () => {
   const artifacts = { publishBytes() { writes++; throw new Error('must not publish'); } } as unknown as ArtifactCatalog;
   assert.throws(() => retainBuiltinCapturePublication(artifacts, {} as any, {} as any, {} as any,
     { death: {} } as any, capsule('bash'))); assert.equal(writes, 0);
+});
+
+test('retained capture data, copied bytes and proxy handles cannot acknowledge an original native result', async () => {
+  let accessed = 0;
+  const producer = new Proxy({}, { get() { accessed++; throw new Error('a forged producer must not be inspected'); } }) as LinuxBlockedInvocation;
+  const raw = capture(Buffer.from('output'));
+  const proxy = new Proxy({}, { get() { accessed++; throw new Error('a forged result must not be inspected'); } });
+  for (const result of [raw, { ...raw, stdout: Buffer.from('output'), stderr: Buffer.alloc(0) }, proxy])
+    await assert.rejects(acknowledgeNativeBuiltinToolResult(producer, result as unknown as NativeBuiltinToolResult), TypeError);
+  assert.equal(accessed, 0);
 });
 
 test('retained controller-stop projection never invents user cancellation or no-effect evidence', () => {

@@ -53,7 +53,7 @@ export async function readModelTarget(driver: SqliteConnection | SqliteDriver, a
 /** Historical readers supply the principal from the immutable Session/workspace
  * closure. This data decoder does not authenticate a caller or authorize I/O. */
 export async function readModelTargetData(artifacts: ArtifactCatalog,
-  input: { principalId: string; run: Run; spec: RunSpec; assembly: RunAssemblyV1 }): Promise<ModelTargetClosure> {
+  input: { principalId: string; run: Pick<Run, 'createdAt' | 'deadlineAt'>; spec: RunSpec; assembly: RunAssemblyV1 }): Promise<ModelTargetClosure> {
   const { principalId, run, spec, assembly } = input;
   if (!principalId || spec.operation !== 'agent' || canonicalSha256(assembly) !== spec.assemblyRef ||
       assembly.assemblyDigest !== digestOmitting(assembly, 'assemblyDigest')) throw new KernelStorageError('RECOVERY_REQUIRED', 'model target has no exact admitted assembly');

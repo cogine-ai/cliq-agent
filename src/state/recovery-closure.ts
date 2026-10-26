@@ -1,3 +1,5 @@
+import { readChildAdmission } from './child-admission.js';
+import { canonicalSha256 } from '../kernel/canonical.js';
 import { assertArtifactRef, parseCanonicalTime } from '../kernel/identity.js';
 import type {
   BudgetUsage,
@@ -37,7 +39,7 @@ import {
 } from './decoders.js';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
 import { validateWorkerRecoveryWait } from './worker-recovery.js';
-import { addBudget, decodeBudgetUsage, isZeroBudget } from './invariants.js';
+import { addBudget, childAllocationBudgetFacts, decodeBudgetUsage, isZeroBudget } from './invariants.js';
 import { readChildAllocationsForRun } from './repositories/child-allocations.js';
 import { readInvocationJournal } from './repositories/journal.js';
 import { readWorkerLaunchesForRun } from './repositories/worker-launches.js';
@@ -251,11 +253,20 @@ async function validateContextArtifacts(
 }
 
 async function validateChildAllocationArtifacts(
+  driver: SqliteDriver,
   artifacts: ArtifactCatalog,
-  allocations: ChildAllocationV1[]
+  allocations: ChildAllocationV1[], run: RecoveryClosureV1['run']
 ): Promise<void> {
+  const children = driver.prepare('SELECT id FROM runs WHERE parent_run_id=? ORDER BY id').all<{ id: string }>(run.id).map(row => row.id);
+  const outgoing = allocations.filter(row => row.parentRunId === run.id).map(row => row.childRunId).sort();
+  if (canonicalSha256(children) !== canonicalSha256(outgoing)) recoveryFailure('direct child Runs and allocation ownership are not all-and-only');
+  const incoming = allocations.filter(row => row.childRunId === run.id);
+  if (run.parentRunId ? incoming.length !== 1 || incoming[0]!.parentRunId !== run.parentRunId : incoming.length !== 0)
+    recoveryFailure('Run parent identity has no exact unique original incoming allocation');
   const refs: Array<readonly [string, string | undefined]> = [];
   for (const [index, allocation] of allocations.entries()) {
+    const original = await readChildAdmission(driver, artifacts, allocation.childRunId);
+    if (canonicalSha256(original.allocation) !== canonicalSha256(allocation)) recoveryFailure('child allocation source differs from the original consistent cut');
     refs.push(
       [`ChildAllocation[${index}].delegateOperationGrantRef`, allocation.delegateOperationGrantRef],
       [`ChildAllocation[${index}].capabilityGrantRef`, allocation.capabilityGrantRef]
@@ -375,6 +386,11 @@ function validateJournalGraph(journal: InvocationJournalEntry[]): Map<string, At
 
   for (const group of groups.values()) {
     const phases = group.entries.map((entry) => entry.phase);
+    if (group.prepared.opKind === 'child_admission' || group.prepared.opKind === 'child_merge' || group.prepared.opKind === 'child_await') {
+      if (phases.join(',') !== 'prepared,dispatch_claimed,completed' || group.entries.some(entry =>
+          entry.localCommittedAt !== group.prepared.localCommittedAt || entry.timestamp !== group.prepared.timestamp))
+        recoveryFailure('local child Journal must be one complete original atomic triplet');
+    }
     if (phases[0] !== 'prepared') recoveryFailure('Run Journal attempt does not begin prepared');
     const claim = group.entries.find((entry) => entry.phase === 'dispatch_claimed');
     if (claim !== undefined) {
@@ -586,7 +602,7 @@ async function validateLaunchGraph(
   } else if (run.activeWorkerLaunchId !== undefined) {
     recoveryFailure('non-running Run retains an active WorkerLaunch pointer');
   }
-  if (run.status === 'waiting' && (run.waitingReason === 'approval' || run.waitingReason === 'input') && launches.some((launch) => launch.phase !== 'retired')) {
+  if (run.status === 'waiting' && (run.waitingReason === 'approval' || run.waitingReason === 'input' || run.waitingReason === 'child') && launches.some((launch) => launch.phase !== 'retired')) {
     recoveryFailure('control wait retains an unretired WorkerLaunch');
   }
 }
@@ -795,16 +811,10 @@ async function readRecoveryProjection(
       recoveryFailure(`typed agent recovery closure is invalid: ${(error as Error).message}`, error);
     }
   }
-  if (
-    !budgetLessThanOrEqual(journalBudgets.reserved, run.budgetReserved) ||
-    !budgetLessThanOrEqual(journalBudgets.consumed, run.budgetConsumed)
-  ) recoveryFailure('Run budget counters are below their durable Journal facts');
-  if (childAllocations.length === 0) {
-    if (
-      !budgetEqual(journalBudgets.reserved, run.budgetReserved) ||
-      !budgetEqual(journalBudgets.consumed, run.budgetConsumed)
-    ) recoveryFailure('Run budget counters do not equal the Journal closure');
-  }
+  const childBudgets = childAllocationBudgetFacts(run.id, childAllocations);
+  if (!budgetEqual(addBudget(journalBudgets.reserved, childBudgets.reserved), run.budgetReserved) ||
+      !budgetEqual(addBudget(journalBudgets.consumed, childBudgets.consumed), run.budgetConsumed))
+    recoveryFailure('Run budget counters do not equal their complete own-Journal and direct inclusive child closure');
   if (run.status !== 'running' && !isZeroBudget(run.budgetReserved) && journal.length === 0) {
     recoveryFailure('lease-free Run has an unexplained budget reservation');
   }
@@ -831,7 +841,7 @@ async function readRecoveryProjection(
   await validateLaunchGraph(artifacts, run, workerLaunches, workspaceGenerations);
   try { await validateWorkerRecoveryWait(artifacts, { ...databaseCut, workspaceGenerations: generationProofs }, driver); }
   catch (error) { recoveryFailure(`worker recovery closure is invalid: ${(error as Error).message}`, error); }
-  await validateChildAllocationArtifacts(artifacts, childAllocations);
+  await validateChildAllocationArtifacts(driver, artifacts, childAllocations, run);
 
   phase('terminal');
   let publicationPrefix: PublicationPrefix | undefined;

@@ -22,6 +22,7 @@ import type {
 import { KernelStorageError } from './errors.js';
 import type { LocalControlConnection } from './control-channel.js';
 import { openSqliteDriver } from './sqlite-driver.js';
+import { KERNEL_SCHEMA_V2_SQL } from './schema.js';
 import { openStateStore, publishInProcessChannel, type StateStore } from './store.js';
 import { createAgentFixture } from './testing/agent-fixtures.js';
 import { disposeFixture } from './testing/fixtures.js';
@@ -484,6 +485,21 @@ test('schema v3 admissions without original links stay recoverable but cannot in
       connection.exec('DROP TRIGGER runs_admission_identity_immutable');
       connection.exec('ALTER TABLE sessions DROP COLUMN admission_request_id');
       connection.exec('ALTER TABLE runs DROP COLUMN admission_request_id');
+      // V3 also predates the complete V8 column/guards. Remove only those
+      // exact later definitions; production migration must still refuse a
+      // relabelled newer layout rather than tolerate duplicate columns.
+      assert.equal(connection.prepare('SELECT count(*) AS n FROM child_allocations').get<{ n: bigint }>()!.n, 0n);
+      for (const name of ['runs_parent_cancellation_immutable', 'runs_parent_cancellation_unseeded',
+        'runs_parent_cancellation_register', 'runs_parent_cancellation_fenced']) connection.exec(`DROP TRIGGER ${name}`);
+      connection.exec('ALTER TABLE runs DROP COLUMN parent_cancellation_ref');
+      connection.exec('DROP INDEX authorization_grants_list_order_v1');
+      for (const name of ['child_allocations_validate_insert', 'child_allocations_validate_update', 'child_allocations_immutable_delete'])
+        connection.exec(`DROP TRIGGER ${name}`);
+      for (const name of ['child_allocations_one_parent', 'child_allocations_one_admission', 'child_allocations_one_delegate',
+        'child_allocations_one_call_index', 'child_allocations_one_call_id']) connection.exec(`DROP INDEX ${name}`);
+      connection.exec('DROP TRIGGER run_journal_validate_insert');
+      connection.exec(KERNEL_SCHEMA_V2_SQL.slice(KERNEL_SCHEMA_V2_SQL.indexOf('CREATE TRIGGER run_journal_validate_insert'),
+        KERNEL_SCHEMA_V2_SQL.indexOf('CREATE TRIGGER run_journal_immutable_update')));
       // V3 also predates the inspection ledger. Keeping this V4 table while
       // relabeling the fixture would test a corrupt layout, not an upgrade.
       connection.exec('DROP TABLE source_inspection_attempts');

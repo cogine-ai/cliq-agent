@@ -1,3 +1,4 @@
+import { assertChildAncestryRelease } from '../child-ancestry.js';
 import { digestOmitting, modelOperationId, parseCanonicalTime } from '../../kernel/identity.js';
 import { planCanonicalArtifact, type PlannedArtifact } from '../../kernel/artifact-plan.js';
 import type {
@@ -121,6 +122,7 @@ export function assertLiveDispatchState(
   expectedLeaseEpoch: number,
   now: string
 ): LiveDispatchState {
+  assertChildAncestryRelease(connection, runId, now);
   const run = readRun(connection, runId);
   if (run.revision !== expectedRunRevision) {
     throw new KernelStorageError('REVISION_CONFLICT', 'Run revision changed before invocation transition');

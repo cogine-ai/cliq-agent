@@ -4,7 +4,7 @@ import { parseJsonStrict } from '../kernel/json.js';
 import { normalizeAbsolutePath } from '../kernel/identity.js';
 import { decodeInstalledControlRequest, type InstalledControlRequestV1 } from '../control/v1.js';
 import type { RunSubmitRequest } from '../kernel/control-submit.js';
-import type { ClientCommand } from './application.js';
+import type { ClientCommand } from './types.js';
 
 export type RunIntent = Omit<RunSubmitRequest, 'method' | 'protocolVersion' | 'requestId' | 'requestDigest' | 'admissionKey' | 'sessionId' | 'expectedContextRevision'>;
 export type ClientInvocation =

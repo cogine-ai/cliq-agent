@@ -1,3 +1,6 @@
+import { readRuntimeUpgradeBoundary } from './runtime-upgrade-history.js';
+import type { SignedSchemaConversionV1 } from '../kernel/runtime-upgrade.js';
+import { readSignedSchemaConversion, readSignedKernelSchema } from './signed-schema.js';
 // Retained data only. This reader never acquires a lock, observes a process or
 // supplies authority for a live observation. Owning callers retain those gates.
 import { canonicalSha256 } from '../kernel/canonical.js';
@@ -128,17 +131,23 @@ async function readInstalledSeed(artifacts: ArtifactCatalog, first: Entry,
 /** Only the two actually implemented birth origins and exact known schemas. This is
  * historical rehashing, not another pristine-namespace or migration bootstrap. */
 async function readGenesis(artifacts: ArtifactCatalog, first: Entry, lock: StateLockIdentityV1,
-  runtimeKind: 'schema' | 'signed'): Promise<void> {
+  runtimeKind: 'schema' | 'signed', conversion?: SignedSchemaConversionV1): Promise<void> {
   if (first.acquisition.kind !== 'genesis') invalid('StateOwner history has no exact genesis');
   const acquisition = first.acquisition;
   const generation = await readCanonicalArtifact<KernelGenerationIdentityV1>(artifacts, acquisition.kernelGenerationIdentityRef);
   if (generation.origin !== 'fresh_empty' && generation.origin !== 'fresh_installed') invalid('unsupported retained StateOwner genesis origin');
   const recipe = kernelSchemaBirthRecipe(generation.stateSchemaVersion);
+  if (conversion && generation.stateSchemaVersion !== 7) invalid('signed conversion cannot reinterpret another original birth version');
   if (runtimeKind === 'schema') {
     if (generation.origin !== 'fresh_empty' || generation.pristineSchemaManifestRef !== first.owner.runtimeBundleRef ||
         generation.pristineSchemaManifestDigest !== first.owner.runtimeBundleManifestDigest)
       invalid('retained schema-only genesis differs from its original runtime schema');
-  } else if (generation.stateSchemaVersion !== KERNEL_STATE_SCHEMA_VERSION) {
+  } else if (generation.stateSchemaVersion !== KERNEL_STATE_SCHEMA_VERSION && !(
+      generation.stateSchemaVersion === 7 && conversion?.source.runtimeBundleRef === first.owner.runtimeBundleRef &&
+      conversion.source.runtimeBundleManifestDigest === first.owner.runtimeBundleManifestDigest &&
+      conversion.source.schemaManifestRef === generation.pristineSchemaManifestRef &&
+      conversion.source.schemaManifestDigest === generation.pristineSchemaManifestDigest &&
+      conversion.source.schemaDigest === generation.pristineSchemaDigest)) {
     // Existing signed births have no exact historical signed-schema source.
     // A supported DDL recipe or broad compatibility range cannot supply it.
     invalid('retained signed schema upgrade requires its original schema authority');
@@ -322,15 +331,38 @@ async function readHistory(driver: SqliteDriver, artifacts: ArtifactCatalog,
       rootIdentity.ownerUid !== entries[0]!.process.ownerUid || rootIdentity.platform !== entries[0]!.process.platform ||
       lockIdentity.ownerUid !== rootIdentity.ownerUid) invalid('retained StateOwner root/lock does not match');
   const runtimeKind = await readRuntime(artifacts, first);
-  await readGenesis(artifacts, entries[0]!, lockIdentity, runtimeKind);
+  const boundaries = entries.filter(entry => entry.acquisition.kind === 'runtime_upgrade');
+  if (boundaries.length > 1) invalid('only the exact signed7-to8 boundary is implemented');
+  const boundary = boundaries[0];
+  const conversionTarget = boundary?.owner.runtimeBundleRef ?? artifacts.runtimeConversionSourceRef();
+  let conversion: SignedSchemaConversionV1 | undefined;
+  if (runtimeKind === 'signed') {
+    const bundle = await readCanonicalArtifact<RuntimeBundleManifest>(artifacts, first.runtimeBundleRef);
+    if (conversionTarget) {
+      const target = await readCanonicalArtifact<RuntimeBundleManifest>(artifacts, conversionTarget);
+      conversion = await readSignedSchemaConversion(artifacts, bundle, target, artifacts.releaseTrustRoots());
+    } else await readSignedKernelSchema(artifacts, bundle, artifacts.releaseTrustRoots());
+  } else if (conversionTarget) invalid('signed conversion cannot replace a schema-only runtime');
+  await readGenesis(artifacts, entries[0]!, lockIdentity, runtimeKind, conversion);
   for (const [index, entry] of entries.entries()) {
-    if (entry.owner.stateLockIdentityRef !== first.stateLockIdentityRef || entry.owner.stateLockIdentityDigest !== first.stateLockIdentityDigest ||
-        entry.owner.runtimeBundleRef !== first.runtimeBundleRef || entry.owner.runtimeBundleManifestDigest !== first.runtimeBundleManifestDigest ||
-        entry.owner.supervisorEntryId !== first.supervisorEntryId || entry.owner.supervisorEntryVersion !== first.supervisorEntryVersion ||
-        (runtimeKind === 'signed' && entry.owner.supervisorExecutableDigest !== first.supervisorExecutableDigest) ||
-        entry.process.ownerUid !== rootIdentity.ownerUid || entry.process.platform !== rootIdentity.platform)
-      invalid('retained StateOwner history changed root/lock/runtime');
     const prior = entries[index - 1]?.owner;
+    const originalRuntime = prior ?? first;
+    const upgrade = entry.acquisition.kind === 'runtime_upgrade';
+    if (entry.owner.stateLockIdentityRef !== first.stateLockIdentityRef || entry.owner.stateLockIdentityDigest !== first.stateLockIdentityDigest ||
+        (!upgrade && (entry.owner.runtimeBundleRef !== originalRuntime.runtimeBundleRef ||
+          entry.owner.runtimeBundleManifestDigest !== originalRuntime.runtimeBundleManifestDigest ||
+          entry.owner.supervisorEntryId !== originalRuntime.supervisorEntryId || entry.owner.supervisorEntryVersion !== originalRuntime.supervisorEntryVersion ||
+          (runtimeKind === 'signed' && entry.owner.supervisorExecutableDigest !== originalRuntime.supervisorExecutableDigest))) ||
+        entry.process.ownerUid !== rootIdentity.ownerUid || entry.process.platform !== rootIdentity.platform)
+      invalid('retained StateOwner history changed root/lock/runtime without an exact upgrade');
+    if (entry.acquisition.kind === 'runtime_upgrade') {
+      if (!prior || entries[0]!.acquisition.kind !== 'genesis') invalid('runtime upgrade lacks its original genesis');
+      const upgradeData = await readRuntimeUpgradeBoundary(driver, artifacts, prior, entry.owner, entry.acquisition, entries[0]!.acquisition);
+      if (upgradeData.receipt.stateRootIdentityRef !== lockIdentity.stateRootIdentityRef ||
+          upgradeData.receipt.stateRootIdentityDigest !== lockIdentity.stateRootIdentityDigest)
+        invalid('runtime upgrade substituted its original StateRoot');
+      await readRuntime(artifacts, entry.owner);
+    }
     if (entry.acquisition.kind !== 'genesis') {
       const acquisition = entry.acquisition;
       if (!prior || prior.state !== 'terminal' || prior.rowDigest !== acquisition.priorTerminalRowDigest ||

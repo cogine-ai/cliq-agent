@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { chmod, copyFile, lstat, mkdir, open, readFile, realpath, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 import { inject } from 'postject';
 import { INSTALLED_CREDENTIAL_PHASE_CHANNEL, INSTALLED_CREDENTIAL_PHASES,
@@ -17,6 +18,7 @@ import { compareSupervisorCarrierLayout } from './supervisor-carrier-layout.js';
 export { INSTALLED_ASSEMBLY_WORK_DIAGNOSTIC_BANNER } from './installed-assembly-work-banner.js';
 
 export const SUPERVISOR_SEA_NODE_VERSION = '24.21.0';
+export const INSTALLED_RESOURCE_SUBSCRIBER = fileURLToPath(new URL('./installed-resource-subscriber.ts', import.meta.url));
 export const SUPERVISOR_SEA_CARRIER_CHECKSUMS: Readonly<Record<string, string>> = {
   'linux-x64': 'fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6',
   'darwin-arm64': '6239d4cf92d864487ec8cd3615038f7b67e7f58b77b21cd2f09ea9fbd68065fe',
@@ -284,11 +286,13 @@ export async function buildSupervisorSeaImage(input: {
   publicationRetirementDiagnostics?: true;
   serverAuthenticationDiagnostics?: true;
   storeFailureDiagnostics?: true;
+  resourceDiagnostics?: true;
 }): Promise<string> {
   assert(input.credentialPhaseDiagnostics === undefined || input.credentialPhaseDiagnostics === true);
   assert(input.publicationRetirementDiagnostics === undefined || input.publicationRetirementDiagnostics === true);
   assert(input.serverAuthenticationDiagnostics === undefined || input.serverAuthenticationDiagnostics === true);
   assert(input.storeFailureDiagnostics === undefined || input.storeFailureDiagnostics === true);
+  assert(input.resourceDiagnostics === undefined || input.resourceDiagnostics === true);
   const banner = (input.credentialPhaseDiagnostics ? CREDENTIAL_PHASE_DIAGNOSTIC_BANNER + INSTALLED_WORK_DIAGNOSTIC_BANNER : '') +
     (input.publicationRetirementDiagnostics ? PUBLICATION_RETIREMENT_DIAGNOSTIC_BANNER : '') +
     (input.serverAuthenticationDiagnostics ? SERVER_AUTHENTICATION_DIAGNOSTIC_BANNER : '') +
@@ -296,6 +300,7 @@ export async function buildSupervisorSeaImage(input: {
   const main = path.join(input.fixture, `${input.variant}.cjs`);
   const result = await build({ entryPoints: [input.entryPoint], outfile: main,
     bundle: true, platform: 'node', format: 'cjs', target: 'node24.21', metafile: true,
+    ...(input.resourceDiagnostics ? { inject: [INSTALLED_RESOURCE_SUBSCRIBER] } : {}),
     ...(banner ? { banner: { js: banner } } : {}),
     // These entries run only as SEA. The ordinary ESM helper branch cannot run.
     define: { 'import.meta.url': 'undefined', ...input.defines } });

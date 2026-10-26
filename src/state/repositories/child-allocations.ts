@@ -1,3 +1,4 @@
+import { parseJsonStrict } from '../../kernel/json.js';
 import type { ChildAllocationV1 } from '../../kernel/types.js';
 import { KernelStorageError } from '../errors.js';
 import { decodeChildAllocation } from '../invariants.js';
@@ -13,7 +14,7 @@ type ChildAllocationSqlRow = {
 function childAllocationFromRow(row: ChildAllocationSqlRow): ChildAllocationV1 {
   let value: unknown;
   try {
-    value = JSON.parse(row.row_json);
+    value = parseJsonStrict(row.row_json);
   } catch {
     throw new KernelStorageError('RECOVERY_REQUIRED', 'ChildAllocation row is not valid JSON');
   }
@@ -47,4 +48,12 @@ export function readChildAllocationsForRun(
     )
     .all<ChildAllocationSqlRow>(runId, runId)
     .map(childAllocationFromRow);
+}
+
+/** One immutable parent link; multiple incoming rows never become a choice. */
+export function readIncomingChildAllocation(connection: SqliteConnection | SqliteDriver, childRunId: string): ChildAllocationV1 | undefined {
+  const rows = connection.prepare(`SELECT parent_run_id, child_run_id, state, row_json FROM child_allocations WHERE child_run_id = ? LIMIT 2`)
+    .all<ChildAllocationSqlRow>(childRunId);
+  if (rows.length > 1) throw new KernelStorageError('RECOVERY_REQUIRED', 'child Run has more than one registered parent');
+  return rows[0] === undefined ? undefined : childAllocationFromRow(rows[0]);
 }

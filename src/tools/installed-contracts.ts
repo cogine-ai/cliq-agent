@@ -9,9 +9,11 @@ import { immutableSnapshot } from '../model/immutable.js';
 import { assertBuiltinScriptGuest } from './execution-identity.js';
 
 type Entry = RuntimeBundleManifest['entries'][number];
-export const INSTALLED_TOOL_NAMES = Object.freeze(['bash', 'edit', 'find', 'grep', 'ls', 'read', 'request_input'] as const);
+export const INSTALLED_TOOL_NAMES = Object.freeze(['await_children', 'bash', 'delegate', 'edit', 'find', 'grep', 'ls', 'read', 'request_input'] as const);
 const descriptions = {
+  await_children: 'Register one wait for the supplied owned child Run handles. Return ordered actual child results and serialized patch merge outcomes. Each explicit registration costs one tool call; internal wake and settlement do not add another charge.',
   bash: 'Execute an authorized Bash command in the private Run workspace.',
+  delegate: 'Admit one ordinary child Run under an explicit unchanged budget ceiling and an intersection of the parent capabilities. The parent retains a bounded continuation budget floor; insufficient room returns not_admitted. Read-only children cannot publish patches. Mutating child patches require separate parent fs-write permission and are merged serially after settlement. Children are scheduled within the existing single-worker installation slot.',
   edit: 'Edit an authorized file in the private Run workspace.',
   find: 'Find private workspace entries whose names contain a literal substring.',
   grep: 'Search private workspace file contents for a literal substring.',
@@ -41,8 +43,11 @@ export function buildInstalledToolContracts(input: { edit: Entry;
       replayClass: builtin.replayClass, inputSchemaRef: schemaRef, inputSchemaDigest: schemaRef };
     if (name === 'edit') return { ...common, access: 'write', replayClass: 'manual',
       execution: { kind: 'builtin', adapterId: edit.entryId, adapterVersion: edit.version, adapterCodeDigest: edit.digest } };
-    if (name === 'request_input') return { ...common, access: 'control', replayClass: 'manual', execution: {
-      kind: 'supervisor_control', handlerId: 'request_input', supervisorEntryId: scripts!.supervisor.entryId,
+    if (name === 'request_input' || name === 'await_children') return { ...common, access: 'control', replayClass: 'manual', execution: {
+      kind: 'supervisor_control', handlerId: name, supervisorEntryId: scripts!.supervisor.entryId,
+      supervisorEntryVersion: scripts!.supervisor.version, supervisorExecutableDigest: scripts!.supervisor.digest } };
+    if (name === 'delegate') return { ...common, access: 'exec', replayClass: 'retry', execution: {
+      kind: 'supervisor_operation', handlerId: 'delegate', supervisorEntryId: scripts!.supervisor.entryId,
       supervisorEntryVersion: scripts!.supervisor.version, supervisorExecutableDigest: scripts!.supervisor.digest } };
     return { ...common, access: name === 'bash' ? 'exec' : 'read', replayClass: name === 'bash' ? 'manual' : 'retry', execution: {
       kind: 'builtin_script', adapterId: 'builtin_tools', adapterVersion: '1', adapterCodeDigest: scripts!.entry.digest,

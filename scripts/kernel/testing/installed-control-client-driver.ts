@@ -5,11 +5,11 @@ import assert from 'node:assert/strict';
 import { constants, writeSync, type BigIntStats } from 'node:fs';
 import { lstat, open, type FileHandle } from 'node:fs/promises';
 import path from 'node:path';
-import { CONTROL_FRAME_BYTES as bound, decodeControlFrame, headlessControlHello } from '../../../src/control/v1.js';
+import { CONTROL_FRAME_BYTES as bound, decodeControlFrame, headlessControlHello, headlessControlResponse } from '../../../src/control/v1.js';
+import { openCliqClient, type CliqClient } from '../../../src/sdk/index.js';
 import { runInstalledControlJsonl } from '../../../src/control/installed-jsonl.js';
 import { parseClientInvocation } from '../../../src/client/commands.js';
-import { runClientInvocation } from '../../../src/client/entry.js';
-import { openInstalledClientStdio } from '../../../src/client/stdio.js';
+import { openInstalledClientHost } from '../../../src/client/installed-host.js';
 import { canonicalJsonBytes } from '../../../src/kernel/canonical.js';
 import { runInstalledHeadlessJsonl, runInstalledHeadlessRpc } from '../../../src/headless/installed.js';
 import { createInstalledControlSession, type InstalledControlSession } from '../../../src/control/session.js';
@@ -160,7 +160,8 @@ async function main(): Promise<void> {
   assert(process.geteuid!() > 0 && process.getegid!() > 0);
   const [filename, schema, ...extra] = process.argv.slice(2);
   const clientEntry = schema === '--client-entry';
-  assert(filename && (clientEntry ? extra.length > 0 : (schema === undefined || schema === '--schema3' || schema === '--schema3-rpc' ||
+  const sdkRead = schema === '--client-sdk-read';
+  assert(filename && (clientEntry ? extra.length > 0 : sdkRead ? extra.length === 1 && /^[A-Za-z0-9_-]{43}$/u.test(extra[0]!) : (schema === undefined || schema === '--schema3' || schema === '--schema3-rpc' ||
     schema === '--client-jsonl' || schema === '--client-rpc') && extra.length === 0));
   setPhase('composition');
   const composition = await fixtureComposition(filename);
@@ -168,12 +169,14 @@ async function main(): Promise<void> {
   const closeRequestFailures = observeRequestFailures();
   let selected: HeldInstalledRuntime | undefined, client: InstalledSupervisorClient | undefined, failure: unknown;
   let session: InstalledControlSession | undefined, surface: AbortController | undefined;
+  let host: Awaited<ReturnType<typeof openInstalledClientHost>> | undefined;
+  let sdk: CliqClient | undefined;
   let stopping: Promise<void> | undefined, stopRequested = false;
   const stop = () => {
     stopRequested = true;
     surface?.abort();
     process.stdin.destroy();
-    if (client) { stopping ??= session ? session.close() : client.close(); void stopping.catch(() => {}); }
+    if (sdk || host || client) { stopping ??= sdk ? sdk.close() : host ? host.close() : session ? session.close() : client!.close(); void stopping.catch(() => {}); }
   };
   process.once('SIGTERM', stop); process.once('SIGINT', stop); process.stdout.on('error', stop);
   try {
@@ -181,6 +184,39 @@ async function main(): Promise<void> {
     selected = await createInstalledRuntime({ releaseKeys: composition.releaseKeys }).openSelected(composition.stateRoot);
     assert(!stopRequested, 'installed client driver is stopping');
     setPhase('authentication');
+    if (sdkRead) {
+      // Fixed qualification-only read of the already admitted Run through the
+      // public package surface. This adds no command language or Run owner.
+      sdk = await openCliqClient(selected);
+      assert(!stopRequested, 'installed client driver is stopping');
+      setPhase('output');
+      const greeting = headlessControlHello({ protocolVersion: 1, method: 'control.hello', clientBuild: 'cliq-installed-sdk-v3',
+        controlSchemaRange: { min: 1, max: 1 }, headlessSchemaRange: { min: 3, max: 3 },
+        requestedFeatureIds: [...sdk.hello.enabledFeatureIds] }, sdk.hello);
+      await output(Buffer.concat([canonicalJsonBytes(greeting), Buffer.from('\n')])); setPhase('request');
+      const request = { protocolVersion: 1 as const, method: 'run.get' as const, runId: extra[0]! };
+      const response = await sdk.execute({ kind: 'request', request });
+      assert(response, 'the SDK read must return its authoritative response');
+      setPhase('output'); await output(Buffer.concat([canonicalJsonBytes(headlessControlResponse(response, request)), Buffer.from('\n')]));
+    } else if (clientEntry || schema === '--client-jsonl' || schema === '--client-rpc') {
+      host = await openInstalledClientHost(selected);
+      assert(!stopRequested, 'installed client driver is stopping');
+      setPhase('output');
+      if (clientEntry) {
+        // Qualification framing only. All authentication, application and
+        // inherited-stdio lifetime now use the production CLI/SDK host.
+        const greeting = headlessControlHello({ protocolVersion: 1, method: 'control.hello', clientBuild: 'cliq-installed-entry-v3',
+          controlSchemaRange: { min: 1, max: 1 }, headlessSchemaRange: { min: 3, max: 3 },
+          requestedFeatureIds: [...host.hello.enabledFeatureIds] }, host.hello);
+        await output(Buffer.concat([canonicalJsonBytes(greeting), Buffer.from('\n')])); setPhase('request');
+      }
+      surface = new AbortController();
+      const invocation = clientEntry ? parseClientInvocation(extra, process.cwd())
+        : { kind: schema === '--client-rpc' ? 'rpc' as const : 'jsonl' as const };
+      const code = await host.run(invocation, { input: process.stdin, output: process.stdout, diagnostic: process.stderr,
+        workspacePath: process.cwd(), signal: surface.signal });
+      assert.equal(code, 0, 'installed application host did not finish its original action');
+    } else {
     client = await openInstalledSupervisorClient(selected, schema === undefined ? 1 : 3);
     assert(!stopRequested, 'installed client driver is stopping');
     setPhase('output');
@@ -189,31 +225,9 @@ async function main(): Promise<void> {
     };
     if (schema !== undefined) {
       session = createInstalledControlSession(client);
-      if (clientEntry) {
-        surface = new AbortController();
-        // Qualification-only framing of the actual authenticated hello. The
-        // CLI/TUI itself uses its unchanged production entry and original
-        // held selected installation; no path/key/ledger option is exposed.
-        const greeting = headlessControlHello({ protocolVersion: 1, method: 'control.hello', clientBuild: 'cliq-installed-entry-v3',
-          controlSchemaRange: { min: 1, max: 1 }, headlessSchemaRange: { min: 3, max: 3 },
-          requestedFeatureIds: [...client.hello.enabledFeatureIds] }, client.hello);
-        await write(Buffer.concat([canonicalJsonBytes(greeting), Buffer.from('\n')]));
-        const stdio = await openInstalledClientStdio(selected, { input: process.stdin,
-          output: process.stdout, diagnostic: process.stderr, workspacePath: process.cwd(), signal: surface.signal });
-        let code: number;
-        try { code = await runClientInvocation(session, parseClientInvocation(extra, process.cwd()), stdio.io); }
-        finally { await stdio.close(); }
-        assert.equal(code, 0, 'installed client entry did not finish its original action');
-      } else if (schema === '--client-jsonl' || schema === '--client-rpc') {
-        surface = new AbortController();
-        const stdio = await openInstalledClientStdio(selected, { input: process.stdin,
-          output: process.stdout, diagnostic: process.stderr, workspacePath: process.cwd(), signal: surface.signal });
-        let code: number;
-        try { code = await runClientInvocation(session, { kind: schema === '--client-rpc' ? 'rpc' : 'jsonl' }, stdio.io); }
-        finally { await stdio.close(); }
-        assert.equal(code, 0, 'installed application adapter did not join');
-      } else await (schema === '--schema3-rpc' ? runInstalledHeadlessRpc : runInstalledHeadlessJsonl)(session, requests(), write);
+      await (schema === '--schema3-rpc' ? runInstalledHeadlessRpc : runInstalledHeadlessJsonl)(session, requests(), write);
     } else await runInstalledControlJsonl(client, requests(), write);
+    }
     assert(!stopRequested, 'installed client driver stopped before EOF');
   } catch (error) {
     failure = error; failedPhase = phase;
@@ -228,7 +242,7 @@ async function main(): Promise<void> {
       // Never close the selected original images under an uncertain native
       // client. The nonzero process exit, not a claimed join, is the fallback.
       if (failure instanceof ResourceRetirementError) throw failure;
-      if (session) await session.close(); else if (client) await client.close();
+      if (sdk) await sdk.close(); else if (host) await host.close(); else if (session) await session.close(); else if (client) await client.close();
       if (selected) await selected.close();
     } catch (error) {
       failedPhase = phase; throw error;

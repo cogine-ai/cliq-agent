@@ -1,3 +1,5 @@
+import { readChildAdmission, validateChildAdmissionHistory } from './child-admission.js';
+import { validateChildWaitHistory } from './child-wait-history.js';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting } from '../kernel/identity.js';
 import type {
@@ -31,7 +33,7 @@ import type { DeliveryReadData } from './delivery-read-data.js';
  * subject-specific retained policy/control/Journal history below. */
 export function assertRunPolicyDecisionSubject(operation: RunSpec['operation'], subjectKind: unknown): void {
   if (!['agent', 'delivery'].includes(operation) || subjectKind !== 'verifier_launch' &&
-      !(operation === 'agent' && subjectKind === 'tool_call') &&
+      !(operation === 'agent' && (subjectKind === 'tool_call' || subjectKind === 'child_merge')) &&
       !(operation === 'delivery' && subjectKind === 'delivery_plan'))
     throw new TypeError('policy decision has an unsupported subject for its Run operation');
 }
@@ -142,6 +144,7 @@ async function validateAgentRecoveryData(input: AgentRecoveryInput, onPhase?: (p
   }
   phase('items');
   const items = new Map<string, ContinuationItem>();
+  let hasChildWaitResult = false;
   for (const row of input.items) {
     const item = await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef);
     if (item.runId !== run.id || item.itemId !== row.itemId || item.createdAt !== row.createdAt) {
@@ -190,20 +193,64 @@ async function validateAgentRecoveryData(input: AgentRecoveryInput, onPhase?: (p
         throw new TypeError('tool result is not owned by its retained batch call');
       }
       if (payload.outcome === 'executed') {
+        hasChildWaitResult ||= payload.source === 'child_results';
         if (payload.source === 'invocation') {
           if (item.opId !== payload.opId || payload.opId !== toolOperationId(run.id, item.batchItemId, item.callId) ||
               !journal.some((entry) => (entry.opKind === 'tool' || entry.opKind === 'mcp') &&
               entry.phase === 'completed' && entry.opId === payload.opId && entry.attempt === payload.attempt &&
               entry.resultRef === payload.journalResultRef)) throw new TypeError('executed invocation result has no completed Journal owner');
-        } else if (payload.source !== 'user_input') throw new TypeError('executed tool result has an unknown source');
+        } else if (payload.source === 'child_admission') {
+          const handle = await readCanonicalArtifact<import('../kernel/children.js').ChildHandleItem>(artifacts, payload.childHandleItemRef);
+          if (!input.driver || call.toolName !== 'delegate' || item.opId !== payload.opId || handle.kind !== 'child_handle')
+            throw new TypeError('local child result has no exact owned delegate subject');
+          const admitted = await readChildAdmission(input.driver, artifacts, handle.childRunId);
+          if (admitted.parent.id !== run.id || admitted.receipt.childHandleItemRef !== payload.childHandleItemRef ||
+              admitted.journal[2]!.resultRef !== payload.journalResultRef || admitted.receipt.receiptDigest !== payload.journalResultDigest ||
+              admitted.allocation.delegateOpId !== payload.opId) throw new TypeError('child result substitutes its original local admission');
+        } else if (payload.source === 'child_admission_refusal') {
+          const receipt = await readCanonicalArtifact<import('../kernel/child-admission-refusal.js').ChildAdmissionRefusalReceiptV1>(artifacts, payload.journalResultRef);
+          if (!input.driver || call.toolName !== 'delegate' || item.opId !== payload.opId || receipt.format !== 'cliq-child-admission-refusal-v1' ||
+              receipt.runId !== run.id || receipt.opId !== payload.opId || receipt.receiptDigest !== payload.journalResultDigest ||
+              !journal.some(row => row.opKind === 'child_admission' && row.opId === payload.opId && row.phase === 'completed' && row.resultRef === payload.journalResultRef))
+            throw new TypeError('no-child result has no exact original local attempt');
+        } else if (payload.source !== 'user_input' && payload.source !== 'child_results') throw new TypeError('executed tool result has an unknown source');
       }
       if (payload.outcome === 'error') await artifacts.readBytes(payload.diagnosticRef);
     }
+  }
+  if (journal.some(row => row.opKind === 'child_admission') || [...items.values()].some(item => item.kind === 'child_handle')) {
+    if (!input.driver) throw new TypeError('child admission history requires its real retained SQLite source');
+    await validateChildAdmissionHistory(input.driver, artifacts, { run, items, journal, checkpoints: input.checkpoints });
+  }
+  if (journal.some(row => row.opKind === 'child_await') || hasChildWaitResult || run.waitingReason === 'child') {
+    if (!input.driver) throw new TypeError('child await history requires its actual retained SQLite source');
+    await (await import('./child-await-history.js')).validateChildAwaitHistory(input.driver, artifacts,
+      { run, spec, items, journal, checkpoints: input.checkpoints });
   }
   if (spec.operation === 'delivery' && !input.driver) throw new TypeError('delivery history requires its owning retained SQLite cut');
   const deliveryMerges = delivery ? await delivery.merges() : input.driver ? await validateDeliveryRecovery(input.driver, artifacts, {
     run, runSpec: spec, items: input.items, journal, checkpoints: input.checkpoints, decodedItems: items
   }) : undefined;
+  let mergedAwaitResults: ReadonlyMap<string, string> | undefined;
+  if (journal.some(row => row.opKind === 'child_merge') || [...items.values()].some(item => item.kind === 'child_merge_result' || item.kind === 'child_merge_batch')) {
+    if (!input.driver) throw new TypeError('child merge effect history requires its actual retained SQLite source');
+    mergedAwaitResults = await (await import('./child-merge-history.js')).validateChildMergeHistory(input.driver, artifacts,
+      { run, items, journal, checkpoints: input.checkpoints });
+  }
+  const excludedFinal = input.context.segments.some(segment => segment.kind === 'excluded_control' &&
+    [...items.values()].slice(segment.fromItemSeq - 1, segment.throughItemSeq).some(item => item.kind === 'model_turn'));
+  if (hasChildWaitResult || excludedFinal || [...items.values()].some(item => item.kind === 'child_result' || item.kind === 'child_merge_batch') || run.waitingReason === 'child') {
+    if (!input.driver) throw new TypeError('child wait history requires its real retained SQLite source');
+    await validateChildWaitHistory(input.driver, artifacts, { run, spec, items, journal, checkpoints: input.checkpoints, mergedAwaitResults,
+      context: input.context, workspaceGenerations: input.workspaceGenerations });
+  }
+  const mergePolicy = [...items.values()].some(item => item.kind === 'policy_decision' && item.subjectKind === 'child_merge');
+  const mergeWaiting = run.waitingReason === 'approval' && run.waitingOnRef &&
+    (await readCanonicalArtifact<{ subject?: { kind?: string } }>(artifacts, run.waitingOnRef)).subject?.kind === 'child_merge';
+  if (mergePolicy || mergeWaiting) {
+    if (!input.driver) throw new TypeError('child merge permission history requires its actual retained SQLite source');
+    await (await import('./child-merge-authorization.js')).validateChildMergeAuthorizationHistory(input.driver, artifacts, { run, items });
+  }
   phase('candidate');
   const verifierProgressByCandidate = new Map<string, VerifierProgress>();
   for (const row of input.items.filter(row => items.get(row.itemId)?.kind === 'final_candidate')) {
@@ -212,7 +259,7 @@ async function validateAgentRecoveryData(input: AgentRecoveryInput, onPhase?: (p
       run, runSpec: spec, items: input.items, journal, workspaceGenerations: input.workspaceGenerations
     }, row.itemId));
   }
-  await validateFinalCandidateRecovery({ artifacts, run, spec, items: input.items, journal,
+  await validateFinalCandidateRecovery({ driver: input.driver, artifacts, run, spec, items: input.items, journal,
     checkpoints: input.checkpoints, workspaceGenerations: input.workspaceGenerations, decodedItems: items, verifierProgressByCandidate, deliveryMerges });
   phase('verifier');
   let repairAttempts = 0;

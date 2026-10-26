@@ -8,6 +8,8 @@ import { immutableSnapshot } from '../model/immutable.js';
 import { openInstalledSupervisorClient, type InstalledSupervisorClient } from '../state/installed-control-client.js';
 import type { HeldInstalledRuntime } from '../state/installed-runtime.js';
 import { ResourceRetirementError } from '../state/errors.js';
+import { ControlRefusal } from './errors.js';
+export { ControlRefusal } from './errors.js';
 import { INSTALLED_CONTROL_FEATURES, decodeInstalledControlEnvelope, decodeInstalledControlRequest,
   decodeInstalledControlResponse, headlessRunEvent,
   type InstalledControlFeature, type InstalledControlRequestV1, type InstalledControlResponseFor,
@@ -16,11 +18,6 @@ import { INSTALLED_CONTROL_FEATURES, decodeInstalledControlEnvelope, decodeInsta
 type Attach = Extract<InstalledControlRequestV1, { method: 'run.attach' }>;
 type AttachResult = Extract<InstalledControlResponseFor<'run.attach'>, { ok: true }>['result'];
 export type SessionResumeInput = Omit<RunSubmitRequest, 'requestDigest' | 'expectedContextRevision'>;
-export class ControlRefusal extends Error {
-  constructor(readonly response: Extract<InstalledControlResponseFor<InstalledControlFeature>, { ok: false }>) {
-    super('installed Supervisor refused the request'); this.name = 'ControlRefusal';
-  }
-}
 export type InstalledControlSession = Readonly<{
   readonly hello: InstalledSupervisorClient['hello'];
   request(value: unknown): Promise<InstalledControlResponseFor<InstalledControlFeature>>;

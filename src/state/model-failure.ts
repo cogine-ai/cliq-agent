@@ -8,20 +8,22 @@ import { validateUnusableModelResponse } from '../runtime/continuation.js';
 import { stopInvocationHistory, type ModelFailureStopIntent } from '../runtime/stop.js';
 import { readCanonicalArtifact } from './agent-context.js';
 import type { ArtifactCatalog } from './artifacts.js';
-import { isZeroBudget } from './invariants.js';
+import { childAllocationBudgetFacts, subtractBudget, isZeroBudget } from './invariants.js';
 import { readStateOwner } from './state-owner.js';
 import type { SqliteDriver } from './sqlite-driver.js';
 import { readSupervisorInspector } from './supervisor-inspector.js';
+import { readStopSourceData } from './stop-source.js';
 import { readCredentialRedemptionFailureCause } from './credential-redemption-failure.js';
 
 type Inspector = { inspectorIdentityRef: string; inspectorIdentityDigest: string };
 
 /** Only positively received normal responses with a settled history. Unknowns require their own external closure. */
-async function readModelFailureCause(artifacts: ArtifactCatalog, cut: RecoveryClosureV1, observedAt: string) {
-  const { run, journal, latestCheckpoint: checkpoint } = cut;
-  if (run.waitingReason || !isZeroBudget(run.budgetReserved)) return undefined;
+async function readModelFailureCause(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1, observedAt: string, sourceCheckpointId?: string, sourceRunRevision?: number, registeredJournalSeq?: number) {
+  const { run } = cut, { checkpoint, journal, items } = readStopSourceData(driver, cut, observedAt, sourceCheckpointId, sourceRunRevision, registeredJournalSeq);
+  const children = childAllocationBudgetFacts(run.id, cut.childAllocations);
+  if (run.waitingReason && sourceCheckpointId === undefined || !isZeroBudget(subtractBudget(run.budgetReserved, children.reserved))) return undefined;
   const history = [...stopInvocationHistory(journal).values()];
-  if (history.some(({ entry, hasClaim }) => !['model', 'tool'].includes(entry.opKind) ||
+  if (history.some(({ entry, hasClaim }) => !['model', 'tool', 'child_admission', 'child_merge', 'child_await'].includes(entry.opKind) ||
       (entry.phase !== 'completed' && (entry.phase !== 'failed' || hasClaim)))) return undefined;
   const latest = history.filter(({ entry }) => entry.opKind === 'model').at(-1)?.entry;
   if (latest?.phase !== 'completed') return undefined;
@@ -36,7 +38,7 @@ async function readModelFailureCause(artifacts: ArtifactCatalog, cut: RecoveryCl
   if (frontier.kind !== 'agent' || frontier.phase !== 'model_turn' || frontier.compactionPlanRef !== undefined ||
       latest.opId !== modelOperationId(run.id, frontier) || (run.frontierRef !== undefined && run.frontierRef !== frontierRef) ||
       projection.contextManifestRef !== checkpoint.contextManifestRef || frontier.contextItemSeq !== checkpoint.runItemSeq ||
-      cut.items.length !== checkpoint.runItemSeq || response.observedAt > latest.timestamp || latest.timestamp > observedAt) {
+      items.length !== checkpoint.runItemSeq || response.observedAt > latest.timestamp || latest.timestamp > observedAt) {
     throw new TypeError('model failure does not own the current normal-model frontier and checkpoint');
   }
   if ((await artifacts.readBytes(response.observedResponse.bytesRef)).byteLength !== response.observedResponse.byteCount) {
@@ -50,7 +52,7 @@ async function readModelFailureCause(artifacts: ArtifactCatalog, cut: RecoveryCl
 export async function prepareModelFailureStop(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerRecordV1, assembly: RunAssemblyV1,
   cut: RecoveryClosureV1, identity: Inspector, observedAt: string) {
   if (assembly.mcpServers.length) return undefined;
-  const cause = await readModelFailureCause(artifacts, cut, observedAt) ??
+  const cause = await readModelFailureCause(driver, artifacts, cut, observedAt) ??
     await readCredentialRedemptionFailureCause(driver, artifacts, cut, observedAt);
   if (!cause) return undefined;
   await readSupervisorInspector(artifacts, owner, assembly, { ...identity, observedAt });
@@ -83,8 +85,8 @@ export async function validateModelFailureStop(driver: SqliteDriver, artifacts: 
       parseCanonicalTime(intent.createdAt) - parseCanonicalTime(evidence.observedAt) > 5_000) {
     throw new TypeError('runtime stop has no exact fresh model failure evidence');
   }
-  const cause = evidence.failureKind === 'model_unusable_response' ? await readModelFailureCause(artifacts, cut, evidence.observedAt) :
-    await readCredentialRedemptionFailureCause(driver, artifacts, cut, evidence.observedAt);
+  const cause = evidence.failureKind === 'model_unusable_response' ? await readModelFailureCause(driver, artifacts, cut, evidence.observedAt, intent.registeredCheckpointId, intent.registeredRunRevision, intent.registeredJournalSeq) :
+    await readCredentialRedemptionFailureCause(driver, artifacts, cut, evidence.observedAt, intent.registeredCheckpointId, intent.registeredRunRevision, intent.registeredJournalSeq);
   if (!cause) throw new TypeError('runtime stop has no settled exact model failure cause');
   requireEqual(evidence, { schemaVersion: 1, format: evidence.format, runId: cut.run.id, ...cause,
     inspectorIdentityRef: evidence.inspectorIdentityRef, inspectorIdentityDigest: evidence.inspectorIdentityDigest,

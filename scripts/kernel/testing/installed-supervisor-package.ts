@@ -1,11 +1,15 @@
+import { readQualificationSource, type FrozenQualificationSource } from './qualification-source.js';
+import { createInstalledQualificationPublisher, qualificationPublisherMaterial, type InstalledQualificationPublisher } from '../../../src/state/testing/qualification-publisher.js';
+import { schemaConversionProfile } from '../../../src/state/signed-schema.js';
+import { signedKernelSchemaProfile } from '../../../src/state/signed-schema.js';
 // Qualification-only signed package recipe, not a release publisher or I1.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { generateKeyPairSync, sign } from 'node:crypto';
+import { sign } from 'node:crypto';
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { rootCertificates } from 'node:tls';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { verifiedSqliteExtensionIncludes } from '../sqlite-extension-headers.mjs';
 
 import { KERNEL_STATE_SCHEMA_VERSION } from '../../../src/config.js';
@@ -25,8 +29,8 @@ import { buildBuiltinToolsAsset } from './builtin-tools-package.js';
  * they do not qualify admission, execution, release signing or complete I1. */
 export async function buildInstalledSupervisorPackage(fixture: string,
   variant: 'complete' | 'retirement-native-missing' = 'complete', modelFixture?: InstalledModelPackageFixture,
-  options: Readonly<{ headlessSchemaVersion?: 3; guestToolchain?: 'node-test-v1'; guestImageProfile?: 'qualification_max'; publicationRetirementDiagnostics?: true; credentialPhaseDiagnostics?: true; serverAuthenticationDiagnostics?: true; storeFailureDiagnostics?: true }> = {}) {
-  assert(Object.keys(options).every(key => key === 'headlessSchemaVersion' || key === 'guestToolchain' || key === 'guestImageProfile' || key === 'publicationRetirementDiagnostics' || key === 'credentialPhaseDiagnostics' || key === 'serverAuthenticationDiagnostics' || key === 'storeFailureDiagnostics'));
+  options: Readonly<{ source?: FrozenQualificationSource; publisher?: InstalledQualificationPublisher; upgradeSourceBundle?: RuntimeBundleManifest; headlessSchemaVersion?: 3; guestToolchain?: 'node-test-v1'; guestImageProfile?: 'qualification_max'; publicationRetirementDiagnostics?: true; credentialPhaseDiagnostics?: true; serverAuthenticationDiagnostics?: true; storeFailureDiagnostics?: true; resourceDiagnostics?: true }> = {}) {
+  assert(Object.keys(options).every(key => key === 'source' || key === 'publisher' || key === 'upgradeSourceBundle' || key === 'headlessSchemaVersion' || key === 'guestToolchain' || key === 'guestImageProfile' || key === 'publicationRetirementDiagnostics' || key === 'credentialPhaseDiagnostics' || key === 'serverAuthenticationDiagnostics' || key === 'storeFailureDiagnostics' || key === 'resourceDiagnostics'));
   assert(options.headlessSchemaVersion === undefined || options.headlessSchemaVersion === 3);
   assert(options.guestToolchain === undefined || options.guestToolchain === 'node-test-v1');
   // Publisher construction only: keep the original maximum-load qualifier
@@ -37,21 +41,31 @@ export async function buildInstalledSupervisorPackage(fixture: string,
   assert(options.credentialPhaseDiagnostics === undefined || options.credentialPhaseDiagnostics === true);
   assert(options.serverAuthenticationDiagnostics === undefined || options.serverAuthenticationDiagnostics === true);
   assert(options.storeFailureDiagnostics === undefined || options.storeFailureDiagnostics === true);
+  assert(options.resourceDiagnostics === undefined || options.resourceDiagnostics === true);
   if (options.serverAuthenticationDiagnostics) assert(options.publicationRetirementDiagnostics === true,
     'fixed server observations belong only to the explicit delayed delivery qualification image');
   if (options.publicationRetirementDiagnostics) assert(options.guestToolchain === 'node-test-v1',
     'fixed publication observations belong only to the installed delivery qualification image');
   if (options.guestToolchain) assert(variant === 'complete' && modelFixture, 'installed verifier requires the complete model and native package');
-  const repository = fileURLToPath(new URL('../../..', import.meta.url));
-  const { nodeRoot, carrier, supervisorCarrier } = await prepareInstalledSupervisorSeaCarrier(fixture);
-  const keys = generateKeyPairSync('ed25519');
-  const releaseKeys = [{ keyId: 'explicit-installed-startup-test-root',
-    publicKeyPem: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString() }];
+  const source = options.source === undefined ? undefined : await readQualificationSource(options.source);
+  const repository = source?.root ?? fileURLToPath(new URL('../../..', import.meta.url));
+  const schemaVersion = source?.schemaVersion ?? KERNEL_STATE_SCHEMA_VERSION;
+  if (options.upgradeSourceBundle && schemaVersion !== 8) throw new TypeError('conversion can only be signed by the target8 recipe');
+  // An explicit old source compiles with that original product's actual SEA
+  // builder and its separately integrity-installed lock, never today's deps.
+  const sea = source ? await import(pathToFileURL(path.join(repository, 'scripts/kernel/testing/supervisor-sea-builder.ts')).href) as
+    Pick<typeof import('./supervisor-sea-builder.js'), 'prepareInstalledSupervisorSeaCarrier' | 'buildSupervisorSeaImage'>
+    : { prepareInstalledSupervisorSeaCarrier, buildSupervisorSeaImage };
+  const { nodeRoot, carrier, supervisorCarrier } = await sea.prepareInstalledSupervisorSeaCarrier(fixture);
+  const publisher = options.publisher ?? createInstalledQualificationPublisher();
+  const keys = qualificationPublisherMaterial(publisher);
+  const releaseKeys = [...keys.releaseKeys];
+  if (options.upgradeSourceBundle) verifyRuntimeBundle(options.upgradeSourceBundle, releaseKeys);
   const rootAsset = path.join(fixture, 'release-trust-roots.json');
   await writeFile(rootAsset, canonicalJsonBytes(releaseKeys), { flag: 'wx', mode: 0o400 });
   const packageRoot = path.join(fixture, 'package');
   await mkdir(packageRoot, { mode: 0o700 });
-  const supervisorFile = await buildSupervisorSeaImage({ fixture, carrier: supervisorCarrier,
+  const supervisorFile = await sea.buildSupervisorSeaImage({ fixture, carrier: supervisorCarrier,
     entryPoint: path.join(repository, 'src/state/installed-entry.ts'),
     executable: path.join(packageRoot, 'supervisor'), variant: 'installed-supervisor',
     // Fixed observations belong only to explicitly selected qualifiers.
@@ -60,6 +74,7 @@ export async function buildInstalledSupervisorPackage(fixture: string,
     ...(options.publicationRetirementDiagnostics ? { publicationRetirementDiagnostics: true as const } : {}),
     ...(options.serverAuthenticationDiagnostics ? { serverAuthenticationDiagnostics: true as const } : {}),
     ...(options.storeFailureDiagnostics ? { storeFailureDiagnostics: true as const } : {}),
+    ...(options.resourceDiagnostics ? { resourceDiagnostics: true as const } : {}),
     assets: { 'release-trust-roots.json': rootAsset } });
   const supervisorBytes = await readFile(supervisorFile);
   const helper = path.join(packageRoot, STATE_OWNER_NATIVE_RELATIVE_PATH);
@@ -132,6 +147,9 @@ export async function buildInstalledSupervisorPackage(fixture: string,
     { entryId: STATE_OWNER_NATIVE_ENTRY_ID, role: 'platform_helper', relativePath: STATE_OWNER_NATIVE_RELATIVE_PATH,
       executable: true, bytes: await readFile(helper) },
     ...workerEntries,
+    ...(options.upgradeSourceBundle ? [{ entryId: 'schema_conversion', role: 'schema', relativePath: 'schema/convert-v7-to-v8.json', executable: false,
+      bytes: canonicalJsonBytes(schemaConversionProfile(options.upgradeSourceBundle)) }] : []),
+    ...(schemaVersion === 8 ? [{ entryId: 'kernel_schema', role: 'schema', relativePath: 'schema/kernel-v8.json', executable: false, bytes: canonicalJsonBytes(signedKernelSchemaProfile()) }] : []),
     { entryId: 'linux_credential_platform', role: 'platform_helper', relativePath: 'native/linux-x64/linux-credential-platform.node',
       executable: true, bytes: await readFile(path.join(credentialRoot, 'linux-credential-platform.node')) },
     { entryId: 'installed-policy', role: 'policy_engine', relativePath: 'profiles/policy.json', executable: false, bytes: canonicalJsonBytes(profile) },
@@ -154,8 +172,8 @@ export async function buildInstalledSupervisorPackage(fixture: string,
     schemaVersion: 1, bundleVersion: guest ? 'installed-sea-verifier-fixture-v1'
       : modelFixture ? 'installed-sea-run-fixture-v1' : 'installed-sea-read-qualification-v1',
     controlProtocolRange: { min: 1, max: 1 }, headlessSchemaRange: { min: options.headlessSchemaVersion ?? 1, max: options.headlessSchemaVersion ?? 1 },
-    stateSchemaRange: { min: 1, max: KERNEL_STATE_SCHEMA_VERSION }, workerProtocolRange: { min: 1, max: 1 },
-    entries: [...contents.map(({ bytes, ...entry }) => ({ ...entry, version: '1', digest: sha256Bytes(bytes), byteCount: bytes.byteLength })),
+    stateSchemaRange: { min: 1, max: schemaVersion }, workerProtocolRange: { min: 1, max: 1 },
+    entries: [...contents.map(({ bytes, ...entry }) => ({ ...entry, version: entry.entryId === 'kernel_schema' ? '8' : entry.entryId === 'schema_conversion' ? '7-to-8' : '1', digest: sha256Bytes(bytes), byteCount: bytes.byteLength })),
       ...(guest?.entries ?? [])],
     structuredArtifacts: [
       ...(modelMaterial?.structuredArtifacts.filter(root => root.kind === 'compaction_prompt') ?? []),
@@ -175,7 +193,9 @@ export async function buildInstalledSupervisorPackage(fixture: string,
   await writeFile(path.join(packageRoot, 'manifest.json'), canonicalJsonBytes(bundle), { flag: 'wx', mode: 0o400 });
   const modelAuthority = modelFixture ? await writeInstalledModelAuthority({ packageRoot, bundle,
     privateKey: keys.privateKey, fixture: modelFixture, material: modelMaterial! }) : undefined;
-  return { packageRoot, releaseKeys, bundle, contents, carrier, ...(modelAuthority ? { modelAuthority } : {}),
+  if (options.source) { const current = await readQualificationSource(options.source);
+    assert.deepEqual(current, source, 'the original frozen source changed during actual package construction'); }
+  return { packageRoot, releaseKeys, bundle, contents, carrier, ...(source ? { sourceProvenance: source } : {}), ...(modelAuthority ? { modelAuthority } : {}),
     ...(guest ? { guestToolchain: { manifest: guest.manifest, manifestRef: guest.manifestRef,
       manifestId: guest.manifestId, imageLayout: guest.imageLayout } } : {}) };
 }

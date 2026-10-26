@@ -44,6 +44,15 @@ test('public Run state data preserves waiting, running and both stopped terminal
     assert.throws(() => decodeWireRun(run), TypeError);
 });
 
+test('a public parent-cancellation pointer is closed child fence data and cannot imply a root or successful outcome', () => {
+  const observed = { ...queued, parentRunId: 'parent-1', cancelRequested: true, stopIntentRef: ref, parentCancellationRef: ref };
+  assert.deepEqual(decodeWireRun(observed), observed);
+  const { parentRunId: _parent, ...root } = observed, { stopIntentRef: _winner, ...unfenced } = observed;
+  for (const value of [root, unfenced, { ...observed, cancelRequested: false }, { ...observed, parentCancellationRef: 'invalid' },
+    { ...observed, parentCancellationRef: 1 }, { ...observed, parentCancellationAuthority: true }])
+    assert.throws(() => decodeWireRun(value), TypeError);
+});
+
 test('public history data preserves Session lineage and binds historical events to their captured Run', () => {
   const session = { schemaVersion: 1, id: 'session-1', workspaceIdentityRef: ref, contextProjectionRef: ref,
     parentSessionId: 'parent-1', forkedThroughItemSeq: 2, contextRevision: 1, latestItemSeq: 3, createdAt: at, updatedAt: at };
@@ -96,6 +105,9 @@ test('one shared Journal decoder preserves closed phases and the storage error p
   // excludes them before this shared decoder, without changing storage calls.
   const retained = { ...prepared, seq: 1n, attempt: 0n };
   assert.equal(decodeInvocationJournalEntry(retained), retained);
+  assert.throws(() => decodeWireJournal(retained), TypeError);
+  for (const value of [{ ...retained, seq: -1n }, { ...retained, seq: BigInt(Number.MAX_SAFE_INTEGER) + 1n },
+    { ...retained, arbitraryCounter: 1n }]) assert.throws(() => decodeInvocationJournalEntry(value), { code: 'STATE_TRANSITION_INVALID' });
 });
 
 test('Journal discriminators require primitive closed strings rather than string-coercible values', () => {

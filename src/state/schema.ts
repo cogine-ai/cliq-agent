@@ -7,7 +7,9 @@ import {
 } from '../config.js';
 import { requiredSafeInteger, sha256Bytes } from '../kernel/identity.js';
 import { canonicalSha256 } from '../kernel/canonical.js';
+import { parseJsonStrict } from '../kernel/json.js';
 import { KernelStorageError } from './errors.js';
+import { decodeChildAllocation } from './invariants.js';
 import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
 
 export const KERNEL_SCHEMA_V1_SQL = `
@@ -644,20 +646,165 @@ export const KERNEL_SCHEMA_V7_SQL = `
 DROP TRIGGER source_inspections_validate_update;
 ${sourceInspectionHandoffUpdate}
 `;
+// Preserve the exact old physical Journal guards. Only these two closed local
+// operation kinds have no process/broker dispatch; their complete triplet and
+// business effect must still commit in the same original owner transaction.
+const localJournalKind = "NEW.op_kind IN ('child_admission', 'child_merge')";
+const localRefFields = ['target', 'requestRef', 'grantRef'];
+const localPhasePaths = "'$.seq', '$.phase', '$.budgetDelta', '$.dispatchId', '$.supervisorInstanceId', '$.stateOwnerEpoch', '$.resultRef', '$.budgetSettlementRef'";
+const localJournalGuard = `    WHEN ${localJournalKind} AND (NOT json_valid(NEW.entry_json))
+      THEN RAISE(ABORT, 'local child journal must contain valid JSON')
+    WHEN ${localJournalKind} AND (
+      json_type(NEW.entry_json) IS NOT 'object' OR NEW.attempt != 0 OR
+      NEW.phase NOT IN ('prepared', 'dispatch_claimed', 'completed') OR
+      json_extract(NEW.entry_json, '$.runId') IS NOT NEW.run_id OR
+      json_extract(NEW.entry_json, '$.opId') IS NOT NEW.op_id OR
+      json_extract(NEW.entry_json, '$.opKind') IS NOT NEW.op_kind OR
+      json_extract(NEW.entry_json, '$.seq') IS NOT NEW.seq OR
+      json_type(NEW.entry_json, '$.seq') IS NOT 'integer' OR
+      json_extract(NEW.entry_json, '$.phase') IS NOT NEW.phase OR
+      json_extract(NEW.entry_json, '$.attempt') IS NOT 0 OR
+      json_type(NEW.entry_json, '$.attempt') IS NOT 'integer' OR
+      json_type(NEW.entry_json, '$.leaseEpoch') IS NOT 'integer' OR
+      json_extract(NEW.entry_json, '$.leaseEpoch') IS NOT 0 OR
+      json_extract(NEW.entry_json, '$.replayClass') IS NOT 'retry' OR
+      json_type(NEW.entry_json, '$.idempotencyKey') IS NOT 'text' OR
+      length(json_extract(NEW.entry_json, '$.idempotencyKey')) < 1 OR
+      ${localRefFields.map(field => `(json_type(NEW.entry_json, '$.${field}') IS NOT 'text' OR
+        length(json_extract(NEW.entry_json, '$.${field}')) != 64 OR json_extract(NEW.entry_json, '$.${field}') GLOB '*[^0-9a-f]*')`).join(' OR ')} OR
+      json_type(NEW.entry_json, '$.timestamp') IS NOT 'text' OR
+      length(json_extract(NEW.entry_json, '$.timestamp')) != 24 OR
+      json_type(NEW.entry_json, '$.localCommittedAt') IS NOT 'text' OR
+      length(json_extract(NEW.entry_json, '$.localCommittedAt')) != 24 OR
+      json_extract(NEW.entry_json, '$.timestamp') > json_extract(NEW.entry_json, '$.localCommittedAt') OR
+      json_type(NEW.entry_json, '$.budgetDelta') IS NOT 'object' OR
+      (SELECT count(*) FROM json_each(NEW.entry_json, '$.budgetDelta')) != 4 OR
+      ${['modelTokens', 'costMicros', 'toolCalls', 'repairAttempts'].map(field => `json_type(NEW.entry_json, '$.budgetDelta.${field}') IS NOT 'integer'`).join(' OR ')} OR
+      ${['modelTokens', 'costMicros', 'repairAttempts'].map(field => `json_extract(NEW.entry_json, '$.budgetDelta.${field}') IS NOT 0`).join(' OR ')} OR
+      json_extract(NEW.entry_json, '$.budgetDelta.toolCalls') IS NOT CASE NEW.phase WHEN 'dispatch_claimed' THEN 0 ELSE 1 END OR
+      (SELECT count(*) FROM json_each(NEW.entry_json)) != CASE NEW.phase WHEN 'prepared' THEN 15 WHEN 'dispatch_claimed' THEN 18 ELSE 20 END OR
+      ${['sandboxLaunchSpecRef', 'brokerFenceTokenDigest', 'receiptRef', 'errorRef', 'evidenceRef', 'evidenceDigest', 'attestationRef']
+        .map(field => `json_type(NEW.entry_json, '$.${field}') IS NOT NULL`).join(' OR ')} OR
+      (NEW.phase != 'prepared' AND (json_type(NEW.entry_json, '$.dispatchId') IS NOT 'text' OR
+        json_type(NEW.entry_json, '$.supervisorInstanceId') IS NOT 'text' OR
+        json_type(NEW.entry_json, '$.stateOwnerEpoch') IS NOT 'integer' OR json_extract(NEW.entry_json, '$.stateOwnerEpoch') < 1)) OR
+      (NEW.phase = 'completed' AND (${['resultRef', 'budgetSettlementRef'].map(field => `(json_type(NEW.entry_json, '$.${field}') IS NOT 'text' OR
+        length(json_extract(NEW.entry_json, '$.${field}')) != 64 OR json_extract(NEW.entry_json, '$.${field}') GLOB '*[^0-9a-f]*')`).join(' OR ')}))
+    ) THEN RAISE(ABORT, 'local child journal cannot carry physical dispatch or incomplete local data')
+    WHEN ${localJournalKind} AND NEW.phase != 'prepared' AND
+      json_remove(NEW.entry_json,${localPhasePaths}) IS NOT (
+        SELECT json_remove(entry_json,${localPhasePaths}) FROM run_journal
+        WHERE run_id=NEW.run_id AND op_id=NEW.op_id AND attempt=NEW.attempt AND phase='prepared')
+      THEN RAISE(ABORT, 'local child journal must preserve its original request grant and commit cut')
+    WHEN ${localJournalKind} AND NEW.phase='completed' AND (
+      ${['dispatchId', 'supervisorInstanceId', 'stateOwnerEpoch'].map(field => `json_extract(NEW.entry_json,'$.${field}') IS NOT (
+        SELECT json_extract(entry_json,'$.${field}') FROM run_journal
+        WHERE run_id=NEW.run_id AND op_id=NEW.op_id AND attempt=NEW.attempt AND phase='dispatch_claimed')`).join(' OR ')})
+      THEN RAISE(ABORT, 'local child journal completion must preserve its original local claim')
+`;
+const runJournalInsert = KERNEL_SCHEMA_V2_SQL.slice(KERNEL_SCHEMA_V2_SQL.indexOf('CREATE TRIGGER run_journal_validate_insert'),
+  KERNEL_SCHEMA_V2_SQL.indexOf('CREATE TRIGGER run_journal_immutable_update'));
+if (!runJournalInsert.startsWith('CREATE TRIGGER run_journal_validate_insert') ||
+    !runJournalInsert.includes("'verifier', 'publish')")) throw new Error('compiled original Journal schema is incomplete');
+// Await registration is a distinct local control accounting operation. Keep
+// the original two local grant guards byte-for-byte and add a separate closed
+// no-grant variant, rather than making a flag an alternate grant authority.
+const localGrantRefGuard = `(json_type(NEW.entry_json, '$.grantRef') IS NOT 'text' OR
+        length(json_extract(NEW.entry_json, '$.grantRef')) != 64 OR json_extract(NEW.entry_json, '$.grantRef') GLOB '*[^0-9a-f]*')`;
+if (!localJournalGuard.includes(localGrantRefGuard)) throw new Error('compiled local child grant guard is incomplete');
+const childAwaitJournalGuard = localJournalGuard.replaceAll(localJournalKind, "NEW.op_kind = 'child_await'")
+  .replace(localGrantRefGuard, "json_type(NEW.entry_json, '$.grantRef') IS NOT NULL")
+  .replace("THEN 15 WHEN 'dispatch_claimed' THEN 18 ELSE 20 END", "THEN 14 WHEN 'dispatch_claimed' THEN 17 ELSE 19 END");
+const childJournalInsert = runJournalInsert
+  .replace("'verifier', 'publish')", "'verifier', 'publish', 'child_admission', 'child_merge', 'child_await')")
+  .replace('    WHEN NEW.attempt < 0', localJournalGuard + childAwaitJournalGuard + '    WHEN NEW.attempt < 0');
+const allocationMutablePaths = "'$.state', '$.terminal', '$.inclusiveBudgetUsage', '$.terminalAt', '$.childResultItemId', '$.parentSettlementRevision', '$.releasedUnusedBudget', '$.settledAt'";
+export const KERNEL_SCHEMA_V8_SQL = `
+ALTER TABLE runs ADD COLUMN parent_cancellation_ref TEXT
+  CHECK(parent_cancellation_ref IS NULL OR (typeof(parent_cancellation_ref)='text' AND length(parent_cancellation_ref)=64 AND parent_cancellation_ref NOT GLOB '*[^0-9a-f]*'));
+CREATE TRIGGER runs_parent_cancellation_unseeded
+BEFORE INSERT ON runs WHEN NEW.parent_cancellation_ref IS NOT NULL
+BEGIN SELECT RAISE(ABORT, 'parent cancellation must be observed after child birth'); END;
+CREATE TRIGGER runs_parent_cancellation_immutable
+BEFORE UPDATE OF parent_cancellation_ref ON runs WHEN OLD.parent_cancellation_ref IS NOT NULL AND NEW.parent_cancellation_ref IS NOT OLD.parent_cancellation_ref
+BEGIN SELECT RAISE(ABORT, 'parent cancellation registration is immutable'); END;
+CREATE TRIGGER runs_parent_cancellation_register
+BEFORE UPDATE OF parent_cancellation_ref ON runs WHEN OLD.parent_cancellation_ref IS NULL AND NEW.parent_cancellation_ref IS NOT NULL
+BEGIN SELECT CASE WHEN OLD.status IN ('succeeded','completed_unverified','failed','cancelled') OR NEW.status IN ('succeeded','completed_unverified','failed','cancelled') OR
+  OLD.parent_run_id IS NULL OR NEW.parent_run_id IS NOT OLD.parent_run_id OR NEW.cancel_requested IS NOT 1 OR NEW.stop_intent_ref IS NULL OR NEW.revision IS NOT OLD.revision+1
+  THEN RAISE(ABORT, 'parent cancellation requires its nonterminal child fence transaction') END; END;
+CREATE TRIGGER runs_parent_cancellation_fenced
+BEFORE UPDATE ON runs WHEN NEW.parent_cancellation_ref IS NOT NULL AND
+  (NEW.parent_run_id IS NULL OR NEW.parent_run_id IS NOT OLD.parent_run_id OR NEW.cancel_requested IS NOT 1 OR NEW.stop_intent_ref IS NULL OR NEW.status IN ('succeeded','completed_unverified'))
+BEGIN SELECT RAISE(ABORT, 'parent cancellation dispatch fence cannot be cleared'); END;
+CREATE UNIQUE INDEX child_allocations_one_parent ON child_allocations(child_run_id);
+CREATE UNIQUE INDEX child_allocations_one_admission ON child_allocations(parent_run_id,json_extract(row_json,'$.admissionKey'));
+CREATE UNIQUE INDEX child_allocations_one_delegate ON child_allocations(parent_run_id,json_extract(row_json,'$.delegateOpId'));
+CREATE UNIQUE INDEX child_allocations_one_call_index ON child_allocations(parent_run_id,json_extract(row_json,'$.delegateBatchItemId'),json_extract(row_json,'$.delegateCallIndex'));
+CREATE UNIQUE INDEX child_allocations_one_call_id ON child_allocations(parent_run_id,json_extract(row_json,'$.delegateBatchItemId'),json_extract(row_json,'$.delegateCallId'));
+CREATE TRIGGER child_allocations_validate_insert
+BEFORE INSERT ON child_allocations BEGIN
+  SELECT CASE
+    WHEN NOT json_valid(NEW.row_json) THEN RAISE(ABORT, 'child allocation must contain valid JSON')
+    WHEN NEW.state != 'reserved' OR json_type(NEW.row_json) IS NOT 'object' OR
+      json_extract(NEW.row_json,'$.schemaVersion') IS NOT 1 OR
+      json_extract(NEW.row_json,'$.state') IS NOT NEW.state OR
+      json_extract(NEW.row_json,'$.parentRunId') IS NOT NEW.parent_run_id OR
+      json_extract(NEW.row_json,'$.childRunId') IS NOT NEW.child_run_id OR NEW.parent_run_id = NEW.child_run_id OR
+      ${['admissionKey', 'delegateOpId', 'delegateBatchItemId', 'delegateCallId'].map(field => `(json_type(NEW.row_json,'$.${field}') IS NOT 'text' OR length(json_extract(NEW.row_json,'$.${field}')) < 1)`).join(' OR ')} OR
+      json_type(NEW.row_json,'$.delegateCallIndex') IS NOT 'integer' OR json_extract(NEW.row_json,'$.delegateCallIndex') < 0 OR
+      ${['terminal', 'inclusiveBudgetUsage', 'terminalAt', 'childResultItemId', 'parentSettlementRevision', 'releasedUnusedBudget', 'settledAt'].map(field => `json_type(NEW.row_json,'$.${field}') IS NOT NULL`).join(' OR ')}
+      THEN RAISE(ABORT, 'child allocation must begin with its original reserved identity')
+  END;
+END;
+CREATE TRIGGER child_allocations_validate_update
+BEFORE UPDATE ON child_allocations BEGIN
+  SELECT CASE
+    WHEN NOT json_valid(NEW.row_json) THEN RAISE(ABORT, 'child allocation must contain valid JSON')
+    WHEN NEW.parent_run_id IS NOT OLD.parent_run_id OR NEW.child_run_id IS NOT OLD.child_run_id OR
+      json_extract(NEW.row_json,'$.state') IS NOT NEW.state OR
+      json_remove(NEW.row_json,${allocationMutablePaths}) IS NOT json_remove(OLD.row_json,${allocationMutablePaths})
+      THEN RAISE(ABORT, 'child allocation original identity is immutable')
+    WHEN NOT ((OLD.state = 'reserved' AND NEW.state = 'child_terminal') OR
+      (OLD.state = 'child_terminal' AND NEW.state = 'settled'))
+      THEN RAISE(ABORT, 'child allocation transition is not monotonic')
+    WHEN json_type(NEW.row_json,'$.terminal') IS NOT 'object' OR
+      json_type(NEW.row_json,'$.inclusiveBudgetUsage') IS NOT 'object' OR json_type(NEW.row_json,'$.terminalAt') IS NOT 'text'
+      THEN RAISE(ABORT, 'child allocation terminal data is incomplete')
+    WHEN OLD.state = 'child_terminal' AND (
+      json_extract(NEW.row_json,'$.terminal') IS NOT json_extract(OLD.row_json,'$.terminal') OR
+      json_extract(NEW.row_json,'$.inclusiveBudgetUsage') IS NOT json_extract(OLD.row_json,'$.inclusiveBudgetUsage') OR
+      json_extract(NEW.row_json,'$.terminalAt') IS NOT json_extract(OLD.row_json,'$.terminalAt'))
+      THEN RAISE(ABORT, 'child allocation original terminal and usage are immutable')
+    WHEN NEW.state = 'settled' AND (json_type(NEW.row_json,'$.childResultItemId') IS NOT 'text' OR
+      json_type(NEW.row_json,'$.parentSettlementRevision') IS NOT 'integer' OR json_extract(NEW.row_json,'$.parentSettlementRevision') < 1 OR
+      json_type(NEW.row_json,'$.releasedUnusedBudget') IS NOT 'object' OR json_type(NEW.row_json,'$.settledAt') IS NOT 'text')
+      THEN RAISE(ABORT, 'child allocation settlement data is incomplete')
+  END;
+END;
+CREATE TRIGGER child_allocations_immutable_delete
+BEFORE DELETE ON child_allocations BEGIN
+  SELECT RAISE(ABORT, 'child allocation history is retained');
+END;
+DROP TRIGGER run_journal_validate_insert;
+${childJournalInsert}
+CREATE INDEX authorization_grants_list_order_v1 ON authorization_grants(owner_principal_id,json_extract(row_json,'$.createdAt') COLLATE BINARY,grant_id COLLATE BINARY);
+`;
 const pristineSchemaV6 = [KERNEL_SCHEMA_V1_SQL, KERNEL_SCHEMA_V2_SQL, KERNEL_SCHEMA_V3_SQL,
   KERNEL_SCHEMA_V4_SQL, KERNEL_SCHEMA_V5_SQL, KERNEL_SCHEMA_V6_SQL].join('\n');
 const pristineSchemaV7 = `${pristineSchemaV6}\n${KERNEL_SCHEMA_V7_SQL}`;
-export const KERNEL_SCHEMA_SQL = pristineSchemaV7;
+const pristineSchemaV8 = `${pristineSchemaV7}\n${KERNEL_SCHEMA_V8_SQL}`;
+export const KERNEL_SCHEMA_SQL = pristineSchemaV8;
 
 /** Historical birth data only. Upgrading a database cannot rewrite the
  * original generation's version, DDL digest or empty-database identity.
- * These two actual birth recipes both had exactly 21 authority tables;
+ * These three birth recipes have exactly 21 authority tables;
  * today's table inventory must never change their retained identities. */
 export function kernelSchemaBirthRecipe(version: unknown): Readonly<{
   userVersion: number; schemaDigest: string; emptyDatabaseContentDigest: string;
 }> {
-  if (version !== 6 && version !== 7) throw new KernelStorageError('RECOVERY_REQUIRED', 'unsupported retained kernel schema birth recipe');
-  const sql = version === 6 ? pristineSchemaV6 : pristineSchemaV7;
+  if (version !== 6 && version !== 7 && version !== 8) throw new KernelStorageError('RECOVERY_REQUIRED', 'unsupported retained kernel schema birth recipe');
+  const sql = version === 6 ? pristineSchemaV6 : version === 7 ? pristineSchemaV7 : pristineSchemaV8;
   return Object.freeze({ userVersion: version, schemaDigest: sha256Bytes(Buffer.from(sql, 'utf8')),
     emptyDatabaseContentDigest: canonicalSha256({ applicationId: KERNEL_SQLITE_APPLICATION_ID, userVersion: version, tables: 21 }) });
 }
@@ -697,7 +844,7 @@ function pragmaScalar(driver: SqliteConnection, name: string): unknown {
 export function applyKernelSchema(driver: SqliteDriver): void {
   const userVersion = requiredSafeInteger(pragmaScalar(driver, 'user_version'), 'user_version');
   const applicationId = requiredSafeInteger(pragmaScalar(driver, 'application_id'), 'application_id');
-  if (![0, 1, 2, 3, 4, 5, 6, KERNEL_STATE_SCHEMA_VERSION].includes(userVersion)) {
+  if (![0, 1, 2, 3, 4, 5, 6, 7, KERNEL_STATE_SCHEMA_VERSION].includes(userVersion)) {
     throw new Error(`unsupported kernel schema version ${userVersion}`);
   }
   if (applicationId !== 0 && applicationId !== KERNEL_SQLITE_APPLICATION_ID) {
@@ -728,6 +875,10 @@ export function applyKernelSchema(driver: SqliteDriver): void {
       if (userVersion < 5) connection.exec(KERNEL_SCHEMA_V5_SQL);
       if (userVersion < 6) connection.exec(KERNEL_SCHEMA_V6_SQL);
       if (userVersion < 7) connection.exec(KERNEL_SCHEMA_V7_SQL);
+      if (userVersion < 8) {
+        validateRetainedChildAllocations(connection);
+        connection.exec(KERNEL_SCHEMA_V8_SQL);
+      }
       connection.exec(`PRAGMA user_version=${KERNEL_STATE_SCHEMA_VERSION}`);
     });
   }
@@ -741,6 +892,30 @@ export function applyKernelSchema(driver: SqliteDriver): void {
   for (const table of REQUIRED_TABLES) {
     if (!names.has(table)) {
       throw new Error(`kernel schema is missing table ${table}`);
+    }
+  }
+}
+
+function validateRetainedChildAllocations(connection: SqliteConnection): void {
+  const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+  const originalText = (value: unknown): string => {
+    if (!(value instanceof Uint8Array)) throw new TypeError('unbounded allocation text');
+    const text = utf8.decode(value);
+    if (!Buffer.from(text, 'utf8').equals(value)) throw new TypeError('allocation text bytes changed');
+    return text;
+  };
+  const rows = connection.prepare(`SELECT
+    CASE WHEN length(CAST(parent_run_id AS BLOB)) <= 1048576 THEN CAST(parent_run_id AS BLOB) END AS parent_run_id,
+    CASE WHEN length(CAST(child_run_id AS BLOB)) <= 1048576 THEN CAST(child_run_id AS BLOB) END AS child_run_id,
+    CASE WHEN length(CAST(state AS BLOB)) <= 1048576 THEN CAST(state AS BLOB) END AS state,
+    CASE WHEN length(CAST(row_json AS BLOB)) <= 1048576 THEN CAST(row_json AS BLOB) END AS row_json FROM child_allocations`).iterate();
+  for (const row of rows) {
+    try {
+      const value = decodeChildAllocation(parseJsonStrict(originalText(row.row_json)));
+      if (value.parentRunId !== originalText(row.parent_run_id) || value.childRunId !== originalText(row.child_run_id) || value.state !== originalText(row.state))
+        throw new TypeError('allocation index mismatch');
+    } catch (cause) {
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'schema migration requires complete original child allocation data', { cause });
     }
   }
 }
@@ -772,4 +947,41 @@ export function assertPristineKernelSchema(connection: SqliteConnection): void {
       canonicalSha256(connection.prepare(SCHEMA_CATALOG_SQL).all()) !== pristineCatalogDigest) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'fresh genesis requires the exact pristine kernel schema');
   }
+}
+
+/** Fixed source for signed schema data. Callers never execute statements taken
+ * from a package: package bytes must equal this compiled recipe in full. */
+export function kernelSchemaDefinition(version: 7 | 8) {
+  const ddl = version === 7 ? pristineSchemaV7 : pristineSchemaV8;
+  const database = new DatabaseSync(':memory:');
+  try {
+    database.exec(ddl);
+    const catalog = database.prepare(SCHEMA_CATALOG_SQL).all().map(row => ({ ...row })) as Array<{
+      type: string; name: string; tbl_name: string; sql: string | null }>;
+    return { ddl, catalog, catalogDigest: canonicalSha256(catalog) };
+  } finally { database.close(); }
+}
+
+export function kernelSchemaManifest<Version extends 7 | 8>(version: Version) {
+  const core = { schemaVersion: 1 as const, format: 'cliq-kernel-schema-manifest-v1' as const,
+    applicationId: KERNEL_SQLITE_APPLICATION_ID, userVersion: version,
+    schemaDigest: kernelSchemaBirthRecipe(version).schemaDigest };
+  return { ...core, manifestDigest: canonicalSha256(core) };
+}
+
+export function assertKernelSchemaVersion(connection: SqliteConnection, version: 7 | 8): void {
+  if (readSchemaUserVersion(connection) !== version ||
+      requiredSafeInteger(connection.prepare('SELECT application_id FROM pragma_application_id').get<{ application_id: unknown }>()?.application_id, 'application_id') !== KERNEL_SQLITE_APPLICATION_ID ||
+      canonicalSha256(connection.prepare(SCHEMA_CATALOG_SQL).all()) !== kernelSchemaDefinition(version).catalogDigest)
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'database differs from its exact signed schema recipe');
+}
+
+/** Only the explicit signed-upgrade transaction calls this. No package SQL is
+ * evaluated, and neither the lock nor a new owner is supplied by this helper. */
+export function applySignedKernelSchema7To8(connection: SqliteConnection): void {
+  assertKernelSchemaVersion(connection, 7);
+  validateRetainedChildAllocations(connection);
+  connection.exec(KERNEL_SCHEMA_V8_SQL);
+  connection.exec('PRAGMA user_version=8');
+  assertKernelSchemaVersion(connection, 8);
 }

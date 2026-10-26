@@ -1,3 +1,4 @@
+import { signedKernelSchemaProfile } from '../signed-schema.js';
 import { generateKeyPairSync, sign } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { KERNEL_STATE_SCHEMA_VERSION } from '../../config.js';
@@ -49,6 +50,8 @@ export async function signedToolBundle(assembly: RunAssemblyV1, tools: ToolContr
     entries: [entry('supervisor-test', 'supervisor', true, image.digest, '1', image.byteCount), entry(assembly.runtime.workerExecutableId, 'worker', true, assembly.runtime.workerExecutableDigest),
       { ...entry(STATE_OWNER_NATIVE_ENTRY_ID, 'platform_helper', true, helper.digest, '1', helper.byteCount), relativePath: STATE_OWNER_NATIVE_RELATIVE_PATH },
       entry(assembly.provider.adapter.adapterId, 'provider_adapter', true, assembly.provider.adapter.codeDigest, assembly.provider.adapter.version),
+      { entryId: 'kernel_schema', role: 'schema', version: '8', relativePath: 'schema/kernel-v8.json', executable: false,
+        digest: canonicalSha256(signedKernelSchemaProfile()), byteCount: canonicalJsonBytes(signedKernelSchemaProfile()).length },
       entry('policy-v1', 'policy_engine', false, profileRef, '1', canonicalJsonBytes(profile).byteLength),
       entry('default_https_trust_store', 'trust_store', false, sha256Bytes(Buffer.from(OFFLINE_MODEL_TRUST_STORE_PEM)), '1',
         Buffer.byteLength(OFFLINE_MODEL_TRUST_STORE_PEM)), entry('root-profile-test', 'sandbox_root_profile', false),

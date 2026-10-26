@@ -54,7 +54,7 @@ export function assertSupervisorControlIdentity(owner: StateOwnerRecordV1, assem
   tools: ToolContractManifestV1['entries']): void {
   for (const tool of tools) {
     const execution = decodeToolExecutionIdentity(tool.execution);
-    if (execution.kind !== 'supervisor_control') continue;
+    if (execution.kind !== 'supervisor_control' && execution.kind !== 'supervisor_operation') continue;
     requireEqual({ runtimeBundleRef: owner.runtimeBundleRef, manifestDigest: owner.runtimeBundleManifestDigest,
       entryId: owner.supervisorEntryId, version: owner.supervisorEntryVersion, digest: owner.supervisorExecutableDigest },
     { runtimeBundleRef: assembly.runtime.runtimeBundleRef, manifestDigest: assembly.runtime.runtimeBundleManifestDigest,

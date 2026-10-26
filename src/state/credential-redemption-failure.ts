@@ -1,3 +1,4 @@
+import { readStopSourceData } from './stop-source.js';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { decodeCredentialAuthorityRecord, decodeEndpointAuthorityRecord, decodeEndpointCredentialGrantBinding,
   decodeEndpointRegistration, type CredentialAuthorityRecordV1, type EndpointAuthorityRecordV1,
@@ -14,7 +15,7 @@ import { readCanonicalArtifact } from './agent-context.js';
 import type { ArtifactCatalog } from './artifacts.js';
 import { readTimeFence, sampleCanonicalNow } from './canonical-time.js';
 import { KernelStorageError } from './errors.js';
-import { isZeroBudget } from './invariants.js';
+import { childAllocationBudgetFacts, subtractBudget, isZeroBudget } from './invariants.js';
 import { readModelGrantClosure } from './model-grant.js';
 import { readModelClaimCut } from './reducers/invocation.js';
 import { readInvocationAttempt } from './repositories/journal.js';
@@ -116,17 +117,19 @@ type FailureCause = WithoutWrapper<CredentialRedemptionFailureEvidenceV1>;
 /** Original immutable error/authority closure only; never today's installation
  * or credential state. No claimed/unknown attempt can enter this branch. */
 export async function readCredentialRedemptionFailureCause(driver: SqliteDriver, artifacts: ArtifactCatalog,
-  cut: RecoveryClosureV1, observedAt: string): Promise<FailureCause | undefined> {
-  if (cut.run.waitingReason || !isZeroBudget(cut.run.budgetReserved)) return undefined;
-  const history = [...stopInvocationHistory(cut.journal).values()];
-  if (history.some(({ entry, hasClaim }) => !['model', 'tool'].includes(entry.opKind) ||
+  cut: RecoveryClosureV1, observedAt: string, registeredCheckpointId?: string, registeredRunRevision?: number, registeredJournalSeq?: number): Promise<FailureCause | undefined> {
+  const source = readStopSourceData(driver, cut, observedAt, registeredCheckpointId, registeredRunRevision, registeredJournalSeq);
+  const children = childAllocationBudgetFacts(cut.run.id, cut.childAllocations);
+  if (cut.run.waitingReason && registeredCheckpointId === undefined || !isZeroBudget(subtractBudget(cut.run.budgetReserved, children.reserved))) return undefined;
+  const history = [...stopInvocationHistory(source.journal).values()];
+  if (history.some(({ entry, hasClaim }) => !['model', 'tool', 'child_admission', 'child_merge', 'child_await'].includes(entry.opKind) ||
       entry.phase !== 'completed' && (entry.phase !== 'failed' || hasClaim))) return undefined;
   const latest = history.filter(({ entry }) => entry.opKind === 'model').at(-1);
   if (!latest || latest.entry.phase !== 'failed' || latest.hasClaim || !latest.entry.errorRef || !latest.entry.budgetSettlementRef) return undefined;
   const error = await readCanonicalArtifact<{ format?: unknown }>(artifacts, latest.entry.errorRef);
   if (error.format !== 'cliq-credential-redemption-refusal-v1') return undefined;
   const refusal = decodeRefusal(error);
-  const entries = cut.journal.filter(entry => entry.opId === latest.entry.opId && entry.attempt === latest.entry.attempt);
+  const entries = source.journal.filter(entry => entry.opId === latest.entry.opId && entry.attempt === latest.entry.attempt);
   const prepared = entries[0];
   if (entries.length !== 2 || prepared?.phase !== 'prepared' || prepared.opKind !== 'model' || !prepared.grantRef ||
       refusal.runId !== cut.run.id || refusal.opId !== prepared.opId || refusal.attempt !== prepared.attempt ||
@@ -141,8 +144,8 @@ export async function readCredentialRedemptionFailureCause(driver: SqliteDriver,
   const request = await readCanonicalArtifact<ModelRequestV1>(artifacts, prepared.requestRef);
   const grant = decodeModelOperationGrant(await readCanonicalArtifact(artifacts, prepared.grantRef));
   const frontier = await readCanonicalArtifact<RunFrontier>(artifacts, grant.frontierRef);
-  if (frontier.kind !== 'agent' || frontier.contextItemSeq !== cut.latestCheckpoint.runItemSeq ||
-      cut.items.length !== cut.latestCheckpoint.runItemSeq || cut.run.frontierRef !== undefined && cut.run.frontierRef !== grant.frontierRef)
+  if (frontier.kind !== 'agent' || frontier.contextItemSeq !== source.checkpoint.runItemSeq ||
+      source.items.length !== source.checkpoint.runItemSeq || cut.run.frontierRef !== undefined && cut.run.frontierRef !== grant.frontierRef)
     throw new TypeError('credential failure no longer owns the ready frontier');
   const authority = await readModelGrantClosure(driver, artifacts, { run: cut.run, spec: cut.runSpec, assembly, frontier,
     frontierRef: grant.frontierRef, request, requestRef: prepared.requestRef, grantRef: prepared.grantRef });

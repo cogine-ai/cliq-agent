@@ -182,7 +182,7 @@ test('delivery remains unavailable on a genuine authenticated peer without its c
 });
 
 test('authenticated artifact.get fetches registered bytes through bounded real UDS frames without a write oracle', async t => {
-  const fixture = await createQueuedFixture('wire-artifact');
+  const fixture = await createQueuedFixture('artifact');
   t.after(() => disposeFixture(fixture));
   const errors: Error[] = [];
   const service = openInstalledControl(fixture.store, { serverBuild: 'wire-artifact-fixture' }, error => errors.push(error));

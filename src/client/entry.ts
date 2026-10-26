@@ -2,7 +2,8 @@ import type { Readable, Writable } from 'node:stream';
 import { setImmediate as yieldTurn } from 'node:timers/promises';
 import { canonicalJsonBytes } from '../kernel/canonical.js';
 import { headlessControlResponse, type InstalledControlResponseFor, type InstalledControlFeature } from '../control/v1.js';
-import { openInstalledControlSession, type InstalledControlSession } from '../control/session.js';
+import type { InstalledControlSession } from '../control/session.js';
+import { openInstalledClientHost } from './installed-host.js';
 import { runInstalledHeadlessJsonl, runInstalledHeadlessRpc } from '../headless/installed.js';
 import type { HeldInstalledRuntime } from '../state/installed-runtime.js';
 import { ResourceRetirementError } from '../state/errors.js';
@@ -64,13 +65,15 @@ inspect <runId> [--after-item <n>] [--after-journal <n>] [--checkpoint-cursor <c
  * Official release-root/discovery composition is an explicit I4 dependency;
  * importing this function does not select it as the default CLI. */
 export async function runInstalledClient(selected: HeldInstalledRuntime, argv: readonly string[], io: ClientIO): Promise<number> {
-  const owned = await openInstalledClientStdio(selected, io);
-  try {
-    const invocation = parseClientInvocation(argv, io.workspacePath);
-    if (invocation.kind === 'help') { const output = clientWriter(owned.io.output); await output.write(Buffer.from(help)); await output.join(); return 0; }
-    const session = await openInstalledControlSession(selected);
-    return await runClientInvocation(session, invocation, owned.io);
-  } finally { await owned.close(); }
+  const invocation = parseClientInvocation(argv, io.workspacePath);
+  if (invocation.kind === 'help') {
+    const owned = await openInstalledClientStdio(selected, io);
+    try { const output = clientWriter(owned.io.output); await output.write(Buffer.from(help)); await output.join(); return 0; }
+    finally { await owned.close(); }
+  }
+  const host = await openInstalledClientHost(selected);
+  try { return await host.run(invocation, io); }
+  finally { await host.close(); }
 }
 
 /** Real installed entry and pure protocol/stdio regressions use this exact

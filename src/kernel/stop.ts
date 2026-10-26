@@ -1,6 +1,6 @@
 import type { ArtifactRef, BudgetUsage, RunStatus, RunTerminalReason } from './types.js';
 
-type StopIdentity = { schemaVersion: 1; runId: string; createdAt: string };
+type StopIdentity = { schemaVersion: 1; runId: string; createdAt: string; supersedesStopIntentRef?: ArtifactRef; registeredCheckpointId?: string; registeredRunRevision?: number; registeredJournalSeq?: number };
 
 /** Independently reproduced from the original final-model Checkpoint and frozen projection. */
 export type ResultSourceLimitCause = {

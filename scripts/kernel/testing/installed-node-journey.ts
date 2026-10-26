@@ -1,3 +1,5 @@
+import { writeSync as writeResourceDiagnostic } from 'node:fs';
+import { replayScannedResourceLines } from './installed-resource-wire.js';
 // Actual signed Linux installation, public authenticated v1 control, real Node
 // verifier and owned HTTPS replies. Not a paid provider, complete fault matrix,
 // default/ask policy, macOS, reboot or release-publisher qualification.
@@ -35,6 +37,7 @@ import { inspectInstalledWorkerIdentity, inspectInstalledWorkerLease, assertInst
 import { inspectInstalledOwnerHistory, waitForInstalledOwnerHistory } from './installed-read-control.js';
 import { assertInstalledVerifierOutcome, InstalledVerifierOutcomeError } from './installed-verifier-result.js';
 import { runInstalledDeliveryCases } from './installed-delivery-journey.js';
+import { createInstalledChildrenResponder, INSTALLED_CHILDREN_PROFILE, INSTALLED_CHILD_CASES, runInstalledChildCase } from './installed-children-journey.js';
 import { InstalledDeliveryOutcomeError } from './installed-delivery-result.js';
 import type { InstalledDeliveryVerifierRetirementIdentity } from './installed-delivery-result.js';
 import type { InstalledVerifierRetirementIdentity } from './installed-verifier-evidence.js';
@@ -59,7 +62,7 @@ import { installedBashStopCall, observeInstalledBash, assertInstalledBashStopped
 
 type Recipe = { buildFixture: string; packageRoot: string; installerEntry: string; stateRoot: string; releaseKeysFile: string;
   controlDirectory: string; observer: string; storeFixture: string; publicationObserver: string; workspace: string; reportFile: string };
-type Ledger = { diagnosticOnly: true; fixture: string; fixtureIdentity: string; username: string;
+export type Ledger = { diagnosticOnly: true; fixture: string; fixtureIdentity: string; username: string;
   uid: number; gid: number; runnerUid: number; home: string; runJourney: Recipe };
 type Response = { protocolVersion: 1; ok: boolean; method?: string; result?: Record<string, any>; error?: Record<string, unknown> };
 type CaseKind = 'required_pass' | 'required_repair' | 'advisory_failure' | 'required_timeout';
@@ -88,7 +91,7 @@ async function bounded<T>(pending: Promise<T>, milliseconds: number, label: stri
   })]); } finally { clearTimeout(timer); }
 }
 
-async function readLedger(filename: string): Promise<Ledger> {
+export async function readLedger(filename: string): Promise<Ledger> {
   const held = await open(filename, constants.O_RDONLY | constants.O_NOFOLLOW);
   let ledger: Ledger;
   try {
@@ -130,7 +133,7 @@ async function readLedger(filename: string): Promise<Ledger> {
   return ledger;
 }
 
-async function transferPackage(filename: string, uid: number, gid: number): Promise<void> {
+export async function transferPackage(filename: string, uid: number, gid: number): Promise<void> {
   const before = await lstat(filename);
   assert(!before.isSymbolicLink() && (before.isDirectory() || before.isFile()));
   assert.equal(before.uid, 0); assert.equal(before.gid, 0);
@@ -173,6 +176,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     actualProviderQualified: false, actualProviderBillingQualified: false, completeI1Qualified: false, completeI2Qualified: false,
     beforeVerifierReleaseStopCutQualified: false, allCrashCutsQualified: false, macosQualified: false, rebootQualified: false };
   if (journeyKind === 'verifier') report.ordinaryToolsFixtureProfile = 'verifier_five_plus_interactive_tools_and_stop_v1';
+  if (journeyKind === 'verifier') report.ordinaryChildrenFixtureProfile = INSTALLED_CHILDREN_PROFILE;
   if (journeyKind === 'delivery') Object.assign(report, {
     scope: 'actual signed Linux explicit Delivery from verified yolo sources, direct-policy publication, noOp, real verifier merge, cancel and public reconnect/restart; not interactive ask/deny, paid provider, release, reboot or complete I1 qualification',
     interactiveApprovalQualified: false, preciseClaimedCloseCutQualified: false,
@@ -379,6 +383,20 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
   let serverAuthenticationFailure = false;
   let storeFailureBinding: typeof serverAuthenticationBinding;
   let client: Awaited<ReturnType<typeof persistentClient>> | undefined, inspectionClient: Awaited<ReturnType<typeof persistentClient>> | undefined;
+  const childResponder = createInstalledChildrenResponder({ model, before: beforeText, after: 'after the ordinary child patch\n',
+    expectedParentTools() { assert(expectedToolNames); return expectedToolNames; }, readCas,
+    async readCut(runId) { assert(inspectionClient); return accepted(await inspectionClient.send({ protocolVersion: 1, method: 'run.get', runId }), 'run.get'); },
+    async observeWorker(runId) {
+      assert(inspectionClient);
+      const cut = accepted(await inspectionClient.send({ protocolVersion: 1, method: 'run.get', runId }), 'run.get'), run = cut.snapshot.run;
+      const status = accepted(await inspectionClient.send({ protocolVersion: 1, method: 'supervisor.status' }), 'supervisor.status');
+      assert(run.activeWorkerLaunchId);
+      const observed = inspectInstalledWorkerIdentity(recipe.stateRoot, { uid: ledger.uid, runId,
+        launchId: run.activeWorkerLaunchId, leaseEpoch: run.leaseEpoch, runRevision: run.revision,
+        supervisorInstanceId: status.supervisorInstanceId, deadlineAt: run.deadlineAt });
+      assert.equal('linux-proc-start-ticks:' + await fixtureProcess(observed.pid, ledger.uid), observed.processStartToken);
+      return observed;
+    } });
   let primary: unknown, responderFailure = false, acceptedTcp = 0, acceptedTls = 0, postCount = 0;
   const responderErrors: unknown[] = [];
   const noteResponderFailure = (error: unknown) => {
@@ -398,6 +416,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
   // Retained comparison bytes only: every fresh/restarted client must still
   // download the complete object again. Never use this map as an I/O shortcut.
   const originalPublicResultBytes = new Map<string, Buffer>();
+  let ordinaryChildDownloadStage = false, ordinaryChildPublicDownloads = 0;
   const readPublicArtifact = async (ref: string, expectedDescriptor?: ArtifactDescriptorV1): Promise<Buffer> => {
     assert(client); assert.match(ref, /^[a-f0-9]{64}$/u);
     let artifact: ArtifactDescriptorV1 | undefined, bytes: Buffer | undefined;
@@ -435,9 +454,11 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     assert.equal(artifact.schemaVersion, 1); assert.equal(artifact.mediaType, 'application/json');
     assert.equal(artifact.sizeBytes, expected.length); assert(expected.length > 0 && expected.length <= 1_048_576);
     const bytes = await readPublicArtifact(artifact.ref, artifact); assert(bytes.equals(expected));
+    if (ordinaryChildDownloadStage) assert(++ordinaryChildPublicDownloads <= 4, 'the two successful child/parent Runs each download their complete result and diff');
     const original = originalPublicResultBytes.get(artifact.ref);
     if (original) assert(bytes.equals(original), 'reconnect/restart must preserve the exact original downloaded bytes');
-    else { originalPublicResultBytes.set(artifact.ref, Buffer.from(bytes)); assert(originalPublicResultBytes.size <= (journeyKind === 'verifier' ? 12 : 10)); }
+    else { originalPublicResultBytes.set(artifact.ref, Buffer.from(bytes)); assert(originalPublicResultBytes.size <=
+      (journeyKind === 'verifier' ? ordinaryChildDownloadStage ? 15 : 12 : 10)); }
     return bytes;
   };
   const resultQueries = async (cut: Record<string, any>): Promise<Response[]> => {
@@ -527,6 +548,12 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         const body = parseJsonStrict(bytes.toString('utf8')) as Record<string, any>;
         assert.equal(body.model, model); assert.equal(body.stream, false); assert.equal(body.max_tokens, 4096);
         assert(expectedToolNames, 'the exact signed tool manifest must precede any provider request');
+        const childPayload = await childResponder.respond(body);
+        if (childPayload) {
+          postCount++; const response = Buffer.from(JSON.stringify(childPayload)); scanBytes(response);
+          outgoing.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': String(response.length), Connection: 'close' }); outgoing.end(response);
+          report.transport = { postCount, acceptedTcp, acceptedTls, tls13: true, exactCredentialMatched: true }; return;
+        }
         assert.deepEqual(body.tools.map((entry: any) => entry.function.name), expectedToolNames);
         const matches = [...cases, 'ordinary_tools' as const, 'ordinary_tools_cancel' as const, 'ordinary_tools_restart' as const, ...deliverySources].filter(kind => body.messages.some((entry: any) => entry.role === 'user' &&
           typeof entry.content === 'string' && entry.content.includes('Owned installed verifier case: ' + kind + '.')));
@@ -624,6 +651,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     { guestToolchain: 'node-test-v1', publicationRetirementDiagnostics: options.publicationRetirementDiagnostics,
       serverAuthenticationDiagnostics: options.publicationRetirementDiagnostics,
       ...(storeFailureDiagnostics ? { storeFailureDiagnostics: true as const } : {}),
+      resourceDiagnostics: true,
       ...(journeyKind === 'verifier' ? { guestImageProfile: 'qualification_max' as const } : {}) });
     assert(signed.guestToolchain && signed.modelAuthority);
     expectedToolNames = signed.modelAuthority.tools.value.entries.map(entry => entry.name);
@@ -1166,6 +1194,71 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     await createSource('ordinary_tools_cancel');
     assert.equal(postCount, 15); assert.equal(acceptedTcp, postCount); assert.equal(acceptedTls, postCount); assert(!responderFailure);
     assert.equal(originalPublicResultBytes.size, 12);
+    ordinaryChildDownloadStage = true;
+    // One uninterrupted campaign and one later secret corpus scan. Preserve
+    // every original case/counter above, then qualify the ordinary child graph
+    // through the same installed entry, client, endpoint and scheduler.
+    for (const kind of INSTALLED_CHILD_CASES) {
+      const proof = await runInstalledChildCase({ kind, responder: childResponder, readCas, send,
+        sendFrame: async (body, timeout) => { assert(client); return client.send(body, timeout); }, request, nextId, mark,
+        async submit(objective) {
+          const workspace = path.join(recipe.workspace, kind); await mkdir(workspace, { mode: 0o700 }); await chown(workspace, ledger.uid, ledger.gid);
+          const filename = path.join(workspace, 'example.txt'); await writeFile(filename, beforeText, { flag: 'wx', mode: 0o644 }); await chown(filename, ledger.uid, ledger.gid);
+          const original = sourceMetadata(await lstat(filename, { bigint: true }));
+          const workspaceId = sha256Bytes(Buffer.from(workspace)), directory = path.join(cliqHome, 'workspaces', workspaceId);
+          await mkdir(directory, { recursive: true, mode: 0o700 });
+          for (const name of [path.dirname(directory), directory]) await chown(name, ledger.uid, ledger.gid);
+          const trust = path.join(directory, 'trust.json');
+          await writeFile(trust, canonicalJsonBytes({ version: 1, workspaceId, workspaceRealPath: workspace,
+            decision: 'trusted', decidedAt: new Date().toISOString() }), { flag: 'wx', mode: 0o600 }); await chown(trust, ledger.uid, ledger.gid);
+          const session = (await send(request({ protocolVersion: 1, method: 'session.create', requestId: nextId(),
+            admissionKey: randomBytes(32).toString('base64url'), workspacePath: workspace, name: 'Installed ordinary child ' + kind }), 'session.create', 30000)).snapshot.session;
+          assert.equal(session.contextRevision, 1); assert.equal(session.latestItemSeq, 0);
+          const submit = request({ protocolVersion: 1, method: 'run.submit', requestId: nextId(), admissionKey: randomBytes(32).toString('base64url'),
+            sessionId: session.id, expectedContextRevision: 1, workspacePath: workspace, objective,
+            model: { provider: 'openai-compatible', model, endpoint: { kind: 'registered', endpointRegistrationId: registration.endpointRegistrationId },
+              modelCredentialGrantIds: [credentialId] }, policyMode: 'yolo',
+            budgets: { wallTimeMs: 300000, modelTokens: 2000000, costMicros: 10000000, toolCalls: 1000,
+              repairAttempts: 0, childDepth: 1, childConcurrency: 1 }, verifiers: [], dependency: { mode: 'none' },
+            sourceIncludes: [], sourceExcludes: [], registeredMcpServerIds: [], skillIds: [], allowUnverified: true });
+          assert(client); const response = await client.send(submit, 30000), admitted = accepted(response, 'run.submit');
+          return { request: submit, response, run: admitted.snapshot.run, sessionId: session.id, hostIdentity: { filename, original } };
+        },
+        async restart(cuts, caseDeadline) {
+          assert(services && client && inspectionClient);
+          const prior = show(services.supervisorUnit);
+          await client.close(); client = undefined; await inspectionClient.close(); inspectionClient = undefined;
+          const stopping = performance.now(); assert.equal(command('/usr/bin/systemctl', ['--user', 'stop', services.supervisorUnit]).status, 0);
+          assert(performance.now() - stopping <= 2000, 'parent and child worker-free wait shutdown must retain the original two-second bound');
+          assert.equal(show(services.supervisorUnit).MainPID, '0');
+          const restartBy = Math.min(caseDeadline, Date.now() + 30000);
+          assert.equal(command('/usr/bin/systemctl', ['--user', 'start', services.supervisorUnit]).status, 0);
+          const successor = show(services.supervisorUnit); assert.notEqual(successor.InvocationID, prior.InvocationID);
+          await selectedSupervisor(services.supervisorUnit, successor, installedImage, restartBy);
+          client = await persistentClient(); inspectionClient = await persistentClient();
+          for (const cut of cuts) assert.deepEqual(await send({ protocolVersion: 1, method: 'run.get', runId: cut.snapshot.run.id }, 'run.get'), cut);
+          assert.equal(show(services.keeperUnit).MainPID, keeperBefore.MainPID);
+          assert.deepEqual(await readFile(path.join(recipe.stateRoot, 'runtime/keeper.ready')), keeperReady);
+        },
+        async inspectRetired(identity) {
+          const retired = inspectInstalledWorkerRetirement(recipe.stateRoot, ledger.uid, identity);
+          try { assert.notEqual('linux-proc-start-ticks:' + await processStart(identity.pid), identity.processStartToken); }
+          catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+          return retired;
+        },
+        async download(cut) { await resultQueries(cut); },
+        async assertHostUnchanged(value) {
+          const original = value as { filename: string; original: Record<string, string> };
+          assert.deepEqual(sourceMetadata(await lstat(original.filename, { bigint: true })), original.original);
+          assert.equal(await readFile(original.filename, 'utf8'), beforeText);
+        },
+      });
+      report.cases.push(proof);
+    }
+    assert.equal(postCount, 24); assert.equal(acceptedTcp, postCount); assert.equal(acceptedTls, postCount); assert(!responderFailure);
+    assert.equal(ordinaryChildPublicDownloads, 4);
+    assert.equal(originalPublicResultBytes.size, 15, 'the child and unchanged-fork parent independently download the same canonical diff');
+    assert.equal(report.cases.length, 10);
     } else {
       const supported = client.hello.enabledFeatureIds.includes('run.apply') && client.hello.enabledFeatureIds.includes('run.approve');
       report.delivery = { diagnosticOnly: true, qualified: false, attemptStarted: false, capabilityAdvertised: supported,
@@ -1739,6 +1832,32 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
               assert.equal(stopped.TimeoutStopUSec, '2s'); assert.equal(stopped.Result, 'success');
               assert.equal(stopped.ExecMainCode, '1'); assert.equal(stopped.ExecMainStatus, '0');
               if (/^[1-9][0-9]*$/u.test(before[index]!.MainPID!)) await assert.rejects(lstat('/proc/' + before[index]!.MainPID), { code: 'ENOENT' });
+            }
+            // Numeric capacity observations are read only after the complete
+            // original stop/status/PID assertions. No diagnostic I/O enters
+            // READY, authentication, installation30 or the measured Stop2.
+            if (storeFailureBinding) {
+              const binding = storeFailureBinding;
+              const originalGone = await lstat('/proc/' + binding.pid).then(() => false,
+                error => { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true; throw error; });
+              if (originalGone) {
+                assertRetained();
+                const stamp = (value: number) => '@' + Math.floor(value / 1000) + '.' + String(value % 1000).padStart(3, '0');
+                const resourceLog = spawnSync('/usr/bin/journalctl', ['--no-pager', '--all', '--no-tail', '--output=cat', '--boot=0',
+                  `--since=${stamp(binding.windowOpenedAt)}`, `--until=${stamp(Date.now())}`,
+                  `_UID=${ledger.uid}`, `_PID=${binding.pid}`, '_TRANSPORT=stdout', `_SYSTEMD_INVOCATION_ID=${binding.invocationId}`],
+                { env: environment, timeout: 5000, killSignal: 'SIGKILL', maxBuffer: 256 * 1024 });
+                assert(Buffer.isBuffer(resourceLog.stdout) && Buffer.isBuffer(resourceLog.stderr));
+                // Keep original stdout/stderr as independent complete streams.
+                // Replay only exact fixed numeric lines from already scanned
+                // cat bytes; no JSON rewriting, new literals or scan reset.
+                scanBytes(resourceLog.stdout); scanBytes(resourceLog.stderr);
+                if (!resourceLog.error && !resourceLog.signal && resourceLog.status === 0)
+                  replayScannedResourceLines(resourceLog.stdout, bytes => {
+                    assert.equal(writeResourceDiagnostic(2, bytes), bytes.length);
+                  });
+                resourceLog.stdout.fill(0); resourceLog.stderr.fill(0); assertRetained();
+              }
             }
             // The original service stop, terminal status and actual PID absence
             // above must finish first. No new image/journal await can hide a

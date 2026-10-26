@@ -1,5 +1,5 @@
 import { setImmediate } from 'node:timers/promises';
-import { canonicalSha256 } from '../kernel/canonical.js';
+import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import { sha256Bytes } from '../kernel/identity.js';
 import type { WorkspaceEntry, WorkspaceEntryManifest } from '../kernel/types.js';
 import type { ArtifactCatalog, PublishedArtifact } from '../state/artifacts.js';
@@ -74,7 +74,18 @@ function retire(resources: readonly { close(): void }[], operationError?: unknow
  * claim that a concurrently writable source was atomically snapshotted. */
 export async function captureWorkspaceEntries(root: HeldWorkspaceRoot, artifacts: ArtifactCatalog,
   selection: SourceCaptureSelection): Promise<PublishedArtifact> {
+  return captureWorkspaceEntriesWithManifestPublication(root, artifacts, selection,
+    manifest => artifacts.publishCanonical(manifest, 'cliq-workspace-entries-v1'));
+}
+
+/** Internal data-publication scope, never a capture or execution authority.
+ * The trusted publisher receives only the immutable native-read manifest
+ * manifest; all original readers/cursors/entries remain held through its full
+ * join. It must return that exact manifest's completed artifact metadata. */
+export async function captureWorkspaceEntriesWithManifestPublication(root: HeldWorkspaceRoot, artifacts: ArtifactCatalog,
+  selection: SourceCaptureSelection, publishManifest: (manifest: WorkspaceEntryManifest) => Promise<PublishedArtifact>): Promise<PublishedArtifact> {
   assertHeldWorkspaceRoot(root);
+  if (typeof publishManifest !== 'function') invalid('source manifest requires its internal data publisher');
   if (!Array.isArray(selection.selectedPaths) || !Number.isSafeInteger(selection.maxEntries) || selection.maxEntries < 1 ||
       !Number.isSafeInteger(selection.maxBytes) || selection.maxBytes < 0) invalid('source capture requires an explicit bounded selection');
   const { maxEntries, maxBytes, signal } = selection, maxSingleFileBytes = selection.maxSingleFileBytes ?? maxBytes;
@@ -156,7 +167,15 @@ export async function captureWorkspaceEntries(root: HeldWorkspaceRoot, artifacts
       for (const entry of heldEntries) entry.assertHeld();
     };
     assertComplete();
-    const result = await artifacts.publishCanonical(manifest, 'cliq-workspace-entries-v1');
+    const expectedRef = canonicalSha256(manifest), expectedLength = canonicalJsonBytes(manifest).length;
+    // Every entry is freshly constructed here from primitive native-read
+    // fields. Freeze this private value rather than clone a potentially large
+    // complete manifest or expose a mutable alias to the publisher.
+    for (const entry of manifest.entries) Object.freeze(entry);
+    Object.freeze(manifest.entries); Object.freeze(manifest);
+    const result = await publishManifest(manifest);
+    if (result.ref !== expectedRef || result.byteLength !== expectedLength || result.mediaType !== 'application/json' ||
+        result.schemaKind !== 'cliq-workspace-entries-v1') invalid('source manifest publication differs from its native-read bytes');
     assertComplete();
     return result;
   } catch (error) { operationError = error; throw error; }

@@ -9,7 +9,7 @@ import ts from 'typescript';
 const groups = [
   ['recovery-closure.ts', 'artifacts', ['[...unique]']],
   ['run-authority.ts', 'openingReads', ['manifest.entries']],
-  ['resource-stop.ts', 'artifacts', ['manifest.entries', 'cut.items', 'cut.items']],
+  ['resource-stop.ts', 'artifacts', ['manifest.entries', 'sourceItems', 'cut.items']],
   ['tool-cut.ts', 'artifacts', ['closure.items']],
   ['agent-context.ts', 'artifacts', ['turn.toolCalls', 'workspace.entries']],
   ['stop-recovery.ts', 'artifacts', ['closure.items']],

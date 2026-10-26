@@ -449,9 +449,16 @@ Fresh bootstrap still requires the exact opened current schema; historical
 reading is not runtime activation, upgrade compatibility or execution authority.
 The implemented schema-only v6/v7 recipes require the pristine schema ref and
 semantic digest to equal the first owner's original schema runtime. Existing
-signed births retain the current-version boundary until their exact original
-signed schema source and upgrade transition are implemented; a compatibility
-range or a known DDL digest does not supply that missing source.
+signed births require their exact signed schema source. The first explicit
+transition is the [fully retired signed 7-to-8 recipe](../../kernel/i4-signed-runtime-upgrade.md):
+an exact new signed legacy-conversion profile recognizes the original generated
+7 source without inventing a missing old schema signature; it binds the complete
+target schema and the same actual publisher key. A compatibility range or a
+known DDL digest alone cannot supply that source. The original genesis bytes
+remain unchanged. A registered conversion cannot reactivate the incompatible
+old writer after its sole SQL decision, and incomplete selection must recover
+only that same decision. Actual installed upgrade qualification and official
+release/default-cut gates remain pending until their independent evidence passes.
 
 The same first transaction records `modelAuthoritySource` from that genuine
 held installation: exactly `{kind:'none'}` or

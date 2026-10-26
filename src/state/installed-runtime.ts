@@ -1,3 +1,19 @@
+import path from 'node:path';
+import { performance } from 'node:perf_hooks';
+import { setTimeout as upgradeDelay } from 'node:timers/promises';
+import { decodeInstalledUpgradeStopObservation } from './credential-platform.js';
+import type { InstalledUpgradeSourceV1, InstalledUpgradeIdentityV1, RuntimeUpgradeReceiptV1 } from '../kernel/runtime-upgrade.js';
+import type { SupervisorHelloV1 } from '../kernel/control-wire.js';
+import { assertControlWireJson, controlWireRecord } from '../kernel/control-wire-data.js';
+import type { PublishedArtifact } from './artifacts.js';
+import { ArtifactCatalog } from './artifacts.js';
+import { readLatestStateOwner } from './state-owner.js';
+import { readRetainedStateOwnerHistory } from './state-owner-history.js';
+import { openSqliteDriver, openReadOnlySqliteDriver } from './sqlite-driver.js';
+import { decodeRuntimeUpgradeReceipt } from './runtime-upgrade-history.js';
+import { assertKernelSchemaVersion } from './schema.js';
+import { sampleCanonicalNow } from './canonical-time.js';
+import { signedKernelSchemaProfile, decodeSignedKernelSchema, schemaConversionProfile, decodeSchemaConversion } from './signed-schema.js';
 import { BUILTIN_SCRIPT_RECIPE } from '../sandbox/builtin-tool-data.js';
 import type { NativeBuiltinBashToolchain } from '../sandbox/guest-toolchain.js';
 import type { NativeBuiltinToolScriptImage } from '../sandbox/linux-worker.js';
@@ -9,11 +25,11 @@ import { Module } from 'node:module';
 import { isSea } from 'node:sea';
 import { setImmediate as yieldImmediate } from 'node:timers/promises';
 
-import { KERNEL_CAS_DIRECTORY } from '../config.js';
+import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME } from '../config.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import { assertArtifactRef, digestOmitting, encodeCanonicalTime, identityHash,
   normalizeAbsolutePath, sha256Bytes } from '../kernel/identity.js';
-import type { LocalControlChannelIdentityV1, LocalPrincipalIdentityV1, PlatformProcessIdentityV1, StateRootIdentityV1 } from '../kernel/types.js';
+import type { LocalControlChannelIdentityV1, LocalPrincipalIdentityV1, PlatformProcessIdentityV1, StateRootIdentityV1, StateOwnerRecordV1 } from '../kernel/types.js';
 import { immutableSnapshot } from '../model/immutable.js';
 import { exactKeys, policyProfile, type ReleaseTrustKey, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { ARTIFACT_CHUNK_BYTES, ContentAddressedStore } from './cas.js';
@@ -188,9 +204,11 @@ type InstalledRuntimeBinding = {
   credentialScope<T>(operation: (token: HeldCredentialAuthorityLock) => Promise<T>): Promise<T>;
 };
 const heldInstalledRuntimes = new WeakMap<HeldInstalledRuntime, InstalledRuntimeBinding>();
+const installedRuntimeTrust = new WeakMap<InstalledRuntime, readonly ReleaseTrustKey[]>();
 let credentialScopeReserved = false;
 const heldInstalledAnchors = new WeakMap<HeldInstalledAnchor, { selected: HeldInstalledRuntime;
-  withRoot(operation: (fd: number, rootPath: string) => void): void }>();
+  withRoot(operation: (fd: number, rootPath: string) => void): void;
+  readBirth(): InstalledUpgradeSourceV1['originalKeeper'] }>();
 
 /** Private worker producer bridge. Only synchronous fixed native operations
  * borrow the original root; neither public handle offers a descriptor getter. */
@@ -592,10 +610,10 @@ async function* chunks(file: InstalledFile, signal?: AbortSignal): AsyncGenerato
   signal?.throwIfAborted();
   if (file.digest !== undefined && hash.digest('hex') !== file.digest) mismatch('installed runtime signed file digest differs');
 }
-async function readSmall(file: InstalledFile, limit = SMALL_BYTES): Promise<Buffer> {
+async function readSmall(file: InstalledFile, limit = SMALL_BYTES, signal?: AbortSignal): Promise<Buffer> {
   if (file.info.size > BigInt(limit)) mismatch('installed runtime data exceeds its bounded decoding limit');
   const bytes: Buffer[] = [];
-  for await (const chunk of chunks(file)) bytes.push(chunk);
+  for await (const chunk of chunks(file, signal)) bytes.push(chunk);
   return Buffer.concat(bytes);
 }
 // Main-isolate discard work shares a single scratch/Worker budget. Other
@@ -897,20 +915,54 @@ async function checkPackageGraph(scope: Scope, root: Directory, bundle: RuntimeB
     await scope.assertDirectory(directory);
   }
 }
-async function checkSelectedVersion(scope: Scope, bundles: Directory, bundleDigest: string): Promise<void> {
+async function checkSelectedVersion(scope: Scope, bundles: Directory, bundleDigest: string, retainedDigest?: string): Promise<void> {
   await scope.assertDirectory(bundles);
   const names = await readdir(childPath(bundles, '.'));
-  if (names.length !== 1 || names[0] !== bundleDigest) mismatch('initial installed runtime contains an unselected version or object');
+  const expected = retainedDigest === undefined ? [bundleDigest] : [retainedDigest, bundleDigest];
+  if (names.length !== expected.length || names.some(name => !expected.includes(name)))
+    mismatch('installed runtime contains an unregistered version or object');
   await scope.assertDirectory(bundles);
 }
+
+/** A separate real historical read, never an executable-image borrow. The
+ * caller retains only the small signed source manifest and its namespace
+ * expectations; every original entry is opened, completely read and joined
+ * inside this fresh scope before current selection may escape. */
+async function verifyRetainedSourcePackage(metadataScope: Scope, root: Directory,
+  releaseKeys: readonly ReleaseTrustKey[], expectedDigest: string): Promise<Readonly<{
+    manifest: InstalledFile; bundle: RuntimeBundleManifest;
+  }>> {
+  const manifest = await metadataScope.file(root, 'manifest.json', 0o400, undefined, expectedDigest);
+  const bytes = await readSmall(manifest);
+  const bundle = validateBundle(checkCanonicalBytes(bytes), releaseKeys);
+  const historical = new Scope();
+  try {
+    // Duplicate the actual captured directory, rather than reopen a caller
+    // path or keep a retired source file in the current execution scope.
+    const originalRoot = await historical.directory(root, '.');
+    const original = await verifyPackage(historical, originalRoot, releaseKeys, expectedDigest);
+    if (!original.manifestBytes.equals(bytes)) mismatch('retained source metadata changed during its historical read');
+    historical.assertMetadata([original.manifest, ...original.entries.values(), ...original.companionFiles]);
+    await historical.assertDirectories();
+    await metadataScope.assertDirectories();
+    await assertFile(manifest);
+  } catch (error) {
+    await joinResourceOperations([Promise.reject(error), historical.close()]);
+    throw error;
+  }
+  await historical.close();
+  await assertFile(manifest); await metadataScope.assertDirectory(root);
+  return Object.freeze({ manifest, bundle });
+}
 async function verifyPackage(scope: Scope, root: Directory, releaseKeys: readonly ReleaseTrustKey[], expectedDigest?: string,
-  sourceCompanion = false): Promise<VerifiedPackage> {
-  return observeInstalledWork('package', () => verifyPackageBytes(scope, root, releaseKeys, expectedDigest, sourceCompanion));
+  sourceCompanion = false, signal?: AbortSignal): Promise<VerifiedPackage> {
+  return observeInstalledWork('package', () => verifyPackageBytes(scope, root, releaseKeys, expectedDigest, sourceCompanion, signal));
 }
 async function verifyPackageBytes(scope: Scope, root: Directory, releaseKeys: readonly ReleaseTrustKey[], expectedDigest?: string,
-  sourceCompanion = false): Promise<VerifiedPackage> {
+  sourceCompanion = false, signal?: AbortSignal): Promise<VerifiedPackage> {
+  signal?.throwIfAborted();
   const manifest = await scope.file(root, 'manifest.json', 0o400, undefined, expectedDigest);
-  const manifestBytes = await readSmall(manifest);
+  const manifestBytes = await readSmall(manifest, SMALL_BYTES, signal);
   const bundleDigest = sha256Bytes(manifestBytes);
   const bundle = validateBundle(checkCanonicalBytes(manifestBytes), releaseKeys);
   manifest.digest = bundleDigest;
@@ -919,25 +971,26 @@ async function verifyPackageBytes(scope: Scope, root: Directory, releaseKeys: re
   const streamedRoots = new Map<string, InstalledFile>();
   const inodes = new Set<string>([`${manifest.info.dev}:${manifest.info.ino}`]);
   for (const entry of bundle.entries) {
+    signal?.throwIfAborted();
     const file = await scope.file(root, entry.relativePath, entry.executable ? 0o500 : 0o400, entry.byteCount, entry.digest);
     const identity = `${file.info.dev}:${file.info.ino}`;
     if (inodes.has(identity)) mismatch('distinct signed entries alias one installed inode');
     inodes.add(identity); entries.set(entry.entryId, file);
     if (['policy_engine', 'sandbox_root_profile', 'system_prompt', 'compaction_prompt', 'guest_toolchain', 'schema'].includes(entry.role)) {
       if (entry.executable) mismatch('signed structured roots must be data');
-      const bytes = await readSmall(file); const value = checkCanonicalBytes(bytes);
+      const bytes = await readSmall(file, SMALL_BYTES, signal); const value = checkCanonicalBytes(bytes);
       if (entry.role === 'policy_engine') {
         if (canonicalSha256(value) !== canonicalSha256(policyProfile())) mismatch('signed policy root is not the fixed supported evaluator profile');
       } else if (entry.role === 'sandbox_root_profile') decodeSandboxRootProfile(value);
       roots.set(entry.digest, bytes);
     } else if (entry.role === 'trust_store') {
-      const bytes = await readSmall(file, TRUST_BYTES); validateTrustStore(bytes); roots.set(entry.digest, bytes);
+      const bytes = await readSmall(file, TRUST_BYTES, signal); validateTrustStore(bytes); roots.set(entry.digest, bytes);
     } else if (entry.entryId === BUILTIN_SCRIPT_RECIPE.entryId && entry.role === 'tool_adapter') {
       if (entry.executable !== false || entry.version !== BUILTIN_SCRIPT_RECIPE.version ||
           entry.relativePath !== BUILTIN_SCRIPT_RECIPE.relativePath || entry.byteCount < 1 || entry.byteCount > BUILTIN_SCRIPT_RECIPE.scriptBytes)
         mismatch('builtin tool script is outside its fixed signed data contract');
-      roots.set(entry.digest, await readSmall(file, BUILTIN_SCRIPT_RECIPE.scriptBytes));
-    } else if (entry.role !== 'bundle_object') await verifyBytes(file);
+      roots.set(entry.digest, await readSmall(file, BUILTIN_SCRIPT_RECIPE.scriptBytes, signal));
+    } else if (entry.role !== 'bundle_object') await verifyBytes(file, signal);
   }
   const guests = guestToolchainRoots(bundle).map(root => {
     const bytes = roots.get(root.artifactRef);
@@ -947,13 +1000,14 @@ async function verifyPackageBytes(scope: Scope, root: Directory, releaseKeys: re
   const imageRefs = new Set(guests.map(guest => guest.manifest.guestImageRef));
   const signatureRefs = new Set(guests.map(guest => guest.manifest.signatureRef));
   for (const entry of bundle.entries.filter(entry => entry.role === 'bundle_object')) {
+    signal?.throwIfAborted();
     const file = entries.get(entry.entryId)!;
     if (imageRefs.has(entry.digest)) {
       if (entry.executable || entry.byteCount < 1 || entry.byteCount > GUEST_EXTRACTOR_RECIPE.maxImageBytes)
         mismatch('installed guest image exceeds the supported signed recipe bound');
-      await verifyBytes(file); streamedRoots.set(entry.digest, file);
+      await verifyBytes(file, signal); streamedRoots.set(entry.digest, file);
     } else {
-      const bytes = await readSmall(file, signatureRefs.has(entry.digest) ? 64 : SMALL_BYTES);
+      const bytes = await readSmall(file, signatureRefs.has(entry.digest) ? 64 : SMALL_BYTES, signal);
       if (!signatureRefs.has(entry.digest)) checkCanonicalBytes(bytes);
       roots.set(entry.digest, bytes);
     }
@@ -972,28 +1026,49 @@ async function verifyPackageBytes(scope: Scope, root: Directory, releaseKeys: re
     await scope.assertDirectory(root);
     if (names.includes('model-authority.json')) {
       const file = await scope.file(root, 'model-authority.json', 0o400);
-      const bytes = await readSmall(file);
+      const bytes = await readSmall(file, SMALL_BYTES, signal);
       try {
         const closure = decodeInstalledModelAuthorityClosure(checkCanonicalBytes(bytes), { bundle, releaseKeys });
         file.digest = sha256Bytes(bytes); companionFiles.push(file); roots.set(file.digest, bytes);
         const objects = new Map<string, Buffer>();
         for (const object of closure.objects) {
+          signal?.throwIfAborted();
           const member = await scope.file(root, `model-objects/sha256/${object.artifactRef.slice(0, 2)}/${object.artifactRef}`,
             0o400, object.byteCount, object.artifactRef);
           const identity = `${member.info.dev}:${member.info.ino}`;
           if (inodes.has(identity)) mismatch('installed model members alias another signed inode');
           inodes.add(identity); companionFiles.push(member);
-          const bytes = await readSmall(member, 65536);
+          const bytes = await readSmall(member, 65536, signal);
           objects.set(object.artifactRef, bytes); roots.set(object.artifactRef, bytes);
         }
         modelAuthority = verifyInstalledModelAuthority({ closure, bundle, releaseKeys, objects });
         if (modelAuthority.closureRef !== file.digest) mismatch('installed model closure complete identity differs');
-      } catch (cause) { mismatch('installed model companion verification failed', cause); }
+      } catch (cause) { if (signal?.aborted && cause === signal.reason) throw cause; mismatch('installed model companion verification failed', cause); }
     }
   }
   await checkPackageGraph(scope, root, bundle, modelAuthority); await scope.assertDirectories();
+  signal?.throwIfAborted();
   return { root, manifest, bundle, bundleDigest, manifestBytes, entries, roots, streamedRoots, structured, companionFiles,
     ...(modelAuthority ? { modelAuthority } : {}) };
+}
+
+async function readInstalledCompanionFromCas(scope: Scope, casRoot: Directory, signed: VerifiedPackage,
+  modelAuthorityRef: string, releaseKeys: readonly ReleaseTrustKey[]): Promise<InstalledFile[]> {
+  const casFiles: InstalledFile[] = [];
+  try {
+    const file = await scope.file(casRoot, modelAuthorityRef, 0o400, undefined, modelAuthorityRef);
+    const bytes = await readSmall(file); casFiles.push(file); signed.roots.set(modelAuthorityRef, bytes);
+    const closure = decodeInstalledModelAuthorityClosure(checkCanonicalBytes(bytes), { bundle: signed.bundle, releaseKeys });
+    const objects = new Map<string, Buffer>();
+    for (const object of closure.objects) {
+      const member = await scope.file(casRoot, object.artifactRef, 0o400, object.byteCount, object.artifactRef);
+      const bytes = await readSmall(member, 65536); casFiles.push(member);
+      objects.set(object.artifactRef, bytes); signed.roots.set(object.artifactRef, bytes);
+    }
+    signed.modelAuthority = verifyInstalledModelAuthority({ closure, bundle: signed.bundle, releaseKeys, objects });
+    if (signed.modelAuthority.closureRef !== modelAuthorityRef) mismatch('selected model closure complete identity differs');
+  } catch (cause) { mismatch('selected installed model companion verification failed', cause); }
+  return casFiles;
 }
 
 async function writeChunks(scope: Scope, root: Directory, relative: string, source: AsyncIterable<Buffer>, mode: number): Promise<void> {
@@ -1176,37 +1251,49 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
         const casRoot = await scope.directory(state, KERNEL_CAS_DIRECTORY);
         const active = await scope.file(root, 'active.json', 0o600);
         const activeBytes = await readSmall(active);
-        const selection = checkCanonicalBytes(activeBytes) as { schemaVersion: number; bundleDigest: string; modelAuthorityRef?: string };
+        const selection = checkCanonicalBytes(activeBytes) as { schemaVersion: number; bundleDigest: string; modelAuthorityRef?: string; upgradeReceiptRef?: string };
         if (!selection || typeof selection !== 'object' || Array.isArray(selection) ||
-            !exactKeys(selection, ['schemaVersion', 'bundleDigest', ...(Object.hasOwn(selection, 'modelAuthorityRef') ? ['modelAuthorityRef'] : [])]) ||
+            !exactKeys(selection, ['schemaVersion', 'bundleDigest', ...(Object.hasOwn(selection, 'modelAuthorityRef') ? ['modelAuthorityRef'] : []),
+              ...(Object.hasOwn(selection, 'upgradeReceiptRef') ? ['upgradeReceiptRef'] : [])]) ||
             selection.schemaVersion !== 1) mismatch('installed runtime selection has an invalid closed shape');
-        try { assertArtifactRef(selection.bundleDigest); if (selection.modelAuthorityRef !== undefined) assertArtifactRef(selection.modelAuthorityRef); }
+        try { assertArtifactRef(selection.bundleDigest); if (selection.modelAuthorityRef !== undefined) assertArtifactRef(selection.modelAuthorityRef);
+          if (selection.upgradeReceiptRef !== undefined) assertArtifactRef(selection.upgradeReceiptRef); }
         catch (cause) { mismatch('installed runtime selection has an invalid complete reference', cause); }
         active.digest = sha256Bytes(activeBytes);
-        await checkSelectedVersion(scope, bundles, selection.bundleDigest);
+        const registeredUpgrade = selection.upgradeReceiptRef === undefined ? undefined :
+          await readRegisteredInstalledUpgrade(stateRoot, releaseKeys, selection.upgradeReceiptRef);
+        if (registeredUpgrade && (registeredUpgrade.targetRuntimeBundleRef !== selection.bundleDigest ||
+            registeredUpgrade.installation.kind !== 'held_installed_stage' ||
+            registeredUpgrade.installation.targetModelAuthorityRef !== selection.modelAuthorityRef)) mismatch('selection differs from its registered upgrade');
+        await checkSelectedVersion(scope, bundles, selection.bundleDigest, registeredUpgrade?.sourceRuntimeBundleRef);
         const version = await scope.directory(bundles, selection.bundleDigest);
         const signed = await verifyPackage(scope, version, releaseKeys, selection.bundleDigest);
         const supervisor = signed.bundle.entries.find(entry => entry.role === 'supervisor')!;
         const bootstrap = await scope.file(root, 'bootstrap', 0o500, supervisor.byteCount, supervisor.digest);
+        const retainedMetadataFiles: InstalledFile[] = [];
+        const retainedGraphs: Array<{ directory: Directory; bundle: RuntimeBundleManifest }> = [];
+        if (registeredUpgrade) {
+          const source = registeredUpgrade.installation;
+          if (source.kind !== 'held_installed_stage') mismatch('installed selection cannot use a noninstalled receipt');
+          assertUpgradeObjectIdentity(root, source.runtimeIdentity);
+          assertUpgradeObjectIdentity(version, source.targetBundleIdentity);
+          assertUpgradeObjectIdentity(active, source.stagedActiveIdentity);
+          assertUpgradeObjectIdentity(bootstrap, source.stagedBootstrapIdentity);
+          const originalStage = await scope.directory(root, source.stageName);
+          assertUpgradeObjectIdentity(originalStage, source.stageIdentity);
+          if ((await readdir(childPath(originalStage, '.'))).length !== 0) mismatch('published upgrade stage contains unregistered objects');
+          const retainedVersion = await scope.directory(bundles, registeredUpgrade.sourceRuntimeBundleRef);
+          const retained = await verifyRetainedSourcePackage(scope, retainedVersion, releaseKeys, registeredUpgrade.sourceRuntimeBundleRef);
+          retainedMetadataFiles.push(retained.manifest);
+          retainedGraphs.push({ directory: retainedVersion, bundle: retained.bundle });
+        }
+
         const casFiles: InstalledFile[] = [];
         for (const [ref, bytes] of signed.roots) casFiles.push(await scope.file(casRoot, ref, 0o400, bytes.length, ref));
         for (const [ref, image] of signed.streamedRoots)
           casFiles.push(await scope.file(casRoot, ref, 0o400, Number(image.info.size), ref));
-        if (selection.modelAuthorityRef !== undefined) {
-          try {
-            const file = await scope.file(casRoot, selection.modelAuthorityRef, 0o400, undefined, selection.modelAuthorityRef);
-            const bytes = await readSmall(file); casFiles.push(file); signed.roots.set(selection.modelAuthorityRef, bytes);
-            const closure = decodeInstalledModelAuthorityClosure(checkCanonicalBytes(bytes), { bundle: signed.bundle, releaseKeys });
-            const objects = new Map<string, Buffer>();
-            for (const object of closure.objects) {
-              const member = await scope.file(casRoot, object.artifactRef, 0o400, object.byteCount, object.artifactRef);
-              const bytes = await readSmall(member, 65536); casFiles.push(member);
-              objects.set(object.artifactRef, bytes); signed.roots.set(object.artifactRef, bytes);
-            }
-            signed.modelAuthority = verifyInstalledModelAuthority({ closure, bundle: signed.bundle, releaseKeys, objects });
-            if (signed.modelAuthority.closureRef !== selection.modelAuthorityRef) mismatch('selected model closure complete identity differs');
-          } catch (cause) { mismatch('selected installed model companion verification failed', cause); }
-        }
+        if (selection.modelAuthorityRef !== undefined)
+          casFiles.push(...await readInstalledCompanionFromCas(scope, casRoot, signed, selection.modelAuthorityRef, releaseKeys));
         let closed = false;
         const guestShutdown = new AbortController();
         const observationShutdown = new AbortController();
@@ -1241,17 +1328,18 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
         };
         const assertSelection = () => {
           if (hasPoisoned) throw poisoned;
-          try { scope.assertMetadata([active, signed.manifest, bootstrap, ...signed.entries.values(), ...casFiles]); }
+          try { scope.assertMetadata([active, signed.manifest, bootstrap, ...signed.entries.values(), ...casFiles, ...retainedMetadataFiles]); }
           catch (error) { rememberRetirement(error); poisoned = error; hasPoisoned = true; throw error; }
         };
         const revalidate = (signal?: AbortSignal) => observeInstalledWork('revalidate', async () => {
           signal?.throwIfAborted();
           healthy(); await scope.assertDirectories();
           signal?.throwIfAborted();
-          await scope.verifyDiscard([active, signed.manifest, bootstrap, ...signed.entries.values(), ...casFiles], signal);
+          await scope.verifyDiscard([active, signed.manifest, bootstrap, ...signed.entries.values(), ...casFiles, ...retainedMetadataFiles], signal);
           await checkPackageGraph(scope, version, signed.bundle);
+          for (const retained of retainedGraphs) await checkPackageGraph(scope, retained.directory, retained.bundle);
           signal?.throwIfAborted();
-          await checkSelectedVersion(scope, bundles, signed.bundleDigest); await scope.assertDirectories();
+          await checkSelectedVersion(scope, bundles, signed.bundleDigest, registeredUpgrade?.sourceRuntimeBundleRef); await scope.assertDirectories();
           signal?.throwIfAborted();
         });
         await revalidate();
@@ -1470,6 +1558,17 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
               // Retain only this private authentication/TLS closure. Ordinary
               // reads do not publish it; the business transaction decides that.
               const objects = new Map<string, Buffer>([[signed.bundleDigest, signed.manifestBytes], [trust.digest, trustBytes]]);
+              // The current genuine package's fixed schema/conversion data can
+              // audit old credential provenance. It does not transfer those
+              // old endpoint/TLS bindings to productive current operations.
+              for (const entry of signed.bundle.entries.filter(entry => entry.role === 'schema')) {
+                if (!['kernel_schema', 'schema_conversion'].includes(entry.entryId) || entry.executable)
+                  mismatch('credential history requires the fixed signed schema entries');
+                const bytes = signed.roots.get(entry.digest);
+                if (!bytes || bytes.length !== entry.byteCount || sha256Bytes(bytes) !== entry.digest)
+                  mismatch('credential history schema source is missing or changed');
+                objects.set(entry.digest, bytes);
+              }
               for (const identity of [rootIdentity, processIdentity, principalIdentity, channelIdentity]) {
                 const bytes = canonicalJsonBytes(identity);
                 objects.set(sha256Bytes(bytes), bytes);
@@ -1830,7 +1929,7 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
               await checkedRevalidate(signal);
               const entry = signed.bundle.entries.find(value => value.entryId === BUILTIN_SCRIPT_RECIPE.entryId);
               const file = signed.entries.get(BUILTIN_SCRIPT_RECIPE.entryId);
-              if (!workerNative || workerNative.builtinToolInterfaceVersion !== 1 || !entry || !file ||
+              if (!workerNative || workerNative.builtinToolInterfaceVersion !== 2 || !entry || !file ||
                   entry.role !== 'tool_adapter' || entry.version !== '1' || entry.executable !== false ||
                   entry.relativePath !== BUILTIN_SCRIPT_RECIPE.relativePath || entry.byteCount < 1 || entry.byteCount > 1024 * 1024)
                 throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'the fixed signed builtin tool script is not installed');
@@ -2059,7 +2158,15 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
                     try { anchor.close(); } catch (error) { rememberRetirement(error); throw error; }
                   },
                 });
-                heldInstalledAnchors.set(held, { selected, withRoot(operation) {
+                heldInstalledAnchors.set(held, { selected, readBirth() {
+                  if (closed || hasPoisoned) mismatch('installed keeper birth lost its original selected lifetime');
+                  healthy(); anchor.assertHeld();
+                  const birth = Object.freeze({ pid: locator.readUInt32LE(8),
+                    processStartToken: `linux-proc-start-ticks:${locator.readBigUInt64LE(16)}`,
+                    locatorDigest: sha256Bytes(locator), bootIdentityHex: locator.subarray(24).toString('hex'), observedAt: sampleCanonicalNow(),
+                    readyIdentity: upgradeDirectoryIdentity(ready) });
+                  anchor.assertHeld(); return birth;
+                }, withRoot(operation) {
                   if (closed) mismatch('installed runtime handle is closed');
                   if (hasPoisoned) throw poisoned;
                   try { healthy(); anchor.withRoot(operation); }
@@ -2215,5 +2322,585 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
       }
     },
   });
+  installedRuntimeTrust.set(runtime, releaseKeys);
   return runtime;
+}
+
+/** The private stage owns actual directories/files, not a structural package
+ * description. It is never an installed execution or StateOwner capability. */
+export type HeldInstalledRuntimeUpgrade = Readonly<{ close(): Promise<void> }>;
+type UpgradeCredentialLifetime = Readonly<{ assertHeld(): void;
+  observeProducerLifetime(pid: number, ownerUid: number, processStartToken: string): 'present' | 'dead' }>;
+export type InstalledUpgradeTransaction = Readonly<{
+  stateRoot: string; bundle: RuntimeBundleManifest; releaseKeys: readonly ReleaseTrustKey[];
+  native: NativeStateOwner; seed: readonly PublishedArtifact[]; source: InstalledUpgradeSourceV1;
+  supervisorBirth: PlatformProcessIdentityV1;
+  supervisorOwner: StateOwnerRecordV1;
+  assertCurrent(): Promise<void>;
+  assertCommit(): void;
+  assertOldProcessesDead(): void;
+  prepareSelection(receiptRef: string): Promise<void>;
+  publishSelection(receiptRef: string, receipt: RuntimeUpgradeReceiptV1): Promise<void>;
+}>;
+type InstalledUpgradeBinding = {
+  prepared: InstalledUpgradeTransaction;
+  run<T>(operation: () => Promise<T>): Promise<T>;
+  publish(receiptRef: string, receipt: RuntimeUpgradeReceiptV1): Promise<void>;
+  stop(): Promise<void>;
+  active(): boolean;
+};
+const installedUpgradeStages = new WeakMap<HeldInstalledRuntimeUpgrade, InstalledUpgradeBinding>();
+// An uncertain native pager/inspection retirement keeps its original source
+// descriptors strongly reachable until process exit. A WeakMap cycle alone
+// would allow FileHandle finalizers to close them beneath that owner.
+const unretiredInstalledUpgradeStages = new Set<HeldInstalledRuntimeUpgrade>();
+/** Internal friend: a cloned/foreign/closed stage cannot supply physical proof.
+ * This is available only inside the owning upgrade transaction's real scope. */
+export function readHeldInstalledUpgradeTransaction(stage: HeldInstalledRuntimeUpgrade): InstalledUpgradeTransaction {
+  const binding = installedUpgradeStages.get(stage);
+  if (!binding || !binding.active()) mismatch('upgrade requires its genuine active prepared stage and credential exclusion');
+  return binding.prepared;
+}
+
+function upgradeDirectoryIdentity(directory: { info: BigIntStats }): InstalledUpgradeIdentityV1 {
+  return { deviceId: String(directory.info.dev), fileId: String(directory.info.ino), ownerUid: Number(directory.info.uid),
+    ownerGid: Number(directory.info.gid), mode: Number(directory.info.mode & 0o7777n) };
+}
+
+/** Preparation is inert: original selection/version remain authoritative. The
+ * original live keeper is authenticated before any death source is captured. */
+export async function stageInstalledRuntimeUpgrade(selected: HeldInstalledRuntime, packageRoot: string,
+  signal?: AbortSignal): Promise<HeldInstalledRuntimeUpgrade> {
+  if (!heldInstalledRuntimes.has(selected)) mismatch('upgrade needs the genuinely selected original installation');
+  signal?.throwIfAborted();
+  const anchor = await acquireInstalledAnchor(selected), anchorSource = heldInstalledAnchors.get(anchor)!;
+  const originalKeeper = anchorSource.readBirth();
+  const scope = new Scope(), sourceScope = new Scope();
+  try {
+    return await withHeldInstalledRuntime(selected, async original => {
+      signal?.throwIfAborted();
+      const stateRoot = original.stateRoot.canonicalPath, state = await scope.root(stateRoot), runtime = await scope.directory(state, 'runtime');
+      if (String(state.info.dev) !== original.stateRoot.deviceId || String(state.info.ino) !== original.stateRoot.fileId)
+        mismatch('upgrade StateRoot differs from the original selection');
+      const bundles = await scope.directory(runtime, 'bundles'), casRoot = await scope.directory(state, KERNEL_CAS_DIRECTORY);
+      if (bundles.info.dev !== runtime.info.dev) mismatch('upgrade requires its original bundle publication filesystem');
+      const oldVersion = await scope.directory(bundles, original.bundleDigest);
+      const oldSigned = await verifyPackage(scope, oldVersion, original.releaseKeys, original.bundleDigest, false, signal);
+      const oldActive = await scope.file(runtime, 'active.json', 0o600), oldActiveBytes = await readSmall(oldActive);
+      oldActive.digest = sha256Bytes(oldActiveBytes);
+      const oldSupervisor = oldSigned.bundle.entries.find(entry => entry.role === 'supervisor')!;
+      const oldBootstrap = await scope.file(runtime, 'bootstrap', 0o500, oldSupervisor.byteCount, oldSupervisor.digest);
+      const oldKeeperReady = await scope.file(runtime, 'keeper.ready', 0o600, 40, originalKeeper.locatorDigest);
+      if ([oldActive, oldBootstrap, oldKeeperReady].some(file => file.info.dev !== runtime.info.dev))
+        mismatch('upgrade requires its original runtime publication filesystem');
+      assertUpgradeObjectIdentity(oldKeeperReady, originalKeeper.readyIdentity); await verifyBytes(oldKeeperReady);
+      const originalFiles = [oldActive, oldBootstrap, oldKeeperReady, oldSigned.manifest, ...oldSigned.entries.values(), ...oldSigned.companionFiles];
+      await verifyBytes(oldBootstrap);
+      const packageDirectory = await sourceScope.root(packageRoot), signed = await verifyPackage(sourceScope, packageDirectory, original.releaseKeys, undefined, true, signal);
+      if (signed.bundleDigest === original.bundleDigest) mismatch('upgrade must select its exact distinct signed target');
+      if (signed.bundle.headlessSchemaRange.min > 3 || signed.bundle.headlessSchemaRange.max < 3)
+        mismatch('complete installed upgrade requires its signed schema3 client interface');
+      const schemaEntry = signed.bundle.entries.find(entry => entry.entryId === 'kernel_schema');
+      const conversionEntry = signed.bundle.entries.find(entry => entry.entryId === 'schema_conversion');
+      if (!schemaEntry || !conversionEntry || schemaEntry.role !== 'schema' || conversionEntry.role !== 'schema') mismatch('upgrade target omits full signed schema/conversion');
+      decodeSignedKernelSchema(checkCanonicalBytes(signed.roots.get(schemaEntry.digest)!));
+      decodeSchemaConversion(checkCanonicalBytes(signed.roots.get(conversionEntry.digest)!), original.bundle);
+      const expectedSchema = signedKernelSchemaProfile(), expectedConversion = schemaConversionProfile(original.bundle);
+      if (schemaEntry.digest !== canonicalSha256(expectedSchema) || conversionEntry.digest !== canonicalSha256(expectedConversion))
+        mismatch('upgrade target substituted its full signed schema sources');
+      const stage = await scope.directory(runtime, `.upgrade-${randomBytes(16).toString('hex')}`, true);
+      const version = await scope.directory(stage, 'package', true);
+      for (const entry of signed.bundle.entries) {
+        signal?.throwIfAborted();
+        await writeChunks(scope, version, entry.relativePath, chunks(signed.entries.get(entry.entryId)!, signal), entry.executable ? 0o500 : 0o400);
+      }
+      await writeChunks(scope, version, 'manifest.json', bytesSource(signed.manifestBytes), 0o400);
+      // Match the existing installed graph: companion bytes are durably
+      // rooted in CAS, never added as unsigned installed package paths.
+      const targetSupervisor = signed.bundle.entries.find(entry => entry.role === 'supervisor')!;
+      await writeChunks(scope, stage, 'bootstrap', chunks(signed.entries.get(targetSupervisor.entryId)!, signal), 0o500);
+      const staged = await verifyPackage(scope, version, original.releaseKeys, signed.bundleDigest, false, signal);
+      const newBootstrap = await scope.file(stage, 'bootstrap', 0o500, targetSupervisor.byteCount, targetSupervisor.digest);
+      await verifyBytes(newBootstrap);
+      // The active file is born here, before the receipt's inode binding. Its
+      // exact receipt-dependent bytes are filled and synced before SQL commit.
+      await scope.assertDirectory(stage);
+      const activeHandle = scope.own(await open(childPath(stage, 'active.json'), constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600));
+      const activeBirth = await activeHandle.stat({ bigint: true });
+      checkFile(activeBirth, 0o600, 0);
+      if (!sameFile(activeBirth, await lstat(childPath(stage, 'active.json'), { bigint: true }))) mismatch('upgrade active birth changed');
+      await activeHandle.sync();
+      const newActive: InstalledFile = { handle: activeHandle, info: activeBirth, parent: stage, name: 'active.json' };
+      const cas = new ContentAddressedStore(childPath(casRoot, '.')), seed: PublishedArtifact[] = [], casFiles: InstalledFile[] = [];
+      const roots = [...signed.roots];
+      for (let offset = 0; offset < roots.length; offset += 4) {
+        const group = roots.slice(offset, offset + 4);
+        for (const _member of group) { signal?.throwIfAborted(); await scope.assertDirectories(); }
+        const published = await publishInstalledCasRoots(cas, group);
+        for (let index = 0; index < group.length; index++) {
+          const [ref, bytes] = group[index]!;
+          if (published[index]!.ref !== ref || published[index]!.byteLength !== bytes.length) mismatch('upgrade CAS root changed');
+          await scope.assertDirectories(); const member = await scope.file(casRoot, ref, 0o400, bytes.length, ref);
+          await verifyBytes(member); casFiles.push(member);
+          seed.push({ ref, byteLength: bytes.length, mediaType: 'application/json', schemaKind: 'cliq-installed-upgrade-seed-v1' });
+        }
+      }
+      for (const [ref, image] of signed.streamedRoots) {
+        signal?.throwIfAborted(); await scope.assertDirectories();
+        const published = await cas.publishChunks(artifactChunks(image), Number(image.info.size));
+        if (published.ref !== ref || BigInt(published.byteLength) !== image.info.size) mismatch('upgrade CAS stream changed');
+        await scope.assertDirectories(); const member = await scope.file(casRoot, ref, 0o400, published.byteLength, ref);
+        await verifyBytes(member); casFiles.push(member);
+        seed.push({ ref, byteLength: published.byteLength, mediaType: 'application/octet-stream', schemaKind: 'cliq-guest-image-raw-ext4-v1' });
+      }
+      await checkPackageGraph(sourceScope, packageDirectory, signed.bundle, signed.modelAuthority);
+      for (const file of [signed.manifest, ...signed.entries.values(), ...signed.companionFiles]) { signal?.throwIfAborted(); await verifyBytes(file, signal); }
+      for (const file of casFiles) { signal?.throwIfAborted(); await verifyBytes(file, signal); }
+      await sourceScope.close(); await syncDirectories(scope); await original.revalidate(signal);
+      anchor.assertHeld(); anchor.close();
+      const artifacts = new ArtifactCatalog(cas, signal, original.releaseKeys).withRuntimeConversionSource(signed.bundleDigest);
+      const database = openReadOnlySqliteDriver(path.join(stateRoot, KERNEL_DATABASE_FILENAME));
+      let supervisorBirth: PlatformProcessIdentityV1, supervisorOwner: StateOwnerRecordV1;
+      try {
+        const owner = readLatestStateOwner(database);
+        if (!owner || owner.state !== 'active' || owner.runtimeBundleRef !== original.bundleDigest) mismatch('upgrade lost the original active owner source');
+        supervisorOwner = owner;
+        const history = await readRetainedStateOwnerHistory(database, artifacts, owner.ownerEpoch);
+        supervisorBirth = history.entries.at(-1)!.process;
+        if (database.prepare("SELECT 1 FROM runs WHERE status NOT IN ('succeeded','completed_unverified','failed','cancelled') LIMIT 1").get())
+          mismatch('upgrade refuses to stop an installation with nonterminal Runs');
+        database.readSnapshot(connection => history.assertUnchanged(connection));
+      } finally { database.close(); }
+      const nativeEntry = staged.bundle.entries.find(entry => entry.entryId === STATE_OWNER_NATIVE_ENTRY_ID)!;
+      const nativeFile = staged.entries.get(nativeEntry.entryId)!;
+      const native = await loadHeldStateOwnerImage(nativeFile.handle, staged.bundle);
+      const source: InstalledUpgradeSourceV1 = { kind: 'held_installed_stage', stageName: stage.name,
+        stageIdentity: upgradeDirectoryIdentity(stage), runtimeIdentity: upgradeDirectoryIdentity(runtime),
+        targetBundleIdentity: upgradeDirectoryIdentity(version), originalActiveIdentity: upgradeDirectoryIdentity(oldActive),
+        originalBootstrapIdentity: upgradeDirectoryIdentity(oldBootstrap), stagedActiveIdentity: upgradeDirectoryIdentity(newActive),
+        stagedBootstrapIdentity: upgradeDirectoryIdentity(newBootstrap),
+        sourceBundleDigest: original.bundleDigest, targetBundleDigest: staged.bundleDigest,
+        ...(signed.modelAuthority ? { targetModelAuthorityRef: signed.modelAuthority.closureRef } : {}),
+        originalActiveDigest: oldActive.digest, originalBootstrapDigest: oldSupervisor.digest, originalKeeper };
+      let closed = false, transactionActive = false, credential: UpgradeCredentialLifetime | undefined, selectionRef: string | undefined;
+      let running: Promise<unknown> | undefined, closePromise: Promise<void> | undefined, stopPromise: Promise<void> | undefined;
+      let activeStop: NativeCredentialInspection | undefined, stopCancellation: Promise<void> | undefined;
+      const assertAlive = () => { if (closed) mismatch('upgrade stage has closed'); signal?.throwIfAborted(); healthy(); };
+      const assertBirth = () => {
+        assertAlive(); scope.assertMetadata([staged.manifest, newBootstrap, ...staged.entries.values(), ...originalFiles, ...casFiles]);
+        if (upgradeDirectoryIdentity(stage).fileId !== source.stageIdentity.fileId) mismatch('upgrade stage birth changed');
+      };
+      const prepared: InstalledUpgradeTransaction = Object.freeze({ stateRoot, bundle: staged.bundle, releaseKeys: original.releaseKeys,
+        native, seed: Object.freeze(seed), source: immutableSnapshot(source), supervisorBirth: immutableSnapshot(supervisorBirth),
+        supervisorOwner: immutableSnapshot(supervisorOwner),
+        async assertCurrent() {
+          assertBirth(); await scope.assertDirectories();
+          await scope.verifyDiscard([staged.manifest, newBootstrap, ...staged.entries.values(), ...originalFiles, ...casFiles], signal);
+          await checkPackageGraph(scope, version, staged.bundle);
+          await checkPackageGraph(scope, oldVersion, oldSigned.bundle); assertBirth();
+        },
+        assertCommit() {
+          if (!transactionActive || !credential) mismatch('upgrade transaction lost its original credential exclusion');
+          assertBirth(); credential.assertHeld();
+          if (!selectionRef) mismatch('upgrade selection bytes are not durable');
+          scope.assertMetadata([newActive]);
+        },
+        assertOldProcessesDead() {
+          if (!transactionActive || !credential) mismatch('upgrade lacks its original process observer');
+          credential.assertHeld();
+          for (const process of [supervisorBirth, { ...originalKeeper, ownerUid: original.stateRoot.ownerUid }])
+            if (credential.observeProducerLifetime(process.pid, process.ownerUid, process.processStartToken) !== 'dead')
+              mismatch('upgrade requires genuine old Supervisor and keeper death');
+        },
+        publishSelection(receiptRef, receipt) {
+          const owner = installedUpgradeStages.get(held);
+          if (!owner || !owner.active()) mismatch('upgrade publication lost its original transaction owner');
+          return owner.publish(receiptRef, receipt);
+        },
+        async prepareSelection(receiptRef) {
+          assertArtifactRef(receiptRef); assertBirth();
+          if (selectionRef) { if (selectionRef !== receiptRef) mismatch('upgrade cannot select another receipt'); return; }
+          const bytes = canonicalJsonBytes({ schemaVersion: 1, bundleDigest: staged.bundleDigest,
+            ...(signed.modelAuthority ? { modelAuthorityRef: signed.modelAuthority.closureRef } : {}), upgradeReceiptRef: receiptRef });
+          if (newActive.info.size !== 0n || newActive.digest !== undefined) mismatch('upgrade selection must use its original empty birth');
+          const writer = scope.own(await open(childPath(stage, 'active.json'), constants.O_WRONLY | constants.O_NOFOLLOW));
+          try {
+            if (!sameFile(newActive.info, await writer.stat({ bigint: true }))) mismatch('upgrade active birth was replaced');
+            let offset = 0;
+            while (offset < bytes.length) { const result = await writer.write(bytes, offset, bytes.length - offset, offset);
+              if (!result.bytesWritten) mismatch('upgrade active write made no progress'); offset += result.bytesWritten; }
+            await writer.sync();
+          } finally { await scope.retire(writer); }
+          const info = await newActive.handle.stat({ bigint: true });
+          if (info.dev !== newActive.info.dev || info.ino !== newActive.info.ino || info.uid !== newActive.info.uid || info.gid !== newActive.info.gid ||
+              info.mode !== newActive.info.mode || info.nlink !== 1n || info.size !== BigInt(bytes.length)) mismatch('upgrade active identity changed during fill');
+          newActive.info = info; newActive.digest = sha256Bytes(bytes); await verifyBytes(newActive); await stage.handle.sync();
+          selectionRef = receiptRef;
+        },
+      });
+      const held: HeldInstalledRuntimeUpgrade = Object.freeze({ close() {
+        if (this !== held) return Promise.reject(new TypeError('invalid upgrade stage receiver'));
+        closed = true;
+        if (activeStop) stopCancellation ??= activeStop.cancelAndJoin();
+        return closePromise ??= (async () => { await joinResourceOperations([running?.then(() => undefined, error => {
+          if (error instanceof ResourceRetirementError) throw error; }), stopCancellation]); await scope.close(); })().catch(error => {
+            if (error instanceof ResourceRetirementError) { unretiredInstalledUpgradeStages.add(held); rememberRetirement(error); }
+            throw error;
+          });
+      } });
+      installedUpgradeStages.set(held, { prepared, active: () => transactionActive && !closed,
+        stop(): Promise<void> {
+          assertAlive();
+          return stopPromise ??= (async () => {
+            if (!transactionActive || !credential) mismatch('upgrade stop requires its original credential exclusion');
+            const { observeInstalledCredentialSupervisor } = await import('./installed-services.js');
+            const observed = await observeInstalledCredentialSupervisor(selected, false);
+            if (observed.stateRoot !== stateRoot || observed.uid !== Number(state.info.uid) ||
+                observed.supervisor.MainPID !== supervisorBirth.pid || observed.keeper.MainPID !== originalKeeper.pid)
+              mismatch('upgrade service observation is not the original Supervisor and keeper');
+            const platformEntry = staged.bundle.entries.find(entry => entry.entryId === 'linux_credential_platform');
+            const platformFile = platformEntry && staged.entries.get(platformEntry.entryId);
+            if (!platformEntry || !platformFile || platformEntry.role !== 'platform_helper' || !platformEntry.executable ||
+                platformEntry.relativePath !== 'native/linux-x64/linux-credential-platform.node') mismatch('upgrade lacks its fixed signed manager helper');
+            await verifyBytes(platformFile);
+            const module = new Module('cliq-installed-runtime-upgrade-manager'); process.dlopen(module, `/proc/self/fd/${platformFile.handle.fd}`);
+            const platform = module.exports as NativeCredentialPlatformBinding;
+            if (platform.interfaceVersion !== 2 || platform.installedUpgradeInterfaceVersion !== 1 || typeof platform.stopInstalledUpgradeUnit !== 'function')
+              mismatch('selected upgrade helper lacks its fixed stop interface');
+            await verifyBytes(platformFile); assertBirth();
+            for (const role of ['supervisor', 'keeper'] as const) {
+              const unit = observed[role], process = role === 'supervisor' ? supervisorBirth : originalKeeper;
+              if (unit.ActiveState !== 'active' || unit.SubState !== 'running' || unit.MainPID !== unit.ExecMainPID ||
+                  !/^[0-9a-f]{32}$/u.test(unit.InvocationID)) mismatch('upgrade stop has no actual original running unit');
+              const started = performance.now();
+              activeStop = platform.stopInstalledUpgradeUnit({ rootIdentityDigest: stateRootIdentityFromDescriptor(stateRoot, {
+                deviceId: String(state.info.dev), fileId: String(state.info.ino), ownerUid: Number(state.info.uid)
+              }).identityDigest, role, pid: process.pid, processStartToken: process.processStartToken, invocationId: unit.InvocationID });
+              if (typeof activeStop.cancelAndJoin !== 'function') throw new ResourceRetirementError('upgrade stop has no original native cancellation/join owner', undefined);
+              const result = decodeInstalledUpgradeStopObservation(await activeStop); activeStop = undefined;
+              if (canonicalSha256(result.bus) !== canonicalSha256(observed.bus) || canonicalSha256(result.manager) !== canonicalSha256(observed.manager) ||
+                  result.unit?.Id !== unit.Id || result.unit.ActiveState !== 'inactive' || result.unit.SubState !== 'dead' ||
+                  result.unit.MainPID !== 0 || result.unit.ControlPID !== 0) mismatch('upgrade stop lost its original manager or fixed unit');
+              while (credential.observeProducerLifetime(process.pid, observed.uid, process.processStartToken) !== 'dead') {
+                if (performance.now() - started >= 2000) mismatch('upgrade original process did not die within the fixed two-second stop limit');
+                await upgradeDelay(5); assertAlive();
+              }
+              if (performance.now() - started >= 2000) mismatch('upgrade actual stop/join exceeded the fixed two-second limit');
+            }
+          })();
+        },
+        run<T>(operation: () => Promise<T>): Promise<T> {
+          assertAlive(); if (running) return Promise.reject(new TypeError('upgrade stage already has its sole transaction'));
+          const pending = withHeldCredentialNativeScope(native, { image: nativeFile.handle, root: state.handle,
+            rootIdentity: state.info, stateRoot }, async originalCredential => {
+              credential = originalCredential; transactionActive = true;
+              try { return await operation(); }
+              finally { transactionActive = false; credential = undefined; }
+            });
+          running = pending; return pending;
+        },
+        async publish(receiptRef, receipt) {
+          assertBirth();
+          if (selectionRef !== receiptRef || receipt.installation.kind !== 'held_installed_stage' ||
+              canonicalSha256(receipt.installation) !== canonicalSha256(source)) mismatch('upgrade publication lacks its registered original stage');
+          await prepared.assertCurrent(); await verifyBytes(newActive);
+          await verifyBytes(oldActive); await verifyBytes(oldBootstrap);
+          await absent(bundles, staged.bundleDigest);
+          await rename(childPath(stage, version.name), childPath(bundles, staged.bundleDigest));
+          version.parent = bundles; version.name = staged.bundleDigest; await bundles.handle.sync(); await scope.assertDirectories();
+          await scope.retire(oldBootstrap.handle);
+          await rename(childPath(stage, newBootstrap.name), childPath(runtime, 'bootstrap'));
+          newBootstrap.parent = runtime; newBootstrap.name = 'bootstrap';
+          const bootstrapRenamed = await newBootstrap.handle.stat({ bigint: true });
+          if (!['dev', 'ino', 'size', 'uid', 'gid', 'mode', 'nlink', 'mtimeNs'].every(key =>
+              bootstrapRenamed[key as keyof BigIntStats] === newBootstrap.info[key as keyof BigIntStats])) mismatch('upgrade bootstrap changed during authorized rename');
+          newBootstrap.info = bootstrapRenamed;
+          await verifyBytes(newBootstrap); await runtime.handle.sync();
+          await scope.retire(oldActive.handle);
+          await rename(childPath(stage, newActive.name), childPath(runtime, 'active.json'));
+          newActive.parent = runtime; newActive.name = 'active.json';
+          const activeRenamed = await newActive.handle.stat({ bigint: true });
+          if (!['dev', 'ino', 'size', 'uid', 'gid', 'mode', 'nlink', 'mtimeNs'].every(key =>
+              activeRenamed[key as keyof BigIntStats] === newActive.info[key as keyof BigIntStats])) mismatch('upgrade active changed during authorized rename');
+          newActive.info = activeRenamed;
+          await verifyBytes(newActive); await runtime.handle.sync(); await scope.assertDirectories();
+          // Every issued copy/hash/fsync has joined. The callback still
+          // retains the native credential source descriptors until that
+          // original native scope closes; stage.close then joins all FDs.
+        },
+      });
+      return held;
+    }, signal);
+  } catch (error) {
+    await joinResourceOperations([Promise.reject(error), sourceScope.close(), scope.close(), Promise.resolve().then(() => anchor.close())]);
+    throw error;
+  }
+}
+
+
+/** Sole installed orchestration. No caller chooses a manager/unit/PID, supplies
+ * retirement facts, or obtains productive authority from a staged package. */
+export async function completeInstalledRuntimeUpgrade(stage: HeldInstalledRuntimeUpgrade): Promise<RuntimeUpgradeReceiptV1> {
+  const binding = installedUpgradeStages.get(stage);
+  if (!binding) mismatch('installed upgrade requires its original held preparation');
+  try {
+    return await binding.run(async () => {
+      await binding.stop();
+      const { upgradeRetiredRuntime } = await import('./runtime-upgrade.js');
+      const prepared = binding.prepared;
+      const receipt = await upgradeRetiredRuntime({ stateRoot: prepared.stateRoot,
+        target: { bundle: prepared.bundle, releaseKeys: prepared.releaseKeys }, installation: stage });
+      return receipt;
+    });
+  } finally { await stage.close(); }
+}
+
+
+function assertUpgradeObjectIdentity(object: { info: BigIntStats }, expected: InstalledUpgradeIdentityV1): void {
+  if (canonicalSha256(upgradeDirectoryIdentity(object)) !== canonicalSha256(expected)) mismatch('registered upgrade object was absent or replaced');
+}
+
+/** Full retained SQL/CAS/signature graph, without acquiring an owner or creating
+ * a missing database. A matching CAS-only receipt is never selected authority. */
+async function readRegisteredInstalledUpgrade(stateRoot: string, releaseKeys: readonly ReleaseTrustKey[], receiptRef: string): Promise<RuntimeUpgradeReceiptV1> {
+  assertArtifactRef(receiptRef);
+  const driver = openReadOnlySqliteDriver(path.join(stateRoot, KERNEL_DATABASE_FILENAME));
+  try {
+    assertKernelSchemaVersion(driver, 8);
+    const artifacts = new ArtifactCatalog(new ContentAddressedStore(path.join(stateRoot, KERNEL_CAS_DIRECTORY)), undefined, releaseKeys);
+    const latest = readLatestStateOwner(driver);
+    if (!latest) mismatch('registered upgrade has no actual owner history');
+    const history = await readRetainedStateOwnerHistory(driver, artifacts, latest.ownerEpoch);
+    const boundary = history.entries.find(entry => entry.acquisition.kind === 'runtime_upgrade');
+    if (!boundary || boundary.acquisition.kind !== 'runtime_upgrade' || boundary.acquisition.upgradeReceiptRef !== receiptRef)
+      mismatch('selection receipt was not registered by the sole upgrade transaction');
+    const receipt = decodeRuntimeUpgradeReceipt(await artifacts.readCanonical(receiptRef));
+    if (canonicalSha256(receipt) !== receiptRef || receipt.receiptDigest !== boundary.acquisition.upgradeReceiptDigest ||
+        receipt.installation.kind !== 'held_installed_stage') mismatch('registered installed upgrade receipt differs');
+    driver.readSnapshot(connection => history.assertUnchanged(connection));
+    return receipt;
+  } finally { driver.close(); }
+}
+
+async function upgradePathInfo(parent: Directory, name: string): Promise<BigIntStats | undefined> {
+  await parent.handle.stat({ bigint: true });
+  try { return await lstat(childPath(parent, name), { bigint: true }); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
+}
+function upgradeIdentityMatches(info: BigIntStats | undefined, expected: InstalledUpgradeIdentityV1): boolean {
+  return info !== undefined && canonicalSha256(upgradeDirectoryIdentity({ info })) === canonicalSha256(expected);
+}
+
+/** Same-decision recovery only. Missing/replaced births or a live original
+ * holder refuse; no package/CAS candidate can allocate another upgrade. */
+export async function recoverInstalledRuntimeUpgrade(stateRoot: string, receiptRef: string,
+  trustedReleaseKeys: readonly ReleaseTrustKey[], signal?: AbortSignal): Promise<RuntimeUpgradeReceiptV1> {
+  signal?.throwIfAborted();
+  const releaseKeys = immutableSnapshot(trustedReleaseKeys);
+  const receipt = await readRegisteredInstalledUpgrade(stateRoot, releaseKeys, receiptRef);
+  if (receipt.installation.kind !== 'held_installed_stage') mismatch('recovery requires its original installed stage');
+  const registered = receipt.installation, scope = new Scope();
+  let held: HeldInstalledRuntimeUpgrade | undefined;
+  try {
+    const state = await scope.root(stateRoot), runtime = await scope.directory(state, 'runtime'), bundles = await scope.directory(runtime, 'bundles');
+    assertUpgradeObjectIdentity(runtime, registered.runtimeIdentity);
+    const stage = await scope.directory(runtime, registered.stageName); assertUpgradeObjectIdentity(stage, registered.stageIdentity);
+    const localBundle = await upgradePathInfo(stage, 'package'), publishedBundle = await upgradePathInfo(bundles, registered.targetBundleDigest);
+    if (localBundle && publishedBundle || !localBundle && !publishedBundle ||
+        !upgradeIdentityMatches(localBundle ?? publishedBundle, registered.targetBundleIdentity)) mismatch('registered upgrade bundle birth is missing or replaced');
+    const version = localBundle ? await scope.directory(stage, 'package') : await scope.directory(bundles, registered.targetBundleDigest);
+    const signed = await verifyPackage(scope, version, releaseKeys, registered.targetBundleDigest, false, signal);
+    const originalVersion = await scope.directory(bundles, registered.sourceBundleDigest);
+    const original = await verifyPackage(scope, originalVersion, releaseKeys, registered.sourceBundleDigest, false, signal);
+    const casRoot = await scope.directory(state, KERNEL_CAS_DIRECTORY), casFiles: InstalledFile[] = [];
+    for (const [ref, bytes] of signed.roots) casFiles.push(await scope.file(casRoot, ref, 0o400, bytes.length, ref));
+    for (const [ref, image] of signed.streamedRoots) casFiles.push(await scope.file(casRoot, ref, 0o400, Number(image.info.size), ref));
+    if (registered.targetModelAuthorityRef) casFiles.push(...await readInstalledCompanionFromCas(scope, casRoot, signed, registered.targetModelAuthorityRef, releaseKeys));
+    for (const file of casFiles) await verifyBytes(file, signal);
+    const targetSupervisor = signed.bundle.entries.find(entry => entry.role === 'supervisor')!;
+    const sourceSupervisor = original.bundle.entries.find(entry => entry.role === 'supervisor')!;
+    const locate = async (name: 'bootstrap' | 'active.json', oldIdentity: InstalledUpgradeIdentityV1,
+      targetIdentity: InstalledUpgradeIdentityV1, oldDigest: string, newDigest: string, oldSize?: number, newSize?: number) => {
+      const source = await upgradePathInfo(stage, name), destination = await upgradePathInfo(runtime, name);
+      if (!destination || source && !upgradeIdentityMatches(source, targetIdentity)) mismatch('registered upgrade file birth is missing or replaced');
+      if (upgradeIdentityMatches(destination, targetIdentity)) {
+        if (source) mismatch('registered upgrade target has duplicated births');
+        const file = await scope.file(runtime, name, name === 'bootstrap' ? 0o500 : 0o600, newSize, newDigest);
+        await verifyBytes(file); return { target: file, published: true, old: undefined as InstalledFile | undefined };
+      }
+      if (!source || !upgradeIdentityMatches(destination, oldIdentity)) mismatch('registered upgrade original destination was replaced');
+      const before = await scope.file(runtime, name, name === 'bootstrap' ? 0o500 : 0o600, oldSize, oldDigest);
+      const file = await scope.file(stage, name, name === 'bootstrap' ? 0o500 : 0o600, newSize, newDigest);
+      await verifyBytes(before); await verifyBytes(file); return { target: file, published: false, old: before };
+    };
+    const activeBytes = canonicalJsonBytes({ schemaVersion: 1, bundleDigest: receipt.targetRuntimeBundleRef,
+      ...(registered.targetModelAuthorityRef ? { modelAuthorityRef: registered.targetModelAuthorityRef } : {}), upgradeReceiptRef: receiptRef });
+    const bootstrap = await locate('bootstrap', registered.originalBootstrapIdentity, registered.stagedBootstrapIdentity,
+      registered.originalBootstrapDigest, targetSupervisor.digest, sourceSupervisor.byteCount, targetSupervisor.byteCount);
+    const active = await locate('active.json', registered.originalActiveIdentity, registered.stagedActiveIdentity,
+      registered.originalActiveDigest, sha256Bytes(activeBytes), undefined, activeBytes.length);
+    if (active.published && (localBundle || !bootstrap.published)) mismatch('upgrade selection precedes its registered bundle/bootstrap');
+    if (active.published) {
+      if ((await readdir(childPath(stage, '.'))).length !== 0) mismatch('completed upgrade stage has unregistered objects');
+      await scope.close(); return receipt; // Strict read-only idempotence; no owner or Stop is created.
+    }
+    const keeperReady = await scope.file(runtime, 'keeper.ready', 0o600, 40, registered.originalKeeper.locatorDigest);
+    assertUpgradeObjectIdentity(keeperReady, registered.originalKeeper.readyIdentity); await verifyBytes(keeperReady);
+    const database = openReadOnlySqliteDriver(path.join(stateRoot, KERNEL_DATABASE_FILENAME));
+    let sourceProcess: PlatformProcessIdentityV1, stageProcess: PlatformProcessIdentityV1, supervisorOwner: StateOwnerRecordV1;
+    try {
+      const sourceOwner = readLatestStateOwner(database);
+      if (!sourceOwner) mismatch('upgrade recovery has no original owner chain');
+      const artifacts = new ArtifactCatalog(new ContentAddressedStore(path.join(stateRoot, KERNEL_CAS_DIRECTORY)), undefined, releaseKeys);
+      const history = await readRetainedStateOwnerHistory(database, artifacts, sourceOwner.ownerEpoch);
+      sourceProcess = history.entries[receipt.sourceOwnerEpoch - 1]!.process;
+      supervisorOwner = history.entries[receipt.sourceOwnerEpoch - 1]!.owner;
+      stageProcess = history.entries[receipt.targetOwner.ownerEpoch - 1]!.process;
+      database.readSnapshot(connection => history.assertUnchanged(connection));
+    } finally { database.close(); }
+    const nativeFile = signed.entries.get(STATE_OWNER_NATIVE_ENTRY_ID);
+    if (!nativeFile) mismatch('registered target lost its exact native helper');
+    const native = await loadHeldStateOwnerImage(nativeFile.handle, signed.bundle);
+    const image = await native.observeCurrentProcess();
+    if (image.executableImageDigest !== targetSupervisor.digest) mismatch('upgrade recovery must run its actual signed target image');
+    let credential: UpgradeCredentialLifetime | undefined, running: Promise<unknown> | undefined, closePromise: Promise<void> | undefined,
+      activeBorrow = false, closed = false;
+    const files = [signed.manifest, ...signed.entries.values(), ...signed.companionFiles, original.manifest, ...original.entries.values(),
+      bootstrap.target, active.target, keeperReady, ...casFiles, ...(bootstrap.old ? [bootstrap.old] : []), ...(active.old ? [active.old] : [])];
+    const assertSource = () => { if (closed) mismatch('registered upgrade recovery scope has closed'); signal?.throwIfAborted(); scope.assertMetadata(files); };
+    const assertDeath = () => {
+      if (!activeBorrow || !credential) mismatch('upgrade recovery lost its original credential exclusion');
+      credential.assertHeld();
+      for (const source of [sourceProcess, stageProcess, { ...registered.originalKeeper, ownerUid: Number(state.info.uid) }])
+        if (credential.observeProducerLifetime(source.pid, source.ownerUid, source.processStartToken) !== 'dead')
+          mismatch('registered upgrade original holder or keeper is still alive');
+    };
+    const prepared: InstalledUpgradeTransaction = Object.freeze({ stateRoot, bundle: signed.bundle, releaseKeys, native,
+      seed: [], source: registered, supervisorBirth: sourceProcess, supervisorOwner,
+      async assertCurrent() { assertSource(); await scope.assertDirectories(); await scope.verifyDiscard(files, signal);
+        await checkPackageGraph(scope, version, signed.bundle); await checkPackageGraph(scope, originalVersion, original.bundle); assertSource(); },
+      assertCommit() { assertSource(); assertDeath(); }, assertOldProcessesDead: assertDeath,
+      prepareSelection(ref) { if (ref !== receiptRef) return Promise.reject(new TypeError('recovery cannot prepare another decision')); return Promise.resolve(); },
+      publishSelection(ref, originalReceipt) {
+        if (ref !== receiptRef || canonicalSha256(originalReceipt) !== canonicalSha256(receipt)) mismatch('recovery cannot select another upgrade');
+        return installedUpgradeStages.get(held!)!.publish(ref, originalReceipt);
+      },
+    });
+    held = Object.freeze({ close() { if (this !== held) return Promise.reject(new TypeError('invalid recovered upgrade receiver'));
+      closed = true; return closePromise ??= (async () => {
+        await running?.then(() => undefined, error => { if (error instanceof ResourceRetirementError) throw error; }); await scope.close();
+      })().catch(error => { if (error instanceof ResourceRetirementError) { unretiredInstalledUpgradeStages.add(held!); rememberRetirement(error); }
+        throw error; }); } });
+    installedUpgradeStages.set(held, { prepared, active: () => activeBorrow && !closed,
+      stop: async () => { assertDeath(); },
+      run<T>(operation: () => Promise<T>): Promise<T> {
+        if (running || closed) return Promise.reject(new TypeError('registered recovery owns one original completion'));
+        const pending = withHeldCredentialNativeScope(native, { image: nativeFile.handle, root: state.handle, rootIdentity: state.info, stateRoot }, async originalScope => {
+          credential = originalScope; activeBorrow = true;
+          try { assertDeath(); return await operation(); } finally { activeBorrow = false; credential = undefined; }
+        }); running = pending; return pending;
+      },
+      async publish(ref, originalReceipt) {
+        if (ref !== receiptRef || canonicalSha256(originalReceipt) !== canonicalSha256(receipt)) mismatch('registered recovery decision changed');
+        await prepared.assertCurrent(); assertDeath();
+        if (localBundle) {
+          await absent(bundles, signed.bundleDigest);
+          await rename(childPath(stage, version.name), childPath(bundles, signed.bundleDigest));
+          version.parent = bundles; version.name = signed.bundleDigest; await bundles.handle.sync();
+        }
+        const publish = async (part: typeof bootstrap, name: 'bootstrap' | 'active.json') => {
+          if (part.published) return;
+          await scope.assertDirectories(); await verifyBytes(part.target); if (part.old) { await verifyBytes(part.old); await scope.retire(part.old.handle); }
+          const before = part.target.info;
+          await rename(childPath(stage, name), childPath(runtime, name)); part.target.parent = runtime; part.target.name = name;
+          const current = await part.target.handle.stat({ bigint: true });
+          if (!['dev', 'ino', 'size', 'uid', 'gid', 'mode', 'nlink', 'mtimeNs'].every(key => before[key as keyof BigIntStats] === current[key as keyof BigIntStats]))
+            mismatch('registered recovery object changed during its authorized rename');
+          part.target.info = current; await verifyBytes(part.target); await runtime.handle.sync();
+        };
+        await publish(bootstrap, 'bootstrap'); await publish(active, 'active.json'); await scope.assertDirectories();
+      },
+    });
+    return await completeInstalledRuntimeUpgrade(held);
+  } catch (error) {
+    if (error instanceof ResourceRetirementError && held) {
+      unretiredInstalledUpgradeStages.add(held); rememberRetirement(error); throw error;
+    }
+    await joinResourceOperations([Promise.reject(error), scope.close()]); throw error;
+  }
+}
+
+
+/** Data-only match against the already verified expected signed bundle. A
+ * HELLO summary is not a signature, held installation or retirement proof. */
+export function assertInstalledUpgradeHelloBundle(summary: SupervisorHelloV1['activeRuntimeBundle'], bundle: RuntimeBundleManifest): void {
+  assertControlWireJson(summary); assertControlWireJson(bundle);
+  controlWireRecord(summary, ['schemaVersion', 'runtimeBundleRef', 'bundleDigest', 'bundleVersion']);
+  const completeRef = canonicalSha256(bundle);
+  if (summary.schemaVersion !== 1 || summary.runtimeBundleRef !== completeRef || summary.bundleDigest !== completeRef ||
+      summary.bundleVersion !== bundle.bundleVersion)
+    mismatch('upgrade HELLO differs from its exact expected signed runtime');
+}
+
+/** One production administrative workflow under the same compiled roots. It
+ * never accepts a trust root, unit, process locator or recovery fact from argv.
+ * Productive execution starts only through the existing installed services. */
+export async function upgradeInstalledRuntime(runtime: InstalledRuntime, stateRoot: string, packageRoot: string,
+  signal?: AbortSignal): Promise<RuntimeUpgradeReceiptV1> {
+  const releaseKeys = installedRuntimeTrust.get(runtime);
+  if (!releaseKeys) mismatch('upgrade requires the original trusted runtime composition');
+  if (normalizeAbsolutePath(stateRoot) !== stateRoot || normalizeAbsolutePath(packageRoot) !== packageRoot)
+    mismatch('upgrade requires canonical installation and package locators');
+  signal?.throwIfAborted();
+  let receiptRef: string | undefined;
+  const database = openReadOnlySqliteDriver(path.join(stateRoot, KERNEL_DATABASE_FILENAME));
+  try {
+    const version = database.prepare('SELECT user_version FROM pragma_user_version').get<{ user_version: bigint }>()!.user_version;
+    if (version === 8n) {
+      const artifacts = new ArtifactCatalog(new ContentAddressedStore(path.join(stateRoot, KERNEL_CAS_DIRECTORY)), signal, releaseKeys);
+      const latest = readLatestStateOwner(database);
+      if (!latest) mismatch('schema8 upgrade recovery has no original owner');
+      const history = await readRetainedStateOwnerHistory(database, artifacts, latest.ownerEpoch);
+      const boundary = history.entries.find(entry => entry.acquisition.kind === 'runtime_upgrade');
+      if (!boundary || boundary.acquisition.kind !== 'runtime_upgrade') mismatch('upgrade cannot convert an unrelated schema8 birth');
+      database.readSnapshot(connection => history.assertUnchanged(connection)); receiptRef = boundary.acquisition.upgradeReceiptRef;
+    } else if (version !== 7n) mismatch('only the exact signed7-to8 installed upgrade is implemented');
+  } finally { database.close(); }
+  let receipt: RuntimeUpgradeReceiptV1;
+  if (receiptRef) receipt = await recoverInstalledRuntimeUpgrade(stateRoot, receiptRef, releaseKeys, signal);
+  else {
+    const original = await runtime.openSelected(stateRoot);
+    try {
+      // A prior precommit attempt may have stopped these original services.
+      // Only schema7 reaches this branch: start the same verified fixed units
+      // and authenticate real old-runtime READY before capturing a new stage.
+      const { observeInstalledCredentialSupervisor } = await import('./installed-services.js');
+      await observeInstalledCredentialSupervisor(original, true);
+      const { openInstalledControlSession } = await import('../control/session.js');
+      const originalSession = await openInstalledControlSession(original);
+      try {
+        assertInstalledUpgradeHelloBundle(originalSession.hello.activeRuntimeBundle, original.bundle);
+      } finally { await originalSession.close(); }
+      signal?.throwIfAborted();
+      const stage = await stageInstalledRuntimeUpgrade(original, packageRoot, signal);
+      const abort = () => { void stage.close().catch(rememberRetirement); };
+      signal?.addEventListener('abort', abort, { once: true });
+      try { signal?.throwIfAborted(); receipt = await completeInstalledRuntimeUpgrade(stage); }
+      finally { signal?.removeEventListener('abort', abort); await stage.close(); }
+    } finally { await original.close(); }
+  }
+  signal?.throwIfAborted();
+  const selected = await runtime.openSelected(stateRoot);
+  try {
+    if (selected.bundleDigest !== receipt.targetRuntimeBundleRef || selected.bundle.manifestDigest !== receipt.targetRuntimeBundleManifestDigest)
+      mismatch('upgrade restart selected another runtime');
+    const { observeInstalledCredentialSupervisor } = await import('./installed-services.js');
+    await observeInstalledCredentialSupervisor(selected, true);
+    const { openInstalledControlSession } = await import('../control/session.js');
+    const session = await openInstalledControlSession(selected);
+    try {
+      assertInstalledUpgradeHelloBundle(session.hello.activeRuntimeBundle, selected.bundle);
+    } finally { await session.close(); }
+  } finally { await selected.close(); }
+  return receipt;
 }

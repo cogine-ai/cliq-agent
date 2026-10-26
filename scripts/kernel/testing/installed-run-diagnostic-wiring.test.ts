@@ -1,3 +1,6 @@
+import './installed-resource-kernel.test.js';
+import './installed-resource-wire.test.js';
+import './installed-resource-builder.test.js';
 // Keep the fixed installer data regressions in the original CI diagnostics suite.
 import './installed-install-diagnostics.test.js';
 // Source wiring and inert CAS resource lifetimes only. No StateOwner, Run,

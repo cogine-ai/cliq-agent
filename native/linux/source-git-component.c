@@ -143,6 +143,37 @@ static void preparation_stream_component(const struct cliq_worker_packet *reques
         check(descriptor_count() == baseline, "all failed/successful input scopes close every actual descriptor");
     }
 }
+/* Ordinary bounded raw datasets exercise the exact historical parser;
+ * these changed copies are never written back as original birth evidence. */
+static void history_wire_versions(const unsigned char *snapshot, size_t length, const struct cliq_source_birth *header) {
+    const size_t prefix = sizeof(struct cliq_source_birth) + sizeof(struct cliq_source_controller_birth);
+    check(length > prefix && (length - prefix) % sizeof(struct cliq_source_birth_record) == 0,
+        "original complete data chain before wire-version regressions");
+    unsigned char *changed = malloc(length); check(changed != NULL, "bounded historical data copy");
+    unsigned char original_digest[32], unchanged_digest[32]; struct sha256_context hash;
+    sha256_init(&hash); sha256_update(&hash, snapshot, length); sha256_final(&hash, original_digest);
+    for (unsigned int variant = 0; variant < 5; variant++) {
+        memcpy(changed, snapshot, length);
+        struct cliq_source_controller_birth creator; memcpy(&creator, changed + sizeof(*header), sizeof(creator));
+        unsigned char previous[32]; memcpy(previous, creator.digest, sizeof(previous));
+        for (size_t offset = prefix, index = 0; offset < length; offset += sizeof(struct cliq_source_birth_record), index++) {
+            struct cliq_source_birth_record record; memcpy(&record, changed + offset, sizeof(record));
+            record.packet.version = variant == 0 ? 6 : variant == 1 ? 7 : variant == 2 ? (index == 0 ? 6 : 7) : variant == 3 ? 5 : 7;
+            if (variant == 4 && index == 0) record.packet.command = CLIQ_ACK_BUILTIN_RESULT;
+            memcpy(record.previous, previous, sizeof(previous));
+            sha256_init(&hash); sha256_update(&hash, (const unsigned char *)&record, offsetof(struct cliq_source_birth_record, digest));
+            sha256_final(&hash, record.digest); memcpy(previous, record.digest, sizeof(previous)); memcpy(changed + offset, &record, sizeof(record));
+        }
+        struct cliq_source_history decoded;
+        bool accepted = cliq_source_history_decode(changed, length, header, &decoded);
+        check(accepted == (variant < 2), "original wire6 and wire7 data pass; fully rehashed mixed/unknown/builtin chains refuse");
+        if (accepted) check(decoded.first.version == (variant == 0 ? 6U : 7U) && decoded.last.version == decoded.first.version && decoded.kind == 12,
+            "accepted history preserves original raw version and complete original closure");
+        sha256_init(&hash); sha256_update(&hash, snapshot, length); sha256_final(&hash, unchanged_digest);
+        check(memcmp(original_digest, unchanged_digest, sizeof(original_digest)) == 0, "historical source bytes remain unchanged for every parse");
+    }
+    free(changed);
+}
 int main(void) {
     struct cliq_worker_packet request = request_data(), changed = request;
     check(cliq_source_request_valid(&request) && strcmp(request.nonce, request.activation_nonce) != 0, "distinct staging and launch nonces");
@@ -181,7 +212,10 @@ int main(void) {
     struct cliq_worker_packet small = request; small.max_generation_bytes = root_budget;
     check(!cliq_source_storage_reserve(&config, &small, &root_budget, &reserve), "no capacity expansion on insufficient original budget");
 
-    char locator[] = "/output/source-git-component.XXXXXX";
+#ifndef CLIQ_SOURCE_COMPONENT_DIRECTORY
+#define CLIQ_SOURCE_COMPONENT_DIRECTORY "/output"
+#endif
+    char locator[] = CLIQ_SOURCE_COMPONENT_DIRECTORY "/source-git-component.XXXXXX";
     check(mkdtemp(locator) != NULL, "owned component root");
     int root = open(locator, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW); check(root >= 0, "owned component root held");
     /* A real bounded file exercises the production history decoder. These
@@ -269,6 +303,7 @@ int main(void) {
     printf("source lifecycle data=%s; bytes=%zu\n", dataset, snapshot_bytes);
     printf("source birth identity=%llu:%llu\n", (unsigned long long)original_birth.st_dev, (unsigned long long)original_birth.st_ino);
 #endif
+    history_wire_versions(snapshot, snapshot_bytes, &header);
     check(!cliq_source_history_decode(snapshot, snapshot_bytes - 1, &header, &decoded), "truncated snapshot never becomes original lifecycle");
     snapshot[offsetof(struct cliq_source_birth, supervisor_pid)] ^= 1;
     check(!cliq_source_history_decode(snapshot, snapshot_bytes, &header, &decoded), "changed original Supervisor bytes rejected");
@@ -306,6 +341,7 @@ int main(void) {
         source_close_fd(&ready_dataset_fd), "complete inert READY lifecycle fixture publication and join");
     printf("source ready lifecycle data=%s; bytes=%zu\n", ready_dataset, snapshot_bytes);
 #endif
+    history_wire_versions(snapshot, snapshot_bytes, &header);
     free(snapshot);
     check(source_close_fd(&birth), "ordinary history file close"); unlink_fixture(root, "data-birth", false);
     int git = directory_at(root, "git"), input = directory_at(root, "input"), objects = directory_at(git, "objects");

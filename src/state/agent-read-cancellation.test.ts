@@ -20,6 +20,32 @@ function between(text: string, start: string, end: string): string {
   return text.slice(first, last);
 }
 
+test('installed waits retain reconciliation but let an actually registered Stop reach the original input or approval drain', () => {
+  // Evaluate only the actual pure branch condition. No fixture can turn on
+  // supportsInstalledRuns, construct a launcher or mint a native authority.
+  const text = source('./store.ts'), file = ts.createSourceFile('store.ts', text, ts.ScriptTarget.Latest, true);
+  let method: ts.MethodDeclaration | undefined;
+  const visit = (node: ts.Node) => {
+    if (ts.isMethodDeclaration(node) && node.name.getText(file) === 'driveInstalledRun') method = node;
+    ts.forEachChild(node, visit);
+  }; visit(file); assert(method?.body);
+  const guards: ts.IfStatement[] = [];
+  const choose = (node: ts.Node) => {
+    if (ts.isIfStatement(node) && ts.isReturnStatement(node.thenStatement) &&
+        /^current\.status === 'waiting'/u.test(node.expression.getText(file))) guards.push(node);
+    ts.forEachChild(node, choose);
+  }; choose(method.body); assert.equal(guards.length, 1);
+  const holds = new Function('current', `return (${guards[0]!.expression.getText(file)});`) as (current: unknown) => boolean;
+  for (const waitingReason of ['input', 'approval']) {
+    assert.equal(holds({ status: 'waiting', waitingReason }), true);
+    assert.equal(holds({ status: 'waiting', waitingReason, stopIntentRef: 'original-registered-ref' }), false);
+  }
+  assert.equal(holds({ status: 'waiting', waitingReason: 'reconciliation', stopIntentRef: 'original-registered-ref' }), true);
+  assert.equal(holds({ status: 'queued', stopIntentRef: 'original-registered-ref' }), false);
+  assert.match(method.body.getText(file), /if \(settled\.run\.status !== 'waiting'\) continue;\s*return;/u,
+    'a genuine still-pending child wait must return to maintenance without attempting terminal quiescence');
+});
+
 test('publication admission scopes its three final reads but preserves original joined publications and owner binding', () => {
   const body = between(source('./publication-invocation.ts'), 'export async function preparePublicationInvocation(', 'type MaintenanceInput =');
   assert.match(body, /prepareValidatedInvocation\(driver, reads, owner,/u,
@@ -443,12 +469,13 @@ test('the installed driver propagates its retained read lifetime through materia
   const store = source('./store.ts'), material = source('./installed-run.ts');
   const drive = between(store, 'private async driveInstalledRun(', 'async cancelInstalledRun(');
   assert.match(drive, /const readSignal = this\.installedAgents\.get\(runId\)\?\.readAbort\?\.signal/u);
-  assert.match(drive, /loadInstalledRunMaterial\(\{ selected: this\.installedRuntime!, artifacts: reads, assemblyRef: spec\.assemblyRef, signal: readSignal \}\)/u);
+  assert.match(drive, /loadInstalledRunMaterial\(\{ selected: this\.installedRuntime!, artifacts: reads, assemblyRef: spec\.assemblyRef,\s*driver: this\.driver, runId, signal: readSignal \}\)/u);
   assert.match(drive, /agent\.readModelAttempt\(readSignal\)/u);
   assert.match(drive, /agent\.prepareModel\(\{ expectedRunRevision: current\.revision, leaseEpoch: current\.leaseEpoch \}, readSignal\)/u);
   const load = between(material, 'export async function loadInstalledRunMaterial(', 'export async function assembleInstalledRun(');
   assert.match(load, /const artifacts = input\.signal \? input\.artifacts\.withReadSignal\(input\.signal\) : input\.artifacts/u);
-  assert.match(load, /materialFor\(installed, artifacts, assembly, input\.signal\)/u);
+  assert.match(load, /materialFor\(installed, artifacts, assembly, input\.signal, childOrigin\)/u);
+  assert.match(load, /readChildAdmission\(input\.driver!, artifacts, run\.id, \{ signal: input\.signal \}\)/u);
 });
 
 test('preparation and recovery bind full CAS reads to their actual task while received checkpoints keep their original catalog', () => {

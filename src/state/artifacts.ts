@@ -1,3 +1,5 @@
+import { immutableSnapshot } from '../model/immutable.js';
+import type { ReleaseTrustKey } from '../policy/runtime-authority.js';
 import { canonicalJsonBytes } from '../kernel/canonical.js';
 import { assertArtifactRef, sha256Bytes } from '../kernel/identity.js';
 import type { ArtifactRef } from '../kernel/types.js';
@@ -15,13 +17,37 @@ export type PublishedArtifact = {
 type CanonicalPublication = Readonly<{ value: unknown; schemaKind: string }>;
 
 export class ArtifactCatalog {
-  constructor(private readonly cas: ContentAddressedStore, private readonly readSignal?: AbortSignal) {}
+  private readonly trustedReleases: readonly ReleaseTrustKey[] | undefined;
+  private readonly runtimeConversionTarget: string | undefined;
+  constructor(private readonly cas: ContentAddressedStore, private readonly readSignal?: AbortSignal,
+    trustedReleaseKeys?: readonly ReleaseTrustKey[], runtimeConversionTarget?: string) {
+    this.trustedReleases = trustedReleaseKeys === undefined ? undefined : immutableSnapshot(trustedReleaseKeys);
+    if (runtimeConversionTarget !== undefined) assertArtifactRef(runtimeConversionTarget);
+    this.runtimeConversionTarget = runtimeConversionTarget;
+  }
+
+  /** Trust configuration from the existing trusted Supervisor composition.
+   * Never populated or extended from CAS, requests or artifact declarations.
+   * Signature trust alone supplies no lock, owner or execution authority. */
+  releaseTrustRoots(): readonly ReleaseTrustKey[] {
+    if (!this.trustedReleases) throw new KernelStorageError('RECOVERY_REQUIRED', 'signed upgrade history requires trusted release composition');
+    return this.trustedReleases;
+  }
 
   /** Same real CAS and checks, with a tighter read lifetime. This view grants
    * no authority, starts no work and cannot discard a parent's cancellation. */
   withReadSignal(signal: AbortSignal): ArtifactCatalog {
-    return new ArtifactCatalog(this.cas, this.readSignal ? AbortSignal.any([this.readSignal, signal]) : signal);
+    return new ArtifactCatalog(this.cas, this.readSignal ? AbortSignal.any([this.readSignal, signal]) : signal, this.trustedReleases, this.runtimeConversionTarget);
   }
+
+  /** Fixed signed-conversion data-audit context. It can only authorize parsing
+   * the exact original source declared by an independently trusted target;
+   * ordinary opening and the sole upgrade transaction retain their own gates. */
+  withRuntimeConversionSource(targetBundleRef: string): ArtifactCatalog {
+    assertArtifactRef(targetBundleRef);
+    return new ArtifactCatalog(this.cas, this.readSignal, this.releaseTrustRoots(), targetBundleRef);
+  }
+  runtimeConversionSourceRef(): string | undefined { return this.runtimeConversionTarget; }
 
   /** Same read lifetime during computation between CAS operations. This is
    * only a cancellation checkpoint, not a new scope or execution authority. */

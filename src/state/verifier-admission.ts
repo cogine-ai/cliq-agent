@@ -17,10 +17,7 @@ import { decodeVerifierCommand, decodeVerifierEnvironment, decodeVerifierSpec } 
 import { sampleCanonicalNow } from './canonical-time.js';
 import { exactKeys, verifyRuntimeBundle, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { decodeRetainedRunAssembly } from '../model/run-assembly.js';
-import { readCheckpoint, readControlRequest, readRun } from './rows.js';
-import { readRetainedControlChannelClosure } from './control-channel.js';
-import { identityHash } from '../kernel/identity.js';
-import { decodeAdmittedContext, decodeRunObjective, decodeUnverifiedConsent } from './decoders.js';
+import { readRun } from './rows.js';
 import { decodeSandboxProfile } from './execution-closure.js';
 import { GUEST_EXTRACTOR_RECIPE, LINUX_VERIFIER_RESOURCE_MINIMUMS } from '../sandbox/guest-toolchain.js';
 import type { InstalledApplyDiagnosticStage } from './installed-run-diagnostics.js';
@@ -400,6 +397,10 @@ export async function validateVerifierRunAdmission(driver: SqliteDriver, artifac
   runtime: AuthorizationRuntime, runId: string, signal?: AbortSignal): Promise<{ authorizationReceiptRefs: string[] }> {
   signal?.throwIfAborted();
   const run = readRun(driver, runId), spec = await readCanonicalArtifact<RunSpec>(artifacts, run.specRef);
+  if (run.parentRunId) {
+    const { readChildVerifierAdmission } = await import('./child-verifier-admission.js');
+    return readChildVerifierAdmission(driver, artifacts, owner, runtime, runId, signal);
+  }
   if (spec.operation === 'delivery') {
     verifyRuntimeBundle(runtime.bundle, runtime.releaseKeys);
     const { readDeliveryRunAdmission } = await import('./reducers/delivery-admission.js');
@@ -410,82 +411,20 @@ export async function validateVerifierRunAdmission(driver: SqliteDriver, artifac
       throw new TypeError('delivery verifier admission changed its original retained source runtime');
     return { authorizationReceiptRefs: [] };
   }
-  const frozen = decodeVerifierSpec(await readCanonicalArtifact(artifacts, spec.verifierSpecRef));
+  const { readRootRunAdmissionOrigin } = await import('./run-admission-origin.js');
+  const original = await readRootRunAdmissionOrigin(driver, artifacts, runId, { signal });
+  const { verifierSpec: frozen, principalId, verifierRequests: requests, admissionIntentDigest: intent } = original;
   if (!frozen.verifiers.length) return { authorizationReceiptRefs: [] };
-  const admission = driver.prepare('SELECT principal_id, admission_key, admission_intent_digest, admitted_request_digest, admission_request_id FROM runs WHERE id = ?')
-    .get<{ principal_id: string; admission_key: string; admission_intent_digest: string; admitted_request_digest: string; admission_request_id: string }>(runId);
-  if (!admission || !admission.admission_request_id) throw new TypeError('verifier Run has no original admission request');
-  const control = readControlRequest(driver, admission.principal_id, 'run.submit', admission.admission_request_id);
-  if (!control || control.committedAt !== run.createdAt) throw new TypeError('verifier Run has no matching original control row');
-  const { channel } = await readRetainedControlChannelClosure(artifacts, owner, { principalId: admission.principal_id,
-    channelIdentityRef: control.channelIdentityRef, channelIdentityDigest: control.channelIdentityDigest });
-  if (channel.openedAt > run.createdAt) throw new TypeError('verifier admission precedes its original authenticated channel');
-  const core = await readCanonicalArtifact<Record<string, unknown>>(artifacts, control.requestDigest);
-  let requests: VerifierRequest[], intent: string, objectiveText: unknown, expectedContextRevision: unknown, allowUnverified: unknown;
-  if (Object.hasOwn(core, 'verifiers')) {
-    const { normalizeRunSubmitRequest, runSubmitIntentDigest } = await import('./source-target.js');
-    const normalized = normalizeRunSubmitRequest({ ...core, requestDigest: control.requestDigest });
-    const request = normalized.request;
-    if (request.requestId !== admission.admission_request_id || request.admissionKey !== admission.admission_key ||
-        request.sessionId !== run.sessionId) throw new TypeError('verifier original public request names another Run');
-    requests = request.verifiers; intent = runSubmitIntentDigest(admission.principal_id, request);
-    objectiveText = request.objective; expectedContextRevision = request.expectedContextRevision; allowUnverified = request.allowUnverified;
-  } else {
-    if (!exactKeys(core, ['protocolVersion', 'requestId', 'method', 'admissionKey', 'sessionId', 'expectedContextRevision', 'workspacePath',
-      'objective', 'assemblyRef', 'policyRef', 'sandboxProfileRef', 'verifierSpecRef', 'verifierRequests', 'credentialGrantRefs',
-      'budgets', 'allowUnverified', 'sourceProjectionRef', 'frozenIgnoreRulesRef', 'baseWorkspaceManifestRef']) ||
-        core.protocolVersion !== 1 || core.method !== 'run.submit' || core.requestId !== admission.admission_request_id ||
-        core.admissionKey !== admission.admission_key || core.sessionId !== run.sessionId || core.verifierSpecRef !== spec.verifierSpecRef ||
-        core.assemblyRef !== spec.assemblyRef || core.policyRef !== spec.policyRef || core.sandboxProfileRef !== spec.sandboxProfileRef ||
-        core.sourceProjectionRef !== spec.sourceProjectionRef || core.baseWorkspaceManifestRef !== spec.baseWorkspaceManifestRef ||
-        !same(core.budgets, spec.budgets) || !same(core.credentialGrantRefs, spec.credentialGrantRefs))
-      throw new TypeError('verifier internal admission is not its original frozen request');
-    const { protocolVersion: _protocol, requestId: _requestId, admissionKey: _key, ...request } = core;
-    intent = canonicalSha256({ principalId: admission.principal_id, method: 'run.submit', request });
-    requests = core.verifierRequests as VerifierRequest[];
-    objectiveText = core.objective; expectedContextRevision = core.expectedContextRevision; allowUnverified = core.allowUnverified;
-  }
-  if (intent !== admission.admission_intent_digest || run.id !== identityHash('cliq-run-id-v1', admission.principal_id, 'run.submit', admission.admission_key))
-    throw new TypeError('verifier admission intent no longer reproduces the original Run');
-  const objective = decodeRunObjective(await readCanonicalArtifact(artifacts, spec.objectiveRef));
-  const context = decodeAdmittedContext(await readCanonicalArtifact(artifacts, spec.admittedContextRef));
-  if (objective.utf8 !== objectiveText || context.sessionId !== run.sessionId || context.sessionContextRevision !== expectedContextRevision)
-    throw new TypeError('verifier admission changed its original objective or context');
-  if (frozen.verifiers.some(entry => entry.gate === 'required')) {
-    if (allowUnverified !== false || spec.unverifiedConsentRef !== undefined) throw new TypeError('required verifier cannot carry unverified consent');
-  } else {
-    const consent = decodeUnverifiedConsent(await readCanonicalArtifact(artifacts, spec.unverifiedConsentRef!));
-    const { unverifiedConsentRef: _consent, ...specCore } = spec;
-    if (allowUnverified !== true || consent.kind !== 'direct_unverified_consent' || consent.principalId !== admission.principal_id ||
-        consent.admissionIntentDigest !== intent || consent.createdAt !== run.createdAt || consent.runSpecCoreDigest !== canonicalSha256(specCore) ||
-        consent.channelIdentityRef !== control.channelIdentityRef || consent.channelIdentityDigest !== control.channelIdentityDigest ||
-        !same(consent.client, channel.client)) throw new TypeError('advisory verifier changed its original direct consent');
-  }
   const assembly = decodeRetainedRunAssembly(await readCanonicalArtifact(artifacts, spec.assemblyRef));
   const bundle = await readCanonicalArtifact<AuthorizationRuntime['bundle']>(artifacts, assembly.runtime.runtimeBundleRef);
   const policy = await readCanonicalArtifact<{ mode: string }>(artifacts, spec.policyRef);
   const prepared = await prepareVerifierSpec(driver, artifacts, owner, { bundle, releaseKeys: runtime.releaseKeys },
-    { principalId: admission.principal_id, requests, policyMode: policy.mode, assembly, sourceProjectionRef: spec.sourceProjectionRef,
+    { principalId, requests, policyMode: policy.mode, assembly, sourceProjectionRef: spec.sourceProjectionRef,
       sandboxProfileRef: spec.sandboxProfileRef },
     { runId, admissionIntentDigest: intent, admittedAt: run.createdAt }, signal);
   if (prepared.specRef !== spec.verifierSpecRef || !same(prepared.spec, frozen)) throw new TypeError('verifier Run changed its original command/environment/spec');
-  const checkpoint = readCheckpoint(driver, identityHash('cliq-checkpoint-id-v1', run.id, 'initial', 0));
-  const source = await readCanonicalArtifact<{ workspaceIdentityDigest: string; frozenIgnoreRulesRef: string; git?: { repositoryIdentityDigest: string } }>(artifacts, spec.baseWorkspaceManifestRef);
   const authorizationReceiptRefs = prepared.resolved.map(({ grant }) => grant.state === 'consumed' ? grant.consumptionReceiptRef : '');
-  const digest = canonicalSha256({ admissionIntentDigest: intent, objectiveRef: spec.objectiveRef, admittedContextRef: spec.admittedContextRef,
-    runSpecRef: run.specRef, workspaceIdentityDigest: source.workspaceIdentityDigest, repositoryIdentityDigest: source.git?.repositoryIdentityDigest ?? null,
-    sourceProjectionRef: spec.sourceProjectionRef, frozenIgnoreRulesRef: source.frozenIgnoreRulesRef, baseWorkspaceManifestRef: spec.baseWorkspaceManifestRef,
-    workspaceStateRef: checkpoint.workspaceStateRef, assemblyRef: spec.assemblyRef, policyRef: spec.policyRef, sandboxProfileRef: spec.sandboxProfileRef,
-    verifierSpecRef: spec.verifierSpecRef, unverifiedConsentRef: spec.unverifiedConsentRef ?? null, credentialGrantRefs: spec.credentialGrantRefs,
-    authorizationReceiptRefs });
-  if (digest !== admission.admitted_request_digest) throw new TypeError('verifier admission resolved authorization closure changed');
-  const frontier = { schemaVersion: 1, kind: 'agent', phase: 'model_turn', turnId: identityHash('cliq-turn-id-v1', run.id, 'initial'), contextItemSeq: 0, cause: 'initial' };
-  const initial = { id: run.id, sessionId: run.sessionId, specRef: run.specRef, status: 'queued', nextStep: 'agent', frontierRef: canonicalSha256(frontier),
-    revision: 1, leaseEpoch: 0, latestCheckpointId: checkpoint.id, budgetReserved: { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 },
-    budgetConsumed: { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 }, repairCount: 0, cancelRequested: false,
-    createdAt: run.createdAt, deadlineAt: run.deadlineAt, updatedAt: run.createdAt };
-  const expected = { protocolVersion: 1, ok: true, result: { method: 'run.submit', snapshot: {
-    schemaVersion: 1, operation: 'agent', run: initial, latestRunItemSeq: 0 } } };
-  if (!same(await readCanonicalArtifact(artifacts, control.responseRef), expected)) throw new TypeError('verifier original response substitutes its committed Run');
+  if (!same(authorizationReceiptRefs, original.authorizationReceiptRefs)) throw new TypeError('verifier original consumption changed');
+  original.assertUnchanged(driver); signal?.throwIfAborted();
   return { authorizationReceiptRefs };
 }

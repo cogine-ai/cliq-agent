@@ -53,9 +53,8 @@ export function loadFinalCandidate(driver: SqliteDriver, artifacts: ArtifactCata
     .all<{ item_id: string; item_seq: unknown; kind: string; payload_ref: string; created_at: string }>(runId)
     .map(row => ({ ...row, item_seq: Number(row.item_seq) }));
   function rejectChildren(connection: SqliteConnection) {
-    if (spec.operation !== 'agent' || admitted.parentRunId ||
-        connection.prepare('SELECT 1 FROM child_allocations WHERE parent_run_id = ? OR child_run_id = ? LIMIT 1').get(runId, runId) ||
-        connection.prepare('SELECT 1 FROM runs WHERE parent_run_id = ? LIMIT 1').get(runId))
+    if (spec.operation !== 'agent' ||
+        connection.prepare("SELECT 1 FROM child_allocations WHERE parent_run_id = ? AND state != 'settled' LIMIT 1").get(runId))
       throw new KernelStorageError('STATE_TRANSITION_INVALID', 'candidate requires child finalize settlement');
   }
   async function begin(expectedRunRevision: number, signal?: AbortSignal): Promise<FinalCandidateOwner> {
@@ -120,7 +119,7 @@ export function loadFinalCandidate(driver: SqliteDriver, artifacts: ArtifactCata
     let failure: unknown, completed: FinalCandidateCompletion | undefined, completedFrom: number | undefined, refreshed = false;
     let completing: Promise<FinalCandidateCompletion> | undefined;
     let completingInput: { expectedRunRevision: number; checkpoint: ToolCheckpointProof } | undefined;
-    const stable = ({ revision: _revision, updatedAt: _time, stopIntentRef: _intent, cancelRequested: _cancel, ...value }: Run) => value;
+    const stable = ({ revision: _revision, updatedAt: _time, stopIntentRef: _intent, cancelRequested: _cancel, parentCancellationRef: _parentCancellation, ...value }: Run) => value;
     function originalRun(current: Run) {
       if (!same(stable(current), stable(run)) || current.revision < run.revision || current.updatedAt < run.updatedAt ||
           !same(current, run) && (!current.stopIntentRef || current.revision <= run.revision))

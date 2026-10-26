@@ -123,7 +123,78 @@ async function heldDescriptors(paths: string[]): Promise<string[]> {
   return observed.sort();
 }
 
-for (const delivery of [false, true]) test(`initial non-Git ${delivery ? 'delivery' : 'Run'} source retains every file sync and twelve directory barriers`, async t => {
+test('initial non-Git entries and projection graph share one real four-object durability group', async t => {
+  const { workspace, state, input } = await fixture(t);
+  await writeFile(path.join(workspace, 'file.txt'), 'original source bytes', { mode: 0o644 });
+  const groups: string[][] = [], publish = input.artifacts.publishCanonicalFour;
+  t.mock.method(input.artifacts, 'publishCanonicalFour', async function(this: ArtifactCatalog, values: Parameters<ArtifactCatalog['publishCanonicalFour']>[0]) {
+    groups.push(values.map(value => value.schemaKind)); return Reflect.apply(publish, this, [values]);
+  });
+  let fileSyncs = 0, rootSyncs = 0;
+  const originalOpen = fs.open;
+  t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
+    const handle = await originalOpen(...args), sync = handle.sync.bind(handle);
+    t.mock.method(handle, 'sync', async () => {
+      if ((await handle.stat()).isDirectory()) rootSyncs++; else fileSyncs++;
+      return sync();
+    });
+    return handle;
+  });
+  const result = await publishNonGitSourceProjection(input);
+  assert.deepEqual(groups, [['cliq-workspace-entries-v1', 'cliq-frozen-ignore-rules-v1', 'cliq-source-projection-v1', 'cliq-source-manifest-v1']]);
+  assert.equal(fileSyncs, 5, 'the raw file and every actual graph member retain their own file sync');
+  assert.equal(rootSyncs, 8, 'one raw publication and one natural graph group retain four directory stages each');
+  const entries = await input.artifacts.readCanonical<WorkspaceEntryManifest>(result.entriesRef);
+  assert.equal(entries.entries.length, 1); assert(entries.entries[0]!.kind === 'file');
+  assert.equal((await input.artifacts.readBytes(entries.entries[0]!.blobRef)).toString(), 'original source bytes');
+  assert.equal((await input.artifacts.readCanonical<SourceManifest>(result.baseWorkspaceManifestRef)).entriesRef, result.entriesRef);
+  assert.equal((await readdir(path.join(state, 'objects'))).filter(name => name.startsWith('.tmp')).length, 0);
+});
+
+for (const fault of ['cancel', 'namespace', 'retirement', 'drift'] as const)
+  test(`the source four-object scope holds original descriptors and joins ${fault} before refusal`, async t => {
+    const { workspace, state, input } = await fixture(t), filename = path.join(workspace, 'file.txt');
+    await writeFile(filename, 'original source bytes', { mode: 0o644 });
+    const before = await heldDescriptors([workspace, filename]), objects = path.join(state, 'objects');
+    const owner = new AbortController(), reason = new Error('original source graph cancelled'), ordinary = new Error('actual group sync fault');
+    const retirement = new Error('actual group root close report is uncertain');
+    let enter!: () => void, release!: () => void, rootSyncs = 0, rootOpens = 0, completed = false;
+    const entered = new Promise<void>(resolve => { enter = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+    const active = new Set<object>(), originalOpen = fs.open;
+    t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
+      const handle = await originalOpen(...args), isRoot = args[0] === objects, ordinal = isRoot ? ++rootOpens : 0;
+      active.add(handle); const sync = handle.sync.bind(handle), close = handle.close.bind(handle);
+      t.mock.method(handle, 'sync', async () => {
+        await sync();
+        if (isRoot && ++rootSyncs === 5) { enter(); await gate; if (fault === 'namespace') throw ordinary; }
+      });
+      t.mock.method(handle, 'close', async () => {
+        await close(); assert(active.delete(handle));
+        if (fault === 'retirement' && isRoot && ordinal === 2) throw retirement;
+      });
+      return handle;
+    });
+    const work = publishNonGitSourceProjection({ ...input, signal: owner.signal });
+    void work.then(() => { completed = true; }, () => { completed = true; });
+    try {
+      await Promise.race([entered, work.then(() => { throw new Error('the actual group sync cut was bypassed'); })]);
+      assert.equal(completed, false);
+      // Native metadata cursors share the held root descriptor; they need not
+      // allocate one extra OS FD per entry. Its original FD identities remain.
+      assert.deepEqual(await heldDescriptors([workspace, filename]), before);
+      if (fault === 'cancel') owner.abort(reason);
+      if (fault === 'drift') await writeFile(filename, 'external metadata changed while the group was in flight');
+      release();
+      await assert.rejects(work, error => fault === 'retirement' ? error instanceof ResourceRetirementError : fault === 'drift'
+        ? error instanceof Error && error.message === 'source entry identity changed or closed' : fault === 'namespace'
+          ? error instanceof ResourceRetirementError && error.cause === ordinary : error === reason);
+      assert.equal(active.size, 0, 'all actual CAS file/root handles must close before refusing capture');
+      assert.deepEqual(await heldDescriptors([workspace, filename]), before);
+      assert.equal((await readdir(objects)).filter(name => name.startsWith('.tmp')).length, 0);
+    } finally { release(); await Promise.allSettled([work]); t.mock.restoreAll(); }
+  });
+
+for (const delivery of [false, true]) test(`initial non-Git ${delivery ? 'delivery' : 'Run'} source retains every file sync and its exact natural-group directory barriers`, async t => {
   const { workspace, state, input } = await fixture(t), objects = path.join(state, 'objects');
   await writeFile(path.join(workspace, 'ordinary'), 'Exact source bytes.\n', { mode: 0o644 });
   const open = fs.open.bind(fs), active = new Set<object>(); let rootSyncs = 0, fileSyncs = 0;
@@ -139,7 +210,7 @@ for (const delivery of [false, true]) test(`initial non-Git ${delivery ? 'delive
     workspaceIdentityRef: 'c'.repeat(64), capturedAt: '2026-10-26T00:00:00.000Z'
   } } : {}) });
   assert.equal(fileSyncs, delivery ? 6 : 5, 'raw source, entries and all original metadata files still sync');
-  assert.equal(rootSyncs, 12, 'raw source and entries remain independent; the complete inert closure shares its four barriers');
+  assert.equal(rootSyncs, delivery ? 12 : 8, 'delivery retains its separate topology group; ordinary entries join the natural four-object closure');
   assert.equal(active.size, 0);
   const source = await input.artifacts.readCanonical<SourceManifest>(captured.baseWorkspaceManifestRef);
   const entries = await input.artifacts.readCanonical<WorkspaceEntryManifest>(source.entriesRef);

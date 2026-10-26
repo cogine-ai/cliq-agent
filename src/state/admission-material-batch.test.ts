@@ -16,7 +16,7 @@ import { KernelStorageError, ResourceRetirementError } from './errors.js';
 import { installedSandboxProfile } from './installed-sandbox-profile.js';
 import { openStateStore } from './store.js';
 
-test('real source capture durably joins its target triple and retirement pair without moving capture or replay', async t => {
+test('real source capture joins its target, source graph, handoff triple and retirement without moving capture or replay', async t => {
   const fixture = await createSourceInspectionFixture(t, 'fixed-admission-groups');
   await writeFile(path.join(fixture.workspace, 'one.txt'), 'one complete source file\n');
   await writeFile(path.join(fixture.workspace, 'two.txt'), 'two complete source file\n');
@@ -41,7 +41,7 @@ test('real source capture durably joins its target triple and retirement pair wi
     assert.equal(retired.outcome.kind, 'captured');
     assert.equal(active.size, 0, 'the original CAS descriptors close before capture can return');
     assert.equal(fileSyncs, 11 + 3, 'all eleven original files and the original-attempt/inspector/handoff closure receive their real data fsync');
-    assert.equal(rootSyncs, 24 + 8, 'target3, source3 and retirement2 each retain four boundaries; original-attempt single and handoff pair add four each');
+    assert.equal(rootSyncs, 24, 'target triple, two raw streams, source four, handoff triple and retirement pair retain four stages each');
     const target = await fixture.store.artifacts.readCanonical<SourceInspectionTargetV1>(retired.targetRef);
     assert.equal(target.originalRequestRef, canonicalSha256(fixture.request));
     assert.deepEqual(await fixture.store.artifacts.readCanonical(target.originalRequestRef), fixture.request);
@@ -198,6 +198,46 @@ test('actual source shutdown during the target triple joins every issued file be
     await assert.rejects(fs.lstat(path.join(fixture.stateRoot, 'runtime/source-inspections')),
       error => error instanceof Error && 'code' in error && error.code === 'ENOENT');
   } finally { await Promise.allSettled([pending, ...(closing ? [closing] : [])]); t.mock.restoreAll(); }
+  const successor = await openStateStore(fixture.stateRoot, fixture.authority);
+  try { assert.equal(successor.ownerEpoch, fixture.store.ownerEpoch + 1); } finally { await successor.close(); }
+});
+
+test('actual source shutdown during the handoff triple cannot register it or release the owner before all writes join', async t => {
+  const fixture = await createSourceInspectionFixture(t, 'handoff-group-cancel');
+  await writeFile(path.join(fixture.workspace, 'one.txt'), 'original captured source\n');
+  const originalOpen = fs.open, active = new Set<object>();
+  let enter!: () => void, release!: () => void, reached = false, captureSettled = false, closeSettled = false;
+  const entered = new Promise<void>(resolve => { enter = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+  t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
+    const handle = await originalOpen(...args), write = handle.writeFile.bind(handle), close = handle.close.bind(handle);
+    active.add(handle);
+    t.mock.method(handle, 'close', async () => { await close(); assert(active.delete(handle)); });
+    if (String(args[0]).includes('/.tmp-stream-')) t.mock.method(handle, 'writeFile', async (...values: Parameters<typeof write>) => {
+      await write(...values);
+      if (!reached && values[0] instanceof Uint8Array && Buffer.from(values[0]).includes(Buffer.from('cliq-source-inspection-retirement-handoff-v1'))) {
+        reached = true; enter(); await gate;
+      }
+    });
+    return handle;
+  });
+  const pending = fixture.store.captureSubmittedSource({ request: fixture.request, identity: fixture.identity });
+  void pending.then(() => { captureSettled = true; }, () => { captureSettled = true; });
+  let closing: Promise<void> | undefined;
+  try {
+    await Promise.race([entered, pending.then(() => { throw new Error('the original handoff write cut was bypassed'); })]);
+    const driver = Reflect.get(fixture.store, 'driver');
+    const rows = driver.prepare('SELECT row_json FROM source_inspection_attempts').all() as Array<{ row_json: string }>;
+    assert.equal(rows.length, 1); const original = JSON.parse(rows[0]!.row_json);
+    assert.equal(original.retirementHandoffRef, undefined);
+    assert.equal((await readdir(path.join(fixture.stateRoot, 'runtime/source-inspections'))).length, 1);
+    closing = fixture.store.close().then(() => { closeSettled = true; });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(captureSettled, false); assert.equal(closeSettled, false);
+    assert.equal(driver.prepare("SELECT count(*) AS n FROM state_owners WHERE state='active'").get().n, 1n);
+    release(); await Promise.allSettled([pending]); await closing;
+    assert.equal(active.size, 0);
+    assert((await readdir(path.join(fixture.stateRoot, KERNEL_CAS_DIRECTORY))).every(name => /^[a-f0-9]{64}$/u.test(name)));
+  } finally { release(); await Promise.allSettled([pending, ...(closing ? [closing] : [])]); t.mock.restoreAll(); }
   const successor = await openStateStore(fixture.stateRoot, fixture.authority);
   try { assert.equal(successor.ownerEpoch, fixture.store.ownerEpoch + 1); } finally { await successor.close(); }
 });

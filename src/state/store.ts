@@ -1,3 +1,6 @@
+import { withInstalledWorkerRoot as borrowInstalledResourceRoot } from './installed-runtime.js';
+import { noteInstalledResourceBoundary } from './installed-resource-diagnostics.js';
+import { assertSignedKernelSchemaEntry, signedKernelSchemaProfile } from './signed-schema.js';
 import type { Stats } from 'node:fs';
 import { lstat, mkdir, readdir } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
@@ -131,7 +134,7 @@ import { readVerifierProgress } from './verifier-recovery.js';
 import { verifierOperationId } from './verifier-policy.js';
 import type { RunResultPhase } from './run-result.js';
 import { beginWorkerRecovery, beginWorkerRecoveryProbe, closeWorkerRecoveryProbe, type BeginWorkerRecoveryInput } from './reducers/worker-recovery.js';
-import { readRun, readSession, readSessionPrincipalId } from './rows.js';
+import { readControlRequest, readRun, readSession, readSessionPrincipalId } from './rows.js';
 import { applyKernelSchema, assertPristineKernelSchema, KERNEL_AUTHORITY_TABLES, KERNEL_SCHEMA_SQL, readSchemaUserVersion } from './schema.js';
 import { iterateNodeSqliteStatement, openSqliteDriver, type SqliteConnection, type SqliteDriver } from './sqlite-driver.js';
 import {
@@ -146,6 +149,7 @@ import {
   type StateOwnerContext
 } from './state-owner.js';
 import { hostPlatform } from './workspace-identity.js';
+import { verifyRetainedInstalledEndpointData, verifyRetainedInstalledCurrentProducerData } from './installed-credential-history.js';
 import { readRetainedStateOwnerHistory, readRetainedStateOwnerProcess as readStateOwnerProcess } from './state-owner-history.js';
 import { immutableSnapshot } from '../model/immutable.js';
 import { loadRunExecution, type LoadRunExecutionInput, type RunExecutionInstallation, type RunRetirementPhase, type RunPublicationPhase } from './run-execution.js';
@@ -154,7 +158,7 @@ import { exactKeys, verifyRuntimeBundle, type ReleaseTrustKey, type RuntimeBundl
 import type { SandboxProfileV1, SourceInspectionAttemptV1 } from '../kernel/execution.js';
 import { normalizeRunSubmitRequest, runSubmitIntentDigest, normalizeSourceInspectionRequest, sourceInspectionIntentDigest } from './source-target.js';
 import { normalizeRunApplyRequest } from '../kernel/control-apply.js';
-import { decodeInstalledControlRequest } from '../kernel/control-wire.js';
+import { decodeInstalledControlRequest, decodeInstalledControlResponse } from '../kernel/control-wire.js';
 import { readVerifiedDeliverySource } from './delivery-source-authority.js';
 import { admitInstalledDelivery, prepareInstalledDelivery, replayInstalledDeliveryAdmission, type AdmitDeliveryResult } from './reducers/delivery-admission.js';
 import { loadDeliveryContinuation, type DeliveryContinuation } from './run-continuation.js';
@@ -213,6 +217,12 @@ function currentModelAuthority(held: CredentialBinding, principalId: string, end
   if (!endpoint || endpoint.state !== 'active' || !endpoint.registration.purposes.includes('model_endpoint') ||
       endpoint.registration.createdAt > now || endpoint.createdAt > now)
     throw new InstalledModelAuthorizationError();
+  // Historical readability cannot transfer a prior runtime's TLS/credential
+  // binding to this current productive model owner.
+  if (endpoint.registration.tls.trustStoreRuntimeBundleRef !== held.selected.bundleDigest ||
+      endpoint.registration.tls.trustStoreRuntimeBundleManifestDigest !== held.selected.bundle.manifestDigest)
+    throw new InstalledModelAuthorizationError();
+  verifyEndpointTrust(held, endpoint.registration, false);
   const history = readCredentialHistory(held, credentialIds[0]!), record = history.latest, creating = history.creating;
   if (!record || !creating || record.state !== 'active' || record.purpose !== 'model_endpoint' ||
       record.createdAt > now || (record.expiresAt !== undefined && now >= record.expiresAt) ||
@@ -349,18 +359,27 @@ function retainedCredentialChannel(held: CredentialBinding, operation: Credentia
       canonicalSha256(root) !== canonicalSha256(held.rootIdentity) || principal.platform !== root.platform ||
       principal.effectiveUid !== root.ownerUid || processIdentity.platform !== root.platform || processIdentity.ownerUid !== root.ownerUid ||
       processIdentity.identityDigest !== channel.transport.processIdentityDigest ||
-      processIdentity.executableImageDigest !== held.processIdentity.executableImageDigest || processIdentity.observedAt !== channel.openedAt ||
+      processIdentity.observedAt !== channel.openedAt ||
       parseCanonicalTime('metadataCommittedAt' in operation ? operation.metadataCommittedAt : operation.createdAt) < parseCanonicalTime(channel.openedAt) ||
       ('finishedAt' in operation && operation.finishedAt !== undefined && parseCanonicalTime(operation.finishedAt) < parseCanonicalTime(operation.createdAt)))
     throw new TypeError('credential preparation provenance differs');
+  const registration = 'metadataCommittedAt' in operation
+    ? retainedCredentialOriginalEndpoint(held, operation.credentialGrantId)
+    : credentialEndpointData(held, operation.commandCore);
+  assertRetainedCredentialProducerImage(held, registration, processIdentity.executableImageDigest,
+    'metadataCommittedAt' in operation ? 'revocation' : 'origin');
   return { channel, processIdentity };
 }
-function credentialEndpoint(held: CredentialBinding, core: CredentialAuthorityCommandCoreV1): EndpointRegistrationV1 {
+function credentialEndpointData(held: CredentialBinding, core: CredentialAuthorityCommandCoreV1): EndpointRegistrationV1 {
   const registration = decodeEndpointRegistration(checkCanonicalBytes(endpointObject(held, core.endpointRegistrationRef)));
   if (registration.ownerPrincipalId !== held.ownerPrincipalId || !registration.purposes.includes(core.purpose) ||
       registration.endpointIdentityDigest !== core.endpointIdentityDigest || registration.tlsPolicyDigest !== core.tlsPolicyDigest ||
       parseCanonicalTime(core.externalSubject.observedAt) < parseCanonicalTime(registration.createdAt))
     throw new TypeError('credential endpoint closure differs');
+  return registration;
+}
+function credentialEndpoint(held: CredentialBinding, core: CredentialAuthorityCommandCoreV1): EndpointRegistrationV1 {
+  const registration = credentialEndpointData(held, core);
   verifyEndpointTrust(held, registration, true);
   return registration;
 }
@@ -379,7 +398,9 @@ function readCredentialFacts(held: CredentialBinding, requestId: string): Creden
     if (operation.ownerPrincipalId !== held.ownerPrincipalId || operation.requestId !== requestId ||
         operation.credentialGrantId !== row.credential_grant_id || operation.attempt !== row.attempt || rank !== row.phase_rank)
       throw new TypeError('credential fact index differs');
-    retainedCredentialChannel(held, operation); credentialEndpoint(held, operation.commandCore);
+    // The original channel audit now validates this exact command endpoint
+    // against its original signed runtime as well as its producer image.
+    retainedCredentialChannel(held, operation);
     if (parseCanonicalTime(operation.createdAt) < parseCanonicalTime(operation.commandCore.externalSubject.observedAt))
       throw new TypeError('credential preparation precedes its frozen subject');
     if (operation.phase === 'prepared') {
@@ -619,6 +640,9 @@ function credentialWriteIntent(held: CredentialBinding, request: CredentialWrite
       (previous && (endpoint.expectedRegistrationArtifactRef !== previous.endpointRegistrationRef ||
         endpoint.registration.endpointIdentityDigest !== previous.endpointIdentityDigest || endpoint.registration.tlsPolicyDigest !== previous.tlsPolicyDigest)))
     throw new KernelStorageError('STATE_TRANSITION_INVALID', 'credential requires a current active endpoint of its purpose');
+  // New enroll/rotate is productive authority; retained read/revoke is not
+  // permission to reuse the old runtime's endpoint binding.
+  verifyEndpointTrust(held, endpoint.registration, false);
   const pending = credentialSchemaVersion(held.database!) !== 1 && held.database!.prepare(`SELECT 1 FROM credential_operation_facts AS f WHERE owner_principal_id=?
     AND credential_grant_id=? AND request_id<>? AND phase_rank=0 AND NOT EXISTS(SELECT 1 FROM credential_operation_facts AS t
       WHERE t.owner_principal_id=f.owner_principal_id AND t.request_id=f.request_id AND t.attempt=f.attempt AND t.phase_rank=2) LIMIT 1`)
@@ -1192,8 +1216,62 @@ function endpointObject(held: CredentialBinding, ref: string, limit = SMALL_BYTE
   return Buffer.from(value);
 }
 
-function verifyEndpointTrust(held: CredentialBinding, registration: EndpointRegistrationV1, retained: boolean): void {
+function retainedCredentialOriginalEndpoint(held: CredentialBinding, grantId: string): EndpointRegistrationV1 {
+  const row = held.database!.prepare(`SELECT record_json FROM credential_records
+    WHERE owner_principal_id=? AND credential_grant_id=? AND authority_revision=1`).get(held.ownerPrincipalId, grantId);
+  if (!row) throw new TypeError('credential original authority row is missing');
+  const record = endpointJson(row.record_json, decodeCredentialAuthorityRecord);
+  if (record.ownerPrincipalId !== held.ownerPrincipalId || record.credentialGrantId !== grantId ||
+      record.authorityRevision !== 1 || record.state !== 'active')
+    throw new TypeError('credential original authority row index differs');
+  const registration = decodeEndpointRegistration(checkCanonicalBytes(endpointObject(held, record.endpointRegistrationRef)));
+  if (registration.ownerPrincipalId !== held.ownerPrincipalId || registration.endpointIdentityDigest !== record.endpointIdentityDigest ||
+      registration.tlsPolicyDigest !== record.tlsPolicyDigest || !registration.purposes.includes(record.purpose))
+    throw new TypeError('credential original endpoint differs');
+  return registration;
+}
+
+function retainedEndpointOriginalRegistration(held: CredentialBinding, endpointId: string): EndpointRegistrationV1 {
+  const row = held.database!.prepare(`SELECT record_json FROM endpoint_records
+    WHERE owner_principal_id=? AND endpoint_registration_id=? AND authority_revision=1`).get(held.ownerPrincipalId, endpointId);
+  if (!row) throw new TypeError('endpoint original authority row is missing');
+  const record = endpointJson(row.record_json, decodeEndpointAuthorityRecord);
+  if (record.ownerPrincipalId !== held.ownerPrincipalId || record.endpointRegistrationId !== endpointId ||
+      record.authorityRevision !== 1 || record.state !== 'active' || canonicalSha256(record.registration) !== record.expectedRegistrationArtifactRef)
+    throw new TypeError('endpoint original authority row index differs');
+  return record.registration;
+}
+
+function assertRetainedCredentialProducerImage(held: CredentialBinding, registration: EndpointRegistrationV1,
+  imageDigest: string, action: 'origin' | 'revocation'): void {
+  const original = verifyEndpointTrust(held, registration, true);
+  if (imageDigest === original.supervisorImageDigest) return;
+  // Revocation is non-expanding and may be performed by the real selected
+  // successor. Its recorded channel still requires the exact original retained
+  // current bundle bytes; today's held bundle cannot fill missing history.
+  if (action === 'revocation' && imageDigest === held.processIdentity.executableImageDigest) {
+    const bytes = endpointObject(held, held.selected.bundleDigest);
+    verifyRetainedInstalledCurrentProducerData(held.selected.bundle, held.releaseKeys, bytes, imageDigest);
+    return;
+  }
+  throw new TypeError('retained credential producer differs from its original signed source');
+}
+
+function verifyEndpointTrust(held: CredentialBinding, registration: EndpointRegistrationV1, retained: boolean):
+  Readonly<{ bundle: RuntimeBundleManifest; supervisorImageDigest: string }> {
   const tls = registration.tls;
+  if (retained) {
+    const old = tls.trustStoreRuntimeBundleRef !== held.selected.bundleDigest;
+    const schema = held.selected.bundle.entries.find(entry => entry.entryId === 'kernel_schema');
+    const conversion = held.selected.bundle.entries.find(entry => entry.entryId === 'schema_conversion');
+    return verifyRetainedInstalledEndpointData({ currentBundle: held.selected.bundle, releaseKeys: held.releaseKeys, registration,
+      originalBundleBytes: endpointObject(held, tls.trustStoreRuntimeBundleRef),
+      originalTrustStoreBytes: endpointObject(held, tls.trustStoreRef, TRUST_BYTES),
+      ...(old && schema && conversion ? {
+        currentSchemaBytes: endpointObject(held, schema.digest, 1_048_576, false),
+        currentConversionBytes: endpointObject(held, conversion.digest, 1_048_576, false),
+      } : {}) });
+  }
   const selected = held.selected.bundle.entries.find(value => value.entryId === 'default_https_trust_store');
   if (tls.trustStoreRuntimeBundleRef !== held.selected.bundleDigest || tls.trustStoreRuntimeBundleManifestDigest !== held.selected.bundle.manifestDigest ||
       !selected || selected.role !== 'trust_store' || selected.executable || selected.digest !== tls.trustStoreRef || selected.digest !== tls.trustStoreDigest)
@@ -1207,6 +1285,9 @@ function verifyEndpointTrust(held: CredentialBinding, registration: EndpointRegi
   const bytes = endpointObject(held, entry.digest, TRUST_BYTES, retained);
   if (bytes.length !== entry.byteCount) throw new TypeError('endpoint trust-store byte count differs from the signed entry');
   validateTrustStore(bytes);
+  const supervisors = bundle.entries.filter(value => value.role === 'supervisor');
+  if (supervisors.length !== 1 || !supervisors[0]!.executable) throw new TypeError('endpoint has no fixed signed producer');
+  return { bundle, supervisorImageDigest: supervisors[0]!.digest };
 }
 
 function readEndpointOperation(held: CredentialBinding, requestId: string): EndpointAuthorityOperationV1 | undefined {
@@ -1232,8 +1313,12 @@ function readEndpointOperation(held: CredentialBinding, requestId: string): Endp
         principal.stateRootIdentityDigest !== root.identityDigest || canonicalSha256(root) !== canonicalSha256(held.rootIdentity) ||
         principal.platform !== root.platform || principal.effectiveUid !== root.ownerUid || processIdentity.platform !== root.platform ||
         processIdentity.ownerUid !== root.ownerUid || processIdentity.identityDigest !== channel.transport.processIdentityDigest ||
-        processIdentity.executableImageDigest !== held.processIdentity.executableImageDigest || processIdentity.observedAt !== channel.openedAt ||
+        processIdentity.observedAt !== channel.openedAt ||
         parseCanonicalTime(operation.committedAt) < parseCanonicalTime(channel.openedAt)) throw new TypeError('endpoint channel closure differs');
+    const registration = operation.commandCore.kind === 'register' ? operation.commandCore.registration :
+      retainedEndpointOriginalRegistration(held, operation.endpointRegistrationId);
+    assertRetainedCredentialProducerImage(held, registration, processIdentity.executableImageDigest,
+      operation.commandCore.kind === 'register' ? 'origin' : 'revocation');
     return operation;
   } catch (cause) { throw new KernelStorageError('RECOVERY_REQUIRED', 'retained endpoint operation provenance could not be verified', { cause }); }
 }
@@ -1391,7 +1476,7 @@ function requireEffectiveUid(): number {
   return process.geteuid();
 }
 
-async function currentProcessIdentity(native: NativeStateOwner, observedAt: string): Promise<PlatformProcessIdentityV1> {
+export async function currentProcessIdentity(native: NativeStateOwner, observedAt: string): Promise<PlatformProcessIdentityV1> {
   const base = await native.observeCurrentProcess();
   const identity: PlatformProcessIdentityV1 = {
     schemaVersion: 1,
@@ -1465,7 +1550,7 @@ async function ensurePrivateDirectory(directory: string, allowCreate: boolean): 
   }
 }
 
-async function stateOwnerFilesystemFromArtifacts(
+export async function stateOwnerFilesystemFromArtifacts(
   stateRoot: string,
   artifacts: ArtifactCatalog,
   owner: StateOwnerRecordV1,
@@ -1745,6 +1830,24 @@ export class StateStore {
       const selected = readRun(this.driver, value.runId);
       if (readSessionPrincipalId(this.driver, selected.sessionId) !== identity.principalId)
         throw new KernelStorageError('NOT_FOUND', 'approval Run is unavailable');
+      const prior = readControlRequest(this.driver, identity.principalId, 'run.approve', value.requestId);
+      let mergeSubject = false;
+      if (prior) {
+        if (prior.requestDigest !== value.requestDigest) throw new KernelStorageError('REQUEST_ID_CONFLICT', 'run.approve requestId was reused');
+        const original = decodeInstalledControlResponse(await this.artifacts.readCanonical(prior.responseRef), value);
+        if (!original.ok || original.result.method !== 'run.approve') throw new TypeError('registered approval has no exact original response');
+        const decision = await this.artifacts.readCanonical<{ subject?: { kind?: string } }>(original.result.decisionRef);
+        mergeSubject = decision.subject?.kind === 'child_merge';
+      } else if (selected.status === 'waiting' && selected.waitingReason === 'approval' && selected.waitingOnRef) {
+        const original = await this.artifacts.readCanonical<{ subject?: { kind?: string } }>(selected.waitingOnRef);
+        mergeSubject = original.subject?.kind === 'child_merge';
+      }
+      if (mergeSubject) {
+        if (!this.runtimeAuthority) throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed merge approval lacks its original signed runtime');
+        const result = await (await import('./child-merge-authorization.js')).approveChildMerge(this.driver, this.artifacts, this.owner,
+          { request: value, identity, releaseKeys: this.runtimeAuthority.releaseKeys }, signal);
+        this.scheduleInstalledRun(value.runId); return result;
+      }
       const continuation = await this.retainInstalledAgent(value.runId);
       const input = { ...identity, requestId: value.requestId, expectedRunRevision: value.expectedRevision,
         waitingOnRef: value.waitingOnRef, decision: value.decision, ...(value.ttlMs === undefined ? {} : { ttlMs: value.ttlMs }) };
@@ -2029,7 +2132,7 @@ export class StateStore {
     this.armInstalledMaintenance();
   }
 
-  private retainInstalledAgent(runId: string, material?: RunAssemblyValidationMaterial, admission?: Promise<AdmitRunResult | AdmitDeliveryResult>): Promise<InstalledContinuation> {
+  private retainInstalledAgent(runId: string, material?: RunAssemblyValidationMaterial, admission?: Promise<{ run: Run }>): Promise<InstalledContinuation> {
     const existing = this.installedAgents.get(runId); if (existing) return Promise.resolve(existing.agent);
     const loading = this.installedAgentLoads.get(runId); if (loading) return loading;
     const task = this.ownInstalledAdmission(async signal => {
@@ -2044,7 +2147,8 @@ export class StateStore {
       const readerSignal = AbortSignal.any([signal, readAbort.signal]);
       if (spec.operation === 'agent' && !material) {
         const { loadInstalledRunMaterial } = await import('./installed-run.js');
-        material = await loadInstalledRunMaterial({ selected: this.installedRuntime!, artifacts: this.artifacts, assemblyRef: spec.assemblyRef, signal });
+        material = await loadInstalledRunMaterial({ selected: this.installedRuntime!, artifacts: this.artifacts, assemblyRef: spec.assemblyRef,
+          driver: this.driver, runId, signal });
       }
       const agent = spec.operation === 'delivery'
         ? await loadDeliveryContinuation(this.driver, this.artifacts.withReadSignal(readerSignal), this.owner,
@@ -2114,6 +2218,10 @@ export class StateStore {
         if (!agent) throw new KernelStorageError('RECOVERY_REQUIRED', 'installed Run lacks its pre-scheduling deadline authority');
         run = readRun(this.driver, id);
         if (!['queued', 'running', 'waiting'].includes(run.status)) continue;
+        if (agent.operation === 'agent' && run.parentRunId && readRun(this.driver, run.parentRunId).stopIntentRef) {
+          const stopped = await agent.stopFromParent({ expectedRunRevision: run.revision });
+          run = stopped.run; this.requestInstalledRunStop(id);
+        }
         if (sampleCanonicalNow() >= run.deadlineAt && !run.stopIntentRef) {
           run = (await agent.expireRun({ expectedRunRevision: run.revision })).run;
           this.requestInstalledRunStop(id);
@@ -2134,7 +2242,7 @@ export class StateStore {
         }
         run = readRun(this.driver, id);
         if (this.loadedExecutionScopes.get(id)?.execution.hasPendingCompletion() ||
-            run.stopIntentRef || run.status === 'waiting' && run.waitingReason === 'reconciliation' ||
+            run.stopIntentRef || run.status === 'waiting' && (run.waitingReason === 'reconciliation' || run.waitingReason === 'child') ||
             run.status === 'queued' && !this.installedRunFailures.has(id)) this.scheduleInstalledRun(id);
         else if (run.status === 'running' && run.nextStep === 'agent' &&
             (this.installedModelCompletions.has(id) || this.installedModelClosures.has(id)) &&
@@ -2275,6 +2383,10 @@ export class StateStore {
     this.installedAgents.delete(runId);
     this.installedRunFailures.delete(runId);
     this.installedPreparationRetries.delete(runId);
+    // Outside Store shutdown: original terminal graph, execution and readers
+    // have already joined. Never add resource I/O to the Stop2 drain.
+    if (!this.closeRequested && this.installedRuntime && this.installedAnchor)
+      noteInstalledResourceBoundary('terminal_joined', operation => borrowInstalledResourceRoot(this.installedRuntime!, this.installedAnchor!, operation));
   }
 
   private async driveInstalledRun(runId: string): Promise<void> {
@@ -2305,7 +2417,8 @@ export class StateStore {
     reads.assertReadActive();
     const spec = decodeRunSpec(await reads.readCanonical(run.specRef));
     const material = spec.operation === 'agent'
-      ? await loadInstalledRunMaterial({ selected: this.installedRuntime!, artifacts: reads, assemblyRef: spec.assemblyRef, signal: readSignal }) : undefined;
+      ? await loadInstalledRunMaterial({ selected: this.installedRuntime!, artifacts: reads, assemblyRef: spec.assemblyRef,
+        driver: this.driver, runId, signal: readSignal }) : undefined;
     const opening = this.executions.get(runId);
     let execution = opening ? (await opening).execution : undefined;
     const nativeExecution = async () => execution ??= await this.loadRunExecution(spec.operation === 'delivery'
@@ -2347,7 +2460,20 @@ export class StateStore {
           current = await (await nativeExecution()).reconcilePublication({ expectedRunRevision: current.revision });
         else return;
       }
-      if (current.status === 'waiting') return;
+      if (current.status === 'waiting' && current.waitingReason === 'child' && agent.operation === 'agent') {
+        if (current.stopIntentRef) {
+          const selected = await agent.planStoppedChildren({ expectedRunRevision: current.revision }, readSignal);
+          if (selected.disposition === 'child_stop_required') {
+            await agent.waitForStoppedChildren({ expectedRunRevision: current.revision }, readSignal);
+            continue;
+          }
+        }
+        const settled = await agent.settleChildren({ expectedRunRevision: current.revision }, readSignal);
+        if (settled.run.status !== 'waiting') continue;
+        return;
+      }
+      if (current.status === 'waiting' &&
+          (current.waitingReason === 'reconciliation' || !current.stopIntentRef)) return;
       if (current.status === 'queued' && (execution || this.driver.prepare(
         "SELECT 1 FROM workspace_generations WHERE run_id = ? AND phase = 'quarantined' LIMIT 1").get(runId))) {
         this.installedRunPhases.set(runId, 'drive_retirement');
@@ -2402,6 +2528,8 @@ export class StateStore {
           }
         }
         if (execution || current.activeWorkerLaunchId) await (await nativeExecution()).finishCurrentStop({ expectedRunRevision: current.revision });
+        else if (agent.operation === 'agent' && (await agent.planStoppedChildren({ expectedRunRevision: current.revision }, readSignal)).disposition !== 'terminal')
+          await agent.waitForStoppedChildren({ expectedRunRevision: current.revision }, readSignal);
         else await agent.commitTerminalStop({ expectedRunRevision: current.revision });
         return;
       }
@@ -2486,14 +2614,86 @@ export class StateStore {
       }
       if (current.nextStep === 'tool') {
         if (current.status === 'queued') {
+          // Route only from the original registered item. The local reducer
+          // independently reloads its whole immutable child/permission cut;
+          // this structural selector is neither a grant nor a worker lease.
+          const frontier = current.frontierRef && await this.artifacts.readCanonical<import('../kernel/types.js').RunFrontier>(current.frontierRef);
+          const batch = frontier && frontier.kind === 'tool' ? this.driver.prepare('SELECT kind FROM items WHERE run_id=? AND item_id=?')
+            .get<{ kind: string }>(runId, frontier.batchItemId) : undefined;
+          if (batch?.kind === 'child_merge_batch') {
+            const { mergeChildResult } = await import('./child-merge.js');
+            let merged;
+            try {
+              merged = await this.ownInstalledAdmission(signal => mergeChildResult(this.driver, this.artifacts, this.owner,
+                { runId, expectedRunRevision: current.revision, releaseKeys: this.runtimeAuthority!.releaseKeys }, signal));
+            } catch (error) {
+              if (!(error instanceof KernelStorageError) || error.code !== 'BUDGET_EXHAUSTED') throw error;
+              // The caught error supplies no cause or authority. Reproduce
+              // the complete original pending merge before the same resource
+              // Stop registration and ordinary physical/child drain.
+              await agent.stopForResourceFailure({ expectedRunRevision: current.revision });
+              this.requestInstalledRunStop(runId); continue;
+            }
+            if (merged.run.status === 'waiting') return;
+            continue;
+          }
           const selection = await agent.prepareTool({ expectedRunRevision: current.revision, leaseEpoch: current.leaseEpoch }, readSignal);
           if (selection.disposition === 'input_required') {
             await agent.waitForInput({ expectedRunRevision: selection.run.revision, waitingOnRef: selection.waitingOnRef }); return;
+          }
+          if (selection.disposition === 'children_required') {
+            let waiting;
+            try { waiting = await agent.waitForChildren({ expectedRunRevision: selection.run.revision }, readSignal); }
+            catch (error) {
+              if (!(error instanceof KernelStorageError) || error.code !== 'BUDGET_EXHAUSTED') throw error;
+              await agent.stopForResourceFailure({ expectedRunRevision: selection.run.revision });
+              this.requestInstalledRunStop(runId); continue;
+            }
+            if (waiting.run.status === 'waiting') return;
+            continue;
           }
           if (selection.disposition === 'approval_required') {
             await agent.waitForToolApproval({ expectedRunRevision: selection.run.revision, waitingOnRef: selection.waitingOnRef }); return;
           }
           if (selection.disposition === 'denied') continue;
+          if (selection.disposition === 'child_admission_required') {
+            const { admitChildRun, completeChildAdmissionRefusal, isChildAdmissionRefused } = await import('./child-run-admission.js');
+            const admission = this.ownInstalledAdmission(async signal => {
+              try {
+                const result = await admitChildRun(this.driver, this.artifacts, this.owner,
+                  { runId, expectedRunRevision: selection.run.revision, releaseKeys: this.runtimeAuthority!.releaseKeys }, signal);
+                return { kind: 'admitted' as const, ...result };
+              } catch (error) {
+                if (!isChildAdmissionRefused(error)) throw error;
+                try {
+                  const result = await completeChildAdmissionRefusal(this.driver, this.artifacts, this.owner, error, signal);
+                  return { kind: 'not_admitted' as const, ...result };
+                } catch (failure) {
+                  if (!(failure instanceof KernelStorageError) || failure.code !== 'BUDGET_EXHAUSTED') throw failure;
+                  // The genuine refusal cannot pay even its own one call.
+                  // Only the ordinary source reader may prove resource Stop;
+                  // the error code itself is never termination authority.
+                  const result = await agent.stopForResourceFailure({ expectedRunRevision: selection.run.revision });
+                  return { kind: 'not_admitted' as const, ...result };
+                }
+              }
+            });
+            // The original asynchronous producer cannot reach its transaction
+            // before this same existing load owner has been registered.
+            this.retainInstalledAgent(selection.childRunId, undefined, admission.then(result => {
+              if (result.kind !== 'admitted') {
+                // This exact owned candidate has no Run or resources. Reject
+                // before the load can read a Run, credential or native scope;
+                // its original owner joins and removes this ordinary no-load.
+                throw new KernelStorageError('NOT_FOUND', 'delegate completed without admitting a child');
+              }
+              return { run: result.child };
+            }));
+            const admitted = await admission;
+            if (admitted.kind === 'admitted') this.scheduleInstalledRun(admitted.childRunId);
+            else if (admitted.run.stopIntentRef) this.requestInstalledRunStop(runId);
+            continue;
+          }
           if (selection.disposition !== 'worker_required') throw new KernelStorageError('RECOVERY_REQUIRED', 'queued tool unexpectedly retains execution authority');
           if (!this.installedWorkerSlotAvailable(runId)) return;
         }
@@ -2879,13 +3079,16 @@ export class StateStore {
           );
         }
       }
+      if (runtimeAuthority && preflightSchemaVersion !== 0 && preflightSchemaVersion !== KERNEL_STATE_SCHEMA_VERSION &&
+          Number(driver.prepare('SELECT count(*) AS count FROM state_owners').get<{ count: unknown }>()?.count ?? 0) !== 0)
+        throw new KernelStorageError('RECOVERY_REQUIRED', 'signed schema transition requires the explicit retired runtime upgrade');
       applyKernelSchema(driver);
       const ownerHistory = driver
         .prepare('SELECT count(*) AS count FROM state_owners')
         .get<{ count: unknown }>();
       const allowLayoutCreation = Number(ownerHistory?.count ?? 0) === 0;
       await ensurePrivateDirectory(casRoot, allowLayoutCreation);
-      const artifacts = new ArtifactCatalog(new ContentAddressedStore(casRoot));
+      const artifacts = new ArtifactCatalog(new ContentAddressedStore(casRoot), undefined, runtimeAuthority?.releaseKeys);
       const owner = await acquireOrBootstrapStateOwner(stateRoot, driver, artifacts, native, heldLock, runtimeAuthority?.bundle, installed);
       const ownerContext = await stateOwnerContextFromArtifacts(stateRoot, artifacts, owner, heldLock);
       // Close abandoned capture resources before publishing the successor
@@ -3753,6 +3956,11 @@ async function acquireOrBootstrapStateOwner(
     manifestDigest: ''
   };
   schemaManifest.manifestDigest = digestOmitting(schemaManifest, 'manifestDigest');
+  let signedSchemaArtifact: PublishedArtifact | undefined;
+  if (runtimeBundle) {
+    assertSignedKernelSchemaEntry(runtimeBundle);
+    signedSchemaArtifact = await artifacts.publishCanonical(signedKernelSchemaProfile(), 'cliq-signed-kernel-schema-v1');
+  }
   const schemaArtifact = await artifacts.publishCanonical(schemaManifest, 'cliq-kernel-schema-manifest-v1');
   const runtimeArtifact = runtimeBundle ? await artifacts.publishCanonical(runtimeBundle, 'cliq-runtime-bundle-v1') : schemaArtifact;
   const supervisor = runtimeBundle?.entries.find((entry) => entry.role === 'supervisor');
@@ -3879,6 +4087,7 @@ async function acquireOrBootstrapStateOwner(
   owner.rowDigest = digestOmitting(owner, 'rowDigest');
 
   const genesisArtifacts = [stateRootArtifact, processArtifact, lockArtifact, schemaArtifact,
+    ...(signedSchemaArtifact ? [signedSchemaArtifact] : []),
     ...(runtimeBundle ? [runtimeArtifact] : []), databaseArtifact, casArtifact, generationArtifact, acquisitionArtifact];
   const rootedArtifacts = [...seedArtifacts, ...genesisArtifacts];
   if (installed) {
@@ -3917,7 +4126,7 @@ function assertPriorProcessDead(heldLock: HeldStateOwnerLock, identity: Platform
   }
 }
 
-async function acquireSuccessorStateOwner(
+export async function acquireSuccessorStateOwner(
   stateRoot: string,
   driver: SqliteDriver,
   artifacts: ArtifactCatalog,

@@ -16,6 +16,7 @@ import { KernelStorageError } from './errors.js';
 import { decodeRepairDiagnosticItem, decodeVerificationReceipt, decodeVerifierRepairDiagnostic,
   decodeVerifierRepairModelContent, verifierRepairModelContent } from './verifier-artifacts.js';
 import { decodeSessionContext, readSessionContextEntries, type SessionCompactionIndex } from './session-context.js';
+import { childResultModelContent } from './child-result-artifacts.js';
 
 export async function readCanonicalArtifact<T>(artifacts: Pick<ArtifactCatalog, 'readCanonical'>, ref: string): Promise<T> {
   const value = await artifacts.readCanonical<T>(ref);
@@ -87,6 +88,19 @@ type ContextProjectionInput = {
 
 /** Model-visible context, shared by request projection and resource-stop recovery. */
 export async function readModelContext(input: ContextProjectionInput): Promise<Pick<NormalPromptProjectionV1, 'messages' | 'tools'>> {
+  return readModelContextProjection(input);
+}
+
+/** Fixed child capture only. Normal model requests still require a closed
+ * tool batch; this reader admits only the original exact open frontier tail. */
+export async function readChildParentModelContext(input: ContextProjectionInput) {
+  if (input.run.nextStep !== 'tool' || !input.run.frontierRef) throw new TypeError('child context requires its original tool frontier');
+  const frontier = await readCanonicalArtifact<import('../kernel/types.js').RunFrontier>(input.artifacts, input.run.frontierRef);
+  if (frontier.kind !== 'tool') throw new TypeError('child context cannot infer a pending batch from text');
+  return readModelContextProjection(input, frontier.orderedCallIds.slice(frontier.nextCallIndex));
+}
+
+async function readModelContextProjection(input: ContextProjectionInput, childPendingTail?: readonly string[]): Promise<Pick<NormalPromptProjectionV1, 'messages' | 'tools'>> {
   const { artifacts, run, spec, assembly, context } = input;
   if (context.runId !== run.id || context.assemblyRef !== spec.assemblyRef || context.admittedContextRef !== spec.admittedContextRef) {
     throw new TypeError('context does not belong to the current Run');
@@ -107,7 +121,7 @@ export async function readModelContext(input: ContextProjectionInput): Promise<P
   for (const ref of admitted.additionalArtifactRefs) user('additional_context', ref, (await readText(artifacts, ref)).utf8);
   user('run_objective', spec.objectiveRef, decodeRunObjective(await readCanonicalArtifact(artifacts, spec.objectiveRef)).utf8);
   let pendingCalls: string[] = [];
-  const pendingInputs: Array<{ itemId: string; content: string }> = [];
+  const pendingInputs: Array<{ itemId: string; content: string; sourceKind: 'user_input' | 'child_result' }> = [];
   const projectItem = async (itemRef: string) => {
       const item = await readCanonicalArtifact<ContinuationItem>(artifacts, itemRef);
       if (item.runId !== run.id) throw new TypeError('context item belongs to another Run');
@@ -135,14 +149,34 @@ export async function readModelContext(input: ContextProjectionInput): Promise<P
           toolCallId: item.callId, contentUtf8: canonicalJsonBytes(content.content).toString('utf8') });
         if (pendingCalls.shift() !== item.callId) throw new TypeError('tool result projection order mismatch');
         // Native providers require all tool results before another user message.
-        if (!pendingCalls.length) for (const input of pendingInputs.splice(0)) user('user_input', input.itemId, input.content);
+        if (!pendingCalls.length) for (const input of pendingInputs.splice(0)) user(input.sourceKind, input.itemId, input.content);
       } else if (item.kind === 'user_input') {
         const content = await readCanonicalArtifact<UserInputModelContentV1>(artifacts, item.modelContentRef);
         if (content.schemaVersion !== 1 || content.format !== 'cliq-user-input-model-content-v1' ||
             content.contentDigest !== item.modelContentDigest || digestOmitting(content, 'contentDigest') !== content.contentDigest ||
             !['text', 'json'].includes(content.inputKind) || pendingCalls[0] !== item.callId) throw new TypeError('input context does not belong to its open call');
-        pendingInputs.push({ itemId: item.itemId, content: content.inputKind === 'text'
+        pendingInputs.push({ itemId: item.itemId, sourceKind: 'user_input', content: content.inputKind === 'text'
           ? content.value as string : canonicalJsonBytes(content.value).toString('utf8') });
+      } else if (item.kind === 'child_result') {
+        if (item.delivery.kind === 'stop_settlement') throw new TypeError('stop child results cannot enter model context');
+        const content = await readCanonicalArtifact<import('../kernel/children.js').ChildResultModelContentV1>(artifacts, item.modelContentRef);
+        if (content.contentDigest !== item.modelContentDigest || canonicalSha256(content) !==
+            canonicalSha256(childResultModelContent(item.childRunId, item.mode, content.content)))
+          throw new TypeError('child result model content differs from its closed projection');
+        // The actual await ToolResult carries these ordered summaries. Keep
+        // the original child item as audited source without a duplicate user
+        // message or an orphan provider tool result. Finalize has no await.
+        if (item.delivery.kind === 'await_tool') return;
+        const rendered = canonicalJsonBytes({ childRunId: item.childRunId, ...content.content }).toString('utf8');
+        if (pendingCalls.length) pendingInputs.push({ itemId: item.itemId, content: rendered, sourceKind: 'child_result' });
+        else user('child_result', item.itemId, rendered);
+      } else if (item.kind === 'child_merge_result') {
+        if (!item.modelContentRef || !item.modelContentDigest || pendingCalls.length || pendingInputs.length)
+          throw new TypeError('merge audit cannot enter model context or overtake a provider call');
+        const content = (await import('./child-merge-effect.js')).decodeChildMergeModelContent(await readCanonicalArtifact(artifacts, item.modelContentRef));
+        if (content.runId !== run.id || content.mergeBatchItemId !== item.mergeBatchItemId || content.contentDigest !== item.modelContentDigest)
+          throw new TypeError('merge model summary differs from its real owning audit outcome');
+        user('child_result', item.itemId, canonicalJsonBytes({ merge: content.merge }).toString('utf8'));
       } else if (item.kind === 'repair_diagnostic') {
         const repair = decodeRepairDiagnosticItem(item);
         if (pendingCalls.length || pendingInputs.length) throw new TypeError('verifier repair overtakes an unanswered tool call');
@@ -168,7 +202,10 @@ export async function readModelContext(input: ContextProjectionInput): Promise<P
       for (const ref of segment.preservedItemRefs) await projectItem(ref);
     } else if (segment.kind === 'raw') for (const entry of segment.items) await projectItem(entry.itemRef);
   }
-  if (pendingCalls.length || pendingInputs.length) throw new TypeError('model context contains an open tool batch');
+  if (childPendingTail) {
+    if (!childPendingTail.length || canonicalSha256(childPendingTail) !== canonicalSha256(pendingCalls) || pendingInputs.length)
+      throw new TypeError('child context differs from the exact original pending tool tail');
+  } else if (pendingCalls.length || pendingInputs.length) throw new TypeError('model context contains an open tool batch');
   return { messages,
     tools: assembly.provider.negotiation.mode === 'text-only' ? [] : input.tools.map(({ replayClass: _, ...tool }, index) => ({ index, ...tool })) };
 }

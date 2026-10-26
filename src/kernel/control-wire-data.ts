@@ -137,15 +137,17 @@ export function decodeWireRun(value: unknown): Run {
   assertControlWireJson(value);
   const run = controlWireRecord(value, ['id', 'sessionId', 'specRef', 'status', 'nextStep', 'revision', 'leaseEpoch', 'latestCheckpointId',
     'budgetReserved', 'budgetConsumed', 'repairCount', 'cancelRequested', 'createdAt', 'deadlineAt', 'updatedAt'],
-  ['parentRunId', 'frontierRef', 'waitingReason', 'waitingOnRef', 'activeWorkerLaunchId', 'resultRef', 'terminalReason', 'terminalDetailRef', 'stopIntentRef']);
+  ['parentRunId', 'frontierRef', 'waitingReason', 'waitingOnRef', 'activeWorkerLaunchId', 'resultRef', 'terminalReason', 'terminalDetailRef', 'stopIntentRef', 'parentCancellationRef']);
   for (const field of ['id', 'sessionId', 'latestCheckpointId']) controlWireText(run[field]);
   controlWireRef(run.specRef); controlWireInteger(run.revision, 1); controlWireInteger(run.leaseEpoch); controlWireInteger(run.repairCount);
   for (const field of ['createdAt', 'updatedAt', 'deadlineAt']) time(run[field]);
   decodeWireBudget(run.budgetReserved); decodeWireBudget(run.budgetConsumed);
   for (const field of ['parentRunId', 'activeWorkerLaunchId']) if (Object.hasOwn(run, field)) controlWireText(run[field]);
-  for (const field of ['frontierRef', 'waitingOnRef', 'resultRef', 'terminalDetailRef', 'stopIntentRef'])
+  for (const field of ['frontierRef', 'waitingOnRef', 'resultRef', 'terminalDetailRef', 'stopIntentRef', 'parentCancellationRef'])
     if (Object.hasOwn(run, field)) controlWireRef(run[field]);
   if (typeof run.cancelRequested !== 'boolean') invalid('Run cancellation metadata is invalid');
+  if (run.parentCancellationRef !== undefined && (run.parentRunId === undefined || run.cancelRequested !== true || run.stopIntentRef === undefined))
+    invalid('parent cancellation observation lost its child or dispatch fence');
   decodeWirePublicState(run);
   if ((run.status === 'running') !== (run.activeWorkerLaunchId !== undefined)) invalid('Run active launch metadata is inconsistent');
   if ((run.status === 'succeeded' || run.status === 'completed_unverified') && (run.stopIntentRef !== undefined || run.cancelRequested))
@@ -295,11 +297,14 @@ function decodeJournalBase(record: Record<string, unknown>): void {
   requireSafeInteger(record.seq, 'Journal.seq', 1);
   requireString(record.runId, 'Journal.runId');
   requireString(record.opId, 'Journal.opId');
-  if (typeof record.opKind !== 'string' || !['model', 'tool', 'mcp-server', 'mcp', 'verifier', 'publish'].includes(record.opKind)) {
+  if (typeof record.opKind !== 'string' || !['model', 'tool', 'mcp-server', 'mcp', 'verifier', 'publish', 'child_admission', 'child_merge', 'child_await'].includes(record.opKind)) {
     invalid('Journal.opKind is not closed');
   }
   requireSafeInteger(record.attempt, 'Journal.attempt');
-  requireSafeInteger(record.leaseEpoch, 'Journal.leaseEpoch', 1);
+  const local = record.opKind === 'child_admission' || record.opKind === 'child_merge' || record.opKind === 'child_await';
+  requireSafeInteger(record.leaseEpoch, 'Journal.leaseEpoch', local ? 0 : 1);
+  if (local && (record.leaseEpoch !== 0 || record.attempt !== 0 || record.replayClass !== 'retry'))
+    invalid('local child Journal has no worker lease or physical retry attempt');
   requireString(record.target, 'Journal.target');
   requireArtifactRef(record.requestRef, 'Journal.requestRef');
   if (typeof record.replayClass !== 'string' || !['retry', 'workspace-rollback-retry', 'reconcile', 'manual'].includes(record.replayClass)) {
@@ -325,9 +330,29 @@ function requireClaimIdentity(record: Record<string, unknown>): void {
 }
 
 export function decodeWireJournal(value: unknown): InvocationJournalEntry {
+  assertControlWireJson(value);
   const record = requireRecord(value, 'Journal');
   decodeJournalBase(record);
   const phase = record.phase;
+  if (record.opKind === 'child_admission' || record.opKind === 'child_merge' || record.opKind === 'child_await') {
+    const claim = ['dispatchId', 'supervisorInstanceId', 'stateOwnerEpoch'];
+    const extra = phase === 'prepared' ? [] : phase === 'dispatch_claimed' ? claim
+      : phase === 'completed' ? [...claim, 'resultRef', 'budgetSettlementRef'] : undefined;
+    if (!extra) invalid('local child operation cannot be externally pending, failed or UNKNOWN');
+    rejectUnknownKeys(record, [...JOURNAL_BASE_KEYS, 'localCommittedAt', ...extra], 'Journal(local child)');
+    requireArtifactRef(record.target, 'Journal.target');
+    requireString(record.idempotencyKey, 'Journal.idempotencyKey');
+    if (record.opKind === 'child_await' ? has(record, 'grantRef') : !has(record, 'grantRef')) invalid('local child grant presence differs from its fixed operation kind');
+    if (record.opKind !== 'child_await') requireArtifactRef(record.grantRef, 'Journal.grantRef');
+    requireCanonicalTime(record.localCommittedAt, 'Journal.localCommittedAt');
+    if ((record.localCommittedAt as string) < (record.timestamp as string)) invalid('local commit predates its immutable preparation');
+    if (phase !== 'prepared') requireClaimIdentity(record);
+    if (phase === 'completed') { requireArtifactRef(record.resultRef, 'Journal.resultRef'); requireArtifactRef(record.budgetSettlementRef, 'Journal.budgetSettlementRef'); }
+    const cost = decodeWireBudget(record.budgetDelta, 'Journal.budgetDelta');
+    if (BUDGET_FIELDS.some(field => cost[field] !== (field === 'toolCalls' && phase !== 'dispatch_claimed' ? 1 : 0)))
+      invalid('local child operation has an invalid single-call budget');
+    return record as InvocationJournalEntry;
+  }
   if (typeof phase !== 'string' || !['prepared', 'dispatch_claimed', 'completed', 'failed', 'unknown', 'abandoned'].includes(phase)) {
     invalid('Journal.phase is not closed');
   }

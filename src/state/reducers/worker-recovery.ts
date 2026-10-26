@@ -299,7 +299,7 @@ export const completeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', a
     assertActiveStateOwner(connection, owner);
     const current = readRun(connection, run.id);
     const unchanged = canonicalSha256(current) === canonicalSha256(run);
-    const stable = ({ revision: _revision, updatedAt: _time, stopIntentRef: _intent, cancelRequested: _cancel, ...data }: Run) => data;
+    const stable = ({ revision: _revision, updatedAt: _time, stopIntentRef: _intent, cancelRequested: _cancel, parentCancellationRef: _parentCancellation, ...data }: Run) => data;
     if ((!unchanged && (!stoppedOwner || !brokerQuiescence || !current.stopIntentRef || current.revision <= run.revision ||
         current.updatedAt < run.updatedAt || run.cancelRequested && !current.cancelRequested ||
         canonicalSha256(stable(current)) !== canonicalSha256(stable(run)))) ||

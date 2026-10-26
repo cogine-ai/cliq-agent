@@ -20,7 +20,8 @@ export async function createAgentFixture(label: string, budgets?: Partial<RunSpe
   rules?: RunPolicySnapshotV1['decisionRules']; outputSchema?: unknown; contextLimitTokens?: number;
 } = {}) {
   const authority = testFixture('openai', true, options.contextLimitTokens);
-  const supervisorDigest = options.tools?.includes('request_input') ? sha256Bytes(await readFile(process.execPath)) : undefined;
+  const supervisorDigest = options.tools?.some(name => ['request_input', 'await_children', 'delegate'].includes(name))
+    ? sha256Bytes(await readFile(process.execPath)) : undefined;
   const builtins = (options.tools ?? ['read']).map((name) => builtinInputContracts[name])
     .sort((left, right) => Buffer.compare(Buffer.from(left.name), Buffer.from(right.name)));
   const selected = builtins.map((builtin) => ({ name: builtin.name, description: `Use ${builtin.name}`, inputSchema: builtin.inputSchema,
@@ -36,6 +37,10 @@ export async function createAgentFixture(label: string, budgets?: Partial<RunSpe
     ...(options.outputSchema === undefined ? {} : { outputSchemaRef: canonicalSha256(options.outputSchema), outputSchemaDigest: canonicalSha256(options.outputSchema) })
     };
     if (tool.name === 'request_input') return { ...base, replayClass: 'manual', execution: { kind: 'supervisor_control', handlerId: 'request_input',
+      supervisorEntryId: 'supervisor-test', supervisorEntryVersion: '1', supervisorExecutableDigest: supervisorDigest! } };
+    if (tool.name === 'await_children') return { ...base, replayClass: 'manual', execution: { kind: 'supervisor_control', handlerId: 'await_children',
+      supervisorEntryId: 'supervisor-test', supervisorEntryVersion: '1', supervisorExecutableDigest: supervisorDigest! } };
+    if (tool.name === 'delegate') return { ...base, replayClass: 'retry', execution: { kind: 'supervisor_operation', handlerId: 'delegate',
       supervisorEntryId: 'supervisor-test', supervisorEntryVersion: '1', supervisorExecutableDigest: supervisorDigest! } };
     return { ...base, replayClass: tool.replayClass, execution: { kind: 'builtin', adapterId: tool.name,
       adapterVersion: '1', adapterCodeDigest: canonicalSha256({ adapter: tool.name }) } };

@@ -83,6 +83,8 @@ export function runFromRow(row: SqliteRow): Run {
   if (terminalDetail !== undefined) run.terminalDetailRef = terminalDetail;
   const stopIntent = optionalString(row.stop_intent_ref);
   if (stopIntent !== undefined) run.stopIntentRef = stopIntent;
+  const parentCancellation = optionalString(row.parent_cancellation_ref);
+  if (parentCancellation !== undefined) run.parentCancellationRef = parentCancellation;
   return run;
 }
 

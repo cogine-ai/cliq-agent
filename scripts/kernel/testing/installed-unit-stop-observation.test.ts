@@ -64,10 +64,36 @@ test('malformed manager observations yield only the closed unavailable variant w
 
 test('the real journey stop assertion still fails after the already-observed finite unit facts are recorded', async () => {
   const source = await readFile(new URL('./installed-node-journey.ts', import.meta.url), 'utf8');
-  const start = source.indexOf('            const after = units.map(unit => show(unit));');
-  const end = source.indexOf('            // The original service stop, terminal status', start);
-  assert(start > 0 && end > start);
-  const body = source.slice(start, end);
+  const parsed = ts.createSourceFile('installed-node-journey.ts', source, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS);
+  const printer = ts.createPrinter({ removeComments: true });
+  const printed = (node: ts.Node, file = parsed) => printer.printNode(ts.EmitHint.Unspecified, node, file).trim();
+  const statement = (text: string) => {
+    const file = ts.createSourceFile('expected.ts', text, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS);
+    assert.equal(file.statements.length, 1); return printed(file.statements[0]!, file);
+  };
+  const matches: Array<readonly [ts.Statement, ts.Statement, ts.Statement]> = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isBlock(node)) for (let index = 1; index + 2 < node.statements.length; index++) {
+      const after = node.statements[index]!;
+      if (printed(after) !== statement('const after = units.map(unit => show(unit));')) continue;
+      assert.equal(printed(node.statements[index - 1]!), statement("assert.equal(command('/usr/bin/systemctl', ['--user', 'stop', ...units]).status, 0);"),
+        'capture follows the original real stop command, not an unrelated later observation');
+      const observation: ts.Statement = node.statements[index + 1]!, assertions: ts.Statement = node.statements[index + 2]!;
+      assert.equal(printed(observation), statement('report.unitStopObservation = projectInstalledUnitStopObservation(before, after);'));
+      assert(ts.isForStatement(assertions), 'the original complete per-unit stop assertions immediately follow the finite capture');
+      assert.equal(printed(assertions), statement(`for (let index = 0; index < units.length; index++) {
+        const stopped = after[index]!;
+        assert.equal(stopped.ActiveState, 'inactive'); assert.equal(stopped.MainPID, '0');
+        assert.equal(stopped.TimeoutStopUSec, '2s'); assert.equal(stopped.Result, 'success');
+        assert.equal(stopped.ExecMainCode, '1'); assert.equal(stopped.ExecMainStatus, '0');
+        if (/^[1-9][0-9]*$/u.test(before[index]!.MainPID!)) await assert.rejects(lstat('/proc/' + before[index]!.MainPID), { code: 'ENOENT' });
+      }`), 'every original state, Stop2, exit and process-absence assertion remains exact');
+      matches.push([after, observation, assertions]);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed); assert.equal(matches.length, 1, 'select exactly the original stop/capture/assertion block');
+  const body = matches[0]!.map(node => node.getText(parsed)).join('\n');
   assert(body.indexOf('report.unitStopObservation =') < body.indexOf("assert.equal(stopped.ActiveState, 'inactive')"));
   assert(!body.includes('delay(') && !body.includes('Date.') && !body.includes('setTimeout(') && !body.includes('command('));
   const code = ts.transpileModule(`return (async()=>{${body}})();`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
@@ -84,4 +110,14 @@ test('the real journey stop assertion still fails after the already-observed fin
   await assert.rejects(invoke(units, () => ({ ActiveState: 'failed' }), malformed, projectInstalledUnitStopObservation, assert, before,
     () => assert.fail('original state assertion still fails before process I/O')), assert.AssertionError);
   assert.deepEqual(malformed.unitStopObservation, unavailable, 'capture refusal neither hides nor replaces the original assertion');
+  const stopped = units.map(() => raw('0', { ActiveState: 'inactive', SubState: 'dead', TimeoutStopUSec: '2s',
+    Result: 'success', ExecMainCode: '1', ExecMainStatus: '0' }));
+  const joined: string[] = [], completed: Record<string, unknown> = {};
+  await invoke(units, (unit: string) => stopped[units.indexOf(unit)], completed, projectInstalledUnitStopObservation, assert, before,
+    async (name: string) => { joined.push(name); throw Object.assign(new Error('absent'), { code: 'ENOENT' }); });
+  assert.deepEqual(joined, ['/proc/17', '/proc/18'], 'both original process-absence assertions still execute after the finite observation');
+  assert.deepEqual(completed.unitStopObservation, projectInstalledUnitStopObservation(before, stopped));
+  await assert.rejects(invoke(units, () => ({ ...stopped[0], TimeoutStopUSec: '3s' }), {}, projectInstalledUnitStopObservation, assert, before,
+    () => assert.fail('the original two-second contract precedes process I/O')),
+  error => error instanceof assert.AssertionError && error.actual === '3s' && error.expected === '2s');
 });

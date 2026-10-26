@@ -11,6 +11,14 @@ type Input = { executable: string; args: readonly string[]; cwd: string; env: No
   runId: string; sessionId: string; originalSubmission: Data; originalAdmission: Data;
   send(request: Data): Promise<Data>; counts(): readonly [number, number, number]; providerHealthy(): boolean;
   openScan(): Scan; onJoined(): void };
+export type InstalledClientApplicationsProof = Readonly<{
+  schemaVersion: 1; format: 'cliq-installed-client-applications-v1'; fixtureProfile: 'cli_sdk_shared_host_v1'; qualified: true;
+  originalRunId: string; originalProviderRequests: 5; additionalProviderRequests: 0;
+  cliNaturalReadAndOriginalAdmissionReplay: true; embeddedSdkReadAndDetach: true; jsonlReadAndLists: true;
+  rpcReadAndFrozenCursorReplay: true; originalRunJournalCheckpointAndSessionPreserved: true;
+  applicationProcessesAndPipesJoined: true; ink: Awaited<ReturnType<typeof qualifyInstalledInkDetach>>;
+  newExecutionQualified: false; completeI3Qualified: false;
+}>;
 const accepted = (value: Data, method: string): Data => { assert(value.ok === true && value.protocolVersion === 1 && value.result.method === method); return value.result; };
 const equal = (actual: unknown, expected: unknown) => assert.deepEqual(canonicalJsonBytes(actual), canonicalJsonBytes(expected));
 
@@ -22,7 +30,7 @@ export function assertSameAuthorizationListing(expected: Data, actual: Data): vo
   assert.equal(typeof actualCursor, typeof expectedCursor);
 }
 
-export async function qualifyInstalledClientApplications(input: Input) {
+export async function qualifyInstalledClientApplications(input: Input): Promise<InstalledClientApplicationsProof> {
   const counts = input.counts(); assert.deepEqual(counts, [5, 5, 5]); assert(input.providerHealthy());
   const runGet = { protocolVersion: 1 as const, method: 'run.get' as const, runId: input.runId };
   const sessionGet = { protocolVersion: 1 as const, method: 'session.get' as const, sessionId: input.sessionId };
@@ -42,6 +50,8 @@ export async function qualifyInstalledClientApplications(input: Input) {
   const replay = decodeInstalledControlRequest(input.originalSubmission); assert.equal(replay.method, 'run.submit');
   client = await open(['--client-entry', 'request', canonicalJsonBytes(replay).toString('utf8'), '--json'], undefined, replay);
   try { equal(await client.initialResponse, input.originalAdmission); } finally { await client.close(); }
+  client = await open(['--client-sdk-read', input.runId], undefined, runGet);
+  try { equal(await client.initialResponse, beforeRun); } finally { await client.close(); }
   const list = { protocolVersion: 1, method: 'run.list', sessionId: input.sessionId, operation: 'agent', limit: 1 };
   let cursor: string, next: Data;
   client = await open(['--client-jsonl']);
@@ -62,9 +72,9 @@ export async function qualifyInstalledClientApplications(input: Input) {
   const ink = await qualifyInstalledInkDetach({ ...input, args: [...input.args, '--client-entry', 'tui', '--run', input.runId] });
   equal(await input.send(runGet), beforeRun); equal(await input.send(sessionGet), beforeSession);
   assert.deepEqual(input.counts(), counts); assert(input.providerHealthy());
-  return Object.freeze({ schemaVersion: 1, format: 'cliq-installed-client-applications-v1', qualified: true,
+  return Object.freeze({ schemaVersion: 1, format: 'cliq-installed-client-applications-v1', fixtureProfile: 'cli_sdk_shared_host_v1', qualified: true,
     originalRunId: input.runId, originalProviderRequests: 5, additionalProviderRequests: 0,
-    cliNaturalReadAndOriginalAdmissionReplay: true, jsonlReadAndLists: true, rpcReadAndFrozenCursorReplay: true,
+    cliNaturalReadAndOriginalAdmissionReplay: true, embeddedSdkReadAndDetach: true, jsonlReadAndLists: true, rpcReadAndFrozenCursorReplay: true,
     originalRunJournalCheckpointAndSessionPreserved: true, applicationProcessesAndPipesJoined: true, ink,
     newExecutionQualified: false, completeI3Qualified: false });
 }

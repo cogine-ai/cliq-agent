@@ -209,6 +209,14 @@ test('the actual experimental entry rejects invalid provisioning before creating
 // Source wiring, not GNU strip/SEA execution or installed qualification. The
 // immutable CT projection preserves every original job, condition and budget.
 function assertCarrierExperimentWorkflow(workflow: string): void {
+  const upgradeStart = workflow.indexOf('  installed-runtime-upgrade:\n');
+  const originalStart = workflow.indexOf('  # Public-repository qualification stays on free standard GitHub-hosted\n', upgradeStart);
+  assert.equal(upgradeStart, workflow.indexOf('jobs:\n') + 'jobs:\n'.length);
+  assert(originalStart > upgradeStart);
+  const upgrade = workflow.slice(upgradeStart, originalStart);
+  assert.equal(createHash('sha256').update(upgrade).digest('hex'), 'ad971cd9def7e58b4591e7aef5907ff5dce694917ee4aca0b82ddef02ed5f669',
+    'the independent signed7-to-8 job keeps its exact free runner, source, command, publisher, artifact and twenty-minute contract');
+  const originalWorkflow = workflow.slice(0, upgradeStart) + workflow.slice(originalStart);
   const experiment = [
     '      - name: Measure fixed carrier metadata reduction without selecting it',
     "        if: ${{ !cancelled() && steps.build.outcome == 'success' }}",
@@ -248,9 +256,13 @@ function assertCarrierExperimentWorkflow(workflow: string): void {
     '          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh "$probe_node" "$RUNNER_TEMP/cliq-systemd-user"\n'),
   'the lifecycle regression precedes the unchanged actual systemd campaign in its original step');
   const buildDependencies = 'bubblewrap libcap-dev libselinux1-dev meson ninja-build';
-  const aptLines = workflow.split('\n').filter(line => line.includes('apt-get install') && /\bbubblewrap\b/u.test(line));
+  const aptLines = originalWorkflow.split('\n').filter(line => line.includes('apt-get install') && /\bbubblewrap\b/u.test(line));
   assert.equal(aptLines.length, 18, 'only the eighteen original bubblewrap installation commands receive fixed source-build dependencies');
-  assert.equal(workflow.split(buildDependencies).length, 19, 'the exact dependency group must occur once in each original command');
+  assert.equal(originalWorkflow.split(buildDependencies).length, 19, 'the exact dependency group must occur once in each original command');
+  const upgradeAptLines = upgrade.split('\n').filter(line => line.includes('apt-get install') && /\bbubblewrap\b/u.test(line));
+  assert.deepEqual(upgradeAptLines, ['        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap libcap-dev libselinux1-dev meson ninja-build e2fsprogs libext2fs-dev pkg-config']);
+  assert.equal(workflow.split('\n').filter(line => line.includes('apt-get install') && /\bbubblewrap\b/u.test(line)).length, 19);
+  assert.equal(workflow.split(buildDependencies).length, 20, 'the sole new dependency command is the exact independent upgrade job');
   for (const line of aptLines) assert.equal(line.split(buildDependencies).length, 2,
     'the original APT bubblewrap remains for its negative parameter regression alongside the fixed build dependencies');
   const storageRegression = [
@@ -268,7 +280,7 @@ function assertCarrierExperimentWorkflow(workflow: string): void {
     '          node --test --import tsx scripts/kernel/testing/guest-verifier-process.test.ts scripts/kernel/testing/guest-verifier-diagnostics.test.ts\n' +
     storageRegression + '          regression="$RUNNER_TEMP/cliq-worker-seccomp-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"\n'),
   'the source-build regressions stay inside the original actual native ABI step, before its unchanged compiler and syscall checks');
-  const projected = workflow.replace(experiment, '').replace(retain, '').replace(parentEvidenceTest, '')
+  const projected = originalWorkflow.replace(experiment, '').replace(retain, '').replace(parentEvidenceTest, '')
     .replace(sessionRegression, '').replace(processRegression, '').replaceAll(buildDependencies, 'bubblewrap').replace(storageRegression, '');
   assert.equal(createHash('sha256').update(projected).digest('hex'), '346af80a56060feace86c309b316c67560f68c512207d6cd3c95ab965cb225f5',
     'all original CT jobs, runner groups, timeouts, qualifiers and conditions must remain byte-identical');
@@ -290,7 +302,14 @@ test('the additive parent-domain regression cannot hide workflow removals, disab
   const storageEnd = '          "$storage_regression"\n';
   const storageStart = workflow.indexOf(negativeParameters);
   const storageRegression = workflow.slice(storageStart, workflow.indexOf(storageEnd, storageStart) + storageEnd.length);
+  const upgradeStart = workflow.indexOf('  installed-runtime-upgrade:\n');
+  const originalStart = workflow.indexOf('  # Public-repository qualification stays on free standard GitHub-hosted\n', upgradeStart);
+  const upgrade = workflow.slice(upgradeStart, originalStart);
+  const mutateOriginal = (from: string, to: string) => workflow.slice(0, originalStart) + workflow.slice(originalStart).replace(from, to);
   const mutations = [
+    workflow.replace(upgrade, ''),
+    workflow.replace(upgrade, upgrade.repeat(2)),
+    workflow.replace('old_commit=25130cfec913bddaff4d0a8c7ff4aac7ef2db932', 'old_commit=410c8193ea516b0b9f8e6a746c4376003e67b5a4'),
     workflow.replace(parentEvidenceTest, ''),
     workflow.replace(parentEvidenceTest, parentEvidenceTest.repeat(2)),
     workflow.replace(parentEvidenceTest, '          # scripts/kernel/testing/installed-verifier-parent-evidence.test.ts\n'),
@@ -313,10 +332,10 @@ test('the additive parent-domain regression cannot hide workflow removals, disab
     workflow.replace(storageRegression, storageRegression.replace(' -Werror -static', ' -static')),
     workflow.replace(storageRegression, '').replace('        run: |\n', '        run: |\n' + storageRegression),
     workflow.replace('        node: [22.13.0, 24.x]', '        node: [24.x]'),
-    workflow.replace('    runs-on: ubuntu-22.04', '    runs-on: ubuntu-22.04-8core'),
-    workflow.replace('    timeout-minutes: 20', '    timeout-minutes: 21'),
+    mutateOriginal('    runs-on: ubuntu-22.04', '    runs-on: ubuntu-22.04-8core'),
+    mutateOriginal('    timeout-minutes: 20', '    timeout-minutes: 21'),
     workflow.replace('    timeout-minutes: 15', '    timeout-minutes: 16'),
-    workflow.replace("        if: ${{ !cancelled() && steps.build.outcome == 'success' }}", '        if: false'),
+    mutateOriginal("        if: ${{ !cancelled() && steps.build.outcome == 'success' }}", '        if: false'),
     workflow.replace('      - run: npm test\n', ''),
   ];
   for (const mutated of mutations) {

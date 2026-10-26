@@ -328,6 +328,10 @@ Implementation notes:
       schemaVersion: 1
       runId: string
       createdAt: string
+      registeredCheckpointId?: string
+      registeredRunRevision?: number
+      registeredJournalSeq?: number
+      supersedesStopIntentRef?: ArtifactRef
     }
 
     type RuntimeFailureEvidenceBaseV1 = {

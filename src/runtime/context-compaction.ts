@@ -42,7 +42,7 @@ export function validateContextItems(context: ContextManifest, items: readonly C
       if (canonicalSha256(segment.items) !== canonicalSha256(source.map(({ itemSeq, itemRef }) => ({ itemSeq, itemRef })))) {
         throw new TypeError('raw context does not match its source rows');
       }
-      if (source.some(({ item }) => item.kind !== 'model_turn' && item.kind !== 'tool_result' && item.kind !== 'user_input' && item.kind !== 'repair_diagnostic')) {
+      if (source.some(({ item }) => item.kind !== 'model_turn' && item.kind !== 'tool_result' && item.kind !== 'user_input' && item.kind !== 'repair_diagnostic' && (item.kind !== 'child_result' || item.delivery.kind === 'stop_settlement') && (item.kind !== 'child_merge_result' || item.modelContentRef === undefined))) {
         throw new TypeError('control items cannot enter raw model context');
       }
     } else {
@@ -57,10 +57,11 @@ export function validateContextItems(context: ContextManifest, items: readonly C
           throw new TypeError('summary is not backed by its exact compaction item and source range');
         }
       } else if (segment.kind !== 'excluded_control' || source.some(({ item }) =>
-        item.kind !== 'assistant_tool_batch' && item.kind !== 'context_compaction' && item.kind !== 'policy_decision' && item.kind !== 'input_request' &&
+        !(item.kind === 'model_turn' && item.stopReason === 'end') && item.kind !== 'assistant_tool_batch' && item.kind !== 'context_compaction' && item.kind !== 'policy_decision' && item.kind !== 'input_request' &&
         item.kind !== 'final_candidate' && item.kind !== 'verifier_result' && item.kind !== 'verifier_stop' &&
         item.kind !== 'delivery_merge' && item.kind !== 'delivery_merge_conflict' && item.kind !== 'delivery_decision' &&
-        item.kind !== 'publication_path_progress' && item.kind !== 'publication_path_result' && item.kind !== 'publication_late_observation')) {
+        item.kind !== 'publication_path_progress' && item.kind !== 'publication_path_result' && item.kind !== 'publication_late_observation' &&
+        item.kind !== 'child_handle' && item.kind !== 'child_merge_batch' && (item.kind !== 'child_merge_result' || item.modelContentRef !== undefined) && (item.kind !== 'child_result' || item.delivery.kind !== 'stop_settlement'))) {
         throw new TypeError('model-visible items cannot be hidden as excluded control');
       }
     }
@@ -108,6 +109,9 @@ function closedBoundaries(items: readonly ContextItem[]): Set<number> {
       }
     } else if (item.kind === 'final_candidate' || item.kind === 'verifier_result' || item.kind === 'verifier_stop' || item.kind === 'repair_diagnostic') {
       if (batch || awaitingBatch) throw new TypeError('candidate or verifier evidence cannot overtake an open tool batch');
+    } else if (item.kind === 'child_handle' || item.kind === 'child_result' || item.kind === 'child_merge_batch' || item.kind === 'child_merge_result') {
+      // The child history reducer independently validates complete wait/batch
+      // ownership. Audit items neither answer a provider call nor open one.
     } else if (item.kind !== 'context_compaction' && item.kind !== 'policy_decision') throw new TypeError('unsupported live context item');
     if (!batch && !awaitingBatch) closed.add(itemSeq);
   }
