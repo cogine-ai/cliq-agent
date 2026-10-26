@@ -21,14 +21,18 @@ import { STATE_OWNER_NATIVE_ENTRY_ID, STATE_OWNER_NATIVE_RELATIVE_PATH } from '.
 import { openInstalledLinuxWorkerLauncher } from '../sandbox/linux-worker.js';
 import { KernelStorageError } from './errors.js';
 import { GUEST_EXTRACTOR_RECIPE } from '../sandbox/guest-toolchain.js';
+import { validateBundle } from './installed-artifacts.js';
 import { observeInstalledCredentialSupervisor } from './installed-services.js';
 import { INSTALLED_WORK_CHANNEL, type InstalledWorkSnapshot } from './installed-work-diagnostics.js';
 
 /** Real signed files for installer/CAS semantics only. The opaque executable
  * entries are deliberately not running Supervisor/worker/addon images and are
  * never spawned or dlopened. They establish no execution qualification. */
+type InstallerFile = Omit<RuntimeBundleManifest['entries'][number], 'digest' | 'byteCount' | 'version'> & {
+  bytes: Buffer; version?: string;
+};
 async function writeInstallerOnlyPackage(packageRoot: string, unclosedPromptRole?: 'system_prompt' | 'compaction_prompt',
-  supervisorBytes?: Buffer, guestImageBytes?: Buffer) {
+  supervisorBytes?: Buffer, guestImageBytes?: Buffer, sourceInspector?: InstallerFile) {
   await mkdir(packageRoot, { mode: 0o700 });
   const profile = policyProfile();
   const rootCore = {
@@ -37,7 +41,7 @@ async function writeInstallerOnlyPackage(packageRoot: string, unclosedPromptRole
     persistent: false, networkConfiguration: 'none',
   };
   const rootRecipe = { ...rootCore, profileDigest: canonicalSha256(rootCore) };
-  const contents = [
+  const contents: InstallerFile[] = [
     { entryId: 'installer-only-supervisor', role: 'supervisor', relativePath: 'supervisor', executable: true,
       bytes: supervisorBytes ?? Buffer.from('installer-only opaque Supervisor bytes; not a runnable image\n') },
     { entryId: 'installer-only-worker', role: 'worker', relativePath: 'workers/worker', executable: true,
@@ -51,6 +55,7 @@ async function writeInstallerOnlyPackage(packageRoot: string, unclosedPromptRole
     { entryId: 'installer-only-empty-root', role: 'sandbox_root_profile', relativePath: 'profiles/empty-root.json', executable: false,
       bytes: canonicalJsonBytes(rootRecipe) },
   ];
+  if (sourceInspector) contents.push(sourceInspector);
   if (unclosedPromptRole) contents.push({
     entryId: `installer-only-${unclosedPromptRole}`, role: unclosedPromptRole,
     relativePath: `prompts/${unclosedPromptRole}.txt`, executable: false,
@@ -89,11 +94,11 @@ async function writeInstallerOnlyPackage(packageRoot: string, unclosedPromptRole
       relativePath: `objects/sha256/${ref.slice(0, 2)}/${ref}`, executable: false, bytes })));
   }
   const entries: RuntimeBundleManifest['entries'] = [];
-  for (const { bytes, ...entry } of contents) {
+  for (const { bytes, version = '1', ...entry } of contents) {
     const filename = path.join(packageRoot, entry.relativePath);
     await mkdir(path.dirname(filename), { recursive: true, mode: 0o700 });
     await writeFile(filename, bytes, { flag: 'wx', mode: entry.executable ? 0o500 : 0o400 });
-    entries.push({ ...entry, version: '1', digest: sha256Bytes(bytes), byteCount: bytes.byteLength });
+    entries.push({ ...entry, version, digest: sha256Bytes(bytes), byteCount: bytes.byteLength });
   }
   const bundle: RuntimeBundleManifest = {
     schemaVersion: 1, bundleVersion: 'installer-file-verification-only-v1',
@@ -116,6 +121,65 @@ async function writeInstallerOnlyPackage(packageRoot: string, unclosedPromptRole
   await writeFile(path.join(packageRoot, 'manifest.json'), canonicalJsonBytes(bundle), { flag: 'wx', mode: 0o400 });
   return { bundle, releaseKeys, profile, rootRecipe, contents };
 }
+
+const sourceInspectorFile = (overrides: Partial<InstallerFile> = {}): InstallerFile => ({
+  entryId: 'source_git_inspector', role: 'platform_helper', version: '1',
+  relativePath: 'helpers/source-git-inspector.mjs', executable: false,
+  bytes: Buffer.from('// signed installer-only source inspector; never executed\n'), ...overrides,
+});
+
+test('the signed installer accepts only the fixed source inspector as non-executable helper code', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'cliq-source-helper-manifest-'));
+  try {
+    for (const [name, bytes] of [['small', Buffer.from(';')], ['maximum', Buffer.alloc(1_048_576, 0x20)]] as const) {
+      const signed = await writeInstallerOnlyPackage(path.join(root, name), undefined, undefined, undefined, sourceInspectorFile({ bytes }));
+      const checked = validateBundle(signed.bundle, signed.releaseKeys);
+      const helper = checked.entries.find(entry => entry.entryId === 'source_git_inspector')!;
+      assert.equal(helper.executable, false); assert.equal(helper.byteCount, bytes.length);
+      assert.equal(helper.digest, sha256Bytes(bytes)); assert(Object.isFrozen(checked));
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('a real signature cannot widen the fixed non-executable helper recipe', async t => {
+  const variants: Record<string, Partial<InstallerFile>> = {
+    id: { entryId: 'other_helper' }, version: { version: '2' }, path: { relativePath: 'helpers/other.mjs' },
+    role: { role: 'tool_adapter' }, executable: { executable: true }, empty: { bytes: Buffer.alloc(0) },
+    oversized: { bytes: Buffer.alloc(1_048_577, 0x20) },
+  };
+  for (const [name, changes] of Object.entries(variants)) await t.test(name, async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'cliq-source-helper-refusal-'));
+    try {
+      const signed = await writeInstallerOnlyPackage(path.join(root, 'package'), undefined, undefined, undefined, sourceInspectorFile(changes));
+      assert.throws(() => validateBundle(signed.bundle, signed.releaseKeys), { code: 'ARTIFACT_MISMATCH' });
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+});
+
+if (process.platform === 'linux') test('the installer preserves and rechecks the complete signed non-executable source helper', async () => {
+  // Real signed files/install/held-selection only. Opaque executable fixtures
+  // are never launched; this supplies no worker or StateOwner proof.
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'cliq-source-helper-install-')));
+  const packageRoot = path.join(root, 'package'), stateRoot = path.join(root, 'state');
+  let selected: HeldInstalledRuntime | undefined;
+  try {
+    const source = sourceInspectorFile();
+    const signed = await writeInstallerOnlyPackage(packageRoot, undefined, undefined, undefined, source);
+    const runtime = createInstalledRuntime({ releaseKeys: signed.releaseKeys });
+    const installation = await runtime.installInitial({ packageRoot, stateRoot });
+    selected = await runtime.openSelected(stateRoot);
+    const file = path.join(stateRoot, 'runtime/bundles', installation.bundleDigest, source.relativePath);
+    assert.deepEqual(await readFile(file), source.bytes); assert.equal((await lstat(file)).mode & 0o777, 0o400);
+    await withHeldInstalledRuntime(selected, async installed => {
+      assert(!installed.seed.some(entry => entry.artifactRef === sha256Bytes(source.bytes)), 'code remains in its original signed runtime closure');
+    });
+    await selected.close(); selected = undefined;
+    const changed = Buffer.from(source.bytes); changed[0] = changed[0]! ^ 1;
+    await chmod(file, 0o600); await writeFile(file, changed); await chmod(file, 0o400);
+    await assert.rejects(runtime.openSelected(stateRoot), { code: 'ARTIFACT_MISMATCH' });
+    assert(!(await readdir(stateRoot)).includes(KERNEL_DATABASE_FILENAME), 'installation never creates StateOwner or business state');
+  } finally { await selected?.close(); await rm(root, { recursive: true, force: true }); }
+});
 
 async function platformRevalidationExpressions() {
   const source = await readFile(new URL('./installed-runtime.ts', import.meta.url), 'utf8');

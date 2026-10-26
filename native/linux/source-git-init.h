@@ -348,7 +348,7 @@ static int source_namespace(struct cliq_worker_packet request, int passed[3]) {
         if (ready < 0) break;
         if (fds[0].revents) {
             struct cliq_worker_packet command; size_t count;
-            if (!(fds[0].revents & POLLIN) || !cliq_receive(3, &command, NULL, 0, &count) || !cliq_fixed_git_same_prepared(&request, &command)) break;
+            if (!(fds[0].revents & POLLIN) || !cliq_receive(3, &command, NULL, 0, &count) || !cliq_fixed_git_namespace_same_prepared(&request, &command)) break;
             if (command.command == CLIQ_SOURCE_RELEASE_CAPTURE && !released) released = true;
             else if (command.command == CLIQ_SOURCE_CONTINUE_GIT && released && !continued) continued = true;
             else break;
@@ -357,7 +357,7 @@ static int source_namespace(struct cliq_worker_packet request, int passed[3]) {
         if (fds[1].revents) {
             struct cliq_worker_packet response; int outputs[CLIQ_SOURCE_TRANSFER_OUTPUTS] = {-1, -1, -1, -1, -1}; size_t count;
             if (!(fds[1].revents & POLLIN) || !cliq_receive(channel[0], &response, outputs, CLIQ_SOURCE_TRANSFER_OUTPUTS, &count) ||
-                !cliq_fixed_git_same_prepared(&request, &response)) break;
+                !cliq_fixed_git_namespace_same_prepared(&request, &response)) break;
             valid = !result && ((response.command == CLIQ_WORKER_READY && !released && count == 0) ||
                 (response.command == CLIQ_SOURCE_SEALED && released && !continued && count == 0) ||
                 (response.command == CLIQ_SOURCE_RESULT && continued && cliq_source_rule_result_valid(&response) &&

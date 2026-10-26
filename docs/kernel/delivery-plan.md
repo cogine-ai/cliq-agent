@@ -13,77 +13,70 @@ Linux execution/restart and cancellation foundations are real, but a final
 model turn still stops at `candidate_required`. No work package or complete I1
 is declared finished by the 32 passing checks.
 
-Latest completed exact-head result (2026-10-25): `b2b3215`
-[run 478](https://github.com/cogine-ai/cliq-agent/actions/runs/40230975104)
-has sixteen successful and six failed jobs; all four TypeScript jobs pass.
-The complete collector retains 105 original reports / 525,316 bytes across
-23 categories, with no missing, incomplete or rejected report. All 21 cleanup
-reports have zero errors and all 21 runner-baseline pairs are byte-identical.
-The original collector, poller, wrapper and scoped awake guard actually join.
-Final capture SHA-256:
-`88ad585d715703f9ca01b0b2b8e886ac74f335af4512825fa0be8aa84e6f1db9`;
-independent full-schema/integrity closeout SHA-256:
+Latest exact-head result (2026-10-26): `f12e2a05e063eb146971697e43224cd1bfb7a736`
+[run 479](https://github.com/cogine-ai/cliq-agent/actions/runs/40243207797)
+has fifteen successful and seven failed jobs; all four TypeScript jobs and
+the real systemd/user-manager process campaign pass. Its complete local gate
+passes 3,012 source tests (three existing skips), 367 script tests (15 existing
+skips) and 102 portable tests (two Linux-only skips), with the actual Node
+22.13.0 child runtime verified.
+
+The original normal installed Run journey now independently qualifies Session
+fork/compact/list/handoff/new-Run resume, original-response replay, reconnect,
+and unique terminal publication with physical retirement. It retains four
+original controlled HTTPS requests plus one new request and three new Journal
+entries. This is controlled-endpoint evidence, not real-provider or complete
+I1 qualification. The enclosing job later fails a separate failure campaign.
+
+Eleven captures retain 105 original reports / 414,016 bytes across 23 categories;
+the collector, poller, wrapper, pipes and scoped awake guard actually join.
+The native category is explicitly incomplete: preparation fails before its
+report, so neither the preparation cut nor the original verifier scenarios are
+qualified by this run. No old report is substituted. Final capture SHA-256:
+`a7145b19203eb5e8763ab62178ecbada80c893de42215250f7595b1cd6729054`.
+Independent schema/integrity closeout verifies all retained bytes, 21 zero-error
+cleanups and 21 identical baseline pairs, while keeping `collectionComplete`
+false and naming both missing reports. Closeout SHA-256:
+`b4d7b30466f72df21877e90497409010c78279d2a2dfe3f74bde4a449987a5e4`.
+
+Five jobs fail during genuine signed installation before creating a Run. The
+production manifest validator incorrectly requires every platform helper to be
+executable, although the fixed source-inspection recipe is signed Node data.
+The correction accepts only `source_git_inspector` / `platform_helper` / version
+`1` / `helpers/source-git-inspector.mjs`, nonexecutable and 1..1,048,576 bytes.
+All signature, full-byte, identity, mode and other helper checks remain. Signed
+positive/negative and actual asset-builder regressions pass locally; the new
+real Linux install/read/tamper regression still requires its Linux run.
+
+Preparation also incorrectly compares the original host UID to namespace UID
+zero. Host validation remains unchanged. Guest producer and relay checks now
+require real UID/GID zero and the fixed, no-follow `/proc/self/uid_map` to have
+exactly one bounded mapping, namespace zero to the original host UID for one
+UID. Pure parser tests and native compilation are not real namespace, READY or
+retirement qualification; those original installed/native cuts remain pending.
+The fixed inspector now uses a real named 0444 private copy: its former
+anonymous bind-data inode could not satisfy the unchanged single-link guard.
+Full hash/currentness, readonly/noexec confinement and resource limits remain;
+direct Linux component checks do not qualify real bubblewrap READY.
+
+The separate failure campaign still expects a trusted fresh Git Session to
+parse Git configuration. Under the descriptor-only `RepositoryIdentityV2`
+contract, Session creation reads identity only; source inspection needs its
+independent grant. The corrected campaign validates the actual Session and CAS
+identities, refuses submission without that grant, proves no Run was admitted,
+and checks the original configuration is preserved. It does not reinterpret
+the old report or infer zero reads from unchanged bytes. Real Linux execution
+of this corrected campaign remains pending.
+
+The previous complete archive for `b2b3215` / run 478 retains 105 reports /
+525,316 bytes, 21 zero-error cleanups and 21 identical runner-baseline pairs.
+Its independent full-schema/integrity closeout remains
 `451f3a4f8af796c30b0b922ec8067189c157cbf0d2772cc902c2df2c8f9d9d2b`.
-
-The normal signed Run and schema3 JSONL/RPC campaign passes. Normal Delivery
-passes its three sources / six model requests and proceeds beyond the old
-replacement-unit comparison: the real third owner is active, the original
-epoch is superseded, all three owner links and the same keeper pass, and the
-cleanup observer joins. Its successor's first persistent client then reports
-the fixed `authentication` failure marker. The current marker does not retain
-the already parsed authentication observations, so its precise failing stage
-is not established. A later service-stop assertion is not the original cause.
-The new closed diagnostic retains those existing observations and projects
-the two already observed unit-stop results; it adds no command or authority.
-
-The original-stop and late-result owned-storage campaigns pass READY but time
-out on their first source request in `submit_final_admission`, before any
-target physical cut. The delayed-storage campaign instead misses READY at
-5,002 ms. None is qualified. The next candidate groups two fixed admission
-quartets through the approved four-stage publication contract and removes
-three redundant reads immediately repeated by a complete `describe` in the
-same read cut. Full byte checks, original credential/material validation,
-sole admission transaction and all deadlines remain unchanged; actual Linux
-latency improvement is not yet verified. The verifier still exhausts its
-original cumulative 4,096 independent-stream limit before completing coverage.
-
-The user-manager diagnostic fails while reading a process's cgroup namespace
-with `EACCES`; that snapshot does not establish its process state. A separate
-real Linux regression reproduces namespace `EACCES` for both live private
-processes and unreaped private zombies. The corrected probe preserves a
-same-identity zombie as present with unavailable namespace information, while
-live-process failures still throw; absence requires a genuinely absent
-original process locator. The original systemd campaign must pass independently.
-
-The combined candidate now includes ordinary Git preparation and cleanup,
-Session fork/compact/list/handoff/resume, fixed Git-index observation and the
-preparing successor's cleanup-only lifecycle. Their focused regressions do not
-qualify the new installed Git/Session branches or physical successor cuts.
-Complete I1–I4, the remaining installed tools and ecosystem, real-provider,
-macOS, reboot, scale and default CLI/TUI Kernel Cut obligations remain open.
-No complete work package or release is declared finished; no PR is opened.
-
-The first combined local run (tree
-`5497d67a026108449639817efd189f7f74bc47e2`) builds and executes all 3,010
-source tests: 3,006 pass, three existing tests skip, and one stale native-error
-assertion fails. A real descriptor retirement failure correctly stays sticky;
-the test now requires its exact resource-retirement error code instead of an
-ordinary identity/closed message. A separate 382-test script preflight finds
-three stale boundary/workflow expectations; their correction retains the
-original phase ordering and workflow fingerprint, allowing only the exact two
-new regression commands. Missing, repeated or commented commands still fail.
-The failed outputs remain retained; this is not a passing combined gate.
-
-A follow-up actual schema-only Store experiment creates and closes v6, records
-the genuine rejection by the uncorrected v7 reader, then opens/closes the same
-database using the corrected v7 reader. Its original v6 genesis bytes remain
-unchanged. Known historical DDL, version and empty-database identities are now
-bound to the first owner's original schema runtime. Self-consistent birth
-substitution is separately rejected for schema-only and signed runtime sources.
-Signed historical births without an exact original signed schema source remain
-unsupported; this component experiment does not qualify signed runtime upgrade,
-installed Linux upgrade, activation or rollback. The next complete local gate
-and real Linux campaigns remain required before submission.
+Normal Delivery recovery, owned delayed-storage cuts, cumulative verifier
+secret-scan coverage, remaining tools/ecosystem/clients, real provider, signed
+runtime upgrade, macOS, reboot, scale and default CLI/TUI Kernel Cut remain
+open. No deadline, scan bound, safety check or acceptance standard changes;
+no complete work package or release is declared finished, and no PR is opened.
 
 Previous completed exact-head result (2026-10-25): `bcab05e`
 [run 477](https://github.com/cogine-ai/cliq-agent/actions/runs/40216567031)

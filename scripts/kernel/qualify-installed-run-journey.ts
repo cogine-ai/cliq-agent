@@ -12,7 +12,8 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 import { canonicalJsonBytes, canonicalSha256 } from '../../src/kernel/canonical.js';
-import { decodeInstalledControlResponse } from '../../src/control/v1.js';
+import { decodeInstalledControlResponse, type InstalledControlRequestV1 } from '../../src/control/v1.js';
+import { decodeRepositoryIdentity } from '../../src/state/repository-identity.js';
 import { decodeBrokerProcessDomainDeath, decodeBrokerProcessDomainDeathDispatchClosure } from '../../src/kernel/broker-process-domain-death.js';
 import { decodeCredentialAuthorityOperation, decodeCredentialAuthorityRevokeOperation,
   decodeEndpointAuthorityOperation, type EndpointRegistrationV1 } from '../../src/kernel/credential-authority.js';
@@ -33,7 +34,7 @@ import { InstalledClientConsumerDeadlineError, InstalledClientDriverError, openI
 import { qualifyInstalledOwnerLinks } from './testing/installed-owner-history.js';
 import { projectInstalledRunProgress, projectInstalledServiceExit, projectInstalledSupervisorStatus } from '../../src/sandbox/testing/installed-run-progress.js';
 import { decodeFinalCandidateItem, decodeRunResult, decodeVerificationClosure, decodeVerifierPlan, decodeWorkspaceDiff } from '../../src/state/result-artifacts.js';
-import { decodeSourceManifest, decodeWorkspaceEntries, decodeWorkspaceState } from '../../src/state/decoders.js';
+import { decodeSourceManifest, decodeWorkspaceEntries, decodeWorkspaceState, decodeWorkspaceIdentity } from '../../src/state/decoders.js';
 import { qualifyInstalledSessionContinuity, installedSessionResumeObjective } from './testing/installed-session-continuity.js';
 
 type Recipe = { buildFixture: string; packageRoot: string; installerEntry: string; stateRoot: string; releaseKeysFile: string;
@@ -1201,12 +1202,14 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
         await mkdir(directory, { mode: 0o700 }); await chown(directory, ledger.uid, ledger.gid);
       }
       const config = path.join(git, 'config');
-      await writeFile(config, '[extensions]\nobjectFormat = unsupported\n', { flag: 'wx', mode: 0o600 }); await chown(config, ledger.uid, ledger.gid);
+      const configBytes = Buffer.from('[extensions]\nobjectFormat = unsupported\n');
+      await writeFile(config, configBytes, { flag: 'wx', mode: 0o600 }); await chown(config, ledger.uid, ledger.gid);
+      const configIdentity = await lstat(config, { bigint: true });
       const untrustedRequest = request({ protocolVersion: 1, method: 'session.create',
         requestId: '019a0012-0000-7000-8000-000000000122', admissionKey: randomBytes(32).toString('base64url'),
         workspacePath: untrustedWorkspace, name: 'Workspace Trust order' });
       const untrusted = exchange([untrustedRequest])[0]!;
-      report.sessionTrustOrder = { qualified: false,
+      report.sessionTrustOrder = { kind: 'identity_only_git_session_v1', qualified: false,
         untrustedObservedCode: ['INVALID_REQUEST', 'ARTIFACT_MISMATCH'].includes(untrusted.error?.code as string)
           ? untrusted.error!.code : 'unrecognized' };
       assert.equal(canonicalSha256(untrusted), canonicalSha256({ protocolVersion: 1, ok: false, method: 'session.create',
@@ -1219,10 +1222,38 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
         workspaceRealPath: untrustedWorkspace, decision: 'trusted', decidedAt: new Date().toISOString() }), { flag: 'wx', mode: 0o600 });
       await chown(gitTrustPath, ledger.uid, ledger.gid);
       const trusted = exchange([untrustedRequest])[0]!;
-      assert.equal(canonicalSha256(trusted), canonicalSha256({ protocolVersion: 1, ok: false, method: 'session.create',
-        error: { schemaVersion: 1, code: 'ARTIFACT_MISMATCH', retryable: false, messageCode: 'control.read_rejected' } }));
+      report.sessionTrustOrder.trustedOutcome = trusted.ok === true ? 'session_created' : 'refused';
+      const trustedSession = accepted(trusted, 'session.create').snapshot.session;
+      const workspace = decodeWorkspaceIdentity(parseJsonStrict((await readCas(trustedSession.workspaceIdentityRef)).toString('utf8')));
+      assert.equal(workspace.kind, 'live');
+      assert(workspace.kind === 'live' && workspace.canonicalRootPath === untrustedWorkspace && workspace.repositoryIdentityRef);
+      const repository = decodeRepositoryIdentity(parseJsonStrict((await readCas(workspace.repositoryIdentityRef)).toString('utf8')));
+      assert.equal(repository.schemaVersion, 2); assert.equal(repository.format, 'cliq-repository-identity-v2');
+      assert.equal(repository.repositoryIdentityDigest, workspace.repositoryIdentityDigest);
+      assert.equal(Object.hasOwn(repository, 'objectFormat'), false, 'Session captures directory identity without authorizing or decoding Git payload');
+      const gitIdentity = await lstat(git, { bigint: true });
+      assert.equal(canonicalSha256(repository.gitDirectoryIdentity),
+        canonicalSha256({ deviceId: String(gitIdentity.dev), fileId: String(gitIdentity.ino), ownerUid: ledger.uid }));
+      const noGrant = request({ protocolVersion: 1, method: 'run.submit', requestId: '019a0012-0000-7000-8000-0000000003f1',
+        admissionKey: randomBytes(32).toString('base64url'), sessionId: trustedSession.id, expectedContextRevision: trustedSession.contextRevision,
+        workspacePath: untrustedWorkspace, objective: 'Require independent Git inspection authority.',
+        model: { provider: 'openai-compatible', model, endpoint: { kind: 'registered', endpointRegistrationId: registration.endpointRegistrationId },
+          modelCredentialGrantIds: [enrollment.credentialGrantId] }, policyMode: 'accept-edits',
+        budgets: { wallTimeMs: 45000, modelTokens: 2000000, costMicros: 10000000, toolCalls: 1000, repairAttempts: 0, childDepth: 0, childConcurrency: 1 },
+        verifiers: [], dependency: { mode: 'none' }, sourceIncludes: [], sourceExcludes: [], registeredMcpServerIds: [], skillIds: [], allowUnverified: true } satisfies
+        Omit<Extract<InstalledControlRequestV1, { method: 'run.submit' }>, 'requestDigest'>);
+      const noGrantResponse = decodeInstalledControlResponse(exchange([noGrant])[0], noGrant);
+      assert(!noGrantResponse.ok); assert.equal(noGrantResponse.error.code, 'AUTHORIZATION_REQUIRED');
+      const absentRequest = { protocolVersion: 1, method: 'run.get',
+        runId: identityHash('cliq-run-id-v1', principal, 'run.submit', noGrant.admissionKey) } as const;
+      const absent = decodeInstalledControlResponse(exchange([absentRequest])[0], absentRequest);
+      assert(!absent.ok); assert.equal(absent.error.code, 'NOT_FOUND');
+      const configAfter = await readFile(config); scanBytes(configAfter); assert.deepEqual(configAfter, configBytes);
+      const configCurrent = await lstat(config, { bigint: true });
+      for (const field of imageFields) assert.equal(configCurrent[field], configIdentity[field]);
       report.sessionTrustOrder = { ...report.sessionTrustOrder, qualified: true, untrustedRefusedBeforeGitConfig: true,
-        unchangedConfigStillRefusedAfterPersistedTrust: true };
+        trustedSessionCreated: true, workspaceIdentityValidated: true, repositoryIdentityVersion: 2,
+        configurationPreserved: true, missingInspectionGrantRefused: true, noRunAdmittedWithoutInspectionGrant: true };
     }
     const sessionRequest = request({ protocolVersion: 1, method: 'session.create', requestId: '019a0012-0000-7000-8000-000000000103',
       admissionKey: randomBytes(32).toString('base64url'), workspacePath: recipe.workspace, name: 'Installed Run journey' });

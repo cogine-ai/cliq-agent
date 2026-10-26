@@ -198,7 +198,11 @@ static void source_bubblewrap(void) {
     SOURCE_ARG("--cap-drop"); SOURCE_ARG("ALL"); SOURCE_ARG("--cap-add"); SOURCE_ARG("CAP_SYS_ADMIN"); SOURCE_ARG("--cap-add"); SOURCE_ARG("CAP_SETPCAP");
     SOURCE_ARG("--clearenv"); SOURCE_ARG("--size"); SOURCE_ARG(root_quota); SOURCE_ARG("--tmpfs"); SOURCE_ARG("/"); SOURCE_ARG("--dir"); SOURCE_ARG("/runtime");
     SOURCE_ARG("--perms"); SOURCE_ARG("0555"); SOURCE_ARG("--ro-bind-data"); SOURCE_ARG(descriptors[0]); SOURCE_ARG("/runtime/cliq-linux-worker-init");
-    SOURCE_ARG("--perms"); SOURCE_ARG("0444"); SOURCE_ARG("--ro-bind-data"); SOURCE_ARG(descriptors[1]); SOURCE_ARG("/runtime/cliq-source-git-inspector.mjs");
+    /* The fixed inspector is data, but its original currentness guard requires
+     * a named, singly linked inode. --ro-bind-data has an unlinked backing
+     * inode; --file creates the actual owned 0444 copy before the trusted
+     * producer fully hashes it. Confinement still seals root readonly/noexec. */
+    SOURCE_ARG("--perms"); SOURCE_ARG("0444"); SOURCE_ARG("--file"); SOURCE_ARG(descriptors[1]); SOURCE_ARG("/runtime/cliq-source-git-inspector.mjs");
     const char *directories[] = { "/usr", "/usr/bin", "/usr/lib", "/usr/lib/x86_64-linux-gnu", "/lib", "/lib/x86_64-linux-gnu", "/lib64" };
     for (size_t i = 0; i < sizeof(directories) / sizeof(directories[0]); i++) { SOURCE_ARG("--dir"); SOURCE_ARG(directories[i]); }
     for (size_t i = 0; i < sizeof(cliq_source_profile_directories) / sizeof(cliq_source_profile_directories[0]); i++) {

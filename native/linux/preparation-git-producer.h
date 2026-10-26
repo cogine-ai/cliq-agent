@@ -44,7 +44,7 @@ static int preparation_producer(void) {
     struct cliq_preparation_capture input; preparation_capture_init(&input);
     struct cliq_source_config *config = calloc(1, sizeof(*config)); bool valid = false;
     if (!config || !cliq_receive(3, &request, files, 2, &count) || request.command != CLIQ_SOURCE_CREATE_BLOCKED || count != 2 ||
-        !cliq_preparation_request_valid(&request)) goto failed;
+        !cliq_preparation_namespace_request_valid(&request)) goto failed;
     uint64_t runtime = 0, reserve = 0;
     valid = source_read_config(files[0], config) && source_bound_logs(&request) && source_script_current(config) &&
         cliq_source_storage_reserve(config, &request, &runtime, &reserve);
@@ -56,7 +56,7 @@ static int preparation_producer(void) {
     if (!valid || !cliq_send(3, &ready, NULL, 0)) goto failed;
     struct cliq_worker_packet release;
     if (!cliq_receive(3, &release, NULL, 0, &count) || release.command != CLIQ_SOURCE_RELEASE_CAPTURE ||
-        !cliq_preparation_same_attempt(&request, &release) ||
+        !cliq_preparation_namespace_same_attempt(&request, &release) ||
         !preparation_capture_input(files[1], &request, request.preparation_input_intent_ref, reserve, &input)) goto failed;
     if (!source_close_fd(&files[1])) goto failed;
     struct cliq_worker_packet sealed = request; sealed.command = CLIQ_SOURCE_SEALED;
@@ -65,7 +65,7 @@ static int preparation_producer(void) {
     if (!cliq_send(3, &sealed, NULL, 0)) goto failed;
     struct cliq_worker_packet continuation;
     if (!cliq_receive(3, &continuation, NULL, 0, &count) || continuation.command != CLIQ_SOURCE_CONTINUE_GIT ||
-        !cliq_preparation_same_attempt(&request, &continuation) || strcmp(continuation.source_snapshot_digest, sealed.source_snapshot_digest) != 0) goto failed;
+        !cliq_preparation_namespace_same_attempt(&request, &continuation) || strcmp(continuation.source_snapshot_digest, sealed.source_snapshot_digest) != 0) goto failed;
     /* Both the original sealed bytes and their private nlink-one copies fit
      * the unchanged envelope before any helper executes. No memfd mount can
      * bypass the measured helper's ordinary-file guard. */

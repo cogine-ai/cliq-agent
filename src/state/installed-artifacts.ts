@@ -37,12 +37,18 @@ export function validateBundle(value: unknown, releaseKeys: readonly ReleaseTrus
     if (!Array.isArray(bundle.entries) || !Array.isArray(bundle.structuredArtifacts) || !Array.isArray(bundle.guestToolchainManifestRefs)) mismatch('installed runtime manifest graph must contain arrays');
     verifyRuntimeBundle(bundle, releaseKeys);
     for (const entry of bundle.entries) {
+      // This fixed signed script is code data for the retained guest Node,
+      // never a host executable, native addon or caller-selected helper.
+      const sourceInspector = entry.entryId === 'source_git_inspector' && entry.role === 'platform_helper' &&
+        entry.version === '1' && entry.relativePath === 'helpers/source-git-inspector.mjs' &&
+        !entry.executable && entry.byteCount >= 1 && entry.byteCount <= 1_048_576;
       if (entry.relativePath.normalize('NFC') !== entry.relativePath || Buffer.byteLength(entry.relativePath) > 4096 ||
           entry.relativePath === 'manifest.json' || entry.relativePath.startsWith('manifest.json/') ||
           entry.relativePath === 'model-authority.json' || entry.relativePath.startsWith('model-authority.json/') ||
           entry.relativePath === 'model-objects' || entry.relativePath.startsWith('model-objects/') ||
           (entry.executable && entry.byteCount === 0) ||
-          (['supervisor', 'worker', 'provider_adapter', 'tool_adapter', 'platform_helper', 'mcp_server', 'mcp_recovery_adapter', 'local_inference'].includes(entry.role) && !entry.executable) ||
+          (entry.entryId === 'source_git_inspector' && !sourceInspector) ||
+          (['supervisor', 'worker', 'provider_adapter', 'tool_adapter', 'platform_helper', 'mcp_server', 'mcp_recovery_adapter', 'local_inference'].includes(entry.role) && !entry.executable && !sourceInspector) ||
           ['skill_bundle', 'mcp_recovery_profile'].includes(entry.role) ||
           (entry.role === 'guest_toolchain' && entry.executable) ||
           (['policy_engine', 'system_prompt', 'compaction_prompt', 'bundle_object', 'schema'].includes(entry.role) && entry.executable)) {
