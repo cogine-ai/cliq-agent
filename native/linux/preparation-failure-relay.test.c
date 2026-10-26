@@ -35,7 +35,7 @@ static struct cliq_worker_packet original(void) {
 int main(void) {
     struct cliq_worker_packet expected = original(); const size_t baseline = descriptors();
     uint64_t wrong_origin = expected.reservation_uid + 1;
-    for (unsigned int scenario = 0; scenario < 23; scenario++) {
+    for (unsigned int scenario = 0; scenario < 60; scenario++) {
         int producer[2], receiver[2];
         check(socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, producer) == 0, "real original producer channel");
         check(socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, receiver) == 0, "real diagnostic parent channel");
@@ -46,7 +46,7 @@ int main(void) {
             int fd = -1; size_t count = 0;
             if (scenario == 1) response.nonce[0] = 'e';
             if (scenario == 2) response.preparation_input_intent_ref[0] = 'e';
-            if (scenario == 3) { fd = open("/dev/null", O_RDONLY | O_CLOEXEC); if (fd < 0) _exit(71); count = 1; }
+            if (scenario == 3 || scenario == 58) { fd = open("/dev/null", O_RDONLY | O_CLOEXEC); if (fd < 0) _exit(71); count = 1; }
             if (scenario == 4) response.source_byte_count = 1;
             if (scenario == 5) response.init_reaped = 1;
             if (scenario == 6) response.observed_at_ms = 1;
@@ -58,6 +58,9 @@ int main(void) {
             if (scenario == 18) strcpy(response.relative_path, "not-permitted-result-data");
             if (scenario == 19) response.preparation_input_intent_ref[0] = '\0';
             if (scenario == 20) response.status = 2016;
+            if (scenario >= 23 && scenario <= 56) response.status = 2601 + scenario - 23;
+            if (scenario == 57) response.status = 2635;
+            if (scenario == 58 || scenario == 59) response.status = CLIQ_SOURCE_OUTPUT_DIRECTORY;
             bool sent = true;
             if (scenario == 21) sent = send(producer[1], &response, sizeof(response) - 1, MSG_NOSIGNAL) == (ssize_t)sizeof(response) - 1;
             else if (scenario != 22) sent = cliq_send(producer[1], &response, count ? &fd : NULL, count);
@@ -65,7 +68,7 @@ int main(void) {
             if (close(producer[1]) != 0) sent = false;
             if (!sent) _exit(71);
             if (scenario == 11) { raise(SIGTERM); _exit(71); }
-            _exit(scenario == 9 ? 0 : scenario == 10 ? 74 : 70);
+            _exit(scenario == 9 || scenario == 59 ? 0 : scenario == 10 ? 74 : 70);
         }
         close_slot(&producer[1]);
         if (scenario == 16) close_slot(&receiver[1]);
@@ -78,7 +81,7 @@ int main(void) {
             if (scenario == 17) close_slot(&producer[0]);
             valid = cliq_preparation_forward_joined_failure(child, &producer[0], receiver[0], &expected, &response, count, observed_uid);
         }
-        bool accepts = scenario == 0 || scenario == 15 || scenario == 20;
+        bool accepts = scenario == 0 || scenario == 15 || scenario == 20 || (scenario >= 23 && scenario <= 56);
         check(valid == accepts, "only exact zero-FD failure and actual exit70 forwards");
         struct cliq_worker_packet forwarded; int passed[1] = {-1}; size_t passed_count = 0;
         if (accepts) {

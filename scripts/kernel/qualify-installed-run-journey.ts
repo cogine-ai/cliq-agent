@@ -4782,7 +4782,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
         else if (diagnostic.code === 'ERR_SQLITE_ERROR' && typeof diagnostic.errcode === 'number' && Number.isSafeInteger(diagnostic.errcode) &&
             diagnostic.errcode >= 0 && diagnostic.errcode <= 65535) failureKinds.push({ kind: 'sqlite', primaryCode: diagnostic.errcode & 0xff });
         else if (diagnostic.code === 'ERR_ASSERTION') failureKinds.push({ kind: 'assertion' });
-        for (const match of (error.stack ?? '').matchAll(/\b(qualify-installed-run-journey|installed-supervisor-package|installed-model-package|installed-owner-history|installed-read-control|installed-client-consumer)\.ts:([1-9][0-9]{0,6}):([1-9][0-9]{0,6})/gu)) {
+        for (const match of (error.stack ?? '').matchAll(/\b(qualify-installed-run-journey|installed-supervisor-package|installed-model-package|installed-owner-history|installed-read-control|installed-client-consumer|installed-client-applications|installed-ink-consumer)\.ts:([1-9][0-9]{0,6}):([1-9][0-9]{0,6})/gu)) {
           sourceFrames.push({ file: `${match[1]}.ts`, line: Number(match[2]), column: Number(match[3]) }); if (sourceFrames.length === 8) break;
         }
         if (error instanceof AggregateError) pending.unshift(...error.errors.slice(0, 4));

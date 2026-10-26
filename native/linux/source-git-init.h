@@ -200,70 +200,40 @@ static bool fixed_git_run_helper(int raw_config, int intent, int exclude, const 
 static bool source_run_helper(int raw_config, int intent, int exclude, const struct cliq_source_config *config) {
     return fixed_git_run_helper(raw_config, intent, exclude, config, false, NULL);
 }
+#include "source-git-output.h"
+
 static bool source_output_files(const struct cliq_worker_packet *request, uint64_t reserve,
-    int outputs[CLIQ_SOURCE_OUTPUTS], struct cliq_worker_packet *result) {
-    const char *names[] = { "inspection.json", "canonical.index", "reachable.pack", "reachable.idx" };
+    int outputs[CLIQ_SOURCE_OUTPUTS], struct cliq_worker_packet *result, uint32_t *failure) {
+    source_output_stage(failure, CLIQ_SOURCE_OUTPUT_DIRECTORY);
     int directory = open("/scratch/output", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (directory < 0) return false;
-    int scan = openat(directory, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    DIR *stream = scan >= 0 ? fdopendir(scan) : NULL;
-    bool valid = stream != NULL; unsigned int seen = 0;
-    if (stream) for (;;) {
-        errno = 0; struct dirent *entry = readdir(stream);
-        if (!entry) { if (errno) valid = false; break; }
-        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
-        unsigned int at = 0; while (at < CLIQ_SOURCE_OUTPUTS && strcmp(entry->d_name, names[at]) != 0) at++;
-        if (at == CLIQ_SOURCE_OUTPUTS || (seen & (1U << at))) { valid = false; break; }
-        seen |= 1U << at;
-    }
-    if (stream && closedir(stream) != 0) valid = false;
-    valid = valid && seen == 15; uint64_t total = 0, copy_capacity = 0;
+    uint64_t copy_capacity = 0, quota = 0;
+    bool valid = source_output_inventory(directory, request, &copy_capacity, failure);
     /* Helper/Git have actually joined. Reserve all simultaneous immutable
-     * output copies before touching their first page, and reduce the same
-     * scratch quota; ongoing scratch mutation cannot borrow that capacity. */
-    for (unsigned int i = 0; valid && i < CLIQ_SOURCE_OUTPUTS; i++) {
-        struct stat file;
-        valid = fstatat(directory, names[i], &file, AT_SYMLINK_NOFOLLOW) == 0 && S_ISREG(file.st_mode) &&
-            file.st_size >= 0 && (uint64_t)file.st_size <= request->max_file_bytes &&
-            cliq_source_page_add(&copy_capacity, (uint64_t)file.st_size, request->max_generation_bytes);
+     * copies before touching their first page, within the same scratch cap. */
+    if (valid) {
+        source_output_stage(failure, CLIQ_SOURCE_OUTPUT_RESERVE);
+        valid = reserve < request->max_generation_bytes && copy_capacity < request->max_generation_bytes - reserve;
     }
-    struct statvfs filesystem; uint64_t quota = 0;
-    valid = valid && reserve < request->max_generation_bytes && copy_capacity < request->max_generation_bytes - reserve;
-    if (valid) quota = request->max_generation_bytes - reserve - copy_capacity;
-    valid = valid && source_scratch_limit(quota) && fstatvfs(directory, &filesystem) == 0 && filesystem.f_frsize > 0 &&
-        filesystem.f_bfree <= filesystem.f_blocks && filesystem.f_blocks - filesystem.f_bfree <= quota / filesystem.f_frsize;
-    for (unsigned int i = 0; valid && i < CLIQ_SOURCE_OUTPUTS; i++) {
-        int file = openat(directory, names[i], O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
-        struct stat before, after, named;
-        valid = file >= 0 && fstat(file, &before) == 0 && S_ISREG(before.st_mode) && before.st_nlink == 1 &&
-            before.st_uid == geteuid() && before.st_size >= 0 && (uint64_t)before.st_size <= request->max_file_bytes &&
-            (i != 0 || (uint64_t)before.st_size <= request->max_output_bytes) &&
-            source_add_u64(&total, (uint64_t)before.st_size, request->max_generation_bytes);
-        int writer = valid ? memfd_create("cliq-source-output", MFD_CLOEXEC | MFD_ALLOW_SEALING) : -1;
-        uint64_t offset = 0; unsigned char buffer[65536]; struct sha256_context hash; sha256_init(&hash);
-        valid = valid && writer >= 0;
-        while (valid && offset < (uint64_t)before.st_size) {
-            size_t wanted = (uint64_t)before.st_size - offset < sizeof(buffer) ? (size_t)((uint64_t)before.st_size - offset) : sizeof(buffer);
-            ssize_t count = read(file, buffer, wanted);
-            if (count < 0 && errno == EINTR) continue;
-            if (count <= 0 || !source_write_all(writer, buffer, (size_t)count)) { valid = false; break; }
-            sha256_update(&hash, buffer, (size_t)count); offset += (uint64_t)count;
-        }
-        unsigned char extra; ssize_t count = -1;
-        if (valid) do { count = read(file, &extra, 1); } while (count < 0 && errno == EINTR);
-        valid = valid && count == 0 && fstat(file, &after) == 0 && source_stat_same(&before, &after) &&
-            fstatat(directory, names[i], &named, AT_SYMLINK_NOFOLLOW) == 0 && source_stat_same(&before, &named);
-        if (!source_close_fd(&file)) valid = false;
-        outputs[i] = valid ? source_sealed_readonly(writer) : -1;
-        if (!source_close_fd(&writer)) valid = false;
-        if (outputs[i] < 0) valid = false;
-        if (valid) {
-            unsigned char digest[32]; sha256_final(&hash, digest);
-            result->source_output_bytes[i] = offset; source_hex(digest, result->source_output_digests[i]);
-        }
+    if (valid) {
+        quota = request->max_generation_bytes - reserve - copy_capacity;
+        source_output_stage(failure, CLIQ_SOURCE_OUTPUT_REMOUNT);
+        valid = source_scratch_limit(quota);
     }
-    if (!source_close_fd(&directory)) valid = false;
-    if (!valid) for (unsigned int i = 0; i < CLIQ_SOURCE_OUTPUTS; i++) source_close_fd(&outputs[i]);
+    struct statvfs filesystem;
+    if (valid) {
+        source_output_stage(failure, CLIQ_SOURCE_OUTPUT_FILESYSTEM);
+        valid = fstatvfs(directory, &filesystem) == 0 && filesystem.f_frsize > 0;
+    }
+    if (valid) {
+        source_output_stage(failure, CLIQ_SOURCE_OUTPUT_USED);
+        valid = filesystem.f_bfree <= filesystem.f_blocks && filesystem.f_blocks - filesystem.f_bfree <= quota / filesystem.f_frsize;
+    }
+    if (valid) valid = source_output_copy(directory, request, outputs, result, failure);
+    if (!source_close_fd(&directory)) { source_output_stage(failure, CLIQ_SOURCE_OUTPUT_DIRECTORY_CLOSE); valid = false; }
+    if (!valid) for (unsigned int i = 0; i < CLIQ_SOURCE_OUTPUTS; i++) if (!source_close_fd(&outputs[i]))
+        source_output_stage(failure, CLIQ_SOURCE_OUTPUT_RETIREMENT);
+    if (valid) source_output_stage(failure, 0);
     return valid;
 }
 static bool source_rule_result(int rule, uint64_t expected, struct cliq_worker_packet *result) {
@@ -349,7 +319,7 @@ static int source_producer(void) {
     int outputs[CLIQ_SOURCE_TRANSFER_OUTPUTS] = {-1, -1, -1, -1, -1};
     struct cliq_worker_packet result = sealed; result.command = CLIQ_SOURCE_RESULT;
     if (!valid || !source_rule_result(raw_rule, snapshot.rule_bytes, &result) ||
-        !source_output_files(&request, storage_reserve, outputs, &result)) goto failed;
+        !source_output_files(&request, storage_reserve, outputs, &result, NULL)) goto failed;
     outputs[4] = raw_rule; raw_rule = -1;
     valid = cliq_send(3, &result, outputs, CLIQ_SOURCE_OUTPUTS + result.source_rule_present);
     for (unsigned int i = 0; i < CLIQ_SOURCE_TRANSFER_OUTPUTS; i++) if (!source_close_fd(&outputs[i])) valid = false;

@@ -108,7 +108,7 @@ static int preparation_producer(void) {
      * original bounded output copy phase, never before an assumed JS close. */
     if (!valid) goto failed;
     result_failure_status = CLIQ_SOURCE_FAIL_OUTPUTS;
-    if (!source_output_files(&request, reserve, outputs, &result)) goto failed;
+    if (!source_output_files(&request, reserve, outputs, &result, &result_failure_status)) goto failed;
     result_failure_status = CLIQ_SOURCE_FAIL_OUTPUT_BINDING;
     for (size_t i = 0; i < CLIQ_SOURCE_OUTPUTS; i++) if (result.source_output_bytes[i] != input.bytes[i] ||
         strcmp(result.source_output_digests[i], input.digests[i]) != 0) goto failed;

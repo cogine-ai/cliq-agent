@@ -1,4 +1,6 @@
 import { randomBytes } from 'node:crypto';
+import { createSourceInspectionErrorResponse as errorResponse, assertSourceInspectionErrorResponse as assertErrorResponse,
+  type SourceInspectionErrorResponse as ErrorResponse } from './source-inspection-error.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import type { SourceInspectionAttemptV1, SourceInspectionRetirementEvidenceV1 } from '../kernel/execution.js';
 import { digestOmitting, identityHash, parseCanonicalTime, sha256Bytes } from '../kernel/identity.js';
@@ -41,10 +43,7 @@ export type SourceInspectionOwnerBootstrap = SourceInspectionBootstrap & Readonl
 type Capturing = Extract<SourceInspectionAttemptV1, { phase: 'capturing' }>;
 type Retired = Extract<SourceInspectionAttemptV1, { phase: 'retired' }>;
 type Unretired = Exclude<SourceInspectionAttemptV1, { phase: 'retired' }>;
-type ErrorResponse = { protocolVersion: 1; ok: false; method: 'run.submit' | 'run.apply'; error:
-  | { schemaVersion: 1; messageCode: string; code: 'INVALID_REQUEST'; retryable: false; issues: Array<{ path: string; issueCode: string }> }
-  | { schemaVersion: 1; messageCode: string; code: 'INTERNAL'; retryable: false; errorId: string }
-  | { schemaVersion: 1; messageCode: string; code: 'CANCEL_REQUESTED' | 'BUDGET_EXHAUSTED' | 'ARTIFACT_MISMATCH'; retryable: false } };
+
 
 export function assertSourceInspectionRequestId(connection: SqliteConnection | SqliteDriver, principalId: string,
   request: { requestId: string; requestDigest: string; method?: 'run.submit' | 'run.apply' }, expectedInspectionId?: string): void {
@@ -67,40 +66,7 @@ function closeResources(resources: readonly { close(): void }[], operationError?
   // failure merely because these outer descriptors subsequently closed.
   if (operationError instanceof ResourceRetirementError) throw operationError;
 }
-function errorResponse(error: unknown, inspectionId: string, cancelled: boolean, method: ErrorResponse['method']): ErrorResponse {
-  if (cancelled) return { protocolVersion: 1, ok: false, method,
-    error: { schemaVersion: 1, messageCode: 'source_capture_cancelled', code: 'CANCEL_REQUESTED', retryable: false } };
-  if (error instanceof KernelStorageError && (error.code === 'BUDGET_EXHAUSTED' || error.code === 'ARTIFACT_MISMATCH'))
-    return { protocolVersion: 1, ok: false, method, error: { schemaVersion: 1,
-      messageCode: 'source_capture_rejected', code: error.code, retryable: false } };
-  if (error instanceof KernelStorageError || error instanceof TypeError) return { protocolVersion: 1, ok: false, method,
-    error: { schemaVersion: 1, messageCode: 'source_capture_rejected', code: 'INVALID_REQUEST', retryable: false,
-      issues: [{ path: 'source', issueCode: 'source_changed_or_unsupported' }] } };
-  return { protocolVersion: 1, ok: false, method, error: { schemaVersion: 1, messageCode: 'source_capture_failed',
-    code: 'INTERNAL', retryable: false, errorId: identityHash('cliq-source-inspection-error-v1', inspectionId) } };
-}
-function assertErrorResponse(value: unknown, inspectionId: string, method: ErrorResponse['method']): asserts value is ErrorResponse {
-  const data = value as ErrorResponse;
-  if (!data || canonicalJsonBytes(data).length > 1_048_576 || Object.keys(data).sort().join() !== 'error,method,ok,protocolVersion' ||
-      data.protocolVersion !== 1 || data.ok !== false || data.method !== method || !data.error || data.error.schemaVersion !== 1 ||
-      data.error.retryable !== false || typeof data.error.messageCode !== 'string' || !/^[a-z_]{1,128}$/u.test(data.error.messageCode))
-    throw new KernelStorageError('RECOVERY_REQUIRED', 'retained source error has the wrong closed response shape');
-  const expected = ['schemaVersion', 'messageCode', 'code', 'retryable'];
-  if (data.error.code === 'INVALID_REQUEST') {
-    expected.push('issues');
-    if (!Array.isArray(data.error.issues) || data.error.issues.length !== 1 ||
-        Object.keys(data.error.issues[0]).sort().join() !== 'issueCode,path' || data.error.issues[0].path !== 'source' ||
-        data.error.issues[0].issueCode !== 'source_changed_or_unsupported')
-      throw new KernelStorageError('RECOVERY_REQUIRED', 'retained source error has invalid redacted issues');
-  } else if (data.error.code === 'INTERNAL') {
-    expected.push('errorId');
-    if (data.error.errorId !== identityHash('cliq-source-inspection-error-v1', inspectionId))
-      throw new KernelStorageError('RECOVERY_REQUIRED', 'retained source error has invalid correlation id');
-  } else if (!['CANCEL_REQUESTED', 'BUDGET_EXHAUSTED', 'ARTIFACT_MISMATCH'].includes(data.error.code))
-    throw new KernelStorageError('RECOVERY_REQUIRED', 'retained source error is not produced by this recipe');
-  if (Object.keys(data.error).sort().join() !== expected.sort().join())
-    throw new KernelStorageError('RECOVERY_REQUIRED', 'retained source error has unknown fields');
-}
+
 
 /** Retained inert response only. The owning capture/replay path establishes
  * retirement and the control association; this friend mints no Run or proof. */

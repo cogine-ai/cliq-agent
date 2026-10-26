@@ -6668,6 +6668,17 @@ StateRoot fail closed. Ordinary `fresh_empty` still requires an empty CAS; later
 clean acquisition never reinterprets a grown namespace as a new installed seed.
 This source adds no ledger, Run authority or execution permission.
 
+The initial installer publishes the already verified complete CAS roots in
+their original order, in groups of at most four. Each group reuses the existing
+four CAS durability stages: every actual file write and file sync completes
+before its stage's shared directory sync, and all failures/cleanup join before
+return. Each original root retains its installation-scope identity checks;
+every final root still receives the original full-byte verification. Streamed
+image publication, complete installed/source/CAS revalidation, source and
+destination retirement, and selection publication keep their original order.
+No selection or control channel may use a partial group. This changes no
+installation, readiness, authentication or shutdown deadline.
+
 Retained genesis is evaluated against its original, explicitly supported birth
 schema, including the complete original DDL digest, schema-manifest version and
 empty-database content identity. A later database migration cannot substitute

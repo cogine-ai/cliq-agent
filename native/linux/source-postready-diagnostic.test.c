@@ -32,10 +32,11 @@ static bool source_close_fd(int *fd) {
 /* Actual owned exec-diagnostic pipes and child waits. These are diagnostic
  * data/resource checks only; no native execution or death authority is minted. */
 static void postready_diagnostic_component(void) {
-    const uint32_t refused[] = { 0, 1, 2000, 2017, 2089, 2092, 2100, 2356, 2400, 2465, 2500, 2520, UINT32_MAX };
+    const uint32_t refused[] = { 0, 1, 2000, 2017, 2089, 2092, 2100, 2356, 2400, 2465, 2500, 2520, 2600, 2635, UINT32_MAX };
     for (size_t i = 0; i < sizeof(refused) / sizeof(refused[0]); i++)
         check(!cliq_source_postready_failure_valid(refused[i]), "post-READY failure vocabulary rejects gaps and unknown values");
     for (uint32_t code = 2001; code <= 2016; code++) check(cliq_source_postready_failure_valid(code), "fixed producer failure vocabulary");
+    for (uint32_t code = 2601; code <= 2634; code++) check(cliq_source_postready_failure_valid(code), "fixed collector failure vocabulary");
     check(!cliq_write_exec_diagnostic(-1, ENOENT), "actual failed diagnostic write cannot be accepted");
     struct cliq_worker_packet original = request_data();
     memset(original.source_inspection_id, 0, sizeof(original.source_inspection_id));

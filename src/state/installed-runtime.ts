@@ -17,6 +17,7 @@ import type { LocalControlChannelIdentityV1, LocalPrincipalIdentityV1, PlatformP
 import { immutableSnapshot } from '../model/immutable.js';
 import { exactKeys, policyProfile, type ReleaseTrustKey, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { ARTIFACT_CHUNK_BYTES, ContentAddressedStore } from './cas.js';
+import { publishInstalledCasRoots } from './installed-cas-roots.js';
 import { joinResourceOperations, KernelStorageError, ResourceRetirementError } from './errors.js';
 import { decodeSandboxRootProfile } from './execution-closure.js';
 import { decodeControlChannel, decodeLocalPrincipalIdentity, decodePlatformProcessIdentity, decodeStateRootIdentity } from './decoders.js';
@@ -1094,12 +1095,18 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
           const casFiles: InstalledFile[] = [];
           noteInstalledInstallPhase('cas_roots_publish');
           let publishedRoots = 0;
-          for (const [ref, bytes] of signed.roots) {
-            await destination.assertDirectories();
-            if (await cas.publish(bytes) !== ref) mismatch('installed runtime CAS publication changed its complete root identity');
-            await destination.assertDirectories();
-            casFiles.push(await destination.file(casRoot, ref, 0o400, bytes.length, ref));
-            noteInstalledInstallPhase('cas_roots_publish', ++publishedRoots);
+          const roots = [...signed.roots];
+          for (let offset = 0; offset < roots.length; offset += 4) {
+            const group = roots.slice(offset, offset + 4);
+            // Each original root retains its scope checks. Only up to four
+            // complete publications share the existing four CAS barriers.
+            for (const _ of group) await destination.assertDirectories();
+            await publishInstalledCasRoots(cas, group);
+            for (const [ref, bytes] of group) {
+              await destination.assertDirectories();
+              casFiles.push(await destination.file(casRoot, ref, 0o400, bytes.length, ref));
+              noteInstalledInstallPhase('cas_roots_publish', ++publishedRoots);
+            }
           }
           noteInstalledInstallPhase('cas_streams_publish');
           let publishedStreams = 0;

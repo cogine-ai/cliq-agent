@@ -21,3 +21,20 @@ test('post-READY diagnostics require the original attempt and joined bounded hel
     assert.equal(result.actualRunQualified, false);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+
+test('fixed output collector preserves full immutable bytes and rejects actual namespace/link/size substitutions', { skip: process.platform !== 'linux' }, async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cliq-source-output-'));
+  try {
+    const binary = path.join(dir, 'component');
+    const compiled = spawnSync('cc', ['-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
+      fileURLToPath(new URL('../../native/linux/source-git-output.test.c', import.meta.url)), '-o', binary], { encoding: 'utf8' });
+    assert.equal(compiled.status, 0, compiled.stderr);
+    const observed = spawnSync(binary, [], { encoding: 'utf8', maxBuffer: 65_536 });
+    assert.equal(observed.status, 0, observed.stderr);
+    const result = JSON.parse(observed.stdout);
+    assert.deepEqual(Object.keys(result).sort(), ['actualRunQualified', 'checks', 'format', 'scratchRemountQualified']);
+    assert.equal(result.format, 'cliq-source-output-component-v1'); assert(result.checks >= 70_000);
+    assert.equal(result.actualRunQualified, false); assert.equal(result.scratchRemountQualified, false);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});

@@ -1097,6 +1097,12 @@ if (process.platform === 'linux') test('fixed initial-install stages complete on
   };
   try {
     const signed = await writeInstallerOnlyPackage(path.join(root, 'package'));
+    const publishFour = ContentAddressedStore.prototype.publishFour;
+    let rootGroups = 0;
+    const groupMock = t.mock.method(ContentAddressedStore.prototype, 'publishFour', function (this: ContentAddressedStore,
+      ...args: Parameters<ContentAddressedStore['publishFour']>) {
+      rootGroups++; return Reflect.apply(publishFour, this, args);
+    });
     const actualOpen = installFixtureFs.open;
     const mock = t.mock.method(installFixtureFs, 'open', async (...args: Parameters<typeof installFixtureFs.open>) => {
       const handle = await actualOpen(...args), actualClose = handle.close.bind(handle); active.add(handle); openCount++;
@@ -1107,9 +1113,10 @@ if (process.platform === 'linux') test('fixed initial-install stages complete on
       const installed = await createInstalledRuntime({ releaseKeys: signed.releaseKeys }).installInitial({
         packageRoot: path.join(root, 'package'), stateRoot: path.join(root, 'state') });
       assert.equal(installed.bundleDigest, canonicalSha256(signed.bundle));
+      assert(rootGroups > 0, 'the real initial installer uses the same complete four-root CAS protocol');
       assert.deepEqual([...new Set(phases.map(value => value.phase))], INSTALLED_INSTALL_PHASES.map((_, index) => index + 1));
       assert.equal(phases.at(-1)!.phase, 16); assert(openCount > 0); assert.equal(active.size, 0); assert.equal(closedAtComplete, true);
       const entryPhase = phases.filter(value => value.phase === 3).at(-1)!; assert.equal(entryPhase.items, signed.bundle.entries.length);
-    } finally { phaseChannel.unsubscribe(observer); mock.mock.restore(); (await import('node:module')).syncBuiltinESMExports(); }
+    } finally { phaseChannel.unsubscribe(observer); mock.mock.restore(); groupMock.mock.restore(); (await import('node:module')).syncBuiltinESMExports(); }
   } finally { phaseChannel.unsubscribe(observer); await rm(root, { recursive: true, force: true }); }
 });

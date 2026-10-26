@@ -62,7 +62,9 @@ static inline uint32_t cliq_source_reply_failure_guard(int outcome) {
 /* Post-READY failures on the original fixed channel are diagnostics only.
  * These finite values never admit a result/FD, death, time or permission.
  * 2101..2355 and 2401..2464 require a truly joined helper wait status;
- * 2501..2519 additionally require its actual exit70 and fixed exec-pipe int. */
+ * 2501..2519 additionally require its actual exit70 and fixed exec-pipe int.
+ * 2601..2634 name only the original output collector operation that failed;
+ * the same zero-FD/request-only/actual-exit70 relay applies to every value. */
 enum cliq_source_postready_failure {
     CLIQ_SOURCE_FAIL_INPUT = 2001, CLIQ_SOURCE_FAIL_INPUT_CLOSE = 2002,
     CLIQ_SOURCE_FAIL_SEAL_SEND = 2003, CLIQ_SOURCE_FAIL_CONTINUATION = 2004,
@@ -72,12 +74,30 @@ enum cliq_source_postready_failure {
     CLIQ_SOURCE_FAIL_OUTPUTS = 2011, CLIQ_SOURCE_FAIL_OUTPUT_BINDING = 2012,
     CLIQ_SOURCE_FAIL_RESULT_SEND = 2013, CLIQ_SOURCE_FAIL_INPUT_RETIREMENT = 2014,
     CLIQ_SOURCE_FAIL_MONITOR_JOIN = 2015, CLIQ_SOURCE_FAIL_MONITOR_EXIT = 2016,
-    CLIQ_SOURCE_FAIL_EXEC = 2090, CLIQ_SOURCE_FAIL_HELPER_JOIN = 2091
+    CLIQ_SOURCE_FAIL_EXEC = 2090, CLIQ_SOURCE_FAIL_HELPER_JOIN = 2091,
+    CLIQ_SOURCE_OUTPUT_DIRECTORY = 2601, CLIQ_SOURCE_OUTPUT_SCAN = 2602,
+    CLIQ_SOURCE_OUTPUT_SCAN_STREAM = 2603, CLIQ_SOURCE_OUTPUT_READ_DIRECTORY = 2604,
+    CLIQ_SOURCE_OUTPUT_NAME = 2605, CLIQ_SOURCE_OUTPUT_SCAN_CLOSE = 2606,
+    CLIQ_SOURCE_OUTPUT_COMPLETE_NAMES = 2607, CLIQ_SOURCE_OUTPUT_CAPACITY_FILE = 2608,
+    CLIQ_SOURCE_OUTPUT_CAPACITY = 2609, CLIQ_SOURCE_OUTPUT_RESERVE = 2610,
+    CLIQ_SOURCE_OUTPUT_REMOUNT = 2611, CLIQ_SOURCE_OUTPUT_FILESYSTEM = 2612,
+    CLIQ_SOURCE_OUTPUT_USED = 2613, CLIQ_SOURCE_OUTPUT_OPEN = 2614,
+    CLIQ_SOURCE_OUTPUT_STAT = 2615, CLIQ_SOURCE_OUTPUT_TYPE = 2616,
+    CLIQ_SOURCE_OUTPUT_LINKS = 2617, CLIQ_SOURCE_OUTPUT_UID = 2618,
+    CLIQ_SOURCE_OUTPUT_SIZE = 2619, CLIQ_SOURCE_OUTPUT_METADATA_SIZE = 2620,
+    CLIQ_SOURCE_OUTPUT_TOTAL_SIZE = 2621, CLIQ_SOURCE_OUTPUT_WRITER = 2622,
+    CLIQ_SOURCE_OUTPUT_READ = 2623, CLIQ_SOURCE_OUTPUT_WRITE = 2624,
+    CLIQ_SOURCE_OUTPUT_EOF = 2625, CLIQ_SOURCE_OUTPUT_AFTER_STAT = 2626,
+    CLIQ_SOURCE_OUTPUT_AFTER_IDENTITY = 2627, CLIQ_SOURCE_OUTPUT_NAMED_STAT = 2628,
+    CLIQ_SOURCE_OUTPUT_NAMED_IDENTITY = 2629, CLIQ_SOURCE_OUTPUT_FILE_CLOSE = 2630,
+    CLIQ_SOURCE_OUTPUT_SEAL = 2631, CLIQ_SOURCE_OUTPUT_WRITER_CLOSE = 2632,
+    CLIQ_SOURCE_OUTPUT_DIRECTORY_CLOSE = 2633, CLIQ_SOURCE_OUTPUT_RETIREMENT = 2634
 };
 static inline bool cliq_source_postready_failure_valid(uint32_t status) {
     return (status >= CLIQ_SOURCE_FAIL_INPUT && status <= CLIQ_SOURCE_FAIL_MONITOR_EXIT) ||
         status == CLIQ_SOURCE_FAIL_EXEC || status == CLIQ_SOURCE_FAIL_HELPER_JOIN ||
-        (status >= 2101 && status <= 2355) || (status >= 2401 && status <= 2464) || (status >= 2501 && status <= 2519);
+        (status >= 2101 && status <= 2355) || (status >= 2401 && status <= 2464) || (status >= 2501 && status <= 2519) ||
+        (status >= CLIQ_SOURCE_OUTPUT_DIRECTORY && status <= CLIQ_SOURCE_OUTPUT_RETIREMENT);
 }
 static inline uint32_t cliq_source_helper_failure(bool joined, int status, ssize_t bytes, int diagnostic) {
     if (!joined) return CLIQ_SOURCE_FAIL_HELPER_JOIN;
