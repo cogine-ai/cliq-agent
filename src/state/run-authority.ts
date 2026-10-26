@@ -1,10 +1,12 @@
 import { canonicalSha256 } from '../kernel/canonical.js';
-import { assertArtifactRef, digestOmitting } from '../kernel/identity.js';
+import { digestOmitting } from '../kernel/identity.js';
 import type { ToolContractManifestV1 } from '../kernel/types.js';
 import type { RunPolicySnapshotV1, PolicyEngineProfileV1 } from '../kernel/tool-authorization.js';
 import { decodeRetainedRunAssembly } from '../model/run-assembly.js';
 import { immutableSnapshot } from '../model/immutable.js';
-import { verifyToolRuntimeAuthority, type ReleaseTrustKey, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
+import { type ReleaseTrustKey, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
+import { decodeToolExecutionIdentity } from '../tools/execution-identity.js';
+import { assertSupervisorControlIdentity, readToolRuntimeAuthority } from './tool-runtime-authority.js';
 import { assertRunPolicySnapshot } from '../policy/tool-policy.js';
 import { loadToolContracts } from '../tools/input-contract.js';
 import { readCanonicalArtifact } from './agent-context.js';
@@ -16,6 +18,7 @@ import { readRun, readSession, readSessionPrincipalId } from './rows.js';
 import type { SqliteDriver } from './sqlite-driver.js';
 import { assertActiveStateOwner, type StateOwnerContext } from './state-owner.js';
 import { validateVerifierRunAdmission } from './verifier-admission.js';
+import { decodeSandboxProfile } from './execution-closure.js';
 import { assertDeliveryModelFreeCut } from './run-model-free.js';
 
 /** Shared retained execution inputs. This reader never creates a model session,
@@ -50,19 +53,12 @@ export const readRunAuthority = stateOperation('RECOVERY_REQUIRED', async functi
     if (!exactKeys(entry, ['name', 'version', 'description', 'access', 'inputSchemaRef', 'inputSchemaDigest', 'replayClass', 'execution',
       ...(output ? ['outputSchemaRef', 'outputSchemaDigest'] : [])]) || typeof entry.version !== 'string' || !entry.version ||
         !['read', 'write', 'exec', 'plan', 'control'].includes(entry.access)) throw new TypeError('invalid frozen tool contract schema');
-    const execution = entry.execution;
-    if (execution.kind === 'builtin') {
-      if (!exactKeys(execution, ['kind', 'adapterId', 'adapterVersion', 'adapterCodeDigest']) ||
-          !['manual', 'retry'].includes(entry.replayClass) || typeof execution.adapterId !== 'string' || !execution.adapterId ||
-          typeof execution.adapterVersion !== 'string' || !execution.adapterVersion) throw new TypeError('invalid builtin execution contract');
-      assertArtifactRef(execution.adapterCodeDigest);
-    } else if (execution.kind === 'mcp') {
-      if (!exactKeys(execution, ['kind', 'registrationId', 'registryRevisionRef', 'registryManifestDigest', 'serverToolName', 'toolContractDigest']) ||
-          typeof execution.serverToolName !== 'string' || !execution.serverToolName || !assembly.mcpServers.some(server =>
+    const execution = decodeToolExecutionIdentity(entry.execution);
+    if (execution.kind === 'mcp') {
+      if (!assembly.mcpServers.some(server =>
             server.registrationId === execution.registrationId && server.registryRevisionRef === execution.registryRevisionRef &&
             server.manifestDigest === execution.registryManifestDigest)) throw new TypeError('tool contract differs from the frozen MCP registration');
-      assertArtifactRef(execution.toolContractDigest);
-    } else throw new TypeError('unknown tool execution contract');
+    } else if (!['manual', 'retry'].includes(entry.replayClass)) throw new TypeError('invalid builtin replay contract');
     const schema = await readCanonicalArtifact(openingReads, entry.inputSchemaRef);
     if (canonicalSha256(schema) !== entry.inputSchemaDigest) throw new TypeError('tool input schema digest mismatch');
     if (output && canonicalSha256(await readCanonicalArtifact(openingReads, entry.outputSchemaRef!)) !== entry.outputSchemaDigest)
@@ -86,7 +82,10 @@ export const readRunAuthority = stateOperation('RECOVERY_REQUIRED', async functi
     assertRunPolicySnapshot({ policy, policyRef: spec.policyRef, assembly, principalId, workspaceIdentityDigest: workspace.identityDigest });
     const bundle = await readCanonicalArtifact<RuntimeBundleManifest>(reads, assembly.runtime.runtimeBundleRef);
     const profile = await readCanonicalArtifact<PolicyEngineProfileV1>(reads, policy.engine.profileRef);
-    verifyToolRuntimeAuthority({ assembly, policy, bundle, profile, tools: contracts.map(({ inputSchema: _schema, ...entry }) => entry), releaseKeys });
+    const tools = contracts.map(({ inputSchema: _schema, ...entry }) => entry);
+    const sandbox = decodeSandboxProfile(await readCanonicalArtifact(reads, spec.sandboxProfileRef));
+    await readToolRuntimeAuthority(reads, { assembly, policy, bundle, profile, tools, releaseKeys, resources: sandbox.resources }, readSignal);
+    assertSupervisorControlIdentity(assertActiveStateOwner(driver, owner), assembly, tools);
     for (const ref of new Set([spec.policyRef, assembly.runtime.runtimeBundleRef, policy.engine.profileRef,
       ...policy.decisionRules.flatMap(rule => rule.sourceRef ? [rule.sourceRef] : [])])) await reads.readBytes(ref);
     readSignal?.throwIfAborted(); assertActiveStateOwner(driver, owner);

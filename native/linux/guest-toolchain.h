@@ -21,6 +21,10 @@ static const napi_type_tag CLIQ_SOURCE_GUEST_TOOLCHAIN_TAG = {
     UINT64_C(0x387029d85bb64033), UINT64_C(0x84a9872ed5990839)
 };
 
+static const napi_type_tag CLIQ_BUILTIN_GUEST_TOOLCHAIN_TAG = {
+    UINT64_C(0x0ce30bc846a149af), UINT64_C(0x8c9d96a2b45d0495)
+};
+
 struct cliq_guest_file {
     int fd;
     uint64_t byte_count;
@@ -45,6 +49,10 @@ struct cliq_guest_toolchain {
     uint32_t source_recipe_version;
     char git_path[CLIQ_GUEST_PATH_BYTES];
     char git_digest[65];
+    /* Read only after the distinct fixed builtin-bash tag, never Node/source. */
+    uint32_t builtin_recipe_version;
+    char bash_path[CLIQ_GUEST_PATH_BYTES];
+    char bash_digest[65];
 };
 
 #endif

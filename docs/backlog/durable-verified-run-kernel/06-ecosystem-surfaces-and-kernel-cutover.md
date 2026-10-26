@@ -1511,6 +1511,16 @@ fresh exact-head Linux qualification. They do not complete unconnected methods,
 default CLI/TUI conversion, public release trust-root composition, all four
 frontend qualification or the Kernel Cut. No new public CLI command is claimed.
 
+The next complete client implementation is recorded in
+[Installed thin client applications](../../kernel/installed-client-applications.md).
+It connects one application to natural CLI, Ink, JSONL and RPC, adds Run/auth
+materialized list cuts and original Session projection presentation, and extends
+the real installed journey with read/replay/PTY-detach checks after all original
+assertions. This is an internal held-installation composition. Actual Linux
+qualification, tool approval/input/new-admission qualification, new list large-state
+Stop evidence and shipped release-root/discovery composition remain pending;
+default entry/cutover and the existing unchecked acceptance gates remain unchanged.
+
 **Qualify the first useful journey.** Use the
 [developer journey and TTHW target](../../kernel/2026-09-26-design-review.md#8-developer-journey-and-release-decisions)
 on clean supported macOS/Linux installations. The user installs, completes

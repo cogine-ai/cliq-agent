@@ -11,7 +11,7 @@ import { openStateStore, publishInProcessChannel } from './store.js';
 import { createAgentFixture } from './testing/agent-fixtures.js';
 import { disposeFixture, uuidv7 } from './testing/fixtures.js';
 import { batch, claimTool, observation, prepareTool } from './testing/tool-calls.js';
-import { fixtureInspector, quiescedToolCheckpoint } from './testing/tool-effects.js';
+import { fixtureInspector, quiescedToolCheckpoint, retireFixtureToolSelection } from './testing/tool-effects.js';
 
 type Fixture = Awaited<ReturnType<typeof createAgentFixture>>;
 const revision = (fixture: Fixture) => fixture.store.getRun(fixture.runId).revision;
@@ -218,10 +218,15 @@ for (const expired of [false, true]) test(`tool budget stopping respects ${expir
     const claimed = await claimTool(fixture, await prepareTool(fixture));
     await fixture.agent.completeTool({ expectedRunRevision: revision(fixture), opId: claimed.entry.opId, attempt: claimed.entry.attempt,
       observationRef: await observation(fixture, claimed, 'first result') });
+    const selection = await fixture.agent.prepareTool({ expectedRunRevision: revision(fixture), leaseEpoch: fixture.leaseEpoch });
+    assert.ok(selection.disposition === 'retirement_required');
+    assert.equal(selection.reason, 'approval');
+    await retireFixtureToolSelection(fixture, selection);
     const pending = await fixture.agent.prepareTool({ expectedRunRevision: revision(fixture), leaseEpoch: fixture.leaseEpoch });
     assert.ok(pending.disposition === 'approval_required');
-    const proof = await quiescedToolCheckpoint(fixture, pending.checkpointId);
-    await fixture.agent.waitForToolApproval({ expectedRunRevision: revision(fixture), waitingOnRef: pending.waitingOnRef, checkpoint: proof.checkpoint });
+    assert.equal(pending.run.activeWorkerLaunchId, undefined);
+    assert.equal(pending.run.budgetConsumed.toolCalls, 1);
+    await fixture.agent.waitForToolApproval({ expectedRunRevision: revision(fixture), waitingOnRef: pending.waitingOnRef });
     await assert.rejects(stop(fixture), { code: 'STATE_TRANSITION_INVALID' });
     const command = { requestId: uuidv7(), expectedRunRevision: revision(fixture),
       waitingOnRef: pending.waitingOnRef, decision: 'allow' as const, ttlMs: 1000, ...await publishInProcessChannel(fixture.store) };

@@ -478,14 +478,29 @@ test('the final candidate and verifier/tool preparation use only their preparing
   assert.match(preparing, /readSignal\?: AbortSignal/u);
   assert.match(preparing, /cut\(input\.expectedRunRevision, readSignal\)/u);
   assert.doesNotMatch(preparing, /readCanonicalArtifact(?:<[^>]+>)?\(artifacts|prepareValidatedInvocation\(driver, artifacts/u);
-  const prepareTool = between(tool, 'prepareTool: stateOperation(', 'waitForToolApproval: stateOperation(');
+  const prepareTool = between(tool, 'prepareTool: stateOperation(', 'retireToolSelection: stateOperation(');
   assert.match(prepareTool, /readSignal\?: AbortSignal/u);
   assert.match(prepareTool, /cut\(expectedRunRevision, reads\)/u);
   assert.doesNotMatch(prepareTool, /artifacts\.readBytes|prepareContinuationCommit\(artifacts|prepareValidatedInvocation\(driver, artifacts/u);
+  const retiringTool = between(tool, 'retireToolSelection: stateOperation(', 'waitForToolApproval: stateOperation(');
+  assert.doesNotMatch(retiringTool, /withReadSignal|readSignal/u,
+    'the original physical selection-retirement receipt must join independently of preparation cancellation');
   const execution = source('./run-execution.ts');
   assert.match(execution, /currentAgent\.beginFinalCandidate\(\{ expectedRunRevision \}, signal\)/u);
   assert.match(execution, /continuation\.prepareVerifier\(\{ expectedRunRevision: run\.revision, leaseEpoch: run\.leaseEpoch \}, signal\)/u);
-  assert.match(execution, /currentAgent\.prepareTool\(\{ expectedRunRevision: activated\.run\.revision, leaseEpoch: activated\.run\.leaseEpoch \}, signal\)/u);
+  const parsed = ts.createSourceFile('tool-preparation.ts', execution, ts.ScriptTarget.Latest, true);
+  const preparations: ts.CallExpression[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) &&
+        node.expression.expression.getText(parsed) === 'currentAgent' && node.expression.name.text === 'prepareTool') preparations.push(node);
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed);
+  assert.equal(preparations.length, 3, 'queued selection, capacity rollover and activated execution must all retain their preparation lifetime');
+  for (const call of preparations) {
+    assert.equal(call.arguments.length, 2);
+    assert.equal(call.arguments[1]!.getText(parsed), 'signal');
+  }
 });
 
 test('real workspace/controller births and worker identity are registered before respecting preparation cancellation', () => {

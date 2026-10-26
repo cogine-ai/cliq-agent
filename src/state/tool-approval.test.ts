@@ -1,20 +1,25 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import path from 'node:path';
-import { canonicalSha256 } from '../kernel/canonical.js';
+import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting } from '../kernel/identity.js';
 import type { ToolApprovalDecisionV1, ToolApprovalWait, ToolOperationGrantV1 } from '../kernel/tool-authorization.js';
 import { KERNEL_DATABASE_FILENAME } from '../config.js';
 import { createAgentFixture } from './testing/agent-fixtures.js';
 import { activateFixtureWorker, disposeFixture, uuidv7 } from './testing/fixtures.js';
 import { batch, prepareTool, claimTool, observation } from './testing/tool-calls.js';
-import { postEffectObservation, quiescedToolCheckpoint } from './testing/tool-effects.js';
+import { postEffectObservation, quiescedToolCheckpoint, retireFixtureToolSelection } from './testing/tool-effects.js';
 import { openStateStore, publishInProcessChannel } from './store.js';
 import { openSqliteDriver } from './sqlite-driver.js';
 
 type Fixture = Awaited<ReturnType<typeof createAgentFixture>>;
 async function ask(fixture: Fixture) {
-  const result = await fixture.agent.prepareTool({ expectedRunRevision: fixture.store.getRun(fixture.runId).revision, leaseEpoch: fixture.leaseEpoch });
+  let result = await fixture.agent.prepareTool({ expectedRunRevision: fixture.store.getRun(fixture.runId).revision, leaseEpoch: fixture.leaseEpoch });
+  if (result.disposition === 'retirement_required') {
+    assert.equal(result.reason, 'approval');
+    await retireFixtureToolSelection(fixture, result);
+    result = await fixture.agent.prepareTool({ expectedRunRevision: fixture.store.getRun(fixture.runId).revision, leaseEpoch: fixture.leaseEpoch });
+  }
   assert.equal(result.disposition, 'approval_required');
   if (result.disposition !== 'approval_required') throw new Error('test expected ask');
   return result;
@@ -128,26 +133,81 @@ test('denial closes one ordered call without dispatch or charge and a later ask 
   } finally { await disposeFixture(fixture); }
 });
 
+test('a Store-loaded approval replay refuses another genuine response from the same Run and preserves its original first response', async () => {
+  const fixture = await createAgentFixture('approval-same-run-response-substitution', undefined, { mode: 'default', tools: ['bash'] });
+  const writer = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+  try {
+    await batch(fixture, [{ name: 'bash', input: { command: 'printf first' } }, { name: 'bash', input: { command: 'printf second' } }]);
+    await wait(fixture);
+    const firstInput = await control(fixture, 'deny');
+    const first = await fixture.agent.approveTool(firstInput);
+    await wait(fixture);
+    const secondInput = await control(fixture, 'deny');
+    const second = await fixture.agent.approveTool(secondInput);
+    assert.notEqual(firstInput.requestId, secondInput.requestId);
+    assert.notEqual(first.response.result.decisionRef, second.response.result.decisionRef);
+    assert.equal(first.run.id, second.run.id);
+    // The cached installed continuation uses this same genuine Store-loaded
+    // reducer. No installed execution authority or physical effect is minted.
+    fixture.agent = await fixture.store.loadAgentRun({ runId: fixture.runId,
+      material: fixture.authority.material, releaseKeys: fixture.signed.releaseKeys });
+    const before = canonicalJsonBytes(await fixture.store.readRecoveryClosure(fixture.runId));
+    const read = (requestId: string) => writer.prepare("SELECT response_ref FROM control_requests WHERE principal_id=? AND method='run.approve' AND request_id=?")
+      .get<{ response_ref: string }>(firstInput.principalId, requestId)!;
+    const original = read(firstInput.requestId), other = read(secondInput.requestId);
+    assert.equal(original.response_ref, canonicalSha256(first.response));
+    assert.equal(other.response_ref, canonicalSha256(second.response));
+    assert.notEqual(original.response_ref, other.response_ref);
+    try {
+      // Only an existing response locator is corrupted: both decisions and
+      // all authority/Journal/artifact rows were produced by real reducers.
+      writer.prepare("UPDATE control_requests SET response_ref=? WHERE principal_id=? AND method='run.approve' AND request_id=?")
+        .run(other.response_ref, firstInput.principalId, firstInput.requestId);
+      await assert.rejects(fixture.agent.approveTool({ ...firstInput, ...await publishInProcessChannel(fixture.store) }),
+        { code: 'RECOVERY_REQUIRED' });
+      assert.equal(read(firstInput.requestId).response_ref, other.response_ref, 'refusal cannot repair or replace retained data');
+    } finally {
+      writer.prepare("UPDATE control_requests SET response_ref=? WHERE principal_id=? AND method='run.approve' AND request_id=?")
+        .run(original.response_ref, firstInput.principalId, firstInput.requestId);
+    }
+    const replay = await fixture.agent.approveTool({ ...firstInput, ...await publishInProcessChannel(fixture.store) });
+    assert.equal(replay.replayed, true);
+    assert.deepEqual(canonicalJsonBytes(replay.response), canonicalJsonBytes(first.response));
+    assert.deepEqual(canonicalJsonBytes(await fixture.store.readRecoveryClosure(fixture.runId)), before);
+    assert.equal(fixture.store.getRun(fixture.runId).budgetConsumed.toolCalls, 0);
+  } finally { writer.close(); await disposeFixture(fixture); }
+});
+
 test('wait and approval commit faults leave no partial generation, checkpoint, control response or decision', async () => {
   const fixture = await createAgentFixture('approval-atomic', undefined, { mode: 'default', tools: ['bash'] });
   const fault = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
   try {
     await batch(fixture, [{ name: 'bash', input: { command: 'printf ok' } }]);
-    const pending = await ask(fixture);
-    await assert.rejects(fixture.agent.waitForToolApproval({ expectedRunRevision: pending.run.revision, waitingOnRef: pending.waitingOnRef }), /retirement proof/);
-    const proof = await quiescedToolCheckpoint(fixture, pending.checkpointId);
-    const input = { expectedRunRevision: pending.run.revision, waitingOnRef: pending.waitingOnRef, checkpoint: proof.checkpoint };
+    const selection = await fixture.agent.prepareTool({ expectedRunRevision: fixture.store.getRun(fixture.runId).revision, leaseEpoch: fixture.leaseEpoch });
+    assert(selection.disposition === 'retirement_required');
+    await assert.rejects(fixture.agent.retireToolSelection({ expectedRunRevision: selection.run.revision,
+      checkpointId: selection.checkpointId, checkpoint: {} as never }));
+    const proof = await quiescedToolCheckpoint(fixture, selection.checkpointId);
+    const retirement = { expectedRunRevision: selection.run.revision, checkpointId: selection.checkpointId, checkpoint: proof.checkpoint };
     const before = await fixture.store.readRecoveryClosure(fixture.runId);
     const death = await fixture.store.artifacts.readCanonical<Record<string, unknown>>(proof.checkpoint.retirementEvidenceRef);
     (death.owner as Record<string, unknown>).workerLaunchId = 'foreign-launch';
     death.evidenceDigest = digestOmitting(death, 'evidenceDigest');
     const foreignDeath = await fixture.store.artifacts.publishCanonical(death, 'cliq-process-containment-death-evidence-v1');
-    await assert.rejects(fixture.agent.waitForToolApproval({ ...input,
+    await assert.rejects(fixture.agent.retireToolSelection({ ...retirement,
       checkpoint: { ...proof.checkpoint, retirementEvidenceRef: foreignDeath.ref } }), /retired worker owner/);
     assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
     fault.exec("CREATE TRIGGER fail_approval_checkpoint BEFORE INSERT ON checkpoints BEGIN SELECT RAISE(ABORT, 'injected approval checkpoint failure'); END");
-    await assert.rejects(fixture.agent.waitForToolApproval(input), /injected approval checkpoint failure/);
+    await assert.rejects(fixture.agent.retireToolSelection(retirement), /injected approval checkpoint failure/);
     assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
+    fault.exec('DROP TRIGGER fail_approval_checkpoint');
+    await fixture.agent.retireToolSelection(retirement);
+    const pending = await ask(fixture);
+    const input = { expectedRunRevision: pending.run.revision, waitingOnRef: pending.waitingOnRef };
+    const beforeWait = await fixture.store.readRecoveryClosure(fixture.runId);
+    fault.exec("CREATE TRIGGER fail_approval_checkpoint BEFORE INSERT ON checkpoints BEGIN SELECT RAISE(ABORT, 'injected approval checkpoint failure'); END");
+    await assert.rejects(fixture.agent.waitForToolApproval(input), /injected approval checkpoint failure/);
+    assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), beforeWait);
     fault.exec('DROP TRIGGER fail_approval_checkpoint');
     await fixture.agent.waitForToolApproval(input);
     const approve = await control(fixture, 'allow');
@@ -270,10 +330,13 @@ test('an approval wait cannot substitute its call, policy evidence or workspace 
       const artifact = await fixture.store.artifacts.publishCanonical(changed, 'cliq-waiting-subject-v1');
       await assert.rejects(fixture.agent.waitForToolApproval({ expectedRunRevision: pending.run.revision, waitingOnRef: artifact.ref }));
     }
-    const proof = await quiescedToolCheckpoint(fixture, pending.checkpointId, true);
+    Object.assign(fixture, await activateFixtureWorker(fixture, 'approval-wrong-workspace'));
+    const selection = await fixture.agent.prepareTool({ expectedRunRevision: fixture.store.getRun(fixture.runId).revision, leaseEpoch: fixture.leaseEpoch });
+    assert(selection.disposition === 'retirement_required');
+    const proof = await quiescedToolCheckpoint(fixture, selection.checkpointId, true);
     const before = await fixture.store.readRecoveryClosure(fixture.runId);
-    await assert.rejects(fixture.agent.waitForToolApproval({ expectedRunRevision: pending.run.revision, waitingOnRef: pending.waitingOnRef,
-      checkpoint: proof.checkpoint }), /unchanged ready workspace/);
+    await assert.rejects(fixture.agent.retireToolSelection({ expectedRunRevision: selection.run.revision, checkpointId: selection.checkpointId,
+      checkpoint: proof.checkpoint }), /original ready workspace/);
     assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
   } finally { await disposeFixture(fixture); }
 });

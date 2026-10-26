@@ -247,8 +247,29 @@ function assertCarrierExperimentWorkflow(workflow: string): void {
   assert(workflow.includes('        run: |\n' + processRegression + '          probe_node=$(realpath "$(command -v node)")\n' +
     '          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh "$probe_node" "$RUNNER_TEMP/cliq-systemd-user"\n'),
   'the lifecycle regression precedes the unchanged actual systemd campaign in its original step');
+  const buildDependencies = 'bubblewrap libcap-dev libselinux1-dev meson ninja-build';
+  const aptLines = workflow.split('\n').filter(line => line.includes('apt-get install') && /\bbubblewrap\b/u.test(line));
+  assert.equal(aptLines.length, 18, 'only the eighteen original bubblewrap installation commands receive fixed source-build dependencies');
+  assert.equal(workflow.split(buildDependencies).length, 19, 'the exact dependency group must occur once in each original command');
+  for (const line of aptLines) assert.equal(line.split(buildDependencies).length, 2,
+    'the original APT bubblewrap remains for its negative parameter regression alongside the fixed build dependencies');
+  const storageRegression = [
+    '          node --test scripts/kernel/testing/build-bubblewrap.test.mjs',
+    '          storage_regression="$RUNNER_TEMP/cliq-source-storage-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"',
+    '          musl-gcc -std=c11 -O2 -Wall -Wextra -Werror -static \\',
+    '            -idirafter /usr/include -idirafter "/usr/include/$(musl-gcc -dumpmachine)" \\',
+    '            native/linux/source-storage.test.c -o "$storage_regression"',
+    '          "$storage_regression"',
+    '',
+  ].join('\n');
+  assert.equal(workflow.split(storageRegression).length, 2, 'the real bounded-storage and old-APT parameter regressions run exactly once');
+  assert(workflow.includes('      - name: Verify real worker seccomp ABI and syscall denials\n' +
+    '        shell: bash\n        run: |\n' +
+    '          node --test --import tsx scripts/kernel/testing/guest-verifier-process.test.ts scripts/kernel/testing/guest-verifier-diagnostics.test.ts\n' +
+    storageRegression + '          regression="$RUNNER_TEMP/cliq-worker-seccomp-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"\n'),
+  'the source-build regressions stay inside the original actual native ABI step, before its unchanged compiler and syscall checks');
   const projected = workflow.replace(experiment, '').replace(retain, '').replace(parentEvidenceTest, '')
-    .replace(sessionRegression, '').replace(processRegression, '');
+    .replace(sessionRegression, '').replace(processRegression, '').replaceAll(buildDependencies, 'bubblewrap').replace(storageRegression, '');
   assert.equal(createHash('sha256').update(projected).digest('hex'), '346af80a56060feace86c309b316c67560f68c512207d6cd3c95ab965cb225f5',
     'all original CT jobs, runner groups, timeouts, qualifiers and conditions must remain byte-identical');
   assert.equal(workflow.split('qualify-supervisor-carrier-size.ts').length, 2, 'no production job may select the experimental carrier');
@@ -263,6 +284,12 @@ test('the additive parent-domain regression cannot hide workflow removals, disab
   const parentEvidenceTest = '          scripts/kernel/testing/installed-verifier-parent-evidence.test.ts\n';
   const sessionRegression = ' scripts/kernel/testing/installed-session-continuity.test.ts';
   const processRegression = '          node --test scripts/kernel/testing/systemd-process-fact.test.mjs\n';
+  const buildDependencies = 'bubblewrap libcap-dev libselinux1-dev meson ninja-build';
+  const negativeParameters = '          node --test scripts/kernel/testing/build-bubblewrap.test.mjs\n';
+  const storageCommand = '            native/linux/source-storage.test.c -o "$storage_regression"\n';
+  const storageEnd = '          "$storage_regression"\n';
+  const storageStart = workflow.indexOf(negativeParameters);
+  const storageRegression = workflow.slice(storageStart, workflow.indexOf(storageEnd, storageStart) + storageEnd.length);
   const mutations = [
     workflow.replace(parentEvidenceTest, ''),
     workflow.replace(parentEvidenceTest, parentEvidenceTest.repeat(2)),
@@ -273,6 +300,18 @@ test('the additive parent-domain regression cannot hide workflow removals, disab
     workflow.replace(processRegression, ''),
     workflow.replace(processRegression, processRegression.repeat(2)),
     workflow.replace(processRegression, processRegression.replace('node --test', '# node --test')),
+    workflow.replace(buildDependencies, 'bubblewrap libcap-dev libselinux1-dev ninja-build meson'),
+    ...['libcap-dev', 'libselinux1-dev', 'meson', 'ninja-build'].map(dependency =>
+      workflow.replace(buildDependencies, buildDependencies.replace(' ' + dependency, ''))),
+    workflow.replace(buildDependencies, 'bubblewrap libcap-dev libselinux1-dev meson ninja-build curl'),
+    workflow.replace(buildDependencies, buildDependencies + ' ' + buildDependencies),
+    workflow.replace(negativeParameters, ''),
+    workflow.replace(negativeParameters, negativeParameters.repeat(2)),
+    workflow.replace(negativeParameters, negativeParameters.replace('node --test', '# node --test')),
+    workflow.replace(storageCommand, ''),
+    workflow.replace(storageCommand, storageCommand.replace('source-storage.test.c', 'worker-channel.test.c')),
+    workflow.replace(storageRegression, storageRegression.replace(' -Werror -static', ' -static')),
+    workflow.replace(storageRegression, '').replace('        run: |\n', '        run: |\n' + storageRegression),
     workflow.replace('        node: [22.13.0, 24.x]', '        node: [24.x]'),
     workflow.replace('    runs-on: ubuntu-22.04', '    runs-on: ubuntu-22.04-8core'),
     workflow.replace('    timeout-minutes: 20', '    timeout-minutes: 21'),

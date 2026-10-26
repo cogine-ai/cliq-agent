@@ -190,7 +190,7 @@ static void source_bubblewrap(void) {
     if (!retain_descriptors(keep, count)) _exit(70);
     char *arguments[256]; size_t at = 0; char quota[32], root_quota[32]; uint64_t runtime_budget, storage_reserve;
     if (!cliq_source_storage_reserve(&source_scope.config, &source_scope.identity, &runtime_budget, &storage_reserve)) _exit(70);
-    snprintf(quota, sizeof(quota), "%llu", (unsigned long long)source_scope.identity.max_generation_bytes);
+    snprintf(quota, sizeof(quota), "%llu", (unsigned long long)source_tmpfs_budget(source_scope.identity.max_generation_bytes));
     snprintf(root_quota, sizeof(root_quota), "%llu", (unsigned long long)runtime_budget);
 #define SOURCE_ARG(value) do { if (at >= sizeof(arguments) / sizeof(arguments[0]) - 1) _exit(70); arguments[at++] = (char *)(value); } while (0)
     SOURCE_ARG("bwrap"); SOURCE_ARG("--unshare-user"); SOURCE_ARG("--uid"); SOURCE_ARG("0"); SOURCE_ARG("--gid"); SOURCE_ARG("0");

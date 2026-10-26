@@ -1661,6 +1661,19 @@ export class StateStore {
   supportsInstalledDelivery(): boolean { return INSTALLED_DELIVERY_COMPOSITION_COMPLETE && this.supportsInstalledRuns(); }
   supportsSessionContinuity(): boolean { return !this.closed && !this.closeRequested && !this.released; }
 
+  listControl(request: unknown, identity: AuthenticatedControlIdentity) {
+    if (!this.supportsSessionContinuity()) return Promise.reject(new KernelStorageError('LEASE_FENCED', 'StateStore is closing or closed'));
+    request = immutableSnapshot(request);
+    return this.ownInstalledAdmission(async signal => {
+      const { decodeControlListRequest } = await import('../kernel/control-list.js');
+      const { readControlList } = await import('./list-read-cut.js');
+      const decoded = decodeControlListRequest(request), scoped = this.artifacts.withReadSignal(signal);
+      signal.throwIfAborted();
+      return { protocolVersion: 1 as const, ok: true as const,
+        result: await readControlList(this.driver, scoped, this.owner, decoded, identity, signal) };
+    });
+  }
+
   sessionContinuity(request: unknown, identity: AuthenticatedControlIdentity) {
     if (!this.supportsSessionContinuity()) return Promise.reject(new KernelStorageError('LEASE_FENCED', 'StateStore is closing or closed'));
     request = immutableSnapshot(request);
@@ -1724,19 +1737,38 @@ export class StateStore {
   }
 
   async approveInstalledRun(request: unknown, identity: AuthenticatedControlIdentity) {
-    if (!this.supportsInstalledDelivery()) throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'installed delivery composition is not complete');
+    if (!this.supportsInstalledRuns()) throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'installed Run composition is not complete');
     const value = decodeInstalledControlRequest(request);
     if (value.method !== 'run.approve') throw new KernelStorageError('INVALID_REQUEST', 'approval requires its exact public contract');
     return this.ownInstalledAdmission(async signal => {
       await validateControlChannelClosure(this.artifacts, this.owner, identity); signal.throwIfAborted();
       const selected = readRun(this.driver, value.runId);
-      if (decodeRunSpec(await this.artifacts.withReadSignal(signal).readCanonical(selected.specRef)).operation !== 'delivery')
-        throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'installed approval is connected only for delivery');
+      if (readSessionPrincipalId(this.driver, selected.sessionId) !== identity.principalId)
+        throw new KernelStorageError('NOT_FOUND', 'approval Run is unavailable');
       const continuation = await this.retainInstalledAgent(value.runId);
-      if (continuation.operation !== 'delivery') throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'installed approval is connected only for delivery');
-      const result = await continuation.approveDelivery({ ...identity, requestId: value.requestId, expectedRunRevision: value.expectedRevision,
-        waitingOnRef: value.waitingOnRef, decision: value.decision, ...(value.ttlMs === undefined ? {} : { ttlMs: value.ttlMs }) });
+      const input = { ...identity, requestId: value.requestId, expectedRunRevision: value.expectedRevision,
+        waitingOnRef: value.waitingOnRef, decision: value.decision, ...(value.ttlMs === undefined ? {} : { ttlMs: value.ttlMs }) };
+      // The owning typed reducer authenticates/replays the original subject;
+      // public clients cannot select an executable or manufacture a grant.
+      const result = continuation.operation === 'delivery' ? await continuation.approveDelivery(input) : await continuation.approveTool(input);
       if (result.run.stopIntentRef) this.requestInstalledRunStop(value.runId);
+      this.scheduleInstalledRun(value.runId); return result;
+    });
+  }
+
+  async inputInstalledRun(request: unknown, identity: AuthenticatedControlIdentity) {
+    if (!this.supportsInstalledRuns()) throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'installed Run composition is not complete');
+    const value = decodeInstalledControlRequest(request);
+    if (value.method !== 'run.input') throw new KernelStorageError('INVALID_REQUEST', 'input requires its exact public contract');
+    return this.ownInstalledAdmission(async signal => {
+      await validateControlChannelClosure(this.artifacts, this.owner, identity); signal.throwIfAborted();
+      const selected = readRun(this.driver, value.runId);
+      if (readSessionPrincipalId(this.driver, selected.sessionId) !== identity.principalId)
+        throw new KernelStorageError('NOT_FOUND', 'input Run is unavailable');
+      const continuation = await this.retainInstalledAgent(value.runId);
+      if (continuation.operation !== 'agent') throw new KernelStorageError('INVALID_REQUEST', 'delivery has no model input continuation');
+      const result = await continuation.submitInput({ ...identity, requestId: value.requestId, expectedRunRevision: value.expectedRevision,
+        waitingOnRef: value.waitingOnRef, input: value.input });
       this.scheduleInstalledRun(value.runId); return result;
     });
   }
@@ -2452,10 +2484,22 @@ export class StateStore {
         // A structural frontier cannot replace original resource ownership.
         throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'delivery maintenance is not completely composed');
       }
-      if (current.status === 'queued' && !this.installedWorkerSlotAvailable(runId)) return;
       if (current.nextStep === 'tool') {
+        if (current.status === 'queued') {
+          const selection = await agent.prepareTool({ expectedRunRevision: current.revision, leaseEpoch: current.leaseEpoch }, readSignal);
+          if (selection.disposition === 'input_required') {
+            await agent.waitForInput({ expectedRunRevision: selection.run.revision, waitingOnRef: selection.waitingOnRef }); return;
+          }
+          if (selection.disposition === 'approval_required') {
+            await agent.waitForToolApproval({ expectedRunRevision: selection.run.revision, waitingOnRef: selection.waitingOnRef }); return;
+          }
+          if (selection.disposition === 'denied') continue;
+          if (selection.disposition !== 'worker_required') throw new KernelStorageError('RECOVERY_REQUIRED', 'queued tool unexpectedly retains execution authority');
+          if (!this.installedWorkerSlotAvailable(runId)) return;
+        }
         await (await nativeExecution()).executeCurrentTool({ expectedRunRevision: current.revision }); continue;
       }
+      if (current.status === 'queued' && !this.installedWorkerSlotAvailable(runId)) return;
       if (current.nextStep !== 'agent') return;
       const prior = await agent.readModelAttempt(readSignal);
       const progress = this.installedModelProgress(prior);

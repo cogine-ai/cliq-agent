@@ -13,6 +13,22 @@ The strong support matrix and three security layers remain unchanged.
 
 This work package is implementable without further product decisions. The visible risks are the signed macOS microVM supply chain, Linux cgroup delegation, Git edge cases, and workspace-image cost; none permits a fallback to host-process detached mutation.
 
+The fixed ordinary-tool script is signed data at
+`adapters/builtin-tools.mjs`, never an executable adapter or user script.
+Its distinct `cliq-builtin-tools-v1` launch uses only the original signed guest
+Node and, for Bash, the separately admitted same-image `/bin/bash`; it never
+uses host spawn, ambient environment/PATH, startup files, network or legacy
+ToolDefinition execution. The exact normalized call and original profile
+limits pass through sealed private input, not argv or a new business manifest.
+Read/search use read-only/no-exec `/work`; Bash uses read-write/no-exec `/work`.
+Per-action permission remains independent from Workspace Trust and the OS
+boundary. Every invocation retains its own claim/release identity and requires
+complete output/descriptor/domain join. Read/search cannot use a private
+rollback to gain write authority or redispatch UNKNOWN. A stopped UNKNOWN can
+close only with the original complete ready Checkpoint, true whole-domain
+retirement, quarantine and actual rollback in the existing terminal reducer;
+its fully charged UNKNOWN and original BudgetSettlement remain unchanged.
+
 ### Source
 
 Brief / issue / roadmap item:
@@ -255,6 +271,12 @@ SQLite recovery reducer, and does not advance this work package's completion.
           argvCwdSource: 'trusted_recipe_decode_of_request_and_target'
         } & (
           | { purpose: 'tool'; recipe: 'cliq-tool-launch-v1'; stdio: SandboxCapturedStdioV1 }
+          | {
+              purpose: 'tool'
+              recipe: 'cliq-builtin-tools-v1'
+              privateGitProtection: 'existing_read_only'
+              stdio: SandboxCapturedStdioV1
+            }
           | { purpose: 'verifier'; recipe: 'cliq-verifier-command-v1'; stdio: SandboxCapturedStdioV1 }
           | {
               purpose: 'mcp_stdio'
@@ -1862,3 +1884,33 @@ settlement completes. No reported boolean substitutes for the live native guard.
 These are implementation contracts, not qualification evidence. The exact-SHA
 Linux reports must independently pass; unexecuted cuts and full I1 remain
 explicitly unqualified.
+
+The ordinary script recipe preflights its original signed guest and unchanged
+profile before admission/grant/claim: Node requires at least 32 processes,
+the actual guest image must fit the original single-file ceiling (at most
+256 MiB), and Bash requires the exact admitted `/bin/bash` root. The fixed
+tool description names only the signed Node/Git/Bash executables, Bash
+builtins, no network and no direct execution from workspace/tmp. Unsupported
+external commands fail honestly; host executables are never a fallback.
+The new recipe's `privateGitProtection='existing_read_only'` is a mandatory
+closed constraint. Bash uses fixed `GIT_OPTIONAL_LOCKS=0`; an actual existing
+private `.git` is independently held and OS-mounted read-only, so status/diff
+may read it while attempted index/config/ref writes remain denied even after
+an environment override. Non-Git generations retain true absence: no fake
+directory is mounted and the basename is not a general write-protection
+mechanism. Creating or replacing `.git` is unsupported; the unchanged complete
+Checkpoint comparison rejects it and requires original physical retirement /
+old-Checkpoint recovery or explicit waiting, never an invented no-effect result,
+ignored hash mismatch or automatic redispatch. Mutable Git metadata/commit
+support remains a stated gap.
+Each genuine result retains full raw outputs, actual termination and separate
+invocation death; only the bounded model projection is clipped, with original
+completeness and native/model truncation distinguished. Supervisor-driven
+`controller_stop` does not imply a user StopIntent or no effect.
+After both original raw output publications fully join, the exact inspector /
+invocation containment / whole-invocation death / capture data quartet may use
+the RFC's existing four-stage CAS publisher. All real files still sync, fully
+rehash and join before its receipt escapes or the unique settlement proceeds;
+failure retains the one original result/fence and cannot re-execute the claim.
+No authority, clock or transaction point is moved, and the physical Linux stop
+deadline still requires independent real validation.

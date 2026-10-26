@@ -8,9 +8,25 @@ import { digestOmitting, identityHash } from './identity.js';
 // Pure wire conformance: no installed selection, peer, grant or execution proof.
 test('connected composition ceiling is immutable while the actual Supervisor selects enabled capabilities', () => {
   assert.deepEqual(INSTALLED_CONTROL_FEATURES, ['session.get', 'run.get', 'run.attach', 'supervisor.status', 'credential.finalize',
-    'session.create', 'session.list', 'session.fork', 'session.compact', 'session.handoff.create', 'run.submit', 'run.cancel', 'authorization.create', 'authorization.revoke', 'run.result', 'run.diff', 'artifact.get', 'run.apply', 'run.approve', 'run.reconcile']);
+    'session.create', 'session.list', 'session.fork', 'session.compact', 'session.handoff.create', 'run.submit', 'run.list', 'run.cancel', 'authorization.create', 'authorization.list', 'authorization.revoke', 'run.result', 'run.diff', 'artifact.get', 'run.apply', 'run.approve', 'run.input', 'run.reconcile']);
   assert.throws(() => Reflect.apply(Array.prototype.push, INSTALLED_CONTROL_FEATURES, ['unexpected.method']));
   assert.throws(() => Reflect.apply(Array.prototype.push, CONTROL_METHODS_V1, ['unexpected.method']));
+});
+
+test('run.input binds one exact bounded value and has no caller principal, executable or authority fields', () => {
+  const core = { protocolVersion: 1, method: 'run.input', requestId: '01900000-0000-7000-8000-000000000017',
+    runId: 'run-input', expectedRevision: 4, waitingOnRef: 'a'.repeat(64), input: { kind: 'text', value: 'Alice' } };
+  const request = { ...core, requestDigest: canonicalSha256(core) };
+  assert.deepEqual(decodeInstalledControlRequest(request), request);
+  for (const input of [{ kind: 'text', value: 3 }, { kind: 'json', value: null, grant: 'bad' },
+    { kind: 'binary', value: 'bad' }]) {
+    const altered = { ...core, input };
+    assert.throws(() => decodeInstalledControlRequest({ ...altered, requestDigest: canonicalSha256(altered) }));
+  }
+  for (const extra of [{ principalId: 'caller' }, { channelIdentityRef: 'a'.repeat(64) }, { leaseEpoch: 9 }, { checkpointId: 'not-authority' }])
+    assert.throws(() => decodeInstalledControlRequest({ ...request, ...extra }));
+  assert.throws(() => decodeInstalledControlRequest({ ...request, input: { kind: 'text', value: 'Bob' } }));
+  assert.throws(() => decodeInstalledControlRequest({ ...request, requestDigest: 'b'.repeat(64) }));
 });
 
 test('Session continuity has one closed wire contract and no Session execution or hidden append authority', () => {

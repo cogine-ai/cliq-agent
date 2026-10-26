@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { canonicalSha256 } from '../kernel/canonical.js';
-import { assertArtifactRef, digestOmitting, parseCanonicalTime } from '../kernel/identity.js';
+import { assertArtifactRef, digestOmitting, identityHash, parseCanonicalTime } from '../kernel/identity.js';
 import type { ProcessContainment, ProcessContainmentPlanV1, SandboxLaunchSpecV1, SandboxProfileV1, SandboxRootProfileV1,
   SandboxResourceSpec, SandboxMountV1 } from '../kernel/execution.js';
 import type { InvocationJournalEntry, Run, RunAssemblyV1, RunFrontier, RunSpec, StateOwnerRecordV1, WorkerIdentity, WorkerLaunch,
@@ -16,7 +16,7 @@ import { assertActiveStateOwner, type StateOwnerContext } from './state-owner.js
 import { readRun } from './rows.js';
 import { readRequiredWorkerLaunch } from './repositories/worker-launches.js';
 import { readRequiredWorkspaceGenerationByRef } from './repositories/workspace-generations.js';
-import { verifyToolRuntimeAuthority, type ReleaseTrustKey, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
+import { type ReleaseTrustKey, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { readCanonicalArtifact } from './agent-context.js';
 import type { ArtifactCatalog } from './artifacts.js';
 import { decodeRunSpec, decodeSourceManifest, decodeStateLockIdentity, decodeStateRootIdentity,
@@ -28,6 +28,10 @@ import { decodeVerifierPlan } from './result-artifacts.js';
 import { decodeVerifierCommand, decodeVerifierEnvironment, decodeVerifierSpec } from './verifier-artifacts.js';
 import { loadVerifierPolicy } from './verifier-policy.js';
 import { readCandidateSource } from './result-source.js';
+import { readToolRuntimeAuthority } from './tool-runtime-authority.js';
+import { BUILTIN_SCRIPT_TOOL_NAMES } from '../tools/execution-identity.js';
+import { loadToolContracts } from '../tools/input-contract.js';
+import { BUILTIN_SCRIPT_ENVIRONMENTS, BUILTIN_SCRIPT_PRIVATE_MOUNTS, builtinToolInputBytes, isBuiltinScriptTool } from '../sandbox/builtin-tool-data.js';
 
 type WorkerSpec = Extract<SandboxLaunchSpecV1, { purpose: 'worker_activation' }>;
 type WorkerOwner = WorkerSpec['owner'];
@@ -36,6 +40,7 @@ type VerifierSpec = Extract<SandboxLaunchSpecV1, { owner: { kind: 'run_invocatio
 type InvocationOwner = EditSpec['owner'];
 const workerClosures = new WeakSet<object>();
 const editClosures = new WeakSet<object>();
+const scriptClosures = new WeakSet<object>();
 const verifierClosures = new WeakSet<object>();
 
 /** A structural clone is retained metadata, not authority to mint a native launch. */
@@ -44,6 +49,16 @@ export function assertWorkerLaunchClosure(value: unknown): asserts value is Work
 }
 export function assertBuiltinEditLaunchClosure(value: unknown): asserts value is BuiltinEditLaunchClosure {
   if (value === null || typeof value !== 'object' || !editClosures.has(value)) mismatch('native edit launch requires its trusted retained-artifact closure');
+}
+export function assertBuiltinScriptLaunchClosure(value: unknown): asserts value is BuiltinScriptLaunchClosure {
+  if (value === null || typeof value !== 'object' || !scriptClosures.has(value)) mismatch('native script launch requires its trusted retained-artifact closure');
+}
+export function isBuiltinScriptLaunchClosure(value: unknown): value is BuiltinScriptLaunchClosure {
+  return value !== null && typeof value === 'object' && scriptClosures.has(value);
+}
+export function assertBuiltinToolLaunchClosure(value: unknown): asserts value is BuiltinToolLaunchClosure {
+  if (value === null || typeof value !== 'object' || !editClosures.has(value) && !scriptClosures.has(value))
+    mismatch('native builtin launch requires its original retained-artifact closure');
 }
 export function assertVerifierLaunchClosure(value: unknown): asserts value is VerifierLaunchClosure {
   if (value === null || typeof value !== 'object' || !verifierClosures.has(value)) mismatch('native verifier launch requires its trusted retained-artifact closure');
@@ -249,7 +264,14 @@ export function decodeWorkerSandboxLaunchSpec(value: unknown): WorkerSpec {
 }
 /** Retained data only; productive creation still requires the branded closure. */
 export function decodeBuiltinEditSandboxLaunchSpec(value: unknown): EditSpec {
-  return decodeLinuxLaunchSpec(value, 'tool') as EditSpec;
+  const spec = decodeLinuxLaunchSpec(value, 'tool') as EditSpec;
+  literal(spec.processInvocation.recipe, 'cliq-tool-launch-v1', 'original edit recipe');
+  return spec;
+}
+export function decodeBuiltinScriptSandboxLaunchSpec(value: unknown): EditSpec {
+  const spec = decodeLinuxLaunchSpec(value, 'tool') as EditSpec;
+  literal(spec.processInvocation.recipe, 'cliq-builtin-tools-v1', 'builtin script recipe');
+  return spec;
 }
 /** Retained data only; a decoder cannot mint the native verifier brand. */
 export function decodeVerifierSandboxLaunchSpec(value: unknown): VerifierSpec {
@@ -268,20 +290,22 @@ function decodeLinuxLaunchSpec(value: unknown, purpose: 'worker_activation' | 't
     for (const member of ['operationGrantRef', 'requestRef', 'requestDigest', 'targetRef', 'targetDigest', 'parentWorkerContainmentRef']) digest(spec[member], member);
   }
   const runtime = record(spec.runtime, ['runtimeBundleRef', 'runtimeBundleManifestDigest', 'sandboxBackend', 'toolchain', 'launcher', 'runtimeDigest'], 'launch runtime');
+  const script = purpose === 'tool' && (spec.processInvocation as { recipe?: unknown } | null)?.recipe === 'cliq-builtin-tools-v1';
+  const guest = purpose === 'verifier' || script;
   digest(runtime.runtimeBundleRef, 'runtime bundle ref'); digest(runtime.runtimeBundleManifestDigest, 'runtime bundle digest');
   literal(runtime.sandboxBackend, 'linux_namespace', 'worker runtime backend');
-  const toolchain = record(runtime.toolchain, purpose === 'verifier'
+  const toolchain = record(runtime.toolchain, guest
     ? ['kind', 'guestToolchainManifestRef', 'guestToolchainManifestDigest', 'guestImageRef', 'guestImageDigest'] : ['kind'], 'Linux toolchain');
-  literal(toolchain.kind, purpose === 'verifier' ? 'guest_toolchain' : 'none', 'Linux toolchain');
-  if (purpose === 'verifier') for (const key of ['guestToolchainManifestRef', 'guestToolchainManifestDigest', 'guestImageRef', 'guestImageDigest']) digest(toolchain[key], key);
+  literal(toolchain.kind, guest ? 'guest_toolchain' : 'none', 'Linux toolchain');
+  if (guest) for (const key of ['guestToolchainManifestRef', 'guestToolchainManifestDigest', 'guestImageRef', 'guestImageDigest']) digest(toolchain[key], key);
   const launcher = record(runtime.launcher, ['executableId', 'executableDigest'], 'sandbox launcher'); text(launcher.executableId, 'launcher id'); digest(launcher.executableDigest, 'launcher digest');
   rehash(runtime, 'runtimeDigest', 'launch runtime');
-  const executable = record(spec.executable, purpose === 'verifier'
+  const executable = record(spec.executable, guest
     ? ['kind', 'guestToolchainManifestRef', 'guestToolchainManifestDigest', 'toolId', 'role', 'executionPath', 'executableDigest']
     : ['kind', 'runtimeBundleRef', 'runtimeBundleManifestDigest', 'executableId', 'role', 'executionPath', 'executableDigest'], 'worker executable');
-  literal(executable.kind, purpose === 'verifier' ? 'guest_toolchain' : 'runtime_bundle', 'Linux executable source');
-  literal(executable.role, purpose === 'worker_activation' ? 'worker' : purpose === 'verifier' ? 'verifier' : 'tool_adapter', 'executable role');
-  if (purpose === 'verifier') {
+  literal(executable.kind, guest ? 'guest_toolchain' : 'runtime_bundle', 'Linux executable source');
+  literal(executable.role, purpose === 'worker_activation' ? 'worker' : purpose === 'verifier' ? 'verifier' : script ? 'tool' : 'tool_adapter', 'executable role');
+  if (guest) {
     digest(executable.guestToolchainManifestRef, 'guest manifest ref'); digest(executable.guestToolchainManifestDigest, 'guest manifest digest'); text(executable.toolId, 'guest tool id');
   } else {
     digest(executable.runtimeBundleRef, 'worker bundle ref'); digest(executable.runtimeBundleManifestDigest, 'worker bundle digest'); text(executable.executableId, 'worker executable id');
@@ -289,18 +313,23 @@ function decodeLinuxLaunchSpec(value: unknown, purpose: 'worker_activation' | 't
   absolute(executable.executionPath, 'worker executable path'); digest(executable.executableDigest, 'worker executable digest');
   const invocation = record(spec.processInvocation, purpose === 'worker_activation'
     ? ['kind', 'purpose', 'recipe', 'runtimeSource', 'executableSource', 'argvSource', 'cwdSource', 'stdio']
-    : ['kind', 'purpose', 'recipe', 'requestRef', 'requestDigest', 'targetRef', 'targetDigest', 'argvCwdSource', 'stdio'], 'process recipe');
+    : ['kind', 'purpose', 'recipe', 'requestRef', 'requestDigest', 'targetRef', 'targetDigest', 'argvCwdSource', 'stdio',
+      ...(script ? ['privateGitProtection'] : [])], 'process recipe');
   const recipe = purpose === 'worker_activation' ? { kind: 'worker_entrypoint', purpose, recipe: 'cliq-worker-entrypoint-v1',
     runtimeSource: 'launch_runtime', executableSource: 'launch_executable', argvSource: 'fixed_empty', cwdSource: 'generation_root' }
-    : { kind: 'run_request', purpose, recipe: purpose === 'verifier' ? 'cliq-verifier-command-v1' : 'cliq-tool-launch-v1', requestRef: spec.requestRef, requestDigest: spec.requestDigest,
-      targetRef: spec.targetRef, targetDigest: spec.targetDigest, argvCwdSource: 'trusted_recipe_decode_of_request_and_target' };
+    : { kind: 'run_request', purpose, recipe: purpose === 'verifier' ? 'cliq-verifier-command-v1' : script ? 'cliq-builtin-tools-v1' : 'cliq-tool-launch-v1', requestRef: spec.requestRef, requestDigest: spec.requestDigest,
+      targetRef: spec.targetRef, targetDigest: spec.targetDigest, argvCwdSource: 'trusted_recipe_decode_of_request_and_target',
+      ...(script ? { privateGitProtection: 'existing_read_only' } : {}) };
   for (const [key, expected] of Object.entries(recipe)) literal(invocation[key], expected, `process recipe ${key}`);
   equal(record(invocation.stdio, ['stdin', 'stdout', 'stderr', 'extraFileDescriptors'], 'worker stdio'),
     { stdin: 'closed', stdout: 'captured', stderr: 'captured', extraFileDescriptors: purpose === 'worker_activation'
       ? 'authenticated_worker_channel_only' : 'authenticated_operation_channel_only' }, 'process stdio');
   environment(spec.environment);
   const filesystem = record(spec.filesystem, ['kind', 'generationRef', 'access', 'sourceProjectionRef', 'independentGit'], 'worker filesystem');
-  literal(filesystem.kind, 'run_generation', 'filesystem kind'); literal(filesystem.access, purpose === 'worker_activation' ? 'preactivated_readonly' : purpose === 'verifier' ? 'read_only' : 'read_write', 'filesystem access');
+  literal(filesystem.kind, 'run_generation', 'filesystem kind');
+  if (script) {
+    if (filesystem.access !== 'read_only' && filesystem.access !== 'read_write') mismatch('script has an invalid closed access envelope');
+  } else literal(filesystem.access, purpose === 'worker_activation' ? 'preactivated_readonly' : purpose === 'verifier' ? 'read_only' : 'read_write', 'filesystem access');
   digest(filesystem.generationRef, 'worker generation'); digest(filesystem.sourceProjectionRef, 'worker projection'); literal(filesystem.independentGit, true, 'worker private Git');
   mounts(spec.mounts, purpose === 'tool'); literal(digest(spec.mountsDigest, 'mount digest'), canonicalSha256(spec.mounts), 'mount digest');
   resources(spec.resources); literal(digest(spec.resourcesDigest, 'resources digest'), canonicalSha256(spec.resources), 'resources digest');
@@ -328,7 +357,8 @@ async function readExecutionEnvironment(artifacts: ArtifactCatalog, owner: State
   if (bundle.schemaVersion !== 1 || !Array.isArray(bundle.entries) || bundle.manifestDigest !== owner.runtimeBundleManifestDigest) mismatch('current StateOwner does not retain a signed execution bundle');
   const { signature: _signature, manifestDigest: _manifestDigest, ...bundleCore } = bundle;
   literal(bundle.manifestDigest, canonicalSha256(bundleCore), 'retained bundle digest');
-  if (spec.executable.kind !== 'runtime_bundle' && !(spec.purpose === 'verifier' && spec.executable.kind === 'guest_toolchain')) mismatch('Linux executable does not resolve a supported signed source');
+  if (spec.executable.kind !== 'runtime_bundle' && !((spec.purpose === 'verifier' || spec.purpose === 'tool' &&
+      spec.processInvocation.recipe === 'cliq-builtin-tools-v1') && spec.executable.kind === 'guest_toolchain')) mismatch('Linux executable does not resolve a supported signed source');
   for (const source of [assembly.runtime, spec.runtime, ...(spec.executable.kind === 'runtime_bundle' ? [spec.executable] : [])]) {
     if (source.runtimeBundleRef !== owner.runtimeBundleRef || source.runtimeBundleManifestDigest !== owner.runtimeBundleManifestDigest) mismatch('execution runtime is not the current verified StateOwner bundle');
   }
@@ -502,6 +532,12 @@ export type BuiltinEditLaunchClosureInput = {
 
 /** Consumes the owning reducer's reproduced grant/request/target; never evaluates permission or observes a native process. */
 export async function readBuiltinEditLaunchClosure(artifacts: ArtifactCatalog, owner: StateOwnerRecordV1, input: BuiltinEditLaunchClosureInput) {
+  const result = await readBuiltinExecutionClosure(artifacts, owner, input, 'edit');
+  return mint(result, editClosures);
+}
+
+async function readBuiltinExecutionClosure(artifacts: ArtifactCatalog, owner: StateOwnerRecordV1,
+  input: BuiltinEditLaunchClosureInput, kind: 'edit' | 'script') {
   input = immutableSnapshot(input);
   const { run, launch, generation: row, prepared, request, target, grant, call } = input;
   if (run.status !== 'running' || run.activeWorkerLaunchId !== launch.launchId || launch.phase !== 'activated' || launch.runId !== run.id ||
@@ -509,14 +545,21 @@ export async function readBuiltinEditLaunchClosure(artifacts: ArtifactCatalog, o
       row.phase !== 'active' || row.generationRef !== launch.workspaceGenerationRef || row.activeWorkerLaunchId !== launch.launchId || row.leaseEpoch !== run.leaseEpoch ||
       prepared.phase !== 'prepared' || prepared.opKind !== 'tool' || prepared.runId !== run.id || prepared.leaseEpoch !== run.leaseEpoch ||
       prepared.requestRef !== canonicalSha256(request) || prepared.target !== canonicalSha256(target) || prepared.grantRef !== canonicalSha256(grant) ||
-      request.toolName !== 'edit' || target.toolName !== 'edit' || target.execution.kind !== 'builtin' || target.execution.adapterId !== 'edit' ||
+      (kind === 'edit' ? request.toolName !== 'edit' || target.execution.kind !== 'builtin' || target.execution.adapterId !== 'edit'
+        : !BUILTIN_SCRIPT_TOOL_NAMES.some(name => name === request.toolName) || target.execution.kind !== 'builtin_script') ||
+      target.toolName !== request.toolName ||
+      request.requestDigest !== digestOmitting(request, 'requestDigest') || target.targetDigest !== digestOmitting(target, 'targetDigest') ||
+      grant.grantDigest !== digestOmitting(grant, 'grantDigest') || call.inputDigest !== digestOmitting(call, 'inputDigest') ||
       request.runId !== run.id || request.opId !== prepared.opId || request.targetRef !== prepared.target || request.targetDigest !== target.targetDigest ||
       grant.requestRef !== prepared.requestRef || grant.requestDigest !== request.requestDigest || grant.targetRef !== prepared.target || grant.targetDigest !== target.targetDigest ||
-      request.inputRef !== canonicalSha256(call) || call.disposition !== 'resolved' || call.toolName !== 'edit' || call.inputDigest !== request.inputDigest) mismatch('edit launch does not bind the current validated preparation and activation');
+      grant.subject.callId !== call.callId || grant.subject.callIndex !== call.index || grant.subject.batchItemId !== request.batchItemId ||
+      grant.subject.toolName !== request.toolName || grant.subject.toolContractDigest !== target.toolContractDigest ||
+      grant.subject.replayClass !== prepared.replayClass || request.callId !== call.callId || request.callIndex !== call.index ||
+      request.inputRef !== canonicalSha256(call) || call.disposition !== 'resolved' || call.toolName !== request.toolName || call.inputDigest !== request.inputDigest) mismatch('builtin launch does not bind the current validated preparation and activation');
   text(input.dispatchId, 'edit dispatch id');
   const [specValue, identityValue, runSpecValue] = await joinResourceOperations([readCanonicalArtifact(artifacts, input.sandboxLaunchSpecRef),
     readCanonicalArtifact(artifacts, row.generationRef), readCanonicalArtifact(artifacts, run.specRef)]);
-  const spec = decodeLinuxLaunchSpec(specValue, 'tool') as EditSpec;
+  const spec = kind === 'edit' ? decodeBuiltinEditSandboxLaunchSpec(specValue) : decodeBuiltinScriptSandboxLaunchSpec(specValue);
   const plan = decodeLinuxContainmentPlan(await readCanonicalArtifact(artifacts, spec.containmentPlanRef), 'run_invocation');
   const generation = decodeWorkspaceGenerationIdentity(identityValue); const runSpec = decodeRunSpec(runSpecValue);
   const expectedOwner: InvocationOwner = { kind: 'run_invocation', runId: run.id, intendedLeaseEpoch: run.leaseEpoch,
@@ -525,13 +568,16 @@ export async function readBuiltinEditLaunchClosure(artifacts: ArtifactCatalog, o
   literal(spec.containmentPlanDigest, plan.planDigest, 'edit plan digest'); literal(spec.parentWorkerContainmentRef, launch.processContainmentRef, 'edit parent worker');
   literal(plan.parentContainmentRef, launch.processContainmentRef, 'edit plan parent worker');
   equal(plan.filesystemBinding, { kind: 'run-generation', generationRef: row.generationRef }, 'edit plan generation');
-  equal(spec.filesystem, { kind: 'run_generation', generationRef: row.generationRef, access: 'read_write', sourceProjectionRef: runSpec.sourceProjectionRef, independentGit: true }, 'edit write envelope');
+  equal(spec.filesystem, { kind: 'run_generation', generationRef: row.generationRef,
+    access: kind === 'edit' || request.toolName === 'bash' ? 'read_write' : 'read_only',
+    sourceProjectionRef: runSpec.sourceProjectionRef, independentGit: true }, 'exact builtin access envelope');
   if (generation.runId !== run.id || generation.identityDigest !== row.generationIdentityDigest || generation.generationId !== row.generationId ||
       generation.sourceCheckpointId !== row.sourceCheckpointId || generation.sourceWorkspaceStateRef !== row.sourceWorkspaceStateRef ||
       generation.sourceWorkspaceStateDigest !== row.sourceWorkspaceStateDigest) mismatch('edit generation differs from its active immutable identity');
   for (const [key, expected] of Object.entries({ operationGrantRef: prepared.grantRef, requestRef: prepared.requestRef,
     requestDigest: request.requestDigest, targetRef: prepared.target, targetDigest: target.targetDigest })) literal(spec[key as keyof EditSpec], expected, `edit ${key}`);
-  if (spec.executable.kind !== 'runtime_bundle' || spec.executable.executableId !== target.execution.adapterId || spec.executable.executableDigest !== target.execution.adapterCodeDigest) mismatch('edit executable differs from the exact signed target adapter');
+  if (kind === 'edit' && (target.execution.kind !== 'builtin' || spec.executable.kind !== 'runtime_bundle' ||
+      spec.executable.executableId !== target.execution.adapterId || spec.executable.executableDigest !== target.execution.adapterCodeDigest)) mismatch('edit executable differs from the exact signed target adapter');
   const environment = await readExecutionEnvironment(artifacts, owner, runSpec, spec, generation);
   if (request.assemblyRef !== runSpec.assemblyRef) mismatch('edit request selects another assembly');
   const parent = decodeWorkerProcessContainment(await readCanonicalArtifact(artifacts, launch.processContainmentRef!));
@@ -541,11 +587,54 @@ export async function readBuiltinEditLaunchClosure(artifacts: ArtifactCatalog, o
   if (parent.backend.kind !== 'linux' || plan.backend.kind !== 'linux' || !plan.backend.cgroupPath.startsWith(`${parent.backend.cgroupPath}/`)) mismatch('edit containment is not nested beneath the exact worker writer domain');
   // The literal recipe has no caller argv/cwd/environment overrides. The native adapter
   // must still derive paths from the held generation and observe the actual child domain.
-  return mint({ spec, plan, generation, runSpec, ...environment, request, target, grant, call,
-    run, launch, prepared, sandboxLaunchSpecRef: input.sandboxLaunchSpecRef }, editClosures);
+  return { spec, plan, generation, runSpec, ...environment, request, target, grant, call,
+    run, launch, prepared, sandboxLaunchSpecRef: input.sandboxLaunchSpecRef };
 }
 
 export type BuiltinEditLaunchClosure = Awaited<ReturnType<typeof readBuiltinEditLaunchClosure>>;
+
+export async function readBuiltinScriptLaunchClosure(artifacts: ArtifactCatalog, owner: StateOwnerRecordV1,
+  input: BuiltinEditLaunchClosureInput, releaseKeys: readonly ReleaseTrustKey[], signal?: AbortSignal) {
+  signal?.throwIfAborted();
+  const result = await readBuiltinExecutionClosure(artifacts, owner, input, 'script');
+  const execution = result.target.execution;
+  if (execution.kind !== 'builtin_script') mismatch('script launch cannot borrow an executable adapter identity');
+  const policy = await readCanonicalArtifact<RunPolicySnapshotV1>(artifacts, result.runSpec.policyRef);
+  const profile = await readCanonicalArtifact<PolicyEngineProfileV1>(artifacts, policy.engine.profileRef);
+  const manifest = await readCanonicalArtifact<ToolContractManifestV1>(artifacts, result.assembly.tools.manifestRef);
+  if (manifest.manifestDigest !== result.assembly.tools.manifestDigest || digestOmitting(manifest, 'manifestDigest') !== manifest.manifestDigest)
+    mismatch('script launch substitutes its original tool manifest');
+  const entry = manifest.entries.find(entry => entry.name === result.call.toolName);
+  if (!entry || canonicalSha256(entry) !== result.target.toolContractDigest || result.call.inputSchemaRef !== entry.inputSchemaRef ||
+      result.call.inputSchemaDigest !== entry.inputSchemaDigest) mismatch('script launch substitutes its exact tool contract');
+  equal(entry.execution, execution, 'script contract execution');
+  const inputSchema = await readCanonicalArtifact(artifacts, entry.inputSchemaRef);
+  const resolver = loadToolContracts([{ ...entry, inputSchema }]);
+  const projection = resolver.projectInvocation({ callId: result.call.callId, index: result.call.index,
+    toolName: result.call.toolName, input: result.call.value! });
+  if (projection.kind !== 'tool') mismatch('script launch requires a normalized ordinary tool call');
+  equal(projection.invocation.input, result.call.value, 'script normalized call');
+  const toolchain = await readToolRuntimeAuthority(artifacts, { assembly: result.assembly, bundle: result.bundle,
+    policy, profile, tools: manifest.entries, releaseKeys, resources: result.spec.resources }, signal);
+  if (!toolchain) mismatch('script launch has no complete original signed guest image');
+  equal(result.spec.executable, { kind: 'guest_toolchain', guestToolchainManifestRef: toolchain.manifestRef,
+    guestToolchainManifestDigest: toolchain.manifest.manifestDigest, toolId: 'node', role: 'tool',
+    executionPath: '/usr/bin/node', executableDigest: toolchain.manifest.node.digest }, 'script guest executable');
+  equal(result.spec.runtime.toolchain, { kind: 'guest_toolchain', guestToolchainManifestRef: toolchain.manifestRef,
+    guestToolchainManifestDigest: toolchain.manifest.manifestDigest, guestImageRef: toolchain.manifest.guestImageRef,
+    guestImageDigest: toolchain.manifest.guestImageDigest }, 'script runtime guest');
+  const scriptEntry = result.bundle.entries.find(entry => entry.entryId === execution.adapterId)!;
+  if (!isBuiltinScriptTool(result.call.toolName)) mismatch('script call selects an unsupported fixed tool');
+  builtinToolInputBytes(result.call.toolName, result.call.value!, result.spec.resources);
+  equal(result.spec.environment, result.call.toolName === 'bash' ? BUILTIN_SCRIPT_ENVIRONMENTS.bash : BUILTIN_SCRIPT_ENVIRONMENTS.read,
+    'fixed script environment');
+  equal(result.spec.mounts, BUILTIN_SCRIPT_PRIVATE_MOUNTS.map(mount => ({ ...mount,
+    privateRootId: identityHash(result.spec.owner.dispatchId, mount.purpose) })), 'fixed script private mounts');
+  signal?.throwIfAborted();
+  return mint({ ...result, toolchain, scriptEntry }, scriptClosures);
+}
+export type BuiltinScriptLaunchClosure = Awaited<ReturnType<typeof readBuiltinScriptLaunchClosure>>;
+export type BuiltinToolLaunchClosure = BuiltinEditLaunchClosure | BuiltinScriptLaunchClosure;
 
 export type VerifierLaunchClosureInput = {
   run: Run; launch: WorkerLaunch; generation: WorkspaceGenerationStateV1; prepared: InvocationJournalEntry;
@@ -615,7 +704,8 @@ export async function readVerifierLaunchClosure(artifacts: ArtifactCatalog, owne
   const policy = await readCanonicalArtifact<RunPolicySnapshotV1>(artifacts, runSpec.policyRef);
   const profile = await readCanonicalArtifact<PolicyEngineProfileV1>(artifacts, policy.engine.profileRef);
   const tools = await readCanonicalArtifact<ToolContractManifestV1>(artifacts, execution.assembly.tools.manifestRef);
-  verifyToolRuntimeAuthority({ assembly: execution.assembly, bundle: execution.bundle, policy, profile, tools: tools.entries, releaseKeys });
+  const builtinToolchain = await readToolRuntimeAuthority(artifacts, { assembly: execution.assembly,
+    bundle: execution.bundle, policy, profile, tools: tools.entries, releaseKeys, resources: spec.resources }, signal);
   const evaluator = loadVerifierPolicy({ policy, policyRef: runSpec.policyRef, assembly: execution.assembly, assemblyRef: runSpec.assemblyRef,
     principalId: policy.principalId, workspaceIdentityDigest: policy.workspaceIdentityDigest,
     context: { runId: run.id, frontierRef: run.frontierRef, assemblyRef: runSpec.assemblyRef, candidateItemId: frontier.candidateItemId,
@@ -625,7 +715,7 @@ export async function readVerifierLaunchClosure(artifacts: ArtifactCatalog, owne
   equal(grant, evaluator.grant(request, target, evidence, grant.issuedAt, grant.expiresAt), 'verifier exact operation grant');
   if (command.executable.kind !== 'guest_toolchain' || spec.executable.kind !== 'guest_toolchain' || spec.runtime.toolchain.kind !== 'guest_toolchain')
     mismatch('verifier requires its supported signed guest executable');
-  const toolchain = await readRetainedVerifierToolchain(artifacts, { bundle: execution.bundle, releaseKeys,
+  const toolchain = builtinToolchain?.manifestRef === command.executable.guestToolchainManifestRef ? builtinToolchain : await readRetainedVerifierToolchain(artifacts, { bundle: execution.bundle, releaseKeys,
     guestToolchainManifestRef: command.executable.guestToolchainManifestRef, signal });
   const { abiFingerprint: _abi, ...commandExecutable } = command.executable;
   equal(commandExecutable, { kind: 'guest_toolchain', guestToolchainManifestRef: toolchain.manifestRef,
@@ -654,14 +744,25 @@ export async function readVerifierLaunchClosure(artifacts: ArtifactCatalog, owne
 export type VerifierLaunchClosure = Awaited<ReturnType<typeof readVerifierLaunchClosure>>;
 
 export function decodeWorkerProcessContainment(value: unknown): ProcessContainment & { owner: WorkerOwner } {
+  return decodeProcessContainment(value, 'worker_activation') as ProcessContainment & { owner: WorkerOwner };
+}
+
+/** Fixed invocation data, independent of its parent worker's lifetime. */
+export function decodeBuiltinProcessContainment(value: unknown): ProcessContainment & { owner: InvocationOwner } {
+  return decodeProcessContainment(value, 'run_invocation') as ProcessContainment & { owner: InvocationOwner };
+}
+
+function decodeProcessContainment(value: unknown, kind: 'worker_activation' | 'run_invocation'): ProcessContainment {
   const containment = record(value, ['schemaVersion', 'planRef', 'sandboxLaunchSpecRef', 'sandboxLaunchSpecDigest', 'owner', 'filesystemBinding', 'launchNonceDigest', 'backend', 'createdAt'], 'worker containment');
-  literal(containment.schemaVersion, 1, 'containment schema'); workerOwner(containment.owner); filesystemBinding(containment.filesystemBinding);
+  literal(containment.schemaVersion, 1, 'containment schema');
+  if (kind === 'worker_activation') workerOwner(containment.owner); else invocationOwner(containment.owner);
+  filesystemBinding(containment.filesystemBinding);
   for (const key of ['planRef', 'sandboxLaunchSpecRef', 'sandboxLaunchSpecDigest', 'launchNonceDigest']) digest(containment[key], `containment ${key}`);
   const backend = record(containment.backend, ['kind', 'pidNamespaceReservationId', 'pidNamespaceId', 'cgroupPath', 'cgroupId', 'namespaceInitStartToken', 'subreaperStartToken'], 'Linux containment');
   literal(backend.kind, 'linux', 'containment backend'); absolute(backend.cgroupPath, 'containment cgroup');
   for (const key of ['pidNamespaceReservationId', 'pidNamespaceId', 'cgroupId', 'namespaceInitStartToken', 'subreaperStartToken']) text(backend[key], `containment ${key}`);
   time(containment.createdAt, 'containment creation');
-  return containment as ProcessContainment & { owner: WorkerOwner };
+  return containment as ProcessContainment;
 }
 
 export async function readWorkerPreactivationClosure(artifacts: ArtifactCatalog, owner: StateOwnerRecordV1, input: {

@@ -53,6 +53,7 @@ export function planToolRequest(input: {
   workspaceIdentityRef: string; workspaceIdentityDigest: string; entry: ToolInputAuthority; call: ToolCallInputV1;
 }) {
   const { runId, frontierRef, batchItemId, assemblyRef, assembly, workspaceIdentityRef, workspaceIdentityDigest, entry, call } = input;
+  if (entry.access === 'control' || entry.execution.kind === 'supervisor_control') throw new TypeError('Supervisor input control has no operation request or target');
   const { inputSchema: _schema, ...contract } = entry;
   const targetCore = { schemaVersion: 1 as const, format: 'cliq-tool-target-v1' as const, runId,
     workspaceIdentityRef, workspaceIdentityDigest, toolManifestRef: assembly.tools.manifestRef,

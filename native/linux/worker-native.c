@@ -13,6 +13,8 @@
 #include "preparation-git-protocol.h"
 #include "guest-toolchain.h"
 #include "verifier-protocol.h"
+#include "builtin-tool-protocol.h"
+#include "builtin-tool-git.h"
 #include "verifier-setup.h"
 #include "worker-sha256.h"
 #include <linux/magic.h>
@@ -30,6 +32,8 @@ static const napi_type_tag IMAGE_TAG = { UINT64_C(0x671ca1bc736f4411), UINT64_C(
 static const napi_type_tag CONTROLLER_TAG = { UINT64_C(0x875a7b5a31bc4112), UINT64_C(0xbf12ad50275ed149) };
 static const napi_type_tag SCOPE_TAG = { UINT64_C(0x00d75ac01fa14d87), UINT64_C(0x9b1c5a0256e81d29) };
 static const napi_type_tag SOURCE_INSPECTOR_IMAGE_TAG = { UINT64_C(0x8c67dfb833d0495c), UINT64_C(0x9be2f2fa2fb9d634) };
+
+static const napi_type_tag BUILTIN_SCRIPT_IMAGE_TAG = { UINT64_C(0x9e40eb5c22474091), UINT64_C(0xa6b77c06b6f9b74f) };
 
 /* The fixed loaded native image owns this uncertainty across controllers and
  * N-API environments. A new receiver cannot erase an unjoined resource. */
@@ -63,10 +67,14 @@ struct controller { int socket, stdout_fd, stderr_fd; pid_t pid; bool closed, re
     napi_deferred close_deferred; napi_ref close_promise;
 };
 struct native_scope { struct controller *controller; struct native_scope *next, *parent; unsigned int id, references;
-    bool ready, released, activated, stopped, invocation, result_received, verifier, stop_requested, stop_queued; int image_fd;
+    bool ready, released, activated, stopped, invocation, result_received, verifier, builtin, stop_requested, stop_queued; int image_fd;
     uint64_t output_limit;
+    uint32_t builtin_tool;
     napi_ref verifier_value;
     struct cliq_worker_packet identity, result; };
+
+static unsigned int capture_release_command(const struct native_scope *scope) { return scope->builtin ? CLIQ_RELEASE_BUILTIN : CLIQ_RELEASE_VERIFIER; }
+static unsigned int capture_poll_command(const struct native_scope *scope) { return scope->builtin ? CLIQ_POLL_BUILTIN : CLIQ_POLL_VERIFIER; }
 
 static napi_value failure(napi_env env, const char *message) {
     bool pending = false;
@@ -500,10 +508,11 @@ static napi_value image_close(napi_env env, napi_callback_info info) {
     return undefined(env);
 }
 
-static napi_value source_inspector_close(napi_env env, napi_callback_info info) {
+static napi_value fixed_script_close(napi_env env, napi_callback_info info) {
     size_t argc = 0; napi_value self; struct image *image;
     napi_get_cb_info(env, info, &argc, NULL, &self, NULL);
-    if (!tagged(env, self, &SOURCE_INSPECTOR_IMAGE_TAG, (void **)&image)) return failure(env, "invalid fixed source inspector image");
+    if (!tagged(env, self, &SOURCE_INSPECTOR_IMAGE_TAG, (void **)&image) &&
+        !tagged(env, self, &BUILTIN_SCRIPT_IMAGE_TAG, (void **)&image)) return failure(env, "invalid fixed signed script image");
     if (!retire_descriptor(&image->fd)) {
         napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "source inspector image descriptor did not retire"); return NULL;
     }
@@ -513,7 +522,7 @@ static napi_value source_inspector_close(napi_env env, napi_callback_info info) 
 /* The TS held-bundle friend selects exactly one signed data entry before
  * this operation. This distinct native tag cannot be obtained by supplying
  * an ordinary sealed image/Buffer to the source controller. */
-static napi_value seal_source_inspector(napi_env env, napi_callback_info info) {
+static napi_value seal_fixed_script(napi_env env, napi_callback_info info, const napi_type_tag *tag) {
     size_t argc = 1; napi_value args[1]; uint64_t source;
     napi_get_cb_info(env, info, &argc, args, NULL, NULL);
     if (argc != 1 || !number(env, args[0], &source) || source > INT32_MAX) return failure(env, "fixed source inspector requires its held signed file");
@@ -561,17 +570,24 @@ static napi_value seal_source_inspector(napi_env env, napi_callback_info info) {
     sha256_final(&hash, digest);
     for (size_t i = 0; i < 32; i++) { image->digest[i * 2] = alphabet[digest[i] >> 4]; image->digest[i * 2 + 1] = alphabet[digest[i] & 15]; }
     image->digest[64] = '\0'; napi_value result, identity;
-    napi_property_descriptor properties[] = { { "close", NULL, source_inspector_close, NULL, NULL, NULL, napi_default, NULL } };
+    napi_property_descriptor properties[] = { { "close", NULL, fixed_script_close, NULL, NULL, NULL, napi_default, NULL } };
     if (napi_create_object(env, &result) != napi_ok || napi_create_object(env, &identity) != napi_ok) {
         (void)retire_descriptor(&image->fd); free(image); return failure(env, "fixed source inspector receiver unavailable");
     }
     set_string(env, identity, "sha256", image->digest); set_number(env, identity, "byteCount", (double)image->byte_count);
     if (napi_object_freeze(env, identity) != napi_ok || napi_set_named_property(env, result, "identity", identity) != napi_ok ||
-        napi_type_tag_object(env, result, &SOURCE_INSPECTOR_IMAGE_TAG) != napi_ok ||
+        napi_type_tag_object(env, result, tag) != napi_ok ||
         napi_define_properties(env, result, 1, properties) != napi_ok || napi_wrap(env, result, image, finalize_image, NULL, NULL) != napi_ok) {
         (void)retire_descriptor(&image->fd); free(image); return failure(env, "fixed source inspector receiver unavailable");
     }
     napi_object_freeze(env, result); return result;
+}
+
+static napi_value seal_source_inspector(napi_env env, napi_callback_info info) {
+    return seal_fixed_script(env, info, &SOURCE_INSPECTOR_IMAGE_TAG);
+}
+static napi_value seal_builtin_script(napi_env env, napi_callback_info info) {
+    return seal_fixed_script(env, info, &BUILTIN_SCRIPT_IMAGE_TAG);
 }
 
 static napi_value seal_image(napi_env env, napi_callback_info info) {
@@ -708,7 +724,7 @@ static bool scope_image_current(struct native_scope *scope) {
     snprintf(path, sizeof(path), "/proc/%ld/root/runtime/%s", (long)scope->identity.pid,
         scope->verifier ? "cliq-linux-worker-init" : scope->invocation ? "cliq-linux-edit" : "cliq-linux-worker");
     return stat(path, &current) == 0 && held.st_dev == current.st_dev && held.st_ino == current.st_ino &&
-        cliq_generation_mount((pid_t)scope->identity.pid, scope->identity.generation_device, scope->identity.generation_inode, !scope->invocation || scope->verifier) &&
+        cliq_generation_mount((pid_t)scope->identity.pid, scope->identity.generation_device, scope->identity.generation_inode, cliq_capture_generation_readonly(scope->invocation, scope->verifier, scope->builtin_tool)) &&
         cliq_process_token((pid_t)scope->identity.pid, token) && strcmp(token, scope->identity.start_token) == 0 &&
         scope_placement_current(scope);
 }
@@ -761,7 +777,7 @@ static napi_value scope_release(napi_env env, napi_callback_info info) {
     napi_get_cb_info(env, info, &argc, NULL, &self, NULL);
     if (!tagged(env, self, &SCOPE_TAG, (void **)&scope) || !scope->ready || !scope->invocation || scope->stopped || scope->released || scope->controller->closed)
         return failure(env, "native invocation release was revoked or consumed");
-    struct cliq_worker_packet request = cliq_packet(scope->verifier ? CLIQ_RELEASE_VERIFIER : CLIQ_RELEASE_WRITE); request.scope = scope->id;
+    struct cliq_worker_packet request = cliq_packet(scope->verifier ? capture_release_command(scope) : CLIQ_RELEASE_WRITE); request.scope = scope->id;
     memcpy(request.nonce, scope->identity.nonce, sizeof(request.nonce));
     scope->released = true;
     /* Retained active flags are not evidence that the real parent survived.
@@ -778,7 +794,7 @@ static napi_value scope_release(napi_env env, napi_callback_info info) {
 
 static bool verifier_reply(struct native_scope *scope, const struct cliq_worker_packet *response, int *files, size_t count) {
     napi_env env = scope->controller->env;
-    bool valid = response->status == 0 && response->command == CLIQ_POLL_VERIFIER && response->scope == scope->id &&
+    bool valid = response->status == 0 && response->command == capture_poll_command(scope) && response->scope == scope->id &&
         response->verifier_reason <= CLIQ_VERIFIER_CONTROLLER_STOP;
     if (response->verifier_reason == CLIQ_VERIFIER_PENDING) {
         valid = valid && count == 0;
@@ -841,7 +857,7 @@ static bool verifier_reply(struct native_scope *scope, const struct cliq_worker_
 
 static int poll_verifier_reply(struct native_scope *scope) {
     struct controller *controller = scope->controller;
-    if (controller->closed || controller->pending_scope != scope || controller->pending != CLIQ_POLL_VERIFIER) return -1;
+    if (controller->closed || controller->pending_scope != scope || controller->pending != capture_poll_command(scope)) return -1;
     struct cliq_worker_packet response; int files[CLIQ_WORKER_MAX_FDS]; size_t count;
     if (!cliq_receive_flags(controller->socket, &response, files, sizeof(files) / sizeof(files[0]), &count, MSG_DONTWAIT)) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
@@ -856,14 +872,14 @@ static napi_value scope_verifier_result(napi_env env, struct native_scope *scope
     struct controller *controller = scope->controller;
     if (!scope->released || (controller->closed && !scope->result_received)) return failure(env, "native verifier outcome is indeterminate");
     if (!scope->result_received && (!scope->stop_requested || scope->stopped)) {
-        if (controller->pending == CLIQ_RELEASE_VERIFIER && controller->pending_scope == scope) {
+        if (controller->pending == capture_release_command(scope) && controller->pending_scope == scope) {
             struct cliq_worker_packet acknowledged;
-            int observed = poll_response(controller, scope, CLIQ_RELEASE_VERIFIER, &acknowledged);
+            int observed = poll_response(controller, scope, capture_release_command(scope), &acknowledged);
             if (observed < 0) return failure(env, "verifier release acknowledgement is indeterminate");
             if (observed == 0) return undefined(env);
         }
         if (controller->pending == 0) {
-            struct cliq_worker_packet request = cliq_packet(CLIQ_POLL_VERIFIER); request.scope = scope->id;
+            struct cliq_worker_packet request = cliq_packet(capture_poll_command(scope)); request.scope = scope->id;
             if (!begin_request(controller, scope, &request, NULL, 0)) return failure(env, "verifier result observation unavailable");
         }
         int observed = poll_verifier_reply(scope);
@@ -900,7 +916,7 @@ static napi_value scope_stop(napi_env env, napi_callback_info info) {
     if (scope->verifier) {
         scope->stop_requested = true;
         if (scope->controller->pending != 0 && scope->controller->pending_scope == scope &&
-            (scope->controller->pending == CLIQ_POLL_VERIFIER || scope->controller->pending == CLIQ_RELEASE_VERIFIER)) {
+            (scope->controller->pending == capture_poll_command(scope) || scope->controller->pending == capture_release_command(scope))) {
             if (scope->stop_queued) return undefined(env);
             /* Revoke now, even while the bounded previous observation reply is
              * in flight. pollStopped consumes that reply before the STOP reply;
@@ -922,10 +938,10 @@ static napi_value scope_poll_stopped(napi_env env, napi_callback_info info) {
     if (!tagged(env, self, &SCOPE_TAG, (void **)&scope) || scope->controller->closed) return failure(env, "invalid native death observation");
     if (scope->stop_queued) {
         int observed;
-        if (scope->controller->pending == CLIQ_POLL_VERIFIER) observed = poll_verifier_reply(scope);
-        else if (scope->controller->pending == CLIQ_RELEASE_VERIFIER) {
+        if (scope->controller->pending == capture_poll_command(scope)) observed = poll_verifier_reply(scope);
+        else if (scope->controller->pending == capture_release_command(scope)) {
             struct cliq_worker_packet acknowledged;
-            observed = poll_response(scope->controller, scope, CLIQ_RELEASE_VERIFIER, &acknowledged);
+            observed = poll_response(scope->controller, scope, capture_release_command(scope), &acknowledged);
         } else return failure(env, "verifier stop lost its original ordered observation");
         if (observed < 0) { (void)close_controller(scope->controller); return failure(env, "verifier stop observation is indeterminate"); }
         if (observed == 0) return undefined(env);
@@ -1163,6 +1179,118 @@ static napi_value create_verifier(napi_env env, napi_callback_info info) {
     bool sent = begin_request(controller, scope, &request, files, 4 + guest->file_count);
     if (!retire_descriptor(&input)) { controller->retirement_failed = true; sent = false; }
     if (!sent) { (void)close_controller(controller); return failure(env, "blocked verifier native creation is indeterminate"); }
+    return result;
+}
+
+/* Full immutable bytes, not a caller digest or metadata identity. */
+static bool builtin_data_identity(int fd, uint64_t *length, char digest[65]) {
+    struct stat before, after; int required = F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL;
+    if (fstat(fd, &before) || !S_ISREG(before.st_mode) || before.st_size < 1 ||
+        (uint64_t)before.st_size > CLIQ_BUILTIN_INPUT_BYTES || fcntl(fd, F_GET_SEALS) != required) return false;
+    struct sha256_context hash; sha256_init(&hash); unsigned char bytes[65536]; off_t offset = 0;
+    while (offset < before.st_size) {
+        size_t wanted = (uint64_t)(before.st_size - offset) < sizeof(bytes) ? (size_t)(before.st_size - offset) : sizeof(bytes);
+        ssize_t count = pread(fd, bytes, wanted, offset);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0 || (size_t)count > wanted) return false;
+        sha256_update(&hash, bytes, (size_t)count); offset += count;
+    }
+    unsigned char observed[32]; static const char hex[] = "0123456789abcdef"; sha256_final(&hash, observed);
+    for (size_t i = 0; i < 32; i++) { digest[i * 2] = hex[observed[i] >> 4]; digest[i * 2 + 1] = hex[observed[i] & 15]; } digest[64] = '\0';
+    *length = (uint64_t)before.st_size;
+    return fstat(fd, &after) == 0 && before.st_dev == after.st_dev && before.st_ino == after.st_ino &&
+        before.st_size == after.st_size && fcntl(fd, F_GET_SEALS) == required;
+}
+
+static napi_value create_builtin_tool(napi_env env, napi_callback_info info) {
+    size_t argc = 9; napi_value arguments[9], self; struct controller *controller;
+    struct native_scope *parent; struct image *helper, *bwrap, *script, *data, *command = NULL; struct cliq_guest_toolchain *guest; uint64_t generation;
+    napi_get_cb_info(env, info, &argc, arguments, &self, NULL);
+    if (atomic_load(&native_retirement_failed) || argc != 9 || !tagged(env, self, &CONTROLLER_TAG, (void **)&controller) ||
+        controller->closed || (controller->source_requested && !controller->preparation_finished) || !controller->ready || controller->pending || controller->next_scope >= CLIQ_WORKER_MAX_SCOPES ||
+        !number(env, arguments[0], &generation) || generation > INT32_MAX ||
+        !tagged(env, arguments[1], &SCOPE_TAG, (void **)&parent) || parent->controller != controller || parent->invocation ||
+        parent->stopped || !parent->activated || !tagged(env, arguments[2], &IMAGE_TAG, (void **)&helper) ||
+        !tagged(env, arguments[3], &IMAGE_TAG, (void **)&bwrap) ||
+        !tagged(env, arguments[5], &BUILTIN_SCRIPT_IMAGE_TAG, (void **)&script) || script->fd < 0 ||
+        !tagged(env, arguments[6], &IMAGE_TAG, (void **)&data) || data->fd < 0)
+        return failure(env, "builtin tool requires its original held parent and signed script");
+    uint64_t tool;
+    if (!field_number(env, arguments[8], "tool", &tool) || tool < CLIQ_BUILTIN_READ || tool > CLIQ_BUILTIN_BASH)
+        return failure(env, "builtin tool is outside its fixed recipe");
+    bool bash = tool == CLIQ_BUILTIN_BASH;
+    napi_valuetype command_type;
+    if (!tagged(env, arguments[4], bash ? &CLIQ_BUILTIN_GUEST_TOOLCHAIN_TAG : &CLIQ_GUEST_TOOLCHAIN_TAG, (void **)&guest) ||
+        guest->abi_version != CLIQ_GUEST_ABI_VERSION || !atomic_load_explicit(&guest->ready, memory_order_acquire) ||
+        atomic_load(&guest->revoked) || guest->file_count < 1 || guest->file_count > CLIQ_GUEST_MAX_FILES ||
+        (bash && (guest->builtin_recipe_version != 1 || !tagged(env, arguments[7], &IMAGE_TAG, (void **)&command) || command->fd < 0)) ||
+        (!bash && (napi_typeof(env, arguments[7], &command_type) != napi_ok || command_type != napi_null)))
+        return failure(env, "builtin tool requires its exact signed guest recipe");
+    struct cliq_builtin_config *fixed = calloc(1, sizeof(*fixed));
+    struct cliq_verifier_config *config = fixed ? &fixed->capture : NULL;
+    if (!config) return failure(env, "builtin tool configuration allocation unavailable");
+    config->magic = CLIQ_VERIFIER_CONFIG_MAGIC; config->version = 1; config->file_count = guest->file_count;
+    memcpy(config->executable, guest->node_path, sizeof(config->executable));
+    struct cliq_worker_packet request = cliq_packet(bash ? CLIQ_CREATE_BUILTIN_BASH : CLIQ_CREATE_BUILTIN_READ);
+    request.scope = controller->next_scope; request.parent = parent->id;
+    memcpy(config->cwd, "/work", 6); config->argument_count = 3; config->environment_count = bash ? 6 : 5;
+    fixed->builtin_magic = CLIQ_BUILTIN_CONFIG_MAGIC; fixed->builtin_version = 1; fixed->tool = (uint32_t)tool;
+    fixed->script_bytes = script->byte_count; memcpy(fixed->script_digest, script->digest, sizeof(fixed->script_digest));
+    const char *argv[] = { "/usr/bin/node", "--no-addons", CLIQ_BUILTIN_SCRIPT_PATH };
+    const char *envp[] = { "LANG=C", "LC_ALL=C", "HOME=/home/cliq", "TMPDIR=/tmp", bash ? "PATH=/usr/bin:/bin" : "PATH=/usr/bin", "GIT_OPTIONAL_LOCKS=0" };
+    bool valid = scope_projection(env, arguments[8], &request) &&
+        field_number(env, arguments[8], "timeoutMs", &config->timeout_ms) &&
+        field_number(env, arguments[8], "outputLimitBytes", &config->output_limit) && config->output_limit <= request.max_output_bytes &&
+        builtin_data_identity(data->fd, &fixed->input_bytes, fixed->input_digest) &&
+        (!bash || (builtin_data_identity(command->fd, &fixed->command_bytes, fixed->command_digest) &&
+            cliq_builtin_capture_git_identity((int)generation, fixed)));
+    for (uint32_t i = 0; valid && i < 3; i++) valid = verifier_string(config, argv[i], &config->arguments[i]);
+    for (uint32_t i = 0; valid && i < config->environment_count; i++) valid = verifier_string(config, envp[i], &config->environment[i]);
+    size_t file_offset = bash ? 7U : 6U;
+    int files[CLIQ_WORKER_MAX_FDS] = { (int)generation, helper->fd, bwrap->fd, -1, script->fd, data->fd };
+    if (bash) files[6] = command->fd;
+    for (uint32_t i = 0; valid && i < guest->file_count; i++) {
+        struct stat metadata; int seals = fcntl(guest->files[i].fd, F_GET_SEALS);
+        int required = F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL;
+        valid = fstat(guest->files[i].fd, &metadata) == 0 && S_ISREG(metadata.st_mode) &&
+            metadata.st_size > 0 && (uint64_t)metadata.st_size == guest->files[i].byte_count &&
+            seals >= 0 && (seals & required) == required;
+        if (valid) {
+            memcpy(config->files[i].path, guest->files[i].path, sizeof(config->files[i].path));
+            memcpy(config->files[i].digest, guest->files[i].digest, sizeof(config->files[i].digest));
+            config->files[i].byte_count = guest->files[i].byte_count; files[file_offset + i] = guest->files[i].fd;
+        }
+    }
+    valid = valid && cliq_builtin_config_valid(fixed);
+    int input = valid ? memfd_create("cliq-builtin-config", MFD_CLOEXEC | MFD_ALLOW_SEALING) : -1;
+    if (input < 0 || write(input, fixed, sizeof(*fixed)) != (ssize_t)sizeof(*fixed) ||
+        fchmod(input, 0400) != 0 || fcntl(input, F_ADD_SEALS, F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL) != 0) valid = false;
+    uint64_t output_limit = config->output_limit;
+    free(config);
+    if (!valid) { if (input >= 0) close(input); return failure(env, "builtin tool command or frozen image mapping is outside the fixed recipe"); }
+    files[3] = input;
+    struct native_scope *scope = calloc(1, sizeof(*scope));
+    if (!scope) { close(input); return failure(env, "builtin tool native lifetime allocation unavailable"); }
+    scope->controller = controller; scope->id = request.scope; scope->identity = request; scope->image_fd = -1;
+    scope->invocation = true; scope->verifier = true; scope->builtin = true; scope->builtin_tool = (uint32_t)tool; scope->parent = parent; scope->references = 2;
+    scope->output_limit = output_limit;
+    napi_value result;
+    napi_property_descriptor properties[] = {
+        { "observe", NULL, scope_inspect, NULL, NULL, NULL, napi_default, NULL },
+        { "pollReady", NULL, scope_poll_ready, NULL, NULL, NULL, napi_default, NULL },
+        { "release", NULL, scope_release, NULL, NULL, NULL, napi_default, NULL },
+        { "result", NULL, scope_result, NULL, NULL, NULL, napi_default, NULL },
+        { "stop", NULL, scope_stop, NULL, NULL, NULL, napi_default, NULL },
+        { "pollStopped", NULL, scope_poll_stopped, NULL, NULL, NULL, napi_default, NULL },
+    };
+    if (napi_create_object(env, &result) != napi_ok || napi_type_tag_object(env, result, &SCOPE_TAG) != napi_ok ||
+        napi_define_properties(env, result, 6, properties) != napi_ok || napi_wrap(env, result, scope, finalize_scope, NULL, NULL) != napi_ok) {
+        (void)retire_descriptor(&input); free(scope); return failure(env, "builtin tool native receiver allocation unavailable");
+    }
+    scope->next = controller->scopes; controller->scopes = scope; controller->references++; controller->next_scope++;
+    bool sent = begin_request(controller, scope, &request, files, file_offset + guest->file_count);
+    if (!retire_descriptor(&input)) { controller->retirement_failed = true; sent = false; }
+    if (!sent) { (void)close_controller(controller); return failure(env, "blocked builtin tool native creation is indeterminate"); }
     return result;
 }
 
@@ -1587,7 +1715,7 @@ static napi_value controller_close(napi_env env, napi_callback_info info) {
             }
         }
     }
-    if (!controller->closed && controller->pending == CLIQ_POLL_VERIFIER && scope && scope->verifier && scope->released) {
+    if (!controller->closed && scope && controller->pending == capture_poll_command(scope) && scope->verifier && scope->released) {
         /* Preserve only a complete authenticated result already delivered on
          * this same channel. The nonblocking observation never waits or sends
          * another command before irreversible revocation. */
@@ -1687,6 +1815,19 @@ static bool prepare_controller_io(struct controller *controller) {
 #include "source-git-native.h"
 #include "preparation-git-native.h"
 
+/* Read-only arena inventory. It grants no spawn/lease/release and never
+ * reuses an old id. The original create guard remains authoritative. */
+static napi_value controller_invocation_capacity(napi_env env, napi_callback_info info) {
+    size_t argc = 1; napi_value args[1], self, result; struct controller *controller; struct native_scope *parent;
+    if (napi_get_cb_info(env, info, &argc, args, &self, NULL) != napi_ok || argc != 1 ||
+        atomic_load(&native_retirement_failed) || !tagged(env, self, &CONTROLLER_TAG, (void **)&controller) ||
+        controller->closed || controller->retirement_failed || !controller->ready || controller->pending ||
+        !tagged(env, args[0], &SCOPE_TAG, (void **)&parent) || parent->controller != controller ||
+        parent->invocation || !parent->ready || !parent->activated || parent->stopped)
+        return failure(env, "invocation capacity requires its original idle live worker owner");
+    return napi_get_boolean(env, controller->next_scope < CLIQ_WORKER_MAX_SCOPES, &result) == napi_ok ? result : NULL;
+}
+
 static napi_value open_controller(napi_env env, napi_callback_info info) {
     if (atomic_load(&native_retirement_failed)) return failure(env, "native resource retirement remains uncertain");
     size_t argc = 2; napi_value args[2]; struct image *helper; uint64_t root;
@@ -1712,7 +1853,9 @@ static napi_value open_controller(napi_env env, napi_callback_info info) {
         { "assertPreactivationRetired", NULL, assert_preactivation_retired, NULL, NULL, NULL, napi_default, NULL },
         { "createWorker", NULL, create_worker, NULL, NULL, NULL, napi_default, NULL },
         { "createInvocation", NULL, create_invocation, NULL, NULL, NULL, napi_default, NULL },
+        { "hasInvocationCapacity", NULL, controller_invocation_capacity, NULL, NULL, NULL, napi_default, NULL },
         { "createVerifier", NULL, create_verifier, NULL, NULL, NULL, napi_default, NULL },
+        { "createBuiltinTool", NULL, create_builtin_tool, NULL, NULL, NULL, napi_default, NULL },
         { "reserveSourceGit", NULL, reserve_source_git, NULL, NULL, NULL, napi_default, NULL },
         { "reservePreparationGit", NULL, reserve_preparation_git, NULL, NULL, NULL, napi_default, NULL },
         { "preparationGitConstructionRetirement", NULL, preparation_native_construction_retirement, NULL, NULL, NULL, napi_default, NULL },
@@ -1780,12 +1923,13 @@ static napi_value initialize(napi_env env, napi_value exports) {
         { "sealImage", NULL, seal_image, NULL, NULL, NULL, napi_default, NULL },
         { "sealImageBuffer", NULL, seal_input, NULL, NULL, NULL, napi_default, NULL },
         { "sealSourceGitInspector", NULL, seal_source_inspector, NULL, NULL, NULL, napi_default, NULL },
+        { "sealBuiltinToolScript", NULL, seal_builtin_script, NULL, NULL, NULL, napi_default, NULL },
         { "openController", NULL, open_controller, NULL, NULL, NULL, napi_default, NULL },
         { "verifierInterfaceVersion", NULL, NULL, NULL, NULL, verifier_version, napi_default, NULL }
     };
     if (napi_define_properties(env, exports, sizeof(properties) / sizeof(properties[0]), properties) != napi_ok) return NULL;
     set_number(env, exports, "interfaceVersion", 3); set_number(env, exports, "sourceInterfaceVersion", 1);
-    set_number(env, exports, "preparationInterfaceVersion", 1); return exports;
+    set_number(env, exports, "preparationInterfaceVersion", 1); set_number(env, exports, "builtinToolInterfaceVersion", 1); return exports;
 }
 #else
 static napi_value unsupported(napi_env env, napi_callback_info info) {

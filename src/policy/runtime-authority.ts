@@ -3,6 +3,8 @@ import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import { assertArtifactRef } from '../kernel/identity.js';
 import type { PolicyEngineProfileV1, RunPolicySnapshotV1 } from '../kernel/tool-authorization.js';
 import type { RunAssemblyV1, ToolContractManifestV1 } from '../kernel/types.js';
+import type { RetainedVerifierToolchain } from '../state/guest-toolchain.js';
+import { BUILTIN_SCRIPT_TOOL_NAMES, decodeToolExecutionIdentity, assertBuiltinScriptGuest } from '../tools/execution-identity.js';
 
 /** Supplied by trusted Supervisor composition, never by a Run, repository, worker or control request. */
 export type ReleaseTrustKey = { keyId: string; publicKeyPem: string };
@@ -84,6 +86,7 @@ export function verifyRuntimeBundle(bundle: RuntimeBundleManifest, releaseKeys: 
 export function verifyToolRuntimeAuthority(input: {
   assembly: RunAssemblyV1; policy: RunPolicySnapshotV1; bundle: RuntimeBundleManifest;
   profile: PolicyEngineProfileV1; tools: ToolContractManifestV1['entries']; releaseKeys: readonly ReleaseTrustKey[];
+  guestToolchain?: RetainedVerifierToolchain;
 }): void {
   const { assembly, policy, bundle, profile, tools, releaseKeys } = input;
   verifyRuntimeBundle(bundle, releaseKeys);
@@ -113,7 +116,31 @@ export function verifyToolRuntimeAuthority(input: {
   };
   executable(assembly.runtime.workerExecutableId, assembly.runtime.workerExecutableDigest, 'worker');
   executable(assembly.provider.adapter.adapterId, assembly.provider.adapter.codeDigest, 'provider_adapter', assembly.provider.adapter.version);
-  for (const tool of tools) if (tool.execution.kind === 'builtin') {
-    executable(tool.execution.adapterId, tool.execution.adapterCodeDigest, 'tool_adapter', tool.execution.adapterVersion);
+  for (const tool of tools) {
+    const execution = decodeToolExecutionIdentity(tool.execution);
+    if (execution.kind === 'builtin') {
+      if (tool.access === 'control') throw new TypeError('a Supervisor control handler cannot be an executable tool adapter');
+      executable(execution.adapterId, execution.adapterCodeDigest, 'tool_adapter', execution.adapterVersion);
+    } else if (execution.kind === 'builtin_script') {
+      const entry = bundle.entries.find(entry => entry.entryId === execution.adapterId), guest = input.guestToolchain;
+      if (!BUILTIN_SCRIPT_TOOL_NAMES.some(name => name === tool.name) || tool.access !== (tool.name === 'bash' ? 'exec' : 'read') ||
+          tool.replayClass !== (tool.name === 'bash' ? 'manual' : 'retry') || !entry || entry.role !== 'tool_adapter' || entry.executable ||
+          entry.version !== execution.adapterVersion || entry.digest !== execution.adapterCodeDigest ||
+          entry.relativePath !== 'adapters/builtin-tools.mjs' || entry.byteCount < 1 || entry.byteCount > 1_048_576 || !guest ||
+          canonicalSha256(guest.manifest) !== guest.manifestRef || guest.manifestRef !== execution.guestToolchainManifestRef ||
+          guest.manifest.manifestDigest !== execution.guestToolchainManifestDigest ||
+          guest.manifestRef !== assembly.runtime.guestToolchainManifestRef ||
+          guest.manifest.manifestDigest !== assembly.runtime.guestToolchainManifestDigest ||
+          guest.manifest.node.logicalName !== execution.toolId || guest.manifest.node.canonicalGuestPath !== execution.executionPath ||
+          guest.manifest.node.digest !== execution.executableDigest || bundle.structuredArtifacts.filter(root => root.kind === 'guest_toolchain' &&
+            root.artifactRef === guest.manifestRef && root.semanticDigest === guest.manifest.manifestDigest).length !== 1)
+        throw new TypeError('builtin script differs from its signed data and complete guest Node identity');
+      assertBuiltinScriptGuest(guest.manifest, [tool.name]);
+    } else if (execution.kind === 'supervisor_control') {
+      if (tool.name !== 'request_input' || tool.access !== 'control' || tool.replayClass !== 'manual' ||
+          tool.outputSchemaRef !== undefined || tool.outputSchemaDigest !== undefined)
+        throw new TypeError('unsupported compiled Supervisor control handler');
+      executable(execution.supervisorEntryId, execution.supervisorExecutableDigest, 'supervisor', execution.supervisorEntryVersion);
+    }
   }
 }

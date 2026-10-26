@@ -18,6 +18,7 @@ import { installedModelPackageEntries, writeInstalledModelAuthority, type Instal
 import { writeInstalledGuestToolchain } from './installed-guest-package.js';
 import { validateGuestToolchainMetadata } from '../../../src/state/guest-toolchain.js';
 import { buildSourceGitInspectorAsset } from './source-git-inspector-package.js';
+import { buildBuiltinToolsAsset } from './builtin-tools-package.js';
 
 /** Construct the same actual SEA/helper package for independent Linux startup
  * and user-manager qualifiers. Real worker images are installed, not launched:
@@ -60,6 +61,7 @@ export async function buildInstalledSupervisorPackage(fixture: string,
     ...(options.serverAuthenticationDiagnostics ? { serverAuthenticationDiagnostics: true as const } : {}),
     ...(options.storeFailureDiagnostics ? { storeFailureDiagnostics: true as const } : {}),
     assets: { 'release-trust-roots.json': rootAsset } });
+  const supervisorBytes = await readFile(supervisorFile);
   const helper = path.join(packageRoot, STATE_OWNER_NATIVE_RELATIVE_PATH);
   await mkdir(path.dirname(helper), { recursive: true, mode: 0o700 });
   const sqliteInclude = await verifiedSqliteExtensionIncludes();
@@ -103,8 +105,6 @@ export async function buildInstalledSupervisorPackage(fixture: string,
   ] as const).filter(([entryId]) => variant !== 'retirement-native-missing' || entryId !== 'linux_worker_native')
     .map(async ([entryId, role, filename]) => ({ entryId, role,
     relativePath: `workers/${filename}`, executable: true, bytes: await readFile(path.join(workerRoot, filename)) })));
-  const modelMaterial = modelFixture ? installedModelPackageEntries(modelFixture, modelBrokerBytes!,
-    workerEntries.find(entry => entry.entryId === 'edit')!.bytes) : undefined;
   let guest: Awaited<ReturnType<typeof writeInstalledGuestToolchain>> | undefined;
   if (options.guestToolchain) {
     const guestImageRoot = path.join(fixture, 'guest-image');
@@ -116,12 +116,19 @@ export async function buildInstalledSupervisorPackage(fixture: string,
     guest = await writeInstalledGuestToolchain({ packageRoot, guestImageRoot,
       extractorPath: path.join(workerRoot, 'linux-guest-extractor.node'), publisherKeyId: releaseKeys[0]!.keyId, privateKey: keys.privateKey });
   }
+  const builtinTools = guest ? await buildBuiltinToolsAsset(repository) : undefined;
+  const modelMaterial = modelFixture ? installedModelPackageEntries(modelFixture, modelBrokerBytes!,
+    workerEntries.find(entry => entry.entryId === 'edit')!.bytes, builtinTools && guest ? {
+      entry: builtinTools, supervisor: { entryId: 'installed-supervisor', role: 'supervisor', relativePath: 'supervisor',
+        executable: true, version: '1', digest: sha256Bytes(supervisorBytes), byteCount: supervisorBytes.length },
+      guest: { manifestRef: guest.manifestRef, manifest: guest.manifest }
+    } : undefined) : undefined;
   const profile = policyProfile();
   const sourceInspector = guest ? await buildSourceGitInspectorAsset(repository) : undefined;
   const rootCore = { schemaVersion: 1, format: 'cliq-sandbox-root-profile-v1', protocol: 'cliq-fresh-empty-root-v1',
     filesystemKind: 'fresh_ephemeral_tmpfs', fixedDirectories: ['/home/cliq', '/tmp', '/work'], persistent: false, networkConfiguration: 'none' };
   const contents = [
-    { entryId: 'installed-supervisor', role: 'supervisor', relativePath: 'supervisor', executable: true, bytes: await readFile(supervisorFile) },
+    { entryId: 'installed-supervisor', role: 'supervisor', relativePath: 'supervisor', executable: true, bytes: supervisorBytes },
     { entryId: STATE_OWNER_NATIVE_ENTRY_ID, role: 'platform_helper', relativePath: STATE_OWNER_NATIVE_RELATIVE_PATH,
       executable: true, bytes: await readFile(helper) },
     ...workerEntries,
@@ -133,6 +140,8 @@ export async function buildInstalledSupervisorPackage(fixture: string,
     { entryId: 'installed-empty-root', role: 'sandbox_root_profile', relativePath: 'profiles/empty-root.json', executable: false,
       bytes: canonicalJsonBytes({ ...rootCore, profileDigest: canonicalSha256(rootCore) }) },
     ...(modelMaterial?.entries ?? []),
+    ...(builtinTools ? [{ entryId: builtinTools.entryId, role: builtinTools.role, relativePath: builtinTools.relativePath,
+      executable: builtinTools.executable, bytes: builtinTools.bytes }] : []),
     ...(sourceInspector ? [{ entryId: sourceInspector.entryId, role: sourceInspector.role, relativePath: sourceInspector.relativePath,
       executable: sourceInspector.executable, bytes: sourceInspector.bytes }] : []),
   ];

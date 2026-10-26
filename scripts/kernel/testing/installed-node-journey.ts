@@ -29,7 +29,7 @@ import { CredentialSecretScanError, createCredentialSecretScanner, copyCredentia
   type CredentialSecretScanCode, type CredentialSecretScanFailureDiagnostic, type CredentialSecretScanFailureStage } from './credential-secret-scan.js';
 import { CredentialSecretCorpusError, scanCredentialSecretCorpus, readCredentialSecretCorpusScanProgress,
   type CredentialSecretCorpusScanProgress } from './credential-secret-corpus.js';
-import { inspectInstalledWorkerIdentity, inspectInstalledWorkerRetirement, inspectInstalledWorkerRetirementHistory, inspectInstalledWorkerLaunchIds, type InstalledWorkerIdentityInspection, type InstalledWorkerRetirementBinding } from './installed-worker-lease.js';
+import { inspectInstalledWorkerIdentity, inspectInstalledWorkerLease, assertInstalledWorkerLeaseRenewed, inspectInstalledWorkerRetirement, inspectInstalledWorkerRetirementHistory, inspectInstalledWorkerLaunchIds, type InstalledWorkerIdentityInspection, type InstalledWorkerRetirementBinding } from './installed-worker-lease.js';
 import { inspectInstalledOwnerHistory, waitForInstalledOwnerHistory } from './installed-read-control.js';
 import { assertInstalledVerifierOutcome, InstalledVerifierOutcomeError } from './installed-verifier-result.js';
 import { runInstalledDeliveryCases } from './installed-delivery-journey.js';
@@ -52,6 +52,8 @@ import type { InstalledPublicationStopResult } from './installed-publication-sto
 import { projectInstalledRunProgress } from './installed-run-progress.js';
 import { projectInstalledUnitStopObservation } from './installed-unit-stop-observation.js';
 import { readInstalledAssemblyWorkJournal, readInstalledPublicationStageJournal, readInstalledStoreDiagnosticJournal, readInstalledStoreStopPhaseJournal } from './installed-store-diagnostic-journal.js';
+import { installedToolsCalls, installedReadOnlyGitCall, assertInstalledToolsOutcome } from './installed-tools-result.js';
+import { installedBashStopCall, observeInstalledBash, assertInstalledBashStopped, type InstalledBashProcesses } from './installed-tools-stop.js';
 
 type Recipe = { buildFixture: string; packageRoot: string; installerEntry: string; stateRoot: string; releaseKeysFile: string;
   controlDirectory: string; observer: string; storeFixture: string; publicationObserver: string; workspace: string; reportFile: string };
@@ -59,9 +61,11 @@ type Ledger = { diagnosticOnly: true; fixture: string; fixtureIdentity: string; 
   uid: number; gid: number; runnerUid: number; home: string; runJourney: Recipe };
 type Response = { protocolVersion: 1; ok: boolean; method?: string; result?: Record<string, any>; error?: Record<string, unknown> };
 type CaseKind = 'required_pass' | 'required_repair' | 'advisory_failure' | 'required_timeout';
-type SourceCaseKind = CaseKind | 'ordinary_git' | 'delivery_publish' | 'delivery_merge' | 'delivery_cancel' | 'delivery_git' | 'delivery_git_merge';
+type SourceCaseKind = CaseKind | 'ordinary_git' | 'ordinary_tools' | 'ordinary_tools_cancel' | 'ordinary_tools_restart' |
+  'delivery_publish' | 'delivery_merge' | 'delivery_cancel' | 'delivery_git' | 'delivery_git_merge';
 const sourceBehavior = (kind: SourceCaseKind): CaseKind =>
-  kind === 'ordinary_git' || kind === 'delivery_publish' || kind === 'delivery_merge' || kind === 'delivery_cancel' || kind === 'delivery_git' || kind === 'delivery_git_merge' ? 'required_pass' : kind;
+  kind === 'ordinary_git' || kind === 'ordinary_tools' || kind === 'ordinary_tools_cancel' || kind === 'ordinary_tools_restart' ||
+    kind === 'delivery_publish' || kind === 'delivery_merge' || kind === 'delivery_cancel' || kind === 'delivery_git' || kind === 'delivery_git_merge' ? 'required_pass' : kind;
 const environment = { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C', LC_ALL: 'C' };
 const model = 'installed-node-verifier-fixture';
 const imageFields = ['dev', 'ino', 'size', 'uid', 'gid', 'mode', 'nlink', 'mtimeNs', 'ctimeNs'] as const;
@@ -163,9 +167,10 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
   const installedClientDriver = path.join(recipe.buildFixture, 'installed-control-client-driver.mjs');
   const report: Record<string, any> = { diagnosticOnly: true, qualified: false, phase: 'installation',
     ordinaryGitFixtureProfile: journeyKind === 'verifier' ? 'verifier_four_plus_ordinary_git_v1' : 'delivery_three_plus_two_git_v1',
-    scope: 'actual signed Linux installed Node required/advisory verifier, repair and exhausted timeout using public v1 UDS and owned HTTPS; not actual provider, release, default/ask policy or complete I2/I1 fault qualification',
+    scope: 'actual signed Linux installed Node required/advisory verifier, repair and exhausted timeout, fixed ordinary tools, explicit approval/input and original process interruption using public v1 UDS and owned HTTPS; not actual provider, release or complete I2/I1 fault qualification',
     actualProviderQualified: false, actualProviderBillingQualified: false, completeI1Qualified: false, completeI2Qualified: false,
     beforeVerifierReleaseStopCutQualified: false, allCrashCutsQualified: false, macosQualified: false, rebootQualified: false };
+  if (journeyKind === 'verifier') report.ordinaryToolsFixtureProfile = 'verifier_five_plus_interactive_tools_and_stop_v1';
   if (journeyKind === 'delivery') Object.assign(report, {
     scope: 'actual signed Linux explicit Delivery from verified yolo sources, direct-policy publication, noOp, real verifier merge, cancel and public reconnect/restart; not interactive ask/deny, paid provider, release, reboot or complete I1 qualification',
     interactiveApprovalQualified: false, preciseClaimedCloseCutQualified: false,
@@ -359,6 +364,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     assert.equal(value.serviceUid, ledger.uid); assert.equal(value.connectionClosed, true); assert(Array.isArray(value.items)); return value;
   };
   let server: Server | undefined, daemon: ChildProcess | undefined, daemonExit: Promise<void> | undefined;
+  let expectedToolNames: readonly string[] | undefined;
   let daemonPid: number | undefined, daemonStart: string | undefined;
   let services: { supervisorUnit: string; keeperUnit: string } | undefined;
   let serverAuthenticationBinding: Readonly<{ pid: number; processStartToken: string; invocationId: string; windowOpenedAt: number }> | undefined;
@@ -372,7 +378,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     if (!responderErrors.length) responderErrors.push(error);
   };
   const sockets: Promise<void>[] = [];
-  const activeCases = new Map<SourceCaseKind, { runId: string; posts: number; identities: InstalledWorkerIdentityInspection[] }>();
+  const activeCases = new Map<SourceCaseKind, { runId: string; posts: number; identities: InstalledWorkerIdentityInspection[];
+    initialScriptLease?: ReturnType<typeof inspectInstalledWorkerLease>; initialScriptWorker?: string }>();
   const completed: Array<{ kind: CaseKind; cut: Record<string, any>; sessionCut: Record<string, any>; submit: Record<string, unknown>;
     admission: Response; resultQueries: Response[]; files: readonly { path: string; before: string; after: string }[];
     workspace: string; sourceIdentity: Map<string, Record<string, string>>; expectedGit?: true;
@@ -422,7 +429,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     const bytes = await readPublicArtifact(artifact.ref, artifact); assert(bytes.equals(expected));
     const original = originalPublicResultBytes.get(artifact.ref);
     if (original) assert(bytes.equals(original), 'reconnect/restart must preserve the exact original downloaded bytes');
-    else { originalPublicResultBytes.set(artifact.ref, Buffer.from(bytes)); assert(originalPublicResultBytes.size <= (journeyKind === 'delivery' ? 10 : 8)); }
+    else { originalPublicResultBytes.set(artifact.ref, Buffer.from(bytes)); assert(originalPublicResultBytes.size <= (journeyKind === 'verifier' ? 12 : 10)); }
     return bytes;
   };
   const resultQueries = async (cut: Record<string, any>): Promise<Response[]> => {
@@ -511,26 +518,56 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         const bytes = Buffer.concat(chunks); scanBytes(bytes); assert.equal(Number(incoming.headers['content-length']), bytes.length);
         const body = parseJsonStrict(bytes.toString('utf8')) as Record<string, any>;
         assert.equal(body.model, model); assert.equal(body.stream, false); assert.equal(body.max_tokens, 4096);
-        assert.deepEqual(body.tools.map((entry: any) => entry.function.name), ['edit']);
-        const matches = [...cases, ...deliverySources].filter(kind => body.messages.some((entry: any) => entry.role === 'user' &&
+        assert(expectedToolNames, 'the exact signed tool manifest must precede any provider request');
+        assert.deepEqual(body.tools.map((entry: any) => entry.function.name), expectedToolNames);
+        const matches = [...cases, 'ordinary_tools' as const, 'ordinary_tools_cancel' as const, 'ordinary_tools_restart' as const, ...deliverySources].filter(kind => body.messages.some((entry: any) => entry.role === 'user' &&
           typeof entry.content === 'string' && entry.content.includes('Owned installed verifier case: ' + kind + '.')));
         assert.equal(matches.length, 1); const sourceKind = matches[0]!, kind = sourceBehavior(sourceKind);
         const registeredBy = Date.now() + 5000;
         while (!activeCases.has(sourceKind)) { assert(Date.now() < registeredBy); await delay(10); }
         const active = activeCases.get(sourceKind)!; const ordinal = ++active.posts; postCount++;
-        assert(ordinal <= (kind === 'required_repair' ? 4 : kind === 'required_pass' ? 2 : 1), 'completed or unknown claims must not resend model requests');
-        const edit = kind === 'required_pass' && ordinal === 1 || kind === 'required_repair' && (ordinal === 1 || ordinal === 3);
+        assert(ordinal <= (sourceKind === 'ordinary_tools_cancel' ? 1 : kind === 'required_repair' ? 4 : kind === 'required_pass' ? 2 : 1), 'completed or unknown claims must not resend model requests');
+        const stoppedTools = sourceKind === 'ordinary_tools_cancel' || sourceKind === 'ordinary_tools_restart';
+        const toolsCase = sourceKind === 'ordinary_tools' || stoppedTools, tools = stoppedTools ? [installedBashStopCall] : installedToolsCalls(beforeText, afterText);
+        const edit = !toolsCase && (kind === 'required_pass' && ordinal === 1 || kind === 'required_repair' && (ordinal === 1 || ordinal === 3));
         const callId = 'owned-verifier-edit-' + ordinal;
-        if (ordinal > 1) {
+        if (toolsCase && ordinal > 1) {
+          const replies = body.messages.filter((entry: any) => entry.role === 'tool');
+          assert.deepEqual(replies.map((entry: any) => entry.tool_call_id), tools.map(call => call.callId));
+          if (stoppedTools) assert(replies.every((entry: any) => typeof entry.content === 'string' && entry.content.includes('controller_stop') && entry.content.includes('CLIQ_BASH_ACTIVE')));
+          else {
+            assert(replies.some((entry: any) => typeof entry.content === 'string' && entry.content.includes('owned native bash output')));
+            assert(replies.some((entry: any) => typeof entry.content === 'string' && entry.content.includes('owned installed reply')));
+          }
+        } else if (ordinal > 1) {
           assert.equal(body.messages.filter((entry: any) => entry.role === 'tool' && entry.tool_call_id === 'owned-verifier-edit-' + (ordinal % 2 === 0 ? ordinal - 1 : 1)).length, 1);
+          if (sourceKind === 'ordinary_git') {
+            const reply = body.messages.filter((entry: any) => entry.role === 'tool' && entry.tool_call_id === installedReadOnlyGitCall(afterText).callId);
+            assert.equal(reply.length, 1); assert(reply[0].content.includes('CLIQ_PRIVATE_GIT_READ_ONLY_OK'));
+          }
         }
         if (kind === 'required_repair' && ordinal === 3) {
           assert(body.messages.some((entry: any) => typeof entry.content === 'string' &&
             entry.content.includes('Verifier "node-tests" failed an assertion (exit 1). Revise the candidate and try again.')), 'the second model turn must consume the actual bounded repair diagnostic');
         }
+        if (stoppedTools && ordinal === 1) {
+          assert(inspectionClient);
+          const cut = accepted(await inspectionClient.send({ protocolVersion: 1, method: 'run.get', runId: active.runId }), 'run.get');
+          const run = cut.snapshot.run; assert(run.activeWorkerLaunchId);
+          const status = accepted(await inspectionClient.send({ protocolVersion: 1, method: 'supervisor.status' }), 'supervisor.status');
+          active.initialScriptLease = inspectInstalledWorkerLease(recipe.stateRoot, { uid: ledger.uid, runId: run.id,
+            launchId: run.activeWorkerLaunchId, leaseEpoch: run.leaseEpoch, runRevision: run.revision,
+            supervisorInstanceId: status.supervisorInstanceId, deadlineAt: run.deadlineAt });
+          active.initialScriptWorker = run.activeWorkerLaunchId;
+          // Hold only this owned HTTPS response. The original worker and lease
+          // run normally; no process, clock, authority or store is modified.
+          // This leaves a real interval between the original parent lease and
+          // the later fixed 60s Bash cap, without lengthening either bound.
+          await delay(5000);
+        }
         // Hold only this real response while observing the already-running
         // original worker. No process pause, fake launch, SQL write or proof.
-        if (!edit) {
+        if (!edit && (!toolsCase || ordinal > 1)) {
           assert(inspectionClient);
           const cut = accepted(await inspectionClient.send({ protocolVersion: 1, method: 'run.get', runId: active.runId }), 'run.get');
           const run = cut.snapshot.run; assert(run.activeWorkerLaunchId);
@@ -548,10 +585,15 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
           }
         }
         const payload = { id: 'owned-' + kind + '-' + ordinal, object: 'chat.completion', model,
-          choices: [{ index: 0, finish_reason: edit ? 'tool_calls' : 'stop', message: edit
+          choices: [{ index: 0, finish_reason: edit || toolsCase && ordinal === 1 ? 'tool_calls' : 'stop', message: toolsCase && ordinal === 1
+            ? { role: 'assistant', content: '', tool_calls: tools.map(call => ({ id: call.callId, type: 'function',
+              function: { name: call.name, arguments: JSON.stringify(call.input) } })) } : edit
             ? { role: 'assistant', content: '', tool_calls: [{ id: callId, type: 'function', function: { name: 'edit',
               arguments: JSON.stringify({ path: 'example.txt', old_text: ordinal === 3 ? afterText : beforeText,
-                new_text: ordinal === 3 ? fixedText : afterText }) } }] }
+                new_text: ordinal === 3 ? fixedText : afterText }) } }, ...(sourceKind === 'ordinary_git' ? (() => {
+                  const call = installedReadOnlyGitCall(afterText);
+                  return [{ id: call.callId, type: 'function', function: { name: call.name, arguments: JSON.stringify(call.input) } }];
+                })() : [])] }
             : { role: 'assistant', content: 'The owned candidate is ready for its frozen Node verifier.' } }],
           usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 } };
         const response = Buffer.from(JSON.stringify(payload)); scanBytes(response);
@@ -576,6 +618,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       ...(storeFailureDiagnostics ? { storeFailureDiagnostics: true as const } : {}),
       ...(journeyKind === 'verifier' ? { guestImageProfile: 'qualification_max' as const } : {}) });
     assert(signed.guestToolchain && signed.modelAuthority);
+    expectedToolNames = signed.modelAuthority.tools.value.entries.map(entry => entry.name);
     const installer = await build({ entryPoints: [fileURLToPath(new URL('./installed-runtime-installer.ts', import.meta.url))],
       outfile: recipe.installerEntry, bundle: true, platform: 'node', format: 'esm', target: 'node22.13', metafile: true, write: false });
     assert(Object.values(installer.metafile!.outputs).flatMap(value => value.imports).every(value => value.external && value.path.startsWith('node:')));
@@ -769,10 +812,12 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     const createSource = async (sourceKind: SourceCaseKind) => {
       assert(client && signed.guestToolchain);
       const kind = sourceBehavior(sourceKind);
+      const stoppedTools = sourceKind === 'ordinary_tools_cancel' || sourceKind === 'ordinary_tools_restart';
+      const toolsCase = sourceKind === 'ordinary_tools' || stoppedTools;
       mark(sourceKind);
       assert(!responderFailure);
       const workspace = path.join(recipe.workspace, sourceKind); await mkdir(workspace, { mode: 0o700 }); await chown(workspace, ledger.uid, ledger.gid);
-      const expected = kind === 'required_pass' ? afterText : kind === 'required_repair' ? fixedText : beforeText;
+      const expected = stoppedTools ? beforeText : kind === 'required_pass' ? afterText : kind === 'required_repair' ? fixedText : beforeText;
       let check = kind === 'required_timeout'
         ? "import test from 'node:test'; test('owned timeout',async()=>{await new Promise(resolve=>setTimeout(resolve,60000));});\n"
         : "import test from 'node:test'; import assert from 'node:assert/strict'; import {readFile} from 'node:fs/promises';\n" +
@@ -830,33 +875,154 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       const authorization: VerifierIdentityCreateRequest = request({ protocolVersion: 1, method: 'authorization.create', requestId: nextId(), decision: {
         kind: 'execution_identity_read', purpose: 'verifier', target: { kind: 'guest_toolchain',
           guestToolchainManifestId: signed.guestToolchain.manifestId, toolId: 'node' } } });
-      const grant: AuthorizationGrantSummaryV1 = (await send(authorization, 'authorization.create', 30000)).grant;
-      assert.equal(grant.state, 'active'); assert.equal(grant.targetKind, 'execution_identity_read');
-      assert.equal(grant.purpose, 'verifier'); assert.equal(grant.useCount, 0);
+      const grant: AuthorizationGrantSummaryV1 | undefined = toolsCase ? undefined : (await send(authorization, 'authorization.create', 30000)).grant;
+      if (grant) { assert.equal(grant.state, 'active'); assert.equal(grant.targetKind, 'execution_identity_read');
+        assert.equal(grant.purpose, 'verifier'); assert.equal(grant.useCount, 0); }
       const submit: Record<string, unknown> = request({ protocolVersion: 1, method: 'run.submit', requestId: nextId(),
         admissionKey: randomBytes(32).toString('base64url'), sessionId: session.id, expectedContextRevision: session.contextRevision,
         workspacePath: workspace, objective: 'Owned installed verifier case: ' + sourceKind + '. Make only the specified example.txt edit; retain all verifier files.',
         model: { provider: 'openai-compatible', model, endpoint: { kind: 'registered', endpointRegistrationId: registration.endpointRegistrationId },
-          modelCredentialGrantIds: [credentialId] }, policyMode: 'yolo',
+          modelCredentialGrantIds: [credentialId] }, policyMode: sourceKind === 'ordinary_tools' ? 'default' : 'yolo',
         budgets: { wallTimeMs: 300000, modelTokens: 2000000, costMicros: 10000000, toolCalls: 1000,
           repairAttempts: kind === 'required_repair' ? 1 : 0, childDepth: 0, childConcurrency: 1 },
-        verifiers: [{ id: 'node-tests', version: '1', required: kind !== 'advisory_failure',
+        verifiers: toolsCase ? [] : [{ id: 'node-tests', version: '1', required: kind !== 'advisory_failure',
           executable: { kind: 'toolchain', toolId: 'node' },
           argv: ['--test', '--test-concurrency=1', 'check.test.mjs'].map(value => ({ kind: 'non_secret_literal', value })),
-          cwd: '.', env: {}, writableEphemeralPaths: [], identityReadGrantId: grant.grantId,
+          cwd: '.', env: {}, writableEphemeralPaths: [], identityReadGrantId: grant!.grantId,
           timeoutMs: kind === 'required_timeout' ? 1000 : 10000, retries: kind === 'required_timeout' ? 1 : 0, outputLimitBytes: 65536 }],
         dependency: { mode: 'none' }, sourceIncludes: [], sourceExcludes: [], registeredMcpServerIds: [], skillIds: [],
         ...(inspectionGrantId ? { sourceInspectionGrantId: inspectionGrantId, ignoreReadGrantIds: [ignoreGrantId!] } : {}),
-        allowUnverified: kind === 'advisory_failure' });
+        allowUnverified: toolsCase || kind === 'advisory_failure' });
       const admission: Response = await client.send(submit, 30000);
       const admitted: Record<string, any> = accepted(admission, 'run.submit').snapshot.run;
       activeCases.set(sourceKind, { runId: admitted.id, posts: 0, identities: [] });
       const by = Date.now() + 90000;
+      const controls = { approvals: 0, denials: 0, inputReplies: 0, restarted: false, replayed: false, staleRefused: false };
+      let readParent: InstalledWorkerIdentityInspection | undefined;
+      let executingBash: InstalledBashProcesses | undefined, bashObservationBy: number | undefined, bashPhysicallyJoined = false;
+      let scriptLeaseRenewed = false;
       let cut: Record<string, any>;
       for (;;) {
         cut = await send({ protocolVersion: 1, method: 'run.get', runId: admitted.id }, 'run.get');
         assert(!responderFailure, 'owned responder must not refuse the literal expected request');
         if (['succeeded', 'completed_unverified', 'failed', 'cancelled'].includes(cut.snapshot.run.status)) break;
+        if (toolsCase) {
+          const run = cut.snapshot.run;
+          if (!stoppedTools && !readParent && run.activeWorkerLaunchId) {
+            const completedReads = cut.journal.filter((entry: any) => entry.opKind === 'tool' && entry.phase === 'completed').length;
+            if (completedReads >= 2 && completedReads < 14) {
+              const status = await send({ protocolVersion: 1, method: 'supervisor.status' }, 'supervisor.status');
+              readParent = inspectInstalledWorkerIdentity(recipe.stateRoot, { uid: ledger.uid, runId: run.id,
+                launchId: run.activeWorkerLaunchId, leaseEpoch: run.leaseEpoch, runRevision: run.revision,
+                supervisorInstanceId: status.supervisorInstanceId, deadlineAt: run.deadlineAt });
+              assert.equal('linux-proc-start-ticks:' + await fixtureProcess(readParent.pid, ledger.uid), readParent.processStartToken);
+            }
+          }
+          if (stoppedTools && !bashPhysicallyJoined && run.status === 'running' && run.activeWorkerLaunchId) {
+            if (cut.journal.some((entry: any) => entry.opKind === 'tool' && entry.phase === 'dispatch_claimed')) {
+              bashObservationBy ??= performance.now() + Math.min(15000, by - Date.now());
+              assert(performance.now() < bashObservationBy, 'real Bash and its non-adapter child must be observed under the original bounded cut');
+              const status = await send({ protocolVersion: 1, method: 'supervisor.status' }, 'supervisor.status');
+              executingBash = await observeInstalledBash({ stateRoot: recipe.stateRoot, uid: ledger.uid, cut,
+                guest: signed.guestToolchain.manifest, supervisorInstanceId: status.supervisorInstanceId,
+                deadline: bashObservationBy, readCas, processIdentity: fixtureProcess });
+              if (executingBash) {
+                const currentServices = services; assert(currentServices);
+                if (sourceKind === 'ordinary_tools_restart') {
+                  const expectedLease = { uid: ledger.uid, runId: run.id, launchId: run.activeWorkerLaunchId, leaseEpoch: run.leaseEpoch,
+                    runRevision: run.revision, supervisorInstanceId: status.supervisorInstanceId, deadlineAt: run.deadlineAt };
+                  const original = activeCases.get(sourceKind)!;
+                  const originalLease = original.initialScriptLease;
+                  assert(originalLease); assert.equal(original.initialScriptWorker, executingBash.parent.launchId);
+                  while (Date.now() <= Date.parse(originalLease.leaseExpiresAt)) {
+                    assert(Date.now() < by, 'script lease proof remains inside the original 90-second case bound'); await delay(100);
+                  }
+                  const continuedLease = inspectInstalledWorkerLease(recipe.stateRoot, expectedLease);
+                  assertInstalledWorkerLeaseRenewed(originalLease, continuedLease, run.deadlineAt);
+                  assert.equal(await fixtureProcess(executingBash.bash.pid, ledger.uid), executingBash.bash.processStartToken);
+                  assert.equal(await fixtureProcess(executingBash.child.pid, ledger.uid, executingBash.bash.pid), executingBash.child.processStartToken);
+                  scriptLeaseRenewed = true;
+                  assert(client);
+                  await client.close(); client = undefined; await inspectionClient!.close(); inspectionClient = undefined;
+                }
+                const stopStarted = performance.now(), originalUnit = show(currentServices.supervisorUnit);
+                if (sourceKind === 'ordinary_tools_cancel') {
+                  assert(client);
+                  const frame = request({ protocolVersion: 1, method: 'run.cancel', requestId: nextId(), runId: run.id, expectedRevision: run.revision });
+                  const reply = await client.send(frame); accepted(reply, 'run.cancel'); assert.deepEqual(await client.send(frame), reply);
+                } else assert.equal(command('/usr/bin/systemctl', ['--user', 'stop', currentServices.supervisorUnit]).status, 0);
+                for (;;) {
+                  let alive = false;
+                  for (const original of [executingBash.bash, executingBash.child]) {
+                    try { if (await processStart(original.pid) === original.processStartToken) alive = true; }
+                    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+                  }
+                  assert(performance.now() - stopStarted <= 2000, 'real Bash cancellation and output/resource retirement must meet two seconds');
+                  if (!alive) break; await delay(10);
+                }
+                bashPhysicallyJoined = true;
+                if (sourceKind === 'ordinary_tools_restart') {
+                  const restartBy = Date.now() + 30000;
+                  assert.equal(command('/usr/bin/systemctl', ['--user', 'start', currentServices.supervisorUnit]).status, 0);
+                  const successor = show(currentServices.supervisorUnit); assert.notEqual(successor.InvocationID, originalUnit.InvocationID);
+                  await selectedSupervisor(currentServices.supervisorUnit, successor, installedImage, restartBy);
+                  client = await persistentClient(); inspectionClient = await persistentClient();
+                  assert.equal(show(currentServices.keeperUnit).MainPID, keeperBefore.MainPID);
+                  assert.deepEqual(await readFile(path.join(recipe.stateRoot, 'runtime/keeper.ready')), keeperReady);
+                }
+              }
+            }
+          }
+          if (run.status === 'waiting' && (run.waitingReason === 'approval' || run.waitingReason === 'input')) {
+            assert(client);
+            assert.equal(run.activeWorkerLaunchId, undefined, 'interactive waits must hold no execution worker');
+            const wait = parseJsonStrict((await readCas(run.waitingOnRef)).toString('utf8')) as any;
+            assert.equal(wait.runId, run.id); assert.equal(wait.kind, run.waitingReason);
+            if (run.waitingReason === 'approval') {
+              assert.equal(wait.subject.kind, 'tool_call'); assert((stoppedTools ? [0] : [15, 16, 17]).includes(wait.subject.callIndex));
+              if (wait.subject.callIndex === 15) {
+                await client.close(); client = await persistentClient();
+                assert.deepEqual(await send({ protocolVersion: 1, method: 'run.get', runId: run.id }, 'run.get'), cut);
+                const stale = await client.send(request({ protocolVersion: 1, method: 'run.approve', requestId: nextId(), runId: run.id,
+                  expectedRevision: run.revision - 1, waitingOnRef: run.waitingOnRef, decision: 'allow', ttlMs: 30000 }));
+                assert.equal(stale.ok, false); assert.equal(stale.error?.code, 'REVISION_CONFLICT');
+              }
+              const decision = wait.subject.callIndex === 17 ? 'deny' : 'allow';
+              const frame = request({ protocolVersion: 1, method: 'run.approve', requestId: nextId(), runId: run.id,
+                expectedRevision: run.revision, waitingOnRef: run.waitingOnRef, decision, ...(decision === 'allow' ? { ttlMs: 30000 } : {}) });
+              const reply = await client.send(frame); accepted(reply, 'run.approve');
+              assert.deepEqual(await client.send(frame), reply); controls.replayed = true;
+              if (decision === 'allow') controls.approvals++; else controls.denials++;
+            } else {
+              assert.equal(controls.inputReplies, 0); assert.equal(controls.restarted, false);
+              const currentServices = services; assert(currentServices);
+              await client.close(); client = undefined; await inspectionClient!.close(); inspectionClient = undefined;
+              const prior = show(currentServices.supervisorUnit), stoppedAt = performance.now();
+              assert.equal(command('/usr/bin/systemctl', ['--user', 'stop', currentServices.supervisorUnit]).status, 0);
+              assert(performance.now() - stoppedAt <= 2000, 'worker-free input shutdown must meet the original two-second bound');
+              assert.equal(show(currentServices.supervisorUnit).MainPID, '0');
+              const restartBy = Date.now() + 30000;
+              assert.equal(command('/usr/bin/systemctl', ['--user', 'start', currentServices.supervisorUnit]).status, 0);
+              const successor = show(currentServices.supervisorUnit); assert.notEqual(successor.InvocationID, prior.InvocationID);
+              await selectedSupervisor(currentServices.supervisorUnit, successor, installedImage, restartBy);
+              client = await persistentClient(); inspectionClient = await persistentClient();
+              const resumed = await send({ protocolVersion: 1, method: 'run.get', runId: run.id }, 'run.get'); assert.deepEqual(resumed, cut);
+              assert.equal(show(currentServices.keeperUnit).MainPID, keeperBefore.MainPID);
+              assert.deepEqual(await readFile(path.join(recipe.stateRoot, 'runtime/keeper.ready')), keeperReady); controls.restarted = true;
+              const foreign = await client.send(request({ protocolVersion: 1, method: 'run.input', requestId: nextId(), runId: run.id,
+                expectedRevision: run.revision, waitingOnRef: 'a'.repeat(64), input: { kind: 'text', value: 'owned installed reply' } }));
+              assert.equal(foreign.ok, false); assert.equal(foreign.error?.code, 'INVALID_REQUEST');
+              assert.deepEqual(await send({ protocolVersion: 1, method: 'run.get', runId: run.id }, 'run.get'), cut);
+              const stale = await client.send(request({ protocolVersion: 1, method: 'run.input', requestId: nextId(), runId: run.id,
+                expectedRevision: run.revision - 1, waitingOnRef: run.waitingOnRef, input: { kind: 'text', value: 'owned installed reply' } }));
+              assert.equal(stale.ok, false); assert.equal(stale.error?.code, 'REVISION_CONFLICT'); controls.staleRefused = true;
+              const frame = request({ protocolVersion: 1, method: 'run.input', requestId: nextId(), runId: run.id,
+                expectedRevision: run.revision, waitingOnRef: run.waitingOnRef, input: { kind: 'text', value: 'owned installed reply' } });
+              const reply = await client.send(frame); accepted(reply, 'run.input'); assert.deepEqual(await client.send(frame), reply);
+              controls.inputReplies++;
+            }
+          }
+        }
         try {
           assert(Date.now() < by, 'actual candidate/verifier/result did not reach terminal within its fixed 90-second qualification window');
         } catch (original) {
@@ -867,25 +1033,44 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         await delay(50);
       }
       const sessionCut = await send({ protocolVersion: 1, method: 'session.get', sessionId: session.id }, 'session.get');
-      const proof = await assertInstalledVerifierOutcome({ cut, sessionCut, readCas, caseKind: kind, expectedFiles: files, principalId: principal,
+      let originalReadRetirement: ReturnType<typeof inspectInstalledWorkerRetirement> | undefined;
+      if (sourceKind === 'ordinary_tools') {
+        assert(readParent, 'the actual parent must be observed alive after two independent read completions');
+        originalReadRetirement = inspectInstalledWorkerRetirement(recipe.stateRoot, ledger.uid, readParent);
+        try { assert.notEqual('linux-proc-start-ticks:' + await processStart(readParent.pid), readParent.processStartToken); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+      }
+      const toolProof = sourceKind === 'ordinary_tools' ? await assertInstalledToolsOutcome({ cut, sessionCut, readCas, calls: installedToolsCalls(beforeText, afterText),
+        observedReadParent: originalReadRetirement!, controls }) : undefined;
+      const stopProof = stoppedTools ? await (async () => {
+        assert(executingBash && bashPhysicallyJoined);
+        const retirement = inspectInstalledWorkerRetirement(recipe.stateRoot, ledger.uid, executingBash.parent);
+        try { assert.notEqual('linux-proc-start-ticks:' + await processStart(retirement.pid), retirement.processStartToken); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+        return assertInstalledBashStopped({ cut, readCas, mode: sourceKind === 'ordinary_tools_cancel' ? 'user_cancel' : 'supervisor_restart',
+          original: executingBash, physicallyJoinedWithinTwoSeconds: true, leaseContinuedPastOriginalExpiry: scriptLeaseRenewed });
+      })() : undefined;
+      const proof = toolsCase ? undefined : await assertInstalledVerifierOutcome({ cut, sessionCut, readCas, caseKind: kind, expectedFiles: files, principalId: principal,
         ...(expectedGit ? { expectedGit: true as const } : {}),
         readOwnerHistory: async () => inspectInstalledOwnerHistory(recipe.stateRoot).owners });
       const queries = await resultQueries(cut);
-      assert.equal(proof.retirementIdentities.length, kind === 'required_repair' || kind === 'required_timeout' ? 2 : 1);
-      for (const retirement of proof.retirementIdentities) await assertVerifierProcessesAbsent(retirement);
+      if (proof) {
+        assert.equal(proof.retirementIdentities.length, kind === 'required_repair' || kind === 'required_timeout' ? 2 : 1);
+        for (const retirement of proof.retirementIdentities) await assertVerifierProcessesAbsent(retirement);
+      }
       const active = activeCases.get(sourceKind)!;
-      assert.equal(active.posts, kind === 'required_pass' ? 2 : kind === 'required_repair' ? 4 : 1);
-      const editCount = kind === 'required_pass' ? 1 : kind === 'required_repair' ? 2 : 0;
-      const verifierCount = kind === 'required_repair' || kind === 'required_timeout' ? 2 : 1;
+      assert.equal(active.posts, sourceKind === 'ordinary_tools_cancel' ? 1 : kind === 'required_pass' ? 2 : kind === 'required_repair' ? 4 : 1);
+      const executedToolCount = stoppedTools ? 1 : toolsCase ? 17 : sourceKind === 'ordinary_git' ? 2 : kind === 'required_pass' ? 1 : kind === 'required_repair' ? 2 : 0;
+      const verifierCount = toolsCase ? 0 : kind === 'required_repair' || kind === 'required_timeout' ? 2 : 1;
       const claims = cut.journal.filter((entry: any) => entry.phase === 'dispatch_claimed');
       assert.equal(claims.filter((entry: any) => entry.opKind === 'model').length, active.posts);
-      assert.equal(claims.filter((entry: any) => entry.opKind === 'tool').length, editCount);
+      assert.equal(claims.filter((entry: any) => entry.opKind === 'tool').length, executedToolCount);
       assert.equal(claims.filter((entry: any) => entry.opKind === 'verifier').length, verifierCount);
-      assert.equal(claims.length, active.posts + editCount + verifierCount);
+      assert.equal(claims.length, active.posts + executedToolCount + verifierCount);
       assert.equal(canonicalSha256(cut.snapshot.run.budgetConsumed), canonicalSha256({ modelTokens: active.posts * 36864,
-        costMicros: 0, toolCalls: editCount + verifierCount, repairAttempts: kind === 'required_repair' ? 1 : 0 }));
+        costMicros: 0, toolCalls: executedToolCount + verifierCount, repairAttempts: kind === 'required_repair' ? 1 : 0 }));
       assert.equal(canonicalSha256(cut.snapshot.run.budgetReserved), canonicalSha256({ modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 }));
-      assert.equal(active.identities.length, kind === 'required_repair' ? 2 : 1);
+      assert.equal(active.identities.length, sourceKind === 'ordinary_tools_cancel' ? 0 : kind === 'required_repair' ? 2 : 1);
       const retirements = active.identities.map(identity => inspectInstalledWorkerRetirement(recipe.stateRoot, ledger.uid, identity));
       // The original active identity was independently observed before the
       // actual final model response, then real native sealed retirement read.
@@ -893,9 +1078,12 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         try { assert.notEqual('linux-proc-start-ticks:' + await processStart(identity.pid), identity.processStartToken); }
         catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
       }
-      const revocation = request({ protocolVersion: 1, method: 'authorization.revoke', requestId: nextId(), grantId: grant.grantId });
-      const consumed = await send(revocation, 'authorization.revoke'); assert.equal(consumed.disposition, 'already_consumed');
-      assert.equal(consumed.grant.state, 'consumed'); assert.equal(consumed.grant.useCount, 1);
+      if (grant) {
+        const revocation = request({ protocolVersion: 1, method: 'authorization.revoke', requestId: nextId(), grantId: grant.grantId });
+        const consumed = await send(revocation, 'authorization.revoke'); assert.equal(consumed.disposition, 'already_consumed');
+        assert.equal(consumed.grant.state, 'consumed'); assert.equal(consumed.grant.useCount, 1);
+      }
+      assert(client);
       assert.deepEqual(await client.send(submit, 30000), admission);
       assert.deepEqual(await send({ protocolVersion: 1, method: 'run.get', runId: admitted.id }, 'run.get'), cut);
       const cancellation = await client.send(request({ protocolVersion: 1, method: 'run.cancel', requestId: nextId(),
@@ -916,7 +1104,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       completed.push(completedSource);
       report.cases.push({ kind: sourceKind, qualified: true, runId: admitted.id, resultRef: cut.snapshot.run.resultRef ?? null,
         posts: active.posts, actualOriginalWorkersRetired: retirements.length,
-        exactVerifierProcessLifetimesIndependentlyAbsent: true, proof });
+        exactVerifierProcessLifetimesIndependentlyAbsent: proof !== undefined, ...(proof ? { proof } : toolProof ? { toolProof } : { stopProof }) });
       return completedSource;
     };
     if (journeyKind === 'verifier') {
@@ -964,6 +1152,16 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     report.reconnectAndRestart = { qualified: true, sameKeeper: true, sameTerminalRunAndSession: true, noRedispatch: true,
       exactOriginalAdmissionReplay: true, sourceFilesAndIdentitiesUnchanged: true, gracefulOriginalOwnerReleased: true,
       committedResultAndDiffDescriptorsPreserved: true, liveAndFailedNeverExposeCandidateAsResult: true };
+    // Preserve the entire original five-case / ten-POST campaign and its
+    // reconnect/restart assertions above before adding this complete vertical.
+    inspectionClient = await persistentClient();
+    await createSource('ordinary_tools');
+    assert.equal(postCount, 12); assert.equal(acceptedTcp, postCount); assert.equal(acceptedTls, postCount); assert(!responderFailure);
+    assert.equal(originalPublicResultBytes.size, 10);
+    await createSource('ordinary_tools_restart');
+    await createSource('ordinary_tools_cancel');
+    assert.equal(postCount, 15); assert.equal(acceptedTcp, postCount); assert.equal(acceptedTls, postCount); assert(!responderFailure);
+    assert.equal(originalPublicResultBytes.size, 12);
     } else {
       const supported = client.hello.enabledFeatureIds.includes('run.apply') && client.hello.enabledFeatureIds.includes('run.approve');
       report.delivery = { diagnosticOnly: true, qualified: false, attemptStarted: false, capabilityAdvertised: supported,
@@ -1728,7 +1926,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         else if (diagnostic.code === 'ERR_ASSERTION') failureKinds.push({ kind: 'assertion' });
         else if (diagnostic.code === 'ERR_SQLITE_ERROR' && typeof diagnostic.errcode === 'number' && Number.isSafeInteger(diagnostic.errcode) &&
             diagnostic.errcode >= 0 && diagnostic.errcode <= 65535) failureKinds.push({ kind: 'sqlite', primaryCode: diagnostic.errcode & 0xff });
-        for (const match of (error.stack ?? '').matchAll(/\b(qualify-installed-verifier-journey|qualify-installed-delivery-journey|installed-node-journey|installed-delivery-journey|installed-delivery-result|installed-verifier-result|installed-guest-package|installed-supervisor-package|installed-model-package|installed-read-control|installed-client-consumer|installed-enroll-diagnostic|installed-worker-lease|installed-publication-recovery|installed-publication-crash-observer|installed-publication-stop-result|installed-publication-journal|installed-publication-retirement|installed-publication-late-result)\.ts:([1-9][0-9]{0,6}):([1-9][0-9]{0,6})/gu)) {
+        for (const match of (error.stack ?? '').matchAll(/\b(qualify-installed-verifier-journey|qualify-installed-delivery-journey|installed-node-journey|installed-delivery-journey|installed-delivery-result|installed-verifier-result|installed-tools-result|installed-tools-stop|installed-guest-package|installed-supervisor-package|installed-model-package|installed-read-control|installed-client-consumer|installed-enroll-diagnostic|installed-worker-lease|installed-publication-recovery|installed-publication-crash-observer|installed-publication-stop-result|installed-publication-journal|installed-publication-retirement|installed-publication-late-result)\.ts:([1-9][0-9]{0,6}):([1-9][0-9]{0,6})/gu)) {
           if (match[1] === 'installed-publication-late-result' && !options.publicationRetirementLate) continue;
           if (frames.length < 8) frames.push({ file: match[1]! + '.ts', line: Number(match[2]), column: Number(match[3]) });
         }

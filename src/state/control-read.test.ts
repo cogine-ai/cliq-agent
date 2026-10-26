@@ -205,6 +205,41 @@ test('artifact.get rejects unregistered bytes, foreign principals and invalid ra
   } finally { driver.close(); await disposeFixture(foreign); await disposeFixture(fixture); }
 });
 
+test('closing the original Store cancels a control closure read after its actual I/O joins', async t => {
+  const fixture = await createActiveFixture('control-read-original-close');
+  try {
+    const identity = await publishInProcessChannel(fixture.store);
+    let entered!: () => void, release!: () => void;
+    const inRead = new Promise<void>(resolve => { entered = resolve; });
+    const readGate = new Promise<void>(resolve => { release = resolve; });
+    const open = fs.open;
+    let reads = 0, closes = 0, queryJoined = false, storeJoined = false;
+    t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
+      const handle = await open(...args);
+      if (!String(args[0]).endsWith('/' + identity.channelIdentityRef)) return handle;
+      const read = handle.read.bind(handle), close = handle.close.bind(handle);
+      t.mock.method(handle, 'read', async (...input: Parameters<typeof handle.read>) => {
+        const result = await Reflect.apply(read, handle, input);
+        if (++reads === 1) { entered(); await readGate; }
+        return result;
+      });
+      t.mock.method(handle, 'close', async () => { await close(); closes++; });
+      return handle;
+    });
+    const query = fixture.store.readControl({ protocolVersion: 1, method: 'run.get', runId: fixture.runId }, identity);
+    const rejected = assert.rejects(query, isCode('LEASE_FENCED')).finally(() => { queryJoined = true; });
+    await inRead;
+    const closing = fixture.store.close().then(() => { storeJoined = true; });
+    await nextTurn();
+    assert.equal(queryJoined, false); assert.equal(storeJoined, false);
+    assert.equal(closes, 0, 'the original FileHandle must remain held while its real read is outstanding');
+    release();
+    await Promise.all([rejected, closing]);
+    assert.equal(reads, 1, 'cancelled closure verification must issue no next chunk or EOF read');
+    assert.equal(closes, 1); assert.equal(queryJoined, true); assert.equal(storeJoined, true);
+  } finally { await disposeFixture(fixture); }
+});
+
 test('artifact.get snapshots the caller request and verifies bytes beyond the selected page before returning it', async () => {
   const fixture = await createActiveFixture('control-read-artifact-integrity');
   const driver = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));

@@ -1,9 +1,10 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmod, copyFile, mkdir, mkdtemp, readFile, rename, rm, stat } from 'node:fs/promises';
-import { constants, realpathSync } from 'node:fs';
+import { chmod, mkdir, mkdtemp, readFile, rename, rm } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { buildBubblewrap } from './build-bubblewrap.mjs';
 
 // An independent production build. Never modifies the loaded StateOwner addon
 // or the disposable execution probe installation.
@@ -56,18 +57,11 @@ try {
   ]);
   await chmod(extractor, 0o500);
   await rename(extractor, path.join(output, 'linux-guest-extractor.node'));
-  let bubblewrap;
-  for (const directory of (process.env.PATH ?? '').split(path.delimiter)) {
-    if (!path.isAbsolute(directory)) continue;
-    try {
-      const candidate = realpathSync(path.join(directory, 'bwrap'));
-      const metadata = await stat(candidate);
-      if (metadata.isFile() && (metadata.mode & 0o111) !== 0 && (metadata.mode & 0o022) === 0) { bubblewrap = candidate; break; }
-    } catch (error) { if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') throw error; }
-  }
-  if (!bubblewrap) throw new Error('A protected installed bubblewrap executable is required');
-  await copyFile(bubblewrap, path.join(output, 'cliq-linux-bubblewrap'), constants.COPYFILE_EXCL);
-  await chmod(path.join(output, 'cliq-linux-bubblewrap'), 0o500);
+  const bubblewrap = await buildBubblewrap(output, staging);
+  console.log(`LINUX_BUBBLEWRAP_SOURCE_VERSION=${bubblewrap.source.version}`);
+  console.log(`LINUX_BUBBLEWRAP_SOURCE_SHA256=${bubblewrap.source.sha256}`);
+  console.log(`LINUX_BUBBLEWRAP_IMAGE_SHA256=${bubblewrap.image.sha256}`);
+  console.log(`LINUX_BUBBLEWRAP_IMAGE_BYTES=${bubblewrap.image.byteCount}`);
 } finally {
   await rm(staging, { recursive: true, force: true });
 }

@@ -36,6 +36,8 @@ import { projectInstalledRunProgress, projectInstalledServiceExit, projectInstal
 import { decodeFinalCandidateItem, decodeRunResult, decodeVerificationClosure, decodeVerifierPlan, decodeWorkspaceDiff } from '../../src/state/result-artifacts.js';
 import { decodeSourceManifest, decodeWorkspaceEntries, decodeWorkspaceState, decodeWorkspaceIdentity } from '../../src/state/decoders.js';
 import { qualifyInstalledSessionContinuity, installedSessionResumeObjective } from './testing/installed-session-continuity.js';
+import { qualifyInstalledClientApplications } from './testing/installed-client-applications.js';
+import { installedClientBuildOptions } from './testing/installed-client-build.js';
 
 type Recipe = { buildFixture: string; packageRoot: string; installerEntry: string; stateRoot: string; releaseKeysFile: string;
   controlDirectory: string; observer: string; storeFixture: string; publicationObserver: string; workspace: string; reportFile: string };
@@ -433,6 +435,7 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
   };
   const openRunObserverClient = (timeout: number) => persistentClient(timeout, true);
   let genuineClient: Awaited<ReturnType<typeof openInstalledClientConsumer>> | undefined, genuineClientFailure: unknown;
+  let clientApplicationsAdmission: { submission: Record<string, any>; admission: Response; runId: string } | undefined;
   let genuineTransport: 'jsonl' | 'rpc' = 'jsonl';
   const closeGenuineClient = async () => {
     try { await genuineClient?.close(); genuineClient = undefined; }
@@ -1088,7 +1091,8 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
     assert.equal(staged.outputFiles!.length, 1); await writeFile(recipe.installerEntry, staged.outputFiles![0]!.contents, { flag: 'wx', mode: 0o444 });
     if (mode === '--campaign') {
       const consumer = await build({ entryPoints: [fileURLToPath(new URL('./testing/installed-control-client-driver.ts', import.meta.url))],
-        outfile: installedClientDriver, bundle: true, platform: 'node', format: 'esm', target: 'node22.13', metafile: true, write: false });
+        outfile: installedClientDriver, bundle: true, platform: 'node', format: 'esm', target: 'node22.13', metafile: true, write: false,
+        ...installedClientBuildOptions() });
       assert(Object.values(consumer.metafile!.outputs).flatMap(value => value.imports).every(value => value.external && value.path.startsWith('node:')));
       assert.equal(consumer.outputFiles!.length, 1); assert(consumer.outputFiles![0]!.contents.length <= 16 * 1024 * 1024);
       await writeFile(installedClientDriver, consumer.outputFiles![0]!.contents, { flag: 'wx', mode: 0o444 });
@@ -3236,6 +3240,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
     registerSubmission(submit);
     const submitReply = mode === '--campaign' ? await sendGenuine(submit) : exchange([submit])[0]!;
     const admitted = accepted(submitReply, 'run.submit').snapshot.run;
+    if (mode === '--campaign') clientApplicationsAdmission = { submission: submit, admission: submitReply, runId: admitted.id };
     report.defaultPolicyRefused = { qualified: true, refusalCode: 'INVALID_REQUEST', noProviderRequest: true,
       sessionUnchanged: true, permissionsAutoAllowed: false, sameAdmissionKeySubsequentlyAccepted: true };
     report.oversizedFileLimitRefused = { requestedBytes: 2_147_483_648, installedLimitBytes: 268_435_456,
@@ -4668,6 +4673,13 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
         registerSubmission, counts: () => [requestsReceived, acceptedTcpConnections, acceptedTlsConnections], providerHealthy: () => !providerFailure,
         enableResume: (summaryUtf8, retainedUtf8) => { assert.equal(sessionResumeExpected, undefined); sessionResumeExpected = { summaryUtf8, retainedUtf8 }; },
         verifyResult: (cut, target) => assertUnverifiedResult(cut, target, { exampleText: hostBefore }) });
+      mark('actual_cli_jsonl_rpc_and_ink_clients');
+      assert(clientApplicationsAdmission, 'client qualification requires its original normal admission response');
+      report.clientApplications = await qualifyInstalledClientApplications({ executable: '/usr/sbin/runuser',
+        args: [...prefix, process.execPath, '--disable-warning=ExperimentalWarning', installedClientDriver, filename],
+        cwd: ledger.home, env: environment, runId: clientApplicationsAdmission.runId, sessionId: session.id, originalSubmission: clientApplicationsAdmission.submission,
+        originalAdmission: clientApplicationsAdmission.admission, send: sendGenuine, counts: () => [requestsReceived, acceptedTcpConnections, acceptedTlsConnections],
+        providerHealthy: () => !providerFailure, openScan: () => scanner.openStream(), onJoined: () => { report.originalPublicClientJoined = true; } });
     }
     report.qualified = true; mark('run_assertions_complete');
   } catch (error) {

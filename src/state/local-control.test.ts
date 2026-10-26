@@ -13,7 +13,7 @@ import type { AuthenticatedControlIdentity, LocalControlConnection, LocalControl
 import { readHistoricalControlChannel } from './control-channel.js';
 import { canonicalJsonBytes } from '../kernel/canonical.js';
 import { sha256Bytes } from '../kernel/identity.js';
-import type { PublishedArtifact } from './artifacts.js';
+import { ArtifactCatalog, type PublishedArtifact } from './artifacts.js';
 import { ResourceRetirementError } from './errors.js';
 import { openSqliteDriver } from './sqlite-driver.js';
 import { openStateStore, publishInProcessChannel } from './store.js';
@@ -544,27 +544,26 @@ test('bounded Run reads survive real native reconnect and owner restart without 
   // Pause the final real authenticated-channel CAS read after the SQL cut,
   // not the immutable RunSpec preflight that now precedes it. A real reducer
   // can commit meanwhile without changing that cut's Run or stream high-waters.
-  const catalog = f.store.artifacts;
-  const readCanonical = catalog.readCanonical.bind(catalog);
+  const readCanonical = ArtifactCatalog.prototype.readCanonical;
   const captured = deferred<void>();
   const release = deferred<void>();
   const originalRun = f.store.getRun(seeded.runId);
   let pause = true, selectedSpec = false;
-  catalog.readCanonical = async <T>(ref: string): Promise<T> => {
-    const value = await readCanonical<T>(ref);
+  const pausedRead = t.mock.method(ArtifactCatalog.prototype, 'readCanonical', async function<T>(this: ArtifactCatalog, ref: string): Promise<T> {
+    const value = await readCanonical.call(this, ref) as T;
     if (ref === originalRun.specRef) selectedSpec = true;
     if (pause && selectedSpec && ref === copied.channelIdentityRef) {
       pause = false; captured.resolve(); await release.promise;
     }
     return value;
-  };
+  });
   const reading = first.connection.dispatch(identity => f.store.readControl({ protocolVersion: 1, method: 'run.get',
     runId: seeded.runId }, identity));
   void reading.catch(() => {});
   try {
     await bounded(captured.promise);
     await seeded.agent.prepareModel({ expectedRunRevision: originalRun.revision, leaseEpoch: seeded.leaseEpoch });
-  } finally { release.resolve(); catalog.readCanonical = readCanonical; }
+  } finally { release.resolve(); pausedRead.mock.restore(); }
   const fixedCut = await bounded(reading);
   if (fixedCut.method !== 'run.get') throw new Error('expected Run read cut');
   assert.deepEqual(fixedCut.snapshot.run, originalRun);

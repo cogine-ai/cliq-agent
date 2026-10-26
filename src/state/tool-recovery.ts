@@ -12,11 +12,16 @@ import { decodeWorkspaceGenerationSnapshotEvidence, decodeWorkspaceState, decode
 import { toolCheckpointId, validateMatchingWorkerDeath } from './tool-checkpoint.js';
 import { compileOutputSchema } from '../tools/input-schema.js';
 import { validatePrivateToolRollback } from './private-tool-rollback.js';
+import { decodeToolExecutionIdentity } from '../tools/execution-identity.js';
+import type { SqliteDriver } from './sqlite-driver.js';
+import { decodeRetainedRunAssembly } from '../model/run-assembly.js';
+import { readBuiltinToolCapture, assertBuiltinCaptureObservation } from './builtin-tool-capture.js';
 
 /** Reachability and durable ownership. The loaded Run additionally verifies release signatures and replays the fixed evaluator. */
 export async function validateToolRecovery(input: {
   artifacts: ArtifactCatalog; run: Run; spec: RunSpec; items: Map<string, ContinuationItem>; journal: InvocationJournalEntry[];
   checkpoints: Checkpoint[]; workspaceGenerations: WorkspaceGenerationStateV1[];
+  driver?: SqliteDriver;
 }): Promise<void> {
   const { artifacts, run, spec, items, journal } = input;
   const decisions = new Map<string, ToolPolicyDecisionItem>();
@@ -50,6 +55,9 @@ export async function validateToolRecovery(input: {
     if (manifest.manifestDigest !== policy.toolManifestDigest || digestOmitting(manifest, 'manifestDigest') !== manifest.manifestDigest ||
         target.toolManifestRef !== policy.toolManifestRef || target.toolManifestDigest !== manifest.manifestDigest ||
         !contract || canonicalSha256(contract) !== target.toolContractDigest) throw new TypeError('tool approval/decision substitutes its frozen contract');
+    const execution = decodeToolExecutionIdentity(target.execution);
+    if (execution.kind === 'supervisor_control' || contract.access === 'control') throw new TypeError('input control cannot own an ordinary execution history');
+    requireEqual(execution, contract.execution, 'retained exact tool execution identity');
     for (const rule of policy.decisionRules) if (rule.sourceRef) await artifacts.readBytes(rule.sourceRef);
     requests.set(evidence.requestRef, request);
     return { evidence, request, target, frontier, batch: batch!, call: call!, contract };
@@ -170,7 +178,7 @@ export async function validateToolRecovery(input: {
       if (!['failed', 'cancelled'].includes(run.status) || failed.timestamp !== detail.createdAt || detail.createdAt > run.updatedAt ||
           claims.some((claim) => claim.attempt === prepared.attempt)) throw new TypeError('stop refund is not an atomic undispatched terminal closure');
       requireEqual(failed.budgetDelta, { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 }, 'stop no-dispatch refund');
-    } else if (failed && unknown && failedClaim && prepared.replayClass === 'manual') {
+    } else if (failed && unknown && failedClaim && ['manual', 'retry'].includes(prepared.replayClass)) {
       const { evidence } = await validatePrivateToolRollback(artifacts, { prepared, claim: failedClaim, unknown, failed,
         generations: input.workspaceGenerations, checkpoints: input.checkpoints });
       const item = [...items.values()].find(item => item.kind === 'tool_result' && item.opId === prepared.opId);
@@ -193,14 +201,27 @@ export async function validateToolRecovery(input: {
         throw new TypeError('private rollback terminal does not restore its last ready workspace');
     } else if (failed) {
       const expiry = await readCanonicalArtifact<ToolGrantExpiryV1>(artifacts, failed.errorRef!);
-      const proof = await approvalWait(expiry.waitingSubjectRef);
-      requireEqual(proof.request, request, 'renewed approval request');
+      parseCanonicalTime(expiry.observedAt);
+      const proof = expiry.waitingSubjectRef !== undefined ? await approvalWait(expiry.waitingSubjectRef) : undefined;
+      if (proof) requireEqual(proof.request, request, 'renewed approval request');
+      const selection = expiry.selectionCheckpointId !== undefined
+        ? input.checkpoints.find(checkpoint => checkpoint.id === expiry.selectionCheckpointId) : undefined;
+      const previous = selection && input.checkpoints.filter(checkpoint => checkpoint.basedOnRunRevision < selection.basedOnRunRevision).at(-1);
+      if (!proof && (!selection || expiry.frontierRef !== request.frontierRef || selection.reason !== 'auto' ||
+          !previous || selection.workspaceStateRef !== previous.workspaceStateRef || selection.contextManifestRef !== previous.contextManifestRef ||
+          selection.runItemSeq !== previous.runItemSeq || expiry.observedAt < run.createdAt || expiry.observedAt >= run.deadlineAt ||
+          selection.basedOnRunRevision < 1 || expiry.selectionCheckpointId !== identityHash('cliq-tool-selection-checkpoint-v1', run.id,
+            request.frontierRef, String(selection.basedOnRunRevision), 'approval')))
+        throw new TypeError('expired grant has no exact original selection retirement checkpoint');
       requireEqual(expiry, { schemaVersion: 1, format: 'cliq-tool-grant-expiry-v1', code: 'TOOL_GRANT_EXPIRED_BEFORE_DISPATCH',
         runId: run.id, opId: prepared.opId, attempt: prepared.attempt, preparedJournalSeq: prepared.seq,
-        grantRef: prepared.grantRef, waitingSubjectRef: expiry.waitingSubjectRef, observedAt: proof.wait.createdAt }, 'no-dispatch expiry');
+        grantRef: prepared.grantRef, ...(proof ? { waitingSubjectRef: expiry.waitingSubjectRef } : {
+          selectionCheckpointId: expiry.selectionCheckpointId, frontierRef: request.frontierRef }),
+        observedAt: proof?.wait.createdAt ?? expiry.observedAt }, 'no-dispatch expiry');
+      const checkpoint = proof?.checkpoint ?? selection!;
       if (grant.provenance.kind !== 'user_approval' || claims.some((claim) => claim.attempt === prepared.attempt) ||
-          expiry.observedAt < grant.expiresAt || failed.timestamp < expiry.observedAt || proof.checkpoint.journalSeq !== failed.seq ||
-          proof.checkpoint.createdAt < failed.timestamp) throw new TypeError('expired tool grant has no atomic positive no-dispatch closure');
+          expiry.observedAt < grant.expiresAt || failed.timestamp < expiry.observedAt || checkpoint.journalSeq !== failed.seq ||
+          checkpoint.createdAt < failed.timestamp) throw new TypeError('expired tool grant has no atomic positive no-dispatch closure');
       requireEqual(failed.budgetDelta, { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 }, 'no-dispatch refund');
     }
     const completion = attempts.find((entry) => entry.attempt === prepared.attempt && entry.phase === 'completed');
@@ -210,6 +231,7 @@ export async function validateToolRecovery(input: {
     const item = [...items.values()].find((item) => item.kind === 'tool_result' && item.opId === prepared.opId);
     if (!claim || !result || !exactKeys(result, ['schemaVersion', 'format', 'runId', 'opId', 'attempt', 'requestRef', 'targetRef', 'grantRef', 'dispatchId',
       'observedAt', 'observationDigest', 'outcome', ...(result.postEffect === undefined ? [] : ['postEffect']),
+      ...(result.captureRef === undefined && result.captureDigest === undefined ? [] : ['captureRef', 'captureDigest']),
       ...(result.outcome === 'executed' ? ['content'] : ['code', 'diagnosticRef', 'diagnosticDigest'])]) ||
         result.schemaVersion !== 1 || result.format !== 'cliq-tool-observation-v1' || result.observationDigest !== digestOmitting(result, 'observationDigest') ||
         result.runId !== run.id || result.opId !== prepared.opId || result.attempt !== prepared.attempt || result.requestRef !== prepared.requestRef ||
@@ -224,6 +246,15 @@ export async function validateToolRecovery(input: {
     const contract = manifest.entries.find((entry) => entry.name === request.toolName);
     if (!contract || canonicalSha256(contract) !== target.toolContractDigest || manifest.manifestDigest !== target.toolManifestDigest ||
         digestOmitting(manifest, 'manifestDigest') !== manifest.manifestDigest) throw new TypeError('tool result contract substitution');
+    if (contract.execution.kind === 'builtin_script') {
+      if (!input.driver || !result.captureRef || !result.captureDigest) throw new TypeError('script history requires its original complete native capture and SQL provenance');
+      const assembly = decodeRetainedRunAssembly(await readCanonicalArtifact(artifacts, spec.assemblyRef));
+      const captured = await readBuiltinToolCapture(input.driver, artifacts, { captureRef: result.captureRef, captureDigest: result.captureDigest,
+        prepared, claim, assembly, observedAt: result.observedAt });
+      await assertBuiltinCaptureObservation(artifacts, result, captured.model, contract.outputSchemaRef && contract.outputSchemaDigest
+        ? { ref: contract.outputSchemaRef, digest: contract.outputSchemaDigest } : undefined);
+    } else if (result.captureRef !== undefined || result.captureDigest !== undefined)
+      throw new TypeError('non-script history cannot borrow a native script capture');
     if (result.outcome === 'executed') {
       if (payload.outcome !== 'executed' || payload.source !== 'invocation' || payload.journalResultRef !== completion.resultRef ||
           payload.journalResultDigest !== result.observationDigest || payload.outputSchemaRef !== contract.outputSchemaRef ||

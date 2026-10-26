@@ -12,10 +12,11 @@ import { assertArtifactRef, normalizeAbsolutePath } from '../kernel/identity.js'
 import type { ProcessContainment, SanitizedSandboxEnvironmentV1 } from '../kernel/execution.js';
 import type { WorkerIdentity, WorkerLaunch } from '../kernel/types.js';
 import { immutableSnapshot } from '../model/immutable.js';
+import { BUILTIN_SCRIPT_RECIPE, BUILTIN_SCRIPT_ENVIRONMENTS, builtinToolInputBytes, isBuiltinScriptTool, type BuiltinScriptTool } from './builtin-tool-data.js';
 import { verifyRuntimeBundle, type ReleaseTrustKey, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { sampleCanonicalNow } from '../state/canonical-time.js';
-import { assertBuiltinEditLaunchClosure, assertWorkerLaunchClosure, assertVerifierLaunchClosure,
-  type BuiltinEditLaunchClosure, type WorkerLaunchClosure, type VerifierLaunchClosure } from '../state/execution-closure.js';
+import { assertBuiltinEditLaunchClosure, assertBuiltinToolLaunchClosure, isBuiltinScriptLaunchClosure, assertWorkerLaunchClosure, assertVerifierLaunchClosure,
+  type BuiltinEditLaunchClosure, type BuiltinScriptLaunchClosure, type BuiltinToolLaunchClosure, type WorkerLaunchClosure, type VerifierLaunchClosure } from '../state/execution-closure.js';
 import { borrowWorkerReservationForExecution, borrowSourceGitInputForExecution, borrowRetainedSourceGitInputForCleanup,
   borrowRegisteredAbsentSourceGitInputForCleanup,
   borrowPreparingGitInputForExecution,
@@ -25,9 +26,10 @@ import { borrowWorkerReservationForExecution, borrowSourceGitInputForExecution, 
 import { borrowRunWorkspaceForExecution, type RunWorkspaceGeneration } from '../workspace/run-workspace/generation.js';
 import { loadInstalledWorkerNative, sealInstalledWorkerImage, withInstalledWorkerRoot, startInstalledGuestToolchain, closeInstalledGuestToolchain,
   sealInstalledSourceGitInspector, startInstalledSourceGitToolchain, closeInstalledSourceGitToolchain,
+  sealInstalledBuiltinToolScript, startInstalledBuiltinBashToolchain, closeInstalledBuiltinBashToolchain,
   type HeldInstalledAnchor, type HeldInstalledRuntime } from '../state/installed-runtime.js';
 import { GUEST_EXTRACTOR_RECIPE, LINUX_VERIFIER_RESOURCE_MINIMUMS, type NativeGuestExtractorBinding, type NativeGuestToolchain,
-  type NativeGuestExtractionInput, type NativeSourceGitToolchain } from './guest-toolchain.js';
+  type NativeGuestExtractionInput, type NativeSourceGitToolchain, type NativeBuiltinBashToolchain } from './guest-toolchain.js';
 import { guestToolchainExecutables, type RetainedVerifierToolchain } from '../state/guest-toolchain.js';
 
 export class LinuxExecutionIdentityError extends Error {
@@ -65,7 +67,7 @@ export const LINUX_VERIFIER_RECIPE = immutableSnapshot({
   maxIpcFrameBytes: LINUX_WORKER_RECIPE.maxIpcFrameBytes, maxQueuedIpcBytes: LINUX_WORKER_RECIPE.maxQueuedIpcBytes,
 } as const);
 
-export type NativeVerifierResult = Readonly<{
+type NativeCapturedInvocationResult = Readonly<{
   startedAt: string; endedAt: string; durationMs: number;
   stdout: Uint8Array; stderr: Uint8Array; stdoutTruncated: boolean; stderrTruncated: boolean;
   death: NativeContainmentDeathObservation;
@@ -73,6 +75,20 @@ export type NativeVerifierResult = Readonly<{
   Readonly<{ terminationReason: 'signal'; signal: string }> |
   Readonly<{ terminationReason: 'spawn_error'; nativeErrorCode: number }> |
   Readonly<{ terminationReason: 'timeout' | 'resource_failure' | 'controller_stop' }>);
+export type NativeVerifierResult = NativeCapturedInvocationResult;
+/** Shared physical data shape; a tool result has its own genuine producer
+ * registry and can never be substituted by the verifier's runtime brand. */
+export type NativeBuiltinToolResult = NativeCapturedInvocationResult & Readonly<{ tool: BuiltinScriptTool }>;
+const builtinToolResults = new WeakMap<object, Readonly<{ stdout: Buffer; stderr: Buffer }>>();
+export function assertNativeBuiltinToolResult(value: unknown): asserts value is NativeBuiltinToolResult {
+  if (!value || typeof value !== 'object' || !builtinToolResults.has(value)) throw new TypeError('builtin result requires its original real native producer');
+}
+/** Pure retained copy of one original actual result, not another native brand. */
+export function captureNativeBuiltinToolResult(value: unknown): NativeBuiltinToolResult {
+  assertNativeBuiltinToolResult(value); const bytes = builtinToolResults.get(value)!;
+  return Object.freeze({ ...value, stdout: Buffer.from(bytes.stdout), stderr: Buffer.from(bytes.stderr) });
+}
+
 export type LinuxBlockedVerifier = Readonly<{
   containment: ProcessContainment;
   result(): Promise<NativeVerifierResult>;
@@ -96,7 +112,7 @@ export function captureNativeVerifierResult(value: unknown): NativeVerifierResul
 export type LinuxBlockedInvocation = Readonly<{
   containment: ProcessContainment;
   observeProcess(): Promise<LinuxObservedProcess>;
-  result(): Promise<'ok' | 'error'>;
+  result(): Promise<'ok' | 'error' | NativeBuiltinToolResult>;
   stop(): Promise<NativeContainmentDeathObservation>;
 }>;
 
@@ -126,7 +142,9 @@ export type LinuxBlockedWorker = Readonly<{
   assertHeld(): void;
   observeProcess(): Promise<LinuxObservedProcess>;
   activateCommitted(launch: WorkerLaunch): Promise<void>;
-  createInvocation(closure: BuiltinEditLaunchClosure): Promise<LinuxBlockedInvocation>;
+  /** Genuine readonly per-controller inventory, never a spawn/release permit. */
+  hasInvocationCapacity(): boolean;
+  createInvocation(closure: BuiltinToolLaunchClosure): Promise<LinuxBlockedInvocation>;
   createVerifier(closure: VerifierLaunchClosure, options?: { signal?: AbortSignal }): Promise<LinuxBlockedVerifier>;
   stop(): Promise<NativeContainmentDeathObservation>;
   closeAfterControllerJoin(): Promise<void>;
@@ -174,6 +192,13 @@ export type NativeWorkerImage = { descriptor(): number; close(): void };
 /** Only the fixed same-bundle data script producer can mint this native tag.
  * It is neither an executable selector nor a numerical descriptor export. */
 export type NativeSourceGitInspectorImage = Readonly<{
+  identity: Readonly<{ sha256: string; byteCount: number }>;
+  close(): void;
+}>;
+declare const builtinToolScriptBrand: unique symbol;
+/** Distinct genuine native tag; data never becomes an executable selector. */
+export type NativeBuiltinToolScriptImage = Readonly<{
+  readonly [builtinToolScriptBrand]: true;
   identity: Readonly<{ sha256: string; byteCount: number }>;
   close(): void;
 }>;
@@ -307,6 +332,10 @@ type NativeController = { pid: number; processStartToken: string;
     (NativeObservation & Readonly<{ kind: 'created_dead'; observedAtMs: number }>) | undefined;
   createWorker(generation: number, cgroup: number, helper: NativeImage, worker: NativeImage, bwrap: NativeImage, config: object): NativeScope;
   createInvocation(generation: number, parent: NativeScope, helper: NativeImage, adapter: NativeImage, bwrap: NativeImage, input: NativeImage, config: object): NativeScope;
+  hasInvocationCapacity(parent: NativeScope): boolean;
+  createBuiltinTool(generation: number, parent: NativeScope, helper: NativeImage, bwrap: NativeImage,
+    guest: NativeGuestToolchain | NativeBuiltinBashToolchain, script: NativeBuiltinToolScriptImage,
+    input: NativeImage, command: NativeImage | null, config: object): NativeScope;
   createVerifier(generation: number, parent: NativeScope, helper: NativeImage, bwrap: NativeImage, guest: NativeGuestToolchain, config: object): NativeScope;
   reserveSourceGit(input: object, helper: NativeImage, bwrap: NativeImage, guest: NativeSourceGitToolchain,
     inspector: NativeSourceGitInspectorImage, recipe: NativeSourceGitRecipe): NativeSourceGitScope;
@@ -326,14 +355,16 @@ type NativeController = { pid: number; processStartToken: string;
   observePreparationBirth(cgroupRootFd: number): NativeControllerPreparationBirthObservation;
   close(): Promise<void>;
 };
-export type NativeWorkerBinding = { interfaceVersion: 3; readonly verifierInterfaceVersion?: 1;
+export type NativeWorkerBinding = { interfaceVersion: 3; readonly builtinToolInterfaceVersion?: 1; readonly verifierInterfaceVersion?: 1;
   readonly sourceInterfaceVersion: 1;
   readonly preparationInterfaceVersion: 1;
+  sealBuiltinToolScript(fd: number): NativeBuiltinToolScriptImage;
   sealSourceGitInspector(fd: number): NativeSourceGitInspectorImage;
   sealImage(fd: number): NativeImage; sealImageBuffer(input: Buffer): NativeImage;
   openController(helper: NativeImage, cgroupRootFd: number): NativeController };
 type NativeBinding = NativeWorkerBinding;
 type HeldGuestPreparation = Readonly<{ job: NativeGuestToolchain; close(): Promise<void> }>;
+type HeldBuiltinToolRuntime = Readonly<{ job: NativeGuestToolchain | NativeBuiltinBashToolchain; script: NativeBuiltinToolScriptImage; close(): Promise<void> }>;
 type HeldPreparingGitRuntime = Readonly<{ guest: NativeSourceGitToolchain; inspector: NativeSourceGitInspectorImage; close(): Promise<void> }>;
 function preparingRecipe(value: NativePreparingGitRecipe): NativePreparingGitRecipe {
   const keys = ['maxProcesses', 'memoryBytes', 'cpuQuotaMicrosPerSecond', 'maxOpenFiles', 'maxSingleFileBytes', 'maxGenerationBytes',
@@ -519,6 +550,25 @@ export async function openInstalledLinuxWorkerLauncher(selected: HeldInstalledRu
         return Object.freeze({ guest, inspector, close });
       } catch (error) {
         try { await close(); } catch (cleanup) { throw retirementError('preparing runtime construction and join failed', new AggregateError([error, cleanup])); }
+        throw error;
+      }
+    },
+    async builtin(toolchain, bash, signal) {
+      let script: NativeBuiltinToolScriptImage | undefined, job: NativeGuestToolchain | NativeBuiltinBashToolchain | undefined;
+      let closing: Promise<void> | undefined;
+      const close = () => closing ??= (async () => {
+        const failures: unknown[] = [];
+        if (job) try { await closeInstalledGuestToolchain(selected, job); } catch (error) { failures.push(error); }
+        if (script) try { script.close(); } catch (error) { failures.push(error); }
+        if (failures.length) throw retirementError('fixed builtin runtime did not join', new AggregateError(failures));
+      })();
+      try {
+        script = await sealInstalledBuiltinToolScript(selected, signal);
+        job = bash ? await startInstalledBuiltinBashToolchain(selected, toolchain, { ...(signal ? { signal } : {}) }) :
+          await startInstalledGuestToolchain(selected, toolchain, { ...(signal ? { signal } : {}) });
+        signal?.throwIfAborted(); return Object.freeze({ script, job, close });
+      } catch (error) {
+        try { await close(); } catch (cleanup) { throw retirementError('builtin runtime construction and join failed', new AggregateError([error, cleanup])); }
         throw error;
       }
     },
@@ -792,7 +842,7 @@ function assertGuestDescription(owner: Pick<NativeGuestToolchain, 'describe'>, t
     mismatch('actual frozen Node mapping differs from its retained signed guest toolchain');
 }
 
-function scopeProjection(closure: WorkerLaunchClosure | BuiltinEditLaunchClosure | VerifierLaunchClosure, borrowed: BorrowedGenerationForExecution, activationNonceDigest: string) {
+function scopeProjection(closure: WorkerLaunchClosure | BuiltinToolLaunchClosure | VerifierLaunchClosure, borrowed: BorrowedGenerationForExecution, activationNonceDigest: string) {
   const backend = closure.plan.backend;
   if (backend.kind !== 'linux') mismatch('worker requires the Linux containment plan');
   const device = Number(borrowed.identity.deviceId), inode = Number(borrowed.identity.fileId);
@@ -861,7 +911,30 @@ function supportedVerifierRecipe(closure: VerifierLaunchClosure): void {
     throw new LinuxExecutionIdentityError('verifier is outside the fixed signed read-only Node test recipe');
 }
 
-function verifierOutcome(raw: NativeVerifierOutcome, containment: ProcessContainment): NativeVerifierResult {
+function supportedBuiltinScriptRecipe(closure: BuiltinScriptLaunchClosure): void {
+  const { spec, scriptEntry, toolchain, call } = closure;
+  const bash = call.toolName === 'bash', execution = closure.target.execution;
+  if (execution.kind !== 'builtin_script' || !['read', 'ls', 'find', 'grep', 'bash'].includes(call.toolName) ||
+      spec.processInvocation.recipe !== BUILTIN_SCRIPT_RECIPE.invocation ||
+      spec.processInvocation.privateGitProtection !== BUILTIN_SCRIPT_RECIPE.privateGitProtection || spec.executable.kind !== 'guest_toolchain' ||
+      spec.executable.toolId !== 'node' || spec.executable.executionPath !== BUILTIN_SCRIPT_RECIPE.nodePath ||
+      spec.executable.executableDigest !== toolchain.manifest.node.digest ||
+      execution.adapterId !== BUILTIN_SCRIPT_RECIPE.entryId || execution.adapterVersion !== BUILTIN_SCRIPT_RECIPE.version ||
+      execution.adapterCodeDigest !== scriptEntry.digest || scriptEntry.role !== 'tool_adapter' || scriptEntry.executable !== false ||
+      scriptEntry.relativePath !== BUILTIN_SCRIPT_RECIPE.relativePath || scriptEntry.byteCount < 1 || scriptEntry.byteCount > BUILTIN_SCRIPT_RECIPE.scriptBytes ||
+      canonicalSha256(spec.environment) !== canonicalSha256(bash ? BUILTIN_SCRIPT_ENVIRONMENTS.bash : BUILTIN_SCRIPT_ENVIRONMENTS.read) ||
+      spec.runtime.launcher.executableId !== LINUX_WORKER_RECIPE.launcherId ||
+      spec.resources.maxIpcFrameBytes !== LINUX_WORKER_RECIPE.maxIpcFrameBytes || spec.resources.maxQueuedIpcBytes !== LINUX_WORKER_RECIPE.maxQueuedIpcBytes ||
+      spec.resources.maxProcesses < LINUX_VERIFIER_RESOURCE_MINIMUMS.maxProcesses || spec.resources.maxSingleFileBytes > 268_435_456 ||
+      spec.resources.maxSingleFileBytes < toolchain.manifest.guestImageByteCount ||
+      spec.filesystem.kind !== 'run_generation' || spec.filesystem.access !== (bash ? 'read_write' : 'read_only') ||
+      spec.mounts.length !== 2 || !spec.mounts.every(mount => mount.kind === 'private_ephemeral' && mount.access === 'read_write' &&
+        ((mount.targetPath === '/home/cliq' && mount.purpose === 'home') || (mount.targetPath === '/tmp' && mount.purpose === 'tmp'))) ||
+      new Set(spec.mounts.map(mount => mount.targetPath)).size !== 2)
+    throw new LinuxExecutionIdentityError('builtin script is outside its exact signed recipe');
+}
+
+function capturedOutcome(raw: NativeVerifierOutcome, containment: ProcessContainment): NativeCapturedInvocationResult {
   for (const value of [raw.startedAtMs, raw.endedAtMs, raw.durationMs])
     if (!Number.isSafeInteger(value) || value < 0) mismatch('native verifier time measurement is invalid');
   if (raw.startedAtMs === 0 || raw.endedAtMs < raw.startedAtMs || !Buffer.isBuffer(raw.stdout) || !Buffer.isBuffer(raw.stderr) ||
@@ -883,10 +956,18 @@ function verifierOutcome(raw: NativeVerifierOutcome, containment: ProcessContain
   else if (raw.termination === 6 && raw.exitCode === 0 && raw.signal === 0 && raw.nativeErrorCode === 0)
     result = Object.freeze({ ...base, terminationReason: 'controller_stop' });
   else mismatch('native verifier termination is unsupported');
+  return result;
+}
+function verifierOutcome(raw: NativeVerifierOutcome, containment: ProcessContainment): NativeVerifierResult {
+  const result = capturedOutcome(raw, containment);
   verifierResults.set(result, Object.freeze({ stdout: Buffer.from(raw.stdout), stderr: Buffer.from(raw.stderr) })); return result;
 }
+function builtinToolOutcome(raw: NativeVerifierOutcome, containment: ProcessContainment, tool: BuiltinScriptTool): NativeBuiltinToolResult {
+  const result = Object.freeze({ ...capturedOutcome(raw, containment), tool });
+  builtinToolResults.set(result, Object.freeze({ stdout: Buffer.from(raw.stdout), stderr: Buffer.from(raw.stderr) })); return result;
+}
 
-function actualContainment(closure: WorkerLaunchClosure | BuiltinEditLaunchClosure | VerifierLaunchClosure, observed: NativeObservation,
+function actualContainment(closure: WorkerLaunchClosure | BuiltinToolLaunchClosure | VerifierLaunchClosure, observed: NativeObservation,
   createdAt = sampleCanonicalNow()): ProcessContainment {
   const backend = closure.plan.backend;
   if (backend.kind !== 'linux') mismatch('worker requires Linux containment');
@@ -977,13 +1058,14 @@ export async function openLinuxWorkerLauncher(options?: LinuxWorkerInstallation)
   let loadedBinding: NativeBinding | undefined;
   async function startSignedGuest(toolchain: RetainedVerifierToolchain, signal: AbortSignal | undefined, sourceGit: false): Promise<HeldGuestPreparation>;
   async function startSignedGuest(toolchain: RetainedVerifierToolchain, signal: AbortSignal | undefined, sourceGit: true): Promise<Readonly<{ job: NativeSourceGitToolchain; close(): Promise<void> }>>;
-  async function startSignedGuest(toolchain: RetainedVerifierToolchain, signal: AbortSignal | undefined, sourceGit: boolean) {
+  async function startSignedGuest(toolchain: RetainedVerifierToolchain, signal: AbortSignal | undefined, sourceGit: 'bash'): Promise<Readonly<{ job: NativeBuiltinBashToolchain; close(): Promise<void> }>>;
+  async function startSignedGuest(toolchain: RetainedVerifierToolchain, signal: AbortSignal | undefined, sourceGit: boolean | 'bash') {
     const entry = bundle.entries.find(value => value.entryId === GUEST_EXTRACTOR_RECIPE.entryId);
     const imageEntry = bundle.entries.find(value => value.digest === toolchain.manifest.guestImageRef);
     if (!entry || entry.role !== 'platform_helper' || !entry.executable || entry.version !== '1' ||
         !imageEntry || imageEntry.executable || imageEntry.role !== 'bundle_object' ||
         imageEntry.byteCount !== toolchain.manifest.guestImageByteCount) mismatch('signed guest helper/image closure is missing');
-    const handles: FileHandle[] = []; let job: NativeGuestToolchain | NativeSourceGitToolchain | undefined;
+    const handles: FileHandle[] = []; let job: NativeGuestToolchain | NativeSourceGitToolchain | NativeBuiltinBashToolchain | undefined;
     try {
       const addon = await openInstalledFile(installation, entry.relativePath); handles.push(addon);
       const image = await openInstalledFile(installation, imageEntry.relativePath); handles.push(image);
@@ -993,9 +1075,9 @@ export async function openLinuxWorkerLauncher(options?: LinuxWorkerInstallation)
         mismatch('native guest extractor is not the exact signed image');
       const loaded = new Module('cliq-linux-guest-extractor'); process.dlopen(loaded, `/proc/self/fd/${addon.fd}`);
       const extractor = loaded.exports as NativeGuestExtractorBinding;
-      if (extractor.interfaceVersion !== 1 || (sourceGit ? typeof extractor.beginSourceGit !== 'function' : typeof extractor.begin !== 'function'))
+      if (extractor.interfaceVersion !== 1 || (sourceGit === 'bash' ? typeof extractor.beginBuiltinBash !== 'function' : sourceGit ? typeof extractor.beginSourceGit !== 'function' : typeof extractor.begin !== 'function'))
         mismatch('unsupported signed guest extractor interface');
-      job = sourceGit ? extractor.beginSourceGit!(image.fd, guestInput(toolchain)) : extractor.begin(image.fd, guestInput(toolchain));
+      job = sourceGit === 'bash' ? extractor.beginBuiltinBash!(image.fd, guestInput(toolchain)) : sourceGit ? extractor.beginSourceGit!(image.fd, guestInput(toolchain)) : extractor.begin(image.fd, guestInput(toolchain));
       const original = job;
       await awaitNative(() => original.pollReady() ? true : undefined, () => original.close(), signal, 15_000);
       assertGuestDescription(original, toolchain);
@@ -1004,6 +1086,13 @@ export async function openLinuxWorkerLauncher(options?: LinuxWorkerInstallation)
         if (toolchain.manifest.git.canonicalGuestPath !== '/usr/bin/git' || source.gitPath !== '/usr/bin/git' ||
             source.gitDigest !== toolchain.manifest.git.digest || !source.files.some(file => file.path === '/usr/bin/git' && file.digest === source.gitDigest))
           mismatch('actual frozen Git mapping differs from its retained signed guest toolchain');
+      }
+      if (sourceGit === 'bash') {
+        const description = (original as NativeBuiltinBashToolchain).describe();
+        const bash = toolchain.manifest.admittedExecutables.find(entry => entry.logicalName === 'bash');
+        if (!bash || bash.canonicalGuestPath !== '/bin/bash' || description.bashPath !== bash.canonicalGuestPath ||
+            description.bashDigest !== bash.digest || !description.files.some(file => file.path === bash.canonicalGuestPath && file.digest === bash.digest))
+          mismatch('actual frozen Bash mapping differs from its retained signed executable');
       }
       return Object.freeze({ job: original, close: () => original.close() });
     } catch (error) {
@@ -1059,7 +1148,7 @@ export async function openLinuxWorkerLauncher(options?: LinuxWorkerInstallation)
       if (!loadedBinding || loadedBinding.sourceInterfaceVersion !== 1 || !entry || entry.role !== 'platform_helper' || entry.executable ||
           entry.version !== '1' || entry.relativePath !== 'helpers/source-git-inspector.mjs' || entry.byteCount < 1 || entry.byteCount > 1_048_576)
         throw new LinuxExecutionIdentityError('the fixed signed preparing Git inspector is unavailable');
-      let inspector: NativeSourceGitInspectorImage | undefined, guest: Awaited<ReturnType<typeof startSignedGuest>> | undefined;
+      let inspector: NativeSourceGitInspectorImage | undefined, guest: Readonly<{ job: NativeSourceGitToolchain; close(): Promise<void> }> | undefined;
       let closing: Promise<void> | undefined;
       const close = () => closing ??= (async () => {
         const failures: unknown[] = [];
@@ -1090,6 +1179,42 @@ export async function openLinuxWorkerLauncher(options?: LinuxWorkerInstallation)
         throw error;
       }
     },
+    async builtin(toolchain, bash, signal) {
+      const entry = bundle.entries.find(value => value.entryId === BUILTIN_SCRIPT_RECIPE.entryId);
+      if (!loadedBinding || loadedBinding.builtinToolInterfaceVersion !== 1 || !entry || entry.role !== 'tool_adapter' || entry.executable ||
+          entry.version !== '1' || entry.relativePath !== BUILTIN_SCRIPT_RECIPE.relativePath || entry.byteCount < 1 || entry.byteCount > 1_048_576)
+        throw new LinuxExecutionIdentityError('the fixed signed preparing Git inspector is unavailable');
+      let inspector: NativeBuiltinToolScriptImage | undefined, guest: Readonly<{ job: NativeGuestToolchain | NativeBuiltinBashToolchain; close(): Promise<void> }> | undefined;
+      let closing: Promise<void> | undefined;
+      const close = () => closing ??= (async () => {
+        const failures: unknown[] = [];
+        if (guest) try { await guest.close(); } catch (error) { failures.push(error); }
+        if (inspector) try { inspector.close(); } catch (error) { failures.push(error); }
+        if (failures.length) throw retirementError('signed preparing Git runtime did not join', new AggregateError(failures));
+      })();
+      try {
+        const source = await openInstalledFile(installation, entry.relativePath);
+        let sealingFailure: { error: unknown } | undefined;
+        try {
+          const metadata = await source.stat();
+          if (!metadata.isFile() || metadata.mode & 0o022 || (metadata.uid !== process.geteuid!() && metadata.uid !== 0) || metadata.size !== entry.byteCount ||
+              await hashHeld(source.fd, entry.byteCount, () => signal?.throwIfAborted()) !== entry.digest)
+            mismatch('preparing inspector is not the exact signed image');
+          inspector = loadedBinding.sealBuiltinToolScript(source.fd);
+          if (inspector.identity.sha256 !== entry.digest || inspector.identity.byteCount !== entry.byteCount)
+            mismatch('preparing inspector differs from its signed bytes');
+        } catch (error) { sealingFailure = { error }; }
+        try { await retireFiles([source]); }
+        catch (error) { throw retirementError('preparing inspector source did not join', new AggregateError([...(sealingFailure ? [sealingFailure.error] : []), error])); }
+        if (sealingFailure) throw sealingFailure.error;
+        guest = bash ? await startSignedGuest(toolchain, signal, 'bash') : await startSignedGuest(toolchain, signal, false); signal?.throwIfAborted();
+        return Object.freeze({ job: guest.job, script: inspector!, close });
+      } catch (error) {
+        try { await close(); }
+        catch (cleanup) { throw retirementError('signed preparing Git construction and join failed', new AggregateError([error, cleanup])); }
+        throw error;
+      }
+    },
     close: () => retireFiles([cgroup, installation]),
   });
 }
@@ -1102,6 +1227,7 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
   loadNative(recheck: () => void): Promise<NativeBinding>;
   image(entryId: string, binding: NativeBinding): Promise<NativeImage>;
   guest(toolchain: RetainedVerifierToolchain, signal?: AbortSignal): Promise<HeldGuestPreparation>;
+  builtin?(toolchain: RetainedVerifierToolchain, bash: boolean, signal?: AbortSignal): Promise<HeldBuiltinToolRuntime>;
   preparing?(toolchain: RetainedVerifierToolchain, signal?: AbortSignal): Promise<HeldPreparingGitRuntime>;
   close(): Promise<void>;
 }): Promise<LinuxWorkerLauncher> {
@@ -1434,6 +1560,12 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
                     same(actualContainment(closure, current, containment.createdAt), containment, 'current native worker containment');
                     controllerReceiver(); borrowed.assertHeld();
                   },
+                  hasInvocationCapacity() {
+                    if (this !== worker || !active) throw new KernelStorageError('LEASE_FENCED', 'capacity observation requires the original active worker');
+                    receiver(); controllerReceiver(); borrowed.assertHeld();
+                    const available = native.hasInvocationCapacity(created);
+                    controllerReceiver(); borrowed.assertHeld(); return available;
+                  },
                   async observeProcess() { if (this !== worker) throw new TypeError('invalid blocked worker'); receiver(); borrowed.assertHeld(); return observedProcess(created, workerDigest); },
                   async activateCommitted(launch) {
                     if (this !== worker) throw new TypeError('invalid blocked worker'); borrowed.assertHeld();
@@ -1447,6 +1579,140 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
                   async createInvocation(invocationClosure) {
                     if (this !== worker || !active) throw new KernelStorageError('LEASE_FENCED', 'invocation requires the actual active parent worker');
                     receiver(); borrowed.assertHeld();
+                    assertBuiltinToolLaunchClosure(invocationClosure);
+                    if (isBuiltinScriptLaunchClosure(invocationClosure)) {
+                      controllerReceiver(); borrowed.assertHeld();
+                      same(invocationClosure.bundle, bundle, 'builtin bundle'); supportedBuiltinScriptRecipe(invocationClosure);
+                      const builtinBackend = invocationClosure.plan.backend;
+                      if (builtinBackend.kind !== 'linux' || invocationClosure.plan.parentContainmentRef !== canonicalSha256(containment) ||
+                          invocationClosure.spec.parentWorkerContainmentRef !== canonicalSha256(containment) ||
+                          invocationClosure.spec.filesystem.kind !== 'run_generation' || invocationClosure.spec.filesystem.generationRef !== closure.workspaceGenerationRef ||
+                          path.posix.dirname(builtinBackend.cgroupPath) !== backend.cgroupPath || binding.builtinToolInterfaceVersion !== 1 || typeof source.builtin !== 'function' ||
+                          typeof native.createBuiltinTool !== 'function')
+                        mismatch('builtin does not select the exact actual parent, generation and fixed native recipe');
+                      const signal = AbortSignal.any([installationAbort.signal, controllerAbort.signal]);
+                      signal.throwIfAborted();
+                      const opening = source.builtin(invocationClosure.toolchain, invocationClosure.call.toolName === 'bash', signal).then(guest => {
+                        guests.add(guest); controllerGuests.add(guest); return guest;
+                      });
+                      guestOpenings.add(opening); controllerGuestOpenings.add(opening);
+                      let guest: HeldBuiltinToolRuntime | undefined;
+                      try {
+                        guest = await opening;
+                        controllerReceiver(); borrowed.assertHeld(); signal.throwIfAborted();
+                        assertGuestDescription(guest.job, invocationClosure.toolchain);
+                        const tool = invocationClosure.call.toolName;
+                        if (!isBuiltinScriptTool(tool)) mismatch('unsupported fixed builtin tool');
+                        const entry = { timeoutMs: BUILTIN_SCRIPT_RECIPE.timeoutMs };
+                        if (guest.script.identity.sha256 !== invocationClosure.scriptEntry.digest ||
+                            guest.script.identity.byteCount !== invocationClosure.scriptEntry.byteCount ||
+                            canonicalSha256(invocationClosure.request) !== invocationClosure.spec.requestRef ||
+                            canonicalSha256(invocationClosure.target) !== invocationClosure.spec.targetRef ||
+                            canonicalSha256(invocationClosure.grant) !== invocationClosure.spec.operationGrantRef ||
+                            canonicalSha256(invocationClosure.call) !== invocationClosure.request.inputRef ||
+                            invocationClosure.call.inputDigest !== invocationClosure.request.inputDigest)
+                          mismatch('builtin input/script differs from its exact original claim');
+                        const inputs: NativeImage[] = []; let createdTool!: NativeScope, primary: { error: unknown } | undefined;
+                        try {
+                          const inputImage = binding.sealImageBuffer(builtinToolInputBytes(tool, invocationClosure.call.value!, invocationClosure.spec.resources));
+                          inputs.push(inputImage);
+                          const commandImage = tool === 'bash' ? binding.sealImageBuffer(Buffer.from(invocationClosure.call.value!.command as string)) : null;
+                          if (commandImage) inputs.push(commandImage);
+                          createdTool = native.createBuiltinTool(borrowed.fd, created, helper, bwrap, guest.job, guest.script, inputImage, commandImage, {
+                            ...scopeProjection(invocationClosure, borrowed, invocationClosure.plan.launchNonceDigest),
+                            tool: ['read', 'ls', 'find', 'grep', 'bash'].indexOf(tool) + 1,
+                            timeoutMs: entry.timeoutMs, outputLimitBytes: invocationClosure.spec.resources.maxInvocationOutputBytes,
+                          });
+                        } catch (error) { primary = { error }; }
+                        const failures: unknown[] = [];
+                        for (const input of inputs) try { retireImage(input); } catch (error) { failures.push(error); }
+                        if (failures.length) throw retirementError('builtin fixed input descriptors did not join',
+                          new AggregateError([...(primary ? [primary.error] : []), ...failures]));
+                        if (primary) throw primary.error;
+                        // The authenticated SCM_RIGHTS send gave the original
+                        // controller its own sealed descriptors. Retire the
+                        // extraction producer, not the controller's copies.
+                        await guest.close(); guests.delete(guest); controllerGuests.delete(guest);
+                        await awaitNative(() => createdTool.pollReady() ? true : undefined, closeController, signal);
+                        controllerReceiver(); borrowed.assertHeld();
+                        const invocationContainment = actualContainment(invocationClosure, createdTool.observe());
+                        const launcherEntry = bundle.entries.find(entry => entry.entryId === LINUX_VERIFIER_RECIPE.launcherId)!;
+                        // Before release this is the real trusted blocked helper,
+                        // not a false observation that Node has already executed.
+                        await observedProcess(createdTool, launcherEntry.digest);
+                        const owner = invocationClosure.spec.owner;
+                        const claim: LinuxInvocationClaim = immutableSnapshot({ runId: owner.runId, leaseEpoch: owner.intendedLeaseEpoch,
+                          workerLaunchId: owner.workerLaunchId, opId: owner.opId, attempt: owner.attempt, dispatchId: owner.dispatchId,
+                          sandboxLaunchSpecRef: invocationClosure.sandboxLaunchSpecRef, requestRef: invocationClosure.spec.requestRef,
+                          requestDigest: invocationClosure.spec.requestDigest, targetRef: invocationClosure.spec.targetRef,
+                          targetDigest: invocationClosure.spec.targetDigest, operationGrantRef: invocationClosure.spec.operationGrantRef,
+                          parentWorkerContainmentRef: invocationClosure.spec.parentWorkerContainmentRef });
+                        let result: NativeBuiltinToolResult | undefined, resultPending: Promise<NativeBuiltinToolResult> | undefined;
+                        let stopping: Promise<NativeContainmentDeathObservation> | undefined;
+                        let controlledStop: Promise<void> | undefined;
+                        const readResult = () => {
+                          if (result) return result;
+                          const raw = createdTool.result();
+                          if (raw === undefined) return undefined;
+                          if (typeof raw !== 'object') mismatch('native builtin returned an edit acknowledgement');
+                          result = builtinToolOutcome(raw, invocationContainment, tool);
+                          controllerVerifierStops.delete(stopForControllerClose);
+                          return result;
+                        };
+                        const stopForControllerClose = (deadline: number): Promise<void> => {
+                          if (controlledStop) return controlledStop;
+                          // Native stop_requested permanently consumes release
+                          // before returning, including an ordered pending ACK or
+                          // POLL. No result measurement exists before RELEASE.
+                          createdTool.stop();
+                          controlledStop = (async () => {
+                            const remaining = () => {
+                              const value = deadline - performance.now();
+                              if (value <= 0) throw new KernelStorageError('RECOVERY_REQUIRED', 'builtin controlled stop exceeded its existing bound');
+                              return value;
+                            };
+                            await awaitNative(() => createdTool.pollStopped(), () => joinController(native), undefined, remaining());
+                            await awaitNative(readResult, () => joinController(native), undefined, remaining());
+                          })();
+                          return controlledStop;
+                        };
+                        const handle: LinuxBlockedInvocation = Object.freeze({ containment: invocationContainment,
+                          async observeProcess() {
+                            if (this !== handle) throw new TypeError('invalid blocked builtin tool');
+                            controllerReceiver(); borrowed.assertHeld(); return observedProcess(createdTool, launcherEntry.digest);
+                          },
+                          async result() {
+                            if (this !== handle) throw new TypeError('invalid blocked builtin tool');
+                            if (result) return result;
+                            if (!resultPending) resultPending = awaitNative(readResult, closeController, signal, entry.timeoutMs + 10_000, 10).catch(error => {
+                              // A real reply consumed during irreversible close
+                              // still belongs to the original permanent claim.
+                              // Its death timestamp is retained, never refreshed.
+                              try { const received = readResult(); if (received) return received; } catch { /* No fabricated outcome. */ }
+                              throw error;
+                            });
+                            return resultPending;
+                          },
+                          async stop() {
+                            if (this !== handle) throw new TypeError('invalid blocked builtin tool');
+                            if (controllerClosed && result) return result.death;
+                            if (!stopping) stopping = death(createdTool, invocationContainment, native, retirementReceiver)
+                              .finally(() => { stopping = undefined; });
+                            return stopping;
+                          } });
+                        invocations.set(handle, { consumed: false, claim, release() {
+                          controllerReceiver(); borrowed.assertHeld(); createdTool.release();
+                          controllerVerifierStops.add(stopForControllerClose);
+                        } });
+                        return handle;
+                      } catch (error) {
+                        let failure: unknown;
+                        if (guest) try { await guest.close(); guests.delete(guest); controllerGuests.delete(guest); } catch (cleanup) { failure = cleanup; }
+                        try { await closeController(); } catch (cleanup) { failure ??= cleanup; }
+                        if (failure !== undefined) throw retirementError('builtin construction and resource join failed', new AggregateError([error, failure]));
+                        throw error;
+                      } finally { guestOpenings.delete(opening); controllerGuestOpenings.delete(opening); }
+                    }
                     assertBuiltinEditLaunchClosure(invocationClosure);
                     same(invocationClosure.bundle, bundle, 'invocation bundle');
                     supportedRecipe(invocationClosure);

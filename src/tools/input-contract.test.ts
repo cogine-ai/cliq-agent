@@ -25,12 +25,48 @@ const schema = { type: 'object', required: ['path'], additionalProperties: false
   properties: { path: { type: 'string' }, start: { type: 'integer', minimum: 1 } } };
 const call = { callId: 'c', index: 0, toolName: 'read' };
 
+test('signed script identities reuse compiled input semantics without calling data an executable', () => {
+  const inputSchema = builtinInputContracts.read.inputSchema, ref = canonicalSha256(inputSchema);
+  const entry = { name: 'read', version: builtinInputContracts.read.version, description: 'Read the private generation',
+    access: 'read', replayClass: 'retry', inputSchema, inputSchemaRef: ref, inputSchemaDigest: ref,
+    execution: { kind: 'builtin_script', adapterId: 'builtin_tools', adapterVersion: '1', adapterCodeDigest: canonicalSha256('inert signed script data'),
+      guestToolchainManifestRef: canonicalSha256('inert guest manifest ref'), guestToolchainManifestDigest: canonicalSha256('inert guest manifest semantic digest'),
+      toolId: 'node', executionPath: '/usr/bin/node', executableDigest: canonicalSha256('inert guest node digest') } };
+  // Input normalization alone creates no signed RuntimeBundle, StateOwner,
+  // executable, grant, native closure or installation authority.
+  const contracts = loadToolContracts([entry as unknown as ToolInputAuthority]);
+  const normalized = contracts.resolveToolInput({ ...call, observedInput: observed({ path: './src//file.txt' }) });
+  assert(normalized.kind === 'resolved'); assert.deepEqual(normalized.value, { path: 'src/file.txt' });
+  const invocation = contracts.projectInvocation({ ...call, input: normalized.value });
+  assert.equal(invocation.kind, 'tool'); assert.deepEqual(invocation.execution, entry.execution);
+  assert(!Object.hasOwn(invocation, 'grant'));
+});
+
+test('request_input binds a distinct Supervisor control identity without an executable adapter or operation grant', () => {
+  const contract = builtinInputContracts.request_input, ref = canonicalSha256(contract.inputSchema);
+  const entry = { name: contract.name, version: contract.version, description: 'Ask for input', access: contract.access,
+    replayClass: contract.replayClass, inputSchema: contract.inputSchema, inputSchemaRef: ref, inputSchemaDigest: ref,
+    execution: { kind: 'supervisor_control', handlerId: 'request_input', supervisorEntryId: 'actual-supervisor-entry',
+      supervisorEntryVersion: 'actual-signed-entry-version', supervisorExecutableDigest: canonicalSha256('inert Supervisor image digest') } };
+  const contracts = loadToolContracts([entry as unknown as ToolInputAuthority]);
+  const input = { prompt: 'Which case?', responseKind: 'text', maximumResponseBytes: 128 };
+  const normalized = contracts.resolveToolInput({ ...call, toolName: 'request_input', observedInput: observed(input) });
+  assert(normalized.kind === 'resolved');
+  const invocation = contracts.projectInvocation({ ...call, toolName: 'request_input', input: normalized.value });
+  assert.equal(invocation.kind, 'input'); assert.deepEqual(invocation.execution, entry.execution);
+  for (const key of ['subject', 'grant', 'adapterId', 'processContainmentRef']) assert(!Object.hasOwn(invocation, key));
+});
+
 function builtin(name: keyof typeof builtinInputContracts): ToolInputAuthority {
   const contract = builtinInputContracts[name];
   const ref = canonicalSha256(contract.inputSchema);
-  return { name, version: contract.version, description: name, access: contract.access, replayClass: contract.replayClass,
+  const base = { name, version: contract.version, description: name, access: contract.access,
     inputSchema: contract.inputSchema, inputSchemaRef: ref, inputSchemaDigest: ref,
-    execution: { kind: 'builtin', adapterId: name, adapterVersion: contract.version, adapterCodeDigest: canonicalSha256(['test-adapter', name]) } };
+  };
+  if (name === 'request_input') return { ...base, replayClass: 'manual', execution: { kind: 'supervisor_control', handlerId: 'request_input',
+    supervisorEntryId: 'supervisor-test', supervisorEntryVersion: '1', supervisorExecutableDigest: canonicalSha256('inert supervisor identity') } };
+  return { ...base, replayClass: contract.replayClass, execution: { kind: 'builtin', adapterId: name,
+    adapterVersion: contract.version, adapterCodeDigest: canonicalSha256(['test-adapter', name]) } };
 }
 
 test('frozen tool schemas validate typed values directly and retain an immutable normalized input', () => {

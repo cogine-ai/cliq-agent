@@ -9,7 +9,7 @@ import type { RunInput, UserInputPayloadV1, UserInputValue } from '../kernel/use
 import { createAgentFixture } from './testing/agent-fixtures.js';
 import { activateFixtureWorker, disposeFixture, uuidv7 } from './testing/fixtures.js';
 import { batch, claimTool, observation, prepareTool } from './testing/tool-calls.js';
-import { quiescedToolCheckpoint } from './testing/tool-effects.js';
+import { quiescedToolCheckpoint, retireFixtureToolSelection } from './testing/tool-effects.js';
 import { openStateStore, publishInProcessChannel } from './store.js';
 import { openSqliteDriver } from './sqlite-driver.js';
 import { validateUserInputRecovery } from './input-recovery.js';
@@ -19,7 +19,12 @@ import { contextSourceDigest } from '../runtime/context-compaction.js';
 type Fixture = Awaited<ReturnType<typeof createAgentFixture>>;
 const question = { prompt: 'Which name should I use?', responseKind: 'text', maximumResponseBytes: 128 };
 async function pendingInput(fixture: Fixture) {
-  const pending = await fixture.agent.prepareTool({ expectedRunRevision: fixture.store.getRun(fixture.runId).revision, leaseEpoch: fixture.leaseEpoch });
+  let pending = await fixture.agent.prepareTool({ expectedRunRevision: fixture.store.getRun(fixture.runId).revision, leaseEpoch: fixture.leaseEpoch });
+  if (pending.disposition === 'retirement_required') {
+    assert.equal(pending.reason, 'input');
+    await retireFixtureToolSelection(fixture, pending);
+    pending = await fixture.agent.prepareTool({ expectedRunRevision: fixture.store.getRun(fixture.runId).revision, leaseEpoch: fixture.leaseEpoch });
+  }
   assert.ok(pending.disposition === 'input_required');
   return pending;
 }
@@ -178,6 +183,8 @@ test('input rejects stale, foreign, malformed, oversized, cancelled and expired 
     await waitForInput(fixture);
     const input = await command(fixture, { kind: 'text', value: '李明' });
     const before = await fixture.store.readRecoveryClosure(fixture.runId);
+    await assert.rejects(fixture.agent.submitInput({ ...input, waitingOnRef: canonicalSha256('foreign-input-wait') }), { code: 'INVALID_REQUEST' });
+    assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
     for (const change of [{ expectedRunRevision: input.expectedRunRevision - 1 }, { waitingOnRef: canonicalSha256('other-wait') },
       { principalId: 'foreign' }, { channelIdentityDigest: canonicalSha256('other-channel') }, { requestId: 'invalid' }, { extra: true },
       { input: { kind: 'text', value: '1234567' } }, { input: { kind: 'text', value: 'e\u0301' } }, { input: { kind: 'text', value: '\0' } },
@@ -202,20 +209,30 @@ test('input wait and reply commit faults roll back worker retirement, request, r
   const fault = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
   try {
     await batch(fixture, [{ name: 'request_input', input: question }]);
-    const pending = await pendingInput(fixture);
-    await assert.rejects(fixture.agent.waitForInput({ expectedRunRevision: pending.run.revision, waitingOnRef: pending.waitingOnRef }), /retirement proof/);
-    const proof = await quiescedToolCheckpoint(fixture, pending.checkpointId);
-    const wait = { expectedRunRevision: pending.run.revision, waitingOnRef: pending.waitingOnRef, checkpoint: proof.checkpoint };
+    const selection = await fixture.agent.prepareTool({ expectedRunRevision: fixture.store.getRun(fixture.runId).revision, leaseEpoch: fixture.leaseEpoch });
+    assert(selection.disposition === 'retirement_required');
+    await assert.rejects(fixture.agent.retireToolSelection({ expectedRunRevision: selection.run.revision,
+      checkpointId: selection.checkpointId, checkpoint: {} as never }));
+    const proof = await quiescedToolCheckpoint(fixture, selection.checkpointId);
+    const retirement = { expectedRunRevision: selection.run.revision, checkpointId: selection.checkpointId, checkpoint: proof.checkpoint };
     const before = await fixture.store.readRecoveryClosure(fixture.runId);
     const death = await fixture.store.artifacts.readCanonical<Record<string, unknown>>(proof.checkpoint.retirementEvidenceRef);
     (death.owner as Record<string, unknown>).workerLaunchId = 'foreign-launch';
     death.evidenceDigest = digestOmitting(death, 'evidenceDigest');
     const foreign = await fixture.store.artifacts.publishCanonical(death, 'cliq-process-containment-death-evidence-v1');
-    await assert.rejects(fixture.agent.waitForInput({ ...wait, checkpoint: { ...wait.checkpoint, retirementEvidenceRef: foreign.ref } }), /retired worker owner/);
+    await assert.rejects(fixture.agent.retireToolSelection({ ...retirement, checkpoint: { ...retirement.checkpoint, retirementEvidenceRef: foreign.ref } }), /retired worker owner/);
     assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
     fault.exec("CREATE TRIGGER fail_input_checkpoint BEFORE INSERT ON checkpoints BEGIN SELECT RAISE(ABORT, 'injected input checkpoint failure'); END");
-    await assert.rejects(fixture.agent.waitForInput(wait), /injected input checkpoint failure/);
+    await assert.rejects(fixture.agent.retireToolSelection(retirement), /injected input checkpoint failure/);
     assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
+    fault.exec('DROP TRIGGER fail_input_checkpoint');
+    await fixture.agent.retireToolSelection(retirement);
+    const pending = await pendingInput(fixture);
+    const wait = { expectedRunRevision: pending.run.revision, waitingOnRef: pending.waitingOnRef };
+    const beforeWait = await fixture.store.readRecoveryClosure(fixture.runId);
+    fault.exec("CREATE TRIGGER fail_input_checkpoint BEFORE INSERT ON checkpoints BEGIN SELECT RAISE(ABORT, 'injected input checkpoint failure'); END");
+    await assert.rejects(fixture.agent.waitForInput(wait), /injected input checkpoint failure/);
+    assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), beforeWait);
     fault.exec('DROP TRIGGER fail_input_checkpoint');
     await fixture.agent.waitForInput(wait);
     const input = await command(fixture, { kind: 'text', value: 'Alice' });

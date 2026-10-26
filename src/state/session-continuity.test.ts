@@ -1,8 +1,6 @@
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { rm, readFile } from 'node:fs/promises';
-import { spawn } from 'node:child_process';
-import { once } from 'node:events';
 import { createHash } from 'node:crypto';
 import ts from 'typescript';
 import test from 'node:test';
@@ -18,81 +16,15 @@ import { openSqliteDriver } from './sqlite-driver.js';
 import { openStateStore, publishInProcessChannel } from './store.js';
 import { readSessionContextCut, frozenSessionCompactionIndex, readSessionContextEntries } from './session-context.js';
 import { createAgentFixture } from './testing/agent-fixtures.js';
-import { admissionKey, disposeFixture, makePrivateDir, uuidv7 } from './testing/fixtures.js';
+import { admissionKey, disposeFixture, uuidv7 } from './testing/fixtures.js';
 import { quiescedToolCheckpoint } from './testing/tool-effects.js';
+import { listFixture, stopActualListChild } from './testing/list-fixture.js';
 
 const mutation = <T extends object>(value: T) => {
   const { requestDigest: _digest, ...core } = value as T & { requestDigest?: string };
   return { ...core, requestDigest: canonicalSha256(core) };
 };
 
-async function stopActualListChild(stateRoot: string, target: 'capture' | 'prepare' | 'final', diagnostic: (text: string) => void) {
-  // Original production Store/SQL/query and real SIGTERM, with markers only
-  // around its unmodified synchronous scopes. No process is paused, no clock
-  // or native evidence is supplied, and parent never writes while it runs.
-  const source = `
-    import assert from 'node:assert/strict';
-    import {openStateStore,publishInProcessChannel} from ${JSON.stringify(new URL('./store.ts', import.meta.url).href)};
-    process.on('message',()=>{});
-    const [root,target]=process.argv.slice(1),store=await openStateStore(root),identity=await publishInProcessChannel(store);
-    const driver=Reflect.get(store,'driver'),prototype=Object.getPrototypeOf(driver),transaction=prototype.transaction;
-    let armed=false,writes=0,sent=false,enteredNs,returnedNs;
-    const mark=phase=>{if(phase===target&&!sent){sent=true;enteredNs=process.hrtime.bigint();process.send({kind:'cut',phase,nodeVersion:process.version});return true;}return false;};
-    prototype.transaction=function(...args){
-      const number=armed?++writes:0,capture=number===2,final=number===3;
-      if(final&&target==='prepare'&&returnedNs===undefined)returnedNs=process.hrtime.bigint();
-      const measured=capture&&mark('capture')||final&&mark('final');
-      try{const value=Reflect.apply(transaction,this,args);if(capture)mark('prepare');return value;}
-      finally{if(measured){returnedNs=process.hrtime.bigint();process.send({kind:'scope_returned',phase:target,enteredNs:String(enteredNs),returnedNs:String(returnedNs)});}}
-    };
-    let resolveStop,rejectStop;const stopped=new Promise((resolve,reject)=>{resolveStop=resolve;rejectStop=reject;});
-    process.once('SIGTERM',()=>{void store.close().then(resolveStop,rejectStop);});
-    armed=true;
-    const pending=store.sessionContinuity({protocolVersion:1,method:'session.list',limit:100},identity);
-    void pending.finally(()=>{if(target==='prepare'&&returnedNs===undefined)returnedNs=process.hrtime.bigint();}).catch(()=>{});
-    const [query,closed]=await Promise.allSettled([pending,stopped]);
-    if(closed.status==='rejected')throw closed.reason;
-    if(query.status==='rejected')assert.equal(query.reason.code,'LEASE_FENCED');
-    assert(sent&&enteredNs!==undefined&&returnedNs!==undefined);process.send({kind:'closed',outcome:query.status,ownerEpoch:store.ownerEpoch,nodeVersion:process.version,
-      enteredNs:String(enteredNs),returnedNs:String(returnedNs)});
-    process.disconnect();
-  `;
-  const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', source, stateRoot, target], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
-  let stderr = '', received: any, closed: any, scopeReturned: any;
-  let signalStarted: number | undefined, deadlineExceeded = false, processAndPipesJoined = false;
-  child.stderr!.on('data', bytes => { stderr += bytes.toString('utf8'); assert(Buffer.byteLength(stderr) <= 65536); });
-  const exited = once(child, 'close');
-  let enter!: (value: any) => void;
-  const entered = new Promise<any>(resolve => { enter = resolve; });
-  child.on('message', message => { if ((message as any)?.kind === 'cut') { received = message; enter(message); } else if ((message as any)?.kind === 'closed') closed = message; else if ((message as any)?.kind === 'scope_returned') scopeReturned = message; });
-  let setupTimer: ReturnType<typeof setTimeout> | undefined, stopTimer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    await Promise.race([entered, exited.then(() => { throw new Error('list child exited before its actual scope: ' + stderr); }), new Promise<never>((_, reject) => {
-      setupTimer = setTimeout(() => reject(new Error('actual list child did not enter its bounded fixture scope')), 60000);
-    })]);
-    clearTimeout(setupTimer);
-    const start = performance.now(), sentNs = process.hrtime.bigint(); signalStarted = start; assert(child.kill('SIGTERM'));
-    const [code, signal] = await Promise.race([exited, new Promise<never>((_, reject) => {
-      stopTimer = setTimeout(() => { deadlineExceeded = true; reject(new Error('actual large list SIGTERM exceeded the unchanged 2000ms stop budget')); }, 2000);
-    })]);
-    const elapsedMs = performance.now() - start;
-    assert.equal(code, 0, stderr); assert.equal(signal, null); assert(elapsedMs < 2000);
-    assert.equal(received.phase, target); assert.equal(closed?.kind, 'closed');
-    assert(BigInt(closed.enteredNs) <= sentNs && sentNs <= BigInt(closed.returnedNs), 'the real signal must be sent inside the original measured scope, never after an idle result');
-    return { phase: target, elapsedMs, ownerEpoch: closed.ownerEpoch, outcome: closed.outcome, nodeVersion: closed.nodeVersion,
-      scopeEnteredNs: closed.enteredNs, signalSentNs: sentNs.toString(), scopeReturnedNs: closed.returnedNs,
-      originalProcessJoined: true, physicalInstalledSupervisorQualified: false };
-  } finally {
-    clearTimeout(setupTimer); clearTimeout(stopTimer);
-    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
-    await exited; processAndPipesJoined = true;
-    diagnostic(JSON.stringify({ diagnosticOnly: true, kind: 'session_list_actual_sigterm_attempt', phase: target,
-      nodeVersion: received?.nodeVersion ?? process.version, deadlineMs: 2000, deadlineExceeded,
-      ...(signalStarted === undefined ? {} : { signalToProcessAndPipesJoinMs: performance.now() - signalStarted }),
-      originalProcessAndPipesJoined: processAndPipesJoined, originalCloseObserved: closed?.kind === 'closed',
-      scopeReturnedObserved: scopeReturned?.kind === 'scope_returned', physicalInstalledSupervisorQualified: false }));
-  }
-}
 test('real terminal publication, whole compaction, retained context, immutable fork and first responses close across reopen', async () => {
   const fixture = await createAgentFixture('session-continuity', undefined, { mode: 'plan' });
   const driver = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
@@ -239,15 +171,6 @@ test('real terminal publication, whole compaction, retained context, immutable f
   } finally { driver.close(); await disposeFixture(fixture); }
 });
 
-async function listFixture(label: string) {
-  const stateRoot = await makePrivateDir(`.cliq-session-${label}-state-`), workspace = await makePrivateDir(`.cliq-session-${label}-ws-`);
-  let store = await openStateStore(stateRoot), identity = await publishInProcessChannel(store);
-  const driver = openSqliteDriver(path.join(stateRoot, KERNEL_DATABASE_FILENAME));
-  return { stateRoot, workspace, driver, get store() { return store; }, get identity() { return identity; },
-    async create(name: string) { return (await store.createSession({ ...identity, requestId: uuidv7(), admissionKey: admissionKey(name), workspacePath: workspace, name })).session; },
-    async reopen() { await store.close(); store = await openStateStore(stateRoot); identity = await publishInProcessChannel(store); },
-    async close() { driver.close(); await store.close(); await rm(stateRoot, { recursive: true, force: true }); await rm(workspace, { recursive: true, force: true }); } };
-}
 test('materialized list freezes full membership/values, authenticates issued pages and survives restart', async () => {
   const fixture = await listFixture('list');
   try {

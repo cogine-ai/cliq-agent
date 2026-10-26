@@ -5,7 +5,7 @@ import type { InputWait, RunInput, UserInputPayloadV1 } from '../kernel/user-inp
 import type { ToolCallInputV1 } from '../protocol/agent-ir.js';
 import { planInputReply, planInputWait } from '../runtime/user-input.js';
 import { loadToolContracts } from '../tools/input-contract.js';
-import { requireEqual } from '../policy/runtime-authority.js';
+import { requireEqual, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { toolOperationId } from '../policy/tool-policy.js';
 import { readCanonicalArtifact } from './agent-context.js';
 import type { ArtifactCatalog } from './artifacts.js';
@@ -32,7 +32,15 @@ export async function validateUserInputRecovery(cut: InputCut) {
   const manifest = await readCanonicalArtifact<ToolContractManifestV1>(artifacts, assembly.tools.manifestRef);
   if (manifest.manifestDigest !== assembly.tools.manifestDigest || digestOmitting(manifest, 'manifestDigest') !== manifest.manifestDigest) throw new TypeError('input tool manifest mismatch');
   const entry = manifest.entries.find((entry) => entry.name === 'request_input');
-  if (!entry || entry.execution.kind !== 'builtin' || entry.access !== 'control') throw new TypeError('input wait has no frozen builtin control contract');
+  if (!entry || entry.execution.kind !== 'supervisor_control' || entry.access !== 'control') throw new TypeError('input wait has no frozen Supervisor control contract');
+  const bundle = await readCanonicalArtifact<RuntimeBundleManifest>(artifacts, assembly.runtime.runtimeBundleRef);
+  const { signature: _signature, manifestDigest: _digest, ...bundleCore } = bundle;
+  const supervisors = bundle.entries.filter(candidate => candidate.role === 'supervisor');
+  if (bundle.manifestDigest !== assembly.runtime.runtimeBundleManifestDigest ||
+      bundle.manifestDigest !== canonicalSha256(bundleCore) ||
+      supervisors.length !== 1 || !supervisors[0]!.executable || supervisors[0]!.entryId !== entry.execution.supervisorEntryId ||
+      supervisors[0]!.version !== entry.execution.supervisorEntryVersion || supervisors[0]!.digest !== entry.execution.supervisorExecutableDigest)
+    throw new TypeError('input history substitutes its original signed Supervisor handler');
   const resolver = loadToolContracts([{ ...entry, inputSchema: await readCanonicalArtifact(artifacts, entry.inputSchemaRef) }]);
   const seenCalls = new Set<string>(), seenReplies = new Set<string>();
   const recovered = [];

@@ -77,7 +77,7 @@ test('inline submit preserves original nested model values without weakening nor
   }
 });
 
-test('installed recipe refuses unavailable default approvals without changing generic policy modes', () => {
+test('installed recipe admits default tool interaction without changing the frozen policy or verifier permission', () => {
   const installedRequest = (policyMode: 'default' | 'plan' | 'accept-edits' | 'yolo') => normalizeRunSubmitRequest(inlineRequest({
     model: { provider: 'openai-compatible', model: 'owned-fixture-model',
       endpoint: { kind: 'registered', endpointRegistrationId: 'owned-fixture-endpoint' }, modelCredentialGrantIds: ['owned-fixture-grant'] },
@@ -85,7 +85,8 @@ test('installed recipe refuses unavailable default approvals without changing ge
   })).request;
   const request = installedRequest('default');
   assert.equal(request.policyMode, 'default', 'generic normalization must retain the requested approval policy');
-  assert.throws(() => assertInstalledRunRecipe(request), { code: 'INVALID_REQUEST' });
+  assert.equal(request.verifiers.length, 0);
+  assert.doesNotThrow(() => assertInstalledRunRecipe(request));
   for (const mode of ['plan', 'accept-edits', 'yolo'] as const) {
     const supported = installedRequest(mode);
     assert.equal(supported.policyMode, mode);
@@ -104,6 +105,7 @@ test('installed recipe reaches only its connected exact Node verifier subset wit
         { kind: 'non_secret_literal', value: 'test.mjs' }], cwd: '.', env: {}, writableEphemeralPaths: [], identityReadGrantId: 'original-read-grant' }]
   })).request;
   assert.doesNotThrow(() => assertInstalledRunRecipe(request));
+  assert.throws(() => assertInstalledRunRecipe({ ...request, policyMode: 'default' }), { refusalCode: 'AUTHORIZATION_REQUIRED' });
   assert.throws(() => assertInstalledRunRecipe({ ...request, policyMode: 'accept-edits' }), { refusalCode: 'AUTHORIZATION_REQUIRED' });
   assert.throws(() => assertInstalledRunRecipe({ ...request, verifiers: [{ ...request.verifiers[0]!,
     executable: { kind: 'toolchain', toolId: 'bash' } }] }), { refusalCode: 'UNSUPPORTED_EXECUTION_IDENTITY' });

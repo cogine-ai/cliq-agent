@@ -239,6 +239,7 @@ export type SandboxProcessInvocationV1 =
       argvCwdSource: 'trusted_recipe_decode_of_request_and_target'
     } & (
       | { purpose: 'tool'; recipe: 'cliq-tool-launch-v1'; stdio: SandboxCapturedStdioV1 }
+      | { purpose: 'tool'; recipe: 'cliq-builtin-tools-v1'; privateGitProtection: 'existing_read_only'; stdio: SandboxCapturedStdioV1 }
       | { purpose: 'verifier'; recipe: 'cliq-verifier-command-v1'; stdio: SandboxCapturedStdioV1 }
       | {
           purpose: 'mcp_stdio'

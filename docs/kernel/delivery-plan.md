@@ -13,55 +13,50 @@ Linux execution/restart and cancellation foundations are real, but a final
 model turn still stops at `candidate_required`. No work package or complete I1
 is declared finished by the 32 passing checks.
 
-Latest exact-head result (2026-10-26): `942a269c99f76c3864bc4c3ca054d61dd57ce78e`
-[run 480](https://github.com/cogine-ai/cliq-agent/actions/runs/40250057022)
-has fourteen successful jobs, seven failures and one cancellation. Its seven
-local gates pass: 3,021 source tests with four platform skips, 367 script tests
-with fifteen platform skips and 102 portable tests with two Linux-only skips.
-The actual Node 22.13.0 child runtime, frozen source tree and all outputs are
-independently checked. Three hosted TypeScript jobs pass; macOS/Node 22.13.0
-fails the unchanged two-second large-Session-list SIGTERM assertion. The
-credential-queue job is cancelled before its subsequent user-manager campaign;
-that campaign is not thereby qualified.
+Latest exact-head result (2026-10-26): `d84d5b2da7a9b8078dea99bab877686c553ef9e0`
+[run 481](https://github.com/cogine-ai/cliq-agent/actions/runs/40257603231)
+has sixteen successful jobs and six failures. All four hosted TypeScript jobs
+pass, including the original two-second large-Session-list SIGTERM assertion.
+Its seven local gates pass 3,030 source tests with five platform skips,
+367 script tests with fifteen platform skips and 102 portable tests with two
+Linux-only skips, using the actual Node 22.13.0 child runtime and exact frozen
+source. Local validation SHA-256:
+`f972a6f55d7c8efa113f9a29781f64da8d967ecbb4446d650d2f6278331de6a1`.
 
-The original normal installed Run/Session continuity journey and the separate
-failure campaign both qualify. The corrected Git Session case proves the real
-identity-only Session, independent source-inspection grant refusal and no Run
-admitted without that grant. Genuine helper installation now proceeds beyond
-the former manifest refusal. These controlled HTTPS mechanisms do not qualify
-an actual provider, complete I1 or release.
-
-Nineteen captures retain 105 original reports / 580,845 bytes across 23
-categories. Collector, poller, wrapper, pipes and scoped awake guard actually
-join. Independent closed-schema/integrity revalidation verifies all retained
-bytes, twenty-one zero-error cleanups and twenty-one identical baseline pairs,
-while preserving `collectionComplete=false`: native preparation and verifier
-reports are missing. Final capture SHA-256:
-`dd195e32162266aef9a6fa9b20ae78c439c2ef04dbbde322f31a7dbc590de799`;
+The original normal installed Run/Session continuity and separate failure
+campaigns retain their genuine controlled-endpoint results. They do not qualify
+an actual provider, complete I1 or release. One capture retains all 105 original
+reports / 547,026 bytes across 23 categories. Collector, poller, wrapper, pipes
+and scoped awake guard actually join. Independent closed-schema/integrity
+revalidation checks twenty-one zero-error cleanups and twenty-one identical
+baseline pairs. It preserves `collectionComplete=false`: native preparation
+and verifier reports remain missing. Capture SHA-256:
+`89b1ee16b7bdbcb3e926e46e96452e481dae87e4be48a60eae6309a3fc6c75ea`;
 independent integrity closeout SHA-256:
-`d0c9b700251b77bb10b861416895ac115a2e06e15ecf79b737d34d862ae11005`.
+`21652378ab7a88cb95258b6719c510948c56f6d6ad7139d2f691238ed364503a`.
+The previous [run 480](https://github.com/cogine-ai/cliq-agent/actions/runs/40250057022)
+and its nineteen captures remain retained; none substitutes for current proof.
 
-The native campaign still fails before the first preparing READY observation.
-Its generic error does not identify the failing gate; neither the UID repair
-nor named-copy component tests establish its cause or qualify the cut. New
-bounded numeric diagnostics retain only original-attempt authenticated failure
-stages and local client boundaries, never tokens, paths, payload or raw stderr.
-They alter no successful check, deadline or authority. Normal Delivery passes
-two ordinary source cases before its new Git case fails; the verifier passes
-four cases before its new Git case fails. The full required suites remain open.
+Original-attempt native diagnostics now identify authenticated failure 1012
+(`CLIQ_SPAWN_READY_RECEIVE`) before process inspection. No producer marker was
+observed; zero diagnostic fields are not a UID mapping observation. The real
+runner installed bubblewrap 0.6.1, which does not support the recipe's `--size`
+option. A fixed supporting build must retain both bounded tmpfs sizes and the
+original signed asset, identity and READY checks; removing the size option or
+accepting its version string as execution proof is not a repair. Native cuts
+and the complete Git-source suites remain unverified.
 
-All three owned delayed-storage campaigns pass original READY, then miss the
-first thirty-second source request before their target physical cuts. Two
-joined reports reach `submit_assembly_final_check` at approximately 28 seconds;
-source capture/instruction preparation already takes approximately 22.7 seconds.
-The next correction groups the complete inert non-Git source triple/quartet and
-instruction texts/source/manifest using the existing bounded CAS stage core.
-Real filesystem regressions keep every original file sync and byte/ref check,
-reduce the representative instruction directory barriers from 24 to 12 and
-source barriers from 20/24 to 12, and refuse cancellation/drift only after the
-original group joins. All seventy relevant regressions, build, strict types
-and design guard pass. These are component measurements; installed request and
-shutdown deadlines still require independent real Linux verification.
+The fixed non-Git source/instruction groups preserve every file sync, full
+readback/currentness check and all-issued join. Real component measurements
+reduce representative instruction directory barriers from 24 to 12 and source
+barriers from 20/24 to 12. They do not prove installed timing: the delayed-volume
+Run reaches one model and tool completion but misses the unchanged ninety-second
+terminal deadline; the late-result campaign misses a thirty-second request;
+the original-stop campaign misses initial five-second authentication. Those
+failures precede their target publication cuts. Two slow-storage supervisors
+also require systemd timeout/SIGKILL during cleanup, so their original Store
+joins and physical cut evidence are unavailable. No deadline, cleanup assertion
+or unexecuted cut is upgraded by these partial results.
 
 The large-list correction freezes the bounded source directly into the original
 connection's private STRICT TEMP table within the same SQLite snapshot, then

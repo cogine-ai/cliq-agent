@@ -177,3 +177,33 @@ test('guest packaging refuses a writable, incomplete, linked or symlinked image 
     await assert.rejects(writeInstalledGuestToolchain(current.input), (error: NodeJS.ErrnoException) => error.code === 'ELOOP');
   } finally { await rm(current.directory, { recursive: true, force: true }); }
 });
+
+
+test('fixed Bash publisher keeps one measured admitted root, exact inventory and unchanged image bounds', async () => {
+  const current = await fixture(true);
+  const bashDigest = sha256Bytes(Buffer.from('opaque Bash inventory data; not an executable'));
+  const bash = { logicalName: 'bash', canonicalGuestPath: '/bin/bash', digest: bashDigest, version: bashDigest };
+  const files = [...current.metadata.files, { path: bash.canonicalGuestPath, digest: bash.digest, byteCount: 1 }]
+    .sort((left, right) => Buffer.compare(Buffer.from(left.path), Buffer.from(right.path)));
+  const metadata = { ...current.metadata, admittedExecutables: [bash], files, extractedFileBytes: 5,
+    imageLayout: { ...current.metadata.imageLayout, contentBytes: 5 } };
+  const replace = async (value: unknown) => {
+    await chmod(current.metadataPath, 0o600); await writeFile(current.metadataPath, JSON.stringify(value)); await chmod(current.metadataPath, 0o400);
+  };
+  try {
+    for (const changed of [
+      { ...metadata, admittedExecutables: [{ ...bash, logicalName: 'other' }] },
+      { ...metadata, admittedExecutables: [{ ...bash, canonicalGuestPath: '/usr/bin/bash' }] },
+      { ...metadata, admittedExecutables: [{ ...bash, version: 'unmeasured-host-version' }] },
+      { ...metadata, admittedExecutables: [bash, { ...bash, logicalName: 'other', canonicalGuestPath: '/bin/other' }] },
+      { ...metadata, files: current.metadata.files, extractedFileBytes: 4, imageLayout: current.metadata.imageLayout },
+      { ...metadata, files: files.map(file => file.path === '/bin/bash' ? { ...file, digest: 'f'.repeat(64) } : file) },
+      { ...metadata, searchTools: [bash] }, { ...metadata, verifiers: [bash] },
+    ]) { await replace(changed); await assert.rejects(writeInstalledGuestToolchain(current.input), /publisher|guest toolchain/); }
+    await replace(metadata);
+    const result = await writeInstalledGuestToolchain(current.input);
+    assert.deepEqual(result.manifest.admittedExecutables, [bash]);
+    assert.equal(result.manifest.guestImageByteCount, current.metadata.guestImageByteCount);
+    assert(result.manifest.guestImageByteCount <= GUEST_EXTRACTOR_RECIPE.maxImageBytes);
+  } finally { await rm(current.directory, { recursive: true, force: true }); }
+});

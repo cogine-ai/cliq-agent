@@ -72,7 +72,8 @@ function publisher(value: unknown, publisherKeyId: string) {
       data.architecture !== 'x86_64' ||
       data.kernelAbi !== 'linux-x86_64-v1' || data.userspaceAbi !== 'linux-x86_64-glibc-v1' ||
       data.scope !== 'actual build bytes only; not release-signed, execution-qualified or a Run proof' ||
-      [data.searchTools, data.verifiers, data.admittedExecutables].some(value => !Array.isArray(value) || value.length !== 0))
+      [data.searchTools, data.verifiers].some(value => !Array.isArray(value) || value.length !== 0) ||
+      !Array.isArray(data.admittedExecutables) || data.admittedExecutables.length > 1)
     fail('publisher input is outside the fixed installed Node recipe');
   const manifest = { schemaVersion: 1, format: 'cliq-guest-toolchain-v1', guestImageRef: data.guestImageRef,
     guestImageDigest: data.guestImageDigest, guestImageByteCount: data.guestImageByteCount, guestImageFormat: data.guestImageFormat,
@@ -85,6 +86,8 @@ function publisher(value: unknown, publisherKeyId: string) {
       decoded.worker.logicalName !== 'cliq-worker' || decoded.worker.canonicalGuestPath !== '/runtime/cliq-linux-worker' || decoded.worker.version !== '1' ||
       decoded.shell.logicalName !== 'sh' || decoded.shell.canonicalGuestPath !== '/bin/sh' ||
       decoded.git.logicalName !== 'git' || decoded.git.canonicalGuestPath !== '/usr/bin/git') fail('publisher executable identity differs from the fixed recipe');
+  if (decoded.admittedExecutables.some(entry => entry.logicalName !== 'bash' || entry.canonicalGuestPath !== '/bin/bash' || entry.version !== entry.digest))
+    fail('publisher admitted executable differs from the fixed measured Bash recipe');
   if (!Array.isArray(data.files) || data.files.length < 4 || data.files.length > GUEST_EXTRACTOR_RECIPE.maxMappedFiles)
     fail('publisher file inventory exceeds its fixed bound');
   let prior: string | undefined, total = 0;
@@ -102,7 +105,7 @@ function publisher(value: unknown, publisherKeyId: string) {
     if (!Number.isSafeInteger(total) || total > GUEST_EXTRACTOR_RECIPE.maxImageBytes - 16 * 1024 ** 2) fail('publisher files exceed the actual image bound');
     files.set(filename, file.digest);
   }
-  if (total !== data.extractedFileBytes || [decoded.worker, decoded.shell, decoded.git, decoded.node]
+  if (total !== data.extractedFileBytes || [decoded.worker, decoded.shell, decoded.git, decoded.node, ...decoded.admittedExecutables]
     .some(entry => files.get(entry.canonicalGuestPath) !== entry.digest)) fail('publisher executable inventory is incomplete or inconsistent');
   const supplied = data.imageLayout;
   if (!supplied || typeof supplied !== 'object' || Array.isArray(supplied) || !exactKeys(supplied,

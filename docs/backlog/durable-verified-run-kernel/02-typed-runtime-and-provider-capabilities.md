@@ -42,6 +42,18 @@ This spec imports those schemas rather than maintaining a second copy.
 WP01 owns state transitions and reachability; WP02 may not narrow their
 evidence, final-candidate, quiescence, recovery or settlement requirements.
 
+The ordinary-tools integration uses the RFC's closed execution union. The
+original executable edit remains `builtin`; `read|ls|find|grep|bash` use the
+signed non-executable `builtin_tools` script plus the exact signed guest Node
+identity (`builtin_script`). `request_input` instead binds the actual signed
+Supervisor image (`supervisor_control`), with no operation request, grant,
+Journal dispatch, process or synthetic death receipt. Whole-batch input
+normalization and ordered native results remain shared with the same
+ToolContractManifest/ToolBatch, not a second tool loop. Frozen manifest,
+script, schema and guest member bytes are fully verified on their original
+read cut. Text-only operation and existing typed model capability rules do
+not change. Local data regressions are not installed Linux qualification.
+
 ### User outcome
 
 Cliq executes tools from negotiated provider-native calls, never from

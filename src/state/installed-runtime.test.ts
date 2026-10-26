@@ -32,7 +32,7 @@ type InstallerFile = Omit<RuntimeBundleManifest['entries'][number], 'digest' | '
   bytes: Buffer; version?: string;
 };
 async function writeInstallerOnlyPackage(packageRoot: string, unclosedPromptRole?: 'system_prompt' | 'compaction_prompt',
-  supervisorBytes?: Buffer, guestImageBytes?: Buffer, sourceInspector?: InstallerFile) {
+  supervisorBytes?: Buffer, guestImageBytes?: Buffer, sourceInspector?: InstallerFile, builtinScriptBytes?: Buffer) {
   await mkdir(packageRoot, { mode: 0o700 });
   const profile = policyProfile();
   const rootCore = {
@@ -56,6 +56,8 @@ async function writeInstallerOnlyPackage(packageRoot: string, unclosedPromptRole
       bytes: canonicalJsonBytes(rootRecipe) },
   ];
   if (sourceInspector) contents.push(sourceInspector);
+  if (builtinScriptBytes) contents.push({ entryId: 'builtin_tools', role: 'tool_adapter',
+    relativePath: 'adapters/builtin-tools.mjs', executable: false, bytes: builtinScriptBytes });
   if (unclosedPromptRole) contents.push({
     entryId: `installer-only-${unclosedPromptRole}`, role: unclosedPromptRole,
     relativePath: `prompts/${unclosedPromptRole}.txt`, executable: false,
@@ -179,6 +181,66 @@ if (process.platform === 'linux') test('the installer preserves and rechecks the
     await assert.rejects(runtime.openSelected(stateRoot), { code: 'ARTIFACT_MISMATCH' });
     assert(!(await readdir(stateRoot)).includes(KERNEL_DATABASE_FILENAME), 'installation never creates StateOwner or business state');
   } finally { await selected?.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('the signed installer keeps the builtin script recipe closed alongside the source inspector', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'cliq-builtin-script-manifest-'));
+  const builtin: InstallerFile = { entryId: 'builtin_tools', role: 'tool_adapter', version: '1',
+    relativePath: 'adapters/builtin-tools.mjs', executable: false, bytes: Buffer.from(';') };
+  try {
+    for (const [name, bytes] of [['small', builtin.bytes], ['maximum', Buffer.alloc(1_048_576, 0x20)]] as const) {
+      await t.test(name, async () => {
+        const signed = await writeInstallerOnlyPackage(path.join(root, name), undefined, undefined, undefined,
+          sourceInspectorFile(), bytes);
+        const checked = validateBundle(signed.bundle, signed.releaseKeys);
+        for (const id of ['source_git_inspector', 'builtin_tools']) {
+          const entry = checked.entries.find(item => item.entryId === id)!;
+          assert.equal(entry.executable, false);
+          if (id === 'builtin_tools') { assert.equal(entry.byteCount, bytes.length); assert.equal(entry.digest, sha256Bytes(bytes)); }
+        }
+      });
+    }
+    const variants: Record<string, Partial<InstallerFile>> = {
+      id: { entryId: 'other_tools' }, version: { version: '2' }, path: { relativePath: 'adapters/other.mjs' },
+      role: { role: 'platform_helper' }, roleData: { role: 'bundle_object' },
+      roleExecutable: { role: 'platform_helper', executable: true },
+      executable: { executable: true }, empty: { bytes: Buffer.alloc(0) },
+      oversized: { bytes: Buffer.alloc(1_048_577, 0x20) },
+    };
+    for (const [name, changes] of Object.entries(variants)) await t.test(name, async () => {
+      const signed = await writeInstallerOnlyPackage(path.join(root, 'invalid-' + name), undefined, undefined,
+        undefined, { ...builtin, ...changes });
+      assert.throws(() => validateBundle(signed.bundle, signed.releaseKeys), { code: 'ARTIFACT_MISMATCH' });
+    });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+if (process.platform === 'linux') test('installed signed builtin script remains complete non-JSON data in the exact original seed and CAS', async () => {
+  const fixture = await realpath(await mkdtemp(path.join(os.tmpdir(), 'cliq-installed-tool-data-')));
+  const packageRoot = path.join(fixture, 'package'), stateRoot = path.join(fixture, 'state');
+  let selected: HeldInstalledRuntime | undefined;
+  try {
+    const bytes = Buffer.from('// Deliberately not JSON or ELF. Never execute this installer-only fixture.\nexport const inert = true;\n');
+    const signed = await writeInstallerOnlyPackage(packageRoot, undefined, undefined, undefined, undefined, bytes);
+    const runtime = createInstalledRuntime({ releaseKeys: signed.releaseKeys });
+    const installation = await runtime.installInitial({ packageRoot, stateRoot });
+    selected = await runtime.openSelected(stateRoot);
+    const digest = sha256Bytes(bytes), entry = signed.bundle.entries.find(entry => entry.entryId === 'builtin_tools')!;
+    assert.equal(entry.executable, false);
+    await withHeldInstalledRuntime(selected, async held => {
+      await held.revalidate();
+      const seed = held.seed.find(member => member.artifactRef === digest);
+      assert.deepEqual(seed, { artifactRef: digest, byteCount: bytes.length,
+        mediaType: 'application/octet-stream', schemaKind: 'cliq-builtin-tool-script-v1' });
+      assert.deepEqual(held.objects.get(digest), bytes);
+    });
+    const installedPath = path.join(stateRoot, 'runtime/bundles', installation.bundleDigest, entry.relativePath);
+    const casPath = path.join(stateRoot, KERNEL_CAS_DIRECTORY, digest);
+    assert.deepEqual(await readFile(installedPath), bytes); assert.deepEqual(await readFile(casPath), bytes);
+    const [installedInfo, casInfo] = await Promise.all([lstat(installedPath), lstat(casPath)]);
+    for (const info of [installedInfo, casInfo]) { assert.equal(info.nlink, 1); assert.equal(info.mode & 0o7777, 0o400); }
+    assert.notEqual(`${installedInfo.dev}:${installedInfo.ino}`, `${casInfo.dev}:${casInfo.ino}`);
+  } finally { await selected?.close(); await rm(fixture, { recursive: true, force: true }); }
 });
 
 async function platformRevalidationExpressions() {

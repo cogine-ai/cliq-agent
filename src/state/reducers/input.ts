@@ -36,7 +36,7 @@ export async function loadInputContinuation(driver: SqliteDriver, artifacts: Art
   openingReads.assertReadActive();
   const { run: admitted, spec, assembly, principalId, resolveToolInput } = authority;
   const runId = admitted.id;
-  const contract = authority.contracts.find((entry) => entry.name === 'request_input' && entry.access === 'control' && entry.execution.kind === 'builtin');
+  const contract = authority.contracts.find((entry) => entry.name === 'request_input' && entry.access === 'control' && entry.execution.kind === 'supervisor_control');
   const assertInputCall = (selected: ToolCut) => {
     if (!contract || selected.call.toolName !== contract.name || selected.call.inputSchemaRef !== contract.inputSchemaRef ||
         selected.call.inputSchemaDigest !== contract.inputSchemaDigest) throw new TypeError('current call is not the frozen builtin request_input');
@@ -104,6 +104,7 @@ export async function loadInputContinuation(driver: SqliteDriver, artifacts: Art
   }
   return {
     async plan(selected: ToolCut) {
+      await authority.assertAuthority();
       assertInputCall(selected);
       const proof = planInputWait(selected.run, selected.batch.itemId, selected.call, sampleCanonicalNow());
       for (const artifact of proof.artifacts) await artifacts.publishBytes(artifact.bytes, artifact.mediaType, artifact.schemaKind);
@@ -168,7 +169,7 @@ export async function loadInputContinuation(driver: SqliteDriver, artifacts: Art
       if (existing) return existing;
       const selected = await cut(input.expectedRunRevision);
       if (selected.run.status !== 'waiting' || selected.run.waitingReason !== 'input' || selected.run.waitingOnRef !== input.waitingOnRef ||
-          selected.run.activeWorkerLaunchId) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'run.input requires its exact worker-free input wait');
+          selected.run.activeWorkerLaunchId) throw new KernelStorageError('INVALID_REQUEST', 'run.input requires its exact worker-free input wait');
       const wait = await readCanonicalArtifact<InputWait>(artifacts, input.waitingOnRef);
       const proof = planInputWait({ ...selected.run, revision: wait.createdFromRevision }, selected.batch.itemId, selected.call, wait.createdAt);
       requireEqual(wait, proof.wait, 'current input wait');

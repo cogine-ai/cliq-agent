@@ -57,7 +57,7 @@ export function installedClientAuthenticationMarker(stage: InstalledClientPhase,
   const usage = self ? ':' + processKeys.map(key => self[key]).join(':') : '';
   const bytes = Buffer.from(`${prefix}${stage}:${elapsedMs}:${suffix}${usage}\n`); assert(bytes.length <= 512); return bytes;
 }
-function authMarker(bytes: Buffer): Omit<InstalledClientAuthenticationObservation, 'observedElapsedMs'> {
+export function authMarker(bytes: Buffer): Omit<InstalledClientAuthenticationObservation, 'observedElapsedMs'> {
   assert(bytes.length <= 512 && bytes.every(byte => byte < 128));
   const text = bytes.toString('ascii'), prefix = text.startsWith(authProcessPrefix) ? authProcessPrefix : authPrefix;
   assert(text.startsWith(prefix) && text.endsWith('\n'));
@@ -110,7 +110,7 @@ type Scan = { scan(bytes: Uint8Array): void; close(): void };
 type Response = { protocolVersion: 1; ok: boolean; method?: string;
   result?: Record<string, any>; error?: Record<string, unknown> };
 type Input = { executable: string; args: readonly string[]; cwd: string; env: NodeJS.ProcessEnv;
-  openScan(): Scan; onJoined(): void; timeout?: number; headlessSchemaVersion?: 3; headlessTransport?: 'rpc' };
+  openScan(): Scan; onJoined(): void; timeout?: number; headlessSchemaVersion?: 3; headlessTransport?: 'rpc'; initialRequest?: InstalledControlRequestV1 };
 export type InstalledClientDriverStage = 'platform' | 'composition' | 'selection' | 'authentication' | 'request' | 'output' | 'retirement';
 const driverStages = ['platform', 'composition', 'selection', 'authentication', 'request', 'output', 'retirement'] as const;
 const driverMarkers = driverStages.flatMap(stage => [
@@ -162,6 +162,8 @@ async function bounded<T>(operation: Promise<T>, milliseconds: number,
 export async function openInstalledClientConsumer(input: Input) {
   assert(input.headlessSchemaVersion === undefined || input.headlessSchemaVersion === 3);
   assert(input.headlessTransport === undefined || input.headlessSchemaVersion === 3 && input.headlessTransport === 'rpc');
+  assert(input.initialRequest === undefined || input.headlessSchemaVersion === 3 && input.headlessTransport === undefined &&
+    ['run.get', 'session.get', 'run.list', 'authorization.list', 'run.submit'].includes(input.initialRequest.method));
   const timeout = input.timeout ?? 5000;
   assert(Number.isSafeInteger(timeout) && timeout > 0 && timeout <= 5000);
   const by = performance.now() + timeout;
@@ -177,6 +179,14 @@ export async function openInstalledClientConsumer(input: Input) {
   let pending: { method: string; request?: InstalledControlRequestV1; page?: Response; events?: HeadlessRunEventV3[];
     attachTarget?: number; attachLimit?: number; rpcId?: number; rpcDrained?: boolean; rpcLast?: Response;
     resolve(value: Response): void; reject(error: unknown): void } | undefined;
+  // Exactly one predetermined CLI invocation may finish before the parent
+  // resumes from hello. Register its original closed request before any child
+  // bytes are consumed; this never sends/replays a business request.
+  const initialResponse = input.initialRequest === undefined ? undefined : new Promise<Response>((resolve, reject) => {
+    const request = decodeHeadlessControlRequest({ schemaVersion: 3, request: input.initialRequest }).request;
+    pending = { method: request.method, request, resolve, reject };
+  });
+  void initialResponse?.catch(() => {});
   let readyResolve!: (value: Response) => void, readyReject!: (error: unknown) => void;
   const ready = new Promise<Response>((resolve, reject) => { readyResolve = resolve; readyReject = reject; });
   const refuse = (error: unknown) => { failure ??= error; readyReject(error); pending?.reject(error); };
@@ -324,6 +334,7 @@ export async function openInstalledClientConsumer(input: Input) {
   })();
   let correlation = 0;
   const send = async (value: Record<string, unknown>, milliseconds = 5000): Promise<Response> => {
+    assert(input.initialRequest === undefined, 'a one-shot invocation never sends another command');
     assert(!pending && !failure && !closing && frames >= 1 && frames < 1024);
     assert(Number.isSafeInteger(milliseconds) && milliseconds > 0 && milliseconds <= 30000);
     const by = performance.now() + milliseconds;
@@ -352,6 +363,9 @@ export async function openInstalledClientConsumer(input: Input) {
       throw new Error('original installed client driver closed before readiness');
     })]), Math.ceil(remaining), 'ready', () => frames, lastObservedStage, timeout, by - timeout, () => authentication);
     assert(performance.now() < by);
-    return Object.freeze({ send, close, hello: greeting.result!, supervisorInstanceId: greeting.result!.supervisorInstanceId as string });
+    const initialCompleted = initialResponse ? bounded(initialResponse, Math.ceil(by - performance.now()), 'request', () => frames,
+      lastObservedStage, timeout, by - timeout, () => authentication).catch(error => { refuse(error); throw error; }) : undefined;
+    void initialCompleted?.catch(() => {});
+    return Object.freeze({ send, close, ...(initialCompleted ? { initialResponse: initialCompleted } : {}), hello: greeting.result!, supervisorInstanceId: greeting.result!.supervisorInstanceId as string });
   } catch (error) { refuse(error); try { await close(); } catch {} throw error; }
 }

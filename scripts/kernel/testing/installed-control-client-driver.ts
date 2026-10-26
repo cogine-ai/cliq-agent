@@ -5,8 +5,11 @@ import assert from 'node:assert/strict';
 import { constants, writeSync, type BigIntStats } from 'node:fs';
 import { lstat, open, type FileHandle } from 'node:fs/promises';
 import path from 'node:path';
-import { CONTROL_FRAME_BYTES as bound, decodeControlFrame } from '../../../src/control/v1.js';
+import { CONTROL_FRAME_BYTES as bound, decodeControlFrame, headlessControlHello } from '../../../src/control/v1.js';
 import { runInstalledControlJsonl } from '../../../src/control/installed-jsonl.js';
+import { parseClientInvocation } from '../../../src/client/commands.js';
+import { runClientInvocation } from '../../../src/client/entry.js';
+import { canonicalJsonBytes } from '../../../src/kernel/canonical.js';
 import { runInstalledHeadlessJsonl, runInstalledHeadlessRpc } from '../../../src/headless/installed.js';
 import { createInstalledControlSession, type InstalledControlSession } from '../../../src/control/session.js';
 import { parseJsonStrict } from '../../../src/kernel/json.js';
@@ -143,15 +146,18 @@ async function main(): Promise<void> {
   assert.equal(process.platform, 'linux'); assert.equal(process.arch, 'x64');
   assert(process.geteuid!() > 0 && process.getegid!() > 0);
   const [filename, schema, ...extra] = process.argv.slice(2);
-  assert(filename && (schema === undefined || schema === '--schema3' || schema === '--schema3-rpc') && extra.length === 0);
+  const clientEntry = schema === '--client-entry';
+  assert(filename && (clientEntry ? extra.length > 0 : (schema === undefined || schema === '--schema3' || schema === '--schema3-rpc' ||
+    schema === '--client-jsonl' || schema === '--client-rpc') && extra.length === 0));
   setPhase('composition');
   const composition = await fixtureComposition(filename);
   const closeAuthentication = observeAuthentication();
   let selected: HeldInstalledRuntime | undefined, client: InstalledSupervisorClient | undefined, failure: unknown;
-  let session: InstalledControlSession | undefined;
+  let session: InstalledControlSession | undefined, surface: AbortController | undefined;
   let stopping: Promise<void> | undefined, stopRequested = false;
   const stop = () => {
     stopRequested = true;
+    surface?.abort();
     process.stdin.destroy();
     if (client) { stopping ??= session ? session.close() : client.close(); void stopping.catch(() => {}); }
   };
@@ -169,7 +175,24 @@ async function main(): Promise<void> {
     };
     if (schema !== undefined) {
       session = createInstalledControlSession(client);
-      await (schema === '--schema3-rpc' ? runInstalledHeadlessRpc : runInstalledHeadlessJsonl)(session, requests(), write);
+      if (clientEntry) {
+        surface = new AbortController();
+        // Qualification-only framing of the actual authenticated hello. The
+        // CLI/TUI itself uses its unchanged production entry and original
+        // held selected installation; no path/key/ledger option is exposed.
+        const greeting = headlessControlHello({ protocolVersion: 1, method: 'control.hello', clientBuild: 'cliq-installed-entry-v3',
+          controlSchemaRange: { min: 1, max: 1 }, headlessSchemaRange: { min: 3, max: 3 },
+          requestedFeatureIds: [...client.hello.enabledFeatureIds] }, client.hello);
+        await write(Buffer.concat([canonicalJsonBytes(greeting), Buffer.from('\n')]));
+        const code = await runClientInvocation(session, parseClientInvocation(extra, process.cwd()), { input: process.stdin,
+          output: process.stdout, diagnostic: process.stderr, workspacePath: process.cwd(), signal: surface.signal });
+        assert.equal(code, 0, 'installed client entry did not finish its original action');
+      } else if (schema === '--client-jsonl' || schema === '--client-rpc') {
+        surface = new AbortController();
+        const code = await runClientInvocation(session, { kind: schema === '--client-rpc' ? 'rpc' : 'jsonl' }, { input: process.stdin,
+          output: process.stdout, diagnostic: process.stderr, workspacePath: process.cwd(), signal: surface.signal });
+        assert.equal(code, 0, 'installed application adapter did not join');
+      } else await (schema === '--schema3-rpc' ? runInstalledHeadlessRpc : runInstalledHeadlessJsonl)(session, requests(), write);
     } else await runInstalledControlJsonl(client, requests(), write);
     assert(!stopRequested, 'installed client driver stopped before EOF');
   } catch (error) { failure = error; failedPhase = phase; }

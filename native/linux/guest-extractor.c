@@ -79,7 +79,8 @@ static bool image_path(const char *path) {
 }
 static bool mapped_path(struct extraction *job, const char *path) {
     if (!image_path(path)) return false;
-    if (job->held.source_recipe_version == 1 && !strcmp(path, "/usr/bin/git")) return true;
+    if ((job->held.source_recipe_version == 1 || job->held.builtin_recipe_version == 1) && !strcmp(path, "/usr/bin/git")) return true;
+    if (job->held.builtin_recipe_version == 1 && !strcmp(path, "/bin/bash")) return true;
     if (!strcmp(path, NODE_PATH) || !strcmp(path, LOADER_PATH)) return true;
     const char *roots[] = { "/lib/x86_64-linux-gnu/", "/usr/lib/x86_64-linux-gnu/" };
     for (size_t i = 0; i < 2; i++) {
@@ -382,8 +383,10 @@ static void execute(napi_env env, void *data) {
         if (!valid) fail(job, "guest_pinned_identity");
     }
     if (valid) valid = extract_file(job, fs, job->held.node_path, job->held.node_digest) == 0;
-    if (valid && job->held.source_recipe_version == 1)
+    if (valid && (job->held.source_recipe_version == 1 || job->held.builtin_recipe_version == 1))
         valid = extract_file(job, fs, job->held.git_path, job->held.git_digest) == 1;
+    if (valid && job->held.builtin_recipe_version == 1)
+        valid = extract_file(job, fs, job->held.bash_path, job->held.bash_digest) == 2;
     /* Newly discovered libraries extend this same bounded worklist; paths and
      * inodes are deduplicated, so cyclic ELF dependencies cannot grow it. */
     for (uint32_t i = 0; valid && i < job->held.file_count; i++) valid = active(job) && elf_dependencies(job, fs, i);
@@ -457,10 +460,12 @@ static void finalize(napi_env env, void *data, void *hint) {
     (void)env; (void)hint; struct extraction *job = data; revoke_extraction(job); retire(job); release(job);
 }
 static bool receiver(napi_env env, napi_callback_info info, struct extraction **job) {
-    size_t argc = 1; napi_value args[1], self; bool tagged = false, source_tagged = false;
+    size_t argc = 1; napi_value args[1], self; bool tagged = false, source_tagged = false, builtin_tagged = false;
     return napi_get_cb_info(env, info, &argc, args, &self, NULL) == napi_ok && argc == 0 &&
         napi_check_object_type_tag(env, self, &CLIQ_GUEST_TOOLCHAIN_TAG, &tagged) == napi_ok &&
-        napi_check_object_type_tag(env, self, &CLIQ_SOURCE_GUEST_TOOLCHAIN_TAG, &source_tagged) == napi_ok && (tagged || source_tagged) &&
+        napi_check_object_type_tag(env, self, &CLIQ_SOURCE_GUEST_TOOLCHAIN_TAG, &source_tagged) == napi_ok &&
+        napi_check_object_type_tag(env, self, &CLIQ_BUILTIN_GUEST_TOOLCHAIN_TAG, &builtin_tagged) == napi_ok &&
+        (tagged || source_tagged || builtin_tagged) &&
         napi_unwrap(env, self, (void **)job) == napi_ok && *job && (*job)->env == env;
 }
 static bool usable(struct extraction *job) {
@@ -492,8 +497,10 @@ static napi_value describe(napi_env env, napi_callback_info info) {
     if (napi_create_object(env, &result) != napi_ok || napi_create_array_with_length(env, job->held.file_count, &files) != napi_ok ||
         !set_text(env, result, "imageDigest", job->held.image_digest) || !set_text(env, result, "nodePath", job->held.node_path) ||
         !set_text(env, result, "nodeDigest", job->held.node_digest)) return failure(env, "native guest description unavailable");
-    if (job->held.source_recipe_version == 1 && (!set_text(env, result, "gitPath", job->held.git_path) ||
+    if ((job->held.source_recipe_version == 1 || job->held.builtin_recipe_version == 1) && (!set_text(env, result, "gitPath", job->held.git_path) ||
         !set_text(env, result, "gitDigest", job->held.git_digest))) return failure(env, "native source guest description unavailable");
+    if (job->held.builtin_recipe_version == 1 && (!set_text(env, result, "bashPath", job->held.bash_path) ||
+        !set_text(env, result, "bashDigest", job->held.bash_digest))) return failure(env, "native builtin guest description unavailable");
     for (uint32_t i = 0; i < job->held.file_count; i++) {
         napi_value file; struct cliq_guest_file *source = &job->held.files[i];
         if (napi_create_object(env, &file) != napi_ok || !set_text(env, file, "path", source->path) ||
@@ -590,7 +597,7 @@ done:
     if (!retire_fd(job, &duplicate)) valid = false;
     return valid;
 }
-static napi_value begin_fixed(napi_env env, napi_callback_info info, bool source_git) {
+static napi_value begin_fixed(napi_env env, napi_callback_info info, unsigned int recipe) {
     if (atomic_load(&retirement_failed)) return failure(env, "native guest retirement remains uncertain");
     size_t argc = 3; napi_value args[3], object, resource; uint64_t descriptor;
     if (napi_get_cb_info(env, info, &argc, args, NULL, NULL) != napi_ok || argc != 2 || !number(env, args[0], &descriptor) || descriptor > INT_MAX)
@@ -601,13 +608,21 @@ static napi_value begin_fixed(napi_env env, napi_callback_info info, bool source
     atomic_init(&job->held.ready, false); atomic_init(&job->held.revoked, false); atomic_init(&job->cancelled, false); atomic_init(&job->finished, false);
     for (size_t i = 0; i < CLIQ_GUEST_MAX_FILES; i++) job->held.files[i].fd = -1;
     bool valid = input(env, args[1], job);
-    if (valid && source_git) {
+    if (valid && recipe != 0) {
         for (uint32_t i = 0; i < job->pinned_count; i++) if (strcmp(job->pinned[i].path, "/usr/bin/git") == 0) {
             memcpy(job->held.git_path, job->pinned[i].path, sizeof(job->held.git_path));
             memcpy(job->held.git_digest, job->pinned[i].digest, sizeof(job->held.git_digest));
-            job->held.source_recipe_version = 1;
+            if (recipe == 1) job->held.source_recipe_version = 1;
         }
-        valid = job->held.source_recipe_version == 1;
+        valid = recipe == 1 ? job->held.source_recipe_version == 1 : job->held.git_path[0] != '\0';
+        if (valid && recipe == 2) {
+            for (uint32_t i = 0; i < job->pinned_count; i++) if (!strcmp(job->pinned[i].path, "/bin/bash")) {
+                memcpy(job->held.bash_path, job->pinned[i].path, sizeof(job->held.bash_path));
+                memcpy(job->held.bash_digest, job->pinned[i].digest, sizeof(job->held.bash_digest));
+                job->held.builtin_recipe_version = 1;
+            }
+            valid = job->held.builtin_recipe_version == 1;
+        }
     }
     if (!valid || !retain_image(job, (int)descriptor)) {
         retire_fd(job, &job->image_fd); retire_fd(job, &job->source_fd); release(job);
@@ -618,7 +633,8 @@ static napi_value begin_fixed(napi_env env, napi_callback_info info, bool source
         { "describe", NULL, describe, NULL, NULL, NULL, napi_default, NULL },
         { "close", NULL, close_owner, NULL, NULL, NULL, napi_default, NULL }
     };
-    const napi_type_tag *tag = source_git ? &CLIQ_SOURCE_GUEST_TOOLCHAIN_TAG : &CLIQ_GUEST_TOOLCHAIN_TAG;
+    const napi_type_tag *tag = recipe == 2 ? &CLIQ_BUILTIN_GUEST_TOOLCHAIN_TAG :
+        recipe == 1 ? &CLIQ_SOURCE_GUEST_TOOLCHAIN_TAG : &CLIQ_GUEST_TOOLCHAIN_TAG;
     if (napi_create_object(env, &object) != napi_ok || napi_type_tag_object(env, object, tag) != napi_ok ||
         napi_define_properties(env, object, 3, properties) != napi_ok ||
         napi_create_string_utf8(env, "cliq-guest-extraction", NAPI_AUTO_LENGTH, &resource) != napi_ok ||
@@ -638,8 +654,10 @@ static napi_value begin_fixed(napi_env env, napi_callback_info info, bool source
     }
     return object;
 }
-static napi_value begin(napi_env env, napi_callback_info info) { return begin_fixed(env, info, false); }
-static napi_value begin_source_git(napi_env env, napi_callback_info info) { return begin_fixed(env, info, true); }
+static napi_value begin(napi_env env, napi_callback_info info) { return begin_fixed(env, info, 0); }
+static napi_value begin_source_git(napi_env env, napi_callback_info info) { return begin_fixed(env, info, 1); }
+
+static napi_value begin_builtin_bash(napi_env env, napi_callback_info info) { return begin_fixed(env, info, 2); }
 
 NAPI_MODULE_INIT() {
     napi_value version, function;
@@ -647,7 +665,9 @@ NAPI_MODULE_INIT() {
         napi_create_function(env, "begin", NAPI_AUTO_LENGTH, begin, NULL, &function) != napi_ok ||
         napi_set_named_property(env, exports, "begin", function) != napi_ok ||
         napi_create_function(env, "beginSourceGit", NAPI_AUTO_LENGTH, begin_source_git, NULL, &function) != napi_ok ||
-        napi_set_named_property(env, exports, "beginSourceGit", function) != napi_ok) return NULL;
+        napi_set_named_property(env, exports, "beginSourceGit", function) != napi_ok ||
+        napi_create_function(env, "beginBuiltinBash", NAPI_AUTO_LENGTH, begin_builtin_bash, NULL, &function) != napi_ok ||
+        napi_set_named_property(env, exports, "beginBuiltinBash", function) != napi_ok) return NULL;
     return exports;
 }
 #else

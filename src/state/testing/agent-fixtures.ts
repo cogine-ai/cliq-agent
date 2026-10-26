@@ -1,5 +1,6 @@
 import { canonicalSha256 } from '../../kernel/canonical.js';
-import { digestOmitting } from '../../kernel/identity.js';
+import { digestOmitting, sha256Bytes } from '../../kernel/identity.js';
+import { readFile } from 'node:fs/promises';
 import type { ToolContractManifestV1, RunSpec } from '../../kernel/types.js';
 import type { ModelTextV1 } from '../../protocol/agent-ir.js';
 import { reseal, testFixture } from '../../model/testing/fixtures.js';
@@ -19,6 +20,7 @@ export async function createAgentFixture(label: string, budgets?: Partial<RunSpe
   rules?: RunPolicySnapshotV1['decisionRules']; outputSchema?: unknown; contextLimitTokens?: number;
 } = {}) {
   const authority = testFixture('openai', true, options.contextLimitTokens);
+  const supervisorDigest = options.tools?.includes('request_input') ? sha256Bytes(await readFile(process.execPath)) : undefined;
   const builtins = (options.tools ?? ['read']).map((name) => builtinInputContracts[name])
     .sort((left, right) => Buffer.compare(Buffer.from(left.name), Buffer.from(right.name)));
   const selected = builtins.map((builtin) => ({ name: builtin.name, description: `Use ${builtin.name}`, inputSchema: builtin.inputSchema,
@@ -27,12 +29,17 @@ export async function createAgentFixture(label: string, budgets?: Partial<RunSpe
   authority.assembly.retry.tools = selected.map((tool) => tool.replayClass === 'retry'
     ? { toolName: tool.name, replayClass: 'retry', maxDispatchedAttempts: 3, postAttemptDelaysMs: [500, 2000] }
     : { toolName: tool.name, replayClass: 'manual', maxDispatchedAttempts: 1, postAttemptDelaysMs: [] });
-  const manifest: ToolContractManifestV1 = { schemaVersion: 1, format: 'cliq-tool-contracts-v1', entries: selected.map((tool, index) => ({
+  const manifest: ToolContractManifestV1 = { schemaVersion: 1, format: 'cliq-tool-contracts-v1', entries: selected.map((tool, index) => {
+    const base = {
     name: tool.name, version: '1', description: tool.description, access: builtins[index]!.access, inputSchemaRef: tool.inputSchemaRef,
-    inputSchemaDigest: tool.inputSchemaDigest, replayClass: tool.replayClass, execution: { kind: 'builtin', adapterId: tool.name,
-      adapterVersion: '1', adapterCodeDigest: canonicalSha256({ adapter: tool.name }) },
+    inputSchemaDigest: tool.inputSchemaDigest,
     ...(options.outputSchema === undefined ? {} : { outputSchemaRef: canonicalSha256(options.outputSchema), outputSchemaDigest: canonicalSha256(options.outputSchema) })
-  })), manifestDigest: '' };
+    };
+    if (tool.name === 'request_input') return { ...base, replayClass: 'manual', execution: { kind: 'supervisor_control', handlerId: 'request_input',
+      supervisorEntryId: 'supervisor-test', supervisorEntryVersion: '1', supervisorExecutableDigest: supervisorDigest! } };
+    return { ...base, replayClass: tool.replayClass, execution: { kind: 'builtin', adapterId: tool.name,
+      adapterVersion: '1', adapterCodeDigest: canonicalSha256({ adapter: tool.name }) } };
+  }), manifestDigest: '' };
   manifest.manifestDigest = digestOmitting(manifest, 'manifestDigest');
   const signed = await signedToolBundle(authority.assembly, manifest.entries);
   const credentials: string[] = [];

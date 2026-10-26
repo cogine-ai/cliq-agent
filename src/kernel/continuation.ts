@@ -9,6 +9,16 @@ import type { VerifierPolicyDecisionItem } from './verifier-invocation.js';
 import type { DeliveryPolicyDecisionItem } from './delivery-invocation.js';
 import type { VerifierResultItem, RepairDiagnosticItem, VerifierStopItem } from './verifier.js';
 
+export type BuiltinScriptExecutionV1 = {
+  kind: 'builtin_script'; adapterId: 'builtin_tools'; adapterVersion: '1'; adapterCodeDigest: string;
+  guestToolchainManifestRef: ArtifactRef; guestToolchainManifestDigest: string;
+  toolId: 'node'; executionPath: '/usr/bin/node'; executableDigest: string;
+};
+export type SupervisorControlExecutionV1 = {
+  kind: 'supervisor_control'; handlerId: 'request_input'; supervisorEntryId: string;
+  supervisorEntryVersion: string; supervisorExecutableDigest: string;
+};
+
 export type ToolContractManifestV1 = {
   schemaVersion: 1;
   format: 'cliq-tool-contracts-v1';
@@ -24,7 +34,8 @@ export type ToolContractManifestV1 = {
   } & (
     | { replayClass: 'manual' | 'retry'; execution: {
         kind: 'builtin'; adapterId: string; adapterVersion: string; adapterCodeDigest: string;
-      } }
+      } | BuiltinScriptExecutionV1 }
+    | { replayClass: 'manual'; execution: SupervisorControlExecutionV1 }
     | { replayClass: ReplayClass; execution: {
         kind: 'mcp'; registrationId: string; registryRevisionRef: ArtifactRef;
         registryManifestDigest: string; serverToolName: string; toolContractDigest: string;

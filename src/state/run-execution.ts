@@ -3,6 +3,8 @@ import path from 'node:path';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting, identityHash, parseCanonicalTime, sha256Bytes } from '../kernel/identity.js';
 import type { ProcessContainmentPlanV1, SandboxLaunchSpecV1, SandboxRuntimeBindingV1 } from '../kernel/execution.js';
+import { BUILTIN_SCRIPT_ENVIRONMENTS, BUILTIN_SCRIPT_PRIVATE_MOUNTS, BUILTIN_SCRIPT_RECIPE,
+  builtinToolInputBytes, decodeBuiltinToolInput, isBuiltinScriptTool } from '../sandbox/builtin-tool-data.js';
 import type { Run, PreparingWorkerLaunch, StateOwnerRecordV1, SupervisorInspectorIdentityV1, WorkerIdentity, WorkspaceGenerationSnapshotEvidenceV1, WorkerDeathWait } from '../kernel/types.js';
 import type { ToolCheckpointProof, ToolObservationV1 } from '../kernel/tool-authorization.js';
 import { decodeRetainedRunAssembly, type RunAssemblyValidationMaterial } from '../model/run-assembly.js';
@@ -19,7 +21,7 @@ import { isJoinedCasPublicationFailure } from './cas.js';
 import { sampleCanonicalNow } from './canonical-time.js';
 import { openInstalledPreparingGit, type InstalledPreparingGit, type PreparingGitCompletion } from '../sandbox/preparation-git.js';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
-import { decodeSandboxProfile, readBuiltinEditLaunchClosure, readWorkerLaunchClosure, readRetainedWorkerLaunchClosure, readQuarantinedWorkerLaunchClosure, decodeWorkerProcessContainment, readVerifierLaunchClosure, type WorkerLaunchClosure } from './execution-closure.js';
+import { decodeSandboxProfile, readBuiltinEditLaunchClosure, readBuiltinScriptLaunchClosure, readWorkerLaunchClosure, readRetainedWorkerLaunchClosure, readQuarantinedWorkerLaunchClosure, decodeWorkerProcessContainment, readVerifierLaunchClosure, type WorkerLaunchClosure } from './execution-closure.js';
 import { loadAgentRun } from './reducers/agent.js';
 import { loadDeliveryContinuation, type DeliveryContinuation } from './run-continuation.js';
 import { assertLiveDispatchState, markInvocationUnknown } from './reducers/invocation.js';
@@ -56,6 +58,7 @@ import { deliveryPublicationCheckpointId } from './delivery-publication-progress
 import type { PublicationPathWait } from '../kernel/reconciliation.js';
 import type { InstalledControlResponseV1, RunReconcileRequestV1 } from '../kernel/control-wire.js';
 import type { AuthenticatedControlIdentity } from './control-channel.js';
+import { retainBuiltinCapturePublication } from './builtin-tool-capture.js';
 import type { PublicationReconciliationTask } from './publication-reconciliation-task.js';
 
 /** Trusted installation paths belong to Supervisor bootstrap, not a Run or a control frame. */
@@ -251,7 +254,7 @@ type ActiveWorker = {
 type ReceivedCompletion = ({ kind: 'tool' | 'final_turn' | 'verifier' | 'publication'; worker: LinuxBlockedWorker;
   activeWorker: ActiveWorker } | { kind: 'publication_maintenance' | 'publication_received' | 'publication_reconciliation';
     worker?: LinuxBlockedWorker; activeWorker?: ActiveWorker }) & {
-  finish(): Promise<Run>; failure?: unknown };
+  finish(): Promise<Run>; failure?: unknown; retainsWorker?: boolean };
 
 /** Pure retry classification only. The caller must already own the genuine
  * received producer; its fixed completion still validates the entire Stop
@@ -307,35 +310,53 @@ async function publishWorkerRecipe(artifacts: ArtifactCatalog, controller: Linux
     workspaceGenerationRef: generationRef, containmentPlanRef, sandboxLaunchSpecRef } };
 }
 
-async function publishEditRecipe(artifacts: ArtifactCatalog, workerSpec: WorkerSpec, parentContainmentRef: string,
+async function publishBuiltinRecipe(artifacts: ArtifactCatalog, workerSpec: WorkerSpec, parentContainmentRef: string,
   parentCgroup: string, prepared: Extract<Awaited<ReturnType<Awaited<ReturnType<typeof loadAgentRun>>['prepareTool']>>, { disposition: 'prepared' }>, dispatchId: string) {
-  if (prepared.target.execution.kind !== 'builtin' || prepared.target.execution.adapterId !== LINUX_WORKER_RECIPE.editId) {
+  const execution = prepared.target.execution;
+  const script = execution.kind === 'builtin_script';
+  if (!script && (execution.kind !== 'builtin' || execution.adapterId !== LINUX_WORKER_RECIPE.editId)) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'edit does not select the installed contained adapter');
   }
+  if (script && !isBuiltinScriptTool(prepared.request.toolName)) throw new TypeError('unsupported fixed script tool');
   if (workerSpec.filesystem.kind !== 'run_generation') throw new KernelStorageError('ARTIFACT_MISMATCH', 'edit requires a private Run generation');
   const owner = { kind: 'run_invocation' as const, runId: prepared.run.id, intendedLeaseEpoch: prepared.run.leaseEpoch,
     workerLaunchId: workerSpec.owner.workerLaunchId, opId: prepared.entry.opId, attempt: prepared.entry.attempt, dispatchId };
   if (workerSpec.containmentPlanRef === parentContainmentRef) throw new KernelStorageError('ARTIFACT_MISMATCH', 'actual parent containment is required');
-  const cgroupNameReservationDigest = canonicalSha256(['cliq-edit-cgroup-v1', dispatchId]);
+  const cgroupNameReservationDigest = canonicalSha256([script ? 'cliq-builtin-tool-cgroup-v1' : 'cliq-edit-cgroup-v1', dispatchId]);
   const plan: ProcessContainmentPlanV1 = { schemaVersion: 1, format: 'cliq-process-containment-plan-v1', owner,
     filesystemBinding: { kind: 'run-generation', generationRef: workerSpec.filesystem.generationRef }, parentContainmentRef,
     launchNonceDigest: nonce(), backend: { kind: 'linux', cgroupPath: path.posix.join(parentCgroup, `cliq-${cgroupNameReservationDigest}`),
-      cgroupNameReservationDigest, pidNamespaceReservationId: identityHash('cliq-edit-namespace-v1', dispatchId),
+      cgroupNameReservationDigest, pidNamespaceReservationId: identityHash(script ? 'cliq-builtin-tool-namespace-v1' : 'cliq-edit-namespace-v1', dispatchId),
       subreaperStartToken: '' }, createdAt: sampleCanonicalNow(), planDigest: '' };
   const parentPlan = await artifacts.readCanonical<ProcessContainmentPlanV1>(workerSpec.containmentPlanRef);
   if (parentPlan.backend.kind !== 'linux' || plan.backend.kind !== 'linux') throw new KernelStorageError('ARTIFACT_MISMATCH', 'edit requires the exact Linux parent');
   plan.backend.subreaperStartToken = parentPlan.backend.subreaperStartToken;
   plan.planDigest = digestOmitting(plan, 'planDigest');
   const containmentPlanRef = (await artifacts.publishCanonical(plan, plan.format)).ref;
-  const spec: EditSpec = { ...workerSpec, owner, purpose: 'tool',
-    executable: { kind: 'runtime_bundle', runtimeBundleRef: workerSpec.runtime.runtimeBundleRef,
-      runtimeBundleManifestDigest: workerSpec.runtime.runtimeBundleManifestDigest, executableId: prepared.target.execution.adapterId,
-      executableDigest: prepared.target.execution.adapterCodeDigest, role: 'tool_adapter', executionPath: LINUX_WORKER_RECIPE.editPath },
-    processInvocation: { kind: 'run_request', purpose: 'tool', recipe: 'cliq-tool-launch-v1', requestRef: prepared.entry.requestRef,
+  const guest = script ? decodeGuestToolchainManifest(await artifacts.readCanonical(execution.guestToolchainManifestRef)) : undefined;
+  const runtime: SandboxRuntimeBindingV1 = guest && script ? { ...workerSpec.runtime, toolchain: { kind: 'guest_toolchain',
+    guestToolchainManifestRef: execution.guestToolchainManifestRef, guestToolchainManifestDigest: guest.manifestDigest,
+    guestImageRef: guest.guestImageRef, guestImageDigest: guest.guestImageDigest }, runtimeDigest: '' } : workerSpec.runtime;
+  if (script) runtime.runtimeDigest = digestOmitting(runtime, 'runtimeDigest');
+  const mounts = script ? BUILTIN_SCRIPT_PRIVATE_MOUNTS.map(mount => ({ ...mount, privateRootId: identityHash(dispatchId, mount.purpose) })) : workerSpec.mounts;
+  if (script) {
+    const call = await artifacts.readCanonical<import('../protocol/agent-ir.js').ToolCallInputV1>(prepared.request.inputRef);
+    builtinToolInputBytes(prepared.request.toolName as import('../sandbox/builtin-tool-data.js').BuiltinScriptTool, call.value!, workerSpec.resources);
+  }
+  const spec: EditSpec = { ...workerSpec, owner, purpose: 'tool', runtime,
+    executable: script ? { kind: 'guest_toolchain', guestToolchainManifestRef: execution.guestToolchainManifestRef,
+      guestToolchainManifestDigest: execution.guestToolchainManifestDigest, toolId: execution.toolId, executableDigest: execution.executableDigest,
+      role: 'tool', executionPath: execution.executionPath } : { kind: 'runtime_bundle', runtimeBundleRef: workerSpec.runtime.runtimeBundleRef,
+      runtimeBundleManifestDigest: workerSpec.runtime.runtimeBundleManifestDigest, executableId: execution.adapterId,
+      executableDigest: execution.adapterCodeDigest, role: 'tool_adapter', executionPath: LINUX_WORKER_RECIPE.editPath },
+    processInvocation: { kind: 'run_request', purpose: 'tool', ...(script ? { recipe: BUILTIN_SCRIPT_RECIPE.invocation,
+      privateGitProtection: 'existing_read_only' as const } : { recipe: 'cliq-tool-launch-v1' as const }), requestRef: prepared.entry.requestRef,
       requestDigest: prepared.request.requestDigest, targetRef: prepared.entry.target, targetDigest: prepared.target.targetDigest,
       argvCwdSource: 'trusted_recipe_decode_of_request_and_target',
       stdio: { stdin: 'closed', stdout: 'captured', stderr: 'captured', extraFileDescriptors: 'authenticated_operation_channel_only' } },
-    filesystem: { ...workerSpec.filesystem, access: 'read_write' }, parentWorkerContainmentRef: parentContainmentRef,
+    filesystem: { ...workerSpec.filesystem, access: script && prepared.request.toolName !== 'bash' ? 'read_only' : 'read_write' },
+    ...(script ? { environment: prepared.request.toolName === 'bash' ? BUILTIN_SCRIPT_ENVIRONMENTS.bash : BUILTIN_SCRIPT_ENVIRONMENTS.read,
+      mounts, mountsDigest: canonicalSha256(mounts) } : {}), parentWorkerContainmentRef: parentContainmentRef,
     requestRef: prepared.entry.requestRef, requestDigest: prepared.request.requestDigest, targetRef: prepared.entry.target,
     targetDigest: prepared.target.targetDigest, operationGrantRef: prepared.entry.grantRef!, containmentPlanRef,
     containmentPlanDigest: plan.planDigest, createdAt: sampleCanonicalNow(), launchSpecDigest: '' };
@@ -492,6 +513,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
   let stopJoin: Promise<void> | undefined;
   let operationPhase: 'preparing' | 'claimed' | 'received' | undefined;
   let verifierReleased = false;
+  let toolReleased = false;
   let receivedCompletion: ReceivedCompletion | undefined;
   let closingCompletion: { operation?: Promise<Run>; completion?: typeof receivedCompletion; worker: LinuxBlockedWorker; activeWorker: ActiveWorker } | undefined;
   let retirementController: LinuxWorkerController | undefined;
@@ -1112,7 +1134,8 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       }
       throw error;
     }).finally(async () => {
-      try { if (!retainedCompletion && (!retainWorker || operationFailure)) await retireWorkerResources(); }
+      const completedRead = receivedCompletion?.kind === 'tool' && receivedCompletion.retainsWorker === true;
+      try { if (!retainedCompletion && ((!retainWorker && !completedRead) || operationFailure)) await retireWorkerResources(); }
       catch (failure) {
         if (operationFailure && operationFailure.error !== failure) {
           cleanupFailure = new ResourceRetirementError('Run execution failed and its resources did not retire',
@@ -1133,6 +1156,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           settleReceivedPublication = undefined;
           if (closingCompletion?.operation === operation || closingCompletion?.completion !== undefined) closingCompletion = undefined;
           operationPhase = undefined;
+          toolReleased = false;
         }
         pending = undefined; if (operationAbort === abort) operationAbort = undefined;
       }
@@ -1425,7 +1449,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
     renewCurrentWorkerLease: () => {
       // An operation in flight owns its current lease. Maintenance cannot
       // race its native activation, revocation or Checkpoint transition.
-      if (closed || isClosing() || pending && !(verifierReleased && operationPhase === 'claimed') || receivedCompletion ||
+      if (closed || isClosing() || pending && !((verifierReleased || toolReleased) && operationPhase === 'claimed') || receivedCompletion ||
           !activeWorker || !worker || !generation || !controller || !reservation) return 'inactive';
       if (cleanupFailure !== undefined) throw new KernelStorageError('RECOVERY_REQUIRED', 'worker maintenance retains a resource retirement failure');
       const retained = activeWorker, run = readRun(driver, runId);
@@ -1878,39 +1902,88 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           await worker!.observeProcess();
           signal.throwIfAborted();
         }
-        if (selected.call.toolName !== 'edit') throw new KernelStorageError('INVALID_REQUEST', 'this installed recipe supports only the current builtin edit');
         const projection = await currentAgent.readToolInvocation(signal);
         requireEqual(projection.run, selected.run, 'current native tool projection');
-        if (projection.kind !== 'tool' || projection.execution.kind !== 'builtin' || projection.execution.adapterId !== LINUX_WORKER_RECIPE.editId) {
+        if (projection.kind === 'tool' && !(projection.execution.kind === 'builtin' && projection.execution.adapterId === LINUX_WORKER_RECIPE.editId ||
+            projection.execution.kind === 'builtin_script') || projection.kind === 'input' && projection.execution.kind !== 'supervisor_control') {
           throw new KernelStorageError('INVALID_REQUEST', 'this installed recipe does not support the frozen tool execution identity');
         }
-        const workspaceCut = await readRecoveryClosure(driver, reads, runId);
-        requireEqual(workspaceCut.run, selected.run, 'native tool workspace cut');
-        const current = queued ? await activateWorker(workspaceCut, signal) : activeWorker!;
-        const { recipe, processContainmentRef } = current;
-        const activated = { ...current.activated, run: queued ? current.activated.run : selected.run };
-        if (!worker || !generation) throw new KernelStorageError('RECOVERY_REQUIRED', 'native tool execution lost its original physical owner');
-        const currentWorker = worker;
-        signal.throwIfAborted();
-        const prepared = await currentAgent.prepareTool({ expectedRunRevision: activated.run.revision, leaseEpoch: activated.run.leaseEpoch }, signal);
-        if (prepared.disposition !== 'prepared') {
-          const checkpointId = prepared.disposition === 'approval_required' ? prepared.checkpointId
-            : identityHash('cliq-denied-tool-worker-checkpoint-v1', runId, prepared.run.latestCheckpointId, nonce());
+        if (retained && projection.kind === 'tool' && !worker!.hasInvocationCapacity()) {
+          // This is the original controller's monotonic scope arena, observed
+          // before preparing any new grant or permanent claim. It is not the
+          // Run tool-call budget and supplies no process-death evidence.
+          const latest = new Map<string, typeof selected.journal[number]>();
+          for (const entry of selected.journal) latest.set(`${entry.opId}:${entry.attempt}`, entry);
+          if ([...latest.values()].some(entry => ['prepared', 'dispatch_claimed', 'unknown'].includes(entry.phase)))
+            throw new KernelStorageError('RECOVERY_REQUIRED', 'scope capacity cannot replace an original unresolved invocation');
+          const current = activeWorker!, cause = 'scope_capacity';
+          const checkpointId = identityHash('cliq-tool-capacity-checkpoint-v1', runId,
+            current.activated.launch.launchId, selected.run.frontierRef!, String(selected.run.revision), cause);
           const proof = await retireToCheckpoint(current, checkpointId, signal);
-          if (prepared.disposition === 'approval_required') {
-            await currentAgent.waitForToolApproval({ expectedRunRevision: prepared.run.revision, waitingOnRef: prepared.waitingOnRef, checkpoint: proof.postEffect });
-          } else {
-            const current = await readRecoveryClosure(driver, artifacts, runId);
-            await sealWorkerGeneration(driver, artifacts, owner, { launchId: activated.launch.launchId,
-              expectedRunRevision: current.run.revision, expectedGenerationRowVersion: proof.checkpointing.generation.rowVersion,
-              quiesceId: proof.quiesceId, checkpointId, contextManifestRef: current.latestCheckpoint.contextManifestRef,
+          if (proof.postEffect.workspaceStateRef !== selected.checkpoint.workspaceStateRef)
+            throw new KernelStorageError('RECOVERY_REQUIRED', 'scope capacity retirement cannot adopt an unobserved workspace change');
+          const cut = await readRecoveryClosure(driver, reads, runId);
+          if (cut.run.frontierRef !== selected.run.frontierRef || cut.latestCheckpoint.id !== selected.checkpoint.id)
+            throw new KernelStorageError('REVISION_CONFLICT', 'scope capacity retirement lost its original tool frontier');
+          const sealed = await sealWorkerGeneration(driver, artifacts, owner, { launchId: current.activated.launch.launchId,
+            expectedRunRevision: cut.run.revision, expectedGenerationRowVersion: proof.checkpointing.generation.rowVersion,
+            quiesceId: proof.quiesceId, checkpointId, contextManifestRef: cut.latestCheckpoint.contextManifestRef,
+            ...proof.postEffect, snapshotEvidenceDigest: proof.snapshot.evidenceDigest, checkpointReason: 'auto' }, reobserveRetirement);
+          await retireWorkerResources();
+          return sealed.run;
+        }
+        let prepared = await currentAgent.prepareTool({ expectedRunRevision: selected.run.revision, leaseEpoch: selected.run.leaseEpoch }, signal);
+        if (prepared.disposition === 'retirement_required') {
+          if (!retained || !activeWorker) throw new KernelStorageError('RECOVERY_REQUIRED', 'waiting selection lost its original live worker');
+          const current = activeWorker, proof = await retireToCheckpoint(current, prepared.checkpointId, signal);
+          await currentAgent.retireToolSelection({ expectedRunRevision: prepared.run.revision,
+            checkpointId: prepared.checkpointId, checkpoint: proof.postEffect });
+          await retireWorkerResources();
+          signal.throwIfAborted();
+          const next = readRun(driver, runId);
+          // Nothing from the old worker's decision is an authorization, nonce,
+          // pending wait or grant. Reproduce the complete policy on this cut.
+          prepared = await currentAgent.prepareTool({ expectedRunRevision: next.revision, leaseEpoch: next.leaseEpoch }, signal);
+        }
+        if (prepared.disposition === 'approval_required') {
+          await currentAgent.waitForToolApproval({ expectedRunRevision: prepared.run.revision, waitingOnRef: prepared.waitingOnRef });
+          return readRun(driver, runId);
+        }
+        if (prepared.disposition === 'input_required') {
+          await currentAgent.waitForInput({ expectedRunRevision: prepared.run.revision, waitingOnRef: prepared.waitingOnRef });
+          return readRun(driver, runId);
+        }
+        if (prepared.disposition === 'denied') {
+          if (activeWorker) {
+            const current = activeWorker;
+            const checkpointId = identityHash('cliq-denied-tool-worker-checkpoint-v1', runId, prepared.run.latestCheckpointId, nonce());
+            const proof = await retireToCheckpoint(current, checkpointId, signal);
+            const cut = await readRecoveryClosure(driver, reads, runId);
+            await sealWorkerGeneration(driver, artifacts, owner, { launchId: current.activated.launch.launchId,
+              expectedRunRevision: cut.run.revision, expectedGenerationRowVersion: proof.checkpointing.generation.rowVersion,
+              quiesceId: proof.quiesceId, checkpointId, contextManifestRef: cut.latestCheckpoint.contextManifestRef,
               ...proof.postEffect, snapshotEvidenceDigest: proof.snapshot.evidenceDigest, checkpointReason: 'auto' }, reobserveRetirement);
           }
           return readRun(driver, runId);
         }
+        if (prepared.disposition === 'worker_required') {
+          const workspaceCut = await readRecoveryClosure(driver, reads, runId);
+          requireEqual(workspaceCut.run, prepared.run, 'native tool worker selection cut');
+          const current = await activateWorker(workspaceCut, signal);
+          prepared = await currentAgent.prepareTool({ expectedRunRevision: current.activated.run.revision,
+            leaseEpoch: current.activated.run.leaseEpoch }, signal);
+        }
+        if (prepared.disposition !== 'prepared' || !activeWorker)
+          throw new KernelStorageError('REVISION_CONFLICT', 'tool must be selected again after its worker cut changed');
+        const current = activeWorker;
+        const { recipe, processContainmentRef } = current;
+        const activated = { ...current.activated, run: prepared.run };
+        if (!worker || !generation) throw new KernelStorageError('RECOVERY_REQUIRED', 'native tool execution lost its original physical owner');
+        const currentWorker = worker;
+        signal.throwIfAborted();
         const dispatchId = identityHash('cliq-tool-dispatch-v1', runId, prepared.entry.opId, String(prepared.entry.attempt), nonce());
         if (currentWorker.containment.backend.kind !== 'linux') throw new KernelStorageError('ARTIFACT_MISMATCH', 'native edit parent is not Linux');
-        const sandboxLaunchSpecRef = await publishEditRecipe(reads, recipe.spec, processContainmentRef, currentWorker.containment.backend.cgroupPath, prepared, dispatchId);
+        const sandboxLaunchSpecRef = await publishBuiltinRecipe(reads, recipe.spec, processContainmentRef, currentWorker.containment.backend.cgroupPath, prepared, dispatchId);
         // The permanent claim precedes even blocked invocation process creation.
         signal.throwIfAborted();
         const claimed = await currentAgent.claimTool({ expectedRunRevision: prepared.run.revision, leaseEpoch: activated.run.leaseEpoch,
@@ -1920,37 +1993,57 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         const call = await artifacts.readCanonical<import('../protocol/agent-ir.js').ToolCallInputV1>(claimed.request.inputRef);
         const grant = await artifacts.readCanonical<import('../kernel/tool-authorization.js').ToolOperationGrantV1>(claimed.entry.grantRef!);
         const live = assertLiveDispatchState(driver, owner, runId, prepared.run.revision, activated.run.leaseEpoch, sampleCanonicalNow());
-        const edit = await readBuiltinEditLaunchClosure(artifacts, assertActiveStateOwner(driver, owner), { ...live, prepared: prepared.entry,
-          request: claimed.request, target: claimed.target, call, grant, dispatchId, sandboxLaunchSpecRef });
-        const invocation = await currentWorker.createInvocation(edit);
+        const closureInput = { ...live, prepared: prepared.entry, request: claimed.request, target: claimed.target,
+          call, grant, dispatchId, sandboxLaunchSpecRef };
+        const script = claimed.target.execution.kind === 'builtin_script';
+        const launchClosure = script
+          ? await readBuiltinScriptLaunchClosure(reads, assertActiveStateOwner(driver, owner), closureInput, bootstrap!.releaseKeys, signal)
+          : await readBuiltinEditLaunchClosure(reads, assertActiveStateOwner(driver, owner), closureInput);
+        const invocation = await currentWorker.createInvocation(launchClosure);
         await invocation.observeProcess();
         signal.throwIfAborted();
         await claimed.release(invocation);
+        toolReleased = script;
         const result = await invocation.result();
+        // The native friend copies the original private bytes synchronously,
+        // before any caller view or post-effect/persistence await can mutate them.
+        const captured = typeof result === 'string' ? undefined : retainBuiltinCapturePublication(artifacts,
+          assertActiveStateOwner(driver, owner), prepared.entry, claimed.entry, result,
+          decodeBuiltinToolInput(builtinToolInputBytes(result.tool, call.value!, launchClosure.spec.resources)));
+        if (script !== (captured !== undefined) || captured && captured.tool !== call.toolName)
+          throw new KernelStorageError('RECOVERY_REQUIRED', 'tool result differs from its original fixed native recipe');
         operationPhase = 'received';
         const observedAt = sampleCanonicalNow();
+        const retainReadWorker = captured !== undefined && captured.tool !== 'bash';
+        const persistCapture = captured?.publish, nativeModel = captured?.model;
         // Register the original result before the first post-effect await.
         // This closure owns only that result's persistence, never a new dispatch.
-        const retire = checkpointRetirement(current, toolCheckpointId(runId, prepared.entry.opId, prepared.entry.attempt), signal);
-        let proof: Awaited<ReturnType<typeof retire>> | undefined;
+        const retire = retainReadWorker ? undefined : checkpointRetirement(current, toolCheckpointId(runId, prepared.entry.opId, prepared.entry.attempt), signal);
+        let proof: Awaited<ReturnType<NonNullable<typeof retire>>> | undefined;
+        let capture: Awaited<ReturnType<NonNullable<typeof persistCapture>>> | undefined;
         let diagnostic: Awaited<ReturnType<ArtifactCatalog['publishCanonical']>> | undefined;
         let observation: ToolObservationV1 | undefined;
         let observationRef: string | undefined;
-        receivedCompletion = { kind: 'tool', worker: currentWorker, activeWorker: current, finish: async () => {
+        receivedCompletion = { kind: 'tool', worker: currentWorker, activeWorker: current, retainsWorker: retainReadWorker, finish: async () => {
           if (activeWorker !== current || worker !== currentWorker || ownedLaunchId !== activated.launch.launchId) {
             throw new KernelStorageError('LEASE_FENCED', 'received tool completion lost its original physical owner');
           }
           assertActiveStateOwner(driver, owner);
-          proof ??= await retire();
+          if (persistCapture) capture ??= await persistCapture();
+          if (retire) proof ??= await retire();
           const base = { schemaVersion: 1 as const, format: 'cliq-tool-observation-v1' as const, runId, opId: claimed.entry.opId,
             attempt: claimed.entry.attempt, requestRef: claimed.entry.requestRef, targetRef: claimed.entry.target,
             grantRef: claimed.entry.grantRef!, dispatchId, observedAt,
-            postEffect: proof.postEffect };
+            ...(proof ? { postEffect: proof.postEffect } : {}),
+            ...(capture ? { captureRef: capture.ref,
+              captureDigest: (await artifacts.readCanonical<import('./builtin-tool-capture.js').BuiltinToolCaptureV1>(capture.ref)).captureDigest } : {}) };
           if (!observation) {
-            if (result === 'ok') observation = { ...base, outcome: 'executed', content: { ok: true }, observationDigest: '' };
+            if (nativeModel?.outcome === 'executed') observation = { ...base, ...nativeModel, observationDigest: '' };
+            else if (!nativeModel && result === 'ok') observation = { ...base, outcome: 'executed', content: { ok: true }, observationDigest: '' };
             else {
-              diagnostic ??= await artifacts.publishCanonical({ schemaVersion: 1, format: 'cliq-tool-output-diagnostic-v1', code: 'TOOL_EXECUTION_FAILED' }, 'cliq-tool-output-diagnostic-v1');
-              observation = { ...base, outcome: 'error', code: 'TOOL_EXECUTION_FAILED', diagnosticRef: diagnostic.ref, diagnosticDigest: diagnostic.ref, observationDigest: '' };
+              const code = nativeModel?.code ?? 'TOOL_EXECUTION_FAILED';
+              diagnostic ??= await artifacts.publishCanonical({ schemaVersion: 1, format: 'cliq-tool-output-diagnostic-v1', code }, 'cliq-tool-output-diagnostic-v1');
+              observation = { ...base, outcome: 'error', code, diagnosticRef: diagnostic.ref, diagnosticDigest: diagnostic.ref, observationDigest: '' };
             }
             observation.observationDigest = digestOmitting(observation, 'observationDigest');
           }

@@ -1,6 +1,8 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
-import type { ArtifactDescriptorV1 } from '../kernel/types.js';
+import type { ArtifactDescriptorV1, Session, SessionContextProjection } from '../kernel/types.js';
+import { decodeSessionContextData } from '../kernel/session-context-data.js';
+import { parseJsonStrict } from '../kernel/json.js';
 import type { RunSubmitRequest } from '../kernel/control-submit.js';
 import { immutableSnapshot } from '../model/immutable.js';
 import { openInstalledSupervisorClient, type InstalledSupervisorClient } from '../state/installed-control-client.js';
@@ -189,4 +191,19 @@ export function createInstalledControlSession(initial: InstalledSupervisorClient
     }
   });
   return session;
+}
+
+/** Display data only, bound to the captured response and complete artifact bytes. */
+export async function readInstalledSessionContext(session: InstalledControlSession, snapshot: Session,
+  signal?: AbortSignal): Promise<SessionContextProjection> {
+      const original = immutableSnapshot(snapshot);
+      const bytes = await session.artifact(original.contextProjectionRef, { maxBytes: 64 * 1024 * 1024, signal });
+      signal?.throwIfAborted();
+      const value = parseJsonStrict(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+      if (!canonicalJsonBytes(value).equals(bytes)) throw new TypeError('Session projection bytes are not canonical');
+      const projection = decodeSessionContextData(value);
+      if (projection.sessionId !== original.id || projection.contextRevision !== original.contextRevision ||
+          projection.throughItemSeq !== original.latestItemSeq)
+        throw new TypeError('Session projection differs from its original captured snapshot');
+      return projection;
 }

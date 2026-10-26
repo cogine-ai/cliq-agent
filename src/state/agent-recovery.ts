@@ -223,7 +223,8 @@ async function validateAgentRecoveryData(input: AgentRecoveryInput, onPhase?: (p
     throw new TypeError('verifier history requires its original retained SQLite cut');
   if (spec.operation === 'agent') {
     phase('tool');
-    await validateToolRecovery({ artifacts, run, spec, items, journal, checkpoints: input.checkpoints, workspaceGenerations: input.workspaceGenerations });
+    await validateToolRecovery({ artifacts, run, spec, items, journal, checkpoints: input.checkpoints,
+      workspaceGenerations: input.workspaceGenerations, driver: input.driver });
     phase('input');
     await validateUserInputRecovery({ artifacts, run, spec, items, journal, checkpoints: input.checkpoints });
   }

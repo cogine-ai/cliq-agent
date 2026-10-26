@@ -535,3 +535,24 @@ test('the original secret scanner may refuse a fixed progress marker before it e
   }), error => error === blocked);
   assert.equal(opened, 2); assert.equal(closed, 2);
 });
+
+test('a real one-shot CLI child keeps its strict original request response even when it exits immediately after hello', async () => {
+  const entryUrl = new URL('../../../src/client/entry.ts', import.meta.url).href;
+  const commandsUrl = new URL('../../../src/client/commands.ts', import.meta.url).href;
+  const fixtureUrl = new URL('../../../src/client/testing/protocol.ts', import.meta.url).href;
+  const wireUrl = new URL('../../../src/kernel/canonical.ts', import.meta.url).href;
+  const source = `import{runClientInvocation}from${JSON.stringify(entryUrl)};
+    import{parseClientInvocation}from${JSON.stringify(commandsUrl)};
+    import{protocolClient}from${JSON.stringify(fixtureUrl)};import{canonicalJsonBytes}from${JSON.stringify(wireUrl)};
+    const f=protocolClient();process.stdout.write(canonicalJsonBytes({schemaVersion:3,protocolVersion:1,type:'response',response:{protocolVersion:1,ok:true,result:f.session.hello}}));process.stdout.write('\\n');
+    const code=await runClientInvocation(f.session,parseClientInvocation(['status','run','--json'],'/workspace'),{input:process.stdin,output:process.stdout,diagnostic:process.stderr,workspacePath:'/workspace'});if(code!==0)process.exitCode=code;`;
+  let streams = 0, joins = 0;
+  const client = await openInstalledClientConsumer({ executable: process.execPath,
+    args: ['--import', 'tsx', '--input-type=module', '-e', source], cwd: process.cwd(), env: { ...process.env, NODE_NO_WARNINGS: '1' },
+    headlessSchemaVersion: 3, initialRequest: { protocolVersion: 1, method: 'run.get', runId: 'run' },
+    openScan: () => ({ scan() {}, close() { streams++; } }), onJoined() { joins++; } });
+  const response = await client.initialResponse;
+  assert.equal(response?.result?.snapshot.run.id, 'run');
+  await client.close(); assert.equal(streams, 2); assert.equal(joins, 1);
+  await assert.rejects(client.send({ protocolVersion: 1, method: 'run.get', runId: 'run' }));
+});

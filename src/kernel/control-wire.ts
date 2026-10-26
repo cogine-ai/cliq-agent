@@ -2,6 +2,7 @@ import { canonicalJsonBytes, canonicalSha256, normalizeCanonicalText } from './c
 import { assertAdmissionKey, assertRequestId, normalizeAbsolutePath, normalizeBoundedText, parseCanonicalTime } from './identity.js';
 import { immutableSnapshot } from '../model/immutable.js';
 import type { ControlResultV1, RunEvent, RunSnapshotV1, SessionSnapshotV1 } from './types.js';
+import type { UserInputValue } from './user-input.js';
 import { decodeCredentialAuthorityOperation, type CredentialAuthorityOperationV1 } from './credential-authority.js';
 import { assertBoundedJsonValue, parseJsonStrict } from './json.js';
 import { decodeWireRun, decodeWireSession, decodeWireCheckpoint, decodeWireEvent, decodeWireJournal,
@@ -11,6 +12,8 @@ import { normalizeSourceReadScopePath } from './source-read-scope.js';
 import { decodeSandboxResourceOptions, normalizeRunSubmitRequest, type RunSubmitRequest } from './control-submit.js';
 import { normalizeRunApplyRequest, type RunApplyRequest } from './control-apply.js';
 import { decodeSessionContinuityRequest, decodeSessionSummary, type SessionContinuityRequestV1, type SessionContinuityResultV1 } from './session-continuity.js';
+import { decodeControlListRequest, decodeControlListResult, validateControlListResponse,
+  type ControlListRequestV1, type ControlListResultV1 } from './control-list.js';
 import { assertControlWireJson as json, controlWireRecord, controlWireText, controlWireInteger, controlWireRef, decodeControlRange } from './control-wire-data.js';
 export { controlWireRecord, controlWireText, controlWireInteger, controlWireRef, decodeControlRange } from './control-wire-data.js';
 
@@ -27,6 +30,8 @@ export type RunCancelRequestV1 = Readonly<{ protocolVersion: 1; method: 'run.can
   requestDigest: string; runId: string; expectedRevision: number }>;
 export type RunApproveRequestV1 = Readonly<{ protocolVersion: 1; method: 'run.approve'; requestId: string;
   requestDigest: string; runId: string; expectedRevision: number; waitingOnRef: string; decision: 'allow' | 'deny'; ttlMs?: number }>;
+export type RunInputRequestV1 = Readonly<{ protocolVersion: 1; method: 'run.input'; requestId: string;
+  requestDigest: string; runId: string; expectedRevision: number; waitingOnRef: string; input: UserInputValue }>;
 /** Connected publication subset: inspection can be enqueued, never supplied
  * with caller-selected evidence, a target, or manual abandonment authority. */
 export type RunReconcileRequestV1 = Readonly<{ protocolVersion: 1; method: 'run.reconcile'; requestId: string;
@@ -34,8 +39,8 @@ export type RunReconcileRequestV1 = Readonly<{ protocolVersion: 1; method: 'run.
 /** A continuation of an existing operation, deliberately not MutationBase. */
 export type CredentialFinalizeRequest = Readonly<{ protocolVersion: 1; method: 'credential.finalize';
   requestId: string; operationId: string; attempt: 1 | 2 | 3; commandDigest: string }>;
-export type InstalledControlRequestV1 = ReadControlRequest | ControlHelloRequestV1 | SessionCreateRequestV1 | SessionContinuityRequestV1 | RunSubmitRequest |
-  RunApplyRequest | RunCancelRequestV1 | RunApproveRequestV1 | RunReconcileRequestV1 | AuthorizationCreateRequest | AuthorizationRevokeRequest | CredentialFinalizeRequest |
+export type InstalledControlRequestV1 = ReadControlRequest | ControlHelloRequestV1 | SessionCreateRequestV1 | SessionContinuityRequestV1 | ControlListRequestV1 | RunSubmitRequest |
+  RunApplyRequest | RunCancelRequestV1 | RunApproveRequestV1 | RunInputRequestV1 | RunReconcileRequestV1 | AuthorizationCreateRequest | AuthorizationRevokeRequest | CredentialFinalizeRequest |
   Readonly<{ protocolVersion: 1; method: 'supervisor.status' }>;
 
 export type RuntimeBundlePublicSummaryV1 = Readonly<{
@@ -68,7 +73,7 @@ export const CONTROL_METHODS_V1 = Object.freeze(['control.hello', 'session.creat
   'authorization.create', 'authorization.list', 'authorization.revoke', 'mcp.register',
   'mcp.refresh', 'mcp.list', 'artifact.get', 'supervisor.status', 'credential.finalize'] as const);
 export type ControlMethodV1 = typeof CONTROL_METHODS_V1[number];
-export type InstalledControlResultV1 = SessionContinuityResultV1 | Extract<ControlResultV1, { method: 'session.get' | 'run.get' | 'run.attach' | 'run.result' | 'run.diff' | 'artifact.get' }> | Extract<ControlResultV1, { method: 'session.create' | 'run.submit' | 'run.apply' | 'run.approve' | 'run.cancel' | 'run.reconcile' }> |
+export type InstalledControlResultV1 = SessionContinuityResultV1 | ControlListResultV1 | Extract<ControlResultV1, { method: 'session.get' | 'run.get' | 'run.attach' | 'run.result' | 'run.diff' | 'artifact.get' }> | Extract<ControlResultV1, { method: 'session.create' | 'run.submit' | 'run.apply' | 'run.approve' | 'run.input' | 'run.cancel' | 'run.reconcile' }> |
   import('../kernel/authorization.js').AuthorizationResponse['result'] |
   SupervisorStatusV1 | { method: 'credential.finalize'; operation: CredentialAuthorityOperationV1 } | (SupervisorHelloV1 & {
   method: 'control.hello'; protocolVersion: 1; serverBuild: string;
@@ -100,7 +105,7 @@ export type InstalledControlResponseV1 =
 
 /** Connected composition ceiling; a hello still intersects this with the actual installed Store. */
 export const INSTALLED_CONTROL_FEATURES = Object.freeze(['session.get', 'run.get', 'run.attach', 'supervisor.status', 'credential.finalize',
-  'session.create', 'session.list', 'session.fork', 'session.compact', 'session.handoff.create', 'run.submit', 'run.cancel', 'authorization.create', 'authorization.revoke', 'run.result', 'run.diff', 'artifact.get', 'run.apply', 'run.approve', 'run.reconcile'] as const);
+  'session.create', 'session.list', 'session.fork', 'session.compact', 'session.handoff.create', 'run.submit', 'run.list', 'run.cancel', 'authorization.create', 'authorization.list', 'authorization.revoke', 'run.result', 'run.diff', 'artifact.get', 'run.apply', 'run.approve', 'run.input', 'run.reconcile'] as const);
 export type InstalledControlFeature = typeof INSTALLED_CONTROL_FEATURES[number];
 export type InstalledControlMethod = InstalledControlRequestV1['method'];
 export type InstalledControlResultFor<M extends InstalledControlMethod> = Extract<InstalledControlResultV1, { method: M }>;
@@ -269,6 +274,7 @@ export function decodeInstalledControlRequest(value: unknown): InstalledControlR
     const { core, requestDigest } = decodeSessionCreatePublicRequest(source); return immutableSnapshot({ ...core, requestDigest });
   }
   if (['session.list', 'session.fork', 'session.compact', 'session.handoff.create'].includes(source?.method as string)) return decodeSessionContinuityRequest(source);
+  if (source?.method === 'run.list' || source?.method === 'authorization.list') return decodeControlListRequest(source);
   if (source?.method === 'run.submit') return normalizeRunSubmitRequest(source).originalRequest as RunSubmitRequest;
   if (source?.method === 'run.apply') return normalizeRunApplyRequest(source).originalRequest as RunApplyRequest;
   if (source?.method === 'run.reconcile') {
@@ -291,6 +297,20 @@ export function decodeInstalledControlRequest(value: unknown): InstalledControlR
     const { requestDigest, ...core } = source;
     if (canonicalSha256(core) !== requestDigest) throw new TypeError('run.approve request digest differs');
     return immutableSnapshot(source) as RunApproveRequestV1;
+  }
+  if (source?.method === 'run.input') {
+    controlWireRecord(source, ['protocolVersion', 'method', 'requestId', 'requestDigest', 'runId', 'expectedRevision', 'waitingOnRef', 'input']);
+    if (source.protocolVersion !== 1) throw new TypeError('control protocol version must be 1');
+    assertRequestId(source.requestId as string); controlWireRef(source.requestDigest); controlWireText(source.runId);
+    controlWireInteger(source.expectedRevision, 1); controlWireRef(source.waitingOnRef);
+    const input = controlWireRecord(source.input, ['kind', 'value']);
+    if (input.kind !== 'json' && input.kind !== 'text' || input.kind === 'text' && typeof input.value !== 'string')
+      throw new TypeError('invalid run.input value');
+    assertBoundedJsonValue(input.value, 'user input');
+    if (canonicalJsonBytes(input.value).byteLength > 1_048_576) throw new TypeError('user input exceeds its bound');
+    const { requestDigest, ...core } = source;
+    if (canonicalSha256(core) !== requestDigest) throw new TypeError('run.input request digest differs');
+    return immutableSnapshot(source) as RunInputRequestV1;
   }
   if (source?.method === 'run.cancel') {
     controlWireRecord(source, ['protocolVersion', 'method', 'requestId', 'requestDigest', 'runId', 'expectedRevision']);
@@ -320,6 +340,7 @@ function sessionSnapshot(value: unknown): SessionSnapshotV1 {
 function result(value: unknown, method: InstalledControlMethod): InstalledControlResultV1 {
   const data = value as Record<string, unknown>;
   if (data?.method !== method) throw new TypeError('unexpected installed control response method');
+  if (method === 'run.list' || method === 'authorization.list') return decodeControlListResult(value, method);
   if (method === 'control.hello') {
     controlWireRecord(data, ['method', 'protocolVersion', 'serverBuild', 'controlSchemaRange', 'enabledFeatureIds', 'supervisorInstanceId', 'activeRuntimeBundle', 'headlessSchemaRange']);
     const control = decodeControlRange(data.controlSchemaRange); decodeControlRange(data.headlessSchemaRange);
@@ -360,6 +381,12 @@ function result(value: unknown, method: InstalledControlMethod): InstalledContro
     controlWireRecord(data, ['method', 'snapshot']); runSnapshot(data.snapshot);
   } else if (method === 'run.approve') {
     controlWireRecord(data, ['method', 'snapshot', 'decisionRef']); runSnapshot(data.snapshot); controlWireRef(data.decisionRef);
+  } else if (method === 'run.input') {
+    controlWireRecord(data, ['method', 'snapshot', 'inputItemRef']);
+    const snapshot = runSnapshot(data.snapshot); controlWireRef(data.inputItemRef);
+    if (snapshot.operation !== 'agent' || snapshot.run.status !== 'queued' || snapshot.run.activeWorkerLaunchId !== undefined ||
+        snapshot.run.waitingReason !== undefined || snapshot.run.waitingOnRef !== undefined)
+      throw new TypeError('input response is not its exact worker-free continuation');
   } else if (method === 'run.reconcile') {
     controlWireRecord(data, ['method', 'snapshot', 'resolution']);
     const snapshot = runSnapshot(data.snapshot), resolution = controlWireRecord(data.resolution, ['kind', 'dispatchDigest', 'userProbeCount']);
@@ -464,13 +491,15 @@ export function decodeInstalledControlResponse<M extends InstalledControlMethod>
       const conflict = error.conflict;
       if ((request.method === 'run.submit' || request.method === 'session.fork' || request.method === 'session.compact' || request.method === 'session.handoff.create') && conflict.resourceKind === 'session') {
         if (conflict.currentSnapshot.session.id !== request.sessionId) throw new TypeError('revision conflict differs from requested Session');
-      } else if ((request.method === 'run.cancel' || request.method === 'run.approve' || request.method === 'run.reconcile') && conflict.resourceKind === 'run') {
+      } else if ((request.method === 'run.cancel' || request.method === 'run.approve' || request.method === 'run.input' || request.method === 'run.reconcile') && conflict.resourceKind === 'run') {
         if (conflict.currentSnapshot.run.id !== request.runId) throw new TypeError('revision conflict differs from requested Run');
       } else throw new TypeError('revision conflict has the wrong resource kind');
     }
     return response as InstalledControlResponseFor<M>;
   }
   const data = response.result;
+  if ((request.method === 'run.list' || request.method === 'authorization.list') &&
+      (data.method === 'run.list' || data.method === 'authorization.list')) validateControlListResponse(data, request);
   if (request.method === 'control.hello' && data.method === request.method) {
     if (!rangeOverlap(request.controlSchemaRange, data.controlSchemaRange) || !rangeOverlap(request.headlessSchemaRange, data.headlessSchemaRange) ||
         data.enabledFeatureIds.some(feature => !request.requestedFeatureIds.includes(feature)) ||
@@ -500,6 +529,9 @@ export function decodeInstalledControlResponse<M extends InstalledControlMethod>
       throw new TypeError('applied Run is not a distinct explicit delivery');
   } else if ((request.method === 'run.cancel' && data.method === request.method) || (request.method === 'run.approve' && data.method === request.method)) {
     if (data.snapshot.run.id !== request.runId) throw new TypeError('cancelled Run differs from request');
+  } else if (request.method === 'run.input' && data.method === request.method) {
+    if (data.snapshot.run.id !== request.runId || data.snapshot.run.revision !== request.expectedRevision + 1)
+      throw new TypeError('input response differs from its original Run and revision');
   } else if (request.method === 'run.reconcile' && data.method === request.method) {
     if (data.snapshot.run.id !== request.runId || data.snapshot.run.revision !== request.expectedRevision + 1 ||
         data.snapshot.run.waitingOnRef === request.waitingOnRef)
@@ -549,11 +581,11 @@ function decodeInstalledControlError(value: unknown, method: InstalledControlMet
   if (error.schemaVersion !== 1) throw new TypeError('invalid control error schema');
   controlWireText(error.messageCode);
   if (code === 'REVISION_CONFLICT') {
-    if (error.retryable !== true || !['run.submit', 'run.cancel', 'run.approve', 'run.reconcile', 'session.fork', 'session.compact', 'session.handoff.create'].includes(method)) throw new TypeError('unexpected revision conflict');
+    if (error.retryable !== true || !['run.submit', 'run.cancel', 'run.approve', 'run.input', 'run.reconcile', 'session.fork', 'session.compact', 'session.handoff.create'].includes(method)) throw new TypeError('unexpected revision conflict');
     const conflict = controlWireRecord(error.conflict, ['resourceKind', 'currentSnapshot']), revision = controlWireInteger(error.currentRevision, 1);
     if (conflict.resourceKind === 'session' && ['run.submit', 'session.fork', 'session.compact', 'session.handoff.create'].includes(method)) {
       if (sessionSnapshot(conflict.currentSnapshot).session.contextRevision !== revision) throw new TypeError('Session conflict revision differs');
-    } else if (conflict.resourceKind === 'run' && (method === 'run.cancel' || method === 'run.approve' || method === 'run.reconcile')) {
+    } else if (conflict.resourceKind === 'run' && (method === 'run.cancel' || method === 'run.approve' || method === 'run.input' || method === 'run.reconcile')) {
       if (runSnapshot(conflict.currentSnapshot).run.revision !== revision) throw new TypeError('Run conflict revision differs');
     } else throw new TypeError('invalid conflict resource');
   } else if (code === 'EVENT_CURSOR_EXPIRED') {

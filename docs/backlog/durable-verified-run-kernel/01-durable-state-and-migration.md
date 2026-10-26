@@ -3714,6 +3714,20 @@ currentness checks remain, with a full recheck after each joined group. No
 padding, cross-cut cache, partial return, wider deadline or omitted scan stream
 is permitted. Git/frozen-result ordering and all final admission checks remain.
 
+The fixed builtin-script result uses one additional exact quartet:
+`[original Supervisor inspector identity, original invocation containment,
+whole-invocation death evidence, BuiltinToolCaptureV1]`. Both original raw
+stdout/stderr byte artifacts are durably published and completely joined
+first. The quartet then derives only immutable data from that genuine native
+result and its original claim. Precomputed complete-byte refs are composition
+data; every actual returned ref/length/media/schema and full byte readback
+must match before the producer returns its capture or settles the invocation.
+There is no intermediate authority/time/SQL effect to move. The same four
+durability boundaries, each file sync, identity checks, partial-failure durable
+cleanup, all-issued join and retirement-error precedence remain required.
+Failure preserves the original result/fence and UNKNOWN rules, never another
+dispatch. This mechanism does not establish Linux two-second-stop qualification.
+
 Authorization freezes preparation time P and its original TTL/response before
 CAS, but only actual final-transaction time C enters the existing time fence.
 Require P<=C<expiry, the same current owner and original authenticated frame;

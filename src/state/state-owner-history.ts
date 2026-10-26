@@ -64,7 +64,7 @@ async function readInstalledSeed(artifacts: ArtifactCatalog, first: Entry,
   if (!bundle || typeof bundle !== 'object' || !Array.isArray(bundle.entries) || !Array.isArray(bundle.structuredArtifacts) ||
       canonicalSha256(bundle) !== bundleRef || bundle.manifestDigest !== first.owner.runtimeBundleManifestDigest)
     invalid('retained installed genesis RuntimeBundle differs');
-  const data = bundle.entries.filter(entry => dataRoles.has(entry.role));
+  const data = bundle.entries.filter(entry => dataRoles.has(entry.role) || entry.role === 'tool_adapter' && !entry.executable);
   for (const entry of data) {
     if (entry.executable) invalid('retained installed seed data entry is executable');
     requireMember(entry.digest, entry.byteCount);
@@ -105,7 +105,10 @@ async function readInstalledSeed(artifacts: ArtifactCatalog, first: Entry,
       if (bytes.length !== 64) invalid('retained installed guest signature is not complete');
       continue;
     }
-    if (entry.role === 'trust_store') validateTrustStore(bytes);
+    if (entry.role === 'tool_adapter') {
+      if (entry.entryId !== 'builtin_tools' || entry.version !== '1' || entry.relativePath !== 'adapters/builtin-tools.mjs' || bytes.length < 1)
+        invalid('retained installed tool script differs from its fixed original data role');
+    } else if (entry.role === 'trust_store') validateTrustStore(bytes);
     else {
       const value = checkCanonicalBytes(bytes);
       if (entry.role === 'sandbox_root_profile') decodeSandboxRootProfile(value);

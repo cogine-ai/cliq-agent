@@ -21,7 +21,9 @@ import type { RunPolicySnapshotV1 } from '../kernel/tool-authorization.js';
 import type { ModelTextV1 } from '../protocol/agent-ir.js';
 import { verifyModelText } from '../model/attempt.js';
 import { LINUX_WORKER_RECIPE } from '../sandbox/linux-worker.js';
-import { builtinInputContracts } from '../tools/builtin-inputs.js';
+import { buildInstalledToolContracts } from '../tools/installed-contracts.js';
+import { assertBuiltinScriptResources } from './tool-runtime-authority.js';
+import { loadToolContracts } from '../tools/input-contract.js';
 import { readCanonicalArtifact } from './agent-context.js';
 import type { ArtifactCatalog } from './artifacts.js';
 import { sampleCanonicalNow } from './canonical-time.js';
@@ -41,7 +43,7 @@ import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
 import { assertActiveStateOwner, type StateOwnerContext } from './state-owner.js';
 import { assertSupportedVerifierRequests, prepareInstalledVerifierAssembly, selectVerifierReleaseReference } from './verifier-admission.js';
 import type { AdmitRunInput } from './reducers/admission.js';
-import { readRetainedVerifierToolchain } from './guest-toolchain.js';
+import { readRetainedVerifierToolchain, type RetainedVerifierToolchain } from './guest-toolchain.js';
 import { VerifierAuthorizationError } from './authorization-artifacts.js';
 import type { InstalledApplyDiagnosticStage } from './installed-run-diagnostics.js';
 
@@ -90,8 +92,6 @@ export function assertInstalledRunRecipe(request: NormalizedRunSubmitRequest,
     invalid('installed Run selects an unsupported model, execution resource, verifier, dependency, MCP, skill or source inclusion');
   if (request.model.modelCredentialGrantIds.length !== 1)
     invalid('installed Run requires exactly one model bearer credential');
-  if (request.policyMode === 'default')
-    invalid('installed Run default policy requires unavailable interactive approval');
   assertSupportedVerifierRequests(request.verifiers, request.policyMode);
   if (endpoint) {
     // The native broker has 64 pin slots. Registration already requires the
@@ -320,7 +320,7 @@ async function publishInstalledModelMaterial(input: {
   return { endpointArtifact, credentialGrantRefs, capabilityArtifact, sandboxProfileRef: undefined };
 }
 
-async function materialFor(installed: InstalledRuntimeBorrow, artifacts: ArtifactCatalog, assembly: RunAssemblyV1, signal?: AbortSignal): Promise<RunAssemblyValidationMaterial> {
+async function materialFor(installed: InstalledRuntimeBorrow, artifacts: ArtifactCatalog, assembly: RunAssemblyV1, signal?: AbortSignal): Promise<RunAssemblyValidationMaterial & { retainedToolchain?: RetainedVerifierToolchain }> {
   signal?.throwIfAborted();
   if (assembly.provider.name !== 'openai-compatible' || assembly.provider.endpoint.kind !== 'registered' ||
       assembly.provider.negotiation.streaming || assembly.mcpServers.length || assembly.instructions.skills.length)
@@ -351,21 +351,22 @@ async function materialFor(installed: InstalledRuntimeBorrow, artifacts: Artifac
   const toolEntry = installed.bundle.entries.find(entry => entry.digest === assembly.tools.manifestRef);
   if (!toolEntry || toolEntry.role !== 'schema' || toolEntry.executable || tools.format !== 'cliq-tool-contracts-v1' ||
       tools.schemaVersion !== 1 || !exactKeys(tools, ['schemaVersion', 'format', 'entries', 'manifestDigest']) ||
-      digestOmitting(tools, 'manifestDigest') !== tools.manifestDigest || tools.entries.length !== 1)
+      digestOmitting(tools, 'manifestDigest') !== tools.manifestDigest || toolEntry.byteCount !== canonicalJsonBytes(tools).length)
     mismatch('installed tool manifest is not the exact signed builtin contract');
-  const entry = tools.entries[0]!, builtin = builtinInputContracts.edit;
   const edit = installed.bundle.entries.find(entry => entry.entryId === LINUX_WORKER_RECIPE.editId);
-  if (!edit || edit.role !== 'tool_adapter' || !edit.executable || entry.name !== builtin.name || entry.version !== builtin.version ||
-      entry.access !== builtin.access || entry.replayClass !== builtin.replayClass || entry.execution.kind !== 'builtin' ||
-      !same(entry.execution, { kind: 'builtin', adapterId: edit.entryId, adapterVersion: edit.version, adapterCodeDigest: edit.digest }) ||
-      !exactKeys(entry, ['name', 'version', 'description', 'access', 'inputSchemaRef', 'inputSchemaDigest', 'replayClass', 'execution']))
-    mismatch('installed tool contract differs from the fixed actual edit adapter');
-  const schema = await readCanonicalArtifact(artifacts, entry.inputSchemaRef);
-  const schemaEntry = installed.bundle.entries.find(candidate => candidate.digest === entry.inputSchemaRef);
-  if (!schemaEntry || schemaEntry.role !== 'schema' || schemaEntry.executable || !same(schema, builtin.inputSchema) ||
-      entry.inputSchemaDigest !== canonicalSha256(builtin.inputSchema)) mismatch('installed edit input schema differs from the fixed builtin');
-  const verifiedTools = immutableSnapshot([{ name: entry.name, description: entry.description, inputSchemaRef: entry.inputSchemaRef,
-    inputSchemaDigest: entry.inputSchemaDigest, inputSchema: schema, replayClass: entry.replayClass }]);
+  if (!edit) mismatch('installed tool manifest has no original edit adapter');
+  const contracts = await artifacts.mapReads(tools.entries, async entry => {
+    const schema = await readCanonicalArtifact(artifacts, entry.inputSchemaRef);
+    const signedSchema = installed.bundle.entries.find(candidate => candidate.digest === entry.inputSchemaRef);
+    if (!signedSchema || signedSchema.role !== 'schema' || signedSchema.executable ||
+        signedSchema.byteCount !== canonicalJsonBytes(schema).length || entry.inputSchemaDigest !== canonicalSha256(schema))
+      mismatch('installed tool schema differs from its complete signed bytes');
+    return { ...entry, inputSchema: schema };
+  });
+  loadToolContracts(contracts);
+  const verifiedTools = immutableSnapshot(contracts.map(entry => ({ name: entry.name, description: entry.description,
+    inputSchemaRef: entry.inputSchemaRef, inputSchemaDigest: entry.inputSchemaDigest,
+    inputSchema: entry.inputSchema, replayClass: entry.replayClass })));
   const system = installed.structured.systemPrompts.find(prompt => prompt.provider === assembly.provider.name && prompt.model === assembly.provider.model);
   const compaction = installed.structured.compactionPrompts.find(prompt => prompt.provider === assembly.provider.name && prompt.model === assembly.provider.model);
   if (!system || !compaction || system.ref !== assembly.instructions.systemPromptRef || system.value.textDigest !== assembly.instructions.systemPromptDigest ||
@@ -385,15 +386,24 @@ async function materialFor(installed: InstalledRuntimeBorrow, artifacts: Artifac
     { kind: 'compaction_prompt_envelope', ref: compaction.material.ref, digest: compaction.material.value.envelopeDigest },
     { kind: 'workspace_instructions', ref: assembly.instructions.workspaceInstructionsRef, digest: instructions.manifestDigest },
   ];
+  let retainedToolchain: RetainedVerifierToolchain | undefined;
   if (assembly.runtime.guestToolchainManifestRef !== undefined) {
-    const toolchain = await readRetainedVerifierToolchain(artifacts, { bundle: installed.bundle, releaseKeys: installed.releaseKeys,
+    const toolchain = retainedToolchain = await readRetainedVerifierToolchain(artifacts, { bundle: installed.bundle, releaseKeys: installed.releaseKeys,
       guestToolchainManifestRef: assembly.runtime.guestToolchainManifestRef, signal });
     if (toolchain.manifest.manifestDigest !== assembly.runtime.guestToolchainManifestDigest)
       mismatch('retained material substitutes its signed guest toolchain');
     references.push({ kind: 'guest_toolchain_manifest', ref: toolchain.manifestRef, digest: toolchain.manifest.manifestDigest });
   }
+  const script = installed.bundle.entries.find(entry => entry.entryId === 'builtin_tools');
+  const supervisor = installed.bundle.entries.find(entry => entry.role === 'supervisor');
+  if (script && (!supervisor || !retainedToolchain)) mismatch('installed scripts lack their complete guest and Supervisor closure');
+  const expected = buildInstalledToolContracts({ edit, ...(script ? { scripts: { entry: script,
+    supervisor: supervisor!, guest: retainedToolchain! } } : {}) });
+  requireEqual(tools, expected.manifest, 'complete installed compiled tool manifest');
+  if (script) for await (const _chunk of artifacts.readChunks(script.digest, script.byteCount)) signal?.throwIfAborted();
   signal?.throwIfAborted();
   return Object.freeze({ capabilityEvidence: immutableSnapshot({ ref: assembly.provider.negotiation.capabilityEvidenceRef, value: capability }),
+    ...(retainedToolchain ? { retainedToolchain } : {}),
     resolveVerifiedCapabilityClaims: source => source.kind === 'signed_catalog' && source.runtimeBundleRef === installed.bundleDigest &&
       source.catalogEntryRef === model.catalog.ref && source.catalogEntryDigest === catalog.catalogEntryDigest ? catalog.claims : null,
     priceTable: immutableSnapshot(model.priceTable), verifyLocalZeroCostAuthority: () => false,
@@ -532,6 +542,15 @@ export async function assembleInstalledRun(input: {
     const c = catalog.claims.contextLimitTokens, o = Math.min(catalog.claims.maxOutputTokens, Math.floor(c / 4));
     const verifierToolchain = selectVerifierReleaseReference(driver, installed.bundle,
       identity.principalId, request.verifiers, request.policyMode, signal);
+    // Script execution always pins the same signed guest discovery root, even
+    // when this Run has no verifier. No executable is resolved from host PATH.
+    const scriptGuestRefs = [...new Set(tools.entries.flatMap(entry => entry.execution.kind === 'builtin_script'
+      ? [entry.execution.guestToolchainManifestRef] : []))];
+    if (scriptGuestRefs.length > 1 || verifierToolchain && scriptGuestRefs.length && verifierToolchain.manifestRef !== scriptGuestRefs[0])
+      mismatch('installed tools and verifiers select different signed guests');
+    const scriptGuestRoot = scriptGuestRefs.length ? installed.bundle.structuredArtifacts.find(root => root.kind === 'guest_toolchain' && root.artifactRef === scriptGuestRefs[0]) : undefined;
+    if (scriptGuestRefs.length && !scriptGuestRoot) mismatch('installed script guest has no original signed discovery root');
+    const selectedGuest = verifierToolchain ?? (scriptGuestRoot ? { manifestRef: scriptGuestRoot.artifactRef, manifestDigest: scriptGuestRoot.semanticDigest } : undefined);
     const h = c - o, s = Math.min(8192, Math.floor(c / 8)), k = compactionEnvelopeEstimate(compaction.material);
     const assembly: RunAssemblyV1 = { schemaVersion: 1, format: 'cliq-run-assembly-v1', provider: { name: catalog.provider, model: catalog.model,
       endpoint: { kind: 'registered', registrationKind: endpoint.registrationKind, endpointRegistrationRef: endpointArtifact.ref,
@@ -546,16 +565,21 @@ export async function assembleInstalledRun(input: {
         workspaceInstructionsDigest: instructions.value.manifestDigest, skills: [] },
       runtime: { runtimeBundleRef: installed.bundleDigest, runtimeBundleManifestDigest: installed.bundle.manifestDigest,
         workerExecutableId: worker.entryId, workerExecutableDigest: worker.digest, sandboxBackend: 'linux_namespace',
-        ...(verifierToolchain ? { guestToolchainManifestRef: verifierToolchain.manifestRef,
-          guestToolchainManifestDigest: verifierToolchain.manifestDigest } : {}) },
+        ...(selectedGuest ? { guestToolchainManifestRef: selectedGuest.manifestRef,
+          guestToolchainManifestDigest: selectedGuest.manifestDigest } : {}) },
       retry: { model: { maxDispatchedAttempts: 3, maxZeroByteTransportRetriesPerAttempt: 0, postAttemptDelaysMs: [500, 2000] },
-        tools: tools.entries.map(entry => ({ toolName: entry.name, replayClass: 'manual', maxDispatchedAttempts: 1, postAttemptDelaysMs: [] })) },
+        tools: tools.entries.map(entry => {
+          if (entry.replayClass === 'retry') return { toolName: entry.name, replayClass: 'retry', maxDispatchedAttempts: 3, postAttemptDelaysMs: [500, 2000] };
+          if (entry.replayClass !== 'manual') mismatch('installed tool uses an unsupported recovery contract');
+          return { toolName: entry.name, replayClass: 'manual', maxDispatchedAttempts: 1, postAttemptDelaysMs: [] };
+        }) },
       context: { compactionPromptEnvelopeRef: compaction.material.ref, compactionPromptEnvelopeDigest: compaction.material.value.envelopeDigest,
         contextLimitTokens: c, reservedOutputTokens: o, hardPromptTokens: h, triggerThresholdTokens: Math.min(Number(7n * BigInt(c) / 10n), h - 8192),
         protectedRecentTokens: Math.min(32768, Math.floor(c / 4)), summaryTokenCap: s, compactionEnvelopeTokens: k,
         sourceInputTokenCap: Math.min(Math.floor(c / 2), c - s - k), maxSummaryBytes: 262144 }, createdAt: admittedAt, assemblyDigest: '' };
     assembly.assemblyDigest = digestOmitting(assembly, 'assemblyDigest');
     const material = await materialFor(installed, reads, assembly, signal), assemblyRef = canonicalSha256(assembly);
+    if (material.retainedToolchain) assertBuiltinScriptResources(material.retainedToolchain.manifest.guestImageByteCount, request.sandboxResources);
     const valid = validateRunAssembly({ assemblyRef, assembly, admittedAt, deadlineAt, maxRunCostMicros: request.budgets.costMicros,
       runSpecCredentialGrantRefs: credentialGrantRefs, material });
     if (!valid.ok) throw new InstalledRunAuthorityError(valid.code);
@@ -567,7 +591,8 @@ export async function assembleInstalledRun(input: {
       toolManifestRef: toolRef, toolManifestDigest: tools.manifestDigest, decisions: modeDecisions(request.policyMode),
       decisionRules: [...BUILTIN_POLICY_RULES], repositoryRequestRefs: [], createdAt: admittedAt, policyDigest: '' };
     policy.policyDigest = digestOmitting(policy, 'policyDigest');
-    verifyToolRuntimeAuthority({ assembly, policy, bundle: installed.bundle, profile, tools: tools.entries, releaseKeys: installed.releaseKeys });
+    verifyToolRuntimeAuthority({ assembly, policy, bundle: installed.bundle, profile, tools: tools.entries, releaseKeys: installed.releaseKeys,
+      ...(material.retainedToolchain ? { guestToolchain: material.retainedToolchain } : {}) });
     reportInstalledRunAssemblyPhase(onAssemblyPhase, 'submit_assembly_publish');
     const sandboxProfileRef = publishedSandboxRef ?? (await artifacts.publishCanonical(
       installedSandboxProfile(request.sandboxResources), 'cliq-sandbox-profile-v1')).ref;

@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { readFileSync } from 'node:fs';
 import { build } from 'esbuild';
 import ts from 'typescript';
+import { installedClientBuildOptions } from './installed-client-build.js';
 
 test('each original auth phase samples actual self resource usage once, with inert V1 fallback when unavailable', () => {
   // Exact source-owned subscriber and real child stderr, not an installed
@@ -126,11 +127,13 @@ test('installed client driver refuses an unowned composition without reflecting 
 test('installed client driver bundles as one ordinary Node consumer with no external application loader', async () => {
   const result = await build({ entryPoints: [fileURLToPath(new URL('./installed-control-client-driver.ts', import.meta.url))],
     outfile: 'installed-control-client-driver.mjs', bundle: true, platform: 'node', format: 'esm', target: 'node22.13',
-    metafile: true, write: false });
+    metafile: true, write: false, ...installedClientBuildOptions() });
   assert.equal(result.outputFiles?.length, 1);
   assert(result.outputFiles[0]!.contents.length > 0 && result.outputFiles[0]!.contents.length <= 16 * 1024 * 1024);
   assert(Object.values(result.metafile!.outputs).flatMap(output => output.imports).every(item => item.external && item.path.startsWith('node:')));
   const inputs = Object.keys(result.metafile!.inputs);
+  for (const entry of ['entry.ts', 'application.ts', 'tui.tsx'])
+    assert(inputs.some(name => name.endsWith('src/client/' + entry)), 'the fixed client image must include each real application surface');
   assert(inputs.some(name => name.endsWith('src/control/installed-jsonl.ts')),
     'the real installed driver must consume the production JSONL adapter');
   assert(inputs.some(name => name.endsWith('src/control/v1.ts')),

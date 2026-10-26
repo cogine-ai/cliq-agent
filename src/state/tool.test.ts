@@ -140,7 +140,7 @@ test('direct deny closes exactly its own call with no Journal or charge, while a
     assert.equal(beforeAsk.run.budgetConsumed.toolCalls, 0);
     assert.equal(beforeAsk.journal.filter((entry) => entry.opKind !== 'model').length, 0);
     const ask = await fixture.agent.prepareTool({ expectedRunRevision: denied.run.revision, leaseEpoch: fixture.leaseEpoch });
-    assert.equal(ask.disposition, 'approval_required');
+    assert.equal(ask.disposition, 'retirement_required');
     assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), beforeAsk);
     assert.equal((await fixture.agent.readToolInvocation()).invocation.index, 1);
     await fixture.store.close();

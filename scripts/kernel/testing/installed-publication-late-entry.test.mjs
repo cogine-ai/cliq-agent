@@ -84,7 +84,7 @@ test('the late-result job is independent and free with the original bounds and c
     'scripts/kernel/testing/installed-publication-late-result.test.ts', 'scripts/kernel/testing/installed-publication-retirement.test.ts',
     'scripts/kernel/testing/installed-publication-journal.test.ts', 'scripts/kernel/testing/installed-publication-recovery.test.ts',
     'scripts/kernel/testing/installed-run-progress.test.ts',
-    'sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap e2fsprogs libext2fs-dev pkg-config dmsetup kmod',
+    'sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap libcap-dev libselinux1-dev meson ninja-build e2fsprogs libext2fs-dev pkg-config dmsetup kmod',
     'test "$RUNNER_ENVIRONMENT" = github-hosted', 'test "$RUNNER_OS" = Linux', 'test "$RUNNER_ARCH" = X64',
     'sudo /usr/sbin/modprobe dm_delay', 'sudo /usr/bin/udevadm settle --timeout=5',
     'test -d /sys/module/dm_mod', 'test -d /sys/module/dm_delay', 'test -c /dev/mapper/control',

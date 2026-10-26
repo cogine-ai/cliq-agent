@@ -7,6 +7,7 @@ import type { PolicySubject } from '../policy/decision.js';
 import type { ToolInvocation } from '../protocol/agent-ir.js';
 import { builtinInputContracts } from './builtin-inputs.js';
 import { compileInputSchema } from './input-schema.js';
+import { BUILTIN_SCRIPT_TOOL_NAMES, decodeToolExecutionIdentity } from './execution-identity.js';
 
 export type ToolInputAuthority = ToolContractManifestV1['entries'][number] & { inputSchema: unknown };
 type ParsedInput = { input: Record<string, unknown>; channel?: Extract<PolicySubject, { kind: 'tool' }>['channel'];
@@ -19,13 +20,20 @@ export function loadToolContracts(tools: readonly ToolInputAuthority[]) {
     if (canonicalSha256(inputSchema) !== entry.inputSchemaRef || entry.inputSchemaRef !== entry.inputSchemaDigest) {
       throw new TypeError('tool input schema does not match its frozen reference');
     }
+    const execution = decodeToolExecutionIdentity(entry.execution);
     let parseInput: (value: unknown) => ParsedInput | undefined;
-    if (entry.execution.kind === 'builtin') {
-      const builtin = Object.hasOwn(builtinInputContracts, entry.execution.adapterId)
-        ? builtinInputContracts[entry.execution.adapterId as keyof typeof builtinInputContracts] : undefined;
-      if (!builtin || entry.name !== builtin.name || entry.version !== builtin.version || entry.execution.adapterVersion !== builtin.version ||
+    if (execution.kind === 'builtin' || execution.kind === 'builtin_script' || execution.kind === 'supervisor_control') {
+      const name = execution.kind === 'builtin' ? execution.adapterId : entry.name;
+      const builtin = Object.hasOwn(builtinInputContracts, name)
+        ? builtinInputContracts[name as keyof typeof builtinInputContracts] : undefined;
+      const script = execution.kind === 'builtin_script';
+      const control = execution.kind === 'supervisor_control';
+      if (!builtin || entry.name !== builtin.name || entry.version !== builtin.version ||
+          (execution.kind !== 'supervisor_control' && execution.adapterVersion !== builtin.version) ||
           entry.access !== builtin.access || entry.replayClass !== builtin.replayClass || canonicalSha256(builtin.inputSchema) !== entry.inputSchemaDigest ||
-          (entry.access === 'control' && entry.outputSchemaRef !== undefined)) {
+          (script && !BUILTIN_SCRIPT_TOOL_NAMES.some(name => name === entry.name)) ||
+          (entry.access === 'control') !== control || (control && (entry.name !== 'request_input' ||
+            Object.hasOwn(entry, 'outputSchemaRef') || Object.hasOwn(entry, 'outputSchemaDigest')))) {
         throw new TypeError('builtin contract differs from the compiled input semantics');
       }
       parseInput = builtin.parseInput;

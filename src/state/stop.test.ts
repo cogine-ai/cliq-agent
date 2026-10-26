@@ -12,7 +12,7 @@ import { openStateStore, publishInProcessChannel } from './store.js';
 import { createAgentFixture } from './testing/agent-fixtures.js';
 import { activateFixtureWorker, admissionKey, disposeFixture, uuidv7 } from './testing/fixtures.js';
 import { batch, claimTool, observation, prepareTool } from './testing/tool-calls.js';
-import { quiescedToolCheckpoint } from './testing/tool-effects.js';
+import { quiescedToolCheckpoint, retireFixtureToolSelection } from './testing/tool-effects.js';
 import { readRetainedAgentStop } from './stop-recovery.js';
 import type { StateOwnerContext } from './state-owner.js';
 import type { SqliteDriver } from './sqlite-driver.js';
@@ -152,10 +152,14 @@ for (const waiting of ['input', 'approval'] as const) test(`cancel closes a work
   try {
     await batch(fixture, waiting === 'input' ? [{ name: 'request_input', input: { prompt: 'Which name?', responseKind: 'text', maximumResponseBytes: 20 } },
       { name: 'read', input: { path: 'a' } }] : [{ name: 'bash', input: { command: 'pwd' } }]);
+    const selection = await fixture.agent.prepareTool({ expectedRunRevision: revision(fixture), leaseEpoch: fixture.leaseEpoch });
+    assert.ok(selection.disposition === 'retirement_required');
+    assert.equal(selection.reason, waiting);
+    await retireFixtureToolSelection(fixture, selection);
     const plan = await fixture.agent.prepareTool({ expectedRunRevision: revision(fixture), leaseEpoch: fixture.leaseEpoch });
     assert.ok(plan.disposition === 'input_required' || plan.disposition === 'approval_required');
-    const proof = await quiescedToolCheckpoint(fixture, plan.checkpointId);
-    const wait = { expectedRunRevision: revision(fixture), waitingOnRef: plan.waitingOnRef, checkpoint: proof.checkpoint };
+    assert.equal(plan.run.activeWorkerLaunchId, undefined);
+    const wait = { expectedRunRevision: revision(fixture), waitingOnRef: plan.waitingOnRef };
     if (waiting === 'input') await fixture.agent.waitForInput(wait); else await fixture.agent.waitForToolApproval(wait);
     await reopen(fixture);
     const before = await fixture.store.readRecoveryClosure(fixture.runId);

@@ -125,12 +125,14 @@ export type ToolCheckpointProof = {
   workspaceStateRef: ArtifactRef; snapshotEvidenceRef: ArtifactRef; retirementEvidenceRef: ArtifactRef;
 };
 
-/** Positive State-owned no-dispatch closure, committed with the replacement wait and reservation refund. */
+/** Positive no-dispatch closure. A new selection checkpoint first closes the
+ * original worker; only the subsequent cut may create a replacement wait. */
 export type ToolGrantExpiryV1 = {
   schemaVersion: 1; format: 'cliq-tool-grant-expiry-v1'; code: 'TOOL_GRANT_EXPIRED_BEFORE_DISPATCH';
   runId: string; opId: string; attempt: number; preparedJournalSeq: number; grantRef: ArtifactRef;
-  waitingSubjectRef: ArtifactRef; observedAt: string;
-};
+  observedAt: string;
+} & ({ waitingSubjectRef: ArtifactRef; selectionCheckpointId?: never; frontierRef?: never }
+  | { selectionCheckpointId: string; frontierRef: ArtifactRef; waitingSubjectRef?: never });
 
 /** Retained adapter observation. State derives model content and settlement; this is never an execution permit. */
 export type ToolObservationV1 = {
@@ -138,6 +140,7 @@ export type ToolObservationV1 = {
   requestRef: ArtifactRef; targetRef: ArtifactRef; grantRef: ArtifactRef; dispatchId: string;
   observedAt: string; observationDigest: string;
   postEffect?: ToolCheckpointProof;
+  captureRef?: ArtifactRef; captureDigest?: string;
 } & (
   | { outcome: 'executed'; content: unknown }
   | { outcome: 'error'; code: 'TOOL_EXECUTION_FAILED' | 'TOOL_PROTOCOL_ERROR' | 'TOOL_RESOURCE_EXHAUSTED';

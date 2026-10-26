@@ -319,6 +319,21 @@ stages, every file sync and complete readback, exact slot descriptors, durable
 failure cleanup, all-issued join and retirement-failure precedence. This allows
 additional valid data-only orphans, not serial-order equivalence, an atomic
 namespace transaction, a dummy fourth member or a wider acceptance deadline.
+The fixed builtin-script result producer may use the same four-stage mechanism
+for exactly `[original Supervisor inspector identity, original invocation
+containment, whole-invocation death evidence, BuiltinToolCaptureV1]`. Before
+planning that quartet, it durably publishes and completely joins both original
+raw stdout/stderr byte artifacts. Every member is derived from the one genuine
+captured native result and original claim; precomputed full-byte refs only
+compose this immutable data graph. No intermediate grant, clock, SQL mutation,
+or execution point exists between the four members. The complete quartet's
+actual bytes, refs, lengths, media types and schema kinds must verify and all
+issued operations must join before the capture receipt is returned or any
+settlement proceeds. Partial failure retains the original result/fence and
+UNKNOWN handling, never another dispatch. All four durability boundaries,
+per-file sync, full re-read, identity checks, durable partial cleanup and
+retirement-failure precedence above remain unchanged; this is not atomic
+publication or evidence that the two-second Linux stop limit has passed.
 Installed final Run admission may also publish these two fixed four-member
 data groups: `[original public request core, Run objective, admitted context,
 initial workspace state]`, then `[Run specification, initial context manifest,
@@ -2423,6 +2438,26 @@ type ToolContractManifestV1 = {
             adapterId: string
             adapterVersion: string
             adapterCodeDigest: string
+          } | {
+            kind: 'builtin_script'
+            adapterId: 'builtin_tools'
+            adapterVersion: '1'
+            adapterCodeDigest: string
+            guestToolchainManifestRef: ArtifactRef
+            guestToolchainManifestDigest: string
+            toolId: 'node'
+            executionPath: '/usr/bin/node'
+            executableDigest: string
+          }
+        }
+      | {
+          replayClass: 'manual'
+          execution: {
+            kind: 'supervisor_control'
+            handlerId: 'request_input'
+            supervisorEntryId: string
+            supervisorEntryVersion: string
+            supervisorExecutableDigest: string
           }
         }
       | {
@@ -2439,6 +2474,87 @@ type ToolContractManifestV1 = {
     )>
   manifestDigest: string
 }
+
+```
+
+The three builtin execution identities are disjoint, closed data. The original
+`builtin` edit still names its signed executable `tool_adapter`. The fixed
+`builtin_script` identity is legal only for `read|ls|find|grep|bash`: its adapter
+is the signed non-executable `builtin_tools`, version `1`, at
+`adapters/builtin-tools.mjs`; its complete original script bytes are retained
+in the same installed genesis/import/CAS closure. It is never classified as
+ELF. The executable is the separately signed guest Node at `/usr/bin/node`,
+under the exact original guest manifest, signature, complete image and
+all-and-only member graph. The first four tools keep `read/retry`; Bash keeps
+`exec/manual`. An input-control handler is neither script nor executable tool.
+Its five identity fields bind the original signed Supervisor image, using that
+entry's actual version. No contract decoder, same-name adapter, structural
+closure or control response supplies a native launch or death proof.
+
+The fixed script launch has `purpose='tool'` and
+`processInvocation.recipe='cliq-builtin-tools-v1'` with mandatory closed literal
+`privateGitProtection='existing_read_only'`; the old edit recipe remains
+`cliq-tool-launch-v1`. Its actual argv is only guest Node, `--no-addons`, and
+`/runtime/cliq-builtin-tools.mjs`. A private sealed input capsule contains only
+`{schemaVersion:1,tool,input,limits:{maxSingleFileBytes,maxInvocationOutputBytes}}`,
+reproduced from the original normalized call and frozen profile, not a new
+business artifact, permission or caller argv. Node and the script independently
+validate the capsule, canonical bytes and fixed limits. Read/search mount the
+same private generation read-only/no-exec; Bash uses read-write/no-exec and only
+the same signed guest `/bin/bash` admitted executable and original DSO graph.
+Bash uses `--noprofile --norc /proc/self/fd/3` with the command in its private
+script descriptor, closed stdin and bounded captured stdout/stderr. No host
+shell, ambient environment, startup files, network, or legacy executor is a
+fallback. The original 60-second Bash cap and earlier Run deadline both apply.
+The fixed Bash environment carries `GIT_OPTIONAL_LOCKS=0`. For an existing
+private `.git`, native creation independently opens it under the original held
+generation with no-follow and checks its exact device/inode/owner/mode in both
+the original producer and controller. It holds that actual FD and mounts it
+read-only/no-exec at `/work/.git`, then the trusted init verifies the mounted
+identity and flags. The caller supplies no presence boolean, host path or FD.
+Git status/diff remain available; `git add` or metadata mutation remains an OS
+refusal even if a command overrides the environment variable. Post-effect
+snapshot still requires all original frozen `.git` bytes and identities.
+This does not support committing modified Git metadata. If `.git` was absent,
+native code creates no placeholder or mount: a command creating/replacing
+workspace Git metadata is unsupported and the unchanged observer refuses it.
+Any already-real private modification requires the existing actual stop,
+retirement and original-Checkpoint recovery or explicit recovery wait; never
+infer a global basename write fence, no effect, fake Checkpoint or retry.
+Before Run admission and again on the original pre-prepare authority cut, the
+fixed script recipe requires at least 32 processes, a single-file ceiling that
+covers the actual signed guest image and is at most 256 MiB, the original
+64 KiB..64 MiB invocation output range and fixed IPC/queue ceilings. Unsupported
+explicit profiles are refused unchanged before a tool grant, preparation or
+claim; the old edit-only minimum remains eight. Native validation and actual OS
+resource enforcement independently retain the same checks. Only after the
+genuine script invocation release has succeeded may maintenance renew that
+same claimed worker lease, using the existing owner/current generation checks,
+30s renewal threshold and 60s lease ceiling capped by the Run deadline. It
+cannot renew an unreleased preparation, a received completion or a stopped Run.
+
+Each read/search invocation must fully join its own output/descriptors and
+prove its actual invocation domain dead before publishing its result and
+unchanged-workspace context Checkpoint. This does not prove or retire the
+still-active parent worker. The same genuine parent/generation may then receive
+the next independent claim/release nonce under the unchanged single-active
+invocation guard. Edit/Bash retain the original complete parent retirement and
+post-effect workspace Checkpoint. Ask/input first retire that parent before
+entering a worker-free wait.
+
+The native controller's fixed scope arena remains 16 monotonic slots, with
+slot zero reserved and the parent worker consuming one slot. Before preparing,
+granting or claiming an additional invocation, the genuine original holder may
+observe arena exhaustion and choose the internal `scope_capacity` retirement
+cause. It must actually retire every old scope and the parent, seal the
+unchanged generation and commit its Checkpoint in the original transaction,
+then finish the original controller and descriptor joins before any replacement
+WorkerLaunch/controller/nonce/lease can be created. The current ToolBatch call is not consumed, no attempt or account is
+reset, and the Run's total tool-call budget is unchanged. The create hard guard
+remains independent. A post-claim capacity race/failure remains UNKNOWN under
+the original recovery/rollback rules; it is not a fresh dispatch opportunity.
+
+```ts
 
 type ProviderContinuation = {
   provider: RunAssemblyV1['provider']['name']
@@ -2676,7 +2792,31 @@ structured-root walk or WP03's executing-process/broker identity checks.
 
 The action classifier is closed: built-in tools use their manifest `access`, except `delegate` becomes `child_read_only|child_mutating`; any MCP tool is `mcp`; verifier, install-script, delivery-plan, and child admission use their named classes. Kernel Cut exposes no generic network/integration tool or child endpoint capability: model, dependency registry, and streamable-HTTP MCP access remain their own typed broker contracts. `decisionRules` freezes `cliq-permission-grammar-v0`, not an opaque policy program: contiguous unique order/rule ids, at most 256 entries/1 MiB, one listed channel, and a nonempty pattern using only exact `*`, literal, suffix ` *`, or suffix `/*` semantics (`**` has no glob meaning). Channel primary keys are canonical root-relative paths for `fs-*`, the trusted parsed command head for `bash`, `registrationId/serverToolName` for MCP, and normalized plan identity for plan channels. Kernel Cut drops the unimplemented `network` channel.
 
-Every evaluation first publishes exact `PolicyChannelEvidenceV1`; there is no ephemeral parser result or adapter-owned matcher input. `evidenceDigest = SHA-256(JCS(evidence with evidenceDigest omitted))`. Its policy ref/digest rehashes the current RunSpec snapshot; principal/Run/frontier/op/request/target equal the exact prospective subject and immutable artifacts; action class is the closed classifier result; and `evaluatedAt` uses canonical time before any approval, grant, denial item, Journal preparation, or target I/O. The fixed Supervisor evaluator plus retained `policy_engine` profile is the sole producer. Storage reruns that exact interpreter/profile over the immutable request/target and compares the full JCS output; a mutable installed parser, caller primary key, worker boolean, executable plugin, or semver-compatible engine is invalid.
+Every authoritative evaluation first publishes exact `PolicyChannelEvidenceV1`; there is no ephemeral parser result or adapter-owned matcher input used as permission. `evidenceDigest = SHA-256(JCS(evidence with evidenceDigest omitted))`. Its policy ref/digest rehashes the current RunSpec snapshot; principal/Run/frontier/op/request/target equal the exact prospective subject and immutable artifacts; action class is the closed classifier result; and `evaluatedAt` uses canonical time before any approval, grant, denial item, Journal preparation, or target I/O. The fixed Supervisor evaluator plus retained `policy_engine` profile is the sole producer. Storage reruns that exact interpreter/profile over the immutable request/target and compares the full JCS output; a mutable installed parser, caller primary key, worker boolean, executable plugin, or semver-compatible engine is invalid.
+
+The same tool-preparation entry may first return a pure `worker_required` or
+`retirement_required` scheduling decision. These internal decisions publish no
+grant, Journal, target, pending approval or input wait, carry no release nonce,
+and are not public wire states. A queued allow first needs real worker
+activation; the new active cut then reruns all original policy, owner, lease,
+budget, approval lifetime and currentness checks before preparation. A queued
+ask, deny or input requires no worker or native image borrow. An active ask or
+input first needs the original worker's actual death, unchanged workspace seal
+and Checkpoint; only after that commit and complete resource join does a new
+cut reproduce the ask/input and publish its worker-free wait. A decision from
+the previous lease epoch cannot authorize a later preparation or extend TTL.
+
+If an original interactive grant expires after `prepared` but before any
+claim, `retireToolSelection` atomically seals that original worker, preserves
+the unchanged context/workspace, appends the original zero-consumption failed
+settlement and commits the selection Checkpoint. Its closed
+`cliq-tool-grant-expiry-v1` branch names `selectionCheckpointId/frontierRef`
+instead of `waitingSubjectRef`; it does not invent a replacement wait. The
+final transaction resamples real commit time C, advances the original time
+fence, and rechecks the exact grant/prepared/lease/launch/Checkpoint/Journal
+cut, expiry at C and claim absence. Nonexpired, claimed and UNKNOWN attempts
+cannot use this refund. Historical replacement-wait evidence remains its own
+closed branch. A new wait and any later grant require their own subsequent cut.
 
 Channel extraction is exact. Filesystem evidence contains the nonempty unique byte-sorted all-and-only canonical admitted-root-relative paths touched by the normalized request; matching evaluates every path and uses the strongest result (`deny > ask > allow`). MCP evidence copies the registration id/server tool name from the exact selected tool contract. Plan evidence copies the fixed normalized plan identity from the typed request/target. Bash evidence copies exactly one closed input projection from the schema-normalized built-in shell request: `argv` is its nonempty ordered argv array and `shell_text` is its exact NFC/no-NUL command string; neither form may be synthesized from the other. The deterministic `cliq-bash-head-parser-v1` emits the optional outer executable head, every nested builtin-deny head in lexical occurrence order, and `unsafeForAllow`. Heads are NFC/no-NUL strings of at most 4096 UTF-8 bytes; the nested list is at most 64 and contains no duplicate occurrence tuple. The parser recognizes the fixed bundled shell grammar and wrappers in golden fixtures; unsupported/dynamic/ambiguous syntax yields no trusted outer head and `unsafeForAllow=true`, never an implementation guess. Artifact recovery uses these retained bytes and exact profile output rather than reparsing with a host shell or changed repository configuration.
 
@@ -4693,17 +4833,21 @@ Phase/op-kind validation is closed at storage, not left to adapters:
 - `prepared` requires immutable request, target, ReplayClass, original epoch, applicable grant, and the complete four-counter reservation in `budgetDelta`; it forbids dispatch/result/receipt/error evidence ref/digest and a settlement ref. The sole zero-reservation form is a typed abort-directory recovery-maintenance request admitted by `claimRecoveryMaintenance`'s preconditions.
 - `dispatch_claimed` requires the one matching prepared row, `dispatchId`, trusted Supervisor instance plus exact active `stateOwnerEpoch`, the broker-token-digest XOR above, the complete four-counter zero value in `budgetDelta`, and no terminal fields, evidence pair, or budget settlement.
 - `completed` requires the matching claim, exact `budgetSettlementRef`, plus an op-kind result: exact usable `AgentModelTurn` or exact `ModelUnusableResponseV1` for `model`, under their closed XOR; result artifact for `tool|mcp`; exact `McpServerInstanceIdentityV1` result plus `McpServerLaunchReceiptV1` for `mcp-server`; a passed/assertion/source-mutation verification receipt for `verifier`; or exact `PublicationProofV1(kind='terminal_receipt')` for `publish`.
-- `failed` is a closed XOR. `pre_dispatch` requires the exact prepared row, error, settlement, and zero consumed `budgetDelta`, while forbidding dispatch/Supervisor/owner/token/result/receipt/evidence pair/attestation fields; the absence of any claim under the universal dispatch gate is itself authoritative proof that no target capability or request byte was released. `post_claim` repeats the exact claim and is legal only in three closed forms: its `evidenceRef/evidenceDigest` decodes exact `PostClaimNoReleaseEvidenceV1`, or an `opKind='verifier'` infrastructure failure carries its cross-field-valid `infra_failed` receipt plus exact containment-death closure and forbids the generic pair; or the sole stopped-recovery terminal transaction resolves a previously fully charged private edit unknown with exact `PrivateToolRollbackV1`, preserving that original settlement. The first form consumes zero and proves the same live owner closed the second gate before any release/spawn; the verifier form consumes its exact attempt usage. Private rollback appends zero additional budget, never a refund or another settlement. Every other claimed failure with no typed result is `unknown`, while a typed negative target response is `completed` with its exact result artifact. A verifier stopped by Run cancel/deadline has a `VerifierStopItem` and no receipt. A malformed response received from an executed/billable provider is `completed` with an unusable-response artifact, not a false no-effect failure.
+- `failed` is a closed XOR. `pre_dispatch` requires the exact prepared row, error, settlement, and zero consumed `budgetDelta`, while forbidding dispatch/Supervisor/owner/token/result/receipt/evidence pair/attestation fields; the absence of any claim under the universal dispatch gate is itself authoritative proof that no target capability or request byte was released. `post_claim` repeats the exact claim and is legal only in three closed forms: its `evidenceRef/evidenceDigest` decodes exact `PostClaimNoReleaseEvidenceV1`, or an `opKind='verifier'` infrastructure failure carries its cross-field-valid `infra_failed` receipt plus exact containment-death closure and forbids the generic pair; or the sole stopped-recovery terminal transaction resolves a previously fully charged fixed private builtin unknown with exact `PrivateToolRollbackV1`, preserving that original settlement. The first form consumes zero and proves the same live owner closed the second gate before any release/spawn; the verifier form consumes its exact attempt usage. Private rollback appends zero additional budget, never a refund or another settlement. Every other claimed failure with no typed result is `unknown`, while a typed negative target response is `completed` with its exact result artifact. A verifier stopped by Run cancel/deadline has a `VerifierStopItem` and no receipt. A malformed response received from an executed/billable provider is `completed` with an unusable-response artifact, not a false no-effect failure.
 - `unknown` requires the matching claim, an `evidenceRef/evidenceDigest` pair decoding exact `InvocationAmbiguityEvidenceV1`, and the exact conservative full `budgetSettlementRef`.
 - `abandoned` requires an existing `unknown` whose ReplayClass is exactly `manual`, repeats that unknown row's settlement ref with zero additional delta, carries the local-principal attestation described below, forbids its own evidence pair, fabricates no result, and has the terminal-only identity-matched `ToolAbandonedItem` when the invocation originated from a tool/MCP call. It is administrative closure, not completion/failure evidence.
 
 Every Journal evidence ref is accompanied by its digest or both are absent; the phase/op-kind decoder fixes the only legal artifact type. `InvocationAmbiguityEvidenceV1.evidenceDigest = SHA-256(JCS(evidence with evidenceDigest omitted))`. Its Run/frontier/op/kind/attempt/dispatch/claim sequence, immutable request and target pairs, claiming Supervisor/StateOwner epoch, current inspector, and observation time equal the exact claimed attempt and the frontier transaction entering `unknown`; no caller/worker payload is accepted. `claim_owner_lost` rehashes exact `StateOwnerAcquisitionEvidenceV1(takeover_after_owner_death)` for the historical claim owner and requires the inspector to be that strictly newer active owner. `broker_channel_lost_after_claim` is limited to a claim that stored the same broker fence-token digest; the same still-live owner records one closed deadline/connection/stream failure after the second release gate and proves the Journal has no durable terminal result. `sandbox_channel_lost_after_claim` rehashes the claim's exact SandboxLaunchSpec and actual containment; its same-owner live branch requires `observedAt >= responseDeadlineAt`, an authenticated channel-close time, and no result, while its death branch rehashes exact all-descendant `ProcessContainmentDeathEvidenceV1` and proves no terminal result was durably received before death. `publication_path_ambiguous` rehashes only the same claim's exact `PublicationProofV1(kind='path_ambiguity')`. Any other kind/mechanism combination, free error string, missing pair, current-owner mismatch, or evidence that instead proves completion/failure is invalid. The `unknown` row repeats this exact pair; a later `ManualAbandonAttestationV1` must repeat the same pair byte-for-byte, not substitute newer display or probe evidence.
 
-`PostClaimNoReleaseEvidenceV1.evidenceDigest` omits itself. Its Run/op/attempt/dispatch/claim sequence, request/target/grant, claiming Supervisor/owner epoch, and current inspector ref/digest equal the prepared/claim rows and current `SupervisorInspectorIdentityV1`; the inspector is the same still-live owner and the observation is within five seconds. The broker branch is legal iff the claim stored that exact fence-token digest: while holding the broker release mutex, the same owner revokes the still-unreleased token, observes zero matching active release, publishes the artifact, and appends post-claim failed plus zero-consumption settlement in one transaction before dropping the mutex. The process branch is legal iff the claim's exact SandboxLaunchSpec has not spawned; its ref and `ProcessContainmentNoSpawnEvidenceV1` rehash the same plan/spec/nonce and positively prove zero matching process. It likewise commits with the failed row before spawn authority can be released. A restart, owner change, absent live token, observed process/release, partial rollback, generic death, adapter assertion, or inline boolean cannot produce this artifact and therefore routes the claim to `unknown` unless the verifier-specific receipt/death form applies. The separate `PrivateToolRollbackV1` exception resolves an already charged unknown only after positive rollback/retirement of the original fixed private edit domain; it is never this no-release evidence or permission to retry.
+`PostClaimNoReleaseEvidenceV1.evidenceDigest` omits itself. Its Run/op/attempt/dispatch/claim sequence, request/target/grant, claiming Supervisor/owner epoch, and current inspector ref/digest equal the prepared/claim rows and current `SupervisorInspectorIdentityV1`; the inspector is the same still-live owner and the observation is within five seconds. The broker branch is legal iff the claim stored that exact fence-token digest: while holding the broker release mutex, the same owner revokes the still-unreleased token, observes zero matching active release, publishes the artifact, and appends post-claim failed plus zero-consumption settlement in one transaction before dropping the mutex. The process branch is legal iff the claim's exact SandboxLaunchSpec has not spawned; its ref and `ProcessContainmentNoSpawnEvidenceV1` rehash the same plan/spec/nonce and positively prove zero matching process. It likewise commits with the failed row before spawn authority can be released. A restart, owner change, absent live token, observed process/release, partial rollback, generic death, adapter assertion, or inline boolean cannot produce this artifact and therefore routes the claim to `unknown` unless the verifier-specific receipt/death form applies. The separate `PrivateToolRollbackV1` exception resolves an already charged unknown only after positive rollback/retirement of the original fixed private builtin domain; it is never this no-release evidence or permission to retry.
 `PrivateToolRollbackV1` is terminal-stop-only and limited to the original signed
-Linux fixed builtin edit recipe whose native boundary permits effects only in
-its exact private generation. The original replay class remains `manual`; no
-retry authority is added. Its request/target/grant, claim, worker launch/epoch,
+Linux fixed builtin edit or `cliq-builtin-tools-v1` script recipe whose native
+boundary permits effects only in its exact private generation. The script
+branch is closed to the same five declared tools and original signed script,
+guest Node, normalized input and complete retained member bytes. Read/search
+retain their read-only envelope and `retry` class; Bash/edit retain their
+read-write envelope and `manual` class. No retry authority is added: even a
+read/search UNKNOWN is not redispatched. Its request/target/grant, claim, worker launch/epoch,
 generation identity, preceding ready Checkpoint and exact whole-domain death,
 quarantine and retirement graph must all agree. The original UNKNOWN remains
 fully charged; the added failed row reuses its immutable BudgetSettlement and
@@ -5787,6 +5931,12 @@ type SandboxProcessInvocationV1 =
       argvCwdSource: 'trusted_recipe_decode_of_request_and_target'
     } & (
       | { purpose: 'tool'; recipe: 'cliq-tool-launch-v1'; stdio: SandboxCapturedStdioV1 }
+      | {
+          purpose: 'tool'
+          recipe: 'cliq-builtin-tools-v1'
+          privateGitProtection: 'existing_read_only'
+          stdio: SandboxCapturedStdioV1
+        }
       | { purpose: 'verifier'; recipe: 'cliq-verifier-command-v1'; stdio: SandboxCapturedStdioV1 }
       | {
           purpose: 'mcp_stdio'
@@ -6580,6 +6730,32 @@ CAS loss, channel loss, timeout, or Supervisor crash forces termination and proo
 Strong containment is backend-specific but semantically identical:
 
 - Linux uses bubblewrap with a private PID namespace plus a dedicated cgroup v2 subtree and Supervisor subreaper. Empty-cgroup proof, not `killpg`, establishes descendant death.
+
+The production package builds bubblewrap 0.12.0 from the fixed official
+`bubblewrap-0.12.0.tar.xz` archive (126,452 bytes,
+SHA-256 `9760d007363e3abba7c747489910f9f82d9fca53ba3bd3282e396fa3c97a3314`).
+The original RuntimeBundle release signs the actual resulting executable's
+complete bytes, digest and size as the existing `linux_bubblewrap` entry.
+Build provenance retains the exact source, compiler, Meson, libcap, libselinux
+and fixed build options. The build disables neither SELinux support nor any
+recipe check; 0.12.0 has no setuid support. It never selects the host's APT/PATH
+bubblewrap as a fallback. The fixed recipe never uses
+`--not-a-security-boundary`. Unsupported `--size` syntax is a package-build
+refusal, not permission to create an unbounded tmpfs. Ubuntu 22.04's original
+0.6.1 cannot execute this recipe.
+
+Syntax probing is distinct from namespace qualification. Before source or
+private-Git preparation sends READY, its trusted producer opens the actual
+private root and scratch directories, verifies distinct real tmpfs mounts and
+their complete block capacities against the original root/runtime and scratch
+ceilings, and closes both descriptors. Every tmpfs size is rounded down to the
+existing 4096-byte source accounting unit, preventing kernel rounding from
+adding a writable page beyond a non-aligned original ceiling.
+Existing full hashing, confinement,
+resource accounting, five-second READY and two-second stop remain mandatory.
+Only the original real Linux namespace/campaign success can qualify that
+physical behavior; a version string, `--help`, build or ordinary-filesystem
+component cannot do so.
 - macOS uses the bundled, signed Virtualization.framework Linux microVM backend. Each activation has a disposable guest PID namespace/cgroup and no host credentials or writable host mount; guest containment emptiness plus VM termination establishes death. Seatbelt without that VM may protect descriptor-safe non-Run inspection helpers, but it is not a Run execution backend because it cannot provide the required durable worker/claim/all-descendant recovery contract.
 
 Every takeover first stops dispatch and performs one transaction that changes the old launch to `reconciling` with `generationWriteState='fenced_reconciling'`, creates the exact typed `worker_death` subject containing launch/identity/epoch/containment/generation/open attempts, CASes the generation from its current `active|revoking|checkpointing` phase to `fenced_reconciling` while retaining its prior snapshot/launch/epoch and binding that wait ref/digest/source phase/quiesce id, clears the Run's active pointer/lease, and installs the wait. This transaction is mandatory even when positive all-descendant death evidence is already immediately available; there is no direct pointer-bound generation-to-quarantine edge. The inspector then terminates or reobserves the old containment, and only a completed `WorkerRecoveryEvidenceV1` for that installed wait may drive `fenced_reconciling -> quarantined`. No second worker starts before that transition, and no branch falsely quarantines bytes before death proof.
@@ -6719,8 +6895,11 @@ prompt, schema, or audit refs. If more calls remain the transaction preserves a
 tool frontier; otherwise it creates an agent frontier with cause `input`.
 
 `request_input` is the closed built-in control contract: `access='control'`,
-`replayClass='manual'`, adapter id `request_input`, version `1`, and no manifest
-output schema. It is not an ordinary policy action and cannot mint an
+`replayClass='manual'`, `execution.kind='supervisor_control'`, fixed handler id
+`request_input`, and no manifest output schema. Its signed Supervisor entry
+id, actual entry version and complete image digest match the original bundle;
+current handling additionally matches the genuine held StateOwner image.
+It is not an ordinary policy action and cannot mint an
 OperationGrant, prepare/claim a Journal invocation, perform target I/O, or
 charge a tool dispatch. A same-named MCP tool remains an ordinary MCP call.
 Its native input is `{prompt,responseKind,maximumResponseBytes,responseSchema?}`:
@@ -6731,10 +6910,13 @@ Other fields, unsupported schemas and malformed prompts reject the call before
 any call in that batch dispatches. Requesting input does not grant any file,
 command, network or child authority, in any policy mode.
 
-The wait atomically appends the exact InputRequestItem, unchanged-workspace
-ready Checkpoint and input WaitingSubject. If a worker exists, current-inspector
-containment-death and unchanged-workspace snapshot proof seal its generation
-and retire it in that transaction; competing unretired launches forbid waiting.
+If a worker exists, the pure selection first requires current-inspector
+containment-death and unchanged-workspace snapshot proof to seal its generation
+and retire it in the original retirement/Checkpoint transaction. That operation
+fully joins the old resources, then reproduces the input on a new cut; it never
+creates an old-epoch pending input. The worker-free wait atomically appends the
+exact InputRequestItem, unchanged-workspace ready Checkpoint and input
+WaitingSubject. Competing unretired launches forbid waiting.
 The request item is excluded from model content. Answering is a worker-free
 control commit, retaining the exact WaitingSubject, canonical request identity
 and authenticated channel in UserInputPayloadV1. Recovery replays the prompt
@@ -7382,6 +7564,35 @@ attempt; only positively proven no-release follows the separate refund protocol.
 
 For every non-read contract, `postEffect` is mandatory even on an error;
 read-only contracts forbid it and preserve the preceding workspace state.
+The fixed `builtin_script` recipe additionally requires the closed
+`captureRef/captureDigest` pair. Its `cliq-builtin-tool-capture-v1` data binds
+the original claim/lease/request/target/grant, fixed tool, SandboxLaunchSpec,
+actual start/end/duration and closed termination union, exact stdout/stderr CAS
+refs and byte counts, independent native truncation flags, original invocation
+containment and positive whole-invocation death. The original native result's
+private bytes are copied before the first await. Every publication and output
+read joins before settlement; joined persistence failure retains this one
+result and its original fence, never another dispatch. Recovery rereads all raw
+bytes and original signed script/guest closure and verifies the claiming
+StateOwner's process/lock/image inspector and invocation reservation.
+Read/search exit-zero output must decode as the exact fixed structured frame
+for the original normalized input; a cut/malformed frame is a retained protocol
+error. Bash and other genuine termination outcomes retain their actual exit
+code, signal, timeout, resource failure or native spawn code. The model receives
+a bounded reproducible projection with explicit UTF-8-lossy encoding and
+separate model-prefix/native-truncation flags; raw output refs and authority
+artifacts are private. An invocation's death does not prove parent worker death.
+If a valid structured directory/search frame plus captured stderr exceeds the
+model byte ceiling, select its largest complete entry prefix. Preserve the
+original `sourceComplete`, mark `modelTruncated=true`, and give the derived
+frame `complete=false` plus `output_limit`; never edit the original raw frame
+or silently promote a partial frame to complete. A real `controller_stop`
+may originate from Supervisor shutdown without a user StopIntent. Retain that
+actual termination, charge once and seal any original RW post-effect; do not
+invent user cancellation, no-effect evidence, a refund or another dispatch.
+A fully validated read/search completion may keep the same active parent and
+generation; each subsequent call still passes its own grant/claim/release and
+complete output/death checks. The old native edit recipe forbids capture fields.
 `checkpointId = H('cliq-tool-checkpoint-v1', runId, opId, String(attempt))` binds
 the positive sealed snapshot to this exact observation. Its workspace, tree,
 generation and retirement closure must agree with the quiesced owning launch;
@@ -7541,6 +7752,8 @@ type ToolObservationV1 = {
   dispatchId: string
   observedAt: string
   observationDigest: string
+  captureRef?: ArtifactRef
+  captureDigest?: string
   postEffect?: {
     workspaceStateRef: ArtifactRef
     snapshotEvidenceRef: ArtifactRef
@@ -10472,6 +10685,14 @@ available. Schema 3 requires a genuine compatible hello; it cannot silently
 downgrade to the old installed range 1. Legacy default CLI/TUI and schema 2
 composition remain until their complete migration/release gate, and controlled
 signed installation fixtures do not substitute for public release trust roots.
+
+The implemented internal thin-client composition and its precise qualification
+boundary are documented in [Installed thin client applications](../kernel/installed-client-applications.md).
+The natural CLI and Ink view call the same authenticated application as JSONL/RPC;
+its lifetime is a connection/view lifetime, never execution ownership. Run and
+authorization lists reuse the same materialized-cut lifecycle as Session lists.
+This does not select a default entry or satisfy the public release-root, platform,
+large-state Stop or complete frontend qualification gates.
 
 The exact initial method names are `control.hello`; `session.create|list|get|fork|compact|handoff.create`; `run.submit|list|get|attach|cancel|approve|input|reconcile|diff|result|apply`; `authorization.create|list|revoke`; `mcp.register|refresh|list`; `artifact.get`; and `supervisor.status`. Authorization and MCP registry methods are Supervisor-owned user administration, not adapter-specific Run lifecycle methods.
 

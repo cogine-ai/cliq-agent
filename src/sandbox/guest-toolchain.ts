@@ -42,11 +42,21 @@ export type NativeSourceGitToolchain = Readonly<{
   close(): Promise<void>;
 }>;
 
+declare const builtinBashToolchainBrand: unique symbol;
+/** A distinct genuine extraction of the same signed image's Node/Git/Bash closure. */
+export type NativeBuiltinBashToolchain = Readonly<{
+  readonly [builtinBashToolchainBrand]: true;
+  pollReady(): boolean;
+  describe(): GuestToolchainDescription & Readonly<{ gitPath: string; gitDigest: string; bashPath: string; bashDigest: string }>;
+  close(): Promise<void>;
+}>;
+
 export type NativeGuestExtractorBinding = Readonly<{
   interfaceVersion: 1;
   /** Acquires its own descriptor synchronously; bounded copy/hash/seal and
    * parsing run inside this same cancellable, joinable native owner. */
   begin(imageFd: number, input: NativeGuestExtractionInput): NativeGuestToolchain;
   /** Fixed Node + /usr/bin/git dual-root extraction, with the same bounds. */
+  beginBuiltinBash?(imageFd: number, input: NativeGuestExtractionInput): NativeBuiltinBashToolchain;
   beginSourceGit?(imageFd: number, input: NativeGuestExtractionInput): NativeSourceGitToolchain;
 }>;

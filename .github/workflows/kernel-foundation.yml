@@ -67,7 +67,7 @@ jobs:
       - run: npm run build
         id: build
       - name: Install actual platform and worker build prerequisites
-        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev musl-tools bubblewrap strace libext2fs-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev musl-tools bubblewrap libcap-dev libselinux1-dev meson ninja-build strace libext2fs-dev pkg-config
       - name: Exercise signed credential commands and Supervisor autostart
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
@@ -101,7 +101,7 @@ jobs:
       - run: npm run build
         id: build
       - name: Install actual platform and worker build prerequisites
-        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev musl-tools bubblewrap strace libext2fs-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev musl-tools bubblewrap libcap-dev libselinux1-dev meson ninja-build strace libext2fs-dev pkg-config
       - name: Exercise signed model input refusals with complete independent retirement
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
@@ -135,7 +135,7 @@ jobs:
       - run: npm run build
         id: build
       - name: Install actual signed image and D-Bus fixture prerequisites
-        run: sudo apt-get update && sudo apt-get install -y libglib2.0-dev musl-tools bubblewrap libext2fs-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y libglib2.0-dev musl-tools bubblewrap libcap-dev libselinux1-dev meson ninja-build libext2fs-dev pkg-config
       - name: Join the original installed finalizer before ordinary two-second stop
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
@@ -167,7 +167,7 @@ jobs:
       - run: npm run build
         id: build
       - name: Install actual signed transport and worker build prerequisites
-        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap e2fsprogs libext2fs-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap libcap-dev libselinux1-dev meson ninja-build e2fsprogs libext2fs-dev pkg-config
       - name: Revoke the real admitted credential and require truthful retirement and restart
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
@@ -200,7 +200,7 @@ jobs:
       - run: npm run build
         id: build
       - name: Install actual signed transport and bounded ext4 prerequisites
-        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap e2fsprogs libext2fs-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap libcap-dev libselinux1-dev meson ninja-build e2fsprogs libext2fs-dev pkg-config
       - name: Refuse real CAS publication and settle the same original claim after exact restoration
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
@@ -235,7 +235,7 @@ jobs:
       - run: npm run build
         id: build
       - name: Install actual signed transport and worker build prerequisites
-        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap e2fsprogs libext2fs-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap libcap-dev libselinux1-dev meson ninja-build e2fsprogs libext2fs-dev pkg-config
       - name: Stop the real Supervisor during positively observed instruction capture
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
@@ -285,7 +285,7 @@ jobs:
       - run: npm run build
         id: build
       - name: Install actual signed transport and worker build prerequisites
-        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap e2fsprogs libext2fs-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap libcap-dev libselinux1-dev meson ninja-build e2fsprogs libext2fs-dev pkg-config
       - name: Stop the real scheduler during positively observed generation writes
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
@@ -318,7 +318,7 @@ jobs:
       - run: npm run build
         id: build
       - name: Install actual signed transport and worker build prerequisites
-        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap e2fsprogs libext2fs-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap libcap-dev libselinux1-dev meson ninja-build e2fsprogs libext2fs-dev pkg-config
       - name: Preserve the actual received private-tool result through ordinary stop
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
@@ -382,7 +382,7 @@ jobs:
       - run: npm run build
         id: build
       - name: Install actual signed transport and worker build prerequisites
-        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap e2fsprogs libext2fs-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap libcap-dev libselinux1-dev meson ninja-build e2fsprogs libext2fs-dev pkg-config
       - name: Exercise byte-triggered whole-prefix compaction and genuine queued successor progress
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
@@ -418,7 +418,7 @@ jobs:
       - run: npm run build
         id: build
       - name: Install actual signed transport and worker build prerequisites
-        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap e2fsprogs libext2fs-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap libcap-dev libselinux1-dev meson ninja-build e2fsprogs libext2fs-dev pkg-config
       - name: Compile the native transport with visible compiler diagnostics
         run: node scripts/kernel/build-linux-model-broker.mjs "$RUNNER_TEMP/cliq-model-broker-compile"
       - name: Exercise actual installed Run, ready Checkpoint, reconnect and restart
@@ -496,7 +496,7 @@ jobs:
       - run: npm run build
         id: build
       - name: Install actual platform and worker build prerequisites
-        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev musl-tools bubblewrap strace libext2fs-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev musl-tools bubblewrap libcap-dev libselinux1-dev meson ninja-build strace libext2fs-dev pkg-config
       # These independent disposable fixtures must not spend the stateful
       # credential journey's unchanged budget. Keep their exact assertions
       # on the same qualified OS/Node baseline; no authority crosses jobs.
@@ -626,7 +626,7 @@ jobs:
       - run: npm ci
 
       - name: Install probe toolchain
-        run: sudo apt-get update && sudo apt-get install -y bubblewrap musl-tools
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap libcap-dev libselinux1-dev meson ninja-build musl-tools
 
       - name: Record qualification baseline
         shell: bash
@@ -740,11 +740,17 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
-      - run: sudo apt-get update && sudo apt-get install -y bubblewrap musl-tools e2fsprogs libext2fs-dev pkg-config
+      - run: sudo apt-get update && sudo apt-get install -y bubblewrap libcap-dev libselinux1-dev meson ninja-build musl-tools e2fsprogs libext2fs-dev pkg-config
       - name: Verify real worker seccomp ABI and syscall denials
         shell: bash
         run: |
           node --test --import tsx scripts/kernel/testing/guest-verifier-process.test.ts scripts/kernel/testing/guest-verifier-diagnostics.test.ts
+          node --test scripts/kernel/testing/build-bubblewrap.test.mjs
+          storage_regression="$RUNNER_TEMP/cliq-source-storage-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          musl-gcc -std=c11 -O2 -Wall -Wextra -Werror -static \
+            -idirafter /usr/include -idirafter "/usr/include/$(musl-gcc -dumpmachine)" \
+            native/linux/source-storage.test.c -o "$storage_regression"
+          "$storage_regression"
           regression="$RUNNER_TEMP/cliq-worker-seccomp-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           channel_regression="$RUNNER_TEMP/cliq-worker-channel-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           hash_regression="$RUNNER_TEMP/cliq-worker-sha256-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
@@ -986,7 +992,7 @@ jobs:
       - run: npm run build
         id: build
       - name: Install actual guest, transport and Secret Service prerequisites
-        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap e2fsprogs libext2fs-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap libcap-dev libselinux1-dev meson ninja-build e2fsprogs libext2fs-dev pkg-config
       - name: Observe the fixed original installed status deadlock
         shell: bash
         run: |
@@ -1038,7 +1044,7 @@ jobs:
       - run: npm run build
         id: build
       - name: Install actual guest, transport and Secret Service prerequisites
-        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap e2fsprogs libext2fs-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap libcap-dev libselinux1-dev meson ninja-build e2fsprogs libext2fs-dev pkg-config
       - name: Exercise explicit publication, drift merge, cancellation, reconnect and restart
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
@@ -1075,7 +1081,7 @@ jobs:
       - run: npm run build
         id: build
       - name: Install actual guest, Secret Service and owned-volume prerequisites
-        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap e2fsprogs libext2fs-dev pkg-config dmsetup kmod
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap libcap-dev libselinux1-dev meson ninja-build e2fsprogs libext2fs-dev pkg-config dmsetup kmod
       - name: Exercise both actual Linux root protocol-child lifetimes
         shell: bash
         run: |
@@ -1127,7 +1133,7 @@ jobs:
       - run: npm run build
         id: build
       - name: Install actual guest, Secret Service and owned-volume prerequisites
-        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap e2fsprogs libext2fs-dev pkg-config dmsetup kmod
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap libcap-dev libselinux1-dev meson ninja-build e2fsprogs libext2fs-dev pkg-config dmsetup kmod
       - name: Exercise both actual Linux root protocol-child lifetimes
         shell: bash
         run: |
@@ -1180,7 +1186,7 @@ jobs:
       - run: npm run build
         id: build
       - name: Install actual guest, Secret Service and owned-volume prerequisites
-        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap e2fsprogs libext2fs-dev pkg-config dmsetup kmod
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap libcap-dev libselinux1-dev meson ninja-build e2fsprogs libext2fs-dev pkg-config dmsetup kmod
       - name: Exercise both actual Linux root protocol-child lifetimes
         shell: bash
         run: |

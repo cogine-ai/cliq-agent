@@ -77,6 +77,8 @@ try {
   const gitVersion = command(gitSource, ['--version']).trim();
   if (!/^git version [A-Za-z0-9.+_-]+$/u.test(gitVersion)) throw new Error('Guest Git version is not bounded fixed output');
   const git = await executable(gitSource, '/usr/bin/git', 'git', gitVersion);
+  const bashSource = await protectedSource('/bin/bash');
+  const bash = await executable(bashSource, '/bin/bash', 'bash', digest(await readFile(bashSource)));
   const node = await executable(selectedNode, '/usr/bin/node', 'node', nodeVersion.slice(1));
   const files = [...copied.values()].sort((a, b) => Buffer.compare(Buffer.from(a.path), Buffer.from(b.path)));
   const totalBytes = files.reduce((sum, file) => sum + file.byteCount, 0);
@@ -105,7 +107,7 @@ try {
     guestImageRef: imageDigest, guestImageDigest: imageDigest, guestImageByteCount: imageByteCount,
     guestImageFormat: 'raw-ext4-v1', architecture: 'x86_64', kernelAbi: 'linux-x86_64-v1',
     userspaceAbi: 'linux-x86_64-glibc-v1', worker, shell, git, node,
-    searchTools: [], verifiers: [], admittedExecutables: [], files, extractedFileBytes: totalBytes, imageLayout,
+    searchTools: [], verifiers: [], admittedExecutables: [bash], files, extractedFileBytes: totalBytes, imageLayout,
     scope: 'actual build bytes only; not release-signed, execution-qualified or a Run proof' };
   const metadataFile = path.join(staging, 'guest-toolchain-input.json');
   await writeFile(metadataFile, JSON.stringify(metadata), { flag: 'wx', mode: 0o400 });

@@ -391,12 +391,13 @@ export async function readControl(driver: SqliteDriver, artifacts: ArtifactCatal
   request: ReadControlRequest, identity: AuthenticatedControlIdentity, signal?: AbortSignal): Promise<ReadControlResult> {
   signal?.throwIfAborted();
   const normalized = validateRequest(request);
+  const reads = signal ? artifacts.withReadSignal(signal) : artifacts;
   const authenticated = { principalId: identity.principalId, channelIdentityRef: identity.channelIdentityRef, channelIdentityDigest: identity.channelIdentityDigest };
-  await validateControlChannelClosure(artifacts, owner, authenticated);
+  await validateControlChannelClosure(reads, owner, authenticated);
   signal?.throwIfAborted();
-  if (normalized.method === 'artifact.get') return readArtifactQuery(driver, artifacts, owner, normalized, authenticated, identity, signal);
+  if (normalized.method === 'artifact.get') return readArtifactQuery(driver, reads, owner, normalized, authenticated, identity, signal);
   if (normalized.method === 'run.result' || normalized.method === 'run.diff')
-    return readResultQuery(driver, artifacts, owner, normalized, authenticated, signal);
+    return readResultQuery(driver, reads, owner, normalized, authenticated, signal);
   // RunSpec is immutable data. Select and validate its exact bytes first so the
   // final snapshot transaction can budget the actual operation spelling. Only
   // that final transaction supplies Run truth, stream rows and high-waters.
@@ -410,7 +411,7 @@ export async function readControl(driver: SqliteDriver, artifacts: ArtifactCatal
         throw error;
       }
     });
-    const value = await artifacts.readCanonical(specRef);
+    const value = await reads.readCanonical(specRef);
     if (canonicalSha256(value) !== specRef) throw new KernelStorageError('ARTIFACT_MISMATCH', 'RunSpec is not canonical JSON');
     selectedSpec = { ref: specRef, operation: decodeRunSpec(value).operation };
     signal?.throwIfAborted();
@@ -436,7 +437,7 @@ export async function readControl(driver: SqliteDriver, artifacts: ArtifactCatal
     result = { ...cut.result, snapshot };
     if (cut.expired) expired = new EventCursorExpiredError(cut.expired.earliest, cut.expired.latest, snapshot);
   } else result = cut.result;
-  await validateControlChannelClosure(artifacts, owner, authenticated);
+  await validateControlChannelClosure(reads, owner, authenticated);
   signal?.throwIfAborted();
   assertActiveStateOwner(driver, owner);
   if (expired) throw expired;

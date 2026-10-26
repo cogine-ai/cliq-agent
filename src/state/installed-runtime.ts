@@ -1,3 +1,6 @@
+import { BUILTIN_SCRIPT_RECIPE } from '../sandbox/builtin-tool-data.js';
+import type { NativeBuiltinBashToolchain } from '../sandbox/guest-toolchain.js';
+import type { NativeBuiltinToolScriptImage } from '../sandbox/linux-worker.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { constants, fstatSync, lstatSync, type BigIntStats } from 'node:fs';
 import { lstat, mkdir, open, readdir, rename, type FileHandle } from 'node:fs/promises';
@@ -175,6 +178,8 @@ type InstalledRuntimeBinding = {
   loadModelBroker(): Promise<NativeModelBrokerBinding>;
   openControlClient(): Promise<HeldInstalledControlClient>;
   sealWorkerImage(entryId: string): Promise<NativeWorkerImage>;
+  sealBuiltinToolScript(signal?: AbortSignal): Promise<NativeBuiltinToolScriptImage>;
+  startBuiltinBashToolchain(toolchain: RetainedVerifierToolchain, options: { signal?: AbortSignal }): Promise<NativeBuiltinBashToolchain>;
   sealSourceGitInspector(signal?: AbortSignal): Promise<NativeSourceGitInspectorImage>;
   startGuestToolchain(toolchain: RetainedVerifierToolchain, options: { signal?: AbortSignal }): Promise<NativeGuestToolchain>;
   startSourceGitToolchain(toolchain: RetainedVerifierToolchain, options: { signal?: AbortSignal }): Promise<NativeSourceGitToolchain>;
@@ -256,6 +261,24 @@ export function sealInstalledSourceGitInspector(selected: HeldInstalledRuntime, 
   const binding = heldInstalledRuntimes.get(selected);
   if (!binding) mismatch('source inspection requires a genuine held installed selection');
   return binding.sealSourceGitInspector(signal);
+}
+
+/** Fixed signed data and its distinct native type; never a caller program. */
+export function sealInstalledBuiltinToolScript(selected: HeldInstalledRuntime, signal?: AbortSignal): Promise<NativeBuiltinToolScriptImage> {
+  const binding = heldInstalledRuntimes.get(selected);
+  if (!binding) mismatch('builtin tool requires a genuine held installed selection');
+  return binding.sealBuiltinToolScript(signal);
+}
+export function startInstalledBuiltinBashToolchain(selected: HeldInstalledRuntime, toolchain: RetainedVerifierToolchain,
+  options: { signal?: AbortSignal } = {}): Promise<NativeBuiltinBashToolchain> {
+  const binding = heldInstalledRuntimes.get(selected);
+  if (!binding) mismatch('builtin bash requires a genuine held installed selection');
+  return binding.startBuiltinBashToolchain(toolchain, options);
+}
+export function closeInstalledBuiltinBashToolchain(selected: HeldInstalledRuntime, job: NativeBuiltinBashToolchain): Promise<void> {
+  const binding = heldInstalledRuntimes.get(selected);
+  if (!binding) mismatch('builtin bash retirement requires a genuine held installed selection');
+  return binding.closeGuestToolchain(job);
 }
 
 /** Private fixed extractor bridge. The original imported CAS image remains
@@ -908,6 +931,11 @@ async function verifyPackageBytes(scope: Scope, root: Directory, releaseKeys: re
       roots.set(entry.digest, bytes);
     } else if (entry.role === 'trust_store') {
       const bytes = await readSmall(file, TRUST_BYTES); validateTrustStore(bytes); roots.set(entry.digest, bytes);
+    } else if (entry.entryId === BUILTIN_SCRIPT_RECIPE.entryId && entry.role === 'tool_adapter') {
+      if (entry.executable !== false || entry.version !== BUILTIN_SCRIPT_RECIPE.version ||
+          entry.relativePath !== BUILTIN_SCRIPT_RECIPE.relativePath || entry.byteCount < 1 || entry.byteCount > BUILTIN_SCRIPT_RECIPE.scriptBytes)
+        mismatch('builtin tool script is outside its fixed signed data contract');
+      roots.set(entry.digest, await readSmall(file, BUILTIN_SCRIPT_RECIPE.scriptBytes));
     } else if (entry.role !== 'bundle_object') await verifyBytes(file);
   }
   const guests = guestToolchainRoots(bundle).map(root => {
@@ -1282,12 +1310,14 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
               companionKind === 'model_catalog_entry' ? 'cliq-signed-model-catalog-entry-v1' :
               companionKind === 'model_price_table' ? 'cliq-model-price-table-v1' :
               signed.structured.objects.find(object => object.artifactRef === artifactRef)?.schemaKind ?? (
+              role === 'tool_adapter' && signed.bundle.entries.some(entry => entry.entryId === BUILTIN_SCRIPT_RECIPE.entryId && entry.digest === artifactRef)
+                ? 'cliq-builtin-tool-script-v1' :
               role === 'schema' ? 'cliq-installed-schema-v1' :
               role === 'policy_engine' ? 'cliq-policy-engine-profile-v1' :
               role === 'sandbox_root_profile' ? 'cliq-sandbox-root-profile-v1' :
               role === 'trust_store' ? 'cliq-https-trust-store-v1' : mismatch('installed seed contains an unsupported object'));
             return Object.freeze({ artifactRef, byteCount: bytes.length,
-              mediaType: role === 'trust_store' || companionKind === 'ed25519_signature' || schemaKind === 'cliq-ed25519-signature-v1'
+              mediaType: schemaKind === 'cliq-builtin-tool-script-v1' || role === 'trust_store' || companionKind === 'ed25519_signature' || schemaKind === 'cliq-ed25519-signature-v1'
                 ? 'application/octet-stream' : 'application/json', schemaKind });
           }).concat([...signed.streamedRoots].map(([artifactRef, file]) => ({ artifactRef, byteCount: Number(file.info.size),
             mediaType: 'application/octet-stream', schemaKind: 'cliq-guest-image-raw-ext4-v1' })))
@@ -1754,6 +1784,32 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
               }
             });
           },
+          sealBuiltinToolScript(signal) {
+            return enqueue(async () => {
+              await checkedRevalidate(signal);
+              const entry = signed.bundle.entries.find(value => value.entryId === BUILTIN_SCRIPT_RECIPE.entryId);
+              const file = signed.entries.get(BUILTIN_SCRIPT_RECIPE.entryId);
+              if (!workerNative || workerNative.builtinToolInterfaceVersion !== 1 || !entry || !file ||
+                  entry.role !== 'tool_adapter' || entry.version !== '1' || entry.executable !== false ||
+                  entry.relativePath !== BUILTIN_SCRIPT_RECIPE.relativePath || entry.byteCount < 1 || entry.byteCount > 1024 * 1024)
+                throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'the fixed signed builtin tool script is not installed');
+              signal?.throwIfAborted();
+              const sealed = workerNative.sealBuiltinToolScript(file.handle.fd);
+              try {
+                if (sealed.identity.sha256 !== entry.digest || sealed.identity.byteCount !== entry.byteCount)
+                  mismatch('sealed builtin tool script differs from its exact signed bytes');
+                await checkedRevalidate(signal); return sealed;
+              }
+              catch (error) {
+                try { sealed.close(); }
+                catch (failure) {
+                  const retirement = new ResourceRetirementError('installed builtin tool script seal did not retire', new AggregateError([error, failure]));
+                  rememberRetirement(retirement); throw retirement;
+                }
+                throw error;
+              }
+            });
+          },
           startGuestToolchain(toolchain, options) {
             return enqueue(async () => {
               const signal = options.signal ? AbortSignal.any([options.signal, guestShutdown.signal]) : guestShutdown.signal;
@@ -1862,6 +1918,70 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
                     !description.files.some(file => file.path === description.nodePath && file.digest === description.nodeDigest) ||
                     !description.files.some(file => file.path === description.gitPath && file.digest === description.gitDigest))
                   mismatch('native source Git extraction differs from both retained executable roots');
+                await checkedRevalidate(signal); current(); return job;
+              } catch (error) { await closeGuestToolchain(job); throw error; }
+            });
+          },
+          startBuiltinBashToolchain(toolchain, options) {
+            return enqueue(async () => {
+              const signal = options.signal ? AbortSignal.any([options.signal, guestShutdown.signal]) : guestShutdown.signal;
+              const current = () => {
+                signal.throwIfAborted(); healthy();
+                if (closed) throw new KernelStorageError('RECOVERY_REQUIRED', 'installed builtin bash extraction is closing');
+                assertSelection();
+              };
+              current();
+              if (!isMainThread || !isSea() || process.platform !== 'linux' || process.arch !== 'x64' || process.versions.node !== '24.21.0')
+                throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'builtin bash extraction requires the fixed signed Linux backend');
+              await checkedRevalidate(signal); current();
+              const bytes = signed.roots.get(toolchain.manifestRef);
+              if (!bytes) mismatch('builtin bash extraction is not in the selected signed closure');
+              const manifest = decodeGuestToolchainManifest(checkCanonicalBytes(bytes));
+              const signature = signed.roots.get(manifest.signatureRef);
+              if (!signature) mismatch('builtin bash extraction has no retained signature');
+              const expected = validateGuestToolchainMetadata(signed.bundle, toolchain.manifestRef, bytes, signature, releaseKeys);
+              if (canonicalSha256(expected) !== canonicalSha256(toolchain) || manifest.architecture !== 'x86_64' ||
+                  manifest.node.canonicalGuestPath !== '/usr/bin/node' || manifest.git.canonicalGuestPath !== '/usr/bin/git' ||
+                  manifest.guestImageByteCount > GUEST_EXTRACTOR_RECIPE.maxImageBytes)
+                mismatch('builtin bash extraction substitutes the pinned fixed recipe');
+              const bash = manifest.admittedExecutables.find(entry => entry.logicalName === 'bash');
+              if (!bash || bash.canonicalGuestPath !== '/bin/bash' ||
+                  manifest.admittedExecutables.filter(entry => entry.logicalName === 'bash').length !== 1)
+                mismatch('builtin bash has no exact signed admitted Bash executable');
+              const image = casFiles.find(file => file.digest === manifest.guestImageRef);
+              if (!image) mismatch('builtin bash extraction lacks its original imported CAS image');
+              if (!guestExtractor) {
+                const entry = signed.bundle.entries.find(value => value.entryId === GUEST_EXTRACTOR_RECIPE.entryId);
+                const file = signed.entries.get(GUEST_EXTRACTOR_RECIPE.entryId);
+                if (!entry || !file || entry.role !== 'platform_helper' || !entry.executable || entry.version !== GUEST_EXTRACTOR_RECIPE.version ||
+                    entry.relativePath !== GUEST_EXTRACTOR_RECIPE.relativePath || entry.byteCount < 1 || entry.byteCount > TRUST_BYTES)
+                  mismatch('fixed signed guest extractor is missing');
+                const loaded = new Module('cliq-installed-linux-guest-extractor');
+                process.dlopen(loaded, `/proc/self/fd/${file.handle.fd}`);
+                const native = loaded.exports as NativeGuestExtractorBinding;
+                if (native.interfaceVersion !== 1 || typeof native.begin !== 'function') mismatch('unsupported installed guest extractor interface');
+                guestExtractor = native;
+              }
+              if (typeof guestExtractor.beginBuiltinBash !== 'function')
+                throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'fixed signed builtin bash extractor is unavailable');
+              current();
+              const job = guestExtractor.beginBuiltinBash(image.handle.fd, { imageDigest: manifest.guestImageDigest, imageByteCount: manifest.guestImageByteCount,
+                architecture: 'x86_64', nodePath: manifest.node.canonicalGuestPath, nodeDigest: manifest.node.digest,
+                pinnedExecutables: guestToolchainExecutables(manifest).map(entry => ({ path: entry.canonicalGuestPath, digest: entry.digest })) });
+              guestJobs.add(job);
+              try {
+                current();
+                while (!job.pollReady()) { current(); await yieldImmediate(); }
+                current();
+                const description = job.describe();
+                if (description.imageDigest !== manifest.guestImageRef || description.nodePath !== manifest.node.canonicalGuestPath ||
+                    description.nodeDigest !== manifest.node.digest || description.gitPath !== manifest.git.canonicalGuestPath ||
+                    description.gitDigest !== manifest.git.digest || description.bashPath !== bash.canonicalGuestPath ||
+                    description.bashDigest !== bash.digest || description.files.length < 3 || description.files.length > GUEST_EXTRACTOR_RECIPE.maxMappedFiles ||
+                    !description.files.some(file => file.path === description.nodePath && file.digest === description.nodeDigest) ||
+                    !description.files.some(file => file.path === description.gitPath && file.digest === description.gitDigest) ||
+                    !description.files.some(file => file.path === description.bashPath && file.digest === description.bashDigest))
+                  mismatch('native builtin bash extraction differs from both retained executable roots');
                 await checkedRevalidate(signal); current(); return job;
               } catch (error) { await closeGuestToolchain(job); throw error; }
             });

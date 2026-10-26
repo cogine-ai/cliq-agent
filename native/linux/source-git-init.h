@@ -3,7 +3,22 @@
 
 #include "source-git-materialize.h"
 #include "preparation-git-protocol.h"
+#include "source-storage.h"
 #include <sys/statvfs.h>
+
+static bool source_initial_storage_current(const struct cliq_source_config *config, const struct cliq_worker_packet *request) {
+    uint64_t root_limit, reserve;
+    if (!cliq_source_storage_reserve(config, request, &root_limit, &reserve)) return false;
+    int root = open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    int scratch = open("/scratch", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    struct stat root_object, scratch_object;
+    bool valid = root >= 0 && scratch >= 0 && fstat(root, &root_object) == 0 && fstat(scratch, &scratch_object) == 0 &&
+        root_object.st_uid == geteuid() && scratch_object.st_uid == geteuid() && root_object.st_dev != scratch_object.st_dev &&
+        source_tmpfs_within(root, root_limit) && source_tmpfs_within(scratch, request->max_generation_bytes);
+    if (!source_close_fd(&root)) valid = false;
+    if (!source_close_fd(&scratch)) valid = false;
+    return valid;
+}
 
 static void source_hex(const unsigned char digest[32], char encoded[65]) {
     static const char alphabet[] = "0123456789abcdef";
@@ -90,6 +105,7 @@ static int source_intent(const struct cliq_worker_packet *request, const struct 
     return fixed_git_intent(request, config, false);
 }
 static bool source_scratch_limit(uint64_t bytes) {
+    bytes = source_tmpfs_budget(bytes);
     if (bytes < 1048576) return false;
     char options[128]; int length = snprintf(options, sizeof(options), "size=%llu,mode=0700", (unsigned long long)bytes);
     return length > 0 && (size_t)length < sizeof(options) && mount("tmpfs", "/scratch", "tmpfs", MS_REMOUNT | MS_NOSUID | MS_NODEV | MS_NOEXEC, options) == 0;
@@ -254,7 +270,7 @@ static int source_producer(void) {
     if (!cliq_receive(3, &request, files, 3, &count) || request.command != CLIQ_SOURCE_CREATE_BLOCKED || count != 3 ||
         !cliq_source_request_valid(&request)) return 70;
     struct cliq_source_config *config = calloc(1, sizeof(*config));
-    bool valid = config && source_read_config(files[0], config) && source_bound_logs(&request);
+    bool valid = config && source_read_config(files[0], config) && source_bound_logs(&request) && source_initial_storage_current(config, &request);
     if (!source_close_fd(&files[0])) valid = false;
     struct stat root, git, named;
     uint64_t runtime_budget = 0, storage_reserve = 0;

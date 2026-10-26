@@ -54,7 +54,8 @@ static int preparation_producer(void) {
     diagnostic_stage = 4; if (!source_read_config(files[0], config)) goto failed;
     diagnostic_stage = 5; if (!source_bound_logs(&request)) goto failed;
     diagnostic_stage = 6; if (!source_script_current(config)) goto failed;
-    diagnostic_stage = 7; if (!cliq_source_storage_reserve(config, &request, &runtime, &reserve)) goto failed;
+    diagnostic_stage = 7; if (!cliq_source_storage_reserve(config, &request, &runtime, &reserve) ||
+        !source_initial_storage_current(config, &request)) goto failed;
     diagnostic_stage = 8;
     valid = source_close_fd(&files[0]);
     struct cliq_worker_packet ready = request; ready.command = CLIQ_WORKER_READY; ready.pid = getpid(); ready.namespace_init_pid = 1;

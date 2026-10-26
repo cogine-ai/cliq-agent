@@ -65,6 +65,37 @@ other stop origins/wait subjects, public UDS server routing, scheduling and
 worker-loss reconciliation remain in this package. This partial integration
 does not complete WP04; see the [exact scope](../../kernel/wp02-typed-runtime.md#durable-root-agent-cancellation-and-deadline-stop).
 
+The ordinary-tool client composition routes `run.approve` to the existing typed
+Agent or Delivery owner and `run.input` to the existing Agent input reducer;
+principal/channel come only from the authenticated Supervisor connection.
+The closed wire request carries no executable, grant, StateOwner, evidence or
+caller principal. Original same-request replay precedes mutable wait checks;
+stale/foreign/cross-Run/malformed replies cannot change a wait or a frontier.
+Queued ask/input/denial needs no worker slot or native image borrow. A queued
+allow returns only an internal `worker_required`; after genuine activation the
+new cut reruns all preparation checks. An active ask/input returns only
+`retirement_required`; the original worker first dies, seals unchanged state,
+commits its Checkpoint and fully joins, then a new cut creates the wait. No
+old-epoch pending approval/input, grant or release nonce crosses that boundary.
+An expired original prepared-but-unclaimed approval refunds zero consumption
+and seals in that same original retirement transaction, with the fixed
+selection-Checkpoint expiry evidence rather than an invented wait. Claimed
+and UNKNOWN attempts retain their existing Stop/recovery ownership.
+
+The complete installed tool campaign is an explicit extension after all five
+original verifier/Git cases and their original ten POSTs/reconnect/restart
+assertions. It adds default-mode continuous read/search with the fixed
+fourteen-invocation controller capacity and real parent rotation, edit/Bash
+approval and denial, worker-free input with exact replay/stale refusal across
+restart, then independent real Bash cancellation and Supervisor shutdown.
+The final fixed profile has eight cases, fifteen POSTs and twelve result/diff
+downloads. It retains the original 2s Stop, 5s READY, 30s request/restart and
+90s terminal bounds. The existing single 4096-stream/512 MiB/60s secret corpus
+scan includes every new state/value/empty stream. Known budget exhaustion is
+retained as an actual failed qualification, never hidden by splitting,
+resetting, skipping, merging or deduplicating independent sources. This code
+and local data regressions do not establish any unexecuted Linux crash cut.
+
 The I1 control-identity foundation now derives the local principal from the
 retained StateRoot digest, platform and effective uid; callers cannot select a
 principal. Reconnect and StateOwner reopen preserve that principal while each
