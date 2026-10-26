@@ -4,6 +4,7 @@
 #include "source-input-bridge.h"
 #include "source-git-protocol.h"
 #include "preparation-git-protocol.h"
+#include "source-ready-diagnostic.h"
 #include <sys/file.h>
 
 /* One original source attempt per original controller. This family cannot
@@ -221,19 +222,25 @@ static void source_bubblewrap(void) {
     fexecve(bwrap, arguments, environment); _exit(70);
 }
 static bool source_create_blocked(struct cliq_worker_packet *request, struct cliq_worker_packet *response) {
+    response->status = CLIQ_SPAWN_INPUT_GATE;
     if (!source_controller_same(request) || !source_scope.created || source_scope.blocked || source_scope.failed ||
         !source_controller_root_current() || !cgroup_empty(source_scope.cgroup) ||
         (source_scope.preparation ? !cliq_preparation_request_valid(request) : !cliq_source_digest(request->plan_ref) ||
         !cliq_source_digest(request->sandbox_launch_ref) || !cliq_source_digest(request->sandbox_launch_digest) || request->generation_ref[0])) return false;
     uint64_t cgroup_device = source_scope.identity.cgroup_device, cgroup_inode = source_scope.identity.cgroup_inode;
     source_scope.identity = *request; source_scope.identity.cgroup_device = cgroup_device; source_scope.identity.cgroup_inode = cgroup_inode;
+    *response = source_scope.identity; response->command = CLIQ_SOURCE_CREATE_BLOCKED; response->status = CLIQ_SPAWN_CGROUP_CREATE;
     if (!source_birth_step(3, &source_scope.identity)) return false;
+    response->status = CLIQ_SPAWN_STDIO;
     source_scope.stdout_fd = memfd_create("cliq-source-stdout", MFD_CLOEXEC | MFD_ALLOW_SEALING);
     source_scope.stderr_fd = memfd_create("cliq-source-stderr", MFD_CLOEXEC | MFD_ALLOW_SEALING);
     int channel[2], barrier[2];
-    if (source_scope.stdout_fd < 0 || source_scope.stderr_fd < 0 || socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, channel) != 0) return false;
+    if (source_scope.stdout_fd < 0 || source_scope.stderr_fd < 0) return false;
+    response->status = CLIQ_SPAWN_CHANNEL;
+    if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, channel) != 0) return false;
     if (pipe2(barrier, O_CLOEXEC) != 0) { close(channel[0]); close(channel[1]); return false; }
     struct scope *process = &source_scope.process;
+    response->status = CLIQ_SPAWN_FORK;
     process->monitor = fork();
     if (process->monitor < 0) { close(channel[0]); close(channel[1]); close(barrier[0]); close(barrier[1]); return false; }
     if (process->monitor == 0) {
@@ -244,19 +251,29 @@ static bool source_create_blocked(struct cliq_worker_packet *request, struct cli
     }
     close(channel[1]); close(barrier[0]); source_scope.channel = channel[0];
     process->cgroup = source_scope.cgroup; process->process_group = source_scope.cgroup; process->channel = source_scope.channel;
+    response->status = CLIQ_SPAWN_MONITOR_TOKEN;
     if (!cliq_process_token(process->monitor, process->monitor_start_token)) { close(barrier[1]); return false; }
     source_scope.identity.monitor_pid = process->monitor;
     memcpy(source_scope.identity.monitor_start_token, process->monitor_start_token, sizeof(process->monitor_start_token));
+    response->status = CLIQ_SPAWN_PROCESS_GROUP;
     if (!source_birth_step(4, &source_scope.identity)) { close(barrier[1]); return false; }
     char pid[32]; snprintf(pid, sizeof(pid), "%ld", (long)process->monitor);
+    response->status = CLIQ_SPAWN_MONITOR_PLACEMENT;
     bool placed = write_control(source_scope.cgroup, "cgroup.procs", pid) && write(barrier[1], "1", 1) == 1;
     if (close(barrier[1]) != 0) placed = false;
     int input[] = { source_scope.config_fd, source_scope.preparation ? source_scope.preparation_stream : source_scope.root, source_scope.git }; size_t count;
     struct cliq_worker_packet ready;
-    if (!placed || !cliq_send(source_scope.channel, &source_scope.identity, input, source_scope.preparation ? 2 : 3) || !readable(source_scope.channel, OBSERVATION_TIMEOUT_MS) ||
-        !cliq_receive(source_scope.channel, &ready, NULL, 0, &count) || ready.command != CLIQ_WORKER_READY ||
-        !cliq_fixed_git_same_attempt(&source_scope.identity, &ready) || !inspect_processes(process, &ready)) return false;
-    if (cgroup_empty(source_scope.cgroup)) return false;
+    if (!placed) return false;
+    response->status = CLIQ_SPAWN_INITIAL_SEND;
+    if (!cliq_send(source_scope.channel, &source_scope.identity, input, source_scope.preparation ? 2 : 3)) return false;
+    response->status = CLIQ_SPAWN_READY_WAIT;
+    if (!readable(source_scope.channel, OBSERVATION_TIMEOUT_MS)) return false;
+    response->status = CLIQ_SPAWN_READY_RECEIVE;
+    if (!cliq_receive(source_scope.channel, &ready, NULL, 0, &count) || ready.command != CLIQ_WORKER_READY ||
+        !cliq_fixed_git_same_attempt(&source_scope.identity, &ready)) return false;
+    response->status = CLIQ_SPAWN_PROCESS_INSPECTION;
+    if (!inspect_processes(process, &ready) || cgroup_empty(source_scope.cgroup)) return false;
+    response->status = CLIQ_SPAWN_IDENTITY_TOKEN;
     source_scope.identity.populated = 1;
     source_scope.identity.pid = process->worker; source_scope.identity.namespace_init_pid = process->init;
     source_scope.identity.pid_namespace_inode = ready.pid_namespace_inode;
@@ -434,7 +451,16 @@ static bool source_command(struct cliq_worker_packet *request, int *passed, size
         return valid;
     }
     if (count != 0 || !source_controller_same(request)) return false;
-    if (request->command == CLIQ_SOURCE_CREATE_BLOCKED) return source_create_blocked(request, response);
+    if (request->command == CLIQ_SOURCE_CREATE_BLOCKED) {
+        bool valid = source_create_blocked(request, response);
+        struct cliq_source_ready_diagnostic diagnostic;
+        if (!valid && source_scope.preparation && source_ready_diagnostic_read(source_scope.stderr_fd, &source_scope.identity, &diagnostic)) {
+            response->setup.stage = diagnostic.stage; response->setup.poll_result = (int32_t)diagnostic.map_observed;
+            response->setup.poll_revents = diagnostic.map_start; response->setup.poll_errno = diagnostic.map_parent; response->setup.elapsed_ms = diagnostic.map_count;
+            response->verifier_errno = diagnostic.original_uid; response->verifier_signal = diagnostic.uid; response->verifier_reason = diagnostic.gid;
+        }
+        return valid;
+    }
     if (request->command == CLIQ_SOURCE_RELEASE_CAPTURE) {
         if (source_scope.released || source_scope.failed || !source_process_current() || !source_birth_step(6, request) ||
             !cliq_send(source_scope.channel, request, NULL, 0)) return false;

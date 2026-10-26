@@ -282,6 +282,24 @@ The later complete profile read, fresh verifier resolution, policy publication
 and final runtime/channel/owner checks retain their relative order. Zero or
 multiple bindings keep their original ordinary publication and later sandbox
 publication, without padding.
+Initial non-Git capture may publish the exact `[frozen ignore rules, source
+projection, source manifest]` triple, or that same tuple plus its same-held-scan
+delivery topology. Raw source files and the complete entries manifest remain
+earlier independent durable publications. Planned canonical refs are inert;
+every original descriptor/currentness check remains, and the complete capture
+is rechecked after the group joins. Git and frozen-result publication paths
+retain their existing ordering.
+Instruction capture retains every independent raw-file publication, canonical
+text, original source entry and final manifest. Its at-most-64 texts / aggregate
+one-MiB input bound is unchanged. Prefix texts may publish in groups of at most
+four; the final pair/triple/quartet contains zero/one/two remaining texts,
+instruction source and instruction manifest. All hashes plan exact existing
+bytes; no padding or synthetic object is added. Each group retains the four
+CAS namespace barriers, every file sync, full reread and actual close/join.
+The original held capture is rechecked after each group and before return.
+No graph escapes early, no source/Run authority or time fence moves, and no
+request, stop or secret-scan bound changes. A failed group may leave inert
+orphans and never a partial accepted capture.
 The fresh final-admission single-verifier path retains its original
 `[command, environment, verifier specification]` triple outside installed
 admission. Installed admission may instead publish exactly `[command,

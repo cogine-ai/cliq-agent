@@ -13,60 +13,70 @@ Linux execution/restart and cancellation foundations are real, but a final
 model turn still stops at `candidate_required`. No work package or complete I1
 is declared finished by the 32 passing checks.
 
-Latest exact-head result (2026-10-26): `f12e2a05e063eb146971697e43224cd1bfb7a736`
-[run 479](https://github.com/cogine-ai/cliq-agent/actions/runs/40243207797)
-has fifteen successful and seven failed jobs; all four TypeScript jobs and
-the real systemd/user-manager process campaign pass. Its complete local gate
-passes 3,012 source tests (three existing skips), 367 script tests (15 existing
-skips) and 102 portable tests (two Linux-only skips), with the actual Node
-22.13.0 child runtime verified.
+Latest exact-head result (2026-10-26): `942a269c99f76c3864bc4c3ca054d61dd57ce78e`
+[run 480](https://github.com/cogine-ai/cliq-agent/actions/runs/40250057022)
+has fourteen successful jobs, seven failures and one cancellation. Its seven
+local gates pass: 3,021 source tests with four platform skips, 367 script tests
+with fifteen platform skips and 102 portable tests with two Linux-only skips.
+The actual Node 22.13.0 child runtime, frozen source tree and all outputs are
+independently checked. Three hosted TypeScript jobs pass; macOS/Node 22.13.0
+fails the unchanged two-second large-Session-list SIGTERM assertion. The
+credential-queue job is cancelled before its subsequent user-manager campaign;
+that campaign is not thereby qualified.
 
-The original normal installed Run journey now independently qualifies Session
-fork/compact/list/handoff/new-Run resume, original-response replay, reconnect,
-and unique terminal publication with physical retirement. It retains four
-original controlled HTTPS requests plus one new request and three new Journal
-entries. This is controlled-endpoint evidence, not real-provider or complete
-I1 qualification. The enclosing job later fails a separate failure campaign.
+The original normal installed Run/Session continuity journey and the separate
+failure campaign both qualify. The corrected Git Session case proves the real
+identity-only Session, independent source-inspection grant refusal and no Run
+admitted without that grant. Genuine helper installation now proceeds beyond
+the former manifest refusal. These controlled HTTPS mechanisms do not qualify
+an actual provider, complete I1 or release.
 
-Eleven captures retain 105 original reports / 414,016 bytes across 23 categories;
-the collector, poller, wrapper, pipes and scoped awake guard actually join.
-The native category is explicitly incomplete: preparation fails before its
-report, so neither the preparation cut nor the original verifier scenarios are
-qualified by this run. No old report is substituted. Final capture SHA-256:
-`a7145b19203eb5e8763ab62178ecbada80c893de42215250f7595b1cd6729054`.
-Independent schema/integrity closeout verifies all retained bytes, 21 zero-error
-cleanups and 21 identical baseline pairs, while keeping `collectionComplete`
-false and naming both missing reports. Closeout SHA-256:
-`b4d7b30466f72df21877e90497409010c78279d2a2dfe3f74bde4a449987a5e4`.
+Nineteen captures retain 105 original reports / 580,845 bytes across 23
+categories. Collector, poller, wrapper, pipes and scoped awake guard actually
+join. Independent closed-schema/integrity revalidation verifies all retained
+bytes, twenty-one zero-error cleanups and twenty-one identical baseline pairs,
+while preserving `collectionComplete=false`: native preparation and verifier
+reports are missing. Final capture SHA-256:
+`dd195e32162266aef9a6fa9b20ae78c439c2ef04dbbde322f31a7dbc590de799`;
+independent integrity closeout SHA-256:
+`d0c9b700251b77bb10b861416895ac115a2e06e15ecf79b737d34d862ae11005`.
 
-Five jobs fail during genuine signed installation before creating a Run. The
-production manifest validator incorrectly requires every platform helper to be
-executable, although the fixed source-inspection recipe is signed Node data.
-The correction accepts only `source_git_inspector` / `platform_helper` / version
-`1` / `helpers/source-git-inspector.mjs`, nonexecutable and 1..1,048,576 bytes.
-All signature, full-byte, identity, mode and other helper checks remain. Signed
-positive/negative and actual asset-builder regressions pass locally; the new
-real Linux install/read/tamper regression still requires its Linux run.
+The native campaign still fails before the first preparing READY observation.
+Its generic error does not identify the failing gate; neither the UID repair
+nor named-copy component tests establish its cause or qualify the cut. New
+bounded numeric diagnostics retain only original-attempt authenticated failure
+stages and local client boundaries, never tokens, paths, payload or raw stderr.
+They alter no successful check, deadline or authority. Normal Delivery passes
+two ordinary source cases before its new Git case fails; the verifier passes
+four cases before its new Git case fails. The full required suites remain open.
 
-Preparation also incorrectly compares the original host UID to namespace UID
-zero. Host validation remains unchanged. Guest producer and relay checks now
-require real UID/GID zero and the fixed, no-follow `/proc/self/uid_map` to have
-exactly one bounded mapping, namespace zero to the original host UID for one
-UID. Pure parser tests and native compilation are not real namespace, READY or
-retirement qualification; those original installed/native cuts remain pending.
-The fixed inspector now uses a real named 0444 private copy: its former
-anonymous bind-data inode could not satisfy the unchanged single-link guard.
-Full hash/currentness, readonly/noexec confinement and resource limits remain;
-direct Linux component checks do not qualify real bubblewrap READY.
+All three owned delayed-storage campaigns pass original READY, then miss the
+first thirty-second source request before their target physical cuts. Two
+joined reports reach `submit_assembly_final_check` at approximately 28 seconds;
+source capture/instruction preparation already takes approximately 22.7 seconds.
+The next correction groups the complete inert non-Git source triple/quartet and
+instruction texts/source/manifest using the existing bounded CAS stage core.
+Real filesystem regressions keep every original file sync and byte/ref check,
+reduce the representative instruction directory barriers from 24 to 12 and
+source barriers from 20/24 to 12, and refuse cancellation/drift only after the
+original group joins. All seventy relevant regressions, build, strict types
+and design guard pass. These are component measurements; installed request and
+shutdown deadlines still require independent real Linux verification.
 
-The separate failure campaign still expects a trusted fresh Git Session to
-parse Git configuration. Under the descriptor-only `RepositoryIdentityV2`
-contract, Session creation reads identity only; source inspection needs its
-independent grant. The corrected campaign validates the actual Session and CAS
-identities, refuses submission without that grant, proves no Run was admitted,
-and checks the original configuration is preserved. It does not reinterpret
-the old report or infer zero reads from unchanged bytes. Real Linux execution
-of this corrected campaign remains pending.
+The large-list correction freezes the bounded source directly into the original
+connection's private STRICT TEMP table within the same SQLite snapshot, then
+fully decodes and counts every row in batches of 128. Original cardinality,
+uniqueness, indexed field equality, canonical byte accounting and final
+owner/frame/fence transaction remain. Bounded projections precede sorting.
+Every text field is decoded from its actual BLOB with fatal UTF-8, preserved
+legal BOM and exact byte roundtrip; cached JSON must equal its original full
+canonical bytes. Independent review reproduces and rejects invalid-UTF-8
+replacement and unintended BOM removal. The original complete 100,000-row /
+64-MiB / byte-plus-one suite and actual SIGTERM cuts pass locally; the three
+observed closes are approximately 351/49/313 ms under the unchanged two-second
+bound, without a controlled host-load claim. Hosted macOS and installed
+qualification remain pending. The combined focused suite passes 80 tests with
+two Linux-only skips; it does not replace the next complete local or Linux gate.
 
 The previous complete archive for `b2b3215` / run 478 retains 105 reports /
 525,316 bytes, 21 zero-error cleanups and 21 identical runner-baseline pairs.

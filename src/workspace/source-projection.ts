@@ -322,21 +322,26 @@ async function captureSourceProjection(input: SourceProjectionCaptureInput, mode
     const rules: FrozenIgnoreRulesV1 = mode.kind === 'frozen' ? mode.rules : git?.rules ?? { schemaVersion: 1,
       format: 'cliq-frozen-ignore-rules-v1', matcherVersion: 'cliq-git-wildmatch-v1', sources: [], rules: [], rulesDigest: '' };
     if (mode.kind === 'initial' && !git) rules.rulesDigest = digestOmitting(rules, 'rulesDigest');
-    const rulesArtifact = mode.kind === 'frozen' ? mode.rulesArtifact : git?.rulesArtifact ?? await artifacts.publishCanonical(rules, rules.format); assertCurrent();
+    const initialNonGit = mode.kind === 'initial' && !git;
+    let rulesArtifact = mode.kind === 'frozen' ? mode.rulesArtifact : git?.rulesArtifact;
+    const rulesRef = rulesArtifact?.ref ?? canonicalSha256(rules); assertCurrent();
     const projection: SourceProjectionSpec = mode.kind === 'frozen' ? mode.projection : git?.projection ?? { schemaVersion: 1,
-      matcherVersion: 'cliq-exact-path-v1', frozenIgnoreRulesRef: rulesArtifact.ref, frozenIgnoreRulesDigest: rules.rulesDigest,
+      matcherVersion: 'cliq-exact-path-v1', frozenIgnoreRulesRef: rulesRef, frozenIgnoreRulesDigest: rules.rulesDigest,
       explicitIncludes: [], explicitExcludes: excludes, maxChangedPaths, maxChangedBytes,
       ...(git ? { classificationIndexRef: git.data.manifest.indexRef } : {}), projectionDigest: '' };
     if (mode.kind === 'initial' && !git?.projection) projection.projectionDigest = digestOmitting(projection, 'projectionDigest');
-    const projectionArtifact = mode.kind === 'frozen' ? mode.projectionArtifact : await artifacts.publishCanonical(projection, 'cliq-source-projection-v1'); assertCurrent();
+    let projectionArtifact = mode.kind === 'frozen' ? mode.projectionArtifact : initialNonGit ? undefined
+      : await artifacts.publishCanonical(projection, 'cliq-source-projection-v1');
+    const projectionRef = projectionArtifact?.ref ?? canonicalSha256(projection); assertCurrent();
     const gitIdentity = mode.kind === 'frozen' ? mode.gitIdentity : git ? { repositoryIdentityDigest: git.data.index.repositoryIdentityDigest,
       head: privateGitSourceHead(git.data), indexRef: git.data.manifest.indexRef, indexTreeObjectId: git.data.index.indexTreeObjectId } : undefined;
     const source: SourceManifest = { schemaVersion: 1, format: 'cliq-source-manifest-v1', role: mode.kind === 'initial' ? 'base' : 'result', workspaceIdentityDigest,
-      entriesRef: entriesArtifact.ref, sourceProjectionRef: projectionArtifact.ref, sourceProjectionDigest: projection.projectionDigest,
-      frozenIgnoreRulesRef: rulesArtifact.ref, frozenIgnoreRulesDigest: rules.rulesDigest, treeDigest: entries.treeDigest,
+      entriesRef: entriesArtifact.ref, sourceProjectionRef: projectionRef, sourceProjectionDigest: projection.projectionDigest,
+      frozenIgnoreRulesRef: rulesRef, frozenIgnoreRulesDigest: rules.rulesDigest, treeDigest: entries.treeDigest,
       ...(gitIdentity ? { git: gitIdentity } : {}), manifestDigest: '' };
     source.manifestDigest = digestOmitting(source, 'manifestDigest');
-    const sourceArtifact = await artifacts.publishCanonical(source, source.format); assertCurrent();
+    let sourceArtifact = initialNonGit ? undefined : await artifacts.publishCanonical(source, source.format);
+    const sourceRef = sourceArtifact?.ref ?? canonicalSha256(source); assertCurrent();
     let topologyArtifact: PublishedArtifact | undefined, topology: DeliveryCaptureTopologyV1 | undefined;
     if (mode.kind === 'initial' && mode.deliveryCapture) {
       const required = new Set<string>();
@@ -347,7 +352,7 @@ async function captureSourceProjection(input: SourceProjectionCaptureInput, mode
       const selectedObservations = new Map(observed.filter(item => !item.pruned).map(item => [item.entry.path, item.entry]));
       const rootIdentity = { ...workspaceRoot.identity, mode: workspaceRoot.mode };
       const body: DeliveryCaptureTopologyV1 = { schemaVersion: 1, format: 'cliq-delivery-capture-topology-v1',
-        inspectionId: mode.deliveryCapture.inspectionId, capturedWorkspaceRef: sourceArtifact.ref,
+        inspectionId: mode.deliveryCapture.inspectionId, capturedWorkspaceRef: sourceRef,
         workspaceIdentityRef: mode.deliveryCapture.workspaceIdentityRef, workspaceIdentityDigest,
         rootIdentity: { ...rootIdentity, identityDigest: publicationDirectoryIdentityDigest(workspaceIdentityDigest, rootIdentity) },
         directories: [...required].sort((left, right) => Buffer.compare(Buffer.from(left), Buffer.from(right))).map(path => {
@@ -361,8 +366,24 @@ async function captureSourceProjection(input: SourceProjectionCaptureInput, mode
           observedEntry.assertHeld(); return { path: selected.path, mode: observedEntry.mode };
         }), capturedAt: mode.deliveryCapture.capturedAt, topologyDigest: '' };
       topology = decodeDeliveryCaptureTopology({ ...body, topologyDigest: digestOmitting(body, 'topologyDigest') });
-      assertCurrent(); topologyArtifact = await artifacts.publishCanonical(topology, topology.format); assertCurrent();
+      assertCurrent();
+      if (!initialNonGit) topologyArtifact = await artifacts.publishCanonical(topology, topology.format);
+      assertCurrent();
     }
+    if (initialNonGit) {
+      // Canonical refs above plan inert data, never durability or authority.
+      // The whole original graph returns only after its fixed three/four
+      // objects complete every CAS stage and actual descriptor retirement.
+      const values = [{ value: rules, schemaKind: rules.format }, { value: projection, schemaKind: 'cliq-source-projection-v1' },
+        { value: source, schemaKind: source.format }] as const;
+      if (topology) [rulesArtifact, projectionArtifact, sourceArtifact, topologyArtifact] =
+        await artifacts.publishCanonicalFour([...values, { value: topology, schemaKind: topology.format }]);
+      else [rulesArtifact, projectionArtifact, sourceArtifact] = await artifacts.publishCanonicalTriple(values);
+      assertCurrent();
+    }
+    if (!rulesArtifact || !projectionArtifact || !sourceArtifact || sourceArtifact.ref !== sourceRef ||
+        rulesArtifact.ref !== rulesRef || projectionArtifact.ref !== projectionRef)
+      invalid('source graph differs from its completely published canonical data');
     const metadata = new Map<string, PublishedArtifact>();
     for (const entry of entries.entries) if (entry.kind === 'file') metadata.set(entry.blobRef, Object.freeze({ ref: entry.blobRef,
       byteLength: entry.size, mediaType: 'application/octet-stream', schemaKind: 'cliq-workspace-file-v1' }));

@@ -123,6 +123,37 @@ async function heldDescriptors(paths: string[]): Promise<string[]> {
   return observed.sort();
 }
 
+for (const delivery of [false, true]) test(`initial non-Git ${delivery ? 'delivery' : 'Run'} source retains every file sync and twelve directory barriers`, async t => {
+  const { workspace, state, input } = await fixture(t), objects = path.join(state, 'objects');
+  await writeFile(path.join(workspace, 'ordinary'), 'Exact source bytes.\n', { mode: 0o644 });
+  const open = fs.open.bind(fs), active = new Set<object>(); let rootSyncs = 0, fileSyncs = 0;
+  t.mock.method(fs, 'open', async (...args: Parameters<typeof open>) => {
+    const handle = await open(...args); active.add(handle);
+    const sync = handle.sync.bind(handle), close = handle.close.bind(handle);
+    t.mock.method(handle, 'sync', async () => { await sync(); if (args[0] === objects) rootSyncs++; else fileSyncs++; });
+    t.mock.method(handle, 'close', async () => { await close(); assert(active.delete(handle)); });
+    return handle;
+  });
+  const captured = await publishNonGitSourceProjection({ ...input, ...(delivery ? { deliveryCapture: {
+    inspectionId: identityHash('cliq-source-inspection-v1', 'durability-data', 'run.apply', 'data-key', 'data-intent'),
+    workspaceIdentityRef: 'c'.repeat(64), capturedAt: '2026-10-26T00:00:00.000Z'
+  } } : {}) });
+  assert.equal(fileSyncs, delivery ? 6 : 5, 'raw source, entries and all original metadata files still sync');
+  assert.equal(rootSyncs, 12, 'raw source and entries remain independent; the complete inert closure shares its four barriers');
+  assert.equal(active.size, 0);
+  const source = await input.artifacts.readCanonical<SourceManifest>(captured.baseWorkspaceManifestRef);
+  const entries = await input.artifacts.readCanonical<WorkspaceEntryManifest>(source.entriesRef);
+  assert.equal(source.sourceProjectionRef, captured.sourceProjectionRef);
+  assert.equal(source.frozenIgnoreRulesRef, captured.frozenIgnoreRulesRef);
+  const file = entries.entries.find(entry => entry.kind === 'file' && entry.path === 'ordinary');
+  assert(file?.kind === 'file'); assert.equal((await input.artifacts.readBytes(file.blobRef)).toString(), 'Exact source bytes.\n');
+  if (delivery) {
+    const topology = decodeDeliveryCaptureTopology(await input.artifacts.readCanonical(captured.captureTopologyRef!));
+    assert.equal(topology.capturedWorkspaceRef, captured.baseWorkspaceManifestRef);
+  }
+  assert.equal(active.size, 0); input.workspaceRoot.assertHeld();
+});
+
 test('frozen capture rejects structural native handles before accessing CAS or caller callbacks', async t => {
   const { input } = await fixture(t);
   let accessed = false;

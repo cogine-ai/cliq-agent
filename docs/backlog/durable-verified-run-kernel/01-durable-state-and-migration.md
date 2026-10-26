@@ -3701,6 +3701,19 @@ failure cleanup, repeated refs/independent publishers and retirement-priority
 rules apply; grouped failures cannot borrow single-write ENOSPC provenance.
 Additional valid orphans remain inert data, not authority or an atomic batch.
 
+Initial non-Git capture additionally permits the fixed `[frozen ignore rules,
+source projection, source manifest]` triple, with same-held-scan delivery
+topology as its sole optional fourth member. Raw files and entries stay earlier
+independent durable publications. Instruction capture keeps all independent
+raw files and at most 64 canonical texts / one MiB of input: prefix texts use
+groups of at most four, then zero/one/two remaining texts plus the original
+instruction source and manifest form the final pair/triple/quartet. Canonical
+refs plan inert existing bytes, never durability or authority. Every file sync,
+four namespace boundaries, full reread and close/join remains. Original capture
+currentness checks remain, with a full recheck after each joined group. No
+padding, cross-cut cache, partial return, wider deadline or omitted scan stream
+is permitted. Git/frozen-result ordering and all final admission checks remain.
+
 Authorization freezes preparation time P and its original TTL/response before
 CAS, but only actual final-transaction time C enters the existing time fence.
 Require P<=C<expiry, the same current owner and original authenticated frame;

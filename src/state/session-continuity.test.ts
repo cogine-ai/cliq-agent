@@ -26,7 +26,7 @@ const mutation = <T extends object>(value: T) => {
   return { ...core, requestDigest: canonicalSha256(core) };
 };
 
-async function stopActualListChild(stateRoot: string, target: 'capture' | 'prepare' | 'final') {
+async function stopActualListChild(stateRoot: string, target: 'capture' | 'prepare' | 'final', diagnostic: (text: string) => void) {
   // Original production Store/SQL/query and real SIGTERM, with markers only
   // around its unmodified synchronous scopes. No process is paused, no clock
   // or native evidence is supplied, and parent never writes while it runs.
@@ -35,18 +35,15 @@ async function stopActualListChild(stateRoot: string, target: 'capture' | 'prepa
     import {openStateStore,publishInProcessChannel} from ${JSON.stringify(new URL('./store.ts', import.meta.url).href)};
     process.on('message',()=>{});
     const [root,target]=process.argv.slice(1),store=await openStateStore(root),identity=await publishInProcessChannel(store);
-    const driver=Reflect.get(store,'driver'),prototype=Object.getPrototypeOf(driver),transaction=prototype.transaction,read=prototype.readSnapshot;
-    let armed=false,writes=0,seen=false,sent=false,enteredNs,returnedNs;
+    const driver=Reflect.get(store,'driver'),prototype=Object.getPrototypeOf(driver),transaction=prototype.transaction;
+    let armed=false,writes=0,sent=false,enteredNs,returnedNs;
     const mark=phase=>{if(phase===target&&!sent){sent=true;enteredNs=process.hrtime.bigint();process.send({kind:'cut',phase,nodeVersion:process.version});return true;}return false;};
     prototype.transaction=function(...args){
-      const final=armed&&++writes===2;if(final&&target==='prepare'&&returnedNs===undefined)returnedNs=process.hrtime.bigint();
-      const measured=final&&mark('final');try{return Reflect.apply(transaction,this,args);}finally{if(measured)returnedNs=process.hrtime.bigint();}
-    };
-    prototype.readSnapshot=function(...args){
-      const measured=armed&&!seen;if(measured){seen=true;mark('capture');}
-      const value=Reflect.apply(read,this,args);if(measured&&target==='capture')returnedNs=process.hrtime.bigint();
-      if(armed&&Array.isArray(value)&&value.length===100000&&Object.hasOwn(value[0],'overlong'))mark('prepare');
-      return value;
+      const number=armed?++writes:0,capture=number===2,final=number===3;
+      if(final&&target==='prepare'&&returnedNs===undefined)returnedNs=process.hrtime.bigint();
+      const measured=capture&&mark('capture')||final&&mark('final');
+      try{const value=Reflect.apply(transaction,this,args);if(capture)mark('prepare');return value;}
+      finally{if(measured){returnedNs=process.hrtime.bigint();process.send({kind:'scope_returned',phase:target,enteredNs:String(enteredNs),returnedNs:String(returnedNs)});}}
     };
     let resolveStop,rejectStop;const stopped=new Promise((resolve,reject)=>{resolveStop=resolve;rejectStop=reject;});
     process.once('SIGTERM',()=>{void store.close().then(resolveStop,rejectStop);});
@@ -61,21 +58,22 @@ async function stopActualListChild(stateRoot: string, target: 'capture' | 'prepa
     process.disconnect();
   `;
   const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', source, stateRoot, target], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
-  let stderr = '', received: any, closed: any;
+  let stderr = '', received: any, closed: any, scopeReturned: any;
+  let signalStarted: number | undefined, deadlineExceeded = false, processAndPipesJoined = false;
   child.stderr!.on('data', bytes => { stderr += bytes.toString('utf8'); assert(Buffer.byteLength(stderr) <= 65536); });
-  const exited = once(child, 'exit');
+  const exited = once(child, 'close');
   let enter!: (value: any) => void;
   const entered = new Promise<any>(resolve => { enter = resolve; });
-  child.on('message', message => { if ((message as any)?.kind === 'cut') { received = message; enter(message); } else if ((message as any)?.kind === 'closed') closed = message; });
+  child.on('message', message => { if ((message as any)?.kind === 'cut') { received = message; enter(message); } else if ((message as any)?.kind === 'closed') closed = message; else if ((message as any)?.kind === 'scope_returned') scopeReturned = message; });
   let setupTimer: ReturnType<typeof setTimeout> | undefined, stopTimer: ReturnType<typeof setTimeout> | undefined;
   try {
     await Promise.race([entered, exited.then(() => { throw new Error('list child exited before its actual scope: ' + stderr); }), new Promise<never>((_, reject) => {
       setupTimer = setTimeout(() => reject(new Error('actual list child did not enter its bounded fixture scope')), 60000);
     })]);
     clearTimeout(setupTimer);
-    const start = performance.now(), sentNs = process.hrtime.bigint(); assert(child.kill('SIGTERM'));
+    const start = performance.now(), sentNs = process.hrtime.bigint(); signalStarted = start; assert(child.kill('SIGTERM'));
     const [code, signal] = await Promise.race([exited, new Promise<never>((_, reject) => {
-      stopTimer = setTimeout(() => reject(new Error('actual large list SIGTERM exceeded the unchanged 2000ms stop budget')), 2000);
+      stopTimer = setTimeout(() => { deadlineExceeded = true; reject(new Error('actual large list SIGTERM exceeded the unchanged 2000ms stop budget')); }, 2000);
     })]);
     const elapsedMs = performance.now() - start;
     assert.equal(code, 0, stderr); assert.equal(signal, null); assert(elapsedMs < 2000);
@@ -87,7 +85,12 @@ async function stopActualListChild(stateRoot: string, target: 'capture' | 'prepa
   } finally {
     clearTimeout(setupTimer); clearTimeout(stopTimer);
     if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
-    await exited;
+    await exited; processAndPipesJoined = true;
+    diagnostic(JSON.stringify({ diagnosticOnly: true, kind: 'session_list_actual_sigterm_attempt', phase: target,
+      nodeVersion: received?.nodeVersion ?? process.version, deadlineMs: 2000, deadlineExceeded,
+      ...(signalStarted === undefined ? {} : { signalToProcessAndPipesJoinMs: performance.now() - signalStarted }),
+      originalProcessAndPipesJoined: processAndPipesJoined, originalCloseObserved: closed?.kind === 'closed',
+      scopeReturnedObserved: scopeReturned?.kind === 'scope_returned', physicalInstalledSupervisorQualified: false }));
   }
 }
 test('real terminal publication, whole compaction, retained context, immutable fork and first responses close across reopen', async () => {
@@ -277,11 +280,11 @@ test('yielded list preparation rechecks the complete source set and old entry by
   const fixture = await listFixture('cut-races');
   try {
     const first = await fixture.create('race-first'); await fixture.create('race-second'); await fixture.create('race-third');
-    const prototype = Object.getPrototypeOf(fixture.driver), original = prototype.readSnapshot;
+    const prototype = Object.getPrototypeOf(fixture.driver), original = prototype.transaction;
     let change: 'value' | 'membership' | 'entry' | undefined, originalPayload: string | undefined, cutId: string | undefined;
-    t.mock.method(prototype, 'readSnapshot', function (this: unknown, ...args: unknown[]) {
+    t.mock.method(prototype, 'transaction', function (this: unknown, ...args: unknown[]) {
       const result = Reflect.apply(original, this, args);
-      const source = Array.isArray(result) && result.length > 0 && Object.hasOwn(result[0], 'overlong');
+      const source = typeof result === 'number';
       const old = result && typeof result === 'object' && 'row' in result && (result as any).row.cut_id === cutId;
       if (change && (source && change !== 'entry' || old && change === 'entry')) {
         const mutation = change; change = undefined;
@@ -321,6 +324,102 @@ test('yielded list preparation rechecks the complete source set and old entry by
     fixture.driver.transaction(connection => connection.prepare('UPDATE list_read_cut_entries SET payload_json=? WHERE cut_id=? AND ordinal=2').run(originalPayload!, cutId!));
     assert.equal((await fixture.store.sessionContinuity(cursor, fixture.identity)).result.method, 'session.list', 'the exact restored original entry remains replayable');
   } finally { t.mock.restoreAll(); await fixture.close(); }
+});
+
+test('native list snapshot bounds every copied text field before sorting and rejects malformed original rows', async t => {
+  const fixture = await listFixture('bounded-native-copy');
+  try {
+    const original = await fixture.create('original display source'), actual = Reflect.get(fixture.store, 'driver');
+    const columns = ['id', 'workspace_identity_ref', 'name', 'parent_session_id', 'created_at', 'updated_at'] as const;
+    const bounds = [128, 64, 256, 128, 24, 24];
+    const row = fixture.driver.prepare('SELECT ' + columns.join(',') + ' FROM sessions WHERE id=?').get<Record<string, string | null>>(original.id)!;
+    const prototype = Object.getPrototypeOf(actual), transaction = prototype.transaction;
+    let copies = 0;
+    t.mock.method(prototype, 'transaction', function (this: unknown, ...args: unknown[]) {
+      const value = Reflect.apply(transaction, this, args);
+      if (this === actual && typeof value === 'number') {
+        const lengths = actual.prepare('SELECT ' + columns.map(column => 'max(length(CAST(' + column + ' AS BLOB))) AS ' + column).join(',') + ' FROM temp.cliq_list_source').get();
+        for (let index = 0; index < columns.length; index++)
+          assert(lengths[columns[index]!] === null || lengths[columns[index]!] <= BigInt(bounds[index]!));
+        copies++;
+      }
+      return value;
+    });
+    const oversized = 'x'.repeat(1_048_576);
+    for (const column of columns) {
+      const display = { ...row, id: 'malformed-display-' + column, [column]: oversized };
+      // Display-only rejection input, like the capacity fixture. No accepted
+      // Session graph, Run, StateOwner or native proof is fabricated; immutable
+      // admission guards remain enabled and the malformed row is deleted.
+      fixture.driver.transaction(connection => connection.prepare(`INSERT INTO sessions(id,workspace_identity_ref,name,parent_session_id,
+        forked_through_item_seq,context_revision,latest_item_seq,context_projection_ref,created_at,updated_at,principal_id,
+        admission_method,admission_key,admission_intent_digest,admission_request_id)
+        VALUES(?,?,?,?,NULL,1,0,?,?,?,?,'display_fixture',?,?,NULL)`).run(display.id!, display.workspace_identity_ref!, display.name!,
+          display.parent_session_id!, original.contextProjectionRef, display.created_at!, display.updated_at!, fixture.identity.principalId,
+          'malformed-display-' + column, original.contextProjectionRef));
+      try {
+        await assert.rejects(fixture.store.sessionContinuity({ protocolVersion: 1, method: 'session.list', limit: 100 }, fixture.identity), { code: 'RECOVERY_REQUIRED' });
+        assert.equal(fixture.driver.prepare('SELECT count(*) AS n FROM list_read_cuts').get<{ n: bigint }>()!.n, 0n);
+      } finally {
+        fixture.driver.transaction(connection => connection.prepare('DELETE FROM sessions WHERE id=?').run(display.id!));
+      }
+    }
+    assert.equal(copies, columns.length);
+    const restored = await fixture.store.sessionContinuity({ protocolVersion: 1, method: 'session.list', limit: 100 }, fixture.identity);
+    assert(restored.result.method === 'session.list'); assert.equal(restored.result.sessions[0]!.id, original.id);
+  } finally { t.mock.restoreAll(); await fixture.close(); }
+});
+
+test('native list source copy rejects malformed UTF-8 rather than presenting replacement text', async () => {
+  const fixture = await listFixture('native-source-utf8');
+  try {
+    const session = await fixture.create('original valid display name');
+    fixture.driver.transaction(connection => connection.prepare("UPDATE sessions SET name=CAST(x'f09f98' AS TEXT) WHERE id=?").run(session.id));
+    try {
+      await assert.rejects(fixture.store.sessionContinuity({ protocolVersion: 1, method: 'session.list', limit: 1 }, fixture.identity), { code: 'RECOVERY_REQUIRED' });
+      assert.equal(fixture.driver.prepare('SELECT count(*) AS n FROM list_read_cuts').get<{ n: bigint }>()!.n, 0n);
+    } finally {
+      fixture.driver.transaction(connection => connection.prepare('UPDATE sessions SET name=? WHERE id=?').run(session.name!, session.id));
+    }
+  } finally { await fixture.close(); }
+});
+
+test('native retained page rejects changed UTF-8 bytes even when replacement decoding would preserve its digest', async () => {
+  const fixture = await listFixture('native-retained-utf8');
+  try {
+    await fixture.create('a valid replacement character: \ufffd'); await fixture.create('second entry');
+    const first = await fixture.store.sessionContinuity({ protocolVersion: 1, method: 'session.list', limit: 1 }, fixture.identity);
+    assert(first.result.method === 'session.list' && first.result.nextCursor);
+    const request = { protocolVersion: 1, method: 'session.list', limit: 1, cursor: first.result.nextCursor } as const;
+    const before = await fixture.store.sessionContinuity(request, fixture.identity);
+    const cutId = JSON.parse(Buffer.from(first.result.nextCursor, 'base64url').toString('utf8')).cutId;
+    const row = fixture.driver.prepare("SELECT ordinal,payload_json FROM list_read_cut_entries WHERE cut_id=? AND instr(payload_json,?)>0")
+      .get<{ ordinal: bigint; payload_json: string }>(cutId, '\ufffd')!;
+    const bytes = Buffer.from(row.payload_json), index = bytes.indexOf(Buffer.from('\ufffd')); assert(index >= 0);
+    const changed = Buffer.from(bytes); changed.set([0xf0, 0x9f, 0x98], index);
+    assert.equal(changed.toString('utf8'), bytes.toString('utf8'), 'default replacement decoding cannot identify these changed bytes');
+    fixture.driver.transaction(connection => connection.prepare('UPDATE list_read_cut_entries SET payload_json=CAST(? AS TEXT) WHERE cut_id=? AND ordinal=?').run(changed, cutId, row.ordinal));
+    try { await assert.rejects(fixture.store.sessionContinuity(request, fixture.identity), { code: 'RECOVERY_REQUIRED' }); }
+    finally { fixture.driver.transaction(connection => connection.prepare('UPDATE list_read_cut_entries SET payload_json=? WHERE cut_id=? AND ordinal=?').run(row.payload_json, cutId, row.ordinal)); }
+    assert.deepEqual(canonicalJsonBytes(await fixture.store.sessionContinuity(request, fixture.identity)), canonicalJsonBytes(before));
+  } finally { await fixture.close(); }
+});
+
+test('native list text decoding preserves a legal leading BOM from actual Session creation and frozen page replay', async () => {
+  const fixture = await listFixture('native-source-bom');
+  try {
+    const original = await fixture.create('\ufefforiginal name'); await fixture.create('second entry');
+    assert.equal(original.name, '\ufefforiginal name');
+    const all = await fixture.store.sessionContinuity({ protocolVersion: 1, method: 'session.list', limit: 100 }, fixture.identity);
+    assert(all.result.method === 'session.list');
+    assert.equal(all.result.sessions.find(session => session.id === original.id)!.name, original.name);
+    const first = await fixture.store.sessionContinuity({ protocolVersion: 1, method: 'session.list', limit: 1 }, fixture.identity);
+    assert(first.result.method === 'session.list' && first.result.nextCursor);
+    const request = { protocolVersion: 1, method: 'session.list', limit: 1, cursor: first.result.nextCursor } as const;
+    const next = await fixture.store.sessionContinuity(request, fixture.identity); assert(next.result.method === 'session.list');
+    assert.equal([...first.result.sessions, ...next.result.sessions].find(session => session.id === original.id)!.name, original.name);
+    assert.deepEqual(canonicalJsonBytes(await fixture.store.sessionContinuity(request, fixture.identity)), canonicalJsonBytes(next));
+  } finally { await fixture.close(); }
 });
 
 test('fork publishes atomically and retained first response remains replayable while new aliases obey sticky canonical time', async () => {
@@ -470,7 +569,7 @@ test('complete list cut enforces actual 100000-row and 64 MiB boundaries without
     t.mock.restoreAll(); await fixture.store.close();
     const stops = [];
     for (const phase of ['capture', 'prepare', 'final'] as const) {
-      const stopped = await stopActualListChild(fixture.stateRoot, phase); stops.push(stopped);
+      const stopped = await stopActualListChild(fixture.stateRoot, phase, text => t.diagnostic(text)); stops.push(stopped);
       assert.equal(fixture.driver.prepare('SELECT state FROM state_owners WHERE owner_epoch=?').get(stopped.ownerEpoch)?.state, 'terminal');
       assert.equal(fixture.driver.prepare("SELECT count(*) AS n FROM state_owners WHERE state='active'").get<{ n: bigint }>()!.n, 0n);
       for (const cut of fixture.driver.prepare('SELECT c.cut_id,count(e.ordinal) AS n FROM list_read_cuts c LEFT JOIN list_read_cut_entries e ON e.cut_id=c.cut_id GROUP BY c.cut_id').all<{ cut_id: string; n: bigint }>())

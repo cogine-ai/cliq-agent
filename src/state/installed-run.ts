@@ -124,7 +124,7 @@ export async function captureInstalledWorkspaceInstructions(root: HeldWorkspaceR
   if (heldWorkspaceRootPath(root) !== workspace.canonicalRootPath || !same(root.identity, workspace.rootIdentity))
     mismatch('instruction root differs from the authenticated Session');
   const resources: Array<{ close(): void }> = [], cursors: HeldWorkspaceCursor[] = [], selected: HeldWorkspaceEntry[] = [];
-  const entries: InstructionEntry[] = [], rendered = new Map<string, { ref: string; digest: string }>();
+  const entries: InstructionEntry[] = [], texts: ModelTextV1[] = [], rendered = new Map<string, { ref: string; digest: string }>();
   let inventory = 0, bytes = 0, failure: unknown;
   const recheck = () => {
     signal?.throwIfAborted(); assertHeldWorkspaceRoot(root);
@@ -163,27 +163,46 @@ export async function captureInstalledWorkspaceInstructions(root: HeldWorkspaceR
       const rawArtifact = await artifacts.publishBytes(raw, 'application/octet-stream', 'cliq-workspace-file-v1');
       const text: ModelTextV1 = { schemaVersion: 1, format: 'cliq-model-text-v1', utf8, byteCount: raw.length, textDigest: '' };
       text.textDigest = digestOmitting(text, 'textDigest'); verifyModelText(text);
-      const content = await artifacts.publishCanonical(text, text.format);
+      texts.push(text);
       const core = { canonicalRootRelativePath: entry.path, directoryDepth: entry.path.split('/').length - 1,
         fileDescriptor: { deviceId: entry.identity.deviceId, fileId: entry.identity.fileId, ownerUid: entry.identity.ownerUid,
           mode: entry.mode as 384 | 420, linkCount: 1 as const }, rawBytesRef: rawArtifact.ref,
         rawBytesDigest: sha256Bytes(raw), rawByteCount: raw.length };
-      entries.push({ ...core, sourceEntryDigest: canonicalSha256(core) }); rendered.set(entry.path, { ref: content.ref, digest: text.textDigest });
+      entries.push({ ...core, sourceEntryDigest: canonicalSha256(core) }); rendered.set(entry.path, { ref: canonicalSha256(text), digest: text.textDigest });
     }
     recheck(); entries.sort((left, right) => Buffer.compare(Buffer.from(left.canonicalRootRelativePath), Buffer.from(right.canonicalRootRelativePath)));
     const source: InstructionSource = { schemaVersion: 1, format: 'cliq-workspace-instruction-source-v1', workspaceIdentityRef,
       workspaceIdentityDigest: workspace.identityDigest, entries, capturedAt: sampleCanonicalNow(), sourceDigest: '' };
     source.sourceDigest = digestOmitting(source, 'sourceDigest');
-    const sourceArtifact = await artifacts.publishCanonical(source, source.format); recheck();
+    const sourceRef = canonicalSha256(source); recheck();
     const manifest: InstructionManifest = { schemaVersion: 1, format: 'cliq-workspace-instructions-v1', workspaceIdentityDigest: workspace.identityDigest,
-      instructionSourceRef: sourceArtifact.ref, instructionSourceDigest: source.sourceDigest, rendering: 'cliq-all-scopes-labeled-instructions-v1',
+      instructionSourceRef: sourceRef, instructionSourceDigest: source.sourceDigest, rendering: 'cliq-all-scopes-labeled-instructions-v1',
       entries: [...entries].sort((left, right) => left.directoryDepth - right.directoryDepth ||
         Buffer.compare(Buffer.from(left.canonicalRootRelativePath), Buffer.from(right.canonicalRootRelativePath)))
         .map((entry, order) => ({ order, canonicalRootRelativePath: entry.canonicalRootRelativePath, appliesToSubtree: true,
           directoryDepth: entry.directoryDepth, instructionSourceEntryDigest: entry.sourceEntryDigest,
           contentRef: rendered.get(entry.canonicalRootRelativePath)!.ref, contentDigest: rendered.get(entry.canonicalRootRelativePath)!.digest })), manifestDigest: '' };
     manifest.manifestDigest = digestOmitting(manifest, 'manifestDigest');
-    const published = await artifacts.publishCanonical(manifest, manifest.format); recheck(); return { ref: published.ref, value: immutableSnapshot(manifest) };
+    // These refs plan inert data only. No graph escapes before every original
+    // file sync, four namespace barriers, full reread and close have joined.
+    const publish = async (values: readonly { value: unknown; schemaKind: string }[]) => {
+      if (values.length === 4) return artifacts.publishCanonicalFour([values[0]!, values[1]!, values[2]!, values[3]!]);
+      if (values.length === 3) return artifacts.publishCanonicalTriple([values[0]!, values[1]!, values[2]!]);
+      if (values.length === 2) return artifacts.publishCanonicalPair([values[0]!, values[1]!]);
+      if (values.length === 1) return [await artifacts.publishCanonical(values[0]!.value, values[0]!.schemaKind)];
+      throw new TypeError('instruction data publication requires one to four objects');
+    };
+    const prefix = Math.max(0, texts.length - 2);
+    for (let index = 0; index < prefix; index += 4) {
+      await publish(texts.slice(index, Math.min(index + 4, prefix)).map(value => ({ value, schemaKind: value.format })));
+      recheck();
+    }
+    const complete = await publish([...texts.slice(prefix).map(value => ({ value, schemaKind: value.format })),
+      { value: source, schemaKind: source.format }, { value: manifest, schemaKind: manifest.format }]);
+    recheck();
+    if (complete[complete.length - 2]!.ref !== sourceRef || complete[complete.length - 1]!.ref !== canonicalSha256(manifest))
+      mismatch('instruction graph differs from its fully published canonical data');
+    return { ref: complete[complete.length - 1]!.ref, value: immutableSnapshot(manifest) };
   } catch (error) { failure = error; throw error; } finally { closeOwned(resources, failure); }
 }
 

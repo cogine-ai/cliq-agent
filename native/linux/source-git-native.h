@@ -7,7 +7,16 @@
 #include "preparation-git-protocol.h"
 #include "preparation-input-bridge.h"
 #include "preparation-git-stream.h"
+#include "source-ready-diagnostic.h"
 #include <sys/file.h>
+
+enum source_ready_failure_boundary {
+    SOURCE_READY_REQUEST_STATE = 1,
+    SOURCE_READY_RECEIVE = 2,
+    SOURCE_READY_UNAUTHENTICATED_REPLY = 3,
+    SOURCE_READY_AUTHENTICATED_FAILURE = 4,
+    SOURCE_READY_KERNEL_OBSERVATION = 5
+};
 
 static const napi_type_tag SOURCE_SCOPE_TAG = { UINT64_C(0xe90767ec63984722), UINT64_C(0x94a089abf2cc9f91) };
 static const napi_type_tag SOURCE_READER_TAG = { UINT64_C(0xd49f4628b0514b9d), UINT64_C(0x8c269484777eb772) };
@@ -35,6 +44,9 @@ struct source_native_scope {
     struct cliq_preparation_origin preparation_origin;
     struct cliq_preparation_history preparation_history;
     int preparation_writer;
+    uint32_t ready_failure_status, ready_failure_boundary;
+    bool ready_diagnostic_observed;
+    struct cliq_source_ready_diagnostic ready_diagnostic;
 };
 struct source_native_reader { struct source_native_scope *scope; unsigned int index; };
 
@@ -247,15 +259,33 @@ static bool source_native_send(struct source_native_scope *scope, uint32_t comma
 }
 static int source_native_reply(struct source_native_scope *scope, uint32_t command, struct cliq_worker_packet *response, int *files, size_t *count) {
     struct controller *controller = scope->controller;
-    if (controller->closed || controller->pending != command || controller->pending_scope != NULL) return -1;
+    if (controller->closed || controller->pending != command || controller->pending_scope != NULL) {
+        if (scope->preparation && command == CLIQ_SOURCE_CREATE_BLOCKED) scope->ready_failure_boundary = SOURCE_READY_REQUEST_STATE;
+        return -1;
+    }
     if (!cliq_receive_flags(controller->socket, response, files, CLIQ_WORKER_MAX_FDS, count, MSG_DONTWAIT)) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
+        if (scope->preparation && command == CLIQ_SOURCE_CREATE_BLOCKED) scope->ready_failure_boundary = SOURCE_READY_RECEIVE;
         (void)close_controller(controller); return -1;
     }
-    bool valid = response->status == 0 && response->command == command && cliq_fixed_git_same_attempt(&scope->identity, response) &&
+    bool same_attempt = response->command == command && cliq_fixed_git_same_attempt(&scope->identity, response) &&
         strcmp(scope->identity.cgroup_name, response->cgroup_name) == 0 &&
         (!scope->starting || cliq_fixed_git_same_prepared(&scope->identity, response));
+    bool valid = response->status == 0 && same_attempt;
     if (!valid) {
+        if (scope->preparation && command == CLIQ_SOURCE_CREATE_BLOCKED) scope->ready_failure_boundary = same_attempt ? SOURCE_READY_AUTHENTICATED_FAILURE : SOURCE_READY_UNAUTHENTICATED_REPLY;
+        if (scope->preparation && command == CLIQ_SOURCE_CREATE_BLOCKED && same_attempt && *count == 0 && response->status >= 1001 && response->status <= 1014) {
+            scope->ready_failure_status = response->status;
+            if (response->setup.stage > 0 && response->setup.stage <= 9 && response->setup.poll_result >= 0 && response->setup.poll_result <= 1 &&
+                (uint64_t)response->verifier_errno == scope->identity.reservation_uid &&
+                (response->setup.poll_result || (!response->setup.poll_revents && !response->setup.poll_errno && !response->setup.elapsed_ms))) {
+                scope->ready_diagnostic_observed = true;
+                scope->ready_diagnostic = (struct cliq_source_ready_diagnostic) { .stage = response->setup.stage,
+                    .uid = response->verifier_signal, .gid = response->verifier_reason, .original_uid = response->verifier_errno,
+                    .map_observed = (uint32_t)response->setup.poll_result, .map_start = response->setup.poll_revents,
+                    .map_parent = response->setup.poll_errno, .map_count = response->setup.elapsed_ms };
+            }
+        }
         for (size_t i = 0; i < *count; i++) if (!retire_descriptor(&files[i])) controller->retirement_failed = true;
         *count = 0; (void)close_controller(controller); return -1;
     }
@@ -319,7 +349,19 @@ static napi_value source_native_ready(napi_env env, napi_callback_info info) {
             response.pid_namespace_inode != 0 && response.cgroup_device == scope->identity.cgroup_device && response.cgroup_inode == scope->identity.cgroup_inode &&
             *response.start_token && *response.init_start_token && *response.init_native_start_token && *response.monitor_start_token;
         for (size_t i = 0; i < count; i++) if (!retire_descriptor(&files[i])) valid = false;
-        if (!valid) { (void)close_controller(scope->controller); return failure(env, "source blocked birth lacks its original kernel identities"); }
+        if (!valid) {
+            (void)close_controller(scope->controller);
+            if (scope->preparation) {
+                if (status == 1) scope->ready_failure_boundary = SOURCE_READY_KERNEL_OBSERVATION;
+                char message[384]; const struct cliq_source_ready_diagnostic *diagnostic = &scope->ready_diagnostic;
+                int length = snprintf(message, sizeof(message), "source blocked birth lacks its original kernel identities: boundary=%u status=%u marker=%u producerStage=%u "
+                    "namespaceUid=%u namespaceGid=%u originalUid=%u mapObserved=%u mapStart=%u mapParent=%u mapCount=%u",
+                    scope->ready_failure_boundary, scope->ready_failure_status, scope->ready_diagnostic_observed ? 1U : 0U, diagnostic->stage, diagnostic->uid, diagnostic->gid,
+                    diagnostic->original_uid, diagnostic->map_observed, diagnostic->map_start, diagnostic->map_parent, diagnostic->map_count);
+                return failure(env, length > 0 && (size_t)length < sizeof(message) ? message : "source blocked birth lacks its original kernel identities; numeric diagnosis unavailable");
+            }
+            return failure(env, "source blocked birth lacks its original kernel identities");
+        }
         scope->identity = response; scope->ready = true;
     }
     if (!source_native_current(scope)) return failure(env, "source blocked birth is no longer current");

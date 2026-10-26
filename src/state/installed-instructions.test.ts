@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
+import { promises as fs } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { test } from 'node:test';
+import { test, type TestContext } from 'node:test';
 import type { ModelTextV1 } from '../protocol/agent-ir.js';
 import type { WorkspaceEntryManifest } from '../kernel/types.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
@@ -12,6 +13,74 @@ import { ContentAddressedStore } from './cas.js';
 import { captureInstalledWorkspaceInstructions } from './installed-run.js';
 import { loadNativeStateOwner, type HeldWorkspaceRoot } from './native-owner.js';
 import { captureLiveWorkspaceIdentity } from './workspace-identity.js';
+
+async function instructionDurabilityFixture(t: TestContext) {
+  const directory = await mkdtemp(path.join(process.cwd(), '.cliq-instruction-durability-'));
+  const workspace = path.join(directory, 'workspace'), objects = path.join(directory, 'objects');
+  await mkdir(workspace, { mode: 0o700 }); await mkdir(objects, { mode: 0o700 });
+  await mkdir(path.join(workspace, 'vendor'), { mode: 0o700 });
+  await writeFile(path.join(workspace, 'AGENTS.md'), 'Root guidance.\n', { mode: 0o644 });
+  await writeFile(path.join(workspace, 'vendor', 'AGENTS.md'), 'Vendor guidance.\n', { mode: 0o644 });
+  const artifacts = new ArtifactCatalog(new ContentAddressedStore(objects));
+  const { identity } = await captureLiveWorkspaceIdentity({ workspacePath: workspace, ownerPrincipalId: 'instruction-durability-data' });
+  const identityRef = (await artifacts.publishCanonical(identity, identity.format)).ref;
+  const root = (await loadNativeStateOwner()).openWorkspaceRoot(workspace);
+  t.after(async () => { root.close(); await rm(directory, { recursive: true, force: true }); });
+  return { workspace, objects, artifacts, identity, identityRef, root };
+}
+
+test('instruction capture retains every file sync and complete graph with twelve directory barriers for two scopes', async t => {
+  const { objects, artifacts, identity, identityRef, root } = await instructionDurabilityFixture(t);
+  const open = fs.open.bind(fs), active = new Set<object>(); let rootSyncs = 0, fileSyncs = 0;
+  t.mock.method(fs, 'open', async (...args: Parameters<typeof open>) => {
+    const handle = await open(...args); active.add(handle);
+    const sync = handle.sync.bind(handle), close = handle.close.bind(handle);
+    t.mock.method(handle, 'sync', async () => { await sync(); if (args[0] === objects) rootSyncs++; else fileSyncs++; });
+    t.mock.method(handle, 'close', async () => { await close(); assert(active.delete(handle)); });
+    return handle;
+  });
+  const captured = await captureInstalledWorkspaceInstructions(root, artifacts, identity, identityRef);
+  assert.equal(fileSyncs, 6, 'all original raw, rendered, source and manifest files still sync');
+  assert.equal(rootSyncs, 12, 'two independent raw publications and one fully joined four-object closure');
+  assert.equal(active.size, 0);
+  const source = await artifacts.readCanonical<{ entries: Array<{ rawBytesRef: string }> }>(captured.value.instructionSourceRef);
+  assert.deepEqual(await Promise.all(source.entries.map(entry => artifacts.readBytes(entry.rawBytesRef).then(bytes => bytes.toString()))),
+    ['Root guidance.\n', 'Vendor guidance.\n']);
+  assert.deepEqual(await Promise.all(captured.value.entries.map(entry => artifacts.readCanonical<ModelTextV1>(entry.contentRef).then(value => value.utf8))),
+    ['Root guidance.\n', 'Vendor guidance.\n']);
+  assert.equal(active.size, 0); root.assertHeld();
+});
+
+for (const fault of ['cancel', 'changed_instruction'] as const)
+  test(`instruction capture joins the original last sync and refuses ${fault} before returning a graph`, async t => {
+    const { workspace, objects, artifacts, identity, identityRef, root } = await instructionDurabilityFixture(t);
+    const open = fs.open.bind(fs), active = new Set<object>(), cancellation = new AbortController();
+    const reason = new Error('the original instruction capture was cancelled');
+    let enter!: () => void, release!: () => void, fileSyncs = 0, settled = false;
+    const entered = new Promise<void>(resolve => { enter = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+    t.mock.method(fs, 'open', async (...args: Parameters<typeof open>) => {
+      const handle = await open(...args); active.add(handle);
+      const sync = handle.sync.bind(handle), close = handle.close.bind(handle);
+      t.mock.method(handle, 'sync', async () => {
+        await sync();
+        if (args[0] !== objects && ++fileSyncs === 6) { enter(); await gate; }
+      });
+      t.mock.method(handle, 'close', async () => { await close(); assert(active.delete(handle)); });
+      return handle;
+    });
+    const pending = captureInstalledWorkspaceInstructions(root, artifacts, identity, identityRef, cancellation.signal);
+    void pending.finally(() => { settled = true; }).catch(() => {});
+    try {
+      await Promise.race([entered, pending.then(() => { throw new Error('the original last sync was bypassed'); })]);
+      if (fault === 'cancel') cancellation.abort(reason);
+      else await writeFile(path.join(workspace, 'AGENTS.md'), 'Changed guidance.\n');
+      assert.equal(settled, false); assert(active.size > 0);
+      release();
+      await assert.rejects(pending, error => fault === 'cancel' ? error === reason
+        : error instanceof Error && /changed|identity/u.test(error.message));
+      assert.equal(fileSyncs, 6); assert.equal(active.size, 0); root.assertHeld();
+    } finally { release(); await Promise.allSettled([pending]); }
+  });
 
 // Approved descriptor/CAS seam only: no Session, Run, permission or execution
 // authority is constructed. The real installed journey remains independent.

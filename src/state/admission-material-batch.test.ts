@@ -41,7 +41,7 @@ test('real source capture durably joins its target triple and retirement pair wi
     assert.equal(retired.outcome.kind, 'captured');
     assert.equal(active.size, 0, 'the original CAS descriptors close before capture can return');
     assert.equal(fileSyncs, 11 + 3, 'all eleven original files and the original-attempt/inspector/handoff closure receive their real data fsync');
-    assert.equal(rootSyncs, 32 + 8, 'target3 and retirement2 retain their boundaries; original-attempt single and handoff pair add four each');
+    assert.equal(rootSyncs, 24 + 8, 'target3, source3 and retirement2 each retain four boundaries; original-attempt single and handoff pair add four each');
     const target = await fixture.store.artifacts.readCanonical<SourceInspectionTargetV1>(retired.targetRef);
     assert.equal(target.originalRequestRef, canonicalSha256(fixture.request));
     assert.deepEqual(await fixture.store.artifacts.readCanonical(target.originalRequestRef), fixture.request);

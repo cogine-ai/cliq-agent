@@ -1640,6 +1640,18 @@ Preserve / do not touch:
 
 ### Implementation refinement — 2026-09-26
 
+Initial non-Git rules/projection/source metadata may use the RFC's fixed
+triple, adding only its same-held-scan delivery topology for the fixed quartet.
+Raw source files and entries remain earlier durable publications. Instruction
+capture similarly retains every original raw file/text/source/manifest, with
+at-most-four text groups and a final zero/one/two-text plus source/manifest
+closure. Planning refs establishes no durability. Full file sync/readback,
+four CAS boundaries and actual join precede return; every held descriptor and
+currentness check remains, including a complete recheck after each group.
+Git/frozen-result paths, capture ownership, native retirement, material and
+admission checks and all original limits remain unchanged. Component sync
+measurements do not qualify the installed 30-second request or two-second stop.
+
 **Make the execution boundary a deep module.** Supervisor callers provide the
 canonical closed launch/request and current typed authority. WP03 owns native
 descriptor handling, environment construction, process creation, I/O fencing,

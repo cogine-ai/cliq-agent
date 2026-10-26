@@ -26,9 +26,9 @@ type Entry = { schemaVersion: 1; cutId: string; ordinal: number; sortCreatedAt: 
   payload: { method: 'session.list'; value: SessionSummaryV1 }; rowDigest: string };
 type CutRow = { cut_id: string; owner_principal_id: string; method: string; normalized_filter_digest: string; normalized_limit: bigint;
   created_at: string; expires_at: string; entries_digest: string; cut_digest: string; cursor_secret_base64url: string };
-type EntryRow = { cut_id: string; ordinal: bigint; stable_id: string; row_digest: string; payload_json: string };
-type SourceRow = { id: string; workspace_identity_ref: string; name: string | null; parent_session_id: string | null;
-  context_revision: bigint; latest_item_seq: bigint; created_at: string; updated_at: string };
+type EntryRow = { cut_id: Uint8Array; ordinal: bigint; stable_id: Uint8Array | null; row_digest: Uint8Array | null; payload_json: Uint8Array };
+type SourceRow = { id: Uint8Array | null; workspace_identity_ref: Uint8Array | null; name: Uint8Array | null; parent_session_id: Uint8Array | null;
+  context_revision: bigint; latest_item_seq: bigint; created_at: Uint8Array | null; updated_at: Uint8Array | null };
 type Cursor = { schemaVersion: 1; cutId: string; afterOrdinal: number; macBase64url: string };
 export class ListCursorError extends KernelStorageError {
   readonly controlError = Object.freeze({ schemaVersion: 1 as const, code: 'INVALID_REQUEST' as const, retryable: false as const,
@@ -99,12 +99,24 @@ const sourceProjection = 'CASE WHEN length(CAST(id AS BLOB))<=128 THEN id END AS
   'CASE WHEN length(CAST(updated_at AS BLOB))=24 THEN updated_at END AS updated_at,' +
   '(name IS NOT NULL AND length(CAST(name AS BLOB))>256 OR parent_session_id IS NOT NULL AND length(CAST(parent_session_id AS BLOB))>128) AS overlong';
 const entryColumns = 'ordinal,stable_id,row_digest,payload_json';
+// Node's ordinary SQLite TEXT conversion replaces malformed UTF-8. Keep the
+// original bounded bytes across this boundary, and reject before any JSON or
+// digest could accidentally describe replacement characters instead.
+const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+function capturedText(bytes: Uint8Array | null): string {
+  if (!(bytes instanceof Uint8Array)) return corrupt();
+  try {
+    const text = utf8.decode(bytes);
+    if (!Buffer.from(text, 'utf8').equals(bytes)) return corrupt();
+    return text;
+  } catch { return corrupt(); }
+}
 function decodedSource(row: SourceRow & { overlong?: bigint }): SessionSummaryV1 {
   try {
     if (row.overlong !== 0n) return corrupt();
-    return decodeSessionSummary({ schemaVersion: 1, id: row.id, workspaceIdentityRef: row.workspace_identity_ref,
-      ...(row.name === null ? {} : { name: row.name }), ...(row.parent_session_id === null ? {} : { parentSessionId: row.parent_session_id }),
-      contextRevision: Number(row.context_revision), latestItemSeq: Number(row.latest_item_seq), createdAt: row.created_at, updatedAt: row.updated_at });
+    return decodeSessionSummary({ schemaVersion: 1, id: capturedText(row.id), workspaceIdentityRef: capturedText(row.workspace_identity_ref),
+      ...(row.name === null ? {} : { name: capturedText(row.name) }), ...(row.parent_session_id === null ? {} : { parentSessionId: capturedText(row.parent_session_id) }),
+      contextRevision: Number(row.context_revision), latestItemSeq: Number(row.latest_item_seq), createdAt: capturedText(row.created_at), updatedAt: capturedText(row.updated_at) });
   } catch { return corrupt(); }
 }
 function sameSource(connection: SqliteConnection, principalId: string, workspaceJson?: string): boolean {
@@ -164,29 +176,31 @@ export async function readSessionList(driver: SqliteDriver, artifacts: ArtifactC
     if (regressedAtEntry) throw new KernelStorageError('INVALID_REQUEST', 'canonical clock has regressed; Session list is paused');
     if (driver.prepare("SELECT 1 FROM sqlite_temp_master WHERE name IN ('cliq_list_source','cliq_list_entries') LIMIT 1").get()) return corrupt();
     ownsScratch = true;
-    driver.exec('CREATE TEMP TABLE cliq_list_source(id TEXT PRIMARY KEY,workspace_identity_ref TEXT NOT NULL,name TEXT,parent_session_id TEXT,' +
-      'context_revision INTEGER NOT NULL,latest_item_seq INTEGER NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL) STRICT;' +
-      'CREATE TEMP TABLE cliq_list_entries(ordinal INTEGER PRIMARY KEY,stable_id TEXT NOT NULL,row_digest TEXT NOT NULL,payload_json TEXT NOT NULL) STRICT');
+    driver.exec('CREATE TEMP TABLE cliq_list_source(ordinal INTEGER PRIMARY KEY,id TEXT UNIQUE,workspace_identity_ref TEXT,name TEXT,parent_session_id TEXT,' +
+      'context_revision INTEGER,latest_item_seq INTEGER,created_at TEXT,updated_at TEXT,overlong INTEGER NOT NULL) STRICT;' +
+      'CREATE TEMP TABLE cliq_list_entries(ordinal INTEGER PRIMARY KEY,stable_id TEXT,row_digest TEXT,payload_json TEXT NOT NULL,source_cut_id TEXT) STRICT');
     const stageEntry = driver.prepare('INSERT INTO temp.cliq_list_entries(ordinal,stable_id,row_digest,payload_json) VALUES(?,?,?,?)');
-    const stageSource = driver.prepare('INSERT INTO temp.cliq_list_source(' + sourceColumns + ') VALUES(?,?,?,?,?,?,?,?)');
     const limit = request.limit ?? 50, normalizedFilterDigest = filterDigest(identity.principalId, request, limit);
     const cursor = request.cursor === undefined ? undefined : decodeCursor(request.cursor);
     if (cursor) {
-      const retained = driver.readSnapshot(connection => {
+      const retained = driver.transaction(connection => {
         current(); assertActiveStateOwner(connection, owner);
         const row = connection.prepare(cutSelect + "WHERE cut_id=? AND owner_principal_id=? AND method='session.list'").get<CutRow>(cursor.cutId, identity.principalId);
         if (!row) throw new ListCursorError();
         const capacity = connection.prepare('SELECT count(*) AS n,coalesce(sum(length(CAST(payload_json AS BLOB))),0) AS bytes FROM list_read_cut_entries WHERE cut_id=?')
           .get<{ n: bigint; bytes: bigint }>(cursor.cutId)!;
         if (capacity.n > BigInt(MAX_ROWS) || capacity.bytes > BigInt(MAX_BYTES)) return corrupt();
-        const entries = connection.prepare('SELECT cut_id,ordinal,CASE WHEN length(CAST(stable_id AS BLOB))<=128 THEN stable_id END AS stable_id,' +
-          'CASE WHEN length(row_digest)=64 THEN row_digest END AS row_digest,payload_json FROM list_read_cut_entries WHERE cut_id=? ORDER BY ordinal LIMIT 100001').all<EntryRow>(cursor.cutId);
-        if (BigInt(entries.length) !== capacity.n) return corrupt();
-        return { row, entries };
+        // Freeze the original complete cut in SQLite, not a 64-MiB/100000-row
+        // JS array. Only this request owns this connection-private scratch.
+        connection.prepare('INSERT INTO temp.cliq_list_entries(source_cut_id,ordinal,stable_id,row_digest,payload_json) ' +
+          'SELECT cut_id,ordinal,CASE WHEN length(CAST(stable_id AS BLOB))<=128 THEN stable_id END,' +
+          'CASE WHEN length(CAST(row_digest AS BLOB))=64 THEN row_digest END,payload_json FROM list_read_cut_entries WHERE cut_id=? ORDER BY ordinal LIMIT 100001').run(cursor.cutId);
+        if (connection.prepare('SELECT count(*) AS n FROM temp.cliq_list_entries').get<{ n: bigint }>()!.n !== capacity.n) return corrupt();
+        return { row, entryCount: Number(capacity.n) };
       });
       const cut: Cut = { schemaVersion: 1, cutId: retained.row.cut_id, ownerPrincipalId: retained.row.owner_principal_id, method: 'session.list',
         normalizedFilterDigest: retained.row.normalized_filter_digest, normalizedLimit: Number(retained.row.normalized_limit), createdAt: retained.row.created_at,
-        expiresAt: retained.row.expires_at, cursorSecretBase64url: retained.row.cursor_secret_base64url, entryCount: retained.entries.length,
+        expiresAt: retained.row.expires_at, cursorSecretBase64url: retained.row.cursor_secret_base64url, entryCount: retained.entryCount,
         entriesDigest: retained.row.entries_digest, cutDigest: retained.row.cut_digest };
       secret(cut.cutId); secret(cut.cursorSecretBase64url);
       if (cut.normalizedLimit !== limit || cut.normalizedFilterDigest !== normalizedFilterDigest ||
@@ -195,27 +209,32 @@ export async function readSessionList(driver: SqliteDriver, artifacts: ArtifactC
       if (received.length !== expected.length || !timingSafeEqual(expected, received) || cursor.afterOrdinal >= cut.entryCount || cursor.afterOrdinal % limit !== 0) throw new ListCursorError();
       const hash = createHash('sha256'); hash.update('['); const selected: Entry[] = [];
       let previousTime = '', previousId = '';
-      for (let index = 0; index < retained.entries.length; index++) {
-        if (index % BATCH === 0) await pause();
-        const raw = retained.entries[index]!;
-        let payload: Entry['payload'];
-        try {
-          const data = controlWireRecord(parseJsonStrict(raw.payload_json), ['method', 'value']);
-          if (data.method !== 'session.list' || canonicalJsonBytes(data).toString('utf8') !== raw.payload_json) return corrupt();
-          payload = { method: 'session.list', value: decodeSessionSummary(data.value) };
-        } catch { return corrupt(); }
-        const entry: Entry = { schemaVersion: 1, cutId: cut.cutId, ordinal: index + 1, stableId: raw.stable_id,
-          sortCreatedAt: payload.value.createdAt, payload, rowDigest: raw.row_digest };
-        if (raw.cut_id !== cut.cutId || raw.ordinal !== BigInt(index + 1) || raw.stable_id !== payload.value.id ||
-            digestOmitting(entry, 'rowDigest') !== raw.row_digest || previousTime > entry.sortCreatedAt ||
-            previousTime === entry.sortCreatedAt && Buffer.compare(Buffer.from(previousId), Buffer.from(entry.stableId)) >= 0) return corrupt();
-        previousTime = entry.sortCreatedAt; previousId = entry.stableId;
-        if (index) hash.update(','); hash.update(canonicalJsonBytes(entry.rowDigest));
-        stageEntry.run(entry.ordinal, entry.stableId, entry.rowDigest, raw.payload_json);
-        if (index >= cursor.afterOrdinal && selected.length < limit) selected.push(entry);
-        // Only the encoded exact comparison bytes and bounded returned page
-        // survive preparation; discarded typed bodies are not cached.
-        retained.entries[index] = undefined as unknown as EntryRow;
+      const retainedBatch = driver.prepare('SELECT CAST(source_cut_id AS BLOB) AS cut_id,ordinal,CAST(stable_id AS BLOB) AS stable_id,' +
+        'CAST(row_digest AS BLOB) AS row_digest,CAST(payload_json AS BLOB) AS payload_json FROM temp.cliq_list_entries WHERE ordinal>? ORDER BY ordinal LIMIT 128');
+      for (let offset = 0; offset < retained.entryCount; offset += BATCH) {
+        await pause();
+        const rows = retainedBatch.all<EntryRow>(offset);
+        if (rows.length !== Math.min(BATCH, retained.entryCount - offset)) return corrupt();
+        for (let part = 0; part < rows.length; part++) {
+          const index = offset + part, raw = rows[part]!;
+          const originalCutId = capturedText(raw.cut_id), stableId = capturedText(raw.stable_id), rowDigest = capturedText(raw.row_digest);
+          let payload: Entry['payload'];
+          try {
+            const data = controlWireRecord(parseJsonStrict(capturedText(raw.payload_json)), ['method', 'value']);
+            if (data.method !== 'session.list' || !canonicalJsonBytes(data).equals(raw.payload_json)) return corrupt();
+            payload = { method: 'session.list', value: decodeSessionSummary(data.value) };
+          } catch { return corrupt(); }
+          const entry: Entry = { schemaVersion: 1, cutId: cut.cutId, ordinal: index + 1, stableId,
+            sortCreatedAt: payload.value.createdAt, payload, rowDigest };
+          if (originalCutId !== cut.cutId || raw.ordinal !== BigInt(index + 1) || stableId !== payload.value.id ||
+              digestOmitting(entry, 'rowDigest') !== rowDigest || previousTime > entry.sortCreatedAt ||
+              previousTime === entry.sortCreatedAt && Buffer.compare(Buffer.from(previousId), Buffer.from(entry.stableId)) >= 0) return corrupt();
+          previousTime = entry.sortCreatedAt; previousId = entry.stableId;
+          if (index) hash.update(','); hash.update(canonicalJsonBytes(entry.rowDigest));
+          if (index >= cursor.afterOrdinal && selected.length < limit) selected.push(entry);
+          // The complete original raw bytes stay in TEMP for the final equality
+          // check. Only one fixed batch and the requested page cross into JS.
+        }
       }
       if (hash.update(']').digest('hex') !== cut.entriesDigest || cutDigest(cut) !== cut.cutDigest) return corrupt();
       const fingerprint = rowFingerprint(retained.row);
@@ -261,33 +280,46 @@ export async function readSessionList(driver: SqliteDriver, artifacts: ArtifactC
         prepared = { refsDigest: hash.update(']').digest('hex'), workspaceJson: canonicalJsonBytes(matching).toString('utf8') };
       }
       const workspaceJson = prepared?.workspaceJson;
-      const captured = driver.readSnapshot(connection => {
+      const captured = driver.transaction(connection => {
         current(); assertActiveStateOwner(connection, owner);
         if (prepared && workspaceRefDigest(connection, identity.principalId) !== prepared.refsDigest) return;
         const filter = workspaceJson === undefined ? '' : ' AND workspace_identity_ref IN (SELECT value FROM json_each(?))';
-        return connection.prepare('SELECT ' + sourceProjection + ' FROM sessions WHERE principal_id=?' + filter +
-          ' ORDER BY created_at COLLATE BINARY,id COLLATE BINARY LIMIT 100001').all<SourceRow & { overlong: bigint }>(
-            identity.principalId, ...(workspaceJson === undefined ? [] : [workspaceJson]));
+        const values = [identity.principalId, ...(workspaceJson === undefined ? [] : [workspaceJson])];
+        const count = connection.prepare('SELECT count(*) AS n FROM (SELECT 1 FROM sessions WHERE principal_id=?' + filter + ' LIMIT 100001)')
+          .get<{ n: bigint }>(...values)!.n;
+        if (count > BigInt(MAX_ROWS)) throw new ListCutCapacityError();
+        // The projection caps every field before the native copy. NULL/overlong
+        // markers remain rejection data for the original complete decoder;
+        // no arbitrarily large raw column is retained in scratch.
+        connection.prepare('INSERT INTO temp.cliq_list_source(ordinal,' + sourceColumns + ',overlong) ' +
+          'SELECT row_number() OVER(ORDER BY created_at COLLATE BINARY,id COLLATE BINARY),' + sourceColumns + ',overlong FROM (' +
+          'SELECT ' + sourceProjection + ' FROM sessions WHERE principal_id=?' + filter + ' LIMIT 100001)' +
+          ' ORDER BY created_at COLLATE BINARY,id COLLATE BINARY').run(...values);
+        if (connection.prepare('SELECT count(*) AS n FROM temp.cliq_list_source').get<{ n: bigint }>()!.n !== count) return corrupt();
+        return Number(count);
       });
-      if (!captured) { prepared = undefined; continue; }
-      if (captured.length > MAX_ROWS) throw new ListCutCapacityError();
+      if (captured === undefined) { prepared = undefined; continue; }
       const cutId = randomBytes(32).toString('base64url'), cursorSecretBase64url = randomBytes(32).toString('base64url');
       const hash = createHash('sha256'); hash.update('[');
       const selected: Entry[] = []; let byteCount = 0;
-      for (let index = 0; index < captured.length; index++) {
-        if (index % BATCH === 0) await pause();
-        const raw = captured[index]!, value = decodedSource(raw), payload = { method: 'session.list' as const, value };
-        const encodedPayload = canonicalJsonBytes(payload).toString('utf8'); byteCount += Buffer.byteLength(encodedPayload);
-        if (byteCount > MAX_BYTES) throw new ListCutCapacityError();
-        const entry: Entry = { schemaVersion: 1, cutId, ordinal: index + 1, stableId: value.id, sortCreatedAt: value.createdAt, payload, rowDigest: '' };
-        entry.rowDigest = digestOmitting(entry, 'rowDigest');
-        stageSource.run(raw.id, raw.workspace_identity_ref, raw.name, raw.parent_session_id, raw.context_revision, raw.latest_item_seq, raw.created_at, raw.updated_at);
-        stageEntry.run(entry.ordinal, entry.stableId, entry.rowDigest, encodedPayload);
-        if (index) hash.update(','); hash.update(canonicalJsonBytes(entry.rowDigest));
-        if (selected.length < limit) selected.push(entry);
-        captured[index] = undefined as unknown as SourceRow & { overlong: bigint };
+      const sourceBatch = driver.prepare('SELECT ' + sourceColumns.split(',').map(column => ['context_revision', 'latest_item_seq'].includes(column)
+        ? column : 'CAST(' + column + ' AS BLOB) AS ' + column).join(',') + ',overlong FROM temp.cliq_list_source WHERE ordinal>? ORDER BY ordinal LIMIT 128');
+      for (let offset = 0; offset < captured; offset += BATCH) {
+        await pause();
+        const rows = sourceBatch.all<SourceRow & { overlong: bigint }>(offset);
+        if (rows.length !== Math.min(BATCH, captured - offset)) return corrupt();
+        for (let part = 0; part < rows.length; part++) {
+          const index = offset + part, raw = rows[part]!, value = decodedSource(raw), payload = { method: 'session.list' as const, value };
+          const encodedPayload = canonicalJsonBytes(payload).toString('utf8'); byteCount += Buffer.byteLength(encodedPayload);
+          if (byteCount > MAX_BYTES) throw new ListCutCapacityError();
+          const entry: Entry = { schemaVersion: 1, cutId, ordinal: index + 1, stableId: value.id, sortCreatedAt: value.createdAt, payload, rowDigest: '' };
+          entry.rowDigest = digestOmitting(entry, 'rowDigest');
+          stageEntry.run(entry.ordinal, entry.stableId, entry.rowDigest, encodedPayload);
+          if (index) hash.update(','); hash.update(canonicalJsonBytes(entry.rowDigest));
+          if (selected.length < limit) selected.push(entry);
+        }
       }
-      const entriesDigest = hash.update(']').digest('hex'), entryCount = captured.length;
+      const entriesDigest = hash.update(']').digest('hex'), entryCount = captured;
       let result: ReturnType<typeof page> | undefined, regressed = false, changed = false;
       driver.transaction(connection => {
         current(); assertActiveStateOwner(connection, owner);

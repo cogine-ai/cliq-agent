@@ -2,6 +2,7 @@
 #define CLIQ_PREPARATION_GIT_PRODUCER_H
 
 #include "preparation-git-capture.h"
+#include "source-ready-diagnostic.h"
 
 static bool preparation_materialize_files(struct cliq_preparation_capture *input) {
     const char *names[] = { NULL, "canonical.index", "reachable.pack", "reachable.idx" };
@@ -43,17 +44,28 @@ static int preparation_producer(void) {
     struct cliq_worker_packet request; int files[2] = { -1, -1 }, intent = -1, outputs[CLIQ_SOURCE_OUTPUTS] = { -1, -1, -1, -1 }; size_t count;
     struct cliq_preparation_capture input; preparation_capture_init(&input);
     struct cliq_source_config *config = calloc(1, sizeof(*config)); bool valid = false;
-    if (!config || !cliq_receive(3, &request, files, 2, &count) || request.command != CLIQ_SOURCE_CREATE_BLOCKED || count != 2 ||
-        !cliq_preparation_namespace_request_valid(&request)) goto failed;
+    uint32_t diagnostic_stage = 0;
+    if (!config || !cliq_receive(3, &request, files, 2, &count)) goto failed;
+    diagnostic_stage = 2;
+    if (request.command != CLIQ_SOURCE_CREATE_BLOCKED || count != 2) goto failed;
+    diagnostic_stage = 3;
+    if (!cliq_preparation_namespace_request_valid(&request)) goto failed;
     uint64_t runtime = 0, reserve = 0;
-    valid = source_read_config(files[0], config) && source_bound_logs(&request) && source_script_current(config) &&
-        cliq_source_storage_reserve(config, &request, &runtime, &reserve);
-    if (!source_close_fd(&files[0])) valid = false;
+    diagnostic_stage = 4; if (!source_read_config(files[0], config)) goto failed;
+    diagnostic_stage = 5; if (!source_bound_logs(&request)) goto failed;
+    diagnostic_stage = 6; if (!source_script_current(config)) goto failed;
+    diagnostic_stage = 7; if (!cliq_source_storage_reserve(config, &request, &runtime, &reserve)) goto failed;
+    diagnostic_stage = 8;
+    valid = source_close_fd(&files[0]);
     struct cliq_worker_packet ready = request; ready.command = CLIQ_WORKER_READY; ready.pid = getpid(); ready.namespace_init_pid = 1;
     struct stat namespace;
     valid = valid && cliq_process_token(2, ready.start_token) && cliq_process_token(1, ready.init_start_token) && stat("/proc/self/ns/pid", &namespace) == 0;
     ready.pid_namespace_inode = valid ? (uint64_t)namespace.st_ino : 0;
-    if (!valid || !cliq_send(3, &ready, NULL, 0)) goto failed;
+    if (!valid) goto failed;
+    diagnostic_stage = 9;
+    source_ready_diagnostic_write(2, &request, diagnostic_stage);
+    if (!cliq_send(3, &ready, NULL, 0)) goto failed;
+    diagnostic_stage = 0; /* No payload/helper failure is eligible for this pre-READY marker. */
     struct cliq_worker_packet release;
     if (!cliq_receive(3, &release, NULL, 0, &count) || release.command != CLIQ_SOURCE_RELEASE_CAPTURE ||
         !cliq_preparation_namespace_same_attempt(&request, &release) ||
@@ -90,6 +102,7 @@ static int preparation_producer(void) {
     if (!preparation_capture_close(&input)) valid = false;
     free(config); return valid ? 0 : 70;
 failed:
+    if (diagnostic_stage) source_ready_diagnostic_write(2, &request, diagnostic_stage);
     for (size_t i = 0; i < 2; i++) source_close_fd(&files[i]);
     for (size_t i = 0; i < CLIQ_SOURCE_OUTPUTS; i++) source_close_fd(&outputs[i]);
     source_close_fd(&intent); preparation_capture_close(&input); free(config); return 70;
