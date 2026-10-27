@@ -63,7 +63,8 @@ static int dependency_peer_poll_ack(void *context) {
     if(controller->closed || !scope->result_ack_started)return 0;
     if(controller->pending!=CLIQ_ACK_DEPENDENCY_RESULT || controller->pending_scope!=scope)return -1;
     struct cliq_worker_packet response;int observed=poll_response(controller,scope,CLIQ_ACK_DEPENDENCY_RESULT,&response);
-    if(observed<0)return -1;if(!observed)return 0;
+    if(observed<0)return -1;
+    if(!observed)return 0;
     if(!scope->parent || !cliq_dependency_result_ack_same(&response,scope->id,scope->parent->id,scope->identity.nonce,scope->result.observed_at_ms) ||
         !dependency_native_drop_result(scope,1)){(void)close_controller(controller);return -1;}return 1;
 }
@@ -201,7 +202,11 @@ static napi_value create_dependency_npm(napi_env env,napi_callback_info info) {
         {"stop",NULL,scope_stop,NULL,NULL,NULL,napi_default,NULL},{"pollStopped",NULL,scope_poll_stopped,NULL,NULL,NULL,napi_default,NULL}};
     if(napi_create_object(env,&result)!=napi_ok || napi_type_tag_object(env,result,&SCOPE_TAG)!=napi_ok || napi_define_properties(env,result,8,methods)!=napi_ok ||
         napi_create_reference(env,args[8],1,&scope->dependency_owner_ref)!=napi_ok || napi_wrap(env,result,scope,finalize_scope,NULL,NULL)!=napi_ok){
-        if(scope->dependency_owner_ref)napi_delete_reference(env,scope->dependency_owner_ref);free(scope);free(config);return failure(env,"dependency receiver allocation unavailable");}
+        if(scope->dependency_owner_ref)napi_delete_reference(env,scope->dependency_owner_ref);
+        free(scope);
+        free(config);
+        return failure(env,"dependency receiver allocation unavailable");
+        }
     scope->next=controller->scopes;controller->scopes=scope;controller->references++;controller->next_scope++;
     const struct cliq_dependency_process_peer peer={scope,dependency_peer_cancel,dependency_peer_poll_joined,dependency_peer_release_execution,dependency_peer_begin_ack,dependency_peer_poll_ack,dependency_peer_release};
     if(owner->acquire_worker(owner,&binding,fixed->dependency_plan_digest,request.sandbox_launch_ref,&peer)!=1){free(config);(void)close_controller(controller);return failure(env,"dependency original native owner refused its single scope");}
@@ -219,7 +224,8 @@ static napi_value create_dependency_npm(napi_env env,napi_callback_info info) {
     if(descriptor<0 || write(descriptor,fixed,sizeof(*fixed))!=(ssize_t)sizeof(*fixed) || fchmod(descriptor,0400)!=0 || fcntl(descriptor,F_ADD_SEALS,F_SEAL_WRITE|F_SEAL_GROW|F_SEAL_SHRINK|F_SEAL_SEAL)!=0)valid=false;
     free(config);files[3]=descriptor;
     if(valid)valid=begin_request(controller,scope,&request,files,8+guest->file_count);
-    if(!retire_descriptor(&descriptor))valid=false;if(!retire_descriptor(&metadata.fd))valid=false;
+    if(!retire_descriptor(&descriptor))valid=false;
+    if(!retire_descriptor(&metadata.fd))valid=false;
     if(!valid){(void)close_controller(controller);return failure(env,"dependency native creation is indeterminate; retain the original claim");}return result;
 }
 #endif

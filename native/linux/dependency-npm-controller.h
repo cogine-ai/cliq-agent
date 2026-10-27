@@ -56,13 +56,15 @@ static void dependency_bubblewrap(int generation_source,int helper_source,int bw
     char *const environment[]={"LANG=C","LC_ALL=C",NULL};fexecve(bwrap,arguments,environment);_exit(70);
 }
 static bool dependency_forward_inputs(const struct cliq_worker_packet *request,int passed[CLIQ_WORKER_MAX_FDS],size_t count,struct cliq_worker_packet *response) {
-    if(request->scope==0 || request->scope>=CLIQ_WORKER_MAX_SCOPES)return false;struct scope *scope=&scopes[request->scope];
+    if(request->scope==0 || request->scope>=CLIQ_WORKER_MAX_SCOPES)return false;
+    struct scope *scope=&scopes[request->scope];
     if(!scope->created || !scope->dependency || scope->stopped || scope->released || scope->dependency_inputs_sealed || !scope_process_current(scope) ||
         !scope_process_current(&scopes[scope->parent]) || !cliq_dependency_input_command_same(request,&scope->identity,request->command) ||
         ((request->command==CLIQ_STAGE_DEPENDENCY_CHUNK)?count!=1:request->command!=CLIQ_SEAL_DEPENDENCY_INPUTS || count!=0))return false;
     size_t extras;struct cliq_worker_packet acknowledgement;
     if(!cliq_send(scope->channel,request,count?passed:NULL,count) || !readable(scope->channel,OBSERVATION_TIMEOUT_MS) ||
         !cliq_receive(scope->channel,&acknowledgement,NULL,0,&extras) || memcmp(&acknowledgement,request,sizeof(acknowledgement)))return false;
-    if(request->command==CLIQ_SEAL_DEPENDENCY_INPUTS)scope->dependency_inputs_sealed=true;*response=acknowledgement;return true;
+    if(request->command==CLIQ_SEAL_DEPENDENCY_INPUTS)scope->dependency_inputs_sealed=true;
+    *response=acknowledgement;return true;
 }
 #endif

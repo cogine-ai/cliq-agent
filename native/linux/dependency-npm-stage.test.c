@@ -26,7 +26,8 @@ static size_t metadata(unsigned char *output,size_t maximum,const char *blob,siz
     size_t offset=0;for(unsigned i=0;i<count;i++){
         char record[2048];int n=snprintf(record,sizeof(record),"{\"blobBytes\":%zu,\"blobSha256\":\"%s\",\"canonicalPackagePath\":\"/owned-%u.tgz\",\"endpointRegistrationRef\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"integrityAlgorithm\":\"sha256\",\"integrityDigest\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\",\"packageName\":\"owned-%u\",\"packageVersion\":\"1.0.0\"}",bytes,blob,i,i);
         CHECK(n>0 && (size_t)n<sizeof(record) && offset+4+(size_t)n<=maximum);uint32_t size=(uint32_t)n;
-        for(unsigned j=0;j<4;j++)output[offset++]=(unsigned char)(size>>(j*8));memcpy(output+offset,record,size);offset+=size;
+        for(unsigned j=0;j<4;j++)output[offset++]=(unsigned char)(size>>(j*8));
+        memcpy(output+offset,record,size);offset+=size;
     }return offset;
 }
 int main(void) {

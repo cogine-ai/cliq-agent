@@ -180,7 +180,9 @@ static void dependency_reader_finalize(napi_env env,void *data,void *hint) {
     (void)hint;struct dependency_reader *reader=data;struct dependency_package *package=reader->package;
     if(!reader->reader.joined && cliq_dependency_data_join(&reader->reader)!=CLIQ_DEPENDENCY_DATA_OK)dependency_unsafe(package->broker);
     struct dependency_reader **link=&package->readers;while(*link && *link!=reader)link=&(*link)->next;if(*link)*link=reader->next;
-    if(reader->parent && !package->broker->env_closing)napi_delete_reference(env,reader->parent);wipe(reader,sizeof(*reader));free(reader);
+    if(reader->parent && !package->broker->env_closing)napi_delete_reference(env,reader->parent);
+    wipe(reader,sizeof(*reader));
+    free(reader);
     if(!package->native_borrows){dependency_unsafe(package->broker);return;}package->native_borrows--;dependency_package_try_free(package);
 }
 static struct dependency_reader *dependency_reader_receiver(napi_env env,napi_callback_info info) {
@@ -197,7 +199,8 @@ static napi_value dependency_reader_read(napi_env env,napi_callback_info info) {
 }
 static napi_value dependency_reader_complete(napi_env env,napi_callback_info info) {
     struct dependency_reader *reader=dependency_reader_receiver(env,info);if(!reader)return NULL;
-    if(!cliq_dependency_data_complete(&reader->reader))return dependency_throw(reader->package->broker,"package_reader_incomplete");return NULL;
+    if(!cliq_dependency_data_complete(&reader->reader))return dependency_throw(reader->package->broker,"package_reader_incomplete");
+    return NULL;
 }
 static napi_value dependency_reader_close(napi_env env,napi_callback_info info) {
     struct dependency_reader *reader=dependency_reader_receiver(env,info);if(!reader)return NULL;
@@ -206,7 +209,8 @@ static napi_value dependency_reader_close(napi_env env,napi_callback_info info) 
 static void dependency_package_finalize(napi_env env,void *data,void *hint) {
     (void)hint;struct dependency_package *package=data;package->finalized=true;dependency_package_retire(package);
     struct dependency_package **link=&package->broker->packages;while(*link && *link!=package)link=&(*link)->next;if(*link)*link=package->next;
-    if(package->parent && !package->broker->env_closing)napi_delete_reference(env,package->parent);package->parent=NULL;
+    if(package->parent && !package->broker->env_closing)napi_delete_reference(env,package->parent);
+    package->parent=NULL;
     dependency_package_try_free(package);
 }
 static struct dependency_package *dependency_package_receiver(napi_env env,napi_callback_info info,napi_value *receiver) {
@@ -363,7 +367,9 @@ static void dependency_maybe_finish(struct dependency_broker *broker) {
     broker->retired=true;
     dependency_release_cleanup(broker);
     if(broker->close_deferred && !broker->env_closing){if(atomic_load(&broker->owner.unsafe))napi_reject_deferred(broker->env,broker->close_deferred,dependency_error(broker));
-        else napi_resolve_deferred(broker->env,broker->close_deferred,dependency_closed_value(broker));broker->close_deferred=NULL;}
+        else napi_resolve_deferred(broker->env,broker->close_deferred,dependency_closed_value(broker));
+        broker->close_deferred=NULL;
+        }
     if(broker->handle && !broker->env_closing){broker->native_borrows++;uint32_t count;if(napi_reference_unref(broker->env,broker->handle,&count)!=napi_ok)dependency_unsafe(broker);dependency_release_borrow(broker);}
     else dependency_try_free(broker);
 }
@@ -395,7 +401,8 @@ static void dependency_begin_close(struct dependency_broker *broker) {
 }
 static napi_value dependency_close_call(napi_env env,napi_callback_info info) {
     napi_value args[1];size_t argc=1;struct dependency_broker *broker=dependency_receiver(env,info,&argc,args);if(!broker)return NULL;
-    if(argc)return dependency_throw(broker,"close_refused");napi_value promise;
+    if(argc)return dependency_throw(broker,"close_refused");
+    napi_value promise;
     if(broker->close_promise){napi_get_reference_value(env,broker->close_promise,&promise);return promise;}
     if(napi_create_promise(env,&broker->close_deferred,&promise)!=napi_ok || napi_create_reference(env,promise,1,&broker->close_promise)!=napi_ok)return dependency_throw(broker,"resource_retirement");
     dependency_begin_close(broker);return promise;
@@ -417,12 +424,14 @@ static napi_value dependency_seal_call(napi_env env,napi_callback_info info) {
         unsigned matches=0;for(uint32_t target=0;target<broker->config->target_count;target++)matches+=cliq_dependency_string_equal(page->values[index].endpoint,broker->config->targets[target].ref);
         if(matches!=1){broker->descriptors.failed=true;return dependency_throw(broker,"descriptor_endpoint_refused");}}
     broker->inputs_fd=(int)syscall(SYS_memfd_create,"cliq-dependency-package-inputs",MFD_CLOEXEC|MFD_ALLOW_SEALING);
-    if(broker->inputs_fd<0)return dependency_throw(broker,"package_metadata_storage_unavailable");sha256_init(&broker->inputs_hash);
+    if(broker->inputs_fd<0)return dependency_throw(broker,"package_metadata_storage_unavailable");
+    sha256_init(&broker->inputs_hash);
     if(broker->ready_deferred){napi_value value;napi_get_undefined(env,&value);napi_resolve_deferred(env,broker->ready_deferred,value);broker->ready_deferred=NULL;}return NULL;
 }
 static napi_value dependency_retain_call(napi_env env,napi_callback_info info) {
     napi_value args[1];size_t argc=1;struct dependency_broker *broker=dependency_receiver(env,info,&argc,args);if(!broker)return NULL;
-    if(argc || !broker->descriptors.sealed || !dependency_outer_current(broker) || atomic_exchange(&broker->owner.fence_retained,true))return dependency_throw(broker,"dispatch_fence_refused");return NULL;
+    if(argc || !broker->descriptors.sealed || !dependency_outer_current(broker) || atomic_exchange(&broker->owner.fence_retained,true))return dependency_throw(broker,"dispatch_fence_refused");
+    return NULL;
 }
 static napi_value dependency_bind_call(napi_env env,napi_callback_info info) {
     napi_value args[2];size_t argc=2;struct dependency_broker *broker=dependency_receiver(env,info,&argc,args);if(!broker)return NULL;
@@ -444,7 +453,8 @@ static napi_value dependency_network_call(napi_env env,napi_callback_info info,e
         if(!broker->target || broker->total_transferred>=broker->config->max_transfer_bytes)return dependency_throw(broker,"package_budget_refused");
         broker->current_attempt=attempt;broker->attempt_completed=false;broker->retry_permitted=false;memset(&broker->http,0,sizeof(broker->http));atomic_store(&broker->error,NULL);atomic_store(&broker->request_expired,false);
         if(broker->cancel){g_object_unref(broker->cancel);broker->cancel=NULL;}broker->cancel=g_cancellable_new();
-        if(clock_gettime(CLOCK_MONOTONIC,&broker->request_deadline))return dependency_throw(broker,"clock_unavailable");broker->request_deadline.tv_sec+=30;
+        if(clock_gettime(CLOCK_MONOTONIC,&broker->request_deadline))return dependency_throw(broker,"clock_unavailable");
+        broker->request_deadline.tv_sec+=30;
         if(broker->request_deadline.tv_sec>broker->outer_deadline.tv_sec || (broker->request_deadline.tv_sec==broker->outer_deadline.tv_sec && broker->request_deadline.tv_nsec>broker->outer_deadline.tv_nsec))broker->request_deadline=broker->outer_deadline;
     }else{
         if(!broker->connected || attempt!=broker->current_attempt || broker->pending_package)return dependency_throw(broker,"package_attempt_refused");
@@ -475,12 +485,14 @@ static bool dependency_data_joined(struct dependency_broker *broker) {
     return true;
 }
 static bool dependency_settlement_drop(struct dependency_settlement *fence) {
-    if(!fence->active)return true;struct dependency_broker *broker=fence->broker;
+    if(!fence->active)return true;
+    struct dependency_broker *broker=fence->broker;
     if(!broker || (!(broker->env_closing && !broker->settlement_locked) &&
         (!broker->settlement_locked || !broker->settlement_borrowed || pthread_mutex_unlock(&broker->mutex)))){
         if(broker){dependency_unsafe(broker);dependency_fail(broker,"resource_retirement");}return false;}
     broker->settlement_locked=false;broker->settlement_borrowed=false;fence->active=false;
-    if(fence->parent && !broker->env_closing)napi_delete_reference(fence->env,fence->parent);fence->parent=NULL;
+    if(fence->parent && !broker->env_closing)napi_delete_reference(fence->env,fence->parent);
+    fence->parent=NULL;
     dependency_maybe_finish(broker);return true;
 }
 static void dependency_settlement_finalize(napi_env env,void *data,void *hint) {
@@ -502,7 +514,8 @@ static napi_value dependency_settlement_assert(napi_env env,napi_callback_info i
 }
 static napi_value dependency_settlement_close(napi_env env,napi_callback_info info) {
     struct dependency_settlement *fence=dependency_settlement_receiver(env,info);if(!fence)return NULL;
-    if(!dependency_settlement_drop(fence))return dependency_throw(fence->broker,"resource_retirement");return NULL;
+    if(!dependency_settlement_drop(fence))return dependency_throw(fence->broker,"resource_retirement");
+    return NULL;
 }
 static napi_value dependency_acquire_settlement(napi_env env,napi_callback_info info) {
     size_t argc=2;napi_value args[2],value,parent;struct dependency_broker *broker=dependency_receiver(env,info,&argc,args);if(!broker)return NULL;
@@ -534,20 +547,25 @@ static napi_value dependency_release_process(napi_env env,napi_callback_info inf
     broker->process_released=true;atomic_fetch_add(&broker->active_releases,1);int status=broker->peer.release_execution(broker->peer.context,&broker->owner.binding);
     if(atomic_fetch_sub(&broker->active_releases,1)!=1)dependency_unsafe(broker);
     if(pthread_mutex_unlock(&broker->mutex)){dependency_unsafe(broker);return dependency_throw(broker,"resource_retirement");}
-    if(status<0)return dependency_throw(broker,"process_release_refused");return NULL;
+    if(status<0)return dependency_throw(broker,"process_release_refused");
+    return NULL;
 }
 static napi_value dependency_begin_ack(napi_env env,napi_callback_info info) {
     size_t argc=2;napi_value args[2];struct dependency_broker *broker=dependency_receiver(env,info,&argc,args);if(!broker)return NULL;
     if(argc!=1 || !dependency_binding_current(broker,args[0]) || !broker->token_revoked || broker->settlement_locked || broker->working || !dependency_data_joined(broker) ||
         !atomic_load(&broker->owner.worker_claimed) || !dependency_process_poll(broker) || !broker->process.result_available || broker->process_peer_released)return dependency_throw(broker,"process_ack_refused");
-    if(broker->process_ack_started)return NULL;broker->process_ack_started=true;
-    if(broker->peer.begin_output_ack(broker->peer.context)<0)return dependency_throw(broker,"process_ack_refused");return NULL;
+    if(broker->process_ack_started)return NULL;
+    broker->process_ack_started=true;
+    if(broker->peer.begin_output_ack(broker->peer.context)<0)return dependency_throw(broker,"process_ack_refused");
+    return NULL;
 }
 static napi_value dependency_poll_ack(napi_env env,napi_callback_info info) {
     size_t argc=1;napi_value args[1],value;struct dependency_broker *broker=dependency_receiver(env,info,&argc,args);if(!broker)return NULL;
     if(argc || !broker->process_ack_started || atomic_load(&broker->owner.unsafe))return dependency_throw(broker,"process_ack_refused");
     if(!broker->process_custody_retired){int status=broker->peer.poll_output_ack(broker->peer.context);
-        if(status<0)return dependency_throw(broker,"process_ack_refused");if(status==1){if(!dependency_process_poll(broker) || !broker->process_custody_retired)return dependency_throw(broker,"process_ack_refused");broker->peer.release(broker->peer.context);
+        if(status<0)return dependency_throw(broker,"process_ack_refused");
+        if(status==1){if(!dependency_process_poll(broker) || !broker->process_custody_retired)return dependency_throw(broker,"process_ack_refused");
+        broker->peer.release(broker->peer.context);
             broker->process_peer_released=true;memset(&broker->peer,0,sizeof(broker->peer));dependency_release_borrow(broker);}}
     napi_get_boolean(env,broker->process_custody_retired,&value);return value;
 }
@@ -589,7 +607,8 @@ static napi_value dependency_prepare(napi_env env,napi_callback_info info) {
     atomic_init(&broker->owner.closing,false);atomic_init(&broker->owner.unsafe,false);atomic_init(&broker->owner.fence_retained,false);
     atomic_init(&broker->active_releases,0);atomic_init(&broker->owner.worker_claimed,false);atomic_init(&broker->owner.worker_joined,false);atomic_init(&broker->request_expired,false);atomic_init(&broker->error,NULL);
     broker->config=calloc(1,sizeof(*broker->config));broker->trust=malloc(trust_size);unsigned char *original_configuration=malloc(configuration_size);
-    if(original_configuration)memcpy(original_configuration,configuration,configuration_size);if(broker->trust)memcpy(broker->trust,trust,trust_size);
+    if(original_configuration)memcpy(original_configuration,configuration,configuration_size);
+    if(broker->trust)memcpy(broker->trust,trust,trust_size);
     unsigned char token[32],digest[32];char trust_digest[65];uid_t uid;gid_t gid;char home[PATH_MAX];
     bool valid=broker->config && broker->trust && original_configuration && current_user(&uid,&gid,home) && cliq_dependency_configuration_read(original_configuration,configuration_size,broker->config) &&
         SHA256(broker->trust,trust_size,digest) && RAND_bytes(token,sizeof(token))==1;
@@ -629,7 +648,8 @@ static napi_value dependency_prepare(napi_env env,napi_callback_info info) {
 static napi_value initialize_dependency_broker(napi_env env,napi_value exports) {
     if(!OPENSSL_init_ssl(OPENSSL_INIT_NO_LOAD_CONFIG,NULL)){napi_throw_error(env,NULL,"Dependency TLS unavailable");return NULL;}
     const napi_property_descriptor methods[]={{"prepareDependencyTransport",NULL,dependency_prepare,NULL,NULL,NULL,napi_default,NULL}};
-    if(napi_define_properties(env,exports,1,methods)!=napi_ok)return NULL;set_number(env,exports,"interfaceVersion",1);
+    if(napi_define_properties(env,exports,1,methods)!=napi_ok)return NULL;
+    set_number(env,exports,"interfaceVersion",1);
     set_number(env,exports,"maximumOwnerDataBytes",CLIQ_DEPENDENCY_DESCRIPTOR_TOTAL_BYTES);
     set_number(env,exports,"descriptorPageStorageBytes",sizeof(struct cliq_dependency_descriptor_page));
     set_number(env,exports,"fixedOwnerStorageBytes",sizeof(struct dependency_broker)+sizeof(struct cliq_dependency_configuration));

@@ -36,7 +36,8 @@ static inline bool cliq_dependency_host(const char *value) {
     for (;;) {
         const char *end = strchr(cursor,'.'); size_t count = end ? (size_t)(end - cursor) : strlen(cursor);
         if (!count || count > 63 || cursor[0] == '-' || cursor[count - 1] == '-') return false;
-        if (!end) return true; cursor = end + 1;
+        if (!end) return true;
+        cursor = end + 1;
     }
 }
 static inline bool cliq_dependency_target_read(struct cliq_dependency_json *json, struct cliq_dependency_target *target) {

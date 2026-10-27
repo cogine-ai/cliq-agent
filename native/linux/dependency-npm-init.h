@@ -18,7 +18,9 @@ static bool dependency_modules_current(const struct cliq_dependency_config *conf
     valid=valid && modules>=0 && fstat(modules,&held)==0 && cliq_dependency_stage_directory(&named,&held) &&
         fstatat(work,"node_modules",&after,AT_SYMLINK_NOFOLLOW)==0 && cliq_dependency_stage_directory(&held,&after);
     struct stat rule;if(valid){errno=0;valid=fstatat(work,".npmrc",&rule,AT_SYMLINK_NOFOLLOW)<0 && errno==ENOENT;}
-    if(modules>=0 && close(modules)!=0)valid=false;if(work>=0 && close(work)!=0)valid=false;return valid;
+    if(modules>=0 && close(modules)!=0)valid=false;
+    if(work>=0 && close(work)!=0)valid=false;
+    return valid;
 }
 /* The parent keeps only an already-open original RW-mount capability while
  * both PIDs see a genuinely RO bind at the package-cache path. That FD is
@@ -59,7 +61,8 @@ static int dependency_namespace(struct cliq_worker_packet initial,int passed[CLI
     int root=open("/",O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW),scratch=open("/scratch",O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);struct stat root_identity,scratch_identity;
     valid=valid && root>=0 && scratch>=0 && fstat(root,&root_identity)==0 && fstat(scratch,&scratch_identity)==0 &&
         root_identity.st_dev!=scratch_identity.st_dev && source_tmpfs_within(root,root_budget) && source_tmpfs_within(scratch,scratch_budget);
-    if(root>=0 && close(root)!=0)valid=false;if(scratch>=0 && close(scratch)!=0)valid=false;
+    if(root>=0 && close(root)!=0)valid=false;
+    if(scratch>=0 && close(scratch)!=0)valid=false;
     int runtime=open("/runtime",O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW),image=-1,npm=-1;
     if(valid && runtime>=0)image=openat(runtime,"npm.image",O_RDONLY|O_CLOEXEC|O_NOFOLLOW|O_NONBLOCK);
     struct stat named,held,after;
@@ -68,14 +71,16 @@ static int dependency_namespace(struct cliq_worker_packet initial,int passed[CLI
     if(valid)npm=openat(runtime,"npm",O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);
     valid=valid && npm>=0 && cliq_npm_materialize(image,npm,&shutdown_requested)==CLIQ_NPM_IMAGE_OK &&
         fstat(image,&after)==0 && cliq_npm_stat_same(&held,&after) && fstatat(runtime,"npm.image",&after,AT_SYMLINK_NOFOLLOW)==0 && cliq_npm_stat_same(&held,&after);
-    if(image>=0 && close(image)!=0)valid=false;if(npm>=0 && close(npm)!=0)valid=false;
+    if(image>=0 && close(image)!=0)valid=false;
+    if(npm>=0 && close(npm)!=0)valid=false;
     if(valid)valid=unlinkat(runtime,"npm.image",0)==0 && mkdirat(runtime,"npm-config",0755)==0;
     int configuration=valid?openat(runtime,"npm-config",O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW):-1;
     const char *names[]={"user","global"};for(size_t i=0;valid && i<2;i++){
         int fd=openat(configuration,names[i],O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW,0400);valid=fd>=0 && fchmod(fd,0400)==0;
         if(fd>=0 && close(fd)!=0)valid=false;
     }
-    if(configuration>=0 && close(configuration)!=0)valid=false;if(runtime>=0 && close(runtime)!=0)valid=false;
+    if(configuration>=0 && close(configuration)!=0)valid=false;
+    if(runtime>=0 && close(runtime)!=0)valid=false;
     if(valid)valid=mount("/scratch/tmp","/tmp",NULL,MS_BIND,NULL)==0 && mount("/scratch/home","/home/cliq",NULL,MS_BIND,NULL)==0;
     int cache=valid?open("/scratch/package-cache",O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW):-1;
     struct cliq_dependency_stage stage;memset(&stage,0,sizeof(stage));stage.metadata_fd=stage.root_fd=stage.writer=-1;
@@ -96,8 +101,12 @@ static int dependency_namespace(struct cliq_worker_packet initial,int passed[CLI
         umask(0022);
         char go;ssize_t n;do{n=read(6,&go,1);}while(n<0 && errno==EINTR);if(close(6)!=0 || n!=1 || go!='1')_exit(70);
         char *arguments[4],*environment[11];for(uint32_t i=0;i<3;i++)arguments[i]=config->strings+config->arguments[i];arguments[3]=NULL;
-        for(uint32_t i=0;i<10;i++)environment[i]=config->strings+config->environment[i];environment[10]=NULL;
-        if(chdir("/work")==0)execve(config->executable,arguments,environment);int error=errno;if(!cliq_write_exec_diagnostic(5,error))_exit(70);_exit(70);
+        for(uint32_t i=0;i<10;i++)environment[i]=config->strings+config->environment[i];
+        environment[10]=NULL;
+        if(chdir("/work")==0)execve(config->executable,arguments,environment);
+        int error=errno;
+        if(!cliq_write_exec_diagnostic(5,error))_exit(70);
+        _exit(70);
     }
     close(barrier[0]);close(execution[1]);if(close(passed[1])!=0){cliq_dependency_stage_close(&stage);free(config);return 70;}
     struct cliq_worker_packet ready=initial;ready.command=CLIQ_WORKER_READY;ready.pid=child;ready.namespace_init_pid=1;struct stat namespace;

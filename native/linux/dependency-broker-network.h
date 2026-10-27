@@ -57,7 +57,9 @@ static bool dependency_network_connect(struct dependency_broker *broker) {
         if(!X509_VERIFY_PARAM_set1_ip_asc(parameters,broker->target->server_name))return dependency_fail(broker,"tls_refused");
     }else if(!SSL_set1_host(broker->tls,broker->target->server_name))return dependency_fail(broker,"tls_refused");
     for(;;){if(!dependency_network_live(broker))return dependency_fail(broker,"cancelled_or_expired");int result=SSL_connect(broker->tls);
-        if(result==1)break;if(!dependency_tls_wait(broker,SSL_get_error(broker->tls,result)))return dependency_fail(broker,"tls_refused");}
+        if(result==1)break;
+        if(!dependency_tls_wait(broker,SSL_get_error(broker->tls,result)))return dependency_fail(broker,"tls_refused");
+        }
     return (SSL_version(broker->tls)==TLS1_3_VERSION && SSL_get_verify_result(broker->tls)==X509_V_OK && dependency_pin(broker)) || dependency_fail(broker,"tls_refused");
 }
 static bool dependency_network_write(struct dependency_broker *broker,const unsigned char *bytes,size_t size) {
@@ -70,8 +72,11 @@ static bool dependency_network_write(struct dependency_broker *broker,const unsi
 static ssize_t dependency_network_read(void *context,unsigned char *bytes,size_t size) {
     struct dependency_broker *broker=context;
     for(;;){if(!dependency_network_live(broker)){dependency_fail(broker,"cancelled_or_expired");return -1;}size_t received=0;int result=SSL_read_ex(broker->tls,bytes,size,&received);
-        if(result==1)return received ? (ssize_t)received : -1;int error=SSL_get_error(broker->tls,result);
-        if(error==SSL_ERROR_ZERO_RETURN)return 0;if(!dependency_tls_wait(broker,error))return -1;}
+        if(result==1)return received ? (ssize_t)received : -1;
+        int error=SSL_get_error(broker->tls,result);
+        if(error==SSL_ERROR_ZERO_RETURN)return 0;
+        if(!dependency_tls_wait(broker,error))return -1;
+        }
 }
 static bool dependency_body_sink(void *context,const unsigned char *bytes,size_t size) {
     struct dependency_broker *broker=context;
@@ -81,7 +86,9 @@ static bool dependency_body_sink(void *context,const unsigned char *bytes,size_t
         if(broker->output_fd<0)return dependency_fail(broker,"package_storage_unavailable");}
     for(size_t offset=0;offset<size;){ssize_t count=write(broker->output_fd,bytes+offset,size-offset);
         if(count<0 && errno==EINTR && dependency_network_live(broker))continue;
-        if(count<=0)return dependency_fail(broker,"package_storage_unavailable");offset+=(size_t)count;}
+        if(count<=0)return dependency_fail(broker,"package_storage_unavailable");
+        offset+=(size_t)count;
+        }
     sha256_update(&broker->content_hash,bytes,size);
     return EVP_DigestUpdate(broker->integrity_hash,bytes,size)==1 || dependency_fail(broker,"integrity_refused");
 }

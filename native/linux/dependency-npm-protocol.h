@@ -78,8 +78,10 @@ static inline bool cliq_dependency_config_valid(const struct cliq_dependency_con
     return node && (fixed->allow_scripts ? git && bash : !git && !bash);
 }
 static inline bool cliq_dependency_page_add(uint64_t *used,uint64_t bytes,uint64_t limit) {
-    if(bytes>UINT64_MAX-4095)return false;uint64_t rounded=(bytes+4095)&~UINT64_C(4095);
-    if(*used>limit || rounded>limit-*used)return false;*used+=rounded;return true;
+    if(bytes>UINT64_MAX-4095)return false;
+    uint64_t rounded=(bytes+4095)&~UINT64_C(4095);
+    if(*used>limit || rounded>limit-*used)return false;
+    *used+=rounded;return true;
 }
 static inline bool cliq_dependency_storage(const struct cliq_dependency_config *fixed,const struct cliq_worker_packet *request,uint64_t *root,uint64_t *scratch) {
     if(!cliq_dependency_config_valid(fixed))return false;

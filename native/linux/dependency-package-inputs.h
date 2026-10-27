@@ -9,7 +9,8 @@ static bool dependency_input_reserve_page(struct dependency_broker *broker,const
     uint64_t reserve=broker->inputs_reserved;
     for(uint32_t index=0;index<page->count;index++){
         int size=dependency_input_record(bytes,sizeof(bytes),&page->values[index],broker->config->max_package_bytes,maximum_digest);
-        if(size<1 || (size_t)size>=sizeof(bytes))return false;reserve+=4+(uint32_t)size;
+        if(size<1 || (size_t)size>=sizeof(bytes))return false;
+        reserve+=4+(uint32_t)size;
     }
     if(sizeof(*broker)+sizeof(*broker->config)+broker->descriptors.owned_bytes+reserve>CLIQ_DEPENDENCY_DESCRIPTOR_TOTAL_BYTES)return false;
     broker->inputs_reserved=reserve;return true;
@@ -22,7 +23,10 @@ static bool dependency_input_append(struct dependency_broker *broker,const struc
     const unsigned char *parts[]={prefix,(const unsigned char*)bytes};size_t sizes[]={4,(size_t)length};
     for(size_t part=0;part<2;part++)for(size_t offset=0;offset<sizes[part];){
         ssize_t count=write(broker->inputs_fd,parts[part]+offset,sizes[part]-offset);
-        if(count<0 && errno==EINTR)continue;if(count<=0){broker->inputs_failed=true;return dependency_fail(broker,"package_metadata_storage_unavailable");}offset+=(size_t)count;
+        if(count<0 && errno==EINTR)continue;
+        if(count<=0){broker->inputs_failed=true;
+        return dependency_fail(broker,"package_metadata_storage_unavailable");
+        }offset+=(size_t)count;
     }
     sha256_update(&broker->inputs_hash,prefix,4);sha256_update(&broker->inputs_hash,(const unsigned char*)bytes,(size_t)length);
     broker->inputs_bytes+=4+(uint32_t)length;broker->inputs_count++;return true;
@@ -40,7 +44,9 @@ static bool dependency_inputs_seal(struct dependency_broker *broker) {
     while(offset<broker->inputs_bytes){if(!dependency_inputs_live(broker))return dependency_fail(broker,"cancelled_or_expired");
         size_t wanted=broker->inputs_bytes-offset>sizeof(bytes)?sizeof(bytes):(size_t)(broker->inputs_bytes-offset);ssize_t count;
         do{count=pread(broker->inputs_fd,bytes,wanted,(off_t)offset);}while(count<0 && errno==EINTR && dependency_inputs_live(broker));
-        if(count<=0 || (size_t)count>wanted)return dependency_fail(broker,"package_metadata_refused");sha256_update(&hash,bytes,(size_t)count);offset+=(uint64_t)count;
+        if(count<=0 || (size_t)count>wanted)return dependency_fail(broker,"package_metadata_refused");
+        sha256_update(&hash,bytes,(size_t)count);
+        offset+=(uint64_t)count;
     }
     ssize_t tail;do{tail=pread(broker->inputs_fd,bytes,1,(off_t)offset);}while(tail<0 && errno==EINTR && dependency_inputs_live(broker));
     sha256_final(&hash,actual);

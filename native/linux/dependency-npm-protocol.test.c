@@ -16,7 +16,9 @@ static void valid(struct cliq_dependency_config *fixed) {
     strcpy(config->executable,"/usr/bin/node");strcpy(config->cwd,"/work");config->argument_count=3;config->environment_count=10;
     const char *args[]={"/usr/bin/node","--no-addons",CLIQ_DEPENDENCY_SCRIPT_PATH};
     const char *env[]={"PATH=/usr/bin:/bin","HOME=/home/cliq","TMPDIR=/tmp","LANG=C.UTF-8","LC_ALL=C.UTF-8","TZ=UTC","GIT_OPTIONAL_LOCKS=0","NODE_EXTRA_CA_CERTS=","NPM_CONFIG_USERCONFIG=/runtime/npm-config/user","NPM_CONFIG_GLOBALCONFIG=/runtime/npm-config/global"};
-    for(unsigned i=0;i<3;i++)string(config,args[i],&config->arguments[i]);for(unsigned i=0;i<10;i++)string(config,env[i],&config->environment[i]);file(config,"/usr/bin/node");
+    for(unsigned i=0;i<3;i++)string(config,args[i],&config->arguments[i]);
+    for(unsigned i=0;i<10;i++)string(config,env[i],&config->environment[i]);
+    file(config,"/usr/bin/node");
 }
 int main(void) { struct cliq_worker_packet initial={0},packet={0},changed;
     initial.scope=2;memset(initial.nonce,'a',64);packet.magic=CLIQ_WORKER_MAGIC;packet.version=CLIQ_WORKER_VERSION;

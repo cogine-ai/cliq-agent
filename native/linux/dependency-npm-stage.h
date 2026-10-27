@@ -167,7 +167,8 @@ static inline bool cliq_dependency_stage_chunk(struct cliq_dependency_stage *sta
     }
     if(valid){sha256_update(&stage->hash,bytes,read_at);stage->package_offset+=read_at;
         if(stage->package_offset==stage->current.blob_bytes)valid=cliq_dependency_stage_finish_package(stage,cancelled);}
-    if(!valid)stage->failed=true;return valid;
+    if(!valid)stage->failed=true;
+    return valid;
 }
 static inline bool cliq_dependency_stage_close(struct cliq_dependency_stage *stage) {
     bool joined=true;int writer=stage->writer,metadata=stage->metadata_fd,root=stage->root_fd;
