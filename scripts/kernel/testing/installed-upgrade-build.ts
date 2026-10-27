@@ -36,17 +36,17 @@ export async function buildUpgradeQualificationPackages(input: {
   assert(target.bundle.entries.some(entry => entry.entryId === 'kernel_schema' && entry.version === '8'));
   assert(target.bundle.entries.some(entry => entry.entryId === 'schema_conversion' && entry.version === '7-to-8'));
   const current = fileURLToPath(new URL('../../..', import.meta.url));
-  const bundleNodeOnly = async (entryPoint: string, outfile: string) => {
+  const bundleNodeOnly = async (sourceRoot: string, entryPoint: string, outfile: string) => {
     const result = await build({ entryPoints: [entryPoint], outfile, bundle: true, platform: 'node', format: 'esm',
-      target: 'node22.13', metafile: true, write: false, ...installedClientBuildOptions() });
+      target: 'node22.13', metafile: true, write: false, ...installedClientBuildOptions(sourceRoot) });
     assert.equal(result.outputFiles!.length, 1);
     assert(Object.values(result.metafile!.outputs).flatMap(output => output.imports).every(item => item.external && item.path.startsWith('node:')));
     assert(result.outputFiles![0]!.contents.length <= 16 * 1024 * 1024);
     await writeFile(outfile, result.outputFiles![0]!.contents, { flag: 'wx', mode: 0o444 }); return outfile;
   };
-  const oldInstaller = await bundleNodeOnly(path.join(source.root, 'scripts/kernel/testing/installed-runtime-installer.ts'),
+  const oldInstaller = await bundleNodeOnly(source.root, path.join(source.root, 'scripts/kernel/testing/installed-runtime-installer.ts'),
     path.join(input.oldBuildFixture, 'installed-runtime-installer.mjs'));
-  const clients = await Promise.all([source.root, current].map((root, index) => bundleNodeOnly(
+  const clients = await Promise.all([source.root, current].map((root, index) => bundleNodeOnly(root,
     path.join(root, 'scripts/kernel/testing/installed-control-client-driver.ts'), path.join(input.fixture, `upgrade-client-${index}.mjs`))));
   // The retained normal seal reader is compiled with its actual original
   // product's schema recipe. It remains data-only and creates no Store owner.

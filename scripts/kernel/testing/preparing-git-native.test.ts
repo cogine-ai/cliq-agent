@@ -4,13 +4,42 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import { inflateSync } from 'node:zlib';
-import { readFile } from 'node:fs/promises';
+import { open, readFile, type FileHandle } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import ts from 'typescript';
 import { canonicalSha256 } from '../../../src/kernel/canonical.js';
 import { workerCampaignSandboxProfile } from '../../../src/sandbox/testing/worker-campaign-fixture.js';
 import { decodeSourceGitInspectionOutput } from '../../../src/workspace/source-git-output.js';
 import { normalizeGitIndex } from '../../../src/workspace/git-index.js';
-import { preparingGitNativeInputData } from './preparing-git-native.js';
+import { missingOriginalProcStat, preparingGitNativeInputData } from './preparing-git-native.js';
+
+test('a real original proc-stat descriptor reports ESRCH after its owned task has exited',
+  { skip: process.platform !== 'linux', timeout: 5000 }, async t => {
+    const child = spawn(process.execPath, ['-e', "process.stdout.write('ready\\n'); process.stdin.once('end',()=>process.exit(0)); process.stdin.resume()"],
+      { stdio: ['pipe', 'pipe', 'pipe'] });
+    const exited = once(child, 'exit'); let handle: FileHandle | undefined;
+    t.after(async () => {
+      await handle?.close();
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+      await exited; child.stdout.destroy(); child.stderr.destroy(); child.stdin.destroy();
+    });
+    await once(child.stdout, 'data'); assert(child.pid);
+    handle = await open(`/proc/${child.pid}/stat`, 'r');
+    const before = await handle.read(Buffer.alloc(256), 0, 256, 0); assert(before.bytesRead > 0);
+    child.stdin.end(); assert.deepEqual(await exited, [0, null]);
+    await assert.rejects(handle.read(Buffer.alloc(256), 0, 256, 0), error => {
+      assert.equal((error as NodeJS.ErrnoException).code, 'ESRCH'); assert(missingOriginalProcStat(error)); return true;
+    });
+  });
+
+test('proc-stat absence classification never accepts unreadability or a caller success record', () => {
+  for (const code of ['ENOENT', 'ESRCH'])
+    assert(missingOriginalProcStat(Object.assign(new Error('fixed proc-stat absence'), { code })));
+  for (const code of ['EACCES', 'EPERM', 'EIO', 'EBADF'])
+    assert.equal(missingOriginalProcStat(Object.assign(new Error('fixed proc-stat refusal'), { code })), false);
+  assert.equal(missingOriginalProcStat({ code: 'ESRCH' }), false);
+});
 
 test('the original driver retains real HELLO birth before preparation and still requires the later native refusal', async () => {
   // Source wiring only. Actual READY, original exit and successor retirement

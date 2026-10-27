@@ -211,7 +211,7 @@ test('the actual experimental entry rejects invalid provisioning before creating
 // unchanged historical CT projection. This is a validation copy only.
 function withoutLockedNodeQualification(workflow: string): string {
   const native = '      - name: Check the actual native dependency family before installed qualification\n' +
-    '        run: node --test --test-concurrency=1 --import tsx scripts/kernel/testing/dependency-native-family.test.ts scripts/kernel/testing/dependency-broker-lifecycle.test.ts scripts/kernel/testing/dependency-npm-stage.test.ts\n';
+    '        run: node --test --test-concurrency=1 --import tsx scripts/kernel/testing/dependency-native-family.test.ts scripts/kernel/testing/dependency-broker-lifecycle.test.ts scripts/kernel/testing/dependency-npm-stage.test.ts scripts/kernel/testing/preparing-git-native.test.ts scripts/kernel/testing/installed-genesis.test.ts\n';
   const start = workflow.indexOf('      - name: Acquire the exact official npm qualification source\n');
   const end = workflow.indexOf('      - name: Observe the fixed original installed status deadlock\n', start);
   assert(start >= 0 && end > start, 'the exact source step must precede the original status regression');
@@ -326,8 +326,27 @@ test('carrier experiments are isolated beside the original image qualifier and r
   assertCarrierExperimentWorkflow(await readFile(new URL('../../../.github/workflows/kernel-foundation.yml', import.meta.url), 'utf8'));
 });
 
+test('the exact native preflight preserves every original and added case and rejects extra or residual commands', async () => {
+  const workflow = await readFile(new URL('../../../.github/workflows/kernel-foundation.yml', import.meta.url), 'utf8');
+  assertCarrierExperimentWorkflow(workflow);
+  const cases = ['dependency-native-family', 'dependency-broker-lifecycle', 'dependency-npm-stage', 'preparing-git-native', 'installed-genesis']
+    .map(name => ' scripts/kernel/testing/' + name + '.test.ts');
+  const mutations = cases.flatMap(filename => [workflow.replace(filename, ''), workflow.replace(filename, filename.repeat(2))]);
+  const lastCase = cases.at(-1)!;
+  mutations.push(
+    workflow.replace(lastCase + '\n', lastCase + ' scripts/kernel/testing/unexpected-native.test.ts\n'),
+    workflow.replace(lastCase + '\n', lastCase + '\n      - run: node --test --import tsx scripts/kernel/testing/unexpected-native.test.ts\n'),
+    workflow + '      - run: node --test --import tsx scripts/kernel/testing/unexpected-native.test.ts\n'
+  );
+  for (const mutated of mutations) {
+    assert.notEqual(mutated, workflow, 'each rejection must exercise a real removal, duplicate, extra case or residual command');
+    assert.throws(() => assertCarrierExperimentWorkflow(mutated), { name: 'AssertionError' });
+  }
+});
+
 test('the additive parent-domain regression cannot hide workflow removals, disabled tests or changed runner and time budgets', async () => {
   const workflow = await readFile(new URL('../../../.github/workflows/kernel-foundation.yml', import.meta.url), 'utf8');
+  assertCarrierExperimentWorkflow(workflow);
   const parentEvidenceTest = '          scripts/kernel/testing/installed-verifier-parent-evidence.test.ts\n';
   const sessionRegression = ' scripts/kernel/testing/installed-session-continuity.test.ts';
   const processRegression = '          node --test scripts/kernel/testing/systemd-process-fact.test.mjs\n';

@@ -54,8 +54,10 @@ function sameSource(connection: SqliteConnection, table: string, columns: readon
   const differences = columns.map(column => column.kind === 'TEXT'
     ? `CAST(${column.expression} AS BLOB) IS NOT CAST(p.${column.name} AS BLOB)`
     : `(${column.numericType} IS NOT 'integer' AND ${column.numericType} IS NOT 'real') OR ${column.expression} IS NOT p.${column.name}`).join(' OR ');
-  // Each side has a unique primary id. Cardinality plus a full null-safe
-  // comparison of every captured public value proves both directions.
+  // The source primary key and validated strict captured (createdAt,id)
+  // order exclude duplicate identical tuples. A repeated id with different
+  // public values fails this comparison. Exact cardinality then closes both
+  // directions without a second TEMP unique index.
   return connection.prepare(`SELECT EXISTS(SELECT 1 FROM temp.cliq_list_source p LEFT JOIN ${table} s ON ${id}=p.id AND ${where} WHERE ${id} IS NULL OR ${differences} LIMIT 1) AS changed`)
     .get<{ changed: bigint }>(...values)?.changed === 0n;
 }
@@ -85,7 +87,7 @@ export function createExtraListSource(driver: SqliteDriver, artifacts: ArtifactC
     return hash.update(']').digest('hex');
   }
   return {
-    schema: columns.map(column => `${column.name} ${column.kind === 'INTEGER' ? 'ANY' : 'TEXT'}${column.name === 'id' ? ' UNIQUE' : ''}`).join(','),
+    schema: columns.map(column => `${column.name} ${column.kind === 'INTEGER' ? 'ANY' : 'TEXT'}`).join(','),
     readProjection: columns.map(column => column.kind === 'TEXT' ? 'CAST(' + column.name + ' AS BLOB) AS ' + column.name : column.name).join(','),
     columns: columns.map(column => column.name), reset() { operation = undefined; },
     async prepare() {

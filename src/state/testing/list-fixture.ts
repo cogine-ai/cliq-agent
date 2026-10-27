@@ -31,7 +31,7 @@ export async function stopActualListChild(stateRoot: string, target: 'capture' |
     if(method!=='session.list')await seedControlListStopFixture(store,identity,originalRoot,workspace,method);
     const driver=Reflect.get(store,'driver'),prototype=Object.getPrototypeOf(driver),transaction=prototype.transaction;
     let armed=false,writes=0,sent=false,enteredNs,returnedNs;
-    const mark=phase=>{if(phase===target&&!sent){sent=true;enteredNs=process.hrtime.bigint();process.send({kind:'cut',phase,nodeVersion:process.version});return true;}return false;};
+    const mark=phase=>{if(phase===target&&!sent){sent=true;enteredNs=process.hrtime.bigint();process.send({kind:'cut',phase,nodeVersion:process.version,enteredNs:String(enteredNs)});return true;}return false;};
     prototype.transaction=function(...args){
       const number=armed?++writes:0,capture=number===2,final=number===3;
       if(final&&target==='prepare'&&returnedNs===undefined)returnedNs=process.hrtime.bigint();
@@ -40,7 +40,7 @@ export async function stopActualListChild(stateRoot: string, target: 'capture' |
       finally{if(measured){returnedNs=process.hrtime.bigint();process.send({kind:'scope_returned',phase:target,enteredNs:String(enteredNs),returnedNs:String(returnedNs)});}}
     };
     let resolveStop,rejectStop;const stopped=new Promise((resolve,reject)=>{resolveStop=resolve;rejectStop=reject;});
-    process.once('SIGTERM',()=>{void store.close().then(resolveStop,rejectStop);});
+    process.once('SIGTERM',()=>{process.send({kind:'stopping',enteredNs:String(process.hrtime.bigint())});void store.close().then(resolveStop,rejectStop);});
     armed=true;
     const request={protocolVersion:1,method,limit:100};
     const pending=method==='session.list'?store.sessionContinuity(request,identity):store.listControl(request,identity);
@@ -56,20 +56,21 @@ export async function stopActualListChild(stateRoot: string, target: 'capture' |
   const workspace = method === 'session.list' ? undefined : await makePrivateDir('.cliq-list-stop-ws-');
   const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', source, stateRoot, target, method,
     ...(freshRoot === undefined ? [] : [freshRoot, workspace!])], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
-  let stderr = '', received: any, closed: any, scopeReturned: any;
+  let stderr = '', received: any, closed: any, scopeReturned: any, stopping: any;
   let signalStarted: number | undefined, deadlineExceeded = false, processAndPipesJoined = false;
+  let signalSentNs: bigint | undefined;
   child.stderr!.on('data', bytes => { stderr += bytes.toString('utf8'); assert(Buffer.byteLength(stderr) <= 65536); });
   const exited = once(child, 'close');
   let enter!: (value: any) => void;
   const entered = new Promise<any>(resolve => { enter = resolve; });
-  child.on('message', message => { if ((message as any)?.kind === 'cut') { received = message; enter(message); } else if ((message as any)?.kind === 'closed') closed = message; else if ((message as any)?.kind === 'scope_returned') scopeReturned = message; });
+  child.on('message', message => { if ((message as any)?.kind === 'cut') { received = message; enter(message); } else if ((message as any)?.kind === 'closed') closed = message; else if ((message as any)?.kind === 'scope_returned') scopeReturned = message; else if ((message as any)?.kind === 'stopping') stopping = message; });
   let setupTimer: ReturnType<typeof setTimeout> | undefined, stopTimer: ReturnType<typeof setTimeout> | undefined;
   try {
     await Promise.race([entered, exited.then(() => { throw new Error('list child exited before its actual scope: ' + stderr); }), new Promise<never>((_, reject) => {
       setupTimer = setTimeout(() => reject(new Error('actual list child did not enter its bounded fixture scope')), 60000);
     })]);
     clearTimeout(setupTimer);
-    const start = performance.now(), sentNs = process.hrtime.bigint(); signalStarted = start; assert(child.kill('SIGTERM'));
+    const start = performance.now(), sentNs = process.hrtime.bigint(); signalStarted = start; signalSentNs = sentNs; assert(child.kill('SIGTERM'));
     const [code, signal] = await Promise.race([exited, new Promise<never>((_, reject) => {
       stopTimer = setTimeout(() => { deadlineExceeded = true; reject(new Error('actual large list SIGTERM exceeded the unchanged 2000ms stop budget')); }, 2000);
     })]);
@@ -108,6 +109,10 @@ export async function stopActualListChild(stateRoot: string, target: 'capture' |
       ...(method === 'session.list' ? {} : { method }), phase: target,
       nodeVersion: received?.nodeVersion ?? process.version, deadlineMs: 2000, deadlineExceeded,
       ...(signalStarted === undefined ? {} : { signalToProcessAndPipesJoinMs: performance.now() - signalStarted }),
+      ...(signalSentNs === undefined ? {} : { signalSentNs: signalSentNs.toString() }),
+      ...(received?.enteredNs === undefined ? {} : { scopeEnteredNs: received.enteredNs }),
+      ...(scopeReturned?.returnedNs === undefined ? {} : { scopeReturnedNs: scopeReturned.returnedNs }),
+      ...(stopping?.enteredNs === undefined ? {} : { signalHandlerEnteredNs: stopping.enteredNs }),
       originalProcessAndPipesJoined: processAndPipesJoined, originalCloseObserved: closed?.kind === 'closed',
       scopeReturnedObserved: scopeReturned?.kind === 'scope_returned', physicalInstalledSupervisorQualified: false }));
     if (freshRoot !== undefined) await rm(freshRoot, { recursive: true, force: true });

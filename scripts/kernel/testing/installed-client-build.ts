@@ -1,7 +1,7 @@
 // Fixed production-client bundling contract, not a runtime trust root.
 import assert from 'node:assert/strict';
 import { constants, openSync, closeSync, fstatSync, lstatSync, readSync, realpathSync } from 'node:fs';
-import { isBuiltin } from 'node:module';
+import { createRequire, isBuiltin } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build, type Plugin, type BuildOptions } from 'esbuild';
@@ -38,8 +38,13 @@ function readFixed(filename: string, maximum: number, expectedUid?: bigint): { b
 /** All normal Ink code stays bundled. DevTools' optional ambient package and
  * local network hook are absent from this fixed client image. Literal Node
  * builtins keep their original semantics with the canonical node: namespace. */
-export function installedClientBuildOptions(): Pick<BuildOptions, 'plugins' | 'banner'> {
-  const directory = path.dirname(path.dirname(fileURLToPath(import.meta.resolve('ink'))));
+export function installedClientBuildOptions(sourceRoot = fileURLToPath(new URL('../../..', import.meta.url))): Pick<BuildOptions, 'plugins' | 'banner'> {
+  assert(path.isAbsolute(sourceRoot));
+  const root = path.resolve(sourceRoot), directory = path.join(root, 'node_modules', 'ink');
+  assert.equal(realpathSync(root), root);
+  assert.equal(realpathSync(directory), directory, 'fixed Ink dependency must belong to the selected source root');
+  const resolved = createRequire(path.join(root, 'package.json')).resolve('ink');
+  assert.equal(realpathSync(resolved), path.join(directory, 'build', 'index.js'), 'fixed Ink entry must belong to the selected source root');
   const heldPackage = readFixed(path.join(directory, 'package.json'), 65536), packageBytes = heldPackage.bytes;
   assert.equal(sha256Bytes(packageBytes), '875318166ca415fb9e04d724df326e12a0ac4b1dafc6540bb04e0f30fd8778cc');
   assert.equal((JSON.parse(packageBytes.toString('utf8')) as { version: string }).version, '7.0.2');

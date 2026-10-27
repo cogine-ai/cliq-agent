@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import test from 'node:test';
+import test, { type TestContext } from 'node:test';
 import { canonicalJsonBytes } from '../kernel/canonical.js';
 import { decodeListRunSnapshot } from '../kernel/control-list.js';
 import { decodeWireGrantSummary } from '../kernel/control-wire-data.js';
@@ -30,6 +30,79 @@ function completeCut(driver: SqliteDriver, cursor: string, expectedRows: number,
   const row = driver.prepare('SELECT count(*) AS n,sum(length(CAST(payload_json AS BLOB))) AS bytes FROM list_read_cut_entries WHERE cut_id=?')
     .get<{ n: bigint; bytes: bigint }>(cutId)!;
   assert.equal(row.n, BigInt(expectedRows)); assert.equal(row.bytes, BigInt(expectedBytes));
+}
+async function captureIntegrity(t: TestContext, fixture: Awaited<ReturnType<typeof listFixture>>,
+  method: 'run.list' | 'authorization.list', expectedRows: number, expectedBytes: number) {
+  const original = await fixture.store.listControl(request(method), fixture.identity);
+  const values = original.result.method === 'run.list' ? original.result.runs : original.result.grants;
+  const ownerDriver = Reflect.get(fixture.store, 'driver') as SqliteDriver;
+  const prototype = Object.getPrototypeOf(ownerDriver), transaction = prototype.transaction;
+  for (const mutation of ['reorder', 'same_tuple', 'different_tuple'] as const) {
+    const before = cacheCounts(fixture.driver);
+    let writes = 0, changed = false, rejectedCandidate = false;
+    t.mock.method(prototype, 'transaction', function (this: unknown, ...args: unknown[]) {
+      const result = Reflect.apply(transaction, this, args);
+      if (this === ownerDriver) {
+        if (++writes === 2) {
+          if (mutation === 'reorder') {
+            ownerDriver.exec(`UPDATE temp.cliq_list_source SET ordinal=-ordinal WHERE ordinal IN (128,129);
+              UPDATE temp.cliq_list_source SET ordinal=257+ordinal WHERE ordinal IN (-128,-129)`);
+          } else {
+            // Copy the whole captured display tuple, including the claimed id
+            // for grants. The persistent source and its primary key never change.
+            const columns = ownerDriver.prepare('PRAGMA temp.table_info(cliq_list_source)').all<{ name: string }>()
+              .map(row => row.name).filter(name => name !== 'ordinal');
+            assert(columns.length > 1 && columns.every(name => /^[a-z_]+$/u.test(name)));
+            const names = columns.join(','), last = expectedRows;
+            const first = ownerDriver.prepare('SELECT created_at FROM temp.cliq_list_source WHERE ordinal=1').get<{ created_at: string }>()!;
+            ownerDriver.exec('UPDATE temp.cliq_list_source SET (' + names + ')=(SELECT ' + names +
+              ' FROM temp.cliq_list_source WHERE ordinal=' + (mutation === 'same_tuple' ? 1 : last) +
+              ') WHERE ordinal=' + (mutation === 'same_tuple' ? 2 : 1));
+            if (mutation === 'different_tuple') {
+              ownerDriver.prepare('UPDATE temp.cliq_list_source SET created_at=? WHERE ordinal=1')
+                .run(new Date(Date.parse(first.created_at) - 1).toISOString());
+              if (method === 'authorization.list') {
+                // This fixture uses the full legal 24h TTL. Move expiry with
+                // creation so the changed tuple remains a valid wire summary.
+                const copied = ownerDriver.prepare('SELECT expires_at FROM temp.cliq_list_source WHERE ordinal=1')
+                  .get<{ expires_at: string }>()!;
+                ownerDriver.prepare('UPDATE temp.cliq_list_source SET expires_at=? WHERE ordinal=1')
+                  .run(new Date(Date.parse(copied.expires_at) - 1).toISOString());
+              }
+              const pair = ownerDriver.prepare('SELECT id,created_at FROM temp.cliq_list_source WHERE ordinal IN (1,?) ORDER BY ordinal')
+                .all<{ id: string; created_at: string }>(last);
+              assert.equal(pair[0]!.id, pair[1]!.id); assert(pair[0]!.created_at < pair[1]!.created_at);
+              const invalidOrder = ownerDriver.prepare(`SELECT EXISTS(SELECT 1 FROM (
+                SELECT created_at,id,lag(created_at) OVER (ORDER BY ordinal) AS previous_time,
+                  lag(id) OVER (ORDER BY ordinal) AS previous_id FROM temp.cliq_list_source)
+                WHERE created_at<previous_time OR (created_at=previous_time AND CAST(id AS BLOB)<=CAST(previous_id AS BLOB))) AS invalid`)
+                .get<{ invalid: bigint }>()!;
+              assert.equal(invalidOrder.invalid, 0n, 'changed id tuple still has strict composite order');
+            }
+          }
+          changed = true;
+        } else if (writes === 3 && mutation === 'different_tuple') {
+          assert.deepEqual(cacheCounts(fixture.driver), before, 'the non-current candidate must publish no cache rows');
+          rejectedCandidate = true;
+        }
+      }
+      return result;
+    });
+    try {
+      if (mutation === 'different_tuple') {
+        const response = await fixture.store.listControl(request(method), fixture.identity);
+        assert(rejectedCandidate);
+        assert.deepEqual(response.result.method === 'run.list' ? response.result.runs : response.result.grants, values);
+        assert(response.result.nextCursor);
+        completeCut(fixture.driver, response.result.nextCursor, expectedRows, expectedBytes);
+        assert.deepEqual(cacheCounts(fixture.driver), { cuts: before.cuts + 1n, entries: before.entries + BigInt(expectedRows) });
+      } else {
+        await assert.rejects(fixture.store.listControl(request(method), fixture.identity), { code: 'RECOVERY_REQUIRED' });
+        assert.deepEqual(cacheCounts(fixture.driver), before);
+      }
+      assert(changed);
+    } finally { t.mock.restoreAll(); }
+  }
 }
 // Canonical text permits non-NUL control characters. Count their actual JCS
 // escape bytes rather than manufacturing an oversized or invalid source field.
@@ -90,13 +163,16 @@ test('Run list applies row-count refusal before CAS reads, exact byte capacity a
     decodeListRunSnapshot(sample);
     const minimalBytes = canonicalJsonBytes({ method: 'run.list', value: sample }).length;
     assert(minimalBytes * MAX_ROWS > MAX_BYTES, 'the legal minimal Run display corpus exceeds the byte cap before 100000 rows');
-    fixture.driver.transaction(connection => connection.prepare(`WITH RECURSIVE counter(n) AS (VALUES(2) UNION ALL SELECT n+1 FROM counter WHERE n<100001)
+    const addDisplayRuns = (from: number, through: number) => fixture.driver.transaction(connection => connection.prepare(`WITH RECURSIVE counter(n) AS (VALUES(?) UNION ALL SELECT n+1 FROM counter WHERE n<?)
       INSERT INTO runs(id,session_id,spec_ref,status,next_step,revision,lease_epoch,latest_checkpoint_id,budget_reserved_json,
       budget_consumed_json,repair_count,result_ref,terminal_reason,cancel_requested,created_at,deadline_at,updated_at,principal_id,
       admission_method,admission_key,admission_intent_digest,admitted_request_digest)
       SELECT printf('display-%06d',n),?,?, 'completed_unverified',NULL,1,0,?,?,?,0,?,'no_required_verifier',0,?,?,?,?,
       'display_fixture',printf('display-%06d',n),?,? FROM counter`)
-      .run(session.id, spec.ref, checkpoint, zero, zero, absent, at, at, at, fixture.identity.principalId, absent, absent));
+      .run(from, through, session.id, spec.ref, checkpoint, zero, zero, absent, at, at, at, fixture.identity.principalId, absent, absent));
+    addDisplayRuns(2, 129);
+    await captureIntegrity(t, fixture, 'run.list', 129, minimalBytes * 129);
+    addDisplayRuns(130, MAX_ROWS + 1);
     const beforeCount = cacheCounts(fixture.driver);
     let specReads = 0;
     const prototype = Object.getPrototypeOf(fixture.store.artifacts), read = prototype.readCanonical;
@@ -155,17 +231,20 @@ test('authorization list preserves genuine bounded summary rows at 100000/64 MiB
     const first = await fixture.store.listControl(request('authorization.list'), fixture.identity);
     assert(first.result.method === 'authorization.list' && first.result.grants.length === 1);
     const sample = first.result.grants[0]!; decodeWireGrantSummary(sample);
-    fixture.driver.transaction(connection => connection.prepare(`WITH RECURSIVE counter(n) AS (VALUES(2) UNION ALL SELECT n+1 FROM counter WHERE n<100001)
+    const minimalBytes = canonicalJsonBytes({ method: 'authorization.list', value: sample }).length;
+    const addDisplayGrants = (from: number, through: number) => fixture.driver.transaction(connection => connection.prepare(`WITH RECURSIVE counter(n) AS (VALUES(?) UNION ALL SELECT n+1 FROM counter WHERE n<?)
       INSERT INTO authorization_grants(grant_id,owner_principal_id,state,row_json)
       SELECT printf('display-%06d',n),?,'consumed',json_set(?,'$.grantId',printf('display-%06d',n)) FROM counter`)
-      .run(fixture.identity.principalId, canonicalJsonBytes(source).toString('utf8')));
+      .run(from, through, fixture.identity.principalId, canonicalJsonBytes(source).toString('utf8')));
+    addDisplayGrants(2, 129);
+    await captureIntegrity(t, fixture, 'authorization.list', 129, minimalBytes * 129);
+    addDisplayGrants(130, MAX_ROWS + 1);
     const beforeCount = cacheCounts(fixture.driver);
     await assert.rejects(fixture.store.listControl(request('authorization.list'), fixture.identity), error => error instanceof ListCutCapacityError);
     assert.deepEqual(cacheCounts(fixture.driver), beforeCount);
     fixture.driver.transaction(connection => connection.prepare('DELETE FROM authorization_grants WHERE grant_id=?').run(displayId(MAX_ROWS + 1)));
     const atCount = await fixture.store.listControl(request('authorization.list'), fixture.identity);
     assert(atCount.result.method === 'authorization.list' && atCount.result.nextCursor);
-    const minimalBytes = canonicalJsonBytes({ method: 'authorization.list', value: sample }).length;
     completeCut(fixture.driver, atCount.result.nextCursor, MAX_ROWS, minimalBytes * MAX_ROWS);
 
     const perRow = Math.floor(MAX_BYTES / MAX_ROWS), extra = MAX_BYTES % MAX_ROWS;

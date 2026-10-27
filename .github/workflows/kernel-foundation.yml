@@ -1043,7 +1043,7 @@ jobs:
       - name: Install actual guest, transport and Secret Service prerequisites
         run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap libcap-dev libselinux1-dev meson ninja-build e2fsprogs libext2fs-dev pkg-config
       - name: Check the actual native dependency family before installed qualification
-        run: node --test --test-concurrency=1 --import tsx scripts/kernel/testing/dependency-native-family.test.ts scripts/kernel/testing/dependency-broker-lifecycle.test.ts scripts/kernel/testing/dependency-npm-stage.test.ts
+        run: node --test --test-concurrency=1 --import tsx scripts/kernel/testing/dependency-native-family.test.ts scripts/kernel/testing/dependency-broker-lifecycle.test.ts scripts/kernel/testing/dependency-npm-stage.test.ts scripts/kernel/testing/preparing-git-native.test.ts scripts/kernel/testing/installed-genesis.test.ts
       - name: Acquire the exact official npm qualification source
         id: npm_source
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}

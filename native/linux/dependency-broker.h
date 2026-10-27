@@ -315,7 +315,17 @@ static bool dependency_queue(struct dependency_broker *broker,enum dependency_st
     return true;
 }
 static void dependency_timer_closed(uv_handle_t *handle) {
-    struct dependency_broker *broker=handle->data;broker->timer_closed=true;dependency_maybe_finish(broker);
+    struct dependency_broker *broker=handle->data;
+    napi_env env=broker->env;
+    napi_handle_scope scope=NULL;
+    /* libuv callbacks have no implicit Node-API handle scope. Save env before
+     * finishing: the last real close may release the native allocation. */
+    if(napi_open_handle_scope(env,&scope)!=napi_ok)
+        napi_fatal_error("cliq-dependency-broker",NAPI_AUTO_LENGTH,"dependency close scope unavailable",NAPI_AUTO_LENGTH);
+    broker->timer_closed=true;
+    dependency_maybe_finish(broker);
+    if(scope && napi_close_handle_scope(env,scope)!=napi_ok)
+        napi_fatal_error("cliq-dependency-broker",NAPI_AUTO_LENGTH,"dependency close scope did not retire",NAPI_AUTO_LENGTH);
 }
 static napi_value dependency_closed_value(struct dependency_broker *broker) {
     napi_value value;napi_create_object(broker->env,&value);set_string(broker->env,value,"kind","dependency_transport_closed");
@@ -375,16 +385,23 @@ static void dependency_maybe_finish(struct dependency_broker *broker) {
 }
 static void dependency_timer(uv_timer_t *timer) {
     struct dependency_broker *broker=timer->data;struct timespec now;
-    if(clock_gettime(CLOCK_MONOTONIC,&now)){dependency_unsafe(broker);dependency_begin_close(broker);return;}
+    napi_env env=broker->env;
+    napi_handle_scope scope=NULL;
+    if(napi_open_handle_scope(env,&scope)!=napi_ok)
+        napi_fatal_error("cliq-dependency-broker",NAPI_AUTO_LENGTH,"dependency timer scope unavailable",NAPI_AUTO_LENGTH);
+    if(clock_gettime(CLOCK_MONOTONIC,&now)){dependency_unsafe(broker);dependency_begin_close(broker);goto finished;}
     if(atomic_load(&broker->owner.closing)){
         if((now.tv_sec>broker->close_deadline.tv_sec || (now.tv_sec==broker->close_deadline.tv_sec && now.tv_nsec>=broker->close_deadline.tv_nsec)) && !broker->retired){
             dependency_unsafe(broker);dependency_fail(broker,"resource_retirement");
             if(broker->close_deferred && !broker->env_closing){napi_reject_deferred(broker->env,broker->close_deferred,dependency_error(broker));broker->close_deferred=NULL;}}
-        dependency_maybe_finish(broker);return;
+        dependency_maybe_finish(broker);goto finished;
     }
-    if(now.tv_sec>broker->outer_deadline.tv_sec || (now.tv_sec==broker->outer_deadline.tv_sec && now.tv_nsec>=broker->outer_deadline.tv_nsec)){dependency_begin_close(broker);return;}
+    if(now.tv_sec>broker->outer_deadline.tv_sec || (now.tv_sec==broker->outer_deadline.tv_sec && now.tv_nsec>=broker->outer_deadline.tv_nsec)){dependency_begin_close(broker);goto finished;}
     if(broker->working && (now.tv_sec>broker->request_deadline.tv_sec || (now.tv_sec==broker->request_deadline.tv_sec && now.tv_nsec>=broker->request_deadline.tv_nsec))){
         atomic_store(&broker->request_expired,true);if(broker->cancel)g_cancellable_cancel(broker->cancel);}
+finished:
+    if(scope && napi_close_handle_scope(env,scope)!=napi_ok)
+        napi_fatal_error("cliq-dependency-broker",NAPI_AUTO_LENGTH,"dependency timer scope did not retire",NAPI_AUTO_LENGTH);
 }
 static void dependency_begin_close(struct dependency_broker *broker) {
     if(atomic_exchange(&broker->owner.closing,true)){dependency_maybe_finish(broker);return;}
@@ -590,9 +607,20 @@ static napi_value dependency_observe_failure(napi_env env,napi_callback_info inf
     napi_object_freeze(env,value);return value;
 }
 static void dependency_cleanup(napi_async_cleanup_hook_handle handle,void *data) {
-    (void)handle;struct dependency_broker *broker=data;broker->env_closing=true;
+    (void)handle;struct dependency_broker *broker=data;
+    napi_env env=broker->env;
+    napi_handle_scope scope=NULL;
+    /* Closing suppresses public replies, not the temporary JS values needed
+     * to queue real native retirement. The async hook owns an env reference;
+     * Node releases that reference asynchronously after hook removal, so this
+     * callback closes its handle scope before that final env release. */
+    if(napi_open_handle_scope(env,&scope)!=napi_ok)
+        napi_fatal_error("cliq-dependency-broker",NAPI_AUTO_LENGTH,"dependency cleanup scope unavailable",NAPI_AUTO_LENGTH);
+    broker->env_closing=true;
     if(broker->settlement_locked){if(pthread_mutex_unlock(&broker->mutex))dependency_unsafe(broker);else broker->settlement_locked=false;}
     broker->settlement_borrowed=false;atomic_store(&broker->owner.fence_retained,false);dependency_begin_close(broker);
+    if(napi_close_handle_scope(env,scope)!=napi_ok)
+        napi_fatal_error("cliq-dependency-broker",NAPI_AUTO_LENGTH,"dependency cleanup scope did not retire",NAPI_AUTO_LENGTH);
 }
 static napi_value dependency_prepare(napi_env env,napi_callback_info info) {
     struct timespec started;size_t argc=3;napi_value args[3];const unsigned char *configuration,*trust;size_t configuration_size,trust_size;

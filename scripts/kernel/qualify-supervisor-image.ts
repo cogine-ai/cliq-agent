@@ -8,9 +8,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { verifiedSqliteExtensionIncludes } from './sqlite-extension-headers.mjs';
+import { sha256Bytes } from '../../src/kernel/identity.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../../src/kernel/canonical.js';
 import { KERNEL_STATE_SCHEMA_VERSION } from '../../src/config.js';
 import { policyProfile, type RuntimeBundleManifest } from '../../src/policy/runtime-authority.js';
+import { signedKernelSchemaProfile } from '../../src/state/signed-schema.js';
 import { STATE_OWNER_NATIVE_ENTRY_ID, STATE_OWNER_NATIVE_RELATIVE_PATH } from '../../src/state/native-owner.js';
 import { buildSupervisorSeaImage, prepareInstalledSupervisorSeaCarrier,
   SUPERVISOR_SEA_CARRIER_CHECKSUMS, SUPERVISOR_SEA_NODE_VERSION } from './testing/supervisor-sea-builder.js';
@@ -83,6 +85,7 @@ try {
         digest: createHash('sha256').update(bytes).digest('hex'), byteCount: bytes.length };
     };
     const profile = policyProfile();
+    const schemaBytes = canonicalJsonBytes(signedKernelSchemaProfile());
     const profileRef = canonicalSha256(profile);
     const bundle: RuntimeBundleManifest = {
       schemaVersion: 1, bundleVersion: 'self-image-component-test-only',
@@ -93,6 +96,8 @@ try {
           relativePath: path.basename(executable), ...await bytesIdentity(executable) },
         { entryId: STATE_OWNER_NATIVE_ENTRY_ID, role: 'platform_helper', executable: true, version: '1',
           relativePath: STATE_OWNER_NATIVE_RELATIVE_PATH, ...await bytesIdentity(helper) },
+        { entryId: 'kernel_schema', role: 'schema', version: '8', executable: false,
+          relativePath: 'schema/kernel-v8.json', digest: sha256Bytes(schemaBytes), byteCount: schemaBytes.byteLength },
         unused('worker', 'unused-worker', true), unused('trust_store', 'default_https_trust_store', false),
         unused('sandbox_root_profile', 'unused-root-profile', false),
         { entryId: 'component-policy', role: 'policy_engine', executable: false, version: '1',

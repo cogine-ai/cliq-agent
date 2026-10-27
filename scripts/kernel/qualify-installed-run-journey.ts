@@ -3111,7 +3111,9 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
           producingItemId: producer.itemId, modelOpId: final.opId, attempt: final.attempt, limitKind,
           observed: limitKind === 'changed_paths' ? 1 : Buffer.byteLength(privateAfter), limit };
         assert.equal(canonicalSha256(stop), canonicalSha256({ schemaVersion: 1, runId: run.id, createdAt: stop.createdAt,
-          origin: 'runtime', targetStatus: 'failed', reason: 'runtime_failed', runtimeSubtype: 'result_source_limit_exceeded', ...cause }));
+          origin: 'runtime', targetStatus: 'failed', reason: 'runtime_failed', runtimeSubtype: 'result_source_limit_exceeded',
+          registeredCheckpointId: sourceCheckpoint.id, registeredRunRevision: sourceCheckpoint.basedOnRunRevision + 1,
+          registeredJournalSeq: final.seq, ...cause }));
         const sealed = cut.checkpoints.find((cp: any) => cp.id === identityHash('cliq-final-candidate-checkpoint-v1', run.id, producer.itemId));
         const terminal = cut.checkpoints.find((cp: any) => cp.id === run.latestCheckpointId);
         assert(sealed && terminal); assert(sealed.createdAt >= stop.createdAt);
@@ -4295,7 +4297,11 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
     assert.deepEqual(deadlineCut.snapshot.run.budgetConsumed, zeroBudget);
     assert.deepEqual(deadlineCut.snapshot.run.budgetReserved, zeroBudget);
     const deadlineIntent = parseJsonStrict((await readCas(deadlineCut.snapshot.run.stopIntentRef)).toString('utf8')) as Record<string, any>;
-    assert.deepEqual(Object.keys(deadlineIntent).sort(), ['schemaVersion', 'runId', 'createdAt', 'origin', 'targetStatus', 'reason', 'deadlineAt'].sort());
+    assert.deepEqual(Object.keys(deadlineIntent).sort(), ['schemaVersion', 'runId', 'createdAt', 'origin', 'targetStatus', 'reason', 'deadlineAt',
+      'registeredCheckpointId', 'registeredRunRevision', 'registeredJournalSeq'].sort());
+    assert.equal(deadlineIntent.registeredCheckpointId, initialQueued.snapshot.run.latestCheckpointId);
+    assert.equal(deadlineIntent.registeredRunRevision, initialQueued.snapshot.run.revision);
+    assert.equal(deadlineIntent.registeredJournalSeq, initialQueued.journal.length);
     assert.equal(deadlineIntent.schemaVersion, 1); assert.equal(deadlineIntent.runId, queuedAdmitted.id);
     assert.equal(deadlineIntent.origin, 'deadline'); assert.equal(deadlineIntent.targetStatus, 'failed');
     assert.equal(deadlineIntent.reason, 'budget_exhausted'); assert.equal(deadlineIntent.deadlineAt, queuedAdmitted.deadlineAt);

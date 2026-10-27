@@ -1183,7 +1183,9 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         assert.equal(consumed.grant.state, 'consumed'); assert.equal(consumed.grant.useCount, 1);
       }
       assert(client);
-      assert.deepEqual(await client.send(submit, 30000), admission);
+      const replay = await client.send(submit, 30000);
+      recordRefusal(replay, 'run.submit');
+      assert.deepEqual(replay, admission);
       assert.deepEqual(await send({ protocolVersion: 1, method: 'run.get', runId: admitted.id }, 'run.get'), cut);
       const cancellation = await client.send(request({ protocolVersion: 1, method: 'run.cancel', requestId: nextId(),
         runId: admitted.id, expectedRevision: cut.snapshot.run.revision }));

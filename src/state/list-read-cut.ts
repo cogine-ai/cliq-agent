@@ -152,8 +152,10 @@ function sameSource(connection: SqliteConnection, principalId: string, workspace
   const capacity = connection.prepare('SELECT count(*) AS n FROM (SELECT 1 FROM sessions WHERE principal_id=?' + filter + ' LIMIT 100001)').get<{ n: bigint }>(...values)!;
   const prepared = connection.prepare('SELECT count(*) AS n FROM temp.cliq_list_source').get<{ n: bigint }>()!;
   if (capacity.n !== prepared.n) return false;
-  // Unique ids plus exact cardinality and every original tuple's indexed
-  // equality prove both directions of set equality without two full sorts.
+  // Strict captured (createdAt,id) order has already been validated. A
+  // repeated id with another tuple fails this indexed equality; an identical
+  // tuple cannot repeat in strict order. Together with the source primary key
+  // and exact cardinality, this proves both directions without another sort.
   const row = connection.prepare('SELECT EXISTS(SELECT 1 FROM temp.cliq_list_source p LEFT JOIN sessions s ON s.id=p.id AND s.principal_id=? WHERE ' +
     's.id IS NULL OR CAST(s.workspace_identity_ref AS BLOB) IS NOT CAST(p.workspace_identity_ref AS BLOB) OR ' +
     'CAST(s.name AS BLOB) IS NOT CAST(p.name AS BLOB) OR CAST(s.parent_session_id AS BLOB) IS NOT CAST(p.parent_session_id AS BLOB) OR ' +
@@ -291,7 +293,7 @@ async function readMaterializedList(driver: SqliteDriver, artifacts: ArtifactCat
       if (captured === undefined) { source.reset(); continue; }
       const cutId = randomBytes(32).toString('base64url'), cursorSecretBase64url = randomBytes(32).toString('base64url');
       const hash = createHash('sha256'); hash.update('[');
-      const selected: Entry[] = []; let byteCount = 0;
+      const selected: Entry[] = []; let byteCount = 0, previousTime = '', previousId = '';
       const sourceBatch = driver.prepare('SELECT ' + source.readProjection + ',overlong FROM temp.cliq_list_source WHERE ordinal>? ORDER BY ordinal LIMIT 128');
       for (let offset = 0; offset < captured; offset += BATCH) {
         await pause();
@@ -302,6 +304,9 @@ async function readMaterializedList(driver: SqliteDriver, artifacts: ArtifactCat
           const encodedPayload = canonicalJsonBytes(payload).toString('utf8'); byteCount += Buffer.byteLength(encodedPayload);
           if (byteCount > MAX_BYTES) throw new ListCutCapacityError();
           const entry: Entry = { schemaVersion: 1, cutId, ordinal: index + 1, stableId: valueIdentity(value).id, sortCreatedAt: valueIdentity(value).createdAt, payload, rowDigest: '' };
+          if (previousTime > entry.sortCreatedAt || previousTime === entry.sortCreatedAt &&
+              Buffer.compare(Buffer.from(previousId), Buffer.from(entry.stableId)) >= 0) return corrupt();
+          previousTime = entry.sortCreatedAt; previousId = entry.stableId;
           entry.rowDigest = digestOmitting(entry, 'rowDigest');
           stageEntry.run(entry.ordinal, entry.stableId, entry.rowDigest, encodedPayload);
           if (index) hash.update(','); hash.update(canonicalJsonBytes(entry.rowDigest));
@@ -368,7 +373,10 @@ function sessionListSource(driver: SqliteDriver, artifacts: ArtifactCatalog, own
   request: SessionListRequestV1, current: () => void): ListSource {
   let prepared: { refsDigest: string; workspaceJson: string } | undefined;
   return {
-    schema: 'id TEXT UNIQUE,workspace_identity_ref TEXT,name TEXT,parent_session_id TEXT,' +
+    // The original primary key, strict decoded order and final full tuple
+    // equality provide uniqueness without maintaining a second TEMP B-tree
+    // inside the uncancellable capture and DROP scopes.
+    schema: 'id TEXT,workspace_identity_ref TEXT,name TEXT,parent_session_id TEXT,' +
       'context_revision INTEGER,latest_item_seq INTEGER,created_at TEXT,updated_at TEXT',
     columns: sourceColumns.split(','),
     readProjection: sourceColumns.split(',').map(column => ['context_revision', 'latest_item_seq'].includes(column)

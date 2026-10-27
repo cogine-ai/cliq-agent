@@ -10,7 +10,9 @@ import { chmod, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { deflateSync } from 'node:zlib';
+import { types } from 'node:util';
 import { KERNEL_CAS_DIRECTORY } from '../../../src/config.js';
+
 import { canonicalJsonBytes, canonicalSha256 } from '../../../src/kernel/canonical.js';
 import type { SandboxResourceSpec } from '../../../src/kernel/execution.js';
 import { digestOmitting, identityHash } from '../../../src/kernel/identity.js';
@@ -34,6 +36,15 @@ import { assertLinuxWorkerController, readNativeControllerPreparationBirth, read
   type NativeSourceGitOutputReader, type HeldPreparingGitScope, openLinuxWorkerLauncher } from '../../../src/sandbox/linux-worker.js';
 
 import { observeRetainedPreparingGeneration, readRetainedPreparingGenerationRetirement } from '../../../src/workspace/run-workspace/preparation-retirement.js';
+
+/** An observation of this proc-stat read only. Whole-domain death and cleanup
+ * still require the original native successor proof below. Linux may return
+ * ESRCH after the path was opened but its original task exited before read. */
+export function missingOriginalProcStat(error: unknown): boolean {
+  if (!types.isNativeError(error)) return false;
+  const code = Object.getOwnPropertyDescriptor(error, 'code')?.value;
+  return code === 'ENOENT' || code === 'ESRCH';
+}
 
 type OriginalLeaf = Readonly<{ ref: string; byteCount: number }>;
 export type PreparingGitNativeCancellationInput = Readonly<{
@@ -355,7 +366,7 @@ async function qualifyPreparingGitSuccessor(selected: { stateVolume: string }, i
         const stat = await readFile(`/proc/${original.controller.identity.pid}/stat`, 'utf8');
         const ticks = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/u)[19];
         absent = `linux-proc-start-ticks:${ticks}` !== original.controller.identity.processStartToken;
-      } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') absent = true; else throw error; }
+      } catch (error) { if (missingOriginalProcStat(error)) absent = true; else throw error; }
       if (absent) break;
       assert(performance.now() < controllerDeadline, 'the actual original controller did not exit within 2 seconds'); await setImmediate();
     }

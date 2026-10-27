@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readFile, mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { readFile, mkdtemp, writeFile, rm, cp, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
@@ -53,5 +53,35 @@ test('actual standalone client bundle keeps its Node-only dependencies, original
     assert.equal(failure, undefined);
     assert.equal(result.code, 0); assert.equal(result.signal, null); assert.equal(Buffer.concat(stderr).length, 0);
     assert.equal(Buffer.concat(stdout).toString(), 'owned compiled Ink component joined\n');
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test('independent source builds bind their own exact locked Ink tree and reject another source or ambient fallback', async () => {
+  const home = await mkdtemp(path.join(process.cwd(), '.cliq-client-source-roots-'));
+  const installed = path.dirname(path.dirname(fileURLToPath(import.meta.resolve('ink'))));
+  try {
+    const roots = [path.join(home, 'old-source'), path.join(home, 'new-source')];
+    for (const root of roots) {
+      await mkdir(path.join(root, 'node_modules'), { recursive: true });
+      await cp(installed, path.join(root, 'node_modules', 'ink'), { recursive: true, errorOnExist: true, force: false });
+      await writeFile(path.join(root, 'package.json'), '{"private":true,"type":"module"}', { flag: 'wx', mode: 0o644 });
+      await writeFile(path.join(root, 'entry.mjs'), "export {render} from 'ink';", { flag: 'wx', mode: 0o644 });
+    }
+    const bundle = async (root: string, entryRoot = root) => {
+      const result = await build({ entryPoints: [path.join(entryRoot, 'entry.mjs')], outfile: path.join(home, 'bundle.mjs'),
+        bundle: true, platform: 'node', format: 'esm', target: 'node22.13', write: false, metafile: true,
+        logLevel: 'silent', ...installedClientBuildOptions(root) });
+      assert.equal(result.outputFiles!.length, 1);
+      assert(result.outputFiles![0]!.contents.length > 0 && result.outputFiles![0]!.contents.length <= 16 * 1024 * 1024);
+      assert(Object.values(result.metafile!.outputs).flatMap(output => output.imports).every(item => item.external && item.path.startsWith('node:')));
+    };
+    await bundle(roots[0]!); await bundle(roots[1]!);
+    await assert.rejects(bundle(roots[0]!, roots[1]!), /fixed-installed-client-dependencies/u);
+    const absent = path.join(home, 'missing-owned-dependency'); await mkdir(absent);
+    await writeFile(path.join(absent, 'package.json'), '{"private":true,"type":"module"}', { flag: 'wx', mode: 0o644 });
+    assert.throws(() => installedClientBuildOptions(absent), 'a parent node_modules tree cannot replace the selected source dependency');
+    const filename = path.join(roots[0]!, 'node_modules', 'ink', 'build', 'ink.js'), changed = Buffer.from(await readFile(filename));
+    changed[0] = changed[0] === 47 ? 32 : 47; await writeFile(filename, changed);
+    await assert.rejects(bundle(roots[0]!), /fixed Ink source hash changed/u);
   } finally { await rm(home, { recursive: true, force: true }); }
 });
