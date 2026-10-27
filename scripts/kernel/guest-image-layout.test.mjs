@@ -54,7 +54,10 @@ test('maximum native and full-corpus qualification retain their original workloa
   const journey = source('./testing/installed-node-journey.ts'), corpus = source('./testing/credential-secret-corpus.ts');
   assert(native.includes('assert.equal(metadata.guestImageByteCount, GUEST_EXTRACTOR_RECIPE.maxImageBytes)'));
   assert(worker.includes('metadata.guestImageByteCount !== GUEST_EXTRACTOR_RECIPE.maxImageBytes'));
-  assert(journey.includes('assert.equal(imageInodes.size, 4,'));
+  assert(journey.includes('assert.equal(imageCopies.length, 3)'));
+  assert(journey.includes('await verifyIndependentDataCopies(imageCopies, imageRef, signed.guestToolchain.manifest.guestImageByteCount)'));
+  assert(journey.includes("installedLayout: 'single_cas_streams_v1', manifestSchemaVersion: 2, completeImageCopiesVerified: true"));
+  assert(journey.includes("runtime/bundles', bundleDigest, guestImageEntry[0]!.relativePath)), { code: 'ENOENT' }"));
   assert(journey.includes('imageCopies.length * signed.guestToolchain.manifest.guestImageByteCount'));
   assert(journey.includes('maxBytes: 512 * 1024 * 1024, maxStreams: 4096'));
   assert(journey.includes('unchangedCorpusByteLimit: 512 * 1024 * 1024, unchangedCorpusStreamLimit: 4096'));

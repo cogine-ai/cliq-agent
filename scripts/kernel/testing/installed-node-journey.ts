@@ -5,7 +5,7 @@ import { replayScannedResourceLines } from './installed-resource-wire.js';
 // default/ask policy, macOS, reboot or release-publisher qualification.
 import assert from 'node:assert/strict';
 import { spawn, spawnSync, type ChildProcess, type ChildProcessWithoutNullStreams, type SpawnSyncReturns } from 'node:child_process';
-import { randomBytes, X509Certificate } from 'node:crypto';
+import { createHash, randomBytes, X509Certificate } from 'node:crypto';
 import { constants, type BigIntStats } from 'node:fs';
 import { chown, lstat, mkdir, open, readFile, readdir, readlink, stat, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:https';
@@ -63,6 +63,7 @@ import { installedReadOnlyGitCall, assertInstalledToolsOutcome } from './install
 import { INSTALLED_SKILLS_PROFILE, installedSkillIds, installedBundledSkill, installedToolsAndSkillsCalls,
   createInstalledSkillSources, assertInstalledSkillPrompt, assertInstalledSkillsOutcome } from './installed-skills.js';
 import { installedBashStopCall, observeInstalledBash, assertInstalledBashStopped, type InstalledBashProcesses } from './installed-tools-stop.js';
+import { NPM_DATA_RECIPE } from '../../../src/sandbox/npm-data-image.js';
 
 type Recipe = { buildFixture: string; packageRoot: string; installerEntry: string; stateRoot: string; releaseKeysFile: string;
   controlDirectory: string; observer: string; storeFixture: string; publicationObserver: string; workspace: string; reportFile: string };
@@ -84,6 +85,30 @@ const afterText = "after the private edit\n";
 const fixedText = "fixed after the verifier feedback\n";
 const cases: readonly SourceCaseKind[] = ['required_pass', 'required_repair', 'advisory_failure', 'required_timeout', 'ordinary_git'];
 const deliverySources = ['delivery_publish', 'delivery_merge', 'delivery_cancel', 'delivery_git', 'delivery_git_merge'] as const;
+
+async function verifyIndependentDataCopies(copies: readonly { filename: string; uid: number }[], ref: string, byteCount: number): Promise<void> {
+  const inodes = new Set<string>();
+  for (const copy of copies) {
+    const metadata = await lstat(copy.filename, { bigint: true });
+    assert(metadata.isFile() && !metadata.isSymbolicLink() && metadata.uid === BigInt(copy.uid) && metadata.nlink === 1n &&
+      (metadata.mode & 0o7777n) === 0o400n && metadata.size === BigInt(byteCount));
+    const handle = await open(copy.filename, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      const stable = (value: BigIntStats) => imageFields.every(key => metadata[key] === value[key]);
+      assert(stable(await handle.stat({ bigint: true })));
+      const scratch = Buffer.allocUnsafe(1_048_576), hash = createHash('sha256'); let position = 0;
+      while (position < byteCount) {
+        const { bytesRead } = await handle.read(scratch, 0, Math.min(scratch.length, byteCount - position), position);
+        assert(bytesRead > 0); position += bytesRead; hash.update(scratch.subarray(0, bytesRead));
+      }
+      assert.equal((await handle.read(scratch, 0, 1, position)).bytesRead, 0);
+      assert.equal(position, byteCount); assert.equal(hash.digest('hex'), ref);
+      assert(stable(await handle.stat({ bigint: true }))); assert(stable(await lstat(copy.filename, { bigint: true })));
+    } finally { await handle.close(); }
+    inodes.add(metadata.dev + ':' + metadata.ino);
+  }
+  assert.equal(inodes.size, copies.length, 'complete build/source/CAS custody objects must be independent real files');
+}
 
 async function bounded<T>(pending: Promise<T>, milliseconds: number, label: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -713,29 +738,33 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     assert.equal(installation.status, 0);
     const bundleDigest = (parseJsonStrict(installation.stdout.trim()) as { bundleDigest: string }).bundleDigest;
     assert.equal(bundleDigest, canonicalSha256(signed.bundle));
+    assert.equal(signed.bundle.schemaVersion, 2); assert.equal(signed.bundle.installedLayout, 'single_cas_streams_v1');
     const imageRef = signed.guestToolchain.manifest.guestImageRef;
     const guestImageEntry = signed.bundle.entries.filter(entry => entry.digest === imageRef);
     assert.equal(guestImageEntry.length, 1); assert.equal(guestImageEntry[0]!.executable, false);
     const imageCopies = [
       { filename: path.join(recipe.buildFixture, 'guest-image/guest-toolchain.ext4'), uid: 0 },
       { filename: path.join(recipe.packageRoot, guestImageEntry[0]!.relativePath), uid: ledger.uid },
-      { filename: path.join(recipe.stateRoot, 'runtime/bundles', bundleDigest, guestImageEntry[0]!.relativePath), uid: ledger.uid },
       { filename: path.join(recipe.stateRoot, 'cas', imageRef), uid: ledger.uid },
     ];
-    const imageInodes = new Set<string>();
-    for (const copy of imageCopies) {
-      const metadata = await lstat(copy.filename, { bigint: true });
-      assert(metadata.isFile() && !metadata.isSymbolicLink() && metadata.uid === BigInt(copy.uid) && metadata.nlink === 1n &&
-        (metadata.mode & 0o7777n) === 0o400n && metadata.size === BigInt(signed.guestToolchain.manifest.guestImageByteCount));
-      imageInodes.add(metadata.dev + ':' + metadata.ino);
-    }
-    assert.equal(imageInodes.size, 4, 'the build, source package, installed package and single CAS image must be distinct real files');
+    assert.equal(imageCopies.length, 3);
+    await verifyIndependentDataCopies(imageCopies, imageRef, signed.guestToolchain.manifest.guestImageByteCount);
+    await assert.rejects(lstat(path.join(recipe.stateRoot, 'runtime/bundles', bundleDigest, guestImageEntry[0]!.relativePath)), { code: 'ENOENT' });
     report.bundle = { bundleDigest, manifestDigest: signed.bundle.manifestDigest,
       guestToolchainManifestRef: signed.guestToolchain.manifestRef, guestImageRef: signed.guestToolchain.manifest.guestImageRef,
       guestImageByteCount: signed.guestToolchain.manifest.guestImageByteCount,
+      installedLayout: 'single_cas_streams_v1', manifestSchemaVersion: 2, completeImageCopiesVerified: true,
       actualReadOnlyImageCopies: imageCopies.length, totalImageCopyBytes: imageCopies.length * signed.guestToolchain.manifest.guestImageByteCount,
       imageCopiesInCompleteSecretWriterCorpus: 1, unchangedCorpusByteLimit: 512 * 1024 * 1024, unchangedCorpusStreamLimit: 4096,
       ...(signed.guestToolchain.imageLayout.kind === 'compact' ? { guestImageLayout: signed.guestToolchain.imageLayout } : {}) };
+    if (options.npmDependencyArchive) {
+      const data = signed.bundle.entries.filter(entry => entry.entryId === NPM_DATA_RECIPE.entryId);
+      assert.equal(data.length, 1); assert.equal(data[0]!.digest, NPM_DATA_RECIPE.completeImageDigest);
+      assert.equal(data[0]!.byteCount, NPM_DATA_RECIPE.completeImageBytes); assert.equal(data[0]!.executable, false);
+      await verifyIndependentDataCopies([{ filename: path.join(recipe.packageRoot, data[0]!.relativePath), uid: ledger.uid },
+        { filename: path.join(recipe.stateRoot, 'cas', data[0]!.digest), uid: ledger.uid }], data[0]!.digest, data[0]!.byteCount);
+      await assert.rejects(lstat(path.join(recipe.stateRoot, 'runtime/bundles', bundleDigest, data[0]!.relativePath)), { code: 'ENOENT' });
+    }
     mark('actual_secret_service_and_credential');
     await mkdir(recipe.controlDirectory, { mode: 0o700 }); await chown(recipe.controlDirectory, ledger.uid, ledger.gid);
     daemon = spawn('/usr/sbin/runuser', [...prefix, '/usr/bin/gnome-keyring-daemon', '--foreground', '--components=secrets', '--unlock',

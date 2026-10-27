@@ -33,9 +33,10 @@ import { assertArtifactRef, digestOmitting, encodeCanonicalTime, identityHash,
   normalizeAbsolutePath, sha256Bytes } from '../kernel/identity.js';
 import type { LocalControlChannelIdentityV1, LocalPrincipalIdentityV1, PlatformProcessIdentityV1, StateRootIdentityV1, StateOwnerRecordV1 } from '../kernel/types.js';
 import { immutableSnapshot } from '../model/immutable.js';
-import { exactKeys, policyProfile, type ReleaseTrustKey, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
+import { exactKeys, policyProfile, SINGLE_CAS_STREAMS_LAYOUT, type ReleaseTrustKey, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { ARTIFACT_CHUNK_BYTES, ContentAddressedStore } from './cas.js';
 import { publishInstalledCasRoots } from './installed-cas-roots.js';
+import type { InstalledRuntimeUpgradePhase } from './installed-upgrade-diagnostics.js';
 import { joinResourceOperations, KernelStorageError, ResourceRetirementError } from './errors.js';
 import { decodeSandboxRootProfile } from './execution-closure.js';
 import { decodeControlChannel, decodeLocalPrincipalIdentity, decodePlatformProcessIdentity, decodeStateRootIdentity } from './decoders.js';
@@ -206,6 +207,7 @@ type InstalledRuntimeBinding = {
   sealDependencyNpmAssets(signal?: AbortSignal): Promise<Readonly<{ script: NativeDependencyNpmScriptImage; data: NativeDependencyNpmDataImage }>>;
   startBuiltinBashToolchain(toolchain: RetainedVerifierToolchain, options: { signal?: AbortSignal }): Promise<NativeBuiltinBashToolchain>;
   sealSourceGitInspector(signal?: AbortSignal): Promise<NativeSourceGitInspectorImage>;
+  retainSourceGitRecipe(signal?: AbortSignal): Promise<void>;
   startGuestToolchain(toolchain: RetainedVerifierToolchain, options: { signal?: AbortSignal }): Promise<NativeGuestToolchain>;
   startSourceGitToolchain(toolchain: RetainedVerifierToolchain, options: { signal?: AbortSignal }): Promise<NativeSourceGitToolchain>;
   closeGuestToolchain(job: NativeGuestToolchain): Promise<void>;
@@ -341,6 +343,13 @@ export function sealInstalledSourceGitInspector(selected: HeldInstalledRuntime, 
   if (!binding) mismatch('source inspection requires a genuine held installed selection');
   return binding.sealSourceGitInspector(signal);
 }
+/** Audit data only, through the same original installed scope. The two fixed
+ * recipe members remain separate host files; CAS bytes cannot execute them. */
+export function retainInstalledSourceGitRecipe(selected: HeldInstalledRuntime, signal?: AbortSignal): Promise<void> {
+  const binding = heldInstalledRuntimes.get(selected);
+  if (!binding) mismatch('source recipe retention requires a genuine held installed selection');
+  return binding.retainSourceGitRecipe(signal);
+}
 
 /** Fixed signed data and its distinct native type; never a caller program. */
 export function sealInstalledBuiltinToolScript(selected: HeldInstalledRuntime, signal?: AbortSignal): Promise<NativeBuiltinToolScriptImage> {
@@ -464,6 +473,7 @@ type InstalledFile = { handle: FileHandle; info: BigIntStats; parent: Directory;
 type VerifiedPackage = { root: Directory; manifest: InstalledFile; bundle: RuntimeBundleManifest;
   bundleDigest: string; manifestBytes: Buffer; entries: Map<string, InstalledFile>; roots: Map<string, Buffer>;
   streamedRoots: Map<string, InstalledFile>;
+  singleCasPaths: ReadonlySet<string>; delegatedPaths: ReadonlySet<string>; delegatedRefs: ReadonlySet<string>;
   structured: InstalledStructuredArtifacts; modelAuthority?: VerifiedInstalledModelAuthority;
   companionFiles: InstalledFile[] };
 function streamedInstalledSchemaKind(signed: VerifiedPackage, ref: string): string {
@@ -471,6 +481,17 @@ function streamedInstalledSchemaKind(signed: VerifiedPackage, ref: string): stri
   if (declared.length !== 1 || !['cliq-guest-image-raw-ext4-v1', 'cliq-skill-source-file-v1', 'cliq-npm-data-image-v1'].includes(declared[0]!.schemaKind))
     mismatch('installed streamed data has no exact supported original member kind');
   return declared[0]!.schemaKind;
+}
+function requireSingleCasBundle(bundle: RuntimeBundleManifest): void {
+  if (bundle.schemaVersion !== 2 || bundle.installedLayout !== SINGLE_CAS_STREAMS_LAYOUT)
+    mismatch('new installed execution requires its signed single-CAS layout');
+}
+// Only the fixed schema7 upgrade controller may reopen the original physical
+// layout. A public caller cannot supply this module-private identity, and no
+// process-global compatibility mode can leak into a concurrent selection.
+const originalUpgradeLayout = Symbol('original installed upgrade source');
+function noteUpgradePhase(observer: ((phase: InstalledRuntimeUpgradePhase) => void) | undefined, phase: InstalledRuntimeUpgradePhase): void {
+  try { observer?.(phase); } catch { /* Fixed diagnostics cannot replace an original upgrade result or refusal. */ }
 }
 
 const SMALL_BYTES = 1_048_576;
@@ -538,6 +559,11 @@ class Scope {
       const error = new ResourceRetirementError('installed runtime descriptor retirement failed', cause);
       rememberRetirement(error); throw error;
     }
+  }
+  async reuseCasFile(file: InstalledFile, parent: Directory, ref: string, byteCount: number): Promise<InstalledFile> {
+    if (this.closePromise || !this.handles.has(file.handle) || file.parent !== parent || file.name !== ref || file.digest !== ref)
+      mismatch('installed CAS member is not the same live physical holder');
+    checkFile(file.info, 0o400, byteCount); await assertFile(file); return file;
   }
   close(): Promise<void> {
     return this.closePromise ??= (async () => {
@@ -962,17 +988,17 @@ async function verifyBytesPipeline(file: InstalledFile, signal?: AbortSignal): P
   signal?.throwIfAborted();
   if (file.digest !== undefined && hash.digest('hex') !== file.digest) mismatch('installed runtime signed file digest differs');
 }
-async function* artifactChunks(file: InstalledFile): AsyncGenerator<Buffer> {
-  for await (const bytes of chunks(file))
+async function* artifactChunks(file: InstalledFile, signal?: AbortSignal): AsyncGenerator<Buffer> {
+  for await (const bytes of chunks(file, signal))
     for (let offset = 0; offset < bytes.length; offset += ARTIFACT_CHUNK_BYTES)
       yield bytes.subarray(offset, offset + ARTIFACT_CHUNK_BYTES);
 }
 async function checkPackageGraph(scope: Scope, root: Directory, bundle: RuntimeBundleManifest,
-  companion?: VerifiedInstalledModelAuthority): Promise<void> {
+  companion?: VerifiedInstalledModelAuthority, delegatedPaths: ReadonlySet<string> = new Set()): Promise<void> {
   const expected = new Map<string, Set<string>>();
   const companionPaths = companion ? ['model-authority.json', ...companion.closure.objects.map(object =>
     `model-objects/sha256/${object.artifactRef.slice(0, 2)}/${object.artifactRef}`)] : [];
-  for (const filename of ['manifest.json', ...bundle.entries.map(entry => entry.relativePath), ...companionPaths]) {
+  for (const filename of ['manifest.json', ...bundle.entries.filter(entry => !delegatedPaths.has(entry.relativePath)).map(entry => entry.relativePath), ...companionPaths]) {
     const components = filename.split('/');
     for (let index = 0; index < components.length; index++) {
       const parent = components.slice(0, index).join('/');
@@ -1001,18 +1027,21 @@ async function checkSelectedVersion(scope: Scope, bundles: Directory, bundleDige
  * expectations; every original entry is opened, completely read and joined
  * inside this fresh scope before current selection may escape. */
 async function verifyRetainedSourcePackage(metadataScope: Scope, root: Directory,
-  releaseKeys: readonly ReleaseTrustKey[], expectedDigest: string): Promise<Readonly<{
-    manifest: InstalledFile; bundle: RuntimeBundleManifest;
+  releaseKeys: readonly ReleaseTrustKey[], expectedDigest: string, casRoot: Directory): Promise<Readonly<{
+    manifest: InstalledFile; bundle: RuntimeBundleManifest; delegatedPaths: ReadonlySet<string>;
   }>> {
   const manifest = await metadataScope.file(root, 'manifest.json', 0o400, undefined, expectedDigest);
   const bytes = await readSmall(manifest);
   const bundle = validateBundle(checkCanonicalBytes(bytes), releaseKeys);
   const historical = new Scope();
+  let delegatedPaths: ReadonlySet<string> = new Set();
   try {
     // Duplicate the actual captured directory, rather than reopen a caller
     // path or keep a retired source file in the current execution scope.
     const originalRoot = await historical.directory(root, '.');
-    const original = await verifyPackage(historical, originalRoot, releaseKeys, expectedDigest);
+    const originalCas = await historical.directory(casRoot, '.');
+    const original = await verifyPackage(historical, originalRoot, releaseKeys, expectedDigest, false, undefined, originalCas);
+    delegatedPaths = original.delegatedPaths;
     if (!original.manifestBytes.equals(bytes)) mismatch('retained source metadata changed during its historical read');
     historical.assertMetadata([original.manifest, ...original.entries.values(), ...original.companionFiles]);
     await historical.assertDirectories();
@@ -1024,14 +1053,16 @@ async function verifyRetainedSourcePackage(metadataScope: Scope, root: Directory
   }
   await historical.close();
   await assertFile(manifest); await metadataScope.assertDirectory(root);
-  return Object.freeze({ manifest, bundle });
+  return Object.freeze({ manifest, bundle, delegatedPaths });
 }
 async function verifyPackage(scope: Scope, root: Directory, releaseKeys: readonly ReleaseTrustKey[], expectedDigest?: string,
-  sourceCompanion = false, signal?: AbortSignal): Promise<VerifiedPackage> {
-  return observeInstalledWork('package', () => verifyPackageBytes(scope, root, releaseKeys, expectedDigest, sourceCompanion, signal));
+  sourceCompanion = false, signal?: AbortSignal, installedCas?: Directory,
+  publishedStreams?: ReadonlyMap<string, InstalledFile>): Promise<VerifiedPackage> {
+  return observeInstalledWork('package', () => verifyPackageBytes(scope, root, releaseKeys, expectedDigest, sourceCompanion, signal, installedCas, publishedStreams));
 }
 async function verifyPackageBytes(scope: Scope, root: Directory, releaseKeys: readonly ReleaseTrustKey[], expectedDigest?: string,
-  sourceCompanion = false, signal?: AbortSignal): Promise<VerifiedPackage> {
+  sourceCompanion = false, signal?: AbortSignal, installedCas?: Directory,
+  publishedStreams?: ReadonlyMap<string, InstalledFile>): Promise<VerifiedPackage> {
   signal?.throwIfAborted();
   const manifest = await scope.file(root, 'manifest.json', 0o400, undefined, expectedDigest);
   const manifestBytes = await readSmall(manifest, SMALL_BYTES, signal);
@@ -1041,8 +1072,12 @@ async function verifyPackageBytes(scope: Scope, root: Directory, releaseKeys: re
   const entries = new Map<string, InstalledFile>();
   const roots = new Map<string, Buffer>([[bundleDigest, manifestBytes]]);
   const streamedRoots = new Map<string, InstalledFile>();
+  const singleCasPaths = new Set<string>(), delegatedPaths = new Set<string>(), delegatedRefs = new Set<string>();
   const inodes = new Set<string>([`${manifest.info.dev}:${manifest.info.ino}`]);
-  for (const entry of bundle.entries) {
+  // Metadata is read before data placement is resolved. Only the exact signed
+  // guest-image edges and fixed npm pair may delegate to installed CAS; absence
+  // of a package path never chooses a layout or supplies a fallback.
+  for (const entry of bundle.entries.filter(entry => entry.role !== 'bundle_object')) {
     signal?.throwIfAborted();
     const file = await scope.file(root, entry.relativePath, entry.executable ? 0o500 : 0o400, entry.byteCount, entry.digest);
     const identity = `${file.info.dev}:${file.info.ino}`;
@@ -1078,7 +1113,18 @@ async function verifyPackageBytes(scope: Scope, root: Directory, releaseKeys: re
   const skillMembers = bundledSkillMemberRoles(bundle, skillClosures);
   for (const entry of bundle.entries.filter(entry => entry.role === 'bundle_object')) {
     signal?.throwIfAborted();
-    const file = entries.get(entry.entryId)!;
+    const eligible = isNpmDataEntry(entry) || imageRefs.has(entry.digest);
+    if (eligible) singleCasPaths.add(entry.relativePath);
+    const delegated = installedCas !== undefined && bundle.schemaVersion === 2 &&
+      bundle.installedLayout === SINGLE_CAS_STREAMS_LAYOUT && eligible;
+    const published = delegated ? publishedStreams?.get(entry.digest) : undefined;
+    const file = published ? await scope.reuseCasFile(published, installedCas!, entry.digest, entry.byteCount) :
+      await scope.file(delegated ? installedCas! : root, delegated ? entry.digest : entry.relativePath,
+        entry.executable ? 0o500 : 0o400, entry.byteCount, entry.digest);
+    const identity = `${file.info.dev}:${file.info.ino}`;
+    if (inodes.has(identity)) mismatch('distinct signed entries alias one installed inode');
+    inodes.add(identity); entries.set(entry.entryId, file);
+    if (delegated) { delegatedPaths.add(entry.relativePath); delegatedRefs.add(entry.digest); }
     if (isNpmDataEntry(entry)) {
       // The sole fixed complete official image is a raw signed data edge,
       // never JSON, an executable or thousands of separate CAS members.
@@ -1139,9 +1185,9 @@ async function verifyPackageBytes(scope: Scope, root: Directory, releaseKeys: re
       } catch (cause) { if (signal?.aborted && cause === signal.reason) throw cause; mismatch('installed model companion verification failed', cause); }
     }
   }
-  await checkPackageGraph(scope, root, bundle, modelAuthority); await scope.assertDirectories();
+  await checkPackageGraph(scope, root, bundle, modelAuthority, delegatedPaths); await scope.assertDirectories();
   signal?.throwIfAborted();
-  return { root, manifest, bundle, bundleDigest, manifestBytes, entries, roots, streamedRoots, structured, companionFiles,
+  return { root, manifest, bundle, bundleDigest, manifestBytes, entries, roots, streamedRoots, singleCasPaths, delegatedPaths, delegatedRefs, structured, companionFiles,
     ...(modelAuthority ? { modelAuthority } : {}) };
 }
 
@@ -1239,6 +1285,7 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
           noteInstalledInstallPhase('source_verify');
           const sourceRoot = await sourceScope.root(packageRoot);
           signed = await verifyPackage(sourceScope, sourceRoot, releaseKeys, undefined, true);
+          requireSingleCasBundle(signed.bundle);
           noteInstalledInstallPhase('destination_layout');
           const state = await destination.root(stateRoot, true);
           const root = await destination.directory(state, 'runtime', true);
@@ -1248,6 +1295,7 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
           noteInstalledInstallPhase('signed_entries_copy');
           let copiedEntries = 0;
           for (const entry of signed.bundle.entries) {
+            if (signed.singleCasPaths.has(entry.relativePath)) continue;
             await writeChunks(destination, stage, entry.relativePath, chunks(signed.entries.get(entry.entryId)!), entry.executable ? 0o500 : 0o400);
             noteInstalledInstallPhase('signed_entries_copy', ++copiedEntries);
           }
@@ -1288,7 +1336,8 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
             noteInstalledInstallPhase('cas_streams_publish', ++publishedStreams);
           }
           noteInstalledInstallPhase('destination_verify');
-          await verifyPackage(destination, stage, releaseKeys, signed.bundleDigest);
+          await verifyPackage(destination, stage, releaseKeys, signed.bundleDigest, false, undefined, casRoot,
+            new Map(casFiles.map(file => [file.name, file])));
           noteInstalledInstallPhase('bootstrap_verify');
           await verifyBytes(await destination.file(root, 'bootstrap', 0o500, supervisor.byteCount, supervisor.digest));
           noteInstalledInstallPhase('source_final_verify');
@@ -1332,9 +1381,10 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
       noteInstalledInstallPhase('complete_joined');
       return installed;
     },
-    async openSelected(this: InstalledRuntime, stateRoot: string): Promise<HeldInstalledRuntime> {
+    async openSelected(this: InstalledRuntime, stateRoot: string, originalLayout?: typeof originalUpgradeLayout): Promise<HeldInstalledRuntime> {
       supportedPlatform();
       if (this !== runtime) mismatch('installed runtime factory receiver is not its trusted instance');
+      if (originalLayout !== undefined && originalLayout !== originalUpgradeLayout) mismatch('installed layout context is not its original upgrade source');
       healthy();
       const scope = new Scope();
       try {
@@ -1360,11 +1410,12 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
             registeredUpgrade.installation.targetModelAuthorityRef !== selection.modelAuthorityRef)) mismatch('selection differs from its registered upgrade');
         await checkSelectedVersion(scope, bundles, selection.bundleDigest, registeredUpgrade?.sourceRuntimeBundleRef);
         const version = await scope.directory(bundles, selection.bundleDigest);
-        const signed = await verifyPackage(scope, version, releaseKeys, selection.bundleDigest);
+        const signed = await verifyPackage(scope, version, releaseKeys, selection.bundleDigest, false, undefined, casRoot);
+        if (originalLayout === undefined) requireSingleCasBundle(signed.bundle);
         const supervisor = signed.bundle.entries.find(entry => entry.role === 'supervisor')!;
         const bootstrap = await scope.file(root, 'bootstrap', 0o500, supervisor.byteCount, supervisor.digest);
         const retainedMetadataFiles: InstalledFile[] = [];
-        const retainedGraphs: Array<{ directory: Directory; bundle: RuntimeBundleManifest }> = [];
+        const retainedGraphs: Array<{ directory: Directory; bundle: RuntimeBundleManifest; delegatedPaths: ReadonlySet<string> }> = [];
         if (registeredUpgrade) {
           const source = registeredUpgrade.installation;
           if (source.kind !== 'held_installed_stage') mismatch('installed selection cannot use a noninstalled receipt');
@@ -1376,15 +1427,21 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
           assertUpgradeObjectIdentity(originalStage, source.stageIdentity);
           if ((await readdir(childPath(originalStage, '.'))).length !== 0) mismatch('published upgrade stage contains unregistered objects');
           const retainedVersion = await scope.directory(bundles, registeredUpgrade.sourceRuntimeBundleRef);
-          const retained = await verifyRetainedSourcePackage(scope, retainedVersion, releaseKeys, registeredUpgrade.sourceRuntimeBundleRef);
+          const retained = await verifyRetainedSourcePackage(scope, retainedVersion, releaseKeys, registeredUpgrade.sourceRuntimeBundleRef, casRoot);
           retainedMetadataFiles.push(retained.manifest);
-          retainedGraphs.push({ directory: retainedVersion, bundle: retained.bundle });
+          retainedGraphs.push({ directory: retainedVersion, bundle: retained.bundle, delegatedPaths: retained.delegatedPaths });
         }
 
         const casFiles: InstalledFile[] = [];
         for (const [ref, bytes] of signed.roots) casFiles.push(await scope.file(casRoot, ref, 0o400, bytes.length, ref));
         for (const [ref, image] of signed.streamedRoots)
-          casFiles.push(await scope.file(casRoot, ref, 0o400, Number(image.info.size), ref));
+          if (!signed.delegatedRefs.has(ref)) casFiles.push(await scope.file(casRoot, ref, 0o400, Number(image.info.size), ref));
+        const installedStreams = new Map<string, InstalledFile>();
+        for (const [ref, image] of signed.streamedRoots) {
+          const physical = signed.delegatedRefs.has(ref) ? image : casFiles.find(file => file.digest === ref);
+          if (!physical) mismatch('installed stream lacks its original physical CAS holder');
+          installedStreams.set(ref, physical);
+        }
         if (selection.modelAuthorityRef !== undefined)
           casFiles.push(...await readInstalledCompanionFromCas(scope, casRoot, signed, selection.modelAuthorityRef, releaseKeys));
         let closed = false;
@@ -1430,8 +1487,8 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
           healthy(); await scope.assertDirectories();
           signal?.throwIfAborted();
           await scope.verifyDiscard([active, signed.manifest, bootstrap, ...signed.entries.values(), ...casFiles, ...retainedMetadataFiles], signal);
-          await checkPackageGraph(scope, version, signed.bundle);
-          for (const retained of retainedGraphs) await checkPackageGraph(scope, retained.directory, retained.bundle);
+          await checkPackageGraph(scope, version, signed.bundle, undefined, signed.delegatedPaths);
+          for (const retained of retainedGraphs) await checkPackageGraph(scope, retained.directory, retained.bundle, undefined, retained.delegatedPaths);
           signal?.throwIfAborted();
           await checkSelectedVersion(scope, bundles, signed.bundleDigest, registeredUpgrade?.sourceRuntimeBundleRef); await scope.assertDirectories();
           signal?.throwIfAborted();
@@ -2135,6 +2192,27 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
               }
             });
           },
+          retainSourceGitRecipe(signal) {
+            return enqueue(async () => {
+              await checkedRevalidate(signal);
+              const cas = new ContentAddressedStore(childPath(casRoot, '.'));
+              for (const entryId of ['source_git_inspector', 'linux_worker_controller']) {
+                const entry = signed.bundle.entries.find(value => value.entryId === entryId), file = signed.entries.get(entryId);
+                const inspector = entryId === 'source_git_inspector';
+                if (!entry || !file || entry.role !== 'platform_helper' || entry.byteCount < 1 ||
+                    (inspector ? entry.version !== '1' || entry.executable !== false ||
+                      entry.relativePath !== 'helpers/source-git-inspector.mjs' || entry.byteCount > SMALL_BYTES
+                      : !entry.executable || entry.byteCount > TRUST_BYTES))
+                  mismatch('source recipe retention requires its exact supported signed members');
+                signal?.throwIfAborted(); assertSelection();
+                const published = await cas.publishChunks(artifactChunks(file, signal), entry.byteCount);
+                if (published.ref !== entry.digest || published.byteLength !== entry.byteCount)
+                  mismatch('retained source recipe differs from its original installed bytes');
+                signal?.throwIfAborted(); assertSelection();
+              }
+              await checkedRevalidate(signal);
+            });
+          },
           sealSourceGitInspector(signal) {
             return enqueue(async () => {
               await checkedRevalidate(signal);
@@ -2240,7 +2318,7 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
               if (canonicalSha256(expected) !== canonicalSha256(toolchain) || manifest.architecture !== 'x86_64' ||
                   manifest.guestImageByteCount > GUEST_EXTRACTOR_RECIPE.maxImageBytes)
                 mismatch('guest extraction substitutes the pinned fixed recipe');
-              const image = casFiles.find(file => file.digest === manifest.guestImageRef);
+              const image = installedStreams.get(manifest.guestImageRef);
               if (!image) mismatch('guest extraction lacks its original imported CAS image');
               if (!guestExtractor) {
                 const entry = signed.bundle.entries.find(entry => entry.entryId === GUEST_EXTRACTOR_RECIPE.entryId);
@@ -2295,7 +2373,7 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
                   manifest.node.canonicalGuestPath !== '/usr/bin/node' || manifest.git.canonicalGuestPath !== '/usr/bin/git' ||
                   manifest.guestImageByteCount > GUEST_EXTRACTOR_RECIPE.maxImageBytes)
                 mismatch('source Git extraction substitutes the pinned fixed recipe');
-              const image = casFiles.find(file => file.digest === manifest.guestImageRef);
+              const image = installedStreams.get(manifest.guestImageRef);
               if (!image) mismatch('source Git extraction lacks its original imported CAS image');
               if (!guestExtractor) {
                 const entry = signed.bundle.entries.find(value => value.entryId === GUEST_EXTRACTOR_RECIPE.entryId);
@@ -2357,7 +2435,7 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
               if (!bash || bash.canonicalGuestPath !== '/bin/bash' ||
                   manifest.admittedExecutables.filter(entry => entry.logicalName === 'bash').length !== 1)
                 mismatch('builtin bash has no exact signed admitted Bash executable');
-              const image = casFiles.find(file => file.digest === manifest.guestImageRef);
+              const image = installedStreams.get(manifest.guestImageRef);
               if (!image) mismatch('builtin bash extraction lacks its original imported CAS image');
               if (!guestExtractor) {
                 const entry = signed.bundle.entries.find(value => value.entryId === GUEST_EXTRACTOR_RECIPE.entryId);
@@ -2617,6 +2695,7 @@ type InstalledUpgradeBinding = {
   publish(receiptRef: string, receipt: RuntimeUpgradeReceiptV1): Promise<void>;
   stop(): Promise<void>;
   active(): boolean;
+  notePhase?(phase: InstalledRuntimeUpgradePhase): void;
 };
 const installedUpgradeStages = new WeakMap<HeldInstalledRuntimeUpgrade, InstalledUpgradeBinding>();
 // An uncertain native pager/inspection retirement keeps its original source
@@ -2639,9 +2718,10 @@ function upgradeDirectoryIdentity(directory: { info: BigIntStats }): InstalledUp
 /** Preparation is inert: original selection/version remain authoritative. The
  * original live keeper is authenticated before any death source is captured. */
 export async function stageInstalledRuntimeUpgrade(selected: HeldInstalledRuntime, packageRoot: string,
-  signal?: AbortSignal): Promise<HeldInstalledRuntimeUpgrade> {
+  signal?: AbortSignal, observePhase?: (phase: InstalledRuntimeUpgradePhase) => void): Promise<HeldInstalledRuntimeUpgrade> {
   if (!heldInstalledRuntimes.has(selected)) mismatch('upgrade needs the genuinely selected original installation');
   signal?.throwIfAborted();
+  noteUpgradePhase(observePhase, 'stage_original');
   const anchor = await acquireInstalledAnchor(selected), anchorSource = heldInstalledAnchors.get(anchor)!;
   const originalKeeper = anchorSource.readBirth();
   const scope = new Scope(), sourceScope = new Scope();
@@ -2654,7 +2734,7 @@ export async function stageInstalledRuntimeUpgrade(selected: HeldInstalledRuntim
       const bundles = await scope.directory(runtime, 'bundles'), casRoot = await scope.directory(state, KERNEL_CAS_DIRECTORY);
       if (bundles.info.dev !== runtime.info.dev) mismatch('upgrade requires its original bundle publication filesystem');
       const oldVersion = await scope.directory(bundles, original.bundleDigest);
-      const oldSigned = await verifyPackage(scope, oldVersion, original.releaseKeys, original.bundleDigest, false, signal);
+      const oldSigned = await verifyPackage(scope, oldVersion, original.releaseKeys, original.bundleDigest, false, signal, casRoot);
       const oldActive = await scope.file(runtime, 'active.json', 0o600), oldActiveBytes = await readSmall(oldActive);
       oldActive.digest = sha256Bytes(oldActiveBytes);
       const oldSupervisor = oldSigned.bundle.entries.find(entry => entry.role === 'supervisor')!;
@@ -2665,7 +2745,9 @@ export async function stageInstalledRuntimeUpgrade(selected: HeldInstalledRuntim
       assertUpgradeObjectIdentity(oldKeeperReady, originalKeeper.readyIdentity); await verifyBytes(oldKeeperReady);
       const originalFiles = [oldActive, oldBootstrap, oldKeeperReady, oldSigned.manifest, ...oldSigned.entries.values(), ...oldSigned.companionFiles];
       await verifyBytes(oldBootstrap);
+      noteUpgradePhase(observePhase, 'stage_source');
       const packageDirectory = await sourceScope.root(packageRoot), signed = await verifyPackage(sourceScope, packageDirectory, original.releaseKeys, undefined, true, signal);
+      requireSingleCasBundle(signed.bundle);
       if (signed.bundleDigest === original.bundleDigest) mismatch('upgrade must select its exact distinct signed target');
       if (signed.bundle.headlessSchemaRange.min > 3 || signed.bundle.headlessSchemaRange.max < 3)
         mismatch('complete installed upgrade requires its signed schema3 client interface');
@@ -2681,6 +2763,7 @@ export async function stageInstalledRuntimeUpgrade(selected: HeldInstalledRuntim
       const version = await scope.directory(stage, 'package', true);
       for (const entry of signed.bundle.entries) {
         signal?.throwIfAborted();
+        if (signed.singleCasPaths.has(entry.relativePath)) continue;
         await writeChunks(scope, version, entry.relativePath, chunks(signed.entries.get(entry.entryId)!, signal), entry.executable ? 0o500 : 0o400);
       }
       await writeChunks(scope, version, 'manifest.json', bytesSource(signed.manifestBytes), 0o400);
@@ -2688,7 +2771,6 @@ export async function stageInstalledRuntimeUpgrade(selected: HeldInstalledRuntim
       // rooted in CAS, never added as unsigned installed package paths.
       const targetSupervisor = signed.bundle.entries.find(entry => entry.role === 'supervisor')!;
       await writeChunks(scope, stage, 'bootstrap', chunks(signed.entries.get(targetSupervisor.entryId)!, signal), 0o500);
-      const staged = await verifyPackage(scope, version, original.releaseKeys, signed.bundleDigest, false, signal);
       const newBootstrap = await scope.file(stage, 'bootstrap', 0o500, targetSupervisor.byteCount, targetSupervisor.digest);
       await verifyBytes(newBootstrap);
       // The active file is born here, before the receipt's inode binding. Its
@@ -2700,6 +2782,7 @@ export async function stageInstalledRuntimeUpgrade(selected: HeldInstalledRuntim
       if (!sameFile(activeBirth, await lstat(childPath(stage, 'active.json'), { bigint: true }))) mismatch('upgrade active birth changed');
       await activeHandle.sync();
       const newActive: InstalledFile = { handle: activeHandle, info: activeBirth, parent: stage, name: 'active.json' };
+      noteUpgradePhase(observePhase, 'stage_cas');
       const cas = new ContentAddressedStore(childPath(casRoot, '.')), seed: PublishedArtifact[] = [], casFiles: InstalledFile[] = [];
       const roots = [...signed.roots];
       for (let offset = 0; offset < roots.length; offset += 4) {
@@ -2724,11 +2807,14 @@ export async function stageInstalledRuntimeUpgrade(selected: HeldInstalledRuntim
         await verifyBytes(member); casFiles.push(member);
         seed.push({ ref, byteLength: published.byteLength, mediaType: 'application/octet-stream', schemaKind: streamedInstalledSchemaKind(signed, ref) });
       }
+      const staged = await verifyPackage(scope, version, original.releaseKeys, signed.bundleDigest, false, signal, casRoot,
+        new Map(casFiles.map(file => [file.name, file])));
       await checkPackageGraph(sourceScope, packageDirectory, signed.bundle, signed.modelAuthority);
       for (const file of [signed.manifest, ...signed.entries.values(), ...signed.companionFiles]) { signal?.throwIfAborted(); await verifyBytes(file, signal); }
       for (const file of casFiles) { signal?.throwIfAborted(); await verifyBytes(file, signal); }
       await sourceScope.close(); await syncDirectories(scope); await original.revalidate(signal);
       anchor.assertHeld(); anchor.close();
+      noteUpgradePhase(observePhase, 'stage_owner_history');
       const artifacts = new ArtifactCatalog(cas, signal, original.releaseKeys).withRuntimeConversionSource(signed.bundleDigest);
       const database = openReadOnlySqliteDriver(path.join(stateRoot, KERNEL_DATABASE_FILENAME));
       let supervisorBirth: PlatformProcessIdentityV1, supervisorOwner: StateOwnerRecordV1;
@@ -2742,6 +2828,7 @@ export async function stageInstalledRuntimeUpgrade(selected: HeldInstalledRuntim
           mismatch('upgrade refuses to stop an installation with nonterminal Runs');
         database.readSnapshot(connection => history.assertUnchanged(connection));
       } finally { database.close(); }
+      noteUpgradePhase(observePhase, 'stage_native');
       const nativeEntry = staged.bundle.entries.find(entry => entry.entryId === STATE_OWNER_NATIVE_ENTRY_ID)!;
       const nativeFile = staged.entries.get(nativeEntry.entryId)!;
       const native = await loadHeldStateOwnerImage(nativeFile.handle, staged.bundle);
@@ -2756,9 +2843,10 @@ export async function stageInstalledRuntimeUpgrade(selected: HeldInstalledRuntim
       let closed = false, transactionActive = false, credential: UpgradeCredentialLifetime | undefined, selectionRef: string | undefined;
       let running: Promise<unknown> | undefined, closePromise: Promise<void> | undefined, stopPromise: Promise<void> | undefined;
       let activeStop: NativeCredentialInspection | undefined, stopCancellation: Promise<void> | undefined;
+      const distinctCasFiles = casFiles.filter(file => !staged.delegatedRefs.has(file.name));
       const assertAlive = () => { if (closed) mismatch('upgrade stage has closed'); signal?.throwIfAborted(); healthy(); };
       const assertBirth = () => {
-        assertAlive(); scope.assertMetadata([staged.manifest, newBootstrap, ...staged.entries.values(), ...originalFiles, ...casFiles]);
+        assertAlive(); scope.assertMetadata([staged.manifest, newBootstrap, ...staged.entries.values(), ...originalFiles, ...distinctCasFiles]);
         if (upgradeDirectoryIdentity(stage).fileId !== source.stageIdentity.fileId) mismatch('upgrade stage birth changed');
       };
       const prepared: InstalledUpgradeTransaction = Object.freeze({ stateRoot, bundle: staged.bundle, releaseKeys: original.releaseKeys,
@@ -2766,9 +2854,9 @@ export async function stageInstalledRuntimeUpgrade(selected: HeldInstalledRuntim
         supervisorOwner: immutableSnapshot(supervisorOwner),
         async assertCurrent() {
           assertBirth(); await scope.assertDirectories();
-          await scope.verifyDiscard([staged.manifest, newBootstrap, ...staged.entries.values(), ...originalFiles, ...casFiles], signal);
-          await checkPackageGraph(scope, version, staged.bundle);
-          await checkPackageGraph(scope, oldVersion, oldSigned.bundle); assertBirth();
+          await scope.verifyDiscard([staged.manifest, newBootstrap, ...staged.entries.values(), ...originalFiles, ...distinctCasFiles], signal);
+          await checkPackageGraph(scope, version, staged.bundle, undefined, staged.delegatedPaths);
+          await checkPackageGraph(scope, oldVersion, oldSigned.bundle, undefined, oldSigned.delegatedPaths); assertBirth();
         },
         assertCommit() {
           if (!transactionActive || !credential) mismatch('upgrade transaction lost its original credential exclusion');
@@ -2820,8 +2908,10 @@ export async function stageInstalledRuntimeUpgrade(selected: HeldInstalledRuntim
           });
       } });
       installedUpgradeStages.set(held, { prepared, active: () => transactionActive && !closed,
+        notePhase: phase => noteUpgradePhase(observePhase, phase),
         stop(): Promise<void> {
           assertAlive();
+          noteUpgradePhase(observePhase, 'stop_original');
           return stopPromise ??= (async () => {
             if (!transactionActive || !credential) mismatch('upgrade stop requires its original credential exclusion');
             const { observeInstalledCredentialSupervisor } = await import('./installed-services.js');
@@ -2862,6 +2952,7 @@ export async function stageInstalledRuntimeUpgrade(selected: HeldInstalledRuntim
         },
         run<T>(operation: () => Promise<T>): Promise<T> {
           assertAlive(); if (running) return Promise.reject(new TypeError('upgrade stage already has its sole transaction'));
+          noteUpgradePhase(observePhase, 'credential_exclusion');
           const pending = withHeldCredentialNativeScope(native, { image: nativeFile.handle, root: state.handle,
             rootIdentity: state.info, stateRoot }, async originalCredential => {
               credential = originalCredential; transactionActive = true;
@@ -2871,6 +2962,7 @@ export async function stageInstalledRuntimeUpgrade(selected: HeldInstalledRuntim
           running = pending; return pending;
         },
         async publish(receiptRef, receipt) {
+          noteUpgradePhase(observePhase, 'publish_selection');
           assertBirth();
           if (selectionRef !== receiptRef || receipt.installation.kind !== 'held_installed_stage' ||
               canonicalSha256(receipt.installation) !== canonicalSha256(source)) mismatch('upgrade publication lacks its registered original stage');
@@ -2917,6 +3009,7 @@ export async function completeInstalledRuntimeUpgrade(stage: HeldInstalledRuntim
   try {
     return await binding.run(async () => {
       await binding.stop();
+      binding.notePhase?.('conversion');
       const { upgradeRetiredRuntime } = await import('./runtime-upgrade.js');
       const prepared = binding.prepared;
       const receipt = await upgradeRetiredRuntime({ stateRoot: prepared.stateRoot,
@@ -2980,12 +3073,15 @@ export async function recoverInstalledRuntimeUpgrade(stateRoot: string, receiptR
     if (localBundle && publishedBundle || !localBundle && !publishedBundle ||
         !upgradeIdentityMatches(localBundle ?? publishedBundle, registered.targetBundleIdentity)) mismatch('registered upgrade bundle birth is missing or replaced');
     const version = localBundle ? await scope.directory(stage, 'package') : await scope.directory(bundles, registered.targetBundleDigest);
-    const signed = await verifyPackage(scope, version, releaseKeys, registered.targetBundleDigest, false, signal);
+    const casRoot = await scope.directory(state, KERNEL_CAS_DIRECTORY);
+    const signed = await verifyPackage(scope, version, releaseKeys, registered.targetBundleDigest, false, signal, casRoot);
+    requireSingleCasBundle(signed.bundle);
     const originalVersion = await scope.directory(bundles, registered.sourceBundleDigest);
-    const original = await verifyPackage(scope, originalVersion, releaseKeys, registered.sourceBundleDigest, false, signal);
-    const casRoot = await scope.directory(state, KERNEL_CAS_DIRECTORY), casFiles: InstalledFile[] = [];
+    const original = await verifyPackage(scope, originalVersion, releaseKeys, registered.sourceBundleDigest, false, signal, casRoot);
+    const casFiles: InstalledFile[] = [];
     for (const [ref, bytes] of signed.roots) casFiles.push(await scope.file(casRoot, ref, 0o400, bytes.length, ref));
-    for (const [ref, image] of signed.streamedRoots) casFiles.push(await scope.file(casRoot, ref, 0o400, Number(image.info.size), ref));
+    for (const [ref, image] of signed.streamedRoots)
+      if (!signed.delegatedRefs.has(ref)) casFiles.push(await scope.file(casRoot, ref, 0o400, Number(image.info.size), ref));
     if (registered.targetModelAuthorityRef) casFiles.push(...await readInstalledCompanionFromCas(scope, casRoot, signed, registered.targetModelAuthorityRef, releaseKeys));
     for (const file of casFiles) await verifyBytes(file, signal);
     const targetSupervisor = signed.bundle.entries.find(entry => entry.role === 'supervisor')!;
@@ -3049,7 +3145,8 @@ export async function recoverInstalledRuntimeUpgrade(stateRoot: string, receiptR
     const prepared: InstalledUpgradeTransaction = Object.freeze({ stateRoot, bundle: signed.bundle, releaseKeys, native,
       seed: [], source: registered, supervisorBirth: sourceProcess, supervisorOwner,
       async assertCurrent() { assertSource(); await scope.assertDirectories(); await scope.verifyDiscard(files, signal);
-        await checkPackageGraph(scope, version, signed.bundle); await checkPackageGraph(scope, originalVersion, original.bundle); assertSource(); },
+        await checkPackageGraph(scope, version, signed.bundle, undefined, signed.delegatedPaths);
+        await checkPackageGraph(scope, originalVersion, original.bundle, undefined, original.delegatedPaths); assertSource(); },
       assertCommit() { assertSource(); assertDeath(); }, assertOldProcessesDead: assertDeath,
       prepareSelection(ref) { if (ref !== receiptRef) return Promise.reject(new TypeError('recovery cannot prepare another decision')); return Promise.resolve(); },
       publishSelection(ref, originalReceipt) {
@@ -3117,12 +3214,13 @@ export function assertInstalledUpgradeHelloBundle(summary: SupervisorHelloV1['ac
  * never accepts a trust root, unit, process locator or recovery fact from argv.
  * Productive execution starts only through the existing installed services. */
 export async function upgradeInstalledRuntime(runtime: InstalledRuntime, stateRoot: string, packageRoot: string,
-  signal?: AbortSignal): Promise<RuntimeUpgradeReceiptV1> {
+  signal?: AbortSignal, observePhase?: (phase: InstalledRuntimeUpgradePhase) => void): Promise<RuntimeUpgradeReceiptV1> {
   const releaseKeys = installedRuntimeTrust.get(runtime);
   if (!releaseKeys) mismatch('upgrade requires the original trusted runtime composition');
   if (normalizeAbsolutePath(stateRoot) !== stateRoot || normalizeAbsolutePath(packageRoot) !== packageRoot)
     mismatch('upgrade requires canonical installation and package locators');
   signal?.throwIfAborted();
+  noteUpgradePhase(observePhase, 'read_schema');
   let receiptRef: string | undefined;
   const database = openReadOnlySqliteDriver(path.join(stateRoot, KERNEL_DATABASE_FILENAME));
   try {
@@ -3138,22 +3236,26 @@ export async function upgradeInstalledRuntime(runtime: InstalledRuntime, stateRo
     } else if (version !== 7n) mismatch('only the exact signed7-to8 installed upgrade is implemented');
   } finally { database.close(); }
   let receipt: RuntimeUpgradeReceiptV1;
-  if (receiptRef) receipt = await recoverInstalledRuntimeUpgrade(stateRoot, receiptRef, releaseKeys, signal);
+  if (receiptRef) { noteUpgradePhase(observePhase, 'recover_selection'); receipt = await recoverInstalledRuntimeUpgrade(stateRoot, receiptRef, releaseKeys, signal); }
   else {
-    const original = await runtime.openSelected(stateRoot);
+    noteUpgradePhase(observePhase, 'source_open');
+    const original = await (runtime.openSelected as (this: InstalledRuntime, root: string,
+      layout: typeof originalUpgradeLayout) => Promise<HeldInstalledRuntime>).call(runtime, stateRoot, originalUpgradeLayout);
     try {
       // A prior precommit attempt may have stopped these original services.
       // Only schema7 reaches this branch: start the same verified fixed units
       // and authenticate real old-runtime READY before capturing a new stage.
       const { observeInstalledCredentialSupervisor } = await import('./installed-services.js');
+      noteUpgradePhase(observePhase, 'source_services');
       await observeInstalledCredentialSupervisor(original, true);
       const { openInstalledControlSession } = await import('../control/session.js');
+      noteUpgradePhase(observePhase, 'source_control');
       const originalSession = await openInstalledControlSession(original);
       try {
         assertInstalledUpgradeHelloBundle(originalSession.hello.activeRuntimeBundle, original.bundle);
       } finally { await originalSession.close(); }
       signal?.throwIfAborted();
-      const stage = await stageInstalledRuntimeUpgrade(original, packageRoot, signal);
+      const stage = await stageInstalledRuntimeUpgrade(original, packageRoot, signal, observePhase);
       const abort = () => { void stage.close().catch(rememberRetirement); };
       signal?.addEventListener('abort', abort, { once: true });
       try { signal?.throwIfAborted(); receipt = await completeInstalledRuntimeUpgrade(stage); }
@@ -3161,13 +3263,16 @@ export async function upgradeInstalledRuntime(runtime: InstalledRuntime, stateRo
     } finally { await original.close(); }
   }
   signal?.throwIfAborted();
+  noteUpgradePhase(observePhase, 'target_open');
   const selected = await runtime.openSelected(stateRoot);
   try {
     if (selected.bundleDigest !== receipt.targetRuntimeBundleRef || selected.bundle.manifestDigest !== receipt.targetRuntimeBundleManifestDigest)
       mismatch('upgrade restart selected another runtime');
     const { observeInstalledCredentialSupervisor } = await import('./installed-services.js');
+    noteUpgradePhase(observePhase, 'target_services');
     await observeInstalledCredentialSupervisor(selected, true);
     const { openInstalledControlSession } = await import('../control/session.js');
+    noteUpgradePhase(observePhase, 'target_control');
     const session = await openInstalledControlSession(selected);
     try {
       assertInstalledUpgradeHelloBundle(session.hello.activeRuntimeBundle, selected.bundle);

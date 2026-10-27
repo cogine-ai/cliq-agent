@@ -4,12 +4,12 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
-import { chmod, lstat, mkdir, open, realpath, symlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, open, realpath, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { canonicalJsonBytes } from '../../../src/kernel/canonical.js';
 import { readQualificationSource, type FrozenQualificationSource } from './qualification-source.js';
-import { readQualificationDependencyTree } from './qualification-dependencies.js';
+import { installQualificationDependencies, readQualificationDependencyInventory } from './qualification-dependencies.js';
 import { prepareSupervisorSeaCarrier, SUPERVISOR_SEA_NODE_VERSION, SUPERVISOR_SEA_CARRIER_CHECKSUMS } from './supervisor-sea-builder.js';
 import { readNativeCallbackEvidence } from './native-callback-evidence.js';
 
@@ -81,19 +81,24 @@ export async function qualifyNativeCallbackLifecycle(destination: string) {
     }
     const lock = inventory.find(row => row.path === 'package-lock.json')!;
     assert.equal(lock.sha256, sha(await heldBytes(path.join(repository, 'package-lock.json'), 16 * 1024 * 1024)));
-    await symlink(path.join(repository, 'node_modules'), path.join(root, 'node_modules'));
     for (const member of inventory) await chmod(path.join(root, member.path), member.mode === '100755' ? 0o555 : 0o444);
-    const directories = new Set([root]);
-    for (const member of inventory) for (let directory = path.dirname(path.join(root, member.path)); directory !== root; directory = path.dirname(directory)) directories.add(directory);
-    for (const directory of directories) await chmod(directory, 0o555);
     const manifestPath = path.join(destination, name + '.inventory.json'), manifest = canonicalJsonBytes({ inventory });
     await writeFile(manifestPath, manifest, { flag: 'wx', mode: 0o400 });
     const source: FrozenQualificationSource = Object.freeze({ root, manifestPath, manifestSha256: sha(manifest) });
+    stage = 'dependencies';
+    // Ordinary npm postinstall may hard-link its esbuild aliases. Preserve the
+    // original single-link guard by using the existing independent, exact-lock
+    // integrity installer with disabled scripts and isolated HOME/cache.
+    await installQualificationDependencies(source);
+    const directories = new Set([root]);
+    for (const member of inventory) for (let directory = path.dirname(path.join(root, member.path)); directory !== root; directory = path.dirname(directory)) directories.add(directory);
+    for (const directory of directories) await chmod(directory, 0o555);
     const before = await readQualificationSource(source);
-    return { source, before, record: { name, originalGitCommit: revision, originalGitTree: expectedTree,
+    const dependencies = await readQualificationDependencyInventory(source); stage = 'source_inventory';
+    return { source, before, dependencies, record: { name, originalGitCommit: revision, originalGitTree: expectedTree,
       fixtureOverlay: name === 'baseline' ? overlays : {}, sourceMembersMatchUnmodifiedGitTree: name !== 'baseline',
       nativeSha256: name === 'baseline' ? original.native : candidateNative, archive: await pin(archiveFile),
-      manifest: await pin(manifestPath), provenance: before } };
+      manifest: await pin(manifestPath), provenance: before, dependencies } };
   };
   try {
     const current = git('rev-parse', 'HEAD').toString().trim(), currentTree = git('rev-parse', 'HEAD^{tree}').toString().trim();
@@ -107,9 +112,9 @@ export async function qualifyNativeCallbackLifecycle(destination: string) {
       assert((await heldBytes(path.join(candidate.source.root, relative), 16 * 1024 * 1024)).equals(bytes));
       report.originalRecipeAndTestFiles.push({ path: relative, bytes: bytes.length, sha256: sha(bytes) });
     }
-    stage = 'dependencies'; const dependencies = path.join(repository, 'node_modules');
-    const dependencyCut = await readQualificationDependencyTree(dependencies); report.sharedDependencyCut = dependencyCut;
-    report.sharedDependencyRoot = dependencies; report.views = [baseline.record, candidate.record];
+    stage = 'dependencies'; assert.equal(baseline.dependencies.contentDigest, candidate.dependencies.contentDigest);
+    report.dependencyMode = 'independent_original_lock_integrity_no_scripts';
+    report.identicalDependencyContentDigest = baseline.dependencies.contentDigest; report.views = [baseline.record, candidate.record];
     stage = 'carrier'; const carrierRoot = path.join(destination, 'carrier'); await mkdir(carrierRoot, { mode: 0o700 });
     await prepareSupervisorSeaCarrier(carrierRoot, process.env.CLIQ_QUALIFICATION_CARRIER_ARCHIVE);
     const carrierArchive = path.join(carrierRoot, `node-v${SUPERVISOR_SEA_NODE_VERSION}-linux-x64.tar.xz`);
@@ -117,7 +122,7 @@ export async function qualifyNativeCallbackLifecycle(destination: string) {
     for (const view of [baseline, candidate]) {
       stage = view.record.name;
       const temporary = path.join(destination, view.record.name + '-tmp'); await mkdir(temporary, { mode: 0o700 });
-      assert.equal(await readQualificationDependencyTree(dependencies), dependencyCut);
+      assert.deepEqual(await readQualificationDependencyInventory(view.source), view.dependencies);
       assert.deepEqual(await readQualificationSource(view.source), view.before);
       assert.deepEqual(await pin(carrierArchive), carrierPin);
       const argv = ['--test', '--test-reporter=tap', '--test-concurrency=1', '--import', 'tsx', ...suite];
@@ -137,7 +142,7 @@ export async function qualifyNativeCallbackLifecycle(destination: string) {
         code: run.status, signal: run.signal, joined }); }
       catch { record.evidenceRefused = true; } // Preserve all original failed output; never relabel unknown failure as RED.
       record.sourceAfter = await readQualificationSource(view.source); assert.deepEqual(record.sourceAfter, view.before);
-      assert.equal(await readQualificationDependencyTree(dependencies), dependencyCut); assert.deepEqual(await pin(carrierArchive), carrierPin);
+      assert.deepEqual(await readQualificationDependencyInventory(view.source), view.dependencies); assert.deepEqual(await pin(carrierArchive), carrierPin);
     }
     report.qualified = report.views.every((view: Record<string, any>) => view.evidence && !view.evidenceRefused);
   } catch { report.failureStage = stage; }

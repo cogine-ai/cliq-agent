@@ -14,7 +14,7 @@ import { advanceTimeFence, readTimeFence } from './canonical-time.js';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
 import { readRetainedVerifierToolchain, guestToolchainRoots } from './guest-toolchain.js';
 import type { HeldInstalledAnchor, HeldInstalledRuntime } from './installed-runtime.js';
-import { withHeldInstalledRuntime } from './installed-runtime.js';
+import { retainInstalledSourceGitRecipe, withHeldInstalledRuntime } from './installed-runtime.js';
 import { openHeldSourceGitInput, type HeldSourceGitInput, type HeldSourceInspectionStaging } from './native-owner.js';
 import { readAuthorizationGrant } from './repositories/authorization-grants.js';
 import { readSourceInspectionAttempt } from './source-inspection.js';
@@ -149,6 +149,10 @@ export function createInstalledSourceGitCapture(driver: SqliteDriver, artifacts:
         const roots = guestToolchainRoots(bootstrap.bundle);
         if (roots.length !== 1) return invalid('source capture has no unique signed guest toolchain');
         const toolchain = await readRetainedVerifierToolchain(reads, { ...bootstrap, guestToolchainManifestRef: roots[0]!.artifactRef, signal });
+        // Retain the original fixed host recipe as inert audit data before any
+        // native birth. Later replay cannot borrow today's installation to fill
+        // a missing source, and cancellation must join these actual writes.
+        await retainInstalledSourceGitRecipe(installed, signal);
         await refresh(); cut(() => {});
         // Set before the call: a throw after allocation is uncertainty, never
         // evidence that native source construction was not attempted.

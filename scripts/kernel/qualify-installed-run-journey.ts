@@ -3761,10 +3761,18 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       assert.equal(canonicalSha256(settlement.released), canonicalSha256(fullCharge));
       const intent = parseJsonStrict((await readCas(failed.stopIntentRef)).toString('utf8')) as Record<string, any>;
       assert.deepEqual(Object.keys(intent).sort(), ['schemaVersion', 'runId', 'createdAt', 'origin', 'targetStatus', 'reason',
-        'runtimeSubtype', 'failingOpId', 'runtimeFailureRef', 'runtimeFailureDigest'].sort());
+        'runtimeSubtype', 'failingOpId', 'runtimeFailureRef', 'runtimeFailureDigest',
+        'registeredCheckpointId', 'registeredRunRevision', 'registeredJournalSeq'].sort());
       assert.equal(intent.schemaVersion, 1); assert.equal(intent.runId, admitted.id); assert.equal(intent.origin, 'runtime');
       assert.equal(intent.targetStatus, 'failed'); assert.equal(intent.reason, 'runtime_failed'); assert.equal(intent.runtimeSubtype, 'runtime');
       assert.equal(intent.failingOpId, prepared.opId); assert(intent.createdAt < failed.deadlineAt);
+      const registeredCheckpoint = terminal.checkpoints.find((checkpoint: any) => checkpoint.id === intent.registeredCheckpointId);
+      assert(registeredCheckpoint, 'the failure must retain its actual originally registered Checkpoint');
+      assert.equal(registeredCheckpoint.runId, admitted.id); assert.equal(registeredCheckpoint.journalSeq, completed.seq);
+      assert.equal(registeredCheckpoint.runItemSeq, terminal.items.length); assert(registeredCheckpoint.createdAt <= intent.createdAt);
+      assert(Number.isSafeInteger(intent.registeredRunRevision) && intent.registeredRunRevision >= admitted.revision &&
+        registeredCheckpoint.basedOnRunRevision <= intent.registeredRunRevision && intent.registeredRunRevision < failed.revision);
+      assert.equal(intent.registeredJournalSeq, completed.seq);
       const evidence = parseJsonStrict((await readCas(intent.runtimeFailureRef)).toString('utf8')) as Record<string, any>;
       assert.deepEqual(Object.keys(evidence).sort(), ['schemaVersion', 'format', 'runId', 'frontierRef', 'frontierDigest', 'failingOpId',
         'inspectorIdentityRef', 'inspectorIdentityDigest', 'observedAt', 'evidenceDigest', 'failureKind', 'unusableResponseRef', 'unusableResponseDigest'].sort());

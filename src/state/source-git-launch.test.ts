@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, sign } from 'node:crypto';
-import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test, type TestContext } from 'node:test';
@@ -102,6 +102,10 @@ test('source Git launch data binds a distinct read-only InputV2 mount and fixed 
   assert(!Object.hasOwn(result.spec, 'operationGrantRef')); assert(!Object.hasOwn(result.spec, 'parentWorkerContainmentRef'));
   assert.deepEqual(await f.artifacts.readCanonical(result.plan.sandboxLaunchSpecRef), result.spec);
   assert.equal(result.plan.reservedBackendIdentity.kind, 'linux');
+  for (const entry of f.bundle.entries.filter(value => ['source_git_inspector', 'linux_worker_controller'].includes(value.entryId))) {
+    assert.deepEqual(result.metadata.filter(value => value.ref === entry.digest), [{ ref: entry.digest, byteLength: entry.byteCount,
+      mediaType: 'application/octet-stream', schemaKind: 'cliq-source-git-recipe-member-v1' }]);
+  }
   // This is real CAS/signed-data publication only: the fabricated data
   // reservation is deliberately not a native scope, launch or SQL permit.
 });
@@ -146,6 +150,17 @@ test('retained source launch reopens the complete original CAS recipe and reject
   await rm(path.join(f.directory, 'cas', helper.digest));
   await assert.rejects(audit());
 });
+
+for (const entryId of ['source_git_inspector', 'linux_worker_controller']) test(
+  `source Git launch refuses missing original ${entryId} bytes before publishing its plan or spec`, async t => {
+    const f = await fixture(t), entry = f.bundle.entries.find(value => value.entryId === entryId)!;
+    await rm(path.join(f.directory, 'cas', entry.digest));
+    const before = (await readdir(path.join(f.directory, 'cas'))).sort();
+    // Signed inert data only: no native, Run, StateOwner or launch authority.
+    // The old fixture's eager publication must not hide this production gap.
+    await assert.rejects(publishSourceGitLaunch(f.artifacts, f, '3'.repeat(64)));
+    assert.deepEqual((await readdir(path.join(f.directory, 'cas'))).sort(), before);
+  });
 
 test('source Git launch refuses foreign target/input/resource/runtime or caller-selected helper data', async t => {
   const f = await fixture(t);

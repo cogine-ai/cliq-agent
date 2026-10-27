@@ -9,8 +9,10 @@ import { BUILTIN_SCRIPT_TOOL_NAMES, decodeToolExecutionIdentity, assertBuiltinSc
 /** Supplied by trusted Supervisor composition, never by a Run, repository, worker or control request. */
 export type ReleaseTrustKey = { keyId: string; publicKeyPem: string };
 
-export type RuntimeBundleManifest = {
-  schemaVersion: 1; bundleVersion: string;
+export const SINGLE_CAS_STREAMS_LAYOUT = 'single_cas_streams_v1' as const;
+
+type RuntimeBundleContents = {
+  bundleVersion: string;
   controlProtocolRange: { min: 1; max: 1 };
   headlessSchemaRange: { min: number; max: number };
   stateSchemaRange: { min: number; max: number };
@@ -22,6 +24,13 @@ export type RuntimeBundleManifest = {
   guestToolchainManifestRefs: string[];
   publisherKeyId: string; manifestDigest: string; signature: string;
 };
+
+/** Version 1 remains readable as original signed history. New installed
+ * execution requires the explicitly signed version 2 custody contract. */
+export type RuntimeBundleManifest = RuntimeBundleContents & (
+  { schemaVersion: 1; installedLayout?: never } |
+  { schemaVersion: 2; installedLayout: typeof SINGLE_CAS_STREAMS_LAYOUT }
+);
 
 export function exactKeys(value: object, keys: readonly string[]): boolean {
   return value !== null && typeof value === 'object' && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
@@ -43,7 +52,8 @@ export function verifyRuntimeBundle(bundle: RuntimeBundleManifest, releaseKeys: 
   const { signature: _signature, manifestDigest: _digest, ...bundleCore } = bundle;
   if (!exactKeys(bundle, ['schemaVersion', 'bundleVersion', 'controlProtocolRange', 'headlessSchemaRange',
     'stateSchemaRange', 'workerProtocolRange', 'entries', 'structuredArtifacts', 'guestToolchainManifestRefs',
-    'publisherKeyId', 'manifestDigest', 'signature']) || bundle.schemaVersion !== 1 ||
+    'publisherKeyId', 'manifestDigest', 'signature', ...(bundle.schemaVersion === 2 ? ['installedLayout'] : [])]) ||
+      !(bundle.schemaVersion === 1 || bundle.schemaVersion === 2 && bundle.installedLayout === SINGLE_CAS_STREAMS_LAYOUT) ||
       typeof bundle.bundleVersion !== 'string' || !bundle.bundleVersion || canonicalJsonBytes(bundle).byteLength > 1_048_576 ||
       canonicalSha256(bundleCore) !== bundle.manifestDigest) throw new TypeError('RuntimeBundle identity mismatch');
   for (const range of [bundle.controlProtocolRange, bundle.headlessSchemaRange, bundle.stateSchemaRange, bundle.workerProtocolRange]) {

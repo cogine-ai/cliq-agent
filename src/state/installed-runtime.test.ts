@@ -16,7 +16,7 @@ import { identityHash, sha256Bytes } from '../kernel/identity.js';
 import { policyProfile, verifyRuntimeBundle, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { ARTIFACT_CHUNK_BYTES, ContentAddressedStore } from './cas.js';
 import { assertInstalledManagerObservationAvailable, createInstalledRuntime, loadInstalledCredentialPlatform, loadInstalledManagerObserver,
-  readInstalledRuntimeObservation, type InstalledRuntimeObservation, type HeldInstalledRuntime, withHeldInstalledRuntime } from './installed-runtime.js';
+  readInstalledRuntimeObservation, retainInstalledSourceGitRecipe, type InstalledRuntimeObservation, type HeldInstalledRuntime, withHeldInstalledRuntime } from './installed-runtime.js';
 import { STATE_OWNER_NATIVE_ENTRY_ID, STATE_OWNER_NATIVE_RELATIVE_PATH } from './native-owner.js';
 import { openInstalledLinuxWorkerLauncher } from '../sandbox/linux-worker.js';
 import { KernelStorageError } from './errors.js';
@@ -36,7 +36,7 @@ type InstallerFile = Omit<RuntimeBundleManifest['entries'][number], 'digest' | '
 };
 async function writeInstallerOnlyPackage(packageRoot: string, unclosedPromptRole?: 'system_prompt' | 'compaction_prompt',
   supervisorBytes?: Buffer, guestImageBytes?: Buffer, sourceInspector?: InstallerFile, builtinScriptBytes?: Buffer,
-  skills?: ReturnType<typeof buildBundledSkillPackageData>) {
+  skills?: ReturnType<typeof buildBundledSkillPackageData>, sourceControllerBytes?: Buffer) {
   await mkdir(packageRoot, { mode: 0o700 });
   const profile = policyProfile();
   const rootCore = {
@@ -60,6 +60,8 @@ async function writeInstallerOnlyPackage(packageRoot: string, unclosedPromptRole
       bytes: canonicalJsonBytes(rootRecipe) },
   ];
   if (sourceInspector) contents.push(sourceInspector);
+  if (sourceControllerBytes) contents.push({ entryId: 'linux_worker_controller', role: 'platform_helper', version: '1',
+    relativePath: 'native/cliq-linux-worker-controller', executable: true, bytes: sourceControllerBytes });
   if (builtinScriptBytes) contents.push({ entryId: 'builtin_tools', role: 'tool_adapter',
     relativePath: 'adapters/builtin-tools.mjs', executable: false, bytes: builtinScriptBytes });
   if (skills) contents.push(...skills.contents);
@@ -108,7 +110,7 @@ async function writeInstallerOnlyPackage(packageRoot: string, unclosedPromptRole
     entries.push({ ...entry, version, digest: sha256Bytes(bytes), byteCount: bytes.byteLength });
   }
   const bundle: RuntimeBundleManifest = {
-    schemaVersion: 1, bundleVersion: 'installer-file-verification-only-v1',
+    schemaVersion: 2, installedLayout: 'single_cas_streams_v1', bundleVersion: 'installer-file-verification-only-v1',
     controlProtocolRange: { min: 1, max: 1 }, headlessSchemaRange: { min: 1, max: 1 },
     stateSchemaRange: { min: 1, max: KERNEL_STATE_SCHEMA_VERSION }, workerProtocolRange: { min: 1, max: 1 },
     entries,
@@ -133,6 +135,36 @@ const sourceInspectorFile = (overrides: Partial<InstallerFile> = {}): InstallerF
   entryId: 'source_git_inspector', role: 'platform_helper', version: '1',
   relativePath: 'helpers/source-git-inspector.mjs', executable: false,
   bytes: Buffer.from('// signed installer-only source inspector; never executed\n'), ...overrides,
+});
+
+test('the signed installed layout is explicit, versioned and cannot be changed without a new release signature', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'cliq-layout-signature-'));
+  try {
+    const original = await writeInstallerOnlyPackage(path.join(root, 'package'));
+    const keys = generateKeyPairSync('ed25519');
+    const releaseKeys = [{ keyId: 'layout-signature-component', publicKeyPem: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString() }];
+    const signed = (version: number, layout: unknown) => {
+      const { signature: _signature, manifestDigest: _digest, ...old } = original.bundle;
+      const core = { ...old, schemaVersion: version, installedLayout: layout, publisherKeyId: releaseKeys[0]!.keyId };
+      const manifestDigest = canonicalSha256(core);
+      return { ...core, manifestDigest, signature: sign(null, Buffer.from(`cliq-runtime-bundle-v1\0${manifestDigest}`), keys.privateKey).toString('base64') };
+    };
+    const modern = signed(2, 'single_cas_streams_v1');
+    assert.doesNotThrow(() => verifyRuntimeBundle(modern as unknown as RuntimeBundleManifest, releaseKeys));
+    assert.doesNotThrow(() => validateBundle(modern, releaseKeys));
+    for (const value of [signed(1, 'single_cas_streams_v1'), signed(2, 'arbitrary_data'), signed(2, null), signed(2, true),
+      { ...modern, installedLayout: 'arbitrary_data' }, { ...modern, schemaVersion: 1 }]) {
+      assert.throws(() => verifyRuntimeBundle(value as unknown as RuntimeBundleManifest, releaseKeys));
+    }
+    // This is retained signed data only; an old manifest is not a capability
+    // to open a new installed execution scope or select a fallback layout.
+    const { installedLayout: _layout, ...modernCore } = modern;
+    const { signature: _signature, manifestDigest: _digest, ...legacyCore } = { ...modernCore, schemaVersion: 1 };
+    const manifestDigest = canonicalSha256(legacyCore);
+    const legacy = { ...legacyCore, manifestDigest, signature: sign(null,
+      Buffer.from(`cliq-runtime-bundle-v1\0${manifestDigest}`), keys.privateKey).toString('base64') };
+    assert.doesNotThrow(() => verifyRuntimeBundle(legacy as RuntimeBundleManifest, releaseKeys));
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test('npm data has one exact signed non-executable pair without widening other script or bundle-object roles', async () => {
@@ -511,8 +543,72 @@ if (process.platform === 'linux') test('installed work measurements count the re
   }
 });
 
-if (process.platform === 'linux') for (const copy of ['bundle', 'cas'] as const) {
-  test(`a newly opened selection rejects the last corrupted byte of its independent ${copy} guest image`, async () => {
+if (process.platform === 'linux') test('source preparation retains its two original fixed recipe members as inert CAS data through the held installation', async () => {
+  const fixture = await realpath(await mkdtemp(path.join(os.tmpdir(), 'cliq-source-recipe-retain-')));
+  const packageRoot = path.join(fixture, 'package'), stateRoot = path.join(fixture, 'state');
+  let selected: HeldInstalledRuntime | undefined;
+  try {
+    const inspector = sourceInspectorFile(), controllerBytes = Buffer.from('opaque controller data; never executed by this test\n');
+    const signed = await writeInstallerOnlyPackage(packageRoot, undefined, undefined, undefined, inspector, undefined, undefined, controllerBytes);
+    const runtime = createInstalledRuntime({ releaseKeys: signed.releaseKeys });
+    const installed = await runtime.installInitial({ packageRoot, stateRoot }); selected = await runtime.openSelected(stateRoot);
+    const members = signed.contents.filter(entry => ['source_git_inspector', 'linux_worker_controller'].includes(entry.entryId));
+    assert.equal(members.length, 2);
+    for (const entry of members) await assert.rejects(lstat(path.join(stateRoot, KERNEL_CAS_DIRECTORY, sha256Bytes(entry.bytes))), { code: 'ENOENT' });
+    await retainInstalledSourceGitRecipe(selected);
+    for (const entry of members) {
+      const original = path.join(stateRoot, 'runtime/bundles', installed.bundleDigest, entry.relativePath);
+      const audit = path.join(stateRoot, KERNEL_CAS_DIRECTORY, sha256Bytes(entry.bytes));
+      const [host, cas] = await Promise.all([lstat(original), lstat(audit)]);
+      assert.equal(host.nlink, 1); assert.equal(cas.nlink, 1); assert.equal(cas.mode & 0o7777, 0o400);
+      assert.equal(host.mode & 0o7777, entry.executable ? 0o500 : 0o400);
+      assert.notEqual(`${host.dev}:${host.ino}`, `${cas.dev}:${cas.ino}`);
+      assert.deepEqual(await readFile(original), entry.bytes); assert.deepEqual(await readFile(audit), entry.bytes);
+    }
+    await retainInstalledSourceGitRecipe(selected); // Existing CAS must be completely verified again.
+    const inspectorRef = sha256Bytes(inspector.bytes), audit = path.join(stateRoot, KERNEL_CAS_DIRECTORY, inspectorRef);
+    await chmod(audit, 0o600);
+    const writer = await open(audit, constants.O_WRONLY | constants.O_NOFOLLOW);
+    try { await writer.write(Buffer.from([inspector.bytes[0]! ^ 1]), 0, 1, 0); await writer.sync(); }
+    finally { await writer.close(); }
+    await chmod(audit, 0o400);
+    await assert.rejects(retainInstalledSourceGitRecipe(selected), { code: 'ARTIFACT_MISMATCH' });
+    assert.notDeepEqual(await readFile(audit), inspector.bytes, 'the old corrupted CAS object is not overwritten from a current host file');
+    const closedSelection = selected;
+    await selected.close(); selected = undefined;
+    await assert.rejects(retainInstalledSourceGitRecipe(closedSelection), { code: 'ARTIFACT_MISMATCH' });
+    await assert.rejects(lstat(path.join(stateRoot, KERNEL_DATABASE_FILENAME)), { code: 'ENOENT' });
+    assert.throws(() => retainInstalledSourceGitRecipe({} as HeldInstalledRuntime), { code: 'ARTIFACT_MISMATCH' });
+  } finally { await selected?.close(); await rm(fixture, { recursive: true, force: true }); }
+});
+
+if (process.platform === 'linux') for (const mutation of ['missing', 'replacement', 'symlink', 'hardlink', 'mode', 'length'] as const)
+  test(`held single-CAS custody refuses actual ${mutation} drift before lending the image again`, async () => {
+    const fixture = await realpath(await mkdtemp(path.join(os.tmpdir(), 'cliq-single-cas-drift-')));
+    let selected: HeldInstalledRuntime | undefined;
+    try {
+      const packageRoot = path.join(fixture, 'package'), stateRoot = path.join(fixture, 'state'), image = Buffer.alloc(65_537, 0x61);
+      const signed = await writeInstallerOnlyPackage(packageRoot, undefined, undefined, image);
+      const runtime = createInstalledRuntime({ releaseKeys: signed.releaseKeys });
+      await runtime.installInitial({ packageRoot, stateRoot }); selected = await runtime.openSelected(stateRoot);
+      await selected.assertHeld();
+      const filename = path.join(stateRoot, KERNEL_CAS_DIRECTORY, sha256Bytes(image)), other = path.join(fixture, 'original-image');
+      if (mutation === 'missing') await rm(filename);
+      else if (mutation === 'replacement' || mutation === 'symlink') {
+        await installFixtureFs.rename(filename, other);
+        if (mutation === 'replacement') await writeFile(filename, image, { flag: 'wx', mode: 0o400 });
+        else await installFixtureFs.symlink(other, filename);
+      } else if (mutation === 'hardlink') await installFixtureFs.link(filename, other);
+      else {
+        await chmod(filename, 0o600);
+        if (mutation === 'length') { await installFixtureFs.truncate(filename, image.length - 1); await chmod(filename, 0o400); }
+      }
+      await assert.rejects(selected.assertHeld(), { code: mutation === 'missing' ? 'ENOENT' : 'ARTIFACT_MISMATCH' });
+    } finally { await selected?.close(); await rm(fixture, { recursive: true, force: true }); }
+  });
+
+if (process.platform === 'linux') for (const copy of ['obsolete_bundle', 'cas'] as const) {
+  test(`single-CAS selection rejects ${copy === 'cas' ? 'the last corrupted CAS byte' : 'an identical extra image at the obsolete bundle path'}`, async () => {
     const fixture = await realpath(await mkdtemp(path.join(os.tmpdir(), `cliq-installed-${copy}-tail-`)));
     const packageRoot = path.join(fixture, 'package'), stateRoot = path.join(fixture, 'state');
     let selected: HeldInstalledRuntime | undefined;
@@ -525,12 +621,24 @@ if (process.platform === 'linux') for (const copy of ['bundle', 'cas'] as const)
       const entry = signed.bundle.entries.find(value => value.digest === ref)!;
       const installedImage = path.join(stateRoot, 'runtime/bundles', installation.bundleDigest, entry.relativePath);
       const casImage = path.join(stateRoot, KERNEL_CAS_DIRECTORY, ref);
-      const installedInfo = await lstat(installedImage), casInfo = await lstat(casImage);
-      assert.equal(installedInfo.nlink, 1); assert.equal(casInfo.nlink, 1);
-      assert.notEqual(`${installedInfo.dev}:${installedInfo.ino}`, `${casInfo.dev}:${casInfo.ino}`);
+      const sourceImage = path.join(packageRoot, entry.relativePath);
+      const sourceInfo = await lstat(sourceImage), casInfo = await lstat(casImage);
+      assert.equal(sourceInfo.nlink, 1); assert.equal(casInfo.nlink, 1);
+      assert.notEqual(`${sourceInfo.dev}:${sourceInfo.ino}`, `${casInfo.dev}:${casInfo.ino}`);
+      await assert.rejects(lstat(installedImage), { code: 'ENOENT' });
+      assert.deepEqual(await readFile(sourceImage), image); assert.deepEqual(await readFile(casImage), image);
+      if (copy === 'obsolete_bundle') {
+        await mkdir(path.dirname(installedImage), { recursive: true, mode: 0o700 });
+        await writeFile(installedImage, image, { flag: 'wx', mode: 0o400 });
+        await assert.rejects(async () => { selected = await runtime.openSelected(stateRoot); }, error =>
+          error instanceof KernelStorageError && error.code === 'ARTIFACT_MISMATCH' &&
+          error.message === 'installed runtime graph contains missing or unsigned paths');
+        assert.deepEqual(await readFile(casImage), image);
+        return;
+      }
       // This owner-controlled corruption precedes openSelected's fresh stat.
       // Refusal must therefore reach the full signed digest, not an old mtime.
-      const filename = copy === 'bundle' ? installedImage : casImage;
+      const filename = casImage;
       await chmod(filename, 0o600);
       const handle = await open(filename, constants.O_WRONLY | constants.O_NOFOLLOW);
       try {
@@ -538,8 +646,8 @@ if (process.platform === 'linux') for (const copy of ['bundle', 'cas'] as const)
         assert.equal(bytesWritten, 1); await handle.sync();
       } finally { await handle.close(); }
       await chmod(filename, 0o400);
-      assert.deepEqual(await readFile(copy === 'bundle' ? casImage : installedImage), image,
-        'the independent original copy remains complete and cannot validate the changed inode');
+      assert.deepEqual(await readFile(sourceImage), image,
+        'the complete independent source cannot substitute for corrupt installed custody');
       await assert.rejects(async () => { selected = await runtime.openSelected(stateRoot); }, error =>
         error instanceof KernelStorageError && error.code === 'ARTIFACT_MISMATCH' &&
         error.message === 'installed runtime signed file digest differs');
@@ -553,18 +661,23 @@ if (process.platform === 'linux') test('successive installed borrows re-read eve
   const subscriber = (value: unknown) => { if (value && typeof value === 'object') observed.push(value as InstalledWorkSnapshot); };
   const descriptor = Object.getOwnPropertyDescriptor(Worker.prototype, 'postMessage')!;
   const workers = new Set<Worker>(), exited = new Set<Worker>(), ids = new Set<number>();
-  let selected: HeldInstalledRuntime | undefined, other: HeldInstalledRuntime | undefined, armed = false, smallJobs = 0;
+  let selected: HeldInstalledRuntime | undefined, other: HeldInstalledRuntime | undefined, armed = false, smallJobs = 0, imageJobs = 0;
   try {
     const packageRoot = path.join(fixture, 'package'), stateRoot = path.join(fixture, 'state');
     const image = Buffer.alloc(8 * 1_048_576 + 17, 0x61);
     const signed = await writeInstallerOnlyPackage(packageRoot, undefined, undefined, image);
     const runtime = createInstalledRuntime({ releaseKeys: signed.releaseKeys });
     await runtime.installInitial({ packageRoot, stateRoot });
+    const imageInfo = await lstat(path.join(stateRoot, KERNEL_CAS_DIRECTORY, sha256Bytes(image)), { bigint: true });
     Object.defineProperty(Worker.prototype, 'postMessage', { ...descriptor, value: function (this: Worker, ...args: unknown[]) {
       const message = args[0] as { fd?: number; id?: number; byteCount?: number } | undefined;
       if (armed && typeof message?.fd === 'number') {
         if (!workers.has(this)) { workers.add(this); this.once('exit', () => exited.add(this)); }
         assert(Number.isSafeInteger(message.id)); assert(!ids.has(message.id!)); ids.add(message.id!);
+        if (message.byteCount === image.length) {
+          const actual = fstatSync(message.fd, { bigint: true });
+          assert.equal(actual.dev, imageInfo.dev); assert.equal(actual.ino, imageInfo.ino); imageJobs++;
+        }
         if (message.byteCount! < 8_388_608) smallJobs++;
       }
       return Reflect.apply(descriptor.value, this, args);
@@ -572,12 +685,14 @@ if (process.platform === 'linux') test('successive installed borrows re-read eve
     diagnostic.subscribe(subscriber); armed = true;
     selected = await runtime.openSelected(stateRoot);
     const initial = observed.at(-1)!.revalidate, bytes = initial.bytesRead - observed[0]!.revalidate.bytesRead;
+    const initialImageJobs = imageJobs;
     assert.equal(workers.size, 2); assert.equal(exited.size, 0);
     for (let round = 1; round <= 16; round++) {
       await selected.assertHeld();
       const current = observed.at(-1)!.revalidate;
       assert.equal(current.bytesRead - initial.bytesRead, round * bytes);
       assert.equal(current.completed - initial.completed, round);
+      assert.equal(imageJobs - initialImageJobs, round, 'each original R fully hashes the one actual installed CAS image exactly once');
       assert.equal(workers.size, 2, 'threads, not results or observations, may be retained');
       assert.equal(exited.size, 0);
     }

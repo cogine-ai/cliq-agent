@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes, X509Certificate } from 'node:crypto';
-import { constants } from 'node:fs';
+import { constants, writeSync } from 'node:fs';
 import { chown, lstat, mkdir, open, readFile, readdir, readlink, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:https';
 import path from 'node:path';
@@ -26,6 +26,7 @@ import { decodeInstalledUpgradeReport, INSTALLED_UPGRADE_PROFILE } from './insta
 import { createInstalledRunObserver } from './installed-run-observer.js';
 import { createUpgradeTlsMaterial } from './installed-upgrade-tls.js';
 import { decodeRuntimeUpgradeReceipt, decodeRuntimeUpgradeRetirement } from '../../../src/state/runtime-upgrade-history.js';
+import { readInstalledRuntimeUpgradeFailureMarker } from '../../../src/state/installed-upgrade-diagnostics.js';
 import { decodeUpgradeResourceIndex, decodeUpgradeResourcePage, UPGRADE_RESOURCE_FAMILIES,
   UPGRADE_RESOURCE_PAGE_ROWS, upgradeResourceSequenceDigest } from '../../../src/state/runtime-upgrade-resources.js';
 
@@ -59,7 +60,12 @@ export async function runInstalledRuntimeUpgradeJourney(filename: string, origin
     return result;
   };
   const acceptedCommand = (executable: string, args: readonly string[], input?: Buffer, timeout?: number) => {
-    const result = command(executable, args, input, timeout); assert.equal(result.status, 0, 'same-user upgrade command refused'); return result.stdout;
+    const result = command(executable, args, input, timeout);
+    if (result.status !== 0) {
+      const marker = readInstalledRuntimeUpgradeFailureMarker(result.stderr);
+      try { if (marker) writeSync(2, marker); } catch { /* Diagnostics cannot replace the original process refusal. */ }
+    }
+    assert.equal(result.status, 0, 'same-user upgrade command refused'); return result.stdout;
   };
   const credential = (metadata: Record<string, unknown>, input?: Buffer) => acceptedCommand(path.join(recipe.stateRoot, 'runtime/bootstrap'),
     ['--bootstrap-credential', canonicalJsonBytes(metadata).toString('base64url')], input, 60000);

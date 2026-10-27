@@ -52,7 +52,11 @@ export function readRetainedPreparingGenerationRetirement(filesystem: HeldStateO
   const held = observations.get(observation), native = readNativeRetainedPreparingGitRetirement(receipt);
   if (!held || held.filesystem !== filesystem || held.receipt !== receipt) throw new TypeError('preparing generation retirement has no same-owner genuine observer');
   assertRetainedPreparingGitInputOwner(filesystem, native.input);
-  if (new Date(assertRetiredGenerationTree(held.tree)).toISOString() !== held.data.observedAt)
-    throw new KernelStorageError('RECOVERY_REQUIRED', 'preparing generation original close observation changed');
+  // assertRetired performs a new native scan and samples its actual time. The
+  // retained receipt keeps the original observation; a later full recheck must
+  // not precede it, but need not land in the same millisecond.
+  const observed = assertRetiredGenerationTree(held.tree);
+  if (!Number.isSafeInteger(observed) || observed < 1 || new Date(observed).toISOString() < held.data.observedAt)
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'preparing generation retirement clock precedes its original observation');
   return held.data;
 }

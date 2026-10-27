@@ -15,7 +15,7 @@ import { verifiedSqliteExtensionIncludes } from '../sqlite-extension-headers.mjs
 import { KERNEL_STATE_SCHEMA_VERSION } from '../../../src/config.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../../../src/kernel/canonical.js';
 import { sha256Bytes } from '../../../src/kernel/identity.js';
-import { policyProfile, verifyRuntimeBundle, type RuntimeBundleManifest } from '../../../src/policy/runtime-authority.js';
+import { policyProfile, SINGLE_CAS_STREAMS_LAYOUT, verifyRuntimeBundle, type RuntimeBundleManifest } from '../../../src/policy/runtime-authority.js';
 import { STATE_OWNER_NATIVE_ENTRY_ID, STATE_OWNER_NATIVE_RELATIVE_PATH } from '../../../src/state/native-owner.js';
 import { buildSupervisorSeaImage, prepareInstalledSupervisorSeaCarrier } from './supervisor-sea-builder.js';
 import { installedModelPackageEntries, writeInstalledModelAuthority, type InstalledModelPackageFixture } from './installed-model-package.js';
@@ -221,7 +221,8 @@ async function buildInstalledSupervisorPackageCore(fixture: string,
   }
   diagnostics.phase=7;
   const bundle: RuntimeBundleManifest = {
-    schemaVersion: 1, bundleVersion: guest ? 'installed-sea-verifier-fixture-v1'
+    ...(schemaVersion === 7 ? { schemaVersion: 1 as const } : { schemaVersion: 2 as const, installedLayout: SINGLE_CAS_STREAMS_LAYOUT }),
+    bundleVersion: guest ? 'installed-sea-verifier-fixture-v1'
       : modelFixture ? 'installed-sea-run-fixture-v1' : 'installed-sea-read-qualification-v1',
     controlProtocolRange: { min: 1, max: 1 }, headlessSchemaRange: { min: options.headlessSchemaVersion ?? 1, max: options.headlessSchemaVersion ?? 1 },
     stateSchemaRange: { min: 1, max: schemaVersion }, workerProtocolRange: { min: 1, max: 1 },

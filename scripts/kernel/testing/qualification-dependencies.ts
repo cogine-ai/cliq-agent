@@ -12,7 +12,8 @@ import type { FrozenQualificationSource } from './qualification-source.js';
 const originals = new WeakMap<FrozenQualificationSource, { cut: string; sourceRoot: string }>();
 const fields = ['dev', 'ino', 'mode', 'uid', 'gid', 'size', 'nlink', 'mtimeNs', 'ctimeNs'] as const;
 export function hasQualificationDependencies(source: FrozenQualificationSource): boolean { return originals.has(source); }
-async function readTree(rootName: string): Promise<string> {
+type DependencyInventory = Readonly<{ physicalDigest: string; contentDigest: string }>;
+async function readTree(rootName: string): Promise<DependencyInventory> {
   const root = await open(rootName, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   let failure: unknown;
   try {
@@ -56,21 +57,28 @@ async function readTree(rootName: string): Promise<string> {
     await visit(rootName, 0);
     for (const [directory, before] of directories) if (!same(before, await lstat(directory, { bigint: true }))) throw new TypeError('build dependency directory changed');
     if (!same(info, await root.stat({ bigint: true }))) throw new TypeError('build dependency root changed');
-    return canonicalSha256({ root: Object.fromEntries(fields.map(key => [key, String(info[key])])), rows, total });
+    return Object.freeze({ physicalDigest: canonicalSha256({ root: Object.fromEntries(fields.map(key => [key, String(info[key])])), rows, total }),
+      contentDigest: canonicalSha256({ rows: rows.map(row => ({ path: row.path, kind: row.kind, mode: row.mode,
+        ...(row.kind === 'file' ? { sha256: row.sha256, byteCount: row.size } :
+          row.kind === 'package_bin_link' ? { target: row.target } : {}) })), total }) });
   } catch (error) { failure = error; throw error; }
   finally { try { await root.close(); } catch (cause) { throw new ResourceRetirementError('build dependency root did not join',
     failure === undefined ? cause : new AggregateError([failure, cause])); } }
 }
 
-/** Full bytes and physical cut of a shared locked build tree. Provenance only;
- * callers must keep the original lock/root binding and compare both cuts. */
-export async function readQualificationDependencyTree(root: string): Promise<string> { return readTree(root); }
-
-export async function readQualificationDependencies(source: FrozenQualificationSource): Promise<string> {
+async function readOriginalDependencyInventory(source: FrozenQualificationSource): Promise<DependencyInventory> {
   const original = originals.get(source);
   if (!original || original.sourceRoot !== source.root) throw new TypeError('independent build dependencies require their original installation session');
   const actual = await readTree(path.join(source.root, 'node_modules'));
-  if (actual !== original.cut) throw new TypeError('independent build dependencies changed'); return actual;
+  if (actual.physicalDigest !== original.cut) throw new TypeError('independent build dependencies changed'); return actual;
+}
+export async function readQualificationDependencies(source: FrozenQualificationSource): Promise<string> {
+  return (await readOriginalDependencyInventory(source)).physicalDigest;
+}
+/** One original integrity-installed tree, freshly and completely reread. The
+ * content digest compares two independent inputs without merging their owners. */
+export async function readQualificationDependencyInventory(source: FrozenQualificationSource): Promise<DependencyInventory> {
+  return readOriginalDependencyInventory(source);
 }
 
 /** Execute the real old lock's npm-ci integrity checks in an isolated HOME and
@@ -102,7 +110,7 @@ export async function installQualificationDependencies(source: FrozenQualificati
     await chmod(directory, 0o555);
   };
   await freeze(path.join(source.root, 'node_modules'));
-  const cut = await readTree(path.join(source.root, 'node_modules')); originals.set(source, { cut, sourceRoot: source.root });
+  const cut = await readTree(path.join(source.root, 'node_modules')); originals.set(source, { cut: cut.physicalDigest, sourceRoot: source.root });
   const after = await readQualificationSource(source);
   if (before.manifestSha256 !== after.manifestSha256 || before.memberCount !== after.memberCount || before.totalBytes !== after.totalBytes ||
       before.schemaVersion !== after.schemaVersion) throw new TypeError('original source changed while installing its locked dependencies');

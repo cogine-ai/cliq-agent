@@ -388,7 +388,10 @@ async function qualifyPreparingGitSuccessor(selected: { stateVolume: string }, i
     assert.equal(actual.observation.originalControllerStartToken, original.controller.identity.processStartToken);
     input.close(); reservation.close(); assertRetainedPreparingGitInputOwner(lock, input);
     const generation = observeRetainedPreparingGeneration(lock, original.identity, 1, receipt);
+    await new Promise(resolve => setTimeout(resolve, 5));
     const observed = readRetainedPreparingGenerationRetirement(lock, generation, receipt);
+    await new Promise(resolve => setTimeout(resolve, 5));
+    assert.deepEqual(readRetainedPreparingGenerationRetirement(lock, generation, receipt), observed);
     assert.equal(observed.observedState.kind, 'unverified_preparation');
     const quarantine = lock.quarantineGeneration(original.identity, 1);
     assert.equal(quarantine.originalLocatorAbsent, true); assert.equal(quarantine.directoryFsyncComplete, true);

@@ -382,7 +382,8 @@ async function readExecutionEnvironment(artifacts: ArtifactCatalog, owner: State
   const profile = decodeSandboxProfile(profileValue);
   const lock = decodeStateLockIdentity(lockValue); const root = decodeStateRootIdentity(rootValue);
   if (root.identityDigest !== generation.locator.stateRootIdentityDigest || lock.stateRootIdentityRef !== generation.locator.stateRootIdentityRef || lock.stateRootIdentityDigest !== root.identityDigest) mismatch('generation does not belong to the current held state root');
-  if (bundle.schemaVersion !== 1 || !Array.isArray(bundle.entries) || bundle.manifestDigest !== owner.runtimeBundleManifestDigest) mismatch('current StateOwner does not retain a signed execution bundle');
+  if (!(bundle.schemaVersion === 1 || bundle.schemaVersion === 2 && bundle.installedLayout === 'single_cas_streams_v1') ||
+      !Array.isArray(bundle.entries) || bundle.manifestDigest !== owner.runtimeBundleManifestDigest) mismatch('current StateOwner does not retain a signed execution bundle');
   const { signature: _signature, manifestDigest: _manifestDigest, ...bundleCore } = bundle;
   literal(bundle.manifestDigest, canonicalSha256(bundleCore), 'retained bundle digest');
   if (spec.executable.kind !== 'runtime_bundle' && !((spec.purpose === 'verifier' || spec.purpose === 'dependency' || spec.purpose === 'tool' &&

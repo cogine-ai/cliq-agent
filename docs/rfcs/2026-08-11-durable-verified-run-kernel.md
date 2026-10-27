@@ -13609,3 +13609,75 @@ the exact managed `node_modules` subtree digest; the full actual Checkpoint M
 and snapshot/native retirement remain independently mandatory. No standalone
 subtree digest, original refusal, same pathname, data template or CAS presence
 provides capture, execution, death or reuse authority.
+
+### Single-CAS installed data custody (2026-10-28)
+
+This installation-contract revision was approved on 2026-10-28. Its implementation
+and real Linux installation, cross-layout upgrade, rollback, restart and storage
+qualification remain pending. Earlier four-copy qualification is not evidence
+for this layout.
+
+New installed runtime manifests use `schemaVersion:2` and the mandatory signed
+literal `installedLayout:'single_cas_streams_v1'`. The complete JCS core, including
+both fields, remains covered by the existing `cliq-runtime-bundle-v1` signature
+envelope and Ed25519 trust roots. Version 1 has its original closed shape without
+that field and remains readable only as original signed history or as the exact
+source of the existing installed-upgrade controller. A new normal installation
+or execution opening cannot infer a layout from missing fields or paths, or fall
+back to the historical layout.
+
+The only delegated members are non-executable `bundle_object` entries selected
+as complete raw guest images by the fully verified signed guest-toolchain
+closure, and the exact fixed npm data image accepted by `NPM_DATA_RECIPE`.
+Other members, including host executables, native helpers, bootstrap, policy,
+Trust, schema, prompts, skills and credentials, retain their original physical
+locations and independent identity/read obligations. Guest/npm data grants no
+host execution authority and is usable only by its original fixed consumer.
+
+The source package retains every signed member at its original `relativePath`.
+Its full bytes, signature, EOF, no-follow, named/held identities and complete
+namespace are verified. The installed bundle namespace exactly excludes the
+delegated members and ancestors needed only by them; an extra old-position
+copy is an error. Their sole installed physical holder is the original
+StateRoot CAS object named by the signed digest. The original CAS publication,
+file sync, directory/crash stages, complete readback and resource join all
+precede activation. Shared or orphan CAS objects are not deleted on install or
+upgrade rollback. No caller-selected locator or second installation ledger is
+introduced.
+
+The existing Scope, borrow, producer revocation, tail and verification joins
+retain this physical holder. Each of the original sixteen R operations reads
+every authority-bearing physical object from byte zero through exact EOF with
+new hashing, named/held identity and directory checks. Only this explicit signed
+delegation maps a logical signed member and CAS edge to one physical holder;
+there is no general inode/content deduplication or cross-operation/epoch cache.
+For guest images, build/source/unique-installed-CAS are three real independent
+files. The fixed npm builder constructs its image in memory and writes the
+complete source member: its source/CAS files are two actual independent images;
+the original official archive is verified separately and is not another image
+inode. Evidence records these actual objects, without inventing a build copy.
+Host image and bootstrap independence remains unchanged.
+
+First `fresh_installed` genesis still records the complete original CAS closure,
+signed bundle and original model-authority source in its sole StateOwner
+transaction. Upgrade stage, receipt, original/target identities and recovery
+read each signed source according to its own layout. Original generation,
+runtime/upgrade and receipt edges remain GC roots, including delegated data
+absent from a bundle directory. No collector may infer cross-process retirement
+from a local WeakMap or delete data without original stage/borrow retirement.
+
+Maximum fixtures, the original 1-MiB scratch budget, READY5, Stop2, RPC/probe30,
+all byte/cardinality/secret-scan caps and every unverified physical cut remain
+unchanged. Timing eligibility requires actual new-layout evidence.
+
+Source Git preparation must also retain the exact original signed
+`source_git_inspector` and `linux_worker_controller` bytes as inert CAS audit
+data through the same genuine installed Scope, before any native birth or
+prepared launch. The launch publisher completely rereads both original members
+and registers their metadata in the existing prepared transaction. Their host
+files, native seals and execution authority remain independently held; these
+audit copies are not delegated installed data or host execution capabilities.
+Retained replay continues to require both complete original CAS members. Missing
+historical members remain recovery-required and cannot be filled from today's
+installation. A failed/cancelled preparation joins its actual publications and
+may leave inert CAS orphans; it never acquires launch permission from them.

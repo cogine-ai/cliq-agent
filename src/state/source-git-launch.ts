@@ -134,6 +134,14 @@ export async function publishSourceGitLaunch(artifacts: ArtifactCatalog, input: 
   signal?.throwIfAborted();
   if (canonicalSha256(toolchain.manifest) !== canonicalSha256(input.toolchain.manifest) ||
       toolchain.manifest.node.canonicalGuestPath !== '/usr/bin/node' || toolchain.manifest.git.canonicalGuestPath !== '/usr/bin/git') return invalid();
+  const recipeMetadata = [];
+  for (const entry of [inspector, launcher]) {
+    let count = 0;
+    for await (const chunk of reads.readChunks(entry.digest, entry.byteCount)) { signal?.throwIfAborted(); count += chunk.length; }
+    if (count !== entry.byteCount) return invalid();
+    recipeMetadata.push({ ref: entry.digest, byteLength: entry.byteCount,
+      mediaType: 'application/octet-stream', schemaKind: 'cliq-source-git-recipe-member-v1' });
+  }
   const rootImage = sourceRootImage(row, target, rootEntry, rootProfile);
   const [intentArtifact, rootArtifact] = await artifacts.publishCanonicalPair([
     { value: intent, schemaKind: intent.format }, { value: rootImage, schemaKind: rootImage.format }
@@ -152,7 +160,7 @@ export async function publishSourceGitLaunch(artifacts: ArtifactCatalog, input: 
       deviceId: reservation.deviceId, fileId: reservation.fileId, ownerUid: reservation.ownerUid,
       pidNamespaceReservationId: reservation.pidNamespaceReservationId, subreaperStartToken: reservation.subreaperStartToken } };
   return immutableSnapshot({ input: intent, inputRef: intentArtifact.ref, rootImage, containmentPlan, spec, plan,
-    metadata: [intentArtifact, rootArtifact, planArtifact, specArtifact] });
+    metadata: [...recipeMetadata, intentArtifact, rootArtifact, planArtifact, specArtifact] });
 }
 
 async function canonicalData<T>(artifacts: ArtifactCatalog, ref: string, maximum = 1_048_576): Promise<T> {

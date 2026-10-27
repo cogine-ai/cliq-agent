@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { writeSync } from 'node:fs';
 import { getAsset, isSea } from 'node:sea';
 import { assertArtifactRef, assertRequestId, normalizeAbsolutePath } from '../kernel/identity.js';
 import { canonicalJsonBytes, canonicalSha256, normalizeCanonicalText } from '../kernel/canonical.js';
@@ -18,6 +19,7 @@ import { installServices } from './installed-services.js';
 import { loadInstalledCredentialPlatform } from './installed-runtime.js';
 import { installedSandboxProfile } from './installed-sandbox-profile.js';
 import { noteInstalledCredentialPhase } from './installed-diagnostics.js';
+import { installedRuntimeUpgradeFailureMarker, type InstalledRuntimeUpgradePhase } from './installed-upgrade-diagnostics.js';
 
 // Hidden Linux SEA entry. Default CLI startup is unchanged. Release roots are
 // embedded at image construction, never selected by argv/environment/control.
@@ -157,9 +159,11 @@ async function start(): Promise<void> {
     if (stateRoot !== process.argv[3] || packageRoot !== process.argv[4]) throw new Error('expected canonical upgrade locators');
     const stop = new AbortController();
     const cancel = () => stop.abort(new Error('runtime upgrade was cancelled'));
+    let phase: InstalledRuntimeUpgradePhase = 'read_schema';
     process.once('SIGTERM', cancel);
     try {
-      const receipt = await upgradeInstalledRuntime(runtime, stateRoot, packageRoot, stop.signal);
+      const receipt = await upgradeInstalledRuntime(runtime, stateRoot, packageRoot, stop.signal, next => { phase = next; });
+      phase = 'output';
       const selected = await runtime.openSelected(stateRoot);
       try {
         const { openInstalledClientStdio } = await import('../client/stdio.js');
@@ -175,6 +179,9 @@ async function start(): Promise<void> {
             providerBindingPolicy: 'explicit_new_runtime_authorization_required' }), Buffer.from('\n')]));
         } finally { stop.signal.removeEventListener('abort', cancelOutput); await joinResourceOperations([writer.join(), io.close()]); }
       } finally { await selected.close(); }
+    } catch (error) {
+      try { writeSync(2, installedRuntimeUpgradeFailureMarker(phase, error)); } catch { /* Preserve the actual upgrade refusal. */ }
+      throw error;
     } finally { process.removeListener('SIGTERM', cancel); }
     return;
   }

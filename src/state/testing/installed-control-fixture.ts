@@ -57,7 +57,7 @@ export async function writeInstalledControlPackage(packageRoot: string,
   }
   const keys = generateKeyPairSync('ed25519');
   const bundle: RuntimeBundleManifest = {
-    schemaVersion: 1, bundleVersion: 'native-uds-read-fixture-v1',
+    schemaVersion: 2, installedLayout: 'single_cas_streams_v1', bundleVersion: 'native-uds-read-fixture-v1',
     controlProtocolRange: { min: 1, max: 1 }, headlessSchemaRange: { min: 1, max: 1 },
     stateSchemaRange: { min: 1, max: KERNEL_STATE_SCHEMA_VERSION }, workerProtocolRange: { min: 1, max: 1 },
     entries,
