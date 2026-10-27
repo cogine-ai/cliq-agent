@@ -39,14 +39,16 @@ test('dependency production worker/controller/extractor compile with their origi
   });
 
 // Real timer and close callbacks, with an inert native data shim. This proves
-// the Node-API handle lifetime only, never TLS/FD/CG/installed qualification.
+// the Node-API handle/callback lifetime only, never TLS/FD/CG/installed qualification.
 test('dependency native timer, close and environment cleanup callbacks own handle scopes',
   { skip: !['darwin', 'linux'].includes(process.platform) }, async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'cliq-dependency-callback-'));
     try {
       const source = await readFile(new URL('../../../native/linux/dependency-broker.h', import.meta.url), 'utf8');
-      const callbacks = ['dependency_timer_closed', 'dependency_timer', 'dependency_cleanup'].map(name => {
-        const start = source.indexOf(`static void ${name}(`);
+      const callbacks = ['dependency_release_borrow', 'dependency_callbacks_init', 'dependency_callback_enter', 'dependency_callback_leave',
+        'dependency_release_cleanup', 'dependency_maybe_finish', 'dependency_timer_closed', 'dependency_timer', 'dependency_cleanup'].map(name => {
+        const declaration = new RegExp('^static (?:void|bool) ' + name + '\\([^;{]*\\) \\{', 'mu').exec(source);
+        const start = declaration?.index ?? -1;
         assert(start >= 0);
         const end = source.indexOf('\nstatic ', start + 1);
         assert(end > start);
@@ -65,15 +67,43 @@ test('dependency native timer, close and environment cleanup callbacks own handl
       { encoding: 'utf8', timeout: 30_000, maxBuffer: 65_536 });
       assert.equal(built.error, undefined); assert.equal(built.signal, null); assert.equal(built.status, 0, built.stderr);
       for (const timer of [false, true]) {
-        const run = spawnSync(process.execPath, ['--input-type=module', '-e', `
+        const run = spawnSync(process.execPath, ['--expose-gc', '--input-type=module', '-e', `
           import assert from 'node:assert/strict';
+          import {createHook} from 'node:async_hooks';
           import {createRequire} from 'node:module';
+          import net from 'node:net';
           const addon=createRequire(import.meta.url)(process.argv[1]);
+          const contexts=new Set(); let initialized=0,before=0,after=0,destroyed=0;
+          createHook({
+            init(id,type){if(type==='cliq dependency callbacks'){contexts.add(id);initialized++;}},
+            before(id){if(contexts.has(id)){assert.equal(destroyed,0);before++;}},
+            after(id){if(contexts.has(id)){assert.equal(destroyed,0);after++;}},
+            destroy(id){if(contexts.has(id)){assert.equal(destroyed,0);destroyed++;}},
+          }).enable();
+          // An actual idle listener keeps the event loop alive, as the real
+          // lifecycle's TLS server does. No request or JS polling pumps the
+          // Promise continuation; this one watchdog can only fail the child.
+          const listener=net.createServer(()=>{throw Error('unexpected owned test connection');});
+          await new Promise(resolve=>listener.listen(0,'127.0.0.1',resolve));
+          const start=performance.now();
+          const watchdog=setTimeout(()=>{
+            process.stderr.write('original native close Promise did not resume within 2000ms\\n');
+            process.exit(1);
+          },2000);
           const {completion,joined}=addon.exercise(process.argv[2]==='true');
           const handled=process.argv[2]==='true'
             ? assert.rejects(completion,/fixed inert callback failure/)
             : completion.then(value=>assert.equal(value.actualTimerClosed,true));
-          await handled; assert.equal((await joined).actualTimerClosed,true);
+          await handled; const physical=await joined; assert.equal(physical.actualTimerClosed,true);
+          global.gc(); addon.assertCallbackAlive();
+          assert(physical.nativeCloseElapsedMs<2000,'the original native close callback itself exceeded 2000ms');
+          assert(performance.now()-start<2000,
+            'original native close continuation exceeded 2000ms; native callback='+Math.ceil(physical.nativeCloseElapsedMs)+'ms');
+          clearTimeout(watchdog); await new Promise(resolve=>listener.close(resolve));
+          process.once('beforeExit',()=>{
+            addon.assertRetired(); assert.equal(initialized,1);
+            assert(before>=1); assert.equal(after,before); assert.equal(destroyed,1);
+          });
           process.stdout.write('actual native timer/close joined\\n');
         `, image, String(timer)], { encoding: 'utf8', timeout: 5000, maxBuffer: 65_536 });
         assert.equal(run.error, undefined); assert.equal(run.signal, null); assert.equal(run.status, 0, run.stderr);

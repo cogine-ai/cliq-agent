@@ -17,19 +17,35 @@ struct dependency_broker {
     napi_env env;
     uv_timer_t timer;
     struct { atomic_bool closing,fence_retained; } owner;
-    struct timespec close_deadline,outer_deadline,request_deadline;
+    struct timespec close_deadline,outer_deadline,request_deadline,started_at;
     bool timer_closed,timer_closing,retired,working,env_closing;
     atomic_bool request_expired;
     void *cancel;
     napi_deferred close_deferred,joined;
+    napi_ref callback_resource;
+    napi_async_context callback_context;
     napi_async_cleanup_hook_handle cleanup_hook;
     napi_async_work work;
     pthread_mutex_t mutex;
-    bool settlement_locked,settlement_borrowed,retire_queued,retire_joined;
+    bool settlement_locked,settlement_borrowed,retire_queued,retire_joined,callbacks_retiring,finalized;
+    unsigned native_borrows,callback_depth;
     int marker;
 };
+struct dependency_callback_scope { napi_env env; napi_handle_scope handles; napi_callback_scope callback; };
+static atomic_bool retirement_failed;
+static struct dependency_broker *live_broker;
 static void dependency_timer_closed(uv_handle_t *handle);
 static void dependency_cleanup(napi_async_cleanup_hook_handle handle,void *data);
+static bool dependency_callbacks_init(struct dependency_broker *broker);
+static void dependency_release_cleanup(struct dependency_broker *broker);
+static void dependency_release_borrow(struct dependency_broker *broker);
+static void dependency_maybe_finish(struct dependency_broker *broker);
+static void dependency_try_free(struct dependency_broker *broker) {
+    if (!broker->retired || !broker->finalized || broker->native_borrows || broker->callback_depth || broker->callbacks_retiring ||
+        broker->callback_context || broker->callback_resource || broker->cleanup_hook) return;
+    if (live_broker!=broker) abort();
+    live_broker=NULL;free(broker);
+}
 static void retirement_execute(napi_env env,void *data) {
     (void)env;
     struct dependency_broker *broker=data;
@@ -38,7 +54,7 @@ static void retirement_execute(napi_env env,void *data) {
 }
 static void retirement_complete(napi_env env,napi_status status,void *data);
 
-static void dependency_maybe_finish(struct dependency_broker *broker) {
+static void dependency_finish(struct dependency_broker *broker) {
     if (broker->env_closing && !broker->retire_joined) {
         if (!broker->retire_queued) {
             napi_value name;
@@ -60,9 +76,8 @@ static void dependency_maybe_finish(struct dependency_broker *broker) {
     if (broker->env_closing) {
         const char marker[]="timer_closed\n";
         if (write(broker->marker,marker,sizeof(marker)-1)!=(ssize_t)sizeof(marker)-1 || close(broker->marker)) abort();
-        napi_async_cleanup_hook_handle hook=broker->cleanup_hook;
-        if (napi_remove_async_cleanup_hook(hook)!=napi_ok) abort();
-        free(broker);
+        broker->retired=true;broker->finalized=true;
+        dependency_release_cleanup(broker);
         return;
     }
     napi_value value;
@@ -70,9 +85,19 @@ static void dependency_maybe_finish(struct dependency_broker *broker) {
     napi_value yes;
     napi_get_boolean(broker->env,true,&yes);
     napi_set_named_property(broker->env,value,"actualTimerClosed",yes);
+    struct timespec ended;
+    if (clock_gettime(CLOCK_MONOTONIC,&ended)) abort();
+    napi_value elapsed;
+    if (napi_create_double(broker->env,(double)(ended.tv_sec-broker->started_at.tv_sec)*1000.0+
+        (double)(ended.tv_nsec-broker->started_at.tv_nsec)/1000000.0,&elapsed)!=napi_ok ||
+        napi_set_named_property(broker->env,value,"nativeCloseElapsedMs",elapsed)!=napi_ok) abort();
     if (broker->close_deferred) napi_resolve_deferred(broker->env,broker->close_deferred,value);
     napi_resolve_deferred(broker->env,broker->joined,value);
-    free(broker);
+    /* This inert allocation is owned only by its callback, unlike the real
+     * JS-wrapped broker. Require the production native borrow to keep it alive
+     * through reentrant Promise/GC and actual async-context retirement. */
+    broker->retired=true;broker->finalized=true;
+    dependency_release_cleanup(broker);
 }
 static void retirement_complete(napi_env env,napi_status status,void *data) {
     struct dependency_broker *broker=data;
@@ -93,7 +118,8 @@ static napi_value dependency_error(struct dependency_broker *broker) {
 }
 static void dependency_begin_close(struct dependency_broker *broker) { atomic_store(&broker->owner.closing,true);dependency_maybe_finish(broker); }
 static void g_cancellable_cancel(void *cancel) { (void)cancel; }
-/* Generated from precisely the three live callbacks; no copied algorithm. */
+/* Generated from the live callbacks and their lifetime helpers; no copied
+ * callback/context-retirement algorithm. */
 #include "dependency-callbacks-under-test.h"
 static napi_value exercise(napi_env env,napi_callback_info info) {
     size_t argc=1;
@@ -103,6 +129,9 @@ static napi_value exercise(napi_env env,napi_callback_info info) {
     struct dependency_broker *broker=calloc(1,sizeof(*broker));
     if (!broker) return NULL;
     broker->env=env;
+    if (clock_gettime(CLOCK_MONOTONIC,&broker->started_at)) abort();
+    if (live_broker || !dependency_callbacks_init(broker)) abort();
+    live_broker=broker;
     atomic_init(&broker->owner.closing,true);
     atomic_init(&broker->request_expired,false);
     uv_loop_t *loop;
@@ -126,6 +155,8 @@ static napi_value arm_cleanup(napi_env env,napi_callback_info info) {
     struct dependency_broker *broker=calloc(1,sizeof(*broker));
     if (!broker) return NULL;
     broker->env=env;
+    if (live_broker || !dependency_callbacks_init(broker)) abort();
+    live_broker=broker;
     broker->marker=open(filename,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);
     if (broker->marker<0) abort();
     atomic_init(&broker->owner.closing,false);
@@ -141,11 +172,21 @@ static napi_value arm_cleanup(napi_env env,napi_callback_info info) {
     napi_get_undefined(env,&value);
     return value;
 }
+static napi_value assert_callback_alive(napi_env env,napi_callback_info info) {
+    (void)info;napi_value resource,value;
+    if (!live_broker || !live_broker->callback_depth || !live_broker->native_borrows || !live_broker->callback_context ||
+        !live_broker->callback_resource || napi_get_reference_value(env,live_broker->callback_resource,&resource)!=napi_ok || !resource) abort();
+    napi_get_undefined(env,&value);return value;
+}
+static napi_value assert_retired(napi_env env,napi_callback_info info) {
+    (void)info;napi_value value;if (live_broker) abort();napi_get_undefined(env,&value);return value;
+}
 static napi_value initialize(napi_env env,napi_value exports) {
     const struct rlimit core={0,0};
     if (setrlimit(RLIMIT_CORE,&core)) return NULL;
-    const napi_property_descriptor methods[]={{"exercise",NULL,exercise,NULL,NULL,NULL,napi_default,NULL},{"armCleanup",NULL,arm_cleanup,NULL,NULL,NULL,napi_default,NULL}};
-    if (napi_define_properties(env,exports,2,methods)!=napi_ok) return NULL;
+    const napi_property_descriptor methods[]={{"exercise",NULL,exercise,NULL,NULL,NULL,napi_default,NULL},{"armCleanup",NULL,arm_cleanup,NULL,NULL,NULL,napi_default,NULL},
+        {"assertCallbackAlive",NULL,assert_callback_alive,NULL,NULL,NULL,napi_default,NULL},{"assertRetired",NULL,assert_retired,NULL,NULL,NULL,napi_default,NULL}};
+    if (napi_define_properties(env,exports,4,methods)!=napi_ok) return NULL;
     return exports;
 }
 NAPI_MODULE(NODE_GYP_MODULE_NAME,initialize)

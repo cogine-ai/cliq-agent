@@ -317,7 +317,13 @@ export async function openInstalledClientConsumer(input: Input) {
           copyAuthentication([...authentication, observation]); authentication.push(Object.freeze(observation)); markerBytes += line.length; continue;
         }
         markerBytes += line.length;
-        if (marker.failure) refuse(new InstalledClientDriverError(marker.stage, authentication));
+        if (marker.failure) {
+          // The original bytes were scanned above. Retain only this exact
+          // source-owned marker so a failed child keeps its fixed stage even
+          // when the outer journey preserves only closed exception frames.
+          try { writeSync(2, marker.bytes); } catch { /* Diagnosis cannot replace the original failure or join. */ }
+          refuse(new InstalledClientDriverError(marker.stage, authentication));
+        }
         else {
           assert(!observedStages.has(marker.stage), 'duplicate installed client progress');
           observedStages.add(marker.stage); lastObservedDriverStage = marker.stage;

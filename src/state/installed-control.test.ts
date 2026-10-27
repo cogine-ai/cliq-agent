@@ -8,7 +8,7 @@ import { test, type TestContext } from 'node:test';
 import { KERNEL_DATABASE_FILENAME } from '../config.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting } from '../kernel/identity.js';
-import type { SessionContextProjection, SessionItem } from '../kernel/types.js';
+import type { LocalControlChannelIdentityV1, SessionContextProjection, SessionItem } from '../kernel/types.js';
 import { insertArtifactMetadata } from './artifacts.js';
 import { openInstalledControl } from './installed-control.js';
 import { openSqliteDriver } from './sqlite-driver.js';
@@ -106,6 +106,105 @@ function byteFrame(body: Buffer): Buffer {
 
 const compatibleHello = { protocolVersion: 1, method: 'control.hello', clientBuild: 'wire-client-fixture',
   controlSchemaRange: { min: 1, max: 1 }, headlessSchemaRange: { min: 1, max: 1 }, requestedFeatureIds: [] };
+
+test('a real accepted peer prepares its complete closure before the first frame without granting frame authority', async t => {
+  const fixture = await createQueuedFixture('wire-accept-preparation');
+  t.after(() => disposeFixture(fixture));
+  const artifacts = fixture.store.artifacts, publish = artifacts.publishCanonicalFour;
+  let completed!: (channel: LocalControlChannelIdentityV1) => void, publications = 0;
+  const prepared = new Promise<LocalControlChannelIdentityV1>(resolve => { completed = resolve; });
+  t.mock.method(artifacts, 'publishCanonicalFour', async function (values: Parameters<typeof publish>[0]) {
+    publications++;
+    const result = await Reflect.apply(publish, artifacts, [values]);
+    completed(values[3].value as LocalControlChannelIdentityV1);
+    return result;
+  });
+  const errors: Error[] = [];
+  const service = openInstalledControl(fixture.store, { serverBuild: 'wire-accept-fixture' }, error => errors.push(error));
+  t.after(() => service.close());
+  const peer = await connectPeer(t, path.join(fixture.stateRoot, 'runtime/control-v1.sock'));
+  // This is the real accepted native socket and actual four-object CAS group.
+  // No client frame has been sent, and retained bytes grant no current frame.
+  const channel = await bounded(prepared, 10_000);
+  await assert.rejects(fixture.store.readSupervisorHello({ principalId: channel.principalId,
+    channelIdentityRef: canonicalSha256(channel), channelIdentityDigest: channel.channelIdentityDigest }), { code: 'ARTIFACT_MISMATCH' });
+  assert.equal(publications, 1);
+  await peer.write(frame(compatibleHello));
+  const hello = await peer.response(); assert.equal(hello.ok, true);
+  await peer.write(frame(compatibleHello)); assert.deepEqual(await peer.response(), hello);
+  assert.equal(publications, 1, 'both frames must join the original accepted-connection producer');
+  assert.deepEqual(errors, []);
+});
+
+test('closing before the first frame joins the original accepted-connection publication', async t => {
+  const fixture = await createQueuedFixture('wire-accept-close');
+  t.after(() => disposeFixture(fixture));
+  const artifacts = fixture.store.artifacts, publish = artifacts.publishCanonicalFour;
+  let entered!: () => void, release!: () => void, joined = false;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  t.mock.method(artifacts, 'publishCanonicalFour', async function (values: Parameters<typeof publish>[0]) {
+    entered(); await gate;
+    const result = await Reflect.apply(publish, artifacts, [values]); joined = true; return result;
+  });
+  const service = openInstalledControl(fixture.store, { serverBuild: 'wire-accept-close-fixture' }, () => {});
+  t.after(() => service.close());
+  const peer = await connectPeer(t, path.join(fixture.stateRoot, 'runtime/control-v1.sock'));
+  let joinClose: Promise<void> | undefined;
+  try {
+    await bounded(started, 10_000);
+    let retired = false;
+    const stopStartedAt = performance.now();
+    const closing = service.close().then(() => {
+      retired = true;
+      assert(performance.now() - stopStartedAt <= 2000, 'the original service close exceeded its 2000ms join budget');
+    });
+    // Include service.close's synchronous work and the peer-close wait in the
+    // same absolute budget. Handle rejection immediately, before waiting for
+    // the peer; cleanup below still joins this original close on every path.
+    joinClose = closing.then(() => {}, () => {});
+    const stopped = bounded(closing, Math.max(0, 2000 - (performance.now() - stopStartedAt)));
+    void stopped.catch(() => {});
+    await Promise.race([peer.receive('closed'), stopped]);
+    await Promise.resolve(); assert.equal(retired, false); assert.equal(joined, false);
+    release(); await stopped;
+    assert.equal(joined, true); assert.equal(retired, true);
+  } finally { release(); await joinClose; }
+});
+
+test('the first real frame waits for the complete original publication and rejects a mismatched result', async t => {
+  const fixture = await createQueuedFixture('wire-auth-result');
+  t.after(() => disposeFixture(fixture));
+  const artifacts = fixture.store.artifacts, publish = artifacts.publishCanonicalFour, readHello = fixture.store.readSupervisorHello;
+  let entered!: () => void, release!: () => void, publications = 0, helloReads = 0;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  t.mock.method(artifacts, 'publishCanonicalFour', async function (values: Parameters<typeof publish>[0]) {
+    const attempt = ++publications;
+    if (attempt === 1) { entered(); await gate; }
+    const result = await Reflect.apply(publish, artifacts, [values]);
+    // Real bytes are fully published; a wrong returned identity still refuses
+    // the entire closure and never supplies a frame or a retry of this peer.
+    return attempt === 1 ? [{ ...result[0], byteLength: result[0].byteLength + 1 }, result[1], result[2], result[3]] as const : result;
+  });
+  t.mock.method(fixture.store, 'readSupervisorHello', function (identity: Parameters<typeof readHello>[0]) {
+    helloReads++; return Reflect.apply(readHello, fixture.store, [identity]);
+  });
+  const errors: Error[] = [];
+  const service = openInstalledControl(fixture.store, { serverBuild: 'wire-auth-result-fixture' }, error => {
+    errors.push(error); throw new Error('reporter must not escape');
+  });
+  t.after(() => service.close());
+  const peer = await connectPeer(t, path.join(fixture.stateRoot, 'runtime/control-v1.sock'));
+  try {
+    await bounded(started, 10_000); await peer.write(frame(compatibleHello));
+    assert.equal(helloReads, 0); release(); await peer.receive('closed');
+    assert.equal(helloReads, 0); assert(errors.length > 0); assert.equal(publications, 1);
+    const survivor = await connectPeer(t, path.join(fixture.stateRoot, 'runtime/control-v1.sock'));
+    await survivor.write(frame(compatibleHello)); assert.equal((await survivor.response()).ok, true);
+    assert.equal(helloReads, 1); assert.equal(publications, 2);
+  } finally { release(); }
+});
 
 test('the same genuine peer can rehello and read, but cannot reuse readiness after Store begins closing', async t => {
   const fixture = await createQueuedFixture('wire-rehello');

@@ -12,7 +12,7 @@ import {
   decodeStateLockIdentity,
   decodeStateRootIdentity
 } from './decoders.js';
-import { joinResourceOperations, KernelStorageError } from './errors.js';
+import { joinResourceOperations, KernelStorageError, ResourceRetirementError } from './errors.js';
 import { readLatestStateOwner, type StateOwnerContext } from './state-owner.js';
 import type { SqliteDriver } from './sqlite-driver.js';
 import { readCanonicalArtifact } from './agent-context.js';
@@ -41,12 +41,16 @@ export type LocalControlConnection = Readonly<{
 export type LocalControlListener = Readonly<{ close(): Promise<void> }>;
 type LiveChannel = { digest: string; assertCurrent(): void;
   processIdentity: PlatformProcessIdentityV1; channel: LocalControlChannelIdentityV1 };
+type PreparedChannel = Readonly<{ identity: AuthenticatedControlIdentity;
+  processIdentity: PlatformProcessIdentityV1; channel: LocalControlChannelIdentityV1 }>;
 const liveChannels = new WeakMap<StateOwnerContext, Map<string, LiveChannel>>();
 type AuthenticatedFrame = { owner: StateOwnerContext; identity: AuthenticatedControlIdentity; channel: LiveChannel; active: boolean };
 const authenticatedFrames = new AsyncLocalStorage<AuthenticatedFrame>();
 
-async function hashNativeImage(peer: HeldControlPeer, observation: NativePeerObservation): Promise<string> {
-  return hashHeldProcessImage(observation.imageFd, observation.imageByteCount, () => peer.assertObservation(observation));
+async function hashNativeImage(peer: HeldControlPeer, observation: NativePeerObservation, assertOpen: () => void): Promise<string> {
+  return hashHeldProcessImage(observation.imageFd, observation.imageByteCount, () => {
+    assertOpen(); peer.assertObservation(observation);
+  });
 }
 
 /** Owner-bound native listener. Historical JSON never populates this registry. */
@@ -59,34 +63,46 @@ export function openLocalControlListener(artifacts: ArtifactCatalog, owner: Stat
   let drain: Promise<void> | undefined;
   const connections = new Set<LocalControlConnection>();
   const pending = new Set<Promise<unknown>>();
+  // A connection owns at most one data-only preparation. These jobs do not
+  // consume or enlarge the independent 64-dispatch capacity below.
+  const authenticating = new Set<Promise<PreparedChannel>>();
+  let retirementFailure: ResourceRetirementError | undefined;
   let native: HeldControlListener;
   const reportError = (error: unknown) => {
     try { onError(error instanceof Error ? error : new Error('control callback failed', { cause: error })); }
     catch { /* A consumer's error reporter must not escape a native callback. */ }
   };
   const acceptPeer = (peer: HeldControlPeer) => {
-    if (closing || connections.size >= 64) { peer.close(); return; }
+    if (retirementFailure) throw retirementFailure;
+    if (closing || connections.size >= 64 || authenticating.size >= 64) { peer.close(); return; }
     let socket: Socket;
     const fd = peer.takeSocketFd();
     try { socket = new Socket({ fd, readable: true, writable: true }); }
     catch (error) { closeSync(fd); peer.close(); throw error; }
     let closed = false;
     let capture: NativePeerObservation | undefined;
-    let published: Promise<AuthenticatedControlIdentity> | undefined;
+    let published: Promise<PreparedChannel> | undefined;
     let identity: AuthenticatedControlIdentity | undefined;
+    const closedError = new KernelStorageError('ARTIFACT_MISMATCH', 'control connection is closed');
+    const assertOpen = () => {
+      if (retirementFailure) throw retirementFailure;
+      if (closing || closed) throw closedError;
+    };
     const assertCurrent = () => {
-      if (closing || closed || !capture) throw new KernelStorageError('ARTIFACT_MISMATCH', 'control connection is closed or unauthenticated');
+      assertOpen();
+      if (!capture) throw new KernelStorageError('ARTIFACT_MISMATCH', 'control connection is unauthenticated');
       try { peer.assertObservation(capture); }
       catch (error) { throw new KernelStorageError('ARTIFACT_MISMATCH', 'control peer native identity changed or became unavailable', { cause: error }); }
     };
     const publish = async () => {
+      assertOpen();
       const observe = beginInstalledServerAuthentication();
       const observedAt = sampleCanonicalNow();
       capture = peer.capture();
       const processIdentity: PlatformProcessIdentityV1 = {
         schemaVersion: 1, format: 'cliq-platform-process-identity-v1', platform: process.platform === 'linux' ? 'linux' : 'macos',
         pid: capture.pid, ownerUid: capture.uid, processStartToken: capture.processStartToken,
-        executableImageDigest: observe ? await observe('image_hash', () => hashNativeImage(peer, capture!)) : await hashNativeImage(peer, capture), observedAt, identityDigest: ''
+        executableImageDigest: observe ? await observe('image_hash', () => hashNativeImage(peer, capture!, assertOpen)) : await hashNativeImage(peer, capture, assertOpen), observedAt, identityDigest: ''
       };
       assertCurrent();
       processIdentity.identityDigest = digestOmitting(processIdentity, 'identityDigest');
@@ -153,11 +169,27 @@ export function openLocalControlListener(artifacts: ArtifactCatalog, owner: Stat
           throw new KernelStorageError('ARTIFACT_MISMATCH', 'control authentication publication does not match its complete canonical bytes');
       }
       assertCurrent();
-      identity = Object.freeze({ principalId: principal.principalId, channelIdentityRef: channelPublication.expected.ref,
-        channelIdentityDigest: channel.channelIdentityDigest });
-      channels.set(identity.channelIdentityRef, { digest: identity.channelIdentityDigest, assertCurrent,
+      return Object.freeze({ identity: Object.freeze({ principalId: principal.principalId,
+        channelIdentityRef: channelPublication.expected.ref, channelIdentityDigest: channel.channelIdentityDigest }),
         processIdentity: processPublication.data, channel: channelPublication.data });
-      return identity;
+    };
+    const prepare = (): Promise<PreparedChannel> => {
+      if (published) return published;
+      // Register the original producer before its first capture/read/await.
+      // Idle clients can overlap this work with their own independent checks,
+      // but no live channel or authenticated frame exists until dispatch.
+      published = Promise.resolve().then(publish).catch(error => {
+        let failure: unknown = error;
+        try { connection.close(); }
+        catch (cause) { failure = new ResourceRetirementError('control authentication resources did not retire', new AggregateError([error, cause])); }
+        if (failure instanceof ResourceRetirementError) retirementFailure ??= failure;
+        if (failure !== closedError) reportError(failure);
+        throw failure;
+      });
+      authenticating.add(published);
+      const original = published;
+      void original.finally(() => authenticating.delete(original)).catch(() => {});
+      return original;
     };
     const connection: LocalControlConnection = Object.freeze({
       socket,
@@ -165,8 +197,14 @@ export function openLocalControlListener(artifacts: ArtifactCatalog, owner: Stat
         if (this !== connection || closing || closed || typeof operation !== 'function') return Promise.reject(new TypeError('invalid control connection dispatch'));
         const running = (async () => {
           if (pending.size >= 64) throw new KernelStorageError('INVALID_REQUEST', 'control dispatch capacity is exhausted');
-          const authenticated = await (published ??= publish().catch(error => { connection.close(); throw error; }));
+          const prepared = await prepare();
           assertCurrent();
+          if (!identity) {
+            identity = prepared.identity;
+            channels.set(identity.channelIdentityRef, { digest: identity.channelIdentityDigest, assertCurrent,
+              processIdentity: prepared.processIdentity, channel: prepared.channel });
+          }
+          const authenticated = identity;
           const authority = channels.get(authenticated.channelIdentityRef)!;
           const frame: AuthenticatedFrame = { owner, identity: authenticated, channel: authority, active: true };
           try { return await authenticatedFrames.run(frame, () => operation(authenticated)); }
@@ -181,16 +219,23 @@ export function openLocalControlListener(artifacts: ArtifactCatalog, owner: Stat
         if (closed) return;
         closed = true;
         if (identity) channels.delete(identity.channelIdentityRef);
-        capture?.close();
-        peer.close();
+        const failures: unknown[] = [];
+        try { capture?.close(); } catch (error) { failures.push(error); }
+        try { peer.close(); } catch (error) { failures.push(error); }
         socket.destroy();
         connections.delete(connection);
+        if (failures.length) {
+          retirementFailure ??= new ResourceRetirementError('control connection resources did not retire', new AggregateError(failures));
+          throw retirementFailure;
+        }
       }
     });
-    socket.on('error', () => connection.close());
-    socket.once('close', () => connection.close());
+    const close = () => { try { connection.close(); } catch (error) { reportError(error); } };
+    socket.on('error', close);
+    socket.once('close', close);
     connections.add(connection);
     try { onConnection(connection); } catch (error) { connection.close(); throw error; }
+    if (!closed) prepare();
   };
   const accept = (peer: HeldControlPeer) => {
     try { acceptPeer(peer); }
@@ -206,10 +251,18 @@ export function openLocalControlListener(artifacts: ArtifactCatalog, owner: Stat
       if (this !== listener) return Promise.reject(new TypeError('invalid control listener'));
       if (drain) return drain;
       closing = true;
-      native.close();
-      for (const connection of connections) connection.close();
+      const failures: unknown[] = [];
+      try { native.close(); } catch (error) { failures.push(error); }
+      for (const connection of connections) {
+        try { connection.close(); } catch (error) { failures.push(error); }
+      }
       liveChannels.delete(owner);
-      drain = Promise.allSettled([...pending]).then(() => {});
+      drain = Promise.allSettled([...authenticating, ...pending]).then(results => {
+        failures.push(...results.filter((result): result is PromiseRejectedResult => result.status === 'rejected' &&
+          result.reason instanceof ResourceRetirementError).map(result => result.reason));
+        if (failures.length) retirementFailure ??= new ResourceRetirementError('control listener resources did not retire', new AggregateError(failures));
+        if (retirementFailure) throw retirementFailure;
+      });
       return drain;
     }
   });

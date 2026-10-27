@@ -2,12 +2,33 @@
 // an installed Supervisor or qualify native authentication/execution.
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { spawnSync } from 'node:child_process';
 import { parseJsonStrict } from '../../../src/kernel/json.js';
 import { createCredentialSecretScanner, type CredentialSecretScanner } from './credential-secret-scan.js';
 import { InstalledClientConsumerDeadlineError, InstalledClientDriverError, openInstalledClientConsumer,
   copyInstalledClientAuthenticationWork, copyInstalledClientAuthenticationProcess,
   installedClientAuthenticationMarker, installedClientRequestFailureMarker } from './installed-client-consumer.js';
 import { installedRequestFailureMarker } from './installed-client-request-failure.js';
+
+test('the actual joined parent retains the fixed child failure stage on its own diagnostic stream', () => {
+  const consumer = new URL('./installed-client-consumer.ts', import.meta.url).href;
+  const failure = "process.stderr.write('installed control client driver failed phase=selection\\n');process.exitCode=1";
+  const result = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', `
+    import { openInstalledClientConsumer, InstalledClientDriverError } from ${JSON.stringify(consumer)};
+    let closed=0,joined=false;
+    try {
+      await openInstalledClientConsumer({executable:process.execPath,
+        args:['-e',${JSON.stringify(failure)}],
+        cwd:process.cwd(),env:process.env,openScan(){return {scan(){},close(){closed++}}},onJoined(){joined=true}});
+      process.exitCode=2;
+    } catch(error) {
+      if(!(error instanceof InstalledClientDriverError) || error.diagnostic.stage!=='selection' || closed!==2 || joined) process.exitCode=3;
+    }
+  `], { cwd: process.cwd(), env: process.env, encoding: 'utf8', timeout: 10000, maxBuffer: 65536 });
+  assert.equal(result.error, undefined); assert.equal(result.signal, null); assert.equal(result.status, 0);
+  assert.equal(result.stdout, '');
+  assert.equal(result.stderr, 'installed control client driver failed phase=selection\n');
+});
 
 test('request failure markers contain only a closed method and never inspect or echo supplied data', () => {
   assert.equal(installedClientRequestFailureMarker('run.get'), 'CLIQ_INSTALLED_REQUEST_FAILED_V1:run.get');

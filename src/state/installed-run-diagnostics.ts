@@ -8,6 +8,7 @@ export const INSTALLED_RUN_FAILURE_CHANNEL = 'cliq.installed.run.failures.v1';
  * also carry prefixed submit_* stages, not counts or evidence of run.apply. */
 export const INSTALLED_APPLY_DIAGNOSTIC_STAGES = Object.freeze(['request', 'replay', 'capture_source', 'capture',
   'source', 'prepare', 'admit', 'postcommit_load', 'submit_request', 'submit_preflight_authority',
+  'submit_replay_control', 'submit_replay_source', 'submit_replay_snapshot', 'submit_replay_verifier', 'submit_replay_commit',
   'submit_source_capture', 'submit_assembly', 'submit_assembly_native', 'submit_assembly_source', 'submit_assembly_platform',
   'submit_assembly_material', 'submit_assembly_publish', 'submit_assembly_verifier', 'submit_assembly_verifier_history',
   'submit_assembly_verifier_current', 'submit_assembly_verifier_compose', 'submit_assembly_verifier_publish', 'submit_assembly_policy',

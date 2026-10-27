@@ -91,7 +91,10 @@ test('fixed server timing is opt-in and cannot defer the original service stop o
 
 test('server authentication joins its fixed four complete publications before validating returns and registering authority', () => {
   const control = source('../../../src/state/control-channel.ts');
-  const publish = control.slice(control.indexOf('    const publish = async () => {'), control.indexOf('    const connection: LocalControlConnection'));
+  const preparation = control.indexOf('    const prepare = (): Promise<PreparedChannel> => {');
+  const connection = control.indexOf('    const connection: LocalControlConnection');
+  assert(preparation > control.indexOf('    const publish = async () => {') && connection > preparation);
+  const publish = control.slice(control.indexOf('    const publish = async () => {'), preparation);
   assert.equal(publish.match(/beginInstalledServerAuthentication\(\)/gu)?.length, 1);
   const hash = publish.indexOf("await observe('image_hash',"), firstGuard = publish.indexOf('assertCurrent();');
   const batch = publish.indexOf('const batch = artifacts.publishCanonicalFour([');
@@ -99,7 +102,7 @@ test('server authentication joins its fixed four complete publications before va
   const group = publish.indexOf('const publishedArtifacts = await joinResourceOperations([');
   const joined = publish.indexOf('      ]);', group);
   assert(hash >= 0 && firstGuard > hash && batch > firstGuard && batchEnd > batch && group > batchEnd && joined > group);
-  assert(publish.includes(': await hashNativeImage(peer, capture)'));
+  assert(publish.includes(': await hashNativeImage(peer, capture, assertOpen)'));
   assert.equal(publish.match(/artifacts\.publishCanonicalFour\(/gu)?.length, 1);
   assert(!/artifacts\.publishCanonical\(/u.test(publish), 'authentication must not fall back to four independent persistence lifecycles');
   const values = publish.slice(batch, batchEnd);
@@ -132,8 +135,14 @@ test('server authentication joins its fixed four complete publications before va
   assert(validation > joined);
   for (const field of ['ref', 'byteLength', 'mediaType', 'schemaKind'])
     assert(publish.includes(`artifact.${field} !== expected.${field}`));
-  const current = publish.lastIndexOf('assertCurrent();'), register = publish.indexOf('channels.set(');
-  assert(current > validation && register > current);
+  const current = publish.lastIndexOf('assertCurrent();'), prepared = publish.indexOf('return Object.freeze({ identity: Object.freeze({');
+  assert(current > validation && prepared > current);
+  assert(!publish.includes('channels.set('), 'preparation may return only data, never activate a channel');
+  const dispatch = control.slice(connection, control.indexOf('\n      close() {', connection));
+  const joinedPreparation = dispatch.indexOf('const prepared = await prepare();');
+  const dispatchCurrent = dispatch.indexOf('assertCurrent();', joinedPreparation), register = dispatch.indexOf('channels.set(');
+  assert(joinedPreparation >= 0 && dispatchCurrent > joinedPreparation && register > dispatchCurrent,
+    'first dispatch joins the complete original preparation and rechecks the native peer before channel activation');
   assert(!/Promise\.all|sync:\s*false|\.catch\(/u.test(publish));
 });
 

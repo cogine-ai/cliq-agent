@@ -88,7 +88,8 @@ test('ambiguous or invalid Stop data cannot invent a single-driver label or invo
     `{...row,driverTasks:0,phases:{}}`, `{...row,driverTasks:1,phases:{}}`, `{...row,driverTasks:2}`,
     `{...row,driverTasks:2,phases:{publication_prepare_read:1,publication_prepare_cut:1}}`,
     `{...row,phases:{publication_prepare_read:2}}`, `{...row,driverTasks:'1'}`, `{...row,phases:{unknown:1}}`,
-    ...['submit_request', 'submit_preflight_authority', 'submit_source_capture', 'submit_assembly',
+    ...['submit_request', 'submit_preflight_authority', 'submit_replay_control', 'submit_replay_source',
+      'submit_replay_snapshot', 'submit_replay_verifier', 'submit_replay_commit', 'submit_source_capture', 'submit_assembly',
       'submit_assembly_native', 'submit_assembly_source', 'submit_assembly_platform', 'submit_assembly_material', 'submit_assembly_publish',
       'submit_assembly_verifier', 'submit_assembly_verifier_history', 'submit_assembly_verifier_current',
       'submit_assembly_verifier_compose', 'submit_assembly_verifier_publish', 'submit_assembly_policy', 'submit_assembly_final_check', 'submit_final_admission',
@@ -142,7 +143,8 @@ test('a failed Stop sink is not retried, repeated Stop cannot add a second label
 test('every submit await stage round-trips through the unchanged admission envelope but never publication markers', async () => {
   const { INSTALLED_STORE_DIAGNOSTIC_BANNER } = await import('./installed-store-diagnostic-banner.js');
   const { readInstalledStoreDiagnosticJournal, readInstalledPublicationStageJournal } = await import('./installed-store-diagnostic-journal.js');
-  const stages = ['submit_request', 'submit_preflight_authority', 'submit_source_capture', 'submit_assembly',
+  const stages = ['submit_request', 'submit_preflight_authority', 'submit_replay_control', 'submit_replay_source',
+    'submit_replay_snapshot', 'submit_replay_verifier', 'submit_replay_commit', 'submit_source_capture', 'submit_assembly',
     'submit_assembly_native', 'submit_assembly_source', 'submit_assembly_platform', 'submit_assembly_material', 'submit_assembly_publish',
     'submit_assembly_verifier', 'submit_assembly_verifier_history', 'submit_assembly_verifier_current',
     'submit_assembly_verifier_compose', 'submit_assembly_verifier_publish', 'submit_assembly_policy', 'submit_assembly_final_check',

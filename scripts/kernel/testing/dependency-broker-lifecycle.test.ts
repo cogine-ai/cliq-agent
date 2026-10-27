@@ -88,8 +88,11 @@ test('public GET owns full large sealed data, retries only three original fetche
         if (bind) owner.bindInvocation(binding); return { owner, binding };
       }
       const unclaimed = prepare(false); await unclaimed.owner.ready;
-      const unclaimedStart = performance.now(); const unclaimedClosed = await unclaimed.owner.close();
-      assert(performance.now() - unclaimedStart < 2000);
+      const unclaimedStart = performance.now(), unclaimedClosing = unclaimed.owner.close();
+      const unclaimedReturnedAt = performance.now(), unclaimedClosed = await unclaimedClosing;
+      const unclaimedJoinedAt = performance.now();
+      assert(unclaimedJoinedAt - unclaimedStart < 2000,
+        `original unclaimed close exceeded 2000ms: synchronous=${Math.ceil(unclaimedReturnedAt - unclaimedStart)}ms, total=${Math.ceil(unclaimedJoinedAt - unclaimedStart)}ms`);
       assert.deepEqual({ kind: unclaimedClosed.kind, dispatchFenceRetained: unclaimedClosed.dispatchFenceRetained,
         settlementFenceBorrowed: unclaimedClosed.settlementFenceBorrowed, networkStarted: unclaimedClosed.networkStarted,
         requestStarted: unclaimedClosed.requestStarted, processClaimed: unclaimedClosed.processClaimed },

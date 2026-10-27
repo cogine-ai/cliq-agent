@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { once } from 'node:events';
 import fs from 'node:fs';
@@ -7,6 +7,7 @@ import { readFile, rm } from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
 import path from 'node:path';
 import { test, type TestContext } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME } from '../config.js';
 import type { LocalSocketPeerObservationV1, PlatformProcessIdentityV1 } from '../kernel/types.js';
 import type { AuthenticatedControlIdentity, LocalControlConnection, LocalControlListener } from './control-channel.js';
@@ -36,21 +37,37 @@ async function bounded<T>(promise: Promise<T>): Promise<T> {
   })]); } finally { clearTimeout(timer); }
 }
 
-async function fixture(t: TestContext, seeded?: Pick<ActiveFixture, 'stateRoot' | 'workspace' | 'store' | 'runtimeAuthority'>) {
+async function fixture(t: TestContext, seeded?: Pick<ActiveFixture, 'stateRoot' | 'workspace' | 'store' | 'runtimeAuthority'>,
+  beforeAuthentication?: (connection: LocalControlConnection) => void) {
   const stateRoot = seeded?.stateRoot ?? await makePrivateDir('.cliq-local-control-');
   const workspace = seeded?.workspace ?? await makePrivateDir('.cliq-local-control-ws-');
   let store = seeded?.store ?? await openStateStore(stateRoot);
   let listener: LocalControlListener;
   const queue: LocalControlConnection[] = [];
   let next = deferred<LocalControlConnection>();
+  let retainedRetirement: ResourceRetirementError | undefined;
   const errors: Error[] = [];
   const listen = () => {
     listener = store.openLocalControl(connection => {
+      beforeAuthentication?.(connection);
       queue.push(connection); next.resolve(connection);
     }, error => { errors.push(error); next.reject(error); });
   };
   const reader = openSqliteDriver(path.join(stateRoot, KERNEL_DATABASE_FILENAME));
   t.after(async () => {
+    if (retainedRetirement) {
+      // This branch runs only in the isolated retirement child. A refused
+      // close retains the real StateOwner until that process actually exits.
+      assert.equal(process.env.CLIQ_LOCAL_CONTROL_RETIREMENT_CHILD, '1');
+      for (let retry = 0; retry < 2; retry++) {
+        await assert.rejects(listener.close(), error => error === retainedRetirement);
+        await assert.rejects(store.close(), error => error === retainedRetirement);
+      }
+      assert.equal(reader.prepare("SELECT state FROM state_owners WHERE state='active'").get()?.state, 'active');
+      reader.close();
+      t.diagnostic(JSON.stringify({ retainedAuthenticationFixture: { stateRoot, workspace } }));
+      return;
+    }
     await listener?.close(); await store.close(); reader.close();
     await rm(stateRoot, { recursive: true, force: true });
     await rm(workspace, { recursive: true, force: true });
@@ -71,6 +88,7 @@ async function fixture(t: TestContext, seeded?: Pick<ActiveFixture, 'stateRoot' 
     return { connection, child, exited };
   };
   return { stateRoot, workspace, reader, errors, connect, get store() { return store; },
+    retainRetirement(error: ResourceRetirementError) { retainedRetirement = error; },
     async reopen() { await listener.close(); await store.close(); store = await openStateStore(stateRoot, seeded?.runtimeAuthority); listen(); } };
 }
 
@@ -109,11 +127,14 @@ test('native authentication yields before and between bounded executable-image b
   const batchBytes = 1024 * 1024;
   const executable = fs.statSync(process.execPath, { bigint: true });
   const expectedDigest = createHash('sha256').update(await readFile(process.execPath)).digest('hex');
-  const f = await fixture(t);
-  const { connection } = await f.connect();
-  const originalRead = fs.readSync;
   let initialProbeRan = false;
-  const initialProbe = setImmediate(() => { initialProbeRan = true; });
+  let initialProbe: ReturnType<typeof setImmediate> | undefined;
+  const f = await fixture(t, undefined, () => {
+    // Accept owns preparation now. Arm the probe in its real consumer callback,
+    // before that producer starts, rather than after connect has already yielded.
+    initialProbe = setImmediate(() => { initialProbeRan = true; });
+  });
+  const originalRead = fs.readSync;
   let probe: ReturnType<typeof setImmediate> | undefined;
   let probeCount = 0;
   let uninterruptedBytes = 0;
@@ -142,6 +163,7 @@ test('native authentication yields before and between bounded executable-image b
   });
   syncBuiltinESMExports();
   try {
+    const { connection } = await f.connect();
     const identity = await bounded(connection.dispatch(async authenticated => authenticated));
     assert.equal(initialProbeRan, true);
     if (executable.size > BigInt(batchBytes)) assert.ok(probeCount > 0);
@@ -156,7 +178,7 @@ test('native authentication yields before and between bounded executable-image b
   } finally {
     reading.mock.restore();
     syncBuiltinESMExports();
-    clearImmediate(initialProbe);
+    if (initialProbe) clearImmediate(initialProbe);
     if (probe) clearImmediate(probe);
   }
 });
@@ -164,9 +186,7 @@ test('native authentication yields before and between bounded executable-image b
 test('closing a native connection while authentication yields stops image reads and never dispatches the operation', async t => {
   const batchBytes = 1024 * 1024;
   const executable = fs.statSync(process.execPath, { bigint: true });
-  const f = await fixture(t);
-  const { connection } = await f.connect();
-  const originalRead = fs.readSync;
+  let connection!: LocalControlConnection;
   const closed = deferred<void>();
   let probe: ReturnType<typeof setImmediate> | undefined;
   let closedAtProbe = false;
@@ -181,7 +201,11 @@ test('closing a native connection while authentication yields stops image reads 
   // Large real executables exercise close between batches. A small host Node
   // still proves cancellation at the initial yield, without inventing an image
   // size or claiming cross-batch coverage where the executable fits one batch.
-  if (executable.size <= BigInt(batchBytes)) probe = setImmediate(closeAtProbe);
+  const f = await fixture(t, undefined, accepted => {
+    connection = accepted;
+    if (executable.size <= BigInt(batchBytes)) probe = setImmediate(closeAtProbe);
+  });
+  const originalRead = fs.readSync;
   const reading = t.mock.method(fs, 'readSync', (...args: unknown[]) => {
     if (closedAtProbe) readsAfterClose++;
     const image = fs.fstatSync(args[0] as number, { bigint: true });
@@ -195,6 +219,7 @@ test('closing a native connection while authentication yields stops image reads 
   });
   syncBuiltinESMExports();
   try {
+    await f.connect();
     await assert.rejects(bounded(connection.dispatch(async () => { reachedOperation = true; })));
     await bounded(closed.promise);
     assert.equal(readsAfterClose, 0, 'the closed native observation is never read again');
@@ -216,10 +241,11 @@ test('closing a native connection while authentication yields stops image reads 
 const authenticationPublications = ['cliq-platform-process-identity-v1', 'cliq-local-principal-identity-v1',
   'cliq-local-socket-peer-observation-v1', 'cliq-local-control-channel-identity-v1'] as const;
 test('native authentication publishes exactly one fixed four-object durability group', async t => {
-  const f = await fixture(t), { connection, child, exited } = await f.connect();
+  const f = await fixture(t);
   const catalog = f.store.artifacts, publish = catalog.publishCanonicalFour.bind(catalog);
   let groups = 0;
   catalog.publishCanonicalFour = async values => { groups++; return publish(values); };
+  const { connection, child, exited } = await f.connect();
   try {
     await bounded(connection.dispatch(async identity => identity));
     assert.equal(groups, 1, 'authentication must use one shared phase group, not four independent lifecycles');
@@ -230,7 +256,6 @@ test('native authentication publishes exactly one fixed four-object durability g
 });
 test('native authentication enables authority only after its complete real CAS group return joins', async t => {
   const f = await fixture(t);
-  const { connection, child, exited } = await f.connect();
   const firstCompleted = deferred<void>(), release = deferred<void>();
   const catalog = f.store.artifacts, publish = catalog.publishCanonicalFour.bind(catalog);
   const values = new Map<string, unknown>(), results = new Map<string, PublishedArtifact>();
@@ -242,6 +267,7 @@ test('native authentication enables authority only after its complete real CAS g
     await release.promise; // Only the already-joined real return value is delayed.
     return result;
   };
+  const { connection, child, exited } = await f.connect();
   const dispatch = connection.dispatch(async identity => { operationEntered = true; return identity; });
   void dispatch.then(() => { dispatchJoined = true; }, () => { dispatchJoined = true; });
   try {
@@ -275,7 +301,6 @@ test('native authentication enables authority only after its complete real CAS g
 for (const closeKind of ['connection', 'store'] as const) for (const stage of [1, 2, 3, 4]) {
   test(`closing ${closeKind} at authentication namespace stage ${stage} joins the whole real group without authority`, async t => {
     const f = await fixture(t);
-    const { connection, child, exited } = await f.connect();
     const entered = deferred<void>(), release = deferred<void>();
     const open = fs.promises.open.bind(fs.promises), casRoot = path.join(f.stateRoot, KERNEL_CAS_DIRECTORY);
     let rootSyncs = 0, active = 0, operationEntered = false, closeJoined = false, dispatchJoined = false;
@@ -292,6 +317,7 @@ for (const closeKind of ['connection', 'store'] as const) for (const stage of [1
       });
       return handle;
     });
+    const { connection, child, exited } = await f.connect();
     const dispatch = connection.dispatch(async () => { operationEntered = true; });
     void dispatch.then(() => { dispatchJoined = true; }, () => { dispatchJoined = true; });
     let closing: Promise<void> | undefined;
@@ -333,7 +359,6 @@ for (const closeKind of ['connection', 'store'] as const) for (const stage of [1
 for (const field of ['ref', 'byteLength', 'mediaType', 'schemaKind', 'failure'] as const) {
   test(`authentication joins every real CAS return and rejects an inconsistent ${field} without activating authority`, async t => {
     const f = await fixture(t);
-    const { connection, child, exited } = await f.connect();
     const catalog = f.store.artifacts, publish = catalog.publishCanonicalFour.bind(catalog);
     const alternate = await catalog.publishBytes(Buffer.from('real alternative bytes'), 'text/plain', 'real-alternative');
     const firstCompleted = deferred<void>(), release = deferred<void>();
@@ -346,6 +371,7 @@ for (const field of ['ref', 'byteLength', 'mediaType', 'schemaKind', 'failure'] 
       if (field === 'failure') throw failure;
       return [{ ...result[0], [field]: alternate[field] }, result[1], result[2], result[3]];
     };
+    const { connection, child, exited } = await f.connect();
     const dispatch = connection.dispatch(async () => { operationEntered = true; });
     void dispatch.then(() => { dispatchJoined = true; }, () => { dispatchJoined = true; });
     try {
@@ -354,14 +380,18 @@ for (const field of ['ref', 'byteLength', 'mediaType', 'schemaKind', 'failure'] 
       assert.equal(dispatchJoined, false, 'an ordinary failure or inconsistent return cannot abandon a pending sibling');
       assert.equal(operationEntered, false);
       release.resolve();
-      await assert.rejects(bounded(dispatch), error => field === 'failure' ? error === failure :
-        (error as { code?: string }).code === 'ARTIFACT_MISMATCH');
+      let refused: unknown;
+      await assert.rejects(bounded(dispatch), error => {
+        refused = error;
+        return field === 'failure' ? error === failure : (error as { code?: string }).code === 'ARTIFACT_MISMATCH';
+      });
       assert.equal(completed, 4, 'all four original full publications have really returned');
       assert.equal(dispatchJoined, true); assert.equal(operationEntered, false);
       await assert.rejects(connection.dispatch(async () => { operationEntered = true; }));
       assert.equal(operationEntered, false);
       assert.equal(f.reader.prepare('SELECT count(*) AS n FROM control_requests').get<{ n: bigint }>()!.n, 0n);
-      assert.deepEqual(f.errors, []);
+      assert.equal(f.errors.length, 1, 'accepted preparation reports its genuine publication failure once');
+      assert.equal(f.errors[0], refused, 'the reporter retains the same original failure as dispatch');
     } finally {
       release.resolve(); await bounded(Promise.allSettled([dispatch])); catalog.publishCanonicalFour = publish;
       if (child.connected) child.disconnect(); await bounded(exited);
@@ -371,8 +401,28 @@ for (const field of ['ref', 'byteLength', 'mediaType', 'schemaKind', 'failure'] 
 
 for (const fault of ['none', 'root_close', 'bytes'] as const) {
   test(`real authentication CAS descriptors fully join with bounded delivered ownership under ${fault}`, async t => {
+    if (fault === 'root_close' && process.env.CLIQ_LOCAL_CONTROL_RETIREMENT_CHILD !== '1') {
+      // Retirement uncertainty deliberately keeps the original Store alive.
+      // Join its actual process and all stdio before touching the retained root.
+      const environment: NodeJS.ProcessEnv = { ...process.env, CLIQ_LOCAL_CONTROL_RETIREMENT_CHILD: '1' };
+      delete environment.NODE_TEST_CONTEXT;
+      const child = spawnSync(process.execPath, ['--test', '--test-reporter=tap', '--test-concurrency=1', '--import', 'tsx', '--test-name-pattern',
+        '^real authentication CAS descriptors fully join with bounded delivered ownership under root_close$', fileURLToPath(import.meta.url)],
+      { env: environment, encoding: 'utf8', timeout: 30_000, maxBuffer: 65_536 });
+      assert.equal(child.error, undefined); assert.equal(child.signal, null); assert.equal(child.status, 0, child.stdout + child.stderr);
+      for (const line of child.stdout.split('\n')) if (line.startsWith('# {"diagnosticOnly":')) t.diagnostic(line.slice(2));
+      const marker = child.stdout.split('\n').find(line => line.startsWith('# {"retainedAuthenticationFixture":'));
+      assert.ok(marker, 'the child verifies the same retirement refusal through listener and Store close retries');
+      const { retainedAuthenticationFixture: retained } = JSON.parse(marker.slice(2)) as {
+        retainedAuthenticationFixture: { stateRoot: string; workspace: string } };
+      const successor = await openStateStore(retained.stateRoot);
+      try { assert.equal(successor.ownerEpoch, 2); }
+      finally { await successor.close(); }
+      await rm(retained.stateRoot, { recursive: true, force: true });
+      await rm(retained.workspace, { recursive: true, force: true });
+      return; // Component cleanup after real process exit, never a production recovery proof.
+    }
     const f = await fixture(t);
-    const { connection, child, exited } = await f.connect();
     const catalog = f.store.artifacts, publish = catalog.publishCanonicalFour.bind(catalog);
     const open = fs.promises.open.bind(fs.promises), casRoot = path.join(f.stateRoot, KERNEL_CAS_DIRECTORY);
     const active = new Set<Awaited<ReturnType<typeof open>>>();
@@ -407,6 +457,7 @@ for (const fault of ['none', 'root_close', 'bytes'] as const) {
       try { return await publish(values); }
       finally { entered.resolve(); await gate.promise; settled++; }
     };
+    const { connection, child, exited } = await f.connect();
     const dispatch = connection.dispatch(async () => { operationEntered = true; });
     void dispatch.then(() => { dispatchJoined = true; }, () => { dispatchJoined = true; });
     try {
@@ -414,10 +465,15 @@ for (const fault of ['none', 'root_close', 'bytes'] as const) {
       assert.equal(active.size, 0, 'every actual CAS handle closes before the return-value gate');
       assert.equal(dispatchJoined, false); assert.equal(operationEntered, false);
       gate.resolve();
+      let refused: unknown;
       if (fault === 'none') await bounded(dispatch);
-      else if (fault === 'root_close') await assert.rejects(bounded(dispatch), error =>
-        error instanceof ResourceRetirementError && error.cause === closeFailure && error !== operationFailure);
-      else await assert.rejects(bounded(dispatch), error => error instanceof Error && /^artifact [0-9a-f]{64} is corrupt$/u.test(error.message));
+      else if (fault === 'root_close') await assert.rejects(bounded(dispatch), error => {
+        assert.ok(error instanceof ResourceRetirementError); assert.equal(error.cause, closeFailure); assert.notEqual(error, operationFailure);
+        refused = error; f.retainRetirement(error); return true;
+      });
+      else await assert.rejects(bounded(dispatch), error => {
+        refused = error; return error instanceof Error && /^artifact [0-9a-f]{64} is corrupt$/u.test(error.message);
+      });
       assert.equal(settled, 1); assert.equal(active.size, 0); assert.equal(opened, closed);
       assert.equal(operationEntered, fault === 'none');
       assert.ok(peak > 2 && peak <= 5, 'one shared root plus four files bounds delivered CAS ownership, not all Supervisor OS descriptors');
@@ -427,7 +483,8 @@ for (const fault of ['none', 'root_close', 'bytes'] as const) {
       t.diagnostic(JSON.stringify({ diagnosticOnly: true, scope: 'delivered_authentication_cas_handles', fault,
         peak, opened, closed, rootSyncs, fileSyncs, allJoined: active.size === 0,
         physicalStopQualified: false, fullSupervisorDescriptorPeakQualified: false }));
-      assert.deepEqual(f.errors, []);
+      assert.equal(f.errors.length, fault === 'none' ? 0 : 1);
+      if (fault !== 'none') assert.equal(f.errors[0], refused, 'genuine storage and integrity failures reach the reporter unchanged');
     } finally {
       gate.resolve(); await bounded(Promise.allSettled([dispatch])); catalog.publishCanonicalFour = publish;
       t.mock.restoreAll();

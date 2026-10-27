@@ -2022,7 +2022,7 @@ export class StateStore {
       await validateControlChannelClosure(reads, this.owner, identity);
       signal.throwIfAborted();
       const { replayInstalledRunAdmission, admitInstalledRun } = await import('./reducers/admission.js');
-      const replay = await replayInstalledRunAdmission(this.driver, this.artifacts, this.owner, normalized, identity, this.runtimeAuthority, signal);
+      const replay = await replayInstalledRunAdmission(this.driver, this.artifacts, this.owner, normalized, identity, this.runtimeAuthority, signal, diagnosis?.stage);
       if (replay) {
         if ('run' in replay) {
           if (['queued', 'running', 'waiting'].includes(readRun(this.driver, replay.run.id).status)) {

@@ -49,6 +49,7 @@ import {
   decodeWorkspaceState
 } from '../decoders.js';
 import { KernelStorageError } from '../errors.js';
+import type { InstalledApplyDiagnosticStage } from '../installed-run-diagnostics.js';
 import { readCanonicalArtifact } from '../agent-context.js';
 import { readInstalledRunAdmission, recheckInstalledRunWorkspace, readInstalledRunDependency, consumeInstalledRunDependency,
   type AssembledInstalledRun } from '../installed-run.js';
@@ -281,14 +282,19 @@ async function replayAdmitRun(
  * never recapture source, choose new assemblies or refresh model authority. */
 export async function replayInstalledRunAdmission(
   driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
-  supplied: ReturnType<typeof normalizeRunSubmitRequest>, identity: AuthenticatedControlIdentity, runtime?: AuthorizationRuntime, signal?: AbortSignal
+  supplied: ReturnType<typeof normalizeRunSubmitRequest>, identity: AuthenticatedControlIdentity, runtime?: AuthorizationRuntime, signal?: AbortSignal,
+  observeStage?: (stage: InstalledApplyDiagnosticStage) => void
 ): Promise<AdmitRunResult | undefined> {
   signal?.throwIfAborted();
+  const noteStage = (stage: InstalledApplyDiagnosticStage) => {
+    try { observeStage?.(stage); } catch { /* Diagnostics cannot replace the original replay outcome. */ }
+  };
   const reads = signal ? artifacts.withReadSignal(signal) : artifacts;
   assertCurrentControlFrame(owner, identity);
   const normalized = normalizeRunSubmitRequest(supplied.originalRequest), request = normalized.request;
   const { principalId } = identity, requestDigest = normalized.originalRequestDigest;
   const intent = runSubmitIntentDigest(principalId, request);
+  noteStage('submit_replay_control');
   const channel = await validateControlChannelClosure(reads, owner, identity);
   assertActiveStateOwner(driver, owner);
   const control = readControlRequest(driver, principalId, 'run.submit', request.requestId);
@@ -317,6 +323,7 @@ export async function replayInstalledRunAdmission(
       runSubmitIntentDigest(principalId, original.request) !== intent)
     throw new KernelStorageError('RECOVERY_REQUIRED', 'installed Run original public request does not bind its admission');
 
+  noteStage('submit_replay_source');
   const source = readSourceInspectionAttempt(driver, { principalId, admissionKey: request.admissionKey, admissionIntentDigest: intent });
   if (!source || source.phase !== 'retired' || source.outcome.kind !== 'captured')
     throw new KernelStorageError('RECOVERY_REQUIRED', 'installed Run original source is not captured and retired');
@@ -342,6 +349,7 @@ export async function replayInstalledRunAdmission(
   }
   await readSourceInspectionRetirement(driver, reads, source, target);
 
+  noteStage('submit_replay_snapshot');
   const response = await readPublishedResponse(reads, originalControl.responseRef), run = response.result.snapshot.run;
   const actual = readRun(driver, admission.id), spec = decodeRunSpec(await readCanonicalArtifact(reads, actual.specRef));
   const checkpoint = readCheckpoint(driver, identityHash('cliq-checkpoint-id-v1', actual.id, 'initial', 0));
@@ -398,11 +406,13 @@ export async function replayInstalledRunAdmission(
         canonicalSha256(consent.client) !== canonicalSha256(initialChannel.client) || consent.runSpecCoreDigest !== canonicalSha256(specCore) || !request.allowUnverified)
       throw new KernelStorageError('RECOVERY_REQUIRED', 'installed Run original direct consent closure changed');
   }
+  noteStage('submit_replay_verifier');
   let verifierHistory: Awaited<ReturnType<typeof validateVerifierRunAdmission>> | undefined;
   if (verifierSpec.verifiers.length) {
     if (!runtime) throw new TypeError('verifier replay has no trusted retained release keys');
     verifierHistory = await validateVerifierRunAdmission(driver, reads, owner, runtime, actual.id, signal);
   }
+  noteStage('submit_replay_commit');
   const admittedRequestDigest = canonicalSha256({ admissionIntentDigest: intent, objectiveRef: spec.objectiveRef,
     admittedContextRef: spec.admittedContextRef, runSpecRef: actual.specRef, workspaceIdentityDigest: workspace.identityDigest,
     repositoryIdentityDigest: workspace.repositoryIdentityDigest ?? null, sourceProjectionRef: spec.sourceProjectionRef,
