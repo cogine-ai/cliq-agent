@@ -82,13 +82,17 @@ export function loadVerifierRepair(driver: SqliteDriver, artifacts: ArtifactCata
           canonicalSha256(cut.runSpec) !== canonicalSha256(spec)) throw new TypeError('repair belongs to another Run authority');
       if (run.revision !== input.expectedRunRevision) throw new KernelStorageError('REVISION_CONFLICT', 'repair revision changed');
       if (run.status !== 'queued' || run.nextStep !== 'verify' || !run.frontierRef || run.activeWorkerLaunchId || run.waitingReason ||
-          run.waitingOnRef || run.cancelRequested || run.stopIntentRef || run.parentRunId || run.resultRef || run.terminalReason ||
-          !isZeroBudget(run.budgetReserved) || spec.operation !== 'agent' || spec.dependencyPolicyRef !== undefined)
+          run.waitingOnRef || run.cancelRequested || run.stopIntentRef || run.resultRef || run.terminalReason ||
+          !isZeroBudget(run.budgetReserved) || spec.operation !== 'agent')
         throw new KernelStorageError('STATE_TRANSITION_INVALID', 'repair requires its unstopped lease-free root verifier frontier');
       const progress = await readVerifierProgress(driver, artifacts, cut);
       const frontier: RunFrontier = { schemaVersion: 1, kind: 'verify', phase: 'verifiers', candidateItemId: progress.candidate.itemId,
         resultSourceRef: progress.candidate.resultSourceRef, verifierPlanRef: progress.planRef,
         nextVerifierIndex: progress.nextVerifierIndex, afterPass: 'finalize' };
+      if (spec.dependencyPolicyRef) {
+        if (!progress.dependency?.ready) throw new TypeError('repair requires its original full dependency readiness');
+        frontier.dependencyPlanRef = progress.dependency.planRef;
+      }
       requireEqual(await readCanonicalArtifact(artifacts, run.frontierRef), frontier, 'repair exact original verifier frontier');
       const existingItems = await artifacts.mapReads(cut.items, async row => ({ itemSeq: row.itemSeq, itemRef: row.payloadRef,
         item: await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef) }));

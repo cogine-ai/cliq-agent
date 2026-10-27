@@ -18,6 +18,7 @@ import { BUILTIN_SCRIPT_RECIPE, BUILTIN_SCRIPT_ENVIRONMENTS, builtinToolInputByt
 import { verifyRuntimeBundle, type ReleaseTrustKey, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { sampleCanonicalNow } from '../state/canonical-time.js';
 import { assertBuiltinEditLaunchClosure, assertBuiltinToolLaunchClosure, isBuiltinScriptLaunchClosure, assertWorkerLaunchClosure, assertVerifierLaunchClosure,
+  assertDependencyLaunchClosure, type DependencyLaunchClosure,
   type BuiltinEditLaunchClosure, type BuiltinScriptLaunchClosure, type BuiltinToolLaunchClosure, type WorkerLaunchClosure, type VerifierLaunchClosure } from '../state/execution-closure.js';
 import { borrowWorkerReservationForExecution, borrowSourceGitInputForExecution, borrowRetainedSourceGitInputForCleanup,
   borrowRegisteredAbsentSourceGitInputForCleanup,
@@ -29,10 +30,15 @@ import { borrowRunWorkspaceForExecution, type RunWorkspaceGeneration } from '../
 import { loadInstalledWorkerNative, sealInstalledWorkerImage, withInstalledWorkerRoot, startInstalledGuestToolchain, closeInstalledGuestToolchain,
   sealInstalledSourceGitInspector, startInstalledSourceGitToolchain, closeInstalledSourceGitToolchain,
   sealInstalledBuiltinToolScript, startInstalledBuiltinBashToolchain, closeInstalledBuiltinBashToolchain,
+  sealInstalledDependencyNpmAssets, borrowInstalledDependencyTransport, readInstalledDependencyTransportClosure,
   type HeldInstalledAnchor, type HeldInstalledRuntime } from '../state/installed-runtime.js';
 import { GUEST_EXTRACTOR_RECIPE, LINUX_VERIFIER_RESOURCE_MINIMUMS, type NativeGuestExtractorBinding, type NativeGuestToolchain,
   type NativeGuestExtractionInput, type NativeSourceGitToolchain, type NativeBuiltinBashToolchain } from './guest-toolchain.js';
 import { guestToolchainExecutables, type RetainedVerifierToolchain } from '../state/guest-toolchain.js';
+import { dependencyNpmInput } from './dependency-npm-data.js';
+import { NPM_DEPENDENCY_RECIPE, NPM_DEPENDENCY_SANDBOX_ENVIRONMENT, npmDependencyMounts } from './dependency-recipe.js';
+import type { DependencyBrokerBinding, NativeDependencyTransport } from '../state/dependency-broker-native.js';
+import type { NativeDependencyClosed } from '../state/dependency-broker-native.js';
 
 export class LinuxExecutionIdentityError extends Error {
   readonly code = 'UNSUPPORTED_EXECUTION_IDENTITY' as const;
@@ -78,6 +84,49 @@ type NativeCapturedInvocationResult = Readonly<{
   Readonly<{ terminationReason: 'spawn_error'; nativeErrorCode: number }> |
   Readonly<{ terminationReason: 'timeout' | 'resource_failure' | 'controller_stop' }>);
 export type NativeVerifierResult = NativeCapturedInvocationResult;
+export type NativeDependencyResult = NativeCapturedInvocationResult;
+export type NativeDependencyResultAcknowledgement = Readonly<{ kind: 'outputs_acknowledged' | 'controller_joined' }>;
+export type LinuxBlockedDependency = Readonly<{
+  containment: ProcessContainment;
+  stagePackageChunk(bytes: Buffer): Promise<void>;
+  sealPackageInputs(): Promise<void>;
+  result(): Promise<NativeDependencyResult>;
+  close(): Promise<void>;
+}>;
+const dependencyResults = new WeakMap<object, { producer: LinuxBlockedDependency;
+  retained?: { stdout: Buffer; stderr: Buffer; acknowledge(): Promise<NativeDependencyResultAcknowledgement> };
+  pending?: Promise<NativeDependencyResultAcknowledgement>; acknowledged?: NativeDependencyResultAcknowledgement }>();
+const dependencyInvocations = new WeakMap<object, { closure: DependencyLaunchClosure; transport: NativeDependencyTransport; bindingDigest: string }>();
+/** Fixed producer identity only, with no caller callback or structural
+ * fallback. An actual result from another scope cannot settle this claim. */
+export function assertNativeDependencyInvocation(closure: DependencyLaunchClosure, transport: NativeDependencyTransport,
+  binding: DependencyBrokerBinding, producer: LinuxBlockedDependency, result?: NativeDependencyResult): void {
+  assertDependencyLaunchClosure(closure);
+  const original = dependencyInvocations.get(producer);
+  if (!original || original.closure !== closure || original.transport !== transport || original.bindingDigest !== canonicalSha256(binding) ||
+      result !== undefined && dependencyResults.get(result)?.producer !== producer)
+    throw new TypeError('dependency requires its exact original native invocation and result');
+}
+export function assertNativeDependencyResult(value: unknown): asserts value is NativeDependencyResult {
+  if (!value || typeof value !== 'object' || !dependencyResults.has(value)) throw new TypeError('dependency result requires its original same-claim native producer');
+}
+export function captureNativeDependencyResult(value: unknown): NativeDependencyResult {
+  assertNativeDependencyResult(value); const held = dependencyResults.get(value)!;
+  if (!held.retained || held.pending) throw new TypeError('dependency result data is retired or being acknowledged');
+  return Object.freeze({ ...value, stdout: Buffer.from(held.retained.stdout), stderr: Buffer.from(held.retained.stderr) });
+}
+/** Only data retirement after the original unique completion commit. It can
+ * neither release npm nor infer a result or death from controller close. */
+export async function acknowledgeNativeDependencyResult(producer: LinuxBlockedDependency, result: NativeDependencyResult): Promise<NativeDependencyResultAcknowledgement> {
+  assertNativeDependencyResult(result); const held = dependencyResults.get(result)!;
+  if (held.producer !== producer) throw new TypeError('dependency acknowledgement belongs to another original producer');
+  if (held.acknowledged) return held.acknowledged;
+  if (held.pending) return held.pending;
+  if (!held.retained) throw new TypeError('dependency result lost its original retained bytes');
+  const pending = held.retained.acknowledge().then(observed => { held.acknowledged = observed; held.retained = undefined; return observed; })
+    .finally(() => { if (held.pending === pending) held.pending = undefined; });
+  held.pending = pending; return pending;
+}
 /** Shared physical data shape; a tool result has its own genuine producer
  * registry and can never be substituted by the verifier's runtime brand. */
 export type NativeBuiltinToolResult = NativeCapturedInvocationResult & Readonly<{ tool: BuiltinScriptTool }>;
@@ -184,6 +233,8 @@ export type LinuxBlockedWorker = Readonly<{
   hasInvocationCapacity(): boolean;
   createInvocation(closure: BuiltinToolLaunchClosure): Promise<LinuxBlockedInvocation>;
   createVerifier(closure: VerifierLaunchClosure, options?: { signal?: AbortSignal }): Promise<LinuxBlockedVerifier>;
+  createDependency(closure: DependencyLaunchClosure, transport: NativeDependencyTransport, binding: DependencyBrokerBinding,
+    options?: { signal?: AbortSignal }): Promise<LinuxBlockedDependency>;
   stop(): Promise<NativeContainmentDeathObservation>;
   closeAfterControllerJoin(): Promise<void>;
 }>;
@@ -368,6 +419,11 @@ type NativeVerifierOutcome = Readonly<{ termination: number; exitCode: number; s
 type NativeScope = { pollReady(): boolean; observe(): NativeObservation; activate(nonce: string): void; pollActivated(): boolean;
   release(): void; result(): number | NativeVerifierOutcome | undefined; stop(): void; pollStopped(): NativeObservation | undefined;
   beginAcknowledgeResult?(raw: NativeVerifierOutcome): void; pollResultAcknowledged?(): boolean };
+export type NativeDependencyNpmScriptImage = Readonly<{ identity: Readonly<{ sha256: string; byteCount: number }>; close(): void }>;
+export type NativeDependencyNpmDataImage = Readonly<{ identity: Readonly<{ sha256: string; byteCount: number }>; close(): void }>;
+type NativeDependencyScope = Pick<NativeScope, 'pollReady' | 'observe' | 'result' | 'stop' | 'pollStopped'> & {
+  stagePackageChunk(bytes: Buffer): void; sealPackageInputs(): void; pollPackageInputs(): boolean;
+};
 type ControllerPreparationDirectoryIdentity = Readonly<{
   deviceId: string; fileId: string; ownerUid: number; ownerGid: number; mode: number;
 }>;
@@ -390,6 +446,9 @@ type NativeController = { pid: number; processStartToken: string;
     guest: NativeGuestToolchain | NativeBuiltinBashToolchain, script: NativeBuiltinToolScriptImage,
     input: NativeImage, command: NativeImage | null, config: object): NativeScope;
   createVerifier(generation: number, parent: NativeScope, helper: NativeImage, bwrap: NativeImage, guest: NativeGuestToolchain, config: object): NativeScope;
+  createDependencyNpm?(generation: number, parent: NativeScope, helper: NativeImage, bwrap: NativeImage,
+    guest: NativeGuestToolchain | NativeBuiltinBashToolchain, script: NativeDependencyNpmScriptImage,
+    data: NativeDependencyNpmDataImage, input: NativeImage, owner: object, bindingBytes: Buffer, config: object): NativeDependencyScope;
   reserveSourceGit(input: object, helper: NativeImage, bwrap: NativeImage, guest: NativeSourceGitToolchain,
     inspector: NativeSourceGitInspectorImage, recipe: NativeSourceGitRecipe): NativeSourceGitScope;
   reservePreparationGit(input: object, helper: NativeImage, bwrap: NativeImage, guest: NativeSourceGitToolchain,
@@ -409,15 +468,20 @@ type NativeController = { pid: number; processStartToken: string;
   close(): Promise<void>;
 };
 export type NativeWorkerBinding = { interfaceVersion: 3; readonly builtinToolInterfaceVersion?: 2; readonly verifierInterfaceVersion?: 1;
+  readonly dependencyInterfaceVersion?: 1;
   readonly sourceInterfaceVersion: 1;
   readonly preparationInterfaceVersion: 1;
   sealBuiltinToolScript(fd: number): NativeBuiltinToolScriptImage;
+  sealDependencyNpmScript?(fd: number): NativeDependencyNpmScriptImage;
+  sealDependencyNpmData?(fd: number): NativeDependencyNpmDataImage;
   sealSourceGitInspector(fd: number): NativeSourceGitInspectorImage;
   sealImage(fd: number): NativeImage; sealImageBuffer(input: Buffer): NativeImage;
   openController(helper: NativeImage, cgroupRootFd: number): NativeController };
 type NativeBinding = NativeWorkerBinding;
 type HeldGuestPreparation = Readonly<{ job: NativeGuestToolchain; close(): Promise<void> }>;
 type HeldBuiltinToolRuntime = Readonly<{ job: NativeGuestToolchain | NativeBuiltinBashToolchain; script: NativeBuiltinToolScriptImage; close(): Promise<void> }>;
+type HeldDependencyRuntime = Readonly<{ job: NativeGuestToolchain | NativeBuiltinBashToolchain; script: NativeDependencyNpmScriptImage;
+  data: NativeDependencyNpmDataImage; originalOwner: object; observeClosed(): NativeDependencyClosed | undefined; close(): Promise<void> }>;
 type HeldPreparingGitRuntime = Readonly<{ guest: NativeSourceGitToolchain; inspector: NativeSourceGitInspectorImage; close(): Promise<void> }>;
 function preparingRecipe(value: NativePreparingGitRecipe): NativePreparingGitRecipe {
   const keys = ['maxProcesses', 'memoryBytes', 'cpuQuotaMicrosPerSecond', 'maxOpenFiles', 'maxSingleFileBytes', 'maxGenerationBytes',
@@ -623,6 +687,28 @@ export async function openInstalledLinuxWorkerLauncher(selected: HeldInstalledRu
         signal?.throwIfAborted(); return Object.freeze({ script, job, close });
       } catch (error) {
         try { await close(); } catch (cleanup) { throw retirementError('builtin runtime construction and join failed', new AggregateError([error, cleanup])); }
+        throw error;
+      }
+    },
+    async dependency(toolchain, scripts, transport, originalBinding, signal) {
+      const originalOwner = borrowInstalledDependencyTransport(selected, transport, originalBinding);
+      let assets: Awaited<ReturnType<typeof sealInstalledDependencyNpmAssets>> | undefined;
+      let job: NativeGuestToolchain | NativeBuiltinBashToolchain | undefined, closing: Promise<void> | undefined;
+      const close = () => closing ??= (async () => {
+        const failures: unknown[] = [];
+        if (job) try { await closeInstalledGuestToolchain(selected, job); } catch (error) { failures.push(error); }
+        if (assets) for (const image of [assets.script, assets.data]) try { image.close(); } catch (error) { failures.push(error); }
+        if (failures.length) throw retirementError('dependency signed runtime did not actually join', new AggregateError(failures));
+      })();
+      try {
+        assets = await sealInstalledDependencyNpmAssets(selected, signal); signal?.throwIfAborted();
+        job = scripts ? await startInstalledBuiltinBashToolchain(selected, toolchain, { ...(signal ? { signal } : {}) })
+          : await startInstalledGuestToolchain(selected, toolchain, { ...(signal ? { signal } : {}) });
+        signal?.throwIfAborted(); borrowInstalledDependencyTransport(selected, transport, originalBinding);
+        return Object.freeze({ ...assets, job, originalOwner,
+          observeClosed: () => readInstalledDependencyTransportClosure(selected, transport, originalBinding), close });
+      } catch (error) {
+        try { await close(); } catch (cleanup) { throw retirementError('dependency runtime construction and join failed', new AggregateError([error, cleanup])); }
         throw error;
       }
     },
@@ -903,7 +989,7 @@ function assertGuestDescription(owner: Pick<NativeGuestToolchain, 'describe'>, t
     mismatch('actual frozen Node mapping differs from its retained signed guest toolchain');
 }
 
-function scopeProjection(closure: WorkerLaunchClosure | BuiltinToolLaunchClosure | VerifierLaunchClosure, borrowed: BorrowedGenerationForExecution, activationNonceDigest: string) {
+function scopeProjection(closure: WorkerLaunchClosure | BuiltinToolLaunchClosure | VerifierLaunchClosure | DependencyLaunchClosure, borrowed: BorrowedGenerationForExecution, activationNonceDigest: string) {
   const backend = closure.plan.backend;
   if (backend.kind !== 'linux') mismatch('worker requires the Linux containment plan');
   const device = Number(borrowed.identity.deviceId), inode = Number(borrowed.identity.fileId);
@@ -995,6 +1081,25 @@ function supportedBuiltinScriptRecipe(closure: BuiltinScriptLaunchClosure): void
     throw new LinuxExecutionIdentityError('builtin script is outside its exact signed recipe');
 }
 
+function supportedDependencyRecipe(closure: DependencyLaunchClosure): void {
+  const { spec, scriptEntry, dataEntry, toolchain } = closure;
+  if (spec.purpose !== 'dependency' || spec.processInvocation.recipe !== NPM_DEPENDENCY_RECIPE.recipe ||
+      spec.executable.kind !== 'guest_toolchain' || spec.executable.role !== 'package_manager' || spec.executable.toolId !== 'node' ||
+      spec.executable.executionPath !== '/usr/bin/node' || spec.executable.executableDigest !== toolchain.manifest.node.digest ||
+      scriptEntry.entryId !== NPM_DEPENDENCY_RECIPE.adapterId || scriptEntry.version !== NPM_DEPENDENCY_RECIPE.adapterVersion ||
+      scriptEntry.role !== 'tool_adapter' || scriptEntry.executable || scriptEntry.relativePath !== NPM_DEPENDENCY_RECIPE.adapterPath ||
+      dataEntry.entryId !== NPM_DEPENDENCY_RECIPE.dataId || dataEntry.version !== NPM_DEPENDENCY_RECIPE.dataVersion ||
+      dataEntry.role !== 'bundle_object' || dataEntry.executable || dataEntry.relativePath !== NPM_DEPENDENCY_RECIPE.dataPath ||
+      canonicalSha256(spec.environment) !== canonicalSha256(NPM_DEPENDENCY_SANDBOX_ENVIRONMENT) ||
+      spec.filesystem.kind !== 'run_generation' || spec.filesystem.access !== 'read_only' ||
+      spec.runtime.launcher.executableId !== LINUX_WORKER_RECIPE.launcherId ||
+      spec.resources.maxIpcFrameBytes !== LINUX_WORKER_RECIPE.maxIpcFrameBytes || spec.resources.maxQueuedIpcBytes !== LINUX_WORKER_RECIPE.maxQueuedIpcBytes ||
+      spec.resources.maxProcesses < LINUX_VERIFIER_RESOURCE_MINIMUMS.maxProcesses ||
+      spec.resources.maxSingleFileBytes < toolchain.manifest.guestImageByteCount || spec.resources.maxSingleFileBytes > 268_435_456 ||
+      canonicalSha256(spec.mounts) !== canonicalSha256(npmDependencyMounts(spec.owner.dispatchId, spec.filesystem.generationRef, scriptEntry.digest, dataEntry.digest)))
+    throw new LinuxExecutionIdentityError('dependency invocation is outside its exact signed npm data/Node recipe');
+}
+
 function capturedOutcome(raw: NativeVerifierOutcome, containment: ProcessContainment): NativeCapturedInvocationResult {
   for (const value of [raw.startedAtMs, raw.endedAtMs, raw.durationMs])
     if (!Number.isSafeInteger(value) || value < 0) mismatch('native verifier time measurement is invalid');
@@ -1030,7 +1135,7 @@ function builtinToolOutcome(raw: NativeVerifierOutcome, containment: ProcessCont
   return result;
 }
 
-function actualContainment(closure: WorkerLaunchClosure | BuiltinToolLaunchClosure | VerifierLaunchClosure, observed: NativeObservation,
+function actualContainment(closure: WorkerLaunchClosure | BuiltinToolLaunchClosure | VerifierLaunchClosure | DependencyLaunchClosure, observed: NativeObservation,
   createdAt = sampleCanonicalNow()): ProcessContainment {
   const backend = closure.plan.backend;
   if (backend.kind !== 'linux') mismatch('worker requires Linux containment');
@@ -1090,7 +1195,7 @@ function checkedDeath(observed: NativeObservation, containment: ProcessContainme
   observedDeaths.add(observation); return observation;
 }
 
-async function observedProcess(scope: NativeScope, expectedDigest: string): Promise<LinuxObservedProcess> {
+async function observedProcess(scope: Pick<NativeScope, 'observe'>, expectedDigest: string): Promise<LinuxObservedProcess> {
   const initial = scope.observe();
   const digest = await hashHeld(initial.imageFd, initial.imageByteCount, () => {
     const current = scope.observe();
@@ -1291,6 +1396,8 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
   image(entryId: string, binding: NativeBinding): Promise<NativeImage>;
   guest(toolchain: RetainedVerifierToolchain, signal?: AbortSignal): Promise<HeldGuestPreparation>;
   builtin?(toolchain: RetainedVerifierToolchain, bash: boolean, signal?: AbortSignal): Promise<HeldBuiltinToolRuntime>;
+  dependency?(toolchain: RetainedVerifierToolchain, scripts: boolean, transport: NativeDependencyTransport,
+    binding: DependencyBrokerBinding, signal?: AbortSignal): Promise<HeldDependencyRuntime>;
   preparing?(toolchain: RetainedVerifierToolchain, signal?: AbortSignal): Promise<HeldPreparingGitRuntime>;
   close(): Promise<void>;
   noteResources?(boundary: ResourceBoundary, subjects?: readonly OriginalResourceSubject[]): void;
@@ -1877,6 +1984,155 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
                       async stop() { if (this !== handle) throw new TypeError('invalid blocked invocation'); return death(scope, invocationContainment, native, retirementReceiver); } });
                     invocations.set(handle, { consumed: false, claim, release() { receiver(); borrowed.assertHeld(); scope.release(); } });
                     return handle;
+                  },
+                  async createDependency(dependencyClosure, transport, originalBinding, options) {
+                    if (this !== worker || !active) throw new KernelStorageError('LEASE_FENCED', 'dependency requires its original actual active parent worker');
+                    controllerReceiver(); borrowed.assertHeld(); assertDependencyLaunchClosure(dependencyClosure);
+                    same(dependencyClosure.bundle, bundle, 'dependency bundle'); supportedDependencyRecipe(dependencyClosure);
+                    const original = immutableSnapshot(originalBinding), expected = dependencyClosure.claim;
+                    same(original, { runId: dependencyClosure.run.id, opId: expected.opId, attempt: expected.attempt,
+                      dispatchId: expected.dispatchId, dispatchJournalSeq: expected.seq, requestRef: expected.requestRef,
+                      requestDigest: dependencyClosure.request.requestDigest, targetRef: dependencyClosure.request.targetRef,
+                      targetDigest: dependencyClosure.target.targetDigest, grantRef: expected.grantRef, supervisorInstanceId: expected.supervisorInstanceId,
+                      stateOwnerEpoch: expected.stateOwnerEpoch, leaseEpoch: expected.leaseEpoch, brokerFenceTokenDigest: expected.brokerFenceTokenDigest },
+                    'dependency original whole-operation native binding');
+                    const dependencyBackend = dependencyClosure.plan.backend;
+                    if (dependencyBackend.kind !== 'linux' || dependencyClosure.plan.parentContainmentRef !== canonicalSha256(containment) ||
+                        dependencyClosure.spec.parentWorkerContainmentRef !== canonicalSha256(containment) ||
+                        dependencyClosure.spec.filesystem.kind !== 'run_generation' || dependencyClosure.spec.filesystem.generationRef !== closure.workspaceGenerationRef ||
+                        path.posix.dirname(dependencyBackend.cgroupPath) !== backend.cgroupPath || binding.dependencyInterfaceVersion !== 1 ||
+                        typeof native.createDependencyNpm !== 'function' || typeof source.dependency !== 'function')
+                      mismatch('dependency does not select its exact original parent, generation and installed native owner');
+                    const signal = AbortSignal.any([installationAbort.signal, controllerAbort.signal, ...(options?.signal ? [options.signal] : [])]);
+                    signal.throwIfAborted();
+                    const opening = source.dependency(dependencyClosure.toolchain, dependencyClosure.dependencyPlan.allowInstallScripts, transport, original, signal)
+                      .then(runtime => { guests.add(runtime); controllerGuests.add(runtime); return runtime; });
+                    guestOpenings.add(opening); controllerGuestOpenings.add(opening);
+                    let runtime: HeldDependencyRuntime | undefined;
+                    try {
+                      runtime = await opening; controllerReceiver(); borrowed.assertHeld(); signal.throwIfAborted();
+                      assertGuestDescription(runtime.job, dependencyClosure.toolchain);
+                      if (runtime.script.identity.sha256 !== dependencyClosure.scriptEntry.digest || runtime.script.identity.byteCount !== dependencyClosure.scriptEntry.byteCount ||
+                          runtime.data.identity.sha256 !== dependencyClosure.dataEntry.digest || runtime.data.identity.byteCount !== dependencyClosure.dataEntry.byteCount)
+                        mismatch('dependency signed data differs from its complete original closure');
+                      const inputData = dependencyNpmInput({ schemaVersion: 1, format: 'cliq-dependency-npm-input-v1',
+                        dependencyPlanRef: dependencyClosure.request.dependencyPlanRef,
+                        packageManifestDigest: dependencyClosure.dependencyPlan.packageManifest.contentDigest, lockfileDigest: dependencyClosure.dependencyPlan.lockfileDigest,
+                        bindingGyp: dependencyClosure.dependencyPlan.bindingGyp.kind === 'absent' ? { kind: 'absent' } :
+                          { kind: 'present', contentDigest: dependencyClosure.dependencyPlan.bindingGyp.contentDigest },
+                        scriptConditionsDigest: canonicalSha256(dependencyClosure.scriptConditions), allowInstallScripts: dependencyClosure.dependencyPlan.allowInstallScripts,
+                        operationGrantRef: dependencyClosure.spec.operationGrantRef, packageCount: dependencyClosure.dependencyPlan.packageCount,
+                        descriptorSequenceDigest: dependencyClosure.dependencyPlan.descriptorSequenceDigest, packageDescriptorBytes: dependencyClosure.dependencyPlan.packageDescriptorBytes,
+                        maxPackageBytes: Math.min(dependencyClosure.spec.resources.maxSingleFileBytes, dependencyClosure.spec.resources.maxInvocationOutputBytes, 67_108_864),
+                        maxCacheBytes: Math.min(dependencyClosure.dependencyPlan.maxDownloadBytes, dependencyClosure.spec.resources.maxGenerationBytes) });
+                      const inputImage = binding.sealImageBuffer(canonicalJsonBytes(inputData));
+                      let scope!: NativeDependencyScope, primary: { error: unknown } | undefined;
+                      try { scope = native.createDependencyNpm(borrowed.fd, created, helper, bwrap, runtime.job, runtime.script, runtime.data,
+                        inputImage, runtime.originalOwner, canonicalJsonBytes(original), {
+                          ...scopeProjection(dependencyClosure, borrowed, dependencyClosure.plan.launchNonceDigest),
+                          planRef: canonicalSha256(dependencyClosure.plan), sandboxLaunchSpecRef: dependencyClosure.sandboxLaunchSpecRef,
+                          sandboxLaunchSpecDigest: dependencyClosure.spec.launchSpecDigest,
+                          allowInstallScripts: dependencyClosure.dependencyPlan.allowInstallScripts ? 1 : 0,
+                          timeoutMs: 60_000, outputLimitBytes: dependencyClosure.spec.resources.maxInvocationOutputBytes,
+                        }); } catch (error) { primary = { error }; }
+                      try { retireImage(inputImage); } catch (error) { throw retirementError('dependency fixed input descriptor did not join',
+                        primary ? new AggregateError([primary.error, error]) : error); }
+                      if (primary) throw primary.error;
+                      await runtime.close(); guests.delete(runtime); controllerGuests.delete(runtime);
+                      await awaitNative(() => scope.pollReady() ? true : undefined, closeController, signal, 5000);
+                      controllerReceiver(); borrowed.assertHeld();
+                      const invocationContainment = actualContainment(dependencyClosure, scope.observe());
+                      const launcherEntry = bundle.entries.find(entry => entry.entryId === LINUX_WORKER_RECIPE.launcherId)!;
+                      await observedProcess(scope, launcherEntry.digest);
+                      let result: NativeDependencyResult | undefined, resultPending: Promise<NativeDependencyResult> | undefined;
+                      let retired = false, acknowledging = false, ackStarted = false, inputPending = false, sealed = false;
+                      let controlledStop: Promise<void> | undefined;
+                      const readResult = () => {
+                        if (retired || acknowledging) throw new TypeError('dependency result data is retired or being acknowledged');
+                        if (result) return result;
+                        const raw = scope.result(); if (raw === undefined) return undefined;
+                        if (typeof raw !== 'object') mismatch('dependency returned an ordinary edit acknowledgement');
+                        const value = capturedOutcome(raw, invocationContainment); result = value;
+                        dependencyResults.set(value, { producer: handle, retained: { stdout: Buffer.from(raw.stdout), stderr: Buffer.from(raw.stderr),
+                          async acknowledge() {
+                            acknowledging = true;
+                            try {
+                              if (!result || resultPending && await resultPending !== result) mismatch('dependency data acknowledgement lost its original joined result reader');
+                              let observation = runtime!.observeClosed();
+                              if (!observation) {
+                                try {
+                                  if (!ackStarted) { ackStarted = true; transport.beginAcknowledgeProcessResult(canonicalJsonBytes(original)); }
+                                  await awaitNative(() => transport.pollProcessResultAcknowledged() ? true : undefined, closeController, controllerAbort.signal, 2000);
+                                } catch (error) {
+                                  try { await closeController(); await transport.close(); }
+                                  catch (cleanup) { throw retirementError('dependency result data and original controller did not join', new AggregateError([error, cleanup])); }
+                                }
+                                observation = await transport.close();
+                              }
+                              if (!observation.processClaimed || !observation.processJoined || !observation.processResultCustodyRetired ||
+                                  !['acknowledged', 'controller_joined'].includes(observation.processResultCustodyOrigin))
+                                throw retirementError('dependency result data has no original complete native custody retirement', new Error('missing original output retirement'));
+                              if (controllerClosed) {
+                                if (!controllerClosing) throw retirementError('dependency original controller join is missing', new Error('missing close owner'));
+                                await controllerClosing;
+                              }
+                              result = undefined; resultPending = undefined; retired = true;
+                              return Object.freeze({ kind: observation.processResultCustodyOrigin === 'acknowledged' ? 'outputs_acknowledged' as const : 'controller_joined' as const });
+                            } finally { acknowledging = false; }
+                          } } });
+                        controllerVerifierStops.delete(stopForControllerClose); return value;
+                      };
+                      const stopForControllerClose = (deadline: number) => controlledStop ??= (async () => {
+                        scope.stop(); const remaining = () => {
+                          const left = deadline - performance.now();
+                          if (left <= 0) throw new KernelStorageError('RECOVERY_REQUIRED', 'dependency controlled stop exceeded its original bound');
+                          return left;
+                        };
+                        await awaitNative(() => scope.pollStopped(), () => joinController(native), undefined, remaining());
+                        await awaitNative(readResult, () => joinController(native), undefined, remaining());
+                      })();
+                      const handle: LinuxBlockedDependency = Object.freeze({ containment: invocationContainment,
+                        async stagePackageChunk(bytes) {
+                          if (this !== handle || sealed || inputPending || retired) throw new TypeError('dependency input has another original stage owner');
+                          controllerReceiver(); borrowed.assertHeld(); signal.throwIfAborted();
+                          if (utilTypes.isProxy(bytes) || !Buffer.isBuffer(bytes) || bytes.length < 1 || bytes.length > 65_536)
+                            throw new TypeError('dependency input requires one fixed bounded data chunk');
+                          inputPending = true;
+                          try { scope.stagePackageChunk(Buffer.from(bytes)); await awaitNative(() => scope.pollPackageInputs() ? true : undefined, closeController, signal); }
+                          finally { inputPending = false; }
+                        },
+                        async sealPackageInputs() {
+                          if (this !== handle || sealed || inputPending || retired) throw new TypeError('dependency inputs are already sealed or pending');
+                          controllerReceiver(); borrowed.assertHeld(); signal.throwIfAborted(); inputPending = true;
+                          try { scope.sealPackageInputs(); await awaitNative(() => scope.pollPackageInputs() ? true : undefined, closeController, signal); sealed = true; }
+                          finally { inputPending = false; }
+                        },
+                        async result() {
+                          if (this !== handle || retired || acknowledging || !sealed || inputPending) throw new TypeError('dependency result requires its exact sealed original producer');
+                          if (result) return result;
+                          if (!resultPending) {
+                            // The actual native result call itself rejects an
+                            // unreleased scope. There is no JS release boolean.
+                            const first = readResult(); if (first) return first;
+                            controllerVerifierStops.add(stopForControllerClose);
+                            resultPending = awaitNative(readResult, closeController, signal, 70_000, 10).catch(error => {
+                              try { const observed = readResult(); if (observed) return observed; } catch { /* Never manufacture a result after close. */ }
+                              throw error;
+                            });
+                          }
+                          return resultPending;
+                        },
+                        async close() { if (this !== handle) throw new TypeError('invalid dependency scope receiver'); await closeController(); }
+                      });
+                      dependencyInvocations.set(handle, { closure: dependencyClosure, transport, bindingDigest: canonicalSha256(original) });
+                      return handle;
+                    } catch (error) {
+                      let failure: unknown;
+                      if (runtime) try { await runtime.close(); guests.delete(runtime); controllerGuests.delete(runtime); } catch (cleanup) { failure = cleanup; }
+                      try { await closeController(); } catch (cleanup) { failure ??= cleanup; }
+                      if (failure !== undefined) throw retirementError('dependency construction and original resource joins failed', new AggregateError([error, failure]));
+                      throw error;
+                    } finally { guestOpenings.delete(opening); controllerGuestOpenings.delete(opening); }
                   },
                   async createVerifier(verifierClosure, options) {
                     if (this !== worker || !active) throw new KernelStorageError('LEASE_FENCED', 'verifier requires the actual next active parent worker');

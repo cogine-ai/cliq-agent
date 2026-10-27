@@ -1042,6 +1042,39 @@ jobs:
         id: build
       - name: Install actual guest, transport and Secret Service prerequisites
         run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap libcap-dev libselinux1-dev meson ninja-build e2fsprogs libext2fs-dev pkg-config
+      - name: Check the actual native dependency family before installed qualification
+        run: node --test --test-concurrency=1 --import tsx scripts/kernel/testing/dependency-native-family.test.ts scripts/kernel/testing/dependency-broker-lifecycle.test.ts scripts/kernel/testing/dependency-npm-stage.test.ts
+      - name: Acquire the exact official npm qualification source
+        id: npm_source
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          node --import tsx --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { constants } from 'node:fs';
+          import { open } from 'node:fs/promises';
+          import path from 'node:path';
+          import { NPM_DATA_RECIPE } from './src/sandbox/npm-data-image.ts';
+          import { buildInstalledNpmDataAsset } from './scripts/kernel/testing/installed-npm-package.ts';
+          assert(typeof process.env.RUNNER_TEMP === 'string' && path.isAbsolute(process.env.RUNNER_TEMP));
+          const response = await fetch(NPM_DATA_RECIPE.officialArchive, {
+            redirect: 'error', signal: AbortSignal.timeout(60000)
+          });
+          const chunks = []; let total = 0;
+          try {
+            assert.equal(response.status, 200); assert(response.body);
+            for await (const chunk of response.body) {
+              total += chunk.byteLength; assert(total <= NPM_DATA_RECIPE.archiveBytes);
+              chunks.push(Buffer.from(chunk));
+            }
+          } finally { await response.body?.cancel(); }
+          assert.equal(total, NPM_DATA_RECIPE.archiveBytes);
+          const archive = Buffer.concat(chunks, total);
+          buildInstalledNpmDataAsset(archive);
+          const file = await open(path.join(process.env.RUNNER_TEMP, 'cliq-official-npm-10.9.2.tgz'),
+            constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+          try { await file.writeFile(archive); await file.sync(); } finally { await file.close(); }
+          NODE
       - name: Observe the fixed original installed status deadlock
         shell: bash
         run: |
@@ -1051,11 +1084,12 @@ jobs:
           mkdir -m 700 "$RUNNER_TEMP/cliq-installed-status-regression"
           node scripts/kernel/testing/installed-status-regression.mjs "$RUNNER_TEMP/cliq-installed-status-regression/status-borrow-regression.json"
       - name: Exercise signed installed identity grant, Node verifier, repair and terminal replay
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.npm_source.outcome == 'success' }}
         shell: bash
         run: |
           probe_node=$(realpath "$(command -v node)")
-          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --run-verifier-journey "$probe_node" "$RUNNER_TEMP/cliq-installed-verifier-journey"
+          probe_npm_archive="$RUNNER_TEMP/cliq-official-npm-10.9.2.tgz"
+          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --run-verifier-journey --locked-node "$probe_npm_archive" "$probe_node" "$RUNNER_TEMP/cliq-installed-verifier-journey"
       - name: Retain only bounded installed verifier and unchanged-runner cleanup evidence
         if: always()
         uses: actions/upload-artifact@v4

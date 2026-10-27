@@ -27,7 +27,10 @@ import { buildBundledSkillPackageData, type BundledSkillPackageInput } from './i
 import { checkCanonicalBytes, validateBundle } from '../../../src/state/installed-artifacts.js';
 import { emitQualificationFailure } from './qualification-failure-diagnostic.js';
 
-type PackageBuildOptions = Readonly<{ source?: FrozenQualificationSource; publisher?: InstalledQualificationPublisher; upgradeSourceBundle?: RuntimeBundleManifest; bundledSkills?: readonly BundledSkillPackageInput[]; headlessSchemaVersion?: 3; guestToolchain?: 'node-test-v1'; guestImageProfile?: 'qualification_max'; publicationRetirementDiagnostics?: true; credentialPhaseDiagnostics?: true; serverAuthenticationDiagnostics?: true; storeFailureDiagnostics?: true; resourceDiagnostics?: true }>;
+type PackageBuildOptions = Readonly<{ source?: FrozenQualificationSource; publisher?: InstalledQualificationPublisher; upgradeSourceBundle?: RuntimeBundleManifest; bundledSkills?: readonly BundledSkillPackageInput[]; headlessSchemaVersion?: 3; guestToolchain?: 'node-test-v1'; guestImageProfile?: 'qualification_max'; publicationRetirementDiagnostics?: true; credentialPhaseDiagnostics?: true; serverAuthenticationDiagnostics?: true; storeFailureDiagnostics?: true; resourceDiagnostics?: true; npmDependencyArchive?: Buffer }>;
+import { buildInstalledNpmAdapterAsset, buildInstalledNpmDataAsset } from './installed-npm-package.js';
+import { DEPENDENCY_BROKER_ENTRY_ID, DEPENDENCY_BROKER_RELATIVE_PATH } from '../../../src/state/dependency-broker-native.js';
+import { NPM_DATA_RECIPE } from '../../../src/sandbox/npm-data-image.js';
 
 /** Construct the same actual SEA/helper package for independent Linux startup
  * and user-manager qualifiers. Real worker images are installed, not launched:
@@ -35,7 +38,7 @@ type PackageBuildOptions = Readonly<{ source?: FrozenQualificationSource; publis
 async function buildInstalledSupervisorPackageCore(fixture: string,
   variant: 'complete' | 'retirement-native-missing' = 'complete', modelFixture?: InstalledModelPackageFixture,
   options: PackageBuildOptions = {}, diagnostics={phase:0}) {
-  assert(Object.keys(options).every(key => key === 'source' || key === 'publisher' || key === 'upgradeSourceBundle' || key === 'bundledSkills' || key === 'headlessSchemaVersion' || key === 'guestToolchain' || key === 'guestImageProfile' || key === 'publicationRetirementDiagnostics' || key === 'credentialPhaseDiagnostics' || key === 'serverAuthenticationDiagnostics' || key === 'storeFailureDiagnostics' || key === 'resourceDiagnostics'));
+  assert(Object.keys(options).every(key => key === 'source' || key === 'publisher' || key === 'upgradeSourceBundle' || key === 'bundledSkills' || key === 'headlessSchemaVersion' || key === 'guestToolchain' || key === 'guestImageProfile' || key === 'publicationRetirementDiagnostics' || key === 'credentialPhaseDiagnostics' || key === 'serverAuthenticationDiagnostics' || key === 'storeFailureDiagnostics' || key === 'resourceDiagnostics' || key === 'npmDependencyArchive'));
   assert(options.headlessSchemaVersion === undefined || options.headlessSchemaVersion === 3);
   assert(options.guestToolchain === undefined || options.guestToolchain === 'node-test-v1');
   // Publisher construction only: keep the original maximum-load qualifier
@@ -52,10 +55,19 @@ async function buildInstalledSupervisorPackageCore(fixture: string,
   if (options.publicationRetirementDiagnostics) assert(options.guestToolchain === 'node-test-v1',
     'fixed publication observations belong only to the installed delivery qualification image');
   if (options.guestToolchain) assert(variant === 'complete' && modelFixture, 'installed verifier requires the complete model and native package');
+  // Publisher-only fixed source. This is not a runtime flag, path, registry
+  // selector or interpreter choice. Validate the entire official source
+  // before starting any builder or publishing a signed dependency entry.
+  assert(options.npmDependencyArchive === undefined || Buffer.isBuffer(options.npmDependencyArchive) &&
+    options.npmDependencyArchive.length === NPM_DATA_RECIPE.archiveBytes, 'installed npm requires its exact bounded official source');
+  const npmData = options.npmDependencyArchive === undefined ? undefined : buildInstalledNpmDataAsset(Buffer.from(options.npmDependencyArchive));
+  if (npmData) assert(options.guestToolchain === 'node-test-v1' && variant === 'complete' && modelFixture,
+    'installed npm requires its complete signed guest, model and native package');
   diagnostics.phase=1;
   const source = options.source === undefined ? undefined : await readQualificationSource(options.source);
   const repository = source?.root ?? fileURLToPath(new URL('../../..', import.meta.url));
   const schemaVersion = source?.schemaVersion ?? KERNEL_STATE_SCHEMA_VERSION;
+  if (options.npmDependencyArchive !== undefined && schemaVersion !== 8) throw new TypeError('the original schema7 product cannot consume a later npm recipe');
   if (options.upgradeSourceBundle && schemaVersion !== 8) throw new TypeError('conversion can only be signed by the target8 recipe');
   if (options.bundledSkills !== undefined && schemaVersion !== 8) throw new TypeError('the original schema7 product cannot consume a later skills recipe');
   // An explicit old source compiles with that original product's actual SEA
@@ -127,6 +139,16 @@ async function buildInstalledSupervisorPackageCore(fixture: string,
     assert.equal(broker.status, 0, `production model broker construction: ${broker.stderr}`);
     modelBrokerBytes = await readFile(path.join(brokerRoot, 'linux-model-broker.node'));
   }
+  let dependencyBrokerBytes: Buffer | undefined;
+  if (npmData) {
+    const brokerRoot = path.join(fixture, 'dependency-broker-image');
+    const broker = spawnSync(process.execPath, [path.join(repository, 'scripts/kernel/build-linux-dependency-broker.mjs'),
+      brokerRoot, path.join(nodeRoot, 'include/node')],
+    { encoding: 'utf8', timeout: 60_000, cwd: fixture, maxBuffer: 2 * 1024 * 1024 });
+    assert.equal(broker.error, undefined, 'production dependency broker construction did not join');
+    assert.equal(broker.status, 0, 'production dependency broker construction refused');
+    dependencyBrokerBytes = await readFile(path.join(brokerRoot, 'linux-dependency-broker.node'));
+  }
   const workerEntries = await Promise.all(([
     ['linux_worker_native', 'platform_helper', 'linux-worker.node'],
     ['linux_worker_controller', 'platform_helper', 'cliq-linux-worker-controller'],
@@ -149,6 +171,7 @@ async function buildInstalledSupervisorPackageCore(fixture: string,
       extractorPath: path.join(workerRoot, 'linux-guest-extractor.node'), publisherKeyId: releaseKeys[0]!.keyId, privateKey: keys.privateKey });
   }
   const builtinTools = guest ? await buildBuiltinToolsAsset(repository) : undefined;
+  const npmAdapter = npmData ? await buildInstalledNpmAdapterAsset(repository) : undefined;
   const modelMaterial = modelFixture ? modelProducer.installedModelPackageEntries(modelFixture, modelBrokerBytes!,
     workerEntries.find(entry => entry.entryId === 'edit')!.bytes, builtinTools && guest ? {
       entry: builtinTools, supervisor: { entryId: 'installed-supervisor', role: 'supervisor', relativePath: 'supervisor',
@@ -163,7 +186,7 @@ async function buildInstalledSupervisorPackageCore(fixture: string,
   const sourceInspector = guest ? await buildSourceGitInspectorAsset(repository) : undefined;
   const rootCore = { schemaVersion: 1, format: 'cliq-sandbox-root-profile-v1', protocol: 'cliq-fresh-empty-root-v1',
     filesystemKind: 'fresh_ephemeral_tmpfs', fixedDirectories: ['/home/cliq', '/tmp', '/work'], persistent: false, networkConfiguration: 'none' };
-  const contents = [
+  const contents: Array<Omit<RuntimeBundleManifest['entries'][number], 'version' | 'digest' | 'byteCount'> & { version?: string; bytes: Buffer }> = [
     { entryId: 'installed-supervisor', role: 'supervisor', relativePath: 'supervisor', executable: true, bytes: supervisorBytes },
     { entryId: STATE_OWNER_NATIVE_ENTRY_ID, role: 'platform_helper', relativePath: STATE_OWNER_NATIVE_RELATIVE_PATH,
       executable: true, bytes: await readFile(helper) },
@@ -184,6 +207,12 @@ async function buildInstalledSupervisorPackageCore(fixture: string,
     ...(sourceInspector ? [{ entryId: sourceInspector.entryId, role: sourceInspector.role, relativePath: sourceInspector.relativePath,
       executable: sourceInspector.executable, bytes: sourceInspector.bytes }] : []),
     ...skillData.contents,
+    ...(npmAdapter && npmData && dependencyBrokerBytes ? [
+      { entryId: DEPENDENCY_BROKER_ENTRY_ID, role: 'platform_helper' as const, relativePath: DEPENDENCY_BROKER_RELATIVE_PATH,
+        version: '1', executable: true, bytes: dependencyBrokerBytes },
+      ...[npmAdapter, npmData].map(({ entryId, role, relativePath, version, executable, bytes }) =>
+        ({ entryId, role, relativePath, version, executable, bytes }))
+    ] : []),
   ];
   for (const entry of contents.slice(2)) {
     const filename = path.join(packageRoot, entry.relativePath);
@@ -196,7 +225,7 @@ async function buildInstalledSupervisorPackageCore(fixture: string,
       : modelFixture ? 'installed-sea-run-fixture-v1' : 'installed-sea-read-qualification-v1',
     controlProtocolRange: { min: 1, max: 1 }, headlessSchemaRange: { min: options.headlessSchemaVersion ?? 1, max: options.headlessSchemaVersion ?? 1 },
     stateSchemaRange: { min: 1, max: schemaVersion }, workerProtocolRange: { min: 1, max: 1 },
-    entries: [...contents.map(({ bytes, ...entry }) => ({ ...entry, version: entry.entryId === 'kernel_schema' ? '8' : entry.entryId === 'schema_conversion' ? '7-to-8' : '1', digest: sha256Bytes(bytes), byteCount: bytes.byteLength })),
+    entries: [...contents.map(({ bytes, version, ...entry }) => ({ ...entry, version: entry.entryId === 'kernel_schema' ? '8' : entry.entryId === 'schema_conversion' ? '7-to-8' : version ?? '1', digest: sha256Bytes(bytes), byteCount: bytes.byteLength })),
       ...(guest?.entries ?? [])],
     structuredArtifacts: [
       ...skillData.roots,

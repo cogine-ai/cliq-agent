@@ -7,6 +7,7 @@ import { decodeEndpointRegistration, type EndpointRegistrationV1 } from '../kern
 import { digestOmitting, sha256Bytes } from '../kernel/identity.js';
 import type { RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { policyProfile, verifyRuntimeBundle } from '../policy/runtime-authority.js';
+import { builtinInputContracts } from '../tools/builtin-inputs.js';
 import { OFFLINE_MODEL_TRUST_STORE_PEM } from './testing/tool-authority.js';
 import { schemaConversionProfile, signedKernelSchemaProfile } from './signed-schema.js';
 import { verifyRetainedInstalledEndpointData, verifyRetainedInstalledCurrentProducerData } from './installed-credential-history.js';
@@ -30,7 +31,8 @@ function fixture() {
   const source = signBundle({ schemaVersion: 1, bundleVersion: 'owned-original-seven-data', controlProtocolRange: { min: 1, max: 1 },
     headlessSchemaRange: { min: 1, max: 3 }, stateSchemaRange: { min: 7, max: 7 }, workerProtocolRange: { min: 1, max: 1 },
     entries: [entry('original-supervisor', 'supervisor', true), entry('worker', 'worker', true), entry('policy', 'policy_engine', false, policyBytes),
-      entry('root', 'sandbox_root_profile', false), entry('default_https_trust_store', 'trust_store', false, trust)],
+      entry('root', 'sandbox_root_profile', false), entry('default_https_trust_store', 'trust_store', false, trust),
+      entry('installed-edit-input-schema', 'schema', false, canonicalJsonBytes(builtinInputContracts.edit.inputSchema))],
     structuredArtifacts: [{ artifactId: 'policy', rootEntryId: 'policy', kind: 'policy_engine_profile',
       artifactRef: sha256Bytes(policyBytes), semanticDigest: policy.profileDigest, memberRefs: [] }],
     guestToolchainManifestRefs: [], publisherKeyId: releaseKeys[0]!.keyId, manifestDigest: '', signature: '' });

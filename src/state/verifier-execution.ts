@@ -56,7 +56,7 @@ export async function loadVerifierContinuation(driver: SqliteDriver, artifacts: 
     if (run.specRef !== admitted.specRef || run.createdAt !== admitted.createdAt || run.deadlineAt !== admitted.deadlineAt)
       throw new TypeError('verifier authority no longer belongs to its original Run');
     if (expected !== undefined && run.revision !== expected) throw new KernelStorageError('REVISION_CONFLICT', 'verifier revision changed');
-    if (run.nextStep !== 'verify' || !run.frontierRef || run.parentRunId || spec.dependencyPolicyRef !== undefined)
+    if (run.nextStep !== 'verify' || !run.frontierRef)
       throw new KernelStorageError('STATE_TRANSITION_INVALID', 'verifier requires its root Run frontier');
     const frontier = await readCanonicalArtifact<RunFrontier>(reads, run.frontierRef);
     const progress = await readVerifierProgress(driver, reads, selected);
@@ -66,6 +66,8 @@ export async function loadVerifierContinuation(driver: SqliteDriver, artifacts: 
       throw new KernelStorageError('STATE_TRANSITION_INVALID', 'verifier has no current frozen pending entry');
     if (progress.entries.slice(0, frontier.nextVerifierIndex).some(entry => !entry.disposition))
       throw new KernelStorageError('STATE_TRANSITION_INVALID', 'a prior required failure must repair or stop before another verifier');
+    if (spec.dependencyPolicyRef && (!progress.dependency?.ready || progress.dependency.ready.createdAt >= run.deadlineAt))
+      throw new KernelStorageError('STATE_TRANSITION_INVALID', 'verifier requires its original complete dependency ready cut');
     const entry = progress.spec.verifiers[frontier.nextVerifierIndex]!;
     const command = decodeVerifierCommand(await readCanonicalArtifact(reads, entry.commandRef));
     const environment = decodeVerifierEnvironment(await readCanonicalArtifact(reads, entry.environmentRef));
@@ -187,7 +189,7 @@ export async function loadVerifierContinuation(driver: SqliteDriver, artifacts: 
       const live = assertLiveDispatchState(driver, owner, runId, input.expectedRunRevision, input.leaseEpoch, sampleCanonicalNow());
       const closure = await readVerifierLaunchClosure(reads, assertActiveStateOwner(driver, owner), { ...live, prepared,
         request: selected.request, target: selected.target, ...proof, dispatchId: input.dispatchId,
-        sandboxLaunchSpecRef: input.sandboxLaunchSpecRef }, authority.releaseKeys!, signal);
+        sandboxLaunchSpecRef: input.sandboxLaunchSpecRef }, authority.releaseKeys!, signal, driver);
       const planMetadata = await reads.describe(closure.spec.containmentPlanRef, 'application/json', 'cliq-process-containment-plan-v1');
       const uses = (connection: SqliteConnection) => readInvocationJournal(connection, runId)
         .filter(row => row.opId === input.opId && row.phase === 'dispatch_claimed').length;
@@ -209,7 +211,7 @@ export async function loadVerifierContinuation(driver: SqliteDriver, artifacts: 
           const active = assertLiveDispatchState(driver, owner, runId, input.expectedRunRevision, input.leaseEpoch, sampleCanonicalNow());
           const checked = await readVerifierLaunchClosure(artifacts, assertActiveStateOwner(driver, owner), { ...active, prepared,
             request: released.request, target: released.target, ...currentProof, dispatchId: input.dispatchId,
-            sandboxLaunchSpecRef: input.sandboxLaunchSpecRef! }, authority.releaseKeys!, signal);
+            sandboxLaunchSpecRef: input.sandboxLaunchSpecRef! }, authority.releaseKeys!, signal, driver);
           signal?.throwIfAborted();
           let outcome: TimeFenceAdvance | undefined;
           driver.transaction(connection => {

@@ -26,6 +26,7 @@ import { GUEST_EXTRACTOR_RECIPE } from '../sandbox/guest-toolchain.js';
 import { hostPlatform } from './workspace-identity.js';
 import { bundledSkillMemberRoles, bundledSkillRoots, validateBundledSkillReferences } from './bundled-skills.js';
 import { decodeBundledSkillClosure, SKILL_RESOURCE_BYTES, type BundledSkillClosureV1 } from '../kernel/skill.js';
+import { isNpmAdapterEntry, isNpmDataEntry } from '../sandbox/dependency-recipe.js';
 
 type Entry = { owner: StateOwnerRecordV1; process: PlatformProcessIdentityV1;
   acquisition: StateOwnerAcquisitionEvidenceV1; transition?: StateOwnerTransitionEvidenceV1 };
@@ -105,6 +106,10 @@ async function readInstalledSeed(artifacts: ArtifactCatalog, first: Entry,
   }
   if (expected.size !== inventory.size) invalid('retained installed genesis has missing or extra original seed objects');
   for (const entry of data) {
+    if (isNpmDataEntry(entry)) {
+      for await (const _chunk of artifacts.readChunks(entry.digest, entry.byteCount)) { /* Complete fixed signed image; no per-file CAS expansion. */ }
+      continue;
+    }
     if (guestImages.has(entry.digest)) {
       if (entry.byteCount < 1 || entry.byteCount > GUEST_EXTRACTOR_RECIPE.maxImageBytes)
         invalid('retained installed guest image exceeds its original recipe bound');
@@ -125,7 +130,7 @@ async function readInstalledSeed(artifacts: ArtifactCatalog, first: Entry,
       // SKILL.md is source text, not canonical JSON. The common structured
       // consumer below rederives its exact instruction from complete bytes.
     } else if (entry.role === 'tool_adapter') {
-      if (entry.entryId !== 'builtin_tools' || entry.version !== '1' || entry.relativePath !== 'adapters/builtin-tools.mjs' || bytes.length < 1)
+      if (!isNpmAdapterEntry(entry) && (entry.entryId !== 'builtin_tools' || entry.version !== '1' || entry.relativePath !== 'adapters/builtin-tools.mjs' || bytes.length < 1))
         invalid('retained installed tool script differs from its fixed original data role');
     } else if (entry.role === 'trust_store') validateTrustStore(bytes);
     else {

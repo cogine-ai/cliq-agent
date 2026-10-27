@@ -19,6 +19,7 @@ import type { ToolRequestV1 } from '../kernel/tool-authorization.js';
 import { decodeWorkspaceGenerationIdentity } from './decoders.js';
 import { immutableSnapshot } from '../model/immutable.js';
 import { prepareVerifierUnknownParentClosure } from './verifier-unknown-retirement.js';
+import { prepareDependencyUnknownParentClosure } from './dependency-unknown-retirement.js';
 
 declare const terminalRecoveryBrand: unique symbol;
 /** Internal original-owner closure. A data/ref or a stopped row cannot mint it. */
@@ -28,6 +29,7 @@ type Plan = {
   driver: SqliteDriver; owner: StateOwnerContext; cut: RecoveryClosureV1;
   metadata: PublishedArtifact[]; quarantineMetadata: PublishedArtifact[]; generation: RetiredGeneration;
   verifierAbandoned: import('../kernel/types.js').TerminalDetail['abandonedRetryInvocations'];
+  dependencyAbandoned: import('../kernel/types.js').TerminalDetail['abandonedRetryInvocations'];
   rollback?: { prepared: InvocationJournalEntry; claim: InvocationJournalEntry; unknown: InvocationJournalEntry;
     evidence: PrivateToolRollbackV1; artifact: PublishedArtifact; request: ToolRequestV1 };
   reobserve(connection: SqliteConnection): void;
@@ -68,10 +70,12 @@ export async function prepareWorkerRecoveryTerminalPlan(driver: SqliteDriver, ar
   }
   const dispatch = wait.probeState.dispatch;
   const identity = decodeWorkspaceGenerationIdentity(await artifacts.readCanonical(generation.generationRef));
+  let assertDependencyBroker = (_connection: SqliteConnection): void => {};
   function observeNativeOwners(): readonly string[] {
     const native = readNativeRetainedWorkerRetirement(input.nativeRetirement);
     const workspace = readRetainedWorkspaceRetirement(owner.filesystem, input.workspaceRetirement);
     assertInstalledBrokerQuiescence(input.brokerQuiescence, driver, owner, run.id);
+    assertDependencyBroker(driver);
     const move = owner.filesystem.quarantineGeneration(identity, quarantine.sourceRowVersion);
     if (canonicalSha256(native.containment) !== launch.processContainmentRef ||
         workspace.generationRef !== generation.generationRef || workspace.generationIdentityDigest !== generation.generationIdentityDigest ||
@@ -102,6 +106,9 @@ export async function prepareWorkerRecoveryTerminalPlan(driver: SqliteDriver, ar
   const artifact = await artifacts.publishCanonical(retirement, retirement.format);
   const verifier = await prepareVerifierUnknownParentClosure(driver, artifacts, cut, { launch, generation,
     quarantine, quarantineRef: input.quarantineArtifact.ref, retirement, retirementRef: artifact.ref });
+  const dependency = await prepareDependencyUnknownParentClosure(driver, artifacts, owner, cut, { launch, generation,
+    quarantine, quarantineRef: input.quarantineArtifact.ref, retirement, retirementRef: artifact.ref });
+  assertDependencyBroker = dependency.assertBroker;
   let rollback: Plan['rollback'];
   if (hasOnlySettledPrivateToolUnknowns(cut.journal)) {
     const unknown = [...cut.journal].reverse().find(entry => entry.phase === 'unknown' && entry.opKind === 'tool')!;
@@ -143,6 +150,7 @@ export async function prepareWorkerRecoveryTerminalPlan(driver: SqliteDriver, ar
   }
   function validate(connection: SqliteConnection | SqliteDriver, now: string): void {
     assertOriginalCut(connection);
+    assertDependencyBroker(connection);
     if (now < observedAt || now >= dispatch.probeDeadlineAt ||
         parseCanonicalTime(now) - parseCanonicalTime(observedAt) > 5000) {
       throw new KernelStorageError('RECOVERY_REQUIRED', 'stopped recovery original probe or retirement observation expired');
@@ -176,9 +184,9 @@ export async function prepareWorkerRecoveryTerminalPlan(driver: SqliteDriver, ar
       retirementEvidenceRef: input.wrapperArtifact.ref });
   }
   const token = Object.freeze({}) as WorkerRecoveryTerminalPlan;
-  plans.set(token, { driver, owner, cut, metadata: [...input.metadata, artifact, ...verifier.metadata, ...(rollback ? [rollback.artifact] : [])],
+  plans.set(token, { driver, owner, cut, metadata: [...input.metadata, artifact, ...verifier.metadata, ...dependency.metadata, ...(rollback ? [rollback.artifact] : [])],
     quarantineMetadata: [...input.metadata],
-    generation: retired, rollback, verifierAbandoned: verifier.abandoned,
+    generation: retired, rollback, verifierAbandoned: verifier.abandoned, dependencyAbandoned: dependency.abandoned,
     reobserve(connection) {
       // Each real native assertion produces a new physical observation time.
       // Finish all of them before the transaction's sole clock sample. Never

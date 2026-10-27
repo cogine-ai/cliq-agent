@@ -207,7 +207,42 @@ test('the actual experimental entry rejects invalid provisioning before creating
 });
 
 // Source wiring, not GNU strip/SEA execution or installed qualification. The
-// immutable CT projection preserves every original job, condition and budget.
+// Check the exact additive Node qualification input before checking the
+// unchanged historical CT projection. This is a validation copy only.
+function withoutLockedNodeQualification(workflow: string): string {
+  const native = '      - name: Check the actual native dependency family before installed qualification\n' +
+    '        run: node --test --test-concurrency=1 --import tsx scripts/kernel/testing/dependency-native-family.test.ts scripts/kernel/testing/dependency-broker-lifecycle.test.ts scripts/kernel/testing/dependency-npm-stage.test.ts\n';
+  const start = workflow.indexOf('      - name: Acquire the exact official npm qualification source\n');
+  const end = workflow.indexOf('      - name: Observe the fixed original installed status deadlock\n', start);
+  assert(start >= 0 && end > start, 'the exact source step must precede the original status regression');
+  const source = workflow.slice(start, end);
+  assert.equal(createHash('sha256').update(source).digest('hex'),
+    'ee17b46a018af605f5cf753dc602440148f18dd8d2e598ddefef3aa4f2c84728',
+    'the only new source step keeps its exact official URL, bounds, full validation, exclusive publication and join');
+  const job = workflow.match(/\n  linux-installed-verifier:\n[\s\S]*?(?=\n  [a-z][a-z0-9-]*:\n|$)/u)?.[0];
+  assert(job, 'the original installed verifier job must remain');
+  assert.equal(workflow.split(native).length, 2, 'the exact native preflight runs once');
+  assert.equal(workflow.split(source).length, 2, 'the exact source acquisition runs once');
+  assert(job.includes(native + source + '      - name: Observe the fixed original installed status deadlock\n'),
+    'the additions remain together immediately before the original status regression');
+  const prerequisite = job.indexOf('      - name: Install actual guest, transport and Secret Service prerequisites\n');
+  assert(prerequisite >= 0 && prerequisite < job.indexOf(native), 'native prerequisites precede the actual native preflight');
+  const invocation = '          probe_node=$(realpath "$(command -v node)")\n' +
+    '          probe_npm_archive="$RUNNER_TEMP/cliq-official-npm-10.9.2.tgz"\n' +
+    '          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --run-verifier-journey --locked-node "$probe_npm_archive" "$probe_node" "$RUNNER_TEMP/cliq-installed-verifier-journey"\n';
+  const originalInvocation = '          probe_node=$(realpath "$(command -v node)")\n' +
+    '          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --run-verifier-journey "$probe_node" "$RUNNER_TEMP/cliq-installed-verifier-journey"\n';
+  const condition = "        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.npm_source.outcome == 'success' }}\n";
+  assert(job.includes(invocation), 'the original verifier receives the fixed trusted npm source');
+  assert.equal(workflow.split(invocation).length, 2, 'the exact verifier invocation runs once');
+  assert(job.includes(condition), 'the candidate requires its fully verified official source');
+  assert.equal(workflow.split(condition).length, 2, 'only the original verifier uses the new source condition');
+  return workflow.replace(native, '').replace(source, '').replace(invocation, originalInvocation)
+    .replace(condition, "        if: ${{ !cancelled() && steps.build.outcome == 'success' }}\n");
+}
+
+// The immutable CT projection preserves every original job and budget after
+// independently checking the closed, same-job Node qualification addition.
 function assertCarrierExperimentWorkflow(workflow: string): void {
   const upgradeStart = workflow.indexOf('  installed-runtime-upgrade:\n');
   const originalStart = workflow.indexOf('  # Public-repository qualification stays on free standard GitHub-hosted\n', upgradeStart);
@@ -280,7 +315,7 @@ function assertCarrierExperimentWorkflow(workflow: string): void {
     '          node --test --import tsx scripts/kernel/testing/guest-verifier-process.test.ts scripts/kernel/testing/guest-verifier-diagnostics.test.ts\n' +
     storageRegression + '          regression="$RUNNER_TEMP/cliq-worker-seccomp-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"\n'),
   'the source-build regressions stay inside the original actual native ABI step, before its unchanged compiler and syscall checks');
-  const projected = originalWorkflow.replace(experiment, '').replace(retain, '').replace(parentEvidenceTest, '')
+  const projected = withoutLockedNodeQualification(originalWorkflow).replace(experiment, '').replace(retain, '').replace(parentEvidenceTest, '')
     .replace(sessionRegression, '').replace(processRegression, '').replaceAll(buildDependencies, 'bubblewrap').replace(storageRegression, '');
   assert.equal(createHash('sha256').update(projected).digest('hex'), '346af80a56060feace86c309b316c67560f68c512207d6cd3c95ab965cb225f5',
     'all original CT jobs, runner groups, timeouts, qualifiers and conditions must remain byte-identical');
@@ -311,6 +346,12 @@ test('the additive parent-domain regression cannot hide workflow removals, disab
     workflow.replace(upgrade, upgrade.repeat(2)),
     workflow.replace('old_commit=25130cfec913bddaff4d0a8c7ff4aac7ef2db932', 'old_commit=410c8193ea516b0b9f8e6a746c4376003e67b5a4'),
     workflow.replace(parentEvidenceTest, ''),
+    workflow.replace('dependency-native-family.test.ts', 'dependency-native-family-skipped.test.ts'),
+    workflow.replace("redirect: 'error'", "redirect: 'follow'"),
+    workflow.replace('total <= NPM_DATA_RECIPE.archiveBytes', 'total <= NPM_DATA_RECIPE.archiveBytes * 2'),
+    workflow.replace('buildInstalledNpmDataAsset(archive);', ''),
+    workflow.replace('--locked-node "$probe_npm_archive" ', ''),
+    workflow.replace(" && steps.npm_source.outcome == 'success'", ''),
     workflow.replace(parentEvidenceTest, parentEvidenceTest.repeat(2)),
     workflow.replace(parentEvidenceTest, '          # scripts/kernel/testing/installed-verifier-parent-evidence.test.ts\n'),
     workflow.replace(parentEvidenceTest + '      - run: npm run build\n', '      - run: npm run build\n' + parentEvidenceTest),

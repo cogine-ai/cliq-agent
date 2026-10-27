@@ -6,7 +6,9 @@ import { readCanonicalArtifact } from './agent-context.js';
 import type { ArtifactCatalog } from './artifacts.js';
 import { decodeVerifierSpec } from './decoders.js';
 import { decodeVerifierPlan } from './result-artifacts.js';
-import { KernelStorageError } from './errors.js';
+import { readFrozenDependencyPolicy } from './dependency-policy-data.js';
+import { readCandidateDependencyPlan } from './dependency-plan.js';
+import { decodeSandboxProfile } from './execution-closure.js';
 import { decodeVerifierCommand, decodeVerifierEnvironment } from './verifier-artifacts.js';
 import { decodeRetainedRunAssembly } from '../model/run-assembly.js';
 
@@ -16,11 +18,20 @@ export const finalCandidateCheckpointId = (runId: string, producerItemId: string
   identityHash('cliq-final-candidate-checkpoint-v1', runId, producerItemId);
 
 /** Deterministic retained-data projection, not permission to launch a verifier. */
-export async function readCandidateVerifierPlan(artifacts: ArtifactCatalog, spec: RunSpec, input: {
+export async function readCandidateVerificationData(artifacts: ArtifactCatalog, spec: RunSpec, input: {
   runId: string; candidateItemId: string; resultSourceRef: string;
-}): Promise<VerifierPlan> {
+}) {
+  let dependencyPlanRef: string | undefined;
+  let dependency: Awaited<ReturnType<typeof readCandidateDependencyPlan>> | undefined;
   if (spec.dependencyPolicyRef !== undefined) {
-    throw new KernelStorageError('STATE_TRANSITION_INVALID', 'candidate dependencies require their acquisition and settlement reducer');
+    const { policy, endpoints } = await readFrozenDependencyPolicy(artifacts, spec);
+    const assembly = decodeRetainedRunAssembly(await readCanonicalArtifact(artifacts, spec.assemblyRef));
+    if (!assembly.runtime.guestToolchainManifestRef) throw new TypeError('dependency candidate has no frozen guest toolchain');
+    const profile = decodeSandboxProfile(await readCanonicalArtifact(artifacts, spec.sandboxProfileRef));
+    const selected = dependency = await readCandidateDependencyPlan(artifacts, { sourceRef: input.resultSourceRef, policy,
+      guestToolchainManifestRef: assembly.runtime.guestToolchainManifestRef, registryEndpoints: endpoints,
+      maxSingleFileBytes: profile.resources.maxSingleFileBytes });
+    dependencyPlanRef = canonicalSha256(selected.plan);
   }
   const frozen = decodeVerifierSpec(await readCanonicalArtifact(artifacts, spec.verifierSpecRef));
   if (!exactKeys(frozen, ['schemaVersion', 'format', 'verifiers', 'specDigest']) ||
@@ -42,9 +53,16 @@ export async function readCandidateVerifierPlan(artifacts: ArtifactCatalog, spec
     }
   }
   const plan: VerifierPlan = { schemaVersion: 1, ...input, verifierSpecRef: spec.verifierSpecRef,
-    verifierSpecDigest: frozen.specDigest, entries: frozen.verifiers.map(entry => ({ index: entry.index, verifierId: entry.id,
+    verifierSpecDigest: frozen.specDigest, ...(dependencyPlanRef ? { dependencyPlanRef } : {}), entries: frozen.verifiers.map(entry => ({ index: entry.index, verifierId: entry.id,
       verifierSpecDigest: frozen.specDigest, verifierEntryDigest: entry.entryDigest, commandRef: entry.commandRef, commandDigest: entry.commandDigest,
       environmentRef: entry.environmentRef, environmentDigest: entry.environmentDigest, required: entry.gate === 'required', maxAttempts: entry.retries + 1 })), planDigest: '' };
   plan.planDigest = digestOmitting(plan, 'planDigest');
-  return decodeVerifierPlan(plan);
+  return { verifierPlan: decodeVerifierPlan(plan), dependency };
+}
+/** Complete data only; the producer separately publishes every referenced
+ * dependency plan before its original candidate transaction. */
+export async function readCandidateVerifierPlan(artifacts: ArtifactCatalog, spec: RunSpec, input: {
+  runId: string; candidateItemId: string; resultSourceRef: string;
+}): Promise<VerifierPlan> {
+  return (await readCandidateVerificationData(artifacts, spec, input)).verifierPlan;
 }

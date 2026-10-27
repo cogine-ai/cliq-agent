@@ -32,16 +32,27 @@ import { readToolRuntimeAuthority } from './tool-runtime-authority.js';
 import { BUILTIN_SCRIPT_TOOL_NAMES } from '../tools/execution-identity.js';
 import { loadToolContracts } from '../tools/input-contract.js';
 import { BUILTIN_SCRIPT_ENVIRONMENTS, BUILTIN_SCRIPT_PRIVATE_MOUNTS, builtinToolInputBytes, isBuiltinScriptTool } from '../sandbox/builtin-tool-data.js';
+import { NPM_DEPENDENCY_SANDBOX_ENVIRONMENT, npmDependencyMounts } from '../sandbox/dependency-recipe.js';
+import { assertControlWireJson } from '../kernel/control-wire-data.js';
+import { decodeDependencyClaimEvidence } from '../kernel/dependency-claim.js';
+import { decodeDependencyOperationGrant, decodeDependencyRequest, decodeDependencyTarget } from '../kernel/dependency-invocation.js';
+import { readRetainedDependencyCandidate } from './dependency-candidate.js';
+import { readDependencyScriptsTemplateHistory } from './dependency-script-history.js';
+import { planDependencyInvocation } from './dependency-invocation-plan.js';
+import { readHighestPreparedAttempt, readInvocationAttempt } from './repositories/journal.js';
+import { sampleCanonicalNow } from './canonical-time.js';
 
 type WorkerSpec = Extract<SandboxLaunchSpecV1, { purpose: 'worker_activation' }>;
 type WorkerOwner = WorkerSpec['owner'];
 type EditSpec = Extract<SandboxLaunchSpecV1, { owner: { kind: 'run_invocation' } }> & { purpose: 'tool' };
 type VerifierSpec = Extract<SandboxLaunchSpecV1, { owner: { kind: 'run_invocation' } }> & { purpose: 'verifier' };
+type DependencySpec = Extract<SandboxLaunchSpecV1, { owner: { kind: 'run_invocation' } }> & { purpose: 'dependency' };
 type InvocationOwner = EditSpec['owner'];
 const workerClosures = new WeakSet<object>();
 const editClosures = new WeakSet<object>();
 const scriptClosures = new WeakSet<object>();
 const verifierClosures = new WeakSet<object>();
+const dependencyClosures = new WeakSet<object>();
 
 /** A structural clone is retained metadata, not authority to mint a native launch. */
 export function assertWorkerLaunchClosure(value: unknown): asserts value is WorkerLaunchClosure {
@@ -62,6 +73,9 @@ export function assertBuiltinToolLaunchClosure(value: unknown): asserts value is
 }
 export function assertVerifierLaunchClosure(value: unknown): asserts value is VerifierLaunchClosure {
   if (value === null || typeof value !== 'object' || !verifierClosures.has(value)) mismatch('native verifier launch requires its trusted retained-artifact closure');
+}
+export function assertDependencyLaunchClosure(value: unknown): asserts value is DependencyLaunchClosure {
+  if (!value || typeof value !== 'object' || !dependencyClosures.has(value)) mismatch('native dependency launch requires its original complete same-claim closure');
 }
 
 function mismatch(message: string): never { throw new KernelStorageError('ARTIFACT_MISMATCH', message); }
@@ -277,7 +291,19 @@ export function decodeBuiltinScriptSandboxLaunchSpec(value: unknown): EditSpec {
 export function decodeVerifierSandboxLaunchSpec(value: unknown): VerifierSpec {
   return decodeLinuxLaunchSpec(value, 'verifier') as VerifierSpec;
 }
-function decodeLinuxLaunchSpec(value: unknown, purpose: 'worker_activation' | 'tool' | 'verifier'): WorkerSpec | EditSpec | VerifierSpec {
+export function decodeDependencySandboxLaunchSpec(value: unknown): DependencySpec {
+  const spec = decodeLinuxLaunchSpec(value, 'dependency') as DependencySpec;
+  if (spec.executable.kind !== 'guest_toolchain' || spec.executable.role !== 'package_manager' ||
+      spec.executable.toolId !== 'node' || spec.executable.executionPath !== '/usr/bin/node') mismatch('dependency requires its actual signed Node interpreter');
+  const adapter = spec.mounts.find(mount => mount.targetPath === '/runtime/cliq-npm-dependency.mjs');
+  const data = spec.mounts.find(mount => mount.targetPath === '/runtime/npm.image');
+  if (spec.filesystem.kind !== 'run_generation' || adapter?.kind !== 'cas_artifact' || data?.kind !== 'cas_artifact')
+    mismatch('dependency requires both original signed data roots and its original generation');
+  equal(spec.mounts, npmDependencyMounts(spec.owner.dispatchId, spec.filesystem.generationRef, adapter.artifactRef, data.artifactRef),
+    'dependency fixed mounts and only managed writable generation subtree');
+  return spec;
+}
+function decodeLinuxLaunchSpec(value: unknown, purpose: 'worker_activation' | 'tool' | 'verifier' | 'dependency'): WorkerSpec | EditSpec | VerifierSpec | DependencySpec {
   const spec = record(value, ['schemaVersion', 'format', 'runtime', 'executable', 'environment', 'filesystem', 'mounts', 'mountsDigest',
     'sandboxProfileRef', 'sandboxProfileDigest', 'resources', 'resourcesDigest', 'containmentPlanRef', 'containmentPlanDigest', 'createdAt',
     'launchSpecDigest', 'owner', 'purpose', 'processInvocation', ...(purpose !== 'worker_activation'
@@ -291,7 +317,7 @@ function decodeLinuxLaunchSpec(value: unknown, purpose: 'worker_activation' | 't
   }
   const runtime = record(spec.runtime, ['runtimeBundleRef', 'runtimeBundleManifestDigest', 'sandboxBackend', 'toolchain', 'launcher', 'runtimeDigest'], 'launch runtime');
   const script = purpose === 'tool' && (spec.processInvocation as { recipe?: unknown } | null)?.recipe === 'cliq-builtin-tools-v1';
-  const guest = purpose === 'verifier' || script;
+  const guest = purpose === 'verifier' || purpose === 'dependency' || script;
   digest(runtime.runtimeBundleRef, 'runtime bundle ref'); digest(runtime.runtimeBundleManifestDigest, 'runtime bundle digest');
   literal(runtime.sandboxBackend, 'linux_namespace', 'worker runtime backend');
   const toolchain = record(runtime.toolchain, guest
@@ -304,7 +330,7 @@ function decodeLinuxLaunchSpec(value: unknown, purpose: 'worker_activation' | 't
     ? ['kind', 'guestToolchainManifestRef', 'guestToolchainManifestDigest', 'toolId', 'role', 'executionPath', 'executableDigest']
     : ['kind', 'runtimeBundleRef', 'runtimeBundleManifestDigest', 'executableId', 'role', 'executionPath', 'executableDigest'], 'worker executable');
   literal(executable.kind, guest ? 'guest_toolchain' : 'runtime_bundle', 'Linux executable source');
-  literal(executable.role, purpose === 'worker_activation' ? 'worker' : purpose === 'verifier' ? 'verifier' : script ? 'tool' : 'tool_adapter', 'executable role');
+  literal(executable.role, purpose === 'worker_activation' ? 'worker' : purpose === 'verifier' ? 'verifier' : purpose === 'dependency' ? 'package_manager' : script ? 'tool' : 'tool_adapter', 'executable role');
   if (guest) {
     digest(executable.guestToolchainManifestRef, 'guest manifest ref'); digest(executable.guestToolchainManifestDigest, 'guest manifest digest'); text(executable.toolId, 'guest tool id');
   } else {
@@ -317,25 +343,27 @@ function decodeLinuxLaunchSpec(value: unknown, purpose: 'worker_activation' | 't
       ...(script ? ['privateGitProtection'] : [])], 'process recipe');
   const recipe = purpose === 'worker_activation' ? { kind: 'worker_entrypoint', purpose, recipe: 'cliq-worker-entrypoint-v1',
     runtimeSource: 'launch_runtime', executableSource: 'launch_executable', argvSource: 'fixed_empty', cwdSource: 'generation_root' }
-    : { kind: 'run_request', purpose, recipe: purpose === 'verifier' ? 'cliq-verifier-command-v1' : script ? 'cliq-builtin-tools-v1' : 'cliq-tool-launch-v1', requestRef: spec.requestRef, requestDigest: spec.requestDigest,
+    : { kind: 'run_request', purpose, recipe: purpose === 'verifier' ? 'cliq-verifier-command-v1' : purpose === 'dependency' ? 'cliq-dependency-npm-v1' : script ? 'cliq-builtin-tools-v1' : 'cliq-tool-launch-v1', requestRef: spec.requestRef, requestDigest: spec.requestDigest,
       targetRef: spec.targetRef, targetDigest: spec.targetDigest, argvCwdSource: 'trusted_recipe_decode_of_request_and_target',
       ...(script ? { privateGitProtection: 'existing_read_only' } : {}) };
   for (const [key, expected] of Object.entries(recipe)) literal(invocation[key], expected, `process recipe ${key}`);
   equal(record(invocation.stdio, ['stdin', 'stdout', 'stderr', 'extraFileDescriptors'], 'worker stdio'),
     { stdin: 'closed', stdout: 'captured', stderr: 'captured', extraFileDescriptors: purpose === 'worker_activation'
-      ? 'authenticated_worker_channel_only' : 'authenticated_operation_channel_only' }, 'process stdio');
-  environment(spec.environment);
+      ? 'authenticated_worker_channel_only' : purpose === 'dependency'
+        ? 'sealed_dependency_input_and_package_metadata_only' : 'authenticated_operation_channel_only' }, 'process stdio');
+  if (purpose === 'dependency') equal(spec.environment, NPM_DEPENDENCY_SANDBOX_ENVIRONMENT, 'fixed dependency npm environment');
+  else environment(spec.environment);
   const filesystem = record(spec.filesystem, ['kind', 'generationRef', 'access', 'sourceProjectionRef', 'independentGit'], 'worker filesystem');
   literal(filesystem.kind, 'run_generation', 'filesystem kind');
   if (script) {
     if (filesystem.access !== 'read_only' && filesystem.access !== 'read_write') mismatch('script has an invalid closed access envelope');
-  } else literal(filesystem.access, purpose === 'worker_activation' ? 'preactivated_readonly' : purpose === 'verifier' ? 'read_only' : 'read_write', 'filesystem access');
+  } else literal(filesystem.access, purpose === 'worker_activation' ? 'preactivated_readonly' : purpose === 'verifier' || purpose === 'dependency' ? 'read_only' : 'read_write', 'filesystem access');
   digest(filesystem.generationRef, 'worker generation'); digest(filesystem.sourceProjectionRef, 'worker projection'); literal(filesystem.independentGit, true, 'worker private Git');
-  mounts(spec.mounts, purpose === 'tool'); literal(digest(spec.mountsDigest, 'mount digest'), canonicalSha256(spec.mounts), 'mount digest');
+  mounts(spec.mounts, purpose === 'tool' || purpose === 'dependency'); literal(digest(spec.mountsDigest, 'mount digest'), canonicalSha256(spec.mounts), 'mount digest');
   resources(spec.resources); literal(digest(spec.resourcesDigest, 'resources digest'), canonicalSha256(spec.resources), 'resources digest');
   for (const member of ['sandboxProfileRef', 'sandboxProfileDigest', 'containmentPlanRef', 'containmentPlanDigest']) digest(spec[member], member);
   time(spec.createdAt, 'launch creation'); rehash(spec, 'launchSpecDigest', 'worker launch');
-  return spec as WorkerSpec | EditSpec | VerifierSpec;
+  return spec as WorkerSpec | EditSpec | VerifierSpec | DependencySpec;
 }
 
 export type WorkerLaunchClosureInput = {
@@ -343,7 +371,7 @@ export type WorkerLaunchClosureInput = {
 };
 
 async function readExecutionEnvironment(artifacts: ArtifactCatalog, owner: StateOwnerRecordV1, runSpec: RunSpec,
-  spec: WorkerSpec | EditSpec | VerifierSpec, generation: WorkspaceGenerationIdentityV1) {
+  spec: WorkerSpec | EditSpec | VerifierSpec | DependencySpec, generation: WorkspaceGenerationIdentityV1) {
   const [assemblyValue, profileValue, bundle, lockValue, rootValue] = await joinResourceOperations([
     readCanonicalArtifact(artifacts, runSpec.assemblyRef), readCanonicalArtifact(artifacts, runSpec.sandboxProfileRef),
     readCanonicalArtifact<RuntimeBundleManifest>(artifacts, owner.runtimeBundleRef), readCanonicalArtifact(artifacts, owner.stateLockIdentityRef),
@@ -357,7 +385,7 @@ async function readExecutionEnvironment(artifacts: ArtifactCatalog, owner: State
   if (bundle.schemaVersion !== 1 || !Array.isArray(bundle.entries) || bundle.manifestDigest !== owner.runtimeBundleManifestDigest) mismatch('current StateOwner does not retain a signed execution bundle');
   const { signature: _signature, manifestDigest: _manifestDigest, ...bundleCore } = bundle;
   literal(bundle.manifestDigest, canonicalSha256(bundleCore), 'retained bundle digest');
-  if (spec.executable.kind !== 'runtime_bundle' && !((spec.purpose === 'verifier' || spec.purpose === 'tool' &&
+  if (spec.executable.kind !== 'runtime_bundle' && !((spec.purpose === 'verifier' || spec.purpose === 'dependency' || spec.purpose === 'tool' &&
       spec.processInvocation.recipe === 'cliq-builtin-tools-v1') && spec.executable.kind === 'guest_toolchain')) mismatch('Linux executable does not resolve a supported signed source');
   for (const source of [assembly.runtime, spec.runtime, ...(spec.executable.kind === 'runtime_bundle' ? [spec.executable] : [])]) {
     if (source.runtimeBundleRef !== owner.runtimeBundleRef || source.runtimeBundleManifestDigest !== owner.runtimeBundleManifestDigest) mismatch('execution runtime is not the current verified StateOwner bundle');
@@ -646,7 +674,7 @@ export type VerifierLaunchClosureInput = {
  * entrance to this brand. It observes no native process and supplies no death
  * evidence; the physical launcher must still claim/release this exact attempt. */
 export async function readVerifierLaunchClosure(artifacts: ArtifactCatalog, owner: StateOwnerRecordV1,
-  input: VerifierLaunchClosureInput, releaseKeys: readonly ReleaseTrustKey[], signal?: AbortSignal) {
+  input: VerifierLaunchClosureInput, releaseKeys: readonly ReleaseTrustKey[], signal?: AbortSignal, driver?: SqliteDriver) {
   signal?.throwIfAborted(); input = immutableSnapshot(input);
   const { run, launch, generation: row, prepared, request, target, grant, evidence } = input;
   if (run.status !== 'running' || run.nextStep !== 'verify' || run.stopIntentRef !== undefined || run.cancelRequested || run.activeWorkerLaunchId !== launch.launchId ||
@@ -666,15 +694,26 @@ export async function readVerifierLaunchClosure(artifacts: ArtifactCatalog, owne
   const runSpec = decodeRunSpec(await readCanonicalArtifact(artifacts, run.specRef));
   if (!run.frontierRef) mismatch('verifier launch has no current frontier');
   const frontier = await readCanonicalArtifact<RunFrontier>(artifacts, run.frontierRef);
-  record(frontier, ['schemaVersion', 'kind', 'phase', 'candidateItemId', 'resultSourceRef', 'verifierPlanRef', 'nextVerifierIndex', 'afterPass'], 'verifier frontier');
+  record(frontier, ['schemaVersion', 'kind', 'phase', 'candidateItemId', 'resultSourceRef', 'verifierPlanRef', 'nextVerifierIndex', 'afterPass'], 'verifier frontier', runSpec.dependencyPolicyRef ? ['dependencyPlanRef'] : []);
   if (frontier.kind !== 'verify' || frontier.phase !== 'verifiers' || frontier.candidateItemId !== target.candidateItemId ||
       frontier.verifierPlanRef !== target.verifierPlanRef || frontier.nextVerifierIndex !== target.verifierIndex ||
       frontier.schemaVersion !== 1 || frontier.resultSourceRef !== target.resultSourceRef ||
       frontier.afterPass !== (runSpec.operation === 'agent' ? 'finalize' : 'delivery_approval') ||
       request.frontierRef !== run.frontierRef || request.assemblyRef !== runSpec.assemblyRef) mismatch('verifier launch substitutes its current candidate frontier');
   const verifierPlan = decodeVerifierPlan(await readCanonicalArtifact(artifacts, target.verifierPlanRef));
-  if (runSpec.dependencyPolicyRef !== undefined || verifierPlan.dependencyPlanRef !== undefined)
-    mismatch('this verifier launch recipe does not implement dependency acquisition');
+  if (runSpec.dependencyPolicyRef !== undefined) {
+    if (!driver || !verifierPlan.dependencyPlanRef || frontier.dependencyPlanRef !== verifierPlan.dependencyPlanRef)
+      mismatch('verifier dependency requires its full actual SQLite/ready history');
+    const cut = await (await import('./recovery-closure.js')).readRecoveryClosure(driver, artifacts, run.id);
+    equal(cut.run, run, 'verifier exact current dependency Run cut');
+    const progress = (await (await import('./dependency-history.js')).readDependencyHistory(driver, artifacts, cut)).get(frontier.candidateItemId);
+    if (!progress?.ready || progress.planRef !== verifierPlan.dependencyPlanRef || progress.ready.createdAt >= run.deadlineAt)
+      mismatch('verifier cannot overtake the original complete dependency readiness');
+    const checkpoint = (await import('./rows.js')).readCheckpoint(driver, progress.ready.readyCheckpointId);
+    literal(generation.sourceWorkspaceStateRef, checkpoint.workspaceStateRef, 'verifier original fully sealed dependency material');
+    equal(readRun(driver, run.id), run, 'verifier unchanged dependency release cut');
+  } else if (verifierPlan.dependencyPlanRef !== undefined || frontier.dependencyPlanRef !== undefined)
+    mismatch('verifier cannot invent an unfrozen dependency policy');
   const verifierSpec = decodeVerifierSpec(await readCanonicalArtifact(artifacts, runSpec.verifierSpecRef));
   const command = decodeVerifierCommand(await readCanonicalArtifact(artifacts, target.commandRef));
   const environment = decodeVerifierEnvironment(await readCanonicalArtifact(artifacts, target.environmentRef));
@@ -742,6 +781,150 @@ export async function readVerifierLaunchClosure(artifacts: ArtifactCatalog, owne
     verifierEntry: verifierSpec.verifiers[frontier.nextVerifierIndex]!, run, launch, prepared, sandboxLaunchSpecRef: input.sandboxLaunchSpecRef }, verifierClosures);
 }
 export type VerifierLaunchClosure = Awaited<ReturnType<typeof readVerifierLaunchClosure>>;
+
+export type DependencyLaunchClosureInput = {
+  runId: string; opId: string; attempt: number; dispatchId: string; sandboxLaunchSpecRef: string; sourceCheckpointId: string;
+};
+
+/** Historical recipe data only. Reuse the complete original environment,
+ * resources, bundle/root and mount checks without minting a live closure or
+ * replacing the original historical StateOwner with today's owner. */
+export async function readRetainedDependencyLaunchEnvironment(artifacts: ArtifactCatalog, owner: StateOwnerRecordV1,
+  runSpec: RunSpec, sandboxLaunchSpecRef: string) {
+  const spec = decodeDependencySandboxLaunchSpec(await readCanonicalArtifact(artifacts, sandboxLaunchSpecRef));
+  if (spec.filesystem.kind !== 'run_generation') mismatch('historical dependency recipe has no original generation');
+  const generation = decodeWorkspaceGenerationIdentity(await readCanonicalArtifact(artifacts, spec.filesystem.generationRef));
+  const environment = await readExecutionEnvironment(artifacts, owner, runSpec, spec, generation);
+  return { spec, generation, ...environment };
+}
+
+/** The same original whole-operation broker claim owns GET and offline npm.
+ * A locator, valid JSON or controller close cannot mint this native family. */
+async function readDependencyLaunchData(driver: SqliteDriver, artifacts: ArtifactCatalog, ownerContext: StateOwnerContext,
+  supplied: DependencyLaunchClosureInput, releaseKeys: readonly ReleaseTrustKey[], signal: AbortSignal | undefined, phase: 'prepared' | 'claimed') {
+  assertControlWireJson(supplied);
+  record(supplied, ['runId', 'opId', 'attempt', 'dispatchId', 'sandboxLaunchSpecRef', 'sourceCheckpointId'], 'dependency closure locator');
+  const input = immutableSnapshot(supplied), reads = signal ? artifacts.withReadSignal(signal) : artifacts;
+  reads.assertReadActive(); const owner = assertActiveStateOwner(driver, ownerContext), run = readRun(driver, input.runId);
+  if (run.status !== 'running' || run.nextStep !== 'verify' || !run.frontierRef || !run.activeWorkerLaunchId || run.stopIntentRef || run.cancelRequested)
+    mismatch('dependency launch lost its current original active Run');
+  const launch = readRequiredWorkerLaunch(driver, run.activeWorkerLaunchId!);
+  if (launch.phase !== 'activated' || !launch.workspaceGenerationRef) mismatch('dependency parent has not completed its original activation');
+  const row = readRequiredWorkspaceGenerationByRef(driver, launch.workspaceGenerationRef);
+  if (launch.phase !== 'activated' || launch.runId !== run.id || launch.leaseEpoch !== run.leaseEpoch ||
+      launch.supervisorInstanceId !== owner.supervisorInstanceId || launch.generationWriteState !== 'active' || row.phase !== 'active' ||
+      row.activeWorkerLaunchId !== launch.launchId || row.leaseEpoch !== run.leaseEpoch) mismatch('dependency launch lost its actual original parent generation');
+  const operation = readInvocationAttempt(driver, run.id, input.opId, input.attempt), prepared = operation[0], claim = operation[1];
+  if (!prepared || prepared.phase !== 'prepared' || prepared.opKind !== 'tool' || prepared.target !== 'builtin:dependency-acquire' ||
+      prepared.replayClass !== 'workspace-rollback-retry' || !prepared.grantRef || prepared.leaseEpoch !== run.leaseEpoch ||
+      (phase === 'prepared' ? operation.length !== 1 : operation.length !== 2 || !claim ||
+        claim.phase !== 'dispatch_claimed' || claim.dispatchId !== input.dispatchId || claim.supervisorInstanceId !== owner.supervisorInstanceId ||
+        claim.stateOwnerEpoch !== owner.ownerEpoch || !claim.brokerFenceTokenDigest || claim.sandboxLaunchSpecRef !== undefined ||
+        claim.requestRef !== prepared.requestRef || claim.grantRef !== prepared.grantRef || claim.target !== prepared.target ||
+        claim.attempt !== prepared.attempt || claim.leaseEpoch !== prepared.leaseEpoch || !claim.evidenceRef || !claim.evidenceDigest))
+    mismatch('dependency launch requires its exact original preparation or permanent broker-only claim');
+  equal(readHighestPreparedAttempt(driver, run.id, prepared.opId), prepared, 'dependency highest prepared attempt');
+  equal(prepared.budgetDelta, { modelTokens: 0, costMicros: 0, toolCalls: 1, repairAttempts: 0 }, 'dependency one-operation reservation');
+  if (claim) equal(claim.budgetDelta, { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 }, 'dependency claim has no second reservation');
+  const request = decodeDependencyRequest(await readCanonicalArtifact(reads, prepared.requestRef));
+  const target = decodeDependencyTarget(await readCanonicalArtifact(reads, request.targetRef));
+  const grant = decodeDependencyOperationGrant(await readCanonicalArtifact(reads, prepared.grantRef));
+  const evidence = claim?.evidenceRef ? decodeDependencyClaimEvidence(await readCanonicalArtifact(reads, claim.evidenceRef)) : undefined;
+  const spec = decodeDependencySandboxLaunchSpec(await readCanonicalArtifact(reads, input.sandboxLaunchSpecRef));
+  const plan = decodeLinuxContainmentPlan(await readCanonicalArtifact(reads, spec.containmentPlanRef), 'run_invocation');
+  const generation = decodeWorkspaceGenerationIdentity(await readCanonicalArtifact(reads, row.generationRef));
+  const selected = await readRetainedDependencyCandidate(driver, reads, run.id, { candidateItemId: request.candidateItemId,
+    sourceCheckpointId: input.sourceCheckpointId, dependencyPlanRef: request.dependencyPlanRef, resultSourceRef: request.resultSourceRef, releaseKeys, signal });
+  const runSpec = selected.spec, execution = await readExecutionEnvironment(reads, owner, runSpec, spec, generation);
+  const frontier = await readCanonicalArtifact<RunFrontier>(reads, run.frontierRef);
+  if (frontier.kind !== 'verify' || frontier.phase !== 'dependencies' || frontier.nextVerifierIndex !== 0 ||
+      frontier.dependencyPlanRef !== request.dependencyPlanRef || frontier.candidateItemId !== request.candidateItemId ||
+      frontier.resultSourceRef !== request.resultSourceRef || frontier.verifierPlanRef !== selected.verifierPlanRef ||
+      frontier.afterPass !== (runSpec.operation === 'agent' ? 'finalize' : 'delivery_approval') || request.frontierRef !== run.frontierRef ||
+      request.assemblyRef !== runSpec.assemblyRef || request.runId !== run.id || request.opId !== prepared.opId ||
+      request.dependencyPlanDigest !== selected.plan.planDigest || spec.createdAt < prepared.timestamp || (claim !== undefined && spec.createdAt > claim.timestamp))
+    mismatch('dependency launch substitutes its exact original candidate, plan or current frontier');
+  let scripts: { templateRef: string; template: Awaited<ReturnType<typeof readDependencyScriptsTemplateHistory>>['template'] } | undefined;
+  let scriptHistory: Awaited<ReturnType<typeof readDependencyScriptsTemplateHistory>> | undefined;
+  if (selected.plan.allowInstallScripts) {
+    if (!target.scriptAuthorizationTemplateRef) mismatch('dependency lifecycle has no explicit original template');
+    scriptHistory = await readDependencyScriptsTemplateHistory(driver, reads, ownerContext,
+      { bundle: execution.bundle, releaseKeys }, { runId: run.id, templateRef: target.scriptAuthorizationTemplateRef }, signal);
+    scripts = { templateRef: scriptHistory.templateRef, template: scriptHistory.template };
+  }
+  const expected = planDependencyInvocation({ runId: run.id, principalId: selected.principalId, policyRef: runSpec.policyRef,
+    frontierRef: run.frontierRef, assemblyRef: runSpec.assemblyRef, workspaceIdentityRef: selected.session.workspaceIdentityRef,
+    workspaceIdentityDigest: selected.workspaceIdentity.identityDigest, candidateItemId: request.candidateItemId,
+    candidateOrdinal: selected.candidateOrdinal, resultSourceRef: request.resultSourceRef, sourceDigest: selected.candidate.sourceDigest,
+    dependencyPolicyRef: runSpec.dependencyPolicyRef!, policy: selected.policy, dependencyPlanRef: request.dependencyPlanRef,
+    plan: selected.plan, conditions: selected.conditions, deadlineAt: run.deadlineAt, ...(scripts ? { scripts } : {}) });
+  equal(request, expected.request, 'dependency whole request'); equal(target, expected.target, 'dependency complete source target');
+  equal(grant, expected.grant(grant.issuedAt, grant.expiresAt), 'dependency original policy or explicit lifecycle template');
+  if (prepared.attempt >= grant.maxDispatchedAttempts || prepared.timestamp < grant.issuedAt || (claim !== undefined && claim.timestamp >= grant.expiresAt) ||
+      sampleCanonicalNow() >= grant.expiresAt) mismatch('dependency launch is outside its original dispatch count or consent lifetime');
+  const expectedOwner: InvocationOwner = { kind: 'run_invocation', runId: run.id, intendedLeaseEpoch: run.leaseEpoch,
+    workerLaunchId: launch.launchId, opId: prepared.opId, attempt: prepared.attempt, dispatchId: input.dispatchId };
+  equal(spec.owner, expectedOwner, 'dependency launch owner'); equal(plan.owner, expectedOwner, 'dependency containment owner');
+  if (claim) {
+    if (!evidence) mismatch('dependency permanent claim lost its original evidence');
+    equal(evidence, { schemaVersion: 1, format: 'cliq-dependency-claim-evidence-v1', runId: run.id, opId: prepared.opId,
+      attempt: prepared.attempt, dispatchId: input.dispatchId, sourceCheckpointId: input.sourceCheckpointId, workerLaunchId: launch.launchId,
+      leaseEpoch: run.leaseEpoch, stateOwnerEpoch: owner.ownerEpoch, supervisorInstanceId: owner.supervisorInstanceId,
+      dependencyPlanRef: request.dependencyPlanRef, dependencyPlanDigest: selected.plan.planDigest, requestRef: prepared.requestRef,
+      requestDigest: request.requestDigest, targetRef: request.targetRef, targetDigest: target.targetDigest, grantRef: prepared.grantRef,
+      sandboxLaunchSpecRef: input.sandboxLaunchSpecRef, sandboxLaunchSpecDigest: spec.launchSpecDigest,
+      brokerFenceTokenDigest: claim.brokerFenceTokenDigest, createdAt: spec.createdAt, evidenceDigest: evidence.evidenceDigest }, 'dependency original claim evidence');
+    if (claim.evidenceDigest !== evidence.evidenceDigest) mismatch('dependency claim substitutes its original evidence digest');
+  }
+  literal(spec.containmentPlanDigest, plan.planDigest, 'dependency containment digest');
+  literal(spec.parentWorkerContainmentRef, launch.processContainmentRef, 'dependency original parent');
+  literal(plan.parentContainmentRef, launch.processContainmentRef, 'dependency plan parent');
+  equal(plan.filesystemBinding, { kind: 'run-generation', generationRef: row.generationRef }, 'dependency generation');
+  equal(spec.filesystem, { kind: 'run_generation', generationRef: row.generationRef, access: 'read_only',
+    sourceProjectionRef: runSpec.sourceProjectionRef, independentGit: true }, 'dependency source read-only envelope');
+  if (generation.runId !== run.id || generation.identityDigest !== row.generationIdentityDigest || generation.generationId !== row.generationId ||
+      generation.sourceCheckpointId !== row.sourceCheckpointId || generation.sourceWorkspaceStateRef !== row.sourceWorkspaceStateRef ||
+      generation.sourceWorkspaceStateDigest !== row.sourceWorkspaceStateDigest || row.sourceWorkspaceStateRef !== selected.checkpoint.workspaceStateRef)
+    mismatch('dependency generation is not materialized from its original complete candidate');
+  for (const [key, value] of Object.entries({ operationGrantRef: prepared.grantRef, requestRef: prepared.requestRef,
+    requestDigest: request.requestDigest, targetRef: request.targetRef, targetDigest: target.targetDigest })) literal(spec[key as keyof DependencySpec], value, `dependency ${key}`);
+  const toolchain = selected.signed.toolchain;
+  equal(spec.executable, { kind: 'guest_toolchain', guestToolchainManifestRef: toolchain.manifestRef,
+    guestToolchainManifestDigest: toolchain.manifest.manifestDigest, toolId: 'node', role: 'package_manager',
+    executionPath: '/usr/bin/node', executableDigest: toolchain.manifest.node.digest }, 'dependency actual signed Node');
+  equal(spec.runtime.toolchain, { kind: 'guest_toolchain', guestToolchainManifestRef: toolchain.manifestRef,
+    guestToolchainManifestDigest: toolchain.manifest.manifestDigest, guestImageRef: toolchain.manifest.guestImageRef,
+    guestImageDigest: toolchain.manifest.guestImageDigest }, 'dependency signed guest root');
+  equal(spec.mounts, npmDependencyMounts(input.dispatchId, row.generationRef, selected.signed.adapter.digest, selected.signed.image.digest),
+    'dependency fixed signed script/data and managed writable subtree');
+  const parent = decodeWorkerProcessContainment(await readCanonicalArtifact(reads, launch.processContainmentRef!));
+  equal(parent.owner, { kind: 'worker_activation', runId: run.id, intendedLeaseEpoch: run.leaseEpoch, workerLaunchId: launch.launchId }, 'dependency actual parent owner');
+  equal(parent.filesystemBinding, plan.filesystemBinding, 'dependency parent generation');
+  literal(parent.planRef, launch.containmentPlanRef, 'dependency parent plan'); literal(parent.sandboxLaunchSpecRef, launch.sandboxLaunchSpecRef, 'dependency parent launch');
+  if (parent.backend.kind !== 'linux' || plan.backend.kind !== 'linux' || !plan.backend.cgroupPath.startsWith(`${parent.backend.cgroupPath}/`))
+    mismatch('dependency scope is not beneath its exact original worker');
+  selected.assertUnchanged(driver); scriptHistory?.assertUnchanged(driver); assertActiveStateOwner(driver, ownerContext); reads.assertReadActive();
+  const data = immutableSnapshot({ spec, plan, generation, runSpec, ...execution, request, target, grant, ...(evidence ? { evidence } : {}), toolchain, dependencyPlan: selected.plan,
+    packageData: selected.data, scriptConditions: selected.conditions, scriptEntry: selected.signed.adapter, dataEntry: selected.signed.image,
+    run, launch, prepared, ...(claim ? { claim } : {}), sandboxLaunchSpecRef: input.sandboxLaunchSpecRef });
+  const assertUnchanged = (connection: import('./sqlite-driver.js').SqliteConnection | SqliteDriver) => {
+    selected.assertUnchanged(connection); scriptHistory?.assertUnchanged(connection); assertActiveStateOwner(connection, ownerContext);
+  };
+  return Object.freeze({ ...data, assertUnchanged });
+}
+/** Preclaim source/configuration data only. No network or process brand is
+ * minted until the same original typed owner commits the permanent claim. */
+export function readDependencyPreparedLaunchData(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
+  input: DependencyLaunchClosureInput, releaseKeys: readonly ReleaseTrustKey[], signal?: AbortSignal) {
+  return readDependencyLaunchData(driver, artifacts, owner, input, releaseKeys, signal, 'prepared');
+}
+export async function readDependencyLaunchClosure(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
+  input: DependencyLaunchClosureInput, releaseKeys: readonly ReleaseTrustKey[], signal?: AbortSignal) {
+  const { assertUnchanged, ...data } = await readDependencyLaunchData(driver, artifacts, owner, input, releaseKeys, signal, 'claimed');
+  if (!data.claim || !data.evidence) mismatch('dependency productive closure requires its original actual permanent claim');
+  assertUnchanged(driver); return mint({ ...data, claim: data.claim, evidence: data.evidence }, dependencyClosures);
+}
+export type DependencyLaunchClosure = Awaited<ReturnType<typeof readDependencyLaunchClosure>>;
 
 export function decodeWorkerProcessContainment(value: unknown): ProcessContainment & { owner: WorkerOwner } {
   return decodeProcessContainment(value, 'worker_activation') as ProcessContainment & { owner: WorkerOwner };

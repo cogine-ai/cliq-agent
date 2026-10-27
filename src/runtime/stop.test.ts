@@ -95,7 +95,7 @@ test('delivery merge resource stops retain exact original sources and closed mea
     assert.throws(() => decodeAgentStop(changed, run));
 });
 
-test('delivery policy denial has its own closed runtime-failure branch, never verifier or dependency authority', () => {
+test('delivery policy denial keeps its closed runtime-failure subject', () => {
   const intent: StopIntent = { schemaVersion: 1, runId: run.id, createdAt, origin: 'policy_deny',
     targetStatus: 'failed', reason: 'runtime_failed', subjectKind: 'delivery', opId: 'delivery',
     policyChannelEvidenceRef: reference, policyChannelEvidenceDigest: 'b'.repeat(64) };
@@ -103,7 +103,21 @@ test('delivery policy denial has its own closed runtime-failure branch, never ve
   assert.deepEqual(agentStopDetail(decodeAgentStop(intent, run), 'c'.repeat(64), createdAt).reasonDetail,
     { kind: 'policy_denied', subjectKind: 'delivery', opId: 'delivery', policyChannelEvidenceRef: reference, policyChannelEvidenceDigest: 'b'.repeat(64) });
   assert.throws(() => decodeAgentStop({ ...intent, reason: 'verification_failed' }, run));
-  assert.throws(() => decodeAgentStop({ ...intent, subjectKind: 'dependency_install_scripts' }, run));
+  assert.throws(() => decodeAgentStop({ ...intent, subjectKind: 'dependency_install_scripts_future' }, run));
+});
+
+test('dependency script denial has its own closed runtime-failure subject and original channel evidence', () => {
+  const intent: StopIntent = { schemaVersion: 1, runId: run.id, createdAt, origin: 'policy_deny',
+    targetStatus: 'failed', reason: 'runtime_failed', subjectKind: 'dependency_install_scripts', opId: 'scripts',
+    policyChannelEvidenceRef: reference, policyChannelEvidenceDigest: 'b'.repeat(64) };
+  assert.deepEqual(decodeAgentStop(intent, run), intent);
+  assert.deepEqual(agentStopDetail(decodeAgentStop(intent, run), 'c'.repeat(64), createdAt).reasonDetail,
+    { kind: 'policy_denied', subjectKind: 'dependency_install_scripts', opId: 'scripts',
+      policyChannelEvidenceRef: reference, policyChannelEvidenceDigest: 'b'.repeat(64) });
+  for (const changed of [{ reason: 'verification_failed' }, { targetStatus: 'succeeded' },
+    { subjectKind: 'dependency_install_scripts_future' }, { policyChannelEvidenceRef: undefined },
+    { policyChannelEvidenceDigest: 'invalid' }, { dependencyPlanRef: reference }])
+    assert.throws(() => decodeAgentStop({ ...intent, ...changed }, run));
 });
 
 test('delivery merge control facts cannot hide a live model tool batch or permit unknown kinds', () => {

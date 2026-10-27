@@ -29,6 +29,7 @@ import { readInvocationJournal } from './repositories/journal.js';
 import { readWorkerLaunchesForRun } from './repositories/worker-launches.js';
 import { readWorkspaceGenerationsForRun } from './repositories/workspace-generations.js';
 import type { DeliveryReadData } from './delivery-read-data.js';
+import { dependencyVerificationProjection } from './dependency-history.js';
 
 function assertDeliveryReadCut(driver: SqliteConnection | SqliteDriver, cut: RecoveryClosureV1) {
   const rows = driver.prepare('SELECT item_id,item_seq,payload_ref,created_at FROM items WHERE run_id=? ORDER BY item_seq')
@@ -64,8 +65,8 @@ async function readDeliveryCandidateMaterialData(driver: SqliteDriver, artifacts
     .map(row => readCheckpoint(driver, row.id));
   const merges = retainedMerges ?? await validateDeliveryRecoveryData(driver, artifacts, { ...cut, checkpoints, decodedItems }, admission);
   const merged = [...merges.values()][0];
-  if (merges.size !== 1 || !merged || cut.runSpec.dependencyPolicyRef !== undefined)
-    throw new KernelStorageError('STATE_TRANSITION_INVALID', 'delivery verification requires its one complete no-dependency merge');
+  if (merges.size !== 1 || !merged)
+    throw new KernelStorageError('STATE_TRANSITION_INVALID', 'delivery verification requires its one complete original merge');
   const progress = await readVerifierProgress(driver, artifacts, cut, merged.candidate.itemId);
   const { candidate, spec: frozen, plan, planRef } = progress;
   requireEqual(candidate, merged.candidate, 'delivery verification exact merged candidate');
@@ -109,6 +110,9 @@ async function readDeliveryResultBasisData(driver: SqliteDriver, artifacts: Arti
     if (cut.journal.some(entry => entry.opKind === 'verifier') || [...decodedItems.values()].some(item =>
       ['verifier_result', 'verifier_stop'].includes(item.kind) || item.kind === 'policy_decision' && item.subjectKind === 'verifier_launch'))
       throw new TypeError('identical delivery cannot relabel local verifier attempts as inherited receipts');
+    if (cut.journal.some(entry => entry.target === 'builtin:dependency-acquire') || [...decodedItems.values()].some(item =>
+      item.kind === 'dependency_ready' || item.kind === 'dependency_failure'))
+      throw new TypeError('identical delivery cannot relabel its own dependency execution as inherited verification');
     const source = admission.source;
     verificationReceiptRefs = [...source.result.verificationReceiptRefs];
     const verificationReceiptDigests: string[] = [];
@@ -117,6 +121,10 @@ async function readDeliveryResultBasisData(driver: SqliteDriver, artifacts: Arti
     if (source.spec.verifierSpecRef !== cut.runSpec.verifierSpecRef || source.verifierSpec.specDigest !== plan.verifierSpecDigest ||
         source.closure.resultSourceRef !== candidate.resultSourceRef || !verificationReceiptRefs.length)
       throw new TypeError('inherited delivery differs from its complete verified source spec, closure or receipts');
+    if (progress.dependency && (source.spec.dependencyPolicyRef !== progress.dependency.dependencyPolicyRef ||
+        source.closure.dependency.kind === 'none' || source.closure.dependency.dependencyPolicyRef !== progress.dependency.dependencyPolicyRef ||
+        source.closure.dependency.dependencyPlanRef !== progress.dependency.planRef))
+      throw new TypeError('inherited delivery lost its complete original dependency verification closure');
     inheritance = { schemaVersion: 1, format: 'cliq-inherited-verification-provenance-v1', deliveryRunId: cut.run.id,
       sourceRunId: source.run.id, sourceRunResultRef: admission.request.expectedRunResultRef,
       sourceRunResultDigest: canonicalSha256(source.result), sourceVerificationClosureRef: source.result.verificationClosureRef,
@@ -171,12 +179,11 @@ export async function readResultBasis(driver: SqliteDriver, artifacts: ArtifactC
 
 async function assertResultBasisCut(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1) {
   const { run, runSpec: spec } = cut;
-  if (spec.dependencyPolicyRef !== undefined ||
-      cut.childAllocations.some(row => row.parentRunId === run.id && row.state !== 'settled') ||
+  if (cut.childAllocations.some(row => row.parentRunId === run.id && row.state !== 'settled') ||
       !isZeroBudget(run.budgetReserved) || cut.workerLaunches.length || run.activeWorkerLaunchId || run.waitingOnRef || run.waitingReason ||
       cut.workspaceGenerations.some(generation => generation.phase !== 'sealed' && generation.phase !== 'retired') ||
       [...stopInvocationHistory(cut.journal).values()].some(({ entry }) =>
-        !(spec.operation === 'delivery' ? ['verifier', 'publish'] : ['model', 'tool', 'verifier', 'child_admission', 'child_merge', 'child_await', 'skill_resource']).includes(entry.opKind) ||
+        !(spec.operation === 'delivery' ? ['verifier', 'publish', ...(spec.dependencyPolicyRef ? ['tool'] : [])] : ['model', 'tool', 'verifier', 'child_admission', 'child_merge', 'child_await', 'skill_resource']).includes(entry.opKind) ||
         !['completed', 'failed'].includes(entry.phase)))
     throw new KernelStorageError('STATE_TRANSITION_INVALID', 'result requires the complete worker-free root candidate closure');
   assertRetiredGenerationCut(driver, run, cut.workspaceGenerations);
@@ -261,7 +268,7 @@ async function readAgentResultBasis(driver: SqliteDriver, artifacts: ArtifactCat
   const completion = progress.entries.at(-1);
   const completionCheckpoint = completion?.resultItem
     ? readCheckpoint(driver, verifierCheckpointId(run.id, completion.resultItem.opId, completion.resultItem.attempt))
-    : readCheckpoint(driver, finalCandidateCheckpointId(run.id, candidate.producingItemId));
+    : readCheckpoint(driver, progress.dependency?.ready?.readyCheckpointId ?? finalCandidateCheckpointId(run.id, candidate.producingItemId));
   if (cut.run.nextStep === 'verify' && cut.latestCheckpoint.id !== completionCheckpoint.id)
     throw new TypeError('verification completion does not retain its exact final producer Checkpoint');
   return { candidate, plan, planRef, consent, summary, principalId, admission, original: original || undefined, childAdmission, progress, verification, verificationReceiptRefs,
@@ -276,6 +283,19 @@ export function expectedInheritedVerificationProvenance(basis: Awaited<ReturnTyp
   return decodeInheritedVerificationProvenance(provenance);
 }
 
+/** The complete progress reader supplies the original acquired receipt. This
+ * projection is data only and cannot convert an inherited ready into a GET. */
+export function expectedDependencyVerification(basis: Awaited<ReturnType<typeof readResultBasis>>, createdAt?: string): VerificationClosureV1['dependency'] {
+  if (basis.delivery?.inheritance && basis.progress.dependency) {
+    if (createdAt === undefined) throw new TypeError('inherited dependency verification requires its original provenance time');
+    const provenance = expectedInheritedVerificationProvenance(basis, createdAt)!;
+    return { kind: 'inherited_verification', dependencyPolicyRef: basis.progress.dependency.dependencyPolicyRef,
+      dependencyPlanRef: basis.progress.dependency.planRef, sourceRunId: provenance.sourceRunId, sourceRunResultRef: provenance.sourceRunResultRef,
+      sourceVerificationClosureRef: provenance.sourceVerificationClosureRef, inheritedProvenanceRef: canonicalSha256(provenance) };
+  }
+  return dependencyVerificationProjection(basis.progress.dependency);
+}
+
 export function expectedVerificationClosure(basis: Awaited<ReturnType<typeof readResultBasis>>, createdAt: string): VerificationClosureV1 {
   const provenance = expectedInheritedVerificationProvenance(basis, createdAt);
   const verification = provenance ? { kind: 'inherited_verified' as const, sourceRunId: provenance.sourceRunId,
@@ -284,7 +304,7 @@ export function expectedVerificationClosure(basis: Awaited<ReturnType<typeof rea
   if (!verification) throw new TypeError('verification closure lost its independently reproduced local or inherited evidence');
   const value: VerificationClosureV1 = { schemaVersion: 1, format: 'cliq-verification-closure-v1', runId: basis.candidate.runId,
     candidateItemId: basis.candidate.itemId, resultSourceRef: basis.candidate.resultSourceRef, verifierPlanRef: basis.planRef,
-    dependency: { kind: 'none' }, verification,
+    dependency: expectedDependencyVerification(basis, createdAt), verification,
     createdAt, closureDigest: '' };
   value.closureDigest = digestOmitting(value, 'closureDigest');
   return value;
@@ -305,9 +325,10 @@ export async function prepareDeliveryNoOpVerification(driver: SqliteDriver, arti
       !cut.run.frontierRef || cut.run.stopIntentRef || cut.run.cancelRequested || cut.run.resultRef || cut.run.terminalReason || cut.run.terminalDetailRef ||
       parseCanonicalTime(createdAt) < parseCanonicalTime(cut.run.updatedAt) || createdAt >= cut.run.deadlineAt)
     throw new KernelStorageError('STATE_TRANSITION_INVALID', 'no-op verification requires its exact unstopped complete no-materialization cut');
-  const frontier: RunFrontier = { schemaVersion: 1, kind: 'verify', phase: 'verifiers', candidateItemId: basis.candidate.itemId,
+  const frontier: RunFrontier = { schemaVersion: 1, kind: 'verify', phase: basis.delivery.inheritance && basis.progress.dependency ? 'dependencies' : 'verifiers', candidateItemId: basis.candidate.itemId,
     resultSourceRef: basis.candidate.resultSourceRef, verifierPlanRef: basis.planRef,
     nextVerifierIndex: basis.delivery.inheritance ? 0 : basis.plan.entries.length, afterPass: 'delivery_approval' };
+  if (basis.progress.dependency) frontier.dependencyPlanRef = basis.progress.dependency.planRef;
   requireEqual(await readCanonicalArtifact(artifacts, cut.run.frontierRef), frontier, 'no-op verification complete source frontier');
   requireEqual(cut.latestCheckpoint, basis.completionCheckpoint, 'no-op verification exact original complete producer Checkpoint');
   const provenance = expectedInheritedVerificationProvenance(basis, createdAt);
@@ -478,6 +499,7 @@ async function validateRunResultRecoveryData(driver: SqliteDriver, artifacts: Ar
   const expected: RunResult = { schemaVersion: 1, runId: run.id, baseSourceRef: basis.candidate.baseSourceRef,
     resultSourceRef: basis.candidate.resultSourceRef, diffRef: basis.candidate.diffRef,
     verificationClosureRef: result.verificationClosureRef, verificationReceiptRefs: basis.verificationReceiptRefs, summaryRef: basis.candidate.summaryRef, createdAt: result.createdAt,
+    ...(historical.closure.dependency.kind !== 'none' ? { dependencyPlanRef: historical.closure.dependency.dependencyPlanRef } : {}),
     ...(cut.runSpec.operation === 'delivery' ? { deliveryTerminalProjectionEvidenceRef: result.deliveryTerminalProjectionEvidenceRef } : {}),
     ...(historical.closure.verification.kind === 'inherited_verified' ? { verificationProvenanceRef: historical.closure.verification.inheritedProvenanceRef } : {}) };
   requireEqual(result, expected, 'terminal immutable RunResult');

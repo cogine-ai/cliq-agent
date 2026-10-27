@@ -48,6 +48,7 @@ import { MODEL_BROKER_ENTRY_ID } from '../model-broker-native.js';
 import { readWorkerRecoveryTerminalPlan, type WorkerRecoveryTerminalPlan } from '../worker-recovery-terminal.js';
 import type { OwnedPublicationInitialAmbiguity, OwnedPublicationReconciliationResult, PublicationInvocationOwner } from '../publication-invocation.js';
 import type { OwnedPublicationReceivedResult } from '../publication-finalization.js';
+import type { DependencyInvocationOwner } from '../dependency-invocation-owner.js';
 
 const ZERO_BUDGET: BudgetUsage = {
   modelTokens: 0,
@@ -419,16 +420,22 @@ export async function claimInvocationDispatch(
 export async function claimValidatedInvocation(
   driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, input: ClaimInvocationDispatchInput,
   validate?: (connection: SqliteConnection, run: Run, prepared: InvocationJournalEntry, now: string) => void,
-  publicationOwner?: PublicationInvocationOwner
+  publicationOwner?: PublicationInvocationOwner,
+  dependencyOwner?: DependencyInvocationOwner
 ): Promise<InvocationJournalEntry> {
   input = { ...input };
   // The attachment is an original same-Store native owner, not caller metadata
   // or an injectable authority callback. Its module owns the only issuer.
   const publication = publicationOwner === undefined ? undefined :
     (await import('../publication-invocation.js')).assertPublicationClaimForInvocation(driver, owner, publicationOwner, input);
+  const dependency = dependencyOwner === undefined ? undefined :
+    (await import('../dependency-invocation-owner.js')).assertDependencyClaimForInvocation(driver, owner, dependencyOwner, input);
   const preparedSnapshot = readHighestPreparedAttempt(driver, input.runId, input.opId);
   if ((preparedSnapshot?.opKind === 'publish') !== (publication !== undefined))
     throw new KernelStorageError('INVALID_REQUEST', 'publication claims require their original typed native owner');
+  if ((preparedSnapshot?.opKind === 'tool' && preparedSnapshot.target === 'builtin:dependency-acquire') !== (dependency !== undefined) ||
+      dependency !== undefined && publication !== undefined)
+    throw new KernelStorageError('INVALID_REQUEST', 'dependency claims require their original same-operation native owner');
   const modelCut = preparedSnapshot?.opKind === 'model' ? await readModelClaimCut(driver, artifacts, preparedSnapshot) : undefined;
   if (input.sandboxLaunchSpecRef !== undefined) await artifacts.readBytes(input.sandboxLaunchSpecRef);
   const launchSpecMetadata = input.sandboxLaunchSpecRef === undefined
@@ -476,6 +483,7 @@ export async function claimValidatedInvocation(
       history: readOperationJournal(connection, run.id, highest.opId), now });
     validate?.(connection, run, highest, now);
     publication?.validate(connection, run, highest, now);
+    dependency?.validate(connection, run, highest, now);
     claimed = {
       ...highest,
       seq: nextJournalSequence(connection, input.runId),
@@ -494,6 +502,11 @@ export async function claimValidatedInvocation(
       claimed.evidenceRef = publication.evidenceRef;
       claimed.evidenceDigest = publication.evidenceDigest;
       for (const artifact of publication.metadata) insertArtifactMetadata(connection, artifact, now);
+    }
+    if (dependency) {
+      claimed.evidenceRef = dependency.evidenceRef;
+      claimed.evidenceDigest = dependency.evidenceDigest;
+      for (const artifact of dependency.metadata) insertArtifactMetadata(connection, artifact, now);
     }
     if (modelCut) modelRetryState(modelCut.retryPolicy, [...readOperationJournal(connection, run.id, highest.opId), claimed], now);
     if (launchSpecMetadata !== undefined) insertArtifactMetadata(connection, launchSpecMetadata, now);
@@ -543,6 +556,7 @@ type RetainedSettlement = {
   /** Set only by the genuine publication adapter factory below. A caller's
    * continuation callback never substitutes for this original owner. */
   publicationOwner?: PublicationInvocationOwner | OwnedPublicationReceivedResult | OwnedPublicationInitialAmbiguity;
+  dependencyOwner?: import('../dependency-settlement.js').OwnedDependencySettlement;
   settlement?: BudgetSettlementV1;
   plan?: PlannedArtifact;
   artifact?: PublishedArtifact;
@@ -588,6 +602,21 @@ export function preparePublicationInvocationSettlement(driver: SqliteDriver, art
       throw new TypeError('publication settlement requires its original artifact catalog');
     retained ??= { validateSnapshot: original.validateSnapshot, publicationOwner };
     return settleInitialInvocation(driver, original.readArtifacts, owner, { ...original.input, expectedRunRevision },
+      original.terminal, original.continuation, retained);
+  } };
+}
+
+/** The dependency's genuine native owner and complete physical retirement
+ * produce this adapter; ordinary continuation callbacks cannot mint it. */
+export function prepareDependencyInvocationSettlement(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
+  dependencyOwner: import('../dependency-settlement.js').OwnedDependencySettlement) {
+  let retained: RetainedSettlement | undefined;
+  return { async settle(expectedRunRevision: number) {
+    const { assertOwnedDependencySettlement } = await import('../dependency-settlement.js');
+    const original = assertOwnedDependencySettlement(driver, owner, dependencyOwner);
+    if (original.artifacts !== artifacts) throw new TypeError('dependency settlement changed its original artifact owner');
+    retained ??= { validateSnapshot: original.validateSnapshot, dependencyOwner };
+    return settleInitialInvocation(driver, artifacts, owner, { ...original.input, expectedRunRevision },
       original.terminal, original.continuation, retained);
   } };
 }
@@ -656,6 +685,14 @@ async function settleInitialInvocation(
         retained.validateSnapshot !== original.validateSnapshot || artifacts !== original.readArtifacts)
       throw new KernelStorageError('INVALID_REQUEST', 'publication settlement changed its original owning continuation');
   }
+  if (retained?.dependencyOwner) {
+    const { assertOwnedDependencySettlement } = await import('../dependency-settlement.js');
+    const original = assertOwnedDependencySettlement(driver, owner, retained.dependencyOwner);
+    if (original.artifacts !== artifacts || input.runId !== original.input.runId || input.opId !== original.input.opId ||
+        input.attempt !== original.input.attempt || terminal !== original.terminal || continuation !== original.continuation ||
+        retained.validateSnapshot !== original.validateSnapshot)
+      throw new KernelStorageError('INVALID_REQUEST', 'dependency settlement changed its original physical continuation');
+  }
   const artifactRefs = terminal.phase === 'completed'
     ? [terminal.resultRef, terminal.receiptRef]
     : terminal.phase === 'failed'
@@ -695,6 +732,8 @@ async function settleInitialInvocation(
     const prepared = entries.find((entry) => entry.phase === 'prepared');
     const claim = entries.find((entry) => entry.phase === 'dispatch_claimed');
     if (prepared === undefined) throw new KernelStorageError('NOT_FOUND', 'prepared invocation attempt is missing');
+    if (prepared.opKind === 'tool' && prepared.target === 'builtin:dependency-acquire' && terminal.phase !== 'unknown' && !retained?.dependencyOwner)
+      throw new KernelStorageError('INVALID_REQUEST', 'dependency settlement requires its original native result and physical retirement');
     if (prepared.opKind === 'publish' && !retained?.publicationOwner) {
       throw new KernelStorageError('INVALID_REQUEST', 'publication settlement requires its original owned physical continuation');
     }

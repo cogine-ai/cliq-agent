@@ -11,7 +11,8 @@ export type VerifierStopIntent = Extract<StopIntent, { origin: 'verification' } 
   { origin: 'policy_deny'; subjectKind: 'verifier' }>;
 export type DeliveryMergeStopIntent = Extract<StopIntent, { runtimeSubtype: 'delivery_merge_conflict' }>;
 export type DeliveryPolicyStopIntent = Extract<StopIntent, { origin: 'policy_deny' }> & { subjectKind: 'delivery'; reason: 'runtime_failed' };
-export type AgentStopIntent = Extract<StopIntent, { origin: 'user_cancel' | 'parent_cancel' | 'deadline' }> | ResourceStopIntent | ModelFailureStopIntent | VerifierStopIntent | DeliveryMergeStopIntent | DeliveryPolicyStopIntent;
+export type DependencyPolicyStopIntent = Extract<StopIntent, { origin: 'policy_deny' }> & { subjectKind: 'dependency_install_scripts'; reason: 'runtime_failed' };
+export type AgentStopIntent = Extract<StopIntent, { origin: 'user_cancel' | 'parent_cancel' | 'deadline' }> | ResourceStopIntent | ModelFailureStopIntent | VerifierStopIntent | DeliveryMergeStopIntent | DeliveryPolicyStopIntent | DependencyPolicyStopIntent | Extract<StopIntent, { origin: 'kernel_integrity'; source: 'dependency_acquisition' }>;
 export const stopCheckpointId = (runId: string, stopIntentRef: string) => identityHash('cliq-stop-checkpoint-v1', runId, stopIntentRef);
 
 export function cancelRequestDigest(runId: string, input: RunCancel): string {
@@ -42,8 +43,15 @@ export function decodeAgentStop(value: unknown, run: Run): AgentStopIntent {
     fields.push('deadlineAt');
     if (intent.targetStatus !== 'failed' || intent.reason !== 'budget_exhausted' || intent.deadlineAt !== run.deadlineAt || intent.createdAt < run.deadlineAt) throw new TypeError('deadline stop precedes the immutable deadline');
   } else if (intent.origin === 'kernel_integrity') {
-    fields.push('verifierOpId', 'integrityEvidenceRef', 'integrityEvidenceDigest');
-    if (intent.targetStatus !== 'failed' || intent.reason !== 'verifier_mutated_source' || !identifier(intent.verifierOpId)) throw new TypeError('invalid verifier integrity stop');
+    fields.push('integrityEvidenceRef', 'integrityEvidenceDigest');
+    if (intent.reason === 'verifier_mutated_source') {
+      fields.push('verifierOpId'); if (!identifier(intent.verifierOpId)) throw new TypeError('invalid verifier integrity stop');
+    } else {
+      fields.push('source', 'dependencyPlanRef', 'failingOpId');
+      if (intent.reason !== 'runtime_failed' || intent.source !== 'dependency_acquisition' || !identifier(intent.failingOpId)) throw new TypeError('invalid dependency integrity stop');
+      assertArtifactRef(intent.dependencyPlanRef);
+    }
+    if (intent.targetStatus !== 'failed') throw new TypeError('invalid integrity stop status');
     assertArtifactRef(intent.integrityEvidenceRef); assertArtifactRef(intent.integrityEvidenceDigest);
   } else if (intent.origin === 'verification') {
     fields.push('candidateItemId', 'verifierPlanRef');
@@ -54,7 +62,7 @@ export function decodeAgentStop(value: unknown, run: Run): AgentStopIntent {
     fields.push('subjectKind', 'opId', 'policyChannelEvidenceRef', 'policyChannelEvidenceDigest');
     if (intent.targetStatus !== 'failed' || !identifier(intent.opId) ||
         !(intent.subjectKind === 'verifier' && intent.reason === 'verification_failed' ||
-          intent.subjectKind === 'delivery' && intent.reason === 'runtime_failed'))
+          ['delivery', 'dependency_install_scripts'].includes(intent.subjectKind) && intent.reason === 'runtime_failed'))
       throw new TypeError('invalid typed policy denial');
     assertArtifactRef(intent.policyChannelEvidenceRef); assertArtifactRef(intent.policyChannelEvidenceDigest);
   } else if (intent.origin === 'budget') {
@@ -121,8 +129,10 @@ export function decodeAgentStop(value: unknown, run: Run): AgentStopIntent {
 
 export function agentStopDetail(intent: AgentStopIntent, stopIntentRef: string, createdAt: string): TerminalDetail {
   const reasonDetail: TerminalDetail['reasonDetail'] = intent.origin === 'kernel_integrity'
-    ? { kind: 'verifier_source_mutation', verifierOpId: intent.verifierOpId,
+    ? intent.reason === 'verifier_mutated_source' ? { kind: 'verifier_source_mutation', verifierOpId: intent.verifierOpId,
         violationOrDigestEvidenceRef: intent.integrityEvidenceRef, violationOrDigestEvidenceDigest: intent.integrityEvidenceDigest }
+      : { kind: 'dependency_source_integrity', dependencyPlanRef: intent.dependencyPlanRef, failingOpId: intent.failingOpId,
+          integrityEvidenceRef: intent.integrityEvidenceRef, integrityEvidenceDigest: intent.integrityEvidenceDigest }
     : intent.origin === 'verification'
       ? { kind: 'verification', candidateItemId: intent.candidateItemId, verifierPlanRef: intent.verifierPlanRef }
     : intent.origin === 'policy_deny'
@@ -221,7 +231,8 @@ export function openStopBatch(items: readonly ContinuationItem[]): { batch: Tool
     } else if (item.kind === 'input_request' || item.kind === 'user_input') {
       if (!pending || item.batchItemId !== pending.batch.itemId || item.index !== pending.next || item.callId !== pending.batch.calls[pending.next]?.callId) throw new TypeError('input overtakes its result-less call');
     } else if (item.kind === 'final_candidate' || item.kind === 'verifier_result' || item.kind === 'verifier_stop' || item.kind === 'repair_diagnostic' ||
-        item.kind === 'delivery_merge' || item.kind === 'delivery_merge_conflict' || item.kind === 'delivery_decision') {
+        item.kind === 'delivery_merge' || item.kind === 'delivery_merge_conflict' || item.kind === 'delivery_decision' ||
+        item.kind === 'dependency_ready' || item.kind === 'dependency_failure') {
       if (pending || model) throw new TypeError('candidate or verifier evidence overtakes an open batch');
     } else if (item.kind === 'child_handle') {
       if (!pending || pending.batch.itemId !== item.delegateBatchItemId || pending.next !== item.delegateCallIndex ||

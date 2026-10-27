@@ -2,6 +2,19 @@
 import { canonicalJsonBytes } from '../kernel/canonical.js';
 import { identityHash } from '../kernel/identity.js';
 import { KernelStorageError } from './errors.js';
+import { decodeDependencyInstallScriptsDecision } from '../kernel/control-wire.js';
+import type { DependencyInstallScriptsDecisionV1 } from '../kernel/authorization.js';
+import { immutableSnapshot } from '../model/immutable.js';
+
+/** Only the capture owner constructs this after its complete immutable input
+ * graph exists. The retained response remains intent, never capture proof. */
+export class DependencyScriptAuthorizationRequired extends KernelStorageError {
+  readonly decision: DependencyInstallScriptsDecisionV1;
+  constructor(decision: DependencyInstallScriptsDecisionV1) {
+    super('STATE_TRANSITION_INVALID', 'dependency scripts require exact source consent');
+    this.decision = immutableSnapshot(decodeDependencyInstallScriptsDecision(decision));
+  }
+}
 
 /** Opaque correlation only. Derive its UUID bits from the original inspection
  * identity so replay cannot borrow another inspection's internal response. */
@@ -14,6 +27,8 @@ function internalErrorId(inspectionId: string): string {
 }
 
 export type SourceInspectionErrorResponse = { protocolVersion: 1; ok: false; method: 'run.submit' | 'run.apply'; error:
+  | { schemaVersion: 1; messageCode: 'dependency_script_authorization_required'; code: 'AUTHORIZATION_REQUIRED'; retryable: false;
+      errorId: string; requiredAuthorization: DependencyInstallScriptsDecisionV1 }
   | { schemaVersion: 1; messageCode: string; code: 'INVALID_REQUEST'; retryable: false; issues: Array<{ path: string; issueCode: string }> }
   | { schemaVersion: 1; messageCode: string; code: 'INTERNAL'; retryable: false; errorId: string }
   | { schemaVersion: 1; messageCode: string; code: 'CANCEL_REQUESTED' | 'BUDGET_EXHAUSTED' | 'ARTIFACT_MISMATCH'; retryable: false } };
@@ -21,6 +36,9 @@ export type SourceInspectionErrorResponse = { protocolVersion: 1; ok: false; met
 export function createSourceInspectionErrorResponse(error: unknown, inspectionId: string, cancelled: boolean, method: SourceInspectionErrorResponse['method']): SourceInspectionErrorResponse {
   if (cancelled) return { protocolVersion: 1, ok: false, method,
     error: { schemaVersion: 1, messageCode: 'source_capture_cancelled', code: 'CANCEL_REQUESTED', retryable: false } };
+  if (error instanceof DependencyScriptAuthorizationRequired && method === 'run.submit') return { protocolVersion: 1, ok: false, method,
+    error: { schemaVersion: 1, messageCode: 'dependency_script_authorization_required', code: 'AUTHORIZATION_REQUIRED', retryable: false,
+      errorId: internalErrorId(inspectionId), requiredAuthorization: error.decision } };
   if (error instanceof KernelStorageError && (error.code === 'BUDGET_EXHAUSTED' || error.code === 'ARTIFACT_MISMATCH'))
     return { protocolVersion: 1, ok: false, method, error: { schemaVersion: 1,
       messageCode: 'source_capture_rejected', code: error.code, retryable: false } };
@@ -37,7 +55,15 @@ export function assertSourceInspectionErrorResponse(value: unknown, inspectionId
       data.error.retryable !== false || typeof data.error.messageCode !== 'string' || !/^[a-z_]{1,128}$/u.test(data.error.messageCode))
     throw new KernelStorageError('RECOVERY_REQUIRED', 'retained source error has the wrong closed response shape');
   const expected = ['schemaVersion', 'messageCode', 'code', 'retryable'];
-  if (data.error.code === 'INVALID_REQUEST') {
+  if (data.error.code === 'AUTHORIZATION_REQUIRED') {
+    expected.push('requiredAuthorization', 'errorId');
+    try {
+      if (method !== 'run.submit' || data.error.messageCode !== 'dependency_script_authorization_required' ||
+          data.error.errorId !== internalErrorId(inspectionId) ||
+          data.error.requiredAuthorization.target.sourceInspectionId !== inspectionId) throw new TypeError('foreign source consent');
+      decodeDependencyInstallScriptsDecision(data.error.requiredAuthorization);
+    } catch (cause) { throw new KernelStorageError('RECOVERY_REQUIRED', 'retained source consent has invalid intent conditions', { cause }); }
+  } else if (data.error.code === 'INVALID_REQUEST') {
     expected.push('issues');
     if (!Array.isArray(data.error.issues) || data.error.issues.length !== 1 ||
         Object.keys(data.error.issues[0]).sort().join() !== 'issueCode,path' || data.error.issues[0].path !== 'source' ||

@@ -83,10 +83,15 @@ export type VerificationClosureV1 = {
   resultSourceRef: ArtifactRef;
   verifierPlanRef: ArtifactRef;
   dependency: { kind: 'none' } | {
+    kind: 'inherited_verification'; dependencyPolicyRef: ArtifactRef; dependencyPlanRef: ArtifactRef;
+    sourceRunId: string; sourceRunResultRef: ArtifactRef; sourceVerificationClosureRef: ArtifactRef; inheritedProvenanceRef: ArtifactRef;
+  } | ({
     kind: 'ready'; dependencyPolicyRef: ArtifactRef; dependencyPlanRef: ArtifactRef;
-    dependencyReadyItemId: string; acquisitionOpId: string; acquisitionAttempt: number;
-    completedJournalSeq: number; readyCheckpointId: string;
-  };
+    dependencyReadyItemId: string; readyCheckpointId: string;
+  } & (
+    | { origin: 'acquired'; acquisitionOpId: string; acquisitionAttempt: number; completedJournalSeq: number }
+    | { origin: 'inherited_parent_ready'; parentRunId: string; parentReadyItemRef: ArtifactRef; childAdmissionRequestRef: ArtifactRef }
+  ));
   verification: {
     kind: 'local'; outcome: 'verified' | 'unverified'; unverifiedConsentRef?: ArtifactRef;
     entries: Array<{

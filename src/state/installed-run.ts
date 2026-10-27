@@ -46,6 +46,9 @@ import { assertActiveStateOwner, type StateOwnerContext } from './state-owner.js
 import { assertSupportedVerifierRequests, prepareInstalledVerifierAssembly, selectVerifierReleaseReference } from './verifier-admission.js';
 import type { AdmitRunInput } from './reducers/admission.js';
 import { readRetainedVerifierToolchain, type RetainedVerifierToolchain } from './guest-toolchain.js';
+import { prepareInstalledDependencyAdmission, readInstalledDependencyAdmission, consumeInstalledDependencyAdmission,
+  assertInstalledDependencyAdmissionAuthority, type InstalledDependencyAdmission } from './installed-dependency-admission.js';
+import { assertInstalledDependencyRequest } from './dependency-profile.js';
 import { VerifierAuthorizationError } from './authorization-artifacts.js';
 import type { InstalledApplyDiagnosticStage } from './installed-run-diagnostics.js';
 import { readAssemblySkills } from './skill-data.js';
@@ -65,13 +68,13 @@ type InstructionManifest = { schemaVersion: 1; format: 'cliq-workspace-instructi
 export type AssembledInstalledRun = Readonly<{
   assemblyRef: string; assembly: RunAssemblyV1; policyRef: string; sandboxProfileRef: string; verifierSpecRef: string;
   credentialGrantRefs: readonly string[]; sourceProjectionRef: string; frozenIgnoreRulesRef: string; baseWorkspaceManifestRef: string;
-  material: RunAssemblyValidationMaterial; admittedAt: string; deadlineAt: string;
+  material: RunAssemblyValidationMaterial; admittedAt: string; deadlineAt: string; dependencyPolicyRef?: string;
 }>;
 type AdmissionBinding = { driver: SqliteDriver; owner: StateOwnerContext; selected: HeldInstalledRuntime;
   identity: AuthenticatedControlIdentity; normalized: ReturnType<typeof normalizeRunSubmitRequest>; source: RetiredSource;
   native: NativeStateOwner; workspace: Extract<WorkspaceIdentityV1, { kind: 'live' }>;
   repository?: RepositoryIdentity;
-  input: AdmitRunInput; admittedAt: string; deadlineAt: string; signal?: AbortSignal };
+  input: AdmitRunInput; admittedAt: string; deadlineAt: string; signal?: AbortSignal; dependency?: InstalledDependencyAdmission };
 const admissions = new WeakMap<AssembledInstalledRun, AdmissionBinding>();
 /** Fixed refusal projection, not authority or a caller-selectable error code. */
 export class InstalledRunAuthorityError extends KernelStorageError {
@@ -90,10 +93,11 @@ export function assertInstalledRunRecipe(request: NormalizedRunSubmitRequest,
   endpoint?: EndpointRegistrationV1): asserts request is NormalizedRunSubmitRequest & {
   model: Exclude<NormalizedRunSubmitRequest['model'], { provider: 'ollama' }>;
 } {
-  if (request.model.provider !== 'openai-compatible' || request.dependency.mode !== 'none' ||
+  if (request.model.provider !== 'openai-compatible' ||
       request.registeredMcpServerIds.length ||
       request.sandboxResources.maxProcesses < 8 || request.sandboxResources.maxSingleFileBytes > 268_435_456)
     invalid('installed Run selects an unsupported model, execution resource, verifier, dependency or MCP');
+  assertInstalledDependencyRequest(request);
   if (request.model.modelCredentialGrantIds.length !== 1)
     invalid('installed Run requires exactly one model bearer credential');
   assertSupportedVerifierRequests(request.verifiers, request.policyMode);
@@ -547,6 +551,11 @@ export async function assembleInstalledRun(input: {
     assertWorkspaceSourceTrust(trust, request.workspacePath);
   } catch (error) { failure = error; throw error; } finally { closeOwned(resources, failure); }
   const admittedAt = sampleCanonicalNow(), deadlineAt = addCanonicalDuration(admittedAt, request.budgets.wallTimeMs);
+  // This factory may borrow the original installed native modules and
+  // credential scope; never call it from the held-runtime queue below.
+  const dependency = request.dependency.mode === 'locked' ? await prepareInstalledDependencyAdmission(driver, reads, owner, selected,
+    { request, source, principalId: identity.principalId, createdAt: admittedAt, deadlineAt }, signal) : undefined;
+  const dependencyData = dependency && readInstalledDependencyAdmission(driver, owner, dependency);
   reportInstalledRunAssemblyPhase(onAssemblyPhase, 'submit_assembly_material');
   return withHeldInstalledRuntime(selected, async installed => {
     await installed.revalidate(signal); await validateControlChannelClosure(reads, owner, identity); assertActiveStateOwner(driver, owner);
@@ -593,7 +602,10 @@ export async function assembleInstalledRun(input: {
       mismatch('installed tools and verifiers select different signed guests');
     const scriptGuestRoot = scriptGuestRefs.length ? installed.bundle.structuredArtifacts.find(root => root.kind === 'guest_toolchain' && root.artifactRef === scriptGuestRefs[0]) : undefined;
     if (scriptGuestRefs.length && !scriptGuestRoot) mismatch('installed script guest has no original signed discovery root');
-    const selectedGuest = verifierToolchain ?? (scriptGuestRoot ? { manifestRef: scriptGuestRoot.artifactRef, manifestDigest: scriptGuestRoot.semanticDigest } : undefined);
+    const ordinaryGuest = verifierToolchain ?? (scriptGuestRoot ? { manifestRef: scriptGuestRoot.artifactRef, manifestDigest: scriptGuestRoot.semanticDigest } : undefined);
+    if (ordinaryGuest && dependencyData && !same(ordinaryGuest, dependencyData.guestToolchain))
+      mismatch('installed dependency and tools/verifiers select different signed guests');
+    const selectedGuest = ordinaryGuest ?? dependencyData?.guestToolchain;
     const h = c - o, s = Math.min(8192, Math.floor(c / 8)), k = compactionEnvelopeEstimate(compaction.material);
     const assembly: RunAssemblyV1 = { schemaVersion: 1, format: 'cliq-run-assembly-v1', provider: { name: catalog.provider, model: catalog.model,
       endpoint: { kind: 'registered', registrationKind: endpoint.registrationKind, endpointRegistrationRef: endpointArtifact.ref,
@@ -651,16 +663,39 @@ export async function assembleInstalledRun(input: {
     await installed.revalidate(signal); await validateControlChannelClosure(reads, owner, identity); assertActiveStateOwner(driver, owner);
     const result: AssembledInstalledRun = Object.freeze({ assemblyRef, assembly: immutableSnapshot(assembly), policyRef, sandboxProfileRef, verifierSpecRef,
       credentialGrantRefs: Object.freeze(credentialGrantRefs), sourceProjectionRef: sourceManifest.sourceProjectionRef,
-      frozenIgnoreRulesRef: sourceManifest.frozenIgnoreRulesRef, baseWorkspaceManifestRef: capturedSourceRef, material, admittedAt, deadlineAt });
-    admissions.set(result, { driver, owner, selected, identity, normalized: currentOriginal, source, native: held, workspace, repository, signal,
+      frozenIgnoreRulesRef: sourceManifest.frozenIgnoreRulesRef, baseWorkspaceManifestRef: capturedSourceRef, material, admittedAt, deadlineAt,
+      ...(dependencyData ? { dependencyPolicyRef: dependencyData.policyRef } : {}) });
+    admissions.set(result, { driver, owner, selected, identity, normalized: currentOriginal, source, native: held, workspace, repository, signal, dependency,
       input: immutableSnapshot({ ...identity, requestId: request.requestId, admissionKey: request.admissionKey, sessionId: request.sessionId,
         expectedContextRevision: request.expectedContextRevision, workspacePath: request.workspacePath, objective: request.objective,
-        assemblyRef, policyRef, sandboxProfileRef, verifierSpecRef,
+        assemblyRef, policyRef, sandboxProfileRef, verifierSpecRef, ...(dependencyData ? { dependencyPolicyRef: dependencyData.policyRef } : {}),
         ...(request.verifiers.length ? { verifierRequests: request.verifiers } : {}), credentialGrantRefs, budgets: request.budgets,
         allowUnverified: request.allowUnverified, sourceProjectionRef: sourceManifest.sourceProjectionRef,
         frozenIgnoreRulesRef: sourceManifest.frozenIgnoreRulesRef, baseWorkspaceManifestRef: capturedSourceRef }), admittedAt, deadlineAt });
     return result;
   }, signal);
+}
+
+/** Same genuine installed preparation, metadata and sole transaction. A
+ * caller-supplied policy ref cannot manufacture the script-consumption token. */
+export function readInstalledRunDependency(prepared: AssembledInstalledRun, driver: SqliteDriver,
+  owner: StateOwnerContext, identity: AuthenticatedControlIdentity) {
+  readInstalledRunAdmission(prepared, driver, owner, identity);
+  const binding = admissions.get(prepared)!;
+  return binding.dependency ? readInstalledDependencyAdmission(driver, owner, binding.dependency) : undefined;
+}
+export function assertInstalledRunDependencyAuthority(prepared: AssembledInstalledRun, driver: SqliteDriver,
+  owner: StateOwnerContext, identity: AuthenticatedControlIdentity, authority: import('./installed-runtime.js').HeldCredentialAuthorityLock): void {
+  readInstalledRunAdmission(prepared, driver, owner, identity);
+  const binding = admissions.get(prepared)!;
+  if (binding.dependency) assertInstalledDependencyAdmissionAuthority(driver, owner, binding.dependency, authority);
+}
+export function consumeInstalledRunDependency(prepared: AssembledInstalledRun, driver: SqliteDriver,
+  owner: StateOwnerContext, identity: AuthenticatedControlIdentity, connection: SqliteConnection, input: {
+    runId: string; admissionIntentDigest: string; sourceInspectionId: string }, at: string) {
+  readInstalledRunAdmission(prepared, driver, owner, identity, connection);
+  const binding = admissions.get(prepared)!;
+  if (binding.dependency) consumeInstalledDependencyAdmission(connection, driver, owner, binding.dependency, input, at);
 }
 
 /** Genuine-brand-first admission friend. Data objects, proxies and callbacks

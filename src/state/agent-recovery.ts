@@ -32,7 +32,7 @@ import type { DeliveryReadData } from './delivery-read-data.js';
 /** Data restriction only. Each permitted subject still requires its complete
  * subject-specific retained policy/control/Journal history below. */
 export function assertRunPolicyDecisionSubject(operation: RunSpec['operation'], subjectKind: unknown): void {
-  if (!['agent', 'delivery'].includes(operation) || subjectKind !== 'verifier_launch' &&
+  if (!['agent', 'delivery'].includes(operation) || subjectKind !== 'verifier_launch' && subjectKind !== 'dependency_install_scripts' &&
       !(operation === 'agent' && (subjectKind === 'tool_call' || subjectKind === 'child_merge')) &&
       !(operation === 'delivery' && subjectKind === 'delivery_plan'))
     throw new TypeError('policy decision has an unsupported subject for its Run operation');
@@ -151,7 +151,7 @@ async function validateAgentRecoveryData(input: AgentRecoveryInput, onPhase?: (p
       throw new TypeError('Run item differs from its durable owner row');
     }
     items.set(item.itemId, item);
-    if (spec.operation === 'delivery' && !['delivery_merge', 'delivery_merge_conflict', 'final_candidate', 'verifier_result',
+    if (spec.operation === 'delivery' && !['delivery_merge', 'delivery_merge_conflict', 'dependency_ready', 'dependency_failure', 'final_candidate', 'verifier_result',
       'verifier_stop', 'policy_decision', 'delivery_decision', 'publication_path_progress', 'publication_path_result', 'publication_late_observation'].includes(item.kind))
       throw new TypeError('delivery history acquired an agentic continuation item');
     if (item.kind === 'policy_decision') assertRunPolicyDecisionSubject(spec.operation, item.subjectKind);
@@ -254,6 +254,13 @@ async function validateAgentRecoveryData(input: AgentRecoveryInput, onPhase?: (p
   if (mergePolicy || mergeWaiting) {
     if (!input.driver) throw new TypeError('child merge permission history requires its actual retained SQLite source');
     await (await import('./child-merge-authorization.js')).validateChildMergeAuthorizationHistory(input.driver, artifacts, { run, items });
+  }
+  const scriptsPolicy = [...items.values()].some(item => item.kind === 'policy_decision' && item.subjectKind === 'dependency_install_scripts');
+  const scriptsWaiting = run.waitingReason === 'approval' && run.waitingOnRef &&
+    (await readCanonicalArtifact<{ subject?: { kind?: string } }>(artifacts, run.waitingOnRef)).subject?.kind === 'dependency_install_scripts';
+  if (scriptsPolicy || scriptsWaiting) {
+    if (!input.driver) throw new TypeError('dependency source consent requires its actual retained SQLite source');
+    await (await import('./dependency-script-approval.js')).validateDependencyScriptApprovalHistory(input.driver, artifacts, { run, items });
   }
   phase('candidate');
   const verifierProgressByCandidate = new Map<string, VerifierProgress>();

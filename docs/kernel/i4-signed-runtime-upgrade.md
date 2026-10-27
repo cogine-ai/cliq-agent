@@ -23,6 +23,15 @@ it does not claim the old publisher signed a schema entry which never existed.
 The target profile names the exact schema 8 profile and fixed compiled 7-to-8
 statements. Package-supplied SQL is never executed.
 
+The generic `schema` role also carries the model's tool-input JSON schemas.
+Only the reserved `kernel_schema` and `schema_conversion` entry IDs select
+database schema purposes. Both still require the exact role, non-executable
+flag, version, path, signed digest, byte count and complete fixed recipe.
+Tool-input schemas remain in their original verified package/consumer closure;
+they do not enter credential-history SQL provenance or authorize DDL. An
+original schema 7 model package may contain these ordinary JSON schemas, but
+must contain neither reserved database-schema entry.
+
 Both bundle signatures must verify under the same actual trusted Ed25519
 public key. The key ID is insufficient. The ArtifactCatalog retains an
 immutable snapshot of the Store's existing trusted release configuration for

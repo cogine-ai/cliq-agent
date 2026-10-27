@@ -344,6 +344,7 @@ export async function readChildAdmission(driver: SqliteDriver, artifacts: Artifa
       const result = Object.freeze({ ...chain[0]!, ancestors: Object.freeze(chain.slice(1)), rootOrigin });
       const { validateChildVerifierData } = await import('./child-verifier-admission.js');
       await validateChildVerifierData(artifacts, result);
+      if (result.spec.dependencyPolicyRef) await (await import('./dependency-inherited.js')).validateChildDependencyOrigin(driver, artifacts, result);
       for (const edge of chain) edge.assertUnchanged(driver);
       rootOrigin.assertUnchanged(driver);
       requireEqual(readRun(driver, childRunId), result.run, 'original child source read cut');

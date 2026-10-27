@@ -88,14 +88,43 @@ test('delivery inherited closure and provenance retain exact closed source ident
   assert.throws(() => decodeInheritedVerificationProvenance(sparse));
 });
 
-test('RunResult admits only exact optional delivery proof refs, never fields that imply source authority', () => {
+test('RunResult admits exact optional dependency and delivery refs without implying source authority', () => {
   const reference = canonicalSha256;
   const result = { schemaVersion: 1, runId: 'delivery', baseSourceRef: reference('base'), resultSourceRef: reference('result'),
     diffRef: reference('diff'), verificationClosureRef: reference('closure'), verificationReceiptRefs: [reference('receipt')],
     verificationProvenanceRef: reference('provenance'), deliveryTerminalProjectionEvidenceRef: reference('projection'),
     summaryRef: reference('summary'), createdAt: '2026-10-18T00:00:00.000Z' };
   assert.deepEqual(decodeRunResult(result), result);
+  const dependency = { ...result, dependencyPlanRef: reference('dependency-plan') };
+  assert.deepEqual(decodeRunResult(dependency), dependency);
   for (const changed of [{ ...result, deliveryTerminalProjectionEvidenceRef: 'not-a-ref' }, { ...result, verificationProvenanceRef: undefined },
-    { ...result, sourceRunId: 'source' }, { ...result, dependencyPlanRef: reference('unsupported-dependency') }])
+    { ...result, sourceRunId: 'source' }, { ...dependency, dependencyPlanRef: 'not-a-ref' }, { ...dependency, dependencyReadyItemId: 'invented-ready' }])
     assert.throws(() => decodeRunResult(changed));
+});
+
+test('inherited dependency verification is tied to the same delivery provenance and cannot assert a local Ready', () => {
+  const inherited: VerificationClosureV1 = { ...closure(), runId: 'delivery', verification: { kind: 'inherited_verified',
+    sourceRunId: 'source', sourceRunResultRef: canonicalSha256('source-result'),
+    sourceVerificationClosureRef: canonicalSha256('source-closure'), inheritedProvenanceRef: canonicalSha256('provenance') },
+    dependency: { kind: 'inherited_verification', dependencyPolicyRef: canonicalSha256('policy'), dependencyPlanRef: canonicalSha256('plan'),
+      sourceRunId: 'source', sourceRunResultRef: canonicalSha256('source-result'),
+      sourceVerificationClosureRef: canonicalSha256('source-closure'), inheritedProvenanceRef: canonicalSha256('provenance') } };
+  inherited.closureDigest = digestOmitting(inherited, 'closureDigest');
+  assert.deepEqual(decodeVerificationClosure(inherited), inherited);
+  const changes = [
+    { ...inherited.dependency, sourceRunId: 'other' }, { ...inherited.dependency, sourceRunResultRef: canonicalSha256('other-result') },
+    { ...inherited.dependency, inheritedProvenanceRef: canonicalSha256('other-provenance') },
+    { ...inherited.dependency, dependencyReadyItemId: 'invented-ready' }, { ...inherited.dependency, readyCheckpointId: 'invented-checkpoint' },
+  ];
+  for (const dependency of changes) {
+    const changed = { ...inherited, dependency }; changed.closureDigest = digestOmitting(changed, 'closureDigest');
+    assert.throws(() => decodeVerificationClosure(changed));
+  }
+  const local = { ...inherited, verification: closure().verification }; local.closureDigest = digestOmitting(local, 'closureDigest');
+  assert.throws(() => decodeVerificationClosure(local));
+  let accessed = 0;
+  const getter = Object.defineProperty({}, 'kind', { enumerable: true, get() { accessed++; return 'inherited_verification'; } });
+  const proxy = new Proxy({}, { get() { accessed++; throw 0; }, getPrototypeOf() { accessed++; throw 0; }, ownKeys() { accessed++; throw 0; } });
+  for (const dependency of [getter, proxy]) assert.throws(() => decodeVerificationClosure({ ...inherited, dependency }));
+  assert.equal(accessed, 0);
 });

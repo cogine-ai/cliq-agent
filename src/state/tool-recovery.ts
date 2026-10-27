@@ -31,6 +31,7 @@ export async function validateToolRecovery(input: {
   driver?: SqliteDriver;
 }): Promise<void> {
   const { artifacts, run, spec, items, journal } = input;
+  let dependencyHistory: Promise<unknown> | undefined;
   const decisions = new Map<string, ToolPolicyDecisionItem>();
   const requests = new Map<string, ToolRequestV1>();
   const calls = [...items.values()].filter((item) => item.kind === 'assistant_tool_batch');
@@ -98,8 +99,16 @@ export async function validateToolRecovery(input: {
   }
   // Worker-death reconciliation is validated against the full Run/launch/
   // generation/Journal cut by readRecoveryClosure, not as a tool approval.
-  if (run.waitingReason === 'approval' || (run.status === 'waiting' && run.nextStep === 'tool' &&
-      run.waitingReason !== 'input' && run.waitingReason !== 'reconciliation' && run.waitingReason !== 'child')) {
+  const dependencyWait = run.waitingReason === 'approval' && run.waitingOnRef &&
+    (await readCanonicalArtifact<{ subject?: { kind?: string } }>(artifacts, run.waitingOnRef)).subject?.kind === 'dependency_install_scripts';
+  if (dependencyWait) {
+    if (!input.driver || run.nextStep !== 'verify') throw new TypeError('dependency approval requires its original verify cut');
+    // The complete consent-item history is owned by ordinary recovery; this
+    // reader independently binds the actual current wait and source cut.
+    await (await import('./dependency-script-approval.js')).readDependencyScriptWaitingRun(input.driver, artifacts, run);
+  }
+  if (!dependencyWait && (run.waitingReason === 'approval' || (run.status === 'waiting' && run.nextStep === 'tool' &&
+      run.waitingReason !== 'input' && run.waitingReason !== 'reconciliation' && run.waitingReason !== 'child'))) {
     if (run.status !== 'waiting' || run.waitingReason !== 'approval' || !run.waitingOnRef || run.activeWorkerLaunchId || run.nextStep !== 'tool') {
       throw new TypeError('approval wait retains an execution worker or lacks its exact subject');
     }
@@ -250,6 +259,14 @@ export async function validateToolRecovery(input: {
       throw new TypeError('direct skill read permission is not registered without its complete local effect');
   }
   for (const prepared of journal.filter((entry) => entry.phase === 'prepared' && (entry.opKind === 'tool' || entry.opKind === 'mcp'))) {
+    if (prepared.target === 'builtin:dependency-acquire') {
+      if (!input.driver || !spec.dependencyPolicyRef) throw new TypeError('dependency requires its complete original history');
+      dependencyHistory ??= (await import('./dependency-history.js')).readDependencyHistory(input.driver, artifacts, { run, runSpec: spec,
+        items: [...items.values()].map((item, index) => ({ schemaVersion: 1, itemId: item.itemId, itemSeq: index + 1,
+          payloadRef: canonicalSha256(item), payloadDigest: canonicalSha256(item), createdAt: item.createdAt })), journal,
+        workspaceGenerations: input.workspaceGenerations });
+      await dependencyHistory; continue;
+    }
     const request = requests.get(prepared.requestRef);
     if (!request || !prepared.grantRef || !decisions.has(prepared.grantRef) || prepared.opId !== request.opId || prepared.target !== request.targetRef ||
         prepared.idempotencyKey !== request.idempotencyKey) throw new TypeError('tool Journal has no committed exact policy/grant owner');

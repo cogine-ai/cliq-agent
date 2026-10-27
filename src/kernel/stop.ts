@@ -50,7 +50,15 @@ export type CredentialRedemptionFailureEvidenceV1 = {
 );
 
 /** Implemented closed branches; other RFC runtime failures still need their owners. */
-export type RuntimeFailureEvidenceV1 = ModelResponseFailureEvidenceV1 | CredentialRedemptionFailureEvidenceV1;
+export type DependencyAcquisitionFailureEvidenceV1 = {
+  schemaVersion: 1; format: 'cliq-runtime-failure-evidence-v1'; runId: string; frontierRef: ArtifactRef; frontierDigest: string;
+  failingOpId: string; inspectorIdentityRef: ArtifactRef; inspectorIdentityDigest: string; observedAt: string; evidenceDigest: string;
+  failureKind: 'dependency_acquisition_failed'; dependencyPlanRef: ArtifactRef; dependencyFailureItemRef: ArtifactRef; failedJournalSeq: number;
+};
+export type DependencyAmbiguityFailureEvidenceV1 = Omit<DependencyAcquisitionFailureEvidenceV1, 'failureKind' | 'dependencyFailureItemRef' | 'failedJournalSeq'> & {
+  failureKind: 'dependency_result_unavailable'; ambiguityRef: ArtifactRef; unknownJournalSeq: number;
+};
+export type RuntimeFailureEvidenceV1 = ModelResponseFailureEvidenceV1 | CredentialRedemptionFailureEvidenceV1 | DependencyAcquisitionFailureEvidenceV1 | DependencyAmbiguityFailureEvidenceV1;
 
 /** RFC stop authority. Individual reducers accept only the branches whose evidence they can prove. */
 export type StopIntent = StopIdentity & (

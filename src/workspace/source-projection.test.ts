@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { promises as fs } from 'node:fs';
+import { fstatSync, promises as fs } from 'node:fs';
 import { chmod, link, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import path from 'node:path';
@@ -113,7 +113,9 @@ async function heldDescriptors(paths: string[]): Promise<string[]> {
   const directory = process.platform === 'linux' ? '/proc/self/fd' : '/dev/fd', observed: string[] = [];
   for (const fd of await readdir(directory)) {
     try {
-      const info = await stat(path.join(directory, fd), { bigint: true }), identity = `${info.dev}:${info.ino}`;
+      assert.match(fd, /^(0|[1-9][0-9]*)$/u);
+      const number = Number(fd); assert(Number.isSafeInteger(number));
+      const info = fstatSync(number, { bigint: true }), identity = `${info.dev}:${info.ino}`;
       if (identities.has(identity)) observed.push(`${fd}:${identity}`);
     } catch (error) {
       // The listing's own descriptor can close before its entry is inspected.
@@ -122,6 +124,24 @@ async function heldDescriptors(paths: string[]): Promise<string[]> {
   }
   return observed.sort();
 }
+
+test('descriptor observation sees actual directory and file identities through their complete close', async t => {
+  const { workspace } = await fixture(t), filename = path.join(workspace, 'observed-file');
+  await writeFile(filename, 'descriptor observation data');
+  const paths = [workspace, filename], before = await heldDescriptors(paths);
+  const handles: Awaited<ReturnType<typeof fs.open>>[] = [];
+  try {
+    handles.push(await fs.open(workspace, 'r')); handles.push(await fs.open(filename, 'r'));
+    const expected = await Promise.all(handles.map(async handle => {
+      const info = await handle.stat({ bigint: true }); return `${handle.fd}:${info.dev}:${info.ino}`;
+    }));
+    assert.deepEqual(await heldDescriptors(paths), [...before, ...expected].sort());
+  } finally {
+    const closed = await Promise.allSettled(handles.map(handle => handle.close()));
+    assert(closed.every(result => result.status === 'fulfilled'));
+  }
+  assert.deepEqual(await heldDescriptors(paths), before);
+});
 
 test('initial non-Git entries and projection graph share one real four-object durability group', async t => {
   const { workspace, state, input } = await fixture(t);
@@ -179,9 +199,17 @@ for (const fault of ['cancel', 'namespace', 'retirement', 'drift'] as const)
     try {
       await Promise.race([entered, work.then(() => { throw new Error('the actual group sync cut was bypassed'); })]);
       assert.equal(completed, false);
-      // Native metadata cursors share the held root descriptor; they need not
-      // allocate one extra OS FD per entry. Its original FD identities remain.
-      assert.deepEqual(await heldDescriptors([workspace, filename]), before);
+      // The classification and byte-capture inventories each own a directory
+      // cursor with an independent readdir offset. Both remain held through
+      // the group, without replacing any original descriptor or retaining a
+      // file reader. Their real retirement must still restore the exact set.
+      const during = await heldDescriptors([workspace, filename]);
+      assert.deepEqual(during.filter(descriptor => before.includes(descriptor)), before);
+      const cursors = during.filter(descriptor => !before.includes(descriptor));
+      const root = await stat(workspace, { bigint: true });
+      assert.equal(cursors.length, 2);
+      assert(cursors.every(descriptor => descriptor.endsWith(`:${root.dev}:${root.ino}`)));
+      input.workspaceRoot.assertHeld(); input.controlledHome.assertHeld();
       if (fault === 'cancel') owner.abort(reason);
       if (fault === 'drift') await writeFile(filename, 'external metadata changed while the group was in flight');
       release();

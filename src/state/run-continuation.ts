@@ -22,9 +22,9 @@ export async function loadRunContinuation(driver: SqliteDriver, artifacts: Artif
   const stop = loadAgentStop(driver, artifacts, owner, stopAuthority, reobserve, installedRuntime);
   const verifier = await loadVerifierContinuation(driver, artifacts, owner, authority);
   const { cancelRun, expireRun, commitTerminalStop, stopForVerification, stopForVerifierPolicyDenial,
-    stopForModelFailure, stopForResourceFailure, stopFromParent } = stop;
+    stopForModelFailure, stopForDependencyFailure, stopForDependencyAmbiguity, stopForDependencyScriptDenial, stopForResourceFailure, stopFromParent } = stop;
   return {
-    shared: Object.freeze({ cancelRun, expireRun, commitTerminalStop, stopForVerification, stopForVerifierPolicyDenial, stopForResourceFailure,
+    shared: Object.freeze({ cancelRun, expireRun, commitTerminalStop, stopForVerification, stopForVerifierPolicyDenial, stopForDependencyFailure, stopForDependencyAmbiguity, stopForDependencyScriptDenial, stopForResourceFailure,
       ...verifier,
       beginVerifierCompletion: stateOperation('RECOVERY_REQUIRED', (input: {
         expectedRunRevision: number; opId: string; attempt: number; result: NativeVerifierResult

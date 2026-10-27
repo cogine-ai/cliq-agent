@@ -16,7 +16,7 @@ import { canonicalJsonBytes } from '../kernel/canonical.js';
 test('submission, invocation, approval and continuation consumers dispatch retained CAS reads through the same bounded joined catalog', async () => {
   const expected = new Map([
     ['store.ts', ['this.artifacts:initial.assembly.provider.credentialGrantRefs']],
-    ['reducers/stop.ts', ['artifacts:selected.items', 'artifacts:selected.items']],
+    ['reducers/stop.ts', ['artifacts:cause.plans', 'artifacts:selected.items', 'artifacts:selected.items']],
     ['reducers/agent.ts', ['artifacts:rows']],
     ['reducers/input.ts', ['reads:closure.items']],
     ['reducers/tool.ts', ['openingReads:contracts.filter((entry) => entry.outputSchemaRef !== undefined)']],

@@ -5,8 +5,14 @@
   "private": false,
   "type": "module",
   "exports": {
-    ".": { "types": "./dist/sdk/index.d.ts", "import": "./dist/sdk/index.js" },
-    "./control/v1": { "types": "./dist/control/v1.d.ts", "import": "./dist/control/v1.js" },
+    ".": {
+      "types": "./dist/sdk/index.d.ts",
+      "import": "./dist/sdk/index.js"
+    },
+    "./control/v1": {
+      "types": "./dist/control/v1.d.ts",
+      "import": "./dist/control/v1.js"
+    },
     "./package.json": "./package.json"
   },
   "license": "MIT",
@@ -72,11 +78,13 @@
     "ajv": "8.20.0",
     "ink": "7.0.2",
     "ink-text-input": "6.0.0",
-    "react": "19.2.6"
+    "react": "19.2.6",
+    "semver": "7.6.3"
   },
   "devDependencies": {
     "@types/node": "^24.5.2",
     "@types/react": "19.2.14",
+    "@types/semver": "7.5.8",
     "esbuild": "0.28.2",
     "ink-testing-library": "4.0.0",
     "postject": "1.0.0-alpha.6",

@@ -1,3 +1,4 @@
+import type { RetainedControlRootContext } from './control-channel.js';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { normalizeRunSubmitRequest as decodeRunSubmitRequest, InvalidRunSubmitRequestError } from '../kernel/control-submit.js';
 import type { NormalizedRunSubmitRequest } from '../kernel/control-submit.js';
@@ -31,6 +32,10 @@ import { assertSourceIncludeConsentConsumed, prepareSourceIncludeConsent, source
 import { readSourceIncludeConsentSnapshots } from './source-include-consent-data.js';
 import { readSourceProjectionData } from './source-projection-data.js';
 import { assertSourceIncludeExpectedDigest } from './source-include-constraints.js';
+import { effectiveSourceExcludes } from '../kernel/dependency-source.js';
+import { assertInstalledDependencyRequest } from './dependency-profile.js';
+import { readDependencySignedAssets } from './dependency-execution-data.js';
+import { loadInstalledDependencyBroker, loadInstalledWorkerNative } from './installed-runtime.js';
 
 function invalid(message: string): never { throw new KernelStorageError('INVALID_REQUEST', message); }
 function object(value: unknown, required: readonly string[], optional: readonly string[] = []): Record<string, unknown> {
@@ -91,8 +96,8 @@ export async function resolveDeliverySourceCapture(driver: SqliteDriver, artifac
   const admitted = decodeSourceManifest(await readCanonicalArtifact(artifacts, source.spec.baseWorkspaceManifestRef));
   const classification = await readSourceProjectionData(artifacts, admitted, projection, profile.resources, signal);
   const sourceIncludes = deliverySourceIncludes(projection, classification.includeAuthorizations, request.sourceReadGrantIds ?? []);
-  if (source.spec.dependencyPolicyRef !== undefined || request.verifierExecutionGrantIds.length)
-    throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'delivery dependency/template admission is not implemented');
+  if (request.verifierExecutionGrantIds.length)
+    throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'delivery verifier template admission is not implemented');
   return immutableSnapshot({ method: 'run.apply', requestId: request.requestId, requestDigest: request.requestDigest,
     admissionKey: request.admissionKey, budgets: request.budgets, sessionId: session.id, expectedContextRevision: session.contextRevision,
     workspacePath: workspace.canonicalRootPath, sourceIncludes: [...sourceIncludes], sourceExcludes: projection.explicitExcludes,
@@ -200,7 +205,8 @@ deliverySource?: VerifiedDeliverySource): Promise<VerifiedSourceInspectionTarget
   const reads = context.signal ? artifacts.withReadSignal(context.signal) : artifacts;
   const request: SourceCaptureSelection = wire.method === 'run.apply'
     ? await resolveDeliverySourceCapture(driver, reads, owner, wire, identity.principalId,
-      assertVerifiedDeliverySource(driver, owner, deliverySource), context.signal) : wire;
+      assertVerifiedDeliverySource(driver, owner, deliverySource), context.signal)
+    : immutableSnapshot({ ...wire, sourceExcludes: [...effectiveSourceExcludes(wire)] });
   const admissionIntentDigest = sourceInspectionIntentDigest(identity.principalId, wire);
   // Any retained attempt/Run is handled by the caller's replay path. Never
   // reopen/capture a mutable source to reconstruct a historical result.
@@ -220,7 +226,15 @@ deliverySource?: VerifiedDeliverySource): Promise<VerifiedSourceInspectionTarget
   if (request.sourceIncludes.some(include => include.readGrantId !== undefined && request.ignoreReadGrantIds?.includes(include.readGrantId)))
     throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');
   if (wire.method === 'run.submit') {
-    if (wire.dependency.mode !== 'none') invalid('dependency admission is not yet implemented');
+    assertInstalledDependencyRequest(wire);
+    if (wire.dependency.mode === 'locked') {
+      if (!context.selectedRuntime) invalid('locked dependencies require the genuine installed fixed npm recipe');
+      const native = await loadInstalledWorkerNative(context.selectedRuntime, context.signal);
+      if (native.dependencyInterfaceVersion !== 1) invalid('installed native worker lacks its fixed dependency capability');
+      await loadInstalledDependencyBroker(context.selectedRuntime);
+      await readDependencySignedAssets(reads, { bundle: bootstrap.bundle, releaseKeys: bootstrap.releaseKeys,
+        resources: wire.sandboxResources, allowScripts: wire.dependency.allowInstallScripts }, context.signal);
+    }
     assertSupportedVerifierRequests(wire.verifiers, wire.policyMode);
     if (wire.verifiers.length) await readVerifierRequestIdentities(driver, reads, owner, bootstrap, identity.principalId, wire.verifiers, undefined, context.signal);
     if (wire.registeredMcpServerIds.length) invalid('MCP admission authority is not yet implemented');
@@ -327,6 +341,7 @@ export async function readSourceInspectionTargetData(artifacts: ArtifactCatalog,
         original.originalRequestDigest !== targetData.originalRequestDigest || original.request.method !== attempt.method ||
         sourceInspectionIntentDigest(attempt.principalId, original.request) !== attempt.admissionIntentDigest)
       invalid('retained target original request or derived index differs');
+    if (original.request.method === 'run.submit') effectiveSourceExcludes(original.request);
     if (git) {
       text(targetData.inspectionGrantId); assertArtifactRef(text(targetData.inspectionReceiptRef, 64)); assertArtifactRef(text(targetData.inspectionReceiptDigest, 64));
       const receipt = decodeAuthorizationConsumptionReceipt(await readCanonicalArtifact(artifacts, targetData.inspectionReceiptRef as string));
@@ -369,7 +384,7 @@ export async function readSourceInspectionTargetData(artifacts: ArtifactCatalog,
  * This returns no native/read capability and cannot authorize fresh capture. */
 export async function readRetainedSourceInspectionTarget(artifacts: ArtifactCatalog, attempt: SourceInspectionAttemptV1,
   originalIndex: { originalRequestId: string; originalRequestDigest: string }, bootstrap: SourceInspectionBootstrap,
-  retained?: { driver: SqliteDriver; owner?: StateOwnerContext; signal?: AbortSignal }) {
+  retained?: { driver: SqliteDriver; owner?: RetainedControlRootContext; signal?: AbortSignal }) {
   try {
     const { target: targetData, original } = await readSourceInspectionTargetData(artifacts, attempt, originalIndex);
     const workspace = decodeWorkspaceIdentity(await readCanonicalArtifact(artifacts, targetData.workspaceIdentityRef));
@@ -469,7 +484,7 @@ export async function readRetainedSourceInspectionTarget(artifacts: ArtifactCata
           !Number.isSafeInteger(targetData.expectedContextRevision) || (targetData.expectedContextRevision as number) < 1 ||
           (targetData.expectedContextRevision as number) > source.session.contextRevision ||
           source.spec.sandboxProfileRef !== targetData.sandboxProfileRef || source.assembly.runtime.runtimeBundleRef !== targetData.runtimeBundleRef ||
-          projection.frozenIgnoreRulesDigest !== rules.rulesDigest || source.spec.dependencyPolicyRef !== undefined ||
+          projection.frozenIgnoreRulesDigest !== rules.rulesDigest ||
           original.verifierExecutionGrantIds.length)
         invalid('retained delivery capture selection differs from its exact original source');
     }

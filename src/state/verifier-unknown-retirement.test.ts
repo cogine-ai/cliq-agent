@@ -5,6 +5,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 import ts from 'typescript';
 import { hasOnlySettledInstalledModelUnknowns } from './worker-recovery.js';
+import { hasOnlySettledDependencyUnknowns } from './dependency-unknown-retirement.js';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting, identityHash } from '../kernel/identity.js';
 import type { FrozenIgnoreRulesV1, InvocationJournalEntry, RunSpec, SourceManifest, SourceProjectionSpec,
@@ -31,10 +32,31 @@ async function quarantineRefused(verifierUnknown: boolean, stopped = true): Prom
     ts.forEachChild(node, visit);
   };
   visit(file); assert.ok(condition, 'actual quarantine refusal condition');
-  const expression = ts.transpile(`(${condition.getText(file)})`, { target: ts.ScriptTarget.ES2022 });
+  // Replace only the fixed module lookup with its real pure-data predicate.
+  // The complete original boolean expression, including short circuiting and
+  // all other refusals, is still executed. No recovery authority is created.
+  let moduleLookups = 0;
+  const transformed = ts.transform(condition, [context => root => {
+    const replace = (node: ts.Node): ts.VisitResult<ts.Node> => {
+      if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+        assert.equal(node.arguments.length, 1);
+        assert(ts.isStringLiteral(node.arguments[0]!));
+        assert.equal(node.arguments[0].text, '../dependency-unknown-retirement.js');
+        moduleLookups++; return ts.factory.createIdentifier('dependencyUnknownModule');
+      }
+      return ts.visitEachChild(node, replace, context);
+    };
+    return ts.visitNode(root, replace) as ts.Expression;
+  }]);
+  let expression: string;
+  try {
+    assert.equal(moduleLookups, 1);
+    expression = ts.createPrinter().printNode(ts.EmitHint.Expression, transformed.transformed[0]!, file);
+  } finally { transformed.dispose(); }
+  const body = ts.transpile(`return (async () => (${expression}))();`, { target: ts.ScriptTarget.ES2022 });
   return new Function('hasOnlySettledInstalledModelUnknowns', 'hasOnlySettledVerifierUnknowns',
-    'assembly', 'cut', 'privateRollback', 'undispatched', 'publication', 'brokerQuiescence', 'run',
-    `return ${expression}`)(() => false, () => verifierUnknown, {}, { journal: [] }, false, false, undefined, true,
+    'dependencyUnknownModule', 'assembly', 'cut', 'privateRollback', 'undispatched', 'publication', 'brokerQuiescence', 'run',
+    body)(() => false, () => verifierUnknown, { hasOnlySettledDependencyUnknowns }, {}, { journal: [] }, false, false, undefined, true,
       { stopIntentRef: stopped ? 'stop' : undefined });
 }
 

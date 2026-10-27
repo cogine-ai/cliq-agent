@@ -1,7 +1,9 @@
 // Original root admission data shared by child/history readers. This never
 // acquires an owner, replays a control mutation or grants current execution.
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
-import type { VerifierRequest } from '../kernel/control-submit.js';
+import type { DependencyRequest, VerifierRequest } from '../kernel/control-submit.js';
+import { decodeDependencyPolicy, decodeDependencyInstallScriptsTemplate, DEPENDENCY_LIMITS, type DependencyPolicy,
+  type DependencyInstallScriptsAuthorizationTemplateV1 } from '../kernel/dependency.js';
 import { mergeBudgets } from '../kernel/control-submit.js';
 import { addCanonicalDuration, digestOmitting, identityHash } from '../kernel/identity.js';
 import type { Run, RunSpec, Session } from '../kernel/types.js';
@@ -50,17 +52,17 @@ export async function readRootRunAdmissionOrigin(driver: SqliteDriver, artifacts
   const spec = decodeRunSpec(await readCanonicalArtifact(reads, run.specRef));
   if (spec.operation !== 'agent' || !exactKeys(spec, ['schemaVersion', 'operation', 'objectiveRef', 'admittedContextRef',
     'baseWorkspaceManifestRef', 'sourceProjectionRef', 'assemblyRef', 'policyRef', 'sandboxProfileRef', 'verifierSpecRef',
-    'credentialGrantRefs', 'budgets', ...(spec.unverifiedConsentRef === undefined ? [] : ['unverifiedConsentRef'])])) invalid();
+    'credentialGrantRefs', 'budgets', ...(spec.dependencyPolicyRef === undefined ? [] : ['dependencyPolicyRef']), ...(spec.unverifiedConsentRef === undefined ? [] : ['unverifiedConsentRef'])])) invalid();
   const requestCore = await readCanonicalArtifact<Record<string, unknown>>(reads, control.requestDigest);
   let verifierRequests: VerifierRequest[], admissionIntentDigest: string, objectiveText: unknown, expectedContextRevision: unknown,
-    allowUnverified: unknown, workspacePath: unknown;
+    allowUnverified: unknown, workspacePath: unknown, dependencyRequest: DependencyRequest | undefined;
   if (Object.hasOwn(requestCore, 'verifiers')) {
     const normalized = normalizeRunSubmitRequest({ ...requestCore, requestDigest: control.requestDigest }), request = normalized.request;
     if (request.requestId !== admission.admission_request_id || request.admissionKey !== admission.admission_key || request.sessionId !== run.sessionId ||
         !same(request.budgets, spec.budgets)) invalid();
     verifierRequests = request.verifiers; admissionIntentDigest = runSubmitIntentDigest(principalId, request);
     objectiveText = request.objective; expectedContextRevision = request.expectedContextRevision;
-    allowUnverified = request.allowUnverified; workspacePath = request.workspacePath;
+    allowUnverified = request.allowUnverified; workspacePath = request.workspacePath; dependencyRequest = request.dependency;
   } else {
     if (!exactKeys(requestCore, ['protocolVersion', 'requestId', 'method', 'admissionKey', 'sessionId', 'expectedContextRevision', 'workspacePath',
       'objective', 'assemblyRef', 'policyRef', 'sandboxProfileRef', 'verifierSpecRef', 'credentialGrantRefs', 'budgets', 'allowUnverified',
@@ -138,10 +140,41 @@ export async function readRootRunAdmissionOrigin(driver: SqliteDriver, artifacts
       initialContext.runId !== run.id || initialContext.throughItemSeq !== 0 || initialContext.assemblyRef !== spec.assemblyRef ||
       initialContext.admittedContextRef !== spec.admittedContextRef || initialContext.segments.length ||
       !Object.hasOwn(requestCore, 'verifiers') && requestCore.frozenIgnoreRulesRef !== source.frozenIgnoreRulesRef) invalid();
+  let dependencyPolicy: DependencyPolicy | undefined, dependencyTemplate: DependencyInstallScriptsAuthorizationTemplateV1 | undefined;
   const authorizationReceiptRefs: string[] = [];
+  if (spec.dependencyPolicyRef !== undefined) {
+    if (dependencyRequest?.mode !== 'locked') invalid();
+    dependencyPolicy = decodeDependencyPolicy(await readCanonicalArtifact(reads, spec.dependencyPolicyRef));
+    if (dependencyPolicy.mode !== 'locked_node' || !same(dependencyPolicy.allowedAdapters, ['npm-ci-v1']) ||
+        dependencyPolicy.credentialGrantRefs.length || dependencyRequest.credentialGrantIds.length ||
+        dependencyPolicy.maxPackages !== (dependencyRequest.maxPackages ?? DEPENDENCY_LIMITS.defaultPackages) ||
+        dependencyPolicy.maxDownloadBytes !== (dependencyRequest.maxDownloadBytes ?? DEPENDENCY_LIMITS.defaultDownloadBytes) ||
+        dependencyRequest.allowInstallScripts !== (dependencyPolicy.installScriptsPolicy === 'exact_lockfile_grant')) invalid();
+    if (dependencyPolicy.installScriptsPolicy === 'exact_lockfile_grant') {
+      dependencyTemplate = decodeDependencyInstallScriptsTemplate(await readCanonicalArtifact(reads, dependencyPolicy.installScriptsGrantRef!));
+      if (dependencyTemplate.provenance.kind !== 'run_admission' || dependencyTemplate.runId !== run.id ||
+          dependencyTemplate.ownerPrincipalId !== principalId || dependencyTemplate.workspaceIdentityDigest !== workspace.identityDigest ||
+          dependencyTemplate.provenance.sourceAuthorizationGrantId !== dependencyRequest.installScriptsGrantId ||
+          dependencyTemplate.expiresAt !== run.deadlineAt || dependencyTemplate.maxCandidateGenerations !== spec.budgets.repairAttempts + 1 ||
+          dependencyTemplate.scriptConditions.source.sourceManifestRef !== spec.baseWorkspaceManifestRef ||
+          dependencyTemplate.scriptConditions.source.sourceManifestDigest !== source.manifestDigest ||
+          dependencyTemplate.scriptConditions.source.workspaceEntriesRef !== state.entriesRef ||
+          dependencyTemplate.scriptConditions.source.workspaceTreeDigest !== source.treeDigest) invalid();
+    } else if (dependencyRequest.installScriptsGrantId !== undefined) invalid();
+  } else if (dependencyRequest?.mode === 'locked') invalid();
   for (const request of verifierRequests) {
     const grant = readAuthorizationGrant(driver, request.identityReadGrantId);
     if (!grant || grant.ownerPrincipalId !== principalId || grant.state !== 'consumed') invalid();
+    const receipt = decodeAuthorizationConsumptionReceipt(await readCanonicalArtifact(reads, grant.consumptionReceiptRef));
+    if (receipt.grantId !== grant.grantId || receipt.ownerPrincipalId !== principalId || receipt.targetDigest !== grant.targetDigest ||
+        receipt.consumedAt !== run.createdAt || !same(receipt.consumer, { kind: 'run_admission', runId, admissionIntentDigest })) invalid();
+    authorizationReceiptRefs.push(grant.consumptionReceiptRef);
+  }
+  if (dependencyTemplate) {
+    if (dependencyTemplate.provenance.kind !== 'run_admission') invalid();
+    const grant = readAuthorizationGrant(driver, dependencyTemplate.provenance.sourceAuthorizationGrantId);
+    if (!grant || grant.ownerPrincipalId !== principalId || grant.state !== 'consumed' || grant.target.kind !== 'dependency_install_scripts' ||
+        grant.consumptionReceiptRef !== dependencyTemplate.provenance.sourceConsumptionReceiptRef) invalid();
     const receipt = decodeAuthorizationConsumptionReceipt(await readCanonicalArtifact(reads, grant.consumptionReceiptRef));
     if (receipt.grantId !== grant.grantId || receipt.ownerPrincipalId !== principalId || receipt.targetDigest !== grant.targetDigest ||
         receipt.consumedAt !== run.createdAt || !same(receipt.consumer, { kind: 'run_admission', runId, admissionIntentDigest })) invalid();
@@ -152,7 +185,8 @@ export async function readRootRunAdmissionOrigin(driver: SqliteDriver, artifacts
     sourceProjectionRef: spec.sourceProjectionRef, frozenIgnoreRulesRef: source.frozenIgnoreRulesRef, baseWorkspaceManifestRef: spec.baseWorkspaceManifestRef,
     workspaceStateRef: initialCheckpoint.workspaceStateRef, assemblyRef: spec.assemblyRef, policyRef: spec.policyRef, sandboxProfileRef: spec.sandboxProfileRef,
     verifierSpecRef: spec.verifierSpecRef, unverifiedConsentRef: spec.unverifiedConsentRef ?? null, credentialGrantRefs: spec.credentialGrantRefs,
-    ...(verifierRequests.length ? { authorizationReceiptRefs } : {}) });
+    ...(spec.dependencyPolicyRef === undefined ? {} : { dependencyPolicyRef: spec.dependencyPolicyRef }),
+    ...(authorizationReceiptRefs.length ? { authorizationReceiptRefs } : {}) });
   if (admission.admitted_request_digest !== admittedDigest) invalid();
   function assertUnchanged(connection: SqliteConnection | SqliteDriver) {
     if (!same(select(connection), admission) || !same(immutableRun(readRun(connection, runId)), immutableRun(run)) ||
@@ -164,6 +198,6 @@ export async function readRootRunAdmissionOrigin(driver: SqliteDriver, artifacts
   reads.assertReadActive(); assertUnchanged(driver);
   return Object.freeze({ ...immutableSnapshot({ run, spec, admission, principalId, control, requestCore, verifierRequests,
     admissionIntentDigest, allowUnverified, objective, admittedContext, verifierSpec, initialCheckpoint, initialRun, initialResponse, channel,
-    authorizationReceiptRefs }), assertUnchanged });
+    authorizationReceiptRefs, ...(dependencyPolicy ? { dependencyPolicy } : {}), ...(dependencyTemplate ? { dependencyTemplate } : {}) }), assertUnchanged });
 }
 export type RootRunAdmissionOrigin = Awaited<ReturnType<typeof readRootRunAdmissionOrigin>>;

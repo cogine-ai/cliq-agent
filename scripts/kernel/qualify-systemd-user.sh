@@ -19,6 +19,7 @@ probe_credential_driver_mode=--campaign
 probe_finalizer_shutdown=0
 probe_volume_mode=loop
 probe_upgrade_source=
+probe_locked_node_archive=
 if [[ ${1:-} = --delay-volume ]]; then probe_volume_mode=delay-50ms; shift; fi
 case ${1:-} in
   --installed) probe_campaign_kind=installed; shift ;;
@@ -51,9 +52,16 @@ case ${1:-} in
   --run-shutdown-pending-model-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--shutdown-pending-model-campaign; shift ;;
   --run-shutdown-startup-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--shutdown-startup-campaign; shift ;;
 esac
-readonly probe_campaign_kind probe_run_driver_mode probe_credential_driver_mode probe_finalizer_shutdown probe_volume_mode probe_upgrade_source
-# After the optional fixed volume and one campaign, only positional paths are
-# allowed. Reject mixed/duplicate modes before even inspecting host identities.
+if [[ ${1:-} = --locked-node ]]; then
+  [[ "$probe_run_driver_mode" = --verifier-campaign && $# -ge 2 && "$2" = /* && -f "$2" && ! -L "$2" ]] || {
+    printf 'locked Node qualification requires its fixed verifier campaign and official archive\n' >&2; exit 2;
+  }
+  probe_locked_node_archive=$2; shift 2
+fi
+readonly probe_campaign_kind probe_run_driver_mode probe_credential_driver_mode probe_finalizer_shutdown probe_volume_mode probe_upgrade_source probe_locked_node_archive
+# After the optional fixed volume, one campaign and its bounded official npm
+# source, only positional paths are allowed. Reject mixed/duplicate modes
+# before even inspecting host identities.
 for probe_argument in "$@"; do
   [[ "$probe_argument" != --* ]] || {
     printf 'campaign flags must be unique and precede the Node path\n' >&2; exit 2;
@@ -76,6 +84,7 @@ done
 }
 if [[ $(id -u) != 0 || $# -lt 1 || $# -gt 2 ]]; then
   printf 'usage: sudo bash %s [--delay-volume] [--installed|--installed-retirement-refusal|--secrets|--credentials|--credentials-model-input|--credential-finalizer-shutdown|--runtime-upgrade-journey ORIGINAL_SOURCE_ROOT|--run-journey|--run-final-source-limits-journey|--run-verifier-journey|--run-delivery-journey|--run-delivery-delay-journey|--run-delivery-stop-journey|--run-delivery-late-journey|--run-failure-journey|--run-retry-journey|--run-authority-failure-journey|--run-storage-failure-journey|--run-request-resource-journey|--run-shutdown-admission-journey|--run-shutdown-session-journey|--run-shutdown-preparation-journey|--run-shutdown-received-tool-journey|--run-shutdown-pending-model-journey|--run-shutdown-startup-journey] ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' "$0" >&2
+  printf 'verifier source option: --run-verifier-journey --locked-node OFFICIAL_NPM_ARCHIVE ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' >&2
   exit 2
 fi
 readonly probe_node=$1
@@ -546,7 +555,18 @@ probe_retire_run_volume() {
   if [[ "$disposition" = mounted ]]; then
     if ! probe_ledger_valid; then probe_fail_cleanup 'ownership ledger changed before bounded volume unmount'; return 1; fi
     if ! probe_run_volume retire-cut >/dev/null; then probe_fail_cleanup 'bounded volume identity changed immediately before unmount'; return 1; fi
-    if ! umount -- "$probe_home"; then probe_fail_cleanup 'bounded fixture volume did not unmount; retaining account and fixture'; return 1; fi
+    if ! umount -- "$probe_home"; then
+      # Read-only holder diagnostics for this still-mounted, identity-checked
+      # owned volume. Never kill holders, force/lazy-unmount or adopt resources.
+      # fuser emits process IDs/access classes only; do not request command lines.
+      if [[ -x /usr/bin/fuser ]]; then
+        printf 'cleanup: read-only busy-volume holder diagnostic\n' >&2
+        /usr/bin/timeout --kill-after=1s 1s /usr/bin/fuser -m -M -- "$probe_home" >&2 || true
+      else
+        printf 'cleanup: read-only busy-volume holder diagnostic unavailable\n' >&2
+      fi
+      probe_fail_cleanup 'bounded fixture volume did not unmount; retaining account and fixture'; return 1
+    fi
   elif [[ "$disposition" != unmounted ]]; then probe_fail_cleanup 'unknown bounded volume retirement cut'; return 1
   fi
   if [[ "$probe_volume_mode" = delay-50ms ]]; then
@@ -992,6 +1012,8 @@ elif [[ "$probe_campaign_kind" = run-journey ]]; then
   # No arbitrary driver, production pause flag or manager-policy override.
   if [[ "$probe_run_driver_mode" = --runtime-upgrade-campaign ]]; then
     "$probe_node" --import "$probe_installed_loader" "$probe_run_driver" "$probe_run_driver_mode" "$probe_ledger" "$probe_upgrade_source"
+  elif [[ -n "$probe_locked_node_archive" ]]; then
+    "$probe_node" --import "$probe_installed_loader" "$probe_run_driver" "$probe_run_driver_mode" "$probe_ledger" --locked-node "$probe_locked_node_archive"
   else
     "$probe_node" --import "$probe_installed_loader" "$probe_run_driver" "$probe_run_driver_mode" "$probe_ledger"
   fi

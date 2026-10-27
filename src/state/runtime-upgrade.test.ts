@@ -6,6 +6,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import { testFixture } from '../model/testing/fixtures.js';
+import { builtinInputContracts } from '../tools/builtin-inputs.js';
 import type { RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { ArtifactCatalog } from './artifacts.js';
 import { ContentAddressedStore } from './cas.js';
@@ -76,7 +77,11 @@ test('signed conversion uses the original actual public key, never an equal labe
     const material = qualificationPublisherMaterial(createInstalledQualificationPublisher());
     const foreign = qualificationPublisherMaterial(createInstalledQualificationPublisher());
     const sourceCore = structuredClone(original.bundle);
-    sourceCore.entries = sourceCore.entries.filter(entry => entry.role !== 'schema'); sourceCore.stateSchemaRange = { min: 1, max: 7 };
+    sourceCore.entries = sourceCore.entries.filter(entry => !['kernel_schema', 'schema_conversion'].includes(entry.entryId));
+    const inputSchema = builtinInputContracts.edit.inputSchema;
+    sourceCore.entries.push({ entryId: 'installed-edit-input-schema', role: 'schema', version: '1', relativePath: 'schemas/edit.input.json',
+      executable: false, digest: canonicalSha256(inputSchema), byteCount: canonicalJsonBytes(inputSchema).length });
+    sourceCore.stateSchemaRange = { min: 1, max: 7 };
     const source = resign(sourceCore, material), profile = signedKernelSchemaProfile(), conversion = schemaConversionProfile(source);
     const targetCore = structuredClone(source); targetCore.stateSchemaRange = { min: 8, max: 8 };
     targetCore.entries.push({ entryId: 'kernel_schema', role: 'schema', version: '8', relativePath: 'schema/kernel-v8.json', executable: false,
@@ -85,8 +90,20 @@ test('signed conversion uses the original actual public key, never an equal labe
       digest: canonicalSha256(conversion), byteCount: canonicalJsonBytes(conversion).length });
     const target = resign(targetCore, material), catalog = new ArtifactCatalog(new ContentAddressedStore(path.join(root, 'cas')), undefined, material.releaseKeys);
     await catalog.publishCanonical(profile, 'cliq-signed-kernel-schema-v1'); await catalog.publishCanonical(conversion, 'cliq-signed-schema-conversion-v1');
+    await catalog.publishCanonical(inputSchema, 'cliq-tool-input-schema-v1');
     await catalog.publishCanonical(foreign.releaseKeys, 'untrusted-key-in-CAS');
     assert.equal((await readSignedSchemaConversion(catalog, source, target, catalog.releaseTrustRoots())).profileDigest, conversion.profileDigest);
+    for (const entryId of ['kernel_schema', 'schema_conversion']) {
+      for (const change of [{ role: 'tool_adapter' }, { executable: true }, { version: 'other' },
+        { relativePath: 'schema/unrelated.json' }, { digest: '0'.repeat(64) }, { byteCount: 1 }]) {
+        const altered = structuredClone(targetCore);
+        Object.assign(altered.entries.find(entry => entry.entryId === entryId)!, change);
+        await assert.rejects(readSignedSchemaConversion(catalog, source, resign(altered, material), catalog.releaseTrustRoots()));
+      }
+      const alteredSource = structuredClone(source);
+      alteredSource.entries.push(structuredClone(target.entries.find(entry => entry.entryId === entryId)!));
+      assert.throws(() => schemaConversionProfile(resign(alteredSource, material)), { code: 'ARTIFACT_MISMATCH' });
+    }
     const replaced = resign(targetCore, foreign); // same keyId; a genuinely different Ed25519 public key.
     await assert.rejects(readSignedSchemaConversion(catalog, source, replaced, catalog.releaseTrustRoots()), /signature/);
     await assert.rejects(readSignedSchemaConversion(catalog, source, target, foreign.releaseKeys), /signature/);

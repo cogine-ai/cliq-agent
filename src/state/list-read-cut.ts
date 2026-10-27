@@ -407,8 +407,11 @@ function sessionListSource(driver: SqliteDriver, artifacts: ArtifactCatalog, own
       const count = connection.prepare('SELECT count(*) AS n FROM (SELECT 1 FROM sessions WHERE principal_id=?' + filter + ' LIMIT 100001)')
         .get<{ n: bigint }>(...values)!.n;
       if (count > BigInt(MAX_ROWS)) throw new ListCutCapacityError();
-      connection.prepare('INSERT INTO temp.cliq_list_source(ordinal,' + sourceColumns + ',overlong) ' +
-        'SELECT row_number() OVER(ORDER BY created_at COLLATE BINARY,id COLLATE BINARY),' + sourceColumns + ',overlong FROM (' +
+      // The fresh private INTEGER PRIMARY KEY assigns contiguous ordinals in
+      // this exact order. Avoid a second full-row window pass over 64 MiB;
+      // all bounded fields, the complete capture and final equality remain.
+      connection.prepare('INSERT INTO temp.cliq_list_source(' + sourceColumns + ',overlong) ' +
+        'SELECT ' + sourceColumns + ',overlong FROM (' +
         'SELECT ' + sourceProjection + ' FROM sessions WHERE principal_id=?' + filter + ' LIMIT 100001)' +
         ' ORDER BY created_at COLLATE BINARY,id COLLATE BINARY').run(...values);
       if (connection.prepare('SELECT count(*) AS n FROM temp.cliq_list_source').get<{ n: bigint }>()!.n !== count) return corrupt();

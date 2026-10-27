@@ -14,6 +14,7 @@ import type { SqliteDriver } from './sqlite-driver.js';
 import { readSupervisorInspector } from './supervisor-inspector.js';
 import { readStopSourceData } from './stop-source.js';
 import { readCredentialRedemptionFailureCause } from './credential-redemption-failure.js';
+import { readDependencyFailureCause, readDependencyAmbiguityCause } from './dependency-failure-cause.js';
 
 type Inspector = { inspectorIdentityRef: string; inspectorIdentityDigest: string };
 
@@ -53,7 +54,8 @@ export async function prepareModelFailureStop(driver: SqliteDriver, artifacts: A
   cut: RecoveryClosureV1, identity: Inspector, observedAt: string) {
   if (assembly.mcpServers.length) return undefined;
   const cause = await readModelFailureCause(driver, artifacts, cut, observedAt) ??
-    await readCredentialRedemptionFailureCause(driver, artifacts, cut, observedAt);
+    await readCredentialRedemptionFailureCause(driver, artifacts, cut, observedAt) ??
+    await readDependencyFailureCause(driver, artifacts, cut, observedAt) ?? await readDependencyAmbiguityCause(driver, artifacts, cut, observedAt);
   if (!cause) return undefined;
   await readSupervisorInspector(artifacts, owner, assembly, { ...identity, observedAt });
   const evidence: RuntimeFailureEvidenceV1 = { schemaVersion: 1, format: 'cliq-runtime-failure-evidence-v1',
@@ -77,7 +79,9 @@ export async function validateModelFailureStop(driver: SqliteDriver, artifacts: 
     fields.push('credentialGrantRef', 'credentialGrantDigest', 'endpointRegistrationRef', 'endpointRegistrationDigest',
       'credentialAuthorityRecordDigest', 'authorityRevision', 'credentialServiceRevision', 'failureCode');
     if (evidence.failureCode === 'endpoint_revoked') fields.push('endpointAuthorityRecordDigest', 'endpointAuthorityRevision');
-  } else throw new TypeError('runtime stop requires its owning failure evidence branch');
+  } else if (evidence.failureKind === 'dependency_acquisition_failed') fields.push('dependencyPlanRef', 'dependencyFailureItemRef', 'failedJournalSeq');
+  else if (evidence.failureKind === 'dependency_result_unavailable') fields.push('dependencyPlanRef', 'ambiguityRef', 'unknownJournalSeq');
+  else throw new TypeError('runtime stop requires its owning failure evidence branch');
   if (!exactKeys(evidence, fields) ||
       evidence.schemaVersion !== 1 || evidence.format !== 'cliq-runtime-failure-evidence-v1' || evidence.runId !== cut.run.id ||
       evidence.evidenceDigest !== intent.runtimeFailureDigest || digestOmitting(evidence, 'evidenceDigest') !== evidence.evidenceDigest ||
@@ -86,7 +90,11 @@ export async function validateModelFailureStop(driver: SqliteDriver, artifacts: 
     throw new TypeError('runtime stop has no exact fresh model failure evidence');
   }
   const cause = evidence.failureKind === 'model_unusable_response' ? await readModelFailureCause(driver, artifacts, cut, evidence.observedAt, intent.registeredCheckpointId, intent.registeredRunRevision, intent.registeredJournalSeq) :
-    await readCredentialRedemptionFailureCause(driver, artifacts, cut, evidence.observedAt, intent.registeredCheckpointId, intent.registeredRunRevision, intent.registeredJournalSeq);
+    evidence.failureKind === 'credential_redemption_failed' ?
+      await readCredentialRedemptionFailureCause(driver, artifacts, cut, evidence.observedAt, intent.registeredCheckpointId, intent.registeredRunRevision, intent.registeredJournalSeq) :
+      evidence.failureKind === 'dependency_acquisition_failed' ?
+        await readDependencyFailureCause(driver, artifacts, cut, evidence.observedAt, intent.registeredCheckpointId, intent.registeredRunRevision, intent.registeredJournalSeq) :
+        await readDependencyAmbiguityCause(driver, artifacts, cut, evidence.observedAt, intent.registeredCheckpointId, intent.registeredRunRevision, intent.registeredJournalSeq);
   if (!cause) throw new TypeError('runtime stop has no settled exact model failure cause');
   requireEqual(evidence, { schemaVersion: 1, format: evidence.format, runId: cut.run.id, ...cause,
     inspectorIdentityRef: evidence.inspectorIdentityRef, inspectorIdentityDigest: evidence.inspectorIdentityDigest,

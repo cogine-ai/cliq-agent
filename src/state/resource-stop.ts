@@ -163,7 +163,7 @@ export const readResourceStopCause = stateOperation('RECOVERY_REQUIRED', async f
     const evidence = evaluator.evaluate(request, target, call, observedAt);
     const decision = items.map(({ item }) => item).filter((item) => item.kind === 'policy_decision' && item.opId === opId).at(-1);
     let approved = false;
-    if (decision?.kind === 'policy_decision' && decision.decision === 'allow' && decision.decisionSource === 'interactive_approval') {
+    if (decision?.kind === 'policy_decision' && decision.subjectKind === 'tool_call' && decision.decision === 'allow' && decision.decisionSource === 'interactive_approval') {
       const proof = await readToolApproval(driver, artifacts, run, evaluator, decision.decisionRef);
       if (!proof.grant) throw new TypeError('resource stop requires the retained allow decision');
       requireEqual(proof.request, request, 'resource approved tool request');

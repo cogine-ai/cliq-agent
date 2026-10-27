@@ -1,6 +1,7 @@
+import type { RetainedControlRootContext } from './control-channel.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import type { AuthorizationGrantV1, AuthorizationResponse, SourceGitInspectionCreateRequest, SourceGitInspectionTargetV1,
-  SourceReadScopeCreateRequest } from '../kernel/authorization.js';
+  SourceReadScopeCreateRequest, DependencyInstallScriptsCreateRequest, DependencyInstallScriptsTargetV1 } from '../kernel/authorization.js';
 import { addCanonicalDuration, digestOmitting, parseCanonicalTime } from '../kernel/identity.js';
 import { immutableSnapshot } from '../model/immutable.js';
 import { verifyRuntimeBundle, type ReleaseTrustKey, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
@@ -22,6 +23,7 @@ import { decodeRunSpec, decodeVerifierSpec, decodeWorkspaceIdentity } from './de
 import { decodeRepositoryIdentity } from './repository-identity.js';
 import { beginInstalledAuthorizationDiagnostic } from './installed-run-diagnostics.js';
 import { normalizeSourceReadScopePath } from '../kernel/source-read-scope.js';
+import { isNpmAdapterEntry, isNpmDataEntry, NPM_DEPENDENCY_RECIPE } from '../sandbox/dependency-recipe.js';
 
 export type AuthorizationRuntime = { bundle: RuntimeBundleManifest; releaseKeys: readonly ReleaseTrustKey[] };
 const same = (left: unknown, right: unknown) => canonicalJsonBytes(left).equals(canonicalJsonBytes(right));
@@ -86,10 +88,81 @@ async function selectSourceReadTarget(driver: SqliteDriver, artifacts: ArtifactC
     scope: selection.scope, ...(selection.expectedDigest === undefined ? {} : { expectedDigest: selection.expectedDigest }) };
   return { target, workspaceIdentityRef: session.workspaceIdentityRef };
 }
+/** Consent selection only. The source refs here are declared conditions, not
+ * proof that any workspace was captured, sealed, unchanged or even present. */
+async function selectDependencyScriptsTarget(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: RetainedControlRootContext, runtime: AuthorizationRuntime,
+  principalId: string, request: DependencyInstallScriptsCreateRequest, signal?: AbortSignal) {
+  const selection = request.decision.target, reads = signal ? artifacts.withReadSignal(signal) : artifacts;
+  const { readDependencyScriptCaptureData } = await import('./dependency-script-capture.js');
+  const capture = await readDependencyScriptCaptureData(driver, reads, owner, runtime, {
+    sourceInspectionId: selection.sourceInspectionId, principalId, sessionId: selection.sessionId, conditions: selection.conditions }, signal);
+  const workspace = decodeWorkspaceIdentity(await readCanonicalArtifact(reads, capture.target.workspaceIdentityRef));
+  if (!capture.intent || workspace.kind !== 'live' || workspace.ownerPrincipalId !== principalId ||
+      workspace.identityDigest !== selection.expectedWorkspaceIdentityDigest)
+    throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');
+  verifyRuntimeBundle(runtime.bundle, runtime.releaseKeys);
+  const execution = selection.conditions.execution, recipe = NPM_DEPENDENCY_RECIPE;
+  const adapter = runtime.bundle.entries.find(entry => entry.entryId === recipe.adapterId);
+  const image = runtime.bundle.entries.find(entry => entry.entryId === recipe.dataId);
+  const guest = runtime.bundle.structuredArtifacts.find(entry => entry.kind === 'guest_toolchain' && entry.artifactRef === execution.guestToolchainManifestRef);
+  if (execution.runtimeBundleRef !== canonicalSha256(runtime.bundle) || execution.runtimeBundleManifestDigest !== runtime.bundle.manifestDigest ||
+      !adapter || !isNpmAdapterEntry(adapter) || adapter.digest !== execution.adapterCodeRef ||
+      !image || !isNpmDataEntry(image) || image.digest !== execution.npmDataRef || !guest ||
+      execution.environmentDigest !== canonicalSha256(recipe.environment))
+    throw new VerifierAuthorizationError('UNSUPPORTED_EXECUTION_IDENTITY');
+  const selected = await readRetainedVerifierToolchain(reads, { ...runtime, guestToolchainManifestId: guest.artifactId,
+    guestToolchainManifestRef: guest.artifactRef, signal });
+  if (selected.manifest.manifestDigest !== execution.guestToolchainManifestDigest || selected.manifest.node.logicalName !== 'node' ||
+      selected.manifest.node.canonicalGuestPath !== execution.nodeExecutionPath || selected.manifest.node.digest !== execution.nodeExecutableDigest)
+    throw new VerifierAuthorizationError('UNSUPPORTED_EXECUTION_IDENTITY');
+  await reads.mapReads([adapter, image], async entry => {
+    let size = 0; for await (const bytes of reads.readChunks(entry.digest, entry.byteCount)) { reads.assertReadActive(); size += bytes.length; }
+    if (size !== entry.byteCount) throw new TypeError('dependency signed data differs from its complete original bytes');
+  });
+  signal?.throwIfAborted(); capture.assertUnchanged(driver);
+  const target: DependencyInstallScriptsTargetV1 = { kind: 'dependency_install_scripts', workspaceIdentityDigest: workspace.identityDigest,
+    conditions: selection.conditions };
+  return { target, workspaceIdentityRef: capture.target.workspaceIdentityRef, capture };
+}
+
+export async function readDependencyScriptsAuthorizationHistory(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: RetainedControlRootContext,
+  grant: AuthorizationGrantV1, releaseKeys: readonly ReleaseTrustKey[], signal?: AbortSignal) {
+  artifacts = signal ? artifacts.withReadSignal(signal) : artifacts;
+  if (grant.target.kind !== 'dependency_install_scripts') throw new TypeError('dependency history has another consent purpose');
+  const row = readAuthorizationCreationControl(driver, grant);
+  const [{ channel }, core] = await joinResourceOperations([
+    readRetainedControlChannelClosure(artifacts, owner, { principalId: grant.ownerPrincipalId,
+      channelIdentityRef: grant.channelIdentityRef, channelIdentityDigest: grant.channelIdentityDigest }),
+    readCanonicalArtifact<Record<string, unknown>>(artifacts, grant.sourceRequestDigest)
+  ] as const);
+  const request = decodeAuthorizationCreateRequest({ ...core, requestDigest: grant.sourceRequestDigest });
+  if (request.decision.kind !== 'dependency_install_scripts' || request.requestId !== grant.sourceRequestId || channel.openedAt > grant.createdAt ||
+      grant.expiresAt !== addCanonicalDuration(grant.createdAt, request.ttlMs ?? 3_600_000) || !same(await readCanonicalArtifact(artifacts, row.responseRef), createResponse(grant)))
+    throw new TypeError('dependency consent has no exact original authenticated creation');
+  let selected = false;
+  for (const historical of authorizationOwnersDuring(driver, grant.createdAt, row.committedAt)) {
+    if (historical.runtimeBundleRef !== grant.target.conditions.execution.runtimeBundleRef ||
+        historical.runtimeBundleManifestDigest !== grant.target.conditions.execution.runtimeBundleManifestDigest) continue;
+    const bundle = await readCanonicalArtifact<RuntimeBundleManifest>(artifacts, historical.runtimeBundleRef);
+    const expected = await selectDependencyScriptsTarget(driver, artifacts, owner, { bundle, releaseKeys }, grant.ownerPrincipalId,
+      request as DependencyInstallScriptsCreateRequest, signal);
+    if (!same(expected.target, grant.target)) throw new TypeError('dependency consent differs from its original exact selector');
+    selected = true;
+  }
+  if (!selected) throw new TypeError('dependency consent has no original selected runtime interval');
+  let consumption: Awaited<ReturnType<typeof import('./dependency-script-history.js')['readDependencyScriptGrantConsumption']>> | undefined;
+  if (grant.state === 'consumed') {
+    const { readDependencyScriptGrantConsumption } = await import('./dependency-script-history.js');
+    const bundle = await readCanonicalArtifact<RuntimeBundleManifest>(artifacts, grant.target.conditions.execution.runtimeBundleRef);
+    consumption = await readDependencyScriptGrantConsumption(driver, artifacts, owner, { bundle, releaseKeys }, grant, signal);
+  }
+  if (grant.state === 'revoked') await verifyRevokeResponse(driver, artifacts, owner, grant, grant.revokedByRequestId, row.committedAt);
+  signal?.throwIfAborted(); return { request, committedAt: row.committedAt, ...(consumption ? { consumption } : {}) };
+}
 
 /** Historical read consent, not permission to reopen a live path. A receipt
  * cannot be accepted until its specific owning capture/admission exists. */
-export async function readSourceReadAuthorizationHistory(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
+export async function readSourceReadAuthorizationHistory(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: RetainedControlRootContext,
   grant: AuthorizationGrantV1, releaseKeys: readonly ReleaseTrustKey[], signal?: AbortSignal) {
   artifacts = signal ? artifacts.withReadSignal(signal) : artifacts; signal?.throwIfAborted();
   if (grant.target.kind !== 'read_scope') throw new TypeError('source read history has another authorization purpose');
@@ -143,7 +216,7 @@ export async function readSourceReadAuthorizationHistory(driver: SqliteDriver, a
 }
 /** Historical source-inspection consent, not current read or native authority.
  * Its immutable receipt is audited against the original attempt, never a Run. */
-export async function readSourceGitAuthorizationHistory(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
+export async function readSourceGitAuthorizationHistory(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: RetainedControlRootContext,
   grant: AuthorizationGrantV1, releaseKeys: readonly ReleaseTrustKey[], signal?: AbortSignal) {
   artifacts = signal ? artifacts.withReadSignal(signal) : artifacts;
   signal?.throwIfAborted();
@@ -207,6 +280,7 @@ function readAnyAuthorizationHistory(driver: SqliteDriver, artifacts: ArtifactCa
   grant: AuthorizationGrantV1, releaseKeys: readonly ReleaseTrustKey[], signal?: AbortSignal) {
   return grant.target.kind === 'source_git_inspection' ? readSourceGitAuthorizationHistory(driver, artifacts, owner, grant, releaseKeys, signal)
     : grant.target.kind === 'read_scope' ? readSourceReadAuthorizationHistory(driver, artifacts, owner, grant, releaseKeys, signal)
+    : grant.target.kind === 'dependency_install_scripts' ? readDependencyScriptsAuthorizationHistory(driver, artifacts, owner, grant, releaseKeys, signal)
     : readAuthorizationHistory(driver, artifacts, owner, grant, releaseKeys, signal);
 }
 /** Historical audit only; it cannot authenticate input or reopen an executable. */
@@ -264,7 +338,7 @@ export async function readAuthorizationHistory(driver: SqliteDriver, artifacts: 
   }
   return { request, selected, committedAt: row.committedAt };
 }
-async function verifyRevokeResponse(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
+async function verifyRevokeResponse(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: RetainedControlRootContext,
   grant: AuthorizationGrantV1, requestId: string, creationCommittedAt: string) {
   const row = readControlRequest(driver, grant.ownerPrincipalId, 'authorization.revoke', requestId);
   if (!row) throw new TypeError('authorization revoke response has no owner');
@@ -344,6 +418,7 @@ export const createAuthorization = stateOperation('INVALID_REQUEST', async (driv
     const request = immutableSnapshot(decodeAuthorizationCreateRequest(value));
     diagnosis?.stage('current_channel');
     const channel = await validateControlChannelClosure(artifacts, owner, identity);
+    assertActiveStateOwner(driver, owner);
     const replay = async () => {
       const existing = readControlRequest(driver, identity.principalId, 'authorization.create', request.requestId);
       if (!existing) return undefined;
@@ -364,7 +439,9 @@ export const createAuthorization = stateOperation('INVALID_REQUEST', async (driv
     if (decision.kind === 'execution_identity_read') diagnosis?.stage('selected_toolchain');
     const readScope = decision.kind === 'read_scope'
       ? await selectSourceReadTarget(driver, artifacts, identity.principalId, request as SourceReadScopeCreateRequest, signal) : undefined;
-    const target = decision.kind === 'read_scope' ? readScope!.target : decision.kind === 'source_git_inspection'
+    const dependency = decision.kind === 'dependency_install_scripts'
+      ? await selectDependencyScriptsTarget(driver, artifacts, owner, runtime, identity.principalId, request as DependencyInstallScriptsCreateRequest, signal) : undefined;
+    const target = decision.kind === 'dependency_install_scripts' ? dependency!.target : decision.kind === 'read_scope' ? readScope!.target : decision.kind === 'source_git_inspection'
       ? await selectSourceInspectionTarget(driver, artifacts, runtime, identity.principalId, request as SourceGitInspectionCreateRequest, signal)
       : await (async () => {
         const selected = await readRetainedVerifierToolchain(artifacts, { ...runtime, guestToolchainManifestId: decision.target.guestToolchainManifestId, signal });
@@ -408,6 +485,12 @@ export const createAuthorization = stateOperation('INVALID_REQUEST', async (driv
       if (decision.kind === 'read_scope' && (readSessionPrincipalId(connection, decision.target.sessionId) !== identity.principalId ||
           readSession(connection, decision.target.sessionId).workspaceIdentityRef !== readScope!.workspaceIdentityRef))
         throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');
+      if (decision.kind === 'dependency_install_scripts') {
+        dependency!.capture.assertUnchanged(connection);
+        if (readSessionPrincipalId(connection, decision.target.sessionId) !== identity.principalId ||
+            readSession(connection, decision.target.sessionId).workspaceIdentityRef !== dependency!.workspaceIdentityRef)
+          throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');
+      }
       for (const metadata of [...channel.metadata, requestArtifact, published]) insertArtifactMetadata(connection, metadata, now);
       insertAuthorizationGrant(connection, grant);
       insertControlRequest(connection, { ...identity, method: 'authorization.create', requestId: request.requestId,

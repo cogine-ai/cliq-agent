@@ -45,9 +45,10 @@ export async function planChildComposition(artifacts: ArtifactCatalog, input: {
   const tools: ToolContractManifestV1 = { ...toolCore, manifestDigest: canonicalSha256(toolCore) };
   const toolPlan = planCanonicalArtifact(tools, tools.format);
   const mcp = parent.mcpServers.filter(server => entries.some(entry => entry.execution.kind === 'mcp' && entry.execution.registrationId === server.registrationId));
-  // The currently installed broker has no MCP or dependency acquisition
-  // consumer. A retained shape cannot invent credential or launch support.
-  if (mcp.length || request.verifierMode === 'inherit_parent' && input.parentSpec.dependencyPolicyRef)
+  // MCP keeps its independent physical contract. A dependency policy only
+  // narrows data here; the sole writer/history separately require a true
+  // original parent ready result and never authorize child acquisition.
+  if (mcp.length)
     throw new KernelStorageError('INVALID_REQUEST', 'this installed child recipe has no MCP or dependency acquisition backend');
   const granted: ChildCapabilityGrantV1['granted'] = {
     builtinToolNames: entries.filter(entry => entry.execution.kind !== 'mcp').map(entry => entry.name),

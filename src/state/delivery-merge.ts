@@ -13,7 +13,7 @@ import { decodeContextManifest } from './decoders.js';
 import { deliveryMergeConflictArtifact, deliveryMergeConflictCheckpointId, deliveryMergeConflictItemId,
   deliveryMergeConflictStop, deliveryMergeItemId, readDeliveryMergeSource } from './delivery-recovery.js';
 import { KernelStorageError, stateOperation } from './errors.js';
-import { finalCandidateCheckpointId, finalCandidateItemId, readCandidateVerifierPlan } from './final-candidate-plan.js';
+import { finalCandidateCheckpointId, finalCandidateItemId, readCandidateVerificationData } from './final-candidate-plan.js';
 import { isZeroBudget } from './invariants.js';
 import { prepareDeliveryMergePlan } from './publication-merge-plan.js';
 import { readRecoveryClosure } from './recovery-closure.js';
@@ -108,16 +108,17 @@ export function loadDeliveryMerge(driver: SqliteDriver, artifacts: ArtifactCatal
           itemId: finalCandidateItemId(runId, item.itemId), producingItemId: item.itemId,
           baseSourceRef: spec.baseWorkspaceManifestRef, resultSourceRef: original.sourceRef, diffRef: original.diffRef,
           summaryRef: original.summaryRef, sourceDigest: original.source.manifestDigest, diffDigest: original.diff.diffDigest, createdAt };
-        const verifierPlan = await readCandidateVerifierPlan(reads, spec, { runId,
+        const { verifierPlan, dependency } = await readCandidateVerificationData(reads, spec, { runId,
           candidateItemId: candidate.itemId, resultSourceRef: candidate.resultSourceRef });
         const verifier = planCanonicalArtifact(verifierPlan, 'cliq-verifier-plan-v1');
-        frontier = { schemaVersion: 1, kind: 'verify', phase: 'verifiers', candidateItemId: candidate.itemId,
+        frontier = { schemaVersion: 1, kind: 'verify', phase: dependency ? 'dependencies' : 'verifiers', candidateItemId: candidate.itemId,
           resultSourceRef: candidate.resultSourceRef, verifierPlanRef: verifier.ref, nextVerifierIndex: 0, afterPass: 'delivery_approval' };
+        if (dependency) frontier.dependencyPlanRef = canonicalSha256(dependency.plan);
         state.checkpointId = finalCandidateCheckpointId(runId, item.itemId); state.itemId = item.itemId;
         state.disposition = 'candidate'; workspaceStateRef = state.prepared.workspaceStateRef; items = [item, candidate];
         state.graph = planContinuationCommit(artifacts, { context: decodeContextManifest(await readCanonicalArtifact(reads,
           state.cut.latestCheckpoint.contextManifestRef)), existingItems: [], items, frontier, checkpointId: state.checkpointId,
-          workspaceStateRef, artifacts: [verifier] });
+          workspaceStateRef, artifacts: [verifier, ...(dependency ? [planCanonicalArtifact(dependency.plan, dependency.plan.format)] : [])] });
       } else {
         const original = state.source.source, conflict = deliveryMergeConflictArtifact(runId, sourceRunResultRef, original);
         const payload = planCanonicalArtifact(conflict, conflict.format);

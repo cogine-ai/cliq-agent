@@ -1,8 +1,44 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
+import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 const workflowUrl = new URL('../../.github/workflows/kernel-foundation.yml', import.meta.url);
+
+test('the locked Node source option rejects mixed modes and invalid archives before host inspection', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'cliq-qualification-options-'));
+  try {
+    const archive = path.join(root, 'owned-archive'), alias = path.join(root, 'alias');
+    await writeFile(archive, 'owned parser fixture'); await symlink(archive, alias);
+    const shell = fileURLToPath(new URL('../../scripts/kernel/qualify-systemd-user.sh', import.meta.url));
+    const node = '/fixed-nonexistent-node';
+    for (const args of [
+      ['--locked-node', archive, node],
+      ['--run-delivery-journey', '--locked-node', archive, node],
+      ['--run-verifier-journey', '--locked-node'],
+      ['--run-verifier-journey', '--locked-node', 'relative-archive', node],
+      ['--run-verifier-journey', '--locked-node', root, node],
+      ['--run-verifier-journey', '--locked-node', alias, node],
+      ['--run-verifier-journey', '--locked-node', path.join(root, 'missing'), node],
+    ]) {
+      const result = spawnSync('/bin/bash', [shell, ...args], { encoding: 'utf8', timeout: 2000 });
+      assert.ifError(result.error); assert.equal(result.status, 2); assert.equal(result.stdout, '');
+      assert.equal(result.stderr, 'locked Node qualification requires its fixed verifier campaign and official archive\n');
+    }
+    for (const args of [
+      ['--run-verifier-journey', '--locked-node', archive, '--locked-node', archive, node],
+      ['--run-verifier-journey', '--locked-node', archive, '--run-delivery-journey', node],
+      ['--run-verifier-journey', node, '--locked-node', archive],
+    ]) {
+      const result = spawnSync('/bin/bash', [shell, ...args], { encoding: 'utf8', timeout: 2000 });
+      assert.ifError(result.error); assert.equal(result.status, 2); assert.equal(result.stdout, '');
+      assert.equal(result.stderr, 'campaign flags must be unique and precede the Node path\n');
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 
 function stepBlocks(workflow: string): string[] {
   const lines = workflow.split('\n');
@@ -103,17 +139,33 @@ test('installed verifier uses its own free bounded manager journey without weake
   assert.doesNotMatch(job, /(?:continue-on-error|needs):/u);
   assert.match(job, /persist-credentials: false/u);
   assert.match(job, /libext2fs-dev pkg-config/u);
-  assert.match(job, /qualify-systemd-user\.sh --run-verifier-journey "\$probe_node"/u);
+  assert.match(job, /qualify-systemd-user\.sh --run-verifier-journey --locked-node "\$probe_npm_archive" "\$probe_node"/u);
+  const npmSource = stepBlocks(job).find(block => block.includes('- name: Acquire the exact official npm qualification source'));
+  assert(npmSource);
+  assert.match(npmSource, /fetch\(NPM_DATA_RECIPE\.officialArchive/u);
+  assert.match(npmSource, /redirect: 'error', signal: AbortSignal\.timeout\(60000\)/u);
+  assert.match(npmSource, /total <= NPM_DATA_RECIPE\.archiveBytes/u);
+  assert.match(npmSource, /assert\.equal\(total, NPM_DATA_RECIPE\.archiveBytes\)/u);
+  assert.match(npmSource, /buildInstalledNpmDataAsset\(archive\)/u);
+  assert.match(npmSource, /O_EXCL \| constants\.O_NOFOLLOW/u);
+  assert.match(npmSource, /finally \{ await file\.close\(\); \}/u);
+  assert.match(job, /steps\.npm_source\.outcome == 'success'/u);
   assert.match(job, /if: always\(\)[\s\S]*actions\/upload-artifact@v4/u);
   assert.match(job, /name: installed-verifier-journey-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/u);
   assert.match(job, /retention-days: 7/u);
   const shell = await readFile(new URL('../../scripts/kernel/qualify-systemd-user.sh', import.meta.url), 'utf8');
   assert.match(shell, /--run-verifier-journey\) probe_campaign_kind=run-journey; probe_run_driver_mode=--verifier-campaign;/u);
+  assert.match(shell, /\/usr\/bin\/timeout --kill-after=1s 1s \/usr\/bin\/fuser -m -M -- "\$probe_home" >&2 \|\| true/u);
+  assert.doesNotMatch(shell, /fuser[^\n]*(?:--kill|(?:^|\s)-[a-zA-Z]*k)/u);
   assert.match(shell, /probe_run_driver_mode" = --verifier-campaign[\s\S]*?qualify-installed-verifier-journey\.ts[\s\S]*?else[\s\S]*?qualify-installed-run-journey\.ts/u);
   const consumer = await readFile(new URL('../../scripts/kernel/qualify-installed-verifier-journey.ts', import.meta.url), 'utf8');
   assert.match(consumer, /import \{ runInstalledNodeJourney \} from '\.\/testing\/installed-node-journey\.js'/u);
-  assert.match(consumer, /assert\.equal\(mode, '--verifier-campaign'\); assert\(filename && extra\.length === 0\)/u);
-  assert.match(consumer, /await runInstalledNodeJourney\(filename, 'verifier'\)/u);
+  assert.match(consumer, /assert\.equal\(mode, '--verifier-campaign'\); assert\(filename\)/u);
+  assert.match(consumer, /assert\(extra\.length === 0 \|\| extra\.length === 2 && extra\[0\] === '--locked-node' && extra\[1\]\)/u);
+  assert.match(consumer, /constants\.O_RDONLY \| constants\.O_NOFOLLOW/u);
+  assert.match(consumer, /before\.nlink === 1n && before\.size === BigInt\(NPM_DATA_RECIPE\.archiveBytes\)/u);
+  assert.match(consumer, /buildInstalledNpmDataAsset\(npmDependencyArchive\)/u);
+  assert.match(consumer, /await runInstalledNodeJourney\(filename, 'verifier', npmDependencyArchive \? \{ npmDependencyArchive \} : \{\}\)/u);
   const driver = await readFile(new URL('../../scripts/kernel/testing/installed-node-journey.ts', import.meta.url), 'utf8');
   assert.match(driver, /maxBytes: 512 \* 1024 \* 1024, maxStreams: 4096/u);
   assert.match(driver, /'required_pass', 'required_repair', 'advisory_failure', 'required_timeout'/u);
@@ -135,7 +187,7 @@ test('installed status deadlock regression observes the fixed original assertion
   assert.match(experiment, /node scripts\/kernel\/testing\/installed-status-regression\.mjs "\$RUNNER_TEMP\/cliq-installed-status-regression\/status-borrow-regression\.json"/u);
   assert.doesNotMatch(experiment, /NODE_OPTIONS=|NODE_V8_COVERAGE=|timeout |\|\| true|set \+e/u);
   assert.match(job, /node --test[^\n]*installed-status-regression\.test\.mjs/u);
-  assert.match(job, /qualify-systemd-user\.sh --run-verifier-journey "\$probe_node"/u);
+  assert.match(job, /qualify-systemd-user\.sh --run-verifier-journey --locked-node "\$probe_npm_archive" "\$probe_node"/u);
   assert.match(job, /name: installed-status-regression-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/u);
   assert.match(job, /path: \$\{\{ runner\.temp \}\}\/cliq-installed-status-regression\/status-borrow-regression\.json/u);
 });

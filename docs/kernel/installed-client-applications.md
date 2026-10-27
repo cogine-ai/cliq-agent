@@ -136,6 +136,19 @@ bound. All three original Run-list cuts passed too. These are actual local
 component observations, not signed installed-Supervisor or Linux qualification;
 the combined installed campaigns remain necessary.
 
+Session capture likewise assigns contiguous ordinals through the fresh private
+table's `INTEGER PRIMARY KEY`, in the original explicit binary source order.
+It removes a redundant full-row window pass; the atomic complete capture,
+bounded projections, row/byte limits and final all-and-only comparison remain.
+Source-change retries must restart ordinals at one and publish only a complete
+cut. An earlier full local run exceeded the unchanged 2-second capture-stop
+deadline and remains failed evidence. After removing the extra pass, the ten
+original Session regressions passed on both Node 22.13.0 and 24.21.0. Their real
+capture/prepare/final SIGTERM joins were 1781.3/52.4/345.1 ms and
+296.7/53.1/353.3 ms respectively. These uncontrolled-host component observations
+do not qualify the installed Supervisor; full local and Linux validation remain
+required.
+
 ## Installed validation and evidence boundary
 
 The installed journey composes the real natural CLI, JSONL and RPC applications

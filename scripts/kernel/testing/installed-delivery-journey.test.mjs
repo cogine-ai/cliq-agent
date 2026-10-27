@@ -220,7 +220,10 @@ test('verifier and Delivery are fixed consumers of one real installed lifecycle'
     ['../qualify-installed-delivery-journey.ts', 'delivery', '--delivery-campaign']]) {
     const entry = source(file);
     assert(entry.includes(`assert.equal(mode, '${mode}')`));
-    assert(entry.includes(`await runInstalledNodeJourney(filename, '${kind}')`));
+    const invocation = kind === 'verifier'
+      ? "await runInstalledNodeJourney(filename, 'verifier', npmDependencyArchive ? { npmDependencyArchive } : {})"
+      : "await runInstalledNodeJourney(filename, 'delivery')";
+    assert(entry.includes(invocation), 'each fixed consumer must call the same owner with only its exact closed options');
     assert(!entry.includes('buildInstalledSupervisorPackage('));
   }
   assert.equal((shared.match(/await buildInstalledSupervisorPackage\(/gu) ?? []).length, 1);

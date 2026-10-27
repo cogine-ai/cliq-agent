@@ -10,6 +10,8 @@ import { assertArtifactRef, assertRequestId, digestOmitting, identityHash, norma
 import { KernelStorageError } from './errors.js';
 import { types } from 'node:util';
 import { normalizeSourceReadScopePath } from '../kernel/source-read-scope.js';
+import { decodeDependencyScriptConditions } from '../kernel/dependency.js';
+import type { DependencyInstallScriptsTargetV1 } from '../kernel/authorization.js';
 
 /** Fixed refusal classification; neither a string nor an artifact supplies authority. */
 export class VerifierAuthorizationError extends KernelStorageError {
@@ -43,7 +45,8 @@ export function authorizationGrantCore(grant: AuthorizationGrantV1): Omit<Author
 }
 export function authorizationSummary(grant: AuthorizationGrantV1): AuthorizationGrantSummaryV1 {
   return { schemaVersion: 1, grantId: grant.grantId, state: grant.state, targetKind: grant.target.kind,
-    purpose: grant.target.kind === 'source_git_inspection' ? 'source_inspection' : grant.target.kind === 'read_scope' ? 'source' : 'verifier', targetDigest: grant.targetDigest, useCount: grant.useCount, rowVersion: grant.rowVersion,
+    purpose: grant.target.kind === 'source_git_inspection' ? 'source_inspection' : grant.target.kind === 'read_scope' ? 'source' :
+      grant.target.kind === 'dependency_install_scripts' ? 'dependency_install_scripts' : 'verifier', targetDigest: grant.targetDigest, useCount: grant.useCount, rowVersion: grant.rowVersion,
     createdAt: grant.createdAt, expiresAt: grant.expiresAt,
     ...(grant.state === 'consumed' ? { consumedAt: grant.consumedAt } : {}),
     ...(grant.state === 'revoked' ? { revokedAt: grant.revokedAt } : {}) };
@@ -63,6 +66,12 @@ export function decodeSourceGitInspectionTarget(value: unknown): SourceGitInspec
   if (inspector.entryId !== 'source_git_inspector' || inspector.entryVersion !== '1') throw new TypeError('source inspector is not the fixed signed recipe');
   return data as SourceGitInspectionTargetV1;
 }
+export function decodeDependencyInstallScriptsTarget(value: unknown): DependencyInstallScriptsTargetV1 {
+  const data = exact(value, ['kind', 'workspaceIdentityDigest', 'conditions']);
+  if (data.kind !== 'dependency_install_scripts') throw new TypeError('foreign dependency script consent');
+  ref(data.workspaceIdentityDigest); decodeDependencyScriptConditions(data.conditions);
+  return data as DependencyInstallScriptsTargetV1;
+}
 export function decodeAuthorizationGrant(value: unknown): AuthorizationGrantV1 {
   if (!plain(value)) throw new TypeError('authorization grant is not a record');
   const state = value.state;
@@ -72,7 +81,8 @@ export function decodeAuthorizationGrant(value: unknown): AuthorizationGrantV1 {
       state === 'revoked' ? ['revokedByRequestId', 'revokedAt'] : [])]);
   if (!plain(value.target)) throw new TypeError('unsupported retained authorization purpose');
   let target: AuthorizationGrantV1['target'];
-  if (value.target.kind === 'source_git_inspection') target = decodeSourceGitInspectionTarget(value.target);
+  if (value.target.kind === 'dependency_install_scripts') target = decodeDependencyInstallScriptsTarget(value.target);
+  else if (value.target.kind === 'source_git_inspection') target = decodeSourceGitInspectionTarget(value.target);
   else if (value.target.kind === 'read_scope') {
     const scope = exact(value.target, ['kind', 'purpose', 'workspaceIdentityDigest', 'canonicalRootRelativePath', 'scope',
       ...(Object.hasOwn(value.target, 'expectedDigest') ? ['expectedDigest'] : [])]);

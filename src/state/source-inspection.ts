@@ -99,7 +99,7 @@ function plan(value: unknown): void {
 }
 function decode(value: unknown): SourceInspectionAttemptV1 {
   const data = record(value, [...BASE, 'phase', 'inputRef', 'inputDigest', 'plan', 'processContainmentRef',
-    'retirementEvidenceRef', 'retiredAt', 'outcome'], 'source inspection row');
+    'retirementEvidenceRef', 'retiredAt', 'outcome', 'admissionErrorResponseRef', 'dependencyScriptIntentRef'], 'source inspection row');
   if (data.schemaVersion !== 1 || data.attempt !== 1 || data.method !== 'run.submit' && data.method !== 'run.apply') invalid('source inspection identity schema differs');
   for (const key of ['inspectionId', 'principalId', 'supervisorInstanceId']) text(data[key], key);
   const admissionKey = text(data.admissionKey, 'admission key');
@@ -152,6 +152,12 @@ function decode(value: unknown): SourceInspectionAttemptV1 {
     } else if (result.kind === 'failed' || result.kind === 'cancelled') {
       record(result, ['kind', 'errorResponseRef'], 'failed inspection outcome'); digest(result.errorResponseRef, 'inspection error response');
     } else invalid('inspection outcome is not part of its closed schema');
+    if (Object.hasOwn(data, 'admissionErrorResponseRef') !== Object.hasOwn(data, 'dependencyScriptIntentRef'))
+      invalid('captured admission refusal requires its complete original dependency intent');
+    if (Object.hasOwn(data, 'admissionErrorResponseRef')) {
+      if (data.method !== 'run.submit' || result.kind !== 'captured') invalid('only a complete submit capture may retain its admission refusal');
+      digest(data.admissionErrorResponseRef, 'captured admission refusal'); digest(data.dependencyScriptIntentRef, 'captured dependency intent');
+    }
   } else invalid('source inspection phase is not part of its closed schema');
   if (digestOmitting(data, 'rowDigest') !== data.rowDigest) invalid('source inspection row digest differs');
   return immutableSnapshot(data as SourceInspectionAttemptV1);

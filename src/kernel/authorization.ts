@@ -1,5 +1,15 @@
 import type { ArtifactRef } from './types.js';
 import type { SandboxResourceSpec } from './execution.js';
+import type { DependencyScriptConditionsV1 } from './dependency.js';
+
+export type DependencyInstallScriptsTargetV1 = {
+  kind: 'dependency_install_scripts'; workspaceIdentityDigest: string; conditions: DependencyScriptConditionsV1;
+};
+export type DependencyInstallScriptsDecisionV1 = {
+  kind: 'dependency_install_scripts'; purpose: 'dependency_install_scripts'; target: {
+    sessionId: string; sourceInspectionId: string; expectedWorkspaceIdentityDigest: string; conditions: DependencyScriptConditionsV1;
+  };
+};
 
 /** Explicit inspection-only consent. Neither Workspace Trust nor ordinary
  * source/tool permission supplies this temporary raw Git metadata scope. */
@@ -30,8 +40,7 @@ export type AuthorizationGrantTargetV1 =
   | { kind: 'verifier_execution'; verifierId: string; verifierRequestCoreDigest: string;
       executionIdentityGrantId: string; executionIdentityTargetDigest: string;
       maxCandidateGenerations: number; maxAttemptsPerCandidate: number }
-  | { kind: 'dependency_install_scripts'; workspaceIdentityDigest: string;
-      lockfilePath: 'package-lock.json' | 'pnpm-lock.yaml' | 'yarn.lock'; lockfileDigest: string };
+  | DependencyInstallScriptsTargetV1;
 
 export type AuthorizationGrantBaseV1 = {
   schemaVersion: 1; grantId: string; ownerPrincipalId: string;
@@ -86,7 +95,11 @@ export type SourceReadScopeCreateRequest = {
     sessionId: string; expectedWorkspaceIdentityDigest: string; path: string; scope: 'entry' | 'subtree'; expectedDigest?: string;
   } };
 };
-export type AuthorizationCreateRequest = VerifierIdentityCreateRequest | SourceGitInspectionCreateRequest | SourceReadScopeCreateRequest;
+export type DependencyInstallScriptsCreateRequest = {
+  protocolVersion: 1; method: 'authorization.create'; requestId: string; requestDigest: string; ttlMs?: number;
+  decision: DependencyInstallScriptsDecisionV1;
+};
+export type AuthorizationCreateRequest = VerifierIdentityCreateRequest | SourceGitInspectionCreateRequest | SourceReadScopeCreateRequest | DependencyInstallScriptsCreateRequest;
 export type AuthorizationRevokeRequest = {
   protocolVersion: 1; method: 'authorization.revoke'; requestId: string; requestDigest: string; grantId: string;
 };

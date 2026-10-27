@@ -238,6 +238,14 @@ test('yielded list preparation rechecks the complete source set and old entry by
     const members = await fixture.store.sessionContinuity(request, fixture.identity); assert(members.result.method === 'session.list');
     assert.equal(members.result.sessions.length, 4); assert(members.result.sessions.some(session => session.id === 'inserted-after-cut'));
     assert.equal(fixture.driver.prepare('SELECT count(*) AS n FROM list_read_cuts').get<{ n: bigint }>()!.n, 2n);
+    const cuts = fixture.driver.prepare(`SELECT count(e.ordinal) AS n,min(e.ordinal) AS first,max(e.ordinal) AS last
+      FROM list_read_cuts c JOIN list_read_cut_entries e ON e.cut_id=c.cut_id GROUP BY c.cut_id`)
+      .all<{ n: bigint; first: bigint; last: bigint }>();
+    assert.deepEqual(cuts.map(cut => cut.n).sort(), [3n, 4n]);
+    for (const cut of cuts) {
+      assert.equal(cut.first, 1n);
+      assert.equal(cut.last, cut.n, 'source changes must restart the complete contiguous cut, never retain scratch ordinals');
+    }
     const firstPage = await fixture.store.sessionContinuity({ ...request, limit: 1 }, fixture.identity); assert(firstPage.result.method === 'session.list' && firstPage.result.nextCursor);
     cutId = JSON.parse(Buffer.from(firstPage.result.nextCursor, 'base64url').toString('utf8')).cutId;
     const cursor = { ...request, limit: 1, cursor: firstPage.result.nextCursor };

@@ -50,7 +50,8 @@ import {
 } from '../decoders.js';
 import { KernelStorageError } from '../errors.js';
 import { readCanonicalArtifact } from '../agent-context.js';
-import { readInstalledRunAdmission, recheckInstalledRunWorkspace, type AssembledInstalledRun } from '../installed-run.js';
+import { readInstalledRunAdmission, recheckInstalledRunWorkspace, readInstalledRunDependency, consumeInstalledRunDependency,
+  type AssembledInstalledRun } from '../installed-run.js';
 import { assertInstalledRunAdmissionCapacity } from '../installed-run-capacity.js';
 import { normalizeRunSubmitRequest, runSubmitIntentDigest } from '../source-target.js';
 import { readSourceInspectionAttempt, readSourceInspectionOriginalRequest } from '../source-inspection.js';
@@ -95,6 +96,7 @@ export type AdmitRunInput = {
   policyRef: string;
   sandboxProfileRef: string;
   verifierSpecRef: string;
+  dependencyPolicyRef?: string;
   verifierRequests?: VerifierRequest[];
   credentialGrantRefs?: string[];
   budgets?: Partial<typeof DEFAULT_RUN_BUDGETS>;
@@ -296,7 +298,8 @@ export async function replayInstalledRunAdmission(
   if (!admission) {
     if (control) {
       const source = readSourceInspectionAttempt(driver, { principalId, admissionKey: request.admissionKey, admissionIntentDigest: intent });
-      if (!source || source.phase !== 'retired' || source.outcome.kind === 'captured' || source.outcome.errorResponseRef !== control.responseRef)
+      if (!source || source.phase !== 'retired' || (source.outcome.kind === 'captured'
+          ? source.admissionErrorResponseRef : source.outcome.errorResponseRef) !== control.responseRef)
         throw new KernelStorageError('RECOVERY_REQUIRED', 'installed Run replay has neither admission nor its original source refusal');
       await readSourceInspectionErrorResponse(reads, source);
     }
@@ -470,6 +473,11 @@ async function admitRunInternal(
 ): Promise<AdmitRunResult> {
   signal?.throwIfAborted();
   const reads = signal ? artifacts.withReadSignal(signal) : artifacts;
+  if (input.dependencyPolicyRef !== undefined && !installed)
+    throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'dependency admission requires its genuine installed public preparation');
+  const dependency = installed && readInstalledRunDependency(installed.prepared, driver, owner, installed.identity);
+  if (input.dependencyPolicyRef !== dependency?.policyRef)
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'dependency policy differs from its original installed preparation');
   const verifierInput = Object.getOwnPropertyDescriptor(input, 'verifierRequests');
   if (verifierInput) {
     if (!verifierInput.enumerable || !Object.hasOwn(verifierInput, 'value')) throw new TypeError('verifier requests must be plain data');
@@ -671,7 +679,7 @@ async function admitRunInternal(
     objectiveDigest: ''
   };
   objective.objectiveDigest = digestOmitting(objective, 'objectiveDigest');
-  const published: PublishedArtifact[] = [...channelClosure.metadata, ...referencedMetadata, ...skillMetadata];
+  const published: PublishedArtifact[] = [...channelClosure.metadata, ...referencedMetadata, ...skillMetadata, ...(dependency?.metadata ?? [])];
   if (verifierPreparation && verifierConsumption) published.push(...verifierPreparation.metadata, ...verifierConsumption.metadata);
   decodeRunObjective(objective);
 
@@ -737,6 +745,7 @@ async function admitRunInternal(
     policyRef: input.policyRef,
     sandboxProfileRef: input.sandboxProfileRef,
     verifierSpecRef: input.verifierSpecRef,
+    ...(dependency ? { dependencyPolicyRef: dependency.policyRef } : {}),
     credentialGrantRefs: input.credentialGrantRefs ?? [],
     budgets
   };
@@ -862,7 +871,9 @@ async function admitRunInternal(
     verifierSpecRef: input.verifierSpecRef,
     unverifiedConsentRef: runSpec.unverifiedConsentRef ?? null,
     credentialGrantRefs: runSpec.credentialGrantRefs,
-    ...(verifierConsumption ? { authorizationReceiptRefs: verifierConsumption.refs } : {})
+    ...(dependency ? { dependencyPolicyRef: dependency.policyRef } : {}),
+    ...((verifierConsumption?.refs.length ?? 0) + (dependency?.receiptRefs.length ?? 0) ? {
+      authorizationReceiptRefs: [...(verifierConsumption?.refs ?? []), ...(dependency?.receiptRefs ?? [])] } : {})
   });
 
   let committed = false;
@@ -909,6 +920,8 @@ async function admitRunInternal(
     }
     for (const artifact of published) insertArtifactMetadata(connection, artifact, now);
     verifierConsumption?.commit(connection, freshNow);
+    if (installed) consumeInstalledRunDependency(installed.prepared, driver, owner, installed.identity, connection,
+      { runId, admissionIntentDigest, sourceInspectionId: installed.data.source.inspectionId }, freshNow);
 
     connection
       .prepare(

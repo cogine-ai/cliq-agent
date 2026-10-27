@@ -7,7 +7,9 @@ import { decodeCredentialAuthorityOperation, type CredentialAuthorityOperationV1
 import { assertBoundedJsonValue, parseJsonStrict } from './json.js';
 import { decodeWireRun, decodeWireSession, decodeWireCheckpoint, decodeWireEvent, decodeWireJournal,
   decodeWireArtifactDescriptor, decodeWireGrantSummary, decodeWireRuntimeBundleSummary, decodeWireRunItemReference, decodeWireSessionItem } from './control-wire-data.js';
-import type { AuthorizationCreateRequest, AuthorizationRevokeRequest, SourceGitInspectionCreateRequest, SourceReadScopeCreateRequest, VerifierIdentityCreateRequest } from './authorization.js';
+import type { AuthorizationCreateRequest, AuthorizationRevokeRequest, SourceGitInspectionCreateRequest, SourceReadScopeCreateRequest, VerifierIdentityCreateRequest,
+  DependencyInstallScriptsCreateRequest, DependencyInstallScriptsDecisionV1 } from './authorization.js';
+import { decodeDependencyScriptConditions } from './dependency.js';
 import { normalizeSourceReadScopePath } from './source-read-scope.js';
 import { decodeSandboxResourceOptions, normalizeRunSubmitRequest, type RunSubmitRequest } from './control-submit.js';
 import { normalizeRunApplyRequest, type RunApplyRequest } from './control-apply.js';
@@ -83,6 +85,7 @@ type ErrorBase = { schemaVersion: 1; messageCode: string };
 type InvalidError = ErrorBase & { code: 'INVALID_REQUEST'; retryable: false;
   issues: Array<{ path: string; issueCode: string }> };
 export type InstalledControlErrorV1 = InvalidError
+  | (ErrorBase & { code: 'AUTHORIZATION_REQUIRED'; retryable: false; errorId: string; requiredAuthorization: DependencyInstallScriptsDecisionV1 })
   | import('../kernel/types.js').ResultUnavailableControlErrorV1
   | (ErrorBase & { code: 'RESOURCE_EXHAUSTED'; retryable: true; resourceKind: 'run_queue' | 'state_storage'; retryAfterMs: 1000 })
   | (ErrorBase & { code: 'RATE_LIMITED'; retryable: true; retryAfterMs: 1000 })
@@ -195,6 +198,15 @@ export function decodeAuthorizationCreateRequest(value: unknown): AuthorizationC
   json(value);
   const data = controlWireRecord(value, ['protocolVersion', 'method', 'requestId', 'requestDigest', 'decision'], ['ttlMs']);
   const decision = controlWireRecord(data.decision, ['kind', 'purpose', 'target']);
+  if (decision.kind === 'dependency_install_scripts') {
+    if (data.protocolVersion !== 1 || data.method !== 'authorization.create') throw new TypeError('invalid dependency authorization method');
+    decodeDependencyInstallScriptsDecision(decision);
+    assertRequestId(data.requestId as string); controlWireRef(data.requestDigest);
+    const { requestDigest, ...core } = data;
+    if (canonicalSha256(core) !== requestDigest) throw new TypeError('authorization request digest does not rehash');
+    if (Object.hasOwn(data, 'ttlMs')) controlWireInteger(data.ttlMs, 1, 86_400_000);
+    return immutableSnapshot(data) as DependencyInstallScriptsCreateRequest;
+  }
   if (decision.kind === 'read_scope') {
     if (data.protocolVersion !== 1 || data.method !== 'authorization.create' || decision.purpose !== 'source')
       throw new TypeError('invalid source read authorization');
@@ -223,6 +235,17 @@ export function decodeAuthorizationCreateRequest(value: unknown): AuthorizationC
   controlWireRecord(target.resourceCeiling, Object.keys(resources));
   if (Object.hasOwn(data, 'ttlMs')) controlWireInteger(data.ttlMs, 1, 86_400_000);
   return immutableSnapshot(data) as SourceGitInspectionCreateRequest;
+}
+/** Exact intent data. Only a later owning capture/Run transaction can consume
+ * an authorization; decoding this value supplies no native or source fact. */
+export function decodeDependencyInstallScriptsDecision(value: unknown): DependencyInstallScriptsDecisionV1 {
+  const decision = controlWireRecord(value, ['kind', 'purpose', 'target']);
+  if (decision.kind !== 'dependency_install_scripts' || decision.purpose !== 'dependency_install_scripts') throw new TypeError('invalid dependency script consent');
+  const target = controlWireRecord(decision.target, ['sessionId', 'sourceInspectionId', 'expectedWorkspaceIdentityDigest', 'conditions']);
+  controlWireText(target.sessionId); controlWireRef(target.expectedWorkspaceIdentityDigest);
+  if (!/^[A-Za-z0-9_-]{43}$/u.test(controlWireText(target.sourceInspectionId))) throw new TypeError('invalid dependency capture locator');
+  decodeDependencyScriptConditions(target.conditions);
+  return immutableSnapshot(decision) as DependencyInstallScriptsDecisionV1;
 }
 export function decodeVerifierIdentityCreateRequest(value: unknown): VerifierIdentityCreateRequest {
   json(value);
@@ -484,6 +507,9 @@ export function decodeInstalledControlResponse<M extends InstalledControlMethod>
   const response = decodeInstalledControlEnvelope(value, request.method);
   if (!response.ok) {
     const error = response.error;
+    if (error.code === 'AUTHORIZATION_REQUIRED' && 'requiredAuthorization' in error &&
+        (request.method !== 'run.submit' || request.dependency.mode !== 'locked' || !request.dependency.allowInstallScripts ||
+          error.requiredAuthorization.target.sessionId !== request.sessionId)) throw new TypeError('dependency consent refusal differs from its requested Session and effect');
     if (error.code === 'RESULT_UNAVAILABLE' && (!('runId' in request) || error.runId !== request.runId)) throw new TypeError('result refusal differs from requested Run');
     if (error.code === 'EVENT_CURSOR_EXPIRED' && (request.method !== 'run.attach' || error.snapshot.run.id !== request.runId || request.afterEventSeq >= error.earliestEventSeq - 1))
       throw new TypeError('expired cursor refusal differs from requested interval');
@@ -576,7 +602,8 @@ function decodeInstalledControlError(value: unknown, method: InstalledControlMet
     code === 'INCOMPATIBLE_PROTOCOL' ? ['supportedControlRange', 'supportedHeadlessRange', 'upgradeAction'] :
     code === 'RATE_LIMITED' ? ['retryAfterMs'] : code === 'RESOURCE_EXHAUSTED' ? ['resourceKind', 'retryAfterMs'] :
     code === 'RESULT_UNAVAILABLE' ? ['runId', 'status', ...(error.retryable === true ? ['currentRevision'] : ['terminalDetailRef'])] :
-    code === 'REVISION_CONFLICT' ? ['currentRevision', 'conflict'] : code === 'EVENT_CURSOR_EXPIRED' ? ['earliestEventSeq', 'latestEventSeq', 'snapshot'] : [];
+    code === 'REVISION_CONFLICT' ? ['currentRevision', 'conflict'] : code === 'EVENT_CURSOR_EXPIRED' ? ['earliestEventSeq', 'latestEventSeq', 'snapshot'] :
+    code === 'AUTHORIZATION_REQUIRED' && Object.hasOwn(error, 'requiredAuthorization') ? ['requiredAuthorization', 'errorId'] : [];
   controlWireRecord(error, [...base, ...extra]);
   if (error.schemaVersion !== 1) throw new TypeError('invalid control error schema');
   controlWireText(error.messageCode);
@@ -608,7 +635,11 @@ function decodeInstalledControlError(value: unknown, method: InstalledControlMet
       throw new TypeError('invalid fixed capacity refusal');
   } else {
     if (error.retryable !== false) throw new TypeError('invalid control refusal retryability');
-    if (code === 'INVALID_REQUEST') {
+    if (code === 'AUTHORIZATION_REQUIRED' && Object.hasOwn(error, 'requiredAuthorization')) {
+      if (method !== 'run.submit' || error.messageCode !== 'dependency_script_authorization_required') throw new TypeError('unexpected dependency script consent request');
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(controlWireText(error.errorId))) throw new TypeError('invalid dependency consent correlation');
+      decodeDependencyInstallScriptsDecision(error.requiredAuthorization);
+    } else if (code === 'INVALID_REQUEST') {
       if (!Array.isArray(error.issues) || error.issues.length > 1000) throw new TypeError('invalid control issues');
       for (const issue of error.issues) {
         const data = controlWireRecord(issue, ['path', 'issueCode']); controlWireText(data.path, 4096); controlWireText(data.issueCode);

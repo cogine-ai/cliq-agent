@@ -161,12 +161,15 @@ async function readStopReference(driver: SqliteDriver, artifacts: ArtifactCatalo
     if (!cause) throw new TypeError('verification stop has no reproducible exhausted required failure');
     requireEqual(agentStopCause(intent), cause, 'verification stop cause');
   } else if (intent.origin === 'kernel_integrity') {
-    const cause = await readVerifierIntegrityCause(driver, artifacts, closure, intent.createdAt);
+    const cause = intent.reason === 'verifier_mutated_source' ? await readVerifierIntegrityCause(driver, artifacts, closure, intent.createdAt) :
+      await (await import('./dependency-failure-cause.js')).readDependencyIntegrityCause(driver, artifacts, closure, intent.createdAt, intent.registeredCheckpointId, intent.registeredRunRevision, intent.registeredJournalSeq);
     if (!cause) throw new TypeError('verifier integrity stop has no exact typed mutation evidence');
     requireEqual(agentStopCause(intent), cause, 'verifier integrity stop cause');
   } else if (intent.origin === 'policy_deny' && intent.subjectKind === 'delivery') {
     if (!deliveryDenial) throw new TypeError('delivery policy stop has no original decision');
     requireEqual(agentStopCause(intent), deliveryDenial, 'winning delivery direct-policy denial');
+  } else if (intent.origin === 'policy_deny' && intent.subjectKind === 'dependency_install_scripts') {
+    await (await import('./dependency-script-stop.js')).validateDependencyScriptStop(driver, artifacts, closure, intent);
   }
   await validateVerifierPolicyDenialHistory(driver, artifacts, closure);
   await validateVerifierStoppedHistory(driver, artifacts, closure);
@@ -253,7 +256,8 @@ async function validateStopRecoveryData(driver: SqliteDriver, artifacts: Artifac
   parseCanonicalTime(preparedAt);
   if (preparedAt < intent.createdAt || preparedAt > run.updatedAt) throw new TypeError('terminal preparation time is outside its intent and committed Checkpoint');
   const abandoned = [...await validateInstalledBrokerTerminalHistory(driver, artifacts, closure, detail),
-    ...await validateVerifierUnknownTerminalHistory(driver, artifacts, closure, detail)]
+    ...await validateVerifierUnknownTerminalHistory(driver, artifacts, closure, detail),
+    ...await (await import('./dependency-unknown-retirement.js')).validateDependencyUnknownTerminalHistory(driver, artifacts, closure, detail)]
     .sort((left, right) => left.unknownJournalSeq - right.unknownJournalSeq ||
       Buffer.compare(Buffer.from(left.opId), Buffer.from(right.opId)) || left.attempt - right.attempt);
   const hasPublicationClaim = journal.some(entry => entry.opKind === 'publish' && entry.phase === 'dispatch_claimed');
@@ -279,15 +283,20 @@ async function validateStopRecoveryData(driver: SqliteDriver, artifacts: Artifac
   const modelNoRelease = await validateInstalledModelNoReleaseHistory(driver, artifacts, closure);
   const privateRollbacks = await validatePrivateToolRollbackHistory(driver, artifacts, closure);
   const verifierStops = await validateVerifierStoppedHistory(driver, artifacts, closure);
+  const dependencyClosed = new Set<number>();
+  if (spec.dependencyPolicyRef) for (const progress of (await (await import('./dependency-history.js')).readDependencyHistory(driver, artifacts, closure)).values()) {
+    if (progress.failed) { const row = journal.find(entry => entry.opId === progress.failed!.opId && entry.attempt === progress.failed!.attempt && entry.phase === 'failed'); if (row) dependencyClosed.add(row.seq); }
+  }
   const unclaimedPublications = !hasPublicationClaim && spec.operation === 'delivery' && journal.some(entry => entry.opKind === 'publish')
     ? data ? await data.unclaimedStopHistory() : await readUnclaimedPublicationStopHistory(driver, artifacts, closure) : new Set<number>();
   for (const { entry, hasClaim } of stopInvocationHistory(journal).values()) {
     if (entry.opKind === 'publish' && (publication?.closedPublicationJournalSeqs.has(entry.seq) || unclaimedPublications.has(entry.seq))) continue;
-    if (['model', 'verifier'].includes(entry.opKind) && entry.replayClass === 'retry' && entry.phase === 'unknown' && abandoned.some(closed =>
+    if ((['model', 'verifier'].includes(entry.opKind) && entry.replayClass === 'retry' || entry.opKind === 'tool' &&
+        entry.target === 'builtin:dependency-acquire' && entry.replayClass === 'workspace-rollback-retry') && entry.phase === 'unknown' && abandoned.some(closed =>
       closed.opId === entry.opId && closed.attempt === entry.attempt && closed.unknownJournalSeq === entry.seq &&
       closed.budgetSettlementRef === entry.budgetSettlementRef)) continue;
     if (entry.phase === 'failed' && (entry.opKind === 'model' && modelNoRelease.has(entry.seq) ||
-        entry.opKind === 'tool' && privateRollbacks.has(entry.seq) || entry.opKind === 'verifier' && verifierStops.has(entry.seq))) continue;
+        entry.opKind === 'tool' && (privateRollbacks.has(entry.seq) || dependencyClosed.has(entry.seq)) || entry.opKind === 'verifier' && verifierStops.has(entry.seq))) continue;
     if (!['model', 'tool', 'verifier', 'child_admission', 'child_merge', 'child_await', 'skill_resource'].includes(entry.opKind) || (entry.phase !== 'completed' &&
         (entry.phase !== 'failed' || hasClaim))) throw new TypeError('terminal stop retains unresolved dispatch evidence');
     if (entry.phase === 'failed' && entry.errorRef === run.stopIntentRef && entry.timestamp !== preparedAt) throw new TypeError('stop refund has no atomic terminal owner');

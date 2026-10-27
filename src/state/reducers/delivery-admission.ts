@@ -293,8 +293,8 @@ export const readDeliveryRunAdmission = stateOperation('RECOVERY_REQUIRED', asyn
       intent !== admission.admission_intent_digest || run.id !== identityHash('cliq-run-id-v1', admission.principal_id, 'run.apply', request.admissionKey))
     invalid('delivery original request no longer reproduces its Run identity');
   if (request.sourceRunId === run.id) invalid('delivery cannot select its own result as an original source');
-  if (request.verifierExecutionGrantIds.length || spec.dependencyPolicyRef !== undefined)
-    throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'retained delivery dependency/template admission is not implemented');
+  if (request.verifierExecutionGrantIds.length)
+    throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'retained delivery verifier template admission is not implemented');
   const channel = await readHistoricalControlChannel(driver, artifacts, { principalId: admission.principal_id,
     channelIdentityRef: original.channelIdentityRef, channelIdentityDigest: original.channelIdentityDigest });
   if (channel.channel.openedAt > run.createdAt) invalid('delivery admission precedes its original channel');

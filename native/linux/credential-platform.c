@@ -21,7 +21,7 @@
 #include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
-#ifdef CLIQ_MODEL_BROKER_MODULE
+#if defined(CLIQ_MODEL_BROKER_MODULE) || defined(CLIQ_DEPENDENCY_REGISTRY_BROKER_MODULE)
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <openssl/pem.h>
@@ -1042,7 +1042,7 @@ static napi_value user(napi_env env, napi_callback_info info) {
   }
   napi_value result; napi_create_object(env, &result); set_number(env, result, "uid", uid); set_number(env, result, "gid", gid); set_string(env, result, "home", home); return result;
 }
-#ifndef CLIQ_MODEL_BROKER_MODULE
+#if !defined(CLIQ_MODEL_BROKER_MODULE) && !defined(CLIQ_DEPENDENCY_REGISTRY_BROKER_MODULE)
 static napi_value initialize(napi_env env, napi_value exports) {
   const napi_property_descriptor methods[] = {
     {"currentUser", NULL, user, NULL, NULL, NULL, napi_default, NULL},
@@ -1054,6 +1054,8 @@ static napi_value initialize(napi_env env, napi_value exports) {
   set_number(env, exports, "interfaceVersion", 2); set_number(env, exports, "installedUpgradeInterfaceVersion", 1); return exports;
 }
 NAPI_MODULE(cliq_linux_credential_platform, initialize)
+#elif defined(CLIQ_DEPENDENCY_REGISTRY_BROKER_MODULE)
+#include "dependency-broker.h"
 #else
 /* A distinct signed provider image. Its private handle owns the token, key,
  * copied request, connection and cancellation. No native call selects SQL

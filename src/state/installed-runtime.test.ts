@@ -21,7 +21,9 @@ import { STATE_OWNER_NATIVE_ENTRY_ID, STATE_OWNER_NATIVE_RELATIVE_PATH } from '.
 import { openInstalledLinuxWorkerLauncher } from '../sandbox/linux-worker.js';
 import { KernelStorageError } from './errors.js';
 import { GUEST_EXTRACTOR_RECIPE } from '../sandbox/guest-toolchain.js';
-import { validateBundle } from './installed-artifacts.js';
+import { validateBundle, validateInstalledStructuredArtifacts } from './installed-artifacts.js';
+import { NPM_DATA_RECIPE } from '../sandbox/npm-data-image.js';
+import { NPM_DEPENDENCY_RECIPE } from '../sandbox/dependency-recipe.js';
 import { observeInstalledCredentialSupervisor } from './installed-services.js';
 import { INSTALLED_INSTALL_PHASE_CHANNEL, INSTALLED_INSTALL_PHASES, INSTALLED_WORK_CHANNEL, type InstalledWorkSnapshot } from './installed-work-diagnostics.js';
 import { buildBundledSkillPackageData } from './bundled-skill-package.js';
@@ -131,6 +133,39 @@ const sourceInspectorFile = (overrides: Partial<InstallerFile> = {}): InstallerF
   entryId: 'source_git_inspector', role: 'platform_helper', version: '1',
   relativePath: 'helpers/source-git-inspector.mjs', executable: false,
   bytes: Buffer.from('// signed installer-only source inspector; never executed\n'), ...overrides,
+});
+
+test('npm data has one exact signed non-executable pair without widening other script or bundle-object roles', async () => {
+  // Real signatures over metadata only. No opaque file here is executed or
+  // materialized, and known data-image pins are not an installation receipt.
+  const root = await mkdtemp(path.join(os.tmpdir(), 'cliq-npm-entry-contract-'));
+  try {
+    const signed = await writeInstallerOnlyPackage(path.join(root, 'package'));
+    const adapter: RuntimeBundleManifest['entries'][number] = { entryId: NPM_DEPENDENCY_RECIPE.adapterId, role: 'tool_adapter', version: '1',
+      relativePath: NPM_DEPENDENCY_RECIPE.adapterPath, executable: false, digest: sha256Bytes(Buffer.from(';')), byteCount: 1 };
+    const image: RuntimeBundleManifest['entries'][number] = { entryId: NPM_DATA_RECIPE.entryId, role: 'bundle_object', version: NPM_DATA_RECIPE.version,
+      relativePath: NPM_DATA_RECIPE.relativePath, executable: false, digest: NPM_DATA_RECIPE.completeImageDigest, byteCount: NPM_DATA_RECIPE.completeImageBytes };
+    const keys = generateKeyPairSync('ed25519');
+    const signEntries = (extra: RuntimeBundleManifest['entries']) => {
+      const bundle = { ...signed.bundle, entries: [...signed.bundle.entries, ...extra], publisherKeyId: 'npm-data-pair-fixture', manifestDigest: '', signature: '' };
+      const { signature: _signature, manifestDigest: _digest, ...core } = bundle;
+      bundle.manifestDigest = canonicalSha256(core);
+      bundle.signature = sign(null, Buffer.from(`cliq-runtime-bundle-v1\0${bundle.manifestDigest}`), keys.privateKey).toString('base64');
+      return { bundle, releaseKeys: [{ keyId: bundle.publisherKeyId, publicKeyPem: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString() }] };
+    };
+    const positive = signEntries([adapter, image]);
+    const accepted = validateBundle(positive.bundle, positive.releaseKeys);
+    assert.equal(accepted.entries.find(entry => entry.entryId === NPM_DATA_RECIPE.entryId)!.byteCount, 11_950_276);
+    const buffers = new Map(signed.contents.map(entry => [sha256Bytes(entry.bytes), entry.bytes]));
+    buffers.set(adapter.digest, Buffer.from(';'));
+    assert(validateInstalledStructuredArtifacts(accepted, buffers).objects.some(entry => entry.artifactRef === image.digest && entry.schemaKind === 'cliq-npm-data-image-v1'));
+    for (const extra of [
+      [adapter], [image], [adapter, { ...image, digest: 'a'.repeat(64) }], [adapter, { ...image, byteCount: image.byteCount + 1 }],
+      [adapter, { ...image, version: '10.9.3' }], [adapter, { ...image, executable: true }],
+      [{ ...adapter, executable: true }, image], [{ ...adapter, relativePath: 'adapters/arbitrary.mjs' }, image],
+      [{ ...adapter, entryId: 'arbitrary_js' }, image], [{ ...adapter, byteCount: 1_048_577 }, image],
+    ]) { const invalid = signEntries(extra); assert.throws(() => validateBundle(invalid.bundle, invalid.releaseKeys), { code: 'ARTIFACT_MISMATCH' }); }
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test('the signed installer accepts only the fixed source inspector as non-executable helper code', async () => {

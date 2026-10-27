@@ -159,6 +159,6 @@ export type RunContextCompactionItem = ItemIdentity & {
   sourceItemsDigest: string;
 };
 
-export type ContinuationItem = import('./child-merge.js').ChildMergePolicyDecisionItem | ChildHandleItem | ChildResultItem | ChildMergeBatchItem | ChildMergeResultItem | ModelTurnItem | ToolBatchItem | ToolResultItem | RunContextCompactionItem | ToolPolicyDecisionItem | InputRequestItem | UserInputItem | FinalCandidateItem |
+export type ContinuationItem = import('./dependency.js').DependencyReadyItem | import('./dependency.js').DependencyFailureItem | import('./dependency-script-approval.js').DependencyScriptDecisionItem | import('./child-merge.js').ChildMergePolicyDecisionItem | ChildHandleItem | ChildResultItem | ChildMergeBatchItem | ChildMergeResultItem | ModelTurnItem | ToolBatchItem | ToolResultItem | RunContextCompactionItem | ToolPolicyDecisionItem | InputRequestItem | UserInputItem | FinalCandidateItem |
   VerifierPolicyDecisionItem | VerifierResultItem | RepairDiagnosticItem | VerifierStopItem |
   DeliveryMergeItem | DeliveryMergeConflictItem | DeliveryDecisionItem | DeliveryPolicyDecisionItem | PublicationPathProgressItem | PublicationPathResultItem | PublicationLateObservationItem;

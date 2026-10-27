@@ -393,7 +393,9 @@ test('authorization diagnosis records only existing await boundaries and rethrow
   assert.equal(body.split(selectedPhase).length, 2, 'only the original execution-identity branch records toolchain selection');
   const selectedStart = body.indexOf(selectedPhase), selectedAwait = body.indexOf('const selected = await readRetainedVerifierToolchain');
   assert(selectedStart >= 0 && selectedAwait > selectedStart && selectedAwait < body.indexOf("diagnosis?.stage('publish_request');"));
-  assert(body.includes("const target = decision.kind === 'read_scope' ? readScope!.target : decision.kind === 'source_git_inspection'\n" +
+  assert(body.includes("const dependency = decision.kind === 'dependency_install_scripts'\n" +
+    '      ? await selectDependencyScriptsTarget(driver, artifacts, owner, runtime, identity.principalId, request as DependencyInstallScriptsCreateRequest, signal) : undefined;'));
+  assert(body.includes("const target = decision.kind === 'dependency_install_scripts' ? dependency!.target : decision.kind === 'read_scope' ? readScope!.target : decision.kind === 'source_git_inspection'\n" +
     "      ? await selectSourceInspectionTarget(driver, artifacts, runtime, identity.principalId, request as SourceGitInspectionCreateRequest, signal)\n" +
     '      : await (async () => {\n        const selected = await readRetainedVerifierToolchain'),
   'the unchanged verifier selection remains inside its execution-only branch, after source-specific selection');

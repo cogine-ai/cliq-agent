@@ -53,10 +53,10 @@ async function readMaterial(artifacts: ArtifactCatalog, original: ChildAdmission
       originalOwner.state === 'terminal' && committed > originalOwner.releasedAt ||
       spec.sourceProjectionRef !== parentSpec.sourceProjectionRef || spec.sandboxProfileRef !== parentSpec.sandboxProfileRef)
     invalid();
-  // No dependency acquisition backend has been implemented. Inheritance may
-  // not turn its retained policy into supported execution or a broader union.
-  if (spec.dependencyPolicyRef !== undefined || capability.childDependencyPolicyRef !== undefined)
-    throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'child dependency acquisition requires its implemented admission and execution closure');
+  if (spec.dependencyPolicyRef !== capability.childDependencyPolicyRef || spec.dependencyPolicyRef !==
+      (delegated.verifierMode === 'inherit_parent' ? parentSpec.dependencyPolicyRef : undefined)) invalid();
+  if (spec.dependencyPolicyRef) (await import('../kernel/dependency.js')).decodeDependencyPolicy(
+    await readCanonicalArtifact(artifacts, spec.dependencyPolicyRef));
   const assembly = decodeRetainedRunAssembly(await readCanonicalArtifact(artifacts, spec.assemblyRef));
   if (!same(assembly.runtime, original.assembly.runtime) || assembly.mcpServers.length ||
       !same(spec.credentialGrantRefs, assembly.provider.credentialGrantRefs) ||

@@ -185,6 +185,9 @@ export const admitChildRun = stateOperation('INVALID_REQUEST', async (driver: Sq
   const childRunId = identityHash('cliq-run-id-v1', authority.controlAuthority.principalId, 'delegate', admissionKey);
   if (driver.prepare('SELECT 1 FROM runs WHERE id = ?').get(childRunId))
     throw new KernelStorageError('REVISION_CONFLICT', 'delegate must replay its committed original result instead of admitting another child');
+  const dependencyReady = delegated.verifierMode === 'inherit_parent' && parentSpec.dependencyPolicyRef
+    ? await (await import('./dependency-inherited.js')).readParentDependencyReadyAtCheckpoint(driver, reads,
+      { runId: parent.id, checkpointId: checkpoint.id }) : undefined;
   const fork = await planChildForkSource(reads, parentSpec, checkpoint.workspaceStateRef, signal);
   const composition = await planChildComposition(reads, { request: delegated, parentSpec,
     principalId: authority.controlAuthority.principalId, workspaceIdentityDigest: source.workspaceIdentityDigest,
@@ -316,6 +319,7 @@ export const admitChildRun = stateOperation('INVALID_REQUEST', async (driver: Sq
   driver.transaction(connection => {
     signal?.throwIfAborted(); assertActiveStateOwner(connection, owner);
     const before = sampleCanonicalNow(); outcome = advanceTimeFence(connection, owner.ownerEpoch, before); if (outcome !== 'healthy') return;
+    dependencyReady?.assertUnchanged();
     requireEqual(readRun(connection, parent.id), parent, 'original parent child admission cut');
     requireEqual(readChildAllocationsForRun(connection, parent.id), selected.childAllocations, 'exact original parent outgoing reservation cut');
     requireEqual(readCheckpoint(connection, parent.latestCheckpointId), checkpoint, 'original parent child fork Checkpoint');

@@ -468,6 +468,12 @@ async function validateJournalArtifactsAndBudgets(
   return { reserved, consumed };
 }
 
+/** Complete original Journal data checks without entering Run recovery or
+ * authorization readers. This confers no claim, retry or native authority. */
+export function readRetainedJournalData(artifacts: ArtifactCatalog, journal: InvocationJournalEntry[]) {
+  return validateJournalArtifactsAndBudgets(artifacts, validateJournalGraph(journal));
+}
+
 function budgetLessThanOrEqual(left: BudgetUsage, right: BudgetUsage): boolean {
   return (
     left.modelTokens <= right.modelTokens &&

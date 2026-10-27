@@ -37,6 +37,8 @@ import { inspectInstalledWorkerIdentity, inspectInstalledWorkerLease, assertInst
 import { inspectInstalledOwnerHistory, waitForInstalledOwnerHistory } from './installed-read-control.js';
 import { assertInstalledVerifierOutcome, InstalledVerifierOutcomeError } from './installed-verifier-result.js';
 import { runInstalledDeliveryCases } from './installed-delivery-journey.js';
+import { createInstalledDependencyResponder, installedDependencyPackage, INSTALLED_DEPENDENCY_PACKAGE_PATH,
+  INSTALLED_DEPENDENCY_PROFILE, runInstalledDependencyCases } from './installed-dependency-journey.js';
 import { createInstalledChildrenResponder, INSTALLED_CHILDREN_PROFILE, INSTALLED_CHILD_CASES, runInstalledChildCase } from './installed-children-journey.js';
 import { InstalledDeliveryOutcomeError } from './installed-delivery-result.js';
 import type { InstalledDeliveryVerifierRetirementIdentity } from './installed-delivery-result.js';
@@ -154,18 +156,21 @@ export async function transferPackage(filename: string, uid: number, gid: number
 
 
 export async function runInstalledNodeJourney(filename: string, journeyKind: 'verifier' | 'delivery',
-  options: Readonly<{ publicationRetirementDiagnostics?: true; publicationRetirementStop?: true; publicationRetirementLate?: true }> = {}): Promise<void> {
+  options: Readonly<{ publicationRetirementDiagnostics?: true; publicationRetirementStop?: true; publicationRetirementLate?: true;
+    npmDependencyArchive?: Buffer }> = {}): Promise<void> {
   assert.equal(process.platform, 'linux'); assert.equal(process.arch, 'x64');
   assert(journeyKind === 'verifier' || journeyKind === 'delivery');
   assert.deepEqual(Object.keys(options).sort(), [
     ...(options.publicationRetirementDiagnostics === true ? ['publicationRetirementDiagnostics'] : []),
     ...(options.publicationRetirementStop === true ? ['publicationRetirementStop'] : []),
     ...(options.publicationRetirementLate === true ? ['publicationRetirementLate'] : []),
+    ...(options.npmDependencyArchive === undefined ? [] : ['npmDependencyArchive']),
   ].sort());
   if (options.publicationRetirementStop) assert.equal(options.publicationRetirementDiagnostics, true);
   if (options.publicationRetirementLate) assert.equal(options.publicationRetirementDiagnostics, true);
   assert(!options.publicationRetirementStop || !options.publicationRetirementLate);
   if (options.publicationRetirementDiagnostics) assert.equal(journeyKind, 'delivery');
+  if (options.npmDependencyArchive) { assert(Buffer.isBuffer(options.npmDependencyArchive)); assert.equal(journeyKind, 'verifier'); }
   // Trusted disposable qualification composition only, including the three
   // owned delayed-volume campaigns. No runtime or public-wire option exists.
   const storeFailureDiagnostics = true;
@@ -181,6 +186,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
   if (journeyKind === 'verifier') report.ordinaryChildrenFixtureProfile = INSTALLED_CHILDREN_PROFILE;
   if (journeyKind === 'verifier') report.ordinarySkillsFixtureProfile = INSTALLED_SKILLS_PROFILE;
   if (journeyKind === 'verifier') report.ordinarySourceIncludesFixtureProfile = 'single_builtin_entry_original_capture_v1';
+  if (options.npmDependencyArchive) report.dependencyFixtureProfile = INSTALLED_DEPENDENCY_PROFILE;
   if (journeyKind === 'delivery') Object.assign(report, {
     scope: 'actual signed Linux explicit Delivery from verified yolo sources, direct-policy publication, noOp, real verifier merge, cancel and public reconnect/restart; not interactive ask/deny, paid provider, release, reboot or complete I1 qualification',
     interactiveApprovalQualified: false, preciseClaimedCloseCutQualified: false,
@@ -379,7 +385,12 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     const value = parseJsonStrict(result.stdout.trim()) as Record<string, any>;
     assert.equal(value.serviceUid, ledger.uid); assert.equal(value.connectionClosed, true); assert(Array.isArray(value.items)); return value;
   };
-  let server: Server | undefined, daemon: ChildProcess | undefined, daemonExit: Promise<void> | undefined;
+  let server: Server | undefined, registryServer: Server | undefined, daemon: ChildProcess | undefined, daemonExit: Promise<void> | undefined;
+  const registrySockets: Promise<void>[] = [];
+  const dependencyResponder = createInstalledDependencyResponder({ model, readCas,
+    async readCut(runId) { assert(inspectionClient); return accepted(await inspectionClient.send({ protocolVersion: 1, method: 'run.get', runId }), 'run.get'); } });
+  const dependencyArchive = options.npmDependencyArchive ? installedDependencyPackage() : undefined;
+  let registryOrigin: string | undefined, registryGets = 0;
   let expectedToolNames: readonly string[] | undefined;
   let daemonPid: number | undefined, daemonStart: string | undefined;
   let services: { supervisorUnit: string; keeperUnit: string } | undefined;
@@ -421,6 +432,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
   // download the complete object again. Never use this map as an I/O shortcut.
   const originalPublicResultBytes = new Map<string, Buffer>();
   let ordinaryChildDownloadStage = false, ordinaryChildPublicDownloads = 0;
+  let dependencyDownloadStage = false, dependencyPublicDownloads = 0;
   const readPublicArtifact = async (ref: string, expectedDescriptor?: ArtifactDescriptorV1): Promise<Buffer> => {
     assert(client); assert.match(ref, /^[a-f0-9]{64}$/u);
     let artifact: ArtifactDescriptorV1 | undefined, bytes: Buffer | undefined;
@@ -459,10 +471,11 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     assert.equal(artifact.sizeBytes, expected.length); assert(expected.length > 0 && expected.length <= 1_048_576);
     const bytes = await readPublicArtifact(artifact.ref, artifact); assert(bytes.equals(expected));
     if (ordinaryChildDownloadStage) assert(++ordinaryChildPublicDownloads <= 4, 'the two successful child/parent Runs each download their complete result and diff');
+    if (dependencyDownloadStage) assert(++dependencyPublicDownloads <= 10, 'three locked roots, one child and one Delivery each download their complete original result and diff');
     const original = originalPublicResultBytes.get(artifact.ref);
     if (original) assert(bytes.equals(original), 'reconnect/restart must preserve the exact original downloaded bytes');
     else { originalPublicResultBytes.set(artifact.ref, Buffer.from(bytes)); assert(originalPublicResultBytes.size <=
-      (journeyKind === 'verifier' ? ordinaryChildDownloadStage ? 15 : 12 : 10)); }
+      (journeyKind === 'verifier' ? dependencyDownloadStage ? 25 : ordinaryChildDownloadStage ? 15 : 12 : 10)); }
     return bytes;
   };
   const resultQueries = async (cut: Record<string, any>): Promise<Response[]> => {
@@ -552,6 +565,14 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         const body = parseJsonStrict(bytes.toString('utf8')) as Record<string, any>;
         assert.equal(body.model, model); assert.equal(body.stream, false); assert.equal(body.max_tokens, 4096);
         assert(expectedToolNames, 'the exact signed tool manifest must precede any provider request');
+        const dependencyPayload = await dependencyResponder.respond(body);
+        if (dependencyPayload) {
+          assert(options.npmDependencyArchive && dependencyArchive);
+          dependencyResponder.assertTools(body, expectedToolNames);
+          postCount++; const response = Buffer.from(JSON.stringify(dependencyPayload)); scanBytes(response);
+          outgoing.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': String(response.length), Connection: 'close' }); outgoing.end(response);
+          report.transport = { postCount, acceptedTcp, acceptedTls, tls13: true, exactCredentialMatched: true }; return;
+        }
         const childPayload = await childResponder.respond(body);
         if (childPayload) {
           postCount++; const response = Buffer.from(JSON.stringify(childPayload)); scanBytes(response);
@@ -645,6 +666,23 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     server.on('secureConnection', socket => { acceptedTls++; if (socket.getProtocol() !== 'TLSv1.3') { noteResponderFailure(new Error('owned responder TLS version refused')); socket.destroy(); } });
     server.on('tlsClientError', () => { noteResponderFailure(new Error('owned responder TLS handshake refused')); });
     await new Promise<void>((resolve, reject) => { server!.once('error', reject); server!.listen(0, '127.0.0.1', resolve); });
+    if (dependencyArchive) {
+      registryServer = createServer({ key, cert, minVersion: 'TLSv1.3', maxVersion: 'TLSv1.3', maxHeaderSize: 65536 }, (incoming, outgoing) => {
+        try {
+          assert.equal(incoming.method, 'GET'); assert.equal(incoming.url, INSTALLED_DEPENDENCY_PACKAGE_PATH);
+          for (const header of ['authorization', 'proxy-authorization', 'cookie', 'transfer-encoding']) assert.equal(incoming.headers[header], undefined);
+          assert(incoming.headers['content-length'] === undefined || incoming.headers['content-length'] === '0');
+          assert(++registryGets <= 4, 'one original GET per whole acquisition must not resend');
+          scanBytes(dependencyArchive);
+          outgoing.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': String(dependencyArchive.length), Connection: 'close' });
+          outgoing.end(dependencyArchive);
+        } catch (error) { noteResponderFailure(error); incoming.destroy(); outgoing.destroy(); }
+      });
+      registryServer.on('connection', socket => registrySockets.push(new Promise<void>(resolve => socket.once('close', resolve))));
+      registryServer.on('tlsClientError', () => noteResponderFailure(new Error('owned public registry TLS handshake refused')));
+      await new Promise<void>((resolve, reject) => { registryServer!.once('error', reject); registryServer!.listen(0, '127.0.0.1', resolve); });
+      const address = registryServer.address(); assert(address && typeof address === 'object'); registryOrigin = `https://127.0.0.1:${address.port}`;
+    }
     key.fill(0); const address = server.address(); assert(address && typeof address === 'object');
     const pin = sha256Bytes(new X509Certificate(cert).publicKey.export({ type: 'spki', format: 'der' }));
     const signed = await buildInstalledSupervisorPackage(recipe.buildFixture, 'complete', { provider: 'openai-compatible', model,
@@ -658,6 +696,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       ...(storeFailureDiagnostics ? { storeFailureDiagnostics: true as const } : {}),
       resourceDiagnostics: true,
       ...(journeyKind === 'verifier' ? { bundledSkills: installedBundledSkill() } : {}),
+      ...(options.npmDependencyArchive ? { npmDependencyArchive: options.npmDependencyArchive } : {}),
       ...(journeyKind === 'verifier' ? { guestImageProfile: 'qualification_max' as const } : {}) });
     assert(signed.guestToolchain && signed.modelAuthority);
     expectedToolNames = signed.modelAuthority.tools.value.entries.map(entry => entry.name);
@@ -735,6 +774,20 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     const registered = command(path.join(recipe.stateRoot, 'runtime/bootstrap'), ['--bootstrap-endpoint'], canonicalJsonBytes({
       schemaVersion: 1, kind: 'commit', requestId: nextId(), commandCore: { ...registerCore, commandDigest: digestOmitting(registerCore, 'commandDigest') } }));
     assert.equal(decodeEndpointAuthorityOperation(success(registered, 'operation')).disposition, 'registered');
+    const registryEndpointId = 'installed-public-dependency-registry';
+    if (registryOrigin) {
+      const target = { scheme: 'https' as const, hostAscii: '127.0.0.1', port: Number(new URL(registryOrigin).port), basePath: '/', redirectPolicy: 'reject_all' as const };
+      const tls = signed.modelAuthority.endpoint.tls, tlsPolicyDigest = canonicalSha256(tls);
+      const dependencyRegistration: EndpointRegistrationV1 = { schemaVersion: 1, format: 'cliq-endpoint-registration-v1',
+        endpointRegistrationId: registryEndpointId, registrationKind: 'user', ownerPrincipalId: principal, purposes: ['dependency_registry'],
+        target, tls, tlsPolicyDigest, endpointIdentityDigest: canonicalSha256({ target, tlsPolicyDigest }), createdAt: new Date().toISOString(), registrationDigest: '' };
+      dependencyRegistration.registrationDigest = digestOmitting(dependencyRegistration, 'registrationDigest');
+      const core = { schemaVersion: 1, kind: 'register', ownerPrincipalId: principal, registration: dependencyRegistration,
+        expectedRegistrationArtifactRef: canonicalSha256(dependencyRegistration), commandDigest: '' };
+      const registered = command(path.join(recipe.stateRoot, 'runtime/bootstrap'), ['--bootstrap-endpoint'], canonicalJsonBytes({
+        schemaVersion: 1, kind: 'commit', requestId: nextId(), commandCore: { ...core, commandDigest: digestOmitting(core, 'commandDigest') } }));
+      assert.equal(decodeEndpointAuthorityOperation(success(registered, 'operation')).disposition, 'registered');
+    }
     const credentialId = 'installed-verifier-credential';
     const enrollment = { schemaVersion: 1, kind: 'enroll', requestId: nextId(), credentialGrantId: credentialId,
       purpose: 'model_endpoint', endpointRegistrationId: registration.endpointRegistrationId,
@@ -1273,6 +1326,46 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     assert.equal(ordinaryChildPublicDownloads, 4);
     assert.equal(originalPublicResultBytes.size, 15, 'the child and unchanged-fork parent independently download the same canonical diff');
     assert.equal(report.cases.length, 10);
+    if (dependencyArchive) {
+      assert(registryOrigin);
+      const originalDownloadPrefix = [...originalPublicResultBytes];
+      ordinaryChildDownloadStage = false; dependencyDownloadStage = true;
+      mark('locked_node_dependencies');
+      const dependencyProof = await runInstalledDependencyCases({ root: recipe.workspace, cliqHome, uid: ledger.uid, gid: ledger.gid,
+        model, modelEndpointId: registration.endpointRegistrationId, modelCredentialId: credentialId,
+        registryEndpointId, registryOrigin, archive: dependencyArchive, guestManifestId: signed.guestToolchain.manifestId, responder: dependencyResponder,
+        request, nextId, readCas, send: (body, timeout) => { assert(client); return client.send(body, timeout); },
+        async readPackage(ref, byteCount) {
+          assert.match(ref, /^[0-9a-f]{64}$/u); assert.equal(byteCount, dependencyArchive.length);
+          const filename = path.join(recipe.stateRoot, 'cas', ref), file = await open(filename, constants.O_RDONLY | constants.O_NOFOLLOW);
+          const scan = scanner.openStream();
+          try {
+            const before = await file.stat({ bigint: true });
+            assert(before.isFile() && before.nlink === 1n && before.uid === BigInt(ledger.uid) && before.size === BigInt(byteCount) && (before.mode & 0o7777n) === 0o400n);
+            const bytes = Buffer.alloc(byteCount); let offset = 0;
+            while (offset < bytes.length) {
+              const result = await file.read(bytes, offset, Math.min(65536, bytes.length - offset), offset); assert(result.bytesRead > 0);
+              scan.scan(bytes.subarray(offset, offset + result.bytesRead)); offset += result.bytesRead;
+            }
+            assert.equal((await file.read(Buffer.alloc(1), 0, 1, offset)).bytesRead, 0);
+            const after = await file.stat({ bigint: true }), named = await lstat(filename, { bigint: true });
+            for (const field of imageFields) { assert.equal(after[field], before[field]); assert.equal(named[field], before[field]); }
+            assert.equal(sha256Bytes(bytes), ref); return bytes;
+          } finally { scan.close(); await file.close(); }
+        },
+        download: async cut => { await resultQueries(cut); },
+        async assertParentRetired(runId, launchId) {
+          const retired = inspectInstalledWorkerRetirementHistory(recipe.stateRoot, ledger.uid, { runId, launchId });
+          try { assert.notEqual('linux-proc-start-ticks:' + await processStart(retired.pid), retired.processStartToken); }
+          catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+        } });
+      assert.equal(ordinaryChildPublicDownloads, 4); assert.equal(dependencyPublicDownloads, 10);
+      for (const [ref, bytes] of originalDownloadPrefix) assert(originalPublicResultBytes.get(ref)!.equals(bytes));
+      report.dependency = { ...dependencyProof, publicArtifactDownloads: { additionalCompleteDownloads: dependencyPublicDownloads,
+        originalPrefixUniqueObjects: originalDownloadPrefix.length, currentUniqueObjects: originalPublicResultBytes.size, originalPrefixPreserved: true } };
+      assert.equal(registryGets, 4); assert.equal(dependencyResponder.posts, 8);
+      assert.equal(postCount, 32); assert.equal(acceptedTcp, postCount); assert.equal(acceptedTls, postCount); assert(!responderFailure);
+    }
     } else {
       const supported = client.hello.enabledFeatureIds.includes('run.apply') && client.hello.enabledFeatureIds.includes('run.approve');
       report.delivery = { diagnosticOnly: true, qualified: false, attemptStarted: false, capabilityAdvertised: supported,
@@ -1816,6 +1909,11 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     try { await client?.close(); } catch (error) { cleanup.push(error); }
     try { await inspectionClient?.close(); } catch (error) { cleanup.push(error); }
     try {
+      if (registryServer) {
+        registryServer.closeAllConnections();
+        await bounded(new Promise<void>(resolve => registryServer!.close(() => resolve())), 10000, 'owned public registry server did not join');
+        await bounded(Promise.all(registrySockets), 10000, 'owned public registry sockets did not join');
+      }
       if (server) {
         server.closeAllConnections();
         await bounded(new Promise<void>(resolve => server!.close(() => resolve())), 10000, 'owned HTTPS server did not join');

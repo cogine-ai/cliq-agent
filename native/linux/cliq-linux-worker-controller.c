@@ -6,6 +6,8 @@
 #include "builtin-tool-protocol.h"
 #include "builtin-result-ack.h"
 #include "builtin-tool-git.h"
+#include "dependency-npm-protocol.h"
+#include "dependency-result-ack.h"
 #include <dirent.h>
 #include <poll.h>
 #include <signal.h>
@@ -43,7 +45,8 @@ enum spawn_rejection {
 struct scope {
     bool created, active, released, stopped, invocation, verifier, verifier_finished;
     unsigned int parent;
-    bool builtin, result_acknowledged;
+    bool builtin, result_acknowledged, dependency, dependency_inputs_sealed;
+    int dependency_modules_fd; struct cliq_dependency_config *dependency_config;
     int builtin_git_fd;
     struct cliq_builtin_config *builtin_config;
     int cgroup, process_group, channel, stdout_fd, stderr_fd;
@@ -204,6 +207,7 @@ static bool close_above_channel(void) { return cliq_close_range(4, UINT_MAX); }
 #include "verifier-init.h"
 #include "builtin-tool-init.h"
 #include "source-git-init.h"
+#include "dependency-npm-init.h"
 
 /* Same installed controller image, executed as PID 1 by --as-pid-1. No user
  * source is loaded until all host generation/cgroup/runtime FDs are closed. */
@@ -214,10 +218,11 @@ static int namespace_init(void) {
     int passed[CLIQ_WORKER_MAX_FDS]; size_t count;
     if (!cliq_receive(3, &request, passed, sizeof(passed) / sizeof(passed[0]), &count) ||
         (request.command != CLIQ_CREATE_WORKER && request.command != CLIQ_CREATE_WRITE && request.command != CLIQ_CREATE_VERIFIER &&
-            request.command != CLIQ_SOURCE_CREATE_BLOCKED && request.command != CLIQ_CREATE_BUILTIN_READ && request.command != CLIQ_CREATE_BUILTIN_BASH) ||
+            request.command != CLIQ_SOURCE_CREATE_BLOCKED && request.command != CLIQ_CREATE_BUILTIN_READ && request.command != CLIQ_CREATE_BUILTIN_BASH && request.command != CLIQ_CREATE_DEPENDENCY_NPM) ||
         count != (request.command == CLIQ_CREATE_WORKER ? 0U : request.command == CLIQ_CREATE_BUILTIN_READ ? 2U :
-            request.command == CLIQ_CREATE_BUILTIN_BASH ? 3U : request.command == CLIQ_SOURCE_CREATE_BLOCKED ?
+            request.command == CLIQ_CREATE_BUILTIN_BASH || request.command == CLIQ_CREATE_DEPENDENCY_NPM ? 3U : request.command == CLIQ_SOURCE_CREATE_BLOCKED ?
             (request.preparation_input_intent_ref[0] ? 2U : 3U) : 1U)) return 70;
+    if (request.command == CLIQ_CREATE_DEPENDENCY_NPM) return dependency_namespace(request, passed);
     if (request.command == CLIQ_CREATE_BUILTIN_READ || request.command == CLIQ_CREATE_BUILTIN_BASH) return builtin_namespace(request, passed);
     if (request.command == CLIQ_CREATE_VERIFIER) return verifier_namespace(request, passed[0]);
     if (request.command == CLIQ_SOURCE_CREATE_BLOCKED) return source_namespace(request, passed);
@@ -414,13 +419,16 @@ static void verifier_bubblewrap(int generation_source, int helper_source, int bw
     fexecve(bwrap, arguments, environment); _exit(70);
 }
 
+#include "dependency-npm-controller.h"
+
 static bool spawn_worker(struct cliq_worker_packet *request, int passed[CLIQ_WORKER_MAX_FDS], size_t count,
                           struct cliq_worker_packet *response) {
     response->status = CLIQ_SPAWN_INPUT_GATE;
+    bool dependency = request->command == CLIQ_CREATE_DEPENDENCY_NPM;
     bool builtin = request->command == CLIQ_CREATE_BUILTIN_READ || request->command == CLIQ_CREATE_BUILTIN_BASH;
     bool bash = request->command == CLIQ_CREATE_BUILTIN_BASH;
-    size_t file_offset = builtin ? (bash ? 7U : 6U) : 4U;
-    bool verifier = request->command == CLIQ_CREATE_VERIFIER || builtin;
+    size_t file_offset = dependency ? 8U : builtin ? (bash ? 7U : 6U) : 4U;
+    bool verifier = request->command == CLIQ_CREATE_VERIFIER || builtin || dependency;
     if ((!verifier && count != 5) || (verifier && (count <= file_offset || count > file_offset + CLIQ_VERIFIER_MAX_FILES))) return false;
     bool invocation = request->command == CLIQ_CREATE_WRITE || verifier;
     if (!invocation && !worker_request_matches_reservation(request)) return false;
@@ -440,8 +448,17 @@ static bool spawn_worker(struct cliq_worker_packet *request, int passed[CLIQ_WOR
     if (invocation && (request->generation_device != scopes[request->parent].identity.generation_device ||
         request->generation_inode != scopes[request->parent].identity.generation_inode)) return false;
     struct scope *scope = &scopes[request->scope];
-    scope->invocation = invocation; scope->parent = request->parent; scope->verifier = verifier; scope->builtin = builtin;
-    if (builtin) {
+    scope->invocation = invocation; scope->parent = request->parent; scope->verifier = verifier; scope->builtin = builtin; scope->dependency = dependency;
+    if (dependency) {
+        scope->dependency_config = calloc(1, sizeof(*scope->dependency_config));
+        if (!scope->dependency_config || !dependency_read_config(input, scope->dependency_config) ||
+            !builtin_sealed_data(passed[4], scope->dependency_config->script_bytes, scope->dependency_config->script_digest) ||
+            !builtin_sealed_data(passed[5], scope->dependency_config->input_bytes, scope->dependency_config->input_digest) ||
+            !builtin_sealed_data(passed[6], scope->dependency_config->data_bytes, scope->dependency_config->data_digest) ||
+            !builtin_sealed_data(passed[7], scope->dependency_config->metadata_bytes, scope->dependency_config->metadata_digest) ||
+            !dependency_open_modules(passed[0], scope->dependency_config, &scope->dependency_modules_fd)) return false;
+        scope->verifier_config = &scope->dependency_config->capture;
+    } else if (builtin) {
         scope->builtin_config = calloc(1, sizeof(*scope->builtin_config));
         if (!scope->builtin_config || !builtin_read_config(input, scope->builtin_config) ||
             (scope->builtin_config->tool == CLIQ_BUILTIN_BASH) != bash ||
@@ -534,6 +551,8 @@ static bool spawn_worker(struct cliq_worker_packet *request, int passed[CLIQ_WOR
             dup2(verifier ? diagnostic[1] : scope->stderr_fd, 2) < 0 || !configure_limits(request)) _exit(70);
         close(barrier[0]);
         if (dup2(channel[1], 3) < 0) _exit(70);
+        if (dependency) dependency_bubblewrap(passed[0], helper_image, bwrap_image, passed + file_offset, scope->dependency_config,
+            passed[4], passed[6], scope->dependency_modules_fd, request);
         if (verifier) verifier_bubblewrap(passed[0], helper_image, bwrap_image, passed + file_offset, scope->verifier_config,
             builtin ? passed[4] : -1, bash, bash ? scope->builtin_git_fd : -1);
         int generation = fcntl(passed[0], F_DUPFD, 20);
@@ -585,8 +604,8 @@ static bool spawn_worker(struct cliq_worker_packet *request, int passed[CLIQ_WOR
     close(barrier[1]);
     if (!started) return false;
     response->status = CLIQ_SPAWN_INITIAL_SEND;
-    int initial[3] = { input, builtin ? passed[5] : -1, bash ? passed[6] : -1 };
-    if (!cliq_send(scope->channel, request, input >= 0 ? initial : NULL, builtin ? (bash ? 3 : 2) : input >= 0 ? 1 : 0)) return false;
+    int initial[3] = { input, builtin || dependency ? passed[5] : -1, dependency ? passed[7] : bash ? passed[6] : -1 };
+    if (!cliq_send(scope->channel, request, input >= 0 ? initial : NULL, dependency ? 3 : builtin ? (bash ? 3 : 2) : input >= 0 ? 1 : 0)) return false;
     struct cliq_worker_packet ready; size_t extras;
     if (verifier) {
         const int64_t started = cliq_verifier_setup_now();
@@ -851,6 +870,17 @@ static bool acknowledge_builtin_result(const struct cliq_worker_packet *request)
     return cliq_builtin_result_retire_outputs(&scope->stdout_fd, &scope->stderr_fd);
 }
 
+static bool acknowledge_dependency_result(const struct cliq_worker_packet *request) {
+    if (!cliq_dependency_result_ack_valid(request)) return false;
+    struct scope *scope = &scopes[request->scope];
+    if (!scope->created || !scope->invocation || !scope->verifier || !scope->dependency || !scope->released ||
+        !scope->verifier_finished || scope->result_acknowledged || scope->verifier_result.verifier_reason == CLIQ_VERIFIER_PENDING ||
+        !cliq_dependency_result_ack_same(request, request->scope, scope->parent, scope->identity.nonce,
+          scope->verifier_result.observed_at_ms) || !held_scope_dead(scope)) return false;
+    scope->result_acknowledged = true;
+    return cliq_builtin_result_retire_outputs(&scope->stdout_fd, &scope->stderr_fd);
+}
+
 static bool stop_scope(unsigned int id, struct cliq_worker_packet *response) {
     if (id == 0 || id >= CLIQ_WORKER_MAX_SCOPES || !scopes[id].created) return false;
     struct scope *scope = &scopes[id];
@@ -1059,7 +1089,7 @@ static int controller(void) {
     source_controller_init();
     for (size_t i = 0; i < CLIQ_WORKER_MAX_SCOPES; i++) {
         scopes[i].cgroup = -1; scopes[i].process_group = -1; scopes[i].channel = -1;
-        scopes[i].builtin_git_fd = -1;
+        scopes[i].builtin_git_fd = -1; scopes[i].dependency_modules_fd = -1;
         scopes[i].stdout_fd = -1; scopes[i].stderr_fd = -1;
         scopes[i].stdout_pipe = -1; scopes[i].stderr_pipe = -1;
     }
@@ -1101,8 +1131,10 @@ static int controller(void) {
         else if (request.command == CLIQ_BIND_RESERVATION) ok = bind_worker_reservation(&request, passed, count);
         else if (request.command == CLIQ_INSPECT_RESERVATION) ok = inspect_worker_reservation(&request, passed, count, &response);
         else if (request.command == CLIQ_CREATE_WORKER || request.command == CLIQ_CREATE_WRITE || request.command == CLIQ_CREATE_VERIFIER ||
-            request.command == CLIQ_CREATE_BUILTIN_READ || request.command == CLIQ_CREATE_BUILTIN_BASH)
+            request.command == CLIQ_CREATE_BUILTIN_READ || request.command == CLIQ_CREATE_BUILTIN_BASH || request.command == CLIQ_CREATE_DEPENDENCY_NPM)
             ok = spawn_worker(&request, passed, count, &response);
+        else if (request.command == CLIQ_STAGE_DEPENDENCY_CHUNK || request.command == CLIQ_SEAL_DEPENDENCY_INPUTS)
+            ok = dependency_forward_inputs(&request, passed, count, &response);
         else if (request.command == CLIQ_TERMINATE_RETAINED && count == 1) ok = terminate_retained(&request, passed[0], &response);
         else if (request.command == CLIQ_ACTIVATE_WORKER && count == 0 && request.scope > 0 && request.scope < CLIQ_WORKER_MAX_SCOPES) {
             struct scope *scope = &scopes[request.scope];
@@ -1129,9 +1161,10 @@ static int controller(void) {
                     for (size_t i = 0; i < extras; i++) close(extra[i]);
                 }
             }
-        } else if ((request.command == CLIQ_RELEASE_VERIFIER || request.command == CLIQ_RELEASE_BUILTIN) && count == 0 && request.scope > 0 && request.scope < CLIQ_WORKER_MAX_SCOPES) {
+        } else if ((request.command == CLIQ_RELEASE_VERIFIER || request.command == CLIQ_RELEASE_BUILTIN || request.command == CLIQ_RELEASE_DEPENDENCY_NPM) && count == 0 && request.scope > 0 && request.scope < CLIQ_WORKER_MAX_SCOPES) {
             struct scope *scope = &scopes[request.scope];
-            if (scope->created && scope->verifier && scope->builtin == (request.command == CLIQ_RELEASE_BUILTIN) && !scope->stopped && !scope->released &&
+            if (scope->created && scope->verifier && scope->builtin == (request.command == CLIQ_RELEASE_BUILTIN) && scope->dependency == (request.command == CLIQ_RELEASE_DEPENDENCY_NPM) &&
+                (!scope->dependency || scope->dependency_inputs_sealed) && !scope->stopped && !scope->released &&
                 scopes[scope->parent].active && !scopes[scope->parent].stopped &&
                 strcmp(request.nonce, scope->identity.nonce) == 0 &&
                 scope_process_current(&scopes[scope->parent]) && scope_process_current(scope)) {
@@ -1142,9 +1175,9 @@ static int controller(void) {
                 scope->verifier_result.started_at_ms = scope->verifier_result.observed_at_ms;
                 if (ok) ok = cliq_send(scope->channel, &request, NULL, 0);
             }
-        } else if ((request.command == CLIQ_POLL_VERIFIER || request.command == CLIQ_POLL_BUILTIN) && count == 0 && request.scope > 0 && request.scope < CLIQ_WORKER_MAX_SCOPES) {
+        } else if ((request.command == CLIQ_POLL_VERIFIER || request.command == CLIQ_POLL_BUILTIN || request.command == CLIQ_POLL_DEPENDENCY_NPM) && count == 0 && request.scope > 0 && request.scope < CLIQ_WORKER_MAX_SCOPES) {
             struct scope *scope = &scopes[request.scope];
-            if (scope->created && scope->verifier && scope->builtin == (request.command == CLIQ_POLL_BUILTIN) && scope->released &&
+            if (scope->created && scope->verifier && scope->builtin == (request.command == CLIQ_POLL_BUILTIN) && scope->dependency == (request.command == CLIQ_POLL_DEPENDENCY_NPM) && scope->released &&
                 !scope->result_acknowledged) {
                 response = scope->verifier_result; response.command = request.command;
                 ok = true;
@@ -1152,6 +1185,8 @@ static int controller(void) {
                     outputs[0] = scope->stdout_fd; outputs[1] = scope->stderr_fd; output_count = 2;
                 } else response.verifier_reason = CLIQ_VERIFIER_PENDING;
             }
+        } else if (request.command == CLIQ_ACK_DEPENDENCY_RESULT && count == 0) {
+            ok = acknowledge_dependency_result(&request); response = request;
         } else if (request.command == CLIQ_ACK_BUILTIN_RESULT && count == 0) {
             ok = acknowledge_builtin_result(&request); response = request;
         } else if (request.command == CLIQ_STOP_SCOPE && count == 0) ok = stop_scope(request.scope, &response);

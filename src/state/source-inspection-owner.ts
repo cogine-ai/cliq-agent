@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { createSourceInspectionErrorResponse as errorResponse, assertSourceInspectionErrorResponse as assertErrorResponse,
+import { DependencyScriptAuthorizationRequired, createSourceInspectionErrorResponse as errorResponse, assertSourceInspectionErrorResponse as assertErrorResponse,
   type SourceInspectionErrorResponse as ErrorResponse } from './source-inspection-error.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import type { SourceInspectionAttemptV1, SourceInspectionRetirementEvidenceV1 } from '../kernel/execution.js';
@@ -13,7 +13,7 @@ import { readCanonicalArtifact } from './agent-context.js';
 import { insertArtifactMetadata, type ArtifactCatalog, type PublishedArtifact } from './artifacts.js';
 import { advanceTimeFence, readTimeFence, sampleCanonicalNow } from './canonical-time.js';
 import { validateControlChannelClosure, type AuthenticatedControlIdentity } from './control-channel.js';
-import { decodeSourceManifest, decodeWorkspaceEntries, decodeWorkspaceIdentity } from './decoders.js';
+import { decodeSourceManifest, decodeSourceProjection, decodeWorkspaceEntries, decodeWorkspaceIdentity } from './decoders.js';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
 import { withHeldInstalledRuntime, type HeldInstalledAnchor, type HeldInstalledRuntime } from './installed-runtime.js';
 import { loadNativeStateOwner, readSourceInspectionStagingRetirement, retireSourceInspectionStaging,
@@ -23,6 +23,7 @@ import { insertControlRequest, readAdmissionReplay, readControlRequest, readSess
 import { readNextUnretiredSourceInspection, readSourceInspectionAttempt, readSourceInspectionOriginalRequest, readSourceInspectionRequest,
   reserveSourceInspectionAttempt } from './source-inspection.js';
 import { assertWorkspaceSourceTrust, holdWorkspaceSourceTrust, type HeldWorkspaceSourceTrust } from './source-trust.js';
+import { effectiveSourceExcludes } from '../kernel/dependency-source.js';
 import { createVerifiedSourceInspectionTarget, normalizeSourceInspectionRequest, readRetainedSourceInspectionTarget,
   readVerifiedSourceInspectionTarget, recheckVerifiedSourceInspectionTarget, sourceInspectionIntentDigest, resolveDeliverySourceCapture,
   type NormalizedSourceRequest, type SourceCaptureSelection, type SourceInspectionBootstrap, type VerifiedSourceInspectionTarget } from './source-target.js';
@@ -71,11 +72,14 @@ function closeResources(resources: readonly { close(): void }[], operationError?
 /** Retained inert response only. The owning capture/replay path establishes
  * retirement and the control association; this friend mints no Run or proof. */
 export async function readSourceInspectionErrorResponse(artifacts: ArtifactCatalog, row: SourceInspectionAttemptV1): Promise<ErrorResponse> {
-  if (row.phase !== 'retired' || row.outcome.kind === 'captured')
+  if (row.phase !== 'retired')
     throw new KernelStorageError('RECOVERY_REQUIRED', 'source inspection has no retained refusal response');
-  const response = await readCanonicalArtifact(artifacts, row.outcome.errorResponseRef);
+  const ref = row.outcome.kind === 'captured' ? row.admissionErrorResponseRef : row.outcome.errorResponseRef;
+  if (!ref) throw new KernelStorageError('RECOVERY_REQUIRED', 'captured source has no original admission refusal');
+  const response = await readCanonicalArtifact(artifacts, ref);
   assertErrorResponse(response, row.inspectionId, row.method);
-  if ((row.outcome.kind === 'cancelled') !== (response.error.code === 'CANCEL_REQUESTED'))
+  if (row.outcome.kind === 'captured' ? row.method !== 'run.submit' || response.error.code !== 'AUTHORIZATION_REQUIRED' :
+      (row.outcome.kind === 'cancelled') !== (response.error.code === 'CANCEL_REQUESTED'))
     throw new KernelStorageError('RECOVERY_REQUIRED', 'source outcome differs from its retained refusal');
   return immutableSnapshot(response);
 }
@@ -187,7 +191,7 @@ export async function replaySubmittedSource(driver: SqliteDriver, artifacts: Art
     return;
   }
   const originalIndex = readSourceInspectionOriginalRequest(driver, retained.inspectionId);
-  const { target } = await readRetainedSourceInspectionTarget(reads, retained, originalIndex, bootstrap, { driver, owner, signal });
+  const { target, original: sourceRequest } = await readRetainedSourceInspectionTarget(reads, retained, originalIndex, bootstrap, { driver, owner, signal });
   if (retained.phase !== 'retired') throw new KernelStorageError('RECOVERY_REQUIRED', 'source inspection still owns unretired capture resources');
   await readSourceInspectionRetirement(driver, reads, retained, target);
   const metadata: PublishedArtifact[] = [];
@@ -196,12 +200,16 @@ export async function replaySubmittedSource(driver: SqliteDriver, artifacts: Art
     if (source.role !== 'base' || source.manifestDigest !== retained.outcome.sourceManifestDigest ||
         source.workspaceIdentityDigest !== retained.workspaceIdentityDigest)
       throw new KernelStorageError('RECOVERY_REQUIRED', 'retained source outcome differs from its exact capture');
+    if (sourceRequest.method === 'run.submit') {
+      const projection = decodeSourceProjection(await readCanonicalArtifact(reads, source.sourceProjectionRef));
+      if (canonicalSha256(projection.explicitExcludes) !== canonicalSha256(effectiveSourceExcludes(sourceRequest)))
+        throw new KernelStorageError('RECOVERY_REQUIRED', 'retained source excludes differ from their original fixed dependency intent');
+    }
     if (retained.method === 'run.apply') await readDeliveryCaptureTopology(reads, retained, target);
-  } else {
-    const errorResponseRef = retained.outcome.errorResponseRef;
-    const error = await readCanonicalArtifact(reads, errorResponseRef); assertErrorResponse(error, retained.inspectionId, retained.method);
-    if ((retained.outcome.kind === 'cancelled') !== (error.error.code === 'CANCEL_REQUESTED'))
-      throw new KernelStorageError('RECOVERY_REQUIRED', 'source outcome differs from its retained error class');
+  }
+  if (retained.outcome.kind !== 'captured' || retained.admissionErrorResponseRef !== undefined) {
+    const errorResponseRef = retained.outcome.kind === 'captured' ? retained.admissionErrorResponseRef! : retained.outcome.errorResponseRef;
+    await readSourceInspectionErrorResponse(reads, retained);
     const channel = await validateControlChannelClosure(reads, owner, identity); metadata.push(...channel.metadata);
     let clockRejected = false;
     driver.transaction(connection => {
@@ -413,7 +421,8 @@ Promise<SourceInspectionAttemptV1> {
   let home: HeldWorkspaceRoot | undefined, workspaceRoot: HeldWorkspaceRoot | undefined, trust: HeldWorkspaceSourceTrust | undefined;
   let target: VerifiedSourceInspectionTarget | undefined, stage: HeldSourceInspectionStaging | undefined, row: Unretired | undefined;
   let graph: PublishedNonGitSourceProjection | undefined, failure: unknown, deadlineTimer: NodeJS.Timeout | undefined;
-  let handoffResponse: PublishedArtifact | undefined;
+  let handoffResponse: PublishedArtifact | undefined, admissionRefusal: PublishedArtifact | undefined;
+  let dependencyIntent: Awaited<ReturnType<typeof import('./dependency-script-intent.js')['publishDependencyScriptIntent']>> | undefined;
   let nativeLifecycle: Buffer | undefined;
   let gitCapture: InstalledSourceGitCapture | undefined;
   let gitResult: Awaited<ReturnType<InstalledSourceGitCapture['run']>> | undefined;
@@ -499,6 +508,23 @@ Promise<SourceInspectionAttemptV1> {
   // Removing staging first would destroy the only genuine cleanup provenance.
   if (retirementFailure !== undefined) throw retirementFailure;
   if (!processClosure) throw new ResourceRetirementError('source capture has no complete original process closure', failure);
+  if (failure === undefined && graph && row && wire.method === 'run.submit' && wire.dependency.mode === 'locked' &&
+      wire.dependency.allowInstallScripts && wire.dependency.installScriptsGrantId === undefined) {
+    try {
+      if (!selectedRuntime) throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'dependency intent requires its genuine installed selection');
+      const { readDependencySubmissionConditions } = await import('./dependency-submission.js');
+      const material = await readDependencySubmissionConditions(driver, reads, owner, { ...bootstrap, selectedRuntime }, {
+        request: wire, sourceManifestRef: graph.baseWorkspaceManifestRef, workspaceEntriesRef: graph.entriesRef,
+        ...(graph.privateGitStateRef ? { privateGitStateRef: graph.privateGitStateRef } : {}) }, captureSignal);
+      const { conditions } = material;
+      const { publishDependencyScriptIntent } = await import('./dependency-script-intent.js');
+      dependencyIntent = await publishDependencyScriptIntent(driver, reads, owner, bootstrap, { row, conditions,
+        scriptlessPolicy: material.scriptlessPolicy, scriptlessPlan: material.scriptlessPlan, registrySources: material.registrySources }, captureSignal);
+      const required = new DependencyScriptAuthorizationRequired({ kind: 'dependency_install_scripts', purpose: 'dependency_install_scripts',
+        target: { sessionId: wire.sessionId, sourceInspectionId: row.inspectionId, expectedWorkspaceIdentityDigest: row.workspaceIdentityDigest, conditions } });
+      admissionRefusal = await artifacts.publishCanonical(errorResponse(required, row.inspectionId, false, wire.method), 'cliq-control-response-v1');
+    } catch (error) { if (error instanceof ResourceRetirementError) throw error; failure = error; }
+  }
   if (row && stage && target) {
     let outcome: Retired['outcome'];
     let refusal: PublishedArtifact | undefined;
@@ -548,7 +574,7 @@ Promise<SourceInspectionAttemptV1> {
     try { await validateControlChannelClosure(artifacts, owner, identity); }
     catch (error) { if (error instanceof ResourceRetirementError) throw error; failure = error; }
   }
-  let response: PublishedArtifact | undefined = handoffResponse, result: Retired | undefined;
+  let response: PublishedArtifact | undefined = handoffResponse ?? admissionRefusal, result: Retired | undefined;
   const key = { principalId: row.principalId, method: row.method, admissionKey: row.admissionKey, admissionIntentDigest: row.admissionIntentDigest };
   // At most one final-cut downgrade, never a new capture/retry or new nonce.
   for (let cut = 0; cut < 2; cut++) {
@@ -593,13 +619,15 @@ Promise<SourceInspectionAttemptV1> {
             sourceManifestDigest: graph.manifestDigest, ...(graph.privateGitStateRef ? { privateGitStateRef: graph.privateGitStateRef } : {}),
             captureTopologyRef: graph.captureTopologyRef!, captureTopologyDigest: graph.captureTopologyDigest! } }
           : { method: 'run.submit' as const, outcome: { kind: 'captured' as const, sourceManifestRef: graph.baseWorkspaceManifestRef,
-            sourceManifestDigest: graph.manifestDigest, ...(graph.privateGitStateRef ? { privateGitStateRef: graph.privateGitStateRef } : {}) } }
+            sourceManifestDigest: graph.manifestDigest, ...(graph.privateGitStateRef ? { privateGitStateRef: graph.privateGitStateRef } : {}) },
+            ...(admissionRefusal && dependencyIntent ? { admissionErrorResponseRef: admissionRefusal.ref, dependencyScriptIntentRef: dependencyIntent.artifact.ref } : {}) }
         : { outcome: { kind: cancelled ? 'cancelled' as const : 'failed' as const, errorResponseRef: response!.ref } };
       const retired: Retired = { ...row!, rowVersion: row!.rowVersion + 1, phase: 'retired', updatedAt: now,
         cancelRequested: row!.cancelRequested || branch.outcome.kind === 'cancelled',
         retirementEvidenceRef: evidenceArtifact.ref, retiredAt: now, ...branch, rowDigest: '' };
       retired.rowDigest = digestOmitting(retired, 'rowDigest');
-      for (const metadata of [...(graph?.metadata ?? []), inspectorArtifact, evidenceArtifact, ...(response ? [response] : [])])
+      for (const metadata of [...(graph?.metadata ?? []), ...(failure === undefined ? dependencyIntent?.metadata ?? [] : []),
+        inspectorArtifact, evidenceArtifact, ...(response ? [response] : [])])
         insertArtifactMetadata(connection, metadata, now);
       const updated = connection.prepare(`UPDATE source_inspection_attempts SET phase = 'retired', row_version = ?, row_json = ?
         WHERE inspection_id = ? AND phase = ? AND row_version = ? AND row_json = ?`).run(retired.rowVersion,

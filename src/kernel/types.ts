@@ -3,6 +3,10 @@ export type ArtifactRef = string;
 export type { BundledSkillClosureV1, SkillSourceFileBytesV1, DescriptorCapturedSkillSourceFileV1,
   BundledSkillSourceFileV1, SkillSourceIdentityBaseV1, SkillSourceIdentityV1, SkillManifestV1 } from './skill.js';
 
+export type { DependencyPolicy, DependencyAcquisitionPlan, DependencyInstallScriptsAuthorizationTemplateV1,
+  PackageCacheFetchAttemptV1, PackageCacheEntryV1, PackageCacheManifestV1, DependencyReadyItem,
+  DependencyGypConditionV1, DependencyGypSourceV1, DependencyScriptConditionsV1, DependencyPackageDescriptorV1 } from './dependency.js';
+
 export type { DeliveryMergeItem, DeliveryMergeConflictItem, DeliveryDecisionItem } from './delivery.js';
 export type { DeliveryPlan, PublicationOperation, PublicationAbortOperation, PublicationProofV1,
   PublicationPathProgressItem, PublicationPathResultItem, PublicationLateObservationItem, DeliveryTerminalProjectionEvidence } from './publication.js';

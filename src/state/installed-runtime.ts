@@ -13,10 +13,11 @@ import { openSqliteDriver, openReadOnlySqliteDriver } from './sqlite-driver.js';
 import { decodeRuntimeUpgradeReceipt } from './runtime-upgrade-history.js';
 import { assertKernelSchemaVersion } from './schema.js';
 import { sampleCanonicalNow } from './canonical-time.js';
-import { signedKernelSchemaProfile, decodeSignedKernelSchema, schemaConversionProfile, decodeSchemaConversion } from './signed-schema.js';
+import { signedKernelSchemaProfile, decodeSignedKernelSchema, schemaConversionProfile, decodeSchemaConversion, kernelSchemaEntries } from './signed-schema.js';
 import { BUILTIN_SCRIPT_RECIPE } from '../sandbox/builtin-tool-data.js';
+import { isNpmAdapterEntry, isNpmDataEntry } from '../sandbox/dependency-recipe.js';
 import type { NativeBuiltinBashToolchain } from '../sandbox/guest-toolchain.js';
-import type { NativeBuiltinToolScriptImage } from '../sandbox/linux-worker.js';
+import type { NativeBuiltinToolScriptImage, NativeDependencyNpmScriptImage, NativeDependencyNpmDataImage } from '../sandbox/linux-worker.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { constants, fstatSync, lstatSync, type BigIntStats } from 'node:fs';
 import { lstat, mkdir, open, readdir, rename, type FileHandle } from 'node:fs/promises';
@@ -24,6 +25,7 @@ import { isMainThread, Worker } from 'node:worker_threads';
 import { Module } from 'node:module';
 import { isSea } from 'node:sea';
 import { setImmediate as yieldImmediate } from 'node:timers/promises';
+import { types as utilTypes } from 'node:util';
 
 import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME } from '../config.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
@@ -43,6 +45,8 @@ import { decodeInstalledModelAuthorityClosure, verifyInstalledModelAuthority,
   type VerifiedInstalledModelAuthority } from '../model/installed-authority.js';
 import { MODEL_BROKER_ENTRY_ID, MODEL_BROKER_RELATIVE_PATH, InstalledModelBrokerRefusalError,
   type ModelBrokerBinding, type NativeModelBrokerBinding, type NativeModelTransport, type NativeModelNoReleaseFence } from './model-broker-native.js';
+import { DEPENDENCY_BROKER_ENTRY_ID, DEPENDENCY_BROKER_RELATIVE_PATH, type DependencyBrokerBinding,
+  type NativeDependencyBrokerBinding, type NativeDependencyTransport, type NativeDependencySettlementFence, type NativeDependencyClosed } from './dependency-broker-native.js';
 import { runInstalledCredentialAuthority, type HeldCredentialAuthorityLock } from './store.js';
 import type { NativeWorkerBinding, NativeWorkerImage, NativeSourceGitInspectorImage } from '../sandbox/linux-worker.js';
 import type { CredentialPlatformUser, NativeCredentialInspection, NativeCredentialPlatformBinding, NativeSecretServiceInput } from './credential-platform.js';
@@ -195,9 +199,11 @@ type InstalledRuntimeBinding = {
   loadManagerObserver(): Promise<InstalledManagerObserver>;
   assertManagerObservationAvailable(): void;
   loadModelBroker(): Promise<NativeModelBrokerBinding>;
+  loadDependencyBroker(): Promise<NativeDependencyBrokerBinding>;
   openControlClient(): Promise<HeldInstalledControlClient>;
   sealWorkerImage(entryId: string): Promise<NativeWorkerImage>;
   sealBuiltinToolScript(signal?: AbortSignal): Promise<NativeBuiltinToolScriptImage>;
+  sealDependencyNpmAssets(signal?: AbortSignal): Promise<Readonly<{ script: NativeDependencyNpmScriptImage; data: NativeDependencyNpmDataImage }>>;
   startBuiltinBashToolchain(toolchain: RetainedVerifierToolchain, options: { signal?: AbortSignal }): Promise<NativeBuiltinBashToolchain>;
   sealSourceGitInspector(signal?: AbortSignal): Promise<NativeSourceGitInspectorImage>;
   startGuestToolchain(toolchain: RetainedVerifierToolchain, options: { signal?: AbortSignal }): Promise<NativeGuestToolchain>;
@@ -207,6 +213,49 @@ type InstalledRuntimeBinding = {
 };
 const heldInstalledRuntimes = new WeakMap<HeldInstalledRuntime, InstalledRuntimeBinding>();
 const installedRuntimeTrust = new WeakMap<InstalledRuntime, readonly ReleaseTrustKey[]>();
+const installedDependencyTransports = new WeakMap<NativeDependencyTransport, {
+  original: NativeDependencyTransport; selected: HeldInstalledRuntime; configurationDigest: string; bindingDigest?: string; closed: boolean;
+  closure?: NativeDependencyClosed;
+  assertCurrent(): void;
+}>();
+/** Genuine fixed native construction, before the permanent claim binds its
+ * sequence. This readonly friend cannot release network or worker execution. */
+export function assertInstalledDependencyTransportConfiguration(selected: HeldInstalledRuntime, transport: NativeDependencyTransport,
+  configurationBytes: Buffer): void {
+  const held = installedDependencyTransports.get(transport);
+  if (!held || held.selected !== selected || held.closed || utilTypes.isProxy(configurationBytes) || !Buffer.isBuffer(configurationBytes) ||
+      configurationBytes.length < 1 || configurationBytes.length > 1_048_576 || held.configurationDigest !== sha256Bytes(configurationBytes))
+    mismatch('dependency claim requires its exact original installed configuration');
+  held.assertCurrent();
+}
+
+/** Original completed close data survives revocation/selection disposal. It
+ * supplies no release/settlement permission and cannot relabel close as ACK. */
+export function readInstalledDependencyTransportClosure(selected: HeldInstalledRuntime, transport: NativeDependencyTransport,
+  binding: DependencyBrokerBinding): NativeDependencyClosed | undefined {
+  const held = installedDependencyTransports.get(transport);
+  if (!held || held.selected !== selected || held.bindingDigest !== canonicalSha256(binding))
+    mismatch('dependency closure requires its exact original installed owner and claim');
+  return held.closure && immutableSnapshot(held.closure);
+}
+const installedDependencySettlements = new WeakMap<NativeDependencySettlementFence, {
+  original: NativeDependencySettlementFence; selected: HeldInstalledRuntime; bindingDigest: string; active: boolean; assertCurrent(): void;
+}>();
+
+/** Only the original signed native purpose object crosses the Worker addon
+ * boundary. A structural transport, changed claim or closed owner never does. */
+export function borrowInstalledDependencyTransport(selected: HeldInstalledRuntime, transport: NativeDependencyTransport, binding: DependencyBrokerBinding): object {
+  const held = installedDependencyTransports.get(transport);
+  if (!held || held.selected !== selected || held.closed || held.bindingDigest !== canonicalSha256(binding))
+    mismatch('dependency scope requires its original installed owner and permanent claim');
+  held.assertCurrent(); return held.original;
+}
+export function assertInstalledDependencySettlement(selected: HeldInstalledRuntime, fence: NativeDependencySettlementFence, binding: DependencyBrokerBinding): void {
+  const held = installedDependencySettlements.get(fence);
+  if (!held || held.selected !== selected || !held.active || held.bindingDigest !== canonicalSha256(binding))
+    mismatch('dependency settlement requires its original joined native owner and exact claim');
+  held.assertCurrent(); fence.assertCurrent();
+}
 let credentialScopeReserved = false;
 const heldInstalledAnchors = new WeakMap<HeldInstalledAnchor, { selected: HeldInstalledRuntime;
   withRoot(operation: (fd: number, rootPath: string) => void): void;
@@ -259,6 +308,15 @@ export function loadInstalledModelBroker(selected: HeldInstalledRuntime): Promis
   if (!binding) mismatch('installed runtime is not a verified held selection');
   return binding.loadModelBroker();
 }
+export function loadInstalledDependencyBroker(selected: HeldInstalledRuntime): Promise<NativeDependencyBrokerBinding> {
+  const binding = heldInstalledRuntimes.get(selected);
+  if (!binding) mismatch('dependency transport requires a genuine held installed selection');
+  return binding.loadDependencyBroker();
+}
+function assertInstalledDependencyBrokerProcess(): void {
+  if (!isMainThread || !isSea() || process.platform !== 'linux' || process.arch !== 'x64' || process.versions.node !== '24.21.0')
+    throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'dependency transport requires the fixed signed Linux Supervisor process');
+}
 
 /** Supported fixed creator-process recipe only, not installation or release
  * authority. Both live dispatch and domain-death production retain this gate. */
@@ -289,6 +347,12 @@ export function sealInstalledBuiltinToolScript(selected: HeldInstalledRuntime, s
   const binding = heldInstalledRuntimes.get(selected);
   if (!binding) mismatch('builtin tool requires a genuine held installed selection');
   return binding.sealBuiltinToolScript(signal);
+}
+export function sealInstalledDependencyNpmAssets(selected: HeldInstalledRuntime, signal?: AbortSignal):
+  Promise<Readonly<{ script: NativeDependencyNpmScriptImage; data: NativeDependencyNpmDataImage }>> {
+  const binding = heldInstalledRuntimes.get(selected);
+  if (!binding) mismatch('dependency execution requires its genuine held installed selection');
+  return binding.sealDependencyNpmAssets(signal);
 }
 export function startInstalledBuiltinBashToolchain(selected: HeldInstalledRuntime, toolchain: RetainedVerifierToolchain,
   options: { signal?: AbortSignal } = {}): Promise<NativeBuiltinBashToolchain> {
@@ -404,7 +468,7 @@ type VerifiedPackage = { root: Directory; manifest: InstalledFile; bundle: Runti
   companionFiles: InstalledFile[] };
 function streamedInstalledSchemaKind(signed: VerifiedPackage, ref: string): string {
   const declared = signed.structured.objects.filter(object => object.artifactRef === ref);
-  if (declared.length !== 1 || !['cliq-guest-image-raw-ext4-v1', 'cliq-skill-source-file-v1'].includes(declared[0]!.schemaKind))
+  if (declared.length !== 1 || !['cliq-guest-image-raw-ext4-v1', 'cliq-skill-source-file-v1', 'cliq-npm-data-image-v1'].includes(declared[0]!.schemaKind))
     mismatch('installed streamed data has no exact supported original member kind');
   return declared[0]!.schemaKind;
 }
@@ -998,6 +1062,8 @@ async function verifyPackageBytes(scope: Scope, root: Directory, releaseKeys: re
           entry.relativePath !== BUILTIN_SCRIPT_RECIPE.relativePath || entry.byteCount < 1 || entry.byteCount > BUILTIN_SCRIPT_RECIPE.scriptBytes)
         mismatch('builtin tool script is outside its fixed signed data contract');
       roots.set(entry.digest, await readSmall(file, BUILTIN_SCRIPT_RECIPE.scriptBytes, signal));
+    } else if (isNpmAdapterEntry(entry)) {
+      roots.set(entry.digest, await readSmall(file, SMALL_BYTES, signal));
     } else if (entry.role !== 'bundle_object') await verifyBytes(file, signal);
   }
   const guests = guestToolchainRoots(bundle).map(root => {
@@ -1013,7 +1079,11 @@ async function verifyPackageBytes(scope: Scope, root: Directory, releaseKeys: re
   for (const entry of bundle.entries.filter(entry => entry.role === 'bundle_object')) {
     signal?.throwIfAborted();
     const file = entries.get(entry.entryId)!;
-    if (imageRefs.has(entry.digest)) {
+    if (isNpmDataEntry(entry)) {
+      // The sole fixed complete official image is a raw signed data edge,
+      // never JSON, an executable or thousands of separate CAS members.
+      await verifyBytes(file, signal); streamedRoots.set(entry.digest, file);
+    } else if (imageRefs.has(entry.digest)) {
       if (entry.executable || entry.byteCount < 1 || entry.byteCount > GUEST_EXTRACTOR_RECIPE.maxImageBytes)
         mismatch('installed guest image exceeds the supported signed recipe bound');
       await verifyBytes(file, signal); streamedRoots.set(entry.digest, file);
@@ -1330,9 +1400,10 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
         let credentialPlatformNative: NativeCredentialPlatformBinding | undefined;
         let managerObserver: InstalledManagerObserver | undefined;
         let modelBroker: NativeModelBrokerBinding | undefined;
+        let dependencyBroker: NativeDependencyBrokerBinding | undefined;
         let guestExtractor: NativeGuestExtractorBinding | undefined;
         const platformJobs = new Set<Promise<unknown>>();
-        const brokerTransports = new Set<NativeModelTransport>();
+        const brokerTransports = new Set<NativeModelTransport | NativeDependencyTransport>();
         const guestJobs = new Set<NativeGuestToolchain>();
         const guestJoins = new Map<NativeGuestToolchain, Promise<void>>();
         const retiredGuestJobs = new WeakSet<NativeGuestToolchain>();
@@ -1464,12 +1535,14 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
               signed.structured.objects.find(object => object.artifactRef === artifactRef)?.schemaKind ?? (
               role === 'tool_adapter' && signed.bundle.entries.some(entry => entry.entryId === BUILTIN_SCRIPT_RECIPE.entryId && entry.digest === artifactRef)
                 ? 'cliq-builtin-tool-script-v1' :
+              role === 'tool_adapter' && signed.bundle.entries.some(entry => entry.digest === artifactRef && isNpmAdapterEntry(entry))
+                ? 'cliq-npm-dependency-script-v1' :
               role === 'schema' ? 'cliq-installed-schema-v1' :
               role === 'policy_engine' ? 'cliq-policy-engine-profile-v1' :
               role === 'sandbox_root_profile' ? 'cliq-sandbox-root-profile-v1' :
               role === 'trust_store' ? 'cliq-https-trust-store-v1' : mismatch('installed seed contains an unsupported object'));
             return Object.freeze({ artifactRef, byteCount: bytes.length,
-              mediaType: schemaKind === 'cliq-builtin-tool-script-v1' || schemaKind === 'cliq-skill-source-file-v1' || role === 'trust_store' || companionKind === 'ed25519_signature' || schemaKind === 'cliq-ed25519-signature-v1'
+              mediaType: schemaKind === 'cliq-builtin-tool-script-v1' || schemaKind === 'cliq-skill-source-file-v1' || schemaKind === 'cliq-npm-dependency-script-v1' || role === 'trust_store' || companionKind === 'ed25519_signature' || schemaKind === 'cliq-ed25519-signature-v1'
                 ? 'application/octet-stream' : 'application/json', schemaKind });
           }).concat([...signed.streamedRoots].map(([artifactRef, file]) => ({ artifactRef, byteCount: Number(file.info.size),
             mediaType: 'application/octet-stream', schemaKind: streamedInstalledSchemaKind(signed, artifactRef) })))
@@ -1584,9 +1657,7 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
               // The current genuine package's fixed schema/conversion data can
               // audit old credential provenance. It does not transfer those
               // old endpoint/TLS bindings to productive current operations.
-              for (const entry of signed.bundle.entries.filter(entry => entry.role === 'schema')) {
-                if (!['kernel_schema', 'schema_conversion'].includes(entry.entryId) || entry.executable)
-                  mismatch('credential history requires the fixed signed schema entries');
+              for (const entry of kernelSchemaEntries(signed.bundle)) {
                 const bytes = signed.roots.get(entry.digest);
                 if (!bytes || bytes.length !== entry.byteCount || sha256Bytes(bytes) !== entry.digest)
                   mismatch('credential history schema source is missing or changed');
@@ -1750,6 +1821,149 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
               }
               await checkedRevalidate();
               return managerObserver;
+            });
+          },
+          loadDependencyBroker() {
+            return enqueue(async () => {
+              assertInstalledDependencyBrokerProcess(); await checkedRevalidate();
+              if (!dependencyBroker) {
+                const entry = signed.bundle.entries.find(value => value.entryId === DEPENDENCY_BROKER_ENTRY_ID);
+                const file = signed.entries.get(DEPENDENCY_BROKER_ENTRY_ID);
+                if (!entry || !file || entry.role !== 'platform_helper' || !entry.executable || entry.version !== '1' ||
+                    entry.relativePath !== DEPENDENCY_BROKER_RELATIVE_PATH || entry.byteCount < 1 || entry.byteCount > TRUST_BYTES)
+                  mismatch('fixed signed dependency registry broker is missing');
+                const loaded = new Module('cliq-installed-linux-dependency-broker');
+                process.dlopen(loaded, `/proc/self/fd/${file.handle.fd}`);
+                const native = loaded.exports as NativeDependencyBrokerBinding;
+                if (native.interfaceVersion !== 1 || typeof native.prepareDependencyTransport !== 'function' ||
+                    native.maximumOwnerDataBytes !== 67_108_864 || !Number.isSafeInteger(native.descriptorPageStorageBytes) ||
+                    native.descriptorPageStorageBytes < 1 || native.descriptorPageStorageBytes > 1_048_576 ||
+                    !Number.isSafeInteger(native.fixedOwnerStorageBytes) || native.fixedOwnerStorageBytes < 1 ||
+                    native.fixedOwnerStorageBytes > native.maximumOwnerDataBytes)
+                  mismatch('unsupported fixed dependency registry broker interface');
+                dependencyBroker = Object.freeze({ interfaceVersion: 1 as const, maximumOwnerDataBytes: 67_108_864 as const,
+                  descriptorPageStorageBytes: native.descriptorPageStorageBytes, fixedOwnerStorageBytes: native.fixedOwnerStorageBytes,
+                  prepareDependencyTransport(configurationBytes, trustStoreBytes) {
+                    if (closed) mismatch('installed dependency selection is closed'); assertSelection();
+                    if (utilTypes.isProxy(configurationBytes) || !Buffer.isBuffer(configurationBytes) || configurationBytes.length < 1 ||
+                        configurationBytes.length > 1_048_576 || utilTypes.isProxy(trustStoreBytes) || !Buffer.isBuffer(trustStoreBytes) ||
+                        trustStoreBytes.length < 1 || trustStoreBytes.length > 16_777_216)
+                      mismatch('dependency native configuration and signed trust root must be bounded original buffers');
+                    const configuration = Buffer.from(configurationBytes), trust = Buffer.from(trustStoreBytes);
+                    let original: NativeDependencyTransport;
+                    try { original = native.prepareDependencyTransport(configuration, trust); }
+                    catch (error) {
+                      const code = utilTypes.isNativeError(error) && !utilTypes.isProxy(error) ? Object.getOwnPropertyDescriptor(error, 'code') : undefined;
+                      if (code && 'value' in code && code.value === 'ERR_CLIQ_RESOURCE_RETIREMENT') {
+                        const failure = new ResourceRetirementError('dependency broker construction did not retire', undefined);
+                        rememberRetirement(failure); throw failure;
+                      }
+                      throw new KernelStorageError('RECOVERY_REQUIRED', 'installed dependency broker refused construction');
+                    }
+                    let transport!: NativeDependencyTransport;
+                    let joining: Promise<Awaited<ReturnType<typeof original.close>>> | undefined;
+                    let fenceRetained = false, resourcesJoined = false;
+                    const fences = new Set<NativeDependencySettlementFence>();
+                    const current = () => { if (closed) mismatch('installed dependency selection is closed'); assertSelection(); };
+                    const binding = { original, selected, configurationDigest: sha256Bytes(configuration), closed: false, assertCurrent: current } as
+                      NonNullable<ReturnType<typeof installedDependencyTransports.get>>;
+                    const fail = (error: unknown, retiring: boolean): never => {
+                      let retirement = retiring;
+                      try { retirement ||= original.observeFailure(error).brokerCode === 'resource_retirement'; } catch { /* No plain-error provenance. */ }
+                      if (retirement) {
+                        const failure = error instanceof ResourceRetirementError ? error : new ResourceRetirementError('dependency broker resources did not actually join', undefined);
+                        rememberRetirement(failure); throw failure;
+                      }
+                      // Preserve only the native purpose-tagged Error itself.
+                      // Its fixed observation is decoded by this exact owner.
+                      try { original.observeFailure(error); } catch {
+                        throw new KernelStorageError('RECOVERY_REQUIRED', 'installed dependency broker refused an operation');
+                      }
+                      throw error;
+                    };
+                    const sync = <T>(operation: () => T, retiring = false): T => {
+                      if (!retiring) current();
+                      try { return operation(); } catch (error) { return fail(error, retiring); }
+                    };
+                    const invoke = <T>(operation: () => Promise<T>, retiring = false): Promise<T> => {
+                      if (!retiring) current();
+                      let pending: Promise<T>;
+                      try { pending = operation(); } catch (error) { pending = Promise.reject(error); }
+                      const job = pending.then(value => { if (!retiring) current(); return value; }, error => fail(error, retiring));
+                      platformJobs.add(job); void job.finally(() => platformJobs.delete(job)).catch(() => {}); return job;
+                    };
+                    // Observe immediately: a rejected synchronous page followed
+                    // by close must not leave an unhandled unsealed-ready task.
+                    const prepared = original.ready.then(() => { current(); assertArtifactRef(original.brokerFenceTokenDigest); }, error => fail(error, false));
+                    const ready = prepared.catch(async error => { await transport.close(); throw error; });
+                    transport = Object.freeze({ brokerFenceTokenDigest: original.brokerFenceTokenDigest, ready,
+                      registerPackagePage: bytes => sync(() => original.registerPackagePage(bytes)),
+                      sealPackagePlan: () => sync(() => original.sealPackagePlan()),
+                      retainDispatchFence() { sync(() => original.retainDispatchFence()); fenceRetained = true; },
+                      bindInvocation(bytes) {
+                        sync(() => original.bindInvocation(bytes));
+                        binding.bindingDigest = sha256Bytes(bytes);
+                      },
+                      connect: (bytes, index, attempt) => invoke(() => original.connect(bytes, index, attempt)),
+                      releaseGet: (bytes, index, attempt) => invoke(() => original.releaseGet(bytes, index, attempt)),
+                      observeFailure: error => original.observeFailure(error),
+                      sealPackageInputs: bytes => invoke(() => original.sealPackageInputs(bytes)),
+                      releaseProcess: bytes => sync(() => original.releaseProcess(bytes)),
+                      acquireSettlementFence(bytes) {
+                        const originalFence = sync(() => original.acquireSettlementFence(bytes));
+                        let fence!: NativeDependencySettlementFence;
+                        const held = { original: originalFence, selected, bindingDigest: sha256Bytes(bytes), active: true, assertCurrent: () => assertSelection() };
+                        fence = Object.freeze({ ...originalFence,
+                          assertCurrent() {
+                            const fixed = installedDependencySettlements.get(fence);
+                            if (!fixed?.active) mismatch('dependency settlement is no longer held');
+                            fixed.assertCurrent(); sync(() => fixed.original.assertCurrent(), true);
+                          },
+                          close() {
+                            if (!held.active) return;
+                            sync(() => originalFence.close(), true); held.active = false; fences.delete(fence);
+                          },
+                        });
+                        installedDependencySettlements.set(fence, held); fences.add(fence); return fence;
+                      },
+                      beginAcknowledgeProcessResult: bytes => sync(() => original.beginAcknowledgeProcessResult(bytes), true),
+                      pollProcessResultAcknowledged: () => sync(() => original.pollProcessResultAcknowledged(), true),
+                      releaseDispatchFence() {
+                        if (fences.size) {
+                          const failure = new ResourceRetirementError('dependency settlement mutex still has its original borrower', undefined);
+                          rememberRetirement(failure); throw failure;
+                        }
+                        sync(() => original.releaseDispatchFence(), true); fenceRetained = false;
+                        if (resourcesJoined) brokerTransports.delete(transport);
+                      },
+                      close: () => joining ??= invoke(async () => {
+                        binding.closed = true;
+                        const value = await original.close();
+                        const booleans = ['networkStarted', 'requestStarted', 'processClaimed', 'processJoined', 'processResultAcknowledged',
+                          'processResultCustodyRetired', 'dispatchFenceRetained', 'settlementFenceBorrowed'] as const;
+                        if (!exactKeys(value, ['kind', 'brokerFenceTokenDigest', 'tokenRevoked', ...booleans, 'connectionCount', 'requestCount',
+                          'transferredBytes', 'processResultCustodyOrigin']) || value.kind !== 'dependency_transport_closed' ||
+                            value.brokerFenceTokenDigest !== original.brokerFenceTokenDigest || value.tokenRevoked !== true ||
+                            booleans.some(key => typeof value[key] !== 'boolean') ||
+                            ['connectionCount', 'requestCount', 'transferredBytes'].some(key => !Number.isSafeInteger(value[key as 'connectionCount']) || value[key as 'connectionCount'] < 0) ||
+                            value.connectionCount > 600_000 || value.requestCount > value.connectionCount || value.transferredBytes > 20 * 1_073_741_824 ||
+                            !['none', 'acknowledged', 'controller_joined'].includes(value.processResultCustodyOrigin) ||
+                            value.processClaimed && (!value.processJoined || !value.processResultCustodyRetired) ||
+                            value.processResultAcknowledged !== (value.processResultCustodyOrigin === 'acknowledged') ||
+                            value.processResultCustodyRetired !== (value.processResultCustodyOrigin !== 'none') ||
+                            value.dispatchFenceRetained !== fenceRetained || value.settlementFenceBorrowed !== (fences.size !== 0))
+                          throw new ResourceRetirementError('dependency broker closure lacks its complete original joins', undefined);
+                        binding.closure = immutableSnapshot(value);
+                        resourcesJoined = true; if (!fenceRetained) brokerTransports.delete(transport); return value;
+                      }, true),
+                    });
+                    installedDependencyTransports.set(transport, binding); brokerTransports.add(transport);
+                    platformJobs.add(ready); void ready.finally(() => platformJobs.delete(ready)).catch(() => {});
+                    return transport;
+                  },
+                });
+              }
+              await checkedRevalidate(); return dependencyBroker;
             });
           },
           loadModelBroker() {
@@ -1968,6 +2182,38 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
                 catch (failure) {
                   const retirement = new ResourceRetirementError('installed builtin tool script seal did not retire', new AggregateError([error, failure]));
                   rememberRetirement(retirement); throw retirement;
+                }
+                throw error;
+              }
+            });
+          },
+          sealDependencyNpmAssets(signal) {
+            return enqueue(async () => {
+              await checkedRevalidate(signal);
+              const scriptEntry = signed.bundle.entries.find(isNpmAdapterEntry), dataEntry = signed.bundle.entries.find(isNpmDataEntry);
+              if (!workerNative || workerNative.dependencyInterfaceVersion !== 1 ||
+                  typeof workerNative.sealDependencyNpmScript !== 'function' || typeof workerNative.sealDependencyNpmData !== 'function' ||
+                  !scriptEntry || !dataEntry)
+                throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'the fixed signed dependency npm assets are not installed');
+              const scriptFile = signed.entries.get(scriptEntry.entryId), dataFile = signed.entries.get(dataEntry.entryId);
+              if (!scriptFile || !dataFile) mismatch('dependency npm assets are missing from the complete signed closure');
+              let script: NativeDependencyNpmScriptImage | undefined, data: NativeDependencyNpmDataImage | undefined;
+              try {
+                signal?.throwIfAborted();
+                script = workerNative.sealDependencyNpmScript(scriptFile.handle.fd);
+                if (script.identity.sha256 !== scriptEntry.digest || script.identity.byteCount !== scriptEntry.byteCount)
+                  mismatch('dependency adapter seal differs from its complete original signed bytes');
+                data = workerNative.sealDependencyNpmData(dataFile.handle.fd);
+                if (data.identity.sha256 !== dataEntry.digest || data.identity.byteCount !== dataEntry.byteCount)
+                  mismatch('dependency npm data seal differs from its complete original signed bytes');
+                await checkedRevalidate(signal);
+                return Object.freeze({ script, data });
+              } catch (error) {
+                const failures: unknown[] = [];
+                for (const image of [script, data]) if (image) try { image.close(); } catch (failure) { failures.push(failure); }
+                if (failures.length) {
+                  const failure = new ResourceRetirementError('dependency npm asset seals did not actually retire', new AggregateError([error, ...failures]));
+                  rememberRetirement(failure); throw failure;
                 }
                 throw error;
               }

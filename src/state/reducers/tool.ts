@@ -215,7 +215,7 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
 
   async function approvedGrant(selected: ToolCut, request: ToolRequestV1, reads = artifacts) {
     const item = selected.items.map(({ item }) => item).filter((item) => item.kind === 'policy_decision' && item.opId === request.opId).at(-1);
-    if (item?.kind !== 'policy_decision' || item.decisionSource !== 'interactive_approval' || item.decision !== 'allow') return undefined;
+    if (item?.kind !== 'policy_decision' || item.subjectKind !== 'tool_call' || item.decisionSource !== 'interactive_approval' || item.decision !== 'allow') return undefined;
     const proof = await verifyGrant(item.grantRef, reads);
     requireEqual(proof.request, request, 'approved current tool request');
     return { ...proof, grantRef: item.grantRef };
@@ -248,7 +248,7 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
     // The sole caller first runs readRunAuthority/full recovery, including the
     // verifier's complete subject-owned history. Its request is not a tool
     // request and has no inputRef; never reinterpret it as tool authority.
-    if (item.subjectKind === 'verifier_launch' || item.subjectKind === 'child_merge') continue; // Each owns a complete independent recovery history.
+    if (item.subjectKind === 'verifier_launch' || item.subjectKind === 'child_merge' || item.subjectKind === 'dependency_install_scripts') continue; // Each owns a complete independent recovery history.
     if (item.subjectKind !== 'tool_call') throw new TypeError('retained tool policy item has an unsupported subject');
     const evidence = await readCanonicalArtifact<ToolPolicyChannelEvidenceV1>(openingReads, item.policyChannelEvidenceRef);
     const request = await readCanonicalArtifact<ToolRequestV1>(openingReads, evidence.requestRef);

@@ -37,7 +37,7 @@ async function readData(artifacts: ArtifactCatalog, ref: string): Promise<unknow
 function originalFields(row: SourceInspectionAttemptV1) {
   const { phase: _phase, rowVersion: _version, rowDigest: _digest, updatedAt: _updated,
     cancelRequested: _cancelled, retirementHandoffRef: _handoff, retirementEvidenceRef: _retirement,
-    retiredAt: _retiredAt, outcome: _outcome, ...original } = row;
+    retiredAt: _retiredAt, outcome: _outcome, admissionErrorResponseRef: _admissionError, dependencyScriptIntentRef: _dependencyIntent, ...original } = row;
   return original;
 }
 

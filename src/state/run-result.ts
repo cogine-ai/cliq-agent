@@ -134,6 +134,7 @@ export function loadRunResult(driver: SqliteDriver, artifacts: ArtifactCatalog, 
     const result: RunResult = { schemaVersion: 1, runId, baseSourceRef: basis.candidate.baseSourceRef,
       resultSourceRef: basis.candidate.resultSourceRef, diffRef: basis.candidate.diffRef,
       verificationClosureRef: frontier.verificationClosureRef, verificationReceiptRefs: basis.verificationReceiptRefs, summaryRef: basis.candidate.summaryRef, createdAt,
+      ...(basis.closure.dependency.kind !== 'none' ? { dependencyPlanRef: basis.closure.dependency.dependencyPlanRef } : {}),
       ...(frontier.operation === 'delivery' ? { deliveryTerminalProjectionEvidenceRef: frontier.deliveryTerminalProjectionEvidenceRef } : {}),
       ...(basis.closure.verification.kind === 'inherited_verified' ? { verificationProvenanceRef: basis.closure.verification.inheritedProvenanceRef } : {}) };
     decodeRunResult(result);
@@ -259,10 +260,11 @@ export function loadRunResult(driver: SqliteDriver, artifacts: ArtifactCatalog, 
       unstopped(cut.run, 'verify');
       if (basis.delivery && basis.delivery.merged.plan.forwardOperations.length === 0)
         throw new KernelStorageError('STATE_TRANSITION_INVALID', 'no-op verification requires its genuine descriptor projection owner');
-      const expectedFrontier: RunFrontier = { schemaVersion: 1, kind: 'verify', phase: 'verifiers', candidateItemId: basis.candidate.itemId,
+      const expectedFrontier: RunFrontier = { schemaVersion: 1, kind: 'verify', phase: basis.delivery?.inheritance && basis.progress.dependency ? 'dependencies' : 'verifiers', candidateItemId: basis.candidate.itemId,
         resultSourceRef: basis.candidate.resultSourceRef, verifierPlanRef: basis.planRef,
         nextVerifierIndex: basis.delivery?.inheritance ? 0 : basis.plan.entries.length,
         afterPass: spec.operation === 'agent' ? 'finalize' : 'delivery_approval' };
+      if (basis.progress.dependency) expectedFrontier.dependencyPlanRef = basis.progress.dependency.planRef;
       requireEqual(await readCanonicalArtifact(artifacts, cut.run.frontierRef!), expectedFrontier, 'complete verification current frontier');
       if (cut.latestCheckpoint.id !== basis.completionCheckpoint.id)
         throw new TypeError('verification has no exact final producer Checkpoint');

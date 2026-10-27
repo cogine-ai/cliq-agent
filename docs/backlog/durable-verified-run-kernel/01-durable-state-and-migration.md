@@ -1297,13 +1297,16 @@ type DependencyReadyItem = {
   runId: string
   kind: 'dependency_ready'
   planRef: ArtifactRef
-  opId: string
-  attempt: number
-  packageCacheManifestRef: ArtifactRef
   readyCheckpointId: string
   installedTreeDigest: string
   createdAt: string
-}
+} & (
+  | { origin: 'acquired'; opId: string; attempt: number; packageCacheManifestRef: ArtifactRef }
+  | { origin: 'inherited_parent_ready'; parentRunId: string; parentReadyItemRef: ArtifactRef
+      parentReadyCheckpointId: string; parentReadyWorkspaceStateRef: ArtifactRef
+      childAdmissionRequestRef: ArtifactRef
+      childPreparation: { workerLaunchId: string; snapshotEvidenceRef: ArtifactRef; retirementEvidenceRef: ArtifactRef } }
+)
 
 type RuntimeFailureEvidenceBaseV1 = {
   schemaVersion: 1

@@ -12,6 +12,18 @@ import { kernelSchemaDefinition, kernelSchemaManifest, KERNEL_SCHEMA_V8_SQL } fr
 
 function mismatch(): never { throw new KernelStorageError('ARTIFACT_MISMATCH', 'signed schema source differs from its fixed full recipe'); }
 
+/** Fixed SQL purposes only. The generic schema role also carries tool-input
+ * JSON schemas; their signed bytes never become database DDL authority. */
+export function kernelSchemaEntries(bundle: RuntimeBundleManifest): RuntimeBundleManifest['entries'] {
+  const entries = bundle.entries.filter(entry => entry.entryId === 'kernel_schema' || entry.entryId === 'schema_conversion');
+  for (const entry of entries) {
+    const [version, relativePath] = entry.entryId === 'kernel_schema'
+      ? ['8', 'schema/kernel-v8.json'] : ['7-to-8', 'schema/convert-v7-to-v8.json'];
+    if (entry.role !== 'schema' || entry.executable || entry.version !== version || entry.relativePath !== relativePath) mismatch();
+  }
+  return entries;
+}
+
 export function signedKernelSchemaProfile(): SignedKernelSchemaV1 {
   const definition = kernelSchemaDefinition(8);
   const core = { schemaVersion: 1 as const, format: 'cliq-signed-kernel-schema-v1' as const,
@@ -30,7 +42,7 @@ export function decodeSignedKernelSchema(value: unknown): SignedKernelSchemaV1 {
 
 export function schemaConversionProfile(source: RuntimeBundleManifest): SignedSchemaConversionV1 {
   const supervisor = source.entries.filter(entry => entry.role === 'supervisor');
-  if (supervisor.length !== 1 || !supervisor[0]!.executable || source.entries.some(entry => entry.role === 'schema') ||
+  if (supervisor.length !== 1 || !supervisor[0]!.executable || kernelSchemaEntries(source).length !== 0 ||
       source.stateSchemaRange.min > 7 || source.stateSchemaRange.max < 7) mismatch();
   const original = kernelSchemaManifest(7), target = signedKernelSchemaProfile();
   const core = { schemaVersion: 1 as const, format: 'cliq-signed-schema-conversion-v1' as const,
@@ -57,11 +69,10 @@ export function decodeSchemaConversion(value: unknown, source: RuntimeBundleMani
  * installation; the held-package producer still verifies every actual file. */
 export function assertSignedKernelSchemaEntry(bundle: RuntimeBundleManifest): void {
   const expected = signedKernelSchemaProfile();
-  const entries = bundle.entries.filter(entry => entry.role === 'schema');
+  const entries = kernelSchemaEntries(bundle);
   const entry = entries.find(item => item.entryId === 'kernel_schema');
   if (!entry || entry.version !== '8' || entry.executable || entry.relativePath !== 'schema/kernel-v8.json' ||
       entry.digest !== canonicalSha256(expected) || entry.byteCount !== canonicalJsonBytes(expected).length ||
-      entries.some(item => !['kernel_schema', 'schema_conversion'].includes(item.entryId)) ||
       bundle.stateSchemaRange.min > 8 || bundle.stateSchemaRange.max < 8) mismatch();
 }
 
@@ -78,10 +89,10 @@ export async function readSignedKernelSchema(artifacts: ArtifactCatalog, bundle:
   releaseKeys: readonly ReleaseTrustKey[]): Promise<SignedKernelSchemaV1> {
   verifyRuntimeBundle(bundle, releaseKeys);
   assertSignedKernelSchemaEntry(bundle);
-  const entries = bundle.entries.filter(entry => entry.role === 'schema');
+  const entries = kernelSchemaEntries(bundle);
   const schema = entries.find(entry => entry.entryId === 'kernel_schema');
   if (!schema || schema.version !== '8' || schema.executable || schema.relativePath !== 'schema/kernel-v8.json' ||
-      schema.byteCount > 1_048_576 || entries.some(entry => !['kernel_schema', 'schema_conversion'].includes(entry.entryId))) mismatch();
+      schema.byteCount > 1_048_576) mismatch();
   const value = await readSignedDataEntry(artifacts, schema);
   const decoded = decodeSignedKernelSchema(value);
   if (canonicalSha256(decoded) !== schema.digest || canonicalJsonBytes(decoded).length !== schema.byteCount ||

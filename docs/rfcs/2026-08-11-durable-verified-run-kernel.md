@@ -7169,19 +7169,46 @@ type DependencyPolicy = {
   maxDownloadBytes: number
 }
 
+type DependencyScriptConditionsV1 = {
+  profile: 'npm-ci-v1'
+  lockfilePath: 'package-lock.json'
+  lockfileDigest: string
+  packageManifestDigest: string
+  bindingGyp: { kind: 'absent' } | { kind: 'present'; contentDigest: string }
+  source: {
+    sourceManifestRef: ArtifactRef; sourceManifestDigest: string; sourceRole: 'base' | 'result'
+    projectedEntriesRef: ArtifactRef; projectedTreeDigest: string
+    sourceProjectionRef: ArtifactRef; sourceProjectionDigest: string
+    workspaceEntriesRef: ArtifactRef; workspaceTreeDigest: string; scriptInputTreeDigest: string
+    privateGit: { kind: 'absent' } | { kind: 'present'; stateRef: ArtifactRef }
+  }
+  execution: {
+    runtimeBundleRef: ArtifactRef; runtimeBundleManifestDigest: string
+    guestToolchainManifestRef: ArtifactRef; guestToolchainManifestDigest: string
+    nodeExecutionPath: '/usr/bin/node'; nodeExecutableDigest: string
+    adapterCodeRef: ArtifactRef; npmDataRef: ArtifactRef
+    registryTargetsDigest: string; environmentDigest: string
+  }
+}
 type DependencyInstallScriptsAuthorizationTemplateV1 = {
   schemaVersion: 1
   format: 'cliq-dependency-install-scripts-authorization-v1'
   runId: string
   ownerPrincipalId: string
   workspaceIdentityDigest: string
-  sourceAuthorizationGrantId: string
-  sourceConsumptionReceiptRef: ArtifactRef
+  provenance:
+    | { kind: 'run_admission'; sourceAuthorizationGrantId: string; sourceConsumptionReceiptRef: ArtifactRef }
+    | { kind: 'candidate_approval'; waitingSubjectRef: ArtifactRef; decisionRef: ArtifactRef; responseRef: ArtifactRef;
+        requestId: string; requestDigest: string; candidateOrdinal: number; dependencyPlanRef: ArtifactRef; resultSourceRef: ArtifactRef }
+  scriptConditions: DependencyScriptConditionsV1
   guestToolchainManifestRef: ArtifactRef
   allowedAdapters: Array<DependencyAcquisitionPlan['adapter']>
   lockfilePath: 'package-lock.json' | 'pnpm-lock.yaml' | 'yarn.lock'
   lockfileRef: ArtifactRef
   lockfileDigest: string
+  packageManifestRef: ArtifactRef
+  packageManifestDigest: string
+  bindingGyp: { kind: 'absent' } | { kind: 'present'; contentRef: ArtifactRef; contentDigest: string }
   registryTargetsDigest: string
   maxCandidateGenerations: number
   maxDispatchedAttemptsPerPlan: 1
@@ -7193,6 +7220,10 @@ type DependencyInstallScriptsAuthorizationTemplateV1 = {
 `run.submit dependency.mode='locked'` resolves the public endpoint/credential ids to immutable registration/grant refs, freezes canonical HTTPS endpoint identity plus TLS policy digests, and validates each credential grant is principal-owned and bound to the same endpoint/purpose, exact authority/service revision, secret generation, and external subject. Re-registering an id cannot redirect an admitted Run: every candidate plan copies these frozen refs/digests unchanged, and the broker redeems only the exact still-current frozen-generation platform item against that target or returns authorization-required without dispatch. Kernel Cut accepts one sharp Node layout only: literal root `package.json`, exactly one literal root lockfile, no `workspaces` member, no nested package manifest, and no second supported lockfile. `packageManifest.contentRef/digest` and `lockfileRef/digest` rehash those exact candidate `SourceManifest` file entries. `package-lock.json` selects only `npm-ci-v1`, `pnpm-lock.yaml` only `pnpm-frozen-v1`, and `yarn.lock` only `yarn-immutable-v1`; the selected pinned package-manager entry must exist in the guest toolchain. Missing integrity, nested/workspace layout, ambiguity, or unlocked resolution fails before Run creation/candidate verification rather than invoking a package-manager heuristic. `planDigest = SHA-256(JCS(plan with planDigest omitted))`.
 
 At every FinalCandidate, trusted code derives a new immutable `DependencyAcquisitionPlan` from the **candidate** SourceManifest's exact root manifest/lockfile under that policy and binds it into `VerifierPlan`; it never reuses an admission-time plan against changed files. If scripts are authorized, admission consumes the exact `dependency_install_scripts` `AuthorizationGrantV1` and publishes the template above in the same transaction. `installScriptsGrantRef` names only that template. `registryTargetsDigest = SHA-256(JCS({registryEndpoints,credentialGrantRefs}))`, using the policy's byte-sorted endpoint tuples and byte-sorted unique credential refs exactly; `templateDigest = SHA-256(JCS(template with templateDigest omitted))`. Template workspace/lockfile/toolchain/allowed-adapter/registry-target bytes must equal the policy and admitted source. Its `sourceConsumptionReceiptRef` decodes to the identity-matched consumed grant and exact `{kind:'run_admission',runId,admissionIntentDigest}` consumer; it never binds the final admitted digest, which is computed only after the template and dependency-policy refs exist and then binds the complete closure. `maxCandidateGenerations = RunSpec.budgets.repairAttempts + 1`, and `expiresAt = Run.deadlineAt`. Each script-bearing candidate plan must retain the same lockfile digest and the exact endpoint/credential projection and consumes one of those generation ordinals through its exact Journal-backed `OperationGrantV1`; there is no resettable counter. A changed lock digest cannot reuse the template: scripts remain denied and the Run creates a typed approval subject for that candidate or fails in noninteractive deny mode. Defaults/maxima are 50,000/200,000 packages and 5/20 GiB downloaded. Repository registry config is declarative endpoints only; endpoints/credentials must be pre-registered user ids. The trusted broker fetches HTTPS package artifacts by frozen lockfile URL+integrity into CAS and may use the bounded integrity-GET exception; it passes no secret into the guest. A bundled adapter then performs a networkless, frozen-lockfile install. Install scripts are off by default; an exact lockfile template runs integrity-pinned package code inside the same strong secretless/networkless containment and never grants host access.
+
+Script consent closes the complete original source and interpreter graph, not a lock digest alone. A zero-Run refusal may retain a genuinely captured, fully retired `run.submit` source with paired `dependencyScriptIntentRef` and `admissionErrorResponseRef` on that captured attempt; its original AUTHORIZATION_REQUIRED first response remains immutable. The exact authorization target includes that `sourceInspectionId`. Authorization creation independently rereads the original normalized request, full source/handoff/retirement, signed execution and original endpoint registration/channel/bundle/CA graph. A fresh admission key performs a new capture and consumes the active authorization together with the Run, receipt, template, metadata and first response in the original sole admission transaction. Failed attempts and arbitrary old refs are never capture evidence. Historical reads obtain root data from the real retained owner/lock and trusted release configuration; only activity-owning code may use a genuine active StateOwner and authenticated frame.
+
+For a script-bearing candidate whose complete script inputs are no longer covered by the original admission template, the fixed Supervisor creates a `dependency_install_scripts` approval wait bound to candidate id/ordinal, full plan ref plus its separate semantic digest, original source Checkpoint/Run snapshot, workspace state and result source. The current frozen named-action policy is rerun over `dependency_install_scripts/<lockfileDigest>`. Deny remains deny. An allow disposition is preserved honestly as allow: this additional exact-source consent is still required and is never fabricated as policy ask or granted by mode alone. Scriptless policy never opens this consent path. `run.approve` uses the original principal/channel/request/revision/wait/owner/inspector and P≤C<expiry gates. One transaction registers the decision, excluded-control policy item, decision Checkpoint, first response and metadata. The item has no template ref: the candidate template is uniquely reconstructed from that registered decision and first response, avoiding a cyclic response/context/item/template graph. Its expiry is the requested/default TTL clipped to the Run deadline; admission templates retain expiry at the original Run deadline. The frozen RunSpec policy is not replaced. Each history read reconstructs the whole provenance XOR and exact first-response bytes. Unused expired allows may request new consent; a deny is sticky and an already claimed candidate/plan, including UNKNOWN, cannot receive a new script template or redispatch. The execution owner separately enforces the original one-attempt ordinal and native release gates. Stop may fence the validated wait without manufacturing an approval, template, native death proof or package readiness.
 
 The whole acquisition is one built-in `opKind='tool'`, target `builtin:dependency-acquire`, `ReplayClass='workspace-rollback-retry'`, and one `toolCalls` reservation. Its request binds the complete plan. During it, the candidate source projection is mounted read-only; only plan-declared dependency/cache/temp roots are writable. Install scripts therefore cannot modify candidate source even when authorized. Before completion Cliq rehashes the exact candidate source and requires equality with the verify frontier's `resultSourceRef`; a detected/audited source write or digest drift quarantines the generation and fails as kernel integrity rather than verifying stale bytes. Partial CAS downloads are harmless orphans; a partial install is discarded with the generation.
 
@@ -8573,13 +8604,16 @@ type DependencyReadyItem = {
   runId: string
   kind: 'dependency_ready'
   planRef: ArtifactRef
-  opId: string
-  attempt: number
-  packageCacheManifestRef: ArtifactRef
   readyCheckpointId: string
   installedTreeDigest: string
   createdAt: string
-}
+} & (
+  | { origin: 'acquired'; opId: string; attempt: number; packageCacheManifestRef: ArtifactRef }
+  | { origin: 'inherited_parent_ready'; parentRunId: string; parentReadyItemRef: ArtifactRef
+      parentReadyCheckpointId: string; parentReadyWorkspaceStateRef: ArtifactRef
+      childAdmissionRequestRef: ArtifactRef
+      childPreparation: { workerLaunchId: string; snapshotEvidenceRef: ArtifactRef; retirementEvidenceRef: ArtifactRef } }
+)
 
 type VerifierExecutableIdentityV1 =
   | {
@@ -8802,10 +8836,19 @@ type VerificationClosureV1 = {
         dependencyPolicyRef: ArtifactRef
         dependencyPlanRef: ArtifactRef
         dependencyReadyItemId: string
-        acquisitionOpId: string
-        acquisitionAttempt: number
-        completedJournalSeq: number
         readyCheckpointId: string
+      } & (
+        | { origin: 'acquired'; acquisitionOpId: string; acquisitionAttempt: number; completedJournalSeq: number }
+        | { origin: 'inherited_parent_ready'; parentRunId: string; parentReadyItemRef: ArtifactRef; childAdmissionRequestRef: ArtifactRef }
+      )
+    | {
+        kind: 'inherited_verification'
+        dependencyPolicyRef: ArtifactRef
+        dependencyPlanRef: ArtifactRef
+        sourceRunId: string
+        sourceRunResultRef: ArtifactRef
+        sourceVerificationClosureRef: ArtifactRef
+        inheritedProvenanceRef: ArtifactRef
       }
   verification:
     | {
@@ -10356,7 +10399,7 @@ Run.status == succeeded
 => RunResult and receipts are durable before the terminal Run commit
 ```
 
-This invariant is enforced at the storage API, not merely by the verifier reducer. Generic Run compare-and-swap cannot set any terminal status. `commitRunResult` is the sole transition to `succeeded|completed_unverified` and first requires `stopIntentRef` absent, `cancelRequested=false`, no active stop proposal, and the same terminal-quiescence/closed-frontier checks. `succeeded` validates the frozen required verifier set and exact receipt/inherited-provenance closure in the same transaction; `completed_unverified` validates that the frozen required set is empty. Required verifier ids are unique. Each required verifier maps one-to-one to a unique passed receipt, and that receipt must be the `receiptRef` of the highest eligible `opKind='verifier'` Journal `completed` attempt whose immutable request binds the exact verifier id/version, `VerifierSpec`, command, environment, and `resultSourceRef`; one receipt cannot satisfy two requirements. Dependency closure is equally storage-enforced: `RunResult.dependencyPlanRef` is absent iff `RunSpec.dependencyPolicyRef` is absent/disabled; otherwise it equals the current candidate's `VerifierPlan.dependencyPlanRef` and has a **current-Run-owned**, identity-matched `DependencyReadyItem`, completed acquisition attempt, unchanged candidate source digest, and exact ready Checkpoint whose id equals `readyCheckpointId` and whose decoded workspace-entry tree digest equals `installedTreeDigest` for that candidate/plan. Inherited delivery verification provenance revalidates only the source Run's identical Journal-backed verifier closure; it cannot stand in for the delivery Run's dependency readiness. For `RunSpec.operation='agent'`, both current finalize frontier and RunResult forbid `deliveryTerminalProjectionEvidenceRef`. For `operation='delivery'`, both require the same exact forward-finalize `DeliveryTerminalProjectionEvidence` ref, whose plan/result/result-item/projection fields revalidate against the carried closure/frontier and current descriptor observations. `commitTerminalStop` is the sole failure/cancellation path; it requires the current winning StopIntent, derives status/reason/detail from it, and enforces terminal quiescence in the same transaction.
+This invariant is enforced at the storage API, not merely by the verifier reducer. Generic Run compare-and-swap cannot set any terminal status. `commitRunResult` is the sole transition to `succeeded|completed_unverified` and first requires `stopIntentRef` absent, `cancelRequested=false`, no active stop proposal, and the same terminal-quiescence/closed-frontier checks. `succeeded` validates the frozen required verifier set and exact receipt/inherited-provenance closure in the same transaction; `completed_unverified` validates that the frozen required set is empty. Required verifier ids are unique. Each required verifier maps one-to-one to a unique passed receipt, and that receipt must be the `receiptRef` of the highest eligible `opKind='verifier'` Journal `completed` attempt whose immutable request binds the exact verifier id/version, `VerifierSpec`, command, environment, and `resultSourceRef`; one receipt cannot satisfy two requirements. Dependency closure is equally storage-enforced: `RunResult.dependencyPlanRef` is absent iff `RunSpec.dependencyPolicyRef` is absent/disabled; otherwise it equals the current candidate's `VerifierPlan.dependencyPlanRef` and has a **current-Run-owned**, identity-matched `DependencyReadyItem`, completed acquisition attempt, unchanged candidate source digest, and exact ready Checkpoint whose id equals `readyCheckpointId` and whose decoded workspace-entry tree digest equals `installedTreeDigest` for that candidate/plan. For the explicit identical-source Delivery exception, `dependency.kind='inherited_verification'` instead binds the exact source Run/result, source verification closure and the same immutable inherited provenance plus policy/plan refs. The complete source dependency receipt/Journal/retirement is revalidated. This proves inherited verification only: no delivery-owned Ready, GET, installed M or script permission is invented. Every other dependency-enabled candidate requires its current-Run-owned acquired or narrowly inherited-parent Ready and its actual local sealed M. For `RunSpec.operation='agent'`, both current finalize frontier and RunResult forbid `deliveryTerminalProjectionEvidenceRef`. For `operation='delivery'`, both require the same exact forward-finalize `DeliveryTerminalProjectionEvidence` ref, whose plan/result/result-item/projection fields revalidate against the carried closure/frontier and current descriptor observations. `commitTerminalStop` is the sole failure/cancellation path; it requires the current winning StopIntent, derives status/reason/detail from it, and enforces terminal quiescence in the same transaction.
 
 ## 14. Result And Delivery
 
@@ -10397,10 +10440,13 @@ final delivery admission digest binds that inherited ref. It does **not**
 inherit an admission-time dependency plan or source-Run dependency readiness.
 Each delivery merge candidate derives its own candidate-bound
 `DependencyAcquisitionPlan` from that policy and exact manifest/lockfile
-digest. When the policy is enabled, the delivery Run executes and records its
-own setup even for an identical `resultSourceRef` and plan; only a ready
-Checkpoint already owned by that same delivery Run may satisfy recovery without
-another dispatch. The delivery Run sets `modelTokens=0`, `costMicros=0`,
+digest. A nonidentical candidate executes and records its own setup; only its
+own true ready Checkpoint can satisfy local recovery. An identical candidate
+may instead retain the closed `inherited_verification` branch bound to its
+original fully verified source and the same inherited provenance. It does not
+claim dependency materialization in the Delivery M or produce a local Ready.
+The source Run's lifecycle script permission never transfers; a local setup
+requires this Delivery's own genuine exact-source approval. The delivery Run sets `modelTokens=0`, `costMicros=0`,
 `repairAttempts=0`, `childDepth=0`, and `childConcurrency=0`, and accepts only
 wall/tool ceilings through `run.apply`. It never invokes a model or repairs
 verifier assertions. Candidate-bound dependency setup consumes one delivery
@@ -13521,3 +13567,24 @@ The following decisions are closed:
 - one-time migration, no long-term dual write, and one Kernel Cut.
 
 Implementation may optimize storage, copy-on-write, batching, and internal library choices without changing these contracts. Any proposal that changes a closed decision requires a new RFC and must explain how it preserves the product promise and release invariants.
+
+### First installed locked Node profile refinement
+
+The first complete implementation profile and its exact execution/reuse
+limits are specified in [Installed Node dependencies](../kernel/installed-node-dependencies.md)
+and the [public integrity-GET native contract](../kernel/dependency-public-get-native.md).
+These are fixed-purpose refinements of this lifecycle, not a general URL fetch,
+package-manager executable choice, additional ledger, resource-cap increase or
+qualification declaration. The two signed non-executable npm adapter/data
+entries are interpreted only by the exact signed guest Node. The original
+wire/model JSON bounds and all old 32-file recipes remain unchanged. The
+new data image alone uses its explicit 4096-file/32-MiB bounded volatile mapper.
+
+`DependencyReadyItem.origin` is a closed XOR: acquired records its original
+whole-operation Journal/cache/actual parent retirement; inherited_parent_ready
+records the original parent sealed Ready/Checkpoint/allocation plus the child's
+own true preparation/candidate seal. `installedTreeDigest` in this profile is
+the exact managed `node_modules` subtree digest; the full actual Checkpoint M
+and snapshot/native retirement remain independently mandatory. No standalone
+subtree digest, original refusal, same pathname, data template or CAS presence
+provides capture, execution, death or reuse authority.

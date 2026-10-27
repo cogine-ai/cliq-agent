@@ -232,16 +232,20 @@ export function assertCurrentControlFrame(owner: StateOwnerContext, identity: Au
 }
 
 /** Rewalk a historical channel against this database's retained StateRoot, without authenticating new input. */
-export async function readHistoricalControlChannel(driver: SqliteDriver, artifacts: ArtifactCatalog,
-  input: { channelIdentityRef: string; channelIdentityDigest: string; principalId: string }) {
+/** Retained root data from the real SQL owner/lock. This intentionally is not
+ * a StateOwnerContext and cannot pass an active-owner or native release gate. */
+export type RetainedControlRootContext = Parameters<typeof readRetainedControlChannelClosure>[1];
+export async function readRetainedControlRoot(driver: SqliteDriver, artifacts: ArtifactCatalog): Promise<RetainedControlRootContext> {
   const owner = readLatestStateOwner(driver);
   if (!owner) throw new TypeError('control history has no retained state owner');
   const lock = decodeStateLockIdentity(await readCanonicalArtifact(artifacts, owner.stateLockIdentityRef));
   if (lock.identityDigest !== owner.stateLockIdentityDigest) throw new TypeError('control history state-owner lock mismatch');
-  return readRetainedControlChannelClosure(artifacts, {
-    stateRootIdentityRef: lock.stateRootIdentityRef, stateRootIdentityDigest: lock.stateRootIdentityDigest,
-    filesystem: { root: { ownerUid: lock.ownerUid } }
-  }, input);
+  return Object.freeze({ stateRootIdentityRef: lock.stateRootIdentityRef, stateRootIdentityDigest: lock.stateRootIdentityDigest,
+    filesystem: Object.freeze({ root: Object.freeze({ ownerUid: lock.ownerUid }) }) });
+}
+export async function readHistoricalControlChannel(driver: SqliteDriver, artifacts: ArtifactCatalog,
+  input: { channelIdentityRef: string; channelIdentityDigest: string; principalId: string }) {
+  return readRetainedControlChannelClosure(artifacts, await readRetainedControlRoot(driver, artifacts), input);
 }
 
 export async function validateControlChannelClosure(

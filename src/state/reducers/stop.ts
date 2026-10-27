@@ -73,14 +73,23 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
       // adds a fence; terminal drain below still requires the original claim
       // and invocation/parent retirement, never a worker-free substitution.
       const frontier = await readCanonicalArtifact<RunFrontier>(artifacts, run.frontierRef!);
+      if (allowUnstartedCandidate && run.status === 'waiting' && run.waitingReason === 'approval' && frontier.kind === 'verify' && frontier.phase === 'dependencies') {
+        const original = await (await import('../dependency-script-approval.js')).readDependencyScriptWaitingRun(driver, artifacts, run);
+        requireEqual(frontier, original.frontier, 'Stop retains its original dependency consent frontier');
+        return selected;
+      }
       if (!allowUnstartedCandidate || !['queued', 'running', 'waiting'].includes(run.status) || frontier.schemaVersion !== 1 ||
           run.status === 'waiting' && !(allowWorkerRecovery && run.waitingReason === 'reconciliation'))
         throw new KernelStorageError('STATE_TRANSITION_INVALID', 'candidate stop requires its exact verification lifecycle');
       if (frontier.kind === 'verify' && run.nextStep === 'verify' && exactKeys(frontier, ['schemaVersion', 'kind', 'phase', 'candidateItemId',
-        'resultSourceRef', 'verifierPlanRef', 'nextVerifierIndex', 'afterPass']) && frontier.phase === 'verifiers' &&
+        'resultSourceRef', 'verifierPlanRef', 'nextVerifierIndex', 'afterPass', ...(spec.dependencyPolicyRef ? ['dependencyPlanRef'] : [])]) &&
+          (frontier.phase === 'verifiers' || frontier.phase === 'dependencies') &&
           frontier.afterPass === (spec.operation === 'agent' ? 'finalize' : 'delivery_approval')) {
         const progress = await readVerifierProgress(driver, artifacts, selected, frontier.candidateItemId);
-        if (frontier.nextVerifierIndex !== progress.nextVerifierIndex || frontier.verifierPlanRef !== progress.planRef ||
+        const dependencyPending = progress.dependency && !progress.dependency.ready;
+        if (frontier.phase !== (dependencyPending ? 'dependencies' : 'verifiers') ||
+            frontier.dependencyPlanRef !== progress.dependency?.planRef ||
+            frontier.nextVerifierIndex !== (dependencyPending ? 0 : progress.nextVerifierIndex) || frontier.verifierPlanRef !== progress.planRef ||
             frontier.resultSourceRef !== progress.candidate.resultSourceRef) throw new TypeError('stop substituted its exact verifier progress');
         return selected;
       }
@@ -273,6 +282,60 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
         }, now);
       });
     }),
+    stopForDependencyFailure: stateOperation('INVALID_REQUEST', async (input: {
+      expectedRunRevision: number; inspectorIdentityRef: string; inspectorIdentityDigest: string;
+    }) => {
+      input = immutableSnapshot(input);
+      if (!spec.dependencyPolicyRef || !exactKeys(input, ['expectedRunRevision', 'inspectorIdentityRef', 'inspectorIdentityDigest']))
+        throw new TypeError('dependency failure requires its exact frozen policy and owning inspector');
+      assertActiveStateOwner(driver, owner); await authority.assertAuthority();
+      const selected = await cut(input.expectedRunRevision, false, true, true);
+      return commitDerivedStop(selected, async now => {
+        const cause = await (await import('../dependency-failure-cause.js')).readDependencyFailureCause(driver, artifacts, selected, now);
+        if (!cause) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'dependency failure has no complete positively received original cause');
+        const integrity = await (await import('../dependency-failure-cause.js')).readDependencyIntegrityCause(driver, artifacts, selected, now);
+        if (integrity) return { intent: integrity };
+        if (now >= selected.run.deadlineAt) return { intent: deadlineIntent(now) };
+        return prepareModelFailureStop(driver, artifacts, assertActiveStateOwner(driver, owner), assembly, selected, {
+          inspectorIdentityRef: input.inspectorIdentityRef, inspectorIdentityDigest: input.inspectorIdentityDigest }, now);
+      });
+    }),
+    stopForDependencyAmbiguity: stateOperation('INVALID_REQUEST', async (input: { expectedRunRevision: number; inspectorIdentityRef: string; inspectorIdentityDigest: string }) => {
+      input = immutableSnapshot(input);
+      if (!spec.dependencyPolicyRef || !exactKeys(input, ['expectedRunRevision', 'inspectorIdentityRef', 'inspectorIdentityDigest']))
+        throw new TypeError('dependency ambiguity requires its frozen policy and original inspector');
+      assertActiveStateOwner(driver, owner); await authority.assertAuthority();
+      const selected = await cut(input.expectedRunRevision, true, true, true);
+      return commitDerivedStop(selected, async now => {
+        const cause = await (await import('../dependency-failure-cause.js')).readDependencyAmbiguityCause(driver, artifacts, selected, now);
+        if (!cause) return undefined;
+        if (now >= selected.run.deadlineAt) return { intent: deadlineIntent(now) };
+        return prepareModelFailureStop(driver, artifacts, assertActiveStateOwner(driver, owner), assembly, selected,
+          { inspectorIdentityRef: input.inspectorIdentityRef, inspectorIdentityDigest: input.inspectorIdentityDigest }, now);
+      });
+    }),
+    stopForDependencyScriptDenial: stateOperation('INVALID_REQUEST', async (input: { expectedRunRevision: number }) => {
+      input = immutableSnapshot(input);
+      if (!spec.dependencyPolicyRef || !exactKeys(input, ['expectedRunRevision']))
+        throw new TypeError('dependency script denial requires its original frozen dependency policy');
+      assertActiveStateOwner(driver, owner); await authority.assertAuthority();
+      const selected = await cut(input.expectedRunRevision, false, true, true);
+      return commitDerivedStop(selected, async now => {
+        if (now >= selected.run.deadlineAt) return { intent: deadlineIntent(now) };
+        const cause = await (await import('../dependency-script-approval.js')).readDependencyScriptDenialCause(driver, artifacts, runId, { observedAt: now });
+        if (!cause) return undefined;
+        const metadata = await artifacts.mapReads(cause.plans, async plan => {
+          const published = await artifacts.publishBytes(plan.bytes, plan.mediaType, plan.schemaKind);
+          requireEqual(published, { ref: plan.ref, byteLength: plan.bytes.length, mediaType: plan.mediaType,
+            schemaKind: plan.schemaKind }, 'dependency script denial complete original artifacts');
+          return published;
+        });
+        const intent: AgentStopIntent = { schemaVersion: 1, runId, createdAt: now, origin: 'policy_deny',
+          subjectKind: 'dependency_install_scripts', targetStatus: 'failed', reason: 'runtime_failed', opId: cause.opId,
+          policyChannelEvidenceRef: cause.policyChannelEvidenceRef, policyChannelEvidenceDigest: cause.policyChannelEvidenceDigest };
+        return { intent, metadata, commit(connection: SqliteConnection) { cause.assertUnchanged(connection); } };
+      });
+    }),
     stopForVerification: stateOperation('INVALID_REQUEST', async (input: { expectedRunRevision: number }) => {
       input = immutableSnapshot(input);
       if (!exactKeys(input, ['expectedRunRevision'])) throw new TypeError('unknown verification stop field');
@@ -350,9 +413,14 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
       }
       const intent = await readAgentStop(driver, artifacts, selected);
       const integrity = await readVerifierIntegrityCause(driver, artifacts, selected, sampleCanonicalNow());
-      if (integrity && (intent.origin !== 'kernel_integrity' || intent.verifierOpId !== integrity.verifierOpId ||
+      if (integrity && (intent.origin !== 'kernel_integrity' || intent.reason !== 'verifier_mutated_source' || intent.verifierOpId !== integrity.verifierOpId ||
           intent.integrityEvidenceRef !== integrity.integrityEvidenceRef || intent.integrityEvidenceDigest !== integrity.integrityEvidenceDigest))
         throw new KernelStorageError('STATE_TRANSITION_INVALID', 'terminal stop requires the higher-priority retained verifier integrity intent');
+      const dependencyIntegrity = await (await import('../dependency-failure-cause.js')).readDependencyIntegrityCause(driver, artifacts, selected, sampleCanonicalNow());
+      if (dependencyIntegrity && (intent.origin !== 'kernel_integrity' || intent.reason !== 'runtime_failed' || intent.source !== 'dependency_acquisition' ||
+          intent.failingOpId !== dependencyIntegrity.failingOpId || intent.integrityEvidenceRef !== dependencyIntegrity.integrityEvidenceRef ||
+          intent.integrityEvidenceDigest !== dependencyIntegrity.integrityEvidenceDigest))
+        throw new KernelStorageError('STATE_TRANSITION_INVALID', 'terminal stop requires the higher-priority original dependency integrity intent');
       const checkpointId = stopCheckpointId(runId, run.stopIntentRef);
       const frontier = await readCanonicalArtifact<RunFrontier>(artifacts, run.frontierRef!);
       const items = await artifacts.mapReads(selected.items, async (row) => ({ itemSeq: row.itemSeq, itemRef: row.payloadRef,
@@ -377,6 +445,10 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
       const rollback = workerRecovery?.rollback;
       const noRelease = await validateInstalledModelNoReleaseHistory(driver, artifacts, selected);
       const verifierStops = await validateVerifierStoppedHistory(driver, artifacts, selected);
+      const dependencyClosed = new Set<number>();
+      if (spec.dependencyPolicyRef) for (const progress of (await (await import('../dependency-history.js')).readDependencyHistory(driver, artifacts, selected)).values()) {
+        if (progress.failed) { const row = selected.journal.find(entry => entry.opId === progress.failed!.opId && entry.attempt === progress.failed!.attempt && entry.phase === 'failed'); if (row) dependencyClosed.add(row.seq); }
+      }
       const unclaimedPublications = !publication && spec.operation === 'delivery' &&
         selected.journal.some(entry => entry.opKind === 'publish') &&
         !selected.journal.some(entry => entry.opKind === 'publish' && entry.phase === 'dispatch_claimed')
@@ -398,9 +470,14 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
           unknowns.push(entry);
           continue;
         }
+        if (entry.opKind === 'tool' && entry.target === 'builtin:dependency-acquire' && entry.replayClass === 'workspace-rollback-retry' && entry.phase === 'unknown' &&
+            workerRecovery?.dependencyAbandoned.some(closed => closed.opId === entry.opId && closed.attempt === entry.attempt &&
+              closed.unknownJournalSeq === entry.seq && closed.budgetSettlementRef === entry.budgetSettlementRef)) {
+          unknowns.push(entry); continue;
+        }
         if (!['model', 'tool', 'verifier', 'child_admission', 'child_merge', 'child_await', 'skill_resource'].includes(entry.opKind) || (!['prepared', 'completed'].includes(entry.phase) &&
             (entry.phase !== 'failed' || hasClaim && !(entry.opKind === 'model' && noRelease.has(entry.seq) ||
-              entry.opKind === 'verifier' && verifierStops.has(entry.seq)))))
+              entry.opKind === 'verifier' && verifierStops.has(entry.seq) || entry.opKind === 'tool' && dependencyClosed.has(entry.seq)))))
           throw new KernelStorageError('STATE_TRANSITION_INVALID', 'terminal stop awaits exact dispatch/reconciliation closure');
         if (entry.phase === 'prepared') prepared.push(entry);
       }
@@ -428,7 +505,7 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
       return withInstalledBrokerTerminalClosure(driver, artifacts, owner, installedRuntime, selected, async (brokerClosure) => {
         // The owning plan proves every exact model/retry unknown, never a
         // generic unknown phase or an already dispatched tool cancellation.
-        const abandoned = [...brokerClosure.abandonedRetryInvocations, ...(workerRecovery?.verifierAbandoned ?? [])]
+        const abandoned = [...brokerClosure.abandonedRetryInvocations, ...(workerRecovery?.verifierAbandoned ?? []), ...(workerRecovery?.dependencyAbandoned ?? [])]
           .sort((left, right) => left.unknownJournalSeq - right.unknownJournalSeq ||
             Buffer.compare(Buffer.from(left.opId), Buffer.from(right.opId)) || left.attempt - right.attempt);
         if (abandoned.length !== unknowns.length || unknowns.some(entry => abandoned.filter(closed =>

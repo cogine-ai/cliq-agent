@@ -16,6 +16,8 @@
 #include "builtin-tool-protocol.h"
 #include "builtin-result-ack.h"
 #include "builtin-tool-git.h"
+#include "dependency-owner-bridge.h"
+#include "dependency-npm-protocol.h"
 #include "verifier-setup.h"
 #include "worker-sha256.h"
 #include <linux/magic.h>
@@ -32,11 +34,13 @@
 static const napi_type_tag IMAGE_TAG = { UINT64_C(0x671ca1bc736f4411), UINT64_C(0xa1d7e8ec9f001820) };
 /* Private wire7/ACK scope layouts never unwrap an older loaded module's
  * controller or scope object, even when both live images share one Node VM. */
-static const napi_type_tag CONTROLLER_TAG = { UINT64_C(0xd13cd526ca3347b7), UINT64_C(0xb59a769ace284f51) };
-static const napi_type_tag SCOPE_TAG = { UINT64_C(0x2b72bf53e4524e35), UINT64_C(0xa9861bd0d5e1c47f) };
+static const napi_type_tag CONTROLLER_TAG = { UINT64_C(0x6b23a76e87cb4d16), UINT64_C(0x91a7370d16fbf053) };
+static const napi_type_tag SCOPE_TAG = { UINT64_C(0x21de46898c494e81), UINT64_C(0x9cc34f7b864ebd59) };
 static const napi_type_tag SOURCE_INSPECTOR_IMAGE_TAG = { UINT64_C(0x8c67dfb833d0495c), UINT64_C(0x9be2f2fa2fb9d634) };
 
 static const napi_type_tag BUILTIN_SCRIPT_IMAGE_TAG = { UINT64_C(0x9e40eb5c22474091), UINT64_C(0xa6b77c06b6f9b74f) };
+static const napi_type_tag DEPENDENCY_SCRIPT_IMAGE_TAG = { UINT64_C(0x9e7336c9cb5c40d7), UINT64_C(0x81b93807dc1d39ac) };
+static const napi_type_tag DEPENDENCY_DATA_IMAGE_TAG = { UINT64_C(0xae12a73d31394dd1), UINT64_C(0x9691bf51a0ad07f8) };
 
 /* The fixed loaded native image owns this uncertainty across controllers and
  * N-API environments. A new receiver cannot erase an unjoined resource. */
@@ -74,11 +78,13 @@ struct native_scope { struct controller *controller; struct native_scope *next, 
     bool result_ack_started, result_ack_outputs_joined, result_acknowledged; int image_fd;
     uint64_t output_limit;
     uint32_t builtin_tool;
+    bool dependency, dependency_inputs_sealed, dependency_peer_released; uint32_t dependency_custody_origin;
+    struct cliq_dependency_owner *dependency_owner; napi_ref dependency_owner_ref;
     napi_ref verifier_value;
     struct cliq_worker_packet identity, result; };
 
-static unsigned int capture_release_command(const struct native_scope *scope) { return scope->builtin ? CLIQ_RELEASE_BUILTIN : CLIQ_RELEASE_VERIFIER; }
-static unsigned int capture_poll_command(const struct native_scope *scope) { return scope->builtin ? CLIQ_POLL_BUILTIN : CLIQ_POLL_VERIFIER; }
+static unsigned int capture_release_command(const struct native_scope *scope) { return scope->dependency ? CLIQ_RELEASE_DEPENDENCY_NPM : scope->builtin ? CLIQ_RELEASE_BUILTIN : CLIQ_RELEASE_VERIFIER; }
+static unsigned int capture_poll_command(const struct native_scope *scope) { return scope->dependency ? CLIQ_POLL_DEPENDENCY_NPM : scope->builtin ? CLIQ_POLL_BUILTIN : CLIQ_POLL_VERIFIER; }
 
 static napi_value failure(napi_env env, const char *message) {
     bool pending = false;
@@ -320,6 +326,9 @@ static void scope_release_memory(struct native_scope *scope) {
     if (--scope->references != 0) return;
     if (!retire_descriptor(&scope->image_fd)) scope->controller->retirement_failed = true;
     if (scope->verifier_value) napi_delete_reference(scope->controller->env, scope->verifier_value);
+    if (scope->dependency_owner_ref && napi_delete_reference(scope->controller->env, scope->dependency_owner_ref) != napi_ok) {
+        scope->controller->retirement_failed = true; atomic_store(&native_retirement_failed, true);
+    }
     controller_release(scope->controller); free(scope);
 }
 
@@ -516,7 +525,9 @@ static napi_value fixed_script_close(napi_env env, napi_callback_info info) {
     size_t argc = 0; napi_value self; struct image *image;
     napi_get_cb_info(env, info, &argc, NULL, &self, NULL);
     if (!tagged(env, self, &SOURCE_INSPECTOR_IMAGE_TAG, (void **)&image) &&
-        !tagged(env, self, &BUILTIN_SCRIPT_IMAGE_TAG, (void **)&image)) return failure(env, "invalid fixed signed script image");
+        !tagged(env, self, &BUILTIN_SCRIPT_IMAGE_TAG, (void **)&image) &&
+        !tagged(env, self, &DEPENDENCY_SCRIPT_IMAGE_TAG, (void **)&image) &&
+        !tagged(env, self, &DEPENDENCY_DATA_IMAGE_TAG, (void **)&image)) return failure(env, "invalid fixed signed script image");
     if (!retire_descriptor(&image->fd)) {
         napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "source inspector image descriptor did not retire"); return NULL;
     }
@@ -779,7 +790,7 @@ static napi_value scope_release(napi_env env, napi_callback_info info) {
     if (atomic_load(&native_retirement_failed)) return failure(env, "native resource retirement remains uncertain");
     size_t argc = 0; napi_value self; struct native_scope *scope;
     napi_get_cb_info(env, info, &argc, NULL, &self, NULL);
-    if (!tagged(env, self, &SCOPE_TAG, (void **)&scope) || !scope->ready || !scope->invocation || scope->stopped || scope->released || scope->controller->closed)
+    if (!tagged(env, self, &SCOPE_TAG, (void **)&scope) || scope->dependency || !scope->ready || !scope->invocation || scope->stopped || scope->released || scope->controller->closed)
         return failure(env, "native invocation release was revoked or consumed");
     struct cliq_worker_packet request = cliq_packet(scope->verifier ? capture_release_command(scope) : CLIQ_RELEASE_WRITE); request.scope = scope->id;
     memcpy(request.nonce, scope->identity.nonce, sizeof(request.nonce));
@@ -1903,6 +1914,7 @@ static bool prepare_controller_io(struct controller *controller) {
 
 #include "source-git-native.h"
 #include "preparation-git-native.h"
+#include "dependency-npm-native.h"
 
 /* Read-only arena inventory. It grants no spawn/lease/release and never
  * reuses an old id. The original create guard remains authoritative. */
@@ -1945,6 +1957,7 @@ static napi_value open_controller(napi_env env, napi_callback_info info) {
         { "hasInvocationCapacity", NULL, controller_invocation_capacity, NULL, NULL, NULL, napi_default, NULL },
         { "createVerifier", NULL, create_verifier, NULL, NULL, NULL, napi_default, NULL },
         { "createBuiltinTool", NULL, create_builtin_tool, NULL, NULL, NULL, napi_default, NULL },
+        { "createDependencyNpm", NULL, create_dependency_npm, NULL, NULL, NULL, napi_default, NULL },
         { "reserveSourceGit", NULL, reserve_source_git, NULL, NULL, NULL, napi_default, NULL },
         { "reservePreparationGit", NULL, reserve_preparation_git, NULL, NULL, NULL, napi_default, NULL },
         { "preparationGitConstructionRetirement", NULL, preparation_native_construction_retirement, NULL, NULL, NULL, napi_default, NULL },
@@ -2013,12 +2026,14 @@ static napi_value initialize(napi_env env, napi_value exports) {
         { "sealImageBuffer", NULL, seal_input, NULL, NULL, NULL, napi_default, NULL },
         { "sealSourceGitInspector", NULL, seal_source_inspector, NULL, NULL, NULL, napi_default, NULL },
         { "sealBuiltinToolScript", NULL, seal_builtin_script, NULL, NULL, NULL, napi_default, NULL },
+        { "sealDependencyNpmScript", NULL, seal_dependency_script, NULL, NULL, NULL, napi_default, NULL },
+        { "sealDependencyNpmData", NULL, seal_dependency_data, NULL, NULL, NULL, napi_default, NULL },
         { "openController", NULL, open_controller, NULL, NULL, NULL, napi_default, NULL },
         { "verifierInterfaceVersion", NULL, NULL, NULL, NULL, verifier_version, napi_default, NULL }
     };
     if (napi_define_properties(env, exports, sizeof(properties) / sizeof(properties[0]), properties) != napi_ok) return NULL;
     set_number(env, exports, "interfaceVersion", 3); set_number(env, exports, "sourceInterfaceVersion", 1);
-    set_number(env, exports, "preparationInterfaceVersion", 1); set_number(env, exports, "builtinToolInterfaceVersion", 2); return exports;
+    set_number(env, exports, "preparationInterfaceVersion", 1); set_number(env, exports, "builtinToolInterfaceVersion", 2); set_number(env, exports, "dependencyInterfaceVersion", 1); return exports;
 }
 #else
 static napi_value unsupported(napi_env env, napi_callback_info info) {

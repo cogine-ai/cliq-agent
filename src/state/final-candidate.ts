@@ -16,7 +16,7 @@ import { advanceTimeFence, sampleCanonicalNow, type TimeFenceAdvance } from './c
 import { planContinuationCommit } from './continuation-commit.js';
 import { decodeContextManifest } from './decoders.js';
 import { KernelStorageError, stateOperation } from './errors.js';
-import { finalCandidateCheckpointId, finalCandidateItemId, readCandidateVerifierPlan } from './final-candidate-plan.js';
+import { finalCandidateCheckpointId, finalCandidateItemId, readCandidateVerificationData } from './final-candidate-plan.js';
 import { isZeroBudget } from './invariants.js';
 import { readRecoveryClosure } from './recovery-closure.js';
 import { readInvocationJournal, readHighestPreparedAttempt } from './repositories/journal.js';
@@ -227,16 +227,18 @@ export function loadFinalCandidate(driver: SqliteDriver, artifacts: ArtifactCata
                     itemId: finalCandidateItemId(runId, producerId), producingItemId: producerId, producingOpId: opId,
                     baseSourceRef: spec.baseWorkspaceManifestRef, resultSourceRef: source.graph.sourceRef, diffRef: source.graph.diffRef,
                     summaryRef: producer.textRef, sourceDigest: source.graph.source.manifestDigest, diffDigest: source.graph.diff.diffDigest, createdAt };
-                  const verifierPlan = await readCandidateVerifierPlan(artifacts, spec, { runId,
+                  const { verifierPlan, dependency } = await readCandidateVerificationData(artifacts, spec, { runId,
                     candidateItemId: candidate.itemId, resultSourceRef: candidate.resultSourceRef });
                   const plan = planCanonicalArtifact(verifierPlan, 'cliq-verifier-plan-v1');
-                  const nextFrontier: RunFrontier = { schemaVersion: 1, kind: 'verify', phase: 'verifiers', candidateItemId: candidate.itemId,
+                  const nextFrontier: RunFrontier = { schemaVersion: 1, kind: 'verify', phase: dependency ? 'dependencies' : 'verifiers', candidateItemId: candidate.itemId,
                     resultSourceRef: candidate.resultSourceRef, verifierPlanRef: plan.ref, nextVerifierIndex: 0, afterPass: 'finalize' };
+                  if (dependency) nextFrontier.dependencyPlanRef = canonicalSha256(dependency.plan);
                   const context = decodeContextManifest(await readCanonicalArtifact(artifacts, selected.latestCheckpoint.contextManifestRef));
                   const existingItems = await artifacts.mapReads(selected.items, async row => ({ itemSeq: row.itemSeq, itemRef: row.payloadRef,
                     item: await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef) }));
                   graph = planContinuationCommit(artifacts, { context, existingItems, items: [candidate], frontier: nextFrontier,
-                    checkpointId, workspaceStateRef: input.checkpoint.workspaceStateRef, artifacts: [plan] });
+                    checkpointId, workspaceStateRef: input.checkpoint.workspaceStateRef, artifacts: [plan,
+                      ...(dependency ? [planCanonicalArtifact(dependency.plan, dependency.plan.format)] : [])] });
                 }
                 graphMetadata ??= await graph!.publish();
               }

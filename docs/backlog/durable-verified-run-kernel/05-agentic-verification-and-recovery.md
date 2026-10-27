@@ -378,10 +378,19 @@ type VerificationClosureV1 = {
         dependencyPolicyRef: ArtifactRef
         dependencyPlanRef: ArtifactRef
         dependencyReadyItemId: string
-        acquisitionOpId: string
-        acquisitionAttempt: number
-        completedJournalSeq: number
         readyCheckpointId: string
+      } & (
+        | { origin: 'acquired'; acquisitionOpId: string; acquisitionAttempt: number; completedJournalSeq: number }
+        | { origin: 'inherited_parent_ready'; parentRunId: string; parentReadyItemRef: ArtifactRef; childAdmissionRequestRef: ArtifactRef }
+      )
+    | {
+        kind: 'inherited_verification'
+        dependencyPolicyRef: ArtifactRef
+        dependencyPlanRef: ArtifactRef
+        sourceRunId: string
+        sourceRunResultRef: ArtifactRef
+        sourceVerificationClosureRef: ArtifactRef
+        inheritedProvenanceRef: ArtifactRef
       }
   verification:
     | {

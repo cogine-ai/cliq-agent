@@ -669,6 +669,7 @@ SQLite recovery reducer, and does not advance this work package's completion.
    `run.submit dependency.mode='locked'` resolves public endpoint/credential ids to immutable registration/grant refs, freezes canonical HTTPS endpoint and TLS-policy digests plus exact authority/service revision, secret generation, and external subject, and accepts exactly literal root `package.json` plus exactly one literal root lockfile and a compatible pinned guest package manager. `packageManifest.contentRef/contentDigest` and the lockfile ref/digest rehash those exact candidate `SourceManifest` entries. `package-lock.json` selects only `npm-ci-v1`; `pnpm-lock.yaml` only `pnpm-frozen-v1`; `yarn.lock` only `yarn-immutable-v1`. A `workspaces` member, nested package manifest or lockfile, second supported root lockfile, adapter/path mismatch, missing integrity, ambiguity, unlocked resolution, unsupported layout, or target mismatch fails before any package-manager process. `planDigest=SHA-256(JCS(plan with planDigest omitted))`. Re-registering an id cannot redirect an accepted Run; each FinalCandidate plan copies the frozen byte-sorted endpoint/grant projection unchanged and the broker redeems only the exact still-current frozen-generation item against that target. Rotation or subject drift returns authorization-required before I/O. Trusted code derives a fresh plan from that candidate's source/package manifest/lockfile under the policy and binds it into `VerifierPlan`; it never installs an admission-time plan against changed candidate bytes.
 
    If install scripts are admitted, the admission transaction consumes the exact active `AuthorizationGrantV1` whose target is `dependency_install_scripts` for the identical workspace/lockfile path/digest and publishes the RFC-exact `DependencyInstallScriptsAuthorizationTemplateV1`; `DependencyPolicy.installScriptsGrantRef` names only that template, never the user authorization row. The template must repeat the exact source receipt, guest toolchain, allowed adapters, lockfile ref/path/digest, registry-target digest, `maxCandidateGenerations = RunSpec.budgets.repairAttempts + 1`, `maxDispatchedAttemptsPerPlan=1`, and `expiresAt=Run.deadlineAt`. Every script-bearing candidate's `OperationGrantV1` uses only `provenance.kind='dependency_install_scripts_template'`, matches that policy/template/plan, and consumes one previously unused candidate ordinal in `0..maxCandidateGenerations-1`; there is no resettable counter. A changed lock digest, registry projection, toolchain, adapter, policy, or exhausted ordinal cannot reuse the template: scripts remain denied until an exact new candidate approval path exists, or fail in noninteractive deny mode.
+   Complete source/interpreter conditions and exact `sourceInspectionId` bind the captured AUTH refusal and the later admission consumer. A changed candidate has its own registered `dependency_install_scripts` wait/decision/first-response provenance and TTL; the initial RunSpec policy is immutable, scriptless mode stays scriptless, coarse policy allow cannot replace exact-source consent, and a claimed/UNKNOWN attempt cannot acquire a new template or retry. Historical and active authority contexts remain separate. The policy item excludes the reconstructed template ref to keep the first-response graph acyclic. See the RFC dependency script-consent contract and `docs/kernel/dependency-script-authorization.md`.
 
    Defaults/maxima are 50,000/200,000 packages and 5/20 GiB download. Repository registry configuration supplies declarative endpoints only. The trusted broker fetches only HTTPS lockfile URL+integrity artifacts into CAS and may retry only the bounded integrity-GET exception, then the bundled adapter performs a networkless frozen-lockfile install in the private generation. Install scripts execute integrity-pinned package code inside the same secretless/networkless strong containment without host access.
 
@@ -1923,3 +1924,18 @@ rehash and join before its receipt escapes or the unique settlement proceeds;
 failure retains the one original result/fence and cannot re-execute the claim.
 No authority, clock or transaction point is moved, and the physical Linux stop
 deadline still requires independent real validation.
+
+## First installed Node dependency profile
+
+The approved fixed `npm-ci-v1` implementation follows
+[the complete installed profile](../../kernel/installed-node-dependencies.md).
+It uses one original Journal/native owner for public integrity-GET and the once
+only offline npm process, exact root/source consent, real parent retirement,
+atomic Ready/settlement and required verification. The managed subtree digest
+is checked inside the full original M/Checkpoint proof. Child ready data reuse
+and identical-source Delivery verification use the explicit XOR origins, never
+fake local GET, script permission or materialization. Original source identity,
+all complete reads, 16R, JSON/output/file/transfer limits, 2/5/30/60-second
+guards and all-issued joins remain unchanged. This first profile does not
+qualify private registries, other ecosystems, arbitrary direct `.bin` execution
+or native add-ons. Actual Linux/installed fault-cut evidence remains required.

@@ -1,4 +1,5 @@
 import { canonicalSha256 } from '../kernel/canonical.js';
+import { types } from 'node:util';
 import { assertArtifactRef, digestOmitting, normalizeBoundedText, parseCanonicalTime, sha256Bytes } from '../kernel/identity.js';
 import type { FinalCandidateItem, VerifierPlan, VerificationClosureV1, RunResult, WorkspaceDiffV1, InheritedVerificationProvenanceV1 } from '../kernel/result.js';
 import type { WorkspaceEntry } from '../kernel/types.js';
@@ -6,7 +7,7 @@ import { KernelStorageError } from './errors.js';
 
 function mismatch(message: string): never { throw new KernelStorageError('ARTIFACT_MISMATCH', message); }
 function closed(value: unknown, required: readonly string[], optional: readonly string[] = []): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+  if (!value || typeof value !== 'object' || types.isProxy(value) || Array.isArray(value) ||
       ![Object.prototype, null].includes(Object.getPrototypeOf(value)) ||
       required.some(key => !Object.hasOwn(value, key)) ||
       Reflect.ownKeys(value).some(key => typeof key !== 'string' || !required.includes(key) && !optional.includes(key)) ||
@@ -142,7 +143,7 @@ export function decodeVerifierPlan(value: unknown): VerifierPlan {
   return plan as VerifierPlan;
 }
 
-/** Local/inherited no-dependency branches only. Decoding creates neither a receipt nor
+/** Closed local/inherited data. Decoding creates neither a receipt nor
  * execution authority; the result consumer rederives every ordered disposition
  * from its owning highest eligible Journal/result/receipt graph. */
 export function decodeVerificationClosure(value: unknown): VerificationClosureV1 {
@@ -152,18 +153,43 @@ export function decodeVerificationClosure(value: unknown): VerificationClosureV1
   text(closure.runId); text(closure.candidateItemId);
   for (const key of ['resultSourceRef', 'verifierPlanRef', 'closureDigest']) ref(closure[key]);
   try { parseCanonicalTime(text(closure.createdAt)); } catch { mismatch('verification closure time is invalid'); }
-  const dependency = closed(closure.dependency, ['kind']);
-  if (dependency.kind !== 'none') mismatch('verification dependency branch is not implemented');
+  const dependencyHeader = closed(closure.dependency, ['kind'], ['origin', 'dependencyPolicyRef', 'dependencyPlanRef', 'dependencyReadyItemId',
+    'readyCheckpointId', 'acquisitionOpId', 'acquisitionAttempt', 'completedJournalSeq', 'parentRunId', 'parentReadyItemRef', 'childAdmissionRequestRef',
+    'sourceRunId', 'sourceRunResultRef', 'sourceVerificationClosureRef', 'inheritedProvenanceRef']);
+  const dependencyKind = dependencyHeader.kind;
+  if (dependencyKind === 'ready') {
+    const origin = dependencyHeader.origin;
+    const dependency = closed(closure.dependency, ['kind', 'origin', 'dependencyPolicyRef', 'dependencyPlanRef', 'dependencyReadyItemId',
+      'readyCheckpointId', ...(origin === 'acquired' ? ['acquisitionOpId', 'acquisitionAttempt', 'completedJournalSeq'] :
+        ['parentRunId', 'parentReadyItemRef', 'childAdmissionRequestRef'])]);
+    ref(dependency.dependencyPolicyRef); ref(dependency.dependencyPlanRef); text(dependency.dependencyReadyItemId); text(dependency.readyCheckpointId);
+    if (origin === 'acquired') { text(dependency.acquisitionOpId); integer(dependency.acquisitionAttempt); integer(dependency.completedJournalSeq, 1); }
+    else if (origin === 'inherited_parent_ready') {
+      if (text(dependency.parentRunId) === closure.runId) mismatch('dependency cannot inherit itself');
+      ref(dependency.parentReadyItemRef); ref(dependency.childAdmissionRequestRef);
+    } else mismatch('verification dependency has another closed origin');
+  } else if (dependencyKind === 'inherited_verification') {
+    const dependency = closed(closure.dependency, ['kind', 'dependencyPolicyRef', 'dependencyPlanRef', 'sourceRunId', 'sourceRunResultRef',
+      'sourceVerificationClosureRef', 'inheritedProvenanceRef']);
+    if (text(dependency.sourceRunId) === closure.runId) mismatch('dependency verification cannot inherit itself');
+    for (const key of ['dependencyPolicyRef', 'dependencyPlanRef', 'sourceRunResultRef', 'sourceVerificationClosureRef', 'inheritedProvenanceRef']) ref(dependency[key]);
+  } else if (closed(closure.dependency, ['kind']).kind !== 'none') mismatch('verification dependency has another closed kind');
   const kind = closed(closure.verification, ['kind'], ['sourceRunId', 'sourceRunResultRef', 'sourceVerificationClosureRef',
     'inheritedProvenanceRef', 'outcome', 'entries', 'unverifiedConsentRef']).kind;
   if (kind === 'inherited_verified') {
     const inherited = closed(closure.verification, ['kind', 'sourceRunId', 'sourceRunResultRef', 'sourceVerificationClosureRef', 'inheritedProvenanceRef']);
     if (text(inherited.sourceRunId) === closure.runId) mismatch('verification cannot inherit itself');
     for (const key of ['sourceRunResultRef', 'sourceVerificationClosureRef', 'inheritedProvenanceRef']) ref(inherited[key]);
+    if (dependencyKind === 'inherited_verification') {
+      const dependency = closure.dependency as Record<string, unknown>;
+      for (const key of ['sourceRunId', 'sourceRunResultRef', 'sourceVerificationClosureRef', 'inheritedProvenanceRef'])
+        if (dependency[key] !== inherited[key]) mismatch('inherited dependency and verifier provenance differ');
+    }
     if (digestOmitting(closure, 'closureDigest') !== closure.closureDigest) mismatch('verification closure digest does not rehash');
     return closure as VerificationClosureV1;
   }
   const verification = closed(closure.verification, ['kind', 'outcome', 'entries'], ['unverifiedConsentRef']);
+  if (dependencyKind === 'inherited_verification') mismatch('local verification cannot borrow another Run dependency receipt');
   if (verification.kind !== 'local' || !['verified', 'unverified'].includes(String(verification.outcome)))
     mismatch('verification closure branch is not implemented');
   const entries = list(verification.entries), verifierIds = new Set<string>(), resultItems = new Set<string>(), receipts = new Set<string>(), ops = new Set<string>();
@@ -218,11 +244,11 @@ export function decodeInheritedVerificationProvenance(value: unknown): Inherited
  * ref is its identity, and the consumer binds every field to the candidate. */
 export function decodeRunResult(value: unknown): RunResult {
   const result = closed(value, ['schemaVersion', 'runId', 'baseSourceRef', 'resultSourceRef', 'diffRef',
-    'verificationClosureRef', 'verificationReceiptRefs', 'summaryRef', 'createdAt'], ['verificationProvenanceRef', 'deliveryTerminalProjectionEvidenceRef']);
+    'verificationClosureRef', 'verificationReceiptRefs', 'summaryRef', 'createdAt'], ['dependencyPlanRef', 'verificationProvenanceRef', 'deliveryTerminalProjectionEvidenceRef']);
   if (result.schemaVersion !== 1) mismatch('Run result has the wrong schema');
   text(result.runId);
   for (const key of ['baseSourceRef', 'resultSourceRef', 'diffRef', 'verificationClosureRef', 'summaryRef']) ref(result[key]);
-  for (const key of ['verificationProvenanceRef', 'deliveryTerminalProjectionEvidenceRef']) if (Object.hasOwn(result, key)) ref(result[key]);
+  for (const key of ['dependencyPlanRef', 'verificationProvenanceRef', 'deliveryTerminalProjectionEvidenceRef']) if (Object.hasOwn(result, key)) ref(result[key]);
   if (Object.hasOwn(result, 'verificationProvenanceRef') && !Object.hasOwn(result, 'deliveryTerminalProjectionEvidenceRef'))
     mismatch('inherited delivery result lost its terminal projection');
   const receipts = list(result.verificationReceiptRefs).map(ref);

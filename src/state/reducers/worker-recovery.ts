@@ -349,7 +349,9 @@ export const completeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', a
       ? await (await import('../publication-worker-retirement.js')).readUnresolvedPublicationWorkerCut(driver, artifacts, cut) : undefined;
     publicationUnknown = publication;
     if ((!hasOnlySettledInstalledModelUnknowns(assembly!, cut.journal) &&
-        !(run.stopIntentRef && hasOnlySettledVerifierUnknowns(cut.journal)) && !privateRollback && !undispatched && !publication) || !brokerQuiescence) {
+        !(run.stopIntentRef && hasOnlySettledVerifierUnknowns(cut.journal)) &&
+        !(run.stopIntentRef && (await import('../dependency-unknown-retirement.js')).hasOnlySettledDependencyUnknowns(cut.journal)) &&
+        !privateRollback && !undispatched && !publication) || !brokerQuiescence) {
       throw new KernelStorageError('RECOVERY_REQUIRED', 'open worker invocations require their typed settlement or explicit manual-risk wait before quarantine');
     }
     assertInstalledBrokerQuiescence(brokerQuiescence, driver, owner, run.id);

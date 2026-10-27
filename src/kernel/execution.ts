@@ -251,7 +251,10 @@ export type SandboxProcessInvocationV1 =
             extraFileDescriptors: 'none'
           }
         }
-      | { purpose: 'dependency'; recipe: 'cliq-dependency-launch-v1'; stdio: SandboxCapturedStdioV1 }
+      | { purpose: 'dependency'; recipe: 'cliq-dependency-npm-v1'; stdio: {
+          stdin: 'closed'; stdout: 'captured'; stderr: 'captured';
+          extraFileDescriptors: 'sealed_dependency_input_and_package_metadata_only'
+        } }
       | { purpose: 'publication'; recipe: 'cliq-publication-launch-v1'; stdio: SandboxCapturedStdioV1 }
     ))
   | ({
@@ -738,6 +741,7 @@ export type SourceInspectionAttemptBaseV1 = {
 export type SourceInspectionAttemptV1 = SourceInspectionAttemptBaseV1 & (
   | ({
       phase: 'capturing'
+      admissionErrorResponseRef?: never; dependencyScriptIntentRef?: never
       plan?: never
       processContainmentRef?: never
       retirementEvidenceRef?: never
@@ -746,6 +750,7 @@ export type SourceInspectionAttemptV1 = SourceInspectionAttemptBaseV1 & (
     } & ({ inputRef?: never; inputDigest?: never } | { inputRef: ArtifactRef; inputDigest: string }))
   | {
       phase: 'prepared'
+      admissionErrorResponseRef?: never; dependencyScriptIntentRef?: never
       inputRef: ArtifactRef
       inputDigest: string
       plan: SourceInspectionPlanV1
@@ -756,6 +761,7 @@ export type SourceInspectionAttemptV1 = SourceInspectionAttemptBaseV1 & (
     }
   | {
       phase: 'active'
+      admissionErrorResponseRef?: never; dependencyScriptIntentRef?: never
       inputRef: ArtifactRef
       inputDigest: string
       plan: SourceInspectionPlanV1
@@ -769,12 +775,13 @@ export type SourceInspectionAttemptV1 = SourceInspectionAttemptBaseV1 & (
       retirementEvidenceRef: ArtifactRef
       retiredAt: string
     } & (
-      | { outcome: { kind: 'failed' | 'cancelled'; errorResponseRef: ArtifactRef } }
+      | { outcome: { kind: 'failed' | 'cancelled'; errorResponseRef: ArtifactRef }; admissionErrorResponseRef?: never; dependencyScriptIntentRef?: never }
       | { method: 'run.submit'; outcome: {
           kind: 'captured'; sourceManifestRef: ArtifactRef; sourceManifestDigest: string; privateGitStateRef?: ArtifactRef
           captureTopologyRef?: never; captureTopologyDigest?: never
-        } }
-      | { method: 'run.apply'; outcome: {
+        }; /** Original admission refusal; the captured result and retirement remain independently complete. */
+          admissionErrorResponseRef?: ArtifactRef; dependencyScriptIntentRef?: ArtifactRef }
+      | { method: 'run.apply'; admissionErrorResponseRef?: never; dependencyScriptIntentRef?: never; outcome: {
           kind: 'captured'; sourceManifestRef: ArtifactRef; sourceManifestDigest: string; privateGitStateRef?: ArtifactRef
           captureTopologyRef: ArtifactRef; captureTopologyDigest: string
         } }

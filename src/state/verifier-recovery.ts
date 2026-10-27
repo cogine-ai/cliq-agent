@@ -47,6 +47,7 @@ export type VerifierProgressEntry = {
 export type VerifierProgress = {
   candidate: FinalCandidateItem; planRef: string; plan: VerifierPlan; spec: VerifierSpec;
   entries: VerifierProgressEntry[]; nextVerifierIndex: number; complete: boolean;
+  dependency?: import('./dependency-history.js').DependencyProgress;
 };
 export type VerifierRecoveryCut = Pick<RecoveryClosureV1, 'run' | 'runSpec' | 'items' | 'journal' | 'workspaceGenerations'>;
 
@@ -149,6 +150,8 @@ export async function readVerifierProgress(driver: SqliteDriver, artifacts: Arti
   const session = readSession(driver, cut.run.sessionId);
   const workspace = decodeWorkspaceIdentity(await readCanonicalArtifact(artifacts, session.workspaceIdentityRef));
   const principalId = readSessionPrincipalId(driver, session.id);
+  const dependency = cut.runSpec.dependencyPolicyRef ? (await (await import('./dependency-history.js')).readDependencyHistory(driver, artifacts, cut)).get(selectedId) : undefined;
+  if (cut.runSpec.dependencyPolicyRef && !dependency) throw new TypeError('verifier lacks its independently read complete dependency history');
   const entries: VerifierProgressEntry[] = [];
   for (const [index, planEntry] of plan.entries.entries()) {
     const specEntry = spec.verifiers[index]!;
@@ -157,11 +160,13 @@ export async function readVerifierProgress(driver: SqliteDriver, artifacts: Arti
     const frontier: Extract<RunFrontier, { kind: 'verify' }> = { schemaVersion: 1, kind: 'verify', phase: 'verifiers',
       candidateItemId: selectedId, resultSourceRef: candidate.resultSourceRef, verifierPlanRef: planRef, nextVerifierIndex: index,
       afterPass: cut.runSpec.operation === 'delivery' ? 'delivery_approval' : 'finalize' };
+    if (dependency) frontier.dependencyPlanRef = dependency.planRef;
     const context = { runId: cut.run.id, frontierRef: canonicalSha256(frontier), assemblyRef: cut.runSpec.assemblyRef,
       candidateItemId: selectedId, resultSourceRef: candidate.resultSourceRef, sourceDigest: candidate.sourceDigest,
       verifierPlanRef: planRef, plan, verifierSpecRef: cut.runSpec.verifierSpecRef, verifierSpec: spec, verifierIndex: index, command, environment };
     const planned = planVerifierRequest(context), opId = verifierOperationId(cut.run.id, selectedId, planRef, index);
     const operation = cut.journal.filter(entry => entry.opId === opId);
+    if (operation.length && dependency && !dependency.ready) throw new TypeError('verifier cannot overtake original dependency readiness');
     if (operation.length && entries.some(entry => !entry.disposition || entry.receipt?.outcome === 'infra_failed' &&
         cut.journal.filter(row => row.opId === entry.terminalJournal?.opId && row.phase === 'dispatch_claimed').length < entry.planEntry.maxAttempts))
       throw new TypeError('verifier Journal advances before its preceding frozen plan entries are eligible');
@@ -300,5 +305,5 @@ export async function readVerifierProgress(driver: SqliteDriver, artifacts: Arti
   const nextVerifierIndex = entries.findIndex(entry => !entry.receipt || entry.receipt.outcome === 'infra_failed' &&
     cut.journal.filter(row => row.opId === entry.terminalJournal?.opId && row.phase === 'dispatch_claimed').length < entry.planEntry.maxAttempts);
   return { candidate, planRef, plan, spec, entries, nextVerifierIndex: nextVerifierIndex < 0 ? entries.length : nextVerifierIndex,
-    complete: nextVerifierIndex < 0 };
+    complete: nextVerifierIndex < 0 && (!dependency || !!dependency.ready), ...(dependency ? { dependency } : {}) };
 }
