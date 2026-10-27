@@ -68,6 +68,17 @@ cycles. Preserve the existing process-image digest domain and client Node
 minimum. Separately signed native addons continue verified held-FD loading.
 Do not add a separate unsigned import path or a general closure loader.
 
+The fixed Node24 SEA main remains CommonJS. It loads one fixed ESM application
+asset embedded in that same signed executable, preserving the client's real
+Ink/Yoga top-level await. The application and native/helper branch selection
+are built together; all emitted imports remain Node builtins. No application
+asset path, module, preload or extra execution argument comes from argv, the
+environment, a mutable installation or the workspace. Snapshot/code-cache
+loading remains disabled and the original SIGUSR1 debugger route stays closed.
+Initialization failure emits only a fixed diagnostic, never a data-URL stack.
+The separate standalone-image/empty-directory component probe does not qualify
+Linux installation, Run execution or macOS sandbox support.
+
 The Linux systemd user service must execute the stable StateRoot bootstrap,
 not a replaceable npm path or directly the selected Supervisor. That fixed
 trusted bootstrap verifies the manifest, installation identities and selected

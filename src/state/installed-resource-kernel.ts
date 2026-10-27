@@ -74,7 +74,9 @@ export function resourceCounters(bytes: Buffer): ReadonlyMap<string, number> {
   if (bytes.length > 4096 || bytes.some(byte => byte > 127) || bytes.includes(0)) throw new TypeError('invalid fixed kernel counters');
   const result = new Map<string, number>();
   for (const row of bytes.toString('ascii').trimEnd().split('\n')) {
-    const pair = /^([a-z_]+) (0|[1-9][0-9]*)$/u.exec(row);
+    // CONFIG_SCHED_CORE emits this literal dotted key in cpu.stat. Keep the
+    // rest of the closed counter grammar, integer and duplicate checks.
+    const pair = /^([a-z_]+|core_sched\.force_idle_usec) (0|[1-9][0-9]*)$/u.exec(row);
     if (!pair || result.has(pair[1]!)) throw new TypeError('invalid or repeated kernel counter');
     result.set(pair[1]!, resourceDecimal(pair[2]!));
   }

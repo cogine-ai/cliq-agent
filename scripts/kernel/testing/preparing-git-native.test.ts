@@ -4,11 +4,32 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import { inflateSync } from 'node:zlib';
+import { readFile } from 'node:fs/promises';
+import ts from 'typescript';
 import { canonicalSha256 } from '../../../src/kernel/canonical.js';
 import { workerCampaignSandboxProfile } from '../../../src/sandbox/testing/worker-campaign-fixture.js';
 import { decodeSourceGitInspectionOutput } from '../../../src/workspace/source-git-output.js';
 import { normalizeGitIndex } from '../../../src/workspace/git-index.js';
 import { preparingGitNativeInputData } from './preparing-git-native.js';
+
+test('the original driver retains real HELLO birth before preparation and still requires the later native refusal', async () => {
+  // Source wiring only. Actual READY, original exit and successor retirement
+  // remain the independent real Linux campaign, never mocked authority here.
+  const text = await readFile(new URL('./preparing-git-native.ts', import.meta.url), 'utf8');
+  const source = ts.createSourceFile('preparing-git-native.ts', text, ts.ScriptTarget.Latest, true);
+  const original = source.statements.find((node): node is ts.FunctionDeclaration =>
+    ts.isFunctionDeclaration(node) && node.name?.text === 'nativeOriginalReadyExit');
+  assert(original?.body);
+  const statements = original.body.statements.map(node => node.getText(source));
+  const birth = statements.findIndex(value => value.startsWith('const controllerBirth = readNativeControllerPreparationBirth('));
+  const opening = statements.findIndex(value => value.includes('await controller.openPreparingGit('));
+  const ready = statements.findIndex(value => value.includes('scope.createBlocked();'));
+  const observedReady = statements.findIndex(value => value.includes('await wait(() => scope.pollReady()'));
+  const refused = statements.findIndex(value => value.startsWith('assert.throws(') && value.includes('readNativeControllerPreparationBirth'));
+  assert(birth >= 0 && birth < opening && opening < ready && ready < observedReady && observedReady < refused);
+  assert.match(statements[refused]!, /code: 'RECOVERY_REQUIRED'/u);
+  assert.match(statements.find(value => value.startsWith('const report:'))!, /controller: controllerBirth/u);
+});
 
 test('native preparing campaign retains a nonempty self-consistent ordinary pack/index closure without host Git', () => {
   const repositoryIdentityDigest = 'a'.repeat(64), resources = workerCampaignSandboxProfile({ maxOpenFiles: 128 }).resources;

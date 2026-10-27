@@ -293,6 +293,7 @@ async function nativeOriginalReadyExit(config: NativeSuccessorConfiguration): Pr
   const toolchain = validateGuestToolchainMetadata(config.installation.runtimeAuthority.bundle, config.toolchain.manifestRef,
     Buffer.from(config.toolchain.manifestBytes, 'base64'), Buffer.from(config.toolchain.signatureBytes, 'base64'), config.installation.runtimeAuthority.releaseKeys);
   const launcher = await openLinuxWorkerLauncher(config.installation), controller = await launcher.startController();
+  const controllerBirth = readNativeControllerPreparationBirth(controller.preparationBirth);
   const held = await controller.openPreparingGit({ input, recipe, toolchain }), scope = held.reserve();
   const wait = async <T>(poll: () => T | undefined, end: number): Promise<T> => {
     for (;;) { const value = poll(); if (value !== undefined) return value;
@@ -300,8 +301,14 @@ async function nativeOriginalReadyExit(config: NativeSuccessorConfiguration): Pr
   };
   await wait(() => scope.pollReserved(), performance.now() + 30_000);
   scope.createBlocked(); await wait(() => scope.pollReady(), performance.now() + 5000);
+  // The genuine pre-preparation HELLO is the immutable historical origin.
+  // READY is observed separately above. A live unfinished preparation must
+  // still refuse a fresh ordinary-controller birth projection.
+  assert.throws(() => readNativeControllerPreparationBirth(controller.preparationBirth), {
+    code: 'RECOVERY_REQUIRED', message: 'original ordinary controller preparation birth is not ready',
+  });
   const report: OriginalPreparingExit = { identity, input: input.identity, recipe,
-    controller: readNativeControllerPreparationBirth(controller.preparationBirth) };
+    controller: controllerBirth };
   // A positive READY was obtained from the real existing protocol. Exit closes
   // the original driver domain; it never calls FINISH/CANCEL or invents joins.
   await new Promise<void>((resolve, reject) => process.send!(report, error => error ? reject(error) : resolve()));

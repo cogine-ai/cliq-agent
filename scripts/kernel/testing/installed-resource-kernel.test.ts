@@ -14,6 +14,11 @@ test('fixed resource data rejects coercion, overflow, duplicate counters, multim
   assert.equal(resourceMembership(Buffer.from('0::/\n')), '/');
   assert.throws(() => resourceCounters(Buffer.from('usage_usec 1\nusage_usec 2\n')));
   assert.throws(() => resourceCounters(Buffer.from('usage_usec 1.5\n')));
+  assert.deepEqual([...resourceCounters(Buffer.from('usage_usec 7\ncore_sched.force_idle_usec 0\n'))],
+    [['usage_usec', 7], ['core_sched.force_idle_usec', 0]]);
+  for (const value of ['core_sched.force_idle_usec 0\ncore_sched.force_idle_usec 1\n',
+    'core_sched.force_idle_usec 1.5\n', 'other.counter 1\n', 'core_sched.force_idle_usec.extra 1\n'])
+    assert.throws(() => resourceCounters(Buffer.from(value)));
   assert.throws(() => resourceNofile(Buffer.from('Max open files 1024 unlimited files\n')));
   assert.throws(() => resourceNofile(Buffer.from('Max open files 2048 1024 files\n')));
   assert.deepEqual(resourceNofile(Buffer.from('Max open files 64 8192 files\n')), [64, 8192]);

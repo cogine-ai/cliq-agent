@@ -15,6 +15,7 @@ import { PUBLICATION_RETIREMENT_CHANNEL } from '../../../src/state/publication-r
 import { INSTALLED_STORE_DIAGNOSTIC_BANNER } from './installed-store-diagnostic-banner.js';
 import { INSTALLED_ASSEMBLY_WORK_DIAGNOSTIC_BANNER } from './installed-assembly-work-banner.js';
 import { compareSupervisorCarrierLayout } from './supervisor-carrier-layout.js';
+import { installedClientBuildOptions } from './installed-client-build.js';
 export { INSTALLED_ASSEMBLY_WORK_DIAGNOSTIC_BANNER } from './installed-assembly-work-banner.js';
 
 export const SUPERVISOR_SEA_NODE_VERSION = '24.21.0';
@@ -279,6 +280,46 @@ export async function copyWritableSupervisorSeaImage(carrier: string, executable
   } finally { await image.close(); }
 }
 
+const SUPERVISOR_APPLICATION_ASSET = 'cliq-supervisor-application.mjs';
+const SUPERVISOR_APPLICATION_BOOTSTRAP = `
+'use strict';
+const {getAsset,isSea} = require('node:sea');
+if (!isSea()) throw new Error('expected the signed single executable');
+const application = Buffer.from(getAsset('${SUPERVISOR_APPLICATION_ASSET}'));
+void import('data:text/javascript;base64,' + application.toString('base64')).catch(() => {
+  // A data-URL stack can contain the entire image. Never print that stack or
+  // caller-controlled exception data from a module initialization failure.
+  require('node:fs').writeSync(2, '{"diagnosticOnly":true,"scope":"installed-module-startup","failed":true}\\n');
+  process.exitCode = 1;
+});
+`;
+
+/** The same complete application, including its lazy TUI, stays inside the
+ * signed image. Node24's SEA main is CJS; its embedded application is ESM so
+ * real dependencies retain top-level await without filesystem imports. */
+export async function buildSupervisorSeaApplication(input: {
+  fixture: string; entryPoint: string; variant: string; defines?: Record<string, string>;
+  resourceDiagnostics?: true;
+}): Promise<{file: string; bytes: number; imports: readonly string[]; sources: readonly string[]}> {
+  const file = path.join(input.fixture, `${input.variant}.mjs`);
+  const result = await build({ entryPoints: [input.entryPoint], outfile: file,
+    bundle: true, platform: 'node', format: 'esm', target: 'node24.21', metafile: true, write: false,
+    plugins: installedClientBuildOptions().plugins,
+    ...(input.resourceDiagnostics ? { inject: [INSTALLED_RESOURCE_SUBSCRIBER] } : {}),
+    banner: { js: "import {createRequire as cliqSeaCreateRequire} from 'node:module';\nconst require = cliqSeaCreateRequire(process.execPath);" },
+    // Preserve the original SEA-only native/helper branch selection. The
+    // fixed require above resolves Node builtins, never an ambient package.
+    define: { 'import.meta.url': 'undefined', ...input.defines } });
+  const imports = Object.values(result.metafile!.outputs).flatMap(value => value.imports);
+  assert(imports.every(item => item.external && item.path.startsWith('node:')),
+    'SEA application closure must have no runtime filesystem dependency');
+  assert.equal(result.outputFiles!.length, 1);
+  const bytes = result.outputFiles![0]!.contents;
+  assert(bytes.length > 0 && bytes.length <= 64 * 1024 * 1024);
+  await writeFile(file, bytes, { flag: 'wx', mode: 0o600 });
+  return { file, bytes: bytes.length, imports: imports.map(item => item.path), sources: Object.keys(result.metafile!.inputs) };
+}
+
 export async function buildSupervisorSeaImage(input: {
   fixture: string; carrier: string; entryPoint: string; executable: string;
   variant: string; assets: Record<string, string>; defines?: Record<string, string>;
@@ -297,23 +338,17 @@ export async function buildSupervisorSeaImage(input: {
     (input.publicationRetirementDiagnostics ? PUBLICATION_RETIREMENT_DIAGNOSTIC_BANNER : '') +
     (input.serverAuthenticationDiagnostics ? SERVER_AUTHENTICATION_DIAGNOSTIC_BANNER : '') +
     (input.storeFailureDiagnostics ? INSTALLED_STORE_DIAGNOSTIC_BANNER + INSTALLED_ASSEMBLY_WORK_DIAGNOSTIC_BANNER : '');
+  assert(!Object.hasOwn(input.assets, SUPERVISOR_APPLICATION_ASSET), 'the signed application asset cannot be replaced');
+  const application = await buildSupervisorSeaApplication(input);
   const main = path.join(input.fixture, `${input.variant}.cjs`);
-  const result = await build({ entryPoints: [input.entryPoint], outfile: main,
-    bundle: true, platform: 'node', format: 'cjs', target: 'node24.21', metafile: true,
-    ...(input.resourceDiagnostics ? { inject: [INSTALLED_RESOURCE_SUBSCRIBER] } : {}),
-    ...(banner ? { banner: { js: banner } } : {}),
-    // These entries run only as SEA. The ordinary ESM helper branch cannot run.
-    define: { 'import.meta.url': 'undefined', ...input.defines } });
-  for (const emitted of Object.values(result.metafile!.outputs)) {
-    assert(emitted.imports.every(item => item.external && item.path.startsWith('node:')),
-      'SEA application closure must have no runtime filesystem dependency');
-  }
+  await writeFile(main, banner + SUPERVISOR_APPLICATION_BOOTSTRAP, { flag: 'wx', mode: 0o600 });
   const blob = path.join(input.fixture, `${input.variant}.blob`);
   const configuration = path.join(input.fixture, `${input.variant}-sea.json`);
   await writeFile(configuration, JSON.stringify({ main, output: blob, useSnapshot: false, useCodeCache: false,
     // Signed image policy: closing NODE_OPTIONS does not close Node's native
     // SIGUSR1 debugger route. No caller-provided CLI/environment extension.
-    execArgv: ['--disable-sigusr1'], execArgvExtension: 'none', disableExperimentalSEAWarning: true, assets: input.assets }),
+    execArgv: ['--disable-sigusr1'], execArgvExtension: 'none', disableExperimentalSEAWarning: true,
+    assets: { ...input.assets, [SUPERVISOR_APPLICATION_ASSET]: application.file } }),
   { flag: 'wx', mode: 0o600 });
   run(input.fixture, input.carrier, ['--experimental-sea-config', configuration]);
   // Keep explicit ownership on this newly created copy independently of the

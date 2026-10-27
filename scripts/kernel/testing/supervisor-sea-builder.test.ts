@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import './supervisor-sea-application.test.js';
 import { spawnSync } from 'node:child_process';
 import { access, chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
