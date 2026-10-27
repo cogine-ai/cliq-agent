@@ -194,8 +194,8 @@ export async function runInstalledRuntimeUpgradeJourney(filename: string, origin
       assert.equal(decodeCredentialAuthorityOperation(enrolled.operation).phase, 'committed'); return { endpointId, credentialId };
     };
     const connect = async (stage: 0 | 1) => openInstalledClientConsumer({ executable: '/usr/sbin/runuser', args: [...prefix, process.execPath,
-      '--disable-warning=ExperimentalWarning', packages.clients[stage]!, filename], cwd: ledger.home, env: environment,
-      openScan: () => scanner.openStream(), onJoined: () => {} });
+      '--disable-warning=ExperimentalWarning', packages.clients[stage]!, filename, '--schema3'], cwd: ledger.home, env: environment,
+      headlessSchemaVersion: 3, openScan: () => scanner.openStream(), onJoined: () => {} });
     const send = async (value: Record<string, unknown>, method: string) => {
       assert(client); const reply = await client.send(value, 30000) as Record<string, any>;
       assert.equal(reply.ok, true, 'public upgrade fixture method refused: ' + method); assert.equal(reply.result.method, method); return reply;

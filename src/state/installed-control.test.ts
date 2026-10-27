@@ -108,7 +108,7 @@ const compatibleHello = { protocolVersion: 1, method: 'control.hello', clientBui
   controlSchemaRange: { min: 1, max: 1 }, headlessSchemaRange: { min: 1, max: 1 }, requestedFeatureIds: [] };
 
 test('a real accepted peer prepares its complete closure before the first frame without granting frame authority', async t => {
-  const fixture = await createQueuedFixture('wire-accept-preparation');
+  const fixture = await createQueuedFixture('wire-ap');
   t.after(() => disposeFixture(fixture));
   const artifacts = fixture.store.artifacts, publish = artifacts.publishCanonicalFour;
   let completed!: (channel: LocalControlChannelIdentityV1) => void, publications = 0;
@@ -137,7 +137,7 @@ test('a real accepted peer prepares its complete closure before the first frame 
 });
 
 test('closing before the first frame joins the original accepted-connection publication', async t => {
-  const fixture = await createQueuedFixture('wire-accept-close');
+  const fixture = await createQueuedFixture('wire-ac');
   t.after(() => disposeFixture(fixture));
   const artifacts = fixture.store.artifacts, publish = artifacts.publishCanonicalFour;
   let entered!: () => void, release!: () => void, joined = false;

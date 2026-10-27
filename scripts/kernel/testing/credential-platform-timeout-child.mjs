@@ -2,6 +2,44 @@
 // native phase or authority observation. A real external reply is withheld.
 import assert from 'node:assert/strict';
 import { performance } from 'node:perf_hooks';
+import { MessageChannel } from 'node:worker_threads';
+import { once } from 'node:events';
+import { createHook } from 'node:async_hooks';
+
+const idleDeliveryFailure = Symbol('private idle delivery refusal');
+function reportFailure(error) {
+  try { process.stderr.write('CLIQ_NATIVE_CALLBACK_FAILURE_V1:' + (error === idleDeliveryFailure ? 'idle_delivery' : 'other') + '\n'); }
+  finally { process.exitCode = 1; }
+}
+function checkHook(check) { try { check(); } catch (error) { reportFailure(error); } }
+const callbackContexts = new Map();
+createHook({
+  init(id, type) { if (type === 'cliq credential platform callbacks') callbackContexts.set(id, { before: 0, after: 0, destroyed: 0 }); },
+  before(id) { checkHook(() => { const state = callbackContexts.get(id); if (state) { assert.equal(state.destroyed, 0); state.before++; } }); },
+  after(id) { checkHook(() => { const state = callbackContexts.get(id); if (state) { assert.equal(state.destroyed, 0); state.after++; } }); },
+  destroy(id) { checkHook(() => { const state = callbackContexts.get(id); if (state) { assert.equal(state.destroyed, 0); state.destroyed++; } }); },
+}).enable();
+process.once('beforeExit', () => {
+  if (process.exitCode) return; // Preserve the original lifecycle refusal as the RED diagnostic.
+  checkHook(() => {
+    assert(callbackContexts.size > 0);
+    for (const state of callbackContexts.values()) { assert(state.before > 0); assert.equal(state.before, state.after); assert.equal(state.destroyed, 1); }
+  });
+});
+async function idleDelivery(operation) {
+  const { port1, port2 } = new MessageChannel();
+  port1.on('message', () => assert.fail('the idle callback-lifetime handle must receive no messages')); port1.ref();
+  let watchdogFired = false;
+  const started = performance.now(), watchdog = setTimeout(() => { watchdogFired = true; }, 1500);
+  try {
+    const value = await operation();
+    if (!(!watchdogFired && performance.now() - started <= 1500)) throw idleDeliveryFailure;
+    return value;
+  } finally {
+    clearTimeout(watchdog);
+    const joined = Promise.all([once(port1, 'close'), once(port2, 'close')]); port1.close(); port2.close(); await joined;
+  }
+}
 
 function inspectionNotifications() {
   let enteredResolve, enteredReject, retiredResolve, retiredReject, timer, text = '', bytesRead = 0, count = 0;
@@ -75,9 +113,13 @@ async function inspectCancellation(native) {
   assert.equal(native.currentUser().uid, process.getuid());
   // A retained old owner must not cancel the next job, even while its native
   // admission is already occupied and before JS completion can run.
-  const healthy = native.secretService({ kind: 'inspect', selector, expectedObservation: observed });
+  let healthy;
+  const delivery = idleDelivery(() => {
+    healthy = native.secretService({ kind: 'inspect', selector, expectedObservation: observed });
+    return healthy.then(value => { healthy = undefined; global.gc(); return value; });
+  });
   assert.equal(inspection.cancelAndJoin(), joining);
-  const fresh = await healthy;
+  const fresh = await delivery;
   assert.equal(fresh.kind, 'present'); assert.equal(fresh.service.pid, process.ppid);
   assert.deepEqual(fresh.selector, observed.selector); assert.deepEqual(fresh.bus, observed.bus);
   assert.deepEqual(fresh.service, observed.service); assert.equal(fresh.collectionPath, observed.collectionPath);
@@ -86,6 +128,7 @@ async function inspectCancellation(native) {
 
 try {
   assert.equal(process.versions.node, '24.21.0');
+  assert.equal(typeof global.gc, 'function');
   assert(process.getuid() > 0);
   assert(process.argv.length === 3 || process.argv.length === 4 && process.argv[3] === '--inspect-cancel');
   const loaded = { exports: {} };
@@ -107,13 +150,12 @@ try {
   assert.equal(native.currentUser().uid, process.getuid());
   // Both the old request's local bus close and its worker/watchdog/main-loop
   // owners must have joined before another operation can be admitted.
-  const healthy = await native.userManager({ kind: 'reload' });
+  const healthy = await idleDelivery(() => native.userManager({ kind: 'reload' }).then(value => { global.gc(); return value; }));
   assert.equal(healthy.kind, 'reload');
   assert.equal(healthy.uid, process.getuid());
   assert.equal(healthy.manager.uid, process.getuid());
   assert.equal(healthy.manager.pid, process.ppid, 'the same ordinary non-root fixture must own the actual service');
   }
 } catch (error) {
-  console.error(error);
-  process.exitCode = 1;
+  reportFailure(error);
 }

@@ -59,12 +59,65 @@ struct platform_observation {
   struct service service;
 };
 struct task;
+/* A raw libuv callback owns neither a Node callback scope nor its C owner.
+ * These counts are independent of model no-release mutex/fence borrows. */
+struct native_callbacks {
+  napi_env env; napi_ref resource; napi_async_context context;
+  unsigned borrows, depth; bool retiring;
+};
+struct native_callback_scope { napi_handle_scope handles; napi_callback_scope callback; };
+static void callback_fatal(const char *message) {
+  napi_fatal_error("cliq-linux-platform", NAPI_AUTO_LENGTH, message, NAPI_AUTO_LENGTH);
+}
+static bool callbacks_init(struct native_callbacks *owner, napi_env env, const char *label) {
+  owner->env = env; napi_value resource, name;
+  return napi_create_object(env, &resource) == napi_ok &&
+    napi_create_reference(env, resource, 1, &owner->resource) == napi_ok &&
+    napi_create_string_utf8(env, label, NAPI_AUTO_LENGTH, &name) == napi_ok &&
+    napi_async_init(env, resource, name, &owner->context) == napi_ok;
+}
+static void callbacks_enter(struct native_callbacks *owner, bool env_closing, struct native_callback_scope *scope) {
+  *scope = (struct native_callback_scope){0}; owner->borrows++; owner->depth++;
+  if (napi_open_handle_scope(owner->env, &scope->handles) != napi_ok) callback_fatal("callback handle scope unavailable");
+  if (!env_closing) {
+    napi_value resource;
+    if (!owner->context || !owner->resource || napi_get_reference_value(owner->env, owner->resource, &resource) != napi_ok || !resource ||
+        napi_open_callback_scope(owner->env, resource, owner->context, &scope->callback) != napi_ok) callback_fatal("callback scope unavailable");
+  }
+}
+static void callbacks_close(struct native_callbacks *owner, struct native_callback_scope *scope) {
+  /* Both closes can run Promise continuations, async hooks and GC. The caller
+   * keeps its original native borrow until context/resource retirement too. */
+  if (scope->callback && napi_close_callback_scope(owner->env, scope->callback) != napi_ok) callback_fatal("callback scope did not retire");
+  if (napi_close_handle_scope(owner->env, scope->handles) != napi_ok) callback_fatal("callback handle scope did not retire");
+  if (!owner->depth) callback_fatal("callback depth underflow");
+  owner->depth--;
+}
+static void callbacks_retire(struct native_callbacks *owner) {
+  if (owner->depth || owner->retiring || (!owner->context && !owner->resource)) return;
+  owner->retiring = true; napi_handle_scope scope;
+  if (napi_open_handle_scope(owner->env, &scope) != napi_ok) callback_fatal("callback retirement scope unavailable");
+  if (owner->context) {
+    napi_async_context context = owner->context; owner->context = NULL;
+    if (napi_async_destroy(owner->env, context) != napi_ok) callback_fatal("callback context did not retire");
+  }
+  if (owner->resource) {
+    napi_ref resource = owner->resource; owner->resource = NULL;
+    if (napi_delete_reference(owner->env, resource) != napi_ok) callback_fatal("callback resource did not retire");
+  }
+  if (napi_close_handle_scope(owner->env, scope) != napi_ok) callback_fatal("callback retirement scope did not retire");
+  owner->retiring = false;
+}
+static bool callbacks_held(const struct native_callbacks *owner) {
+  return owner->borrows || owner->depth || owner->retiring || owner->context || owner->resource;
+}
 struct inspection_owner {
   napi_env env;
   struct task *task;
   napi_ref handle, join_promise;
   napi_deferred join_deferred;
-  bool retained, finalized, joined, unsafe;
+  unsigned completion_borrows;
+  bool retained, finalized, joined, unsafe, env_closing;
 };
 struct task {
   napi_env env; napi_async_work work; napi_deferred deferred; napi_async_cleanup_hook_handle cleanup_hook;
@@ -83,12 +136,14 @@ struct task {
   GVariant *unit_properties, *service_properties;
   const char *error; const char *result_kind;
   struct inspection_owner *inspection;
+  struct inspection_owner *completed_inspection;
+  struct native_callbacks callbacks; bool completion_finished, release_pending;
   struct task *unretired_next;
 };
 static atomic_bool retirement_failed;
 static atomic_bool job_in_flight;
 static struct task *unretired_tasks;
-static const napi_type_tag inspection_tag = { UINT64_C(0x7145d66c9a4a4718), UINT64_C(0x8d01e244ace23b91) };
+static const napi_type_tag inspection_tag = { UINT64_C(0xd1c80f2f51c64de9), UINT64_C(0xb168d6825793a026) };
 static bool manager_shape(struct task *task);
 
 static void wipe(void *memory, size_t count) { volatile unsigned char *bytes = memory; while (count--) *bytes++ = 0; }
@@ -744,10 +799,6 @@ static napi_value error_value(napi_env env, bool unsafe, const char *code) {
 }
 static void retire_main_handles(struct task *task) {
   bool valid = true;
-  if (task->cleanup_hook) {
-    if (napi_remove_async_cleanup_hook(task->cleanup_hook) != napi_ok) valid = false;
-    else task->cleanup_hook = NULL;
-  }
   if (task->work) {
     if (napi_delete_async_work(task->env, task->work) != napi_ok) valid = false;
     else task->work = NULL;
@@ -765,10 +816,13 @@ static void retire_main_handles(struct task *task) {
    * and callback is joined, retire that owner before a successful reply. */
   if (!task->unsafe && task->cancel) { g_object_unref(task->cancel); task->cancel = NULL; }
 }
-static void release_task(struct task *task) {
+static void release_task_storage(struct task *task) {
   if (task->secret) { wipe(task->secret, task->secret_size); free(task->secret); task->secret = NULL; }
   if (task->unit_properties) { g_variant_unref(task->unit_properties); task->unit_properties = NULL; }
   if (task->service_properties) { g_variant_unref(task->service_properties); task->service_properties = NULL; }
+}
+static void release_task(struct task *task) {
+  release_task_storage(task);
   if (task->unsafe) {
     /* A possibly owning bus or watchdog must stay strongly retained until
      * process death. This is resource ownership, not a recovery ledger. */
@@ -778,14 +832,39 @@ static void release_task(struct task *task) {
   free(task);
 }
 static void release_inspection_owner(struct inspection_owner *owner) {
-  if (owner->join_promise && napi_delete_reference(owner->env, owner->join_promise) != napi_ok)
+  if (!owner->env_closing && owner->join_promise && napi_delete_reference(owner->env, owner->join_promise) != napi_ok)
     atomic_store(&retirement_failed, true);
-  if (owner->handle && napi_delete_reference(owner->env, owner->handle) != napi_ok)
+  if (!owner->env_closing && owner->handle && napi_delete_reference(owner->env, owner->handle) != napi_ok)
     atomic_store(&retirement_failed, true);
   free(owner);
 }
-static void finish_task(struct task *task) {
-  if (!task->work_complete || (task->timer_initialized && !task->timer_closed)) return;
+static void task_retire_callbacks(struct task *task) {
+  if (!task->completion_finished || task->callbacks.depth || task->callbacks.retiring) return;
+  callbacks_retire(&task->callbacks);
+  if (task->cleanup_hook) {
+    if (napi_remove_async_cleanup_hook(task->cleanup_hook) != napi_ok) callback_fatal("platform cleanup hook did not retire");
+    task->cleanup_hook = NULL;
+  }
+}
+static void task_try_release(struct task *task) {
+  if (!task->release_pending || callbacks_held(&task->callbacks) || task->cleanup_hook) return;
+  task->release_pending = false;
+  struct inspection_owner *owner = task->completed_inspection; task->completed_inspection = NULL;
+  if (owner) {
+    if (!owner->completion_borrows) callback_fatal("inspection completion borrow underflow");
+    owner->completion_borrows--;
+    if (owner->finalized && !owner->task && !owner->completion_borrows) release_inspection_owner(owner);
+  }
+  release_task(task);
+}
+static void task_release_callback_borrow(struct task *task) {
+  task_retire_callbacks(task);
+  if (!task->callbacks.borrows) callback_fatal("platform callback borrow underflow");
+  task->callbacks.borrows--; task_try_release(task);
+}
+static void finish_task_data(struct task *task) {
+  if (task->completion_finished || !task->work_complete || (task->timer_initialized && !task->timer_closed)) return;
+  task->completion_finished = true;
   /* Neither the async worker nor the timer can still access the task. The
    * queued-cancel path never ran execute, so retire its copied input here. */
   if (task->secret) { wipe(task->secret, task->secret_size); free(task->secret); task->secret = NULL; }
@@ -797,6 +876,7 @@ static void finish_task(struct task *task) {
   retire_main_handles(task);
   const bool env_closing = task->env_closing;
   struct inspection_owner *owner = task->inspection;
+  if (owner) { owner->completion_borrows++; owner->env_closing = env_closing; }
   napi_env env = task->env;
   napi_handle_scope scope = NULL;
   if (!env_closing) {
@@ -827,8 +907,10 @@ static void finish_task(struct task *task) {
   if (owner) {
     owner->task = NULL; owner->joined = true; owner->unsafe = task->unsafe;
     task->inspection = NULL;
+    task->completed_inspection = owner;
   }
-  atomic_store(&job_in_flight, false); release_task(task);
+  release_task_storage(task);
+  atomic_store(&job_in_flight, false); task->release_pending = true;
   // release_task also retires variant/input storage. A positive cancellation
   // join is published only after every worker, watchdog, bus, FD and timer gate.
   if (owner && !env_closing && owner->join_deferred) {
@@ -841,12 +923,17 @@ static void finish_task(struct task *task) {
       napi_fatal_error("cliq-credential-platform", NAPI_AUTO_LENGTH, "inspection join unavailable", NAPI_AUTO_LENGTH);
     owner->join_deferred = NULL;
   }
-  if (owner && owner->finalized) release_inspection_owner(owner);
   if (scope && napi_close_handle_scope(env, scope) != napi_ok)
     napi_fatal_error("cliq-credential-platform", NAPI_AUTO_LENGTH, "platform completion scope did not retire", NAPI_AUTO_LENGTH);
 }
+static void finish_task(struct task *task) {
+  task->callbacks.borrows++; finish_task_data(task); task_release_callback_borrow(task);
+}
 static void timer_closed(uv_handle_t *handle) {
-  struct task *task = handle->data; task->timer_closed = true; finish_task(task);
+  struct task *task = handle->data; struct native_callback_scope scope;
+  callbacks_enter(&task->callbacks, task->env_closing, &scope);
+  task->timer_closed = true; finish_task(task);
+  callbacks_close(&task->callbacks, &scope); task_release_callback_borrow(task);
 }
 static void close_timer(struct task *task) {
   if (task->timer_initialized && !task->timer_closing) {
@@ -855,7 +942,7 @@ static void close_timer(struct task *task) {
   }
 }
 static void cancel_task(struct task *task) {
-  g_cancellable_cancel(task->cancel);
+  if (task->cancel) g_cancellable_cancel(task->cancel);
   if (!task->work_complete && !task->cancel_requested) {
     task->cancel_requested = true;
     napi_status status = napi_cancel_async_work(task->env, task->work);
@@ -867,8 +954,10 @@ static void cancel_task(struct task *task) {
   }
 }
 static void deadline_expired(uv_timer_t *timer) {
-  struct task *task = timer->data; task->expired = true;
+  struct task *task = timer->data; struct native_callback_scope scope;
+  callbacks_enter(&task->callbacks, task->env_closing, &scope); task->expired = true;
   cancel_task(task); close_timer(task);
+  callbacks_close(&task->callbacks, &scope); task_release_callback_borrow(task);
 }
 static void complete(napi_env env, napi_status status, void *data) {
   (void)env; struct task *task = data; task->work_complete = true;
@@ -879,16 +968,20 @@ static void complete(napi_env env, napi_status status, void *data) {
 }
 static void cleanup_task(napi_async_cleanup_hook_handle handle, void *data) {
   (void)handle; struct task *task = data; task->env_closing = true;
+  if (task->inspection) task->inspection->env_closing = true;
+  if (task->completed_inspection) task->completed_inspection->env_closing = true;
+  struct native_callback_scope scope; callbacks_enter(&task->callbacks, true, &scope);
   cancel_task(task); close_timer(task);
+  callbacks_close(&task->callbacks, &scope); task_release_callback_borrow(task);
 }
 static void finalize_inspection(napi_env env, void *data, void *hint) {
   (void)env; (void)hint; struct inspection_owner *owner = data; owner->finalized = true;
   if (owner->task) {
     // Strong task ownership normally prevents GC here. Environment teardown
     // can finalize first; retain this owner until the same task's complete gate.
-    owner->task->env_closing = true;
+    owner->env_closing = true; owner->task->env_closing = true;
     cancel_task(owner->task); close_timer(owner->task);
-  } else release_inspection_owner(owner);
+  } else if (!owner->completion_borrows) release_inspection_owner(owner);
 }
 static napi_value cancel_inspection(napi_env env, napi_callback_info info) {
   size_t argc = 1; napi_value args[1], receiver; bool tagged = false; struct inspection_owner *owner = NULL;
@@ -1012,7 +1105,8 @@ static napi_value submit(napi_env env, napi_callback_info info, bool manager, bo
       ((task->operation == INSPECT_SECRET || task->operation == STOP_INSTALLED_UPGRADE) && !own_inspection(task, promise)) ||
       napi_create_string_utf8(env, "cliq-linux-credential-platform", NAPI_AUTO_LENGTH, &resource) != napi_ok ||
       napi_create_async_work(env, NULL, resource, execute, complete, task, &task->work) != napi_ok ||
-      napi_add_async_cleanup_hook(env, cleanup_task, task, &task->cleanup_hook) != napi_ok) goto failed;
+      napi_add_async_cleanup_hook(env, cleanup_task, task, &task->cleanup_hook) != napi_ok ||
+      !callbacks_init(&task->callbacks, env, "cliq credential platform callbacks")) goto failed;
   uv_loop_t *loop;
   if (napi_get_uv_event_loop(env, &loop) != napi_ok || uv_timer_init(loop, &task->deadline_timer)) goto failed;
   task->timer_initialized = true; task->deadline_timer.data = task;
@@ -1088,6 +1182,7 @@ struct broker {
   bool mutex_ready, token_revoked, fence_locked, finalize_requested;
   atomic_bool fence_retained;
   unsigned active_releases, fence_borrows;
+  struct native_callbacks callbacks;
   pid_t creator_pid;
   enum broker_stage stage;
   struct broker_binding binding;
@@ -1109,8 +1204,8 @@ struct broker {
 /* struct task is embedded in broker. Its upgrade fields change the private
  * native layout, so old-image owners/fences cannot borrow this image's methods.
  * Public transport semantics and retained evidence formats are unchanged. */
-static const napi_type_tag broker_tag = { UINT64_C(0x613929b5e6bd4b03), UINT64_C(0xaac5c25e66e15d24) };
-static const napi_type_tag broker_fence_tag = { UINT64_C(0x935ea37257e14d06), UINT64_C(0x89351effd851e41b) };
+static const napi_type_tag broker_tag = { UINT64_C(0x4d7fbd63748b4ad2), UINT64_C(0xa753e6e27e73a7d1) };
+static const napi_type_tag broker_fence_tag = { UINT64_C(0x81ef3e57441645e2), UINT64_C(0x97ab33b325569920) };
 struct broker_fence {
   struct broker *broker; napi_env env; napi_ref original; struct broker_binding binding; pid_t creator_pid; bool active;
 };
@@ -1118,6 +1213,22 @@ static struct broker *unretired_brokers;
 static void broker_begin_close(struct broker *broker);
 static bool broker_queue(struct broker *broker, enum broker_stage stage);
 static void broker_finish_close(struct broker *broker);
+static void broker_free(napi_env env, struct broker *broker);
+static void broker_retire_callbacks(struct broker *broker) {
+  if (!broker->retired || !broker->close_finished || (broker->timer_ready && !broker->timer_closed) ||
+      broker->callbacks.depth || broker->callbacks.retiring) return;
+  callbacks_retire(&broker->callbacks);
+  if (!atomic_load(&broker->fence_retained) && !broker->fence_locked && broker->cleanup_hook) {
+    if (napi_remove_async_cleanup_hook(broker->cleanup_hook) != napi_ok) callback_fatal("broker cleanup hook did not retire");
+    broker->cleanup_hook = NULL;
+  }
+}
+static void broker_release_callback_borrow(struct broker *broker) {
+  broker_retire_callbacks(broker);
+  if (!broker->callbacks.borrows) callback_fatal("broker callback borrow underflow");
+  broker->callbacks.borrows--;
+  if (broker->finalize_requested) broker_free(broker->env, broker);
+}
 
 static bool broker_fail(struct broker *broker, const char *code) {
   const char *expected = NULL;
@@ -1612,7 +1723,9 @@ static napi_value broker_closed_value(struct broker *broker) {
 static void broker_free(napi_env env, struct broker *broker) {
   /* A referenced handle cannot finalize before retirement. Uncertainty keeps
    * its owning C allocation until process death rather than forgetting it. */
-  if (!broker->retired || broker->unsafe) return;
+  if (!broker->finalize_requested || !broker->retired || broker->unsafe || broker->working ||
+      (broker->timer_ready && !broker->timer_closed) || callbacks_held(&broker->callbacks) || broker->cleanup_hook ||
+      broker->fence_borrows || broker->fence_locked || atomic_load(&broker->fence_retained)) return;
   if (broker->close_promise && !broker->env_closing) napi_delete_reference(env, broker->close_promise);
   if (broker->response) { wipe(broker->response, BROKER_BODY_CAP + 1); free(broker->response); }
   if (broker->mutex_ready && pthread_mutex_destroy(&broker->release_mutex)) {
@@ -1846,9 +1959,12 @@ static napi_value broker_handle_value(struct broker *broker, napi_value ready) {
   return handle;
 }
 static void broker_timer_closed(uv_handle_t *timer) {
-  struct broker *broker = timer->data; broker->timer_closed = true; broker_finish_close(broker);
+  struct broker *broker = timer->data; struct native_callback_scope scope;
+  callbacks_enter(&broker->callbacks, broker->env_closing, &scope);
+  broker->timer_closed = true; broker_finish_close(broker);
+  callbacks_close(&broker->callbacks, &scope); broker_release_callback_borrow(broker);
 }
-static void broker_finish_close(struct broker *broker) {
+static void broker_finish_close_data(struct broker *broker) {
   if (!broker->retired || (broker->timer_ready && !broker->timer_closed)) return;
   bool retained = atomic_load(&broker->fence_retained);
   if (broker->env_closing && !broker->fence_locked) { atomic_store(&broker->fence_retained, false); retained = false; }
@@ -1856,10 +1972,6 @@ static void broker_finish_close(struct broker *broker) {
     wipe(broker->token, sizeof(broker->token));
     if (pthread_mutex_destroy(&broker->release_mutex)) { broker->unsafe = true; atomic_store(&retirement_failed, true); }
     else broker->mutex_ready = false;
-  }
-  if (!retained && broker->cleanup_hook) {
-    if (napi_remove_async_cleanup_hook(broker->cleanup_hook) != napi_ok) { broker->unsafe = true; atomic_store(&retirement_failed, true); }
-    else broker->cleanup_hook = NULL;
   }
   if (broker->close_finished) {
     if (!retained && !broker->unsafe && broker->handle) {
@@ -1911,6 +2023,9 @@ static void broker_finish_close(struct broker *broker) {
     if (!broker->env_closing) napi_delete_reference(broker->env, broker->handle);
     broker->handle = NULL;
   }
+}
+static void broker_finish_close(struct broker *broker) {
+  broker->callbacks.borrows++; broker_finish_close_data(broker); broker_release_callback_borrow(broker);
 }
 static void broker_close_timer(struct broker *broker) {
   if (broker->timer_ready && !broker->timer_closing) {
@@ -1996,9 +2111,15 @@ static void broker_begin_close(struct broker *broker) {
     broker_close_timer(broker); broker_finish_close(broker);
   }
 }
-static void broker_deadline(uv_timer_t *timer) { broker_begin_close(timer->data); }
+static void broker_deadline(uv_timer_t *timer) {
+  struct broker *broker = timer->data; struct native_callback_scope scope;
+  callbacks_enter(&broker->callbacks, broker->env_closing, &scope);
+  broker_begin_close(broker);
+  callbacks_close(&broker->callbacks, &scope); broker_release_callback_borrow(broker);
+}
 static void broker_cleanup(napi_async_cleanup_hook_handle handle, void *data) {
   (void)handle; struct broker *broker = data; broker->env_closing = true;
+  struct native_callback_scope scope; callbacks_enter(&broker->callbacks, true, &scope);
   /* No JavaScript continuation can commit after environment teardown. Retire
    * this original mutex without inventing a no-release database fact. */
   if (broker->fence_locked) {
@@ -2006,6 +2127,7 @@ static void broker_cleanup(napi_async_cleanup_hook_handle handle, void *data) {
     else broker->fence_locked = false;
   }
   atomic_store(&broker->fence_retained, false); broker_begin_close(broker); broker_finish_close(broker);
+  callbacks_close(&broker->callbacks, &scope); broker_release_callback_borrow(broker);
 }
 static bool broker_input(napi_env env, napi_value input, struct broker *broker) {
   const char *keys[] = {"provider", "selector", "expectedObservation", "target", "trustStoreBytes", "trustStoreDigest", "requestPath", "bodyBytes", "bodyBytesDigest"};
@@ -2071,6 +2193,7 @@ static napi_value broker_prepare_call(napi_env env, napi_callback_info info) {
   if (napi_create_promise(env, &broker->ready_deferred, &ready) == napi_ok) handle = broker_handle_value(broker, ready);
   if (!handle ||
       napi_add_async_cleanup_hook(env, broker_cleanup, broker, &broker->cleanup_hook) != napi_ok ||
+      !callbacks_init(&broker->callbacks, env, "cliq model broker callbacks") ||
       napi_get_uv_event_loop(env, &loop) != napi_ok || uv_timer_init(loop, &broker->timer)) {
     broker->unsafe = true; atomic_store(&retirement_failed, true); broker_fail(broker, "resource_retirement");
     broker->unretired_next = unretired_brokers; unretired_brokers = broker;

@@ -7,7 +7,19 @@ import test from 'node:test';
 const journey = readFileSync(new URL('../qualify-installed-run-journey.ts', import.meta.url), 'utf8');
 const verifier = readFileSync(new URL('./installed-node-journey.ts', import.meta.url), 'utf8');
 const clientBuild = readFileSync(new URL('./installed-client-build.ts', import.meta.url), 'utf8');
+const upgrade = readFileSync(new URL('./installed-upgrade-journey.ts', import.meta.url), 'utf8');
+const upgradeBuild = readFileSync(new URL('./installed-upgrade-build.ts', import.meta.url), 'utf8');
+const driver = readFileSync(new URL('./installed-control-client-driver.ts', import.meta.url), 'utf8');
 const matches = (text, pattern) => assert(pattern.test(text), 'fixed genuine installed consumer wiring missing: ' + pattern.source);
+
+test('schema7 and schema8 upgrade clients explicitly select the signed schema3 contract in both directions', () => {
+  // Static call-site wiring only. The real old/new Linux installations still
+  // have to authenticate and complete both original upgrade Runs themselves.
+  matches(upgradeBuild, /const old = await buildInstalledSupervisorPackage\([^;]*headlessSchemaVersion: 3/u);
+  matches(upgradeBuild, /const target = await buildInstalledSupervisorPackage\([^;]*headlessSchemaVersion: 3/u);
+  matches(driver, /openInstalledSupervisorClient\(selected, schema === undefined \? 1 : 3\)/u);
+  matches(upgrade, /const connect = async \(stage: 0 \| 1\) => openInstalledClientConsumer\(\{ executable: '\/usr\/sbin\/runuser', args: \[\.\.\.prefix, process\.execPath,\s*'--disable-warning=ExperimentalWarning', packages\.clients\[stage\]!, filename, '--schema3'\], cwd: ledger\.home, env: environment,\s*headlessSchemaVersion: 3, openScan: \(\) => scanner\.openStream\(\), onJoined: \(\) => \{\} \}\)/u);
+});
 
 test('the complete ordinary installed journey sends initial admission and terminal delivery through the genuine client', () => {
   matches(journey, /import \{ InstalledClientConsumerDeadlineError, InstalledClientDriverError, openInstalledClientConsumer \} from '\.\/testing\/installed-client-consumer\.js'/u);

@@ -9,6 +9,61 @@ import { InstalledClientConsumerDeadlineError, InstalledClientDriverError, openI
   copyInstalledClientAuthenticationWork, copyInstalledClientAuthenticationProcess,
   installedClientAuthenticationMarker, installedClientRequestFailureMarker } from './installed-client-consumer.js';
 import { installedRequestFailureMarker } from './installed-client-request-failure.js';
+import { decodeInstalledControlResponse, headlessControlHello } from '../../../src/control/v1.js';
+import { hello as schema3Hello } from '../../../src/client/testing/protocol.js';
+
+test('a schema3-only Hello rejects the legacy default range without broadening its protocol', () => {
+  const request = (schema: 1 | 3) => ({ protocolVersion: 1 as const, method: 'control.hello' as const,
+    clientBuild: 'owned-upgrade-protocol-component', controlSchemaRange: { min: 1, max: 1 },
+    headlessSchemaRange: { min: schema, max: schema }, requestedFeatureIds: [...schema3Hello.enabledFeatureIds] });
+  const legacy = request(1), current = request(3);
+  const refusal = headlessControlHello(legacy, schema3Hello);
+  assert.equal(refusal.response.ok, false);
+  if (refusal.response.ok) throw new Error('expected the real closed range refusal');
+  assert.equal(refusal.response.error.code, 'INCOMPATIBLE_PROTOCOL');
+  if (refusal.response.error.code !== 'INCOMPATIBLE_PROTOCOL') throw new Error('expected the exact closed protocol refusal');
+  assert.deepEqual(refusal.response.error.supportedHeadlessRange, { min: 3, max: 3 });
+  assert.equal(refusal.response.error.upgradeAction, 'upgrade_client');
+  assert.throws(() => decodeInstalledControlResponse({ protocolVersion: 1, ok: true, result: schema3Hello }, legacy),
+    /hello features or schema ranges differ/u);
+  const accepted = headlessControlHello(current, schema3Hello);
+  assert.equal(accepted.response.ok, true);
+  assert.deepEqual(decodeInstalledControlResponse(accepted.response, current), accepted.response);
+});
+
+test('an actual schema3 adapter child requires explicit consumer framing and joins both original pipes', async () => {
+  // Existing inert wire data and complete production adapter modules only.
+  // This child supplies no installed selection, native peer or upgrade proof.
+  for (const schema of [undefined, 3] as const) {
+    const source = `import assert from 'node:assert/strict';
+      import {protocolClient} from ${JSON.stringify(new URL('../../../src/client/testing/protocol.ts', import.meta.url).href)};
+      import {runInstalledHeadlessJsonl} from ${JSON.stringify(new URL('../../../src/headless/installed.ts', import.meta.url).href)};
+      const f=protocolClient();
+      try { await runInstalledHeadlessJsonl(f.session,process.stdin,bytes=>new Promise((resolve,reject)=>process.stdout.write(bytes,e=>e?reject(e):resolve()))); }
+      finally { await f.session.close();assert.equal(f.closed(),1);assert.equal(f.calls.length,${schema === 3 ? 1 : 0}); }`;
+    const scanned: Buffer[] = []; let closed = 0, joined = 0;
+    const opening = openInstalledClientConsumer({ executable: process.execPath,
+      args: ['--import', 'tsx', '--input-type=module', '-e', source], cwd: process.cwd(),
+      env: { ...process.env, NODE_NO_WARNINGS: '1' }, ...(schema === 3 ? { headlessSchemaVersion: schema } : {}),
+      openScan: () => ({ scan(bytes) { scanned.push(Buffer.from(bytes)); }, close() { closed++; } }), onJoined() { joined++; } });
+    if (schema === undefined) {
+      await assert.rejects(opening, { code: 'ERR_ASSERTION' });
+      assert.equal(joined, 0, 'a framing refusal must never become a positive consumer join');
+    } else {
+      const client = await opening;
+      try {
+        assert.deepEqual({ ...client.hello.headlessSchemaRange }, { min: 3, max: 3 });
+        const response = await client.send({ protocolVersion: 1, method: 'run.get', runId: 'run' });
+        assert.equal(response.result?.snapshot.run.id, 'run');
+      } finally { await client.close(); }
+      assert.equal(joined, 1);
+    }
+    assert.equal(closed, 2, 'both scanned original child streams must actually close on success and refusal');
+    const wire = Buffer.concat(scanned).toString('utf8').trim().split('\n').map(line => parseJsonStrict(line)) as Record<string, any>[];
+    assert.equal(wire.length, schema === 3 ? 2 : 1);
+    assert(wire.every(row => row.schemaVersion === 3 && row.type === 'response'));
+  }
+});
 
 test('the actual joined parent retains the fixed child failure stage on its own diagnostic stream', () => {
   const consumer = new URL('./installed-client-consumer.ts', import.meta.url).href;

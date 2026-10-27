@@ -62,6 +62,10 @@ async function readTree(rootName: string): Promise<string> {
     failure === undefined ? cause : new AggregateError([failure, cause])); } }
 }
 
+/** Full bytes and physical cut of a shared locked build tree. Provenance only;
+ * callers must keep the original lock/root binding and compare both cuts. */
+export async function readQualificationDependencyTree(root: string): Promise<string> { return readTree(root); }
+
 export async function readQualificationDependencies(source: FrozenQualificationSource): Promise<string> {
   const original = originals.get(source);
   if (!original || original.sourceRoot !== source.root) throw new TypeError('independent build dependencies require their original installation session');

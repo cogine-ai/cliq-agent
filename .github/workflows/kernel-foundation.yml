@@ -1043,7 +1043,12 @@ jobs:
       - name: Install actual guest, transport and Secret Service prerequisites
         run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap libcap-dev libselinux1-dev meson ninja-build e2fsprogs libext2fs-dev pkg-config
       - name: Check the actual native dependency family before installed qualification
-        run: node --test --test-concurrency=1 --import tsx scripts/kernel/testing/dependency-native-family.test.ts scripts/kernel/testing/dependency-broker-lifecycle.test.ts scripts/kernel/testing/dependency-npm-stage.test.ts scripts/kernel/testing/preparing-git-native.test.ts scripts/kernel/testing/installed-genesis.test.ts
+        run: |
+          node --test --test-concurrency=1 --import tsx scripts/kernel/testing/dependency-native-family.test.ts scripts/kernel/testing/dependency-broker-lifecycle.test.ts scripts/kernel/testing/dependency-npm-stage.test.ts scripts/kernel/testing/preparing-git-native.test.ts scripts/kernel/testing/installed-genesis.test.ts
+          if ! git cat-file -e 'ba804a59dcadee80cb41c822e2d0e32198462f20^{commit}'; then
+            git fetch --no-tags --depth=1 origin ba804a59dcadee80cb41c822e2d0e32198462f20
+          fi
+          node --import tsx scripts/kernel/testing/qualify-native-callback-lifecycle.ts "$RUNNER_TEMP/cliq-native-callback-lifecycle"
       - name: Acquire the exact official npm qualification source
         id: npm_source
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
@@ -1104,6 +1109,20 @@ jobs:
         with:
           name: installed-status-regression-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/cliq-installed-status-regression/status-borrow-regression.json
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Retain bounded native callback source and joined output evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-callback-lifecycle-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/cliq-native-callback-lifecycle/*.json
+            ${{ runner.temp }}/cliq-native-callback-lifecycle/*.tap
+            ${{ runner.temp }}/cliq-native-callback-lifecycle/*.stderr
+            ${{ runner.temp }}/cliq-native-callback-lifecycle/*.source.tar
+            ${{ runner.temp }}/cliq-native-callback-lifecycle/carrier/*.tar.xz
           if-no-files-found: warn
           retention-days: 7
 

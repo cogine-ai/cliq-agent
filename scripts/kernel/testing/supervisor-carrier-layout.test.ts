@@ -211,7 +211,23 @@ test('the actual experimental entry rejects invalid provisioning before creating
 // unchanged historical CT projection. This is a validation copy only.
 function withoutLockedNodeQualification(workflow: string): string {
   const native = '      - name: Check the actual native dependency family before installed qualification\n' +
-    '        run: node --test --test-concurrency=1 --import tsx scripts/kernel/testing/dependency-native-family.test.ts scripts/kernel/testing/dependency-broker-lifecycle.test.ts scripts/kernel/testing/dependency-npm-stage.test.ts scripts/kernel/testing/preparing-git-native.test.ts scripts/kernel/testing/installed-genesis.test.ts\n';
+    '        run: |\n' +
+    '          node --test --test-concurrency=1 --import tsx scripts/kernel/testing/dependency-native-family.test.ts scripts/kernel/testing/dependency-broker-lifecycle.test.ts scripts/kernel/testing/dependency-npm-stage.test.ts scripts/kernel/testing/preparing-git-native.test.ts scripts/kernel/testing/installed-genesis.test.ts\n' +
+    "          if ! git cat-file -e 'ba804a59dcadee80cb41c822e2d0e32198462f20^{commit}'; then\n" +
+    '            git fetch --no-tags --depth=1 origin ba804a59dcadee80cb41c822e2d0e32198462f20\n' +
+    '          fi\n' +
+    '          node --import tsx scripts/kernel/testing/qualify-native-callback-lifecycle.ts "$RUNNER_TEMP/cliq-native-callback-lifecycle"\n';
+  const callbackRetention = '\n      - name: Retain bounded native callback source and joined output evidence\n' +
+    '        if: always()\n        uses: actions/upload-artifact@v4\n        with:\n' +
+    '          name: native-callback-lifecycle-${{ github.run_id }}-${{ github.run_attempt }}\n' +
+    '          path: |\n' +
+    '            ${{ runner.temp }}/cliq-native-callback-lifecycle/*.json\n' +
+    '            ${{ runner.temp }}/cliq-native-callback-lifecycle/*.tap\n' +
+    '            ${{ runner.temp }}/cliq-native-callback-lifecycle/*.stderr\n' +
+    '            ${{ runner.temp }}/cliq-native-callback-lifecycle/*.source.tar\n' +
+    '            ${{ runner.temp }}/cliq-native-callback-lifecycle/carrier/*.tar.xz\n' +
+    '          if-no-files-found: warn\n          retention-days: 7\n';
+  assert.equal(workflow.split(callbackRetention).length, 2, 'the fixed public inputs and bounded original output remain retained');
   const start = workflow.indexOf('      - name: Acquire the exact official npm qualification source\n');
   const end = workflow.indexOf('      - name: Observe the fixed original installed status deadlock\n', start);
   assert(start >= 0 && end > start, 'the exact source step must precede the original status regression');
@@ -237,7 +253,7 @@ function withoutLockedNodeQualification(workflow: string): string {
   assert.equal(workflow.split(invocation).length, 2, 'the exact verifier invocation runs once');
   assert(job.includes(condition), 'the candidate requires its fully verified official source');
   assert.equal(workflow.split(condition).length, 2, 'only the original verifier uses the new source condition');
-  return workflow.replace(native, '').replace(source, '').replace(invocation, originalInvocation)
+  return workflow.replace(native, '').replace(callbackRetention, '').replace(source, '').replace(invocation, originalInvocation)
     .replace(condition, "        if: ${{ !cancelled() && steps.build.outcome == 'success' }}\n");
 }
 
@@ -334,6 +350,9 @@ test('the exact native preflight preserves every original and added case and rej
   const mutations = cases.flatMap(filename => [workflow.replace(filename, ''), workflow.replace(filename, filename.repeat(2))]);
   const lastCase = cases.at(-1)!;
   mutations.push(
+    workflow.replace('qualify-native-callback-lifecycle.ts', 'callback-qualification-skipped.ts'),
+    workflow.replace('origin ba804a59dcadee80cb41c822e2d0e32198462f20', 'origin HEAD'),
+    workflow.replace('cliq-native-callback-lifecycle/*.tap', 'cliq-native-callback-lifecycle/omitted.tap'),
     workflow.replace(lastCase + '\n', lastCase + ' scripts/kernel/testing/unexpected-native.test.ts\n'),
     workflow.replace(lastCase + '\n', lastCase + '\n      - run: node --test --import tsx scripts/kernel/testing/unexpected-native.test.ts\n'),
     workflow + '      - run: node --test --import tsx scripts/kernel/testing/unexpected-native.test.ts\n'
