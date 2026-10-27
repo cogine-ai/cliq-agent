@@ -1,4 +1,4 @@
-import { canonicalJsonBytes } from '../kernel/canonical.js';
+import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import type { SourceInspectionAttemptV1 } from '../kernel/execution.js';
 import { addCanonicalDuration, assertAdmissionKey, assertRequestId, digestOmitting, identityHash, normalizeAbsolutePath, normalizeBoundedText,
   parseCanonicalTime, requiredSafeInteger } from '../kernel/identity.js';
@@ -13,6 +13,7 @@ import { assertVerifiedSourceInspectionTargetCut, readVerifiedSourceInspectionTa
 import type { StateOwnerContext } from './state-owner.js';
 import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
 import { consumeSourceGitConsent, sourceGitConsentData } from './source-git-consent.js';
+import { assertSourceIncludeConsentConsumed, consumeSourceIncludeConsent, sourceIncludeConsentData } from './source-include-consent.js';
 import { decodeSourceGitInputIntent } from './source-git-input.js';
 
 export type SourceInspectionReplayKey = Readonly<{
@@ -275,19 +276,26 @@ Promise<Extract<SourceInspectionAttemptV1, { phase: 'capturing' }>> {
     if (advanceTimeFence(connection, owner.ownerEpoch) !== 'healthy') { clockRejected = true; return; }
     const now = readTimeFence(connection)!.lastAcceptedAt;
     const consent = held.inspectionConsent && sourceGitConsentData(owner, held.inspectionConsent);
+    const included = held.includeConsent && sourceIncludeConsentData(owner, held.includeConsent);
     if (held.target.schemaVersion === 2 && !held.inspectionConsent)
       throw new KernelStorageError('RECOVERY_REQUIRED', 'Git capture has no original prepared inspection consent');
     if (held.inspectionConsent) consumeSourceGitConsent(connection, owner, held.inspectionConsent, {
       inspectionId: held.inspectionId, admissionIntentDigest: held.target.admissionIntentDigest, workspaceIdentityDigest: held.workspace.identityDigest
     }, now);
+    if (canonicalSha256(included?.sourceReadGrantRefs ?? []) !== canonicalSha256(held.target.sourceReadGrantRefs))
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'source capture has no original prepared include consent');
+    if (held.includeConsent) consumeSourceIncludeConsent(connection, owner, held.includeConsent, {
+      inspectionId: held.inspectionId, admissionIntentDigest: held.target.admissionIntentDigest, workspaceIdentityDigest: held.workspace.identityDigest
+    }, now);
+    const deadlineAt = [addCanonicalDuration(now, held.request.budgets.wallTimeMs),
+      ...(consent ? [consent.expiresAt] : []), ...(included?.expiresAt ? [included.expiresAt] : [])].sort()[0]!;
     const base = {
       schemaVersion: 1, inspectionId: held.inspectionId, attempt: 1, ...key,
       targetRef: held.targetRef, targetDigest: held.target.targetDigest, workspaceIdentityDigest: held.workspace.identityDigest,
       stateOwnerEpoch: owner.ownerEpoch, supervisorInstanceId: owner.supervisorInstanceId,
       stagingNonceDigest: physical.stagingNonceDigest, stagingIdentity: physical.stagingIdentity,
       phase: 'capturing' as const, cancelRequested: false, rowVersion: 1,
-      createdAt: now, deadlineAt: consent && consent.expiresAt < addCanonicalDuration(now, held.request.budgets.wallTimeMs)
-        ? consent.expiresAt : addCanonicalDuration(now, held.request.budgets.wallTimeMs), updatedAt: now, rowDigest: '' };
+      createdAt: now, deadlineAt, updatedAt: now, rowDigest: '' };
     const row: Extract<SourceInspectionAttemptV1, { phase: 'capturing' }> = intent
       ? { ...base, schemaVersion: 1, attempt: 1, inputRef: intent.ref, inputDigest: intentDigest! }
       : { ...base, schemaVersion: 1, attempt: 1 };
@@ -303,5 +311,6 @@ Promise<Extract<SourceInspectionAttemptV1, { phase: 'capturing' }>> {
   });
   if (clockRejected) throw new KernelStorageError('INVALID_REQUEST', 'canonical clock is regressed; source capture is paused');
   if (!result) throw new KernelStorageError('RECOVERY_REQUIRED', 'source reservation committed no owning row');
+  if (held.includeConsent) assertSourceIncludeConsentConsumed(driver, owner, held.includeConsent);
   return result;
 }

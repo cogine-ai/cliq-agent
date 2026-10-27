@@ -24,6 +24,8 @@ import { readStateOwner } from './state-owner.js';
 import { decodeGuestToolchainManifest, guestToolchainMembers, guestToolchainRoots } from './guest-toolchain.js';
 import { GUEST_EXTRACTOR_RECIPE } from '../sandbox/guest-toolchain.js';
 import { hostPlatform } from './workspace-identity.js';
+import { bundledSkillMemberRoles, bundledSkillRoots, validateBundledSkillReferences } from './bundled-skills.js';
+import { decodeBundledSkillClosure, SKILL_RESOURCE_BYTES, type BundledSkillClosureV1 } from '../kernel/skill.js';
 
 type Entry = { owner: StateOwnerRecordV1; process: PlatformProcessIdentityV1;
   acquisition: StateOwnerAcquisitionEvidenceV1; transition?: StateOwnerTransitionEvidenceV1 };
@@ -42,7 +44,7 @@ type BirthMember = { artifactRef: string; byteCount: number };
 async function readInstalledSeed(artifacts: ArtifactCatalog, first: Entry,
   generation: Extract<KernelGenerationIdentityV1, { origin: 'fresh_installed' }>, members: readonly BirthMember[]): Promise<void> {
   const smallBytes = 1_048_576, trustBytes = 16 * smallBytes;
-  const dataRoles = new Set(['policy_engine', 'sandbox_root_profile', 'system_prompt', 'compaction_prompt', 'bundle_object', 'guest_toolchain', 'schema', 'trust_store']);
+  const dataRoles = new Set(['policy_engine', 'sandbox_root_profile', 'system_prompt', 'compaction_prompt', 'bundle_object', 'guest_toolchain', 'schema', 'trust_store', 'skill_bundle']);
   const inventory = new Map(members.map(member => [member.artifactRef, member.byteCount]));
   const expected = new Map<string, number>(), buffers = new Map<string, Buffer>();
   const requireMember = (ref: string, byteCount: number) => {
@@ -81,6 +83,12 @@ async function readInstalledSeed(artifacts: ArtifactCatalog, first: Entry,
   }
   const guestImages = new Set(guests.map(manifest => manifest.guestImageRef));
   const guestSignatures = new Set(guests.map(manifest => manifest.signatureRef));
+  const skillClosures = new Map<string, Readonly<BundledSkillClosureV1>>();
+  for (const root of bundledSkillRoots(bundle)) {
+    const size = inventory.get(root.artifactRef); if (size === undefined) invalid('retained installed genesis lacks an original skill closure');
+    skillClosures.set(root.artifactRef, decodeBundledSkillClosure(checkCanonicalBytes(await read(root.artifactRef, size, smallBytes))));
+  }
+  const skillMembers = bundledSkillMemberRoles(bundle, skillClosures);
   const source = generation.modelAuthoritySource;
   if (!source || typeof source !== 'object' || (source.kind === 'none'
     ? !exactKeys(source, ['kind'])
@@ -103,12 +111,20 @@ async function readInstalledSeed(artifacts: ArtifactCatalog, first: Entry,
       for await (const _chunk of artifacts.readChunks(entry.digest, entry.byteCount)) { /* Complete original image, never a metadata-only digest. */ }
       continue;
     }
+    if (skillMembers.resources.has(entry.digest) && !skillMembers.instructions.has(entry.digest) && !guestSignatures.has(entry.digest)) {
+      if (entry.byteCount > SKILL_RESOURCE_BYTES) invalid('retained installed skill resource exceeds its original bound');
+      for await (const _chunk of artifacts.readChunks(entry.digest, entry.byteCount)) { /* Complete original data, never an executable identity. */ }
+      continue;
+    }
     const bytes = await read(entry.digest, entry.byteCount, guestSignatures.has(entry.digest) ? 64 : entry.role === 'trust_store' ? trustBytes : smallBytes);
     if (guestSignatures.has(entry.digest)) {
       if (bytes.length !== 64) invalid('retained installed guest signature is not complete');
       continue;
     }
-    if (entry.role === 'tool_adapter') {
+    if (skillMembers.instructions.has(entry.digest)) {
+      // SKILL.md is source text, not canonical JSON. The common structured
+      // consumer below rederives its exact instruction from complete bytes.
+    } else if (entry.role === 'tool_adapter') {
       if (entry.entryId !== 'builtin_tools' || entry.version !== '1' || entry.relativePath !== 'adapters/builtin-tools.mjs' || bytes.length < 1)
         invalid('retained installed tool script differs from its fixed original data role');
     } else if (entry.role === 'trust_store') validateTrustStore(bytes);
@@ -117,6 +133,15 @@ async function readInstalledSeed(artifacts: ArtifactCatalog, first: Entry,
       if (entry.role === 'sandbox_root_profile') decodeSandboxRootProfile(value);
     }
   }
+  await validateBundledSkillReferences(skillClosures, async (ref, byteCount) => {
+    const retained = buffers.get(ref); if (retained) return retained;
+    requireMember(ref, byteCount);
+    if (byteCount > SKILL_RESOURCE_BYTES) invalid('retained skill textual resource exceeds its original bound');
+    const chunks: Buffer[] = []; let count = 0;
+    for await (const chunk of artifacts.readChunks(ref, byteCount)) { count += chunk.length; if (count > byteCount) invalid('retained skill resource length changed'); chunks.push(Buffer.from(chunk)); }
+    if (count !== byteCount) invalid('retained skill resource is incomplete');
+    return Buffer.concat(chunks);
+  });
   validateInstalledStructuredArtifacts(bundle, buffers);
   if (companion) {
     const objects = new Map<string, Buffer>();

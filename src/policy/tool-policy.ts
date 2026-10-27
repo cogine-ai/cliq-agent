@@ -9,6 +9,7 @@ import { loadToolContracts, type ToolInputAuthority } from '../tools/input-contr
 import { parseCanonicalBash } from './canonical-bash.js';
 import { exactKeys, requireEqual } from './runtime-authority.js';
 import { toolApprovalDecision } from './tool-approval.js';
+import { decodeSkillResourceInput } from '../kernel/skill.js';
 
 const CLASSES: PolicyActionClass[] = ['read', 'plan', 'write', 'exec', 'mcp', 'verifier',
   'dependency_install_scripts', 'delivery', 'child_read_only', 'child_mutating'];
@@ -63,13 +64,14 @@ export function planToolRequest(input: {
     workspaceIdentityRef, workspaceIdentityDigest, toolManifestRef: assembly.tools.manifestRef,
     toolManifestDigest: assembly.tools.manifestDigest, toolName: call.toolName, toolContractDigest: canonicalSha256(contract), execution: entry.execution };
   const target: ToolTargetV1 = { ...targetCore, targetDigest: canonicalSha256(targetCore) };
-  const opId = entry.execution.kind === 'supervisor_operation'
+  const opId = entry.execution.kind === 'supervisor_operation' && entry.execution.handlerId === 'delegate'
     ? childDelegateOperationId(runId, batchItemId, call.callId, call.index, call.inputDigest) : toolOperationId(runId, batchItemId, call.callId);
   const core = { schemaVersion: 1 as const, format: 'cliq-tool-request-v1' as const, runId, opId, frontierRef, assemblyRef,
     batchItemId, callId: call.callId, callIndex: call.index, toolName: call.toolName, inputRef: canonicalSha256(call), inputDigest: call.inputDigest,
     targetRef: canonicalSha256(target), targetDigest: target.targetDigest,
     ...(entry.execution.kind === 'mcp' ? { idempotencyKey: identityHash('cliq-mcp-tool-idempotency-v1', runId, opId,
-      entry.execution.registryRevisionRef, entry.execution.serverToolName) } : {}) };
+      entry.execution.registryRevisionRef, entry.execution.serverToolName) } : entry.execution.kind === 'supervisor_operation' && entry.execution.handlerId === 'skill_resource'
+        ? { idempotencyKey: identityHash('cliq-skill-resource-idempotency-v1', runId, opId, call.inputDigest) } : {}) };
   return { request: { ...core, requestDigest: canonicalSha256(core) } satisfies ToolRequestV1, target, entry };
 }
 
@@ -139,7 +141,7 @@ export function loadToolPolicy(input: {
       'batchItemId', 'callId', 'callIndex', 'toolName', 'inputRef', 'inputDigest', 'targetRef', 'targetDigest', 'requestDigest',
       ...(request.idempotencyKey === undefined ? [] : ['idempotencyKey'])]) || request.schemaVersion !== 1 || request.format !== 'cliq-tool-request-v1' ||
         request.assemblyRef !== assemblyRef || request.requestDigest !== digestOmitting(request, 'requestDigest') ||
-        request.opId !== (target.execution.kind === 'supervisor_operation'
+        request.opId !== (target.execution.kind === 'supervisor_operation' && target.execution.handlerId === 'delegate'
           ? childDelegateOperationId(request.runId, request.batchItemId, request.callId, request.callIndex, request.inputDigest)
           : toolOperationId(request.runId, request.batchItemId, request.callId)) ||
         call.disposition !== 'resolved' || call.callId !== request.callId || call.index !== request.callIndex || call.toolName !== request.toolName ||
@@ -158,10 +160,13 @@ export function loadToolPolicy(input: {
     requireEqual(target, { ...targetCore, targetDigest: canonicalSha256(targetCore) }, 'tool target');
     if (request.targetRef !== canonicalSha256(target) || request.targetDigest !== target.targetDigest) throw new TypeError('tool request target mismatch');
     const idempotencyKey = entry.execution.kind === 'mcp'
-      ? identityHash('cliq-mcp-tool-idempotency-v1', request.runId, request.opId, entry.execution.registryRevisionRef, entry.execution.serverToolName) : undefined;
+      ? identityHash('cliq-mcp-tool-idempotency-v1', request.runId, request.opId, entry.execution.registryRevisionRef, entry.execution.serverToolName)
+      : entry.execution.kind === 'supervisor_operation' && entry.execution.handlerId === 'skill_resource'
+        ? identityHash('cliq-skill-resource-idempotency-v1', request.runId, request.opId, call.inputDigest) : undefined;
     if (request.idempotencyKey !== idempotencyKey) throw new TypeError('tool idempotency identity mismatch');
-    const local = entry.execution.kind === 'supervisor_operation';
-    const actionClass: PolicyActionClass = local
+    const local = entry.execution.kind === 'supervisor_operation' && entry.execution.handlerId === 'delegate';
+    const resource = entry.execution.kind === 'supervisor_operation' && entry.execution.handlerId === 'skill_resource';
+    const actionClass: PolicyActionClass = resource ? 'read' : local
       ? call.value!.mode === 'read_only' ? 'child_read_only' : 'child_mutating'
       : entry.execution.kind === 'mcp' ? 'mcp' : entry.access;
     let channel: ToolPolicyChannel;
@@ -171,6 +176,11 @@ export function loadToolPolicy(input: {
           intent.kind !== 'named-action' || intent.action !== actionClass || !['read_only', 'mutating'].includes(call.value!.mode as string))
         throw new TypeError('local child admission requires its exact mode-specific permission intent');
       channel = { channel: 'named-action', action: actionClass as 'child_read_only' | 'child_mutating', mode: call.value!.mode as 'read_only' | 'mutating' };
+    } else if (resource) {
+      const input = decodeSkillResourceInput(call.value);
+      if (entry.name !== 'skill_resource' || intent.kind !== 'named-action' || intent.action !== 'skill_resource')
+        throw new TypeError('skill resource requires its fixed read permission intent');
+      channel = { channel: 'named-action', action: 'skill_resource', skillId: input.skillId, canonicalRelativePath: input.canonicalRelativePath };
     } else if (intent.kind === 'fs-read' || intent.kind === 'fs-write') {
       if (!text(intent.path) || intent.path.includes('\\') || (intent.path !== '.' && intent.path.split('/').some((part) => ['', '.', '..'].includes(part)))) {
         throw new TypeError('filesystem policy path is not canonical');
@@ -188,7 +198,8 @@ export function loadToolPolicy(input: {
     const keys = channel.channel === 'fs-read' || channel.channel === 'fs-write' ? channel.canonicalRootRelativePaths
       : channel.channel === 'bash' ? [channel.outerCommandHead ?? '']
         : channel.channel === 'mcp' ? [`${channel.registrationId}/${channel.serverToolName}`]
-          : 'normalizedPlanIdentity' in channel ? [channel.normalizedPlanIdentity] : channel.channel === 'named-action' ? [channel.action] : [];
+          : 'normalizedPlanIdentity' in channel ? [channel.normalizedPlanIdentity] : channel.channel === 'named-action'
+            ? [channel.action === 'skill_resource' ? `skill_resource ${channel.skillId}/${channel.canonicalRelativePath}` : channel.action] : [];
     const evaluateKey = (key: string) => evaluateFrozenPolicyKey(policy, actionClass, channel.channel, key,
       channel.channel === 'bash' ? channel : undefined);
     const winning = keys.map(evaluateKey).reduce((a, b) => RANK[b.disposition] > RANK[a.disposition] ? b : a);
@@ -230,7 +241,7 @@ export function loadToolPolicy(input: {
   function approvalWait(request: ToolRequestV1, target: ToolTargetV1, evidence: ToolPolicyChannelEvidenceV1, revision: number): ToolApprovalWait {
     if (evidence.effectiveDisposition !== 'ask' || !Number.isSafeInteger(revision) || revision < 1) throw new TypeError('only ask can create an approval wait');
     return immutableSnapshot({ schemaVersion: 1, kind: 'approval', runId: request.runId, frontierRef: request.frontierRef,
-      createdFromRevision: revision, createdAt: evidence.evaluatedAt, subject: { kind: 'tool_call', ...(target.execution.kind === 'supervisor_operation'
+      createdFromRevision: revision, createdAt: evidence.evaluatedAt, subject: { kind: 'tool_call', ...(target.execution.kind === 'supervisor_operation' && target.execution.handlerId === 'delegate'
         ? { policySubjectKind: 'child_delegate' as const, mode: evidence.actionClass === 'child_read_only' ? 'read_only' as const : 'mutating' as const }
         : { policySubjectKind: 'ordinary_tool' as const }),
         opId: request.opId, target: request.targetRef, batchItemId: request.batchItemId, callId: request.callId, callIndex: request.callIndex,
@@ -245,7 +256,7 @@ export function loadToolPolicy(input: {
     if (!retry || retry.replayClass !== entry.replayClass) throw new TypeError('tool retry authority mismatch');
     const subject: ToolOperationGrantV1['subject'] = { kind: 'tool_call', batchItemId: request.batchItemId,
       callId: request.callId, callIndex: request.callIndex, toolName: request.toolName, toolContractDigest: target.toolContractDigest,
-      replayClass: entry.replayClass, ...(target.execution.kind === 'supervisor_operation'
+      replayClass: entry.replayClass, ...(target.execution.kind === 'supervisor_operation' && target.execution.handlerId === 'delegate'
         ? { policySubjectKind: 'child_delegate' as const, mode: call.value!.mode as 'read_only' | 'mutating' }
         : { policySubjectKind: 'ordinary_tool' as const }) };
     const core = { schemaVersion: 1 as const, format: 'cliq-operation-grant-v1' as const,
@@ -253,7 +264,10 @@ export function loadToolPolicy(input: {
       principalId, runId: request.runId, policyRef, frontierRef: request.frontierRef, opId: request.opId,
       requestRef: canonicalSha256(request), requestDigest: request.requestDigest, targetRef: request.targetRef, targetDigest: request.targetDigest,
       subject, provenance,
-      maxDispatchedAttempts: retry.maxDispatchedAttempts, issuedAt, expiresAt };
+      // The normal assembly retry ceiling remains unchanged. This atomic
+      // local read narrows its own grant to one use and has no UNKNOWN retry.
+      maxDispatchedAttempts: target.execution.kind === 'supervisor_operation' && target.execution.handlerId === 'skill_resource'
+        ? 1 : retry.maxDispatchedAttempts, issuedAt, expiresAt };
     return immutableSnapshot({ ...core, grantDigest: canonicalSha256(core) });
   }
   return Object.freeze({ evaluate, grant, approvalWait, approve });

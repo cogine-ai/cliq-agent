@@ -1741,6 +1741,12 @@ Implement work package 06 of the Durable Verified Run Kernel: one generated vers
 - Import legacy state once with validated backup/idempotency, then remove the old runner and all dual write.
 - Keep plugin marketplace, MCP resources/prompts, cloud, native Windows execution, and `cliq-models` expansion out of this Kernel Cut.
 
+## Frozen skill implementation contract
+
+Implement RFC 5.1 as one vertical: standard-compatible bounded explicit references, genuine descriptor capture from bundled/user/workspace scopes, all raw bytes plus exact source/manifest/instruction CAS, selected order and cross-scope collision refusal, actual model projection, installed seed/history, and the CAS-only signed-Supervisor `skill_resource` read action. Do not require a custom resources field, run a script, borrow legacy configuration/runner authority, silently reopen mutable sources during recovery, or raise the existing 65-root/JSON/global limits to fit individual skill maxima. Workspace Trust, the normal per-action read permission and OS boundaries remain independent.
+
+The new local Journal branch is separate from physical invocation and child admission/merge/await: exact Q/C source, ordinary one-attempt read grant, no native/broker/lease/UNKNOWN, one atomic cost/Checkpoint/result/frontier transaction and independent full history reconstruction. Preserve empty EOF, bounded binary ranges, real SQL/CAS failure join, approval/replay/TTL, Stop and zero duplicate charges. The original 10-case/24-POST/16-download installed campaign keeps all earlier assertions and adds three scope selections plus three local reads to its existing ordinary tools batch under the explicit `verifier_ten_with_three_scope_frozen_skills_v1` profile. Its script resource is executable-disabled data. Old tool/native counts and scope-capacity rotation remain separate from the three local charges. The original single secret scanner and every cap remain unchanged; component success or an unexecuted campaign never establishes Linux/default-release qualification.
+
 ## Validation
 
 Run `npm run generate:control`, `npm run check:control-generated`, `npm run build`, `npm test`, `npm run test:fault`, `npm run test:sandbox`, `npm run test:migration`, and `npm run test:e2e`; include MCP lifecycle, guest identity, RuntimeBundle upgrade/rollback, and retention fault matrices before the RFC 24-hour/50-repository release campaign.

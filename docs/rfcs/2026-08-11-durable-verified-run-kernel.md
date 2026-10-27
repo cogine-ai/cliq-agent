@@ -3166,6 +3166,16 @@ For recursive Runs, token, cost, tool-attempt, and repair-attempt allocations ar
 
 A terminal Run never returns to `running`. The Kernel Cut has no separate Run-level retry relation; users submit a new Run explicitly, while invocation retries remain Journal attempts under one Run.
 
+### 5.1 Frozen skill capture and resource reads
+
+Skill syntax follows the [AgentSkills specification](https://agentskills.io/specification), not a custom required `resources` frontmatter. The installed closed parser accepts the standard name/description, optional string license/compatibility, string-map metadata and inert allowed-tools text; unsupported frontmatter refuses. The instruction is the exact trimmed body projected as ModelText. Its bounded resource grammar captures actual inline/image local destinations, full/collapsed/shortcut reference links and explicit relative file/code/line tokens such as `scripts/extract.py`, `references/guide.md:12` or `assets/template.txt#L3-L7`. In prose, a file token needs a relative path component and an ordinary file suffix or the fixed scripts/references/assets/templates prefix; bare names need a Markdown link, code token, standalone line or `./` path. Ambiguous product/library names such as Node.js are inert prose. It does not infer unspecified files from natural language or run programs to discover imports. External URLs and same-file fragments are inert; local HTML attributes, variable/glob/absolute paths, escapes, unsupported multiline destinations and root escapes refuse. JSON resources admit only bounded literal local `$ref` edges relative to the containing file, without rebasing, remote/dynamic references or cycles. The all-and-only graph is recomputed from original retained bytes with depth32, 128 resources and 16 MiB of resource bytes. Raw SKILL.md retains its independent 1 MiB bound. No executable-disabled resource is imported or executed.
+
+The fixed no-argument held-root `openSkillSnapshot` recipe supplies only descriptor-relative metadata/selected regular-file reads, skipping Git metadata; ordinary source and instruction-only recipes retain their original behavior. Discovery checks the real workspace and actual principal's two skill roots plus the selected signed bundle, then rejects cross-scope duplicate unqualified ids. It opens only the chosen declaration/reference closure and retains full no-follow/owner/device/mode/link/inode/EOF/hash checks through durable publication and real reader retirement. Capturing a skill does not add any path to the independent SourceProjection or grant permission to read source/tool/network state. An independently selected workspace source path may still be ordinary source; exclusions are explicit source selectors, never implicit skill authority. The signed `bundled_skill` structured family contains non-executable `skill_bundle` closures and exact signed raw `bundle_object` members. These remain inside the original aggregate 65-root and manifest 1 MiB/10k/depth32 limits; per-skill maxima do not raise any non-skill limit or guarantee that all individual maxima fit simultaneously.
+
+`skill_resource` is a closed read/retry builtin with `execution.kind='supervisor_operation'`, `handlerId='skill_resource'` and the original signed Supervisor entry id/version/complete-byte digest. It has no executable adapter, native OperationGrant, broker release or process/death claim. Its only input is `{skillId,canonicalRelativePath,offset,length}`: one explicitly selected id, canonical resource path, offset from zero through 16 MiB and length 1..65536. Callers cannot provide host paths or CAS refs. The current owner first validates the complete original assembly/source/manifest/instruction/resource graph, including the complete requested file, then returns an explicit range `{schemaVersion:1,skillId,canonicalRelativePath,kind,byteCount,offset,bytesBase64,nextOffset,eof}`; base64 is canonical and empty EOF is explicit. Unknown selection/path and an offset beyond EOF are closed ordinary charged read refusals; missing/corrupt CAS, uncertain close and cancellation retain their original failure semantics. There is no truncation or hidden text/execution interpretation. The original model JSON/token/compaction bounds still apply.
+
+Per-action permission is the original frozen read action with named-action key `skill_resource <skillId>/<canonicalRelativePath>`. The normal ToolRequest, exact target, ordinary OperationGrant, deny/ask/allow rules and authenticated approval/replay remain mandatory. This grant is narrowed to one local dispatched attempt. The distinct `skill_resource` Journal kind permits only an atomic `prepared → dispatch_claimed → completed` triplet in the same unchanged-workspace Checkpoint/result/frontier/settlement transaction. Attempt and lease are zero, prepared/completed deltas are one tool call and claim delta is zero; sandbox/native/broker/UNKNOWN fields are forbidden. The receipt binds the original Run snapshot, assembly, request/target/grant, provider batch/call/index, source Checkpoint/Journal sequence, original Supervisor inspector and preparation Q. The actual original SQL rows alone register final sampled C. All CAS bytes are durable, completely reread and joined before fresh C rechecks exact Run/Checkpoint/Journal/items, current owner/time fence, source, grant TTL, original active lease when present, ancestry Stop and deadline, with no await before effect. Rollback leaves only orphan CAS and no charge or result; successful replay never registers or charges a second read. Physical claimed/UNKNOWN attempts preserve their original charging and recovery rules. A queued Run needs no worker, and an active parent retains its same generation/lease. Model projection emits only the genuine owning provider tool result. Every recovery, including a cut before any tool call, verifies the entire original selected skill graph from CAS and never falls back to mutable directories or a later installed bundle.
+
 ## 6. Authoritative Run State
 
 ```ts
@@ -5443,7 +5453,8 @@ request replay and P/C time-fence semantics remain unchanged. Revocation only
 affects unused consent; a consumed receipt is immutable history, not a still
 active or renewable grant. The original attempt's cancellation/deadline and
 fresh fences continue to govern capture. Independent ignored/include read
-grants retain their original final-admission consumption rules above.
+grants use the same first-SourceInspection consumption timing specified in
+section 10.5; final Run admission binds that original receipt without consuming again.
 Rule-source capture is distinct from an ignored workspace include. Optional
 `ignoreReadGrantIds` selects at most 128 unique independent `read_scope/source`
 grants for exact `entry` paths `.git/info/exclude` or an in-root `.gitignore`.
@@ -5459,8 +5470,8 @@ actual held rule bytes before publishing the frozen rules. Missing permission
 never permits a rule-source read, duplicate path scopes and unnecessary grants
 fail, and consumption cannot be reused for final `run_admission` or a later
 capture. Tracked rule sources may use only the independently validated retained
-Git index's ordinary tracked-source permission. Final ignored includes retain
-their separate unchanged `run_admission` receipt and atomic commit rule.
+Git index's ordinary tracked-source permission. Ignored includes retain their
+separate exact `source_inspection` receipt and atomic first-capture commit rule.
 `deadlineAt` is the earlier of `createdAt + normalized Run budgets.wallTimeMs`
 and every inspection/read grant expiry used by this attempt; it is finite and never
 extended. The later admitted Run still uses its ordinary admission clock.
@@ -7264,6 +7275,7 @@ type SourceIncludeClassificationEvidenceV1 = {
   schemaVersion: 1
   format: 'cliq-source-include-classification-v1'
   principalId: string
+  inspectionId: string
   runId: string
   sessionId: string
   workspaceIdentityRef: ArtifactRef
@@ -7273,24 +7285,40 @@ type SourceIncludeClassificationEvidenceV1 = {
   admissionIntentDigest: string
   frozenIgnoreRulesRef: ArtifactRef
   frozenIgnoreRulesDigest: string
+  capturedEntriesRef: ArtifactRef // complete original entries, not a later child/Delivery base
+  capturedTreeDigest: string
   gitIndexRef?: ArtifactRef
   gitIndexTreeObjectId?: string
+  pageRefs: ArtifactRef[] // 1..8192, exact ordinal order
+  entryCount: number // 1..100000
+  entriesDigest: string // SHA-256 of the complete canonical entry sequence
+  observedAt: string
+  evidenceDigest: string
+}
+
+type SourceIncludeClassificationPageV1 = {
+  schemaVersion: 1
+  format: 'cliq-source-include-classification-page-v1'
+  inspectionId: string
+  selectorDigest: string
+  pageIndex: number
   entries: Array<{
     path: string
+    entryKind: 'directory' | 'file' | 'symlink'
     workspaceEntryDigest: string
     deviceId: string
     fileId: string
     linkCount: number
-    classification: 'tracked_in_git_index' | 'nonignored_in_root'
+    classification: 'tracked_in_git_index' | 'tracked_ancestor_in_git_index' | 'nonignored_in_root'
   }>
-  observedAt: string
-  evidenceDigest: string
+  pageDigest: string
 }
 
 type SourceIncludeAuthorizationV1 = {
   schemaVersion: 1
   format: 'cliq-source-include-authorization-v1'
   principalId: string
+  inspectionId: string
   runId: string
   sessionId: string
   workspaceIdentityRef: ArtifactRef
@@ -7298,6 +7326,8 @@ type SourceIncludeAuthorizationV1 = {
   selector: { path: string; scope: 'entry' | 'subtree' }
   selectorDigest: string
   admissionIntentDigest: string
+  capturedEntriesRef: ArtifactRef // complete original typed source artifact
+  capturedTreeDigest: string
   createdAt: string
   authorizationDigest: string
 } & (
@@ -7313,6 +7343,7 @@ type SourceIncludeAuthorizationV1 = {
       kind: 'consumed_user_read_grant'
       authorizationGrantId: string
       authorizationGrantTargetDigest: string
+      consumedGrantSnapshotRef: ArtifactRef // exact original Target snapshot, including expectedDigest
       consumptionReceiptRef: ArtifactRef
       consumptionReceiptDigest: string
     }
@@ -7351,7 +7382,33 @@ A's own HEAD/index metadata while inheriting B's exact projection/rules and
 classification index. Non-Git forbids this field. Neither a today's index nor a
 historical source payload grants new include/read permission.
 
-Every include's `authorizationRef` decodes only to `SourceIncludeAuthorizationV1`; `selectorDigest = SHA-256(JCS(selector))` and `authorizationDigest = SHA-256(JCS(authorization with authorizationDigest omitted))`. Principal/Run/Session/live workspace ref+digest, selector bytes, and admission-intent digest equal the admitted request/projection. For an ordinary tracked/non-ignored in-root selector, the Supervisor first publishes exact `SourceIncludeClassificationEvidenceV1`, then publishes `builtin_nonignored` with the identical evidence ref/digest and frozen-ignore pair. `evidenceDigest = SHA-256(JCS(evidence with evidenceDigest omitted))`; its entries are nonempty, unique, byte-sorted paths and exactly cover the descriptor-walked entries selected for capture. Each `workspaceEntryDigest` equals `SHA-256(JCS(the exact captured WorkspaceEntry))`, the later SourceManifest entry set contains the same entries, and device/file/link-count observations come from the same no-follow descriptors. `tracked_in_git_index` is legal only when both Git-index fields are present, the ref equals the frozen SourceProjection.classificationIndexRef (the initial admitted SourceManifest B Git index), and fixed canonical Git-index parsing proves that path tracked; any such entry requires the fields. `nonignored_in_root` re-evaluates under the exact frozen rules and requires a non-ignored result. If no entry is tracked, Git-index fields may be absent; if either Git-index field is present both are required. An ignored in-root selector requires `consumed_user_read_grant`: the supplied `readGrantId` resolves an active principal/workspace/path/scope-exact `AuthorizationGrantV1(read_scope)`, and the admission transaction consumes it once. The artifact's target and receipt digests must match; `AuthorizationConsumptionReceiptV1.consumer` is exactly `{kind:'run_admission',runId,admissionIntentDigest}`. The receipt never names the final admitted digest. Grant consumption, final admitted-digest computation, Run/Checkpoint/projection/control response, and receipt/ref installation commit atomically. A missing optional wire grant selects only the builtin branch and therefore cannot include ignored bytes; an unnecessary/mismatched grant is rejected rather than ignored. Outside-root/external selectors are rejected. A repository can request a selector but cannot manufacture either authorization form or reuse one across a Run/workspace/selector.
+Every include's `authorizationRef` decodes only to `SourceIncludeAuthorizationV1`; `selectorDigest = SHA-256(JCS(selector))` and `authorizationDigest = SHA-256(JCS(authorization with authorizationDigest omitted))`. Principal, original SourceInspection, planned Run id, Session/live workspace ref+digest, exact selector bytes and admission-intent digest bind the same original request. A planned id is data, never Run or execution authority.
+
+For an ordinary tracked/nonignored selector, publish the exact `SourceIncludeClassificationEvidenceV1` closure before `builtin_nonignored`. Classification pages contain at most 128 entries and 512 KiB of complete canonical bytes; the root contains at most 8192 unique ordered page refs and 100000 total entries. The root remains below the original JSON byte/node bounds even with worst-case escaped canonical paths in its bounded pages. Original 1 MiB JSON, 10000-node and depth-32 guards remain unchanged. `pageDigest` and `evidenceDigest` omit only their own digest field. `entriesDigest` hashes the complete canonical array sequence incrementally, including brackets and commas. All pages, ordinals, context, count, full bytes, unique byte-sorted paths and sequence digest must verify. This explicitly replaces the unpublished unbounded inline classification array; it does not relax an existing JSON guard.
+
+The sequence exactly covers the selected entries in the original captured SourceManifest. Each `workspaceEntryDigest` hashes the complete original WorkspaceEntry, including its kind; `entryKind`, device/file/link-count observations come from that same still-held no-follow descriptor walk. `tracked_in_git_index` requires the exact original `SourceProjection.classificationIndexRef` and tree id and proves the path tracked. `tracked_ancestor_in_git_index` is restricted to directory metadata with a component-boundary descendant proved tracked in that same index; it never authorizes an ignored leaf. This explicitly represents the ancestor metadata already required by ordinary tracked capture. `nonignored_in_root` reproduces the frozen matcher with the original entry kind. Any Git-index fields occur as a complete pair and match the original index even if all entries are nonignored. Excludes and every hard exclusion still win. Entry-only directory selection captures only its directory metadata; it does not borrow permission for children or reinterpret an ordinary empty-directory proof.
+
+An ignored untracked include requires an active, principal/Session/workspace/path/scope-exact `AuthorizationGrantV1(read_scope, purpose=source)`. The original first SourceInspection transaction consumes it once, registers its exact receipt and consumed-grant snapshot, binds those snapshot refs in the existing `SourceInspectionTarget.sourceReadGrantRefs`, and registers the actual capture attempt before any source payload read. This explicitly revises the former unpublished requirement to consume only at Run admission: a sealed capture cannot contain a future receipt. Inert CAS publication alone supplies no read permission. The receipt consumer is exactly `{kind:'source_inspection',inspectionId,admissionIntentDigest}`. Prepared time P and actual commit time C retain the real owner/frame/time-fence checks and require original creation commit <= P <= C < original expiry. Capture retains the original deadline/expiry boundary; failed or cancelled capture burns the one authorized attempt and cannot restore or transfer it.
+
+Run admission later binds that same fully captured, retired source, original authenticated creation/consumption history, immutable authorization closure and original intent in the existing Run/Checkpoint/projection/first-response transaction. It does not consume the grant again or invent a receipt. Missing original evidence requires recovery; replay cannot reopen mutable source. A missing optional grant selects only the builtin branch and cannot include ignored bytes. Unnecessary, mismatched, repeated or cross-purpose grants refuse. Outside-root/external selectors refuse; a repository can request selectors but cannot manufacture authorization, retarget an old receipt, or reuse it for another live capture.
+
+Every builtin classification root retains `capturedEntriesRef` and `capturedTreeDigest` for its exact original complete entries manifest. Consumers fully reread and verify that manifest before checking selector coverage, entry kinds and complete entry digests. Original admission binds both fields to its actual captured and retired SourceManifest. A result, child fork or fresh Delivery A never substitutes its newer entries simply because its manifest has role `base`.
+
+Both authorization branches carry that exact original entries ref/tree; the
+builtin classification root repeats it only under strict equality. The complete
+WorkspaceEntryManifest retains its original full typed source reader, canonical
+ref and tree validation, rather than the narrower inline JSON reader used for
+authorization/root/page artifacts. Their original 1 MiB/10000-node/depth-32
+guards remain unchanged. The user authorization also carries the complete
+`consumedGrantSnapshotRef` from the original Target, with exact grant id, target,
+principal, workspace, selector, time and receipt equality. Its optional
+`expectedDigest` supports only an `entry` regular file's full blob digest.
+Constrained `subtree` refuses before consumption; constrained directory, symlink
+or missing entries refuse. Retained readers validate the full original grant
+and complete original file bytes. A later private result or child is not
+required to preserve those original bytes and cannot replace their provenance.
+
+Fresh `run.apply.sourceReadGrantIds` is a bounded unique array of at most 128 grant ids, in B's original user-include order. The Supervisor fully verifies B's projection/authorization closure and derives exact path/scope from it; the caller supplies no path, scope or authorization ref. Builtin selectors take no grant; ignored user selectors require a new exact active grant and cannot reuse the original consumed id. Extra, missing, duplicate or ignore-rule-overlapping ids refuse. Fresh grant snapshots/receipts commit in the same original Delivery SourceInspection target and first capture transaction. A preserves B's exact frozen projection without rewriting its authorizations; a deleted unconstrained selector entry is captured as absence under that same selection. A fresh expectedDigest must match A's actual complete regular-file bytes, independently of B's retained constraint; missing or non-file A refuses. Retained Delivery reconstructs that same snapshot/A comparison. A fresh receipt does not grant tool or publication permission. Child inheritance remains private immutable data bound to the actual parent allocation/fork, never authority to recapture mutable user source.
 
 Normalization defaults to 10,000 changed paths and 512 MiB of changed/new file content; accepted maxima are 100,000 paths and 4 GiB. Equality is allowed; strictly exceeding either fails result construction with `runtime_failed(result_source_limit_exceeded)` rather than truncating the result. Count the complete byte-sorted projected diff: add/delete/modify each contributes one changed path, including mode-only changes; changed bytes sum the full new file size only for additions or modifications whose size/blob differs. Deletes, directories, symlinks and mode-only file changes contribute no changed file bytes. If both limits are exceeded, `changed_paths` wins deterministically.
 
@@ -11167,6 +11224,9 @@ type RunApplyRequest = MutationBase & {
   expectedRunResultRef: ArtifactRef
   budgets?: { wallTimeMs?: number; toolCalls?: number }
   verifierExecutionGrantIds?: string[]
+  sourceInspectionGrantId?: string
+  ignoreReadGrantIds?: string[]
+  sourceReadGrantIds?: string[] // fresh exact grants in B's user-include selector order
 }
 
 type SessionCreateRequest = MutationBase & {

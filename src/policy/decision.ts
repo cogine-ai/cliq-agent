@@ -23,7 +23,7 @@ export type ToolAccess = 'read' | 'write' | 'exec' | 'plan';
  * "no network access".
  */
 export type AccessChannel =
-  | { kind: 'named-action'; action: 'child_read_only' | 'child_mutating' }
+  | { kind: 'named-action'; action: 'child_read_only' | 'child_mutating' | 'skill_resource' }
   | { kind: 'fs-read'; path: string }
   | { kind: 'fs-write'; path: string; op: 'create' | 'modify' | 'delete' }
   | {

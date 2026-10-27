@@ -8,6 +8,7 @@ import { setImmediate } from 'node:timers/promises';
 import ts from 'typescript';
 import { readCanonicalArtifact } from './agent-context.js';
 import { ArtifactCatalog } from './artifacts.js';
+import { canonicalJsonBytes } from '../kernel/canonical.js';
 import { ContentAddressedStore } from './cas.js';
 import { joinResourceOperations, ResourceRetirementError } from './errors.js';
 
@@ -269,8 +270,8 @@ function admissionMetadata(): (input: Record<string, unknown>, sourceManifest: {
   visit(parsed); assert.equal(expressions.length, 1);
   const output = ts.transpileModule(`return (async () => ${expressions[0]!.getText(parsed)})();`,
     { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText;
-  const decode = new Function('input', 'sourceManifest', 'artifacts', 'reads', 'joinResourceOperations', output);
-  return (input, manifest, reads) => decode(input, manifest, reads, reads, joinResourceOperations) as Promise<unknown>;
+  const decode = new Function('input', 'sourceManifest', 'artifacts', 'reads', 'joinResourceOperations', 'readCanonicalArtifact', 'canonicalJsonBytes', output);
+  return (input, manifest, reads) => decode(input, manifest, reads, reads, joinResourceOperations, readCanonicalArtifact, canonicalJsonBytes) as Promise<unknown>;
 }
 
 // Execute only the original delivery item-read expression. These plain CAS

@@ -14,6 +14,7 @@ import { LINUX_WORKER_RECIPE } from '../linux-worker.js';
 import { OFFLINE_MODEL_TRUST_STORE_PEM } from '../../state/testing/tool-authority.js';
 import { decodeGuestToolchainManifest } from '../../state/guest-toolchain.js';
 import { GUEST_EXTRACTOR_RECIPE } from '../guest-toolchain.js';
+import { signedKernelSchemaProfile } from '../../state/signed-schema.js';
 
 async function actualFileDigest(filename: string, expectedBytes: number) {
   const handle = await open(filename, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -69,6 +70,10 @@ export async function signedLinuxWorkerTestRuntime(input: {
   }
   fromBytes('supervisor-test', 'supervisor', 'test/supervisor', await readFile(process.execPath), true);
   fromBytes(STATE_OWNER_NATIVE_ENTRY_ID, 'platform_helper', STATE_OWNER_NATIVE_RELATIVE_PATH, await readFile(STATE_OWNER_NATIVE_PATH), true);
+  // The real campaign boots schema8 through the unchanged full signed-schema
+  // gate. Declare that exact canonical data recipe under the same test root;
+  // Store bootstrap still independently verifies and publishes those bytes.
+  fromBytes('kernel_schema','schema','schema/kernel-v8.json',canonicalJsonBytes(signedKernelSchemaProfile()),false,'8');
   const profile = policyProfile(), profileRef = canonicalSha256(profile);
   fromBytes('policy-v1', 'policy_engine', 'test/policy-v1', canonicalJsonBytes(profile), false);
   fromBytes('default_https_trust_store', 'trust_store', 'test/https-trust', Buffer.from(OFFLINE_MODEL_TRUST_STORE_PEM), false);

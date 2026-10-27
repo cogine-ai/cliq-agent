@@ -117,8 +117,7 @@ export async function readSourceReadAuthorizationHistory(driver: SqliteDriver, a
   if (grant.state === 'consumed') {
     const receipt = decodeAuthorizationConsumptionReceipt(await readCanonicalArtifact(artifacts, grant.consumptionReceiptRef));
     if (receipt.consumer.kind !== 'source_inspection' || receipt.grantId !== grant.grantId || receipt.ownerPrincipalId !== grant.ownerPrincipalId ||
-        receipt.targetDigest !== grant.targetDigest || receipt.consumedAt !== grant.consumedAt || receipt.consumedAt < row.committedAt ||
-        target.scope !== 'entry' || (target.canonicalRootRelativePath !== '.git/info/exclude' && target.canonicalRootRelativePath.split('/').at(-1) !== '.gitignore'))
+        receipt.targetDigest !== grant.targetDigest || receipt.consumedAt !== grant.consumedAt || receipt.consumedAt < row.committedAt)
       throw new TypeError('source rule-read consumption differs from its original independent consent');
     const original = driver.prepare('SELECT principal_id, method, admission_key, admission_intent_digest FROM source_inspection_attempts WHERE inspection_id = ?')
       .get<{ principal_id: string; method: 'run.submit' | 'run.apply'; admission_key: string; admission_intent_digest: string }>(receipt.consumer.inspectionId);
@@ -132,7 +131,10 @@ export async function readSourceReadAuthorizationHistory(driver: SqliteDriver, a
     const { readSourceInspectionTargetData } = await import('./source-target.js');
     const { target: retained } = await readSourceInspectionTargetData(artifacts, attempt, readSourceInspectionOriginalRequest(driver, attempt.inspectionId));
     const selected = retained.schemaVersion === 2 && retained.ignoreReadConsents.find(value => value.grantId === grant.grantId);
-    if (!selected || selected.receiptRef !== grant.consumptionReceiptRef || selected.receiptDigest !== receipt.receiptDigest ||
+    const include = retained.sourceReadGrantRefs.includes(canonicalSha256(grant));
+    const ignore = selected && selected.receiptRef === grant.consumptionReceiptRef && selected.receiptDigest === receipt.receiptDigest &&
+      target.scope === 'entry' && (target.canonicalRootRelativePath === '.git/info/exclude' || target.canonicalRootRelativePath.split('/').at(-1) === '.gitignore');
+    if ((!include && !ignore) || include && !!selected ||
         retained.sessionId !== request.decision.target.sessionId || retained.workspaceIdentityRef !== expected.workspaceIdentityRef)
       throw new TypeError('source rule-read target has another grant, receipt or Session');
   }

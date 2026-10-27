@@ -42,7 +42,7 @@ export function decodeToolExecutionIdentity(value: unknown): ToolExecutionIdenti
   } else if (data.kind === 'supervisor_control' || data.kind === 'supervisor_operation') {
     exact(['kind', 'handlerId', 'supervisorEntryId', 'supervisorEntryVersion', 'supervisorExecutableDigest']);
     if (data.kind === 'supervisor_control' ? !['request_input', 'await_children'].includes(data.handlerId)
-      : !['delegate', 'child_merge'].includes(data.handlerId)) invalid();
+      : !['delegate', 'child_merge', 'skill_resource'].includes(data.handlerId)) invalid();
     text('supervisorEntryId'); text('supervisorEntryVersion'); refs('supervisorExecutableDigest');
   } else if (data.kind === 'mcp') {
     exact(['kind', 'registrationId', 'registryRevisionRef', 'registryManifestDigest', 'serverToolName', 'toolContractDigest']);

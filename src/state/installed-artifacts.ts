@@ -11,6 +11,9 @@ import { exactKeys, policyProfile, verifyRuntimeBundle, type ReleaseTrustKey, ty
 import type { ModelTextV1 } from '../protocol/agent-ir.js';
 import { KernelStorageError } from './errors.js';
 import { decodeGuestToolchainManifest, guestToolchainMembers, guestToolchainRoots } from './guest-toolchain.js';
+import { decodeBundledSkillClosure } from '../kernel/skill.js';
+import { bundledSkillMembers, bundledSkillRoots } from './bundled-skills.js';
+import { skillInstruction } from './skill-data.js';
 
 function mismatch(message: string, cause?: unknown): never {
   throw new KernelStorageError('ARTIFACT_MISMATCH', message, cause === undefined ? undefined : { cause });
@@ -53,9 +56,9 @@ export function validateBundle(value: unknown, releaseKeys: readonly ReleaseTrus
           (entry.entryId === 'source_git_inspector' && !sourceInspector) ||
           (entry.entryId === 'builtin_tools' && !builtinTools) ||
           (['supervisor', 'worker', 'provider_adapter', 'tool_adapter', 'platform_helper', 'mcp_server', 'mcp_recovery_adapter', 'local_inference'].includes(entry.role) && !entry.executable && !sourceInspector && !builtinTools) ||
-          ['skill_bundle', 'mcp_recovery_profile'].includes(entry.role) ||
+          entry.role === 'mcp_recovery_profile' ||
           (entry.role === 'guest_toolchain' && entry.executable) ||
-          (['policy_engine', 'system_prompt', 'compaction_prompt', 'bundle_object', 'schema'].includes(entry.role) && entry.executable)) {
+          (['policy_engine', 'system_prompt', 'compaction_prompt', 'bundle_object', 'schema', 'skill_bundle'].includes(entry.role) && entry.executable)) {
         mismatch('installed runtime entry path or role is unsupported');
       }
     }
@@ -73,33 +76,34 @@ function boundedText(value: unknown): string {
  * Other normative kinds require their own complete implemented decoders. */
 function structuredMetadata(bundle: RuntimeBundleManifest): StructuredRoot[] {
   if (bundle.structuredArtifacts.length > 65) mismatch('installed structured root inventory exceeds its bound');
+  bundledSkillRoots(bundle); // The skill family also remains inside all original aggregate bounds.
   const roots: StructuredRoot[] = [], identities = new Set<string>(), entries = new Set<string>();
   let previous: Buffer | undefined;
   for (const root of bundle.structuredArtifacts) {
     const prompt = root.kind === 'system_prompt' || root.kind === 'compaction_prompt';
     if (!exactKeys(root, ['artifactId', 'rootEntryId', 'artifactRef', 'semanticDigest', 'memberRefs', 'kind',
-      ...(prompt ? ['provider', 'model'] : [])]) || (!prompt && root.kind !== 'policy_engine_profile' && root.kind !== 'guest_toolchain'))
+      ...(prompt ? ['provider', 'model'] : [])]) || (!prompt && root.kind !== 'policy_engine_profile' && root.kind !== 'guest_toolchain' && root.kind !== 'bundled_skill'))
       mismatch('installed runtime contains an unsupported structured root');
     boundedText(root.artifactId); boundedText(root.rootEntryId);
     if (prompt && (!['openai', 'anthropic', 'openrouter', 'openai-compatible', 'zhipu', 'ollama'].includes(boundedText(root.provider)) ||
         !boundedText(root.model))) mismatch('installed provider prompt identity is invalid');
     assertArtifactRef(root.artifactRef); assertArtifactRef(root.semanticDigest);
     const key = Buffer.from([root.kind, root.provider ?? '', root.model ?? '', root.artifactId].join('\0'));
-    const identity = [root.kind, root.provider ?? '', root.model ?? ''].join('\0');
+    const identity = [root.kind, root.provider ?? '', root.model ?? '', ...(root.kind === 'bundled_skill' ? [root.artifactId] : [])].join('\0');
     if ((previous && Buffer.compare(previous, key) >= 0) || identities.has(identity) || entries.has(root.rootEntryId))
       mismatch('installed structured roots are unordered or ambiguous');
     previous = key; identities.add(identity); entries.add(root.rootEntryId);
     const entry = bundle.entries.find(entry => entry.entryId === root.rootEntryId);
-    const role = root.kind === 'policy_engine_profile' ? 'policy_engine' : root.kind;
+    const role = root.kind === 'policy_engine_profile' ? 'policy_engine' : root.kind === 'bundled_skill' ? 'skill_bundle' : root.kind;
     if (!entry || entry.executable || entry.role !== role || entry.digest !== root.artifactRef || entry.byteCount > 1048576 ||
-        !Array.isArray(root.memberRefs) || root.memberRefs.length > 3 ||
+        !Array.isArray(root.memberRefs) || root.memberRefs.length > (root.kind === 'bundled_skill' ? 129 : 3) ||
         root.memberRefs.some((ref, index) => { assertArtifactRef(ref); return ref === root.artifactRef || (index > 0 && ref <= root.memberRefs[index - 1]!); }) ||
-        (root.kind !== 'compaction_prompt' && root.kind !== 'guest_toolchain' && root.memberRefs.length !== 0))
+        (root.kind !== 'compaction_prompt' && root.kind !== 'guest_toolchain' && root.kind !== 'bundled_skill' && root.memberRefs.length !== 0))
       mismatch('installed structured root does not bind its complete signed entry');
     roots.push(root);
   }
   if (roots.filter(root => root.kind === 'policy_engine_profile').length !== 1 ||
-      bundle.entries.some(entry => ['policy_engine', 'system_prompt', 'compaction_prompt', 'guest_toolchain'].includes(entry.role) && !entries.has(entry.entryId)))
+      bundle.entries.some(entry => ['policy_engine', 'system_prompt', 'compaction_prompt', 'guest_toolchain', 'skill_bundle'].includes(entry.role) && !entries.has(entry.entryId)))
     mismatch('installed signed structured entries are missing their exact discovery roots');
   for (const root of roots.filter(root => root.kind === 'system_prompt')) {
     if (!roots.some(other => other.kind === 'compaction_prompt' && other.provider === root.provider && other.model === root.model))
@@ -158,6 +162,15 @@ export function validateInstalledStructuredArtifacts(bundle: RuntimeBundleManife
         metadata.set(root.artifactRef, manifest.format);
         metadata.set(manifest.signatureRef, 'cliq-ed25519-signature-v1');
         metadata.set(manifest.guestImageRef, 'cliq-guest-image-raw-ext4-v1');
+      } else if (root.kind === 'bundled_skill') {
+        const closure = decodeBundledSkillClosure(value);
+        bundledSkillMembers(bundle, root, closure);
+        const instruction = closure.files.find(file => file.canonicalRelativePath === 'SKILL.md')!;
+        skillInstruction(closure.skillId, raw(instruction.rawBytesRef));
+        metadata.set(root.artifactRef, closure.format);
+        for (const file of closure.files) {
+          members.add(file.rawBytesRef); metadata.set(file.rawBytesRef, 'cliq-skill-source-file-v1');
+        }
       } else {
         const envelope = value as CompactionPromptEnvelopeV1;
         const expected = [...new Set([envelope.systemInstructionRef, envelope.userPrefixRef, envelope.userSuffixRef])].sort();

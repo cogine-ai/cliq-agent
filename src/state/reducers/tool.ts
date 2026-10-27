@@ -1,7 +1,7 @@
 import { canonicalJsonBytes, canonicalSha256 } from '../../kernel/canonical.js';
 import { planCanonicalArtifact, type PlannedArtifact } from '../../kernel/artifact-plan.js';
 import { digestOmitting, identityHash, parseCanonicalTime } from '../../kernel/identity.js';
-import type { ContinuationItem, Run, RunAssemblyV1, RunFrontier, RunItemReferenceV1, RunSpec, ToolResultItem, ToolResultPayloadV1, ToolResultModelContentV1 } from '../../kernel/types.js';
+import type { BudgetSettlementV1, ContinuationItem, Run, RunAssemblyV1, RunFrontier, RunItemReferenceV1, RunSpec, ToolResultItem, ToolResultPayloadV1, ToolResultModelContentV1 } from '../../kernel/types.js';
 import type { PolicyEngineProfileV1, RunPolicySnapshotV1, ToolObservationV1, ToolOperationGrantV1,
   ToolPolicyChannelEvidenceV1, ToolPolicyDecisionItem, ToolRequestV1, ToolTargetV1, ToolApprovalDecisionV1,
   ToolCheckpointProof, ToolGrantExpiryV1 } from '../../kernel/tool-authorization.js';
@@ -23,7 +23,7 @@ import { isJoinedCasPublicationFailure } from '../cas.js';
 import { decodeWorkspaceIdentity } from '../decoders.js';
 import { joinResourceOperations, KernelStorageError, stateOperation } from '../errors.js';
 import { readBuiltinEditLaunchClosure, readBuiltinScriptLaunchClosure, decodeSandboxProfile } from '../execution-closure.js';
-import { nextJournalSequence, readHighestPreparedAttempt, readInvocationAttempt, readInvocationJournal } from '../repositories/journal.js';
+import { appendInvocationJournalEntry, nextJournalSequence, readHighestPreparedAttempt, readInvocationAttempt, readInvocationJournal } from '../repositories/journal.js';
 import { readWorkerLaunchesForRun } from '../repositories/worker-launches.js';
 import { readWorkspaceGenerationsForRun } from '../repositories/workspace-generations.js';
 import { insertControlRequest, readCheckpoint, readControlRequest, readRun, readSession, readSessionPrincipalId, ZERO_BUDGET } from '../rows.js';
@@ -40,6 +40,11 @@ import { decodeAgentStop, selectAgentStop, type AgentStopIntent } from '../../ru
 import { readBuiltinToolCapture, assertBuiltinCaptureObservation } from '../builtin-tool-capture.js';
 import { childAdmissionKey } from '../child-admission.js';
 import { loadChildWaitContinuation } from '../child-wait.js';
+import { readSkillResourceValue, skillResourceCheckpointId, skillResourceDispatchId, skillResourceReceipt } from '../skill-resource-data.js';
+import { decodeSkillResourceInput } from '../../kernel/skill.js';
+import { supervisorInspectorIdentity } from '../supervisor-inspector.js';
+import { addBudget, assertBudgetWithin } from '../invariants.js';
+import { assertChildAncestryRelease } from '../child-ancestry.js';
 
 const TOOL_BUDGET = Object.freeze({ modelTokens: 0, costMicros: 0, toolCalls: 1, repairAttempts: 0 });
 type ResultFields<T = Exclude<ToolResultPayloadV1, { source: 'user_input' }>> = T extends ToolResultPayloadV1
@@ -174,6 +179,8 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
 
   async function builtinLaunch(selected: ToolCut, prepared: ToolCut['journal'][number],
     proof: Awaited<ReturnType<typeof verifyGrant>>, claim: Omit<ClaimInvocationDispatchInput, 'runId'>, reads = artifacts) {
+    if (proof.target.execution.kind === 'supervisor_operation')
+      throw new KernelStorageError('INVALID_REQUEST', 'Supervisor local operations cannot claim physical tool dispatch');
     const script = proof.target.execution.kind === 'builtin_script';
     if (proof.request.toolName !== 'edit' && !script) {
       if (claim.sandboxLaunchSpecRef !== undefined) {
@@ -529,6 +536,9 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
           childRunId: identityHash('cliq-run-id-v1', workspace.ownerPrincipalId, 'delegate', childAdmissionKey(runId,
             selected.batch.itemId, selected.call.callId, selected.call.index, selected.call.inputDigest)) });
       }
+      if (!ask && evidence.effectiveDisposition !== 'deny' && contract.execution.kind === 'supervisor_operation' &&
+          contract.execution.handlerId === 'skill_resource')
+        return immutableSnapshot({ disposition: 'skill_resource_required' as const, run: selected.run });
       if (!ask && evidence.effectiveDisposition !== 'deny' && selected.run.status === 'queued')
         return immutableSnapshot({ disposition: 'worker_required' as const, run: selected.run });
       const requestPlan = planCanonicalArtifact(request, request.format), targetPlan = planCanonicalArtifact(target, target.format);
@@ -591,6 +601,86 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
       }, commit(connection, run, journal) { plan.commit(connection, run, journal.seq, journal.timestamp); } });
       return immutableSnapshot({ disposition: 'prepared' as const, ...prepared, request, target,
         checkpointId: toolCheckpointId(runId, request.opId, prepared.entry.attempt) });
+    }),
+    readSkillResource: stateOperation('RECOVERY_REQUIRED', async (input: { expectedRunRevision: number; leaseEpoch: number }, readSignal?: AbortSignal) => {
+      if (!exactKeys(input, ['expectedRunRevision', 'leaseEpoch'])) throw new TypeError('skill read accepts only its current Run cut');
+      const reads = readSignal ? artifacts.withReadSignal(readSignal) : artifacts;
+      await controlAuthority.assertAuthority(readSignal);
+      const selected = await cut(input.expectedRunRevision, reads), run = selected.run, { request, target, entry } = requestFor(selected);
+      if (entry.name !== 'skill_resource' || entry.execution.kind !== 'supervisor_operation' || entry.execution.handlerId !== 'skill_resource' ||
+          run.leaseEpoch !== input.leaseEpoch || run.cancelRequested || run.stopIntentRef || !['queued', 'running'].includes(run.status))
+        throw new KernelStorageError('LEASE_FENCED', 'skill read requires its original productive selection');
+      if (run.status === 'running') assertLiveDispatchState(driver, owner, runId, run.revision, input.leaseEpoch, sampleCanonicalNow());
+      else if (run.activeWorkerLaunchId) throw new TypeError('queued skill read cannot retain a worker');
+      if (readHighestPreparedAttempt(driver, runId, request.opId) || selected.journal.some(row =>
+          ['prepared', 'dispatch_claimed', 'unknown'].includes(row.phase) && !selected.journal.some(terminal => terminal.opId === row.opId &&
+            terminal.attempt === row.attempt && ['completed', 'failed', 'abandoned'].includes(terminal.phase))))
+        throw new KernelStorageError('RECOVERY_REQUIRED', 'skill read cannot overtake an unresolved original operation');
+      const approved = await approvedGrant(selected, request, reads), preparedAt = sampleCanonicalNow();
+      const evidence = requirePolicy().evaluate(request, target, selected.call, preparedAt);
+      const hasApproval = approved !== undefined && approved.grant.expiresAt > preparedAt;
+      if (evidence.effectiveDisposition === 'deny' || evidence.effectiveDisposition !== 'allow' && !hasApproval)
+        throw new KernelStorageError('INVALID_REQUEST', 'skill read requires its own current read permission');
+      const grant = hasApproval ? approved!.grant : requirePolicy().grant(request, target, selected.call, evidence, preparedAt, run.deadlineAt);
+      if (hasApproval) requireEqual(approved!.request, request, 'original approved skill read');
+      const active = assertActiveStateOwner(driver, owner), inspector = supervisorInspectorIdentity(active);
+      const sequence = nextJournalSequence(driver, runId), requestPlan = planCanonicalArtifact(request, request.format),
+        targetPlan = planCanonicalArtifact(target, target.format), grantPlan = planCanonicalArtifact(grant, grant.format),
+        evidencePlan = planCanonicalArtifact(evidence, evidence.format), originalRun = planCanonicalArtifact(run, 'cliq-skill-resource-original-run-v1'),
+        inspectorPlan = planCanonicalArtifact(inspector, inspector.format);
+      const value = await readSkillResourceValue(reads, assembly, decodeSkillResourceInput(selected.call.value));
+      const receipt = skillResourceReceipt({ schemaVersion: 1, format: 'cliq-skill-resource-read-v1', runId, opId: request.opId,
+        assemblyRef: spec.assemblyRef, requestRef: requestPlan.ref, targetRef: request.targetRef, grantRef: grantPlan.ref,
+        batchItemId: selected.batch.itemId, callId: selected.call.callId, callIndex: selected.call.index,
+        originalRunSnapshotRef: originalRun.ref, sourceCheckpointId: selected.checkpoint.id, sourceJournalSeq: sequence - 1,
+        inspectorIdentityRef: inspectorPlan.ref, inspectorIdentityDigest: inspector.identityDigest, preparedAt, value });
+      const receiptPlan = planCanonicalArtifact(receipt, receipt.format), consumed = addBudget(run.budgetConsumed, TOOL_BUDGET);
+      assertBudgetWithin(consumed, run.budgetReserved, ZERO_BUDGET, spec.budgets);
+      const settlement: BudgetSettlementV1 = { schemaVersion: 1, format: 'cliq-budget-settlement-v1', runId, opId: request.opId, attempt: 0,
+        preparedJournalSeq: sequence, terminalJournalSeq: sequence + 2, terminalPhase: 'completed', reserved: TOOL_BUDGET, consumed: TOOL_BUDGET,
+        released: TOOL_BUDGET, budgetConsumedBefore: run.budgetConsumed, budgetConsumedAfter: consumed,
+        budgetReservedBefore: addBudget(run.budgetReserved, TOOL_BUDGET), budgetReservedAfter: run.budgetReserved,
+        settledAt: preparedAt, settlementDigest: '' };
+      settlement.settlementDigest = digestOmitting(settlement, 'settlementDigest');
+      const settlementPlan = planCanonicalArtifact(settlement, settlement.format), decision = policyItem(evidence, { grantRef: grantPlan.ref });
+      const result = resultPlan(request, preparedAt, { outcome: 'executed', source: 'skill_resource', opId: request.opId,
+        journalResultRef: receiptPlan.ref, journalResultDigest: receipt.receiptDigest }, value);
+      const items = [...(hasApproval ? [] : [decision]), result.item];
+      const graph = planContinuationCommit(reads, { context: selected.context, existingItems: selected.items, items,
+        frontier: nextFrontier(selected, items.length), checkpointId: skillResourceCheckpointId(runId, request.opId),
+        workspaceStateRef: selected.checkpoint.workspaceStateRef });
+      const plans = [requestPlan, targetPlan, grantPlan, evidencePlan, originalRun, inspectorPlan, receiptPlan, settlementPlan, ...result.artifacts];
+      const metadata = await joinResourceOperations(plans.map(plan => reads.publishBytes(plan.bytes, plan.mediaType, plan.schemaKind)));
+      const continuation = await graph.publish(); reads.assertReadActive();
+      let outcome: TimeFenceAdvance | undefined, updated!: Run;
+      driver.transaction(connection => {
+        reads.assertReadActive(); requireEqual(assertActiveStateOwner(connection, owner), active, 'original skill Supervisor owner');
+        let now = sampleCanonicalNow(); outcome = advanceTimeFence(connection, owner.ownerEpoch, now); if (outcome !== 'healthy') return;
+        requireEqual(readRun(connection, runId), run, 'original skill Run cut');
+        requireEqual(readCheckpoint(connection, run.latestCheckpointId), selected.checkpoint, 'original skill Checkpoint');
+        requireEqual(readInvocationJournal(connection, runId), selected.journal, 'original skill Journal prefix'); assertCut(connection, run, selected);
+        for (const artifact of [...metadata, ...continuation.metadata]) insertArtifactMetadata(connection, artifact, preparedAt);
+        now = sampleCanonicalNow(); outcome = advanceTimeFence(connection, owner.ownerEpoch, now); if (outcome !== 'healthy') return;
+        if (now < preparedAt || now < grant.issuedAt || now >= grant.expiresAt || now >= run.deadlineAt || run.cancelRequested || run.stopIntentRef)
+          throw new KernelStorageError('LEASE_FENCED', 'skill read original permission or Run deadline ended before commit');
+        assertChildAncestryRelease(connection, runId, now);
+        if (run.status === 'running') assertLiveDispatchState(connection, owner, runId, run.revision, input.leaseEpoch, now);
+        requireEqual(assertActiveStateOwner(connection, owner), active, 'final skill Supervisor owner');
+        assertBudgetWithin(consumed, run.budgetReserved, ZERO_BUDGET, spec.budgets);
+        const common = { runId, opId: request.opId, opKind: 'skill_resource' as const, attempt: 0, leaseEpoch: 0,
+          target: request.targetRef, requestRef: requestPlan.ref, replayClass: 'retry' as const, idempotencyKey: request.idempotencyKey!,
+          grantRef: grantPlan.ref, timestamp: preparedAt, localCommittedAt: now };
+        const claim = { dispatchId: skillResourceDispatchId(runId, request.opId, requestPlan.ref),
+          supervisorInstanceId: owner.supervisorInstanceId, stateOwnerEpoch: owner.ownerEpoch };
+        appendInvocationJournalEntry(connection, { ...common, seq: sequence, phase: 'prepared', budgetDelta: TOOL_BUDGET });
+        appendInvocationJournalEntry(connection, { ...common, ...claim, seq: sequence + 1, phase: 'dispatch_claimed', budgetDelta: ZERO_BUDGET });
+        appendInvocationJournalEntry(connection, { ...common, ...claim, seq: sequence + 2, phase: 'completed', budgetDelta: TOOL_BUDGET,
+          resultRef: receiptPlan.ref, budgetSettlementRef: settlementPlan.ref });
+        continuation.commit(connection, run, sequence + 2, now);
+        connection.prepare('UPDATE runs SET budget_consumed_json=?,revision=revision+1,updated_at=? WHERE id=?').run(JSON.stringify(consumed), now, runId);
+        updated = readRun(connection, runId); appendRunStateEvent(connection, updated, now);
+      });
+      requireHealthyFence(outcome); return immutableSnapshot({ run: updated });
     }),
     retireToolSelection: stateOperation('RECOVERY_REQUIRED', async (input: {
       expectedRunRevision: number; checkpointId: string; checkpoint: ToolCheckpointProof;

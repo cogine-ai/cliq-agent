@@ -80,14 +80,16 @@ async function planCandidateSource(artifacts: CandidateSourceReader, spec: RunSp
       rules.matcherVersion !== 'cliq-git-wildmatch-v1' || !Array.isArray(rules.sources) || !Array.isArray(rules.rules))
     mismatch('candidate source ignore manifest has invalid fields');
   let selectedByFrozenSource: ((entry: import('../kernel/types.js').WorkspaceEntry) => boolean) | undefined;
-  if (base.git || rules.sources.length || rules.rules.length || workspace.privateGitStateRef) {
-    if (!completeReader(artifacts)) mismatch('candidate Git source requires complete bounded cancellable CAS reads');
+  if (base.git || rules.sources.length || rules.rules.length || workspace.privateGitStateRef || projection.explicitIncludes.length) {
+    if (!completeReader(artifacts)) mismatch('candidate classified source requires complete bounded cancellable CAS reads');
     const profile = decodeSandboxProfile(await read(spec.sandboxProfileRef, 'cliq-sandbox-profile-v1'));
     const classification = await readSourceProjectionData(artifacts, base, projection, profile.resources, signal);
     selectedByFrozenSource = classification.includes;
-    if (!base.git || !workspace.privateGitStateRef) mismatch('candidate Git source lost its original Checkpoint graph');
-    const current = await loadFrozenPrivateGit(artifacts, base, workspace, classification.rules, signal, profile.resources);
-    if (!current || current.index.objectFormat !== classification.index!.objectFormat) mismatch('candidate private Git format differs from its admitted source');
+    if (base.git || rules.sources.length || rules.rules.length || workspace.privateGitStateRef) {
+      if (!base.git || !workspace.privateGitStateRef) mismatch('candidate Git source lost its original Checkpoint graph');
+      const current = await loadFrozenPrivateGit(artifacts, base, workspace, classification.rules, signal, profile.resources);
+      if (!current || current.index.objectFormat !== classification.index!.objectFormat) mismatch('candidate private Git format differs from its admitted source');
+    }
   }
   const baseEntries = decodeWorkspaceEntries(await read(base.entriesRef, 'cliq-workspace-entries-v1'));
   const currentEntries = decodeWorkspaceEntries(await read(workspace.entriesRef, 'cliq-workspace-entries-v1'));

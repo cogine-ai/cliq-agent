@@ -130,7 +130,7 @@ export function parseClientInvocation(argv: readonly string[], workspacePath: st
     result = command(clientMutation({ method: `run.${name}`, runId, expectedRevision, waitingOnRef, ...fields }));
   } else if (name === 'apply') {
     const options = jsonObject(p.take('--options') ?? '{}');
-    if (Object.keys(options).some(key => !['budgets', 'verifierExecutionGrantIds', 'sourceInspectionGrantId', 'ignoreReadGrantIds'].includes(key)))
+    if (Object.keys(options).some(key => !['budgets', 'verifierExecutionGrantIds', 'sourceInspectionGrantId', 'ignoreReadGrantIds', 'sourceReadGrantIds'].includes(key)))
       throw new TypeError('Delivery options contain an unsupported field');
     result = { kind: 'apply', sourceRunId: oneId(), options, json };
   }

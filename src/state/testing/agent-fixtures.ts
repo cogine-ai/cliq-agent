@@ -13,14 +13,17 @@ import type { RunPolicySnapshotV1 } from '../../kernel/tool-authorization.js';
 import { sampleCanonicalNow } from '../canonical-time.js';
 import { DEFAULT_RUN_BUDGETS } from '../rows.js';
 import { publishOfflineModelEndpoint } from './model-endpoint.js';
+import type { StateStore } from '../store.js';
+import type { WorkspaceIdentityV1, RunAssemblyV1 } from '../../kernel/types.js';
 
 /** Real CAS + SQLite/lease, with offline signed-authority verification fixtures; no provider or tool I/O. */
 export async function createAgentFixture(label: string, budgets?: Partial<RunSpec['budgets']>, options: {
   tools?: Array<keyof typeof builtinInputContracts>; mode?: RunPolicySnapshotV1['mode'];
   rules?: RunPolicySnapshotV1['decisionRules']; outputSchema?: unknown; contextLimitTokens?: number;
+  freezeSkills?: (store: StateStore, workspace: WorkspaceIdentityV1, assembly: RunAssemblyV1) => Promise<RunAssemblyV1['instructions']>;
 } = {}) {
   const authority = testFixture('openai', true, options.contextLimitTokens);
-  const supervisorDigest = options.tools?.some(name => ['request_input', 'await_children', 'delegate'].includes(name))
+  const supervisorDigest = options.tools?.some(name => ['request_input', 'await_children', 'delegate', 'skill_resource'].includes(name))
     ? sha256Bytes(await readFile(process.execPath)) : undefined;
   const builtins = (options.tools ?? ['read']).map((name) => builtinInputContracts[name])
     .sort((left, right) => Buffer.compare(Buffer.from(left.name), Buffer.from(right.name)));
@@ -40,7 +43,7 @@ export async function createAgentFixture(label: string, budgets?: Partial<RunSpe
       supervisorEntryId: 'supervisor-test', supervisorEntryVersion: '1', supervisorExecutableDigest: supervisorDigest! } };
     if (tool.name === 'await_children') return { ...base, replayClass: 'manual', execution: { kind: 'supervisor_control', handlerId: 'await_children',
       supervisorEntryId: 'supervisor-test', supervisorEntryVersion: '1', supervisorExecutableDigest: supervisorDigest! } };
-    if (tool.name === 'delegate') return { ...base, replayClass: 'retry', execution: { kind: 'supervisor_operation', handlerId: 'delegate',
+    if (tool.name === 'delegate' || tool.name === 'skill_resource') return { ...base, replayClass: 'retry', execution: { kind: 'supervisor_operation', handlerId: tool.name,
       supervisorEntryId: 'supervisor-test', supervisorEntryVersion: '1', supervisorExecutableDigest: supervisorDigest! } };
     return { ...base, replayClass: tool.replayClass, execution: { kind: 'builtin', adapterId: tool.name,
       adapterVersion: '1', adapterCodeDigest: canonicalSha256({ adapter: tool.name }) } };
@@ -74,6 +77,7 @@ export async function createAgentFixture(label: string, budgets?: Partial<RunSpe
     const instructions = await store.artifacts.publishCanonical(workspace, workspace.format);
     Object.assign(authority.assembly.instructions, { systemPromptRef: system.ref, systemPromptDigest: text.textDigest,
       workspaceInstructionsRef: instructions.ref, workspaceInstructionsDigest: workspace.manifestDigest });
+    if (options.freezeSkills) authority.assembly.instructions = await options.freezeSkills(store, identity, authority.assembly);
     const envelope = authority.material.compactionEnvelope;
     for (const part of [envelope.systemInstruction, envelope.userPrefix, envelope.userSuffix, envelope]) {
       await store.artifacts.publishCanonical(part.value, part.value.format);

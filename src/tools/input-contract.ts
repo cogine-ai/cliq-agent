@@ -32,7 +32,8 @@ export function loadToolContracts(tools: readonly ToolInputAuthority[]) {
           ('adapterVersion' in execution && execution.adapterVersion !== builtin.version) ||
           entry.access !== builtin.access || entry.replayClass !== builtin.replayClass || canonicalSha256(builtin.inputSchema) !== entry.inputSchemaDigest ||
           (script && !BUILTIN_SCRIPT_TOOL_NAMES.some(name => name === entry.name)) ||
-          (entry.access === 'control') !== control || (execution.kind === 'supervisor_operation' && (entry.name !== 'delegate' || execution.handlerId !== 'delegate')) ||
+          (entry.access === 'control') !== control || (execution.kind === 'supervisor_operation' &&
+            (!['delegate', 'skill_resource'].includes(entry.name) || execution.handlerId !== entry.name)) ||
           (control && (entry.name !== execution.handlerId || !['request_input', 'await_children'].includes(entry.name) ||
             Object.hasOwn(entry, 'outputSchemaRef') || Object.hasOwn(entry, 'outputSchemaDigest')))) {
         throw new TypeError('builtin contract differs from the compiled input semantics');

@@ -43,8 +43,14 @@ const descriptorInventory = () => new Map(readdirSync('/proc/self/fd').flatMap(v
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error; }
 }));
 function actual() {
-  const root = openSync('/sys/fs/cgroup', constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW), info = fstatSync(root, { bigint: true });
-  const identity = { device: String(info.dev), inode: String(info.ino) }, membership = resourceMembership(readFileSync('/proc/self/cgroup'));
+  const membership = resourceMembership(readFileSync('/proc/self/cgroup'));
+  // A hosted runner may put this real process in a nested group. Borrow that
+  // exact kernel-reported directory, rather than pretending the mount root is
+  // its owner. Production still independently checks filesystem/PID/start/UID,
+  // membership, original group identity and every actual reader close.
+  const root = openSync('/sys/fs/cgroup' + (membership === '/' ? '' : membership),
+    constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW), info = fstatSync(root, { bigint: true });
+  const identity = { device: String(info.dev), inode: String(info.ino) };
   const processIdentity = { pid: process.pid, uid: process.geteuid!(), start: resourceStart(readFileSync('/proc/self/stat'), process.pid) };
   return { root, identity, membership, processIdentity };
 }

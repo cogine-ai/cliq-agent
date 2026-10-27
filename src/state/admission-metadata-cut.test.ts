@@ -10,6 +10,8 @@ import ts from 'typescript';
 import { ArtifactCatalog } from './artifacts.js';
 import { ContentAddressedStore } from './cas.js';
 import { ResourceRetirementError } from './errors.js';
+import { readCanonicalArtifact } from './agent-context.js';
+import { canonicalJsonBytes } from '../kernel/canonical.js';
 
 async function metadataCut() {
   const source = await readFile(new URL('./reducers/admission.ts', import.meta.url), 'utf8');
@@ -19,8 +21,10 @@ async function metadataCut() {
   assert(metadata >= 0 && end > metadata);
   const body = source.slice(redundant < 0 ? metadata : redundant, end);
   const code = ts.transpileModule(`${body}\nreturn referencedMetadata;`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
-  return new Function('reads', 'input', 'sourceManifest', `return (async () => { ${code} })();`) as
-    (reads: ArtifactCatalog, input: Record<string, unknown>, sourceManifest: { entriesRef: string }) => Promise<Array<{ ref: string; byteLength: number }>>;
+  const execute = new Function('readCanonicalArtifact', 'canonicalJsonBytes', 'reads', 'input', 'sourceManifest',
+    `return (async () => { ${code} })();`);
+  return (reads: ArtifactCatalog, input: Record<string, unknown>, sourceManifest: { entriesRef: string }) =>
+    execute(readCanonicalArtifact, canonicalJsonBytes, reads, input, sourceManifest) as Promise<Array<{ ref: string; byteLength: number }>>;
 }
 async function fixture(t: TestContext) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'cliq-admission-metadata-')); await fs.chmod(root, 0o700);

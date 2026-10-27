@@ -10,6 +10,10 @@ export type SourceCaptureSelection = Readonly<{
   /** Exact policy-resolved leaves/empty directories, never a recursive glob or
    * a permission grant. The caller must establish Trust and read permission. */
   selectedPaths: readonly string[];
+  /** Explicit entry-only directory metadata, including a nonempty directory.
+   * This never authorizes its children or removes the ordinary empty-directory
+   * assertion for any other selected leaf. */
+  directoryMetadataPaths?: readonly string[];
   /** Bounds all visited ordinary metadata, including excluded siblings. */
   maxEntries: number;
   maxBytes: number;
@@ -98,6 +102,10 @@ export async function captureWorkspaceEntriesWithManifestPublication(root: HeldW
     for (let slash = path.indexOf('/'); slash >= 0; slash = path.indexOf('/', slash + 1)) needed.add(path.slice(0, slash));
   }
   if (new Set([...selected, ...needed]).size > maxEntries) invalid('source selection exceeds the entry limit');
+  const directoryMetadata = new Set(selection.directoryMetadataPaths ?? []);
+  if (directoryMetadata.size !== (selection.directoryMetadataPaths?.length ?? 0) ||
+      [...directoryMetadata].some(path => !selected.has(checkedPath(path))))
+    invalid('source directory metadata must be a unique exact selected entry');
   const cursors: HeldWorkspaceCursor[] = [], heldEntries: HeldWorkspaceEntry[] = [], entries: WorkspaceEntry[] = [];
   const observedPaths = new Set<string>(), observedFolded = new Set<string>();
   let byteCount = 0, inventoryCount = 0, operationError: unknown;
@@ -123,8 +131,10 @@ export async function captureWorkspaceEntriesWithManifestPublication(root: HeldW
       if (observedPaths.has(entry.path) || observedFolded.has(entry.path.toLowerCase())) invalid('selected source entries collide');
       observedPaths.add(entry.path); observedFolded.add(entry.path.toLowerCase());
       if (needed.has(entry.path) && entry.kind !== 'directory') invalid('source selection ancestor is not a directory');
+      if (directoryMetadata.has(entry.path) && entry.kind !== 'directory') invalid('source directory metadata target changed its kind');
       if (entry.kind === 'directory') {
         entries.push({ path: entry.path, kind: 'directory', mode: 0o755 });
+        if (directoryMetadata.has(entry.path) && !needed.has(entry.path)) continue;
         const child = entry.openDirectory(); cursors.push(child);
         stack.push({ cursor: child, selectedEmpty: selected.has(entry.path) && !needed.has(entry.path) });
       } else if (entry.kind === 'file') {

@@ -8,7 +8,9 @@ import { builtinCaptureModelContent, decodeBuiltinToolCapture } from '../../../s
 import { builtinToolInputBytes, decodeBuiltinToolInput } from '../../../src/sandbox/builtin-tool-data.js';
 import { decodeBuiltinProcessContainment, decodeBuiltinScriptSandboxLaunchSpec } from '../../../src/state/execution-closure.js';
 import { decodeRunResult, decodeVerificationClosure } from '../../../src/state/result-artifacts.js';
-import { decodeWorkspaceState, decodeSourceManifest, decodeWorkspaceEntries, decodeWorkspaceGenerationSnapshotEvidence } from '../../../src/state/decoders.js';
+import { decodeWorkspaceState, decodeSourceManifest, decodeSourceProjection, decodeWorkspaceEntries, decodeWorkspaceGenerationSnapshotEvidence } from '../../../src/state/decoders.js';
+import { decodeSourceIncludeAuthorization } from '../../../src/state/source-include-artifacts.js';
+import { readSourceIncludeClassification } from '../../../src/state/source-include-classification.js';
 import { toolCheckpointId, validateMatchingWorkerDeath } from '../../../src/state/tool-checkpoint.js';
 import type { InstalledWorkerRetirementInspection } from './installed-worker-lease.js';
 
@@ -38,10 +40,12 @@ export type InstalledToolsEvidence = {
   bashExitCode: 7; workerFreeWaits: true; waitingInputRestartPreserved: true;
   exactControlReplay: true; staleReplyRefused: true; hostFilesUnchanged: true;
   status: 'completed_unverified'; actualVerifierQualified: false;
+  originalBuiltinIncludeCaptured: true; originalCaptureDescriptorMatched: true; originalAuthorizationPreservedAfterEdit: true;
 };
 
 export async function assertInstalledToolsOutcome(input: { cut: Record<string, any>; sessionCut: Record<string, any>; readCas(ref: string): Promise<Buffer>;
-  calls: ReturnType<typeof installedToolsCalls>; observedReadParent: InstalledWorkerRetirementInspection; controls: { approvals: number; denials: number;
+  calls: readonly { name: string; callId: string; input: Record<string, unknown> }[]; observedReadParent: InstalledWorkerRetirementInspection;
+  originalHostFile: Readonly<Record<string, string>>; controls: { approvals: number; denials: number;
     inputReplies: number; restarted: boolean; replayed: boolean; staleRefused: boolean } }): Promise<InstalledToolsEvidence> {
   const { cut, calls } = input, run = cut.snapshot.run;
   assert.equal(run.status, 'completed_unverified'); assert.equal(run.terminalReason, 'no_required_verifier');
@@ -136,7 +140,39 @@ export async function assertInstalledToolsOutcome(input: { cut: Record<string, a
   assert(verification.verification.unverifiedConsentRef); await object(verification.verification.unverifiedConsentRef);
   const source = decodeSourceManifest(await object(final.resultSourceRef)), entries = decodeWorkspaceEntries(await object(source.entriesRef));
   const base = decodeSourceManifest(await object(final.baseSourceRef)), before = decodeWorkspaceEntries(await object(base.entriesRef));
+  const projection = decodeSourceProjection(await object(base.sourceProjectionRef));
+  assert.deepEqual(projection.explicitIncludes.map(({ path, scope }) => ({ path, scope })), [{ path: 'example.txt', scope: 'entry' }]);
+  assert.equal(base.git, undefined); assert.equal(projection.classificationIndexRef, undefined);
+  const authorizationRef = projection.explicitIncludes[0]!.authorizationRef;
+  const authorization = decodeSourceIncludeAuthorization(await object(authorizationRef));
+  assert.equal(authorization.kind, 'builtin_nonignored');
+  if (authorization.kind !== 'builtin_nonignored') assert.fail('the ordinary fixture must use its actual builtin classification');
+  assert.equal(authorization.runId, run.id); assert.equal(authorization.sessionId, run.sessionId);
+  assert.equal(authorization.workspaceIdentityDigest, base.workspaceIdentityDigest);
+  assert.equal(authorization.capturedEntriesRef, base.entriesRef); assert.equal(authorization.capturedTreeDigest, base.treeDigest);
+  assert(authorization.createdAt <= run.createdAt);
+  const original = before.entries.find(entry => entry.path === 'example.txt');
+  assert(original?.kind === 'file');
+  const classification = await readSourceIncludeClassification({ readBoundedBytes: async (ref, maximum) => {
+    // Complete bytes still come from the same real, independently checked
+    // installed CAS reader. This adapter supplies only a data size ceiling.
+    const bytes = await input.readCas(ref); assert.equal(sha256Bytes(bytes), ref); assert(bytes.length <= maximum); return bytes;
+  } }, authorization.classificationEvidenceRef);
+  assert.equal(classification.evidence.evidenceDigest, authorization.classificationEvidenceDigest);
+  assert.equal(classification.evidence.capturedEntriesRef, base.entriesRef);
+  assert.equal(classification.evidence.capturedTreeDigest, base.treeDigest);
+  assert.equal(classification.evidence.inspectionId, authorization.inspectionId);
+  assert(classification.evidence.observedAt >= authorization.createdAt && classification.evidence.observedAt <= run.createdAt);
+  assert.equal(classification.entries.length, 1);
+  const observed = classification.entries[0]!;
+  assert.equal(observed.path, 'example.txt'); assert.equal(observed.entryKind, 'file');
+  assert.equal(observed.workspaceEntryDigest, canonicalSha256(original)); assert.equal(observed.classification, 'nonignored_in_root');
+  assert.equal(observed.deviceId, input.originalHostFile.dev); assert.equal(observed.fileId, input.originalHostFile.ino);
+  assert.equal(String(observed.linkCount), input.originalHostFile.nlink);
+  assert.equal(source.sourceProjectionRef, base.sourceProjectionRef); assert.equal(source.sourceProjectionDigest, base.sourceProjectionDigest);
   const editInput = calls[15]!.input; assert('new_text' in editInput && typeof editInput.new_text === 'string');
+  assert.equal(typeof editInput.old_text, 'string');
+  assert((await input.readCas(original.blobRef)).equals(Buffer.from(editInput.old_text as string)));
   const after = Buffer.from(editInput.new_text), afterRef = sha256Bytes(after);
   assert.equal(canonicalSha256(entries.entries), canonicalSha256(before.entries.map(entry => entry.path === 'example.txt'
     ? { path: entry.path, kind: 'file', mode: entry.mode, blobRef: afterRef, size: after.length } : entry)));
@@ -150,5 +186,6 @@ export async function assertInstalledToolsOutcome(input: { cut: Record<string, a
     sameParentForFirstFourteenReads: true, fifteenthReadUsedNewParent: true, actualReadParentObservedAlive: true,
     scopeCapacityCheckpointUnchanged: true, eachOriginalClaimCompletedOnce: true, rawOutputsAndInvocationDeathChecked: true,
     bashExitCode: 7, workerFreeWaits: true, waitingInputRestartPreserved: true, exactControlReplay: true,
-    staleReplyRefused: true, hostFilesUnchanged: true, status: 'completed_unverified', actualVerifierQualified: false };
+    staleReplyRefused: true, hostFilesUnchanged: true, status: 'completed_unverified', actualVerifierQualified: false,
+    originalBuiltinIncludeCaptured: true, originalCaptureDescriptorMatched: true, originalAuthorizationPreservedAfterEdit: true };
 }

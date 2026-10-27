@@ -209,7 +209,7 @@ test('complete role, workspace, entry, projection and ignore identities are chec
   assert.equal(plan.kind, 'ready'); assert.equal(plan.input.sourceDesiredRef, desired.ref);
 });
 
-test('forged Git identity and unproven ignore data are rejected, while unimplemented includes remain explicit', async t => {
+test('forged Git identity, missing include authorization and unproven ignore data are rejected', async t => {
   const f = await fixture(t), entry = await f.file('a', 'data'), base = await f.source('base', [entry]);
   const git = await f.source('result', [entry], { git: { repositoryIdentityDigest: '1'.repeat(64),
     head: { kind: 'unborn', branch: 'main' }, indexRef: '2'.repeat(64), indexTreeObjectId: '3'.repeat(40) } });
@@ -227,8 +227,9 @@ test('forged Git identity and unproven ignore data are rejected, while unimpleme
     const changes = { sourceProjectionRef: projectionRef, sourceProjectionDigest: projection.projectionDigest,
       frozenIgnoreRulesRef: rulesRef, frozenIgnoreRulesDigest: rules.rulesDigest };
     const b = await f.source('base', [entry], changes), s = await f.source('result', [entry], changes);
-    await assert.rejects(f.plan({ sourceBaseRef: b.ref, sourceDesiredRef: s.ref, capturedWorkspaceRef: b.ref }),
-      error => error instanceof KernelStorageError && error.code === (unsupported === 'includes' ? 'UNSUPPORTED_PLATFORM' : 'ARTIFACT_MISMATCH'));
+    const planned = f.plan({ sourceBaseRef: b.ref, sourceDesiredRef: s.ref, capturedWorkspaceRef: b.ref });
+    if (unsupported === 'includes') await assert.rejects(planned, { code: 'ENOENT' });
+    else await assert.rejects(planned, error => error instanceof KernelStorageError && error.code === 'ARTIFACT_MISMATCH');
   }
 });
 

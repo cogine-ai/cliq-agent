@@ -59,6 +59,8 @@ import { loadFrozenPrivateGit } from '../workspace/run-workspace/private-git.js'
 import { readSourceProjectionData } from './source-projection-data.js';
 import { decodeSandboxProfile } from './execution-closure.js';
 import { checkSourceManifest } from './source-validation.js';
+import { decodeRetainedRunAssembly } from '../model/run-assembly.js';
+import { readAssemblySkills } from './skill-data.js';
 
 type FrozenSourceContext = Readonly<{ baseRef: string; source: SourceManifest; rules: FrozenIgnoreRulesV1; resources?: SandboxResourceSpec }>;
 
@@ -190,7 +192,8 @@ async function validateRunSpecArtifacts(
       [`SourceProjection.explicitIncludes[${index}].authorizationRef`, include.authorizationRef] as const
     )
   ]);
-  const resources = source.git ? decodeSandboxProfile(await artifacts.readCanonical(runSpec.sandboxProfileRef)).resources : undefined;
+  const resources = source.git || projection.explicitIncludes.length
+    ? decodeSandboxProfile(await artifacts.readCanonical(runSpec.sandboxProfileRef)).resources : undefined;
   const classification = resources ? await readSourceProjectionData(artifacts, source, projection, resources) : undefined;
   const rules = classification?.rules ?? await readFrozenIgnoreRules(artifacts, source.frozenIgnoreRulesRef);
   await requireRecoveryArtifacts(
@@ -386,7 +389,7 @@ function validateJournalGraph(journal: InvocationJournalEntry[]): Map<string, At
 
   for (const group of groups.values()) {
     const phases = group.entries.map((entry) => entry.phase);
-    if (group.prepared.opKind === 'child_admission' || group.prepared.opKind === 'child_merge' || group.prepared.opKind === 'child_await') {
+    if (group.prepared.opKind === 'child_admission' || group.prepared.opKind === 'child_merge' || group.prepared.opKind === 'child_await' || group.prepared.opKind === 'skill_resource') {
       if (phases.join(',') !== 'prepared,dispatch_claimed,completed' || group.entries.some(entry =>
           entry.localCommittedAt !== group.prepared.localCommittedAt || entry.timestamp !== group.prepared.timestamp))
         recoveryFailure('local child Journal must be one complete original atomic triplet');
@@ -750,6 +753,14 @@ async function readRecoveryProjection(
   const runSpec = decodeRunSpec(await artifacts.readCanonical(run.specRef));
   if (runSpec.operation === 'delivery') assertDeliveryModelFreeCut({ run, runSpec, journal, childAllocations });
   const frozenSource = await validateRunSpecArtifacts(artifacts, runSpec);
+  const assemblyData = await artifacts.readCanonical<RunAssemblyV1>(runSpec.assemblyRef);
+  if (assemblyData?.format === 'cliq-run-assembly-v1' && assemblyData.instructions?.skills?.length) {
+    try {
+      await readAssemblySkills(artifacts, decodeRetainedRunAssembly(assemblyData), {
+        workspaceIdentityRef: databaseCut.workspaceIdentityRef, ownerPrincipalId: databaseCut.principalId
+      });
+    } catch (error) { recoveryFailure('Run skill closure is not its complete original immutable source', error); }
+  }
   phase('context');
   const context = decodeContextManifest(await artifacts.readCanonical(latestCheckpoint.contextManifestRef));
   if (context.runId !== run.id || context.throughItemSeq !== latestCheckpoint.runItemSeq) {

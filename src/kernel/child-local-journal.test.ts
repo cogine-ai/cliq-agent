@@ -15,8 +15,8 @@ function row(phase: 'prepared' | 'dispatch_claimed' | 'completed' = 'prepared') 
     ...(phase === 'completed' ? { resultRef: ref, budgetSettlementRef: ref } : {}) };
 }
 
-test('closed child local Journal uses zero to denote no worker lease, and never accepts a physical release or unknown branch', () => {
-  for (const opKind of ['child_admission', 'child_merge']) for (const phase of ['prepared', 'dispatch_claimed', 'completed'] as const) {
+test('closed grant-bearing local Journal uses zero to denote no worker lease, and never accepts a physical release or unknown branch', () => {
+  for (const opKind of ['child_admission', 'child_merge', 'skill_resource']) for (const phase of ['prepared', 'dispatch_claimed', 'completed'] as const) {
     const value = { ...row(phase), opKind }; assert.equal(decodeWireJournal(value), value);
     for (const key of ['sandboxLaunchSpecRef', 'brokerFenceTokenDigest', 'receiptRef', 'errorRef', 'evidenceRef', 'evidenceDigest', 'attestationRef'])
       assert.throws(() => decodeWireJournal({ ...value, [key]: ref }));

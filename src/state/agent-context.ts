@@ -17,6 +17,7 @@ import { decodeRepairDiagnosticItem, decodeVerificationReceipt, decodeVerifierRe
   decodeVerifierRepairModelContent, verifierRepairModelContent } from './verifier-artifacts.js';
 import { decodeSessionContext, readSessionContextEntries, type SessionCompactionIndex } from './session-context.js';
 import { childResultModelContent } from './child-result-artifacts.js';
+import { readAssemblySkills } from './skill-data.js';
 
 export async function readCanonicalArtifact<T>(artifacts: Pick<ArtifactCatalog, 'readCanonical'>, ref: string): Promise<T> {
   const value = await artifacts.readCanonical<T>(ref);
@@ -42,7 +43,8 @@ export async function readModelTurnMaterial(artifacts: ArtifactCatalog, ref: str
 }
 
 /** Static, post-Trust instruction projection. Reads retained CAS only, never live repository files. */
-export async function loadInstructionText(artifacts: ArtifactCatalog, assembly: Pick<RunAssemblyV1, 'instructions'>): Promise<string> {
+export async function loadInstructionText(artifacts: ArtifactCatalog,
+  assembly: Pick<RunAssemblyV1, 'instructions'> & Partial<Pick<RunAssemblyV1, 'runtime' | 'createdAt'>>): Promise<string> {
   const instructions = assembly.instructions;
   const system = await readText(artifacts, instructions.systemPromptRef, instructions.systemPromptDigest);
   if (!system.utf8.trim()) throw new TypeError('system instruction is empty');
@@ -63,19 +65,11 @@ export async function loadInstructionText(artifacts: ArtifactCatalog, assembly: 
     });
     pieces.push(canonicalJsonBytes({ format: 'cliq-workspace-instruction-prompt-v1', entries }).toString('utf8'));
   }
-  for (const selected of instructions.skills) {
-    const skill = await readCanonicalArtifact<{
-      schemaVersion: 1; format: string; skillId: string; sourceScope: string;
-      instructionRef: string; instructionDigest: string; manifestDigest: string;
-    }>(artifacts, selected.manifestRef);
-    if (skill.schemaVersion !== 1 || skill.format !== 'cliq-skill-manifest-v1' || skill.skillId !== selected.skillId ||
-        skill.manifestDigest !== selected.manifestDigest || digestOmitting(skill, 'manifestDigest') !== skill.manifestDigest) {
-      throw new TypeError('selected skill does not match retained manifest');
-    }
-    const instructionUtf8 = (await readText(artifacts, skill.instructionRef, skill.instructionDigest)).utf8;
-    if (!instructionUtf8.trim()) throw new TypeError('selected skill instruction is empty');
-    pieces.push(canonicalJsonBytes({ format: 'cliq-skill-instruction-prompt-v1', skillId: skill.skillId,
-      sourceScope: skill.sourceScope, instructionUtf8 }).toString('utf8'));
+  if (instructions.skills.length) {
+    if (!assembly.runtime || !assembly.createdAt) throw new TypeError('selected skills require the original complete assembly binding');
+    const skills = await readAssemblySkills(artifacts, { instructions, runtime: assembly.runtime, createdAt: assembly.createdAt });
+    for (const skill of skills) pieces.push(canonicalJsonBytes({ format: 'cliq-skill-instruction-prompt-v1', skillId: skill.manifest.skillId,
+      sourceScope: skill.manifest.sourceScope, instructionUtf8: skill.instruction.utf8 }).toString('utf8'));
   }
   return pieces.join('\n\n');
 }

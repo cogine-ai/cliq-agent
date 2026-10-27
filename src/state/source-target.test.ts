@@ -23,6 +23,39 @@ import { openSqliteDriver } from './sqlite-driver.js';
 import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME } from '../config.js';
 import { createSourceInspectionFixture, sourceInspectionRequest as inlineRequest } from './testing/source-inspection-fixtures.js';
 
+test('the real source capture retains skills and source selectors with independent source consent and MCP refusal', async t => {
+  const fixture = await createSourceInspectionFixture(t, 'requested-skills');
+  const skillDirectory = path.join(fixture.workspace, '.cliq', 'skills', 'review-skill');
+  await mkdir(skillDirectory, { recursive: true, mode: 0o700 });
+  await writeFile(path.join(skillDirectory, 'SKILL.md'), '---\nname: review-skill\ndescription: Review the current change.\n---\nRead before changing code.\n');
+  const skillPath = '.cliq/skills/review-skill/SKILL.md';
+  const request = inlineRequest({ ...fixture.request, skillIds: ['review-skill'], sourceIncludes: [{ path: skillPath, scope: 'entry' }] });
+  const captured = await fixture.store.captureSubmittedSource({ request, identity: fixture.identity });
+  if (captured.phase !== 'retired' || captured.outcome.kind !== 'captured') assert.fail('requested skill data must reach the original source capture');
+  const target = await fixture.store.artifacts.readCanonical<SourceInspectionTargetV1>(captured.targetRef);
+  const original = await fixture.store.artifacts.readCanonical<{ skillIds: string[] }>(target.originalRequestRef);
+  assert.deepEqual(original.skillIds, ['review-skill']);
+  const source = await fixture.store.artifacts.readCanonical<SourceManifest>(captured.outcome.sourceManifestRef);
+  const entries = await fixture.store.artifacts.readCanonical<WorkspaceEntryManifest>(source.entriesRef);
+  assert(entries.entries.some(entry => entry.path === '.cliq/skills/review-skill/SKILL.md'));
+  const driver = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+  try {
+    assert.deepEqual(driver.prepare('SELECT id FROM runs').all(), [], 'capture alone creates no accepted Run');
+    assert.deepEqual(driver.prepare("SELECT ref FROM artifacts WHERE schema_kind IN ('cliq-skill-manifest-v1','cliq-skill-source-identity-v1')").all(), [],
+      'assembly must still freeze and validate the selected skill independently');
+    const before = driver.prepare('SELECT inspection_id FROM source_inspection_attempts').all();
+    await assert.rejects(fixture.store.captureSubmittedSource({ identity: fixture.identity,
+      request: inlineRequest({ ...fixture.request, requestId: uuidv7(), admissionKey: admissionKey('missing-source-consent'),
+        skillIds: ['review-skill'], sourceIncludes: [{ path: skillPath, scope: 'entry', readGrantId: 'not-a-real-source-grant' }] }) }),
+    { refusalCode: 'AUTHORIZATION_REQUIRED' });
+    assert.deepEqual(driver.prepare('SELECT inspection_id FROM source_inspection_attempts').all(), before);
+    await assert.rejects(fixture.store.captureSubmittedSource({ identity: fixture.identity,
+      request: inlineRequest({ ...fixture.request, requestId: uuidv7(), admissionKey: admissionKey('requested-mcp'),
+        skillIds: ['review-skill'], registeredMcpServerIds: ['not-registered'] }) }), { code: 'INVALID_REQUEST' });
+    assert.deepEqual(driver.prepare('SELECT inspection_id FROM source_inspection_attempts').all(), before);
+  } finally { driver.close(); }
+});
+
 test('inline submit normalization closes its schema and freezes defaults into intent, not request identity', () => {
   const first = normalizeRunSubmitRequest(inlineRequest());
   assert.equal(first.request.budgets.wallTimeMs, 86_400_000);
@@ -92,6 +125,22 @@ test('installed recipe admits default tool interaction without changing the froz
     assert.equal(supported.policyMode, mode);
     assert.doesNotThrow(() => assertInstalledRunRecipe(supported));
   }
+});
+
+test('installed recipe retains ordered skills and source requests before their independent authority checks', () => {
+  const request = normalizeRunSubmitRequest(inlineRequest({
+    model: { provider: 'openai-compatible', model: 'owned-fixture-model',
+      endpoint: { kind: 'registered', endpointRegistrationId: 'owned-fixture-endpoint' }, modelCredentialGrantIds: ['owned-fixture-grant'] },
+    policyMode: 'default', skillIds: ['selected-user', 'selected-bundled', 'selected-workspace']
+  })).request;
+  assert.deepEqual(request.skillIds, ['selected-user', 'selected-bundled', 'selected-workspace']);
+  assert.doesNotThrow(() => assertInstalledRunRecipe(request));
+  assert.equal(request.policyMode, 'default'); assert.deepEqual(request.sourceIncludes, []);
+  assert.throws(() => assertInstalledRunRecipe({ ...request, registeredMcpServerIds: ['unimplemented-server'] }), { code: 'INVALID_REQUEST' });
+  // Shape support creates no source/read permission. The real capture test
+  // above independently refuses a locator without its actual grant.
+  assert.doesNotThrow(() => assertInstalledRunRecipe({ ...request,
+    sourceIncludes: [{ path: 'separate-source', scope: 'entry', readGrantId: 'caller-request-only' }] }));
 });
 
 test('installed recipe reaches only its connected exact Node verifier subset without inferring execution permission', () => {
@@ -201,7 +250,7 @@ for (const outcome of ['captured', 'failed'] as const) for (const missing of ['r
     const fixture = await createSourceInspectionFixture(t, `${outcome}-${missing}`);
     await writeFile(path.join(fixture.workspace, 'note.txt'), 'retirement provenance\n');
     const request = outcome === 'captured' ? fixture.request : inlineRequest({ ...fixture.request,
-      sourceIncludes: [{ path: 'note.txt', scope: 'entry' }] });
+      sourceIncludes: [{ path: 'note.txt', scope: 'entry' }], sourceExcludes: [{ path: 'note.txt', scope: 'entry' }] });
     const retired = await fixture.store.captureSubmittedSource({ request, identity: fixture.identity });
     if (retired.phase !== 'retired' || retired.outcome.kind !== outcome) assert.fail('actual fixture did not retire its expected outcome');
     const evidence = await fixture.store.artifacts.readCanonical<SourceInspectionRetirementEvidenceV1>(retired.retirementEvidenceRef);
@@ -218,7 +267,8 @@ for (const outcome of ['captured', 'failed'] as const) for (const missing of ['r
 test('retained source replay rejects a real foreign INTERNAL error without adopting its request association', async t => {
   const fixture = await createSourceInspectionFixture(t, 'foreign-error');
   await writeFile(path.join(fixture.workspace, 'note.txt'), 'genuine source retirement\n');
-  const request = inlineRequest({ ...fixture.request, sourceIncludes: [{ path: 'note.txt', scope: 'entry' }] });
+  const request = inlineRequest({ ...fixture.request, sourceIncludes: [{ path: 'note.txt', scope: 'entry' }],
+    sourceExcludes: [{ path: 'note.txt', scope: 'entry' }] });
   const retired = await fixture.store.captureSubmittedSource({ request, identity: fixture.identity });
   if (retired.phase !== 'retired' || retired.outcome.kind !== 'failed') assert.fail('actual capture must retire its supported failure prefix');
   const foreign = await fixture.store.artifacts.publishCanonical({ protocolVersion: 1, ok: false, method: 'run.submit',
@@ -254,8 +304,9 @@ test('retained source replay rejects a real foreign INTERNAL error without adopt
 
 test('source shutdown during an actual error publication retires as cancellation with its matching retained error', async t => {
   const fixture = await createSourceInspectionFixture(t, 'late-cancel');
-  await writeFile(path.join(fixture.workspace, 'note.txt'), 'actual source, unsupported explicit include\n');
-  const request = inlineRequest({ ...fixture.request, sourceIncludes: [{ path: 'note.txt', scope: 'entry' }] });
+  await writeFile(path.join(fixture.workspace, 'note.txt'), 'actual source with an explicitly excluded include\n');
+  const request = inlineRequest({ ...fixture.request, sourceIncludes: [{ path: 'note.txt', scope: 'entry' }],
+    sourceExcludes: [{ path: 'note.txt', scope: 'entry' }] });
   const sample = await open(path.join(fixture.workspace, 'note.txt'), 'r');
   const prototype = Object.getPrototypeOf(sample) as FileHandle; await sample.close();
   const originalWrite = prototype.writeFile;
@@ -319,7 +370,7 @@ test('failed capture retires genuine resources and associates later request ids 
   t.after(() => rm(directory, { recursive: true, force: true }));
   const stateRoot = path.join(directory, 'state'), home = path.join(directory, 'home'), workspace = path.join(directory, 'workspace');
   for (const member of [stateRoot, home, workspace]) await mkdir(member, { mode: 0o700 });
-  await writeFile(path.join(workspace, 'secret.txt'), 'never capture this unsupported include\n');
+  await writeFile(path.join(workspace, 'secret.txt'), 'never capture this explicitly excluded include\n');
   await writePersistedWorkspaceTrust(await createWorkspaceTrustContext(workspace, home), 'trusted');
   const signed = await signedToolBundle(testFixture().assembly, []);
   const profile = fixtureSandboxProfile(); profile.allowedOwners = ['source_inspection']; profile.profileDigest = digestOmitting(profile, 'profileDigest');
@@ -329,10 +380,10 @@ test('failed capture retires genuine resources and associates later request ids 
     const identity = await publishInProcessChannel(store);
     const created = await store.createSession({ ...identity, requestId: uuidv7(), admissionKey: admissionKey('source-error-session'), workspacePath: workspace });
     const request = inlineRequest({ sessionId: created.session.id, workspacePath: workspace,
-      sourceIncludes: [{ path: 'secret.txt', scope: 'entry' }] });
+      sourceIncludes: [{ path: 'secret.txt', scope: 'entry' }], sourceExcludes: [{ path: 'secret.txt', scope: 'entry' }] });
     const retired = await store.captureSubmittedSource({ request, identity });
     assert.equal(retired.phase, 'retired');
-    if (retired.phase !== 'retired' || retired.outcome.kind !== 'failed') assert.fail('unsupported source request must fail after real retirement');
+    if (retired.phase !== 'retired' || retired.outcome.kind !== 'failed') assert.fail('excluded include must fail after real retirement');
     const errorResponseRef = retired.outcome.errorResponseRef;
     const error = await store.artifacts.readCanonical(errorResponseRef);
     assert.deepEqual(error, { protocolVersion: 1, ok: false, method: 'run.submit', error: { schemaVersion: 1,

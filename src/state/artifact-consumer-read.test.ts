@@ -10,6 +10,8 @@ import { sha256Bytes } from '../kernel/identity.js';
 import { ArtifactCatalog, type PublishedArtifact } from './artifacts.js';
 import { ContentAddressedStore } from './cas.js';
 import { joinResourceOperations, ResourceRetirementError } from './errors.js';
+import { readCanonicalArtifact } from './agent-context.js';
+import { canonicalJsonBytes } from '../kernel/canonical.js';
 
 test('submission, invocation, approval and continuation consumers dispatch retained CAS reads through the same bounded joined catalog', async () => {
   const expected = new Map([
@@ -108,8 +110,9 @@ test('admission metadata lazily describes every original fixed and credential re
   assert(ts.isCallExpression(call)); assert.equal(call.expression.getText(parsed), 'reads.mapReads');
   const output = ts.transpileModule(`return (async () => ${expressions[0]!.getText(parsed)})();`,
     { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText;
-  const read = new Function('input', 'sourceManifest', 'reads', output) as
-    (input: Record<string, unknown>, source: { entriesRef: string }, reads: ArtifactCatalog) => Promise<PublishedArtifact[]>;
+  const execute = new Function('readCanonicalArtifact', 'canonicalJsonBytes', 'input', 'sourceManifest', 'reads', output);
+  const read = (input: Record<string, unknown>, source: { entriesRef: string }, reads: ArtifactCatalog) =>
+    execute(readCanonicalArtifact, canonicalJsonBytes, input, source, reads) as Promise<PublishedArtifact[]>;
   const directory = await mkdtemp(path.join(os.tmpdir(), 'cliq-admission-metadata-pool-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const root = path.join(directory, 'objects'); await mkdir(root, { mode: 0o700 });

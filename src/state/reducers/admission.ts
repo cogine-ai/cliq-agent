@@ -1,6 +1,8 @@
 import { canonicalJsonBytes, canonicalSha256 } from '../../kernel/canonical.js';
 import { immutableSnapshot } from '../../model/immutable.js';
 import { decodeRetainedRunAssembly } from '../../model/run-assembly.js';
+import { readAssemblySkillMetadata } from '../skill-data.js';
+import type { RunAssemblyV1 } from '../../kernel/types.js';
 import { exactKeys } from '../../policy/runtime-authority.js';
 import {
   addCanonicalDuration,
@@ -324,13 +326,13 @@ export async function replayInstalledRunAdmission(
       ...(target.schemaVersion === 2 ? ['inspectionGrantId', 'inspectionReceiptRef', 'inspectionReceiptDigest', 'ignoreReadConsents'] : [])]) ||
       !(target.schemaVersion === 1 && target.format === 'cliq-source-inspection-target-v1' || target.schemaVersion === 2 && target.format === 'cliq-source-inspection-target-v2') || target.method !== 'run.submit' ||
       target.workspaceIdentityDigest !== source.workspaceIdentityDigest || target.sessionId !== request.sessionId ||
-      target.expectedContextRevision !== request.expectedContextRevision || !Array.isArray(target.sourceReadGrantRefs) || target.sourceReadGrantRefs.length !== 0 ||
+      target.expectedContextRevision !== request.expectedContextRevision || !Array.isArray(target.sourceReadGrantRefs) || target.sourceReadGrantRefs.length > 128 ||
       target.targetDigest !== source.targetDigest || target.targetDigest !== digestOmitting(target, 'targetDigest') ||
       target.principalId !== principalId || target.admissionKey !== request.admissionKey || target.admissionIntentDigest !== intent ||
       target.originalRequestDigest !== sourceOriginal.originalRequestDigest || sourceIndex.originalRequestId !== sourceOriginal.request.requestId ||
       sourceIndex.originalRequestDigest !== sourceOriginal.originalRequestDigest || runSubmitIntentDigest(principalId, sourceOriginal.request) !== intent)
     throw new KernelStorageError('RECOVERY_REQUIRED', 'installed Run source original request closure changed');
-  if (target.schemaVersion === 2) {
+  if (target.schemaVersion === 2 || request.sourceIncludes.length) {
     if (!runtime) throw new KernelStorageError('RECOVERY_REQUIRED', 'Git admission replay requires its retained signed authorization roots');
     await readRetainedSourceInspectionTarget(reads, source, sourceIndex, { ...runtime,
       sandboxProfile: decodeSandboxProfile(await readCanonicalArtifact(reads, target.sandboxProfileRef)) }, { driver, owner, signal });
@@ -565,10 +567,12 @@ async function admitRunInternal(
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'base SourceManifest is not bound to the admitted Session workspace');
   }
   decodeWorkspaceEntries(await reads.readCanonical(sourceManifest.entriesRef));
-  if (privateGitStateRef) {
+  if (sourceProjection.explicitIncludes.length && !installed)
+    throw new KernelStorageError('UNSUPPORTED_PLATFORM','explicit source includes require their genuine installed captured admission');
+  if (privateGitStateRef || sourceProjection.explicitIncludes.length) {
     const sourceProfile = decodeSandboxProfile(await reads.readCanonical(input.sandboxProfileRef));
     const sourceData = await readSourceProjectionData(reads, sourceManifest, sourceProjection, sourceProfile.resources, signal);
-    await loadFrozenPrivateGit(reads, sourceManifest, { schemaVersion: 1, format: 'cliq-workspace-state-v1',
+    if (privateGitStateRef) await loadFrozenPrivateGit(reads, sourceManifest, { schemaVersion: 1, format: 'cliq-workspace-state-v1',
       runId, baseWorkspaceManifestRef: input.baseWorkspaceManifestRef, entriesRef: sourceManifest.entriesRef,
       sourceProjectionDigest: sourceProjection.projectionDigest, invalidatedEphemeralPaths: [], privateGitStateRef, stateDigest: '' }, sourceData.rules, signal, sourceProfile.resources);
   }
@@ -609,6 +613,7 @@ async function admitRunInternal(
 
   // describe performs each complete hash/length/identity-checked CAS read on
   // this same signal; a preceding discarded raw read adds no data to this cut.
+  let skillMetadata: readonly PublishedArtifact[] = [];
   const referencedMetadata = await reads.mapReads([
     [input.assemblyRef, 'cliq-run-assembly-v1'],
     [input.policyRef, 'cliq-run-policy-v1'],
@@ -619,7 +624,17 @@ async function admitRunInternal(
     [input.baseWorkspaceManifestRef, 'cliq-source-manifest-v1'],
     [sourceManifest.entriesRef, 'cliq-workspace-entries-v1'],
     ...(input.credentialGrantRefs ?? []).map((ref) => [ref, 'cliq-endpoint-credential-grant-binding-v1'] as const)
-  ] as const, ([ref, schemaKind]) => reads.describe(ref, 'application/json', schemaKind));
+  ] as const, async ([ref, schemaKind]) => {
+    if (schemaKind !== 'cliq-run-assembly-v1') return reads.describe(ref, 'application/json', schemaKind);
+    // This consumes the same complete assembly stream as describe, retaining
+    // its actual canonical data for the newly selected skill closure only.
+    const assembly = await readCanonicalArtifact<RunAssemblyV1>(reads, ref);
+    if (assembly?.format === 'cliq-run-assembly-v1' && assembly.instructions?.skills?.length)
+      skillMetadata = await readAssemblySkillMetadata(reads, decodeRetainedRunAssembly(assembly), {
+        workspaceIdentityRef: session.workspaceIdentityRef, ownerPrincipalId: input.principalId
+      });
+    return { ref, mediaType: 'application/json', schemaKind, byteLength: canonicalJsonBytes(assembly).length };
+  });
 
   const now = installed?.data.admittedAt ?? sampleCanonicalNow();
   if (!verifierConsumption && verifierPreparation) verifierConsumption = await prepareVerifierConsumption(artifacts, verifierPreparation,
@@ -656,7 +671,7 @@ async function admitRunInternal(
     objectiveDigest: ''
   };
   objective.objectiveDigest = digestOmitting(objective, 'objectiveDigest');
-  const published: PublishedArtifact[] = [...channelClosure.metadata, ...referencedMetadata];
+  const published: PublishedArtifact[] = [...channelClosure.metadata, ...referencedMetadata, ...skillMetadata];
   if (verifierPreparation && verifierConsumption) published.push(...verifierPreparation.metadata, ...verifierConsumption.metadata);
   decodeRunObjective(objective);
 

@@ -15,10 +15,10 @@ import type { SqliteDriver } from './sqlite-driver.js';
 import type { StateStore } from './store.js';
 
 type Fixture = { runId: string; store: StateStore; driver: SqliteDriver };
-async function source(fixture: Fixture) {
+async function source(fixture: Fixture, observation: 'read' | 'checkpoint' = 'read') {
   const cut = await fixture.store.readRecoveryClosure(fixture.runId);
   return { runId: fixture.runId, sourceCheckpointId: cut.latestCheckpoint.id, sourceRunRevision: cut.run.revision,
-    sourceJournalSeq: cut.journal.length, observedAt: sampleCanonicalNow() };
+    sourceJournalSeq: cut.journal.length, observedAt: observation === 'checkpoint' ? cut.latestCheckpoint.createdAt : sampleCanonicalNow() };
 }
 
 // Real ordinary Store/SQLite/CAS/owner and original admitted child/patch
@@ -53,7 +53,28 @@ test('pending merge cost reads the exact source with conservative sibling reserv
   } finally { await disposeFixture(fixture); }
 });
 
-test('only the actual unused allow proves pending cost; original source remains readable after real Stop and natural expiry cannot rewrite its observation', async () => {
+test('a real live unused approval proves pending cost without minting time or execution authority', async () => {
+  const fixture = await createMergeApprovalFixture('pending-merge-live-allow');
+  try {
+    const waiting = await prepareChildMergeAuthorization(fixture.driver,fixture.store.artifacts,fixture.owner,
+      {runId:fixture.runId,expectedRunRevision:fixture.store.getRun(fixture.runId).revision,releaseKeys:fixture.signed.releaseKeys});
+    if (waiting.disposition !== 'waiting') throw new Error('default merge must obtain its own approval');
+    const core = {protocolVersion:1 as const,method:'run.approve' as const,runId:fixture.runId,requestId:uuidv7(),
+      expectedRevision:waiting.run.revision,waitingOnRef:waiting.run.waitingOnRef!,decision:'allow' as const};
+    const approved = await approveChildMerge(fixture.driver,fixture.store.artifacts,fixture.owner,
+      {request:{...core,requestDigest:canonicalSha256(core)},identity:await publishInProcessChannel(fixture.store),releaseKeys:fixture.signed.releaseKeys});
+    const grant = await readChildMergeApproval(fixture.driver,fixture.store.artifacts,fixture.runId,approved.response.result.decisionRef);
+    const original = await source(fixture), fence = readTimeFence(fixture.driver);
+    assert(original.observedAt >= grant.grant!.issuedAt && original.observedAt < grant.grant!.expiresAt);
+    const proof = await readChildMergePendingBudgetData(fixture.driver,fixture.store.artifacts,original);
+    assert.equal(proof?.required,1);proof!.assertUnchanged(fixture.driver);
+    assert.deepEqual(readTimeFence(fixture.driver),fence);
+    assert.equal(fixture.driver.prepare("SELECT count(*) AS n FROM run_journal WHERE run_id=? AND op_kind='child_merge'")
+      .get<{n:bigint}>(fixture.runId)!.n,0n);
+  } finally {await disposeFixture(fixture);}
+});
+
+test('only the actual unused allow proves historical pending cost; original source remains readable after real Stop and natural expiry cannot rewrite its observation', async () => {
   const fixture = await createMergeApprovalFixture('pending-merge-approved-original');
   try {
     assert.equal(await readChildMergePendingBudgetData(fixture.driver, fixture.store.artifacts, await source(fixture)), undefined);
@@ -66,7 +87,13 @@ test('only the actual unused allow proves pending cost; original source remains 
     const approved = await approveChildMerge(fixture.driver, fixture.store.artifacts, fixture.owner,
       { request: { ...core, requestDigest: canonicalSha256(core) }, identity: await publishInProcessChannel(fixture.store), releaseKeys: fixture.signed.releaseKeys });
     const grant = await readChildMergeApproval(fixture.driver, fixture.store.artifacts, fixture.runId, approved.response.result.decisionRef);
-    const original = await source(fixture);
+    // This test reads the historical approval cut. Its real checkpoint commit
+    // is the observation, even if a complete CAS read on a busy runner finishes
+    // after the unchanged three-second grant expires. No clock or live grant
+    // is extended; the fresh post-expiry observation below must still refuse.
+    const original = await source(fixture,'checkpoint');
+    assert.equal(original.sourceRunRevision,approved.run.revision);
+    assert(original.observedAt >= grant.grant!.issuedAt && original.observedAt < grant.grant!.expiresAt);
     assert.notEqual(original.sourceCheckpointId, grant.request.sourceCheckpointId, 'approval CP does not replace the original authorized source');
     const proof = await readChildMergePendingBudgetData(fixture.driver, fixture.store.artifacts, original);
     assert.equal(proof?.required, 1);

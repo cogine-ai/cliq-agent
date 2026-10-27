@@ -159,6 +159,7 @@ static napi_value open_workspace_root(napi_env env, napi_callback_info info) {
         {"readGitConfigChunk", NULL, source_config_chunk, NULL, NULL, NULL, napi_default, NULL},
         {"openSnapshot", NULL, source_open_snapshot, NULL, NULL, NULL, napi_default, NULL},
         {"openInstructionSnapshot", NULL, source_open_instruction_snapshot, NULL, NULL, NULL, napi_default, NULL},
+        {"openSkillSnapshot", NULL, source_open_skill_snapshot, NULL, NULL, NULL, napi_default, NULL},
         {"close", NULL, source_close, NULL, NULL, NULL, napi_default, NULL}
     };
     if (napi_create_object(env, &result) != napi_ok || !identity_member(env, result, "identity", identity) ||

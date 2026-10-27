@@ -70,13 +70,20 @@ export function checkProjection(projection: SourceProjectionSpec): void {
     'explicitIncludes', 'explicitExcludes', 'maxChangedPaths', 'maxChangedBytes', 'projectionDigest',
     ...(projection.classificationIndexRef !== undefined ? ['classificationIndexRef'] : [])]) ||
       !Array.isArray(projection.explicitIncludes) || !Array.isArray(projection.explicitExcludes) ||
-      projection.explicitExcludes.length > 128 || !Number.isSafeInteger(projection.maxChangedPaths) ||
+      projection.explicitIncludes.length > 128 || projection.explicitExcludes.length > 128 || !Number.isSafeInteger(projection.maxChangedPaths) ||
       projection.maxChangedPaths < 0 || projection.maxChangedPaths > 100_000 ||
       !Number.isSafeInteger(projection.maxChangedBytes) || projection.maxChangedBytes < 0 || projection.maxChangedBytes > 4 * 1024 ** 3)
     mismatch('candidate source projection has invalid fields or limits');
   if (projection.classificationIndexRef !== undefined) assertArtifactRef(projection.classificationIndexRef);
-  if (projection.explicitIncludes.length)
-    throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'candidate source includes require their implemented authorization closure');
+  const includes = new Set<string>();
+  for (const selector of projection.explicitIncludes) {
+    if (!selector || !exactKeys(selector,['path','scope','authorizationRef']) || !['entry','subtree'].includes(selector.scope))
+      mismatch('candidate source include has invalid fields');
+    checkedPath(selector.path); assertArtifactRef(selector.authorizationRef);
+    const key = `${selector.path}\0${selector.scope}`;
+    if (includes.has(key)) mismatch('candidate source has duplicate includes');
+    includes.add(key);
+  }
   const seen = new Set<string>();
   for (const selector of projection.explicitExcludes) {
     if (!selector || !exactKeys(selector, ['path', 'scope']) || !['entry', 'subtree'].includes(selector.scope))

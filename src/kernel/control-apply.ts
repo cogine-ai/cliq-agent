@@ -14,6 +14,7 @@ export type RunApplyRequest = {
   verifierExecutionGrantIds?: string[];
   sourceInspectionGrantId?: string;
   ignoreReadGrantIds?: string[];
+  sourceReadGrantIds?: string[];
 };
 export type NormalizedRunApplyRequest = Omit<RunApplyRequest, 'budgets' | 'verifierExecutionGrantIds'> & {
   budgets: { wallTimeMs: number; toolCalls: number }; verifierExecutionGrantIds: string[];
@@ -32,7 +33,7 @@ export function normalizeRunApplyRequest(value: unknown): {
   try {
     assertControlWireJson(value);
     const data = controlWireRecord(value, ['protocolVersion', 'method', 'requestId', 'requestDigest',
-      'admissionKey', 'sourceRunId', 'expectedRunResultRef'], ['budgets', 'verifierExecutionGrantIds', 'sourceInspectionGrantId', 'ignoreReadGrantIds']);
+      'admissionKey', 'sourceRunId', 'expectedRunResultRef'], ['budgets', 'verifierExecutionGrantIds', 'sourceInspectionGrantId', 'ignoreReadGrantIds', 'sourceReadGrantIds']);
     if (data.protocolVersion !== 1 || data.method !== 'run.apply') throw new TypeError('expected protocol-v1 run.apply');
     const requestId = text(data.requestId), admissionKey = text(data.admissionKey), requestDigest = text(data.requestDigest);
     assertRequestId(requestId); assertAdmissionKey(admissionKey); assertArtifactRef(requestDigest);
@@ -47,6 +48,11 @@ export function normalizeRunApplyRequest(value: unknown): {
     if (!Array.isArray(ignoreGrants) || ignoreGrants.length > 128) throw new TypeError('delivery ignore grants exceed their bounded array');
     const ignoreReadGrantIds = ignoreGrants.map(text);
     if (new Set(ignoreReadGrantIds).size !== ignoreReadGrantIds.length) throw new TypeError('delivery ignore grants must be unique');
+    const sourceGrants = Object.hasOwn(data, 'sourceReadGrantIds') ? data.sourceReadGrantIds : [];
+    if (!Array.isArray(sourceGrants) || sourceGrants.length > 128) throw new TypeError('delivery source grants exceed their bounded array');
+    const sourceReadGrantIds = sourceGrants.map(text);
+    if (new Set(sourceReadGrantIds).size !== sourceReadGrantIds.length || sourceReadGrantIds.some(id => ignoreReadGrantIds.includes(id)))
+      throw new TypeError('delivery source grants must be unique and independent from ignore-rule grants');
     const { requestDigest: _digest, ...originalCore } = data;
     const originalRequest = { ...originalCore, requestDigest };
     if (canonicalJsonBytes(originalRequest).length > 1048576 || canonicalSha256(originalCore) !== requestDigest)
@@ -55,6 +61,7 @@ export function normalizeRunApplyRequest(value: unknown): {
       sourceRunId: text(data.sourceRunId), expectedRunResultRef,
       ...(Object.hasOwn(data, 'sourceInspectionGrantId') ? { sourceInspectionGrantId: text(data.sourceInspectionGrantId) } : {}),
       ...(Object.hasOwn(data, 'ignoreReadGrantIds') ? { ignoreReadGrantIds } : {}),
+      ...(Object.hasOwn(data, 'sourceReadGrantIds') ? { sourceReadGrantIds } : {}),
       budgets: { wallTimeMs: normalizedBudgets.wallTimeMs, toolCalls: normalizedBudgets.toolCalls }, verifierExecutionGrantIds },
       originalRequest, originalRequestDigest: requestDigest });
   } catch (cause) {

@@ -211,6 +211,10 @@ test('human commands build canonical intents without release-key, secret or lega
   const created = parseClientInvocation(['session', 'create', '--name', 'clear name'], '/work');
   assert(created.kind === 'command' && created.command.kind === 'request' && created.command.request.method === 'session.create');
   assert.equal(created.command.request.name, 'clear name');
+  const delivery = parseClientInvocation(['apply', 'run', '--options', '{"sourceReadGrantIds":["fresh-read"]}'], '/work');
+  assert(delivery.kind === 'apply');
+  assert.deepEqual(Object.keys(delivery.options), ['sourceReadGrantIds']);
+  assert.deepEqual(delivery.options.sourceReadGrantIds, ['fresh-read']);
   for (const argv of [['status', 'run', '--release-keys', 'fake'], ['run', 'prompt', '--api-key', 'inert'],
     ['approve', 'run', '--decision', 'allow'], ['apply', 'run', '--options', '{"method":"run.submit"}'], ['resume']])
     assert.throws(() => parseClientInvocation(argv, '/work'));

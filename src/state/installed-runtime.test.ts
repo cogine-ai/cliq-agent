@@ -24,6 +24,7 @@ import { GUEST_EXTRACTOR_RECIPE } from '../sandbox/guest-toolchain.js';
 import { validateBundle } from './installed-artifacts.js';
 import { observeInstalledCredentialSupervisor } from './installed-services.js';
 import { INSTALLED_INSTALL_PHASE_CHANNEL, INSTALLED_INSTALL_PHASES, INSTALLED_WORK_CHANNEL, type InstalledWorkSnapshot } from './installed-work-diagnostics.js';
+import { buildBundledSkillPackageData } from './bundled-skill-package.js';
 
 /** Real signed files for installer/CAS semantics only. The opaque executable
  * entries are deliberately not running Supervisor/worker/addon images and are
@@ -32,7 +33,8 @@ type InstallerFile = Omit<RuntimeBundleManifest['entries'][number], 'digest' | '
   bytes: Buffer; version?: string;
 };
 async function writeInstallerOnlyPackage(packageRoot: string, unclosedPromptRole?: 'system_prompt' | 'compaction_prompt',
-  supervisorBytes?: Buffer, guestImageBytes?: Buffer, sourceInspector?: InstallerFile, builtinScriptBytes?: Buffer) {
+  supervisorBytes?: Buffer, guestImageBytes?: Buffer, sourceInspector?: InstallerFile, builtinScriptBytes?: Buffer,
+  skills?: ReturnType<typeof buildBundledSkillPackageData>) {
   await mkdir(packageRoot, { mode: 0o700 });
   const profile = policyProfile();
   const rootCore = {
@@ -58,6 +60,7 @@ async function writeInstallerOnlyPackage(packageRoot: string, unclosedPromptRole
   if (sourceInspector) contents.push(sourceInspector);
   if (builtinScriptBytes) contents.push({ entryId: 'builtin_tools', role: 'tool_adapter',
     relativePath: 'adapters/builtin-tools.mjs', executable: false, bytes: builtinScriptBytes });
+  if (skills) contents.push(...skills.contents);
   if (unclosedPromptRole) contents.push({
     entryId: `installer-only-${unclosedPromptRole}`, role: unclosedPromptRole,
     relativePath: `prompts/${unclosedPromptRole}.txt`, executable: false,
@@ -110,7 +113,7 @@ async function writeInstallerOnlyPackage(packageRoot: string, unclosedPromptRole
     // The empty-root recipe is an acyclic sandbox_root_profile entry, not
     // resource/permission policy or a new structured-artifact kind. The sole
     // supported structured policy root is self-contained.
-    structuredArtifacts: [...(guestRoot ? [guestRoot] : []), { kind: 'policy_engine_profile', artifactId: 'policy-v1', rootEntryId: 'policy-v1',
+    structuredArtifacts: [...(skills?.roots ?? []), ...(guestRoot ? [guestRoot] : []), { kind: 'policy_engine_profile', artifactId: 'policy-v1', rootEntryId: 'policy-v1',
       artifactRef: canonicalSha256(profile), semanticDigest: profile.profileDigest, memberRefs: [] }],
     guestToolchainManifestRefs: guestManifestRef ? [guestManifestRef] : [], publisherKeyId: 'explicit-installer-unit-test-root', manifestDigest: '', signature: '',
   };
@@ -240,6 +243,56 @@ if (process.platform === 'linux') test('installed signed builtin script remains 
     const [installedInfo, casInfo] = await Promise.all([lstat(installedPath), lstat(casPath)]);
     for (const info of [installedInfo, casInfo]) { assert.equal(info.nlink, 1); assert.equal(info.mode & 0o7777, 0o400); }
     assert.notEqual(`${installedInfo.dev}:${installedInfo.ino}`, `${casInfo.dev}:${casInfo.ino}`);
+  } finally { await selected?.close(); await rm(fixture, { recursive: true, force: true }); }
+});
+
+test('signed skill metadata stays within the original total root cap and non-executable member rules', async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), 'cliq-installed-skill-metadata-'));
+  try {
+    const skill = buildBundledSkillPackageData([{ skillId: 'example', files: [
+      { canonicalRelativePath: 'SKILL.md', bytes: Buffer.from('---\nname: example\ndescription: Frozen metadata.\n---\n[schema](assets/root.json)\n') },
+      { canonicalRelativePath: 'assets/root.json', bytes: Buffer.from('{"type":"string"}') }
+    ] }]);
+    const signed = await writeInstallerOnlyPackage(path.join(fixture, 'package'), undefined, undefined, undefined, undefined, undefined, skill);
+    validateBundle(signed.bundle, signed.releaseKeys);
+    assert(signed.bundle.entries.filter(entry => entry.role === 'skill_bundle' || skill.roots[0]!.memberRefs.includes(entry.digest)).every(entry => !entry.executable));
+    const keys = generateKeyPairSync('ed25519');
+    const resign = (value: RuntimeBundleManifest) => {
+      const { signature: _signature, manifestDigest: _digest, ...core } = { ...value, publisherKeyId: 'exact-root-cap-test' };
+      const manifestDigest = canonicalSha256(core);
+      return { ...core, manifestDigest, signature: sign(null, Buffer.from(`cliq-runtime-bundle-v1\0${manifestDigest}`), keys.privateKey).toString('base64') };
+    };
+    const release = [{ keyId: 'exact-root-cap-test', publicKeyPem: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString() }];
+    const over = resign({ ...signed.bundle, structuredArtifacts: Array.from({ length: 66 }, (_, index) => ({
+      ...signed.bundle.structuredArtifacts[0]!, artifactId: `skill-${index}` })) });
+    assert.throws(() => validateBundle(over, release), { code: 'ARTIFACT_MISMATCH' });
+    for (const role of ['skill_bundle', 'bundle_object']) {
+      const bad = resign({ ...signed.bundle, entries: signed.bundle.entries.map(entry => entry.role === role ? { ...entry, executable: true } : entry) });
+      assert.throws(() => validateBundle(bad, release), { code: 'ARTIFACT_MISMATCH' });
+    }
+  } finally { await rm(fixture, { recursive: true, force: true }); }
+});
+
+if (process.platform === 'linux') test('installer imports the complete signed skill closure into CAS and reopens without the original package', async () => {
+  const fixture = await realpath(await mkdtemp(path.join(os.tmpdir(), 'cliq-installed-skill-data-')));
+  const packageRoot = path.join(fixture, 'package'), stateRoot = path.join(fixture, 'state'); let selected: HeldInstalledRuntime | undefined;
+  try {
+    const raw = Buffer.from('deliberately inert resource bytes\n'), skill = buildBundledSkillPackageData([{ skillId: 'example', files: [
+      { canonicalRelativePath: 'SKILL.md', bytes: Buffer.from('---\nname: example\ndescription: Frozen install.\n---\n[resource](assets/data.bin)\n') },
+      { canonicalRelativePath: 'assets/data.bin', bytes: raw }
+    ] }]);
+    const signed = await writeInstallerOnlyPackage(packageRoot, undefined, undefined, undefined, undefined, undefined, skill);
+    const runtime = createInstalledRuntime({ releaseKeys: signed.releaseKeys });
+    const installation = await runtime.installInitial({ packageRoot, stateRoot }); selected = await runtime.openSelected(stateRoot);
+    await withHeldInstalledRuntime(selected, async held => {
+      for (const entry of skill.contents) {
+        const digest = sha256Bytes(entry.bytes); assert(held.seed.some(member => member.artifactRef === digest && member.byteCount === entry.bytes.length));
+        assert((await readFile(path.join(stateRoot, KERNEL_CAS_DIRECTORY, digest))).equals(entry.bytes));
+      }
+    });
+    await selected.close(); selected = undefined; await rm(packageRoot, { recursive: true }); selected = await runtime.openSelected(stateRoot);
+    assert.equal((await readInstalledRuntimeObservation(selected)).bundleDigest, installation.bundleDigest);
+    assert(!(await readdir(stateRoot)).includes(KERNEL_DATABASE_FILENAME), 'opaque signed installer data supplies no StateOwner or Run execution proof');
   } finally { await selected?.close(); await rm(fixture, { recursive: true, force: true }); }
 });
 

@@ -30,7 +30,7 @@ import { readRun } from './rows.js';
 import type { ArtifactCatalog } from './artifacts.js';
 import { sampleCanonicalNow } from './canonical-time.js';
 import { validateControlChannelClosure, type AuthenticatedControlIdentity } from './control-channel.js';
-import { decodeSourceManifest, decodeWorkspaceIdentity } from './decoders.js';
+import { decodeLocalPrincipalIdentity, decodeSourceManifest, decodeWorkspaceIdentity } from './decoders.js';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
 import { decodeSandboxProfile } from './execution-closure.js';
 import { loadInstalledCredentialPlatform, loadInstalledWorkerNative, withHeldInstalledRuntime, type HeldInstalledRuntime, type InstalledRuntimeBorrow } from './installed-runtime.js';
@@ -48,6 +48,8 @@ import type { AdmitRunInput } from './reducers/admission.js';
 import { readRetainedVerifierToolchain, type RetainedVerifierToolchain } from './guest-toolchain.js';
 import { VerifierAuthorizationError } from './authorization-artifacts.js';
 import type { InstalledApplyDiagnosticStage } from './installed-run-diagnostics.js';
+import { readAssemblySkills } from './skill-data.js';
+import { captureInstalledSkills } from './skill-source.js';
 
 type RetiredSource = Extract<SourceInspectionAttemptV1, { phase: 'retired' }>;
 type InstructionEntry = { canonicalRootRelativePath: string; directoryDepth: number;
@@ -89,9 +91,9 @@ export function assertInstalledRunRecipe(request: NormalizedRunSubmitRequest,
   model: Exclude<NormalizedRunSubmitRequest['model'], { provider: 'ollama' }>;
 } {
   if (request.model.provider !== 'openai-compatible' || request.dependency.mode !== 'none' ||
-      request.registeredMcpServerIds.length || request.skillIds.length || request.sourceIncludes.length ||
+      request.registeredMcpServerIds.length ||
       request.sandboxResources.maxProcesses < 8 || request.sandboxResources.maxSingleFileBytes > 268_435_456)
-    invalid('installed Run selects an unsupported model, execution resource, verifier, dependency, MCP, skill or source inclusion');
+    invalid('installed Run selects an unsupported model, execution resource, verifier, dependency or MCP');
   if (request.model.modelCredentialGrantIds.length !== 1)
     invalid('installed Run requires exactly one model bearer credential');
   assertSupportedVerifierRequests(request.verifiers, request.policyMode);
@@ -326,8 +328,8 @@ async function materialFor(installed: InstalledRuntimeBorrow, artifacts: Artifac
   childOrigin?: ChildAdmissionData): Promise<RunAssemblyValidationMaterial & { retainedToolchain?: RetainedVerifierToolchain }> {
   signal?.throwIfAborted();
   if (assembly.provider.name !== 'openai-compatible' || assembly.provider.endpoint.kind !== 'registered' ||
-      assembly.provider.negotiation.streaming || assembly.mcpServers.length || assembly.instructions.skills.length)
-    invalid('installed assembly selects an unsupported model, MCP or skill recipe');
+      assembly.provider.negotiation.streaming || assembly.mcpServers.length)
+    invalid('installed assembly selects an unsupported model or MCP recipe');
   const endpoint = decodeEndpointRegistration(await readCanonicalArtifact(artifacts, assembly.provider.endpoint.endpointRegistrationRef));
   const trust = installed.bundle.entries.find(entry => entry.entryId === endpoint.tls.trustStoreEntryId);
   if (!trust || trust.role !== 'trust_store' || trust.executable || endpoint.tls.trustStoreRuntimeBundleRef !== installed.bundleDigest ||
@@ -376,6 +378,7 @@ async function materialFor(installed: InstalledRuntimeBorrow, artifacts: Artifac
   if (!system || !compaction || system.ref !== assembly.instructions.systemPromptRef || system.value.textDigest !== assembly.instructions.systemPromptDigest ||
       compaction.material.ref !== assembly.context.compactionPromptEnvelopeRef) mismatch('installed assembly substitutes signed prompt identity');
   const instructions = await readInstructions(artifacts, assembly, endpoint.ownerPrincipalId);
+  const skills = await readAssemblySkills(artifacts, assembly);
   const credentialRefs = [...assembly.provider.credentialGrantRefs];
   for (const ref of credentialRefs) {
     const binding = decodeEndpointCredentialGrantBinding(await readCanonicalArtifact(artifacts, ref));
@@ -389,6 +392,7 @@ async function materialFor(installed: InstalledRuntimeBorrow, artifacts: Artifac
     { kind: 'system_prompt', ref: system.ref, digest: system.value.textDigest },
     { kind: 'compaction_prompt_envelope', ref: compaction.material.ref, digest: compaction.material.value.envelopeDigest },
     { kind: 'workspace_instructions', ref: assembly.instructions.workspaceInstructionsRef, digest: instructions.manifestDigest },
+    ...skills.map(skill => ({ kind: 'skill_manifest', ref: skill.manifestRef, digest: skill.manifest.manifestDigest })),
   ];
   let retainedToolchain: RetainedVerifierToolchain | undefined;
   if (assembly.runtime.guestToolchainManifestRef !== undefined) {
@@ -487,7 +491,7 @@ export async function assembleInstalledRun(input: {
   }
   const remote = request.model;
   reportInstalledRunAssemblyPhase(onAssemblyPhase, 'submit_assembly_source');
-  await validateControlChannelClosure(reads, owner, identity); assertActiveStateOwner(driver, owner); signal?.throwIfAborted();
+  const control = await validateControlChannelClosure(reads, owner, identity); assertActiveStateOwner(driver, owner); signal?.throwIfAborted();
   const session = readSession(driver, request.sessionId), workspace = decodeWorkspaceIdentity(await readCanonicalArtifact(reads, session.workspaceIdentityRef));
   if (readSessionPrincipalId(driver, session.id) !== identity.principalId || session.contextRevision !== request.expectedContextRevision ||
       workspace.kind !== 'live' || workspace.ownerPrincipalId !== identity.principalId || workspace.canonicalRootPath !== request.workspacePath)
@@ -507,26 +511,39 @@ export async function assembleInstalledRun(input: {
       sourceManifest.git && sourceManifest.git.repositoryIdentityDigest !== workspace.repositoryIdentityDigest)
     mismatch('installed source closure differs from the authenticated original capture');
   const repository = workspace.repositoryIdentityRef ? decodeRepositoryIdentity(await readCanonicalArtifact(reads, workspace.repositoryIdentityRef)) : undefined;
-  const held = await withHeldInstalledRuntime(selected, async installed => {
+  const captureRuntime = await withHeldInstalledRuntime(selected, async installed => {
     await installed.revalidate(signal); const active = assertActiveStateOwner(driver, owner);
     if (active.runtimeBundleRef !== installed.bundleDigest || target.runtimeBundleRef !== installed.bundleDigest ||
         active.runtimeBundleManifestDigest !== installed.bundle.manifestDigest) mismatch('installed assembly and capture have another runtime owner');
     await readRetainedSourceInspectionTarget(reads, source, readSourceInspectionOriginalRequest(driver, source.inspectionId),
       { bundle: installed.bundle, releaseKeys: installed.releaseKeys, sandboxProfile: decodeSandboxProfile(await readCanonicalArtifact(reads, target.sandboxProfileRef)) },
       { driver, owner, signal });
-    const native = await installed.loadStateOwner(signal); await installed.revalidate(signal); return native;
+    const native = await installed.loadStateOwner(signal); await installed.revalidate(signal);
+    return { native, bundle: immutableSnapshot(installed.bundle), bundleRef: installed.bundleDigest };
   }, signal);
+  const held = captureRuntime.native;
   reportInstalledRunAssemblyPhase(onAssemblyPhase, 'submit_assembly_platform');
   const platform = await loadInstalledCredentialPlatform(selected, signal), user = platform.currentUser();
   if (path.join(user.home, '.cliq') !== controlledHome) mismatch('installed instruction home is not the actual platform controlled home');
   const resources: Array<{ close(): void }> = []; let failure: unknown;
   let instructions: Awaited<ReturnType<typeof captureInstalledWorkspaceInstructions>>;
+  let skills: Awaited<ReturnType<typeof captureInstalledSkills>> = { skills: [], metadata: [] };
   try {
     const home = held.openWorkspaceRoot(controlledHome); resources.push(home);
     const trust = await holdWorkspaceSourceTrust(home, request.workspacePath, signal); resources.push(trust);
     assertWorkspaceSourceTrust(trust, request.workspacePath);
     const root = held.openWorkspaceRoot(request.workspacePath); resources.push(root);
     instructions = await captureInstalledWorkspaceInstructions(root, artifacts, workspace, session.workspaceIdentityRef, signal);
+    if (request.skillIds.length) {
+      const principal = decodeLocalPrincipalIdentity(await readCanonicalArtifact(reads, control.channel.principalIdentityRef));
+      if (principal.principalId !== identity.principalId || principal.identityDigest !== control.channel.principalIdentityDigest)
+        mismatch('selected skills do not belong to the authenticated original principal');
+      const actualHome = held.openWorkspaceRoot(user.home); resources.push(actualHome);
+      skills = await captureInstalledSkills({ artifacts, requestedSkillIds: request.skillIds, workspaceRoot: root,
+        workspaceIdentity: workspace, workspaceIdentityRef: session.workspaceIdentityRef,
+        userRoots: [{ root: home, prefix: 'skills' }, { root: actualHome, prefix: '.agents/skills' }], actualUserHome: user.home,
+        principal, principalRef: control.channel.principalIdentityRef, bundle: captureRuntime.bundle, bundleRef: captureRuntime.bundleRef, signal });
+    }
     assertWorkspaceSourceTrust(trust, request.workspacePath);
   } catch (error) { failure = error; throw error; } finally { closeOwned(resources, failure); }
   const admittedAt = sampleCanonicalNow(), deadlineAt = addCanonicalDuration(admittedAt, request.budgets.wallTimeMs);
@@ -588,7 +605,7 @@ export async function assembleInstalledRun(input: {
         calculationAlgorithm: 'cliq-price-ceil-v1', maxRunCostMicros: request.budgets.costMicros, validThrough: model.priceTable.value.validThrough,
         provenanceRef: model.priceTable.value.signatureRef } }, mcpServers: [], tools: { manifestRef: toolRef, manifestDigest: tools.manifestDigest },
       instructions: { systemPromptRef: system.ref, systemPromptDigest: system.value.textDigest, workspaceInstructionsRef: instructions.ref,
-        workspaceInstructionsDigest: instructions.value.manifestDigest, skills: [] },
+        workspaceInstructionsDigest: instructions.value.manifestDigest, skills: skills.skills },
       runtime: { runtimeBundleRef: installed.bundleDigest, runtimeBundleManifestDigest: installed.bundle.manifestDigest,
         workerExecutableId: worker.entryId, workerExecutableDigest: worker.digest, sandboxBackend: 'linux_namespace',
         ...(selectedGuest ? { guestToolchainManifestRef: selectedGuest.manifestRef,

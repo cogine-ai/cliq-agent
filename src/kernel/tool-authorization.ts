@@ -63,7 +63,8 @@ export type ToolPolicyChannel =
       parser: 'cliq-bash-head-parser-v1'; outerCommandHead?: string; nestedBuiltinDenyHeads: string[]; unsafeForAllow: boolean }
   | { channel: 'mcp'; registrationId: string; serverToolName: string }
   | { channel: 'plan' | 'plan-progress'; normalizedPlanIdentity: string }
-  | { channel: 'named-action'; action: 'child_read_only' | 'child_mutating'; mode: 'read_only' | 'mutating' };
+  | { channel: 'named-action'; action: 'child_read_only' | 'child_mutating'; mode: 'read_only' | 'mutating' }
+  | { channel: 'named-action'; action: 'skill_resource'; skillId: string; canonicalRelativePath: string };
 
 /** Ordinary-tool branch of the RFC evidence union; named effects have separate owning reducers. */
 export type ToolPolicyChannelEvidenceV1 = ToolPolicyChannel & {

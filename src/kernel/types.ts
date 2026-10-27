@@ -1,5 +1,8 @@
 export type ArtifactRef = string;
 
+export type { BundledSkillClosureV1, SkillSourceFileBytesV1, DescriptorCapturedSkillSourceFileV1,
+  BundledSkillSourceFileV1, SkillSourceIdentityBaseV1, SkillSourceIdentityV1, SkillManifestV1 } from './skill.js';
+
 export type { DeliveryMergeItem, DeliveryMergeConflictItem, DeliveryDecisionItem } from './delivery.js';
 export type { DeliveryPlan, PublicationOperation, PublicationAbortOperation, PublicationProofV1,
   PublicationPathProgressItem, PublicationPathResultItem, PublicationLateObservationItem, DeliveryTerminalProjectionEvidence } from './publication.js';
@@ -1379,7 +1382,7 @@ export type InvocationJournalEntry = {
   seq: number;
   runId: string;
   opId: string;
-  opKind: 'model' | 'tool' | 'mcp-server' | 'mcp' | 'verifier' | 'publish' | 'child_admission' | 'child_merge' | 'child_await';
+  opKind: 'model' | 'tool' | 'mcp-server' | 'mcp' | 'verifier' | 'publish' | 'child_admission' | 'child_merge' | 'child_await' | 'skill_resource';
   attempt: number;
   leaseEpoch: number;
   phase: InvocationPhase;

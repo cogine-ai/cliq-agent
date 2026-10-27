@@ -720,6 +720,8 @@ export type HeldWorkspaceRoot = Readonly<{
   openSnapshot(): HeldWorkspaceCursor;
   /** Fixed instruction recipe: skip Git metadata, read only AGENTS.md bytes. */
   openInstructionSnapshot(): HeldWorkspaceCursor;
+  /** Fixed declarative skill capture: skip Git metadata, never read symlink targets. */
+  openSkillSnapshot(): HeldWorkspaceCursor;
   close(): void;
 }>;
 

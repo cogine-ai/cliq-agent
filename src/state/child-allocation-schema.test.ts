@@ -181,10 +181,12 @@ test('schema 8 retains every original physical Journal guard and closes local op
     const first = current.indexOf("    WHEN NEW.op_kind IN ('child_admission', 'child_merge')");
     const last = current.indexOf('    WHEN NEW.attempt < 0', first);
     assert(first >= 0 && last > first);
-    assert.equal((current.slice(0, first) + current.slice(last)).replace(", 'child_admission', 'child_merge', 'child_await'", ''), original,
+    const addedKinds = ", 'child_admission', 'child_merge', 'child_await', 'skill_resource'";
+    assert.equal(current.split(addedKinds).length, 2, 'only the four exact schema-8 local kinds extend the original whitelist');
+    assert.equal((current.slice(0, first) + current.slice(last)).replace(addedKinds, ''), original,
       'all original physical kind, sequencing, claim, terminal, UNKNOWN and settlement checks remain byte-identical');
     let seq = 0;
-    for (const opKind of ['child_admission', 'child_merge', 'child_await']) {
+    for (const opKind of ['child_admission', 'child_merge', 'child_await', 'skill_resource']) {
       const prepared = { seq: seq + 1, runId: 'p0', opId: opKind, opKind, attempt: 0, leaseEpoch: 0, phase: 'prepared',
         target: ref, requestRef: ref, replayClass: 'retry', idempotencyKey: opKind, ...(opKind === 'child_await' ? {} : { grantRef: ref }),
         budgetDelta: { modelTokens: 0, costMicros: 0, toolCalls: 1, repairAttempts: 0 }, timestamp: time, localCommittedAt: time };
@@ -211,7 +213,7 @@ test('schema 8 retains every original physical Journal guard and closes local op
       });
       seq += 3;
     }
-    assert.equal(f.db.prepare('SELECT count(*) AS n FROM run_journal').get<{ n: bigint }>()!.n, 9n);
+    assert.equal(f.db.prepare('SELECT count(*) AS n FROM run_journal').get<{ n: bigint }>()!.n, 12n);
   } finally { await f.close(); }
 });
 

@@ -57,7 +57,9 @@ import type { InstalledPublicationStopResult } from './installed-publication-sto
 import { projectInstalledRunProgress } from './installed-run-progress.js';
 import { projectInstalledUnitStopObservation } from './installed-unit-stop-observation.js';
 import { readInstalledAssemblyWorkJournal, readInstalledPublicationStageJournal, readInstalledStoreDiagnosticJournal, readInstalledStoreStopPhaseJournal } from './installed-store-diagnostic-journal.js';
-import { installedToolsCalls, installedReadOnlyGitCall, assertInstalledToolsOutcome } from './installed-tools-result.js';
+import { installedReadOnlyGitCall, assertInstalledToolsOutcome } from './installed-tools-result.js';
+import { INSTALLED_SKILLS_PROFILE, installedSkillIds, installedBundledSkill, installedToolsAndSkillsCalls,
+  createInstalledSkillSources, assertInstalledSkillPrompt, assertInstalledSkillsOutcome } from './installed-skills.js';
 import { installedBashStopCall, observeInstalledBash, assertInstalledBashStopped, type InstalledBashProcesses } from './installed-tools-stop.js';
 
 type Recipe = { buildFixture: string; packageRoot: string; installerEntry: string; stateRoot: string; releaseKeysFile: string;
@@ -172,11 +174,13 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
   const installedClientDriver = path.join(recipe.buildFixture, 'installed-control-client-driver.mjs');
   const report: Record<string, any> = { diagnosticOnly: true, qualified: false, phase: 'installation',
     ordinaryGitFixtureProfile: journeyKind === 'verifier' ? 'verifier_four_plus_ordinary_git_v1' : 'delivery_three_plus_two_git_v1',
-    scope: 'actual signed Linux installed Node required/advisory verifier, repair and exhausted timeout, fixed ordinary tools, explicit approval/input and original process interruption using public v1 UDS and owned HTTPS; not actual provider, release or complete I2/I1 fault qualification',
+    scope: 'actual signed Linux installed Node required/advisory verifier, repair and exhausted timeout, fixed ordinary tools, frozen three-scope skills and CAS-only resource reads, explicit approval/input and original process interruption using public v1 UDS and owned HTTPS; not actual provider, release or complete I2/I1 fault qualification',
     actualProviderQualified: false, actualProviderBillingQualified: false, completeI1Qualified: false, completeI2Qualified: false,
     beforeVerifierReleaseStopCutQualified: false, allCrashCutsQualified: false, macosQualified: false, rebootQualified: false };
   if (journeyKind === 'verifier') report.ordinaryToolsFixtureProfile = 'verifier_five_plus_interactive_tools_and_stop_v1';
   if (journeyKind === 'verifier') report.ordinaryChildrenFixtureProfile = INSTALLED_CHILDREN_PROFILE;
+  if (journeyKind === 'verifier') report.ordinarySkillsFixtureProfile = INSTALLED_SKILLS_PROFILE;
+  if (journeyKind === 'verifier') report.ordinarySourceIncludesFixtureProfile = 'single_builtin_entry_original_capture_v1';
   if (journeyKind === 'delivery') Object.assign(report, {
     scope: 'actual signed Linux explicit Delivery from verified yolo sources, direct-policy publication, noOp, real verifier merge, cancel and public reconnect/restart; not interactive ask/deny, paid provider, release, reboot or complete I1 qualification',
     interactiveApprovalQualified: false, preciseClaimedCloseCutQualified: false,
@@ -563,7 +567,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         const active = activeCases.get(sourceKind)!; const ordinal = ++active.posts; postCount++;
         assert(ordinal <= (sourceKind === 'ordinary_tools_cancel' ? 1 : kind === 'required_repair' ? 4 : kind === 'required_pass' ? 2 : 1), 'completed or unknown claims must not resend model requests');
         const stoppedTools = sourceKind === 'ordinary_tools_cancel' || sourceKind === 'ordinary_tools_restart';
-        const toolsCase = sourceKind === 'ordinary_tools' || stoppedTools, tools = stoppedTools ? [installedBashStopCall] : installedToolsCalls(beforeText, afterText);
+        const toolsCase = sourceKind === 'ordinary_tools' || stoppedTools, tools = stoppedTools ? [installedBashStopCall] : installedToolsAndSkillsCalls(beforeText, afterText);
+        if (sourceKind === 'ordinary_tools') assertInstalledSkillPrompt(body, ordinal > 1);
         const edit = !toolsCase && (kind === 'required_pass' && ordinal === 1 || kind === 'required_repair' && (ordinal === 1 || ordinal === 3));
         const callId = 'owned-verifier-edit-' + ordinal;
         if (toolsCase && ordinal > 1) {
@@ -652,6 +657,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       serverAuthenticationDiagnostics: options.publicationRetirementDiagnostics,
       ...(storeFailureDiagnostics ? { storeFailureDiagnostics: true as const } : {}),
       resourceDiagnostics: true,
+      ...(journeyKind === 'verifier' ? { bundledSkills: installedBundledSkill() } : {}),
       ...(journeyKind === 'verifier' ? { guestImageProfile: 'qualification_max' as const } : {}) });
     assert(signed.guestToolchain && signed.modelAuthority);
     expectedToolNames = signed.modelAuthority.tools.value.entries.map(entry => entry.name);
@@ -881,6 +887,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         const filename = path.join(workspace, entry.path); await writeFile(filename, entry.before, { flag: 'wx', mode: 0o644 });
         await chown(filename, ledger.uid, ledger.gid); sourceIdentity.set(entry.path, sourceMetadata(await lstat(filename, { bigint: true })));
       }
+      const removeMutableSkillSources = sourceKind === 'ordinary_tools'
+        ? await createInstalledSkillSources(ledger.home, workspace, ledger.uid, ledger.gid) : undefined;
       const workspaceId = sha256Bytes(Buffer.from(workspace)), trustDirectory = path.join(cliqHome, 'workspaces', workspaceId);
       await mkdir(trustDirectory, { recursive: true, mode: 0o700 });
       for (const directory of [path.dirname(trustDirectory), trustDirectory]) await chown(directory, ledger.uid, ledger.gid);
@@ -922,11 +930,14 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
           argv: ['--test', '--test-concurrency=1', 'check.test.mjs'].map(value => ({ kind: 'non_secret_literal', value })),
           cwd: '.', env: {}, writableEphemeralPaths: [], identityReadGrantId: grant!.grantId,
           timeoutMs: kind === 'required_timeout' ? 1000 : 10000, retries: kind === 'required_timeout' ? 1 : 0, outputLimitBytes: 65536 }],
-        dependency: { mode: 'none' }, sourceIncludes: [], sourceExcludes: [], registeredMcpServerIds: [], skillIds: [],
+        dependency: { mode: 'none' }, sourceIncludes: sourceKind === 'ordinary_tools' ? [{ path: 'example.txt', scope: 'entry' }] : [],
+        sourceExcludes: sourceKind === 'ordinary_tools' ? [{ path: '.cliq/skills', scope: 'subtree' }] : [],
+        registeredMcpServerIds: [], skillIds: sourceKind === 'ordinary_tools' ? installedSkillIds() : [],
         ...(inspectionGrantId ? { sourceInspectionGrantId: inspectionGrantId, ignoreReadGrantIds: [ignoreGrantId!] } : {}),
         allowUnverified: toolsCase || kind === 'advisory_failure' });
       const admission: Response = await client.send(submit, 30000);
       const admitted: Record<string, any> = accepted(admission, 'run.submit').snapshot.run;
+      await removeMutableSkillSources?.();
       activeCases.set(sourceKind, { runId: admitted.id, posts: 0, identities: [] });
       const by = Date.now() + 90000;
       const controls = { approvals: 0, denials: 0, inputReplies: 0, restarted: false, replayed: false, staleRefused: false };
@@ -1072,8 +1083,9 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         try { assert.notEqual('linux-proc-start-ticks:' + await processStart(readParent.pid), readParent.processStartToken); }
         catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
       }
-      const toolProof = sourceKind === 'ordinary_tools' ? await assertInstalledToolsOutcome({ cut, sessionCut, readCas, calls: installedToolsCalls(beforeText, afterText),
-        observedReadParent: originalReadRetirement!, controls }) : undefined;
+      const toolProof = sourceKind === 'ordinary_tools' ? await assertInstalledToolsOutcome({ cut, sessionCut, readCas, calls: installedToolsAndSkillsCalls(beforeText, afterText),
+        observedReadParent: originalReadRetirement!, originalHostFile: sourceIdentity.get('example.txt')!, controls }) : undefined;
+      const skillProof = sourceKind === 'ordinary_tools' ? await assertInstalledSkillsOutcome({ cut, readCas }) : undefined;
       const stopProof = stoppedTools ? await (async () => {
         assert(executingBash && bashPhysicallyJoined);
         const retirement = inspectInstalledWorkerRetirement(recipe.stateRoot, ledger.uid, executingBash.parent);
@@ -1098,9 +1110,11 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       assert.equal(claims.filter((entry: any) => entry.opKind === 'model').length, active.posts);
       assert.equal(claims.filter((entry: any) => entry.opKind === 'tool').length, executedToolCount);
       assert.equal(claims.filter((entry: any) => entry.opKind === 'verifier').length, verifierCount);
-      assert.equal(claims.length, active.posts + executedToolCount + verifierCount);
+      const localSkillReads = sourceKind === 'ordinary_tools' ? 3 : 0;
+      assert.equal(claims.filter((entry: any) => entry.opKind === 'skill_resource').length, localSkillReads);
+      assert.equal(claims.length, active.posts + executedToolCount + verifierCount + localSkillReads);
       assert.equal(canonicalSha256(cut.snapshot.run.budgetConsumed), canonicalSha256({ modelTokens: active.posts * 36864,
-        costMicros: 0, toolCalls: executedToolCount + verifierCount, repairAttempts: kind === 'required_repair' ? 1 : 0 }));
+        costMicros: 0, toolCalls: executedToolCount + verifierCount + localSkillReads, repairAttempts: kind === 'required_repair' ? 1 : 0 }));
       assert.equal(canonicalSha256(cut.snapshot.run.budgetReserved), canonicalSha256({ modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 }));
       assert.equal(active.identities.length, sourceKind === 'ordinary_tools_cancel' ? 0 : kind === 'required_repair' ? 2 : 1);
       const retirements = active.identities.map(identity => inspectInstalledWorkerRetirement(recipe.stateRoot, ledger.uid, identity));
@@ -1136,7 +1150,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       completed.push(completedSource);
       report.cases.push({ kind: sourceKind, qualified: true, runId: admitted.id, resultRef: cut.snapshot.run.resultRef ?? null,
         posts: active.posts, actualOriginalWorkersRetired: retirements.length,
-        exactVerifierProcessLifetimesIndependentlyAbsent: proof !== undefined, ...(proof ? { proof } : toolProof ? { toolProof } : { stopProof }) });
+        exactVerifierProcessLifetimesIndependentlyAbsent: proof !== undefined, ...(proof ? { proof } : toolProof ? { toolProof, skillProof } : { stopProof }) });
       return completedSource;
     };
     if (journeyKind === 'verifier') {
@@ -2049,7 +2063,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         else if (diagnostic.code === 'ERR_ASSERTION') failureKinds.push({ kind: 'assertion' });
         else if (diagnostic.code === 'ERR_SQLITE_ERROR' && typeof diagnostic.errcode === 'number' && Number.isSafeInteger(diagnostic.errcode) &&
             diagnostic.errcode >= 0 && diagnostic.errcode <= 65535) failureKinds.push({ kind: 'sqlite', primaryCode: diagnostic.errcode & 0xff });
-        for (const match of (error.stack ?? '').matchAll(/\b(qualify-installed-verifier-journey|qualify-installed-delivery-journey|installed-node-journey|installed-delivery-journey|installed-delivery-result|installed-verifier-result|installed-tools-result|installed-tools-stop|installed-guest-package|installed-supervisor-package|installed-model-package|installed-read-control|installed-client-consumer|installed-enroll-diagnostic|installed-worker-lease|installed-publication-recovery|installed-publication-crash-observer|installed-publication-stop-result|installed-publication-journal|installed-publication-retirement|installed-publication-late-result)\.ts:([1-9][0-9]{0,6}):([1-9][0-9]{0,6})/gu)) {
+        for (const match of (error.stack ?? '').matchAll(/\b(qualify-installed-verifier-journey|qualify-installed-delivery-journey|installed-node-journey|installed-delivery-journey|installed-delivery-result|installed-verifier-result|installed-tools-result|installed-tools-stop|installed-skills|installed-guest-package|installed-supervisor-package|installed-model-package|installed-read-control|installed-client-consumer|installed-enroll-diagnostic|installed-worker-lease|installed-publication-recovery|installed-publication-crash-observer|installed-publication-stop-result|installed-publication-journal|installed-publication-retirement|installed-publication-late-result)\.ts:([1-9][0-9]{0,6}):([1-9][0-9]{0,6})/gu)) {
           if (match[1] === 'installed-publication-late-result' && !options.publicationRetirementLate) continue;
           if (frames.length < 8) frames.push({ file: match[1]! + '.ts', line: Number(match[2]), column: Number(match[3]) });
         }

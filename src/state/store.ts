@@ -2694,6 +2694,15 @@ export class StateStore {
             else if (admitted.run.stopIntentRef) this.requestInstalledRunStop(runId);
             continue;
           }
+          if (selection.disposition === 'skill_resource_required') {
+            try { await agent.readSkillResource({ expectedRunRevision: selection.run.revision, leaseEpoch: selection.run.leaseEpoch }, readSignal); }
+            catch (error) {
+              if (!(error instanceof KernelStorageError) || error.code !== 'BUDGET_EXHAUSTED') throw error;
+              await agent.stopForResourceFailure({ expectedRunRevision: selection.run.revision });
+              this.requestInstalledRunStop(runId);
+            }
+            continue;
+          }
           if (selection.disposition !== 'worker_required') throw new KernelStorageError('RECOVERY_REQUIRED', 'queued tool unexpectedly retains execution authority');
           if (!this.installedWorkerSlotAvailable(runId)) return;
         }

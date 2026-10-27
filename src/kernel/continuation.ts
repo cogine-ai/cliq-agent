@@ -21,7 +21,7 @@ export type SupervisorControlExecutionV1 = {
 };
 
 export type SupervisorOperationExecutionV1 = {
-  kind: 'supervisor_operation'; handlerId: 'delegate' | 'child_merge'; supervisorEntryId: string;
+  kind: 'supervisor_operation'; handlerId: 'delegate' | 'child_merge' | 'skill_resource'; supervisorEntryId: string;
   supervisorEntryVersion: string; supervisorExecutableDigest: string;
 };
 
@@ -110,6 +110,7 @@ export type ToolResultPayloadV1 = {
   | { outcome: 'executed'; source: 'user_input'; inputItemRef: ArtifactRef; inputRef: ArtifactRef; inputDigest: string }
   | { outcome: 'executed'; source: 'child_admission'; opId: string; journalResultRef: ArtifactRef; journalResultDigest: string; childHandleItemRef: ArtifactRef }
   | { outcome: 'executed'; source: 'child_admission_refusal'; opId: string; journalResultRef: ArtifactRef; journalResultDigest: string }
+  | { outcome: 'executed'; source: 'skill_resource'; opId: string; journalResultRef: ArtifactRef; journalResultDigest: string }
   | { outcome: 'executed'; source: 'child_results'; waitSetRef: ArtifactRef; childResultItemRefs: ArtifactRef[]; mergeResultItemRefs?: ArtifactRef[] }
   | { outcome: 'denied'; code: 'TOOL_CALL_DENIED'; denial:
       | { source: 'policy'; policyRef: ArtifactRef; decisionDigest: string }

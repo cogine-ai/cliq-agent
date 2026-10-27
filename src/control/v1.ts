@@ -7,7 +7,7 @@ export { CONTROL_FRAME_BYTES, CONTROL_METHODS_V1, INSTALLED_CONTROL_FEATURES, CO
 export type { InstalledControlFeature, InstalledControlMethod, InstalledControlRequestV1,
   InstalledControlResponseFor, InstalledControlResultFor, HeadlessControlRequestV3, HeadlessControlResponseV3, HeadlessRunEventV3, HeadlessControlRecordV3 } from '../kernel/control-wire.js';
 
-export const CONTROL_V1_SOURCE_DIGEST = "f2039e80255358bbb47b5a6c67c76a21404882b6c2a6e5fc4513756cf48f91c3";
+export const CONTROL_V1_SOURCE_DIGEST = "bd452896a24a928e8c556c04f31c810ca1ac4347c140a9a214e1077ff31b15b2";
 export const CONTROL_V1_SOURCE_MANIFEST = Object.freeze({
   entry: "src/kernel/control-wire.ts",
   scope: "static_local_typescript_dependency_closure_including_types",
@@ -17,11 +17,11 @@ export const CONTROL_V1_SOURCE_MANIFEST = Object.freeze({
   "src/kernel/canonical.ts": "1da8e712e84191808e03fdee254d04473dd874d360e05c2bf6215ea1f9e129ba",
   "src/kernel/child-merge.ts": "a940f9821d47e13287a52069cabfdbd326432e1def9991285ebd80f693298fae",
   "src/kernel/children.ts": "1e7c4a8351c627f8a02a097a5a9ce5657ce20533d384d00bf0df4fed23f14657",
-  "src/kernel/continuation.ts": "b710d1f6315a9c696e249c93e84391e2f07831b19dd8f089a226831941b692ce",
-  "src/kernel/control-apply.ts": "141295473f3220d390d466fc8a668106b914cfccf12a72458ca1198b3deb0581",
+  "src/kernel/continuation.ts": "c1efd4e92a67d150d5a085f80087516c6babe36725018ff744d0e8528f76e86f",
+  "src/kernel/control-apply.ts": "eb3129bf940a92a1f601f4015323a8ae462a9a6776b813ee1aa1e02d70197e5d",
   "src/kernel/control-list.ts": "66ef7efddbb92aef34d2ab35b02f2f0e0a153b5e74acabe75b153856a6cfb723",
   "src/kernel/control-submit.ts": "c9d6ec30110293419c1b47797e2a6561b10e0651d13bcc9cc85ee4371b8014e9",
-  "src/kernel/control-wire-data.ts": "c1ae600750ed54db5653409e498ceedb4c0f3d31c8dfc7004890a138f4a1adab",
+  "src/kernel/control-wire-data.ts": "a2a2fb9a3f4f053cd7a2e2b06aa44f6503072c6b507f9a078d2edfeb244e9750",
   "src/kernel/control-wire.ts": "8919d5003addbd8bb49e91a82c1638513c9ecff6c5cfea58038a837fe651d3bb",
   "src/kernel/credential-authority.ts": "9f859359d7ef7e6471a57f8d2be6a2244c3fc6894ce73ebce343c545b71a83ea",
   "src/kernel/delivery-invocation.ts": "6a0fe0225ce62aa11aa3ddbed7d8e4e58f2fcf2034291aaf46af846fa2016263",
@@ -33,10 +33,11 @@ export const CONTROL_V1_SOURCE_MANIFEST = Object.freeze({
   "src/kernel/reconciliation.ts": "904c5bf2eb9775270b700735a8e99160ccc846a3918e5f2d00e80f18c57bd0fc",
   "src/kernel/result.ts": "4ce5e2e822f9fd4af27f4ada16b0727896d2083fe2d6039c57faeff5d3bd293e",
   "src/kernel/session-continuity.ts": "79c74f5ae89083c25caa42ec9def7db3b36522683ad6192108b5d84689944fe3",
+  "src/kernel/skill.ts": "5706a937be8edfed33cea9ea5e7a189ec348937da373246d6b293042ddf847e0",
   "src/kernel/source-read-scope.ts": "18cd25f1e2992e2634c90e51acb6cae2ea11f1f7745831b3061ac52d76e07655",
   "src/kernel/stop.ts": "c3bf431e0ff0d599bac845e544c8d2cacb9a6ae8ba454b0e19bd8a9ddadda914",
-  "src/kernel/tool-authorization.ts": "69d8bec97caa00b3b99a8de9f3b64d8f9dda079b07d87595abdf83ef72f15407",
-  "src/kernel/types.ts": "82af526689b08286f27c0d3afb6507fa6d34c49498f3a1f5ab580dd43692c96e",
+  "src/kernel/tool-authorization.ts": "27b02660459f2d6ec70d97deb7d01cfb4b2c2a8c828cc08736b8c27bfea1f2d7",
+  "src/kernel/types.ts": "e691c686c9d5cfd00f07294a9343f144055a936bfc71fdbec535d7462531a7cd",
   "src/kernel/user-input.ts": "010bd6ca988106cddf40aaa238930670a653deb567e347178ffc11851e291e89",
   "src/kernel/verifier-invocation.ts": "30f35a66fda07b7d85543e44c5c409449f895d090a51f980151a571ad55e6206",
   "src/kernel/verifier.ts": "d70004abb58b9b08e0a2c5681688db8dd9a98f490dee6dbfd3c10ee90b5e7247",

@@ -47,6 +47,8 @@ import { runInstalledCredentialAuthority, type HeldCredentialAuthorityLock } fro
 import type { NativeWorkerBinding, NativeWorkerImage, NativeSourceGitInspectorImage } from '../sandbox/linux-worker.js';
 import type { CredentialPlatformUser, NativeCredentialInspection, NativeCredentialPlatformBinding, NativeSecretServiceInput } from './credential-platform.js';
 import { GUEST_EXTRACTOR_RECIPE, type NativeGuestExtractorBinding, type NativeGuestToolchain, type NativeSourceGitToolchain } from '../sandbox/guest-toolchain.js';
+import { decodeBundledSkillClosure, SKILL_RESOURCE_BYTES } from '../kernel/skill.js';
+import { bundledSkillMemberRoles, bundledSkillRoots, validateBundledSkillReferences } from './bundled-skills.js';
 import { decodeGuestToolchainManifest, guestToolchainExecutables, guestToolchainRoots, validateGuestToolchainMetadata,
   type RetainedVerifierToolchain } from './guest-toolchain.js';
 import { acquireHeldInstalledAnchor, executeHeldInstalledImage, initializeHeldInstalledKeeper, loadHeldStateOwnerImage,
@@ -400,6 +402,12 @@ type VerifiedPackage = { root: Directory; manifest: InstalledFile; bundle: Runti
   streamedRoots: Map<string, InstalledFile>;
   structured: InstalledStructuredArtifacts; modelAuthority?: VerifiedInstalledModelAuthority;
   companionFiles: InstalledFile[] };
+function streamedInstalledSchemaKind(signed: VerifiedPackage, ref: string): string {
+  const declared = signed.structured.objects.filter(object => object.artifactRef === ref);
+  if (declared.length !== 1 || !['cliq-guest-image-raw-ext4-v1', 'cliq-skill-source-file-v1'].includes(declared[0]!.schemaKind))
+    mismatch('installed streamed data has no exact supported original member kind');
+  return declared[0]!.schemaKind;
+}
 
 const SMALL_BYTES = 1_048_576;
 const TRUST_BYTES = 16 * SMALL_BYTES;
@@ -976,7 +984,7 @@ async function verifyPackageBytes(scope: Scope, root: Directory, releaseKeys: re
     const identity = `${file.info.dev}:${file.info.ino}`;
     if (inodes.has(identity)) mismatch('distinct signed entries alias one installed inode');
     inodes.add(identity); entries.set(entry.entryId, file);
-    if (['policy_engine', 'sandbox_root_profile', 'system_prompt', 'compaction_prompt', 'guest_toolchain', 'schema'].includes(entry.role)) {
+    if (['policy_engine', 'sandbox_root_profile', 'system_prompt', 'compaction_prompt', 'guest_toolchain', 'schema', 'skill_bundle'].includes(entry.role)) {
       if (entry.executable) mismatch('signed structured roots must be data');
       const bytes = await readSmall(file, SMALL_BYTES, signal); const value = checkCanonicalBytes(bytes);
       if (entry.role === 'policy_engine') {
@@ -999,6 +1007,9 @@ async function verifyPackageBytes(scope: Scope, root: Directory, releaseKeys: re
   });
   const imageRefs = new Set(guests.map(guest => guest.manifest.guestImageRef));
   const signatureRefs = new Set(guests.map(guest => guest.manifest.signatureRef));
+  const skillClosures = new Map(bundledSkillRoots(bundle).map(root => [root.artifactRef,
+    decodeBundledSkillClosure(checkCanonicalBytes(roots.get(root.artifactRef)!))] as const));
+  const skillMembers = bundledSkillMemberRoles(bundle, skillClosures);
   for (const entry of bundle.entries.filter(entry => entry.role === 'bundle_object')) {
     signal?.throwIfAborted();
     const file = entries.get(entry.entryId)!;
@@ -1006,12 +1017,24 @@ async function verifyPackageBytes(scope: Scope, root: Directory, releaseKeys: re
       if (entry.executable || entry.byteCount < 1 || entry.byteCount > GUEST_EXTRACTOR_RECIPE.maxImageBytes)
         mismatch('installed guest image exceeds the supported signed recipe bound');
       await verifyBytes(file, signal); streamedRoots.set(entry.digest, file);
+    } else if (skillMembers.instructions.has(entry.digest)) {
+      roots.set(entry.digest, await readSmall(file, SMALL_BYTES, signal));
+    } else if (skillMembers.resources.has(entry.digest)) {
+      if (entry.executable || entry.byteCount > SKILL_RESOURCE_BYTES) mismatch('installed skill resource exceeds its signed data bound');
+      await verifyBytes(file, signal); streamedRoots.set(entry.digest, file);
     } else {
       const bytes = await readSmall(file, signatureRefs.has(entry.digest) ? 64 : SMALL_BYTES, signal);
       if (!signatureRefs.has(entry.digest)) checkCanonicalBytes(bytes);
       roots.set(entry.digest, bytes);
     }
   }
+  await validateBundledSkillReferences(skillClosures, async (ref, byteCount) => {
+    const retained = roots.get(ref); if (retained) return retained;
+    const declarations = bundle.entries.filter(entry => entry.digest === ref), entry = declarations[0];
+    if (declarations.length !== 1 || !entry || entry.role !== 'bundle_object' || entry.executable || entry.byteCount !== byteCount)
+      mismatch('skill textual resource has no unique original signed member');
+    return readSmall(entries.get(entry.entryId)!, SKILL_RESOURCE_BYTES, signal);
+  });
   const structured = validateInstalledStructuredArtifacts(bundle, roots);
   for (const guest of guests) {
     const signature = roots.get(guest.manifest.signatureRef);
@@ -1189,7 +1212,7 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
             await destination.assertDirectories();
             const result = await cas.publishChunks(artifactChunks(file), Number(file.info.size));
             if (result.ref !== ref || BigInt(result.byteLength) !== file.info.size)
-              mismatch('installed guest image CAS publication changed its complete identity');
+              mismatch('installed streamed data CAS publication changed its complete identity');
             await destination.assertDirectories();
             casFiles.push(await destination.file(casRoot, ref, 0o400, result.byteLength, ref));
             noteInstalledInstallPhase('cas_streams_publish', ++publishedStreams);
@@ -1446,10 +1469,10 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
               role === 'sandbox_root_profile' ? 'cliq-sandbox-root-profile-v1' :
               role === 'trust_store' ? 'cliq-https-trust-store-v1' : mismatch('installed seed contains an unsupported object'));
             return Object.freeze({ artifactRef, byteCount: bytes.length,
-              mediaType: schemaKind === 'cliq-builtin-tool-script-v1' || role === 'trust_store' || companionKind === 'ed25519_signature' || schemaKind === 'cliq-ed25519-signature-v1'
+              mediaType: schemaKind === 'cliq-builtin-tool-script-v1' || schemaKind === 'cliq-skill-source-file-v1' || role === 'trust_store' || companionKind === 'ed25519_signature' || schemaKind === 'cliq-ed25519-signature-v1'
                 ? 'application/octet-stream' : 'application/json', schemaKind });
           }).concat([...signed.streamedRoots].map(([artifactRef, file]) => ({ artifactRef, byteCount: Number(file.info.size),
-            mediaType: 'application/octet-stream', schemaKind: 'cliq-guest-image-raw-ext4-v1' })))
+            mediaType: 'application/octet-stream', schemaKind: streamedInstalledSchemaKind(signed, artifactRef) })))
             .sort((left, right) => left.artifactRef < right.artifactRef ? -1 : left.artifactRef > right.artifactRef ? 1 : 0)),
         });
         const selected: HeldInstalledRuntime = Object.freeze({
@@ -2442,7 +2465,9 @@ export async function stageInstalledRuntimeUpgrade(selected: HeldInstalledRuntim
           if (published[index]!.ref !== ref || published[index]!.byteLength !== bytes.length) mismatch('upgrade CAS root changed');
           await scope.assertDirectories(); const member = await scope.file(casRoot, ref, 0o400, bytes.length, ref);
           await verifyBytes(member); casFiles.push(member);
-          seed.push({ ref, byteLength: bytes.length, mediaType: 'application/json', schemaKind: 'cliq-installed-upgrade-seed-v1' });
+          const skillRaw = signed.structured.objects.some(object => object.artifactRef === ref && object.schemaKind === 'cliq-skill-source-file-v1');
+          seed.push({ ref, byteLength: bytes.length, mediaType: skillRaw ? 'application/octet-stream' : 'application/json',
+            schemaKind: skillRaw ? 'cliq-skill-source-file-v1' : 'cliq-installed-upgrade-seed-v1' });
         }
       }
       for (const [ref, image] of signed.streamedRoots) {
@@ -2451,7 +2476,7 @@ export async function stageInstalledRuntimeUpgrade(selected: HeldInstalledRuntim
         if (published.ref !== ref || BigInt(published.byteLength) !== image.info.size) mismatch('upgrade CAS stream changed');
         await scope.assertDirectories(); const member = await scope.file(casRoot, ref, 0o400, published.byteLength, ref);
         await verifyBytes(member); casFiles.push(member);
-        seed.push({ ref, byteLength: published.byteLength, mediaType: 'application/octet-stream', schemaKind: 'cliq-guest-image-raw-ext4-v1' });
+        seed.push({ ref, byteLength: published.byteLength, mediaType: 'application/octet-stream', schemaKind: streamedInstalledSchemaKind(signed, ref) });
       }
       await checkPackageGraph(sourceScope, packageDirectory, signed.bundle, signed.modelAuthority);
       for (const file of [signed.manifest, ...signed.entries.values(), ...signed.companionFiles]) { signal?.throwIfAborted(); await verifyBytes(file, signal); }

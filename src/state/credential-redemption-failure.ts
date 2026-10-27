@@ -122,7 +122,7 @@ export async function readCredentialRedemptionFailureCause(driver: SqliteDriver,
   const children = childAllocationBudgetFacts(cut.run.id, cut.childAllocations);
   if (cut.run.waitingReason && registeredCheckpointId === undefined || !isZeroBudget(subtractBudget(cut.run.budgetReserved, children.reserved))) return undefined;
   const history = [...stopInvocationHistory(source.journal).values()];
-  if (history.some(({ entry, hasClaim }) => !['model', 'tool', 'child_admission', 'child_merge', 'child_await'].includes(entry.opKind) ||
+  if (history.some(({ entry, hasClaim }) => !['model', 'tool', 'child_admission', 'child_merge', 'child_await', 'skill_resource'].includes(entry.opKind) ||
       entry.phase !== 'completed' && (entry.phase !== 'failed' || hasClaim))) return undefined;
   const latest = history.filter(({ entry }) => entry.opKind === 'model').at(-1);
   if (!latest || latest.entry.phase !== 'failed' || latest.hasClaim || !latest.entry.errorRef || !latest.entry.budgetSettlementRef) return undefined;

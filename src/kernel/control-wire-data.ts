@@ -297,11 +297,11 @@ function decodeJournalBase(record: Record<string, unknown>): void {
   requireSafeInteger(record.seq, 'Journal.seq', 1);
   requireString(record.runId, 'Journal.runId');
   requireString(record.opId, 'Journal.opId');
-  if (typeof record.opKind !== 'string' || !['model', 'tool', 'mcp-server', 'mcp', 'verifier', 'publish', 'child_admission', 'child_merge', 'child_await'].includes(record.opKind)) {
+  if (typeof record.opKind !== 'string' || !['model', 'tool', 'mcp-server', 'mcp', 'verifier', 'publish', 'child_admission', 'child_merge', 'child_await', 'skill_resource'].includes(record.opKind)) {
     invalid('Journal.opKind is not closed');
   }
   requireSafeInteger(record.attempt, 'Journal.attempt');
-  const local = record.opKind === 'child_admission' || record.opKind === 'child_merge' || record.opKind === 'child_await';
+  const local = record.opKind === 'child_admission' || record.opKind === 'child_merge' || record.opKind === 'child_await' || record.opKind === 'skill_resource';
   requireSafeInteger(record.leaseEpoch, 'Journal.leaseEpoch', local ? 0 : 1);
   if (local && (record.leaseEpoch !== 0 || record.attempt !== 0 || record.replayClass !== 'retry'))
     invalid('local child Journal has no worker lease or physical retry attempt');
@@ -334,7 +334,7 @@ export function decodeWireJournal(value: unknown): InvocationJournalEntry {
   const record = requireRecord(value, 'Journal');
   decodeJournalBase(record);
   const phase = record.phase;
-  if (record.opKind === 'child_admission' || record.opKind === 'child_merge' || record.opKind === 'child_await') {
+  if (record.opKind === 'child_admission' || record.opKind === 'child_merge' || record.opKind === 'child_await' || record.opKind === 'skill_resource') {
     const claim = ['dispatchId', 'supervisorInstanceId', 'stateOwnerEpoch'];
     const extra = phase === 'prepared' ? [] : phase === 'dispatch_claimed' ? claim
       : phase === 'completed' ? [...claim, 'resultRef', 'budgetSettlementRef'] : undefined;

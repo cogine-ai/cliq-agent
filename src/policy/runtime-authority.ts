@@ -142,7 +142,8 @@ export function verifyToolRuntimeAuthority(input: {
         throw new TypeError('unsupported compiled Supervisor control handler');
       executable(execution.supervisorEntryId, execution.supervisorExecutableDigest, 'supervisor', execution.supervisorEntryVersion);
     } else if (execution.kind === 'supervisor_operation') {
-      if (tool.name !== 'delegate' || execution.handlerId !== 'delegate' || tool.access !== 'exec' || tool.replayClass !== 'retry' ||
+      if (!['delegate', 'skill_resource'].includes(tool.name) || execution.handlerId !== tool.name ||
+          tool.access !== (tool.name === 'skill_resource' ? 'read' : 'exec') || tool.replayClass !== 'retry' ||
           tool.outputSchemaRef !== undefined || tool.outputSchemaDigest !== undefined)
         throw new TypeError('unsupported signed Supervisor local operation');
       executable(execution.supervisorEntryId, execution.supervisorExecutableDigest, 'supervisor', execution.supervisorEntryVersion);

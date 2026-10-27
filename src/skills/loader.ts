@@ -7,15 +7,15 @@ import { fileURLToPath } from 'node:url';
 import { APP_DIR } from '../config.js';
 import { resolveCliqHome } from '../session/store.js';
 import { isPathInsideWorkspace } from '../tools/path.js';
+import { diagnostic, isValidSkillName, parseSkillMarkdown } from './markdown.js';
+export { isValidSkillName, parseSkillMarkdown } from './markdown.js';
 import type {
   ActiveSkill,
   LoadedSkill,
-  ParsedSkillMarkdown,
   SkillActivationSource,
   SkillCatalog,
   SkillCatalogEntry,
   SkillDiagnostic,
-  SkillManifest,
   SkillScope,
   SkillSourceKind,
   SkillStatus
@@ -45,190 +45,8 @@ export type ActivateSkillOptions = LoadSkillsOptions & {
   activatedBy: SkillActivationSource;
 };
 
-const KNOWN_FRONTMATTER_FIELDS = new Set([
-  'name',
-  'description',
-  'license',
-  'compatibility',
-  'metadata',
-  'allowed-tools'
-]);
-
 export function mergeSkillNames(defaultSkills: string[], cliSkills: string[]) {
   return [...new Set([...defaultSkills, ...cliSkills])];
-}
-
-export function isValidSkillName(name: string) {
-  return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name);
-}
-
-function diagnostic(level: SkillDiagnostic['level'], code: string, message: string, source?: string): SkillDiagnostic {
-  return {
-    level,
-    code,
-    message,
-    ...(source ? { source } : {})
-  };
-}
-
-function stripQuotes(value: string) {
-  const trimmed = value.trim();
-  if (
-    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
-    (trimmed.startsWith("'") && trimmed.endsWith("'"))
-  ) {
-    return trimmed.slice(1, -1);
-  }
-  return trimmed;
-}
-
-function parseInlineArray(value: string) {
-  const trimmed = value.trim();
-  if (!trimmed.startsWith('[') || !trimmed.endsWith(']')) {
-    return null;
-  }
-  const body = trimmed.slice(1, -1).trim();
-  if (!body) {
-    return [];
-  }
-  return body.split(',').map((part) => stripQuotes(part)).filter(Boolean);
-}
-
-function parseFrontmatterBlock(lines: string[], start: number) {
-  const block: string[] = [];
-  let index = start;
-  while (index < lines.length) {
-    const line = lines[index]!;
-    if (line.trim() && !/^\s/.test(line)) {
-      break;
-    }
-    block.push(line);
-    index += 1;
-  }
-  return { block, nextIndex: index };
-}
-
-function parseMetadataBlock(block: string[]) {
-  const metadata: Record<string, string> = {};
-  for (const line of block) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) {
-      continue;
-    }
-    const match = /^([^:]+):\s*(.*)$/.exec(trimmed);
-    if (!match) {
-      continue;
-    }
-    metadata[match[1]!.trim()] = stripQuotes(match[2] ?? '');
-  }
-  return metadata;
-}
-
-function parseAllowedToolsBlock(block: string[]) {
-  const tools: string[] = [];
-  for (const line of block) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) {
-      continue;
-    }
-    const match = /^-\s*(.+)$/.exec(trimmed);
-    if (match) {
-      tools.push(stripQuotes(match[1]!));
-    }
-  }
-  return tools;
-}
-
-export function parseSkillMarkdown(raw: string, source = 'SKILL.md'): ParsedSkillMarkdown {
-  const match = raw.match(/^\uFEFF?---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)([\s\S]*)$/);
-  const diagnostics: SkillDiagnostic[] = [];
-  if (!match) {
-    return {
-      manifest: { name: '', description: '' },
-      prompt: '',
-      diagnostics: [diagnostic('error', 'missing-frontmatter', 'Skill file must begin with frontmatter', source)]
-    };
-  }
-
-  const manifest: SkillManifest = { name: '', description: '' };
-  const frontmatter = match[1] ?? '';
-  const lines = frontmatter.split(/\r?\n/);
-  for (let index = 0; index < lines.length; index += 1) {
-    const rawLine = lines[index]!;
-    const trimmed = rawLine.trim();
-    if (!trimmed || trimmed.startsWith('#')) {
-      continue;
-    }
-    if (/^\s/.test(rawLine)) {
-      diagnostics.push(diagnostic('warning', 'ignored-frontmatter-line', `Ignoring nested frontmatter line: ${trimmed}`, source));
-      continue;
-    }
-
-    const separator = trimmed.indexOf(':');
-    if (separator === -1) {
-      diagnostics.push(diagnostic('error', 'invalid-frontmatter-line', `Invalid frontmatter line: ${trimmed}`, source));
-      continue;
-    }
-
-    const key = trimmed.slice(0, separator).trim();
-    const value = trimmed.slice(separator + 1).trim();
-    if (!KNOWN_FRONTMATTER_FIELDS.has(key)) {
-      diagnostics.push(diagnostic('warning', 'unknown-frontmatter-field', `Ignoring unknown skill field: ${key}`, source));
-      continue;
-    }
-
-    if (key === 'metadata') {
-      if (value) {
-        diagnostics.push(diagnostic('warning', 'invalid-metadata', 'metadata must be an indented map', source));
-        continue;
-      }
-      const { block, nextIndex } = parseFrontmatterBlock(lines, index + 1);
-      manifest.metadata = parseMetadataBlock(block);
-      index = nextIndex - 1;
-      continue;
-    }
-
-    if (key === 'allowed-tools') {
-      const inline = parseInlineArray(value);
-      if (inline) {
-        manifest.allowedTools = inline;
-      } else if (value) {
-        manifest.allowedTools = [stripQuotes(value)];
-      } else {
-        const { block, nextIndex } = parseFrontmatterBlock(lines, index + 1);
-        manifest.allowedTools = parseAllowedToolsBlock(block);
-        index = nextIndex - 1;
-      }
-      continue;
-    }
-
-    const scalar = stripQuotes(value);
-    if (key === 'name') {
-      manifest.name = scalar;
-    } else if (key === 'description') {
-      manifest.description = scalar;
-    } else if (key === 'license') {
-      manifest.license = scalar;
-    } else if (key === 'compatibility') {
-      manifest.compatibility = scalar;
-    }
-  }
-
-  if (!manifest.name) {
-    diagnostics.push(diagnostic('error', 'missing-name', 'Skill file must declare a name', source));
-  } else if (!isValidSkillName(manifest.name)) {
-    diagnostics.push(diagnostic('error', 'invalid-name', `Invalid skill name: ${manifest.name}`, source));
-  }
-  if (!manifest.description) {
-    diagnostics.push(diagnostic('error', 'missing-description', 'Skill file must declare a description', source));
-  }
-
-  const prompt = (match[2] ?? '').trim();
-  if (!prompt) {
-    diagnostics.push(diagnostic('warning', 'empty-body', 'Skill prompt body is empty', source));
-  }
-
-  return { manifest, prompt, diagnostics };
 }
 
 async function exists(target: string) {

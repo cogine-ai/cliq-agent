@@ -398,7 +398,7 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
           unknowns.push(entry);
           continue;
         }
-        if (!['model', 'tool', 'verifier', 'child_admission', 'child_merge', 'child_await'].includes(entry.opKind) || (!['prepared', 'completed'].includes(entry.phase) &&
+        if (!['model', 'tool', 'verifier', 'child_admission', 'child_merge', 'child_await', 'skill_resource'].includes(entry.opKind) || (!['prepared', 'completed'].includes(entry.phase) &&
             (entry.phase !== 'failed' || hasClaim && !(entry.opKind === 'model' && noRelease.has(entry.seq) ||
               entry.opKind === 'verifier' && verifierStops.has(entry.seq)))))
           throw new KernelStorageError('STATE_TRANSITION_INVALID', 'terminal stop awaits exact dispatch/reconciliation closure');

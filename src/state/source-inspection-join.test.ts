@@ -13,12 +13,12 @@ async function fixture(t: TestContext) {
   await writeFile(path.join(created.workspace, 'source'), 'actual user source, not a fake native observation\n');
   function request(overrides: Record<string, unknown> = {}) {
     return sourceInspectionRequest({ ...created.request, requestId: uuidv7(), admissionKey: admissionKey('join-source'),
-      sourceIncludes: [{ path: 'source', scope: 'entry' }], ...overrides });
+      sourceIncludes: [{ path: 'source', scope: 'entry' }], sourceExcludes: [{ path: 'source', scope: 'entry' }], ...overrides });
   }
   return { ...created, request };
 }
 function errorRef(row: SourceInspectionAttemptV1): string {
-  if (row.phase !== 'retired' || row.outcome.kind !== 'failed') assert.fail('the unsupported include must retire as its real failure');
+  if (row.phase !== 'retired' || row.outcome.kind !== 'failed') assert.fail('the excluded include must retire as its real failure');
   return row.outcome.errorResponseRef;
 }
 async function bounded<T>(operation: Promise<T>, timeout = 10_000): Promise<T> {

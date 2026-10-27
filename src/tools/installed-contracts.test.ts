@@ -22,7 +22,7 @@ const guest: { manifestRef: string; manifest: GuestToolchainManifest } = { manif
 test('installed contracts retain old edit bytes and expose the complete distinct script/control identities', () => {
   const old = buildInstalledToolContracts({ edit: entry }), all = buildInstalledToolContracts({ edit: entry, scripts: { entry: script, supervisor, guest } });
   assert.deepEqual(old.manifest.entries.map(item => item.name), ['edit']);
-  assert.deepEqual(all.manifest.entries.map(item => item.name), ['await_children', 'bash', 'delegate', 'edit', 'find', 'grep', 'ls', 'read', 'request_input']);
+  assert.deepEqual(all.manifest.entries.map(item => item.name), ['await_children', 'bash', 'delegate', 'edit', 'find', 'grep', 'ls', 'read', 'request_input', 'skill_resource']);
   assert.deepEqual(all.manifest.entries.find(item => item.name === 'edit'), old.manifest.entries[0]);
   const control = all.manifest.entries.find(item => item.name === 'request_input')!;
   assert.equal(control.execution.kind, 'supervisor_control');
@@ -31,7 +31,9 @@ test('installed contracts retain old edit bytes and expose the complete distinct
   const operation = all.manifest.entries.find(item => item.name === 'delegate')!, waiting = all.manifest.entries.find(item => item.name === 'await_children')!;
   assert.equal(operation.execution.kind, 'supervisor_operation'); assert.equal(operation.access, 'exec'); assert.equal(operation.replayClass, 'retry');
   assert.equal(waiting.execution.kind, 'supervisor_control'); assert.equal(waiting.access, 'control'); assert.equal(waiting.replayClass, 'manual');
-  for (const value of [operation, waiting]) {
+  const resource = all.manifest.entries.find(item => item.name === 'skill_resource')!;
+  assert.equal(resource.execution.kind, 'supervisor_operation'); assert.equal(resource.access, 'read'); assert.equal(resource.replayClass, 'retry');
+  for (const value of [operation, waiting, resource]) {
     if (value.execution.kind !== 'supervisor_operation' && value.execution.kind !== 'supervisor_control') throw new Error('wrong closed Supervisor identity');
     assert.equal(value.execution.handlerId, value.name); assert.equal(value.execution.supervisorEntryVersion, supervisor.version);
     assert.equal(value.execution.supervisorExecutableDigest, supervisor.digest);
@@ -47,6 +49,9 @@ test('installed contracts retain old edit bytes and expose the complete distinct
   const awaitInvocation = resolver.projectInvocation({ callId: 'await', index: 2, toolName: 'await_children', input: { childRunIds: ['owned-child'] } });
   assert.equal(awaitInvocation.kind, 'input');
   assert.equal(awaitInvocation.execution.kind === 'supervisor_control' && awaitInvocation.execution.handlerId, 'await_children');
+  const localRead = resolver.projectInvocation({ callId: 'resource', index: 3, toolName: 'skill_resource',
+    input: { skillId: 'selected', canonicalRelativePath: 'scripts/data.py', offset: 0, length: 65536 } });
+  assert.equal(localRead.kind, 'tool'); assert.equal(localRead.execution.kind, 'supervisor_operation');
 });
 
 test('a Node-only discovery root and executable script disguise cannot advertise the fixed complete toolset', () => {

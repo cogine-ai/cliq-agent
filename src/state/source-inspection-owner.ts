@@ -449,6 +449,7 @@ Promise<SourceInspectionAttemptV1> {
     };
     armDeadline(); captureSignal.throwIfAborted();
     const projectionInput = { workspaceRoot, controlledHome: home, stateOwnerLock: owner.filesystem,
+      ...(request.sourceIncludes.length ? { includeCapture: { owner, target } } : {}),
       workspaceIdentityDigest: held.workspace.identityDigest, artifacts, sourceIncludes: request.sourceIncludes, sourceExcludes: request.sourceExcludes,
       maxChangedPaths: request.maxChangedPaths, maxChangedBytes: request.maxChangedBytes, maxEntries: 100_000,
       maxBytes: request.sandboxResources.maxGenerationBytes, maxSingleFileBytes: request.sandboxResources.maxSingleFileBytes, signal: captureSignal,
@@ -468,7 +469,9 @@ Promise<SourceInspectionAttemptV1> {
         resources: request.sandboxResources, frozenIgnoreRulesRef: request.frozenProjection?.frozenIgnoreRulesRef ?? rules!.rulesArtifact.ref,
         ...(request.frozenProjection ? { inheritedSourceRef: request.frozenProjection.admittedSourceRef } : {}) } });
       graph = { ...projected, metadata: [...gitResult.metadata, ...(rules?.metadata ?? []), ...projected.metadata] };
-    } else graph = await publishNonGitSourceProjection(projectionInput);
+    } else graph = await publishNonGitSourceProjection({ ...projectionInput,
+      ...(request.frozenProjection ? { inheritedProjection: { admittedSourceRef: request.frozenProjection.admittedSourceRef,
+        resources: request.sandboxResources } } : {}) });
     if (request.frozenProjection && (graph.sourceProjectionRef !== request.frozenProjection.sourceProjectionRef ||
         graph.frozenIgnoreRulesRef !== request.frozenProjection.frozenIgnoreRulesRef))
       throw new KernelStorageError('ARTIFACT_MISMATCH', 'delivery capture changed its inherited frozen projection');

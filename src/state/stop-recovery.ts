@@ -288,7 +288,7 @@ async function validateStopRecoveryData(driver: SqliteDriver, artifacts: Artifac
       closed.budgetSettlementRef === entry.budgetSettlementRef)) continue;
     if (entry.phase === 'failed' && (entry.opKind === 'model' && modelNoRelease.has(entry.seq) ||
         entry.opKind === 'tool' && privateRollbacks.has(entry.seq) || entry.opKind === 'verifier' && verifierStops.has(entry.seq))) continue;
-    if (!['model', 'tool', 'verifier', 'child_admission', 'child_merge', 'child_await'].includes(entry.opKind) || (entry.phase !== 'completed' &&
+    if (!['model', 'tool', 'verifier', 'child_admission', 'child_merge', 'child_await', 'skill_resource'].includes(entry.opKind) || (entry.phase !== 'completed' &&
         (entry.phase !== 'failed' || hasClaim))) throw new TypeError('terminal stop retains unresolved dispatch evidence');
     if (entry.phase === 'failed' && entry.errorRef === run.stopIntentRef && entry.timestamp !== preparedAt) throw new TypeError('stop refund has no atomic terminal owner');
   }

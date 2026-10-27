@@ -715,9 +715,12 @@ if (!localJournalGuard.includes(localGrantRefGuard)) throw new Error('compiled l
 const childAwaitJournalGuard = localJournalGuard.replaceAll(localJournalKind, "NEW.op_kind = 'child_await'")
   .replace(localGrantRefGuard, "json_type(NEW.entry_json, '$.grantRef') IS NOT NULL")
   .replace("THEN 15 WHEN 'dispatch_claimed' THEN 18 ELSE 20 END", "THEN 14 WHEN 'dispatch_claimed' THEN 17 ELSE 19 END");
+// The fixed CAS-only read has its own local kind. It cannot borrow a physical
+// lease or the no-grant await variant; the old branches remain byte-identical.
+const skillResourceJournalGuard = localJournalGuard.replaceAll(localJournalKind, "NEW.op_kind = 'skill_resource'");
 const childJournalInsert = runJournalInsert
-  .replace("'verifier', 'publish')", "'verifier', 'publish', 'child_admission', 'child_merge', 'child_await')")
-  .replace('    WHEN NEW.attempt < 0', localJournalGuard + childAwaitJournalGuard + '    WHEN NEW.attempt < 0');
+  .replace("'verifier', 'publish')", "'verifier', 'publish', 'child_admission', 'child_merge', 'child_await', 'skill_resource')")
+  .replace('    WHEN NEW.attempt < 0', localJournalGuard + childAwaitJournalGuard + skillResourceJournalGuard + '    WHEN NEW.attempt < 0');
 const allocationMutablePaths = "'$.state', '$.terminal', '$.inclusiveBudgetUsage', '$.terminalAt', '$.childResultItemId', '$.parentSettlementRevision', '$.releasedUnusedBudget', '$.settledAt'";
 export const KERNEL_SCHEMA_V8_SQL = `
 ALTER TABLE runs ADD COLUMN parent_cancellation_ref TEXT

@@ -176,7 +176,7 @@ async function assertResultBasisCut(driver: SqliteDriver, artifacts: ArtifactCat
       !isZeroBudget(run.budgetReserved) || cut.workerLaunches.length || run.activeWorkerLaunchId || run.waitingOnRef || run.waitingReason ||
       cut.workspaceGenerations.some(generation => generation.phase !== 'sealed' && generation.phase !== 'retired') ||
       [...stopInvocationHistory(cut.journal).values()].some(({ entry }) =>
-        !(spec.operation === 'delivery' ? ['verifier', 'publish'] : ['model', 'tool', 'verifier', 'child_admission', 'child_merge', 'child_await']).includes(entry.opKind) ||
+        !(spec.operation === 'delivery' ? ['verifier', 'publish'] : ['model', 'tool', 'verifier', 'child_admission', 'child_merge', 'child_await', 'skill_resource']).includes(entry.opKind) ||
         !['completed', 'failed'].includes(entry.phase)))
     throw new KernelStorageError('STATE_TRANSITION_INVALID', 'result requires the complete worker-free root candidate closure');
   assertRetiredGenerationCut(driver, run, cut.workspaceGenerations);

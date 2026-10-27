@@ -58,3 +58,18 @@ test('delivery request decoding rejects hidden/accessor/symbol authority without
   const grants: unknown[] = []; Object.defineProperty(grants, 0, { get() { invoked++; return 'grant'; }, enumerable: true });
   assert.throws(() => normalizeRunApplyRequest({ ...request(), verifierExecutionGrantIds: grants })); assert.equal(invoked, 0);
 });
+
+test('fresh Delivery source consent contains only unique grant locators in exact wire order', () => {
+  const sourceReadGrantIds = ['first', 'second'];
+  const decoded = normalizeRunApplyRequest(request({ ...core, sourceReadGrantIds }));
+  assert.deepEqual(decoded.request.sourceReadGrantIds, sourceReadGrantIds);
+  sourceReadGrantIds.reverse();
+  assert.deepEqual(decoded.request.sourceReadGrantIds, ['first', 'second']);
+  assert.notEqual(runApplyIntentDigest('principal', decoded.request), runApplyIntentDigest('principal',
+    normalizeRunApplyRequest(request({ ...core, sourceReadGrantIds })).request));
+  for (const ids of [['same', 'same'], [''], ['a'.repeat(129)], new Array(1),
+    Array.from({ length: 129 }, (_, i) => `grant-${i}`), [{ path: 'caller-selected', grantId: 'first' }]]) {
+    assert.throws(() => normalizeRunApplyRequest(request({ ...core, sourceReadGrantIds: ids })));
+  }
+  assert.throws(() => normalizeRunApplyRequest(request({ ...core, sourceReadGrantIds: ['same'], ignoreReadGrantIds: ['same'] })));
+});

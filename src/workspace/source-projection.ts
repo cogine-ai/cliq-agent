@@ -14,10 +14,15 @@ import { decodeDeliveryCaptureTopology, publicationDirectoryIdentityDigest,
   type DeliveryCaptureTopologyV1 } from '../kernel/publication.js';
 import { checkProjection } from '../state/source-validation.js';
 import { readFrozenIgnoreRules } from './frozen-ignore.js';
-import { createFrozenIgnoreMatcher } from './frozen-ignore.js';
+import { createSourceClassifier } from './source-classification.js';
 import { readPrivateGitData, privateGitSourceHead, type PrivateGitData } from './private-git-data.js';
 import type { SandboxResourceSpec } from '../kernel/execution.js';
 import { readSourceProjectionData } from '../state/source-projection-data.js';
+import type { StateOwnerContext } from '../state/state-owner.js';
+import type { VerifiedSourceInspectionTarget } from '../state/source-target.js';
+import { publishSourceIncludeAuthorizations } from '../state/source-include-capture.js';
+import { readSourceIncludeProjectionData } from '../state/source-include-projection-data.js';
+import { assertSourceIncludeExpectedDigest } from '../state/source-include-constraints.js';
 
 export const MAX_SOURCE_PROJECTION_ENTRIES = 100_000;
 
@@ -28,6 +33,7 @@ export type NonGitSourceProjectionInput = Readonly<{
   workspaceIdentityDigest: string;
   artifacts: ArtifactCatalog;
   sourceIncludes: readonly SourceSelectorRequest[];
+  includeCapture?: { owner: StateOwnerContext; target: VerifiedSourceInspectionTarget };
   sourceExcludes: readonly Omit<SourceSelectorRequest, 'readGrantId'>[];
   maxChangedPaths: number;
   maxChangedBytes: number;
@@ -38,6 +44,7 @@ export type NonGitSourceProjectionInput = Readonly<{
   /** Internal apply capture provenance only; this is not publication or
    * physical-generation evidence. Observations use this same held scan. */
   deliveryCapture?: { inspectionId: string; workspaceIdentityRef: string; capturedAt: string };
+  inheritedProjection?: { admittedSourceRef: string; resources: SandboxResourceSpec };
   signal?: AbortSignal;
 }>;
 export type PublishedNonGitSourceProjection = Readonly<{
@@ -60,13 +67,16 @@ export type CapturedFrozenSourceProjection = Omit<PublishedNonGitSourceProjectio
   'baseWorkspaceManifestRef' | 'captureTopologyRef' | 'captureTopologyDigest'> & Readonly<{ resultWorkspaceManifestRef: string }>;
 type ProjectionCaptureMode = {
   kind: 'initial'; sourceIncludes: NonGitSourceProjectionInput['sourceIncludes'];
+  includeCapture?: NonGitSourceProjectionInput['includeCapture'];
   sourceExcludes: NonGitSourceProjectionInput['sourceExcludes']; maxChangedPaths: number; maxChangedBytes: number;
   deliveryCapture?: NonGitSourceProjectionInput['deliveryCapture'];
+  frozen?: { projection: SourceProjectionSpec; rules: FrozenIgnoreRulesV1; rulesArtifact: PublishedArtifact };
   git?: { data: PrivateGitData; rules: FrozenIgnoreRulesV1; rulesArtifact: PublishedArtifact;
     classificationIndex?: GitIndexSnapshotV1; projection?: SourceProjectionSpec; projectionRef?: string };
 } | {
   kind: 'frozen'; projection: SourceProjectionSpec; projectionArtifact: PublishedArtifact;
   rules: FrozenIgnoreRulesV1; rulesArtifact: PublishedArtifact;
+  userIncludes: readonly { path: string; scope: 'entry' | 'subtree' }[];
   gitIdentity?: NonNullable<SourceManifest['git']>; classificationIndex?: GitIndexSnapshotV1;
 };
 function invalid(message: string): never { throw new KernelStorageError('INVALID_REQUEST', message); }
@@ -125,9 +135,26 @@ function checkHardExcludedLinks(manifest: WorkspaceEntryManifest, hardRoots: rea
  * first. A returned graph is neither an accepted Run nor a permission grant.
  * No payload is opened until the complete metadata selection is classified. */
 export async function publishNonGitSourceProjection(input: NonGitSourceProjectionInput): Promise<PublishedNonGitSourceProjection> {
+  let frozen: Extract<ProjectionCaptureMode, { kind: 'initial' }>['frozen'];
+  if (input.inheritedProjection) {
+    if (!input.deliveryCapture) invalid('inherited live projection requires its original Delivery capture');
+    const artifacts = input.signal ? input.artifacts.withReadSignal(input.signal) : input.artifacts;
+    const source = decodeSourceManifest(await artifacts.readCanonical(input.inheritedProjection.admittedSourceRef));
+    const projection = decodeSourceProjection(await artifacts.readCanonical(source.sourceProjectionRef));
+    const data = await readSourceProjectionData(artifacts, source, projection, input.inheritedProjection.resources, input.signal);
+    if (source.git || source.workspaceIdentityDigest !== input.workspaceIdentityDigest ||
+        projection.maxChangedPaths !== input.maxChangedPaths || projection.maxChangedBytes !== input.maxChangedBytes ||
+        canonicalSha256(projection.explicitExcludes) !== canonicalSha256(input.sourceExcludes) ||
+        canonicalSha256(projection.explicitIncludes.map(({ path, scope }) => ({ path, scope }))) !==
+          canonicalSha256(input.sourceIncludes.map(({ path, scope }) => ({ path, scope }))))
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'delivery capture changed its original non-Git frozen projection');
+    frozen = { projection, rules: data.rules, rulesArtifact: { ref: source.frozenIgnoreRulesRef,
+      byteLength: canonicalJsonBytes(data.rules).length, mediaType: 'application/json', schemaKind: data.rules.format } };
+  }
   const { sourceManifestRef, ...capture } = await captureSourceProjection(input, { kind: 'initial',
     sourceIncludes: input.sourceIncludes, sourceExcludes: input.sourceExcludes,
-    maxChangedPaths: input.maxChangedPaths, maxChangedBytes: input.maxChangedBytes, deliveryCapture: input.deliveryCapture });
+    includeCapture: input.includeCapture,
+    maxChangedPaths: input.maxChangedPaths, maxChangedBytes: input.maxChangedBytes, deliveryCapture: input.deliveryCapture, frozen });
   return Object.freeze({ baseWorkspaceManifestRef: sourceManifestRef, ...capture });
 }
 
@@ -151,12 +178,15 @@ export async function publishGitSourceProjection(input: NonGitSourceProjectionIn
     const classification = await readSourceProjectionData(artifacts, source, projection, git.resources, signal);
     if (!source.git || source.git.repositoryIdentityDigest !== git.repositoryIdentityDigest || source.frozenIgnoreRulesRef !== git.frozenIgnoreRulesRef ||
         projection.maxChangedPaths !== input.maxChangedPaths || projection.maxChangedBytes !== input.maxChangedBytes ||
-        canonicalSha256(projection.explicitExcludes) !== canonicalSha256(input.sourceExcludes))
+        canonicalSha256(projection.explicitExcludes) !== canonicalSha256(input.sourceExcludes) ||
+        canonicalSha256(projection.explicitIncludes.map(({ path, scope }) => ({ path, scope }))) !==
+          canonicalSha256(input.sourceIncludes.map(({ path, scope }) => ({ path, scope }))))
       throw new KernelStorageError('ARTIFACT_MISMATCH', 'delivery capture differs from its admitted frozen Git projection');
     inherited = { classificationIndex: classification.classificationIndex, projection, projectionRef: source.sourceProjectionRef };
   }
   const { sourceManifestRef, ...capture } = await captureSourceProjection(input, { kind: 'initial',
     sourceIncludes: input.sourceIncludes, sourceExcludes: input.sourceExcludes, maxChangedPaths: input.maxChangedPaths,
+    includeCapture: input.includeCapture,
     maxChangedBytes: input.maxChangedBytes, deliveryCapture: input.deliveryCapture, git: { data, rules, rulesArtifact, ...inherited } });
   return Object.freeze({ ...capture, baseWorkspaceManifestRef: sourceManifestRef, privateGitStateRef: data.manifestRef });
 }
@@ -202,8 +232,10 @@ export async function captureFrozenSourceProjection(input: FrozenSourceProjectio
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'frozen non-Git ignore rules have invalid fields');
   if (rules.rulesDigest !== projection.frozenIgnoreRulesDigest)
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'frozen source ignore rules differ from their retained digest');
+  const includeData = await readSourceIncludeProjectionData(artifacts,projection,input.workspaceIdentityDigest,rules,classificationIndex,undefined,signal);
   const { sourceManifestRef, captureTopologyRef: _topologyRef, captureTopologyDigest: _topologyDigest, ...capture } =
     await captureSourceProjection({ ...input, artifacts }, { kind: 'frozen', projection, rules, gitIdentity, classificationIndex,
+      userIncludes: includeData.users,
       projectionArtifact: { ref: sourceProjectionRef, byteLength: canonicalJsonBytes(projection).byteLength,
         mediaType: 'application/json', schemaKind: 'cliq-source-projection-v1' },
       rulesArtifact: { ref: projection.frozenIgnoreRulesRef, byteLength: canonicalJsonBytes(rules).byteLength,
@@ -221,25 +253,34 @@ async function captureSourceProjection(input: SourceProjectionCaptureInput, mode
   const stateRoot = stateRootIdentityForLock(stateOwnerLock);
   assertArtifactRef(workspaceIdentityDigest);
   const git = mode.kind === 'initial' ? mode.git : undefined;
+  const inheritedProjection = mode.kind === 'initial' ? mode.frozen?.projection ?? git?.projection : undefined;
   const hasGit = git !== undefined || mode.kind === 'frozen' && mode.gitIdentity !== undefined;
   if (workspaceRoot.repositoryDirectory !== undefined && !hasGit) invalid('Git source inspection is not implemented by the non-Git projection');
   if (workspaceRoot.repositoryDirectory === undefined && hasGit) invalid('Git projection has no original repository descriptor');
-  const ignored = git ? createFrozenIgnoreMatcher(git.rules) : mode.kind === 'frozen' ? createFrozenIgnoreMatcher(mode.rules) : undefined;
   const classificationIndex = mode.kind === 'frozen' ? mode.classificationIndex : git?.classificationIndex ?? git?.data.index;
-  const tracked = classificationIndex ? new Set(classificationIndex.entries.map(entry => entry.canonicalRootRelativePath)) : undefined;
-  const trackedPaths = classificationIndex?.entries.map(entry => entry.canonicalRootRelativePath) ?? [];
-  const trackedBelow = (path: string) => {
-    const prefix = `${path}/`, bytes = Buffer.from(prefix); let left = 0, right = trackedPaths.length;
-    while (left < right) { const middle = (left + right) >>> 1;
-      if (Buffer.compare(Buffer.from(trackedPaths[middle]!), bytes) < 0) left = middle + 1; else right = middle; }
-    return trackedPaths[left]?.startsWith(prefix) === true;
-  };
+  const classifier = createSourceClassifier(git?.rules ?? (mode.kind === 'frozen' ? mode.rules : mode.frozen?.rules),classificationIndex);
+  const ignored = classifier.ignored, trackedBelow = classifier.hasTrackedDescendant;
   if (![maxEntries, maxBytes, maxSingleFileBytes, maxChangedPaths, maxChangedBytes].every(Number.isSafeInteger) ||
       maxEntries < 1 || maxEntries > MAX_SOURCE_PROJECTION_ENTRIES || maxBytes < 0 || maxSingleFileBytes < 0 ||
       maxChangedPaths < 0 || maxChangedPaths > 100_000 || maxChangedBytes < 0 || maxChangedBytes > 4 * 1024 ** 3)
     invalid('source projection limits are outside the fixed capture/result bounds');
-  if (mode.kind === 'initial' && (!Array.isArray(mode.sourceIncludes) || mode.sourceIncludes.length))
-    invalid('explicit source includes and read-grant admission are not implemented');
+  if (mode.kind === 'initial' && (!Array.isArray(mode.sourceIncludes) || mode.sourceIncludes.length > 128))
+    invalid('explicit source includes exceed their selector bound');
+  const includeReader = mode.kind === 'initial' && mode.sourceIncludes.length
+    ? (await import('../state/source-target.js')).readVerifiedSourceIncludeCapture : undefined;
+  const includeCapture = () => {
+    if (!includeReader || mode.kind !== 'initial' || !mode.includeCapture)
+      invalid('explicit source includes require original registered capture authority');
+    const data = includeReader(mode.includeCapture.owner,mode.includeCapture.target,workspaceRoot);
+    if (data.workspaceIdentityDigest !== workspaceIdentityDigest || canonicalSha256(data.selectors) !== canonicalSha256(mode.sourceIncludes))
+      invalid('explicit source includes differ from the original capturing target');
+    return data;
+  };
+  if (includeReader) includeCapture();
+  const requestedIncludes = mode.kind === 'initial' ? mode.sourceIncludes : mode.projection.explicitIncludes;
+  const userIncludes = mode.kind === 'initial' ? mode.sourceIncludes.filter(selector => selector.readGrantId !== undefined) : mode.userIncludes;
+  const coveredBy = (value: string, selector: {path:string;scope:'entry'|'subtree'}) =>
+    value === selector.path || selector.scope === 'subtree' && covered(value,selector.path);
   const sourceExcludes = mode.kind === 'initial' ? mode.sourceExcludes : mode.projection.explicitExcludes;
   if (!Array.isArray(sourceExcludes) || sourceExcludes.length > 128) invalid('source excludes exceed their selector bound');
   const seenSelectors = new Set<string>();
@@ -254,15 +295,16 @@ async function captureSourceProjection(input: SourceProjectionCaptureInput, mode
     relativeHardRoot(heldWorkspaceRootPath(workspaceRoot), stateRoot.canonicalAbsolutePath)]
     .filter((root): root is string => root !== undefined);
   const assertSelectors = () => {
-    for (const selector of excludes) if (hardRoots.some(root => covered(selector.path, root)))
+    for (const selector of [...excludes,...requestedIncludes]) if (hardRoots.some(root => covered(selector.path, root)))
       invalid('source selector addresses a hard-excluded root');
   };
   assertSelectors();
   const cursors: HeldWorkspaceCursor[] = [], observed: Array<{ entry: HeldWorkspaceEntry; pruned: boolean }> = [];
-  const selected: string[] = [], directoryEntryExcludes = new Set<string>(), folded = new Set<string>();
+  const selected: string[] = [], directoryMetadata = new Set<string>(), directoryEntryExcludes = new Set<string>(), folded = new Set<string>();
   let inventoryCount = 0, fileBytes = 0, operationError: unknown;
   const assertCurrent = () => {
     signal?.throwIfAborted(); assertHeldWorkspaceRoot(workspaceRoot); assertHeldWorkspaceRoot(controlledHome);
+    if (includeReader) includeCapture();
     stateRootIdentityForLock(stateOwnerLock);
     for (const cursor of cursors) cursor.assertComplete();
     for (const { entry, pruned } of observed) { if (pruned) entry.assertPathHeld(); else entry.assertHeld(); }
@@ -277,7 +319,7 @@ async function captureSourceProjection(input: SourceProjectionCaptureInput, mode
       const frame = stack[stack.length - 1], entry = frame.cursor.next();
       if (!entry) {
         frame.cursor.assertComplete(); stack.pop();
-        if (frame.path && frame.children === 0 && !frame.excludedEntry) selected.push(frame.path);
+        if (frame.path && frame.children === 0 && !frame.excludedEntry && !directoryMetadata.has(frame.path)) selected.push(frame.path);
         continue;
       }
       frame.children++;
@@ -294,11 +336,18 @@ async function captureSourceProjection(input: SourceProjectionCaptureInput, mode
       const excluding = excludes.filter(selector => selector.path === entry.path ||
         (selector.scope === 'subtree' && covered(entry.path, selector.path)));
       if (excluding.some(selector => selector.scope === 'subtree') || (excluding.length && entry.kind !== 'directory')) continue;
-      if (ignored?.(entry.path, entry.kind === 'directory') && !tracked?.has(entry.path) &&
-          !(entry.kind === 'directory' && trackedBelow(entry.path))) continue;
+      const isIgnored = ignored?.(entry.path, entry.kind === 'directory') === true;
+      const granted = userIncludes.some(selector => coveredBy(entry.path,selector));
+      const grantBelow = entry.kind === 'directory' && userIncludes.some(selector => selector.path.startsWith(`${entry.path}/`));
+      if (isIgnored && !classifier.isTracked(entry.path) && !(entry.kind === 'directory' && trackedBelow(entry.path)) && !granted && !grantBelow) continue;
       observation.pruned = false;
       if (entry.kind === 'directory') {
         if (excluding.length) directoryEntryExcludes.add(entry.path);
+        if (!excluding.length && requestedIncludes.some(selector => selector.path === entry.path)) {
+          selected.push(entry.path); directoryMetadata.add(entry.path);
+        }
+        if (isIgnored && !trackedBelow(entry.path) && !grantBelow &&
+            !userIncludes.some(selector => selector.scope === 'subtree' && coveredBy(entry.path,selector))) continue;
         const child = entry.openDirectory(); cursors.push(child);
         stack.push({ cursor: child, path: entry.path, children: 0, excludedEntry: excluding.length > 0 });
       } else {
@@ -312,10 +361,22 @@ async function captureSourceProjection(input: SourceProjectionCaptureInput, mode
     }
     for (const directory of directoryEntryExcludes) if (selected.some(value => covered(value, directory)))
       invalid('entry-only exclusion of a required directory ancestor is unsupported; use subtree');
+    if (mode.kind === 'initial' && requestedIncludes.length && !(mode.deliveryCapture && inheritedProjection)) {
+      const capturedPaths = new Set(selected);
+      for (const path of selected) for (let slash=path.indexOf('/');slash>=0;slash=path.indexOf('/',slash+1)) capturedPaths.add(path.slice(0,slash));
+      for (const selector of mode.sourceIncludes) {
+        const rows = observed.filter(item => !item.pruned && capturedPaths.has(item.entry.path) && coveredBy(item.entry.path,selector));
+        if (!rows.length || !rows.some(item => item.entry.path === selector.path))
+          invalid('explicit source include does not select its existing unexcluded entry');
+        const needsGrant = rows.some(item => classifier.classify(item.entry) === undefined);
+        if ((selector.readGrantId !== undefined) !== needsGrant)
+          throw new KernelStorageError('INVALID_REQUEST','explicit source include has missing or unnecessary read consent');
+      }
+    }
     assertCurrent();
     const reads = signal ? artifacts.withReadSignal(signal) : artifacts;
     const rereadEntries = async (entriesArtifact: PublishedArtifact) => decodeWorkspaceEntries(await reads.readCanonical(entriesArtifact.ref));
-    if (mode.kind === 'initial' && !git && !mode.deliveryCapture) {
+    if (mode.kind === 'initial' && !git && !mode.deliveryCapture && !mode.sourceIncludes.length) {
       // One natural inert graph. Native capture resources stay held through
       // the complete fixed group and the original full manifest reread.
       let completed: PublishedSourceProjectionCapture | undefined;
@@ -362,21 +423,30 @@ async function captureSourceProjection(input: SourceProjectionCaptureInput, mode
       return completed;
     }
     const entriesArtifact = await captureWorkspaceEntries(workspaceRoot, artifacts,
-      { selectedPaths: selected, maxEntries, maxBytes, maxSingleFileBytes, signal });
+      { selectedPaths: selected, directoryMetadataPaths: [...directoryMetadata], maxEntries, maxBytes, maxSingleFileBytes, signal });
     assertCurrent();
     const entries = await rereadEntries(entriesArtifact);
     checkHardExcludedLinks(entries, hardRoots); assertCurrent();
-    const rules: FrozenIgnoreRulesV1 = mode.kind === 'frozen' ? mode.rules : git?.rules ?? { schemaVersion: 1,
+    // Fresh Delivery preserves B's projection, but its new capture consent
+    // still constrains the actual A bytes, including kind and absence.
+    if (includeReader) for (const consent of includeCapture().scopes)
+      assertSourceIncludeExpectedDigest(consent.target,entries);
+    const rules: FrozenIgnoreRulesV1 = mode.kind === 'frozen' ? mode.rules : git?.rules ?? mode.frozen?.rules ?? { schemaVersion: 1,
       format: 'cliq-frozen-ignore-rules-v1', matcherVersion: 'cliq-git-wildmatch-v1', sources: [], rules: [], rulesDigest: '' };
-    if (mode.kind === 'initial' && !git) rules.rulesDigest = digestOmitting(rules, 'rulesDigest');
+    if (mode.kind === 'initial' && !git && !mode.frozen) rules.rulesDigest = digestOmitting(rules, 'rulesDigest');
     const initialNonGit = mode.kind === 'initial' && !git;
-    let rulesArtifact = mode.kind === 'frozen' ? mode.rulesArtifact : git?.rulesArtifact;
+    let rulesArtifact = mode.kind === 'frozen' ? mode.rulesArtifact : git?.rulesArtifact ?? mode.frozen?.rulesArtifact;
     const rulesRef = rulesArtifact?.ref ?? canonicalSha256(rules); assertCurrent();
-    const projection: SourceProjectionSpec = mode.kind === 'frozen' ? mode.projection : git?.projection ?? { schemaVersion: 1,
+    const includePublications = mode.kind === 'initial' && mode.sourceIncludes.length && !inheritedProjection
+      ? await publishSourceIncludeAuthorizations({artifacts,capture:includeCapture(),entries,
+        observations:new Map(observed.filter(item=>!item.pruned).map(item=>[item.entry.path,item.entry])),rules,rulesRef,
+        ...(classificationIndex ? {index:classificationIndex,indexRef:git?.projection?.classificationIndexRef ?? git?.data.manifest.indexRef} : {}),signal}) : undefined;
+    assertCurrent();
+    const projection: SourceProjectionSpec = mode.kind === 'frozen' ? mode.projection : inheritedProjection ?? { schemaVersion: 1,
       matcherVersion: 'cliq-exact-path-v1', frozenIgnoreRulesRef: rulesRef, frozenIgnoreRulesDigest: rules.rulesDigest,
-      explicitIncludes: [], explicitExcludes: excludes, maxChangedPaths, maxChangedBytes,
+      explicitIncludes: includePublications?.includes ?? [], explicitExcludes: excludes, maxChangedPaths, maxChangedBytes,
       ...(git ? { classificationIndexRef: git.data.manifest.indexRef } : {}), projectionDigest: '' };
-    if (mode.kind === 'initial' && !git?.projection) projection.projectionDigest = digestOmitting(projection, 'projectionDigest');
+    if (mode.kind === 'initial' && !inheritedProjection) projection.projectionDigest = digestOmitting(projection, 'projectionDigest');
     let projectionArtifact = mode.kind === 'frozen' ? mode.projectionArtifact : initialNonGit ? undefined
       : await artifacts.publishCanonical(projection, 'cliq-source-projection-v1');
     const projectionRef = projectionArtifact?.ref ?? canonicalSha256(projection); assertCurrent();
@@ -432,6 +502,7 @@ async function captureSourceProjection(input: SourceProjectionCaptureInput, mode
         rulesArtifact.ref !== rulesRef || projectionArtifact.ref !== projectionRef)
       invalid('source graph differs from its completely published canonical data');
     const metadata = new Map<string, PublishedArtifact>();
+    for (const artifact of includePublications?.metadata ?? []) metadata.set(artifact.ref,artifact);
     for (const entry of entries.entries) if (entry.kind === 'file') metadata.set(entry.blobRef, Object.freeze({ ref: entry.blobRef,
       byteLength: entry.size, mediaType: 'application/octet-stream', schemaKind: 'cliq-workspace-file-v1' }));
     for (const artifact of [entriesArtifact, rulesArtifact, projectionArtifact, sourceArtifact, ...(topologyArtifact ? [topologyArtifact] : [])])

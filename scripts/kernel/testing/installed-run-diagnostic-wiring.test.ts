@@ -81,7 +81,7 @@ test('assembly fixed observations remain outside authority input and precede onl
   assert.match(assembly.getText(), /signal\?: AbortSignal, onAssemblyPhase\?: \(phase: InstalledRunAssemblyPhase\) => void/u);
   assert(!/\bawait\b|Date\.|performance\.|setTimeout/u.test(declaration.getText()), 'observation adds no I/O, timer or clock');
   for (const [stage, operation] of [['native', 'const native = await loadInstalledWorkerNative'],
-    ['source', 'await validateControlChannelClosure'], ['platform', 'const platform = await loadInstalledCredentialPlatform'],
+    ['source', 'const control = await validateControlChannelClosure'], ['platform', 'const platform = await loadInstalledCredentialPlatform'],
     ['material', 'return withHeldInstalledRuntime'], ['publish', 'const sandboxProfileRef = publishedSandboxRef ??'],
     ['verifier', 'const verifier = await prepareInstalledVerifierAssembly'], ['policy', 'const policyRef ='],
     ['final_check', 'await installed.revalidate(signal); await validateControlChannelClosure']])

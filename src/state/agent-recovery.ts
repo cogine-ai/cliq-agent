@@ -199,6 +199,10 @@ async function validateAgentRecoveryData(input: AgentRecoveryInput, onPhase?: (p
               !journal.some((entry) => (entry.opKind === 'tool' || entry.opKind === 'mcp') &&
               entry.phase === 'completed' && entry.opId === payload.opId && entry.attempt === payload.attempt &&
               entry.resultRef === payload.journalResultRef)) throw new TypeError('executed invocation result has no completed Journal owner');
+        } else if (payload.source === 'skill_resource') {
+          if (call.toolName !== 'skill_resource' || item.opId !== payload.opId || payload.opId !== toolOperationId(run.id, item.batchItemId, item.callId) ||
+              !journal.some(entry => entry.opKind === 'skill_resource' && entry.phase === 'completed' && entry.opId === payload.opId && entry.resultRef === payload.journalResultRef))
+            throw new TypeError('skill resource result has no unique original local Journal owner');
         } else if (payload.source === 'child_admission') {
           const handle = await readCanonicalArtifact<import('../kernel/children.js').ChildHandleItem>(artifacts, payload.childHandleItemRef);
           if (!input.driver || call.toolName !== 'delegate' || item.opId !== payload.opId || handle.kind !== 'child_handle')

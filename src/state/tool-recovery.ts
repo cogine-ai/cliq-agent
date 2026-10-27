@@ -18,6 +18,11 @@ import { decodeToolExecutionIdentity } from '../tools/execution-identity.js';
 import type { SqliteDriver } from './sqlite-driver.js';
 import { decodeRetainedRunAssembly } from '../model/run-assembly.js';
 import { readBuiltinToolCapture, assertBuiltinCaptureObservation } from './builtin-tool-capture.js';
+import { decodeSkillResourceReceipt, readSkillResourceValue, skillResourceCheckpointId, skillResourceDispatchId } from './skill-resource-data.js';
+import { decodeSkillResourceInput } from '../kernel/skill.js';
+import { decodeWireRun } from '../kernel/control-wire-data.js';
+import { readRetainedStateOwnerHistory } from './state-owner-history.js';
+import { readSupervisorInspector } from './supervisor-inspector.js';
 
 /** Reachability and durable ownership. The loaded Run additionally verifies release signatures and replays the fixed evaluator. */
 export async function validateToolRecovery(input: {
@@ -39,7 +44,7 @@ export async function validateToolRecovery(input: {
     if (digestOmitting(evidence, 'evidenceDigest') !== evidence.evidenceDigest || evidence.runId !== run.id || evidence.policyRef !== spec.policyRef ||
         request.format !== 'cliq-tool-request-v1' || request.requestDigest !== evidence.requestDigest ||
         digestOmitting(request, 'requestDigest') !== request.requestDigest || request.runId !== run.id || request.assemblyRef !== spec.assemblyRef ||
-        request.opId !== evidence.opId || request.opId !== (target.execution.kind === 'supervisor_operation'
+        request.opId !== evidence.opId || request.opId !== (target.execution.kind === 'supervisor_operation' && target.execution.handlerId === 'delegate'
           ? childDelegateOperationId(run.id, request.batchItemId, request.callId, request.callIndex, request.inputDigest)
           : toolOperationId(run.id, request.batchItemId, request.callId)) ||
         request.frontierRef !== evidence.frontierRef || request.targetRef !== evidence.targetRef || request.targetDigest !== evidence.targetDigest ||
@@ -75,7 +80,7 @@ export async function validateToolRecovery(input: {
         !Number.isSafeInteger(wait.createdFromRevision) || wait.createdFromRevision < 1 || wait.createdAt !== evidence.evaluatedAt ||
         wait.createdAt < run.createdAt || wait.createdAt >= run.deadlineAt || evidence.effectiveDisposition !== 'ask') throw new TypeError('invalid retained tool approval wait');
     parseCanonicalTime(wait.createdAt);
-    const localInput = contract.execution.kind === 'supervisor_operation'
+    const localInput = contract.execution.kind === 'supervisor_operation' && contract.execution.handlerId === 'delegate'
       ? await readCanonicalArtifact<ToolCallInputV1>(artifacts, request.inputRef) : undefined;
     if (localInput && (localInput.disposition !== 'resolved' || localInput.inputDigest !== request.inputDigest ||
         digestOmitting(localInput, 'inputDigest') !== localInput.inputDigest)) throw new TypeError('child approval lost its original normalized input');
@@ -173,12 +178,84 @@ export async function validateToolRecovery(input: {
       requireEqual(content.content, { code: 'TOOL_CALL_DENIED' }, 'model-safe denial');
     }
   }
+  // These operations read immutable data under an ordinary per-action grant.
+  // They cannot be adopted by the physical tool branch or survive as a half
+  // local claim. The original exact triplet and ready CP own every result.
+  for (const prepared of journal.filter(entry => entry.phase === 'prepared' && entry.opKind === 'skill_resource')) {
+    if (!input.driver || !prepared.grantRef || !decisions.has(prepared.grantRef)) throw new TypeError('skill read lost its real SQL/grant owner');
+    const request = requests.get(prepared.requestRef), group = journal.filter(entry => entry.opId === prepared.opId);
+    if (!request || group.length !== 3 || group.map(entry => entry.phase).join(',') !== 'prepared,dispatch_claimed,completed' ||
+        group.some((entry, index) => entry.opKind !== 'skill_resource' || entry.attempt !== 0 || entry.leaseEpoch !== 0 || entry.seq !== prepared.seq + index ||
+          entry.timestamp !== prepared.timestamp || entry.localCommittedAt !== prepared.localCommittedAt || entry.grantRef !== prepared.grantRef ||
+          entry.target !== request.targetRef || entry.requestRef !== prepared.requestRef || entry.idempotencyKey !== request.idempotencyKey))
+      throw new TypeError('skill read must retain one complete original atomic triplet');
+    const claim = group[1]!, completed = group[2]!, target = await readCanonicalArtifact<ToolTargetV1>(artifacts, request.targetRef);
+    const grant = await readCanonicalArtifact<ToolOperationGrantV1>(artifacts, prepared.grantRef);
+    if (request.toolName !== 'skill_resource' || target.execution.kind !== 'supervisor_operation' || target.execution.handlerId !== 'skill_resource' ||
+        grant.subject.policySubjectKind !== 'ordinary_tool' || grant.subject.replayClass !== 'retry' || grant.maxDispatchedAttempts !== 1 ||
+        prepared.replayClass !== 'retry' || prepared.opId !== request.opId || prepared.idempotencyKey !==
+          identityHash('cliq-skill-resource-idempotency-v1', run.id, request.opId, request.inputDigest) ||
+        claim.dispatchId !== skillResourceDispatchId(run.id, request.opId, prepared.requestRef) || claim.dispatchId !== completed.dispatchId ||
+        claim.stateOwnerEpoch !== completed.stateOwnerEpoch || claim.supervisorInstanceId !== completed.supervisorInstanceId ||
+        !claim.stateOwnerEpoch || !completed.resultRef || !prepared.localCommittedAt || prepared.timestamp < grant.issuedAt ||
+        prepared.localCommittedAt < prepared.timestamp || prepared.localCommittedAt >= grant.expiresAt || prepared.localCommittedAt >= run.deadlineAt)
+      throw new TypeError('skill read substituted its ordinary grant, local claim or lifetime');
+    const cost = { modelTokens: 0, costMicros: 0, toolCalls: 1, repairAttempts: 0 };
+    requireEqual(prepared.budgetDelta, cost, 'skill read single reservation'); requireEqual(completed.budgetDelta, cost, 'skill read single charge');
+    requireEqual(claim.budgetDelta, { ...cost, toolCalls: 0 }, 'skill read local claim has no extra charge');
+    const receipt = decodeSkillResourceReceipt(await readCanonicalArtifact(artifacts, completed.resultRef));
+    const call = await readCanonicalArtifact<ToolCallInputV1>(artifacts, request.inputRef);
+    const assembly = decodeRetainedRunAssembly(await readCanonicalArtifact(artifacts, spec.assemblyRef));
+    const original = decodeWireRun(await readCanonicalArtifact(artifacts, receipt.originalRunSnapshotRef));
+    const source = input.checkpoints.find(value => value.id === receipt.sourceCheckpointId);
+    const checkpoint = input.checkpoints.find(value => value.id === skillResourceCheckpointId(run.id, request.opId));
+    const item = [...items.values()].find(value => value.kind === 'tool_result' && value.opId === request.opId);
+    if (receipt.runId !== run.id || receipt.opId !== request.opId || receipt.assemblyRef !== spec.assemblyRef ||
+        receipt.requestRef !== prepared.requestRef || receipt.targetRef !== request.targetRef || receipt.grantRef !== prepared.grantRef ||
+        receipt.batchItemId !== request.batchItemId || receipt.callId !== request.callId || receipt.callIndex !== request.callIndex ||
+        receipt.sourceJournalSeq !== prepared.seq - 1 || receipt.preparedAt !== prepared.timestamp || call.disposition !== 'resolved' ||
+        call.toolName !== 'skill_resource' || call.inputDigest !== request.inputDigest || digestOmitting(call, 'inputDigest') !== call.inputDigest ||
+        original.id !== run.id || original.specRef !== run.specRef || original.sessionId !== run.sessionId || original.parentRunId !== run.parentRunId ||
+        original.createdAt !== run.createdAt || original.deadlineAt !== run.deadlineAt || original.cancelRequested || original.stopIntentRef ||
+        original.nextStep !== 'tool' || !['queued', 'running'].includes(original.status) || original.frontierRef !== request.frontierRef ||
+        original.latestCheckpointId !== receipt.sourceCheckpointId || !source || !checkpoint || checkpoint.basedOnRunRevision !== original.revision ||
+        checkpoint.workspaceStateRef !== source.workspaceStateRef || checkpoint.journalSeq !== completed.seq ||
+        checkpoint.createdAt !== prepared.localCommittedAt || item?.kind !== 'tool_result' || item.createdAt !== prepared.timestamp ||
+        checkpoint.runItemSeq !== [...items.keys()].indexOf(item.itemId) + 1 || source.createdAt > prepared.timestamp ||
+        source.basedOnRunRevision >= original.revision || source.journalSeq > receipt.sourceJournalSeq ||
+        input.checkpoints.some(value => value.basedOnRunRevision > source.basedOnRunRevision && value.basedOnRunRevision < original.revision))
+      throw new TypeError('skill read lost its original exact call, source cut or ready Checkpoint');
+    const history = await readRetainedStateOwnerHistory(input.driver, artifacts, claim.stateOwnerEpoch), owner = history.entries.at(-1)!.owner;
+    if (owner.supervisorInstanceId !== claim.supervisorInstanceId || owner.acquiredAt > prepared.timestamp ||
+        owner.releasedAt && prepared.localCommittedAt > owner.releasedAt) throw new TypeError('skill read is outside its original Supervisor lifetime');
+    await readSupervisorInspector(artifacts, owner, assembly, { inspectorIdentityRef: receipt.inspectorIdentityRef,
+      inspectorIdentityDigest: receipt.inspectorIdentityDigest, observedAt: receipt.preparedAt });
+    const value = await readSkillResourceValue(artifacts, assembly, decodeSkillResourceInput(call.value));
+    requireEqual(receipt.value, value, 'complete original frozen skill resource bytes');
+    const payload = await readCanonicalArtifact<ToolResultPayloadV1>(artifacts, item.resultRef);
+    const model = await readCanonicalArtifact<ToolResultModelContentV1>(artifacts, payload.modelContentRef);
+    const modelCore = { schemaVersion: 1, format: 'cliq-tool-result-model-content-v1', callId: request.callId, index: request.callIndex,
+      toolName: 'skill_resource', outcome: 'executed', content: value };
+    requireEqual(model, { ...modelCore, contentDigest: canonicalSha256(modelCore) }, 'skill read exact model content');
+    const payloadCore = { schemaVersion: 1, format: 'cliq-tool-result-payload-v1', runId: run.id, batchItemId: request.batchItemId,
+      callId: request.callId, index: request.callIndex, toolName: 'skill_resource', modelContentRef: canonicalSha256(model), modelContentDigest: model.contentDigest,
+      outcome: 'executed', source: 'skill_resource', opId: request.opId, journalResultRef: completed.resultRef, journalResultDigest: receipt.receiptDigest };
+    requireEqual(payload, { ...payloadCore, payloadDigest: canonicalSha256(payloadCore) }, 'skill read exact local result source');
+    history.assertUnchanged(input.driver);
+  }
+  for (const [grantRef, decision] of decisions) {
+    const grant = await readCanonicalArtifact<ToolOperationGrantV1>(artifacts, grantRef);
+    if (grant.subject.toolName === 'skill_resource' && decision.decisionSource === 'direct_policy' &&
+        !journal.some(entry => entry.opKind === 'skill_resource' && entry.phase === 'completed' && entry.grantRef === grantRef))
+      throw new TypeError('direct skill read permission is not registered without its complete local effect');
+  }
   for (const prepared of journal.filter((entry) => entry.phase === 'prepared' && (entry.opKind === 'tool' || entry.opKind === 'mcp'))) {
     const request = requests.get(prepared.requestRef);
     if (!request || !prepared.grantRef || !decisions.has(prepared.grantRef) || prepared.opId !== request.opId || prepared.target !== request.targetRef ||
         prepared.idempotencyKey !== request.idempotencyKey) throw new TypeError('tool Journal has no committed exact policy/grant owner');
     const grant = await readCanonicalArtifact<ToolOperationGrantV1>(artifacts, prepared.grantRef);
     const target = await readCanonicalArtifact<ToolTargetV1>(artifacts, request.targetRef);
+    if (target.execution.kind === 'supervisor_operation') throw new TypeError('Supervisor local operation cannot use physical tool Journal history');
     if (prepared.replayClass !== grant.subject.replayClass || grant.requestRef !== prepared.requestRef ||
         prepared.opKind !== (target.execution.kind === 'mcp' ? 'mcp' : 'tool')) throw new TypeError('tool Journal substitutes the grant contract');
     requireEqual(prepared.budgetDelta, { modelTokens: 0, costMicros: 0, toolCalls: 1, repairAttempts: 0 }, 'tool reservation');

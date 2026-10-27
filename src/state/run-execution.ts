@@ -1930,10 +1930,11 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         const projection = await currentAgent.readToolInvocation(signal);
         requireEqual(projection.run, selected.run, 'current native tool projection');
         if (projection.kind === 'tool' && !(projection.execution.kind === 'builtin' && projection.execution.adapterId === LINUX_WORKER_RECIPE.editId ||
-            projection.execution.kind === 'builtin_script') || projection.kind === 'input' && projection.execution.kind !== 'supervisor_control') {
+            projection.execution.kind === 'builtin_script' || projection.execution.kind === 'supervisor_operation' && projection.execution.handlerId === 'skill_resource') ||
+            projection.kind === 'input' && projection.execution.kind !== 'supervisor_control') {
           throw new KernelStorageError('INVALID_REQUEST', 'this installed recipe does not support the frozen tool execution identity');
         }
-        if (retained && projection.kind === 'tool' && !worker!.hasInvocationCapacity()) {
+        if (retained && projection.kind === 'tool' && projection.execution.kind !== 'supervisor_operation' && !worker!.hasInvocationCapacity()) {
           // This is the original controller's monotonic scope arena, observed
           // before preparing any new grant or permanent claim. It is not the
           // Run tool-call budget and supplies no process-death evidence.
@@ -1979,6 +1980,13 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           return readRun(driver, runId);
         }
         if (prepared.disposition === 'child_admission_required') return prepared.run;
+        if (prepared.disposition === 'skill_resource_required') {
+          try { return (await currentAgent.readSkillResource({ expectedRunRevision: prepared.run.revision, leaseEpoch: prepared.run.leaseEpoch }, signal)).run; }
+          catch (error) {
+            if (!(error instanceof KernelStorageError) || error.code !== 'BUDGET_EXHAUSTED') throw error;
+            return (await currentAgent.stopForResourceFailure({ expectedRunRevision: prepared.run.revision })).run;
+          }
+        }
         if (prepared.disposition === 'children_required') {
           await currentAgent.waitForChildren({ expectedRunRevision: prepared.run.revision }, signal);
           return readRun(driver, runId);
@@ -2189,7 +2197,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           // exact terminal seq. A failed phase or refunded budget alone never
           // substitutes for native retirement, and M still retires below.
           if (entry.opKind === 'publish' && !hasClaim && stoppedPreparations.has(entry.seq)) continue;
-          if (!['model', 'tool', 'verifier', 'child_admission', 'child_merge', 'child_await'].includes(entry.opKind) || (!['prepared', 'completed'].includes(entry.phase) &&
+          if (!['model', 'tool', 'verifier', 'child_admission', 'child_merge', 'child_await', 'skill_resource'].includes(entry.opKind) || (!['prepared', 'completed'].includes(entry.phase) &&
               (entry.phase !== 'failed' || hasClaim && !(entry.opKind === 'model' && noRelease.has(entry.seq)) &&
                 !(entry.opKind === 'verifier' && stoppedVerifiers.has(entry.seq))))) {
             throw new KernelStorageError('STATE_TRANSITION_INVALID', 'terminal stop awaits exact dispatch/reconciliation closure');

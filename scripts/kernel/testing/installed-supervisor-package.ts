@@ -23,14 +23,19 @@ import { writeInstalledGuestToolchain } from './installed-guest-package.js';
 import { validateGuestToolchainMetadata } from '../../../src/state/guest-toolchain.js';
 import { buildSourceGitInspectorAsset } from './source-git-inspector-package.js';
 import { buildBuiltinToolsAsset } from './builtin-tools-package.js';
+import { buildBundledSkillPackageData, type BundledSkillPackageInput } from './installed-skill-package.js';
+import { checkCanonicalBytes, validateBundle } from '../../../src/state/installed-artifacts.js';
+import { emitQualificationFailure } from './qualification-failure-diagnostic.js';
+
+type PackageBuildOptions = Readonly<{ source?: FrozenQualificationSource; publisher?: InstalledQualificationPublisher; upgradeSourceBundle?: RuntimeBundleManifest; bundledSkills?: readonly BundledSkillPackageInput[]; headlessSchemaVersion?: 3; guestToolchain?: 'node-test-v1'; guestImageProfile?: 'qualification_max'; publicationRetirementDiagnostics?: true; credentialPhaseDiagnostics?: true; serverAuthenticationDiagnostics?: true; storeFailureDiagnostics?: true; resourceDiagnostics?: true }>;
 
 /** Construct the same actual SEA/helper package for independent Linux startup
  * and user-manager qualifiers. Real worker images are installed, not launched:
  * they do not qualify admission, execution, release signing or complete I1. */
-export async function buildInstalledSupervisorPackage(fixture: string,
+async function buildInstalledSupervisorPackageCore(fixture: string,
   variant: 'complete' | 'retirement-native-missing' = 'complete', modelFixture?: InstalledModelPackageFixture,
-  options: Readonly<{ source?: FrozenQualificationSource; publisher?: InstalledQualificationPublisher; upgradeSourceBundle?: RuntimeBundleManifest; headlessSchemaVersion?: 3; guestToolchain?: 'node-test-v1'; guestImageProfile?: 'qualification_max'; publicationRetirementDiagnostics?: true; credentialPhaseDiagnostics?: true; serverAuthenticationDiagnostics?: true; storeFailureDiagnostics?: true; resourceDiagnostics?: true }> = {}) {
-  assert(Object.keys(options).every(key => key === 'source' || key === 'publisher' || key === 'upgradeSourceBundle' || key === 'headlessSchemaVersion' || key === 'guestToolchain' || key === 'guestImageProfile' || key === 'publicationRetirementDiagnostics' || key === 'credentialPhaseDiagnostics' || key === 'serverAuthenticationDiagnostics' || key === 'storeFailureDiagnostics' || key === 'resourceDiagnostics'));
+  options: PackageBuildOptions = {}, diagnostics={phase:0}) {
+  assert(Object.keys(options).every(key => key === 'source' || key === 'publisher' || key === 'upgradeSourceBundle' || key === 'bundledSkills' || key === 'headlessSchemaVersion' || key === 'guestToolchain' || key === 'guestImageProfile' || key === 'publicationRetirementDiagnostics' || key === 'credentialPhaseDiagnostics' || key === 'serverAuthenticationDiagnostics' || key === 'storeFailureDiagnostics' || key === 'resourceDiagnostics'));
   assert(options.headlessSchemaVersion === undefined || options.headlessSchemaVersion === 3);
   assert(options.guestToolchain === undefined || options.guestToolchain === 'node-test-v1');
   // Publisher construction only: keep the original maximum-load qualifier
@@ -47,16 +52,25 @@ export async function buildInstalledSupervisorPackage(fixture: string,
   if (options.publicationRetirementDiagnostics) assert(options.guestToolchain === 'node-test-v1',
     'fixed publication observations belong only to the installed delivery qualification image');
   if (options.guestToolchain) assert(variant === 'complete' && modelFixture, 'installed verifier requires the complete model and native package');
+  diagnostics.phase=1;
   const source = options.source === undefined ? undefined : await readQualificationSource(options.source);
   const repository = source?.root ?? fileURLToPath(new URL('../../..', import.meta.url));
   const schemaVersion = source?.schemaVersion ?? KERNEL_STATE_SCHEMA_VERSION;
   if (options.upgradeSourceBundle && schemaVersion !== 8) throw new TypeError('conversion can only be signed by the target8 recipe');
+  if (options.bundledSkills !== undefined && schemaVersion !== 8) throw new TypeError('the original schema7 product cannot consume a later skills recipe');
   // An explicit old source compiles with that original product's actual SEA
   // builder and its separately integrity-installed lock, never today's deps.
   const sea = source ? await import(pathToFileURL(path.join(repository, 'scripts/kernel/testing/supervisor-sea-builder.ts')).href) as
     Pick<typeof import('./supervisor-sea-builder.js'), 'prepareInstalledSupervisorSeaCarrier' | 'buildSupervisorSeaImage'>
     : { prepareInstalledSupervisorSeaCarrier, buildSupervisorSeaImage };
+  // A real old product's serialized tool contracts must come from its same
+  // original verified source, just like its executable/native recipes. The
+  // current compiler cannot silently add a later handler to an old image.
+  const modelProducer = source ? await import(pathToFileURL(path.join(repository, 'scripts/kernel/testing/installed-model-package.ts')).href) as
+    Pick<typeof import('./installed-model-package.js'), 'installedModelPackageEntries'> : { installedModelPackageEntries };
+  diagnostics.phase=2;
   const { nodeRoot, carrier, supervisorCarrier } = await sea.prepareInstalledSupervisorSeaCarrier(fixture);
+  diagnostics.phase=3;
   const publisher = options.publisher ?? createInstalledQualificationPublisher();
   const keys = qualificationPublisherMaterial(publisher);
   const releaseKeys = [...keys.releaseKeys];
@@ -65,6 +79,7 @@ export async function buildInstalledSupervisorPackage(fixture: string,
   await writeFile(rootAsset, canonicalJsonBytes(releaseKeys), { flag: 'wx', mode: 0o400 });
   const packageRoot = path.join(fixture, 'package');
   await mkdir(packageRoot, { mode: 0o700 });
+  diagnostics.phase=4;
   const supervisorFile = await sea.buildSupervisorSeaImage({ fixture, carrier: supervisorCarrier,
     entryPoint: path.join(repository, 'src/state/installed-entry.ts'),
     executable: path.join(packageRoot, 'supervisor'), variant: 'installed-supervisor',
@@ -77,6 +92,7 @@ export async function buildInstalledSupervisorPackage(fixture: string,
     ...(options.resourceDiagnostics ? { resourceDiagnostics: true as const } : {}),
     assets: { 'release-trust-roots.json': rootAsset } });
   const supervisorBytes = await readFile(supervisorFile);
+  diagnostics.phase=5;
   const helper = path.join(packageRoot, STATE_OWNER_NATIVE_RELATIVE_PATH);
   await mkdir(path.dirname(helper), { recursive: true, mode: 0o700 });
   const sqliteInclude = await verifiedSqliteExtensionIncludes();
@@ -120,6 +136,7 @@ export async function buildInstalledSupervisorPackage(fixture: string,
   ] as const).filter(([entryId]) => variant !== 'retirement-native-missing' || entryId !== 'linux_worker_native')
     .map(async ([entryId, role, filename]) => ({ entryId, role,
     relativePath: `workers/${filename}`, executable: true, bytes: await readFile(path.join(workerRoot, filename)) })));
+  diagnostics.phase=6;
   let guest: Awaited<ReturnType<typeof writeInstalledGuestToolchain>> | undefined;
   if (options.guestToolchain) {
     const guestImageRoot = path.join(fixture, 'guest-image');
@@ -132,13 +149,17 @@ export async function buildInstalledSupervisorPackage(fixture: string,
       extractorPath: path.join(workerRoot, 'linux-guest-extractor.node'), publisherKeyId: releaseKeys[0]!.keyId, privateKey: keys.privateKey });
   }
   const builtinTools = guest ? await buildBuiltinToolsAsset(repository) : undefined;
-  const modelMaterial = modelFixture ? installedModelPackageEntries(modelFixture, modelBrokerBytes!,
+  const modelMaterial = modelFixture ? modelProducer.installedModelPackageEntries(modelFixture, modelBrokerBytes!,
     workerEntries.find(entry => entry.entryId === 'edit')!.bytes, builtinTools && guest ? {
       entry: builtinTools, supervisor: { entryId: 'installed-supervisor', role: 'supervisor', relativePath: 'supervisor',
         executable: true, version: '1', digest: sha256Bytes(supervisorBytes), byteCount: supervisorBytes.length },
       guest: { manifestRef: guest.manifestRef, manifest: guest.manifest }
     } : undefined) : undefined;
   const profile = policyProfile();
+  const originalStructuredCount = 1 + (guest ? 1 : 0) + (modelMaterial?.structuredArtifacts.length ?? 0);
+  if (options.bundledSkills && options.bundledSkills.length + originalStructuredCount > 65)
+    throw new TypeError('bundled skills exceed the unchanged total structured root bound');
+  const skillData = buildBundledSkillPackageData(options.bundledSkills ?? []);
   const sourceInspector = guest ? await buildSourceGitInspectorAsset(repository) : undefined;
   const rootCore = { schemaVersion: 1, format: 'cliq-sandbox-root-profile-v1', protocol: 'cliq-fresh-empty-root-v1',
     filesystemKind: 'fresh_ephemeral_tmpfs', fixedDirectories: ['/home/cliq', '/tmp', '/work'], persistent: false, networkConfiguration: 'none' };
@@ -162,12 +183,14 @@ export async function buildInstalledSupervisorPackage(fixture: string,
       executable: builtinTools.executable, bytes: builtinTools.bytes }] : []),
     ...(sourceInspector ? [{ entryId: sourceInspector.entryId, role: sourceInspector.role, relativePath: sourceInspector.relativePath,
       executable: sourceInspector.executable, bytes: sourceInspector.bytes }] : []),
+    ...skillData.contents,
   ];
   for (const entry of contents.slice(2)) {
     const filename = path.join(packageRoot, entry.relativePath);
     await mkdir(path.dirname(filename), { recursive: true, mode: 0o700 });
     await writeFile(filename, entry.bytes, { flag: 'wx', mode: entry.executable ? 0o500 : 0o400 });
   }
+  diagnostics.phase=7;
   const bundle: RuntimeBundleManifest = {
     schemaVersion: 1, bundleVersion: guest ? 'installed-sea-verifier-fixture-v1'
       : modelFixture ? 'installed-sea-run-fixture-v1' : 'installed-sea-read-qualification-v1',
@@ -176,6 +199,7 @@ export async function buildInstalledSupervisorPackage(fixture: string,
     entries: [...contents.map(({ bytes, ...entry }) => ({ ...entry, version: entry.entryId === 'kernel_schema' ? '8' : entry.entryId === 'schema_conversion' ? '7-to-8' : '1', digest: sha256Bytes(bytes), byteCount: bytes.byteLength })),
       ...(guest?.entries ?? [])],
     structuredArtifacts: [
+      ...skillData.roots,
       ...(modelMaterial?.structuredArtifacts.filter(root => root.kind === 'compaction_prompt') ?? []),
       ...(guest ? [guest.root] : []),
       { kind: 'policy_engine_profile', artifactId: 'installed-policy', rootEntryId: 'installed-policy',
@@ -188,9 +212,11 @@ export async function buildInstalledSupervisorPackage(fixture: string,
   bundle.manifestDigest = canonicalSha256(core);
   bundle.signature = sign(null, Buffer.from(`cliq-runtime-bundle-v1\0${bundle.manifestDigest}`), keys.privateKey).toString('base64');
   verifyRuntimeBundle(bundle, releaseKeys);
+  checkCanonicalBytes(canonicalJsonBytes(bundle)); validateBundle(bundle, releaseKeys);
   if (guest) validateGuestToolchainMetadata(bundle, guest.manifestRef, canonicalJsonBytes(guest.manifest),
     await readFile(path.join(packageRoot, `objects/sha256/${guest.manifest.signatureRef.slice(0, 2)}/${guest.manifest.signatureRef}`)), releaseKeys);
   await writeFile(path.join(packageRoot, 'manifest.json'), canonicalJsonBytes(bundle), { flag: 'wx', mode: 0o400 });
+  diagnostics.phase=8;
   const modelAuthority = modelFixture ? await writeInstalledModelAuthority({ packageRoot, bundle,
     privateKey: keys.privateKey, fixture: modelFixture, material: modelMaterial! }) : undefined;
   if (options.source) { const current = await readQualificationSource(options.source);
@@ -198,4 +224,11 @@ export async function buildInstalledSupervisorPackage(fixture: string,
   return { packageRoot, releaseKeys, bundle, contents, carrier, ...(source ? { sourceProvenance: source } : {}), ...(modelAuthority ? { modelAuthority } : {}),
     ...(guest ? { guestToolchain: { manifest: guest.manifest, manifestRef: guest.manifestRef,
       manifestId: guest.manifestId, imageLayout: guest.imageLayout } } : {}) };
+}
+
+export async function buildInstalledSupervisorPackage(fixture:string,
+  variant:'complete'|'retirement-native-missing'='complete',modelFixture?:InstalledModelPackageFixture,options:PackageBuildOptions={}) {
+  const diagnostics={phase:0};
+  try { return await buildInstalledSupervisorPackageCore(fixture,variant,modelFixture,options,diagnostics); }
+  catch (error) { emitQualificationFailure('package',error,diagnostics.phase); throw error; }
 }

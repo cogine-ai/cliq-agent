@@ -11,7 +11,7 @@ import { verifyRuntimeBundle, type ReleaseTrustKey, type RuntimeBundleManifest }
 import type { ArtifactCatalog, PublishedArtifact } from './artifacts.js';
 import { readCanonicalArtifact } from './agent-context.js';
 import { assertCurrentControlFrame, validateControlChannelClosure, type AuthenticatedControlIdentity } from './control-channel.js';
-import { decodeFrozenIgnoreRules, decodeSourceProjection, decodeWorkspaceIdentity } from './decoders.js';
+import { decodeFrozenIgnoreRules, decodeSourceManifest, decodeSourceProjection, decodeWorkspaceIdentity, decodeWorkspaceEntries } from './decoders.js';
 import { assertVerifiedDeliverySource, readRetainedVerifiedDeliverySource, type VerifiedDeliverySource } from './delivery-source-authority.js';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
 import { withHeldInstalledRuntime, type HeldInstalledRuntime } from './installed-runtime.js';
@@ -27,6 +27,10 @@ import { assertSupportedVerifierRequests, readVerifierRequestIdentities } from '
 import { prepareSourceGitConsent, sourceGitConsentData, type PreparedSourceGitConsent } from './source-git-consent.js';
 import { decodeAuthorizationConsumptionReceipt, VerifierAuthorizationError } from './authorization-artifacts.js';
 import { readFrozenIgnoreRules } from '../workspace/frozen-ignore.js';
+import { assertSourceIncludeConsentConsumed, prepareSourceIncludeConsent, sourceIncludeConsentData, type PreparedSourceIncludeConsent } from './source-include-consent.js';
+import { readSourceIncludeConsentSnapshots } from './source-include-consent-data.js';
+import { readSourceProjectionData } from './source-projection-data.js';
+import { assertSourceIncludeExpectedDigest } from './source-include-constraints.js';
 
 function invalid(message: string): never { throw new KernelStorageError('INVALID_REQUEST', message); }
 function object(value: unknown, required: readonly string[], optional: readonly string[] = []): Record<string, unknown> {
@@ -82,15 +86,16 @@ export async function resolveDeliverySourceCapture(driver: SqliteDriver, artifac
   const profile = decodeSandboxProfile(await readCanonicalArtifact(artifacts, source.spec.sandboxProfileRef));
   signal?.throwIfAborted();
   if (workspace.kind !== 'live' || workspace.ownerPrincipalId !== principalId) invalid('delivery requires its original live Session identity');
-  // An old consumed admission read grant cannot authorize a new live capture.
-  // Only the connected ordinary builtin projection is currently implemented.
-  if (projection.explicitIncludes.length || projection.frozenIgnoreRulesDigest !== rules.rulesDigest)
-    throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'delivery capture of granted/ignored source is not implemented');
+  if (projection.frozenIgnoreRulesDigest !== rules.rulesDigest) invalid('delivery source rules differ from their exact original projection');
+  const { deliverySourceIncludes } = await import('./delivery-source-includes.js');
+  const admitted = decodeSourceManifest(await readCanonicalArtifact(artifacts, source.spec.baseWorkspaceManifestRef));
+  const classification = await readSourceProjectionData(artifacts, admitted, projection, profile.resources, signal);
+  const sourceIncludes = deliverySourceIncludes(projection, classification.includeAuthorizations, request.sourceReadGrantIds ?? []);
   if (source.spec.dependencyPolicyRef !== undefined || request.verifierExecutionGrantIds.length)
     throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'delivery dependency/template admission is not implemented');
   return immutableSnapshot({ method: 'run.apply', requestId: request.requestId, requestDigest: request.requestDigest,
     admissionKey: request.admissionKey, budgets: request.budgets, sessionId: session.id, expectedContextRevision: session.contextRevision,
-    workspacePath: workspace.canonicalRootPath, sourceIncludes: [], sourceExcludes: projection.explicitExcludes,
+    workspacePath: workspace.canonicalRootPath, sourceIncludes: [...sourceIncludes], sourceExcludes: projection.explicitExcludes,
     maxChangedPaths: projection.maxChangedPaths, maxChangedBytes: projection.maxChangedBytes, sandboxResources: profile.resources,
     ...(request.sourceInspectionGrantId === undefined ? {} : { sourceInspectionGrantId: request.sourceInspectionGrantId }),
     ...(request.ignoreReadGrantIds === undefined ? {} : { ignoreReadGrantIds: request.ignoreReadGrantIds }),
@@ -113,6 +118,7 @@ type TargetBinding = {
   targetRef: string; inspectionId: string; workspace: Extract<WorkspaceIdentityV1, { kind: 'live' }>;
   metadata: readonly PublishedArtifact[];
   inspectionConsent?: PreparedSourceGitConsent;
+  includeConsent?: PreparedSourceIncludeConsent;
 };
 const verifiedTargets = new WeakMap<VerifiedSourceInspectionTarget, TargetBinding>();
 
@@ -147,13 +153,34 @@ export function readVerifiedSourceInspectionTarget(owner: StateOwnerContext, tar
   const held = binding(owner, target); assertActiveStateOwner(held.driver, owner); assertPhysicalTarget(held);
   return Object.freeze({ request: held.request, originalRequest: held.originalRequest, target: held.target,
     targetRef: held.targetRef, inspectionId: held.inspectionId, workspace: held.workspace,
-    workspaceRoot: held.workspaceRoot, metadata: held.metadata, inspectionConsent: held.inspectionConsent });
+    workspaceRoot: held.workspaceRoot, metadata: held.metadata, inspectionConsent: held.inspectionConsent,
+    includeConsent: held.includeConsent });
 }
 export async function recheckVerifiedSourceInspectionTarget(owner: StateOwnerContext,
   target: VerifiedSourceInspectionTarget): Promise<void> {
   const held = binding(owner, target);
   await validateControlChannelClosure(held.artifacts, owner, held.identity);
   assertVerifiedSourceInspectionTargetCut(held.driver, owner, target);
+}
+
+/** Live friend of the existing capture task. Neither a target ref nor an
+ * uncommitted consent snapshot can construct this original registered cut. */
+export function readVerifiedSourceIncludeCapture(owner: StateOwnerContext, target: VerifiedSourceInspectionTarget, workspaceRoot: HeldWorkspaceRoot) {
+  const held = binding(owner, target);
+  if (held.workspaceRoot !== workspaceRoot) throw new TypeError('source include capture must retain its exact original workspace handle');
+  assertVerifiedSourceInspectionTargetCut(held.driver, owner, target);
+  const row = readSourceInspectionAttempt(held.driver, { principalId: held.target.principalId,
+    method: held.target.method, admissionKey: held.target.admissionKey, admissionIntentDigest: held.target.admissionIntentDigest });
+  if (!row || row.phase !== 'capturing' || row.inspectionId !== held.inspectionId || row.targetRef !== held.targetRef ||
+      row.targetDigest !== held.target.targetDigest || row.stateOwnerEpoch !== owner.ownerEpoch || row.supervisorInstanceId !== owner.supervisorInstanceId)
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'source include capture lost its actual original registered owner');
+  if (held.includeConsent) assertSourceIncludeConsentConsumed(held.driver, owner, held.includeConsent);
+  const included = held.includeConsent && sourceIncludeConsentData(owner, held.includeConsent);
+  return immutableSnapshot({ principalId: held.target.principalId, inspectionId: row.inspectionId,
+    runId: identityHash('cliq-run-id-v1', held.target.principalId, held.target.method, held.target.admissionKey),
+    sessionId: held.target.sessionId, workspaceIdentityRef: held.target.workspaceIdentityRef,
+    workspaceIdentityDigest: held.workspace.identityDigest, admissionIntentDigest: held.target.admissionIntentDigest,
+    createdAt: row.createdAt, selectors: held.request.sourceIncludes, scopes: included?.scopes ?? [] });
 }
 
 /** Freezes the complete inline intent only after real authentication, Trust,
@@ -190,12 +217,13 @@ deliverySource?: VerifiedDeliverySource): Promise<VerifiedSourceInspectionTarget
   assertHeldWorkspaceRoot(workspaceRoot);
   if (heldWorkspaceRootPath(workspaceRoot) !== request.workspacePath) throw new KernelStorageError('ARTIFACT_MISMATCH', 'held workspace path differs from inline request');
   assertWorkspaceSourceTrust(trust, request.workspacePath);
-  if (request.sourceIncludes.some(include => include.readGrantId !== undefined)) invalid('source read grants are not implemented; ignored bytes cannot be captured');
+  if (request.sourceIncludes.some(include => include.readGrantId !== undefined && request.ignoreReadGrantIds?.includes(include.readGrantId)))
+    throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');
   if (wire.method === 'run.submit') {
     if (wire.dependency.mode !== 'none') invalid('dependency admission is not yet implemented');
     assertSupportedVerifierRequests(wire.verifiers, wire.policyMode);
     if (wire.verifiers.length) await readVerifierRequestIdentities(driver, reads, owner, bootstrap, identity.principalId, wire.verifiers, undefined, context.signal);
-    if (wire.registeredMcpServerIds.length || wire.skillIds.length) invalid('MCP/skill admission authority is not yet implemented');
+    if (wire.registeredMcpServerIds.length) invalid('MCP admission authority is not yet implemented');
   }
   if (wire.method === 'run.submit' && wire.model.provider !== 'ollama') {
     if (!context.selectedRuntime || wire.model.provider !== 'openai-compatible')
@@ -224,6 +252,12 @@ deliverySource?: VerifiedDeliverySource): Promise<VerifiedSourceInspectionTarget
   if (!profile.allowedOwners.includes('source_inspection') || canonicalSha256(profile.resources) !== canonicalSha256(request.sandboxResources))
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'trusted source inspection profile differs from the requested frozen resources');
   const inspectionId = identityHash('cliq-source-inspection-v1', identity.principalId, wire.method, request.admissionKey, admissionIntentDigest);
+  const includeConsent = request.sourceIncludes.some(include => include.readGrantId !== undefined)
+    ? await prepareSourceIncludeConsent(driver, reads, owner, bootstrap, {
+      principalId: identity.principalId, sessionId: session.id, workspaceIdentityRef: session.workspaceIdentityRef,
+      workspaceIdentityDigest: workspace.identityDigest, inspectionId, admissionIntentDigest
+    }, request.sourceIncludes, context.signal) : undefined;
+  const included = includeConsent && sourceIncludeConsentData(owner, includeConsent);
   let inspectionConsent: PreparedSourceGitConsent | undefined;
   if (workspace.repositoryIdentityRef !== undefined) {
     if (!request.sourceInspectionGrantId || !workspace.repositoryIdentityDigest) throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');
@@ -241,7 +275,8 @@ deliverySource?: VerifiedDeliverySource): Promise<VerifiedSourceInspectionTarget
     method: wire.method, admissionKey: request.admissionKey, admissionIntentDigest,
     originalRequestRef: originalRef, originalRequestDigest: normalized.originalRequestDigest,
     sessionId: request.sessionId, expectedContextRevision: request.expectedContextRevision,
-    workspaceIdentityRef: session.workspaceIdentityRef, workspaceIdentityDigest: workspace.identityDigest, sourceReadGrantRefs: [],
+    workspaceIdentityRef: session.workspaceIdentityRef, workspaceIdentityDigest: workspace.identityDigest,
+    sourceReadGrantRefs: included ? [...included.sourceReadGrantRefs] : [],
     runtimeBundleRef, runtimeBundleManifestDigest: bootstrap.bundle.manifestDigest,
     sandboxProfileRef: selectedProfileRef, sandboxProfileDigest: profile.profileDigest, targetDigest: '' };
   const consent = inspectionConsent && sourceGitConsentData(owner, inspectionConsent);
@@ -257,9 +292,9 @@ deliverySource?: VerifiedDeliverySource): Promise<VerifiedSourceInspectionTarget
   verifiedTargets.set(result, { driver, artifacts, owner, workspaceRoot, trust, identity, request,
     ...(channel.channel.transport.kind === 'uds_peer' ? { frameIdentity } : {}),
     originalRequest: normalized.originalRequest, target: immutableSnapshot(target), targetRef: published.ref,
-    inspectionId, inspectionConsent,
+    inspectionId, inspectionConsent, includeConsent,
     workspace: immutableSnapshot(workspace), metadata: immutableSnapshot([...channel.metadata, original, selectedProfile, published,
-      ...(consent ? consent.metadata : [])]) });
+      ...(consent ? consent.metadata : []), ...(included ? included.metadata : [])]) });
   await recheckVerifiedSourceInspectionTarget(owner, result);
   return result;
 }
@@ -283,7 +318,7 @@ export async function readSourceInspectionTargetData(artifacts: ArtifactCatalog,
         targetData.targetDigest !== digestOmitting(targetData, 'targetDigest') || targetData.targetDigest !== attempt.targetDigest ||
         targetData.principalId !== attempt.principalId || targetData.admissionKey !== attempt.admissionKey ||
         targetData.admissionIntentDigest !== attempt.admissionIntentDigest || targetData.workspaceIdentityDigest !== attempt.workspaceIdentityDigest ||
-        !Array.isArray(targetData.sourceReadGrantRefs) || targetData.sourceReadGrantRefs.length !== 0 ||
+        !Array.isArray(targetData.sourceReadGrantRefs) || targetData.sourceReadGrantRefs.length > 128 ||
         typeof targetData.sessionId !== 'string' || normalizeBoundedText(targetData.sessionId, 1, 128) !== targetData.sessionId ||
         !Number.isSafeInteger(targetData.expectedContextRevision) || (targetData.expectedContextRevision as number) < 1)
       invalid('retained target does not bind its original source attempt');
@@ -317,7 +352,13 @@ export async function readSourceInspectionTargetData(artifacts: ArtifactCatalog,
         invalid('retained ignore consent selection differs from the original request');
     } else if (original.request.sourceInspectionGrantId !== undefined || original.request.ignoreReadGrantIds?.length)
       invalid('historical target cannot borrow an inspection or ignore-rule grant');
-    return { target: immutableSnapshot(targetData as SourceInspectionTarget), original: original.request };
+    const target = immutableSnapshot(targetData as SourceInspectionTarget);
+    if (original.request.method === 'run.submit' && original.request.sourceIncludes.some(selector =>
+      selector.readGrantId !== undefined && original.request.ignoreReadGrantIds?.includes(selector.readGrantId)))
+      invalid('one source read consent cannot be spent on both rule inspection and explicit inclusion');
+    await readSourceIncludeConsentSnapshots(artifacts, attempt, target,
+      original.request.method === 'run.submit' ? original.request.sourceIncludes : { grantIds: original.request.sourceReadGrantIds ?? [] });
+    return { target, original: original.request };
   } catch (cause) {
     if (cause instanceof ResourceRetirementError) throw cause;
     throw new KernelStorageError('RECOVERY_REQUIRED', 'source inspection retained target is invalid', { cause });
@@ -335,6 +376,19 @@ export async function readRetainedSourceInspectionTarget(artifacts: ArtifactCata
     if (workspace.kind !== 'live' || workspace.identityDigest !== targetData.workspaceIdentityDigest ||
         workspace.ownerPrincipalId !== attempt.principalId || targetData.schemaVersion === 2 && workspace.repositoryIdentityRef === undefined)
       invalid('retained target workspace differs from its original request');
+    const includeSnapshots = await readSourceIncludeConsentSnapshots(artifacts, attempt, targetData,
+      original.method === 'run.submit' ? original.sourceIncludes : { grantIds: original.sourceReadGrantIds ?? [] });
+    if (includeSnapshots.length) {
+      if (!retained?.owner) invalid('source include history requires its original consumed-grant recovery context');
+      const { readAuthorizationGrant } = await import('./repositories/authorization-grants.js');
+      const { readSourceReadAuthorizationHistory } = await import('./authorization.js');
+      for (const snapshot of includeSnapshots) {
+        const current = readAuthorizationGrant(retained.driver, snapshot.grantId);
+        if (!current || canonicalSha256(current) !== canonicalSha256(snapshot))
+          invalid('source include lost its original actual SQL consumption');
+        await readSourceReadAuthorizationHistory(retained.driver, artifacts, retained.owner, current, bootstrap.releaseKeys, retained.signal);
+      }
+    }
     if (targetData.schemaVersion === 2) {
       if (!retained?.owner) invalid('Git capture history requires its original retained consent recovery context');
       const { readAuthorizationGrant } = await import('./repositories/authorization-grants.js');
@@ -357,6 +411,27 @@ export async function readRetainedSourceInspectionTarget(artifacts: ArtifactCata
     const profile = decodeSandboxProfile(await readCanonicalArtifact(artifacts, text(targetData.sandboxProfileRef, 64)));
     if (profile.profileDigest !== targetData.sandboxProfileDigest || !profile.allowedOwners.includes('source_inspection'))
       invalid('retained target source profile differs');
+    if (attempt.phase === 'retired' && attempt.outcome.kind === 'captured' && original.method === 'run.submit' && original.sourceIncludes.length) {
+      const source = decodeSourceManifest(await readCanonicalArtifact(artifacts,attempt.outcome.sourceManifestRef));
+      const projection = decodeSourceProjection(await readCanonicalArtifact(artifacts,source.sourceProjectionRef));
+      const data = await readSourceProjectionData(artifacts,source,projection,profile.resources,retained?.signal);
+      if (source.role !== 'base' || source.workspaceIdentityDigest !== attempt.workspaceIdentityDigest ||
+          source.manifestDigest !== attempt.outcome.sourceManifestDigest || projection.explicitIncludes.length !== original.sourceIncludes.length ||
+          data.includeAuthorizations.some((authorization,index) => {
+            const selector = original.sourceIncludes[index]!;
+            return authorization.principalId !== attempt.principalId || authorization.inspectionId !== attempt.inspectionId ||
+              authorization.runId !== identityHash('cliq-run-id-v1',attempt.principalId,attempt.method,attempt.admissionKey) ||
+              authorization.sessionId !== targetData.sessionId || authorization.workspaceIdentityRef !== targetData.workspaceIdentityRef ||
+              authorization.admissionIntentDigest !== attempt.admissionIntentDigest || authorization.createdAt !== attempt.createdAt ||
+              authorization.capturedEntriesRef !== source.entriesRef || authorization.capturedTreeDigest !== source.treeDigest ||
+              authorization.selector.path !== selector.path || authorization.selector.scope !== selector.scope ||
+              (authorization.kind === 'consumed_user_read_grant' ? authorization.authorizationGrantId !== selector.readGrantId ||
+                authorization.consumedGrantSnapshotRef !== canonicalSha256(includeSnapshots.find(grant => grant.grantId === selector.readGrantId))
+                : selector.readGrantId !== undefined);
+          }) || data.includeObservations.some(value => value.observedAt < attempt.createdAt || value.observedAt > attempt.retiredAt ||
+            value.capturedEntriesRef !== source.entriesRef || value.capturedTreeDigest !== source.treeDigest))
+        invalid('retained source includes differ from their exact original captured and retired admission');
+    }
     if (original.method === 'run.submit') {
       if (original.sessionId !== targetData.sessionId || original.expectedContextRevision !== targetData.expectedContextRevision ||
           workspace.canonicalRootPath !== original.workspacePath ||
@@ -367,11 +442,34 @@ export async function readRetainedSourceInspectionTarget(artifacts: ArtifactCata
         sourceRunId: original.sourceRunId, expectedRunResultRef: original.expectedRunResultRef, signal: retained.signal });
       const projection = decodeSourceProjection(await readCanonicalArtifact(artifacts, source.spec.sourceProjectionRef));
       const rules = await readFrozenIgnoreRules(artifacts, projection.frozenIgnoreRulesRef, workspace.repositoryIdentityDigest, retained.signal);
+      const { deliverySourceIncludes } = await import('./delivery-source-includes.js');
+      const admitted = decodeSourceManifest(await readCanonicalArtifact(artifacts, source.spec.baseWorkspaceManifestRef));
+      const classification = await readSourceProjectionData(artifacts, admitted, projection, profile.resources, retained.signal);
+      const selectors = deliverySourceIncludes(projection, classification.includeAuthorizations, original.sourceReadGrantIds ?? []);
+      const freshConsents = await readSourceIncludeConsentSnapshots(artifacts, attempt, targetData, selectors);
+      if (attempt.phase === 'retired' && attempt.outcome.kind === 'captured') {
+        const actual = decodeSourceManifest(await readCanonicalArtifact(artifacts,attempt.outcome.sourceManifestRef));
+        const entries = decodeWorkspaceEntries(await readCanonicalArtifact(artifacts,actual.entriesRef));
+        if (actual.role !== 'base' || actual.workspaceIdentityDigest !== attempt.workspaceIdentityDigest ||
+            actual.manifestDigest !== attempt.outcome.sourceManifestDigest || actual.sourceProjectionRef !== source.spec.sourceProjectionRef ||
+            entries.treeDigest !== actual.treeDigest)
+          invalid('fresh delivery consent lost its exact captured A entries');
+        for (const consent of freshConsents) {
+          if (consent.target.kind !== 'read_scope') invalid('fresh delivery consent changed its purpose');
+          assertSourceIncludeExpectedDigest(consent.target,entries);
+          if (consent.target.expectedDigest !== undefined) {
+            const path = consent.target.canonicalRootRelativePath;
+            const entry = entries.entries.find(entry => entry.path === path);
+            if (entry?.kind !== 'file') invalid('fresh delivery constraint has no captured regular file');
+            for await (const _chunk of artifacts.readChunks(entry.blobRef,entry.size)) retained.signal?.throwIfAborted();
+          }
+        }
+      }
       if (source.run.sessionId !== targetData.sessionId || source.session.workspaceIdentityRef !== targetData.workspaceIdentityRef ||
           !Number.isSafeInteger(targetData.expectedContextRevision) || (targetData.expectedContextRevision as number) < 1 ||
           (targetData.expectedContextRevision as number) > source.session.contextRevision ||
           source.spec.sandboxProfileRef !== targetData.sandboxProfileRef || source.assembly.runtime.runtimeBundleRef !== targetData.runtimeBundleRef ||
-          projection.explicitIncludes.length || projection.frozenIgnoreRulesDigest !== rules.rulesDigest || source.spec.dependencyPolicyRef !== undefined ||
+          projection.frozenIgnoreRulesDigest !== rules.rulesDigest || source.spec.dependencyPolicyRef !== undefined ||
           original.verifierExecutionGrantIds.length)
         invalid('retained delivery capture selection differs from its exact original source');
     }

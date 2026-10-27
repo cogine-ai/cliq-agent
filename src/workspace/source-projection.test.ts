@@ -370,7 +370,7 @@ test('frozen capture rejects altered, noncanonical and unsupported retained proj
   await assert.rejects(captureFrozenSourceProjection(await publishProjection({ matcherVersion: 'future-matcher' })), /wrong schema/);
   await assert.rejects(captureFrozenSourceProjection(await publishProjection({ explicitIncludes: [
     { path: 'ordinary', scope: 'entry', authorizationRef: 'b'.repeat(64) }
-  ] })), /includes require.*implemented authorization/);
+  ] })), {code:'ENOENT'});
   await assert.rejects(captureFrozenSourceProjection(await publishProjection({ explicitExcludes: [
     { path: 'ordinary', scope: 'glob' }
   ] })), /exclude has invalid fields/);
@@ -458,11 +458,14 @@ test('frozen capture cooperatively cancels real payload reading and fully joins 
   input.workspaceRoot.assertHeld(); input.controlledHome.assertHeld(); input.stateOwnerLock.assertHeld();
 });
 
-test('non-Git selectors cannot enable managed roots, escape, fake native handles or request unimplemented include authority', async t => {
+test('non-Git selectors cannot enable managed roots, escape, fake native handles or borrow include authority', async t => {
   const { workspace, home, input, native } = await fixture(t);
   for (const selector of ['../outside', '/absolute', '.git/config', 'managed-home', 'managed-state/credential'])
     await assert.rejects(publishNonGitSourceProjection({ ...input, sourceExcludes: [{ path: selector, scope: 'subtree' }] }), /canonical|hard-excluded/);
-  await assert.rejects(publishNonGitSourceProjection({ ...input, sourceIncludes: [{ path: 'ordinary', scope: 'entry' }] }), /includes.*not implemented/);
+  await assert.rejects(publishNonGitSourceProjection({ ...input, sourceIncludes: [{ path: 'ordinary', scope: 'entry' }] }),
+    {code:'INVALID_REQUEST',message:'explicit source includes require original registered capture authority'});
+  await assert.rejects(publishNonGitSourceProjection({ ...input, sourceIncludes: [{ path: 'ordinary', scope: 'entry' }],
+    includeCapture:{owner:{},target:{}} as never }), {code:'ARTIFACT_MISMATCH'});
   await assert.rejects(publishNonGitSourceProjection({ ...input, sourceExcludes: [{ path: 'ordinary', scope: 'entry', readGrantId: 'forged' } as never] }), /unknown fields/);
   await assert.rejects(publishNonGitSourceProjection({ ...input, workspaceRoot: { ...input.workspaceRoot } }), /invalid native source/);
   await assert.rejects(publishNonGitSourceProjection({ ...input, stateOwnerLock: { ...input.stateOwnerLock } }), /invalid StateOwner lock/);

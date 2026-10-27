@@ -23,7 +23,7 @@ async function readModelFailureCause(driver: SqliteDriver, artifacts: ArtifactCa
   const children = childAllocationBudgetFacts(run.id, cut.childAllocations);
   if (run.waitingReason && sourceCheckpointId === undefined || !isZeroBudget(subtractBudget(run.budgetReserved, children.reserved))) return undefined;
   const history = [...stopInvocationHistory(journal).values()];
-  if (history.some(({ entry, hasClaim }) => !['model', 'tool', 'child_admission', 'child_merge', 'child_await'].includes(entry.opKind) ||
+  if (history.some(({ entry, hasClaim }) => !['model', 'tool', 'child_admission', 'child_merge', 'child_await', 'skill_resource'].includes(entry.opKind) ||
       (entry.phase !== 'completed' && (entry.phase !== 'failed' || hasClaim)))) return undefined;
   const latest = history.filter(({ entry }) => entry.opKind === 'model').at(-1)?.entry;
   if (latest?.phase !== 'completed') return undefined;

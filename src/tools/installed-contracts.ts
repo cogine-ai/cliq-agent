@@ -9,7 +9,7 @@ import { immutableSnapshot } from '../model/immutable.js';
 import { assertBuiltinScriptGuest } from './execution-identity.js';
 
 type Entry = RuntimeBundleManifest['entries'][number];
-export const INSTALLED_TOOL_NAMES = Object.freeze(['await_children', 'bash', 'delegate', 'edit', 'find', 'grep', 'ls', 'read', 'request_input'] as const);
+export const INSTALLED_TOOL_NAMES = Object.freeze(['await_children', 'bash', 'delegate', 'edit', 'find', 'grep', 'ls', 'read', 'request_input', 'skill_resource'] as const);
 const descriptions = {
   await_children: 'Register one wait for the supplied owned child Run handles. Return ordered actual child results and serialized patch merge outcomes. Each explicit registration costs one tool call; internal wake and settlement do not add another charge.',
   bash: 'Execute an authorized Bash command in the private Run workspace.',
@@ -19,7 +19,8 @@ const descriptions = {
   grep: 'Search private workspace file contents for a literal substring.',
   ls: 'List a directory in the private Run workspace.',
   read: 'Read a file in the private Run workspace.',
-  request_input: 'Ask the user for a bounded text or schema-bound JSON answer.'
+  request_input: 'Ask the user for a bounded text or schema-bound JSON answer.',
+  skill_resource: 'Read a 1..65536 byte range of a resource from an explicitly selected frozen skill. Supply skillId, canonicalRelativePath, offset and length. The result reports total size, exact base64 bytes, nextOffset and eof; request further ranges explicitly. Executable-disabled resources are data and cannot be executed or imported.'
 };
 export function buildInstalledToolContracts(input: { edit: Entry;
   scripts?: { entry: Entry; supervisor: Entry; guest: { manifestRef: string; manifest: GuestToolchainManifest } } }) {
@@ -46,8 +47,8 @@ export function buildInstalledToolContracts(input: { edit: Entry;
     if (name === 'request_input' || name === 'await_children') return { ...common, access: 'control', replayClass: 'manual', execution: {
       kind: 'supervisor_control', handlerId: name, supervisorEntryId: scripts!.supervisor.entryId,
       supervisorEntryVersion: scripts!.supervisor.version, supervisorExecutableDigest: scripts!.supervisor.digest } };
-    if (name === 'delegate') return { ...common, access: 'exec', replayClass: 'retry', execution: {
-      kind: 'supervisor_operation', handlerId: 'delegate', supervisorEntryId: scripts!.supervisor.entryId,
+    if (name === 'delegate' || name === 'skill_resource') return { ...common, access: name === 'skill_resource' ? 'read' : 'exec', replayClass: 'retry', execution: {
+      kind: 'supervisor_operation', handlerId: name, supervisorEntryId: scripts!.supervisor.entryId,
       supervisorEntryVersion: scripts!.supervisor.version, supervisorExecutableDigest: scripts!.supervisor.digest } };
     return { ...common, access: name === 'bash' ? 'exec' : 'read', replayClass: name === 'bash' ? 'manual' : 'retry', execution: {
       kind: 'builtin_script', adapterId: 'builtin_tools', adapterVersion: '1', adapterCodeDigest: scripts!.entry.digest,
