@@ -3846,19 +3846,25 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
         providerRequestsUnchanged: true, terminalRunUnchanged: true,
         singleExplicitBusyRequest: true, manualReplayAfterScopeDrain: true };
       mark('durable_source_refusal_before_credential_revocation');
+      // A genuine unsupported source object is rejected by capture after its
+      // reservation. Duplicate selectors are already refused by the fixed
+      // managed-dependency preflight and cannot exercise durable source replay.
+      const refusalNestedRoot = path.join(recipe.workspace, 'unsupported-source-refusal');
+      await mkdir(refusalNestedRoot, { mode: 0o755 }); await chown(refusalNestedRoot, ledger.uid, ledger.gid);
+      const refusalNestedGit = path.join(refusalNestedRoot, '.git');
+      await mkdir(refusalNestedGit, { mode: 0o755 }); await chown(refusalNestedGit, ledger.uid, ledger.gid);
       const refusalSession = currentSession();
       const refusalCore = { ...resourceCore, requestId: '019a0012-0000-7000-8000-000000000116',
         admissionKey: randomBytes(32).toString('base64url'), expectedContextRevision: refusalSession.contextRevision,
         objective: 'Observe a durable cafe\u0301 source refusal without executing a model.',
-        // Canonical inline selectors pass generic/installed admission. The
-        // existing source projection rejects duplicates after real reservation,
-        // then retires its genuine descriptors/staging before this response.
-        sourceExcludes: [{ path: 'example.txt', scope: 'entry' }, { path: 'example.txt', scope: 'entry' }] };
+        // Keep the generic selector preflight valid. The original native source
+        // cursor independently refuses nested Git metadata without following it.
+        sourceExcludes: [] };
       const refusalRequest = request(refusalCore), refusal = exchange([refusalRequest])[0]!;
       assert.equal(canonicalSha256(refusal), canonicalSha256({ protocolVersion: 1, ok: false, method: 'run.submit',
         error: { schemaVersion: 1, messageCode: 'source_capture_rejected', code: 'INVALID_REQUEST', retryable: false,
           issues: [{ path: 'source', issueCode: 'source_changed_or_unsupported' }] } }));
-      report.sourceRefusalReplay = { qualified: false, sourceRule: 'duplicate_exclude_selectors',
+      report.sourceRefusalReplay = { qualified: false, sourceRule: 'nested_git_metadata',
         originalResponseDigest: canonicalSha256(refusal), initialSourceRefusal: true };
       assert.deepEqual(currentSession(), refusalSession); assert.equal(requestsReceived, 1);
       mark('real_credential_revocation_before_source_refusal_replay');

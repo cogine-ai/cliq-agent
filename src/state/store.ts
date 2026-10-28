@@ -2800,16 +2800,19 @@ export class StateStore {
         value.protocolVersion !== 1 || value.method !== 'run.cancel') throw new KernelStorageError('INVALID_REQUEST', 'run.cancel requires its exact contract');
     const { requestDigest, ...core } = value;
     if (requestDigest !== canonicalSha256(core)) throw new KernelStorageError('INVALID_REQUEST', 'run.cancel request digest differs');
-    await validateControlChannelClosure(this.artifacts, this.owner, identity);
+    await observeInstalledPublicationWork(value.runId as string, 'run_cancel_channel', () =>
+      validateControlChannelClosure(this.artifacts, this.owner, identity));
     const runId = value.runId as string;
     let agent = this.installedAgents.get(runId)?.agent;
     const terminal = ['succeeded', 'completed_unverified', 'failed', 'cancelled'].includes(readRun(this.driver, runId).status);
     if (!agent && terminal) return this.cancelTerminalInstalledRun(runId,
       { ...identity, requestId: value.requestId as string, expectedRunRevision: value.expectedRevision as number });
     if (!agent) {
-      agent = await this.retainInstalledAgent(runId);
+      agent = await observeInstalledPublicationWork(runId, 'run_cancel_load', () => this.retainInstalledAgent(runId));
     }
-    const result = await agent.cancelRun({ ...identity, requestId: value.requestId as string, expectedRunRevision: value.expectedRevision as number });
+    const retainedAgent = agent;
+    const result = await observeInstalledPublicationWork(runId, 'run_cancel_stop', () =>
+      retainedAgent.cancelRun({ ...identity, requestId: value.requestId as string, expectedRunRevision: value.expectedRevision as number }));
     // The StopIntent commits first; revocation enters native synchronously.
     this.requestInstalledRunStop(runId);
     this.scheduleInstalledRun(runId);
@@ -2824,23 +2827,26 @@ export class StateStore {
       const reads = this.artifacts.withReadSignal(signal), run = readRun(this.driver, runId);
       const operation = decodeRunSpec(await reads.readCanonical(run.specRef)).operation;
       const { readRunAuthority } = await import('./run-authority.js');
-      const authority = await readRunAuthority(this.driver, reads, this.owner,
-        { runId, operation, releaseKeys: this.runtimeAuthority!.releaseKeys }, signal);
+      const authority = await observeInstalledPublicationWork(runId, 'terminal_cancel_authority', () =>
+        readRunAuthority(this.driver, reads, this.owner,
+          { runId, operation, releaseKeys: this.runtimeAuthority!.releaseKeys }, signal));
       if (!['succeeded', 'completed_unverified', 'failed', 'cancelled'].includes(authority.run.status))
         throw new KernelStorageError('REVISION_CONFLICT', 'terminal cancellation lost its original terminal cut');
       // These readers each own a four-leaf group. Keep them serial; joining
       // their whole graphs would silently enlarge the actual CAS read peak.
       if (operation === 'agent') {
         const { loadInstalledRunMaterial } = await import('./installed-run.js');
-        const material = await loadInstalledRunMaterial({ selected: this.installedRuntime!, artifacts: reads,
-          assemblyRef: authority.spec.assemblyRef, driver: this.driver, runId, signal });
+        const material = await observeInstalledPublicationWork(runId, 'terminal_cancel_material', () =>
+          loadInstalledRunMaterial({ selected: this.installedRuntime!, artifacts: reads,
+            assemblyRef: authority.spec.assemblyRef, driver: this.driver, runId, signal }));
         const { validateAgentRunAssembly } = await import('./reducers/agent.js');
         validateAgentRunAssembly(authority, material);
       }
-      await authority.controlAuthority.assertAuthority(signal);
+      await observeInstalledPublicationWork(runId, 'terminal_cancel_control', () => authority.controlAuthority.assertAuthority(signal));
       signal.throwIfAborted();
       const { loadAgentStop } = await import('./reducers/stop.js');
-      return loadAgentStop(this.driver, reads, this.owner, authority.controlAuthority).cancelRun(command);
+      return observeInstalledPublicationWork(runId, 'terminal_cancel_stop', () =>
+        loadAgentStop(this.driver, reads, this.owner, authority.controlAuthority).cancelRun(command));
     });
   }
 

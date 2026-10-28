@@ -160,7 +160,11 @@ test('the production awaits, bounded parser and independent V1 report fallback r
     assert(body.includes('})().finally(() => { binding.settling = undefined; }));'),
       'the end observation follows the original returned settlement promise, including its existing finally');
   }
-  assert.equal(INSTALLED_PUBLICATION_WORK_V2.length, 9);
+  assert.deepEqual(INSTALLED_PUBLICATION_WORK_V2, ['publication_recovery', 'publication_completion_recovery',
+    'publication_settlement_prepare', 'publication_settlement', 'publication_received_prepare',
+    'publication_received_settlement_prepare', 'publication_received_settlement', 'terminal_retirement_recovery', 'result_recovery',
+    'terminal_cancel_authority', 'terminal_cancel_material', 'terminal_cancel_control', 'terminal_cancel_stop',
+    'run_cancel_channel', 'run_cancel_load', 'run_cancel_stop']);
 });
 
 test('malformed V2 cannot invoke a getter, leak private text or poison the original valid exit summary', () => {
@@ -188,4 +192,38 @@ test('the fixed 64-Run diagnostic tracker bound never refuses or delays the 65th
   `], { encoding: 'utf8', timeout: 5000, maxBuffer: 65536 });
   assert.equal(child.error, undefined); assert.equal(child.status, 0); assert.equal(child.signal, null);
   assert.equal(child.stdout, '65:128'); assert.equal(child.stderr, '');
+});
+
+test('terminal cancel consumers use the original bounded V2 sink and retain a pending original stop consumer', () => {
+  // Ordinary promises and real child stdio only, never native/Run authority.
+  const moduleUrl = new URL('../../../src/state/installed-run-diagnostics.ts', import.meta.url).href;
+  const names = ['terminal_cancel_authority', 'terminal_cancel_material', 'terminal_cancel_control', 'terminal_cancel_stop'];
+  const child = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '--eval',
+    `import {createRequire} from 'node:module';const require=createRequire(import.meta.url);` + INSTALLED_STORE_DIAGNOSTIC_BANNER + `
+      const {observeInstalledPublicationWork}=await import(${JSON.stringify(moduleUrl)});
+      const d=require('node:diagnostics_channel').channel('cliq.installed.run.failures.v1');
+      for(let n=0;n<8;n++)await observeInstalledPublicationWork(${JSON.stringify(runId)},'result_recovery',async()=>n);
+      for(const work of ${JSON.stringify(names.slice(0, 3))})await observeInstalledPublicationWork(${JSON.stringify(runId)},work,async()=>23);
+      let release;const joined=new Promise(resolve=>release=resolve);
+      const pending=observeInstalledPublicationWork(${JSON.stringify(runId)},'terminal_cancel_stop',async()=>{await joined;return 19;});
+      d.publish({kind:'store_stop',driverTasks:0,agentLoads:0,admissions:1,retainedFailures:0,globalFailure:false,phases:{}});
+      release();if(await pending!==19)throw Error('original consumer result changed');
+    `], { encoding: 'utf8', timeout: 5000, maxBuffer: 65536 });
+  assert.equal(child.error, undefined); assert.equal(child.status, 0); assert.equal(child.signal, null); assert.equal(child.stdout, '');
+  const rows = child.stderr.trimEnd().split('\n'); assert(rows.length <= 80);
+  const workRows = rows.filter(row => row.startsWith(prefix)); assert.equal(workRows.length, 2);
+  assert(workRows.every(row => Buffer.byteLength(row) + 1 <= 4096));
+  assert(Buffer.byteLength(workRows.join('\n')) <= 8192);
+  const data = readInstalledPublicationWorkJournal(journal(rows), sender)!;
+  assert.deepEqual(data.snapshots.map(snapshot => snapshot.boundary), ['stop', 'exit']);
+  for (const snapshot of data.snapshots) {
+    assert.equal(snapshot.runs.length, 1); const run = snapshot.runs[0]!;
+    assert.equal(run.runId, runId); assert.equal(run.spans.length, 6); assert.equal(run.discardedSpans, 6);
+    assert.deepEqual(run.spans.slice(-4).map(span => span.work), names);
+  }
+  assert.equal(data.snapshots[0]!.runs[0]!.spans.at(-1)!.outcome, 'pending');
+  assert.equal(data.snapshots[0]!.runs[0]!.spans.at(-1)!.endedMs, null);
+  assert.equal(data.snapshots[1]!.runs[0]!.spans.at(-1)!.outcome, 'fulfilled');
+  assert.equal(readInstalledStoreDiagnosticJournal(journal(rows), sender)!.schedulerFailuresBeforeStop, 0);
+  assert.throws(() => readInstalledPublicationWorkJournal(journal(rows).replace('terminal_cancel_stop', 'terminal_cancel_private'), sender));
 });

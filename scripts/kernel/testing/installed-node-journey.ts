@@ -35,7 +35,7 @@ import { CredentialSecretScanError, createCredentialSecretScanner, copyCredentia
 import { CredentialSecretCorpusError, scanCredentialSecretCorpus, readCredentialSecretCorpusScanProgress,
   type CredentialSecretCorpusScanProgress } from './credential-secret-corpus.js';
 import { inspectInstalledWorkerIdentity, inspectInstalledWorkerLease, assertInstalledWorkerLeaseRenewed, inspectInstalledWorkerRetirement, inspectInstalledWorkerRetirementHistory, inspectInstalledWorkerLaunchIds, type InstalledWorkerIdentityInspection, type InstalledWorkerRetirementBinding } from './installed-worker-lease.js';
-import { inspectInstalledOwnerHistory, waitForInstalledOwnerHistory } from './installed-read-control.js';
+import { inspectInstalledOwnerHistory, waitForInstalledOwnerHistory, type InstalledOwnerHistoryReadStage } from './installed-read-control.js';
 import { assertInstalledVerifierOutcome, InstalledVerifierOutcomeError } from './installed-verifier-result.js';
 import { runInstalledDeliveryCases } from './installed-delivery-journey.js';
 import { createInstalledDependencyResponder, installedDependencyPackage, INSTALLED_DEPENDENCY_PACKAGE_PATH,
@@ -424,7 +424,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
   let serverAuthenticationBinding: Readonly<{ pid: number; processStartToken: string; invocationId: string; windowOpenedAt: number }> | undefined;
   let serverAuthenticationFailure = false;
   let storeFailureBinding: typeof serverAuthenticationBinding;
-  type BindingFailureStage = 'owner_history' | 'owner_cardinality' | 'owner_state' | 'owner_bundle' |
+  type BindingFailureStage = 'owner_history' | `owner_history_${InstalledOwnerHistoryReadStage}` | 'owner_cardinality' | 'owner_state' | 'owner_bundle' |
     'owner_process' | 'process_start' | 'unit_recheck';
   let storeBindingFailureStage: BindingFailureStage | undefined;
   let client: Awaited<ReturnType<typeof persistentClient>> | undefined, inspectionClient: Awaited<ReturnType<typeof persistentClient>> | undefined;
@@ -905,7 +905,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       // observation stays unavailable; never reconstruct it after a failure.
       let bindingStage: BindingFailureStage = 'owner_history';
       try {
-        const owners = inspectInstalledOwnerHistory(recipe.stateRoot).owners;
+        const owners = inspectInstalledOwnerHistory(recipe.stateRoot, stage => { bindingStage = `owner_history_${stage}`; }).owners;
         bindingStage = 'owner_cardinality'; assert.equal(owners.length, 1);
         bindingStage = 'owner_state'; assert.equal(owners[0]!.state, 'active');
         bindingStage = 'owner_bundle';

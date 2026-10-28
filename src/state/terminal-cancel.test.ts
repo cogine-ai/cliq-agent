@@ -39,3 +39,62 @@ test('a retired terminal Run uses the authenticated cancellation reader before e
   assert.equal(agent.match(/validateAgentRunAssembly\(authority, material\)/gu)?.length, 1,
     'productive loading still invokes that same validation');
 });
+
+test('terminal cancellation observes each original serial consumer without adding authority or work', async () => {
+  const { INSTALLED_PUBLICATION_WORK_V2, INSTALLED_RUN_FAILURE_CHANNEL, observeInstalledPublicationWork } =
+    await import('./installed-run-diagnostics.js');
+  const { channel } = await import('node:diagnostics_channel');
+  const names = ['terminal_cancel_authority', 'terminal_cancel_material', 'terminal_cancel_control', 'terminal_cancel_stop'];
+  for (const name of names) assert((INSTALLED_PUBLICATION_WORK_V2 as readonly string[]).includes(name), name);
+  const text = readFileSync(new URL('./store.ts', import.meta.url), 'utf8');
+  const file = ts.createSourceFile('store.ts', text, ts.ScriptTarget.Latest, true);
+  let method: ts.MethodDeclaration | undefined;
+  const visit = (node: ts.Node) => { if (ts.isMethodDeclaration(node) && node.name.getText(file) === 'cancelTerminalInstalledRun') method = node;
+    ts.forEachChild(node, visit); }; visit(file); assert(method?.body);
+  const calls: ts.CallExpression[] = [];
+  const gather = (node: ts.Node) => { if (ts.isCallExpression(node) && node.expression.getText(file) === 'observeInstalledPublicationWork') calls.push(node);
+    ts.forEachChild(node, gather); }; gather(method.body);
+  assert.deepEqual(calls.map(call => (call.arguments[1] as ts.StringLiteral).text), names);
+  const consumers = ['readRunAuthority(', 'loadInstalledRunMaterial(', 'authority.controlAuthority.assertAuthority(signal)', '.cancelRun(command)'];
+  for (const [index, call] of calls.entries()) {
+    assert.equal(call.arguments[0]?.getText(file), 'runId');
+    const callback = call.arguments[2]; assert(callback && ts.isArrowFunction(callback));
+    assert(callback.body.getText(file).includes(consumers[index]!));
+    assert(ts.isAwaitExpression(call.parent) || ts.isReturnStatement(call.parent), 'one original awaited/returned promise, no fire and forget');
+  }
+  assert.doesNotMatch(method.body.getText(file), /Promise\.(all|race)|setTimeout|performance\.now|Date\.now|catch\s*\(/u);
+  const diagnostic = channel(INSTALLED_RUN_FAILURE_CHANNEL), records: any[] = [];
+  const receive = (value: unknown) => records.push(value); diagnostic.subscribe(receive);
+  try {
+    const original = new Error('private original refusal');
+    const observe = observeInstalledPublicationWork as (runId: string, name: string, read: () => Promise<unknown>) => Promise<unknown>;
+    assert.equal(await observe('a'.repeat(43), names[0]!, async () => 17), 17);
+    await assert.rejects(observe('a'.repeat(43), names[1]!, async () => { throw original; }), error => error === original);
+    assert.deepEqual(records.map(row => [row.work, row.event]), [[names[0], 'begin'], [names[0], 'fulfilled'], [names[1], 'begin'], [names[1], 'rejected']]);
+    assert(records.every(row => Object.isFrozen(row) && Number.isSafeInteger(row.elapsedMs) && row.elapsedMs >= 0));
+    assert(!JSON.stringify(records).includes(original.message));
+  } finally { diagnostic.unsubscribe(receive); }
+});
+
+test('cancel diagnostics preserve authenticated routing and the retained-agent stop before native revocation', () => {
+  const text = readFileSync(new URL('./store.ts', import.meta.url), 'utf8');
+  const file = ts.createSourceFile('store.ts', text, ts.ScriptTarget.Latest, true);
+  let method: ts.MethodDeclaration | undefined;
+  const visit = (node: ts.Node) => { if (ts.isMethodDeclaration(node) && node.name.getText(file) === 'cancelInstalledRun') method = node;
+    ts.forEachChild(node, visit); }; visit(file); assert(method?.body);
+  const calls: ts.CallExpression[] = [];
+  const gather = (node: ts.Node) => { if (ts.isCallExpression(node) && node.expression.getText(file) === 'observeInstalledPublicationWork') calls.push(node);
+    ts.forEachChild(node, gather); }; gather(method.body);
+  assert.deepEqual(calls.map(call => (call.arguments[1] as ts.StringLiteral).text), ['run_cancel_channel', 'run_cancel_load', 'run_cancel_stop']);
+  const consumers = ['validateControlChannelClosure(this.artifacts, this.owner, identity)', 'this.retainInstalledAgent(runId)', 'retainedAgent.cancelRun('];
+  for (const [index, call] of calls.entries()) {
+    assert.equal(call.arguments[0]?.getText(file), index === 0 ? 'value.runId as string' : 'runId');
+    const callback = call.arguments[2]; assert(callback && ts.isArrowFunction(callback));
+    assert(callback.body.getText(file).includes(consumers[index]!)); assert(ts.isAwaitExpression(call.parent));
+  }
+  const body = method.body.getText(file), positions = ['immutableSnapshot(request)', 'requestDigest !== canonicalSha256(core)',
+    "'run_cancel_channel'", 'this.installedAgents.get(runId)', 'readRun(this.driver, runId)', 'cancelTerminalInstalledRun(',
+    "'run_cancel_load'", "'run_cancel_stop'", 'this.requestInstalledRunStop(runId)', 'this.scheduleInstalledRun(runId)'].map(value => body.indexOf(value));
+  assert(positions.every((value, index) => value >= 0 && (index === 0 || value > positions[index - 1]!)));
+  assert.doesNotMatch(body, /Promise\.(all|race)|setTimeout|performance\.now|Date\.now|catch\s*\(/u);
+});

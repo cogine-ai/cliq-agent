@@ -88,7 +88,7 @@ test('a missing original binding reports only the fixed local failed stage befor
     node.left.getText(parsed) === 'bindingStage').map(node => node.right.getText(parsed));
   const initial = nodes.find((node): node is ts.VariableDeclaration => ts.isVariableDeclaration(node) && node.name.getText(parsed) === 'bindingStage');
   assert.equal(initial?.initializer?.getText(parsed), "'owner_history'");
-  assert.deepEqual(stages, ["'owner_cardinality'", "'owner_state'", "'owner_bundle'", "'owner_process'", "'process_start'", "'unit_recheck'"]);
+  assert.deepEqual(stages, ['`owner_history_${stage}`', "'owner_cardinality'", "'owner_state'", "'owner_bundle'", "'owner_process'", "'process_start'", "'unit_recheck'"]);
   const catchClause = nodes.find((node): node is ts.CatchClause => ts.isCatchClause(node) &&
     node.block.getText(parsed).includes('storeBindingFailureStage = bindingStage'));
   assert(catchClause && !catchClause.variableDeclaration, 'no exception field may become a binding stage');

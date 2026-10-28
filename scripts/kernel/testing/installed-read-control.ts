@@ -16,12 +16,22 @@ const ownerKeys = ['schemaVersion', 'ownerEpoch', 'supervisorInstanceId', 'runti
   'instanceNonceDigest', 'acquiredAt', 'rowDigest', 'state', 'rowVersion'];
 const terminalKeys = ['releasedAt', 'terminalReason', 'transitionEvidenceRef', 'transitionEvidenceDigest'];
 
-export function inspectInstalledOwnerHistory(stateRoot: string) {
+export type InstalledOwnerHistoryReadStage = 'open' | 'snapshot' | 'schema' | 'rows' | 'records' | 'fence' | 'commit';
+
+export function inspectInstalledOwnerHistory(stateRoot: string, observer?: (stage: InstalledOwnerHistoryReadStage) => void) {
+  const note = (stage: InstalledOwnerHistoryReadStage) => {
+    try { observer?.(stage); } catch { /* Observation cannot decide or replace the original read. */ }
+  };
+  note('open');
   const database = new DatabaseSync(path.join(stateRoot, KERNEL_DATABASE_FILENAME), { readOnly: true, allowExtension: false });
   try {
+    note('snapshot');
     database.exec('BEGIN');
+    note('schema');
     assert.equal(database.prepare('PRAGMA user_version').get()?.user_version, KERNEL_STATE_SCHEMA_VERSION);
+    note('rows');
     const rows = database.prepare('SELECT owner_epoch, supervisor_instance_id, record_json, state, row_digest FROM state_owners ORDER BY owner_epoch').all();
+    note('records');
     const owners = rows.map((row, index) => {
       assert.equal(typeof row.record_json, 'string');
       const owner = parseJsonStrict(row.record_json as string) as StateOwnerRecordV1;
@@ -40,6 +50,7 @@ export function inspectInstalledOwnerHistory(stateRoot: string) {
       }
       return owner;
     });
+    note('fence');
     const fences = database.prepare('SELECT * FROM canonical_time_fence').all();
     assert.equal(fences.length, owners.length ? 1 : 0);
     let fence: CanonicalTimeFenceV1 | undefined;
@@ -53,6 +64,7 @@ export function inspectInstalledOwnerHistory(stateRoot: string) {
       assert(['healthy', 'clock_regressed'].includes(fence.state)); assert.equal(fence.updatedAt, fence.lastAcceptedAt);
       if (fence.state === 'healthy') assert.equal(fence.observedWallClockAt, fence.lastAcceptedAt);
     }
+    note('commit');
     database.exec('COMMIT');
     return { owners, fence };
   } finally { database.close(); }

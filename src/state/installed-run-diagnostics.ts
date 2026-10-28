@@ -185,7 +185,8 @@ export function noteInstalledStoreStop(input: unknown): void {
 export const INSTALLED_PUBLICATION_WORK_V2 = Object.freeze(['publication_recovery', 'publication_completion_recovery',
   'publication_settlement_prepare', 'publication_settlement', 'publication_received_prepare',
   'publication_received_settlement_prepare', 'publication_received_settlement',
-  'terminal_retirement_recovery', 'result_recovery'] as const);
+  'terminal_retirement_recovery', 'result_recovery', 'terminal_cancel_authority', 'terminal_cancel_material',
+  'terminal_cancel_control', 'terminal_cancel_stop', 'run_cancel_channel', 'run_cancel_load', 'run_cancel_stop'] as const);
 export type InstalledPublicationWorkV2 = typeof INSTALLED_PUBLICATION_WORK_V2[number];
 const publicationWork: ReadonlySet<string> = new Set(INSTALLED_PUBLICATION_WORK_V2);
 const publicationRuns = new Map<string, { origin: number; next: number; active: number }>();

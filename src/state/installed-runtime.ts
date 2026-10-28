@@ -2684,6 +2684,8 @@ export type InstalledUpgradeTransaction = Readonly<{
   native: NativeStateOwner; seed: readonly PublishedArtifact[]; source: InstalledUpgradeSourceV1;
   supervisorBirth: PlatformProcessIdentityV1;
   supervisorOwner: StateOwnerRecordV1;
+  /** Fixed inert conversion boundary, never a decision or physical witness. */
+  notePhase?(phase: InstalledRuntimeUpgradePhase): void;
   assertCurrent(): Promise<void>;
   assertCommit(): void;
   assertOldProcessesDead(): void;
@@ -2873,6 +2875,7 @@ export async function stageInstalledRuntimeUpgrade(selected: HeldInstalledRuntim
       const prepared: InstalledUpgradeTransaction = Object.freeze({ stateRoot, bundle: staged.bundle, releaseKeys: original.releaseKeys,
         native, seed: Object.freeze(seed), source: immutableSnapshot(source), supervisorBirth: immutableSnapshot(supervisorBirth),
         supervisorOwner: immutableSnapshot(supervisorOwner),
+        notePhase: phase => noteUpgradePhase(observePhase, phase),
         async assertCurrent() {
           assertBirth(); await scope.assertDirectories();
           await scope.verifyDiscard([staged.manifest, newBootstrap, ...staged.entries.values(), ...originalFiles, ...distinctCasFiles], signal);

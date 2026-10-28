@@ -6,7 +6,10 @@ import { ResourceRetirementError } from './errors.js';
 export const INSTALLED_RUNTIME_UPGRADE_PHASES = ['read_schema', 'recover_selection', 'source_open', 'source_services',
   'source_control', 'stage_original', 'stage_source', 'stage_cas', 'stage_owner_history', 'stage_native',
   'stop_original', 'stop_observe_original', 'stop_load_platform', 'stop_supervisor_request', 'stop_supervisor_decode',
-  'stop_supervisor_death', 'stop_keeper_request', 'stop_keeper_decode', 'stop_keeper_death', 'credential_exclusion', 'conversion', 'publish_selection', 'target_open', 'target_services',
+  'stop_supervisor_death', 'stop_keeper_request', 'stop_keeper_decode', 'stop_keeper_death', 'credential_exclusion', 'conversion', 'conversion_current', 'conversion_owner', 'conversion_recovery',
+  'conversion_schema', 'conversion_history', 'conversion_resources', 'conversion_rows', 'conversion_death',
+  'conversion_receipt', 'conversion_selection', 'conversion_acquisition', 'conversion_commit', 'conversion_publish',
+  'conversion_release', 'publish_selection', 'target_open', 'target_services',
   'target_control', 'output', 'unknown'] as const;
 export type InstalledRuntimeUpgradePhase = typeof INSTALLED_RUNTIME_UPGRADE_PHASES[number];
 // Only native task statuses reachable by the fixed manager/upgrade recipe.

@@ -58,6 +58,7 @@ export async function upgradeRetiredRuntime(input: Readonly<{ stateRoot: string;
   verifyRuntimeBundle(target.bundle, target.releaseKeys);
   if (installed && (installed.stateRoot !== stateRoot || canonicalSha256(installed.bundle) !== canonicalSha256(target.bundle) ||
       canonicalSha256(installed.releaseKeys) !== canonicalSha256(target.releaseKeys))) refuse('upgrade stage differs from trusted target composition');
+  installed?.notePhase?.('conversion_current');
   if (installed) await installed.assertCurrent();
   const native = installed?.native ?? await loadNativeStateOwner(target.bundle);
   const supervisor = target.bundle.entries.find(entry => entry.role === 'supervisor')!;
@@ -72,9 +73,11 @@ export async function upgradeRetiredRuntime(input: Readonly<{ stateRoot: string;
     const catalog = new ArtifactCatalog(new ContentAddressedStore(path.join(stateRoot, KERNEL_CAS_DIRECTORY)), undefined, target.releaseKeys);
     const prior = readLatestStateOwner(driver);
     if (!prior) refuse('upgrade cannot bootstrap a missing original owner');
+    installed?.notePhase?.('conversion_owner');
     await stateOwnerFilesystemFromArtifacts(stateRoot, catalog, prior, lock);
     const version = readSchemaUserVersion(driver), targetRef = canonicalSha256(target.bundle);
     if (version === 8) {
+      installed?.notePhase?.('conversion_recovery');
       const history = await readRetainedStateOwnerHistory(driver, catalog, prior.ownerEpoch);
       const boundary = history.entries.find(entry => entry.acquisition.kind === 'runtime_upgrade');
       if (!boundary || boundary.acquisition.kind !== 'runtime_upgrade' || boundary.owner.runtimeBundleRef !== targetRef) refuse('schema8 is not this registered upgrade');
@@ -97,6 +100,7 @@ export async function upgradeRetiredRuntime(input: Readonly<{ stateRoot: string;
     if (version !== 7 || prior.state !== 'terminal' || prior.terminalReason !== 'graceful_release')
       refuse('explicit upgrade requires schema7 and a real gracefully released original owner');
     assertKernelSchemaVersion(driver, 7);
+    installed?.notePhase?.('conversion_schema');
     const source = await readCanonicalArtifact<RuntimeBundleManifest>(catalog, prior.runtimeBundleRef);
     verifyRuntimeBundle(source, target.releaseKeys);
     const schema = signedKernelSchemaProfile(), conversion = schemaConversionProfile(source);
@@ -109,6 +113,7 @@ export async function upgradeRetiredRuntime(input: Readonly<{ stateRoot: string;
     // present in CAS. Nothing published so far is a commit or new owner.
     await readSignedSchemaConversion(catalog, source, target.bundle, target.releaseKeys);
     const reads = catalog.withRuntimeConversionSource(targetRef);
+    installed?.notePhase?.('conversion_history');
     const history = await readRetainedStateOwnerHistory(driver, reads, prior.ownerEpoch);
     const genesis = history.entries[0]!.acquisition;
     if (genesis.kind !== 'genesis') refuse('upgrade has no original generation');
@@ -124,6 +129,7 @@ export async function upgradeRetiredRuntime(input: Readonly<{ stateRoot: string;
     const originalProcess = history.entries.at(-1)!.process;
     lock.assertPriorProcessDead(originalProcess.pid, originalProcess.processStartToken);
     const counters = { data: versionCounter(driver, 'data_version'), changes: versionCounter(driver, 'total_changes') };
+    installed?.notePhase?.('conversion_resources');
     for (const table of ['runs', 'worker_launches', 'workspace_generations', 'source_inspection_attempts']) {
       const count = requiredSafeInteger(driver.prepare(`SELECT count(*) AS count FROM ${table}`).get<{ count: unknown }>()?.count, 'upgrade resource count');
       if (count > UPGRADE_RESOURCE_FAMILY_ROWS) refuse('upgrade original resource family exceeds its complete fixed witness capacity');
@@ -172,8 +178,10 @@ export async function upgradeRetiredRuntime(input: Readonly<{ stateRoot: string;
       workspace_generation: workspaceGenerationRowRefs, source_inspection: sourceInspectionRowRefs });
     // Every page/index and complete original row is durable and independently
     // reread/joined before sampling the original final death/5s commit window.
+    installed?.notePhase?.('conversion_rows');
     await readRuntimeUpgradeRetiredRows(driver, reads, resources.refs);
     resourceObjects.push(...resources.objects);
+    installed?.notePhase?.('conversion_death');
     const acquiredAt = sampleCanonicalNow(), current = await currentProcessIdentity(native, acquiredAt);
     lock.assertPriorProcessDead(originalProcess.pid, originalProcess.processStartToken);
     const fence = readTimeFence(driver);
@@ -191,6 +199,7 @@ export async function upgradeRetiredRuntime(input: Readonly<{ stateRoot: string;
       });
       refuse('upgrade observed a regressed original canonical time fence');
     }
+    installed?.notePhase?.('conversion_receipt');
     const processObject = await reads.publishCanonical(current, 'cliq-platform-process-identity-v1');
     const ownerEpoch = prior.ownerEpoch + 1, supervisorInstanceId = identityHash('cliq-supervisor-instance-v1', current.identityDigest, acquiredAt, String(ownerEpoch));
     const instanceNonceDigest = sha256Bytes(randomBytes(32));
@@ -213,6 +222,7 @@ export async function upgradeRetiredRuntime(input: Readonly<{ stateRoot: string;
         instanceNonceDigest, acquiredAt }, receiptDigest: '' };
     receipt.receiptDigest = digestOmitting(receipt, 'receiptDigest');
     const receiptObject = await reads.publishCanonical(receipt, 'cliq-runtime-upgrade-receipt-v1');
+    installed?.notePhase?.('conversion_selection');
     if (installed) await installed.prepareSelection(receiptObject.ref);
     const acquisition: StateOwnerAcquisitionEvidenceV1 = { schemaVersion: 1, format: 'cliq-state-owner-acquisition-evidence-v1',
       ...receipt.targetOwner, runtimeBundleRef: targetRef, runtimeBundleManifestDigest: target.bundle.manifestDigest,
@@ -221,6 +231,7 @@ export async function upgradeRetiredRuntime(input: Readonly<{ stateRoot: string;
       priorTransitionEvidenceRef: prior.transitionEvidenceRef, priorTransitionEvidenceDigest: prior.transitionEvidenceDigest,
       priorTerminalReason: 'graceful_release', upgradeReceiptRef: receiptObject.ref, upgradeReceiptDigest: receipt.receiptDigest };
     acquisition.evidenceDigest = digestOmitting(acquisition, 'evidenceDigest');
+    installed?.notePhase?.('conversion_acquisition');
     const acquisitionObject = await reads.publishCanonical(acquisition, 'cliq-state-owner-acquisition-evidence-v1');
     const owner: Extract<StateOwnerRecordV1, { state: 'active' }> = { schemaVersion: 1, ...receipt.targetOwner,
       runtimeBundleRef: targetRef, runtimeBundleManifestDigest: target.bundle.manifestDigest, supervisorEntryId: supervisor.entryId,
@@ -229,6 +240,7 @@ export async function upgradeRetiredRuntime(input: Readonly<{ stateRoot: string;
       acquisitionEvidenceRef: acquisitionObject.ref, acquisitionEvidenceDigest: acquisition.evidenceDigest,
       rowDigest: '', state: 'active', rowVersion: 1 };
     owner.rowDigest = digestOmitting(owner, 'rowDigest');
+    installed?.notePhase?.('conversion_commit');
     const committed = driver.transaction(connection => {
       assertStateOwnerLock(lock); history.assertUnchanged(connection);
       if (versionCounter(connection, 'data_version') !== counters.data || versionCounter(connection, 'total_changes') !== counters.changes ||
@@ -250,7 +262,9 @@ export async function upgradeRetiredRuntime(input: Readonly<{ stateRoot: string;
       return true;
     });
     if (!committed) refuse('upgrade commit observed a regressed original canonical time fence');
+    installed?.notePhase?.('conversion_publish');
     if (installed) await installed.publishSelection(receiptObject.ref, receipt);
+    installed?.notePhase?.('conversion_release');
     await gracefullyReleaseStateOwner(driver, reads, contextFromStateOwner(owner, lock, {
       ref: history.lockIdentity.stateRootIdentityRef, digest: history.lockIdentity.stateRootIdentityDigest }));
     return immutableSnapshot(receipt);

@@ -33,10 +33,21 @@ export type InstalledDeliveryDiagnosticStage = 'public_cut' | 'source_and_merge'
   'verification' | 'verification_inputs' | 'verification_plan' | 'verification_grant' | 'verification_settlement' |
   'verification_cancel' | 'verification_parent_retirement' | 'verification_child_retirement' |
   'verification_workspace' | 'verification_context' | 'publication_receipts' | 'terminal_projection' | 'session_publication';
+const deliveryOutcomeStages = new Set<InstalledDeliveryDiagnosticStage>(['public_cut', 'source_and_merge', 'direct_policy', 'settlements',
+  'verification', 'verification_inputs', 'verification_plan', 'verification_grant', 'verification_settlement',
+  'verification_cancel', 'verification_parent_retirement', 'verification_child_retirement',
+  'verification_workspace', 'verification_context', 'publication_receipts', 'terminal_projection', 'session_publication']);
+// Diagnostic identity only. Opaque errors, proxies and forged prototypes never
+// cross the enclosing catch; this creates no Run or retirement evidence.
+const deliveryOutcomeErrors = new WeakSet<object>();
+
 export class InstalledDeliveryOutcomeError extends Error {
   readonly code = 'INSTALLED_DELIVERY_OUTCOME_REFUSED';
   constructor(readonly diagnosticStage: InstalledDeliveryDiagnosticStage) {
+    if (typeof diagnosticStage !== 'string' || !deliveryOutcomeStages.has(diagnosticStage))
+      throw new TypeError('invalid installed Delivery diagnostic stage');
     super(`Installed Delivery outcome refused at ${diagnosticStage}`); this.name = 'InstalledDeliveryOutcomeError';
+    Object.freeze(this); deliveryOutcomeErrors.add(this);
   }
 }
 
@@ -488,5 +499,8 @@ export async function assertInstalledDeliveryOutcome(input: {
       verification: kind === 'merge' ? 'local' as const : 'inherited_verified' as const, ...counts,
       verifierRetirementIdentities, publicationWorkerRetirement: publication.publicationWorkerRetirement,
       completeRetainedArtifactWalk: true as const, directPolicyOnly: true as const, publicationProjectionMatched: true as const };
-  } catch { throw new InstalledDeliveryOutcomeError(stage); }
+  } catch (error) {
+    if (typeof error === 'object' && error !== null && deliveryOutcomeErrors.has(error)) throw error;
+    throw new InstalledDeliveryOutcomeError(stage);
+  }
 }

@@ -161,3 +161,37 @@ test('unsafe stop and cancellation failures reach the original credential scope 
   const original = native.slice(native.indexOf('export async function withHeldCredentialNativeScope'), native.indexOf('/** Private verified-installation bridge.', native.indexOf('export async function withHeldCredentialNativeScope')));
   assert(original.indexOf('if (failure instanceof ResourceRetirementError) throw failure;') < original.indexOf('try { owned.close(); }'));
 });
+
+test('conversion subphases only label original operations and preserve the complete audit and five-second commit window', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const source = await readFile(new URL('./runtime-upgrade.ts', import.meta.url), 'utf8');
+  const operations = [
+    ["'conversion_current'", 'if (installed) await installed.assertCurrent()'],
+    ["'conversion_owner'", 'await stateOwnerFilesystemFromArtifacts('],
+    ["'conversion_schema'", 'const source = await readCanonicalArtifact<RuntimeBundleManifest>'],
+    ["'conversion_history'", 'const history = await readRetainedStateOwnerHistory(driver, reads, prior.ownerEpoch)'],
+    ["'conversion_resources'", "for (const table of ['runs', 'worker_launches', 'workspace_generations', 'source_inspection_attempts'])"],
+    ["'conversion_rows'", 'await readRuntimeUpgradeRetiredRows(driver, reads, resources.refs)'],
+    ["'conversion_death'", 'const acquiredAt = sampleCanonicalNow(), current = await currentProcessIdentity(native, acquiredAt)'],
+    ["'conversion_receipt'", 'const processObject = await reads.publishCanonical(current,'],
+    ["'conversion_selection'", 'if (installed) await installed.prepareSelection(receiptObject.ref)'],
+    ["'conversion_acquisition'", 'const acquisitionObject = await reads.publishCanonical(acquisition,'],
+    ["'conversion_commit'", 'const committed = driver.transaction(connection =>'],
+    ["'conversion_publish'", 'if (installed) await installed.publishSelection(receiptObject.ref, receipt)'],
+    ["'conversion_release'", 'await gracefullyReleaseStateOwner(driver, reads, contextFromStateOwner(owner, lock,']
+  ];
+  for (const [phase, consumer] of operations) {
+    assert((INSTALLED_RUNTIME_UPGRADE_PHASES as readonly string[]).includes(phase!.slice(1, -1)), phase);
+    const note = `installed?.notePhase?.(${phase})`, at = source.indexOf(note), operation = source.indexOf(consumer!);
+    assert(at >= 0 && at < operation, phase); assert.equal(source.split(note).length, 2);
+  }
+  assert.equal(source.match(/age < 0 \|\| age > 5000/gu)?.length, 1);
+  assert(source.indexOf('await readRuntimeUpgradeRetiredRows(driver, reads, resources.refs)') < source.indexOf('const acquiredAt = sampleCanonicalNow()'));
+  const start = source.indexOf('const committed = driver.transaction'), end = source.indexOf('if (!committed)', start);
+  for (const guard of ['history.assertUnchanged(connection)', 'versionCounter(connection,', 'lock.assertPriorProcessDead(',
+    'installed?.assertCommit()', 'installed?.assertOldProcessesDead()', 'applySignedKernelSchema7To8(connection)', 'transferTimeFenceOwner('])
+    assert(source.slice(start, end).includes(guard), guard);
+  assert(!source.includes('console.') && !source.includes('writeSync('));
+  const runtime = await readFile(new URL('./installed-runtime.ts', import.meta.url), 'utf8');
+  assert(runtime.includes('notePhase: phase => noteUpgradePhase(observePhase, phase)'));
+});

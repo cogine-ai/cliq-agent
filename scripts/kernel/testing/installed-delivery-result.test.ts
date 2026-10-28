@@ -146,3 +146,71 @@ test('a retained-input refusal reports its fixed verification phase without insp
   error => error instanceof InstalledDeliveryOutcomeError && error.diagnosticStage === 'verification_inputs');
   assert.equal(reads, 1); assert.equal(detailReads, 0);
 });
+
+test('the enclosing Delivery catch preserves each existing typed diagnostic identity without inspecting its private fields', async () => {
+  const stages = ['public_cut', 'source_and_merge', 'direct_policy', 'settlements', 'verification', 'verification_inputs',
+    'verification_plan', 'verification_grant', 'verification_settlement', 'verification_cancel', 'verification_parent_retirement',
+    'verification_child_retirement', 'verification_workspace', 'verification_context', 'publication_receipts',
+    'terminal_projection', 'session_publication'] as const;
+  let privateReads = 0, artifactReads = 0;
+  for (const stage of stages) {
+    const original = new InstalledDeliveryOutcomeError(stage);
+    assert(Object.isFrozen(original));
+    for (const key of ['message', 'stack', 'cause', 'name', 'diagnosticStage']) assert.throws(() =>
+      Object.defineProperty(original, key, { get() { privateReads++; throw Error('private error field must not be inspected'); } }), TypeError);
+    assert.equal(Reflect.set(original, 'diagnosticStage', 'private external diagnostic'), false);
+    // Enter the real original catch without constructing a Run, native proof,
+    // retained graph or test-positive verification/retirement evidence.
+    await assert.rejects(assertInstalledDeliveryOutcome({
+      get cut(): Record<string, any> { throw original; }, sessionCut: {}, sourceCut: {}, sourceResultRef: 'a'.repeat(64),
+      expectedFiles: [], kind: 'merge', readRetainedArtifact: async () => { artifactReads++; throw Error('unreachable'); },
+      readOwnerHistory: async () => { artifactReads++; throw Error('unreachable'); }
+    }), error => error === original);
+  }
+  assert.equal(privateReads, 0); assert.equal(artifactReads, 0);
+});
+
+test('opaque, proxy and forged diagnostic failures still receive only the original enclosing fixed stage', async () => {
+  let inspected = 0;
+  const bad = () => { inspected++; throw Error('private external diagnostic'); };
+  const original = Object.defineProperties(Error('private external diagnostic'), Object.fromEntries(
+    ['message', 'stack', 'cause', 'name', 'code'].map(key => [key, { get: bad }])));
+  const forged = Object.create(InstalledDeliveryOutcomeError.prototype, { diagnosticStage: { get: bad } });
+  const nativeForged = Object.setPrototypeOf(Error('private external diagnostic'), InstalledDeliveryOutcomeError.prototype);
+  const proxy = new Proxy(new InstalledDeliveryOutcomeError('verification_inputs'), {
+    get: bad, getPrototypeOf: bad, ownKeys: bad, getOwnPropertyDescriptor: bad
+  });
+  class MutatedDiagnostic extends InstalledDeliveryOutcomeError {
+    constructor() { super('verification_inputs'); Object.defineProperty(this, 'diagnosticStage', { get: bad }); }
+  }
+  let subclassFailure: unknown;
+  try { new MutatedDiagnostic(); } catch (error) { subclassFailure = error; }
+  assert(subclassFailure instanceof TypeError);
+  for (const failure of [original, forged, nativeForged, proxy, subclassFailure, null, undefined, 'private external diagnostic', 1]) {
+    await assert.rejects(assertInstalledDeliveryOutcome({
+      get cut(): Record<string, any> { throw failure; }, sessionCut: {}, sourceCut: {}, sourceResultRef: 'a'.repeat(64),
+      expectedFiles: [], kind: 'merge', readRetainedArtifact: async () => { throw Error('unreachable'); },
+      readOwnerHistory: async () => { throw Error('unreachable'); }
+    }), error => {
+      assert(error instanceof InstalledDeliveryOutcomeError);
+      assert.equal(error.diagnosticStage, 'public_cut');
+      assert.equal(error.message, 'Installed Delivery outcome refused at public_cut');
+      assert.equal(Object.hasOwn(error, 'cause'), false);
+      return true;
+    });
+  }
+  assert.equal(inspected, 0);
+});
+
+test('the retained diagnostic constructor rejects non-closed stages before coercion or message creation', () => {
+  let inspected = 0;
+  const hostile = new Proxy({}, { get() { inspected++; throw Error('private input'); },
+    ownKeys() { inspected++; throw Error('private input'); }, getPrototypeOf() { inspected++; throw Error('private input'); } });
+  for (const stage of ['private external diagnostic', 'verification_inputs\n', '', null, undefined, 1, true,
+    ['verification_inputs'], hostile, Symbol('private external diagnostic')]) {
+    assert.throws(() => new InstalledDeliveryOutcomeError(stage as never), error => {
+      assert(error instanceof TypeError); assert.equal(error.message, 'invalid installed Delivery diagnostic stage'); return true;
+    });
+  }
+  assert.equal(inspected, 0);
+});

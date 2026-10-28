@@ -15,6 +15,58 @@ import { inspectInstalledOwner, inspectInstalledOwnerHistory, observeInstalledOw
   waitForInstalledOwnerHistory } from './installed-read-control.js';
 import * as readControl from './installed-read-control.js';
 
+test('owner-history fixed read diagnostics cannot replace the complete original SQL cut', async () => {
+  const owned = await fixture();
+  try {
+    const original = inspectInstalledOwnerHistory(owned.stateRoot);
+    const stages: string[] = [];
+    const observed = inspectInstalledOwnerHistory(owned.stateRoot, stage => { stages.push(stage); });
+    assert.deepEqual(stages, ['open', 'snapshot', 'schema', 'rows', 'records', 'fence', 'commit']);
+    assert.deepEqual(observed, original);
+    let calls = 0;
+    assert.deepEqual(inspectInstalledOwnerHistory(owned.stateRoot, () => { calls++; throw new Error('inert observer'); }), observed);
+    assert.equal(calls, stages.length, 'observer failure cannot skip a read or decide the cut');
+  } finally { await owned.close(); }
+});
+
+test('owner-history fixed read diagnostics preserve real schema, row and fence failures', async () => {
+  for (const failure of ['schema', 'rows', 'records', 'fence'] as const) {
+    const owned = await fixture();
+    try {
+      if (failure === 'schema' || failure === 'rows') {
+        const writer = new DatabaseSync(owned.filename);
+        try { writer.exec(failure === 'schema' ? `PRAGMA user_version=${KERNEL_STATE_SCHEMA_VERSION + 1}` : 'DROP TABLE state_owners'); }
+        finally { writer.close(); }
+      } else if (failure === 'records') replaceOwner(owned.filename, { ...owned.owner, rowDigest: 'b'.repeat(64) });
+      else replaceFence(owned.filename, { ...owned.fence, fenceDigest: 'b'.repeat(64) });
+      const stages: string[] = [];
+      assert.throws(() => inspectInstalledOwnerHistory(owned.stateRoot, stage => { stages.push(stage); }));
+      assert.equal(stages.at(-1), failure);
+      assert(!stages.includes('commit'), 'failed retained input cannot produce a complete-cut observation');
+    } finally { await owned.close(); }
+  }
+});
+
+test('owner-history fixed read diagnostics distinguish absent and genuinely busy SQLite input', async () => {
+  const empty = await mkdtemp(path.join(os.tmpdir(), 'cliq-owner-diagnostic-absent-'));
+  try {
+    const stages: string[] = [];
+    assert.throws(() => inspectInstalledOwnerHistory(empty, stage => { stages.push(stage); }));
+    assert.deepEqual(stages, ['open']);
+  } finally { await rm(empty, { recursive: true, force: true }); }
+  const owned = await fixture(), writer = new DatabaseSync(owned.filename);
+  try {
+    const original = inspectInstalledOwnerHistory(owned.stateRoot);
+    writer.exec('BEGIN EXCLUSIVE');
+    const stages: string[] = [];
+    assert.throws(() => inspectInstalledOwnerHistory(owned.stateRoot, stage => { stages.push(stage); }),
+      error => error instanceof Error && Object.getOwnPropertyDescriptor(error, 'errcode')?.value === 5);
+    assert.equal(stages.at(-1), 'schema');
+    writer.exec('ROLLBACK');
+    assert.deepEqual(inspectInstalledOwnerHistory(owned.stateRoot), original);
+  } finally { writer.close(); await owned.close(); }
+});
+
 async function fixture() {
   const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-installed-read-control-'));
   const filename = path.join(stateRoot, KERNEL_DATABASE_FILENAME);

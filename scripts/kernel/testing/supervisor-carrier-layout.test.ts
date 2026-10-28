@@ -293,8 +293,10 @@ function assertCarrierExperimentWorkflow(workflow: string): void {
   const adjacent = '        run: node --import tsx scripts/kernel/qualify-supervisor-image.ts "$RUNNER_TEMP/cliq-supervisor-image"\n' + experiment + retain;
   assert(workflow.includes(adjacent), 'the independent experiment belongs immediately after the original complete-image qualifier');
   const parentEvidenceTest = '          scripts/kernel/testing/installed-verifier-parent-evidence.test.ts\n';
+  const qualificationPreflightTest = '          scripts/kernel/testing/installed-qualification-preflight.test.ts\n';
   assert.equal(workflow.split(parentEvidenceTest).length, 2, 'the new parent-domain regression must run exactly once in the existing four-job TypeScript matrix');
-  assert(workflow.includes('          scripts/kernel/testing/installed-verifier-result.test.ts\n' + parentEvidenceTest + '      - run: npm run build\n'),
+  assert.equal(workflow.split(qualificationPreflightTest).length, 2, 'the exact qualification source regressions run once in the original four-job matrix');
+  assert(workflow.includes('          scripts/kernel/testing/installed-verifier-result.test.ts\n' + parentEvidenceTest + qualificationPreflightTest + '      - run: npm run build\n'),
     'the added regression must remain in the original test command, not in a disabled or independent step');
   const sessionRegression = ' scripts/kernel/testing/installed-session-continuity.test.ts';
   const readinessRegression = ' scripts/kernel/testing/installed-control-readiness.test.ts';
@@ -333,7 +335,7 @@ function assertCarrierExperimentWorkflow(workflow: string): void {
     '          node --test --import tsx scripts/kernel/testing/guest-verifier-process.test.ts scripts/kernel/testing/guest-verifier-diagnostics.test.ts\n' +
     storageRegression + '          regression="$RUNNER_TEMP/cliq-worker-seccomp-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"\n'),
   'the source-build regressions stay inside the original actual native ABI step, before its unchanged compiler and syscall checks');
-  const projected = withoutLockedNodeQualification(originalWorkflow).replace(experiment, '').replace(retain, '').replace(parentEvidenceTest, '')
+  const projected = withoutLockedNodeQualification(originalWorkflow).replace(experiment, '').replace(retain, '').replace(parentEvidenceTest, '').replace(qualificationPreflightTest, '')
     .replace(sessionRegression, '').replace(readinessRegression, '').replace(processRegression, '').replaceAll(buildDependencies, 'bubblewrap').replace(storageRegression, '');
   assert.equal(createHash('sha256').update(projected).digest('hex'), '346af80a56060feace86c309b316c67560f68c512207d6cd3c95ab965cb225f5',
     'all original CT jobs, runner groups, timeouts, qualifiers and conditions must remain byte-identical');
@@ -369,6 +371,7 @@ test('the additive parent-domain regression cannot hide workflow removals, disab
   const workflow = await readFile(new URL('../../../.github/workflows/kernel-foundation.yml', import.meta.url), 'utf8');
   assertCarrierExperimentWorkflow(workflow);
   const parentEvidenceTest = '          scripts/kernel/testing/installed-verifier-parent-evidence.test.ts\n';
+  const qualificationPreflightTest = '          scripts/kernel/testing/installed-qualification-preflight.test.ts\n';
   const sessionRegression = ' scripts/kernel/testing/installed-session-continuity.test.ts';
   const readinessRegression = ' scripts/kernel/testing/installed-control-readiness.test.ts';
   const processRegression = '          node --test scripts/kernel/testing/systemd-process-fact.test.mjs\n';
@@ -386,7 +389,7 @@ test('the additive parent-domain regression cannot hide workflow removals, disab
     workflow.replace(upgrade, ''),
     workflow.replace(upgrade, upgrade.repeat(2)),
     workflow.replace('old_commit=25130cfec913bddaff4d0a8c7ff4aac7ef2db932', 'old_commit=410c8193ea516b0b9f8e6a746c4376003e67b5a4'),
-    workflow.replace(parentEvidenceTest, ''),
+    workflow.replace(parentEvidenceTest, '').replace(qualificationPreflightTest, ''),
     workflow.replace('dependency-native-family.test.ts', 'dependency-native-family-skipped.test.ts'),
     workflow.replace("redirect: 'error'", "redirect: 'follow'"),
     workflow.replace('total <= NPM_DATA_RECIPE.archiveBytes', 'total <= NPM_DATA_RECIPE.archiveBytes * 2'),
@@ -394,8 +397,12 @@ test('the additive parent-domain regression cannot hide workflow removals, disab
     workflow.replace('--locked-node "$probe_npm_archive" ', ''),
     workflow.replace(" && steps.npm_source.outcome == 'success'", ''),
     workflow.replace(parentEvidenceTest, parentEvidenceTest.repeat(2)),
+    workflow.replace(qualificationPreflightTest, ''),
+    workflow.replace(qualificationPreflightTest, qualificationPreflightTest.repeat(2)),
+    workflow.replace(qualificationPreflightTest, qualificationPreflightTest.replace('scripts/', '# scripts/')),
+    workflow.replace(qualificationPreflightTest + '      - run: npm run build\n', '      - run: npm run build\n' + qualificationPreflightTest),
     workflow.replace(parentEvidenceTest, '          # scripts/kernel/testing/installed-verifier-parent-evidence.test.ts\n'),
-    workflow.replace(parentEvidenceTest + '      - run: npm run build\n', '      - run: npm run build\n' + parentEvidenceTest),
+    workflow.replace(parentEvidenceTest + qualificationPreflightTest + '      - run: npm run build\n', '      - run: npm run build\n' + parentEvidenceTest + qualificationPreflightTest),
     workflow.replace(sessionRegression, ''),
     workflow.replace(sessionRegression, sessionRegression.repeat(2)),
     workflow.replace(readinessRegression, ''),

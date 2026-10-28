@@ -94,6 +94,7 @@ jobs:
           scripts/kernel/testing/installed-verifier-evidence.test.ts
           scripts/kernel/testing/installed-verifier-result.test.ts
           scripts/kernel/testing/installed-verifier-parent-evidence.test.ts
+          scripts/kernel/testing/installed-qualification-preflight.test.ts
       - run: npm run build
       - run: npm test
 
