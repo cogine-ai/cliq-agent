@@ -10,6 +10,11 @@ import { fileURLToPath } from 'node:url';
 
 const baseline = 'b6140b57836e19b0fb937327af449e8138f47eca';
 const testRelative = 'src/state/installed-genesis.test.ts';
+// Exact historical test bytes, including their baseline-compatible installed
+// layout. The evolving candidate's single-CAS fixture is not a baseline test.
+// Source: 5ad50f301bf5f38a673652f664e053464f75996d, Git blob
+// 01571738ea145c92600ea4bd2190d7389e189b7b at testRelative.
+const qualificationFixtureRelative = 'scripts/kernel/testing/fixtures/installed-status-5ad50f3.ts.fixture';
 const testSha256 = '9b610c47d9887e3eb827d6d9c8c240b6cdaaef3d10a4fad021e70c0aee52a096';
 const testName = 'installed Supervisor status completes its three full revalidations while an actual held borrow waits for its client response';
 const assertionMessage = 'status must return before the waiting client can provide its external response';
@@ -98,8 +103,8 @@ async function qualify(reportFile) {
   const checkout = await realpath(fileURLToPath(new URL('../../..', import.meta.url)));
   const report = path.resolve(reportFile);
   requireValue(path.basename(report) === 'status-borrow-regression.json');
-  const candidateTest = path.join(checkout, testRelative);
-  requireValue(sha256(await readFile(candidateTest)) === testSha256);
+  const qualificationFixture = path.join(checkout, qualificationFixtureRelative);
+  requireValue(sha256(await readFile(qualificationFixture)) === testSha256);
   requireValue((await lstat(await realpath(path.join(checkout, 'node_modules')))).isDirectory());
   // Missing history is a workflow fetch prerequisite, not script-controlled network access.
   requireValue((await joined('git', ['cat-file', '-e', `${baseline}^{commit}`], checkout)).code === 0);
@@ -114,7 +119,7 @@ async function qualify(reportFile) {
   await symlink(await realpath(path.join(checkout, 'node_modules')), path.join(source, 'node_modules'), 'dir');
   requireValue((await joined('npm', ['--logs-max=0', '--loglevel=silent',
     `--logs-dir=${path.join(owned, 'npm-logs')}`, 'run', 'build'], source)).code === 0);
-  await copyFile(candidateTest, path.join(source, testRelative));
+  await copyFile(qualificationFixture, path.join(source, testRelative));
   requireValue(sha256(await readFile(path.join(source, testRelative))) === testSha256);
   const pattern = `^${testName.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}$`;
   const observed = await joined(process.execPath, ['--test', '--test-concurrency=1', '--import', 'tsx',
@@ -122,7 +127,7 @@ async function qualify(reportFile) {
   requireValue(observed.code === 1);
   // Exact, bounded, closed reporter output: no extra fields or raw test logs.
   requireValue(observed.output === `${JSON.stringify({ version: 1, summary: reportSummary })}\n`);
-  requireValue(sha256(await readFile(candidateTest)) === testSha256);
+  requireValue(sha256(await readFile(qualificationFixture)) === testSha256);
   const evidence = { version: 1, baseline, baselineSourceSha256, testSha256,
     driverSha256: sha256(await readFile(fileURLToPath(import.meta.url))),
     platform: process.platform, arch: process.arch, nodeVersion: process.version,

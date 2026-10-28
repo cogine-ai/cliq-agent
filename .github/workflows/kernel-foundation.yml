@@ -463,7 +463,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: node --test scripts/kernel/testing/installed-volume-guard.test.mjs scripts/kernel/testing/installed-run-client.test.mjs scripts/kernel/testing/installed-run-partition.test.mjs scripts/kernel/testing/installed-client-journey.test.mjs
-      - run: node --test --import tsx scripts/kernel/testing/installed-worker-lease.test.ts scripts/kernel/testing/installed-client-consumer.test.ts scripts/kernel/testing/installed-control-client-driver.test.ts scripts/kernel/testing/installed-session-continuity.test.ts
+      - run: node --test --import tsx scripts/kernel/testing/installed-worker-lease.test.ts scripts/kernel/testing/installed-client-consumer.test.ts scripts/kernel/testing/installed-control-client-driver.test.ts scripts/kernel/testing/installed-session-continuity.test.ts scripts/kernel/testing/installed-control-readiness.test.ts
       - run: npm run build
         id: build
       - name: Install actual signed transport and worker build prerequisites

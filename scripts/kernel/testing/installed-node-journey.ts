@@ -14,6 +14,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 import { buildInstalledClientDriver } from './installed-client-build.js';
+import { isReplacementControlSocketHint } from './installed-control-readiness.js';
 import { InstalledClientConsumerDeadlineError, InstalledClientDriverError, openInstalledClientConsumer } from './installed-client-consumer.js';
 import { fixtureCommandJoinDiagnostic } from './fixture-command-diagnostic.js';
 import { preparingGitNativeInputData } from './preparing-git-native.js';
@@ -423,6 +424,9 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
   let serverAuthenticationBinding: Readonly<{ pid: number; processStartToken: string; invocationId: string; windowOpenedAt: number }> | undefined;
   let serverAuthenticationFailure = false;
   let storeFailureBinding: typeof serverAuthenticationBinding;
+  type BindingFailureStage = 'owner_history' | 'owner_cardinality' | 'owner_state' | 'owner_bundle' |
+    'owner_process' | 'process_start' | 'unit_recheck';
+  let storeBindingFailureStage: BindingFailureStage | undefined;
   let client: Awaited<ReturnType<typeof persistentClient>> | undefined, inspectionClient: Awaited<ReturnType<typeof persistentClient>> | undefined;
   const childResponder = createInstalledChildrenResponder({ model, before: beforeText, after: 'after the ordinary child patch\n',
     expectedParentTools() { assert(expectedToolNames); return expectedToolNames; }, readCas,
@@ -540,7 +544,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       'public artifact reads must not append a Journal, execute a tool or change the terminal Run');
     return replies;
   };
-  const selectedSupervisor = async (unit: string, shown: Record<string, string>, image: string, by: number) => {
+  const selectedSupervisor = async (unit: string, shown: Record<string, string>, image: string, by: number, previousSocket?: BigIntStats) => {
     const pid = Number(shown.MainPID), start = await fixtureProcess(pid, ledger.uid);
     for (;;) {
       assert(Date.now() < by, 'installed image handoff exceeded the original 30-second restart budget');
@@ -553,8 +557,15 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     for (const field of imageFields) assert.equal(actual[field], named[field]);
     for (;;) {
       assert(Date.now() < by, 'public control readiness exceeded the original restart budget');
-      try { const socket = await lstat(path.join(recipe.stateRoot, 'runtime/control-v1.sock')); assert(socket.isSocket() && socket.uid === ledger.uid); break; }
-      catch (error) { assert.equal((error as NodeJS.ErrnoException).code, 'ENOENT'); await delay(50); }
+      try {
+        const socket = await lstat(path.join(recipe.stateRoot, 'runtime/control-v1.sock'), { bigint: true });
+        assert(socket.isSocket() && socket.uid === BigInt(ledger.uid));
+        // A crashed owner leaves a named socket behind. Replacement only
+        // ends this negative wait; the original single native authentication
+        // must still prove the actual successor and its application channel.
+        if (!previousSocket || isReplacementControlSocketHint(previousSocket, socket)) break;
+      } catch (error) { assert.equal((error as NodeJS.ErrnoException).code, 'ENOENT'); }
+      await delay(50);
     }
     const confirmed = show(unit); for (const field of ['MainPID', 'ExecMainPID', 'InvocationID', 'ActiveState']) assert.equal(confirmed[field], shown[field]);
     assert.equal(await fixtureProcess(pid, ledger.uid), start); assert.equal(await readlink('/proc/' + pid + '/exe'), image);
@@ -892,22 +903,32 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     if (options.publicationRetirementDiagnostics || storeFailureDiagnostics) {
       // Actual live binding before the first public-client attempt. A missing
       // observation stays unavailable; never reconstruct it after a failure.
+      let bindingStage: BindingFailureStage = 'owner_history';
       try {
         const owners = inspectInstalledOwnerHistory(recipe.stateRoot).owners;
-        assert.equal(owners.length, 1); assert.equal(owners[0]!.state, 'active');
+        bindingStage = 'owner_cardinality'; assert.equal(owners.length, 1);
+        bindingStage = 'owner_state'; assert.equal(owners[0]!.state, 'active');
+        bindingStage = 'owner_bundle';
         assert.equal(owners[0]!.runtimeBundleRef, bundleDigest);
         const entry = signed.bundle.entries.find(entry => entry.role === 'supervisor'); assert(entry);
         const pid = Number(supervisorBefore.MainPID);
+        bindingStage = 'owner_process';
         const actual = await qualifyInstalledOwnerProcess({ stateRoot: recipe.stateRoot, uid: ledger.uid,
           pid, selectedImage: installedImage, imageDigest: entry.digest }, owners[0]!, {});
+        bindingStage = 'process_start';
         assert.equal('linux-proc-start-ticks:' + await fixtureProcess(pid, ledger.uid), actual.processStartToken);
+        bindingStage = 'unit_recheck';
         const same = show(services.supervisorUnit);
         assert.equal(same.MainPID, supervisorBefore.MainPID); assert.equal(same.InvocationID, supervisorBefore.InvocationID);
         const binding = Object.freeze({ pid, processStartToken: actual.processStartToken,
           invocationId: supervisorBefore.InvocationID!, windowOpenedAt: Date.now() });
         if (options.publicationRetirementDiagnostics) serverAuthenticationBinding = Object.freeze(binding);
         if (storeFailureDiagnostics) storeFailureBinding = binding;
-      } catch { /* Optional binding failure cannot defer or decide authentication. */ }
+      } catch {
+        // Fixed local stage only: never inspect the original error or replace
+        // its missing preexisting producer with a later image/owner selection.
+        if (storeFailureDiagnostics) storeBindingFailureStage = bindingStage;
+      }
     }
     try { client = await persistentClient(); inspectionClient = await persistentClient(); }
     catch (original) {
@@ -1658,6 +1679,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
           assert.equal(ownersBefore.length, 2); const original = ownersBefore[1]!; assert.equal(original.state, 'active');
           const shown = show(services!.supervisorUnit), pid = Number(shown.MainPID), supervisorEntry = signed.bundle.entries.find(entry => entry.role === 'supervisor');
           assert(supervisorEntry); const supervisorDigest = supervisorEntry.digest;
+          const originalControlSocket = await lstat(path.join(recipe.stateRoot, 'runtime/control-v1.sock'), { bigint: true });
+          assert(originalControlSocket.isSocket() && originalControlSocket.uid === BigInt(ledger.uid));
           const actual = await qualifyInstalledOwnerProcess({ stateRoot: recipe.stateRoot, uid: ledger.uid,
             pid, selectedImage: installedImage, imageDigest: supervisorDigest }, original, {});
           const image = await lstat(installedImage, { bigint: true });
@@ -1736,7 +1759,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
                 assert(Date.now() < restartBy, 'actual late successor identity was not bound within the original restart budget'); await delay(50);
               }
             }
-            const successorStart = await selectedSupervisor(services!.supervisorUnit, successorUnit, installedImage, restartBy);
+            const successorStart = await selectedSupervisor(services!.supervisorUnit, successorUnit, installedImage, restartBy, originalControlSocket);
             if (lateDiagnostic) assert.equal(successorStart, boundStart);
             const history = await waitForSuccessorOwnerHistory(restartBy);
             assert.equal(history.length, 3); assert.equal(history[1]!.terminalReason, 'superseded_after_owner_death');
@@ -1964,7 +1987,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         if (storeFailureDiagnostics && primary) report.storeFailureDiagnostics = { diagnosticOnly: true, kind: 'unavailable',
           reason: storeFailureBinding ? 'original_join_missing' : 'preexisting_binding_missing' };
         if (storeFailureDiagnostics && primary) report.assemblyWorkDiagnostics = { diagnosticOnly: true, kind: 'unavailable',
-          reason: storeFailureBinding ? 'original_join_missing' : 'preexisting_binding_missing' };
+          reason: storeFailureBinding ? 'original_join_missing' : 'preexisting_binding_missing',
+          ...(!storeFailureBinding && storeBindingFailureStage ? { bindingFailureStage: storeBindingFailureStage } : {}) };
         await withRetainedUnitHistory(units, async assertRetained => {
           let originalStopFailed = false;
           try {
@@ -2073,6 +2097,9 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
             // exit. It cannot satisfy the successful Stop/join assertions
             // above, nor manufacture a Store exit summary or Run attribution.
             if (storeFailureDiagnostics && (primary || originalStopFailed)) {
+              if (originalStopFailed) report.assemblyWorkDiagnostics = { diagnosticOnly: true, kind: 'unavailable',
+                reason: storeFailureBinding ? 'journal_unavailable' : 'preexisting_binding_missing',
+                ...(!storeFailureBinding && storeBindingFailureStage ? { bindingFailureStage: storeBindingFailureStage } : {}) };
               report.publicationWorkDiagnostics = { diagnosticOnly: true, profile: 'publication_work_v2', kind: 'unavailable',
                 reason: storeFailureBinding ? 'original_lifetime_missing' : 'preexisting_binding_missing' };
               report.publicationStageDiagnostics = { diagnosticOnly: true, kind: 'unavailable',
@@ -2121,6 +2148,28 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
                   else if (work && publicationDeadlineRunId) report.publicationWorkDiagnostics = { diagnosticOnly: true,
                     profile: 'publication_work_v2', kind: 'unavailable', reason: 'terminal_deadline_run_not_observed' };
                 } catch { /* V2 absence/malformed data cannot discard V1 observations or the original failure. */ }
+                if (originalStopFailed) try {
+                  // A separate fixed stream preserves the original journal's
+                  // entry/byte bounds and its independent valid observations.
+                  const remaining = logBy - Date.now(); assert(remaining > 0); assertRetained();
+                  const assemblyLog = spawnSync('/usr/bin/journalctl', ['--no-pager', '--all', '--no-tail', '--output=json', '--boot=0',
+                    '--grep=^CLIQ_ASSEMBLY_WORK_V1:',
+                    `--since=${timestamp(storeFailureBinding.windowOpenedAt)}`, `--until=${timestamp(until)}`,
+                    `_UID=${ledger.uid}`, `_PID=${storeFailureBinding.pid}`, '_TRANSPORT=stdout',
+                    `_SYSTEMD_INVOCATION_ID=${storeFailureBinding.invocationId}`],
+                  { env: environment, timeout: Math.min(5000, remaining), killSignal: 'SIGKILL', maxBuffer: 256 * 1024 });
+                  try {
+                    assert(Buffer.isBuffer(assemblyLog.stdout) && Buffer.isBuffer(assemblyLog.stderr));
+                    scanBytes(assemblyLog.stdout); scanBytes(assemblyLog.stderr);
+                    assert.equal(assemblyLog.error, undefined); assert.equal(assemblyLog.signal, null); assert.equal(assemblyLog.status, 0);
+                    const assemblyWork = readInstalledAssemblyWorkJournal(new TextDecoder('utf-8', { fatal: true }).decode(assemblyLog.stdout),
+                      { uid: ledger.uid, pid: storeFailureBinding.pid, invocationId: storeFailureBinding.invocationId });
+                    assert(Date.now() < logBy, 'actual assembly work journal exceeded five seconds'); assertRetained();
+                    if (assemblyWork) report.assemblyWorkDiagnostics = { diagnosticOnly: true, kind: 'observed',
+                      source: 'actual_absent_original_supervisor_journal', preexistingProcessStartAndFullImageBound: true,
+                      originalInvocationBound: true, originalPidObservedAbsent: true, cuts: assemblyWork.cuts };
+                  } finally { assemblyLog.stdout?.fill(0); assemblyLog.stderr?.fill(0); }
+                } catch { /* Incomplete assembly data cannot discard another original diagnostic or imply a successful join. */ }
 
               } catch { /* Preserve every original failure; a marker is never resource-join evidence. */ }
             }

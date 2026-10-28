@@ -2,6 +2,8 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
+import { readFile } from 'node:fs/promises';
+import ts from 'typescript';
 
 const sender = { uid: 1000, pid: 2000, invocationId: 'a'.repeat(32) };
 const journal = (messages: string[]) => messages.map(MESSAGE => JSON.stringify({ _UID: '1000', _PID: '2000',
@@ -9,6 +11,94 @@ const journal = (messages: string[]) => messages.map(MESSAGE => JSON.stringify({
 const emptyNumbers = Array<number>(25).fill(0);
 const frame = (ordinal: number, phase: string, elapsed: number, numbers = emptyNumbers, cpu = '-:-') =>
   `CLIQ_ASSEMBLY_WORK_V1:${ordinal}:${phase}:${elapsed}:${numbers.join(':')}:${cpu}`;
+
+async function journeySource() {
+  const source = await readFile(new URL('./installed-node-journey.ts', import.meta.url), 'utf8');
+  const parsed = ts.createSourceFile('journey.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const nodes: ts.Node[] = [];
+  const visit = (node: ts.Node) => { nodes.push(node); ts.forEachChild(node, visit); };
+  visit(parsed); return { parsed, nodes };
+}
+
+test('abnormal assembly diagnostics retain the original absence gate without claiming a joined server', async () => {
+  const { parsed, nodes } = await journeySource();
+  const candidates = nodes.filter((node): node is ts.ObjectLiteralExpression => ts.isObjectLiteralExpression(node) &&
+    node.properties.some(property => ts.isPropertyAssignment(property) && property.name.getText(parsed) === 'cuts') &&
+    node.properties.some(property => ts.isPropertyAssignment(property) && ts.isStringLiteral(property.initializer) &&
+      property.initializer.text === 'actual_absent_original_supervisor_journal'));
+  assert.equal(candidates.length, 1);
+  const object = candidates[0]!, names = object.properties.map(property => property.name?.getText(parsed));
+  assert.deepEqual(names, ['diagnosticOnly', 'kind', 'source', 'preexistingProcessStartAndFullImageBound',
+    'originalInvocationBound', 'originalPidObservedAbsent', 'cuts']);
+  assert(!names.includes('originalServerJoined'));
+  const ancestors: ts.Node[] = [];
+  for (let parent = object.parent; parent; parent = parent.parent) ancestors.push(parent);
+  assert(ancestors.some(node => ts.isIfStatement(node) && node.expression.getText(parsed) === 'originalStopFailed'));
+  const bound = ancestors.find(node => ts.isTryStatement(node) && node.getText(parsed).includes("await assert.rejects(lstat('/proc/' + storeFailureBinding.pid), { code: 'ENOENT' })"));
+  assert(bound && bound.getText(parsed).indexOf("await assert.rejects(lstat('/proc/' + storeFailureBinding.pid)") < object.pos - bound.pos);
+  assert(ancestors.some(node => ts.isIfStatement(node) && node.expression.getText(parsed).includes('storeFailureBinding.invocationId === before[0]!.InvocationID') &&
+    node.expression.getText(parsed).includes('String(storeFailureBinding.pid) === before[0]!.MainPID')));
+  const text = parsed.getText();
+  assert(text.includes('} catch (error) { originalStopFailed = true; throw error; }'));
+  assert(text.includes("assert.equal(stopped.TimeoutStopUSec, '2s')"));
+});
+
+test('the abnormal assembly stream keeps independent original bounds, scan and closure', async () => {
+  const { parsed, nodes } = await journeySource();
+  const calls = nodes.filter((node): node is ts.CallExpression => ts.isCallExpression(node) &&
+    node.expression.getText(parsed) === 'spawnSync' && node.arguments[1]?.getText(parsed).includes("'--grep=^CLIQ_ASSEMBLY_WORK_V1:'"));
+  assert.equal(calls.length, 1);
+  const call = calls[0]!, args = call.arguments[1]!.getText(parsed), options = call.arguments[2]!.getText(parsed);
+  for (const field of ['windowOpenedAt', 'pid', 'invocationId']) assert(args.includes('storeFailureBinding.' + field));
+  assert(args.includes('_UID=${ledger.uid}') && args.includes('--until=${timestamp(until)}'));
+  for (const field of ['timeout: Math.min(5000, remaining)', "killSignal: 'SIGKILL'", 'maxBuffer: 256 * 1024']) assert(options.includes(field));
+  const text = parsed.getText();
+  assert.equal(text.split("'--grep=^(CLIQ_PUBLICATION_STAGE_V1:|CLIQ_STORE_STOP_PHASE_V1:|CLIQ_PUBLICATION_WORK_V2:)'" ).length, 2,
+    'the earlier publication stream keeps its exact independent entry bound');
+  for (const field of ['scanBytes(assemblyLog.stdout)', 'scanBytes(assemblyLog.stderr)',
+    'assemblyLog.stdout?.fill(0)', 'assemblyLog.stderr?.fill(0)', 'assertRetained()', 'assert(Date.now() < logBy']) assert(text.includes(field));
+});
+
+test('the original publication V2 projection is saved before an optional assembly query can consume its remaining budget', async () => {
+  const { parsed, nodes } = await journeySource();
+  const publication = nodes.filter((node): node is ts.CallExpression => ts.isCallExpression(node) &&
+    node.expression.getText(parsed) === 'readInstalledPublicationWorkJournal');
+  const assembly = nodes.filter((node): node is ts.CallExpression => ts.isCallExpression(node) &&
+    node.expression.getText(parsed) === 'spawnSync' && node.arguments[1]?.getText(parsed).includes("'--grep=^CLIQ_ASSEMBLY_WORK_V1:'"));
+  assert.equal(publication.length, 1); assert.equal(assembly.length, 1);
+  let projectionTry: ts.Node | undefined = publication[0]!.parent;
+  while (projectionTry && !ts.isTryStatement(projectionTry)) projectionTry = projectionTry.parent;
+  assert(projectionTry && ts.isTryStatement(projectionTry) && projectionTry.catchClause);
+  assert(projectionTry.tryBlock.getText(parsed).includes('report.publicationWorkDiagnostics ='));
+  assert(projectionTry.tryBlock.getText(parsed).includes('...work'));
+  assert(projectionTry.end < assembly[0]!.pos,
+    'the original V2 parser, deadline/retention checks and projection must complete before the optional child starts');
+  let optional: ts.Node | undefined = assembly[0]!.parent;
+  while (optional && !ts.isIfStatement(optional)) optional = optional.parent;
+  assert(optional && ts.isIfStatement(optional));
+  assert.equal(optional.expression.getText(parsed), 'originalStopFailed');
+  assert.equal(optional.parent, projectionTry.parent, 'both streams keep the original shared outer deadline');
+  assert(!optional.getText(parsed).includes('report.publicationWorkDiagnostics'),
+    'a timed-out or malformed optional stream cannot overwrite already retained V2 data');
+});
+
+test('a missing original binding reports only the fixed local failed stage before client authentication', async () => {
+  const { parsed, nodes } = await journeySource();
+  const stages = nodes.filter((node): node is ts.BinaryExpression => ts.isBinaryExpression(node) &&
+    node.left.getText(parsed) === 'bindingStage').map(node => node.right.getText(parsed));
+  const initial = nodes.find((node): node is ts.VariableDeclaration => ts.isVariableDeclaration(node) && node.name.getText(parsed) === 'bindingStage');
+  assert.equal(initial?.initializer?.getText(parsed), "'owner_history'");
+  assert.deepEqual(stages, ["'owner_cardinality'", "'owner_state'", "'owner_bundle'", "'owner_process'", "'process_start'", "'unit_recheck'"]);
+  const catchClause = nodes.find((node): node is ts.CatchClause => ts.isCatchClause(node) &&
+    node.block.getText(parsed).includes('storeBindingFailureStage = bindingStage'));
+  assert(catchClause && !catchClause.variableDeclaration, 'no exception field may become a binding stage');
+  assert.equal(catchClause.block.statements.length, 1);
+  assert(catchClause.end < parsed.getText().indexOf('try { client = await persistentClient(); inspectionClient = await persistentClient(); }'));
+  const literal = nodes.filter((node): node is ts.PropertyAssignment => ts.isPropertyAssignment(node) &&
+    node.name.getText(parsed) === 'bindingFailureStage');
+  assert.equal(literal.length, 2);
+  for (const field of literal) assert.equal(field.initializer.getText(parsed), 'storeBindingFailureStage');
+});
 
 test('the independent reader accepts only original-sender complete numeric prefix records, never reconstructed windows', async () => {
   const readers = await import('./installed-store-diagnostic-journal.js');

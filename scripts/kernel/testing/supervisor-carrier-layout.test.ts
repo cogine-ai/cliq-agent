@@ -297,9 +297,11 @@ function assertCarrierExperimentWorkflow(workflow: string): void {
   assert(workflow.includes('          scripts/kernel/testing/installed-verifier-result.test.ts\n' + parentEvidenceTest + '      - run: npm run build\n'),
     'the added regression must remain in the original test command, not in a disabled or independent step');
   const sessionRegression = ' scripts/kernel/testing/installed-session-continuity.test.ts';
+  const readinessRegression = ' scripts/kernel/testing/installed-control-readiness.test.ts';
   assert.equal(workflow.split(sessionRegression).length, 2, 'the installed Session regression runs exactly once');
+  assert.equal(workflow.split(readinessRegression).length, 2, 'the real replacement-socket regression runs exactly once');
   assert(workflow.includes('      - run: node --test --import tsx scripts/kernel/testing/installed-worker-lease.test.ts ' +
-    'scripts/kernel/testing/installed-client-consumer.test.ts scripts/kernel/testing/installed-control-client-driver.test.ts' + sessionRegression + '\n'),
+    'scripts/kernel/testing/installed-client-consumer.test.ts scripts/kernel/testing/installed-control-client-driver.test.ts' + sessionRegression + readinessRegression + '\n'),
   'Session conformance remains in the original installed-Run preflight command');
   const processRegression = '          node --test scripts/kernel/testing/systemd-process-fact.test.mjs\n';
   assert.equal(workflow.split(processRegression).length, 2, 'the real process-lifecycle regression runs exactly once');
@@ -332,7 +334,7 @@ function assertCarrierExperimentWorkflow(workflow: string): void {
     storageRegression + '          regression="$RUNNER_TEMP/cliq-worker-seccomp-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"\n'),
   'the source-build regressions stay inside the original actual native ABI step, before its unchanged compiler and syscall checks');
   const projected = withoutLockedNodeQualification(originalWorkflow).replace(experiment, '').replace(retain, '').replace(parentEvidenceTest, '')
-    .replace(sessionRegression, '').replace(processRegression, '').replaceAll(buildDependencies, 'bubblewrap').replace(storageRegression, '');
+    .replace(sessionRegression, '').replace(readinessRegression, '').replace(processRegression, '').replaceAll(buildDependencies, 'bubblewrap').replace(storageRegression, '');
   assert.equal(createHash('sha256').update(projected).digest('hex'), '346af80a56060feace86c309b316c67560f68c512207d6cd3c95ab965cb225f5',
     'all original CT jobs, runner groups, timeouts, qualifiers and conditions must remain byte-identical');
   assert.equal(workflow.split('qualify-supervisor-carrier-size.ts').length, 2, 'no production job may select the experimental carrier');
@@ -368,6 +370,7 @@ test('the additive parent-domain regression cannot hide workflow removals, disab
   assertCarrierExperimentWorkflow(workflow);
   const parentEvidenceTest = '          scripts/kernel/testing/installed-verifier-parent-evidence.test.ts\n';
   const sessionRegression = ' scripts/kernel/testing/installed-session-continuity.test.ts';
+  const readinessRegression = ' scripts/kernel/testing/installed-control-readiness.test.ts';
   const processRegression = '          node --test scripts/kernel/testing/systemd-process-fact.test.mjs\n';
   const buildDependencies = 'bubblewrap libcap-dev libselinux1-dev meson ninja-build';
   const negativeParameters = '          node --test scripts/kernel/testing/build-bubblewrap.test.mjs\n';
@@ -395,6 +398,10 @@ test('the additive parent-domain regression cannot hide workflow removals, disab
     workflow.replace(parentEvidenceTest + '      - run: npm run build\n', '      - run: npm run build\n' + parentEvidenceTest),
     workflow.replace(sessionRegression, ''),
     workflow.replace(sessionRegression, sessionRegression.repeat(2)),
+    workflow.replace(readinessRegression, ''),
+    workflow.replace(readinessRegression, readinessRegression.repeat(2)),
+    workflow.replace(sessionRegression + readinessRegression + '\n', sessionRegression + '\n' +
+      '      - run: node --test --import tsx' + readinessRegression + '\n'),
     workflow.replace(processRegression, ''),
     workflow.replace(processRegression, processRegression.repeat(2)),
     workflow.replace(processRegression, processRegression.replace('node --test', '# node --test')),

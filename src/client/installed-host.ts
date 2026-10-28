@@ -61,7 +61,10 @@ export function createClientHostSession(session: InstalledControlSession, select
 /** Borrows the actual selected installation through client join. There are no
  * key, socket, transport, loader, credential or StateOwner options. */
 export async function openInstalledClientHost(selected: HeldInstalledRuntime) {
-  return withHeldInstalledRuntime(selected, async () => createClientHostSession(await openInstalledControlSession(selected), selected));
+  // Keep the original complete entry validation, then release its queue before
+  // the session acquires the same selection's manager/native/current borrows.
+  await withHeldInstalledRuntime(selected, async () => {});
+  return createClientHostSession(await openInstalledControlSession(selected), selected);
 }
 
 /** Embedded SDK entry. Closing detaches this application/session only; the

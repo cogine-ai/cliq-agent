@@ -485,8 +485,10 @@ static bool manager_operation(struct task *task) {
       const char *job; g_variant_get(reply, "(&o)", &job); bool valid = copy_text(task->job, sizeof(task->job), job); g_variant_unref(reply);
       if (!valid) return fail(task, "platform_shape_mismatch");
     }
-    // LoadUnit never starts the original inspector's fixed service profile.
-    if (!manager_read_unit(task, task->operation == INSPECT_UNIT)) return false;
+    // A stopped unit can be garbage-collected before this read or the next
+    // poll. Load only its fixed profile again; this never starts the service.
+    // The original running PID/Invocation precheck above remains GetUnit-only.
+    if (!manager_read_unit(task, task->operation == INSPECT_UNIT || task->operation == STOP_INSTALLED_UPGRADE)) return false;
     if (task->operation == STOP_INSTALLED_UPGRADE) {
       for (;;) {
         const char *active = NULL, *sub = NULL; uint32_t main_pid = UINT32_MAX, control_pid = UINT32_MAX;
@@ -499,7 +501,7 @@ static bool manager_operation(struct task *task) {
         g_variant_unref(task->unit_properties); task->unit_properties = NULL;
         g_variant_unref(task->service_properties); task->service_properties = NULL;
         g_usleep(10000);
-        if (!manager_read_unit(task, false)) return false;
+        if (!manager_read_unit(task, true)) return false;
       }
     }
   }

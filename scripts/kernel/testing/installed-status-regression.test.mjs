@@ -1,5 +1,7 @@
 // Pure reporter-data regression, not installed Linux or timing qualification.
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { summarizeStatusRegression } from './installed-status-regression.mjs';
 
@@ -7,6 +9,24 @@ const name = 'installed Supervisor status completes its three full revalidations
 const message = 'status must return before the waiting client can provide its external response';
 const file = '/tmp/cliq-status-red-fixed/source/src/state/installed-genesis.test.ts';
 const counts = { tests: 1, suites: 0, passed: 0, failed: 1, cancelled: 0, skipped: 0, todo: 0, topLevel: 1 };
+
+test('the baseline qualification consumes its exact historical fixture, independently of the evolving candidate test', async () => {
+  const driver = await readFile(new URL('./installed-status-regression.mjs', import.meta.url), 'utf8');
+  const selected = driver.match(/const qualificationFixtureRelative = '([^']+)';/u);
+  assert(selected, 'the pinned baseline must not consume the evolving candidate installation fixture');
+  assert.equal(selected[1], 'scripts/kernel/testing/fixtures/installed-status-5ad50f3.ts.fixture');
+  const bytes = await readFile(new URL('../../../' + selected[1], import.meta.url));
+  assert.equal(bytes.length, 16265);
+  assert.equal(createHash('sha256').update(bytes).digest('hex'),
+    '9b610c47d9887e3eb827d6d9c8c240b6cdaaef3d10a4fad021e70c0aee52a096');
+  assert.equal(createHash('sha1').update(Buffer.from('blob 16265\0')).update(bytes).digest('hex'),
+    '01571738ea145c92600ea4bd2190d7389e189b7b');
+  assert(driver.includes("const baseline = 'b6140b57836e19b0fb937327af449e8138f47eca'"));
+  assert(driver.includes('const qualificationFixture = path.join(checkout, qualificationFixtureRelative)'));
+  assert(driver.includes('await copyFile(qualificationFixture, path.join(source, testRelative))'));
+  assert.equal((driver.match(/sha256\(await readFile\(qualificationFixture\)\) === testSha256/gu) ?? []).length, 2,
+    'original before/after source-byte checks stay around the complete joined baseline run');
+});
 function events() {
   const cause = Object.assign(new Error(`${message}\n+ actual - expected\n\n+ 'deadline'\n- 'observed'\n`), {
     name: 'AssertionError', code: 'ERR_ASSERTION', actual: 'deadline', expected: 'observed',

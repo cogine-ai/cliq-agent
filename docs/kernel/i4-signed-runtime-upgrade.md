@@ -100,6 +100,12 @@ operators do not manually order low-level stage, Stop and selector operations.
    it cannot use that successor as the original producer or death evidence.
    Its optional
    interface does not become a requirement for ordinary old helper loading.
+   Keep the running-unit precheck on `GetUnit`. After the Stop request and on
+   each subsequent poll, use `LoadUnit` before reading the fixed unit's full
+   properties: systemd may collect an inactive unit while the original process
+   is already gone. Loading metadata never starts that service. The same bus,
+   manager, profile, inactive/dead state and zero PID checks still apply; unit
+   absence alone never supplies a successful stop or process-death proof.
 4. A StopUnit job or inactive unit is not a death proof. Independently observe
    actual original Supervisor and keeper PID/start death, preserve the original
    two-second Stop bound and join the original native inspection, timer and

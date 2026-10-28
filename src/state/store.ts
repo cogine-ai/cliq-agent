@@ -2803,6 +2803,9 @@ export class StateStore {
     await validateControlChannelClosure(this.artifacts, this.owner, identity);
     const runId = value.runId as string;
     let agent = this.installedAgents.get(runId)?.agent;
+    const terminal = ['succeeded', 'completed_unverified', 'failed', 'cancelled'].includes(readRun(this.driver, runId).status);
+    if (!agent && terminal) return this.cancelTerminalInstalledRun(runId,
+      { ...identity, requestId: value.requestId as string, expectedRunRevision: value.expectedRevision as number });
     if (!agent) {
       agent = await this.retainInstalledAgent(runId);
     }
@@ -2811,6 +2814,34 @@ export class StateStore {
     this.requestInstalledRunStop(runId);
     this.scheduleInstalledRun(runId);
     return result;
+  }
+
+  /** A refusal/replay consumes retained data, never a productive continuation.
+   * Keep every original material and owner check; the original Stop reducer
+   * still decides replay, revision and terminal precedence without writing. */
+  private cancelTerminalInstalledRun(runId: string, command: import('../kernel/types.js').RunCancel) {
+    return this.ownInstalledAdmission(async signal => {
+      const reads = this.artifacts.withReadSignal(signal), run = readRun(this.driver, runId);
+      const operation = decodeRunSpec(await reads.readCanonical(run.specRef)).operation;
+      const { readRunAuthority } = await import('./run-authority.js');
+      const authority = await readRunAuthority(this.driver, reads, this.owner,
+        { runId, operation, releaseKeys: this.runtimeAuthority!.releaseKeys }, signal);
+      if (!['succeeded', 'completed_unverified', 'failed', 'cancelled'].includes(authority.run.status))
+        throw new KernelStorageError('REVISION_CONFLICT', 'terminal cancellation lost its original terminal cut');
+      // These readers each own a four-leaf group. Keep them serial; joining
+      // their whole graphs would silently enlarge the actual CAS read peak.
+      if (operation === 'agent') {
+        const { loadInstalledRunMaterial } = await import('./installed-run.js');
+        const material = await loadInstalledRunMaterial({ selected: this.installedRuntime!, artifacts: reads,
+          assemblyRef: authority.spec.assemblyRef, driver: this.driver, runId, signal });
+        const { validateAgentRunAssembly } = await import('./reducers/agent.js');
+        validateAgentRunAssembly(authority, material);
+      }
+      await authority.controlAuthority.assertAuthority(signal);
+      signal.throwIfAborted();
+      const { loadAgentStop } = await import('./reducers/stop.js');
+      return loadAgentStop(this.driver, reads, this.owner, authority.controlAuthority).cancelRun(command);
+    });
   }
 
   get stateRootIdentity(): { ref: string; digest: string } {

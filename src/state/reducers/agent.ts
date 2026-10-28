@@ -34,7 +34,7 @@ import type { HeldInstalledRuntime } from '../installed-runtime.js';
 import { loadFinalCandidate } from '../final-candidate.js';
 import { loadRunResult, type RunResultPhase } from '../run-result.js';
 import { loadVerifierRepair } from '../verifier-repair.js';
-import { readRunAuthority } from '../run-authority.js';
+import { readRunAuthority, type RunAuthority } from '../run-authority.js';
 import { loadRunContinuation } from '../run-continuation.js';
 
 export type LoadAgentRunInput = {
@@ -107,6 +107,22 @@ export class AgentHandoffPendingError extends KernelStorageError {
   }
 }
 
+/** Same complete static assembly validation for execution and inert terminal
+ * cancellation. This does not reproduce a prepared request or open a producer. */
+export function validateAgentRunAssembly(authority: RunAuthority, material: RunAssemblyValidationMaterial) {
+  const { run, spec, assembly, contracts } = authority;
+  const tools = contracts.map((entry) => ({ name: entry.name, description: entry.description, inputSchemaRef: entry.inputSchemaRef,
+    inputSchemaDigest: entry.inputSchemaDigest, inputSchema: entry.inputSchema, replayClass: entry.replayClass }));
+  const validated = validateRunAssembly({ assemblyRef: spec.assemblyRef, assembly, admittedAt: run.createdAt,
+    deadlineAt: run.deadlineAt, maxRunCostMicros: spec.budgets.costMicros, runSpecCredentialGrantRefs: spec.credentialGrantRefs,
+    material: { ...material, resolveVerifiedTools: (reference) => {
+      const verified = material.resolveVerifiedTools(reference);
+      return verified !== null && canonicalSha256(verified) === canonicalSha256(tools) ? tools : null;
+    } } });
+  if (!validated.ok) throw new TypeError(`${validated.code}: ${validated.reason}`);
+  return { model: validated.model, tools };
+}
+
 function requireRetryReady(retry: ModelRetryState): number {
   if (retry.kind === 'backoff') throw new ModelRetryPendingError(retry.nextAttempt, retry.notBefore);
   if (retry.kind === 'exhausted') throw new AgentHandoffPendingError('stop_required', retry.evidenceRef, 'model_retry_exhausted');
@@ -135,16 +151,7 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
     [key, typeof value === 'function' ? value : immutableSnapshot(value)])) as RunAssemblyValidationMaterial;
   const authority = await readRunAuthority(driver, artifacts, owner, { runId, operation: 'agent', releaseKeys: input.releaseKeys }, signal);
   const { recovered, run: admittedRun, spec, assembly, releaseKeys, contracts, toolContracts } = authority;
-  const tools = contracts.map((entry) => ({ name: entry.name, description: entry.description, inputSchemaRef: entry.inputSchemaRef,
-    inputSchemaDigest: entry.inputSchemaDigest, inputSchema: entry.inputSchema, replayClass: entry.replayClass }));
-  const validated = validateRunAssembly({ assemblyRef: spec.assemblyRef, assembly, admittedAt: admittedRun.createdAt,
-    deadlineAt: admittedRun.deadlineAt, maxRunCostMicros: spec.budgets.costMicros, runSpecCredentialGrantRefs: spec.credentialGrantRefs,
-    material: { ...material, resolveVerifiedTools: (reference) => {
-      const verified = material.resolveVerifiedTools(reference);
-      return verified !== null && canonicalSha256(verified) === canonicalSha256(tools) ? tools : null;
-    } } });
-  if (!validated.ok) throw new TypeError(`${validated.code}: ${validated.reason}`);
-  const { model } = validated;
+  const { model, tools } = validateAgentRunAssembly(authority, material);
   const systemInstruction = await loadInstructionText(openingReads, assembly);
   const { resolveToolInput } = toolContracts;
   const sessionCompactionIndex = (projection: import('../../kernel/types.js').SessionContextProjection) => frozenSessionCompactionIndex(driver,

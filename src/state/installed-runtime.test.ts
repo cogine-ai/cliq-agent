@@ -27,6 +27,39 @@ import { NPM_DEPENDENCY_RECIPE } from '../sandbox/dependency-recipe.js';
 import { observeInstalledCredentialSupervisor } from './installed-services.js';
 import { INSTALLED_INSTALL_PHASE_CHANNEL, INSTALLED_INSTALL_PHASES, INSTALLED_WORK_CHANNEL, type InstalledWorkSnapshot } from './installed-work-diagnostics.js';
 import { buildBundledSkillPackageData } from './bundled-skill-package.js';
+import { openInstalledClientHost } from '../client/installed-host.js';
+
+async function assertInstalledClientHostBorrowBoundary(): Promise<void> {
+  const source = await readFile(new URL('../client/installed-host.ts', import.meta.url), 'utf8');
+  const parsed = ts.createSourceFile('installed-host.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const factory = parsed.statements.find((node): node is ts.FunctionDeclaration =>
+    ts.isFunctionDeclaration(node) && node.name?.text === 'openInstalledClientHost');
+  assert(factory?.body);
+  const [borrow, connect, ...extra] = factory.body.statements;
+  assert.equal(extra.length, 0);
+  assert(borrow && ts.isExpressionStatement(borrow) && ts.isAwaitExpression(borrow.expression));
+  const call = borrow.expression.expression;
+  assert(ts.isCallExpression(call) && ts.isIdentifier(call.expression) && call.expression.text === 'withHeldInstalledRuntime');
+  assert.equal(call.arguments.length, 2);
+  assert.equal(call.arguments[0]!.getText(parsed), 'selected');
+  const callback = call.arguments[1]!;
+  assert(ts.isArrowFunction(callback) && callback.modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.AsyncKeyword));
+  assert.equal(callback.parameters.length, 0);
+  assert(ts.isBlock(callback.body) && callback.body.statements.length === 0,
+    'the original complete validation borrow must join before any session acquisition can reenter its queue');
+  assert(connect && ts.isReturnStatement(connect) && connect.expression && ts.isCallExpression(connect.expression));
+  assert.equal(connect.expression.expression.getText(parsed), 'createClientHostSession');
+  assert.equal(connect.expression.arguments.length, 2);
+  assert.equal(connect.expression.arguments[1]!.getText(parsed), 'selected');
+  const session = connect.expression.arguments[0]!;
+  assert(ts.isAwaitExpression(session) && ts.isCallExpression(session.expression));
+  assert.equal(session.expression.expression.getText(parsed), 'openInstalledControlSession');
+  assert.equal(session.expression.arguments.length, 1);
+  assert.equal(session.expression.arguments[0]!.getText(parsed), 'selected');
+}
+
+test('the installed client host joins its original validation borrow before acquiring the authenticated session',
+  assertInstalledClientHostBorrowBoundary);
 
 /** Real signed files for installer/CAS semantics only. The opaque executable
  * entries are deliberately not running Supervisor/worker/addon images and are
@@ -130,6 +163,7 @@ async function writeInstallerOnlyPackage(packageRoot: string, unclosedPromptRole
   await writeFile(path.join(packageRoot, 'manifest.json'), canonicalJsonBytes(bundle), { flag: 'wx', mode: 0o400 });
   return { bundle, releaseKeys, profile, rootRecipe, contents };
 }
+
 
 const sourceInspectorFile = (overrides: Partial<InstallerFile> = {}): InstallerFile => ({
   entryId: 'source_git_inspector', role: 'platform_helper', version: '1',
@@ -1410,4 +1444,44 @@ if (process.platform === 'linux') test('fixed initial-install stages complete on
       const entryPhase = phases.filter(value => value.phase === 3).at(-1)!; assert.equal(entryPhase.items, signed.bundle.entries.length);
     } finally { phaseChannel.unsubscribe(observer); mock.mock.restore(); groupMock.mock.restore(); (await import('node:module')).syncBuiltinESMExports(); }
   } finally { phaseChannel.unsubscribe(observer); await rm(root, { recursive: true, force: true }); }
+});
+
+if (process.platform === 'linux') test('the client host reaches the original manager refusal and joins selection close without a recursive borrow', async () => {
+  // Fail before opening any real scope if the composition regresses. The
+  // signed opaque fixture has no credential helper and must never load one.
+  await assertInstalledClientHostBorrowBoundary();
+  const fixture = await realpath(await mkdtemp(path.join(os.tmpdir(), 'cliq-client-host-borrow-')));
+  const packageRoot = path.join(fixture, 'package'), stateRoot = path.join(fixture, 'state');
+  const diagnostic = channel(INSTALLED_WORK_CHANNEL), rows: InstalledWorkSnapshot[] = [];
+  const observe = (value: unknown) => { if (value && typeof value === 'object') rows.push(value as InstalledWorkSnapshot); };
+  let selected: HeldInstalledRuntime | undefined, opening: Promise<unknown> | undefined, closing: Promise<void> | undefined;
+  try {
+    const signed = await writeInstallerOnlyPackage(packageRoot), runtime = createInstalledRuntime({ releaseKeys: signed.releaseKeys });
+    await runtime.installInitial({ packageRoot, stateRoot }); selected = await runtime.openSelected(stateRoot);
+    diagnostic.subscribe(observe);
+    try {
+      await assert.rejects(openInstalledClientHost(selected), error => error instanceof KernelStorageError &&
+        (process.arch === 'x64' ? error.code === 'ARTIFACT_MISMATCH' && error.message === 'fixed signed credential platform module is missing'
+          : error.code === 'UNSUPPORTED_PLATFORM' && error.message === 'installed manager observation requires Linux x64 and Node >=22.13'));
+    } finally { diagnostic.unsubscribe(observe); }
+    const first = rows[0]!.revalidate, last = rows.at(-1)!.revalidate, expected = process.arch === 'x64' ? 2 : 1;
+    assert.equal(last.started - first.started + 1, expected, 'the original complete host-entry R and permitted manager-entry R remain');
+    assert.equal(last.completed - first.completed, expected, 'every real validation is settled before the original refusal returns');
+    assert(last.bytesRead > first.bytesRead, 'the entry borrow still reads its complete signed bytes');
+    await selected.assertHeld();
+    await selected.close();
+    await assert.rejects(openInstalledClientHost(selected), error => error instanceof KernelStorageError &&
+      error.code === 'ARTIFACT_MISMATCH' && error.message === 'installed runtime handle is closed');
+    selected = await runtime.openSelected(stateRoot);
+    opening = openInstalledClientHost(selected);
+    const rejected = assert.rejects(opening, error => error instanceof KernelStorageError &&
+      error.code === 'ARTIFACT_MISMATCH' && error.message === 'installed runtime handle is closed');
+    closing = selected.close();
+    await Promise.all([rejected, closing]);
+    await assert.rejects(lstat(path.join(stateRoot, KERNEL_DATABASE_FILENAME)), { code: 'ENOENT' });
+    for (const { relativePath, bytes } of signed.contents) assert.deepEqual(await readFile(path.join(packageRoot, relativePath)), bytes);
+  } finally {
+    diagnostic.unsubscribe(observe);
+    await Promise.allSettled([opening, closing]); await selected?.close(); await rm(fixture, { recursive: true, force: true });
+  }
 });

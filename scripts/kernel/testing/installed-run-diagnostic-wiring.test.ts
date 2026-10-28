@@ -551,10 +551,17 @@ test('arrival diagnostics can observe an abnormal original exit without satisfyi
   const stopPhaseRead = body.indexOf('const stopPhase = readInstalledStoreStopPhaseJournal(text,');
   assert(stopPhaseRead > body.indexOf('const observation = readInstalledPublicationStageJournal(text,'));
   assert(body.includes('originalPidObservedAbsent: true, phase: stopPhase.phase'));
-  assert.equal(body.match(/spawnSync\('\/usr\/bin\/journalctl'/gu)?.length, 1, 'both diagnostics reuse the same original bounded journal command');
+  const optionalAssembly = body.indexOf('if (originalStopFailed) try {');
+  assert(optionalAssembly > body.indexOf("report.publicationWorkDiagnostics = { diagnosticOnly: true, kind: 'observed', ...work,"),
+    'the original bounded publication observations are retained before an optional assembly query can spend the remaining deadline');
+  const publicationBody = body.slice(0, optionalAssembly);
+  assert.equal(publicationBody.match(/spawnSync\('\/usr\/bin\/journalctl'/gu)?.length, 1,
+    'all original publication diagnostics reuse their same single bounded journal command');
+  assert.equal(body.match(/spawnSync\('\/usr\/bin\/journalctl'/gu)?.length, 2,
+    'only the fixed independently bounded assembly query is added');
   assert.equal(body.match(/scanBytes\(log\.stdout\); scanBytes\(log\.stderr\);/gu)?.length, 1);
   assert.equal(body.match(/new TextDecoder\('utf-8', \{ fatal: true \}\)\.decode\(log\.stdout\)/gu)?.length, 1);
-  assert.equal(body.match(/Date\.now\(\)/gu)?.length, 3,
+  assert.equal(publicationBody.match(/Date\.now\(\)/gu)?.length, 3,
     'the original window sample and deadline check remain; V2 rechecks that same unchanged deadline after its bounded decode');
   assert(!/report\.installedWritersJoined\s*=|scanner\.openStream\(/u.test(body), 'a phase is not resource-join evidence and creates no new scanner stream');
   assert(!/originalServerJoined: true|qualified: true|report\.storeFailureDiagnostics =/u.test(body), 'arrival data never upgrades exit-summary or outcome proof');
