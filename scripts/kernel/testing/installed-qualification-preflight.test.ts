@@ -18,7 +18,7 @@ test('the callback qualifier candidate pin names the complete current native ima
   assert.match(source, /report\.qualified = report\.views\.every\(\(view: Record<string, any>\) => view\.evidence && !view\.evidenceRefused\)/u);
 });
 
-test('the durable source-refusal campaign passes the original selector preflight and creates an actual nested Git object before capture', async () => {
+test('the durable source-refusal campaign keeps the original selector preflight and real owned projection refusal', async () => {
   const source = await readFile(new URL('../qualify-installed-run-journey.ts', import.meta.url), 'utf8');
   const file = ts.createSourceFile('installed-source-refusal.ts', source, ts.ScriptTarget.Latest, true);
   const declarations = new Map<string, ts.VariableDeclaration>();
@@ -31,8 +31,19 @@ test('the durable source-refusal campaign passes the original selector preflight
   const refusal = declarations.get('refusalCore')?.initializer; assert(refusal && ts.isObjectLiteralExpression(refusal));
   const exclude = refusal.properties.find((property): property is ts.PropertyAssignment => ts.isPropertyAssignment(property) &&
     property.name.getText(file) === 'sourceExcludes')?.initializer;
-  assert(exclude && ts.isArrayLiteralExpression(exclude));
-  const selectors = exclude.elements.map(item => {
+  assert(exclude && ts.isPropertyAccessExpression(exclude));
+  assert.equal(exclude.getText(file), 'resourceCore.sourceExcludes');
+  // The actual failure-mode submit keeps its original vendor-only exclusion;
+  // its pre-existing nested .git must not choose an unrelated native refusal.
+  const submit = declarations.get('submit')?.initializer;
+  assert(submit && ts.isCallExpression(submit));
+  const core = submit.arguments[0]; assert(core && ts.isObjectLiteralExpression(core));
+  const originalExcludes = core.properties.find((property): property is ts.PropertyAssignment => ts.isPropertyAssignment(property) &&
+    property.name.getText(file) === 'sourceExcludes')?.initializer;
+  assert(originalExcludes && ts.isConditionalExpression(originalExcludes));
+  assert.equal(originalExcludes.condition.getText(file), 'failureOnly');
+  assert(ts.isArrayLiteralExpression(originalExcludes.whenTrue));
+  const selectors = originalExcludes.whenTrue.elements.map(item => {
     assert(ts.isObjectLiteralExpression(item));
     const fields = Object.fromEntries(item.properties.map(property => {
       assert(ts.isPropertyAssignment(property) && ts.isStringLiteral(property.initializer));
@@ -43,18 +54,12 @@ test('the durable source-refusal campaign passes the original selector preflight
     return { path: fields.path!, scope: fields.scope as 'entry' | 'subtree' };
   });
   assert.doesNotThrow(() => effectiveSourceExcludes({ dependency: { mode: 'none' }, sourceIncludes: [], sourceExcludes: selectors }));
-  assert.equal(selectors.length, 0);
-  const root = declarations.get('refusalNestedRoot')?.initializer, nested = declarations.get('refusalNestedGit')?.initializer;
-  assert(root && root.getText(file) === "path.join(recipe.workspace, 'unsupported-source-refusal')");
-  assert(nested && nested.getText(file) === "path.join(refusalNestedRoot, '.git')");
-  for (const name of ['refusalNestedRoot', 'refusalNestedGit']) {
-    const mkdir = calls.filter(call => call.expression.getText(file) === 'mkdir' && call.arguments[0]?.getText(file) === name);
-    const chown = calls.filter(call => call.expression.getText(file) === 'chown' && call.arguments[0]?.getText(file) === name);
-    assert.equal(mkdir.length, 1); assert.equal(chown.length, 1);
-    assert.equal(chown[0]!.arguments[1]?.getText(file), 'ledger.uid'); assert.equal(chown[0]!.arguments[2]?.getText(file), 'ledger.gid');
-    assert(mkdir[0]!.pos < chown[0]!.pos && chown[0]!.end < refusal.pos);
-  }
-  assert.match(source, /sourceRule: 'nested_git_metadata'/u);
+  assert.deepEqual(selectors, [{ path: 'vendor', scope: 'subtree' }]);
+  const fixture = calls.filter(call => call.expression.getText(file) === 'withInstalledSourceRefusalFixture');
+  assert.equal(fixture.length, 1);
+  assert.equal(fixture[0]!.arguments[0]?.getText(file), '{ workspace: recipe.workspace, uid: ledger.uid, gid: ledger.gid }');
+  assert(fixture[0]!.pos < refusal.pos && fixture[0]!.end > refusal.end);
+  assert.match(source, /sourceRule: 'non_nfc_source_name'/u);
   for (const original of [
     "original nonce must replay its durable source refusal despite current credential revocation",
     "fresh nonce must bind the same original source refusal without reauthorizing capture",

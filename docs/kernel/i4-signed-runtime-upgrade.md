@@ -245,3 +245,22 @@ An unsigned candidate is never selectable. Qualification's ephemeral key is
 not a project release root. Maintainers must provide the official compiled trust
 configuration and sign the real complete package; publishing, signed installed
 upgrade qualification and the default client cut remain gated separately.
+
+## Fixed conversion refusal diagnostics
+
+The installed upgrade marker subdivides the original resource audit into the
+count checks, each terminal Run row, its complete recovery traversal and settled
+Journal, retained Run/worker/generation rows, source-inspection retirement,
+unsupported producer families and the complete paged resource graph. The
+recovery traversal reports only its existing closed phase names, plus the
+original SQL cut and worker-preparation boundary. These labels contain no Run
+identifier, artifact ref, path, timestamp, exception text or cause. They do not
+change the traversal, resource ceilings, retirement proof or final five-second
+commit window. The original stderr scanner and exact marker decoder still
+precede forwarding.
+
+CI498 reached `conversion_resources` and refused with `RECOVERY_REQUIRED`
+after the original schema7 Run completed and both workers retired. Its report
+does not retain the failed SQL/CAS graph, so this finer observation does not
+establish which check refused, prove compatibility or qualify the upgrade.
+The same real signed installation journey must establish the next result.

@@ -1,5 +1,6 @@
 import { types } from 'node:util';
 import { ResourceRetirementError } from './errors.js';
+import type { RecoveryClosurePhase } from './recovery-closure.js';
 
 // Fixed diagnostics only. No request, identifier, path, exception text, time,
 // retry permission or evidence of an upgrade operation is carried here.
@@ -7,11 +8,29 @@ export const INSTALLED_RUNTIME_UPGRADE_PHASES = ['read_schema', 'recover_selecti
   'source_control', 'stage_original', 'stage_source', 'stage_cas', 'stage_owner_history', 'stage_native',
   'stop_original', 'stop_observe_original', 'stop_load_platform', 'stop_supervisor_request', 'stop_supervisor_decode',
   'stop_supervisor_death', 'stop_keeper_request', 'stop_keeper_decode', 'stop_keeper_death', 'credential_exclusion', 'conversion', 'conversion_current', 'conversion_owner', 'conversion_recovery',
-  'conversion_schema', 'conversion_history', 'conversion_resources', 'conversion_rows', 'conversion_death',
+  'conversion_schema', 'conversion_history', 'conversion_resources',
+  'conversion_resource_counts', 'conversion_resource_run_row', 'conversion_resource_run_journal', 'conversion_resource_run_retain',
+  'conversion_resource_worker_row', 'conversion_resource_worker_retain', 'conversion_resource_generation_row', 'conversion_resource_generation_retain',
+  'conversion_resource_source_row', 'conversion_resource_source_retirement', 'conversion_resource_source_retain',
+  'conversion_resource_unsupported', 'conversion_resource_graph',
+  'conversion_run_cut', 'conversion_run_preparation', 'conversion_run_spec', 'conversion_run_context', 'conversion_run_journal',
+  'conversion_run_generations', 'conversion_run_history', 'conversion_run_history_model', 'conversion_run_history_items',
+  'conversion_run_history_candidate', 'conversion_run_history_verifier', 'conversion_run_history_tool', 'conversion_run_history_input',
+  'conversion_run_history_broker', 'conversion_run_seals', 'conversion_run_terminal', 'conversion_rows', 'conversion_death',
   'conversion_receipt', 'conversion_selection', 'conversion_acquisition', 'conversion_commit', 'conversion_publish',
   'conversion_release', 'publish_selection', 'target_open', 'target_services',
   'target_control', 'output', 'unknown'] as const;
 export type InstalledRuntimeUpgradePhase = typeof INSTALLED_RUNTIME_UPGRADE_PHASES[number];
+const recoveryPhases = Object.freeze({
+  cut: 'conversion_run_cut', preparation: 'conversion_run_preparation', spec: 'conversion_run_spec', context: 'conversion_run_context',
+  journal: 'conversion_run_journal', generations: 'conversion_run_generations', history: 'conversion_run_history',
+  history_model: 'conversion_run_history_model', history_items: 'conversion_run_history_items', history_candidate: 'conversion_run_history_candidate',
+  history_verifier: 'conversion_run_history_verifier', history_tool: 'conversion_run_history_tool', history_input: 'conversion_run_history_input',
+  history_broker: 'conversion_run_history_broker', seals: 'conversion_run_seals', terminal: 'conversion_run_terminal'
+} as const satisfies Record<RecoveryClosurePhase, InstalledRuntimeUpgradePhase>);
+/** Same original recovery boundaries, projected to closed labels only. */
+export function installedUpgradeRecoveryPhase(phase: RecoveryClosurePhase): InstalledRuntimeUpgradePhase { return recoveryPhases[phase]; }
+
 // Only native task statuses reachable by the fixed manager/upgrade recipe.
 // A raw/remote string is never transformed or copied into an output marker.
 const platformCodes = Object.freeze({

@@ -15,6 +15,8 @@ import { loadNativeStateOwner } from '../state/native-owner.js';
 import { captureFrozenSourceProjection, publishNonGitSourceProjection } from './source-projection.js';
 import { decodeDeliveryCaptureTopology, publicationDirectoryIdentityDigest } from '../kernel/publication.js';
 import { ResourceRetirementError } from '../state/errors.js';
+import { createSourceInspectionErrorResponse } from '../state/source-inspection-error.js';
+import { INSTALLED_SOURCE_REFUSAL_NAME, withInstalledSourceRefusalFixture } from '../state/testing/source-refusal-fixture.js';
 
 // Execute only the actual entries reread expression against inert CAS bytes.
 // No native source capture, Run, StateOwner or entries authority is created.
@@ -548,6 +550,39 @@ test('non-Git projection prunes an actual special entry but refuses selectors in
   await mkdir(path.join(workspace, '.git'));
   const gitRoot = native.openWorkspaceRoot(workspace); t.after(() => gitRoot.close());
   await assert.rejects(publishNonGitSourceProjection({ ...input, workspaceRoot: gitRoot }), /Git source inspection is not implemented/);
+});
+
+test('owned source refusal uses the original native inventory and exact public error classification', async t => {
+  const { workspace, input } = await fixture(t);
+  const expected = { protocolVersion: 1, ok: false, method: 'run.submit', error: { schemaVersion: 1,
+    messageCode: 'source_capture_rejected', code: 'INVALID_REQUEST', retryable: false,
+    issues: [{ path: 'source', issueCode: 'source_changed_or_unsupported' }] } };
+  await mkdir(path.join(workspace, 'nested')); await mkdir(path.join(workspace, 'nested', '.git'));
+  await assert.rejects(publishNonGitSourceProjection(input), error => {
+    // The native Error is retained as INTERNAL; it is not relabelled to make
+    // an installed fixture's exact INVALID_REQUEST assertion pass.
+    assert.equal(createSourceInspectionErrorResponse(error, 'owned-inspection', false, 'run.submit').error.code, 'INTERNAL');
+    return true;
+  });
+  await rm(path.join(workspace, 'nested'), { recursive: true });
+  await mkdir(path.join(workspace, 'vendor')); await mkdir(path.join(workspace, 'vendor', '.git'));
+  await withInstalledSourceRefusalFixture({ workspace, uid: process.getuid!(), gid: process.getgid!() }, async () => {
+    await assert.rejects(publishNonGitSourceProjection({ ...input, sourceExcludes: [{ path: 'vendor', scope: 'subtree' }] }), error => {
+      assert.deepEqual(createSourceInspectionErrorResponse(error, 'owned-inspection', false, 'run.submit'), expected); return true;
+    });
+  });
+  assert.deepEqual(await fs.readdir(workspace), ['managed-home', 'managed-state', 'vendor']);
+  const original = Error('original owned callback failure');
+  await assert.rejects(withInstalledSourceRefusalFixture({ workspace, uid: process.getuid!(), gid: process.getgid!() }, async () => {
+    throw original;
+  }), error => error === original);
+  assert.deepEqual(await fs.readdir(workspace), ['managed-home', 'managed-state', 'vendor']);
+  const originalName = path.join(workspace, INSTALLED_SOURCE_REFUSAL_NAME), retainedName = originalName + '-retained';
+  await assert.rejects(withInstalledSourceRefusalFixture({ workspace, uid: process.getuid!(), gid: process.getgid!() }, async () => {
+    await rename(originalName, retainedName); await mkdir(originalName); throw original;
+  }), error => error instanceof AggregateError && error.errors[0] === original);
+  assert((await fs.lstat(originalName)).isDirectory()); assert((await fs.lstat(retainedName)).isDirectory());
+  await fs.rmdir(originalName); await fs.rmdir(retainedName);
 });
 
 test('non-Git metadata inventory yields for cancellation even when every ordinary directory is excluded', async t => {

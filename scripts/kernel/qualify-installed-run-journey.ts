@@ -19,6 +19,7 @@ import { decodeCredentialAuthorityOperation, decodeCredentialAuthorityRevokeOper
   decodeEndpointAuthorityOperation, type EndpointRegistrationV1 } from '../../src/kernel/credential-authority.js';
 import { digestOmitting, identityHash, sha256Bytes } from '../../src/kernel/identity.js';
 import { parseJsonStrict } from '../../src/kernel/json.js';
+import { withInstalledSourceRefusalFixture } from '../../src/state/testing/source-refusal-fixture.js';
 import type { ArtifactDescriptorV1 } from '../../src/kernel/types.js';
 import { buildModelRequestWire, estimatePromptTokens, type ModelVisiblePromptV1 } from '../../src/model/request.js';
 import type { CredentialFinalizeRequest } from '../../src/state/installed-credential-client.js';
@@ -3846,25 +3847,22 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
         providerRequestsUnchanged: true, terminalRunUnchanged: true,
         singleExplicitBusyRequest: true, manualReplayAfterScopeDrain: true };
       mark('durable_source_refusal_before_credential_revocation');
-      // A genuine unsupported source object is rejected by capture after its
-      // reservation. Duplicate selectors are already refused by the fixed
-      // managed-dependency preflight and cannot exercise durable source replay.
-      const refusalNestedRoot = path.join(recipe.workspace, 'unsupported-source-refusal');
-      await mkdir(refusalNestedRoot, { mode: 0o755 }); await chown(refusalNestedRoot, ledger.uid, ledger.gid);
-      const refusalNestedGit = path.join(refusalNestedRoot, '.git');
-      await mkdir(refusalNestedGit, { mode: 0o755 }); await chown(refusalNestedGit, ledger.uid, ledger.gid);
+      // Observe an actual non-NFC name through the original native inventory.
+      // Its projection refusal has the exact public INVALID_REQUEST class;
+      // native nested-Git errors retain their separate INTERNAL classification.
       const refusalSession = currentSession();
+      await withInstalledSourceRefusalFixture({ workspace: recipe.workspace, uid: ledger.uid, gid: ledger.gid }, async () => {
       const refusalCore = { ...resourceCore, requestId: '019a0012-0000-7000-8000-000000000116',
         admissionKey: randomBytes(32).toString('base64url'), expectedContextRevision: refusalSession.contextRevision,
         objective: 'Observe a durable cafe\u0301 source refusal without executing a model.',
-        // Keep the generic selector preflight valid. The original native source
-        // cursor independently refuses nested Git metadata without following it.
-        sourceExcludes: [] };
+        // Preserve the original valid vendor exclusion: its separate .git
+        // instruction fixture must not replace this projection refusal.
+        sourceExcludes: resourceCore.sourceExcludes };
       const refusalRequest = request(refusalCore), refusal = exchange([refusalRequest])[0]!;
       assert.equal(canonicalSha256(refusal), canonicalSha256({ protocolVersion: 1, ok: false, method: 'run.submit',
         error: { schemaVersion: 1, messageCode: 'source_capture_rejected', code: 'INVALID_REQUEST', retryable: false,
           issues: [{ path: 'source', issueCode: 'source_changed_or_unsupported' }] } }));
-      report.sourceRefusalReplay = { qualified: false, sourceRule: 'nested_git_metadata',
+      report.sourceRefusalReplay = { qualified: false, sourceRule: 'non_nfc_source_name',
         originalResponseDigest: canonicalSha256(refusal), initialSourceRefusal: true };
       assert.deepEqual(currentSession(), refusalSession); assert.equal(requestsReceived, 1);
       mark('real_credential_revocation_before_source_refusal_replay');
@@ -3903,6 +3901,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       report.sourceRefusalReplay.sameNonceAndFreshNoncePreserved = true;
       report.sourceRefusalReplay.requestAndAdmissionConflictsPreserved = true;
       report.sourceRefusalReplay.noNewRunSessionMutationOrProviderRequest = true;
+      });
       mark('run_submit_original_wire_identity_and_normalized_intent');
       const normalizedSubmit = request({ ...resourceCore, objective: 'Observe the owned caf\u00e9 model failure without using a tool.' });
       assert.notEqual(submit.requestDigest, normalizedSubmit.requestDigest);

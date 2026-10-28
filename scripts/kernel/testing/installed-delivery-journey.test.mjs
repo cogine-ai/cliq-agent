@@ -286,7 +286,7 @@ test('Delivery keeps retained proof reads distinct from the actual public downlo
   assert(!delivery.includes('delivery_cancel_real_inflight_verifier'));
   assert(delivery.includes('cancellation: { request: cancellation, response: cancellationResponse }'));
   assert(delivery.includes('await context.assertVerifierProcessesAbsent(identity)'));
-  assert(shared.includes('readOwnerHistory: async () => inspectInstalledOwnerHistory(recipe.stateRoot).owners'));
+  assert(shared.includes('readOwnerHistory: async (observe?: (stage: InstalledOwnerHistoryReadStage) => void) => inspectInstalledOwnerHistory(recipe.stateRoot, observe).owners'));
   assert(!/new StateStore|\.transaction\(|new DatabaseSync|loadNativeStateOwner|process\.env/u.test(delivery));
 });
 

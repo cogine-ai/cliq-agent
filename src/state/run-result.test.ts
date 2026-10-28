@@ -77,7 +77,7 @@ test('explicitly consented empty verification publishes one unverified immutable
       throw new Error('an inert recovery diagnosis cannot decide the retained cut');
     });
     assert.deepEqual(recovered.run, fixture.store.getRun(fixture.runId));
-    assert.deepEqual(recoveryPhases, ['spec', 'context', 'journal', 'generations', 'history', 'history_model',
+    assert.deepEqual(recoveryPhases, ['cut', 'preparation', 'spec', 'context', 'journal', 'generations', 'history', 'history_model',
       'history_items', 'history_candidate', 'history_verifier', 'history_tool', 'history_input', 'history_broker', 'seals', 'terminal']);
     const resultOwner = loadRunResult(held.driver, fixture.store.artifacts, held.owner,
       { run: before.run, spec: before.runSpec, principalId: fixture.principalId }, value => {
@@ -88,7 +88,7 @@ test('explicitly consented empty verification publishes one unverified immutable
     await assert.rejects(readVerifiedDeliverySource(held.driver, fixture.store.artifacts, held.owner, {
       principalId: fixture.principalId, sourceRunId: fixture.runId, expectedRunResultRef: committed.resultRef
     }), { code: 'INVALID_REQUEST' });
-    assert.deepEqual(phases, ['result_recovery', 'result_recovery_spec', 'result_recovery_context', 'result_recovery_journal',
+    assert.deepEqual(phases, ['result_recovery', 'result_recovery_cut', 'result_recovery_preparation', 'result_recovery_spec', 'result_recovery_context', 'result_recovery_journal',
       'result_recovery_generations', 'result_recovery_history', 'result_recovery_history_model', 'result_recovery_history_items',
       'result_recovery_history_candidate', 'result_recovery_history_verifier', 'result_recovery_history_tool',
       'result_recovery_history_input', 'result_recovery_history_broker', 'result_recovery_seals', 'result_recovery_terminal',

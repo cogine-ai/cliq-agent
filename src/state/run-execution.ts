@@ -1,3 +1,4 @@
+import { isBuiltinExecutionPhase, type BuiltinExecutionPhase } from '../sandbox/builtin-tool-diagnostics.js';
 import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import { canonicalSha256 } from '../kernel/canonical.js';
@@ -444,7 +445,8 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
   input: LoadRunExecutionInput, isClosing: () => boolean = () => false,
   selectedRuntime?: HeldInstalledRuntime, installedAnchor?: HeldInstalledAnchor, executionStore?: StateStore, openingSignal?: AbortSignal,
   onRetirementPhase?: (phase: RunRetirementPhase) => void,
-  onPublicationPhase?: (phase: RunPublicationPhase) => void
+  onPublicationPhase?: (phase: RunPublicationPhase) => void,
+  onBuiltinPhase?: (phase: BuiltinExecutionPhase) => void
 ): Promise<{ execution: RunExecution; closeWorkerRecoveryProbe(input: { runId: string; expectedRunRevision: number }): Promise<Run>;
   beginClose(): Promise<void>; close(): Promise<void> }> {
   openingSignal?.throwIfAborted();
@@ -452,6 +454,12 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
   const runId = input.runId;
   const retirementPhase = (phase: RunRetirementPhase) => { try { onRetirementPhase?.(phase); } catch { /* Diagnosis cannot decide retirement. */ } };
   const publicationPhase = (phase: RunPublicationPhase) => { try { onPublicationPhase?.(phase); } catch { /* Diagnosis cannot decide publication. */ } };
+  let currentBuiltinPhase: BuiltinExecutionPhase | undefined;
+  const builtinPhase = (phase: BuiltinExecutionPhase) => {
+    if (!onBuiltinPhase || !isBuiltinExecutionPhase(phase)) return;
+    currentBuiltinPhase = phase;
+    try { onBuiltinPhase(phase); } catch { /* Diagnosis cannot decide execution. */ }
+  };
   // Delivery never reads or validates live model material. Agent resolvers
   // retain their original trusted functions and snapshot BEFORE the first
   // asynchronous read. The explicit selector is checked against retained State,
@@ -2092,6 +2100,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       operationPhase = 'preparing';
       let claimedTool: Awaited<ReturnType<typeof currentAgent.claimTool>> | undefined;
       const work = (async () => {
+        builtinPhase('tool_select');
         signal.throwIfAborted();
         const selected = await readToolCut(driver, reads, runId, currentAgent.resolveToolInput);
         signal.throwIfAborted();
@@ -2142,6 +2151,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           await retireWorkerResources();
           return sealed.run;
         }
+        builtinPhase('tool_prepare');
         let prepared = await currentAgent.prepareTool({ expectedRunRevision: selected.run.revision, leaseEpoch: selected.run.leaseEpoch }, signal);
         if (prepared.disposition === 'retirement_required') {
           if (!retained || !activeWorker) throw new KernelStorageError('RECOVERY_REQUIRED', 'waiting selection lost its original live worker');
@@ -2204,38 +2214,52 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         const currentWorker = worker;
         signal.throwIfAborted();
         const dispatchId = identityHash('cliq-tool-dispatch-v1', runId, prepared.entry.opId, String(prepared.entry.attempt), nonce());
+        builtinPhase('tool_claim_spec');
         if (currentWorker.containment.backend.kind !== 'linux') throw new KernelStorageError('ARTIFACT_MISMATCH', 'native edit parent is not Linux');
         const sandboxLaunchSpecRef = await publishBuiltinRecipe(reads, recipe.spec, processContainmentRef, currentWorker.containment.backend.cgroupPath, prepared, dispatchId);
         // The permanent claim precedes even blocked invocation process creation.
         signal.throwIfAborted();
+        builtinPhase('tool_claim');
         const claimed = await currentAgent.claimTool({ expectedRunRevision: prepared.run.revision, leaseEpoch: activated.run.leaseEpoch,
           opId: prepared.entry.opId, attempt: prepared.entry.attempt, dispatchId, sandboxLaunchSpecRef }, signal);
         claimedTool = claimed;
         operationPhase = 'claimed';
+        builtinPhase('tool_claim_data');
         const call = await artifacts.readCanonical<import('../protocol/agent-ir.js').ToolCallInputV1>(claimed.request.inputRef);
         const grant = await artifacts.readCanonical<import('../kernel/tool-authorization.js').ToolOperationGrantV1>(claimed.entry.grantRef!);
+        builtinPhase('tool_claim_live');
         const live = assertLiveDispatchState(driver, owner, runId, prepared.run.revision, activated.run.leaseEpoch, sampleCanonicalNow());
         const closureInput = { ...live, prepared: prepared.entry, request: claimed.request, target: claimed.target,
           call, grant, dispatchId, sandboxLaunchSpecRef };
         const script = claimed.target.execution.kind === 'builtin_script';
+        builtinPhase(script ? 'tool_script_closure' : 'tool_edit_closure');
         const launchClosure = script
           ? await readBuiltinScriptLaunchClosure(reads, assertActiveStateOwner(driver, owner), closureInput, bootstrap!.releaseKeys, signal)
           : await readBuiltinEditLaunchClosure(reads, assertActiveStateOwner(driver, owner), closureInput);
-        const invocation = await currentWorker.createInvocation(launchClosure);
+        builtinPhase('tool_native_parent');
+        const invocation = await currentWorker.createInvocation(launchClosure, onBuiltinPhase ? builtinPhase : undefined);
+        builtinPhase('tool_process_observe');
         await invocation.observeProcess();
         signal.throwIfAborted();
+        builtinPhase('tool_release');
         await claimed.release(invocation);
         toolReleased = script;
+        builtinPhase('tool_result');
         const result = await invocation.result();
         const editSucceeded = result === 'ok';
         // The native friend copies the original private bytes synchronously,
         // before any caller view or post-effect/persistence await can mutate them.
+        // Keep raw result custody synchronous: no observer runs between the
+        // original result and its private capture copy.
+        if (onBuiltinPhase) currentBuiltinPhase = 'tool_capture';
         const captured = typeof result === 'string' ? undefined : retainBuiltinCapturePublication(artifacts,
           assertActiveStateOwner(driver, owner), prepared.entry, claimed.entry, result,
           decodeBuiltinToolInput(builtinToolInputBytes(result.tool, call.value!, launchClosure.spec.resources)));
+        builtinPhase('tool_capture');
         if (script !== (captured !== undefined) || captured && captured.tool !== call.toolName)
           throw new KernelStorageError('RECOVERY_REQUIRED', 'tool result differs from its original fixed native recipe');
         operationPhase = 'received';
+        builtinPhase('tool_received');
         const observedAt = sampleCanonicalNow();
         const retainReadWorker = captured !== undefined && captured.tool !== 'bash';
         const persistCapture = captured?.publish, nativeModel = captured?.model;
@@ -2310,23 +2334,29 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         if (closingCompletion?.worker === currentWorker && closingCompletion.activeWorker === current) closingCompletion.completion = receivedCompletion;
         return receivedCompletion.finish();
       })().catch(async error => {
+        const failedBuiltinPhase = currentBuiltinPhase;
         if (claimedTool && operationPhase !== 'received') {
           // A permanent claim is possibly dispatched even when cancellation
           // wins before the blocked child/RELEASE handshake. Join the actual
           // producer, preserve uncertainty and charge once; only the separate
           // genuine private rollback closure may later resolve that unknown.
+          builtinPhase('tool_error_revoke');
           await revokeOriginalWorker();
+          builtinPhase('tool_error_history');
           const history = readInvocationAttempt(driver, runId, claimedTool.entry.opId, claimedTool.entry.attempt);
           if (history.at(-1)?.phase === 'dispatch_claimed') {
+            builtinPhase('tool_error_evidence');
             const ambiguity = await artifacts.publishCanonical({ schemaVersion: 1, format: 'cliq-private-tool-ambiguity-v1',
               runId, opId: claimedTool.entry.opId, attempt: claimedTool.entry.attempt, dispatchId: claimedTool.entry.dispatchId,
               claimJournalSeq: claimedTool.entry.seq, requestRef: claimedTool.entry.requestRef, targetRef: claimedTool.entry.target,
               grantRef: claimedTool.entry.grantRef, reason: 'original_producer_joined_without_result' }, 'cliq-private-tool-ambiguity-v1');
+            builtinPhase('tool_error_unknown');
             await markInvocationUnknown(driver, artifacts, owner, { runId, opId: claimedTool.entry.opId,
               attempt: claimedTool.entry.attempt, expectedRunRevision: readRun(driver, runId).revision,
               evidenceRef: ambiguity.ref, evidenceDigest: ambiguity.ref });
           }
         }
+        if (failedBuiltinPhase) builtinPhase(failedBuiltinPhase);
         throw error;
       });
       return ownOperation(work, abort);

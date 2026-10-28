@@ -1,3 +1,4 @@
+import type { BuiltinExecutionPhase } from '../sandbox/builtin-tool-diagnostics.js';
 import { verifyRetainedEndpointAuthoritySource, validateRetainedEndpointResult as validateEndpointResult } from './endpoint-authority-source.js';
 import { withInstalledWorkerRoot as borrowInstalledResourceRoot } from './installed-runtime.js';
 import { noteInstalledResourceBoundary } from './installed-resource-diagnostics.js';
@@ -1726,7 +1727,7 @@ export class StateStore {
     closure?: ModelBrokerClosed; initial: Awaited<ReturnType<typeof readModelClaimCut>>;
   }>();
   private readonly installedRunTasks = new Map<string, Promise<void>>();
-  private readonly installedRunPhases = new Map<string, RunResultPhase | RunPublicationPhase | 'scheduled' | 'drive_material' | 'drive_agent' |
+  private readonly installedRunPhases = new Map<string, RunResultPhase | RunPublicationPhase | BuiltinExecutionPhase | 'scheduled' | 'drive_material' | 'drive_agent' |
     'drive_retirement' | `drive_retirement_${RunRetirementPhase}` | 'drive_verify' | 'drive_finalize' | 'terminal_retirement'>();
   private readonly installedAgents = new Map<string, { agent: InstalledContinuation; readAbort: AbortController }>();
   private readonly installedAgentLoads = new Map<string, Promise<InstalledContinuation>>();
@@ -3522,6 +3523,8 @@ export class StateStore {
       installedRunDiagnosticsSubscribed() ? phase => {
         if (this.installedRunPhases.has(runId)) this.installedRunPhases.set(runId, phase);
         noteInstalledPublicationPhase(phase);
+      } : undefined, installedRunDiagnosticsSubscribed() ? phase => {
+        if (this.installedRunPhases.has(runId)) this.installedRunPhases.set(runId, phase);
       } : undefined));
     this.executions.set(runId, opening);
     let scope: Awaited<typeof opening> | undefined;

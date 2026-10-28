@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { INSTALLED_RUNTIME_UPGRADE_PHASES, installedRuntimeUpgradeFailureMarker, readInstalledRuntimeUpgradeFailureMarker } from './installed-upgrade-diagnostics.js';
+import { INSTALLED_RUNTIME_UPGRADE_PHASES, installedUpgradeRecoveryPhase, installedRuntimeUpgradeFailureMarker, readInstalledRuntimeUpgradeFailureMarker } from './installed-upgrade-diagnostics.js';
 
 test('upgrade diagnostics emit only fixed phases and codes, with no exception or caller property execution', () => {
   const secret = 'dedicated-diagnostic-secret-never-emit';
@@ -194,4 +194,73 @@ test('conversion subphases only label original operations and preserve the compl
   assert(!source.includes('console.') && !source.includes('writeSync('));
   const runtime = await readFile(new URL('./installed-runtime.ts', import.meta.url), 'utf8');
   assert(runtime.includes('notePhase: phase => noteUpgradePhase(observePhase, phase)'));
+});
+
+
+test('every original conversion resource boundary and complete recovery subphase has a fixed marker', async () => {
+  const recovery = ['cut', 'preparation', 'spec', 'context', 'journal', 'generations', 'history',
+    'history_model', 'history_items', 'history_candidate', 'history_verifier', 'history_tool', 'history_input',
+    'history_broker', 'seals', 'terminal'] as const;
+  const resources = ['counts', 'run_row', 'run_journal', 'run_retain', 'worker_row', 'worker_retain',
+    'generation_row', 'generation_retain', 'source_row', 'source_retirement', 'source_retain', 'unsupported', 'graph'] as const;
+  for (const boundary of [...resources.map(value => `conversion_resource_${value}`),
+    ...recovery.map(value => `conversion_run_${value}`)]) {
+    assert((INSTALLED_RUNTIME_UPGRADE_PHASES as readonly string[]).includes(boundary), boundary);
+    const marker = installedRuntimeUpgradeFailureMarker(boundary, { code: 'RECOVERY_REQUIRED' });
+    assert.equal(marker, `CLIQ_INSTALLED_UPGRADE_FAILURE_V1:${boundary}:RECOVERY_REQUIRED\n`);
+    assert.deepEqual(readInstalledRuntimeUpgradeFailureMarker(Buffer.from(marker)), Buffer.from(marker));
+  }
+  for (const phase of recovery) assert.equal(installedUpgradeRecoveryPhase(phase), `conversion_run_${phase}`);
+  const { readFile } = await import('node:fs/promises');
+  const source = await readFile(new URL('./runtime-upgrade.ts', import.meta.url), 'utf8');
+  const recoverySource = await readFile(new URL('./recovery-closure.ts', import.meta.url), 'utf8');
+  const operations = [
+    ['counts', "for (const table of ['runs', 'worker_launches', 'workspace_generations', 'source_inspection_attempts'])"],
+    ['run_row', 'const run = readRun(driver, id)'],
+    ['run_journal', 'if (closure.journal.some('],
+    ['run_retain', 'await retain(run, runTerminalRowRefs)'],
+    ['worker_row', "if (launch.phase !== 'retired')"],
+    ['worker_retain', 'await retain(launch, workerLaunchRowRefs)'],
+    ['generation_row', "if (row.phase !== 'retired')"],
+    ['generation_retain', 'await retain(row, workspaceGenerationRowRefs)'],
+    ['source_row', 'const row = readSourceInspectionAttempt(driver,'],
+    ['source_retirement', 'await readSourceInspectionRetirement(driver, reads, row,'],
+    ['source_retain', 'await retain(row, sourceInspectionRowRefs)'],
+    ['unsupported', "for (const table of ['local_inference_activation_cycles'"],
+    ['graph', 'const resources = await publishUpgradeResourceGraph(']
+  ];
+  for (const [label, operation] of operations) {
+    const note = `installed?.notePhase?.('conversion_resource_${label}')`;
+    assert(source.indexOf(note) >= 0 && source.indexOf(note) < source.indexOf(operation!), label);
+    assert(source.split(note).length >= 2, label);
+  }
+  assert(source.includes('readRecoveryClosure(driver, reads, id, installed && (phase => installed.notePhase?.(installedUpgradeRecoveryPhase(phase))))'));
+  assert(recoverySource.indexOf("phase('cut')") < recoverySource.indexOf('const databaseCut ='));
+  assert(recoverySource.indexOf("phase('preparation')") < recoverySource.indexOf('await validateWorkerPreparationHistory('));
+});
+
+
+test('real Store recovery retains its full cut and original refusal when the phase observer throws', async () => {
+  const { createQueuedFixture, disposeFixture } = await import('./testing/fixtures.js');
+  const { openSqliteDriver } = await import('./sqlite-driver.js');
+  const { readRecoveryClosure } = await import('./recovery-closure.js');
+  const { canonicalSha256 } = await import('../kernel/canonical.js');
+  const path = await import('node:path');
+  const fixture = await createQueuedFixture('upgrade-resource-phases');
+  const driver = openSqliteDriver(path.join(fixture.stateRoot, 'kernel.sqlite3'));
+  try {
+    const original = await readRecoveryClosure(driver, fixture.store.artifacts, fixture.runId);
+    const phases: string[] = [];
+    const observed = await readRecoveryClosure(driver, fixture.store.artifacts, fixture.runId, phase => {
+      phases.push(installedUpgradeRecoveryPhase(phase)); throw Error('observer-only-private-text');
+    });
+    assert.equal(canonicalSha256(observed), canonicalSha256(original));
+    assert.deepEqual(phases, ['cut', 'preparation', 'spec', 'context', 'journal', 'generations', 'history', 'seals', 'terminal']
+      .map(value => `conversion_run_${value}`));
+    const failed: string[] = [];
+    await assert.rejects(readRecoveryClosure(driver, fixture.store.artifacts, 'absent-original-run', phase => {
+      failed.push(phase); throw Error('observer-only-private-text');
+    }), { code: 'NOT_FOUND' });
+    assert.deepEqual(failed, ['cut']);
+  } finally { driver.close(); await disposeFixture(fixture); }
 });

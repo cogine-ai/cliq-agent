@@ -268,6 +268,15 @@ function assertCarrierExperimentWorkflow(workflow: string): void {
   assert.equal(createHash('sha256').update(upgrade).digest('hex'), 'ad971cd9def7e58b4591e7aef5907ff5dce694917ee4aca0b82ddef02ed5f669',
     'the independent signed7-to-8 job keeps its exact free runner, source, command, publisher, artifact and twenty-minute contract');
   const originalWorkflow = workflow.slice(0, upgradeStart) + workflow.slice(originalStart);
+  const preparingReport = '            ${{ steps.guest.outputs.report_root }}/guest-preparing-git-report.json\n';
+  assert.equal(workflow.split(preparingReport).length, 2, 'the original real preparing report must be retained exactly once');
+  assert(workflow.includes(
+    '          name: native-guest-verifier-${{ github.run_id }}-${{ github.run_attempt }}\n' +
+    '          path: |\n' +
+    '            ${{ steps.guest.outputs.report_root }}/guest-extractor-report.json\n' + preparingReport +
+    '            ${{ steps.guest.outputs.report_root }}/guest-verifier-report.json\n' +
+    '            ${{ steps.guest.outputs.report_root }}/guest-campaign-failure.json\n'),
+  'only the fixed original preparing JSON is added to the bounded native artifact');
   const experiment = [
     '      - name: Measure fixed carrier metadata reduction without selecting it',
     "        if: ${{ !cancelled() && steps.build.outcome == 'success' }}",
@@ -336,7 +345,7 @@ function assertCarrierExperimentWorkflow(workflow: string): void {
     storageRegression + '          regression="$RUNNER_TEMP/cliq-worker-seccomp-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"\n'),
   'the source-build regressions stay inside the original actual native ABI step, before its unchanged compiler and syscall checks');
   const projected = withoutLockedNodeQualification(originalWorkflow).replace(experiment, '').replace(retain, '').replace(parentEvidenceTest, '').replace(qualificationPreflightTest, '')
-    .replace(sessionRegression, '').replace(readinessRegression, '').replace(processRegression, '').replaceAll(buildDependencies, 'bubblewrap').replace(storageRegression, '');
+    .replace(sessionRegression, '').replace(readinessRegression, '').replace(processRegression, '').replaceAll(buildDependencies, 'bubblewrap').replace(storageRegression, '').replace(preparingReport, '');
   assert.equal(createHash('sha256').update(projected).digest('hex'), '346af80a56060feace86c309b316c67560f68c512207d6cd3c95ab965cb225f5',
     'all original CT jobs, runner groups, timeouts, qualifiers and conditions must remain byte-identical');
   assert.equal(workflow.split('qualify-supervisor-carrier-size.ts').length, 2, 'no production job may select the experimental carrier');
@@ -391,6 +400,9 @@ test('the additive parent-domain regression cannot hide workflow removals, disab
     workflow.replace('old_commit=25130cfec913bddaff4d0a8c7ff4aac7ef2db932', 'old_commit=410c8193ea516b0b9f8e6a746c4376003e67b5a4'),
     workflow.replace(parentEvidenceTest, '').replace(qualificationPreflightTest, ''),
     workflow.replace('dependency-native-family.test.ts', 'dependency-native-family-skipped.test.ts'),
+    workflow.replace('            ${{ steps.guest.outputs.report_root }}/guest-preparing-git-report.json\n', ''),
+    workflow.replace('guest-preparing-git-report.json', 'guest-preparing-git-report*.json'),
+    workflow.replace('guest-preparing-git-report.json', 'guest-preparing-git-report.json\n            ${{ steps.guest.outputs.report_root }}/guest-preparing-git-report.json'),
     workflow.replace("redirect: 'error'", "redirect: 'follow'"),
     workflow.replace('total <= NPM_DATA_RECIPE.archiveBytes', 'total <= NPM_DATA_RECIPE.archiveBytes * 2'),
     workflow.replace('buildInstalledNpmDataAsset(archive);', ''),

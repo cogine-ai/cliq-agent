@@ -4,6 +4,30 @@ import { channel } from 'node:diagnostics_channel';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { KernelStorageError } from './errors.js';
+import { BUILTIN_EXECUTION_PHASES } from '../sandbox/builtin-tool-diagnostics.js';
+
+test('builtin and original recovery phases reuse the same scheduler failure envelope with closed stages and redacted errors', async () => {
+  const { beginInstalledSchedulerDiagnostic, INSTALLED_SCHEDULER_DIAGNOSTIC_PHASES } = await import('./installed-run-diagnostics.js');
+  const records: unknown[] = [], diagnostic = channel('cliq.installed.run.failures.v1');
+  const receive = (record: unknown) => { try { records.push(record); } catch {} };
+  diagnostic.subscribe(receive);
+  try {
+    let accesses = 0;
+    const error = new KernelStorageError('ARTIFACT_MISMATCH', 'private fixture error');
+    for (const name of ['message', 'cause', 'stack']) Object.defineProperty(error, name, {
+      get() { accesses++; throw Error('must not read private error'); }
+    });
+    const observer = beginInstalledSchedulerDiagnostic('drive'); assert(observer);
+    const phases = [...BUILTIN_EXECUTION_PHASES, 'result_recovery_cut', 'result_recovery_preparation'];
+    for (const phase of phases) {
+      assert((INSTALLED_SCHEDULER_DIAGNOSTIC_PHASES as readonly string[]).includes(phase));
+      observer.phase(phase); observer.failure(error, false);
+    }
+    assert.deepEqual(records, phases.map(phase => ({ kind: 'scheduler_failure', origin: 'drive', phase,
+      closing: false, errorClass: 'kernel', code: 'ARTIFACT_MISMATCH', sqliteCode: null })));
+    assert.equal(accesses, 0); assert(records.every(value => Object.isFrozen(value)));
+  } finally { diagnostic.unsubscribe(receive); }
+});
 
 test('submit stages use the historical admission failure envelope without claiming an apply or publication', async () => {
   const module = await import('./installed-run-diagnostics.js') as Record<string, any>;

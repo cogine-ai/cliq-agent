@@ -618,7 +618,7 @@ async function validateLaunchGraph(
 }
 
 /** Fixed, inert progress only: no refs, timing, authority or retry decisions. */
-export type RecoveryClosurePhase = 'spec' | 'context' | 'journal' | 'generations' | 'history' |
+export type RecoveryClosurePhase = 'cut' | 'preparation' | 'spec' | 'context' | 'journal' | 'generations' | 'history' |
   `history_${import('./agent-recovery.js').AgentRecoveryPhase}` | 'history_broker' | 'seals' | 'terminal';
 
 type PublicationPrefix = Awaited<ReturnType<typeof import('./delivery-publication-progress.js')['readPublicationPrefix']>>;
@@ -666,6 +666,7 @@ async function readRecoveryProjection(
   preparationCleanup?: WorkerPreparationCleanupContext
 ): Promise<{ cut: RecoveryClosureV1; prefix?: PublicationPrefix }> {
   const phase = (value: RecoveryClosurePhase) => { try { onPhase?.(value); } catch { /* Diagnosis cannot decide recovery. */ } };
+  phase('cut');
   const databaseCut = driver.transaction((connection) => {
     const run = readRun(connection, runId);
     const principalId = connection.prepare('SELECT principal_id FROM runs WHERE id = ?').get<{ principal_id: string }>(run.id)?.principal_id;
@@ -703,6 +704,7 @@ async function readRecoveryProjection(
     workspaceGenerations,
     childAllocations
   } = databaseCut;
+  phase('preparation');
   try {
     await validateWorkerPreparationHistory(driver, artifacts, { run, launches: databaseCut.allWorkerLaunches,
       generations: workspaceGenerations }, preparationCleanup);

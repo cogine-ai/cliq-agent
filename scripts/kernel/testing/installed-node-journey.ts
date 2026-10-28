@@ -949,6 +949,26 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     assert.equal(originalOwner.owners[0]!.state, 'active'); assert.equal(originalOwner.owners[0]!.runtimeBundleRef, bundleDigest);
     const initialOwnerImage = parseJsonStrict((await readCas(originalOwner.owners[0]!.processIdentityRef)).toString('utf8')) as Record<string, any>;
     assert.equal(initialOwnerImage.pid, Number(supervisorBefore.MainPID));
+    if (storeFailureDiagnostics && !storeFailureBinding) {
+      // The early optional read can encounter a real rollback-journal lock at
+      // its fixed schema stage. Reuse the complete cut already obtained inside
+      // the original readiness budget, before any Session/source attempt. No
+      // later failure or absent process can supply this live binding.
+      try {
+        const entry = signed.bundle.entries.find(entry => entry.role === 'supervisor'); assert(entry);
+        const pid = Number(supervisorBefore.MainPID);
+        const actual = await qualifyInstalledOwnerProcess({ stateRoot: recipe.stateRoot, uid: ledger.uid,
+          pid, selectedImage: installedImage, imageDigest: entry.digest }, originalOwner.owners[0]!, {});
+        assert.equal('linux-proc-start-ticks:' + await fixtureProcess(pid, ledger.uid), actual.processStartToken);
+        const same = show(services.supervisorUnit);
+        assert.equal(same.MainPID, supervisorBefore.MainPID); assert.equal(same.InvocationID, supervisorBefore.InvocationID);
+        storeFailureBinding = Object.freeze({ pid, processStartToken: actual.processStartToken,
+          invocationId: supervisorBefore.InvocationID!, windowOpenedAt: Date.now() });
+      } catch {
+        // Keep the early fixed failure stage and the binding absent. Diagnosis
+        // never replaces the original failure or creates execution authority.
+      }
+    }
     report.cases = [];
     await mkdir(recipe.workspace, { mode: 0o700 }); await chown(recipe.workspace, ledger.uid, ledger.gid);
     const createSource = async (sourceKind: SourceCaseKind) => {
@@ -1200,7 +1220,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       })() : undefined;
       const proof = toolsCase ? undefined : await assertInstalledVerifierOutcome({ cut, sessionCut, readCas, caseKind: kind, expectedFiles: files, principalId: principal,
         ...(expectedGit ? { expectedGit: true as const } : {}),
-        readOwnerHistory: async () => inspectInstalledOwnerHistory(recipe.stateRoot).owners });
+        readOwnerHistory: async (observe?: (stage: InstalledOwnerHistoryReadStage) => void) => inspectInstalledOwnerHistory(recipe.stateRoot, observe).owners });
       const queries = await resultQueries(cut);
       if (proof) {
         assert.equal(proof.retirementIdentities.length, kind === 'required_repair' || kind === 'required_timeout' ? 2 : 1);
@@ -1284,7 +1304,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       assert.deepEqual(await resultQueries(cut), entry.resultQueries);
       await assertInstalledVerifierOutcome({ cut, sessionCut, readCas, caseKind: entry.kind, expectedFiles: entry.files, principalId: principal,
         ...(entry.expectedGit ? { expectedGit: true as const } : {}),
-        readOwnerHistory: async () => inspectInstalledOwnerHistory(recipe.stateRoot).owners });
+        readOwnerHistory: async (observe?: (stage: InstalledOwnerHistoryReadStage) => void) => inspectInstalledOwnerHistory(recipe.stateRoot, observe).owners });
       for (const file of entry.files) {
         assert.deepEqual(sourceMetadata(await lstat(path.join(entry.workspace, file.path), { bigint: true })), entry.sourceIdentity.get(file.path));
         assert.equal(await readFile(path.join(entry.workspace, file.path), 'utf8'), file.before);
@@ -1477,7 +1497,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
           recordRefusal(response, body.method as string); return response;
         },
         nextId, readRetainedArtifact: readCas, downloadPublicArtifact: readPublicArtifact, uid: ledger.uid, gid: ledger.gid, mark,
-        readOwnerHistory: async () => inspectInstalledOwnerHistory(recipe.stateRoot).owners,
+        readOwnerHistory: async (observe?: (stage: InstalledOwnerHistoryReadStage) => void) => inspectInstalledOwnerHistory(recipe.stateRoot, observe).owners,
         readParentRetirement: binding => inspectInstalledVerifierParentRetirement(recipe.stateRoot, ledger.uid, binding),
         assertVerifierProcessesAbsent,
         assertRunWorkersRetired: async (runId, observedLaunchIds, publicationRetirement, verifierParentRetirement) => {
@@ -1776,7 +1796,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
               recovered = accepted(await client.send({ protocolVersion: 1, method: 'run.get', runId }), 'run.get');
               if (lateDiagnostic && canonicalSha256(recovered) !== lastSampledCutDigest) {
                 const sampled = await readInstalledPublicationProbeSample({ cut: recovered, originalBirth: claimed.birth,
-                  readRetainedArtifact: readCas, readOwnerHistory: async () => inspectInstalledOwnerHistory(recipe.stateRoot).owners });
+                  readRetainedArtifact: readCas, readOwnerHistory: async (observe?: (stage: InstalledOwnerHistoryReadStage) => void) => inspectInstalledOwnerHistory(recipe.stateRoot, observe).owners });
                 // Identical actual public cuts cannot expose a new immutable
                 // CAS fact. Avoid rescanning their bytes on every poll; the
                 // full final readers independently reread all retained facts.
@@ -1793,7 +1813,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
             }
             const recoveryInput = { cut: recovered, originalBirth: claimed.birth,
               expectedFiles: source.files.map(file => ({ path: file.path, text: file.after })), sourceResultRef: source.cut.snapshot.run.resultRef,
-              readRetainedArtifact: readCas, readOwnerHistory: async () => inspectInstalledOwnerHistory(recipe.stateRoot).owners };
+              readRetainedArtifact: readCas, readOwnerHistory: async (observe?: (stage: InstalledOwnerHistoryReadStage) => void) => inspectInstalledOwnerHistory(recipe.stateRoot, observe).owners };
             if (lateDiagnostic) {
               // Preserve the actual single or dual observed packets before
               // asserting that this run hit the intended late cut. A normal

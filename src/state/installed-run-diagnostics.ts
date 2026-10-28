@@ -3,6 +3,7 @@ import { types } from 'node:util';
 import { performance } from 'node:perf_hooks';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
 import { beginInstalledAssemblySubmit, noteInstalledAssemblyStop } from './installed-work-diagnostics.js';
+import { BUILTIN_EXECUTION_PHASES } from '../sandbox/builtin-tool-diagnostics.js';
 
 export const INSTALLED_RUN_FAILURE_CHANNEL = 'cliq.installed.run.failures.v1';
 /** Historical admission envelope: apply_failure/applyFailures/firstApplyFailure
@@ -21,6 +22,7 @@ export const INSTALLED_PUBLICATION_DIAGNOSTIC_PHASES = Object.freeze(['publicati
   'publication_roots_open', 'publication_prepare', 'publication_dispatch', 'publication_settlement'] as const);
 const publicationPhases: ReadonlySet<string> = new Set(INSTALLED_PUBLICATION_DIAGNOSTIC_PHASES);
 export const INSTALLED_SCHEDULER_DIAGNOSTIC_PHASES = Object.freeze(['scheduled', 'drive_material', 'drive_agent', 'drive_retirement',
+  ...BUILTIN_EXECUTION_PHASES,
   'drive_retirement_history', 'drive_retirement_quarantine_closure', 'drive_retirement_native_retirement',
   'drive_retirement_workspace_observation', 'drive_retirement_retirement_commit', 'drive_retirement_resource_join',
   'drive_verify', 'drive_finalize', 'publication_select', 'publication_worker_activate', 'publication_roots_open',
@@ -29,7 +31,7 @@ export const INSTALLED_SCHEDULER_DIAGNOSTIC_PHASES = Object.freeze(['scheduled',
   'publication_prepare_physical', 'publication_prepare_admit',
   'publication_received_retirement', 'publication_received_read', 'publication_received_proof', 'publication_received_settle',
   'terminal_retirement', 'result_recovery', 'result_basis', 'result_finalization',
-  'result_publication', 'result_session', 'result_commit', 'result_recovery_spec', 'result_recovery_context',
+  'result_publication', 'result_session', 'result_commit', 'result_recovery_cut', 'result_recovery_preparation', 'result_recovery_spec', 'result_recovery_context',
   'result_recovery_journal', 'result_recovery_generations', 'result_recovery_history', 'result_recovery_history_model',
   'result_recovery_history_items', 'result_recovery_history_candidate', 'result_recovery_history_verifier',
   'result_recovery_history_tool', 'result_recovery_history_input', 'result_recovery_history_broker', 'result_recovery_seals',

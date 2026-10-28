@@ -1,3 +1,4 @@
+import type { NativeBuiltinInvocationPhase } from './builtin-tool-diagnostics.js';
 import { installedResourcesObserved, noteInstalledResourceBoundary, type OriginalResourceSubject } from '../state/installed-resource-diagnostics.js';
 import type { ResourceBoundary } from '../state/installed-resource-kernel.js';
 import { KernelStorageError, ResourceRetirementError } from '../state/errors.js';
@@ -231,7 +232,7 @@ export type LinuxBlockedWorker = Readonly<{
   activateCommitted(launch: WorkerLaunch): Promise<void>;
   /** Genuine readonly per-controller inventory, never a spawn/release permit. */
   hasInvocationCapacity(): boolean;
-  createInvocation(closure: BuiltinToolLaunchClosure): Promise<LinuxBlockedInvocation>;
+  createInvocation(closure: BuiltinToolLaunchClosure, observe?: (phase: NativeBuiltinInvocationPhase) => void): Promise<LinuxBlockedInvocation>;
   createVerifier(closure: VerifierLaunchClosure, options?: { signal?: AbortSignal }): Promise<LinuxBlockedVerifier>;
   createDependency(closure: DependencyLaunchClosure, transport: NativeDependencyTransport, binding: DependencyBrokerBinding,
     options?: { signal?: AbortSignal }): Promise<LinuxBlockedDependency>;
@@ -1760,11 +1761,18 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
                         device: birthIdentity.root.deviceId, inode: actual.cgroupId, relative: path.posix.basename(backend.cgroupPath) }]);
                     }
                   },
-                  async createInvocation(invocationClosure) {
+                  async createInvocation(invocationClosure, observe) {
                     if (this !== worker || !active) throw new KernelStorageError('LEASE_FENCED', 'invocation requires the actual active parent worker');
+                    let currentNativePhase: NativeBuiltinInvocationPhase | undefined;
+                    const phase = (value: NativeBuiltinInvocationPhase) => {
+                      if (!observe) return;
+                      currentNativePhase = value;
+                      try { observe(value); } catch { /* Inert diagnosis only. */ }
+                    };
                     receiver(); borrowed.assertHeld();
                     assertBuiltinToolLaunchClosure(invocationClosure);
                     if (isBuiltinScriptLaunchClosure(invocationClosure)) {
+                      phase('tool_native_recipe');
                       controllerReceiver(); borrowed.assertHeld();
                       same(invocationClosure.bundle, bundle, 'builtin bundle'); supportedBuiltinScriptRecipe(invocationClosure);
                       const builtinBackend = invocationClosure.plan.backend;
@@ -1776,6 +1784,7 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
                         mismatch('builtin does not select the exact actual parent, generation and fixed native recipe');
                       const signal = AbortSignal.any([installationAbort.signal, controllerAbort.signal]);
                       signal.throwIfAborted();
+                      phase('tool_native_guest_open');
                       const opening = source.builtin(invocationClosure.toolchain, invocationClosure.call.toolName === 'bash', signal).then(guest => {
                         guests.add(guest); controllerGuests.add(guest); return guest;
                       });
@@ -1784,10 +1793,12 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
                       try {
                         guest = await opening;
                         controllerReceiver(); borrowed.assertHeld(); signal.throwIfAborted();
+                        phase('tool_native_guest_identity');
                         assertGuestDescription(guest.job, invocationClosure.toolchain);
                         const tool = invocationClosure.call.toolName;
                         if (!isBuiltinScriptTool(tool)) mismatch('unsupported fixed builtin tool');
                         const entry = { timeoutMs: BUILTIN_SCRIPT_RECIPE.timeoutMs };
+                        phase('tool_native_claim_identity');
                         if (guest.script.identity.sha256 !== invocationClosure.scriptEntry.digest ||
                             guest.script.identity.byteCount !== invocationClosure.scriptEntry.byteCount ||
                             canonicalSha256(invocationClosure.request) !== invocationClosure.spec.requestRef ||
@@ -1796,35 +1807,44 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
                             canonicalSha256(invocationClosure.call) !== invocationClosure.request.inputRef ||
                             invocationClosure.call.inputDigest !== invocationClosure.request.inputDigest)
                           mismatch('builtin input/script differs from its exact original claim');
-                        const inputs: NativeImage[] = []; let createdTool!: NativeScope, primary: { error: unknown } | undefined;
+                        const inputs: NativeImage[] = []; let createdTool!: NativeScope,
+                          primary: { error: unknown; phase?: NativeBuiltinInvocationPhase } | undefined;
                         try {
+                          phase('tool_native_inputs');
                           const inputImage = binding.sealImageBuffer(builtinToolInputBytes(tool, invocationClosure.call.value!, invocationClosure.spec.resources));
                           inputs.push(inputImage);
                           const commandImage = tool === 'bash' ? binding.sealImageBuffer(Buffer.from(invocationClosure.call.value!.command as string)) : null;
                           if (commandImage) inputs.push(commandImage);
+                          phase('tool_native_create');
                           createdTool = native.createBuiltinTool(borrowed.fd, created, helper, bwrap, guest.job, guest.script, inputImage, commandImage, {
                             ...scopeProjection(invocationClosure, borrowed, invocationClosure.plan.launchNonceDigest),
                             tool: ['read', 'ls', 'find', 'grep', 'bash'].indexOf(tool) + 1,
                             timeoutMs: entry.timeoutMs, outputLimitBytes: invocationClosure.spec.resources.maxInvocationOutputBytes,
                           });
-                        } catch (error) { primary = { error }; }
+                        } catch (error) { primary = { error, phase: currentNativePhase }; }
+                        phase('tool_native_inputs_join');
                         const failures: unknown[] = [];
                         for (const input of inputs) try { retireImage(input); } catch (error) { failures.push(error); }
                         if (failures.length) throw retirementError('builtin fixed input descriptors did not join',
                           new AggregateError([...(primary ? [primary.error] : []), ...failures]));
-                        if (primary) throw primary.error;
+                        if (primary) { if (primary.phase) phase(primary.phase); throw primary.error; }
+                        phase('tool_native_ack_interface');
                         if (typeof createdTool.beginAcknowledgeResult !== 'function' || typeof createdTool.pollResultAcknowledged !== 'function')
                           mismatch('builtin scope lacks its fixed data acknowledgement lifecycle');
                         // The authenticated SCM_RIGHTS send gave the original
                         // controller its own sealed descriptors. Retire the
                         // extraction producer, not the controller's copies.
+                        phase('tool_native_guest_join');
                         await guest.close(); guests.delete(guest); controllerGuests.delete(guest);
+                        phase('tool_native_ready');
                         await awaitNative(() => createdTool.pollReady() ? true : undefined, closeController, signal);
                         controllerReceiver(); borrowed.assertHeld();
+                        phase('tool_native_containment');
                         const invocationContainment = actualContainment(invocationClosure, createdTool.observe());
                         const launcherEntry = bundle.entries.find(entry => entry.entryId === LINUX_VERIFIER_RECIPE.launcherId)!;
                         // Before release this is the real trusted blocked helper,
                         // not a false observation that Node has already executed.
+                        phase('tool_native_process');
                         await observedProcess(createdTool, launcherEntry.digest);
                         const owner = invocationClosure.spec.owner;
                         const claim: LinuxInvocationClaim = immutableSnapshot({ runId: owner.runId, leaseEpoch: owner.intendedLeaseEpoch,
@@ -1935,10 +1955,19 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
                         } });
                         return handle;
                       } catch (error) {
-                        let failure: unknown;
-                        if (guest) try { await guest.close(); guests.delete(guest); controllerGuests.delete(guest); } catch (cleanup) { failure = cleanup; }
-                        try { await closeController(); } catch (cleanup) { failure ??= cleanup; }
-                        if (failure !== undefined) throw retirementError('builtin construction and resource join failed', new AggregateError([error, failure]));
+                        const failedNativePhase = currentNativePhase;
+                        let failure: unknown, failedJoinPhase: NativeBuiltinInvocationPhase | undefined;
+                        if (guest) try {
+                          phase('tool_native_error_guest_join');
+                          await guest.close(); guests.delete(guest); controllerGuests.delete(guest);
+                        } catch (cleanup) { failure = cleanup; failedJoinPhase = currentNativePhase; }
+                        try { phase('tool_native_error_controller_join'); await closeController(); }
+                        catch (cleanup) { if (failure === undefined) failedJoinPhase = currentNativePhase; failure ??= cleanup; }
+                        if (failure !== undefined) {
+                          if (failedJoinPhase) phase(failedJoinPhase);
+                          throw retirementError('builtin construction and resource join failed', new AggregateError([error, failure]));
+                        }
+                        if (failedNativePhase) phase(failedNativePhase);
                         throw error;
                       } finally { guestOpenings.delete(opening); controllerGuestOpenings.delete(opening); }
                     }

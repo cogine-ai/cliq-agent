@@ -1,3 +1,4 @@
+import { installedUpgradeRecoveryPhase } from './installed-upgrade-diagnostics.js';
 import { readHeldInstalledUpgradeTransaction, type HeldInstalledRuntimeUpgrade } from './installed-runtime.js';
 import { randomBytes } from 'node:crypto';
 import path from 'node:path';
@@ -130,6 +131,7 @@ export async function upgradeRetiredRuntime(input: Readonly<{ stateRoot: string;
     lock.assertPriorProcessDead(originalProcess.pid, originalProcess.processStartToken);
     const counters = { data: versionCounter(driver, 'data_version'), changes: versionCounter(driver, 'total_changes') };
     installed?.notePhase?.('conversion_resources');
+    installed?.notePhase?.('conversion_resource_counts');
     for (const table of ['runs', 'worker_launches', 'workspace_generations', 'source_inspection_attempts']) {
       const count = requiredSafeInteger(driver.prepare(`SELECT count(*) AS count FROM ${table}`).get<{ count: unknown }>()?.count, 'upgrade resource count');
       if (count > UPGRADE_RESOURCE_FAMILY_ROWS) refuse('upgrade original resource family exceeds its complete fixed witness capacity');
@@ -140,11 +142,14 @@ export async function upgradeRetiredRuntime(input: Readonly<{ stateRoot: string;
       const object = await reads.publishCanonical(value, 'cliq-retained-upgrade-resource-row-v1');
       resourceObjects.push(object); refs.push(object.ref);
     };
+    installed?.notePhase?.('conversion_resource_run_row');
     for (const { id } of driver.prepare('SELECT id FROM runs ORDER BY id').iterate<{ id: string }>()) {
+      installed?.notePhase?.('conversion_resource_run_row');
       const run = readRun(driver, id);
       if (!['succeeded', 'completed_unverified', 'failed', 'cancelled'].includes(run.status) ||
           run.activeWorkerLaunchId !== undefined || !isZeroBudget(run.budgetReserved)) refuse('upgrade cannot retire a nonterminal or reserved Run');
-      const closure = await readRecoveryClosure(driver, reads, id);
+      const closure = await readRecoveryClosure(driver, reads, id, installed && (phase => installed.notePhase?.(installedUpgradeRecoveryPhase(phase))));
+      installed?.notePhase?.('conversion_resource_run_journal');
       if (closure.journal.some(entry => ['prepared', 'dispatch_claimed', 'unknown'].includes(entry.phase))) {
         // Historical prepared/claim prefixes are legal only when their exact
         // original attempt is conclusively settled, never inferred by opId.
@@ -152,27 +157,40 @@ export async function upgradeRetiredRuntime(input: Readonly<{ stateRoot: string;
         for (const entry of closure.journal) last.set(`${entry.opId}:${entry.attempt}`, entry.phase);
         if ([...last.values()].some(phase => !['completed', 'failed'].includes(phase))) refuse('upgrade has an unsettled or UNKNOWN attempt');
       }
+      installed?.notePhase?.('conversion_resource_run_retain');
       await retain(run, runTerminalRowRefs);
+      installed?.notePhase?.('conversion_resource_worker_row');
       for (const launch of readWorkerLaunchesForRun(driver, id)) {
+        installed?.notePhase?.('conversion_resource_worker_row');
         if (launch.phase !== 'retired') refuse('upgrade requires every original worker to be physically retired');
+        installed?.notePhase?.('conversion_resource_worker_retain');
         await retain(launch, workerLaunchRowRefs);
       }
+      installed?.notePhase?.('conversion_resource_generation_row');
       for (const row of readWorkspaceGenerationsForRun(driver, id)) {
+        installed?.notePhase?.('conversion_resource_generation_row');
         if (row.phase !== 'retired') refuse('upgrade requires every original generation to be physically retired');
+        installed?.notePhase?.('conversion_resource_generation_retain');
         await retain(row, workspaceGenerationRowRefs);
       }
     }
+    installed?.notePhase?.('conversion_resource_source_row');
     for (const key of driver.prepare('SELECT principal_id,method,admission_key,admission_intent_digest FROM source_inspection_attempts ORDER BY inspection_id')
       .iterate<{ principal_id: string; method: 'run.submit' | 'run.apply'; admission_key: string; admission_intent_digest: string }>()) {
+      installed?.notePhase?.('conversion_resource_source_row');
       const row = readSourceInspectionAttempt(driver, { principalId: key.principal_id, method: key.method, admissionKey: key.admission_key, admissionIntentDigest: key.admission_intent_digest })!;
       if (row.phase !== 'retired') refuse('upgrade requires the original source scope retirement');
+      installed?.notePhase?.('conversion_resource_source_retirement');
       await readSourceInspectionRetirement(driver, reads, row, { runtimeBundleRef: prior.runtimeBundleRef, runtimeBundleManifestDigest: prior.runtimeBundleManifestDigest });
+      installed?.notePhase?.('conversion_resource_source_retain');
       await retain(row, sourceInspectionRowRefs);
     }
     // These families have no implemented legacy7 offline transition. Their
     // presence is not interpreted as proof of joined producers.
+    installed?.notePhase?.('conversion_resource_unsupported');
     for (const table of ['local_inference_activation_cycles', 'local_inference_launches', 'admin_operations', 'mcp_registrations'])
       if (driver.prepare(`SELECT 1 AS present FROM ${table} LIMIT 1`).get()) refuse('upgrade has an unsupported original producer family');
+    installed?.notePhase?.('conversion_resource_graph');
     const resources = await publishUpgradeResourceGraph(reads, { sourceOwnerEpoch: prior.ownerEpoch, sourceOwnerRowDigest: prior.rowDigest }, {
       run_terminal: runTerminalRowRefs, worker_launch: workerLaunchRowRefs,
       workspace_generation: workspaceGenerationRowRefs, source_inspection: sourceInspectionRowRefs });

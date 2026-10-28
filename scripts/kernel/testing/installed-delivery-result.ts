@@ -20,7 +20,7 @@ import { verifyModelText } from '../../../src/model/attempt.js';
 import { validateContextItems } from '../../../src/runtime/context-compaction.js';
 import { decodeAgentStop } from '../../../src/runtime/stop.js';
 import { loadVerifierPolicy, planVerifierRequest, verifierOperationId } from '../../../src/state/verifier-policy.js';
-import { assertInstalledVerifierRetirement, readInstalledVerifierInputs, type InstalledVerifierRetirementIdentity } from './installed-verifier-evidence.js';
+import { assertInstalledVerifierRetirement, readInstalledVerifierInputs, type InstalledVerifierRetirementIdentity, type InstalledVerifierOwnerHistoryReader } from './installed-verifier-evidence.js';
 import { assertInstalledDeliveryPublication } from './installed-delivery-publication-result.js';
 import { assertInstalledVerifierParentRetirement, type InstalledVerifierParentRetirementIdentity } from './installed-verifier-parent-evidence.js';
 import type { InstalledVerifierParentRetirementBinding, inspectInstalledVerifierParentRetirement } from './installed-worker-lease.js';
@@ -121,7 +121,7 @@ function assertSettlementData(prepared: Record<string, any>, claim: Record<strin
 type InstalledDeliveryVerifierInput = {
   cut: Record<string, any>; sourceCut: Record<string, any>; outcome: 'passed' | 'stopped';
   readRetainedArtifact: (ref: string) => Promise<Buffer>;
-  readOwnerHistory: () => Promise<readonly StateOwnerRecordV1[]>;
+  readOwnerHistory: InstalledVerifierOwnerHistoryReader;
   expectedGit?: true;
   cancellation?: { request: Record<string, any>; response: Record<string, any> };
   readParentRetirement?: (binding: InstalledVerifierParentRetirementBinding) => ReturnType<typeof inspectInstalledVerifierParentRetirement>;
@@ -313,7 +313,7 @@ export async function assertInstalledDeliveryOutcome(input: {
   expectedFiles: readonly { path: string; text: string }[]; kind: 'publish' | 'no_op' | 'merge';
   expectedGit?: true;
   readRetainedArtifact: (ref: string) => Promise<Buffer>;
-  readOwnerHistory: () => Promise<readonly StateOwnerRecordV1[]>;
+  readOwnerHistory: InstalledVerifierOwnerHistoryReader;
 }) {
   let stage: InstalledDeliveryDiagnosticStage = 'public_cut';
   try {

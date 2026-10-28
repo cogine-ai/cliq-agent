@@ -27,7 +27,7 @@ import { decodeVerifierSpec } from '../../../src/state/verifier-artifacts.js';
 import { loadVerifierPolicy, planVerifierRequest, verifierOperationId } from '../../../src/state/verifier-policy.js';
 import { verifierCheckpointId, verifierResultItemId, type VerifierProgress } from '../../../src/state/verifier-recovery.js';
 import { planVerifierRepair } from '../../../src/state/verifier-repair.js';
-import { assertInstalledVerifierRetirement, readInstalledVerifierInputs, type InstalledVerifierRetirementPhase } from './installed-verifier-evidence.js';
+import { assertInstalledVerifierRetirement, readInstalledVerifierInputs, type InstalledVerifierRetirementPhase, type InstalledVerifierOwnerHistoryReader } from './installed-verifier-evidence.js';
 
 type CaseKind = 'required_pass' | 'required_repair' | 'advisory_failure' | 'required_timeout';
 type ProcessIdentity = { role: 'namespace_init' | 'monitor' | 'subreaper'; pid: number; startTicks: string };
@@ -65,7 +65,7 @@ const comparePath = (left: { path: string }, right: { path: string }) => Buffer.
  * workspace bytes, argv, environment values or untrusted decoder messages. */
 export async function assertInstalledVerifierOutcome(input: {
   cut: Record<string, any>; sessionCut: Record<string, any>; readCas: (ref: string) => Promise<Buffer>;
-  readOwnerHistory: () => Promise<readonly StateOwnerRecordV1[]>;
+  readOwnerHistory: InstalledVerifierOwnerHistoryReader;
   caseKind: CaseKind; expectedFiles: readonly { path: string; before: string; after: string }[]; principalId: string;
   expectedGit?: true;
 }): Promise<InstalledVerifierOutcome> {

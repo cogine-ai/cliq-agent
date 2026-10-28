@@ -13699,3 +13699,24 @@ carrier, workload and before/after provenance checks remain mandatory for both
 views. Unknown failures remain refusals. The report uses the explicit
 `cliq-native-callback-lifecycle-v2` format; prior v1 reports and their failures are
 not reinterpreted as passing qualification. New Linux evidence is required.
+
+#### First-submit diagnostic binding after an early busy observation (2026-10-28)
+
+An optional pre-client owner-history read can encounter a real SQLite exclusive
+writer while reading `PRAGMA user_version`. Its fixed `owner_history_schema`
+stage identifies the attempted read, not a schema-mismatch diagnosis. Failure
+produces no complete owner cut or process binding and its original fixed stage
+is retained without inspecting arbitrary exception text.
+
+Before the first Session/source/Run submission, the installed journey may reuse
+its complete original owner-history cut already obtained within the unchanged
+five-second readiness budget. Only the original signed selected Supervisor's
+complete actual image, retained process identity, actual PID/start token and
+unchanged unit invocation can establish the live diagnostic binding. This
+fallback opens no additional owner-history transaction, resets no deadline and
+cannot reconstruct provenance after a failure. A failed recheck keeps the
+binding absent; original PID absence still does not mean the server joined.
+All publication/assembly journal bounds, full bytes, secret scanning, original
+Stop2 assertions and qualification results remain unchanged. This correction
+restores diagnosis of the original submit30 failure; it is not a production
+latency fix or proof that the delayed-volume campaign now passes.

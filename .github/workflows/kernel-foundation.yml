@@ -1007,6 +1007,7 @@ jobs:
           name: native-guest-verifier-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ steps.guest.outputs.report_root }}/guest-extractor-report.json
+            ${{ steps.guest.outputs.report_root }}/guest-preparing-git-report.json
             ${{ steps.guest.outputs.report_root }}/guest-verifier-report.json
             ${{ steps.guest.outputs.report_root }}/guest-campaign-failure.json
           if-no-files-found: warn

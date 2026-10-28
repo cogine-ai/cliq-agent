@@ -100,6 +100,42 @@ test('a missing original binding reports only the fixed local failed stage befor
   for (const field of literal) assert.equal(field.initializer.getText(parsed), 'storeBindingFailureStage');
 });
 
+test('first-submit diagnostics can bind the original ready cut after an early busy read without manufacturing a source', async () => {
+  const { parsed, nodes } = await journeySource();
+  const fallback = nodes.find((node): node is ts.IfStatement => ts.isIfStatement(node) &&
+    node.expression.getText(parsed) === 'storeFailureDiagnostics && !storeFailureBinding');
+  assert(fallback, 'the original complete readiness cut must remain usable after the early optional history read failed');
+  const body = fallback.thenStatement.getText(parsed);
+  const ready = nodes.find((node): node is ts.VariableDeclaration => ts.isVariableDeclaration(node) &&
+    node.name.getText(parsed) === 'originalOwner');
+  assert(ready?.initializer && ts.isAwaitExpression(ready.initializer));
+  assert.equal(ready.initializer.expression.getText(parsed), 'waitForInstalledOwnerHistory(recipe.stateRoot, readinessBy)');
+  assert(ready.end < fallback.pos);
+  const sessions = nodes.filter((node): node is ts.CallExpression => ts.isCallExpression(node) &&
+    node.expression.getText(parsed) === 'request' && node.arguments[0]?.getText(parsed).includes("method: 'session.create'"));
+  assert(sessions.length > 0 && sessions.every(node => fallback.end < node.pos),
+    'every original Session and source producer must follow this actual live binding attempt');
+  assert(body.includes('originalOwner.owners[0]!'));
+  assert(!/inspectInstalledOwnerHistory|waitForInstalledOwnerHistory|DatabaseSync|readCas|readInstalledOwnerHistory/u.test(body),
+    'the already acquired SQL cut is reused without another history transaction or a new readiness budget');
+  assert(body.includes('const actual = await qualifyInstalledOwnerProcess('));
+  for (const field of ['stateRoot: recipe.stateRoot', 'uid: ledger.uid', 'pid, selectedImage: installedImage', 'imageDigest: entry.digest',
+    "'linux-proc-start-ticks:' + await fixtureProcess(pid, ledger.uid)", 'actual.processStartToken',
+    'same.MainPID, supervisorBefore.MainPID', 'same.InvocationID, supervisorBefore.InvocationID']) assert(body.includes(field));
+  const assignment = nodes.find((node): node is ts.BinaryExpression => ts.isBinaryExpression(node) &&
+    node.left.getText(parsed) === 'storeFailureBinding' && fallback.pos < node.pos && node.end < fallback.end);
+  assert(assignment && assignment.right.getText(parsed).startsWith('Object.freeze('));
+  assert(body.indexOf('await qualifyInstalledOwnerProcess(') < body.indexOf('storeFailureBinding =') &&
+    body.indexOf('same.InvocationID, supervisorBefore.InvocationID') < body.indexOf('storeFailureBinding ='));
+  for (const field of ['pid, processStartToken: actual.processStartToken', 'invocationId: supervisorBefore.InvocationID!', 'windowOpenedAt: Date.now()'])
+    assert(assignment.right.getText(parsed).includes(field));
+  const caught = nodes.find((node): node is ts.CatchClause => ts.isCatchClause(node) && fallback.pos < node.pos && node.end < fallback.end);
+  assert(caught && !caught.variableDeclaration && caught.block.statements.length === 0,
+    'a failed live recheck retains absence and the original fixed failed-stage observation without inspecting an error');
+  assert(!body.includes('storeBindingFailureStage =') && !body.includes('serverAuthenticationBinding =') &&
+    !body.includes('originalServerJoined') && !body.includes('originalPidObservedAbsent'));
+});
+
 test('the independent reader accepts only original-sender complete numeric prefix records, never reconstructed windows', async () => {
   const readers = await import('./installed-store-diagnostic-journal.js');
   const read = Reflect.get(readers, 'readInstalledAssemblyWorkJournal') as typeof readers.readInstalledAssemblyWorkJournal;

@@ -15,6 +15,7 @@ import { decodeSourceManifest, decodeWorkspaceEntries } from '../../../src/state
 import { decodeDeliveryTerminalProjectionEvidence } from '../../../src/kernel/publication.js';
 import { decodeRunResult } from '../../../src/state/result-artifacts.js';
 import { assertInstalledDeliveryOutcome, assertInstalledDeliveryVerifier } from './installed-delivery-result.js';
+import type { InstalledVerifierOwnerHistoryReader } from './installed-verifier-evidence.js';
 import type { InstalledDeliveryVerifierRetirementIdentity } from './installed-delivery-result.js';
 import type { InstalledWorkerRetirementBinding, InstalledVerifierParentRetirementBinding, inspectInstalledVerifierParentRetirement } from './installed-worker-lease.js';
 import { assertInstalledPublicationStopResult, type InstalledPublicationStopResult } from './installed-publication-stop-result.js';
@@ -29,7 +30,7 @@ type Context = {
   createSource(kind: 'publish' | 'merge' | 'cancel' | 'git' | 'git_merge'): Promise<Source>;
   send(request: Record<string, unknown>, timeout?: number): Promise<Response>;
   readRetainedArtifact(ref: string): Promise<Buffer>; downloadPublicArtifact(ref: string): Promise<Buffer>;
-  readOwnerHistory(): Promise<readonly StateOwnerRecordV1[]>;
+  readOwnerHistory: InstalledVerifierOwnerHistoryReader;
   nextId(): string; uid: number; gid: number;
   assertRunWorkersRetired(runId: string, observedLaunchIds: readonly string[], publicationRetirement?: InstalledWorkerRetirementBinding | null,
     verifierParentRetirement?: InstalledVerifierParentRetirementBinding): Promise<number>;

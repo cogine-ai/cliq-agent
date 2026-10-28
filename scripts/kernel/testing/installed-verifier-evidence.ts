@@ -16,13 +16,26 @@ import { decodeVerifierCommand, decodeVerifierEnvironment, decodeVerifierSpec } 
 import { planVerifierRequest } from '../../../src/state/verifier-policy.js';
 import { verifierCheckpointId } from '../../../src/state/verifier-recovery.js';
 import { supervisorInspectorIdentity } from '../../../src/state/supervisor-inspector.js';
+import type { InstalledOwnerHistoryReadStage } from './installed-read-control.js';
 
 export type InstalledVerifierProcessIdentity = { role: 'namespace_init' | 'monitor' | 'subreaper'; pid: number; startTicks: string };
 export type InstalledVerifierRetirementIdentity = { opId: string; attempt: number; containmentRef: string; deathEvidenceRef: string;
   namespaceInitStartToken: string; subreaperStartToken: string; processes: InstalledVerifierProcessIdentity[] };
 export type InstalledVerifierRetirementPhase = 'verifier_retirement_request' | 'verifier_retirement_source' | 'verifier_retirement_projection' |
   'verifier_retirement_launch' | 'verifier_retirement_child' | 'verifier_retirement_parent' | 'verifier_retirement_inspector' |
+  'verifier_retirement_inspector_assembly' | 'verifier_retirement_inspector_bundle' | 'verifier_retirement_inspector_history' |
+  'verifier_retirement_inspector_history_open' | 'verifier_retirement_inspector_history_snapshot' | 'verifier_retirement_inspector_history_schema' |
+  'verifier_retirement_inspector_history_rows' | 'verifier_retirement_inspector_history_records' | 'verifier_retirement_inspector_history_fence' |
+  'verifier_retirement_inspector_history_commit' | 'verifier_retirement_inspector_owners' | 'verifier_retirement_inspector_identity' |
+  'verifier_retirement_inspector_binding' | 'verifier_retirement_inspector_claim' | 'verifier_retirement_inspector_process' |
+  'verifier_retirement_inspector_lock' | 'verifier_retirement_inspector_root' | 'verifier_retirement_inspector_acquisition' |
+  'verifier_retirement_inspector_digests' | 'verifier_retirement_inspector_fields' |
   'verifier_retirement_processes' | 'verifier_retirement_output';
+export type InstalledVerifierOwnerHistoryReader = (observe?: (stage: InstalledOwnerHistoryReadStage) => void) => Promise<readonly StateOwnerRecordV1[]>;
+const ownerHistoryPhases = Object.freeze({ open: 'verifier_retirement_inspector_history_open', snapshot: 'verifier_retirement_inspector_history_snapshot',
+  schema: 'verifier_retirement_inspector_history_schema', rows: 'verifier_retirement_inspector_history_rows',
+  records: 'verifier_retirement_inspector_history_records', fence: 'verifier_retirement_inspector_history_fence',
+  commit: 'verifier_retirement_inspector_history_commit' } as const satisfies Record<InstalledOwnerHistoryReadStage, InstalledVerifierRetirementPhase>);
 type Reader = (ref: string) => Promise<Buffer>;
 const check = (value: unknown): void => { if (!value) throw new Error('installed verifier evidence differs'); };
 const same = (left: unknown, right: unknown) => check(canonicalSha256(left) === canonicalSha256(right));
@@ -107,7 +120,7 @@ export async function assertInstalledVerifierRetirement(input: {
   run: Pick<Run, 'id' | 'deadlineAt'>; checkpoints: readonly Checkpoint[];
   prepared: Record<string, any>; claim: Record<string, any>; terminal: Record<string, any>;
   requestContext: any; measurement: Record<string, any>; readRetainedArtifact: Reader;
-  readOwnerHistory: () => Promise<readonly StateOwnerRecordV1[]>;
+  readOwnerHistory: InstalledVerifierOwnerHistoryReader;
 }, observe?: (phase: InstalledVerifierRetirementPhase) => void) {
   const phase = (value: InstalledVerifierRetirementPhase) => { try { observe?.(value); } catch { /* Optional fixed-data diagnosis only. */ } };
   try {
@@ -176,27 +189,46 @@ export async function assertInstalledVerifierRetirement(input: {
     same(parentDeath.owner, { kind: 'worker_activation', runId: run.id, intendedLeaseEpoch: claim.leaseEpoch, workerLaunchId: launch.owner.workerLaunchId });
     validateMatchingWorkerDeath(await object(snapshot.quiescenceEvidenceRef!), parentDeath, 'installed verifier parent retirement');
     phase('verifier_retirement_inspector');
-    const assembly = decodeRetainedRunAssembly(await object(requestContext.assemblyRef)), bundle = await object(assembly.runtime.runtimeBundleRef);
+    phase('verifier_retirement_inspector_assembly');
+    const assembly = decodeRetainedRunAssembly(await object(requestContext.assemblyRef));
+    phase('verifier_retirement_inspector_bundle');
+    const bundle = await object(assembly.runtime.runtimeBundleRef);
     check(bundle.manifestDigest === assembly.runtime.runtimeBundleManifestDigest && Array.isArray(bundle.entries));
     const supervisors = bundle.entries.filter((entry: any) => entry.role === 'supervisor'); check(supervisors.length === 1);
-    const values = await input.readOwnerHistory(); check(Array.isArray(values) && values.length > 0 && values.length <= 1000);
+    phase('verifier_retirement_inspector_history');
+    const values = await input.readOwnerHistory(stage => {
+      if (typeof stage === 'string' && Object.hasOwn(ownerHistoryPhases, stage)) phase(ownerHistoryPhases[stage]);
+    });
+    phase('verifier_retirement_inspector_owners');
+    check(Array.isArray(values) && values.length > 0 && values.length <= 1000);
     const owners = values.map(value => decodeStateOwnerRecord(value));
     owners.forEach((owner, index) => check(owner.ownerEpoch === index + 1 && (index === owners.length - 1 || owner.state === 'terminal')));
     for (const observation of [death, parentDeath]) {
+      phase('verifier_retirement_inspector_identity');
       const inspector = await object(observation.inspectorIdentityRef), owner = owners.find(value => value.ownerEpoch === inspector.stateOwnerEpoch);
       check(owner); if (!owner) throw new Error('missing original verifier inspector owner');
       same(inspector, supervisorInspectorIdentity(owner));
+      phase('verifier_retirement_inspector_binding');
       check(inspector.identityDigest === observation.inspectorIdentityDigest && owner.supervisorInstanceId === observation.inspectorSupervisorInstanceId &&
         owner.runtimeBundleRef === assembly.runtime.runtimeBundleRef && owner.runtimeBundleManifestDigest === assembly.runtime.runtimeBundleManifestDigest &&
         owner.supervisorEntryId === supervisors[0].entryId && owner.supervisorEntryVersion === supervisors[0].version &&
         owner.supervisorExecutableDigest === supervisors[0].digest && supervisors[0].executable === true && owner.acquiredAt <= observation.observedAt &&
         (owner.state !== 'terminal' || owner.releasedAt >= observation.observedAt));
+      phase('verifier_retirement_inspector_claim');
       if (observation === death) check(owner.ownerEpoch === claim.stateOwnerEpoch && owner.supervisorInstanceId === claim.supervisorInstanceId);
-      const process = decodePlatformProcessIdentity(await object(owner.processIdentityRef)), lock = decodeStateLockIdentity(await object(owner.stateLockIdentityRef));
-      const root = decodeStateRootIdentity(await object(lock.stateRootIdentityRef)), acquired = decodeStateOwnerAcquisitionEvidence(await object(owner.acquisitionEvidenceRef));
+      phase('verifier_retirement_inspector_process');
+      const process = decodePlatformProcessIdentity(await object(owner.processIdentityRef));
+      phase('verifier_retirement_inspector_lock');
+      const lock = decodeStateLockIdentity(await object(owner.stateLockIdentityRef));
+      phase('verifier_retirement_inspector_root');
+      const root = decodeStateRootIdentity(await object(lock.stateRootIdentityRef));
+      phase('verifier_retirement_inspector_acquisition');
+      const acquired = decodeStateOwnerAcquisitionEvidence(await object(owner.acquisitionEvidenceRef));
+      phase('verifier_retirement_inspector_digests');
       check(process.identityDigest === owner.processIdentityDigest && process.executableImageDigest === owner.supervisorExecutableDigest &&
         lock.identityDigest === owner.stateLockIdentityDigest && lock.stateRootIdentityDigest === root.identityDigest &&
         process.ownerUid === root.ownerUid && lock.ownerUid === root.ownerUid && lock.deviceId === root.deviceId && acquired.evidenceDigest === owner.acquisitionEvidenceDigest);
+      phase('verifier_retirement_inspector_fields');
       for (const field of ['ownerEpoch', 'supervisorInstanceId', 'runtimeBundleRef', 'runtimeBundleManifestDigest', 'processIdentityRef',
         'processIdentityDigest', 'stateLockIdentityRef', 'stateLockIdentityDigest', 'instanceNonceDigest', 'acquiredAt'] as const) check(acquired[field] === owner[field]);
     }
