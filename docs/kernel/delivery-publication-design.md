@@ -697,3 +697,46 @@ closed cancellation summary records that distinction; a parent-domain success
 cannot claim the precise in-flight child cut. Reconnect/restart repeat both the
 retained graph and actual process checks. Data regressions do not qualify Linux;
 the original run471 cancellation report remains failed pending a new real run.
+
+
+### Run-bound publication timing observation V2
+
+`CLIQ_PUBLICATION_WORK_V2` is a separate diagnostic window. V1 first-arrival
+phase markers and the process-wide Stop phase keep their original meanings;
+neither can be reinterpreted as a Run-bound span or completion. Each V2 span
+names the actual owning Run, a fixed work label, and integer milliseconds from
+that Run's first subscribed observation on the process monotonic clock. Its
+end is recorded only after the original awaited promise fulfills or rejects.
+Cancellation remains pending until that promise's existing resource join has
+settled. A fulfilled promise is not physical publication, native retirement,
+Stop, or qualification proof.
+
+The fixed labels cover fresh publication recovery, completion recovery,
+settlement preparation/settlement and the readonly received-result preparation
+and settlement. The two original result-recovery label producers (result
+preparation and terminal retirement) are also named by their actual Run, so a
+process-wide Stop phase cannot silently be attributed to a different Run.
+No full read, per-use identity/currentness check, SQL gate,
+original producer or resource join is removed or reused. No timer or keepalive
+is added. Ordinary images without the trusted diagnostic subscriber sample no
+clock and allocate no Run tracker. The producer tracks at most 64 observed Run
+origins; observations after that diagnostic-only bound may be unavailable.
+
+The existing trusted sink retains only two Run windows and six issued spans
+per Run. It evicts completed spans explicitly, reports their discarded count,
+and never turns a pending span into a completion on phase change. Its Stop and
+exit snapshots each encode at most 16 closed logical rows (255 bytes each)
+in one JSON marker line of at most 4096 bytes. The whole new window is at most
+two physical lines/8192 bytes, inside the unchanged journal
+80-line/256-KiB cap and five-second read. Both snapshots use synchronous bounded
+writes under the original Stop deadline. An abnormal exit may omit the exit
+snapshot. Missing or malformed V2 data cannot discard V1 diagnostics.
+
+The report's new `publicationWorkDiagnostics(profile=publication_work_v2)`
+retains the complete snapshots after original PID absence and image/start/uid/
+invocation checks and the existing secret scan. A Delivery terminal-deadline
+Run id is copied only from that actual public cut and is attached to an
+observed window only if the same Run is present. Otherwise the field records
+`terminal_deadline_run_not_observed`. These observations do not upgrade any
+old report, alter its original bytes or satisfy Linux acceptance. The original
+90/5/2/30-second gates and all sixteen full runtime reads remain unchanged.

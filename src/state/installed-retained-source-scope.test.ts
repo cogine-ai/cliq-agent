@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmod, cp, mkdtemp, readFile, readdir, readlink, realpath, rename, rm, writeFile, type FileHandle } from 'node:fs/promises';
+import { chmod, cp, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rename, rm, writeFile, type FileHandle } from 'node:fs/promises';
 import type { BigIntStats } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -17,7 +17,8 @@ type DataScope = { root(name: string): Promise<DataDirectory>; directory(parent:
   file(parent: DataDirectory, name: string, mode: number, bytes?: number, digest?: string): Promise<DataFile>;
   verifyDiscard(files: readonly DataFile[]): Promise<void>; assertMetadata(files: readonly DataFile[]): void; close(): Promise<void> };
 type DataApi = { Scope: new () => DataScope;
-  verifyRetainedSourcePackage(scope: DataScope, root: DataDirectory, keys: readonly ReleaseTrustKey[], ref: string): Promise<{ manifest: DataFile; bundle: RuntimeBundleManifest }>;
+  verifyRetainedSourcePackage(scope: DataScope, root: DataDirectory, keys: readonly ReleaseTrustKey[], ref: string,
+    casRoot: DataDirectory): Promise<{ manifest: DataFile; bundle: RuntimeBundleManifest; delegatedPaths: ReadonlySet<string> }>;
   writeInstallerOnlyPackage(root: string, prompt?: undefined, supervisor?: Buffer): Promise<{ bundle: RuntimeBundleManifest; releaseKeys: ReleaseTrustKey[] }> };
 
 /** Compile the actual private data helpers, with only test exports appended.
@@ -70,11 +71,14 @@ export async function exerciseRetainedScopeData(directory: string, api: DataApi)
   const scope = new api.Scope();
   try {
     const root = await scope.root(directory), original = await scope.directory(root, 'source-package');
+    await mkdir(path.join(directory, 'cas'), { mode: 0o700 });
+    const casRoot = await scope.directory(root, 'cas');
     const currentBytes = Buffer.from('owned current read data, never executed\n');
     await writeFile(path.join(directory, 'current-image'), currentBytes, { mode: 0o500 });
     const current = await scope.file(root, 'current-image', 0o500, currentBytes.length, sha256Bytes(currentBytes));
-    const source = await api.verifyRetainedSourcePackage(scope, original, signed.releaseKeys, canonicalSha256(signed.bundle));
-    assert.deepEqual(Object.keys(source).sort(), ['bundle', 'manifest']);
+    const source = await api.verifyRetainedSourcePackage(scope, original, signed.releaseKeys, canonicalSha256(signed.bundle), casRoot);
+    assert.deepEqual(Object.keys(source).sort(), ['bundle', 'delegatedPaths', 'manifest']);
+    assert.deepEqual([...source.delegatedPaths], [], 'this original executable-only package delegates no CAS data');
     const image = path.join(packageRoot, 'supervisor');
     assert(!(await descriptorTargets()).includes(image), 'historical executable FD must be actually closed before returning metadata');
     assert((await descriptorTargets()).includes(path.join(packageRoot, 'manifest.json')), 'the source manifest stays held by the current metadata scope');
@@ -82,25 +86,25 @@ export async function exerciseRetainedScopeData(directory: string, api: DataApi)
     // These are the actual unchanged current read bodies. The old executable
     // is not a selected execution image, and no old successful hash is reused.
     await scope.verifyDiscard([current, source.manifest]);
-    await assert.rejects(api.verifyRetainedSourcePackage(scope, original, signed.releaseKeys, canonicalSha256(signed.bundle)),
+    await assert.rejects(api.verifyRetainedSourcePackage(scope, original, signed.releaseKeys, canonicalSha256(signed.bundle), casRoot),
       { code: 'ARTIFACT_MISMATCH' });
     assert(!(await descriptorTargets()).includes(image), 'failed fresh historical reads also close their original image descriptors');
     await chmod(image, 0o600); await writeFile(image, originalBytes); await chmod(image, 0o500);
-    await api.verifyRetainedSourcePackage(scope, original, signed.releaseKeys, canonicalSha256(signed.bundle));
+    await api.verifyRetainedSourcePackage(scope, original, signed.releaseKeys, canonicalSha256(signed.bundle), casRoot);
     await writeFile(path.join(packageRoot, 'unsigned'), 'owned unknown data', { mode: 0o400 });
-    await assert.rejects(api.verifyRetainedSourcePackage(scope, original, signed.releaseKeys, canonicalSha256(signed.bundle)),
+    await assert.rejects(api.verifyRetainedSourcePackage(scope, original, signed.releaseKeys, canonicalSha256(signed.bundle), casRoot),
       { code: 'ARTIFACT_MISMATCH' });
     await rm(path.join(packageRoot, 'unsigned'));
     const worker = signed.bundle.entries.find(entry => entry.role === 'worker')!.relativePath;
     const workerBytes = await readFile(path.join(packageRoot, worker));
     await rm(path.join(packageRoot, worker));
-    await assert.rejects(api.verifyRetainedSourcePackage(scope, original, signed.releaseKeys, canonicalSha256(signed.bundle)),
+    await assert.rejects(api.verifyRetainedSourcePackage(scope, original, signed.releaseKeys, canonicalSha256(signed.bundle), casRoot),
       error => (error as NodeJS.ErrnoException).code === 'ENOENT');
     await writeFile(path.join(packageRoot, worker), workerBytes, { mode: 0o500 });
     // A byte-identical replacement of the captured source directory cannot
     // become that held object. This fails before any replacement is read.
     const moved = path.join(directory, 'moved-source'); await rename(packageRoot, moved); await cp(moved, packageRoot, { recursive: true });
-    await assert.rejects(api.verifyRetainedSourcePackage(scope, original, signed.releaseKeys, canonicalSha256(signed.bundle)),
+    await assert.rejects(api.verifyRetainedSourcePackage(scope, original, signed.releaseKeys, canonicalSha256(signed.bundle), casRoot),
       { code: 'ARTIFACT_MISMATCH' });
     assert.throws(() => scope.assertMetadata([current]), { code: 'ARTIFACT_MISMATCH' },
       'current metadata still refuses replacement of the original retained source directory');

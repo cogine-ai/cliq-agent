@@ -1,3 +1,4 @@
+import { observeInstalledPublicationWork } from './installed-run-diagnostics.js';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting, parseCanonicalTime, sha256Bytes } from '../kernel/identity.js';
 import { decodeDeliveryCaptureTopology, decodeDeliveryTerminalProjectionEvidence, decodePublicationPathProgressItem, decodePublicationPathResultItem, decodePublicationProof,
@@ -328,6 +329,7 @@ export async function handoffOwnedReconciledPublicationResult(driver: SqliteDriv
 export async function prepareOwnedPublicationReceivedResult(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
   execution: unknown, task: DeliveryPublicationReceivedTask): Promise<OwnedPublicationReceivedResult> {
   const resources = assertDeliveryPublicationReceivedExecution(driver, owner, execution, task, artifacts);
+  return observeInstalledPublicationWork(resources.runId, 'publication_received_prepare', async () => {
   const reads = artifacts.withReadSignal(resources.signal);
   const { cut, prefix } = await readDeliveryPublicationClosure(driver, reads, resources.runId), entry = prefix.forward.at(-1);
   if (cut.run.revision !== resources.expectedRunRevision || cut.run.status !== 'queued' || cut.run.nextStep !== 'delivery' ||
@@ -342,6 +344,7 @@ export async function prepareOwnedPublicationReceivedResult(driver: SqliteDriver
   const token = Object.freeze({ [receivedBrand]: true as const });
   receivedResults.set(token, { driver, artifacts, owner, execution, task, resources, cut, prefix, entry, receipt });
   return token;
+  });
 }
 
 function originalReceived(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,

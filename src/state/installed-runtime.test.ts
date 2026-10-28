@@ -19,7 +19,7 @@ import { assertInstalledManagerObservationAvailable, createInstalledRuntime, loa
   readInstalledRuntimeObservation, retainInstalledSourceGitRecipe, type InstalledRuntimeObservation, type HeldInstalledRuntime, withHeldInstalledRuntime } from './installed-runtime.js';
 import { STATE_OWNER_NATIVE_ENTRY_ID, STATE_OWNER_NATIVE_RELATIVE_PATH } from './native-owner.js';
 import { openInstalledLinuxWorkerLauncher } from '../sandbox/linux-worker.js';
-import { KernelStorageError } from './errors.js';
+import { KernelStorageError, ResourceRetirementError } from './errors.js';
 import { GUEST_EXTRACTOR_RECIPE } from '../sandbox/guest-toolchain.js';
 import { validateBundle, validateInstalledStructuredArtifacts } from './installed-artifacts.js';
 import { NPM_DATA_RECIPE } from '../sandbox/npm-data-image.js';
@@ -507,7 +507,7 @@ if (process.platform === 'linux') test('a status-side installed read can finish 
   }
 });
 
-if (process.platform === 'linux') test('installed work measurements count the real complete package and both independent guest copies without changing validation', async () => {
+if (process.platform === 'linux') test('installed work measurements count the complete package and one physical CAS guest per R without changing validation', async () => {
   const fixture = await realpath(await mkdtemp(path.join(os.tmpdir(), 'cliq-installed-work-')));
   const packageRoot = path.join(fixture, 'package'), stateRoot = path.join(fixture, 'state');
   const diagnostic = channel(INSTALLED_WORK_CHANNEL), observed: InstalledWorkSnapshot[] = [];
@@ -526,7 +526,10 @@ if (process.platform === 'linux') test('installed work measurements count the re
     let casBytes = 0;
     for (const name of await readdir(casRoot)) casBytes += (await readFile(path.join(casRoot, name))).length;
     const supervisorBytes = signed.contents.find(entry => entry.role === 'supervisor')!.bytes.length;
-    const revalidationBytes = activeBytes + packageBytes + supervisorBytes + casBytes;
+    // Package verification still reads every declared entry, including the
+    // delegated image. R retains that original CAS holder in signed.entries;
+    // casFiles contains only the remaining mirrors, never a second image FD.
+    const revalidationBytes = activeBytes + packageBytes + supervisorBytes + casBytes - image.length;
     diagnostic.subscribe(subscriber);
     selected = await runtime.openSelected(stateRoot);
     const opened = observed.at(-1)!;
@@ -541,6 +544,27 @@ if (process.platform === 'linux') test('installed work measurements count the re
   } finally {
     diagnostic.unsubscribe(subscriber); await selected?.close(); await rm(fixture, { recursive: true, force: true });
   }
+});
+
+function exactSourceRecipeCorruption(reference: string) {
+  return (error: unknown) => error instanceof Error && error.name === 'Error' &&
+    error.message === `artifact ${reference} is corrupt` && !('code' in error);
+}
+
+test('source recipe corruption expectations match the actual CAS guard and refuse unrelated storage failures', async t => {
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'cliq-recipe-corrupt-guard-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const cas = new ContentAddressedStore(root), bytes = Buffer.from('complete ordinary CAS recipe data\n'), ref = await cas.publish(bytes);
+  const filename = path.join(root, ref); await chmod(filename, 0o600);
+  const changed = Buffer.from(bytes); changed[changed.length - 1] ^= 1;
+  await writeFile(filename, changed); await chmod(filename, 0o400);
+  const matches = exactSourceRecipeCorruption(ref);
+  await assert.rejects(cas.read(ref), matches);
+  assert.deepEqual(await readFile(filename), changed, 'the rejected CAS bytes remain unrepaired');
+  for (const error of [Object.assign(new Error(`artifact ${ref} is corrupt`), { code: 'ENOSPC' }),
+    new ResourceRetirementError(`artifact ${ref} is corrupt`, new Error('negative retirement report')),
+    new Error(`artifact ${'0'.repeat(64)} is corrupt`), new Error('unrelated read failure'),
+    { name: 'Error', message: `artifact ${ref} is corrupt` }]) assert.equal(matches(error), false);
 });
 
 if (process.platform === 'linux') test('source preparation retains its two original fixed recipe members as inert CAS data through the held installation', async () => {
@@ -572,11 +596,12 @@ if (process.platform === 'linux') test('source preparation retains its two origi
     try { await writer.write(Buffer.from([inspector.bytes[0]! ^ 1]), 0, 1, 0); await writer.sync(); }
     finally { await writer.close(); }
     await chmod(audit, 0o400);
-    await assert.rejects(retainInstalledSourceGitRecipe(selected), { code: 'ARTIFACT_MISMATCH' });
+    await assert.rejects(retainInstalledSourceGitRecipe(selected), exactSourceRecipeCorruption(inspectorRef));
     assert.notDeepEqual(await readFile(audit), inspector.bytes, 'the old corrupted CAS object is not overwritten from a current host file');
+    await assert.rejects(new ContentAddressedStore(path.join(stateRoot, KERNEL_CAS_DIRECTORY)).read(inspectorRef), exactSourceRecipeCorruption(inspectorRef));
     const closedSelection = selected;
     await selected.close(); selected = undefined;
-    await assert.rejects(retainInstalledSourceGitRecipe(closedSelection), { code: 'ARTIFACT_MISMATCH' });
+    assert.throws(() => retainInstalledSourceGitRecipe(closedSelection), { code: 'ARTIFACT_MISMATCH' });
     await assert.rejects(lstat(path.join(stateRoot, KERNEL_DATABASE_FILENAME)), { code: 'ENOENT' });
     assert.throws(() => retainInstalledSourceGitRecipe({} as HeldInstalledRuntime), { code: 'ARTIFACT_MISMATCH' });
   } finally { await selected?.close(); await rm(fixture, { recursive: true, force: true }); }
@@ -665,7 +690,9 @@ if (process.platform === 'linux') test('successive installed borrows re-read eve
   try {
     const packageRoot = path.join(fixture, 'package'), stateRoot = path.join(fixture, 'state');
     const image = Buffer.alloc(8 * 1_048_576 + 17, 0x61);
-    const signed = await writeInstallerOnlyPackage(packageRoot, undefined, undefined, image);
+    const controller = Buffer.alloc(8 * 1_048_576 + 43, 0x43);
+    const signed = await writeInstallerOnlyPackage(packageRoot, undefined, undefined, image,
+      undefined, undefined, undefined, controller);
     const runtime = createInstalledRuntime({ releaseKeys: signed.releaseKeys });
     await runtime.installInitial({ packageRoot, stateRoot });
     const imageInfo = await lstat(path.join(stateRoot, KERNEL_CAS_DIRECTORY, sha256Bytes(image)), { bigint: true });
@@ -799,7 +826,9 @@ if (process.platform === 'linux') for (const operation of ['borrow-close', 'obse
     selected = await runtime.openSelected(stateRoot);
     const completeBytes = observed!.revalidate.bytesRead - initialReadBase!;
     const imageRef = sha256Bytes(image), entry = signed.bundle.entries.find(value => value.digest === imageRef)!;
-    const filename = path.join(stateRoot, 'runtime/bundles', installation.bundleDigest, entry.relativePath);
+    const filename = path.join(stateRoot, KERNEL_CAS_DIRECTORY, imageRef);
+    assert.equal(entry.byteCount, image.length);
+    await assert.rejects(lstat(path.join(stateRoot, 'runtime/bundles', installation.bundleDigest, entry.relativePath)), { code: 'ENOENT' });
     const expected = await lstat(filename, { bigint: true });
     const probe = await open(filename, constants.O_RDONLY | constants.O_NOFOLLOW);
     try { prototype = Object.getPrototypeOf(probe); }
@@ -874,6 +903,56 @@ if (process.platform === 'linux') for (const operation of ['borrow-close', 'obse
   }
 });
 
+// Test rendezvous only: these values identify issued tasks, never authorize a
+// Worker, descriptor or joined receipt. A wrong pool width must reach the exact
+// width assertion rather than wait for a shutdown the test itself withholds.
+function allDispatchedWorkersClosing<T>(workers: ReadonlySet<T>, closings: readonly { worker: T }[]): boolean {
+  return workers.size > 0 && [...workers].every(worker => closings.some(closing => closing.worker === worker));
+}
+
+test('hash shutdown rendezvous follows the actual dispatched identities before the exact pool-width assertion', () => {
+  const first = Symbol('first issued task'), second = Symbol('second issued task');
+  const dispatched = new Set([first, second]), closing = [{ worker: first }];
+  assert.equal(allDispatchedWorkersClosing(dispatched, closing), false);
+  assert.equal(allDispatchedWorkersClosing(dispatched, [{ worker: first }, { worker: first }]), false);
+  closing.push({ worker: second });
+  assert.equal(allDispatchedWorkersClosing(dispatched, closing), true);
+  assert.throws(() => assert.equal(dispatched.size, 4), { code: 'ERR_ASSERTION' },
+    'a two-task regression reaches the unchanged exact four-worker refusal');
+  const third = Symbol('third issued task'), fourth = Symbol('fourth issued task');
+  dispatched.add(third); dispatched.add(fourth);
+  assert.equal(allDispatchedWorkersClosing(dispatched, closing), false);
+  closing.push({ worker: third }, { worker: fourth });
+  assert.equal(allDispatchedWorkersClosing(dispatched, closing), true);
+  assert.equal(allDispatchedWorkersClosing(new Set<symbol>(), []), false);
+});
+
+test('opaque signed hash fixtures declare two or four independent large holders without a second guest copy', async t => {
+  const fixture = await realpath(await mkdtemp(path.join(os.tmpdir(), 'cliq-hash-width-data-')));
+  t.after(() => rm(fixture, { recursive: true, force: true }));
+  for (const laneCount of [2, 4] as const) {
+    const image = Buffer.alloc(8 * 1_048_576 + 17, 0x61); image[image.length - 1] = 0x7a;
+    const supervisor = laneCount === 4 ? Buffer.alloc(8 * 1_048_576 + 31, 0x73) : undefined;
+    const controller = Buffer.alloc(8 * 1_048_576 + 43, 0x43);
+    const signed = await writeInstallerOnlyPackage(path.join(fixture, String(laneCount)), undefined, supervisor, image,
+      undefined, undefined, undefined, controller);
+    const entry = signed.bundle.entries.find(value => value.entryId === 'linux_worker_controller')!;
+    assert.equal(entry.byteCount, controller.length); assert.equal(entry.digest, sha256Bytes(controller));
+    assert.notEqual(entry.digest, sha256Bytes(image));
+    const largeEntries = signed.bundle.entries.filter(value => value.byteCount >= 8_388_608);
+    // Metadata arithmetic only, not actual Linux pool/FD qualification: the
+    // selected read has one entry per signed member plus its separate bootstrap.
+    const bootstrap = signed.bundle.entries.find(value => value.role === 'supervisor')!;
+    const largeCount = largeEntries.length + Number(bootstrap.byteCount >= 8_388_608);
+    assert.equal(largeCount, laneCount);
+    assert.equal(largeEntries.filter(value => value.digest === sha256Bytes(image)).length, 1);
+    for (const value of largeEntries) {
+      const bytes = await readFile(path.join(fixture, String(laneCount), value.relativePath));
+      assert.equal(bytes.length, value.byteCount); assert.equal(sha256Bytes(bytes), value.digest);
+    }
+  }
+});
+
 if (process.platform === 'linux') for (const laneCount of [2, 4] as const) test(`discard batches join all ${laneCount} actual hash Workers before original image FDs close`, async () => {
   const fixture = await realpath(await mkdtemp(path.join(os.tmpdir(), 'cliq-installed-hash-exit-')));
   let selected: HeldInstalledRuntime | undefined, reopened: HeldInstalledRuntime | undefined;
@@ -896,7 +975,9 @@ if (process.platform === 'linux') for (const laneCount of [2, 4] as const) test(
     const packageRoot = path.join(fixture, 'package'), stateRoot = path.join(fixture, 'state');
     const image = Buffer.alloc(8 * 1_048_576 + 17, 0x61); image[image.length - 1] = 0x7a;
     const supervisor = laneCount === 4 ? Buffer.alloc(8 * 1_048_576 + 31, 0x73) : undefined;
-    const signed = await writeInstallerOnlyPackage(packageRoot, undefined, supervisor, image);
+    const controller = Buffer.alloc(8 * 1_048_576 + 43, 0x43);
+    const signed = await writeInstallerOnlyPackage(packageRoot, undefined, supervisor, image,
+      undefined, undefined, undefined, controller);
     const runtime = createInstalledRuntime({ releaseKeys: signed.releaseKeys });
     await runtime.installInitial({ packageRoot, stateRoot });
     const probe = await open(path.join(stateRoot, 'runtime/active.json'), constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -931,7 +1012,7 @@ if (process.platform === 'linux') for (const laneCount of [2, 4] as const) test(
       if (armed && workers.has(this) && message?.kind === 'close') {
         // Real hashing has completed; delay only JS delivery of shutdown to
         // the original Worker. This does not claim physically blocked I/O.
-        delayed.push({ worker: this, args }); if (delayed.length === laneCount) ready(); return;
+        delayed.push({ worker: this, args }); if (allDispatchedWorkersClosing(workers, delayed)) ready(); return;
       }
       return Reflect.apply(postDescriptor.value, this, args);
     } });
@@ -960,7 +1041,9 @@ if (process.platform === 'linux') for (const fault of ['nonplain', 'unsolicited_
     try {
       const packageRoot = path.join(fixture, 'package'), stateRoot = path.join(fixture, 'state');
       const image = Buffer.alloc(8 * 1_048_576 + 17, 0x61); image[image.length - 1] = 0x7a;
-      const signed = await writeInstallerOnlyPackage(packageRoot, undefined, undefined, image);
+      const controller = Buffer.alloc(8 * 1_048_576 + 43, 0x43);
+      const signed = await writeInstallerOnlyPackage(packageRoot, undefined, undefined, image,
+        undefined, undefined, undefined, controller);
       const runtime = createInstalledRuntime({ releaseKeys: signed.releaseKeys });
       await runtime.installInitial({ packageRoot, stateRoot }); selected = await runtime.openSelected(stateRoot);
       Object.defineProperty(Worker.prototype, 'postMessage', { ...descriptor, value: function (this: Worker, ...args: unknown[]) {
@@ -1006,7 +1089,10 @@ if (process.platform === 'linux') for (const fault of ['idle_exit', 'idle_exit_c
     let selected: HeldInstalledRuntime | undefined, packet: unknown, original: Worker | undefined;
     try {
       const packageRoot = path.join(fixture, 'package'), stateRoot = path.join(fixture, 'state');
-      const signed = await writeInstallerOnlyPackage(packageRoot, undefined, undefined, Buffer.alloc(8 * 1_048_576 + 17, 0x61));
+      const image = Buffer.alloc(8 * 1_048_576 + 17, 0x61);
+      const controller = Buffer.alloc(8 * 1_048_576 + 43, 0x43);
+      const signed = await writeInstallerOnlyPackage(packageRoot, undefined, undefined, image,
+        undefined, undefined, undefined, controller);
       const runtime = createInstalledRuntime({ releaseKeys: signed.releaseKeys });
       await runtime.installInitial({ packageRoot, stateRoot });
       Object.defineProperty(Worker.prototype, 'postMessage', { ...descriptor, value: function (this: Worker, ...args: unknown[]) {
@@ -1018,7 +1104,8 @@ if (process.platform === 'linux') for (const fault of ['idle_exit', 'idle_exit_c
         return Reflect.apply(descriptor.value, this, args);
       } });
       selected = await runtime.openSelected(stateRoot);
-      assert(original && packet); assert.equal(workers.size, 2); assert.equal(exited.size, 0);
+      assert(original && packet, 'the two-large signed fixture must dispatch a real Worker and receive its original packet');
+      assert.equal(workers.size, 2); assert.equal(exited.size, 0);
       if (fault !== 'stale_reply') await original.terminate();
       else {
         // Replay only an already returned inert packet from this real Worker.
@@ -1105,7 +1192,8 @@ if (process.platform === 'linux') test('initial installation streams a complete 
     const installed = await runtime.installInitial({ packageRoot, stateRoot });
     const imageRef = sha256Bytes(image);
     const entry = signed.bundle.entries.find(entry => entry.digest === imageRef)!;
-    const installedFile = path.join(stateRoot, 'runtime/bundles', installed.bundleDigest, entry.relativePath);
+    const installedFile = path.join(stateRoot, KERNEL_CAS_DIRECTORY, imageRef);
+    await assert.rejects(lstat(path.join(stateRoot, 'runtime/bundles', installed.bundleDigest, entry.relativePath)), { code: 'ENOENT' });
     const cas = new ContentAddressedStore(path.join(stateRoot, KERNEL_CAS_DIRECTORY));
     assert.deepEqual(await readFile(installedFile), image);
     assert.deepEqual(await cas.verify(imageRef), { ref: imageRef, byteLength: image.length });

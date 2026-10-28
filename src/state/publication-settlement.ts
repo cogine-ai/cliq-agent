@@ -1,3 +1,4 @@
+import { observeInstalledPublicationWork } from './installed-run-diagnostics.js';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { decodePublicationPathResultItem, type PublicationPathResultItem } from '../kernel/publication.js';
 import type { BudgetSettlementV1, ContinuationItem, InvocationJournalEntry, RecoveryClosureV1, Run, RunFrontier } from '../kernel/types.js';
@@ -532,7 +533,7 @@ export async function preparePublicationSettlement(driver: SqliteDriver, artifac
       const expected = request.expectedRunRevision;
       if (!Number.isSafeInteger(expected) || expected < 1) throw new TypeError('publication settlement requires one exact expected revision');
       if (binding.settling) return Promise.reject(new KernelStorageError('STATE_TRANSITION_INVALID', 'original publication settlement is already in flight'));
-      binding.settling = (async () => {
+      binding.settling = observeInstalledPublicationWork(binding.input.runId, 'publication_settlement', () => (async () => {
         const selection = await select(binding), retained = selection.prefix.entries.get(binding.input.opId)!;
         if (retained.result) {
           if (retained.result.item.evidenceRef !== completion.evidenceRef || retained.result.item.outcome !==
@@ -560,12 +561,13 @@ export async function preparePublicationSettlement(driver: SqliteDriver, artifac
         if (selection.cut.run.revision !== expected) throw new KernelStorageError('REVISION_CONFLICT', 'publication result Run revision changed');
         binding.selection = selection;
         return immutableSnapshot(await binding.reducer.settle(expected));
-      })().finally(() => { binding.settling = undefined; });
+      })().finally(() => { binding.settling = undefined; }));
       return binding.settling;
     } }) };
   // Complete the original retained read before exposing even this nonsemantic
   // adapter. No structural successful fixture can supply this selection.
-  binding.selection = await select(binding);
+  binding.selection = await observeInstalledPublicationWork(binding.input.runId, 'publication_settlement_prepare',
+    () => select(binding));
   bindings.set(input.publicationOwner, binding);
   return binding.facade;
 }
@@ -718,7 +720,7 @@ export async function preparePublicationReceivedSettlement(driver: SqliteDriver,
       const expected = request.expectedRunRevision;
       if (!Number.isSafeInteger(expected) || expected < 1) throw new TypeError('received settlement requires one exact expected revision');
       if (binding.settling) return Promise.reject(new KernelStorageError('STATE_TRANSITION_INVALID', 'original received settlement is already in flight'));
-      binding.settling = (async () => {
+      binding.settling = observeInstalledPublicationWork(binding.input.runId, 'publication_received_settlement', () => (async () => {
         for (let retry = 0; ; retry++) try {
           const selection = await selectReceived(binding), retained = selection.prefix.entries.get(binding.input.opId)!;
           if (retained.result && retained.result.item.outcome !== 'unknown') {
@@ -752,10 +754,11 @@ export async function preparePublicationReceivedSettlement(driver: SqliteDriver,
           const finalization = binding.finalization; binding.finalization = undefined;
           if (finalization) closeOwnedPublicationFinalization(driver, owner, finalization);
         }
-      })().finally(() => { binding.settling = undefined; });
+      })().finally(() => { binding.settling = undefined; }));
       return binding.settling;
     } }) };
-  binding.selection = await selectReceived(binding);
+  binding.selection = await observeInstalledPublicationWork(binding.input.runId, 'publication_received_settlement_prepare',
+    () => selectReceived(binding));
   bindings.set(input.receivedResult, binding); return binding.facade;
 }
 

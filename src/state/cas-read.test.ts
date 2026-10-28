@@ -134,7 +134,17 @@ for (const mutation of ['mtime', 'ctime', 'mode', 'links'] as const) test('whole
         if (!changed) {
           changed = true;
           if (mutation === 'mtime') await utimes(filename, new Date(), new Date(Date.now() + 2000));
-          if (mutation === 'ctime') { await chmod(filename, 0o600); await chmod(filename, 0o400); }
+          if (mutation === 'ctime') {
+            const before = await handle.stat(); let after = before;
+            // ext4 can retain the exact same ctime even across chmod600/400
+            // in one filesystem tick. Require a real observable mutation;
+            // no timer, clock override or unchanged observation is accepted.
+            for (let attempt = 0; attempt < 1024 && after.ctimeMs === before.ctimeMs; attempt++) {
+              await chmod(filename, 0o600); await chmod(filename, 0o400); after = await handle.stat();
+            }
+            assert.notEqual(after.ctimeMs, before.ctimeMs, 'ctime fixture did not advance its actual timestamp');
+            assert.equal(after.mode, before.mode); assert.equal(after.mtimeMs, before.mtimeMs);
+          }
           if (mutation === 'mode') await chmod(filename, 0o600);
           if (mutation === 'links') await link(filename, second);
         }
@@ -143,6 +153,10 @@ for (const mutation of ['mtime', 'ctime', 'mode', 'links'] as const) test('whole
     }
     return handle;
   }) as typeof fs.open;
-  try { await assert.rejects(cas.read(ref), /changed|invalid mode|link count/); assert.equal(changed, true); }
+  const expected = mutation === 'ctime'
+    ? (error: unknown) => error instanceof Error && error.name === 'Error' &&
+      error.message === `artifact ${ref} changed while it was streamed` && !('code' in error)
+    : /changed|invalid mode|link count/;
+  try { await assert.rejects(cas.read(ref), expected); assert.equal(changed, true); }
   finally { fs.open = actualOpen; if (mutation === 'links') await unlink(second).catch(() => {}); await rm(root, { recursive: true, force: true }); }
 });

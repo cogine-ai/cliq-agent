@@ -36,7 +36,7 @@ import { immutableSnapshot } from '../model/immutable.js';
 import { exactKeys, policyProfile, SINGLE_CAS_STREAMS_LAYOUT, type ReleaseTrustKey, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { ARTIFACT_CHUNK_BYTES, ContentAddressedStore } from './cas.js';
 import { publishInstalledCasRoots } from './installed-cas-roots.js';
-import type { InstalledRuntimeUpgradePhase } from './installed-upgrade-diagnostics.js';
+import { installedUpgradeRetirementFailure, type InstalledRuntimeUpgradePhase } from './installed-upgrade-diagnostics.js';
 import { joinResourceOperations, KernelStorageError, ResourceRetirementError } from './errors.js';
 import { decodeSandboxRootProfile } from './execution-closure.js';
 import { decodeControlChannel, decodeLocalPrincipalIdentity, decodePlatformProcessIdentity, decodeStateRootIdentity } from './decoders.js';
@@ -2921,7 +2921,17 @@ export async function stageInstalledRuntimeUpgrade(selected: HeldInstalledRuntim
       const held: HeldInstalledRuntimeUpgrade = Object.freeze({ close() {
         if (this !== held) return Promise.reject(new TypeError('invalid upgrade stage receiver'));
         closed = true;
-        if (activeStop) stopCancellation ??= activeStop.cancelAndJoin();
+        if (activeStop && !stopCancellation) {
+          const failedJoin = (error: unknown): never => {
+            const failure = installedUpgradeRetirementFailure(error) ??
+              new ResourceRetirementError('installed upgrade native stop cancellation did not join', error);
+            rememberRetirement(failure); throw failure;
+          };
+          // Cancellation is issued synchronously, and even a synchronous
+          // native rejection becomes the one retained/joined close producer.
+          try { stopCancellation = activeStop.cancelAndJoin().catch(failedJoin); }
+          catch (error) { stopCancellation = Promise.reject(error).catch(failedJoin); }
+        }
         return closePromise ??= (async () => { await joinResourceOperations([running?.then(() => undefined, error => {
           if (error instanceof ResourceRetirementError) throw error; }), stopCancellation]); await scope.close(); })().catch(error => {
             if (error instanceof ResourceRetirementError) { unretiredInstalledUpgradeStages.add(held); rememberRetirement(error); }
@@ -2935,11 +2945,13 @@ export async function stageInstalledRuntimeUpgrade(selected: HeldInstalledRuntim
           noteUpgradePhase(observePhase, 'stop_original');
           return stopPromise ??= (async () => {
             if (!transactionActive || !credential) mismatch('upgrade stop requires its original credential exclusion');
+            noteUpgradePhase(observePhase, 'stop_observe_original');
             const { observeInstalledCredentialSupervisor } = await import('./installed-services.js');
             const observed = await observeInstalledCredentialSupervisor(selected, false);
             if (observed.stateRoot !== stateRoot || observed.uid !== Number(state.info.uid) ||
                 observed.supervisor.MainPID !== supervisorBirth.pid || observed.keeper.MainPID !== originalKeeper.pid)
               mismatch('upgrade service observation is not the original Supervisor and keeper');
+            noteUpgradePhase(observePhase, 'stop_load_platform');
             const platformEntry = staged.bundle.entries.find(entry => entry.entryId === 'linux_credential_platform');
             const platformFile = platformEntry && staged.entries.get(platformEntry.entryId);
             if (!platformEntry || !platformFile || platformEntry.role !== 'platform_helper' || !platformEntry.executable ||
@@ -2955,21 +2967,29 @@ export async function stageInstalledRuntimeUpgrade(selected: HeldInstalledRuntim
               if (unit.ActiveState !== 'active' || unit.SubState !== 'running' || unit.MainPID !== unit.ExecMainPID ||
                   !/^[0-9a-f]{32}$/u.test(unit.InvocationID)) mismatch('upgrade stop has no actual original running unit');
               const started = performance.now();
+              noteUpgradePhase(observePhase, role === 'supervisor' ? 'stop_supervisor_request' : 'stop_keeper_request');
               activeStop = platform.stopInstalledUpgradeUnit({ rootIdentityDigest: stateRootIdentityFromDescriptor(stateRoot, {
                 deviceId: String(state.info.dev), fileId: String(state.info.ino), ownerUid: Number(state.info.uid)
               }).identityDigest, role, pid: process.pid, processStartToken: process.processStartToken, invocationId: unit.InvocationID });
               if (typeof activeStop.cancelAndJoin !== 'function') throw new ResourceRetirementError('upgrade stop has no original native cancellation/join owner', undefined);
-              const result = decodeInstalledUpgradeStopObservation(await activeStop); activeStop = undefined;
+              const raw = await activeStop;
+              noteUpgradePhase(observePhase, role === 'supervisor' ? 'stop_supervisor_decode' : 'stop_keeper_decode');
+              const result = decodeInstalledUpgradeStopObservation(raw); activeStop = undefined;
               if (canonicalSha256(result.bus) !== canonicalSha256(observed.bus) || canonicalSha256(result.manager) !== canonicalSha256(observed.manager) ||
                   result.unit?.Id !== unit.Id || result.unit.ActiveState !== 'inactive' || result.unit.SubState !== 'dead' ||
                   result.unit.MainPID !== 0 || result.unit.ControlPID !== 0) mismatch('upgrade stop lost its original manager or fixed unit');
+              noteUpgradePhase(observePhase, role === 'supervisor' ? 'stop_supervisor_death' : 'stop_keeper_death');
               while (credential.observeProducerLifetime(process.pid, observed.uid, process.processStartToken) !== 'dead') {
                 if (performance.now() - started >= 2000) mismatch('upgrade original process did not die within the fixed two-second stop limit');
                 await upgradeDelay(5); assertAlive();
               }
               if (performance.now() - started >= 2000) mismatch('upgrade actual stop/join exceeded the fixed two-second limit');
             }
-          })();
+          })().catch(error => {
+            const failure = installedUpgradeRetirementFailure(error);
+            if (failure) { rememberRetirement(failure); throw failure; }
+            throw error;
+          });
         },
         run<T>(operation: () => Promise<T>): Promise<T> {
           assertAlive(); if (running) return Promise.reject(new TypeError('upgrade stage already has its sole transaction'));
@@ -2977,8 +2997,21 @@ export async function stageInstalledRuntimeUpgrade(selected: HeldInstalledRuntim
           const pending = withHeldCredentialNativeScope(native, { image: nativeFile.handle, root: state.handle,
             rootIdentity: state.info, stateRoot }, async originalCredential => {
               credential = originalCredential; transactionActive = true;
-              try { return await operation(); }
-              finally { transactionActive = false; credential = undefined; }
+              try {
+                let result!: T;
+                let failed = false, failure: unknown;
+                try { result = await operation(); }
+                catch (error) { failed = true; failure = error; }
+                // A concurrent close owns this exact native cancellation.
+                // Join it before the credential scope can consider release;
+                // its sticky RRE takes precedence over an ordinary failure.
+                if (stopCancellation) try {
+                  await joinResourceOperations([failed ? Promise.reject(failure) : Promise.resolve(), stopCancellation]);
+                } catch (error) { healthy(); throw error; }
+                healthy();
+                if (failed) throw failure;
+                return result;
+              } finally { transactionActive = false; credential = undefined; }
             });
           running = pending; return pending;
         },

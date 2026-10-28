@@ -1,3 +1,4 @@
+import { observeInstalledPublicationWork } from './installed-run-diagnostics.js';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting, identityHash } from '../kernel/identity.js';
 import type { FinalCandidateItem, RunResult, VerificationClosureV1 } from '../kernel/result.js';
@@ -70,7 +71,8 @@ export function loadRunResult(driver: SqliteDriver, artifacts: ArtifactCatalog, 
   async function load() {
     assertActiveStateOwner(driver, owner);
     phase('result_recovery');
-    const cut = await readRecoveryClosure(driver, artifacts, runId, value => phase(`result_recovery_${value}`));
+    const cut = await observeInstalledPublicationWork(runId, 'result_recovery',
+      () => readRecoveryClosure(driver, artifacts, runId, value => phase(`result_recovery_${value}`)));
     if (cut.run.specRef !== admitted.specRef || cut.run.createdAt !== admitted.createdAt || cut.run.deadlineAt !== admitted.deadlineAt ||
         canonicalSha256(cut.runSpec) !== canonicalSha256(spec)) throw new TypeError('result authority no longer belongs to this Run');
     phase('result_basis');

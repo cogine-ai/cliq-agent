@@ -67,7 +67,7 @@ import { decodeSecretServiceObservation, decodeRetainedSecretServiceObservation,
 import { ensureInstalledCredentialSupervisor, type CredentialFinalizeRequest } from './installed-credential-client.js';
 import { noteInstalledCredentialPhase } from './installed-diagnostics.js';
 import { beginInstalledApplyDiagnostic, beginInstalledSubmitDiagnostic, beginInstalledSchedulerDiagnostic, installedRunDiagnosticsSubscribed,
-  noteInstalledStoreStop, noteInstalledPublicationPhase, type InstalledApplyDiagnostic } from './installed-run-diagnostics.js';
+  noteInstalledStoreStop, noteInstalledPublicationPhase, observeInstalledPublicationWork, type InstalledApplyDiagnostic } from './installed-run-diagnostics.js';
 import { ContentAddressedStore } from './cas.js';
 import { openLocalControlListener, type AuthenticatedControlIdentity, type LocalControlConnection, type LocalControlListener } from './control-channel.js';
 import { readControl, type ReadControlRequest } from './control-read.js';
@@ -2394,10 +2394,11 @@ export class StateStore {
     // releasing its original installation/launcher image owners; failures keep
     // both the cache and StateOwner, never masquerading as positive cleanup.
     this.installedRunPhases.set(runId, 'terminal_retirement');
-    await this.ownInstalledAdmission(signal => readRecoveryClosure(this.driver, this.artifacts.withReadSignal(signal), runId,
-      phase => {
-        if (this.installedRunPhases.has(runId)) this.installedRunPhases.set(runId, `result_recovery_${phase}`);
-      }));
+    await observeInstalledPublicationWork(runId, 'terminal_retirement_recovery', () =>
+      this.ownInstalledAdmission(signal => readRecoveryClosure(this.driver, this.artifacts.withReadSignal(signal), runId,
+        phase => {
+          if (this.installedRunPhases.has(runId)) this.installedRunPhases.set(runId, `result_recovery_${phase}`);
+        })));
     const opening = this.executions.get(runId);
     if (opening) {
       try { await (await opening).close(); }

@@ -255,7 +255,15 @@ test('installed model material remains inside the original full admission and ca
   const parsed = ts.createSourceFile('installed-run.ts', source, ts.ScriptTarget.Latest, true);
   const material = parsed.statements.find((node): node is ts.FunctionDeclaration => ts.isFunctionDeclaration(node) && node.name?.text === 'materialFor');
   assert(material?.body);
-  assert(material.body.getText(parsed).includes('await readRetainedVerifierToolchain(artifacts,'));
+  const compact = (node: ts.Node) => node.getText(parsed).replace(/\s+/gu, '');
+  assert(compact(material.body).includes('awaitreadInstalledRunDataClosures(artifacts,assembly,endpoint.ownerPrincipalId,installed,signal)'));
+  const closures = parsed.statements.find((node): node is ts.FunctionDeclaration => ts.isFunctionDeclaration(node) && node.name?.text === 'readInstalledRunDataClosures');
+  assert(closures?.body);
+  const closureSource = compact(closures.body);
+  assert(closureSource.includes('signal?artifacts.withReadSignal(signal):artifacts'));
+  assert(closureSource.includes('awaitreadRetainedVerifierToolchain(reads,{bundle:runtime.bundle,releaseKeys:runtime.releaseKeys,guestToolchainManifestRef:assembly.runtime.guestToolchainManifestRef,signal})'));
+  assert(closureSource.includes('selected.manifest.manifestDigest!==assembly.runtime.guestToolchainManifestDigest'));
+  assert(closureSource.includes('reads.assertReadActive();signal?.throwIfAborted();'));
   assert(material.body.getText(parsed).includes('signal?.throwIfAborted();'));
   assert(assembly.includes('sandboxResources: request.sandboxResources, signal'));
 });

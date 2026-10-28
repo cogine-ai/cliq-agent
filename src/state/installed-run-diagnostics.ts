@@ -1,5 +1,6 @@
 import { channel } from 'node:diagnostics_channel';
 import { types } from 'node:util';
+import { performance } from 'node:perf_hooks';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
 import { beginInstalledAssemblySubmit, noteInstalledAssemblyStop } from './installed-work-diagnostics.js';
 
@@ -177,4 +178,40 @@ export function noteInstalledStoreStop(input: unknown): void {
       retainedFailures: counts[3], globalFailure: fields.globalFailure!.value,
       phases: Object.freeze(Object.fromEntries([...multiplicities].sort(([left], [right]) => left.localeCompare(right)))) }));
   } catch { /* A diagnostic cannot prevent synchronous revocation. */ }
+}
+
+/** V2 observations name the actual owning Run and an awaited work span.
+ * They remain timing data, never a completion/physical/retirement proof. */
+export const INSTALLED_PUBLICATION_WORK_V2 = Object.freeze(['publication_recovery', 'publication_completion_recovery',
+  'publication_settlement_prepare', 'publication_settlement', 'publication_received_prepare',
+  'publication_received_settlement_prepare', 'publication_received_settlement',
+  'terminal_retirement_recovery', 'result_recovery'] as const);
+export type InstalledPublicationWorkV2 = typeof INSTALLED_PUBLICATION_WORK_V2[number];
+const publicationWork: ReadonlySet<string> = new Set(INSTALLED_PUBLICATION_WORK_V2);
+const publicationRuns = new Map<string, { origin: number; next: number; active: number }>();
+
+/** The original promise settles before its end observation, including rejection
+ * after cancellation/join. No timer, retry, exception inspection or new work is
+ * introduced. Without the trusted subscriber, no clock or tracker is touched. */
+export async function observeInstalledPublicationWork<T>(runId: string, work: InstalledPublicationWorkV2,
+  read: () => Promise<T>): Promise<T> {
+  if (!diagnostic.hasSubscribers || typeof runId !== 'string' || !/^[A-Za-z0-9_-]{43}$/u.test(runId) ||
+      typeof work !== 'string' || !publicationWork.has(work)) return read();
+  let run = publicationRuns.get(runId);
+  if (!run) {
+    if (publicationRuns.size === 64) return read();
+    run = { origin: performance.now(), next: 0, active: 0 }; publicationRuns.set(runId, run);
+  }
+  if (run.next === Number.MAX_SAFE_INTEGER) return read();
+  const span = ++run.next, origin = run.origin;
+  run.active++;
+  const publish = (event: 'begin' | 'fulfilled' | 'rejected') => {
+    try { diagnostic.publish(Object.freeze({ kind: 'publication_work_v2', runId, span, work, event,
+      origin, elapsedMs: Math.max(0, Math.floor(performance.now() - origin)) })); }
+    catch { /* A diagnostic cannot change the original operation. */ }
+  };
+  publish('begin');
+  try { const value = await read(); publish('fulfilled'); return value; }
+  catch (error) { publish('rejected'); throw error; }
+  finally { run.active--; }
 }

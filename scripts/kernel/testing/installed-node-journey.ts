@@ -58,7 +58,7 @@ import { publicationEnvelopeLocations } from '../../../src/state/delivery-public
 import type { InstalledPublicationStopResult } from './installed-publication-stop-result.js';
 import { projectInstalledRunProgress } from './installed-run-progress.js';
 import { projectInstalledUnitStopObservation } from './installed-unit-stop-observation.js';
-import { readInstalledAssemblyWorkJournal, readInstalledPublicationStageJournal, readInstalledStoreDiagnosticJournal, readInstalledStoreStopPhaseJournal } from './installed-store-diagnostic-journal.js';
+import { readInstalledAssemblyWorkJournal, readInstalledPublicationStageJournal, readInstalledPublicationWorkJournal, readInstalledStoreDiagnosticJournal, readInstalledStoreStopPhaseJournal } from './installed-store-diagnostic-journal.js';
 import { installedReadOnlyGitCall, assertInstalledToolsOutcome } from './installed-tools-result.js';
 import { INSTALLED_SKILLS_PROFILE, installedSkillIds, installedBundledSkill, installedToolsAndSkillsCalls,
   createInstalledSkillSources, assertInstalledSkillPrompt, assertInstalledSkillsOutcome } from './installed-skills.js';
@@ -202,6 +202,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
   assert.equal(process.geteuid!(), 0);
   const ledger = await readLedger(filename), recipe = ledger.runJourney;
   const installedClientDriver = path.join(recipe.buildFixture, 'installed-control-client-driver.mjs');
+  let publicationDeadlineRunId: string | undefined;
   const report: Record<string, any> = { diagnosticOnly: true, qualified: false, phase: 'installation',
     ordinaryGitFixtureProfile: journeyKind === 'verifier' ? 'verifier_four_plus_ordinary_git_v1' : 'delivery_three_plus_two_git_v1',
     scope: 'actual signed Linux installed Node required/advisory verifier, repair and exhausted timeout, fixed ordinary tools, frozen three-scope skills and CAS-only resource reads, explicit approval/input and original process interruption using public v1 UDS and owned HTTPS; not actual provider, release or complete I2/I1 fault qualification',
@@ -1447,6 +1448,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         createSource: kind => createSource(`delivery_${kind}`),
         onTerminalDeadline: (caseKind, cut) => {
           report.runProgressAtTerminalDeadline = projectInstalledRunProgress({ caseKind, cut, postCount });
+          const id: unknown = cut.snapshot?.run?.id;
+          if (typeof id === 'string' && /^[A-Za-z0-9_-]{43}$/u.test(id)) publicationDeadlineRunId = id;
         },
         send: async (body, timeout = 5000) => {
           assert(client); const response = await client.send(body, timeout);
@@ -2070,6 +2073,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
             // exit. It cannot satisfy the successful Stop/join assertions
             // above, nor manufacture a Store exit summary or Run attribution.
             if (storeFailureDiagnostics && (primary || originalStopFailed)) {
+              report.publicationWorkDiagnostics = { diagnosticOnly: true, profile: 'publication_work_v2', kind: 'unavailable',
+                reason: storeFailureBinding ? 'original_lifetime_missing' : 'preexisting_binding_missing' };
               report.publicationStageDiagnostics = { diagnosticOnly: true, kind: 'unavailable',
                 reason: storeFailureBinding ? 'original_lifetime_missing' : 'preexisting_binding_missing' };
               report.originalStopPhaseDiagnostic = { diagnosticOnly: true, kind: 'unavailable',
@@ -2078,12 +2083,13 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
                   storeFailureBinding.invocationId === before[0]!.InvocationID) try {
                 assertRetained();
                 await assert.rejects(lstat('/proc/' + storeFailureBinding.pid), { code: 'ENOENT' });
+                report.publicationWorkDiagnostics = { diagnosticOnly: true, profile: 'publication_work_v2', kind: 'unavailable', reason: 'journal_unavailable' };
                 report.publicationStageDiagnostics = { diagnosticOnly: true, kind: 'unavailable', reason: 'journal_unavailable' };
                 report.originalStopPhaseDiagnostic = { diagnosticOnly: true, kind: 'unavailable', reason: 'journal_unavailable' };
                 const until = Date.now(), logBy = until + 5000;
                 const timestamp = (value: number) => '@' + Math.floor(value / 1000) + '.' + String(value % 1000).padStart(3, '0');
                 const log = spawnSync('/usr/bin/journalctl', ['--no-pager', '--all', '--no-tail', '--output=json', '--boot=0',
-                  '--grep=^(CLIQ_PUBLICATION_STAGE_V1:|CLIQ_STORE_STOP_PHASE_V1:)',
+                  '--grep=^(CLIQ_PUBLICATION_STAGE_V1:|CLIQ_STORE_STOP_PHASE_V1:|CLIQ_PUBLICATION_WORK_V2:)',
                   `--since=${timestamp(storeFailureBinding.windowOpenedAt)}`, `--until=${timestamp(until)}`,
                   `_UID=${ledger.uid}`, `_PID=${storeFailureBinding.pid}`, '_TRANSPORT=stdout',
                   `_SYSTEMD_INVOCATION_ID=${storeFailureBinding.invocationId}`],
@@ -2102,6 +2108,20 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
                 if (stopPhase) report.originalStopPhaseDiagnostic = { diagnosticOnly: true, kind: 'observed',
                   source: 'actual_absent_original_supervisor_journal', preexistingProcessStartAndFullImageBound: true,
                   originalInvocationBound: true, originalPidObservedAbsent: true, phase: stopPhase.phase };
+                try {
+                  const work = readInstalledPublicationWorkJournal(text,
+                    { uid: ledger.uid, pid: storeFailureBinding.pid, invocationId: storeFailureBinding.invocationId });
+                  assert(Date.now() < logBy, 'actual publication work journal exceeded five seconds'); assertRetained();
+                  if (work && (!publicationDeadlineRunId || work.snapshots.some(snapshot =>
+                    snapshot.runs.some(run => run.runId === publicationDeadlineRunId))))
+                    report.publicationWorkDiagnostics = { diagnosticOnly: true, kind: 'observed', ...work,
+                      source: 'actual_absent_original_supervisor_journal', preexistingProcessStartAndFullImageBound: true,
+                      originalInvocationBound: true, originalPidObservedAbsent: true,
+                      ...(publicationDeadlineRunId ? { terminalDeadlineRunId: publicationDeadlineRunId } : {}) };
+                  else if (work && publicationDeadlineRunId) report.publicationWorkDiagnostics = { diagnosticOnly: true,
+                    profile: 'publication_work_v2', kind: 'unavailable', reason: 'terminal_deadline_run_not_observed' };
+                } catch { /* V2 absence/malformed data cannot discard V1 observations or the original failure. */ }
+
               } catch { /* Preserve every original failure; a marker is never resource-join evidence. */ }
             }
           }

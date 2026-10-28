@@ -1,3 +1,4 @@
+import { observeInstalledPublicationWork } from './installed-run-diagnostics.js';
 import { randomBytes } from 'node:crypto';
 import { setImmediate as yieldToLoop } from 'node:timers/promises';
 import { planCanonicalArtifact, type PlannedArtifact } from '../kernel/artifact-plan.js';
@@ -887,7 +888,8 @@ async function publishObservation(held: PhysicalBinding, key: string, value: Pub
 }
 async function completionCut(held: Binding): Promise<RecoveryClosureV1> {
   assertActiveStateOwner(held.driver, held.owner);
-  const cut = await readRecoveryClosure(held.driver, held.artifacts, held.run.id);
+  const cut = await observeInstalledPublicationWork(held.run.id, 'publication_completion_recovery',
+    () => readRecoveryClosure(held.driver, held.artifacts, held.run.id));
   const baseline = held.afterProgressRun ?? held.run;
   const stable = (run: Run) => {
     const { revision: _revision, updatedAt: _updatedAt, cancelRequested: _cancel, stopIntentRef: _stop, ...rest } = run;

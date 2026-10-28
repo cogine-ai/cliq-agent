@@ -543,7 +543,7 @@ test('arrival diagnostics can observe an abnormal original exit without satisfyi
   const body = journey.slice(originalThrow, joined);
   assert.match(body, /finally \{[\s\S]*storeFailureDiagnostics && \(primary \|\| originalStopFailed\)/u);
   assert.match(body, /String\(storeFailureBinding.pid\) === before\[0\]!.MainPID &&\s*storeFailureBinding.invocationId === before\[0\]!.InvocationID/u);
-  assert(body.includes("'--grep=^(CLIQ_PUBLICATION_STAGE_V1:|CLIQ_STORE_STOP_PHASE_V1:)'"));
+  assert(body.includes("'--grep=^(CLIQ_PUBLICATION_STAGE_V1:|CLIQ_STORE_STOP_PHASE_V1:|CLIQ_PUBLICATION_WORK_V2:)'"));
   assert(body.includes('timeout: 5000, killSignal: \'SIGKILL\', maxBuffer: 256 * 1024'));
   assert(body.includes('scanBytes(log.stdout); scanBytes(log.stderr);'));
   assert(body.includes("source: 'actual_absent_original_supervisor_journal'"));
@@ -554,7 +554,8 @@ test('arrival diagnostics can observe an abnormal original exit without satisfyi
   assert.equal(body.match(/spawnSync\('\/usr\/bin\/journalctl'/gu)?.length, 1, 'both diagnostics reuse the same original bounded journal command');
   assert.equal(body.match(/scanBytes\(log\.stdout\); scanBytes\(log\.stderr\);/gu)?.length, 1);
   assert.equal(body.match(/new TextDecoder\('utf-8', \{ fatal: true \}\)\.decode\(log\.stdout\)/gu)?.length, 1);
-  assert.equal(body.match(/Date\.now\(\)/gu)?.length, 2, 'the original window sample and original deadline check remain the only clocks');
+  assert.equal(body.match(/Date\.now\(\)/gu)?.length, 3,
+    'the original window sample and deadline check remain; V2 rechecks that same unchanged deadline after its bounded decode');
   assert(!/report\.installedWritersJoined\s*=|scanner\.openStream\(/u.test(body), 'a phase is not resource-join evidence and creates no new scanner stream');
   assert(!/originalServerJoined: true|qualified: true|report\.storeFailureDiagnostics =/u.test(body), 'arrival data never upgrades exit-summary or outcome proof');
 });

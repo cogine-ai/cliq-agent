@@ -2831,3 +2831,48 @@ assertions, authentication, connection behavior, READY, restart and stop bounds
 remain unchanged; a diagnostic record is not physical join or qualification.
 The corresponding strict evidence consumer must accept only these additive
 closed variants while preserving every original report and secret-scan bound.
+
+The CI495 complete-HOME50 original-stop report still fails its initial
+`run.submit` request at 30,001 ms, before the publication target cut. Its exact
+report hash is `c80ea50e0403fef6fbc9eedcb375e340801c40fb83eb62c86625c3a7b02ec722`.
+The same original joined Supervisor observes `submit_assembly_material` at
+19,067 ms and `submit_assembly_final_check` at 24,147 ms. Between request and
+material, the cumulative counters add 21 complete runtime revalidations,
+16 file syncs and 28 root syncs. Their span deltas are cumulative work, not
+independent wall intervals that may be summed into a diagnosis. The eventual
+`LEASE_FENCED` occurs during close at final admission and does not identify the
+original slow operation.
+
+The local admission DAG candidate overlaps only independent original reads:
+verifier creation/current guest history with the selected model's original
+three-check borrow; the committed source-target read with the signed native
+loader's original before/after checks; and the complete retained instruction/guest data pair after a separate,
+fully joined skill-read stage. Catalog/price and detached-signature reads also
+join independent pairs. Every original revalidation remains on the same side
+of its guarded operation, including the outer checks before and after source
+and loader completion. No native root opens and no target is reserved before
+the complete associated group joins. No branch lends an authority WeakMap,
+mutable intermediate, cached digest, descriptor or result to another operation.
+
+The original three-branch candidate overlooked the skill reader's nested
+four-leaf `source.files` pool. That candidate and its evidence remain retained;
+its claimed three-leaf peak was incorrect. The correction completes skills as
+an independent serial stage, then joins only instruction and guest reads.
+The existing skill-file and tool-schema groups each retain four readers and
+fully join before the two-reader group; these stages never overlap or nest.
+The runtime discard executor remains its original process-wide one-MiB budget
+and fixed two/four lanes. It already retains that scratch while idle. CAS
+reader chunk bounds and original full reads/EOF/stats/closes are unchanged.
+The same signal reaches all branches; every issued read and loader joins,
+with a real retirement failure retaining priority over an ordinary refusal.
+Policy/verifier publication order, all original file syncs and four directory
+barriers, and the original final owner/channel/SQL authority remain unchanged.
+
+Real CAS/Ed25519 data regressions observe simultaneous original descriptors,
+join cancellation and a later close failure after an earlier integrity error,
+and re-read a four-MiB image before rejecting changed bytes on a second call.
+They neither execute the opaque image nor manufacture native authority. These
+local component and static wiring results do not establish a HOME50 speedup
+or Linux qualification. The unchanged real complete-HOME campaign must still
+pass 30-second submit, five-second READY and two-second Stop in the complete
+integrated cohort; no fixture, R, storage boundary or time limit is removed.

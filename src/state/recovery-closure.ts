@@ -1,3 +1,4 @@
+import { observeInstalledPublicationWork } from './installed-run-diagnostics.js';
 import { readChildAdmission } from './child-admission.js';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { assertArtifactRef, parseCanonicalTime } from '../kernel/identity.js';
@@ -649,10 +650,12 @@ export async function readDeliveryPublicationClosure(
   runId: string,
   onPhase?: (phase: RecoveryClosurePhase) => void
 ): Promise<{ cut: RecoveryClosureV1; prefix: PublicationPrefix }> {
-  const result = await readRecoveryProjection(driver, artifacts, runId, onPhase);
-  if (result.cut.runSpec.operation !== 'delivery' || !result.prefix)
-    throw new KernelStorageError('RECOVERY_REQUIRED', 'publication closure requires a delivery Run');
-  return { cut: result.cut, prefix: result.prefix };
+  return observeInstalledPublicationWork(runId, 'publication_recovery', async () => {
+    const result = await readRecoveryProjection(driver, artifacts, runId, onPhase);
+    if (result.cut.runSpec.operation !== 'delivery' || !result.prefix)
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'publication closure requires a delivery Run');
+    return { cut: result.cut, prefix: result.prefix };
+  });
 }
 
 async function readRecoveryProjection(

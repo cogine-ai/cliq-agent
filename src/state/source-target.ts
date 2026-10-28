@@ -14,7 +14,7 @@ import { readCanonicalArtifact } from './agent-context.js';
 import { assertCurrentControlFrame, validateControlChannelClosure, type AuthenticatedControlIdentity } from './control-channel.js';
 import { decodeFrozenIgnoreRules, decodeSourceManifest, decodeSourceProjection, decodeWorkspaceIdentity, decodeWorkspaceEntries } from './decoders.js';
 import { assertVerifiedDeliverySource, readRetainedVerifiedDeliverySource, type VerifiedDeliverySource } from './delivery-source-authority.js';
-import { KernelStorageError, ResourceRetirementError } from './errors.js';
+import { joinResourceOperations, KernelStorageError, ResourceRetirementError } from './errors.js';
 import { withHeldInstalledRuntime, type HeldInstalledRuntime } from './installed-runtime.js';
 import { decodeSandboxProfile } from './execution-closure.js';
 import { assertHeldWorkspaceRoot, heldWorkspaceRootPath, type HeldWorkspaceRoot } from './native-owner.js';
@@ -236,20 +236,27 @@ deliverySource?: VerifiedDeliverySource): Promise<VerifiedSourceInspectionTarget
         resources: wire.sandboxResources, allowScripts: wire.dependency.allowInstallScripts }, context.signal);
     }
     assertSupportedVerifierRequests(wire.verifiers, wire.policyMode);
-    if (wire.verifiers.length) await readVerifierRequestIdentities(driver, reads, owner, bootstrap, identity.principalId, wire.verifiers, undefined, context.signal);
     if (wire.registeredMcpServerIds.length) invalid('MCP admission authority is not yet implemented');
-  }
-  if (wire.method === 'run.submit' && wire.model.provider !== 'ollama') {
-    if (!context.selectedRuntime || wire.model.provider !== 'openai-compatible')
-      invalid('remote model admission requires the genuine installed fixed broker recipe');
-    await withHeldInstalledRuntime(context.selectedRuntime, async installed => {
-      await installed.revalidate(context.signal);
-      if (installed.bundleDigest !== canonicalSha256(bootstrap.bundle) ||
-          !installed.modelAuthority?.models.some(model => model.catalog.value.provider === wire.model.provider &&
-            model.catalog.value.model === wire.model.model && model.catalog.value.adapter.adapterId === 'openai-compatible-broker-v1' &&
-            model.catalog.value.adapter.version === '1')) invalid('remote model source capture lacks the selected signed model authority');
-      await installed.revalidate(context.signal);
-    }, context.signal);
+    // The original verifier history/current-image reads and selected model
+    // observation are independent. Both complete before any target can be
+    // reserved; each original before/after revalidation stays around its use.
+    await joinResourceOperations([
+      wire.verifiers.length ? readVerifierRequestIdentities(driver, reads, owner, bootstrap,
+        identity.principalId, wire.verifiers, undefined, context.signal) : Promise.resolve(),
+      (async () => {
+        if (wire.model.provider === 'ollama') return;
+        if (!context.selectedRuntime || wire.model.provider !== 'openai-compatible')
+          invalid('remote model admission requires the genuine installed fixed broker recipe');
+        await withHeldInstalledRuntime(context.selectedRuntime, async installed => {
+          await installed.revalidate(context.signal);
+          if (installed.bundleDigest !== canonicalSha256(bootstrap.bundle) ||
+              !installed.modelAuthority?.models.some(model => model.catalog.value.provider === wire.model.provider &&
+                model.catalog.value.model === wire.model.model && model.catalog.value.adapter.adapterId === 'openai-compatible-broker-v1' &&
+                model.catalog.value.adapter.version === '1')) invalid('remote model source capture lacks the selected signed model authority');
+          await installed.revalidate(context.signal);
+        }, context.signal);
+      })()
+    ]);
   }
   const workspace = decodeWorkspaceIdentity(await readCanonicalArtifact(reads, session.workspaceIdentityRef));
   if (workspace.kind !== 'live' || workspace.ownerPrincipalId !== identity.principalId || workspace.platform !== hostPlatform() ||

@@ -6,7 +6,7 @@ import { INSTALLED_ASSEMBLY_WORK_PHASES, type InstalledAssemblyWorkSnapshot } fr
 import { INSTALLED_APPLY_DIAGNOSTIC_STAGES, INSTALLED_AUTHORIZATION_DIAGNOSTIC_STAGES,
   INSTALLED_RUN_DIAGNOSTIC_ERROR_CLASSES, INSTALLED_RUN_DIAGNOSTIC_ERROR_CODES,
   INSTALLED_SCHEDULER_DIAGNOSTIC_ORIGINS, INSTALLED_SCHEDULER_DIAGNOSTIC_PHASES,
-  INSTALLED_PUBLICATION_DIAGNOSTIC_PHASES } from '../../../src/state/installed-run-diagnostics.js';
+  INSTALLED_PUBLICATION_DIAGNOSTIC_PHASES, INSTALLED_PUBLICATION_WORK_V2 } from '../../../src/state/installed-run-diagnostics.js';
 
 const stages: ReadonlySet<string> = new Set(INSTALLED_APPLY_DIAGNOSTIC_STAGES);
 const authorizationStages: ReadonlySet<string> = new Set(INSTALLED_AUTHORIZATION_DIAGNOSTIC_STAGES);
@@ -189,4 +189,70 @@ export function readInstalledAssemblyWorkJournal(text: string, expected: Origina
     previousPhase = phaseIndex; previousElapsed = elapsedMs; previous = numbers;
   }
   return Object.freeze({ cuts: Object.freeze(cuts) });
+}
+
+
+/** V2 is an explicit bounded timing window for the named Run. Begin/end
+ * numbers describe the real awaited promise, never native effect or resource
+ * join. A pending span remains pending at Stop; later exit may record rejection.
+ * V1 phase-arrival and Stop summaries cannot be reinterpreted as these spans. */
+export function readInstalledPublicationWorkJournal(text: string, expected: OriginalJournalIdentity) {
+  const messages = originalJournalMessages(text, expected).filter(message => message.startsWith('CLIQ_PUBLICATION_WORK'));
+  if (!messages.length) return;
+  need(messages.length <= 2 && messages.reduce((bytes, row) => bytes + Buffer.byteLength(row, 'utf8') + 1, 0) <= 8192);
+  const rows: string[] = [];
+  for (const message of messages) {
+    need(message.length + 1 <= 4096 && message.startsWith('CLIQ_PUBLICATION_WORK_V2:'));
+    const payload = parseJsonStrict(message.slice('CLIQ_PUBLICATION_WORK_V2:'.length));
+    need(Array.isArray(payload) && payload.length >= 4 && payload.length <= 16 && payload.every(row => typeof row === 'string'));
+    rows.push(...payload);
+  }
+  need(rows.length <= 32);
+  const vocabulary: ReadonlySet<string> = new Set(INSTALLED_PUBLICATION_WORK_V2);
+  type Span = Readonly<{ span: number; work: string; startedMs: number; endedMs: number | null;
+    outcome: 'pending' | 'fulfilled' | 'rejected' }>;
+  type Run = Readonly<{ runId: string; observedMs: number; discardedSpans: number; spans: readonly Span[] }>;
+  const snapshots: Array<Readonly<{ boundary: 'stop' | 'exit'; runs: readonly Run[] }>> = [];
+  let cursor = 0;
+  while (cursor < rows.length) {
+    const next = () => {
+      const row = rows[cursor++]; need(row && row.length <= 255 && /^[\x20-\x7e]+$/u.test(row));
+      const fields = row.split(':'); need(fields[0] === 'CLIQ_PUBLICATION_WORK_V2'); return fields;
+    };
+    const begin = next(); need(begin.length === 4 && begin[1] === 'begin' && ['stop', 'exit'].includes(begin[2]!));
+    const boundary = begin[2] as 'stop' | 'exit';
+    need(!snapshots.length || snapshots.length === 1 && snapshots[0]!.boundary === 'stop' && boundary === 'exit');
+    const runCount = count(begin[3]!); need(runCount >= 1 && runCount <= 2);
+    const runs: Run[] = [];
+    for (let index = 0; index < runCount; index++) {
+      const header = next(); need(header.length === 5 && header[1] === 'run' && /^[A-Za-z0-9_-]{43}$/u.test(header[2]!));
+      const runId = header[2]!, observedMs = count(header[3]!), discardedSpans = count(header[4]!);
+      need(!runs.some(run => run.runId === runId));
+      const spans: Span[] = [];
+      while (rows[cursor]?.split(':')[1] === 'span') {
+        const row = next(); need(row.length === 8 && row[1] === 'span' && row[2] === runId && vocabulary.has(row[4]!));
+        const span = count(row[3]!), startedMs = count(row[5]!), endedMs = row[6] === '-' ? null : count(row[6]!);
+        const outcome = row[7] as Span['outcome'];
+        need(span > 0 && (spans.length === 0 || span > spans.at(-1)!.span && startedMs >= spans.at(-1)!.startedMs));
+        need(startedMs <= observedMs && (outcome === 'pending' ? endedMs === null :
+          ['fulfilled', 'rejected'].includes(outcome) && endedMs !== null && endedMs >= startedMs && endedMs <= observedMs));
+        spans.push(Object.freeze({ span, work: row[4]!, startedMs, endedMs, outcome })); need(spans.length <= 6);
+      }
+      need(spans.length > 0 && discardedSpans + spans.length === spans.at(-1)!.span);
+      runs.push(Object.freeze({ runId, observedMs, discardedSpans, spans: Object.freeze(spans) }));
+    }
+    const end = next(); need(end.length === 3 && end[1] === 'end' && end[2] === boundary);
+    snapshots.push(Object.freeze({ boundary, runs: Object.freeze(runs) })); need(snapshots.length <= 2);
+  }
+  if (snapshots.length === 2) for (const previous of snapshots[0]!.runs) {
+    const current = snapshots[1]!.runs.find(run => run.runId === previous.runId);
+    if (!current) continue;
+    need(current.observedMs >= previous.observedMs && current.discardedSpans >= previous.discardedSpans);
+    for (const old of previous.spans) {
+      const span = current.spans.find(span => span.span === old.span); if (!span) continue;
+      need(span.work === old.work && span.startedMs === old.startedMs &&
+        (old.outcome === 'pending' || span.outcome === old.outcome && span.endedMs === old.endedMs));
+    }
+  }
+  return Object.freeze({ profile: 'publication_work_v2' as const, snapshots: Object.freeze(snapshots) });
 }

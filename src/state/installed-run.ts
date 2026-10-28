@@ -31,7 +31,7 @@ import type { ArtifactCatalog } from './artifacts.js';
 import { sampleCanonicalNow } from './canonical-time.js';
 import { validateControlChannelClosure, type AuthenticatedControlIdentity } from './control-channel.js';
 import { decodeLocalPrincipalIdentity, decodeSourceManifest, decodeWorkspaceIdentity } from './decoders.js';
-import { KernelStorageError, ResourceRetirementError } from './errors.js';
+import { joinResourceOperations, KernelStorageError, ResourceRetirementError } from './errors.js';
 import { decodeSandboxProfile } from './execution-closure.js';
 import { loadInstalledCredentialPlatform, loadInstalledWorkerNative, withHeldInstalledRuntime, type HeldInstalledRuntime, type InstalledRuntimeBorrow } from './installed-runtime.js';
 import { installedSandboxProfile } from './installed-sandbox-profile.js';
@@ -280,6 +280,30 @@ async function readInstructions(artifacts: ArtifactCatalog, assembly: RunAssembl
   return immutableSnapshot(manifest);
 }
 
+/** Independent complete retained data only. No native handle, permission or
+ * admission token is created. Skills own their original four-leaf pool in a
+ * separate fully joined stage. Only instructions and guest read together;
+ * neither uses a nested pool, so they cannot enlarge that four-reader peak. */
+export async function readInstalledRunDataClosures(artifacts: ArtifactCatalog, assembly: RunAssemblyV1,
+  principalId: string, runtime: Pick<InstalledRuntimeBorrow, 'bundle' | 'releaseKeys'>, signal?: AbortSignal) {
+  const reads = signal ? artifacts.withReadSignal(signal) : artifacts;
+  const skills = await readAssemblySkills(reads, assembly);
+  reads.assertReadActive(); signal?.throwIfAborted();
+  const [instructions, retainedToolchain] = await joinResourceOperations([
+    readInstructions(reads, assembly, principalId),
+    (async () => {
+      if (assembly.runtime.guestToolchainManifestRef === undefined) return undefined;
+      const selected = await readRetainedVerifierToolchain(reads, { bundle: runtime.bundle, releaseKeys: runtime.releaseKeys,
+        guestToolchainManifestRef: assembly.runtime.guestToolchainManifestRef, signal });
+      if (selected.manifest.manifestDigest !== assembly.runtime.guestToolchainManifestDigest)
+        mismatch('retained material substitutes its signed guest toolchain');
+      return selected;
+    })()
+  ] as const);
+  reads.assertReadActive(); signal?.throwIfAborted();
+  return { instructions, skills, retainedToolchain };
+}
+
 /** Only one credential has this exact four-object inert data closure. The
  * sandbox grants no authority before the original complete material checks. */
 async function publishInstalledModelMaterial(input: {
@@ -346,12 +370,15 @@ async function materialFor(installed: InstalledRuntimeBorrow, artifacts: Artifac
   if (capability.source.kind !== 'signed_catalog' || assembly.provider.pricing.kind !== 'trusted_price_table')
     mismatch('retained installed model authority is not its admitted signed catalog/price pair');
   const catalogRef = capability.source.catalogEntryRef, priceRef = assembly.provider.pricing.priceTableRef;
-  const retainedCatalog = await readCanonicalArtifact<SignedModelCatalogEntryV1>(artifacts, catalogRef);
-  const retainedPrice = await readCanonicalArtifact<ModelPriceTableV1>(artifacts, priceRef);
+  const [retainedCatalog, retainedPrice] = await joinResourceOperations([
+    readCanonicalArtifact<SignedModelCatalogEntryV1>(artifacts, catalogRef),
+    readCanonicalArtifact<ModelPriceTableV1>(artifacts, priceRef)
+  ] as const);
   assertArtifactRef(retainedCatalog.signatureRef); assertArtifactRef(retainedPrice.signatureRef);
   const objects = new Map([[catalogRef, canonicalJsonBytes(retainedCatalog)], [priceRef, canonicalJsonBytes(retainedPrice)]]);
-  for (const reference of [retainedCatalog.signatureRef, retainedPrice.signatureRef])
-    objects.set(reference, await artifacts.readBytes(reference));
+  const signatures = [retainedCatalog.signatureRef, retainedPrice.signatureRef];
+  const signatureBytes = await artifacts.mapReads(signatures, reference => artifacts.readBytes(reference));
+  signatures.forEach((reference, index) => objects.set(reference, signatureBytes[index]!));
   const model = verifyRetainedModelAuthorityPair({ bundle: installed.bundle, releaseKeys: installed.releaseKeys,
     catalogEntryRef: catalogRef, priceTableRef: priceRef, objects }), catalog = model.catalog.value;
   if (catalog.adapter.adapterId !== 'openai-compatible-broker-v1' || catalog.adapter.version !== '1') mismatch('installed provider adapter recipe is unsupported');
@@ -381,8 +408,6 @@ async function materialFor(installed: InstalledRuntimeBorrow, artifacts: Artifac
   const compaction = installed.structured.compactionPrompts.find(prompt => prompt.provider === assembly.provider.name && prompt.model === assembly.provider.model);
   if (!system || !compaction || system.ref !== assembly.instructions.systemPromptRef || system.value.textDigest !== assembly.instructions.systemPromptDigest ||
       compaction.material.ref !== assembly.context.compactionPromptEnvelopeRef) mismatch('installed assembly substitutes signed prompt identity');
-  const instructions = await readInstructions(artifacts, assembly, endpoint.ownerPrincipalId);
-  const skills = await readAssemblySkills(artifacts, assembly);
   const credentialRefs = [...assembly.provider.credentialGrantRefs];
   for (const ref of credentialRefs) {
     const binding = decodeEndpointCredentialGrantBinding(await readCanonicalArtifact(artifacts, ref));
@@ -390,6 +415,8 @@ async function materialFor(installed: InstalledRuntimeBorrow, artifacts: Artifac
         binding.endpointRegistrationRef !== assembly.provider.endpoint.endpointRegistrationRef || binding.endpointIdentityDigest !== endpoint.endpointIdentityDigest ||
         binding.tlsPolicyDigest !== endpoint.tlsPolicyDigest) mismatch('installed model credential closure is for another principal or endpoint');
   }
+  const { instructions, skills, retainedToolchain } = await readInstalledRunDataClosures(artifacts, assembly,
+    endpoint.ownerPrincipalId, installed, signal);
   const references = [
     { kind: 'runtime_bundle', ref: installed.bundleDigest, digest: installed.bundle.manifestDigest },
     { kind: 'tool_contract_manifest', ref: assembly.tools.manifestRef, digest: tools.manifestDigest },
@@ -398,14 +425,8 @@ async function materialFor(installed: InstalledRuntimeBorrow, artifacts: Artifac
     { kind: 'workspace_instructions', ref: assembly.instructions.workspaceInstructionsRef, digest: instructions.manifestDigest },
     ...skills.map(skill => ({ kind: 'skill_manifest', ref: skill.manifestRef, digest: skill.manifest.manifestDigest })),
   ];
-  let retainedToolchain: RetainedVerifierToolchain | undefined;
-  if (assembly.runtime.guestToolchainManifestRef !== undefined) {
-    const toolchain = retainedToolchain = await readRetainedVerifierToolchain(artifacts, { bundle: installed.bundle, releaseKeys: installed.releaseKeys,
-      guestToolchainManifestRef: assembly.runtime.guestToolchainManifestRef, signal });
-    if (toolchain.manifest.manifestDigest !== assembly.runtime.guestToolchainManifestDigest)
-      mismatch('retained material substitutes its signed guest toolchain');
-    references.push({ kind: 'guest_toolchain_manifest', ref: toolchain.manifestRef, digest: toolchain.manifest.manifestDigest });
-  }
+  if (retainedToolchain) references.push({ kind: 'guest_toolchain_manifest', ref: retainedToolchain.manifestRef,
+    digest: retainedToolchain.manifest.manifestDigest });
   const script = installed.bundle.entries.find(entry => entry.entryId === 'builtin_tools');
   const supervisor = installed.bundle.entries.find(entry => entry.role === 'supervisor');
   if (script && (!supervisor || !retainedToolchain)) mismatch('installed scripts lack their complete guest and Supervisor closure');
@@ -519,10 +540,17 @@ export async function assembleInstalledRun(input: {
     await installed.revalidate(signal); const active = assertActiveStateOwner(driver, owner);
     if (active.runtimeBundleRef !== installed.bundleDigest || target.runtimeBundleRef !== installed.bundleDigest ||
         active.runtimeBundleManifestDigest !== installed.bundle.manifestDigest) mismatch('installed assembly and capture have another runtime owner');
-    await readRetainedSourceInspectionTarget(reads, source, readSourceInspectionOriginalRequest(driver, source.inspectionId),
-      { bundle: installed.bundle, releaseKeys: installed.releaseKeys, sandboxProfile: decodeSandboxProfile(await readCanonicalArtifact(reads, target.sandboxProfileRef)) },
-      { driver, owner, signal });
-    const native = await installed.loadStateOwner(signal); await installed.revalidate(signal);
+    // This read consumes only the already committed source graph. The signed
+    // native loader independently retains both of its original full checks;
+    // no native root opens until both operations have really joined.
+    const [, native] = await joinResourceOperations([
+      (async () => readRetainedSourceInspectionTarget(reads, source, readSourceInspectionOriginalRequest(driver, source.inspectionId),
+        { bundle: installed.bundle, releaseKeys: installed.releaseKeys,
+          sandboxProfile: decodeSandboxProfile(await readCanonicalArtifact(reads, target.sandboxProfileRef)) },
+        { driver, owner, signal }))(),
+      (async () => installed.loadStateOwner(signal))()
+    ] as const);
+    await installed.revalidate(signal);
     return { native, bundle: immutableSnapshot(installed.bundle), bundleRef: installed.bundleDigest };
   }, signal);
   const held = captureRuntime.native;
