@@ -14,7 +14,11 @@ function reportFailure(error) {
 function checkHook(check) { try { check(); } catch (error) { reportFailure(error); } }
 const callbackContexts = new Map();
 createHook({
-  init(id, type) { if (type === 'cliq credential platform callbacks') callbackContexts.set(id, { before: 0, after: 0, destroyed: 0 }); },
+  // The original napi_async_work completion already has Node's managed
+  // callback context. Custom uv callbacks additionally need the explicit one.
+  // Both are real resources whose complete lifetime must remain balanced.
+  init(id, type) { if (type === 'cliq-linux-credential-platform' || type === 'cliq credential platform callbacks')
+    callbackContexts.set(id, { before: 0, after: 0, destroyed: 0 }); },
   before(id) { checkHook(() => { const state = callbackContexts.get(id); if (state) { assert.equal(state.destroyed, 0); state.before++; } }); },
   after(id) { checkHook(() => { const state = callbackContexts.get(id); if (state) { assert.equal(state.destroyed, 0); state.after++; } }); },
   destroy(id) { checkHook(() => { const state = callbackContexts.get(id); if (state) { assert.equal(state.destroyed, 0); state.destroyed++; } }); },

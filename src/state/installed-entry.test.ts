@@ -14,6 +14,7 @@ test('the hidden installed entry refuses ordinary Node before reading roots or c
     const roles = ['keeper', 'supervisor'].flatMap(role => [[`--bootstrap-${role}`], [`--installed-${role}`,
       path.join(fixture, 'state'), 'a'.repeat(64), `0:1:${process.geteuid!()}`]]);
     roles.push(['--installed-client', path.join(fixture, 'state'), 'supervisor', 'status', '--json']);
+    roles.push(['--upgrade-source-control', path.join(fixture, 'state'), 'a'.repeat(64)]);
     for (const args of roles) {
         const result = spawnSync(process.execPath, ['--import', loader, entry, ...args], {
           cwd: fixture, env: { PATH: process.env.PATH }, encoding: 'utf8',

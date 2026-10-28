@@ -255,9 +255,11 @@ async function readRuntime(artifacts: ArtifactCatalog, owner: StateOwnerRecordV1
         owner.supervisorEntryVersion !== 'm2') invalid('retained schema-only StateOwner runtime does not match');
     return 'schema';
   }
-  if (!exactKeys(value, ['schemaVersion', 'bundleVersion', 'controlProtocolRange', 'headlessSchemaRange',
+  const singleCas = value.schemaVersion === 2;
+  if (!exactKeys(value, ['schemaVersion', ...(singleCas ? ['installedLayout'] : []), 'bundleVersion', 'controlProtocolRange', 'headlessSchemaRange',
     'stateSchemaRange', 'workerProtocolRange', 'entries', 'structuredArtifacts', 'guestToolchainManifestRefs',
-    'publisherKeyId', 'manifestDigest', 'signature']) || value.schemaVersion !== 1 || !Array.isArray(value.entries))
+    'publisherKeyId', 'manifestDigest', 'signature']) ||
+      (singleCas ? value.installedLayout !== 'single_cas_streams_v1' : value.schemaVersion !== 1) || !Array.isArray(value.entries))
     invalid('retained StateOwner runtime manifest is invalid');
   const { signature: _signature, manifestDigest: _digest, ...core } = value;
   const supervisors = value.entries.filter(entry => entry.role === 'supervisor');

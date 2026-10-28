@@ -34,7 +34,7 @@ Pi66oQ==
 `;
 
 /** A real Ed25519 signature under an explicitly injected test root. Not a Cliq release/installation qualification. */
-export async function signedToolBundle(assembly: RunAssemblyV1, tools: ToolContractManifestV1['entries']) {
+export async function signedToolBundle(assembly: RunAssemblyV1, tools: ToolContractManifestV1['entries'], schemaVersion: 1 | 2 = 1) {
   supervisorImage ??= readFile(process.execPath).then((bytes) => ({ digest: sha256Bytes(bytes), byteCount: bytes.byteLength }));
   nativeImage ??= readFile(STATE_OWNER_NATIVE_PATH).then((bytes) => ({ digest: sha256Bytes(bytes), byteCount: bytes.byteLength }));
   const image = await supervisorImage;
@@ -44,7 +44,9 @@ export async function signedToolBundle(assembly: RunAssemblyV1, tools: ToolContr
   const profileRef = canonicalSha256(profile);
   const entry = (entryId: string, role: string, executable: boolean, digest = canonicalSha256({ entryId }), version = '1', byteCount = 1) =>
     ({ entryId, role, version, relativePath: `test/${entryId}`, digest, byteCount, executable });
-  const bundle: RuntimeBundleManifest = { schemaVersion: 1, bundleVersion: 'offline-tool-authority-test-v1',
+  const bundle: RuntimeBundleManifest = { ...(schemaVersion === 2
+    ? { schemaVersion: 2 as const, installedLayout: 'single_cas_streams_v1' as const } : { schemaVersion: 1 as const }),
+    bundleVersion: 'offline-tool-authority-test-v1',
     controlProtocolRange: { min: 1, max: 1 }, headlessSchemaRange: { min: 1, max: 1 },
     stateSchemaRange: { min: 1, max: KERNEL_STATE_SCHEMA_VERSION }, workerProtocolRange: { min: 1, max: 1 },
     entries: [entry('supervisor-test', 'supervisor', true, image.digest, '1', image.byteCount), entry(assembly.runtime.workerExecutableId, 'worker', true, assembly.runtime.workerExecutableDigest),

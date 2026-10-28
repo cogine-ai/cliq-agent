@@ -57,6 +57,27 @@ test('upgrade evidence has closed original identity, owner, version and byte con
   assert.equal(touched, false);
 });
 
+test('current-checker V2 is a closed source while retained V1 keeps its exact original shape', () => {
+  const legacy = dataReceipt(); assert.deepEqual(decodeRuntimeUpgradeReceipt(legacy), legacy);
+  if (legacy.installation.kind === 'not_installed') throw new Error('decoder fixture only');
+  const current = { ...legacy, installation: { ...legacy.installation, kind: 'held_installed_stage_v2' as const,
+    keeperObservationKind: 'current_checked_original_keeper' as const } };
+  current.receiptDigest = digestOmitting(current, 'receiptDigest');
+  assert.deepEqual(decodeRuntimeUpgradeReceipt(current), current);
+  const mutations = [
+    { ...current.installation, keeperObservationKind: 'held_anchor' },
+    { ...current.installation, kind: 'held_installed_stage' },
+    { ...current.installation, kind: 'held_installed_stage_v3' },
+    { ...current.installation, retainedKeeperName: 'caller-path' },
+    { ...current.installation, withRoot: true },
+  ];
+  const missing: Record<string, unknown> = { ...current.installation }; delete missing.keeperObservationKind;
+  for (const installation of [...mutations, missing]) {
+    const changed = { ...current, installation }; changed.receiptDigest = digestOmitting(changed, 'receiptDigest');
+    assert.throws(() => decodeRuntimeUpgradeReceipt(changed));
+  }
+});
+
 test('retirement data binds four distinct bounded resource indexes and rejects claimed death shortcuts', () => {
   const row = { schemaVersion: 1, format: 'cliq-retired-runtime-cut-v1', sourceOwnerEpoch: 1, sourceOwnerRowDigest: ref,
     sourceProcessIdentityRef: ref, sourceProcessIdentityDigest: ref, sourceProcessObservation: 'absent_or_start_token_mismatch',

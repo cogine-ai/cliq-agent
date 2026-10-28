@@ -10,20 +10,20 @@ import { CALLBACK_CASES, CALLBACK_IDLE_MARKER, CALLBACK_OTHER_MARKER, readNative
 function fixture(mode: 'baseline' | 'candidate') {
   const baseline = mode === 'baseline';
   const stdout = Buffer.from('TAP version 13\n' + CALLBACK_CASES.map((name, index) => {
-    const passed = !baseline || index === 0;
+    const passed = !baseline || index !== 3;
     return `${passed ? 'ok' : 'not ok'} ${index + 1} - ${name}\n` + (passed ? '' : `  ---\n  error: |-\n    ${CALLBACK_IDLE_MARKER}\n  ...\n`);
   }).join('') + '# ' + JSON.stringify({ diagnosticOnly: true, actualInspectionEntered: true, cancelJoinedWithin1500ms: true,
     actualInspectionConnectionRetired: true, childrenJoined: true, installedI1Qualified: false }) + '\n# ' +
     JSON.stringify({ diagnosticOnly: true, actualPreparationEntered: true, closeJoinedWithin1500ms: true,
       actualPreparationConnectionRetired: true, childrenJoined: true, installedI1Qualified: false }) +
-    `\n1..4\n# tests 4\n# pass ${baseline ? 1 : 4}\n# fail ${baseline ? 3 : 0}\n# cancelled 0\n# skipped 0\n`);
+    `\n1..4\n# tests 4\n# pass ${baseline ? 3 : 4}\n# fail ${baseline ? 1 : 0}\n# cancelled 0\n# skipped 0\n`);
   return { mode, stdout, stderr: Buffer.alloc(0), code: baseline ? 1 : 0, signal: null, joined: true };
 }
 test('closed callback evidence requires every original case and both actual-join report shapes', () => {
   for (const mode of ['baseline', 'candidate'] as const) {
     const result = readNativeCallbackEvidence(fixture(mode));
     assert.equal(result.mode, mode); assert.equal(result.installedI1Qualified, false);
-    assert.equal(result.idleDeliveryRefusals, mode === 'baseline' ? 3 : 0);
+    assert.equal(result.idleDeliveryRefusals, mode === 'baseline' ? 1 : 0);
   }
 });
 test('unknown failure, missing proof, altered counters and unjoined collectors never become expected RED or GREEN', () => {
@@ -35,7 +35,8 @@ test('unknown failure, missing proof, altered counters and unjoined collectors n
     { ...baseline, stdout: Buffer.from(baseline.stdout.toString().replace('"actualPreparationEntered":true', '"actualPreparationEntered":false')) },
     { ...baseline, stdout: Buffer.from(baseline.stdout.toString().replace('"actualInspectionConnectionRetired":true', '"actualInspectionConnectionRetired":false')) },
     { ...baseline, stdout: Buffer.from(baseline.stdout.toString().replace('"closeJoinedWithin1500ms":true', '"closeJoinedWithin1500ms":false')) },
-    { ...baseline, stdout: Buffer.from(baseline.stdout.toString().replace('# fail 3', '# fail 2')) },
+    { ...baseline, stdout: Buffer.from(baseline.stdout.toString().replace('# fail 1', '# fail 2')) },
+    { ...baseline, stdout: Buffer.from(baseline.stdout.toString().replace(`ok 2 - ${CALLBACK_CASES[1]}`, `not ok 2 - ${CALLBACK_CASES[1]}`)) },
     { ...baseline, stdout: Buffer.from(baseline.stdout.toString().replace(CALLBACK_CASES[0], 'other case')) },
     { ...baseline, stdout: Buffer.from(baseline.stdout.toString().replace('"diagnosticOnly":true', '"diagnosticOnly":true,"extra":true')) },
     { ...baseline, code: 0 }, { ...baseline, signal: 'SIGKILL' }, { ...baseline, joined: false },

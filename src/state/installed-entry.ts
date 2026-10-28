@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { writeSync } from 'node:fs';
+import { closeSync, writeSync } from 'node:fs';
 import { getAsset, isSea } from 'node:sea';
 import { assertArtifactRef, assertRequestId, normalizeAbsolutePath } from '../kernel/identity.js';
 import { canonicalJsonBytes, canonicalSha256, normalizeCanonicalText } from '../kernel/canonical.js';
@@ -7,10 +7,11 @@ import { decodeEndpointAuthorityCommandCore, type EndpointAuthorityCommandCoreV1
 import { parseJsonStrict } from '../kernel/json.js';
 import type { ReleaseTrustKey } from '../policy/runtime-authority.js';
 import { openInstalledControl, type InstalledControlService } from './installed-control.js';
-import { acquireInstalledAnchor, createInstalledRuntime, upgradeInstalledRuntime, initializeInstalledKeeper, withHeldInstalledRuntime,
+import { acquireInstalledAnchor, createInstalledRuntime, upgradeInstalledRuntime, verifyInstalledUpgradeOriginalControl, initializeInstalledKeeper, withHeldInstalledRuntime,
   commitEndpointAuthority, readEndpointAuthority, readCredentialAuthority, withCredentialAuthorityLock,
   type HeldInstalledAnchor, type HeldInstalledKeeper, type HeldInstalledRuntime } from './installed-runtime.js';
-import { joinResourceOperations, KernelStorageError } from './errors.js';
+import { joinResourceOperations, KernelStorageError, ResourceRetirementError } from './errors.js';
+import { UPGRADE_SOURCE_CONTROL_MODE, UPGRADE_SOURCE_CONTROL_RETIREMENT } from './installed-upgrade-source-control.js';
 import { exactKeys } from '../policy/runtime-authority.js';
 import { decodeCredentialWriteRequest, writeCredentialAuthority, decodeCredentialRevokeRequest, revokeCredentialAuthority, openStateStore,
   decodeCredentialCleanupRequest, cleanupCredentialAuthority,
@@ -141,6 +142,22 @@ async function start(): Promise<void> {
     .decode(getAsset('release-trust-roots.json'))) as ReleaseTrustKey[];
   const runtime = createInstalledRuntime({ releaseKeys });
   const mode = process.argv[2];
+  if (mode === UPGRADE_SOURCE_CONTROL_MODE) {
+    // One inherited, kernel-executed signed image FD. This readonly child
+    // never creates a Store, changes a selection or inherits an old Anchor.
+    const stop = new AbortController(), cancel = () => stop.abort();
+    process.once('SIGTERM', cancel);
+    try {
+      if (process.argv.length !== 5) throw new KernelStorageError('ARTIFACT_MISMATCH', 'invalid original control purpose');
+      closeSync(3);
+      await verifyInstalledUpgradeOriginalControl(runtime, process.argv[3]!, process.argv[4]!, stop.signal);
+    } catch (error) {
+      try { writeSync(2, error instanceof ResourceRetirementError ? UPGRADE_SOURCE_CONTROL_RETIREMENT :
+        installedRuntimeUpgradeFailureMarker('source_control', error)); } catch { /* Exit refusal remains authoritative. */ }
+      process.exitCode = 1;
+    } finally { process.removeListener('SIGTERM', cancel); }
+    return;
+  }
   if (mode === '--installed-client') {
     if (process.argv.length < 5) throw new Error('expected a client StateRoot locator and command');
     const stop = new AbortController(), stopping = () => { stop.abort(); };

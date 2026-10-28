@@ -26,6 +26,7 @@ import { decodeInstalledUpgradeReport, INSTALLED_UPGRADE_PROFILE } from './insta
 import { createInstalledRunObserver } from './installed-run-observer.js';
 import { createUpgradeTlsMaterial } from './installed-upgrade-tls.js';
 import { decodeRuntimeUpgradeReceipt, decodeRuntimeUpgradeRetirement } from '../../../src/state/runtime-upgrade-history.js';
+import { STATE_OWNER_NATIVE_ENTRY_ID } from '../../../src/state/native-owner.js';
 import { readInstalledRuntimeUpgradeFailureMarker } from '../../../src/state/installed-upgrade-diagnostics.js';
 import { decodeUpgradeResourceIndex, decodeUpgradeResourcePage, UPGRADE_RESOURCE_FAMILIES,
   UPGRADE_RESOURCE_PAGE_ROWS, upgradeResourceSequenceDigest } from '../../../src/state/runtime-upgrade-resources.js';
@@ -286,6 +287,9 @@ export async function runInstalledRuntimeUpgradeJourney(filename: string, origin
     const originalUnits = [show(services.supervisorUnit), show(services.keeperUnit)];
     const originalProcesses = await Promise.all(originalUnits.map(async unit => ({ pid: Number(unit.MainPID), start: await processStart(Number(unit.MainPID)) })));
     mark('formal_signed_upgrade_and_real_ready');
+    assert.notEqual(packages.old.bundle.entries.find(entry => entry.entryId === STATE_OWNER_NATIVE_ENTRY_ID)!.digest,
+      packages.target.bundle.entries.find(entry => entry.entryId === STATE_OWNER_NATIVE_ENTRY_ID)!.digest,
+      'the genuine upgrade must exercise distinct old and target helper images');
     // The existing record-retention observer owns a10s input lifetime. It is
     // appropriate for final Stop2, not the entire legitimate upgrade30 budget.
     const upgrade = response(acceptedCommand(path.join(packages.target.packageRoot, 'supervisor'), ['--upgrade-runtime', recipe.stateRoot, packages.target.packageRoot]));
@@ -296,8 +300,9 @@ export async function runInstalledRuntimeUpgradeJourney(filename: string, origin
     assert.equal(receipt.sourceRuntimeBundleRef, report.packages.sourceBundleRef); assert.equal(receipt.targetRuntimeBundleRef, report.packages.targetBundleRef);
     assert.equal(receipt.sourceRuntimeBundleManifestDigest, packages.old.bundle.manifestDigest);
     assert.equal(receipt.targetRuntimeBundleManifestDigest, packages.target.bundle.manifestDigest);
-    assert.equal(receipt.installation.kind, 'held_installed_stage');
-    if (receipt.installation.kind !== 'held_installed_stage') throw new Error('expected genuine installed upgrade receipt');
+    assert.equal(receipt.installation.kind, 'held_installed_stage_v2');
+    if (receipt.installation.kind !== 'held_installed_stage_v2') throw new Error('expected genuine current-checker installed upgrade receipt');
+    assert.equal(receipt.installation.keeperObservationKind, 'current_checked_original_keeper');
     assert.equal(receipt.installation.originalKeeper.pid, originalProcesses[1]!.pid);
     assert.equal(receipt.installation.originalKeeper.processStartToken, 'linux-proc-start-ticks:' + originalProcesses[1]!.start);
     const retired = decodeRuntimeUpgradeRetirement(response(await readCas(receipt.retirementRef)));

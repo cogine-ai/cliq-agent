@@ -58,10 +58,31 @@ runtime override. The SDK client facade does not expose these administrative
 constructors. The command performs the whole sequence and joins its owners;
 operators do not manually order low-level stage, Stop and selector operations.
 
-1. Open the genuine old selection and authenticate its live keeper anchor.
-   Capture the original keeper PID/start, boot/locator bytes and ready-file
-   inode before closing the anchor. Verify the whole old and target signed
-   closures. Create target files only in the held private runtime stage.
+1. Open the genuine old selection and verify the whole old and target signed
+   closures. Capture the original keeper PID/start, boot/locator bytes and
+   ready-file inode through a current metadata check before any Stop.
+   Create target files only in the held private runtime stage.
+   The upgrade controller is not the old fixed Supervisor. It never obtains an
+   old Supervisor Anchor. A distinct `current_checked_original_keeper` native
+   purpose checks the old keeper's original PID/start, signed image inode and
+   fixed argv, boot/namespaces, the actual held procfs source FD, cgroup root,
+   keeper leaf/delegation and every original postcheck. It exposes only
+   `assertCurrent` and `close`, with no root FD or `withRoot`. The current
+   controller is independently bound to the held signed target image and its
+   exact `--upgrade-runtime` argv. These descriptor checks close at the original
+   pre-Stop boundary. Inert birth metadata is persisted in the closed
+   `held_installed_stage_v2` source with its exact checker-purpose discriminant;
+   the retained V1 source shape and its existing physical/recovery rules remain.
+
+   The source HELLO uses one fixed readonly child, kernel-executed through the
+   held target SEA FD. Only that child loads the original helper, authenticates
+   the original schema3 HELLO, closes the session/selection and exits. The
+   parent joins all child stdio and exit before closing the image borrow; abort
+   actually kills and joins that nonproductive child. No Store, runner, unit or
+   ledger is created by this purpose. The parent first loads only the staged
+   target helper and retains that same physical inode through publication.
+   The process-wide single-helper-image guard is unchanged.
+
 2. Persist target package, bootstrap, CAS roots and streams. Roots use the same
    fixed groups of at most four with every original file sync, four publication
    stages, complete rereads and all failure joins. The stage precreates the

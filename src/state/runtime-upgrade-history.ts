@@ -35,9 +35,12 @@ export function decodeRuntimeUpgradeReceipt(value: unknown): RuntimeUpgradeRecei
   if (!installation || typeof installation !== 'object' || Array.isArray(installation)) invalid();
   if (Reflect.get(installation, 'kind') === 'not_installed') controlWireRecord(installation, ['kind']);
   else {
+    const v2 = Reflect.get(installation, 'kind') === 'held_installed_stage_v2';
     const source = controlWireRecord(installation, ['kind', 'stageName', 'stageIdentity', 'runtimeIdentity', 'targetBundleIdentity', 'originalActiveIdentity', 'originalBootstrapIdentity', 'stagedActiveIdentity', 'stagedBootstrapIdentity', 'sourceBundleDigest',
-      'targetBundleDigest', 'originalActiveDigest', 'originalBootstrapDigest', 'originalKeeper'], ['targetModelAuthorityRef']);
-    if (source.kind !== 'held_installed_stage' || typeof source.stageName !== 'string' || !/^\.upgrade-[0-9a-f]{32}$/u.test(source.stageName)) invalid();
+      'targetBundleDigest', 'originalActiveDigest', 'originalBootstrapDigest', 'originalKeeper',
+      ...(v2 ? ['keeperObservationKind'] : [])], ['targetModelAuthorityRef']);
+    if ((!v2 && source.kind !== 'held_installed_stage') || v2 && source.keeperObservationKind !== 'current_checked_original_keeper' ||
+        typeof source.stageName !== 'string' || !/^\.upgrade-[0-9a-f]{32}$/u.test(source.stageName)) invalid();
     for (const key of ['stageIdentity', 'runtimeIdentity', 'targetBundleIdentity', 'originalActiveIdentity', 'originalBootstrapIdentity', 'stagedActiveIdentity', 'stagedBootstrapIdentity']) {
       const identity = controlWireRecord(source[key], ['deviceId', 'fileId', 'ownerUid', 'ownerGid', 'mode']);
       if (!/^(0|[1-9][0-9]*)$/u.test(controlWireText(identity.deviceId)) || !/^[1-9][0-9]*$/u.test(controlWireText(identity.fileId)) || identity.mode !== (key.includes('Active') ? 384 : key.includes('Bootstrap') ? 320 : 448)) invalid();

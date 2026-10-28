@@ -18,7 +18,7 @@ const original = { commit: 'ba804a59dcadee80cb41c822e2d0e32198462f20', tree: 'e3
 const candidateNative = 'e5413784fef74decb7e9cc0befac523e003523a69879fc6bb8f8f15498a3d364';
 const overlays = Object.freeze({
   'scripts/kernel/testing/model-broker-preparation-lifecycle-child.mjs': '0454d5fd45921b3de29599f383253b28252848a3b765a16ff4de8a12940988c1',
-  'scripts/kernel/testing/credential-platform-timeout-child.mjs': '8968ec6ba70492f845b8e0ff3e2e6a110338ca73d363c81072405920e0600b16',
+  'scripts/kernel/testing/credential-platform-timeout-child.mjs': 'c019ef4df83956e3aabf13ac7acafebb8aec9c86dc260382991837685e8df982',
   'scripts/kernel/testing/credential-platform-timeout-fixture.c': '4ba83ef0e0e7b4bb98709703aa704e4c9e026e8013cb4815c7ac2282d33031cc',
 });
 const suite = ['scripts/kernel/testing/credential-platform-queue.test.ts',
@@ -44,7 +44,7 @@ export async function qualifyNativeCallbackLifecycle(destination: string) {
   assert(path.isAbsolute(destination) && await realpath(path.dirname(destination)) === path.dirname(destination));
   await mkdir(destination, { mode: 0o700 }); // No adoption, reset or cleanup of another run.
   const repository = path.resolve(fileURLToPath(new URL('../../..', import.meta.url))); assert.equal(await realpath(repository), repository);
-  const report: Record<string, any> = { diagnosticOnly: true, format: 'cliq-native-callback-lifecycle-v1', qualified: false,
+  const report: Record<string, any> = { diagnosticOnly: true, format: 'cliq-native-callback-lifecycle-v2', qualified: false,
     original, installedI1Qualified: false, ready5Qualified: false, stop2Qualified: false, successor30Qualified: false, views: [] };
   let stage = 'source_inventory';
   const git = (...args: string[]) => {

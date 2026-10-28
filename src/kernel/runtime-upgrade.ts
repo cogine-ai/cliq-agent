@@ -83,8 +83,7 @@ export type RuntimeUpgradeResourcePageV1 = {
 export type InstalledUpgradeIdentityV1 = {
   deviceId: string; fileId: string; ownerUid: number; ownerGid: number; mode: number;
 };
-export type InstalledUpgradeSourceV1 = {
-  kind: 'held_installed_stage';
+type InstalledUpgradeStageFields = {
   stageName: string;
   stageIdentity: InstalledUpgradeIdentityV1;
   runtimeIdentity: InstalledUpgradeIdentityV1;
@@ -103,3 +102,9 @@ export type InstalledUpgradeSourceV1 = {
     bootIdentityHex: string; observedAt: string; readyIdentity: InstalledUpgradeIdentityV1;
   };
 };
+/** V1 remains an exact retained legacy shape. V2 explicitly records a current
+ * checker observation; neither branch serializes a native Anchor handle. */
+export type InstalledUpgradeSourceV1 = InstalledUpgradeStageFields & (
+  { kind: 'held_installed_stage' } |
+  { kind: 'held_installed_stage_v2'; keeperObservationKind: 'current_checked_original_keeper' }
+);

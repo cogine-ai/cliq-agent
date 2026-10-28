@@ -993,6 +993,7 @@ fail:
     free(anchor);
     return installed_keeper_error(env, error, retirement_failed);
 }
+#include "installed-upgrade-keeper.c"
 #else
 static napi_value initialize_installed_keeper(napi_env env, napi_callback_info info) {
     (void)info;
@@ -1001,5 +1002,9 @@ static napi_value initialize_installed_keeper(napi_env env, napi_callback_info i
 static napi_value acquire_installed_anchor(napi_env env, napi_callback_info info) {
     (void)info;
     return native_error(env, "installed anchor requires Linux");
+}
+static napi_value check_installed_upgrade_keeper(napi_env env, napi_callback_info info) {
+    (void)info;
+    return native_error(env, "current keeper check requires Linux");
 }
 #endif

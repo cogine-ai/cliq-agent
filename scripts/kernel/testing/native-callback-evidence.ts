@@ -28,14 +28,17 @@ export function readNativeCallbackEvidence(input: Readonly<{ mode: 'baseline' | 
   assert(CALLBACK_CASES.every(name => cases.some(row => row.name === name)));
   const baseline = input.mode === 'baseline';
   for (const [index, row] of cases.entries()) {
-    const expected = !baseline || row.name === CALLBACK_CASES[0];
+    // The two original credential completions use napi_async_work and may
+    // correctly pass. The original custom broker close must hit its actual
+    // private idle-delivery sentinel; a missing implementation label is not RED.
+    const expected = !baseline || row.name !== CALLBACK_CASES[3];
     assert.equal(row.passed, expected);
     const block = lines.slice(row.at + 1, cases[index + 1]?.at ?? lines.length);
     const idle = block.filter(line => line.trim() === CALLBACK_IDLE_MARKER).length;
     assert.equal(idle, expected ? 0 : 1, 'RED requires the actual private idle-delivery sentinel for every refusal');
   }
-  assert.equal(lines.filter(line => line.trim() === CALLBACK_IDLE_MARKER).length, baseline ? 3 : 0);
-  for (const [name, count] of [['tests', 4], ['pass', baseline ? 1 : 4], ['fail', baseline ? 3 : 0],
+  assert.equal(lines.filter(line => line.trim() === CALLBACK_IDLE_MARKER).length, baseline ? 1 : 0);
+  for (const [name, count] of [['tests', 4], ['pass', baseline ? 3 : 4], ['fail', baseline ? 1 : 0],
     ['cancelled', 0], ['skipped', 0]] as const) assert.equal(lines.filter(line => line === `# ${name} ${count}`).length, 1);
   const reports = lines.filter(line => line.startsWith('# {')).map(line => parseJsonStrict(line.slice(2))) as Record<string, unknown>[];
   const required = [
@@ -49,7 +52,7 @@ export function readNativeCallbackEvidence(input: Readonly<{ mode: 'baseline' | 
     assert.equal(row.diagnosticOnly, true); assert.equal(row[entered], true); assert.equal(row[retired], true);
     assert.equal(row[timely], true); assert.equal(row.childrenJoined, true); assert.equal(row.installedI1Qualified, false);
   }
-  return Object.freeze({ diagnosticOnly: true, mode: input.mode, cases: 4, passed: baseline ? 1 : 4,
-    idleDeliveryRefusals: baseline ? 3 : 0, originalInspectionEnteredAndRetired: true,
+  return Object.freeze({ diagnosticOnly: true, mode: input.mode, cases: 4, passed: baseline ? 3 : 4,
+    idleDeliveryRefusals: baseline ? 1 : 0, originalInspectionEnteredAndRetired: true,
     originalPreparationEnteredAndRetired: true, originalFixtureChildrenJoined: true, installedI1Qualified: false });
 }

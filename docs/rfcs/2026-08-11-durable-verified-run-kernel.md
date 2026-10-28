@@ -13681,3 +13681,21 @@ Retained replay continues to require both complete original CAS members. Missing
 historical members remain recovery-required and cannot be filled from today's
 installation. A failed/cancelled preparation joins its actual publications and
 may leave inert CAS orphans; it never acquires launch permission from them.
+
+#### Native callback qualification profile v2 (2026-10-28)
+
+The fixed four-case campaign must observe genuine callback resources, including
+the original `cliq-linux-credential-platform` async-work resource and the explicit
+custom callback resource. Both require actual before/after/destroy balance.
+Node supplies the async context for managed async-work completion
+([Node-API v24.21.0](https://nodejs.org/download/release/v24.21.0/docs/api/n-api.html#napi_make_callback)).
+Absence of a newly introduced implementation label is not a product failure.
+
+The pinned original source must pass its queue and two managed credential cases;
+its custom broker close must fail through the actual private idle-delivery
+sentinel. The candidate must pass all four cases. The original executing
+inspection/preparation, connection retirement, child joins, 1500-ms bounds,
+carrier, workload and before/after provenance checks remain mandatory for both
+views. Unknown failures remain refusals. The report uses the explicit
+`cliq-native-callback-lifecycle-v2` format; prior v1 reports and their failures are
+not reinterpreted as passing qualification. New Linux evidence is required.

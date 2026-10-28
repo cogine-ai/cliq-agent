@@ -1125,6 +1125,9 @@ type NativeCurrentProcess = Readonly<{
 type NativeInstalledKeeper = Readonly<{ assertHeld(): void; readyLocator(): Buffer; close(): void }>;
 type NativeInstalledAnchor = Readonly<{ assertHeld(): void;
   withRoot(operation: (fd: number, rootPath: string) => void): void; close(): void }>;
+/** A current checker observes an original keeper; no Anchor/root borrow exists. */
+export type NativeInstalledUpgradeKeeperCheck = Readonly<{ purpose: 'current_checked_original_keeper'; assertCurrent(): void; close(): void }>;
+type RawInstalledUpgradeKeeperCheck = Readonly<{ assertCurrent(): void; close(): void }>;
 type NativeCredentialScope = Readonly<{ generation: string; assertHeld(): void; close(): void;
   observeProducerLifetime(pid: number, ownerUid: number, processStartToken: string): 'present' | 'dead' }>;
 type NativeBinding = { acquireLock(stateRoot: string, createLayout: boolean): NativeLock; processStartToken(): string;
@@ -1140,6 +1143,9 @@ type NativeBinding = { acquireLock(stateRoot: string, createLayout: boolean): Na
     image: readonly bigint[], root: readonly bigint[]): NativeInstalledKeeper;
   acquireInstalledAnchor?(stateRoot: string, bundleDigest: string, relativePath: string,
     image: readonly bigint[], root: readonly bigint[], locator: Buffer): NativeInstalledAnchor;
+  checkInstalledUpgradeKeeper?(stateRoot: string, bundleDigest: string, relativePath: string,
+    image: readonly bigint[], root: readonly bigint[], locator: Buffer, packageRoot: string,
+    controllerRelativePath: string, controllerImage: readonly bigint[], packageIdentity: readonly bigint[]): RawInstalledUpgradeKeeperCheck;
   executeInstalledImage?(fd: number, image: readonly bigint[], bootstrap: readonly bigint[], root: readonly bigint[],
     stateRoot: string, bundleDigest: string, relativePath: string, role: 'keeper' | 'supervisor' | 'endpoint' | 'credential', command?: string): never };
 const nativeBindings = new WeakMap<NativeStateOwner, NativeBinding>();
@@ -1315,6 +1321,39 @@ export function initializeHeldInstalledKeeper(native: NativeStateOwner, input: R
 
 /** Private consumer bridge. The locator is untrusted; native acquisition binds
  * the live signed keeper and obtains its original pin through held procfs. */
+export function checkHeldInstalledUpgradeKeeper(native: NativeStateOwner, input: Readonly<{
+  stateRoot: string; root: BigIntStats; image: BigIntStats; bundleDigest: string; relativePath: string; locator: Buffer;
+  packageRoot: string; packageIdentity: BigIntStats; controllerRelativePath: string; controllerImage: BigIntStats;
+}>): NativeInstalledUpgradeKeeperCheck {
+  const binding = nativeBindings.get(native);
+  if (!binding) throw new KernelStorageError('ARTIFACT_MISMATCH', 'current keeper check requires the genuine loaded image');
+  if (process.platform !== 'linux' || typeof binding.checkInstalledUpgradeKeeper !== 'function')
+    throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'current keeper check requires its fixed Linux helper');
+  const failed = (error: unknown): never => {
+    if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT')
+      throw new ResourceRetirementError('current keeper check descriptors did not retire', error);
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'current keeper check refused its controller or original source', { cause: error });
+  };
+  const image = (v: BigIntStats) => [v.dev, v.ino, v.size, v.uid, v.gid, v.mode, v.nlink, v.mtimeNs, v.ctimeNs];
+  const root = (v: BigIntStats) => [v.dev, v.ino, v.uid, v.gid, v.mode];
+  let owned: RawInstalledUpgradeKeeperCheck;
+  try { owned = binding.checkInstalledUpgradeKeeper(input.stateRoot, input.bundleDigest, input.relativePath,
+    image(input.image), root(input.root), input.locator, input.packageRoot, input.controllerRelativePath,
+    image(input.controllerImage), root(input.packageIdentity)); }
+  catch (error) { failed(error); }
+  const check: NativeInstalledUpgradeKeeperCheck = Object.freeze({ purpose: 'current_checked_original_keeper',
+    assertCurrent() {
+      if (this !== check) throw new TypeError('invalid current keeper check receiver');
+      try { owned.assertCurrent(); } catch (error) { failed(error); }
+    },
+    close() {
+      if (this !== check) throw new TypeError('invalid current keeper check receiver');
+      try { owned.close(); } catch (error) { failed(error); }
+    },
+  });
+  return check;
+}
+
 export function acquireHeldInstalledAnchor(native: NativeStateOwner, input: Readonly<{
   stateRoot: string; root: BigIntStats; image: BigIntStats; bundleDigest: string; relativePath: string; locator: Buffer;
 }>): NativeInstalledAnchor {

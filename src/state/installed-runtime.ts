@@ -56,9 +56,10 @@ import { decodeBundledSkillClosure, SKILL_RESOURCE_BYTES } from '../kernel/skill
 import { bundledSkillMemberRoles, bundledSkillRoots, validateBundledSkillReferences } from './bundled-skills.js';
 import { decodeGuestToolchainManifest, guestToolchainExecutables, guestToolchainRoots, validateGuestToolchainMetadata,
   type RetainedVerifierToolchain } from './guest-toolchain.js';
-import { acquireHeldInstalledAnchor, executeHeldInstalledImage, initializeHeldInstalledKeeper, loadHeldStateOwnerImage,
+import { acquireHeldInstalledAnchor, checkHeldInstalledUpgradeKeeper, executeHeldInstalledImage, initializeHeldInstalledKeeper, loadHeldStateOwnerImage,
   stateRootIdentityFromDescriptor, withHeldCredentialNativeScope, STATE_OWNER_NATIVE_ENTRY_ID, STATE_OWNER_NATIVE_RELATIVE_PATH,
-  type NativeStateOwner } from './native-owner.js';
+  type NativeStateOwner, type NativeInstalledUpgradeKeeperCheck } from './native-owner.js';
+import { joinInstalledUpgradeSourceControl } from './installed-upgrade-source-control.js';
 import { openHeldInstalledControlClient, type HeldInstalledControlClient } from './native-owner.js';
 import { noteInstalledWorkRead, observeInstalledWork, noteInstalledInstallPhase } from './installed-work-diagnostics.js';
 
@@ -1406,7 +1407,7 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
         const registeredUpgrade = selection.upgradeReceiptRef === undefined ? undefined :
           await readRegisteredInstalledUpgrade(stateRoot, releaseKeys, selection.upgradeReceiptRef);
         if (registeredUpgrade && (registeredUpgrade.targetRuntimeBundleRef !== selection.bundleDigest ||
-            registeredUpgrade.installation.kind !== 'held_installed_stage' ||
+            registeredUpgrade.installation.kind === 'not_installed' ||
             registeredUpgrade.installation.targetModelAuthorityRef !== selection.modelAuthorityRef)) mismatch('selection differs from its registered upgrade');
         await checkSelectedVersion(scope, bundles, selection.bundleDigest, registeredUpgrade?.sourceRuntimeBundleRef);
         const version = await scope.directory(bundles, selection.bundleDigest);
@@ -1418,7 +1419,7 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
         const retainedGraphs: Array<{ directory: Directory; bundle: RuntimeBundleManifest; delegatedPaths: ReadonlySet<string> }> = [];
         if (registeredUpgrade) {
           const source = registeredUpgrade.installation;
-          if (source.kind !== 'held_installed_stage') mismatch('installed selection cannot use a noninstalled receipt');
+          if (source.kind === 'not_installed') mismatch('installed selection cannot use a noninstalled receipt');
           assertUpgradeObjectIdentity(root, source.runtimeIdentity);
           assertUpgradeObjectIdentity(version, source.targetBundleIdentity);
           assertUpgradeObjectIdentity(active, source.stagedActiveIdentity);
@@ -2722,9 +2723,8 @@ export async function stageInstalledRuntimeUpgrade(selected: HeldInstalledRuntim
   if (!heldInstalledRuntimes.has(selected)) mismatch('upgrade needs the genuinely selected original installation');
   signal?.throwIfAborted();
   noteUpgradePhase(observePhase, 'stage_original');
-  const anchor = await acquireInstalledAnchor(selected), anchorSource = heldInstalledAnchors.get(anchor)!;
-  const originalKeeper = anchorSource.readBirth();
   const scope = new Scope(), sourceScope = new Scope();
+  let keeperCheck: NativeInstalledUpgradeKeeperCheck | undefined;
   try {
     return await withHeldInstalledRuntime(selected, async original => {
       signal?.throwIfAborted();
@@ -2739,10 +2739,12 @@ export async function stageInstalledRuntimeUpgrade(selected: HeldInstalledRuntim
       oldActive.digest = sha256Bytes(oldActiveBytes);
       const oldSupervisor = oldSigned.bundle.entries.find(entry => entry.role === 'supervisor')!;
       const oldBootstrap = await scope.file(runtime, 'bootstrap', 0o500, oldSupervisor.byteCount, oldSupervisor.digest);
-      const oldKeeperReady = await scope.file(runtime, 'keeper.ready', 0o600, 40, originalKeeper.locatorDigest);
+      const oldKeeperReady = await scope.file(runtime, 'keeper.ready', 0o600, 40);
+      const keeperLocator = await readSmall(oldKeeperReady); oldKeeperReady.digest = sha256Bytes(keeperLocator);
       if ([oldActive, oldBootstrap, oldKeeperReady].some(file => file.info.dev !== runtime.info.dev))
         mismatch('upgrade requires its original runtime publication filesystem');
-      assertUpgradeObjectIdentity(oldKeeperReady, originalKeeper.readyIdentity); await verifyBytes(oldKeeperReady);
+      if (oldKeeperReady.info.gid !== state.info.gid) mismatch('upgrade original keeper locator has another group');
+      await verifyBytes(oldKeeperReady);
       const originalFiles = [oldActive, oldBootstrap, oldKeeperReady, oldSigned.manifest, ...oldSigned.entries.values(), ...oldSigned.companionFiles];
       await verifyBytes(oldBootstrap);
       noteUpgradePhase(observePhase, 'stage_source');
@@ -2759,6 +2761,12 @@ export async function stageInstalledRuntimeUpgrade(selected: HeldInstalledRuntim
       const expectedSchema = signedKernelSchemaProfile(), expectedConversion = schemaConversionProfile(original.bundle);
       if (schemaEntry.digest !== canonicalSha256(expectedSchema) || conversionEntry.digest !== canonicalSha256(expectedConversion))
         mismatch('upgrade target substituted its full signed schema sources');
+      const targetSupervisor = signed.bundle.entries.find(entry => entry.role === 'supervisor')!;
+      const controller = signed.entries.get(targetSupervisor.entryId)!;
+      noteUpgradePhase(observePhase, 'source_control');
+      await verifyBytes(controller, signal);
+      await joinInstalledUpgradeSourceControl(controller.handle, stateRoot, original.bundleDigest, signal);
+      await verifyBytes(controller, signal); await sourceScope.assertDirectories(); await original.revalidate(signal);
       const stage = await scope.directory(runtime, `.upgrade-${randomBytes(16).toString('hex')}`, true);
       const version = await scope.directory(stage, 'package', true);
       for (const entry of signed.bundle.entries) {
@@ -2769,7 +2777,6 @@ export async function stageInstalledRuntimeUpgrade(selected: HeldInstalledRuntim
       await writeChunks(scope, version, 'manifest.json', bytesSource(signed.manifestBytes), 0o400);
       // Match the existing installed graph: companion bytes are durably
       // rooted in CAS, never added as unsigned installed package paths.
-      const targetSupervisor = signed.bundle.entries.find(entry => entry.role === 'supervisor')!;
       await writeChunks(scope, stage, 'bootstrap', chunks(signed.entries.get(targetSupervisor.entryId)!, signal), 0o500);
       const newBootstrap = await scope.file(stage, 'bootstrap', 0o500, targetSupervisor.byteCount, targetSupervisor.digest);
       await verifyBytes(newBootstrap);
@@ -2812,8 +2819,25 @@ export async function stageInstalledRuntimeUpgrade(selected: HeldInstalledRuntim
       await checkPackageGraph(sourceScope, packageDirectory, signed.bundle, signed.modelAuthority);
       for (const file of [signed.manifest, ...signed.entries.values(), ...signed.companionFiles]) { signal?.throwIfAborted(); await verifyBytes(file, signal); }
       for (const file of casFiles) { signal?.throwIfAborted(); await verifyBytes(file, signal); }
-      await sourceScope.close(); await syncDirectories(scope); await original.revalidate(signal);
-      anchor.assertHeld(); anchor.close();
+      await syncDirectories(scope); await original.revalidate(signal);
+      noteUpgradePhase(observePhase, 'stage_native');
+      const nativeEntry = staged.bundle.entries.find(entry => entry.entryId === STATE_OWNER_NATIVE_ENTRY_ID)!;
+      const nativeFile = staged.entries.get(nativeEntry.entryId)!;
+      const native = await loadHeldStateOwnerImage(nativeFile.handle, staged.bundle);
+      keeperCheck = checkHeldInstalledUpgradeKeeper(native, { stateRoot, root: state.info, image: oldSigned.entries.get(oldSupervisor.entryId)!.info,
+        bundleDigest: original.bundleDigest, relativePath: oldSupervisor.relativePath, locator: keeperLocator,
+        packageRoot, packageIdentity: packageDirectory.info, controllerRelativePath: targetSupervisor.relativePath, controllerImage: controller.info });
+      await verifyBytes(oldKeeperReady); await verifyBytes(controller, signal); await original.revalidate(signal);
+      keeperCheck.assertCurrent();
+      // Pure birth metadata from the current native check, not an old held
+      // Anchor. The closed V2 installation source records these actual facts,
+      // never a claim to inherit or hold an original native Anchor token.
+      const originalKeeper: InstalledUpgradeSourceV1['originalKeeper'] = Object.freeze({ pid: keeperLocator.readUInt32LE(8),
+        processStartToken: `linux-proc-start-ticks:${keeperLocator.readBigUInt64LE(16)}`,
+        locatorDigest: sha256Bytes(keeperLocator), bootIdentityHex: keeperLocator.subarray(24).toString('hex'), observedAt: sampleCanonicalNow(),
+        readyIdentity: upgradeDirectoryIdentity(oldKeeperReady) });
+      keeperCheck.assertCurrent(); keeperCheck.close(); keeperCheck = undefined;
+      await sourceScope.close();
       noteUpgradePhase(observePhase, 'stage_owner_history');
       const artifacts = new ArtifactCatalog(cas, signal, original.releaseKeys).withRuntimeConversionSource(signed.bundleDigest);
       const database = openReadOnlySqliteDriver(path.join(stateRoot, KERNEL_DATABASE_FILENAME));
@@ -2828,11 +2852,8 @@ export async function stageInstalledRuntimeUpgrade(selected: HeldInstalledRuntim
           mismatch('upgrade refuses to stop an installation with nonterminal Runs');
         database.readSnapshot(connection => history.assertUnchanged(connection));
       } finally { database.close(); }
-      noteUpgradePhase(observePhase, 'stage_native');
-      const nativeEntry = staged.bundle.entries.find(entry => entry.entryId === STATE_OWNER_NATIVE_ENTRY_ID)!;
-      const nativeFile = staged.entries.get(nativeEntry.entryId)!;
-      const native = await loadHeldStateOwnerImage(nativeFile.handle, staged.bundle);
-      const source: InstalledUpgradeSourceV1 = { kind: 'held_installed_stage', stageName: stage.name,
+      const source: InstalledUpgradeSourceV1 = { kind: 'held_installed_stage_v2',
+        keeperObservationKind: 'current_checked_original_keeper', stageName: stage.name,
         stageIdentity: upgradeDirectoryIdentity(stage), runtimeIdentity: upgradeDirectoryIdentity(runtime),
         targetBundleIdentity: upgradeDirectoryIdentity(version), originalActiveIdentity: upgradeDirectoryIdentity(oldActive),
         originalBootstrapIdentity: upgradeDirectoryIdentity(oldBootstrap), stagedActiveIdentity: upgradeDirectoryIdentity(newActive),
@@ -2964,7 +2985,7 @@ export async function stageInstalledRuntimeUpgrade(selected: HeldInstalledRuntim
         async publish(receiptRef, receipt) {
           noteUpgradePhase(observePhase, 'publish_selection');
           assertBirth();
-          if (selectionRef !== receiptRef || receipt.installation.kind !== 'held_installed_stage' ||
+          if (selectionRef !== receiptRef || receipt.installation.kind === 'not_installed' ||
               canonicalSha256(receipt.installation) !== canonicalSha256(source)) mismatch('upgrade publication lacks its registered original stage');
           await prepared.assertCurrent(); await verifyBytes(newActive);
           await verifyBytes(oldActive); await verifyBytes(oldBootstrap);
@@ -2995,7 +3016,9 @@ export async function stageInstalledRuntimeUpgrade(selected: HeldInstalledRuntim
       return held;
     }, signal);
   } catch (error) {
-    await joinResourceOperations([Promise.reject(error), sourceScope.close(), scope.close(), Promise.resolve().then(() => anchor.close())]);
+    rememberRetirement(error);
+    await joinResourceOperations([Promise.reject(error), sourceScope.close(), scope.close(), Promise.resolve().then(() => keeperCheck?.close())])
+      .catch(failure => { rememberRetirement(failure); throw failure; });
     throw error;
   }
 }
@@ -3040,7 +3063,7 @@ async function readRegisteredInstalledUpgrade(stateRoot: string, releaseKeys: re
       mismatch('selection receipt was not registered by the sole upgrade transaction');
     const receipt = decodeRuntimeUpgradeReceipt(await artifacts.readCanonical(receiptRef));
     if (canonicalSha256(receipt) !== receiptRef || receipt.receiptDigest !== boundary.acquisition.upgradeReceiptDigest ||
-        receipt.installation.kind !== 'held_installed_stage') mismatch('registered installed upgrade receipt differs');
+        receipt.installation.kind === 'not_installed') mismatch('registered installed upgrade receipt differs');
     driver.readSnapshot(connection => history.assertUnchanged(connection));
     return receipt;
   } finally { driver.close(); }
@@ -3062,7 +3085,7 @@ export async function recoverInstalledRuntimeUpgrade(stateRoot: string, receiptR
   signal?.throwIfAborted();
   const releaseKeys = immutableSnapshot(trustedReleaseKeys);
   const receipt = await readRegisteredInstalledUpgrade(stateRoot, releaseKeys, receiptRef);
-  if (receipt.installation.kind !== 'held_installed_stage') mismatch('recovery requires its original installed stage');
+  if (receipt.installation.kind === 'not_installed') mismatch('recovery requires its original installed stage');
   const registered = receipt.installation, scope = new Scope();
   let held: HeldInstalledRuntimeUpgrade | undefined;
   try {
@@ -3210,6 +3233,26 @@ export function assertInstalledUpgradeHelloBundle(summary: SupervisorHelloV1['ac
     mismatch('upgrade HELLO differs from its exact expected signed runtime');
 }
 
+/** Fixed readonly child friend. The private original layout context never
+ * escapes; only the existing authenticated HELLO is inspected and joined. */
+export async function verifyInstalledUpgradeOriginalControl(runtime: InstalledRuntime, stateRoot: string,
+  sourceBundleRef: string, signal?: AbortSignal): Promise<void> {
+  if (!installedRuntimeTrust.has(runtime)) mismatch('original control check requires its genuine runtime composition');
+  if (!isMainThread || !isSea() || process.platform !== 'linux' || process.arch !== 'x64' || process.versions.node !== '24.21.0')
+    throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'original control check requires its fixed readonly SEA purpose');
+  if (normalizeAbsolutePath(stateRoot) !== stateRoot) mismatch('original control check requires its canonical StateRoot');
+  assertArtifactRef(sourceBundleRef); signal?.throwIfAborted();
+  const original = await (runtime.openSelected as (this: InstalledRuntime, root: string,
+    layout: typeof originalUpgradeLayout) => Promise<HeldInstalledRuntime>).call(runtime, stateRoot, originalUpgradeLayout);
+  try {
+    if (original.bundleDigest !== sourceBundleRef) mismatch('original control check selected another signed source');
+    const { openInstalledControlSession } = await import('../control/session.js');
+    const session = await openInstalledControlSession(original);
+    try { signal?.throwIfAborted(); assertInstalledUpgradeHelloBundle(session.hello.activeRuntimeBundle, original.bundle); }
+    finally { await session.close(); }
+  } finally { await original.close(); }
+}
+
 /** One production administrative workflow under the same compiled roots. It
  * never accepts a trust root, unit, process locator or recovery fact from argv.
  * Productive execution starts only through the existing installed services. */
@@ -3248,12 +3291,6 @@ export async function upgradeInstalledRuntime(runtime: InstalledRuntime, stateRo
       const { observeInstalledCredentialSupervisor } = await import('./installed-services.js');
       noteUpgradePhase(observePhase, 'source_services');
       await observeInstalledCredentialSupervisor(original, true);
-      const { openInstalledControlSession } = await import('../control/session.js');
-      noteUpgradePhase(observePhase, 'source_control');
-      const originalSession = await openInstalledControlSession(original);
-      try {
-        assertInstalledUpgradeHelloBundle(originalSession.hello.activeRuntimeBundle, original.bundle);
-      } finally { await originalSession.close(); }
       signal?.throwIfAborted();
       const stage = await stageInstalledRuntimeUpgrade(original, packageRoot, signal, observePhase);
       const abort = () => { void stage.close().catch(rememberRetirement); };
