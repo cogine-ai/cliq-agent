@@ -90,7 +90,10 @@ async function buildInstalledSupervisorPackageCore(fixture: string,
   const providerProducer = providerModel && source ? await import(pathToFileURL(path.join(repository, 'scripts/kernel/model-package.ts')).href) as
     Pick<typeof import('../model-package.js'), 'buildInstalledModelPackageEntries'> : { buildInstalledModelPackageEntries };
   diagnostics.phase=2;
-  const { nodeRoot, carrier, supervisorCarrier } = await sea.prepareInstalledSupervisorSeaCarrier(fixture);
+  // The existing qualification cache supplies only archive bytes. The same
+  // complete official checksum and fresh extraction still run unconditionally.
+  const { nodeRoot, carrier, supervisorCarrier } = await sea.prepareInstalledSupervisorSeaCarrier(
+    fixture, process.env.CLIQ_QUALIFICATION_CARRIER_ARCHIVE);
   diagnostics.phase=3;
   const publisher = options.publisher ?? createInstalledQualificationPublisher();
   const keys = qualificationPublisherMaterial(publisher);
