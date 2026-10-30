@@ -3,6 +3,38 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 
+test('received tool subphases round-trip through the original bounded failure summary and preserve the old label', async () => {
+  const { INSTALLED_STORE_DIAGNOSTIC_BANNER } = await import('./installed-store-diagnostic-banner.js');
+  const { readInstalledStoreDiagnosticJournal, readInstalledStoreStopPhaseJournal,
+    readInstalledPublicationStageJournal } = await import('./installed-store-diagnostic-journal.js');
+  const phases = ['tool_received', 'tool_received_capture_publish', 'tool_received_checkpoint_retirement',
+    'tool_received_capture_read', 'tool_received_diagnostic_publish',
+    'tool_received_observation_publish', 'tool_received_complete_tool'];
+  const sender = { uid: 1000, pid: 2000, invocationId: 'a'.repeat(32) };
+  const journal = (messages: string[]) => messages.map(MESSAGE => JSON.stringify({ _UID: '1000', _PID: '2000',
+    _TRANSPORT: 'stdout', _SYSTEMD_INVOCATION_ID: sender.invocationId, MESSAGE })).join('\n');
+  for (const phase of phases) {
+    const child = spawnSync(process.execPath, ['--input-type=commonjs', '--eval', INSTALLED_STORE_DIAGNOSTIC_BANNER + `
+      const d=require('node:diagnostics_channel').channel('cliq.installed.run.failures.v1');
+      d.publish({kind:'publication_phase',phase:${JSON.stringify(phase)}});
+      d.publish({kind:'scheduler_failure',origin:'drive',phase:${JSON.stringify(phase)},closing:false,errorClass:'kernel',code:'ARTIFACT_MISMATCH',sqliteCode:null});
+      d.publish({kind:'store_stop',driverTasks:1,agentLoads:0,admissions:0,retainedFailures:1,globalFailure:false,phases:{[${JSON.stringify(phase)}]:1}});
+    `], { encoding: 'utf8', timeout: 5000, maxBuffer: 65536 });
+    assert.equal(child.error, undefined); assert.equal(child.signal, null); assert.equal(child.status, 0); assert.equal(child.stdout, '');
+    const rows = child.stderr.trimEnd().split('\n');
+    assert(rows.length <= 16 && Buffer.byteLength(child.stderr) <= 4096 && rows.every(row => Buffer.byteLength(row) <= 255));
+    const text = journal(rows), summary = readInstalledStoreDiagnosticJournal(text, sender)!;
+    assert.equal(summary.schedulerFailures, 1); assert.equal(summary.schedulerFailuresBeforeStop, 1);
+    const failure = { origin: 'drive', phase, closing: false, errorClass: 'kernel', code: 'ARTIFACT_MISMATCH', sqliteCode: null };
+    assert.deepEqual(summary.firstSchedulerFailure, failure); assert.deepEqual(summary.lastSchedulerFailure, failure);
+    assert.deepEqual(summary.stop.phases, { [phase]: 1 });
+    assert.deepEqual(readInstalledStoreStopPhaseJournal(text, sender), { phase });
+    assert.equal(readInstalledPublicationStageJournal(text, sender), undefined);
+    assert.throws(() => readInstalledStoreDiagnosticJournal(journal(rows.map(row => row.replaceAll(phase, phase + '_unknown'))), sender));
+    assert.equal(Object.hasOwn(summary, 'qualified'), false); assert.equal(Object.hasOwn(summary, 'originalServerJoined'), false);
+  }
+});
+
 test('one accepted original Stop entry emits a fixed single-driver phase without changing its exit summary', async () => {
   const { INSTALLED_STORE_DIAGNOSTIC_BANNER } = await import('./installed-store-diagnostic-banner.js');
   const child = spawnSync(process.execPath, ['--input-type=commonjs', '--eval', INSTALLED_STORE_DIAGNOSTIC_BANNER + `

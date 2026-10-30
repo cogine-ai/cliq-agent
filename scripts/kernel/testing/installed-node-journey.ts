@@ -33,7 +33,7 @@ import type { InstalledModelPackageFixture } from './installed-model-package.js'
 import { providerModelDefinition, type InstalledProviderModelDefinition } from '../installed-provider-model.js';
 import { PROVIDER_JOURNEY_FILES, runInstalledProviderJourney, runInstalledDailyProviderJourney,
   type InstalledProviderJourneyContext } from './installed-provider-journey.js';
-import { runInstalledDailyCommand } from './installed-daily-command.js';
+import { InstalledDailyCommandError, runInstalledDailyCommand } from './installed-daily-command.js';
 import { installedServiceProfiles } from '../../../src/state/installed-services.js';
 import { decodeInstalledInstallerDiagnostics, encodeInstalledInstallerDiagnostic } from './installed-install-diagnostics.js';
 import { CredentialSecretScanError, createCredentialSecretScanner, copyCredentialSecretScanFailureDiagnostic,
@@ -303,10 +303,17 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     ['--bootstrap-credential', canonicalJsonBytes(metadata).toString('base64url')], input, 60000);
   const dailyAlias = options.provider ? 'deepseek' : 'owned-daily';
   const dailyCommand = async (argv: readonly string[], timeout = 30_000, input?: Buffer) => {
-    assert(dailyJourney && [30_000, 60_000, 90_000].includes(timeout));
-    const result = await runInstalledDailyCommand({ executable: '/usr/sbin/runuser',
-      args: [...prefix, path.join(recipe.packageRoot, 'supervisor'), ...argv], env: environment, cwd: ledger.home,
-      ...(input === undefined ? {} : { input }), deadlineMs: timeout, scanner });
+    assert(dailyJourney && [30_000, 60_000, 90_000].includes(timeout) && ['setup', 'models', 'run', 'result', 'apply'].includes(argv[0]!));
+    let result: Awaited<ReturnType<typeof runInstalledDailyCommand>>;
+    try {
+      result = await runInstalledDailyCommand({ executable: '/usr/sbin/runuser',
+        args: [...prefix, path.join(recipe.packageRoot, 'supervisor'), ...argv], env: environment, cwd: ledger.home,
+        ...(input === undefined ? {} : { input }), deadlineMs: timeout, scanner });
+    } catch (error) {
+      if (error instanceof InstalledDailyCommandError) report.normalCliCommandFailure ??= { command: argv[0],
+        ...error.diagnostic, launcherAndPipesJoined: error.launcherAndPipesJoined, descendantRetirement: error.descendantRetirement };
+      throw error;
+    }
     report.normalCliCommands.push({ command: argv[0], elapsedMs: result.elapsedMs, processAndPipesJoined: true,
       completeInputWriteJoined: true, stdoutBytes: result.stdout.length, stderrBytes: result.stderr.length });
     return { stdout: result.stdout };

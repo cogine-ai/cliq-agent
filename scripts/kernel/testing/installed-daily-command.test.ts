@@ -6,6 +6,7 @@ import { lstat, mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import ts from 'typescript';
 import { createCredentialSecretScanner } from './credential-secret-scan.js';
 import { InstalledDailyCommandError, runInstalledDailyCommand } from './installed-daily-command.js';
 
@@ -19,6 +20,97 @@ test('ordinary command success requires actual child, complete input and all ori
     assert.equal(result.stdout.toString(), 'owned public metadata\n'); assert.equal(result.stderr.toString(), 'joined\n');
     assert.equal(scan.stats().streamsOpened, 2); assert.equal(scan.stats().streamsClosed, 2);
   } finally { scan.close(); }
+});
+
+test('a real nonzero child records only its actual exit, byte counts and joined resources', async () => {
+  const scan = scanner(), privateOutput = 'untrusted-command-error-must-not-be-retained';
+  try {
+    await assert.rejects(runInstalledDailyCommand({ executable: process.execPath,
+      args: ['--input-type=module', '-e', `for await(const _ of process.stdin){};process.stdout.write('public result');process.stderr.write(${JSON.stringify(privateOutput)},()=>process.exit(7));`],
+      cwd: tmpdir(), env: {}, input: Buffer.from('owned public input'), deadlineMs: 3_000, scanner: scan }), error => {
+      assert(error instanceof InstalledDailyCommandError); assert.equal(error.launcherAndPipesJoined, true);
+      const { elapsedMs, ...observed } = error.diagnostic;
+      assert(Number.isSafeInteger(elapsedMs) && elapsedMs >= 0 && elapsedMs < 3_000);
+      assert.deepEqual(observed, { diagnosticOnly: true, reason: 'exit', code: 7, signal: null,
+        spawned: true, childJoined: true, inputWriteJoined: true, stdinJoined: true, stdoutJoined: true, stderrJoined: true,
+        stdoutBytes: Buffer.byteLength('public result'), stderrBytes: Buffer.byteLength(privateOutput) });
+      assert(Object.isFrozen(error.diagnostic)); assert.equal(Object.hasOwn(error, 'cause'), false);
+      assert(!JSON.stringify(error).includes(privateOutput)); return true;
+    });
+    assert.equal(scan.stats().streamsClosed, 2);
+  } finally { scan.close(); }
+});
+
+test('an actual exec refusal distinguishes no spawned process from the joined child handle and pipes', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'cliq-daily-exec-')), scan = scanner();
+  try {
+    await assert.rejects(runInstalledDailyCommand({ executable: path.join(directory, 'absent'), args: [],
+      cwd: directory, env: {}, deadlineMs: 3_000, scanner: scan }), error => {
+      assert(error instanceof InstalledDailyCommandError);
+      assert.equal(error.diagnostic.reason, 'spawn'); assert.equal(error.diagnostic.spawned, false);
+      assert.equal(error.diagnostic.childJoined, true); assert.equal(error.diagnostic.code, -2); assert.equal(error.diagnostic.signal, null);
+      assert.equal(error.diagnostic.stdoutBytes, 0); assert.equal(error.diagnostic.stderrBytes, 0);
+      assert(!JSON.stringify(error).includes(directory)); return true;
+    });
+    assert.equal(scan.stats().streamsClosed, 2);
+  } finally { scan.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('real oversized output preserves the original two-MiB refusal independently of the secret scanner', async () => {
+  const scan = createCredentialSecretScanner([Buffer.from('owned-unused-secret-741083e4')], { maxBytes: 4 * 1024 * 1024, maxStreams: 2 });
+  try {
+    await assert.rejects(runInstalledDailyCommand({ executable: process.execPath,
+      args: ['--input-type=module', '-e', "process.stdout.write(Buffer.alloc(2*1024*1024+1,'x'),()=>process.exit(0));"],
+      cwd: tmpdir(), env: {}, deadlineMs: 3_000, scanner: scan }), error => {
+      assert(error instanceof InstalledDailyCommandError); assert.equal(error.diagnostic.reason, 'output_bound');
+      assert.equal(error.diagnostic.stdoutBytes, 2 * 1024 * 1024 + 1); assert.equal(error.diagnostic.stderrBytes, 0);
+      assert.equal(error.launcherAndPipesJoined, true); assert.equal(error.diagnostic.childJoined, true);
+      assert.equal(error.diagnostic.stdoutJoined, true); assert.equal(error.diagnostic.stderrJoined, true); return true;
+    });
+    assert.equal(scan.stats().limitExceeded, false); assert.equal(scan.stats().streamsClosed, 2);
+  } finally { scan.close(); }
+});
+
+test('a real forbidden output remains a scanner refusal and never enters the closed error', async () => {
+  const scan = scanner(), needle = 'owned-unused-secret-741083e4';
+  try {
+    await assert.rejects(runInstalledDailyCommand({ executable: process.execPath,
+      args: ['--input-type=module', '-e', `process.stdout.write(${JSON.stringify(needle)});`],
+      cwd: tmpdir(), env: {}, deadlineMs: 3_000, scanner: scan }), error => {
+      assert(error instanceof InstalledDailyCommandError); assert.equal(error.diagnostic.reason, 'scan');
+      assert.equal(error.diagnostic.stdoutBytes, Buffer.byteLength(needle)); assert(!JSON.stringify(error).includes(needle)); return true;
+    });
+    assert.equal(scan.stats().matched, true); assert.equal(scan.stats().streamsClosed, 2);
+  } finally { scan.close(); }
+});
+
+test('the actual daily owner records only a closed failed attempt after the command joins and rethrows it unchanged', async () => {
+  const source = await readFile(new URL('./installed-node-journey.ts', import.meta.url), 'utf8');
+  const parsed = ts.createSourceFile('installed-node-journey.ts', source, ts.ScriptTarget.Latest, true);
+  let owner: ts.ArrowFunction | undefined;
+  const visit = (node: ts.Node): void => {
+    if (ts.isVariableDeclaration(node) && node.name.getText(parsed) === 'dailyCommand' && node.initializer && ts.isArrowFunction(node.initializer)) owner = node.initializer;
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed); assert(owner && ts.isBlock(owner.body));
+  const body = owner.body, attempt = body.statements.find(ts.isTryStatement); assert(attempt?.catchClause);
+  assert.equal(attempt.tryBlock.getText(parsed).match(/await runInstalledDailyCommand\(/gu)?.length, 1);
+  assert.equal(attempt.catchClause.block.statements.length, 2);
+  const [record, rethrow] = attempt.catchClause.block.statements;
+  assert(record && ts.isIfStatement(record) && !record.elseStatement);
+  assert.equal(record.expression.getText(parsed), 'error instanceof InstalledDailyCommandError');
+  assert(ts.isExpressionStatement(record.thenStatement) && ts.isBinaryExpression(record.thenStatement.expression));
+  const publication = record.thenStatement.expression;
+  assert.equal(publication.left.getText(parsed), 'report.normalCliCommandFailure');
+  assert.equal(publication.operatorToken.kind, ts.SyntaxKind.QuestionQuestionEqualsToken);
+  assert(ts.isObjectLiteralExpression(publication.right));
+  assert.deepEqual(publication.right.properties.map(property => property.getText(parsed)),
+    ['command: argv[0]', '...error.diagnostic', 'launcherAndPipesJoined: error.launcherAndPipesJoined', 'descendantRetirement: error.descendantRetirement']);
+  assert(!/message|stack|cause|stderr|stdout|\.args|\.input/u.test(record.thenStatement.getText(parsed)));
+  assert(rethrow && ts.isThrowStatement(rethrow) && rethrow.expression?.getText(parsed) === 'error');
+  const success = body.statements.find(statement => statement.getText(parsed).startsWith('report.normalCliCommands.push('));
+  assert(success && attempt.end < success.getStart(parsed));
+  assert(owner.getText(parsed).includes("['setup', 'models', 'run', 'result', 'apply'].includes(argv[0]!)"));
 });
 
 for (const ignoreTerm of [false, true]) test(ignoreTerm
@@ -54,6 +146,11 @@ for (const ignoreTerm of [false, true]) test(ignoreTerm
     await assert.rejects(failure, error => {
       assert(error instanceof InstalledDailyCommandError);
       assert.equal(error.launcherAndPipesJoined, !ignoreTerm);
+      assert.equal(error.diagnostic.reason, 'deadline'); assert.equal(error.diagnostic.spawned, true);
+      assert.equal(error.diagnostic.childJoined, !ignoreTerm); assert.equal(error.diagnostic.inputWriteJoined, true);
+      for (const field of ['stdinJoined', 'stdoutJoined', 'stderrJoined'] as const) assert.equal(error.diagnostic[field], true);
+      assert(error.diagnostic.elapsedMs >= 3_000);
+      assert.equal(error.diagnostic.signal, ignoreTerm ? null : 'SIGTERM');
       assert.equal(error.descendantRetirement, 'outer_uid_coordinator_required'); return true;
     });
     assert(performance.now() - started < (ignoreTerm ? 15_000 : 7_000));
@@ -127,6 +224,9 @@ test('actual root-owned Linux runuser TERM retires its original nobody command a
     assert.equal(parentImage.dev, originalLauncher.dev); assert.equal(parentImage.ino, originalLauncher.ino);
     await assert.rejects(command, error => {
       assert(error instanceof InstalledDailyCommandError); assert.equal(error.launcherAndPipesJoined, true);
+      assert.equal(error.diagnostic.reason, 'deadline'); assert.equal(error.diagnostic.spawned, true);
+      assert.equal(error.diagnostic.childJoined, true); assert.equal(error.diagnostic.inputWriteJoined, true);
+      for (const field of ['stdinJoined', 'stdoutJoined', 'stderrJoined'] as const) assert.equal(error.diagnostic[field], true);
       assert.equal(error.descendantRetirement, 'outer_uid_coordinator_required'); return true;
     });
     await gone(pid, child.start, 5_000); await gone(child.parent, launcher.start, 5_000);

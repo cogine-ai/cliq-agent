@@ -2277,25 +2277,41 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           }
           assertActiveStateOwner(driver, owner);
           if (!completion.toolCompletionCommitted) {
-            if (persistCapture) capture ??= await persistCapture();
-            if (retire) proof ??= await retire();
+            // Restore only after success so the original failure subscriber
+            // retains the specific rejected await, including during Stop.
+            if (persistCapture) {
+              builtinPhase('tool_received_capture_publish');
+              capture ??= await persistCapture();
+              builtinPhase('tool_received');
+            }
+            if (retire) {
+              builtinPhase('tool_received_checkpoint_retirement');
+              proof ??= await retire();
+              builtinPhase('tool_received');
+            }
+            if (capture) builtinPhase('tool_received_capture_read');
             const base = { schemaVersion: 1 as const, format: 'cliq-tool-observation-v1' as const, runId, opId: claimed.entry.opId,
               attempt: claimed.entry.attempt, requestRef: claimed.entry.requestRef, targetRef: claimed.entry.target,
               grantRef: claimed.entry.grantRef!, dispatchId, observedAt,
               ...(proof ? { postEffect: proof.postEffect } : {}),
               ...(capture ? { captureRef: capture.ref,
                 captureDigest: (await artifacts.readCanonical<import('./builtin-tool-capture.js').BuiltinToolCaptureV1>(capture.ref)).captureDigest } : {}) };
+            if (capture) builtinPhase('tool_received');
             if (!observation) {
               if (nativeModel?.outcome === 'executed') observation = { ...base, ...nativeModel, observationDigest: '' };
               else if (!nativeModel && editSucceeded) observation = { ...base, outcome: 'executed', content: { ok: true }, observationDigest: '' };
               else {
                 const code = nativeModel?.code ?? 'TOOL_EXECUTION_FAILED';
+                builtinPhase('tool_received_diagnostic_publish');
                 diagnostic ??= await artifacts.publishCanonical({ schemaVersion: 1, format: 'cliq-tool-output-diagnostic-v1', code }, 'cliq-tool-output-diagnostic-v1');
+                builtinPhase('tool_received');
                 observation = { ...base, outcome: 'error', code, diagnosticRef: diagnostic.ref, diagnosticDigest: diagnostic.ref, observationDigest: '' };
               }
               observation.observationDigest = digestOmitting(observation, 'observationDigest');
             }
+            builtinPhase('tool_received_observation_publish');
             observationRef ??= (await artifacts.publishCanonical(observation, observation.format)).ref;
+            builtinPhase('tool_received');
             // A user stop changes Run revision, not this original producer's
             // genuinely observed outcome. Retain the immutable result while the
             // owning reducer revalidates the current cut; never replay the tool.
@@ -2306,13 +2322,16 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
                 throw new KernelStorageError('LEASE_FENCED', 'tool result no longer belongs to its original active worker');
               }
               try {
+                builtinPhase('tool_received_complete_tool');
                 await currentAgent.completeTool({ opId: claimed.entry.opId, attempt: claimed.entry.attempt,
                   expectedRunRevision: current.revision, observationRef });
+                builtinPhase('tool_received');
                 if (captured) completion.toolCompletionCommitted = true;
                 break;
               } catch (error) {
                 if (!(error instanceof KernelStorageError) || error.code !== 'REVISION_CONFLICT' || retry >= 7 ||
                     readRun(driver, runId).revision === current.revision) throw error;
+                builtinPhase('tool_received');
               }
             }
           }

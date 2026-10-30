@@ -7,6 +7,9 @@ export const BUILTIN_EXECUTION_PHASES = Object.freeze([
   'tool_native_guest_join', 'tool_native_ready', 'tool_native_containment', 'tool_native_process',
   'tool_native_error_guest_join', 'tool_native_error_controller_join',
   'tool_process_observe', 'tool_release', 'tool_result', 'tool_capture', 'tool_received',
+  'tool_received_capture_publish', 'tool_received_checkpoint_retirement',
+  'tool_received_capture_read', 'tool_received_diagnostic_publish',
+  'tool_received_observation_publish', 'tool_received_complete_tool',
   'tool_error_revoke', 'tool_error_history', 'tool_error_evidence', 'tool_error_unknown'
 ] as const);
 export type BuiltinExecutionPhase = typeof BUILTIN_EXECUTION_PHASES[number];
