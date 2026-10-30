@@ -26,13 +26,13 @@ test('a retired terminal Run uses the authenticated cancellation reader before e
   assert(cancel.getText(file).indexOf(branch.getText(file)) < cancel.getText(file).indexOf('this.retainInstalledAgent('));
   const terminal = methods.get('cancelTerminalInstalledRun')?.body; assert(terminal);
   const body = terminal.getText(file);
-  for (const required of ['this.ownInstalledAdmission(', 'withReadSignal(signal)', 'readRunAuthority(',
+  for (const required of ['this.ownInstalledAdmission(', 'withReadSignal(signal)', 'readTerminalRunMaterial(',
     'loadInstalledRunMaterial(', 'validateAgentRunAssembly(', 'authority.controlAuthority.assertAuthority(signal)',
-    'loadAgentStop(', '.cancelRun(command)']) assert(body.includes(required), required);
+    'loadAgentStop(', '.cancelTerminalRun(command, authority.session)']) assert(body.includes(required), required);
   assert.doesNotMatch(body, /loadAgentRun\(|loadRunExecution\(|requestInstalledRunStop\(|scheduleInstalledRun\(/u);
-  assert(body.indexOf('readRunAuthority(') < body.indexOf('loadInstalledRunMaterial('),
+  assert(body.indexOf('readTerminalRunMaterial(') < body.indexOf('loadInstalledRunMaterial('),
     'nested four-reader groups remain serial, never two overlapping pools');
-  assert(body.indexOf('validateAgentRunAssembly(') < body.indexOf('.cancelRun(command)'));
+  assert(body.indexOf('validateAgentRunAssembly(') < body.indexOf('.cancelTerminalRun(command, authority.session)'));
   const agent = readFileSync(new URL('./reducers/agent.ts', import.meta.url), 'utf8');
   assert.equal(agent.match(/validateRunAssembly\(/gu)?.length, 1,
     'execution and terminal refusal must share the original complete assembly validator');
@@ -55,7 +55,7 @@ test('terminal cancellation observes each original serial consumer without addin
   const gather = (node: ts.Node) => { if (ts.isCallExpression(node) && node.expression.getText(file) === 'observeInstalledPublicationWork') calls.push(node);
     ts.forEachChild(node, gather); }; gather(method.body);
   assert.deepEqual(calls.map(call => (call.arguments[1] as ts.StringLiteral).text), names);
-  const consumers = ['readRunAuthority(', 'loadInstalledRunMaterial(', 'authority.controlAuthority.assertAuthority(signal)', '.cancelRun(command)'];
+  const consumers = ['readTerminalRunMaterial(', 'loadInstalledRunMaterial(', 'authority.controlAuthority.assertAuthority(signal)', '.cancelTerminalRun(command, authority.session)'];
   for (const [index, call] of calls.entries()) {
     assert.equal(call.arguments[0]?.getText(file), 'runId');
     const callback = call.arguments[2]; assert(callback && ts.isArrowFunction(callback));

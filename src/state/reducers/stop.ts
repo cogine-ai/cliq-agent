@@ -1,7 +1,7 @@
 import { canonicalSha256 } from '../../kernel/canonical.js';
 import { planCanonicalArtifact, type PlannedArtifact } from '../../kernel/artifact-plan.js';
 import { digestOmitting, identityHash, parseCanonicalTime } from '../../kernel/identity.js';
-import type { BudgetSettlementV1, ContinuationItem, InvocationJournalEntry, Run, RunAssemblyV1, RunCancel, RunFrontier, RunSpec, SessionRunTerminalItem } from '../../kernel/types.js';
+import type { BudgetSettlementV1, ContinuationItem, InvocationJournalEntry, Run, RunAssemblyV1, RunCancel, RunFrontier, RunSpec, Session, SessionRunTerminalItem } from '../../kernel/types.js';
 import type { ToolCheckpointProof } from '../../kernel/tool-authorization.js';
 import { immutableSnapshot } from '../../model/immutable.js';
 import type { ResolveToolInput } from '../../model/attempt.js';
@@ -20,7 +20,7 @@ import { readRecoveryClosure } from '../recovery-closure.js';
 import { appendInvocationJournalEntry, nextJournalSequence } from '../repositories/journal.js';
 import { readRequiredWorkerLaunch, readWorkerLaunchesForRun } from '../repositories/worker-launches.js';
 import { readRequiredWorkspaceGenerationByRef } from '../repositories/workspace-generations.js';
-import { insertControlRequest, readControlRequest, readRun, readSession, ZERO_BUDGET } from '../rows.js';
+import { insertControlRequest, readControlRequest, readRun, readSession, readSessionPrincipalId, ZERO_BUDGET } from '../rows.js';
 import type { SqliteConnection, SqliteDriver } from '../sqlite-driver.js';
 import { assertActiveStateOwner, type StateOwnerContext } from '../state-owner.js';
 import { readCancelResponse, readAgentStop, type CancelResponse } from '../stop-recovery.js';
@@ -181,6 +181,50 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
     throw new KernelStorageError('REVISION_CONFLICT', 'failure/time cut kept changing');
   }
   return {
+    /** No-write terminal reader. Replay has no later cut in cancelRun, so this
+     * path owns one complete fresh walk before every request outcome. Earlier
+     * closed material is data only and cannot stand in for that history. */
+    cancelTerminalRun: stateOperation('INVALID_REQUEST', async (input: RunCancel, session: Session) => {
+      input = immutableSnapshot(input); session = immutableSnapshot(session);
+      if (!exactKeys(input, ['principalId', 'channelIdentityRef', 'channelIdentityDigest', 'requestId', 'expectedRunRevision']))
+        throw new TypeError('unknown run.cancel field');
+      const digest = cancelRequestDigest(runId, input);
+      const assertCurrent = () => {
+        artifacts.assertReadActive(); assertActiveStateOwner(driver, owner);
+        if (canonicalSha256(readRun(driver, runId)) !== canonicalSha256(admitted) ||
+            canonicalSha256(readSession(driver, admitted.sessionId)) !== canonicalSha256(session))
+          throw new KernelStorageError('REVISION_CONFLICT', 'terminal cancellation original Run or Session changed');
+        if (session.id !== admitted.sessionId || readSessionPrincipalId(driver, session.id) !== principalId ||
+            driver.prepare('SELECT principal_id FROM runs WHERE id = ?').get<{ principal_id: string }>(runId)?.principal_id !== principalId)
+          throw new KernelStorageError('ARTIFACT_MISMATCH', 'terminal cancellation has a foreign Run or Session principal');
+      };
+      artifacts.assertReadActive(); assertActiveStateOwner(driver, owner);
+      if (input.principalId !== principalId) throw new KernelStorageError('ARTIFACT_MISMATCH', 'cancellation caller does not own this Run');
+      await validateControlChannelClosure(artifacts, owner, input);
+      const selected = await readRecoveryClosure(driver, artifacts, runId);
+      assertCurrent();
+      requireEqual(selected.run, admitted, 'terminal cancellation complete original Run');
+      requireEqual(selected.runSpec, spec, 'terminal cancellation complete original RunSpec');
+      if (spec.operation === 'delivery') assertDeliveryModelFreeCut(selected);
+      if (!['succeeded', 'completed_unverified', 'failed', 'cancelled'].includes(selected.run.status))
+        throw new KernelStorageError('REVISION_CONFLICT', 'terminal cancellation lost its original terminal cut');
+      await validateControlChannelClosure(artifacts, owner, input);
+      assertCurrent();
+      const row = readControlRequest(driver, principalId, 'run.cancel', input.requestId);
+      if (row) {
+        if (row.requestDigest !== digest) throw new KernelStorageError('REQUEST_ID_CONFLICT', 'run.cancel requestId was reused with different bytes');
+        const { response } = await readCancelResponse(driver, artifacts, admitted, principalId, input.requestId);
+        await validateControlChannelClosure(artifacts, owner, input);
+        assertCurrent();
+        const current = readControlRequest(driver, principalId, 'run.cancel', input.requestId);
+        if (!current || canonicalSha256(current) !== canonicalSha256(row))
+          throw new KernelStorageError('REVISION_CONFLICT', 'terminal cancellation original replay request changed');
+        return immutableSnapshot({ replayed: true, ...result(response.result.snapshot.run), response });
+      }
+      if (!Number.isSafeInteger(input.expectedRunRevision) || input.expectedRunRevision < 1) throw new TypeError('invalid stop revision');
+      if (admitted.revision !== input.expectedRunRevision) throw new KernelStorageError('REVISION_CONFLICT', 'stop Run revision changed');
+      throw new RunTerminalError();
+    }),
     cancelRun: stateOperation('INVALID_REQUEST', async (input: RunCancel) => {
       input = immutableSnapshot(input);
       if (!exactKeys(input, ['principalId', 'channelIdentityRef', 'channelIdentityDigest', 'requestId', 'expectedRunRevision'])) throw new TypeError('unknown run.cancel field');

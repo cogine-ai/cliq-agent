@@ -1,6 +1,6 @@
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting } from '../kernel/identity.js';
-import type { ToolContractManifestV1 } from '../kernel/types.js';
+import type { Run, ToolContractManifestV1 } from '../kernel/types.js';
 import type { RunPolicySnapshotV1, PolicyEngineProfileV1 } from '../kernel/tool-authorization.js';
 import { decodeRetainedRunAssembly } from '../model/run-assembly.js';
 import { immutableSnapshot } from '../model/immutable.js';
@@ -21,20 +21,20 @@ import { validateVerifierRunAdmission } from './verifier-admission.js';
 import { decodeSandboxProfile } from './execution-closure.js';
 import { assertDeliveryModelFreeCut } from './run-model-free.js';
 
-/** Shared retained execution inputs. This reader never creates a model session,
- * resolves live credentials or validates provider pricing/capability material. */
-export const readRunAuthority = stateOperation('RECOVERY_REQUIRED', async function readRunAuthority(
+type RunAuthorityInput = { runId: string; operation: 'agent' | 'delivery'; releaseKeys?: readonly ReleaseTrustKey[] };
+
+/** Closed material only. No history shortcut is returned to an execution or
+ * replay: each caller retains its own complete fresh recovery boundary. */
+async function readRunAuthorityMaterial(
   driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
-  input: { runId: string; operation: 'agent' | 'delivery'; releaseKeys?: readonly ReleaseTrustKey[] }, signal?: AbortSignal
+  input: RunAuthorityInput, run: Run, signal?: AbortSignal
 ) {
   signal?.throwIfAborted(); assertActiveStateOwner(driver, owner);
   const openingReads = signal ? artifacts.withReadSignal(signal) : artifacts;
   const releaseKeys = input.releaseKeys === undefined ? undefined : immutableSnapshot(input.releaseKeys);
-  const recovered = await readRecoveryClosure(driver, openingReads, input.runId), run = recovered.run;
   const spec = immutableSnapshot(decodeRunSpec(await readCanonicalArtifact(openingReads, run.specRef)));
   if (spec.operation !== input.operation) throw new TypeError(input.operation === 'agent'
     ? 'delivery Runs cannot load a model' : 'an Agent Run cannot load a delivery continuation');
-  if (spec.operation === 'delivery') assertDeliveryModelFreeCut(recovered);
   const assembly = immutableSnapshot(decodeRetainedRunAssembly(await readCanonicalArtifact(openingReads, spec.assemblyRef)));
   if (decodeVerifierSpec(await readCanonicalArtifact(openingReads, spec.verifierSpecRef)).verifiers.length) {
     if (!releaseKeys) throw new TypeError('verifier authority requires the original trusted Supervisor release roots');
@@ -91,8 +91,46 @@ export const readRunAuthority = stateOperation('RECOVERY_REQUIRED', async functi
     readSignal?.throwIfAborted(); assertActiveStateOwner(driver, owner);
   };
   signal?.throwIfAborted(); assertActiveStateOwner(driver, owner);
-  return { recovered, run, spec, assembly, releaseKeys, contracts, toolContracts,
+  return { run, spec, assembly, releaseKeys, contracts, toolContracts, session,
     controlAuthority: { run, spec, assembly, principalId, resolveToolInput: toolContracts.resolveToolInput, assertAuthority } };
+}
+
+/** Shared retained execution inputs. Productive loading keeps its complete
+ * opening history validation before any continuation is constructed. */
+export const readRunAuthority = stateOperation('RECOVERY_REQUIRED', async function readRunAuthority(
+  driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
+  input: RunAuthorityInput, signal?: AbortSignal
+) {
+  signal?.throwIfAborted(); assertActiveStateOwner(driver, owner);
+  const reads = signal ? artifacts.withReadSignal(signal) : artifacts;
+  const selected = { ...input, releaseKeys: input.releaseKeys === undefined ? undefined : immutableSnapshot(input.releaseKeys) };
+  const recovered = await readRecoveryClosure(driver, reads, selected.runId);
+  if (recovered.runSpec.operation === 'delivery') assertDeliveryModelFreeCut(recovered);
+  const material = await readRunAuthorityMaterial(driver, artifacts, owner, selected, recovered.run, signal);
+  return { recovered, ...material };
+});
+
+/** Read-only terminal cancellation inputs. The terminal-only stop reader must
+ * still validate the entire fresh history before replay, conflict or refusal.
+ * This does not load an agent, resolve credentials, or open a native producer. */
+export const readTerminalRunMaterial = stateOperation('RECOVERY_REQUIRED', async function readTerminalRunMaterial(
+  driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
+  input: RunAuthorityInput, signal?: AbortSignal
+) {
+  signal?.throwIfAborted(); assertActiveStateOwner(driver, owner);
+  const run = readRun(driver, input.runId), session = readSession(driver, run.sessionId);
+  const principalId = readSessionPrincipalId(driver, session.id);
+  if (!['succeeded', 'completed_unverified', 'failed', 'cancelled'].includes(run.status))
+    throw new KernelStorageError('REVISION_CONFLICT', 'terminal cancellation lost its original terminal cut');
+  const material = await readRunAuthorityMaterial(driver, artifacts, owner, input, run, signal);
+  signal?.throwIfAborted(); assertActiveStateOwner(driver, owner);
+  if (canonicalSha256(readRun(driver, run.id)) !== canonicalSha256(run) ||
+      canonicalSha256(readSession(driver, session.id)) !== canonicalSha256(session) ||
+      canonicalSha256(material.session) !== canonicalSha256(session) ||
+      readSessionPrincipalId(driver, session.id) !== principalId ||
+      material.controlAuthority.principalId !== principalId)
+    throw new KernelStorageError('REVISION_CONFLICT', 'terminal cancellation material changed its original Run or Session');
+  return material;
 });
 
 export type RunAuthority = Awaited<ReturnType<typeof readRunAuthority>>;

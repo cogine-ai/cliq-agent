@@ -2827,9 +2827,9 @@ export class StateStore {
     return this.ownInstalledAdmission(async signal => {
       const reads = this.artifacts.withReadSignal(signal), run = readRun(this.driver, runId);
       const operation = decodeRunSpec(await reads.readCanonical(run.specRef)).operation;
-      const { readRunAuthority } = await import('./run-authority.js');
+      const { readTerminalRunMaterial } = await import('./run-authority.js');
       const authority = await observeInstalledPublicationWork(runId, 'terminal_cancel_authority', () =>
-        readRunAuthority(this.driver, reads, this.owner,
+        readTerminalRunMaterial(this.driver, reads, this.owner,
           { runId, operation, releaseKeys: this.runtimeAuthority!.releaseKeys }, signal));
       if (!['succeeded', 'completed_unverified', 'failed', 'cancelled'].includes(authority.run.status))
         throw new KernelStorageError('REVISION_CONFLICT', 'terminal cancellation lost its original terminal cut');
@@ -2847,7 +2847,7 @@ export class StateStore {
       signal.throwIfAborted();
       const { loadAgentStop } = await import('./reducers/stop.js');
       return observeInstalledPublicationWork(runId, 'terminal_cancel_stop', () =>
-        loadAgentStop(this.driver, reads, this.owner, authority.controlAuthority).cancelRun(command));
+        loadAgentStop(this.driver, reads, this.owner, authority.controlAuthority).cancelTerminalRun(command, authority.session));
     });
   }
 

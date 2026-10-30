@@ -109,7 +109,7 @@ export class AgentHandoffPendingError extends KernelStorageError {
 
 /** Same complete static assembly validation for execution and inert terminal
  * cancellation. This does not reproduce a prepared request or open a producer. */
-export function validateAgentRunAssembly(authority: RunAuthority, material: RunAssemblyValidationMaterial) {
+export function validateAgentRunAssembly(authority: Pick<RunAuthority, 'run' | 'spec' | 'assembly' | 'contracts'>, material: RunAssemblyValidationMaterial) {
   const { run, spec, assembly, contracts } = authority;
   const tools = contracts.map((entry) => ({ name: entry.name, description: entry.description, inputSchemaRef: entry.inputSchemaRef,
     inputSchemaDigest: entry.inputSchemaDigest, inputSchema: entry.inputSchema, replayClass: entry.replayClass }));
