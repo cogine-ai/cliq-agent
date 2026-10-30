@@ -61,7 +61,7 @@ test('private client flock rejects unsafe fixed files and detects replacement wh
 test('another real process holds the private client flock until its actual OS exit', async () => {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'cliq-client-lock-process-'))); await chmod(root, 0o700);
   const native = await loadNativeStateOwner(), directory = await open(root, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
-  const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', `
+  const child = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', '--import', 'tsx', '--input-type=module', '-e', `
     import { open, constants } from 'node:fs/promises';
     const { loadNativeStateOwner, tryLockClientDataDirectory } = await import(process.argv[2]);
     const directory = await open(process.argv[1], constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
