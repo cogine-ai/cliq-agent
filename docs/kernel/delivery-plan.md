@@ -44,6 +44,15 @@ coverage; real-provider invocation, installed Linux Delivery/repair/upgrade and
 the outstanding storage/fault qualifications remain unverified. No paid model
 request has been made and no complete PR is opened on this basis.
 
+The controlled real-provider preparation now routes through the same complete
+installed package and disposable Linux ownership/cleanup journey. Its explicit
+provider mode has secret-free root-owned configuration, stdin-only enrollment
+after the original driver signals readiness, and the same public review/apply
+workflow. It preserves separate honest reports and all original fixture cases;
+it is not a new runtime or free-CI paid job. Actual model invocation and complete
+installed execution remain unverified until this new combined source is built,
+installed and exercised with the authorized credential and cumulative budget.
+
 Baseline: `cefa89ae797d8763686b87811743c4422922743c` (PR #523), reviewed
 2026-10-18. Its tree equals the qualified `990656c` follow-up. The installed
 Linux execution/restart and cancellation foundations are real, but a final

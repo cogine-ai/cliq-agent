@@ -20,6 +20,7 @@ probe_finalizer_shutdown=0
 probe_volume_mode=loop
 probe_upgrade_source=
 probe_locked_node_archive=
+probe_provider_configuration=
 if [[ ${1:-} = --delay-volume ]]; then probe_volume_mode=delay-50ms; shift; fi
 case ${1:-} in
   --installed) probe_campaign_kind=installed; shift ;;
@@ -36,6 +37,11 @@ case ${1:-} in
     probe_campaign_kind=run-journey; probe_run_driver_mode=--runtime-upgrade-campaign; probe_upgrade_source=$2; shift 2 ;;
   --run-final-source-limits-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--final-source-limits-campaign; shift ;;
   --run-verifier-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--verifier-campaign; shift ;;
+  --run-provider-journey)
+    [[ $# -ge 2 && "$2" = /* && -f "$2" && ! -L "$2" ]] || {
+      printf 'provider qualification requires its root-owned non-secret configuration\n' >&2; exit 2;
+    }
+    probe_campaign_kind=run-journey; probe_run_driver_mode=--provider-campaign; probe_provider_configuration=$2; shift 2 ;;
   --run-delivery-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--delivery-campaign; shift ;;
   --run-delivery-delay-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--delivery-delay-campaign; shift ;;
   --run-delivery-stop-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--delivery-stop-campaign; shift ;;
@@ -58,7 +64,7 @@ if [[ ${1:-} = --locked-node ]]; then
   }
   probe_locked_node_archive=$2; shift 2
 fi
-readonly probe_campaign_kind probe_run_driver_mode probe_credential_driver_mode probe_finalizer_shutdown probe_volume_mode probe_upgrade_source probe_locked_node_archive
+readonly probe_campaign_kind probe_run_driver_mode probe_credential_driver_mode probe_finalizer_shutdown probe_volume_mode probe_upgrade_source probe_locked_node_archive probe_provider_configuration
 # After the optional fixed volume, one campaign and its bounded official npm
 # source, only positional paths are allowed. Reject mixed/duplicate modes
 # before even inspecting host identities.
@@ -73,6 +79,9 @@ done
 [[ "$probe_run_driver_mode" != --runtime-upgrade-campaign || "$probe_volume_mode" = loop ]] || {
   printf 'the fixed upgrade scope requires its original owned non-delayed volume\n' >&2; exit 2;
 }
+[[ "$probe_run_driver_mode" != --provider-campaign || "$probe_volume_mode" = loop ]] || {
+  printf 'the explicit provider scope requires the original non-delayed volume\n' >&2; exit 2;
+}
 [[ "$probe_run_driver_mode" != --delivery-delay-campaign || "$probe_volume_mode" = delay-50ms ]] || {
   printf 'the fixed delayed Delivery campaign requires its owned delayed volume\n' >&2; exit 2;
 }
@@ -83,7 +92,7 @@ done
   printf 'the fixed publication-late campaign requires its owned delayed volume\n' >&2; exit 2;
 }
 if [[ $(id -u) != 0 || $# -lt 1 || $# -gt 2 ]]; then
-  printf 'usage: sudo bash %s [--delay-volume] [--installed|--installed-retirement-refusal|--secrets|--credentials|--credentials-model-input|--credential-finalizer-shutdown|--runtime-upgrade-journey ORIGINAL_SOURCE_ROOT|--run-journey|--run-final-source-limits-journey|--run-verifier-journey|--run-delivery-journey|--run-delivery-delay-journey|--run-delivery-stop-journey|--run-delivery-late-journey|--run-failure-journey|--run-retry-journey|--run-authority-failure-journey|--run-storage-failure-journey|--run-request-resource-journey|--run-shutdown-admission-journey|--run-shutdown-session-journey|--run-shutdown-preparation-journey|--run-shutdown-received-tool-journey|--run-shutdown-pending-model-journey|--run-shutdown-startup-journey] ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' "$0" >&2
+  printf 'usage: sudo bash %s [--delay-volume] [--installed|--installed-retirement-refusal|--secrets|--credentials|--credentials-model-input|--credential-finalizer-shutdown|--runtime-upgrade-journey ORIGINAL_SOURCE_ROOT|--run-journey|--run-final-source-limits-journey|--run-verifier-journey|--run-provider-journey PUBLIC_CONFIG|--run-delivery-journey|--run-delivery-delay-journey|--run-delivery-stop-journey|--run-delivery-late-journey|--run-failure-journey|--run-retry-journey|--run-authority-failure-journey|--run-storage-failure-journey|--run-request-resource-journey|--run-shutdown-admission-journey|--run-shutdown-session-journey|--run-shutdown-preparation-journey|--run-shutdown-received-tool-journey|--run-shutdown-pending-model-journey|--run-shutdown-startup-journey] ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' "$0" >&2
   printf 'verifier source option: --run-verifier-journey --locked-node OFFICIAL_NPM_ARCHIVE ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' >&2
   exit 2
 fi
@@ -121,6 +130,8 @@ if [[ "$probe_run_driver_mode" = --runtime-upgrade-campaign ]]; then
   readonly probe_run_driver="$probe_source_dir/qualify-installed-runtime-upgrade.ts"
 elif [[ "$probe_run_driver_mode" = --verifier-campaign ]]; then
   readonly probe_run_driver="$probe_source_dir/qualify-installed-verifier-journey.ts"
+elif [[ "$probe_run_driver_mode" = --provider-campaign ]]; then
+  readonly probe_run_driver="$probe_source_dir/qualify-installed-provider-journey.ts"
 elif [[ "$probe_run_driver_mode" = --delivery-campaign || "$probe_run_driver_mode" = --delivery-delay-campaign || "$probe_run_driver_mode" = --delivery-late-campaign || "$probe_run_driver_mode" = --delivery-stop-campaign ]]; then
   readonly probe_run_driver="$probe_source_dir/qualify-installed-delivery-journey.ts"
 else
@@ -1012,6 +1023,10 @@ elif [[ "$probe_campaign_kind" = run-journey ]]; then
   # No arbitrary driver, production pause flag or manager-policy override.
   if [[ "$probe_run_driver_mode" = --runtime-upgrade-campaign ]]; then
     "$probe_node" --import "$probe_installed_loader" "$probe_run_driver" "$probe_run_driver_mode" "$probe_ledger" "$probe_upgrade_source"
+  elif [[ "$probe_run_driver_mode" = --provider-campaign ]]; then
+    # No key in argv/environment/config. The owner sends it only after this
+    # original driver's fixed stdin-ready marker; all setup children are done.
+    "$probe_node" --import "$probe_installed_loader" "$probe_run_driver" "$probe_run_driver_mode" "$probe_ledger" "$probe_provider_configuration"
   elif [[ -n "$probe_locked_node_archive" ]]; then
     "$probe_node" --import "$probe_installed_loader" "$probe_run_driver" "$probe_run_driver_mode" "$probe_ledger" --locked-node "$probe_locked_node_archive"
   else

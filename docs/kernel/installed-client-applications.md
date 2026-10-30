@@ -172,6 +172,63 @@ required.
 
 ## Installed validation and evidence boundary
 
+### Explicit real-provider experiment
+
+The fixed Linux provider journey uses the same disposable UID, root-owned ledger,
+owned filesystem, actual systemd user manager, Secret Service, signed SEA/native
+package builder, installer and resource finalizers as the original Node journey.
+Its separate `provider` branch calls the public model → private edit → required
+Node check → result review → explicit exact-result Delivery workflow. It does not
+run an owned HTTPS model responder or reuse that responder's POST-count evidence.
+The package and client both select headless schema 3; the original fixture modes
+retain their original schema and every original case/assertion.
+
+The root-owned experiment launcher selects this mode explicitly:
+
+```text
+sudo bash scripts/kernel/qualify-systemd-user.sh \
+  --run-provider-journey /absolute/root-owned-public-config.json \
+  /absolute/supported-node /absolute/new-output-directory
+```
+
+The configuration is secret-free canonical JSON containing only `definition`
+and `budgets`. It must be a root-owned, single-link, no-follow file of at most
+64 KiB, mode 0400 or 0444, with no aliased locator. The selected definition uses
+`openai-compatible`, `deepseek-flash`, `https://api.deepseek.com/`, explicit
+currently authenticated SPKI pins, nonzero prices, full per-request token
+ceilings, capability declarations and a finite validity interval. The public CA
+bytes enter the same signed package; no new runtime CA/root override is accepted.
+The publisher's signature does not independently qualify these declarations.
+
+The caller sends **no credential bytes during shell setup**. It waits for the
+exact original driver's `CLIQ_PROVIDER_SECRET_STDIN_READY_V1` line, then writes
+the key once through its private stdin pipe and closes that pipe. The driver
+consumes actual EOF before spawning any build or installation child, requires
+1–4096 bytes within thirty seconds, erases consumed chunks, and clears its owned
+copy in `finally`. The key is enrolled through the existing bootstrap credential
+stdin path. It is never placed in arguments, environment, public configuration,
+reports, source files or CAS. This mode is not invoked by free repository CI.
+
+The first authorized experiment has an explicit USD 5 source-Run ceiling and
+a conservative CNY 35 scheduling reservation within the owner's cumulative
+CNY 200 authorization. The recorded USD/CNY upper conversion is 7; this is a
+conservative scheduling allowance, not a currency conversion built into the
+kernel. No second experiment is started without checking cumulative spend and
+unresolved reservations. The selected highest documented non-discount rates
+and whole-request bounds must be checked again before execution; returned usage
+and input estimates never reduce the original reservation. Current references:
+[prices](https://api-docs.deepseek.com/quick_start/pricing/) and
+[request/token bounds](https://api-docs.deepseek.com/api/create-chat-completion/).
+
+The report is `cliq-installed-provider-journey-v1`, with its own profile. Public
+workflow completion, complete actual resource joins, unchanged Stop2 checks and
+the original cumulative 512-MiB/4096-stream secret scan are independently
+required. External HTTPS is owned by the installed native broker; no fixture
+`httpsJoined` observation is invented. `actualProviderQualified`,
+`actualProviderBillingQualified`, `officialReleaseQualified` and complete I1/I2
+remain false. Protocol/data regressions and a successful package build are not
+evidence that this real installed experiment has executed.
+
 The installed journey composes the real natural CLI, JSONL and RPC applications
 and a util-linux PTY running the actual Ink component, through the existing held
 installation and test-owned signed fixture. It preserves all original normal

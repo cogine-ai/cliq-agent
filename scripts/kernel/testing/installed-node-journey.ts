@@ -26,9 +26,12 @@ import { decodeCredentialAuthorityOperation, decodeEndpointAuthorityOperation, t
 import { digestOmitting, identityHash, sha256Bytes } from '../../../src/kernel/identity.js';
 import { parseJsonStrict } from '../../../src/kernel/json.js';
 import { decodeDeliveryPlan, type PublicationArenaBirthV1 } from '../../../src/kernel/publication.js';
-import type { ArtifactDescriptorV1 } from '../../../src/kernel/types.js';
+import type { ArtifactDescriptorV1, RunSpec } from '../../../src/kernel/types.js';
 import { decodeRunResult, decodeWorkspaceDiff } from '../../../src/state/result-artifacts.js';
-import { buildInstalledSupervisorPackage } from './installed-supervisor-package.js';
+import { buildInstalledProviderQualificationPackage, buildInstalledSupervisorPackage } from './installed-supervisor-package.js';
+import type { InstalledModelPackageFixture } from './installed-model-package.js';
+import { providerModelDefinition, type InstalledProviderModelDefinition } from '../installed-provider-model.js';
+import { PROVIDER_JOURNEY_FILES, runInstalledProviderJourney } from './installed-provider-journey.js';
 import { decodeInstalledInstallerDiagnostics, encodeInstalledInstallerDiagnostic } from './installed-install-diagnostics.js';
 import { CredentialSecretScanError, createCredentialSecretScanner, copyCredentialSecretScanFailureDiagnostic,
   type CredentialSecretScanCode, type CredentialSecretScanFailureDiagnostic, type CredentialSecretScanFailureStage } from './credential-secret-scan.js';
@@ -181,17 +184,28 @@ export async function transferPackage(filename: string, uid: number, gid: number
 
 
 
-export async function runInstalledNodeJourney(filename: string, journeyKind: 'verifier' | 'delivery',
+export type InstalledProviderNodeJourneyInput = Readonly<{
+  definition: InstalledProviderModelDefinition; budgets: RunSpec['budgets']; secret: Buffer;
+}>;
+
+export async function runInstalledNodeJourney(filename: string, journeyKind: 'verifier' | 'delivery' | 'provider',
   options: Readonly<{ publicationRetirementDiagnostics?: true; publicationRetirementStop?: true; publicationRetirementLate?: true;
-    npmDependencyArchive?: Buffer }> = {}): Promise<void> {
+    npmDependencyArchive?: Buffer; provider?: InstalledProviderNodeJourneyInput }> = {}): Promise<void> {
   assert.equal(process.platform, 'linux'); assert.equal(process.arch, 'x64');
-  assert(journeyKind === 'verifier' || journeyKind === 'delivery');
+  assert(journeyKind === 'verifier' || journeyKind === 'delivery' || journeyKind === 'provider');
   assert.deepEqual(Object.keys(options).sort(), [
     ...(options.publicationRetirementDiagnostics === true ? ['publicationRetirementDiagnostics'] : []),
     ...(options.publicationRetirementStop === true ? ['publicationRetirementStop'] : []),
     ...(options.publicationRetirementLate === true ? ['publicationRetirementLate'] : []),
     ...(options.npmDependencyArchive === undefined ? [] : ['npmDependencyArchive']),
+    ...(options.provider === undefined ? [] : ['provider']),
   ].sort());
+  assert.equal(journeyKind === 'provider', options.provider !== undefined);
+  if (options.provider) {
+    assert.deepEqual(Object.keys(options), ['provider'], 'real provider scope cannot borrow a fixture or fault campaign');
+    providerModelDefinition(options.provider.definition);
+    assert(Buffer.isBuffer(options.provider.secret) && options.provider.secret.length > 0 && options.provider.secret.length <= 4096);
+  }
   if (options.publicationRetirementStop) assert.equal(options.publicationRetirementDiagnostics, true);
   if (options.publicationRetirementLate) assert.equal(options.publicationRetirementDiagnostics, true);
   assert(!options.publicationRetirementStop || !options.publicationRetirementLate);
@@ -228,7 +242,15 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     'actual signed Linux complete original Delivery core and separate normal-publication first-parent fsync SIGTERM/owner restart; not UNKNOWN cleanup crash, late-result, paid provider, macOS, reboot or complete I1 qualification';
   if (options.publicationRetirementLate) report.scope =
     'actual signed Linux complete Delivery core and original UNKNOWN first-late audit/fresh-nonce recovery on the fixed delayed volume; not late-fsync SIGTERM, paid provider, macOS, reboot or complete I1 qualification';
-  const secret = Buffer.from(randomBytes(32).toString('hex')), password = Buffer.from(randomBytes(32).toString('hex'));
+  if (options.provider) {
+    delete report.ordinaryGitFixtureProfile;
+    Object.assign(report, { format: 'cliq-installed-provider-journey-v1', profile: 'real_compatible_required_node_result_review_apply_v1',
+      scope: 'actual signed Linux real-provider text/tools, required Node verification, result review and explicit exact-result Delivery; not official release, complete provider billing, macOS, reboot or complete I1/I2 qualification',
+      officialReleaseQualified: false, ownedHttpsFixtureCreated: false, httpsOwner: 'installed_native_broker',
+      providerModel: options.provider.definition.model });
+  }
+  const secret = options.provider ? Buffer.from(options.provider.secret) : Buffer.from(randomBytes(32).toString('hex'));
+  const password = Buffer.from(randomBytes(32).toString('hex'));
   let scanStage: CredentialSecretScanFailureStage = 'runtime', firstFailureStage: CredentialSecretScanFailureStage | null = null;
   let beforeCorpus: CredentialSecretScanFailureDiagnostic['beforeCorpus'] = null, corpusScanFailureCode: CredentialSecretScanCode | null = null;
   let secretCorpusScanProgress: CredentialSecretCorpusScanProgress | undefined;
@@ -236,7 +258,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     firstFailureStage ??= scanStage;
   });
   const scanBytes = (bytes: Uint8Array) => { const stream = scanner.openStream(); try { stream.scan(bytes); } finally { stream.close(); } };
-  const mark = (phase: string) => { report.phase = phase; console.log('Installed verifier journey phase ' + phase); };
+  const mark = (phase: string) => { report.phase = phase; console.log((options.provider ? 'Installed provider journey phase ' : 'Installed verifier journey phase ') + phase); };
   const prefix = ['--user', ledger.username, '--', '/usr/bin/env', '-i', 'HOME=' + ledger.home, 'PATH=/usr/bin:/bin', 'LANG=C', 'LC_ALL=C',
     'XDG_RUNTIME_DIR=/run/user/' + ledger.uid, 'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/' + ledger.uid + '/bus'];
   const command = (executable: string, args: string[], input?: Buffer, timeout = 30000) => {
@@ -280,7 +302,9 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
   };
   const persistentClient = async () => {
     const client = await openInstalledClientConsumer({ executable: '/usr/sbin/runuser',
-      args: [...prefix, process.execPath, '--disable-warning=ExperimentalWarning', installedClientDriver, filename], cwd: ledger.home, env: environment,
+      args: [...prefix, process.execPath, '--disable-warning=ExperimentalWarning', installedClientDriver, filename,
+        ...(options.provider ? ['--schema3'] : [])], cwd: ledger.home, env: environment,
+      ...(options.provider ? { headlessSchemaVersion: 3 as const } : {}),
       openScan: () => scanner.openStream(), onJoined: () => { report.originalPublicClientJoined = true; } });
     assert(Array.isArray(client.hello.enabledFeatureIds) && client.hello.enabledFeatureIds.includes('artifact.get'));
     return client;
@@ -583,8 +607,10 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
   };
 
   try {
-    mark('owned_https_and_signed_guest_package');
+    mark(options.provider ? 'real_provider_and_signed_guest_package' : 'owned_https_and_signed_guest_package');
     await mkdir(recipe.buildFixture, { mode: 0o755 });
+    let ownedModelFixture: InstalledModelPackageFixture | undefined;
+    if (!options.provider) {
     const keyPath = path.join(recipe.buildFixture, 'owned-https-key.pem'), certPath = path.join(recipe.buildFixture, 'owned-https-cert.pem');
     const certificate = spawnSync('/usr/bin/openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', keyPath, '-out', certPath,
       '-days', '2', '-subj', '/CN=installed-verifier-fixture.invalid', '-addext', 'subjectAltName=IP:127.0.0.1,DNS:installed-verifier-fixture.invalid'],
@@ -722,19 +748,23 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     }
     key.fill(0); const address = server.address(); assert(address && typeof address === 'object');
     const pin = sha256Bytes(new X509Certificate(cert).publicKey.export({ type: 'spki', format: 'der' }));
-    const signed = await buildInstalledSupervisorPackage(recipe.buildFixture, 'complete', { provider: 'openai-compatible', model,
+    ownedModelFixture = { provider: 'openai-compatible', model,
       target: { hostAscii: '127.0.0.1', port: address.port, basePath: '/v1' },
       tls: { serverNameAscii: 'installed-verifier-fixture.invalid', caPem: cert, spkiSha256Pins: [pin] },
       claims: { nativeToolCalling: true, streaming: false, trustedUsageEvidence: false, contextLimitTokens: 32768, maxOutputTokens: 4096 },
       requestTokenCeiling: { inputTokens: 32768, outputTokens: 4096, cacheReadTokens: 0, cacheWriteTokens: 0 },
-      validFrom: new Date(Date.now() - 60000).toISOString(), validThrough: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString() },
-    { guestToolchain: 'node-test-v1', publicationRetirementDiagnostics: options.publicationRetirementDiagnostics,
+      validFrom: new Date(Date.now() - 60000).toISOString(), validThrough: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString() };
+    }
+    const buildOptions = { guestToolchain: 'node-test-v1' as const, publicationRetirementDiagnostics: options.publicationRetirementDiagnostics,
       serverAuthenticationDiagnostics: options.publicationRetirementDiagnostics,
       ...(storeFailureDiagnostics ? { storeFailureDiagnostics: true as const } : {}),
       resourceDiagnostics: true,
       ...(journeyKind === 'verifier' ? { bundledSkills: installedBundledSkill() } : {}),
       ...(options.npmDependencyArchive ? { npmDependencyArchive: options.npmDependencyArchive } : {}),
-      ...(journeyKind === 'verifier' ? { guestImageProfile: 'qualification_max' as const } : {}) });
+      ...(journeyKind === 'verifier' ? { guestImageProfile: 'qualification_max' as const } : {}) };
+    const signed = options.provider
+      ? await buildInstalledProviderQualificationPackage(recipe.buildFixture, options.provider.definition, buildOptions)
+      : await buildInstalledSupervisorPackage(recipe.buildFixture, 'complete', ownedModelFixture, buildOptions);
     assert(signed.guestToolchain && signed.modelAuthority);
     expectedToolNames = signed.modelAuthority.tools.value.entries.map(entry => entry.name);
     const installer = await build({ entryPoints: [fileURLToPath(new URL('./installed-runtime-installer.ts', import.meta.url))],
@@ -807,7 +837,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       mode: 448, openedNoFollow: true, layoutVersion: 1 });
     const principal = identityHash('cliq-local-principal-v1', rootDigest, 'linux', ledger.uid);
     const registration: EndpointRegistrationV1 = { schemaVersion: 1, format: 'cliq-endpoint-registration-v1',
-      endpointRegistrationId: 'installed-verifier-endpoint', registrationKind: 'user', ownerPrincipalId: principal,
+      endpointRegistrationId: options.provider ? 'installed-provider-endpoint' : 'installed-verifier-endpoint', registrationKind: 'user', ownerPrincipalId: principal,
       purposes: ['model_endpoint'], ...signed.modelAuthority.endpoint, createdAt: new Date().toISOString(), registrationDigest: '' };
     registration.registrationDigest = digestOmitting(registration, 'registrationDigest');
     const registerCore = { schemaVersion: 1, kind: 'register', ownerPrincipalId: principal, registration,
@@ -829,10 +859,11 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         schemaVersion: 1, kind: 'commit', requestId: nextId(), commandCore: { ...core, commandDigest: digestOmitting(core, 'commandDigest') } }));
       assert.equal(decodeEndpointAuthorityOperation(success(registered, 'operation')).disposition, 'registered');
     }
-    const credentialId = 'installed-verifier-credential';
+    const credentialId = options.provider ? 'installed-provider-credential' : 'installed-verifier-credential';
     const enrollment = { schemaVersion: 1, kind: 'enroll', requestId: nextId(), credentialGrantId: credentialId,
       purpose: 'model_endpoint', endpointRegistrationId: registration.endpointRegistrationId,
-      secretSubmissionId: 'installed-verifier-fixture-secret', expiresAt: '2099-01-01T00:00:00.000Z' };
+      secretSubmissionId: options.provider ? 'installed-provider-owned-secret' : 'installed-verifier-fixture-secret',
+      expiresAt: options.provider ? options.provider.definition.validThrough : '2099-01-01T00:00:00.000Z' };
     const enrollDiagnostic = {} as InstalledEnrollDiagnostic;
     report.enrollDiagnostic = enrollDiagnostic;
     const summarizeUnits = () => {
@@ -971,6 +1002,46 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     }
     report.cases = [];
     await mkdir(recipe.workspace, { mode: 0o700 }); await chown(recipe.workspace, ledger.uid, ledger.gid);
+    if (options.provider) {
+      const workspace = path.join(recipe.workspace, 'provider');
+      await mkdir(workspace, { mode: 0o700 }); await chown(workspace, ledger.uid, ledger.gid);
+      for (const [name, bytes] of Object.entries(PROVIDER_JOURNEY_FILES)) {
+        const filename = path.join(workspace, name);
+        await writeFile(filename, bytes, { flag: 'wx', mode: 0o644 }); await chown(filename, ledger.uid, ledger.gid);
+      }
+      const workspaceId = sha256Bytes(Buffer.from(workspace)), directory = path.join(cliqHome, 'workspaces', workspaceId);
+      await mkdir(directory, { recursive: true, mode: 0o700 });
+      for (const filename of [path.dirname(directory), directory]) await chown(filename, ledger.uid, ledger.gid);
+      const trust = path.join(directory, 'trust.json');
+      await writeFile(trust, canonicalJsonBytes({ version: 1, workspaceId, workspaceRealPath: workspace,
+        decision: 'trusted', decidedAt: new Date().toISOString() }), { flag: 'wx', mode: 0o600 }); await chown(trust, ledger.uid, ledger.gid);
+      const observeFile = async (name: 'math.mjs' | 'check.test.mjs') => {
+        const filename = path.join(workspace, name), held = await open(filename, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+        try {
+          const before = await held.stat({ bigint: true });
+          assert(before.isFile() && before.uid === BigInt(ledger.uid) && before.nlink === 1n && before.size <= 1_048_576n);
+          const bytes = await held.readFile(), after = await held.stat({ bigint: true }), named = await lstat(filename, { bigint: true });
+          for (const field of imageFields) { assert.equal(before[field], after[field]); assert.equal(after[field], named[field]); }
+          assert.equal(BigInt(bytes.length), before.size); scanBytes(bytes); return bytes;
+        } finally { await held.close(); }
+      };
+      report.providerWorkflow = await runInstalledProviderJourney({ workspacePath: workspace,
+        model: { provider: 'openai-compatible', model: options.provider.definition.model,
+          endpoint: { kind: 'registered', endpointRegistrationId: registration.endpointRegistrationId }, modelCredentialGrantIds: [credentialId] },
+        budgets: options.provider.budgets, guestToolchainManifestId: signed.guestToolchain.manifestId,
+        endpointIdentityDigest: signed.modelAuthority.endpoint.endpointIdentityDigest }, {
+        send: async (body, timeout) => { assert(client); return client.send(body, timeout); },
+        artifact: async (ref, options) => {
+          options.signal?.throwIfAborted(); const bytes = await readPublicArtifact(ref);
+          options.signal?.throwIfAborted(); assert(bytes.length <= options.maxBytes); return bytes;
+        },
+        reconnect: async () => { assert(client); await client.close(); client = undefined; client = await persistentClient(); },
+        observeWorkspace: async () => ({ paths: await readdir(workspace), math: await observeFile('math.mjs'), test: await observeFile('check.test.mjs') }),
+        review: detail => { scanBytes(Buffer.from(detail.text)); report.reviewedResultRef = detail.artifactRef; },
+        mark,
+      });
+      report.protocolWorkflowComplete = true;
+    } else {
     const createSource = async (sourceKind: SourceCaseKind) => {
       assert(client && signed.guestToolchain);
       const kind = sourceBehavior(sourceKind);
@@ -1979,6 +2050,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       assert.equal(postCount, 10); assert.equal(acceptedTcp, postCount); assert.equal(acceptedTls, postCount); assert(!responderFailure);
       assert.equal(originalPublicResultBytes.size, 10);
     }
+    }
     report.qualified = true;
   } catch (error) { primary = error; }
   finally {
@@ -2215,7 +2287,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     if (!primary) {
       try {
         mark('complete_retained_secret_corpus');
-        assert.equal(report.installedWritersJoined, true); assert.equal(report.httpsJoined, true); assert.equal(report.daemonJoined, true);
+        assert.equal(report.installedWritersJoined, true); assert.equal(report.daemonJoined, true);
+        if (!options.provider) assert.equal(report.httpsJoined, true);
         const before = scanner.stats();
         beforeCorpus = Object.freeze({ streamsOpened: before.streamsOpened, bytesScanned: before.bytesScanned });
         scanStage = 'corpus';
@@ -2287,7 +2360,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         }
         if (error instanceof AggregateError) errors.unshift(...error.errors.slice(0, 4));
       }
-      report.error = { diagnosticOnly: true, kind: journeyKind === 'verifier' ? 'installed_verifier_journey_failed' : 'installed_delivery_journey_failed', sourceFrames: frames, failureKinds };
+      report.error = { diagnosticOnly: true, kind: options.provider ? 'installed_provider_journey_failed'
+        : journeyKind === 'verifier' ? 'installed_verifier_journey_failed' : 'installed_delivery_journey_failed', sourceFrames: frames, failureKinds };
     }
     let publication: Buffer;
     try {
@@ -2307,7 +2381,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     secret.fill(0); password.fill(0);
     try { await writeFile(recipe.reportFile, publication, { flag: 'wx', mode: 0o644 }); } finally { publication.fill(0); }
   }
-  if (primary) throw new Error(journeyKind === 'verifier' ? 'actual installed verifier journey failed; inspect the closed diagnostic report'
+  if (primary) throw new Error(options.provider ? 'actual installed provider journey failed; inspect the closed diagnostic report'
+    : journeyKind === 'verifier' ? 'actual installed verifier journey failed; inspect the closed diagnostic report'
     : 'actual installed Delivery journey failed; inspect the closed diagnostic report');
 }
 
