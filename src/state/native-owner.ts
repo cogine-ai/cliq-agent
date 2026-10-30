@@ -1131,6 +1131,7 @@ type RawInstalledUpgradeKeeperCheck = Readonly<{ assertCurrent(): void; close():
 type NativeCredentialScope = Readonly<{ generation: string; assertHeld(): void; close(): void;
   observeProducerLifetime(pid: number, ownerUid: number, processStartToken: string): 'present' | 'dead' }>;
 type NativeBinding = { acquireLock(stateRoot: string, createLayout: boolean): NativeLock; processStartToken(): string;
+  tryLockClientDataDirectory?(directoryFd: number): HeldClientDataLock | null;
   duplicateClientStdout?(): number;
   duplicateClientStderr?(): number;
   decodeSourceGitLifecycle?(bytes: Buffer): SourceGitNativeLifecycleV2;
@@ -1149,6 +1150,37 @@ type NativeBinding = { acquireLock(stateRoot: string, createLayout: boolean): Na
   executeInstalledImage?(fd: number, image: readonly bigint[], bootstrap: readonly bigint[], root: readonly bigint[],
     stateRoot: string, bundleDigest: string, relativePath: string, role: 'keeper' | 'supervisor' | 'endpoint' | 'credential', command?: string): never };
 const nativeBindings = new WeakMap<NativeStateOwner, NativeBinding>();
+
+/** A private client-file serialization owner only. It grants no StateOwner,
+ * credential, database, Run, process-death or execution authority. */
+export type HeldClientDataLock = Readonly<{ assertHeld(): void; close(): void }>;
+export function tryLockClientDataDirectory(native: NativeStateOwner, directoryFd: number): HeldClientDataLock | null {
+  const binding = nativeBindings.get(native);
+  if (!binding) throw new KernelStorageError('ARTIFACT_MISMATCH', 'client-data locking requires the original loaded native image');
+  if (typeof binding.tryLockClientDataDirectory !== 'function')
+    throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'installed helper lacks private client-data serialization');
+  if (!Number.isSafeInteger(directoryFd) || directoryFd < 0 || directoryFd > 0x7fffffff)
+    throw new TypeError('client-data locking requires one held directory descriptor');
+  const convert = (error: unknown): never => {
+    if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT')
+      throw new ResourceRetirementError('private client-data lock did not retire', error);
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'private client-data lock is unavailable or changed', { cause: error });
+  };
+  let original: HeldClientDataLock | null;
+  try { original = binding.tryLockClientDataDirectory(directoryFd); } catch (error) { return convert(error); }
+  if (original === null) return null;
+  const held: HeldClientDataLock = Object.freeze({
+    assertHeld(...args: unknown[]) {
+      if (this !== held || args.length) throw new TypeError('client-data lock requires its original receiver and no arguments');
+      try { original.assertHeld(); } catch (error) { convert(error); }
+    },
+    close(...args: unknown[]) {
+      if (this !== held || args.length) throw new TypeError('client-data lock requires its original receiver and no arguments');
+      try { original.close(); } catch (error) { convert(error); }
+    }
+  });
+  return held;
+}
 
 /** Fixed stdio-only bridge, available solely on the original loaded image.
  * The caller immediately transfers the duplicate to its own Socket owner. */

@@ -6,6 +6,7 @@ import { CONTROL_FRAME_BYTES, CONTROL_V1_SOURCE_DIGEST, decodeControlFrame, deco
   decodeInstalledControlResponse, type InstalledControlResponseFor } from '../control/v1.js';
 import { openPrivateClientDirectory, type PrivateClientDirectory, type PrivateClientDirectoryIdentity } from './private-files.js';
 import type { PendingClientMutation, PendingRequestMetadata, PendingRequestRecord, PendingRequestSummary } from './request-data.js';
+import { ClientPendingRequestError } from './errors.js';
 export type { PendingClientMutation, PendingRequestMetadata, PendingRequestRecord, PendingRequestSummary } from './request-data.js';
 
 const METADATA_BYTES = 4096;
@@ -81,7 +82,9 @@ export async function openPendingRequests(directory: PrivateClientDirectory, sup
   const acknowledging = new Map<string, Promise<void>>();
   function serial<T>(operation: () => Promise<T>): Promise<T> {
     if (closed) return Promise.reject(new TypeError('pending request data is closed'));
-    const result = tail.then(async () => { await assertBinding(); const value = await operation(); await assertBinding(); return value; });
+    const result = tail.then(() => directory.withLock(async () => {
+      await assertBinding(); const value = await operation(); await assertBinding(); return value;
+    }));
     tail = result.then(() => {}, () => {}); return result;
   }
   async function read(group: PrivateClientDirectory): Promise<PendingRequestRecord> {
@@ -103,16 +106,20 @@ export async function openPendingRequests(directory: PrivateClientDirectory, sup
       return value;
     } finally { await group.close(); }
   }
+  async function* scan(): AsyncGenerator<PendingRequestRecord> {
+    for (const requestId of await requests.names()) {
+      // Acknowledgement residues bind the original physical group; they are
+      // not unresolved requests or permission to send anything.
+      if (requestId.startsWith('.ack-')) { await requests.assertAcknowledgedDirectory(requestId); continue; }
+      assertRequestId(requestId); yield await load(requestId);
+    }
+  }
   return Object.freeze({
     list(): Promise<readonly PendingRequestSummary[]> {
       return serial(async () => {
         const result: PendingRequestSummary[] = [];
-        for (const requestId of await requests.names()) {
-          // Only explicit acknowledgement of a strictly known response moves a
-          // group to this identity-bound cleanup namespace. It is local data,
-          // never a peer response or authority to execute/retry anything.
-          if (requestId.startsWith('.ack-')) { await requests.assertAcknowledgedDirectory(requestId); continue; }
-          assertRequestId(requestId); const value = await load(requestId), response = value.response;
+        for await (const value of scan()) {
+          const response = value.response;
           const snapshot = response?.ok && 'snapshot' in response.result ? response.result.snapshot : undefined;
           result.push(Object.freeze({ metadata: value.metadata, state: response === undefined ? 'unresolved' : 'known',
             ...(snapshot && 'run' in snapshot ? { knownRunId: snapshot.run.id } : {}),
@@ -121,11 +128,26 @@ export async function openPendingRequests(directory: PrivateClientDirectory, sup
         return Object.freeze(result);
       });
     },
-    retain(suppliedRequest: unknown): Promise<Readonly<PendingRequestRecord & { existing: boolean }>> {
+    retain(suppliedRequest: unknown, options: Readonly<{ replay?: boolean }> = {}): Promise<Readonly<PendingRequestRecord & { existing: boolean }>> {
       const original = mutation(suppliedRequest), bytes = canonicalJsonBytes(original);
+      const replay = options.replay === true;
       return serial(async () => {
+        // The original-byte publication and the complete fresh unknown check
+        // share this one OS lock across independent clients and processes.
+        let previous: PendingRequestRecord | undefined, unresolved = false;
+        for await (const value of scan()) {
+          if (value.request.requestId === original.requestId) previous = value;
+          if (value.response === undefined) unresolved = true;
+        }
+        if (previous && !previous.bytes.equals(bytes)) throw new TypeError('pending request conflicts with the retained original bytes');
+        if (replay) {
+          if (!previous) throw new ClientPendingRequestError();
+          return Object.freeze({ ...previous, existing: true });
+        }
+        if (previous || unresolved) throw new ClientPendingRequestError();
         const created = await requests.createDirectory(original.requestId);
         try {
+          if (!created.created) throw new TypeError('new pending request publication was replaced');
           if (created.created) {
             const metadata: PendingRequestMetadata = { schemaVersion: 1, protocolVersion: 1, method: original.method,
               requestId: original.requestId, requestDigest: original.requestDigest, stateRoot: expected,

@@ -6,7 +6,7 @@ import { CONTROL_V1_SOURCE_DIGEST, decodeInstalledControlRequest, decodeInstalle
 import type { InstalledSupervisorClient } from '../state/installed-control-client.js';
 import { ResourceRetirementError } from '../state/errors.js';
 import { createClientApplication } from '../client/application.js';
-import { ClientPendingRequestError, ClientRequestPersistenceError } from '../client/errors.js';
+import { ClientBusyError, ClientPendingRequestError, ClientRequestPersistenceError } from '../client/errors.js';
 import { clientMutation } from '../client/commands.js';
 import type { ClientUpdate } from '../client/types.js';
 import type { PendingClientMutation, PendingRequestMetadata, PendingRequestRecord, PendingRequests } from '../client/pending-requests.js';
@@ -33,11 +33,13 @@ function data(initial: readonly PendingRequestRecord[] = []) {
     async list() { events.push('list'); return [...records.values()].map(value => ({ metadata: value.metadata,
       state: value.response === undefined ? 'unresolved' as const : 'known' as const })); },
     async load(id: string) { events.push('load'); const value = records.get(id); if (!value) throw new Error('record absent'); return value; },
-    async retain(supplied: unknown) {
+    async retain(supplied: unknown, options: Readonly<{ replay?: boolean }> = {}) {
       const request = decodeInstalledControlRequest(supplied) as PendingClientMutation;
       events.push('retain.begin'); await beforeRetain?.();
       const previous = records.get(request.requestId);
       if (previous && !previous.bytes.equals(canonicalJsonBytes(request))) throw new Error('original bytes differ');
+      if (options.replay ? !previous : previous || [...records.values()].some(value => value.response === undefined))
+        throw new ClientPendingRequestError();
       const value = previous ?? Object.freeze({ metadata: metadata(request), request, bytes: canonicalJsonBytes(request) });
       records.set(request.requestId, value); events.push('retain.joined'); return { ...value, existing: previous !== undefined };
     },
@@ -76,16 +78,17 @@ test('the shared mutation waits for complete original persistence and complete s
     await retained; assert.equal(sent, 0); assert.equal(session.pendingRequest, undefined);
     allowRetain(); await resolved; assert.equal(sent, 1); assert.equal(returned, false); assert.deepEqual(session.pendingRequest, original);
     allowResolve(); assert.equal((await request).ok, false); assert.equal(session.pendingRequest, undefined);
-    assert.deepEqual(saved.events, ['list', 'retain.begin', 'retain.joined', 'response.begin', 'response.joined']);
+    assert.deepEqual(saved.events, ['retain.begin', 'retain.joined', 'response.begin', 'response.joined']);
     await session.close(); assert(saved.records.get(original.requestId)?.response, 'SDK/session close must preserve an unacknowledged known result');
   } finally { allowRetain(); allowResolve(); await session.close(); }
 });
 
-test('startup unknowns fence new mutations and convenience cancel without installing a different memory pending or disconnecting reads', async () => {
-  const original = originalRequest(), saved = data([record(original)]); let sends = 0;
+test('the atomic retained-data check fences foreign unknowns and convenience cancel without installing a different memory pending or disconnecting reads', async () => {
+  const original = originalRequest(), saved = data(); let sends = 0;
   const bytes: Buffer[] = [], updates: ClientUpdate[] = [];
   const remote = peer(async value => { sends++; bytes.push(canonicalJsonBytes(value)); return refusal(); });
   const session = createInstalledControlSession(remote, async () => remote, saved.store), app = createClientApplication(session, update => { updates.push(update); });
+  saved.records.set(original.requestId, record(original)); // Another client publishes after this session has opened.
   try {
     const other = originalRequest();
     await assert.rejects(app.execute({ kind: 'request', request: other }), ClientPendingRequestError);
@@ -97,7 +100,7 @@ test('startup unknowns fence new mutations and convenience cancel without instal
     assert.deepEqual((await app.requests!.load(original.requestId)).request, original); assert.equal(sends, 0, 'a disk response/read is never a new peer result');
     await app.requests!.replay(original.requestId); assert.equal(sends, 1); assert.deepEqual(bytes[0], canonicalJsonBytes(original));
     await app.execute({ kind: 'request', request: other }); assert.equal(sends, 2);
-    assert.equal(saved.events.filter(value => value === 'list').length, 1, 'known history is scanned once, not before each wire request');
+    assert.equal(saved.events.filter(value => value === 'list').length, 0, 'a startup snapshot must not replace the atomic retain check');
   } finally { await app.close(); }
 });
 
@@ -112,6 +115,40 @@ test('a prewire storage failure sends nothing, preserves a healthy peer and fenc
     await assert.rejects(app.execute({ kind: 'request', request: originalRequest() }), ClientRequestPersistenceError); assert.equal(sends, 0);
     await app.execute({ kind: 'request', request: { protocolVersion: 1, method: 'supervisor.status' } });
     assert(!updates.some(update => update.kind === 'pending' || update.kind === 'connection' && update.state === 'disconnected'));
+  } finally { await app.close(); }
+});
+
+test('temporary data-lock busy is a healthy prewire refusal and never permanently poisons a client', async () => {
+  const saved = data(), original = originalRequest(), updates: ClientUpdate[] = []; let sends = 0;
+  saved.retainHook(async () => { throw new ClientBusyError(); });
+  const session = createInstalledControlSession(peer(async () => { sends++; return refusal(); }), undefined, saved.store);
+  const app = createClientApplication(session, update => { updates.push(update); });
+  try {
+    await assert.rejects(app.execute({ kind: 'request', request: original }), ClientBusyError);
+    assert.equal(sends, 0); assert.equal(app.pendingRequest, undefined);
+    assert.equal(saved.records.size, 0);
+    await app.execute({ kind: 'request', request: { protocolVersion: 1, method: 'supervisor.status' } });
+    assert(!updates.some(update => update.kind === 'pending' || update.kind === 'connection' && update.state === 'disconnected'));
+    saved.retainHook();
+    await app.execute({ kind: 'request', request: original });
+    assert.equal(sends, 1); assert.equal(app.pendingRequest, undefined);
+  } finally { await app.close(); }
+});
+
+test('a response-side busy lock preserves the sent original and permits only explicit original replay after it clears', async () => {
+  const saved = data(), original = originalRequest(), updates: ClientUpdate[] = []; let sends = 0;
+  saved.resolveHook(async () => { throw new ClientBusyError(); });
+  const session = createInstalledControlSession(peer(async () => { sends++; return refusal(); }), undefined, saved.store);
+  const app = createClientApplication(session, update => { updates.push(update); });
+  try {
+    await assert.rejects(app.execute({ kind: 'request', request: original }), ClientBusyError);
+    assert.equal(sends, 1); assert.deepEqual(app.pendingRequest, original);
+    assert.equal(saved.records.get(original.requestId)?.response, undefined);
+    await assert.rejects(app.execute({ kind: 'request', request: originalRequest() }), ClientPendingRequestError);
+    saved.resolveHook(); assert.equal(sends, 1, 'clearing a file lock never automatically resends a mutation');
+    await app.requests!.replay(original.requestId);
+    assert.equal(sends, 2); assert.equal(app.pendingRequest, undefined);
+    assert(!updates.some(update => update.kind === 'connection' && update.state === 'disconnected'));
   } finally { await app.close(); }
 });
 

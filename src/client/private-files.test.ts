@@ -6,6 +6,8 @@ import path from 'node:path';
 import test from 'node:test';
 import { ResourceRetirementError } from '../state/errors.js';
 import { openPrivateClientDirectory } from './private-files.js';
+import { loadNativeStateOwner } from '../state/native-owner.js';
+import { ClientBusyError } from './errors.js';
 
 const linux = process.platform === 'linux';
 async function fixture() {
@@ -41,6 +43,43 @@ test('actual private files publish once, replace preferences atomically, and clo
     assert.equal((await f.directory.read('preferences.json', 65536))?.toString(), 'second');
     assert.deepEqual(await readdir(f.root), ['group', 'original.json', 'preferences.json']);
   } finally { await f.close(); }
+});
+
+test('adopting existing and cached directory births joins their actual owned parent sync before returning', { skip: !linux }, async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-private-birth-')), parent = path.join(home, '.cliq'), root = path.join(parent, 'client-v1');
+  await mkdir(root, { recursive: true, mode: 0o700 });
+  const sample = await open(home), prototype = Object.getPrototypeOf(sample), original = prototype.sync;
+  await sample.close();
+  const physical = (info: { dev: bigint; ino: bigint }) => `${info.dev}:${info.ino}`;
+  const observed: string[] = [];
+  prototype.sync = async function() {
+    observed.push(physical(fstatSync(this.fd, { bigint: true })));
+    return original.call(this); // Observe and join the real filesystem sync.
+  };
+  let directory: Awaited<ReturnType<typeof openPrivateClientDirectory>> | undefined;
+  try {
+    directory = await openPrivateClientDirectory(root, { create: true });
+    for (const ownedParent of [home, parent]) assert(observed.includes(physical(await lstat(ownedParent, { bigint: true }))));
+    const rootId = physical(await lstat(root, { bigint: true }));
+    await mkdir(path.join(root, 'requests-v1'), { mode: 0o700 });
+    observed.length = 0;
+    await directory.directory('requests-v1', true); // Another creator's existing edge.
+    assert.deepEqual(observed, [rootId]);
+    observed.length = 0;
+    await directory.directory('requests-v1', true); // The same held child is now cached.
+    assert.deepEqual(observed, [rootId]);
+    observed.length = 0;
+    assert.equal((await directory.createDirectory('requests-v1')).created, false);
+    assert.deepEqual(observed, [rootId]);
+    observed.length = 0;
+    assert.equal((await directory.createDirectory('new-group')).created, true);
+    assert.deepEqual(observed, [rootId], 'a new edge joins one complete parent barrier');
+    observed.length = 0;
+    const readOnly = await openPrivateClientDirectory(root);
+    await readOnly.close(); assert.deepEqual(observed, [], 'read-only binding checks add no publication barrier');
+  } finally {
+    prototype.sync = original; await directory?.close(); await rm(home, { recursive: true, force: true });
+  }
 });
 
 test('actual files reject symlinks, shared inodes, loose modes and oversized input without following or replacing them', { skip: !linux }, async () => {
@@ -113,6 +152,28 @@ test('closing joins the actual accepted file read and rejects later work', { ski
     await assert.rejects(f.directory.read('data.json', 100), /closed/u);
     release(); assert.equal((await reading as Buffer).toString(), 'original'); await closing; assert.equal(closed, true);
   } finally { release(); await reading?.catch(() => {}); if (prototype) prototype.read = original; await f.close(); }
+});
+
+test('root close joins the complete actual flock lifetime before releasing its held directory family', { skip: !linux }, async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-private-lock-')), filename = path.join(home, 'client');
+  const native = await loadNativeStateOwner(), directory = await openPrivateClientDirectory(filename, { create: true, native });
+  const other = await openPrivateClientDirectory(filename, { native });
+  let enter!: () => void, release!: () => void, closed = false;
+  const entered = new Promise<void>(resolve => { enter = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+  const holding = directory.withLock(async () => { enter(); await gate; await directory.names(); });
+  void holding.catch(() => {});
+  let closing: Promise<void> | undefined;
+  try {
+    await entered; closing = directory.close().then(() => { closed = true; });
+    await Promise.resolve(); assert.equal(closed, false);
+    await assert.rejects(other.withLock(async () => {}), ClientBusyError);
+    release(); await assert.rejects(holding, /closed/u); await closing;
+    assert.equal(closed, true);
+    await other.withLock(async () => { assert.deepEqual(await other.names(), ['client-mutation.lock']); });
+  } finally {
+    release(); await Promise.allSettled([holding, closing]);
+    await directory.close(); await other.close(); await rm(home, { recursive: true, force: true });
+  }
 });
 
 test('original descriptor close failure outranks an ordinary read failure and is never retried', { skip: !linux }, async () => {

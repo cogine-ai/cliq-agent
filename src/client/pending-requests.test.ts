@@ -3,12 +3,17 @@ import { lstat, mkdir, mkdtemp, open, readFile, readdir, rename, rm, writeFile }
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { fork } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { once } from 'node:events';
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import { CONTROL_FRAME_BYTES, CONTROL_V1_SOURCE_DIGEST, decodeInstalledControlRequest } from '../control/v1.js';
 import { MAX_JSON_CONTAINER_ENTRIES, MAX_JSON_DEPTH, measureBoundedJsonValue } from '../kernel/json.js';
 import { clientMutation } from './commands.js';
 import { decodePendingRequestFiles, openPendingRequests, type PendingClientMutation, type PendingRequestMetadata } from './pending-requests.js';
 import { openPrivateClientDirectory } from './private-files.js';
+import { loadNativeStateOwner } from '../state/native-owner.js';
+import { ClientBusyError, ClientPendingRequestError } from './errors.js';
 import { runSnapshot, sessionSnapshot } from './testing/protocol.js';
 
 const linux = process.platform === 'linux', bundle = canonicalSha256('original source bundle');
@@ -73,9 +78,10 @@ async function fixture() {
   await mkdir(root, { mode: 0o700 });
   const physical = await lstat(root, { bigint: true });
   const binding = { stateRoot: { canonicalPath: root, deviceId: String(physical.dev), fileId: String(physical.ino), ownerUid: Number(physical.uid) }, sourceBundleDigest: bundle };
-  const directoryPath = path.join(home, 'client'), directory = await openPrivateClientDirectory(directoryPath, { create: true });
+  const native = await loadNativeStateOwner();
+  const directoryPath = path.join(home, 'client'), directory = await openPrivateClientDirectory(directoryPath, { create: true, native });
   const pending = await openPendingRequests(directory, binding);
-  return { home, root, binding, directoryPath, directory, pending,
+  return { home, root, binding, directoryPath, directory, pending, native,
     async close() { await pending.close(); try { await directory.close(); } finally { await rm(home, { recursive: true, force: true }); } } };
 }
 
@@ -85,15 +91,16 @@ test('real files retain an unknown request across restart and a strict known res
     const retained = await f.pending.retain(original); assert.equal(retained.existing, false);
     assert.deepEqual(retained.bytes, canonicalJsonBytes(original));
     await f.pending.close(); await f.directory.close();
-    const directory = await openPrivateClientDirectory(f.directoryPath), pending = await openPendingRequests(directory,
+    const directory = await openPrivateClientDirectory(f.directoryPath, { native: f.native }), pending = await openPendingRequests(directory,
       { ...f.binding, sourceBundleDigest: canonicalSha256('upgraded current bundle') });
     try {
       assert.equal((await pending.list())[0]?.state, 'unresolved');
       assert.deepEqual((await pending.load(original.requestId)).request, original);
-      assert.equal((await pending.retain(original)).existing, true);
+      await assert.rejects(pending.retain(original), ClientPendingRequestError);
+      assert.equal((await pending.retain(original, { replay: true })).existing, true);
       await pending.resolve(original, knownResponse()); // No output occurred.
     } finally { await pending.close(); await directory.close(); }
-    const nextDirectory = await openPrivateClientDirectory(f.directoryPath), next = await openPendingRequests(nextDirectory, f.binding);
+    const nextDirectory = await openPrivateClientDirectory(f.directoryPath, { native: f.native }), next = await openPendingRequests(nextDirectory, f.binding);
     try {
       assert.deepEqual((await next.load(original.requestId)).response, knownResponse());
       const entry = (await next.list())[0]; assert.equal(entry?.state, 'known'); assert.equal(entry?.knownSessionId, 'session');
@@ -163,4 +170,78 @@ test('explicit actual-file acknowledgement refuses unknown results and retires o
     assert.deepEqual(await readdir(path.join(f.directoryPath, 'requests-v1')), []);
     await f.directory.replace('preferences.json', Buffer.from('root family remains usable'));
   } finally { await f.close(); }
+});
+
+test('independent actual stores atomically fence foreign unknowns, release busy locks and preserve original replay', { skip: !linux }, async () => {
+  const f = await fixture(), first = request(), second = request();
+  const otherDirectory = await openPrivateClientDirectory(f.directoryPath, { native: f.native });
+  const other = await openPendingRequests(otherDirectory, f.binding);
+  let entered!: () => void, release!: () => void;
+  const inside = new Promise<void>(resolve => { entered = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+  const holding = f.directory.withLock(async () => { entered(); await gate; });
+  try {
+    await inside;
+    await assert.rejects(other.retain(second), ClientBusyError);
+    await assert.rejects(other.list(), ClientBusyError);
+    assert.deepEqual(await readdir(path.join(f.directoryPath, 'requests-v1')), []);
+    release(); await holding;
+    await f.pending.retain(first);
+    await assert.rejects(other.retain(second), ClientPendingRequestError);
+    await assert.rejects(other.retain(second, { replay: true }), ClientPendingRequestError);
+    assert.deepEqual(await readdir(path.join(f.directoryPath, 'requests-v1')), [first.requestId]);
+    const replayed = await other.retain(first, { replay: true });
+    assert.equal(replayed.existing, true); assert.deepEqual(replayed.bytes, canonicalJsonBytes(first));
+    await other.resolve(first, knownResponse());
+    assert.equal((await f.pending.load(first.requestId)).response?.ok, true);
+    await f.pending.acknowledge(first.requestId);
+    await other.retain(second);
+    assert.equal((await f.pending.list())[0]?.metadata.requestId, second.requestId);
+  } finally {
+    release(); await holding; await other.close(); await otherDirectory.close(); await f.close();
+  }
+});
+
+test('two real Linux processes cannot publish different unknown requests from simultaneous empty startup cuts', {
+  skip: !linux, timeout: 20_000,
+}, async t => {
+  const f = await fixture(), originals = [request(), request()];
+  const children = originals.map(original => {
+    const child = fork(fileURLToPath(new URL('./testing/pending-request-child.ts', import.meta.url)), [], {
+      execPath: process.execPath, execArgv: ['--import', 'tsx'], stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+    });
+    let output = 0;
+    for (const stream of [child.stdout!, child.stderr!]) stream.on('data', bytes => { output += bytes.length; if (output > 4096) child.kill('SIGKILL'); });
+    const closed = new Promise<void>((resolve, reject) => {
+      child.once('error', reject);
+      child.once('close', (code, signal) => code === 0 && signal === null ? resolve() : reject(new Error('owned pending-data child did not join successfully')));
+    });
+    void closed.catch(() => {});
+    const ready = once(child, 'message'); child.send({ directoryPath: f.directoryPath, binding: f.binding, request: original });
+    return { child, closed, ready };
+  });
+  const abort = () => { for (const owner of children) if (owner.child.exitCode === null && owner.child.signalCode === null) owner.child.kill('SIGKILL'); };
+  t.signal.addEventListener('abort', abort, { once: true });
+  try {
+    for (const owner of children) {
+      const [message] = await Promise.race([owner.ready, owner.closed.then(() => { throw new Error('owned child closed before ready'); })]);
+      assert.deepEqual(message, { kind: 'ready' });
+    }
+    const results = children.map(owner => {
+      const result = once(owner.child, 'message'); owner.child.send({ kind: 'retain' });
+      return Promise.race([result, owner.closed.then(() => { throw new Error('owned child closed before result'); })]);
+    });
+    const outcomes = await Promise.all(results);
+    assert.equal(outcomes.filter(([value]) => value.kind === 'created').length, 1);
+    assert(outcomes.every(([value]) => ['created', 'busy', 'pending'].includes(value.kind)));
+    await Promise.all(children.map(owner => owner.closed));
+    const winner = originals[outcomes.findIndex(([value]) => value.kind === 'created')]!;
+    const records = await f.pending.list(); assert.equal(records.length, 1);
+    assert.equal(records[0]!.state, 'unresolved'); assert.equal(records[0]!.metadata.requestId, winner.requestId);
+    assert.deepEqual((await f.pending.load(winner.requestId)).bytes, canonicalJsonBytes(winner));
+    assert.deepEqual(await readdir(path.join(f.directoryPath, 'requests-v1')), [winner.requestId]);
+  } finally {
+    t.signal.removeEventListener('abort', abort);
+    for (const owner of children) if (owner.child.exitCode === null && owner.child.signalCode === null) owner.child.kill('SIGTERM');
+    await Promise.allSettled(children.map(owner => owner.closed)); await f.close();
+  }
 });

@@ -109,11 +109,13 @@ export async function configureInstalledModel(selected: HeldInstalledRuntime, da
       record.expiresAt !== undefined && new Date().toISOString() >= record.expiresAt)
     throw new TypeError('model credential is revoked, expired or differs from its original endpoint');
   await currentModel(selected, data, profile);
-  const preferences = await readClientPreferences(data.directory);
   const selection: ClientModelSelectionV1 = { alias, provider: profile.provider, model: profile.model,
     endpointRegistrationId: request.credential.endpointRegistrationId, credentialGrantId: request.credential.credentialGrantId };
-  await writeClientPreferences(data.directory, { ...preferences,
-    modelSelections: [...preferences.modelSelections.filter(value => value.alias !== alias), selection],
-    defaultModelAlias: preferences.defaultModelAlias ?? alias });
+  await data.directory.withLock(async () => {
+    const preferences = await readClientPreferences(data.directory);
+    await writeClientPreferences(data.directory, { ...preferences,
+      modelSelections: [...preferences.modelSelections.filter(value => value.alias !== alias), selection],
+      defaultModelAlias: preferences.defaultModelAlias ?? alias });
+  });
   return selection;
 }

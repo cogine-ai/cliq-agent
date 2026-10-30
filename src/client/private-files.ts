@@ -3,7 +3,9 @@ import { constants, type BigIntStats } from 'node:fs';
 import { link, lstat, mkdir, open, opendir, rename, rmdir, unlink, type FileHandle } from 'node:fs/promises';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { assertRequestId, normalizeAbsolutePath } from '../kernel/identity.js';
-import { ResourceRetirementError } from '../state/errors.js';
+import { KernelStorageError, ResourceRetirementError } from '../state/errors.js';
+import { tryLockClientDataDirectory, type NativeStateOwner } from '../state/native-owner.js';
+import { ClientBusyError } from './errors.js';
 
 const FILE_BYTES = 1024 * 1024;
 const DIRECTORY_ENTRIES = 4096;
@@ -25,6 +27,7 @@ export type PrivateClientDirectory = Readonly<{
   names(): Promise<readonly string[]>;
   sync(): Promise<void>;
   assertCurrent(): Promise<void>;
+  withLock<T>(operation: () => Promise<T>): Promise<T>;
   close(): Promise<void>;
 }>;
 type Directory = { handle: FileHandle; info: BigIntStats; parent?: Directory; name: string; private: boolean; closing?: Promise<void>; closed?: boolean };
@@ -54,7 +57,8 @@ class PrivateFiles {
   private tail: Promise<void> = Promise.resolve();
   private closing?: Promise<void>;
   private retirement?: ResourceRetirementError;
-  constructor(readonly uid: bigint) {}
+  private readonly lockTasks = new Set<Promise<unknown>>();
+  constructor(readonly uid: bigint, readonly native?: NativeStateOwner) {}
   own(handle: FileHandle) { this.handles.add(handle); return handle; }
   checkDirectory(info: BigIntStats, privateDirectory: boolean) {
     if (!info.isDirectory() || (privateDirectory ? info.uid !== this.uid || (info.mode & 0o7777n) !== 0o700n :
@@ -95,15 +99,18 @@ class PrivateFiles {
   }
   async directory(parent: Directory, entry: string, create: boolean): Promise<Directory> {
     const known = this.directories.find(value => value.parent === parent && value.name === entry);
-    if (known) return known;
+    if (known) { if (create) await parent.handle.sync(); return known; }
     const filename = child(parent, entry);
-    if (create) try { await mkdir(filename, { mode: 0o700 }); await parent.handle.sync(); }
+    if (create) try { await mkdir(filename, { mode: 0o700 }); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
     const named = await lstat(filename, { bigint: true }); this.checkDirectory(named, true);
     const handle = this.own(await open(filename, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW | constants.O_NONBLOCK));
     try {
       const info = await handle.stat({ bigint: true }); this.checkDirectory(info, true);
       if (!same(info, named)) throw new TypeError('private client directory changed while opening');
+      // An existing edge may have just been published by another process
+      // which has not synced its parent. Adopting it must join that barrier.
+      if (create) await parent.handle.sync();
       const directory = { handle, info, parent, name: entry, private: true }; this.directories.push(directory); return directory;
     } catch (error) { await this.retire(handle); throw error; }
   }
@@ -191,6 +198,32 @@ class PrivateFiles {
     finally { try { await stream.close(); } catch (cause) { throw this.retirement ??= new ResourceRetirementError('private client directory stream did not close', cause); } }
     return Object.freeze(entries.sort());
   }
+  withLock<T>(directory: Directory, operation: () => Promise<T>): Promise<T> {
+    let held: ReturnType<typeof tryLockClientDataDirectory>;
+    const acquired = this.at(directory, () => {
+      if (!this.native) throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'private client requests require the original native file lock');
+      const lock = held = tryLockClientDataDirectory(this.native, directory.handle.fd);
+      if (!lock) throw new ClientBusyError();
+      return Promise.resolve(lock);
+    }).catch(error => { held?.close(); throw error; });
+    const pending = acquired.then(async lock => {
+      try {
+        lock.assertHeld();
+        const value = await operation();
+        await this.at(directory, async () => { lock.assertHeld(); });
+        return value;
+      } catch (error) {
+        if (error instanceof ResourceRetirementError) this.retirement ??= error;
+        throw error;
+      } finally { lock.close(); }
+    }).catch(error => {
+      if (error instanceof ResourceRetirementError) this.retirement ??= error;
+      throw this.retirement ?? error;
+    });
+    this.lockTasks.add(pending);
+    void pending.finally(() => this.lockTasks.delete(pending)).catch(() => {});
+    return pending;
+  }
   view(directory: Directory, root = false): PrivateClientDirectory {
     return Object.freeze({ identity: identity(directory),
       read: (entry: string, maxBytes: number) => { name(entry); limit(maxBytes); return this.at(directory, () => this.read(directory, entry, maxBytes)); },
@@ -205,9 +238,11 @@ class PrivateFiles {
       directory: (entry: string, create = false) => { name(entry); return this.at(directory, async () => this.view(await this.directory(directory, entry, create))); },
       createDirectory: (entry: string) => { name(entry); return this.at(directory, async () => {
         let created = false;
-        try { await mkdir(child(directory, entry), { mode: 0o700 }); created = true; await directory.handle.sync(); }
+        try { await mkdir(child(directory, entry), { mode: 0o700 }); created = true; }
         catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
-        return Object.freeze({ directory: this.view(await this.directory(directory, entry, false)), created });
+        const opened = await this.directory(directory, entry, false);
+        await directory.handle.sync();
+        return Object.freeze({ directory: this.view(opened), created });
       }); },
       acknowledgeDirectory: (entry: string, expected: PrivateClientDirectoryIdentity,
         supplied: readonly Readonly<{ name: string; bytes: Uint8Array }>[]) => {
@@ -248,10 +283,16 @@ class PrivateFiles {
       },
       names: () => this.at(directory, () => this.names(directory)),
       sync: () => this.at(directory, () => directory.handle.sync()),
-      assertCurrent: () => this.at(directory, async () => {}), close: () => root ? this.close() : this.closeDirectory(directory) });
+      assertCurrent: () => this.at(directory, async () => {}),
+      withLock: <T>(operation: () => Promise<T>) => {
+        if (!root) return Promise.reject(new TypeError('private client locking requires its original root directory'));
+        return this.withLock(directory, operation);
+      },
+      close: () => root ? this.close() : this.closeDirectory(directory) });
   }
   close(): Promise<void> {
     return this.closing ??= (async () => {
+      await Promise.allSettled([...this.lockTasks]);
       await this.tail;
       const results = await Promise.allSettled([...this.handles].reverse().map(handle => this.retire(handle)));
       if (this.retirement) throw this.retirement;
@@ -262,10 +303,11 @@ class PrivateFiles {
 
 /** Internal data path, chosen by the installed host from the actual account.
  * There is intentionally no environment override or non-Linux path fallback. */
-export async function openPrivateClientDirectory(filename: string, options: Readonly<{ create?: boolean }> = {}): Promise<PrivateClientDirectory> {
+export async function openPrivateClientDirectory(filename: string,
+  options: Readonly<{ create?: boolean; native?: NativeStateOwner }> = {}): Promise<PrivateClientDirectory> {
   if (process.platform !== 'linux' || typeof process.geteuid !== 'function') throw new TypeError('private installed client data requires Linux descriptor-relative files');
   if (normalizeAbsolutePath(filename) !== filename || filename === '/') throw new TypeError('private client directory requires its canonical absolute path');
-  const scope = new PrivateFiles(BigInt(process.geteuid()));
+  const scope = new PrivateFiles(BigInt(process.geteuid()), options.native);
   try {
     const handle = scope.own(await open('/', constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW));
     let directory: Directory = { handle, info: await handle.stat({ bigint: true }), name: '/', private: false };
@@ -279,7 +321,7 @@ export async function openPrivateClientDirectory(filename: string, options: Read
       try { named = await lstat(location, { bigint: true }); }
       catch (error) {
         if (!options.create || !missing(error) || directory.info.uid !== scope.uid) throw error;
-        try { await mkdir(location, { mode: 0o700 }); await directory.handle.sync(); }
+        try { await mkdir(location, { mode: 0o700 }); }
         catch (cause) { if ((cause as NodeJS.ErrnoException).code !== 'EEXIST') throw cause; }
         named = await lstat(location, { bigint: true });
       }
@@ -287,6 +329,7 @@ export async function openPrivateClientDirectory(filename: string, options: Read
       const held = scope.own(await open(location, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW | constants.O_NONBLOCK));
       const info = await held.stat({ bigint: true }); scope.checkDirectory(info, last);
       if (!same(named, info)) throw new TypeError('private client ancestor changed while opening');
+      if (options.create && directory.info.uid === scope.uid) await directory.handle.sync();
       directory = { handle: held, info, parent: directory, name: part, private: last }; scope.directories.push(directory);
     }
     await scope.assertDirectories(); return scope.view(directory, true);

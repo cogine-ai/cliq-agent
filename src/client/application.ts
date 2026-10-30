@@ -67,7 +67,7 @@ export function createClientApplication(session: InstalledControlSession,
           requestId: unresolved.requestId, ...('admissionKey' in unresolved ? { admissionKey: unresolved.admissionKey } : {}) }); }
         catch { /* Preserve the original transport, storage or resource failure. */ }
       }
-      if (error instanceof ClientPendingRequestError || error instanceof ClientRequestPersistenceError) throw error;
+      if (error instanceof ClientBusyError || error instanceof ClientPendingRequestError || error instanceof ClientRequestPersistenceError) throw error;
       disconnected = true;
       try { await emit({ kind: 'connection', state: 'disconnected' }); } catch { /* Preserve the original transport/resource failure. */ }
       throw error;

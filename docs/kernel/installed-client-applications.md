@@ -53,9 +53,21 @@ not a newly authenticated peer observation.
 An unknown response cannot be acknowledged. Incomplete or changed files remain
 failures requiring inspection, never a reason to submit a replacement.
 
+Every pending-data operation uses the same private-directory OS file lock.
+The current unresolved set is checked atomically with original request
+publication, including across already-open clients and independent processes.
+The lock is released before sending on the control channel. Contention is a
+local busy refusal, with no automatic polling, wire retry or unhealthy-peer
+substitution. Explicit replay requires an existing exact original and can
+reconcile multiple historical unknowns one at a time. The lock file is a live
+mutex only: it has no owner epoch, recovery evidence, expiry or unlink protocol.
+Model-alias read/merge/write also uses this same short metadata lock.
+
 Files use the actual Linux account's private directory, descriptor-relative
 no-follow operations, single-link files, fixed permissions, complete bounded
-reads, identity checks, fsync and real close/join. The request retains the
+reads, identity checks, fsync and real close/join. Create/adopt paths persist
+the actual owned parent-directory edges even when another process created the
+directory first; a child fsync alone cannot persist that birth. The request retains the
 unchanged 1 MiB, depth-32 and 10,000-node wire limits. Protocol-only fixtures
 without an installed file owner retain in-memory data only. A disk record never
 permits an automatic retry, a replacement admission, a hidden cancellation or a

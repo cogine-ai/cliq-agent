@@ -8,7 +8,7 @@ import { immutableSnapshot } from '../model/immutable.js';
 import { openInstalledSupervisorClient, type InstalledSupervisorClient } from '../state/installed-control-client.js';
 import type { HeldInstalledRuntime } from '../state/installed-runtime.js';
 import { ResourceRetirementError } from '../state/errors.js';
-import { ClientPendingRequestError, ClientRequestPersistenceError } from '../client/errors.js';
+import { ClientBusyError, ClientPendingRequestError, ClientRequestPersistenceError } from '../client/errors.js';
 import type { PendingRequests } from '../client/pending-requests.js';
 import type { ClientRequests, PendingClientMutation } from '../client/request-data.js';
 import { ControlRefusal } from './errors.js';
@@ -72,12 +72,11 @@ export function createInstalledControlSession(initial: InstalledSupervisorClient
     }); dataTasks.add(pending);
     void pending.finally(() => dataTasks.delete(pending)).catch(() => {}); return pending;
   }
-  const startup = retained ? retained.list().then(records => { for (const record of records) if (record.state === 'unresolved') unknown.add(record.metadata.requestId); }) : Promise.resolve();
-  void startup.catch(() => {});
   async function persist<T>(operation: () => Promise<T>): Promise<T> {
     try { return await operation(); }
     catch (error) {
       if (error instanceof ResourceRetirementError) throw retirementFailure ??= error;
+      if (error instanceof ClientBusyError || error instanceof ClientPendingRequestError) throw error;
       throw persistenceFailure ??= new ClientRequestPersistenceError(error);
     }
   }
@@ -94,11 +93,10 @@ export function createInstalledControlSession(initial: InstalledSupervisorClient
         try {
           const mutation = 'requestId' in candidate && 'requestDigest' in candidate ? candidate as PendingClientMutation : undefined;
           if (retained && mutation) {
-            await persist(() => startup);
             if (persistenceFailure) throw persistenceFailure;
             if (pendingRequest && !canonicalJsonBytes(pendingRequest).equals(canonicalJsonBytes(mutation))) throw new ClientPendingRequestError();
             if (replayId === undefined && unknown.size) throw new ClientPendingRequestError();
-            const original = await persist(() => retained.retain(mutation));
+            const original = await persist(() => retained.retain(mutation, { replay: replayId !== undefined }));
             if (original.existing && replayId === undefined) throw new ClientPendingRequestError();
             if (replayId !== undefined && mutation.requestId !== replayId) throw new TypeError('replay substituted its original requestId');
             unknown.add(mutation.requestId); pendingRequest = mutation;
@@ -126,7 +124,6 @@ export function createInstalledControlSession(initial: InstalledSupervisorClient
       replay(requestId: string, expected?: PendingClientMutation) {
         const captured = expected === undefined ? undefined : decodeInstalledControlRequest(expected);
         return localData(async () => {
-          await persist(() => startup);
           const original = await persist(async () => {
             const value = await retained.load(requestId);
             if (captured && !value.bytes.equals(canonicalJsonBytes(captured))) throw new TypeError('replay data changed its captured original request');
@@ -251,8 +248,6 @@ export function createInstalledControlSession(initial: InstalledSupervisorClient
         // Ordinary query rejection is expected on detach; its own caller still
         // observes it. Any uncertain retirement remains the primary failure.
         for (const result of await Promise.allSettled(running ? [running] : []))
-          if (result.status === 'rejected' && result.reason instanceof ResourceRetirementError) failures.push(result.reason);
-        for (const result of await Promise.allSettled([startup]))
           if (result.status === 'rejected' && result.reason instanceof ResourceRetirementError) failures.push(result.reason);
         for (const result of await Promise.allSettled([...dataTasks]))
           if (result.status === 'rejected' && result.reason instanceof ResourceRetirementError) failures.push(result.reason);

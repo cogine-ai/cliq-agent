@@ -22,15 +22,16 @@ export function installedClientDataPath(accountHome: string, stateRoot: PendingR
  * Preferences and original requests are private data, never StateOwner, Trust,
  * credentials or a permission to retry. No environment home override exists. */
 export async function openInstalledClientData(selected: HeldInstalledRuntime) {
-  const context = await withHeldInstalledRuntime(selected, async installed => {
+  const { context, native } = await withHeldInstalledRuntime(selected, async installed => {
     const roots = guestToolchainRoots(installed.bundle);
-    return immutableSnapshot({ stateRoot: installed.stateRoot, sourceBundleDigest: installed.bundleDigest,
-      ...(roots.length === 1 ? { guestToolchainManifestId: roots[0]!.artifactId } : {}) });
+    return { native: await installed.loadStateOwner(),
+      context: immutableSnapshot({ stateRoot: installed.stateRoot, sourceBundleDigest: installed.bundleDigest,
+        ...(roots.length === 1 ? { guestToolchainManifestId: roots[0]!.artifactId } : {}) }) };
   });
   const user = os.userInfo();
   if (process.platform !== 'linux' || process.geteuid?.() !== user.uid || context.stateRoot.ownerUid !== user.uid)
     throw new TypeError('installed client data belongs to another operating-system account');
-  const directory = await openPrivateClientDirectory(installedClientDataPath(user.homedir, context.stateRoot), { create: true });
+  const directory = await openPrivateClientDirectory(installedClientDataPath(user.homedir, context.stateRoot), { create: true, native });
   let pending: Awaited<ReturnType<typeof openPendingRequests>> | undefined;
   try {
     pending = await openPendingRequests(directory, context);
