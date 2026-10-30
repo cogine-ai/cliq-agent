@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, sign } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -44,6 +44,25 @@ test('provider package preflight rejects fixture prices and target/TLS overrides
     { providerModel: definition }), /complete signed native package/);
   await assert.rejects(buildInstalledSupervisorPackage('/must-not-be-opened', 'complete', {} as never,
     { providerModel: definition }), /cannot be combined/);
+});
+
+test('a qualification carrier cache cannot replace the complete official archive checksum', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'cliq-provider-carrier-refusal-'));
+  const original = process.env.CLIQ_QUALIFICATION_CARRIER_ARCHIVE;
+  try {
+    const archive = path.join(directory, 'not-the-official-node-archive');
+    await writeFile(archive, Buffer.from('inert invalid archive'), { flag: 'wx', mode: 0o600 });
+    const fixture = path.join(directory, 'publisher'); await mkdir(fixture, { mode: 0o700 });
+    process.env.CLIQ_QUALIFICATION_CARRIER_ARCHIVE = archive;
+    await assert.rejects(buildInstalledProviderQualificationPackage(fixture, definition), /official carrier checksum mismatch/);
+    await assert.rejects(readFile(path.join(fixture, 'manifest.json')), { code: 'ENOENT' });
+    await assert.rejects(readFile(path.join(fixture, 'package', 'supervisor')), { code: 'ENOENT' });
+    assert.equal((await readFile(archive)).toString(), 'inert invalid archive');
+  } finally {
+    if (original === undefined) delete process.env.CLIQ_QUALIFICATION_CARRIER_ARCHIVE;
+    else process.env.CLIQ_QUALIFICATION_CARRIER_ARCHIVE = original;
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test('real-provider package writes the same installer closure with explicit billable prices and original bundle TLS binding', async () => {
