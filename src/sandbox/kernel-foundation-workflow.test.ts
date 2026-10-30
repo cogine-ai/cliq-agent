@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import ts from 'typescript';
 
 const workflowUrl = new URL('../../.github/workflows/kernel-foundation.yml', import.meta.url);
 
@@ -169,7 +170,27 @@ test('installed verifier uses its own free bounded manager journey without weake
   const driver = await readFile(new URL('../../scripts/kernel/testing/installed-node-journey.ts', import.meta.url), 'utf8');
   assert.match(driver, /maxBytes: 512 \* 1024 \* 1024, maxStreams: 4096/u);
   assert.match(driver, /'required_pass', 'required_repair', 'advisory_failure', 'required_timeout'/u);
-  assert.match(driver, /scanCredentialSecretCorpus\(\{ stateRoot: recipe\.stateRoot, uid: ledger\.uid, evidenceDirs: \[\], scanner \}\)/u);
+  const parsed = ts.createSourceFile('installed-node-journey.ts', driver, ts.ScriptTarget.Latest, true);
+  const scans: ts.CallExpression[] = [];
+  const collect = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'scanCredentialSecretCorpus') scans.push(node);
+    ts.forEachChild(node, collect);
+  };
+  collect(parsed); assert.equal(scans.length, 1, 'one original scanner still spans the complete campaign');
+  const scan = scans[0]!; assert.equal(scan.arguments.length, 1);
+  const options = scan.arguments[0]!; assert(ts.isObjectLiteralExpression(options));
+  assert.deepEqual(options.properties.slice(0, 4).map(property => property.getText(parsed)),
+    ['stateRoot: recipe.stateRoot', 'uid: ledger.uid', 'evidenceDirs: []', 'scanner']);
+  assert.equal(options.properties.length, 5);
+  const extra = options.properties[4]!; assert(ts.isSpreadAssignment(extra));
+  let selection = extra.expression;
+  while (ts.isParenthesizedExpression(selection)) selection = selection.expression;
+  assert(ts.isConditionalExpression(selection)); assert.equal(selection.condition.getText(parsed), 'dailyJourney');
+  assert(ts.isObjectLiteralExpression(selection.whenTrue) && ts.isObjectLiteralExpression(selection.whenFalse));
+  assert.deepEqual(selection.whenTrue.properties.map(property => property.getText(parsed)), ['scanInstalledClientData: true as const']);
+  assert.equal(selection.whenFalse.properties.length, 0, 'the existing verifier mode keeps its original scan options');
+  assert(driver.includes('assert.equal(report.secretCorpus.sqliteDatabasesScanned, 2); assert.equal(report.secretCorpus.evidenceDirectoriesScanned, dailyJourney ? 1 : 0);'));
+  assert(driver.includes('if (dailyJourney) assert.equal(report.secretCorpus.installedClientDataScanned, true);'));
   assert.match(driver, /stopped\.TimeoutStopUSec, '2s'/u);
   assert.match(driver, /setTimeout\(resolve,60000\)/u);
   assert.match(driver, /retries: kind === 'required_timeout' \? 1 : 0/u);

@@ -29,13 +29,19 @@ import { INSTALLED_INSTALL_PHASE_CHANNEL, INSTALLED_INSTALL_PHASES, INSTALLED_WO
 import { buildBundledSkillPackageData } from './bundled-skill-package.js';
 import { openInstalledClientHost } from '../client/installed-host.js';
 
-async function assertInstalledClientHostBorrowBoundary(): Promise<void> {
-  const source = await readFile(new URL('../client/installed-host.ts', import.meta.url), 'utf8');
+function assertInstalledClientHostBorrowBoundarySource(source: string): void {
   const parsed = ts.createSourceFile('installed-host.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const tokens = (text: string) => {
+    const scanner = ts.createScanner(ts.ScriptTarget.Latest, true, ts.LanguageVariant.Standard, text), result: string[] = [];
+    while (scanner.scan() !== ts.SyntaxKind.EndOfFileToken) result.push(scanner.getTokenText());
+    return result;
+  };
+  const assertCode = (node: ts.Node, expected: string, message?: string) =>
+    assert.deepEqual(tokens(node.getText(parsed)), tokens(expected), message);
   const factory = parsed.statements.find((node): node is ts.FunctionDeclaration =>
     ts.isFunctionDeclaration(node) && node.name?.text === 'openInstalledClientHost');
   assert(factory?.body);
-  const [borrow, connect, ...extra] = factory.body.statements;
+  const [borrow, data, connect, ...extra] = factory.body.statements;
   assert.equal(extra.length, 0);
   assert(borrow && ts.isExpressionStatement(borrow) && ts.isAwaitExpression(borrow.expression));
   const call = borrow.expression.expression;
@@ -44,22 +50,84 @@ async function assertInstalledClientHostBorrowBoundary(): Promise<void> {
   assert.equal(call.arguments[0]!.getText(parsed), 'selected');
   const callback = call.arguments[1]!;
   assert(ts.isArrowFunction(callback) && callback.modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.AsyncKeyword));
-  assert.equal(callback.parameters.length, 0);
-  assert(ts.isBlock(callback.body) && callback.body.statements.length === 0,
-    'the original complete validation borrow must join before any session acquisition can reenter its queue');
-  assert(connect && ts.isReturnStatement(connect) && connect.expression && ts.isCallExpression(connect.expression));
-  assert.equal(connect.expression.expression.getText(parsed), 'createClientHostSession');
-  assert.equal(connect.expression.arguments.length, 2);
-  assert.equal(connect.expression.arguments[1]!.getText(parsed), 'selected');
-  const session = connect.expression.arguments[0]!;
+  assert.equal(callback.parameters.length, 1);
+  assertCode(callback.parameters[0]!, 'installed');
+  assert(ts.isBlock(callback.body) && callback.body.statements.length === 1);
+  const checkSynchronous = (node: ts.Node): void => {
+    assert(!ts.isAwaitExpression(node) && !ts.isFunctionLike(node),
+      'the validation borrow cannot acquire data, invoke loaders, or hide async reentry in a nested callback');
+    ts.forEachChild(node, checkSynchronous);
+  };
+  checkSynchronous(callback.body);
+  const comparison = callback.body.statements[0]!;
+  assert(ts.isIfStatement(comparison) && !comparison.elseStatement);
+  assertCode(comparison.expression, `borrowedData && (
+    !canonicalJsonBytes(borrowedData.stateRoot).equals(canonicalJsonBytes(installed.stateRoot)) ||
+    borrowedData.sourceBundleDigest !== installed.bundleDigest)`,
+  'the borrow may only compare the copied physical root and signed bundle tuple');
+  assert(ts.isThrowStatement(comparison.thenStatement) && comparison.thenStatement.expression &&
+    ts.isNewExpression(comparison.thenStatement.expression) &&
+    comparison.thenStatement.expression.expression.getText(parsed) === 'TypeError' &&
+    comparison.thenStatement.expression.arguments?.length === 1 &&
+    ts.isStringLiteral(comparison.thenStatement.expression.arguments[0]!));
+  assert(data && ts.isVariableStatement(data));
+  assertCode(data, 'const data = borrowedData ?? await openInstalledClientData(selected);',
+    'data acquisition must follow the complete joined validation borrow');
+  assert(connect && ts.isTryStatement(connect) && !connect.finallyBlock && connect.tryBlock.statements.length === 1);
+  const returned = connect.tryBlock.statements[0]!;
+  assert(ts.isReturnStatement(returned) && returned.expression && ts.isCallExpression(returned.expression));
+  assert.equal(returned.expression.expression.getText(parsed), 'createClientHostSession');
+  assert.equal(returned.expression.arguments.length, 4);
+  assertCode(returned.expression.arguments[1]!, 'selected');
+  assertCode(returned.expression.arguments[2]!, 'data');
+  assertCode(returned.expression.arguments[3]!, '!borrowedData');
+  const session = returned.expression.arguments[0]!;
   assert(ts.isAwaitExpression(session) && ts.isCallExpression(session.expression));
   assert.equal(session.expression.expression.getText(parsed), 'openInstalledControlSession');
-  assert.equal(session.expression.arguments.length, 1);
-  assert.equal(session.expression.arguments[0]!.getText(parsed), 'selected');
+  assert.equal(session.expression.arguments.length, 2);
+  assertCode(session.expression.arguments[0]!, 'selected');
+  assertCode(session.expression.arguments[1]!, 'data.requests');
+  assert(connect.catchClause);
+  assertCode(connect.catchClause, `catch (error) {
+    try { if (!borrowedData) await data.close(); }
+    catch (retirement) { if (retirement instanceof ResourceRetirementError) throw retirement; }
+    throw error;
+  }`, 'a failed session acquisition must join owned data cleanup without closing borrowed data or hiding retirement failure');
+}
+
+async function assertInstalledClientHostBorrowBoundary(): Promise<void> {
+  assertInstalledClientHostBorrowBoundarySource(await readFile(new URL('../client/installed-host.ts', import.meta.url), 'utf8'));
 }
 
 test('the installed client host joins its original validation borrow before acquiring the authenticated session',
   assertInstalledClientHostBorrowBoundary);
+
+test('the installed client host borrow guard rejects reentry, tuple drift and unjoined owned cleanup', async () => {
+  const source = await readFile(new URL('../client/installed-host.ts', import.meta.url), 'utf8');
+  const mutations = [
+    ['nested async session reentry', 'async installed => {',
+      'async installed => { void (async () => { await openInstalledControlSession(selected); })();'],
+    ['data acquisition inside the borrow', 'async installed => {',
+      'async installed => { await openInstalledClientData(selected);'],
+    ['synchronous native loader inside the borrow', 'async installed => {',
+      'async installed => { installed.loadStateOwner();'],
+    ['data acquisition before the borrow', 'await withHeldInstalledRuntime(selected,',
+      'await openInstalledClientData(selected); await withHeldInstalledRuntime(selected,'],
+    ['borrowed root comparison omitted', 'canonicalJsonBytes(installed.stateRoot)', 'canonicalJsonBytes(borrowedData.stateRoot)'],
+    ['borrowed signed bundle comparison omitted', 'borrowedData.sourceBundleDigest !== installed.bundleDigest',
+      'borrowedData.sourceBundleDigest !== borrowedData.sourceBundleDigest'],
+    ['session detached from held pending requests', 'openInstalledControlSession(selected, data.requests)',
+      'openInstalledControlSession(selected, undefined)'],
+    ['borrowed data claimed as owned', 'selected, data, !borrowedData)', 'selected, data, true)'],
+    ['owned data cleanup not joined', 'if (!borrowedData) await data.close();', 'if (!borrowedData) void data.close();'],
+    ['borrowed data closed on session failure', 'if (!borrowedData) await data.close();', 'if (borrowedData) await data.close();'],
+    ['retirement failure swallowed', 'if (retirement instanceof ResourceRetirementError) throw retirement;', 'void retirement;'],
+  ] as const;
+  for (const [name, before, after] of mutations) {
+    assert(source.includes(before), `${name}: mutation must affect the current implementation`);
+    assert.throws(() => assertInstalledClientHostBorrowBoundarySource(source.replace(before, after)), name);
+  }
+});
 
 /** Real signed files for installer/CAS semantics only. The opaque executable
  * entries are deliberately not running Supervisor/worker/addon images and are

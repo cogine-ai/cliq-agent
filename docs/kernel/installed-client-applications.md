@@ -125,6 +125,18 @@ combined daily command campaign, real provider call, interruption/upgrade
 qualification and public release/default switch remain separate gates. Real
 Linux file lifecycle tests and terminal PTY components do not replace them.
 
+The normal daily campaign and the original installed application's normal
+campaign include their actual private client partition in the same cumulative
+credential scan, after all client/service writers join. The fixed locator is
+derived from the real StateRoot device/inode/owner/path tuple. It covers existing
+preferences, model setup requests, original requests/responses, acknowledgement
+residues and the zero-byte mutex. A read-only client may legitimately have only
+the request directory; optional files are fully scanned when present. Unknown
+entries, aliases, unsafe modes, incomplete original groups and replaced
+directories refuse qualification. The original byte, stream, entry, file and
+time bounds remain unchanged. Successful byte scanning conveys no execution,
+replay, credential or process-death authority.
+
 The Ink view attaches to authoritative snapshots and finite event cuts. It
 renders committed model/tool items through the original bounded artifact reader;
 progress events never become model text or authority. A cold viewport starts

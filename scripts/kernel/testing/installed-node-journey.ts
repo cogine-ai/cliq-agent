@@ -1847,7 +1847,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
             currentSealedMDirectoryPhysicalBytesQualified: false,
           } : undefined;
           if (lateDiagnostic) report.publicationLateResult = lateDiagnostic;
-          const originalPosts = postCount; if (lateDiagnostic) assert.equal(originalPosts, 6);
+          const originalPosts = postCount; if (lateDiagnostic) assert.equal(originalPosts, 10);
           const ownersBefore = inspectInstalledOwnerHistory(recipe.stateRoot).owners;
           assert.equal(ownersBefore.length, 2); const original = ownersBefore[1]!; assert.equal(original.state, 'active');
           const shown = show(services!.supervisorUnit), pid = Number(shown.MainPID), supervisorEntry = signed.bundle.entries.find(entry => entry.role === 'supervisor');
@@ -2374,8 +2374,10 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         const before = scanner.stats();
         beforeCorpus = Object.freeze({ streamsOpened: before.streamsOpened, bytesScanned: before.bytesScanned });
         scanStage = 'corpus';
-        report.secretCorpus = await scanCredentialSecretCorpus({ stateRoot: recipe.stateRoot, uid: ledger.uid, evidenceDirs: [], scanner });
-        assert.equal(report.secretCorpus.sqliteDatabasesScanned, 2); assert.equal(report.secretCorpus.evidenceDirectoriesScanned, 0);
+        report.secretCorpus = await scanCredentialSecretCorpus({ stateRoot: recipe.stateRoot, uid: ledger.uid, evidenceDirs: [], scanner,
+          ...(dailyJourney ? { scanInstalledClientData: true as const } : {}) });
+        assert.equal(report.secretCorpus.sqliteDatabasesScanned, 2); assert.equal(report.secretCorpus.evidenceDirectoriesScanned, dailyJourney ? 1 : 0);
+        if (dailyJourney) assert.equal(report.secretCorpus.installedClientDataScanned, true);
         if (options.publicationRetirementStop) {
           assert.equal(report.delivery.preciseInFlightPublicationStopQualified, true); assert.equal(report.delivery.cleanupCrashQualified, false);
           assert.equal(report.publicationOriginalStop.stage, 'closure_verified');

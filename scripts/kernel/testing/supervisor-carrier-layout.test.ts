@@ -257,8 +257,39 @@ function withoutLockedNodeQualification(workflow: string): string {
     .replace(condition, "        if: ${{ !cancelled() && steps.build.outcome == 'success' }}\n");
 }
 
+function withoutDailyQualification(workflow: string): string {
+  const marker = '  linux-installed-daily:\n', start = workflow.indexOf(marker);
+  assert(start >= 0 && workflow.split(marker).length === 2, 'one independent daily qualification job is required');
+  const end = workflow.indexOf('  linux-installed-verifier:\n', start);
+  assert(end > start, 'the added daily job must precede the untouched original verifier job');
+  const daily = workflow.slice(start, end);
+  assert.equal(createHash('sha256').update(daily).digest('hex'), '4bf9a5daf2a764482fad6bd1ce7f9342806dfc0f091f3f283c242ce0ab0edc10',
+    'the independent normal CLI job keeps its exact free runner, prerequisites, commands, joins and bounded evidence retention');
+  assert(daily.includes('    runs-on: ubuntu-22.04\n    timeout-minutes: 20\n'));
+  assert(daily.includes('      - uses: actions/checkout@v4\n        with:\n          persist-credentials: false\n'));
+  assert(daily.includes('      - uses: actions/setup-node@v4\n        with:\n          node-version: 22.13.0\n          cache: npm\n'));
+  assert(daily.includes('      - run: npm ci\n      - run: npm run build\n        id: build\n' +
+    '      - name: Check the shared daily client and original harness contracts\n'),
+  'the real clean runner must build before its native-backed preflight');
+  assert.deepEqual(daily.split('\n').filter(line => line.includes('apt-get install')), [
+    '        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap libcap-dev libselinux1-dev meson ninja-build e2fsprogs libext2fs-dev pkg-config',
+  ]);
+  assert(daily.includes("        if: ${{ !cancelled() && steps.build.outcome == 'success' }}\n        shell: bash\n        run: |\n" +
+    '          test "$RUNNER_ENVIRONMENT" = github-hosted\n          test "$RUNNER_OS" = Linux\n          test "$RUNNER_ARCH" = X64\n' +
+    '          probe_node=$(realpath "$(command -v node)")\n' +
+    '          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --run-daily-journey "$probe_node" "$RUNNER_TEMP/cliq-installed-daily-journey"\n'));
+  assert(daily.includes('      - name: Retain original daily workflow and unchanged cleanup evidence\n        if: always()\n' +
+    '        uses: actions/upload-artifact@v4\n        with:\n' +
+    '          name: installed-daily-journey-${{ github.run_id }}-${{ github.run_attempt }}\n' +
+    '          path: ${{ runner.temp }}/cliq-installed-daily-journey/*.json\n' +
+    '          if-no-files-found: warn\n          retention-days: 7\n'));
+  assert(!/(?:continue-on-error|needs):/u.test(daily));
+  return workflow.slice(0, start) + workflow.slice(end);
+}
+
 // The immutable CT projection preserves every original job and budget after
-// independently checking the closed, same-job Node qualification addition.
+// independently checking the exact upgrade and normal daily jobs and the
+// closed, same-job Node qualification addition.
 function assertCarrierExperimentWorkflow(workflow: string): void {
   const upgradeStart = workflow.indexOf('  installed-runtime-upgrade:\n');
   const originalStart = workflow.indexOf('  # Public-repository qualification stays on free standard GitHub-hosted\n', upgradeStart);
@@ -267,7 +298,7 @@ function assertCarrierExperimentWorkflow(workflow: string): void {
   const upgrade = workflow.slice(upgradeStart, originalStart);
   assert.equal(createHash('sha256').update(upgrade).digest('hex'), 'ad971cd9def7e58b4591e7aef5907ff5dce694917ee4aca0b82ddef02ed5f669',
     'the independent signed7-to-8 job keeps its exact free runner, source, command, publisher, artifact and twenty-minute contract');
-  const originalWorkflow = workflow.slice(0, upgradeStart) + workflow.slice(originalStart);
+  const originalWorkflow = withoutDailyQualification(workflow.slice(0, upgradeStart) + workflow.slice(originalStart));
   const preparingReport = '            ${{ steps.guest.outputs.report_root }}/guest-preparing-git-report.json\n';
   assert.equal(workflow.split(preparingReport).length, 2, 'the original real preparing report must be retained exactly once');
   assert(workflow.includes(
@@ -325,8 +356,8 @@ function assertCarrierExperimentWorkflow(workflow: string): void {
   assert.equal(originalWorkflow.split(buildDependencies).length, 19, 'the exact dependency group must occur once in each original command');
   const upgradeAptLines = upgrade.split('\n').filter(line => line.includes('apt-get install') && /\bbubblewrap\b/u.test(line));
   assert.deepEqual(upgradeAptLines, ['        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap libcap-dev libselinux1-dev meson ninja-build e2fsprogs libext2fs-dev pkg-config']);
-  assert.equal(workflow.split('\n').filter(line => line.includes('apt-get install') && /\bbubblewrap\b/u.test(line)).length, 19);
-  assert.equal(workflow.split(buildDependencies).length, 20, 'the sole new dependency command is the exact independent upgrade job');
+  assert.equal(workflow.split('\n').filter(line => line.includes('apt-get install') && /\bbubblewrap\b/u.test(line)).length, 20);
+  assert.equal(workflow.split(buildDependencies).length, 21, 'only the exact independent upgrade and daily jobs add dependency commands');
   for (const line of aptLines) assert.equal(line.split(buildDependencies).length, 2,
     'the original APT bubblewrap remains for its negative parameter regression alongside the fixed build dependencies');
   const storageRegression = [
@@ -393,10 +424,27 @@ test('the additive parent-domain regression cannot hide workflow removals, disab
   const upgradeStart = workflow.indexOf('  installed-runtime-upgrade:\n');
   const originalStart = workflow.indexOf('  # Public-repository qualification stays on free standard GitHub-hosted\n', upgradeStart);
   const upgrade = workflow.slice(upgradeStart, originalStart);
+  const dailyStart = workflow.indexOf('  linux-installed-daily:\n');
+  const dailyEnd = workflow.indexOf('  linux-installed-verifier:\n', dailyStart);
+  const daily = workflow.slice(dailyStart, dailyEnd);
   const mutateOriginal = (from: string, to: string) => workflow.slice(0, originalStart) + workflow.slice(originalStart).replace(from, to);
   const mutations = [
     workflow.replace(upgrade, ''),
     workflow.replace(upgrade, upgrade.repeat(2)),
+    workflow.replace(daily, ''),
+    workflow.replace(daily, daily.repeat(2)),
+    workflow.replace(daily, daily.replace('runs-on: ubuntu-22.04', 'runs-on: ubuntu-22.04-8core')),
+    workflow.replace(daily, daily.replace('timeout-minutes: 20', 'timeout-minutes: 21')),
+    workflow.replace(daily, daily.replace('persist-credentials: false', 'persist-credentials: true')),
+    workflow.replace(daily, daily.replace('node-version: 22.13.0', 'node-version: 24.x')),
+    workflow.replace(daily, daily.replace('      - run: npm run build\n        id: build\n', '')),
+    workflow.replace(daily, daily.replace('src/client/daily.test.ts', '# src/client/daily.test.ts')),
+    workflow.replace(daily, daily.replace("if: ${{ !cancelled() && steps.build.outcome == 'success' }}", 'if: false')),
+    workflow.replace(daily, daily.replace('--run-daily-journey', '--run-verifier-journey')),
+    workflow.replace(daily, daily.replace('libssl-dev ', '')),
+    workflow.replace(daily, daily.replace('retention-days: 7', 'retention-days: 30')),
+    workflow.replace(daily, daily.replace('cliq-installed-daily-journey/*.json', 'cliq-installed-daily-journey/**')),
+    workflow.replace(daily, daily + '      - run: node --test scripts/kernel/testing/unexpected-daily.test.mjs\n'),
     workflow.replace('old_commit=25130cfec913bddaff4d0a8c7ff4aac7ef2db932', 'old_commit=410c8193ea516b0b9f8e6a746c4376003e67b5a4'),
     workflow.replace(parentEvidenceTest, '').replace(qualificationPreflightTest, ''),
     workflow.replace('dependency-native-family.test.ts', 'dependency-native-family-skipped.test.ts'),

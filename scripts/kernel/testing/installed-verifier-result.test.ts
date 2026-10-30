@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import ts from 'typescript';
 import { InstalledVerifierOutcomeError } from './installed-verifier-result.js';
 
 const stages = ['public_cut', 'frozen_inputs', 'source_and_candidate', 'candidate_producer', 'candidate_source',
@@ -47,7 +48,26 @@ test('inspector diagnostics label the original deep checks and thread the real r
   const original = source.slice(source.indexOf('export async function assertInstalledVerifierRetirement('));
   for (const [note, operation] of ordered) assert(original.indexOf(note!) >= 0 && original.indexOf(note!) < original.indexOf(operation!), note);
   const consumer = readFileSync(new URL('./installed-node-journey.ts', import.meta.url), 'utf8');
-  assert.equal(consumer.match(/readOwnerHistory: async \(observe\?: \(stage: InstalledOwnerHistoryReadStage\) => void\) => inspectInstalledOwnerHistory\(recipe.stateRoot, observe\)\.owners/gu)?.length, 5);
+  const parsed = ts.createSourceFile('installed-node-journey.ts', consumer, ts.ScriptTarget.Latest, true);
+  const readers: ts.PropertyAssignment[] = [];
+  const collect = (node: ts.Node): void => {
+    if (ts.isPropertyAssignment(node) && node.name.getText(parsed) === 'readOwnerHistory') readers.push(node);
+    ts.forEachChild(node, collect);
+  };
+  collect(parsed);
+  assert.deepEqual(readers.map(reader => {
+    assert.equal(reader.initializer.getText(parsed),
+      'async (observe?: (stage: InstalledOwnerHistoryReadStage) => void) => inspectInstalledOwnerHistory(recipe.stateRoot, observe).owners');
+    assert(ts.isObjectLiteralExpression(reader.parent));
+    const owner = reader.parent.parent;
+    if (ts.isCallExpression(owner)) return owner.expression.getText(parsed);
+    assert(ts.isVariableDeclaration(owner)); return owner.name.getText(parsed);
+  }), ['assertInstalledVerifierOutcome', 'assertInstalledVerifierOutcome', 'assertInstalledVerifierOutcome',
+    'runInstalledDeliveryCases', 'readInstalledPublicationProbeSample', 'recoveryInput']);
+  const dailyProof = readers[0]!;
+  let scope: ts.Node | undefined = dailyProof.parent;
+  while (scope && !(ts.isPropertyAssignment(scope) && scope.name.getText(parsed) === 'verifySource')) scope = scope.parent;
+  assert(scope, 'the additive daily verifier must use the same complete original readonly owner history');
   assert(source.includes("typeof stage === 'string' && Object.hasOwn(ownerHistoryPhases, stage)"));
 });
 

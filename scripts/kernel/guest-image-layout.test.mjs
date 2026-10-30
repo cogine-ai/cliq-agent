@@ -43,7 +43,16 @@ test('the actual shared builder defaults to compact while only fixed qualificati
   assert(installed.includes("...(options.guestImageProfile ? ['--qualification-max'] : [])"));
   assert(journey.includes("...(journeyKind === 'verifier' ? { guestImageProfile: 'qualification_max' as const } : {})"));
   assert(native.includes("[builder, guestRoot, installationRoot, carrier, '--qualification-max']"));
-  assert(!/process\.env/u.test(builder + publisher + installed), 'no environment-driven size or authority override');
+  assert(!/process\.env/u.test(builder + publisher), 'no environment-driven image construction override');
+  assert.equal(installed.match(/process\.env\b/gu)?.length, 1);
+  assert.deepEqual(installed.match(/process\.env(?:\.[A-Za-z_$][\w$]*|\[[^\]]*\])/gu),
+    ['process.env.CLIQ_QUALIFICATION_CARRIER_ARCHIVE'], 'the sole environment input is the fixed official archive cache, never size or authority');
+  assert(installed.includes('await sea.prepareInstalledSupervisorSeaCarrier(\n    fixture, process.env.CLIQ_QUALIFICATION_CARRIER_ARCHIVE)'));
+  const carrier = source('./testing/supervisor-sea-builder.ts');
+  const cached = carrier.indexOf('const archive = cachedArchive ? await readFile(cachedArchive)'),
+    checksum = carrier.indexOf("assert.equal(createHash('sha256').update(archive).digest('hex'), checksum, 'official carrier checksum mismatch')", cached),
+    extraction = carrier.indexOf("run(fixture, 'tar', ['--no-same-owner', '-xJf', archivePath, '-C', fixture])", checksum);
+  assert(cached >= 0 && checksum > cached && extraction > checksum, 'cached bytes retain the full pinned checksum before fresh extraction');
   const imageCreation = builder.slice(builder.indexOf('const imageLayout ='), builder.indexOf('const handle = await open(filename'));
   assert.equal((imageCreation.match(/command\('\/usr\/sbin\/mke2fs'/gu) ?? []).length, 1);
   assert(!/catch|while|retry|\.filter\(/u.test(imageCreation), 'capacity failure cannot grow the image or drop files');

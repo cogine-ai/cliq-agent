@@ -9,6 +9,7 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { KERNEL_AUTHORITY_TABLES } from '../../../src/state/schema.js';
+import { canonicalSha256 } from '../../../src/kernel/canonical.js';
 import * as corpus from './credential-secret-corpus.js';
 import { CredentialSecretCorpusError, scanCopiedCredentialDatabase, scanCredentialSecretCorpus } from './credential-secret-corpus.js';
 import { CredentialSecretScanError, createCredentialSecretScanner, type CredentialSecretScanStats } from './credential-secret-scan.js';
@@ -399,6 +400,171 @@ async function actualFixture(layout: typeof stateLayouts[number], work: (stateRo
     await work(stateRoot, cas);
   } finally { await rm(fixture, { recursive: true, force: true }); }
 }
+
+const clientRequestId = '019a0013-0000-7000-8000-000000000001';
+async function installedClientFixture(stateRoot: string) {
+  const root = await fs.lstat(stateRoot, { bigint: true });
+  const client = path.join(path.dirname(stateRoot), 'client-v1'), installations = path.join(client, 'installations');
+  const partition = path.join(installations, canonicalSha256({ deviceId: String(root.dev), fileId: String(root.ino),
+    ownerUid: process.geteuid!(), canonicalPath: stateRoot }));
+  const requests = path.join(partition, 'requests-v1'), group = path.join(requests, clientRequestId);
+  await mkdir(group, { recursive: true, mode: 0o700 });
+  const preferences = path.join(partition, 'preferences.json'), setup = path.join(partition, `model-setup-${'a'.repeat(64)}.json`);
+  const metadata = path.join(group, 'metadata.json'), original = path.join(group, 'request.json'), response = path.join(group, 'response.json');
+  const lock = path.join(partition, 'client-mutation.lock');
+  for (const filename of [preferences, setup, metadata, original, response])
+    await writeFile(filename, '{"owned":"public diagnostic data"}', { flag: 'wx', mode: 0o600 });
+  await writeFile(lock, '', { flag: 'wx', mode: 0o600 });
+  return { client, installations, partition, requests, group, preferences, setup, metadata, original, response, lock };
+}
+
+test('actual Linux daily corpus scans the complete physical client partition with the original scanner and joined descriptors', linux, async t => {
+  await actualFixture('home/.cliq/kernel-v1', async stateRoot => {
+    await installedClientFixture(stateRoot);
+    const scanner = createCredentialSecretScanner([secret()], limits), active = new Set<object>(), actualOpen = fs.open;
+    t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
+      const handle = await actualOpen(...args), close = handle.close.bind(handle); active.add(handle);
+      t.mock.method(handle, 'close', async () => { await close(); assert.equal(active.delete(handle), true); }); return handle;
+    });
+    syncBuiltinESMExports();
+    try {
+      const old = await scanCredentialSecretCorpus({ stateRoot, uid: process.geteuid!(), evidenceDirs: [], scanner });
+      assert.equal(old.filesScanned, 2); assert.equal(old.evidenceDirectoriesScanned, 0);
+      assert.equal(Object.hasOwn(old, 'installedClientDataScanned'), false); assert.equal(active.size, 0);
+      const result = await scanCredentialSecretCorpus({ stateRoot, uid: process.geteuid!(), evidenceDirs: [], scanner, scanInstalledClientData: true });
+      assert.equal(result.filesScanned, 8); assert.equal(result.sqliteDatabasesScanned, 2);
+      assert.equal(result.evidenceDirectoriesScanned, 1); assert.equal(result.installedClientDataScanned, true);
+      assert.equal(scanner.stats().streamsOpened, scanner.stats().streamsClosed); assert.equal(active.size, 0);
+      assert.equal(scanner.stats().matched, false);
+    } finally { scanner.close(); }
+  });
+});
+
+test('actual Linux installed readonly-host partition needs no model preferences, setup or mutation lock to be fully scanned', linux, async () => {
+  await actualFixture('home/.cliq/kernel-v1', async stateRoot => {
+    const client = await installedClientFixture(stateRoot), scanner = createCredentialSecretScanner([secret()], limits);
+    try {
+      await rm(client.group, { recursive: true });
+      for (const filename of [client.preferences, client.setup, client.lock]) await rm(filename);
+      const result = await scanCredentialSecretCorpus({ stateRoot, uid: process.geteuid!(), evidenceDirs: [], scanner, scanInstalledClientData: true });
+      assert.equal(result.filesScanned, 2); assert.equal(result.sqliteDatabasesScanned, 2);
+      assert.equal(result.evidenceDirectoriesScanned, 1); assert.equal(result.installedClientDataScanned, true);
+      assert.equal(scanner.stats().streamsOpened, scanner.stats().streamsClosed); assert.equal(scanner.stats().matched, false);
+    } finally { scanner.close(); }
+  });
+});
+
+for (const leaf of ['preferences', 'setup', 'original', 'response'] as const)
+  test(`actual Linux daily corpus detects a secret in the real client ${leaf} file without retaining its path or bytes`, linux, async () => {
+    await actualFixture('home/.cliq/kernel-v1', async stateRoot => {
+      const client = await installedClientFixture(stateRoot), scanner = createCredentialSecretScanner([secret()], limits);
+      try {
+        const bytes = Buffer.from(JSON.stringify((leaf === 'original' ? 'a'.repeat(65_530) : '') + secret().toString()));
+        await writeFile(client[leaf], bytes, { mode: 0o600 });
+        // An unchanged old-mode scan is not evidence about this new footprint.
+        const old = await scanCredentialSecretCorpus({ stateRoot, uid: process.geteuid!(), evidenceDirs: [], scanner });
+        assert.equal(old.evidenceDirectoriesScanned, 0); assert.equal(scanner.stats().matched, false);
+        await assert.rejects(scanCredentialSecretCorpus({ stateRoot, uid: process.geteuid!(), evidenceDirs: [], scanner, scanInstalledClientData: true }), error => {
+          assert(error instanceof CredentialSecretScanError); assert.equal(error.code, 'SECRET_DETECTED');
+          const progress = failureProgress(error) as { source: object };
+          assert.deepEqual(progress.source, { kind: 'evidence', part: 'file_bytes' });
+          assert(!JSON.stringify(error).includes(stateRoot)); assert(!JSON.stringify(error).includes(secret().toString())); return true;
+        });
+        assert.equal(scanner.stats().streamsOpened, scanner.stats().streamsClosed);
+      } finally { scanner.close(); }
+    });
+  });
+
+test('actual Linux daily corpus refuses alias files, incomplete groups, unbound partitions and nonempty locks', linux, async () => {
+  await actualFixture('home/.cliq/kernel-v1', async stateRoot => {
+    const client = await installedClientFixture(stateRoot), scanner = createCredentialSecretScanner([secret()], limits);
+    const scan = () => scanCredentialSecretCorpus({ stateRoot, uid: process.geteuid!(), evidenceDirs: [], scanner, scanInstalledClientData: true });
+    try {
+      const linked = path.join(path.dirname(stateRoot), 'outside-client-link');
+      await fs.link(client.preferences, linked);
+      await assert.rejects(scan(), CredentialSecretCorpusError); await rm(linked);
+      const original = await readFile(client.preferences); await rm(client.preferences); await symlink(client.setup, client.preferences);
+      await assert.rejects(scan(), CredentialSecretCorpusError); await rm(client.preferences);
+      await writeFile(client.preferences, original, { mode: 0o600 });
+      await chmod(client.preferences, 0o644); await assert.rejects(scan(), CredentialSecretCorpusError); await chmod(client.preferences, 0o600);
+      await rm(client.original); await assert.rejects(scan(), CredentialSecretCorpusError);
+      await writeFile(client.original, '{}', { mode: 0o600 });
+      await writeFile(client.original, Buffer.alloc(1_048_577)); await assert.rejects(scan(), CredentialSecretCorpusError);
+      await writeFile(client.original, '{}');
+      await writeFile(client.lock, 'x'); await assert.rejects(scan(), CredentialSecretCorpusError); await writeFile(client.lock, '');
+      const foreign = path.join(client.installations, 'f'.repeat(64));
+      await fs.rename(client.partition, foreign); await assert.rejects(scan(), CredentialSecretCorpusError); await fs.rename(foreign, client.partition);
+      const extra = path.join(client.client, 'unexpected'); await mkdir(extra, { mode: 0o700 });
+      await assert.rejects(scan(), CredentialSecretCorpusError); await rm(extra, { recursive: true });
+      assert.equal((await scan()).installedClientDataScanned, true);
+      assert.equal(scanner.stats().streamsOpened, scanner.stats().streamsClosed);
+    } finally { scanner.close(); }
+  });
+});
+
+test('actual Linux daily corpus scans physically bound acknowledgement residues and refuses a substituted group identity', linux, async () => {
+  await actualFixture('home/.cliq/kernel-v1', async stateRoot => {
+    const client = await installedClientFixture(stateRoot), scanner = createCredentialSecretScanner([secret()], limits);
+    const group = await fs.lstat(client.group, { bigint: true });
+    const digest = canonicalSha256({ deviceId: String(group.dev), fileId: String(group.ino), ownerUid: process.geteuid!() });
+    const acknowledged = path.join(client.requests, `.ack-${clientRequestId}-${digest}-${'0'.repeat(32)}`);
+    const scan = () => scanCredentialSecretCorpus({ stateRoot, uid: process.geteuid!(), evidenceDirs: [], scanner, scanInstalledClientData: true });
+    try {
+      await fs.rename(client.group, acknowledged); await rm(path.join(acknowledged, 'metadata.json'));
+      const result = await scan();
+      assert.equal(result.evidenceDirectoriesScanned, 1); assert.equal(result.installedClientDataScanned, true); assert.equal(result.filesScanned, 7);
+      const substituted = path.join(client.requests, `.ack-${clientRequestId}-${'f'.repeat(64)}-${'0'.repeat(32)}`);
+      await fs.rename(acknowledged, substituted); await assert.rejects(scan(), CredentialSecretCorpusError);
+      await fs.rename(substituted, acknowledged);
+      await writeFile(path.join(acknowledged, 'response.json'), secret());
+      await assert.rejects(scan(), { code: 'SECRET_DETECTED' });
+      assert.equal(scanner.stats().streamsOpened, scanner.stats().streamsClosed);
+    } finally { scanner.close(); }
+  });
+});
+
+test('actual Linux daily corpus rejects replacement of its held client directory even when the replacement bytes are identical', linux, async t => {
+  await actualFixture('home/.cliq/kernel-v1', async stateRoot => {
+    const client = await installedClientFixture(stateRoot), scanner = createCredentialSecretScanner([secret()], limits);
+    const actualOpen = fs.open, active = new Set<object>(); let replaced = false;
+    t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
+      const handle = await actualOpen(...args), close = handle.close.bind(handle); active.add(handle);
+      t.mock.method(handle, 'close', async () => { await close(); assert.equal(active.delete(handle), true); });
+      if (String(args[0]).endsWith('/preferences.json')) {
+        const read = handle.read.bind(handle);
+        t.mock.method(handle, 'read', async (...values: Parameters<typeof handle.read>) => {
+          const result = await read(...values);
+          if (!replaced && result.bytesRead > 0) {
+            replaced = true; const retired = `${client.client}-original`;
+            await fs.rename(client.client, retired); await fs.cp(retired, client.client, { recursive: true });
+          }
+          return result;
+        });
+      }
+      return handle;
+    });
+    syncBuiltinESMExports();
+    try {
+      await assert.rejects(scanCredentialSecretCorpus({ stateRoot, uid: process.geteuid!(), evidenceDirs: [], scanner, scanInstalledClientData: true }), error => {
+        assert(error instanceof CredentialSecretCorpusError); assert.equal(error.corpusFailure?.stage, 'evidence'); return true;
+      });
+      assert.equal(replaced, true); assert.equal(active.size, 0);
+      assert.equal(scanner.stats().streamsOpened, scanner.stats().streamsClosed);
+    } finally { scanner.close(); }
+  });
+});
+
+test('actual Linux daily-only option cannot expand the legacy root or become an arbitrary path switch', linux, async () => {
+  await actualFixture('home/probe/credential-state', async stateRoot => {
+    const scanner = createCredentialSecretScanner([secret()], limits);
+    try {
+      for (const selected of [true, false, '/caller-selected-client-path'])
+        await assert.rejects(scanCredentialSecretCorpus({ stateRoot, uid: process.geteuid!(), evidenceDirs: [], scanner,
+          scanInstalledClientData: selected as true }), CredentialSecretCorpusError);
+      assert.equal(scanner.stats().streamsOpened, 0);
+    } finally { scanner.close(); }
+  });
+});
 
 for (const part of ['entry_name', 'file_bytes'] as const)
   test(`actual Linux CAS ${part} refusal keeps the original 4096 streams and joins real file descriptors`, linux, async t => {

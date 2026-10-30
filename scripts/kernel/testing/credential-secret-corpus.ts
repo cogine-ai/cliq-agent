@@ -6,6 +6,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { DatabaseSync } from 'node:sqlite';
+import { canonicalSha256 } from '../../../src/kernel/canonical.js';
+import { REQUEST_ID_PATTERN } from '../../../src/kernel/identity.js';
 import { iterateNodeSqliteStatement } from '../../../src/state/sqlite-driver.js';
 import { CredentialSecretScanError, type CredentialSecretScanner } from './credential-secret-scan.js';
 
@@ -41,7 +43,7 @@ type ScanSource = Readonly<{
   part: 'table_name' | 'table_sql' | 'cell';
   logicalRowsObserved: number; logicalValuesAttempted: number; logicalBytesObserved: number;
 }> | Readonly<{ kind: 'database_file'; database: 'kernel' | 'authority'; part: 'main' | 'wal' | 'journal' | 'shm' }>
-  | Readonly<{ kind: 'cas'; part: 'entry_name' | 'file_bytes' }> | Readonly<{ kind: 'evidence'; part: 'file_bytes' }>;
+  | Readonly<{ kind: 'cas'; part: 'entry_name' | 'file_bytes' }> | Readonly<{ kind: 'evidence'; part: 'entry_name' | 'file_bytes' }>;
 export type CredentialSecretCorpusScanProgress = Readonly<{ diagnosticOnly: true; source: ScanSource;
   corpusCounters?: Readonly<Stats & { inventoryEntriesObserved: number }> }>;
 const scanFailures = new WeakMap<object, CredentialSecretCorpusScanProgress>();
@@ -168,14 +170,17 @@ export function scanCopiedCredentialDatabase(filename: string, scanner: Credenti
 }
 
 export type CredentialSecretCorpusInput = Readonly<{ stateRoot: string; uid: number;
-  evidenceDirs: readonly string[]; scanner: CredentialSecretScanner }>;
+  evidenceDirs: readonly string[]; scanner: CredentialSecretScanner; scanInstalledClientData?: true }>;
 
 /** Invoke after all fixture credential writers and Supervisor/keeper have
  * positively joined. Linux /proc descriptor paths pin every ancestor without
  * following a directory symlink. Only fixed SQLite files, flat CAS names and
- * explicitly supplied sibling crash trace directories are in scope. */
+ * explicitly supplied sibling crash trace directories are in scope. The fixed
+ * fixed option additionally covers its actual physical installation's
+ * client data partition; it supplies no caller-selected path or authority. */
 export async function scanCredentialSecretCorpus(input: CredentialSecretCorpusInput) {
   const directories: Directory[] = [];
+  const clientDirectories: Directory[] = [];
   const observedFiles: { directory: Directory; leaf: string; info?: BigIntStats }[] = [];
   const stats: Stats = { filesScanned: 0, fileBytesScanned: 0, sqliteDatabasesScanned: 0,
     logicalRowsScanned: 0, logicalValuesScanned: 0, logicalBytesScanned: 0, evidenceDirectoriesScanned: 0 };
@@ -256,7 +261,10 @@ export async function scanCredentialSecretCorpus(input: CredentialSecretCorpusIn
   try {
     check(process.platform === 'linux' && Number.isSafeInteger(input.uid) && input.uid > 0);
     check(/^\/var\/tmp\/cliq-systemd-probe\.[A-Za-z0-9]+\/home\/(?:probe\/credential-state|\.cliq\/kernel-v1)$/u.test(input.stateRoot));
+    check(input.scanInstalledClientData === undefined || input.scanInstalledClientData === true);
+    if (input.scanInstalledClientData) check(input.stateRoot.endsWith('/home/.cliq/kernel-v1'));
     check(Array.isArray(input.evidenceDirs) && input.evidenceDirs.length <= 16 && new Set(input.evidenceDirs).size === input.evidenceDirs.length);
+    if (input.scanInstalledClientData) check(input.evidenceDirs.length === 0);
     const fixture = path.resolve(input.stateRoot, '../../..');
     for (const filename of input.evidenceDirs) check(path.dirname(filename) === fixture && /^credential-prepared-crash-[A-Za-z0-9]+$/u.test(path.basename(filename)));
     stage = 'root';
@@ -317,6 +325,65 @@ export async function scanCredentialSecretCorpus(input: CredentialSecretCorpusIn
       }
       check(JSON.stringify(await names(trace)) === JSON.stringify(traceNames)); stats.evidenceDirectoriesScanned++;
     }
+    if (input.scanInstalledClientData) {
+      // Same canonical locator and actual dev/ino/uid tuple as
+      // installedClientDataPath. These are byte-diagnostic locators only, never
+      // an installed runtime, authenticated response or retry permission.
+      const partition = canonicalSha256({ deviceId: String(root.info.dev), fileId: String(root.info.ino),
+        ownerUid: input.uid, canonicalPath: input.stateRoot });
+      const parent = directories.find(directory => directory.physicalPath === path.dirname(input.stateRoot)); check(parent);
+      const privateDirectory = async (parent: Directory, leaf: string) => {
+        const directory = await openDirectory(path.join(parent.physicalPath, leaf), parent, leaf);
+        check(directory.info.uid === BigInt(input.uid) && (directory.info.mode & 0o7777n) === 0o700n);
+        clientDirectories.push(directory); return directory;
+      };
+      const inventory = async (directory: Directory) => {
+        const result = await names(directory);
+        for (const leaf of result) {
+          const bytes = Buffer.from(leaf, 'utf8'); scanSource = { kind: 'evidence', part: 'entry_name' };
+          try { scanValue(input.scanner, bytes); } finally { bytes.fill(0); }
+        }
+        return result;
+      };
+      const client = await privateDirectory(parent, 'client-v1'), clientNames = await inventory(client);
+      check(JSON.stringify(clientNames) === '["installations"]');
+      const installations = await privateDirectory(client, 'installations'), installationNames = await inventory(installations);
+      check(JSON.stringify(installationNames) === JSON.stringify([partition]));
+      const selected = await privateDirectory(installations, partition), selectedNames = await inventory(selected);
+      // A readonly SDK/CLI host creates requests-v1 before any mutation or
+      // model selection. Optional data must be scanned when present; absence
+      // is not a model-configuration or execution-authority decision.
+      check(selectedNames.includes('requests-v1'));
+      for (const leaf of selectedNames) {
+        if (leaf === 'requests-v1') continue;
+        check(leaf === 'client-mutation.lock' || leaf === 'preferences.json' || /^model-setup-[0-9a-f]{64}\.json$/u.test(leaf));
+        scanSource = { kind: 'evidence', part: 'file_bytes' };
+        await file(selected, leaf, { mode: [0o600n], limit: leaf === 'client-mutation.lock' ? 0 : 65_536 });
+      }
+      const requests = await privateDirectory(selected, 'requests-v1'), requestNames = await inventory(requests);
+      for (const leaf of requestNames) {
+        const acknowledged = /^\.ack-([0-9a-f-]{36})-([0-9a-f]{64})-([0-9a-f]{32})$/u.exec(leaf);
+        check(REQUEST_ID_PATTERN.test(acknowledged?.[1] ?? leaf));
+        const group = await privateDirectory(requests, leaf), groupNames = await inventory(group);
+        if (acknowledged) {
+          check(acknowledged[2] === canonicalSha256({ deviceId: String(group.info.dev), fileId: String(group.info.ino), ownerUid: input.uid }));
+        } else check(groupNames.includes('metadata.json') && groupNames.includes('request.json'));
+        // A genuine acknowledgement residue may have already removed any of
+        // these three files. Its physical name binding is mandatory; neither
+        // it nor the scan turns a disk response into an authenticated result.
+        for (const name of groupNames) {
+          check(['metadata.json', 'request.json', 'response.json'].includes(name));
+          scanSource = { kind: 'evidence', part: 'file_bytes' };
+          await file(group, name, { mode: [0o600n], limit: name === 'metadata.json' ? 4_096 : 1_048_576 });
+        }
+        check(JSON.stringify(await names(group)) === JSON.stringify(groupNames));
+      }
+      check(JSON.stringify(await names(requests)) === JSON.stringify(requestNames));
+      check(JSON.stringify(await names(selected)) === JSON.stringify(selectedNames));
+      check(JSON.stringify(await names(installations)) === JSON.stringify(installationNames));
+      check(JSON.stringify(await names(client)) === JSON.stringify(clientNames));
+      stats.evidenceDirectoriesScanned++;
+    }
     stage = 'stability';
     for (const observed of observedFiles) {
       let info: BigIntStats | undefined;
@@ -325,7 +392,9 @@ export async function scanCredentialSecretCorpus(input: CredentialSecretCorpusIn
       check(observed.info ? info && identity(info) === identity(observed.info) : !info);
     }
     for (const directory of directories) await current(directory);
-    return Object.freeze({ diagnosticOnly: true as const, qualified: true as const, ...stats });
+    for (const directory of clientDirectories) await current(directory, true);
+    return Object.freeze({ diagnosticOnly: true as const, qualified: true as const, ...stats,
+      ...(input.scanInstalledClientData ? { installedClientDataScanned: true as const } : {}) });
   } catch (error) {
     if (error instanceof CredentialSecretScanError) {
       try {

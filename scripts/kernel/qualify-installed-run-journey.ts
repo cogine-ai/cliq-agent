@@ -4776,8 +4776,10 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       mark('secret_corpus');
       try {
         assert.equal(report.installedWritersJoined, true); assert.equal(report.httpsJoined, true); assert.equal(report.daemonJoined, true);
-        report.secretCorpus = await scanCredentialSecretCorpus({ stateRoot: recipe.stateRoot, uid: ledger.uid, evidenceDirs: [], scanner });
-        assert.equal(report.secretCorpus.sqliteDatabasesScanned, 2); assert.equal(report.secretCorpus.evidenceDirectoriesScanned, 0);
+        report.secretCorpus = await scanCredentialSecretCorpus({ stateRoot: recipe.stateRoot, uid: ledger.uid, evidenceDirs: [], scanner,
+          ...(mode === '--campaign' ? { scanInstalledClientData: true as const } : {}) });
+        assert.equal(report.secretCorpus.sqliteDatabasesScanned, 2); assert.equal(report.secretCorpus.evidenceDirectoriesScanned, mode === '--campaign' ? 1 : 0);
+        if (mode === '--campaign') assert.equal(report.secretCorpus.installedClientDataScanned, true);
         mark('complete');
       }
       catch (error) {
