@@ -268,8 +268,8 @@ test('normal daily coverage uses the signed command path and original joined fix
   assert.match(driver, /if \(dailyJourney\) await dailyCommand\(\['models', 'add', dailyAlias, '--api-key-stdin'\], 60_000, secret\)/u);
   assert.match(driver, /runInstalledDailyProviderJourney\([\s\S]*?command: dailyCommand/u);
   assert.match(driver, /report\.normalCliCommands\.map\([\s\S]*?\['setup', 'models', 'run', 'result', 'apply'\]/u);
-  assert.match(driver, /const dailyCommand = async[^\n]+\n\s*assert\(dailyJourney && \[30_000, 60_000, 90_000\]\.includes\(timeout\)\)/u,
-    'the normal commands keep the original distinct command budgets');
+  assert(/const dailyCommand = async[^\n]+\n\s*assert\(dailyJourney && \[30_000, 60_000, 90_000\]\.includes\(timeout\) && \['setup', 'models', 'run', 'result', 'apply'\]\.includes\(argv\[0\]!\)\)/u.test(driver),
+    'the normal commands keep the original distinct command budgets and closed command names');
   assert.match(driver, /await runInstalledDailyCommand\(\{ executable: '\/usr\/sbin\/runuser',[\s\S]*?path\.join\(recipe\.packageRoot, 'supervisor'\), \.\.\.argv[\s\S]*?deadlineMs: timeout, scanner \}/u);
   const command = await readFile(new URL('../../scripts/kernel/testing/installed-daily-command.ts', import.meta.url), 'utf8');
   assert.match(command, /Promise\.all\(\[closed, written, streamsClosed\]\)/u);
