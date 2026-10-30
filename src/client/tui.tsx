@@ -114,7 +114,7 @@ export function ClientTui({ app, io, initialRunId, profile }: Readonly<{
       invocation = { kind: 'run' as const, intent: { ...intent.current, objective: text }, sessionId: snapshot.run.sessionId, detach: false, json: false };
     }
     if (invocation.kind === 'tui' || invocation.kind === 'jsonl' || invocation.kind === 'rpc' || invocation.kind === 'help') {
-      setMessage(':list · :status <id> · :attach <id> · :session list/show/fork/compact · :run <objective> <model options>'); return;
+      setMessage(':list · :attach <id> · :result <id> · :diff <id> · :apply <id> [--result <ref>] · :session list/show/fork/compact · :run <objective> <model options>'); return;
     }
     if (invocation.kind === 'run') intent.current = invocation.intent;
     const result = await executeClientAction(app, invocation, io.confirmUnverified, lifetime.current.signal);
@@ -174,7 +174,7 @@ export function ClientTui({ app, io, initialRunId, profile }: Readonly<{
       {view.pending.admissionKey ? ` · admission ${terminalText(view.pending.admissionKey)}` : ''}
       {view.connection === 'disconnected' ? ' · :reconnect, then explicitly :replay' : ' · unresolved until its original response'}</Text>}
     <Box marginTop={1}><Text>{busy ? 'Working…' : '> '}{terminalText(Array.from(input).slice(-160).join(''))}</Text></Box>
-    <Text dimColor>Esc/Ctrl+C: detach · Ctrl+K: explicitly cancel · :commands use the same installed protocol</Text>
+    <Text dimColor>Esc/Ctrl+C: detach · Ctrl+K: explicitly cancel · :help · :result/:diff to review · :apply to apply explicitly</Text>
   </Box>;
 }
 

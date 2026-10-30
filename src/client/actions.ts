@@ -40,10 +40,12 @@ export async function executeClientAction(app: ClientApplication, invocation: Cl
   if (invocation.kind === 'apply') {
     const read = accepted(await send({ protocolVersion: 1, method: 'run.result', runId: invocation.sourceRunId }));
     if (read.result.method !== 'run.result') throw new TypeError('Delivery did not read its immutable source result');
+    if (invocation.expectedRunResultRef !== undefined && invocation.expectedRunResultRef !== read.result.result.ref)
+      throw new TypeError('Delivery source differs from the explicitly reviewed result');
     const result = accepted(await send(clientMutation({ ...invocation.options, method: 'run.apply',
       sourceRunId: invocation.sourceRunId, expectedRunResultRef: read.result.result.ref }, true)));
     if (result.result.method !== 'run.apply') throw new TypeError('Delivery has no exact durable admission response');
-    return { exitCode: 0, runId: result.result.snapshot.run.id, follow: false };
+    return { exitCode: 0, runId: result.result.snapshot.run.id, follow: !invocation.detach };
   }
   if (invocation.kind !== 'run') throw new TypeError('this local mode is not a client action');
   let intent = invocation.intent;

@@ -3,9 +3,11 @@
 The CLI, Ink view, JSONL adapter and local RPC adapter use the same authenticated
 `InstalledControlSession`. `src/client/application.ts` owns the connection,
 bounded command/read queue and disposable view lifetime. It never owns a Run,
-WorkerLaunch, lease, Checkpoint or permission decision. Closing input, pressing
-Esc/Ctrl+C, an output failure or a lost connection detaches; only an explicit
-revisioned `run.cancel` requests cancellation.
+WorkerLaunch, lease, Checkpoint or permission decision. Closing observer/stdio
+input, pressing Esc/Ctrl+C, an output failure or a lost connection detaches;
+only an explicit revisioned `run.cancel` requests cancellation. Natural finite
+`run` and `apply` commands wait for their terminal result even with redirected
+or already-closed stdin. `--detach` explicitly returns after durable admission.
 
 The launcher calls `runInstalledClient` with a genuine held installation selected
 under fixed shipped release roots. This module accepts no key, ledger or trust-root
@@ -65,9 +67,28 @@ return a nonzero exit code. Esc detach remains a normal TUI exit.
 `inspect` accepts independent item, Journal and Checkpoint cursors; `session show`
 accepts the original raw-item cursor and limit. Metadata pages expose their exact
 next/high-water values. These are explicit reads, not a hidden mutable-history
-reconstruction. `diff` and `result` download their selected immutable artifacts,
-reuse the original pure result/closure decoders and show the committed summary
-and verification provenance. Handoff downloads its exact JSON and Markdown refs
+reconstruction. `diff` and `result` download their selected immutable artifacts
+and reuse the original pure result/closure decoders. A result review keeps its
+committed summary, required/advisory check outcomes and code changes together in
+one view, including in Ink. The exact base/result source pair must match the
+selected diff. Unified text changes use pinned jsdiff over original authenticated
+blob reads, without opening the user workspace or invoking Git. File mode, type
+and symlink changes remain visible. Binary/invalid-UTF-8 files, files above
+128 KiB, and exhausted one-MiB review budgets are explicitly marked incomplete
+with original artifact references. Each asynchronous text comparison has a fixed
+work/time bound and is joined before cancellation returns. Raw artifact export
+retains its original byte limits. No rendered diff is applied directly.
+
+The review shows `apply <runId> --result <ref>` to bind a later explicit application
+to that exact immutable result. A mismatching current result sends no mutation.
+Application still creates one distinct authorized Delivery Run through the existing
+protocol, then follows its real status by default. Admission is not displayed as
+completed publication; a failed/cancelled terminal Delivery returns nonzero in
+the finite CLI. `apply --detach` returns only the acknowledged Delivery id. Lost
+mutation responses retain their exact original request identity without an
+automatic replacement or execution retry.
+
+Handoff downloads its exact JSON and Markdown refs
 at the captured Session revision. `artifact <ref> > file` exports every verified
 original byte with no header; a terminal gets escaped text or a binary-export
 hint. No export bypasses registered-artifact membership or the 64-MiB buffered

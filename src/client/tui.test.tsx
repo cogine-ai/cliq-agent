@@ -104,6 +104,67 @@ test('local client tokenization preserves quoted data without shell expansion or
   assert.deepEqual(splitClientCommand('input run --text ""'), ['input', 'run', '--text', '']);
 });
 
+test('Ink keeps code and check evidence in one result review, then follows only an explicit exact-result Delivery', async () => {
+  const objects = new Map<string, Buffer>();
+  const save = (value: unknown) => { const bytes = canonicalJsonBytes(value), digest = canonicalSha256(value); objects.set(digest, bytes); return digest; };
+  // Actual artifact.get verifies the complete byte hash, so raw file blobs use
+  // their true content address rather than a display/test identity.
+  const { sha256Bytes } = await import('../kernel/identity.js');
+  const file = (text: string) => { const bytes = Buffer.from(text), blobRef = sha256Bytes(bytes); objects.set(blobRef, bytes);
+    return { path: 'note.txt', kind: 'file', mode: 0o644, size: bytes.length, blobRef }; };
+  const before = file('old\n'), after = file('fixed\n');
+  const diffCore = { schemaVersion: 1, format: 'cliq-workspace-diff-v1', baseSourceRef: ref, resultSourceRef: 'b'.repeat(64),
+    operations: [{ path: 'note.txt', kind: 'modify', before, after }] };
+  const diffRef = save({ ...diffCore, diffDigest: canonicalSha256(diffCore) });
+  const summaryCore = { schemaVersion: 1, format: 'cliq-model-text-v1', utf8: 'Fixed the bug.', byteCount: 14 };
+  const summaryRef = save({ ...summaryCore, textDigest: canonicalSha256(summaryCore) });
+  const closureCore = { schemaVersion: 1, format: 'cliq-verification-closure-v1', runId: 'run', candidateItemId: 'candidate',
+    resultSourceRef: diffCore.resultSourceRef, verifierPlanRef: ref, dependency: { kind: 'none' }, createdAt: at,
+    verification: { kind: 'local', outcome: 'verified', entries: [{ verifierIndex: 0, verifierId: 'tests', verifierSpecDigest: ref,
+      verifierEntryDigest: ref, required: true, disposition: { kind: 'passed', verifierResultItemId: 'check', opId: 'verify', attempt: 0,
+        completedJournalSeq: 1, receiptRef: ref } }] } };
+  const closureRef = save({ ...closureCore, closureDigest: canonicalSha256(closureCore) });
+  const resultRef = save({ schemaVersion: 1, runId: 'run', baseSourceRef: ref, resultSourceRef: diffCore.resultSourceRef,
+    diffRef, summaryRef, verificationClosureRef: closureRef, verificationReceiptRefs: [ref], createdAt: at });
+  const queued = runSnapshot(); queued.operation = 'delivery'; queued.run.id = 'delivery'; queued.run.nextStep = 'delivery';
+  const terminal = (runId: string) => {
+    const snapshot = runSnapshot(), { frontierRef: _frontier, ...run } = snapshot.run;
+    return { ...snapshot, operation: runId === 'delivery' ? 'delivery' as const : 'agent' as const,
+      run: { ...run, id: runId, revision: 2, status: 'succeeded' as const, nextStep: null, terminalReason: 'verified' as const, resultRef } };
+  };
+  const descriptor = (digest: string) => ({ schemaVersion: 1, ref: digest, digest, sizeBytes: objects.get(digest)!.length, mediaType: 'application/json' });
+  const f = protocolClient({
+    'run.get': async (request: { runId: string }) => ({ protocolVersion: 1, ok: true, result: { method: 'run.get', snapshot: terminal(request.runId),
+      items: [], journal: [], checkpoints: [], highWaterItemSeq: 0, highWaterJournalSeq: 0,
+      highWaterCheckpointCursor: encodeControlCheckpointCursor(request.runId, { createdAt: at, checkpointId: 'checkpoint' }), nextItemSeq: 0, nextJournalSeq: 0 } }),
+    'run.attach': async (request: { runId: string }) => ({ protocolVersion: 1, ok: true, result: { method: 'run.attach', snapshot: terminal(request.runId),
+      earliestRetainedEventSeq: 1, latestRetainedEventSeq: 1, highWaterEventSeq: 1, nextEventSeq: 1,
+      events: [{ schemaVersion: 1, kind: 'progress', runId: request.runId, eventSeq: 1, observedRunRevision: 1, phase: 'verify', occurredAt: at }] } }),
+    'run.result': async () => ({ protocolVersion: 1, ok: true, result: { method: 'run.result', runId: 'run', result: descriptor(resultRef), verificationClosureRef: closureRef } }),
+    'artifact.get': async (request: { digest: string; offset: number; length: number }) => {
+      const bytes = objects.get(request.digest)!; assert(bytes); const part = bytes.subarray(request.offset, request.offset + request.length);
+      return { protocolVersion: 1, ok: true, result: { method: 'artifact.get', artifact: descriptor(request.digest), offset: request.offset,
+        nextOffset: request.offset + part.length, bytesBase64: part.toString('base64'), eof: request.offset + part.length === bytes.length } };
+    },
+    'run.apply': async () => ({ protocolVersion: 1, ok: true, result: { method: 'run.apply', snapshot: queued } })
+  });
+  const app = createClientApplication(f.session, () => {}), input = new PassThrough();
+  const ui = render(<ClientTui app={app} io={{ input, output: outputStream().stream, diagnostic: outputStream().stream, workspacePath: '/workspace' }} initialRunId="run" />);
+  try {
+    await until(() => ui.lastFrame()?.includes('Verified') === true);
+    ui.stdin.write(':result run'); await new Promise(resolve => setTimeout(resolve, 20)); ui.stdin.write('\r');
+    await until(() => ui.lastFrame()?.includes('Result review') === true, () => ui.lastFrame());
+    assert.match(ui.lastFrame()!, /Fixed the bug/u); assert.match(ui.lastFrame()!, /Required checks passed/u);
+    assert.match(ui.lastFrame()!, /-old/u); assert.match(ui.lastFrame()!, /\+fixed/u);
+    assert.equal(f.calls.some(call => call.method === 'run.apply'), false, 'reading a result cannot apply it');
+    ui.stdin.write(`:apply run --result ${resultRef}`); await new Promise(resolve => setTimeout(resolve, 20)); ui.stdin.write('\r');
+    await until(() => f.calls.some(call => call.method === 'run.attach' && call.request.runId === 'delivery'));
+    const applies = f.calls.filter(call => call.method === 'run.apply'); assert.equal(applies.length, 1);
+    assert.equal(applies[0]!.request.sourceRunId, 'run'); assert.equal(applies[0]!.request.expectedRunResultRef, resultRef);
+    assert.equal(f.calls.some(call => call.method === 'run.cancel'), false);
+  } finally { ui.unmount(); await app.close(); input.destroy(); }
+});
+
 test('input presentation follows the actual strict protocol fixture graph', async () => {
   const f = fixture('input');
   try { assert.equal((await readWaitingPresentation(f.app, f.snapshot)).text, 'Which name should I use?'); }

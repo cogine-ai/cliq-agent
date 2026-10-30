@@ -113,7 +113,18 @@ operators do not manually order low-level stage, Stop and selector operations.
    is added.
 5. Hold the same StateRoot flock. Require the exact schema 7 catalog and actual
    graceful old StateOwner release. Fully read each terminal Run's ordinary
-   recovery closure, all retired launches/generations and source retirements.
+   recovery closure, all retired launches, closed generations and source
+   retirements. A closed generation is either the original `retired` row or
+   its original dormant `sealed` row with the unique original activated,
+   physically retired worker. For the latter, retain the row and version
+   unchanged; revalidate its complete immutable Checkpoint/file-byte,
+   snapshot, containment, inspector and all-descendant death graph, including
+   freshness at the original commit. The locked SQL cut must contain exactly
+   that referencing launch, no active Run pointer, and the same complete
+   worker row in the retained resource graph. A phase label, same pathname,
+   current matching bytes or newly manufactured retirement cannot substitute
+   for this source. Both conversion and retained receipt reads apply this
+   same closed check; other generation phases still refuse.
    Outstanding reservations, UNKNOWN/unsettled attempts, missing provenance
    and unsupported producer families refuse. Actual connection change counters
    and the complete old owner history bind this audited SQL cut.

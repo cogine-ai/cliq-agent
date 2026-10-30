@@ -21,6 +21,7 @@ import { readWorkerLaunchesForRun } from './repositories/worker-launches.js';
 import { readWorkspaceGenerationsForRun } from './repositories/workspace-generations.js';
 import { readRun } from './rows.js';
 import { readRuntimeUpgradeBoundary, readRuntimeUpgradeRetiredRows } from './runtime-upgrade-history.js';
+import { assertClosedUpgradeGeneration } from './runtime-upgrade-generations.js';
 import { publishUpgradeResourceGraph, UPGRADE_RESOURCE_FAMILY_ROWS } from './runtime-upgrade-resources.js';
 import { applySignedKernelSchema7To8, assertKernelSchemaVersion, readSchemaUserVersion } from './schema.js';
 import { readSignedSchemaConversion, schemaConversionProfile, signedKernelSchemaProfile } from './signed-schema.js';
@@ -160,7 +161,8 @@ export async function upgradeRetiredRuntime(input: Readonly<{ stateRoot: string;
       installed?.notePhase?.('conversion_resource_run_retain');
       await retain(run, runTerminalRowRefs);
       installed?.notePhase?.('conversion_resource_worker_row');
-      for (const launch of readWorkerLaunchesForRun(driver, id)) {
+      const retainedWorkers = new Map(readWorkerLaunchesForRun(driver, id).map(launch => [launch.launchId, launch]));
+      for (const launch of retainedWorkers.values()) {
         installed?.notePhase?.('conversion_resource_worker_row');
         if (launch.phase !== 'retired') refuse('upgrade requires every original worker to be physically retired');
         installed?.notePhase?.('conversion_resource_worker_retain');
@@ -169,7 +171,7 @@ export async function upgradeRetiredRuntime(input: Readonly<{ stateRoot: string;
       installed?.notePhase?.('conversion_resource_generation_row');
       for (const row of readWorkspaceGenerationsForRun(driver, id)) {
         installed?.notePhase?.('conversion_resource_generation_row');
-        if (row.phase !== 'retired') refuse('upgrade requires every original generation to be physically retired');
+        await assertClosedUpgradeGeneration(driver, reads, run, row, retainedWorkers);
         installed?.notePhase?.('conversion_resource_generation_retain');
         await retain(row, workspaceGenerationRowRefs);
       }

@@ -19,6 +19,8 @@ import { policyProfile, SINGLE_CAS_STREAMS_LAYOUT, verifyRuntimeBundle, type Run
 import { STATE_OWNER_NATIVE_ENTRY_ID, STATE_OWNER_NATIVE_RELATIVE_PATH } from '../../../src/state/native-owner.js';
 import { buildSupervisorSeaImage, prepareInstalledSupervisorSeaCarrier } from './supervisor-sea-builder.js';
 import { installedModelPackageEntries, writeInstalledModelAuthority, type InstalledModelPackageFixture } from './installed-model-package.js';
+import { buildInstalledModelPackageEntries } from '../model-package.js';
+import { providerModelDefinition, writeInstalledProviderModelAuthority, type InstalledProviderModelDefinition } from '../installed-provider-model.js';
 import { writeInstalledGuestToolchain } from './installed-guest-package.js';
 import { validateGuestToolchainMetadata } from '../../../src/state/guest-toolchain.js';
 import { buildSourceGitInspectorAsset } from './source-git-inspector-package.js';
@@ -27,7 +29,7 @@ import { buildBundledSkillPackageData, type BundledSkillPackageInput } from './i
 import { checkCanonicalBytes, validateBundle } from '../../../src/state/installed-artifacts.js';
 import { emitQualificationFailure } from './qualification-failure-diagnostic.js';
 
-type PackageBuildOptions = Readonly<{ source?: FrozenQualificationSource; publisher?: InstalledQualificationPublisher; upgradeSourceBundle?: RuntimeBundleManifest; bundledSkills?: readonly BundledSkillPackageInput[]; headlessSchemaVersion?: 3; guestToolchain?: 'node-test-v1'; guestImageProfile?: 'qualification_max'; publicationRetirementDiagnostics?: true; credentialPhaseDiagnostics?: true; serverAuthenticationDiagnostics?: true; storeFailureDiagnostics?: true; resourceDiagnostics?: true; npmDependencyArchive?: Buffer }>;
+type PackageBuildOptions = Readonly<{ source?: FrozenQualificationSource; publisher?: InstalledQualificationPublisher; upgradeSourceBundle?: RuntimeBundleManifest; bundledSkills?: readonly BundledSkillPackageInput[]; headlessSchemaVersion?: 3; guestToolchain?: 'node-test-v1'; guestImageProfile?: 'qualification_max'; publicationRetirementDiagnostics?: true; credentialPhaseDiagnostics?: true; serverAuthenticationDiagnostics?: true; storeFailureDiagnostics?: true; resourceDiagnostics?: true; npmDependencyArchive?: Buffer; providerModel?: InstalledProviderModelDefinition }>;
 import { buildInstalledNpmAdapterAsset, buildInstalledNpmDataAsset } from './installed-npm-package.js';
 import { DEPENDENCY_BROKER_ENTRY_ID, DEPENDENCY_BROKER_RELATIVE_PATH } from '../../../src/state/dependency-broker-native.js';
 import { NPM_DATA_RECIPE } from '../../../src/sandbox/npm-data-image.js';
@@ -38,7 +40,11 @@ import { NPM_DATA_RECIPE } from '../../../src/sandbox/npm-data-image.js';
 async function buildInstalledSupervisorPackageCore(fixture: string,
   variant: 'complete' | 'retirement-native-missing' = 'complete', modelFixture?: InstalledModelPackageFixture,
   options: PackageBuildOptions = {}, diagnostics={phase:0}) {
-  assert(Object.keys(options).every(key => key === 'source' || key === 'publisher' || key === 'upgradeSourceBundle' || key === 'bundledSkills' || key === 'headlessSchemaVersion' || key === 'guestToolchain' || key === 'guestImageProfile' || key === 'publicationRetirementDiagnostics' || key === 'credentialPhaseDiagnostics' || key === 'serverAuthenticationDiagnostics' || key === 'storeFailureDiagnostics' || key === 'resourceDiagnostics' || key === 'npmDependencyArchive'));
+  assert(Object.keys(options).every(key => key === 'source' || key === 'publisher' || key === 'upgradeSourceBundle' || key === 'bundledSkills' || key === 'headlessSchemaVersion' || key === 'guestToolchain' || key === 'guestImageProfile' || key === 'publicationRetirementDiagnostics' || key === 'credentialPhaseDiagnostics' || key === 'serverAuthenticationDiagnostics' || key === 'storeFailureDiagnostics' || key === 'resourceDiagnostics' || key === 'npmDependencyArchive' || key === 'providerModel'));
+  assert(!(modelFixture && options.providerModel), 'owned fixture and real provider definitions cannot be combined');
+  const providerModel = options.providerModel === undefined ? undefined : providerModelDefinition(options.providerModel);
+  if (providerModel) assert(variant === 'complete', 'real provider qualification requires the complete signed native package');
+  const hasModel = modelFixture !== undefined || providerModel !== undefined;
   assert(options.headlessSchemaVersion === undefined || options.headlessSchemaVersion === 3);
   assert(options.guestToolchain === undefined || options.guestToolchain === 'node-test-v1');
   // Publisher construction only: keep the original maximum-load qualifier
@@ -54,19 +60,20 @@ async function buildInstalledSupervisorPackageCore(fixture: string,
     'fixed server observations belong only to the explicit delayed delivery qualification image');
   if (options.publicationRetirementDiagnostics) assert(options.guestToolchain === 'node-test-v1',
     'fixed publication observations belong only to the installed delivery qualification image');
-  if (options.guestToolchain) assert(variant === 'complete' && modelFixture, 'installed verifier requires the complete model and native package');
+  if (options.guestToolchain) assert(variant === 'complete' && hasModel, 'installed verifier requires the complete model and native package');
   // Publisher-only fixed source. This is not a runtime flag, path, registry
   // selector or interpreter choice. Validate the entire official source
   // before starting any builder or publishing a signed dependency entry.
   assert(options.npmDependencyArchive === undefined || Buffer.isBuffer(options.npmDependencyArchive) &&
     options.npmDependencyArchive.length === NPM_DATA_RECIPE.archiveBytes, 'installed npm requires its exact bounded official source');
   const npmData = options.npmDependencyArchive === undefined ? undefined : buildInstalledNpmDataAsset(Buffer.from(options.npmDependencyArchive));
-  if (npmData) assert(options.guestToolchain === 'node-test-v1' && variant === 'complete' && modelFixture,
+  if (npmData) assert(options.guestToolchain === 'node-test-v1' && variant === 'complete' && hasModel,
     'installed npm requires its complete signed guest, model and native package');
   diagnostics.phase=1;
   const source = options.source === undefined ? undefined : await readQualificationSource(options.source);
   const repository = source?.root ?? fileURLToPath(new URL('../../..', import.meta.url));
   const schemaVersion = source?.schemaVersion ?? KERNEL_STATE_SCHEMA_VERSION;
+  if (providerModel && schemaVersion !== 8) throw new TypeError('real provider qualification requires the current signed schema8 recipe');
   if (options.npmDependencyArchive !== undefined && schemaVersion !== 8) throw new TypeError('the original schema7 product cannot consume a later npm recipe');
   if (options.upgradeSourceBundle && schemaVersion !== 8) throw new TypeError('conversion can only be signed by the target8 recipe');
   if (options.bundledSkills !== undefined && schemaVersion !== 8) throw new TypeError('the original schema7 product cannot consume a later skills recipe');
@@ -80,6 +87,8 @@ async function buildInstalledSupervisorPackageCore(fixture: string,
   // current compiler cannot silently add a later handler to an old image.
   const modelProducer = source ? await import(pathToFileURL(path.join(repository, 'scripts/kernel/testing/installed-model-package.ts')).href) as
     Pick<typeof import('./installed-model-package.js'), 'installedModelPackageEntries'> : { installedModelPackageEntries };
+  const providerProducer = providerModel && source ? await import(pathToFileURL(path.join(repository, 'scripts/kernel/model-package.ts')).href) as
+    Pick<typeof import('../model-package.js'), 'buildInstalledModelPackageEntries'> : { buildInstalledModelPackageEntries };
   diagnostics.phase=2;
   const { nodeRoot, carrier, supervisorCarrier } = await sea.prepareInstalledSupervisorSeaCarrier(fixture);
   diagnostics.phase=3;
@@ -130,7 +139,7 @@ async function buildInstalledSupervisorPackageCore(fixture: string,
   assert.equal(credentials.error, undefined, 'production credential platform construction did not join');
   assert.equal(credentials.status, 0, `production credential platform construction: ${credentials.stderr}`);
   let modelBrokerBytes: Buffer | undefined;
-  if (modelFixture) {
+  if (hasModel) {
     const brokerRoot = path.join(fixture, 'model-broker-image');
     const broker = spawnSync(process.execPath, [path.join(repository, 'scripts/kernel/build-linux-model-broker.mjs'),
       brokerRoot, path.join(nodeRoot, 'include/node')],
@@ -172,12 +181,14 @@ async function buildInstalledSupervisorPackageCore(fixture: string,
   }
   const builtinTools = guest ? await buildBuiltinToolsAsset(repository) : undefined;
   const npmAdapter = npmData ? await buildInstalledNpmAdapterAsset(repository) : undefined;
-  const modelMaterial = modelFixture ? modelProducer.installedModelPackageEntries(modelFixture, modelBrokerBytes!,
-    workerEntries.find(entry => entry.entryId === 'edit')!.bytes, builtinTools && guest ? {
+  const scriptMaterial = builtinTools && guest ? {
       entry: builtinTools, supervisor: { entryId: 'installed-supervisor', role: 'supervisor', relativePath: 'supervisor',
         executable: true, version: '1', digest: sha256Bytes(supervisorBytes), byteCount: supervisorBytes.length },
       guest: { manifestRef: guest.manifestRef, manifest: guest.manifest }
-    } : undefined) : undefined;
+    } : undefined;
+  const editBytes = workerEntries.find(entry => entry.entryId === 'edit')!.bytes;
+  const modelMaterial = modelFixture ? modelProducer.installedModelPackageEntries(modelFixture, modelBrokerBytes!, editBytes, scriptMaterial)
+    : providerModel ? providerProducer.buildInstalledModelPackageEntries(providerModel, modelBrokerBytes!, editBytes, scriptMaterial) : undefined;
   const profile = policyProfile();
   const originalStructuredCount = 1 + (guest ? 1 : 0) + (modelMaterial?.structuredArtifacts.length ?? 0);
   if (options.bundledSkills && options.bundledSkills.length + originalStructuredCount > 65)
@@ -222,7 +233,7 @@ async function buildInstalledSupervisorPackageCore(fixture: string,
   diagnostics.phase=7;
   const bundle: RuntimeBundleManifest = {
     ...(schemaVersion === 7 ? { schemaVersion: 1 as const } : { schemaVersion: 2 as const, installedLayout: SINGLE_CAS_STREAMS_LAYOUT }),
-    bundleVersion: guest ? 'installed-sea-verifier-fixture-v1'
+    bundleVersion: providerModel ? 'installed-sea-provider-qualification-v1' : guest ? 'installed-sea-verifier-fixture-v1'
       : modelFixture ? 'installed-sea-run-fixture-v1' : 'installed-sea-read-qualification-v1',
     controlProtocolRange: { min: 1, max: 1 }, headlessSchemaRange: { min: options.headlessSchemaVersion ?? 1, max: options.headlessSchemaVersion ?? 1 },
     stateSchemaRange: { min: 1, max: schemaVersion }, workerProtocolRange: { min: 1, max: 1 },
@@ -248,7 +259,9 @@ async function buildInstalledSupervisorPackageCore(fixture: string,
   await writeFile(path.join(packageRoot, 'manifest.json'), canonicalJsonBytes(bundle), { flag: 'wx', mode: 0o400 });
   diagnostics.phase=8;
   const modelAuthority = modelFixture ? await writeInstalledModelAuthority({ packageRoot, bundle,
-    privateKey: keys.privateKey, fixture: modelFixture, material: modelMaterial! }) : undefined;
+    privateKey: keys.privateKey, fixture: modelFixture, material: modelMaterial! })
+    : providerModel ? await writeInstalledProviderModelAuthority({ packageRoot, bundle,
+      privateKey: keys.privateKey, definition: providerModel, material: modelMaterial! }) : undefined;
   if (options.source) { const current = await readQualificationSource(options.source);
     assert.deepEqual(current, source, 'the original frozen source changed during actual package construction'); }
   return { packageRoot, releaseKeys, bundle, contents, carrier, ...(source ? { sourceProvenance: source } : {}), ...(modelAuthority ? { modelAuthority } : {}),
@@ -261,4 +274,13 @@ export async function buildInstalledSupervisorPackage(fixture:string,
   const diagnostics={phase:0};
   try { return await buildInstalledSupervisorPackageCore(fixture,variant,modelFixture,options,diagnostics); }
   catch (error) { emitQualificationFailure('package',error,diagnostics.phase); throw error; }
+}
+
+/** A controlled real-provider experiment uses the original SEA/native/guest
+ * build and installer, with public CAs and compiled qualification roots. This
+ * does not publish an official release, call the model or persist its key. */
+export function buildInstalledProviderQualificationPackage(directory: string, definition: InstalledProviderModelDefinition,
+  options: Omit<PackageBuildOptions, 'providerModel' | 'headlessSchemaVersion' | 'guestToolchain'> = {}) {
+  return buildInstalledSupervisorPackage(directory, 'complete', undefined,
+    { ...options, providerModel: definition, headlessSchemaVersion: 3, guestToolchain: 'node-test-v1' });
 }

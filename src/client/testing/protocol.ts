@@ -8,7 +8,8 @@ export const ref = 'a'.repeat(64), at = '2026-10-26T00:00:00.000Z';
 export const hello = { method: 'control.hello' as const, protocolVersion: 1 as const, serverBuild: 'inert-client-data',
   supervisorInstanceId: 'supervisor', controlSchemaRange: { min: 1 as const, max: 1 as const }, headlessSchemaRange: { min: 3, max: 3 },
   activeRuntimeBundle: { schemaVersion: 1 as const, runtimeBundleRef: ref, bundleDigest: ref, bundleVersion: 'inert' },
-  enabledFeatureIds: ['supervisor.status', 'session.create', 'session.get', 'run.submit', 'run.get', 'run.attach', 'run.cancel', 'run.approve', 'run.input', 'artifact.get'] };
+  enabledFeatureIds: ['supervisor.status', 'session.create', 'session.get', 'run.submit', 'run.get', 'run.attach', 'run.cancel', 'run.approve', 'run.input',
+    'run.result', 'run.diff', 'run.apply', 'artifact.get'] };
 export function runSnapshot(): RunSnapshotV1 { return { schemaVersion: 1, operation: 'agent', latestRunItemSeq: 0, run: {
   id: 'run', sessionId: 'session', specRef: ref, status: 'queued', nextStep: 'agent', frontierRef: ref, revision: 1, leaseEpoch: 0,
   latestCheckpointId: 'checkpoint', budgetReserved: { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 },

@@ -2,9 +2,14 @@
 
 [![npm version](https://img.shields.io/npm/v/@cogineai/cliq.svg)](https://www.npmjs.com/package/@cogineai/cliq)
 
-Every team has their own agent. This is ours.
+Cliq is a local-first, provider-neutral coding agent for developers and small
+teams. Work interactively or delegate a repository task, review the code changes
+and actual check results, then explicitly apply the result.
 
-Cliq is a local coding-agent CLI built around a small, provider-agnostic JSON action protocol. It runs in your current workspace, keeps sessions on your machine, and works with local or hosted model providers.
+The default CLI currently uses the existing interactive runtime. The installed
+durable execution path is a qualification preview: its model, verification,
+review and Delivery integration is still being completed. It has not replaced
+the default CLI or passed the complete release gate.
 
 ## Install
 

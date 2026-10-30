@@ -9,6 +9,7 @@ import { decodeRunResult, decodeWorkspaceDiff, decodeVerificationClosure, decode
 import { verifyModelText } from '../model/attempt.js';
 import type { ModelTextV1 } from '../protocol/agent-ir.js';
 import type { ClientApplication } from './actions.js';
+import { renderWorkspaceReview } from './review.js';
 export type ClientDetail = Readonly<{ label: string; artifactRef: string; text: string }>;
 const utf8 = (bytes: Uint8Array) => new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
 
@@ -31,27 +32,46 @@ export async function presentControlArtifacts(app: Pick<ClientApplication, 'arti
   }
   if (result.method === 'run.diff') {
     if (request.method !== result.method || request.runId !== result.runId) throw new TypeError('diff differs from its original request');
-    const data = await json(result.diff.ref, result.diff.sizeBytes); decodeWorkspaceDiff(data.value);
-    await present({ label: 'Workspace diff', artifactRef: result.diff.ref, text: data.text });
+    const data = await json(result.diff.ref, result.diff.sizeBytes), diff = decodeWorkspaceDiff(data.value);
+    await present({ label: 'Workspace diff', artifactRef: result.diff.ref,
+      text: await renderWorkspaceReview(diff, app.artifact.bind(app), signal) + `\nComplete diff artifact: ${result.diff.ref}\n` });
   } else if (result.method === 'run.result') {
     if (request.method !== result.method || request.runId !== result.runId) throw new TypeError('result differs from its original request');
     const raw = await json(result.result.ref, result.result.sizeBytes), value = decodeRunResult(raw.value);
     if (value.runId !== result.runId || value.verificationClosureRef !== result.verificationClosureRef)
       throw new TypeError('result detail substitutes its original selection');
-    await present({ label: 'Immutable Run result', artifactRef: result.result.ref, text: raw.text });
     const closureData = await json(value.verificationClosureRef), closure = decodeVerificationClosure(closureData.value);
     if (closure.runId !== value.runId || closure.resultSourceRef !== value.resultSourceRef)
       throw new TypeError('result closure differs from its original result');
-    await present({ label: 'Verification provenance', artifactRef: value.verificationClosureRef, text: closureData.text });
+    if ((closure.verification.kind === 'inherited_verified') !== (value.verificationProvenanceRef !== undefined))
+      throw new TypeError('result inherited verification is missing its original provenance');
+    const lines = [`Run ${JSON.stringify(value.runId)}`, `Result: ${result.result.ref}`, `Source: ${value.resultSourceRef}`];
     if (value.verificationProvenanceRef !== undefined) {
       const data = await json(value.verificationProvenanceRef), provenance = decodeInheritedVerificationProvenance(data.value);
       if (closure.verification.kind !== 'inherited_verified' || closure.verification.inheritedProvenanceRef !== value.verificationProvenanceRef ||
           provenance.deliveryRunId !== value.runId || provenance.resultSourceRef !== value.resultSourceRef)
         throw new TypeError('inherited provenance differs from its result');
-      await present({ label: 'Inherited provenance', artifactRef: value.verificationProvenanceRef, text: data.text });
+      lines.push(`Inherited verification from Run ${JSON.stringify(provenance.sourceRunId)}`, `Inherited provenance: ${value.verificationProvenanceRef}`);
     }
     const summary = (await json(value.summaryRef)).value as ModelTextV1; verifyModelText(summary);
-    await present({ label: 'Summary', artifactRef: value.summaryRef, text: summary.utf8 });
+    lines.push('', 'Summary', summary.utf8, '', 'Verification');
+    if (closure.verification.kind === 'local') {
+      lines.push(closure.verification.outcome === 'verified' ? 'Required checks passed for this exact result.' : 'UNVERIFIED: no required checks were configured.');
+      for (const entry of closure.verification.entries) {
+        const disposition = entry.disposition;
+        lines.push(`${JSON.stringify(entry.verifierId)} (${entry.required ? 'required' : 'advisory'}): ` +
+          (disposition.kind === 'passed' ? 'passed' : disposition.kind === 'advisory_skipped' ? 'skipped' : disposition.outcome) +
+          ('receiptRef' in disposition ? ` · receipt ${disposition.receiptRef}` : ''));
+      }
+    } else lines.push(`Inherited required checks from Run ${JSON.stringify(closure.verification.sourceRunId)} for the unchanged result source.`);
+    lines.push(`Verification evidence: ${value.verificationClosureRef}`);
+    const diffData = await json(value.diffRef), diff = decodeWorkspaceDiff(diffData.value);
+    if (diff.baseSourceRef !== value.baseSourceRef || diff.resultSourceRef !== value.resultSourceRef)
+      throw new TypeError('review diff differs from its original result sources');
+    lines.push('', 'Changes', await renderWorkspaceReview(diff, app.artifact.bind(app), signal),
+      `Complete diff artifact: ${value.diffRef}`, `Summary artifact: ${value.summaryRef}`, '',
+      `To apply this exact result explicitly: cliq apply ${JSON.stringify(value.runId)} --result ${result.result.ref}`);
+    await present({ label: 'Result review', artifactRef: result.result.ref, text: lines.join('\n') });
   } else if (result.method === 'session.handoff.create') {
     if (request.method !== result.method) throw new TypeError('handoff differs from its original request');
     const raw = await json(result.json.ref, result.json.sizeBytes);

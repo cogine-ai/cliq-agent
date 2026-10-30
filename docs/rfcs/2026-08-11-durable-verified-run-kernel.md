@@ -11785,6 +11785,20 @@ endpoint/credential authorization does not transfer implicitly. The official
 release roots, actual installed/crash qualification and default Kernel Cut
 remain separate release gates.
 
+For this conversion, an original dormant `sealed` workspace generation may
+remain in its exact historical phase and row version. It must belong to a
+terminal, zero-reservation Run, have no active Run pointer or other referencing
+launch, and match the unique original activated worker's `retired`/`sealed`
+record in the complete retained resource graph. Both conversion and subsequent
+receipt reads revalidate the ordinary complete sealed Checkpoint, file bytes,
+snapshot, containment, inspector, all-descendant death and freshness at the
+original commit. No current pathname, matching content or phase label supplies
+this proof, and no generation is relabeled `retired` or resealed by conversion.
+Other unretired generation phases still refuse. Later target-runtime Runs do
+not replace or enlarge this immutable original resource graph. This branch
+requires its own real installed upgrade validation; component regressions do
+not establish that qualification.
+
 The Kernel Cut includes:
 
 - current provider adapters with typed capability negotiation;

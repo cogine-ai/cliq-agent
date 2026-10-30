@@ -7,6 +7,43 @@ the single Kernel Cut. The goal is usable, verifiable work, not a count of
 modules, tests, or merged PRs. The RFC remains authoritative; this plan changes
 ordering and records delivery scope, not safety, billing, or success semantics.
 
+### Execution priority clarification (2026-10-30)
+
+The owner explicitly prioritizes completing the integrated product functionality
+over serial CI repair. Continue the real model → tools → verifier/repair → result
+→ explicit Delivery journey and its shared clients while CI diagnosis and
+qualification run alongside it. A failing qualification job is not automatically
+a prerequisite for starting the next independent feature. Concrete correctness
+or safety defects in the affected path still require repair, and development
+retains necessary compilation and focused regressions. The original local build
+and full test requirements before push, all final qualification gates, timing
+bounds and safety contracts remain unchanged. Batch complete qualification on
+the integrated fixed source; do not make each diagnostic or test seam a separate
+delivery objective.
+
+Keep candidate source in persistent worktrees and validation evidence in
+persistent owned storage. Temporary directories are disposable build scratch,
+never the sole holder of uncommitted implementation or qualification evidence.
+The previously recorded temporary candidates and running jobs must be restored
+and revalidated where their source or completion evidence is no longer present.
+
+Judge progress by a usable repository task and its inspectable changes, actual
+checks, reconnection and explicit application. Kernel mechanisms and test counts
+support that outcome; they are not the product positioning. This execution-order
+change does not remove any work package or declare the default Kernel Cut ready.
+
+The current integrated candidate adds original-blob unified code review with
+verification provenance, explicit application bound to the reviewed result, and
+finite CLI observation of the resulting Delivery. It shares model/tool package
+material and explicit signed capability/price construction between real-provider
+builds and the unchanged owned-endpoint fixture; zero fixture prices are never
+inferred for a real provider. It also validates dormant original sealed
+generations through the existing complete worker-seal/death reader during
+upgrade, preserving their original rows. These changes have local component
+coverage; real-provider invocation, installed Linux Delivery/repair/upgrade and
+the outstanding storage/fault qualifications remain unverified. No paid model
+request has been made and no complete PR is opened on this basis.
+
 Baseline: `cefa89ae797d8763686b87811743c4422922743c` (PR #523), reviewed
 2026-10-18. Its tree equals the qualified `990656c` follow-up. The installed
 Linux execution/restart and cancellation foundations are real, but a final

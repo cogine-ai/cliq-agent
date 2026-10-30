@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { parseJsonStrict } from '../kernel/json.js';
-import { normalizeAbsolutePath } from '../kernel/identity.js';
+import { assertArtifactRef, normalizeAbsolutePath } from '../kernel/identity.js';
 import { decodeInstalledControlRequest, type InstalledControlRequestV1 } from '../control/v1.js';
 import type { RunSubmitRequest } from '../kernel/control-submit.js';
 import type { ClientCommand } from './types.js';
@@ -12,7 +12,7 @@ export type ClientInvocation =
   | Readonly<{ kind: 'run'; intent: RunIntent; sessionId?: string; detach: boolean; json: boolean }>
   | Readonly<{ kind: 'attach'; runId: string; afterEventSeq: number; json: boolean }>
   | Readonly<{ kind: 'cancel'; runId: string; expectedRevision?: number; json: boolean }>
-  | Readonly<{ kind: 'apply'; sourceRunId: string; options: Record<string, unknown>; json: boolean }>
+  | Readonly<{ kind: 'apply'; sourceRunId: string; expectedRunResultRef?: string; options: Record<string, unknown>; detach: boolean; json: boolean }>
   | Readonly<{ kind: 'artifact'; digest: string }>
   | Readonly<{ kind: 'tui'; runId?: string }>
   | Readonly<{ kind: 'jsonl' | 'rpc' | 'help' }>;
@@ -132,7 +132,10 @@ export function parseClientInvocation(argv: readonly string[], workspacePath: st
     const options = jsonObject(p.take('--options') ?? '{}');
     if (Object.keys(options).some(key => !['budgets', 'verifierExecutionGrantIds', 'sourceInspectionGrantId', 'ignoreReadGrantIds', 'sourceReadGrantIds'].includes(key)))
       throw new TypeError('Delivery options contain an unsupported field');
-    result = { kind: 'apply', sourceRunId: oneId(), options, json };
+    const expectedRunResultRef = p.take('--result');
+    if (expectedRunResultRef !== undefined) assertArtifactRef(expectedRunResultRef);
+    result = { kind: 'apply', sourceRunId: oneId(), options, detach: p.take('--detach') === 'true', json,
+      ...(expectedRunResultRef === undefined ? {} : { expectedRunResultRef }) };
   }
   else if (name === 'session') {
     const action = words.shift();

@@ -2,7 +2,7 @@ import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import { assertControlWireJson, controlWireInteger, controlWireRecord, controlWireRef, controlWireText, decodeWireRun } from '../kernel/control-wire-data.js';
 import { digestOmitting, parseCanonicalTime } from '../kernel/identity.js';
 import type { RuntimeUpgradeReceiptV1, RuntimeUpgradeRetirementV1 } from '../kernel/runtime-upgrade.js';
-import type { StateOwnerRecordV1, StateOwnerAcquisitionEvidenceV1 } from '../kernel/types.js';
+import type { Run, WorkerLaunch, StateOwnerRecordV1, StateOwnerAcquisitionEvidenceV1 } from '../kernel/types.js';
 import { immutableSnapshot } from '../model/immutable.js';
 import { requireEqual, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { readCanonicalArtifact } from './agent-context.js';
@@ -15,6 +15,7 @@ import { decodeSourceInspectionAttempt, readSourceInspectionAttempt } from './so
 import { readRun } from './rows.js';
 import { readWorkerLaunch } from './repositories/worker-launches.js';
 import { readWorkspaceGeneration } from './repositories/workspace-generations.js';
+import { assertClosedUpgradeGeneration } from './runtime-upgrade-generations.js';
 import type { SqliteDriver } from './sqlite-driver.js';
 import { readUpgradeResourceGraph, readUpgradeResourceRow, UPGRADE_RESOURCE_FAMILIES, UPGRADE_RESOURCE_FAMILY_ROWS,
   type UpgradeResourceRefs } from './runtime-upgrade-resources.js';
@@ -129,24 +130,26 @@ export async function readRuntimeUpgradeBoundary(driver: SqliteDriver, artifacts
 /** Shared full row audit, before the producer samples death/time and during
  * retained reads. It never supplies an owner, physical proof or permit. */
 export async function readRuntimeUpgradeRetiredRows(driver: SqliteDriver, artifacts: ArtifactCatalog, resourceRefs: UpgradeResourceRefs): Promise<void> {
-  const runs = new Set<string>(), launches = new Set<string>(), generations = new Set<string>(), attempts = new Set<string>();
+  const runs = new Map<string, Run>(), launches = new Map<string, WorkerLaunch>(), generations = new Set<string>(), attempts = new Set<string>();
   for (const ref of resourceRefs.run_terminal) {
     const run = decodeWireRun(await readUpgradeResourceRow(artifacts, ref));
     if (!['succeeded', 'completed_unverified', 'failed', 'cancelled'].includes(run.status) ||
         run.activeWorkerLaunchId !== undefined || !isZeroBudget(run.budgetReserved) || runs.has(run.id)) invalid();
     requireEqual(readRun(driver, run.id), run, 'original retired upgrade Run');
-    runs.add(run.id);
+    runs.set(run.id, run);
   }
   for (const ref of resourceRefs.worker_launch) {
     const row = decodeWorkerLaunch(await readUpgradeResourceRow(artifacts, ref));
     if (row.phase !== 'retired' || !runs.has(row.runId) || launches.has(row.launchId)) invalid();
     requireEqual(readWorkerLaunch(driver, row.launchId), row, 'original retired upgrade worker');
-    launches.add(row.launchId);
+    launches.set(row.launchId, row);
   }
   for (const ref of resourceRefs.workspace_generation) {
     const row = decodeWorkspaceGenerationState(await readUpgradeResourceRow(artifacts, ref));
-    if (row.phase !== 'retired' || !runs.has(row.runId) || generations.has(row.generationId)) invalid();
+    const run = runs.get(row.runId);
+    if (!run || generations.has(row.generationId)) invalid();
     requireEqual(readWorkspaceGeneration(driver, row.generationId), row, 'original retired upgrade generation');
+    await assertClosedUpgradeGeneration(driver, artifacts, run, row, launches);
     generations.add(row.generationId);
   }
   for (const ref of resourceRefs.source_inspection) {

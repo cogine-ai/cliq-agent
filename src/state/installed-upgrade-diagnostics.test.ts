@@ -221,7 +221,7 @@ test('every original conversion resource boundary and complete recovery subphase
     ['run_retain', 'await retain(run, runTerminalRowRefs)'],
     ['worker_row', "if (launch.phase !== 'retired')"],
     ['worker_retain', 'await retain(launch, workerLaunchRowRefs)'],
-    ['generation_row', "if (row.phase !== 'retired')"],
+    ['generation_row', 'await assertClosedUpgradeGeneration(driver, reads, run, row, retainedWorkers)'],
     ['generation_retain', 'await retain(row, workspaceGenerationRowRefs)'],
     ['source_row', 'const row = readSourceInspectionAttempt(driver,'],
     ['source_retirement', 'await readSourceInspectionRetirement(driver, reads, row,'],

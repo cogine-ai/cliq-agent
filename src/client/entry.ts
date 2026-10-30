@@ -57,7 +57,7 @@ export function clientWriter(stream: Writable) {
     if (errors.length) throw errors[0];
   } };
 }
-const help = `Cliq installed client\n\nrun <objective> --provider <id> --model <name> --endpoint <id> --credential-grant <id> [--session <id>] [--detach]\nresume <sessionId> <new objective> <same model options>\nlist | status <runId> | inspect <runId> | attach <runId> | cancel <runId>\napprove <runId> --revision <n> --wait <ref> --decision allow|deny\ninput <runId> --revision <n> --wait <ref> --text <value>\nreconcile <runId> --revision <n> --wait <ref>\ndiff <runId> | result <runId> | apply <runId> | artifact <ref> > file
+const help = `Cliq installed client\n\nrun <objective> --provider <id> --model <name> --endpoint <id> --credential-grant <id> [--session <id>] [--detach]\nresume <sessionId> <new objective> <same model options>\nlist | status <runId> | inspect <runId> | attach <runId> | cancel <runId>\napprove <runId> --revision <n> --wait <ref> --decision allow|deny\ninput <runId> --revision <n> --wait <ref> --text <value>\nreconcile <runId> --revision <n> --wait <ref>\ndiff <runId> | result <runId> | apply <runId> [--result <ref>] [--detach] | artifact <ref> > file
 inspect <runId> [--after-item <n>] [--after-journal <n>] [--checkpoint-cursor <cursor>]\nsession create|list|show|fork|compact | handoff create\nauthorization create|list|revoke | supervisor status | tui [--run <id>] | jsonl | rpc\n\nRun --options takes the method's bounded JSON options; no required verifier needs explicit --allow-unverified.\nClosing a client detaches. Only an explicit cancel command cancels a Run.\n`;
 
 /** The launcher must supply the actual held selection authenticated under its
@@ -110,7 +110,8 @@ export async function runClientInvocation(session: InstalledControlSession, invo
       invocation.kind === 'apply' && request.method === 'run.result';
     if (internal && response.ok) return;
     if ('json' in invocation && invocation.json) await output.write(Buffer.concat([canonicalJsonBytes(headlessControlResponse(response, request)), Buffer.from('\n')]));
-    else if (invocation.kind === 'run' && invocation.detach && response.ok && response.result.method === 'run.submit')
+    else if ((invocation.kind === 'run' || invocation.kind === 'apply') && invocation.detach && response.ok &&
+        (response.result.method === 'run.submit' || response.result.method === 'run.apply'))
       await output.write(Buffer.from(response.result.snapshot.run.id + '\n'));
     else for (const line of humanResponse(request, response)) await output.write(Buffer.from(terminalText(line) + '\n'));
   });
@@ -161,7 +162,11 @@ export async function runClientInvocation(session: InstalledControlSession, invo
           try { await runClientTui(app, io, action.runId, invocation.kind === 'run' ? invocation.intent : undefined); }
           finally { rendering = false; }
         } else {
-          detachOnEof(); await app.follow(action.runId, action.afterEventSeq ?? 0, signal);
+          // Natural run/apply commands are finite operations: redirected or
+          // already-closed stdin does not mean their result was delivered.
+          // Explicit observers retain EOF detach; signals detach either form.
+          if (invocation.kind === 'attach') detachOnEof();
+          await app.follow(action.runId, action.afterEventSeq ?? 0, signal);
           if (lastResponse && !lastResponse.ok) exitCode = 1;
           else if (lastResponse?.ok && 'snapshot' in lastResponse.result && 'run' in lastResponse.result.snapshot &&
               ['failed', 'cancelled'].includes(lastResponse.result.snapshot.run.status)) exitCode = 1;
@@ -171,7 +176,7 @@ export async function runClientInvocation(session: InstalledControlSession, invo
   } catch (error) {
     // Detaching an observer is normal. An interrupted finite action/export
     // cannot be reported to a shell as a complete result. No Run is cancelled.
-    if (signal.aborted && !observing) exitCode = 1;
+    if (signal.aborted && (!observing || invocation.kind === 'run' || invocation.kind === 'apply')) exitCode = 1;
     if (!signal.aborted || error instanceof ResourceRetirementError || pending !== undefined) {
       primary = error; exitCode = 1;
       if (!(error instanceof ClientRefusal)) await diagnostic.write(Buffer.from(pending

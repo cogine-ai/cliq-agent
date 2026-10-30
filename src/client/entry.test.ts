@@ -6,6 +6,7 @@ import { parseClientInvocation } from './commands.js';
 import { clientWriter, runClientInvocation } from './entry.js';
 import { hello, protocolClient, outputStream, runSnapshot } from './testing/protocol.js';
 import { buildBlockedOutputFixture } from './testing/blocked-output-build.js';
+import type { RunSnapshotV1 } from '../kernel/types.js';
 const turn = () => new Promise<void>(resolve => setImmediate(resolve));
 const line = (value: unknown) => Buffer.concat([canonicalJsonBytes(value), Buffer.from('\n')]);
 const io = (input: Readable, output = outputStream(), diagnostic = outputStream()) => ({ input, output: output.stream,
@@ -33,6 +34,106 @@ test('uncertain CLI admission retains its original identities without replacemen
   assert.equal(f.calls.filter(call => call.method === 'run.submit').length, 1);
   assert.equal(f.calls.some(call => call.method === 'run.cancel'), false); assert.equal(output.text(), '');
   assert.match(diagnostic.text(), /request .*; admission /u); assert.doesNotMatch(diagnostic.text(), /sensitive transport/u); assert.equal(f.closed(), 1);
+});
+
+for (const status of ['completed_unverified', 'failed'] as const) test(`explicit apply waits for its distinct Delivery ${status} with stdin already closed`, async () => {
+  const sourceRef = 'c'.repeat(64), queued = runSnapshot(); queued.operation = 'delivery'; queued.run.id = 'delivery'; queued.run.nextStep = 'delivery';
+  const { frontierRef: _frontier, ...run } = queued.run;
+  const terminal: RunSnapshotV1 = { ...queued, run: { ...run, revision: 2, status, nextStep: null,
+    ...(status === 'completed_unverified' ? { terminalReason: 'no_required_verifier', resultRef: sourceRef }
+      : { terminalReason: 'runtime_failed', terminalDetailRef: sourceRef, stopIntentRef: sourceRef }) } };
+  let enter!: () => void, finish!: () => void;
+  const ready = new Promise<void>(resolve => { enter = resolve; }), gate = new Promise<void>(resolve => { finish = resolve; });
+  const f = protocolClient({
+    'run.result': async () => ({ protocolVersion: 1, ok: true, result: { method: 'run.result', runId: 'run',
+      result: { schemaVersion: 1, ref: sourceRef, digest: sourceRef, sizeBytes: 10, mediaType: 'application/json' }, verificationClosureRef: sourceRef } }),
+    'run.apply': async () => ({ protocolVersion: 1, ok: true, result: { method: 'run.apply', snapshot: queued } }),
+    'run.attach': async () => { enter(); await gate; return { protocolVersion: 1, ok: true, result: { method: 'run.attach', snapshot: terminal,
+      earliestRetainedEventSeq: 1, latestRetainedEventSeq: 1, highWaterEventSeq: 1, nextEventSeq: 1,
+      events: [{ schemaVersion: 1, kind: 'progress', runId: 'delivery', eventSeq: 1, observedRunRevision: 1, phase: 'delivery', occurredAt: queued.run.createdAt }] } }; }
+  });
+  const input = Readable.from([]); input.resume(); await new Promise<void>(resolve => { input.once('end', resolve); });
+  let returned = false; const output = outputStream();
+  const pending = runClientInvocation(f.session, parseClientInvocation(['apply', 'run', '--result', sourceRef], '/workspace'), io(input, output))
+    .then(code => { returned = true; return code; });
+  await ready; await turn(); assert.equal(returned, false, 'admission and closed stdin do not complete application');
+  finish(); assert.equal(await pending, status === 'failed' ? 1 : 0);
+  assert.deepEqual(f.calls.map(call => call.method), ['run.result', 'run.apply', 'run.attach']);
+  const original = f.calls.find(call => call.method === 'run.apply')!.request;
+  assert.equal(original.sourceRunId, 'run'); assert.equal(original.expectedRunResultRef, sourceRef);
+  assert.equal(f.calls.find(call => call.method === 'run.attach')!.request.runId, 'delivery');
+  assert.match(output.text(), status === 'failed' ? /failed · runtime_failed/u : /Completed · unverified/u);
+  assert.equal(f.closed(), 1);
+});
+
+test('apply --detach prints only the acknowledged Delivery id and never starts observation', async () => {
+  const ref = 'c'.repeat(64), delivery = runSnapshot(); delivery.operation = 'delivery'; delivery.run.id = 'delivery'; delivery.run.nextStep = 'delivery';
+  const f = protocolClient({
+    'run.result': async () => ({ protocolVersion: 1, ok: true, result: { method: 'run.result', runId: 'run',
+      result: { schemaVersion: 1, ref, digest: ref, sizeBytes: 10, mediaType: 'application/json' }, verificationClosureRef: ref } }),
+    'run.apply': async () => ({ protocolVersion: 1, ok: true, result: { method: 'run.apply', snapshot: delivery } })
+  });
+  const output = outputStream();
+  assert.equal(await runClientInvocation(f.session, parseClientInvocation(['apply', 'run', '--detach'], '/workspace'), io(Readable.from([]), output)), 0);
+  assert.equal(output.text(), 'delivery\n'); assert.deepEqual(f.calls.map(call => call.method), ['run.result', 'run.apply']);
+});
+
+test('an explicitly reviewed result mismatch sends no application mutation', async () => {
+  const ref = 'c'.repeat(64), f = protocolClient({ 'run.result': async () => ({ protocolVersion: 1, ok: true,
+    result: { method: 'run.result', runId: 'run', result: { schemaVersion: 1, ref, digest: ref, sizeBytes: 10, mediaType: 'application/json' }, verificationClosureRef: ref } }) });
+  assert.equal(await runClientInvocation(f.session, parseClientInvocation(['apply', 'run', '--result', 'd'.repeat(64)], '/workspace'), io(Readable.from([]))), 1);
+  assert.deepEqual(f.calls.map(call => call.method), ['run.result']);
+  assert.throws(() => parseClientInvocation(['apply', 'run', '--result', 'not-a-ref'], '/workspace'));
+});
+
+test('a lost apply response retains the original admission identity and is never replaced or cancelled', async () => {
+  const ref = 'c'.repeat(64), f = protocolClient({
+    'run.result': async () => ({ protocolVersion: 1, ok: true, result: { method: 'run.result', runId: 'run',
+      result: { schemaVersion: 1, ref, digest: ref, sizeBytes: 10, mediaType: 'application/json' }, verificationClosureRef: ref } }),
+    'run.apply': async () => { throw new Error('inert transport loss'); }
+  });
+  const diagnostic = outputStream();
+  assert.equal(await runClientInvocation(f.session, parseClientInvocation(['apply', 'run'], '/workspace'), io(Readable.from([]), outputStream(), diagnostic)), 1);
+  assert.deepEqual(f.calls.map(call => call.method), ['run.result', 'run.apply']);
+  const original = f.calls.find(call => call.method === 'run.apply')!.request;
+  assert(diagnostic.text().includes(original.requestId)); assert(diagnostic.text().includes(original.admissionKey));
+});
+
+test('interrupting a finite application before its terminal result joins the read and returns nonzero without cancellation', async () => {
+  const ref = 'c'.repeat(64), queued = runSnapshot(); queued.operation = 'delivery'; queued.run.id = 'delivery'; queued.run.nextStep = 'delivery';
+  let enter!: () => void, finish!: () => void, closes = 0;
+  const ready = new Promise<void>(resolve => { enter = resolve; }), gate = new Promise<void>(resolve => { finish = resolve; });
+  const abort = new AbortController(), f = protocolClient({ close: async () => { closes++; finish(); },
+    'run.result': async () => ({ protocolVersion: 1, ok: true, result: { method: 'run.result', runId: 'run',
+      result: { schemaVersion: 1, ref, digest: ref, sizeBytes: 10, mediaType: 'application/json' }, verificationClosureRef: ref } }),
+    'run.apply': async () => ({ protocolVersion: 1, ok: true, result: { method: 'run.apply', snapshot: queued } }),
+    'run.attach': async () => { enter(); await gate; return { protocolVersion: 1, ok: true, result: { method: 'run.attach', snapshot: queued,
+      earliestRetainedEventSeq: 1, latestRetainedEventSeq: 1, highWaterEventSeq: 1, nextEventSeq: 1,
+      events: [{ schemaVersion: 1, kind: 'progress', runId: 'delivery', eventSeq: 1, observedRunRevision: 1, phase: 'delivery', occurredAt: queued.run.createdAt }] } }; }
+  });
+  const pending = runClientInvocation(f.session, parseClientInvocation(['apply', 'run'], '/workspace'),
+    { ...io(Readable.from([])), signal: abort.signal });
+  await ready; abort.abort(); assert.equal(await pending, 1);
+  assert.deepEqual(f.calls.map(call => call.method), ['run.result', 'run.apply', 'run.attach']);
+  assert.equal(closes, 1);
+});
+
+test('natural run with redirected stdin waits for its authoritative terminal failure rather than reporting admission success', async () => {
+  const { frontierRef: _frontier, ...run } = runSnapshot().run;
+  const terminal: RunSnapshotV1 = { ...runSnapshot(), run: { ...run, revision: 2, status: 'failed', nextStep: null,
+    terminalReason: 'verification_failed', terminalDetailRef: 'c'.repeat(64), stopIntentRef: 'c'.repeat(64) } };
+  let enter!: () => void, finish!: () => void;
+  const ready = new Promise<void>(resolve => { enter = resolve; }), gate = new Promise<void>(resolve => { finish = resolve; });
+  const f = protocolClient({ 'run.attach': async () => { enter(); await gate; return { protocolVersion: 1, ok: true,
+    result: { method: 'run.attach', snapshot: terminal, earliestRetainedEventSeq: 1, latestRetainedEventSeq: 1, highWaterEventSeq: 1, nextEventSeq: 1,
+      events: [{ schemaVersion: 1, kind: 'progress', runId: 'run', eventSeq: 1, observedRunRevision: 1, phase: 'verify', occurredAt: run.createdAt }] } }; } });
+  const input = Readable.from([]); input.resume(); await new Promise<void>(resolve => { input.once('end', resolve); });
+  let returned = false;
+  const pending = runClientInvocation(f.session, parseClientInvocation(['run', 'Fix the bug', '--provider', 'ollama', '--model', 'fixture', '--allow-unverified'], '/workspace'), io(input))
+    .then(code => { returned = true; return code; });
+  await ready; await turn(); assert.equal(returned, false); finish(); assert.equal(await pending, 1);
+  assert.deepEqual(f.calls.map(call => call.method), ['session.create', 'session.get', 'run.submit', 'run.attach']);
+  assert.equal(f.closed(), 1);
 });
 
 test('text attach EOF joins its original pending read and detaches without cancel', async () => {

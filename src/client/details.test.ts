@@ -40,9 +40,13 @@ test('result detail reads complete original CAS, its strict closure and committe
       verificationClosureRef: f.closureRef } } as const;
     const shown: ClientDetail[] = [];
     await presentControlArtifacts(f.app, { protocolVersion: 1, method: 'run.result', runId: 'run' }, response, value => { shown.push(value); });
-    assert.deepEqual(shown.map(value => value.artifactRef), [f.resultRef, f.closureRef, f.summaryRef]);
-    assert.equal(shown.at(-1)!.text, f.summary.utf8);
-    assert.equal(shown[0]!.text, canonicalJsonBytes(f.result).toString('utf8'));
+    assert.deepEqual(shown.map(value => value.artifactRef), [f.resultRef]);
+    assert.equal(shown[0]!.label, 'Result review');
+    assert(shown[0]!.text.includes(f.summary.utf8));
+    assert.match(shown[0]!.text, /UNVERIFIED: no required checks were configured/u);
+    assert.match(shown[0]!.text, /0 changed paths/u);
+    for (const ref of [f.resultRef, f.closureRef, f.summaryRef, f.diffRef]) assert(shown[0]!.text.includes(ref));
+    assert.match(shown[0]!.text, /cliq apply "run" --result /u);
     const wrong = { ...response, result: { ...response.result, result: { ...response.result.result, sizeBytes: 1 } } };
     await assert.rejects(presentControlArtifacts(f.app, { protocolVersion: 1, method: 'run.result', runId: 'run' }, wrong, () => {}), /descriptor/u);
     const foreign = { ...f.result, runId: 'foreign' }, foreignRef = await f.store(foreign);
@@ -71,5 +75,51 @@ test('handoff display binds the captured Session revision and original downloade
     assert.match(viewport.text, /view clipped/u); assert.doesNotThrow(() => canonicalJsonBytes(viewport));
     assert.match(artifactText(Buffer.from([255])), /Binary artifact/u);
     assert.equal(artifactText(Buffer.from('\ufefftext')), '\ufefftext');
+  } finally { await rm(f.home, { recursive: true, force: true }); }
+});
+
+test('result review retains required passes and advisory failures without relabelling either check', async () => {
+  const f = await fixture();
+  try {
+    const requiredReceipt = canonicalSha256('required receipt'), advisoryReceipt = canonicalSha256('advisory receipt');
+    const entry = { verifierSpecDigest: f.ref, verifierEntryDigest: f.ref };
+    const core = { ...f.closure, verification: { kind: 'local', outcome: 'verified', entries: [
+      { ...entry, verifierIndex: 0, verifierId: 'tests', required: true,
+        disposition: { kind: 'passed', verifierResultItemId: 'required', opId: 'required-op', attempt: 0, completedJournalSeq: 1, receiptRef: requiredReceipt } },
+      { ...entry, verifierIndex: 1, verifierId: 'lint', required: false,
+        disposition: { kind: 'advisory_nonpassing', outcome: 'assertion_failed', verifierResultItemId: 'advisory', opId: 'advisory-op', attempt: 0,
+          terminalJournalSeq: 2, receiptRef: advisoryReceipt } }
+    ] } };
+    const closure = { ...core, closureDigest: digestOmitting(core, 'closureDigest') }, closureRef = await f.store(closure);
+    const resultRef = await f.store({ ...f.result, verificationClosureRef: closureRef, verificationReceiptRefs: [requiredReceipt, advisoryReceipt] });
+    const shown: ClientDetail[] = [];
+    await presentControlArtifacts(f.app, { protocolVersion: 1, method: 'run.result', runId: 'run' },
+      { protocolVersion: 1, ok: true, result: { method: 'run.result', runId: 'run', result: await f.descriptor(resultRef), verificationClosureRef: closureRef } },
+      value => { shown.push(value); });
+    assert.equal(shown.length, 1);
+    assert.match(shown[0]!.text, /Required checks passed for this exact result/u);
+    assert.match(shown[0]!.text, /"tests" \(required\): passed/u);
+    assert.match(shown[0]!.text, /"lint" \(advisory\): assertion_failed/u);
+    assert(shown[0]!.text.includes(requiredReceipt) && shown[0]!.text.includes(advisoryReceipt));
+  } finally { await rm(f.home, { recursive: true, force: true }); }
+});
+
+test('a substituted diff source or missing inherited provenance cannot produce a successful review', async () => {
+  const f = await fixture();
+  try {
+    const core = { schemaVersion: 1, format: 'cliq-workspace-diff-v1', baseSourceRef: 'f'.repeat(64), resultSourceRef: f.ref, operations: [] };
+    const diffRef = await f.store({ ...core, diffDigest: canonicalSha256(core) });
+    const resultRef = await f.store({ ...f.result, diffRef }); let shown = 0;
+    await assert.rejects(presentControlArtifacts(f.app, { protocolVersion: 1, method: 'run.result', runId: 'run' },
+      { protocolVersion: 1, ok: true, result: { method: 'run.result', runId: 'run', result: await f.descriptor(resultRef), verificationClosureRef: f.closureRef } },
+      () => { shown++; }), /original result sources/u);
+    const closureCore = { ...f.closure, verification: { kind: 'inherited_verified', sourceRunId: 'original', sourceRunResultRef: f.ref,
+      sourceVerificationClosureRef: f.ref, inheritedProvenanceRef: f.ref } };
+    const closureRef = await f.store({ ...closureCore, closureDigest: digestOmitting(closureCore, 'closureDigest') });
+    const inheritedResult = await f.store({ ...f.result, verificationClosureRef: closureRef });
+    await assert.rejects(presentControlArtifacts(f.app, { protocolVersion: 1, method: 'run.result', runId: 'run' },
+      { protocolVersion: 1, ok: true, result: { method: 'run.result', runId: 'run', result: await f.descriptor(inheritedResult), verificationClosureRef: closureRef } },
+      () => { shown++; }), /original provenance/u);
+    assert.equal(shown, 0);
   } finally { await rm(f.home, { recursive: true, force: true }); }
 });
