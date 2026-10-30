@@ -52,7 +52,7 @@ try {
   const rootInfo = await lstat(stateRoot, { bigint: true });
   const rootLocator = `${rootInfo.dev}:${rootInfo.ino}:${rootInfo.uid}`;
   for (const [args, message] of [
-    [[], 'expected a fixed installed Supervisor role'],
+    [['--installed-invalid-role'], 'expected a fixed installed Supervisor role'],
     [['--installed-supervisor', stateRoot, installed.bundleDigest, rootLocator], 'installed Supervisor differs from the fixed selected image'],
   ] as const) {
     const refused = spawnSync(bootstrap, [...args], { cwd, env: { PATH: process.env.PATH },

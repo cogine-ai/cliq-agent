@@ -4,7 +4,7 @@ import { createClientApplication, type ClientUpdate } from './application.js';
 import { openInstalledControlSession, type InstalledControlSession } from '../control/session.js';
 import { openInstalledClientStdio } from './stdio.js';
 import { withHeldInstalledRuntime, type HeldInstalledRuntime } from '../state/installed-runtime.js';
-import { ResourceRetirementError } from '../state/errors.js';
+import { joinResourceOperations, ResourceRetirementError } from '../state/errors.js';
 import type { CliqClient, ClientUpdateSink } from './types.js';
 import { canonicalJsonBytes } from '../kernel/canonical.js';
 import { openInstalledClientData, type InstalledClientData } from './installed-data.js';
@@ -87,11 +87,14 @@ export async function openInstalledClientHost(selected: HeldInstalledRuntime, bo
         borrowedData.sourceBundleDigest !== installed.bundleDigest))
       throw new TypeError('borrowed client data belongs to another held installation');
   });
-  const data = borrowedData ?? await openInstalledClientData(selected);
-  try { return createClientHostSession(await openInstalledControlSession(selected, data.requests), selected, data, !borrowedData); }
+  let data = borrowedData;
+  try { return createClientHostSession(await openInstalledControlSession(selected, borrowedData ? borrowedData.requests : (async () => {
+    const prepared = await openInstalledClientData(selected);
+    data = prepared;
+    return prepared.requests;
+  })), selected, data, !borrowedData); }
   catch (error) {
-    try { if (!borrowedData) await data.close(); }
-    catch (retirement) { if (retirement instanceof ResourceRetirementError) throw retirement; }
+    await joinResourceOperations([Promise.reject(error), !borrowedData ? data?.close() : undefined]);
     throw error;
   }
 }

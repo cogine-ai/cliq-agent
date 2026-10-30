@@ -71,8 +71,8 @@ function assertInstalledClientHostBorrowBoundarySource(source: string): void {
     comparison.thenStatement.expression.arguments?.length === 1 &&
     ts.isStringLiteral(comparison.thenStatement.expression.arguments[0]!));
   assert(data && ts.isVariableStatement(data));
-  assertCode(data, 'const data = borrowedData ?? await openInstalledClientData(selected);',
-    'data acquisition must follow the complete joined validation borrow');
+  assertCode(data, 'let data = borrowedData;',
+    'owned data acquisition must wait until the original manager and authenticated peer accept the installation');
   assert(connect && ts.isTryStatement(connect) && !connect.finallyBlock && connect.tryBlock.statements.length === 1);
   const returned = connect.tryBlock.statements[0]!;
   assert(ts.isReturnStatement(returned) && returned.expression && ts.isCallExpression(returned.expression));
@@ -86,11 +86,14 @@ function assertInstalledClientHostBorrowBoundarySource(source: string): void {
   assert.equal(session.expression.expression.getText(parsed), 'openInstalledControlSession');
   assert.equal(session.expression.arguments.length, 2);
   assertCode(session.expression.arguments[0]!, 'selected');
-  assertCode(session.expression.arguments[1]!, 'data.requests');
+  assertCode(session.expression.arguments[1]!, `borrowedData ? borrowedData.requests : (async () => {
+    const prepared = await openInstalledClientData(selected);
+    data = prepared;
+    return prepared.requests;
+  })`, 'only a joined post-authentication data factory may acquire owned requests');
   assert(connect.catchClause);
   assertCode(connect.catchClause, `catch (error) {
-    try { if (!borrowedData) await data.close(); }
-    catch (retirement) { if (retirement instanceof ResourceRetirementError) throw retirement; }
+    await joinResourceOperations([Promise.reject(error), !borrowedData ? data?.close() : undefined]);
     throw error;
   }`, 'a failed session acquisition must join owned data cleanup without closing borrowed data or hiding retirement failure');
 }
@@ -116,12 +119,13 @@ test('the installed client host borrow guard rejects reentry, tuple drift and un
     ['borrowed root comparison omitted', 'canonicalJsonBytes(installed.stateRoot)', 'canonicalJsonBytes(borrowedData.stateRoot)'],
     ['borrowed signed bundle comparison omitted', 'borrowedData.sourceBundleDigest !== installed.bundleDigest',
       'borrowedData.sourceBundleDigest !== borrowedData.sourceBundleDigest'],
-    ['session detached from held pending requests', 'openInstalledControlSession(selected, data.requests)',
-      'openInstalledControlSession(selected, undefined)'],
+    ['session detached from held pending requests', 'return prepared.requests;', 'return undefined;'],
     ['borrowed data claimed as owned', 'selected, data, !borrowedData)', 'selected, data, true)'],
-    ['owned data cleanup not joined', 'if (!borrowedData) await data.close();', 'if (!borrowedData) void data.close();'],
-    ['borrowed data closed on session failure', 'if (!borrowedData) await data.close();', 'if (borrowedData) await data.close();'],
-    ['retirement failure swallowed', 'if (retirement instanceof ResourceRetirementError) throw retirement;', 'void retirement;'],
+    ['owned data cleanup not joined', 'await joinResourceOperations([Promise.reject(error), !borrowedData ? data?.close() : undefined]);',
+      'void joinResourceOperations([Promise.reject(error), !borrowedData ? data?.close() : undefined]);'],
+    ['borrowed data closed on session failure', '!borrowedData ? data?.close() : undefined', 'borrowedData ? data?.close() : undefined'],
+    ['original failure swallowed', 'joinResourceOperations([Promise.reject(error), !borrowedData',
+      'joinResourceOperations([Promise.resolve(), !borrowedData'],
   ] as const;
   for (const [name, before, after] of mutations) {
     assert(source.includes(before), `${name}: mutation must affect the current implementation`);

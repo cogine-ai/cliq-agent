@@ -5,10 +5,98 @@ import { protocolClient, hello } from './testing/protocol.js';
 import { createInstalledControlSession } from '../control/session.js';
 import type { InstalledSupervisorClient } from '../state/installed-control-client.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
-import { ResourceRetirementError } from '../state/errors.js';
+import { joinResourceOperations, ResourceRetirementError } from '../state/errors.js';
 import type { HeldInstalledRuntime } from '../state/installed-runtime.js';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
+import vm from 'node:vm';
+import type { PendingRequests } from './pending-requests.js';
+
+/** Execute the original composition bodies over the existing inert protocol
+ * seam. No structural object is passed off as a held installation, authenticated
+ * peer, native loader, filesystem receipt or Run authority. Real Linux keeps
+ * its separate signed-opaque manager-refusal and complete installed campaigns. */
+function openingComposition(input: {
+  connect(): Promise<InstalledSupervisorClient>;
+  data(): Promise<import('./installed-data.js').InstalledClientData>;
+}) {
+  const declaration = (relative: string, name: string) => {
+    const source = ts.createSourceFile(relative, readFileSync(new URL(relative, import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true);
+    const node = source.statements.find((node): node is ts.FunctionDeclaration => ts.isFunctionDeclaration(node) && node.name?.text === name);
+    assert(node?.body); return node.getText(source).replace(/^export\s+/u, '');
+  };
+  const code = declaration('../control/session.ts', 'openInstalledControlSession') + '\n' +
+    declaration('./installed-host.ts', 'openInstalledClientHost') + '\nglobalThis.openHost = openInstalledClientHost;';
+  const context = vm.createContext({ openInstalledSupervisorClient: input.connect, createInstalledControlSession, createClientHostSession,
+    openInstalledClientData: input.data, canonicalJsonBytes, joinResourceOperations, ResourceRetirementError,
+    withHeldInstalledRuntime: async (_selected: unknown, check: (tuple: object) => Promise<void>) => {
+      await check({ stateRoot: { identity: 'inert-root' }, bundleDigest: 'inert-bundle' });
+    } });
+  vm.runInContext(ts.transpileModule(code, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context);
+  return context.openHost as typeof import('./installed-host.js').openInstalledClientHost;
+}
+
+test('owned request data waits for the original peer opening and every first mutation waits for durable retention', async () => {
+  const events: string[] = []; let release!: (peer: InstalledSupervisorClient) => void;
+  const authenticated = new Promise<InstalledSupervisorClient>(resolve => { release = resolve; });
+  let started!: () => void; const opening = new Promise<void>(resolve => { started = resolve; });
+  const store = { async retain() { events.push('retained'); return { existing: false }; },
+    async resolve() { events.push('response retained'); } } as unknown as PendingRequests;
+  const data = { requests: store, close: async () => { events.push('data closed'); } } as unknown as import('./installed-data.js').InstalledClientData;
+  const peer = { hello: { ...hello, enabledFeatureIds: ['run.cancel'] }, close: async () => { events.push('peer closed'); },
+    'run.cancel': async () => { events.push('sent'); return { protocolVersion: 1, ok: false, method: 'run.cancel',
+      error: { schemaVersion: 1, code: 'NOT_FOUND', retryable: false, messageCode: 'control.not_found' } }; } } as unknown as InstalledSupervisorClient;
+  const open = openingComposition({ connect: async () => { events.push('opening peer'); started(); return authenticated; },
+    data: async () => { events.push('data opened'); return data; } });
+  const pending = open({} as HeldInstalledRuntime); await opening;
+  assert.deepEqual(events, ['opening peer']);
+  release(peer); const host = await pending, app = host.application(() => {});
+  assert.deepEqual(events, ['opening peer', 'data opened']);
+  const core = { protocolVersion: 1 as const, method: 'run.cancel' as const,
+    requestId: '019a0012-0000-7000-8000-000000000902', runId: 'run', expectedRevision: 1 };
+  await app.execute({ kind: 'request', request: { ...core, requestDigest: canonicalSha256(core) } });
+  await app.close();
+  assert.deepEqual(events, ['opening peer', 'data opened', 'retained', 'sent', 'response retained', 'peer closed', 'data closed']);
+});
+
+test('manager refusal opens no own data; data failure joins the original peer close and preserves retirement priority', async () => {
+  const refusal = new Error('original manager refused'); let dataCalls = 0;
+  const refused = openingComposition({ connect: async () => { throw refusal; }, data: async () => { dataCalls++; throw new Error('must not open'); } });
+  await assert.rejects(refused({} as HeldInstalledRuntime), error => error === refusal); assert.equal(dataCalls, 0);
+  for (const originalIsRetirement of [false, true]) {
+    const retirement = new ResourceRetirementError('original owner close is uncertain', new Error('inert retirement'));
+    const original = originalIsRetirement ? retirement : new Error('data preparation refused');
+    let enter!: () => void, release!: () => void, returned = false, closed = 0;
+    const entered = new Promise<void>(resolve => { enter = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+    const peer = { hello, close: async () => { closed++; enter(); await gate; if (!originalIsRetirement) throw retirement; } } as InstalledSupervisorClient;
+    const open = openingComposition({ connect: async () => peer, data: async () => { throw original; } });
+    const pending = open({} as HeldInstalledRuntime).then(() => { throw new Error('must refuse'); }, error => { returned = true; return error; });
+    await entered; assert.equal(returned, false); assert.equal(closed, 1);
+    release(); assert.equal(await pending, retirement); assert.equal(closed, 1);
+  }
+});
+
+test('borrowed data stays borrowed while the original peer failure is retired', async () => {
+  let loaded = 0, dataClosed = 0, peerClosed = 0;
+  const data = { stateRoot: { identity: 'inert-root' }, sourceBundleDigest: 'inert-bundle', requests: {},
+    close: async () => { dataClosed++; } } as unknown as import('./installed-data.js').InstalledClientData;
+  const open = openingComposition({ data: async () => { loaded++; throw new Error('must not load own data'); },
+    connect: async () => ({ hello: { ...hello, headlessSchemaRange: { min: 1, max: 1 } }, close: async () => { peerClosed++; } }) as InstalledSupervisorClient });
+  await assert.rejects(open({} as HeldInstalledRuntime, data), /headless schema 3/u);
+  assert.equal(peerClosed, 1); assert.equal(loaded, 0); assert.equal(dataClosed, 0);
+});
+
+test('an already prepared own data family joins after peer failure without hiding its original retirement uncertainty', async () => {
+  const retirement = new ResourceRetirementError('original peer close is uncertain', new Error('inert close'));
+  const events: string[] = [];
+  const data = { requests: {}, close: async () => { events.push('data closed'); throw new Error('ordinary data close failed'); } } as unknown as
+    import('./installed-data.js').InstalledClientData;
+  const open = openingComposition({ data: async () => { events.push('data opened'); return data; },
+    connect: async () => ({ hello: { ...hello, headlessSchemaRange: { min: 1, max: 1 } },
+      close: async () => { events.push('peer closed'); throw retirement; } }) as unknown as InstalledSupervisorClient });
+  await assert.rejects(open({} as HeldInstalledRuntime), error => error === retirement);
+  assert.deepEqual(events, ['data opened', 'peer closed', 'data closed']);
+});
 
 // Existing byte-consumer seam, never a genuine installed peer/Run/native proof.
 test('the shared SDK host keeps the original pending request through reconnect and joins one explicit replay', async () => {

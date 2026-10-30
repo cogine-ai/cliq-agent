@@ -7,7 +7,7 @@ import type { RunSubmitRequest } from '../kernel/control-submit.js';
 import { immutableSnapshot } from '../model/immutable.js';
 import { openInstalledSupervisorClient, type InstalledSupervisorClient } from '../state/installed-control-client.js';
 import type { HeldInstalledRuntime } from '../state/installed-runtime.js';
-import { ResourceRetirementError } from '../state/errors.js';
+import { joinResourceOperations, ResourceRetirementError } from '../state/errors.js';
 import { ClientBusyError, ClientPendingRequestError, ClientRequestPersistenceError } from '../client/errors.js';
 import type { PendingRequests } from '../client/pending-requests.js';
 import type { ClientRequests, PendingClientMutation } from '../client/request-data.js';
@@ -42,10 +42,18 @@ export type InstalledControlSession = Readonly<{
 
 /** Actual installation/peer authentication remains in the original client.
  * The caller retains its selected image handles until this session joins. */
-export async function openInstalledControlSession(selected: HeldInstalledRuntime, requests?: PendingRequests): Promise<InstalledControlSession> {
+export async function openInstalledControlSession(selected: HeldInstalledRuntime,
+  requests?: PendingRequests | (() => Promise<PendingRequests>)): Promise<InstalledControlSession> {
   const connect = () => openInstalledSupervisorClient(selected, 3), client = await connect();
-  try { return createInstalledControlSession(client, connect, requests); }
-  catch (error) { await client.close(); throw error; }
+  try {
+    // The original manager and authenticated peer must accept the installation
+    // before own client files or its native data lock are acquired.
+    const retained = typeof requests === 'function' ? await requests() : requests;
+    return createInstalledControlSession(client, connect, retained);
+  } catch (error) {
+    await joinResourceOperations([Promise.reject(error), Promise.resolve().then(() => client.close())]);
+    throw error;
+  }
 }
 
 /** One shared protocol consumer. Reconnection is explicit and never resends a
