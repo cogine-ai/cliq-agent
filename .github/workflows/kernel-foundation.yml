@@ -1038,6 +1038,8 @@ jobs:
           node-version: 22.13.0
           cache: npm
       - run: npm ci
+      - run: npm run build
+        id: build
       - name: Check the shared daily client and original harness contracts
         run: >-
           node --test --test-concurrency=1 --import tsx
@@ -1049,8 +1051,6 @@ jobs:
           scripts/kernel/testing/provider-journey-input.test.ts
           scripts/kernel/testing/installed-run-client.test.mjs
           scripts/kernel/testing/installed-run-diagnostic-wiring.test.ts
-      - run: npm run build
-        id: build
       - name: Install the unchanged actual native, systemd and credential prerequisites
         run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap libcap-dev libselinux1-dev meson ninja-build e2fsprogs libext2fs-dev pkg-config
       - name: Exercise the same signed image through its normal daily commands

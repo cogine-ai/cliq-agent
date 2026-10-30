@@ -217,6 +217,8 @@ test('normal daily coverage uses the signed command path and original joined fix
   assert(job); assert.match(job, /runs-on: ubuntu-22\.04\n/u); assert.match(job, /timeout-minutes: 20\n/u);
   assert.doesNotMatch(job, /(?:continue-on-error|needs):/u); assert.match(job, /persist-credentials: false/u);
   assert.match(job, /node-version: 22\.13\.0/u); assert.match(job, /libext2fs-dev pkg-config/u);
+  const build = job.indexOf('- run: npm run build'), files = job.indexOf('src/client/private-files.test.ts');
+  assert(build >= 0 && files > build, 'a clean runner builds the actual native helper before filesystem/mutex preflight');
   const exercise = stepBlocks(job).find(block => block.includes('- name: Exercise the same signed image through its normal daily commands'));
   assert(exercise); assert.match(exercise, /steps\.build\.outcome == 'success'/u);
   for (const guard of ['test "$RUNNER_ENVIRONMENT" = github-hosted', 'test "$RUNNER_OS" = Linux', 'test "$RUNNER_ARCH" = X64'])
