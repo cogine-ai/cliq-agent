@@ -1037,7 +1037,12 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         },
         reconnect: async () => { assert(client); await client.close(); client = undefined; client = await persistentClient(); },
         observeWorkspace: async () => ({ paths: await readdir(workspace), math: await observeFile('math.mjs'), test: await observeFile('check.test.mjs') }),
-        review: detail => { scanBytes(Buffer.from(detail.text)); report.reviewedResultRef = detail.artifactRef; },
+        review: detail => {
+          scanBytes(Buffer.from(detail.text)); report.reviewedResultRef = detail.artifactRef;
+          // Preserve the actual production review as scanned data. Its refs
+          // alone cannot let the owner inspect the model's code after cleanup.
+          report.reviewedResultText = detail.text;
+        },
         mark,
       });
       report.protocolWorkflowComplete = true;

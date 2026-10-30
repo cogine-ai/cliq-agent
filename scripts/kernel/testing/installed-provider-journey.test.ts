@@ -86,7 +86,7 @@ test('UNKNOWN reconciliation remains an explicit failed journey without auto-pro
   assert.equal(f.reconnects(), 0); assert.equal(f.artifacts.length, 0);
 });
 
-function terminalPage(request: Extract<InstalledControlRequestV1, { method: 'run.get' }>, changeSecondPage: boolean) {
+function terminalPage(request: Extract<InstalledControlRequestV1, { method: 'run.get' }>, changeSecondPage: boolean, deferredCheckpoints = false) {
   const queued = snapshot(), { frontierRef: _frontier, ...run } = queued.run;
   const terminal: RunSnapshotV1 = { ...queued, latestRunItemSeq: 202, run: { ...run, revision: 2, status: 'succeeded', nextStep: null,
     terminalReason: 'verified', resultRef: ref } };
@@ -94,12 +94,13 @@ function terminalPage(request: Extract<InstalledControlRequestV1, { method: 'run
   const cursor = encodeControlCheckpointCursor('run', { createdAt: at, checkpointId: 'checkpoint' });
   const checkpoint = { schemaVersion: 1, id: 'checkpoint', runId: 'run', basedOnRunRevision: 1, contextManifestRef: ref, workspaceStateRef: ref,
     runItemSeq: 0, journalSeq: 0, reason: 'initial', createdAt: at };
+  const reachedCheckpoints = !deferredCheckpoints || start + length === 202;
   if (changeSecondPage && start === 100) terminal.run.revision = 3;
   return { protocolVersion: 1, ok: true, result: { method: 'run.get', snapshot: terminal,
     items: Array.from({ length }, (_, index) => ({ schemaVersion: 1, itemId: `inert-item-${start + index + 1}`, itemSeq: start + index + 1,
-      payloadRef: ref, payloadDigest: ref, createdAt: at })), journal: [], checkpoints: request.checkpointCursor ? [] : [checkpoint],
+      payloadRef: ref, payloadDigest: ref, createdAt: at })), journal: [], checkpoints: request.checkpointCursor || !reachedCheckpoints ? [] : [checkpoint],
     highWaterItemSeq: 202, highWaterJournalSeq: 0, highWaterCheckpointCursor: cursor,
-    nextItemSeq: start + length, nextJournalSeq: 0, nextCheckpointCursor: cursor } };
+    nextItemSeq: start + length, nextJournalSeq: 0, ...(reachedCheckpoints ? { nextCheckpointCursor: cursor } : {}) } };
 }
 
 for (const changeSecondPage of [false, true]) test(`terminal inspection ${changeSecondPage ? 'refuses a changed cut' : 'collects all original pages without a turn-count assumption'}`, async () => {
@@ -112,4 +113,18 @@ for (const changeSecondPage of [false, true]) test(`terminal inspection ${change
   assert.deepEqual(gets.map(request => request.afterItemSeq), changeSecondPage ? [0, 0, 100] : [0, 0, 100, 200]);
   assert.equal(f.calls.some(request => request.method === 'run.apply'), false);
   assert.equal(f.artifacts.length, changeSecondPage ? 0 : 1);
+});
+
+test('a full item/Journal page cannot skip original checkpoints by substituting the high-water cursor', async () => {
+  const f = fixture(request => {
+    if (request.method === 'run.submit') return { protocolVersion: 1, ok: true, result: { method: 'run.submit', snapshot: snapshot() } };
+    assert(request.method === 'run.get'); return terminalPage(request, false, true);
+  });
+  // Reaching result-artifact inspection proves the complete original cut was
+  // collected. This inert fixture has no artifacts or native/runtime authority.
+  await assert.rejects(runInstalledProviderJourney(input, f.context), refusedAt('result'));
+  const gets = f.calls.filter((request): request is Extract<InstalledControlRequestV1, { method: 'run.get' }> => request.method === 'run.get');
+  assert.deepEqual(gets.map(request => request.afterItemSeq), [0, 0, 100, 200]);
+  assert(gets.every(request => request.checkpointCursor === undefined), 'no checkpoint has been consumed when these requests are sent');
+  assert.equal(f.artifacts.length, 1); assert.equal(f.calls.some(request => request.method === 'run.apply'), false);
 });

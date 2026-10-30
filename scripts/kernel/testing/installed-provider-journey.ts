@@ -118,7 +118,9 @@ export async function runInstalledProviderJourney(input: InstalledProviderJourne
       while (page.nextItemSeq < first.highWaterItemSeq || page.nextJournalSeq < first.highWaterJournalSeq || page.nextCheckpointCursor !== first.highWaterCheckpointCursor) {
         check(++pages <= 1000 && items.length + journal.length + checkpoints.length <= 10_000);
         const next = await send({ protocolVersion: 1, method: 'run.get', runId, afterItemSeq: page.nextItemSeq, afterJournalSeq: page.nextJournalSeq,
-          ...(page.nextCheckpointCursor ?? page.highWaterCheckpointCursor ? { checkpointCursor: page.nextCheckpointCursor ?? page.highWaterCheckpointCursor } : {}),
+          // A full item/Journal frame may not have reached checkpoints yet.
+          // Only an actually issued next cursor advances that stream.
+          ...(page.nextCheckpointCursor === undefined ? {} : { checkpointCursor: page.nextCheckpointCursor }),
           itemLimit: 100, journalLimit: 100, checkpointLimit: 100 }, 'run.get');
         same(next.snapshot, first.snapshot); same([next.highWaterItemSeq, next.highWaterJournalSeq, next.highWaterCheckpointCursor ?? null],
           [first.highWaterItemSeq, first.highWaterJournalSeq, first.highWaterCheckpointCursor ?? null]);
