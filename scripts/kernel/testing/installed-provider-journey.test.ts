@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
+import vm from 'node:vm';
+import ts from 'typescript';
 import { runSnapshot, sessionSnapshot, ref, at } from '../../../src/client/testing/protocol.js';
 import { encodeControlCheckpointCursor } from '../../../src/kernel/control-wire.js';
 import { parseClientInvocation } from '../../../src/client/commands.js';
@@ -34,7 +37,8 @@ function fixture(handler?: (request: InstalledControlRequestV1) => unknown | Pro
     async artifact(ref) { artifacts.push(ref); throw new Error('no real artifacts exist in this protocol test'); },
     async reconnect() { reconnects++; },
     async observeWorkspace() { return { paths: ['check.test.mjs', 'math.mjs'], math: Buffer.from(PROVIDER_JOURNEY_FILES['math.mjs']),
-      test: Buffer.from(PROVIDER_JOURNEY_FILES['check.test.mjs']) }; }
+      test: Buffer.from(PROVIDER_JOURNEY_FILES['check.test.mjs']) }; },
+    async verifySource() { throw new Error('no actual verifier retirement or repair authority exists in this protocol test'); }
   };
   return { context, calls, artifacts, reconnects: () => reconnects };
 }
@@ -73,11 +77,12 @@ test('an authoritative admission refusal cannot become a replacement Run or an a
   assert.equal(f.calls.some(request => request.method === 'run.apply'), false); assert.equal(f.artifacts.length, 0);
 });
 
-test('normal daily admission uses the actual alias, explicit fixed check and budgets without a hidden protocol mutation or retry', async () => {
+for (const providerKind of ['owned_https', 'real_provider'] as const)
+test(`${providerKind} normal admission uses the actual alias, explicit fixed check and original budgets without a hidden mutation or retry`, async () => {
   const f = fixture(); let commands = 0;
-  const budgets = { ...input.budgets, modelTokens: 20_000_000, costMicros: 5_000_000 };
+  const budgets = { ...input.budgets, modelTokens: 20_000_000, costMicros: 5_000_000, repairAttempts: providerKind === 'real_provider' ? 2 : 1 };
   await assert.rejects(runInstalledDailyProviderJourney({ workspacePath: input.workspacePath,
-    model: { provider: 'openai-compatible', model: input.model.model }, modelAlias: 'owned-daily', budgets,
+    model: { provider: 'openai-compatible', model: input.model.model }, modelAlias: 'owned-daily', providerKind, budgets,
     endpointIdentityDigest: input.endpointIdentityDigest }, { ...f.context,
     async command(argv, timeout) {
       commands++; assert.equal(timeout, 30_000); assert.equal(argv[0], 'run');
@@ -152,4 +157,32 @@ test('a full item/Journal page cannot skip original checkpoints by substituting 
   assert.deepEqual(gets.map(request => request.afterItemSeq), [0, 0, 100, 200]);
   assert(gets.every(request => request.checkpointCursor === undefined), 'no checkpoint has been consumed when these requests are sent');
   assert.equal(f.artifacts.length, 1); assert.equal(f.calls.some(request => request.method === 'run.apply'), false);
+});
+
+test('actual shared accounting retains verified repairs independently from invocation settlements for both provider entrances', async () => {
+  // Execute only the actual pure accounting body, with powerless numeric data.
+  // This creates no Run, accepted response, receipt or native retirement proof.
+  const source = readFileSync(new URL('./installed-provider-journey.ts', import.meta.url), 'utf8');
+  const parsed = ts.createSourceFile('journey.ts', source, ts.ScriptTarget.Latest, true);
+  let accounting: ts.FunctionDeclaration | undefined;
+  const visit = (node: ts.Node) => {
+    if (ts.isFunctionDeclaration(node) && node.name?.text === 'accounting') { assert.equal(accounting, undefined); accounting = node; }
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed); assert(accounting);
+  const script = ts.transpileModule(accounting.getText(parsed) + '\nglobalThis.accounting = accounting;',
+    { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  const zero = { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 };
+  const context = vm.createContext({ ZERO: zero, check: assert.ok,
+    same: (left: unknown, right: unknown) => assert.deepEqual(JSON.parse(JSON.stringify(left)), JSON.parse(JSON.stringify(right))) });
+  vm.runInContext(script, context);
+  for (const repairs of [0, 1, 2]) {
+    const cut = { journal: [], snapshot: { run: { budgetReserved: zero, budgetConsumed: { ...zero, repairAttempts: repairs } } } };
+    const consumed = await context.accounting(cut, repairs);
+    assert.equal(consumed.repairAttempts, repairs);
+    if (repairs) await assert.rejects(context.accounting(cut, 0));
+  }
+  assert(source.includes('const sourceVerification = await context.verifySource(source, session, fixedMath)'));
+  assert(source.includes('await accounting(source, sourceVerification.repairCount)'));
+  assert(!source.includes('accounting(source, source.snapshot.run.repairCount)'));
 });

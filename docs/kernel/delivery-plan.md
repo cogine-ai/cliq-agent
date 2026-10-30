@@ -63,24 +63,35 @@ The normal command campaign must exercise an actual failed required check and
 repair before reviewing and applying the final result. These paths are not a
 second runner or a replacement for the existing installed protocol campaigns.
 
-As of 2026-10-31, pushed `eff1b78050485721eee1bd1d2e9378d66f363114`
-passes its independent local build and original full test command (3,481 passed,
-zero failed, sixteen platform skips). Its
-[Linux/hosted run](https://github.com/cogine-ai/cliq-agent/actions/runs/41095828769)
-has seven successful and sixteen failed jobs. Twelve failures stop at two
-static harness parsing mismatches; their corrections pass the unchanged local
-diagnostic preflight. The remaining failures are real READY/admission timing
-misses and a nonzero old-credential revocation after the signed upgrade. They
-remain failures; the latter needs a fixed, scanned refusal diagnostic before
-choosing a production correction. Late-result teardown also exceeded the
-original two-second stop and is not recorded as joined.
+As of 2026-10-31, pushed `0a023df6c2699d4994d27fdd73d6741035509cb0`
+passes its independent local build and original full test command (3,544 passed,
+zero failed, thirty-two platform skips), packed SDK and explicit script gates.
+Its [free Linux/hosted run](https://github.com/cogine-ai/cliq-agent/actions/runs/41121555558)
+is in progress, including the normal signed daily command campaign. Actual
+Linux component tests separately pass the cross-process metadata mutex and
+sixty-five cumulative secret-corpus cases; they do not qualify that campaign.
 
-Current daily-client changes have focused regressions, actual Linux private-file
-checks and a packed SDK check, but still require their combined full local and
-installed gates. The local x64 TCG package build fails its unchanged sixty-second
-worker construction limit before credential enrollment or a model call. Zero
-paid requests have been made. Neither this failure nor a controlled HTTPS
-response establishes real-provider, complete I1 or release qualification.
+The preceding [run](https://github.com/cogine-ai/cliq-agent/actions/runs/41095828769)
+had seven successful and sixteen failed jobs. Its static harness mismatches are
+corrected in the pushed source. The READY/admission timing misses, nonzero
+old-credential revocation and late-result teardown exceeding the original
+two-second stop remain unresolved qualification failures until the new source
+passes their complete real campaigns.
+
+The next combined candidate connects the authorized real provider to the same
+normal signed setup, model enrollment, Run, review and exact-result apply
+commands. Both provider entrances validate the full candidate, repair,
+Checkpoint, verifier receipt and actual retirement graph before accounting.
+Only natural repairs within the original budget are accepted; the owned HTTPS
+case retains its exact one-repair/four-POST assertions. The candidate also
+patches the three affected dependency branches within the existing package
+ranges. These additions require their combined local and installed gates.
+
+The local x64 TCG package build still fails its unchanged sixty-second worker
+construction limit, including genuine GCC and Clang builds, before credential
+enrollment or a model call. Zero paid requests have been made. Neither this
+failure nor a controlled HTTPS response establishes real-provider, complete I1
+or release qualification.
 
 Baseline: `cefa89ae797d8763686b87811743c4422922743c` (PR #523), reviewed
 2026-10-18. Its tree equals the qualified `990656c` follow-up. The installed

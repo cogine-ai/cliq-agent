@@ -263,7 +263,7 @@ test('normal daily coverage uses the signed command path and original joined fix
   assert.match(consumer, /assert\.equal\(mode, '--daily-campaign'\); assert\(filename\); assert\.equal\(extra\.length, 0\)/u);
   assert.match(consumer, /await runInstalledNodeJourney\(filename, 'daily'\)/u);
   const driver = await readFile(new URL('../../scripts/kernel/testing/installed-node-journey.ts', import.meta.url), 'utf8');
-  assert.match(driver, /if \(dailyJourney\) assert\.deepEqual\(Object\.keys\(options\), \[\]/u);
+  assert.match(driver, /if \(journeyKind === 'daily'\) assert\.deepEqual\(Object\.keys\(options\), \[\]/u);
   assert.match(driver, /if \(dailyJourney\) await dailyCommand\(\['setup'\]\)/u);
   assert.match(driver, /if \(dailyJourney\) await dailyCommand\(\['models', 'add', dailyAlias, '--api-key-stdin'\], 60_000, secret\)/u);
   assert.match(driver, /runInstalledDailyProviderJourney\([\s\S]*?command: dailyCommand/u);

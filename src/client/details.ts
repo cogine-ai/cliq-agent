@@ -70,7 +70,7 @@ export async function presentControlArtifacts(app: Pick<ClientApplication, 'arti
       throw new TypeError('review diff differs from its original result sources');
     lines.push('', 'Changes', await renderWorkspaceReview(diff, app.artifact.bind(app), signal),
       `Complete diff artifact: ${value.diffRef}`, `Summary artifact: ${value.summaryRef}`, '',
-      `To apply this exact result explicitly: cliq apply ${JSON.stringify(value.runId)} --result ${result.result.ref}`);
+      `Apply this exact result with the same signed client, using these arguments:\napply ${JSON.stringify(value.runId)} --result ${result.result.ref}`);
     await present({ label: 'Result review', artifactRef: result.result.ref, text: lines.join('\n') });
   } else if (result.method === 'session.handoff.create') {
     if (request.method !== result.method) throw new TypeError('handoff differs from its original request');

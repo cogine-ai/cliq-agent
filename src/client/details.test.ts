@@ -46,7 +46,8 @@ test('result detail reads complete original CAS, its strict closure and committe
     assert.match(shown[0]!.text, /UNVERIFIED: no required checks were configured/u);
     assert.match(shown[0]!.text, /0 changed paths/u);
     for (const ref of [f.resultRef, f.closureRef, f.summaryRef, f.diffRef]) assert(shown[0]!.text.includes(ref));
-    assert.match(shown[0]!.text, /cliq apply "run" --result /u);
+    assert(shown[0]!.text.includes(`Apply this exact result with the same signed client, using these arguments:\napply "run" --result ${f.resultRef}`));
+    assert.doesNotMatch(shown[0]!.text, /cliq apply/u, 'the npm entry still has its legacy composition before Kernel Cut');
     const wrong = { ...response, result: { ...response.result, result: { ...response.result.result, sizeBytes: 1 } } };
     await assert.rejects(presentControlArtifacts(f.app, { protocolVersion: 1, method: 'run.result', runId: 'run' }, wrong, () => {}), /descriptor/u);
     const foreign = { ...f.result, runId: 'foreign' }, foreignRef = await f.store(foreign);

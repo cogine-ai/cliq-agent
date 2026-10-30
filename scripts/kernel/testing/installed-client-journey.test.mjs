@@ -102,7 +102,7 @@ test('old verifier and delivery keep schema1 while provider and normal daily cli
   matches(verifier, /\.\.\.\(dailyJourney \? \{ headlessSchemaVersion: 3 as const \} : \{\}\)/u);
   matches(packageBuild, /headlessSchemaRange: \{ min: options\.headlessSchemaVersion \?\? 1, max: options\.headlessSchemaVersion \?\? 1 \}/u);
   matches(packageBuild, /\{ \.\.\.options, providerModel: definition, headlessSchemaVersion: 3, guestToolchain: 'node-test-v1' \}/u);
-  for (const [kind, provider, daily] of [['verifier', false, false], ['delivery', false, false], ['provider', true, false], ['daily', false, true]]) {
+  for (const [kind, provider, daily] of [['verifier', false, false], ['delivery', false, false], ['provider', true, false], ['daily', false, true], ['provider-daily', true, true]]) {
     const schema3 = provider || daily;
     const selectedArgs = select(elements[5].expression, schema3); assert(ts.isArrayLiteralExpression(selectedArgs));
     assert.deepEqual(selectedArgs.elements.map(value => { assert(ts.isStringLiteral(value)); return value.text; }), schema3 ? ['--schema3'] : [], kind);

@@ -31,7 +31,8 @@ import { decodeRunResult, decodeWorkspaceDiff } from '../../../src/state/result-
 import { buildInstalledProviderQualificationPackage, buildInstalledSupervisorPackage } from './installed-supervisor-package.js';
 import type { InstalledModelPackageFixture } from './installed-model-package.js';
 import { providerModelDefinition, type InstalledProviderModelDefinition } from '../installed-provider-model.js';
-import { PROVIDER_JOURNEY_FILES, runInstalledProviderJourney, runInstalledDailyProviderJourney } from './installed-provider-journey.js';
+import { PROVIDER_JOURNEY_FILES, runInstalledProviderJourney, runInstalledDailyProviderJourney,
+  type InstalledProviderJourneyContext } from './installed-provider-journey.js';
 import { runInstalledDailyCommand } from './installed-daily-command.js';
 import { installedServiceProfiles } from '../../../src/state/installed-services.js';
 import { decodeInstalledInstallerDiagnostics, encodeInstalledInstallerDiagnostic } from './installed-install-diagnostics.js';
@@ -190,13 +191,13 @@ export type InstalledProviderNodeJourneyInput = Readonly<{
   definition: InstalledProviderModelDefinition; budgets: RunSpec['budgets']; secret: Buffer;
 }>;
 
-export async function runInstalledNodeJourney(filename: string, journeyKind: 'verifier' | 'delivery' | 'provider' | 'daily',
+export async function runInstalledNodeJourney(filename: string, journeyKind: 'verifier' | 'delivery' | 'provider' | 'daily' | 'provider-daily',
   options: Readonly<{ publicationRetirementDiagnostics?: true; publicationRetirementStop?: true; publicationRetirementLate?: true;
     npmDependencyArchive?: Buffer; provider?: InstalledProviderNodeJourneyInput }> = {}): Promise<void> {
   assert.equal(process.platform, 'linux'); assert.equal(process.arch, 'x64');
-  assert(journeyKind === 'verifier' || journeyKind === 'delivery' || journeyKind === 'provider' || journeyKind === 'daily');
-  const dailyJourney = journeyKind === 'daily';
-  if (dailyJourney) assert.deepEqual(Object.keys(options), [], 'normal daily qualification has no alternate authority or scenario options');
+  assert(journeyKind === 'verifier' || journeyKind === 'delivery' || journeyKind === 'provider' || journeyKind === 'daily' || journeyKind === 'provider-daily');
+  const dailyJourney = journeyKind === 'daily' || journeyKind === 'provider-daily';
+  if (journeyKind === 'daily') assert.deepEqual(Object.keys(options), [], 'normal daily qualification has no alternate authority or scenario options');
   assert.deepEqual(Object.keys(options).sort(), [
     ...(options.publicationRetirementDiagnostics === true ? ['publicationRetirementDiagnostics'] : []),
     ...(options.publicationRetirementStop === true ? ['publicationRetirementStop'] : []),
@@ -204,7 +205,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     ...(options.npmDependencyArchive === undefined ? [] : ['npmDependencyArchive']),
     ...(options.provider === undefined ? [] : ['provider']),
   ].sort());
-  assert.equal(journeyKind === 'provider', options.provider !== undefined);
+  assert.equal(journeyKind === 'provider' || journeyKind === 'provider-daily', options.provider !== undefined);
   if (options.provider) {
     assert.deepEqual(Object.keys(options), ['provider'], 'real provider scope cannot borrow a fixture or fault campaign');
     providerModelDefinition(options.provider.definition);
@@ -255,9 +256,12 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
   }
   if (dailyJourney) {
     delete report.ordinaryGitFixtureProfile;
-    Object.assign(report, { format: 'cliq-installed-daily-journey-v1', profile: 'owned_https_daily_required_repair_review_apply_v1',
+    Object.assign(report, options.provider ? {
+      format: 'cliq-installed-provider-daily-journey-v1', profile: 'real_compatible_daily_required_node_result_review_apply_v1',
+      scope: 'actual normal signed Linux setup, real-provider model alias enrollment, required Node verification and any natural budgeted repair, complete result review and exact Delivery; not official provider/billing/release, macOS, reboot or complete I1/I2',
+    } : { format: 'cliq-installed-daily-journey-v1', profile: 'owned_https_daily_required_repair_review_apply_v1',
       scope: 'actual normal signed Linux setup, model alias enrollment, required Node assertion repair, complete result review and exact Delivery; owned HTTPS only, not paid provider, billing, release, macOS, reboot or complete I1/I2',
-      officialReleaseQualified: false, ownedHttpsFixtureCreated: true, actualProviderQualified: false, actualProviderBillingQualified: false,
+    }, { officialReleaseQualified: false, ownedHttpsFixtureCreated: !options.provider, actualProviderQualified: false, actualProviderBillingQualified: false,
       normalCliCommands: [] });
   }
   const secret = options.provider ? Buffer.from(options.provider.secret) : Buffer.from(randomBytes(32).toString('hex'));
@@ -297,7 +301,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
   };
   const credential = (metadata: Record<string, unknown>, input?: Buffer) => command(path.join(recipe.stateRoot, 'runtime/bootstrap'),
     ['--bootstrap-credential', canonicalJsonBytes(metadata).toString('base64url')], input, 60000);
-  const dailyAlias = 'owned-daily';
+  const dailyAlias = options.provider ? 'deepseek' : 'owned-daily';
   const dailyCommand = async (argv: readonly string[], timeout = 30_000, input?: Buffer) => {
     assert(dailyJourney && [30_000, 60_000, 90_000].includes(timeout));
     const result = await runInstalledDailyCommand({ executable: '/usr/sbin/runuser',
@@ -1082,7 +1086,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
           assert.equal(BigInt(bytes.length), before.size); scanBytes(bytes); return bytes;
         } finally { await held.close(); }
       };
-      const workflowContext = {
+      const workflowContext: InstalledProviderJourneyContext = {
         send: async (body: import('../../../src/control/v1.js').InstalledControlRequestV1, timeout: number) => { assert(client); return client.send(body, timeout); },
         artifact: async (ref: string, options: { maxBytes: number; signal?: AbortSignal }) => {
           options.signal?.throwIfAborted(); const bytes = await readPublicArtifact(ref);
@@ -1094,24 +1098,29 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
           scanBytes(Buffer.from(detail.text)); report.reviewedResultRef = detail.artifactRef;
           report.reviewedResultText = detail.text;
         }, mark,
+        verifySource: async (cut, sessionCut, finalMath) => {
+          const after = options.provider ? new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(finalMath)
+            : 'export function add(a, b) {\n  return a + b;\n}\n';
+          assert(Buffer.from(after).equals(finalMath), 'the final private math bytes must retain their complete UTF-8 identity');
+          const proof = await assertInstalledVerifierOutcome({ cut, sessionCut, readCas,
+            caseKind: options.provider ? 'required_provider' : 'required_repair', principalId: principal,
+            expectedFiles: [{ path: 'check.test.mjs', before: PROVIDER_JOURNEY_FILES['check.test.mjs'], after: PROVIDER_JOURNEY_FILES['check.test.mjs'] },
+              { path: 'math.mjs', before: PROVIDER_JOURNEY_FILES['math.mjs'], after }],
+            readOwnerHistory: async (observe?: (stage: InstalledOwnerHistoryReadStage) => void) => inspectInstalledOwnerHistory(recipe.stateRoot, observe).owners });
+          if (!options.provider) assert.equal(proof.retirementIdentities.length, 2);
+          assert.equal(proof.retirementIdentities.length, proof.verifierAttemptCount);
+          for (const retirement of proof.retirementIdentities) await assertVerifierProcessesAbsent(retirement);
+          return proof;
+        },
       };
       if (dailyJourney) {
-        const fixed = 'export function add(a, b) {\n  return a + b;\n}\n';
         report.providerWorkflow = await runInstalledDailyProviderJourney({ workspacePath: workspace,
-          model: { provider: 'openai-compatible', model }, modelAlias: dailyAlias,
-          budgets: { wallTimeMs: 300_000, modelTokens: 20_000_000, costMicros: 5_000_000, toolCalls: 16, repairAttempts: 1, childDepth: 0, childConcurrency: 1 },
+          model: { provider: 'openai-compatible', model: options.provider?.definition.model ?? model }, modelAlias: dailyAlias,
+          providerKind: options.provider ? 'real_provider' : 'owned_https',
+          budgets: options.provider?.budgets ?? { wallTimeMs: 300_000, modelTokens: 20_000_000, costMicros: 5_000_000, toolCalls: 16, repairAttempts: 1, childDepth: 0, childConcurrency: 1 },
           endpointIdentityDigest: signed.modelAuthority.endpoint.endpointIdentityDigest }, { ...workflowContext,
-          command: dailyCommand,
-          verifySource: async (cut, sessionCut) => {
-            const proof = await assertInstalledVerifierOutcome({ cut, sessionCut, readCas, caseKind: 'required_repair', principalId: principal,
-              expectedFiles: [{ path: 'check.test.mjs', before: PROVIDER_JOURNEY_FILES['check.test.mjs'], after: PROVIDER_JOURNEY_FILES['check.test.mjs'] },
-                { path: 'math.mjs', before: PROVIDER_JOURNEY_FILES['math.mjs'], after: fixed }],
-              readOwnerHistory: async (observe?: (stage: InstalledOwnerHistoryReadStage) => void) => inspectInstalledOwnerHistory(recipe.stateRoot, observe).owners });
-            assert.equal(proof.retirementIdentities.length, 2);
-            for (const retirement of proof.retirementIdentities) await assertVerifierProcessesAbsent(retirement);
-            return proof;
-          } });
-        assert.equal(postCount, 4); assert.equal(acceptedTcp, 4); assert.equal(acceptedTls, 4);
+          command: dailyCommand });
+        if (!options.provider) { assert.equal(postCount, 4); assert.equal(acceptedTcp, 4); assert.equal(acceptedTls, 4); }
         assert.deepEqual(report.normalCliCommands.map((value: { command: string }) => value.command), ['setup', 'models', 'run', 'result', 'apply']);
         assert(!responderFailure); report.normalCliWorkflowComplete = true;
       } else {

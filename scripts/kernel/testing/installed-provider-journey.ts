@@ -46,18 +46,21 @@ export type InstalledProviderJourneyContext = Readonly<{
   /** Owner's joined no-follow/full-byte observation of only its tiny fixture.
    * This is read-only test composition, never a native proof or execution grant. */
   observeWorkspace(): Promise<Readonly<{ paths: readonly string[]; math: Buffer; test: Buffer }>>;
+  /** Owner verifies the complete original candidate/repair/receipt/retirement
+   * graph and independently observes every recorded process lifetime absent. */
+  verifySource(cut: Cut, session: Result<'session.get'>, finalMath: Buffer): Promise<InstalledVerifierOutcome>;
   review?(detail: ClientDetail): void | Promise<void>;
   mark?(phase: ProviderJourneyStage): void;
 }>;
 const check = (condition: unknown): void => { if (!condition) throw new Error('public provider workflow invariant failed'); };
 export type InstalledDailyProviderJourneyInput = Readonly<Omit<InstalledProviderJourneyInput, 'model' | 'guestToolchainManifestId'> & {
   model: Readonly<{ provider: 'openai-compatible'; model: string }>; modelAlias: string;
+  providerKind: 'owned_https' | 'real_provider';
 }>;
 export type InstalledDailyProviderJourneyContext = InstalledProviderJourneyContext & Readonly<{
   /** The fixture owns this actual same-user signed SEA child and credential
    * stdin. No secret, native proof or execution authority crosses here. */
   command(argv: readonly string[], timeoutMs: number): Promise<Readonly<{ stdout: Buffer }>>;
-  verifySource(cut: Cut, session: Result<'session.get'>): Promise<InstalledVerifierOutcome>;
 }>;
 type Journey = { kind: 'control'; input: InstalledProviderJourneyInput; context: InstalledProviderJourneyContext } |
   { kind: 'daily'; input: InstalledDailyProviderJourneyInput; context: InstalledDailyProviderJourneyContext };
@@ -81,6 +84,7 @@ async function runProviderJourney(journey: Journey) {
   let stage: ProviderJourneyStage = 'workspace';
   const mark = (next: ProviderJourneyStage) => { stage = next; context.mark?.(next); };
   try {
+    if (journey.kind === 'daily') check(['owned_https', 'real_provider'].includes(journey.input.providerKind));
     async function send<M extends InstalledControlFeature>(request: unknown, method: M): Promise<Result<M>> {
       const selected = decodeInstalledControlRequest(request); check(selected.method === method);
       const response = decodeInstalledControlResponse(await context.send(selected, REQUEST_MS), selected);
@@ -260,17 +264,23 @@ async function runProviderJourney(journey: Journey) {
       row.attempt === passed.attempt && row.phase === 'completed' && row.receiptRef === receiptRef);
     check(verifierCompletion && verifierCompletion.seq === passed.completedJournalSeq);
     check(source.journal.some(row => row.opKind === 'model' && row.phase === 'completed') && source.journal.some(row => row.opKind === 'tool' && row.phase === 'completed'));
-    let sourceVerification: InstalledVerifierOutcome | undefined;
-    if (journey.kind === 'daily') {
-      const session = await send({ protocolVersion: 1, method: 'session.get', sessionId: source.snapshot.run.sessionId, limit: 100 }, 'session.get');
-      check(session.nextItemSeq === session.highWaterItemSeq);
-      sourceVerification = await journey.context.verifySource(source, session);
-      check(sourceVerification.runId === sourceRunId && sourceVerification.status === 'succeeded' && sourceVerification.terminalReason === 'verified' &&
+    const session = await send({ protocolVersion: 1, method: 'session.get', sessionId: source.snapshot.run.sessionId, limit: 100 }, 'session.get');
+    check(session.nextItemSeq === session.highWaterItemSeq);
+    const sourceVerification = await context.verifySource(source, session, fixedMath);
+    check(sourceVerification.runId === sourceRunId && sourceVerification.sessionId === source.snapshot.run.sessionId &&
+      sourceVerification.status === 'succeeded' && sourceVerification.terminalReason === 'verified' &&
+      sourceVerification.resultRef === reply.result.ref && sourceVerification.verificationClosureRef === result.verificationClosureRef &&
+      Number.isSafeInteger(sourceVerification.repairCount) && sourceVerification.repairCount >= 0 &&
+      sourceVerification.repairCount <= input.budgets.repairAttempts && sourceVerification.candidateCount === sourceVerification.repairCount + 1 &&
+      sourceVerification.checkedFileCount === 2 && sourceVerification.retirementIdentities.length === sourceVerification.verifierAttemptCount);
+    const ownedDaily = journey.kind === 'daily' && journey.input.providerKind === 'owned_https';
+    if (ownedDaily) {
+      check(sourceVerification.caseKind === 'required_repair' &&
         sourceVerification.candidateCount === 2 && sourceVerification.verifierAttemptCount === 2 && sourceVerification.repairCount === 1 &&
         sourceVerification.checkedFileCount === 2 && source.snapshot.run.repairCount === 1);
-    }
-    mark('accounting'); const sourceConsumed = await accounting(source, sourceVerification?.repairCount);
-    check((journey.kind === 'daily' ? sourceConsumed.costMicros === 0 : sourceConsumed.costMicros > 0) && sourceConsumed.modelTokens > 0);
+    } else check(sourceVerification.caseKind === 'required_provider');
+    mark('accounting'); const sourceConsumed = await accounting(source, sourceVerification.repairCount);
+    check((ownedDaily ? sourceConsumed.costMicros === 0 : sourceConsumed.costMicros > 0) && sourceConsumed.modelTokens > 0);
     for (const dimension of Object.keys(ZERO) as (keyof BudgetUsage)[]) check(sourceConsumed[dimension] <= input.budgets[dimension]);
     mark('review');
     const review: ClientDetail[] = [];
@@ -331,7 +341,8 @@ async function runProviderJourney(journey: Journey) {
       completedModelCalls: source.journal.filter(row => row.opKind === 'model' && row.phase === 'completed').length,
       hostFileDigest: mathFile.blobRef, preservedTestDigest: testFile.blobRef, reviewedArtifactRef: review[0]!.artifactRef,
       ...(journey.kind === 'daily' ? { normalCliWorkflowComplete: true as const, reviewApplyWorkflowCommandCount: 3 as const,
-        controlledHttpsProvider: true as const, sourceVerification } : {}) };
+        controlledHttpsProvider: ownedDaily, sourceVerification,
+        ...(journey.input.providerKind === 'real_provider' ? { actualProviderRepairObserved: sourceVerification.repairCount > 0 } : {}) } : {}) };
   } catch {
     // Provider/tool bytes and arbitrary assertions must never become a retained
     // diagnostic, cause chain or console message in the credential-owning owner.

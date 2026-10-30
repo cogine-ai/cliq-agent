@@ -6,12 +6,12 @@ import { readProviderJourneyConfiguration, readProviderJourneySecret } from './t
 
 assert.equal(process.platform, 'linux'); assert.equal(process.arch, 'x64'); assert.equal(process.geteuid!(), 0);
 const [mode, filename, config, ...extra] = process.argv.slice(2);
-assert.equal(mode, '--provider-campaign'); assert(filename && config && !extra.length);
+assert(mode === '--provider-campaign' || mode === '--provider-daily-campaign'); assert(filename && config && !extra.length);
 const selection = await readProviderJourneyConfiguration(config);
 // The root-owned caller must not send key bytes during the shell's setup. It
 // waits for this fixed marker from this exact original driver, then writes the
 // private pipe once and closes it. No child is started until EOF is consumed.
 await new Promise<void>((resolve, reject) => process.stdout.write('CLIQ_PROVIDER_SECRET_STDIN_READY_V1\n', error => error ? reject(error) : resolve()));
 const secret = await readProviderJourneySecret(process.stdin);
-try { await runInstalledNodeJourney(filename, 'provider', { provider: { ...selection, secret } }); }
+try { await runInstalledNodeJourney(filename, mode === '--provider-daily-campaign' ? 'provider-daily' : 'provider', { provider: { ...selection, secret } }); }
 finally { secret.fill(0); }

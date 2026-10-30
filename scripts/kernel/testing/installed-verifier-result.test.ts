@@ -4,8 +4,43 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import ts from 'typescript';
+import vm from 'node:vm';
 import { InstalledVerifierOutcomeError } from './installed-verifier-result.js';
 
+test('real provider candidate eligibility allows only its original repair budget and leaves every fixed fixture strict', () => {
+  // These are only the actual pure cardinality predicates. Native receipts,
+  // retirement and repair-plan reconstruction remain required afterwards.
+  const source = readFileSync(new URL('./installed-verifier-result.ts', import.meta.url), 'utf8');
+  const parsed = ts.createSourceFile('result.ts', source, ts.ScriptTarget.Latest, true);
+  let candidates: ts.IfStatement | undefined, repairs: ts.CallExpression | undefined;
+  const visit = (node: ts.Node) => {
+    if (ts.isIfStatement(node) && node.expression.getText(parsed) === "caseKind === 'required_provider'") candidates = node;
+    if (ts.isCallExpression(node) && node.expression.getText(parsed) === 'check' && node.arguments[0]?.getText(parsed).startsWith('repairs.length ===')) repairs = node;
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed); assert(candidates && repairs);
+  const predicates = ts.transpileModule(candidates.getText(parsed) + '\n' + repairs.getText(parsed),
+    { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  const accepts = (caseKind: string, candidateCount: number, repairCount: number, budget: number, claimedRepairs = repairCount) => {
+    const context = { caseKind, candidates: Array(candidateCount), repairs: Array(repairCount), spec: { budgets: { repairAttempts: budget } },
+      run: { repairCount: claimedRepairs, budgetConsumed: { repairAttempts: claimedRepairs } }, check: assert.ok };
+    try { vm.runInNewContext(predicates, context); return true; } catch { return false; }
+  };
+  for (const [count, repair] of [[1, 0], [2, 1], [3, 2]]) assert.equal(accepts('required_provider', count!, repair!, 2), true);
+  for (const [count, repair, budget, claimed] of [[0, 0, 2, 0], [4, 3, 2, 3], [2, 0, 2, 1], [3, 1, 2, 2], [1, 0, 2, 2]])
+    assert.equal(accepts('required_provider', count!, repair!, budget!, claimed!), false);
+  for (const caseKind of ['required_pass', 'advisory_failure', 'required_timeout']) {
+    assert.equal(accepts(caseKind, 1, 0, 2), true); assert.equal(accepts(caseKind, 2, 1, 2), false);
+  }
+  assert.equal(accepts('required_repair', 2, 1, 2), true); assert.equal(accepts('required_repair', 3, 2, 2), false);
+  const reconstructed = source.indexOf('const expected = planVerifierRepair(progress,');
+  const balanced = source.indexOf('const consumed = { ...ZERO, repairAttempts: repairs.length }');
+  assert(reconstructed >= 0 && balanced > reconstructed);
+  assert(source.slice(reconstructed, balanced).includes('same(repair, expected.item)'));
+  assert(source.slice(reconstructed, balanced).includes('same(await object(plan.ref), parseJsonStrict(Buffer.from(plan.bytes)'));
+  assert(source.slice(reconstructed, balanced).includes("const messages = projection.messages.filter((message: any) => message.sourceKind === 'verifier_repair')"));
+  assert(source.includes('const physical = await assertInstalledVerifierRetirement('));
+});
 const stages = ['public_cut', 'frozen_inputs', 'source_and_candidate', 'candidate_producer', 'candidate_source',
   'verifier_request', 'verifier_policy_and_attempt', 'verifier_settlement', 'verifier_receipt', 'verifier_retirement',
   'verifier_retirement_request', 'verifier_retirement_source', 'verifier_retirement_projection', 'verifier_retirement_launch',

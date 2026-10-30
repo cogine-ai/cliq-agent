@@ -324,6 +324,28 @@ required. External HTTPS is owned by the installed native broker; no fixture
 remain false. Protocol/data regressions and a successful package build are not
 evidence that this real installed experiment has executed.
 
+`--run-provider-daily-journey` selects the same explicit configuration, secret
+stdin handshake, signed package and disposable fixture owner, but invokes its
+normal `setup`, `models add`, `run`, `result --wait` and exact-result `apply`
+commands. It retains the old control-provider mode. Its separate report is
+`cliq-installed-provider-daily-journey-v1` with profile
+`real_compatible_daily_required_node_result_review_apply_v1`. Both provider
+paths validate all original candidate, verifier, repair and retirement graphs
+and independently observe the recorded process lifetimes absent. A real model
+may pass immediately or repair naturally within the unchanged original budget;
+the experiment never manufactures a failed candidate to force another paid
+request. Zero observed repairs is not evidence of real-provider repair coverage.
+The owned-HTTPS daily fixture retains its exact four replies and one repair.
+
+The current public experiment selects a 32,768-token local context and an
+8,192-token normal output cap; compaction uses at most 4,096 output tokens.
+Its signed provider-wide input/output ceiling is 1,048,576 + 393,216 =
+1,441,792 tokens per request. At the selected peak rates, with cache charged as
+an additional independent upper component, each reservation is 792,725 USD
+micros. An explicit 20,000,000-token allowance covers thirteen such token
+reservations, while USD 5 permits only six complete cost reservations. The
+broader ceiling is not the requested output cap or provider-reported usage.
+
 The installed journey composes the real natural CLI, JSONL and RPC applications
 and a util-linux PTY running the actual Ink component, through the existing held
 installation and test-owned signed fixture. It preserves all original normal

@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import { Readable, PassThrough } from 'node:stream';
 import { readFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import ts from 'typescript';
 import { decodeProviderJourneyConfiguration, readProviderJourneySecret } from './provider-journey-input.js';
@@ -91,7 +96,7 @@ test('provider and normal daily branches select matching schema3 framing while o
   const conditionalOptions = options.properties.filter((property): property is ts.SpreadAssignment =>
     ts.isSpreadAssignment(property) && property.expression.getText(file).includes('headlessSchemaVersion'));
   assert.equal(conditionalOptions.length, 1);
-  for (const [provider, daily] of [[false, false], [true, false], [false, true]] as const) {
+  for (const [provider, daily] of [[false, false], [true, false], [false, true], [true, true]] as const) {
     const values = branch(conditionalArgs[0]!.expression, provider, daily); assert(ts.isArrayLiteralExpression(values));
     const selectedArgs = values.elements.map(value => { assert(ts.isStringLiteral(value)); return value.text; });
     const selected = branch(conditionalOptions[0]!.expression, provider, daily); assert(ts.isObjectLiteralExpression(selected));
@@ -104,4 +109,37 @@ test('provider and normal daily branches select matching schema3 framing while o
       assert(ts.isNumericLiteral(value)); assert.equal(value.text, '3');
     } else assert.equal(schema, undefined);
   }
+});
+
+test('real normal provider mode shares the original fixed driver, original secret handshake and complete safe owner', async () => {
+  const driver = await readFile(new URL('../qualify-installed-provider-journey.ts', import.meta.url), 'utf8');
+  assert(driver.includes("assert(mode === '--provider-campaign' || mode === '--provider-daily-campaign'); assert(filename && config && !extra.length)"));
+  assert(driver.includes("mode === '--provider-daily-campaign' ? 'provider-daily' : 'provider'"));
+  assert.equal(driver.split('CLIQ_PROVIDER_SECRET_STDIN_READY_V1').length, 2);
+  const selection = driver.indexOf('await readProviderJourneyConfiguration(config)'), ready = driver.indexOf('CLIQ_PROVIDER_SECRET_STDIN_READY_V1');
+  const eof = driver.indexOf('await readProviderJourneySecret(process.stdin)'), run = driver.indexOf('try { await runInstalledNodeJourney(');
+  assert(selection >= 0 && ready > selection && eof > ready && run > eof);
+  assert(driver.includes('finally { secret.fill(0); }'));
+  const owner = await readFile(new URL('./installed-node-journey.ts', import.meta.url), 'utf8');
+  assert(owner.includes("const dailyJourney = journeyKind === 'daily' || journeyKind === 'provider-daily'"));
+  assert(owner.includes("assert.equal(journeyKind === 'provider' || journeyKind === 'provider-daily', options.provider !== undefined)"));
+  assert(owner.includes("providerKind: options.provider ? 'real_provider' : 'owned_https'"));
+  assert(owner.includes('budgets: options.provider?.budgets ??'));
+  assert(owner.includes('if (!options.provider) { assert.equal(postCount, 4); assert.equal(acceptedTcp, 4); assert.equal(acceptedTls, 4); }'));
+});
+
+test('the explicit real normal provider mode rejects delayed storage and mixed modes before host provisioning', async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), 'cliq-provider-options-'));
+  try {
+    const config = path.join(temporary, 'public.json'); await writeFile(config, '{}');
+    const shell = fileURLToPath(new URL('../qualify-systemd-user.sh', import.meta.url));
+    for (const mode of ['--run-provider-journey', '--run-provider-daily-journey']) {
+      const delayed = spawnSync('/bin/bash', [shell, '--delay-volume', mode, config, '/fixed-nonexistent-node'], { encoding: 'utf8', timeout: 2_000 });
+      assert.ifError(delayed.error); assert.equal(delayed.status, 2);
+      assert.equal(delayed.stderr, 'the explicit provider scope requires the original non-delayed volume\n');
+      const duplicate = spawnSync('/bin/bash', [shell, mode, config, mode, config, '/fixed-nonexistent-node'], { encoding: 'utf8', timeout: 2_000 });
+      assert.ifError(duplicate.error); assert.equal(duplicate.status, 2);
+      assert.equal(duplicate.stderr, 'campaign flags must be unique and precede the Node path\n');
+    }
+  } finally { await rm(temporary, { recursive: true, force: true }); }
 });

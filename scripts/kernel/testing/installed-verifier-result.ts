@@ -29,7 +29,7 @@ import { verifierCheckpointId, verifierResultItemId, type VerifierProgress } fro
 import { planVerifierRepair } from '../../../src/state/verifier-repair.js';
 import { assertInstalledVerifierRetirement, readInstalledVerifierInputs, type InstalledVerifierRetirementPhase, type InstalledVerifierOwnerHistoryReader } from './installed-verifier-evidence.js';
 
-type CaseKind = 'required_pass' | 'required_repair' | 'advisory_failure' | 'required_timeout';
+type CaseKind = 'required_pass' | 'required_repair' | 'required_provider' | 'advisory_failure' | 'required_timeout';
 type ProcessIdentity = { role: 'namespace_init' | 'monitor' | 'subreaper'; pid: number; startTicks: string };
 export type InstalledVerifierDiagnosticStage = InstalledVerifierRetirementPhase | 'public_cut' | 'frozen_inputs' | 'source_and_candidate' | 'candidate_producer' |
   'candidate_source' | 'verifier_request' | 'verifier_policy_and_attempt' | 'verifier_settlement' | 'verifier_receipt' |
@@ -73,7 +73,7 @@ export async function assertInstalledVerifierOutcome(input: {
   try {
     const { cut, sessionCut, caseKind } = input;
     check(input.expectedGit === undefined || input.expectedGit === true);
-    check(['required_pass', 'required_repair', 'advisory_failure', 'required_timeout'].includes(caseKind));
+    check(['required_pass', 'required_repair', 'required_provider', 'advisory_failure', 'required_timeout'].includes(caseKind));
     const run = cut.snapshot?.run as Run;
     check(cut.method === 'run.get' && cut.snapshot.schemaVersion === 1 && cut.snapshot.operation === 'agent');
     check(run && !run.parentRunId && run.cancelRequested === false && run.nextStep === null && !run.frontierRef &&
@@ -176,7 +176,8 @@ export async function assertInstalledVerifierOutcome(input: {
     same(baseEntries.entries, expectedBase);
     for (const fixed of input.expectedFiles) check((await bytes(sha256Bytes(Buffer.from(fixed.before)))).equals(Buffer.from(fixed.before)));
     const candidates = items.filter((item): item is FinalCandidateItem => item.kind === 'final_candidate').map(decodeFinalCandidateItem);
-    check(candidates.length === (caseKind === 'required_repair' ? 2 : 1));
+    if (caseKind === 'required_provider') check(candidates.length >= 1 && candidates.length <= spec.budgets.repairAttempts + 1);
+    else check(candidates.length === (caseKind === 'required_repair' ? 2 : 1));
     const progresses: VerifierProgress[] = [], seenVerifierJournal = new Set<number>(), seenVerifierItems = new Set<string>();
     const retirementIdentities: InstalledVerifierOutcome['retirementIdentities'] = [];
     let verifierAttemptCount = 0;
@@ -359,7 +360,8 @@ export async function assertInstalledVerifierOutcome(input: {
     check(journal.filter(entry => entry.opKind === 'verifier').every(entry => seenVerifierJournal.has(entry.seq)));
     check(items.filter(item => item.kind.startsWith('verifier_') || item.kind === 'policy_decision' && item.subjectKind === 'verifier_launch').every(item => seenVerifierItems.has(item.itemId)));
     const repairs = items.filter(item => item.kind === 'repair_diagnostic').map(decodeRepairDiagnosticItem);
-    check(repairs.length === (caseKind === 'required_repair' ? 1 : 0) && run.repairCount === repairs.length && run.budgetConsumed.repairAttempts === repairs.length &&
+    check(repairs.length === (caseKind === 'required_provider' ? candidates.length - 1 : caseKind === 'required_repair' ? 1 : 0) &&
+      run.repairCount === repairs.length && run.budgetConsumed.repairAttempts === repairs.length &&
       repairs.length <= spec.budgets.repairAttempts);
     for (const [index, repair] of repairs.entries()) {
       const progress = progresses[index]!, repairRow = rowFor(repair.itemId), nextCandidate = candidates[index + 1]!;
