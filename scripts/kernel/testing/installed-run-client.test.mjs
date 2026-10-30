@@ -144,27 +144,46 @@ test('an owned responder refusal retains only its original fixed source frames, 
   // Exercise the existing closed projection, not an HTTPS/Run/native proof.
   const source = readFileSync(new URL('./installed-node-journey.ts', import.meta.url), 'utf8');
   const start = source.indexOf('      const frames: Array<');
-  const end = source.indexOf('      report.error = ', start);
-  assert(start >= 0 && end > start);
-  const finish = source.indexOf('\n', end);
-  const code = ts.transpileModule(source.slice(start, finish),
+  const parsed = ts.createSourceFile('installed-node-journey.ts', source, ts.ScriptTarget.Latest, true);
+  let assignment;
+  const visit = node => {
+    if (ts.isExpressionStatement(node) && ts.isBinaryExpression(node.expression) &&
+        node.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+        node.expression.left.getText(parsed) === 'report.error') {
+      assert.equal(assignment, undefined, 'the original failure report has one fixed assignment'); assignment = node;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed);
+  assert(start >= 0 && assignment && assignment.getStart(parsed) > start);
+  const code = ts.transpileModule(source.slice(start, assignment.end),
     { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
   const secret = 'synthetic-private-request-and-error-text';
   const responder = new assert.AssertionError({ message: secret });
   responder.stack = `AssertionError: ${secret}\n at owned (installed-node-journey.ts:444:9)\n at forbidden (${secret}.ts:1:2)`;
   const primary = new assert.AssertionError({ message: 'outer refusal' });
   primary.stack = 'AssertionError: outer refusal\n at owned (installed-node-journey.ts:715:9)';
-  const context = { primary, responderErrors: [responder], report: {}, journeyKind: 'delivery', Error, AggregateError,
-    InstalledClientConsumerDeadlineError: class {}, InstalledClientDriverError: class {},
-    InstalledVerifierOutcomeError: class {}, InstalledDeliveryOutcomeError: class {} };
-  vm.runInNewContext(code, context);
-  const result = JSON.parse(JSON.stringify(context.report));
-  assert.deepEqual(result.error.sourceFrames, [
-    { file: 'installed-node-journey.ts', line: 444, column: 9 },
-    { file: 'installed-node-journey.ts', line: 715, column: 9 },
-  ]);
-  assert.deepEqual(result.error.failureKinds, [{ kind: 'assertion' }, { kind: 'assertion' }]);
-  assert.equal(JSON.stringify(result).includes(secret), false);
+  for (const [journeyKind, provider, kind] of [
+    ['verifier', false, 'installed_verifier_journey_failed'],
+    ['delivery', false, 'installed_delivery_journey_failed'],
+    ['delivery', true, 'installed_provider_journey_failed'],
+    ['daily', false, 'installed_daily_journey_failed']
+  ]) {
+    const context = { primary, responderErrors: [responder], report: {}, journeyKind, dailyJourney: journeyKind === 'daily', options: { provider }, Error, AggregateError,
+      InstalledClientConsumerDeadlineError: class {}, InstalledClientDriverError: class {},
+      InstalledVerifierOutcomeError: class {}, InstalledDeliveryOutcomeError: class {} };
+    vm.runInNewContext(code, context);
+    const result = JSON.parse(JSON.stringify(context.report));
+    assert.deepEqual(Object.keys(result.error).sort(), ['diagnosticOnly', 'failureKinds', 'kind', 'sourceFrames']);
+    assert.equal(result.error.diagnosticOnly, true);
+    assert.equal(result.error.kind, kind);
+    assert.deepEqual(result.error.sourceFrames, [
+      { file: 'installed-node-journey.ts', line: 444, column: 9 },
+      { file: 'installed-node-journey.ts', line: 715, column: 9 },
+    ]);
+    assert.deepEqual(result.error.failureKinds, [{ kind: 'assertion' }, { kind: 'assertion' }]);
+    assert.equal(JSON.stringify(result).includes(secret), false);
+  }
 });
 // Observation only: preserve and return the real Socket. This lets the parent
 // wait for an actual pre-connect kernel error before publishing the listener.

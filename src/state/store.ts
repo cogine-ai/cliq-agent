@@ -810,7 +810,9 @@ async function readCredentialSecret(): Promise<Buffer> {
 }
 /** Complete fixed installed business action. Input and phase writers are owned
  * here, not exposed as injectable callbacks/factories or public phase methods. */
-export async function writeCredentialAuthority(selected: HeldInstalledRuntime, request: CredentialWriteRequest): Promise<CredentialAuthorityOperationV1> {
+export async function writeCredentialAuthority(selected: HeldInstalledRuntime, request: CredentialWriteRequest,
+  input: 'stdin' | 'terminal' = 'stdin'): Promise<CredentialAuthorityOperationV1> {
+  if (input !== 'stdin' && input !== 'terminal') throw new KernelStorageError('INVALID_REQUEST', 'credential input source is unsupported');
   noteInstalledCredentialPhase('history');
   const initial = await withCredentialAuthorityLock(selected, async token => {
     const held = checkedCredentialToken(token); request = decodeCredentialWriteRequest(request);
@@ -836,7 +838,8 @@ export async function writeCredentialAuthority(selected: HeldInstalledRuntime, r
   let secret: Buffer | undefined;
   try {
     noteInstalledCredentialPhase('secret_input');
-    secret = await readCredentialSecret();
+    secret = input === 'stdin' ? await readCredentialSecret()
+      : await (await import('./credential-terminal-input.js')).readTerminalCredentialSecret();
     // Input waited without credential locks. Freshly authenticate the same
     // current owner before preparation instead of reusing old readiness.
     noteInstalledCredentialPhase('second_supervisor');

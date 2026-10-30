@@ -37,6 +37,7 @@ case ${1:-} in
     probe_campaign_kind=run-journey; probe_run_driver_mode=--runtime-upgrade-campaign; probe_upgrade_source=$2; shift 2 ;;
   --run-final-source-limits-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--final-source-limits-campaign; shift ;;
   --run-verifier-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--verifier-campaign; shift ;;
+  --run-daily-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--daily-campaign; shift ;;
   --run-provider-journey)
     [[ $# -ge 2 && "$2" = /* && -f "$2" && ! -L "$2" ]] || {
       printf 'provider qualification requires its root-owned non-secret configuration\n' >&2; exit 2;
@@ -82,6 +83,9 @@ done
 [[ "$probe_run_driver_mode" != --provider-campaign || "$probe_volume_mode" = loop ]] || {
   printf 'the explicit provider scope requires the original non-delayed volume\n' >&2; exit 2;
 }
+[[ "$probe_run_driver_mode" != --daily-campaign || "$probe_volume_mode" = loop ]] || {
+  printf 'the normal daily scope requires the original non-delayed volume\n' >&2; exit 2;
+}
 [[ "$probe_run_driver_mode" != --delivery-delay-campaign || "$probe_volume_mode" = delay-50ms ]] || {
   printf 'the fixed delayed Delivery campaign requires its owned delayed volume\n' >&2; exit 2;
 }
@@ -92,7 +96,7 @@ done
   printf 'the fixed publication-late campaign requires its owned delayed volume\n' >&2; exit 2;
 }
 if [[ $(id -u) != 0 || $# -lt 1 || $# -gt 2 ]]; then
-  printf 'usage: sudo bash %s [--delay-volume] [--installed|--installed-retirement-refusal|--secrets|--credentials|--credentials-model-input|--credential-finalizer-shutdown|--runtime-upgrade-journey ORIGINAL_SOURCE_ROOT|--run-journey|--run-final-source-limits-journey|--run-verifier-journey|--run-provider-journey PUBLIC_CONFIG|--run-delivery-journey|--run-delivery-delay-journey|--run-delivery-stop-journey|--run-delivery-late-journey|--run-failure-journey|--run-retry-journey|--run-authority-failure-journey|--run-storage-failure-journey|--run-request-resource-journey|--run-shutdown-admission-journey|--run-shutdown-session-journey|--run-shutdown-preparation-journey|--run-shutdown-received-tool-journey|--run-shutdown-pending-model-journey|--run-shutdown-startup-journey] ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' "$0" >&2
+  printf 'usage: sudo bash %s [--delay-volume] [--installed|--installed-retirement-refusal|--secrets|--credentials|--credentials-model-input|--credential-finalizer-shutdown|--runtime-upgrade-journey ORIGINAL_SOURCE_ROOT|--run-journey|--run-final-source-limits-journey|--run-verifier-journey|--run-daily-journey|--run-provider-journey PUBLIC_CONFIG|--run-delivery-journey|--run-delivery-delay-journey|--run-delivery-stop-journey|--run-delivery-late-journey|--run-failure-journey|--run-retry-journey|--run-authority-failure-journey|--run-storage-failure-journey|--run-request-resource-journey|--run-shutdown-admission-journey|--run-shutdown-session-journey|--run-shutdown-preparation-journey|--run-shutdown-received-tool-journey|--run-shutdown-pending-model-journey|--run-shutdown-startup-journey] ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' "$0" >&2
   printf 'verifier source option: --run-verifier-journey --locked-node OFFICIAL_NPM_ARCHIVE ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' >&2
   exit 2
 fi
@@ -132,6 +136,8 @@ elif [[ "$probe_run_driver_mode" = --verifier-campaign ]]; then
   readonly probe_run_driver="$probe_source_dir/qualify-installed-verifier-journey.ts"
 elif [[ "$probe_run_driver_mode" = --provider-campaign ]]; then
   readonly probe_run_driver="$probe_source_dir/qualify-installed-provider-journey.ts"
+elif [[ "$probe_run_driver_mode" = --daily-campaign ]]; then
+  readonly probe_run_driver="$probe_source_dir/qualify-installed-daily-journey.ts"
 elif [[ "$probe_run_driver_mode" = --delivery-campaign || "$probe_run_driver_mode" = --delivery-delay-campaign || "$probe_run_driver_mode" = --delivery-late-campaign || "$probe_run_driver_mode" = --delivery-stop-campaign ]]; then
   readonly probe_run_driver="$probe_source_dir/qualify-installed-delivery-journey.ts"
 else

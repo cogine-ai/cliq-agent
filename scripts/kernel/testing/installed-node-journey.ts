@@ -31,7 +31,9 @@ import { decodeRunResult, decodeWorkspaceDiff } from '../../../src/state/result-
 import { buildInstalledProviderQualificationPackage, buildInstalledSupervisorPackage } from './installed-supervisor-package.js';
 import type { InstalledModelPackageFixture } from './installed-model-package.js';
 import { providerModelDefinition, type InstalledProviderModelDefinition } from '../installed-provider-model.js';
-import { PROVIDER_JOURNEY_FILES, runInstalledProviderJourney } from './installed-provider-journey.js';
+import { PROVIDER_JOURNEY_FILES, runInstalledProviderJourney, runInstalledDailyProviderJourney } from './installed-provider-journey.js';
+import { runInstalledDailyCommand } from './installed-daily-command.js';
+import { installedServiceProfiles } from '../../../src/state/installed-services.js';
 import { decodeInstalledInstallerDiagnostics, encodeInstalledInstallerDiagnostic } from './installed-install-diagnostics.js';
 import { CredentialSecretScanError, createCredentialSecretScanner, copyCredentialSecretScanFailureDiagnostic,
   type CredentialSecretScanCode, type CredentialSecretScanFailureDiagnostic, type CredentialSecretScanFailureStage } from './credential-secret-scan.js';
@@ -188,11 +190,13 @@ export type InstalledProviderNodeJourneyInput = Readonly<{
   definition: InstalledProviderModelDefinition; budgets: RunSpec['budgets']; secret: Buffer;
 }>;
 
-export async function runInstalledNodeJourney(filename: string, journeyKind: 'verifier' | 'delivery' | 'provider',
+export async function runInstalledNodeJourney(filename: string, journeyKind: 'verifier' | 'delivery' | 'provider' | 'daily',
   options: Readonly<{ publicationRetirementDiagnostics?: true; publicationRetirementStop?: true; publicationRetirementLate?: true;
     npmDependencyArchive?: Buffer; provider?: InstalledProviderNodeJourneyInput }> = {}): Promise<void> {
   assert.equal(process.platform, 'linux'); assert.equal(process.arch, 'x64');
-  assert(journeyKind === 'verifier' || journeyKind === 'delivery' || journeyKind === 'provider');
+  assert(journeyKind === 'verifier' || journeyKind === 'delivery' || journeyKind === 'provider' || journeyKind === 'daily');
+  const dailyJourney = journeyKind === 'daily';
+  if (dailyJourney) assert.deepEqual(Object.keys(options), [], 'normal daily qualification has no alternate authority or scenario options');
   assert.deepEqual(Object.keys(options).sort(), [
     ...(options.publicationRetirementDiagnostics === true ? ['publicationRetirementDiagnostics'] : []),
     ...(options.publicationRetirementStop === true ? ['publicationRetirementStop'] : []),
@@ -249,6 +253,13 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       officialReleaseQualified: false, ownedHttpsFixtureCreated: false, httpsOwner: 'installed_native_broker',
       providerModel: options.provider.definition.model });
   }
+  if (dailyJourney) {
+    delete report.ordinaryGitFixtureProfile;
+    Object.assign(report, { format: 'cliq-installed-daily-journey-v1', profile: 'owned_https_daily_required_repair_review_apply_v1',
+      scope: 'actual normal signed Linux setup, model alias enrollment, required Node assertion repair, complete result review and exact Delivery; owned HTTPS only, not paid provider, billing, release, macOS, reboot or complete I1/I2',
+      officialReleaseQualified: false, ownedHttpsFixtureCreated: true, actualProviderQualified: false, actualProviderBillingQualified: false,
+      normalCliCommands: [] });
+  }
   const secret = options.provider ? Buffer.from(options.provider.secret) : Buffer.from(randomBytes(32).toString('hex'));
   const password = Buffer.from(randomBytes(32).toString('hex'));
   let scanStage: CredentialSecretScanFailureStage = 'runtime', firstFailureStage: CredentialSecretScanFailureStage | null = null;
@@ -258,7 +269,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     firstFailureStage ??= scanStage;
   });
   const scanBytes = (bytes: Uint8Array) => { const stream = scanner.openStream(); try { stream.scan(bytes); } finally { stream.close(); } };
-  const mark = (phase: string) => { report.phase = phase; console.log((options.provider ? 'Installed provider journey phase ' : 'Installed verifier journey phase ') + phase); };
+  const mark = (phase: string) => { report.phase = phase; console.log((dailyJourney ? 'Installed daily journey phase ' : options.provider ? 'Installed provider journey phase ' : 'Installed verifier journey phase ') + phase); };
   const prefix = ['--user', ledger.username, '--', '/usr/bin/env', '-i', 'HOME=' + ledger.home, 'PATH=/usr/bin:/bin', 'LANG=C', 'LC_ALL=C',
     'XDG_RUNTIME_DIR=/run/user/' + ledger.uid, 'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/' + ledger.uid + '/bus'];
   const command = (executable: string, args: string[], input?: Buffer, timeout = 30000) => {
@@ -286,6 +297,16 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
   };
   const credential = (metadata: Record<string, unknown>, input?: Buffer) => command(path.join(recipe.stateRoot, 'runtime/bootstrap'),
     ['--bootstrap-credential', canonicalJsonBytes(metadata).toString('base64url')], input, 60000);
+  const dailyAlias = 'owned-daily';
+  const dailyCommand = async (argv: readonly string[], timeout = 30_000, input?: Buffer) => {
+    assert(dailyJourney && [30_000, 60_000, 90_000].includes(timeout));
+    const result = await runInstalledDailyCommand({ executable: '/usr/sbin/runuser',
+      args: [...prefix, path.join(recipe.packageRoot, 'supervisor'), ...argv], env: environment, cwd: ledger.home,
+      ...(input === undefined ? {} : { input }), deadlineMs: timeout, scanner });
+    report.normalCliCommands.push({ command: argv[0], elapsedMs: result.elapsedMs, processAndPipesJoined: true,
+      completeInputWriteJoined: true, stdoutBytes: result.stdout.length, stderrBytes: result.stderr.length });
+    return { stdout: result.stdout };
+  };
   let requestOrdinal = 0;
   const nextId = () => '019a0013-0000-7000-8000-' + String(++requestOrdinal).padStart(12, '0');
   const request = <T extends Record<string, unknown>>(core: T): T & { requestDigest: string } => ({ ...core, requestDigest: canonicalSha256(core) });
@@ -303,8 +324,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
   const persistentClient = async () => {
     const client = await openInstalledClientConsumer({ executable: '/usr/sbin/runuser',
       args: [...prefix, process.execPath, '--disable-warning=ExperimentalWarning', installedClientDriver, filename,
-        ...(options.provider ? ['--schema3'] : [])], cwd: ledger.home, env: environment,
-      ...(options.provider ? { headlessSchemaVersion: 3 as const } : {}),
+        ...(options.provider || dailyJourney ? ['--schema3'] : [])], cwd: ledger.home, env: environment,
+      ...(options.provider || dailyJourney ? { headlessSchemaVersion: 3 as const } : {}),
       openScan: () => scanner.openStream(), onJoined: () => { report.originalPublicClientJoined = true; } });
     assert(Array.isArray(client.hello.enabledFeatureIds) && client.hello.enabledFeatureIds.includes('artifact.get'));
     return client;
@@ -628,6 +649,26 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         const body = parseJsonStrict(bytes.toString('utf8')) as Record<string, any>;
         assert.equal(body.model, model); assert.equal(body.stream, false); assert.equal(body.max_tokens, 4096);
         assert(expectedToolNames, 'the exact signed tool manifest must precede any provider request');
+        if (dailyJourney) {
+          assert.deepEqual(body.tools.map((entry: any) => entry.function.name), expectedToolNames);
+          const ordinal = ++postCount; assert(ordinal <= 4, 'normal daily workflow must not resend a completed or unknown model claim');
+          const bad = 'export function add(a, b) {\n  return a + b + 1;\n}\n', fixed = 'export function add(a, b) {\n  return a + b;\n}\n';
+          if (ordinal > 1) assert.equal(body.messages.filter((entry: any) => entry.role === 'tool' &&
+            entry.tool_call_id === 'owned-daily-edit-' + (ordinal === 4 ? 3 : 1)).length, 1);
+          if (ordinal === 3) assert(body.messages.some((entry: any) => typeof entry.content === 'string' &&
+            entry.content.includes('Verifier "node-tests" failed an assertion (exit 1). Revise the candidate and try again.')),
+          'normal daily repair must consume its real bounded assertion diagnostic');
+          const edit = ordinal === 1 || ordinal === 3;
+          const response = Buffer.from(JSON.stringify({ id: 'owned-daily-' + ordinal, object: 'chat.completion', model,
+            choices: [{ index: 0, finish_reason: edit ? 'tool_calls' : 'stop', message: edit ? { role: 'assistant', content: '',
+              tool_calls: [{ id: 'owned-daily-edit-' + ordinal, type: 'function', function: { name: 'edit', arguments: JSON.stringify({
+                path: 'math.mjs', old_text: ordinal === 1 ? PROVIDER_JOURNEY_FILES['math.mjs'] : bad, new_text: ordinal === 1 ? bad : fixed }) } }] }
+              : { role: 'assistant', content: 'The private math fix is ready for its required Node tests.' } }],
+            usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 } }));
+          scanBytes(response);
+          outgoing.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': String(response.length), Connection: 'close' }); outgoing.end(response);
+          report.transport = { postCount, acceptedTcp, acceptedTls, tls13: true, exactCredentialMatched: true }; return;
+        }
         const dependencyPayload = await dependencyResponder.respond(body);
         if (dependencyPayload) {
           assert(options.npmDependencyArchive && dependencyArchive);
@@ -758,7 +799,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     const buildOptions = { guestToolchain: 'node-test-v1' as const, publicationRetirementDiagnostics: options.publicationRetirementDiagnostics,
       serverAuthenticationDiagnostics: options.publicationRetirementDiagnostics,
       ...(storeFailureDiagnostics ? { storeFailureDiagnostics: true as const } : {}),
-      resourceDiagnostics: true,
+      resourceDiagnostics: true as const,
+      ...(dailyJourney ? { headlessSchemaVersion: 3 as const } : {}),
       ...(journeyKind === 'verifier' ? { bundledSkills: installedBundledSkill() } : {}),
       ...(options.npmDependencyArchive ? { npmDependencyArchive: options.npmDependencyArchive } : {}),
       ...(journeyKind === 'verifier' ? { guestImageProfile: 'qualification_max' as const } : {}) };
@@ -776,9 +818,10 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     await writeFile(recipe.releaseKeysFile, canonicalJsonBytes(signed.releaseKeys), { flag: 'wx', mode: 0o444 });
     await transferPackage(recipe.packageRoot, ledger.uid, ledger.gid);
     const cliqHome = path.join(ledger.home, '.cliq'); await mkdir(cliqHome, { mode: 0o700 }); await chown(cliqHome, ledger.uid, ledger.gid);
-    const installation = command(process.execPath, [recipe.installerEntry, recipe.packageRoot, recipe.stateRoot, recipe.releaseKeysFile]);
-    assert.equal(installation.status, 0);
-    const bundleDigest = (parseJsonStrict(installation.stdout.trim()) as { bundleDigest: string }).bundleDigest;
+    const installation = dailyJourney ? undefined : command(process.execPath, [recipe.installerEntry, recipe.packageRoot, recipe.stateRoot, recipe.releaseKeysFile]);
+    if (dailyJourney) await dailyCommand(['setup']);
+    else assert.equal(installation!.status, 0);
+    const bundleDigest = dailyJourney ? canonicalSha256(signed.bundle) : (parseJsonStrict(installation!.stdout.trim()) as { bundleDigest: string }).bundleDigest;
     assert.equal(bundleDigest, canonicalSha256(signed.bundle));
     assert.equal(signed.bundle.schemaVersion, 2); assert.equal(signed.bundle.installedLayout, 'single_cas_streams_v1');
     const imageRef = signed.guestToolchain.manifest.guestImageRef;
@@ -826,15 +869,22 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     assert.equal(await readlink('/proc/' + daemonPid + '/exe'), '/usr/bin/gnome-keyring-daemon');
     const daemonImage = await stat('/proc/' + daemonPid + '/exe', { bigint: true }), namedDaemon = await lstat('/usr/bin/gnome-keyring-daemon', { bigint: true });
     for (const field of imageFields) assert.equal(daemonImage[field], namedDaemon[field]);
+    if (!dailyJourney) {
     const setup = credential({ schemaVersion: 1, kind: 'install_services' }); assert.equal(setup.status, 0);
     const installed = parseJsonStrict(setup.stdout.trim()) as { schemaVersion: 1; supervisorUnit: string; keeperUnit: string };
     assert.deepEqual(Object.keys(installed).sort(), ['schemaVersion', 'supervisorUnit', 'keeperUnit'].sort()); assert.equal(installed.schemaVersion, 1);
     for (const unit of [installed.supervisorUnit, installed.keeperUnit]) assert.match(unit, /^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,240}\.service$/u);
     services = installed;
+    }
     const root = await lstat(recipe.stateRoot, { bigint: true });
     const rootDigest = canonicalSha256({ schemaVersion: 1, format: 'cliq-state-root-identity-v1', platform: 'linux',
       canonicalAbsolutePath: recipe.stateRoot, ownerUid: ledger.uid, deviceId: root.dev.toString(), directoryFileId: root.ino.toString(),
       mode: 448, openedNoFollow: true, layoutVersion: 1 });
+    if (dailyJourney) {
+      const profiles = installedServiceProfiles(recipe.stateRoot, rootDigest);
+      services = { keeperUnit: profiles.keeper.unit, supervisorUnit: profiles.supervisor.unit };
+    }
+    assert(services);
     const principal = identityHash('cliq-local-principal-v1', rootDigest, 'linux', ledger.uid);
     const registration: EndpointRegistrationV1 = { schemaVersion: 1, format: 'cliq-endpoint-registration-v1',
       endpointRegistrationId: options.provider ? 'installed-provider-endpoint' : 'installed-verifier-endpoint', registrationKind: 'user', ownerPrincipalId: principal,
@@ -842,9 +892,11 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     registration.registrationDigest = digestOmitting(registration, 'registrationDigest');
     const registerCore = { schemaVersion: 1, kind: 'register', ownerPrincipalId: principal, registration,
       expectedRegistrationArtifactRef: canonicalSha256(registration), commandDigest: '' };
+    if (!dailyJourney) {
     const registered = command(path.join(recipe.stateRoot, 'runtime/bootstrap'), ['--bootstrap-endpoint'], canonicalJsonBytes({
       schemaVersion: 1, kind: 'commit', requestId: nextId(), commandCore: { ...registerCore, commandDigest: digestOmitting(registerCore, 'commandDigest') } }));
     assert.equal(decodeEndpointAuthorityOperation(success(registered, 'operation')).disposition, 'registered');
+    }
     const registryEndpointId = 'installed-public-dependency-registry';
     if (registryOrigin) {
       const target = { scheme: 'https' as const, hostAscii: '127.0.0.1', port: Number(new URL(registryOrigin).port), basePath: '/', redirectPolicy: 'reject_all' as const };
@@ -876,7 +928,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
           'stop', 'stop-sigterm', 'stop-sigkill', 'stop-post', 'final-sigterm', 'final-sigkill'].includes(value.SubState!) ? value.SubState : 'other';
         return { activeState, subState };
       };
-      try { return { keeper: summary(installed.keeperUnit), supervisor: summary(installed.supervisorUnit) }; }
+      try { return { keeper: summary(services!.keeperUnit), supervisor: summary(services!.supervisorUnit) }; }
       catch { return { kind: 'unavailable' }; }
       finally {
         // Diagnostic-only probes do not replace the main command's original
@@ -889,6 +941,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     // manager cuts lie outside the original 60s enroll lifetime, not inside a
     // timer callback that could prevent it from firing on time.
     report.enrollUnitStates = { before: summarizeUnits(), liveObserved: false, afterJoin: { kind: 'unavailable' } };
+    if (dailyJourney) await dailyCommand(['models', 'add', dailyAlias, '--api-key-stdin'], 60_000, secret);
+    else {
     let enrollmentResult: Awaited<ReturnType<typeof runOwnedEnrollDiagnostic>>;
     const enrollmentStarted = performance.now();
     try {
@@ -920,6 +974,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     assert.equal(enrollmentResult.error, undefined, 'actual fixture command must join'); assert.equal(enrollmentResult.signal, null);
     const enrolled = decodeCredentialAuthorityOperation(success(enrollmentResult, 'operation'));
     assert.equal(enrolled.phase, 'committed'); assert.equal(enrolled.ownerPrincipalId, principal); assert.equal(enrolled.attempt, 1);
+    }
     const enrolledPlatform = observeSecretService(); assert.equal(enrolledPlatform.items.length, 1);
     assert.equal(enrolledPlatform.servicePid, platform.servicePid); assert.equal(enrolledPlatform.nameOwner, platform.nameOwner);
     const keeperBefore = show(services.keeperUnit), supervisorBefore = show(services.supervisorUnit);
@@ -1002,19 +1057,21 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     }
     report.cases = [];
     await mkdir(recipe.workspace, { mode: 0o700 }); await chown(recipe.workspace, ledger.uid, ledger.gid);
-    if (options.provider) {
-      const workspace = path.join(recipe.workspace, 'provider');
+    if (options.provider || dailyJourney) {
+      const workspace = path.join(recipe.workspace, dailyJourney ? 'daily' : 'provider');
       await mkdir(workspace, { mode: 0o700 }); await chown(workspace, ledger.uid, ledger.gid);
       for (const [name, bytes] of Object.entries(PROVIDER_JOURNEY_FILES)) {
         const filename = path.join(workspace, name);
         await writeFile(filename, bytes, { flag: 'wx', mode: 0o644 }); await chown(filename, ledger.uid, ledger.gid);
       }
+      if (!dailyJourney) {
       const workspaceId = sha256Bytes(Buffer.from(workspace)), directory = path.join(cliqHome, 'workspaces', workspaceId);
       await mkdir(directory, { recursive: true, mode: 0o700 });
       for (const filename of [path.dirname(directory), directory]) await chown(filename, ledger.uid, ledger.gid);
       const trust = path.join(directory, 'trust.json');
       await writeFile(trust, canonicalJsonBytes({ version: 1, workspaceId, workspaceRealPath: workspace,
         decision: 'trusted', decidedAt: new Date().toISOString() }), { flag: 'wx', mode: 0o600 }); await chown(trust, ledger.uid, ledger.gid);
+      }
       const observeFile = async (name: 'math.mjs' | 'check.test.mjs') => {
         const filename = path.join(workspace, name), held = await open(filename, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
         try {
@@ -1025,26 +1082,46 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
           assert.equal(BigInt(bytes.length), before.size); scanBytes(bytes); return bytes;
         } finally { await held.close(); }
       };
-      report.providerWorkflow = await runInstalledProviderJourney({ workspacePath: workspace,
-        model: { provider: 'openai-compatible', model: options.provider.definition.model,
-          endpoint: { kind: 'registered', endpointRegistrationId: registration.endpointRegistrationId }, modelCredentialGrantIds: [credentialId] },
-        budgets: options.provider.budgets, guestToolchainManifestId: signed.guestToolchain.manifestId,
-        endpointIdentityDigest: signed.modelAuthority.endpoint.endpointIdentityDigest }, {
-        send: async (body, timeout) => { assert(client); return client.send(body, timeout); },
-        artifact: async (ref, options) => {
+      const workflowContext = {
+        send: async (body: import('../../../src/control/v1.js').InstalledControlRequestV1, timeout: number) => { assert(client); return client.send(body, timeout); },
+        artifact: async (ref: string, options: { maxBytes: number; signal?: AbortSignal }) => {
           options.signal?.throwIfAborted(); const bytes = await readPublicArtifact(ref);
           options.signal?.throwIfAborted(); assert(bytes.length <= options.maxBytes); return bytes;
         },
         reconnect: async () => { assert(client); await client.close(); client = undefined; client = await persistentClient(); },
         observeWorkspace: async () => ({ paths: await readdir(workspace), math: await observeFile('math.mjs'), test: await observeFile('check.test.mjs') }),
-        review: detail => {
+        review: (detail: import('../../../src/client/details.js').ClientDetail) => {
           scanBytes(Buffer.from(detail.text)); report.reviewedResultRef = detail.artifactRef;
-          // Preserve the actual production review as scanned data. Its refs
-          // alone cannot let the owner inspect the model's code after cleanup.
           report.reviewedResultText = detail.text;
-        },
-        mark,
-      });
+        }, mark,
+      };
+      if (dailyJourney) {
+        const fixed = 'export function add(a, b) {\n  return a + b;\n}\n';
+        report.providerWorkflow = await runInstalledDailyProviderJourney({ workspacePath: workspace,
+          model: { provider: 'openai-compatible', model }, modelAlias: dailyAlias,
+          budgets: { wallTimeMs: 300_000, modelTokens: 20_000_000, costMicros: 5_000_000, toolCalls: 16, repairAttempts: 1, childDepth: 0, childConcurrency: 1 },
+          endpointIdentityDigest: signed.modelAuthority.endpoint.endpointIdentityDigest }, { ...workflowContext,
+          command: dailyCommand,
+          verifySource: async (cut, sessionCut) => {
+            const proof = await assertInstalledVerifierOutcome({ cut, sessionCut, readCas, caseKind: 'required_repair', principalId: principal,
+              expectedFiles: [{ path: 'check.test.mjs', before: PROVIDER_JOURNEY_FILES['check.test.mjs'], after: PROVIDER_JOURNEY_FILES['check.test.mjs'] },
+                { path: 'math.mjs', before: PROVIDER_JOURNEY_FILES['math.mjs'], after: fixed }],
+              readOwnerHistory: async (observe?: (stage: InstalledOwnerHistoryReadStage) => void) => inspectInstalledOwnerHistory(recipe.stateRoot, observe).owners });
+            assert.equal(proof.retirementIdentities.length, 2);
+            for (const retirement of proof.retirementIdentities) await assertVerifierProcessesAbsent(retirement);
+            return proof;
+          } });
+        assert.equal(postCount, 4); assert.equal(acceptedTcp, 4); assert.equal(acceptedTls, 4);
+        assert.deepEqual(report.normalCliCommands.map((value: { command: string }) => value.command), ['setup', 'models', 'run', 'result', 'apply']);
+        assert(!responderFailure); report.normalCliWorkflowComplete = true;
+      } else {
+      assert(options.provider);
+      report.providerWorkflow = await runInstalledProviderJourney({ workspacePath: workspace,
+        model: { provider: 'openai-compatible', model: options.provider.definition.model,
+          endpoint: { kind: 'registered', endpointRegistrationId: registration.endpointRegistrationId }, modelCredentialGrantIds: [credentialId] },
+        budgets: options.provider.budgets, guestToolchainManifestId: signed.guestToolchain.manifestId,
+        endpointIdentityDigest: signed.modelAuthority.endpoint.endpointIdentityDigest }, workflowContext);
+      }
       report.protocolWorkflowComplete = true;
     } else {
     const createSource = async (sourceKind: SourceCaseKind) => {
@@ -2365,7 +2442,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         }
         if (error instanceof AggregateError) errors.unshift(...error.errors.slice(0, 4));
       }
-      report.error = { diagnosticOnly: true, kind: options.provider ? 'installed_provider_journey_failed'
+      report.error = { diagnosticOnly: true, kind: dailyJourney ? 'installed_daily_journey_failed' : options.provider ? 'installed_provider_journey_failed'
         : journeyKind === 'verifier' ? 'installed_verifier_journey_failed' : 'installed_delivery_journey_failed', sourceFrames: frames, failureKinds };
     }
     let publication: Buffer;
@@ -2386,7 +2463,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     secret.fill(0); password.fill(0);
     try { await writeFile(recipe.reportFile, publication, { flag: 'wx', mode: 0o644 }); } finally { publication.fill(0); }
   }
-  if (primary) throw new Error(options.provider ? 'actual installed provider journey failed; inspect the closed diagnostic report'
+  if (primary) throw new Error(dailyJourney ? 'actual normal installed daily journey failed; inspect the closed diagnostic report' : options.provider ? 'actual installed provider journey failed; inspect the closed diagnostic report'
     : journeyKind === 'verifier' ? 'actual installed verifier journey failed; inspect the closed diagnostic report'
     : 'actual installed Delivery journey failed; inspect the closed diagnostic report');
 }

@@ -13,6 +13,8 @@ const parsed = ts.parseJsonConfigFileContent(config.config, ts.sys, root);
 if (parsed.errors.length) throw new Error('invalid public declaration build configuration');
 const program = ts.createProgram(parsed.fileNames, parsed.options);
 const queue = ['src/sdk/index.ts', 'src/control/v1.ts'], seen = new Set();
+const privateClientModules = new Set(['application', 'daily', 'installed-data', 'installed-host', 'model-settings',
+  'pending-requests', 'preferences', 'private-files', 'stdio'].map(name => `src/client/${name}.ts`));
 const outputs = new Map();
 while (queue.length) {
   const relative = queue.shift(); if (seen.has(relative)) continue; seen.add(relative);
@@ -44,6 +46,8 @@ while (queue.length) {
       // implementation into stable package surface.
       if (target.startsWith('src/state/') || target.startsWith('src/sandbox/') || target.startsWith('src/runtime/'))
         throw new Error(`public declaration leaked a private authority implementation: ${relative} -> ${target}`);
+      if (privateClientModules.has(target))
+        throw new Error(`public declaration leaked a private client implementation: ${relative} -> ${target}`);
       queue.push(target);
     }
     ts.forEachChild(node, visit);

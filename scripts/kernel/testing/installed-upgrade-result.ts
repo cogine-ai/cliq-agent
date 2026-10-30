@@ -4,6 +4,33 @@ import assert from 'node:assert/strict';
 import { types } from 'node:util';
 import { LEGACY_UPGRADE_SOURCE } from './legacy-upgrade-source-data.js';
 import { copyCredentialSecretScanFailureDiagnostic } from './credential-secret-scan.js';
+import { parseJsonStrict } from '../../../src/kernel/json.js';
+
+export const INSTALLED_UPGRADE_CREDENTIAL_ACTIONS = ['install_services', 'enroll', 'read', 'revoke'] as const;
+const credentialFailureCodes = ['ADMISSION_KEY_CONFLICT', 'REQUEST_ID_CONFLICT', 'ARTIFACT_MISMATCH', 'AGENT_HANDOFF_PENDING',
+  'MODEL_RETRY_PENDING', 'BUDGET_EXHAUSTED', 'EVENT_CURSOR_EXPIRED', 'INVALID_REQUEST', 'LEASE_FENCED', 'NOT_FOUND',
+  'RECOVERY_REQUIRED', 'REVISION_CONFLICT', 'STATE_TRANSITION_INVALID', 'UNSUPPORTED_PLATFORM'] as const;
+
+/** Read only the fixed startup failure code from already-scanned child stderr.
+ * No error message, stack, path, credential or arbitrary native code survives. */
+export function readInstalledUpgradeCredentialFailure(bytes: Buffer,
+  action: typeof INSTALLED_UPGRADE_CREDENTIAL_ACTIONS[number], status: number) {
+  assert(INSTALLED_UPGRADE_CREDENTIAL_ACTIONS.includes(action)); assert(Number.isSafeInteger(status) && status > 0 && status <= 255);
+  let code: typeof credentialFailureCodes[number] | null = null;
+  try {
+    assert(Buffer.isBuffer(bytes) && !types.isProxy(bytes) && bytes.length <= 65536);
+    const lines = new TextDecoder('utf-8', { fatal: true }).decode(bytes).split('\n'); assert(lines.length <= 128);
+    let seen = false;
+    for (const line of lines) {
+      if (!line.startsWith('{')) continue;
+      const row = parseJsonStrict(line) as Record<string, unknown>;
+      if (!row || typeof row !== 'object' || Array.isArray(row) || row.diagnosticOnly !== true || row.scope !== 'installed-read-startup') continue;
+      assert(!seen && Object.keys(row).every(key => ['diagnosticOnly', 'scope', 'code', 'message', 'path'].includes(key))); seen = true;
+      code = credentialFailureCodes.find(value => value === row.code) ?? null;
+    }
+  } catch { code = null; }
+  return Object.freeze({ diagnosticOnly: true as const, kind: 'credential_command_failed' as const, action, status, code });
+}
 
 export const INSTALLED_UPGRADE_PROFILE = 'actual_2513_schema7_to_signed8_edit_run_v1';
 export const INSTALLED_UPGRADE_PHASES = ['source_and_packages', 'actual_schema7_installation', 'schema7_public_authorization_and_run',
@@ -36,7 +63,7 @@ export function decodeInstalledUpgradeReport(value: unknown): Readonly<Record<st
   const row = object(value, ['diagnosticOnly', 'qualified', 'schemaVersion', 'format', 'fixtureProfile', 'phase', 'secretOutputScan'],
     ['scope', 'cases', 'officialReleaseQualified', 'wholeI4Qualified', 'legacy43ErrorReceipt', 'originalSource', 'packages',
       'oldCredentialNewRuntimeRefusal', 'upgrade', 'servicesStoppedAndJoined', 'secretServiceJoined', 'httpsJoined', 'transport', 'secretCorpus', 'error',
-      'secretScanFailure', 'secretCorpusScanProgress']);
+      'secretScanFailure', 'secretCorpusScanProgress', 'credentialCommandFailure']);
   assert.equal(row.diagnosticOnly, true); assert.equal(row.schemaVersion, 1); assert.equal(typeof row.qualified, 'boolean');
   assert.equal(row.format, 'cliq-installed-runtime-upgrade-qualification-v1'); assert.equal(row.fixtureProfile, INSTALLED_UPGRADE_PROFILE);
   assert(INSTALLED_UPGRADE_PHASES.includes(row.phase));
@@ -44,6 +71,13 @@ export function decodeInstalledUpgradeReport(value: unknown): Readonly<Record<st
   if (row.officialReleaseQualified !== undefined) assert.equal(row.officialReleaseQualified, false);
   if (row.wholeI4Qualified !== undefined) assert.equal(row.wholeI4Qualified, false);
   if (row.legacy43ErrorReceipt !== undefined) assert.equal(object(row.legacy43ErrorReceipt, ['kind']).kind, 'not_exercised');
+  if (row.credentialCommandFailure !== undefined) {
+    const failure = object(row.credentialCommandFailure, ['diagnosticOnly', 'kind', 'action', 'status', 'code']);
+    assert.equal(failure.diagnosticOnly, true); assert.equal(failure.kind, 'credential_command_failed');
+    assert(INSTALLED_UPGRADE_CREDENTIAL_ACTIONS.includes(failure.action));
+    assert(natural(failure.status, 255) > 0); assert(failure.code === null || credentialFailureCodes.includes(failure.code));
+    assert.equal(row.qualified, false);
+  }
   if (row.originalSource !== undefined) {
     const source = object(row.originalSource, Object.keys(LEGACY_UPGRADE_SOURCE));
     for (const [key, expected] of Object.entries(LEGACY_UPGRADE_SOURCE)) assert.equal(source[key], expected);

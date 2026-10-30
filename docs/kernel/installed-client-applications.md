@@ -29,18 +29,89 @@ Handoff remains the deterministic server JSON/Markdown artifact query.
 A new user mutation receives one UUIDv7 identity and one canonical digest.
 A failed transport preserves those identities for inspection and explicit replay.
 An explicit reconnect authenticates a new connection and sends no mutation.
-The application retains one bounded original unresolved request in memory.
-In Ink, `:reconnect` followed by an explicit `:replay` sends that same closed
+The installed composition also persists the exact bounded canonical request
+before its first wire send. The private files bind the actual StateRoot directory
+identity and canonical locator; a bundle digest is a provenance hint, not a second
+authority or an upgrade prohibition. A strict authenticated response is durably
+recorded before the request becomes known. These records survive client exit and
+lost output and are shared by CLI, Ink, JSONL, RPC and the installed SDK. They
+contain no credential bytes and never stand in for a fresh authenticated peer.
+
+In Ink, `:reconnect` followed by an explicit `:replay` sends the same closed
 request, including its original digest and admission identity. Read-only
-inspection remains available, while a different new mutation waits for the
-original response. Closing the client discards this local memory; JSONL/RPC
-callers retain their own original request, and `request <json>` accepts an
-explicit original request without rebuilding its context revision.
-The client never retries an uncertain Invocation, creates a replacement
-admission, hides cancellation or grants itself permission. A one-shot natural
-CLI command reports the uncertain original identities and read-only recovery
-guidance; it does not persist or print its full request body. Retaining that
-body across separate CLI processes remains an explicit gap.
+inspection remains available while an unresolved original fences a different new
+mutation. Across processes, `requests`, `requests show <id>` and
+`requests replay <id>` inspect or explicitly replay that original. Replay binds
+the exact bytes loaded for presentation; it cannot displace a different current
+unresolved request. Text/JSONL/RPC acknowledge only this host's strictly known
+sends after a successful return, complete output/stdio joins and no cancellation.
+Ink and SDK clients retain known responses until explicit
+`requests acknowledge <id>` or `client.requests.acknowledge(id)`; cancelled or
+failed output retains them too. Older retained responses require explicit
+acknowledgement. `requests show` and SDK `load` return historical client data,
+not a newly authenticated peer observation.
+An unknown response cannot be acknowledged. Incomplete or changed files remain
+failures requiring inspection, never a reason to submit a replacement.
+
+Files use the actual Linux account's private directory, descriptor-relative
+no-follow operations, single-link files, fixed permissions, complete bounded
+reads, identity checks, fsync and real close/join. The request retains the
+unchanged 1 MiB, depth-32 and 10,000-node wire limits. Protocol-only fixtures
+without an installed file owner retain in-memory data only. A disk record never
+permits an automatic retry, a replacement admission, a hidden cancellation or a
+permission grant.
+
+## Normal commands in the signed Linux image
+
+The same signed image now includes a normal daily-client entry in addition to
+its original fixed service roles. It selects the actual system account's
+`~/.cliq/kernel-v1`, with no root, key, socket, transport, loader or environment
+override. `setup` uses the original signed installer and service installation;
+an existing directory is validated rather than adopted. The npm `cliq` entry
+still uses its existing composition until the Kernel Cut is qualified.
+
+`models add <alias>` selects a bounded public setup profile embedded in that
+image. The endpoint tuple must match a unique currently valid signed catalog
+and price pair. The existing endpoint registration, native credential producer,
+Secret Service round-trip, Supervisor time fence and credential finalizer remain
+mandatory. Setup retains the original secret-free operation identities before
+writing, so an explicit retry reads history before requesting secret input.
+Terminal input uses Node readline with hidden input and bounded real stream
+retirement; `--api-key-stdin` selects the original non-TTY input path. A key is
+never an argument, model preference, request record or CAS object.
+
+The terminal reader owns signal handling until its actual stream joins and
+terminal restoration finish. Outside that prompt, normal model setup retains
+real OS termination instead of intercepting a signal with an AbortSignal that
+its native credential action cannot consume. An interrupted operation is
+resolved through its retained original setup/credential history on an explicit
+retry, not declared rolled back or gracefully joined. This does not change the
+Supervisor's separate two-second Stop contract. Strict preference validation and
+the alias limit are checked before starting credential setup; a concurrent or
+later storage failure still requires original-request recovery.
+
+Model aliases retain only model/endpoint/credential identifiers. Preferences
+grant neither Workspace Trust nor a tool permission. A new workspace requires
+its retained Trust decision, an interactive decision or an explicit
+`--trust-workspace`; a retained denial is not overridden. The canonical trusted
+workspace is passed to Session capture. The fixed `--check-node <relative.mjs>`
+preset requires explicit `--policy yolo`, obtains a real verifier identity-read
+grant, and uses the original read-only guest Node recipe. It does not run npm,
+arbitrary shell code or a check discovered in repository configuration.
+
+`--budget-usd` converts exact decimal USD to integer micros; `--budget-tokens`
+selects the existing bounded token allowance. Neither changes unmentioned
+limits, conservative reservations or the kernel's default budget. In particular,
+a provider's large per-request ceiling may require an explicit larger token
+budget to allow multiple turns. `result <id> --wait` follows authoritative state
+and then displays the original result review; a waiting/refused Run is not
+automatically approved or retried. `apply <id> --result <ref>` retains the
+distinct exact-result Delivery action.
+
+These are implemented source paths, not installed qualification evidence. The
+combined daily command campaign, real provider call, interruption/upgrade
+qualification and public release/default switch remain separate gates. Real
+Linux file lifecycle tests and terminal PTY components do not replace them.
 
 The Ink view attaches to authoritative snapshots and finite event cuts. It
 renders committed model/tool items through the original bounded artifact reader;

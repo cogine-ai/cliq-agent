@@ -28,7 +28,11 @@ assert(declarations.length > 0);
 for (const file of inventory.files) {
   assert(!file.path.split('/').includes('..') && !path.isAbsolute(file.path));
   assert(!file.path.endsWith('.test.js') && !file.path.endsWith('.test.d.ts'));
-  if (file.path.endsWith('.d.ts')) assert(!/^dist\/(state|sandbox|runtime)\//u.test(file.path), 'private authority declarations escaped');
+  if (file.path.endsWith('.d.ts')) {
+    assert(!/^dist\/(state|sandbox|runtime)\//u.test(file.path), 'private authority declarations escaped');
+    assert(!/^dist\/client\/(application|daily|installed-data|installed-host|model-settings|pending-requests|preferences|private-files|stdio)\.d\.ts$/u.test(file.path),
+      'private client declarations escaped');
+  }
 }
 const modules = path.join(fixture, 'node_modules'), packageDir = path.join(modules, '@cogineai/cliq');
 fs.mkdirSync(packageDir, { recursive: true });
@@ -57,7 +61,8 @@ const sdk = await import('@cogineai/cliq');
 const protocol = await import('@cogineai/cliq/control/v1');
 assert.equal(typeof sdk.openCliqClient, 'function');
 assert.equal(protocol.HEADLESS_SCHEMA_VERSION, 3);
-for (const name of ['openStateStore','createInstalledRuntime','mintOperationGrant']) assert(!Object.hasOwn(sdk,name));
+for (const name of ['openStateStore','createInstalledRuntime','mintOperationGrant','openPrivateClientDirectory','openPendingRequests','openInstalledClientData'])
+ assert(!Object.hasOwn(sdk,name));
 await assert.rejects(import('@cogineai/cliq/state/store'), {code:'ERR_PACKAGE_PATH_NOT_EXPORTED'});
 let traps = 0;
 await assert.rejects(sdk.openCliqClient(new Proxy({}, {get(){traps++;throw new Error('must not inspect caller');}})));
@@ -85,6 +90,14 @@ async function example(){
  await client.execute({kind:'request',request});
  await client.execute({kind:'request',request:clientMutation({protocolVersion:1,method:'run.cancel',runId:'original',expectedRevision:1})});
  if(client.pendingRequest){await client.execute({kind:'reconnect'});await client.replay();}
+ if(client.requests){
+  const saved=await client.requests.list();
+  if(saved[0]){
+   const original=await client.requests.load(saved[0].metadata.requestId);
+   if(original.response)await client.requests.acknowledge(original.request.requestId);
+   else await client.requests.replay(original.request.requestId,original.request);
+  }
+ }
  await client.close();
 }
 void example;

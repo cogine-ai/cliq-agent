@@ -1,8 +1,19 @@
 import type { InstalledControlFeature, InstalledControlRequestV1, InstalledControlResponseFor,
   InstalledControlResultFor, HeadlessRunEventV3 } from '../control/v1.js';
 import type { RunSubmitRequest } from '../kernel/control-submit.js';
-import type { Session, SessionContextProjection } from '../kernel/types.js';
+import type { RunSpec, Session, SessionContextProjection } from '../kernel/types.js';
+import type { ClientRequests } from './request-data.js';
 
+/** Copied user choices only; no filesystem factory or authority is part of
+ * the SDK's command-default data contract. */
+export type ClientModelSelectionV1 = Readonly<{
+  alias: string; provider: 'openai-compatible'; model: string;
+  endpointRegistrationId: string; credentialGrantId: string;
+}>;
+export type ClientPreferencesV1 = Readonly<{
+  schemaVersion: 1; modelSelections: readonly ClientModelSelectionV1[];
+  defaultModelAlias?: string; budgetDefaults?: Readonly<RunSpec['budgets']>;
+}>;
 export type SessionResumeInput = Omit<RunSubmitRequest, 'requestDigest' | 'expectedContextRevision'>;
 export type ClientCommand = Readonly<{ kind: 'request'; request: InstalledControlRequestV1 }>
   | Readonly<{ kind: 'resume'; intent: SessionResumeInput }> | Readonly<{ kind: 'reconnect' }>;
@@ -19,6 +30,7 @@ export type ClientUpdateSink = (update: ClientUpdate) => void | Promise<void>;
 export type CliqClient = Readonly<{
   readonly hello: InstalledControlResultFor<'control.hello'>;
   readonly pendingRequest: InstalledControlRequestV1 | undefined;
+  readonly requests?: ClientRequests;
   subscribe(listener: (update: ClientUpdate) => void): () => void;
   artifact(digest: string, options: Readonly<{ maxBytes: number; signal?: AbortSignal }>): Promise<Buffer>;
   readRun(request: Extract<InstalledControlRequestV1, { method: 'run.get' }>): Promise<Response>;

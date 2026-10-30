@@ -53,13 +53,42 @@ it is not a new runtime or free-CI paid job. Actual model invocation and complet
 installed execution remain unverified until this new combined source is built,
 installed and exercised with the authorized credential and cumulative budget.
 
+The next integrated candidate adds normal commands to that same signed Linux
+image: fixed actual-account setup, signed public model profiles, secure local
+credential enrollment, model aliases, explicit budgets, required Node checks,
+result waiting and exact-result application. Original requests and strict
+responses now have one private client-data lifetime shared by CLI, Ink, JSONL,
+RPC and SDK; an uncertain send is never replaced or automatically replayed.
+The normal command campaign must exercise an actual failed required check and
+repair before reviewing and applying the final result. These paths are not a
+second runner or a replacement for the existing installed protocol campaigns.
+
+As of 2026-10-31, pushed `eff1b78050485721eee1bd1d2e9378d66f363114`
+passes its independent local build and original full test command (3,481 passed,
+zero failed, sixteen platform skips). Its
+[Linux/hosted run](https://github.com/cogine-ai/cliq-agent/actions/runs/41095828769)
+has seven successful and sixteen failed jobs. Twelve failures stop at two
+static harness parsing mismatches; their corrections pass the unchanged local
+diagnostic preflight. The remaining failures are real READY/admission timing
+misses and a nonzero old-credential revocation after the signed upgrade. They
+remain failures; the latter needs a fixed, scanned refusal diagnostic before
+choosing a production correction. Late-result teardown also exceeded the
+original two-second stop and is not recorded as joined.
+
+Current daily-client changes have focused regressions, actual Linux private-file
+checks and a packed SDK check, but still require their combined full local and
+installed gates. The local x64 TCG package build fails its unchanged sixty-second
+worker construction limit before credential enrollment or a model call. Zero
+paid requests have been made. Neither this failure nor a controlled HTTPS
+response establishes real-provider, complete I1 or release qualification.
+
 Baseline: `cefa89ae797d8763686b87811743c4422922743c` (PR #523), reviewed
 2026-10-18. Its tree equals the qualified `990656c` follow-up. The installed
 Linux execution/restart and cancellation foundations are real, but a final
 model turn still stops at `candidate_required`. No work package or complete I1
 is declared finished by the 32 passing checks.
 
-Latest completed exact-head result (2026-10-26):
+Historical completed result (2026-10-26):
 `410c8193ea516b0b9f8e6a746c4376003e67b5a4`,
 [run 485](https://github.com/cogine-ai/cliq-agent/actions/runs/40387747812),
 has fourteen successful jobs and eight failures. All three hosted TypeScript

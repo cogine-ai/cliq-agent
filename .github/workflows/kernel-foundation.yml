@@ -1023,6 +1023,54 @@ jobs:
           done
           rmdir -- "$CLIQ_I1_FOREIGN_INSTALLATION"
 
+  linux-installed-daily:
+    name: Linux signed daily setup, required repair, review and apply
+    # Independent controlled-endpoint coverage on the standard free runner.
+    # It contains no paid provider credential and replaces no original campaign.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+      - run: npm ci
+      - name: Check the shared daily client and original harness contracts
+        run: >-
+          node --test --test-concurrency=1 --import tsx
+          src/client/daily.test.ts src/client/daily-actions.test.ts
+          src/client/preferences.test.ts src/client/model-setup-profile.test.ts
+          src/client/private-files.test.ts src/client/pending-requests.test.ts
+          src/control/session-retention.test.ts
+          scripts/kernel/testing/installed-provider-journey.test.ts
+          scripts/kernel/testing/provider-journey-input.test.ts
+          scripts/kernel/testing/installed-run-client.test.mjs
+          scripts/kernel/testing/installed-run-diagnostic-wiring.test.ts
+      - run: npm run build
+        id: build
+      - name: Install the unchanged actual native, systemd and credential prerequisites
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap libcap-dev libselinux1-dev meson ninja-build e2fsprogs libext2fs-dev pkg-config
+      - name: Exercise the same signed image through its normal daily commands
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          test "$RUNNER_ARCH" = X64
+          probe_node=$(realpath "$(command -v node)")
+          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --run-daily-journey "$probe_node" "$RUNNER_TEMP/cliq-installed-daily-journey"
+      - name: Retain original daily workflow and unchanged cleanup evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installed-daily-journey-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cliq-installed-daily-journey/*.json
+          if-no-files-found: warn
+          retention-days: 7
+
   linux-installed-verifier:
     name: Linux signed installed required and advisory Node verifier
     # Standard public-repository runner. Its own full installation/corpus and

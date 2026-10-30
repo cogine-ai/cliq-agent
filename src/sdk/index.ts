@@ -2,7 +2,7 @@
 // The trusted embedding host supplies one genuine held installed selection.
 import type { CliqClient, ClientUpdateSink } from '../client/types.js';
 export type { CliqClient, ClientUpdateSink, ClientCommand, ClientUpdate, SessionResumeInput } from '../client/types.js';
-export { ClientBusyError, ClientDisconnectedError, ClientPendingRequestError } from '../client/errors.js';
+export { ClientBusyError, ClientDisconnectedError, ClientPendingRequestError, ClientRequestPersistenceError } from '../client/errors.js';
 export { ControlRefusal } from '../control/errors.js';
 /** The opaque object must be the actual installation handle supplied by the
  * trusted host. No structural object, signer, callback or path is accepted as

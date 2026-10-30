@@ -2,9 +2,10 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { runSnapshot, sessionSnapshot, ref, at } from '../../../src/client/testing/protocol.js';
 import { encodeControlCheckpointCursor } from '../../../src/kernel/control-wire.js';
+import { parseClientInvocation } from '../../../src/client/commands.js';
 import type { InstalledControlRequestV1 } from '../../../src/control/v1.js';
 import type { RunSnapshotV1 } from '../../../src/kernel/types.js';
-import { PROVIDER_JOURNEY_FILES, InstalledProviderJourneyError, runInstalledProviderJourney,
+import { PROVIDER_JOURNEY_FILES, InstalledProviderJourneyError, runInstalledProviderJourney, runInstalledDailyProviderJourney,
   type InstalledProviderJourneyContext, type InstalledProviderJourneyInput } from './installed-provider-journey.js';
 
 // Powerless public-protocol data only. These cases do not create an installed
@@ -70,6 +71,30 @@ test('an authoritative admission refusal cannot become a replacement Run or an a
   await assert.rejects(runInstalledProviderJourney(input, f.context), refusedAt('admission'));
   assert.equal(f.calls.filter(request => request.method === 'run.submit').length, 1);
   assert.equal(f.calls.some(request => request.method === 'run.apply'), false); assert.equal(f.artifacts.length, 0);
+});
+
+test('normal daily admission uses the actual alias, explicit fixed check and budgets without a hidden protocol mutation or retry', async () => {
+  const f = fixture(); let commands = 0;
+  const budgets = { ...input.budgets, modelTokens: 20_000_000, costMicros: 5_000_000 };
+  await assert.rejects(runInstalledDailyProviderJourney({ workspacePath: input.workspacePath,
+    model: { provider: 'openai-compatible', model: input.model.model }, modelAlias: 'owned-daily', budgets,
+    endpointIdentityDigest: input.endpointIdentityDigest }, { ...f.context,
+    async command(argv, timeout) {
+      commands++; assert.equal(timeout, 30_000); assert.equal(argv[0], 'run');
+      assert(argv.includes('--trust-workspace') && argv.includes('--detach') && argv.includes('--json'));
+      const invocation = parseClientInvocation(argv.filter(flag => flag !== '--trust-workspace'), '/unused', {
+        guestToolchainManifestId: input.guestToolchainManifestId, preferences: { schemaVersion: 1, modelSelections: [{ alias: 'owned-daily',
+          provider: 'openai-compatible', model: input.model.model, endpointRegistrationId: 'existing-endpoint', credentialGrantId: 'existing-credential' }] } });
+      assert.equal(invocation.kind, 'run'); if (invocation.kind !== 'run') throw new Error('run expected');
+      assert.equal(invocation.intent.workspacePath, input.workspacePath); assert.deepEqual(invocation.intent.budgets, budgets);
+      assert.equal(invocation.intent.policyMode, 'yolo'); assert.equal(invocation.intent.allowUnverified, false);
+      assert.deepEqual(invocation.nodeCheck, { path: 'check.test.mjs', guestToolchainManifestId: input.guestToolchainManifestId });
+      assert.deepEqual(invocation.intent.verifiers, []); assert.equal(invocation.intent.maxChangedPaths, 1);
+      assert.equal(invocation.intent.maxChangedBytes, 65_536);
+      throw new Error('lost command response is not permission to invent or resend an admission');
+    }, async verifySource() { throw new Error('no real verifier evidence exists in this protocol test'); }
+  }), refusedAt('admission'));
+  assert.equal(commands, 1); assert.equal(f.calls.length, 0); assert.equal(f.artifacts.length, 0); assert.equal(f.reconnects(), 0);
 });
 
 test('UNKNOWN reconciliation remains an explicit failed journey without auto-probe, permission or dispatch', async () => {

@@ -571,7 +571,7 @@ test('safe scanner failure diagnosis is sticky and snapshots only original count
   const journey = await readFile(new URL('./installed-node-journey.ts', import.meta.url), 'utf8');
   assert(journey.includes('firstFailureStage ??= scanStage;'), 'only the first actual scanner failure owns the fixed stage');
   assert.match(journey, /maxBytes: 512 \* 1024 \* 1024, maxStreams: 4096/u);
-  const joined = journey.indexOf("assert.equal(report.installedWritersJoined, true); assert.equal(report.httpsJoined, true); assert.equal(report.daemonJoined, true);");
+  const joined = journey.indexOf('assert.equal(report.installedWritersJoined, true); assert.equal(report.daemonJoined, true);');
   const snapshot = journey.indexOf('beforeCorpus = Object.freeze({ streamsOpened: before.streamsOpened, bytesScanned: before.bytesScanned });', joined);
   const corpus = journey.indexOf("scanStage = 'corpus';", snapshot);
   const scanned = journey.indexOf('report.secretCorpus = await scanCredentialSecretCorpus(', corpus);
@@ -579,6 +579,8 @@ test('safe scanner failure diagnosis is sticky and snapshots only original count
   const originalReportScan = journey.indexOf('scanBytes(bytes); bytes.fill(0); scanner.close();', report);
   assert(joined >= 0 && snapshot > joined && corpus > snapshot && scanned > corpus && report > scanned && originalReportScan > report,
     'only original post-join counts precede the unchanged corpus and final report scans');
+  assert.match(journey.slice(joined, snapshot), /if \(!options\.provider\) assert\.equal\(report\.httpsJoined, true\);/u,
+    'the owned HTTPS responder must still join before corpus scanning; a real provider has no owned responder');
   assert(!journey.slice(joined, scanned).includes('await'), 'diagnosis adds no await before the original corpus operation');
   assert(journey.includes('corpusScanFailureCode = error.code;'), 'only the existing caught scanner class supplies the corpus code');
   const fallback = journey.slice(journey.indexOf('let secretScanFailure: CredentialSecretScanFailureDiagnostic | undefined;'),

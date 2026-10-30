@@ -8,14 +8,15 @@ import { runInstalledHeadlessJsonl, runInstalledHeadlessRpc } from '../headless/
 import type { HeldInstalledRuntime } from '../state/installed-runtime.js';
 import { ResourceRetirementError } from '../state/errors.js';
 import { createClientApplication, type ClientUpdate } from './application.js';
-import { parseClientInvocation, type ClientInvocation } from './commands.js';
+import { parseClientInvocation, type ClientInvocation, type ClientInvocationDefaults } from './commands.js';
 import { humanResponse, sessionContextLines, terminalText } from './view.js';
 import { presentControlArtifacts, artifactText, type ClientDetail } from './details.js';
 import { executeClientAction, ClientRefusal } from './actions.js';
 import { openInstalledClientStdio } from './stdio.js';
 
 export type ClientIO = Readonly<{ input: Readable; output: Writable & { isTTY?: boolean }; diagnostic: Writable;
-  workspacePath: string; signal?: AbortSignal; confirmUnverified?: () => Promise<boolean> }>;
+  workspacePath: string; signal?: AbortSignal; confirmUnverified?: () => Promise<boolean>;
+  commandDefaults?: ClientInvocationDefaults }>;
 type Response = InstalledControlResponseFor<InstalledControlFeature>;
 export function clientWriter(stream: Writable) {
   let tail: Promise<void> = Promise.resolve(), failure: unknown, cancellation: Error | undefined, closeWait: Promise<void> | undefined;
@@ -65,7 +66,7 @@ inspect <runId> [--after-item <n>] [--after-journal <n>] [--checkpoint-cursor <c
  * Official release-root/discovery composition is an explicit I4 dependency;
  * importing this function does not select it as the default CLI. */
 export async function runInstalledClient(selected: HeldInstalledRuntime, argv: readonly string[], io: ClientIO): Promise<number> {
-  const invocation = parseClientInvocation(argv, io.workspacePath);
+  const invocation = parseClientInvocation(argv, io.workspacePath, io.commandDefaults);
   if (invocation.kind === 'help') {
     const owned = await openInstalledClientStdio(selected, io);
     try { const output = clientWriter(owned.io.output); await output.write(Buffer.from(help)); await output.join(); return 0; }
@@ -83,7 +84,12 @@ export async function runClientInvocation(session: InstalledControlSession, invo
   let pending: Extract<ClientUpdate, { kind: 'pending' }> | undefined;
   let lastResponse: Response | undefined, rendering = false;
   const app = createClientApplication(session, async update => {
-    if (update.kind === 'pending') { pending = update; return; }
+    if (update.kind === 'pending') {
+      pending = update;
+      if (invocation.kind === 'request-replay' && !invocation.json)
+        await output.write(Buffer.from(`Replaying ${terminalText(update.method)} · ${terminalText(update.requestId)}\n`));
+      return;
+    }
     if (update.kind === 'connection') return;
     if (update.kind === 'context') {
       if (!rendering && !('json' in invocation && invocation.json))
@@ -153,13 +159,17 @@ export async function runClientInvocation(session: InstalledControlSession, invo
         if (io.output.isTTY) await present({ label: 'Artifact', artifactRef: action.artifact.digest, text: artifactText(action.artifact.bytes) });
         else for (let offset = 0; offset < action.artifact.bytes.length; offset += 65536)
           await output.write(action.artifact.bytes.subarray(offset, offset + 65536));
-      } else if (action.response && invocation.kind === 'command' && invocation.command.kind === 'request' && !invocation.json)
-        await presentControlArtifacts(app, invocation.command.request, action.response, present, signal);
+      } else if (action.response && !('json' in invocation && invocation.json)) {
+        const request = action.presentationRequest ?? (invocation.kind === 'command' && invocation.command.kind === 'request'
+          ? invocation.command.request : undefined);
+        if (request) await presentControlArtifacts(app, request, action.response, present, signal);
+      }
       if (action.follow && action.runId) {
         observing = true;
         if (io.output.isTTY && !('json' in invocation && invocation.json)) {
           const { runClientTui } = await import('./tui.js'); rendering = true;
-          try { await runClientTui(app, io, action.runId, invocation.kind === 'run' ? invocation.intent : undefined); }
+          try { await runClientTui(app, io, action.runId, invocation.kind === 'run' ? invocation.intent : undefined,
+            invocation.kind === 'run' ? invocation.nodeCheck : undefined); }
           finally { rendering = false; }
         } else {
           // Natural run/apply commands are finite operations: redirected or

@@ -21,6 +21,7 @@ import { buildSupervisorSeaImage, prepareInstalledSupervisorSeaCarrier } from '.
 import { installedModelPackageEntries, writeInstalledModelAuthority, type InstalledModelPackageFixture } from './installed-model-package.js';
 import { buildInstalledModelPackageEntries } from '../model-package.js';
 import { providerModelDefinition, writeInstalledProviderModelAuthority, type InstalledProviderModelDefinition } from '../installed-provider-model.js';
+import { encodeModelSetupProfiles, MODEL_SETUP_PROFILES_ASSET } from '../../../src/client/model-setup-profile.js';
 import { writeInstalledGuestToolchain } from './installed-guest-package.js';
 import { validateGuestToolchainMetadata } from '../../../src/state/guest-toolchain.js';
 import { buildSourceGitInspectorAsset } from './source-git-inspector-package.js';
@@ -101,6 +102,21 @@ async function buildInstalledSupervisorPackageCore(fixture: string,
   if (options.upgradeSourceBundle) verifyRuntimeBundle(options.upgradeSourceBundle, releaseKeys);
   const rootAsset = path.join(fixture, 'release-trust-roots.json');
   await writeFile(rootAsset, canonicalJsonBytes(releaseKeys), { flag: 'wx', mode: 0o400 });
+  // Public setup choices live in the same signed executable. No bundle refs,
+  // prices, credentials or qualification assertions enter this template. The
+  // installed host must derive and match its actual signed authority tuple.
+  const setupAssets: Record<string, string> = {};
+  const setupModel = providerModel ?? (source ? undefined : modelFixture);
+  if (setupModel) {
+    const setupProducer = source ? await import(pathToFileURL(path.join(repository, 'src/client/model-setup-profile.ts')).href) as
+      Pick<typeof import('../../../src/client/model-setup-profile.js'), 'encodeModelSetupProfiles'> : { encodeModelSetupProfiles };
+    const setupAsset = path.join(fixture, MODEL_SETUP_PROFILES_ASSET);
+    await writeFile(setupAsset, setupProducer.encodeModelSetupProfiles([{ schemaVersion: 1, id: 'default',
+      provider: setupModel.provider, model: setupModel.model, target: setupModel.target,
+      tls: { serverNameAscii: setupModel.tls.serverNameAscii, spkiSha256Pins: setupModel.tls.spkiSha256Pins } }]),
+    { flag: 'wx', mode: 0o400 });
+    setupAssets[MODEL_SETUP_PROFILES_ASSET] = setupAsset;
+  }
   const packageRoot = path.join(fixture, 'package');
   await mkdir(packageRoot, { mode: 0o700 });
   diagnostics.phase=4;
@@ -114,7 +130,7 @@ async function buildInstalledSupervisorPackageCore(fixture: string,
     ...(options.serverAuthenticationDiagnostics ? { serverAuthenticationDiagnostics: true as const } : {}),
     ...(options.storeFailureDiagnostics ? { storeFailureDiagnostics: true as const } : {}),
     ...(options.resourceDiagnostics ? { resourceDiagnostics: true as const } : {}),
-    assets: { 'release-trust-roots.json': rootAsset } });
+    assets: { 'release-trust-roots.json': rootAsset, ...setupAssets } });
   const supervisorBytes = await readFile(supervisorFile);
   diagnostics.phase=5;
   const helper = path.join(packageRoot, STATE_OWNER_NATIVE_RELATIVE_PATH);

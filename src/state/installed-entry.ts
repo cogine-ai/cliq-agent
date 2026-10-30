@@ -142,6 +142,30 @@ async function start(): Promise<void> {
     .decode(getAsset('release-trust-roots.json'))) as ReleaseTrustKey[];
   const runtime = createInstalledRuntime({ releaseKeys });
   const mode = process.argv[2];
+  if (mode === undefined || mode === '--help' || !mode.startsWith('--')) {
+    const stop = new AbortController(), stopping = () => stop.abort();
+    // Pre-install help owns no native resources or Run. Keep the ordinary OS
+    // signal termination, which also closes a blocked inherited output pipe.
+    const helpOnly = mode === undefined || mode === 'help' || mode === '--help';
+    // Credential preparation has no native cancellation receipt. Outside the
+    // hidden prompt's own joined terminal lifetime, retain real OS termination
+    // and recover the persisted original setup request on an explicit retry.
+    const gracefulSignals = !helpOnly && mode !== 'models';
+    if (gracefulSignals) { process.once('SIGTERM', stopping); process.once('SIGINT', stopping); }
+    try {
+      const { runInstalledDaily } = await import('../client/daily.js');
+      const { MODEL_SETUP_PROFILES_ASSET, decodeModelSetupProfiles } = await import('../client/model-setup-profile.js');
+      let profiles: ReturnType<typeof decodeModelSetupProfiles>['profiles'] = [];
+      if (mode === 'models') {
+        const bytes = getAsset(MODEL_SETUP_PROFILES_ASSET);
+        if (bytes.byteLength > 1_048_576) throw new TypeError('embedded model setup profiles exceed their data bound');
+        profiles = decodeModelSetupProfiles(parseJsonStrict(new TextDecoder('utf-8', { fatal: true }).decode(bytes))).profiles;
+      }
+      process.exitCode = await runInstalledDaily(runtime, process.argv.slice(2), { input: process.stdin, output: process.stdout,
+        diagnostic: process.stderr, workspacePath: process.cwd(), signal: stop.signal }, profiles);
+    } finally { process.removeListener('SIGTERM', stopping); process.removeListener('SIGINT', stopping); }
+    return;
+  }
   if (mode === UPGRADE_SOURCE_CONTROL_MODE) {
     // One inherited, kernel-executed signed image FD. This readonly child
     // never creates a Store, changes a selection or inherits an old Anchor.

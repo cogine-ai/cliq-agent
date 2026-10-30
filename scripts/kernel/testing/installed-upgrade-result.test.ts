@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { LEGACY_UPGRADE_SOURCE } from './legacy-upgrade-source-data.js';
-import { decodeInstalledUpgradeReport, INSTALLED_UPGRADE_PROFILE } from './installed-upgrade-result.js';
+import { decodeInstalledUpgradeReport, INSTALLED_UPGRADE_PROFILE, readInstalledUpgradeCredentialFailure } from './installed-upgrade-result.js';
+import { readFile } from 'node:fs/promises';
 
 // Deliberately inert report data. These tests prove only the closed evidence
 // decoder; they do not supply any Store, native receipt or installed authority.
@@ -55,4 +56,47 @@ test('partial upgrade failures stay failures and hostile data cannot execute get
     part: 'cell', logicalRowsObserved: 1, logicalValuesAttempted: 2, logicalBytesObserved: 3 } };
   assert.equal(decodeInstalledUpgradeReport(corpus).qualified, false);
   corpus.secretCorpusScanProgress.source.rawPath = '/not-allowed'; assert.throws(() => decodeInstalledUpgradeReport(corpus));
+});
+
+test('credential command refusal retains only a fixed action, status and original code after scanned output', () => {
+  const privateText = 'synthetic-private-key-path-and-error';
+  const original = { diagnosticOnly: true, scope: 'installed-read-startup', code: 'RECOVERY_REQUIRED', message: privateText, path: privateText };
+  const bytes = Buffer.from('CLIQ_CREDENTIAL_PHASE_V1:history\n' + JSON.stringify(original) + '\n');
+  const failure = readInstalledUpgradeCredentialFailure(bytes, 'revoke', 1);
+  assert.deepEqual(failure, { diagnosticOnly: true, kind: 'credential_command_failed', action: 'revoke', status: 1, code: 'RECOVERY_REQUIRED' });
+  assert(!JSON.stringify(failure).includes(privateText)); assert(Object.isFrozen(failure));
+  const report = complete(); report.qualified = false; report.phase = 'explicit_schema8_new_authorization_and_run'; delete report.upgrade;
+  report.credentialCommandFailure = failure;
+  assert.equal(decodeInstalledUpgradeReport(report).qualified, false);
+  for (const bad of [
+    { ...failure, code: privateText }, { ...failure, action: privateText }, { ...failure, status: 0 },
+    { ...failure, status: 256 }, { ...failure, rawError: privateText }
+  ]) { report.credentialCommandFailure = bad; assert.throws(() => decodeInstalledUpgradeReport(report)); }
+  const qualified = complete(); qualified.credentialCommandFailure = failure;
+  assert.throws(() => decodeInstalledUpgradeReport(qualified));
+});
+
+test('unknown, malformed, contradictory or oversized stderr cannot invent a credential refusal code', () => {
+  const row = { diagnosticOnly: true, scope: 'installed-read-startup', code: 'RECOVERY_REQUIRED' };
+  for (const bytes of [Buffer.from(JSON.stringify({ ...row, code: 'private-unrecognized-code' })),
+    Buffer.from(JSON.stringify({ ...row, scope: 'foreign' })), Buffer.from('{invalid'), Buffer.from([255]), Buffer.alloc(65537, 32),
+    Buffer.from(JSON.stringify(row) + '\n' + JSON.stringify({ ...row, code: 'INVALID_REQUEST' })),
+    Buffer.from(JSON.stringify({ ...row, privateField: 'do-not-retain' }))])
+    assert.equal(readInstalledUpgradeCredentialFailure(bytes, 'revoke', 1).code, null);
+  assert.throws(() => readInstalledUpgradeCredentialFailure(Buffer.alloc(0), 'revoke', 0));
+});
+
+test('upgrade credential failure diagnosis follows original process and output joins without changing command limits or refusal', async () => {
+  const source = await readFile(new URL('./installed-upgrade-journey.ts', import.meta.url), 'utf8');
+  const command = source.slice(source.indexOf('  const command = '), source.indexOf('  const acceptedCommand = '));
+  assert(command.includes('scan(result.stdout); scan(result.stderr);'));
+  assert(command.includes("assert.equal(result.error, undefined, 'owned upgrade command must join'); assert.equal(result.signal, null);"));
+  const accepted = source.slice(source.indexOf('  const acceptedCommand = '), source.indexOf('  const show = '));
+  const joined = accepted.indexOf('const result = command(executable, args, input, timeout);');
+  const diagnosed = accepted.indexOf('readInstalledUpgradeCredentialFailure(result.stderr, credentialAction, result.status);');
+  const refused = accepted.indexOf("assert.equal(result.status, 0, 'same-user upgrade command refused');");
+  assert(joined >= 0 && diagnosed > joined && refused > diagnosed);
+  assert(accepted.includes('report.credentialCommandFailure ??='), 'a later refusal cannot replace the original failed command');
+  assert(accepted.includes('input, 60000, action)'));
+  assert(!/\.message|\.stack|\.path|writeFile|setTimeout/u.test(accepted));
 });

@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { parseJsonStrict } from '../kernel/json.js';
 import { canonicalJsonBytes } from '../kernel/canonical.js';
 import type { ClientIO } from './entry.js';
-import type { RunIntent } from './commands.js';
+import type { ClientNodeCheck, RunIntent } from './commands.js';
 import { clientMutation, parseClientInvocation } from './commands.js';
 import { executeClientAction, type ClientApplication } from './actions.js';
 import { initialClientView, reduceClientView, runHeadline, terminalText } from './view.js';
@@ -27,26 +27,31 @@ export function splitClientCommand(value: string): string[] {
   if (started) result.push(part); return result;
 }
 
-export function ClientTui({ app, io, initialRunId, profile }: Readonly<{
-  app: ClientApplication; io: ClientIO; initialRunId?: string; profile?: RunIntent;
+export function ClientTui({ app, io, initialRunId, profile, nodeCheck }: Readonly<{
+  app: ClientApplication; io: ClientIO; initialRunId?: string; profile?: RunIntent; nodeCheck?: ClientNodeCheck;
 }>) {
   const [view, setView] = useState(initialClientView), [input, setInput] = useState(''), [message, setMessage] = useState('');
   const [detail, setDetail] = useState<WaitingPresentation>(), [detailPage, setDetailPage] = useState(0), [busy, setBusy] = useState(false);
   const [detailRead, setDetailRead] = useState(0), [inspection, setInspection] = useState<ClientDetail>();
   const current = useRef(view); current.current = view;
-  const intent = useRef(profile), operation = useRef(false), lifetime = useRef(new AbortController());
+  const intent = useRef(profile), check = useRef(nodeCheck), operation = useRef(false), lifetime = useRef(new AbortController());
   const watch = useRef<{ abort: AbortController; promise: Promise<void> } | undefined>(undefined);
   const { exit } = useApp();
   const report = () => { setMessage('Client operation refused or unavailable. Refresh and inspect the exact current state.'); };
+  const stopWatching = async () => {
+    const previous = watch.current;
+    previous?.abort.abort();
+    if (previous) await previous.promise.catch(error => {
+      // The prior viewport already reported ordinary read/refusal failures.
+      // Resource retirement must still join before selecting a new read.
+      if (error instanceof ResourceRetirementError) throw error;
+    });
+    if (watch.current === previous) watch.current = undefined;
+  };
   const select = async (runId: string, afterEventSeq = 0) => {
     setInspection(undefined);
     const previous = current.current.run?.run;
-    watch.current?.abort.abort();
-    if (watch.current) await watch.current.promise.catch(error => {
-      // The prior viewport already reported ordinary read/refusal failures.
-      // They cannot block this new explicit attach after an explicit reconnect.
-      if (error instanceof ResourceRetirementError) throw error;
-    });
+    await stopWatching();
     const response = await app.execute({ kind: 'request', request: { protocolVersion: 1, method: 'run.get', runId } });
     if (!response || !response.ok || response.result.method !== 'run.get') return;
     if (previous?.id === runId && previous.waitingOnRef === response.result.snapshot.run.waitingOnRef)
@@ -107,20 +112,26 @@ export function ClientTui({ app, io, initialRunId, profile }: Readonly<{
         await select(response.result.snapshot.run.id);
       return;
     }
-    if (text.startsWith(':')) invocation = parseClientInvocation(splitClientCommand(text.slice(1)), io.workspacePath);
+    if (text.startsWith(':')) invocation = parseClientInvocation(splitClientCommand(text.slice(1)), io.workspacePath, io.commandDefaults);
     else {
       if (!intent.current || !snapshot || !['succeeded', 'completed_unverified', 'failed', 'cancelled'].includes(snapshot.run.status))
         throw new TypeError('a new objective needs its explicit Run profile and completed context');
-      invocation = { kind: 'run' as const, intent: { ...intent.current, objective: text }, sessionId: snapshot.run.sessionId, detach: false, json: false };
+      invocation = { kind: 'run' as const, intent: { ...intent.current, objective: text }, sessionId: snapshot.run.sessionId,
+        ...(check.current ? { nodeCheck: check.current } : {}), detach: false, json: false };
     }
     if (invocation.kind === 'tui' || invocation.kind === 'jsonl' || invocation.kind === 'rpc' || invocation.kind === 'help') {
       setMessage(':list · :attach <id> · :result <id> · :diff <id> · :apply <id> [--result <ref>] · :session list/show/fork/compact · :run <objective> <model options>'); return;
     }
-    if (invocation.kind === 'run') intent.current = invocation.intent;
+    if (invocation.kind === 'run') { intent.current = invocation.intent; check.current = invocation.nodeCheck; }
+    if (invocation.kind === 'result') await stopWatching();
     const result = await executeClientAction(app, invocation, io.confirmUnverified, lifetime.current.signal);
     if (result.artifact) setInspection(detailViewport({ label: 'Artifact', artifactRef: result.artifact.digest, text: artifactText(result.artifact.bytes) }));
-    else if (result.response && invocation.kind === 'command' && invocation.command.kind === 'request' && !invocation.json)
-      await presentControlArtifacts(app, invocation.command.request, result.response, value => { setInspection(detailViewport(value)); setDetailPage(0); }, lifetime.current.signal);
+    else if (result.response && !('json' in invocation && invocation.json)) {
+      const request = result.presentationRequest ?? (invocation.kind === 'command' && invocation.command.kind === 'request'
+        ? invocation.command.request : undefined);
+      if (request) await presentControlArtifacts(app, request, result.response,
+        value => { setInspection(detailViewport(value)); setDetailPage(0); }, lifetime.current.signal);
+    }
     if (result.runId && result.follow) await select(result.runId, result.afterEventSeq ?? 0);
   }
   useInput((text, key) => {
@@ -180,9 +191,9 @@ export function ClientTui({ app, io, initialRunId, profile }: Readonly<{
 
 /** The same application/connection is shared with CLI and closes once through
  * its original idempotent close. Ink never owns or cancels a Run. */
-export async function runClientTui(app: ClientApplication, io: ClientIO, runId?: string, profile?: RunIntent): Promise<void> {
+export async function runClientTui(app: ClientApplication, io: ClientIO, runId?: string, profile?: RunIntent, nodeCheck?: ClientNodeCheck): Promise<void> {
   if (!(io.input as { isTTY?: boolean }).isTTY || !io.output.isTTY) throw new TypeError('TUI needs a terminal; use JSONL/RPC or text commands otherwise');
-  const instance = render(<ClientTui app={app} io={io} initialRunId={runId} profile={profile} />,
+  const instance = render(<ClientTui app={app} io={io} initialRunId={runId} profile={profile} nodeCheck={nodeCheck} />,
     { stdin: io.input as NodeJS.ReadStream, stdout: io.output as NodeJS.WriteStream, stderr: io.diagnostic as NodeJS.WriteStream, exitOnCtrlC: false, interactive: true });
   try { await instance.waitUntilExit(); }
   finally { instance.unmount(); await app.close(); }

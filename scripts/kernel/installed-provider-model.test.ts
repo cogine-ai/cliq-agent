@@ -11,6 +11,7 @@ import { sha256Bytes } from '../../src/kernel/identity.js';
 import { verifyInstalledModelAuthority } from '../../src/model/installed-authority.js';
 import { parseJsonStrict } from '../../src/kernel/json.js';
 import type { RuntimeBundleManifest } from '../../src/policy/runtime-authority.js';
+import { modelSetupEndpointCandidate } from '../../src/client/model-setup-profile.js';
 import { buildInstalledModelPackageEntries } from './model-package.js';
 import { providerModelDefinition, writeInstalledProviderModelAuthority, type InstalledProviderModelDefinition } from './installed-provider-model.js';
 import { buildInstalledProviderQualificationPackage, buildInstalledSupervisorPackage } from './testing/installed-supervisor-package.js';
@@ -102,6 +103,8 @@ test('real-provider package writes the same installer closure with explicit bill
     assert.deepEqual(verified.models[0]!.priceTable.value.requestTokenCeiling, definition.requestTokenCeiling);
     assert.equal(result.endpoint.tls.trustStoreRef, sha256Bytes(ca));
     assert.equal(result.endpoint.tls.trustStoreRuntimeBundleRef, canonicalSha256(bundle));
+    assert.deepEqual(modelSetupEndpointCandidate({ schemaVersion: 1, id: 'default', provider: definition.provider,
+      model: definition.model, target: definition.target, tls: definition.tls }, bundle), result.endpoint);
     const registrationCore = { schemaVersion: 1, format: 'cliq-endpoint-registration-v1', endpointRegistrationId: 'data-test',
       registrationKind: 'user', ownerPrincipalId: 'inert-data-principal', purposes: ['model_endpoint'], ...result.endpoint, createdAt: definition.validFrom };
     // This invokes only the existing closed data decoder, never registration.

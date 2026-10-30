@@ -8,6 +8,9 @@ import { immutableSnapshot } from '../model/immutable.js';
 import { openInstalledSupervisorClient, type InstalledSupervisorClient } from '../state/installed-control-client.js';
 import type { HeldInstalledRuntime } from '../state/installed-runtime.js';
 import { ResourceRetirementError } from '../state/errors.js';
+import { ClientPendingRequestError, ClientRequestPersistenceError } from '../client/errors.js';
+import type { PendingRequests } from '../client/pending-requests.js';
+import type { ClientRequests, PendingClientMutation } from '../client/request-data.js';
 import { ControlRefusal } from './errors.js';
 export { ControlRefusal } from './errors.js';
 import { INSTALLED_CONTROL_FEATURES, decodeInstalledControlEnvelope, decodeInstalledControlRequest,
@@ -18,8 +21,15 @@ import { INSTALLED_CONTROL_FEATURES, decodeInstalledControlEnvelope, decodeInsta
 type Attach = Extract<InstalledControlRequestV1, { method: 'run.attach' }>;
 type AttachResult = Extract<InstalledControlResponseFor<'run.attach'>, { ok: true }>['result'];
 export type SessionResumeInput = Omit<RunSubmitRequest, 'requestDigest' | 'expectedContextRevision'>;
+/** Local original-request data only, never cached peer authentication or
+ * permission to resend an Invocation. Replay always makes a real wire call. */
+export type InstalledSessionRequests = ClientRequests & Readonly<{
+  acknowledgeSent(): Promise<void>;
+}>;
 export type InstalledControlSession = Readonly<{
   readonly hello: InstalledSupervisorClient['hello'];
+  readonly pendingRequest?: PendingClientMutation;
+  readonly requests?: InstalledSessionRequests;
   request(value: unknown): Promise<InstalledControlResponseFor<InstalledControlFeature>>;
   cancel(runId: string, expectedRevision: number): Promise<InstalledControlResponseFor<InstalledControlFeature>>;
   prepareResume(request: SessionResumeInput, signal?: AbortSignal): Promise<RunSubmitRequest>;
@@ -32,9 +42,9 @@ export type InstalledControlSession = Readonly<{
 
 /** Actual installation/peer authentication remains in the original client.
  * The caller retains its selected image handles until this session joins. */
-export async function openInstalledControlSession(selected: HeldInstalledRuntime): Promise<InstalledControlSession> {
+export async function openInstalledControlSession(selected: HeldInstalledRuntime, requests?: PendingRequests): Promise<InstalledControlSession> {
   const connect = () => openInstalledSupervisorClient(selected, 3), client = await connect();
-  try { return createInstalledControlSession(client, connect); }
+  try { return createInstalledControlSession(client, connect, requests); }
   catch (error) { await client.close(); throw error; }
 }
 
@@ -42,7 +52,7 @@ export async function openInstalledControlSession(selected: HeldInstalledRuntime
  * request; callers retain the exact original request/admission identities.
  * Owning/closing this client detaches only, and creates no server authority. */
 export function createInstalledControlSession(initial: InstalledSupervisorClient,
-  connect?: () => Promise<InstalledSupervisorClient>): InstalledControlSession {
+  connect?: () => Promise<InstalledSupervisorClient>, retained?: PendingRequests): InstalledControlSession {
   const checkHello = (client: InstalledSupervisorClient) => {
     const hello = decodeInstalledControlEnvelope({ protocolVersion: 1, ok: true, result: client.hello }, 'control.hello');
     if (!hello.ok || hello.result.headlessSchemaRange.min > 3 || hello.result.headlessSchemaRange.max < 3)
@@ -52,7 +62,26 @@ export function createInstalledControlSession(initial: InstalledSupervisorClient
   let client = initial, stopped = false, closing: Promise<void> | undefined, switching: Promise<void> | undefined;
   let retirementFailure: ResourceRetirementError | undefined;
   let running: Promise<InstalledControlResponseFor<InstalledControlFeature>> | undefined;
-  const request = (value: unknown): Promise<InstalledControlResponseFor<InstalledControlFeature>> => {
+  let pendingRequest: PendingClientMutation | undefined, persistenceFailure: unknown;
+  const unknown = new Set<string>(), knownSends = new Set<string>();
+  const dataTasks = new Set<Promise<unknown>>();
+  function localData<T>(operation: () => Promise<T>): Promise<T> {
+    const pending = Promise.resolve().then(operation).catch(error => {
+      if (error instanceof ResourceRetirementError) retirementFailure ??= error;
+      throw error;
+    }); dataTasks.add(pending);
+    void pending.finally(() => dataTasks.delete(pending)).catch(() => {}); return pending;
+  }
+  const startup = retained ? retained.list().then(records => { for (const record of records) if (record.state === 'unresolved') unknown.add(record.metadata.requestId); }) : Promise.resolve();
+  void startup.catch(() => {});
+  async function persist<T>(operation: () => Promise<T>): Promise<T> {
+    try { return await operation(); }
+    catch (error) {
+      if (error instanceof ResourceRetirementError) throw retirementFailure ??= error;
+      throw persistenceFailure ??= new ClientRequestPersistenceError(error);
+    }
+  }
+  const request = (value: unknown, replayId?: string): Promise<InstalledControlResponseFor<InstalledControlFeature>> => {
     try {
       if (retirementFailure) throw retirementFailure;
       if (stopped || closing || switching || running) throw new TypeError('control session is closed or busy');
@@ -62,7 +91,26 @@ export function createInstalledControlSession(initial: InstalledSupervisorClient
         throw new TypeError('control method was not enabled by the authenticated hello');
       const method = candidate.method as InstalledControlFeature;
       const pending = (async () => {
-        try { return decodeInstalledControlResponse(await Reflect.apply(client[method], client, [candidate]), candidate); }
+        try {
+          const mutation = 'requestId' in candidate && 'requestDigest' in candidate ? candidate as PendingClientMutation : undefined;
+          if (retained && mutation) {
+            await persist(() => startup);
+            if (persistenceFailure) throw persistenceFailure;
+            if (pendingRequest && !canonicalJsonBytes(pendingRequest).equals(canonicalJsonBytes(mutation))) throw new ClientPendingRequestError();
+            if (replayId === undefined && unknown.size) throw new ClientPendingRequestError();
+            const original = await persist(() => retained.retain(mutation));
+            if (original.existing && replayId === undefined) throw new ClientPendingRequestError();
+            if (replayId !== undefined && mutation.requestId !== replayId) throw new TypeError('replay substituted its original requestId');
+            unknown.add(mutation.requestId); pendingRequest = mutation;
+            if (stopped || closing) throw new ClientRequestPersistenceError(new TypeError('session closed before original request dispatch'));
+          }
+          const response = decodeInstalledControlResponse(await Reflect.apply(client[method], client, [candidate]), candidate);
+          if (retained && mutation) {
+            await persist(() => retained.resolve(mutation, response));
+            unknown.delete(mutation.requestId); knownSends.add(mutation.requestId); pendingRequest = undefined;
+          }
+          return response;
+        }
         catch (error) { if (error instanceof ResourceRetirementError) retirementFailure ??= error; throw error; }
       })();
       running = pending;
@@ -72,6 +120,29 @@ export function createInstalledControlSession(initial: InstalledSupervisorClient
   };
   const session: InstalledControlSession = Object.freeze({
     get hello() { return immutableSnapshot(client.hello); }, request,
+    get pendingRequest() { return pendingRequest; },
+    ...(retained ? { requests: Object.freeze({
+      list: () => localData(() => retained.list()), load: (requestId: string) => localData(() => retained.load(requestId)),
+      replay(requestId: string, expected?: PendingClientMutation) {
+        const captured = expected === undefined ? undefined : decodeInstalledControlRequest(expected);
+        return localData(async () => {
+          await persist(() => startup);
+          const original = await persist(async () => {
+            const value = await retained.load(requestId);
+            if (captured && !value.bytes.equals(canonicalJsonBytes(captured))) throw new TypeError('replay data changed its captured original request');
+            return value;
+          });
+          return request(original.request, requestId);
+        });
+      },
+      acknowledge(requestId: string) { return localData(async () => {
+        await retained.acknowledge(requestId); knownSends.delete(requestId); unknown.delete(requestId);
+        if (pendingRequest?.requestId === requestId) pendingRequest = undefined;
+      }); },
+      acknowledgeSent() { return localData(async () => {
+        for (const requestId of [...knownSends]) { await retained.acknowledge(requestId); knownSends.delete(requestId); }
+      }); }
+    }) } : {}),
     async prepareResume(supplied: SessionResumeInput, signal?: AbortSignal) {
       // Return the complete new admission before dispatch. Callers can retain
       // these exact bytes across an explicit reconnect; no old Run is resumed
@@ -180,6 +251,10 @@ export function createInstalledControlSession(initial: InstalledSupervisorClient
         // Ordinary query rejection is expected on detach; its own caller still
         // observes it. Any uncertain retirement remains the primary failure.
         for (const result of await Promise.allSettled(running ? [running] : []))
+          if (result.status === 'rejected' && result.reason instanceof ResourceRetirementError) failures.push(result.reason);
+        for (const result of await Promise.allSettled([startup]))
+          if (result.status === 'rejected' && result.reason instanceof ResourceRetirementError) failures.push(result.reason);
+        for (const result of await Promise.allSettled([...dataTasks]))
           if (result.status === 'rejected' && result.reason instanceof ResourceRetirementError) failures.push(result.reason);
         for (const error of failures) if (error instanceof ResourceRetirementError) retirementFailure ??= error;
         if (retirementFailure) throw retirementFailure;

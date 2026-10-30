@@ -9,9 +9,10 @@ import { ResourceRetirementError } from '../state/errors.js';
 import { isInstalledControlCloseError } from '../state/installed-control-close-error.js';
 import { readRunItemPresentation } from './artifacts.js';
 import type { ClientCommand, ClientUpdate } from './types.js';
-import { ClientBusyError, ClientDisconnectedError, ClientPendingRequestError } from './errors.js';
+import { ClientBusyError, ClientDisconnectedError, ClientPendingRequestError, ClientRequestPersistenceError } from './errors.js';
+import type { PendingClientMutation } from './request-data.js';
 export type { ClientCommand, ClientUpdate } from './types.js';
-export { ClientBusyError, ClientDisconnectedError, ClientPendingRequestError } from './errors.js';
+export { ClientBusyError, ClientDisconnectedError, ClientPendingRequestError, ClientRequestPersistenceError } from './errors.js';
 
 type Response = InstalledControlResponseFor<InstalledControlFeature>;
 
@@ -24,7 +25,7 @@ export function createClientApplication(session: InstalledControlSession,
   let disconnected = false, closing: Promise<void> | undefined, following: Promise<void> | undefined;
   // At most one closed, already bounded wire request. This is disposable client
   // memory, never an execution journal or permission to retry an Invocation.
-  let unresolved: InstalledControlRequestV1 | undefined;
+  let unresolved: Extract<InstalledControlRequestV1, { requestId: string; requestDigest: string }> | undefined;
   const local = new AbortController();
   const listeners = new Set<(update: ClientUpdate) => void>();
   async function emit(update: ClientUpdate) {
@@ -46,17 +47,27 @@ export function createClientApplication(session: InstalledControlSession,
     void pending.finally(() => { if (kind === 'read') readPending--; else commandPending = false; }).catch(() => {});
     return pending;
   }
-  async function dispatch(request: InstalledControlRequestV1) {
+  async function dispatch(request: InstalledControlRequestV1, replayId?: string) {
     const mutation = 'requestId' in request && 'requestDigest' in request;
     if (mutation) {
       if (unresolved && !canonicalJsonBytes(request).equals(canonicalJsonBytes(unresolved))) throw new ClientPendingRequestError();
-      await emit({ kind: 'pending', method: request.method,
-        requestId: request.requestId, ...('admissionKey' in request ? { admissionKey: request.admissionKey } : {}) });
-      unresolved ??= immutableSnapshot(request);
+      if (!session.requests) {
+        await emit({ kind: 'pending', method: request.method,
+          requestId: request.requestId, ...('admissionKey' in request ? { admissionKey: request.admissionKey } : {}) });
+        unresolved ??= immutableSnapshot(request);
+      }
     }
     let response: Response;
-    try { response = await session.request(request); }
+    try { response = replayId !== undefined && session.requests && 'requestId' in request && 'requestDigest' in request
+      ? await session.requests.replay(replayId, request) : await session.request(request); }
     catch (error) {
+      if (session.requests && mutation) {
+        unresolved = session.pendingRequest;
+        if (unresolved) try { await emit({ kind: 'pending', method: unresolved.method,
+          requestId: unresolved.requestId, ...('admissionKey' in unresolved ? { admissionKey: unresolved.admissionKey } : {}) }); }
+        catch { /* Preserve the original transport, storage or resource failure. */ }
+      }
+      if (error instanceof ClientPendingRequestError || error instanceof ClientRequestPersistenceError) throw error;
       disconnected = true;
       try { await emit({ kind: 'connection', state: 'disconnected' }); } catch { /* Preserve the original transport/resource failure. */ }
       throw error;
@@ -72,7 +83,21 @@ export function createClientApplication(session: InstalledControlSession,
   }
   return Object.freeze({
     get hello() { return session.hello; },
-    get pendingRequest() { return unresolved; },
+    get pendingRequest() { return unresolved ?? session.pendingRequest; },
+    ...(session.requests ? { requests: Object.freeze({
+      list: () => serial('read', () => session.requests!.list()),
+      load: (requestId: string) => serial('read', () => session.requests!.load(requestId)),
+      replay: (requestId: string, expected?: PendingClientMutation) => serial('command', async () => {
+        const original = await session.requests!.load(requestId);
+        if (expected && !original.bytes.equals(canonicalJsonBytes(decodeInstalledControlRequest(expected))))
+          throw new ClientRequestPersistenceError(new TypeError('replay data changed its reviewed original request'));
+        return dispatch(original.request, requestId);
+      }),
+      acknowledge: (requestId: string) => serial('command', async () => {
+        await session.requests!.acknowledge(requestId);
+        if (unresolved?.requestId === requestId) unresolved = undefined;
+      })
+    }) } : {}),
     subscribe(listener: (update: ClientUpdate) => void) {
       if (closed || listeners.size >= 4) throw new ClientBusyError();
       listeners.add(listener); return () => { listeners.delete(listener); };
@@ -150,7 +175,7 @@ export function createClientApplication(session: InstalledControlSession,
       return serial('command', async () => {
         if (!unresolved) throw new TypeError('the client has no unresolved request to replay');
         if (!session.hello.enabledFeatureIds.includes(unresolved.method)) throw new TypeError('the authenticated connection does not enable the original request');
-        return dispatch(unresolved);
+        return dispatch(unresolved, session.requests ? unresolved.requestId : undefined);
       });
     },
     follow(runId: string, afterEventSeq = 0, signal?: AbortSignal): Promise<void> {

@@ -65,7 +65,7 @@ test('secret stdin requires raw bytes and preserves their complete value without
   finally { secret.fill(0); }
 });
 
-test('the real provider branch selects matching schema3 child framing and consumer while original modes retain schema1', async () => {
+test('provider and normal daily branches select matching schema3 framing while original modes retain schema1', async () => {
   // Inspect the actual fixed caller expression. Do not execute this Linux
   // bootstrap, a child process, credential operation or provider request.
   const source = await readFile(new URL('./installed-node-journey.ts', import.meta.url), 'utf8');
@@ -77,10 +77,10 @@ test('the real provider branch selects matching schema3 child framing and consum
   };
   visit(file); assert.equal(calls.length, 1);
   const options = calls[0]!.arguments[0]; assert(options && ts.isObjectLiteralExpression(options));
-  const branch = (value: ts.Expression, provider: boolean): ts.Expression => {
+  const branch = (value: ts.Expression, provider: boolean, daily: boolean): ts.Expression => {
     while (ts.isParenthesizedExpression(value) || ts.isAsExpression(value)) value = value.expression;
-    assert(ts.isConditionalExpression(value)); assert.equal(value.condition.getText(file), 'options.provider');
-    return provider ? value.whenTrue : value.whenFalse;
+    assert(ts.isConditionalExpression(value)); assert.equal(value.condition.getText(file), 'options.provider || dailyJourney');
+    return provider || daily ? value.whenTrue : value.whenFalse;
   };
   const args = options.properties.find((property): property is ts.PropertyAssignment =>
     ts.isPropertyAssignment(property) && property.name.getText(file) === 'args');
@@ -91,14 +91,14 @@ test('the real provider branch selects matching schema3 child framing and consum
   const conditionalOptions = options.properties.filter((property): property is ts.SpreadAssignment =>
     ts.isSpreadAssignment(property) && property.expression.getText(file).includes('headlessSchemaVersion'));
   assert.equal(conditionalOptions.length, 1);
-  for (const provider of [false, true]) {
-    const values = branch(conditionalArgs[0]!.expression, provider); assert(ts.isArrayLiteralExpression(values));
+  for (const [provider, daily] of [[false, false], [true, false], [false, true]] as const) {
+    const values = branch(conditionalArgs[0]!.expression, provider, daily); assert(ts.isArrayLiteralExpression(values));
     const selectedArgs = values.elements.map(value => { assert(ts.isStringLiteral(value)); return value.text; });
-    const selected = branch(conditionalOptions[0]!.expression, provider); assert(ts.isObjectLiteralExpression(selected));
+    const selected = branch(conditionalOptions[0]!.expression, provider, daily); assert(ts.isObjectLiteralExpression(selected));
     const schema = selected.properties.find((property): property is ts.PropertyAssignment =>
       ts.isPropertyAssignment(property) && property.name.getText(file) === 'headlessSchemaVersion');
-    assert.deepEqual(selectedArgs, provider ? ['--schema3'] : []);
-    if (provider) {
+    assert.deepEqual(selectedArgs, provider || daily ? ['--schema3'] : []);
+    if (provider || daily) {
       assert(schema); let value = schema.initializer;
       while (ts.isAsExpression(value)) value = value.expression;
       assert(ts.isNumericLiteral(value)); assert.equal(value.text, '3');

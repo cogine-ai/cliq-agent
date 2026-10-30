@@ -210,3 +210,51 @@ test('installed Delivery keeps its own free bounded production journey and canno
   assert.match(driver, /assert\(supported,[\s\S]*the genuine production composition must advertise explicit Delivery/u);
   assert.doesNotMatch(driver, /INSTALLED_DELIVERY_COMPOSITION_COMPLETE|supportsInstalledDelivery\s*=|featureOverride/u);
 });
+
+test('normal daily coverage uses the signed command path and original joined fixture without replacing prior campaigns', async () => {
+  const workflow = await readFile(workflowUrl, 'utf8');
+  const job = workflow.match(/\n  linux-installed-daily:\n[\s\S]*?(?=\n  [a-z][a-z0-9-]*:\n|$)/u)?.[0];
+  assert(job); assert.match(job, /runs-on: ubuntu-22\.04\n/u); assert.match(job, /timeout-minutes: 20\n/u);
+  assert.doesNotMatch(job, /(?:continue-on-error|needs):/u); assert.match(job, /persist-credentials: false/u);
+  assert.match(job, /node-version: 22\.13\.0/u); assert.match(job, /libext2fs-dev pkg-config/u);
+  const exercise = stepBlocks(job).find(block => block.includes('- name: Exercise the same signed image through its normal daily commands'));
+  assert(exercise); assert.match(exercise, /steps\.build\.outcome == 'success'/u);
+  for (const guard of ['test "$RUNNER_ENVIRONMENT" = github-hosted', 'test "$RUNNER_OS" = Linux', 'test "$RUNNER_ARCH" = X64'])
+    assert(exercise.includes(guard));
+  assert.match(exercise, /qualify-systemd-user\.sh --run-daily-journey "\$probe_node" "\$RUNNER_TEMP\/cliq-installed-daily-journey"/u);
+  assert.doesNotMatch(exercise, /--delay-volume|--run-provider-journey|\|\| true|set \+e/u);
+  const retained = stepBlocks(job).find(block => block.includes('- name: Retain original daily workflow and unchanged cleanup evidence'));
+  assert(retained); assert.match(retained, /if: always\(\)/u); assert.match(retained, /actions\/upload-artifact@v4/u);
+  assert.match(retained, /path: \$\{\{ runner\.temp \}\}\/cliq-installed-daily-journey\/\*\.json/u); assert.match(retained, /retention-days: 7/u);
+  for (const [id, mode] of [['linux-installed-verifier', '--run-verifier-journey'], ['linux-installed-delivery', '--run-delivery-journey'],
+    ['linux-credential-authority', '--credentials'], ['linux-credential-model-input', '--credentials-model-input']]) {
+    const original = workflow.match(new RegExp(`\\n  ${id}:\\n[\\s\\S]*?(?=\\n  [a-z][a-z0-9-]*:\\n|$)`))?.[0];
+    assert(original, `the original independent ${id} campaign remains`);
+    assert(original.includes(`qualify-systemd-user.sh ${mode} `)); assert.doesNotMatch(original, /(?:continue-on-error|needs):/u);
+  }
+  const shell = await readFile(new URL('../../scripts/kernel/qualify-systemd-user.sh', import.meta.url), 'utf8');
+  assert.match(shell, /--run-daily-journey\) probe_campaign_kind=run-journey; probe_run_driver_mode=--daily-campaign; shift/u);
+  assert.match(shell, /probe_run_driver_mode" != --daily-campaign \|\| "\$probe_volume_mode" = loop/u);
+  assert.match(shell, /probe_run_driver_mode" = --daily-campaign[\s\S]*?qualify-installed-daily-journey\.ts/u);
+  const consumer = await readFile(new URL('../../scripts/kernel/qualify-installed-daily-journey.ts', import.meta.url), 'utf8');
+  assert.match(consumer, /assert\.equal\(mode, '--daily-campaign'\); assert\(filename\); assert\.equal\(extra\.length, 0\)/u);
+  assert.match(consumer, /await runInstalledNodeJourney\(filename, 'daily'\)/u);
+  const driver = await readFile(new URL('../../scripts/kernel/testing/installed-node-journey.ts', import.meta.url), 'utf8');
+  assert.match(driver, /if \(dailyJourney\) assert\.deepEqual\(Object\.keys\(options\), \[\]/u);
+  assert.match(driver, /if \(dailyJourney\) await dailyCommand\(\['setup'\]\)/u);
+  assert.match(driver, /if \(dailyJourney\) await dailyCommand\(\['models', 'add', dailyAlias, '--api-key-stdin'\], 60_000, secret\)/u);
+  assert.match(driver, /runInstalledDailyProviderJourney\([\s\S]*?command: dailyCommand/u);
+  assert.match(driver, /report\.normalCliCommands\.map\([\s\S]*?\['setup', 'models', 'run', 'result', 'apply'\]/u);
+  assert.match(driver, /const dailyCommand = async[^\n]+\n\s*assert\(dailyJourney && \[30_000, 60_000, 90_000\]\.includes\(timeout\)\)/u,
+    'the normal commands keep the original distinct command budgets');
+  assert.match(driver, /await runInstalledDailyCommand\(\{ executable: '\/usr\/sbin\/runuser',[\s\S]*?path\.join\(recipe\.packageRoot, 'supervisor'\), \.\.\.argv[\s\S]*?deadlineMs: timeout, scanner \}/u);
+  const command = await readFile(new URL('../../scripts/kernel/testing/installed-daily-command.ts', import.meta.url), 'utf8');
+  assert.match(command, /Promise\.all\(\[closed, written, streamsClosed\]\)/u);
+  const joined = command.indexOf('Promise.all([closed, streamsClosed, written.catch(() => {})])');
+  const retired = command.indexOf('out.close(); err.close();', joined);
+  const returned = command.indexOf('return { stdout: Buffer.concat(stdout)', retired);
+  assert(joined > 0 && retired > joined && returned > retired,
+    'the actual command child, complete stdin write and inherited pipes join before scanner retirement and success');
+  assert.match(command, /descendantRetirement = 'outer_uid_coordinator_required'/u);
+  assert.match(command, /if \(failure\) for \(const stream of streams\) stream\.destroy\(\)/u);
+});

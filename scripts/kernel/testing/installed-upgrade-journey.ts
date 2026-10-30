@@ -22,7 +22,8 @@ import { openInstalledClientConsumer } from './installed-client-consumer.js';
 import { withUpgradeUnitHistory } from './installed-upgrade-unit-history.js';
 import { decodeRunResult, decodeVerificationClosure, decodeWorkspaceDiff } from '../../../src/state/result-artifacts.js';
 import { decodePlatformProcessIdentity, decodeSourceManifest, decodeWorkspaceEntries } from '../../../src/state/decoders.js';
-import { decodeInstalledUpgradeReport, INSTALLED_UPGRADE_PROFILE } from './installed-upgrade-result.js';
+import { decodeInstalledUpgradeReport, INSTALLED_UPGRADE_PROFILE, INSTALLED_UPGRADE_CREDENTIAL_ACTIONS,
+  readInstalledUpgradeCredentialFailure } from './installed-upgrade-result.js';
 import { createInstalledRunObserver } from './installed-run-observer.js';
 import { createUpgradeTlsMaterial } from './installed-upgrade-tls.js';
 import { decodeRuntimeUpgradeReceipt, decodeRuntimeUpgradeRetirement } from '../../../src/state/runtime-upgrade-history.js';
@@ -60,16 +61,24 @@ export async function runInstalledRuntimeUpgradeJourney(filename: string, origin
     assert.equal(result.error, undefined, 'owned upgrade command must join'); assert.equal(result.signal, null);
     return result;
   };
-  const acceptedCommand = (executable: string, args: readonly string[], input?: Buffer, timeout?: number) => {
+  const acceptedCommand = (executable: string, args: readonly string[], input?: Buffer, timeout?: number,
+    credentialAction?: typeof INSTALLED_UPGRADE_CREDENTIAL_ACTIONS[number]) => {
     const result = command(executable, args, input, timeout);
     if (result.status !== 0) {
+      // command() has joined and scanned both original buffers. Retain only
+      // the first fixed credential action/status/code, then keep the refusal.
+      if (credentialAction && result.status !== null) report.credentialCommandFailure ??=
+        readInstalledUpgradeCredentialFailure(result.stderr, credentialAction, result.status);
       const marker = readInstalledRuntimeUpgradeFailureMarker(result.stderr);
       try { if (marker) writeSync(2, marker); } catch { /* Diagnostics cannot replace the original process refusal. */ }
     }
     assert.equal(result.status, 0, 'same-user upgrade command refused'); return result.stdout;
   };
-  const credential = (metadata: Record<string, unknown>, input?: Buffer) => acceptedCommand(path.join(recipe.stateRoot, 'runtime/bootstrap'),
-    ['--bootstrap-credential', canonicalJsonBytes(metadata).toString('base64url')], input, 60000);
+  const credential = (metadata: Record<string, unknown>, input?: Buffer) => {
+    const action = INSTALLED_UPGRADE_CREDENTIAL_ACTIONS.find(value => value === metadata.kind); assert(action);
+    return acceptedCommand(path.join(recipe.stateRoot, 'runtime/bootstrap'),
+      ['--bootstrap-credential', canonicalJsonBytes(metadata).toString('base64url')], input, 60000, action);
+  };
   const show = (unit: string) => Object.fromEntries(acceptedCommand('/usr/bin/systemctl', ['--user', 'show', unit,
     '--property=ActiveState,SubState,MainPID,ExecMainPID,InvocationID,Type,Delegate,KillMode,Result,ExecMainCode,ExecMainStatus,TimeoutStopUSec', '--no-pager'])
     .toString('utf8').trim().split('\n').map(line => { const at = line.indexOf('='); assert(at > 0); return [line.slice(0, at), line.slice(at + 1)]; }));

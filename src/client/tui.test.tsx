@@ -10,6 +10,7 @@ import type { ToolCallInputV1 } from '../protocol/agent-ir.js';
 import { createInstalledControlSession } from '../control/session.js';
 import type { InstalledSupervisorClient } from '../state/installed-control-client.js';
 import { createClientApplication } from './application.js';
+import { parseClientInvocation } from './commands.js';
 import { readWaitingPresentation } from './artifacts.js';
 import { ClientTui, splitClientCommand } from './tui.js';
 import { at, ref, hello, protocolClient, outputStream, runSnapshot } from './testing/protocol.js';
@@ -102,6 +103,54 @@ test('local client tokenization preserves quoted data without shell expansion or
     ['run', 'literal $(not-executed)', '--model', 'a b', '--provider', 'ollama']);
   assert.throws(() => splitClientCommand('run "unfinished'));
   assert.deepEqual(splitClientCommand('input run --text ""'), ['input', 'run', '--text', '']);
+});
+
+test('Ink retains a planned Node check across follow-ups and consumes a fresh real response grant for each new Run', async () => {
+  const defaults = { guestToolchainManifestId: 'installed-node-toolchain', preferences: { schemaVersion: 1 as const,
+    modelSelections: [{ alias: 'deepseek', provider: 'openai-compatible' as const, model: 'deepseek-flash',
+      endpointRegistrationId: 'endpoint', credentialGrantId: 'credential' }], defaultModelAlias: 'deepseek' } };
+  const initial = parseClientInvocation(['run', 'Initial task', '--check-node', 'check.test.mjs', '--policy', 'yolo'], '/workspace', defaults);
+  assert.equal(initial.kind, 'run'); if (initial.kind !== 'run') return;
+  let grants = 0, submissions = 0;
+  const identityRequests: unknown[] = [];
+  const terminal = (id: string) => {
+    const snapshot = runSnapshot();
+    const { frontierRef: _frontier, ...run } = snapshot.run;
+    return { ...snapshot, run: { ...run, id, revision: 2, status: 'succeeded', nextStep: null, terminalReason: 'verified', resultRef: ref } };
+  };
+  const f = protocolClient({ hello: { ...hello, enabledFeatureIds: [...hello.enabledFeatureIds, 'authorization.create'] },
+    'authorization.create': async (request: unknown) => { identityRequests.push(request); return { protocolVersion: 1, ok: true,
+      result: { method: 'authorization.create', grant: { schemaVersion: 1, grantId: `followup-grant-${++grants}`, state: 'active',
+        targetKind: 'execution_identity_read', purpose: 'verifier', targetDigest: ref, useCount: 0, rowVersion: 1,
+        createdAt: at, expiresAt: '2026-10-27T00:00:00.000Z' } } }; },
+    'run.submit': async () => { const snapshot = runSnapshot(); snapshot.run.id = `followup-${++submissions}`;
+      return { protocolVersion: 1, ok: true, result: { method: 'run.submit', snapshot } }; },
+    'run.get': async (request: { runId: string }) => ({ protocolVersion: 1, ok: true, result: { method: 'run.get', snapshot: terminal(request.runId),
+      items: [], journal: [], checkpoints: [], highWaterItemSeq: 0, highWaterJournalSeq: 0,
+      highWaterCheckpointCursor: encodeControlCheckpointCursor(request.runId, { createdAt: at, checkpointId: 'checkpoint' }), nextItemSeq: 0, nextJournalSeq: 0 } }),
+    'run.attach': async (request: { runId: string }) => ({ protocolVersion: 1, ok: true, result: { method: 'run.attach', snapshot: terminal(request.runId),
+      earliestRetainedEventSeq: 1, latestRetainedEventSeq: 1, highWaterEventSeq: 1, nextEventSeq: 1,
+      events: [{ schemaVersion: 1, kind: 'progress', runId: request.runId, eventSeq: 1, observedRunRevision: 1, phase: 'agent', occurredAt: at }] } })
+  });
+  const app = createClientApplication(f.session, () => {}), io = { input: new PassThrough(), output: outputStream().stream,
+    diagnostic: outputStream().stream, workspacePath: '/workspace', commandDefaults: defaults,
+    confirmUnverified: async () => { throw new Error('a planned required check must not ask for unverified admission'); } };
+  const ui = render(<ClientTui app={app} io={io} initialRunId="run" profile={initial.intent} nodeCheck={initial.nodeCheck} />);
+  try {
+    await until(() => ui.lastFrame()?.includes('Run run ·') === true);
+    for (let index = 1; index <= 2; index++) {
+      ui.stdin.write(`Follow-up ${index}`); await new Promise(resolve => setTimeout(resolve, 20)); ui.stdin.write('\r');
+      await until(() => submissions === index && ui.lastFrame()?.includes(`Run followup-${index} ·`) === true && !ui.lastFrame()?.includes('Working…'),
+        () => ({ frame: ui.lastFrame(), methods: f.calls.map(call => call.method), grants, submissions }));
+    }
+    assert.equal(grants, 2);
+    const requests = f.calls.filter(call => call.method === 'run.submit').map(call => call.request);
+    assert.deepEqual(requests.map(request => request.verifiers[0].identityReadGrantId), ['followup-grant-1', 'followup-grant-2']);
+    assert(requests.every(request => request.policyMode === 'yolo' && request.allowUnverified === false && request.verifiers.length === 1));
+    for (const request of identityRequests as Array<{ decision: unknown }>) assert.deepEqual(request.decision, {
+      kind: 'execution_identity_read', purpose: 'verifier', target: { kind: 'guest_toolchain', guestToolchainManifestId: 'installed-node-toolchain', toolId: 'node' } });
+    assert.equal(f.calls.some(call => call.method === 'run.cancel'), false);
+  } finally { ui.unmount(); await app.close(); }
 });
 
 test('Ink keeps code and check evidence in one result review, then follows only an explicit exact-result Delivery', async () => {

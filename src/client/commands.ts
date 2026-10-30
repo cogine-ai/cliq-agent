@@ -1,15 +1,19 @@
 import { randomBytes } from 'node:crypto';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { parseJsonStrict } from '../kernel/json.js';
-import { assertArtifactRef, normalizeAbsolutePath } from '../kernel/identity.js';
+import { assertArtifactRef, assertRequestId, normalizeAbsolutePath, normalizeBoundedText } from '../kernel/identity.js';
 import { decodeInstalledControlRequest, type InstalledControlRequestV1 } from '../control/v1.js';
-import type { RunSubmitRequest } from '../kernel/control-submit.js';
-import type { ClientCommand } from './types.js';
+import { mergeBudgets, type RunModelRequest, type RunSubmitRequest } from '../kernel/control-submit.js';
+import type { ClientCommand, ClientPreferencesV1 } from './types.js';
 
 export type RunIntent = Omit<RunSubmitRequest, 'method' | 'protocolVersion' | 'requestId' | 'requestDigest' | 'admissionKey' | 'sessionId' | 'expectedContextRevision'>;
+export type ClientInvocationDefaults = Readonly<{ preferences: ClientPreferencesV1; guestToolchainManifestId?: string }>;
+export type ClientNodeCheck = Readonly<{ path: string; guestToolchainManifestId: string }>;
 export type ClientInvocation =
   | Readonly<{ kind: 'command'; command: ClientCommand; json: boolean }>
-  | Readonly<{ kind: 'run'; intent: RunIntent; sessionId?: string; detach: boolean; json: boolean }>
+  | Readonly<{ kind: 'run'; intent: RunIntent; sessionId?: string; nodeCheck?: ClientNodeCheck; detach: boolean; json: boolean }>
+  | Readonly<{ kind: 'result'; runId: string; wait: true; json: boolean }>
+  | Readonly<{ kind: 'request-replay'; requestId: string; json: boolean }>
   | Readonly<{ kind: 'attach'; runId: string; afterEventSeq: number; json: boolean }>
   | Readonly<{ kind: 'cancel'; runId: string; expectedRevision?: number; json: boolean }>
   | Readonly<{ kind: 'apply'; sourceRunId: string; expectedRunResultRef?: string; options: Record<string, unknown>; detach: boolean; json: boolean }>
@@ -39,6 +43,19 @@ function natural(value: string, minimum = 0): number {
     throw new TypeError('expected an exact nonnegative integer');
   return Number(value);
 }
+function usdMicros(value: string): number {
+  if (!/^(?:0|[1-9][0-9]{0,6})(?:\.[0-9]{1,6})?$/u.test(value)) throw new TypeError('USD budget needs an exact decimal with at most six fractional digits');
+  const [whole, fraction = ''] = value.split('.');
+  const micros = BigInt(whole!) * 1_000_000n + BigInt(fraction.padEnd(6, '0'));
+  if (micros < 1n || micros > 1_000_000_000_000n) throw new TypeError('USD budget is outside the existing Run bound');
+  return Number(micros);
+}
+function checkNodePath(value: string): string {
+  if (normalizeBoundedText(value, 1, 4096) !== value || !value.endsWith('.mjs') || value.startsWith('-') || value.includes('\\') ||
+      value.split('/').some(part => !part || part === '.' || part === '..' || part === '.git' || Buffer.byteLength(part) > 255))
+    throw new TypeError('Node check must be a canonical relative .mjs path');
+  return value;
+}
 function parsed(argv: readonly string[]) {
   const positionals: string[] = [], flags = new Map<string, string[]>();
   for (let index = 0; index < argv.length; index++) {
@@ -46,7 +63,7 @@ function parsed(argv: readonly string[]) {
     if (arg === '--') { positionals.push(...argv.slice(index + 1)); break; }
     if (!arg.startsWith('--')) { positionals.push(arg); continue; }
     if (arg.includes('=')) throw new TypeError('use a separate value after an option');
-    const boolean = ['--json', '--detach', '--allow-unverified'].includes(arg);
+    const boolean = ['--json', '--detach', '--allow-unverified'].includes(arg) || arg === '--wait' && positionals[0] === 'result';
     const value = boolean ? 'true' : argv[++index];
     if (value === undefined || !boolean && value.startsWith('--')) throw new TypeError('option needs its explicit value');
     flags.set(arg, [...(flags.get(arg) ?? []), value]);
@@ -62,7 +79,7 @@ function parsed(argv: readonly string[]) {
 }
 /** Arguments describe an explicit client operation. They never load repository
  * config, model credentials, a runner, or an installation/release-key override. */
-export function parseClientInvocation(argv: readonly string[], workspacePath: string): ClientInvocation {
+export function parseClientInvocation(argv: readonly string[], workspacePath: string, defaults?: ClientInvocationDefaults): ClientInvocation {
   if (argv.length > 1000 || argv.reduce((total, value) => total + Buffer.byteLength(value), 0) > 1_048_576)
     throw new TypeError('client arguments exceed the bounded control input');
   if (!argv.length || argv[0] === 'help' || argv[0] === '--help') return { kind: 'help' };
@@ -75,28 +92,71 @@ export function parseClientInvocation(argv: readonly string[], workspacePath: st
   if (name === 'jsonl' || name === 'rpc') { if (words.length || json) throw new TypeError('stdio mode has no positional or output options'); result = { kind: name }; }
   else if (name === 'tui') { const runId = p.take('--run'); if (words.length || json) throw new TypeError('TUI selection uses --run'); result = { kind: 'tui', ...(runId ? { runId } : {}) }; }
   else if (name === 'request') { const raw = oneId(); result = command(parseJsonStrict(raw)); }
+  else if (name === 'requests' && words.shift() === 'replay') {
+    const requestId = oneId(); assertRequestId(requestId); result = { kind: 'request-replay', requestId, json };
+  }
   else if (name === 'reconnect') { if (words.length) throw new TypeError('reconnect has no id'); result = { kind: 'command', command: { kind: 'reconnect' }, json }; }
   else if (name === 'run' || name === 'resume') {
     const sessionId = name === 'resume' ? words.shift() : p.take('--session');
     if (name === 'resume' && !sessionId) throw new TypeError('resume requires an explicit Session id');
     const objective = words.join(' '); if (!objective) throw new TypeError('a new objective is required');
-    const provider = p.required('--provider'), model = p.required('--model');
+    const provider = p.take('--provider'), model = p.take('--model');
     const endpoint = p.take('--endpoint'), credentials = p.all('--credential-grant');
-    const selectedModel = provider === 'ollama' ? { provider, model } : { provider, model,
-      endpoint: { kind: 'registered', endpointRegistrationId: endpoint }, modelCredentialGrantIds: credentials };
-    if (provider === 'ollama' ? endpoint !== undefined || credentials.length !== 0 : endpoint === undefined || !credentials.length)
-      throw new TypeError('remote models need registered endpoint and credential grant ids; local models take neither');
+    let selectedModel: RunModelRequest, aliasSelected = false;
+    if (provider === undefined) {
+      if (endpoint !== undefined || credentials.length) throw new TypeError('model aliases cannot override endpoint or credential ids');
+      const alias = model ?? defaults?.preferences.defaultModelAlias;
+      const matches = defaults?.preferences.modelSelections.filter(selected => selected.alias === alias) ?? [];
+      if (alias === undefined || matches.length !== 1) throw new TypeError('select a configured model alias or supply explicit provider options');
+      const selected = matches[0]!; aliasSelected = true;
+      selectedModel = { provider: selected.provider, model: selected.model,
+        endpoint: { kind: 'registered', endpointRegistrationId: selected.endpointRegistrationId }, modelCredentialGrantIds: [selected.credentialGrantId] };
+    } else {
+      if (model === undefined) throw new TypeError('--model is required with --provider');
+      if (provider === 'ollama' ? endpoint !== undefined || credentials.length !== 0 : endpoint === undefined || !credentials.length)
+        throw new TypeError('remote models need registered endpoint and credential grant ids; local models take neither');
+      selectedModel = (provider === 'ollama' ? { provider, model } : { provider, model,
+        endpoint: { kind: 'registered', endpointRegistrationId: endpoint }, modelCredentialGrantIds: credentials }) as RunModelRequest;
+    }
     const supplied = p.take('--options'), options = supplied === undefined ? {} : jsonObject(supplied);
     const allowed = ['budgets', 'sandboxResources', 'verifiers', 'dependency', 'sourceIncludes', 'sourceExcludes',
       'maxChangedPaths', 'maxChangedBytes', 'registeredMcpServerIds', 'skillIds', 'sourceInspectionGrantId', 'ignoreReadGrantIds'];
     if (Object.keys(options).some(key => !allowed.includes(key))) throw new TypeError('Run options contain an unsupported field');
+    const dollars = p.take('--budget-usd'), tokens = p.take('--budget-tokens');
+    if (dollars !== undefined || tokens !== undefined || aliasSelected && defaults?.preferences.budgetDefaults !== undefined) {
+      const suppliedBudget = options.budgets;
+      if (suppliedBudget !== undefined && (!suppliedBudget || typeof suppliedBudget !== 'object' || Array.isArray(suppliedBudget) ||
+          Object.keys(suppliedBudget).some(key => !['wallTimeMs', 'modelTokens', 'costMicros', 'toolCalls', 'repairAttempts', 'childDepth', 'childConcurrency'].includes(key))))
+        throw new TypeError('Run budget options contain an unsupported field');
+      if (dollars !== undefined && suppliedBudget !== undefined && Object.hasOwn(suppliedBudget as object, 'costMicros'))
+        throw new TypeError('USD budget cannot be combined with an explicit costMicros option');
+      if (tokens !== undefined && suppliedBudget !== undefined && Object.hasOwn(suppliedBudget as object, 'modelTokens'))
+        throw new TypeError('token budget cannot be combined with an explicit modelTokens option');
+      options.budgets = mergeBudgets({ ...(aliasSelected ? defaults?.preferences.budgetDefaults : {}),
+        ...(suppliedBudget as Partial<RunIntent['budgets']> | undefined), ...(dollars === undefined ? {} : { costMicros: usdMicros(dollars) }),
+        ...(tokens === undefined ? {} : { modelTokens: natural(tokens, 1) }) });
+    }
+    const policyMode = p.take('--policy') ?? 'default', checkPath = p.take('--check-node');
+    let nodeCheck: ClientNodeCheck | undefined;
+    if (checkPath !== undefined) {
+      if (policyMode !== 'yolo') throw new TypeError('the fixed Node verifier requires explicit --policy yolo');
+      if (Object.hasOwn(options, 'verifiers')) throw new TypeError('Node check cannot be combined with explicit verifiers');
+      const guestToolchainManifestId = defaults?.guestToolchainManifestId;
+      if (typeof guestToolchainManifestId !== 'string' || normalizeBoundedText(guestToolchainManifestId, 1, 128) !== guestToolchainManifestId)
+        throw new TypeError('the selected installation has no supported Node verifier toolchain');
+      nodeCheck = { path: checkNodePath(checkPath), guestToolchainManifestId };
+    }
     const intent = { workspacePath: normalizeAbsolutePath(p.take('--workspace') ?? workspacePath), objective, model: selectedModel,
-      policyMode: p.take('--policy') ?? 'default', verifiers: [], dependency: { mode: 'none' }, sourceIncludes: [], sourceExcludes: [],
+      policyMode, verifiers: [], dependency: { mode: 'none' }, sourceIncludes: [], sourceExcludes: [],
       registeredMcpServerIds: [], skillIds: [], ...options, allowUnverified: p.take('--allow-unverified') === 'true' } as RunIntent;
+    if (nodeCheck && intent.allowUnverified) throw new TypeError('a required Node check cannot select unverified admission');
     // Validate the complete method-specific inline value before opening a
-    // connection; these temporary ids grant no permission or execution.
-    clientMutation({ method: 'run.submit', ...intent, sessionId: sessionId ?? 'new-session', expectedContextRevision: 1 }, true);
-    result = { kind: 'run', intent, ...(sessionId ? { sessionId } : {}), detach: p.take('--detach') === 'true', json };
+    // connection. Consent and a planned check's real grant are resolved later;
+    // this unsent syntax draft is never an admission or permission decision.
+    clientMutation({ method: 'run.submit', ...intent,
+      allowUnverified: intent.allowUnverified || !intent.verifiers.some(verifier => verifier.required),
+      sessionId: sessionId ?? 'new-session', expectedContextRevision: 1 }, true);
+    result = { kind: 'run', intent, ...(sessionId ? { sessionId } : {}), ...(nodeCheck ? { nodeCheck } : {}), detach: p.take('--detach') === 'true', json };
   } else if (name === 'list') {
     const sessionId = p.take('--session'), operation = p.take('--operation'), statuses = p.all('--status'), cursor = p.take('--cursor'), limit = p.take('--limit');
     if (words.length) throw new TypeError('list uses filters, not positional ids');
@@ -117,7 +177,10 @@ export function parseClientInvocation(argv: readonly string[], workspacePath: st
     const value = decodeInstalledControlRequest({ protocolVersion: 1, method: 'artifact.get', digest: oneId(), offset: 0, length: 65536 });
     if (value.method !== 'artifact.get') throw new TypeError('invalid artifact export'); result = { kind: 'artifact', digest: value.digest };
   }
-  else if (name === 'diff' || name === 'result') result = read(`run.${name}`, { runId: oneId() });
+  else if (name === 'diff' || name === 'result') {
+    const runId = oneId();
+    result = name === 'result' && p.take('--wait') === 'true' ? { kind: 'result', runId, wait: true, json } : read(`run.${name}`, { runId });
+  }
   else if (name === 'attach') result = { kind: 'attach', runId: oneId(), afterEventSeq: natural(p.take('--after') ?? '0'), json };
   else if (name === 'cancel') { const expected = p.take('--revision'); result = { kind: 'cancel', runId: oneId(), ...(expected ? { expectedRevision: natural(expected, 1) } : {}), json }; }
   else if (name === 'approve' || name === 'input' || name === 'reconcile') {

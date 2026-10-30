@@ -16,6 +16,9 @@ import { decodeRetainedRunAssembly } from '../../../src/model/run-assembly.js';
 import { decodeRunResult, decodeWorkspaceDiff, decodeVerificationClosure, decodeInheritedVerificationProvenance } from '../../../src/state/result-artifacts.js';
 import { decodeVerificationReceipt, decodeVerifierCommand, decodeVerifierEnvironment } from '../../../src/state/verifier-artifacts.js';
 import { decodeDeliveryTerminalProjectionEvidence } from '../../../src/kernel/publication.js';
+import { decodeHeadlessControlRecord } from '../../../src/control/v1.js';
+import { terminalText } from '../../../src/client/view.js';
+import type { InstalledVerifierOutcome } from './installed-verifier-result.js';
 
 export const PROVIDER_JOURNEY_FILES = Object.freeze({
   'math.mjs': 'export function add(a, b) {\n  return a - b;\n}\n',
@@ -26,7 +29,7 @@ const ZERO: BudgetUsage = { modelTokens: 0, costMicros: 0, toolCalls: 0, repairA
 const ARTIFACT_BYTES = 64 * 1024 * 1024, REQUEST_MS = 30_000, TERMINAL_MS = 90_000;
 type Result<M extends InstalledControlFeature> = Extract<InstalledControlResponseFor<M>, { ok: true }>['result'];
 type Cut = Result<'run.get'>;
-export type ProviderJourneyStage = 'workspace' | 'session' | 'authorization' | 'admission' | 'execution' | 'result' |
+export type ProviderJourneyStage = 'setup' | 'model_setup' | 'workspace' | 'session' | 'authorization' | 'admission' | 'execution' | 'result' |
   'review' | 'reconnect' | 'application' | 'publication' | 'accounting';
 export class InstalledProviderJourneyError extends Error {
   readonly code = 'INSTALLED_PROVIDER_JOURNEY_REFUSED';
@@ -47,6 +50,17 @@ export type InstalledProviderJourneyContext = Readonly<{
   mark?(phase: ProviderJourneyStage): void;
 }>;
 const check = (condition: unknown): void => { if (!condition) throw new Error('public provider workflow invariant failed'); };
+export type InstalledDailyProviderJourneyInput = Readonly<Omit<InstalledProviderJourneyInput, 'model' | 'guestToolchainManifestId'> & {
+  model: Readonly<{ provider: 'openai-compatible'; model: string }>; modelAlias: string;
+}>;
+export type InstalledDailyProviderJourneyContext = InstalledProviderJourneyContext & Readonly<{
+  /** The fixture owns this actual same-user signed SEA child and credential
+   * stdin. No secret, native proof or execution authority crosses here. */
+  command(argv: readonly string[], timeoutMs: number): Promise<Readonly<{ stdout: Buffer }>>;
+  verifySource(cut: Cut, session: Result<'session.get'>): Promise<InstalledVerifierOutcome>;
+}>;
+type Journey = { kind: 'control'; input: InstalledProviderJourneyInput; context: InstalledProviderJourneyContext } |
+  { kind: 'daily'; input: InstalledDailyProviderJourneyInput; context: InstalledDailyProviderJourneyContext };
 const same = (a: unknown, b: unknown) => check(canonicalJsonBytes(a).equals(canonicalJsonBytes(b)));
 
 /** Run only after the owner has installed and registered the actual package,
@@ -54,6 +68,16 @@ const same = (a: unknown, b: unknown) => check(canonicalJsonBytes(a).equals(cano
  * can exercise these decisions, but can never turn this report into provider,
  * containment, billing, installation or complete I1/I2 qualification. */
 export async function runInstalledProviderJourney(input: InstalledProviderJourneyInput, context: InstalledProviderJourneyContext) {
+  return runProviderJourney({ kind: 'control', input, context });
+}
+/** The owner first runs normal setup and model enrollment, retaining their
+ * actual process/pipe joins. This completes its three remaining normal commands
+ * and shared read-only evidence checks, never provider/billing qualification. */
+export async function runInstalledDailyProviderJourney(input: InstalledDailyProviderJourneyInput, context: InstalledDailyProviderJourneyContext) {
+  return runProviderJourney({ kind: 'daily', input, context });
+}
+async function runProviderJourney(journey: Journey) {
+  const { input, context } = journey;
   let stage: ProviderJourneyStage = 'workspace';
   const mark = (next: ProviderJourneyStage) => { stage = next; context.mark?.(next); };
   try {
@@ -76,8 +100,38 @@ export async function runInstalledProviderJourney(input: InstalledProviderJourne
       same([...observation.paths].sort(), ['check.test.mjs', 'math.mjs']);
       check(observation.math.equals(expectedMath) && observation.test.equals(Buffer.from(PROVIDER_JOURNEY_FILES['check.test.mjs'])));
     };
+    async function daily(argv: readonly string[], timeoutMs = REQUEST_MS): Promise<Buffer> {
+      if (journey.kind !== 'daily') throw new Error('daily command scope required');
+      const output = await journey.context.command(argv, timeoutMs);
+      check(Buffer.isBuffer(output.stdout) && output.stdout.length <= 2 * 1024 * 1024); return output.stdout;
+    }
+    function admittedOutput<M extends 'run.submit' | 'run.apply'>(bytes: Buffer, method: M): Result<M> {
+      const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+      check(text.endsWith('\n'));
+      const records = text.slice(0, -1).split('\n').map(line => {
+        const value = parseJsonStrict(line); check(canonicalJsonBytes(value).equals(Buffer.from(line))); return decodeHeadlessControlRecord(value);
+      });
+      const matches = records.filter(record => record.type === 'response' && record.response.ok && record.response.result.method === method);
+      check(matches.length === 1);
+      const selected = matches[0]!;
+      if (selected.type !== 'response' || !selected.response.ok) throw new Error('daily admission response required');
+      return selected.response.result as Result<M>;
+    }
     const originalMath = Buffer.from(PROVIDER_JOURNEY_FILES['math.mjs']);
     await observe(originalMath);
+    let sourceRunId: string, submit: InstalledControlRequestV1 | undefined, admitted: Result<'run.submit'>;
+    if (journey.kind === 'daily') {
+      mark('admission');
+      const { modelTokens, costMicros, ...otherBudgets } = input.budgets;
+      const usd = `${Math.floor(costMicros / 1_000_000)}.${String(costMicros % 1_000_000).padStart(6, '0')}`;
+      admitted = admittedOutput(await daily(['run',
+        'Fix the add function in math.mjs so the existing check.test.mjs tests pass. Inspect the files and edit only math.mjs. Preserve check.test.mjs byte-for-byte. Do not add files, dependencies or network calls. Finish with a concise explanation of the fix.',
+        '--workspace', input.workspacePath, '--model', journey.input.modelAlias, '--check-node', 'check.test.mjs', '--policy', 'yolo',
+        '--budget-usd', usd, '--budget-tokens', String(modelTokens), '--trust-workspace', '--detach', '--json',
+        '--options', canonicalJsonBytes({ budgets: otherBudgets, maxChangedPaths: 1, maxChangedBytes: 65_536 }).toString('utf8')]), 'run.submit');
+      sourceRunId = admitted.snapshot.run.id; check(admitted.snapshot.operation === 'agent');
+    } else {
+    const input = journey.input;
     mark('session');
     const created = await send(clientMutation({ method: 'session.create', workspacePath: input.workspacePath }, true), 'session.create');
     const session = created.snapshot.session;
@@ -87,7 +141,7 @@ export async function runInstalledProviderJourney(input: InstalledProviderJourne
     check(authorized.grant.state === 'active' && authorized.grant.purpose === 'verifier' &&
       authorized.grant.targetKind === 'execution_identity_read' && authorized.grant.useCount === 0);
     mark('admission');
-    const submit = clientMutation({ method: 'run.submit', sessionId: session.id, expectedContextRevision: session.contextRevision,
+    submit = clientMutation({ method: 'run.submit', sessionId: session.id, expectedContextRevision: session.contextRevision,
       workspacePath: input.workspacePath,
       objective: 'Fix the add function in math.mjs so the existing check.test.mjs tests pass. Inspect the files and edit only math.mjs. Preserve check.test.mjs byte-for-byte. Do not add files, dependencies or network calls. Finish with a concise explanation of the fix.',
       model: input.model, policyMode: 'yolo', budgets: input.budgets, maxChangedPaths: 1, maxChangedBytes: 65_536,
@@ -95,8 +149,9 @@ export async function runInstalledProviderJourney(input: InstalledProviderJourne
         argv: CHECK_ARGS.map(value => ({ kind: 'non_secret_literal', value })), cwd: '.', env: {}, writableEphemeralPaths: [],
         identityReadGrantId: authorized.grant.grantId, timeoutMs: 10_000, retries: 0, outputLimitBytes: 65_536 }],
       dependency: { mode: 'none' }, sourceIncludes: [], sourceExcludes: [], registeredMcpServerIds: [], skillIds: [], allowUnverified: false }, true);
-    const admitted = await send(submit, 'run.submit'), sourceRunId = admitted.snapshot.run.id;
+    admitted = await send(submit, 'run.submit'); sourceRunId = admitted.snapshot.run.id;
     check(admitted.snapshot.operation === 'agent' && admitted.snapshot.run.sessionId === session.id);
+    }
 
     async function terminal(runId: string): Promise<Cut> {
       const by = Date.now() + TERMINAL_MS;
@@ -137,9 +192,9 @@ export async function runInstalledProviderJourney(input: InstalledProviderJourne
       return { ...captured, items, journal, checkpoints, nextItemSeq: page.nextItemSeq, nextJournalSeq: page.nextJournalSeq,
         ...(page.nextCheckpointCursor === undefined ? {} : { nextCheckpointCursor: page.nextCheckpointCursor }) };
     }
-    async function accounting(cut: Cut) {
+    async function accounting(cut: Cut, verifiedRepairs = 0) {
       same(cut.snapshot.run.budgetReserved, ZERO);
-      const consumed = { ...ZERO }, settlements = new Map<string, string>();
+      const consumed = { ...ZERO, repairAttempts: verifiedRepairs }, settlements = new Map<string, string>();
       for (const row of cut.journal) {
         if (row.budgetSettlementRef === undefined) continue;
         const key = `${row.opId}\0${row.attempt}`, previous = settlements.get(key);
@@ -205,20 +260,42 @@ export async function runInstalledProviderJourney(input: InstalledProviderJourne
       row.attempt === passed.attempt && row.phase === 'completed' && row.receiptRef === receiptRef);
     check(verifierCompletion && verifierCompletion.seq === passed.completedJournalSeq);
     check(source.journal.some(row => row.opKind === 'model' && row.phase === 'completed') && source.journal.some(row => row.opKind === 'tool' && row.phase === 'completed'));
-    mark('accounting'); const sourceConsumed = await accounting(source);
-    check(sourceConsumed.costMicros > 0 && sourceConsumed.modelTokens > 0);
+    let sourceVerification: InstalledVerifierOutcome | undefined;
+    if (journey.kind === 'daily') {
+      const session = await send({ protocolVersion: 1, method: 'session.get', sessionId: source.snapshot.run.sessionId, limit: 100 }, 'session.get');
+      check(session.nextItemSeq === session.highWaterItemSeq);
+      sourceVerification = await journey.context.verifySource(source, session);
+      check(sourceVerification.runId === sourceRunId && sourceVerification.status === 'succeeded' && sourceVerification.terminalReason === 'verified' &&
+        sourceVerification.candidateCount === 2 && sourceVerification.verifierAttemptCount === 2 && sourceVerification.repairCount === 1 &&
+        sourceVerification.checkedFileCount === 2 && source.snapshot.run.repairCount === 1);
+    }
+    mark('accounting'); const sourceConsumed = await accounting(source, sourceVerification?.repairCount);
+    check((journey.kind === 'daily' ? sourceConsumed.costMicros === 0 : sourceConsumed.costMicros > 0) && sourceConsumed.modelTokens > 0);
     for (const dimension of Object.keys(ZERO) as (keyof BudgetUsage)[]) check(sourceConsumed[dimension] <= input.budgets[dimension]);
     mark('review');
     const review: ClientDetail[] = [];
     await presentControlArtifacts({ artifact: context.artifact }, { protocolVersion: 1, method: 'run.result', runId: sourceRunId },
       { protocolVersion: 1, ok: true, result: reply }, async detail => { review.push(detail); await context.review?.(detail); });
     check(review.length === 1 && review[0]!.artifactRef === reply.result.ref);
-    mark('reconnect'); await context.reconnect(); same(await send(submit, 'run.submit'), admitted); same(await fullCut(sourceRunId), source);
+    if (journey.kind === 'daily') {
+      const output = await daily(['result', sourceRunId, '--wait']);
+      check(output.includes(Buffer.from(`${terminalText(review[0]!.label)} · ${reply.result.ref}\n${terminalText(review[0]!.text)}\n`)));
+    }
+    mark('reconnect'); await context.reconnect();
+    if (journey.kind === 'control') same(await send(submit, 'run.submit'), admitted);
+    same(await fullCut(sourceRunId), source);
     await observe(originalMath);
     mark('application');
-    const apply = clientMutation({ method: 'run.apply', sourceRunId, expectedRunResultRef: reply.result.ref,
+    let apply: InstalledControlRequestV1 | undefined, applied: Result<'run.apply'>;
+    if (journey.kind === 'daily') {
+      applied = admittedOutput(await daily(['apply', sourceRunId, '--result', reply.result.ref, '--json', '--options',
+        canonicalJsonBytes({ budgets: { wallTimeMs: input.budgets.wallTimeMs, toolCalls: input.budgets.toolCalls } }).toString('utf8')], TERMINAL_MS), 'run.apply');
+    } else {
+    apply = clientMutation({ method: 'run.apply', sourceRunId, expectedRunResultRef: reply.result.ref,
       budgets: { wallTimeMs: input.budgets.wallTimeMs, toolCalls: input.budgets.toolCalls } }, true);
-    const applied = await send(apply, 'run.apply'), deliveryRunId = applied.snapshot.run.id;
+    applied = await send(apply, 'run.apply');
+    }
+    const deliveryRunId = applied.snapshot.run.id;
     check(applied.snapshot.operation === 'delivery' && deliveryRunId !== sourceRunId);
     mark('publication'); await terminal(deliveryRunId); const delivery = await fullCut(deliveryRunId);
     check(delivery.snapshot.operation === 'delivery' && delivery.snapshot.run.status === 'succeeded' && delivery.snapshot.run.terminalReason === 'verified');
@@ -243,7 +320,8 @@ export async function runInstalledProviderJourney(input: InstalledProviderJourne
     await observe(fixedMath);
     mark('accounting'); const deliveryConsumed = await accounting(delivery);
     check(deliveryConsumed.costMicros === 0 && deliveryConsumed.modelTokens === 0);
-    mark('reconnect'); await context.reconnect(); same(await send(apply, 'run.apply'), applied);
+    mark('reconnect'); await context.reconnect();
+    if (journey.kind === 'control') same(await send(apply, 'run.apply'), applied);
     same(await fullCut(deliveryRunId), delivery); same(await fullCut(sourceRunId), source); await observe(fixedMath);
     return { protocolWorkflowComplete: true as const, actualProviderQualified: false as const, actualProviderBillingQualified: false as const,
       officialReleaseQualified: false as const, completeI1Qualified: false as const, completeI2Qualified: false as const,
@@ -251,7 +329,9 @@ export async function runInstalledProviderJourney(input: InstalledProviderJourne
       verificationClosureRef: result.verificationClosureRef, receiptRef, diffRef: result.diffRef,
       sourceConsumed, deliveryConsumed, sourceJournalEntries: source.journal.length, deliveryJournalEntries: delivery.journal.length,
       completedModelCalls: source.journal.filter(row => row.opKind === 'model' && row.phase === 'completed').length,
-      hostFileDigest: mathFile.blobRef, preservedTestDigest: testFile.blobRef, reviewedArtifactRef: review[0]!.artifactRef };
+      hostFileDigest: mathFile.blobRef, preservedTestDigest: testFile.blobRef, reviewedArtifactRef: review[0]!.artifactRef,
+      ...(journey.kind === 'daily' ? { normalCliWorkflowComplete: true as const, reviewApplyWorkflowCommandCount: 3 as const,
+        controlledHttpsProvider: true as const, sourceVerification } : {}) };
   } catch {
     // Provider/tool bytes and arbitrary assertions must never become a retained
     // diagnostic, cause chain or console message in the credential-owning owner.

@@ -7,6 +7,8 @@ import type { InstalledSupervisorClient } from '../state/installed-control-clien
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import { ResourceRetirementError } from '../state/errors.js';
 import type { HeldInstalledRuntime } from '../state/installed-runtime.js';
+import { readFileSync } from 'node:fs';
+import ts from 'typescript';
 
 // Existing byte-consumer seam, never a genuine installed peer/Run/native proof.
 test('the shared SDK host keeps the original pending request through reconnect and joins one explicit replay', async () => {
@@ -76,4 +78,41 @@ test('SDK detach joins the borrowed output callback without closing or replacing
   assert.equal(delivered, 1);
   release(); await Promise.all([operation, closing]);
   assert.equal(joined, true); assert.equal(f.calls.some(call => call.method === 'run.cancel'), false);
+});
+
+test('only joined uncancelled text/JSON output may acknowledge known sends; Ink retains them', () => {
+  // Routing assertion only. No structural installation/stdio/native handle is
+  // supplied to the host, and no render callback is fabricated as delivery.
+  const source = ts.createSourceFile('installed-host.ts', readFileSync(new URL('./installed-host.ts', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true);
+  let ink: ts.VariableDeclaration | undefined, acknowledgement: ts.CallExpression | undefined;
+  const visit = (node: ts.Node) => {
+    if (ts.isVariableDeclaration(node) && node.name.getText(source) === 'ink') ink = node;
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === 'acknowledgeSent') {
+      assert.equal(acknowledgement, undefined); acknowledgement = node;
+    }
+    ts.forEachChild(node, visit);
+  }; visit(source); assert(ink?.initializer); assert(acknowledgement);
+  let guarded: ts.Node = acknowledgement;
+  while (guarded.parent && !ts.isIfStatement(guarded)) guarded = guarded.parent;
+  assert(ts.isIfStatement(guarded));
+  const usesInk = new Function('invocation', 'owned', `return (${ink.initializer.getText(source)});`) as
+    (invocation: object, owned: object) => boolean;
+  const acknowledges = new Function('result', 'signal', 'ink', `return (${guarded.expression.getText(source)});`) as
+    (result: number, signal: { aborted: boolean }, ink: boolean) => boolean;
+  for (const [invocation, tty, expected] of [
+    [{ kind: 'tui' }, true, false], [{ kind: 'tui' }, false, false],
+    [{ kind: 'attach', json: false }, true, false], [{ kind: 'attach', json: true }, true, true],
+    [{ kind: 'run', json: false, detach: false }, true, false], [{ kind: 'apply', json: false, detach: false }, true, false],
+    [{ kind: 'run', json: true, detach: false }, true, true], [{ kind: 'apply', json: false, detach: true }, true, true],
+    [{ kind: 'run', json: false, detach: false }, false, true], [{ kind: 'request-replay', json: false }, true, true],
+    [{ kind: 'jsonl' }, false, true], [{ kind: 'rpc' }, false, true]
+  ] as const) {
+    const interactive = usesInk(invocation, { io: { output: { isTTY: tty } } });
+    assert.equal(acknowledges(0, { aborted: false }, interactive), expected);
+    assert.equal(acknowledges(0, { aborted: true }, interactive), false);
+    assert.equal(acknowledges(1, { aborted: false }, interactive), false);
+  }
+  const text = source.getFullText();
+  assert(text.indexOf('await owned.close()') < acknowledgement.getStart(source));
+  assert(text.indexOf('if (failure !== undefined) throw failure') < acknowledgement.getStart(source));
 });
