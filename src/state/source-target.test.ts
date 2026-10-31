@@ -158,7 +158,7 @@ test('installed recipe reaches only its connected exact Node verifier subset wit
   t.after(async () => { owned?.close(); await rm(directory, { recursive: true, force: true }); });
   const driver = owned = openSqliteDriver(path.join(directory, 'state.sqlite'));
   driver.exec('CREATE TABLE authorization_grants (grant_id TEXT PRIMARY KEY, owner_principal_id TEXT NOT NULL, state TEXT NOT NULL, row_json TEXT NOT NULL) STRICT');
-  const discovery = { structuredArtifacts: [], guestToolchainManifestRefs: [], entries: [] } as Parameters<typeof selectVerifierReleaseReference>[1];
+  const discovery = (await signedToolBundle(testFixture().assembly, [])).bundle;
   assert.equal(driver.prepare('SELECT COUNT(*) AS count FROM authorization_grants').get<{ count: bigint }>()!.count, 0n);
   for (const policyMode of ['default', 'accept-edits', 'plan', 'yolo'] as const) {
     const selected = { ...request, policyMode };
