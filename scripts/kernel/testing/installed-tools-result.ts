@@ -87,7 +87,7 @@ export async function assertInstalledToolsOutcome(input: { cut: Record<string, a
     assert.equal(capture.targetRef, prepared.target); assert.equal(capture.grantRef, prepared.grantRef);
     assert.equal(capture.opId, opId); assert.equal(capture.tool, call.name); assert.equal(capture.leaseEpoch, claim.leaseEpoch);
     const launch = decodeBuiltinScriptSandboxLaunchSpec(await object(claim.sandboxLaunchSpecRef));
-    const containment = decodeBuiltinProcessContainment(await object(capture.containmentRef));
+    const containment = decodeBuiltinProcessContainment(await object(capture.containmentRef), launch.parentWorkerContainmentRef);
     const death = await object(capture.deathEvidenceRef);
     assert.equal(capture.sandboxLaunchSpecRef, claim.sandboxLaunchSpecRef); assert.equal(death.evidenceDigest, digestOmitting(death, 'evidenceDigest'));
     assert.equal(death.containmentRef, capture.containmentRef); assert.equal(death.sandboxLaunchSpecRef, claim.sandboxLaunchSpecRef);

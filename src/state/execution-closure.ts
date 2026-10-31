@@ -931,15 +931,21 @@ export function decodeWorkerProcessContainment(value: unknown): ProcessContainme
   return decodeProcessContainment(value, 'worker_activation') as ProcessContainment & { owner: WorkerOwner };
 }
 
-/** Fixed invocation data, independent of its parent worker's lifetime. */
-export function decodeBuiltinProcessContainment(value: unknown): ProcessContainment & { owner: InvocationOwner } {
-  return decodeProcessContainment(value, 'run_invocation') as ProcessContainment & { owner: InvocationOwner };
+/** Fixed invocation data, bound to its original launch parent without making
+ * any claim about that parent worker's current lifetime. */
+export function decodeBuiltinProcessContainment(value: unknown, expectedParentContainmentRef: string):
+ProcessContainment & { owner: InvocationOwner; parentContainmentRef: string } {
+  const containment = decodeProcessContainment(value, 'run_invocation');
+  literal(containment.parentContainmentRef, digest(expectedParentContainmentRef, 'original invocation parent'), 'invocation parent');
+  return containment as ProcessContainment & { owner: InvocationOwner; parentContainmentRef: string };
 }
 
 function decodeProcessContainment(value: unknown, kind: 'worker_activation' | 'run_invocation'): ProcessContainment {
-  const containment = record(value, ['schemaVersion', 'planRef', 'sandboxLaunchSpecRef', 'sandboxLaunchSpecDigest', 'owner', 'filesystemBinding', 'launchNonceDigest', 'backend', 'createdAt'], 'worker containment');
+  const containment = record(value, ['schemaVersion', 'planRef', 'sandboxLaunchSpecRef', 'sandboxLaunchSpecDigest', 'owner', 'filesystemBinding', 'launchNonceDigest', 'backend', 'createdAt',
+    ...(kind === 'run_invocation' ? ['parentContainmentRef'] : [])], 'worker containment');
   literal(containment.schemaVersion, 1, 'containment schema');
-  if (kind === 'worker_activation') workerOwner(containment.owner); else invocationOwner(containment.owner);
+  if (kind === 'worker_activation') workerOwner(containment.owner);
+  else { invocationOwner(containment.owner); digest(containment.parentContainmentRef, 'invocation parent containment'); }
   filesystemBinding(containment.filesystemBinding);
   for (const key of ['planRef', 'sandboxLaunchSpecRef', 'sandboxLaunchSpecDigest', 'launchNonceDigest']) digest(containment[key], `containment ${key}`);
   const backend = record(containment.backend, ['kind', 'pidNamespaceReservationId', 'pidNamespaceId', 'cgroupPath', 'cgroupId', 'namespaceInitStartToken', 'subreaperStartToken'], 'Linux containment');

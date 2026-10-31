@@ -153,7 +153,7 @@ export async function readDependencyProcessCapture(driver: SqliteDriver, artifac
       evidence.sandboxLaunchSpecDigest !== spec.launchSpecDigest || capture.startedAt < claim.timestamp || capture.endedAt > input.observedAt ||
       capture.stdoutByteCount + capture.stderrByteCount > spec.resources.maxInvocationOutputBytes)
     throw new TypeError('dependency capture substitutes its complete original claim and resource bound');
-  const containment = decodeBuiltinProcessContainment(await readCanonicalArtifact(artifacts, capture.containmentRef));
+  const containment = decodeBuiltinProcessContainment(await readCanonicalArtifact(artifacts, capture.containmentRef), spec.parentWorkerContainmentRef);
   const death = await readCanonicalArtifact<ProcessContainmentDeathEvidenceV1>(artifacts, capture.deathEvidenceRef);
   assertControlWireJson(death); controlWireRecord(death, ['schemaVersion', 'kind', 'containmentRef', 'planRef', 'sandboxLaunchSpecRef',
     'sandboxLaunchSpecDigest', 'owner', 'launchNonceDigest', 'inspectorSupervisorInstanceId', 'inspectorIdentityRef', 'inspectorIdentityDigest',

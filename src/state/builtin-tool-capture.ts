@@ -242,7 +242,7 @@ export async function readBuiltinToolCapture(driver: SqliteDriver, artifacts: Ar
       capture.startedAt < claim.timestamp || capture.endedAt > input.observedAt ||
       capture.stdoutByteCount + capture.stderrByteCount > launch.resources.maxInvocationOutputBytes)
     throw new TypeError('builtin capture substitutes its original claim, tool or resource bound');
-  const containment = decodeBuiltinProcessContainment(await readCanonicalArtifact(artifacts, capture.containmentRef));
+  const containment = decodeBuiltinProcessContainment(await readCanonicalArtifact(artifacts, capture.containmentRef), launch.parentWorkerContainmentRef);
   const death = await readCanonicalArtifact<ProcessContainmentDeathEvidenceV1>(artifacts, capture.deathEvidenceRef);
   if (!closed(death, ['schemaVersion', 'kind', 'containmentRef', 'planRef', 'sandboxLaunchSpecRef', 'sandboxLaunchSpecDigest', 'owner',
     'launchNonceDigest', 'inspectorSupervisorInstanceId', 'inspectorIdentityRef', 'inspectorIdentityDigest', 'backend', 'observedAt', 'evidenceDigest']) ||
