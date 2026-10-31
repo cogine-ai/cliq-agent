@@ -44,7 +44,10 @@ async function factory(dependencies: Record<string, unknown>): Promise<Factory> 
     ts.isFunctionDeclaration(node) && node.name?.text === 'createDeliveryReadData');
   assert(declaration, 'execute the actual private data factory, never an authority-bearing caller');
   const names = Object.keys(dependencies);
-  const executable = ts.transpileModule(declaration.getText(source).replace(/^export\s+/u, ''),
+  const bindings = source.statements.find(node => ts.isVariableStatement(node) &&
+    node.declarationList.declarations.some(item => item.name.getText(source) === 'deliveryReadBindings'));
+  assert(bindings, 'the original private family identities must remain part of the fixture expression');
+  const executable = ts.transpileModule(bindings.getText(source) + '\n' + declaration.getText(source).replace(/^export\s+/u, ''),
     { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText;
   const create = new Script(`(function(${names.join(',')}) { ${executable}; return createDeliveryReadData; })`,
     { filename: 'actual-delivery-read-data-expression.js' }).runInThisContext() as (...values: unknown[]) => Factory;

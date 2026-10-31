@@ -29,7 +29,7 @@ import { decodeVerificationReceipt } from './verifier-artifacts.js';
 import { readInvocationJournal } from './repositories/journal.js';
 import { readWorkerLaunchesForRun } from './repositories/worker-launches.js';
 import { readWorkspaceGenerationsForRun } from './repositories/workspace-generations.js';
-import type { DeliveryReadData } from './delivery-read-data.js';
+import { assertDeliveryReadData, type DeliveryReadData } from './delivery-read-data.js';
 import { dependencyVerificationProjection } from './dependency-history.js';
 
 function assertDeliveryReadCut(driver: SqliteConnection | SqliteDriver, cut: RecoveryClosureV1) {
@@ -56,7 +56,7 @@ async function readDeliveryCandidateMaterial(driver: SqliteDriver, artifacts: Ar
 }
 
 async function readDeliveryCandidateMaterialData(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1,
-  admission: Awaited<ReturnType<typeof readDeliveryRunAdmission>>, retainedMerges?: ReadonlyMap<string, RetainedDeliveryMerge>) {
+  admission: Awaited<ReturnType<typeof readDeliveryRunAdmission>>, retainedMerges?: ReadonlyMap<string, RetainedDeliveryMerge>, history?: AgentRecoveryReadData) {
   assertDeliveryModelFreeCut(cut);
   assertDeliveryReadCut(driver, cut);
   requireEqual(admission.run, cut.run, 'delivery verification owning Run cut');
@@ -68,7 +68,10 @@ async function readDeliveryCandidateMaterialData(driver: SqliteDriver, artifacts
   const merged = [...merges.values()][0];
   if (merges.size !== 1 || !merged)
     throw new KernelStorageError('STATE_TRANSITION_INVALID', 'delivery verification requires its one complete original merge');
-  const progress = await readVerifierProgress(driver, artifacts, cut, merged.candidate.itemId);
+  const completed = history ? readAgentRecoveryData(driver, artifacts, cut, history) : undefined;
+  const progress = completed ? completed.verifierProgressByCandidate.get(merged.candidate.itemId)
+    : await readVerifierProgress(driver, artifacts, cut, merged.candidate.itemId);
+  if (!progress) throw new TypeError('Delivery result data lost its exact completely validated candidate');
   const { candidate, spec: frozen, plan, planRef } = progress;
   requireEqual(candidate, merged.candidate, 'delivery verification exact merged candidate');
   if (!frozen.verifiers.some(entry => entry.gate === 'required') || cut.runSpec.unverifiedConsentRef !== undefined)
@@ -176,6 +179,15 @@ export async function readResultBasis(driver: SqliteDriver, artifacts: ArtifactC
   const { run, runSpec: spec } = cut;
   if (spec.operation === 'delivery') return readDeliveryResultBasis(driver, artifacts, cut);
   return readAgentResultBasis(driver, artifacts, cut);
+}
+
+/** Internal completion reader: preserve the full result predicate while
+ * obtaining plain data from this entry's actual Delivery read family. */
+export async function readResultBasisInDeliveryEpoch(driver: SqliteDriver, artifacts: ArtifactCatalog,
+  cut: RecoveryClosureV1, delivery: DeliveryReadData) {
+  assertDeliveryReadData(driver, artifacts, cut, delivery);
+  await assertResultBasisCut(driver, artifacts, cut);
+  return delivery.basis();
 }
 
 async function assertResultBasisCut(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1) {
@@ -443,6 +455,16 @@ export async function readDeliveryVerification(driver: SqliteDriver, artifacts: 
 export async function readDeliveryResultData(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1,
   admission: Awaited<ReturnType<typeof readDeliveryRunAdmission>>, merges: ReadonlyMap<string, RetainedDeliveryMerge>) {
   const material = await readDeliveryCandidateMaterialData(driver, artifacts, cut, admission, merges);
+  return readDeliveryResultBasisData(driver, artifacts, cut, material);
+}
+
+/** Same-entry friend only; standalone Delivery result readers remain fresh. */
+export async function readDeliveryResultDataInRecovery(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1,
+  admission: Awaited<ReturnType<typeof readDeliveryRunAdmission>>, merges: ReadonlyMap<string, RetainedDeliveryMerge>,
+  history: AgentRecoveryReadData) {
+  const original = readAgentRecoveryData(driver, artifacts, cut, history);
+  if (!original.delivery) throw new TypeError('Delivery result data requires its actual completed history family');
+  const material = await readDeliveryCandidateMaterialData(driver, artifacts, cut, admission, merges, history);
   return readDeliveryResultBasisData(driver, artifacts, cut, material);
 }
 

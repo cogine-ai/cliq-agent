@@ -7,6 +7,43 @@ the single Kernel Cut. The goal is usable, verifiable work, not a count of
 modules, tests, or merged PRs. The RFC remains authoritative; this plan changes
 ordering and records delivery scope, not safety, billing, or success semantics.
 
+### Current product and qualification status (2026-10-31)
+
+The product remains a local-first, provider-neutral coding agent: a real model
+changes private code, required checks can trigger repair, the user reviews the
+complete result and its verification provenance, and explicit application binds
+that exact result. Continue completing this journey while CI runs alongside
+independent implementation work.
+
+At immutable `9341f07bacedb3c6a5796e0a8aa9ad93ef84c343`, the
+[Linux daily campaign](https://github.com/cogine-ai/cliq-agent/actions/runs/41193613811)
+passes signed `setup`, `models`, `run`, `result` and `apply`, including an actual
+required-check failure, one repair and the final applied changes. Its four
+model POSTs use the owned HTTPS endpoint and the fixed `yolo`/Node verifier
+profile. This qualifies that controlled workflow; real-provider requests and
+billing remain unverified, with zero paid calls made. All four Linux/macOS and
+Node 22/24 test jobs pass at that source.
+
+The original run has eighteen successful and six failed jobs. Ordinary Git
+finalization, received-effect successor completion, Git-merge publication and
+the delayed-storage campaigns still miss their original acceptance windows.
+The delayed campaigns have not reached their intended physical publication
+cuts. A same-source upgrade rerun subsequently fails at the repeated upgrade
+command after both original and target Runs and old-credential revocation
+complete. Its production cause remains unconfirmed. Retain both the passing
+and failing evidence; neither a diagnostic nor a different successful cut
+closes these gaps. Result-read sharing and preparation cancellation must still
+pass the complete real campaigns with the original 90/30/2/5-second limits.
+
+Remaining implementation includes ordinary-policy verifier/Delivery authority,
+manual UNKNOWN disposition, MCP and managed local inference, configurable
+bounded concurrency, complete state import/rollback/GC and compatible upgrades,
+production platform support, and the final default-entry cutover. Advance them
+as complete user flows through the existing Run/Journal/Checkpoint lifecycle.
+Full I1, I2–I4 and the six work packages remain incomplete; retain the approved
+same-filesystem publication and captured-directory-object boundaries explicitly.
+The dated records below retain their original source-specific limits.
+
 ### Execution priority clarification (2026-10-30)
 
 The owner explicitly prioritizes completing the integrated product functionality

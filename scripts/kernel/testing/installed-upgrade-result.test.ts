@@ -5,6 +5,7 @@ import { decodeInstalledUpgradeReport, INSTALLED_UPGRADE_PROFILE, readInstalledU
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import { CredentialSecretScanError } from './credential-secret-scan.js';
+import { readInstalledRuntimeUpgradeFailureMarker, installedRuntimeUpgradeFailureMarker } from '../../../src/state/installed-upgrade-diagnostics.js';
 
 // Deliberately inert report data. These tests prove only the closed evidence
 // decoder; they do not supply any Store, native receipt or installed authority.
@@ -157,4 +158,69 @@ test('cleanup corpus scanning preserves an original failure phase and cannot qua
     assert.equal(context.report.qualified, !failedBeforeScan && !scanFails);
     assert.equal(context.report.phase, failedBeforeScan ? 'explicit_schema8_new_authorization_and_run' : scanFails ? 'secret_corpus' : 'complete');
   }
+});
+
+
+test('failed upgrade commands retain only their first scanned fixed marker and actual exit status', async () => {
+  const source = await readFile(new URL('./installed-upgrade-journey.ts', import.meta.url), 'utf8');
+  const start = source.indexOf('  const acceptedCommand = '), begin = source.indexOf('    const result = command(', start);
+  const end = source.indexOf('\n  };', begin); assert(start >= 0 && begin > start && end > begin);
+  const body = source.slice(begin, end), first = installedRuntimeUpgradeFailureMarker('recover_selection', { code: 'RECOVERY_REQUIRED' }),
+    second = installedRuntimeUpgradeFailureMarker('target_control', { code: 'ARTIFACT_MISMATCH' });
+  const privateText = 'inert-private-error-path-and-ref';
+  function composition(status: number | null, stderr: Buffer, report: Record<string, any> = {}) {
+    const events: string[] = [], stdout = Buffer.from('inert-output'); let result = { status, stderr, stdout };
+    // Execute only the original post-command report/refusal composition. The
+    // command seam denotes already-joined/scanned inert bytes, not a process.
+    const accepted = vm.runInNewContext(`(executable, args, input, timeout, credentialAction) => { ${body} }`, {
+      assert, report, command: () => { events.push('joined_and_scanned'); return result; },
+      readInstalledUpgradeCredentialFailure,
+      readInstalledRuntimeUpgradeFailureMarker: (bytes: Buffer) => { events.push('decoded'); return readInstalledRuntimeUpgradeFailureMarker(bytes); },
+      writeSync: () => { events.push('forwarded'); }
+    }) as (executable: string, args: string[], input?: Buffer, timeout?: number, credentialAction?: 'read') => Buffer;
+    return { report, events, stdout, accepted,
+      next(nextStatus: number | null, nextStderr: Buffer) { result = { status: nextStatus, stderr: nextStderr, stdout }; } };
+  }
+  const credential = { original: true }, fixture = composition(1, Buffer.from(privateText + '\n' + first), { credentialCommandFailure: credential });
+  assert.throws(() => fixture.accepted('inert', ['--upgrade-runtime'], undefined, 30000));
+  assert(Object.hasOwn(fixture.report, 'upgradeCommandFailure'), 'the original failed upgrade command must retain its fixed diagnostic');
+  assert.deepEqual(JSON.parse(JSON.stringify(fixture.report.upgradeCommandFailure)), { exitStatus: 1, marker: first });
+  assert.equal(fixture.report.credentialCommandFailure, credential); assert.deepEqual(fixture.events, ['joined_and_scanned', 'decoded', 'forwarded']);
+  assert(!JSON.stringify(fixture.report.upgradeCommandFailure).includes(privateText));
+  const original = fixture.report.upgradeCommandFailure;
+  fixture.next(2, Buffer.from(second)); assert.throws(() => fixture.accepted('inert', ['--upgrade-runtime']));
+  assert.equal(fixture.report.upgradeCommandFailure, original);
+  for (const bytes of [Buffer.alloc(0), Buffer.from(privateText), Buffer.from(first + first),
+    Buffer.from(first.replace('RECOVERY_REQUIRED', privateText)), Buffer.from('prefix-' + first)]) {
+    const unavailable = composition(null, bytes);
+    assert.throws(() => unavailable.accepted('inert', ['--upgrade-runtime']));
+    assert.deepEqual(JSON.parse(JSON.stringify(unavailable.report.upgradeCommandFailure)), { exitStatus: null, marker: null });
+    assert(!JSON.stringify(unavailable.report).includes(privateText));
+    unavailable.next(3, Buffer.from(second)); assert.throws(() => unavailable.accepted('inert', ['--upgrade-runtime']));
+    assert.equal(unavailable.report.upgradeCommandFailure.marker, null, 'a later marker cannot replace an unavailable first failure');
+  }
+  const success = composition(0, Buffer.from(first));
+  assert.equal(success.accepted('inert', ['--upgrade-runtime']), success.stdout);
+  assert(!Object.hasOwn(success.report, 'upgradeCommandFailure')); assert.deepEqual(success.events, ['joined_and_scanned']);
+  const historical = composition(1, Buffer.from(JSON.stringify({ diagnosticOnly: true, scope: 'installed-read-startup', code: 'RECOVERY_REQUIRED' })));
+  assert.throws(() => historical.accepted('inert', ['--bootstrap-credential'], undefined, 60000, 'read'));
+  assert(!Object.hasOwn(historical.report, 'upgradeCommandFailure')); assert.equal(historical.report.credentialCommandFailure.action, 'read');
+  assert.equal(historical.report.credentialCommandFailure.code, 'RECOVERY_REQUIRED');
+  const other = composition(1, Buffer.from(first)); assert.throws(() => other.accepted('inert', ['inert', '--upgrade-runtime']));
+  assert(!Object.hasOwn(other.report, 'upgradeCommandFailure'));
+});
+
+test('upgrade command failure reports accept only unavailable or one exact original marker and a failed exit status', () => {
+  const marker = installedRuntimeUpgradeFailureMarker('recover_selection', { code: 'RECOVERY_REQUIRED' });
+  const report = complete(); report.qualified = false; report.phase = 'same_receipt_recovery_and_old_first_response'; delete report.upgrade;
+  for (const exitStatus of [null, 1, 255]) for (const value of [null, marker]) {
+    report.upgradeCommandFailure = { exitStatus, marker: value }; assert.equal(decodeInstalledUpgradeReport(report).qualified, false);
+  }
+  for (const bad of [
+    { exitStatus: 0, marker }, { exitStatus: -1, marker }, { exitStatus: 256, marker }, { exitStatus: '1', marker },
+    { exitStatus: 1, marker: 'private-unrecognized-text' }, { exitStatus: 1, marker: marker + marker },
+    { exitStatus: 1, marker: 'prefix-' + marker }, { exitStatus: 1, marker: marker + 'private-tail' },
+    { exitStatus: 1, marker: null, rawError: 'private-unrecognized-text' }
+  ]) { report.upgradeCommandFailure = bad; assert.throws(() => decodeInstalledUpgradeReport(report)); }
+  const success = complete(); success.upgradeCommandFailure = { exitStatus: 1, marker }; assert.throws(() => decodeInstalledUpgradeReport(success));
 });

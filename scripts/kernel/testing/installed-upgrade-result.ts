@@ -5,6 +5,7 @@ import { types } from 'node:util';
 import { LEGACY_UPGRADE_SOURCE } from './legacy-upgrade-source-data.js';
 import { copyCredentialSecretScanFailureDiagnostic } from './credential-secret-scan.js';
 import { parseJsonStrict } from '../../../src/kernel/json.js';
+import { readInstalledRuntimeUpgradeFailureMarker } from '../../../src/state/installed-upgrade-diagnostics.js';
 
 export const INSTALLED_UPGRADE_CREDENTIAL_ACTIONS = ['install_services', 'enroll', 'read', 'revoke'] as const;
 const credentialFailureCodes = ['ADMISSION_KEY_CONFLICT', 'REQUEST_ID_CONFLICT', 'ARTIFACT_MISMATCH', 'AGENT_HANDOFF_PENDING',
@@ -98,7 +99,7 @@ export function decodeInstalledUpgradeReport(value: unknown): Readonly<Record<st
   const row = object(value, ['diagnosticOnly', 'qualified', 'schemaVersion', 'format', 'fixtureProfile', 'phase', 'secretOutputScan'],
     ['scope', 'cases', 'officialReleaseQualified', 'wholeI4Qualified', 'legacy43ErrorReceipt', 'originalSource', 'packages',
       'oldCredentialNewRuntimeRefusal', 'upgrade', 'servicesStoppedAndJoined', 'secretServiceJoined', 'httpsJoined', 'transport', 'secretCorpus', 'error',
-      'secretScanFailure', 'secretCorpusScanProgress', 'credentialCommandFailure']);
+      'secretScanFailure', 'secretCorpusScanProgress', 'credentialCommandFailure', 'upgradeCommandFailure']);
   assert.equal(row.diagnosticOnly, true); assert.equal(row.schemaVersion, 1); assert.equal(typeof row.qualified, 'boolean');
   assert.equal(row.format, 'cliq-installed-runtime-upgrade-qualification-v1'); assert.equal(row.fixtureProfile, INSTALLED_UPGRADE_PROFILE);
   assert(INSTALLED_UPGRADE_PHASES.includes(row.phase));
@@ -113,6 +114,17 @@ export function decodeInstalledUpgradeReport(value: unknown): Readonly<Record<st
     assert(natural(failure.status, 255) > 0); assert(failure.code === null || credentialFailureCodes.includes(failure.code));
     if (failure.reason !== undefined) assert(Object.values(credentialFailureReasons).includes(failure.reason));
     assert.equal(row.qualified, false);
+  }
+  if (row.upgradeCommandFailure !== undefined) {
+    const failure = object(row.upgradeCommandFailure, ['exitStatus', 'marker']);
+    assert(failure.exitStatus === null || Number.isSafeInteger(failure.exitStatus) && failure.exitStatus > 0 && failure.exitStatus <= 255,
+      'upgrade command failure has an invalid exit status');
+    if (failure.marker !== null) {
+      assert(typeof failure.marker === 'string' && Buffer.byteLength(failure.marker) <= 129, 'upgrade command marker is not bounded text');
+      const bytes = Buffer.from(failure.marker), decoded = readInstalledRuntimeUpgradeFailureMarker(bytes);
+      assert(decoded?.equals(bytes), 'upgrade command marker is not its exact fixed source line');
+    }
+    assert.equal(row.qualified, false, 'a failed upgrade command cannot qualify');
   }
   if (row.originalSource !== undefined) {
     const source = object(row.originalSource, Object.keys(LEGACY_UPGRADE_SOURCE));

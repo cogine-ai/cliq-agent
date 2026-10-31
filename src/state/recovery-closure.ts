@@ -19,8 +19,8 @@ import type {
   WorkspaceStateManifest
 } from '../kernel/types.js';
 import type { ArtifactCatalog } from './artifacts.js';
-import { validateAgentRecovery, validateAgentRecoveryInDeliveryEpoch, validateAgentRecoveryInResultEpoch } from './agent-recovery.js';
-import { createDeliveryReadData } from './delivery-read-data.js';
+import { closeAgentRecoveryData, validateAgentRecovery, validateAgentRecoveryInDeliveryEpoch, validateAgentRecoveryInDeliveryResultEpoch, validateAgentRecoveryInResultEpoch } from './agent-recovery.js';
+import { closeDeliveryReadData, completeDeliveryRecoveryHistory, createDeliveryReadData } from './delivery-read-data.js';
 import { validateStopRecovery, validateStopRecoveryInDeliveryEpoch } from './stop-recovery.js';
 import {
   decodeAdmittedContext,
@@ -52,7 +52,7 @@ import { readRetiredGenerationSource } from './generation-retirement.js';
 import { validateInstalledBrokerAmbiguityHistory } from './broker-ambiguity.js';
 import { validateInstalledModelNoReleaseHistory } from './broker-no-release.js';
 import { assertWorkerPreparationCleanupContext, validateWorkerPreparationHistory, type WorkerPreparationCleanupContext } from './worker-preparation.js';
-import { closeAgentResultReadData, createAgentResultReadData, readAgentResultData, readResultBasis, validateRunResultRecovery, validateRunResultRecoveryInAgentEpoch,
+import { closeAgentResultReadData, createAgentResultReadData, readAgentResultData, readResultBasis, readResultBasisInDeliveryEpoch, validateRunResultRecovery, validateRunResultRecoveryInAgentEpoch,
   validateRunResultRecoveryInDeliveryEpoch, type AgentResultReadData } from './run-result-recovery.js';
 import { assertDeliveryModelFreeCut } from './run-model-free.js';
 import type { SandboxResourceSpec } from '../kernel/execution.js';
@@ -638,10 +638,10 @@ export async function readRecoveryClosure(
  * only its actual completed data family can supply the terminal basis. */
 export async function readResultRecoveryClosure(driver: SqliteDriver, artifacts: ArtifactCatalog, runId: string,
   onPhase?: (phase: RecoveryClosurePhase) => void) {
-  const result = await readRecoveryProjection(driver, artifacts, runId, onPhase);
+  const result = await readRecoveryProjection(driver, artifacts, runId, onPhase, undefined, true);
   try {
-    const basis = result.agent ? await readAgentResultData(driver, artifacts, result.cut, result.agent).basis()
-      : await readResultBasis(driver, artifacts, result.cut);
+    const basis = result.basis ?? (result.agent ? await readAgentResultData(driver, artifacts, result.cut, result.agent).basis()
+      : await readResultBasis(driver, artifacts, result.cut));
     artifacts.assertReadActive();
     return { cut: result.cut, basis };
   } finally { if (result.agent) closeAgentResultReadData(driver, artifacts, result.cut, result.agent); }
@@ -679,8 +679,10 @@ async function readRecoveryProjection(
   artifacts: ArtifactCatalog,
   runId: string,
   onPhase?: (phase: RecoveryClosurePhase) => void,
-  preparationCleanup?: WorkerPreparationCleanupContext
-): Promise<{ cut: RecoveryClosureV1; prefix?: PublicationPrefix; agent?: AgentResultReadData }> {
+  preparationCleanup?: WorkerPreparationCleanupContext,
+  resultBasisRequested = false
+): Promise<{ cut: RecoveryClosureV1; prefix?: PublicationPrefix; agent?: AgentResultReadData;
+  basis?: Awaited<ReturnType<typeof readResultBasis>> }> {
   const phase = (value: RecoveryClosurePhase) => { try { onPhase?.(value); } catch { /* Diagnosis cannot decide recovery. */ } };
   phase('cut');
   const databaseCut = driver.transaction((connection) => {
@@ -827,84 +829,96 @@ async function readRecoveryProjection(
   const closure: RecoveryClosureV1 = { runSpec, run, latestCheckpoint, items, journal, workerLaunches, workspaceGenerations, childAllocations };
   const delivery = runSpec.operation === 'delivery' ? createDeliveryReadData(driver, artifacts, closure) : undefined;
   let agent: AgentResultReadData | undefined;
-  phase('history');
-  if (journal.some((entry) => entry.opKind === 'model' || entry.opKind === 'verifier') || run.repairCount !== 0 ||
-      runSpec.operation === 'agent' && items.length > 0 || runSpec.operation === 'delivery') {
-    try {
-      const input = { driver, artifacts, run, spec: runSpec, items, journal,
-        principalId: databaseCut.principalId, workspaceIdentityRef: databaseCut.workspaceIdentityRef,
-        checkpoints: databaseCut.checkpoints, workspaceGenerations: generationProofs,
-        context: decodeContextManifest(await artifacts.readCanonical(latestCheckpoint.contextManifestRef)) };
-      let history: { repairAttempts: number };
-      if (delivery) history = await validateAgentRecoveryInDeliveryEpoch(input, delivery, value => phase(`history_${value}`));
-      else if (!run.activeWorkerLaunchId && workerLaunches.length === 0 &&
-          (run.nextStep === 'verify' || run.nextStep === 'finalize' || run.resultRef !== undefined)) {
-        const recovered = await validateAgentRecoveryInResultEpoch(input, closure, value => phase(`history_${value}`));
-        agent = createAgentResultReadData(driver, artifacts, closure, recovered.data);
-        history = recovered;
-      } else history = await validateAgentRecovery(input, value => phase(`history_${value}`));
-      journalBudgets.consumed = addBudget(journalBudgets.consumed,
-        { ...ZERO_BUDGET, repairAttempts: history.repairAttempts }, 'recovery authorized repair budget');
-      const assembly = await artifacts.readCanonical<RunAssemblyV1>(runSpec.assemblyRef);
-      if (assembly.format === 'cliq-run-assembly-v1') {
-        phase('history_broker');
-        await validateInstalledBrokerAmbiguityHistory({ driver, artifacts,
-          run, spec: runSpec, assembly, journal, childAllocations, principalId: databaseCut.principalId });
-      }
-    } catch (error) {
-      recoveryFailure(`typed agent recovery closure is invalid: ${(error as Error).message}`, error);
-    }
-  }
-  const childBudgets = childAllocationBudgetFacts(run.id, childAllocations);
-  if (!budgetEqual(addBudget(journalBudgets.reserved, childBudgets.reserved), run.budgetReserved) ||
-      !budgetEqual(addBudget(journalBudgets.consumed, childBudgets.consumed), run.budgetConsumed))
-    recoveryFailure('Run budget counters do not equal their complete own-Journal and direct inclusive child closure');
-  if (run.status !== 'running' && !isZeroBudget(run.budgetReserved) && journal.length === 0) {
-    recoveryFailure('lease-free Run has an unexplained budget reservation');
-  }
-  phase('seals');
-  const sealedGenerations = generationProofs.filter(generation => generation.phase === 'sealed');
-  const sealedLaunches = databaseCut.allWorkerLaunches.filter(launch => launch.phase === 'retired' && launch.generationWriteState === 'sealed');
-  if (sealedGenerations.length || sealedLaunches.length) {
-    const assembly = await artifacts.readCanonical<RunAssemblyV1>(runSpec.assemblyRef);
-    if (assembly.format === 'cliq-run-assembly-v1') {
+  try {
+    phase('history');
+    if (journal.some((entry) => entry.opKind === 'model' || entry.opKind === 'verifier') || run.repairCount !== 0 ||
+        runSpec.operation === 'agent' && items.length > 0 || runSpec.operation === 'delivery') {
       try {
-        for (const generation of sealedGenerations) {
-          const matches = sealedLaunches.filter(launch => launch.workspaceGenerationRef === generation.generationRef);
-          if (matches.length !== 1 || !matches[0]!.activatedAt) throw new TypeError('sealed generation has no unique retired activated worker');
-          await validateRetainedWorkerSeal(driver, artifacts, { run, spec: runSpec, assembly, launch: matches[0]!, generation });
-        }
-        if (sealedLaunches.some(launch => !sealedGenerations.some(generation => generation.generationRef === launch.workspaceGenerationRef))) {
-          throw new TypeError('retired sealed worker has no matching sealed generation');
+        const input = { driver, artifacts, run, spec: runSpec, items, journal,
+          principalId: databaseCut.principalId, workspaceIdentityRef: databaseCut.workspaceIdentityRef,
+          checkpoints: databaseCut.checkpoints, workspaceGenerations: generationProofs,
+          context: decodeContextManifest(await artifacts.readCanonical(latestCheckpoint.contextManifestRef)) };
+        let history: { repairAttempts: number };
+        if (delivery) {
+          if (!run.activeWorkerLaunchId && workerLaunches.length === 0) {
+            const recovered = await validateAgentRecoveryInDeliveryResultEpoch(input, closure, delivery, value => phase(`history_${value}`));
+            try { completeDeliveryRecoveryHistory(driver, artifacts, closure, delivery, recovered.data); }
+            catch (error) { closeAgentRecoveryData(driver, artifacts, closure, recovered.data); throw error; }
+            history = recovered;
+          } else history = await validateAgentRecoveryInDeliveryEpoch(input, delivery, value => phase(`history_${value}`));
+        } else if (!run.activeWorkerLaunchId && workerLaunches.length === 0 &&
+            (run.nextStep === 'verify' || run.nextStep === 'finalize' || run.resultRef !== undefined)) {
+          const recovered = await validateAgentRecoveryInResultEpoch(input, closure, value => phase(`history_${value}`));
+          agent = createAgentResultReadData(driver, artifacts, closure, recovered.data);
+          history = recovered;
+        } else history = await validateAgentRecovery(input, value => phase(`history_${value}`));
+        journalBudgets.consumed = addBudget(journalBudgets.consumed,
+          { ...ZERO_BUDGET, repairAttempts: history.repairAttempts }, 'recovery authorized repair budget');
+        const assembly = await artifacts.readCanonical<RunAssemblyV1>(runSpec.assemblyRef);
+        if (assembly.format === 'cliq-run-assembly-v1') {
+          phase('history_broker');
+          await validateInstalledBrokerAmbiguityHistory({ driver, artifacts,
+            run, spec: runSpec, assembly, journal, childAllocations, principalId: databaseCut.principalId });
         }
       } catch (error) {
-        recoveryFailure(`worker seal history is invalid: ${(error as Error).message}`, error);
+        recoveryFailure(`typed agent recovery closure is invalid: ${(error as Error).message}`, error);
       }
     }
-  }
-  await validateLaunchGraph(artifacts, run, workerLaunches, workspaceGenerations);
-  try { await validateWorkerRecoveryWait(artifacts, { ...databaseCut, workspaceGenerations: generationProofs }, driver); }
-  catch (error) { recoveryFailure(`worker recovery closure is invalid: ${(error as Error).message}`, error); }
-  await validateChildAllocationArtifacts(driver, artifacts, childAllocations, run);
-
-  phase('terminal');
-  let publicationPrefix: PublicationPrefix | undefined;
-  try {
-    if (runSpec.operation === 'delivery') {
-      // Use the complete actual cut, not a filled-in verifier/agent subset.
-      // Reverse coverage requires the unique policy + delivery decision and
-      // their original wait/control/Checkpoint graph even if a later stop
-      // outranks the decision. No pure decoder result grants publication.
-      publicationPrefix = await delivery!.prefix();
+    const childBudgets = childAllocationBudgetFacts(run.id, childAllocations);
+    if (!budgetEqual(addBudget(journalBudgets.reserved, childBudgets.reserved), run.budgetReserved) ||
+        !budgetEqual(addBudget(journalBudgets.consumed, childBudgets.consumed), run.budgetConsumed))
+      recoveryFailure('Run budget counters do not equal their complete own-Journal and direct inclusive child closure');
+    if (run.status !== 'running' && !isZeroBudget(run.budgetReserved) && journal.length === 0) {
+      recoveryFailure('lease-free Run has an unexplained budget reservation');
     }
-    await validateInstalledModelNoReleaseHistory(driver, artifacts, closure);
-    if (delivery) await validateStopRecoveryInDeliveryEpoch(driver, artifacts, closure, delivery);
-    else await validateStopRecovery(driver, artifacts, closure);
-    if (delivery) await validateRunResultRecoveryInDeliveryEpoch(driver, artifacts, closure, delivery);
-    else if (agent) await validateRunResultRecoveryInAgentEpoch(driver, artifacts, closure, agent);
-    else await validateRunResultRecovery(driver, artifacts, closure);
-    if (delivery) await delivery.prefix();
-  }
-  catch (error) { recoveryFailure(`stop recovery closure is invalid: ${(error as Error).message}`, error); }
-  return { cut: closure, ...(publicationPrefix ? { prefix: publicationPrefix } : {}), ...(agent ? { agent } : {}) };
+    phase('seals');
+    const sealedGenerations = generationProofs.filter(generation => generation.phase === 'sealed');
+    const sealedLaunches = databaseCut.allWorkerLaunches.filter(launch => launch.phase === 'retired' && launch.generationWriteState === 'sealed');
+    if (sealedGenerations.length || sealedLaunches.length) {
+      const assembly = await artifacts.readCanonical<RunAssemblyV1>(runSpec.assemblyRef);
+      if (assembly.format === 'cliq-run-assembly-v1') {
+        try {
+          for (const generation of sealedGenerations) {
+            const matches = sealedLaunches.filter(launch => launch.workspaceGenerationRef === generation.generationRef);
+            if (matches.length !== 1 || !matches[0]!.activatedAt) throw new TypeError('sealed generation has no unique retired activated worker');
+            await validateRetainedWorkerSeal(driver, artifacts, { run, spec: runSpec, assembly, launch: matches[0]!, generation });
+          }
+          if (sealedLaunches.some(launch => !sealedGenerations.some(generation => generation.generationRef === launch.workspaceGenerationRef))) {
+            throw new TypeError('retired sealed worker has no matching sealed generation');
+          }
+        } catch (error) {
+          recoveryFailure(`worker seal history is invalid: ${(error as Error).message}`, error);
+        }
+      }
+    }
+    await validateLaunchGraph(artifacts, run, workerLaunches, workspaceGenerations);
+    try { await validateWorkerRecoveryWait(artifacts, { ...databaseCut, workspaceGenerations: generationProofs }, driver); }
+    catch (error) { recoveryFailure(`worker recovery closure is invalid: ${(error as Error).message}`, error); }
+    await validateChildAllocationArtifacts(driver, artifacts, childAllocations, run);
+
+    phase('terminal');
+    let publicationPrefix: PublicationPrefix | undefined;
+    try {
+      if (runSpec.operation === 'delivery') {
+        // Use the complete actual cut, not a filled-in verifier/agent subset.
+        // Reverse coverage requires the unique policy + delivery decision and
+        // their original wait/control/Checkpoint graph even if a later stop
+        // outranks the decision. No pure decoder result grants publication.
+        publicationPrefix = await delivery!.prefix();
+      }
+      await validateInstalledModelNoReleaseHistory(driver, artifacts, closure);
+      if (delivery) await validateStopRecoveryInDeliveryEpoch(driver, artifacts, closure, delivery);
+      else await validateStopRecovery(driver, artifacts, closure);
+      if (delivery) await validateRunResultRecoveryInDeliveryEpoch(driver, artifacts, closure, delivery);
+      else if (agent) await validateRunResultRecoveryInAgentEpoch(driver, artifacts, closure, agent);
+      else await validateRunResultRecovery(driver, artifacts, closure);
+      if (delivery) await delivery.prefix();
+    }
+    catch (error) { recoveryFailure(`stop recovery closure is invalid: ${(error as Error).message}`, error); }
+    // Only the completion reader asks for this ordinary result data. Other
+    // recovery entries may legally precede their first Delivery candidate.
+    const basis = resultBasisRequested && delivery ? await readResultBasisInDeliveryEpoch(driver, artifacts, closure, delivery) : undefined;
+    return { cut: closure, ...(publicationPrefix ? { prefix: publicationPrefix } : {}), ...(agent ? { agent } : {}),
+      ...(basis ? { basis } : {}) };
+  } finally { if (delivery) closeDeliveryReadData(driver, artifacts, closure, delivery); }
 }

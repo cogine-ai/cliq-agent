@@ -27,7 +27,7 @@ import type { SqliteDriver } from './sqlite-driver.js';
 import { readVerifierProgress, type VerifierProgress } from './verifier-recovery.js';
 import { validateVerifierHistory } from './verifier-history.js';
 import { validateDeliveryRecovery } from './delivery-recovery.js';
-import type { DeliveryReadData } from './delivery-read-data.js';
+import { assertDeliveryReadData, type DeliveryReadData } from './delivery-read-data.js';
 import { readInvocationJournal } from './repositories/journal.js';
 import { readWorkerLaunchesForRun } from './repositories/worker-launches.js';
 import { readWorkspaceGenerationsForRun } from './repositories/workspace-generations.js';
@@ -74,7 +74,8 @@ const agentReadBrand: unique symbol = Symbol('AgentRecoveryReadData');
 export type AgentRecoveryReadData = Readonly<{ readonly [agentReadBrand]: true }>;
 const agentReadData = new WeakMap<object, { driver: SqliteDriver; artifacts: ArtifactCatalog;
   cut: RecoveryClosureV1; cutDigest: string; sqlDigest: string;
-  decodedItems: ReadonlyMap<string, ContinuationItem>; verifierProgressByCandidate: ReadonlyMap<string, VerifierProgress> }>();
+  decodedItems: ReadonlyMap<string, ContinuationItem>; verifierProgressByCandidate: ReadonlyMap<string, VerifierProgress>;
+  delivery?: DeliveryReadData }>();
 
 function agentRecoverySqlCut(driver: SqliteDriver, cut: RecoveryClosureV1) {
   const run = readRun(driver, cut.run.id), session = readSession(driver, run.sessionId);
@@ -103,19 +104,35 @@ function agentRecoverySqlCut(driver: SqliteDriver, cut: RecoveryClosureV1) {
  * history has joined. Public independent validation keeps its original shape. */
 export async function validateAgentRecoveryInResultEpoch(input: AgentRecoveryInput, cut: RecoveryClosureV1,
   onPhase?: (phase: AgentRecoveryPhase) => void) {
-  if (!input.driver || cut.runSpec.operation !== 'agent' || input.run !== cut.run || input.spec !== cut.runSpec ||
-      input.items !== cut.items || input.journal !== cut.journal)
+  if (cut.runSpec.operation !== 'agent') throw new TypeError('Agent result data requires its original recovery operation');
+  return validateCompletedRecoveryHistory(input, cut, onPhase);
+}
+
+/** Same complete history, only for this actual worker-free Delivery family.
+ * A structurally compatible factory or unfinished Map cannot supply it. */
+export async function validateAgentRecoveryInDeliveryResultEpoch(input: AgentRecoveryInput, cut: RecoveryClosureV1,
+  delivery: DeliveryReadData, onPhase?: (phase: AgentRecoveryPhase) => void) {
+  if (cut.runSpec.operation !== 'delivery') throw new TypeError('Delivery result data requires its original recovery operation');
+  return validateCompletedRecoveryHistory(input, cut, onPhase, delivery);
+}
+
+async function validateCompletedRecoveryHistory(input: AgentRecoveryInput, cut: RecoveryClosureV1,
+  onPhase?: (phase: AgentRecoveryPhase) => void, delivery?: DeliveryReadData) {
+  if (!input.driver || input.run !== cut.run || input.spec !== cut.runSpec || input.items !== cut.items ||
+      input.journal !== cut.journal || cut.run.activeWorkerLaunchId || cut.workerLaunches.length)
     throw new TypeError('Agent result data requires its original recovery cut');
   input.artifacts.assertReadActive();
   const cutDigest = canonicalSha256(cut), sqlDigest = canonicalSha256(agentRecoverySqlCut(input.driver, cut));
-  const result = await validateAgentRecoveryData(input, onPhase);
+  if (delivery) assertDeliveryReadData(input.driver, input.artifacts, cut, delivery);
+  const result = await validateAgentRecoveryData(input, onPhase, delivery);
+  if (delivery) assertDeliveryReadData(input.driver, input.artifacts, cut, delivery);
   input.artifacts.assertReadActive();
   requireEqual(canonicalSha256(agentRecoverySqlCut(input.driver, cut)), sqlDigest, 'Agent recovery SQL changed during validation');
   if (canonicalSha256(cut) !== cutDigest) throw new TypeError('Agent recovery data cut changed during validation');
   const data = Object.freeze({ [agentReadBrand]: true as const });
   agentReadData.set(data, { driver: input.driver, artifacts: input.artifacts, cut, cutDigest, sqlDigest,
     decodedItems: new Map([...result.decodedItems].map(([id, item]) => [id, immutableSnapshot(item)])),
-    verifierProgressByCandidate: new Map([...result.verifierProgressByCandidate].map(([id, progress]) => [id, immutableSnapshot(progress)])) });
+    verifierProgressByCandidate: new Map([...result.verifierProgressByCandidate].map(([id, progress]) => [id, immutableSnapshot(progress)])), ...(delivery ? { delivery } : {}) });
   return { repairAttempts: result.repairAttempts, data };
 }
 

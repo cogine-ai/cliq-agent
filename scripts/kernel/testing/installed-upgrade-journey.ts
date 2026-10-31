@@ -70,6 +70,8 @@ export async function runInstalledRuntimeUpgradeJourney(filename: string, origin
       if (credentialAction && result.status !== null) report.credentialCommandFailure ??=
         readInstalledUpgradeCredentialFailure(result.stderr, credentialAction, result.status);
       const marker = readInstalledRuntimeUpgradeFailureMarker(result.stderr);
+      if (args[0] === '--upgrade-runtime') report.upgradeCommandFailure ??=
+        { exitStatus: result.status, marker: marker?.toString('ascii') ?? null };
       try { if (marker) writeSync(2, marker); } catch { /* Diagnostics cannot replace the original process refusal. */ }
     }
     assert.equal(result.status, 0, 'same-user upgrade command refused'); return result.stdout;

@@ -43,7 +43,7 @@ function gate() {
 async function functions(dependencies: Record<string, unknown>): Promise<Api> {
   const selections = [
     ['agent-recovery.ts', ['agentReadBrand', 'agentReadData', 'agentRecoverySqlCut',
-      'validateAgentRecoveryInResultEpoch', 'readAgentRecoveryData', 'closeAgentRecoveryData']],
+      'validateAgentRecoveryInResultEpoch', 'validateCompletedRecoveryHistory', 'readAgentRecoveryData', 'closeAgentRecoveryData']],
     ['run-result-recovery.ts', ['resultReadBrand', 'resultReadData', 'createAgentResultReadData', 'readAgentResultData', 'closeAgentResultReadData']]
   ] as const;
   const bodies: string[] = [];
