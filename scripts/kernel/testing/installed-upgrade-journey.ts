@@ -393,7 +393,9 @@ export async function runInstalledRuntimeUpgradeJourney(filename: string, origin
     report.transport = { postCount, acceptedTcp: tcpCount, acceptedTls: tlsCount, providerHealthy: !providerFailure };
     if (report.servicesStoppedAndJoined && report.secretServiceJoined && report.httpsJoined) {
       try {
-        mark('secret_corpus'); scanStage = 'corpus'; const current = scanner.stats(); beforeCorpus = { streamsOpened: current.streamsOpened, bytesScanned: current.bytesScanned };
+        // Cleanup scanning still runs after a business failure, without replacing its original phase.
+        if (primary === undefined) mark('secret_corpus');
+        scanStage = 'corpus'; const current = scanner.stats(); beforeCorpus = { streamsOpened: current.streamsOpened, bytesScanned: current.bytesScanned };
         report.secretCorpus = await scanCredentialSecretCorpus({ stateRoot: recipe.stateRoot, uid: ledger.uid, evidenceDirs: [], scanner });
       } catch (error) {
         if (error instanceof CredentialSecretScanError) {

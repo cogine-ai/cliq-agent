@@ -11,12 +11,44 @@ const credentialFailureCodes = ['ADMISSION_KEY_CONFLICT', 'REQUEST_ID_CONFLICT',
   'MODEL_RETRY_PENDING', 'BUDGET_EXHAUSTED', 'EVENT_CURSOR_EXPIRED', 'INVALID_REQUEST', 'LEASE_FENCED', 'NOT_FOUND',
   'RECOVERY_REQUIRED', 'REVISION_CONFLICT', 'STATE_TRANSITION_INVALID', 'UNSUPPORTED_PLATFORM'] as const;
 
+// Only exact existing internal literals classify the already-scanned failure.
+// These fixed hints do not retain error text or change the original refusal.
+const credentialFailureReasons = {
+  'credential authority history is not contiguous': 'credential_history',
+  'credential result kind, generation or expiry differs': 'credential_history',
+  'credential committed operation has no authority result': 'credential_history',
+  'credential fact index differs': 'credential_history',
+  'credential attempts are not contiguous frozen-core attempts': 'credential_history',
+  'credential phase continuity differs': 'credential_history',
+  'credential transition rewrites its original preparation': 'credential_history',
+  'credential revision has no unique creating operation': 'credential_history',
+  'credential revision differs from its committed operation': 'credential_history',
+  'credential revoke has no active predecessor': 'credential_revoke_history',
+  'credential revoke rewrites its active predecessor': 'credential_revoke_history',
+  'credential revoke has no original receipt': 'credential_revoke_history',
+  'credential revoke row identity differs': 'credential_revoke_history',
+  'credential cleanup evidence precedes its phase': 'credential_revoke_history',
+  'credential cleanup receipt differs from its observation': 'credential_revoke_history',
+  'credential revoke receipt differs from its terminal result': 'credential_revoke_history',
+  'credential preparation provenance differs': 'credential_original_source',
+  'credential original authority row is missing': 'credential_original_source',
+  'credential original authority row index differs': 'credential_original_source',
+  'credential original endpoint differs': 'credential_original_source',
+  'retained credential producer differs from its original signed source': 'credential_producer_source',
+  'retained current producer data is not bounded original data': 'credential_current_source',
+  'retained current producer differs from its exact original signed bundle': 'credential_current_source',
+  'endpoint retained object is missing or does not rehash': 'credential_retained_object',
+  'credential authority database did not retire': 'credential_retirement',
+  'ordinary credential entry cannot be called while a scope is acquiring, active or draining': 'credential_scope_busy',
+} as const;
+type CredentialFailureReason = typeof credentialFailureReasons[keyof typeof credentialFailureReasons];
+
 /** Read only the fixed startup failure code from already-scanned child stderr.
  * No error message, stack, path, credential or arbitrary native code survives. */
 export function readInstalledUpgradeCredentialFailure(bytes: Buffer,
   action: typeof INSTALLED_UPGRADE_CREDENTIAL_ACTIONS[number], status: number) {
   assert(INSTALLED_UPGRADE_CREDENTIAL_ACTIONS.includes(action)); assert(Number.isSafeInteger(status) && status > 0 && status <= 255);
-  let code: typeof credentialFailureCodes[number] | null = null;
+  let code: typeof credentialFailureCodes[number] | null = null, reason: CredentialFailureReason | undefined;
   try {
     assert(Buffer.isBuffer(bytes) && !types.isProxy(bytes) && bytes.length <= 65536);
     const lines = new TextDecoder('utf-8', { fatal: true }).decode(bytes).split('\n'); assert(lines.length <= 128);
@@ -27,9 +59,12 @@ export function readInstalledUpgradeCredentialFailure(bytes: Buffer,
       if (!row || typeof row !== 'object' || Array.isArray(row) || row.diagnosticOnly !== true || row.scope !== 'installed-read-startup') continue;
       assert(!seen && Object.keys(row).every(key => ['diagnosticOnly', 'scope', 'code', 'message', 'path'].includes(key))); seen = true;
       code = credentialFailureCodes.find(value => value === row.code) ?? null;
+      if (typeof row.message === 'string' && Object.hasOwn(credentialFailureReasons, row.message))
+        reason = credentialFailureReasons[row.message as keyof typeof credentialFailureReasons];
     }
-  } catch { code = null; }
-  return Object.freeze({ diagnosticOnly: true as const, kind: 'credential_command_failed' as const, action, status, code });
+  } catch { code = null; reason = undefined; }
+  return Object.freeze({ diagnosticOnly: true as const, kind: 'credential_command_failed' as const, action, status, code,
+    ...(reason === undefined ? {} : { reason }) });
 }
 
 export const INSTALLED_UPGRADE_PROFILE = 'actual_2513_schema7_to_signed8_edit_run_v1';
@@ -72,10 +107,11 @@ export function decodeInstalledUpgradeReport(value: unknown): Readonly<Record<st
   if (row.wholeI4Qualified !== undefined) assert.equal(row.wholeI4Qualified, false);
   if (row.legacy43ErrorReceipt !== undefined) assert.equal(object(row.legacy43ErrorReceipt, ['kind']).kind, 'not_exercised');
   if (row.credentialCommandFailure !== undefined) {
-    const failure = object(row.credentialCommandFailure, ['diagnosticOnly', 'kind', 'action', 'status', 'code']);
+    const failure = object(row.credentialCommandFailure, ['diagnosticOnly', 'kind', 'action', 'status', 'code'], ['reason']);
     assert.equal(failure.diagnosticOnly, true); assert.equal(failure.kind, 'credential_command_failed');
     assert(INSTALLED_UPGRADE_CREDENTIAL_ACTIONS.includes(failure.action));
     assert(natural(failure.status, 255) > 0); assert(failure.code === null || credentialFailureCodes.includes(failure.code));
+    if (failure.reason !== undefined) assert(Object.values(credentialFailureReasons).includes(failure.reason));
     assert.equal(row.qualified, false);
   }
   if (row.originalSource !== undefined) {

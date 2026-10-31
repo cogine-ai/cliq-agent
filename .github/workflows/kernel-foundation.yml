@@ -1162,6 +1162,15 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+      - name: Retain only bounded native callback receipts and source identities
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-callback-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cliq-native-callback-lifecycle/*.json
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: Retain bounded native callback source and joined output evidence
         if: always()
         uses: actions/upload-artifact@v4

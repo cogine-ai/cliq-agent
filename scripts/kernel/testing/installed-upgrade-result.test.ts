@@ -3,6 +3,8 @@ import { test } from 'node:test';
 import { LEGACY_UPGRADE_SOURCE } from './legacy-upgrade-source-data.js';
 import { decodeInstalledUpgradeReport, INSTALLED_UPGRADE_PROFILE, readInstalledUpgradeCredentialFailure } from './installed-upgrade-result.js';
 import { readFile } from 'node:fs/promises';
+import vm from 'node:vm';
+import { CredentialSecretScanError } from './credential-secret-scan.js';
 
 // Deliberately inert report data. These tests prove only the closed evidence
 // decoder; they do not supply any Store, native receipt or installed authority.
@@ -99,4 +101,60 @@ test('upgrade credential failure diagnosis follows original process and output j
   assert(accepted.includes('report.credentialCommandFailure ??='), 'a later refusal cannot replace the original failed command');
   assert(accepted.includes('input, 60000, action)'));
   assert(!/\.message|\.stack|\.path|writeFile|setTimeout/u.test(accepted));
+});
+
+
+test('already-scanned credential failures expose only exact fixed internal reasons', () => {
+  const cases = [
+    ['credential authority history is not contiguous', 'credential_history'],
+    ['credential cleanup receipt differs from its observation', 'credential_revoke_history'],
+    ['credential preparation provenance differs', 'credential_original_source'],
+    ['retained current producer differs from its exact original signed bundle', 'credential_current_source'],
+    ['retained credential producer differs from its original signed source', 'credential_producer_source'],
+    ['endpoint retained object is missing or does not rehash', 'credential_retained_object'],
+    ['credential authority database did not retire', 'credential_retirement'],
+    ['ordinary credential entry cannot be called while a scope is acquiring, active or draining', 'credential_scope_busy'],
+  ];
+  const privateText = 'synthetic-private-key-path-and-ref';
+  const bytes = (message: string) => Buffer.from(JSON.stringify({ diagnosticOnly: true, scope: 'installed-read-startup',
+    message, path: privateText }));
+  for (const [message, reason] of cases) {
+    const failure = readInstalledUpgradeCredentialFailure(bytes(message!), 'read', 1);
+    assert.deepEqual(failure, { diagnosticOnly: true, kind: 'credential_command_failed', action: 'read', status: 1, code: null, reason });
+    assert(!JSON.stringify(failure).includes(message!)); assert(!JSON.stringify(failure).includes(privateText));
+    const report = complete(); report.qualified = false; report.phase = 'explicit_schema8_new_authorization_and_run';
+    report.credentialCommandFailure = failure; delete report.upgrade;
+    assert.equal(decodeInstalledUpgradeReport(report).qualified, false);
+    for (const input of [bytes(message! + privateText), bytes(privateText + message),
+      Buffer.concat([bytes(message!), Buffer.from('\n'), bytes(message!)])])
+      assert(!Object.hasOwn(readInstalledUpgradeCredentialFailure(input, 'read', 1), 'reason'));
+    report.credentialCommandFailure = { ...failure, reason: privateText };
+    assert.throws(() => decodeInstalledUpgradeReport(report));
+  }
+});
+
+test('cleanup corpus scanning preserves an original failure phase and cannot qualify that failure', async () => {
+  const source = await readFile(new URL('./installed-upgrade-journey.ts', import.meta.url), 'utf8');
+  const begin = source.indexOf('    if (report.servicesStoppedAndJoined && report.secretServiceJoined && report.httpsJoined) {');
+  const end = source.indexOf('    if (primary) report.error', begin);
+  assert(begin >= 0 && end > begin);
+  // Execute only the source's report/corpus composition over inert data. No
+  // campaign, process, filesystem scan, installed role or authority is created.
+  const fragment = source.slice(begin, end);
+  for (const failedBeforeScan of [false, true]) for (const scanFails of [false, true]) {
+    const original = failedBeforeScan ? new Error('inert business refusal') : undefined;
+    const scanFailure = new Error('inert corpus refusal'), report = { phase: 'explicit_schema8_new_authorization_and_run',
+      servicesStoppedAndJoined: true, secretServiceJoined: true, httpsJoined: true };
+    let scans = 0;
+    const context = vm.createContext({ primary: original, report, scanner: { stats: () => ({ streamsOpened: 7, bytesScanned: 11 }) },
+      scanStage: 'runtime', beforeCorpus: null, CredentialSecretScanError,
+      scanCredentialSecretCorpus: async () => { scans++; if (scanFails) throw scanFailure; return { qualified: true }; },
+      recipe: { stateRoot: 'inert' }, ledger: { uid: 1 }, mark: (phase: string) => { report.phase = phase; } });
+    await vm.runInContext(`(async () => { ${fragment} })()`, context);
+    assert.equal(scans, 1); assert.equal(context.scanStage, 'corpus');
+    assert.equal(context.beforeCorpus.streamsOpened, 7); assert.equal(context.beforeCorpus.bytesScanned, 11);
+    assert.equal(context.primary, original ?? (scanFails ? scanFailure : undefined));
+    assert.equal(context.report.qualified, !failedBeforeScan && !scanFails);
+    assert.equal(context.report.phase, failedBeforeScan ? 'explicit_schema8_new_authorization_and_run' : scanFails ? 'secret_corpus' : 'complete');
+  }
 });
