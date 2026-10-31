@@ -499,8 +499,8 @@ test('concurrent native worker binds preserve the process umask in an isolated c
   const runnerMask = process.umask();
   const workerCode = `
     const { parentPort, workerData } = require('node:worker_threads');
-    const { tsImport } = require('tsx/esm/api');
     (async () => {
+      const { tsImport } = await import('tsx/esm/api');
       const { loadNativeStateOwner } = await tsImport(workerData.nativeOwnerUrl, workerData.nativeOwnerUrl);
       const native = await loadNativeStateOwner();
       const held = native.acquireLock(workerData.root, true);
