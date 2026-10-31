@@ -209,6 +209,12 @@ test('the actual experimental entry rejects invalid provisioning before creating
 // Source wiring, not GNU strip/SEA execution or installed qualification. The
 // Check the exact additive Node qualification input before checking the
 // unchanged historical CT projection. This is a validation copy only.
+const callbackReceiptRetention = '\n      - name: Retain only bounded native callback receipts and source identities\n' +
+  '        if: always()\n        uses: actions/upload-artifact@v4\n        with:\n' +
+  '          name: native-callback-evidence-${{ github.run_id }}-${{ github.run_attempt }}\n' +
+  '          path: ${{ runner.temp }}/cliq-native-callback-lifecycle/*.json\n' +
+  '          if-no-files-found: warn\n          retention-days: 7\n';
+
 function withoutLockedNodeQualification(workflow: string): string {
   const native = '      - name: Check the actual native dependency family before installed qualification\n' +
     '        run: |\n' +
@@ -237,6 +243,9 @@ function withoutLockedNodeQualification(workflow: string): string {
     'the only new source step keeps its exact official URL, bounds, full validation, exclusive publication and join');
   const job = workflow.match(/\n  linux-installed-verifier:\n[\s\S]*?(?=\n  [a-z][a-z0-9-]*:\n|$)/u)?.[0];
   assert(job, 'the original installed verifier job must remain');
+  assert.equal(workflow.split(callbackReceiptRetention).length, 2, 'one exact JSON-only callback receipt artifact is required');
+  assert(job.includes(callbackReceiptRetention + callbackRetention),
+    'the bounded receipt stays beside the unchanged full callback evidence in its original verifier job');
   assert.equal(workflow.split(native).length, 2, 'the exact native preflight runs once');
   assert.equal(workflow.split(source).length, 2, 'the exact source acquisition runs once');
   assert(job.includes(native + source + '      - name: Observe the fixed original installed status deadlock\n'),
@@ -253,7 +262,7 @@ function withoutLockedNodeQualification(workflow: string): string {
   assert.equal(workflow.split(invocation).length, 2, 'the exact verifier invocation runs once');
   assert(job.includes(condition), 'the candidate requires its fully verified official source');
   assert.equal(workflow.split(condition).length, 2, 'only the original verifier uses the new source condition');
-  return workflow.replace(native, '').replace(callbackRetention, '').replace(source, '').replace(invocation, originalInvocation)
+  return workflow.replace(native, '').replace(callbackReceiptRetention, '').replace(callbackRetention, '').replace(source, '').replace(invocation, originalInvocation)
     .replace(condition, "        if: ${{ !cancelled() && steps.build.outcome == 'success' }}\n");
 }
 
@@ -393,7 +402,18 @@ test('the exact native preflight preserves every original and added case and rej
     .map(name => ' scripts/kernel/testing/' + name + '.test.ts');
   const mutations = cases.flatMap(filename => [workflow.replace(filename, ''), workflow.replace(filename, filename.repeat(2))]);
   const lastCase = cases.at(-1)!;
+  const mutateReceipt = (from: string, to: string) => workflow.replace(callbackReceiptRetention, callbackReceiptRetention.replace(from, to));
   mutations.push(
+    workflow.replace(callbackReceiptRetention, ''),
+    workflow.replace(callbackReceiptRetention, callbackReceiptRetention.repeat(2)),
+    workflow.replace(callbackReceiptRetention, '') + callbackReceiptRetention,
+    mutateReceipt('if: always()', 'if: false'),
+    mutateReceipt('native-callback-evidence-${{ github.run_id }}', 'native-callback-lifecycle-${{ github.run_id }}'),
+    mutateReceipt('cliq-native-callback-lifecycle/*.json', 'cliq-native-callback-lifecycle/*.tap'),
+    mutateReceipt('          path: ${{ runner.temp }}/cliq-native-callback-lifecycle/*.json\n',
+      '          path: |\n            ${{ runner.temp }}/cliq-native-callback-lifecycle/*.json\n' +
+      '            ${{ runner.temp }}/cliq-native-callback-lifecycle/*.source.tar\n'),
+    mutateReceipt('retention-days: 7', 'retention-days: 8'),
     workflow.replace('qualify-native-callback-lifecycle.ts', 'callback-qualification-skipped.ts'),
     workflow.replace('origin ba804a59dcadee80cb41c822e2d0e32198462f20', 'origin HEAD'),
     workflow.replace('cliq-native-callback-lifecycle/*.tap', 'cliq-native-callback-lifecycle/omitted.tap'),
