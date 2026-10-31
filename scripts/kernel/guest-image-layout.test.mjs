@@ -41,7 +41,12 @@ test('the actual shared builder defaults to compact while only fixed qualificati
   assert(publisher.includes('guestImageLayout(total,'));
   assert(installed.includes("guestImageProfile?: 'qualification_max'"));
   assert(installed.includes("...(options.guestImageProfile ? ['--qualification-max'] : [])"));
-  assert(journey.includes("...(journeyKind === 'verifier' ? { guestImageProfile: 'qualification_max' as const } : {})"));
+  assert(journey.includes("...(journeyKind === 'verifier' || journeyKind === 'permission' ? { guestImageProfile: 'qualification_max' as const } : {})"));
+  assert.equal(journey.match(/guestImageProfile:/gu)?.length, 1, 'only the two fixed maximum-fixture callers may select this option');
+  const maximum = /\.\.\.\((journeyKind === 'verifier' \|\| journeyKind === 'permission') \? \{ guestImageProfile: 'qualification_max' as const \} : \{\}\)/u.exec(journey);
+  assert(maximum); const selectMaximum = Function('journeyKind', 'return ' + maximum[1]);
+  for (const kind of ['verifier', 'permission']) assert.equal(selectMaximum(kind), true);
+  for (const kind of ['delivery', 'provider', 'daily', 'provider-daily', 'unknown', '', undefined]) assert.equal(selectMaximum(kind), false);
   assert(native.includes("[builder, guestRoot, installationRoot, carrier, '--qualification-max']"));
   assert(!/process\.env/u.test(builder + publisher), 'no environment-driven image construction override');
   assert.equal(installed.match(/process\.env\b/gu)?.length, 1);

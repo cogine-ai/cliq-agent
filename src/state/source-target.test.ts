@@ -14,6 +14,7 @@ import { testFixture } from '../model/testing/fixtures.js';
 import { createWorkspaceTrustContext, writePersistedWorkspaceTrust } from '../session/trust.js';
 import { normalizeRunSubmitRequest, runSubmitIntentDigest } from './source-target.js';
 import { assertInstalledRunRecipe } from './installed-run.js';
+import { selectVerifierReleaseReference } from './verifier-admission.js';
 import { insertArtifactMetadata } from './artifacts.js';
 import { admissionKey, uuidv7 } from './testing/fixtures.js';
 import { signedToolBundle } from './testing/tool-authority.js';
@@ -143,9 +144,9 @@ test('installed recipe retains ordered skills and source requests before their i
     sourceIncludes: [{ path: 'separate-source', scope: 'entry', readGrantId: 'caller-request-only' }] }));
 });
 
-test('installed recipe reaches only its connected exact Node verifier subset without inferring execution permission', () => {
-  // Data-only preflight. This does not mint an identity grant or qualify a
-  // physical installation; admission still consumes the real original grant.
+test('installed recipe reaches only its connected exact Node verifier subset without inferring execution permission', async t => {
+  // Request support and a real empty SQLite lookup only. Neither this
+  // discovery projection nor an identity locator is execution authority.
   const request = normalizeRunSubmitRequest(inlineRequest({
     model: { provider: 'openai-compatible', model: 'owned-fixture-model',
       endpoint: { kind: 'registered', endpointRegistrationId: 'owned-fixture-endpoint' }, modelCredentialGrantIds: ['owned-fixture-grant'] },
@@ -153,9 +154,22 @@ test('installed recipe reaches only its connected exact Node verifier subset wit
       argv: [{ kind: 'non_secret_literal', value: '--test' }, { kind: 'non_secret_literal', value: '--test-concurrency=1' },
         { kind: 'non_secret_literal', value: 'test.mjs' }], cwd: '.', env: {}, writableEphemeralPaths: [], identityReadGrantId: 'original-read-grant' }]
   })).request;
-  assert.doesNotThrow(() => assertInstalledRunRecipe(request));
-  assert.throws(() => assertInstalledRunRecipe({ ...request, policyMode: 'default' }), { refusalCode: 'AUTHORIZATION_REQUIRED' });
-  assert.throws(() => assertInstalledRunRecipe({ ...request, policyMode: 'accept-edits' }), { refusalCode: 'AUTHORIZATION_REQUIRED' });
+  const directory = await mkdtemp(path.join(tmpdir(), 'cliq-verifier-reference-')); let owned: ReturnType<typeof openSqliteDriver> | undefined;
+  t.after(async () => { owned?.close(); await rm(directory, { recursive: true, force: true }); });
+  const driver = owned = openSqliteDriver(path.join(directory, 'state.sqlite'));
+  driver.exec('CREATE TABLE authorization_grants (grant_id TEXT PRIMARY KEY, owner_principal_id TEXT NOT NULL, state TEXT NOT NULL, row_json TEXT NOT NULL) STRICT');
+  const discovery = { structuredArtifacts: [], guestToolchainManifestRefs: [], entries: [] } as Parameters<typeof selectVerifierReleaseReference>[1];
+  assert.equal(driver.prepare('SELECT COUNT(*) AS count FROM authorization_grants').get<{ count: bigint }>()!.count, 0n);
+  for (const policyMode of ['default', 'accept-edits', 'plan', 'yolo'] as const) {
+    const selected = { ...request, policyMode };
+    assert.doesNotThrow(() => assertInstalledRunRecipe(selected));
+    assert.throws(() => selectVerifierReleaseReference(driver, discovery, 'owned-principal', selected.verifiers, policyMode),
+      { refusalCode: 'AUTHORIZATION_REQUIRED' });
+    assert.throws(() => assertInstalledRunRecipe({ ...selected, verifiers: [{ ...selected.verifiers[0]!,
+      argv: [{ kind: 'non_secret_literal', value: '--eval' }, ...selected.verifiers[0]!.argv.slice(1)] }] }),
+    { refusalCode: 'UNSUPPORTED_EXECUTION_IDENTITY' });
+  }
+  assert.equal(driver.prepare('SELECT COUNT(*) AS count FROM authorization_grants').get<{ count: bigint }>()!.count, 0n);
   assert.throws(() => assertInstalledRunRecipe({ ...request, verifiers: [{ ...request.verifiers[0]!,
     executable: { kind: 'toolchain', toolId: 'bash' } }] }), { refusalCode: 'UNSUPPORTED_EXECUTION_IDENTITY' });
 });

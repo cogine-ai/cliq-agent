@@ -133,12 +133,24 @@ test('installed verifier preparation diagnosis follows the actual history, curre
   const installed = functions.get('prepareInstalledVerifierAssembly')!.getText();
   const ordinary = functions.get('prepareVerifierSpec')!.getText();
   for (const [body, stage, operation] of [
-    [identities, verifierPreparationStages[0], 'const history = await readAuthorizationHistory'],
+    [identities, verifierPreparationStages[0], 'const history = request.executionGrantId === undefined'],
     [identities, verifierPreparationStages[1], 'const selected = await readRetainedVerifierToolchain'],
     [resolve, verifierPreparationStages[2], 'const profile ='],
     [installed, verifierPreparationStages[3], 'const metadata = await publishVerifierAssembly']
   ]) assert(body.includes(`reportInstalledVerifierPreparationPhase(onPreparationPhase, '${stage}');\n` +
     (body === identities ? '    ' : '  ') + operation), 'a fixed phase must immediately precede its original operation');
+  const histories: ts.VariableDeclaration[] = [];
+  const findHistory = (node: ts.Node): void => {
+    if (ts.isVariableDeclaration(node) && node.name.getText() === 'history') histories.push(node);
+    ts.forEachChild(node, findHistory);
+  };
+  findHistory(functions.get('readVerifierRequestIdentities')!); assert.equal(histories.length, 1);
+  const history = histories[0]!.initializer; assert(history && ts.isConditionalExpression(history));
+  assert.equal(history.condition.getText(), 'request.executionGrantId === undefined');
+  assert.equal(history.whenTrue.getText(), 'await readAuthorizationHistory(driver, artifacts, owner, grant, runtime.releaseKeys, signal)');
+  assert.equal(history.whenFalse.getText(), 'await readVerifierExecutionAuthorizationHistory(driver, artifacts, owner, grant, runtime.releaseKeys, signal)');
+  assert.equal((identities.match(/reportInstalledVerifierPreparationPhase\(onPreparationPhase, 'submit_assembly_verifier_history'\)/gu) ?? []).length, 1,
+    'one original observer must precede the complete mutually exclusive history selection');
   assert.match(resolve, /input\.requests, historical, signal, onPreparationPhase\)/u);
   assert.match(installed, /input, undefined, signal, onPreparationPhase\)/u);
   assert.match(ordinary, /input, historical, signal\)/u);
@@ -395,7 +407,19 @@ test('authorization diagnosis records only existing await boundaries and rethrow
   assert(selectedStart >= 0 && selectedAwait > selectedStart && selectedAwait < body.indexOf("diagnosis?.stage('publish_request');"));
   assert(body.includes("const dependency = decision.kind === 'dependency_install_scripts'\n" +
     '      ? await selectDependencyScriptsTarget(driver, artifacts, owner, runtime, identity.principalId, request as DependencyInstallScriptsCreateRequest, signal) : undefined;'));
-  assert(body.includes("const target = decision.kind === 'dependency_install_scripts' ? dependency!.target : decision.kind === 'read_scope' ? readScope!.target : decision.kind === 'source_git_inspection'\n" +
+  assert(body.includes("const readScope = decision.kind === 'read_scope'\n" +
+    '      ? await selectSourceReadTarget(driver, artifacts, identity.principalId, request as SourceReadScopeCreateRequest, signal) : undefined;'));
+  assert(body.includes("const executionIdentity = decision.kind === 'verifier_execution' ? readAuthorizationGrant(driver, decision.executionIdentityGrantId) : undefined;"));
+  assert(body.includes("if (decision.kind === 'verifier_execution') {\n" +
+    "      if (!executionIdentity || executionIdentity.state !== 'active' || executionIdentity.ownerPrincipalId !== identity.principalId ||\n" +
+    "          executionIdentity.target.kind !== 'execution_identity_read' || executionIdentity.target.purpose !== 'verifier')\n" +
+    "        throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');\n" +
+    '      executionCreationAt = (await readAuthorizationHistory(driver, artifacts, owner, executionIdentity, runtime.releaseKeys, signal)).committedAt;\n    }'));
+  assert(body.includes("const target = decision.kind === 'verifier_execution' ? {\n" +
+    "      kind: 'verifier_execution' as const, verifierId: decision.verifierId, verifierRequestCoreDigest: decision.verifierRequestDigest,\n" +
+    '      executionIdentityGrantId: executionIdentity!.grantId, executionIdentityTargetDigest: executionIdentity!.targetDigest,\n' +
+    '      maxCandidateGenerations: decision.maxCandidateGenerations, maxAttemptsPerCandidate: decision.maxAttemptsPerCandidate\n' +
+    "    } : decision.kind === 'dependency_install_scripts' ? dependency!.target : decision.kind === 'read_scope' ? readScope!.target : decision.kind === 'source_git_inspection'\n" +
     "      ? await selectSourceInspectionTarget(driver, artifacts, runtime, identity.principalId, request as SourceGitInspectionCreateRequest, signal)\n" +
     '      : await (async () => {\n        const selected = await readRetainedVerifierToolchain'),
   'the unchanged verifier selection remains inside its execution-only branch, after source-specific selection');

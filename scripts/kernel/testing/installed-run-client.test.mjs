@@ -24,11 +24,14 @@ const hello = { protocolVersion: 1, method: 'control.hello' };
 const mutation = { protocolVersion: 1, method: 'run.submit', requestId: 'test-request-once' };
 const helloReply = JSON.stringify({ protocolVersion: 1, ok: true, result: { method: 'control.hello', supervisorInstanceId: 'fixture-owner' } });
 
-test('the installed policy refusal probe exercises verifier authority rather than rejecting supported ordinary defaults', async () => {
-  // Exact campaign block plus production pure-data admission checks. This
-  // fixture opens no Store, installation, connection or execution authority.
+test('the installed policy refusal probe exercises verifier authority rather than rejecting supported ordinary defaults', async t => {
+  // Exact campaign block and real reference selection over an empty SQLite
+  // grant table. No Store, installation, connection or authority is created;
+  // the inert Session view below is not a physical admission qualification.
   const { normalizeRunSubmitRequest } = await tsImport('../../../src/state/source-target.ts', import.meta.url);
   const { assertInstalledRunRecipe } = await tsImport('../../../src/state/installed-run.ts', import.meta.url);
+  const { selectVerifierReleaseReference } = await tsImport('../../../src/state/verifier-admission.ts', import.meta.url);
+  const { openSqliteDriver } = await tsImport('../../../src/state/sqlite-driver.ts', import.meta.url);
   const { sourceInspectionRequest } = await tsImport('../../../src/state/testing/source-inspection-fixtures.ts', import.meta.url);
   const value = sourceInspectionRequest({ model: { provider: 'openai-compatible', model: 'owned-fixture-model',
     endpoint: { kind: 'registered', endpointRegistrationId: 'owned-fixture-endpoint' }, modelCredentialGrantIds: ['owned-fixture-grant'] } });
@@ -37,13 +40,24 @@ test('the installed policy refusal probe exercises verifier authority rather tha
   assert(start >= 0 && end > start);
   const observed = [], session = { id: value.sessionId, revision: 1 };
   const plain = value => JSON.parse(JSON.stringify(value));
+  const directory = await mkdtemp('/tmp/cliq-run-policy-refusal-'); let driver;
+  t.after(async () => { driver?.close(); await rm(directory, { recursive: true, force: true }); });
+  driver = openSqliteDriver(path.join(directory, 'state.sqlite'));
+  driver.exec('CREATE TABLE authorization_grants (grant_id TEXT PRIMARY KEY, owner_principal_id TEXT NOT NULL, state TEXT NOT NULL, row_json TEXT NOT NULL) STRICT');
+  const grantCount = () => Number(driver.prepare('SELECT COUNT(*) AS count FROM authorization_grants').get().count);
+  assert.equal(grantCount(), 0);
   const context = { assert, resourceCore, session, requestsReceived: 0, currentSession: () => session,
     canonicalSha256: value => canonicalSha256(plain(value)),
     request: core => { const data = plain(core); return { ...data, requestDigest: canonicalSha256(data) }; },
     exchange: requests => requests.map(request => {
       observed.push(request);
       const normalized = normalizeRunSubmitRequest(plain(request)).request;
-      try { assertInstalledRunRecipe(normalized); return { protocolVersion: 1, ok: true, result: { method: 'run.submit' } }; }
+      assertInstalledRunRecipe(normalized); // Ordinary default-mode data is supported.
+      try {
+        selectVerifierReleaseReference(driver, { structuredArtifacts: [], guestToolchainManifestRefs: [], entries: [] },
+          'owned-principal', normalized.verifiers, normalized.policyMode);
+        assert.fail('the original ungranted identity must be refused by real reference selection');
+      }
       catch (error) {
         assert.equal(error.name, 'VerifierAuthorizationError');
         assert.equal(error.code, 'STATE_TRANSITION_INVALID');
@@ -59,6 +73,8 @@ test('the installed policy refusal probe exercises verifier authority rather tha
   assert.equal(observed[0].allowUnverified, false);
   assert.equal(observed[0].verifiers.length, 1);
   assert.equal(observed[0].verifiers[0].required, true);
+  assert.equal(observed[0].verifiers[0].identityReadGrantId, 'policy-preflight-ungranted');
+  assert.equal(grantCount(), 0);
 });
 
 test('stop diagnosis retains only fixed phases and bounded counts, never journal text or execution evidence', () => {
