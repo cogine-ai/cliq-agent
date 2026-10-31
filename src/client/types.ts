@@ -36,6 +36,6 @@ export type CliqClient = Readonly<{
   readRun(request: Extract<InstalledControlRequestV1, { method: 'run.get' }>): Promise<Response>;
   execute(command: ClientCommand): Promise<Response | void>;
   replay(): Promise<Response>;
-  follow(runId: string, afterEventSeq?: number, signal?: AbortSignal): Promise<void>;
+  follow(runId: string, afterEventSeq?: number, signal?: AbortSignal, presentation?: 'transcript' | 'state'): Promise<void>;
   close(): Promise<void>;
 }>;

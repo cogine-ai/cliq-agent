@@ -178,7 +178,7 @@ export function createClientApplication(session: InstalledControlSession,
         return dispatch(unresolved, session.requests ? unresolved.requestId : undefined);
       });
     },
-    follow(runId: string, afterEventSeq = 0, signal?: AbortSignal): Promise<void> {
+    follow(runId: string, afterEventSeq = 0, signal?: AbortSignal, presentation: 'transcript' | 'state' = 'transcript'): Promise<void> {
       if (following) return Promise.reject(new ClientBusyError());
       const readSignal = signal ? AbortSignal.any([signal, local.signal]) : local.signal;
       const pending = (async () => {
@@ -222,7 +222,7 @@ export function createClientApplication(session: InstalledControlSession,
               await emit({ kind: 'response', origin: 'follow', request, response });
               for (const event of events) await emit({ kind: 'event', event });
               if (!response.ok) return; // Expiry never invents a replacement cursor.
-              await transcript(response.result.snapshot.latestRunItemSeq);
+              if (presentation !== 'state') await transcript(response.result.snapshot.latestRunItemSeq);
               afterEventSeq = response.result.nextEventSeq;
               const status = response.result.snapshot.run.status;
               terminal = !['queued', 'running', 'waiting'].includes(status);

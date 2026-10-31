@@ -117,7 +117,8 @@ limits, conservative reservations or the kernel's default budget. In particular,
 a provider's large per-request ceiling may require an explicit larger token
 budget to allow multiple turns. `result <id> --wait` follows authoritative state
 and then displays the original result review; a waiting/refused Run is not
-automatically approved or retried. `apply <id> --result <ref>` retains the
+automatically approved or retried. Result waiting observes state and events
+without replaying historical conversation; run and attach keep their transcript. `apply <id> --result <ref>` retains the
 distinct exact-result Delivery action.
 
 These are implemented source paths, not installed qualification evidence. The

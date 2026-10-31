@@ -47,7 +47,7 @@ export async function executeClientAction(app: ClientApplication, invocation: Cl
       }
     });
     try {
-      try { await app.follow(invocation.runId, 0, followSignal); }
+      try { await app.follow(invocation.runId, 0, followSignal, 'state'); }
       catch (error) { if (signal?.aborted || !stoppedAtWait || !(error instanceof Error) || error.name !== 'AbortError') throw error; }
     } finally { unsubscribe(); }
     signal?.throwIfAborted();
