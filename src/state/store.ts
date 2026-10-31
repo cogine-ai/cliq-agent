@@ -2098,6 +2098,7 @@ export class StateStore {
         endpoint: authority.endpoint, credentialBindings: authority.bindings, controlledHome }, signal, diagnosis?.stage);
       diagnosis?.stage('submit_final_admission');
       const admission = withCredentialAuthorityLock(selected, async token => {
+        diagnosis?.stage('submit_final_admission_scope_held');
         signal.throwIfAborted();
         const held = checkedCredentialToken(token);
         currentModelAuthority(held, identity.principalId, model.endpoint.endpointRegistrationId,
@@ -2106,7 +2107,10 @@ export class StateStore {
         if (authority.bindings.some(binding => binding.expiresAt !== undefined && binding.expiresAt < assembled.deadlineAt))
           throw new InstalledModelAuthorizationError();
         assertCurrentControlFrame(this.owner, identity); token.assertHeld();
-        return admitInstalledRun(this.driver, this.artifacts, this.owner, assembled, identity, this.runtimeAuthority, signal);
+        const admitted = await admitInstalledRun(this.driver, this.artifacts, this.owner, assembled, identity, this.runtimeAuthority, signal);
+        // Durable admission is not the enclosing scope's post-validation or join.
+        diagnosis?.stage('submit_final_admission_committed');
+        return admitted;
       });
       const runId = identityHash('cliq-run-id-v1', identity.principalId, 'run.submit', normalized.request.admissionKey);
       // Register before that asynchronous producer can commit a visible Run.
@@ -2186,7 +2190,7 @@ export class StateStore {
           { runId, releaseKeys: this.runtimeAuthority!.releaseKeys }, undefined, this.installedRuntime, readerSignal)
         : await loadAgentRun(this.driver, this.artifacts, this.owner,
           { runId, material: material!, releaseKeys: this.runtimeAuthority!.releaseKeys }, undefined, this.installedRuntime, signal,
-          phase => { if (this.installedRunPhases.has(runId)) this.installedRunPhases.set(runId, phase); });
+          phase => { if (this.installedRunPhases.has(runId)) this.installedRunPhases.set(runId, phase); }, readerSignal);
       signal.throwIfAborted();
       if (['queued', 'running', 'waiting'].includes(readRun(this.driver, runId).status)) this.installedAgents.set(runId, { agent, readAbort });
       return agent;

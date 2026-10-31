@@ -19,7 +19,7 @@ import type {
   WorkspaceStateManifest
 } from '../kernel/types.js';
 import type { ArtifactCatalog } from './artifacts.js';
-import { validateAgentRecovery, validateAgentRecoveryInDeliveryEpoch } from './agent-recovery.js';
+import { validateAgentRecovery, validateAgentRecoveryInDeliveryEpoch, validateAgentRecoveryInResultEpoch } from './agent-recovery.js';
 import { createDeliveryReadData } from './delivery-read-data.js';
 import { validateStopRecovery, validateStopRecoveryInDeliveryEpoch } from './stop-recovery.js';
 import {
@@ -52,7 +52,8 @@ import { readRetiredGenerationSource } from './generation-retirement.js';
 import { validateInstalledBrokerAmbiguityHistory } from './broker-ambiguity.js';
 import { validateInstalledModelNoReleaseHistory } from './broker-no-release.js';
 import { assertWorkerPreparationCleanupContext, validateWorkerPreparationHistory, type WorkerPreparationCleanupContext } from './worker-preparation.js';
-import { validateRunResultRecovery, validateRunResultRecoveryInDeliveryEpoch } from './run-result-recovery.js';
+import { closeAgentResultReadData, createAgentResultReadData, readAgentResultData, readResultBasis, validateRunResultRecovery, validateRunResultRecoveryInAgentEpoch,
+  validateRunResultRecoveryInDeliveryEpoch, type AgentResultReadData } from './run-result-recovery.js';
 import { assertDeliveryModelFreeCut } from './run-model-free.js';
 import type { SandboxResourceSpec } from '../kernel/execution.js';
 import { readFrozenIgnoreRules } from '../workspace/frozen-ignore.js';
@@ -527,11 +528,10 @@ async function validateGenerationArtifacts(
       const evidence = decodeWorkspaceGenerationSnapshotEvidence(
         await artifacts.readCanonical(generation.snapshotEvidenceRef)
       );
-      const evidenceWorkspace = await validateWorkspaceStateArtifacts(
-        artifacts,
-        evidence.workspaceStateRef,
-        'WorkspaceGenerationSnapshotEvidence.workspaceStateRef', frozen
-      );
+      artifacts.assertReadActive();
+      const evidenceWorkspace = evidence.workspaceStateRef === identity.sourceWorkspaceStateRef ? sourceWorkspace
+        : await validateWorkspaceStateArtifacts(artifacts, evidence.workspaceStateRef,
+          'WorkspaceGenerationSnapshotEvidence.workspaceStateRef', frozen);
       if (
         evidence.evidenceDigest !== generation.snapshotEvidenceDigest ||
         evidence.generationRef !== generation.generationRef ||
@@ -629,7 +629,22 @@ export async function readRecoveryClosure(
   runId: string,
   onPhase?: (phase: RecoveryClosurePhase) => void
 ): Promise<RecoveryClosureV1> {
-  return (await readRecoveryProjection(driver, artifacts, runId, onPhase)).cut;
+  const result = await readRecoveryProjection(driver, artifacts, runId, onPhase);
+  if (result.agent) closeAgentResultReadData(driver, artifacts, result.cut, result.agent);
+  return result.cut;
+}
+
+/** Internal completion reader. It opens the same full fresh recovery entry;
+ * only its actual completed data family can supply the terminal basis. */
+export async function readResultRecoveryClosure(driver: SqliteDriver, artifacts: ArtifactCatalog, runId: string,
+  onPhase?: (phase: RecoveryClosurePhase) => void) {
+  const result = await readRecoveryProjection(driver, artifacts, runId, onPhase);
+  try {
+    const basis = result.agent ? await readAgentResultData(driver, artifacts, result.cut, result.agent).basis()
+      : await readResultBasis(driver, artifacts, result.cut);
+    artifacts.assertReadActive();
+    return { cut: result.cut, basis };
+  } finally { if (result.agent) closeAgentResultReadData(driver, artifacts, result.cut, result.agent); }
 }
 
 /** One exact dead preparation may be inspected by its genuine successor.
@@ -638,8 +653,8 @@ export async function readPreparingCleanupClosure(driver: SqliteDriver, artifact
   runId: string, context: WorkerPreparationCleanupContext): Promise<RecoveryClosureV1> {
   assertWorkerPreparationCleanupContext(driver, context, runId);
   const result = await readRecoveryProjection(driver, artifacts, runId, undefined, context);
-  assertWorkerPreparationCleanupContext(driver, context, runId);
-  return result.cut;
+  try { assertWorkerPreparationCleanupContext(driver, context, runId); return result.cut; }
+  finally { if (result.agent) closeAgentResultReadData(driver, artifacts, result.cut, result.agent); }
 }
 
 /** One complete fresh recovery traversal and its publication projection.
@@ -652,6 +667,7 @@ export async function readDeliveryPublicationClosure(
 ): Promise<{ cut: RecoveryClosureV1; prefix: PublicationPrefix }> {
   return observeInstalledPublicationWork(runId, 'publication_recovery', async () => {
     const result = await readRecoveryProjection(driver, artifacts, runId, onPhase);
+    if (result.agent) closeAgentResultReadData(driver, artifacts, result.cut, result.agent);
     if (result.cut.runSpec.operation !== 'delivery' || !result.prefix)
       throw new KernelStorageError('RECOVERY_REQUIRED', 'publication closure requires a delivery Run');
     return { cut: result.cut, prefix: result.prefix };
@@ -664,7 +680,7 @@ async function readRecoveryProjection(
   runId: string,
   onPhase?: (phase: RecoveryClosurePhase) => void,
   preparationCleanup?: WorkerPreparationCleanupContext
-): Promise<{ cut: RecoveryClosureV1; prefix?: PublicationPrefix }> {
+): Promise<{ cut: RecoveryClosureV1; prefix?: PublicationPrefix; agent?: AgentResultReadData }> {
   const phase = (value: RecoveryClosurePhase) => { try { onPhase?.(value); } catch { /* Diagnosis cannot decide recovery. */ } };
   phase('cut');
   const databaseCut = driver.transaction((connection) => {
@@ -810,6 +826,7 @@ async function readRecoveryProjection(
   await validateGenerationArtifacts(artifacts, generationProofs, frozenSource);
   const closure: RecoveryClosureV1 = { runSpec, run, latestCheckpoint, items, journal, workerLaunches, workspaceGenerations, childAllocations };
   const delivery = runSpec.operation === 'delivery' ? createDeliveryReadData(driver, artifacts, closure) : undefined;
+  let agent: AgentResultReadData | undefined;
   phase('history');
   if (journal.some((entry) => entry.opKind === 'model' || entry.opKind === 'verifier') || run.repairCount !== 0 ||
       runSpec.operation === 'agent' && items.length > 0 || runSpec.operation === 'delivery') {
@@ -818,9 +835,14 @@ async function readRecoveryProjection(
         principalId: databaseCut.principalId, workspaceIdentityRef: databaseCut.workspaceIdentityRef,
         checkpoints: databaseCut.checkpoints, workspaceGenerations: generationProofs,
         context: decodeContextManifest(await artifacts.readCanonical(latestCheckpoint.contextManifestRef)) };
-      const history = delivery
-        ? await validateAgentRecoveryInDeliveryEpoch(input, delivery, value => phase(`history_${value}`))
-        : await validateAgentRecovery(input, value => phase(`history_${value}`));
+      let history: { repairAttempts: number };
+      if (delivery) history = await validateAgentRecoveryInDeliveryEpoch(input, delivery, value => phase(`history_${value}`));
+      else if (!run.activeWorkerLaunchId && workerLaunches.length === 0 &&
+          (run.nextStep === 'verify' || run.nextStep === 'finalize' || run.resultRef !== undefined)) {
+        const recovered = await validateAgentRecoveryInResultEpoch(input, closure, value => phase(`history_${value}`));
+        agent = createAgentResultReadData(driver, artifacts, closure, recovered.data);
+        history = recovered;
+      } else history = await validateAgentRecovery(input, value => phase(`history_${value}`));
       journalBudgets.consumed = addBudget(journalBudgets.consumed,
         { ...ZERO_BUDGET, repairAttempts: history.repairAttempts }, 'recovery authorized repair budget');
       const assembly = await artifacts.readCanonical<RunAssemblyV1>(runSpec.assemblyRef);
@@ -879,9 +901,10 @@ async function readRecoveryProjection(
     if (delivery) await validateStopRecoveryInDeliveryEpoch(driver, artifacts, closure, delivery);
     else await validateStopRecovery(driver, artifacts, closure);
     if (delivery) await validateRunResultRecoveryInDeliveryEpoch(driver, artifacts, closure, delivery);
+    else if (agent) await validateRunResultRecoveryInAgentEpoch(driver, artifacts, closure, agent);
     else await validateRunResultRecovery(driver, artifacts, closure);
     if (delivery) await delivery.prefix();
   }
   catch (error) { recoveryFailure(`stop recovery closure is invalid: ${(error as Error).message}`, error); }
-  return { cut: closure, ...(publicationPrefix ? { prefix: publicationPrefix } : {}) };
+  return { cut: closure, ...(publicationPrefix ? { prefix: publicationPrefix } : {}), ...(agent ? { agent } : {}) };
 }

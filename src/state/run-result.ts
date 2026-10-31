@@ -11,7 +11,7 @@ import { advanceTimeFence, sampleCanonicalNow, type TimeFenceAdvance } from './c
 import { decodeAdmittedContext, decodeSessionProjection } from './decoders.js';
 import { KernelStorageError, stateOperation } from './errors.js';
 import { assertRetiredGenerationCut } from './generation-retirement.js';
-import { readRecoveryClosure, type RecoveryClosurePhase } from './recovery-closure.js';
+import { readResultRecoveryClosure, type RecoveryClosurePhase } from './recovery-closure.js';
 import { readInvocationJournal } from './repositories/journal.js';
 import { readWorkerLaunchesForRun } from './repositories/worker-launches.js';
 import { readWorkspaceGenerationsForRun } from './repositories/workspace-generations.js';
@@ -60,8 +60,12 @@ export function readOwnedPublicationResultPlan(driver: SqliteDriver, owner: Stat
 /** Store-derived completion only. A no-required-check result is explicitly unverified;
  * this module grants no execution permission and accepts no caller proof/list. */
 export function loadRunResult(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
-  authority: { run: Run; spec: RunSpec; principalId: string }, onPhase?: (phase: RunResultPhase) => void) {
+  authority: { run: Run; spec: RunSpec; principalId: string }, onPhase?: (phase: RunResultPhase) => void,
+  resultPreparationSignal?: AbortSignal) {
   const { run: admitted, spec, principalId } = authority, runId = admitted.id;
+  // Only effect-free normal result preparation borrows this read lifetime.
+  // Owned publication/no-op results retain their original real producer scope.
+  const resultReads = resultPreparationSignal ? artifacts.withReadSignal(resultPreparationSignal) : artifacts;
   const phase = (value: RunResultPhase) => { try { onPhase?.(value); } catch { /* Diagnosis cannot decide execution. */ } };
   function revision(input: { expectedRunRevision: number }): number {
     if (!input || !exactKeys(input, ['expectedRunRevision']) || !Number.isSafeInteger(input.expectedRunRevision) || input.expectedRunRevision < 1)
@@ -69,14 +73,16 @@ export function loadRunResult(driver: SqliteDriver, artifacts: ArtifactCatalog, 
     return input.expectedRunRevision;
   }
   async function load() {
+    resultReads.assertReadActive();
     assertActiveStateOwner(driver, owner);
     phase('result_recovery');
-    const cut = await observeInstalledPublicationWork(runId, 'result_recovery',
-      () => readRecoveryClosure(driver, artifacts, runId, value => phase(`result_recovery_${value}`)));
+    const { cut, basis } = await observeInstalledPublicationWork(runId, 'result_recovery',
+      () => readResultRecoveryClosure(driver, resultReads, runId, value => phase(`result_recovery_${value}`)));
+    resultReads.assertReadActive();
+    assertActiveStateOwner(driver, owner);
     if (cut.run.specRef !== admitted.specRef || cut.run.createdAt !== admitted.createdAt || cut.run.deadlineAt !== admitted.deadlineAt ||
         canonicalSha256(cut.runSpec) !== canonicalSha256(spec)) throw new TypeError('result authority no longer belongs to this Run');
     phase('result_basis');
-    const basis = await readResultBasis(driver, artifacts, cut);
     if (basis.principalId !== principalId) throw new TypeError('result authority belongs to another principal');
     return { cut, basis };
   }
@@ -93,6 +99,7 @@ export function loadRunResult(driver: SqliteDriver, artifacts: ArtifactCatalog, 
     const launches = readWorkerLaunchesForRun(driver, runId), generations = readWorkspaceGenerationsForRun(driver, runId), items = itemRows(driver);
     const allocations = readChildAllocationsForRun(driver, runId);
     return (connection: SqliteConnection) => {
+      resultReads.assertReadActive();
       assertActiveStateOwner(connection, owner);
       if ('childAdmission' in basis && basis.childAdmission) {
         for (const edge of [basis.childAdmission, ...basis.childAdmission.ancestors]) edge.assertUnchanged(connection);
@@ -241,8 +248,8 @@ export function loadRunResult(driver: SqliteDriver, artifacts: ArtifactCatalog, 
       const expected = revision(input), { cut, basis } = await load();
       if (cut.run.nextStep === 'finalize') {
         unstopped(cut.run, 'finalize');
-        const frontier = await readCanonicalArtifact<Extract<RunFrontier, { kind: 'finalize' }>>(artifacts, cut.run.frontierRef!);
-        const historical = await readFinalization(driver, artifacts, cut, basis, frontier.verificationClosureRef,
+        const frontier = await readCanonicalArtifact<Extract<RunFrontier, { kind: 'finalize' }>>(resultReads, cut.run.frontierRef!);
+        const historical = await readFinalization(driver, resultReads, cut, basis, frontier.verificationClosureRef,
           frontier.operation === 'delivery' ? frontier.deliveryTerminalProjectionEvidenceRef : undefined);
         if (![cut.run.revision, historical.checkpoint.basedOnRunRevision].includes(expected))
           throw new KernelStorageError('REVISION_CONFLICT', 'verification replay revision differs from its original cut');
@@ -250,10 +257,10 @@ export function loadRunResult(driver: SqliteDriver, artifacts: ArtifactCatalog, 
       }
       if (spec.operation === 'delivery' && cut.run.nextStep === 'delivery') {
         unstopped(cut.run, 'delivery');
-        const frontier = await readCanonicalArtifact<RunFrontier>(artifacts, cut.run.frontierRef!);
+        const frontier = await readCanonicalArtifact<RunFrontier>(resultReads, cut.run.frontierRef!);
         if (frontier.kind !== 'delivery' || frontier.phase !== 'approval')
           throw new KernelStorageError('STATE_TRANSITION_INVALID', 'verification replay requires its exact untouched delivery approval frontier');
-        const historical = await readDeliveryVerification(driver, artifacts, cut, frontier.verificationClosureRef);
+        const historical = await readDeliveryVerification(driver, resultReads, cut, frontier.verificationClosureRef);
         if (![cut.run.revision, historical.checkpoint.basedOnRunRevision].includes(expected))
           throw new KernelStorageError('REVISION_CONFLICT', 'delivery verification replay revision differs from its original cut');
         return immutableSnapshot({ run: cut.run, verificationClosureRef: frontier.verificationClosureRef, checkpointId: historical.checkpoint.id });
@@ -267,14 +274,16 @@ export function loadRunResult(driver: SqliteDriver, artifacts: ArtifactCatalog, 
         nextVerifierIndex: basis.delivery?.inheritance ? 0 : basis.plan.entries.length,
         afterPass: spec.operation === 'agent' ? 'finalize' : 'delivery_approval' };
       if (basis.progress.dependency) expectedFrontier.dependencyPlanRef = basis.progress.dependency.planRef;
-      requireEqual(await readCanonicalArtifact(artifacts, cut.run.frontierRef!), expectedFrontier, 'complete verification current frontier');
+      requireEqual(await readCanonicalArtifact(resultReads, cut.run.frontierRef!), expectedFrontier, 'complete verification current frontier');
       if (cut.latestCheckpoint.id !== basis.completionCheckpoint.id)
         throw new TypeError('verification has no exact final producer Checkpoint');
       const assertCut = capture(cut, basis), createdAt = sampleCanonicalNow();
       const closure = expectedVerificationClosure(basis, createdAt); decodeVerificationClosure(closure);
       const provenance = expectedInheritedVerificationProvenance(basis, createdAt);
       const provenanceArtifact = provenance && await artifacts.publishCanonical(provenance, provenance.format);
+      resultReads.assertReadActive();
       const published = await artifacts.publishCanonical(closure, closure.format);
+      resultReads.assertReadActive();
       const frontier: RunFrontier = basis.delivery ? { schemaVersion: 1, kind: 'delivery', phase: 'approval',
         sourceRunResultRef: basis.delivery.admission.request.expectedRunResultRef, candidateItemId: basis.candidate.itemId,
         resultSourceRef: basis.candidate.resultSourceRef, verifierPlanRef: basis.planRef,
@@ -311,14 +320,14 @@ export function loadRunResult(driver: SqliteDriver, artifacts: ArtifactCatalog, 
       if (cut.run.revision !== expected) throw new KernelStorageError('REVISION_CONFLICT', 'result Run revision changed');
       unstopped(cut.run, 'finalize');
       phase('result_finalization');
-      const frontier = await readCanonicalArtifact<Extract<RunFrontier, { kind: 'finalize' }>>(artifacts, cut.run.frontierRef!);
-      const historical = await readFinalization(driver, artifacts, cut, basis, frontier.verificationClosureRef,
+      const frontier = await readCanonicalArtifact<Extract<RunFrontier, { kind: 'finalize' }>>(resultReads, cut.run.frontierRef!);
+      const historical = await readFinalization(driver, resultReads, cut, basis, frontier.verificationClosureRef,
         frontier.operation === 'delivery' ? frontier.deliveryTerminalProjectionEvidenceRef : undefined);
       requireEqual(frontier, historical.frontier, 'result current finalize frontier');
       const assertCut = capture(cut, basis), prepared = await prepareTerminal(cut.run,
-        { ...basis, summaryDigest: basis.summary.textDigest, closure: historical.closure }, frontier);
+        { ...basis, summaryDigest: basis.summary.textDigest, closure: historical.closure }, frontier, resultReads);
       if (cut.run.parentRunId) {
-        const allocation = await prepareChildTerminalAllocation(driver, artifacts, owner,
+        const allocation = await prepareChildTerminalAllocation(driver, resultReads, owner,
           { run: cut.run, status: basis.status, resultRef: prepared.resultArtifact.ref });
         let outcome: TimeFenceAdvance | undefined, updated: Run | undefined;
         driver.transaction(connection => {
@@ -339,7 +348,7 @@ export function loadRunResult(driver: SqliteDriver, artifacts: ArtifactCatalog, 
         return immutableSnapshot({ run: updated, resultRef: prepared.resultArtifact.ref });
       }
       for (let attempt = 0; attempt < 8; attempt++) {
-        const sessionPlan = await prepareTerminalSession(cut.run, prepared), { session, projectionArtifact } = sessionPlan;
+        const sessionPlan = await prepareTerminalSession(cut.run, prepared, resultReads), { session, projectionArtifact } = sessionPlan;
         let outcome: TimeFenceAdvance | undefined, updated: Run | undefined;
         phase('result_commit');
         try {

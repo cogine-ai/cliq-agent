@@ -23,7 +23,8 @@ export function noteInstalledInstallPhase(phase: InstalledInstallPhase, items = 
 export const INSTALLED_ASSEMBLY_WORK_CHANNEL = 'cliq.installed.assembly.work.v1';
 export const INSTALLED_ASSEMBLY_WORK_PHASES = Object.freeze(['submit_request', 'submit_assembly_material',
   'submit_assembly_verifier_history', 'submit_assembly_verifier_current', 'submit_assembly_verifier_compose',
-  'submit_assembly_verifier_publish', 'submit_assembly_policy', 'submit_assembly_final_check', 'original_store_stop'] as const);
+  'submit_assembly_verifier_publish', 'submit_assembly_policy', 'submit_assembly_final_check', 'original_store_stop',
+  'submit_final_admission', 'submit_final_admission_scope_held', 'submit_final_admission_committed', 'submit_postcommit_load'] as const);
 export type InstalledAssemblyWorkPhase = typeof INSTALLED_ASSEMBLY_WORK_PHASES[number];
 export type InstalledWorkKind = 'package' | 'revalidate' | 'create_compare';
 export type InstalledWorkCounters = Readonly<{ started: number; completed: number; bytesRead: number; spanElapsedMs: number }>;
@@ -163,7 +164,10 @@ function assemblyCut(phase: InstalledAssemblyWorkPhase): void {
   if (!assemblyDiagnostic.hasSubscribers || !submitOpen || assemblyTruncated) return;
   try {
     const index = INSTALLED_ASSEMBLY_WORK_PHASES.indexOf(phase);
-    if (index <= lastPhase) return;
+    // Preserve the original phase codes while both window-closing cuts sort
+    // after the newly appended admission detail.
+    const order = phase === 'original_store_stop' || phase === 'submit_postcommit_load' ? INSTALLED_ASSEMBLY_WORK_PHASES.length : index;
+    if (order <= lastPhase) return;
     const now = performance.now();
     const numbers = <T extends Record<string, number>>(value: T): Readonly<T> => {
       if (!Object.values(value).every(number => Number.isSafeInteger(number) && number >= 0)) throw 0;
@@ -184,7 +188,7 @@ function assemblyCut(phase: InstalledAssemblyWorkPhase): void {
       runtime: Object.freeze({ package: runtime('package'), revalidate: runtime('revalidate'), createCompare: runtime('create_compare') }),
       casRead: numbers({ ...cas('casRead'), bytesRead: assemblyCounters.casRead.bytesRead }),
       publishFour: cas('publishFour'), fileSync: cas('fileSync'), rootSync: cas('rootSync') });
-    lastPhase = index; assemblyDiagnostic.publish(value);
+    lastPhase = order; assemblyDiagnostic.publish(value);
   } catch { truncateAssembly(); }
 }
 
@@ -198,9 +202,9 @@ export function beginInstalledAssemblySubmit(): Readonly<{ stage(value: string):
     firstSubmit = true; submitStarted = performance.now(); submitOpen = true;
     assemblyCut('submit_request');
     return Object.freeze({ stage(value: string): void {
-      if (value === 'submit_postcommit_load') { submitOpen = false; return; }
       if (typeof value === 'string' && (INSTALLED_ASSEMBLY_WORK_PHASES as readonly string[]).includes(value))
         assemblyCut(value as InstalledAssemblyWorkPhase);
+      if (value === 'submit_postcommit_load') submitOpen = false;
     } });
   } catch { truncateAssembly(); return; }
 }

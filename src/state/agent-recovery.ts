@@ -3,7 +3,7 @@ import { validateChildWaitHistory } from './child-wait-history.js';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting } from '../kernel/identity.js';
 import type {
-  ContextManifest, ContinuationItem, InvocationJournalEntry, Run, RunItemReferenceV1, RunSpec,
+  ContextManifest, ContinuationItem, InvocationJournalEntry, RecoveryClosureV1, Run, RunItemReferenceV1, RunSpec,
   ToolResultPayloadV1, ToolResultModelContentV1, RunContextCompactionPlan, RunAssemblyV1, WorkspaceGenerationStateV1
 } from '../kernel/types.js';
 import type { ModelUnusableResponseV1 } from '../protocol/agent-ir.js';
@@ -28,6 +28,13 @@ import { readVerifierProgress, type VerifierProgress } from './verifier-recovery
 import { validateVerifierHistory } from './verifier-history.js';
 import { validateDeliveryRecovery } from './delivery-recovery.js';
 import type { DeliveryReadData } from './delivery-read-data.js';
+import { readInvocationJournal } from './repositories/journal.js';
+import { readWorkerLaunchesForRun } from './repositories/worker-launches.js';
+import { readWorkspaceGenerationsForRun } from './repositories/workspace-generations.js';
+import { readChildAllocationsForRun } from './repositories/child-allocations.js';
+import { readCheckpoint, readRun, readSession, readSessionPrincipalId } from './rows.js';
+import { requireEqual } from '../policy/runtime-authority.js';
+import { immutableSnapshot } from '../model/immutable.js';
 
 /** Data restriction only. Each permitted subject still requires its complete
  * subject-specific retained policy/control/Journal history below. */
@@ -50,15 +57,93 @@ type AgentRecoveryInput = {
   principalId: string; workspaceIdentityRef: string;
 };
 export async function validateAgentRecovery(input: AgentRecoveryInput, onPhase?: (phase: AgentRecoveryPhase) => void): Promise<{ repairAttempts: number }> {
-  return validateAgentRecoveryData(input, onPhase);
+  const { repairAttempts } = await validateAgentRecoveryData(input, onPhase);
+  return { repairAttempts };
 }
 /** Reader-family data only; the public independent reader stays fresh. */
 export async function validateAgentRecoveryInDeliveryEpoch(input: AgentRecoveryInput, data: DeliveryReadData,
   onPhase?: (phase: AgentRecoveryPhase) => void): Promise<{ repairAttempts: number }> {
-  return validateAgentRecoveryData(input, onPhase, data);
+  const { repairAttempts } = await validateAgentRecoveryData(input, onPhase, data);
+  return { repairAttempts };
 }
+
+// Completed data from this one actual recovery traversal. Neither a Map nor
+// an object with the same fields can stand in for that traversal. No token is
+// retained by the Store, exported on the wire or transferred to a new cut.
+const agentReadBrand: unique symbol = Symbol('AgentRecoveryReadData');
+export type AgentRecoveryReadData = Readonly<{ readonly [agentReadBrand]: true }>;
+const agentReadData = new WeakMap<object, { driver: SqliteDriver; artifacts: ArtifactCatalog;
+  cut: RecoveryClosureV1; cutDigest: string; sqlDigest: string;
+  decodedItems: ReadonlyMap<string, ContinuationItem>; verifierProgressByCandidate: ReadonlyMap<string, VerifierProgress> }>();
+
+function agentRecoverySqlCut(driver: SqliteDriver, cut: RecoveryClosureV1) {
+  const run = readRun(driver, cut.run.id), session = readSession(driver, run.sessionId);
+  const items = driver.prepare('SELECT item_id,item_seq,payload_ref,created_at FROM items WHERE run_id=? ORDER BY item_seq')
+    .all<{ item_id: string; item_seq: bigint; payload_ref: string; created_at: string }>(run.id)
+    .map(row => ({ schemaVersion: 1, itemId: row.item_id, itemSeq: Number(row.item_seq), payloadRef: row.payload_ref,
+      payloadDigest: row.payload_ref, createdAt: row.created_at }));
+  const launches = readWorkerLaunchesForRun(driver, run.id), generations = readWorkspaceGenerationsForRun(driver, run.id);
+  const journal = readInvocationJournal(driver, run.id), checkpoint = readCheckpoint(driver, run.latestCheckpointId);
+  const allocations = readChildAllocationsForRun(driver, run.id);
+  requireEqual(run, cut.run, 'Agent recovery exact Run cut');
+  requireEqual(checkpoint, cut.latestCheckpoint, 'Agent recovery exact current Checkpoint');
+  requireEqual(items, cut.items, 'Agent recovery exact item cut');
+  requireEqual(journal, cut.journal, 'Agent recovery exact Journal cut');
+  requireEqual(launches.filter(row => row.phase !== 'retired'), cut.workerLaunches, 'Agent recovery exact live launch cut');
+  requireEqual(generations, cut.workspaceGenerations, 'Agent recovery exact original generation cut');
+  requireEqual(allocations, cut.childAllocations, 'Agent recovery exact child allocation cut');
+  const checkpoints = driver.prepare('SELECT id FROM checkpoints WHERE run_id=? ORDER BY rowid')
+    .all<{ id: string }>(run.id).map(row => readCheckpoint(driver, row.id));
+  const admission = driver.prepare('SELECT principal_id,admission_method,admission_key,admission_intent_digest,admission_request_id FROM runs WHERE id=?').get(run.id);
+  return { run, checkpoint, items, journal, launches, generations, allocations, checkpoints, admission,
+    principalId: readSessionPrincipalId(driver, session.id), workspaceIdentityRef: session.workspaceIdentityRef };
+}
+
+/** Internal friend: produce sharing data only after the complete original
+ * history has joined. Public independent validation keeps its original shape. */
+export async function validateAgentRecoveryInResultEpoch(input: AgentRecoveryInput, cut: RecoveryClosureV1,
+  onPhase?: (phase: AgentRecoveryPhase) => void) {
+  if (!input.driver || cut.runSpec.operation !== 'agent' || input.run !== cut.run || input.spec !== cut.runSpec ||
+      input.items !== cut.items || input.journal !== cut.journal)
+    throw new TypeError('Agent result data requires its original recovery cut');
+  input.artifacts.assertReadActive();
+  const cutDigest = canonicalSha256(cut), sqlDigest = canonicalSha256(agentRecoverySqlCut(input.driver, cut));
+  const result = await validateAgentRecoveryData(input, onPhase);
+  input.artifacts.assertReadActive();
+  requireEqual(canonicalSha256(agentRecoverySqlCut(input.driver, cut)), sqlDigest, 'Agent recovery SQL changed during validation');
+  if (canonicalSha256(cut) !== cutDigest) throw new TypeError('Agent recovery data cut changed during validation');
+  const data = Object.freeze({ [agentReadBrand]: true as const });
+  agentReadData.set(data, { driver: input.driver, artifacts: input.artifacts, cut, cutDigest, sqlDigest,
+    decodedItems: new Map([...result.decodedItems].map(([id, item]) => [id, immutableSnapshot(item)])),
+    verifierProgressByCandidate: new Map([...result.verifierProgressByCandidate].map(([id, progress]) => [id, immutableSnapshot(progress)])) });
+  return { repairAttempts: result.repairAttempts, data };
+}
+
+/** A token is data, never authority. Every reuse still checks the same read
+ * lifetime and the complete original SQL cut, including retired launch rows. */
+export function readAgentRecoveryData(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1,
+  data: AgentRecoveryReadData) {
+  artifacts.assertReadActive();
+  const original = data !== null && typeof data === 'object' ? agentReadData.get(data) : undefined;
+  if (!original || original.driver !== driver || original.artifacts !== artifacts || original.cut !== cut ||
+      canonicalSha256(cut) !== original.cutDigest)
+    throw new TypeError('Agent recovery data is not from this exact completed read');
+  requireEqual(canonicalSha256(agentRecoverySqlCut(driver, cut)), original.sqlDigest, 'Agent recovery SQL changed before reuse');
+  artifacts.assertReadActive(); return original;
+}
+
+/** Closing a data scope invalidates reuse even when the underlying read was
+ * cancelled. It does not close a descriptor or manufacture retirement. */
+export function closeAgentRecoveryData(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1,
+  data: AgentRecoveryReadData): void {
+  const original = agentReadData.get(data);
+  if (!original || original.driver !== driver || original.artifacts !== artifacts || original.cut !== cut)
+    throw new TypeError('cannot close another Agent recovery read');
+  agentReadData.delete(data);
+}
+
 async function validateAgentRecoveryData(input: AgentRecoveryInput, onPhase?: (phase: AgentRecoveryPhase) => void,
-  delivery?: DeliveryReadData): Promise<{ repairAttempts: number }> {
+  delivery?: DeliveryReadData) {
   const phase = (value: AgentRecoveryPhase) => { try { onPhase?.(value); } catch { /* Diagnosis cannot decide recovery. */ } };
   const { artifacts, run, spec, journal } = input;
   const workspace = decodeWorkspaceIdentity(await readCanonicalArtifact(artifacts, input.workspaceIdentityRef));
@@ -289,5 +374,5 @@ async function validateAgentRecoveryData(input: AgentRecoveryInput, onPhase?: (p
   validateContextItems(input.context, input.items.map((row) => ({
     itemSeq: row.itemSeq, itemRef: row.payloadRef, item: items.get(row.itemId)!
   })));
-  return { repairAttempts };
+  return { repairAttempts, decodedItems: items, verifierProgressByCandidate };
 }

@@ -2473,6 +2473,10 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
     },
     resumeCurrentRetirement: async value => {
       const expectedRunRevision = revision(value);
+      // This is only a negative scheduling selector. Any quarantine still
+      // requires the complete recovery closure and real retirement below.
+      if (!driver.prepare("SELECT 1 FROM workspace_generations WHERE run_id = ? AND phase = 'quarantined' LIMIT 1").get(runId))
+        return readRun(driver, runId);
       const abort = new AbortController(); operationAbort = abort;
       const signal = abort.signal;
       const reads = artifacts.withReadSignal(signal);

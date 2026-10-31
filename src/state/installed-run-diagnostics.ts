@@ -14,7 +14,8 @@ export const INSTALLED_APPLY_DIAGNOSTIC_STAGES = Object.freeze(['request', 'repl
   'submit_source_capture', 'submit_assembly', 'submit_assembly_native', 'submit_assembly_source', 'submit_assembly_platform',
   'submit_assembly_material', 'submit_assembly_publish', 'submit_assembly_verifier', 'submit_assembly_verifier_history',
   'submit_assembly_verifier_current', 'submit_assembly_verifier_compose', 'submit_assembly_verifier_publish', 'submit_assembly_policy',
-  'submit_assembly_final_check', 'submit_final_admission', 'submit_postcommit_load'] as const);
+  'submit_assembly_final_check', 'submit_final_admission', 'submit_postcommit_load',
+  'submit_final_admission_scope_held', 'submit_final_admission_committed'] as const);
 export type InstalledApplyDiagnosticStage = typeof INSTALLED_APPLY_DIAGNOSTIC_STAGES[number];
 const applyStages: ReadonlySet<string> = new Set(INSTALLED_APPLY_DIAGNOSTIC_STAGES);
 const diagnostic = channel(INSTALLED_RUN_FAILURE_CHANNEL);

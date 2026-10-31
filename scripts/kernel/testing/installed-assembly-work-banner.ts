@@ -26,7 +26,8 @@ export const INSTALLED_ASSEMBLY_WORK_DIAGNOSTIC_BANNER = `;(() => { try {
     const [phase, elapsed, runtime, casRead, publishFour, fileSync, rootSync] = values(value,
       ['phase', 'elapsedMs', 'runtime', 'casRead', 'publishFour', 'fileSync', 'rootSync']);
     const index = typeof phase === 'string' ? phases.indexOf(phase) : -1;
-    if (index < 0 || index <= previousPhase || emitted === 0 && index !== 0 || !safe(elapsed) ||
+    const order = phase === 'original_store_stop' || phase === 'submit_postcommit_load' ? phases.length : index;
+    if (index < 0 || order <= previousPhase || emitted === 0 && index !== 0 || !safe(elapsed) ||
         elapsed < previousElapsed || emitted === 0 && elapsed !== 0) throw 0;
     const numbers = values(runtime, ['package', 'revalidate', 'createCompare']).flatMap(row => {
       const result = values(row, ['started', 'completed', 'bytesRead', 'spanElapsedMs']);
@@ -50,7 +51,7 @@ export const INSTALLED_ASSEMBLY_WORK_DIAGNOSTIC_BANNER = `;(() => { try {
       }
     } catch {}
     const frame = prefix + (emitted + 1) + ':' + phase + ':' + elapsed + ':' + numbers.join(':') + ':' + cpu.join(':') + '\\n';
-    if (emitted >= 9 || frame.length > 512 || total + frame.length + truncatedFrame.length > 4096) { truncate(); return; }
-    emitted++; total += frame.length; previousPhase = index; previousElapsed = elapsed; previous = numbers; output(frame);
+    if (emitted >= 13 || frame.length > 512 || total + frame.length + truncatedFrame.length > 4096) { truncate(); return; }
+    emitted++; total += frame.length; previousPhase = order; previousElapsed = elapsed; previous = numbers; output(frame);
   } catch { truncate(); } });
 } catch {} })();`;

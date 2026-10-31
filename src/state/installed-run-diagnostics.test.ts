@@ -37,7 +37,7 @@ test('submit stages use the historical admission failure envelope without claimi
     'submit_assembly_native', 'submit_assembly_source', 'submit_assembly_platform', 'submit_assembly_material', 'submit_assembly_publish',
     'submit_assembly_verifier', 'submit_assembly_verifier_history', 'submit_assembly_verifier_current',
     'submit_assembly_verifier_compose', 'submit_assembly_verifier_publish', 'submit_assembly_policy', 'submit_assembly_final_check',
-    'submit_final_admission', 'submit_postcommit_load'];
+    'submit_final_admission', 'submit_postcommit_load', 'submit_final_admission_scope_held', 'submit_final_admission_committed'];
   assert.deepEqual(module.INSTALLED_APPLY_DIAGNOSTIC_STAGES, ['request', 'replay', 'capture_source', 'capture',
     'source', 'prepare', 'admit', 'postcommit_load', ...stages]);
   const records: any[] = [], diagnostic = channel(module.INSTALLED_RUN_FAILURE_CHANNEL);
@@ -56,7 +56,7 @@ test('submit stages use the historical admission failure envelope without claimi
       new Proxy({}, { get: bad, ownKeys: bad, getPrototypeOf: bad }), Object.defineProperty({}, 'toString', { get: bad })])
       observer.stage(stage);
     observer.failure(new Proxy(original, { get: bad, ownKeys: bad, getPrototypeOf: bad }), true);
-    assert.deepEqual(records.at(-1), { kind: 'apply_failure', stage: 'submit_postcommit_load', closing: true,
+    assert.deepEqual(records.at(-1), { kind: 'apply_failure', stage: 'submit_final_admission_committed', closing: true,
       errorClass: 'other', code: 'none', sqliteCode: null });
     for (const stage of stages) module.noteInstalledPublicationPhase(stage);
     assert.equal(accesses, 0); assert.equal(records.length, stages.length + 1);

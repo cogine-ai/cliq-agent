@@ -272,6 +272,8 @@ test('the actual source first-submit observer, real CAS and trusted child banner
         first.stage('submit_assembly_verifier_publish');
         await store.publishFour([Buffer.from('1'),Buffer.from('2'),Buffer.from('3'),Buffer.from('4')]);
         first.stage('submit_assembly_policy');
+        first.stage('submit_assembly_final_check');first.stage('submit_final_admission');
+        first.stage('submit_final_admission_scope_held');first.stage('submit_final_admission_committed');
         first.stage('submit_postcommit_load');first.stage('submit_assembly_final_check');
         const second=beginInstalledSubmitDiagnostic();second?.stage('submit_assembly_final_check');
         noteInstalledStoreStop({driverTasks:0,agentLoads:0,admissions:0,retainedFailures:0,globalFailure:false,phases:[]});
@@ -280,7 +282,8 @@ test('the actual source first-submit observer, real CAS and trusted child banner
   `], { encoding: 'utf8', timeout: 5000, maxBuffer: 65536, cwd: new URL('../../..', import.meta.url) });
   assert.equal(child.error, undefined); assert.equal(child.status, 0, child.stderr); assert.equal(child.signal, null);
   const cuts = read(journal(child.stderr.trimEnd().split('\n')), sender)!.cuts;
-  assert.deepEqual(cuts.map(cut => cut.phase), ['submit_request', 'submit_assembly_material', 'submit_assembly_verifier_publish', 'submit_assembly_policy']);
+  assert.deepEqual(cuts.map(cut => cut.phase), ['submit_request', 'submit_assembly_material', 'submit_assembly_verifier_publish', 'submit_assembly_policy',
+    'submit_assembly_final_check', 'submit_final_admission', 'submit_final_admission_scope_held', 'submit_final_admission_committed', 'submit_postcommit_load']);
   assert.equal(cuts[1]!.casRead.bytesRead, 10); assert.equal(cuts[1]!.casRead.settled, 2);
   assert.equal(cuts[3]!.publishFour.settled, 1); assert.equal(cuts[3]!.fileSync.settled, 5); assert.equal(cuts[3]!.rootSync.settled, 8);
   assert.equal(child.stdout, '');
@@ -295,10 +298,54 @@ test('the fixed four-KiB output bound includes its final explicit truncation rec
     const row={phase:'submit_request',elapsedMs:0,runtime:{package:r,revalidate:r,createCompare:{...r,bytesRead:0}},
       casRead:{...s,bytesRead:m},publishFour:s,fileSync:s,rootSync:s};
     const d=require('node:diagnostics_channel').channel('cliq.installed.assembly.work.v1');
-    for(const [index,phase] of ${JSON.stringify(phases)}.entries())d.publish({...row,phase,elapsedMs:index===0?0:m});
+    for(const [index,phase] of ${JSON.stringify([...phases.filter(phase => phase !== 'original_store_stop'), 'original_store_stop'])}.entries())d.publish({...row,phase,elapsedMs:index===0?0:m});
     d.publish({...row,phase:'original_store_stop',elapsedMs:m});
   `], { encoding: 'utf8', timeout: 5000, maxBuffer: 65536 });
   assert.equal(child.error, undefined); assert.equal(child.signal, null); assert.equal(child.status, 0);
   assert(child.stderr.endsWith('CLIQ_ASSEMBLY_WORK_V1:truncated\n'));
   assert(Buffer.byteLength(child.stderr) <= 4096, 'all measurement records including truncation must obey the existing four-KiB bound');
+});
+
+
+test('assembly admission phases append fixed codes and the original Stop closes a late admission prefix', async () => {
+  const { INSTALLED_ASSEMBLY_WORK_PHASES: phases } = await import('../../../src/state/installed-work-diagnostics.js');
+  assert.deepEqual(phases, ['submit_request', 'submit_assembly_material', 'submit_assembly_verifier_history',
+    'submit_assembly_verifier_current', 'submit_assembly_verifier_compose', 'submit_assembly_verifier_publish',
+    'submit_assembly_policy', 'submit_assembly_final_check', 'original_store_stop', 'submit_final_admission',
+    'submit_final_admission_scope_held', 'submit_final_admission_committed', 'submit_postcommit_load']);
+  assert(Object.isFrozen(phases));
+  const { readInstalledAssemblyWorkJournal: read } = await import('./installed-store-diagnostic-journal.js');
+  const late = ['submit_request', 'submit_assembly_final_check', 'submit_final_admission',
+    'submit_final_admission_scope_held', 'submit_final_admission_committed', 'original_store_stop'];
+  assert.deepEqual(read(journal(late.map((phase, index) => frame(index + 1, phase, index))), sender)!.cuts.map(cut => cut.phase), late);
+  for (const invalid of [
+    [...late, 'submit_postcommit_load'],
+    [...late, 'original_store_stop'],
+    ['submit_request', 'submit_final_admission_scope_held', 'submit_final_admission'],
+    ['submit_request', 'submit_final_admission_committed', 'submit_final_admission_scope_held'],
+    ['submit_request', 'submit_postcommit_load', 'original_store_stop'],
+    ['submit_request', 'submit_final_admission', 'untrusted_admission_detail']
+  ]) assert.throws(() => read(journal(invalid.map((phase, index) => frame(index + 1, phase, index))), sender), { code: 'ERR_ASSERTION' });
+});
+
+test('the actual submit observer records held and durable admission then its original Stop without claiming scope closure', async () => {
+  const { INSTALLED_ASSEMBLY_WORK_DIAGNOSTIC_BANNER: banner } = await import('./installed-assembly-work-banner.js');
+  const { readInstalledAssemblyWorkJournal: read } = await import('./installed-store-diagnostic-journal.js');
+  const diagnostics = new URL('../../../src/state/installed-run-diagnostics.ts', import.meta.url).href;
+  const child = spawnSync(process.execPath, ['--no-warnings', '--import', 'tsx', '--input-type=commonjs', '--eval',
+    `process.argv[2]='--installed-supervisor';` + banner + `
+    (async()=>{const {beginInstalledSubmitDiagnostic,noteInstalledStoreStop}=await import(${JSON.stringify(diagnostics)});
+      const first=beginInstalledSubmitDiagnostic();
+      first.stage('submit_assembly_final_check');first.stage('submit_final_admission');
+      first.stage('submit_final_admission_scope_held');first.stage('submit_final_admission_committed');
+      noteInstalledStoreStop({driverTasks:0,agentLoads:1,admissions:2,retainedFailures:0,globalFailure:false,phases:[]});
+      first.stage('submit_postcommit_load');first.stage('submit_final_admission_scope_held');
+    })().catch(()=>{process.exitCode=1});
+  `], { encoding: 'utf8', timeout: 5000, maxBuffer: 65536, cwd: new URL('../../..', import.meta.url) });
+  assert.equal(child.error, undefined); assert.equal(child.status, 0, child.stderr); assert.equal(child.signal, null);
+  assert.equal(child.stdout, ''); assert(Buffer.byteLength(child.stderr) <= 4096);
+  const cuts = read(journal(child.stderr.trimEnd().split('\n')), sender)!.cuts;
+  assert.deepEqual(cuts.map(cut => cut.phase), ['submit_request', 'submit_assembly_final_check', 'submit_final_admission',
+    'submit_final_admission_scope_held', 'submit_final_admission_committed', 'original_store_stop']);
+  assert(cuts.every(cut => Object.keys(cut).every(key => !['scopeClosed', 'joined', 'success', 'authority'].includes(key))));
 });

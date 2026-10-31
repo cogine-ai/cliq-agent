@@ -51,7 +51,7 @@ export type VerifierProgress = {
 };
 export type VerifierRecoveryCut = Pick<RecoveryClosureV1, 'run' | 'runSpec' | 'items' | 'journal' | 'workspaceGenerations'>;
 
-async function currentCandidate(artifacts: ArtifactCatalog, cut: VerifierRecoveryCut): Promise<string> {
+export async function readCurrentVerifierCandidate(artifacts: ArtifactCatalog, cut: VerifierRecoveryCut): Promise<string> {
   if (cut.run.frontierRef) {
     const frontier = await readCanonicalArtifact<RunFrontier>(artifacts, cut.run.frontierRef);
     if (frontier.kind === 'verify' || frontier.kind === 'finalize' || frontier.kind === 'delivery' && frontier.phase !== 'merge')
@@ -134,7 +134,7 @@ export async function readVerifierRetirement(driver: SqliteDriver, artifacts: Ar
  * an inspector or grants a retry. Missing/unknown attempts have no disposition. */
 export async function readVerifierProgress(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: VerifierRecoveryCut,
   candidateItemId?: string): Promise<VerifierProgress> {
-  const selectedId = candidateItemId ?? await currentCandidate(artifacts, cut);
+  const selectedId = candidateItemId ?? await readCurrentVerifierCandidate(artifacts, cut);
   const candidates = cut.items.filter(row => row.itemId === selectedId);
   if (candidates.length !== 1) throw new TypeError('verifier progress has no unique owned candidate');
   const candidate = decodeFinalCandidateItem(await readCanonicalArtifact(artifacts, candidates[0]!.payloadRef));

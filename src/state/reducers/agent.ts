@@ -140,7 +140,7 @@ function appendItems(connection: SqliteConnection, run: Run, items: Continuation
 export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function loadAgentRun(
   driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, input: LoadAgentRunInput,
   reobserve?: NativeWorkerRetirement, installedRuntime?: HeldInstalledRuntime, signal?: AbortSignal,
-  onResultPhase?: (phase: RunResultPhase) => void
+  onResultPhase?: (phase: RunResultPhase) => void, resultPreparationSignal?: AbortSignal
 ) {
   signal?.throwIfAborted();
   // Opening history is cancellable, but it must not replace the catalog
@@ -238,7 +238,7 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
     ...loadVerifierRepair(driver, artifacts, owner, { run: admittedRun, spec }),
     ...loadFinalCandidate(driver, artifacts, owner, { run: admittedRun, spec, assembly, resolveToolInput,
       expireRun: continuation.shared.expireRun, stopForResourceFailure: continuation.shared.stopForResourceFailure }, reobserve),
-    ...loadRunResult(driver, artifacts, owner, { run: admittedRun, spec, principalId: readSessionPrincipalId(driver, admittedRun.sessionId) }, onResultPhase),
+    ...loadRunResult(driver, artifacts, owner, { run: admittedRun, spec, principalId: readSessionPrincipalId(driver, admittedRun.sessionId) }, onResultPhase, resultPreparationSignal),
     model,
     resolveToolInput,
     /** Read the current durable call. This projection is neither a grant nor permission to dispatch it. */

@@ -20,7 +20,8 @@ import { decodeInheritedVerificationProvenance, decodeRunResult, decodeVerificat
 import { readCheckpoint, readControlRequest, readRun, readSession, readSessionPrincipalId, ZERO_BUDGET } from './rows.js';
 import { assertSessionTerminalProjection } from './session-context.js';
 import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
-import { readVerifierProgress, verifierCheckpointId } from './verifier-recovery.js';
+import { readCurrentVerifierCandidate, readVerifierProgress, verifierCheckpointId } from './verifier-recovery.js';
+import { closeAgentRecoveryData, readAgentRecoveryData, type AgentRecoveryReadData } from './agent-recovery.js';
 import { validateDeliveryRecoveryData, type RetainedDeliveryMerge } from './delivery-recovery.js';
 import { readDeliveryRunAdmission } from './reducers/delivery-admission.js';
 import { assertDeliveryModelFreeCut } from './run-model-free.js';
@@ -191,11 +192,19 @@ async function assertResultBasisCut(driver: SqliteDriver, artifacts: ArtifactCat
   if (assembly.mcpServers.length) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'result requires its implemented MCP containment closure');
 }
 
-async function readAgentResultBasis(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1) {
+async function readAgentResultBasis(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1, data?: AgentRecoveryReadData) {
   const { run, runSpec: spec } = cut;
-  const items = await artifacts.mapReads(cut.items, row => readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef));
+  const retained = data ? readAgentRecoveryData(driver, artifacts, cut, data) : undefined;
+  const items = retained ? cut.items.map(row => {
+    const item = retained.decodedItems.get(row.itemId);
+    if (!item) throw new TypeError('result data lost an originally validated item');
+    return item;
+  }) : await artifacts.mapReads(cut.items, row => readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef));
   if (openStopBatch(items)) throw new TypeError('result retains an open tool batch');
-  const progress = await readVerifierProgress(driver, artifacts, cut), { candidate, spec: frozen, plan, planRef } = progress;
+  const progress = retained ? retained.verifierProgressByCandidate.get(await readCurrentVerifierCandidate(artifacts, cut))
+    : await readVerifierProgress(driver, artifacts, cut);
+  if (!progress) throw new TypeError('result data lost its exact current verified candidate');
+  const { candidate, spec: frozen, plan, planRef } = progress;
   if (candidate.operation !== 'agent' || candidate.runId !== run.id || candidate.baseSourceRef !== spec.baseWorkspaceManifestRef)
     throw new TypeError('result has no current root agent candidate');
   if (!progress.complete || progress.entries.some(entry => !entry.disposition || entry.planEntry.required && entry.disposition.kind !== 'passed'))
@@ -274,6 +283,67 @@ async function readAgentResultBasis(driver: SqliteDriver, artifacts: ArtifactCat
   return { candidate, plan, planRef, consent, summary, principalId, admission, original: original || undefined, childAdmission, progress, verification, verificationReceiptRefs,
     completionCheckpoint, status: required ? 'succeeded' as const : 'completed_unverified' as const,
     terminalReason: required ? 'verified' as const : 'no_required_verifier' as const, delivery: undefined };
+}
+
+
+// This token can only be produced from the completed original history token.
+// No public independent reader accepts an optional caller-provided Map/basis.
+const resultReadBrand: unique symbol = Symbol('AgentResultReadData');
+export type AgentResultReadData = Readonly<{ readonly [resultReadBrand]: true }>;
+type AgentResultBasis = Awaited<ReturnType<typeof readAgentResultBasis>>;
+const resultReadData = new WeakMap<object, { driver: SqliteDriver; artifacts: ArtifactCatalog; cut: RecoveryClosureV1;
+  history: AgentRecoveryReadData; basis(): Promise<AgentResultBasis> }>();
+
+/** One private completed-node family. The recovery entry owns its full graph;
+ * a new entry, retry or SQL change cannot inherit any of these data results. */
+export function createAgentResultReadData(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1,
+  history: AgentRecoveryReadData): AgentResultReadData {
+  readAgentRecoveryData(driver, artifacts, cut, history);
+  let basis: AgentResultBasis | undefined, failed = false, failure: unknown;
+  const active = new Set<string>();
+  const assertCurrent = () => {
+    readAgentRecoveryData(driver, artifacts, cut, history);
+    if (failed) throw failure;
+  };
+  async function enter<T>(node: string, read: () => Promise<T>): Promise<T> {
+    assertCurrent();
+    if (active.has(node)) throw new KernelStorageError('RECOVERY_REQUIRED', 'result validation data contains a cycle');
+    active.add(node);
+    try { const value = await read(); assertCurrent(); return value; }
+    catch (error) { failed = true; failure = error; throw error; }
+    finally { active.delete(node); }
+  }
+  const reads = {
+    async basis() {
+      assertCurrent();
+      // Keep the complete worker-free/current-generation predicate on hits.
+      await assertResultBasisCut(driver, artifacts, cut);
+      if (!basis) basis = await enter('basis', () => readAgentResultBasis(driver, artifacts, cut, history));
+      assertCurrent(); return basis;
+    }
+  };
+  const data = Object.freeze({ [resultReadBrand]: true as const });
+  resultReadData.set(data, { driver, artifacts, cut, history, ...reads }); return data;
+}
+
+/** Internal friend, never a current owner or terminal permission. */
+export function readAgentResultData(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1,
+  data: AgentResultReadData) {
+  const original = data !== null && typeof data === 'object' ? resultReadData.get(data) : undefined;
+  if (!original || original.driver !== driver || original.artifacts !== artifacts || original.cut !== cut)
+    throw new TypeError('result data is not from this exact completed recovery read');
+  readAgentRecoveryData(driver, artifacts, cut, original.history); return original;
+}
+
+/** The enclosing recovery call always discards this family, including on
+ * cancellation. No resource owner or previous successful data survives it. */
+export function closeAgentResultReadData(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1,
+  data: AgentResultReadData): void {
+  const original = resultReadData.get(data);
+  if (!original || original.driver !== driver || original.artifacts !== artifacts || original.cut !== cut)
+    throw new TypeError('cannot close another result recovery read');
+  resultReadData.delete(data);
+  closeAgentRecoveryData(driver, artifacts, cut, original.history);
 }
 
 export function expectedInheritedVerificationProvenance(basis: Awaited<ReturnType<typeof readResultBasis>>, createdAt: string) {
@@ -467,8 +537,15 @@ export async function validateRunResultRecoveryInDeliveryEpoch(driver: SqliteDri
   return validateRunResultRecoveryData(driver, artifacts, cut, delivery);
 }
 
+/** Reuse only the family minted by this same full recovery entry. */
+export async function validateRunResultRecoveryInAgentEpoch(driver: SqliteDriver, artifacts: ArtifactCatalog,
+  cut: RecoveryClosureV1, data: AgentResultReadData): Promise<void> {
+  readAgentResultData(driver, artifacts, cut, data);
+  return validateRunResultRecoveryData(driver, artifacts, cut, undefined, data);
+}
+
 async function validateRunResultRecoveryData(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1,
-  delivery?: DeliveryReadData): Promise<void> {
+  delivery?: DeliveryReadData, agent?: AgentResultReadData): Promise<void> {
   const { run } = cut;
   if (cut.runSpec.operation === 'delivery' && run.frontierRef && run.nextStep === 'delivery') {
     const frontier = await readCanonicalArtifact<RunFrontier>(artifacts, run.frontierRef);
@@ -478,7 +555,8 @@ async function validateRunResultRecoveryData(driver: SqliteDriver, artifacts: Ar
   }
   if (run.nextStep !== 'finalize' && run.resultRef === undefined && !['succeeded', 'completed_unverified'].includes(run.status)) return;
   if (delivery) await assertResultBasisCut(driver, artifacts, cut);
-  const basis = delivery ? await delivery.basis() : await readResultBasis(driver, artifacts, cut);
+  const data = agent ? readAgentResultData(driver, artifacts, cut, agent) : undefined;
+  const basis = delivery ? await delivery.basis() : data ? await data.basis() : await readResultBasis(driver, artifacts, cut);
   if (run.nextStep === 'finalize') {
     const frontier = await readCanonicalArtifact<RunFrontier>(artifacts, run.frontierRef!);
     if (frontier.kind !== 'finalize' || frontier.operation !== cut.runSpec.operation || run.status !== 'queued' || run.resultRef || run.terminalReason || run.terminalDetailRef)
