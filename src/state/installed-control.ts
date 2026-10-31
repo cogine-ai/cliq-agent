@@ -109,6 +109,13 @@ function hello(value: Record<string, unknown>): HelloRequest {
 }
 const invalid = (): InvalidError => ({ schemaVersion: 1, code: 'INVALID_REQUEST', retryable: false,
   messageCode: 'control.invalid_request', issues: [{ path: 'request', issueCode: 'invalid_request' }] });
+/** Maps credential finalization STATE_TRANSITION_INVALID errors to closed wire refusals. */
+export function mapCredentialFinalizeRefusal(error: KernelStorageError): InstalledControlErrorV1 {
+  const reason = error instanceof CredentialFinalizationTimeError ? error.reason : undefined;
+  const messageCode = reason === 'noncausal_time' ? 'credential.finalize.noncausal_time' :
+    reason === 'expired' ? 'credential.finalize.expired' : 'credential.finalize_refused';
+  return { schemaVersion: 1, code: 'AUTHORIZATION_REQUIRED', retryable: false, messageCode };
+}
 const overlaps = (left: Range, right: Range) => left.min <= right.max && right.min <= left.max;
 function incompatible(control: Range, headless: Range, supported: Range): InstalledControlErrorV1 {
   return { schemaVersion: 1, code: 'INCOMPATIBLE_PROTOCOL', retryable: false, messageCode: 'control.incompatible_protocol',
@@ -186,12 +193,8 @@ export function openInstalledControl(store: StateStore,
     if (error instanceof KernelStorageError && ['REQUEST_ID_CONFLICT', 'ADMISSION_KEY_CONFLICT', 'BUDGET_EXHAUSTED'].includes(error.code)) return {
       schemaVersion: 1, code: error.code as 'REQUEST_ID_CONFLICT' | 'ADMISSION_KEY_CONFLICT' | 'BUDGET_EXHAUSTED',
       retryable: false, messageCode: 'control.mutation_refused' };
-    if (credential && error instanceof KernelStorageError && error.code === 'STATE_TRANSITION_INVALID') {
-      const reason = error instanceof CredentialFinalizationTimeError ? error.reason : undefined;
-      const messageCode = reason === 'noncausal_time' ? 'credential.finalize.noncausal_time' :
-        reason === 'expired' ? 'credential.finalize.expired' : 'credential.finalize_refused';
-      return { schemaVersion: 1, code: 'AUTHORIZATION_REQUIRED', retryable: false, messageCode };
-    }
+    if (credential && error instanceof KernelStorageError && error.code === 'STATE_TRANSITION_INVALID')
+      return mapCredentialFinalizeRefusal(error);
     if (error instanceof KernelStorageError && (error.code === 'NOT_FOUND' || error.code === 'ARTIFACT_MISMATCH' || error.code === 'UNSUPPORTED_PLATFORM')) {
       return { schemaVersion: 1, code: error.code, retryable: false, messageCode: 'control.read_rejected' };
     }
