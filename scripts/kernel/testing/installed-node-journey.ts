@@ -44,10 +44,14 @@ import { inspectInstalledWorkerIdentity, inspectInstalledWorkerLease, assertInst
 import { inspectInstalledOwnerHistory, waitForInstalledOwnerHistory, type InstalledOwnerHistoryReadStage } from './installed-read-control.js';
 import { assertInstalledVerifierOutcome, InstalledVerifierOutcomeError } from './installed-verifier-result.js';
 import { runInstalledDeliveryCases } from './installed-delivery-journey.js';
+import { createInstalledPermissionResponder, runInstalledPermissionCases } from './installed-permission-journey.js';
+import { INSTALLED_PERMISSION_PROFILE } from './installed-permission-result.js';
+import { assertInstalledUnusedDeliveryGrant, type InstalledPermissionEvidence } from './installed-permission-evidence.js';
+import { inspectInstalledPermissionRecord } from './installed-worker-lease.js';
 import { createInstalledDependencyResponder, installedDependencyPackage, INSTALLED_DEPENDENCY_PACKAGE_PATH,
   INSTALLED_DEPENDENCY_PROFILE, runInstalledDependencyCases } from './installed-dependency-journey.js';
 import { createInstalledChildrenResponder, INSTALLED_CHILDREN_PROFILE, INSTALLED_CHILD_CASES, runInstalledChildCase } from './installed-children-journey.js';
-import { InstalledDeliveryOutcomeError } from './installed-delivery-result.js';
+import { assertInstalledDeliveryOutcome, InstalledDeliveryOutcomeError } from './installed-delivery-result.js';
 import type { InstalledDeliveryVerifierRetirementIdentity } from './installed-delivery-result.js';
 import type { InstalledVerifierRetirementIdentity } from './installed-verifier-evidence.js';
 import { qualifyInstalledOwnerLinks, qualifyInstalledOwnerProcess } from './installed-owner-history.js';
@@ -191,11 +195,12 @@ export type InstalledProviderNodeJourneyInput = Readonly<{
   definition: InstalledProviderModelDefinition; budgets: RunSpec['budgets']; secret: Buffer;
 }>;
 
-export async function runInstalledNodeJourney(filename: string, journeyKind: 'verifier' | 'delivery' | 'provider' | 'daily' | 'provider-daily',
+export async function runInstalledNodeJourney(filename: string, journeyKind: 'verifier' | 'delivery' | 'provider' | 'daily' | 'provider-daily' | 'permission',
   options: Readonly<{ publicationRetirementDiagnostics?: true; publicationRetirementStop?: true; publicationRetirementLate?: true;
     npmDependencyArchive?: Buffer; provider?: InstalledProviderNodeJourneyInput }> = {}): Promise<void> {
   assert.equal(process.platform, 'linux'); assert.equal(process.arch, 'x64');
-  assert(journeyKind === 'verifier' || journeyKind === 'delivery' || journeyKind === 'provider' || journeyKind === 'daily' || journeyKind === 'provider-daily');
+  assert(journeyKind === 'verifier' || journeyKind === 'delivery' || journeyKind === 'provider' || journeyKind === 'daily' || journeyKind === 'provider-daily' || journeyKind === 'permission');
+  if (journeyKind === 'permission') assert.deepEqual(Object.keys(options), [], 'ordinary permission has one fixed owned campaign');
   const dailyJourney = journeyKind === 'daily' || journeyKind === 'provider-daily';
   if (journeyKind === 'daily') assert.deepEqual(Object.keys(options), [], 'normal daily qualification has no alternate authority or scenario options');
   assert.deepEqual(Object.keys(options).sort(), [
@@ -232,6 +237,12 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
   if (journeyKind === 'verifier') report.ordinaryChildrenFixtureProfile = INSTALLED_CHILDREN_PROFILE;
   if (journeyKind === 'verifier') report.ordinarySkillsFixtureProfile = INSTALLED_SKILLS_PROFILE;
   if (journeyKind === 'verifier') report.ordinarySourceIncludesFixtureProfile = 'single_builtin_entry_original_capture_v1';
+  if (journeyKind === 'permission') {
+    delete report.ordinaryGitFixtureProfile;
+    Object.assign(report, { permissionFixtureProfile: INSTALLED_PERMISSION_PROFILE,
+      scope: 'actual signed Linux default/accept-edits private edit, exact verifier approval, repair, deny/skip, consumed templates, independent Delivery verifier/publication approval and apply; owned HTTPS only, not paid provider, real TTY, precise expiry/claim Stop cuts or complete I1 qualification',
+      realTtyQualified: false, approvalExpiryBeforeClaimQualified: false, exactClaimStopCutQualified: false });
+  }
   if (options.npmDependencyArchive) report.dependencyFixtureProfile = INSTALLED_DEPENDENCY_PROFILE;
   if (journeyKind === 'delivery') Object.assign(report, {
     scope: 'actual signed Linux explicit Delivery from verified yolo sources, direct-policy publication, noOp, real verifier merge, cancel and public reconnect/restart; not interactive ask/deny, paid provider, release, reboot or complete I1 qualification',
@@ -475,6 +486,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
   const dependencyArchive = options.npmDependencyArchive ? installedDependencyPackage() : undefined;
   let registryOrigin: string | undefined, registryGets = 0;
   let expectedToolNames: readonly string[] | undefined;
+  const permissionResponder = createInstalledPermissionResponder(model, () => { assert(expectedToolNames); return expectedToolNames; });
   let daemonPid: number | undefined, daemonStart: string | undefined;
   let services: { supervisorUnit: string; keeperUnit: string } | undefined;
   let serverAuthenticationBinding: Readonly<{ pid: number; processStartToken: string; invocationId: string; windowOpenedAt: number }> | undefined;
@@ -680,6 +692,14 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
           outgoing.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': String(response.length), Connection: 'close' }); outgoing.end(response);
           report.transport = { postCount, acceptedTcp, acceptedTls, tls13: true, exactCredentialMatched: true }; return;
         }
+        const permissionPayload = permissionResponder.respond(body);
+        if (permissionPayload) {
+          assert.equal(journeyKind, 'permission');
+          postCount++; const response = Buffer.from(JSON.stringify(permissionPayload)); scanBytes(response);
+          outgoing.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': String(response.length), Connection: 'close' }); outgoing.end(response);
+          report.transport = { postCount, acceptedTcp, acceptedTls, tls13: true, exactCredentialMatched: true }; return;
+        }
+        assert.notEqual(journeyKind, 'permission', 'the permission endpoint accepts only its fixed owned objectives');
         const dependencyPayload = await dependencyResponder.respond(body);
         if (dependencyPayload) {
           assert(options.npmDependencyArchive && dependencyArchive);
@@ -814,7 +834,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       ...(dailyJourney ? { headlessSchemaVersion: 3 as const } : {}),
       ...(journeyKind === 'verifier' ? { bundledSkills: installedBundledSkill() } : {}),
       ...(options.npmDependencyArchive ? { npmDependencyArchive: options.npmDependencyArchive } : {}),
-      ...(journeyKind === 'verifier' ? { guestImageProfile: 'qualification_max' as const } : {}) };
+      ...(journeyKind === 'verifier' || journeyKind === 'permission' ? { guestImageProfile: 'qualification_max' as const } : {}) };
     const signed = options.provider
       ? await buildInstalledProviderQualificationPackage(recipe.buildFixture, options.provider.definition, buildOptions)
       : await buildInstalledSupervisorPackage(recipe.buildFixture, 'complete', ownedModelFixture, buildOptions);
@@ -1068,7 +1088,86 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     }
     report.cases = [];
     await mkdir(recipe.workspace, { mode: 0o700 }); await chown(recipe.workspace, ledger.uid, ledger.gid);
-    if (options.provider || dailyJourney) {
+    if (journeyKind === 'permission') {
+      const controls = new Map<string, { request: Record<string, any>; response: Record<string, any> }>();
+      const permission: InstalledPermissionEvidence = { controls,
+        readRecord: selector => inspectInstalledPermissionRecord(recipe.stateRoot, ledger.uid, selector),
+        readOwnerHistory: async observe => inspectInstalledOwnerHistory(recipe.stateRoot, observe).owners };
+      const sendPermission = async (frame: Record<string, any>, timeout = 30000) => {
+        assert(client); const response = await client.send(frame, timeout); recordRefusal(response, frame.method);
+        if (response.ok && typeof frame.requestId === 'string') {
+          const prior = controls.get(frame.requestId);
+          if (prior) { assert.deepEqual(prior.request, frame); assert.deepEqual(prior.response, response); }
+          else controls.set(frame.requestId, { request: frame, response });
+        }
+        return response;
+      };
+      const workersRetired = async (runId: string, cut: Record<string, any>) => {
+        assert.equal(cut.snapshot.run.id, runId); assert.equal(cut.snapshot.run.activeWorkerLaunchId, undefined);
+        assert.deepEqual(cut.snapshot.run.budgetReserved, { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 });
+        const latest = new Map<string, Record<string, any>>();
+        for (const row of cut.journal) latest.set(`${row.opId}:${row.attempt}`, row);
+        assert([...latest.values()].every(row => row.phase === 'completed' || row.phase === 'failed'));
+        const observed = inspectInstalledWorkerLaunchIds(recipe.stateRoot, ledger.uid, runId);
+        for (const launchId of observed.launchIds) {
+          const retired = inspectInstalledWorkerRetirementHistory(recipe.stateRoot, ledger.uid, { runId, launchId });
+          try { assert.notEqual('linux-proc-start-ticks:' + await processStart(retired.pid), retired.processStartToken); }
+          catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+        }
+        const after = inspectInstalledWorkerLaunchIds(recipe.stateRoot, ledger.uid, runId);
+        assert.equal(after.databaseIdentity, observed.databaseIdentity); assert.deepEqual(after.launchIds, observed.launchIds);
+      };
+      report.permission = await runInstalledPermissionCases({ workspaceRoot: recipe.workspace, cliqHome, uid: ledger.uid, gid: ledger.gid,
+        model: { provider: 'openai-compatible', model, endpoint: { kind: 'registered', endpointRegistrationId: registration.endpointRegistrationId },
+          modelCredentialGrantIds: [credentialId] }, guestToolchainManifestId: signed.guestToolchain.manifestId,
+        send: sendPermission, nextId, readCas, download: readPublicArtifact, mark, responder: permissionResponder,
+        assertWorkerFree: workersRetired,
+        async assertVerifierEvidence(cut, kind, expectedFiles) {
+          const sessionCut = accepted(await sendPermission({ protocolVersion: 1, method: 'session.get', sessionId: cut.snapshot.run.sessionId }), 'session.get');
+          const proof = await assertInstalledVerifierOutcome({ cut, sessionCut, readCas, permission, principalId: principal, expectedFiles,
+            caseKind: kind === 'template_retry' ? 'required_timeout' : kind === 'default_repair' || kind === 'template_repair' ? 'required_repair' : 'required_pass',
+            readOwnerHistory: permission.readOwnerHistory });
+          for (const retired of proof.retirementIdentities) await assertVerifierProcessesAbsent(retired);
+        },
+        async assertDeliveryEvidence(cut, sourceCut, files, local) {
+          const sessionCut = accepted(await sendPermission({ protocolVersion: 1, method: 'session.get', sessionId: cut.snapshot.run.sessionId }), 'session.get');
+          const proof = await assertInstalledDeliveryOutcome({ cut, sessionCut, sourceCut, sourceResultRef: sourceCut.snapshot.run.resultRef,
+            kind: local ? 'merge' : 'publish', expectedFiles: [...files].map(([path, text]) => ({ path, text })),
+            permission, readRetainedArtifact: readCas, readOwnerHistory: permission.readOwnerHistory });
+          assert.equal(proof.directPolicyOnly, false);
+          for (const retired of proof.verifierRetirementIdentities) await assertVerifierProcessesAbsent(retired);
+          if (proof.publicationWorkerRetirement) {
+            const retired = inspectInstalledWorkerRetirementHistory(recipe.stateRoot, ledger.uid, { runId: cut.snapshot.run.id,
+              launchId: proof.publicationWorkerRetirement.launchId, retirement: proof.publicationWorkerRetirement });
+            try { assert.notEqual('linux-proc-start-ticks:' + await processStart(retired.pid), retired.processStartToken); }
+            catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+          }
+        },
+        async assertConsumedDeliveryGrant(cut, grantId) {
+          await assertInstalledUnusedDeliveryGrant({ evidence: permission, cut, grantId, principalId: principal,
+            object: async ref => { const bytes = await readCas(ref), value = parseJsonStrict(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+              assert(canonicalJsonBytes(value).equals(bytes)); return value; } });
+        },
+        reconnect: async () => { assert(client); await client.close(); client = await persistentClient(); },
+        restart: async () => {
+          assert(services && client && inspectionClient); const prior = show(services.supervisorUnit), priorOwners = inspectInstalledOwnerHistory(recipe.stateRoot).owners;
+          await client.close(); client = undefined; await inspectionClient.close(); inspectionClient = undefined;
+          const stoppedAt = performance.now(); assert.equal(command('/usr/bin/systemctl', ['--user', 'stop', services.supervisorUnit]).status, 0);
+          assert(performance.now() - stoppedAt <= 2000, 'the real worker-free Supervisor stop must meet two seconds');
+          const stopped = show(services.supervisorUnit); assert.equal(stopped.MainPID, '0'); assert.equal(stopped.Result, 'success');
+          const by = Date.now() + 30000; assert.equal(command('/usr/bin/systemctl', ['--user', 'start', services.supervisorUnit]).status, 0);
+          const successor = show(services.supervisorUnit); assert.notEqual(successor.InvocationID, prior.InvocationID);
+          assert.notEqual(successor.MainPID, prior.MainPID); await selectedSupervisor(services.supervisorUnit, successor, installedImage, by);
+          client = await persistentClient(); inspectionClient = await persistentClient();
+          const owners = await waitForInstalledOwnerHistory(recipe.stateRoot, by);
+          assert.equal(owners.owners.length, priorOwners.length + 1); assert.equal(owners.owners.at(-2)!.terminalReason, 'graceful_release');
+          assert.equal(owners.owners.at(-1)!.state, 'active'); assert.equal(owners.owners.at(-1)!.runtimeBundleRef, bundleDigest);
+          assert.equal(show(services.keeperUnit).MainPID, keeperBefore.MainPID);
+          assert.deepEqual(await readFile(path.join(recipe.stateRoot, 'runtime/keeper.ready')), keeperReady);
+        } });
+      report.cases = report.permission.cases;
+      assert.equal(postCount, 20); assert.equal(acceptedTcp, postCount); assert.equal(acceptedTls, postCount); assert(!responderFailure);
+    } else if (options.provider || dailyJourney) {
       const workspace = path.join(recipe.workspace, dailyJourney ? 'daily' : 'provider');
       await mkdir(workspace, { mode: 0o700 }); await chown(workspace, ledger.uid, ledger.gid);
       for (const [name, bytes] of Object.entries(PROVIDER_JOURNEY_FILES)) {
@@ -2428,6 +2527,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     }
     if (primary) {
       report.qualified = false;
+      if (report.permission) report.permission.qualified = false;
       if (options.publicationRetirementStop) {
         report.preciseInFlightPublicationStopQualified = false;
         if (report.delivery) report.delivery.preciseInFlightPublicationStopQualified = false;
@@ -2454,13 +2554,14 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         else if (diagnostic.code === 'ERR_ASSERTION') failureKinds.push({ kind: 'assertion' });
         else if (diagnostic.code === 'ERR_SQLITE_ERROR' && typeof diagnostic.errcode === 'number' && Number.isSafeInteger(diagnostic.errcode) &&
             diagnostic.errcode >= 0 && diagnostic.errcode <= 65535) failureKinds.push({ kind: 'sqlite', primaryCode: diagnostic.errcode & 0xff });
-        for (const match of (error.stack ?? '').matchAll(/\b(qualify-installed-verifier-journey|qualify-installed-delivery-journey|installed-node-journey|installed-delivery-journey|installed-delivery-result|installed-verifier-result|installed-tools-result|installed-tools-stop|installed-skills|installed-guest-package|installed-supervisor-package|installed-model-package|installed-read-control|installed-client-consumer|installed-enroll-diagnostic|installed-worker-lease|installed-publication-recovery|installed-publication-crash-observer|installed-publication-stop-result|installed-publication-journal|installed-publication-retirement|installed-publication-late-result)\.ts:([1-9][0-9]{0,6}):([1-9][0-9]{0,6})/gu)) {
+        for (const match of (error.stack ?? '').matchAll(/\b(qualify-installed-verifier-journey|qualify-installed-delivery-journey|qualify-installed-permission-journey|installed-permission-journey|installed-permission-result|installed-permission-evidence|installed-node-journey|installed-delivery-journey|installed-delivery-result|installed-verifier-result|installed-tools-result|installed-tools-stop|installed-skills|installed-guest-package|installed-supervisor-package|installed-model-package|installed-read-control|installed-client-consumer|installed-enroll-diagnostic|installed-worker-lease|installed-publication-recovery|installed-publication-crash-observer|installed-publication-stop-result|installed-publication-journal|installed-publication-retirement|installed-publication-late-result)\.ts:([1-9][0-9]{0,6}):([1-9][0-9]{0,6})/gu)) {
           if (match[1] === 'installed-publication-late-result' && !options.publicationRetirementLate) continue;
           if (frames.length < 8) frames.push({ file: match[1]! + '.ts', line: Number(match[2]), column: Number(match[3]) });
         }
         if (error instanceof AggregateError) errors.unshift(...error.errors.slice(0, 4));
       }
       report.error = { diagnosticOnly: true, kind: dailyJourney ? 'installed_daily_journey_failed' : options.provider ? 'installed_provider_journey_failed'
+        : journeyKind === 'permission' ? 'installed_permission_journey_failed'
         : journeyKind === 'verifier' ? 'installed_verifier_journey_failed' : 'installed_delivery_journey_failed', sourceFrames: frames, failureKinds };
     }
     let publication: Buffer;
@@ -2482,6 +2583,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     try { await writeFile(recipe.reportFile, publication, { flag: 'wx', mode: 0o644 }); } finally { publication.fill(0); }
   }
   if (primary) throw new Error(dailyJourney ? 'actual normal installed daily journey failed; inspect the closed diagnostic report' : options.provider ? 'actual installed provider journey failed; inspect the closed diagnostic report'
+    : journeyKind === 'permission' ? 'actual installed ordinary permission journey failed; inspect the closed diagnostic report'
     : journeyKind === 'verifier' ? 'actual installed verifier journey failed; inspect the closed diagnostic report'
     : 'actual installed Delivery journey failed; inspect the closed diagnostic report');
 }

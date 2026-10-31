@@ -1,0 +1,52 @@
+name: Installed ordinary permissions
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main, 'cliq/**', 'codex/**']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kernel-permission-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-installed-permission:
+    name: Linux signed installed verifier and Delivery permissions
+    # A separate standard free runner preserves every original campaign.
+    # This owned HTTPS fixture cannot qualify a paid provider or real TTY.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Check the closed report and owned model responder
+        run: node --test --test-concurrency=1 --import tsx scripts/kernel/testing/installed-permission-result.test.ts
+      - name: Install the original native, systemd and credential prerequisites
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap libcap-dev libselinux1-dev meson ninja-build e2fsprogs libext2fs-dev pkg-config
+      - name: Exercise exact approvals, repair, refusal, templates and Delivery
+        shell: bash
+        run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          test "$RUNNER_ARCH" = X64
+          probe_node=$(realpath "$(command -v node)")
+          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --run-permission-journey "$probe_node" "$RUNNER_TEMP/cliq-installed-permission-journey"
+      - name: Retain bounded permission and original cleanup evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installed-permission-journey-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cliq-installed-permission-journey/*.json
+          if-no-files-found: warn
+          retention-days: 7

@@ -204,22 +204,35 @@ async function start(): Promise<void> {
     process.once('SIGTERM', cancel);
     try {
       const receipt = await upgradeInstalledRuntime(runtime, stateRoot, packageRoot, stop.signal, next => { phase = next; });
-      phase = 'output';
+      phase = 'output_selection_open';
       const selected = await runtime.openSelected(stateRoot);
       try {
         const { openInstalledClientStdio } = await import('../client/stdio.js');
         const { clientWriter } = await import('../client/entry.js');
+        phase = 'output_stdio_open';
         const io = await openInstalledClientStdio(selected, { input: process.stdin, output: process.stdout,
           diagnostic: process.stderr, workspacePath: stateRoot, signal: stop.signal });
         const writer = clientWriter(io.io.output), cancelOutput = () => writer.cancel(stop.signal.reason);
         stop.signal.addEventListener('abort', cancelOutput, { once: true });
+        let outputFailure: { error: unknown } | undefined;
         try {
           stop.signal.throwIfAborted();
+          phase = 'output_write';
           await writer.write(Buffer.concat([canonicalJsonBytes({ schemaVersion: 1, format: 'cliq-runtime-upgrade-complete-v1',
             runtimeBundleRef: receipt.targetRuntimeBundleRef, upgradeReceiptRef: canonicalSha256(receipt),
             providerBindingPolicy: 'explicit_new_runtime_authorization_required' }), Buffer.from('\n')]));
-        } finally { stop.signal.removeEventListener('abort', cancelOutput); await joinResourceOperations([writer.join(), io.close()]); }
-      } finally { await selected.close(); }
+        } catch (error) { outputFailure = { error }; throw error; }
+        finally {
+          stop.signal.removeEventListener('abort', cancelOutput);
+          const priorPhase = phase; phase = 'output_join';
+          try { await joinResourceOperations([writer.join(), io.close()]); }
+          catch (error) { if (outputFailure?.error === error) phase = priorPhase; throw error; }
+          phase = priorPhase;
+        }
+      } finally {
+        const priorPhase = phase; phase = 'output_selection_close';
+        await selected.close(); phase = priorPhase;
+      }
     } catch (error) {
       try { writeSync(2, installedRuntimeUpgradeFailureMarker(phase, error)); } catch { /* Preserve the actual upgrade refusal. */ }
       throw error;

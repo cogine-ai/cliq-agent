@@ -81,7 +81,18 @@ export function decodeAuthorizationGrant(value: unknown): AuthorizationGrantV1 {
       state === 'revoked' ? ['revokedByRequestId', 'revokedAt'] : [])]);
   if (!plain(value.target)) throw new TypeError('unsupported retained authorization purpose');
   let target: AuthorizationGrantV1['target'];
-  if (value.target.kind === 'dependency_install_scripts') target = decodeDependencyInstallScriptsTarget(value.target);
+  if (value.target.kind === 'verifier_execution') {
+    const execution = exact(value.target, ['kind', 'verifierId', 'verifierRequestCoreDigest', 'executionIdentityGrantId',
+      'executionIdentityTargetDigest', 'maxCandidateGenerations', 'maxAttemptsPerCandidate']);
+    text(execution.verifierId); text(execution.executionIdentityGrantId);
+    for (const key of ['verifierRequestCoreDigest', 'executionIdentityTargetDigest']) ref(execution[key]);
+    if (!Number.isSafeInteger(execution.maxCandidateGenerations) || (execution.maxCandidateGenerations as number) < 1 ||
+        (execution.maxCandidateGenerations as number) > 6 || !Number.isSafeInteger(execution.maxAttemptsPerCandidate) ||
+        (execution.maxAttemptsPerCandidate as number) < 1 || (execution.maxAttemptsPerCandidate as number) > 4)
+      throw new TypeError('verifier execution bounds are invalid');
+    target = execution as AuthorizationGrantV1['target'];
+  }
+  else if (value.target.kind === 'dependency_install_scripts') target = decodeDependencyInstallScriptsTarget(value.target);
   else if (value.target.kind === 'source_git_inspection') target = decodeSourceGitInspectionTarget(value.target);
   else if (value.target.kind === 'read_scope') {
     const scope = exact(value.target, ['kind', 'purpose', 'workspaceIdentityDigest', 'canonicalRootRelativePath', 'scope',
@@ -122,6 +133,14 @@ export function decodeAuthorizationGrant(value: unknown): AuthorizationGrantV1 {
 export function decodeAuthorizationConsumptionReceipt(value: unknown): AuthorizationConsumptionReceiptV1 {
   const data = exact(value, ['schemaVersion', 'grantId', 'ownerPrincipalId', 'targetDigest', 'consumer', 'consumedAt', 'receiptDigest']);
   if (!plain(data.consumer)) throw new TypeError('unsupported authorization consumer');
+  if (data.consumer.kind === 'authorization_derivation') {
+    const consumer = exact(data.consumer, ['kind', 'derivedGrantId']);
+    if (data.schemaVersion !== 1) throw new TypeError('unsupported authorization consumer');
+    text(data.grantId); text(data.ownerPrincipalId); text(consumer.derivedGrantId); ref(data.targetDigest); ref(data.receiptDigest);
+    parseCanonicalTime(data.consumedAt as string);
+    if (data.receiptDigest !== digestOmitting(data, 'receiptDigest')) throw new TypeError('authorization receipt digest does not rehash');
+    return data as AuthorizationConsumptionReceiptV1;
+  }
   const source = data.consumer.kind === 'source_inspection';
   const consumer = exact(data.consumer, ['kind', source ? 'inspectionId' : 'runId', 'admissionIntentDigest']);
   if (data.schemaVersion !== 1 || consumer.kind !== (source ? 'source_inspection' : 'run_admission')) throw new TypeError('unsupported authorization consumer');

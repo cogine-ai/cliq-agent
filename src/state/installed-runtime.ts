@@ -200,7 +200,7 @@ type InstalledRuntimeBinding = {
   loadCredentialPlatform(signal?: AbortSignal): Promise<NativeCredentialPlatformBinding>;
   loadManagerObserver(): Promise<InstalledManagerObserver>;
   assertManagerObservationAvailable(): void;
-  loadModelBroker(): Promise<NativeModelBrokerBinding>;
+  loadModelBroker(preparationSignal?: AbortSignal): Promise<NativeModelBrokerBinding>;
   loadDependencyBroker(): Promise<NativeDependencyBrokerBinding>;
   openControlClient(): Promise<HeldInstalledControlClient>;
   sealWorkerImage(entryId: string): Promise<NativeWorkerImage>;
@@ -212,7 +212,7 @@ type InstalledRuntimeBinding = {
   startGuestToolchain(toolchain: RetainedVerifierToolchain, options: { signal?: AbortSignal }): Promise<NativeGuestToolchain>;
   startSourceGitToolchain(toolchain: RetainedVerifierToolchain, options: { signal?: AbortSignal }): Promise<NativeSourceGitToolchain>;
   closeGuestToolchain(job: NativeGuestToolchain): Promise<void>;
-  credentialScope<T>(operation: (token: HeldCredentialAuthorityLock) => Promise<T>): Promise<T>;
+  credentialScope<T>(operation: (token: HeldCredentialAuthorityLock) => Promise<T>, preparationSignal?: AbortSignal): Promise<T>;
 };
 const heldInstalledRuntimes = new WeakMap<HeldInstalledRuntime, InstalledRuntimeBinding>();
 const installedRuntimeTrust = new WeakMap<InstalledRuntime, readonly ReleaseTrustKey[]>();
@@ -306,10 +306,10 @@ export function assertInstalledManagerObservationAvailable(selected: HeldInstall
 export function loadInstalledManagerObserver(selected: HeldInstalledRuntime): Promise<InstalledManagerObserver> {
   return managerObservationBinding(selected).loadManagerObserver();
 }
-export function loadInstalledModelBroker(selected: HeldInstalledRuntime): Promise<NativeModelBrokerBinding> {
+export function loadInstalledModelBroker(selected: HeldInstalledRuntime, preparationSignal?: AbortSignal): Promise<NativeModelBrokerBinding> {
   const binding = heldInstalledRuntimes.get(selected);
   if (!binding) mismatch('installed runtime is not a verified held selection');
-  return binding.loadModelBroker();
+  return binding.loadModelBroker(preparationSignal);
 }
 export function loadInstalledDependencyBroker(selected: HeldInstalledRuntime): Promise<NativeDependencyBrokerBinding> {
   const binding = heldInstalledRuntimes.get(selected);
@@ -449,7 +449,7 @@ export class CredentialScopeBusyError extends TypeError {
  * before enqueue: recursion or a second factory cannot wait on its own tail.
  * This token carries physical ownership, not an authentication decision. */
 export function withCredentialAuthorityLock<T>(held: HeldInstalledRuntime,
-  operation: (token: HeldCredentialAuthorityLock) => Promise<T>): Promise<T> {
+  operation: (token: HeldCredentialAuthorityLock) => Promise<T>, preparationSignal?: AbortSignal): Promise<T> {
   const binding = heldInstalledRuntimes.get(held);
   if (!binding) mismatch('installed runtime is not a verified held selection');
   healthy();
@@ -458,7 +458,7 @@ export function withCredentialAuthorityLock<T>(held: HeldInstalledRuntime,
   credentialScopeReserved = true;
   const release = () => { if (!retirementFailure) credentialScopeReserved = false; };
   try {
-    return binding.credentialScope(operation).finally(release);
+    return binding.credentialScope(operation, preparationSignal).finally(release);
   } catch (error) { release(); throw error; }
 }
 
@@ -1667,12 +1667,14 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
             if (closed) mismatch('installed runtime handle is closed');
             assertSelection();
           },
-          credentialScope(operation) {
+          credentialScope(operation, preparationSignal) {
             return enqueue(async () => {
+              preparationSignal?.throwIfAborted();
               if (!isMainThread || !isSea() || process.versions.node !== '24.21.0')
                 throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'credential authority requires the fixed signed installed backend');
-              const native = await loadSelectedNative();
+              const native = await loadSelectedNative(preparationSignal);
               const processImage = await native.observeCurrentProcess();
+              preparationSignal?.throwIfAborted();
               const image = signed.entries.get(STATE_OWNER_NATIVE_ENTRY_ID)!;
               const rootIdentity = stateRootIdentityFromDescriptor(stateRoot, {
                 deviceId: state.info.dev.toString(), fileId: state.info.ino.toString(), ownerUid: Number(state.info.uid),
@@ -1728,7 +1730,9 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
               return withHeldCredentialNativeScope(native, {
                 image: image.handle, root: state.handle, rootIdentity: state.info, stateRoot,
               }, async credential => {
-                await checkedRevalidate(); credential.assertHeld();
+                // Cancellation ends only preparation. The original callback,
+                // postvalidation and native scope close retain their raw owner.
+                await checkedRevalidate(preparationSignal); credential.assertHeld();
                 const physical: InstalledCredentialScope = Object.freeze({ assertHeld() {
                   if (this !== physical) throw new TypeError('invalid installed credential physical scope receiver');
                   assertInstalledCredentialScope(physical);
@@ -2024,10 +2028,10 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
               await checkedRevalidate(); return dependencyBroker;
             });
           },
-          loadModelBroker() {
+          loadModelBroker(preparationSignal) {
             return enqueue(async () => {
               assertInstalledModelBrokerProcess();
-              await checkedRevalidate();
+              await checkedRevalidate(preparationSignal);
               if (!modelBroker) {
                 const entry = signed.bundle.entries.find(value => value.entryId === MODEL_BROKER_ENTRY_ID);
                 const file = signed.entries.get(MODEL_BROKER_ENTRY_ID);
@@ -2151,7 +2155,7 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
                   },
                 });
               }
-              await checkedRevalidate(); return modelBroker;
+              await checkedRevalidate(preparationSignal); return modelBroker;
             });
           },
           openControlClient() {

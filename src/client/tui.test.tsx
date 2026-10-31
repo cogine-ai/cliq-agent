@@ -14,6 +14,7 @@ import { parseClientInvocation } from './commands.js';
 import { readWaitingPresentation } from './artifacts.js';
 import { ClientTui, splitClientCommand } from './tui.js';
 import { at, ref, hello, protocolClient, outputStream, runSnapshot } from './testing/protocol.js';
+import { verifierPresentationData } from './testing/verifier-presentation-data.js';
 
 // Ink and the production strict wire/byte consumer only. No installation,
 // accepted Run, native death or ToolPermission grant is minted here.
@@ -21,7 +22,7 @@ async function until(check: () => boolean, detail: () => unknown = () => '') {
   for (let count = 0; count < 200; count++) { if (check()) return; await new Promise(resolve => setTimeout(resolve, 5)); }
   assert(check(), 'the owned component did not reach its expected visible condition: ' + JSON.stringify(detail()));
 }
-function fixture(kind: 'approval' | 'input', gate?: { enter(): void; wait: Promise<void>; failFirstArtifact?: boolean }) {
+function fixture(kind: 'approval' | 'input' | 'verifier', gate?: { enter(): void; wait: Promise<void>; failFirstArtifact?: boolean }, required = true) {
   let gets = 0, reads = 0;
   const objects = new Map<string, Buffer>();
   const save = (value: unknown) => { const bytes = canonicalJsonBytes(value), digest = canonicalSha256(value); objects.set(digest, bytes); return digest; };
@@ -29,7 +30,9 @@ function fixture(kind: 'approval' | 'input', gate?: { enter(): void; wait: Promi
     evidenceDigest: '', display: 'Original action: edit only note.txt' };
   evidence.evidenceDigest = digestOmitting(evidence, 'evidenceDigest');
   let item: ReturnType<typeof planInputWait>['item'] | undefined;
-  const wait = kind === 'approval' ? { schemaVersion: 1, kind: 'approval', runId: 'run', createdFromRevision: 1, createdAt: at, frontierRef: ref,
+  const verifier = kind === 'verifier' ? verifierPresentationData({ required }) : undefined;
+  if (verifier) for (const [ref, bytes] of verifier.objects) objects.set(ref, bytes);
+  const wait = verifier?.wait ?? (kind === 'approval' ? { schemaVersion: 1, kind: 'approval', runId: 'run', createdFromRevision: 1, createdAt: at, frontierRef: ref,
     subject: { kind: 'tool_call', policySubjectKind: 'ordinary_tool', batchItemId: 'batch', callId: 'call', callIndex: 0,
       opId: 'op', target: ref, toolName: 'edit', toolContractDigest: ref, replayClass: 'manual',
       policyChannelEvidenceRef: save(evidence), policyChannelEvidenceDigest: evidence.evidenceDigest } } : (() => {
@@ -39,10 +42,11 @@ function fixture(kind: 'approval' | 'input', gate?: { enter(): void; wait: Promi
     const proof = planInputWait({ id: 'run', revision: 1, frontierRef: ref }, 'batch', call, at);
     for (const artifact of proof.artifacts) objects.set(artifact.ref, Buffer.from(artifact.bytes));
     item = proof.item; save(item); return proof.wait;
-  })();
-  const waitingOnRef = save(wait), snapshot = runSnapshot();
+  })());
+  const waitingOnRef = save(wait), snapshot = verifier?.snapshot ?? runSnapshot();
   snapshot.latestRunItemSeq = item ? 1 : 0;
-  Object.assign(snapshot.run, { status: 'waiting', nextStep: 'tool', revision: 2, waitingReason: kind, waitingOnRef });
+  Object.assign(snapshot.run, { status: 'waiting', nextStep: verifier ? 'verify' : 'tool', revision: 2,
+    waitingReason: verifier ? 'approval' : kind, waitingOnRef });
   const f = protocolClient({
     'run.get': async () => { if (++gets === 2 && gate) { gate.enter(); await gate.wait; } return { protocolVersion: 1, ok: true, result: { method: 'run.get', snapshot,
       items: item ? [{ schemaVersion: 1, itemId: item.itemId, itemSeq: 1, payloadRef: canonicalSha256(item), payloadDigest: canonicalSha256(item), createdAt: at }] : [],
@@ -105,11 +109,27 @@ test('local client tokenization preserves quoted data without shell expansion or
   assert.deepEqual(splitClientCommand('input run --text ""'), ['input', 'run', '--text', '']);
 });
 
+for (const required of [true, false]) test(`Ink presents the exact ${required ? 'required' : 'advisory'} verifier and sends only the explicit decision`, async () => {
+  const f = fixture('verifier', undefined, required), ui = render(<ClientTui app={f.app} io={f.io} initialRunId="run" />);
+  try {
+    await until(() => ui.lastFrame()?.includes('y: allow this exact action') === true,
+      () => ({ frame: ui.lastFrame(), calls: f.calls.map(call => call.method) }));
+    assert.match(ui.lastFrame()!, /node-tests/u); assert.match(ui.lastFrame()!, /check\.mjs/u);
+    assert.match(ui.lastFrame()!, required ? /Deny cancels this Run/u : /Deny skips this advisory/u);
+    assert.equal(f.calls.some(call => call.method === 'run.approve'), false);
+    ui.stdin.write('n'); await until(() => f.calls.some(call => call.method === 'run.approve'));
+    const approvals = f.calls.filter(call => call.method === 'run.approve'); assert.equal(approvals.length, 1);
+    assert.equal(approvals[0]!.request.expectedRevision, f.snapshot.run.revision);
+    assert.equal(approvals[0]!.request.waitingOnRef, f.waitingOnRef); assert.equal(approvals[0]!.request.decision, 'deny');
+    assert.equal(f.calls.some(call => ['authorization.create', 'run.cancel', 'run.apply'].includes(call.method)), false);
+  } finally { ui.unmount(); await f.app.close(); }
+});
+
 test('Ink retains a planned Node check across follow-ups and consumes a fresh real response grant for each new Run', async () => {
   const defaults = { guestToolchainManifestId: 'installed-node-toolchain', preferences: { schemaVersion: 1 as const,
     modelSelections: [{ alias: 'deepseek', provider: 'openai-compatible' as const, model: 'deepseek-flash',
       endpointRegistrationId: 'endpoint', credentialGrantId: 'credential' }], defaultModelAlias: 'deepseek' } };
-  const initial = parseClientInvocation(['run', 'Initial task', '--check-node', 'check.test.mjs', '--policy', 'yolo'], '/workspace', defaults);
+  const initial = parseClientInvocation(['run', 'Initial task', '--check-node', 'check.test.mjs'], '/workspace', defaults);
   assert.equal(initial.kind, 'run'); if (initial.kind !== 'run') return;
   let grants = 0, submissions = 0;
   const identityRequests: unknown[] = [];
@@ -146,7 +166,8 @@ test('Ink retains a planned Node check across follow-ups and consumes a fresh re
     assert.equal(grants, 2);
     const requests = f.calls.filter(call => call.method === 'run.submit').map(call => call.request);
     assert.deepEqual(requests.map(request => request.verifiers[0].identityReadGrantId), ['followup-grant-1', 'followup-grant-2']);
-    assert(requests.every(request => request.policyMode === 'yolo' && request.allowUnverified === false && request.verifiers.length === 1));
+    assert(requests.every(request => request.policyMode === 'default' && request.allowUnverified === false && request.verifiers.length === 1 &&
+      request.verifiers[0].executionGrantId === undefined));
     for (const request of identityRequests as Array<{ decision: unknown }>) assert.deepEqual(request.decision, {
       kind: 'execution_identity_read', purpose: 'verifier', target: { kind: 'guest_toolchain', guestToolchainManifestId: 'installed-node-toolchain', toolId: 'node' } });
     assert.equal(f.calls.some(call => call.method === 'run.cancel'), false);

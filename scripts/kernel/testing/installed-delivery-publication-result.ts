@@ -27,6 +27,7 @@ import { supervisorInspectorIdentity } from '../../../src/state/supervisor-inspe
 import { decodeSandboxProfile } from '../../../src/state/execution-closure.js';
 import { readPublicationGitIndexClosure } from '../../../src/state/publication-git-index.js';
 import { assertInstalledGitState, installedGitDataReader } from './installed-git-data.js';
+import { assertInstalledInteractivePermission, type InstalledPermissionEvidence } from './installed-permission-evidence.js';
 
 const ZERO = { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 };
 const ONE = { ...ZERO, toolCalls: 1 };
@@ -38,6 +39,7 @@ function same(left: unknown, right: unknown): void { check(canonicalSha256(left)
 export type InstalledDeliveryPublicationInput = {
   cut: Record<string, any>;
   expectedGit?: true;
+  permission?: InstalledPermissionEvidence;
   readRetainedArtifact: (ref: string) => Promise<Buffer>;
   /** Actual readonly SQL history from this same fixture, not owners inferred
    * from an inspector's self-asserted epoch or a caller-chosen CAS pathname. */
@@ -211,7 +213,7 @@ async function inspect(input: InstalledDeliveryPublicationInput): Promise<Instal
     check(operation.expected.kind === 'file' && operation.desired.kind === 'file' && operation.parent.kind === 'existing_directory');
     check(histories.length === 3 && policyItems.length === 1 && decisionItems.length === 1 && pathItems.length === 3);
     const policyItem = policyItems[0]!.item, decision = decisionItems[0]!.item as DeliveryDecisionItem;
-    check(policyItem.decisionSource === 'direct_policy' && policyItem.decision === 'allow' && decision.decision === 'allow' &&
+    check((policyItem.decisionSource === 'direct_policy' || input.permission && policyItem.decisionSource === 'interactive_approval') && policyItem.decision === 'allow' && decision.decision === 'allow' &&
       decision.runId === run.id && decision.deliveryPlanRef === planRef && decision.grantRef === policyItem.grantRef &&
       decision.decisionRef === policyItem.decisionRef && policyItems[0]!.row.itemSeq < decisionItems[0]!.row.itemSeq);
     const parent = await object(policyItem.grantRef) as DeliveryPlanGrantV1, channel = await object(policyItem.policyChannelEvidenceRef);
@@ -224,17 +226,24 @@ async function inspect(input: InstalledDeliveryPublicationInput): Promise<Instal
     const planned = planDeliveryRequest(context);
     same(await object(parent.requestRef), planned.request); same(await object(parent.targetRef), planned.target);
     same(channel, evaluator.evaluate(planned.request, planned.target, channel.evaluatedAt));
+    if (policyItem.decisionSource === 'interactive_approval') {
+      check(input.permission);
+      await assertInstalledInteractivePermission({ evidence: input.permission, object, cut, principalId: workspace.ownerPrincipalId,
+        grant: parent, policyItem, evaluator, request: planned.request, target: planned.target });
+    } else {
     same(parent, evaluator.grant(planned.request, planned.target, channel, parent.issuedAt, run.deadlineAt));
-    check(parent.principalId === policyItem.principalId && policyItem.decisionRef === canonicalSha256(channel) &&
+    check(policyItem.decisionRef === canonicalSha256(channel));
+    }
+    check(parent.principalId === policyItem.principalId &&
       policyItem.policyChannelEvidenceDigest === channel.evidenceDigest && decision.approvalOpId === parent.opId &&
       decision.createdAt === parent.issuedAt && policyItem.createdAt === parent.issuedAt);
-    same(policyItem, { schemaVersion: 1, itemId: identityHash('cliq-delivery-policy-item-v1', run.id, parent.opId, canonicalSha256(channel)),
+    if (policyItem.decisionSource === 'direct_policy') same(policyItem, { schemaVersion: 1, itemId: identityHash('cliq-delivery-policy-item-v1', run.id, parent.opId, canonicalSha256(channel)),
       runId: run.id, kind: 'policy_decision', subjectKind: 'delivery_plan', opId: parent.opId, principalId: workspace.ownerPrincipalId,
       decisionRef: canonicalSha256(channel), policyChannelEvidenceRef: canonicalSha256(channel), policyChannelEvidenceDigest: channel.evidenceDigest,
       createdAt: parent.issuedAt, decisionSource: 'direct_policy', decision: 'allow', grantRef: canonicalSha256(parent) });
-    same(decision, { schemaVersion: 1, itemId: identityHash('cliq-delivery-decision-item-v1', run.id, planRef, canonicalSha256(channel)),
+    same(decision, { schemaVersion: 1, itemId: identityHash('cliq-delivery-decision-item-v1', run.id, planRef, policyItem.decisionRef),
       runId: run.id, kind: 'delivery_decision', deliveryPlanRef: planRef, approvalOpId: parent.opId, decision: 'allow',
-      decisionRef: canonicalSha256(channel), grantRef: canonicalSha256(parent), createdAt: parent.issuedAt });
+      decisionRef: policyItem.decisionRef, grantRef: canonicalSha256(parent), createdAt: parent.issuedAt });
     const [prepared, claim, terminal] = histories; check(prepared && claim && terminal);
     same(histories.map(value => value.phase), ['prepared', 'dispatch_claimed', 'completed']);
     const request = await object(prepared.requestRef), grant = await object(prepared.grantRef!);

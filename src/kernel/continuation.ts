@@ -8,7 +8,7 @@ import type { DeliveryMergeItem, DeliveryMergeConflictItem, DeliveryDecisionItem
 import type { PublicationPathProgressItem, PublicationPathResultItem, PublicationLateObservationItem } from './publication.js';
 import type { VerifierPolicyDecisionItem } from './verifier-invocation.js';
 import type { DeliveryPolicyDecisionItem } from './delivery-invocation.js';
-import type { VerifierResultItem, RepairDiagnosticItem, VerifierStopItem } from './verifier.js';
+import type { VerifierResultItem, RepairDiagnosticItem, VerifierStopItem, VerifierSkipItem } from './verifier.js';
 
 export type BuiltinScriptExecutionV1 = {
   kind: 'builtin_script'; adapterId: 'builtin_tools'; adapterVersion: '1'; adapterCodeDigest: string;
@@ -160,5 +160,5 @@ export type RunContextCompactionItem = ItemIdentity & {
 };
 
 export type ContinuationItem = import('./dependency.js').DependencyReadyItem | import('./dependency.js').DependencyFailureItem | import('./dependency-script-approval.js').DependencyScriptDecisionItem | import('./child-merge.js').ChildMergePolicyDecisionItem | ChildHandleItem | ChildResultItem | ChildMergeBatchItem | ChildMergeResultItem | ModelTurnItem | ToolBatchItem | ToolResultItem | RunContextCompactionItem | ToolPolicyDecisionItem | InputRequestItem | UserInputItem | FinalCandidateItem |
-  VerifierPolicyDecisionItem | VerifierResultItem | RepairDiagnosticItem | VerifierStopItem |
+  VerifierPolicyDecisionItem | VerifierResultItem | RepairDiagnosticItem | VerifierStopItem | VerifierSkipItem |
   DeliveryMergeItem | DeliveryMergeConflictItem | DeliveryDecisionItem | DeliveryPolicyDecisionItem | PublicationPathProgressItem | PublicationPathResultItem | PublicationLateObservationItem;

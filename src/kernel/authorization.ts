@@ -74,12 +74,16 @@ export type AuthorizationGrantSummaryV1 = {
   consumedAt?: string; revokedAt?: string;
 };
 
-/** The implemented public identity-read branch. Other RFC decisions are
- * refused explicitly until their complete consumers exist. */
+/** Identity inspection and execution consent remain independent decisions. */
 export type VerifierIdentityCreateRequest = {
   protocolVersion: 1; method: 'authorization.create'; requestId: string; requestDigest: string; ttlMs?: number;
   decision: { kind: 'execution_identity_read'; purpose: 'verifier';
     target: { kind: 'guest_toolchain'; guestToolchainManifestId: string; toolId: string } };
+};
+export type VerifierExecutionCreateRequest = {
+  protocolVersion: 1; method: 'authorization.create'; requestId: string; requestDigest: string; ttlMs?: number;
+  decision: { kind: 'verifier_execution'; verifierId: string; verifierRequestDigest: string;
+    executionIdentityGrantId: string; maxCandidateGenerations: number; maxAttemptsPerCandidate: number };
 };
 export type SourceGitInspectionCreateRequest = {
   protocolVersion: 1; method: 'authorization.create'; requestId: string; requestDigest: string; ttlMs?: number;
@@ -99,7 +103,7 @@ export type DependencyInstallScriptsCreateRequest = {
   protocolVersion: 1; method: 'authorization.create'; requestId: string; requestDigest: string; ttlMs?: number;
   decision: DependencyInstallScriptsDecisionV1;
 };
-export type AuthorizationCreateRequest = VerifierIdentityCreateRequest | SourceGitInspectionCreateRequest | SourceReadScopeCreateRequest | DependencyInstallScriptsCreateRequest;
+export type AuthorizationCreateRequest = VerifierIdentityCreateRequest | VerifierExecutionCreateRequest | SourceGitInspectionCreateRequest | SourceReadScopeCreateRequest | DependencyInstallScriptsCreateRequest;
 export type AuthorizationRevokeRequest = {
   protocolVersion: 1; method: 'authorization.revoke'; requestId: string; requestDigest: string; grantId: string;
 };

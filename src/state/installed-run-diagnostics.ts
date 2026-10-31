@@ -36,7 +36,8 @@ export const INSTALLED_SCHEDULER_DIAGNOSTIC_PHASES = Object.freeze(['scheduled',
   'result_recovery_journal', 'result_recovery_generations', 'result_recovery_history', 'result_recovery_history_model',
   'result_recovery_history_items', 'result_recovery_history_candidate', 'result_recovery_history_verifier',
   'result_recovery_history_tool', 'result_recovery_history_input', 'result_recovery_history_broker', 'result_recovery_seals',
-  'result_recovery_terminal'] as const);
+  'result_recovery_terminal', 'drive_prior_read', 'drive_worker_activate', 'drive_model_prepare', 'drive_broker_prepare',
+  'drive_credential_prepare', 'drive_model_claim', 'drive_model_release'] as const);
 const schedulerPhases: ReadonlySet<string> = new Set(INSTALLED_SCHEDULER_DIAGNOSTIC_PHASES);
 export const INSTALLED_SCHEDULER_DIAGNOSTIC_ORIGINS = Object.freeze(['drive', 'maintenance', 'maintenance_global', 'stop',
   'publication_recovery'] as const);

@@ -25,7 +25,7 @@ async function originalReadPair() {
   const text = await readFile(new URL('./authorization.ts', import.meta.url), 'utf8');
   const source = ts.createSourceFile('authorization.ts', text, ts.ScriptTarget.Latest, true);
   const body = source.statements.find((node): node is ts.FunctionDeclaration =>
-    ts.isFunctionDeclaration(node) && node.name?.text === 'readAuthorizationHistory')?.body;
+    ts.isFunctionDeclaration(node) && node.name?.text === 'readVerifierIdentityHistory')?.body;
   assert(body, 'use the actual historical reader, never an authority-bearing replacement');
   const at = (name: string) => body.statements.findIndex(node => ts.isVariableStatement(node) &&
     node.declarationList.declarations.some(value => value.name.getText(source) === name));

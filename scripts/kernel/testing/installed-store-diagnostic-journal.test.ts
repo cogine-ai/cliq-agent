@@ -342,3 +342,21 @@ test('expected sender accessors, proxies, hidden and extra fields are rejected w
     assert.throws(() => readInstalledStoreDiagnosticJournal(journal(), expected as never), 'invalid expected sender must not be accepted');
   assert.equal(traps, 0);
 });
+
+
+test('fixed model preparation stop phases round-trip only through the existing bounded scheduler journal', async () => {
+  const { readInstalledStoreStopPhaseJournal, readInstalledStoreDiagnosticJournal, readInstalledPublicationStageJournal } =
+    await import('./installed-store-diagnostic-journal.js');
+  const phases = ['drive_prior_read', 'drive_worker_activate', 'drive_model_prepare', 'drive_broker_prepare',
+    'drive_credential_prepare', 'drive_model_claim', 'drive_model_release'];
+  for (const phase of phases) {
+    assert.deepEqual(readInstalledStoreStopPhaseJournal(journal([`CLIQ_STORE_STOP_PHASE_V1:${phase}`]), sender), { phase });
+    const summary = readInstalledStoreDiagnosticJournal(journal(['CLIQ_STORE_DIAG_V1:begin:0:1',
+      `CLIQ_STORE_DIAG_V1:scheduler:drive:${phase}:1:kernel:LEASE_FENCED:-`, 'CLIQ_STORE_DIAG_V1:stop:1:0:0:0:0',
+      `CLIQ_STORE_DIAG_V1:phase:${phase}:1`, 'CLIQ_STORE_DIAG_V1:end']), sender)!;
+    assert.equal(summary.firstSchedulerFailure!.phase, phase); assert.deepEqual(summary.stop.phases, { [phase]: 1 });
+    assert.equal(Object.hasOwn(summary, 'qualified'), false);
+    assert.throws(() => readInstalledStoreStopPhaseJournal(journal([`CLIQ_STORE_STOP_PHASE_V1:${phase}_foreign`]), sender));
+    assert.throws(() => readInstalledPublicationStageJournal(journal([`CLIQ_PUBLICATION_STAGE_V1:1:${phase}`]), sender));
+  }
+});

@@ -79,14 +79,14 @@ test('no verifier selects no release and does not even query a grant or require 
   assert.equal(select(f.driver, bundle, f.principal, []), undefined);
 });
 
-test('distinct verifier grants may select one root but never waive the original supported policy mode', async t => {
+test('distinct verifier identity grants select one root without implying execution permission in any policy mode', async t => {
   const f = await fixture(t), grant = structuredClone(f.grant), second = structuredClone(f.request);
   grant.sourceRequestId = '019a1cb4-5000-7000-8000-000000000004'; seal(grant); f.store(grant);
   second.id = 'second'; second.identityReadGrantId = grant.grantId;
   assert.deepEqual(select(f.driver, f.signed.bundle, f.principal, [f.request, second]),
     { manifestRef: f.signed.manifestRef, manifestDigest: f.signed.manifest.manifestDigest });
-  assert.throws(() => select(f.driver, f.signed.bundle, f.principal, [f.request], 'default'),
-    error => error instanceof VerifierAuthorizationError && error.refusalCode === 'AUTHORIZATION_REQUIRED');
+  for (const mode of ['default', 'accept-edits', 'plan']) assert.deepEqual(select(f.driver, f.signed.bundle, f.principal, [f.request], mode),
+    { manifestRef: f.signed.manifestRef, manifestDigest: f.signed.manifest.manifestDigest });
 });
 
 for (const fault of ['missing', 'principal', 'consumed', 'revoked', 'future', 'expired', 'row-columns', 'row-digest',

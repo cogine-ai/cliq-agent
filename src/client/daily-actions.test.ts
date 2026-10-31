@@ -68,14 +68,18 @@ test('explicit token budgets preserve every unmentioned limit and reject ambiguo
     assert.throws(() => parseClientInvocation(['run', 'Fix it', ...flags], '/workspace', defaults));
 });
 
-test('Node preset remains local data until real authorization, with explicit yolo and the exact fixed path profile', () => {
-  const parsed = parseClientInvocation(['run', 'Fix it', '--check-node', 'test/check.mjs', '--policy', 'yolo'], '/workspace', defaults);
-  assert.equal(parsed.kind, 'run'); if (parsed.kind !== 'run') return;
-  assert.deepEqual(parsed.nodeCheck, { path: 'test/check.mjs', guestToolchainManifestId: 'installed-node-toolchain' });
-  assert.deepEqual(parsed.intent.verifiers, []); assert.equal(parsed.intent.allowUnverified, false);
+test('Node preset selects a gate in ordinary modes without manufacturing an execution grant', () => {
+  for (const policy of ['default', 'accept-edits', 'plan', 'yolo']) {
+    const parsed = parseClientInvocation(['run', 'Fix it', '--check-node', 'test/check.mjs', '--policy', policy], '/workspace', defaults);
+    assert.equal(parsed.kind, 'run'); if (parsed.kind !== 'run') return;
+    assert.deepEqual(parsed.nodeCheck, { path: 'test/check.mjs', guestToolchainManifestId: 'installed-node-toolchain' });
+    assert.deepEqual(parsed.intent.verifiers, []); assert.equal(parsed.intent.allowUnverified, false);
+    assert.equal(parsed.intent.policyMode, policy);
+  }
   for (const path of ['../check.mjs', '/check.mjs', '.git/check.mjs', '-check.mjs', 'check.test.js', 'test\\check.mjs', 'test//check.mjs'])
     assert.throws(() => parseClientInvocation(['run', 'Fix it', '--check-node', path, '--policy', 'yolo'], '/workspace', defaults));
-  assert.throws(() => parseClientInvocation(['run', 'Fix it', '--check-node', 'check.mjs'], '/workspace', defaults));
+  const ordinary = parseClientInvocation(['run', 'Fix it', '--check-node', 'check.mjs'], '/workspace', defaults);
+  assert.equal(ordinary.kind === 'run' && ordinary.intent.policyMode, 'default');
   assert.throws(() => parseClientInvocation(['run', 'Fix it', '--check-node', 'check.mjs', '--policy', 'yolo', '--options', '{"verifiers":[]}'], '/workspace', defaults));
   assert.throws(() => parseClientInvocation(['run', 'Fix it', '--check-node', 'check.mjs', '--policy', 'yolo', '--allow-unverified'], '/workspace', defaults));
   assert.throws(() => parseClientInvocation(['run', 'Fix it', '--check-node', 'check.mjs', '--policy', 'yolo'], '/workspace', { preferences: defaults.preferences }));
@@ -118,10 +122,10 @@ function consumer(overrides: Record<string, unknown> = {}) {
   return { app: createClientApplication(session, () => {}), calls };
 }
 
-test('a checked Run creates its Session, requests its real identity grant and only then submits the fixed verifier', async () => {
+for (const policy of ['default', 'accept-edits', 'yolo']) test(`a checked ${policy} Run only requests identity authority before its fixed verifier admission`, async () => {
   const fixture = consumer();
   try {
-    const invocation = parseClientInvocation(['run', 'Fix it', '--check-node', 'check.test.mjs', '--policy', 'yolo', '--detach'], '/workspace', defaults);
+    const invocation = parseClientInvocation(['run', 'Fix it', '--check-node', 'check.test.mjs', '--policy', policy, '--detach'], '/workspace', defaults);
     const result = await executeClientAction(fixture.app, invocation, async () => { throw new Error('required check must not ask for unverified consent'); });
     assert.equal(result.runId, 'run'); assert.equal(result.follow, false);
     assert.deepEqual(fixture.calls.map(call => call.method), ['session.create', 'authorization.create', 'session.get', 'run.submit']);
@@ -129,6 +133,9 @@ test('a checked Run creates its Session, requests its real identity grant and on
       target: { kind: 'guest_toolchain', guestToolchainManifestId: 'installed-node-toolchain', toolId: 'node' } });
     const request = fixture.calls[3]!.request;
     assert.equal(request.expectedContextRevision, 7); assert.equal(request.allowUnverified, false);
+    assert.equal(request.policyMode, policy);
+    assert.equal(Object.hasOwn(request.verifiers[0], 'executionGrantId'), false);
+    assert.equal(fixture.calls.some(call => call.method === 'run.approve'), false);
     assert.deepEqual(request.verifiers, [{ id: 'node-tests', version: '1', required: true, executable: { kind: 'toolchain', toolId: 'node' },
       argv: ['--test', '--test-concurrency=1', 'check.test.mjs'].map(value => ({ kind: 'non_secret_literal', value })),
       cwd: '.', env: {}, writableEphemeralPaths: [], identityReadGrantId: 'real-response-grant', timeoutMs: 10000, retries: 0, outputLimitBytes: 65536 }]);

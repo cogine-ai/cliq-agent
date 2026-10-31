@@ -1,6 +1,6 @@
 import type { RetainedControlRootContext } from './control-channel.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
-import type { AuthorizationGrantV1, AuthorizationResponse, SourceGitInspectionCreateRequest, SourceGitInspectionTargetV1,
+import type { AuthorizationConsumptionReceiptV1, AuthorizationGrantV1, AuthorizationResponse, SourceGitInspectionCreateRequest, SourceGitInspectionTargetV1,
   SourceReadScopeCreateRequest, DependencyInstallScriptsCreateRequest, DependencyInstallScriptsTargetV1 } from '../kernel/authorization.js';
 import { addCanonicalDuration, digestOmitting, parseCanonicalTime } from '../kernel/identity.js';
 import { immutableSnapshot } from '../model/immutable.js';
@@ -281,11 +281,16 @@ function readAnyAuthorizationHistory(driver: SqliteDriver, artifacts: ArtifactCa
   return grant.target.kind === 'source_git_inspection' ? readSourceGitAuthorizationHistory(driver, artifacts, owner, grant, releaseKeys, signal)
     : grant.target.kind === 'read_scope' ? readSourceReadAuthorizationHistory(driver, artifacts, owner, grant, releaseKeys, signal)
     : grant.target.kind === 'dependency_install_scripts' ? readDependencyScriptsAuthorizationHistory(driver, artifacts, owner, grant, releaseKeys, signal)
+    : grant.target.kind === 'verifier_execution' ? readVerifierExecutionAuthorizationHistory(driver, artifacts, owner, grant, releaseKeys, signal)
     : readAuthorizationHistory(driver, artifacts, owner, grant, releaseKeys, signal);
 }
 /** Historical audit only; it cannot authenticate input or reopen an executable. */
-export async function readAuthorizationHistory(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
+export async function readAuthorizationHistory(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: RetainedControlRootContext,
   grant: AuthorizationGrantV1, releaseKeys: readonly ReleaseTrustKey[], signal?: AbortSignal) {
+  return readVerifierIdentityHistory(driver, artifacts, owner, grant, releaseKeys, signal, true);
+}
+async function readVerifierIdentityHistory(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: RetainedControlRootContext,
+  grant: AuthorizationGrantV1, releaseKeys: readonly ReleaseTrustKey[], signal: AbortSignal | undefined, consumer: boolean) {
   signal?.throwIfAborted();
   const row = readAuthorizationCreationControl(driver, grant);
   const [{ channel }, core] = await joinResourceOperations([
@@ -319,16 +324,16 @@ export async function readAuthorizationHistory(driver: SqliteDriver, artifacts: 
   if (selected.manifest.manifestDigest !== target.identity.manifestDigest || node.logicalName !== target.identity.toolId ||
       node.canonicalGuestPath !== target.identity.executionPath || node.digest !== target.identity.executableDigest)
     throw new TypeError('authorization no longer reproduces the retained signed Node identity');
-  if (grant.state === 'consumed') {
+  if (consumer && grant.state === 'consumed') {
     const receipt = decodeAuthorizationConsumptionReceipt(await readCanonicalArtifact(artifacts, grant.consumptionReceiptRef));
-    if (receipt.consumer.kind !== 'run_admission' || receipt.grantId !== grant.grantId || receipt.ownerPrincipalId !== grant.ownerPrincipalId ||
+    if (receipt.grantId !== grant.grantId || receipt.ownerPrincipalId !== grant.ownerPrincipalId ||
         receipt.targetDigest !== grant.targetDigest || receipt.consumedAt !== grant.consumedAt || receipt.consumedAt < row.committedAt)
       throw new TypeError('authorization consumption does not match its immutable receipt');
-    const run = readRun(driver, receipt.consumer.runId);
-    const admission = driver.prepare('SELECT principal_id, admission_intent_digest FROM runs WHERE id = ?')
-      .get<{ principal_id: string; admission_intent_digest: string }>(run.id);
-    if (!admission || admission.principal_id !== grant.ownerPrincipalId || admission.admission_intent_digest !== receipt.consumer.admissionIntentDigest ||
-        run.createdAt !== receipt.consumedAt) throw new TypeError('authorization receipt has no matching original Run admission');
+    if (receipt.consumer.kind === 'authorization_derivation') {
+      const derived = readAuthorizationGrant(driver, receipt.consumer.derivedGrantId);
+      if (!derived) throw new KernelStorageError('RECOVERY_REQUIRED', 'identity derivation lost its original derived authorization');
+      await readVerifierExecutionAuthorizationHistory(driver, artifacts, owner, derived, releaseKeys, signal);
+    } else assertRunAuthorizationConsumer(driver, grant, receipt);
   }
   if (grant.state === 'revoked') {
     const revoked = readControlRequest(driver, grant.ownerPrincipalId, 'authorization.revoke', grant.revokedByRequestId);
@@ -338,6 +343,63 @@ export async function readAuthorizationHistory(driver: SqliteDriver, artifacts: 
   }
   return { request, selected, committedAt: row.committedAt };
 }
+function assertRunAuthorizationConsumer(driver: SqliteDriver, grant: AuthorizationGrantV1, receipt: AuthorizationConsumptionReceiptV1) {
+  if (receipt.consumer.kind !== 'run_admission') throw new TypeError('authorization has another consumer');
+  const run = readRun(driver, receipt.consumer.runId);
+  const admission = driver.prepare('SELECT principal_id, admission_intent_digest FROM runs WHERE id = ?')
+    .get<{ principal_id: string; admission_intent_digest: string }>(run.id);
+  if (!admission || admission.principal_id !== grant.ownerPrincipalId || admission.admission_intent_digest !== receipt.consumer.admissionIntentDigest ||
+      run.createdAt !== receipt.consumedAt) throw new TypeError('authorization receipt has no matching original Run admission');
+}
+
+/** Complete original derivation, not permission to consume a terminal grant.
+ * Identity creation is read without recursively following its consumer; this
+ * function closes that one exact consumer against the derived control row. */
+export async function readVerifierExecutionAuthorizationHistory(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: RetainedControlRootContext,
+  grant: AuthorizationGrantV1, releaseKeys: readonly ReleaseTrustKey[], signal?: AbortSignal) {
+  const reads = signal ? artifacts.withReadSignal(signal) : artifacts;
+  const target = grant.target;
+  if (target.kind !== 'verifier_execution') throw new TypeError('verifier execution history has another target');
+  const row = readAuthorizationCreationControl(driver, grant);
+  const [{ channel }, core, response] = await joinResourceOperations([
+    readRetainedControlChannelClosure(reads, owner, { principalId: grant.ownerPrincipalId,
+      channelIdentityRef: grant.channelIdentityRef, channelIdentityDigest: grant.channelIdentityDigest }),
+    readCanonicalArtifact<Record<string, unknown>>(reads, grant.sourceRequestDigest),
+    readCanonicalArtifact(reads, row.responseRef)
+  ] as const);
+  const request = decodeAuthorizationCreateRequest({ ...core, requestDigest: grant.sourceRequestDigest });
+  if (request.decision.kind !== 'verifier_execution') throw new TypeError('verifier execution lacks its original explicit decision');
+  const decision = request.decision;
+  const identity = readAuthorizationGrant(driver, target.executionIdentityGrantId);
+  if (!identity || identity.ownerPrincipalId !== grant.ownerPrincipalId || identity.state !== 'consumed' ||
+      identity.target.kind !== 'execution_identity_read' || identity.target.purpose !== 'verifier' ||
+      identity.targetDigest !== target.executionIdentityTargetDigest)
+    throw new TypeError('verifier execution lacks its uniquely consumed identity');
+  const history = await readVerifierIdentityHistory(driver, reads, owner, identity, releaseKeys, signal, false);
+  const derivation = decodeAuthorizationConsumptionReceipt(await readCanonicalArtifact(reads, identity.consumptionReceiptRef));
+  if (request.requestId !== grant.sourceRequestId || channel.openedAt > grant.createdAt ||
+      grant.expiresAt !== addCanonicalDuration(grant.createdAt, request.ttlMs ?? 3_600_000) || !same(response, createResponse(grant)) ||
+      decision.verifierId !== target.verifierId || decision.verifierRequestDigest !== target.verifierRequestCoreDigest ||
+      decision.executionIdentityGrantId !== identity.grantId || decision.maxCandidateGenerations !== target.maxCandidateGenerations ||
+      decision.maxAttemptsPerCandidate !== target.maxAttemptsPerCandidate ||
+      !same(derivation.consumer, { kind: 'authorization_derivation', derivedGrantId: grant.grantId }) ||
+      derivation.grantId !== identity.grantId || derivation.ownerPrincipalId !== grant.ownerPrincipalId ||
+      derivation.targetDigest !== identity.targetDigest || derivation.consumedAt !== identity.consumedAt ||
+      derivation.consumedAt !== grant.createdAt || grant.createdAt < history.committedAt || row.committedAt >= identity.expiresAt ||
+      authorizationOwnersDuring(driver, grant.createdAt, row.committedAt).next().done)
+    throw new TypeError('verifier execution differs from its complete original authenticated derivation');
+  if (grant.state === 'consumed') {
+    const receipt = decodeAuthorizationConsumptionReceipt(await readCanonicalArtifact(reads, grant.consumptionReceiptRef));
+    if (receipt.grantId !== grant.grantId || receipt.ownerPrincipalId !== grant.ownerPrincipalId ||
+        receipt.targetDigest !== grant.targetDigest || receipt.consumedAt !== grant.consumedAt || receipt.consumedAt < row.committedAt)
+      throw new TypeError('verifier execution consumption differs from its original receipt');
+    assertRunAuthorizationConsumer(driver, grant, receipt);
+  }
+  if (grant.state === 'revoked') await verifyRevokeResponse(driver, reads, owner, grant, grant.revokedByRequestId, row.committedAt);
+  reads.assertReadActive();
+  return { request, identity, derivation, selected: history.selected, committedAt: row.committedAt };
+}
+
 async function verifyRevokeResponse(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: RetainedControlRootContext,
   grant: AuthorizationGrantV1, requestId: string, creationCommittedAt: string) {
   const row = readControlRequest(driver, grant.ownerPrincipalId, 'authorization.revoke', requestId);
@@ -441,7 +503,19 @@ export const createAuthorization = stateOperation('INVALID_REQUEST', async (driv
       ? await selectSourceReadTarget(driver, artifacts, identity.principalId, request as SourceReadScopeCreateRequest, signal) : undefined;
     const dependency = decision.kind === 'dependency_install_scripts'
       ? await selectDependencyScriptsTarget(driver, artifacts, owner, runtime, identity.principalId, request as DependencyInstallScriptsCreateRequest, signal) : undefined;
-    const target = decision.kind === 'dependency_install_scripts' ? dependency!.target : decision.kind === 'read_scope' ? readScope!.target : decision.kind === 'source_git_inspection'
+    const executionIdentity = decision.kind === 'verifier_execution' ? readAuthorizationGrant(driver, decision.executionIdentityGrantId) : undefined;
+    let executionCreationAt: string | undefined;
+    if (decision.kind === 'verifier_execution') {
+      if (!executionIdentity || executionIdentity.state !== 'active' || executionIdentity.ownerPrincipalId !== identity.principalId ||
+          executionIdentity.target.kind !== 'execution_identity_read' || executionIdentity.target.purpose !== 'verifier')
+        throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');
+      executionCreationAt = (await readAuthorizationHistory(driver, artifacts, owner, executionIdentity, runtime.releaseKeys, signal)).committedAt;
+    }
+    const target = decision.kind === 'verifier_execution' ? {
+      kind: 'verifier_execution' as const, verifierId: decision.verifierId, verifierRequestCoreDigest: decision.verifierRequestDigest,
+      executionIdentityGrantId: executionIdentity!.grantId, executionIdentityTargetDigest: executionIdentity!.targetDigest,
+      maxCandidateGenerations: decision.maxCandidateGenerations, maxAttemptsPerCandidate: decision.maxAttemptsPerCandidate
+    } : decision.kind === 'dependency_install_scripts' ? dependency!.target : decision.kind === 'read_scope' ? readScope!.target : decision.kind === 'source_git_inspection'
       ? await selectSourceInspectionTarget(driver, artifacts, runtime, identity.principalId, request as SourceGitInspectionCreateRequest, signal)
       : await (async () => {
         const selected = await readRetainedVerifierToolchain(artifacts, { ...runtime, guestToolchainManifestId: decision.target.guestToolchainManifestId, signal });
@@ -460,6 +534,18 @@ export const createAuthorization = stateOperation('INVALID_REQUEST', async (driv
       maxUses: 1 as const, createdAt, expiresAt: addCanonicalDuration(createdAt, request.ttlMs ?? 3_600_000) };
     const grant: AuthorizationGrantV1 = { ...base, rowVersion: 1, grantCoreDigest: canonicalSha256(base), state: 'active', useCount: 0, rowDigest: '' };
     grant.rowDigest = digestOmitting(grant, 'rowDigest');
+    let derivation: { next: AuthorizationGrantV1; metadata: Awaited<ReturnType<ArtifactCatalog['publishCanonical']>> } | undefined;
+    if (executionIdentity) {
+      if (createdAt < executionCreationAt! || createdAt >= executionIdentity.expiresAt) throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');
+      const receipt: AuthorizationConsumptionReceiptV1 = { schemaVersion: 1, grantId: executionIdentity.grantId,
+        ownerPrincipalId: identity.principalId, targetDigest: executionIdentity.targetDigest,
+        consumer: { kind: 'authorization_derivation', derivedGrantId: grant.grantId }, consumedAt: createdAt, receiptDigest: '' };
+      receipt.receiptDigest = digestOmitting(receipt, 'receiptDigest');
+      const metadata = await artifacts.publishCanonical(receipt, 'cliq-authorization-consumption-receipt-v1');
+      const next: AuthorizationGrantV1 = { ...authorizationGrantCore(executionIdentity), rowVersion: 2, grantCoreDigest: executionIdentity.grantCoreDigest,
+        state: 'consumed', useCount: 1, consumptionReceiptRef: metadata.ref, consumedAt: createdAt, rowDigest: '' };
+      next.rowDigest = digestOmitting(next, 'rowDigest'); derivation = { next, metadata };
+    }
     const { requestDigest: _digest, ...requestCore } = request;
     diagnosis?.stage('publish_request');
     const requestArtifact = await artifacts.publishCanonical(requestCore, 'cliq-authorization-create-request-v1');
@@ -479,6 +565,12 @@ export const createAuthorization = stateOperation('INVALID_REQUEST', async (driv
       if (outcome !== 'healthy') return;
       if (now < createdAt || now >= grant.expiresAt || currentOwner.acquiredAt > createdAt || channel.channel.openedAt > createdAt)
         throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');
+      if (executionIdentity) {
+        if (now >= executionIdentity.expiresAt || !same(readAuthorizationGrant(connection, executionIdentity.grantId), executionIdentity))
+          throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');
+        insertArtifactMetadata(connection, derivation!.metadata, now);
+        consumeOrRevokeAuthorization(connection, executionIdentity, derivation!.next);
+      }
       if (target.kind === 'source_git_inspection' && (readSessionPrincipalId(connection, target.sessionId) !== identity.principalId ||
           readSession(connection, target.sessionId).workspaceIdentityRef !== target.workspaceIdentityRef))
         throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');

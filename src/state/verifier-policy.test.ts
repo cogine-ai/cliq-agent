@@ -11,8 +11,13 @@ import type { RunPolicySnapshotV1 } from '../kernel/tool-authorization.js';
 import { testFixture } from '../model/testing/fixtures.js';
 import { BUILTIN_POLICY_RULES, modeDecisions } from '../policy/tool-policy.js';
 import { loadVerifierPolicy, planVerifierRequest } from './verifier-policy.js';
+import { toolApprovalDecision } from '../policy/tool-approval.js';
+import type { VerifierAuthorizationTemplateV1 } from '../kernel/verifier-invocation.js';
+import { decodeVerifierAuthorizationTemplate } from './verifier-template.js';
+import { verifierDenial, verifierPolicyItem } from './verifier-permission-history.js';
+import { decodeVerifierSkipItem } from './verifier-artifacts.js';
 
-function data() {
+function data(required = true) {
   const assembly = testFixture().assembly, ref = canonicalSha256;
   const command: VerifierCommandV1 = { schemaVersion: 1, format: 'cliq-verifier-command-v1', verifierId: 'tests', verifierVersion: '1',
     executable: { kind: 'guest_toolchain', guestToolchainManifestRef: ref('guest'), guestToolchainManifestDigest: ref('guest-digest'), toolId: 'node',
@@ -26,7 +31,7 @@ function data() {
     runtimeBundleManifestDigest: assembly.runtime.runtimeBundleManifestDigest, guestToolchainManifestRef: ref('guest'),
     guestToolchainManifestDigest: ref('guest-digest'), environmentDigest: '' };
   environment.environmentDigest = digestOmitting(environment, 'environmentDigest');
-  const entry: VerifierSpec['verifiers'][number] = { index: 0, id: 'tests', version: '1', gate: 'required', commandRef: ref(command),
+  const entry: VerifierSpec['verifiers'][number] = { index: 0, id: 'tests', version: '1', gate: required ? 'required' : 'advisory', commandRef: ref(command),
     commandDigest: command.commandDigest, environmentRef: ref(environment), environmentDigest: environment.environmentDigest,
     timeoutMs: 1000, retries: 1, outputLimitBytes: 65_536, entryDigest: '' };
   entry.entryDigest = digestOmitting(entry, 'entryDigest');
@@ -35,7 +40,7 @@ function data() {
   const plan: VerifierPlan = { schemaVersion: 1, runId: 'run-1', candidateItemId: 'candidate-1', resultSourceRef: ref('source'),
     verifierSpecRef: ref(verifierSpec), verifierSpecDigest: verifierSpec.specDigest, entries: [{ index: 0, verifierId: entry.id,
       verifierSpecDigest: verifierSpec.specDigest, verifierEntryDigest: entry.entryDigest, commandRef: entry.commandRef, commandDigest: entry.commandDigest,
-      environmentRef: entry.environmentRef, environmentDigest: entry.environmentDigest, required: true, maxAttempts: 2 }], planDigest: '' };
+      environmentRef: entry.environmentRef, environmentDigest: entry.environmentDigest, required, maxAttempts: 2 }], planDigest: '' };
   plan.planDigest = digestOmitting(plan, 'planDigest');
   const policy: RunPolicySnapshotV1 = { schemaVersion: 1, format: 'cliq-run-policy-v1', principalId: 'principal-1', workspaceIdentityDigest: ref('workspace'),
     mode: 'yolo', engine: { id: 'cliq-policy-v1', version: '1', runtimeBundleRef: assembly.runtime.runtimeBundleRef,
@@ -50,6 +55,57 @@ function data() {
     principalId: policy.principalId, workspaceIdentityDigest: policy.workspaceIdentityDigest, context });
   return { context, policy, load };
 }
+
+for (const mode of ['default', 'accept-edits'] as const) test(`${mode} verifier selection preserves ask and requires its exact candidate approval`, () => {
+  const f = data(), policy = { ...f.policy, mode, decisions: modeDecisions(mode) };
+  policy.policyDigest = digestOmitting(policy, 'policyDigest');
+  const evaluator = f.load(policy), { request, target } = planVerifierRequest(f.context);
+  const at = '2026-10-18T00:01:00.000Z', decidedAt = '2026-10-18T00:01:01.000Z', deadline = '2026-10-18T00:05:00.000Z';
+  const evidence = evaluator.evaluate(request, target, at), wait = evaluator.approvalWait(request, target, evidence, 9);
+  assert.equal(evidence.effectiveDisposition, 'ask'); assert.equal(wait.subject.resultSourceRef, target.resultSourceRef);
+  assert.throws(() => evaluator.grant(request, target, evidence, at, deadline));
+  const input = { principalId: policy.principalId, channelIdentityRef: canonicalSha256('actual-channel-data'), channelIdentityDigest: canonicalSha256('channel-digest'),
+    requestId: '019a1cb4-5000-7000-8000-000000000001', expectedRunRevision: 10, waitingOnRef: canonicalSha256(wait), decision: 'allow' as const, ttlMs: 1000 };
+  const decision = toolApprovalDecision(wait, input, decidedAt, deadline), grant = evaluator.approve(request, target, evidence, wait, decision, deadline)!;
+  assert.equal(grant.provenance.kind, 'user_approval'); assert.equal(grant.expiresAt, '2026-10-18T00:01:02.000Z');
+  assert.equal(grant.maxDispatchedAttempts, target.maxAttempts); assert.equal(evidence.effectiveDisposition, 'ask');
+  const denied = toolApprovalDecision(wait, { ...input, decision: 'deny' }, decidedAt, deadline);
+  assert.equal(evaluator.approve(request, target, evidence, wait, denied, deadline), undefined);
+  assert.equal(denied.grantExpiresAt, undefined);
+  for (const change of [{ runId: 'another-run' }, { subject: { ...wait.subject, resultSourceRef: canonicalSha256('another-source') } },
+    { subject: { ...wait.subject, required: false } }, { frontierRef: canonicalSha256('later-frontier') }])
+    assert.throws(() => evaluator.approve(request, target, evidence, { ...wait, ...change }, decision, deadline));
+  assert.throws(() => toolApprovalDecision(wait, { ...input, expectedRunRevision: 11 }, decidedAt, deadline));
+  assert.throws(() => toolApprovalDecision(wait, input, deadline, deadline));
+});
+
+test('a pure bounded verifier template retains ask and cannot change Run, identity, candidate ordinal or attempt ceiling', () => {
+  const f = data(), policy = { ...f.policy, mode: 'default' as const, decisions: modeDecisions('default') };
+  policy.policyDigest = digestOmitting(policy, 'policyDigest');
+  const evaluator = f.load(policy), { request, target } = planVerifierRequest(f.context), at = '2026-10-18T00:01:00.000Z';
+  const evidence = evaluator.evaluate(request, target, at);
+  const template: VerifierAuthorizationTemplateV1 = { schemaVersion: 1, format: 'cliq-verifier-authorization-template-v1',
+    runId: request.runId, verifierSpecRef: target.verifierSpecRef, verifierSpecDigest: target.verifierSpecDigest,
+    verifierIndex: target.verifierIndex, verifierId: target.verifierId, verifierVersion: target.verifierVersion,
+    verifierEntryDigest: target.verifierEntryDigest, commandRef: target.commandRef, commandDigest: target.commandDigest,
+    environmentRef: target.environmentRef, environmentDigest: target.environmentDigest, sourceProjectionRef: f.context.environment.sourceProjectionRef,
+    maxCandidateGenerations: 2, maxAttempts: 2, expiresAt: '2026-10-18T00:05:00.000Z', decisionRef: canonicalSha256('original-consumption-data'), templateDigest: '' };
+  template.templateDigest = digestOmitting(template, 'templateDigest'); decodeVerifierAuthorizationTemplate(template);
+  const grant = evaluator.templateGrant(request, target, evidence, template, 1, at);
+  assert.deepEqual(grant.provenance, { kind: 'verifier_template', templateRef: canonicalSha256(template), candidateOrdinal: 1, decisionRef: template.decisionRef });
+  assert.equal(evidence.effectiveDisposition, 'ask'); assert.equal(grant.expiresAt, template.expiresAt);
+  for (const ordinal of [-1, 2, 3, 0.5, Number.MAX_SAFE_INTEGER]) assert.throws(() => evaluator.templateGrant(request, target, evidence, template, ordinal, at));
+  for (const change of [{ runId: 'another-run' }, { verifierId: 'another-check' }, { maxAttempts: 3 },
+    { sourceProjectionRef: canonicalSha256('other-projection') }, { commandRef: canonicalSha256('other-command') },
+    { environmentDigest: canonicalSha256('other-environment') }, { expiresAt: at }])
+    assert.throws(() => evaluator.templateGrant(request, target, evidence, { ...template, ...change }, 0, at));
+  for (const change of [{ templateDigest: canonicalSha256('forged') }, { automaticRenewal: true }, { operationGrantRef: canonicalSha256('forged') }])
+    assert.throws(() => decodeVerifierAuthorizationTemplate({ ...template, ...change }));
+  const deniedPolicy = { ...policy, mode: 'plan' as const, decisions: modeDecisions('plan') };
+  deniedPolicy.policyDigest = digestOmitting(deniedPolicy, 'policyDigest');
+  const denied = f.load(deniedPolicy), deniedEvidence = denied.evaluate(request, target, at);
+  assert.throws(() => denied.templateGrant(request, target, deniedEvidence, template, 0, at));
+});
 
 test('verifier permission binds the full frozen candidate/request graph and direct named-action evidence', () => {
   const { context, load } = data(), { request, target } = planVerifierRequest(context), evaluator = load();
@@ -89,4 +145,40 @@ test('named verifier policy uses the original precedence and neither deny nor as
   value.policyDigest = digestOmitting(value, 'policyDigest');
   const evaluator = load(value), evidence = evaluator.evaluate(request, target, now);
   assert.equal(evidence.effectiveDisposition, 'deny'); assert.deepEqual(evidence.matchedRuleIds, ['named-deny']);
+});
+
+for (const required of [true, false]) test(`${required ? 'required refusal cancels' : 'advisory refusal skips'} without fabricating verification or changing ask evidence`, () => {
+  const f = data(required), policy = { ...f.policy, mode: 'default' as const, decisions: modeDecisions('default') };
+  policy.policyDigest = digestOmitting(policy, 'policyDigest');
+  const evaluator = f.load(policy), { request, target } = planVerifierRequest(f.context);
+  const at = '2026-10-18T00:01:00.000Z', deadline = '2026-10-18T00:05:00.000Z';
+  const evidence = evaluator.evaluate(request, target, at), wait = evaluator.approvalWait(request, target, evidence, 9);
+  const decision = toolApprovalDecision(wait, { principalId: policy.principalId, channelIdentityRef: canonicalSha256('channel'),
+    channelIdentityDigest: canonicalSha256('channel-digest'), requestId: '019a1cb4-5000-7000-8000-000000000002',
+    expectedRunRevision: 10, waitingOnRef: canonicalSha256(wait), decision: 'deny' }, at, deadline);
+  const context = { run: { id: request.runId }, request, target }, ref = canonicalSha256(decision);
+  const outcome = verifierDenial(context, evidence, ref, at, decision), item = verifierPolicyItem(context, evidence, ref, at, undefined, decision);
+  assert.equal(evidence.effectiveDisposition, 'ask'); assert.equal(evaluator.approve(request, target, evidence, wait, decision, deadline), undefined);
+  assert.equal(item.decisionSource, 'interactive_approval'); assert.equal(item.decision, 'deny');
+  if (item.decision !== 'deny') assert.fail('refusal item');
+  assert.equal('grantRef' in item, false); assert.equal('receiptRef' in item, false);
+  if (required) {
+    assert.equal(outcome.skip, undefined); assert.equal(outcome.stop?.origin, 'user_cancel'); assert.equal(outcome.stop?.targetStatus, 'cancelled');
+    assert.deepEqual(item.denialOutcome, { kind: 'stop_intent', subjectKind: 'verifier_launch', stopIntentRef: canonicalSha256(outcome.stop) });
+  } else {
+    assert.equal(outcome.stop, undefined); assert(outcome.skip);
+    assert.equal(outcome.skip.outcome, 'skipped_by_user'); assert.equal('policyChannelEvidenceDigest' in outcome.skip, false);
+    assert.deepEqual(decodeVerifierSkipItem(outcome.skip), outcome.skip);
+    assert.deepEqual(item.denialOutcome, { kind: 'advisory_verifier_skipped', subjectKind: 'verifier_launch', verifierSkipItemRef: canonicalSha256(outcome.skip) });
+    for (const extra of [{ receiptRef: canonicalSha256('forged-receipt') }, { outcome: 'passed' },
+      { policyChannelEvidenceDigest: evidence.evidenceDigest }, { grantRef: canonicalSha256('forged-grant') }])
+      assert.throws(() => decodeVerifierSkipItem({ ...outcome.skip, ...extra }));
+    const deniedPolicy = { ...policy, mode: 'plan' as const, decisions: modeDecisions('plan') };
+    deniedPolicy.policyDigest = digestOmitting(deniedPolicy, 'policyDigest');
+    const deniedEvidence = f.load(deniedPolicy).evaluate(request, target, at);
+    assert.equal(deniedEvidence.effectiveDisposition, 'deny');
+    const policySkip = verifierDenial(context, deniedEvidence, canonicalSha256(deniedEvidence), at).skip!;
+    assert.equal(policySkip.outcome, 'skipped_by_policy'); assert.deepEqual(decodeVerifierSkipItem(policySkip), policySkip);
+    const { policyChannelEvidenceDigest: _digest, ...missing } = policySkip; assert.throws(() => decodeVerifierSkipItem(missing));
+  }
 });

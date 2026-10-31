@@ -112,7 +112,7 @@ async function readDeliveryResultBasisData(driver: SqliteDriver, artifacts: Arti
   let verificationReceiptRefs: string[], completionCheckpoint = merged.checkpoint;
   if (identical) {
     if (cut.journal.some(entry => entry.opKind === 'verifier') || [...decodedItems.values()].some(item =>
-      ['verifier_result', 'verifier_stop'].includes(item.kind) || item.kind === 'policy_decision' && item.subjectKind === 'verifier_launch'))
+      ['verifier_result', 'verifier_stop', 'verifier_skip'].includes(item.kind) || item.kind === 'policy_decision' && item.subjectKind === 'verifier_launch'))
       throw new TypeError('identical delivery cannot relabel local verifier attempts as inherited receipts');
     if (cut.journal.some(entry => entry.target === 'builtin:dependency-acquire') || [...decodedItems.values()].some(item =>
       item.kind === 'dependency_ready' || item.kind === 'dependency_failure'))
@@ -144,8 +144,8 @@ async function readDeliveryResultBasisData(driver: SqliteDriver, artifacts: Arti
     verification = { kind: 'local', outcome: 'verified', entries };
     verificationReceiptRefs = entries.flatMap(entry => 'receiptRef' in entry.disposition ? [entry.disposition.receiptRef] : []);
     const completion = progress.entries.at(-1);
-    if (!completion?.resultItem) throw new TypeError('delivery local verification lost its final receipt-backed result');
-    completionCheckpoint = readCheckpoint(driver, verifierCheckpointId(cut.run.id, completion.resultItem.opId, completion.resultItem.attempt));
+    if (!completion?.resultItem && !completion?.skipCheckpointId) throw new TypeError('delivery local verification lost its final receipt or exact advisory skip');
+    completionCheckpoint = readCheckpoint(driver, completion.skipCheckpointId ?? verifierCheckpointId(cut.run.id, completion.resultItem!.opId, completion.resultItem!.attempt));
   }
   assertDeliveryReadCut(driver, cut);
   return { candidate, plan, planRef, consent: undefined, summary, principalId, admission: row, original, progress, verification,
@@ -287,7 +287,7 @@ async function readAgentResultBasis(driver: SqliteDriver, artifacts: ArtifactCat
     : { kind: 'local', outcome: 'unverified', unverifiedConsentRef: spec.unverifiedConsentRef!, entries };
   const verificationReceiptRefs = entries.flatMap(entry => 'receiptRef' in entry.disposition ? [entry.disposition.receiptRef] : []);
   const completion = progress.entries.at(-1);
-  const completionCheckpoint = completion?.resultItem
+  const completionCheckpoint = completion?.skipCheckpointId ? readCheckpoint(driver, completion.skipCheckpointId) : completion?.resultItem
     ? readCheckpoint(driver, verifierCheckpointId(run.id, completion.resultItem.opId, completion.resultItem.attempt))
     : readCheckpoint(driver, progress.dependency?.ready?.readyCheckpointId ?? finalCandidateCheckpointId(run.id, candidate.producingItemId));
   if (cut.run.nextStep === 'verify' && cut.latestCheckpoint.id !== completionCheckpoint.id)

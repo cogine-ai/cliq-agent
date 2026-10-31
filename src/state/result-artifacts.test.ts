@@ -51,6 +51,24 @@ test('verification closure rejects contradictory status, nonpassed required evid
   assert.throws(() => decodeVerificationClosure(noConsent));
 });
 
+test('advisory skip is a closed nonreceipt disposition and never satisfies a required gate', () => {
+  const value = closure(false); if (value.verification.kind !== 'local') assert.fail();
+  const entry = value.verification.entries[0]!;
+  entry.disposition = { kind: 'advisory_skipped', verifierSkipItemId: 'original-skip-item', decisionRef: canonicalSha256('original-denial') };
+  value.closureDigest = digestOmitting(value, 'closureDigest'); assert.deepEqual(decodeVerificationClosure(value), value);
+  for (const extra of [{ receiptRef: canonicalSha256('phantom') }, { completedJournalSeq: 1 }, { outcome: 'passed' },
+    { grantRef: canonicalSha256('phantom') }]) {
+    const changed = structuredClone(value); if (changed.verification.kind !== 'local') assert.fail();
+    changed.verification.entries[0]!.disposition = { ...entry.disposition, ...extra };
+    changed.closureDigest = digestOmitting(changed, 'closureDigest'); assert.throws(() => decodeVerificationClosure(changed));
+  }
+  const mixed = closure(); if (mixed.verification.kind !== 'local') assert.fail();
+  mixed.verification.entries.push({ ...entry, verifierIndex: 1, verifierId: 'advisory-check' });
+  mixed.closureDigest = digestOmitting(mixed, 'closureDigest'); assert.deepEqual(decodeVerificationClosure(mixed), mixed);
+  mixed.verification.entries[1]!.required = true; mixed.closureDigest = digestOmitting(mixed, 'closureDigest');
+  assert.throws(() => decodeVerificationClosure(mixed));
+});
+
 test('delivery inherited closure and provenance retain exact closed source identities without relabeling receipts', () => {
   const reference = canonicalSha256;
   const provenance: InheritedVerificationProvenanceV1 = { schemaVersion: 1, format: 'cliq-inherited-verification-provenance-v1',

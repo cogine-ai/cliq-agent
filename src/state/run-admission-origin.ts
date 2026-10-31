@@ -1,6 +1,7 @@
 // Original root admission data shared by child/history readers. This never
 // acquires an owner, replays a control mutation or grants current execution.
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
+import { readAdmittedVerifierTemplates } from './verifier-template.js';
 import type { DependencyRequest, VerifierRequest } from '../kernel/control-submit.js';
 import { decodeDependencyPolicy, decodeDependencyInstallScriptsTemplate, DEPENDENCY_LIMITS, type DependencyPolicy,
   type DependencyInstallScriptsAuthorizationTemplateV1 } from '../kernel/dependency.js';
@@ -163,7 +164,7 @@ export async function readRootRunAdmissionOrigin(driver: SqliteDriver, artifacts
     } else if (dependencyRequest.installScriptsGrantId !== undefined) invalid();
   } else if (dependencyRequest?.mode === 'locked') invalid();
   for (const request of verifierRequests) {
-    const grant = readAuthorizationGrant(driver, request.identityReadGrantId);
+    const grant = readAuthorizationGrant(driver, request.executionGrantId ?? request.identityReadGrantId);
     if (!grant || grant.ownerPrincipalId !== principalId || grant.state !== 'consumed') invalid();
     const receipt = decodeAuthorizationConsumptionReceipt(await readCanonicalArtifact(reads, grant.consumptionReceiptRef));
     if (receipt.grantId !== grant.grantId || receipt.ownerPrincipalId !== principalId || receipt.targetDigest !== grant.targetDigest ||
@@ -180,13 +181,16 @@ export async function readRootRunAdmissionOrigin(driver: SqliteDriver, artifacts
         receipt.consumedAt !== run.createdAt || !same(receipt.consumer, { kind: 'run_admission', runId, admissionIntentDigest })) invalid();
     authorizationReceiptRefs.push(grant.consumptionReceiptRef);
   }
+  const verifierTemplates = await readAdmittedVerifierTemplates(driver, reads, { run, spec,
+    requests: verifierRequests.map((request, verifierIndex) => ({ request, verifierIndex })), admissionIntentDigest, principalId });
   const admittedDigest = canonicalSha256({ admissionIntentDigest, objectiveRef: spec.objectiveRef, admittedContextRef: spec.admittedContextRef,
     runSpecRef: run.specRef, workspaceIdentityDigest: source.workspaceIdentityDigest, repositoryIdentityDigest: source.git?.repositoryIdentityDigest ?? null,
     sourceProjectionRef: spec.sourceProjectionRef, frozenIgnoreRulesRef: source.frozenIgnoreRulesRef, baseWorkspaceManifestRef: spec.baseWorkspaceManifestRef,
     workspaceStateRef: initialCheckpoint.workspaceStateRef, assemblyRef: spec.assemblyRef, policyRef: spec.policyRef, sandboxProfileRef: spec.sandboxProfileRef,
     verifierSpecRef: spec.verifierSpecRef, unverifiedConsentRef: spec.unverifiedConsentRef ?? null, credentialGrantRefs: spec.credentialGrantRefs,
     ...(spec.dependencyPolicyRef === undefined ? {} : { dependencyPolicyRef: spec.dependencyPolicyRef }),
-    ...(authorizationReceiptRefs.length ? { authorizationReceiptRefs } : {}) });
+    ...(authorizationReceiptRefs.length ? { authorizationReceiptRefs } : {}),
+    ...(verifierTemplates.roots.length ? { verifierTemplates: verifierTemplates.roots } : {}) });
   if (admission.admitted_request_digest !== admittedDigest) invalid();
   function assertUnchanged(connection: SqliteConnection | SqliteDriver) {
     if (!same(select(connection), admission) || !same(immutableRun(readRun(connection, runId)), immutableRun(run)) ||
@@ -198,6 +202,7 @@ export async function readRootRunAdmissionOrigin(driver: SqliteDriver, artifacts
   reads.assertReadActive(); assertUnchanged(driver);
   return Object.freeze({ ...immutableSnapshot({ run, spec, admission, principalId, control, requestCore, verifierRequests,
     admissionIntentDigest, allowUnverified, objective, admittedContext, verifierSpec, initialCheckpoint, initialRun, initialResponse, channel,
-    authorizationReceiptRefs, ...(dependencyPolicy ? { dependencyPolicy } : {}), ...(dependencyTemplate ? { dependencyTemplate } : {}) }), assertUnchanged });
+    authorizationReceiptRefs, ...(verifierTemplates.roots.length ? { verifierTemplates: verifierTemplates.roots } : {}),
+    ...(dependencyPolicy ? { dependencyPolicy } : {}), ...(dependencyTemplate ? { dependencyTemplate } : {}) }), assertUnchanged });
 }
 export type RootRunAdmissionOrigin = Awaited<ReturnType<typeof readRootRunAdmissionOrigin>>;

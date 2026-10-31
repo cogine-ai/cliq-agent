@@ -37,6 +37,11 @@ export type VerifierResultItem = {
   schemaVersion: 1; itemId: string; runId: string; kind: 'verifier_result'; candidateItemId: string; verifierPlanRef: ArtifactRef;
   verifierIndex: number; verifierId: string; opId: string; attempt: number; outcome: VerificationReceipt['outcome']; receiptRef: ArtifactRef; createdAt: string;
 };
+export type VerifierSkipItem = {
+  schemaVersion: 1; itemId: string; runId: string; kind: 'verifier_skip'; candidateItemId: string;
+  verifierPlanRef: ArtifactRef; verifierIndex: number; verifierId: string; decisionRef: ArtifactRef; createdAt: string;
+} & ({ outcome: 'skipped_by_user'; policyChannelEvidenceDigest?: never } |
+  { outcome: 'skipped_by_policy'; policyChannelEvidenceDigest: string });
 
 /** A Run cancellation/deadline retains the real measurement and retirement,
  * not an infrastructure receipt or permission to retry the claimed attempt. */

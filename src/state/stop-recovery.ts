@@ -31,6 +31,7 @@ import { readDeliveryPolicyDenial } from './delivery-approval.js';
 import { readDeliveryTerminalProjection, readUnclaimedPublicationStopHistory } from './delivery-publication-recovery.js';
 import type { DeliveryReadData } from './delivery-read-data.js';
 import { validateVerifierUnknownTerminalHistory } from './verifier-unknown-retirement.js';
+import { readVerifierApprovalDenials } from './verifier-permission-history.js';
 
 export type CancelResponse = Extract<ControlApplicationResponseV1, { ok: true }> & { result: Extract<ControlResultV1, { method: 'run.cancel' }> };
 
@@ -111,12 +112,15 @@ async function readStopReference(driver: SqliteDriver, artifacts: ArtifactCatalo
   const parentObservation = requireCurrentFence ? await readParentCancellationObservation(driver, artifacts, closure) : undefined;
   const deliveryDenial = closure.runSpec.operation === 'delivery'
     ? data ? (await data.authorization())?.stop : await readDeliveryPolicyDenial(driver, artifacts, closure) : undefined;
+  const verifierDenials = await readVerifierApprovalDenials(driver, artifacts, closure);
   if (intent.origin === 'user_cancel') {
     if (!run.cancelRequested) throw new TypeError('cancellation lost its monotonic dispatch fence');
     if (deliveryDenial?.origin === 'user_cancel' && canonicalSha256(deliveryDenial) === ref) {
       // The complete approval reader already checked the original run.approve
       // channel, wait, decision and response. Never pretend it was run.cancel.
       requireEqual(intent, deliveryDenial, 'winning delivery approval denial');
+    } else if (verifierDenials.has(ref)) {
+      requireEqual(intent, verifierDenials.get(ref), 'winning verifier approval denial');
     } else {
       const { response, row } = await readCancelResponse(driver, artifacts, run, intent.principalId, intent.requestId);
       if (response.result.snapshot.run.stopIntentRef !== ref || row.committedAt !== intent.createdAt) throw new TypeError('cancellation has no exact control-row owner');
@@ -126,7 +130,7 @@ async function readStopReference(driver: SqliteDriver, artifacts: ArtifactCatalo
   } else if (requireCurrentFence && run.cancelRequested) {
     if (intent.origin !== 'kernel_integrity') throw new TypeError('resource/deadline stop cannot override user cancellation');
     const principalId = readSessionPrincipalId(driver, run.sessionId);
-    let owned = deliveryDenial?.origin === 'user_cancel' || parentObservation !== undefined;
+    let owned = deliveryDenial?.origin === 'user_cancel' || parentObservation !== undefined || verifierDenials.size > 0;
     for (const row of driver.prepare("SELECT request_id, response_ref FROM control_requests WHERE principal_id = ? AND method = 'run.cancel'")
       .all<{ request_id: string; response_ref: string }>(principalId)) {
       const response = await readCanonicalArtifact<CancelResponse>(artifacts, row.response_ref);
@@ -185,6 +189,7 @@ export async function validateVerifierPolicyDenialHistory(driver: SqliteDriver, 
   for (const itemRow of closure.items) {
     const item = await readCanonicalArtifact<ContinuationItem>(artifacts, itemRow.payloadRef);
     if (item.kind !== 'policy_decision' || item.subjectKind !== 'verifier_launch' || item.decision !== 'deny') continue;
+    if (item.decisionSource !== 'direct_policy' || item.denialOutcome.kind !== 'stop_intent') continue;
     if (!run.stopIntentRef) throw new TypeError('verifier denial lost its Run stop fence');
     const stopRef = item.denialOutcome.stopIntentRef;
     const intent = decodeAgentStop(await readCanonicalArtifact(artifacts, stopRef), run);

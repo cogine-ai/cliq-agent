@@ -201,6 +201,12 @@ export function decodeVerificationClosure(value: unknown): VerificationClosureV1
       mismatch('verification closure entries are not one ordered frozen spec');
     verifierIds.add(id); specDigest = spec;
     const kind = (entry.disposition as { kind?: unknown } | null)?.kind;
+    if (kind === 'advisory_skipped') {
+      const skipped = closed(entry.disposition, ['kind', 'verifierSkipItemId', 'decisionRef']);
+      const id = text(skipped.verifierSkipItemId); ref(skipped.decisionRef);
+      if (entry.required || resultItems.has(id)) mismatch('required verification cannot be satisfied by a skip');
+      resultItems.add(id); continue;
+    }
     const disposition = closed(entry.disposition, ['kind', 'verifierResultItemId', 'opId', 'attempt', 'receiptRef',
       ...(kind === 'passed' ? ['completedJournalSeq'] : ['outcome', 'terminalJournalSeq'])]);
     if (kind !== 'passed' && (kind !== 'advisory_nonpassing' || entry.required ||

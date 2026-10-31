@@ -408,7 +408,7 @@ export async function replayInstalledRunAdmission(
   }
   noteStage('submit_replay_verifier');
   let verifierHistory: Awaited<ReturnType<typeof validateVerifierRunAdmission>> | undefined;
-  if (verifierSpec.verifiers.length) {
+  if (verifierSpec.verifiers.length || spec.dependencyPolicyRef) {
     if (!runtime) throw new TypeError('verifier replay has no trusted retained release keys');
     verifierHistory = await validateVerifierRunAdmission(driver, reads, owner, runtime, actual.id, signal);
   }
@@ -420,7 +420,9 @@ export async function replayInstalledRunAdmission(
     workspaceStateRef: checkpoint.workspaceStateRef, assemblyRef: spec.assemblyRef, policyRef: spec.policyRef,
     sandboxProfileRef: spec.sandboxProfileRef, verifierSpecRef: spec.verifierSpecRef, unverifiedConsentRef: spec.unverifiedConsentRef ?? null,
     credentialGrantRefs: spec.credentialGrantRefs,
-    ...(verifierHistory ? { authorizationReceiptRefs: verifierHistory.authorizationReceiptRefs } : {}) });
+    ...(spec.dependencyPolicyRef === undefined ? {} : { dependencyPolicyRef: spec.dependencyPolicyRef }),
+    ...(verifierHistory?.authorizationReceiptRefs.length ? { authorizationReceiptRefs: verifierHistory.authorizationReceiptRefs } : {}),
+    ...(verifierHistory?.verifierTemplates?.length ? { verifierTemplates: verifierHistory.verifierTemplates } : {}) });
   const frozen = driver.prepare('SELECT admitted_request_digest FROM runs WHERE id = ?').get<{ admitted_request_digest: string }>(actual.id);
   if (frozen?.admitted_request_digest !== admittedRequestDigest)
     throw new KernelStorageError('RECOVERY_REQUIRED', 'installed Run final admitted closure no longer rehashes');
@@ -623,7 +625,8 @@ async function admitRunInternal(
       sourceProjectionRef: input.sourceProjectionRef, sandboxProfileRef: input.sandboxProfileRef };
     if (installed && verifierRequests.length === 1) {
       const published = await prepareInstalledVerifierAdmission(driver, reads, owner, runtime, verifierInput,
-        { runId, admissionIntentDigest, admittedAt: installed.data.admittedAt }, input.verifierSpecRef, signal);
+        { runId, admissionIntentDigest, admittedAt: installed.data.admittedAt, deadlineAt: addCanonicalDuration(installed.data.admittedAt, budgets.wallTimeMs),
+          maxCandidateGenerations: budgets.repairAttempts + 1, sourceProjectionRef: input.sourceProjectionRef }, input.verifierSpecRef, signal);
       verifierPreparation = published.preparation; verifierConsumption = published.consumption;
     } else verifierPreparation = await prepareVerifierSpec(driver, reads, owner, runtime, verifierInput, undefined, signal);
     if (verifierPreparation.specRef !== input.verifierSpecRef) throw new KernelStorageError('ARTIFACT_MISMATCH', 'verifier spec differs from the authorized public command and environment');
@@ -656,7 +659,8 @@ async function admitRunInternal(
 
   const now = installed?.data.admittedAt ?? sampleCanonicalNow();
   if (!verifierConsumption && verifierPreparation) verifierConsumption = await prepareVerifierConsumption(artifacts, verifierPreparation,
-    { runId, admissionIntentDigest, admittedAt: now }, signal);
+    { runId, admissionIntentDigest, admittedAt: now, deadlineAt: addCanonicalDuration(now, budgets.wallTimeMs),
+      maxCandidateGenerations: budgets.repairAttempts + 1, sourceProjectionRef: input.sourceProjectionRef }, signal);
   // Revocation stops the next independent publication, never an already
   // started write/fsync/cleanup. A storage or retirement failure keeps priority.
   const publish = async (value: unknown, schemaKind: string): Promise<PublishedArtifact> => {
@@ -883,7 +887,8 @@ async function admitRunInternal(
     credentialGrantRefs: runSpec.credentialGrantRefs,
     ...(dependency ? { dependencyPolicyRef: dependency.policyRef } : {}),
     ...((verifierConsumption?.refs.length ?? 0) + (dependency?.receiptRefs.length ?? 0) ? {
-      authorizationReceiptRefs: [...(verifierConsumption?.refs ?? []), ...(dependency?.receiptRefs ?? [])] } : {})
+      authorizationReceiptRefs: [...(verifierConsumption?.refs ?? []), ...(dependency?.receiptRefs ?? [])] } : {}),
+    ...(verifierConsumption?.templates.length ? { verifierTemplates: verifierConsumption.templates } : {})
   });
 
   let committed = false;

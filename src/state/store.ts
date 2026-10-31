@@ -1731,7 +1731,9 @@ export class StateStore {
   }>();
   private readonly installedRunTasks = new Map<string, Promise<void>>();
   private readonly installedRunPhases = new Map<string, RunResultPhase | RunPublicationPhase | BuiltinExecutionPhase | 'scheduled' | 'drive_material' | 'drive_agent' |
-    'drive_retirement' | `drive_retirement_${RunRetirementPhase}` | 'drive_verify' | 'drive_finalize' | 'terminal_retirement'>();
+    'drive_retirement' | `drive_retirement_${RunRetirementPhase}` | 'drive_verify' | 'drive_finalize' | 'terminal_retirement' |
+    'drive_prior_read' | 'drive_worker_activate' | 'drive_model_prepare' | 'drive_broker_prepare' | 'drive_credential_prepare' |
+    'drive_model_claim' | 'drive_model_release'>();
   private readonly installedAgents = new Map<string, { agent: InstalledContinuation; readAbort: AbortController }>();
   private readonly installedAgentLoads = new Map<string, Promise<InstalledContinuation>>();
   private readonly installedRunFailures = new Map<string, unknown>();
@@ -1854,6 +1856,7 @@ export class StateStore {
       const prior = readControlRequest(this.driver, identity.principalId, 'run.approve', value.requestId);
       let mergeSubject = false;
       let dependencySubject = false;
+      let verifierSubject = false;
       if (prior) {
         if (prior.requestDigest !== value.requestDigest) throw new KernelStorageError('REQUEST_ID_CONFLICT', 'run.approve requestId was reused');
         const original = decodeInstalledControlResponse(await this.artifacts.readCanonical(prior.responseRef), value);
@@ -1861,10 +1864,12 @@ export class StateStore {
         const decision = await this.artifacts.readCanonical<{ subject?: { kind?: string } }>(original.result.decisionRef);
         mergeSubject = decision.subject?.kind === 'child_merge';
         dependencySubject = decision.subject?.kind === 'dependency_install_scripts';
+        verifierSubject = decision.subject?.kind === 'verifier_launch';
       } else if (selected.status === 'waiting' && selected.waitingReason === 'approval' && selected.waitingOnRef) {
         const original = await this.artifacts.readCanonical<{ subject?: { kind?: string } }>(selected.waitingOnRef);
         mergeSubject = original.subject?.kind === 'child_merge';
         dependencySubject = original.subject?.kind === 'dependency_install_scripts';
+        verifierSubject = original.subject?.kind === 'verifier_launch';
       }
       if (dependencySubject) {
         if (!this.runtimeAuthority) throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed script approval lacks its original signed runtime');
@@ -1883,7 +1888,8 @@ export class StateStore {
         waitingOnRef: value.waitingOnRef, decision: value.decision, ...(value.ttlMs === undefined ? {} : { ttlMs: value.ttlMs }) };
       // The owning typed reducer authenticates/replays the original subject;
       // public clients cannot select an executable or manufacture a grant.
-      const result = continuation.operation === 'delivery' ? await continuation.approveDelivery(input) : await continuation.approveTool(input);
+      const result = verifierSubject ? await continuation.approveVerifier(input, signal)
+        : continuation.operation === 'delivery' ? await continuation.approveDelivery(input) : await continuation.approveTool(input);
       if (result.run.stopIntentRef) this.requestInstalledRunStop(value.runId);
       this.scheduleInstalledRun(value.runId); return result;
     });
@@ -2617,6 +2623,11 @@ export class StateStore {
         const operation = cut.journal.filter(row => row.opId === opId), last = operation.at(-1);
         if (last && ['prepared', 'dispatch_claimed', 'unknown', 'abandoned'].includes(last.phase)) return;
         if (last?.phase === 'failed' && operation.some(row => row.attempt === last.attempt && row.phase === 'dispatch_claimed')) return;
+        const permission = await agent.prepareVerifierPermission({ expectedRunRevision: current.revision }, readSignal);
+        if (permission.disposition === 'policy_denied') {
+          await agent.stopForVerifierPolicyDenial({ expectedRunRevision: permission.run.revision }); this.requestInstalledRunStop(runId); continue;
+        }
+        if (permission.disposition === 'waiting' || permission.disposition === 'skipped') continue;
         if (current.status === 'queued' && !this.installedWorkerSlotAvailable(runId)) return;
         await (await nativeExecution()).executeCurrentVerifier({ expectedRunRevision: current.revision }); continue;
       }
@@ -2754,6 +2765,7 @@ export class StateStore {
       }
       if (current.status === 'queued' && !this.installedWorkerSlotAvailable(runId)) return;
       if (current.nextStep !== 'agent') return;
+      this.installedRunPhases.set(runId, 'drive_prior_read');
       const prior = await agent.readModelAttempt(readSignal);
       const progress = this.installedModelProgress(prior);
       if (progress === 'stop' && prior) {
@@ -2774,12 +2786,14 @@ export class StateStore {
       if (progress === 'retain') return;
       const native = await nativeExecution();
       if (current.status === 'queued') {
+        this.installedRunPhases.set(runId, 'drive_worker_activate');
         current = await native.activateCurrentWorker({ expectedRunRevision: current.revision });
       }
       if (progress === 'candidate') {
         await native.finishCurrentFinalTurn({ expectedRunRevision: current.revision }); continue;
       }
       let prepared: Awaited<ReturnType<AgentRunState['prepareModel']>>;
+      this.installedRunPhases.set(runId, 'drive_model_prepare');
       try { prepared = await agent.prepareModel({ expectedRunRevision: current.revision, leaseEpoch: current.leaseEpoch }, readSignal); }
       catch (error) {
         if (!(error instanceof AgentContextExhaustedError)) throw error;
@@ -2789,7 +2803,7 @@ export class StateStore {
         this.requestInstalledRunStop(runId);
         continue;
       }
-      try { await this.dispatchInstalledModel(native, agent, prepared); }
+      try { await this.dispatchInstalledModel(native, agent, prepared, readSignal); }
       catch (error) {
         if (error instanceof ResourceRetirementError) throw error;
         const stopped = readRun(this.driver, runId);
@@ -3256,10 +3270,10 @@ export class StateStore {
   /** Production broker only. The native image owns raw credential/header bytes
    * and transport resources; SQL owns every claim, budget and continuation. */
   private dispatchInstalledModel(execution: RunExecution, agent: AgentRunState,
-    attempt: Awaited<ReturnType<AgentRunState['prepareModel']>>) {
+    attempt: Awaited<ReturnType<AgentRunState['prepareModel']>>, preparationSignal: AbortSignal) {
     const runId = attempt.entry.runId;
     if (this.modelOperations.has(runId)) throw new KernelStorageError('REVISION_CONFLICT', 'Run already owns a native model operation');
-    const operation = this.dispatchInstalledModelOwned(execution, agent, attempt);
+    const operation = this.dispatchInstalledModelOwned(execution, agent, attempt, preparationSignal);
     this.modelOperations.set(runId, operation);
     const release = (error?: unknown) => { if (!(error instanceof ResourceRetirementError)) this.modelOperations.delete(runId); };
     void operation.then(() => release(), release); return operation;
@@ -3330,20 +3344,23 @@ export class StateStore {
   }
 
   private async dispatchInstalledModelOwned(execution: RunExecution, agent: AgentRunState,
-    attempt: Awaited<ReturnType<AgentRunState['prepareModel']>>) {
+    attempt: Awaited<ReturnType<AgentRunState['prepareModel']>>, preparationSignal: AbortSignal) {
     const selected = this.installedRuntime;
     if (!selected || !this.runtimeAuthority || !this.installedAnchor)
       throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed broker composition is unavailable');
-    const broker = await loadInstalledModelBroker(selected);
+    preparationSignal.throwIfAborted();
+    const reads = this.artifacts.withReadSignal(preparationSignal);
     const prepared = attempt.entry, runId = prepared.runId;
-    const initial = await readModelClaimCut(this.driver, this.artifacts, prepared);
+    this.installedRunPhases.set(runId, 'drive_broker_prepare');
+    const broker = await loadInstalledModelBroker(selected, preparationSignal);
+    const initial = await readModelClaimCut(this.driver, reads, prepared);
     if (initial.assembly.provider.name !== 'openai-compatible' || initial.authority.target.format !== 'cliq-endpoint-registration-v1' ||
         attempt.prepared.outbound.requestPath !== '/chat/completions')
       throw new KernelStorageError('ARTIFACT_MISMATCH', 'model request does not select the exact installed broker recipe');
     const target = initial.authority.target;
-    const frozen = await this.artifacts.mapReads(initial.assembly.provider.credentialGrantRefs, async ref =>
-      decodeEndpointCredentialGrantBinding(await this.artifacts.readCanonical(ref)));
-    const trustStoreBytes = await this.artifacts.readBytes(target.tls.trustStoreRef);
+    const frozen = await reads.mapReads(initial.assembly.provider.credentialGrantRefs, async ref =>
+      decodeEndpointCredentialGrantBinding(await reads.readCanonical(ref)));
+    const trustStoreBytes = await reads.readBytes(target.tls.trustStoreRef);
     const failPreparation = async (retryError?: KernelStorageError | CredentialScopeBusyError, retainedErrorRef?: string) => {
       const input = { runId, opId: prepared.opId, attempt: prepared.attempt, expectedRunRevision: readRun(this.driver, runId).revision };
       const evidence = { schemaVersion: 1, format: 'cliq-invocation-error-v1', runId, opId: prepared.opId, attempt: prepared.attempt,
@@ -3367,6 +3384,9 @@ export class StateStore {
     const dispatch = async (token: HeldCredentialAuthorityLock) => {
       callbackEntered = true;
       const held = checkedCredentialToken(token);
+      // No transport, claim or response exists yet. After this synchronous
+      // boundary, the native owner's existing revocation/join takes over.
+      preparationSignal.throwIfAborted();
       let transport: NativeModelTransport | undefined;
       let fenceRetained = false;
       let claimed: import('../kernel/types.js').InvocationJournalEntry | undefined;
@@ -3377,6 +3397,7 @@ export class StateStore {
           frozen.map(binding => binding.credentialGrantId), sampleCanonicalNow(), { endpoint: target, bindings: frozen });
         try {
           if (this.closeRequested || this.closed || this.released) throw new KernelStorageError('LEASE_FENCED', 'model broker is closing');
+          this.installedRunPhases.set(runId, 'drive_broker_prepare');
           transport = broker.prepareModelTransport({ provider: 'openai-compatible', selector: authority.selector,
             expectedObservation: authority.observation, target: { hostAscii: target.target.hostAscii, port: target.target.port,
               basePath: target.target.basePath, serverNameAscii: target.tls.serverNameAscii, spkiSha256Pins: target.tls.spkiSha256Pins },
@@ -3399,6 +3420,7 @@ export class StateStore {
         // Transport close still joins I/O immediately, but cannot destroy the
         // sole live no-release proof owner before its settlement transaction.
         transport.retainDispatchFence(); fenceRetained = true;
+        this.installedRunPhases.set(runId, 'drive_model_claim');
         claimed = await claimInvocationDispatch(this.driver, this.artifacts, this.owner, {
           runId, opId: prepared.opId, attempt: prepared.attempt, expectedRunRevision: readRun(this.driver, runId).revision,
           leaseEpoch: prepared.leaseEpoch, dispatchId: identityHash('cliq-installed-model-dispatch-v1', randomBytes(32).toString('hex')),
@@ -3442,6 +3464,7 @@ export class StateStore {
         // Only local credential redemption happened before the permanent claim.
         // Each async revalidation ends in a fresh synchronous cut; native queue
         // entry follows immediately with no await/callback/SQL transaction I/O.
+        this.installedRunPhases.set(runId, 'drive_model_release');
         await gate(() => transport!.connect(binding));
         const response = await gate(() => transport!.releaseBody(binding));
         receivedResponse = true;
@@ -3507,7 +3530,9 @@ export class StateStore {
     try {
       if (sha256Bytes(bodyBytes) !== initial.request.bodyBytesRef || bodyBytes.length !== initial.request.bodyByteCount)
         throw new KernelStorageError('ARTIFACT_MISMATCH', 'model compiled body differs from the permanent prepared request');
-      return await withCredentialAuthorityLock(selected, dispatch);
+      reads.assertReadActive();
+      this.installedRunPhases.set(runId, 'drive_credential_prepare');
+      return await withCredentialAuthorityLock(selected, dispatch, preparationSignal);
     } catch (error) {
       // Only the real non-reentrant guard can refuse before this callback
       // enters. No native owner or permanent claim was created by this call.

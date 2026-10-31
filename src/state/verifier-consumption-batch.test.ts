@@ -22,6 +22,7 @@ import { consumeOrRevokeAuthorization, readAuthorizationGrant } from './reposito
 import { openSqliteDriver } from './sqlite-driver.js';
 import { signedVerifierAuthority } from './testing/verifier-authority.js';
 import * as admission from './verifier-admission.js';
+import { verifierTemplateRoots } from './verifier-template.js';
 
 async function fixture(t: TestContext) {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'cliq-verifier-consumption-'));
@@ -86,7 +87,7 @@ async function publisher() {
     return {preparation,consumption};
   }`;
   const context = { canonicalJsonBytes, canonicalSha256, sha256Bytes, digestOmitting, readCanonicalArtifact,
-    KernelStorageError, VerifierAuthorizationError, authorizationGrantCore, decodeAuthorizationGrant,
+    KernelStorageError, VerifierAuthorizationError, authorizationGrantCore, decodeAuthorizationGrant, verifierTemplateRoots,
     decodeAuthorizationConsumptionReceipt, readAuthorizationGrant, consumeOrRevokeAuthorization,
     same: (a: unknown, b: unknown) => canonicalJsonBytes(a).equals(canonicalJsonBytes(b)),
     prepareVerifierConsumption: admission.prepareVerifierConsumption,

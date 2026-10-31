@@ -97,6 +97,39 @@ function readWorkerDiagnostic<T>(stateRoot: string, uid: number,
   }
 }
 
+/** Fixed single-row permission audit over the same held, no-follow readonly
+ * diagnostic. Selectors come from the fixture's own accepted public requests;
+ * this returns data and cannot authenticate, consume or create authority. */
+export function inspectInstalledPermissionRecord(stateRoot: string, uid: number, selector:
+  | { kind: 'control'; principalId: string; method: 'run.approve' | 'authorization.create' | 'run.submit' | 'run.apply'; requestId: string }
+  | { kind: 'grant'; grantId: string }
+  | { kind: 'admission'; runId: string }) {
+  return readWorkerDiagnostic(stateRoot, uid, database => {
+    database.exec('BEGIN');
+    try {
+      let row;
+      if (selector.kind === 'control') {
+        requireValue(boundedString(selector.principalId) && boundedString(selector.requestId) &&
+          ['run.approve', 'authorization.create', 'run.submit', 'run.apply'].includes(selector.method));
+        row = database.prepare('SELECT * FROM control_requests WHERE principal_id=? AND method=? AND request_id=?')
+          .get(selector.principalId, selector.method, selector.requestId);
+      } else if (selector.kind === 'grant') {
+        requireValue(boundedString(selector.grantId));
+        const retained = database.prepare('SELECT grant_id,owner_principal_id,state,row_json FROM authorization_grants WHERE grant_id=?').get(selector.grantId);
+        requireValue(retained && typeof retained.row_json === 'string' && Buffer.byteLength(retained.row_json) <= 65536);
+        const grant = parseJsonStrict(retained.row_json) as Record<string, unknown>;
+        requireValue(canonicalJsonBytes(grant).toString('utf8') === retained.row_json && grant.grantId === retained.grant_id &&
+          grant.ownerPrincipalId === retained.owner_principal_id && grant.state === retained.state);
+        row = grant;
+      } else {
+        requireValue(selector.kind === 'admission' && boundedString(selector.runId));
+        row = database.prepare('SELECT id,principal_id,admission_method,admission_request_id,admission_intent_digest,admitted_request_digest FROM runs WHERE id=?').get(selector.runId);
+      }
+      requireValue(row); database.exec('COMMIT'); return row;
+    } catch (failure) { database.exec('ROLLBACK'); throw failure; }
+  });
+}
+
 /** One actual readonly SQL cut, used only to arm the external crash actor or
  * record the first post-kill cut. A missing claim is not a missing resource. */
 export function inspectInstalledPublicationClaim(stateRoot: string, uid: number, runId: string) {

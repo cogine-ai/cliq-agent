@@ -330,3 +330,23 @@ test('malformed pre-close snapshots cannot invoke accessors or fabricate a phase
     assert.equal(accesses, 0); assert.deepEqual(records, []);
   } finally { diagnostic.unsubscribe(receive); }
 });
+
+
+test('model preparation detail appends fixed scheduler data without becoming publication evidence', async () => {
+  const module = await import('./installed-run-diagnostics.js');
+  const phases = ['drive_prior_read', 'drive_worker_activate', 'drive_model_prepare', 'drive_broker_prepare',
+    'drive_credential_prepare', 'drive_model_claim', 'drive_model_release'];
+  assert.deepEqual(module.INSTALLED_SCHEDULER_DIAGNOSTIC_PHASES.slice(-phases.length), phases);
+  assert.equal(module.INSTALLED_SCHEDULER_DIAGNOSTIC_PHASES.at(-phases.length - 1), 'result_recovery_terminal');
+  const records: unknown[] = [], diagnostic = channel(module.INSTALLED_RUN_FAILURE_CHANNEL);
+  const receive = (record: unknown) => { records.push(record); }; diagnostic.subscribe(receive);
+  try {
+    for (const phase of phases) {
+      const observer = module.beginInstalledSchedulerDiagnostic('drive')!; observer.phase(phase); observer.failure(Error(), true);
+      module.noteInstalledPublicationPhase(phase);
+    }
+    assert.deepEqual(records, phases.map(phase => ({ kind: 'scheduler_failure', origin: 'drive', phase,
+      closing: true, errorClass: 'other', code: 'none', sqliteCode: null })));
+    assert.equal(module.INSTALLED_PUBLICATION_DIAGNOSTIC_PHASES.length, 6);
+  } finally { diagnostic.unsubscribe(receive); }
+});

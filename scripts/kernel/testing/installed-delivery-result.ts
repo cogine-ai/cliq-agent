@@ -24,6 +24,7 @@ import { assertInstalledVerifierRetirement, readInstalledVerifierInputs, type In
 import { assertInstalledDeliveryPublication } from './installed-delivery-publication-result.js';
 import { assertInstalledVerifierParentRetirement, type InstalledVerifierParentRetirementIdentity } from './installed-verifier-parent-evidence.js';
 import type { InstalledVerifierParentRetirementBinding, inspectInstalledVerifierParentRetirement } from './installed-worker-lease.js';
+import { assertInstalledInteractivePermission, type InstalledPermissionEvidence } from './installed-permission-evidence.js';
 
 const ZERO = { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 };
 const ONE_TOOL = { ...ZERO, toolCalls: 1 };
@@ -123,6 +124,7 @@ type InstalledDeliveryVerifierInput = {
   readRetainedArtifact: (ref: string) => Promise<Buffer>;
   readOwnerHistory: InstalledVerifierOwnerHistoryReader;
   expectedGit?: true;
+  permission?: InstalledPermissionEvidence;
   cancellation?: { request: Record<string, any>; response: Record<string, any> };
   readParentRetirement?: (binding: InstalledVerifierParentRetirementBinding) => ReturnType<typeof inspectInstalledVerifierParentRetirement>;
 };
@@ -195,19 +197,29 @@ export async function assertInstalledDeliveryVerifier(input: InstalledDeliveryVe
       row.requestRef === canonicalSha256(planned.request) && row.target === planned.request.targetRef && row.grantRef === prepared.grantRef));
     same(await object(prepared.requestRef), planned.request); same(await object(prepared.target), planned.target);
     stage = 'verification_grant';
-    const grant = await object(prepared.grantRef); check(grant.provenance.kind === 'policy_snapshot');
-    const channel = await object(grant.provenance.channelEvidenceRef);
+    const grant = await object(prepared.grantRef);
+    const policyRows = items.filter(value => value.item.kind === 'policy_decision' && value.item.subjectKind === 'verifier_launch');
+    check(policyRows.length === 1);
     const evaluator = loadVerifierPolicy({ policy, policyRef: spec.policyRef, assembly, assemblyRef: spec.assemblyRef,
       principalId: policy.principalId, workspaceIdentityDigest: source.workspaceIdentityDigest, context: requestContext });
+    if (grant.provenance.kind === 'user_approval') {
+      check(input.permission);
+      if (!input.permission) throw new Error('missing installed Delivery permission audit');
+      await assertInstalledInteractivePermission({ evidence: input.permission, object, cut, principalId: policy.principalId,
+        grant, policyItem: policyRows[0]!.item, evaluator, request: planned.request, target: planned.target });
+    } else {
+    check(grant.provenance.kind === 'policy_snapshot');
+    const channel = await object(grant.provenance.channelEvidenceRef);
     same(grant, evaluator.grant(planned.request, planned.target, channel, grant.issuedAt, grant.expiresAt));
     check(grant.issuedAt >= candidate.createdAt && grant.expiresAt <= run.deadlineAt && prepared.timestamp >= grant.issuedAt &&
       prepared.timestamp < grant.expiresAt && claim.timestamp >= prepared.timestamp && claim.timestamp < grant.expiresAt);
-    const policyRows = items.filter(value => value.item.kind === 'policy_decision' && value.item.subjectKind === 'verifier_launch');
-    check(policyRows.length === 1);
     const decisionId = identityHash('cliq-verifier-policy-item-v1', run.id, opId, grant.provenance.channelEvidenceRef);
     same(policyRows[0]!.item, { schemaVersion: 1, kind: 'policy_decision', subjectKind: 'verifier_launch', itemId: decisionId, runId: run.id, opId,
       principalId: policy.principalId, decisionRef: grant.provenance.channelEvidenceRef, policyChannelEvidenceRef: grant.provenance.channelEvidenceRef,
       policyChannelEvidenceDigest: channel.evidenceDigest, createdAt: channel.evaluatedAt, decisionSource: 'direct_policy', decision: 'allow', grantRef: prepared.grantRef });
+    }
+    check(grant.issuedAt >= candidate.createdAt && grant.expiresAt <= run.deadlineAt && prepared.timestamp >= grant.issuedAt &&
+      prepared.timestamp < grant.expiresAt && claim.timestamp >= prepared.timestamp && claim.timestamp < grant.expiresAt);
     check(policyRows[0]!.row.itemSeq > candidateRow.itemSeq && policyRows[0]!.row.createdAt <= prepared.timestamp);
     stage = 'verification_settlement';
     if (unknownParent) assertInstalledDeliveryUnknownSettlement(prepared, claim, terminal, await object(terminal.budgetSettlementRef));
@@ -312,6 +324,7 @@ export async function assertInstalledDeliveryOutcome(input: {
   cut: Record<string, any>; sessionCut: Record<string, any>; sourceCut: Record<string, any>; sourceResultRef: string;
   expectedFiles: readonly { path: string; text: string }[]; kind: 'publish' | 'no_op' | 'merge';
   expectedGit?: true;
+  permission?: InstalledPermissionEvidence;
   readRetainedArtifact: (ref: string) => Promise<Buffer>;
   readOwnerHistory: InstalledVerifierOwnerHistoryReader;
 }) {
@@ -390,7 +403,7 @@ export async function assertInstalledDeliveryOutcome(input: {
     check(policies.length === (kind === 'no_op' ? 0 : 1) && decisions.length === policies.length);
     if (kind !== 'no_op') {
       const policyItem = policies[0]!.item, decision = decisions[0]!.item;
-      check(policyItem.decisionSource === 'direct_policy' && policyItem.decision === 'allow' && decision.decision === 'allow' &&
+      check((policyItem.decisionSource === 'direct_policy' || input.permission && policyItem.decisionSource === 'interactive_approval') && policyItem.decision === 'allow' && decision.decision === 'allow' &&
         decision.grantRef === policyItem.grantRef && decision.decisionRef === policyItem.decisionRef && decision.deliveryPlanRef === merged.deliveryPlanRef);
       const grant = await object(policyItem.grantRef), evidence = await object(policyItem.policyChannelEvidenceRef);
       const topology = decodeDeliveryCaptureTopology(await object(plan.captureTopologyRef));
@@ -402,8 +415,15 @@ export async function assertInstalledDeliveryOutcome(input: {
       const planned = planDeliveryRequest(context);
       same(await object(grant.requestRef), planned.request); same(await object(grant.targetRef), planned.target);
       same(evidence, evaluator.evaluate(planned.request, planned.target, evidence.evaluatedAt));
+      if (policyItem.decisionSource === 'interactive_approval') {
+        check(input.permission); if (!input.permission) throw new Error('missing installed Delivery publication permission audit');
+        await assertInstalledInteractivePermission({ evidence: input.permission, object, cut, principalId: policyItem.principalId,
+          grant, policyItem, evaluator, request: planned.request, target: planned.target });
+      } else {
       same(grant, evaluator.grant(planned.request, planned.target, evidence, grant.issuedAt, run.deadlineAt));
-      check(grant.maxDispatchedAttempts === 0 && policyItem.decisionRef === canonicalSha256(evidence) &&
+      check(policyItem.decisionRef === canonicalSha256(evidence));
+      }
+      check(grant.maxDispatchedAttempts === 0 &&
         policyItem.policyChannelEvidenceDigest === evidence.evidenceDigest && grant.issuedAt === policyItem.createdAt &&
         decision.createdAt === policyItem.createdAt && decision.approvalOpId === grant.opId &&
         policies[0]!.row.itemSeq < decisions[0]!.row.itemSeq);
@@ -422,9 +442,12 @@ export async function assertInstalledDeliveryOutcome(input: {
     const verifierRetirementIdentities: InstalledVerifierRetirementIdentity[] = [];
     if (kind === 'merge') {
       verifierRetirementIdentities.push(await assertInstalledDeliveryVerifier({ cut, sourceCut, outcome: 'passed', readRetainedArtifact: bytes,
+        ...(input.permission ? { permission: input.permission } : {}),
         readOwnerHistory: input.readOwnerHistory, ...(input.expectedGit ? { expectedGit: true as const } : {}) }));
     } else {
       check(closure.verification.kind === 'inherited_verified');
+      if (input.permission) check(!items.some(value => ['verifier_result', 'verifier_stop', 'verifier_skip'].includes(value.item.kind) ||
+        value.item.kind === 'policy_decision' && value.item.subjectKind === 'verifier_launch'));
       const inherited = closure.verification; if (inherited.kind !== 'inherited_verified') throw new Error('wrong inherited verification');
       const provenance = decodeInheritedVerificationProvenance(await object(inherited.inheritedProvenanceRef));
       check(inherited.sourceRunId === sourceRun.id && inherited.sourceRunResultRef === input.sourceResultRef &&
@@ -436,6 +459,7 @@ export async function assertInstalledDeliveryOutcome(input: {
     stage = 'publication_receipts';
     const results = items.filter(value => value.item.kind === 'publication_path_result');
     const publication = await assertInstalledDeliveryPublication({ cut, readRetainedArtifact: bytes, readOwnerHistory: input.readOwnerHistory,
+      ...(input.permission ? { permission: input.permission } : {}),
       ...(input.expectedGit ? { expectedGit: true as const } : {}) });
     check(results.length === plan.forwardOperations.length && publication.planRef === merged.deliveryPlanRef &&
       publication.projectionRef === result.deliveryTerminalProjectionEvidenceRef && publication.publishClaims === counts.publishClaims &&
@@ -498,7 +522,7 @@ export async function assertInstalledDeliveryOutcome(input: {
     return { qualified: true as const, kind, runId: run.id, resultRef: run.resultRef as string,
       verification: kind === 'merge' ? 'local' as const : 'inherited_verified' as const, ...counts,
       verifierRetirementIdentities, publicationWorkerRetirement: publication.publicationWorkerRetirement,
-      completeRetainedArtifactWalk: true as const, directPolicyOnly: true as const, publicationProjectionMatched: true as const };
+      completeRetainedArtifactWalk: true as const, directPolicyOnly: input.permission === undefined, publicationProjectionMatched: true as const };
   } catch (error) {
     if (typeof error === 'object' && error !== null && deliveryOutcomeErrors.has(error)) throw error;
     throw new InstalledDeliveryOutcomeError(stage);

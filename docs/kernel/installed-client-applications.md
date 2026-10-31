@@ -107,8 +107,15 @@ grant neither Workspace Trust nor a tool permission. A new workspace requires
 its retained Trust decision, an interactive decision or an explicit
 `--trust-workspace`; a retained denial is not overridden. The canonical trusted
 workspace is passed to Session capture. The fixed `--check-node <relative.mjs>`
-preset requires explicit `--policy yolo`, obtains a real verifier identity-read
-grant, and uses the original read-only guest Node recipe. It does not run npm,
+preset obtains only a real verifier identity-read grant and uses the original
+read-only guest Node recipe. In `default` and `accept-edits`, each exact
+candidate waits for its independent execution approval unless its admission
+explicitly consumed a matching bounded execution grant. The shared waiting
+view shows the original candidate, fixed command, resources, policy evidence
+and required/advisory consequence; the existing `approve --revision … --wait …`
+or TUI `y`/`n` acts only on that captured wait. Required denial cancels the Run;
+advisory denial records a skip without a verification receipt. Applying the
+complete Delivery plan still requires its separate original approval. It does not run npm,
 arbitrary shell code or a check discovered in repository configuration.
 
 `--budget-usd` converts exact decimal USD to integer micros; `--budget-tokens`

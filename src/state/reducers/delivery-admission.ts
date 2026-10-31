@@ -30,6 +30,10 @@ import { readRetainedSourceInspectionTarget } from '../source-target.js';
 import { decodeRepositoryIdentity } from '../repository-identity.js';
 import type { SqliteConnection, SqliteDriver } from '../sqlite-driver.js';
 import { assertActiveStateOwner, type StateOwnerContext } from '../state-owner.js';
+import { prepareDeliveryVerifierConsumption } from '../verifier-admission.js';
+import { mapDeliveryVerifierRequests, readAdmittedVerifierTemplates } from '../verifier-template.js';
+import type { VerifierTemplateRootV1 } from '../../kernel/verifier-invocation.js';
+import { readAuthorizationGrant } from '../repositories/authorization-grants.js';
 
 type Normalized = ReturnType<typeof normalizeRunApplyRequest>;
 type Capture = Extract<SourceInspectionAttemptV1, { phase: 'retired'; method: 'run.apply' }>;
@@ -44,6 +48,7 @@ type Binding = {
   target: SourceInspectionTarget; session: Session; run: Run; spec: RunSpec; workspaceState: WorkspaceStateManifest;
   contextManifest: ContextManifest; response: ApplyResponse; responseRef: string; admittedRequestDigest: string;
   metadata: PublishedArtifact[]; signal?: AbortSignal;
+  verifierConsumption?: Awaited<ReturnType<typeof prepareDeliveryVerifierConsumption>>;
 };
 const preparedDeliveries = new WeakMap<PreparedInstalledDelivery, Binding>();
 const same = (left: unknown, right: unknown) => canonicalSha256(left) === canonicalSha256(right);
@@ -65,7 +70,8 @@ function inherited(spec: RunSpec, source: VerifiedDeliverySource['spec']): void 
     invalid('delivery acquired agentic or credential authority');
 }
 function admittedDigest(input: { intent: string; sourceRunId: string; sourceRunResultRef: string; spec: RunSpec; specRef: string;
-  workspaceIdentityRef: string; workspaceIdentityDigest: string; workspaceStateRef: string; capture: Capture }) {
+  workspaceIdentityRef: string; workspaceIdentityDigest: string; workspaceStateRef: string; capture: Capture;
+  verifierTemplates?: VerifierTemplateRootV1[]; authorizationReceiptRefs?: string[] }) {
   const { spec, capture } = input;
   if (capture.outcome.kind !== 'captured') invalid('delivery has no successful original capture');
   return canonicalSha256({ admissionIntentDigest: input.intent, sourceRunId: input.sourceRunId, sourceRunResultRef: input.sourceRunResultRef,
@@ -76,7 +82,9 @@ function admittedDigest(input: { intent: string; sourceRunId: string; sourceRunR
     sandboxProfileRef: spec.sandboxProfileRef, verifierSpecRef: spec.verifierSpecRef, dependencyPolicyRef: spec.dependencyPolicyRef ?? null,
     credentialGrantRefs: spec.credentialGrantRefs, sourceInspectionId: capture.inspectionId, sourceInspectionTargetRef: capture.targetRef,
     sourceInspectionRetirementRef: capture.retirementEvidenceRef, captureTopologyRef: capture.outcome.captureTopologyRef,
-    captureTopologyDigest: capture.outcome.captureTopologyDigest });
+    captureTopologyDigest: capture.outcome.captureTopologyDigest,
+    ...(input.authorizationReceiptRefs?.length ? { authorizationReceiptRefs: input.authorizationReceiptRefs } : {}),
+    ...(input.verifierTemplates?.length ? { verifierTemplates: input.verifierTemplates } : {}) });
 }
 function initialRun(run: Pick<Run, 'id' | 'sessionId' | 'createdAt' | 'deadlineAt'>, specRef: string, frontierRef: string, checkpointId: string): Run {
   return { id: run.id, sessionId: run.sessionId, specRef, status: 'queued', nextStep: 'delivery', frontierRef, revision: 1, leaseEpoch: 0,
@@ -122,14 +130,15 @@ export async function prepareInstalledDelivery(input: {
       key(identity.principalId, normalized.request).admissionIntentDigest || target.sandboxProfileRef !== source.spec.sandboxProfileRef ||
       target.sandboxProfileDigest !== profile.profileDigest || !profile.allowedOwners.includes('source_inspection'))
     invalid('delivery target changed its original request or inherited sandbox profile');
-  const stateOwnerNative = await withHeldInstalledRuntime(selected, async installed => {
+  const installedAuthority = await withHeldInstalledRuntime(selected, async installed => {
     await installed.revalidate(signal);
     if (installed.bundleDigest !== source.assembly.runtime.runtimeBundleRef || installed.bundleDigest !== target.runtimeBundleRef ||
         installed.bundle.manifestDigest !== source.assembly.runtime.runtimeBundleManifestDigest)
       invalid('delivery requires its unchanged signed installed source runtime');
     await readRetainedSourceInspectionTarget(artifacts, capture, readSourceInspectionOriginalRequest(driver, capture.inspectionId),
       { bundle: installed.bundle, releaseKeys: installed.releaseKeys, sandboxProfile: profile }, { driver, owner, signal });
-    const native = await installed.loadStateOwner(signal); await installed.revalidate(signal); return native;
+    const native = await installed.loadStateOwner(signal); await installed.revalidate(signal);
+    return { native, runtime: { bundle: installed.bundle, releaseKeys: installed.releaseKeys } };
   }, signal);
   await readSourceInspectionRetirement(driver, artifacts, capture, target);
   await readDeliveryCaptureTopology(artifacts, capture, target);
@@ -184,6 +193,10 @@ export async function prepareInstalledDelivery(input: {
   const now = sampleCanonicalNow(), checkpointId = identityHash('cliq-checkpoint-id-v1', runId, 'initial', 0);
   const run = initialRun({ id: runId, sessionId: session.id, createdAt: now,
     deadlineAt: addCanonicalDuration(now, normalized.request.budgets.wallTimeMs) }, specArtifact.ref, frontierArtifact.ref, checkpointId);
+  const verifierConsumption = await prepareDeliveryVerifierConsumption(driver, artifacts, owner, installedAuthority.runtime, {
+    sourceRunId: source.run.id, sourceAssembly: source.assembly, spec, principalId: identity.principalId,
+    grantIds: normalized.request.verifierExecutionGrantIds, consumer: { runId, admittedAt: run.createdAt, deadlineAt: run.deadlineAt,
+      admissionIntentDigest: key(identity.principalId, normalized.request).admissionIntentDigest } }, signal);
   const response: ApplyResponse = { protocolVersion: 1, ok: true, result: { method: 'run.apply',
     snapshot: { schemaVersion: 1, operation: 'delivery', run, latestRunItemSeq: 0 } } };
   const responseArtifact = await artifacts.publishCanonical(response, 'cliq-control-response-v1');
@@ -193,16 +206,18 @@ export async function prepareInstalledDelivery(input: {
   const admittedRequestDigest = admittedDigest({ intent: key(identity.principalId, normalized.request).admissionIntentDigest,
     sourceRunId: source.run.id, sourceRunResultRef: normalized.request.expectedRunResultRef, spec, specRef: specArtifact.ref,
     workspaceIdentityRef: target.workspaceIdentityRef, workspaceIdentityDigest: target.workspaceIdentityDigest,
-    workspaceStateRef: stateArtifact.ref, capture });
+    workspaceStateRef: stateArtifact.ref, capture, verifierTemplates: verifierConsumption?.templates,
+    authorizationReceiptRefs: verifierConsumption?.refs });
   // Revalidate the complete source after the potentially long new capture and
   // data publication, never only its transient selection brand.
   const currentSource = await readVerifiedDeliverySource(driver, artifacts, owner, { principalId: identity.principalId,
     sourceRunId: source.run.id, expectedRunResultRef: normalized.request.expectedRunResultRef, signal });
   if (!same(currentSource.run, source.run) || !same(currentSource.spec, source.spec)) invalid('delivery original source closure changed');
   const metadata = [...channel.metadata, stateArtifact, context, specArtifact, manifest, frontierArtifact, responseArtifact, requestCore,
+    ...(verifierConsumption?.metadata ?? []),
     ...recoveryImage.metadata.filter(entry => entry.ref !== recoveryImage.sourceRef && entry.ref !== recoveryImage.diffRef)];
   const prepared: PreparedInstalledDelivery = Object.freeze({ kind: 'prepared_installed_delivery' });
-  preparedDeliveries.set(prepared, { driver, artifacts, owner, identity, native: stateOwnerNative, normalized, source,
+  preparedDeliveries.set(prepared, { driver, artifacts, owner, identity, native: installedAuthority.native, normalized, source, verifierConsumption,
     capture, target, workspace: immutableSnapshot(workspace), ...(repository ? { repository } : {}),
     session: immutableSnapshot(session), run: immutableSnapshot(run), spec: immutableSnapshot(spec),
     workspaceState: immutableSnapshot(workspaceState), contextManifest: immutableSnapshot(contextManifest), response: immutableSnapshot(response),
@@ -246,6 +261,7 @@ export async function admitInstalledDelivery(driver: SqliteDriver, artifacts: Ar
     if (advanceTimeFence(connection, owner.ownerEpoch, now) !== 'healthy') { regressed = true; return; }
     if (now < run.createdAt || now >= run.deadlineAt) invalid('delivery admission interval is no longer current');
     assertInstalledRunAdmissionCapacity(connection);
+    value.verifierConsumption?.commit(connection, now);
     for (const entry of value.metadata) insertArtifactMetadata(connection, entry, run.createdAt);
     connection.prepare(`INSERT INTO checkpoints (id,schema_version,run_id,based_on_run_revision,run_item_seq,context_manifest_ref,
       journal_seq,workspace_state_ref,created_at,reason) VALUES (?,1,?,0,0,?,0,?,?,'initial')`).run(run.latestCheckpointId, run.id,
@@ -293,8 +309,6 @@ export const readDeliveryRunAdmission = stateOperation('RECOVERY_REQUIRED', asyn
       intent !== admission.admission_intent_digest || run.id !== identityHash('cliq-run-id-v1', admission.principal_id, 'run.apply', request.admissionKey))
     invalid('delivery original request no longer reproduces its Run identity');
   if (request.sourceRunId === run.id) invalid('delivery cannot select its own result as an original source');
-  if (request.verifierExecutionGrantIds.length)
-    throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'retained delivery verifier template admission is not implemented');
   const channel = await readHistoricalControlChannel(driver, artifacts, { principalId: admission.principal_id,
     channelIdentityRef: original.channelIdentityRef, channelIdentityDigest: original.channelIdentityDigest });
   if (channel.channel.openedAt > run.createdAt) invalid('delivery admission precedes its original channel');
@@ -344,9 +358,18 @@ export const readDeliveryRunAdmission = stateOperation('RECOVERY_REQUIRED', asyn
   if (inspection.outcome.kind !== 'captured' || recovered.diff.operations.length || workspaceState.invalidatedEphemeralPaths.length ||
       workspaceState.privateGitStateRef !== inspection.outcome.privateGitStateRef)
     invalid('delivery W_A is not its exact complete captured source');
+  const verifierRequests = request.verifierExecutionGrantIds.length ? await mapDeliveryVerifierRequests(driver, artifacts, {
+    sourceRunId: source.run.id, spec, grantIds: request.verifierExecutionGrantIds, principalId: admission.principal_id }, signal) : [];
+  const verifierTemplates = await readAdmittedVerifierTemplates(driver, artifacts, { run, spec, requests: verifierRequests,
+    admissionIntentDigest: intent, principalId: admission.principal_id });
+  const authorizationReceiptRefs = verifierRequests.map(({ request }) => {
+    const grant = readAuthorizationGrant(driver, request.executionGrantId!);
+    if (grant?.state !== 'consumed') invalid('delivery lost its original consumed verifier grant');
+    return grant.consumptionReceiptRef;
+  });
   const digest = admittedDigest({ intent, sourceRunId: source.run.id, sourceRunResultRef: request.expectedRunResultRef, spec, specRef: run.specRef,
     workspaceIdentityRef: target.workspaceIdentityRef, workspaceIdentityDigest: target.workspaceIdentityDigest,
-    workspaceStateRef: checkpoint.workspaceStateRef, capture: inspection });
+    workspaceStateRef: checkpoint.workspaceStateRef, capture: inspection, verifierTemplates: verifierTemplates.roots, authorizationReceiptRefs });
   if (digest !== admission.admitted_request_digest) invalid('delivery resolved admission digest changed');
   const frontier: Extract<RunFrontier, { kind: 'delivery'; phase: 'merge' }> = { schemaVersion: 1, kind: 'delivery', phase: 'merge',
     sourceRunResultRef: request.expectedRunResultRef, capturedWorkspaceRef: spec.baseWorkspaceManifestRef };
@@ -357,7 +380,8 @@ export const readDeliveryRunAdmission = stateOperation('RECOVERY_REQUIRED', asyn
   if (!same(readRun(driver, runId), run) || !same(readRun(driver, source.run.id), source.run) ||
       readSessionPrincipalId(driver, run.sessionId) !== admission.principal_id || readSession(driver, run.sessionId).workspaceIdentityRef !== target.workspaceIdentityRef)
     invalid('delivery Run or original source/Session changed during retained admission validation');
-  return immutableSnapshot({ run, spec, source, request, original, inspection, target, initialCheckpoint: checkpoint, workspaceState, admittedRequestDigest: digest });
+  return immutableSnapshot({ run, spec, source, request, original, inspection, target, initialCheckpoint: checkpoint, workspaceState,
+    admittedRequestDigest: digest, verifierTemplates: verifierTemplates.roots });
 });
 
 /** Lookup precedes any Session/source/capture read. A fresh request may bind

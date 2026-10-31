@@ -1,6 +1,7 @@
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { assertArtifactRef, assertRequestId, identityHash, parseCanonicalTime } from '../kernel/identity.js';
 import type { ToolApprovalDecisionV1, ToolApprovalWait } from '../kernel/tool-authorization.js';
+import type { VerifierApprovalWait } from '../kernel/verifier-invocation.js';
 import { immutableSnapshot } from '../model/immutable.js';
 
 /** Wire intent excludes the authenticated channel, so a fresh connection can replay the same request. */
@@ -25,7 +26,9 @@ export function toolApprovalRequestDigest(runId: string, input: ToolApprovalInpu
 export const toolApprovalCheckpointId = (waitingOnRef: string) => identityHash('cliq-tool-approval-checkpoint-v1', waitingOnRef);
 
 /** Deterministic retained decision; authenticating its channel and committing its control row are State's job. */
-export function toolApprovalDecision(wait: ToolApprovalWait, input: ToolApprovalInput, createdAt: string, deadlineAt: string): ToolApprovalDecisionV1 {
+export function toolApprovalDecision<Subject extends ToolApprovalWait['subject'] | VerifierApprovalWait['subject']>(
+  wait: Omit<ToolApprovalWait, 'subject'> & { subject: Subject }, input: ToolApprovalInput, createdAt: string, deadlineAt: string
+): Omit<ToolApprovalDecisionV1, 'subject'> & { subject: Subject } {
   const requestDigest = toolApprovalRequestDigest(wait.runId, input);
   assertArtifactRef(input.channelIdentityRef);
   assertArtifactRef(input.channelIdentityDigest);

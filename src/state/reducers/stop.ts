@@ -78,6 +78,11 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
         requireEqual(frontier, original.frontier, 'Stop retains its original dependency consent frontier');
         return selected;
       }
+      if (allowUnstartedCandidate && run.status === 'waiting' && run.waitingReason === 'approval' && frontier.kind === 'verify' && frontier.phase === 'verifiers') {
+        const original = await (await import('../verifier-permission-history.js')).readVerifierWaitingRun(driver, artifacts, run, spec);
+        requireEqual(frontier, await readCanonicalArtifact(artifacts, original.wait.frontierRef), 'Stop retains its exact verifier consent frontier');
+        return selected;
+      }
       if (!allowUnstartedCandidate || !['queued', 'running', 'waiting'].includes(run.status) || frontier.schemaVersion !== 1 ||
           run.status === 'waiting' && !(allowWorkerRecovery && run.waitingReason === 'reconciliation'))
         throw new KernelStorageError('STATE_TRANSITION_INVALID', 'candidate stop requires its exact verification lifecycle');

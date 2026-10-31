@@ -7,22 +7,22 @@ export { CONTROL_FRAME_BYTES, CONTROL_METHODS_V1, INSTALLED_CONTROL_FEATURES, CO
 export type { InstalledControlFeature, InstalledControlMethod, InstalledControlRequestV1,
   InstalledControlResponseFor, InstalledControlResultFor, HeadlessControlRequestV3, HeadlessControlResponseV3, HeadlessRunEventV3, HeadlessControlRecordV3 } from '../kernel/control-wire.js';
 
-export const CONTROL_V1_SOURCE_DIGEST = "c40f4c68def46a0e8555c49147a5da17034eb129627f7d4489b5ad51c377c543";
+export const CONTROL_V1_SOURCE_DIGEST = "75154f97dcc86c09923ba9c970957500a2fd111ec2b4fdf1013d73db3300ea15";
 export const CONTROL_V1_SOURCE_MANIFEST = Object.freeze({
   entry: "src/kernel/control-wire.ts",
   scope: "static_local_typescript_dependency_closure_including_types",
   sources: Object.freeze({
-  "src/kernel/authorization.ts": "9f4852e42f54a495d970a1f84132b23dd93faf5865d279a13ceead2cbdb8d755",
+  "src/kernel/authorization.ts": "cf9495fb8b01a3e00413bd0a940b961686c9d6ed179da234aba70523ac03d1f3",
   "src/kernel/broker-process-domain-death.ts": "e87fda8c5c2dd41f4405dda718cf0cd1af1425089656df43d5cf66a632df581a",
   "src/kernel/canonical.ts": "1da8e712e84191808e03fdee254d04473dd874d360e05c2bf6215ea1f9e129ba",
   "src/kernel/child-merge.ts": "a940f9821d47e13287a52069cabfdbd326432e1def9991285ebd80f693298fae",
   "src/kernel/children.ts": "1e7c4a8351c627f8a02a097a5a9ce5657ce20533d384d00bf0df4fed23f14657",
-  "src/kernel/continuation.ts": "5ae2ba71808050ad52c6fd03d8d9d79f6aefbcb52893d9358decb8658d169634",
+  "src/kernel/continuation.ts": "e645102c201b168a1a8fc25f395104223fb664fe53213c7aa6651d193c34da9e",
   "src/kernel/control-apply.ts": "eb3129bf940a92a1f601f4015323a8ae462a9a6776b813ee1aa1e02d70197e5d",
   "src/kernel/control-list.ts": "66ef7efddbb92aef34d2ab35b02f2f0e0a153b5e74acabe75b153856a6cfb723",
   "src/kernel/control-submit.ts": "c9d6ec30110293419c1b47797e2a6561b10e0651d13bcc9cc85ee4371b8014e9",
   "src/kernel/control-wire-data.ts": "a2a2fb9a3f4f053cd7a2e2b06aa44f6503072c6b507f9a078d2edfeb244e9750",
-  "src/kernel/control-wire.ts": "962ed8a8999ffc089dfc78b796d966463d93dd59e287e502bea48ad5739e6dff",
+  "src/kernel/control-wire.ts": "735c28917dd3e42b3e26ac69bb5a42b58b5bafb50fd9f1f6cc70414d2f4ebd26",
   "src/kernel/credential-authority.ts": "9f859359d7ef7e6471a57f8d2be6a2244c3fc6894ce73ebce343c545b71a83ea",
   "src/kernel/delivery-invocation.ts": "6a0fe0225ce62aa11aa3ddbed7d8e4e58f2fcf2034291aaf46af846fa2016263",
   "src/kernel/delivery.ts": "0a83da75cc71220fea91e85fc2e5722faafb59364b41a37b8bbd295dba490734",
@@ -41,8 +41,8 @@ export const CONTROL_V1_SOURCE_MANIFEST = Object.freeze({
   "src/kernel/tool-authorization.ts": "27b02660459f2d6ec70d97deb7d01cfb4b2c2a8c828cc08736b8c27bfea1f2d7",
   "src/kernel/types.ts": "5529060d303323c3c4a476986f49617fc7f0092798dc418b46b269e5f2c4462c",
   "src/kernel/user-input.ts": "010bd6ca988106cddf40aaa238930670a653deb567e347178ffc11851e291e89",
-  "src/kernel/verifier-invocation.ts": "30f35a66fda07b7d85543e44c5c409449f895d090a51f980151a571ad55e6206",
-  "src/kernel/verifier.ts": "d70004abb58b9b08e0a2c5681688db8dd9a98f490dee6dbfd3c10ee90b5e7247",
+  "src/kernel/verifier-invocation.ts": "d80548b2e14f65bf6fc3f07271c332e61d0ae7fe7481736aa23f0677ffadfd4c",
+  "src/kernel/verifier.ts": "246cdbc141c103d844379eb5a5a22255e7c9e155a9b13fe834ddc5bc036ed4a3",
   "src/model/immutable.ts": "e9c476c73e33d2edda489764bc403a6e2aae4c59191e67fc8c708ed376abbb0a",
   "src/protocol/agent-ir.ts": "028fb3e10b6571169bab406bcdc2fa8a7466f3cae8361ab1cbdea2835366cd4a"
 }),

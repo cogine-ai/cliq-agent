@@ -1,7 +1,7 @@
 import { digestOmitting, normalizeAbsolutePath, normalizeBoundedText, assertArtifactRef, parseCanonicalTime } from '../kernel/identity.js';
 import { canonicalJsonBytes } from '../kernel/canonical.js';
 import type { RepairDiagnosticItem, VerificationReceipt, VerifierCommandV1, VerifierEnvironmentV1, VerifierExecutableIdentityV1,
-  VerifierRepairDiagnosticV1, VerifierRepairModelContentV1, VerifierResultItem, VerifierStopEvidence, VerifierStopItem } from '../kernel/verifier.js';
+  VerifierRepairDiagnosticV1, VerifierRepairModelContentV1, VerifierResultItem, VerifierStopEvidence, VerifierStopItem, VerifierSkipItem } from '../kernel/verifier.js';
 import type { VerifierSpec } from '../kernel/types.js';
 import { KernelStorageError } from './errors.js';
 
@@ -53,6 +53,17 @@ function integer(value: unknown, minimum = 0, maximum = Number.MAX_SAFE_INTEGER)
 }
 function time(value: unknown): number {
   try { return parseCanonicalTime(text(value)); } catch { return mismatch(); }
+}
+
+export function decodeVerifierSkipItem(value: unknown): VerifierSkipItem {
+  const data = closed(value, ['schemaVersion', 'itemId', 'runId', 'kind', 'candidateItemId', 'verifierPlanRef',
+    'verifierIndex', 'verifierId', 'decisionRef', 'createdAt', 'outcome'], ['policyChannelEvidenceDigest']);
+  if (data.schemaVersion !== 1 || data.kind !== 'verifier_skip' || !['skipped_by_user', 'skipped_by_policy'].includes(data.outcome as string) ||
+      Object.hasOwn(data, 'policyChannelEvidenceDigest') !== (data.outcome === 'skipped_by_policy')) mismatch();
+  for (const key of ['itemId', 'runId', 'candidateItemId', 'verifierId']) text(data[key]);
+  ref(data.verifierPlanRef); ref(data.decisionRef); integer(data.verifierIndex, 0, 31); time(data.createdAt);
+  if (data.outcome === 'skipped_by_policy') ref(data.policyChannelEvidenceDigest);
+  return data as VerifierSkipItem;
 }
 
 /** Data decoding does not resolve a signed executable or authorize reading it. */

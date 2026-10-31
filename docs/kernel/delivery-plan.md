@@ -35,8 +35,17 @@ and failing evidence; neither a diagnostic nor a different successful cut
 closes these gaps. Result-read sharing and preparation cancellation must still
 pass the complete real campaigns with the original 90/30/2/5-second limits.
 
-Remaining implementation includes ordinary-policy verifier/Delivery authority,
-manual UNKNOWN disposition, MCP and managed local inference, configurable
+The ordinary-permission candidate adds fixed Node checks under `default` and
+`accept-edits`, using exact worker-free candidate approvals or explicitly
+consumed admission templates. It retains independent Delivery verification and
+complete-plan approval, source-bound fresh grants, required-denial cancellation,
+advisory skips, counted repair candidates and original claimed/UNKNOWN limits.
+Shared CLI/TUI/SDK consumers use the existing v1 methods. Focused component
+regressions are not the real installed permission, preclaim shutdown or upgrade
+qualification; those new campaigns and all original timing limits remain open
+until run on the integrated immutable source.
+
+Remaining implementation includes manual UNKNOWN disposition, MCP and managed local inference, configurable
 bounded concurrency, complete state import/rollback/GC and compatible upgrades,
 production platform support, and the final default-entry cutover. Advance them
 as complete user flows through the existing Run/Journal/Checkpoint lifecycle.

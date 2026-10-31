@@ -20,6 +20,7 @@ import { createQueuedFixture, disposeFixture, uuidv7 } from './testing/fixtures.
 import { publishInProcessChannel } from './store.js';
 import { signedVerifierAuthority } from './testing/verifier-authority.js';
 import { advanceTimeFence, readTimeFence } from './canonical-time.js';
+import { mapDeliveryVerifierRequests, verifierRequestCoreDigest } from './verifier-template.js';
 
 test('verifier identity authorization is retained, replayable, and explicitly revocable without executing a Run', async () => {
   const signed = await signedVerifierAuthority();
@@ -170,7 +171,7 @@ test('Run admission consumes a real identity authorization once and freezes the 
       { kind: 'non_secret_literal', value: 'different.test.mjs' }] }] }),
       { code: 'ARTIFACT_MISMATCH' });
     await assert.rejects(fixture.store.admitRun({ ...input, verifierRequests: [{ ...verifier, executionGrantId: 'unimplemented' }] }),
-      (error: unknown) => error instanceof Error && 'refusalCode' in error && error.refusalCode === 'UNSUPPORTED_EXECUTION_IDENTITY');
+      (error: unknown) => error instanceof Error && 'refusalCode' in error && error.refusalCode === 'AUTHORIZATION_REQUIRED');
     for (const unsupported of [{ ...verifier, env: { EXPLICIT: { kind: 'non_secret_literal' as const, value: 'value' } } },
       { ...verifier, argv: [verifier.argv[0]!, verifier.argv[2]!] }, { ...verifier, writableEphemeralPaths: ['output'] }]) {
       await assert.rejects(fixture.store.admitRun({ ...input, verifierRequests: [unsupported] }),
@@ -241,6 +242,75 @@ test('Run admission consumes a real identity authorization once and freezes the 
     const advisoryRunSpec = await fixture.store.artifacts.readCanonical<RunSpec>(advisory.run.specRef);
     assert(advisoryRunSpec.unverifiedConsentRef, 'advisory-only Run retains original explicit unverified consent');
     assert.deepEqual((await fixture.store.admitRun(advisoryInput)).response, advisory.response);
+    for (const mode of ['default', 'accept-edits'] as const) await t.test(`${mode} admission consumes only explicit execution consent and roots its exact bounded template`, async () => {
+      const identityCore = { ...core, requestId: uuidv7() }, identityRequest = { ...identityCore, requestDigest: canonicalSha256(identityCore) };
+      const identityGrant = await fixture.store.createAuthorization(identityRequest, identity);
+      const selectedVerifier = { ...verifier, identityReadGrantId: identityGrant.response.result.grant.grantId };
+      const executionCore = { protocolVersion: 1, method: 'authorization.create', requestId: uuidv7(), decision: {
+        kind: 'verifier_execution', verifierId: selectedVerifier.id, verifierRequestDigest: verifierRequestCoreDigest(selectedVerifier),
+        executionIdentityGrantId: selectedVerifier.identityReadGrantId, maxCandidateGenerations: 3, maxAttemptsPerCandidate: 1 } };
+      const permission = await fixture.store.createAuthorization({ ...executionCore, requestDigest: canonicalSha256(executionCore) }, identity);
+      const modePolicy = { ...policy, mode, decisions: modeDecisions(mode), policyDigest: '' };
+      modePolicy.policyDigest = digestOmitting(modePolicy, 'policyDigest');
+      const published = await fixture.store.artifacts.publishCanonical(modePolicy, modePolicy.format);
+      const submitted = { ...input, policyRef: published.ref, requestId: uuidv7(), admissionKey: admissionKey(`explicit-${mode}`),
+        verifierRequests: [{ ...selectedVerifier, executionGrantId: permission.response.result.grant.grantId }] };
+      const admitted = await fixture.store.admitRun(submitted);
+      const frozen = await fixture.store.artifacts.readCanonical<RunSpec>(admitted.run.specRef);
+      assert.equal(admitted.run.status, 'queued'); assert.equal(admitted.run.activeWorkerLaunchId, undefined);
+      const reader = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+      try {
+        const origin = await (await import('./run-admission-origin.js')).readRootRunAdmissionOrigin(reader, fixture.store.artifacts, admitted.run.id);
+        assert.equal(origin.verifierTemplates?.length, 1);
+        const root = origin.verifierTemplates![0]!, template = await fixture.store.artifacts.readCanonical<import('../kernel/verifier-invocation.js').VerifierAuthorizationTemplateV1>(root.templateRef);
+        assert.equal(template.runId, admitted.run.id); assert.equal(template.verifierSpecRef, specArtifact.ref);
+        assert.equal(template.maxCandidateGenerations, 3); assert.equal(template.maxAttempts, 1); assert.equal(template.expiresAt, admitted.run.deadlineAt);
+        assert.equal(root.templateDigest, template.templateDigest); assert.equal(template.decisionRef, origin.authorizationReceiptRefs[0]);
+        const { readVerifierTemplateForRun } = await import('./verifier-permission-history.js');
+        assert.deepEqual(await readVerifierTemplateForRun(reader, fixture.store.artifacts, admitted.run, frozen, 0), template);
+        assert.equal(await readVerifierTemplateForRun(reader, fixture.store.artifacts, admitted.run, frozen, 1), undefined);
+        await assert.rejects(readVerifierTemplateForRun(reader, fixture.store.artifacts, admitted.run,
+          { ...frozen, sourceProjectionRef: canonicalSha256('foreign') }, 0), /original Agent spec/);
+        assert.equal(reader.prepare('SELECT count(*) AS count FROM run_journal WHERE run_id=?').get<{ count: bigint }>(admitted.run.id)!.count, 0n);
+        assert.equal(reader.prepare('SELECT count(*) AS count FROM worker_launches WHERE run_id=?').get<{ count: bigint }>(admitted.run.id)!.count, 0n);
+        if (mode === 'default') {
+          // Read-only source mapping uses a genuine admitted request and real
+          // consent rows. It creates no Delivery, worker or native proof.
+          const newIdentityCore = { ...core, requestId: uuidv7() };
+          const newIdentity = await fixture.store.createAuthorization({ ...newIdentityCore, requestDigest: canonicalSha256(newIdentityCore) }, identity);
+          const freshVerifier = { ...selectedVerifier, identityReadGrantId: newIdentity.response.result.grant.grantId };
+          const freshCore = { ...executionCore, requestId: uuidv7(), decision: { ...executionCore.decision,
+            executionIdentityGrantId: freshVerifier.identityReadGrantId, verifierRequestDigest: verifierRequestCoreDigest(freshVerifier), maxCandidateGenerations: 1 } };
+          const fresh = await fixture.store.createAuthorization({ ...freshCore, requestDigest: canonicalSha256(freshCore) }, identity);
+          const mapping = { sourceRunId: admitted.run.id, spec: frozen, grantIds: [fresh.response.result.grant.grantId], principalId: identity.principalId };
+          assert.deepEqual(await mapDeliveryVerifierRequests(reader, fixture.store.artifacts, mapping),
+            [{ verifierIndex: 0, request: { ...freshVerifier, executionGrantId: fresh.response.result.grant.grantId } }]);
+          await assert.rejects(mapDeliveryVerifierRequests(reader, fixture.store.artifacts,
+            { ...mapping, grantIds: [mapping.grantIds[0]!, mapping.grantIds[0]!] }), /authority is unavailable/);
+          await assert.rejects(mapDeliveryVerifierRequests(reader, fixture.store.artifacts,
+            { ...mapping, principalId: 'another-principal' }), /authority is unavailable/);
+          const otherIdentityCore = { ...core, requestId: uuidv7() };
+          const otherIdentity = await fixture.store.createAuthorization({ ...otherIdentityCore, requestDigest: canonicalSha256(otherIdentityCore) }, identity);
+          const omitted: VerifierRequest = { ...selectedVerifier, identityReadGrantId: otherIdentity.response.result.grant.grantId };
+          delete omitted.timeoutMs;
+          const changedCore = { ...freshCore, requestId: uuidv7(), decision: { ...freshCore.decision,
+            executionIdentityGrantId: omitted.identityReadGrantId, verifierRequestDigest: verifierRequestCoreDigest(omitted) } };
+          const changed = await fixture.store.createAuthorization({ ...changedCore, requestDigest: canonicalSha256(changedCore) }, identity);
+          await assert.rejects(mapDeliveryVerifierRequests(reader, fixture.store.artifacts,
+            { ...mapping, grantIds: [changed.response.result.grant.grantId] }), /authority is unavailable/,
+          'a request with the default omitted cannot substitute the original explicitly present timeout');
+        }
+        assert.deepEqual((await fixture.store.admitRun(submitted)).response, admitted.response);
+        const retained = path.join(fixture.stateRoot, `retained-template-${mode}`), file = path.join(fixture.stateRoot, KERNEL_CAS_DIRECTORY, root.templateRef);
+        await rename(file, retained);
+        try {
+          await assert.rejects(fixture.store.admitRun(submitted));
+          await assert.rejects(stat(file), { code: 'ENOENT' }, 'missing original template is not repaired or replaced by policy allow');
+        } finally { await rename(retained, file); }
+      } finally { reader.close(); }
+      await assert.rejects(fixture.store.admitRun({ ...submitted, requestId: uuidv7(), admissionKey: admissionKey(`reuse-${mode}`) }),
+        error => error instanceof Error && 'refusalCode' in error && error.refusalCode === 'AUTHORIZATION_REQUIRED');
+    });
     await fixture.store.close();
     fixture.store = await openStateStore(fixture.stateRoot, fixture.runtimeAuthority);
     const successor = await publishInProcessChannel(fixture.store);

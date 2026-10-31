@@ -20,7 +20,7 @@ export async function loadRunContinuation(driver: SqliteDriver, artifacts: Artif
   authority: RunAuthority, reobserve?: NativeWorkerRetirement, installedRuntime?: HeldInstalledRuntime,
   stopAuthority = authority.controlAuthority) {
   const stop = loadAgentStop(driver, artifacts, owner, stopAuthority, reobserve, installedRuntime);
-  const verifier = await loadVerifierContinuation(driver, artifacts, owner, authority);
+  const verifier = await loadVerifierContinuation(driver, artifacts, owner, authority, reobserve);
   const { cancelRun, expireRun, commitTerminalStop, stopForVerification, stopForVerifierPolicyDenial,
     stopForModelFailure, stopForDependencyFailure, stopForDependencyAmbiguity, stopForDependencyScriptDenial, stopForResourceFailure, stopFromParent } = stop;
   return {

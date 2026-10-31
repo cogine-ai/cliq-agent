@@ -635,7 +635,7 @@ type PolicyDenialOutcomeV1 =
       outcomeItemRef: ArtifactRef
     }
   | {
-      kind: 'required_verifier_stopped'
+      kind: 'stop_intent'
       subjectKind: 'verifier_launch'
       stopIntentRef: ArtifactRef
     }

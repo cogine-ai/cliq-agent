@@ -16,6 +16,8 @@ import type { VerifierProgress, VerifierRecoveryCut } from './verifier-recovery.
 import { verifierCheckpointId, verifierResultItemId } from './verifier-recovery.js';
 import { planVerifierRepair } from './verifier-repair.js';
 import { validateVerifierStoppedHistory } from './verifier-stop-history.js';
+import { readVerifierApproval, readVerifierApprovalWait, readVerifierPermissionContext, readVerifierSkip,
+  readVerifierTemplateForRun, verifierCandidateOrdinal } from './verifier-permission-history.js';
 
 /** Reverse coverage of the exact retained graph. The sole production caller
  * supplies progress from readVerifierProgress in the same recovery walk; these
@@ -30,6 +32,7 @@ export async function validateVerifierHistory(input: {
     throw new TypeError('verifier history lost its exact contiguous owned item cut');
   const cut: VerifierRecoveryCut = { run, runSpec: spec, items, journal, workspaceGenerations: input.workspaceGenerations };
   const operations = new Map<string, { progress: VerifierProgress; index: number }>();
+  const separatelyDenied = new Set<string>();
   for (const [candidateId, progress] of verifierProgressByCandidate) {
     const rows = items.filter(row => row.itemId === candidateId);
     if (rows.length !== 1 || progress.candidate.itemId !== candidateId || progress.candidate.runId !== run.id ||
@@ -45,6 +48,38 @@ export async function validateVerifierHistory(input: {
   }
   for (const item of decodedItems.values()) if (item.kind === 'final_candidate' && !verifierProgressByCandidate.has(item.itemId))
     throw new TypeError('verifier candidate has no independently validated progress');
+  if (run.waitingReason === 'approval' && run.waitingOnRef) {
+    const wait = await readCanonicalArtifact<import('../kernel/verifier-invocation.js').VerifierApprovalWait>(artifacts, run.waitingOnRef);
+    if (wait.subject?.kind === 'verifier_launch') {
+      const evidence = await readCanonicalArtifact<VerifierPolicyChannelEvidenceV1>(artifacts, wait.subject.policyChannelEvidenceRef);
+      const context = await readVerifierPermissionContext(driver, artifacts, run, spec, evidence.requestRef, evidence.targetRef);
+      const owner = operations.get(context.request.opId), original = await readVerifierApprovalWait(driver, artifacts, context, run.waitingOnRef);
+      if (!owner || context.target.candidateItemId !== owner.progress.candidate.itemId || context.target.verifierIndex !== owner.index ||
+          run.status !== 'waiting' || run.activeWorkerLaunchId || run.frontierRef !== wait.frontierRef ||
+          run.latestCheckpointId !== original.checkpoint.id || original.checkpoint.journalSeq !== journal.length)
+        throw new TypeError('verifier current wait lost its exact lease-free continuation');
+      if (!run.stopIntentRef) {
+        if (run.revision !== wait.createdFromRevision + 1 || run.updatedAt !== wait.createdAt)
+          throw new TypeError('verifier current wait changed without a registered Stop');
+      } else {
+        const chain = await (await import('./stop-registration.js')).readRegisteredAgentStopChain(artifacts, run);
+        if (!chain.some(({ intent }) => intent.registeredCheckpointId === original.checkpoint.id &&
+            intent.registeredRunRevision === wait.createdFromRevision + 1 && intent.registeredJournalSeq === journal.length))
+          throw new TypeError('stopped verifier wait lost its actual original registration cut');
+      }
+      const source = await (await import('./result-source.js')).readCandidateSource(artifacts, spec, original.checkpoint.workspaceStateRef);
+      if (source.sourceRef !== context.target.resultSourceRef) throw new TypeError('verifier wait changed its original ready candidate');
+      for (const item of decodedItems.values()) if (item.kind === 'policy_decision' && item.subjectKind === 'verifier_launch' &&
+          item.opId === context.request.opId && item.decision === 'allow') {
+        const grant = await readCanonicalArtifact<VerifierOperationGrantV1>(artifacts, item.grantRef);
+        if (grant.expiresAt > wait.createdAt) throw new TypeError('verifier wait replaced a still-valid original grant');
+      }
+      const template = await readVerifierTemplateForRun(driver, artifacts, run, spec, context.target.verifierIndex);
+      if (template && wait.createdAt < template.expiresAt &&
+          await verifierCandidateOrdinal(artifacts, items, context.target.candidateItemId) < template.maxCandidateGenerations)
+        throw new TypeError('verifier wait replaced its original bounded template');
+    }
+  }
   for (const entry of journal.filter(entry => entry.opKind === 'verifier')) {
     const owner = operations.get(entry.opId);
     if (!owner) throw new TypeError('verifier Journal has no owned candidate and frozen plan');
@@ -55,9 +90,14 @@ export async function validateVerifierHistory(input: {
   for (const row of items) {
     const item = decodedItems.get(row.itemId);
     if (!item) throw new TypeError('verifier history lost its owned item payload');
-    if (typeof item.kind === 'string' && item.kind.startsWith('verifier_') && item.kind !== 'verifier_result' && item.kind !== 'verifier_stop')
+    if (typeof item.kind === 'string' && item.kind.startsWith('verifier_') && item.kind !== 'verifier_result' && item.kind !== 'verifier_stop' && item.kind !== 'verifier_skip')
       throw new TypeError('verifier history contains an unsupported audit branch');
-    if (item.kind === 'verifier_result' || item.kind === 'verifier_stop') {
+    if (item.kind === 'verifier_skip') {
+      const opId = verifierOperationId(run.id, item.candidateItemId, item.verifierPlanRef, item.verifierIndex), owner = operations.get(opId);
+      if (!owner || item.createdAt !== row.createdAt || !owner.progress.entries[owner.index]?.skipItem)
+        throw new TypeError('verifier skip has no uniquely validated owning candidate');
+      requireEqual(item, owner.progress.entries[owner.index]!.skipItem, 'verifier independently validated skip');
+    } else if (item.kind === 'verifier_result' || item.kind === 'verifier_stop') {
       const checked = item.kind === 'verifier_result' ? decodeVerifierResultItem(item) : decodeVerifierStopItem(item);
       const owner = operations.get(checked.opId);
       if (!owner || owner.progress.candidate.itemId !== checked.candidateItemId || owner.progress.planRef !== checked.verifierPlanRef ||
@@ -76,6 +116,21 @@ export async function validateVerifierHistory(input: {
       const owner = operations.get(item.opId);
       if (!owner) throw new TypeError('verifier policy item has no owned candidate and frozen plan');
       if (!['allow', 'deny'].includes(item.decision)) throw new TypeError('verifier policy item has an unsupported decision');
+      if (item.decisionSource === 'interactive_approval' || item.decision === 'deny' && item.denialOutcome.kind === 'advisory_verifier_skipped') {
+        const evidence = await readCanonicalArtifact<VerifierPolicyChannelEvidenceV1>(artifacts, item.policyChannelEvidenceRef);
+        const context = await readVerifierPermissionContext(driver, artifacts, run, spec, evidence.requestRef, evidence.targetRef);
+        if (context.target.candidateItemId !== owner.progress.candidate.itemId || context.target.verifierIndex !== owner.index)
+          throw new TypeError('verifier decision borrowed another owned plan entry');
+        if (item.decisionSource === 'interactive_approval') {
+          const original = await readVerifierApproval(driver, artifacts, context, item.decisionRef);
+          requireEqual(original.item, item, 'verifier original authenticated decision');
+        } else if (item.decision === 'deny' && item.denialOutcome.kind === 'advisory_verifier_skipped') {
+          const skip = await readCanonicalArtifact(artifacts, item.denialOutcome.verifierSkipItemRef);
+          await readVerifierSkip(driver, artifacts, context, skip);
+        }
+        if (item.decision === 'deny') separatelyDenied.add(item.itemId);
+        continue;
+      }
       if (item.decision === 'allow') {
         const prepared = journal.filter(entry => entry.opKind === 'verifier' && entry.opId === item.opId && entry.phase === 'prepared' && entry.grantRef === item.grantRef);
         if (!prepared.length) throw new TypeError('verifier allow policy item has no original preparation');
@@ -98,7 +153,7 @@ export async function validateVerifierHistory(input: {
   const denied = await validateVerifierPolicyDenialHistory(driver, artifacts, cut);
   const stopped = await validateVerifierStoppedHistory(driver, artifacts, cut);
   for (const item of decodedItems.values()) if (item.kind === 'policy_decision' && item.subjectKind === 'verifier_launch' &&
-      item.decision === 'deny' && !denied.has(item.itemId)) throw new TypeError('verifier denied policy item has no independently owned stop');
+      item.decision === 'deny' && !denied.has(item.itemId) && !separatelyDenied.has(item.itemId)) throw new TypeError('verifier denied policy item has no independently owned stop or skip');
   for (const entry of journal.filter(entry => entry.opKind === 'verifier' && entry.phase === 'failed')) {
     const claimed = journal.some(claim => claim.opId === entry.opId && claim.attempt === entry.attempt && claim.phase === 'dispatch_claimed');
     if (claimed && !stopped.has(entry.seq)) throw new TypeError('claimed failed verifier has no owned typed stop retirement');
@@ -136,7 +191,8 @@ export async function validateVerifierHistory(input: {
       throw new TypeError('repair authorization retains an unsettled original invocation');
     if (items.slice(0, row.itemSeq - 1).some(row => {
       const prior = decodedItems.get(row.itemId);
-      return prior?.kind === 'verifier_stop' || prior?.kind === 'policy_decision' && prior.subjectKind === 'verifier_launch' && prior.decision === 'deny';
+      return prior?.kind === 'verifier_stop' || prior?.kind === 'policy_decision' && prior.subjectKind === 'verifier_launch' &&
+        prior.decision === 'deny' && prior.denialOutcome.kind === 'stop_intent';
     })) throw new TypeError('repair authorization follows a nonproductive verifier stop');
     for (const [opId, owner] of operations) if (owner.progress === progress && journal.some(entry => entry.opId === opId && entry.seq > checkpoint.journalSeq))
       throw new TypeError('repaired candidate received a later verifier invocation');

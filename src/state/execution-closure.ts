@@ -14,6 +14,7 @@ import { immutableSnapshot } from '../model/immutable.js';
 import type { SqliteDriver } from './sqlite-driver.js';
 import { assertActiveStateOwner, type StateOwnerContext } from './state-owner.js';
 import { readRun } from './rows.js';
+import { readVerifierGrant } from './verifier-permission-history.js';
 import { readRequiredWorkerLaunch } from './repositories/worker-launches.js';
 import { readRequiredWorkspaceGenerationByRef } from './repositories/workspace-generations.js';
 import { type ReleaseTrustKey, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
@@ -752,7 +753,18 @@ export async function readVerifierLaunchClosure(artifacts: ArtifactCatalog, owne
       resultSourceRef: target.resultSourceRef, sourceDigest: resultSource.manifestDigest, verifierPlanRef: frontier.verifierPlanRef,
       plan: verifierPlan, verifierSpecRef: runSpec.verifierSpecRef, verifierSpec, verifierIndex: frontier.nextVerifierIndex, command, environment } });
   equal(evidence, evaluator.evaluate(request, target, evidence.evaluatedAt), 'verifier exact policy evidence');
-  equal(grant, evaluator.grant(request, target, evidence, grant.issuedAt, grant.expiresAt), 'verifier exact operation grant');
+  if (grant.provenance.kind === 'policy_snapshot')
+    equal(grant, evaluator.grant(request, target, evidence, grant.issuedAt, grant.expiresAt), 'verifier exact operation grant');
+  else {
+    if (!driver) mismatch('verifier authorization requires its original complete SQLite history');
+    const items = driver.prepare('SELECT item_id,item_seq,payload_ref,created_at FROM items WHERE run_id=? ORDER BY item_seq')
+      .all<{ item_id: string; item_seq: bigint; payload_ref: string; created_at: string }>(run.id)
+      .map(row => ({ schemaVersion: 1 as const, itemId: row.item_id, itemSeq: Number(row.item_seq), payloadRef: row.payload_ref,
+        payloadDigest: row.payload_ref, createdAt: row.created_at }));
+    const original = await readVerifierGrant(driver, artifacts, { run, spec: runSpec, request, target, evaluator }, canonicalSha256(grant), items);
+    equal(original.evidence, evidence, 'verifier original authorization policy evidence');
+    equal(readRun(driver, run.id), run, 'verifier unchanged authorization release cut');
+  }
   if (command.executable.kind !== 'guest_toolchain' || spec.executable.kind !== 'guest_toolchain' || spec.runtime.toolchain.kind !== 'guest_toolchain')
     mismatch('verifier requires its supported signed guest executable');
   const toolchain = builtinToolchain?.manifestRef === command.executable.guestToolchainManifestRef ? builtinToolchain : await readRetainedVerifierToolchain(artifacts, { bundle: execution.bundle, releaseKeys,

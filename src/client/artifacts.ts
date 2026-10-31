@@ -1,4 +1,5 @@
 import { readDependencyScriptWaitingPresentation } from './dependency-script-presentation.js';
+import { readVerifierWaitingPresentation } from './verifier-presentation.js';
 import { canonicalJsonBytes } from '../kernel/canonical.js';
 import { readChildMergeWaitingPresentation } from './child-merge-presentation.js';
 import { readChildWaitingPresentation } from './child-wait-presentation.js';
@@ -46,6 +47,8 @@ export async function readWaitingPresentation(app: PresentationClient, snapshot:
         return readChildMergeWaitingPresentation(app, snapshot, value, signal);
       if (subject && typeof subject === 'object' && subject.kind === 'dependency_install_scripts')
         return readDependencyScriptWaitingPresentation(app, snapshot, value, signal);
+      if (subject && typeof subject === 'object' && subject.kind === 'verifier_launch')
+        return readVerifierWaitingPresentation(app, snapshot, value, signal);
       let text = canonicalJsonBytes(subject).toString('utf8');
       if (subject && typeof subject === 'object' && typeof subject.policyChannelEvidenceRef === 'string') {
         const evidence = await readClientJson(app, subject.policyChannelEvidenceRef, signal) as Record<string, unknown>;

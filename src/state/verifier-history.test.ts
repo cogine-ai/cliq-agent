@@ -32,7 +32,14 @@ test('retained verifier history rejects orphan Journal and audit facts even with
         outcome: 'passed', receiptRef: 'b'.repeat(64), createdAt: cut.run.updatedAt },
       { schemaVersion: 1, kind: 'verifier_stop', itemId: 'orphan-stop', runId: fixture.runId, candidateItemId: 'missing',
         verifierPlanRef: 'a'.repeat(64), verifierIndex: 0, verifierId: 'checks', opId: 'orphan', attempt: 0,
-        stopIntent: 'cancelled_by_user', stopIntentRef: 'b'.repeat(64), containmentEvidenceRef: 'c'.repeat(64), createdAt: cut.run.updatedAt }
+        stopIntent: 'cancelled_by_user', stopIntentRef: 'b'.repeat(64), containmentEvidenceRef: 'c'.repeat(64), createdAt: cut.run.updatedAt },
+      { schemaVersion: 1, kind: 'policy_decision', subjectKind: 'verifier_launch', itemId: 'orphan-consent', runId: fixture.runId,
+        opId: 'orphan', principalId: fixture.principalId, decisionRef: 'a'.repeat(64), policyChannelEvidenceRef: 'a'.repeat(64),
+        policyChannelEvidenceDigest: 'b'.repeat(64), createdAt: cut.run.updatedAt, decisionSource: 'interactive_approval',
+        waitingSubjectRef: 'd'.repeat(64), decision: 'allow', grantRef: 'c'.repeat(64) },
+      { schemaVersion: 1, kind: 'verifier_skip', itemId: 'orphan-skip', runId: fixture.runId, candidateItemId: 'missing',
+        verifierPlanRef: 'a'.repeat(64), verifierIndex: 0, verifierId: 'checks', decisionRef: 'b'.repeat(64),
+        outcome: 'skipped_by_user', createdAt: cut.run.updatedAt }
     ] as ContinuationItem[]) {
       const artifact = await fixture.store.artifacts.publishCanonical(item, 'offline-retained-audit-data');
       const row = { schemaVersion: 1 as const, itemId: item.itemId, itemSeq: 1, payloadRef: artifact.ref,

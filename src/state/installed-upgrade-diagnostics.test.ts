@@ -53,7 +53,8 @@ test('fixed native manager statuses and error classes round-trip without reading
     [Object.assign(privateFields(Error()), { code: 'ERR_CLIQ_CREDENTIAL_PLATFORM', platformCode }), code]);
   for (const [native, code] of Object.entries({ ERR_CLIQ_RESOURCE_RETIREMENT: 'NATIVE_RESOURCE_RETIREMENT',
     ERR_CLIQ_CREDENTIAL_SCOPE: 'NATIVE_CREDENTIAL_SCOPE_REFUSED', ERR_CLIQ_CREDENTIAL_BUSY: 'NATIVE_CREDENTIAL_BUSY',
-    ERR_DLOPEN_FAILED: 'DLOPEN_FAILED' })) examples.push([Object.assign(privateFields(Error()), { code: native }), code]);
+    ERR_DLOPEN_FAILED: 'DLOPEN_FAILED', ERR_CLIQ_STATE_OWNER_NATIVE: 'NATIVE_STATE_OWNER_REFUSED',
+    EPIPE: 'PIPE_CLOSED', EBADF: 'BAD_DESCRIPTOR' })) examples.push([Object.assign(privateFields(Error()), { code: native }), code]);
   for (const [error, code] of [[new TypeError(), 'TYPE_ERROR'], [new SyntaxError(), 'SYNTAX_ERROR'],
     [new RangeError(), 'RANGE_ERROR'], [new AggregateError([]), 'AGGREGATE_ERROR'], [Error(), 'ERROR'],
     [new ResourceRetirementError('private-fixture-secret', undefined), 'RECOVERY_REQUIRED']] as const)
@@ -263,4 +264,70 @@ test('real Store recovery retains its full cut and original refusal when the pha
     }), { code: 'NOT_FOUND' });
     assert.deepEqual(failed, ['cut']);
   } finally { driver.close(); await disposeFixture(fixture); }
+});
+
+
+test('upgrade output subphases and codes append closed values without changing legacy marker order', () => {
+  const prior = INSTALLED_RUNTIME_UPGRADE_PHASES.indexOf('unknown');
+  assert.deepEqual(INSTALLED_RUNTIME_UPGRADE_PHASES.slice(prior + 1),
+    ['output_selection_open', 'output_stdio_open', 'output_write', 'output_join', 'output_selection_close']);
+  for (const [raw, code] of [['ERR_CLIQ_STATE_OWNER_NATIVE', 'NATIVE_STATE_OWNER_REFUSED'], ['EPIPE', 'PIPE_CLOSED'], ['EBADF', 'BAD_DESCRIPTOR']]) {
+    let accessed = 0;
+    const error = Object.assign(Error(), { code: raw });
+    for (const field of ['message', 'stack', 'cause', 'path', 'name']) Object.defineProperty(error, field, {
+      configurable: true, get() { accessed++; throw new Error('private output bytes'); }
+    });
+    for (const phase of INSTALLED_RUNTIME_UPGRADE_PHASES.slice(prior + 1)) {
+      const marker = installedRuntimeUpgradeFailureMarker(phase, error);
+      assert.equal(marker, `CLIQ_INSTALLED_UPGRADE_FAILURE_V1:${phase}:${code}\n`);
+      assert.deepEqual(readInstalledRuntimeUpgradeFailureMarker(Buffer.from(marker)), Buffer.from(marker));
+      assert(Buffer.byteLength(marker) <= 128);
+    }
+    assert.equal(accessed, 0);
+  }
+});
+
+test('actual upgrade output diagnosis preserves the original write failure through joined cleanup and reports distinct cleanup failures', async () => {
+  // Only the entry's presentation branch runs over ordinary streams/inert
+  // callbacks. No upgrade, held selection, native descriptor or authority is
+  // manufactured; the real installed journey remains independent.
+  const { readFile } = await import('node:fs/promises'), { Script } = await import('node:vm');
+  const { Writable, PassThrough } = await import('node:stream'), ts = (await import('typescript')).default;
+  const { clientWriter } = await import('../client/entry.js');
+  const { joinResourceOperations } = await import('./errors.js');
+  const { canonicalJsonBytes, canonicalSha256 } = await import('../kernel/canonical.js');
+  const source = ts.createSourceFile('installed-entry.ts', await readFile(new URL('./installed-entry.ts', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true);
+  let branch: import('typescript').IfStatement | undefined;
+  const visit = (node: import('typescript').Node) => {
+    if (ts.isIfStatement(node) && node.expression.getText(source) === "mode === '--upgrade-runtime'") branch = node;
+    ts.forEachChild(node, visit);
+  }; visit(source); assert(branch);
+  const code = branch!.getText(source).replace("const { openInstalledClientStdio } = await import('../client/stdio.js');", '')
+    .replace("const { clientWriter } = await import('../client/entry.js');", '');
+  for (const stage of ['success', 'selection_open', 'stdio_open', 'write', 'join', 'selection_close'] as const) {
+    const primary = Object.assign(Error(), { code: 'EPIPE' }), retirement = Object.assign(Error(), { code: 'EBADF' });
+    const calls: string[] = [], markers: string[] = [];
+    const output = stage === 'write' ? new Writable({ write(_bytes, _encoding, callback) { callback(primary); } }) : new PassThrough();
+    output.on('data', () => {});
+    const selected = { async close() { calls.push('selection_close'); if (stage === 'selection_close') throw retirement; } };
+    const dependencies = { mode: '--upgrade-runtime', process: { argv: ['inert', 'inert', '--upgrade-runtime', '/state', '/package'],
+      stdin: new PassThrough(), stdout: output, stderr: new PassThrough(), once() {}, removeListener() {} },
+      normalizeAbsolutePath: (value: string) => value, AbortController, canonicalJsonBytes, canonicalSha256, clientWriter, joinResourceOperations,
+      upgradeInstalledRuntime: async () => { calls.push('upgrade_return'); return { targetRuntimeBundleRef: 'a'.repeat(64) }; },
+      runtime: { async openSelected() { calls.push('selection_open'); if (stage === 'selection_open') throw primary; return selected; } },
+      openInstalledClientStdio: async () => { calls.push('stdio_open'); if (stage === 'stdio_open') throw primary;
+        return { io: { output }, async close() { calls.push('stdio_close'); output.destroy(); if (stage === 'join') throw retirement; } }; },
+      writeSync: (_fd: number, marker: string) => { markers.push(marker); }, installedRuntimeUpgradeFailureMarker };
+    const names = Object.keys(dependencies), compiled = ts.transpileModule(`return async function() { ${code} };`,
+      { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText;
+    const invoke = new Script(`(function(${names.join(',')}) { ${compiled} })`).runInThisContext()(...Object.values(dependencies)) as () => Promise<void>;
+    if (stage === 'success') { await invoke(); assert.deepEqual(markers, []); }
+    else {
+      await assert.rejects(invoke(), error => error === (['join', 'selection_close'].includes(stage) ? retirement : primary));
+      assert.deepEqual(markers, [`CLIQ_INSTALLED_UPGRADE_FAILURE_V1:output_${stage}:${['join', 'selection_close'].includes(stage) ? 'BAD_DESCRIPTOR' : 'PIPE_CLOSED'}\n`]);
+    }
+    if (!['selection_open', 'stdio_open'].includes(stage)) assert(calls.includes('stdio_close'));
+    if (stage !== 'selection_open') assert.equal(calls.at(-1), 'selection_close');
+    output.destroy();
+  }
 });

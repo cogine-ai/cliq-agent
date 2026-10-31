@@ -4,7 +4,9 @@ import type { VerifierPlan } from '../kernel/result.js';
 import type { RunAssemblyV1, VerifierSpec } from '../kernel/types.js';
 import type { VerifierCommandV1, VerifierEnvironmentV1 } from '../kernel/verifier.js';
 import type { RunPolicySnapshotV1 } from '../kernel/tool-authorization.js';
-import type { VerifierOperationGrantV1, VerifierPolicyChannelEvidenceV1, VerifierRequestV1, VerifierTargetV1 } from '../kernel/verifier-invocation.js';
+import type { VerifierApprovalDecisionV1, VerifierApprovalWait, VerifierAuthorizationTemplateV1, VerifierOperationGrantV1,
+  VerifierPolicyChannelEvidenceV1, VerifierRequestV1, VerifierTargetV1 } from '../kernel/verifier-invocation.js';
+import { toolApprovalDecision } from '../policy/tool-approval.js';
 import { immutableSnapshot } from '../model/immutable.js';
 import { requireEqual } from '../policy/runtime-authority.js';
 import { assertRunPolicySnapshot, evaluateFrozenPolicyKey } from '../policy/tool-policy.js';
@@ -80,13 +82,19 @@ export function loadVerifierPolicy(input: {
     return immutableSnapshot({ ...core, evidenceDigest: canonicalSha256(core) });
   }
   function grant(request: VerifierRequestV1, target: VerifierTargetV1, evidence: VerifierPolicyChannelEvidenceV1,
-    issuedAt: string, expiresAt: string): VerifierOperationGrantV1 {
+    issuedAt: string, expiresAt: string) {
     requireEqual(evidence, evaluate(request, target, evidence.evaluatedAt), 'verifier policy channel evidence');
     if (evidence.effectiveDisposition !== 'allow' || parseCanonicalTime(issuedAt) < parseCanonicalTime(evidence.evaluatedAt) ||
         parseCanonicalTime(expiresAt) <= parseCanonicalTime(issuedAt)) throw new TypeError('only an exact direct allow can mint a verifier grant');
     const decision = { policyRef, channelEvidenceRef: canonicalSha256(evidence), channelEvidenceDigest: evidence.evidenceDigest,
       actionClass: 'verifier' as const, requestDigest: request.requestDigest, targetDigest: target.targetDigest,
       matchedRuleIds: evidence.matchedRuleIds, effectiveDisposition: 'allow' as const };
+    return operationGrant(request, target, issuedAt, expiresAt, { kind: 'policy_snapshot', actionClass: 'verifier',
+      channelEvidenceRef: decision.channelEvidenceRef, channelEvidenceDigest: decision.channelEvidenceDigest,
+      matchedRuleIds: evidence.matchedRuleIds, effectiveDisposition: 'allow', decisionDigest: canonicalSha256(decision) });
+  }
+  function operationGrant<Provenance extends VerifierOperationGrantV1['provenance']>(request: VerifierRequestV1, target: VerifierTargetV1,
+    issuedAt: string, expiresAt: string, provenance: Provenance): VerifierOperationGrantV1 & { provenance: Provenance } {
     const subject: VerifierOperationGrantV1['subject'] = { kind: 'verifier_launch', candidateItemId: target.candidateItemId,
       resultSourceRef: target.resultSourceRef, verifierPlanRef: target.verifierPlanRef, verifierIndex: target.verifierIndex,
       verifierId: target.verifierId, verifierSpecDigest: target.verifierSpecDigest, required: target.required };
@@ -94,11 +102,46 @@ export function loadVerifierPolicy(input: {
       grantId: identityHash('cliq-operation-grant-v1', request.runId, request.opId, request.requestDigest, subject, issuedAt),
       principalId, runId: request.runId, policyRef, frontierRef: request.frontierRef, opId: request.opId,
       requestRef: canonicalSha256(request), requestDigest: request.requestDigest, targetRef: request.targetRef, targetDigest: target.targetDigest,
-      subject, provenance: { kind: 'policy_snapshot' as const, actionClass: 'verifier' as const,
-        channelEvidenceRef: decision.channelEvidenceRef, channelEvidenceDigest: decision.channelEvidenceDigest,
-        matchedRuleIds: evidence.matchedRuleIds, effectiveDisposition: 'allow' as const, decisionDigest: canonicalSha256(decision) },
+      subject, provenance,
       maxDispatchedAttempts: target.maxAttempts, issuedAt, expiresAt };
     return immutableSnapshot({ ...core, grantDigest: canonicalSha256(core) });
   }
-  return Object.freeze({ evaluate, grant });
+  function approvalWait(request: VerifierRequestV1, target: VerifierTargetV1, evidence: VerifierPolicyChannelEvidenceV1,
+    revision: number): VerifierApprovalWait {
+    requireEqual(evidence, evaluate(request, target, evidence.evaluatedAt), 'verifier approval original policy');
+    if (evidence.effectiveDisposition !== 'ask' || !Number.isSafeInteger(revision) || revision < 1) throw new TypeError('only an exact verifier ask can wait');
+    return immutableSnapshot({ schemaVersion: 1, kind: 'approval', runId: request.runId, createdFromRevision: revision,
+      createdAt: evidence.evaluatedAt, frontierRef: request.frontierRef, subject: { kind: 'verifier_launch', opId: request.opId,
+        target: request.targetRef, candidateItemId: target.candidateItemId, resultSourceRef: target.resultSourceRef,
+        verifierPlanRef: target.verifierPlanRef, verifierIndex: target.verifierIndex, verifierId: target.verifierId,
+        verifierSpecDigest: target.verifierSpecDigest, required: target.required,
+        policyChannelEvidenceRef: canonicalSha256(evidence), policyChannelEvidenceDigest: evidence.evidenceDigest } });
+  }
+  function approve(request: VerifierRequestV1, target: VerifierTargetV1, evidence: VerifierPolicyChannelEvidenceV1,
+    wait: VerifierApprovalWait, decision: VerifierApprovalDecisionV1, deadlineAt: string) {
+    requireEqual(wait, approvalWait(request, target, evidence, wait.createdFromRevision), 'verifier exact approval wait');
+    requireEqual(decision, toolApprovalDecision(wait, { principalId, channelIdentityRef: decision.channelIdentityRef,
+      channelIdentityDigest: decision.channelIdentityDigest, requestId: decision.requestId, expectedRunRevision: decision.expectedRunRevision,
+      waitingOnRef: canonicalSha256(wait), decision: decision.decision,
+      ...(decision.requestedTtlMs === undefined ? {} : { ttlMs: decision.requestedTtlMs }) }, decision.createdAt, deadlineAt), 'verifier exact approval decision');
+    if (decision.decision === 'deny') return undefined;
+    return operationGrant(request, target, decision.createdAt, decision.grantExpiresAt!, { kind: 'user_approval',
+      waitingSubjectRef: canonicalSha256(wait), decisionRef: canonicalSha256(decision), requestId: decision.requestId,
+      channelEvidenceRef: canonicalSha256(evidence), channelEvidenceDigest: evidence.evidenceDigest });
+  }
+  function templateGrant(request: VerifierRequestV1, target: VerifierTargetV1, evidence: VerifierPolicyChannelEvidenceV1,
+    template: VerifierAuthorizationTemplateV1, candidateOrdinal: number, issuedAt: string): VerifierOperationGrantV1 {
+    requireEqual(evidence, evaluate(request, target, evidence.evaluatedAt), 'verifier template original policy');
+    if (evidence.effectiveDisposition === 'deny' || template.runId !== request.runId || template.verifierSpecRef !== target.verifierSpecRef ||
+        template.verifierSpecDigest !== target.verifierSpecDigest || template.verifierIndex !== target.verifierIndex || template.verifierId !== target.verifierId ||
+        template.verifierVersion !== target.verifierVersion || template.verifierEntryDigest !== target.verifierEntryDigest ||
+        template.commandRef !== target.commandRef || template.commandDigest !== target.commandDigest || template.environmentRef !== target.environmentRef ||
+        template.environmentDigest !== target.environmentDigest || template.sourceProjectionRef !== context.environment.sourceProjectionRef ||
+        template.maxAttempts !== target.maxAttempts || !Number.isSafeInteger(candidateOrdinal) || candidateOrdinal < 0 ||
+        candidateOrdinal >= template.maxCandidateGenerations || issuedAt < evidence.evaluatedAt || issuedAt >= template.expiresAt)
+      throw new TypeError('verifier template cannot authorize another source, policy, bound or lifetime');
+    return operationGrant(request, target, issuedAt, template.expiresAt, { kind: 'verifier_template', templateRef: canonicalSha256(template),
+      candidateOrdinal, decisionRef: template.decisionRef });
+  }
+  return Object.freeze({ evaluate, grant, approvalWait, approve, templateGrant });
 }

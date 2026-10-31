@@ -8,7 +8,7 @@ import { assertBoundedJsonValue, parseJsonStrict } from './json.js';
 import { decodeWireRun, decodeWireSession, decodeWireCheckpoint, decodeWireEvent, decodeWireJournal,
   decodeWireArtifactDescriptor, decodeWireGrantSummary, decodeWireRuntimeBundleSummary, decodeWireRunItemReference, decodeWireSessionItem } from './control-wire-data.js';
 import type { AuthorizationCreateRequest, AuthorizationRevokeRequest, SourceGitInspectionCreateRequest, SourceReadScopeCreateRequest, VerifierIdentityCreateRequest,
-  DependencyInstallScriptsCreateRequest, DependencyInstallScriptsDecisionV1 } from './authorization.js';
+  DependencyInstallScriptsCreateRequest, DependencyInstallScriptsDecisionV1, VerifierExecutionCreateRequest } from './authorization.js';
 import { decodeDependencyScriptConditions } from './dependency.js';
 import { normalizeSourceReadScopePath } from './source-read-scope.js';
 import { decodeSandboxResourceOptions, normalizeRunSubmitRequest, type RunSubmitRequest } from './control-submit.js';
@@ -197,6 +197,19 @@ export class UnsupportedExecutionIdentityRequestError extends TypeError {}
 export function decodeAuthorizationCreateRequest(value: unknown): AuthorizationCreateRequest {
   json(value);
   const data = controlWireRecord(value, ['protocolVersion', 'method', 'requestId', 'requestDigest', 'decision'], ['ttlMs']);
+  const kind = (data.decision as { kind?: unknown } | null)?.kind;
+  if (kind === 'verifier_execution') {
+    const decision = controlWireRecord(data.decision, ['kind', 'verifierId', 'verifierRequestDigest',
+      'executionIdentityGrantId', 'maxCandidateGenerations', 'maxAttemptsPerCandidate']);
+    if (data.protocolVersion !== 1 || data.method !== 'authorization.create') throw new TypeError('invalid verifier execution authorization');
+    controlWireText(decision.verifierId); controlWireRef(decision.verifierRequestDigest); controlWireText(decision.executionIdentityGrantId);
+    controlWireInteger(decision.maxCandidateGenerations, 1, 6); controlWireInteger(decision.maxAttemptsPerCandidate, 1, 4);
+    assertRequestId(data.requestId as string); controlWireRef(data.requestDigest);
+    const { requestDigest, ...core } = data;
+    if (canonicalSha256(core) !== requestDigest) throw new TypeError('authorization request digest does not rehash');
+    if (Object.hasOwn(data, 'ttlMs')) controlWireInteger(data.ttlMs, 1, 86_400_000);
+    return immutableSnapshot(data) as VerifierExecutionCreateRequest;
+  }
   const decision = controlWireRecord(data.decision, ['kind', 'purpose', 'target']);
   if (decision.kind === 'dependency_install_scripts') {
     if (data.protocolVersion !== 1 || data.method !== 'authorization.create') throw new TypeError('invalid dependency authorization method');
@@ -563,7 +576,8 @@ export function decodeInstalledControlResponse<M extends InstalledControlMethod>
         data.snapshot.run.waitingOnRef === request.waitingOnRef)
       throw new TypeError('inspection enqueue differs from its exact original Run and wait');
   } else if (request.method === 'authorization.create' && data.method === request.method) {
-    if (data.grant.state !== 'active' || data.grant.targetKind !== request.decision.kind || data.grant.purpose !== request.decision.purpose)
+    if (data.grant.state !== 'active' || data.grant.targetKind !== request.decision.kind ||
+        data.grant.purpose !== (request.decision.kind === 'verifier_execution' ? 'verifier' : request.decision.purpose))
       throw new TypeError('authorization creation differs from its original decision');
   } else if (request.method === 'authorization.revoke' && data.method === request.method) {
     if (data.grant.grantId !== request.grantId || (data.disposition === 'already_consumed' ? data.grant.state !== 'consumed' : data.grant.state !== 'revoked'))

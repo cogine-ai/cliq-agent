@@ -19,7 +19,8 @@ export const INSTALLED_RUNTIME_UPGRADE_PHASES = ['read_schema', 'recover_selecti
   'conversion_run_history_broker', 'conversion_run_seals', 'conversion_run_terminal', 'conversion_rows', 'conversion_death',
   'conversion_receipt', 'conversion_selection', 'conversion_acquisition', 'conversion_commit', 'conversion_publish',
   'conversion_release', 'publish_selection', 'target_open', 'target_services',
-  'target_control', 'output', 'unknown'] as const;
+  'target_control', 'output', 'unknown', 'output_selection_open', 'output_stdio_open', 'output_write', 'output_join',
+  'output_selection_close'] as const;
 export type InstalledRuntimeUpgradePhase = typeof INSTALLED_RUNTIME_UPGRADE_PHASES[number];
 const recoveryPhases = Object.freeze({
   cut: 'conversion_run_cut', preparation: 'conversion_run_preparation', spec: 'conversion_run_spec', context: 'conversion_run_context',
@@ -48,7 +49,8 @@ const platformCodes = Object.freeze({
 } as const);
 const nativeCodes = Object.freeze({ ERR_CLIQ_RESOURCE_RETIREMENT: 'NATIVE_RESOURCE_RETIREMENT',
   ERR_CLIQ_CREDENTIAL_SCOPE: 'NATIVE_CREDENTIAL_SCOPE_REFUSED', ERR_CLIQ_CREDENTIAL_BUSY: 'NATIVE_CREDENTIAL_BUSY',
-  ERR_DLOPEN_FAILED: 'DLOPEN_FAILED' } as const);
+  ERR_DLOPEN_FAILED: 'DLOPEN_FAILED', ERR_CLIQ_STATE_OWNER_NATIVE: 'NATIVE_STATE_OWNER_REFUSED',
+  EPIPE: 'PIPE_CLOSED', EBADF: 'BAD_DESCRIPTOR' } as const);
 const originalCodes = ['ARTIFACT_MISMATCH', 'RECOVERY_REQUIRED', 'LEASE_FENCED', 'STATE_TRANSITION_INVALID',
   'UNSUPPORTED_PLATFORM', 'CLOCK_UNTRUSTED', 'BUDGET_EXHAUSTED', 'ENOENT', 'EACCES', 'unclassified'] as const;
 const codes = [...originalCodes,

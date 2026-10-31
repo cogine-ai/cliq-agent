@@ -96,8 +96,6 @@ export async function resolveDeliverySourceCapture(driver: SqliteDriver, artifac
   const admitted = decodeSourceManifest(await readCanonicalArtifact(artifacts, source.spec.baseWorkspaceManifestRef));
   const classification = await readSourceProjectionData(artifacts, admitted, projection, profile.resources, signal);
   const sourceIncludes = deliverySourceIncludes(projection, classification.includeAuthorizations, request.sourceReadGrantIds ?? []);
-  if (request.verifierExecutionGrantIds.length)
-    throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'delivery verifier template admission is not implemented');
   return immutableSnapshot({ method: 'run.apply', requestId: request.requestId, requestDigest: request.requestDigest,
     admissionKey: request.admissionKey, budgets: request.budgets, sessionId: session.id, expectedContextRevision: session.contextRevision,
     workspacePath: workspace.canonicalRootPath, sourceIncludes: [...sourceIncludes], sourceExcludes: projection.explicitExcludes,
@@ -491,8 +489,7 @@ export async function readRetainedSourceInspectionTarget(artifacts: ArtifactCata
           !Number.isSafeInteger(targetData.expectedContextRevision) || (targetData.expectedContextRevision as number) < 1 ||
           (targetData.expectedContextRevision as number) > source.session.contextRevision ||
           source.spec.sandboxProfileRef !== targetData.sandboxProfileRef || source.assembly.runtime.runtimeBundleRef !== targetData.runtimeBundleRef ||
-          projection.frozenIgnoreRulesDigest !== rules.rulesDigest ||
-          original.verifierExecutionGrantIds.length)
+          projection.frozenIgnoreRulesDigest !== rules.rulesDigest)
         invalid('retained delivery capture selection differs from its exact original source');
     }
     return { target: targetData, original, bundle };

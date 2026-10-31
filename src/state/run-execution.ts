@@ -2005,8 +2005,24 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       operationPhase = 'preparing';
       let preparedVerifier: Extract<Awaited<ReturnType<typeof continuation.prepareVerifier>>, { disposition: 'prepared' }> | undefined;
       let claimedVerifier: Awaited<ReturnType<typeof continuation.claimVerifier>> | undefined;
+      const preparePermission = async (expectedRunRevision: number): Promise<Run | undefined> => {
+        const selected = await continuation.prepareVerifierPermission({ expectedRunRevision }, signal);
+        if (selected.disposition === 'authorized') return undefined;
+        if (selected.disposition === 'retirement_required') {
+          const current = activeWorker;
+          if (!current || !worker || ownedLaunchId !== current.activated.launch.launchId)
+            throw new KernelStorageError('LEASE_FENCED', 'verifier selection cannot retire another original worker');
+          const proof = await retireToCheckpoint(current, selected.checkpointId, signal);
+          await continuation.retireVerifierSelection({ expectedRunRevision: selected.run.revision,
+            checkpointId: selected.checkpointId, checkpoint: proof.postEffect });
+          await retireWorkerResources(); return readRun(driver, runId);
+        }
+        if (selected.disposition === 'policy_denied') return (await continuation.stopForVerifierPolicyDenial({ expectedRunRevision: selected.run.revision })).run;
+        return selected.run;
+      };
       const work = (async () => {
         signal.throwIfAborted();
+        const waiting = await preparePermission(expectedRunRevision); if (waiting) return waiting;
         const selected = await readRecoveryClosure(driver, reads, runId);
         signal.throwIfAborted();
         const progress = await readVerifierProgress(driver, reads, selected);
@@ -2021,10 +2037,9 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         const currentWorker = worker, run = readRun(driver, runId);
         const prepared = await continuation.prepareVerifier({ expectedRunRevision: run.revision, leaseEpoch: run.leaseEpoch }, signal);
         if (prepared.disposition !== 'prepared') {
-          const stopped = await continuation.stopForVerifierPolicyDenial({ expectedRunRevision: prepared.run.revision });
-          const checkpointId = stopCheckpointId(runId, stopped.run.stopIntentRef!);
-          const proof = await retireToCheckpoint(current, checkpointId, signal);
-          return (await continuation.commitTerminalStop({ expectedRunRevision: readRun(driver, runId).revision, checkpoint: proof.postEffect })).run;
+          const waiting = await preparePermission(prepared.run.revision);
+          if (!waiting) throw new KernelStorageError('REVISION_CONFLICT', 'verifier selection changed after activation');
+          return waiting;
         }
         preparedVerifier = prepared;
         signal.throwIfAborted();
@@ -2037,7 +2052,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           opId: prepared.entry.opId, attempt: prepared.entry.attempt, dispatchId, sandboxLaunchSpecRef }, signal);
         claimedVerifier = claimed; operationPhase = 'claimed';
         const grant = await artifacts.readCanonical<import('../kernel/verifier-invocation.js').VerifierOperationGrantV1>(claimed.entry.grantRef!);
-        const evidence = await artifacts.readCanonical<import('../kernel/verifier-invocation.js').VerifierPolicyChannelEvidenceV1>(grant.provenance.channelEvidenceRef);
+        const evidence = claimed.evidence;
         const live = assertLiveDispatchState(driver, owner, runId, prepared.run.revision, prepared.run.leaseEpoch, sampleCanonicalNow());
         const closure = await readVerifierLaunchClosure(artifacts, assertActiveStateOwner(driver, owner), { ...live, prepared: prepared.entry,
           request: claimed.request, target: claimed.target, grant, evidence, dispatchId, sandboxLaunchSpecRef }, bootstrap!.releaseKeys, signal, driver);

@@ -6,7 +6,10 @@ import type { RunAssemblyV1, RunSpec, VerifierSpec } from '../kernel/types.js';
 import type { VerifierCommandV1, VerifierEnvironmentV1 } from '../kernel/verifier.js';
 import { readCanonicalArtifact } from './agent-context.js';
 import type { ArtifactCatalog, PublishedArtifact } from './artifacts.js';
-import { readAuthorizationHistory, type AuthorizationRuntime } from './authorization.js';
+import { readAuthorizationHistory, readVerifierExecutionAuthorizationHistory, type AuthorizationRuntime } from './authorization.js';
+import { composeVerifierTemplate, mapDeliveryVerifierRequests, readAdmittedVerifierTemplates, readOriginalVerifierRequests,
+  verifierRequestCoreDigest, verifierTemplateRoots } from './verifier-template.js';
+import type { VerifierAuthorizationTemplateV1, VerifierTemplateRootV1 } from '../kernel/verifier-invocation.js';
 import { authorizationGrantCore, decodeAuthorizationConsumptionReceipt, decodeAuthorizationGrant, VerifierAuthorizationError } from './authorization-artifacts.js';
 import { KernelStorageError } from './errors.js';
 import { guestToolchainRoots, readRetainedVerifierToolchain, type RetainedVerifierToolchain } from './guest-toolchain.js';
@@ -60,14 +63,14 @@ export function assertSupportedVerifierRequests(requests: readonly VerifierReque
   assertVerifierRequestData(requests);
   if (!Array.isArray(requests) || requests.length > 32 || new Set(requests.map(request => request.id)).size !== requests.length ||
       new Set(requests.map(request => request.identityReadGrantId)).size !== requests.length) throw new TypeError('verifier identities must be bounded and unique');
-  if (requests.length && mode !== 'yolo') throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');
+  if (!['default', 'accept-edits', 'plan', 'yolo'].includes(mode)) throw new TypeError('unknown verifier policy mode');
   for (const request of requests) {
     if (!request || typeof request !== 'object' || Array.isArray(request) || !exactKeys(request,
       ['id', 'version', 'required', 'executable', 'argv', 'cwd', 'env', 'writableEphemeralPaths', 'identityReadGrantId',
         ...(request.executionGrantId === undefined ? [] : ['executionGrantId']), ...(request.timeoutMs === undefined ? [] : ['timeoutMs']),
         ...(request.retries === undefined ? [] : ['retries']), ...(request.outputLimitBytes === undefined ? [] : ['outputLimitBytes'])]) ||
         typeof request.required !== 'boolean') throw new TypeError('verifier request has unknown or missing fields');
-    if (request.executionGrantId !== undefined || request.executable.kind !== 'toolchain' || request.executable.toolId !== 'node' ||
+    if (request.executable.kind !== 'toolchain' || request.executable.toolId !== 'node' ||
         request.writableEphemeralPaths.length || Object.keys(request.env).length || request.argv.length !== 3 ||
         request.argv[0]?.kind !== 'non_secret_literal' || request.argv[0].value !== '--test' ||
         request.argv[1]?.kind !== 'non_secret_literal' || request.argv[1].value !== '--test-concurrency=1' ||
@@ -97,10 +100,15 @@ Readonly<{ manifestRef: string; manifestDigest: string }> | undefined {
   for (const request of requests) {
     signal?.throwIfAborted();
     const grant = readAuthorizationGrant(driver, request.identityReadGrantId);
-    if (!grant || grant.ownerPrincipalId !== principalId || grant.state !== 'active')
+    const execution = request.executionGrantId === undefined ? undefined : readAuthorizationGrant(driver, request.executionGrantId);
+    if (!grant || grant.ownerPrincipalId !== principalId || (execution ? grant.state !== 'consumed' || execution.state !== 'active' ||
+        execution.ownerPrincipalId !== principalId || execution.target.kind !== 'verifier_execution' ||
+        execution.target.executionIdentityGrantId !== grant.grantId || execution.target.executionIdentityTargetDigest !== grant.targetDigest ||
+        execution.target.verifierRequestCoreDigest !== verifierRequestCoreDigest(request) : request.executionGrantId !== undefined || grant.state !== 'active'))
       throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');
+    const authority = execution ?? grant;
     const checkedAt = sampleCanonicalNow();
-    if (checkedAt < grant.createdAt || checkedAt >= grant.expiresAt) throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');
+    if (checkedAt < authority.createdAt || checkedAt >= authority.expiresAt) throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');
     const target = grant.target;
     if (target.kind !== 'execution_identity_read' || target.purpose !== 'verifier' || target.identity.kind !== 'guest_toolchain' ||
         request.executable.kind !== 'toolchain' || request.executable.toolId !== target.identity.toolId)
@@ -125,15 +133,23 @@ export async function readVerifierRequestIdentities(driver: SqliteDriver, artifa
   const resolved = [];
   for (const request of requests) {
     signal?.throwIfAborted();
-    const grant = readAuthorizationGrant(driver, request.identityReadGrantId);
-    if (!grant || grant.ownerPrincipalId !== principalId || (historical ? grant.state !== 'consumed' : grant.state !== 'active'))
+    const identityGrant = readAuthorizationGrant(driver, request.identityReadGrantId);
+    const grant = request.executionGrantId === undefined ? identityGrant : readAuthorizationGrant(driver, request.executionGrantId);
+    if (!identityGrant || !grant || grant.ownerPrincipalId !== principalId || identityGrant.ownerPrincipalId !== principalId ||
+        (historical ? grant.state !== 'consumed' : grant.state !== 'active'))
       throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');
     const checkedAt = historical?.admittedAt ?? sampleCanonicalNow();
     if (checkedAt < grant.createdAt || checkedAt >= grant.expiresAt) throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');
     reportInstalledVerifierPreparationPhase(onPreparationPhase, 'submit_assembly_verifier_history');
-    const history = await readAuthorizationHistory(driver, artifacts, owner, grant, runtime.releaseKeys, signal);
+    const history = request.executionGrantId === undefined
+      ? await readAuthorizationHistory(driver, artifacts, owner, grant, runtime.releaseKeys, signal)
+      : await readVerifierExecutionAuthorizationHistory(driver, artifacts, owner, grant, runtime.releaseKeys, signal);
     if (checkedAt < history.committedAt) throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');
-    const target = grant.target;
+    if (request.executionGrantId !== undefined && (grant.target.kind !== 'verifier_execution' || identityGrant.state !== 'consumed' ||
+        grant.target.executionIdentityGrantId !== identityGrant.grantId || grant.target.executionIdentityTargetDigest !== identityGrant.targetDigest ||
+        grant.target.verifierId !== request.id || grant.target.verifierRequestCoreDigest !== verifierRequestCoreDigest(request) ||
+        grant.target.maxAttemptsPerCandidate !== (request.retries ?? 0) + 1)) throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');
+    const target = identityGrant.target;
     if (target.kind !== 'execution_identity_read' || target.purpose !== 'verifier' || target.identity.kind !== 'guest_toolchain' ||
         request.executable.kind !== 'toolchain' || request.executable.toolId !== target.identity.toolId)
       throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');
@@ -149,7 +165,7 @@ export async function readVerifierRequestIdentities(driver: SqliteDriver, artifa
       if (!same(receipt.consumer, { kind: 'run_admission', runId: historical.runId, admissionIntentDigest: historical.admissionIntentDigest }) ||
           receipt.consumedAt !== historical.admittedAt) throw new TypeError('verifier identity was consumed by another admission');
     }
-    resolved.push({ request, grant, selected, creationCommittedAt: history.committedAt });
+    resolved.push({ request, grant, identityGrant, selected, creationCommittedAt: history.committedAt });
   }
   if (new Set(resolved.map(({ selected }) => selected.manifestRef)).size > 1)
     throw new VerifierAuthorizationError('UNSUPPORTED_EXECUTION_IDENTITY');
@@ -315,7 +331,8 @@ export async function prepareInstalledVerifierAssembly(driver: SqliteDriver, art
   const metadata = await publishVerifierAssembly(artifacts, composed, input.assembly, signal);
   return { spec: composed.spec, specRef: composed.specRef, metadata, resolved };
 }
-type VerifierConsumer = { runId: string; admissionIntentDigest: string; admittedAt: string };
+type VerifierConsumer = { runId: string; admissionIntentDigest: string; admittedAt: string;
+  deadlineAt?: string; maxCandidateGenerations?: number; sourceProjectionRef?: string; verifierIndices?: readonly number[] };
 function composeVerifierConsumption({ grant, creationCommittedAt }: Awaited<ReturnType<typeof resolveVerifierSpec>>['resolved'][number],
   input: VerifierConsumer) {
   if (grant.state !== 'active' || input.admittedAt < creationCommittedAt || input.admittedAt >= grant.expiresAt)
@@ -330,8 +347,9 @@ function composeVerifierConsumption({ grant, creationCommittedAt }: Awaited<Retu
   return { prior: grant, next, receipt };
 }
 function verifierConsumptionResult(transitions: Array<ReturnType<typeof composeVerifierConsumption> & { artifact: PublishedArtifact }>,
-  input: VerifierConsumer) {
-  return { metadata: transitions.map(transition => transition.artifact), refs: transitions.map(transition => transition.artifact.ref),
+  input: VerifierConsumer, templates: VerifierAuthorizationTemplateV1[] = [], templateMetadata: PublishedArtifact[] = []) {
+  return { metadata: [...transitions.map(transition => transition.artifact), ...templateMetadata], refs: transitions.map(transition => transition.artifact.ref),
+    templates: verifierTemplateRoots(templates),
     commit(connection: SqliteConnection, now: string) {
       for (const { prior, next } of transitions) {
         if (!same(readAuthorizationGrant(connection, prior.grantId), prior) || now < input.admittedAt || now >= prior.expiresAt)
@@ -344,15 +362,40 @@ function verifierConsumptionResult(transitions: Array<ReturnType<typeof composeV
 export async function prepareVerifierConsumption(artifacts: ArtifactCatalog, prepared: Awaited<ReturnType<typeof prepareVerifierSpec>>,
   input: VerifierConsumer, signal?: AbortSignal) {
   signal?.throwIfAborted();
-  const transitions = [];
-  for (const resolved of prepared.resolved) {
+  const transitions = [], templates: VerifierAuthorizationTemplateV1[] = [], templateMetadata: PublishedArtifact[] = [];
+  for (const [verifierIndex, resolved] of prepared.resolved.entries()) {
     signal?.throwIfAborted();
     const transition = composeVerifierConsumption(resolved, input);
     const artifact = await artifacts.publishCanonical(transition.receipt, 'cliq-authorization-consumption-receipt-v1');
     signal?.throwIfAborted();
     transitions.push({ ...transition, artifact });
+    if (resolved.request.executionGrantId !== undefined) {
+      if (!input.deadlineAt || !input.sourceProjectionRef || !input.maxCandidateGenerations) throw new TypeError('verifier template lost its exact admission bounds');
+      const template = composeVerifierTemplate({ runId: input.runId, deadlineAt: input.deadlineAt, sourceProjectionRef: input.sourceProjectionRef,
+        spec: prepared.spec, verifierIndex: input.verifierIndices?.[verifierIndex] ?? verifierIndex, request: resolved.request, grant: resolved.grant, receiptRef: artifact.ref,
+        maxCandidateGenerations: input.maxCandidateGenerations });
+      signal?.throwIfAborted(); templateMetadata.push(await artifacts.publishCanonical(template, template.format));
+      templates.push(template);
+    }
   }
-  return verifierConsumptionResult(transitions, input);
+  return verifierConsumptionResult(transitions, input, templates, templateMetadata);
+}
+
+/** Delivery consumes only explicitly supplied fresh grants. Original identity
+ * and command bytes remain the source, never another Run's execution permit. */
+export async function prepareDeliveryVerifierConsumption(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
+  runtime: AuthorizationRuntime, input: { sourceRunId: string; sourceAssembly: RunAssemblyV1; spec: RunSpec;
+    grantIds: readonly string[]; principalId: string; consumer: VerifierConsumer }, signal?: AbortSignal) {
+  if (!input.grantIds.length) return undefined;
+  const mapped = await mapDeliveryVerifierRequests(driver, artifacts, input, signal);
+  const resolved = await readVerifierRequestIdentities(driver, artifacts, owner, runtime, input.principalId, mapped.map(value => value.request), undefined, signal);
+  const original = await readOriginalVerifierRequests(driver, artifacts, input.sourceRunId, signal);
+  const composed = composeVerifierSpec({ requests: original, assembly: input.sourceAssembly, sourceProjectionRef: input.spec.sourceProjectionRef,
+    toolchain: resolved[0]?.selected });
+  if (composed.specRef !== input.spec.verifierSpecRef) throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');
+  return prepareVerifierConsumption(artifacts, { spec: composed.spec, specRef: composed.specRef, metadata: [], resolved },
+    { ...input.consumer, sourceProjectionRef: input.spec.sourceProjectionRef, maxCandidateGenerations: 1,
+      verifierIndices: mapped.map(value => value.verifierIndex) }, signal);
 }
 
 /** Data publication after the fresh resolver, never authorization by an
@@ -363,6 +406,11 @@ async function publishInstalledVerifierAdmission(artifacts: ArtifactCatalog, res
   signal?.throwIfAborted();
   if (composed.specRef !== expectedSpecRef)
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'verifier spec differs from the authorized public command and environment');
+  if (resolved.some(value => value.request.executionGrantId !== undefined)) {
+    const preparation = { spec: composed.spec, specRef: composed.specRef,
+      metadata: await publishVerifierArtifacts(artifacts, composed, undefined, signal), resolved };
+    return { preparation, consumption: await prepareVerifierConsumption(artifacts, preparation, consumer, signal) };
+  }
   if (composed.spec.verifiers.length !== 1 || composed.artifacts.length !== 3 || resolved.length !== 1)
     throw new TypeError('one verifier requires three artifacts and one original grant');
   const transition = composeVerifierConsumption(resolved[0]!, consumer), [command, environment, spec] = composed.artifacts;
@@ -394,7 +442,7 @@ export async function prepareInstalledVerifierAdmission(driver: SqliteDriver, ar
 /** Reproduce the original frozen admission, never reconstruct lost commands or
  * derive authority from today's public request/channel/installed selection. */
 export async function validateVerifierRunAdmission(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
-  runtime: AuthorizationRuntime, runId: string, signal?: AbortSignal): Promise<{ authorizationReceiptRefs: string[] }> {
+  runtime: AuthorizationRuntime, runId: string, signal?: AbortSignal): Promise<{ authorizationReceiptRefs: string[]; verifierTemplates?: VerifierTemplateRootV1[] }> {
   signal?.throwIfAborted();
   const run = readRun(driver, runId), spec = await readCanonicalArtifact<RunSpec>(artifacts, run.specRef);
   if (run.parentRunId) {
@@ -409,12 +457,22 @@ export async function validateVerifierRunAdmission(driver: SqliteDriver, artifac
         original.source.assembly.runtime.runtimeBundleRef !== canonicalSha256(runtime.bundle) ||
         original.source.assembly.runtime.runtimeBundleManifestDigest !== runtime.bundle.manifestDigest)
       throw new TypeError('delivery verifier admission changed its original retained source runtime');
-    return { authorizationReceiptRefs: [] };
+    const principalId = (await import('./rows.js')).readSessionPrincipalId(driver, run.sessionId);
+    const mapped = await mapDeliveryVerifierRequests(driver, artifacts, { sourceRunId: original.source.run.id, spec,
+      grantIds: original.request.verifierExecutionGrantIds, principalId }, signal);
+    const resolved = await readVerifierRequestIdentities(driver, artifacts, owner, runtime, principalId,
+      mapped.map(value => value.request), { runId, admissionIntentDigest: (await import('../kernel/control-apply.js')).runApplyIntentDigest(principalId, original.request),
+        admittedAt: run.createdAt }, signal);
+    return { authorizationReceiptRefs: resolved.map(value => value.grant.state === 'consumed' ? value.grant.consumptionReceiptRef : ''),
+      ...(original.verifierTemplates.length ? { verifierTemplates: original.verifierTemplates } : {}) };
   }
   const { readRootRunAdmissionOrigin } = await import('./run-admission-origin.js');
   const original = await readRootRunAdmissionOrigin(driver, artifacts, runId, { signal });
   const { verifierSpec: frozen, principalId, verifierRequests: requests, admissionIntentDigest: intent } = original;
-  if (!frozen.verifiers.length) return { authorizationReceiptRefs: [] };
+  if (!frozen.verifiers.length) {
+    original.assertUnchanged(driver); signal?.throwIfAborted();
+    return { authorizationReceiptRefs: original.authorizationReceiptRefs };
+  }
   const assembly = decodeRetainedRunAssembly(await readCanonicalArtifact(artifacts, spec.assemblyRef));
   const bundle = await readCanonicalArtifact<AuthorizationRuntime['bundle']>(artifacts, assembly.runtime.runtimeBundleRef);
   const policy = await readCanonicalArtifact<{ mode: string }>(artifacts, spec.policyRef);
@@ -424,7 +482,9 @@ export async function validateVerifierRunAdmission(driver: SqliteDriver, artifac
     { runId, admissionIntentDigest: intent, admittedAt: run.createdAt }, signal);
   if (prepared.specRef !== spec.verifierSpecRef || !same(prepared.spec, frozen)) throw new TypeError('verifier Run changed its original command/environment/spec');
   const authorizationReceiptRefs = prepared.resolved.map(({ grant }) => grant.state === 'consumed' ? grant.consumptionReceiptRef : '');
-  if (!same(authorizationReceiptRefs, original.authorizationReceiptRefs)) throw new TypeError('verifier original consumption changed');
+  if (!same(authorizationReceiptRefs, original.authorizationReceiptRefs.slice(0, requests.length))) throw new TypeError('verifier original consumption changed');
+  const templates = await readAdmittedVerifierTemplates(driver, artifacts, { run, spec, requests: requests.map((request, verifierIndex) => ({ request, verifierIndex })),
+    admissionIntentDigest: intent, principalId });
   original.assertUnchanged(driver); signal?.throwIfAborted();
-  return { authorizationReceiptRefs };
+  return { authorizationReceiptRefs: original.authorizationReceiptRefs, ...(templates.roots.length ? { verifierTemplates: templates.roots } : {}) };
 }

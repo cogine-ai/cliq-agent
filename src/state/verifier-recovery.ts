@@ -3,7 +3,8 @@ import { digestOmitting, identityHash, parseCanonicalTime } from '../kernel/iden
 import type { ProcessContainment, ProcessContainmentDeathEvidenceV1 } from '../kernel/execution.js';
 import type { FinalCandidateItem, InvocationJournalEntry, RecoveryClosureV1, RunFrontier, VerifierSpec } from '../kernel/types.js';
 import type { VerificationClosureV1, VerifierPlan } from '../kernel/result.js';
-import type { VerificationReceipt, VerifierResultItem } from '../kernel/verifier.js';
+import type { VerificationReceipt, VerifierResultItem, VerifierSkipItem } from '../kernel/verifier.js';
+import { readVerifierApproval, readVerifierGrant, readVerifierSkip, verifierPolicyItem } from './verifier-permission-history.js';
 import type { VerifierOperationGrantV1, VerifierPolicyChannelEvidenceV1, VerifierPolicyDecisionItem } from '../kernel/verifier-invocation.js';
 import type { RunPolicySnapshotV1 } from '../kernel/tool-authorization.js';
 import { decodeRetainedRunAssembly } from '../model/run-assembly.js';
@@ -22,7 +23,7 @@ import { readSupervisorInspector } from './supervisor-inspector.js';
 import { readRequiredWorkerLaunch } from './repositories/worker-launches.js';
 import { readRetiredGenerationSource } from './generation-retirement.js';
 import { validateMatchingWorkerDeath, validateRetainedWorkerSeal } from './tool-checkpoint.js';
-import { decodeVerificationReceipt, decodeVerifierCommand, decodeVerifierEnvironment, decodeVerifierResultItem, decodeVerifierSpec } from './verifier-artifacts.js';
+import { decodeVerificationReceipt, decodeVerifierCommand, decodeVerifierEnvironment, decodeVerifierResultItem, decodeVerifierSpec, decodeVerifierSkipItem } from './verifier-artifacts.js';
 import { loadVerifierPolicy, planVerifierRequest, verifierOperationId } from './verifier-policy.js';
 import { isZeroBudget } from './invariants.js';
 
@@ -43,6 +44,7 @@ export type VerifierProgressEntry = {
   planEntry: VerifierPlan['entries'][number]; specEntry: VerifierSpec['verifiers'][number];
   resultItem?: VerifierResultItem; receipt?: VerificationReceipt; terminalJournal?: InvocationJournalEntry;
   disposition?: LocalEntry['disposition'];
+  skipItem?: VerifierSkipItem; skipCheckpointId?: string;
 };
 export type VerifierProgress = {
   candidate: FinalCandidateItem; planRef: string; plan: VerifierPlan; spec: VerifierSpec;
@@ -152,6 +154,12 @@ export async function readVerifierProgress(driver: SqliteDriver, artifacts: Arti
   const principalId = readSessionPrincipalId(driver, session.id);
   const dependency = cut.runSpec.dependencyPolicyRef ? (await (await import('./dependency-history.js')).readDependencyHistory(driver, artifacts, cut)).get(selectedId) : undefined;
   if (cut.runSpec.dependencyPolicyRef && !dependency) throw new TypeError('verifier lacks its independently read complete dependency history');
+  const skipRows = driver.prepare("SELECT item_id,payload_ref FROM items WHERE run_id=? AND kind='verifier_skip' ORDER BY item_seq")
+    .all<{ item_id: string; payload_ref: string }>(cut.run.id);
+  const skips = await artifacts.mapReads(skipRows, async row => {
+    if (!cut.items.some(item => item.itemId === row.item_id && item.payloadRef === row.payload_ref)) throw new TypeError('verifier skip escaped its exact item cut');
+    return decodeVerifierSkipItem(await readCanonicalArtifact(artifacts, row.payload_ref));
+  });
   const entries: VerifierProgressEntry[] = [];
   for (const [index, planEntry] of plan.entries.entries()) {
     const specEntry = spec.verifiers[index]!;
@@ -167,8 +175,8 @@ export async function readVerifierProgress(driver: SqliteDriver, artifacts: Arti
     const planned = planVerifierRequest(context), opId = verifierOperationId(cut.run.id, selectedId, planRef, index);
     const operation = cut.journal.filter(entry => entry.opId === opId);
     if (operation.length && dependency && !dependency.ready) throw new TypeError('verifier cannot overtake original dependency readiness');
-    if (operation.length && entries.some(entry => !entry.disposition || entry.receipt?.outcome === 'infra_failed' &&
-        cut.journal.filter(row => row.opId === entry.terminalJournal?.opId && row.phase === 'dispatch_claimed').length < entry.planEntry.maxAttempts))
+    if (operation.length && entries.some(entry => entry.disposition?.kind !== 'advisory_skipped' && (!entry.disposition || entry.receipt?.outcome === 'infra_failed' &&
+        cut.journal.filter(row => row.opId === entry.terminalJournal?.opId && row.phase === 'dispatch_claimed').length < entry.planEntry.maxAttempts)))
       throw new TypeError('verifier Journal advances before its preceding frozen plan entries are eligible');
     const progress: VerifierProgressEntry = { planEntry, specEntry }; entries.push(progress);
     for (const entry of operation) if (entry.opKind !== 'verifier' || entry.requestRef !== canonicalSha256(planned.request) || entry.target !== planned.request.targetRef)
@@ -183,6 +191,14 @@ export async function readVerifierProgress(driver: SqliteDriver, artifacts: Arti
     if (uses.length > planEntry.maxAttempts) throw new TypeError('verifier dispatch exceeds its frozen total attempt bound');
     const evaluator = loadVerifierPolicy({ policy, policyRef: cut.runSpec.policyRef, assembly, assemblyRef: cut.runSpec.assemblyRef,
       principalId, workspaceIdentityDigest: workspace.identityDigest, context });
+    const permission = { run: cut.run, spec: cut.runSpec, request: planned.request, target: planned.target, evaluator };
+    const skipped = skips.filter(item => item.candidateItemId === selectedId && item.verifierIndex === index);
+    if (skipped.length > 1) throw new TypeError('verifier has multiple advisory skip decisions');
+    if (skipped[0]) {
+      const original = await readVerifierSkip(driver, artifacts, permission, skipped[0]);
+      progress.skipItem = original.skip; progress.skipCheckpointId = original.checkpoint.id;
+      progress.disposition = { kind: 'advisory_skipped', verifierSkipItemId: original.skip.itemId, decisionRef: original.skip.decisionRef };
+    }
     let previous: { terminal: InvocationJournalEntry; claimed: boolean; receipt?: VerificationReceipt; checkpointAt?: string } | undefined;
     for (const [attemptIndex, prepared] of preparations.entries()) {
       const reservation = { modelTokens: 0, costMicros: 0, toolCalls: 1, repairAttempts: 0 };
@@ -202,25 +218,23 @@ export async function readVerifierProgress(driver: SqliteDriver, artifacts: Arti
             previous.checkpointAt !== undefined && prepared.timestamp < previous.checkpointAt) ||
           attempt.some(entry => entry.grantRef !== prepared.grantRef || entry.leaseEpoch !== prepared.leaseEpoch || entry.replayClass !== prepared.replayClass ||
             entry.timestamp < prepared.timestamp)) throw new TypeError('verifier attempt has a mismatched or illegal Journal lifecycle');
-      const grant = await readCanonicalArtifact<VerifierOperationGrantV1>(artifacts, prepared.grantRef);
-      if (grant.provenance.kind !== 'policy_snapshot') throw new TypeError('verifier grant provenance is not implemented');
-      const evidenceRef = grant.provenance.channelEvidenceRef;
-      const evidence = await readCanonicalArtifact<VerifierPolicyChannelEvidenceV1>(artifacts, evidenceRef);
-      requireEqual(grant, evaluator.grant(planned.request, planned.target, evidence, grant.issuedAt, grant.expiresAt), 'retained verifier grant');
+      const { grant, evidence } = await readVerifierGrant(driver, artifacts, permission, prepared.grantRef, cut.items);
+      const evidenceRef = canonicalSha256(evidence);
       if (grant.issuedAt < candidate.createdAt || grant.expiresAt > cut.run.deadlineAt || prepared.timestamp < grant.issuedAt ||
           prepared.timestamp >= grant.expiresAt || claim && (claim.timestamp < grant.issuedAt || claim.timestamp >= grant.expiresAt ||
             !claim.sandboxLaunchSpecRef || !claim.dispatchId || !claim.supervisorInstanceId || !claim.stateOwnerEpoch))
         throw new TypeError('verifier attempt exceeds its exact grant, original claim or candidate lifetime');
-      const decisionId = identityHash('cliq-verifier-policy-item-v1', cut.run.id, opId, evidenceRef);
-      const decisionRows = cut.items.filter(row => row.itemId === decisionId), decisionRow = decisionRows[0];
-      const decision: VerifierPolicyDecisionItem = { schemaVersion: 1, kind: 'policy_decision', subjectKind: 'verifier_launch',
-        itemId: decisionId, runId: cut.run.id, opId, principalId, decisionRef: evidenceRef, policyChannelEvidenceRef: evidenceRef,
-        policyChannelEvidenceDigest: evidence.evidenceDigest, createdAt: evidence.evaluatedAt,
-        decisionSource: 'direct_policy', decision: 'allow', grantRef: prepared.grantRef };
-      if (decisionRows.length !== 1 || !decisionRow || decisionRow.itemSeq <= candidates[0]!.itemSeq ||
-          decisionRow.createdAt !== decision.createdAt || decision.createdAt > prepared.timestamp || decision.createdAt < candidate.createdAt)
-        throw new TypeError('verifier preparation lacks its unique original owned policy decision');
-      requireEqual(await readCanonicalArtifact(artifacts, decisionRow.payloadRef), decision, 'owned verifier policy decision');
+      let decisionRow = candidates[0]!;
+      if (grant.provenance.kind !== 'verifier_template') {
+        const approved = grant.provenance.kind === 'user_approval' ? await readVerifierApproval(driver, artifacts, permission, grant.provenance.decisionRef) : undefined;
+        const decision = verifierPolicyItem(permission, evidence, approved ? canonicalSha256(approved.decision) : evidenceRef,
+          approved?.decision.createdAt ?? evidence.evaluatedAt, grant, approved?.decision);
+        const decisionRows = cut.items.filter(row => row.itemId === decision.itemId), selected = decisionRows[0];
+        if (decisionRows.length !== 1 || !selected || selected.itemSeq <= candidates[0]!.itemSeq || selected.createdAt !== decision.createdAt ||
+            decision.createdAt > prepared.timestamp || decision.createdAt < candidate.createdAt)
+          throw new TypeError('verifier preparation lacks its unique original owned policy decision');
+        requireEqual(await readCanonicalArtifact(artifacts, selected.payloadRef), decision, 'owned verifier policy decision'); decisionRow = selected;
+      }
       if (claim) {
         if (!isZeroBudget(claim.budgetDelta)) throw new TypeError('verifier claim changes its reserved budget');
         const firstTerminal = attempt.find(entry => ['completed', 'failed', 'unknown'].includes(entry.phase));
@@ -301,9 +315,10 @@ export async function readVerifierProgress(driver: SqliteDriver, artifacts: Arti
     }
     if (operation.some(entry => entry.attempt >= preparations.length || entry.attempt < 0))
       throw new TypeError('verifier Journal has an unowned attempt');
+    if (progress.skipItem) progress.disposition = { kind: 'advisory_skipped', verifierSkipItemId: progress.skipItem.itemId, decisionRef: progress.skipItem.decisionRef };
   }
-  const nextVerifierIndex = entries.findIndex(entry => !entry.receipt || entry.receipt.outcome === 'infra_failed' &&
-    cut.journal.filter(row => row.opId === entry.terminalJournal?.opId && row.phase === 'dispatch_claimed').length < entry.planEntry.maxAttempts);
+  const nextVerifierIndex = entries.findIndex(entry => entry.disposition?.kind !== 'advisory_skipped' && (!entry.receipt || entry.receipt.outcome === 'infra_failed' &&
+    cut.journal.filter(row => row.opId === entry.terminalJournal?.opId && row.phase === 'dispatch_claimed').length < entry.planEntry.maxAttempts));
   return { candidate, planRef, plan, spec, entries, nextVerifierIndex: nextVerifierIndex < 0 ? entries.length : nextVerifierIndex,
     complete: nextVerifierIndex < 0 && (!dependency || !!dependency.ready), ...(dependency ? { dependency } : {}) };
 }

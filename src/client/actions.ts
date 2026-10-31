@@ -79,8 +79,8 @@ export async function executeClientAction(app: ClientApplication, invocation: Cl
   }
   if (invocation.kind !== 'run') throw new TypeError('this local mode is not a client action');
   let intent = invocation.intent;
-  if (invocation.nodeCheck && (intent.policyMode !== 'yolo' || intent.verifiers.length))
-    throw new TypeError('the fixed Node check requires explicit yolo and no other verifier');
+  if (invocation.nodeCheck && intent.verifiers.length)
+    throw new TypeError('the fixed Node check cannot be combined with another verifier');
   if (!invocation.nodeCheck && !intent.verifiers.some(verifier => verifier.required) && !intent.allowUnverified) {
     if (!confirmUnverified || !await confirmUnverified()) throw new TypeError('explicit unverified consent is required');
     intent = { ...intent, allowUnverified: true };
@@ -93,6 +93,8 @@ export async function executeClientAction(app: ClientApplication, invocation: Cl
     sessionId = created.result.snapshot.session.id;
   }
   if (invocation.nodeCheck) {
+    // Selecting a required check requests its immutable identity only. The
+    // owning Run must separately authorize execution of each exact candidate.
     const authorized = accepted(await send(clientMutation({ method: 'authorization.create', decision: {
       kind: 'execution_identity_read', purpose: 'verifier', target: { kind: 'guest_toolchain',
         guestToolchainManifestId: invocation.nodeCheck.guestToolchainManifestId, toolId: 'node' } } })));

@@ -139,7 +139,6 @@ export function parseClientInvocation(argv: readonly string[], workspacePath: st
     const policyMode = p.take('--policy') ?? 'default', checkPath = p.take('--check-node');
     let nodeCheck: ClientNodeCheck | undefined;
     if (checkPath !== undefined) {
-      if (policyMode !== 'yolo') throw new TypeError('the fixed Node verifier requires explicit --policy yolo');
       if (Object.hasOwn(options, 'verifiers')) throw new TypeError('Node check cannot be combined with explicit verifiers');
       const guestToolchainManifestId = defaults?.guestToolchainManifestId;
       if (typeof guestToolchainManifestId !== 'string' || normalizeBoundedText(guestToolchainManifestId, 1, 128) !== guestToolchainManifestId)

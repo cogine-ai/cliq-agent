@@ -28,6 +28,7 @@ import { loadVerifierPolicy, planVerifierRequest, verifierOperationId } from '..
 import { verifierCheckpointId, verifierResultItemId, type VerifierProgress } from '../../../src/state/verifier-recovery.js';
 import { planVerifierRepair } from '../../../src/state/verifier-repair.js';
 import { assertInstalledVerifierRetirement, readInstalledVerifierInputs, type InstalledVerifierRetirementPhase, type InstalledVerifierOwnerHistoryReader } from './installed-verifier-evidence.js';
+import { assertInstalledInteractivePermission, assertInstalledTemplatePermission, type InstalledPermissionEvidence } from './installed-permission-evidence.js';
 
 type CaseKind = 'required_pass' | 'required_repair' | 'required_provider' | 'advisory_failure' | 'required_timeout';
 type ProcessIdentity = { role: 'namespace_init' | 'monitor' | 'subreaper'; pid: number; startTicks: string };
@@ -68,6 +69,7 @@ export async function assertInstalledVerifierOutcome(input: {
   readOwnerHistory: InstalledVerifierOwnerHistoryReader;
   caseKind: CaseKind; expectedFiles: readonly { path: string; before: string; after: string }[]; principalId: string;
   expectedGit?: true;
+  permission?: InstalledPermissionEvidence;
 }): Promise<InstalledVerifierOutcome> {
   let stage: InstalledVerifierDiagnosticStage = 'public_cut';
   try {
@@ -285,16 +287,34 @@ export async function assertInstalledVerifierOutcome(input: {
             attempt[0] === prepared && claims.length <= 1 && (!previous || previous.terminal.seq < prepared.seq && (!previous.checkpointAt || prepared.timestamp >= previous.checkpointAt)));
           check(attempt.every(entry => entry.grantRef === prepared.grantRef && entry.leaseEpoch === prepared.leaseEpoch && entry.replayClass === prepared.replayClass && entry.timestamp >= prepared.timestamp));
           const grant = await object<VerifierOperationGrantV1>(prepared.grantRef!);
+          let decisionRow = row;
+          if (grant.provenance.kind !== 'policy_snapshot') {
+            check(input.permission);
+            if (!input.permission) throw new Error('missing installed permission control audit');
+            if (grant.provenance.kind === 'verifier_template') {
+              await assertInstalledTemplatePermission({ evidence: input.permission, object, cut, principalId: input.principalId,
+                spec, grant, evaluator, request: planned.request, target: planned.target, candidateOrdinal: candidateIndex });
+            } else {
+              const decisionId = identityHash('cliq-verifier-policy-item-v1', run.id, opId, grant.provenance.decisionRef);
+              decisionRow = rowFor(decisionId);
+              await assertInstalledInteractivePermission({ evidence: input.permission, object, cut, principalId: input.principalId,
+                grant, policyItem: items[decisionRow.itemSeq - 1]!, evaluator, request: planned.request, target: planned.target });
+              check(decisionRow.itemSeq > row.itemSeq && decisionRow.createdAt <= prepared.timestamp && decisionRow.createdAt >= candidate.createdAt);
+              seenVerifierItems.add(decisionId);
+            }
+            check(grant.issuedAt >= candidate.createdAt && grant.expiresAt <= run.deadlineAt && prepared.timestamp >= grant.issuedAt && prepared.timestamp < grant.expiresAt);
+          } else {
           check(grant.provenance.kind === 'policy_snapshot');
           const channel = await object<VerifierPolicyChannelEvidenceV1>(grant.provenance.channelEvidenceRef);
           same(grant, evaluator.grant(planned.request, planned.target, channel, grant.issuedAt, grant.expiresAt));
           check(grant.issuedAt >= candidate.createdAt && grant.expiresAt <= run.deadlineAt && prepared.timestamp >= grant.issuedAt && prepared.timestamp < grant.expiresAt);
           const decisionId = identityHash('cliq-verifier-policy-item-v1', run.id, opId, grant.provenance.channelEvidenceRef);
-          const decisionRow = rowFor(decisionId), decision = items[decisionRow.itemSeq - 1]!;
+          decisionRow = rowFor(decisionId); const decision = items[decisionRow.itemSeq - 1]!;
           same(decision, { schemaVersion: 1, kind: 'policy_decision', subjectKind: 'verifier_launch', itemId: decisionId, runId: run.id, opId,
             principalId: input.principalId, decisionRef: grant.provenance.channelEvidenceRef, policyChannelEvidenceRef: grant.provenance.channelEvidenceRef,
             policyChannelEvidenceDigest: channel.evidenceDigest, createdAt: channel.evaluatedAt, decisionSource: 'direct_policy', decision: 'allow', grantRef: prepared.grantRef });
           check(decisionRow.itemSeq > row.itemSeq && decisionRow.createdAt <= prepared.timestamp && decisionRow.createdAt >= candidate.createdAt); seenVerifierItems.add(decisionId);
+          }
           previous = { terminal, claimed: !!claim };
           const firstTerminal = attempt.find(entry => ['unknown', 'completed', 'failed'].includes(entry.phase)); check(firstTerminal?.budgetSettlementRef);
           stage = 'verifier_settlement';
