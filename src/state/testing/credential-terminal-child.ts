@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { readTerminalCredentialSecret } from '../credential-terminal-input.js';
 
 const mode = process.argv[2];
-assert(['exact', 'edited', 'unicode', 'maximum', 'oversize', 'overflow', 'eof', 'interrupt', 'signal', 'cleanup_signal', 'timeout', 'prior_raw'].includes(mode!));
+assert(['exact', 'edited', 'unicode', 'maximum', 'edited_boundary', 'unicode_boundary', 'oversize', 'overflow', 'eof', 'interrupt', 'signal', 'cleanup_signal', 'timeout', 'prior_raw'].includes(mode!));
 process.stdin.pause();
 if (mode === 'prior_raw') process.stdin.setRawMode(true);
 const rawBefore = process.stdin.isRaw, pausedBefore = process.stdin.isPaused();
@@ -25,6 +25,8 @@ let bytes: Buffer | undefined, exact = false, outcome = 'refused', code: unknown
 try {
   bytes = await readTerminalCredentialSecret();
   const expected = mode === 'maximum' ? Buffer.alloc(65536, 107)
+    : mode === 'edited_boundary' ? Buffer.alloc(2048, 107)
+    : mode === 'unicode_boundary' ? Buffer.concat([Buffer.alloc(2047, 107), Buffer.from('终端')])
     : Buffer.from(mode === 'unicode' ? '  fixture-e\u0301-终端  ' : '  fixture-input-bytes  ');
   exact = bytes.equals(expected); expected.fill(0); outcome = 'read';
 } catch (error) { code = (error as { code?: unknown }).code; }

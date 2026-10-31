@@ -21,6 +21,8 @@ if mode in ['exact','prior_raw','cleanup_signal']:payload=b'  fixture-input-byte
 elif mode=='edited':payload=b'  fixture-input-byteX\x7fs  \r'
 elif mode=='unicode':payload='  fixture-e\u0301-终端  \r'.encode('utf8')
 elif mode=='maximum':payload=b'k'*65536+b'\r'
+elif mode=='edited_boundary':payload=b'k'*2047+b'X\x7fk\r'
+elif mode=='unicode_boundary':payload=b'k'*2047+'终端'.encode('utf8')+b'\r'
 elif mode=='oversize':payload=b'k'*65537+b'\r'
 elif mode=='overflow':payload=b'k'*98304+b'\r'
 elif mode=='eof':payload=b'\x04'
@@ -75,10 +77,11 @@ test('hidden terminal input refuses ordinary piped stdio without reading it', { 
   await assert.rejects(readTerminalCredentialSecret(), { code: 'INVALID_REQUEST' });
 });
 
-for (const mode of ['exact', 'edited', 'unicode', 'prior_raw', 'maximum']) test(`real hidden terminal preserves exact input and restores ownership (${mode})`, async () => {
+for (const mode of ['exact', 'edited', 'unicode', 'prior_raw', 'maximum', 'edited_boundary', 'unicode_boundary']) test(`real hidden terminal preserves exact input and restores ownership (${mode})`, async () => {
   const result = await terminal(mode);
   assert.equal(result.outcome, 'read'); assert.equal(result.exact, true, `exact terminal editing returned ${result.byteCount} bytes`);
-  assert.equal(result.byteCount, mode === 'maximum' ? 65536 : mode === 'unicode' ? Buffer.byteLength('  fixture-e\u0301-终端  ') : 23);
+  assert.equal(result.byteCount, mode === 'maximum' ? 65536 : mode === 'edited_boundary' ? 2048 : mode === 'unicode_boundary' ? 2053
+    : mode === 'unicode' ? Buffer.byteLength('  fixture-e\u0301-终端  ') : 23);
 });
 
 for (const mode of ['oversize', 'overflow', 'eof', 'interrupt', 'signal', 'cleanup_signal']) test(`real hidden terminal rejects and joins (${mode})`, async () => {

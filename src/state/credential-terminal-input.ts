@@ -1,5 +1,5 @@
-import { createInterface, type Interface, type Key } from 'node:readline';
-import { Transform, Writable } from 'node:stream';
+import { createInterface, emitKeypressEvents, type Interface, type Key } from 'node:readline';
+import { PassThrough, Transform, Writable } from 'node:stream';
 import { finished } from 'node:stream/promises';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
 
@@ -15,16 +15,22 @@ export async function readTerminalCredentialSecret(): Promise<Buffer> {
     throw new KernelStorageError('INVALID_REQUEST', 'credential prompt requires interactive stdin and stderr terminals');
   const wasRaw = input.isRaw, wasFlowing = input.readableFlowing === true;
   const muted = new Writable({ write(_bytes, _encoding, done) { done(); } });
+  const editorInput = new PassThrough();
   let reader: Interface | undefined, timer: ReturnType<typeof setTimeout> | undefined;
   let secret: Buffer | undefined, settled = false, rawBytes = 0, promptStarted = false, discarding = false, readerRetired = false;
-  let interrupted = false;
+  let interrupted = false, printable = '';
   let retirement: unknown;
   let resolve!: (value: Buffer) => void, reject!: (error: unknown) => void;
   const answer = new Promise<Buffer>((accept, refuse) => { resolve = accept; reject = refuse; });
   // A stream can report its first failure while setup or a fixed prompt write
   // is still joining. It must never become an unhandled promise rejection.
   void answer.catch(() => {});
+  const flushPrintable = () => {
+    if (!printable) return;
+    const text = printable; printable = ''; reader?.write(text);
+  };
   const closeReader = () => {
+    printable = '';
     if (!reader || readerRetired) return;
     readerRetired = true;
     try { reader.write('', { ctrl: true, name: 'u' }); }
@@ -49,11 +55,22 @@ export async function readTerminalCredentialSecret(): Promise<Buffer> {
       discarding = true; closeReader(); this.resume();
       if (retirement !== undefined) refuse();
     }
-    done(null, chunk);
+    // Decode with Node, but insert a paste's ordinary text as one public
+    // readline write. Node 22 otherwise rescans the growing hidden line for
+    // every keypress, making a valid maximum-size paste miss the deadline.
+    this.push(chunk); flushPrintable(); done();
   } });
-  const discardKey = (_text: string | undefined, key: Key) => {
-    if (discarding && (key.name === 'return' || key.name === 'enter' ||
-        key.ctrl && ['c', 'd', 'z'].includes(key.name ?? ''))) refuse();
+  const readKey = (text: string | undefined, key: Key) => {
+    if (discarding) {
+      if (key.name === 'return' || key.name === 'enter' ||
+          key.ctrl && ['c', 'd', 'z'].includes(key.name ?? '')) refuse();
+      return;
+    }
+    if (settled) return;
+    if (text && !key.ctrl && !key.meta && key.sequence === text && !/[\u0000-\u001f\u007f-\u009f]/u.test(text)) {
+      printable += text; return;
+    }
+    flushPrintable(); reader?.write(text ?? '', key);
   };
   const readerClosed = () => { readerRetired = true; if (!discarding) refuse(); };
   const writes: Promise<void>[] = [];
@@ -66,12 +83,12 @@ export async function readTerminalCredentialSecret(): Promise<Buffer> {
   };
   try {
     input.once('end', refuse); input.once('close', refuse); input.on('error', refuse);
-    output.on('error', refuse); muted.on('error', refuse); bridge.on('error', refuse);
+    output.on('error', refuse); muted.on('error', refuse); bridge.on('error', refuse); editorInput.on('error', refuse);
     for (const signal of signals) process.on(signal, interrupt);
     timer = setTimeout(refuse, INPUT_DEADLINE_MS);
     input.setRawMode(true);
-    reader = createInterface({ input: bridge, output: muted, terminal: true, historySize: 0 });
-    bridge.on('keypress', discardKey);
+    reader = createInterface({ input: editorInput, output: muted, terminal: true, historySize: 0 });
+    emitKeypressEvents(bridge); bridge.on('keypress', readKey);
     reader.once('close', readerClosed); reader.once('SIGINT', refuse); reader.once('SIGTSTP', refuse);
     reader.question('', value => {
       if (settled) return;
@@ -93,9 +110,10 @@ export async function readTerminalCredentialSecret(): Promise<Buffer> {
     closeReader(); input.unpipe(bridge); input.pause();
     input.removeListener('end', refuse); input.removeListener('close', refuse); input.removeListener('error', refuse);
     reader?.removeListener('close', readerClosed); reader?.removeListener('SIGINT', refuse); reader?.removeListener('SIGTSTP', refuse);
-    bridge.removeListener('keypress', discardKey);
-    if (!bridge.writableEnded) bridge.end(); bridge.resume(); muted.end();
-    const joined = await Promise.allSettled([...writes, finished(bridge, { cleanup: true }), finished(muted, { cleanup: true })]);
+    bridge.removeListener('keypress', readKey);
+    if (!bridge.writableEnded) bridge.end(); bridge.resume();
+    editorInput.end(); editorInput.resume(); muted.end();
+    const joined = await Promise.allSettled([...writes, finished(bridge, { cleanup: true }), finished(editorInput, { cleanup: true }), finished(muted, { cleanup: true })]);
     const failure = joined.find((result): result is PromiseRejectedResult => result.status === 'rejected');
     retirement ??= failure?.reason;
     try {
@@ -109,7 +127,7 @@ export async function readTerminalCredentialSecret(): Promise<Buffer> {
     // belong to the prompt. A signal after Enter still prevents the returned
     // secret from reaching credential preparation.
     for (const signal of signals) process.removeListener(signal, interrupt);
-    output.removeListener('error', refuse); muted.removeListener('error', refuse); bridge.removeListener('error', refuse);
+    output.removeListener('error', refuse); muted.removeListener('error', refuse); bridge.removeListener('error', refuse); editorInput.removeListener('error', refuse);
     if (retirement !== undefined) {
       secret?.fill(0);
       throw new ResourceRetirementError('credential prompt streams or terminal state did not retire', retirement);
