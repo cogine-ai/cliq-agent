@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { projectQualificationWorkflow } from '../../ci/testing/workflow-projection.mjs';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
@@ -69,7 +70,7 @@ test('the late mode uses the same fixed Delivery entry with diagnostics and no o
 });
 
 test('the late-result job is independent and free with the original bounds and complete recovery checks', () => {
-  const workflow = source('../../../.github/workflows/kernel-foundation.yml');
+  const workflow = projectQualificationWorkflow(source('../../../.github/workflows/kernel-foundation.yml'));
   const marker = '\n  linux-installed-delivery-late-result:\n', index = workflow.indexOf(marker);
   assert(index >= 0); assert.equal(workflow.split(marker).length, 2);
   const next = /\n  [a-z][a-z0-9-]*:\n/u.exec(workflow.slice(index + marker.length));

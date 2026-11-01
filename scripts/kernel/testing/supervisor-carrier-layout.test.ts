@@ -9,6 +9,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
+import { projectQualificationWorkflow } from '../../ci/testing/workflow-projection.mjs';
 
 async function compare(original: Buffer, candidate: Buffer, mode: 'debug' | 'static' = 'static') {
   const module = await import('./supervisor-carrier-layout.js').catch(() => undefined);
@@ -300,6 +301,7 @@ function withoutDailyQualification(workflow: string): string {
 // independently checking the exact upgrade and normal daily jobs and the
 // closed, same-job Node qualification addition.
 function assertCarrierExperimentWorkflow(workflow: string): void {
+  workflow = projectQualificationWorkflow(workflow);
   const upgradeStart = workflow.indexOf('  installed-runtime-upgrade:\n');
   const originalStart = workflow.indexOf('  # Public-repository qualification stays on free standard GitHub-hosted\n', upgradeStart);
   assert.equal(upgradeStart, workflow.indexOf('jobs:\n') + 'jobs:\n'.length);

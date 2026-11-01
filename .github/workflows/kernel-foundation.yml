@@ -5,6 +5,9 @@ on:
     branches: [main]
   push:
     branches: [main, 'cliq/**', 'codex/**']
+  workflow_dispatch:
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read
@@ -14,7 +17,37 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  ci-route:
+    name: Select affected qualification groups
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    outputs:
+      typescript: ${{ steps.route.outputs.typescript }}
+      native: ${{ steps.route.outputs.native }}
+      credentials: ${{ steps.route.outputs.credentials }}
+      run: ${{ steps.route.outputs.run }}
+      verifier: ${{ steps.route.outputs.verifier }}
+      delivery: ${{ steps.route.outputs.delivery }}
+      upgrade: ${{ steps.route.outputs.upgrade }}
+      permission: ${{ steps.route.outputs.permission }}
+      full: ${{ steps.route.outputs.full }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+      - name: Check routing and preserved qualification wiring
+        run: node --test scripts/ci/route.test.mjs
+      - name: Select immutable-source qualification scope
+        id: route
+        run: node scripts/ci/route.mjs
+
   installed-runtime-upgrade:
+    needs: ci-route
+    if: ${{ !cancelled() && (needs.ci-route.result != 'success' || needs.ci-route.outputs.upgrade != 'false') }}
     name: Actual installed signed schema7 to schema8 upgrade
     runs-on: ubuntu-22.04
     timeout-minutes: 20
@@ -66,6 +99,8 @@ jobs:
   # Public-repository qualification stays on free standard GitHub-hosted
   # runners. Do not switch these jobs to larger/paid runner labels.
   typescript:
+    needs: ci-route
+    if: ${{ !cancelled() && (needs.ci-route.result != 'success' || needs.ci-route.outputs.typescript != 'false') }}
     name: TypeScript (${{ matrix.os }}, Node ${{ matrix.node }})
     strategy:
       fail-fast: false
@@ -99,6 +134,8 @@ jobs:
       - run: npm test
 
   linux-credential-authority:
+    needs: ci-route
+    if: ${{ !cancelled() && (needs.ci-route.result != 'success' || needs.ci-route.outputs.credentials != 'false') }}
     name: Linux installed credential authority diagnostics
     # The real credential journey and independent component baseline run in
     # parallel on free standard runners. This is not complete installed I1.
@@ -134,6 +171,8 @@ jobs:
           retention-days: 7
 
   linux-credential-model-input:
+    needs: ci-route
+    if: ${{ !cancelled() && (needs.ci-route.result != 'success' || needs.ci-route.outputs.credentials != 'false') }}
     name: Linux installed model credential input diagnostics
     # Independently required with the lifecycle campaign. The exact negative
     # cases retain full real installation, platform checks, joins and scans.
@@ -168,6 +207,8 @@ jobs:
           retention-days: 7
 
   linux-installed-finalizer-shutdown:
+    needs: ci-route
+    if: ${{ !cancelled() && (needs.ci-route.result != 'success' || needs.ci-route.outputs.credentials != 'false') }}
     name: Linux installed original credential finalizer ordinary SIGTERM
     # The owned external service stays on the actual disposable-user bus for
     # the whole scenario. This is not GNOME Keyring or full installed I1.
@@ -202,6 +243,8 @@ jobs:
           retention-days: 7
 
   linux-installed-authority-stop:
+    needs: ci-route
+    if: ${{ !cancelled() && (needs.ci-route.result != 'success' || needs.ci-route.outputs.credentials != 'false') }}
     name: Linux installed post-admission credential refusal and retirement
     runs-on: ubuntu-22.04
     timeout-minutes: 20
@@ -234,6 +277,8 @@ jobs:
           retention-days: 7
 
   linux-installed-settlement-storage:
+    needs: ci-route
+    if: ${{ !cancelled() && (needs.ci-route.result != 'success' || needs.ci-route.outputs.run != 'false') }}
     name: Linux installed original-claim settlement after actual CAS refusal
     runs-on: ubuntu-22.04
     timeout-minutes: 20
@@ -267,6 +312,8 @@ jobs:
           retention-days: 7
 
   linux-installed-shutdown:
+    needs: ci-route
+    if: ${{ !cancelled() && (needs.ci-route.result != 'success' || needs.ci-route.outputs.run != 'false') }}
     name: Linux installed SIGTERM during admission
     # Independent ordinary Run-instruction and Session-Trust cuts. Keep the production
     # two-second service policy and the original full-journey scan bounds.
@@ -317,6 +364,8 @@ jobs:
           retention-days: 7
 
   linux-installed-preparation-shutdown:
+    needs: ci-route
+    if: ${{ !cancelled() && (needs.ci-route.result != 'success' || needs.ci-route.outputs.run != 'false') }}
     name: Linux installed SIGTERM during preparation
     # Separate real scheduler/copy corpus; do not inflate the original full
     # campaign's fixed scan bounds or change the two-second service policy.
@@ -352,6 +401,8 @@ jobs:
           retention-days: 7
 
   linux-installed-effects-shutdown:
+    needs: ci-route
+    if: ${{ !cancelled() && (needs.ci-route.result != 'success' || needs.ci-route.outputs.run != 'false') }}
     name: Linux installed SIGTERM preserves actual received tool and model effects
     runs-on: ubuntu-22.04
     timeout-minutes: 20
@@ -413,6 +464,8 @@ jobs:
           retention-days: 7
 
   linux-installed-request-resources:
+    needs: ci-route
+    if: ${{ !cancelled() && (needs.ci-route.result != 'success' || needs.ci-route.outputs.run != 'false') }}
     name: Linux installed request-byte compaction and terminal retirement
     # A separate fresh disposable UID keeps the original full journey and its
     # unchanged 4096-stream/512-MiB secret scan independent of this workload.
@@ -449,6 +502,8 @@ jobs:
           retention-days: 7
 
   linux-installed-run:
+    needs: ci-route
+    if: ${{ !cancelled() && (needs.ci-route.result != 'success' || needs.ci-route.outputs.run != 'false') }}
     name: Linux signed installed Run closed-loop diagnostics
     # Real installed/manager/native transport mechanics, not complete I1 or a
     # qualified provider. Reuse the unmodified qualified 22.04 sandbox policy.
@@ -529,6 +584,8 @@ jobs:
           retention-days: 7
 
   linux-supervisor-preflight:
+    needs: ci-route
+    if: ${{ !cancelled() && (needs.ci-route.result != 'success' || needs.ci-route.outputs.native != 'false') }}
     name: Linux Supervisor image and actual user-manager diagnostics
     # Component/OS facts only, not an installed I1 qualification. Standard
     # public-repository runner; never substitute a detached child manager.
@@ -660,6 +717,8 @@ jobs:
           retention-days: 7
 
   linux-strong-probe:
+    needs: ci-route
+    if: ${{ !cancelled() && (needs.ci-route.result != 'success' || needs.ci-route.outputs.native != 'false') }}
     name: Linux namespace and cgroup qualification
     # Ubuntu 24.04's hosted image denies the network-namespace setup under
     # its default AppArmor user-namespace policy. Keep 24.04 in the build/test
@@ -777,6 +836,8 @@ jobs:
           sudo rmdir "$CLIQ_CGROUP_PARENT"
 
   linux-run-execution:
+    needs: ci-route
+    if: ${{ !cancelled() && (needs.ci-route.result != 'success' || needs.ci-route.outputs.native != 'false') }}
     name: Real Linux Run execution and recovery
     runs-on: ubuntu-22.04
     timeout-minutes: 20
@@ -1024,6 +1085,8 @@ jobs:
           rmdir -- "$CLIQ_I1_FOREIGN_INSTALLATION"
 
   linux-installed-daily:
+    needs: ci-route
+    if: ${{ !cancelled() && (needs.ci-route.result != 'success' || needs.ci-route.outputs.verifier != 'false') }}
     name: Linux signed daily setup, required repair, review and apply
     # Independent controlled-endpoint coverage on the standard free runner.
     # It contains no paid provider credential and replaces no original campaign.
@@ -1072,6 +1135,8 @@ jobs:
           retention-days: 7
 
   linux-installed-verifier:
+    needs: ci-route
+    if: ${{ !cancelled() && (needs.ci-route.result != 'success' || needs.ci-route.outputs.verifier != 'false') }}
     name: Linux signed installed required and advisory Node verifier
     # Standard public-repository runner. Its own full installation/corpus and
     # 20-minute budget do not replace or dilute any original campaign.
@@ -1186,6 +1251,8 @@ jobs:
           retention-days: 7
 
   linux-installed-delivery:
+    needs: ci-route
+    if: ${{ !cancelled() && (needs.ci-route.result != 'success' || needs.ci-route.outputs.delivery != 'false') }}
     name: Linux signed installed explicit Delivery and terminal replay
     # Independent standard public runner; no feature override or replacement
     # for verifier, ordinary Run, shutdown or namespace qualification.
@@ -1222,6 +1289,8 @@ jobs:
           retention-days: 7
 
   linux-installed-delivery-delayed-volume:
+    needs: ci-route
+    if: ${{ !cancelled() && (needs.ci-route.result != 'success' || needs.ci-route.outputs.delivery != 'false') }}
     name: Linux installed Delivery on owned delayed storage
     # A separate free standard disposable VM, not a host/global-disk fixture.
     # This retains the ordinary complete Delivery assertions. Fixed timing
@@ -1275,6 +1344,8 @@ jobs:
           retention-days: 7
 
   linux-installed-delivery-original-stop:
+    needs: ci-route
+    if: ${{ !cancelled() && (needs.ci-route.result != 'success' || needs.ci-route.outputs.delivery != 'false') }}
     name: Linux installed publication retirement and actual original SIGTERM
     # Independent complete Run/Delivery fixture. Neither the ordinary closure
     # nor namespace UNKNOWN recovery is replaced by this first-parent cut.
@@ -1327,6 +1398,8 @@ jobs:
           retention-days: 7
 
   linux-installed-delivery-late-result:
+    needs: ci-route
+    if: ${{ !cancelled() && (needs.ci-route.result != 'success' || needs.ci-route.outputs.delivery != 'false') }}
     name: Linux installed publication late audit and original-claim recovery
     # A separate free disposable VM. The fixed 50ms volume must actually cross
     # the original probe deadline; ordinary Delivery/UNKNOWN closure still runs.

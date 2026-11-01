@@ -1,0 +1,60 @@
+import assert from 'node:assert/strict';
+
+// Test-only projection. Validate every allowed routing addition before removing
+// it, so existing immutable campaign hashes still check the ORIGINAL job bodies.
+const routerJob = "  ci-route:\n    name: Select affected qualification groups\n    runs-on: ubuntu-22.04\n    timeout-minutes: 5\n    outputs:\n      typescript: ${{ steps.route.outputs.typescript }}\n      native: ${{ steps.route.outputs.native }}\n      credentials: ${{ steps.route.outputs.credentials }}\n      run: ${{ steps.route.outputs.run }}\n      verifier: ${{ steps.route.outputs.verifier }}\n      delivery: ${{ steps.route.outputs.delivery }}\n      upgrade: ${{ steps.route.outputs.upgrade }}\n      permission: ${{ steps.route.outputs.permission }}\n      full: ${{ steps.route.outputs.full }}\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          persist-credentials: false\n          fetch-depth: 0\n      - uses: actions/setup-node@v4\n        with:\n          node-version: 22.13.0\n      - name: Check routing and preserved qualification wiring\n        run: node --test scripts/ci/route.test.mjs\n      - name: Select immutable-source qualification scope\n        id: route\n        run: node scripts/ci/route.mjs\n";
+const triggers = '  workflow_dispatch:\n  merge_group:\n    types: [checks_requested]\n';
+const foundation = {
+  "installed-runtime-upgrade": "upgrade",
+  "typescript": "typescript",
+  "linux-credential-authority": "credentials",
+  "linux-credential-model-input": "credentials",
+  "linux-installed-finalizer-shutdown": "credentials",
+  "linux-installed-authority-stop": "credentials",
+  "linux-installed-settlement-storage": "run",
+  "linux-installed-shutdown": "run",
+  "linux-installed-preparation-shutdown": "run",
+  "linux-installed-effects-shutdown": "run",
+  "linux-installed-request-resources": "run",
+  "linux-installed-run": "run",
+  "linux-supervisor-preflight": "native",
+  "linux-strong-probe": "native",
+  "linux-run-execution": "native",
+  "linux-installed-daily": "verifier",
+  "linux-installed-verifier": "verifier",
+  "linux-installed-delivery": "delivery",
+  "linux-installed-delivery-delayed-volume": "delivery",
+  "linux-installed-delivery-original-stop": "delivery",
+  "linux-installed-delivery-late-result": "delivery"
+};
+const permission = { 'linux-installed-permission': 'permission' };
+
+function replaceOnce(text, part, replacement) {
+  assert.equal(text.split(part).length, 2, 'routing addition must occur exactly once');
+  return text.replace(part, replacement);
+}
+
+export function projectQualificationWorkflow(workflow, kind = 'foundation') {
+  assert(kind === 'foundation' || kind === 'permission');
+  const jobs = kind === 'foundation' ? foundation : permission;
+  const events = "on:\n  pull_request:\n    branches: [main]\n  push:\n    branches: [main, 'cliq/**', 'codex/**']\n";
+  let projected = replaceOnce(workflow, events + triggers, events);
+  projected = replaceOnce(projected, 'jobs:\n' + routerJob + '\n', 'jobs:\n');
+  assert.equal(projected.includes('ci-route:\n'), false, 'no duplicate or altered router job');
+  assert.deepEqual([...projected.matchAll(/^  ([a-z][a-z0-9-]*):$/gm)].map(match => match[1])
+    .filter(id => Object.hasOwn(jobs, id)), Object.keys(jobs), 'original job ordering remains');
+  const jobSection = projected.slice(projected.indexOf('\njobs:\n') + 7);
+  assert.deepEqual([...jobSection.matchAll(/^  ([a-z][a-z0-9-]*):$/gm)].map(match => match[1]),
+    Object.keys(jobs), 'no original job can be omitted or silently added');
+  for (const [id, group] of Object.entries(jobs)) {
+    const original = '  ' + id + ':\n';
+    const routed = original + '    needs: ci-route\n' +
+      "    if: ${{ !cancelled() && (needs.ci-route.result != 'success' || needs.ci-route.outputs." + group + " != 'false') }}\n";
+    assert.equal(projected.split(routed).length, 2, 'each job requires exactly its approved router dependency and conservative condition');
+    projected = projected.replace(routed, original);
+  }
+  assert.doesNotMatch(projected, /^    (?:needs|if):/m, 'no additional job dependency or gate');
+  assert.doesNotMatch(projected, /ci-route|workflow_dispatch|merge_group/, 'only the approved routing additions may be projected');
+  return projected;
+}
+

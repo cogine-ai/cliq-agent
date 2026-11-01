@@ -55,6 +55,17 @@ The dated records below retain their original source-specific limits.
 
 ### Execution priority clarification (2026-10-30)
 
+Execution cadence clarification (2026-11-01): I1's complete acceptance is not a
+global prerequisite for I2–I4 implementation. The six WPs remain parallel
+ownership boundaries. Advance complete consumer-connected functionality against
+actual dependencies while qualification proceeds independently. Run affected
+regressions during implementation and batch the original full local build/test
+on each integrated candidate before push, rather than after every internal edit.
+The impact router described in [CI scope](../ci.md) narrows only understood,
+independently owned inputs; shared/runtime/unknown changes, main, merge queues
+and manual full checks retain all original jobs. A selected subset never clears
+an old qualification failure or lowers the final release gates.
+
 The owner explicitly prioritizes completing the integrated product functionality
 over serial CI repair. Continue the real model → tools → verifier/repair → result
 → explicit Delivery journey and its shared clients while CI diagnosis and

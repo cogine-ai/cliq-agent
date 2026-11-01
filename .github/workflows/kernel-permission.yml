@@ -5,6 +5,9 @@ on:
     branches: [main]
   push:
     branches: [main, 'cliq/**', 'codex/**']
+  workflow_dispatch:
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read
@@ -14,7 +17,37 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  ci-route:
+    name: Select affected qualification groups
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    outputs:
+      typescript: ${{ steps.route.outputs.typescript }}
+      native: ${{ steps.route.outputs.native }}
+      credentials: ${{ steps.route.outputs.credentials }}
+      run: ${{ steps.route.outputs.run }}
+      verifier: ${{ steps.route.outputs.verifier }}
+      delivery: ${{ steps.route.outputs.delivery }}
+      upgrade: ${{ steps.route.outputs.upgrade }}
+      permission: ${{ steps.route.outputs.permission }}
+      full: ${{ steps.route.outputs.full }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+      - name: Check routing and preserved qualification wiring
+        run: node --test scripts/ci/route.test.mjs
+      - name: Select immutable-source qualification scope
+        id: route
+        run: node scripts/ci/route.mjs
+
   linux-installed-permission:
+    needs: ci-route
+    if: ${{ !cancelled() && (needs.ci-route.result != 'success' || needs.ci-route.outputs.permission != 'false') }}
     name: Linux signed installed verifier and Delivery permissions
     # A separate standard free runner preserves every original campaign.
     # This owned HTTPS fixture cannot qualify a paid provider or real TTY.

@@ -6,8 +6,13 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
+import { projectQualificationWorkflow } from '../../scripts/ci/testing/workflow-projection.mjs';
 
 const workflowUrl = new URL('../../.github/workflows/kernel-foundation.yml', import.meta.url);
+
+async function readQualificationWorkflow(): Promise<string> {
+  return projectQualificationWorkflow(await readFile(workflowUrl, 'utf8'));
+}
 
 test('the locked Node source option rejects mixed modes and invalid archives before host inspection', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'cliq-qualification-options-'));
@@ -61,7 +66,7 @@ function stepBlocks(workflow: string): string[] {
 }
 
 test('Kernel foundation checkout never persists the GitHub credential', async () => {
-  const workflow = await readFile(workflowUrl, 'utf8');
+  const workflow = await readQualificationWorkflow();
   const checkouts = stepBlocks(workflow).filter((block) =>
     /- uses: actions\/checkout@/.test(block)
   );
@@ -73,7 +78,7 @@ test('Kernel foundation checkout never persists the GitHub credential', async ()
 });
 
 test('Linux qualification cleanup kills and removes the whole delegated cgroup tree', async () => {
-  const workflow = await readFile(workflowUrl, 'utf8');
+  const workflow = await readQualificationWorkflow();
   const cleanup = stepBlocks(workflow).find((block) =>
     /- name: Remove delegated cgroup subtree/.test(block)
   );
@@ -86,7 +91,7 @@ test('Linux qualification cleanup kills and removes the whole delegated cgroup t
 });
 
 test('credential lifecycle and model-input coverage require independent unchanged-budget Linux jobs', async () => {
-  const workflow = await readFile(workflowUrl, 'utf8');
+  const workflow = await readQualificationWorkflow();
   for (const [jobId, mode, artifact] of [
     ['linux-credential-authority', '--credentials', 'credential-journey'],
     ['linux-credential-model-input', '--credentials-model-input', 'credential-model-input'],
@@ -104,7 +109,7 @@ test('credential lifecycle and model-input coverage require independent unchange
 });
 
 test('real guest verifier stays in the existing free bounded job without replacing ordinary lifecycle coverage', async () => {
-  const workflow = await readFile(workflowUrl, 'utf8');
+  const workflow = await readQualificationWorkflow();
   const job = workflow.match(/\n  linux-run-execution:\n[\s\S]*?(?=\n  [a-z][a-z0-9-]*:\n|$)/u)?.[0];
   assert(job);
   assert.match(job, /runs-on: ubuntu-22\.04\n/); assert.match(job, /timeout-minutes: 20\n/);
@@ -134,7 +139,7 @@ test('real guest verifier stays in the existing free bounded job without replaci
 });
 
 test('installed verifier uses its own free bounded manager journey without weakening any original campaign', async () => {
-  const workflow = await readFile(workflowUrl, 'utf8');
+  const workflow = await readQualificationWorkflow();
   const job = workflow.match(/\n  linux-installed-verifier:\n[\s\S]*?(?=\n  [a-z][a-z0-9-]*:\n|$)/u)?.[0];
   assert(job); assert.match(job, /runs-on: ubuntu-22\.04\n/u); assert.match(job, /timeout-minutes: 20\n/u);
   assert.doesNotMatch(job, /(?:continue-on-error|needs):/u);
@@ -197,7 +202,7 @@ test('installed verifier uses its own free bounded manager journey without weake
 });
 
 test('installed status deadlock regression observes the fixed original assertion without replacing candidate Linux coverage', async () => {
-  const workflow = await readFile(workflowUrl, 'utf8');
+  const workflow = await readQualificationWorkflow();
   const job = workflow.match(/\n  linux-installed-verifier:\n[\s\S]*?(?=\n  [a-z][a-z0-9-]*:\n|$)/u)?.[0];
   assert(job); assert.match(job, /runs-on: ubuntu-22\.04\n/u); assert.match(job, /timeout-minutes: 20\n/u);
   assert.doesNotMatch(job, /(?:continue-on-error|needs):/u);
@@ -214,7 +219,7 @@ test('installed status deadlock regression observes the fixed original assertion
 });
 
 test('installed Delivery keeps its own free bounded production journey and cannot override its capability gate', async () => {
-  const workflow = await readFile(workflowUrl, 'utf8');
+  const workflow = await readQualificationWorkflow();
   const job = workflow.match(/\n  linux-installed-delivery:\n[\s\S]*?(?=\n  [a-z][a-z0-9-]*:\n|$)/u)?.[0];
   assert(job, 'Delivery requires its own real installed campaign');
   assert.match(job, /runs-on: ubuntu-22\.04\n/u); assert.match(job, /timeout-minutes: 20\n/u);
@@ -233,7 +238,7 @@ test('installed Delivery keeps its own free bounded production journey and canno
 });
 
 test('normal daily coverage uses the signed command path and original joined fixture without replacing prior campaigns', async () => {
-  const workflow = await readFile(workflowUrl, 'utf8');
+  const workflow = await readQualificationWorkflow();
   const job = workflow.match(/\n  linux-installed-daily:\n[\s\S]*?(?=\n  [a-z][a-z0-9-]*:\n|$)/u)?.[0];
   assert(job); assert.match(job, /runs-on: ubuntu-22\.04\n/u); assert.match(job, /timeout-minutes: 20\n/u);
   assert.doesNotMatch(job, /(?:continue-on-error|needs):/u); assert.match(job, /persist-credentials: false/u);

@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { projectQualificationWorkflow } from '../../ci/testing/workflow-projection.mjs';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
@@ -173,7 +174,7 @@ test('the real shell refuses missing delayed storage before any identity or host
 });
 
 test('the original-stop job is independent, free, bounded and retains only its own reports', () => {
-  const workflow = source('../../../.github/workflows/kernel-foundation.yml');
+  const workflow = projectQualificationWorkflow(source('../../../.github/workflows/kernel-foundation.yml'));
   const marker = '\n  linux-installed-delivery-original-stop:\n';
   const index = workflow.indexOf(marker);
   assert(index >= 0);
