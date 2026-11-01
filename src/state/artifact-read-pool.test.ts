@@ -91,7 +91,7 @@ test('a production item read joins every issued real CAS close and preserves a l
 test('all six retained readers pass the original lazy callbacks to the bounded catalog group, including the fixed two-source read', async () => {
   const expected = new Map([
     ['run-result-recovery.ts', ['cut.items']], ['verifier-completion.ts', ['selected.items']],
-    ['verifier-repair.ts', ['cut.items']], ['verifier-recovery.ts', ['cut.workspaceGenerations']],
+    ['verifier-repair.ts', ['cut.items']], ['verifier-recovery.ts', ['cut.workspaceGenerations', 'skipRows']],
     ['final-candidate-recovery.ts', ["input.workspaceGenerations.filter(generation => generation.phase === 'sealed')"]],
     ['verifier-stop-history.ts', ['cut.items', '[before, after]']]
   ]);
@@ -108,6 +108,13 @@ test('all six retained readers pass the original lazy callbacks to the bounded c
     for (const call of calls) {
       assert.equal(call.arguments.length, 2);
       assert(ts.isArrowFunction(call.arguments[1]!), `${file}: pass a callback, never already-started promises`);
+    }
+    if (file === 'verifier-recovery.ts') {
+      const skipRead = calls[1]!.arguments[1]!.getText(parsed);
+      assert.match(skipRead, /if \(!cut\.items\.some\(item => item\.itemId === row\.item_id && item\.payloadRef === row\.payload_ref\)\) throw/u,
+        'each lazy skip read remains bound to its exact retained item cut');
+      assert.match(skipRead, /decodeVerifierSkipItem\(await readCanonicalArtifact\(artifacts, row\.payload_ref\)\)/u,
+        'the added bounded group retains the original full canonical read and decoder');
     }
   }
 });

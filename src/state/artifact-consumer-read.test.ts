@@ -15,7 +15,7 @@ import { canonicalJsonBytes } from '../kernel/canonical.js';
 
 test('submission, invocation, approval and continuation consumers dispatch retained CAS reads through the same bounded joined catalog', async () => {
   const expected = new Map([
-    ['store.ts', ['this.artifacts:initial.assembly.provider.credentialGrantRefs']],
+    ['store.ts', ['reads:initial.assembly.provider.credentialGrantRefs']],
     ['reducers/stop.ts', ['artifacts:cause.plans', 'artifacts:selected.items', 'artifacts:selected.items']],
     ['reducers/agent.ts', ['artifacts:rows']],
     ['reducers/input.ts', ['reads:closure.items']],
@@ -24,7 +24,7 @@ test('submission, invocation, approval and continuation consumers dispatch retai
     ['publication-preflight.ts', ['artifacts:cut.items']],
     ['delivery-approval.ts', ['artifacts:cut.items', 'artifacts:cut.items', 'artifacts:cut.items']],
     ['final-candidate.ts', ['artifacts:selected.items']],
-    ['verifier-execution.ts', ['reads:selected.items']],
+    ['verifier-execution.ts', ['reads:selected.items', 'reads:selected.items', 'reads:selected.items']],
     ['reducers/invocation.ts', [
       'artifacts:artifactRefs.filter((ref): ref is string => ref !== undefined)',
       'artifacts:artifactRefs.filter((ref): ref is string => ref !== undefined)'
@@ -44,6 +44,19 @@ test('submission, invocation, approval and continuation consumers dispatch retai
     for (const call of calls) {
       assert.equal(call.arguments.length, 2, file);
       assert(ts.isArrowFunction(call.arguments[1]!), `${file}: defer the original read body, not an already started operation`);
+    }
+    if (file === 'store.ts') {
+      let scope: ts.Node | undefined = calls[0];
+      while (scope && !ts.isMethodDeclaration(scope)) scope = scope.parent;
+      assert(scope && ts.isMethodDeclaration(scope));
+      assert.match(scope.getText(parsed), /const reads = this\.artifacts\.withReadSignal\(preparationSignal\);/u,
+        'credential reads retain the original preparation signal on the same CAS view');
+      assert.match(calls[0]!.arguments[1]!.getText(parsed), /decodeEndpointCredentialGrantBinding\(await reads\.readCanonical\(ref\)\)/u,
+        'the lazy credential callback reads and decodes the full original bytes through that view');
+    }
+    if (file === 'verifier-execution.ts') for (const call of calls) {
+      assert.match(call.arguments[1]!.getText(parsed), /readCanonicalArtifact<ContinuationItem>\(reads, row\.payloadRef\)/u,
+        'policy selection and continuation groups read full canonical items through the original view');
     }
     if (file === 'reducers/invocation.ts') {
       const declaration = body.slice(body.indexOf('const invocationMetadata ='), body.indexOf('const initialRun ='));
