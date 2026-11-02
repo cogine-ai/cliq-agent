@@ -177,8 +177,8 @@ export function openInstalledControl(store: StateStore,
         if (method === 'mcp.register' || method === 'mcp.refresh') return await store.mutateMcpRegistration(decodeInstalledControlRequest(request) as import('../kernel/mcp.js').McpMutationRequestV1, identity);
         if (method === 'mcp.list') return await store.listMcpRegistrations(decodeInstalledControlRequest(request) as import('../kernel/control-wire.js').McpListRequestV1, identity);
         if (method === 'session.create') return (await store.createInstalledSession(request, identity)).response;
-        if (SESSION_FEATURES.includes(method)) return store.sessionContinuity(request, identity);
-        if (LIST_FEATURES.includes(method)) return store.listControl(request, identity);
+        if (SESSION_FEATURES.includes(method)) return await store.sessionContinuity(request, identity);
+        if (LIST_FEATURES.includes(method)) return await store.listControl(request, identity);
         if (method === 'run.submit') return (await store.submitInstalledRun(request, identity)).response;
         if (method === 'run.apply') return (await store.applyInstalledRun(request, identity)).response;
         if (method === 'run.approve') return (await store.approveInstalledRun(request, identity)).response;

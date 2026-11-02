@@ -1139,9 +1139,10 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       assert.equal(beforeRefusal.attempts, 0); assert.equal(beforeRefusal.claims, 0); assert.equal(beforeRefusal.registrations, 0);
       assert.equal(mcpHandler.posts(), 0); assert.equal(postCount, 0); assert.equal(acceptedTcp, 0); assert.equal(acceptedTls, 0);
       const refused = await client.send(missingEndpoint, 30_000);
-      assert.deepEqual(refused, { protocolVersion: 1, ok: false, method: 'mcp.register', error: {
+      recordRefusal(refused, 'mcp.register');
+      assert(canonicalJsonBytes(refused).equals(canonicalJsonBytes({ protocolVersion: 1, ok: false, method: 'mcp.register', error: {
         schemaVersion: 1, code: 'INVALID_REQUEST', retryable: false, messageCode: 'control.invalid_request',
-        issues: [{ path: 'request', issueCode: 'invalid_request' }] } });
+        issues: [{ path: 'request', issueCode: 'invalid_request' }] } })), 'MCP preclaim refusal differs from its exact canonical wire envelope');
       const status = accepted(await client.send({ protocolVersion: 1, method: 'supervisor.status' }, 30_000), 'supervisor.status');
       assert.equal(status.supervisorInstanceId, client.hello.supervisorInstanceId);
       const afterRefusal = preclaim(); assert.deepEqual(afterRefusal, beforeRefusal);

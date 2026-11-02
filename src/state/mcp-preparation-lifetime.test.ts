@@ -24,9 +24,9 @@ function declaration(parsed: ts.SourceFile, name: string): ts.FunctionDeclaratio
   return selected[0]!;
 }
 
-test('MCP mutation and listing await the real producer inside the original control refusal boundary', async () => {
+test('all four direct asynchronous control producers await inside the original refusal boundary', async () => {
   const parsed = await source('./installed-control.ts');
-  for (const name of ['mutateMcpRegistration', 'listMcpRegistrations']) {
+  for (const name of ['mutateMcpRegistration', 'listMcpRegistrations', 'sessionContinuity', 'listControl']) {
     const selected: ts.CallExpression[] = [];
     const visit = (node: ts.Node) => {
       if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) &&
@@ -43,7 +43,9 @@ test('MCP mutation and listing await the real producer inside the original contr
     assert(boundary.tryBlock.pos < call.pos && call.end < boundary.tryBlock.end);
     assert.match(boundary.catchClause.getText(parsed), /error: errorResult\(error, method === 'credential\.finalize'\)/u,
       'preserve the closed original error mapper instead of retiring the connection on an ordinary refusal');
-    assert.match(call.arguments[0]!.getText(parsed), /^decodeInstalledControlRequest\(request\) as /u);
+    if (name === 'mutateMcpRegistration' || name === 'listMcpRegistrations')
+      assert.match(call.arguments[0]!.getText(parsed), /^decodeInstalledControlRequest\(request\) as /u);
+    else assert.equal(call.arguments[0]!.getText(parsed), 'request');
     assert.equal(call.arguments[1]!.getText(parsed), 'identity');
   }
 });

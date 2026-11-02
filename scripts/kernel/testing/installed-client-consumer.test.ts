@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { spawnSync } from 'node:child_process';
 import { parseJsonStrict } from '../../../src/kernel/json.js';
+import { canonicalJsonBytes } from '../../../src/kernel/canonical.js';
 import { createCredentialSecretScanner, type CredentialSecretScanner } from './credential-secret-scan.js';
 import { InstalledClientConsumerDeadlineError, InstalledClientDriverError, openInstalledClientConsumer,
   copyInstalledClientAuthenticationWork, copyInstalledClientAuthenticationProcess,
@@ -680,6 +681,39 @@ test('a real one-shot CLI child keeps its strict original request response even 
   assert.equal(response?.result?.snapshot.run.id, 'run');
   await client.close(); assert.equal(streams, 2); assert.equal(joins, 1);
   await assert.rejects(client.send({ protocolVersion: 1, method: 'run.get', runId: 'run' }));
+});
+
+test('a real child refusal retains strict null-prototype wire data and exact canonical comparison rejects extra fields and changed values', async () => {
+  const expected = { protocolVersion: 1, ok: false, method: 'mcp.register', error: { schemaVersion: 1, code: 'INVALID_REQUEST',
+    retryable: false, messageCode: 'control.invalid_request', issues: [{ path: 'request', issueCode: 'invalid_request' }] } };
+  const responses = [expected, { ...expected, error: { ...expected.error, extra: true } },
+    { ...expected, error: { ...expected.error, issues: [{ path: 'target', issueCode: 'invalid_request' }] } }];
+  const frames = responses.map(value => Buffer.concat([canonicalJsonBytes(value), Buffer.from('\n')]).toString('base64'));
+  const hello = Buffer.concat([canonicalJsonBytes({ protocolVersion: 1, ok: true,
+    result: { method: 'control.hello', supervisorInstanceId: 'owned-framing-fixture' } }), Buffer.from('\n')]).toString('base64');
+  let closed = 0, joined = 0;
+  const client = await openInstalledClientConsumer({ executable: process.execPath,
+    args: ['--input-type=module', '-e', `import {createInterface} from 'node:readline';
+      process.stdout.write(Buffer.from('${hello}','base64'));
+      const frames=${JSON.stringify(frames)};let count=0;
+      for await(const _ of createInterface({input:process.stdin,crlfDelay:Infinity})) {
+        if(count>=frames.length){process.exitCode=2;break;}
+        process.stdout.write(Buffer.from(frames[count++],'base64'));
+      }`], cwd: process.cwd(), env: process.env,
+    openScan: () => ({ scan() {}, close() { closed++; } }), onJoined() { joined++; } });
+  try {
+    const original = await client.send({ protocolVersion: 1, method: 'mcp.register' });
+    assert(original.error && Array.isArray(original.error.issues));
+    assert.equal(Object.getPrototypeOf(original), null); assert.equal(Object.getPrototypeOf(original.error), null);
+    assert.equal(Object.getPrototypeOf(original.error.issues[0]), null);
+    assert.throws(() => assert.deepEqual(original, expected), 'prototype identity is not wire-envelope identity');
+    assert(canonicalJsonBytes(original).equals(canonicalJsonBytes(expected)));
+    for (let index = 1; index < frames.length; index++) {
+      const different = await client.send({ protocolVersion: 1, method: 'mcp.register' });
+      assert(!canonicalJsonBytes(different).equals(canonicalJsonBytes(expected)), 'no extra field or changed issue value may pass exact wire equality');
+    }
+  } finally { await client.close(); }
+  assert.equal(closed, 2); assert.equal(joined, 1);
 });
 
 test('a real child fixed request cause is scanned and logged without changing its original fatal error or resending', async () => {
