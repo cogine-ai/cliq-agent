@@ -8,11 +8,13 @@ import { DatabaseSync } from 'node:sqlite';
 import { test, type TestContext } from 'node:test';
 import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME, KERNEL_STATE_SCHEMA_VERSION } from '../../../src/config.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../../../src/kernel/canonical.js';
+import { DEFAULT_SANDBOX_RESOURCES } from '../../../src/kernel/control-submit.js';
 import { digestOmitting, sha256Bytes } from '../../../src/kernel/identity.js';
+import type { ProcessContainmentPlanV1, SandboxLaunchSpecV1 } from '../../../src/kernel/execution.js';
 import type { WorkerIdentity, WorkerLaunch, WorkspaceGenerationStateV1 } from '../../../src/kernel/types.js';
 import { assertInstalledWorkerLeaseRenewed, inspectInstalledWorkerIdentity, inspectInstalledWorkerLease,
   inspectInstalledWorkerRetirement, inspectInstalledWorkerRetirementHistory, inspectInstalledWorkerLaunchIds } from './installed-worker-lease.js';
-import { inspectInstalledPublicationClaim, inspectInstalledRecoveredWorkerRetirement, inspectInstalledVerifierParentRetirement } from './installed-worker-lease.js';
+import { inspectInstalledPublicationClaim, inspectInstalledRecoveredWorkerRetirement, inspectInstalledVerifierClaim, inspectInstalledVerifierParentRetirement } from './installed-worker-lease.js';
 import type { VerifierParentDomainDispatchClosureV1 } from '../../../src/state/verifier-unknown-retirement.js';
 import { publicationArenaId } from '../../../src/kernel/publication.js';
 import { addCanonicalDuration, identityHash } from '../../../src/kernel/identity.js';
@@ -24,6 +26,104 @@ test('publication crash diagnostics never accept an absent claim or manufacture 
   const before = await readFile(value.filename), names = await readdir(value.cas);
   assert.equal(inspectInstalledPublicationClaim(value.stateRoot, value.expected.uid, value.expected.runId), undefined);
   assert.deepEqual(await readFile(value.filename), before); assert.deepEqual(await readdir(value.cas), names);
+});
+
+// Serialized SQL and canonical launch/plan data only. No process, native
+// scope, cancellation, containment death or recovery authority is created.
+async function verifierClaimFixture(t: TestContext) {
+  const value = await fixture(t), hash = 'a'.repeat(64), time = value.launch.createdAt;
+  const cas = path.join(value.stateRoot, KERNEL_CAS_DIRECTORY); await mkdir(cas, { mode: 0o700 });
+  const put = async (object: unknown) => {
+    const ref = canonicalSha256(object);
+    await writeFile(path.join(cas, ref), canonicalJsonBytes(object), { mode: 0o400, flag: 'wx' }); return ref;
+  };
+  const owner = { kind: 'run_invocation' as const, runId: value.expected.runId, intendedLeaseEpoch: value.expected.leaseEpoch,
+    workerLaunchId: value.expected.launchId, opId: 'inert-verifier', attempt: 0, dispatchId: 'inert-verifier-dispatch' };
+  const plan: ProcessContainmentPlanV1 = { schemaVersion: 1, format: 'cliq-process-containment-plan-v1', owner,
+    filesystemBinding: { kind: 'run-generation', generationRef: hash }, parentContainmentRef: hash,
+    launchNonceDigest: hash, backend: { kind: 'linux', cgroupPath: '/fixture/verifier', cgroupNameReservationDigest: hash,
+      pidNamespaceReservationId: 'inert-verifier-namespace', subreaperStartToken: 'inert-subreaper' }, createdAt: time, planDigest: '' };
+  plan.planDigest = digestOmitting(plan, 'planDigest');
+  const runtime = { runtimeBundleRef: hash, runtimeBundleManifestDigest: hash, sandboxBackend: 'linux_namespace' as const,
+    toolchain: { kind: 'guest_toolchain' as const, guestToolchainManifestRef: hash, guestToolchainManifestDigest: hash,
+      guestImageRef: hash, guestImageDigest: hash }, launcher: { executableId: 'inert-launcher', executableDigest: hash }, runtimeDigest: '' };
+  runtime.runtimeDigest = digestOmitting(runtime, 'runtimeDigest');
+  const environment = { schemaVersion: 1 as const, format: 'cliq-sanitized-sandbox-environment-v1' as const,
+    controlledPath: ['/usr/bin'], locale: { lang: 'C.UTF-8', lcAll: 'C.UTF-8' }, home: '/home/cliq', tmpdir: '/tmp', variables: [],
+    inheritedHostEnvironment: false as const, secretMaterial: 'none' as const, brokerAccessAtSpawn: 'none' as const,
+    networkMode: 'none' as const, environmentDigest: '' };
+  environment.environmentDigest = digestOmitting(environment, 'environmentDigest');
+  const launch: Extract<SandboxLaunchSpecV1, { owner: { kind: 'run_invocation' } }> = {
+    schemaVersion: 1, format: 'cliq-sandbox-launch-v1', owner, purpose: 'verifier', runtime, environment,
+    executable: { kind: 'guest_toolchain', guestToolchainManifestRef: hash, guestToolchainManifestDigest: hash, toolId: 'node',
+      role: 'verifier', executionPath: '/usr/bin/node', executableDigest: hash },
+    processInvocation: { kind: 'run_request', purpose: 'verifier', recipe: 'cliq-verifier-command-v1', requestRef: hash,
+      requestDigest: hash, targetRef: hash, targetDigest: hash, argvCwdSource: 'trusted_recipe_decode_of_request_and_target',
+      stdio: { stdin: 'closed', stdout: 'captured', stderr: 'captured', extraFileDescriptors: 'authenticated_operation_channel_only' } },
+    filesystem: { kind: 'run_generation', generationRef: hash, access: 'read_only', sourceProjectionRef: hash, independentGit: true },
+    mounts: [], mountsDigest: canonicalSha256([]), sandboxProfileRef: hash, sandboxProfileDigest: hash,
+    resources: { ...DEFAULT_SANDBOX_RESOURCES }, resourcesDigest: canonicalSha256(DEFAULT_SANDBOX_RESOURCES),
+    containmentPlanRef: await put(plan), containmentPlanDigest: plan.planDigest, operationGrantRef: hash, requestRef: hash,
+    requestDigest: hash, targetRef: hash, targetDigest: hash, parentWorkerContainmentRef: hash, createdAt: time, launchSpecDigest: '' };
+  launch.launchSpecDigest = digestOmitting(launch, 'launchSpecDigest');
+  const claim = { runId: value.expected.runId, seq: 8, opId: owner.opId, opKind: 'verifier', attempt: 0, phase: 'dispatch_claimed',
+    leaseEpoch: owner.intendedLeaseEpoch, requestRef: hash, target: hash, grantRef: hash, replayClass: 'retry',
+    budgetDelta: { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 }, timestamp: time,
+    dispatchId: owner.dispatchId, supervisorInstanceId: value.expected.supervisorInstanceId, stateOwnerEpoch: 1,
+    sandboxLaunchSpecRef: await put(launch) };
+  update(value.filename, database => database.exec(`CREATE TABLE run_journal(run_id TEXT,seq INTEGER,op_id TEXT,op_kind TEXT,attempt INTEGER,phase TEXT,entry_json TEXT)`));
+  const saveClaim = (selected = claim) => update(value.filename, database => {
+    database.prepare('DELETE FROM run_journal').run();
+    database.prepare('INSERT INTO run_journal VALUES(?,?,?,?,?,?,?)')
+      .run(selected.runId, selected.seq, selected.opId, selected.opKind, selected.attempt, selected.phase, JSON.stringify(selected));
+  });
+  return { ...value, cas, plan, launch, claim, put, saveClaim,
+    inspect: () => inspectInstalledVerifierClaim(value.stateRoot, value.expected.uid, value.expected.runId) };
+}
+
+test('in-flight verifier diagnostics retain one immutable SQL/CAS recipe without claiming process or retirement evidence', async t => {
+  const value = await verifierClaimFixture(t);
+  assert.equal(value.inspect(), undefined, 'no claim is an observation to keep waiting, not no-spawn evidence');
+  value.saveClaim();
+  const databaseBefore = await readFile(value.filename), namesBefore = await readdir(value.cas), observed = value.inspect()!;
+  assert.deepEqual(observed.claim, value.claim); assert.deepEqual(observed.launch, value.launch); assert.deepEqual(observed.plan, value.plan);
+  assert.equal(observed.diagnosticOnly, true); assert.match(observed.sqlCutDigest, /^[a-f0-9]{64}$/u);
+  assert(Object.isFrozen(observed) && Object.isFrozen(observed.claim) && Object.isFrozen(observed.launch.owner) && Object.isFrozen(observed.plan.backend));
+  for (const field of ['qualified', 'pid', 'retiredAt', 'deathEvidenceRef', 'cancel', 'stop']) assert.equal(Object.hasOwn(observed, field), false);
+  assert.deepEqual(await readFile(value.filename), databaseBefore); assert.deepEqual(await readdir(value.cas), namesBefore);
+  update(value.filename, database => database.prepare('UPDATE runs SET revision=revision+1').run());
+  assert.deepEqual(value.inspect(), observed, 'unrelated mutable Run revision is outside this locating diagnostic');
+  assert.throws(() => inspectInstalledVerifierClaim(value.stateRoot, value.expected.uid, 'missing'),
+    { message: 'installed verifier claim inspection refused' });
+});
+
+test('verifier locating diagnostics refuse changed launch bindings, malformed canonical data and excess rows', async t => {
+  const value = await verifierClaimFixture(t); value.saveClaim();
+  for (const member of ['requestRef', 'target', 'grantRef', 'dispatchId'] as const) {
+    value.saveClaim({ ...value.claim, [member]: member === 'dispatchId' ? 'foreign-dispatch' : 'b'.repeat(64) });
+    assert.throws(value.inspect); value.saveClaim();
+  }
+  update(value.filename, database => database.prepare('UPDATE runs SET active_worker_launch_id=?').run('foreign-launch'));
+  assert.throws(value.inspect);
+  update(value.filename, database => database.prepare('UPDATE runs SET active_worker_launch_id=?,lease_epoch=lease_epoch+1').run(value.expected.launchId));
+  assert.throws(value.inspect);
+  update(value.filename, database => database.prepare('UPDATE runs SET lease_epoch=?').run(value.expected.leaseEpoch));
+  const malformed = { ...value.launch, unretained: 'not part of the closed launch' };
+  malformed.launchSpecDigest = digestOmitting(malformed, 'launchSpecDigest');
+  value.saveClaim({ ...value.claim, sandboxLaunchSpecRef: await value.put(malformed) }); assert.throws(value.inspect);
+  const wrongPlan = structuredClone(value.plan); wrongPlan.owner = { ...value.launch.owner, workerLaunchId: 'foreign-launch' };
+  wrongPlan.planDigest = digestOmitting(wrongPlan, 'planDigest');
+  const wrongLaunch = { ...value.launch, containmentPlanRef: await value.put(wrongPlan), containmentPlanDigest: wrongPlan.planDigest };
+  wrongLaunch.launchSpecDigest = digestOmitting(wrongLaunch, 'launchSpecDigest');
+  value.saveClaim({ ...value.claim, sandboxLaunchSpecRef: await value.put(wrongLaunch) }); assert.throws(value.inspect);
+  value.saveClaim();
+  update(value.filename, database => database.prepare('UPDATE run_journal SET entry_json=?').run('x'.repeat(65537)));
+  assert.throws(value.inspect); value.saveClaim();
+  update(value.filename, database => {
+    const insert = database.prepare('INSERT INTO run_journal VALUES(?,?,?,?,?,?,?)');
+    for (let index = 0; index < 3; index++) insert.run(value.claim.runId, index + 9, value.claim.opId, 'verifier', 0, 'dispatch_claimed', JSON.stringify({ ...value.claim, seq: index + 9 }));
+  });
+  assert.throws(value.inspect, 'the fixed one-verifier campaign bound is not a production Run limit');
 });
 
 test('publication crash diagnostics bind actual canonical birth and retain an already-committed receipt as a missed cut', async t => {

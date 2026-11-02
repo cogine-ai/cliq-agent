@@ -12,6 +12,7 @@ import type { InstalledWorkSnapshot } from '../../../src/state/installed-work-di
 import { writeSync } from 'node:fs';
 import { decodeInstalledRequestFailureMarker, installedRequestFailureMarker,
   INSTALLED_REQUEST_FAILURE_PREFIX } from './installed-client-request-failure.js';
+import { decodeInstalledRequestFailure, type InstalledRequestFailure } from '../../../src/state/installed-request-diagnostics.js';
 
 export type InstalledClientAuthenticationObservation = Readonly<{ stage: InstalledClientPhase; elapsedMs: number;
   observedElapsedMs: number; work?: InstalledWorkSnapshot; process?: InstalledClientAuthenticationProcess }>;
@@ -128,13 +129,15 @@ const driverMarkers = driverStages.flatMap(stage => [
 
 export class InstalledClientDriverError extends Error {
   readonly diagnostic: Readonly<{ kind: 'installed_client_driver'; stage: InstalledClientDriverStage;
-    authentication?: readonly InstalledClientAuthenticationObservation[] }>;
-  constructor(stage: InstalledClientDriverStage, authentication: readonly InstalledClientAuthenticationObservation[] = []) {
+    authentication?: readonly InstalledClientAuthenticationObservation[]; requestFailure?: InstalledRequestFailure }>;
+  constructor(stage: InstalledClientDriverStage, authentication: readonly InstalledClientAuthenticationObservation[] = [],
+    requestFailure?: InstalledRequestFailure) {
     super('original installed client driver failed');
     assert(typeof stage === 'string' && driverStages.includes(stage));
     const observed = copyAuthentication(authentication);
+    const request = requestFailure === undefined ? undefined : decodeInstalledRequestFailure(requestFailure);
     this.diagnostic = Object.freeze({ kind: 'installed_client_driver', stage,
-      ...(observed.length ? { authentication: observed } : {}) });
+      ...(observed.length ? { authentication: observed } : {}), ...(request ? { requestFailure: request } : {}) });
   }
 }
 
@@ -185,6 +188,7 @@ export async function openInstalledClientConsumer(input: Input) {
   const observedStages = new Set<InstalledClientDriverStage>(), lastObservedStage = () => lastObservedDriverStage;
   const authentication: InstalledClientAuthenticationObservation[] = [];
   let requestFailureObserved = false;
+  let requestFailure: InstalledRequestFailure | undefined;
   let pending: { method: string; request?: InstalledControlRequestV1; page?: Response; events?: HeadlessRunEventV3[];
     attachTarget?: number; attachLimit?: number; rpcId?: number; rpcDrained?: boolean; rpcLast?: Response;
     resolve(value: Response): void; reject(error: unknown): void } | undefined;
@@ -306,7 +310,7 @@ export async function openInstalledClientConsumer(input: Input) {
           if (line.subarray(0, INSTALLED_REQUEST_FAILURE_PREFIX.length).toString('ascii') === INSTALLED_REQUEST_FAILURE_PREFIX) {
             assert(!requestFailureObserved, 'duplicate fixed request failure');
             const observation = decodeInstalledRequestFailureMarker(line);
-            requestFailureObserved = true; markerBytes += line.length;
+            requestFailureObserved = true; requestFailure = observation; markerBytes += line.length;
             // errorScan already scanned every original byte above. Log only
             // the closed canonical projection; never the original exception.
             try { writeSync(2, installedRequestFailureMarker(observation)); } catch { /* Diagnosis cannot replace the original failure. */ }
@@ -322,7 +326,7 @@ export async function openInstalledClientConsumer(input: Input) {
           // source-owned marker so a failed child keeps its fixed stage even
           // when the outer journey preserves only closed exception frames.
           try { writeSync(2, marker.bytes); } catch { /* Diagnosis cannot replace the original failure or join. */ }
-          refuse(new InstalledClientDriverError(marker.stage, authentication));
+          refuse(new InstalledClientDriverError(marker.stage, authentication, requestFailure));
         }
         else {
           assert(!observedStages.has(marker.stage), 'duplicate installed client progress');

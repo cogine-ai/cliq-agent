@@ -46,6 +46,15 @@ test('the same named source case cannot be confused with its actual Delivery pub
   }
 });
 
+test('ordinary tool deadline diagnostics retain the actual source case and its own bounded post count', () => {
+  for (const caseKind of ['ordinary_tools', 'ordinary_tools_cancel', 'ordinary_tools_restart']) {
+    const value = input(); value.caseKind = caseKind; value.postCount = 2;
+    const result = projectInstalledRunProgress(value);
+    assert.equal(result.caseKind, caseKind); assert.equal(result.postCount, 2);
+    assert.equal(result.completeCut, true);
+  }
+});
+
 test('valid item, journal and checkpoint prefixes never claim a complete cut', () => {
   const items = input(); items.cut.items.pop(); items.cut.nextItemSeq = 1;
   const journal = input(); journal.cut.highWaterJournalSeq = 2;

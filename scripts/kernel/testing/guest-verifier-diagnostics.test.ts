@@ -20,6 +20,23 @@ test('in-flight cancellation requires a live verified executable, never the muta
   assert(source.includes('performance.now() - stopStarted <= 2000'));
 });
 
+test('only the live verifier observation uses a narrow diagnostic and complete recovery still follows the actual join', async () => {
+  const source = await readFile(new URL('./guest-verifier-native.ts', import.meta.url), 'utf8');
+  const begin = source.indexOf('const before = await store.readRecoveryClosure(fixture.runId);', source.indexOf("label: 'guest-inflight-cancel'"));
+  const running = source.indexOf('const running = execution.executeCurrentVerifier(', begin);
+  const polling = source.indexOf('while (!actualNode && !settled', running), stop = source.indexOf('await agent.cancelRun(', polling);
+  const joined = source.indexOf('await joined;', stop), measured = source.indexOf('const measured = await store.readRecoveryClosure(', joined);
+  const after = source.indexOf('const after = await store.readRecoveryClosure(', measured);
+  const reopen = source.indexOf('store = await openStateStore(', after);
+  const reopened = source.indexOf('const reopened = await store.readRecoveryClosure(', reopen);
+  assert(begin >= 0 && running > begin && polling > running && stop > polling && joined > stop && measured > joined &&
+    after > measured && reopen > after && reopened > reopen);
+  const inFlight = source.slice(polling, stop);
+  assert(inFlight.includes('inspectInstalledVerifierClaim(fixture.stateRoot, process.geteuid!(), fixture.runId)'));
+  assert(!inFlight.includes('readRecoveryClosure(') && !inFlight.includes('store.artifacts.readCanonical'));
+  assert(inFlight.includes('observeGuestVerifierProcess(') && inFlight.includes('actualNode && invocationPath && !settled'));
+});
+
 test('cancellation precondition diagnostics retain separate actual observations and settlement, never turning completion into a Node observation', () => {
   const original = new Error('unretained original failure'), rejected = new Error('unretained producer failure');
   Object.defineProperty(rejected, 'code', { value: 'LEASE_FENCED' });

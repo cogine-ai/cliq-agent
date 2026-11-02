@@ -16,8 +16,8 @@ that exact result. Continue completing this journey while CI runs alongside
 independent implementation work.
 
 At the last inspected remote source,
-`3f92d3098a1720febdba69aefd50d92a32fe7b9a`, the
-[Linux daily campaign](https://github.com/cogine-ai/cliq-agent/actions/runs/41203569110)
+`38a41fe890d343b5a2a5dae2f15566c41c84ab9c`, the
+[Linux daily campaign](https://github.com/cogine-ai/cliq-agent/actions/runs/41526916699)
 passes signed `setup`, `models`, `run`, `result` and `apply`, including an actual
 required-check failure, one repair and the final applied changes. Its four
 model POSTs use the owned HTTPS endpoint and the fixed `yolo`/Node verifier
@@ -25,39 +25,52 @@ profile. This qualifies that controlled workflow; real-provider requests and
 billing remain unverified, with zero paid calls made. All four Linux/macOS and
 Node 22/24 test jobs pass at that source.
 
-That run has eighteen successful jobs, five failures and one cancellation.
+That run has seventeen successful jobs, seven failures and one cancellation.
 The verifier campaign passes its first five cases, including ordinary Git,
-but misses the ordinary-tools source window. Received model/tool shutdown and
-successor completion pass their original limits, retaining the original claim
-and result without resending. The normal Delivery campaign is cancelled at its
-original twenty-minute workflow limit. Delayed-storage campaigns still fail
-before their intended physical publication cuts; upgrade fails during output
-processing with its production cause unconfirmed. Retain all of this evidence;
+but misses the ordinary-tools source window and does not meet Stop2 there.
+Received-model and startup shutdown pass; the received-tool successor reaches
+queued finalization but exceeds its original thirty-second observation window.
+The normal Delivery campaign is cancelled at its original twenty-minute
+workflow limit. Delayed-storage campaigns still fail before their intended
+physical publication cuts. Upgrade reaches schema 8 and reads the original Run
+and CAS, then its original endpoint read refuses with the cause unconfirmed.
+Retain all of this evidence;
 neither diagnostics nor a different passing cut close those gaps. Subsequent
 candidates still require the complete campaigns at the original 90/30/2/5-second
 limits. These remote results do not qualify the later local candidates.
 
-The ordinary-permission candidate adds fixed Node checks under `default` and
+The ordinary-permission implementation adds fixed Node checks under `default` and
 `accept-edits`, using exact worker-free candidate approvals or explicitly
 consumed admission templates. It retains independent Delivery verification and
 complete-plan approval, source-bound fresh grants, required-denial cancellation,
 advisory skips, counted repair candidates and original claimed/UNKNOWN limits.
 Shared CLI/TUI/SDK consumers use the existing v1 methods. Focused component
 regressions are not the real installed permission, preclaim shutdown or upgrade
-qualification; those new campaigns and all original timing limits remain open
-until run on the integrated immutable source.
+qualification. The [permission campaign](https://github.com/cogine-ai/cliq-agent/actions/runs/41526916990)
+misses the original five-second client READY limit before exercising its cases;
+all original timing limits and those qualification gaps remain open.
 
-The MCP candidate connects authenticated discovery, frozen provider-safe tool
+The MCP implementation connects authenticated discovery, frozen provider-safe tool
 contracts, one claimed stateless HTTP call, received-result retention or
 full-once UNKNOWN, worker retirement and explicit manual abandonment through
 the existing terminal writer. Its installed campaign includes code modification,
 required Node checks, result review/application, reconnect and restart. Pinned
 component tests and compiled Linux C data checks do not qualify that installed
-campaign. Authenticated Bearer, active Admin shutdown, retry/backoff, zero-I/O
+campaign. Its [first installed run](https://github.com/cogine-ai/cliq-agent/actions/runs/41526916880)
+fails at registration before its first case. Follow-up repairs keep asynchronous
+refusals inside the original control error boundary and revoke the dedicated
+Admin controller before joining its pending scope; real Linux lifecycle
+validation remains required. Authenticated Bearer, active Admin shutdown, retry/backoff, zero-I/O
 failure, known-unusable results and precise crash cuts still need their real
 campaigns. An Admin persistence outage beyond its five-second retirement
 freshness window remains fenced with its original owner; it has no native
 fresh-observation continuation yet.
+
+I4 import/rollback/GC implementation advances independently in a private complete
+package. Legacy history projection passes its focused Node 22/24 data suites;
+the physical backup, fenced import, marker recovery, rollback and typed GC roots
+still require integrated implementation and real qualification. No preview,
+SQLite row or copied pathname supplies migration or execution authority.
 
 Remaining implementation includes the other MCP transport/recovery profiles,
 managed local inference, configurable bounded concurrency, complete state

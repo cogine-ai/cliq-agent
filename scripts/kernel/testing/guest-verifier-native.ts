@@ -3,7 +3,7 @@ import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { canonicalSha256 } from '../../../src/kernel/canonical.js';
-import { digestOmitting, identityHash } from '../../../src/kernel/identity.js';
+import { identityHash } from '../../../src/kernel/identity.js';
 import type { ProcessContainmentDeathEvidenceV1, ProcessContainmentPlanV1, SandboxLaunchSpecV1 } from '../../../src/kernel/execution.js';
 import type { VerificationReceipt, VerifierStopEvidence, VerifierStopItem } from '../../../src/kernel/verifier.js';
 import type { RunFrontier, SourceManifest, WorkspaceEntryManifest, WorkspaceGenerationSnapshotEvidenceV1, WorkspaceStateManifest } from '../../../src/kernel/types.js';
@@ -13,7 +13,7 @@ import { sampleCanonicalNow } from '../../../src/state/canonical-time.js';
 import { openStateStore, publishInProcessChannel, type StateStore } from '../../../src/state/store.js';
 import { uuidv7 } from '../../../src/state/testing/fixtures.js';
 import { verifierCheckpointId, type VerifierRetirementV1 } from '../../../src/state/verifier-recovery.js';
-import { inspectInstalledWorkerRetirementHistory } from './installed-worker-lease.js';
+import { inspectInstalledVerifierClaim, inspectInstalledWorkerRetirementHistory } from './installed-worker-lease.js';
 import { recordGuestVerifierBoundaryFailure, recordGuestVerifierCancellationFailure } from './guest-verifier-diagnostics.js';
 import { assertGuestVerifierParentRetirement } from './guest-verifier-retirement.js';
 import { observeGuestVerifierProcess } from './guest-verifier-process.js';
@@ -234,22 +234,15 @@ test('must really exceed output cap',()=>{for(let i=0;i<32;i++)fs.writeSync(1,Bu
       try {
       while (!actualNode && !settled && performance.now() - started < 15_000) {
         polls++;
-        const cut = await store.readRecoveryClosure(fixture.runId);
-        const claim = cut.journal.find(row => row.opKind === 'verifier' && row.phase === 'dispatch_claimed');
-        if (claim?.sandboxLaunchSpecRef) {
+        // Execution is changing live launch rows. Observe one synchronous
+        // diagnostic cut here; full recovery validation follows its join.
+        const observation = inspectInstalledVerifierClaim(fixture.stateRoot, process.geteuid!(), fixture.runId);
+        if (observation) {
           claimObserved = true;
-          const launch = await store.artifacts.readCanonical<SandboxLaunchSpecV1>(claim.sandboxLaunchSpecRef);
-          const plan = await store.artifacts.readCanonical<ProcessContainmentPlanV1>(launch.containmentPlanRef);
+          const { launch, plan } = observation;
           if (plan.backend.kind !== 'linux') throw new Error('cancel campaign requires the actual nested Linux cgroup');
           assert.equal(launch.purpose, 'verifier'); assert.equal(launch.owner.kind, 'run_invocation');
           if (launch.owner.kind !== 'run_invocation' || launch.executable.kind !== 'guest_toolchain') throw new Error('cancel observation lost its original verifier identity');
-          assert.equal(launch.owner.runId, fixture.runId); assert.equal(launch.owner.opId, claim.opId);
-          assert.equal(launch.owner.attempt, claim.attempt); assert.equal(launch.owner.dispatchId, claim.dispatchId);
-          assert.equal(launch.owner.intendedLeaseEpoch, claim.leaseEpoch); assert.equal(launch.owner.workerLaunchId, cut.run.activeWorkerLaunchId);
-          assert.equal(canonicalSha256(launch.owner), canonicalSha256(plan.owner));
-          assert.equal(plan.planDigest, launch.containmentPlanDigest); assert.equal(plan.planDigest, digestOmitting(plan, 'planDigest'));
-          assert.equal(launch.launchSpecDigest, digestOmitting(launch, 'launchSpecDigest'));
-          assert.equal(plan.parentContainmentRef, launch.parentWorkerContainmentRef);
           assert.equal(launch.executable.executionPath, '/usr/bin/node');
           assert.equal(launch.executable.executableDigest, fixture.signed.guest!.manifest.node.digest);
           assert.equal(fixture.signed.guest!.manifest.node.canonicalGuestPath, '/usr/bin/node');

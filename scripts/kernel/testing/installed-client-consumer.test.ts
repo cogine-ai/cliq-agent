@@ -428,6 +428,23 @@ test('driver failure copies only a closed immutable authentication prefix and re
   assert.deepEqual(new InstalledClientDriverError('authentication', []).diagnostic, { kind: 'installed_client_driver', stage: 'authentication' });
 });
 
+test('driver failure retains only the same immutable four-field request observation without evaluating foreign data', () => {
+  const observation = { method: 'mcp.register' as const, boundary: 'exchange' as const, kind: 'kernel_storage' as const,
+    code: 'RECOVERY_REQUIRED' as const };
+  const error = new InstalledClientDriverError('request', [], observation);
+  assert.deepEqual(error.diagnostic.requestFailure, observation);
+  assert(Object.isFrozen(error.diagnostic.requestFailure));
+  let traps = 0;
+  const accessor = { ...observation };
+  Object.defineProperty(accessor, 'code', { enumerable: true, get() { traps++; throw 0; } });
+  const proxy = new Proxy(observation, { get() { traps++; throw 0; }, ownKeys() { traps++; throw 0; } });
+  for (const value of [accessor, proxy, { ...observation, message: 'not retained' }, { ...observation, code: 'foreign' },
+    { ...observation, boundary: 'foreign' }, { ...observation, method: 'foreign' }])
+    assert.throws(() => new InstalledClientDriverError('request', [], value as never), TypeError);
+  assert.equal(traps, 0);
+  assert.deepEqual(Object.keys(error.diagnostic.requestFailure!).sort(), ['boundary', 'code', 'kind', 'method']);
+});
+
 test('V2 labels only explicitly supplied self whole-process cumulative counters and keeps V1 bytes unchanged', () => {
   const process = { userCPUTime: 100, systemCPUTime: 20, fsRead: 3, fsWrite: 4 };
   assert.equal(installedClientAuthenticationMarker('native_connected', 12, undefined, process).toString('ascii'),
@@ -666,7 +683,8 @@ test('a real one-shot CLI child keeps its strict original request response even 
 });
 
 test('a real child fixed request cause is scanned and logged without changing its original fatal error or resending', async () => {
-  const marker = installedRequestFailureMarker({ method: 'authorization.create', boundary: 'response_decode', kind: 'type_error', code: null });
+  const requestFailure = { method: 'authorization.create' as const, boundary: 'response_decode' as const, kind: 'type_error' as const, code: null };
+  const marker = installedRequestFailureMarker(requestFailure);
   const scanned: Buffer[] = []; let closed = 0, joined = false;
   const client = await openInstalledClientConsumer({ executable: process.execPath,
     args: ['--input-type=module', '-e', `import {createInterface} from 'node:readline';
@@ -681,7 +699,7 @@ test('a real child fixed request cause is scanned and logged without changing it
   try {
     await assert.rejects(client.send({ protocolVersion: 1, method: 'authorization.create' }), error => {
       assert(error instanceof InstalledClientDriverError);
-      assert.deepEqual(error.diagnostic, { kind: 'installed_client_driver', stage: 'request' }); return true;
+      assert.deepEqual(error.diagnostic, { kind: 'installed_client_driver', stage: 'request', requestFailure }); return true;
     });
     await assert.rejects(client.send({ protocolVersion: 1, method: 'authorization.create' }));
   } finally { await assert.rejects(client.close()); }

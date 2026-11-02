@@ -1053,11 +1053,18 @@ export async function mutateInstalledMcpRegistration(driver: SqliteDriver, artif
     const resource: AdminResource = { close() {
       stopping = true;
       return closed ??= (async () => {
-        // Revoke network/helper before retiring original input and launchers.
+        // This attempt created its own controller above. Revoke its channel
+        // together with the native owner so an outstanding READY request is
+        // interrupted now, rather than after the scope's Stop2 join expires.
         const failures: unknown[] = [];
-        try { await native?.close(); } catch (error) { failures.push(error); }
+        const joins: Promise<unknown>[] = [];
+        try { if (native) joins.push(native.close()); } catch (error) { failures.push(error); }
+        try { joins.push(controller.close()); } catch (error) { failures.push(error); }
+        for (const result of await Promise.allSettled(joins)) if (result.status === 'rejected') failures.push(result.reason);
+        // The original scope's JS receivers remain fenced while controller
+        // cleanup is pending. Observe/assert it only after the actual join;
+        // native completion must retain its original birth/ACK/input custody.
         try { await scope?.close(); } catch (error) { failures.push(error); }
-        try { await controller.close(); } catch (error) { failures.push(error); }
         try { await launcher.close(); } catch (error) { failures.push(error); }
         if (failures.length) throw failures.find(error => error instanceof ResourceRetirementError) ??
           new ResourceRetirementError('MCP original Admin owner did not completely join', new AggregateError(failures));

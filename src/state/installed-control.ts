@@ -174,8 +174,8 @@ export function openInstalledControl(store: StateStore,
           error: { schemaVersion: 1, code: 'AUTHORIZATION_REQUIRED', retryable: false, messageCode: 'control.method_not_enabled' } } satisfies InstalledControlResponseV1;
         if (MCP_FEATURES.includes(method) && !store.supportsInstalledMcp()) return { protocolVersion: 1, ok: false, method: knownMethod,
           error: { schemaVersion: 1, code: 'AUTHORIZATION_REQUIRED', retryable: false, messageCode: 'control.method_not_enabled' } } satisfies InstalledControlResponseV1;
-        if (method === 'mcp.register' || method === 'mcp.refresh') return store.mutateMcpRegistration(decodeInstalledControlRequest(request) as import('../kernel/mcp.js').McpMutationRequestV1, identity);
-        if (method === 'mcp.list') return store.listMcpRegistrations(decodeInstalledControlRequest(request) as import('../kernel/control-wire.js').McpListRequestV1, identity);
+        if (method === 'mcp.register' || method === 'mcp.refresh') return await store.mutateMcpRegistration(decodeInstalledControlRequest(request) as import('../kernel/mcp.js').McpMutationRequestV1, identity);
+        if (method === 'mcp.list') return await store.listMcpRegistrations(decodeInstalledControlRequest(request) as import('../kernel/control-wire.js').McpListRequestV1, identity);
         if (method === 'session.create') return (await store.createInstalledSession(request, identity)).response;
         if (SESSION_FEATURES.includes(method)) return store.sessionContinuity(request, identity);
         if (LIST_FEATURES.includes(method)) return store.listControl(request, identity);

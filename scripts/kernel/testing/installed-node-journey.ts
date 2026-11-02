@@ -51,7 +51,7 @@ import { createInstalledMcpModelResponder } from './installed-mcp-model.js';
 import { runInstalledMcpCases, INSTALLED_MCP_PROFILE } from './installed-mcp-journey.js';
 import { INSTALLED_MCP_CASES, type InstalledMcpCase } from './installed-mcp-responder.js';
 import { assertInstalledUnusedDeliveryGrant, type InstalledPermissionEvidence } from './installed-permission-evidence.js';
-import { inspectInstalledPermissionRecord } from './installed-worker-lease.js';
+import { inspectInstalledPermissionRecord, inspectInstalledMcpPreclaimRefusal } from './installed-worker-lease.js';
 import { createInstalledDependencyResponder, installedDependencyPackage, INSTALLED_DEPENDENCY_PACKAGE_PATH,
   INSTALLED_DEPENDENCY_PROFILE, runInstalledDependencyCases } from './installed-dependency-journey.js';
 import { createInstalledChildrenResponder, INSTALLED_CHILDREN_PROFILE, INSTALLED_CHILD_CASES, runInstalledChildCase } from './installed-children-journey.js';
@@ -361,6 +361,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       ...(options.provider || dailyJourney ? { headlessSchemaVersion: 3 as const } : {}),
       openScan: () => scanner.openStream(), onJoined: () => { report.originalPublicClientJoined = true; } });
     assert(Array.isArray(client.hello.enabledFeatureIds) && client.hello.enabledFeatureIds.includes('artifact.get'));
+    if (journeyKind === 'mcp') for (const method of ['mcp.register', 'mcp.list'])
+      assert(client.hello.enabledFeatureIds.includes(method), 'the actual authenticated Hello did not enable the complete MCP recipe');
     return client;
   };
   const withRetainedUnitHistory = async (units: readonly [string, string], body: (assertRetained: () => void) => Promise<void>): Promise<void> => {
@@ -1126,6 +1128,27 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     report.cases = [];
     await mkdir(recipe.workspace, { mode: 0o700 }); await chown(recipe.workspace, ledger.uid, ledger.gid);
     if (journeyKind === 'mcp') {
+      assert(client);
+      const missingEndpoint = request({ protocolVersion: 1, method: 'mcp.register', requestId: nextId(),
+        registrationId: 'owned-mcp-missing-endpoint', target: { kind: 'streamable_http',
+          endpointRegistrationId: 'installed-mcp-missing-endpoint', credentialGrantIds: [] },
+        assertStatelessPerCall: true, toolRecovery: {} });
+      const preclaim = () => inspectInstalledMcpPreclaimRefusal(recipe.stateRoot, ledger.uid, principal,
+        missingEndpoint.requestId, missingEndpoint.registrationId);
+      const beforeRefusal = preclaim();
+      assert.equal(beforeRefusal.attempts, 0); assert.equal(beforeRefusal.claims, 0); assert.equal(beforeRefusal.registrations, 0);
+      assert.equal(mcpHandler.posts(), 0); assert.equal(postCount, 0); assert.equal(acceptedTcp, 0); assert.equal(acceptedTls, 0);
+      const refused = await client.send(missingEndpoint, 30_000);
+      assert.deepEqual(refused, { protocolVersion: 1, ok: false, method: 'mcp.register', error: {
+        schemaVersion: 1, code: 'INVALID_REQUEST', retryable: false, messageCode: 'control.invalid_request',
+        issues: [{ path: 'request', issueCode: 'invalid_request' }] } });
+      const status = accepted(await client.send({ protocolVersion: 1, method: 'supervisor.status' }, 30_000), 'supervisor.status');
+      assert.equal(status.supervisorInstanceId, client.hello.supervisorInstanceId);
+      const afterRefusal = preclaim(); assert.deepEqual(afterRefusal, beforeRefusal);
+      assert.equal(mcpHandler.posts(), 0); assert.equal(postCount, 0); assert.equal(acceptedTcp, 0); assert.equal(acceptedTls, 0);
+      report.mcpPreclaimRefusal = { diagnosticOnly: true, code: 'INVALID_REQUEST', sameAuthenticatedConnection: true,
+        attempts: afterRefusal.attempts, claims: afterRefusal.claims, registrations: afterRefusal.registrations,
+        endpointPosts: mcpHandler.posts(), acceptedTcp, acceptedTls };
       const sendMcp = async (frame: Record<string, any>, timeout = 30_000) => {
         assert(client); const response = await client.send(frame, timeout); recordRefusal(response, frame.method); return response;
       };
@@ -1566,7 +1589,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         try {
           assert(Date.now() < by, 'actual candidate/verifier/result did not reach terminal within its fixed 90-second qualification window');
         } catch (original) {
-          try { report.runProgressAtTerminalDeadline = projectInstalledRunProgress({ caseKind: sourceKind, cut, postCount }); }
+          try { report.runProgressAtTerminalDeadline = projectInstalledRunProgress({ caseKind: sourceKind, cut,
+            postCount: activeCases.get(sourceKind)!.posts }); }
           catch { /* Optional fixed-data diagnosis cannot replace the original deadline failure. */ }
           throw original;
         }

@@ -57,6 +57,13 @@ mcp_admin_native_joined(struct controller *controller)
     struct mcp_admin_native_scope *scope = controller->mcp_admin;
     if (!scope || scope->acked)
         return;
+    /* Historical kind9 can close only this original execution scope. A
+     * current checker requires its own authenticated CLEANUP_RETAINED reply;
+     * reaping that checker cannot promote the old journal into its actions. */
+    if (scope->retained) {
+        controller->retirement_failed = true;
+        return;
+    }
     struct cliq_mcp_admin_history history;
     bool            valid = scope->input && scope->input->birth_fd >= 0 && cliq_mcp_admin_read_history(scope->input->birth_fd, &history, &scope->snapshot, &scope->snapshot_size) &&
     history.count && history.last.kind == 9 && !history.last.packet.populated && !history.last.packet.remaining_descendants && (!scope->ready || history.last.packet.init_reaped == 1);
@@ -73,15 +80,42 @@ mcp_admin_native_joined(struct controller *controller)
 static void
 mcp_admin_native_complete(napi_env env, struct controller *controller)
 {
-    (void)env;
     struct mcp_admin_native_scope *scope = controller->mcp_admin;
     if (!scope || !scope->acked || !scope->input)
         return;
-    if (!retire_descriptor(&scope->outgoing_fd))
+    if (controller->env != env || controller->creator_pid != getpid() || syscall(SYS_gettid) != getpid() ||
+        !controller->closed || !controller->cleanup_done || !controller->reaped || controller->retirement_failed || !scope->joined || !scope->closed) {
         controller->retirement_failed = true;
+        return;
+    }
+    if (!scope->retained) {
+        struct cliq_mcp_admin_history history;
+        if (!scope->snapshot || !cliq_mcp_admin_history_bytes(scope->snapshot, scope->snapshot_size, &history) ||
+            !history.count || history.last.kind != 9 || memcmp(&history.header, &scope->input->binding, sizeof(history.header)) ||
+            history.first.controller_pid != controller->pid || strcmp(history.first.controller_start_token, controller->token) ||
+            !cliq_mcp_admin_packet_same(&scope->identity, &history.last.packet) ||
+            (scope->pending && (scope->pending < CLIQ_MCP_ADMIN_RESERVE || scope->pending > CLIQ_MCP_ADMIN_ACK ||
+                                controller->pending != scope->pending || controller->pending_scope))) {
+            controller->retirement_failed = true;
+            return;
+        }
+    }
+    if (!retire_descriptor(&scope->outgoing_fd)) {
+        controller->retirement_failed = true;
+        return;
+    }
     atomic_store(&scope->input->execution_joined, true);
-    if (scope->input->retire(scope->input))
+    if (scope->input->retire(scope->input) || !atomic_load(&scope->input->closed)) {
         controller->retirement_failed = true;
+        return;
+    }
+    if (!scope->retained && scope->pending) {
+        /* The revoked channel and its complete original domain have joined.
+         * Consume only the cancelled local request, never a semantic reply,
+         * no-effect fact or a current-checker cleanup observation. */
+        controller->pending = 0;
+        scope->pending = 0;
+    }
 }
 static bool
 mcp_admin_peer_current(struct cliq_mcp_admin_peer_handle *bridge)

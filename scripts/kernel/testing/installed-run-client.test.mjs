@@ -573,6 +573,9 @@ test('installed journey failures retain only fixed classifications from actual e
     const primary = new InstalledClientDriverError(stage);
     assert.deepEqual(classify(primary), [{ kind: 'installed_client_driver', stage }]);
   }
+  const requestFailure = { method: 'mcp.register', boundary: 'exchange', kind: 'kernel_storage', code: 'RECOVERY_REQUIRED' };
+  assert.deepEqual(classify(new InstalledClientDriverError('request', [], requestFailure)),
+    [{ kind: 'installed_client_driver', stage: 'request', requestFailure }]);
   for (const stage of ['ready', 'request', 'close']) {
     const primary = new InstalledClientConsumerDeadlineError(stage, stage === 'request' ? 30000 : stage === 'close' ? 10000 : 5000,
       performance.now(), 17);

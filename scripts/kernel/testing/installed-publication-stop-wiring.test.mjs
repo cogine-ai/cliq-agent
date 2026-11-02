@@ -204,7 +204,8 @@ test('deadline diagnosis rethrows the original unchanged assertion without query
   assert(start >= 0 && end > location);
   const guarded = owner.slice(start, end + 'throw original;'.length);
   assert(guarded.includes('catch (original)'));
-  assert(guarded.includes('projectInstalledRunProgress({ caseKind: sourceKind, cut, postCount })'));
+  assert.match(guarded, /projectInstalledRunProgress\(\{ caseKind: sourceKind, cut,\s+postCount: activeCases\.get\(sourceKind\)!\.posts \}\)/u);
+  assert(!guarded.includes('cut, postCount }'), 'later source cases retain their own count, not accumulated earlier requests');
   assert.equal((guarded.match(/Date\.now\(\)/gu) ?? []).length, 1);
   assert(!/await |\.send\(|readCas\(|setTimeout\(|setInterval\(/u.test(guarded));
   assert(guarded.includes('catch { /* Optional fixed-data diagnosis cannot replace the original deadline failure. */ }'));

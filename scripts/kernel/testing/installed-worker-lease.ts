@@ -15,6 +15,8 @@ import { journalEntryFromRow, type JournalSqlRow } from '../../../src/state/repo
 import type { PublicationGenerationResourcesV1 } from '../../../src/kernel/publication.js';
 import type { VerifierParentDomainDispatchClosureV1 } from '../../../src/state/verifier-unknown-retirement.js';
 import { decodeVerifierParentDomainDispatchClosure as decodeVerifierParentEvidence } from '../../../src/state/verifier-unknown-retirement.js';
+import { decodeBuiltinEditContainmentPlan, decodeVerifierSandboxLaunchSpec } from '../../../src/state/execution-closure.js';
+import { immutableSnapshot } from '../../../src/model/immutable.js';
 
 export type InstalledWorkerLeaseExpected = { uid: number; runId: string; launchId: string; leaseEpoch: number;
   runRevision: number; supervisorInstanceId: string; deadlineAt: string };
@@ -130,6 +132,27 @@ export function inspectInstalledPermissionRecord(stateRoot: string, uid: number,
   });
 }
 
+/** Fixed negative-admission audit only. A zero durable claim count is not a
+ * native no-spawn/join receipt and cannot authorize any subsequent operation. */
+export function inspectInstalledMcpPreclaimRefusal(stateRoot: string, uid: number,
+  principalId: string, requestId: string, registrationId: string) {
+  requireValue(boundedString(principalId) && boundedString(requestId) && boundedString(registrationId));
+  return readWorkerDiagnostic(stateRoot, uid, (database, databaseIdentity) => {
+    database.exec('BEGIN');
+    try {
+      const operations = database.prepare(`SELECT count(*) AS attempts,
+        coalesce(sum(CASE WHEN json_extract(row_json,'$.probeDispatch.state') IN ('claimed','released') THEN 1 ELSE 0 END),0) AS claims
+        FROM admin_operations WHERE principal_id=? AND method='mcp.register' AND request_id=?`).get(principalId, requestId)!;
+      const registration = database.prepare('SELECT count(*) AS revisions FROM mcp_registrations WHERE owner_principal_id=? AND registration_id=?')
+        .get(principalId, registrationId)!;
+      const attempts = operations.attempts, claims = operations.claims, registrations = registration.revisions;
+      requireValue([attempts, claims, registrations].every(value => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0));
+      database.exec('COMMIT');
+      return { diagnosticOnly: true as const, databaseIdentity, attempts: attempts as number, claims: claims as number, registrations: registrations as number };
+    } catch (failure) { database.exec('ROLLBACK'); throw failure; }
+  });
+}
+
 /** One actual readonly SQL cut, used only to arm the external crash actor or
  * record the first post-kill cut. A missing claim is not a missing resource. */
 export function inspectInstalledPublicationClaim(stateRoot: string, uid: number, runId: string) {
@@ -162,6 +185,49 @@ export function inspectInstalledPublicationClaim(stateRoot: string, uid: number,
       birth, claim, originalReceiptCommitted, journal, progress });
     database.exec('COMMIT'); return result;
   });
+}
+
+/** This fixed one-verifier campaign observes only its current claim recipe.
+ * The synchronous SQL/CAS cut locates a cgroup for independent process checks;
+ * it grants no execution, cancellation, recovery or retirement authority. */
+export function inspectInstalledVerifierClaim(stateRoot: string, uid: number, runId: string) {
+  try {
+    requireValue(boundedString(runId));
+    return readWorkerDiagnostic(stateRoot, uid, (database, databaseIdentity, readCas) => {
+      database.exec('BEGIN');
+      try {
+        const runs = database.prepare('SELECT id,active_worker_launch_id,lease_epoch FROM runs WHERE id=? LIMIT 2').all(runId);
+        requireValue(runs.length === 1 && runs[0]!.id === runId);
+        const run = runs[0]!;
+        const rows = database.prepare(`SELECT run_id,seq,op_id,op_kind,attempt,phase,
+          CASE WHEN typeof(entry_json)='text' AND length(CAST(entry_json AS BLOB)) BETWEEN 1 AND 65536
+          THEN entry_json ELSE NULL END AS entry_json FROM run_journal
+          WHERE run_id=? AND op_kind='verifier' ORDER BY seq LIMIT 4`).all(runId);
+        requireValue(rows.length <= 3 && rows.every(row => typeof row.entry_json === 'string'));
+        const journal = rows.map(row => journalEntryFromRow(row as JournalSqlRow));
+        journal.forEach(row => requireValue(row.runId === runId && row.opKind === 'verifier' && row.attempt === 0));
+        const claims = journal.filter(row => row.phase === 'dispatch_claimed');
+        requireValue(claims.length <= 1);
+        if (!claims.length) { database.exec('COMMIT'); return undefined; }
+        const claim = claims[0]!;
+        requireValue(claim.sandboxLaunchSpecRef && claim.dispatchId && boundedString(run.active_worker_launch_id) &&
+          Number.isSafeInteger(run.lease_epoch) && run.lease_epoch === claim.leaseEpoch);
+        const launch = decodeVerifierSandboxLaunchSpec(readCas(claim.sandboxLaunchSpecRef));
+        const plan = decodeBuiltinEditContainmentPlan(readCas(launch.containmentPlanRef));
+        requireValue(launch.owner.runId === runId && launch.owner.opId === claim.opId && launch.owner.attempt === claim.attempt &&
+          launch.owner.dispatchId === claim.dispatchId && launch.owner.intendedLeaseEpoch === claim.leaseEpoch &&
+          launch.owner.workerLaunchId === run.active_worker_launch_id && launch.requestRef === claim.requestRef &&
+          launch.targetRef === claim.target && launch.operationGrantRef === claim.grantRef &&
+          canonicalSha256(launch.owner) === canonicalSha256(plan.owner) && plan.planDigest === launch.containmentPlanDigest &&
+          plan.parentContainmentRef === launch.parentWorkerContainmentRef && plan.backend.kind === 'linux' &&
+          launch.filesystem.kind === 'run_generation' && plan.filesystemBinding.kind === 'run-generation' &&
+          plan.filesystemBinding.generationRef === launch.filesystem.generationRef);
+        const result = immutableSnapshot({ diagnosticOnly: true as const, databaseIdentity,
+          sqlCutDigest: canonicalSha256({ run, journal }), claim, launch, plan });
+        database.exec('COMMIT'); return result;
+      } catch (failure) { database.exec('ROLLBACK'); throw failure; }
+    });
+  } catch { throw new Error('installed verifier claim inspection refused'); }
 }
 
 /** Strict recovery branch only. Retained data cannot replace the owning

@@ -24,6 +24,30 @@ function declaration(parsed: ts.SourceFile, name: string): ts.FunctionDeclaratio
   return selected[0]!;
 }
 
+test('MCP mutation and listing await the real producer inside the original control refusal boundary', async () => {
+  const parsed = await source('./installed-control.ts');
+  for (const name of ['mutateMcpRegistration', 'listMcpRegistrations']) {
+    const selected: ts.CallExpression[] = [];
+    const visit = (node: ts.Node) => {
+      if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) &&
+          node.expression.expression.getText(parsed) === 'store' && node.expression.name.text === name) selected.push(node);
+      ts.forEachChild(node, visit);
+    };
+    visit(parsed); assert.equal(selected.length, 1, name);
+    const call = selected[0]!;
+    assert(ts.isAwaitExpression(call.parent) && ts.isReturnStatement(call.parent.parent),
+      'an asynchronous backend refusal must reach the application catch before returning');
+    let boundary: ts.Node | undefined = call.parent.parent;
+    while (boundary && !ts.isTryStatement(boundary)) boundary = boundary.parent;
+    assert(boundary && ts.isTryStatement(boundary) && boundary.catchClause);
+    assert(boundary.tryBlock.pos < call.pos && call.end < boundary.tryBlock.end);
+    assert.match(boundary.catchClause.getText(parsed), /error: errorResult\(error, method === 'credential\.finalize'\)/u,
+      'preserve the closed original error mapper instead of retiring the connection on an ordinary refusal');
+    assert.match(call.arguments[0]!.getText(parsed), /^decodeInstalledControlRequest\(request\) as /u);
+    assert.equal(call.arguments[1]!.getText(parsed), 'identity');
+  }
+});
+
 test('both MCP credential preparations forward their actual signal into the original installed credential scope', async () => {
   const parsed = await source('./store.ts');
   for (const name of ['withInstalledMcpHttpAuthority', 'resolveInstalledMcpTransport']) {
