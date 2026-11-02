@@ -246,7 +246,7 @@ test('installed model material remains inside the original full admission and ca
   const source = await readFile(new URL('./installed-run.ts', import.meta.url), 'utf8');
   const start = source.indexOf('export async function assembleInstalledRun('), end = source.indexOf('admissions.set(result,', start);
   assert(start >= 0 && end > start);
-  const assembly = source.slice(start, end), phases = ['await publishInstalledModelMaterial({', 'await materialFor(installed, reads, assembly, signal)',
+  const assembly = source.slice(start, end), phases = ['await publishInstalledModelMaterial({', 'await materialFor(installed, reads, assembly, signal, undefined, driver)',
     'validateRunAssembly(', 'verifyToolRuntimeAuthority(', 'const sandboxProfileRef = publishedSandboxRef ??', 'await prepareInstalledVerifierAssembly(',
     'await artifacts.publishCanonical(policy, policy.format)', 'await installed.revalidate(signal)',
     'await validateControlChannelClosure(reads, owner, identity)', 'assertActiveStateOwner(driver, owner)'];

@@ -24,7 +24,7 @@ import { openSqliteDriver } from './sqlite-driver.js';
 import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME } from '../config.js';
 import { createSourceInspectionFixture, sourceInspectionRequest as inlineRequest } from './testing/source-inspection-fixtures.js';
 
-test('the real source capture retains skills and source selectors with independent source consent and MCP refusal', async t => {
+test('the real source capture retains independent skill/source consent and rejects an unavailable MCP recipe before inspection', async t => {
   const fixture = await createSourceInspectionFixture(t, 'requested-skills');
   const skillDirectory = path.join(fixture.workspace, '.cliq', 'skills', 'review-skill');
   await mkdir(skillDirectory, { recursive: true, mode: 0o700 });
@@ -52,7 +52,7 @@ test('the real source capture retains skills and source selectors with independe
     assert.deepEqual(driver.prepare('SELECT inspection_id FROM source_inspection_attempts').all(), before);
     await assert.rejects(fixture.store.captureSubmittedSource({ identity: fixture.identity,
       request: inlineRequest({ ...fixture.request, requestId: uuidv7(), admissionKey: admissionKey('requested-mcp'),
-        skillIds: ['review-skill'], registeredMcpServerIds: ['not-registered'] }) }), { code: 'INVALID_REQUEST' });
+        skillIds: ['review-skill'], registeredMcpServerIds: ['not-registered'] }) }), { code: 'UNSUPPORTED_PLATFORM' });
     assert.deepEqual(driver.prepare('SELECT inspection_id FROM source_inspection_attempts').all(), before);
   } finally { driver.close(); }
 });
@@ -128,7 +128,7 @@ test('installed recipe admits default tool interaction without changing the froz
   }
 });
 
-test('installed recipe retains ordered skills and source requests before their independent authority checks', () => {
+test('installed recipe retains ordered skills, MCP ids and source requests before their independent authority checks', () => {
   const request = normalizeRunSubmitRequest(inlineRequest({
     model: { provider: 'openai-compatible', model: 'owned-fixture-model',
       endpoint: { kind: 'registered', endpointRegistrationId: 'owned-fixture-endpoint' }, modelCredentialGrantIds: ['owned-fixture-grant'] },
@@ -137,9 +137,12 @@ test('installed recipe retains ordered skills and source requests before their i
   assert.deepEqual(request.skillIds, ['selected-user', 'selected-bundled', 'selected-workspace']);
   assert.doesNotThrow(() => assertInstalledRunRecipe(request));
   assert.equal(request.policyMode, 'default'); assert.deepEqual(request.sourceIncludes, []);
-  assert.throws(() => assertInstalledRunRecipe({ ...request, registeredMcpServerIds: ['unimplemented-server'] }), { code: 'INVALID_REQUEST' });
-  // Shape support creates no source/read permission. The real capture test
-  // above independently refuses a locator without its actual grant.
+  const requestedMcp = { ...request, registeredMcpServerIds: ['requested-server'] };
+  assert.doesNotThrow(() => assertInstalledRunRecipe(requestedMcp));
+  assert.deepEqual(requestedMcp.registeredMcpServerIds, ['requested-server']);
+  // Shape support creates no MCP execution or source/read permission. The real
+  // capture test above independently refuses a missing signed MCP recipe or
+  // a source locator without its actual grant, before any new inspection.
   assert.doesNotThrow(() => assertInstalledRunRecipe({ ...request,
     sourceIncludes: [{ path: 'separate-source', scope: 'entry', readGrantId: 'caller-request-only' }] }));
 });

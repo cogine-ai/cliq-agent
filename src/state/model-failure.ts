@@ -15,17 +15,20 @@ import { readSupervisorInspector } from './supervisor-inspector.js';
 import { readStopSourceData } from './stop-source.js';
 import { readCredentialRedemptionFailureCause } from './credential-redemption-failure.js';
 import { readDependencyFailureCause, readDependencyAmbiguityCause } from './dependency-failure-cause.js';
+import { validateMcpStopComposition } from './manual-reconciliation.js';
+import { readMcpKnownUnusableCause } from './mcp-execution.js';
 
 type Inspector = { inspectorIdentityRef: string; inspectorIdentityDigest: string };
 
 /** Only positively received normal responses with a settled history. Unknowns require their own external closure. */
-async function readModelFailureCause(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1, observedAt: string, sourceCheckpointId?: string, sourceRunRevision?: number, registeredJournalSeq?: number) {
+async function readModelFailureCause(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1, observedAt: string,
+  sourceCheckpointId?: string, sourceRunRevision?: number, registeredJournalSeq?: number, mcpNoRelease: ReadonlySet<number> = new Set()) {
   const { run } = cut, { checkpoint, journal, items } = readStopSourceData(driver, cut, observedAt, sourceCheckpointId, sourceRunRevision, registeredJournalSeq);
   const children = childAllocationBudgetFacts(run.id, cut.childAllocations);
   if (run.waitingReason && sourceCheckpointId === undefined || !isZeroBudget(subtractBudget(run.budgetReserved, children.reserved))) return undefined;
   const history = [...stopInvocationHistory(journal).values()];
-  if (history.some(({ entry, hasClaim }) => !['model', 'tool', 'child_admission', 'child_merge', 'child_await', 'skill_resource'].includes(entry.opKind) ||
-      (entry.phase !== 'completed' && (entry.phase !== 'failed' || hasClaim)))) return undefined;
+  if (history.some(({ entry, hasClaim }) => !['model', 'tool', 'mcp', 'child_admission', 'child_merge', 'child_await', 'skill_resource'].includes(entry.opKind) ||
+      (entry.phase !== 'completed' && (entry.phase !== 'failed' || hasClaim && !(entry.opKind === 'mcp' && mcpNoRelease.has(entry.seq)))))) return undefined;
   const latest = history.filter(({ entry }) => entry.opKind === 'model').at(-1)?.entry;
   if (latest?.phase !== 'completed') return undefined;
   const request = await readCanonicalArtifact<ModelRequestV1>(artifacts, latest.requestRef);
@@ -52,8 +55,10 @@ async function readModelFailureCause(driver: SqliteDriver, artifacts: ArtifactCa
 /** The state owner observes its Journal now and constructs the wrapper; callers supply no reason or evidence artifact. */
 export async function prepareModelFailureStop(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerRecordV1, assembly: RunAssemblyV1,
   cut: RecoveryClosureV1, identity: Inspector, observedAt: string) {
-  if (assembly.mcpServers.length) return undefined;
-  const cause = await readModelFailureCause(driver, artifacts, cut, observedAt) ??
+  const mcpNoRelease = assembly.mcpServers.length || cut.journal.some(entry => entry.opKind === 'mcp' || entry.opKind === 'mcp-server')
+    ? await validateMcpStopComposition(driver, artifacts, cut) : new Set<number>();
+  const cause = await readMcpKnownUnusableCause(driver, artifacts, cut, observedAt) ??
+    await readModelFailureCause(driver, artifacts, cut, observedAt, undefined, undefined, undefined, mcpNoRelease) ??
     await readCredentialRedemptionFailureCause(driver, artifacts, cut, observedAt) ??
     await readDependencyFailureCause(driver, artifacts, cut, observedAt) ?? await readDependencyAmbiguityCause(driver, artifacts, cut, observedAt);
   if (!cause) return undefined;
@@ -75,6 +80,9 @@ export async function validateModelFailureStop(driver: SqliteDriver, artifacts: 
   const fields = ['schemaVersion', 'format', 'runId', 'frontierRef', 'frontierDigest', 'failingOpId',
     'inspectorIdentityRef', 'inspectorIdentityDigest', 'observedAt', 'evidenceDigest', 'failureKind'];
   if (evidence.failureKind === 'model_unusable_response') fields.push('unusableResponseRef', 'unusableResponseDigest');
+  else if (evidence.failureKind === 'mcp_known_result_unusable') {
+    fields.push('toolObservationRef', 'toolObservationDigest', 'captureRef', 'captureDigest');
+  }
   else if (evidence.failureKind === 'credential_redemption_failed') {
     fields.push('credentialGrantRef', 'credentialGrantDigest', 'endpointRegistrationRef', 'endpointRegistrationDigest',
       'credentialAuthorityRecordDigest', 'authorityRevision', 'credentialServiceRevision', 'failureCode');
@@ -89,7 +97,12 @@ export async function validateModelFailureStop(driver: SqliteDriver, artifacts: 
       parseCanonicalTime(intent.createdAt) - parseCanonicalTime(evidence.observedAt) > 5_000) {
     throw new TypeError('runtime stop has no exact fresh model failure evidence');
   }
-  const cause = evidence.failureKind === 'model_unusable_response' ? await readModelFailureCause(driver, artifacts, cut, evidence.observedAt, intent.registeredCheckpointId, intent.registeredRunRevision, intent.registeredJournalSeq) :
+  const assembly = await readCanonicalArtifact<RunAssemblyV1>(artifacts, cut.runSpec.assemblyRef);
+  const mcpNoRelease = assembly.mcpServers.length || cut.journal.some(entry => entry.opKind === 'mcp' || entry.opKind === 'mcp-server')
+    ? await validateMcpStopComposition(driver, artifacts, cut) : new Set<number>();
+  const cause = evidence.failureKind === 'mcp_known_result_unusable'
+    ? await readMcpKnownUnusableCause(driver, artifacts, cut, evidence.observedAt, intent.registeredCheckpointId, intent.registeredRunRevision, intent.registeredJournalSeq) :
+    evidence.failureKind === 'model_unusable_response' ? await readModelFailureCause(driver, artifacts, cut, evidence.observedAt, intent.registeredCheckpointId, intent.registeredRunRevision, intent.registeredJournalSeq, mcpNoRelease) :
     evidence.failureKind === 'credential_redemption_failed' ?
       await readCredentialRedemptionFailureCause(driver, artifacts, cut, evidence.observedAt, intent.registeredCheckpointId, intent.registeredRunRevision, intent.registeredJournalSeq) :
       evidence.failureKind === 'dependency_acquisition_failed' ?
@@ -104,7 +117,5 @@ export async function validateModelFailureStop(driver: SqliteDriver, artifacts: 
   if (!owner || owner.acquiredAt > evidence.observedAt || (owner.state === 'terminal' && owner.releasedAt < intent.createdAt)) {
     throw new TypeError('model failure inspector was not the state owner at stop commit');
   }
-  const assembly = await readCanonicalArtifact<RunAssemblyV1>(artifacts, cut.runSpec.assemblyRef);
-  if (assembly.mcpServers.length) throw new TypeError('model failure stop lacks MCP closure');
   await readSupervisorInspector(artifacts, owner, assembly, evidence);
 }

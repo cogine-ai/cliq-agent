@@ -32,6 +32,7 @@ import { readDeliveryTerminalProjection, readUnclaimedPublicationStopHistory } f
 import type { DeliveryReadData } from './delivery-read-data.js';
 import { validateVerifierUnknownTerminalHistory } from './verifier-unknown-retirement.js';
 import { readVerifierApprovalDenials } from './verifier-permission-history.js';
+import { validateManualAbandonmentHistory, validateMcpStopComposition } from './manual-reconciliation.js';
 
 export type CancelResponse = Extract<ControlApplicationResponseV1, { ok: true }> & { result: Extract<ControlResultV1, { method: 'run.cancel' }> };
 
@@ -125,6 +126,10 @@ async function readStopReference(driver: SqliteDriver, artifacts: ArtifactCatalo
       const { response, row } = await readCancelResponse(driver, artifacts, run, intent.principalId, intent.requestId);
       if (response.result.snapshot.run.stopIntentRef !== ref || row.committedAt !== intent.createdAt) throw new TypeError('cancellation has no exact control-row owner');
     }
+  } else if(intent.origin==='manual_abandon'){
+    const marker=await validateManualAbandonmentHistory(driver,artifacts,closure);
+    if(!marker||marker.opId!==intent.opId||marker.attempt!==intent.attempt||marker.attestationRef!==intent.attestationRef)
+      throw new TypeError('manual Stop has no exact terminal acknowledgement owner');
   } else if (intent.origin === 'parent_cancel') {
     if (!run.cancelRequested || requireCurrentFence && parentObservation?.ref !== ref) throw new TypeError('parent cancellation lost its original registered dispatch observation');
   } else if (requireCurrentFence && run.cancelRequested) {
@@ -257,6 +262,7 @@ async function validateStopRecoveryData(driver: SqliteDriver, artifacts: Artifac
       checkpoint.id !== stopCheckpointId(run.id, run.stopIntentRef) || checkpoint.createdAt !== run.updatedAt ||
       checkpoint.journalSeq !== journal.length || checkpoint.runItemSeq !== closure.items.length) throw new TypeError('terminal stop has an open Run/worker/budget cut');
   const detail = await readCanonicalArtifact<TerminalDetail>(artifacts, run.terminalDetailRef);
+  const manual=await validateManualAbandonmentHistory(driver,artifacts,closure,detail);
   const preparedAt = detail.createdAt;
   parseCanonicalTime(preparedAt);
   if (preparedAt < intent.createdAt || preparedAt > run.updatedAt) throw new TypeError('terminal preparation time is outside its intent and committed Checkpoint');
@@ -278,10 +284,13 @@ async function validateStopRecoveryData(driver: SqliteDriver, artifacts: Artifac
     throw new TypeError('terminal stop publication projection was not the same original terminal transaction');
   requireEqual(detail, { ...agentStopDetail(intent, run.stopIntentRef, preparedAt),
     abandonedRetryInvocations: abandoned,
+    ...(manual?{abandonedManualInvocation:manual}:{}),
     ...(publication ? { publicationResultItemRefs: [...publication.evidence.forwardResultItemRefs, ...publication.evidence.abortResultItemRefs],
       deliveryTerminalProjectionEvidenceRef: publication.evidenceRef } : {}) }, 'terminal reason closure');
   const assembly = await readCanonicalArtifact<RunAssemblyV1>(artifacts, spec.assemblyRef);
-  if (assembly.format !== 'cliq-run-assembly-v1' || assembly.mcpServers.length) throw new TypeError('terminal stop lacks its typed containment closure');
+  if (assembly.format !== 'cliq-run-assembly-v1') throw new TypeError('terminal stop lacks its typed containment closure');
+  const mcpNoRelease=assembly.mcpServers.length||journal.some(entry=>entry.opKind==='mcp'||entry.opKind==='mcp-server')
+    ?await validateMcpStopComposition(driver,artifacts,closure):new Set<number>();
   // Common recovery verified every complete seal or retirement/source graph;
   // a phase string alone cannot satisfy this final retained SQL cut.
   assertRetiredGenerationCut(driver, run, closure.workspaceGenerations);
@@ -295,14 +304,15 @@ async function validateStopRecoveryData(driver: SqliteDriver, artifacts: Artifac
   const unclaimedPublications = !hasPublicationClaim && spec.operation === 'delivery' && journal.some(entry => entry.opKind === 'publish')
     ? data ? await data.unclaimedStopHistory() : await readUnclaimedPublicationStopHistory(driver, artifacts, closure) : new Set<number>();
   for (const { entry, hasClaim } of stopInvocationHistory(journal).values()) {
+    if(manual&&entry.phase==='abandoned'&&entry.opId===manual.opId&&entry.attempt===manual.attempt&&entry.seq===manual.abandonedJournalSeq)continue;
     if (entry.opKind === 'publish' && (publication?.closedPublicationJournalSeqs.has(entry.seq) || unclaimedPublications.has(entry.seq))) continue;
     if ((['model', 'verifier'].includes(entry.opKind) && entry.replayClass === 'retry' || entry.opKind === 'tool' &&
         entry.target === 'builtin:dependency-acquire' && entry.replayClass === 'workspace-rollback-retry') && entry.phase === 'unknown' && abandoned.some(closed =>
       closed.opId === entry.opId && closed.attempt === entry.attempt && closed.unknownJournalSeq === entry.seq &&
       closed.budgetSettlementRef === entry.budgetSettlementRef)) continue;
-    if (entry.phase === 'failed' && (entry.opKind === 'model' && modelNoRelease.has(entry.seq) ||
+    if (entry.phase === 'failed' && (entry.opKind === 'model' && modelNoRelease.has(entry.seq) || entry.opKind==='mcp'&&mcpNoRelease.has(entry.seq)||
         entry.opKind === 'tool' && (privateRollbacks.has(entry.seq) || dependencyClosed.has(entry.seq)) || entry.opKind === 'verifier' && verifierStops.has(entry.seq))) continue;
-    if (!['model', 'tool', 'verifier', 'child_admission', 'child_merge', 'child_await', 'skill_resource'].includes(entry.opKind) || (entry.phase !== 'completed' &&
+    if (!['model', 'tool', 'mcp', 'verifier', 'child_admission', 'child_merge', 'child_await', 'skill_resource'].includes(entry.opKind) || (entry.phase !== 'completed' &&
         (entry.phase !== 'failed' || hasClaim))) throw new TypeError('terminal stop retains unresolved dispatch evidence');
     if (entry.phase === 'failed' && entry.errorRef === run.stopIntentRef && entry.timestamp !== preparedAt) throw new TypeError('stop refund has no atomic terminal owner');
   }

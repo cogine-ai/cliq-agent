@@ -38,7 +38,11 @@ export async function readToolRuntimeAuthority(artifacts: ArtifactCatalog, input
     bundle: input.bundle, releaseKeys: input.releaseKeys,
     guestToolchainManifestRef: input.assembly.runtime.guestToolchainManifestRef, signal
   }) : undefined;
-  verifyToolRuntimeAuthority({ ...input, ...(guestToolchain ? { guestToolchain } : {}) });
+  const mcpRegistries = await artifacts.mapReads(input.assembly.mcpServers, async selected => {
+    const registry = (await import('../kernel/mcp.js')).decodeMcpRegistryRevision(await artifacts.readCanonical(selected.registryRevisionRef));
+    return { ref: selected.registryRevisionRef, registry };
+  });
+  verifyToolRuntimeAuthority({ ...input, mcpRegistries, ...(guestToolchain ? { guestToolchain } : {}) });
   if (guestToolchain) assertBuiltinScriptResources(guestToolchain.manifest.guestImageByteCount, input.resources);
   for (const digest of new Set(scripts.map(execution => execution.adapterCodeDigest))) {
     const entry = input.bundle.entries.find(entry => entry.digest === digest)!;

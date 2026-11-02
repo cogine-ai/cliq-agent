@@ -13,6 +13,7 @@ export type BrokerInvocationAmbiguityEvidenceV1 = {
   ambiguityKind: 'broker_channel_lost_after_claim'; brokerFenceTokenDigest: string;
   failureCode: 'deadline_after_release_possible' | 'connection_lost_after_release_possible' | 'response_stream_interrupted';
   durableTerminalResultAbsent: true;
+  creatorProcessDeathEvidenceRef?: string; creatorProcessDeathEvidenceDigest?: string;
 };
 
 export function decodeBrokerInvocationAmbiguity(value: unknown): BrokerInvocationAmbiguityEvidenceV1 {
@@ -20,7 +21,8 @@ export function decodeBrokerInvocationAmbiguity(value: unknown): BrokerInvocatio
     'frontierRef', 'frontierDigest', 'opId', 'opKind', 'attempt', 'dispatchId', 'dispatchJournalSeq', 'operationRequestRef',
     'operationRequestDigest', 'operationTargetRef', 'operationTargetDigest', 'claimingSupervisorInstanceId', 'claimingStateOwnerEpoch',
     'inspectorIdentityRef', 'inspectorIdentityDigest', 'observedAt', 'evidenceDigest', 'ambiguityKind', 'brokerFenceTokenDigest',
-    'failureCode', 'durableTerminalResultAbsent'])) throw new TypeError('broker ambiguity has an invalid closed shape');
+    'failureCode', 'durableTerminalResultAbsent', ...(Object.hasOwn(value, 'creatorProcessDeathEvidenceRef') || Object.hasOwn(value, 'creatorProcessDeathEvidenceDigest')
+      ? ['creatorProcessDeathEvidenceRef', 'creatorProcessDeathEvidenceDigest'] : [])])) throw new TypeError('broker ambiguity has an invalid closed shape');
   const evidence = value as BrokerInvocationAmbiguityEvidenceV1;
   if (evidence.schemaVersion !== 1 || evidence.format !== 'cliq-invocation-ambiguity-evidence-v1' ||
       evidence.ambiguityKind !== 'broker_channel_lost_after_claim' || !['model', 'tool', 'mcp'].includes(evidence.opKind) ||
@@ -36,6 +38,11 @@ export function decodeBrokerInvocationAmbiguity(value: unknown): BrokerInvocatio
     'operationTargetDigest', 'inspectorIdentityRef', 'inspectorIdentityDigest', 'evidenceDigest', 'brokerFenceTokenDigest'] as const)
     assertArtifactRef(evidence[key]);
   parseCanonicalTime(evidence.observedAt);
+  if (evidence.creatorProcessDeathEvidenceRef !== undefined || evidence.creatorProcessDeathEvidenceDigest !== undefined) {
+    if (evidence.opKind !== 'mcp') throw new TypeError('creator-process MCP closure cannot widen another broker purpose');
+    if (!evidence.creatorProcessDeathEvidenceRef || !evidence.creatorProcessDeathEvidenceDigest) throw new TypeError('MCP successor lost its exact paired creator death evidence');
+    assertArtifactRef(evidence.creatorProcessDeathEvidenceRef); assertArtifactRef(evidence.creatorProcessDeathEvidenceDigest);
+  }
   if (evidence.frontierRef !== evidence.frontierDigest || evidence.evidenceDigest !== digestOmitting(evidence, 'evidenceDigest'))
     throw new TypeError('broker ambiguity digest does not rehash');
   return evidence;

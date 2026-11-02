@@ -13,8 +13,8 @@ changes runtime assertions or release acceptance.
 
 ## Routing
 
-`scripts/ci/route.mjs` supplies the same scope to Kernel foundation and Installed
-ordinary permissions. Both workflows always start their small router job, so
+`scripts/ci/route.mjs` supplies the same scope to Kernel foundation, Installed
+ordinary permissions and Kernel MCP qualification. Each starts its small router job, so
 workflow-level path filters do not leave absent required checks pending.
 
 | Change | Selected coverage |
@@ -27,6 +27,14 @@ workflow-level path filters do not leave absent required checks pending.
 The narrow list is intentionally closed. Shared helper imports cannot be treated
 as independent just because their filename mentions one campaign. Adding a new
 input defaults to full coverage until its real consumers are understood.
+
+The MCP workflow consumes the existing `run` group. Its new shared inputs and
+unclassified qualification files select full coverage. It also runs on `codex/**`
+branch pushes so the complete owned installation can be checked before opening
+a PR. It uses the standard GitHub-hosted Ubuntu runner, the original native
+prerequisites and twenty-minute campaign limit, and retains only JSON evidence.
+Its controlled public endpoint cannot qualify real providers, authenticated
+Bearer, other MCP recovery profiles or unexecuted physical cuts.
 
 Pull requests compare the immutable head with the merge base of the immutable
 base SHA, covering every commit in that PR. Development pushes compare their
@@ -44,8 +52,10 @@ remain in place.
 ## Complete integration checks
 
 Pushes to main, merge-queue checks and manual `workflow_dispatch` always select
-all groups. For a complete development-branch check, dispatch **both** Kernel
-foundation and Installed ordinary permissions on the same unchanged commit.
+all groups. For a complete development-branch check, run Kernel foundation,
+Installed ordinary permissions and Kernel MCP qualification on the same unchanged
+commit. The MCP branch-push run can supply that check before its new workflow
+is registered on the default branch; inspect its actual routed scope as well.
 Inspect each run's actual head SHA, all original job results and retained scope
 reports. Do not combine evidence from different source versions.
 

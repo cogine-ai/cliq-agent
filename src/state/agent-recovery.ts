@@ -35,6 +35,7 @@ import { readChildAllocationsForRun } from './repositories/child-allocations.js'
 import { readCheckpoint, readRun, readSession, readSessionPrincipalId } from './rows.js';
 import { requireEqual } from '../policy/runtime-authority.js';
 import { immutableSnapshot } from '../model/immutable.js';
+import { decodeToolAbandonedItem } from '../kernel/mcp.js';
 
 /** Data restriction only. Each permitted subject still requires its complete
  * subject-specific retained policy/control/Journal history below. */
@@ -282,6 +283,11 @@ async function validateAgentRecoveryData(input: AgentRecoveryInput, onPhase?: (p
         throw new TypeError('context summary is not owned by the matching completed compaction attempt');
       }
       await readCanonicalArtifact(artifacts, plan.sourceContextManifestRef);
+    } else if(item.kind==='tool_abandoned'){
+      decodeToolAbandonedItem(item);
+      if(!['failed','cancelled'].includes(run.status)||!journal.some(entry=>entry.phase==='abandoned'&&entry.opId===item.opId&&
+        entry.attempt===item.attempt&&entry.seq===item.abandonedJournalSeq&&entry.attestationRef===item.attestationRef))
+        throw new TypeError('terminal-only abandonment has no exact original abandoned Journal row');
     } else if (item.kind === 'tool_result') {
       const batch = items.get(item.batchItemId);
       const call = batch?.kind === 'assistant_tool_batch' ? batch.calls[item.index] : undefined;
@@ -384,7 +390,7 @@ async function validateAgentRecoveryData(input: AgentRecoveryInput, onPhase?: (p
   if (spec.operation === 'agent') {
     phase('tool');
     await validateToolRecovery({ artifacts, run, spec, items, journal, checkpoints: input.checkpoints,
-      workspaceGenerations: input.workspaceGenerations, driver: input.driver });
+      workspaceGenerations: input.workspaceGenerations, driver: input.driver,itemRows:input.items });
     phase('input');
     await validateUserInputRecovery({ artifacts, run, spec, items, journal, checkpoints: input.checkpoints });
   }

@@ -46,6 +46,10 @@ import { assertInstalledVerifierOutcome, InstalledVerifierOutcomeError } from '.
 import { runInstalledDeliveryCases } from './installed-delivery-journey.js';
 import { createInstalledPermissionResponder, runInstalledPermissionCases } from './installed-permission-journey.js';
 import { INSTALLED_PERMISSION_PROFILE } from './installed-permission-result.js';
+import { createInstalledMcpHttpHandler } from './installed-mcp-http.js';
+import { createInstalledMcpModelResponder } from './installed-mcp-model.js';
+import { runInstalledMcpCases, INSTALLED_MCP_PROFILE } from './installed-mcp-journey.js';
+import { INSTALLED_MCP_CASES, type InstalledMcpCase } from './installed-mcp-responder.js';
 import { assertInstalledUnusedDeliveryGrant, type InstalledPermissionEvidence } from './installed-permission-evidence.js';
 import { inspectInstalledPermissionRecord } from './installed-worker-lease.js';
 import { createInstalledDependencyResponder, installedDependencyPackage, INSTALLED_DEPENDENCY_PACKAGE_PATH,
@@ -195,12 +199,13 @@ export type InstalledProviderNodeJourneyInput = Readonly<{
   definition: InstalledProviderModelDefinition; budgets: RunSpec['budgets']; secret: Buffer;
 }>;
 
-export async function runInstalledNodeJourney(filename: string, journeyKind: 'verifier' | 'delivery' | 'provider' | 'daily' | 'provider-daily' | 'permission',
+export async function runInstalledNodeJourney(filename: string, journeyKind: 'verifier' | 'delivery' | 'provider' | 'daily' | 'provider-daily' | 'permission' | 'mcp',
   options: Readonly<{ publicationRetirementDiagnostics?: true; publicationRetirementStop?: true; publicationRetirementLate?: true;
     npmDependencyArchive?: Buffer; provider?: InstalledProviderNodeJourneyInput }> = {}): Promise<void> {
   assert.equal(process.platform, 'linux'); assert.equal(process.arch, 'x64');
-  assert(journeyKind === 'verifier' || journeyKind === 'delivery' || journeyKind === 'provider' || journeyKind === 'daily' || journeyKind === 'provider-daily' || journeyKind === 'permission');
+  assert(journeyKind === 'verifier' || journeyKind === 'delivery' || journeyKind === 'provider' || journeyKind === 'daily' || journeyKind === 'provider-daily' || journeyKind === 'permission' || journeyKind === 'mcp');
   if (journeyKind === 'permission') assert.deepEqual(Object.keys(options), [], 'ordinary permission has one fixed owned campaign');
+  if (journeyKind === 'mcp') assert.deepEqual(Object.keys(options), [], 'installed MCP qualification has one fixed owned campaign');
   const dailyJourney = journeyKind === 'daily' || journeyKind === 'provider-daily';
   if (journeyKind === 'daily') assert.deepEqual(Object.keys(options), [], 'normal daily qualification has no alternate authority or scenario options');
   assert.deepEqual(Object.keys(options).sort(), [
@@ -242,6 +247,12 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     Object.assign(report, { permissionFixtureProfile: INSTALLED_PERMISSION_PROFILE,
       scope: 'actual signed Linux default/accept-edits private edit, exact verifier approval, repair, deny/skip, consumed templates, independent Delivery verifier/publication approval and apply; owned HTTPS only, not paid provider, real TTY, precise expiry/claim Stop cuts or complete I1 qualification',
       realTtyQualified: false, approvalExpiryBeforeClaimQualified: false, exactClaimStopCutQualified: false });
+  }
+  if (journeyKind === 'mcp') {
+    delete report.ordinaryGitFixtureProfile;
+    Object.assign(report, { mcpFixtureProfile: INSTALLED_MCP_PROFILE,
+      scope: 'actual signed Linux isolated Admin discovery, frozen stateless HTTP MCP, JSON/SSE and ping, one permanent claim, private edit and Node verification, exact result review/apply, full-once UNKNOWN and explicit manual abandonment through reconnect and restart; owned public HTTPS only, not authenticated Bearer, stdio, paid provider, precise crash cuts or complete I1',
+      authenticatedBearerQualified: false, stdioQualified: false, retryRiskQualified: false, reconcileAdapterQualified: false });
   }
   if (options.npmDependencyArchive) report.dependencyFixtureProfile = INSTALLED_DEPENDENCY_PROFILE;
   if (journeyKind === 'delivery') Object.assign(report, {
@@ -487,6 +498,9 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
   let registryOrigin: string | undefined, registryGets = 0;
   let expectedToolNames: readonly string[] | undefined;
   const permissionResponder = createInstalledPermissionResponder(model, () => { assert(expectedToolNames); return expectedToolNames; });
+  const mcpHandler = createInstalledMcpHttpHandler(scanBytes);
+  const mcpModelResponder = createInstalledMcpModelResponder(model, () => { assert(expectedToolNames); return expectedToolNames; });
+  const mcpEndpointIds = new Map<InstalledMcpCase, string>();
   let daemonPid: number | undefined, daemonStart: string | undefined;
   let services: { supervisorUnit: string; keeperUnit: string } | undefined;
   let serverAuthenticationBinding: Readonly<{ pid: number; processStartToken: string; invocationId: string; windowOpenedAt: number }> | undefined;
@@ -663,6 +677,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     const key = await readFile(keyPath), cert = await readFile(certPath);
     server = createServer({ key, cert, minVersion: 'TLSv1.3', maxVersion: 'TLSv1.3', maxHeaderSize: 65536 }, async (incoming, outgoing) => {
       try {
+        if (journeyKind === 'mcp' && await mcpHandler.handle(incoming, outgoing)) return;
         assert.equal(incoming.method, 'POST'); assert.equal(incoming.url, '/v1/chat/completions');
         assert.equal(incoming.headers.authorization, 'Bearer ' + secret.toString('utf8'));
         assert.equal(incoming.headers['content-type'], 'application/json');
@@ -691,6 +706,12 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
           scanBytes(response);
           outgoing.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': String(response.length), Connection: 'close' }); outgoing.end(response);
           report.transport = { postCount, acceptedTcp, acceptedTls, tls13: true, exactCredentialMatched: true }; return;
+        }
+        if (journeyKind === 'mcp') {
+          const payload = mcpModelResponder.respond(body); assert(payload, 'the MCP model endpoint accepts only its fixed owned objectives');
+          postCount++; const response = Buffer.from(JSON.stringify(payload)); scanBytes(response);
+          outgoing.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': String(response.length), Connection: 'close' });
+          outgoing.end(response); return;
         }
         const permissionPayload = permissionResponder.respond(body);
         if (permissionPayload) {
@@ -833,6 +854,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       resourceDiagnostics: true as const,
       ...(dailyJourney ? { headlessSchemaVersion: 3 as const } : {}),
       ...(journeyKind === 'verifier' ? { bundledSkills: installedBundledSkill() } : {}),
+      ...(journeyKind === 'mcp' ? { mcpHttp: true as const } : {}),
       ...(options.npmDependencyArchive ? { npmDependencyArchive: options.npmDependencyArchive } : {}),
       ...(journeyKind === 'verifier' || journeyKind === 'permission' ? { guestImageProfile: 'qualification_max' as const } : {}) };
     const signed = options.provider
@@ -943,6 +965,21 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       assert.equal(decodeEndpointAuthorityOperation(success(registered, 'operation')).disposition, 'registered');
     }
     const credentialId = options.provider ? 'installed-provider-credential' : 'installed-verifier-credential';
+    if (journeyKind === 'mcp') for (const kind of INSTALLED_MCP_CASES) {
+      const endpointRegistrationId = `installed-mcp-${kind}`, target = { ...registration.target, basePath: `/mcp/${kind}` };
+      const endpoint: EndpointRegistrationV1 = { schemaVersion: 1, format: 'cliq-endpoint-registration-v1',
+        endpointRegistrationId, registrationKind: 'user', ownerPrincipalId: principal, purposes: ['mcp_streamable_http'], target,
+        tls: registration.tls, tlsPolicyDigest: registration.tlsPolicyDigest,
+        endpointIdentityDigest: canonicalSha256({ target, tlsPolicyDigest: registration.tlsPolicyDigest }),
+        createdAt: new Date().toISOString(), registrationDigest: '' };
+      endpoint.registrationDigest = digestOmitting(endpoint, 'registrationDigest');
+      const core = { schemaVersion: 1, kind: 'register', ownerPrincipalId: principal, registration: endpoint,
+        expectedRegistrationArtifactRef: canonicalSha256(endpoint), commandDigest: '' };
+      const registered = command(path.join(recipe.stateRoot, 'runtime/bootstrap'), ['--bootstrap-endpoint'], canonicalJsonBytes({
+        schemaVersion: 1, kind: 'commit', requestId: nextId(), commandCore: { ...core, commandDigest: digestOmitting(core, 'commandDigest') } }));
+      assert.equal(decodeEndpointAuthorityOperation(success(registered, 'operation')).disposition, 'registered');
+      mcpEndpointIds.set(kind, endpointRegistrationId);
+    }
     const enrollment = { schemaVersion: 1, kind: 'enroll', requestId: nextId(), credentialGrantId: credentialId,
       purpose: 'model_endpoint', endpointRegistrationId: registration.endpointRegistrationId,
       secretSubmissionId: options.provider ? 'installed-provider-owned-secret' : 'installed-verifier-fixture-secret',
@@ -1088,7 +1125,75 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     }
     report.cases = [];
     await mkdir(recipe.workspace, { mode: 0o700 }); await chown(recipe.workspace, ledger.uid, ledger.gid);
-    if (journeyKind === 'permission') {
+    if (journeyKind === 'mcp') {
+      const sendMcp = async (frame: Record<string, any>, timeout = 30_000) => {
+        assert(client); const response = await client.send(frame, timeout); recordRefusal(response, frame.method); return response;
+      };
+      const absent = async (pid: number, start: string) => {
+        assert(Number.isSafeInteger(pid) && pid > 0 && /^[1-9][0-9]*$/u.test(start));
+        try { assert.notEqual(await processStart(pid), start, 'the exact original process lifetime remains live'); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+      };
+      report.mcp = await runInstalledMcpCases({ workspaceRoot: recipe.workspace, cliqHome, uid: ledger.uid, gid: ledger.gid,
+        model: { provider: 'openai-compatible', model, endpoint: { kind: 'registered', endpointRegistrationId: registration.endpointRegistrationId },
+          modelCredentialGrantIds: [credentialId] }, guestToolchainManifestId: signed.guestToolchain.manifestId,
+        endpointIds: mcpEndpointIds, send: sendMcp, nextId, readCas, download: readPublicArtifact, mark,
+        responder: mcpHandler.responder, modelResponder: mcpModelResponder, assertOriginalProcessAbsent: absent,
+        assertEndpointJoined: (kind, deadlineAt) => mcpHandler.waitForCaseJoined(kind, deadlineAt),
+        async assertWorkerFree(runId, cut) {
+          assert.equal(cut.snapshot.run.id, runId); assert.equal(cut.snapshot.run.activeWorkerLaunchId, undefined);
+          assert.deepEqual(cut.snapshot.run.budgetReserved, { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 });
+          const observed = inspectInstalledWorkerLaunchIds(recipe.stateRoot, ledger.uid, runId);
+          for (const launchId of observed.launchIds) {
+            const retired = inspectInstalledWorkerRetirementHistory(recipe.stateRoot, ledger.uid, { runId, launchId });
+            assert.match(retired.processStartToken, /^linux-proc-start-ticks:[1-9][0-9]*$/u);
+            await absent(retired.pid, retired.processStartToken.slice('linux-proc-start-ticks:'.length));
+          }
+          const after = inspectInstalledWorkerLaunchIds(recipe.stateRoot, ledger.uid, runId);
+          assert.equal(after.databaseIdentity, observed.databaseIdentity); assert.deepEqual(after.launchIds, observed.launchIds);
+        },
+        async assertVerifierEvidence(cut, expectedFiles) {
+          const sessionCut = accepted(await sendMcp({ protocolVersion: 1, method: 'session.get', sessionId: cut.snapshot.run.sessionId }), 'session.get');
+          const evidence = await assertInstalledVerifierOutcome({ cut, sessionCut, readCas, principalId: principal,
+            caseKind: 'required_pass', expectedFiles,
+            readOwnerHistory: async (observe?: (stage: InstalledOwnerHistoryReadStage) => void) => inspectInstalledOwnerHistory(recipe.stateRoot, observe).owners });
+          for (const retired of evidence.retirementIdentities) await assertVerifierProcessesAbsent(retired);
+        },
+        async assertDeliveryEvidence(cut, sourceCut, files) {
+          const sessionCut = accepted(await sendMcp({ protocolVersion: 1, method: 'session.get', sessionId: cut.snapshot.run.sessionId }), 'session.get');
+          const evidence = await assertInstalledDeliveryOutcome({ cut, sessionCut, sourceCut, sourceResultRef: sourceCut.snapshot.run.resultRef,
+            kind: 'publish', expectedFiles: [...files].map(([path, text]) => ({ path, text })), readRetainedArtifact: readCas,
+            readOwnerHistory: async (observe?: (stage: InstalledOwnerHistoryReadStage) => void) => inspectInstalledOwnerHistory(recipe.stateRoot, observe).owners });
+          assert.equal(evidence.directPolicyOnly, true);
+          for (const retired of evidence.verifierRetirementIdentities) await assertVerifierProcessesAbsent(retired);
+          if (evidence.publicationWorkerRetirement) {
+            const retired = inspectInstalledWorkerRetirementHistory(recipe.stateRoot, ledger.uid, { runId: cut.snapshot.run.id,
+              launchId: evidence.publicationWorkerRetirement.launchId, retirement: evidence.publicationWorkerRetirement });
+            await absent(retired.pid, retired.processStartToken.slice('linux-proc-start-ticks:'.length));
+          }
+        },
+        reconnect: async () => { assert(client); await client.close(); client = await persistentClient(); },
+        restart: async () => {
+          assert(services && client && inspectionClient);
+          const prior = show(services.supervisorUnit), history = inspectInstalledOwnerHistory(recipe.stateRoot).owners;
+          await client.close(); client = undefined; await inspectionClient.close(); inspectionClient = undefined;
+          const stoppedAt = performance.now(); assert.equal(command('/usr/bin/systemctl', ['--user', 'stop', services.supervisorUnit]).status, 0);
+          assert(performance.now() - stoppedAt <= 2000, 'the actual MCP Supervisor must stop and join within two seconds');
+          const stopped = show(services.supervisorUnit); assert.equal(stopped.MainPID, '0'); assert.equal(stopped.Result, 'success');
+          const by = Date.now() + 30_000; assert.equal(command('/usr/bin/systemctl', ['--user', 'start', services.supervisorUnit]).status, 0);
+          const successor = show(services.supervisorUnit); assert.notEqual(successor.InvocationID, prior.InvocationID);
+          assert.notEqual(successor.MainPID, prior.MainPID); await selectedSupervisor(services.supervisorUnit, successor, installedImage, by);
+          client = await persistentClient(); inspectionClient = await persistentClient();
+          const owners = await waitForInstalledOwnerHistory(recipe.stateRoot, by);
+          assert.equal(owners.owners.length, history.length + 1); assert.equal(owners.owners.at(-2)!.terminalReason, 'graceful_release');
+          assert.equal(owners.owners.at(-1)!.state, 'active'); assert.equal(owners.owners.at(-1)!.runtimeBundleRef, bundleDigest);
+          assert.equal(show(services.keeperUnit).MainPID, keeperBefore.MainPID);
+          assert.deepEqual(await readFile(path.join(recipe.stateRoot, 'runtime/keeper.ready')), keeperReady);
+        } });
+      report.cases = report.mcp.cases;
+      assert.equal(postCount, 11); assert.equal(acceptedTcp, postCount + mcpHandler.posts());
+      assert.equal(acceptedTls, acceptedTcp); mcpHandler.assertJoined(); assert(!responderFailure);
+    } else if (journeyKind === 'permission') {
       const controls = new Map<string, { request: Record<string, any>; response: Record<string, any> }>();
       const permission: InstalledPermissionEvidence = { controls,
         readRecord: selector => inspectInstalledPermissionRecord(recipe.stateRoot, ledger.uid, selector),
@@ -2528,6 +2633,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     if (primary) {
       report.qualified = false;
       if (report.permission) report.permission.qualified = false;
+      if (report.mcp) report.mcp.qualified = false;
       if (options.publicationRetirementStop) {
         report.preciseInFlightPublicationStopQualified = false;
         if (report.delivery) report.delivery.preciseInFlightPublicationStopQualified = false;
@@ -2561,7 +2667,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         if (error instanceof AggregateError) errors.unshift(...error.errors.slice(0, 4));
       }
       report.error = { diagnosticOnly: true, kind: dailyJourney ? 'installed_daily_journey_failed' : options.provider ? 'installed_provider_journey_failed'
-        : journeyKind === 'permission' ? 'installed_permission_journey_failed'
+        : journeyKind === 'mcp' ? 'installed_mcp_journey_failed' : journeyKind === 'permission' ? 'installed_permission_journey_failed'
         : journeyKind === 'verifier' ? 'installed_verifier_journey_failed' : 'installed_delivery_journey_failed', sourceFrames: frames, failureKinds };
     }
     let publication: Buffer;
@@ -2583,6 +2689,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     try { await writeFile(recipe.reportFile, publication, { flag: 'wx', mode: 0o644 }); } finally { publication.fill(0); }
   }
   if (primary) throw new Error(dailyJourney ? 'actual normal installed daily journey failed; inspect the closed diagnostic report' : options.provider ? 'actual installed provider journey failed; inspect the closed diagnostic report'
+    : journeyKind === 'mcp' ? 'actual installed MCP journey failed; inspect the closed diagnostic report'
     : journeyKind === 'permission' ? 'actual installed ordinary permission journey failed; inspect the closed diagnostic report'
     : journeyKind === 'verifier' ? 'actual installed verifier journey failed; inspect the closed diagnostic report'
     : 'actual installed Delivery journey failed; inspect the closed diagnostic report');

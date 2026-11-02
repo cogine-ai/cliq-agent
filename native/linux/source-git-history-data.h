@@ -5,6 +5,10 @@
 #include <errno.h>
 #include <unistd.h>
 _Static_assert(CLIQ_SOURCE_HISTORY_MAX_BYTES <= 1048576, "source lifecycle snapshot must stay within its fixed byte ceiling");
+/* Frozen original wire6/7 record layout, also used unchanged by wire8. */
+_Static_assert(sizeof(struct cliq_source_birth_record)==7120, "original source record bytes");
+_Static_assert(offsetof(struct cliq_source_birth_record,packet)==40, "original source packet offset");
+_Static_assert(offsetof(struct cliq_source_birth_record,digest)==7088, "original full hash input");
 
 /* One bounded original birth chain. Decoding this data does not establish
  * process death, cgroup ownership/currentness or a replacement execution. */
@@ -51,8 +55,8 @@ static inline bool cliq_source_retirement_project(const struct cliq_source_histo
     result->snapshot = result->sealed ? &history->sealed : NULL;
     return true;
 }
-/* Historical raw wire6 and current wire7 retain their exact original bytes.
- * This reader serves data/cleanup only; live cliq_receive remains wire7-only.
+/* Historical raw wire6/7 and current wire8 retain their exact original bytes.
+ * This reader serves data/cleanup only; live cliq_receive remains wire8-only.
  * A chain cannot mix versions or carry a new builtin acknowledgement. */
 static inline bool cliq_source_history_packet(const struct cliq_worker_packet *packet) {
     /* Only fixed source fields can enter the retained binary snapshot. This
@@ -96,7 +100,7 @@ static inline bool cliq_source_history_packet(const struct cliq_worker_packet *p
     const char *digests[] = { packet->plan_ref, packet->sandbox_launch_ref, packet->sandbox_launch_digest,
         packet->source_snapshot_digest, packet->source_rule_digest };
     for (size_t i = 0; i < sizeof(digests) / sizeof(digests[0]); i++) if (*digests[i] && !cliq_source_digest(digests[i])) return false;
-    if (packet->magic != CLIQ_WORKER_MAGIC || (packet->version != UINT32_C(6) && packet->version != UINT32_C(7)) || packet->status != 0 ||
+    if (packet->magic != CLIQ_WORKER_MAGIC || (packet->version != UINT32_C(6) && packet->version != UINT32_C(7) && packet->version != UINT32_C(8)) || packet->status != 0 ||
         packet->command < CLIQ_SOURCE_RESERVE || packet->command > CLIQ_SOURCE_RETIRE ||
         packet->scope == 0 || packet->scope >= CLIQ_WORKER_MAX_SCOPES || !cliq_source_request_valid(packet) ||
         strnlen(packet->cgroup_name, sizeof(packet->cgroup_name)) != 76 || strncmp(packet->cgroup_name, "cliq-source-", 12) != 0 ||

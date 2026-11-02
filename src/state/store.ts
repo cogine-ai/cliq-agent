@@ -82,6 +82,8 @@ import { assertDependencyBrokerQuiescence } from './dependency-invocation-owner.
 import { MODEL_BROKER_ENTRY_ID, InstalledModelBrokerRefusalError, type NativeModelTransport, type ModelBrokerBinding, type ModelBrokerClosed } from './model-broker-native.js';
 import { decodeBrokerInvocationAmbiguity, type BrokerInvocationAmbiguityEvidenceV1 } from '../kernel/broker-ambiguity.js';
 import { supervisorInspectorIdentity } from './supervisor-inspector.js';
+import { assertInstalledMcpBrokerProcess } from './mcp-native-binding.js';
+import { assertBoundedJsonValue } from '../kernel/json.js';
 import { selectInstalledModelProgress } from './installed-model-progress.js';
 import { assertInstalledRunAdmissionCapacity, INSTALLED_RUN_INVENTORY_LIMIT } from './installed-run-capacity.js';
 import type { SupervisorHelloV1, SupervisorStatusV1 } from './installed-control.js';
@@ -157,7 +159,10 @@ import { readRetainedStateOwnerHistory, readRetainedStateOwnerProcess as readSta
 import { immutableSnapshot } from '../model/immutable.js';
 import { loadRunExecution, type LoadRunExecutionInput, type RunExecutionInstallation, type RunRetirementPhase, type RunPublicationPhase } from './run-execution.js';
 import { retireAbandonedPreactivations } from './preactivation-retirement.js';
-import { exactKeys, verifyRuntimeBundle, type ReleaseTrustKey, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
+import { exactKeys, requireEqual, verifyRuntimeBundle, type ReleaseTrustKey, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
+import { readCanonicalArtifact } from './agent-context.js';
+import { assertMcpRunQuiescence } from './mcp-execution.js';
+import { closeMcpAdminOperations, retireRetainedMcpAdminOperations } from './mcp-registration.js';
 import type { SandboxProfileV1, SourceInspectionAttemptV1 } from '../kernel/execution.js';
 import { normalizeRunSubmitRequest, runSubmitIntentDigest, normalizeSourceInspectionRequest, sourceInspectionIntentDigest } from './source-target.js';
 import { normalizeRunApplyRequest } from '../kernel/control-apply.js';
@@ -239,6 +244,78 @@ function currentModelAuthority(held: CredentialBinding, principalId: string, end
   assertInstalledCredentialScope(held.physical);
   return { endpoint: endpoint.registration, bindings: [binding], creating,
     selector: credentialSelector(held, creating), observation: readStoredCredentialObservation(held, creating) };
+}
+
+/** The exact original credential scope stays held for the complete logical
+ * client. Public mode has no Secret Service selector or invented observation.
+ * Each synchronous gate rereads current purpose/endpoint/revision/expiry.
+ * Cancellation scopes only native preparation, never the owned callback or
+ * its complete postvalidation after a claim or received result. */
+export async function withInstalledMcpHttpAuthority<T>(selected: HeldInstalledRuntime, owner: StateOwnerContext,
+  artifacts: ArtifactCatalog, principalId: string, transport: Extract<import('../kernel/mcp.js').McpResolvedTransportV1, { kind: 'streamable_http' }>,
+  operation: (authority: Readonly<{ endpoint: EndpointRegistrationV1;
+    authentication: import('./mcp-broker-native.js').FrozenMcpHttpInput['authentication']; assertCurrent(): void }>) => Promise<T>,
+  preparationSignal?: AbortSignal) {
+  if (transport.credentialGrantRefs.length > 1) throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'multiple MCP credentials are not implemented');
+  const frozenEndpoint = decodeEndpointRegistration(await readCanonicalArtifact(artifacts, transport.endpointRegistrationRef));
+  const frozenBindings = await artifacts.mapReads(transport.credentialGrantRefs,
+    async ref => decodeEndpointCredentialGrantBinding(await readCanonicalArtifact(artifacts, ref)));
+  return withCredentialAuthorityLock(selected, async token => {
+    const held = checkedCredentialToken(token);
+    const current = () => {
+      token.assertHeld(); assertStateOwnerLock(owner.filesystem);
+      if (held.ownerPrincipalId !== principalId || transport.credentialGrantRefs.length > 1)
+        throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'MCP HTTP requires the exact principal and public or one Bearer binding');
+      const now = sampleCanonicalNow();
+      ensureEndpointSchema(held.database!);
+      const endpoint = readEndpointHistory(held, frozenEndpoint.endpointRegistrationId).at(-1);
+      if (!endpoint || endpoint.state !== 'active' || endpoint.registration.ownerPrincipalId !== principalId ||
+          endpoint.expectedRegistrationArtifactRef !== transport.endpointRegistrationRef ||
+          !endpoint.registration.purposes.includes('mcp_streamable_http') || endpoint.registration.createdAt > now || endpoint.createdAt > now ||
+          endpoint.registration.endpointIdentityDigest !== transport.endpointIdentityDigest || endpoint.registration.tlsPolicyDigest !== transport.tlsPolicyDigest ||
+          endpoint.registration.tls.trustStoreRuntimeBundleRef !== held.selected.bundleDigest ||
+          endpoint.registration.tls.trustStoreRuntimeBundleManifestDigest !== held.selected.bundle.manifestDigest)
+        throw new KernelStorageError('INVALID_REQUEST', 'MCP endpoint authority is no longer current');
+      verifyEndpointTrust(held, endpoint.registration, false);
+      if (!transport.credentialGrantRefs.length) return { endpoint: endpoint.registration, authentication: { kind: 'public' as const } };
+      if (credentialSchemaVersion(held.database!) !== 2) throw new KernelStorageError('INVALID_REQUEST', 'MCP credential authority is unavailable');
+      const { latest: record, creating } = readCredentialHistory(held, frozenBindings[0]!.credentialGrantId);
+      if (!record || !creating || record.state !== 'active' || record.purpose !== 'mcp_streamable_http' || record.createdAt > now ||
+          canonicalSha256(frozenModelCredential(record)) !== transport.credentialGrantRefs[0] ||
+          record.expiresAt !== undefined && record.expiresAt <= now || record.endpointRegistrationRef !== transport.endpointRegistrationRef ||
+          record.endpointIdentityDigest !== transport.endpointIdentityDigest || record.tlsPolicyDigest !== transport.tlsPolicyDigest)
+        throw new KernelStorageError('INVALID_REQUEST', 'MCP credential is revoked, expired or for another purpose');
+      return { endpoint: endpoint.registration, authentication: { kind: 'bearer' as const, selector: credentialSelector(held, creating),
+        expectedObservation: readStoredCredentialObservation(held, creating) } };
+    };
+    const initial = current();
+    return operation(Object.freeze({ ...initial, assertCurrent() { requireEqual(current(), initial, 'MCP current original endpoint and credential purpose'); } }));
+  }, preparationSignal);
+}
+export async function resolveInstalledMcpTransport(selected: HeldInstalledRuntime, artifacts: ArtifactCatalog,
+  principalId: string, endpointRegistrationId: string, credentialGrantIds: readonly string[], preparationSignal?: AbortSignal) {
+  if (credentialGrantIds.length > 1) throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'the first MCP HTTP profile supports at most one Bearer credential');
+  return withCredentialAuthorityLock(selected, async token => {
+    const held = checkedCredentialToken(token), now = sampleCanonicalNow();
+    const endpoint = readEndpointAuthority(token, endpointRegistrationId);
+    if (!endpoint || endpoint.state !== 'active' || held.ownerPrincipalId !== principalId || endpoint.ownerPrincipalId !== principalId ||
+        !endpoint.registration.purposes.includes('mcp_streamable_http') || endpoint.registration.createdAt > now)
+      throw new KernelStorageError('INVALID_REQUEST', 'MCP endpoint does not authorize this principal and purpose');
+    verifyEndpointTrust(held, endpoint.registration, false);
+    const endpointArtifact = await artifacts.publishCanonical(endpoint.registration, endpoint.registration.format), credentialGrantRefs: string[] = [];
+    for (const id of credentialGrantIds) {
+      const record = readCredentialAuthority(token, id);
+      if (!record || record.state !== 'active' || record.ownerPrincipalId !== principalId || record.purpose !== 'mcp_streamable_http' ||
+          record.endpointRegistrationRef !== endpointArtifact.ref || record.endpointIdentityDigest !== endpoint.registration.endpointIdentityDigest ||
+          record.tlsPolicyDigest !== endpoint.registration.tlsPolicyDigest || record.createdAt > now || record.expiresAt !== undefined && record.expiresAt <= now)
+        throw new KernelStorageError('INVALID_REQUEST', 'MCP credential does not authorize the original endpoint and purpose');
+      const binding = frozenModelCredential(record);
+      credentialGrantRefs.push((await artifacts.publishCanonical(binding, 'cliq-endpoint-credential-grant-binding-v1')).ref);
+    }
+    token.assertHeld();
+    return immutableSnapshot({ kind: 'streamable_http' as const, endpointRegistrationRef: endpointArtifact.ref,
+      endpointIdentityDigest: endpoint.registration.endpointIdentityDigest, tlsPolicyDigest: endpoint.registration.tlsPolicyDigest, credentialGrantRefs });
+  }, preparationSignal);
 }
 
 /** An authenticated v1 store contains endpoints only. Verify its exact format
@@ -1686,6 +1763,7 @@ export function assertInstalledBrokerQuiescence(receipt: InstalledBrokerQuiescen
   // and row predicates through its actual transaction-scoped SQL connection.
   assertStateOwnerLock(owner.filesystem);
   assertDependencyBrokerQuiescence(driver, owner, runId);
+  assertMcpRunQuiescence(runId);
   if (observed.binding.operations.has(runId) || observed.binding.transports.has(runId) || observed.binding.settlements.has(runId))
     throw new ResourceRetirementError('generation retains an original native model transport owner', undefined);
 }
@@ -1767,6 +1845,49 @@ export class StateStore {
   supportsCredentialFinalization(): boolean { return installedCredentialFinalizers.has(this); }
   supportsInstalledRuns(): boolean { return this.schedulerStarted && this.schedulerFailure === undefined && !this.closeRequested && !this.closed; }
   supportsInstalledDelivery(): boolean { return INSTALLED_DELIVERY_COMPOSITION_COMPLETE && this.supportsInstalledRuns(); }
+  supportsInstalledMcp(): boolean {
+    if (!this.supportsInstalledRuns() || !this.installedRuntime || !this.installedAnchor || !this.runtimeAuthority) return false;
+    try { assertInstalledMcpBrokerProcess(); } catch { return false; }
+    const entries = this.runtimeAuthority.bundle.entries;
+    return entries.filter(entry => entry.entryId === 'mcp-streamable-http-broker-v1' && entry.role === 'platform_helper' && entry.executable && entry.version === '1' &&
+      entry.relativePath === 'native/linux-x64/linux-mcp-http-broker.node').length === 1 &&
+      entries.filter(entry => entry.entryId === 'mcp-http-admin-probe-v1' && entry.role === 'platform_helper' && !entry.executable && entry.version === '1' &&
+        entry.relativePath === 'helpers/mcp-http-admin-probe.mjs').length === 1;
+  }
+  listMcpRegistrations(request: unknown, identity: AuthenticatedControlIdentity) {
+    const value = decodeInstalledControlRequest(request);
+    if (value.method !== 'mcp.list') return Promise.reject(new KernelStorageError('INVALID_REQUEST', 'MCP list requires its exact public contract'));
+    return this.ownInstalledAdmission(async signal => {
+      const reads = this.artifacts.withReadSignal(signal);
+      await validateControlChannelClosure(reads, this.owner, identity); assertActiveStateOwner(this.driver, this.owner);
+      const rows = this.driver.prepare('SELECT registration_id FROM mcp_registrations WHERE owner_principal_id=? ORDER BY CAST(registration_id AS BLOB) LIMIT 1025')
+        .all<{ registration_id: string }>(identity.principalId);
+      const capacity = () => ({ protocolVersion: 1 as const, ok: false as const, method: 'mcp.list' as const,
+        error: { schemaVersion: 1 as const, code: 'RESOURCE_EXHAUSTED' as const, retryable: true as const,
+          resourceKind: 'state_storage' as const, retryAfterMs: 1000 as const, messageCode: 'mcp.registry_list_capacity' } });
+      if (rows.length > 1024) return capacity();
+      const { readMcpRegistry } = await import('./mcp-registration.js');
+      const { mcpRegistrySummary } = await import('../kernel/mcp.js');
+      const selected = await reads.mapReads(rows, row => readMcpRegistry(this.driver, reads, identity.principalId, row.registration_id));
+      await validateControlChannelClosure(reads, this.owner, identity); signal.throwIfAborted();
+      for (const item of selected) item.assertUnchanged(this.driver);
+      const response = { protocolVersion: 1 as const, ok: true as const, result: { method: 'mcp.list' as const,
+        registrations: selected.map(item => mcpRegistrySummary(item.registry)) } };
+      try { assertBoundedJsonValue(response, 'MCP complete registry list'); }
+      catch (error) { if (error instanceof TypeError) return capacity(); throw error; }
+      if (canonicalJsonBytes(response).byteLength > 1_048_576) return capacity();
+      return response;
+    });
+  }
+  mutateMcpRegistration(request: unknown, identity: AuthenticatedControlIdentity) {
+    const value = (request as { method?: string })?.method;
+    if (value !== 'mcp.register' && value !== 'mcp.refresh') return Promise.reject(new KernelStorageError('INVALID_REQUEST', 'MCP mutation requires its exact public contract'));
+    if (!this.supportsInstalledMcp()) return Promise.reject(new KernelStorageError('UNSUPPORTED_PLATFORM', 'the complete installed MCP HTTP recipe is unavailable'));
+    return this.ownInstalledAdmission(async signal => {
+      const { mutateInstalledMcpRegistration } = await import('./mcp-registration.js');
+      return mutateInstalledMcpRegistration(this.driver, this.artifacts, this.owner, this.installedRuntime!, this.installedAnchor!, request, identity, signal);
+    });
+  }
   supportsSessionContinuity(): boolean { return !this.closed && !this.closeRequested && !this.released; }
 
   listControl(request: unknown, identity: AuthenticatedControlIdentity) {
@@ -1917,6 +2038,18 @@ export class StateStore {
     const value = decodeInstalledControlRequest(request);
     if (value.method !== 'run.reconcile') throw new KernelStorageError('INVALID_REQUEST', 'reconciliation requires its exact public contract');
     return this.ownInstalledAdmission(async signal => {
+      if (value.resolution.kind === 'abandon_run') {
+        const manual = await import('./manual-reconciliation.js');
+        const replay = await manual.replayManualReconciliation(this.driver, this.artifacts.withReadSignal(signal), this.owner, { request: value, identity });
+        if (replay) return replay;
+        const plan = await manual.prepareManualInvocationFinalization(this.driver, this.artifacts.withReadSignal(signal), this.owner,
+          { request: value, identity, installedRuntime: this.installedRuntime! });
+        const agent = await this.retainInstalledAgent(value.runId);
+        await agent.commitTerminalStop({ expectedRunRevision: value.expectedRevision }, undefined, undefined, plan);
+        const committed = await manual.replayManualReconciliation(this.driver, this.artifacts, this.owner, { request: value, identity });
+        if (!committed) throw new KernelStorageError('RECOVERY_REQUIRED', 'manual terminal transaction has no original first response');
+        return committed;
+      }
       const reconciliation = await import('./publication-reconciliation.js');
       const replay = await reconciliation.replayPublicationReconciliationProbe(this.driver, this.artifacts.withReadSignal(signal),
         this.owner, { request: value, identity });
@@ -2144,6 +2277,8 @@ export class StateStore {
     const isClosing = () => this.closeRequested || this.closed || this.released;
     if (isClosing()) return;
     await this.ownInstalledAdmission(async signal => {
+      await retireRetainedMcpAdminOperations(this.driver, this.artifacts.withReadSignal(signal), this.owner,
+        this.installedRuntime!, this.installedAnchor!, signal);
       const { retireAbandonedWorkerPreparations } = await import('./preparing-successor.js');
       await retireAbandonedWorkerPreparations(this.driver, this.artifacts.withReadSignal(signal), this.owner,
         { store: this, selected: this.installedRuntime, anchor: this.installedAnchor, signal });
@@ -2239,6 +2374,7 @@ export class StateStore {
       this.schedulerFailure ??= new KernelStorageError('RECOVERY_REQUIRED', 'installed maintenance canonical time fence refused progress');
       for (const task of this.sourceInspectionTasks) task.abort.abort();
       const joins = await Promise.allSettled([
+        closeMcpAdminOperations(this.driver),
         ...[...this.modelTransports.values()].map(transport => transport.close()),
         ...[...this.executions.values()].map(async opening => (await opening).close()),
       ]);
@@ -2490,6 +2626,22 @@ export class StateStore {
         await this.settleInstalledModelCompletion(runId, agent);
         continue;
       }
+      if (agent.operation === 'agent' && !current.stopIntentRef) {
+        const cut = await readRecoveryClosure(this.driver, reads, runId);
+        const cause = await (await import('./mcp-execution.js')).readMcpKnownUnusableCause(this.driver, reads, cut, sampleCanonicalNow());
+        if (cause) {
+          const inspector = supervisorInspectorIdentity(assertActiveStateOwner(this.driver, this.owner));
+          const published = await this.artifacts.publishCanonical(inspector, inspector.format);
+          await agent.stopForMcpKnownUnusable({ expectedRunRevision: cut.run.revision,
+            inspectorIdentityRef: published.ref, inspectorIdentityDigest: inspector.identityDigest });
+          this.requestInstalledRunStop(runId); continue;
+        }
+      }
+      if (agent.operation === 'agent' && !opening && current.activeWorkerLaunchId) {
+        const recovered = await (await import('./mcp-execution.js')).recoverMcpClaimedAfterProcessDeath(this.driver, reads, this.owner,
+          this.installedRuntime!, { runId, expectedRunRevision: current.revision });
+        if (recovered) { current = recovered.run; predecessorWorker = true; }
+      }
       if (predecessorWorker && current.status === 'running' && current.activeWorkerLaunchId) {
         predecessorWorker = false;
         current = await (await nativeExecution()).recoverWorker({ expectedRunRevision: current.revision });
@@ -2521,6 +2673,16 @@ export class StateStore {
         this.installedRunPhases.set(runId, 'drive_retirement');
         current = await (await nativeExecution()).resumeCurrentRetirement({ expectedRunRevision: current.revision });
         this.installedRunPhases.set(runId, 'drive_agent');
+      }
+      if (agent.operation === 'agent' && current.activeWorkerLaunchId === undefined &&
+          !this.driver.prepare("SELECT 1 FROM workspace_generations WHERE run_id=? AND phase NOT IN ('sealed','retired') LIMIT 1").get(runId)) {
+        const cut = await readRecoveryClosure(this.driver, reads, runId);
+        if ((await import('./worker-recovery.js')).hasOnlySettledMcpUnknowns(cut.journal)) {
+          const unknown = cut.journal.filter(entry => entry.opKind === 'mcp' && entry.phase === 'unknown').at(-1)!;
+          await (await import('./manual-reconciliation.js')).prepareManualInvocationWait(this.driver, this.artifacts, this.owner,
+            { runId, opId: unknown.opId, attempt: unknown.attempt, expectedRunRevision: cut.run.revision });
+          return;
+        }
       }
       if (sampleCanonicalNow() >= current.deadlineAt && !current.stopIntentRef) {
         current = (await agent.expireRun({ expectedRunRevision: current.revision })).run;
@@ -3789,6 +3951,10 @@ export class StateStore {
     for (const task of this.installedAdmissionTasks)
       task.abort.abort(new KernelStorageError('LEASE_FENCED', 'StateStore is closing or closed'));
     for (const task of this.sourceInspectionTasks) task.abort.abort();
+    void closeMcpAdminOperations(this.driver).catch(error => {
+      this.closeRevocationFailure ??= error instanceof ResourceRetirementError ? error :
+        new ResourceRetirementError('MCP Admin revocation did not join', error);
+    });
     const credential = installedCredentialFinalizers.get(this);
     if (credential?.inspection && !credential.inspectionJoin) {
       try {
@@ -3832,6 +3998,7 @@ export class StateStore {
     this.beginClose();
     const attempt = (async () => {
       const admissionJoins = await Promise.allSettled([...this.installedAdmissionTasks].map(task => task.promise));
+      const mcpAdminJoins = await Promise.allSettled([closeMcpAdminOperations(this.driver)]);
       // Retire transports and join driver tasks before fencing workers or
       // closing their sole SQL owner; no key/request owner outlives StateOwner.
       const brokerJoins = await Promise.allSettled([...this.modelTransports.values()].map(transport => transport.close()));
@@ -3874,7 +4041,7 @@ export class StateStore {
       // A failed broker join cannot skip independent listener/source/worker
       // revocation. Every owner is joined, but StateOwner stays held on any
       // retirement uncertainty; neither failure becomes a positive receipt.
-      const failure = [...brokerJoins, ...closureJoins, ...completionJoins,
+      const failure = [...brokerJoins, ...mcpAdminJoins, ...closureJoins, ...completionJoins,
         ...admissionJoins.filter(result => result.status === 'rejected' && result.reason instanceof ResourceRetirementError),
         ...producerJoins.filter(result => result.status === 'rejected' && result.reason instanceof ResourceRetirementError),
         ...driverJoins.filter(result => result.status === 'rejected' && result.reason instanceof ResourceRetirementError),

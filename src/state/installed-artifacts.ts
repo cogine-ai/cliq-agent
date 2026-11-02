@@ -15,6 +15,7 @@ import { decodeBundledSkillClosure } from '../kernel/skill.js';
 import { bundledSkillMembers, bundledSkillRoots } from './bundled-skills.js';
 import { skillInstruction } from './skill-data.js';
 import { isNpmAdapterEntry, isNpmDataEntry, NPM_DEPENDENCY_RECIPE } from '../sandbox/dependency-recipe.js';
+import { MCP_ADMIN_HELPER_ENTRY_ID, MCP_ADMIN_HELPER_RELATIVE_PATH } from './mcp-broker-native.js';
 
 function mismatch(message: string, cause?: unknown): never {
   throw new KernelStorageError('ARTIFACT_MISMATCH', message, cause === undefined ? undefined : { cause });
@@ -50,6 +51,8 @@ export function validateBundle(value: unknown, releaseKeys: readonly ReleaseTrus
         entry.version === '1' && entry.relativePath === 'adapters/builtin-tools.mjs' &&
         !entry.executable && entry.byteCount >= 1 && entry.byteCount <= 1_048_576;
       const npmAdapter = isNpmAdapterEntry(entry), npmData = isNpmDataEntry(entry);
+      const mcpAdminHelper=entry.entryId===MCP_ADMIN_HELPER_ENTRY_ID&&entry.role==='platform_helper'&&entry.version==='1'&&
+        entry.relativePath===MCP_ADMIN_HELPER_RELATIVE_PATH&&entry.executable===false&&entry.byteCount>=1&&entry.byteCount<=1_048_576;
       if (entry.relativePath.normalize('NFC') !== entry.relativePath || Buffer.byteLength(entry.relativePath) > 4096 ||
           entry.relativePath === 'manifest.json' || entry.relativePath.startsWith('manifest.json/') ||
           entry.relativePath === 'model-authority.json' || entry.relativePath.startsWith('model-authority.json/') ||
@@ -57,9 +60,10 @@ export function validateBundle(value: unknown, releaseKeys: readonly ReleaseTrus
           (entry.executable && entry.byteCount === 0) ||
           (entry.entryId === 'source_git_inspector' && !sourceInspector) ||
           (entry.entryId === 'builtin_tools' && !builtinTools) ||
+          (entry.entryId===MCP_ADMIN_HELPER_ENTRY_ID&&!mcpAdminHelper)||
           (entry.entryId === NPM_DEPENDENCY_RECIPE.adapterId && !npmAdapter) ||
           (entry.entryId === NPM_DEPENDENCY_RECIPE.dataId && !npmData) ||
-          (['supervisor', 'worker', 'provider_adapter', 'tool_adapter', 'platform_helper', 'mcp_server', 'mcp_recovery_adapter', 'local_inference'].includes(entry.role) && !entry.executable && !sourceInspector && !builtinTools && !npmAdapter) ||
+          (['supervisor', 'worker', 'provider_adapter', 'tool_adapter', 'platform_helper', 'mcp_server', 'mcp_recovery_adapter', 'local_inference'].includes(entry.role) && !entry.executable && !sourceInspector && !builtinTools && !npmAdapter&&!mcpAdminHelper) ||
           entry.role === 'mcp_recovery_profile' ||
           (entry.role === 'guest_toolchain' && entry.executable) ||
           (['policy_engine', 'system_prompt', 'compaction_prompt', 'bundle_object', 'schema', 'skill_bundle'].includes(entry.role) && entry.executable)) {

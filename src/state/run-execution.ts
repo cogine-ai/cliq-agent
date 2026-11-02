@@ -43,10 +43,17 @@ import { loadNativeStateOwner, type HeldWorkerReservation, type HeldWorkspaceRoo
 import { withHeldInstalledRuntime, withInstalledWorkerRoot, type HeldInstalledAnchor, type HeldInstalledRuntime } from './installed-runtime.js';
 import { stopCheckpointId, stopInvocationHistory } from '../runtime/stop.js';
 import { retireQuarantinedGeneration } from './generation-retirement.js';
-import { observeInstalledBrokerQuiescence, type StateStore } from './store.js';
+import { observeInstalledBrokerQuiescence, withInstalledMcpHttpAuthority, type StateStore } from './store.js';
+import { loadInstalledMcpHttpBroker } from './mcp-native-binding.js';
+import type { NativeMcpRunHttpOwner, RunMcpHttpBinding } from './mcp-broker-native.js';
+import { driveMcpRunProtocol, publishMcpRunCapture, acknowledgeMcpRunCapture, settleMcpRunUnknown,
+  readMcpRunResourceOwner } from './mcp-execution.js';
+import { failMcpRunWithoutRelease } from './mcp-execution.js';
+import { readMcpRegistryClosure } from './mcp-registration.js';
+import { mcpInitializeRequestData, mcpInitializedNotificationData, mcpToolsListRequestData, mcpToolsCallRequestData } from '../kernel/mcp-wire.js';
 import { readRequiredWorkerLaunch, readWorkerLaunchesForRun } from './repositories/worker-launches.js';
-import { hasOnlySettledInstalledModelUnknowns } from './worker-recovery.js';
-import { readInvocationAttempt } from './repositories/journal.js';
+import { hasOnlySettledInstalledModelUnknowns, hasOnlySettledMcpUnknowns } from './worker-recovery.js';
+import { readInvocationAttempt, nextJournalSequence } from './repositories/journal.js';
 import { beginWorkerPreparation, recordWorkerPreparationGeneration, recordWorkerPreparationController, retireWorkerPreparation,
   assertWorkerPreparationRelease } from './worker-preparation.js';
 import { validateInstalledModelNoReleaseHistory } from './broker-no-release.js';
@@ -263,7 +270,7 @@ type ActiveWorker = {
   processContainmentRef: string;
   closure: WorkerLaunchClosure;
 };
-type ReceivedCompletion = ({ kind: 'tool' | 'final_turn' | 'verifier' | 'dependency' | 'dependency_acquisition' | 'publication'; worker: LinuxBlockedWorker;
+type ReceivedCompletion = ({ kind: 'tool' | 'mcp_unreceived' | 'final_turn' | 'verifier' | 'dependency' | 'dependency_acquisition' | 'publication'; worker: LinuxBlockedWorker;
   activeWorker: ActiveWorker } | { kind: 'publication_maintenance' | 'publication_received' | 'publication_reconciliation';
     worker?: LinuxBlockedWorker; activeWorker?: ActiveWorker }) & {
   finish(): Promise<Run>; failure?: unknown; retainsWorker?: boolean; toolCompletionCommitted?: boolean };
@@ -549,6 +556,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
   const publicationOwners = new Set<PublicationInvocationOwner>();
   const dependencyOwners = new Set<DependencyInvocationOwner>();
   let dependencyOwner: DependencyInvocationOwner | undefined;
+  let mcpTransport: NativeMcpRunHttpOwner | undefined;
   let publicationTask: DeliveryPublicationTask | undefined;
   let noOpTask: DeliveryNoOpTask | undefined;
   let publicationMaintenanceTask: DeliveryPublicationMaintenanceTask | undefined;
@@ -637,6 +645,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
     // revocation. Do not abort that result's Checkpoint/settlement path.
     if (operationPhase !== 'claimed' && operationPhase !== 'received') operationAbort?.abort();
     const joins: Promise<unknown>[] = [];
+    if (mcpTransport) try { joins.push(mcpTransport.close()); } catch (error) { cleanupFailure ??= error; }
     for (const original of dependencyOwners) {
       try { joins.push(revokeDependencyInvocationIO(driver, owner, original)); } catch (error) { cleanupFailure ??= error; }
     }
@@ -1095,6 +1104,14 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
     let retainedCompletion = false;
     const operation = work.catch(async error => {
       operationFailure = { error };
+      if (receivedCompletion?.kind === 'mcp_unreceived' && receivedCompletion.worker === worker && receivedCompletion.activeWorker === activeWorker) {
+        // This explicitly unreceived owner retains only its actual native
+        // no-I/O/UNKNOWN settlement continuation, never a response or retry.
+        // Storage failure must not fence M before that same settlement can
+        // commit, because the ordered no-I/O result still owns its frontier.
+        if (error instanceof ResourceRetirementError) cleanupFailure ??= error;
+        receivedCompletion.failure = error; retainedCompletion = true; throw error;
+      }
       if (receivedCompletion?.kind === 'publication_received') {
         // A durable handoff already proves the original M/arenas retired. No
         // new preactivation recovery or physical operation can be inferred
@@ -1488,6 +1505,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       // close enters irreversible native channel revocation synchronously,
       // before the control request can acknowledge its durable intent.
       const joined: Promise<unknown>[] = [...dependencyOwners].map(original => revokeDependencyInvocationIO(driver, owner, original));
+      if (mcpTransport) joined.push(mcpTransport.close());
       joined.push(revokeOriginalWorker());
       return Promise.all(joined).then(() => {});
     },
@@ -2138,7 +2156,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         const projection = await currentAgent.readToolInvocation(signal);
         requireEqual(projection.run, selected.run, 'current native tool projection');
         if (projection.kind === 'tool' && !(projection.execution.kind === 'builtin' && projection.execution.adapterId === LINUX_WORKER_RECIPE.editId ||
-            projection.execution.kind === 'builtin_script' || projection.execution.kind === 'supervisor_operation' && projection.execution.handlerId === 'skill_resource') ||
+            projection.execution.kind === 'builtin_script' || projection.execution.kind === 'mcp' || projection.execution.kind === 'supervisor_operation' && projection.execution.handlerId === 'skill_resource') ||
             projection.kind === 'input' && projection.execution.kind !== 'supervisor_control') {
           throw new KernelStorageError('INVALID_REQUEST', 'this installed recipe does not support the frozen tool execution identity');
         }
@@ -2229,6 +2247,129 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         const currentWorker = worker;
         signal.throwIfAborted();
         const dispatchId = identityHash('cliq-tool-dispatch-v1', runId, prepared.entry.opId, String(prepared.entry.attempt), nonce());
+        if (prepared.target.execution.kind === 'mcp') {
+          if (!selectedRuntime || !bootstrap) throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'MCP requires the complete original installed HTTP recipe');
+          const execution = prepared.target.execution;
+          const grant = await reads.readCanonical<import('../kernel/tool-authorization.js').ToolOperationGrantV1>(prepared.entry.grantRef!);
+          const frozen = await readMcpRegistryClosure(driver, reads, execution.registryRevisionRef, grant.principalId);
+          if (frozen.registry.transport.kind !== 'streamable_http') throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'MCP stdio lifecycle is not implemented');
+          const transport = frozen.registry.transport;
+          const output = frozen.registry.tools.find(tool => tool.name === execution.serverToolName)?.outputSchemaRef;
+          const outputSchema = output ? await reads.readCanonical(output) : undefined;
+          const call = await reads.readCanonical<import('../protocol/agent-ir.js').ToolCallInputV1>(prepared.request.inputRef);
+          const broker = await loadInstalledMcpHttpBroker(selectedRuntime, signal);
+          const trustStoreBytes = await reads.readBytes((await reads.readCanonical<import('../kernel/credential-authority.js').EndpointRegistrationV1>(transport.endpointRegistrationRef)).tls.trustStoreRef);
+          const frames = [mcpInitializeRequestData(1, '0.15.0'), mcpInitializedNotificationData(), mcpToolsListRequestData(2),
+            mcpToolsCallRequestData(3, execution.serverToolName, call.value)];
+          const deadlineMs = Math.min(parseCanonicalTime(prepared.run.deadlineAt), parseCanonicalTime(grant.expiresAt),
+            parseCanonicalTime(activated.launch.leaseExpiresAt!), Date.now() + frozen.registry.lifecycle.callTimeoutMs);
+          const transportInput = frames.map(frame => ({ phase: frame.phase, bodyBytes: Buffer.from(frame.json), bodyBytesDigest: frame.digest }));
+          return withInstalledMcpHttpAuthority(selectedRuntime, owner, reads, grant.principalId, transport, async authority => {
+            signal.throwIfAborted(); authority.assertCurrent();
+            const endpoint = authority.endpoint;
+            const native = broker.prepareRunHttp({ authentication: authority.authentication,
+              target: { hostAscii: endpoint.target.hostAscii, port: endpoint.target.port, path: endpoint.target.basePath,
+                serverNameAscii: endpoint.tls.serverNameAscii, spkiSha256Pins: endpoint.tls.spkiSha256Pins },
+              trustStoreBytes, trustStoreDigest: endpoint.tls.trustStoreDigest, maximumResponseBytes: 1_048_576,
+              remainingDeadlineMs: Math.max(1, deadlineMs - Date.now()), recipe: transportInput });
+            mcpTransport = native;
+            try { await native.ready; signal.throwIfAborted(); }
+            catch (error) { await native.close(); mcpTransport = undefined; throw error; }
+            native.retainDispatchFence();
+            const binding: RunMcpHttpBinding = { runId, opId: prepared.entry.opId, attempt: prepared.entry.attempt, dispatchId,
+              dispatchJournalSeq: nextJournalSequence(driver, runId), requestRef: prepared.entry.requestRef, requestDigest: prepared.request.requestDigest,
+              targetRef: prepared.entry.target, targetDigest: prepared.target.targetDigest, grantRef: prepared.entry.grantRef!, grantDigest: grant.grantDigest,
+              registryRef: frozen.ref, manifestDigest: frozen.registry.manifestDigest, toolContractDigest: execution.toolContractDigest,
+              batchItemId: prepared.request.batchItemId, callId: prepared.request.callId, callIndex: prepared.request.callIndex,
+              supervisorInstanceId: owner.supervisorInstanceId, stateOwnerEpoch: owner.ownerEpoch, workerLaunchId: activated.launch.launchId,
+              leaseEpoch: prepared.entry.leaseEpoch, brokerFenceTokenDigest: native.brokerFenceTokenDigest, deadlineMs };
+            let claimed: Awaited<ReturnType<typeof currentAgent.claimTool>>;
+            try {
+              native.bind(binding);
+              claimed = await currentAgent.claimTool({ expectedRunRevision: prepared.run.revision, leaseEpoch: activated.run.leaseEpoch,
+                opId: prepared.entry.opId, attempt: prepared.entry.attempt, dispatchId, brokerFenceTokenDigest: native.brokerFenceTokenDigest }, signal, { owner: native, binding });
+            } catch (error) { await native.close(); native.releaseDispatchFence(); mcpTransport = undefined; throw error; }
+            operationPhase = 'claimed'; toolReleased = true;
+            try {
+              await driveMcpRunProtocol(native, binding, frozen.registry, () => {
+                authority.assertCurrent(); frozen.assertUnchanged(driver); claimed.assertMcpRelease();
+                if (closed || isClosing() || mcpTransport !== native) throw new KernelStorageError('LEASE_FENCED', 'MCP original resource owner is closing');
+              }, outputSchema);
+            } catch (error) {
+              const custody = readMcpRunResourceOwner(native, binding);
+              if (!custody.resultReceived) {
+                let settled: Run | undefined;
+                const settlement: ReceivedCompletion = { kind: 'mcp_unreceived', worker: currentWorker, activeWorker: current,
+                  finish: async () => {
+                    if (!settled) {
+                      if (custody.joined && !custody.joined.networkStarted && !custody.joined.requestStarted &&
+                          !custody.joined.setupReleased && !custody.joined.effectReleased)
+                        settled = await failMcpRunWithoutRelease(driver, artifacts, owner, native, prepared.entry, claimed.entry, currentAgent.resolveToolInput);
+                      else settled = (await settleMcpRunUnknown(driver, artifacts, owner, native, prepared.entry, claimed.entry)).run;
+                    }
+                    // The existing real recovery/quarantine owns M's death
+                    // and private-generation retirement, preserving the ready
+                    // no-I/O result or original unresolved tool frontier.
+                    const selected = readRun(driver, runId);
+                    const recovering = selected.activeWorkerLaunchId === current.activated.launch.launchId
+                      ? await beginWorkerRecovery(driver, artifacts, owner, { runId, expectedRunRevision: selected.revision }) : selected;
+                    mcpTransport = undefined; return recovering;
+                  } };
+                receivedCompletion = settlement;
+                if (closingCompletion?.worker === currentWorker && closingCompletion.activeWorker === current) closingCompletion.completion = settlement;
+                return settlement.finish();
+              }
+              // A complete native matching response remains in custody even
+              // when semantic validation or finite-tail export refuses.
+            }
+            operationPhase = 'received';
+            const observedAt = sampleCanonicalNow();
+            const retire = checkpointRetirement(current, toolCheckpointId(runId, prepared.entry.opId, prepared.entry.attempt), signal);
+            let captured: Awaited<ReturnType<typeof publishMcpRunCapture>> | undefined;
+            let proof: Awaited<ReturnType<typeof retire>> | undefined;
+            let observation: ToolObservationV1 | undefined, observationRef: string | undefined;
+            let captureAcknowledged = false;
+            const completion: ReceivedCompletion = { kind: 'tool', worker: currentWorker, activeWorker: current, finish: async () => {
+              captured ??= await publishMcpRunCapture(artifacts, native); proof ??= await retire();
+              if (!observation) {
+                const base = { schemaVersion: 1 as const, format: 'cliq-tool-observation-v1' as const, runId, opId: claimed.entry.opId,
+                  attempt: claimed.entry.attempt, requestRef: claimed.entry.requestRef, targetRef: claimed.entry.target,
+                  grantRef: claimed.entry.grantRef!, dispatchId, observedAt, postEffect: proof.postEffect,
+                  captureRef: captured.ref, captureDigest: captured.value.captureDigest };
+                if (captured.value.result) observation = { ...base, outcome: 'executed', content: captured.value.result, observationDigest: '' };
+                else {
+                  const unusable = captured.value.unusableResponseRef && await reads.readCanonical<import('../kernel/mcp.js').McpKnownUnusableResponseV1>(captured.value.unusableResponseRef);
+                  const diagnostic = await artifacts.publishCanonical({ schemaVersion: 1, format: 'cliq-tool-output-diagnostic-v1', code: 'TOOL_PROTOCOL_ERROR',
+                    ...(unusable ? { knownUnusableResponseRef: captured.value.unusableResponseRef, knownUnusableResponseDigest: unusable.auditDigest } : {}) }, 'cliq-tool-output-diagnostic-v1');
+                  observation = { ...base, outcome: 'error', code: 'TOOL_PROTOCOL_ERROR', diagnosticRef: diagnostic.ref, diagnosticDigest: diagnostic.ref, observationDigest: '' };
+                }
+                observation.observationDigest = digestOmitting(observation, 'observationDigest');
+              }
+              observationRef ??= (await artifacts.publishCanonical(observation, observation.format)).ref;
+              if (!completion.toolCompletionCommitted) {
+                for (let retry = 0; ; retry++) {
+                  const run = readRun(driver, runId);
+                  try { await currentAgent.completeTool({ opId: claimed.entry.opId, attempt: claimed.entry.attempt,
+                    expectedRunRevision: run.revision, observationRef }); completion.toolCompletionCommitted = true; break; }
+                  catch (error) { if (!(error instanceof KernelStorageError) || error.code !== 'REVISION_CONFLICT' || retry >= 7 || readRun(driver, runId).revision === run.revision) throw error; }
+                }
+              }
+              if (!captureAcknowledged) { acknowledgeMcpRunCapture(captured.ref); captureAcknowledged = true; }
+              mcpTransport = undefined;
+              if (captured.value.format === 'cliq-mcp-known-unusable-run-capture-v1') {
+                await retireWorkerResources();
+                const cut = readRun(driver, runId);
+                if (!['failed', 'cancelled', 'succeeded'].includes(cut.status))
+                  await currentAgent.stopForMcpKnownUnusable({ expectedRunRevision: cut.revision,
+                    ...await publishInspector(artifacts, assertActiveStateOwner(driver, owner)) });
+              }
+              return readRun(driver, runId);
+            } };
+            receivedCompletion = completion;
+            if (closingCompletion?.worker === currentWorker && closingCompletion.activeWorker === current) closingCompletion.completion = completion;
+            return completion.finish();
+          }, signal);
+        }
         builtinPhase('tool_claim_spec');
         if (currentWorker.containment.backend.kind !== 'linux') throw new KernelStorageError('ARTIFACT_MISMATCH', 'native edit parent is not Linux');
         const sandboxLaunchSpecRef = await publishBuiltinRecipe(reads, recipe.spec, processContainmentRef, currentWorker.containment.backend.cgroupPath, prepared, dispatchId);
@@ -2605,7 +2746,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           throw new KernelStorageError('REVISION_CONFLICT', 'worker recovery model handoff cut changed');
         }
         const unknownHandoff = handoff?.state.phase === 'unknown' && hasOnlySettledInstalledModelUnknowns(
-          decodeRetainedRunAssembly(await reads.readCanonical(cut.runSpec.assemblyRef)), cut.journal);
+          decodeRetainedRunAssembly(await reads.readCanonical(cut.runSpec.assemblyRef)), cut.journal) || hasOnlySettledMcpUnknowns(cut.journal);
         const replacement = cut.workspaceGenerations.filter(row => row.phase === 'preactivated_readonly' || row.phase === 'materializing');
         if (unknownHandoff && replacement.length !== 0) {
           throw new KernelStorageError('RECOVERY_REQUIRED', 'unknown model worker quarantine cannot retain an unused replacement generation');

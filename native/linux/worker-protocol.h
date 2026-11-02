@@ -5,9 +5,10 @@
  * durable artifact schema. The trusted TypeScript launcher decodes the exact
  * retained RFC artifacts before constructing one of these closed commands. */
 #include <stdint.h>
+#include <stddef.h>
 
 #define CLIQ_WORKER_MAGIC UINT32_C(0x43575131)
-#define CLIQ_WORKER_VERSION UINT32_C(7)
+#define CLIQ_WORKER_VERSION UINT32_C(8)
 #define CLIQ_WORKER_MAX_SCOPES 16
 #define CLIQ_WORKER_MAX_FDS 40
 #define CLIQ_WORKER_TOKEN_BYTES 192
@@ -59,7 +60,15 @@ enum cliq_worker_command {
     CLIQ_SEAL_DEPENDENCY_INPUTS = 48,
     CLIQ_RELEASE_DEPENDENCY_NPM = 49,
     CLIQ_POLL_DEPENDENCY_NPM = 50,
-    CLIQ_ACK_DEPENDENCY_RESULT = 51
+    CLIQ_ACK_DEPENDENCY_RESULT = 51,
+    CLIQ_MCP_ADMIN_RESERVE = 52,
+    CLIQ_MCP_ADMIN_CREATE_BLOCKED = 53,
+    CLIQ_MCP_ADMIN_RELEASE_RECIPE = 54,
+    CLIQ_MCP_ADMIN_POLL = 55,
+    CLIQ_MCP_ADMIN_DELIVER = 56,
+    CLIQ_MCP_ADMIN_STOP = 57,
+    CLIQ_MCP_ADMIN_ACK = 58,
+    CLIQ_MCP_ADMIN_CLEANUP_RETAINED = 59
 };
 
 /* Private pre-READY diagnosis only. Never process, release, time or death
@@ -116,7 +125,21 @@ struct cliq_worker_packet {
     char monitor_start_token[CLIQ_WORKER_TOKEN_BYTES];
     char cgroup_name[96];
     char executable_path[256];
-    char relative_path[CLIQ_WORKER_PATH_BYTES];
+    /* Old commands retain their exact path bytes. Only the closed Admin
+     * command namespace interprets the packed alternative identity data.
+     * No path is an Admin capability; all unused union bytes remain zero. */
+    union {
+        char relative_path[CLIQ_WORKER_PATH_BYTES];
+        struct __attribute__((__packed__)) {
+            char admin_operation_id[257], admin_principal_id[257];
+            uint64_t admin_attempt, admin_deadline_ms;
+            char admin_target_ref[65], admin_target_digest[65], admin_core_ref[65], admin_core_digest[65], admin_plan_digest[65];
+            uint32_t admin_phase, admin_protocol_complete;
+            uint64_t admin_checker_owner_epoch;
+            int64_t admin_checker_supervisor_pid;
+            char admin_checker_supervisor_id[257], admin_checker_supervisor_token[192], admin_original_birth_digest[65];
+        };
+    };
     char plan_ref[65];
     char sandbox_launch_ref[65];
     char sandbox_launch_digest[65];
@@ -136,6 +159,16 @@ struct cliq_worker_packet {
     char source_output_digests[4][65];
     /* Disjoint preparing-owner family, never a source grant or active Run. */
     char preparation_input_intent_ref[65];
+
 };
 
+/* Frozen 95f913a5 base header SHA-256:
+ * a4667d6b7f0f6f510e617f218a7fcda62168ed6d57f1995605c82ec2563ea69f.
+ * No original packet/source birth-record hash input is resized. */
+_Static_assert(sizeof(struct cliq_worker_packet) == 7048, "original wire6/7 packet bytes");
+_Static_assert(offsetof(struct cliq_worker_packet, relative_path) == 1722, "original path offset");
+_Static_assert(offsetof(struct cliq_worker_packet, plan_ref) == 5818, "original following identity offset");
+_Static_assert(offsetof(struct cliq_worker_packet, source_inspection_id) == 6270, "original source identity offset");
+_Static_assert(offsetof(struct cliq_worker_packet, preparation_input_intent_ref) == 6980, "original preparing identity offset");
+_Static_assert(offsetof(struct cliq_worker_packet, admin_original_birth_digest) + 65 <= offsetof(struct cliq_worker_packet, relative_path) + CLIQ_WORKER_PATH_BYTES, "closed Admin data fits original storage");
 #endif

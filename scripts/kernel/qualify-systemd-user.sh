@@ -38,6 +38,7 @@ case ${1:-} in
   --run-final-source-limits-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--final-source-limits-campaign; shift ;;
   --run-verifier-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--verifier-campaign; shift ;;
   --run-permission-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--permission-campaign; shift ;;
+  --run-mcp-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--mcp-campaign; shift ;;
   --run-daily-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--daily-campaign; shift ;;
   --run-provider-journey)
     [[ $# -ge 2 && "$2" = /* && -f "$2" && ! -L "$2" ]] || {
@@ -145,6 +146,8 @@ elif [[ "$probe_run_driver_mode" = --verifier-campaign ]]; then
   readonly probe_run_driver="$probe_source_dir/qualify-installed-verifier-journey.ts"
 elif [[ "$probe_run_driver_mode" = --permission-campaign ]]; then
   readonly probe_run_driver="$probe_source_dir/qualify-installed-permission-journey.ts"
+elif [[ "$probe_run_driver_mode" = --mcp-campaign ]]; then
+  readonly probe_run_driver="$probe_source_dir/qualify-installed-mcp-journey.ts"
 elif [[ "$probe_run_driver_mode" = --provider-campaign || "$probe_run_driver_mode" = --provider-daily-campaign ]]; then
   readonly probe_run_driver="$probe_source_dir/qualify-installed-provider-journey.ts"
 elif [[ "$probe_run_driver_mode" = --daily-campaign ]]; then

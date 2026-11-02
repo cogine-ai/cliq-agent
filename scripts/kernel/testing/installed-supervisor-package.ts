@@ -26,11 +26,13 @@ import { writeInstalledGuestToolchain } from './installed-guest-package.js';
 import { validateGuestToolchainMetadata } from '../../../src/state/guest-toolchain.js';
 import { buildSourceGitInspectorAsset } from './source-git-inspector-package.js';
 import { buildBuiltinToolsAsset } from './builtin-tools-package.js';
+import { buildMcpHttpAdminProbeAsset } from '../mcp-package.js';
+import { MCP_HTTP_BROKER_ENTRY_ID, MCP_HTTP_BROKER_RELATIVE_PATH } from '../../../src/state/mcp-broker-native.js';
 import { buildBundledSkillPackageData, type BundledSkillPackageInput } from './installed-skill-package.js';
 import { checkCanonicalBytes, validateBundle } from '../../../src/state/installed-artifacts.js';
 import { emitQualificationFailure } from './qualification-failure-diagnostic.js';
 
-type PackageBuildOptions = Readonly<{ source?: FrozenQualificationSource; publisher?: InstalledQualificationPublisher; upgradeSourceBundle?: RuntimeBundleManifest; bundledSkills?: readonly BundledSkillPackageInput[]; headlessSchemaVersion?: 3; guestToolchain?: 'node-test-v1'; guestImageProfile?: 'qualification_max'; publicationRetirementDiagnostics?: true; credentialPhaseDiagnostics?: true; serverAuthenticationDiagnostics?: true; storeFailureDiagnostics?: true; resourceDiagnostics?: true; npmDependencyArchive?: Buffer; providerModel?: InstalledProviderModelDefinition }>;
+type PackageBuildOptions = Readonly<{ source?: FrozenQualificationSource; publisher?: InstalledQualificationPublisher; upgradeSourceBundle?: RuntimeBundleManifest; bundledSkills?: readonly BundledSkillPackageInput[]; headlessSchemaVersion?: 3; guestToolchain?: 'node-test-v1'; guestImageProfile?: 'qualification_max'; publicationRetirementDiagnostics?: true; credentialPhaseDiagnostics?: true; serverAuthenticationDiagnostics?: true; storeFailureDiagnostics?: true; resourceDiagnostics?: true; npmDependencyArchive?: Buffer; providerModel?: InstalledProviderModelDefinition; mcpHttp?: true }>;
 import { buildInstalledNpmAdapterAsset, buildInstalledNpmDataAsset } from './installed-npm-package.js';
 import { DEPENDENCY_BROKER_ENTRY_ID, DEPENDENCY_BROKER_RELATIVE_PATH } from '../../../src/state/dependency-broker-native.js';
 import { NPM_DATA_RECIPE } from '../../../src/sandbox/npm-data-image.js';
@@ -41,7 +43,7 @@ import { NPM_DATA_RECIPE } from '../../../src/sandbox/npm-data-image.js';
 async function buildInstalledSupervisorPackageCore(fixture: string,
   variant: 'complete' | 'retirement-native-missing' = 'complete', modelFixture?: InstalledModelPackageFixture,
   options: PackageBuildOptions = {}, diagnostics={phase:0}) {
-  assert(Object.keys(options).every(key => key === 'source' || key === 'publisher' || key === 'upgradeSourceBundle' || key === 'bundledSkills' || key === 'headlessSchemaVersion' || key === 'guestToolchain' || key === 'guestImageProfile' || key === 'publicationRetirementDiagnostics' || key === 'credentialPhaseDiagnostics' || key === 'serverAuthenticationDiagnostics' || key === 'storeFailureDiagnostics' || key === 'resourceDiagnostics' || key === 'npmDependencyArchive' || key === 'providerModel'));
+  assert(Object.keys(options).every(key => key === 'source' || key === 'publisher' || key === 'upgradeSourceBundle' || key === 'bundledSkills' || key === 'headlessSchemaVersion' || key === 'guestToolchain' || key === 'guestImageProfile' || key === 'publicationRetirementDiagnostics' || key === 'credentialPhaseDiagnostics' || key === 'serverAuthenticationDiagnostics' || key === 'storeFailureDiagnostics' || key === 'resourceDiagnostics' || key === 'npmDependencyArchive' || key === 'providerModel' || key === 'mcpHttp'));
   assert(!(modelFixture && options.providerModel), 'owned fixture and real provider definitions cannot be combined');
   const providerModel = options.providerModel === undefined ? undefined : providerModelDefinition(options.providerModel);
   if (providerModel) assert(variant === 'complete', 'real provider qualification requires the complete signed native package');
@@ -57,6 +59,9 @@ async function buildInstalledSupervisorPackageCore(fixture: string,
   assert(options.serverAuthenticationDiagnostics === undefined || options.serverAuthenticationDiagnostics === true);
   assert(options.storeFailureDiagnostics === undefined || options.storeFailureDiagnostics === true);
   assert(options.resourceDiagnostics === undefined || options.resourceDiagnostics === true);
+  assert(options.mcpHttp === undefined || options.mcpHttp === true);
+  if (options.mcpHttp) assert(variant === 'complete' && options.guestToolchain === 'node-test-v1' && hasModel,
+    'MCP HTTP requires the complete signed native, fixed Admin helper and guest Node package');
   if (options.serverAuthenticationDiagnostics) assert(options.publicationRetirementDiagnostics === true,
     'fixed server observations belong only to the explicit delayed delivery qualification image');
   if (options.publicationRetirementDiagnostics) assert(options.guestToolchain === 'node-test-v1',
@@ -78,6 +83,7 @@ async function buildInstalledSupervisorPackageCore(fixture: string,
   if (options.npmDependencyArchive !== undefined && schemaVersion !== 8) throw new TypeError('the original schema7 product cannot consume a later npm recipe');
   if (options.upgradeSourceBundle && schemaVersion !== 8) throw new TypeError('conversion can only be signed by the target8 recipe');
   if (options.bundledSkills !== undefined && schemaVersion !== 8) throw new TypeError('the original schema7 product cannot consume a later skills recipe');
+  if (options.mcpHttp && schemaVersion !== 8) throw new TypeError('MCP HTTP requires the current signed schema8 recipe');
   // An explicit old source compiles with that original product's actual SEA
   // builder and its separately integrity-installed lock, never today's deps.
   const sea = source ? await import(pathToFileURL(path.join(repository, 'scripts/kernel/testing/supervisor-sea-builder.ts')).href) as
@@ -168,6 +174,18 @@ async function buildInstalledSupervisorPackageCore(fixture: string,
     modelBrokerBytes = await readFile(path.join(brokerRoot, 'linux-model-broker.node'));
   }
   let dependencyBrokerBytes: Buffer | undefined;
+  let mcpBrokerBytes: Buffer | undefined;
+  let mcpAdminHelper: Awaited<ReturnType<typeof buildMcpHttpAdminProbeAsset>> | undefined;
+  if (options.mcpHttp) {
+    const brokerRoot = path.join(fixture, 'mcp-http-broker-image');
+    const broker = spawnSync(process.execPath, [path.join(repository, 'scripts/kernel/build-linux-mcp-http-broker.mjs'),
+      brokerRoot, path.join(nodeRoot, 'include/node')],
+    { encoding: 'utf8', timeout: 60_000, cwd: fixture, maxBuffer: 2 * 1024 * 1024 });
+    assert.equal(broker.error, undefined, 'production MCP HTTP broker construction did not join');
+    assert.equal(broker.status, 0, 'production MCP HTTP broker construction refused');
+    mcpBrokerBytes = await readFile(path.join(brokerRoot, 'linux-mcp-http-broker.node'));
+    mcpAdminHelper = await buildMcpHttpAdminProbeAsset(repository);
+  }
   if (npmData) {
     const brokerRoot = path.join(fixture, 'dependency-broker-image');
     const broker = spawnSync(process.execPath, [path.join(repository, 'scripts/kernel/build-linux-dependency-broker.mjs'),
@@ -237,6 +255,12 @@ async function buildInstalledSupervisorPackageCore(fixture: string,
     ...(sourceInspector ? [{ entryId: sourceInspector.entryId, role: sourceInspector.role, relativePath: sourceInspector.relativePath,
       executable: sourceInspector.executable, bytes: sourceInspector.bytes }] : []),
     ...skillData.contents,
+    ...(mcpBrokerBytes && mcpAdminHelper ? [
+      { entryId: MCP_HTTP_BROKER_ENTRY_ID, role: 'platform_helper' as const, relativePath: MCP_HTTP_BROKER_RELATIVE_PATH,
+        version: '1', executable: true, bytes: mcpBrokerBytes },
+      { entryId: mcpAdminHelper.entryId, role: mcpAdminHelper.role, relativePath: mcpAdminHelper.relativePath,
+        version: mcpAdminHelper.version, executable: mcpAdminHelper.executable, bytes: mcpAdminHelper.bytes },
+    ] : []),
     ...(npmAdapter && npmData && dependencyBrokerBytes ? [
       { entryId: DEPENDENCY_BROKER_ENTRY_ID, role: 'platform_helper' as const, relativePath: DEPENDENCY_BROKER_RELATIVE_PATH,
         version: '1', executable: true, bytes: dependencyBrokerBytes },

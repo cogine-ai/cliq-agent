@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import path from 'node:path';
-import { rename } from 'node:fs/promises';
+import { readdir, rename } from 'node:fs/promises';
 import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME } from '../config.js';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting } from '../kernel/identity.js';
@@ -261,30 +261,59 @@ for (const phase of ['unknown', 'abandoned'] as const) test(`${phase} typed tool
     const unknown = await fixture.store.markInvocationUnknown({ runId: fixture.runId, opId: prepared.entry.opId, attempt: 0,
       expectedRunRevision: prepared.run.revision, evidenceRef: ambiguity.ref, evidenceDigest: ambiguity.ref });
     await assert.rejects(fixture.agent.prepareTool({ expectedRunRevision: unknown.run.revision, leaseEpoch: fixture.leaseEpoch }), /tool attempt already exists/);
-    if (phase === 'abandoned') {
-      // A low-level Journal acknowledgement is not the authenticated terminal Run closure.
-      const acknowledgement = await fixture.store.artifacts.publishCanonical({ acknowledgeExactRisk: true }, 'cliq-manual-abandon-attestation-v1');
-      const abandoned = await fixture.store.abandonUnknownInvocation({ runId: fixture.runId, opId: prepared.entry.opId,
-        attempt: 0, attestationRef: acknowledgement.ref });
-      assert.equal(abandoned.budgetSettlementRef, unknown.entry.budgetSettlementRef);
-    }
-    // Each cut has a fresh owner-bound proof, so stale inspector rejection
-    // cannot mask the unresolved Journal guard being exercised here.
+    // Prepare the existing offline changed-workspace proof while the UNKNOWN
+    // cut is still readable. It cannot repair a later Journal-only abandonment.
     const proof = await postEffectObservation(fixture, await observation(fixture, claimed, { changed: true }), prepared.checkpointId);
     const before = await fixture.store.readRecoveryClosure(fixture.runId);
-    assert.equal(before.journal.at(-1)!.phase, phase);
+    assert.equal(before.journal.at(-1)!.phase, 'unknown');
     assert.equal(before.run.status, 'running');
     assert.equal(before.run.budgetConsumed.toolCalls, 1);
     assert.equal(before.run.budgetReserved.toolCalls, 0);
     assert.equal(before.latestCheckpoint.workspaceStateRef, proof.priorWorkspaceStateRef);
-    await assert.rejects(fixture.store.sealWorkerGeneration({ launchId: fixture.launchId, expectedRunRevision: before.run.revision,
+    const sealInput = { launchId: fixture.launchId, expectedRunRevision: before.run.revision,
       expectedGenerationRowVersion: before.workspaceGenerations[0]!.rowVersion, quiesceId: 'tool-test-quiesce', checkpointId: prepared.checkpointId,
       contextManifestRef: before.latestCheckpoint.contextManifestRef, workspaceStateRef: proof.workspaceStateRef,
       snapshotEvidenceRef: proof.observation.postEffect!.snapshotEvidenceRef, snapshotEvidenceDigest: proof.snapshot.evidenceDigest,
-      retirementEvidenceRef: proof.observation.postEffect!.retirementEvidenceRef, checkpointReason: 'auto' }), /post-effect Checkpoint together/);
+      retirementEvidenceRef: proof.observation.postEffect!.retirementEvidenceRef, checkpointReason: 'auto' as const };
+    if (phase === 'abandoned') {
+      // Deliberately incomplete retained state: this low-level ack has no
+      // typed attestation, authenticated terminal transaction or call marker.
+      const acknowledgement = await fixture.store.artifacts.publishCanonical({ acknowledgeExactRisk: true }, 'cliq-manual-abandon-attestation-v1');
+      const abandoned = await fixture.store.abandonUnknownInvocation({ runId: fixture.runId, opId: prepared.entry.opId,
+        attempt: 0, attestationRef: acknowledgement.ref });
+      assert.equal(abandoned.budgetSettlementRef, unknown.entry.budgetSettlementRef);
+      assert.deepEqual(abandoned.budgetDelta, { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 });
+      const driver = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+      const rows = () => Object.fromEntries(['runs', 'worker_launches', 'workspace_generations', 'run_journal', 'artifacts',
+        'canonical_time_fence', 'items', 'checkpoints', 'sessions', 'control_requests', 'run_events']
+        .map(table => [table, driver.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()]));
+      try {
+        const unchanged = rows(), objects = (await readdir(path.join(fixture.stateRoot, KERNEL_CAS_DIRECTORY))).sort();
+        // Exercise the real seal first so its existing five-second proof
+        // freshness cannot mask the unresolved claimed-call guard.
+        await assert.rejects(fixture.store.sealWorkerGeneration(sealInput), {
+          code: 'STATE_TRANSITION_INVALID', message: /post-effect Checkpoint together/ });
+        const refusal = { code: 'RECOVERY_REQUIRED', message: /manual abandonment requires.*terminal-only marker/ };
+        await assert.rejects(fixture.store.readRecoveryClosure(fixture.runId), refusal);
+        await assert.rejects(fixture.agent.prepareTool({ expectedRunRevision: before.run.revision, leaseEpoch: fixture.leaseEpoch }), refusal);
+        await assert.rejects(fixture.agent.readToolInvocation(), refusal);
+        await assert.rejects(fixture.store.beginWorkerRecovery({ runId: fixture.runId, expectedRunRevision: before.run.revision }), refusal);
+        assert.deepEqual(rows(), unchanged, 'refusal cannot seal changed workspace, close the call or append recovery state');
+        assert.deepEqual((await readdir(path.join(fixture.stateRoot, KERNEL_CAS_DIRECTORY))).sort(), objects);
+        await fixture.store.close();
+        fixture.store = await openStateStore(fixture.stateRoot, fixture.signed);
+        const reopened = rows();
+        await assert.rejects(fixture.store.readRecoveryClosure(fixture.runId), refusal);
+        await assert.rejects(fixture.store.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material,
+          releaseKeys: fixture.signed!.releaseKeys }), refusal);
+        assert.deepEqual(rows(), reopened, 'reopening cannot turn the incomplete acknowledgement into terminal authority');
+      } finally { driver.close(); }
+      return;
+    }
+    await assert.rejects(fixture.store.sealWorkerGeneration(sealInput), /post-effect Checkpoint together/);
     assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
     assert.equal((await fixture.agent.readToolInvocation()).invocation.index, 0);
-    // Independently reopen unknown and abandoned cuts, not just abandonment.
+    // Independently reopen the still-valid unresolved UNKNOWN cut.
     await fixture.store.close();
     fixture.store = await openStateStore(fixture.stateRoot, fixture.signed);
     fixture.agent = await fixture.store.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material, releaseKeys: fixture.signed!.releaseKeys });

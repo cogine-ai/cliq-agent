@@ -12,7 +12,7 @@ export type VerifierStopIntent = Extract<StopIntent, { origin: 'verification' } 
 export type DeliveryMergeStopIntent = Extract<StopIntent, { runtimeSubtype: 'delivery_merge_conflict' }>;
 export type DeliveryPolicyStopIntent = Extract<StopIntent, { origin: 'policy_deny' }> & { subjectKind: 'delivery'; reason: 'runtime_failed' };
 export type DependencyPolicyStopIntent = Extract<StopIntent, { origin: 'policy_deny' }> & { subjectKind: 'dependency_install_scripts'; reason: 'runtime_failed' };
-export type AgentStopIntent = Extract<StopIntent, { origin: 'user_cancel' | 'parent_cancel' | 'deadline' }> | ResourceStopIntent | ModelFailureStopIntent | VerifierStopIntent | DeliveryMergeStopIntent | DeliveryPolicyStopIntent | DependencyPolicyStopIntent | Extract<StopIntent, { origin: 'kernel_integrity'; source: 'dependency_acquisition' }>;
+export type AgentStopIntent = Extract<StopIntent, { origin: 'user_cancel' | 'parent_cancel' | 'deadline' | 'manual_abandon' }> | ResourceStopIntent | ModelFailureStopIntent | VerifierStopIntent | DeliveryMergeStopIntent | DeliveryPolicyStopIntent | DependencyPolicyStopIntent | Extract<StopIntent, { origin: 'kernel_integrity'; source: 'dependency_acquisition' }>;
 export const stopCheckpointId = (runId: string, stopIntentRef: string) => identityHash('cliq-stop-checkpoint-v1', runId, stopIntentRef);
 
 export function cancelRequestDigest(runId: string, input: RunCancel): string {
@@ -29,7 +29,12 @@ export function decodeAgentStop(value: unknown, run: Run): AgentStopIntent {
   const intent = value as AgentStopIntent;
   const identifier = (value: unknown) => typeof value === 'string' && normalizeBoundedText(value, 1, 256) === value;
   const fields = ['schemaVersion', 'runId', 'createdAt', 'origin', 'targetStatus', 'reason'];
-  if (intent.origin === 'user_cancel') {
+  if (intent.origin === 'manual_abandon') {
+    fields.push('requestId', 'principalId', 'opId', 'attempt', 'attestationRef');
+    assertRequestId(intent.requestId); assertArtifactRef(intent.attestationRef);
+    if (intent.targetStatus !== 'cancelled' || intent.reason !== 'cancelled_by_user' || !identifier(intent.principalId) ||
+        !identifier(intent.opId) || !Number.isSafeInteger(intent.attempt) || intent.attempt < 0) throw new TypeError('invalid exact manual abandonment');
+  } else if (intent.origin === 'user_cancel') {
     fields.push('requestId', 'principalId');
     assertRequestId(intent.requestId);
     if (intent.targetStatus !== 'cancelled' || intent.reason !== 'cancelled_by_user' || !intent.principalId) throw new TypeError('invalid user cancellation');
@@ -139,7 +144,7 @@ export function agentStopDetail(intent: AgentStopIntent, stopIntentRef: string, 
       ? { kind: 'policy_denied', subjectKind: intent.subjectKind, opId: intent.opId,
           policyChannelEvidenceRef: intent.policyChannelEvidenceRef, policyChannelEvidenceDigest: intent.policyChannelEvidenceDigest }
     : intent.origin !== 'runtime'
-    ? { kind: intent.origin === 'user_cancel' || intent.origin === 'parent_cancel' ? 'cancelled' : 'budget_exhausted',
+    ? { kind: intent.origin === 'user_cancel' || intent.origin === 'parent_cancel' || intent.origin === 'manual_abandon' ? 'cancelled' : 'budget_exhausted',
         stopIntentRef: intent.origin === 'parent_cancel' ? intent.sourceStopIntentRef : stopIntentRef }
     : intent.runtimeSubtype === 'runtime'
       ? { kind: 'runtime', failingOpId: intent.failingOpId, runtimeFailureRef: intent.runtimeFailureRef, runtimeFailureDigest: intent.runtimeFailureDigest }
@@ -178,7 +183,7 @@ function contextExhaustionDetail(intent: Extract<AgentStopIntent, { runtimeSubty
 /** Integrity wins even after cancellation; the separate dispatch fence remains
  * monotonic. Equal precedence retains the first already committed fact. */
 export function agentStopPriority(intent: AgentStopIntent): number {
-  return intent.origin === 'kernel_integrity' ? 7 : intent.origin === 'user_cancel' ? 6 : intent.origin === 'parent_cancel' ? 5
+  return intent.origin === 'manual_abandon' ? 0 : intent.origin === 'kernel_integrity' ? 7 : intent.origin === 'user_cancel' ? 6 : intent.origin === 'parent_cancel' ? 5
     : intent.reason === 'budget_exhausted' ? 4 : intent.reason === 'verification_failed' ? 3 : intent.reason === 'verifier_infrastructure_failed' ? 2 : 1;
 }
 export function selectAgentStop(prior: AgentStopIntent | undefined, proposed: AgentStopIntent): AgentStopIntent {
@@ -217,7 +222,9 @@ export function stopInvocationHistory(journal: readonly InvocationJournalEntry[]
 export function openStopBatch(items: readonly ContinuationItem[]): { batch: ToolBatchItem; next: number } | undefined {
   let pending: { batch: ToolBatchItem; next: number } | undefined;
   let model: Extract<ContinuationItem, { kind: 'model_turn' }> | undefined;
+  let abandoned=false;
   for (const item of items) {
+    if(abandoned&&(item.kind!=='tool_result'||item.outcome!=='cancelled'))throw new TypeError('manual abandonment permits only later undispatched cancellations');
     if (item.kind === 'model_turn') {
       if (pending || model) throw new TypeError('model turn overtakes an open batch');
       if (item.stopReason === 'tool_calls') model = item;
@@ -225,9 +232,10 @@ export function openStopBatch(items: readonly ContinuationItem[]): { batch: Tool
       if (pending || !model || item.modelTurnRef !== model.modelTurnRef || item.calls.length === 0) throw new TypeError('tool batch has no matching model turn');
       pending = { batch: item, next: 0 };
       model = undefined;
-    } else if (item.kind === 'tool_result') {
+    } else if (item.kind === 'tool_result' || item.kind === 'tool_abandoned') {
       if (!pending || item.batchItemId !== pending.batch.itemId || item.index !== pending.next || item.callId !== pending.batch.calls[pending.next]?.callId) throw new TypeError('stop transcript has a skipped or duplicate call result');
       if (++pending.next === pending.batch.calls.length) pending = undefined;
+      if(item.kind==='tool_abandoned')abandoned=true;
     } else if (item.kind === 'input_request' || item.kind === 'user_input') {
       if (!pending || item.batchItemId !== pending.batch.itemId || item.index !== pending.next || item.callId !== pending.batch.calls[pending.next]?.callId) throw new TypeError('input overtakes its result-less call');
     } else if (item.kind === 'final_candidate' || item.kind === 'verifier_result' || item.kind === 'verifier_stop' || item.kind === 'repair_diagnostic' ||

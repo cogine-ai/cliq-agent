@@ -128,6 +128,18 @@ export function hasOnlySettledInstalledModelUnknowns(assembly: RunAssemblyV1,
       canonicalSha256(current.budgetDelta) === canonicalSha256(prepared.budgetDelta);
   });
 }
+/** Eligibility only after the original MCP request/registry/ambiguity and
+ * full-once settlement were validated by the recovery closure. It supplies no
+ * effect outcome, physical death or permission to repeat the HTTP recipe. */
+export function hasOnlySettledMcpUnknowns(journal: readonly InvocationJournalEntry[]): boolean {
+  const open = openWorkerInvocations(journal);
+  return open.length === 1 && open.every(prepared => {
+    const entries = journal.filter(entry => entry.opId === prepared.opId && entry.attempt === prepared.attempt), final = entries.at(-1)!;
+    return prepared.opKind === 'mcp' && prepared.replayClass === 'manual' && entries.length === 3 && entries[1]!.phase === 'dispatch_claimed' &&
+      final.phase === 'unknown' && final.opKind === 'mcp' && !!final.budgetSettlementRef && !!final.evidenceRef && !!final.evidenceDigest &&
+      canonicalSha256(final.budgetDelta) === canonicalSha256(prepared.budgetDelta);
+  });
+}
 
 type WorkerCut = Pick<RecoveryClosureV1, 'run' | 'journal' | 'workerLaunches' | 'workspaceGenerations'>;
 

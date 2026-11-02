@@ -12,7 +12,7 @@ export async function readRegisteredAgentStopChain(artifacts: ArtifactCatalog, r
   let ref = run.stopIntentRef, newer: AgentStopIntent | undefined;
   const chain: Array<{ ref: string; intent: AgentStopIntent }> = [];
   const seen = new Set<string>();
-  for (let depth = 0; depth < 7; depth++) {
+  for (let depth = 0; depth < 8; depth++) {
     if (seen.has(ref)) throw new KernelStorageError('RECOVERY_REQUIRED', 'Stop registration chain is cyclic');
     seen.add(ref);
     const stop = decodeAgentStop(await readCanonicalArtifact(artifacts, ref), run);

@@ -36,6 +36,7 @@ import { effectiveSourceExcludes } from '../kernel/dependency-source.js';
 import { assertInstalledDependencyRequest } from './dependency-profile.js';
 import { readDependencySignedAssets } from './dependency-execution-data.js';
 import { loadInstalledDependencyBroker, loadInstalledWorkerNative } from './installed-runtime.js';
+import { readMcpAdmissionSelections } from './mcp-admission.js';
 
 function invalid(message: string): never { throw new KernelStorageError('INVALID_REQUEST', message); }
 function object(value: unknown, required: readonly string[], optional: readonly string[] = []): Record<string, unknown> {
@@ -234,11 +235,12 @@ deliverySource?: VerifiedDeliverySource): Promise<VerifiedSourceInspectionTarget
         resources: wire.sandboxResources, allowScripts: wire.dependency.allowInstallScripts }, context.signal);
     }
     assertSupportedVerifierRequests(wire.verifiers, wire.policyMode);
-    if (wire.registeredMcpServerIds.length) invalid('MCP admission authority is not yet implemented');
     // The original verifier history/current-image reads and selected model
     // observation are independent. Both complete before any target can be
     // reserved; each original before/after revalidation stays around its use.
     await joinResourceOperations([
+      readMcpAdmissionSelections(driver, reads, identity.principalId, wire.registeredMcpServerIds,
+        bootstrap.bundle, context.signal),
       wire.verifiers.length ? readVerifierRequestIdentities(driver, reads, owner, bootstrap,
         identity.principalId, wire.verifiers, undefined, context.signal) : Promise.resolve(),
       (async () => {

@@ -865,6 +865,9 @@ Implementation notes:
      format: 'cliq-mcp-admin-probe-target-v1'
      ownerPrincipalId: string
      registrationId: string
+     originalRequestRef: ArtifactRef
+     channelIdentityRef: ArtifactRef
+     channelIdentityDigest: string
      method: 'mcp.register' | 'mcp.refresh'
      expectedRegistryRevision?: number
      sourceRegistryRevisionRef?: ArtifactRef

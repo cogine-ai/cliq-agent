@@ -2,13 +2,39 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { ContinuationItem, Run, StopIntent } from '../kernel/types.js';
-import { agentStopDetail, decodeAgentStop, openStopBatch, selectAgentStop } from './stop.js';
+import { agentStopDetail, decodeAgentStop, openStopBatch, selectAgentStop,cancelledCall } from './stop.js';
 
 const reference = 'a'.repeat(64), createdAt = '2026-10-18T00:00:01.000Z';
 const run: Run = { id: 'run', sessionId: 'session', specRef: reference, status: 'queued', nextStep: 'verify', frontierRef: reference,
   revision: 2, leaseEpoch: 0, latestCheckpointId: 'checkpoint', budgetReserved: { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 },
   budgetConsumed: { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 }, repairCount: 0, cancelRequested: true,
   createdAt: '2026-10-18T00:00:00.000Z', updatedAt: '2026-10-18T00:00:02.000Z', deadlineAt: createdAt };
+
+test('exact manual Stop has its own closed provenance and preserves every existing higher-priority cause',()=>{
+  const manual:StopIntent={schemaVersion:1,runId:run.id,createdAt,origin:'manual_abandon',targetStatus:'cancelled',reason:'cancelled_by_user',
+    requestId:'019eae02-0000-7000-8000-000000000091',principalId:'principal',opId:'mcp-call',attempt:0,attestationRef:reference};
+  assert.deepEqual(decodeAgentStop(manual,run),manual);
+  assert.deepEqual(agentStopDetail(manual,reference,createdAt).reasonDetail,{kind:'cancelled',stopIntentRef:reference});
+  const deadline:StopIntent={schemaVersion:1,runId:run.id,createdAt,origin:'deadline',targetStatus:'failed',reason:'budget_exhausted',deadlineAt:run.deadlineAt};
+  assert.strictEqual(selectAgentStop(deadline,manual),deadline);assert.strictEqual(selectAgentStop(manual,deadline),deadline);
+  for(const change of [{attempt:-1},{attestationRef:'bad'},{targetStatus:'succeeded'},{principalId:''},{acknowledgeExactRisk:true},{origin:'user_cancel'}])
+    assert.throws(()=>decodeAgentStop({...manual,...change},run));
+});
+
+test('terminal-only abandonment closes its exact uncertain call and later cancellations without synthesizing a result',()=>{
+  const turn:Extract<ContinuationItem,{kind:'model_turn'}>={schemaVersion:1,kind:'model_turn',itemId:'turn',runId:run.id,modelOpId:'model',modelAttempt:0,
+    modelTurnRef:reference,textRef:reference,stopReason:'tool_calls',createdAt};
+  const batch:Extract<ContinuationItem,{kind:'assistant_tool_batch'}>={schemaVersion:1,kind:'assistant_tool_batch',itemId:'batch',runId:run.id,
+    modelOpId:'model',modelAttempt:0,modelTurnRef:reference,textRef:reference,calls:[0,1].map(index=>({callId:`call-${index}`,toolName:'calendar',inputRef:reference,inputDigest:reference,index})),createdAt};
+  const marker:Extract<ContinuationItem,{kind:'tool_abandoned'}>={schemaVersion:1,kind:'tool_abandoned',itemId:'abandoned',runId:run.id,
+    batchItemId:batch.itemId,callId:'call-0',index:0,opId:'mcp-call',attempt:0,abandonedJournalSeq:7,attestationRef:reference,createdAt};
+  assert.equal(openStopBatch([turn,batch,marker])?.next,1);
+  const cancelled=cancelledCall(batch,1,reference,createdAt).item;
+  assert.equal(openStopBatch([turn,batch,marker,cancelled]),undefined);
+  for(const tail of [marker,turn,{...cancelled,outcome:'executed'} as ContinuationItem])
+    assert.throws(()=>openStopBatch([turn,batch,marker,cancelled,tail]));
+  assert.throws(()=>openStopBatch([turn,batch,{...marker,index:1,callId:'call-1'}]));
+});
 
 test('verifier stop branches retain closed reason detail and integrity outranks cancellation without clearing its fence', () => {
   const base = { schemaVersion: 1 as const, runId: run.id, createdAt, targetStatus: 'failed' as const };

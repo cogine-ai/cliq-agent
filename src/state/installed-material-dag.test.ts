@@ -123,7 +123,7 @@ test('source/native DAG keeps every original before/after R and does not move pu
   // or depend on a developer's private baseline. Check the original guarded
   // operations individually so unrelated legitimate borrows cannot mask an R.
   const parse=async(name:string)=>ts.createSourceFile(name,await fs.readFile(new URL(name,import.meta.url),'utf8'),ts.ScriptTarget.Latest,true);
-  const [source,current,runtime,catalog]=await Promise.all(['source-target.ts','installed-run.ts','installed-runtime.ts','artifacts.ts'].map(parse));
+  const [source,current,runtime,catalog,mcp]=await Promise.all(['source-target.ts','installed-run.ts','installed-runtime.ts','artifacts.ts','mcp-admission.ts'].map(parse));
   function descendants<T extends ts.Node>(root:ts.Node,guard:(node:ts.Node)=>node is T):T[]{
     const found:T[]=[];const visit=(node:ts.Node)=>{if(guard(node))found.push(node);ts.forEachChild(node,visit);};visit(root);return found;
   }
@@ -142,8 +142,18 @@ test('source/native DAG keeps every original before/after R and does not move pu
   };
 
   const sourceBody=fn(source,'createVerifiedSourceInspectionTarget'),sourceJoin=awaited(call(sourceBody,'joinResourceOperations'));
-  pair(sourceJoin);const verifier=call(sourceJoin,'readVerifierRequestIdentities');assert.equal(text(verifier.arguments.at(-1)!), 'context.signal');
+  let sourceInput=sourceJoin.arguments[0]!;
+  if(ts.isAsExpression(sourceInput))sourceInput=sourceInput.expression;
+  assert(ts.isArrayLiteralExpression(sourceInput));assert.equal(sourceInput.elements.length,3,'source preflight joins exactly MCP, verifier and model validation');
+  const mcpSelection=call(sourceJoin,'readMcpAdmissionSelections');
+  assert.equal(text(sourceInput.elements[0]!),text(mcpSelection));
+  assert.deepEqual(mcpSelection.arguments.map(text),['driver','reads','identity.principalId','wire.registeredMcpServerIds','bootstrap.bundle','context.signal']);
+  const verifier=call(sourceJoin,'readVerifierRequestIdentities');assert.equal(text(verifier.arguments.at(-1)!), 'context.signal');
+  const verifierBranch=sourceInput.elements[1]!;assert(ts.isConditionalExpression(verifierBranch));
+  assert.deepEqual([text(verifierBranch.condition),text(verifierBranch.whenTrue),text(verifierBranch.whenFalse)],
+    ['wire.verifiers.length',text(verifier),'Promise.resolve()']);
   const modelBorrow=call(sourceJoin,'withHeldInstalledRuntime'),modelBody=callback(modelBorrow);
+  assert(sourceInput.elements[2]!.pos<=modelBorrow.pos&&modelBorrow.end<=sourceInput.elements[2]!.end,'the original model borrow stays in the third joined branch');
   assert.deepEqual([text(modelBorrow.arguments[0]!),text(modelBorrow.arguments[2]!)],['context.selectedRuntime','context.signal']);
   const modelGuard=one(modelBody.statements.filter(ts.isIfStatement),'original selected-model identity guard');
   bracket(modelBody,modelGuard,'context.signal');
@@ -151,6 +161,14 @@ test('source/native DAG keeps every original before/after R and does not move pu
   assert(text(modelGuard.expression).includes('installed.modelAuthority?.models.some('));
   assert(sourceJoin.end<call(sourceBody,'artifacts.publishCanonicalTriple').pos);
   assert(call(sourceBody,'artifacts.publishCanonicalTriple').end<awaited(call(sourceBody,'recheckVerifiedSourceInspectionTarget')).pos);
+
+  const mcpBody=fn(mcp,'readMcpAdmissionSelections'),mcpGroup=awaited(call(mcpBody,'reads.mapReads'));
+  assert(text(mcpBody).includes('constreads=signal?artifacts.withReadSignal(signal):artifacts;'));
+  assert.deepEqual(mcpGroup.arguments.map(text),['registrationIds','registrationId=>readMcpRegistry(driver,reads,principalId,registrationId)'],
+    'MCP lazily joins full registry closures through the same bounded preparing view');
+  assert(call(mcpBody,'assertMcpHttpRecipe').end<mcpGroup.pos,'fixed installed recipe qualification precedes registry reads');
+  assert(text(mcpBody).includes('reads.assertReadActive();signal?.throwIfAborted();'));
+  assert(text(mcpBody).includes('for(constselectionofselections)selection.assertUnchanged(driver);'));
 
   const assembly=fn(current,'assembleInstalledRun'),capture=one(calls(assembly,'withHeldInstalledRuntime').filter(value=>calls(value,'installed.loadStateOwner').length===1),'original capture borrow');
   const captureBody=callback(capture),captureJoin=awaited(call(captureBody,'joinResourceOperations'));

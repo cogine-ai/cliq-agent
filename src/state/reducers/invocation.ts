@@ -421,7 +421,8 @@ export async function claimValidatedInvocation(
   driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, input: ClaimInvocationDispatchInput,
   validate?: (connection: SqliteConnection, run: Run, prepared: InvocationJournalEntry, now: string) => void,
   publicationOwner?: PublicationInvocationOwner,
-  dependencyOwner?: DependencyInvocationOwner
+  dependencyOwner?: DependencyInvocationOwner,
+  mcpOwner?: import('./tool.js').McpToolClaimOwner
 ): Promise<InvocationJournalEntry> {
   input = { ...input };
   // The attachment is an original same-Store native owner, not caller metadata
@@ -431,6 +432,10 @@ export async function claimValidatedInvocation(
   const dependency = dependencyOwner === undefined ? undefined :
     (await import('../dependency-invocation-owner.js')).assertDependencyClaimForInvocation(driver, owner, dependencyOwner, input);
   const preparedSnapshot = readHighestPreparedAttempt(driver, input.runId, input.opId);
+  if ((preparedSnapshot?.opKind === 'mcp') !== (mcpOwner !== undefined))
+    throw new KernelStorageError('INVALID_REQUEST', 'MCP claims require their original typed policy/native owner');
+  const assertMcp = mcpOwner === undefined ? undefined : (await import('./tool.js')).assertMcpToolClaimOwner;
+  assertMcp?.(driver, owner, mcpOwner!, input);
   if ((preparedSnapshot?.opKind === 'publish') !== (publication !== undefined))
     throw new KernelStorageError('INVALID_REQUEST', 'publication claims require their original typed native owner');
   if ((preparedSnapshot?.opKind === 'tool' && preparedSnapshot.target === 'builtin:dependency-acquire') !== (dependency !== undefined) ||
@@ -453,6 +458,7 @@ export async function claimValidatedInvocation(
   let fenceOutcome: TimeFenceAdvance | undefined;
   driver.transaction((connection) => {
     assertActiveStateOwner(connection, owner);
+    assertMcp?.(driver, owner, mcpOwner!, input);
     const now = sampleCanonicalNow();
     fenceOutcome = advanceTimeFence(connection, owner.ownerEpoch, now);
     if (fenceOutcome !== 'healthy') return;
@@ -536,6 +542,7 @@ export type SettlementContinuation = (input: {
 }) => Promise<{
   metadata: PublishedArtifact[];
   unknownEvidence?: { evidenceRef: string; evidenceDigest: string };
+  reobserve?: (connection: SqliteConnection) => void;
   validate?: (connection: SqliteConnection, run: Run, committedAt: string) => void;
   commit?: (connection: SqliteConnection, run: Run, entry: InvocationJournalEntry, committedAt: string) => void;
 }>;
@@ -832,7 +839,8 @@ async function settleInitialInvocation(
           retained?.validateSnapshot(connection, run);
           continuationPlan?.validate?.(connection, run, committedAt);
         },
-        publication
+        publication,
+        continuationPlan?.reobserve
       );
     } catch (error) {
       if (error instanceof ReducerSnapshotChanged) {
@@ -866,12 +874,14 @@ function commitInitialSettlement(
   terminalMetadata: PublishedArtifact[],
   commitContinuation?: (connection: SqliteConnection, run: Run, entry: InvocationJournalEntry, committedAt: string) => void,
   validateTerminal?: (connection: SqliteConnection, run: Run, committedAt: string) => void,
-  publication?: ReturnType<typeof import('../publication-settlement.js')['assertPublicationSettlementForInvocation']>
+  publication?: ReturnType<typeof import('../publication-settlement.js')['assertPublicationSettlementForInvocation']>,
+  reobserve?: (connection: SqliteConnection) => void
 ): { entry: InvocationJournalEntry; settlement: BudgetSettlementV1; run: Run } {
   let result!: { entry: InvocationJournalEntry; settlement: BudgetSettlementV1; run: Run };
   let fenceOutcome: TimeFenceAdvance | undefined;
   driver.transaction((connection) => {
     assertActiveStateOwner(connection, owner);
+    reobserve?.(connection);
     const committedAt = sampleCanonicalNow();
     const run = readRun(connection, input.runId);
     if (
@@ -1015,6 +1025,7 @@ export async function markInvocationUnknown(
   const spec = decodeRunSpec(await readCanonicalArtifact(artifacts, run.specRef));
   const assembly = await readCanonicalArtifact<Partial<RunAssemblyV1>>(artifacts, spec.assemblyRef);
   const prepared = readInvocationAttempt(driver, input.runId, input.opId, input.attempt).find(entry => entry.phase === 'prepared');
+  if (prepared?.opKind === 'mcp') throw new KernelStorageError('INVALID_REQUEST', 'MCP uncertainty requires its original native or successor process-death producer');
   if (prepared?.opKind === 'model' && assembly.format === 'cliq-run-assembly-v1' && assembly.provider?.adapter?.adapterId === MODEL_BROKER_ENTRY_ID) {
     return markInstalledBrokerAmbiguity(driver, artifacts, owner, input);
   }

@@ -2,7 +2,7 @@ import type { ToolCallInputV1 } from '../protocol/agent-ir.js';
 import { decodeDelegateRequest } from '../tools/child-inputs.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting, identityHash, parseCanonicalTime } from '../kernel/identity.js';
-import type { Checkpoint, ContinuationItem, InvocationJournalEntry, Run, RunFrontier, RunSpec, TerminalDetail, ToolContractManifestV1, ToolResultPayloadV1, ToolResultModelContentV1, WorkspaceGenerationStateV1 } from '../kernel/types.js';
+import type { Checkpoint, ContinuationItem, InvocationJournalEntry, Run, RunFrontier, RunItemReferenceV1, RunSpec, TerminalDetail, ToolContractManifestV1, ToolResultPayloadV1, ToolResultModelContentV1, WorkspaceGenerationStateV1 } from '../kernel/types.js';
 import type { RunPolicySnapshotV1, ToolObservationV1, ToolOperationGrantV1, ToolPolicyChannelEvidenceV1, ToolPolicyDecisionItem,
   ToolRequestV1, ToolTargetV1, ToolApprovalWait, ToolApprovalDecisionV1, ToolGrantExpiryV1 } from '../kernel/tool-authorization.js';
 import { toolOperationId, childDelegateOperationId } from '../policy/tool-policy.js';
@@ -17,20 +17,36 @@ import { validatePrivateToolRollback } from './private-tool-rollback.js';
 import { decodeToolExecutionIdentity } from '../tools/execution-identity.js';
 import type { SqliteDriver } from './sqlite-driver.js';
 import { decodeRetainedRunAssembly } from '../model/run-assembly.js';
+import { mcpNoReleaseCheckpointId } from '../kernel/mcp.js';
 import { readBuiltinToolCapture, assertBuiltinCaptureObservation } from './builtin-tool-capture.js';
+import { readMcpRunCapture, assertMcpCaptureObservation, readMcpNoReleaseHistory, readMcpAmbiguityHistory } from './mcp-execution.js';
 import { decodeSkillResourceReceipt, readSkillResourceValue, skillResourceCheckpointId, skillResourceDispatchId } from './skill-resource-data.js';
 import { decodeSkillResourceInput } from '../kernel/skill.js';
 import { decodeWireRun } from '../kernel/control-wire-data.js';
 import { readRetainedStateOwnerHistory } from './state-owner-history.js';
 import { readSupervisorInspector } from './supervisor-inspector.js';
+import { validateManualAbandonmentHistory } from './manual-reconciliation.js';
 
 /** Reachability and durable ownership. The loaded Run additionally verifies release signatures and replays the fixed evaluator. */
 export async function validateToolRecovery(input: {
   artifacts: ArtifactCatalog; run: Run; spec: RunSpec; items: Map<string, ContinuationItem>; journal: InvocationJournalEntry[];
   checkpoints: Checkpoint[]; workspaceGenerations: WorkspaceGenerationStateV1[];
+  itemRows?: RunItemReferenceV1[];
   driver?: SqliteDriver;
 }): Promise<void> {
   const { artifacts, run, spec, items, journal } = input;
+  const abandonedItems = [...items.values()].filter(item => item.kind === 'tool_abandoned');
+  const hasManualAbandonment = journal.some(entry => entry.phase === 'abandoned' && entry.replayClass === 'manual');
+  const manual = hasManualAbandonment || abandonedItems.length ? await (async () => {
+    if (!input.driver || !input.itemRows || abandonedItems.length !== 1)
+      throw new TypeError('manual abandonment requires its original SQLite cut and one terminal-only marker');
+    const marker = await validateManualAbandonmentHistory(input.driver, artifacts,
+      { run, runSpec: spec, items: input.itemRows, journal });
+    if (!marker || abandonedItems[0]!.kind !== 'tool_abandoned' || marker.opId !== abandonedItems[0]!.opId ||
+        marker.attempt !== abandonedItems[0]!.attempt || marker.attestationRef !== abandonedItems[0]!.attestationRef)
+      throw new TypeError('terminal-only abandonment marker has no exact original manual disposition');
+    return marker;
+  })() : undefined;
   let dependencyHistory: Promise<unknown> | undefined;
   const decisions = new Map<string, ToolPolicyDecisionItem>();
   const requests = new Map<string, ToolRequestV1>();
@@ -282,9 +298,19 @@ export async function validateToolRecovery(input: {
     if (claims.length > grant.maxDispatchedAttempts || grantClaims.some((entry) =>
         entry.timestamp < grant.issuedAt || entry.timestamp >= grant.expiresAt)) throw new TypeError('tool grant claim lifetime or use count mismatch');
     if (prepared.timestamp < grant.issuedAt || prepared.timestamp >= grant.expiresAt) throw new TypeError('tool preparation uses an expired grant');
+    const abandoned = attempts.filter(entry => entry.attempt === prepared.attempt && entry.phase === 'abandoned');
+    if (abandoned.length && (abandoned.length !== 1 || !manual || manual.opId !== prepared.opId ||
+        manual.attempt !== prepared.attempt || manual.abandonedJournalSeq !== abandoned[0]!.seq))
+      throw new TypeError('manual tool abandonment is outside its authenticated original terminal closure');
     const failed = attempts.find((entry) => entry.attempt === prepared.attempt && entry.phase === 'failed');
     const unknown = attempts.find(entry => entry.attempt === prepared.attempt && entry.phase === 'unknown');
     const failedClaim = claims.find(entry => entry.attempt === prepared.attempt);
+    if (unknown && prepared.opKind === 'mcp') {
+      if (!input.driver || !failedClaim)
+        throw new TypeError('MCP ambiguity requires its exact original claim and retained SQLite ownership history');
+      const assembly = decodeRetainedRunAssembly(await readCanonicalArtifact(artifacts, spec.assemblyRef));
+      await readMcpAmbiguityHistory(input.driver, artifacts, { prepared, claim: failedClaim, unknown, assembly });
+    }
     if (failed && run.stopIntentRef && failed.errorRef === run.stopIntentRef) {
       const detail = await readCanonicalArtifact<TerminalDetail>(artifacts, run.terminalDetailRef!);
       if (!['failed', 'cancelled'].includes(run.status) || failed.timestamp !== detail.createdAt || detail.createdAt > run.updatedAt ||
@@ -311,6 +337,25 @@ export async function validateToolRecovery(input: {
       if (!terminalCheckpoint || terminalCheckpoint.journalSeq < failed.seq || terminalCheckpoint.createdAt < failed.timestamp ||
           terminalCheckpoint.workspaceStateRef !== evidence.workspaceStateRef)
         throw new TypeError('private rollback terminal does not restore its last ready workspace');
+    } else if (failed && failedClaim && prepared.opKind === 'mcp') {
+      if (!input.driver || unknown) throw new TypeError('MCP no-release failure cannot borrow UNKNOWN or omit its original SQL provenance');
+      const assembly = decodeRetainedRunAssembly(await readCanonicalArtifact(artifacts, spec.assemblyRef));
+      await readMcpNoReleaseHistory(input.driver, artifacts, { prepared, claim: failedClaim, failed, assembly });
+      const item = [...items.values()].find(value => value.kind === 'tool_result' && value.opId === prepared.opId);
+      if (item?.kind !== 'tool_result' || item.outcome !== 'error' || item.batchItemId !== request.batchItemId ||
+          item.callId !== request.callId || item.index !== request.callIndex || item.createdAt !== failed.timestamp)
+        throw new TypeError('MCP no-release failure has no exact ordered error item');
+      const payload = await readCanonicalArtifact<ToolResultPayloadV1>(artifacts, item.resultRef);
+      if (payload.outcome !== 'error' || payload.code !== 'TOOL_EXECUTION_FAILED' || payload.opId !== prepared.opId ||
+          payload.attempt !== prepared.attempt || payload.journalErrorRef !== failed.errorRef || payload.journalErrorDigest !== failed.errorRef ||
+          payload.diagnosticRef !== failed.errorRef || payload.diagnosticDigest !== failed.errorRef)
+        throw new TypeError('MCP no-release result changed its exact original closure');
+      const model = await readCanonicalArtifact<ToolResultModelContentV1>(artifacts, payload.modelContentRef);
+      requireEqual(model.content, { code: 'TOOL_EXECUTION_FAILED' }, 'MCP no-release model-safe failure');
+      const checkpoint = input.checkpoints.find(value => value.id === mcpNoReleaseCheckpointId(run.id, prepared.opId, prepared.attempt));
+      if (!checkpoint || checkpoint.journalSeq !== failed.seq || checkpoint.runItemSeq !== [...items.keys()].indexOf(item.itemId) + 1 ||
+          checkpoint.createdAt < failed.timestamp)
+        throw new TypeError('MCP no-release result has no original ready Checkpoint');
     } else if (failed) {
       const expiry = await readCanonicalArtifact<ToolGrantExpiryV1>(artifacts, failed.errorRef!);
       parseCanonicalTime(expiry.observedAt);
@@ -365,6 +410,13 @@ export async function validateToolRecovery(input: {
         prepared, claim, assembly, observedAt: result.observedAt });
       await assertBuiltinCaptureObservation(artifacts, result, captured.model, contract.outputSchemaRef && contract.outputSchemaDigest
         ? { ref: contract.outputSchemaRef, digest: contract.outputSchemaDigest } : undefined);
+    } else if (contract.execution.kind === 'mcp') {
+      if (!input.driver || !result.captureRef || !result.captureDigest)
+        throw new TypeError('MCP history requires its complete original capture and SQL registration provenance');
+      const assembly = decodeRetainedRunAssembly(await readCanonicalArtifact(artifacts, spec.assemblyRef));
+      const captured = await readMcpRunCapture(input.driver, artifacts, { captureRef: result.captureRef,
+        captureDigest: result.captureDigest, prepared, claim, assembly });
+      await assertMcpCaptureObservation(artifacts, result, captured);
     } else if (result.captureRef !== undefined || result.captureDigest !== undefined)
       throw new TypeError('non-script history cannot borrow a native script capture');
     if (result.outcome === 'executed') {
@@ -373,7 +425,7 @@ export async function validateToolRecovery(input: {
           payload.outputSchemaDigest !== contract.outputSchemaDigest) throw new TypeError('executed result substitutes its Journal source');
       requireEqual(content.content, result.content, 'executed model content');
       if (canonicalJsonBytes(result.content).byteLength > 1_048_576) throw new TypeError('retained tool output exceeds its byte bound');
-      if (contract.outputSchemaRef) {
+      if (contract.outputSchemaRef && contract.execution.kind !== 'mcp') {
         const schema = await readCanonicalArtifact(artifacts, contract.outputSchemaRef);
         if (canonicalSha256(schema) !== contract.outputSchemaDigest || !compileOutputSchema(schema)(result.content)) throw new TypeError('retained tool output violates its frozen schema');
       }

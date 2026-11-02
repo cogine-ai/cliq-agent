@@ -93,11 +93,11 @@ test('inspector diagnostics label the original deep checks and thread the real r
   assert.deepEqual(readers.map((reader, index) => {
     assert(ts.isObjectLiteralExpression(reader.parent));
     const owner = reader.parent.parent;
-    if (index === 0) {
+    if (index === 2) {
       assert(ts.isVariableDeclaration(owner)); assert.equal(owner.name.getText(parsed), 'permission');
       assert.equal(owner.type?.getText(parsed), 'InstalledPermissionEvidence', 'the inferred callback must retain its complete declared reader type');
       assert.equal(reader.initializer.getText(parsed), 'async observe => inspectInstalledOwnerHistory(recipe.stateRoot, observe).owners');
-    } else if (index === 1 || index === 2) {
+    } else if (index === 3 || index === 4) {
       assert.equal(reader.initializer.getText(parsed), 'permission.readOwnerHistory', 'permission consumers forward the same real reader without a wrapper');
     } else {
       assert.equal(reader.initializer.getText(parsed),
@@ -105,13 +105,13 @@ test('inspector diagnostics label the original deep checks and thread the real r
     }
     if (ts.isCallExpression(owner)) return owner.expression.getText(parsed);
     assert(ts.isVariableDeclaration(owner)); return owner.name.getText(parsed);
-  }), ['permission', 'assertInstalledVerifierOutcome', 'assertInstalledDeliveryOutcome',
+  }), ['assertInstalledVerifierOutcome', 'assertInstalledDeliveryOutcome', 'permission', 'assertInstalledVerifierOutcome', 'assertInstalledDeliveryOutcome',
     'assertInstalledVerifierOutcome', 'assertInstalledVerifierOutcome', 'assertInstalledVerifierOutcome',
     'runInstalledDeliveryCases', 'readInstalledPublicationProbeSample', 'recoveryInput']);
   const permission = readFileSync(new URL('./installed-permission-evidence.ts', import.meta.url), 'utf8');
   assert(permission.includes('readOwnerHistory: InstalledVerifierOwnerHistoryReader;'));
   assert(source.includes('export type InstalledVerifierOwnerHistoryReader = (observe?: (stage: InstalledOwnerHistoryReadStage) => void) => Promise<readonly StateOwnerRecordV1[]>;'));
-  const dailyProof = readers[3]!;
+  const dailyProof = readers[5]!;
   let scope: ts.Node | undefined = dailyProof.parent;
   while (scope && !(ts.isPropertyAssignment(scope) && scope.name.getText(parsed) === 'verifySource')) scope = scope.parent;
   assert(scope, 'the additive daily verifier must use the same complete original readonly owner history');

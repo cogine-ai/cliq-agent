@@ -63,7 +63,7 @@ function parsed(argv: readonly string[]) {
     if (arg === '--') { positionals.push(...argv.slice(index + 1)); break; }
     if (!arg.startsWith('--')) { positionals.push(arg); continue; }
     if (arg.includes('=')) throw new TypeError('use a separate value after an option');
-    const boolean = ['--json', '--detach', '--allow-unverified'].includes(arg) || arg === '--wait' && positionals[0] === 'result';
+    const boolean = ['--json', '--detach', '--allow-unverified', '--assert-stateless-per-call', '--acknowledge-exact-risk'].includes(arg) || arg === '--wait' && positionals[0] === 'result';
     const value = boolean ? 'true' : argv[++index];
     if (value === undefined || !boolean && value.startsWith('--')) throw new TypeError('option needs its explicit value');
     flags.set(arg, [...(flags.get(arg) ?? []), value]);
@@ -186,8 +186,13 @@ export function parseClientInvocation(argv: readonly string[], workspacePath: st
     const runId = oneId(), expectedRevision = revision(), waitingOnRef = p.required('--wait');
     const ttl = name === 'approve' ? p.take('--ttl-ms') : undefined;
     const inputText = name === 'input' ? p.take('--text') : undefined;
+    const resolution = name === 'reconcile' ? p.take('--resolution') ?? 'probe_now' : undefined;
+    const acknowledgedRisk = name === 'reconcile' ? p.take('--acknowledge-exact-risk') : undefined;
+    if (name === 'reconcile' && (resolution !== 'probe_now' && resolution !== 'abandon_run' ||
+        (resolution === 'abandon_run' ? acknowledgedRisk !== 'true' : acknowledgedRisk !== undefined)))
+      throw new TypeError('abandon_run requires --acknowledge-exact-risk for this exact wait');
     const fields = name === 'approve' ? { decision: p.required('--decision'), ...(ttl !== undefined ? { ttlMs: natural(ttl, 1) } : {}) }
-      : name === 'reconcile' ? { resolution: { kind: 'probe_now' } }
+      : name === 'reconcile' ? { resolution: { kind: resolution, ...(resolution === 'abandon_run' ? { acknowledgeExactRisk: true } : {}) } }
         : { input: inputText !== undefined ? { kind: 'text', value: inputText } : { kind: 'json', value: parseJsonStrict(p.required('--value-json')) } };
     result = command(clientMutation({ method: `run.${name}`, runId, expectedRevision, waitingOnRef, ...fields }));
   } else if (name === 'apply') {
@@ -233,6 +238,17 @@ export function parseClientInvocation(argv: readonly string[], workspacePath: st
     } else if (action === 'revoke') result = command(clientMutation({ method: 'authorization.revoke', grantId: oneId() }));
     else if (action === 'create') result = command(clientMutation({ method: 'authorization.create', decision: jsonObject(p.required('--decision-json')) }));
     else throw new TypeError('unknown authorization command');
+  } else if (name === 'mcp') {
+    const action = words.shift();
+    if (action === 'list') { if (words.length) throw new TypeError('MCP list has no positional arguments'); result = read('mcp.list'); }
+    else if (action === 'register') {
+      const registrationId = oneId(), target = jsonObject(p.required('--target-json'));
+      if (p.take('--assert-stateless-per-call') !== 'true') throw new TypeError('registration requires --assert-stateless-per-call');
+      const lifecycle = p.take('--lifecycle-json');
+      result = command(clientMutation({ method: 'mcp.register', registrationId, target, assertStatelessPerCall: true,
+        toolRecovery: jsonObject(p.take('--recovery-json') ?? '{}'), ...(lifecycle === undefined ? {} : { lifecycle: jsonObject(lifecycle) }) }));
+    } else if (action === 'refresh') result = command(clientMutation({ method: 'mcp.refresh', registrationId: oneId(), expectedRegistryRevision: revision() }));
+    else throw new TypeError('unknown MCP command');
   } else if (name === 'supervisor' && words.shift() === 'status') result = read('supervisor.status');
   else throw new TypeError('unknown installed client command');
   p.done(); if (words.length && !['run', 'resume'].includes(name)) throw new TypeError('unexpected positional arguments');

@@ -25,7 +25,7 @@ static int sealed_output(void) {
     return fd;
 }
 int main(void) {
-    check(CLIQ_WORKER_VERSION == 7 && CLIQ_WORKER_MAX_SCOPES == 16, "honest private wire version and unchanged arena ceiling");
+    check(CLIQ_WORKER_VERSION == 8 && CLIQ_WORKER_MAX_SCOPES == 16, "honest private wire version and unchanged arena ceiling");
     struct cliq_worker_packet packet = cliq_packet(CLIQ_ACK_BUILTIN_RESULT);
     packet.scope = 2; packet.parent = 1; packet.observed_at_ms = 7; memset(packet.nonce, 'a', 64);
     check(cliq_builtin_result_ack_valid(&packet), "closed ACK inert packet");

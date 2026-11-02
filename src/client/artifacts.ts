@@ -3,6 +3,8 @@ import { readVerifierWaitingPresentation } from './verifier-presentation.js';
 import { canonicalJsonBytes } from '../kernel/canonical.js';
 import { readChildMergeWaitingPresentation } from './child-merge-presentation.js';
 import { readChildWaitingPresentation } from './child-wait-presentation.js';
+import { decodeManualAbandonAttestation, decodeToolAbandonedItem } from '../kernel/mcp.js';
+import { manualInvocationPresentation } from './mcp-presentation.js';
 import { digestOmitting } from '../kernel/identity.js';
 import { parseJsonStrict } from '../kernel/json.js';
 import { controlWireInteger, controlWireRecord, controlWireRef } from '../kernel/control-wire-data.js';
@@ -15,6 +17,7 @@ type ArtifactReader = Pick<InstalledControlSession, 'artifact'>;
 type PresentationClient = ArtifactReader & { readRun(request: Extract<InstalledControlRequestV1, { method: 'run.get' }>): Promise<InstalledControlResponseFor<InstalledControlFeature>> };
 
 export type WaitingPresentation = Readonly<{ waitingOnRef: string; text: string;
+  reconciliation?: 'manual' | 'probe';
   responseKind?: 'text' | 'json'; maximumResponseBytes?: number; responseSchema?: unknown }>;
 export async function readClientJson(app: ArtifactReader, ref: string, signal?: AbortSignal): Promise<unknown> {
   controlWireRef(ref);
@@ -35,6 +38,9 @@ export async function readWaitingPresentation(app: PresentationClient, snapshot:
   const run = snapshot.run;
   if (run.status !== 'waiting' || !run.waitingOnRef) throw new TypeError('there is no captured wait to present');
   const value = await readClientJson(app, run.waitingOnRef, signal);
+  if (run.waitingReason === 'reconciliation' && (value as {subject?: {kind?: unknown}} | null)?.subject?.kind === 'invocation') {
+    return manualInvocationPresentation(snapshot, value);
+  }
   if (run.waitingReason === 'child') return readChildWaitingPresentation(app, snapshot, value, signal);
   if (run.waitingReason !== 'input') {
     if (run.waitingReason === 'approval') {
@@ -59,7 +65,8 @@ export async function readWaitingPresentation(app: PresentationClient, snapshot:
       }
       return { waitingOnRef: run.waitingOnRef, text };
     }
-    return { waitingOnRef: run.waitingOnRef, text: canonicalJsonBytes(value).toString('utf8') };
+    return { waitingOnRef: run.waitingOnRef, text: canonicalJsonBytes(value).toString('utf8'),
+      ...(run.waitingReason === 'reconciliation' ? { reconciliation: 'probe' as const } : {}) };
   }
   const wait = controlWireRecord(value, ['schemaVersion', 'kind', 'runId', 'createdFromRevision', 'createdAt', 'frontierRef',
     'inputRequestItemId', 'batchItemId', 'callId']);
@@ -120,6 +127,13 @@ export async function readRunItemPresentation(app: ArtifactReader,
         content.index !== item.index || content.toolName !== payload.toolName || content.outcome !== item.outcome || content.contentDigest !== payload.modelContentDigest ||
         digestOmitting(content, 'contentDigest') !== content.contentDigest) throw new TypeError('tool model content presentation differs');
     return `${String(content.toolName)} · ${String(content.outcome)}: ${canonicalJsonBytes(content.content).toString('utf8')}`;
+  }
+  if (item.kind === 'tool_abandoned') {
+    const abandoned = decodeToolAbandonedItem(item), attestation = decodeManualAbandonAttestation(await readClientJson(app, abandoned.attestationRef, signal));
+    if (attestation.runId !== abandoned.runId || attestation.opId !== abandoned.opId || attestation.attempt !== abandoned.attempt)
+      throw new TypeError('abandoned invocation history differs from its exact risk acknowledgement');
+    return `Stopped after exact risk acknowledgement · ${JSON.stringify(abandoned.opId)} · attempt ${abandoned.attempt}\n` +
+      'The effect may have occurred; its result was not used.\n' + `Attestation: ${abandoned.attestationRef}`;
   }
   return `${item.kind} · ${expected.itemId}`;
 }

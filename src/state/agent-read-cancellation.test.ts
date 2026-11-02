@@ -475,8 +475,90 @@ test('the installed driver propagates its retained read lifetime through materia
   assert.match(drive, /agent\.prepareModel\(\{ expectedRunRevision: current\.revision, leaseEpoch: current\.leaseEpoch \}, readSignal\)/u);
   const load = between(material, 'export async function loadInstalledRunMaterial(', 'export async function assembleInstalledRun(');
   assert.match(load, /const artifacts = input\.signal \? input\.artifacts\.withReadSignal\(input\.signal\) : input\.artifacts/u);
-  assert.match(load, /materialFor\(installed, artifacts, assembly, input\.signal, childOrigin\)/u);
+  assert.match(load, /materialFor\(installed, artifacts, assembly, input\.signal, childOrigin, input\.driver\)/u);
   assert.match(load, /readChildAdmission\(input\.driver!, artifacts, run\.id, \{ signal: input\.signal \}\)/u);
+});
+
+test('MCP preparation scopes grant and credential reads without replacing received-result publication', () => {
+  const execution = source('./run-execution.ts');
+  const parsed = ts.createSourceFile('mcp-preparation-read-data.ts', execution, ts.ScriptTarget.Latest, true);
+  const branches: ts.IfStatement[] = [];
+  const visit = (node: ts.Node) => {
+    if (ts.isIfStatement(node) && node.expression.getText(parsed) === "prepared.target.execution.kind === 'mcp'") branches.push(node);
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed);
+  assert.equal(branches.length, 1, 'inspect the original MCP tool execution branch');
+  const branch = branches[0]!.thenStatement.getText(parsed);
+  const preparation = branch.slice(0, branch.indexOf("operationPhase = 'claimed';"));
+  assert(preparation.length > 0 && preparation.length < branch.length, 'the original claim boundary must remain explicit');
+  const execute = between(execution, 'executeCurrentTool: async value =>', "if (prepared.target.execution.kind === 'mcp')");
+  assert.match(execute, /const signal = abort\.signal;\s*const reads = artifacts\.withReadSignal\(signal\);\s*operationPhase = 'preparing';/u);
+  assert.match(preparation, /const grant = await reads\.readCanonical<import\('\.\.\/kernel\/tool-authorization\.js'\)\.ToolOperationGrantV1>\(prepared\.entry\.grantRef!\)/u);
+  assert.match(preparation, /readMcpRegistryClosure\(driver, reads, execution\.registryRevisionRef, grant\.principalId\)/u);
+  assert.match(preparation, /withInstalledMcpHttpAuthority\(selectedRuntime, owner, reads, grant\.principalId, transport, async authority => \{\s*signal\.throwIfAborted\(\); authority\.assertCurrent\(\);/u);
+  assert.doesNotMatch(preparation, /artifacts\.(?:readBytes|readCanonical|readChunks|describe)\(/u,
+    'pre-claim reads must not bypass their actual preparing task');
+  const completion = branch.slice(branch.indexOf("operationPhase = 'received';"));
+  assert.match(completion, /publishMcpRunCapture\(artifacts, native\)/u,
+    'received native custody still publishes through the original catalog');
+  assert.match(completion, /await artifacts\.publishCanonical\(observation, observation\.format\)/u);
+  assert.doesNotMatch(completion, /reads\.publishCanonical|publishMcpRunCapture\(reads,/u);
+});
+
+test('MCP output schema fully reads before native creation and permanent claim, never in protocol call arguments', () => {
+  const branch = between(source('./run-execution.ts'), "if (prepared.target.execution.kind === 'mcp')", "builtinPhase('tool_claim_spec');");
+  const parsed = ts.createSourceFile('mcp-output-schema-read-data.ts', branch, ts.ScriptTarget.Latest, true);
+  const schemas: ts.VariableDeclaration[] = [];
+  const calls = new Map<string, ts.CallExpression[]>();
+  const visit = (node: ts.Node) => {
+    if (ts.isVariableDeclaration(node) && node.name.getText(parsed) === 'outputSchema') schemas.push(node);
+    if (ts.isCallExpression(node)) {
+      const name = node.expression.getText(parsed);
+      if (['broker.prepareRunHttp', 'currentAgent.claimTool', 'driveMcpRunProtocol'].includes(name)) {
+        const selected = calls.get(name) ?? [];
+        selected.push(node); calls.set(name, selected);
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed);
+  assert.equal(schemas.length, 1);
+  assert.equal(schemas[0]!.initializer?.getText(parsed), 'output ? await reads.readCanonical(output) : undefined',
+    'the original complete schema read must retain the preparing catalog view');
+  for (const name of ['broker.prepareRunHttp', 'currentAgent.claimTool', 'driveMcpRunProtocol']) assert.equal(calls.get(name)?.length, 1, name);
+  const create = calls.get('broker.prepareRunHttp')![0]!, claim = calls.get('currentAgent.claimTool')![0]!;
+  const drive = calls.get('driveMcpRunProtocol')![0]!;
+  assert(schemas[0]!.end < create.pos && create.end < claim.pos && claim.end < drive.pos,
+    'material must join before native ownership and the irreversible claim');
+  assert.equal(drive.arguments.length, 5);
+  assert(ts.isIdentifier(drive.arguments[4]!) && drive.arguments[4]!.getText(parsed) === 'outputSchema',
+    'protocol entry receives the already read schema, with no argument-time await or new CAS read');
+});
+
+test('MCP admission and frozen material preserve their preparing signal and complete registry provenance', () => {
+  const admission = source('./mcp-admission.ts');
+  const current = between(admission, 'export async function readMcpAdmissionSelections(', '/** Existing Runs keep their original revision');
+  const frozen = between(admission, 'export async function readFrozenMcpSelections(', 'export function mcpSelectionCredentialRefs(');
+  for (const body of [current, frozen]) {
+    assert.match(body, /const reads = signal \? artifacts\.withReadSignal\(signal\) : artifacts/u);
+    assert.match(body, /reads\.assertReadActive\(\); signal\?\.throwIfAborted\(\);/u);
+    assert.match(body, /for \(const selection of selections\) selection\.assertUnchanged\(driver\)/u);
+    assert.doesNotMatch(body, /readMcpRegistry(?:Closure)?\(driver, artifacts,/u);
+  }
+  assert.match(current, /registrationId => readMcpRegistry\(driver, reads, principalId, registrationId\)/u);
+  assert.match(frozen, /await readMcpRegistryClosure\(driver, reads, server\.registryRevisionRef, principalId\)/u);
+  assert.match(frozen, /selected\.registry\.registrationId !== server\.registrationId \|\| selected\.registry\.registryRevision !== server\.registryRevision \|\|\s*selected\.registry\.manifestDigest !== server\.manifestDigest/u);
+  const target = between(source('./source-target.ts'), 'export async function createVerifiedSourceInspectionTarget(', '/** Shared retained-data binding,');
+  assert.match(target, /readMcpAdmissionSelections\(driver, reads, identity\.principalId, wire\.registeredMcpServerIds,\s*bootstrap\.bundle, context\.signal\)/u);
+  const installed = source('./installed-run.ts');
+  const assembly = between(installed, 'export async function assembleInstalledRun(', '/** Same genuine installed preparation,');
+  assert.match(assembly, /readMcpAdmissionSelections\(driver, reads, identity\.principalId,\s*request\.registeredMcpServerIds, captureRuntime\.bundle, signal\)/u);
+  const material = between(installed, 'async function materialFor(', 'export async function loadInstalledRunMaterial(');
+  assert.match(material, /readFrozenMcpSelections\(driver, artifacts, endpoint\.ownerPrincipalId,\s*assembly\.mcpServers, installed\.bundle, signal\)/u);
+  const final = installed.slice(installed.indexOf('export function readInstalledRunAdmission('));
+  assert.match(final, /binding\.signal\?\.throwIfAborted\(\);\s*assertActiveStateOwner\(connection, owner\);\s*for \(const selected of binding\.mcp\) selected\.assertUnchanged\(connection\)/u,
+    'the original sole admission transaction still rechecks the frozen selection and owner');
 });
 
 test('preparation and recovery bind full CAS reads to their actual task while received checkpoints keep their original catalog', () => {

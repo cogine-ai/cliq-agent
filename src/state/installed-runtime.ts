@@ -46,6 +46,10 @@ import { decodeInstalledModelAuthorityClosure, verifyInstalledModelAuthority,
   type VerifiedInstalledModelAuthority } from '../model/installed-authority.js';
 import { MODEL_BROKER_ENTRY_ID, MODEL_BROKER_RELATIVE_PATH, InstalledModelBrokerRefusalError,
   type ModelBrokerBinding, type NativeModelBrokerBinding, type NativeModelTransport, type NativeModelNoReleaseFence } from './model-broker-native.js';
+import { MCP_HTTP_BROKER_ENTRY_ID, MCP_HTTP_BROKER_RELATIVE_PATH, MCP_ADMIN_HELPER_ENTRY_ID, MCP_ADMIN_HELPER_RELATIVE_PATH, InstalledMcpBrokerRefusalError,
+  type NativeMcpHttpBrokerBinding, type NativeMcpRunHttpOwner, type NativeMcpAdminHttpOwner,
+  type RunMcpHttpBinding, type AdminMcpHttpBinding, type NativeMcpRunJoined, type NativeMcpAdminJoined,
+  type NativeMcpNoReleaseFence, type NativeMcpReceipt, type NativeMcpRawResponse, type NativeMcpUnusableResponse, type NativeMcpAdminProbeImage } from './mcp-broker-native.js';
 import { DEPENDENCY_BROKER_ENTRY_ID, DEPENDENCY_BROKER_RELATIVE_PATH, type DependencyBrokerBinding,
   type NativeDependencyBrokerBinding, type NativeDependencyTransport, type NativeDependencySettlementFence, type NativeDependencyClosed } from './dependency-broker-native.js';
 import { runInstalledCredentialAuthority, type HeldCredentialAuthorityLock } from './store.js';
@@ -102,6 +106,65 @@ const installedModelNoReleaseFences = new WeakMap<NativeModelNoReleaseFence, {
   native: NativeModelNoReleaseFence; bindingDigest: string; active: boolean; processId: number;
   selected: HeldInstalledRuntime; bundleDigest: string; manifestDigest: string; assertSelection(): void;
 }>();
+type InstalledMcpOwnerBinding = { native: NativeMcpRunHttpOwner | NativeMcpAdminHttpOwner; purpose: 'run' | 'admin';
+  processId: number; selected: HeldInstalledRuntime; assertSelection(): void };
+const installedMcpOwners = new WeakMap<object, InstalledMcpOwnerBinding>();
+const installedMcpNoReleaseFences = new WeakMap<NativeMcpNoReleaseFence, { native: NativeMcpNoReleaseFence;
+  bindingDigest: string; processId: number; active: boolean; owner: InstalledMcpOwnerBinding }>();
+function mcpOwner(owner: object, purpose?: 'run' | 'admin'): InstalledMcpOwnerBinding {
+  const held = installedMcpOwners.get(owner);
+  if (!held || held.processId !== process.pid || purpose !== undefined && held.purpose !== purpose) {
+    mismatch('MCP proof is not held by its original selected native owner');
+  }
+  held.assertSelection();
+  return held;
+}
+function assertMcpNativeProof(operation: () => void): void {
+  try {
+    operation();
+  } catch (error) {
+    if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT') {
+      const failure = new ResourceRetirementError('MCP native proof retains uncertain resources', undefined);
+      rememberRetirement(failure);
+      throw failure;
+    }
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'original installed MCP native proof is unavailable');
+  }
+}
+export function assertInstalledMcpRunOwner(owner: NativeMcpRunHttpOwner, binding: RunMcpHttpBinding): void {
+  const held = mcpOwner(owner, 'run');
+  assertMcpNativeProof(() => (held.native as NativeMcpRunHttpOwner).assertBinding(binding));
+}
+export function assertInstalledMcpAdminOwner(owner: NativeMcpAdminHttpOwner, binding: AdminMcpHttpBinding): void {
+  const held = mcpOwner(owner, 'admin');
+  assertMcpNativeProof(() => (held.native as NativeMcpAdminHttpOwner).assertBinding(binding));
+}
+export function assertInstalledMcpRunJoined(owner: NativeMcpRunHttpOwner, observation: NativeMcpRunJoined, binding: RunMcpHttpBinding): void {
+  const held = mcpOwner(owner, 'run');
+  assertMcpNativeProof(() => (held.native as NativeMcpRunHttpOwner).assertJoined(observation, binding));
+}
+export function assertInstalledMcpAdminJoined(owner: NativeMcpAdminHttpOwner, observation: NativeMcpAdminJoined, binding: AdminMcpHttpBinding): void {
+  const held = mcpOwner(owner, 'admin');
+  assertMcpNativeProof(() => (held.native as NativeMcpAdminHttpOwner).assertJoined(observation, binding));
+}
+export function assertInstalledMcpRawResponse(owner: NativeMcpRunHttpOwner | NativeMcpAdminHttpOwner,
+  receipt: NativeMcpReceipt, response: NativeMcpRawResponse): void {
+  const held = mcpOwner(owner);
+  assertMcpNativeProof(() => held.native.assertRawResponse(receipt, response));
+}
+export function assertInstalledMcpUnusableResponse(owner: NativeMcpRunHttpOwner,
+  receipt: NativeMcpReceipt, response: NativeMcpUnusableResponse): void {
+  const held = mcpOwner(owner, 'run');
+  assertMcpNativeProof(() => held.native.assertUnusableResponse(receipt, response));
+}
+export function assertInstalledMcpNoReleaseFence(fence: NativeMcpNoReleaseFence, binding: RunMcpHttpBinding): void {
+  const held = installedMcpNoReleaseFences.get(fence);
+  if (!held || !held.active || held.processId !== process.pid || held.bindingDigest !== canonicalSha256(binding)) {
+    mismatch('MCP no-release proof is not the original continuously held native mutex');
+  }
+  held.owner.assertSelection();
+  assertMcpNativeProof(() => held.native.assertHeld());
+}
 
 /** Friend validation only. A structural object, closed report or token digest
  * is not the original signed native owner's continuously held release mutex. */
@@ -201,6 +264,7 @@ type InstalledRuntimeBinding = {
   loadManagerObserver(): Promise<InstalledManagerObserver>;
   assertManagerObservationAvailable(): void;
   loadModelBroker(preparationSignal?: AbortSignal): Promise<NativeModelBrokerBinding>;
+  loadMcpHttpBroker(preparationSignal?: AbortSignal): Promise<NativeMcpHttpBrokerBinding>;
   loadDependencyBroker(): Promise<NativeDependencyBrokerBinding>;
   openControlClient(): Promise<HeldInstalledControlClient>;
   sealWorkerImage(entryId: string): Promise<NativeWorkerImage>;
@@ -208,7 +272,9 @@ type InstalledRuntimeBinding = {
   sealDependencyNpmAssets(signal?: AbortSignal): Promise<Readonly<{ script: NativeDependencyNpmScriptImage; data: NativeDependencyNpmDataImage }>>;
   startBuiltinBashToolchain(toolchain: RetainedVerifierToolchain, options: { signal?: AbortSignal }): Promise<NativeBuiltinBashToolchain>;
   sealSourceGitInspector(signal?: AbortSignal): Promise<NativeSourceGitInspectorImage>;
+  sealMcpAdminProbe(signal?: AbortSignal): Promise<NativeMcpAdminProbeImage>;
   retainSourceGitRecipe(signal?: AbortSignal): Promise<void>;
+  retainMcpAdminRecipe(signal?: AbortSignal): Promise<void>;
   startGuestToolchain(toolchain: RetainedVerifierToolchain, options: { signal?: AbortSignal }): Promise<NativeGuestToolchain>;
   startSourceGitToolchain(toolchain: RetainedVerifierToolchain, options: { signal?: AbortSignal }): Promise<NativeSourceGitToolchain>;
   closeGuestToolchain(job: NativeGuestToolchain): Promise<void>;
@@ -311,6 +377,15 @@ export function loadInstalledModelBroker(selected: HeldInstalledRuntime, prepara
   if (!binding) mismatch('installed runtime is not a verified held selection');
   return binding.loadModelBroker(preparationSignal);
 }
+export function loadInstalledMcpHttpBroker(selected: HeldInstalledRuntime, preparationSignal?: AbortSignal): Promise<NativeMcpHttpBrokerBinding> {
+  const binding = heldInstalledRuntimes.get(selected);
+  if (!binding) mismatch('MCP transport requires a genuine held installed selection');
+  return binding.loadMcpHttpBroker(preparationSignal);
+}
+export function assertInstalledMcpBrokerProcess(): void {
+  if (!isMainThread || !isSea() || process.platform !== 'linux' || process.arch !== 'x64' || process.versions.node !== '24.21.0')
+    throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'MCP broker requires the fixed signed Linux Supervisor process');
+}
 export function loadInstalledDependencyBroker(selected: HeldInstalledRuntime): Promise<NativeDependencyBrokerBinding> {
   const binding = heldInstalledRuntimes.get(selected);
   if (!binding) mismatch('dependency transport requires a genuine held installed selection');
@@ -344,12 +419,21 @@ export function sealInstalledSourceGitInspector(selected: HeldInstalledRuntime, 
   if (!binding) mismatch('source inspection requires a genuine held installed selection');
   return binding.sealSourceGitInspector(signal);
 }
+export function sealInstalledMcpAdminProbe(selected: HeldInstalledRuntime, signal?: AbortSignal): Promise<NativeMcpAdminProbeImage> {
+  const binding = heldInstalledRuntimes.get(selected);
+  if (!binding) mismatch('MCP Admin probing requires a genuine held installed selection');
+  return binding.sealMcpAdminProbe(signal);
+}
 /** Audit data only, through the same original installed scope. The two fixed
  * recipe members remain separate host files; CAS bytes cannot execute them. */
 export function retainInstalledSourceGitRecipe(selected: HeldInstalledRuntime, signal?: AbortSignal): Promise<void> {
   const binding = heldInstalledRuntimes.get(selected);
   if (!binding) mismatch('source recipe retention requires a genuine held installed selection');
   return binding.retainSourceGitRecipe(signal);
+}
+export function retainInstalledMcpAdminRecipe(selected:HeldInstalledRuntime,signal?:AbortSignal):Promise<void>{
+  const binding=heldInstalledRuntimes.get(selected);if(!binding)mismatch('MCP Admin recipe retention requires a genuine held selection');
+  return binding.retainMcpAdminRecipe(signal);
 }
 
 /** Fixed signed data and its distinct native type; never a caller program. */
@@ -1458,10 +1542,11 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
         let credentialPlatformNative: NativeCredentialPlatformBinding | undefined;
         let managerObserver: InstalledManagerObserver | undefined;
         let modelBroker: NativeModelBrokerBinding | undefined;
+        let mcpHttpBroker: NativeMcpHttpBrokerBinding | undefined;
         let dependencyBroker: NativeDependencyBrokerBinding | undefined;
         let guestExtractor: NativeGuestExtractorBinding | undefined;
         const platformJobs = new Set<Promise<unknown>>();
-        const brokerTransports = new Set<NativeModelTransport | NativeDependencyTransport>();
+        const brokerTransports = new Set<NativeModelTransport | NativeDependencyTransport | NativeMcpRunHttpOwner | NativeMcpAdminHttpOwner>();
         const guestJobs = new Set<NativeGuestToolchain>();
         const guestJoins = new Map<NativeGuestToolchain, Promise<void>>();
         const retiredGuestJobs = new WeakSet<NativeGuestToolchain>();
@@ -2028,6 +2113,126 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
               await checkedRevalidate(); return dependencyBroker;
             });
           },
+          loadMcpHttpBroker(preparationSignal) {
+            return enqueue(async () => {
+              assertInstalledMcpBrokerProcess();
+              await checkedRevalidate(preparationSignal);
+              if (!mcpHttpBroker) {
+                const entry = signed.bundle.entries.find(value => value.entryId === MCP_HTTP_BROKER_ENTRY_ID);
+                const file = signed.entries.get(MCP_HTTP_BROKER_ENTRY_ID);
+                if (!entry || !file || entry.role !== 'platform_helper' || entry.executable !== true || entry.version !== '1' ||
+                    entry.relativePath !== MCP_HTTP_BROKER_RELATIVE_PATH) mismatch('fixed signed MCP HTTP broker image is missing');
+                const loaded = new Module('cliq-installed-linux-mcp-http-broker');
+                process.dlopen(loaded, `/proc/self/fd/${file.handle.fd}`);
+                const native = loaded.exports as NativeMcpHttpBrokerBinding;
+                if (Reflect.ownKeys(native).length !== 3 || !['interfaceVersion', 'prepareAdminHttp', 'prepareRunHttp'].every(key => Object.hasOwn(native, key)) || native.interfaceVersion !== 1 ||
+                    typeof native.prepareAdminHttp !== 'function' || typeof native.prepareRunHttp !== 'function')
+                  mismatch('unsupported installed MCP HTTP broker interface');
+                const refused = (error: unknown): never => {
+                  if ((error as {code?: unknown} | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT') {
+                    const failure = new ResourceRetirementError('MCP HTTP broker resources did not retire', undefined);
+                    rememberRetirement(failure); throw failure;
+                  }
+                  if ((error as {code?: unknown; brokerCode?: unknown} | null)?.code === 'ERR_CLIQ_MCP_BROKER' &&
+                      (error as {brokerCode?: unknown}).brokerCode === 'mcp_response_refused') throw new InstalledMcpBrokerRefusalError();
+                  throw new KernelStorageError('RECOVERY_REQUIRED', 'installed MCP HTTP broker refused an operation');
+                };
+                const wrapOwner = (original: NativeMcpRunHttpOwner | NativeMcpAdminHttpOwner, purpose: 'run' | 'admin') => {
+                  const held: InstalledMcpOwnerBinding = { native: original, purpose, processId: process.pid, selected, assertSelection };
+                  let retained = false, joined = false;
+                  let retirement: ReturnType<typeof original.close> | undefined;
+                  let owner: NativeMcpRunHttpOwner | NativeMcpAdminHttpOwner;
+                  const fences = new Set<NativeMcpNoReleaseFence>();
+                  const check = () => { if (closed) mismatch('installed runtime handle is closed'); assertSelection(); };
+                  const sync = <T>(operation: () => T): T => { check(); try { return operation(); } catch (error) { return refused(error); } };
+                  const invoke = <T>(operation: () => Promise<T>, retiring = false): Promise<T> => {
+                    if (!retiring) check();
+                    let pending: Promise<T>;
+                    try { pending = operation(); } catch (error) { pending = Promise.reject(error); }
+                    const job = pending.then(value => { if (!retiring) check(); return value; }, refused);
+                    platformJobs.add(job); void job.finally(() => platformJobs.delete(job)).catch(() => {}); return job;
+                  };
+                  const close = () => retirement ??= invoke(async () => {
+                    const value = await original.close();
+                    if (value.kind !== 'mcp_http_owner_joined' || value.purpose !== purpose || value.tokenRevoked !== true ||
+                        value.matchingActiveReleaseCount !== 0 || value.networkJoined !== true || value.tasksJoined !== true ||
+                        purpose === 'admin' && (value as NativeMcpAdminJoined).adminPeerJoined !== true ||
+                        purpose === 'run' && (value as NativeMcpRunJoined).brokerFenceTokenDigest !== (original as NativeMcpRunHttpOwner).brokerFenceTokenDigest) {
+                      const failure = new ResourceRetirementError('MCP HTTP owner closure is incomplete', undefined);
+                      rememberRetirement(failure); throw failure;
+                    }
+                    joined = true; if (!retained) brokerTransports.delete(owner); return value;
+                  }, true) as ReturnType<typeof original.close>;
+                  const ready = original.ready.then(() => { check(); }, refused).catch(async error => { await close(); throw error; });
+                  const protocol = {
+                    ready,
+                    bind: (binding: never) => sync(() => original.bind(binding)),
+                    // These calls enter native synchronously. In particular the
+                    // final SQL cut cannot be separated from a body release by a microtask.
+                    connectStage: (binding: never, phase: never) => invoke(() => original.connectStage(binding, phase)),
+                    releaseStage: (binding: never, phase: never) => sync(() => original.releaseStage(binding, phase)),
+                    nextMessage: () => invoke(() => original.nextMessage()),
+                    connectPing: (binding: never, receipt: NativeMcpReceipt) => invoke(() => original.connectPing(binding, receipt)),
+                    releasePing: (binding: never, receipt: NativeMcpReceipt) => sync(() => original.releasePing(binding, receipt)),
+                    finishResponse: (receipt: NativeMcpReceipt) => invoke(() => original.finishResponse(receipt)),
+                    readUnusableResponse: (receipt: NativeMcpReceipt) => sync(() => original.readUnusableResponse(receipt)),
+                    assertBinding: (binding: never) => sync(() => original.assertBinding(binding)),
+                    assertJoined: (observation: never, binding: never) => { assertSelection(); original.assertJoined(observation, binding); },
+                    assertRawResponse: (receipt: NativeMcpReceipt, response: NativeMcpRawResponse) => { assertSelection(); original.assertRawResponse(receipt, response); },
+                    assertUnusableResponse: (receipt: NativeMcpReceipt, response: NativeMcpUnusableResponse) => { assertSelection(); assertMcpNativeProof(() => original.assertUnusableResponse(receipt, response)); },
+                    close,
+                  };
+                  const releaseDomain = (operation: () => void) => {
+                    if (fences.size) {
+                      const failure = new ResourceRetirementError('MCP release mutex still has an owning guard', undefined);
+                      rememberRetirement(failure); throw failure;
+                    }
+                    try { operation(); } catch (error) { return refused(error); }
+                    retained = false; if (joined) brokerTransports.delete(owner);
+                  };
+                  if (purpose === 'run') {
+                    const run = original as NativeMcpRunHttpOwner;
+                    owner = Object.freeze({ ...protocol, brokerFenceTokenDigest: run.brokerFenceTokenDigest,
+                      retainDispatchFence: () => sync(() => { run.retainDispatchFence(); retained = true; }),
+                      acquireNoReleaseFence: (binding: RunMcpHttpBinding) => {
+                        if (!retained || !joined) mismatch('MCP no-release fence lacks its original joined resource owner');
+                        const frozen = immutableSnapshot(binding), nativeFence = run.acquireNoReleaseFence(frozen);
+                        const state = { native: nativeFence, bindingDigest: canonicalSha256(frozen), processId: process.pid, active: true, owner: held };
+                        const fence: NativeMcpNoReleaseFence = Object.freeze({
+                          assertHeld() { assertInstalledMcpNoReleaseFence(fence, frozen); },
+                          close() {
+                            if (!state.active) return;
+                            try { nativeFence.close(); }
+                            catch (error) { const failure = new ResourceRetirementError('MCP no-release mutex did not retire', error); rememberRetirement(failure); throw failure; }
+                            state.active = false; fences.delete(fence);
+                          },
+                        });
+                        installedMcpNoReleaseFences.set(fence, state); fences.add(fence); return fence;
+                      },
+                      releaseDispatchFence: () => releaseDomain(() => run.releaseDispatchFence()),
+                    }) as NativeMcpRunHttpOwner;
+                  } else {
+                    const admin = original as NativeMcpAdminHttpOwner;
+                    owner = Object.freeze({ ...protocol,
+                      retainDomain: () => sync(() => { admin.retainDomain(); retained = true; }),
+                      attachProtocolPeer: (peer: Parameters<typeof admin.attachProtocolPeer>[0]) => sync(() => admin.attachProtocolPeer(peer)),
+                      releaseDomain: () => releaseDomain(() => admin.releaseDomain()),
+                    }) as NativeMcpAdminHttpOwner;
+                  }
+                  installedMcpOwners.set(owner, held); brokerTransports.add(owner);
+                  platformJobs.add(ready); void ready.finally(() => platformJobs.delete(ready)).catch(() => {});
+                  return owner;
+                };
+                mcpHttpBroker = Object.freeze({ interfaceVersion: 1 as const,
+                  prepareRunHttp(input) { if (closed) mismatch('installed runtime handle is closed'); assertSelection();
+                    try { return wrapOwner(native.prepareRunHttp(input), 'run') as NativeMcpRunHttpOwner; } catch (error) { return refused(error); } },
+                  prepareAdminHttp(input) { if (closed) mismatch('installed runtime handle is closed'); assertSelection();
+                    try { return wrapOwner(native.prepareAdminHttp(input), 'admin') as NativeMcpAdminHttpOwner; } catch (error) { return refused(error); } },
+                });
+              }
+              await checkedRevalidate(preparationSignal); return mcpHttpBroker;
+            });
+          },
           loadModelBroker(preparationSignal) {
             return enqueue(async () => {
               assertInstalledModelBrokerProcess();
@@ -2197,6 +2402,18 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
               }
             });
           },
+          retainMcpAdminRecipe(signal){
+            return enqueue(async()=>{
+              await checkedRevalidate(signal);
+              const entry=signed.bundle.entries.find(value=>value.entryId===MCP_ADMIN_HELPER_ENTRY_ID),file=signed.entries.get(MCP_ADMIN_HELPER_ENTRY_ID);
+              if(!entry||!file||entry.role!=='platform_helper'||entry.version!=='1'||entry.executable!==false||
+                entry.relativePath!==MCP_ADMIN_HELPER_RELATIVE_PATH||entry.byteCount<1||entry.byteCount>SMALL_BYTES)mismatch('fixed MCP Admin recipe data is missing');
+              const cas=new ContentAddressedStore(childPath(casRoot,'.'));
+              const published=await cas.publishChunks(artifactChunks(file,signal),entry.byteCount);
+              if(published.ref!==entry.digest||published.byteLength!==entry.byteCount)mismatch('retained MCP Admin helper differs from its original signed bytes');
+              await checkedRevalidate(signal);
+            });
+          },
           retainSourceGitRecipe(signal) {
             return enqueue(async () => {
               await checkedRevalidate(signal);
@@ -2216,6 +2433,31 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
                 signal?.throwIfAborted(); assertSelection();
               }
               await checkedRevalidate(signal);
+            });
+          },
+          sealMcpAdminProbe(signal) {
+            return enqueue(async () => {
+              await checkedRevalidate(signal);
+              const entry = signed.bundle.entries.find(value => value.entryId === MCP_ADMIN_HELPER_ENTRY_ID);
+              const file = signed.entries.get(MCP_ADMIN_HELPER_ENTRY_ID);
+              if (!workerNative || workerNative.mcpAdminInterfaceVersion !== 1 || typeof workerNative.sealMcpHttpAdminProbe !== 'function' ||
+                  !entry || !file || entry.role !== 'platform_helper' || entry.version !== '1' || entry.executable !== false ||
+                  entry.relativePath !== MCP_ADMIN_HELPER_RELATIVE_PATH || entry.byteCount < 1 || entry.byteCount > 1_048_576)
+                throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'the fixed signed MCP Admin helper is not installed');
+              signal?.throwIfAborted();
+              const sealed = workerNative.sealMcpHttpAdminProbe(file.handle.fd);
+              try {
+                if (sealed.identity.sha256 !== entry.digest || sealed.identity.byteCount !== entry.byteCount)
+                  mismatch('sealed MCP Admin helper differs from its exact signed bytes');
+                await checkedRevalidate(signal); return sealed;
+              } catch (error) {
+                try { sealed.close(); }
+                catch (failure) {
+                  const retirement = new ResourceRetirementError('installed MCP Admin helper seal did not retire', new AggregateError([error, failure]));
+                  rememberRetirement(retirement); throw retirement;
+                }
+                throw error;
+              }
             });
           },
           sealSourceGitInspector(signal) {

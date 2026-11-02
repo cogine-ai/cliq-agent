@@ -53,6 +53,9 @@ import { VerifierAuthorizationError } from './authorization-artifacts.js';
 import type { InstalledApplyDiagnosticStage } from './installed-run-diagnostics.js';
 import { readAssemblySkills } from './skill-data.js';
 import { captureInstalledSkills } from './skill-source.js';
+import { combineMcpToolManifest } from './mcp-registration.js';
+import { readMcpAdmissionSelections, readFrozenMcpSelections, mcpSelectionCredentialRefs,
+  type InstalledMcpSelection } from './mcp-admission.js';
 
 type RetiredSource = Extract<SourceInspectionAttemptV1, { phase: 'retired' }>;
 type InstructionEntry = { canonicalRootRelativePath: string; directoryDepth: number;
@@ -74,7 +77,8 @@ type AdmissionBinding = { driver: SqliteDriver; owner: StateOwnerContext; select
   identity: AuthenticatedControlIdentity; normalized: ReturnType<typeof normalizeRunSubmitRequest>; source: RetiredSource;
   native: NativeStateOwner; workspace: Extract<WorkspaceIdentityV1, { kind: 'live' }>;
   repository?: RepositoryIdentity;
-  input: AdmitRunInput; admittedAt: string; deadlineAt: string; signal?: AbortSignal; dependency?: InstalledDependencyAdmission };
+  input: AdmitRunInput; admittedAt: string; deadlineAt: string; signal?: AbortSignal; dependency?: InstalledDependencyAdmission;
+  mcp: readonly InstalledMcpSelection[] };
 const admissions = new WeakMap<AssembledInstalledRun, AdmissionBinding>();
 /** Fixed refusal projection, not authority or a caller-selectable error code. */
 export class InstalledRunAuthorityError extends KernelStorageError {
@@ -94,9 +98,8 @@ export function assertInstalledRunRecipe(request: NormalizedRunSubmitRequest,
   model: Exclude<NormalizedRunSubmitRequest['model'], { provider: 'ollama' }>;
 } {
   if (request.model.provider !== 'openai-compatible' ||
-      request.registeredMcpServerIds.length ||
       request.sandboxResources.maxProcesses < 8 || request.sandboxResources.maxSingleFileBytes > 268_435_456)
-    invalid('installed Run selects an unsupported model, execution resource, verifier, dependency or MCP');
+    invalid('installed Run selects an unsupported model, execution resource, verifier or dependency');
   assertInstalledDependencyRequest(request);
   if (request.model.modelCredentialGrantIds.length !== 1)
     invalid('installed Run requires exactly one model bearer credential');
@@ -353,12 +356,16 @@ async function publishInstalledModelMaterial(input: {
 }
 
 async function materialFor(installed: InstalledRuntimeBorrow, artifacts: ArtifactCatalog, assembly: RunAssemblyV1, signal?: AbortSignal,
-  childOrigin?: ChildAdmissionData): Promise<RunAssemblyValidationMaterial & { retainedToolchain?: RetainedVerifierToolchain }> {
+  childOrigin?: ChildAdmissionData, driver?: SqliteDriver): Promise<RunAssemblyValidationMaterial & { retainedToolchain?: RetainedVerifierToolchain }> {
   signal?.throwIfAborted();
   if (assembly.provider.name !== 'openai-compatible' || assembly.provider.endpoint.kind !== 'registered' ||
-      assembly.provider.negotiation.streaming || assembly.mcpServers.length)
-    invalid('installed assembly selects an unsupported model or MCP recipe');
+      assembly.provider.negotiation.streaming)
+    invalid('installed assembly selects an unsupported model recipe');
+  if (assembly.mcpServers.length && (!driver || childOrigin))
+    invalid('MCP material requires its original SQL registration provenance and implemented root-Run profile');
   const endpoint = decodeEndpointRegistration(await readCanonicalArtifact(artifacts, assembly.provider.endpoint.endpointRegistrationRef));
+  const mcp = driver ? await readFrozenMcpSelections(driver, artifacts, endpoint.ownerPrincipalId,
+    assembly.mcpServers, installed.bundle, signal) : [];
   const trust = installed.bundle.entries.find(entry => entry.entryId === endpoint.tls.trustStoreEntryId);
   if (!trust || trust.role !== 'trust_store' || trust.executable || endpoint.tls.trustStoreRuntimeBundleRef !== installed.bundleDigest ||
       endpoint.tls.trustStoreRuntimeBundleManifestDigest !== installed.bundle.manifestDigest ||
@@ -385,7 +392,7 @@ async function materialFor(installed: InstalledRuntimeBorrow, artifacts: Artifac
   requireEqual(assembly.provider.adapter, catalog.adapter, 'installed provider adapter');
   const tools = await readCanonicalArtifact<ToolContractManifestV1>(artifacts, assembly.tools.manifestRef);
   const toolEntry = installed.bundle.entries.find(entry => entry.digest === assembly.tools.manifestRef);
-  if ((!childOrigin && (!toolEntry || toolEntry.role !== 'schema' || toolEntry.executable || toolEntry.byteCount !== canonicalJsonBytes(tools).length)) ||
+  if ((!childOrigin && !mcp.length && (!toolEntry || toolEntry.role !== 'schema' || toolEntry.executable || toolEntry.byteCount !== canonicalJsonBytes(tools).length)) ||
       tools.format !== 'cliq-tool-contracts-v1' ||
       tools.schemaVersion !== 1 || !exactKeys(tools, ['schemaVersion', 'format', 'entries', 'manifestDigest']) ||
       digestOmitting(tools, 'manifestDigest') !== tools.manifestDigest)
@@ -394,6 +401,16 @@ async function materialFor(installed: InstalledRuntimeBorrow, artifacts: Artifac
   if (!edit) mismatch('installed tool manifest has no original edit adapter');
   const contracts = await artifacts.mapReads(tools.entries, async entry => {
     const schema = await readCanonicalArtifact(artifacts, entry.inputSchemaRef);
+    if (entry.execution.kind === 'mcp') {
+      const execution = entry.execution;
+      const registered = mcp.find(selected => selected.ref === execution.registryRevisionRef &&
+        selected.registry.registrationId === execution.registrationId && selected.registry.manifestDigest === execution.registryManifestDigest);
+      const contract = registered?.registry.tools.find(tool => tool.name === execution.serverToolName && tool.toolContractDigest === execution.toolContractDigest);
+      if (!contract || contract.inputSchemaRef !== entry.inputSchemaRef || contract.inputSchemaDigest !== entry.inputSchemaDigest ||
+          canonicalSha256(schema) !== contract.inputSchemaDigest)
+        mismatch('installed MCP schema is outside its exact authenticated frozen discovery');
+      return { ...entry, inputSchema: schema };
+    }
     const signedSchema = installed.bundle.entries.find(candidate => candidate.digest === entry.inputSchemaRef);
     if (!signedSchema || signedSchema.role !== 'schema' || signedSchema.executable ||
         signedSchema.byteCount !== canonicalJsonBytes(schema).length || entry.inputSchemaDigest !== canonicalSha256(schema))
@@ -424,6 +441,7 @@ async function materialFor(installed: InstalledRuntimeBorrow, artifacts: Artifac
     { kind: 'compaction_prompt_envelope', ref: compaction.material.ref, digest: compaction.material.value.envelopeDigest },
     { kind: 'workspace_instructions', ref: assembly.instructions.workspaceInstructionsRef, digest: instructions.manifestDigest },
     ...skills.map(skill => ({ kind: 'skill_manifest', ref: skill.manifestRef, digest: skill.manifest.manifestDigest })),
+    ...mcp.map(selected => ({ kind: 'mcp_registry_revision', ref: selected.ref, digest: selected.registry.manifestDigest })),
   ];
   if (retainedToolchain) references.push({ kind: 'guest_toolchain_manifest', ref: retainedToolchain.manifestRef,
     digest: retainedToolchain.manifest.manifestDigest });
@@ -443,7 +461,8 @@ async function materialFor(installed: InstalledRuntimeBorrow, artifacts: Artifac
       if (!rootEntry) mismatch('child tool is outside its original signed root manifest');
       requireEqual(entry, rootEntry, 'child exact signed root tool member');
     }
-  } else requireEqual(tools, expected.manifest, 'complete installed compiled tool manifest');
+  } else requireEqual(tools, mcp.length ? combineMcpToolManifest(expected.manifest, mcp) : expected.manifest,
+    'complete installed builtin and authenticated MCP tool manifest');
   if (script) for await (const _chunk of artifacts.readChunks(script.digest, script.byteCount)) signal?.throwIfAborted();
   signal?.throwIfAborted();
   return Object.freeze({ capabilityEvidence: immutableSnapshot({ ref: assembly.provider.negotiation.capabilityEvidenceRef, value: capability }),
@@ -454,7 +473,7 @@ async function materialFor(installed: InstalledRuntimeBorrow, artifacts: Artifac
     resolvePriceTableAuthority: table => same(table, model.priceTable.value) ? model.priceTable.value.signatureRef : null,
     compactionEnvelope: compaction.material,
     resolveVerifiedTools: reference => same(reference, assembly.tools) ? verifiedTools : null,
-    additionalCredentialGrantRefs: [], verifyReference: reference => references.some(expected => same(expected, reference)),
+    additionalCredentialGrantRefs: mcpSelectionCredentialRefs(mcp), verifyReference: reference => references.some(expected => same(expected, reference)),
     verifyProviderAdapter: candidate => same(candidate, { adapter: catalog.adapter, runtimeBundleRef: installed.bundleDigest,
       runtimeBundleManifestDigest: installed.bundle.manifestDigest }),
     verifyProviderEndpoint: candidate => same(candidate, { provider: catalog.provider, model: catalog.model, endpoint: assembly.provider.endpoint,
@@ -480,9 +499,9 @@ export async function loadInstalledRunMaterial(input: { selected: HeldInstalledR
     if (childOrigin) {
       if (childOrigin.spec.assemblyRef !== input.assemblyRef) mismatch('child material does not belong to the exact admitted Run');
       const rootAssembly = decodeRetainedRunAssembly(await readCanonicalArtifact(artifacts, childOrigin.rootOrigin.spec.assemblyRef));
-      await materialFor(installed, artifacts, rootAssembly, input.signal);
+      await materialFor(installed, artifacts, rootAssembly, input.signal, undefined, input.driver);
     }
-    const material = await materialFor(installed, artifacts, assembly, input.signal, childOrigin); await installed.revalidate(input.signal);
+    const material = await materialFor(installed, artifacts, assembly, input.signal, childOrigin, input.driver); await installed.revalidate(input.signal);
     childOrigin?.rootOrigin.assertUnchanged(input.driver!);
     input.signal?.throwIfAborted(); return material;
   }, input.signal);
@@ -584,6 +603,8 @@ export async function assembleInstalledRun(input: {
   const dependency = request.dependency.mode === 'locked' ? await prepareInstalledDependencyAdmission(driver, reads, owner, selected,
     { request, source, principalId: identity.principalId, createdAt: admittedAt, deadlineAt }, signal) : undefined;
   const dependencyData = dependency && readInstalledDependencyAdmission(driver, owner, dependency);
+  const mcp = await readMcpAdmissionSelections(driver, reads, identity.principalId,
+    request.registeredMcpServerIds, captureRuntime.bundle, signal);
   reportInstalledRunAssemblyPhase(onAssemblyPhase, 'submit_assembly_material');
   return withHeldInstalledRuntime(selected, async installed => {
     await installed.revalidate(signal); await validateControlChannelClosure(reads, owner, identity); assertActiveStateOwner(driver, owner);
@@ -614,7 +635,12 @@ export async function assembleInstalledRun(input: {
       const bytes = installed.objects.get(entry.digest); return bytes && JSON.parse(bytes.toString('utf8')) as { format?: string };
     }).filter((value): value is ToolContractManifestV1 => value?.format === 'cliq-tool-contracts-v1');
     if (toolCandidates.length !== 1) mismatch('installed runtime lacks its unique signed builtin tool manifest');
-    const tools = toolCandidates[0]!, toolRef = canonicalSha256(tools);
+    const builtinTools = toolCandidates[0]!;
+    const tools = mcp.length ? combineMcpToolManifest(builtinTools, mcp) : builtinTools;
+    const toolRef = canonicalSha256(tools);
+    if (mcp.length && (await artifacts.publishCanonical(tools, tools.format)).ref !== toolRef)
+      mismatch('derived MCP tool manifest differs from its complete authenticated inputs');
+    const allCredentialGrantRefs = [...new Set([...credentialGrantRefs, ...mcpSelectionCredentialRefs(mcp)])].sort();
     const system = installed.structured.systemPrompts.find(prompt => prompt.provider === catalog.provider && prompt.model === catalog.model);
     const compaction = installed.structured.compactionPrompts.find(prompt => prompt.provider === catalog.provider && prompt.model === catalog.model);
     const worker = installed.bundle.entries.find(entry => entry.entryId === LINUX_WORKER_RECIPE.workerId);
@@ -643,7 +669,9 @@ export async function assembleInstalledRun(input: {
         exposedToolNames: capability.nativeToolCalling ? tools.entries.map(entry => entry.name) : [] },
       pricing: { kind: 'trusted_price_table', priceTableRef: model.priceTable.ref, priceTableDigest: model.priceTable.value.tableDigest,
         calculationAlgorithm: 'cliq-price-ceil-v1', maxRunCostMicros: request.budgets.costMicros, validThrough: model.priceTable.value.validThrough,
-        provenanceRef: model.priceTable.value.signatureRef } }, mcpServers: [], tools: { manifestRef: toolRef, manifestDigest: tools.manifestDigest },
+        provenanceRef: model.priceTable.value.signatureRef } }, mcpServers: mcp.map(selected => ({ registrationId: selected.registry.registrationId,
+          registryRevisionRef: selected.ref, registryRevision: selected.registry.registryRevision, manifestDigest: selected.registry.manifestDigest })),
+      tools: { manifestRef: toolRef, manifestDigest: tools.manifestDigest },
       instructions: { systemPromptRef: system.ref, systemPromptDigest: system.value.textDigest, workspaceInstructionsRef: instructions.ref,
         workspaceInstructionsDigest: instructions.value.manifestDigest, skills: skills.skills },
       runtime: { runtimeBundleRef: installed.bundleDigest, runtimeBundleManifestDigest: installed.bundle.manifestDigest,
@@ -661,10 +689,10 @@ export async function assembleInstalledRun(input: {
         protectedRecentTokens: Math.min(32768, Math.floor(c / 4)), summaryTokenCap: s, compactionEnvelopeTokens: k,
         sourceInputTokenCap: Math.min(Math.floor(c / 2), c - s - k), maxSummaryBytes: 262144 }, createdAt: admittedAt, assemblyDigest: '' };
     assembly.assemblyDigest = digestOmitting(assembly, 'assemblyDigest');
-    const material = await materialFor(installed, reads, assembly, signal), assemblyRef = canonicalSha256(assembly);
+    const material = await materialFor(installed, reads, assembly, signal, undefined, driver), assemblyRef = canonicalSha256(assembly);
     if (material.retainedToolchain) assertBuiltinScriptResources(material.retainedToolchain.manifest.guestImageByteCount, request.sandboxResources);
     const valid = validateRunAssembly({ assemblyRef, assembly, admittedAt, deadlineAt, maxRunCostMicros: request.budgets.costMicros,
-      runSpecCredentialGrantRefs: credentialGrantRefs, material });
+      runSpecCredentialGrantRefs: allCredentialGrantRefs, material });
     if (!valid.ok) throw new InstalledRunAuthorityError(valid.code);
     const profile = policyProfile(), profileEntry = installed.bundle.entries.find(entry => entry.role === 'policy_engine')!;
     const policy: RunPolicySnapshotV1 = { schemaVersion: 1, format: 'cliq-run-policy-v1', principalId: identity.principalId,
@@ -675,6 +703,7 @@ export async function assembleInstalledRun(input: {
       decisionRules: [...BUILTIN_POLICY_RULES], repositoryRequestRefs: [], createdAt: admittedAt, policyDigest: '' };
     policy.policyDigest = digestOmitting(policy, 'policyDigest');
     verifyToolRuntimeAuthority({ assembly, policy, bundle: installed.bundle, profile, tools: tools.entries, releaseKeys: installed.releaseKeys,
+      ...(mcp.length ? { mcpRegistries: mcp } : {}),
       ...(material.retainedToolchain ? { guestToolchain: material.retainedToolchain } : {}) });
     reportInstalledRunAssemblyPhase(onAssemblyPhase, 'submit_assembly_publish');
     const sandboxProfileRef = publishedSandboxRef ?? (await artifacts.publishCanonical(
@@ -690,14 +719,14 @@ export async function assembleInstalledRun(input: {
     reportInstalledRunAssemblyPhase(onAssemblyPhase, 'submit_assembly_final_check');
     await installed.revalidate(signal); await validateControlChannelClosure(reads, owner, identity); assertActiveStateOwner(driver, owner);
     const result: AssembledInstalledRun = Object.freeze({ assemblyRef, assembly: immutableSnapshot(assembly), policyRef, sandboxProfileRef, verifierSpecRef,
-      credentialGrantRefs: Object.freeze(credentialGrantRefs), sourceProjectionRef: sourceManifest.sourceProjectionRef,
+      credentialGrantRefs: Object.freeze(allCredentialGrantRefs), sourceProjectionRef: sourceManifest.sourceProjectionRef,
       frozenIgnoreRulesRef: sourceManifest.frozenIgnoreRulesRef, baseWorkspaceManifestRef: capturedSourceRef, material, admittedAt, deadlineAt,
       ...(dependencyData ? { dependencyPolicyRef: dependencyData.policyRef } : {}) });
-    admissions.set(result, { driver, owner, selected, identity, normalized: currentOriginal, source, native: held, workspace, repository, signal, dependency,
+    admissions.set(result, { driver, owner, selected, identity, normalized: currentOriginal, source, native: held, workspace, repository, signal, dependency, mcp,
       input: immutableSnapshot({ ...identity, requestId: request.requestId, admissionKey: request.admissionKey, sessionId: request.sessionId,
         expectedContextRevision: request.expectedContextRevision, workspacePath: request.workspacePath, objective: request.objective,
         assemblyRef, policyRef, sandboxProfileRef, verifierSpecRef, ...(dependencyData ? { dependencyPolicyRef: dependencyData.policyRef } : {}),
-        ...(request.verifiers.length ? { verifierRequests: request.verifiers } : {}), credentialGrantRefs, budgets: request.budgets,
+        ...(request.verifiers.length ? { verifierRequests: request.verifiers } : {}), credentialGrantRefs: allCredentialGrantRefs, budgets: request.budgets,
         allowUnverified: request.allowUnverified, sourceProjectionRef: sourceManifest.sourceProjectionRef,
         frozenIgnoreRulesRef: sourceManifest.frozenIgnoreRulesRef, baseWorkspaceManifestRef: capturedSourceRef }), admittedAt, deadlineAt });
     return result;
@@ -739,6 +768,7 @@ export function readInstalledRunAdmission(prepared: AssembledInstalledRun, drive
   // responses never consult this transient preparation token on replay.
   binding.signal?.throwIfAborted();
   assertActiveStateOwner(connection, owner);
+  for (const selected of binding.mcp) selected.assertUnchanged(connection);
   const key = { principalId: identity.principalId, admissionKey: binding.normalized.request.admissionKey,
     admissionIntentDigest: runSubmitIntentDigest(identity.principalId, binding.normalized.request) };
   if (!same(readSourceInspectionAttempt(connection, key), binding.source)) mismatch('installed admission source cut changed');

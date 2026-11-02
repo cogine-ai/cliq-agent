@@ -35,6 +35,17 @@ export type ModelResponseFailureEvidenceV1 = {
   failureKind: 'model_unusable_response'; unusableResponseRef: ArtifactRef; unusableResponseDigest: string;
 };
 
+/** A native-screened matching MCP event with unusable full-prefix custody.
+ * Its original completed observation stays fully charged and cannot resume. */
+export type McpKnownResultUnusableEvidenceV1 = Omit<ModelResponseFailureEvidenceV1,
+  'failureKind' | 'unusableResponseRef' | 'unusableResponseDigest'> & {
+  failureKind: 'mcp_known_result_unusable';
+  toolObservationRef: ArtifactRef;
+  toolObservationDigest: string;
+  captureRef: ArtifactRef;
+  captureDigest: string;
+};
+
 /** Pre-I/O refusal, never a model response, dispatch permission or a retry hint. */
 export type CredentialRedemptionFailureEvidenceV1 = {
   schemaVersion: 1; format: 'cliq-runtime-failure-evidence-v1'; runId: string;
@@ -58,7 +69,8 @@ export type DependencyAcquisitionFailureEvidenceV1 = {
 export type DependencyAmbiguityFailureEvidenceV1 = Omit<DependencyAcquisitionFailureEvidenceV1, 'failureKind' | 'dependencyFailureItemRef' | 'failedJournalSeq'> & {
   failureKind: 'dependency_result_unavailable'; ambiguityRef: ArtifactRef; unknownJournalSeq: number;
 };
-export type RuntimeFailureEvidenceV1 = ModelResponseFailureEvidenceV1 | CredentialRedemptionFailureEvidenceV1 | DependencyAcquisitionFailureEvidenceV1 | DependencyAmbiguityFailureEvidenceV1;
+export type RuntimeFailureEvidenceV1 = ModelResponseFailureEvidenceV1 | McpKnownResultUnusableEvidenceV1 |
+  CredentialRedemptionFailureEvidenceV1 | DependencyAcquisitionFailureEvidenceV1 | DependencyAmbiguityFailureEvidenceV1;
 
 /** RFC stop authority. Individual reducers accept only the branches whose evidence they can prove. */
 export type StopIntent = StopIdentity & (
@@ -111,7 +123,8 @@ export type TerminalDetail = {
   deliveryTerminalProjectionEvidenceRef?: ArtifactRef;
   abandonedRetryInvocations: Array<{ opId: string; attempt: number; unknownJournalSeq: number;
     budgetSettlementRef: ArtifactRef; dispatchFenceOrDeathEvidenceRef: ArtifactRef }>;
-  abandonedManualInvocation?: { opId: string; attempt: number; abandonedJournalSeq: number; attestationRef: ArtifactRef; toolAbandonedItemRef?: ArtifactRef };
+  abandonedManualInvocation?: { opId: string; attempt: number; abandonedJournalSeq: number; attestationRef: ArtifactRef;
+    dispatchFenceOrDeathEvidenceRef: ArtifactRef; toolAbandonedItemRef: ArtifactRef };
   createdAt: string;
 };
 

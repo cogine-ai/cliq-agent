@@ -31,6 +31,7 @@ import { readWorkerLaunchesForRun } from './repositories/worker-launches.js';
 import { readWorkspaceGenerationsForRun } from './repositories/workspace-generations.js';
 import { assertDeliveryReadData, type DeliveryReadData } from './delivery-read-data.js';
 import { dependencyVerificationProjection } from './dependency-history.js';
+import { validateMcpStopComposition } from './manual-reconciliation.js';
 
 function assertDeliveryReadCut(driver: SqliteConnection | SqliteDriver, cut: RecoveryClosureV1) {
   const rows = driver.prepare('SELECT item_id,item_seq,payload_ref,created_at FROM items WHERE run_id=? ORDER BY item_seq')
@@ -196,12 +197,26 @@ async function assertResultBasisCut(driver: SqliteDriver, artifacts: ArtifactCat
       !isZeroBudget(run.budgetReserved) || cut.workerLaunches.length || run.activeWorkerLaunchId || run.waitingOnRef || run.waitingReason ||
       cut.workspaceGenerations.some(generation => generation.phase !== 'sealed' && generation.phase !== 'retired') ||
       [...stopInvocationHistory(cut.journal).values()].some(({ entry }) =>
-        !(spec.operation === 'delivery' ? ['verifier', 'publish', ...(spec.dependencyPolicyRef ? ['tool'] : [])] : ['model', 'tool', 'verifier', 'child_admission', 'child_merge', 'child_await', 'skill_resource']).includes(entry.opKind) ||
+        !(spec.operation === 'delivery' ? ['verifier', 'publish', ...(spec.dependencyPolicyRef ? ['tool'] : [])] : ['model', 'tool', 'mcp', 'verifier', 'child_admission', 'child_merge', 'child_await', 'skill_resource']).includes(entry.opKind) ||
         !['completed', 'failed'].includes(entry.phase)))
     throw new KernelStorageError('STATE_TRANSITION_INVALID', 'result requires the complete worker-free root candidate closure');
   assertRetiredGenerationCut(driver, run, cut.workspaceGenerations);
   const assembly = decodeRetainedRunAssembly(await readCanonicalArtifact(artifacts, spec.assemblyRef));
-  if (assembly.mcpServers.length) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'result requires its implemented MCP containment closure');
+  if (assembly.mcpServers.length) {
+    // Remote HTTP has no pretend local MCP server. The original shared
+    // composition validates exact registries, received captures/no-I/O
+    // failures and actual native quiescence; success still forbids every
+    // uncertain or manually abandoned invocation independently above.
+    await validateMcpStopComposition(driver, artifacts, cut);
+    for (const completed of cut.journal.filter(entry => entry.opKind === 'mcp' && entry.phase === 'completed')) {
+      const observation = await readCanonicalArtifact<import('../kernel/tool-authorization.js').ToolObservationV1>(artifacts, completed.resultRef!);
+      const captured = observation.captureRef && await readCanonicalArtifact<{format:string}>(artifacts, observation.captureRef);
+      if (captured && captured.format === 'cliq-mcp-known-unusable-run-capture-v1')
+        throw new KernelStorageError('STATE_TRANSITION_INVALID', 'known-unusable MCP result requires its sole failed Stop terminal');
+    }
+    if (cut.journal.some(entry => entry.opKind === 'mcp' && ['unknown', 'abandoned'].includes(entry.phase)))
+      throw new KernelStorageError('STATE_TRANSITION_INVALID', 'manual MCP uncertainty cannot produce a RunResult');
+  }
 }
 
 async function readAgentResultBasis(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1, data?: AgentRecoveryReadData) {

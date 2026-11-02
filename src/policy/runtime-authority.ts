@@ -1,6 +1,7 @@
 import { createPublicKey, verify } from 'node:crypto';
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import { assertArtifactRef } from '../kernel/identity.js';
+import { mcpExposedToolName, mcpExposedToolDescription } from '../kernel/mcp.js';
 import type { PolicyEngineProfileV1, RunPolicySnapshotV1 } from '../kernel/tool-authorization.js';
 import type { RunAssemblyV1, ToolContractManifestV1 } from '../kernel/types.js';
 import type { RetainedVerifierToolchain } from '../state/guest-toolchain.js';
@@ -97,6 +98,7 @@ export function verifyToolRuntimeAuthority(input: {
   assembly: RunAssemblyV1; policy: RunPolicySnapshotV1; bundle: RuntimeBundleManifest;
   profile: PolicyEngineProfileV1; tools: ToolContractManifestV1['entries']; releaseKeys: readonly ReleaseTrustKey[];
   guestToolchain?: RetainedVerifierToolchain;
+  mcpRegistries?: readonly Readonly<{ ref: string; registry: import('../kernel/mcp.js').McpRegistryRevisionV1 }>[];
 }): void {
   const { assembly, policy, bundle, profile, tools, releaseKeys } = input;
   verifyRuntimeBundle(bundle, releaseKeys);
@@ -126,6 +128,18 @@ export function verifyToolRuntimeAuthority(input: {
   };
   executable(assembly.runtime.workerExecutableId, assembly.runtime.workerExecutableDigest, 'worker');
   executable(assembly.provider.adapter.adapterId, assembly.provider.adapter.codeDigest, 'provider_adapter', assembly.provider.adapter.version);
+  const mcp = input.mcpRegistries ?? [];
+  if (mcp.length !== assembly.mcpServers.length || new Set(mcp.map(item => item.registry.registrationId)).size !== mcp.length)
+    throw new TypeError('tool authority lacks the exact complete frozen MCP registry set');
+  for (const selected of assembly.mcpServers) {
+    const retained = mcp.find(item => item.registry.registrationId === selected.registrationId);
+    if (!retained || retained.ref !== selected.registryRevisionRef || canonicalSha256(retained.registry) !== retained.ref ||
+        retained.registry.manifestDigest !== selected.manifestDigest || retained.registry.registryRevision !== selected.registryRevision ||
+        retained.registry.ownerPrincipalId !== policy.principalId || retained.registry.stateModel !== 'stateless_per_call' ||
+        retained.registry.transport.kind !== 'streamable_http' || retained.registry.transport.credentialGrantRefs.length > 1 ||
+        retained.registry.tools.some(tool => tool.recovery.kind !== 'manual'))
+      throw new TypeError('MCP tool authority substitutes its principal, frozen registry or supported recovery');
+  }
   for (const tool of tools) {
     const execution = decodeToolExecutionIdentity(tool.execution);
     if (execution.kind === 'builtin') {
@@ -157,6 +171,16 @@ export function verifyToolRuntimeAuthority(input: {
           tool.outputSchemaRef !== undefined || tool.outputSchemaDigest !== undefined)
         throw new TypeError('unsupported signed Supervisor local operation');
       executable(execution.supervisorEntryId, execution.supervisorExecutableDigest, 'supervisor', execution.supervisorEntryVersion);
+    } else if (execution.kind === 'mcp') {
+      const retained = mcp.find(item => item.registry.registrationId === execution.registrationId);
+      const contract = retained?.registry.tools.find(item => item.name === execution.serverToolName);
+      if (!retained || !contract || retained.ref !== execution.registryRevisionRef ||
+          retained.registry.manifestDigest !== execution.registryManifestDigest || contract.toolContractDigest !== execution.toolContractDigest ||
+          tool.name !== mcpExposedToolName(execution.registrationId, execution.serverToolName) || tool.version !== contract.version ||
+          tool.description !== mcpExposedToolDescription(execution.registrationId, execution.serverToolName, contract.description) || tool.access !== 'exec' || tool.replayClass !== 'manual' ||
+          contract.recovery.kind !== 'manual' || tool.inputSchemaRef !== contract.inputSchemaRef || tool.inputSchemaDigest !== contract.inputSchemaDigest ||
+          tool.outputSchemaRef !== contract.outputSchemaRef || tool.outputSchemaDigest !== contract.outputSchemaDigest)
+        throw new TypeError('MCP tool differs from its exact frozen manual contract');
     }
   }
 }

@@ -15,7 +15,8 @@ import { canonicalJsonBytes } from '../kernel/canonical.js';
 
 test('submission, invocation, approval and continuation consumers dispatch retained CAS reads through the same bounded joined catalog', async () => {
   const expected = new Map([
-    ['store.ts', ['reads:initial.assembly.provider.credentialGrantRefs']],
+    ['store.ts', ['artifacts:transport.credentialGrantRefs', 'reads:rows', 'reads:initial.assembly.provider.credentialGrantRefs']],
+    ['mcp-admission.ts', ['reads:registrationIds', 'reads:servers']],
     ['reducers/stop.ts', ['artifacts:cause.plans', 'artifacts:selected.items', 'artifacts:selected.items']],
     ['reducers/agent.ts', ['artifacts:rows']],
     ['reducers/input.ts', ['reads:closure.items']],
@@ -46,13 +47,35 @@ test('submission, invocation, approval and continuation consumers dispatch retai
       assert(ts.isArrowFunction(call.arguments[1]!), `${file}: defer the original read body, not an already started operation`);
     }
     if (file === 'store.ts') {
-      let scope: ts.Node | undefined = calls[0];
-      while (scope && !ts.isMethodDeclaration(scope)) scope = scope.parent;
-      assert(scope && ts.isMethodDeclaration(scope));
-      assert.match(scope.getText(parsed), /const reads = this\.artifacts\.withReadSignal\(preparationSignal\);/u,
+      const methodFor = (call: ts.CallExpression): ts.MethodDeclaration | undefined => {
+        let scope: ts.Node | undefined = call;
+        while (scope && !ts.isMethodDeclaration(scope)) scope = scope.parent;
+        return scope && ts.isMethodDeclaration(scope) ? scope : undefined;
+      };
+      const modelCalls = calls.filter(call => methodFor(call)?.name.getText(parsed) === 'dispatchInstalledModelOwned');
+      assert.equal(modelCalls.length, 1, 'locate the original model credential group by its owning method');
+      const modelCall = modelCalls[0]!;
+      assert.match(methodFor(modelCall)!.getText(parsed), /const reads = this\.artifacts\.withReadSignal\(preparationSignal\);/u,
         'credential reads retain the original preparation signal on the same CAS view');
-      assert.match(calls[0]!.arguments[1]!.getText(parsed), /decodeEndpointCredentialGrantBinding\(await reads\.readCanonical\(ref\)\)/u,
+      assert.match(modelCall.arguments[1]!.getText(parsed), /decodeEndpointCredentialGrantBinding\(await reads\.readCanonical\(ref\)\)/u,
         'the lazy credential callback reads and decodes the full original bytes through that view');
+      const listCalls = calls.filter(call => methodFor(call)?.name.getText(parsed) === 'listMcpRegistrations');
+      assert.equal(listCalls.length, 1);
+      assert.match(methodFor(listCalls[0]!)!.getText(parsed), /const reads = this\.artifacts\.withReadSignal\(signal\);/u);
+      assert.match(listCalls[0]!.arguments[1]!.getText(parsed), /readMcpRegistry\(this\.driver, reads, identity\.principalId, row\.registration_id\)/u,
+        'listing verifies each full original registry closure through its existing read view');
+      const authority = parsed.statements.find((node): node is ts.FunctionDeclaration =>
+        ts.isFunctionDeclaration(node) && node.name?.text === 'withInstalledMcpHttpAuthority');
+      assert(authority?.body);
+      const authorityCalls = calls.filter(call => call.pos >= authority.body!.pos && call.end <= authority.body!.end);
+      assert.equal(authorityCalls.length, 1);
+      assert.match(authorityCalls[0]!.arguments[1]!.getText(parsed), /decodeEndpointCredentialGrantBinding\(await readCanonicalArtifact\(artifacts, ref\)\)/u,
+        'the MCP caller-selected view still reads and decodes the complete frozen credential');
+    }
+    if (file === 'mcp-admission.ts') {
+      assert.match(calls[0]!.arguments[1]!.getText(parsed), /readMcpRegistry\(driver, reads, principalId, registrationId\)/u);
+      assert.match(calls[1]!.arguments[1]!.getText(parsed), /readMcpRegistryClosure\(driver, reads, server\.registryRevisionRef, principalId\)/u,
+        'frozen material verifies its exact historical closure, not the latest pointer or a summary');
     }
     if (file === 'verifier-execution.ts') for (const call of calls) {
       assert.match(call.arguments[1]!.getText(parsed), /readCanonicalArtifact<ContinuationItem>\(reads, row\.payloadRef\)/u,

@@ -18,8 +18,8 @@ enum source_ready_failure_boundary {
     SOURCE_READY_KERNEL_OBSERVATION = 5
 };
 
-static const napi_type_tag SOURCE_SCOPE_TAG = { UINT64_C(0xe90767ec63984722), UINT64_C(0x94a089abf2cc9f91) };
-static const napi_type_tag SOURCE_READER_TAG = { UINT64_C(0xd49f4628b0514b9d), UINT64_C(0x8c269484777eb772) };
+static const napi_type_tag SOURCE_SCOPE_TAG = { UINT64_C(0x7c1bf7d79f214190), UINT64_C(0xa589f3b230bb6128) };
+static const napi_type_tag SOURCE_READER_TAG = { UINT64_C(0x065a1f53dd5648c8), UINT64_C(0x927b49af22862dba) };
 struct source_native_scope {
     struct controller *controller;
     struct cliq_source_input *input;

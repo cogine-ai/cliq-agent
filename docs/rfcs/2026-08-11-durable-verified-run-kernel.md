@@ -721,6 +721,9 @@ type McpAdminProbeTargetV1 = {
   format: 'cliq-mcp-admin-probe-target-v1'
   ownerPrincipalId: string
   registrationId: string
+  originalRequestRef: ArtifactRef
+  channelIdentityRef: ArtifactRef
+  channelIdentityDigest: string
   method: 'mcp.register' | 'mcp.refresh'
   expectedRegistryRevision?: number
   sourceRegistryRevisionRef?: ArtifactRef
@@ -997,6 +1000,22 @@ The primary identity is `(principalId,method,requestId,attempt)` and `adminOpera
 
 `AdminOperation.targetRef` always resolves to `McpAdminProbeTargetV1`, never an opaque request blob. For register, `expectedRegistryRevision`/`sourceRegistryRevisionRef` are absent; for refresh both are required and name the exact current revision whose immutable transport/recovery/lifecycle inputs are copied. `requestCoreDigest = SHA-256(JCS(public method body with protocolVersion/requestId/requestDigest omitted))`; `targetDigest = SHA-256(JCS(target with targetDigest omitted))`. Recovery overrides are unique and byte-sorted by tool name; missing discovered tools normalize to `manual`. Lifecycle defaults/ranges are the MCP registry contract. `probePayloadCoreRef` resolves to `AdminProbePayloadCoreV1`, whose `payloadCoreDigest` omits itself under JCS, whose adapter id/version/digest resolves to a signed RuntimeBundle helper, and whose `maximumResponseBytes` is `65536..1048576` (default `1048576`); the fixed protocol recipe contains no dispatch id, containment, credentials, endpoint payload, or caller argv. It is published before containment planning. The SandboxLaunchSpec repeats only that static core ref; after claim, `AdminProbeBrokerRequest.payloadRef` must equal it and supplies the claim/containment/target envelope separately. The admin row, admin-owned `ProcessContainment`, broker envelope target/core, probe result/receipt, and final registry core must all reference or reproduce these exact artifacts; any method/owner/registration/revision/executable/argv/endpoint/TLS/grant/recovery/lifecycle/payload/digest mismatch fails before I/O or publication.
 
+The target's mandatory `originalRequestRef` retains the complete original
+public mutation bytes. Its `channelIdentityRef/channelIdentityDigest` name the
+genuinely authenticated original channel. The historical reader rehashes and
+decodes that request, proves its request id/digest/method/registration and
+`requestCoreDigest`, and independently follows its principal/channel and first
+StateOwner history. Later attempts retain these same target/core/request/channel
+artifacts; a new caller authenticates its own current frame before joining or
+replaying them. Startup uses original historical authorization plus its genuine
+current owner and fresh endpoint/credential gates, never an old live frame.
+The fixed deadline belongs to each attempt. Only after positive original
+retirement and the existing 1s/5s backoff may the next contiguous attempt select
+its actual new `createdAt` and `deadlineAt = createdAt +` the same retained
+`launchTimeoutMs`. No deadline extends within an attempt. The independent 30s
+control transport can lose an observer while that original producer remains in
+custody; neither this nor a later same-id join creates an operation-status API.
+
 For initial stdio registration, target construction resolves the public
 `executionIdentityGrantId` to the exact active principal-owned
 `AuthorizationGrantV1(target.kind='execution_identity_read',
@@ -1013,7 +1032,7 @@ closure. The final stdio `McpRegistryRevision` repeats those three identity
 fields. A raw grant id/ref, unconsumed grant, receipt for another principal/
 registration/revision, or changed executable cannot reach containment or I/O.
 
-Probe terminal artifacts are closed. `McpAdminProbeResultV1.resultDigest`, `AdminProbeClosureEvidenceV1.evidenceDigest`, and `AdminProbeErrorV1.errorDigest` each omit only themselves under JCS; every other ref/digest pair rehashes its named bytes. A result is legal only for the released dispatch and repeats the row's operation/attempt/request/target/payload/containment. Its three bounded secret-free response artifacts are the exact bytes decoded by the fixed recipe; `initializeDigest`/`capabilityDigest` are their normalized protocol projections. `normalizedTools` contains only byte-sorted unique `McpProbedToolInterfaceV1` rows, each `interfaceDigest = SHA-256(JCS(interface with interfaceDigest omitted))`, and `probedToolsListDigest = SHA-256(JCS(normalizedTools))`. It contains no requested recovery intent, profile, template, predicate, final tool contract, or registry digest. The completed row's result ref/digest names that artifact exactly.
+Probe terminal artifacts are closed. `McpAdminProbeResultV1.resultDigest`, `AdminProbeClosureEvidenceV1.evidenceDigest`, and `AdminProbeErrorV1.errorDigest` each omit only themselves under JCS; every other ref/digest pair rehashes its named bytes. A result is legal only for the released dispatch and repeats the row's operation/attempt/request/target/payload/containment. Its bounded secret-free response artifacts are the exact bytes decoded by the fixed recipe; `initializeDigest`/`capabilityDigest` are their normalized protocol projections. MCP capabilities arrive in the real initialize result, not a separate capabilities RPC: `initializeResponseRef` and `capabilityResponseRef` may name the same actual initialize response bytes, with both independent projection digests revalidated. They never name the initialized notification's empty acknowledgement or invented response bytes. The tools-list response names its separate actual bytes. This follows the CAS same-byte multi-purpose rule and adds no ledger or digest cycle. `normalizedTools` contains only byte-sorted unique `McpProbedToolInterfaceV1` rows, each `interfaceDigest = SHA-256(JCS(interface with interfaceDigest omitted))`, and `probedToolsListDigest = SHA-256(JCS(normalizedTools))`. It contains no requested recovery intent, profile, template, predicate, final tool contract, or registry digest. The completed row's result ref/digest names that artifact exactly.
 
 Every terminal attempt also names one `AdminProbeClosureEvidenceV1`. `no_spawn` decodes the exact `ProcessContainmentNoSpawnEvidenceV1` for the row's plan/spec/owner/nonce and is legal only before release, with no process/dispatch fields. `containment_dead` decodes the exact `ProcessContainmentDeathEvidenceV1`, repeats the actual containment, and requires dispatch/request iff the row reached claimed/released. Its inspector is current and every row/target/plan/spec/digest matches. An `AdminProbeErrorV1` repeats that closure; deterministic protocol target/schema/capability rejection has `deterministicRejection=true`, while preactivation/transport/timeout recovery failures are false and require the named positive no-spawn/death fact. Diagnostic bytes are bounded/redacted and never decide disposition. `retryable_recovery|retry_exhausted` require false; `final_rejection` requires true. The row's result/evidence/error/control-response ref/digest pairs are exact and forbidden outside their typed phase.
 
@@ -3884,6 +3903,13 @@ type RuntimeFailureEvidenceV1 = RuntimeFailureEvidenceBaseV1 & (
       unusableResponseDigest: string
     }
   | {
+      failureKind: 'mcp_known_result_unusable'
+      toolObservationRef: ArtifactRef
+      toolObservationDigest: string
+      captureRef: ArtifactRef
+      captureDigest: string
+    }
+  | {
       failureKind: 'model_attempts_exhausted'
       attempt: number
       terminalJournalSeq: number
@@ -4124,7 +4150,7 @@ The status/reason mapping is exact: `succeeded -> verified`; `completed_unverifi
 
 Stop-to-**reason-detail** derivation is total and one-to-one; `StopIntentBase` deliberately has no generic evidence ref. The terminal primary-evidence matrix is exact and acyclic: verifier/dependency integrity use `integrityEvidenceRef`; parent cancellation uses `sourceStopIntentRef`; local-inference failure uses `failureDetailRef`; direct verifier/delivery/dependency policy denial uses `policyChannelEvidenceRef`; generic runtime uses `runtimeFailureRef`; manual abandon uses `attestationRef`; every user cancellation, deadline/budget, verification, context-compaction/window/result-source, delivery-merge, or delivery-publication branch uses the winning `stopIntentRef` itself after that immutable artifact has been published. The corresponding `TerminalReasonDetail` copies the exact branch fields; its `stopIntentRef|evidenceRef` where present equals that same selected primary ref. Each `origin='runtime'` variant maps only to the detail with identical `runtimeSubtype`; generic runtime requires its exact `RuntimeFailureEvidenceV1` ref/digest and matching `failingOpId`. Storage rejects a subtype/detail mismatch, missing field, alternate primary ref, or caller-selected reason projection. This post-publication pointer creates no content hash cycle because the StopIntent contains no self ref. The surrounding publication/manual/retry closure fields are a separate deterministic projection of authoritative Journal/items at terminal quiescence; they may close facts learned after the winning intent without changing its reason. Candidate, diagnostic, verifier-receipt, and child-result facts remain in their already ordered typed Run-item/Journal graph and are not copied into implementation-selected TerminalDetail lists.
 
-`RuntimeFailureEvidenceV1.evidenceDigest = SHA-256(JCS(evidence with evidenceDigest omitted))`. Its Run/frontier/failing op/current-inspector fields equal the proposed Run and the inspector is fresh under the canonical five-second rule. `model_unusable_response` rehashes the exact `ModelUnusableResponseV1` that is the completed Journal result for that op. `model_attempts_exhausted` names the final contiguous failed model attempt, exact normal/compaction request, Journal sequence, and literal `transport_exhausted`; that failed row must satisfy the ordinary pre-dispatch or exact post-claim-no-release closure and therefore cannot claim a provider response. `credential_redemption_failed` is produced while holding the credential-authority lock before target I/O; its immutable binding/endpoint equal the Run assembly, and its latest authority-record digest/revisions plus canonical time or platform-store observation prove exactly expired, revoked, changed frozen credential binding, revoked endpoint, absent item, or unavailable store. `credential_binding_changed` requires a later active authority revision/generation that differs from the frozen original binding, without relabeling it as revoked. `endpoint_revoked` additionally binds the exact latest endpoint authority record digest/revision while the credential itself may remain active. Missing or corrupt history and noncausal time require recovery, not a synthetic authorization failure. `retry_unknown_exhausted` rehashes exact `RetryUnknownCancelledResult` and its Journal/settlement/dispatch-closure chain. `dependency_acquisition_failed` equals the current candidate plan and final acquisition Journal attempt/sequence with one closed failure code. `local_service_identity_mismatch` rehashes the assembly provenance/service spec plus the current boundary evidence that failed the active-launch/stable-identity gate before provider release. No branch accepts another branch's members, generic diagnostic text, a provider/worker boolean, or an untyped Journal error. The StopIntent and TerminalDetail repeat the same evidence ref/digest/failing op, and storage re-walks the named Journal/request/authority graph before terminal commit.
+`RuntimeFailureEvidenceV1.evidenceDigest = SHA-256(JCS(evidence with evidenceDigest omitted))`. Its Run/frontier/failing op/current-inspector fields equal the proposed Run and the inspector is fresh under the canonical five-second rule. `model_unusable_response` rehashes the exact `ModelUnusableResponseV1` that is the completed Journal result for that op. `mcp_known_result_unusable` binds `toolObservationRef/toolObservationDigest` to the same original claim's completed `ToolObservationV1` with fixed `TOOL_PROTOCOL_ERROR`, and `captureRef/captureDigest` to its exact `cliq-mcp-known-unusable-run-capture-v1`. That capture roots two real setup captures, the independently screened matching event and exact `cliq-mcp-known-unusable-response-v1` audit of the original joined native refusal; unsafe prefix bytes are not retained or claimed re-readable. Storage reproduces the ordered result item, original ready Checkpoint/current next frontier, full-once completed settlement, claim and owner history before the existing sole Stop writer may terminalize; the durable scheduler and RunResult barriers forbid later productive work across restart. UNKNOWN, no-release, unsafe-event or missing-join data cannot satisfy this branch. `model_attempts_exhausted` names the final contiguous failed model attempt, exact normal/compaction request, Journal sequence, and literal `transport_exhausted`; that failed row must satisfy the ordinary pre-dispatch or exact post-claim-no-release closure and therefore cannot claim a provider response. `credential_redemption_failed` is produced while holding the credential-authority lock before target I/O; its immutable binding/endpoint equal the Run assembly, and its latest authority-record digest/revisions plus canonical time or platform-store observation prove exactly expired, revoked, changed frozen credential binding, revoked endpoint, absent item, or unavailable store. `credential_binding_changed` requires a later active authority revision/generation that differs from the frozen original binding, without relabeling it as revoked. `endpoint_revoked` additionally binds the exact latest endpoint authority record digest/revision while the credential itself may remain active. Missing or corrupt history and noncausal time require recovery, not a synthetic authorization failure. `retry_unknown_exhausted` rehashes exact `RetryUnknownCancelledResult` and its Journal/settlement/dispatch-closure chain. `dependency_acquisition_failed` equals the current candidate plan and final acquisition Journal attempt/sequence with one closed failure code. `local_service_identity_mismatch` rehashes the assembly provenance/service spec plus the current boundary evidence that failed the active-launch/stable-identity gate before provider release. No branch accepts another branch's members, generic diagnostic text, a provider/worker boolean, or an untyped Journal error. The StopIntent and TerminalDetail repeat the same evidence ref/digest/failing op, and storage re-walks the named Journal/request/authority graph before terminal commit.
 
 Kernel-integrity stop evidence is one closed chain. `KernelIntegrityEvidenceV1.evidenceDigest = SHA-256(JCS(evidence with evidenceDigest omitted))`; its Run/source projection/generation/current inspector match the exact Journal claim and frozen RunSpec. Canonical target paths are NFC admitted-root-relative paths with no empty/`.`/`..` component. An `audited_write_attempt` is emitted only by the strong sandbox filesystem or trusted broker at the blocked syscall/request boundary, repeats the exact request/containment/SandboxLaunch, has `sourceBeforeRef === sourceAfterRef` and equal digests, and proves no byte changed. A `source_digest_drift` rehashes two exact SourceManifests, requires unequal digests and a nonempty unique byte-sorted list of the changed WorkspaceEntry digests. Its source XOR either forbids both containment/spec refs for a trusted Supervisor rehash outside a child process, or requires both and matches them to the same owning Journal claim and actual containment; ref-only or spec-only drift is invalid. The verifier subject matches one verifier Journal op/attempt/result source, while dependency matches the exact candidate plan and acquisition op/attempt. For both kernel-integrity StopIntent variants, branch `integrityEvidenceRef` and digest name this same artifact; `TerminalReasonDetail` and `primaryEvidenceRef` copy the identical ref/digest. A verifier `source_mutation` receipt requires both violation fields and the verifier form of this artifact; every other outcome forbids both. The audited branch requires equal receipt source digests, the drift branch requires unequal ones. Dependency completion/ready state is forbidden and its integrity StopIntent uses the dependency form. A generic CAS ref, verifier text, caught un-audited read-only error, or adapter assertion cannot win kernel-integrity precedence.
 
@@ -12089,6 +12115,149 @@ The Supervisor publishes the per-registration status template only after the raw
 The recovery contract repeats the same profile id/digest, and its injection pointer, the status template pointer, and the public per-tool request pointer are byte-identical. `recoveryRequestDigest` covers the normalized reconcile request `{kind,bundledAdapterId,idempotencyKeyJsonPointer}` and is included in the admin target/request digest; changed selection bytes cannot reuse the signed profile closure. The recovery contract's adapter/template/predicate refs/digests must equal that same signed profile, so no adapter iteration order or implementation default chooses semantics. The status template is bound to that adapter/profile/registration/revision/target/result/tool, one NFC operation name, one valid RFC-6901 key pointer, and bounded canonical JSON static arguments. Predicate expressions are the complete closed IR: maximum depth 8, maximum 64 nodes, nonempty `and|or`, finite safe-integer numbers, valid RFC-6901 pointers, and no script, regex, path, network target, or executable reference. Completed and failed predicates must be distinct, cannot both match a response, and any neither/both/schema-invalid result remains unresolved. At recovery time the invocation separately carries the immutable final registry ref/manifest digest and must equal the registration/revision/template target and tool; the signed adapter may issue only the template's exact no-new-effect status operation through that original stdio target. It cannot invoke the effecting tool, change executable/argv, use HTTP, call a same-named operation on another revision, or perform a conditional retry unless a separately Journaled retry transition is authorized. Repository or user executable bytes cannot define/load an adapter; the Kernel Cut has no trusted plugin ABI. Every MCP call freezes the exact `McpRegistryRevision` ref/manifest digest, tool contract, batch/call/index identity, and stable idempotency key into its request artifact.
 
 The Kernel Cut never trusts a probe or server assertion to prove statelessness. It enforces the recoverable portion structurally. Every stdio tool call gets a fresh process/containment with a fresh empty private HOME/TMP, read-only registered executable/toolchain, no persistent writable mount, no network, and teardown/death proof after that call; no stdio instance is reused across calls. Streamable HTTP uses a fresh broker request with no cookie jar, session id, ambient header, or cross-call client state. External service state remains part of the target and therefore must be covered by the tool's `manual|retry|reconcile` contract. A server that requires client-held session state is unsupported rather than “proved safe” by registration. Recovery never checkpoints hidden server memory; a future stateful MCP mode requires a typed server-state/restore RFC.
+
+The first installed Streamable HTTP profile fixes MCP protocol `2025-11-25`
+and supports public endpoints or exactly one principal-owned
+`mcp_streamable_http` Bearer credential binding. The general public request
+bound remains 32 credential ids; two or more are an explicitly unimplemented
+authentication profile, rejected as `UNSUPPORTED_PLATFORM` after request
+authentication and before registration resources, claim, probe or authority
+artifact publication. No first-key selection, trial, header merging or
+ambient authentication is permitted. Refresh copies the original exact
+transport; both actual release gates recheck original owner, purpose,
+endpoint/TLS identity, active authority, expiry and exact zero-or-one binding.
+Current implementation support never rewrites historical declarations.
+
+The provider-facing exposed tool name is exactly `mcp_` plus the first 16 ASCII
+characters of `registrationId + '_' + serverToolName` after every character
+outside `[A-Za-z0-9_-]` is replaced by `_`, then `_`, then the full 43-character
+base64url SHA-256 of JCS `['cliq-mcp-exposed-tool-v1', registrationId,
+serverToolName]`. It is at most 64 provider-safe ASCII characters and remains
+stable across revisions without truncating qualified identity. Its exact
+description begins `MCP registration ` + JSON string of the registration id +
+`, server tool ` + JSON string of the server tool name + `.\n`, followed by
+the original description. Policy, display, frozen execution and actual
+tools/call retain the complete original names; the exposed name never changes
+the server request or grants authority.
+
+Stateless HTTP does not skip the protocol lifecycle. Every fresh admin or Run
+logical client performs real initialize, validates the exact negotiated
+version, sends `notifications/initialized`, then performs tools/list. A Run
+compares the original immutable initialize/capability/interface closure before
+its sole effecting tools/call; setup and effect belong to the same original
+permanent claim. The request Accept header advertises both application/json
+and text/event-stream, and the fixed decoder supports both actual response
+types. There is no SDK-fabricated initialized state, separate capabilities
+RPC, session id, cookie jar, redirect, retry, reconnect, GET resume or hidden
+request. MCP-Protocol-Version is fixed on every post-initialize message.
+Encountering pagination nextCursor rejects before effects: pagination's
+protocol SHOULD remains explicitly unsupported, never silently truncated.
+
+A matching SSE response event already screened and delivered by the original
+native owner is known received data even if the joined complete finite prefix
+later fails NoEcho. The closed `cliq-mcp-known-unusable-response-v1` audit keeps
+only that safe event's exact bytes/ref/digest, and the original opaque native
+receipt's full received prefix byte count/hash, event-end offset, tail count
+and fixed `full_capture_no_echo_refused` code. Tail count may be zero when an
+unsafe comment preceded the safe event. Unsafe prefix bytes are never exported
+or published; this audit explicitly does not claim they can be re-read.
+The distinct `cliq-mcp-known-unusable-run-capture-v1` joins the actual two setup
+captures, that audit, the immutable full claim binding and genuine original
+response/owner joins. Only the actual native refusal receipt can produce it;
+generic network, storage or unsafe-event errors cannot. The same invocation
+settles completed on the same original claim with its full original charge and
+fixed `TOOL_PROTOCOL_ERROR` observation. The closed
+`RuntimeFailureEvidenceV1(failureKind='mcp_known_result_unusable')` repeats the
+exact `toolObservationRef/toolObservationDigest` and `captureRef/captureDigest`.
+History reproduces that ordered result item, original ready Checkpoint/next
+frontier, claim/owner and full-once completed settlement before the existing
+sole Stop writer records the failed runtime cause with unchanged precedence.
+The installed scheduler reproduces that cause before any later tool/model
+scheduling after restart, and RunResult publication rejects the same retained
+cause. The complete safe-event/audit/setup/claim/settlement graph remains a
+recovery and GC root; the omitted unsafe prefix never becomes a purported raw
+capture. This branch never becomes UNKNOWN, no-release, retry, success
+or a manual-discard request. An unsafe matching event or missing native join
+remains recovery-required with original custody retained.
+
+If a Supervisor dies before any recoverable completed result is durably handed
+off, a strictly newer actual StateOwner may observe the original signed MCP
+creator process absent or with a different start token. The native token is
+nontransferable and all HTTP workers are threads in that creator process;
+its real death closes only the local domain, not remote effects. The original
+claim/registry/grant/root/owner-history tuple and current signed inspector are
+revalidated, the death is reobserved before the sole UNKNOWN transaction's
+actual commit clock, and paired creator-death evidence is retained in the
+original ambiguity artifact. The original claim is charged full once. Actual
+worker quarantine/retirement then precedes the same exact manual-risk wait;
+no old FD, mutex, receipt, credential lifetime or request is recreated.
+
+Each real data response's entire received finite capture is bounded by the probe core's B
+(`65536..1048576`, default `1048576`), including all SSE framing, fragments
+and notifications without resetting per event. Admin has exactly two data
+responses, Run exactly three, deriving total data bounds 2B and 3B. The
+initialized acknowledgement must be HTTP 202 with no body. A genuinely
+received server ping is answered promptly with a fixed empty result bound to
+its exact parsed id: at most eight pings over the whole native owner, with
+the same original target, credential purpose, claim and total deadline.
+Both Admin and Run perform a fresh original-domain SQL gate immediately before
+receipt-bound async `connectPing`, await that bounded DNS/TLS connection, then
+perform another current SQL gate immediately before synchronous `releasePing`
+with no intervening await. The actual receipt's original id/nonce/stream/owner
+binding is unchanged; no cached pre-CONNECT consent, new target or generic
+connect-and-send operation may authorize body release.
+Their acknowledgements must also be empty HTTP 202; no active periodic ping
+or arbitrary server-request handler is provided. Every individual header
+limit remains enforced, deriving whole-owner header bounds from at most 11
+Admin or 12 Run total responses. Empty acknowledgements carry no extra data
+and cannot expand NoEcho limits. Unknown server requests, additional data
+responses, exhausted bounds or interrupted unmatched responses fail closed
+under original claim/result truth, never silently continuing. Native code
+reconstructs each complete SSE event's JSON and applies the full original
+NoEcho projections before that message can cross into JS or the fixed helper,
+including ping and notifications. Nonfinal events export no raw frame or
+unchecked slice. The complete unchanged raw finite capture, including earlier
+frames/comments and all received read-ahead/tail, stays native-owned under the
+same original B through final freeze and actual response join; it must pass
+the complete raw/projection screen before any raw export. Screening a
+nonfinal event must not discard or prevent decoding a later matching safe
+response already held in that same bounded buffer. Cancellation/deadline
+removes live I/O/release authority but does not cancel the bounded offline
+screen of already received bytes; no byte/stream/entry/file/time counter
+resets. An unsafe event yields no screened message or response receipt, and
+only the exact safe-event/full-capture-refusal branch may retain a known
+unusable result. Whole source bytes remain exact and bounded. An SDK close or JS promise is not
+actual cancel-and-join or whole-containment death evidence.
+
+The genuine original-owner native response receipt distinguishes actual
+`http_eof` from `sse_response_event`. JSON retains its original complete HTTP
+body/EOF guard. Only SSE may finish on an actual complete matching JSON-RPC
+response event, including the blank-line dispatch delimiter, followed by real
+read/worker/network close and join; this does not claim the HTTP body reached
+EOF. The retained raw artifact is then a finite received entity prefix. Its
+byte length and SHA-256 cover every original byte delivered by an issued read,
+including read-ahead after the complete event and any bytes delivered before
+join. The receipt records the exact response-event end offset and received
+tail byte count. Tail bytes, including partial SSE/UTF-8 fragments, remain in
+the same original B and finite native NoEcho raw/SSE-data projections. They
+are never discarded, omitted from the hash, exported unscreened or relabeled
+complete-body evidence. A pure JS parser's reported completion/offset/hash
+cannot substitute the opaque native receipt or actual join. No provider HTTP
+EOF guard, model/dependency native interface, execution ledger, claim or
+refund rule is changed by this SSE-specific representation.
+
+These are explicit fixed multi-response profile contracts, not evidence that
+an earlier single-response MCP path was production-qualified. Setup I/O is
+already I/O for `PostClaimNoReleaseEvidence`: `effectReleased=false` is only
+diagnostic after setup, provides no refund, zero charge or replacement claim,
+and an unresolved call retains original UNKNOWN/full-once settlement plus
+real closure and exact manual disposition. A client disconnect cancels only
+side-effect-free preparation reads, never custody of the producer, real
+result or original fence after permanent claim. The 30-second control
+deadline is unchanged by the admin launch timeout; delayed first responses
+join/replay the original request id/digest and attempt. This profile does not
+claim general MCP feature parity, multi-credential, stdio, signed-reconcile
+or complete WP02 qualification without their separate physical evidence.
 
 A stdio instance is call-scoped while its registration is user-scoped. For the exact owning batch/call, `lifecycleSeq` starts at zero and stable launch `opId = H(runId, batchItemId, callIndex, callId, registryManifestDigest, lifecycleSeq)`. Launch uses `ReplayClass='retry'` only after any old call-scoped containment is proven dead. Every launch has fresh `prepared`, reservation, claim, and one `toolCalls` charge. After containment spawn, MCP initialize, capability validation, and exact `tools/list` digest match, the Supervisor publishes `McpServerInstanceIdentityV1`; `identityDigest = SHA-256(JCS(identity with identityDigest omitted))`. Its Run/batch/call/index, registry revision/manifest, lifecycle/op/attempt/dispatch, SandboxLaunch/containment, nonce, and initialize/capability/probed-tools-list digests must equal the exact call request, claim, containment, and immutable registry. Only that identity may receive the owning `tools/call`; no address, PID, socket, or adapter-local handle is authority.
 

@@ -57,7 +57,7 @@ export function validateContextItems(context: ContextManifest, items: readonly C
           throw new TypeError('summary is not backed by its exact compaction item and source range');
         }
       } else if (segment.kind !== 'excluded_control' || source.some(({ item }) =>
-        !(item.kind === 'model_turn' && item.stopReason === 'end') && item.kind !== 'assistant_tool_batch' && item.kind !== 'context_compaction' && item.kind !== 'policy_decision' && item.kind !== 'input_request' &&
+        !(item.kind === 'model_turn' && item.stopReason === 'end') && item.kind !== 'assistant_tool_batch' && item.kind !== 'context_compaction' && item.kind !== 'policy_decision' && item.kind !== 'input_request' && item.kind !== 'tool_abandoned' &&
         item.kind !== 'dependency_failure' && item.kind !== 'dependency_ready' && item.kind !== 'final_candidate' && item.kind !== 'verifier_result' && item.kind !== 'verifier_stop' && item.kind !== 'verifier_skip' &&
         item.kind !== 'delivery_merge' && item.kind !== 'delivery_merge_conflict' && item.kind !== 'delivery_decision' &&
         item.kind !== 'publication_path_progress' && item.kind !== 'publication_path_result' && item.kind !== 'publication_late_observation' &&

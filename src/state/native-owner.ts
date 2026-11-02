@@ -27,6 +27,179 @@ export const STATE_OWNER_NATIVE_PATH = isSea()
   : fileURLToPath(new URL(`../../dist/${STATE_OWNER_NATIVE_RELATIVE_PATH}`, import.meta.url));
 
 type DescriptorIdentity = Readonly<{ deviceId: string; fileId: string; ownerUid: number }>;
+export type AdminMcpInputBinding = Readonly<{
+  adminOperationId: string;
+  attempt: number;
+  principalId: string;
+  nonce: string;
+  targetRef: string;
+  targetDigest: string;
+  probePayloadCoreRef: string;
+  probePayloadCoreDigest: string;
+  plannedContainmentRef: string;
+  plannedContainmentDigest: string;
+  sandboxLaunchSpecRef: string;
+  sandboxLaunchSpecDigest: string;
+}>;
+export type HeldAdminMcpInput = Readonly<{
+  identity: Readonly<{
+    adminOperationId: string;
+    attempt: number;
+    nonce: string;
+    targetRef: string;
+    probePayloadCoreRef: string;
+    birthIdentity: unknown;
+  }>;
+  assertHeld(): void;
+  close(): void;
+}>;
+export type AdminMcpNativeLifecycle = Readonly<{
+  schemaVersion: 1;
+  format: 'cliq-mcp-admin-native-lifecycle-v1';
+  binding: AdminMcpInputBinding;
+  birthIdentity: DescriptorIdentity;
+  privateParentIdentity: DescriptorIdentity;
+  originalSupervisor: Readonly<{
+    pid: number;
+    processStartToken: string;
+  }>;
+  stateRootIdentity: DescriptorIdentity;
+  runtimeIdentity: DescriptorIdentity;
+  controller: Readonly<{
+    pid: number;
+    processStartToken: string;
+  }>;
+  reservation: Readonly<{
+    cgroupName: string;
+    cgroupDevice: string;
+    cgroupInode: string;
+  }>;
+  containment: import('../sandbox/mcp-http-admin-native.js').McpAdminScopeObservation | null;
+  retirement: import('../sandbox/mcp-http-admin-native.js').McpAdminScopeObservation | null;
+  joined: Readonly<{
+    deathJoined: boolean;
+    outputCustodyRetired: boolean;
+    protocolCompleted: boolean;
+  }>;
+  progressKind: number;
+  progressDigest: string;
+}>;
+type NativeAdminMcpInput = HeldAdminMcpInput;
+const adminMcpInputs = new WeakMap<HeldAdminMcpInput, {
+  lock: HeldStateOwnerLock;
+  native: NativeAdminMcpInput;
+  bindingDigest: string;
+  processId: number;
+  active: boolean;
+  mode: 'create' | 'retained' | 'absent';
+}>();
+function adminMcpInput(lock: HeldStateOwnerLock, input: AdminMcpInputBinding, mode: 'create' | 'retained' | 'absent'): HeldAdminMcpInput {
+  assertStateOwnerLock(lock);
+  const keys = ['adminOperationId', 'attempt', 'principalId', 'nonce', 'targetRef', 'targetDigest', 'probePayloadCoreRef', 'probePayloadCoreDigest',
+    'plannedContainmentRef', 'plannedContainmentDigest', 'sandboxLaunchSpecRef', 'sandboxLaunchSpecDigest'];
+  if (!input || typeof input !== 'object' || types.isProxy(input)) {
+    throw new TypeError('invalid original Admin MCP input binding');
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(input);
+  if (Reflect.ownKeys(descriptors).length !== keys.length || keys.some(key => !Object.hasOwn(descriptors, key) ||
+    !descriptors[key]!.enumerable || !Object.hasOwn(descriptors[key]!, 'value'))) {
+    throw new TypeError('invalid original Admin MCP input binding');
+  }
+  const binding = Object.freeze(Object.fromEntries(keys.map(key => [key, descriptors[key]!.value]))) as AdminMcpInputBinding;
+  if (typeof binding.adminOperationId !== 'string' || binding.adminOperationId.length < 1 || Buffer.byteLength(binding.adminOperationId) > 256 || binding.adminOperationId.includes('\0') ||
+    typeof binding.principalId !== 'string' || binding.principalId.length < 1 || Buffer.byteLength(binding.principalId) > 256 || binding.principalId.includes('\0') ||
+    !Number.isSafeInteger(binding.attempt) || binding.attempt < 1 || binding.attempt > 3 || typeof binding.nonce !== 'string' || !/^[0-9a-f]{64}$/u.test(binding.nonce) ||
+    keys.slice(4).some(key => typeof (binding as unknown as Record<string, unknown>)[key] !== 'string' ||
+      !/^[0-9a-f]{64}$/u.test((binding as unknown as Record<string, string>)[key]!))) {
+    throw new TypeError('invalid original Admin MCP input binding');
+  }
+  const owner = publicationLocks.get(lock);
+  if (!owner) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'Admin MCP input requires its genuine StateOwner lock');
+  }
+  let native: NativeAdminMcpInput;
+  try {
+    native = mode === 'create' ? owner.createAdminMcpInput(binding) : mode === 'retained'
+      ? owner.openRetainedAdminMcpInput(binding) : owner.openAbsentAdminMcpInput(binding);
+  } catch (error) {
+    return workerReservationError(error);
+  }
+  if (native.identity.adminOperationId !== binding.adminOperationId || native.identity.attempt !== binding.attempt ||
+    native.identity.nonce !== binding.nonce || native.identity.targetRef !== binding.targetRef || native.identity.probePayloadCoreRef !== binding.probePayloadCoreRef) {
+    try {
+      native.close();
+    } catch (error) {
+      throw new ResourceRetirementError('mismatched native Admin MCP input did not retire', error);
+    }
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'native Admin MCP input differs from its exact original intent');
+  }
+  const held = {
+    lock, native, bindingDigest: canonicalSha256(binding), processId: process.pid, active: true, mode
+  };
+  const handle: HeldAdminMcpInput = Object.freeze({
+    identity: immutableSnapshot(native.identity),
+    assertHeld() {
+      if (this !== handle || !held.active || held.processId !== process.pid) {
+        throw new TypeError('invalid original Admin MCP input');
+      }
+      lock.assertHeld();
+      try {
+        native.assertHeld();
+      } catch (error) {
+        workerReservationError(error);
+      }
+    },
+    close() {
+      if (this !== handle) {
+        throw new TypeError('invalid original Admin MCP input');
+      }
+      if (!held.active) {
+        return;
+      }
+      try {
+        native.close();
+        held.active = false;
+      } catch (error) {
+        workerReservationError(error);
+      }
+    },
+  });
+  adminMcpInputs.set(handle, held);
+  return handle;
+}
+export const openAdminMcpInput = (lock: HeldStateOwnerLock, input: AdminMcpInputBinding): HeldAdminMcpInput => adminMcpInput(lock, input, 'create');
+export const openRetainedAdminMcpInput = (lock: HeldStateOwnerLock, input: AdminMcpInputBinding): HeldAdminMcpInput => adminMcpInput(lock, input, 'retained');
+export const openAbsentAdminMcpInput = (lock: HeldStateOwnerLock, input: AdminMcpInputBinding): HeldAdminMcpInput => adminMcpInput(lock, input, 'absent');
+/** C-only tagged friend input; this transfers no caller-selected descriptor. */
+export function borrowAdminMcpInputForExecution(lock: HeldStateOwnerLock, input: HeldAdminMcpInput, binding: AdminMcpInputBinding): object {
+  const held = adminMcpInputs.get(input);
+  if (!held || held.lock !== lock || held.processId !== process.pid || held.bindingDigest !== canonicalSha256(binding) || held.mode !== 'create') {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'Admin MCP input differs from its exact original physical owner');
+  }
+  input.assertHeld();
+  return held.native;
+}
+export function borrowRetainedAdminMcpInputForCleanup(lock: HeldStateOwnerLock, input: HeldAdminMcpInput, binding: AdminMcpInputBinding): object {
+  const held = adminMcpInputs.get(input);
+  if (!held || held.lock !== lock || held.processId !== process.pid || held.bindingDigest !== canonicalSha256(binding) || held.mode !== 'retained') {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'MCP cleanup requires the exact reopened original Admin input');
+  }
+  input.assertHeld();
+  return held.native;
+}
+/** Pure historical projection from the native original-birth/hash-chain
+ * decoder. Neither these audit data nor bytes prove a live domain is dead. */
+export function decodeAdminMcpLifecycleData(snapshot: Uint8Array): AdminMcpNativeLifecycle {
+  const binding = loaded && nativeBindings.get(loaded.implementation);
+  if (!binding?.decodeAdminMcpLifecycle) {
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'loaded fixed native Admin MCP data decoder is unavailable');
+  }
+  const decoded = binding.decodeAdminMcpLifecycle(sourceLifecycleBytes(snapshot));
+  if (decoded.schemaVersion !== 1 || decoded.format !== 'cliq-mcp-admin-native-lifecycle-v1') {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'native Admin MCP lifecycle projection differs');
+  }
+  return immutableSnapshot(decoded);
+}
 /** Physical birth witness only. It grants neither activation nor death proof. */
 export type HeldWorkerReservation = Readonly<{ identity: DescriptorIdentity; assertHeld(): void; close(): void }>;
 type NativeWorkerReservation = HeldWorkerReservation & { borrow(): Readonly<{ fd: number; identity: DescriptorIdentity; assertHeld(): void; close(): void }>;
@@ -757,6 +930,9 @@ type NativeLock = Omit<HeldStateOwnerLock, 'quarantineGeneration' | 'createGener
   openSourceInspectionStaging(stagingId: string, deviceId: string, fileId: string): NativeSourceInspectionStaging;
   createWorkerReservation(reservationId: string): NativeWorkerReservation;
   openWorkerReservation(reservationId: string, deviceId: string, fileId: string, ownerUid: number): NativeWorkerReservation;
+  createAdminMcpInput(input: AdminMcpInputBinding): NativeAdminMcpInput;
+  openRetainedAdminMcpInput(input: AdminMcpInputBinding): NativeAdminMcpInput;
+  openAbsentAdminMcpInput(input: AdminMcpInputBinding): NativeAdminMcpInput;
   openPublicationGitIndex(root: HeldWorkspaceRoot, deviceId: string, fileId: string, ownerUid: number, maxBytes: number): HeldPublicationGitIndex;
   openPublicationOperation(root: HeldWorkspaceRoot, operation: NativePublicationOperationInput): NativePublicationOperation;
   openPublicationNamespaceObserver(root: HeldWorkspaceRoot, input: NativePublicationNamespaceInput): NativePublicationNamespaceObserver;
@@ -1135,6 +1311,7 @@ type NativeBinding = { acquireLock(stateRoot: string, createLayout: boolean): Na
   duplicateClientStdout?(): number;
   duplicateClientStderr?(): number;
   decodeSourceGitLifecycle?(bytes: Buffer): SourceGitNativeLifecycleV2;
+  decodeAdminMcpLifecycle?(bytes: Buffer): AdminMcpNativeLifecycle;
   captureCurrentProcess(): NativeCurrentProcess;
   openWorkspaceRoot(workspacePath: string): HeldWorkspaceRoot;
   acquireCredentialScope?(rootFd: number, stateRoot: string, root: readonly bigint[]): NativeCredentialScope;

@@ -161,4 +161,4 @@ export type RunContextCompactionItem = ItemIdentity & {
 
 export type ContinuationItem = import('./dependency.js').DependencyReadyItem | import('./dependency.js').DependencyFailureItem | import('./dependency-script-approval.js').DependencyScriptDecisionItem | import('./child-merge.js').ChildMergePolicyDecisionItem | ChildHandleItem | ChildResultItem | ChildMergeBatchItem | ChildMergeResultItem | ModelTurnItem | ToolBatchItem | ToolResultItem | RunContextCompactionItem | ToolPolicyDecisionItem | InputRequestItem | UserInputItem | FinalCandidateItem |
   VerifierPolicyDecisionItem | VerifierResultItem | RepairDiagnosticItem | VerifierStopItem | VerifierSkipItem |
-  DeliveryMergeItem | DeliveryMergeConflictItem | DeliveryDecisionItem | DeliveryPolicyDecisionItem | PublicationPathProgressItem | PublicationPathResultItem | PublicationLateObservationItem;
+  DeliveryMergeItem | DeliveryMergeConflictItem | DeliveryDecisionItem | DeliveryPolicyDecisionItem | PublicationPathProgressItem | PublicationPathResultItem | PublicationLateObservationItem | import('./mcp.js').ToolAbandonedItem;

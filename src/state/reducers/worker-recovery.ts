@@ -20,7 +20,7 @@ import { readRequiredWorkspaceGenerationByRef, readWorkspaceGenerationsForRun, u
 import { readRun } from '../rows.js';
 import type { SqliteConnection, SqliteDriver } from '../sqlite-driver.js';
 import { assertActiveStateOwner, type StateOwnerContext } from '../state-owner.js';
-import { hasOnlySettledInstalledModelUnknowns, openWorkerInvocations, readWorkerProbeOwnerDeath, readWorkerRecoveryAnchor, WORKER_PROBE_BACKOFF_MS } from '../worker-recovery.js';
+import { hasOnlySettledInstalledModelUnknowns, hasOnlySettledMcpUnknowns, openWorkerInvocations, readWorkerProbeOwnerDeath, readWorkerRecoveryAnchor, WORKER_PROBE_BACKOFF_MS } from '../worker-recovery.js';
 import { assertWorkerRecoveryTaskReceipt, type WorkerRecoveryTaskReceipt } from '../worker-recovery-task.js';
 import { assertInstalledBrokerQuiescence, type InstalledBrokerQuiescence } from '../store.js';
 import { appendRunStateEvent, requireHealthyFence } from './invocation.js';
@@ -349,6 +349,7 @@ export const completeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', a
       ? await (await import('../publication-worker-retirement.js')).readUnresolvedPublicationWorkerCut(driver, artifacts, cut) : undefined;
     publicationUnknown = publication;
     if ((!hasOnlySettledInstalledModelUnknowns(assembly!, cut.journal) &&
+        !hasOnlySettledMcpUnknowns(cut.journal) &&
         !(run.stopIntentRef && hasOnlySettledVerifierUnknowns(cut.journal)) &&
         !(run.stopIntentRef && (await import('../dependency-unknown-retirement.js')).hasOnlySettledDependencyUnknowns(cut.journal)) &&
         !privateRollback && !undispatched && !publication) || !brokerQuiescence) {

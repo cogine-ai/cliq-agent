@@ -260,6 +260,24 @@ export type LinuxWorkerController = Readonly<{
   close(): Promise<void>;
 }>;
 const linuxWorkerControllers = new WeakSet<LinuxWorkerController>();
+const mcpAdminControllers = new WeakMap<LinuxWorkerController, (input: object, guest: NativeGuestToolchain,
+  script: import('../state/mcp-broker-native.js').NativeMcpAdminProbeImage, config: Buffer) => import('./mcp-http-admin-native.js').NativeMcpAdminScope>();
+/** Purpose-specific friend bridge from the already owned common controller.
+ * Neither the caller nor an Admin plan can substitute a PID, FD or native owner. */
+export function reserveInstalledMcpHttpAdmin(controller: LinuxWorkerController, input: object, guest: NativeGuestToolchain,
+  script: import('../state/mcp-broker-native.js').NativeMcpAdminProbeImage, config: Buffer): import('./mcp-http-admin-native.js').NativeMcpAdminScope {
+  assertLinuxWorkerController(controller);
+  const reserve = mcpAdminControllers.get(controller);
+  if (!reserve) throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'same-controller fixed MCP Admin recipe is unavailable');
+  return reserve(input, guest, script, config);
+}
+const mcpAdminCleanupControllers=new WeakMap<LinuxWorkerController,(input:object,checker:{supervisorInstanceId:string;stateOwnerEpoch:number})=>
+  import('./mcp-http-admin-native.js').NativeMcpAdminCleanupScope>();
+export function cleanupInstalledMcpHttpAdmin(controller:LinuxWorkerController,input:object,checker:{supervisorInstanceId:string;stateOwnerEpoch:number}){
+  assertLinuxWorkerController(controller);const cleanup=mcpAdminCleanupControllers.get(controller);
+  if(!cleanup)throw new KernelStorageError('UNSUPPORTED_PLATFORM','fixed MCP Admin original-birth cleanup is unavailable');
+  return cleanup(input,checker);
+}
 /** Structural wrappers and borrowed birth data do not own this native
  * controller's productive channel or preparing lifecycle. */
 export function assertLinuxWorkerController(controller: LinuxWorkerController): void {
@@ -434,6 +452,9 @@ type NativeControllerPreparationBirthObservation = Readonly<{
   readyObservedAtMs: number; observedAtMs: number;
 }>;
 type NativeController = { pid: number; processStartToken: string;
+  cleanupRetainedMcpHttpAdmin?(input:object,checker:{supervisorInstanceId:string;stateOwnerEpoch:number}):import('./mcp-http-admin-native.js').NativeMcpAdminCleanupScope;
+  reserveMcpHttpAdmin?(input: object, helper: NativeImage, bubblewrap: NativeImage, guest: NativeGuestToolchain,
+    script: import('../state/mcp-broker-native.js').NativeMcpAdminProbeImage, config: Buffer): import('./mcp-http-admin-native.js').NativeMcpAdminScope;
   pollReady(): boolean;
   bindReservation(reservation: number, config: object): void;
   pollBound(): boolean;
@@ -469,6 +490,8 @@ type NativeController = { pid: number; processStartToken: string;
   close(): Promise<void>;
 };
 export type NativeWorkerBinding = { interfaceVersion: 3; readonly builtinToolInterfaceVersion?: 2; readonly verifierInterfaceVersion?: 1;
+  readonly mcpAdminInterfaceVersion?: 1;
+  sealMcpHttpAdminProbe?(fd: number): import('../state/mcp-broker-native.js').NativeMcpAdminProbeImage;
   readonly dependencyInterfaceVersion?: 1;
   readonly sourceInterfaceVersion: 1;
   readonly preparationInterfaceVersion: 1;
@@ -2382,6 +2405,13 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
             async close() { if (this !== controller) throw new TypeError('invalid worker controller'); await closeController(); controllers.delete(native); }
           });
           linuxWorkerControllers.add(controller);
+          if (binding.mcpAdminInterfaceVersion === 1 && typeof native.reserveMcpHttpAdmin === 'function')
+            mcpAdminControllers.set(controller, (input, guest, script, config) => {
+              controllerReceiver();
+              return native.reserveMcpHttpAdmin!(input, helper, bwrap, guest, script, config);
+            });
+          if(binding.mcpAdminInterfaceVersion===1&&typeof native.cleanupRetainedMcpHttpAdmin==='function')
+            mcpAdminCleanupControllers.set(controller,(input,checker)=>{controllerReceiver();return native.cleanupRetainedMcpHttpAdmin!(input,checker);});
           preparingResourceNotes.set(controller, subject => noteResources('preparation_ready', [subject]));
           return controller;
         } catch (error) {

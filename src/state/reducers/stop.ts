@@ -46,6 +46,9 @@ import { readUnclaimedPublicationStopHistory } from '../delivery-publication-rec
 import { readChildAllocationsForRun } from '../repositories/child-allocations.js';
 import { readParentStopRevocation } from '../parent-stop-revocation.js';
 import { prepareChildTerminalAllocation } from '../child-terminal-publication.js';
+import { readManualInvocationFinalization, stageManualInvocationFinalization, validateMcpStopComposition,
+  type ManualInvocationFinalization } from '../manual-reconciliation.js';
+import { manualStopTimeOrderIsValid } from '../manual-stop-time.js';
 
 /** Loaded authority only. Cancellation fences immediately; terminal drain independently proves the entire current cut. */
 export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, authority: {
@@ -331,6 +334,27 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
         }, now);
       });
     }),
+    stopForMcpKnownUnusable: stateOperation('INVALID_REQUEST', async (input: {
+      expectedRunRevision: number; inspectorIdentityRef: string; inspectorIdentityDigest: string;
+    }) => {
+      input = immutableSnapshot(input);
+      if (spec.operation !== 'agent' || !exactKeys(input, ['expectedRunRevision', 'inspectorIdentityRef', 'inspectorIdentityDigest'])) {
+        throw new TypeError('MCP unusable result Stop requires its original Agent inspector');
+      }
+      assertActiveStateOwner(driver, owner);
+      await authority.assertAuthority();
+      const selected = await cut(input.expectedRunRevision, false, false, true);
+      return commitDerivedStop(selected, async now => {
+        const cause = await (await import('../mcp-execution.js')).readMcpKnownUnusableCause(driver, artifacts, selected, now);
+        if (!cause) {
+          throw new KernelStorageError('STATE_TRANSITION_INVALID', 'MCP unusable result Stop has no original completed received cause');
+        }
+        if (now >= selected.run.deadlineAt) return { intent: deadlineIntent(now) };
+        return prepareModelFailureStop(driver, artifacts, assertActiveStateOwner(driver, owner), assembly, selected, {
+          inspectorIdentityRef: input.inspectorIdentityRef, inspectorIdentityDigest: input.inspectorIdentityDigest
+        }, now);
+      });
+    }),
     stopForDependencyFailure: stateOperation('INVALID_REQUEST', async (input: {
       expectedRunRevision: number; inspectorIdentityRef: string; inspectorIdentityDigest: string;
     }) => {
@@ -432,7 +456,12 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
       });
     }),
     commitTerminalStop: stateOperation('INVALID_REQUEST', async (input: { expectedRunRevision: number; checkpoint?: ToolCheckpointProof },
-      recovery?: WorkerRecoveryTerminalPlan, publicationFinalization?: OwnedPublicationAbortFinalization) => {
+      recovery?: WorkerRecoveryTerminalPlan, publicationFinalization?: OwnedPublicationAbortFinalization, manualFinalization?: ManualInvocationFinalization) => {
+      const manual = manualFinalization === undefined ? undefined
+        : readManualInvocationFinalization(driver, owner, manualFinalization, runId);
+      if (manual && (recovery || publicationFinalization || input.checkpoint)) {
+        throw new TypeError('manual terminal closure cannot borrow worker or publication authority');
+      }
       const publication = publicationFinalization === undefined ? undefined
         : readOwnedPublicationAbortFinalization(driver, owner, publicationFinalization, runId);
       try {
@@ -448,19 +477,27 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
         return immutableSnapshot({ run: recovered.run });
       }
       const workerRecovery = recovery === undefined ? undefined : readWorkerRecoveryTerminalPlan(driver, owner, recovery, runId);
-      const selected = await cut(input.expectedRunRevision, workerRecovery !== undefined, true);
-      const { run, latestCheckpoint: checkpoint } = selected;
+      const selected = await cut(input.expectedRunRevision, workerRecovery !== undefined || manual !== undefined, true);
+      const { run: originalRun, latestCheckpoint: checkpoint } = selected;
+      let run = originalRun;
+      if (manual) requireEqual(selected, manual.cut, 'manual terminal exact original waiting cut');
       if (workerRecovery) requireEqual(selected, workerRecovery.cut, 'terminal original worker recovery cut');
       if (publication) requireEqual(selected, publication.cut, 'terminal original owned publication cut');
-      if (!run.stopIntentRef) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'terminal drain requires a persisted StopIntent');
-      if (assembly.mcpServers.length) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'MCP stop requires server-containment closure');
+      if (!run.stopIntentRef && !manual) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'terminal drain requires a persisted StopIntent');
+      const mcpNoRelease = assembly.mcpServers.length || selected.journal.some(entry => entry.opKind === 'mcp' || entry.opKind === 'mcp-server')
+        ? await validateMcpStopComposition(driver, artifacts, selected, manual) : new Set<number>();
       // The public recovery cut already verified every sealed worker proof;
       // stop additionally forbids the preactivation and fenced branches.
       if (readWorkerLaunchesForRun(driver, runId).some(launch => launch.phase === 'retired' && launch.retirementKind !== 'preparation' && launch.generationWriteState !== 'sealed' &&
           !selected.workspaceGenerations.some(generation => generation.generationRef === launch.workspaceGenerationRef && generation.phase === 'retired'))) {
         throw new TypeError('terminal stop retains an unsealed retired worker');
       }
-      const intent = await readAgentStop(driver, artifacts, selected);
+      let manualPreparedAt = manual ? sampleCanonicalNow() : undefined;
+      let manualStage = manual ? stageManualInvocationFinalization(manual, manualPreparedAt!, selected.journal.length + 1) : undefined;
+      const prior = run.stopIntentRef ? await readAgentStop(driver, artifacts, selected) : undefined;
+      let intent = manualStage ? selectAgentStop(prior, manualStage.intent) : prior!;
+      let manualStop = manualStage && intent === manualStage.intent ? planCanonicalArtifact(intent, 'cliq-stop-intent-v1') : undefined;
+      if (manualStop) run = { ...run, stopIntentRef: manualStop.ref, cancelRequested: true };
       const integrity = await readVerifierIntegrityCause(driver, artifacts, selected, sampleCanonicalNow());
       if (integrity && (intent.origin !== 'kernel_integrity' || intent.reason !== 'verifier_mutated_source' || intent.verifierOpId !== integrity.verifierOpId ||
           intent.integrityEvidenceRef !== integrity.integrityEvidenceRef || intent.integrityEvidenceDigest !== integrity.integrityEvidenceDigest))
@@ -470,7 +507,7 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
           intent.failingOpId !== dependencyIntegrity.failingOpId || intent.integrityEvidenceRef !== dependencyIntegrity.integrityEvidenceRef ||
           intent.integrityEvidenceDigest !== dependencyIntegrity.integrityEvidenceDigest))
         throw new KernelStorageError('STATE_TRANSITION_INVALID', 'terminal stop requires the higher-priority original dependency integrity intent');
-      const checkpointId = stopCheckpointId(runId, run.stopIntentRef);
+      let checkpointId = stopCheckpointId(runId, run.stopIntentRef!);
       const frontier = await readCanonicalArtifact<RunFrontier>(artifacts, run.frontierRef!);
       const items = await artifacts.mapReads(selected.items, async (row) => ({ itemSeq: row.itemSeq, itemRef: row.payloadRef,
         item: await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef) }));
@@ -487,7 +524,7 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
         // cursor. It is never a fake provider batch or an executable tool.
       } else {
         if (frontier.kind !== run.nextStep || (pending !== undefined) !== (frontier.kind === 'tool')) throw new TypeError('stop frontier differs from its open batch');
-        if (frontier.kind === 'tool') await readToolCut(driver, artifacts, runId, authority.resolveToolInput);
+        if (frontier.kind === 'tool' && !manual) await readToolCut(driver, artifacts, runId, authority.resolveToolInput);
       }
       const prepared: InvocationJournalEntry[] = [];
       const unknowns: InvocationJournalEntry[] = [];
@@ -503,6 +540,7 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
         !selected.journal.some(entry => entry.opKind === 'publish' && entry.phase === 'dispatch_claimed')
         ? await readUnclaimedPublicationStopHistory(driver, artifacts, selected) : new Set<number>();
       for (const { entry, hasClaim } of stopInvocationHistory(selected.journal).values()) {
+        if (manual && entry.seq === manual.original.unknown.seq) continue;
         if (entry.opKind === 'publish') {
           if (!publication?.closedJournalSeqs.has(entry.seq) && !unclaimedPublications.has(entry.seq))
             throw new KernelStorageError('STATE_TRANSITION_INVALID', 'terminal stop awaits exact publication retirement and projection closure');
@@ -524,9 +562,9 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
               closed.unknownJournalSeq === entry.seq && closed.budgetSettlementRef === entry.budgetSettlementRef)) {
           unknowns.push(entry); continue;
         }
-        if (!['model', 'tool', 'verifier', 'child_admission', 'child_merge', 'child_await', 'skill_resource'].includes(entry.opKind) || (!['prepared', 'completed'].includes(entry.phase) &&
+        if (!['model', 'tool', 'mcp', 'verifier', 'child_admission', 'child_merge', 'child_await', 'skill_resource'].includes(entry.opKind) || (!['prepared', 'completed'].includes(entry.phase) &&
             (entry.phase !== 'failed' || hasClaim && !(entry.opKind === 'model' && noRelease.has(entry.seq) ||
-              entry.opKind === 'verifier' && verifierStops.has(entry.seq) || entry.opKind === 'tool' && dependencyClosed.has(entry.seq)))))
+              entry.opKind === 'mcp' && mcpNoRelease.has(entry.seq) || entry.opKind === 'verifier' && verifierStops.has(entry.seq) || entry.opKind === 'tool' && dependencyClosed.has(entry.seq)))))
           throw new KernelStorageError('STATE_TRANSITION_INVALID', 'terminal stop awaits exact dispatch/reconciliation closure');
         if (entry.phase === 'prepared') prepared.push(entry);
       }
@@ -537,10 +575,15 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
       }
       if (pending && pending.batch.calls.slice(pending.next).some((call) => selected.journal.some((entry) =>
           entry.opId === toolOperationId(runId, pending.batch.itemId, call.callId) && entry.phase === 'dispatch_claimed' &&
+          !(manual && entry.seq === manual.original.claim.seq) &&
           !(rollback && entry.seq === rollback.claim.seq)))) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'an already dispatched call needs its real result');
       if (rollback && (!pending || rollback.request.batchItemId !== pending.batch.itemId || rollback.request.callIndex !== pending.next ||
           rollback.request.callId !== pending.batch.calls[pending.next]?.callId))
         throw new KernelStorageError('ARTIFACT_MISMATCH', 'private rollback is not the current ordered stopped call');
+      if (manual && (!pending || manual.original.request.batchItemId !== pending.batch.itemId || manual.original.request.callIndex !== pending.next ||
+          manual.original.request.callId !== pending.batch.calls[pending.next]?.callId)) {
+        throw new TypeError('manual acknowledgement changed the current original ordered call');
+      }
       let seal: Awaited<ReturnType<typeof prepareToolCheckpoint>> | undefined;
       if (publication) {
         seal = publication.seal;
@@ -563,7 +606,15 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
           throw new KernelStorageError('STATE_TRANSITION_INVALID', 'terminal stop awaits exact dispatch/reconciliation closure');
         }
         for (let retry = 0; retry < 8; retry++) {
-          const now = sampleCanonicalNow();
+          if (manual) {
+            manualPreparedAt = sampleCanonicalNow();
+            manualStage = stageManualInvocationFinalization(manual, manualPreparedAt, selected.journal.length + 1);
+            intent = selectAgentStop(prior, manualStage.intent);
+            manualStop = intent === manualStage.intent ? planCanonicalArtifact(intent, 'cliq-stop-intent-v1') : undefined;
+            run = manualStop ? { ...originalRun, stopIntentRef: manualStop.ref, cancelRequested: true } : originalRun;
+            checkpointId = stopCheckpointId(runId, run.stopIntentRef!);
+          }
+          const now = manualPreparedAt ?? sampleCanonicalNow();
           if (publication && now < publication.observedAt)
             throw new KernelStorageError('RECOVERY_REQUIRED', 'publication terminal preparation predates its actual root projection');
           const refunds: Array<{ artifact: PlannedArtifact; closure?: PlannedArtifact; entry: InvocationJournalEntry }> = [];
@@ -571,7 +622,7 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
           for (const entry of prepared.sort((a, b) => a.seq - b.seq)) {
             const remaining = subtractBudget(reserved, entry.budgetDelta, 'stop refund');
             const settlement: BudgetSettlementV1 = { schemaVersion: 1, format: 'cliq-budget-settlement-v1', runId, opId: entry.opId,
-              attempt: entry.attempt, preparedJournalSeq: entry.seq, terminalJournalSeq: selected.journal.length + (rollback ? 1 : 0) + refunds.length + 1,
+              attempt: entry.attempt, preparedJournalSeq: entry.seq, terminalJournalSeq: selected.journal.length + (manual ? 1 : 0) + (rollback ? 1 : 0) + refunds.length + 1,
               terminalPhase: 'failed', reserved: entry.budgetDelta, consumed: ZERO_BUDGET, released: entry.budgetDelta,
               budgetConsumedBefore: run.budgetConsumed, budgetConsumedAfter: run.budgetConsumed,
               budgetReservedBefore: reserved, budgetReservedAfter: remaining, settledAt: now, settlementDigest: '' };
@@ -587,20 +638,26 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
           }
           if (!isZeroBudget(reserved)) throw new TypeError('stop retains an unexplained reservation');
           const rollbackResult = rollback ? planPrivateRollbackResult(rollback.request, rollback.evidence, now) : undefined;
-          const nextCancelled = (pending?.next ?? 0) + (rollback ? 1 : 0);
+          const nextCancelled = (pending?.next ?? 0) + (rollback ? 1 : 0) + (manual ? 1 : 0);
           const cancelled = pending ? pending.batch.calls.slice(nextCancelled).map((_, index) => cancelledCall(pending.batch, nextCancelled + index, run.stopIntentRef!, now)) : [];
           const detail = planCanonicalArtifact({ ...agentStopDetail(intent, run.stopIntentRef!, now),
             abandonedRetryInvocations: abandoned,
+            ...(manualStage ? { abandonedManualInvocation: manualStage.detail } : {}),
             ...(publication ? { publicationResultItemRefs: publication.publicationResultItemRefs,
               deliveryTerminalProjectionEvidenceRef: publication.evidenceRef } : {}) }, 'cliq-terminal-detail-v1');
           const continuation = await prepareContinuationCommit(artifacts, { context: decodeContextManifest(await readCanonicalArtifact(artifacts, checkpoint.contextManifestRef)),
-            existingItems: items, items: [...(rollbackResult ? [rollbackResult.item] : []), ...cancelled.map(({ item }) => item)], frontier, checkpointId, workspaceStateRef: checkpoint.workspaceStateRef,
-            artifacts: [detail, ...(rollbackResult?.artifacts ?? []), ...refunds.flatMap(({ artifact, closure }) => [artifact, ...(closure ? [closure] : [])]),
+            existingItems: items, items: [...(manualStage ? [manualStage.item] : []), ...(rollbackResult ? [rollbackResult.item] : []), ...cancelled.map(({ item }) => item)], frontier, checkpointId, workspaceStateRef: checkpoint.workspaceStateRef,
+            artifacts: [detail, ...(manualStage ? [manualStage.artifact] : []), ...(manualStop ? [manualStop] : []), ...(rollbackResult?.artifacts ?? []), ...refunds.flatMap(({ artifact, closure }) => [artifact, ...(closure ? [closure] : [])]),
               ...cancelled.flatMap(({ artifacts }) => artifacts)] });
           const childTerminal = run.parentRunId ? await prepareChildTerminalAllocation(driver, artifacts, owner,
-            { run, status: intent.targetStatus, terminalReason: intent.reason, terminalDetailRef: detail.ref }) : undefined;
+            { run: originalRun, status: intent.targetStatus, terminalReason: intent.reason, terminalDetailRef: detail.ref }) : undefined;
+          let manualSessionRaced = false;
           const sessionPlan = !run.parentRunId ? await (async () => {
           const session = readSession(driver, run.sessionId);
+          if (manual && session.updatedAt > now) {
+            manualSessionRaced = true;
+            return undefined;
+          }
           const projection = decodeSessionProjection(await readCanonicalArtifact(artifacts, session.contextProjectionRef));
           if (projection.sessionId !== session.id || projection.contextRevision !== session.contextRevision || projection.throughItemSeq !== session.latestItemSeq) throw new TypeError('Session stop projection is not current');
           const admittedContext = decodeAdmittedContext(await readCanonicalArtifact(artifacts, spec.admittedContextRef));
@@ -617,6 +674,25 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
           const projectionArtifact = await artifacts.publishCanonical(projection, projection.format);
             return { session, projectionArtifact, terminalArtifact, itemId, seq };
           })() : undefined;
+          if (manualSessionRaced) continue;
+          // New manual branch has two honest times: immutable logical
+          // projection P, then true sampled commit/time-fence C. P is never a
+          // physical observation, expiry extension or execution permission.
+          const { frontierRef: _frontier, waitingOnRef: _wait, waitingReason: _reason, activeWorkerLaunchId: _worker, ...retainedRun } = run;
+          const projectedManualRun: Run | undefined = manual ? {
+            ...retainedRun, status: intent.targetStatus, nextStep: null,
+            latestCheckpointId: checkpointId, budgetReserved: { ...ZERO_BUDGET }, terminalReason: intent.reason,
+            terminalDetailRef: detail.ref, revision: originalRun.revision + 1, updatedAt: now
+          } : undefined;
+          const manualResponse = manual && manualStage && projectedManualRun ? {
+            protocolVersion: 1 as const, ok: true as const,
+            result: {
+              method: 'run.reconcile' as const,
+              snapshot: { schemaVersion: 1 as const, operation: spec.operation, run: projectedManualRun, latestRunItemSeq: continuation.throughItemSeq },
+              resolution: { kind: 'abandoned_run' as const, attestationRef: manualStage.artifact.ref, terminalDetailRef: detail.ref }
+            }
+          } : undefined;
+          const manualResponseArtifact = manualResponse ? await artifacts.publishCanonical(manualResponse, 'cliq-control-response-v1') : undefined;
           await seal?.refresh();
           let time: ReturnType<typeof acceptTime> | undefined, updated: Run | undefined;
           driver.transaction((connection) => {
@@ -625,17 +701,29 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
               if (seal && !publication) throw new KernelStorageError('REVISION_CONFLICT', 'terminal Session changed after sealed completion preparation');
               return;
             }
+            // P describes this selected Run/Session projection. Unrelated
+            // maintenance may advance the global fence while CAS publishes;
+            // only the actual fresh transaction sample C must honor it.
+            const priorManualFence = manual ? readTimeFence(connection)?.lastAcceptedAt : undefined;
             brokerClosure.reobserve(connection);
             workerRecovery?.reobserve(connection);
+            manual?.reobserve(connection);
             const committedAt = sampleCanonicalNow();
             time = acceptTime(connection, committedAt);
             if (!time.accepted) return;
+            if (manual && (!priorManualFence || !manualStopTimeOrderIsValid({
+              projectionAt: now, sourceRunUpdatedAt: originalRun.updatedAt, sourceCheckpointCreatedAt: checkpoint.createdAt,
+              ...(sessionPlan ? { sourceSessionUpdatedAt: sessionPlan.session.updatedAt } : {}), committedAt, lastAcceptedAt: priorManualFence
+            }))) {
+              throw new KernelStorageError('RECOVERY_REQUIRED', 'manual terminal projection or true commit time regressed');
+            }
             if (committedAt < now) throw new KernelStorageError('RECOVERY_REQUIRED', 'terminal transaction precedes its prepared artifacts');
             assertCut(connection, selected);
-            if (abandoned.length && parseCanonicalTime(committedAt) - parseCanonicalTime(now) > 5_000) {
+            if ((abandoned.length || manual) && parseCanonicalTime(committedAt) - parseCanonicalTime(now) > 5_000) {
               throw new KernelStorageError('RECOVERY_REQUIRED', 'broker terminal closure preparation is stale; reobserve the original claim');
             }
-            brokerClosure.validate(connection, run, committedAt);
+            brokerClosure.validate(connection, originalRun, committedAt);
+            manual?.validate(connection, committedAt);
             publication?.validate(connection, run, committedAt);
             workerRecovery?.validate(connection, committedAt);
             for (const artifact of workerRecovery?.metadata ?? []) insertArtifactMetadata(connection, artifact, committedAt);
@@ -644,7 +732,7 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
             if (connection.prepare("SELECT 1 FROM worker_launches WHERE run_id = ? AND phase != 'retired' AND launch_id != ? LIMIT 1")
               .get(runId, run.activeWorkerLaunchId ?? '')) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'stop cannot retain a pending worker launch');
             for (const artifact of [...continuation.metadata, ...(seal?.metadata ?? []), ...(publication?.metadata(connection) ?? []),
-              ...brokerClosure.metadata, ...(childTerminal?.metadata ?? []), ...(sessionPlan ? [sessionPlan.terminalArtifact, sessionPlan.projectionArtifact] : [])]) insertArtifactMetadata(connection, artifact, committedAt);
+              ...brokerClosure.metadata, ...(manual?.metadata ?? []), ...(manualResponseArtifact ? [manualResponseArtifact] : []), ...(childTerminal?.metadata ?? []), ...(sessionPlan ? [sessionPlan.terminalArtifact, sessionPlan.projectionArtifact] : [])]) insertArtifactMetadata(connection, artifact, committedAt);
             publication?.validate(connection, run, committedAt);
             if (publication && sessionPlan && canonicalSha256(readSession(connection, sessionPlan.session.id)) !== canonicalSha256(sessionPlan.session))
               throw new KernelStorageError('REVISION_CONFLICT', 'publication terminal Session changed during artifact registration');
@@ -655,26 +743,42 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
               workerRecovery?.generation.generationRef === generation.generationRef ||
               seal && generation.generationRef === readRequiredWorkerLaunch(connection, run.activeWorkerLaunchId!).workspaceGenerationRef
                 ? readRequiredWorkspaceGenerationByRef(connection, generation.generationRef) : generation));
+            if (manualStage) appendInvocationJournalEntry(connection, manualStage.abandoned);
             for (const refund of refunds) appendInvocationJournalEntry(connection, refund.entry);
-            continuation.commit(connection, run, selected.journal.length + (rollback ? 1 : 0) + refunds.length, committedAt);
+            const logicalAt = manual ? now : committedAt;
+            continuation.commit(connection, originalRun, selected.journal.length + (manual ? 1 : 0) + (rollback ? 1 : 0) + refunds.length, logicalAt);
             connection.prepare(`UPDATE runs SET status = ?, next_step = NULL, frontier_ref = NULL, waiting_reason = NULL, waiting_on_ref = NULL,
-              active_worker_launch_id = NULL, budget_reserved_json = ?, terminal_reason = ?, terminal_detail_ref = ?, revision = revision + 1, updated_at = ? WHERE id = ?`)
-              .run(intent.targetStatus, JSON.stringify(ZERO_BUDGET), intent.reason, detail.ref, committedAt, runId);
-            childTerminal?.commit(connection, committedAt);
+              active_worker_launch_id = NULL, budget_reserved_json = ?, terminal_reason = ?, terminal_detail_ref = ?,stop_intent_ref=?,cancel_requested=?, revision = revision + 1, updated_at = ? WHERE id = ?`)
+              .run(intent.targetStatus, JSON.stringify(ZERO_BUDGET), intent.reason, detail.ref, run.stopIntentRef!, run.cancelRequested ? 1 : 0, logicalAt, runId);
+            childTerminal?.commit(connection, logicalAt);
             if (sessionPlan) {
               const { session, terminalArtifact, projectionArtifact, itemId, seq } = sessionPlan;
             connection.prepare("INSERT INTO items (item_id, session_id, run_id, item_seq, kind, payload_ref, created_at) VALUES (?, ?, NULL, ?, 'run_terminal', ?, ?)")
-              .run(itemId, session.id, BigInt(seq), terminalArtifact.ref, committedAt);
+              .run(itemId, session.id, BigInt(seq), terminalArtifact.ref, logicalAt);
             connection.prepare('UPDATE sessions SET latest_item_seq = ?, context_revision = context_revision + 1, context_projection_ref = ?, updated_at = ? WHERE id = ?')
-              .run(BigInt(seq), projectionArtifact.ref, committedAt, session.id);
+              .run(BigInt(seq), projectionArtifact.ref, logicalAt, session.id);
             }
             updated = readRun(connection, runId);
+            if (manual && manualResponseArtifact && projectedManualRun) {
+              requireEqual(updated, projectedManualRun, 'manual first response exact SQL terminal projection');
+              if (readControlRequest(connection, manual.mutation.identity.principalId, 'run.reconcile', manual.mutation.request.requestId)) {
+                throw new KernelStorageError('REQUEST_ID_CONFLICT', 'manual request already has a retained response');
+              }
+              insertControlRequest(connection, {
+                principalId: manual.mutation.identity.principalId, method: 'run.reconcile', requestId: manual.mutation.request.requestId,
+                requestDigest: manual.mutation.request.requestDigest, channelIdentityRef: manual.mutation.identity.channelIdentityRef,
+                channelIdentityDigest: manual.mutation.identity.channelIdentityDigest, responseRef: manualResponseArtifact.ref, committedAt
+              });
+            }
             publication?.assertFresh(committedAt, connection);
             if (publicationFinalization) closeOwnedPublicationAbortFinalization(driver, owner, publicationFinalization);
-            appendRunStateEvent(connection, updated, committedAt);
+            appendRunStateEvent(connection, updated, logicalAt);
           });
           requireHealthyFence(time?.outcome);
-          if (updated) return immutableSnapshot({ run: updated });
+          if (updated) {
+            manual?.release();
+            return immutableSnapshot({ run: updated });
+          }
           if (seal && !publication) throw new KernelStorageError('RECOVERY_REQUIRED', 'terminal time cut changed after sealed completion preparation');
         }
         throw new KernelStorageError('REVISION_CONFLICT', 'terminal Session/time cut kept changing');

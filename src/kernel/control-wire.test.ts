@@ -2,13 +2,13 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { decodeControlFrame, decodeInstalledControlRequest, decodeInstalledControlResponse,
   CONTROL_METHODS_V1, INSTALLED_CONTROL_FEATURES, UnsupportedExecutionIdentityRequestError } from './control-wire.js';
-import { canonicalSha256 } from './canonical.js';
+import { canonicalJsonBytes, canonicalSha256 } from './canonical.js';
 import { digestOmitting, identityHash } from './identity.js';
 
 // Pure wire conformance: no installed selection, peer, grant or execution proof.
 test('connected composition ceiling is immutable while the actual Supervisor selects enabled capabilities', () => {
   assert.deepEqual(INSTALLED_CONTROL_FEATURES, ['session.get', 'run.get', 'run.attach', 'supervisor.status', 'credential.finalize',
-    'session.create', 'session.list', 'session.fork', 'session.compact', 'session.handoff.create', 'run.submit', 'run.list', 'run.cancel', 'authorization.create', 'authorization.list', 'authorization.revoke', 'run.result', 'run.diff', 'artifact.get', 'run.apply', 'run.approve', 'run.input', 'run.reconcile']);
+    'session.create', 'session.list', 'session.fork', 'session.compact', 'session.handoff.create', 'run.submit', 'run.list', 'run.cancel', 'authorization.create', 'authorization.list', 'authorization.revoke', 'run.result', 'run.diff', 'artifact.get', 'run.apply', 'run.approve', 'run.input', 'run.reconcile', 'mcp.register', 'mcp.refresh', 'mcp.list']);
   assert.throws(() => Reflect.apply(Array.prototype.push, INSTALLED_CONTROL_FEATURES, ['unexpected.method']));
   assert.throws(() => Reflect.apply(Array.prototype.push, CONTROL_METHODS_V1, ['unexpected.method']));
 });
@@ -49,6 +49,26 @@ test('Session continuity has one closed wire contract and no Session execution o
     retryable: true, retryAfterMs: 1000, messageCode: 'control.list_cut_busy' } };
   assert.deepEqual(decodeInstalledControlResponse(busy, list), busy);
   assert.throws(() => decodeInstalledControlResponse({ ...busy, error: { ...busy.error, messageCode: 'run.credential_scope_busy' } }, list));
+});
+
+test('MCP list capacity is one fixed closed refusal and roundtrips without truncated registry data', () => {
+  const request = { protocolVersion: 1, method: 'mcp.list' } as const;
+  const capacity = { protocolVersion: 1, ok: false, method: 'mcp.list', error: {
+    schemaVersion: 1, code: 'RESOURCE_EXHAUSTED', retryable: true, resourceKind: 'state_storage',
+    retryAfterMs: 1000, messageCode: 'mcp.registry_list_capacity'
+  } };
+  assert.deepEqual(decodeInstalledControlResponse(decodeControlFrame(canonicalJsonBytes(capacity)), request), capacity);
+  for (const change of [
+    { retryable: false }, { retryAfterMs: 1001 }, { resourceKind: 'run_queue' },
+    { messageCode: 'control.list_cut_capacity' }, { code: 'RATE_LIMITED' },
+    { detailRef: 'a'.repeat(64) }, { recoveryKind: 'mcp' }, { registrations: [] }
+  ]) {
+    assert.throws(() => decodeInstalledControlResponse({ ...capacity, error: { ...capacity.error, ...change } }, request));
+  }
+  assert.throws(() => decodeInstalledControlResponse({ ...capacity, result: { method: 'mcp.list', registrations: [] } }, request));
+  for (const method of ['session.list', 'supervisor.status'] as const) {
+    assert.throws(() => decodeInstalledControlResponse({ ...capacity, method }, { protocolVersion: 1, method }));
+  }
 });
 
 test('control wire owns read defaults and closes request fields before retention', () => {
@@ -146,10 +166,54 @@ test('publication reconciliation wire freezes only the exact no-new-effect probe
   for (const bad of [{ ...core, expectedRevision: 0 }, { ...core, expectedRevision: Number.MAX_SAFE_INTEGER + 1 },
     { ...core, waitingOnRef: 'not-a-ref' }, { ...core, target: '/not-caller-authority' },
     { ...core, resolution: { kind: 'probe_now', evidenceRef: 'b'.repeat(64) } },
-    { ...core, resolution: { kind: 'abandon_run', acknowledgeExactRisk: true } },
+    { ...core, resolution: { kind: 'abandon_run', acknowledgeExactRisk: false } },
     { ...core, resolution: 'probe_now' }])
     assert.throws(() => decodeInstalledControlRequest({ ...bad, requestDigest: canonicalSha256(bad) }));
   assert.throws(() => decodeInstalledControlRequest({ ...request, requestDigest: 'b'.repeat(64) }));
+});
+
+test('manual reconciliation accepts only exact terminal risk acknowledgement and binds it into the original digest', () => {
+  const core = { protocolVersion: 1, method: 'run.reconcile', requestId: '01900000-0000-7000-8000-000000000011',
+    runId: 'run-manual', expectedRevision: 8, waitingOnRef: 'a'.repeat(64), resolution: { kind: 'abandon_run', acknowledgeExactRisk: true } } as const;
+  const request = { ...core, requestDigest: canonicalSha256(core) };
+  assert.deepEqual(decodeInstalledControlRequest(request), request);
+  for (const resolution of [{ kind: 'abandon_run' }, { kind: 'abandon_run', acknowledgeExactRisk: 'true' },
+    { kind: 'abandon_run', acknowledgeExactRisk: true, evidenceRef: 'b'.repeat(64) },
+    { kind: 'probe_now', acknowledgeExactRisk: true }, { kind: 'retry', acknowledgeExactRisk: true }]) {
+    const changed = { ...core, resolution };
+    assert.throws(() => decodeInstalledControlRequest({ ...changed, requestDigest: canonicalSha256(changed) }));
+  }
+  assert.throws(() => decodeInstalledControlRequest({ ...request, resolution: { kind: 'probe_now' } }));
+  const at = '2026-11-01T00:00:00.000Z', ref = 'a'.repeat(64), budget = { modelTokens: 0, costMicros: 0, toolCalls: 1, repairAttempts: 0 };
+  const run = { id: core.runId, sessionId: 'session-1', specRef: ref, status: 'failed', terminalReason: 'runtime_failed', nextStep: null,
+    terminalDetailRef: 'b'.repeat(64), stopIntentRef: 'c'.repeat(64), revision: 9, leaseEpoch: 1, latestCheckpointId: 'checkpoint-1', budgetReserved: { ...budget, toolCalls: 0 },
+    budgetConsumed: budget, repairCount: 0, cancelRequested: false, createdAt: at, deadlineAt: at, updatedAt: at };
+  const result = { method: 'run.reconcile', snapshot: { schemaVersion: 1, operation: 'agent', run, latestRunItemSeq: 4 },
+    resolution: { kind: 'abandoned_run', attestationRef: ref, terminalDetailRef: 'b'.repeat(64) } };
+  const response = { protocolVersion: 1, ok: true, result };
+  assert.deepEqual(decodeInstalledControlResponse(response, request), response);
+  for (const changed of [{ ...result, resolution: { kind: 'probe_enqueued', dispatchDigest: ref, userProbeCount: 1 } },
+    { ...result, resultRef: ref }, { ...result, snapshot: { ...result.snapshot, run: { ...run, status: 'succeeded', terminalReason: 'verified' } } },
+    { ...result, snapshot: { ...result.snapshot, run: { ...run, waitingReason: 'reconciliation', waitingOnRef: ref } } }])
+    assert.throws(() => decodeInstalledControlResponse({ ...response, result: changed }, request));
+});
+
+test('MCP control discovery uses the closed original request and summary without granting Run permission', () => {
+  const core = { protocolVersion: 1, method: 'mcp.register', requestId: '01900000-0000-7000-8000-000000000021',
+    registrationId: 'calendar', target: { kind: 'streamable_http', endpointRegistrationId: 'calendar-endpoint', credentialGrantIds: [] },
+    assertStatelessPerCall: true, toolRecovery: {} } as const;
+  const request = { ...core, requestDigest: canonicalSha256(core) };
+  assert.deepEqual(decodeInstalledControlRequest(request), request);
+  const registry = { schemaVersion: 1, registrationId: 'calendar', registryRevision: 1, transport: 'streamable_http', stateModel: 'stateless_per_call',
+    toolCount: 1, toolsListDigest: 'a'.repeat(64), manifestDigest: 'b'.repeat(64), registrationReceiptRef: 'c'.repeat(64), createdAt: '2026-11-01T00:00:00.000Z' };
+  const response = { protocolVersion: 1, ok: true, result: { method: 'mcp.register', registry } };
+  assert.deepEqual(decodeInstalledControlResponse(response, request), response);
+  for (const changed of [{ ...registry, registrationId: 'other' }, { ...registry, registryRevision: 2 }, { ...registry, grant: 'a'.repeat(64) }])
+    assert.throws(() => decodeInstalledControlResponse({ ...response, result: { method: 'mcp.register', registry: changed } }, request));
+  for (const extra of [{ principalId: 'caller' }, { runId: 'not-admin' }, { permission: true }, { probeResultRef: 'd'.repeat(64) }])
+    assert.throws(() => decodeInstalledControlRequest({ ...request, ...extra }));
+  assert.deepEqual(decodeInstalledControlRequest({ protocolVersion: 1, method: 'mcp.list' }), { protocolVersion: 1, method: 'mcp.list' });
+  assert.throws(() => decodeInstalledControlRequest({ protocolVersion: 1, method: 'mcp.list', principalId: 'caller' }));
 });
 
 test('reconciliation response reports an enqueue, never an inspection result or another wait', () => {

@@ -7,7 +7,7 @@ the single Kernel Cut. The goal is usable, verifiable work, not a count of
 modules, tests, or merged PRs. The RFC remains authoritative; this plan changes
 ordering and records delivery scope, not safety, billing, or success semantics.
 
-### Current product and qualification status (2026-10-31)
+### Current product and qualification status (2026-11-03)
 
 The product remains a local-first, provider-neutral coding agent: a real model
 changes private code, required checks can trigger repair, the user reviews the
@@ -15,8 +15,9 @@ complete result and its verification provenance, and explicit application binds
 that exact result. Continue completing this journey while CI runs alongside
 independent implementation work.
 
-At immutable `9341f07bacedb3c6a5796e0a8aa9ad93ef84c343`, the
-[Linux daily campaign](https://github.com/cogine-ai/cliq-agent/actions/runs/41193613811)
+At the last inspected remote source,
+`3f92d3098a1720febdba69aefd50d92a32fe7b9a`, the
+[Linux daily campaign](https://github.com/cogine-ai/cliq-agent/actions/runs/41203569110)
 passes signed `setup`, `models`, `run`, `result` and `apply`, including an actual
 required-check failure, one repair and the final applied changes. Its four
 model POSTs use the owned HTTPS endpoint and the fixed `yolo`/Node verifier
@@ -24,16 +25,17 @@ profile. This qualifies that controlled workflow; real-provider requests and
 billing remain unverified, with zero paid calls made. All four Linux/macOS and
 Node 22/24 test jobs pass at that source.
 
-The original run has eighteen successful and six failed jobs. Ordinary Git
-finalization, received-effect successor completion, Git-merge publication and
-the delayed-storage campaigns still miss their original acceptance windows.
-The delayed campaigns have not reached their intended physical publication
-cuts. A same-source upgrade rerun subsequently fails at the repeated upgrade
-command after both original and target Runs and old-credential revocation
-complete. Its production cause remains unconfirmed. Retain both the passing
-and failing evidence; neither a diagnostic nor a different successful cut
-closes these gaps. Result-read sharing and preparation cancellation must still
-pass the complete real campaigns with the original 90/30/2/5-second limits.
+That run has eighteen successful jobs, five failures and one cancellation.
+The verifier campaign passes its first five cases, including ordinary Git,
+but misses the ordinary-tools source window. Received model/tool shutdown and
+successor completion pass their original limits, retaining the original claim
+and result without resending. The normal Delivery campaign is cancelled at its
+original twenty-minute workflow limit. Delayed-storage campaigns still fail
+before their intended physical publication cuts; upgrade fails during output
+processing with its production cause unconfirmed. Retain all of this evidence;
+neither diagnostics nor a different passing cut close those gaps. Subsequent
+candidates still require the complete campaigns at the original 90/30/2/5-second
+limits. These remote results do not qualify the later local candidates.
 
 The ordinary-permission candidate adds fixed Node checks under `default` and
 `accept-edits`, using exact worker-free candidate approvals or explicitly
@@ -45,10 +47,23 @@ regressions are not the real installed permission, preclaim shutdown or upgrade
 qualification; those new campaigns and all original timing limits remain open
 until run on the integrated immutable source.
 
-Remaining implementation includes manual UNKNOWN disposition, MCP and managed local inference, configurable
-bounded concurrency, complete state import/rollback/GC and compatible upgrades,
-production platform support, and the final default-entry cutover. Advance them
-as complete user flows through the existing Run/Journal/Checkpoint lifecycle.
+The MCP candidate connects authenticated discovery, frozen provider-safe tool
+contracts, one claimed stateless HTTP call, received-result retention or
+full-once UNKNOWN, worker retirement and explicit manual abandonment through
+the existing terminal writer. Its installed campaign includes code modification,
+required Node checks, result review/application, reconnect and restart. Pinned
+component tests and compiled Linux C data checks do not qualify that installed
+campaign. Authenticated Bearer, active Admin shutdown, retry/backoff, zero-I/O
+failure, known-unusable results and precise crash cuts still need their real
+campaigns. An Admin persistence outage beyond its five-second retirement
+freshness window remains fenced with its original owner; it has no native
+fresh-observation continuation yet.
+
+Remaining implementation includes the other MCP transport/recovery profiles,
+managed local inference, configurable bounded concurrency, complete state
+import/rollback/GC and compatible upgrades, production platform support, and the
+final default-entry cutover. Advance them as complete user flows through the
+existing Run/Journal/Checkpoint lifecycle.
 Full I1, I2–I4 and the six work packages remain incomplete; retain the approved
 same-filesystem publication and captured-directory-object boundaries explicitly.
 The dated records below retain their original source-specific limits.

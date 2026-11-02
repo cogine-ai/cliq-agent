@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import ts from 'typescript';
-import { hasOnlySettledInstalledModelUnknowns } from './worker-recovery.js';
+import { hasOnlySettledInstalledModelUnknowns, hasOnlySettledMcpUnknowns } from './worker-recovery.js';
 import { hasOnlySettledDependencyUnknowns } from './dependency-unknown-retirement.js';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting, identityHash } from '../kernel/identity.js';
@@ -54,9 +54,9 @@ async function quarantineRefused(verifierUnknown: boolean, stopped = true): Prom
     expression = ts.createPrinter().printNode(ts.EmitHint.Expression, transformed.transformed[0]!, file);
   } finally { transformed.dispose(); }
   const body = ts.transpile(`return (async () => (${expression}))();`, { target: ts.ScriptTarget.ES2022 });
-  return new Function('hasOnlySettledInstalledModelUnknowns', 'hasOnlySettledVerifierUnknowns',
+  return new Function('hasOnlySettledInstalledModelUnknowns', 'hasOnlySettledVerifierUnknowns', 'hasOnlySettledMcpUnknowns',
     'dependencyUnknownModule', 'assembly', 'cut', 'privateRollback', 'undispatched', 'publication', 'brokerQuiescence', 'run',
-    body)(() => false, () => verifierUnknown, { hasOnlySettledDependencyUnknowns }, {}, { journal: [] }, false, false, undefined, true,
+    body)(() => false, () => verifierUnknown, hasOnlySettledMcpUnknowns, { hasOnlySettledDependencyUnknowns }, {}, { journal: [] }, false, false, undefined, true,
       { stopIntentRef: stopped ? 'stop' : undefined });
 }
 

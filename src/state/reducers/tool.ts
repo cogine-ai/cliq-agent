@@ -45,11 +45,28 @@ import { decodeSkillResourceInput } from '../../kernel/skill.js';
 import { supervisorInspectorIdentity } from '../supervisor-inspector.js';
 import { addBudget, assertBudgetWithin } from '../invariants.js';
 import { assertChildAncestryRelease } from '../child-ancestry.js';
+import { assertOwnedMcpRunCapture, readMcpRunCapture, assertMcpCaptureObservation } from '../mcp-execution.js';
+import { assertInstalledMcpRunOwner } from '../mcp-native-binding.js';
+import type { NativeMcpRunHttpOwner, RunMcpHttpBinding } from '../mcp-broker-native.js';
 
 const TOOL_BUDGET = Object.freeze({ modelTokens: 0, costMicros: 0, toolCalls: 1, repairAttempts: 0 });
 type ResultFields<T = Exclude<ToolResultPayloadV1, { source: 'user_input' }>> = T extends ToolResultPayloadV1
   ? Omit<T, 'schemaVersion' | 'format' | 'runId' | 'batchItemId' | 'callId' | 'index' | 'toolName' | 'modelContentRef' | 'modelContentDigest' | 'payloadDigest'> : never;
 type ToolCompletionInput = { opId: string; attempt: number; expectedRunRevision: number; observationRef: string };
+declare const mcpClaimOwnerBrand: unique symbol;
+export type McpToolClaimOwner = Readonly<{ [mcpClaimOwnerBrand]: true }>;
+const mcpClaims = new WeakMap<McpToolClaimOwner, { driver: SqliteDriver; owner: StateOwnerContext; native: NativeMcpRunHttpOwner;
+  binding: RunMcpHttpBinding; input: ClaimInvocationDispatchInput }>();
+/** Only claimTool below issues this owner after reproducing policy/grant and
+ * exact native binding. A structural token or arbitrary validator cannot
+ * enter the generic claim seam for MCP. */
+export function assertMcpToolClaimOwner(driver: SqliteDriver, owner: StateOwnerContext, handle: McpToolClaimOwner,
+  input: ClaimInvocationDispatchInput): void {
+  const original = mcpClaims.get(handle);
+  if (!original || original.driver !== driver || original.owner !== owner || canonicalSha256(original.input) !== canonicalSha256(input))
+    throw new KernelStorageError('INVALID_REQUEST', 'MCP claim lost its original typed policy/native owner');
+  assertInstalledMcpRunOwner(original.native, original.binding);
+}
 
 function policyItem(evidence: ToolPolicyChannelEvidenceV1, decision: { grantRef: string } | { outcomeItemRef: string },
   approval?: ToolApprovalDecisionV1): ToolPolicyDecisionItem {
@@ -91,6 +108,9 @@ function nextFrontier(cut: ToolCut, addedItems: number): RunFrontier {
     : { schemaVersion: 1, kind: 'agent', phase: 'model_turn', turnId: identityHash('cliq-agent-turn-v1', cut.run.id, cut.batch.itemId),
         contextItemSeq: cut.context.throughItemSeq + addedItems, cause: 'tool_batch_complete' };
 }
+/** Inert result/frontier plans shared by the original typed MCP no-I/O
+ * settlement. They cannot publish a claim or commit without its SQL owner. */
+export { resultPlan as planToolInvocationResult, nextFrontier as nextToolFrontier };
 
 /** Internal to the loaded Run. Static authority is shared; every mutable selection comes from SQLite again. */
 export async function loadToolContinuation(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, input: {
@@ -406,11 +426,18 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
             await assertBuiltinCaptureObservation(artifacts, observation, captured.model, expected.entry.outputSchemaRef && expected.entry.outputSchemaDigest
               ? { ref: expected.entry.outputSchemaRef, digest: expected.entry.outputSchemaDigest } : undefined);
             captureMetadata = captured.metadata;
+          } else if (expected.entry.execution.kind === 'mcp') {
+            if (!observation.captureRef || !observation.captureDigest) throw new TypeError('MCP completion requires its original received capture');
+            assertOwnedMcpRunCapture(observation.captureRef, prepared, claim);
+            const captured = await readMcpRunCapture(driver, artifacts, { captureRef: observation.captureRef,
+              captureDigest: observation.captureDigest, prepared, claim, assembly });
+            await assertMcpCaptureObservation(artifacts, observation, captured);
+            captureMetadata = captured.metadata;
           } else if (observation.captureRef !== undefined || observation.captureDigest !== undefined)
             throw new TypeError('legacy tool cannot borrow the signed script result recipe');
           const plans: PlannedArtifact[] = [];
           if (observation.outcome === 'executed' && (canonicalJsonBytes(observation.content).byteLength > 1_048_576 ||
-              outputSchemas.get(expected.entry.name)?.(observation.content) === false)) {
+              expected.entry.execution.kind !== 'mcp' && outputSchemas.get(expected.entry.name)?.(observation.content) === false)) {
             if (expected.entry.execution.kind === 'builtin_script')
               captureMetadata.push(await artifacts.describe(observationRef, 'application/json', observation.format));
             const diagnostic = planCanonicalArtifact({ schemaVersion: 1, format: 'cliq-tool-output-diagnostic-v1',
@@ -518,6 +545,14 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
       const { request, target, entry } = requestFor(selected);
       const approved = await approvedGrant(selected, request, reads);
       const prior = readHighestPreparedAttempt(driver, runId, request.opId);
+      if (prior && entry.execution.kind === 'mcp' && selected.run.status === 'running' && prior.phase === 'prepared' &&
+          prior.leaseEpoch === leaseEpoch && prior.grantRef && readInvocationAttempt(driver, runId, request.opId, prior.attempt).length === 1) {
+        const original = await verifyGrant(prior.grantRef, reads);
+        requireEqual(original.request, request, 'MCP original unclaimed preparation');
+        if (sampleCanonicalNow() >= original.grant.expiresAt) throw new KernelStorageError('LEASE_FENCED', 'MCP original prepared grant has expired');
+        return immutableSnapshot({ disposition: 'prepared' as const, run: selected.run, entry: prior, request, target,
+          checkpointId: toolCheckpointId(runId, request.opId, prior.attempt) });
+      }
       const canRenew = approved && approved.grant.expiresAt <= sampleCanonicalNow() && prior?.grantRef === approved.grantRef &&
         readInvocationAttempt(driver, runId, request.opId, prior.attempt).length === 1;
       if (prior && !canRenew && !await retryAfterExpiry(request, reads)) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'tool attempt already exists; retry/reconciliation requires its owning recovery reducer');
@@ -930,7 +965,8 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
       }
       throw new KernelStorageError('REVISION_CONFLICT', 'approval control cut kept changing');
     }),
-    claimTool: stateOperation('RECOVERY_REQUIRED', async (input: Omit<ClaimInvocationDispatchInput, 'runId'>, readSignal?: AbortSignal) => {
+    claimTool: stateOperation('RECOVERY_REQUIRED', async (input: Omit<ClaimInvocationDispatchInput, 'runId'>, readSignal?: AbortSignal,
+      mcpOwner?: Readonly<{ owner: NativeMcpRunHttpOwner; binding: RunMcpHttpBinding }>) => {
       const reads = readSignal ? artifacts.withReadSignal(readSignal) : artifacts;
       reads.assertReadActive();
       input = { ...input };
@@ -942,13 +978,40 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
       }
       const proof = await verifyGrant(prepared.grantRef, reads);
       requireEqual(proof.request, expected.request, 'current tool request');
+      if (proof.target.execution.kind === 'mcp' && (!input.brokerFenceTokenDigest || input.sandboxLaunchSpecRef !== undefined ||
+          prepared.replayClass !== 'manual')) throw new TypeError('MCP HTTP requires its original native broker fence and manual claim');
+      if (proof.target.execution.kind === 'mcp') {
+        if (!mcpOwner) throw new KernelStorageError('INVALID_REQUEST', 'MCP claim requires its original bound native owner');
+        assertInstalledMcpRunOwner(mcpOwner.owner, mcpOwner.binding);
+        const binding = mcpOwner.binding;
+        if (binding.runId !== runId || binding.opId !== prepared.opId || binding.attempt !== prepared.attempt ||
+            binding.dispatchId !== input.dispatchId || binding.requestRef !== prepared.requestRef || binding.requestDigest !== proof.request.requestDigest ||
+            binding.targetRef !== prepared.target || binding.targetDigest !== proof.target.targetDigest || binding.grantRef !== prepared.grantRef ||
+            binding.grantDigest !== proof.grant.grantDigest || binding.registryRef !== proof.target.execution.registryRevisionRef ||
+            binding.manifestDigest !== proof.target.execution.registryManifestDigest || binding.toolContractDigest !== proof.target.execution.toolContractDigest ||
+            binding.batchItemId !== proof.request.batchItemId || binding.callId !== proof.request.callId || binding.callIndex !== proof.request.callIndex ||
+            binding.supervisorInstanceId !== owner.supervisorInstanceId || binding.stateOwnerEpoch !== owner.ownerEpoch ||
+            binding.workerLaunchId !== selected.run.activeWorkerLaunchId || binding.leaseEpoch !== input.leaseEpoch ||
+            binding.brokerFenceTokenDigest !== input.brokerFenceTokenDigest)
+          throw new KernelStorageError('ARTIFACT_MISMATCH', 'MCP native owner differs from its sole original claim');
+      } else if (mcpOwner) throw new KernelStorageError('INVALID_REQUEST', 'ordinary tool cannot borrow an MCP owner');
       const execution = await builtinLaunch(selected, prepared, proof, input, reads);
       const planMetadata = execution && await reads.describe(execution.closure.spec.containmentPlanRef,
         'application/json', 'cliq-process-containment-plan-v1');
       reads.assertReadActive();
+      const mcpClaim = mcpOwner ? Object.freeze({}) as McpToolClaimOwner : undefined;
+      if (mcpClaim) mcpClaims.set(mcpClaim, { driver, owner, native: mcpOwner!.owner, binding: mcpOwner!.binding, input: { ...input, runId } });
       const claimed = await claimValidatedInvocation(driver, reads, owner, { ...input, runId }, (connection, run, current, now) => {
         assertCut(connection, run, selected);
         requireEqual(current, prepared, 'prepared tool claim');
+        if (mcpOwner) {
+          assertInstalledMcpRunOwner(mcpOwner.owner, mcpOwner.binding);
+          const live = assertLiveDispatchState(connection, owner, runId, input.expectedRunRevision, input.leaseEpoch, now);
+          if (mcpOwner.binding.dispatchJournalSeq !== nextJournalSequence(connection, runId) ||
+              Date.parse(now) >= mcpOwner.binding.deadlineMs || !live.launch.leaseExpiresAt || mcpOwner.binding.workerLaunchId !== live.launch.launchId ||
+              mcpOwner.binding.deadlineMs > Math.min(Date.parse(run.deadlineAt), Date.parse(proof.grant.expiresAt), Date.parse(live.launch.leaseExpiresAt)))
+            throw new KernelStorageError('LEASE_FENCED', 'MCP original native claim sequence or fixed deadline changed');
+        }
         if (execution) {
           const live = assertLiveDispatchState(connection, owner, runId, input.expectedRunRevision, input.leaseEpoch, now);
           requireEqual(live.launch, execution.closure.launch, 'claimed edit activation');
@@ -960,11 +1023,32 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
         if (now < proof.grant.issuedAt || now >= proof.grant.expiresAt || uses >= proof.grant.maxDispatchedAttempts) {
           throw new KernelStorageError('LEASE_FENCED', 'tool grant is expired, not yet valid or exhausted');
         }
-      });
+      }, undefined, undefined, mcpClaim);
+      if (mcpClaim) mcpClaims.delete(mcpClaim);
       const dispatch = immutableSnapshot({ entry: claimed, request: proof.request, target: proof.target,
         ...compiled.projectInvocation({ callId: selected.call.callId, index: selected.call.index, toolName: selected.call.toolName, input: selected.call.value! }) });
       let consumed = false;
       return Object.freeze({ ...dispatch,
+        /** Fresh synchronous release assertion for every fixed MCP setup,
+         * effect and receipt-bound ping boundary under this one claim. */
+        assertMcpRelease() {
+          if (proof.target.execution.kind !== 'mcp' || !claimed.brokerFenceTokenDigest)
+            throw new KernelStorageError('INVALID_REQUEST', 'MCP release requires its exact original HTTP claim');
+          let outcome: TimeFenceAdvance | undefined;
+          driver.transaction(connection => {
+            const now = sampleCanonicalNow(); assertActiveStateOwner(connection, owner);
+            outcome = advanceTimeFence(connection, owner.ownerEpoch, now); if (outcome !== 'healthy') return;
+            const live = assertLiveDispatchState(connection, owner, runId, input.expectedRunRevision, input.leaseEpoch, now);
+            assertCut(connection, live.run, selected); assertChildAncestryRelease(connection, runId, now);
+            requireEqual(readHighestPreparedAttempt(connection, runId, input.opId), prepared, 'MCP highest original prepared call');
+            requireEqual(readInvocationAttempt(connection, runId, input.opId, input.attempt), [prepared, claimed], 'MCP one original permanent claim');
+            if (now < proof.grant.issuedAt || now >= proof.grant.expiresAt || proof.grant.maxDispatchedAttempts !== 1 ||
+                claimed.supervisorInstanceId !== owner.supervisorInstanceId || claimed.stateOwnerEpoch !== owner.ownerEpoch ||
+                live.launch.launchId !== selected.run.activeWorkerLaunchId || live.run.frontierRef !== proof.grant.frontierRef)
+              throw new KernelStorageError('LEASE_FENCED', 'MCP original grant, worker lease, owner or deadline changed');
+          });
+          requireHealthyFence(outcome);
+        },
         // Only the just-created claim has this one-use capability. Loading retained Journal bytes
         // cannot recreate it. The native bridge rejects structural or differently bound handles.
         release: stateOperation('RECOVERY_REQUIRED', async (target: unknown): Promise<void> => {

@@ -17,6 +17,7 @@ import { decodeSessionContinuityRequest, decodeSessionSummary, type SessionConti
 import { decodeControlListRequest, decodeControlListResult, validateControlListResponse,
   type ControlListRequestV1, type ControlListResultV1 } from './control-list.js';
 import { assertControlWireJson as json, controlWireRecord, controlWireText, controlWireInteger, controlWireRef, decodeControlRange } from './control-wire-data.js';
+import { decodeMcpMutationRequest, type McpMutationRequestV1, type McpRegistrySummaryV1 } from './mcp.js';
 export { controlWireRecord, controlWireText, controlWireInteger, controlWireRef, decodeControlRange } from './control-wire-data.js';
 
 export const CONTROL_FRAME_BYTES = 1024 * 1024;
@@ -34,15 +35,16 @@ export type RunApproveRequestV1 = Readonly<{ protocolVersion: 1; method: 'run.ap
   requestDigest: string; runId: string; expectedRevision: number; waitingOnRef: string; decision: 'allow' | 'deny'; ttlMs?: number }>;
 export type RunInputRequestV1 = Readonly<{ protocolVersion: 1; method: 'run.input'; requestId: string;
   requestDigest: string; runId: string; expectedRevision: number; waitingOnRef: string; input: UserInputValue }>;
-/** Connected publication subset: inspection can be enqueued, never supplied
- * with caller-selected evidence, a target, or manual abandonment authority. */
+/** Exact original wait only. Manual acknowledgement supplies no evidence or target. */
 export type RunReconcileRequestV1 = Readonly<{ protocolVersion: 1; method: 'run.reconcile'; requestId: string;
-  requestDigest: string; runId: string; expectedRevision: number; waitingOnRef: string; resolution: Readonly<{ kind: 'probe_now' }> }>;
+  requestDigest: string; runId: string; expectedRevision: number; waitingOnRef: string;
+  resolution: Readonly<{ kind: 'probe_now' }> | Readonly<{ kind: 'abandon_run'; acknowledgeExactRisk: true }> }>;
+export type McpListRequestV1 = Readonly<{ protocolVersion: 1; method: 'mcp.list' }>;
 /** A continuation of an existing operation, deliberately not MutationBase. */
 export type CredentialFinalizeRequest = Readonly<{ protocolVersion: 1; method: 'credential.finalize';
   requestId: string; operationId: string; attempt: 1 | 2 | 3; commandDigest: string }>;
 export type InstalledControlRequestV1 = ReadControlRequest | ControlHelloRequestV1 | SessionCreateRequestV1 | SessionContinuityRequestV1 | ControlListRequestV1 | RunSubmitRequest |
-  RunApplyRequest | RunCancelRequestV1 | RunApproveRequestV1 | RunInputRequestV1 | RunReconcileRequestV1 | AuthorizationCreateRequest | AuthorizationRevokeRequest | CredentialFinalizeRequest |
+  RunApplyRequest | RunCancelRequestV1 | RunApproveRequestV1 | RunInputRequestV1 | RunReconcileRequestV1 | McpMutationRequestV1 | McpListRequestV1 | AuthorizationCreateRequest | AuthorizationRevokeRequest | CredentialFinalizeRequest |
   Readonly<{ protocolVersion: 1; method: 'supervisor.status' }>;
 
 export type RuntimeBundlePublicSummaryV1 = Readonly<{
@@ -76,7 +78,7 @@ export const CONTROL_METHODS_V1 = Object.freeze(['control.hello', 'session.creat
   'mcp.refresh', 'mcp.list', 'artifact.get', 'supervisor.status', 'credential.finalize'] as const);
 export type ControlMethodV1 = typeof CONTROL_METHODS_V1[number];
 export type InstalledControlResultV1 = SessionContinuityResultV1 | ControlListResultV1 | Extract<ControlResultV1, { method: 'session.get' | 'run.get' | 'run.attach' | 'run.result' | 'run.diff' | 'artifact.get' }> | Extract<ControlResultV1, { method: 'session.create' | 'run.submit' | 'run.apply' | 'run.approve' | 'run.input' | 'run.cancel' | 'run.reconcile' }> |
-  import('../kernel/authorization.js').AuthorizationResponse['result'] |
+  Extract<ControlResultV1, { method: 'mcp.register' | 'mcp.refresh' | 'mcp.list' }> | import('../kernel/authorization.js').AuthorizationResponse['result'] |
   SupervisorStatusV1 | { method: 'credential.finalize'; operation: CredentialAuthorityOperationV1 } | (SupervisorHelloV1 & {
   method: 'control.hello'; protocolVersion: 1; serverBuild: string;
   controlSchemaRange: { min: 1; max: 1 }; enabledFeatureIds: string[];
@@ -108,7 +110,7 @@ export type InstalledControlResponseV1 =
 
 /** Connected composition ceiling; a hello still intersects this with the actual installed Store. */
 export const INSTALLED_CONTROL_FEATURES = Object.freeze(['session.get', 'run.get', 'run.attach', 'supervisor.status', 'credential.finalize',
-  'session.create', 'session.list', 'session.fork', 'session.compact', 'session.handoff.create', 'run.submit', 'run.list', 'run.cancel', 'authorization.create', 'authorization.list', 'authorization.revoke', 'run.result', 'run.diff', 'artifact.get', 'run.apply', 'run.approve', 'run.input', 'run.reconcile'] as const);
+  'session.create', 'session.list', 'session.fork', 'session.compact', 'session.handoff.create', 'run.submit', 'run.list', 'run.cancel', 'authorization.create', 'authorization.list', 'authorization.revoke', 'run.result', 'run.diff', 'artifact.get', 'run.apply', 'run.approve', 'run.input', 'run.reconcile', 'mcp.register', 'mcp.refresh', 'mcp.list'] as const);
 export type InstalledControlFeature = typeof INSTALLED_CONTROL_FEATURES[number];
 export type InstalledControlMethod = InstalledControlRequestV1['method'];
 export type InstalledControlResultFor<M extends InstalledControlMethod> = Extract<InstalledControlResultV1, { method: M }>;
@@ -313,13 +315,22 @@ export function decodeInstalledControlRequest(value: unknown): InstalledControlR
   if (source?.method === 'run.list' || source?.method === 'authorization.list') return decodeControlListRequest(source);
   if (source?.method === 'run.submit') return normalizeRunSubmitRequest(source).originalRequest as RunSubmitRequest;
   if (source?.method === 'run.apply') return normalizeRunApplyRequest(source).originalRequest as RunApplyRequest;
+  if (source?.method === 'mcp.register' || source?.method === 'mcp.refresh') return decodeMcpMutationRequest(source);
+  if (source?.method === 'mcp.list') {
+    controlWireRecord(source, ['protocolVersion', 'method']);
+    if (source.protocolVersion !== 1) throw new TypeError('control protocol version must be 1');
+    return immutableSnapshot(source) as McpListRequestV1;
+  }
   if (source?.method === 'run.reconcile') {
     controlWireRecord(source, ['protocolVersion', 'method', 'requestId', 'requestDigest', 'runId', 'expectedRevision', 'waitingOnRef', 'resolution']);
     if (source.protocolVersion !== 1) throw new TypeError('control protocol version must be 1');
     assertRequestId(source.requestId as string); controlWireRef(source.requestDigest); controlWireText(source.runId);
     controlWireInteger(source.expectedRevision, 1); controlWireRef(source.waitingOnRef);
-    const resolution = controlWireRecord(source.resolution, ['kind']);
-    if (resolution.kind !== 'probe_now') throw new TypeError('unsupported installed reconciliation resolution');
+    const resolution = controlWireRecord(source.resolution, ['kind'], ['acknowledgeExactRisk']);
+    if (resolution.kind === 'abandon_run') {
+      if (resolution.acknowledgeExactRisk !== true) throw new TypeError('manual abandonment requires exact risk acknowledgement');
+    } else if (resolution.kind !== 'probe_now' || Object.hasOwn(resolution, 'acknowledgeExactRisk'))
+      throw new TypeError('unsupported installed reconciliation resolution');
     const { requestDigest, ...core } = source;
     if (canonicalSha256(core) !== requestDigest) throw new TypeError('run.reconcile request digest differs');
     return immutableSnapshot(source) as RunReconcileRequestV1;
@@ -363,6 +374,16 @@ export function decodeInstalledControlRequest(value: unknown): InstalledControlR
 }
 function rangeOverlap(left: ControlRangeV1, right: ControlRangeV1): boolean { return left.min <= right.max && right.min <= left.max; }
 function array(value: unknown): unknown[] { if (!Array.isArray(value)) throw new TypeError('control collection must be an array'); return value; }
+function mcpSummary(value: unknown): McpRegistrySummaryV1 {
+  const data = controlWireRecord(value, ['schemaVersion', 'registrationId', 'registryRevision', 'transport', 'stateModel',
+    'toolCount', 'toolsListDigest', 'manifestDigest', 'registrationReceiptRef', 'createdAt']);
+  if (data.schemaVersion !== 1 || !['stdio', 'streamable_http'].includes(data.transport as string) || data.stateModel !== 'stateless_per_call')
+    throw new TypeError('invalid MCP registry summary');
+  controlWireText(data.registrationId); controlWireInteger(data.registryRevision, 1); controlWireInteger(data.toolCount, 1, 128);
+  for (const key of ['toolsListDigest', 'manifestDigest', 'registrationReceiptRef']) controlWireRef(data[key]);
+  parseCanonicalTime(controlWireText(data.createdAt));
+  return data as McpRegistrySummaryV1;
+}
 function runSnapshot(value: unknown): RunSnapshotV1 {
   const data = controlWireRecord(value, ['schemaVersion', 'operation', 'run', 'latestRunItemSeq']);
   if (data.schemaVersion !== 1 || !['agent', 'delivery'].includes(data.operation as string)) throw new TypeError('invalid Run snapshot');
@@ -413,6 +434,19 @@ function result(value: unknown, method: InstalledControlMethod): InstalledContro
     controlWireRecord(data, ['method', 'grant', ...(method === 'authorization.revoke' ? ['disposition'] : [])]); decodeWireGrantSummary(data.grant);
     if (method === 'authorization.revoke' && !['revoked', 'already_revoked', 'already_consumed'].includes(data.disposition as string))
       throw new TypeError('invalid authorization revocation disposition');
+  } else if (method === 'mcp.register' || method === 'mcp.refresh') {
+    controlWireRecord(data, ['method', 'registry']); mcpSummary(data.registry);
+  } else if (method === 'mcp.list') {
+    controlWireRecord(data, ['method', 'registrations']);
+    const registrations = array(data.registrations);
+    if (registrations.length > 1024) throw new TypeError('MCP registry list exceeds its bound');
+    let previous = '';
+    for (const value of registrations) {
+      const summary = mcpSummary(value);
+      if (previous && Buffer.compare(Buffer.from(previous), Buffer.from(summary.registrationId)) >= 0)
+        throw new TypeError('MCP registry list must be unique and byte sorted');
+      previous = summary.registrationId;
+    }
   } else if (method === 'run.submit' || method === 'run.apply' || method === 'run.cancel') {
     controlWireRecord(data, ['method', 'snapshot']); runSnapshot(data.snapshot);
   } else if (method === 'run.approve') {
@@ -425,10 +459,19 @@ function result(value: unknown, method: InstalledControlMethod): InstalledContro
       throw new TypeError('input response is not its exact worker-free continuation');
   } else if (method === 'run.reconcile') {
     controlWireRecord(data, ['method', 'snapshot', 'resolution']);
-    const snapshot = runSnapshot(data.snapshot), resolution = controlWireRecord(data.resolution, ['kind', 'dispatchDigest', 'userProbeCount']);
-    if (resolution.kind !== 'probe_enqueued' || snapshot.run.status !== 'waiting' || snapshot.run.waitingReason !== 'reconciliation')
-      throw new TypeError('reconciliation response is not its persisted inspection enqueue');
-    controlWireRef(resolution.dispatchDigest); controlWireInteger(resolution.userProbeCount, 1);
+    const snapshot = runSnapshot(data.snapshot), kind = (data.resolution as {kind?: unknown} | null)?.kind;
+    if (kind === 'abandoned_run') {
+      const resolution = controlWireRecord(data.resolution, ['kind', 'attestationRef', 'terminalDetailRef']);
+      controlWireRef(resolution.attestationRef); controlWireRef(resolution.terminalDetailRef);
+      if (!['failed', 'cancelled'].includes(snapshot.run.status) || snapshot.run.waitingOnRef !== undefined || snapshot.run.waitingReason !== undefined ||
+          snapshot.run.activeWorkerLaunchId !== undefined || snapshot.run.terminalDetailRef !== resolution.terminalDetailRef)
+        throw new TypeError('manual abandonment response is not terminal');
+    } else {
+      const resolution = controlWireRecord(data.resolution, ['kind', 'dispatchDigest', 'userProbeCount']);
+      if (resolution.kind !== 'probe_enqueued' || snapshot.run.status !== 'waiting' || snapshot.run.waitingReason !== 'reconciliation')
+        throw new TypeError('reconciliation response is not its persisted inspection enqueue');
+      controlWireRef(resolution.dispatchDigest); controlWireInteger(resolution.userProbeCount, 1);
+    }
   } else if (method === 'run.result' || method === 'run.diff') {
     controlWireRecord(data, ['method', 'runId', ...(method === 'run.result' ? ['result', 'verificationClosureRef'] : ['diff'])]);
     controlWireText(data.runId); decodeWireArtifactDescriptor(data[method === 'run.result' ? 'result' : 'diff']);
@@ -573,8 +616,13 @@ export function decodeInstalledControlResponse<M extends InstalledControlMethod>
       throw new TypeError('input response differs from its original Run and revision');
   } else if (request.method === 'run.reconcile' && data.method === request.method) {
     if (data.snapshot.run.id !== request.runId || data.snapshot.run.revision !== request.expectedRevision + 1 ||
-        data.snapshot.run.waitingOnRef === request.waitingOnRef)
-      throw new TypeError('inspection enqueue differs from its exact original Run and wait');
+        data.snapshot.run.waitingOnRef === request.waitingOnRef ||
+        (request.resolution.kind === 'abandon_run' ? data.resolution.kind !== 'abandoned_run' : data.resolution.kind !== 'probe_enqueued'))
+      throw new TypeError('reconciliation differs from its exact original Run, wait and resolution');
+  } else if ((request.method === 'mcp.register' || request.method === 'mcp.refresh') && data.method === request.method) {
+    if (data.registry.registrationId !== request.registrationId || request.method === 'mcp.refresh' &&
+        data.registry.registryRevision !== request.expectedRegistryRevision + 1 || request.method === 'mcp.register' && data.registry.registryRevision !== 1)
+      throw new TypeError('MCP registry differs from its exact registration request');
   } else if (request.method === 'authorization.create' && data.method === request.method) {
     if (data.grant.state !== 'active' || data.grant.targetKind !== request.decision.kind ||
         data.grant.purpose !== (request.decision.kind === 'verifier_execution' ? 'verifier' : request.decision.purpose))
@@ -643,6 +691,9 @@ function decodeInstalledControlError(value: unknown, method: InstalledControlMet
       if (error.retryable !== true || error.retryAfterMs !== 1000 || error.messageCode !== 'control.list_cut_busy') throw new TypeError('invalid list preparation backpressure');
     } else if (method === 'session.list' && code === 'RESOURCE_EXHAUSTED') {
       if (error.retryable !== true || error.retryAfterMs !== 1000 || error.resourceKind !== 'state_storage' || error.messageCode !== 'control.list_cut_capacity') throw new TypeError('invalid list cut capacity refusal');
+    } else if (method === 'mcp.list' && code === 'RESOURCE_EXHAUSTED') {
+      if (error.retryable !== true || error.retryAfterMs !== 1000 || error.resourceKind !== 'state_storage' ||
+          error.messageCode !== 'mcp.registry_list_capacity') throw new TypeError('invalid MCP registry list capacity refusal');
     } else if (error.retryable !== true || error.retryAfterMs !== 1000 || (method !== 'run.submit' &&
         !(method === 'run.apply' && code === 'RESOURCE_EXHAUSTED') && (code !== 'RATE_LIMITED' || method !== 'credential.finalize')) ||
         (code === 'RATE_LIMITED' ? error.messageCode !== 'run.credential_scope_busy' : error.messageCode !== 'run.queue_capacity' || error.resourceKind !== 'run_queue'))

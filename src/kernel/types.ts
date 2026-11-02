@@ -1708,6 +1708,9 @@ export type ResultUnavailableControlErrorV1 = {
 
 export type ControlResultV1 =
   | { method: 'session.create'; snapshot: SessionSnapshotV1 }
+  | { method: 'mcp.register'; registry: import('./mcp.js').McpRegistrySummaryV1 }
+  | { method: 'mcp.refresh'; registry: import('./mcp.js').McpRegistrySummaryV1 }
+  | { method: 'mcp.list'; registrations: import('./mcp.js').McpRegistrySummaryV1[] }
   | { method: 'authorization.create'; grant: import('./authorization.js').AuthorizationGrantSummaryV1 }
   | { method: 'authorization.revoke'; disposition: 'revoked' | 'already_revoked' | 'already_consumed';
       grant: import('./authorization.js').AuthorizationGrantSummaryV1 }
@@ -1724,7 +1727,8 @@ export type ControlResultV1 =
   | { method: 'run.input'; snapshot: RunSnapshotV1; inputItemRef: ArtifactRef }
   | { method: 'run.cancel'; snapshot: RunSnapshotV1 }
   | { method: 'run.reconcile'; snapshot: RunSnapshotV1;
-      resolution: { kind: 'probe_enqueued'; dispatchDigest: string; userProbeCount: number } }
+      resolution: { kind: 'probe_enqueued'; dispatchDigest: string; userProbeCount: number } |
+        { kind: 'abandoned_run'; attestationRef: ArtifactRef; terminalDetailRef: ArtifactRef } }
   | { method: 'run.result'; runId: string; result: ArtifactDescriptorV1; verificationClosureRef: ArtifactRef }
   | { method: 'run.diff'; runId: string; diff: ArtifactDescriptorV1 }
   | { method: 'artifact.get'; artifact: ArtifactDescriptorV1; offset: number;

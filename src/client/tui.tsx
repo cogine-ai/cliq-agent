@@ -76,10 +76,12 @@ export function ClientTui({ app, io, initialRunId, profile, nodeCheck }: Readonl
   useEffect(() => {
     setDetail(undefined); setDetailPage(0); setInspection(undefined);
     const snapshot = current.current.run;
-    if (!snapshot || snapshot.run.status !== 'waiting' || !snapshot.run.waitingOnRef || snapshot.run.cancelRequested || snapshot.run.stopIntentRef) return;
+    if (!snapshot || snapshot.run.status !== 'waiting' || !snapshot.run.waitingOnRef ||
+        (snapshot.run.cancelRequested || snapshot.run.stopIntentRef) && snapshot.run.waitingReason !== 'reconciliation') return;
     const abort = new AbortController();
     void readWaitingPresentation(app, snapshot, AbortSignal.any([abort.signal, lifetime.current.signal]))
-      .then(value => { if (!abort.signal.aborted) setDetail(value); }, error => { if (!abort.signal.aborted) report(); });
+      .then(value => { if (!abort.signal.aborted && (!(snapshot.run.cancelRequested || snapshot.run.stopIntentRef) || value.reconciliation === 'manual'))
+        setDetail(value); }, error => { if (!abort.signal.aborted) report(); });
     return () => { abort.abort(); };
   }, [waitRef, view.run?.run.stopIntentRef, view.run?.run.cancelRequested, detailRead]);
   async function act(task: () => Promise<unknown>) {
@@ -120,7 +122,7 @@ export function ClientTui({ app, io, initialRunId, profile, nodeCheck }: Readonl
         ...(check.current ? { nodeCheck: check.current } : {}), detach: false, json: false };
     }
     if (invocation.kind === 'tui' || invocation.kind === 'jsonl' || invocation.kind === 'rpc' || invocation.kind === 'help') {
-      setMessage(':list · :attach <id> · :result <id> · :diff <id> · :apply <id> [--result <ref>] · :session list/show/fork/compact · :run <objective> <model options>'); return;
+      setMessage(':list · :attach <id> · :result <id> · :diff <id> · :apply <id> [--result <ref>] · :mcp list/register/refresh · :session list/show/fork/compact · :run <objective> <model options>'); return;
     }
     if (invocation.kind === 'run') { intent.current = invocation.intent; check.current = invocation.nodeCheck; }
     if (invocation.kind === 'result') await stopWatching();
@@ -149,6 +151,7 @@ export function ClientTui({ app, io, initialRunId, profile, nodeCheck }: Readonl
       void act(() => app.execute({ kind: 'request', request })); return;
     }
     if (!inspection && !input && text === 'r' && snapshot?.run.status === 'waiting' && snapshot.run.waitingReason === 'reconciliation' &&
+        detail?.reconciliation === 'probe' && detail.waitingOnRef === snapshot.run.waitingOnRef &&
         !snapshot.run.cancelRequested && !snapshot.run.stopIntentRef) {
       const request = clientMutation({ method: 'run.reconcile', runId: snapshot.run.id, expectedRevision: snapshot.run.revision,
         waitingOnRef: snapshot.run.waitingOnRef, resolution: { kind: 'probe_now' } });
@@ -178,7 +181,8 @@ export function ClientTui({ app, io, initialRunId, profile, nodeCheck }: Readonl
       <Text dimColor>{inspection ? `${inspection.label} · ${inspection.artifactRef} · :back` : `Exact wait ${detail!.waitingOnRef}`} · page {page + 1}/{pageCount} · PgUp/PgDn</Text></Box>}
     {!inspection && run?.waitingReason === 'approval' && detail && !run.cancelRequested && !run.stopIntentRef && <Text>y: allow this exact action · n: deny</Text>}
     {!inspection && run?.waitingReason === 'input' && !run.cancelRequested && !run.stopIntentRef && <Text>{detail?.responseKind === 'json' ? 'Enter the requested JSON response.' : 'Enter the requested text response.'}</Text>}
-    {!inspection && run?.waitingReason === 'reconciliation' && !run.cancelRequested && !run.stopIntentRef && <Text>r: request a read-only probe of this exact wait</Text>}
+    {!inspection && run?.waitingReason === 'reconciliation' && detail?.reconciliation === 'probe' && !run.cancelRequested && !run.stopIntentRef && <Text>r: request a read-only probe of this exact wait</Text>}
+    {!inspection && run?.waitingReason === 'reconciliation' && detail?.reconciliation === 'manual' && <Text>Enter the displayed :reconcile command to acknowledge this exact risk and stop.</Text>}
     {message && <Text color="yellow">{terminalText(message)}</Text>}
     {view.refusal && <Text color="yellow">{view.refusal.code}: {view.refusal.messageCode}</Text>}
     {view.pending && <Text color="yellow">Original request {terminalText(view.pending.method)} · {terminalText(view.pending.requestId)}

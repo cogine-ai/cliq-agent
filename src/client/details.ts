@@ -10,6 +10,7 @@ import { verifyModelText } from '../model/attempt.js';
 import type { ModelTextV1 } from '../protocol/agent-ir.js';
 import type { ClientApplication } from './actions.js';
 import { renderWorkspaceReview } from './review.js';
+import { manualInvocationPresentation } from './mcp-presentation.js';
 export type ClientDetail = Readonly<{ label: string; artifactRef: string; text: string }>;
 const utf8 = (bytes: Uint8Array) => new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
 
@@ -30,7 +31,14 @@ export async function presentControlArtifacts(app: Pick<ClientApplication, 'arti
     if (!canonicalJsonBytes(value).equals(bytes)) throw new TypeError('detail artifact is not canonical JSON');
     return { value, text };
   }
-  if (result.method === 'run.diff') {
+  if ((result.method === 'run.get' || result.method === 'run.attach') && result.snapshot.run.status === 'waiting' &&
+      result.snapshot.run.waitingReason === 'reconciliation' && result.snapshot.run.waitingOnRef) {
+    const ref = result.snapshot.run.waitingOnRef, data = await json(ref);
+    if ((data.value as {subject?: {kind?: unknown}} | null)?.subject?.kind === 'invocation') {
+      const manual = manualInvocationPresentation(result.snapshot, data.value);
+      await present({ label: 'Exact manual risk', artifactRef: ref, text: manual.text });
+    }
+  } else if (result.method === 'run.diff') {
     if (request.method !== result.method || request.runId !== result.runId) throw new TypeError('diff differs from its original request');
     const data = await json(result.diff.ref, result.diff.sizeBytes), diff = decodeWorkspaceDiff(data.value);
     await present({ label: 'Workspace diff', artifactRef: result.diff.ref,

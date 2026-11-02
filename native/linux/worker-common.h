@@ -36,6 +36,12 @@ static inline bool cliq_hex_digest(const char *value) {
     }
     return true;
 }
+static inline bool cliq_admin_packet_strings_terminated(const struct cliq_worker_packet *packet) {
+    if (packet->command < CLIQ_MCP_ADMIN_RESERVE || packet->command > CLIQ_MCP_ADMIN_CLEANUP_RETAINED) return true;
+    return packet->admin_operation_id[sizeof(packet->admin_operation_id)-1]=='\0' && packet->admin_principal_id[sizeof(packet->admin_principal_id)-1]=='\0' &&
+        packet->admin_target_ref[64]=='\0' && packet->admin_target_digest[64]=='\0' && packet->admin_core_ref[64]=='\0' && packet->admin_core_digest[64]=='\0' && packet->admin_plan_digest[64]=='\0' &&
+        packet->admin_checker_supervisor_id[sizeof(packet->admin_checker_supervisor_id)-1]=='\0' && packet->admin_checker_supervisor_token[sizeof(packet->admin_checker_supervisor_token)-1]=='\0' && packet->admin_original_birth_digest[64]=='\0';
+}
 
 /* Never bound descriptor cleanup by the current RLIMIT_NOFILE: limits can
  * already be lower than inherited open descriptors. No weaker fallback. */
@@ -99,7 +105,7 @@ static inline bool cliq_receive_flags(int socket, struct cliq_worker_packet *pac
     }
     bool valid = ancillary_valid && received == (ssize_t)sizeof(*packet) &&
         (message.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) == 0 &&
-        packet->magic == CLIQ_WORKER_MAGIC && packet->version == CLIQ_WORKER_VERSION &&
+        packet->magic == CLIQ_WORKER_MAGIC && packet->version == CLIQ_WORKER_VERSION && cliq_admin_packet_strings_terminated(packet) &&
         (packet->command == CLIQ_VERIFIER_SETUP || packet->status != 0 || cliq_verifier_setup_empty(&packet->setup)) &&
         packet->nonce[sizeof(packet->nonce) - 1] == '\0' && packet->activation_nonce[sizeof(packet->activation_nonce) - 1] == '\0' &&
         packet->start_token[sizeof(packet->start_token) - 1] == '\0' && packet->init_start_token[sizeof(packet->init_start_token) - 1] == '\0' &&

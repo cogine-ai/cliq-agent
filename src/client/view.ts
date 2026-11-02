@@ -59,6 +59,11 @@ export function humanResponse(request: InstalledControlRequestV1, response: Inst
   if (value.method === 'run.result') return [`Result: ${value.result.ref}`, `Verification: ${value.verificationClosureRef}`];
   if (value.method === 'run.diff') return [`Diff: ${value.diff.ref}`];
   if (value.method === 'authorization.create' || value.method === 'authorization.revoke') return [`${value.grant.grantId}  ${value.grant.state}`];
+  if (value.method === 'mcp.register' || value.method === 'mcp.refresh') return [
+    `${JSON.stringify(value.registry.registrationId)} · registry ${value.registry.registryRevision} · ${value.registry.toolCount} tools`,
+    `Manifest: ${value.registry.manifestDigest}`, 'Registration is discovery; each Run separately authorizes its exact tool calls.'];
+  if (value.method === 'mcp.list') return value.registrations.map(registry =>
+    `${JSON.stringify(registry.registrationId)} · registry ${registry.registryRevision} · ${registry.transport} · ${registry.toolCount} tools`);
   if (value.method === 'supervisor.status') return [`Supervisor ${value.health}`, `Queued ${value.queue.queuedRuns} · running ${value.queue.runningRuns} · capacity ${value.queue.capacity}`];
   return [request.method];
 }

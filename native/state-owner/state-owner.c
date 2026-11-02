@@ -60,6 +60,7 @@ typedef struct worker_reservation worker_reservation;
 typedef struct preparation_git_input preparation_git_input;
 typedef struct publication_operation publication_operation;
 typedef struct publication_git_reader publication_git_reader;
+typedef struct admin_mcp_input admin_mcp_input;
 
 typedef struct {
     int root_fd, runtime_fd, lock_fd;
@@ -71,13 +72,15 @@ typedef struct {
     worker_reservation *worker_reservations;
     publication_operation *publication_operations;
     publication_git_reader *publication_git_readers;
+    admin_mcp_input *admin_mcp_inputs;
+    int admin_mcp_retirement_error;
     int source_retirement_error, worker_reservation_error, generation_retirement_error;
     int process_observation_retirement_error;
     int publication_retirement_error;
     int finalized;
 } state_lock;
 
-static const napi_type_tag lock_tag = {0x3d641bc705864cfbULL, 0xab53499f3ee988c4ULL};
+static const napi_type_tag lock_tag = {0x8241692a33014712ULL, 0xb47e01d236db9c54ULL};
 
 static napi_value assert_prior_process_dead(napi_env env, napi_callback_info info);
 static napi_value observe_prior_process_death(napi_env env, napi_callback_info info);
@@ -105,10 +108,16 @@ static int close_lock_publication_git_readers(state_lock *lock);
 static napi_value open_publication_git_index(napi_env env, napi_callback_info info);
 static napi_value open_publication_operation(napi_env env, napi_callback_info info);
 static napi_value open_publication_namespace_observer(napi_env env, napi_callback_info info);
+static int close_lock_admin_mcp_inputs(state_lock *lock);
+static napi_value create_admin_mcp_input(napi_env env,napi_callback_info info);
+static napi_value open_retained_admin_mcp_input(napi_env env,napi_callback_info info);
+static napi_value open_absent_admin_mcp_input(napi_env env,napi_callback_info info);
+static napi_value decode_admin_mcp_lifecycle(napi_env env,napi_callback_info info);
 
 /* Reopening a path is only a locator check. Authority stays on these held
  * descriptors, and flock is released solely by closing the lock descriptor. */
 static void close_lock(state_lock *lock) {
+    if (close_lock_admin_mcp_inputs(lock)) return;
     if (close_lock_publication_git_readers(lock)) return;
     close_lock_listeners(lock);
     close_lock_trees(lock);
@@ -122,7 +131,7 @@ static void close_lock(state_lock *lock) {
 }
 
 static void free_lock_if_done(state_lock *lock) {
-    if (!lock->finalized || lock->trees || lock->listeners || lock->source_stagings || lock->worker_reservations || lock->publication_operations || lock->publication_git_readers) return;
+    if (!lock->finalized || lock->trees || lock->listeners || lock->source_stagings || lock->worker_reservations || lock->publication_operations || lock->publication_git_readers || lock->admin_mcp_inputs) return;
     free(lock->path);
     free(lock);
 }
@@ -132,7 +141,7 @@ static void finalize_lock(napi_env env, void *data, void *hint) {
     state_lock *lock = data;
     /* Fatal observation uncertainty cannot turn GC into a successful release.
      * Retain this exact allocation and its OS lock until actual process death. */
-    if (lock->process_observation_retirement_error || lock->publication_retirement_error) return;
+    if (lock->process_observation_retirement_error || lock->publication_retirement_error || lock->admin_mcp_retirement_error) return;
     close_lock(lock);
     lock->finalized = 1;
     free_lock_if_done(lock);
@@ -234,6 +243,7 @@ static napi_value release_lock(napi_env env, napi_callback_info info) {
     state_lock *lock = unwrap_lock(env, info);
     if (!lock) return NULL;
     if (lock->process_observation_retirement_error) return prior_process_observation_retirement_error(env, lock);
+    if (close_lock_admin_mcp_inputs(lock)) { napi_throw_error(env,"ERR_CLIQ_RESOURCE_RETIREMENT","Admin MCP resources did not retire; StateOwner remains held"); return NULL; }
     int source_failed = close_lock_source_stagings(lock);
     int reservation_failed = close_lock_worker_reservations(lock);
     int publication_failed = close_lock_publication_operations(lock);
@@ -328,6 +338,9 @@ static napi_value acquire_lock(napi_env env, napi_callback_info info) {
         {"openSourceInspectionStaging", NULL, open_source_staging, NULL, NULL, NULL, napi_default, NULL},
         {"createWorkerReservation", NULL, create_worker_reservation, NULL, NULL, NULL, napi_default, NULL},
         {"openWorkerReservation", NULL, open_worker_reservation, NULL, NULL, NULL, napi_default, NULL},
+        {"createAdminMcpInput", NULL, create_admin_mcp_input, NULL, NULL, NULL, napi_default, NULL},
+        {"openRetainedAdminMcpInput", NULL, open_retained_admin_mcp_input, NULL, NULL, NULL, napi_default, NULL},
+        {"openAbsentAdminMcpInput", NULL, open_absent_admin_mcp_input, NULL, NULL, NULL, napi_default, NULL},
         {"openPublicationOperation", NULL, open_publication_operation, NULL, NULL, NULL, napi_default, NULL},
         {"openPublicationNamespaceObserver", NULL, open_publication_namespace_observer, NULL, NULL, NULL, napi_default, NULL},
         {"openPublicationGitIndex", NULL, open_publication_git_index, NULL, NULL, NULL, napi_default, NULL},
@@ -578,6 +591,7 @@ static int observe_process(pid_t pid, char token[128]) {
 #include "source-root.c"
 #include "source-git-input.c"
 #include "source-git-lifecycle.c"
+#include "admin-mcp-input.c"
 #include "publication.c"
 #include "publication-git-index.c"
 #include "credential-authority.c"
@@ -664,6 +678,7 @@ static napi_value initialize(napi_env env, napi_value exports) {
         {"acquireCredentialScope", NULL, acquire_credential_scope, NULL, NULL, NULL, napi_default, NULL},
         {"processStartToken", NULL, process_start_token, NULL, NULL, NULL, napi_default, NULL},
         {"decodeSourceGitLifecycle", NULL, decode_source_git_lifecycle, NULL, NULL, NULL, napi_default, NULL},
+        {"decodeAdminMcpLifecycle", NULL, decode_admin_mcp_lifecycle, NULL, NULL, NULL, napi_default, NULL},
         {"captureCurrentProcess", NULL, capture_current_process, NULL, NULL, NULL, napi_default, NULL},
         {"duplicateClientStdout", NULL, duplicate_client_stdio, NULL, NULL, NULL, napi_default, (void *)1},
         {"duplicateClientStderr", NULL, duplicate_client_stdio, NULL, NULL, NULL, napi_default, (void *)2},

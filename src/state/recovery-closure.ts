@@ -39,7 +39,8 @@ import {
   decodeWorkspaceState
 } from './decoders.js';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
-import { validateWorkerRecoveryWait } from './worker-recovery.js';
+import { validateWorkerRecoveryWait, validateRetainedWorkerQuarantines } from './worker-recovery.js';
+import { validateManualInvocationWait } from './manual-reconciliation.js';
 import { addBudget, childAllocationBudgetFacts, decodeBudgetUsage, isZeroBudget } from './invariants.js';
 import { readChildAllocationsForRun } from './repositories/child-allocations.js';
 import { readInvocationJournal } from './repositories/journal.js';
@@ -892,7 +893,14 @@ async function readRecoveryProjection(
       }
     }
     await validateLaunchGraph(artifacts, run, workerLaunches, workspaceGenerations);
-    try { await validateWorkerRecoveryWait(artifacts, { ...databaseCut, workspaceGenerations: generationProofs }, driver); }
+    try {
+      const waiting=run.status==='waiting'&&run.waitingReason==='reconciliation'&&run.waitingOnRef
+        ?await artifacts.readCanonical<{subject?:{kind?:string}}>(run.waitingOnRef):undefined;
+      if(waiting?.subject?.kind==='invocation'){
+        await validateManualInvocationWait(driver,artifacts,closure);
+        await validateRetainedWorkerQuarantines(artifacts,{...databaseCut,workspaceGenerations:generationProofs},driver);
+      }else await validateWorkerRecoveryWait(artifacts, { ...databaseCut, workspaceGenerations: generationProofs }, driver);
+    }
     catch (error) { recoveryFailure(`worker recovery closure is invalid: ${(error as Error).message}`, error); }
     await validateChildAllocationArtifacts(driver, artifacts, childAllocations, run);
 

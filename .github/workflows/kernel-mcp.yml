@@ -1,0 +1,75 @@
+name: Kernel MCP qualification
+
+on:
+  push:
+    branches: [main, 'codex/**']
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ci-route:
+    name: Select qualification scope
+    runs-on: ubuntu-22.04
+    outputs:
+      run: ${{ steps.route.outputs.run }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+      - name: Check routing and preserved qualification wiring
+        run: node --test scripts/ci/route.test.mjs
+      - name: Select immutable-source qualification scope
+        id: route
+        run: node scripts/ci/route.mjs
+
+  linux-installed-mcp:
+    needs: ci-route
+    if: ${{ !cancelled() && (needs.ci-route.result != 'success' || needs.ci-route.outputs.run != 'false') }}
+    name: Linux signed installed MCP and manual recovery
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Check bounded build cancellation and actual child joining
+        run: node --test scripts/kernel/testing/bounded-native-build.test.mjs
+      - name: Check the owned service and model responses
+        run: >-
+          node --test --test-concurrency=1 --import tsx
+          scripts/kernel/testing/installed-mcp-responder.test.ts
+          scripts/kernel/testing/installed-mcp-model.test.ts
+          scripts/kernel/testing/installed-mcp-http.test.ts
+      - name: Install the original native, systemd and credential prerequisites
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap libcap-dev libselinux1-dev meson ninja-build e2fsprogs libext2fs-dev pkg-config
+      - name: Check actual native parsers and NoEcho without manufacturing authority
+        run: node --test --test-concurrency=1 --import tsx scripts/kernel/testing/mcp-native-data.test.ts
+      - name: Qualify the actual signed installation on the free Linux runner
+        shell: bash
+        run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          test "$RUNNER_ARCH" = X64
+          probe_node=$(realpath "$(command -v node)")
+          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --run-mcp-journey "$probe_node" "$RUNNER_TEMP/cliq-installed-mcp-journey"
+      - name: Preserve bounded JSON qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installed-mcp-journey-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cliq-installed-mcp-journey/*.json
+          if-no-files-found: warn

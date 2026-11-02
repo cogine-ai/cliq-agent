@@ -10,6 +10,7 @@ import type { InvocationJournalEntry, WorkerDeathWait, WorkerIdentity } from '..
 import { readTimeFence, sampleCanonicalNow } from './canonical-time.js';
 import { openSqliteDriver, type SqliteDriver } from './sqlite-driver.js';
 import { openStateStore, publishInProcessChannel } from './store.js';
+import { openWorkerInvocations } from './worker-recovery.js';
 import { createAgentFixture } from './testing/agent-fixtures.js';
 import { activateFixtureWorker, digest, disposeFixture, makePrivateDir, uuidv7, type ActiveFixture } from './testing/fixtures.js';
 import { childFor } from './testing/state-owner-process.js';
@@ -282,7 +283,7 @@ for (const phase of ['completed', 'failed'] as const) {
   });
 }
 
-test('recovery excludes an abandoned manual call from pre-fence witnesses without inventing another open typed call', async t => {
+test('worker recovery refuses Journal-only abandonment without a terminal marker and changes no retained state', async t => {
   const fixture = await fixtureFor(t, 'historical-abandoned');
   const historical = await prepare(fixture, 'manual-plan', true, true);
   const uncertainty = await fixture.store.artifacts.publishCanonical({ uncertain: true }, 'cliq-test-ambiguity-v1');
@@ -290,19 +291,35 @@ test('recovery excludes an abandoned manual call from pre-fence witnesses withou
     expectedRunRevision: revision(fixture), evidenceRef: uncertainty.ref, evidenceDigest: uncertainty.ref });
   const attestation = await fixture.store.artifacts.publishCanonical({ abandon: true }, 'cliq-test-attestation-v1');
   await fixture.store.abandonUnknownInvocation({ runId: fixture.runId, opId: historical.opId, attempt: historical.attempt, attestationRef: attestation.ref });
-  const waiting = await begin(fixture);
-  const wait = await fixture.store.artifacts.readCanonical<WorkerDeathWait>(waiting.waitingOnRef!);
-  assert.deepEqual(wait.subject.openInvocationRefs, []);
-  const cut = await fixture.store.readRecoveryClosure(fixture.runId);
-  const forged = await fixture.store.artifacts.publishCanonical({ ...wait, subject: { ...wait.subject,
-    openInvocationRefs: [canonicalSha256(historical)] } }, 'cliq-waiting-subject-v1');
-  withDb(fixture.stateRoot, driver => {
-    driver.exec('DROP TRIGGER workspace_generations_validate_update');
-    const generation = { ...cut.workspaceGenerations[0], waitingSubjectRef: forged.ref, waitingSubjectDigest: forged.ref };
-    driver.prepare('UPDATE workspace_generations SET row_json = ? WHERE generation_id = ?').run(JSON.stringify(generation), fixture.generationId);
-    driver.prepare('UPDATE runs SET waiting_on_ref = ? WHERE id = ?').run(forged.ref, fixture.runId);
-  });
-  await assert.rejects(fixture.store.readRecoveryClosure(fixture.runId), { code: 'RECOVERY_REQUIRED' });
+  // This low-level ack intentionally lacks the typed attestation and sole
+  // terminal transaction. Excluding it from a witness list cannot repair it.
+  const before = snapshot(fixture.stateRoot);
+  const refusal = { code: 'RECOVERY_REQUIRED', message: /manual abandonment requires.*terminal-only marker/ };
+  await assert.rejects(fixture.store.readRecoveryClosure(fixture.runId), refusal);
+  await assert.rejects(begin(fixture), refusal);
+  await assert.rejects(fixture.agent.prepareTool({ expectedRunRevision: revision(fixture), leaseEpoch: fixture.leaseEpoch }), refusal);
+  await assert.rejects(fixture.agent.readToolInvocation(), refusal);
+  assert.deepEqual(snapshot(fixture.stateRoot), before, 'no worker fence, replacement wait, call result or checkpoint may be appended');
+});
+
+test('the real pre-fence witness selector excludes abandoned data without proving a valid Run or native retirement', () => {
+  // Only the selector's immutable Journal data is exercised. This does not
+  // construct a valid terminal cut, authenticated attestation or native proof.
+  const prepared: InvocationJournalEntry = { seq: 1, runId: 'inert-run', opId: 'inert-manual-call', opKind: 'tool', attempt: 0,
+    leaseEpoch: 1, phase: 'prepared', target: digest('inert-target'), requestRef: digest('inert-request'), grantRef: digest('inert-grant'),
+    replayClass: 'manual', budgetDelta: { ...ZERO, toolCalls: 1 }, timestamp: '2026-10-25T00:00:00.000Z' };
+  const claimed: InvocationJournalEntry = { ...prepared, seq: 2, phase: 'dispatch_claimed', dispatchId: 'inert-dispatch',
+    supervisorInstanceId: 'inert-supervisor', stateOwnerEpoch: 1, budgetDelta: { ...ZERO } };
+  const unknown: InvocationJournalEntry = { ...claimed, seq: 3, phase: 'unknown', budgetDelta: { ...prepared.budgetDelta },
+    budgetSettlementRef: digest('inert-settlement'), evidenceRef: digest('inert-ambiguity'), evidenceDigest: digest('inert-ambiguity') };
+  const abandoned: InvocationJournalEntry = { ...claimed, seq: 4, phase: 'abandoned', budgetDelta: { ...ZERO },
+    budgetSettlementRef: unknown.budgetSettlementRef, attestationRef: digest('inert-incomplete-attestation') };
+  const journal = [prepared, claimed, unknown, abandoned], before = structuredClone(journal);
+  assert.deepEqual(openWorkerInvocations(journal.slice(0, 3)), [prepared]);
+  assert.deepEqual(openWorkerInvocations(journal), []);
+  const other: InvocationJournalEntry = { ...prepared, seq: 5, opId: 'inert-other-open-call' };
+  assert.deepEqual(openWorkerInvocations([...journal, other]), [other]);
+  assert.deepEqual(journal, before, 'the selector cannot rewrite the retained abandonment or invent another open call');
 });
 
 test('late native model completion cannot advance the frontier or checkpoint underneath worker recovery', async t => {

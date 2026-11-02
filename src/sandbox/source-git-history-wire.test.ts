@@ -6,7 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-test('full raw source data preserves historical wire6 and current wire7 while rejecting mixed or builtin ACK chains', { skip: process.platform !== 'linux' }, async () => {
+test('full raw source data preserves historical wire6/7 and current wire8 while rejecting mixed or builtin ACK chains', { skip: process.platform !== 'linux' }, async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'cliq-source-history-wire-'));
   try {
     const binary = path.join(dir, 'component');
