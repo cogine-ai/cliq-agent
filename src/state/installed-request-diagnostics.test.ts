@@ -2,7 +2,7 @@
 // connection, native authentication, source inspection or Linux qualification.
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { beginInstalledRequestDiagnostic, classifyInstalledRequestError, decodeInstalledRequestFailure,
+import { INSTALLED_REQUEST_FAILURE_BOUNDARIES, beginInstalledRequestDiagnostic, classifyInstalledRequestError, decodeInstalledRequestFailure,
   observeInstalledRequestFailures, type InstalledRequestFailure } from './installed-request-diagnostics.js';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
 import { assertCurrentControlFrame } from './control-channel.js';
@@ -21,6 +21,21 @@ test('request diagnosis is absent without an observer and contains each synchron
     assert(Object.isFrozen(observed[0]));
   } finally { close(); closeThrowing(); }
   assert.equal(beginInstalledRequestDiagnostic('run.get'), undefined);
+});
+
+test('exchange diagnosis keeps each fixed executed failure stage without carrying transport or native exception data', () => {
+  const seen: InstalledRequestFailure[] = [], close = observeInstalledRequestFailures(value => { seen.push(value); });
+  try {
+    const boundaries = INSTALLED_REQUEST_FAILURE_BOUNDARIES.filter(value => value.startsWith('exchange_'));
+    assert.equal(boundaries.length, 9);
+    for (const boundary of boundaries) {
+      const diagnosis = beginInstalledRequestDiagnostic('mcp.register')!;
+      diagnosis.at(boundary); diagnosis.failure(new KernelStorageError('RECOVERY_REQUIRED', 'never emitted', { cause: new Error('never emitted') }));
+      diagnosis.at('post_current'); diagnosis.failure(new Error('later error cannot replace the original failure'));
+    }
+    assert.deepEqual(seen.map(value => value.boundary), boundaries);
+    assert.ok(seen.every(value => Object.keys(value).sort().join(',') === 'boundary,code,kind,method'));
+  } finally { close(); }
 });
 
 test('an observer registered during failure delivery waits for the next independent observation', () => {

@@ -168,16 +168,21 @@ export async function openInstalledControlTransport(selected: HeldInstalledRunti
   let failure: unknown; let stopped = false; let retiring: Promise<void> | undefined; let closing: Promise<void> | undefined;
   let running: Promise<unknown> | undefined;
   let waiter: { resolve(value: unknown): void; reject(error: unknown): void } | undefined;
+  // The first observed failing part of this original exchange only. These
+  // fixed labels carry no exception text, resource proof or retry permission.
+  let exchangeFailureBoundary: import('./installed-request-diagnostics.js').InstalledRequestFailure['boundary'] | undefined;
   const header = Buffer.alloc(4); let headerCount = 0; let body: Buffer | undefined; let bodyCount = 0;
-  const fail = (error: unknown) => {
+  const fail = (error: unknown, boundary?: typeof exchangeFailureBoundary) => {
+    if (boundary) exchangeFailureBoundary ??= boundary;
     if (error instanceof ResourceRetirementError) { retainedGuards.add(native); retirementFailure ??= error; failure = retirementFailure; }
     else failure ??= error;
     stopped = true; waiter?.reject(failure); waiter = undefined; body = undefined; socket.destroy();
   };
-  socket.on('error', () => fail(new KernelStorageError('RECOVERY_REQUIRED', 'installed control socket failed')));
-  socket.on('close', () => { if (!stopped) fail(new KernelStorageError('RECOVERY_REQUIRED', 'installed control peer closed')); });
+  socket.on('error', () => fail(new KernelStorageError('RECOVERY_REQUIRED', 'installed control socket failed'), 'exchange_socket_error'));
+  socket.on('close', () => { if (!stopped) fail(new KernelStorageError('RECOVERY_REQUIRED', 'installed control peer closed'), 'exchange_peer_closed'); });
   socket.on('data', (chunk: Buffer) => {
     if (stopped) return;
+    let boundary: typeof exchangeFailureBoundary = 'exchange_frame';
     try {
       let offset = 0;
       while (offset < chunk.length) {
@@ -191,12 +196,14 @@ export async function openInstalledControlTransport(selected: HeldInstalledRunti
         const count = Math.min(body.length - bodyCount, chunk.length - offset); chunk.copy(body, bodyCount, offset, offset + count);
         offset += count; bodyCount += count;
         if (bodyCount === body.length) {
+          boundary = 'exchange_native_response';
           native.assertHeld();
+          boundary = 'exchange_frame';
           const value = decodeControlFrame(body);
           const complete = waiter; waiter = undefined; body = undefined; complete.resolve(value);
         }
       }
-    } catch (error) { fail(error instanceof ResourceRetirementError ? error : new KernelStorageError('RECOVERY_REQUIRED', 'installed control response or native peer is invalid')); }
+    } catch (error) { fail(error instanceof ResourceRetirementError ? error : new KernelStorageError('RECOVERY_REQUIRED', 'installed control response or native peer is invalid'), boundary); }
   });
   const retire = (): Promise<void> => retiring ??= (async () => {
     stopped = true; waiter?.reject(failure ?? new KernelStorageError('RECOVERY_REQUIRED', 'installed control client is closing')); waiter = undefined;
@@ -211,20 +218,27 @@ export async function openInstalledControlTransport(selected: HeldInstalledRunti
     try { native.close(); }
     catch (error) { retainedGuards.add(native); retirementFailure ??= error instanceof ResourceRetirementError ? error : new ResourceRetirementError('installed native control descriptors did not retire', error); throw retirementFailure; }
   })();
-  const exchange = async (request: object): Promise<unknown> => {
+  const exchange = async (request: object, diagnosis?: ReturnType<typeof beginInstalledRequestDiagnostic>): Promise<unknown> => {
     if (stopped || waiter || retirementFailure) throw retirementFailure ?? failure ?? new KernelStorageError('RECOVERY_REQUIRED', 'installed control connection is closed or busy');
+    diagnosis?.at('exchange_native_before');
     native.assertHeld();
     const bytes = canonicalJsonBytes(request); if (!bytes.length || bytes.length > (purpose === 'credential' ? 65536 : FRAME_BYTES)) throw new TypeError('installed control request exceeds its bound');
     const frame = Buffer.alloc(4); frame.writeUInt32BE(bytes.length);
+    exchangeFailureBoundary = undefined;
     const response = new Promise<unknown>((resolve, reject) => { waiter = { resolve, reject }; });
-    const timer = setTimeout(() => fail(new KernelStorageError('RECOVERY_REQUIRED', 'installed control response timed out')), 30000);
+    const timer = setTimeout(() => fail(new KernelStorageError('RECOVERY_REQUIRED', 'installed control response timed out'), 'exchange_timeout'), 30000);
     try {
+      diagnosis?.at('exchange_response');
       const writes = [frame, bytes].map(value => new Promise<void>((resolve, reject) => {
-        try { socket.write(value, error => error ? reject(new Error('installed control write failed')) : resolve()); }
-        catch { reject(new Error('installed control write failed')); }
+        const refused = () => { exchangeFailureBoundary ??= 'exchange_write'; reject(new Error('installed control write failed')); };
+        try { socket.write(value, error => error ? refused() : resolve()); }
+        catch { refused(); }
       }));
-      const results = await Promise.all([response, ...writes]); native.assertHeld(); return results[0];
-    } finally { clearTimeout(timer); }
+      const results = await Promise.all([response, ...writes]); diagnosis?.at('exchange_native_after'); native.assertHeld(); return results[0];
+    } catch (error) {
+      if (exchangeFailureBoundary) diagnosis?.at(exchangeFailureBoundary);
+      throw error;
+    } finally { clearTimeout(timer); exchangeFailureBoundary = undefined; }
   };
   const checkCurrent = async () => {
     if (stopped || retirementFailure) throw retirementFailure ?? failure ?? new KernelStorageError('RECOVERY_REQUIRED', 'installed control client is closing');
@@ -284,7 +298,7 @@ export async function openInstalledControlTransport(selected: HeldInstalledRunti
           diagnosis?.at('pre_current');
           await checkCurrent();
           diagnosis?.at('exchange');
-          const value = await exchange(candidate);
+          const value = await exchange(candidate, diagnosis);
           diagnosis?.at('response_decode');
           const response = decodeInstalledControlResponse(value, candidate);
           diagnosis?.at('post_current');

@@ -4,6 +4,8 @@ import { KernelStorageError, ResourceRetirementError, type KernelStorageErrorCod
 
 export const INSTALLED_REQUEST_FAILURE_BOUNDARIES = Object.freeze([
   'request_validation', 'adapter_dispatch', 'pre_current', 'exchange', 'response_decode', 'post_current', 'adapter_output', 'unobserved',
+  'exchange_native_before', 'exchange_native_response', 'exchange_native_after', 'exchange_response',
+  'exchange_frame', 'exchange_write', 'exchange_socket_error', 'exchange_peer_closed', 'exchange_timeout',
 ] as const);
 export const INSTALLED_REQUEST_FAILURE_KINDS = Object.freeze([
   'kernel_storage', 'resource_retirement', 'type_error', 'assertion', 'error', 'non_error',

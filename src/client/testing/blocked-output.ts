@@ -25,11 +25,11 @@ const stdio = await (async () => {
   }
 })();
 if (stdio.io.output === process.stdout) throw new Error('original stdout pipe was not independently owned');
-const pending = new Set<object>(); let announced = false, blockedToken: object | undefined;
+const pending = new Map<object, { enteredAt: number; backpressured: boolean }>(); let announced = false, blockedToken: object | undefined;
 let enteredAt: number | undefined, abortObservedAt: number | undefined, callbackJoinedAt: number | undefined;
 const originalWrite = stdio.io.output.write;
 stdio.io.output.write = function (this: typeof stdio.io.output, ...args: unknown[]) {
-  const token = {}; pending.add(token);
+  const token = {}, observation = { enteredAt: performance.now(), backpressured: false }; pending.set(token, observation);
   const callback = args.at(-1);
   if (typeof callback !== 'function') throw new TypeError('only the original client callback write is expected');
   args[args.length - 1] = (...values: unknown[]) => {
@@ -37,16 +37,21 @@ stdio.io.output.write = function (this: typeof stdio.io.output, ...args: unknown
     Reflect.apply(callback, undefined, values);
   };
   const result = Reflect.apply(originalWrite, this, args) as boolean;
+  observation.backpressured = !result;
   if (!result && !announced) setImmediate(() => {
     if (pending.has(token) && !announced) {
-      announced = true; blockedToken = token; enteredAt = performance.now(); process.send!({ kind: 'actual_pending_output' });
+      // This message is a wake-up observation, not a reservation of this
+      // callback. The actual original write is sampled at cancellation below.
+      announced = true; process.send!({ kind: 'actual_pending_output' });
     }
   });
   return result;
 } as typeof stdio.io.output.write;
 process.on('message', message => {
   if (message !== 'abort') return;
-  if (!blockedToken || !pending.has(blockedToken) || callbackJoinedAt !== undefined) throw new Error('original write no longer pending at cancellation');
+  const current = [...pending].filter(([, observation]) => observation.backpressured);
+  if (current.length !== 1 || callbackJoinedAt !== undefined) throw new Error('original write is not uniquely pending at cancellation');
+  [blockedToken] = current[0]!; enteredAt = current[0]![1].enteredAt;
   abortObservedAt = performance.now(); abort.abort();
 });
 const f = protocolClient({ 'artifact.get': async (request: { offset: number; length: number }) => {
